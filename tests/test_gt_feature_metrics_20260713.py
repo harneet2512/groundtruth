@@ -111,6 +111,20 @@ def test_import_crosscheck_catches_bad_factclass(monkeypatch):
     # MUTATION: removing the registry cross-check would let a bad fact class ship.
 
 
+@pytest.mark.parametrize(("layer", "fact_class"), [
+    ("consensus.scope", "localization"),
+    ("edit.syntax", "syntax_result"),
+    ("semantic_drift", "cochange_prior"),
+    ("ga.trace_frame", "localization"),
+    ("verify.horizon.executed", "covering_red"),
+])
+def test_real_runtime_layers_map_to_fact_classes(layer, fact_class):
+    """Every layer observed as delivered in arm-4 must enter its canonical FACT lifecycle."""
+    assert g.layer_to_fact_class(layer) == fact_class
+    # MUTATION: removing the explicit legacy mapping or the registry fallback makes a delivered
+    # row disappear from FACT receipt metrics even though its sealed bytes reached the model.
+
+
 # =========================================================================== #
 # 3. native/tag-free facts detected through the content SEAL (defect #2)
 # =========================================================================== #
@@ -247,6 +261,41 @@ def test_leak_canary_catches_gold_path(tmp_path):
     # MUTATION: skipping the leak check in the aggregate would keep publishable=True.
 
 
+def test_integrity_scans_exact_delivered_payload_for_test_identity_leaks(tmp_path):
+    payload = "candidate.py:4 FAIL_TO_PASS tests/x.py::test_hidden_case"
+    rows = [_delivered(
+        "gateway.trace_frame", chars=len(payload),
+        content_sha256_16=_sha16(payload), native_text=payload,
+    )]
+    rec = g.collect_task(
+        "synthetic__payload-leak",
+        _write_task(tmp_path, messages=[_tool(payload)], ledger_rows=rows),
+        profile="2",
+    )
+
+    assert rec["integrity"]["leak_count"] >= 1
+    assert "FAIL_TO_PASS" in rec["integrity"]["leak_canary"]
+    assert g.aggregate_run("run-leak", [rec], profile="2")["integrity"]["publishable"] is False
+
+
+def test_integrity_rejects_more_than_one_gt_dose_in_an_observation(tmp_path):
+    first = "src/a.py:1 preserve alpha"
+    second = "src/b.py:2 preserve beta"
+    rows = [
+        _delivered("gateway.trace_frame", chars=len(first), content_sha256_16=_sha16(first)),
+        _delivered("edit.syntax", chars=len(second), content_sha256_16=_sha16(second)),
+    ]
+    rec = g.collect_task(
+        "synthetic__double-dose",
+        _write_task(tmp_path, messages=[_tool(first + "\n" + second)], ledger_rows=rows),
+        profile="2",
+    )
+
+    assert rec["integrity"]["max_dose_per_observation"] == 2
+    assert rec["integrity"]["dose_violation_count"] == 1
+    assert g.aggregate_run("run-dose", [rec], profile="2")["integrity"]["publishable"] is False
+
+
 # =========================================================================== #
 # stale delivered fact => FIX verdict, zero efficacy credit
 # =========================================================================== #
@@ -258,7 +307,12 @@ def test_stale_delivered_gets_fix_and_no_efficacy(tmp_path):
                          profile="2")
     cc = rec["fact_classes"]["caller_contract"]
     assert cc["stale"]["value"] is True
-    assert rec["features"]["GT_CONTRACT_MODE"]["verdict"] == s.VERDICT_FIX
+    # The FACT owns the stale delivery. Its CAP mediator links the fact but must
+    # not inherit the FACT timing failure as if it owned those bytes.
+    assert rec["features"]["GT_CONTRACT_MODE"]["verdict"] == s.VERDICT_HOLD
+    assert rec["features"]["GT_CONTRACT_MODE"]["lifecycle"]["stale"][
+        "status"
+    ] == "NOT_ELIGIBLE"
     # a stale delivered fact earns NO positive efficacy credit.
     assert cc["steps_saved"]["value"] is None
     # MUTATION: ignoring the delivered-row stale reason would drop FIX to HOLD.
@@ -281,6 +335,74 @@ def test_tool_output_cannot_promote_consumption(tmp_path):
     lvl = cc["receipt_level"]["value"]
     assert lvl is None or lvl < 3
     # MUTATION: promoting a receipt from tool output would push this to >=3.
+
+
+def test_ss_readiness_is_conjunctive_and_requires_live_witness():
+    lifecycle = s.new_lifecycle("fixture")
+    lifecycle.update({
+        "delivered": s.measured(True),
+        "truth_valid": s.measured(True),
+        "authority_valid": s.measured(True),
+        "stale": s.measured(False),
+        "expired_late": s.measured(False),
+        "receipt_level": s.measured(3),
+    })
+
+    offline = g.ss_gate_readiness(
+        lifecycle, byte_proven=True, leak_free=True, dose_ok=True,
+        fair_probe=True, live_witness=False, chronological_time=True,
+    )
+    assert offline["ss_live"] is False
+    assert offline["gates"]["acknowledged"] is True
+    assert "live_witness" in offline["blockers"]
+
+    live = g.ss_gate_readiness(
+        lifecycle, byte_proven=True, leak_free=True, dose_ok=True,
+        fair_probe=True, live_witness=True, chronological_time=True,
+    )
+    assert live["ss_live"] is True
+
+
+def test_no_late_counter_is_not_authoritative_chronological_proof():
+    lifecycle = s.new_lifecycle("fixture")
+    lifecycle.update({
+        "delivered": s.measured(True),
+        "truth_valid": s.measured(True),
+        "authority_valid": s.measured(True),
+        "stale": s.measured(False),
+        "expired_late": s.measured(False),
+        "receipt_level": s.measured(3),
+    })
+
+    readiness = g.ss_gate_readiness(
+        lifecycle, byte_proven=True, leak_free=True, dose_ok=True,
+        fair_probe=True, live_witness=False,
+    )
+
+    assert readiness["gates"]["correct_rl_adhered_time"] is None
+
+
+def test_collector_never_promotes_unknown_truth_or_fair_probe(tmp_path):
+    payload = "src/pkg.py:12 preserve callers"
+    row = _delivered(
+        "l3.contract", event="file_view", file="src/pkg.py",
+        chars=len(payload), content_sha256_16=_sha16(payload), native_text=payload,
+    )
+    rec = g.collect_task(
+        "synthetic__readiness",
+        _write_task(tmp_path, messages=[_tool(payload)], ledger_rows=[row]),
+        profile="2",
+    )
+    readiness = rec["features"]["GT_CONTRACT_NATIVE"]["ss_readiness"]
+
+    # The sealed row proves the FACT bytes, not which of several CAP mediators
+    # produced them. Infra controls expose mediation links, never FACT gates.
+    assert readiness["role"] == "infra_control"
+    assert "delivered_byte_proven" not in readiness["gates"]
+    assert readiness["gates"]["runtime_member_control_receipt"] is None
+    assert readiness["gates"]["mediation_correct"] is None
+    assert readiness["mediation"]["delivered_fact_ids"] == ["caller_contract"]
+    assert readiness["ss_live"] is False
 
 
 # =========================================================================== #

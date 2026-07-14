@@ -405,6 +405,129 @@ def test_r5_resurface_routes_through_ledger(monkeypatch, tmp_path):
     assert g._HOOK_FIRE_COUNTS.get("obligation.resurface") == 1, "resurface fire not counted"
 
 
+def test_r5_v2_artifact_owns_review_transition_obligation_site(monkeypatch, tmp_path):
+    """A valid v2 artifact must exclude the legacy tracker at every obligation site."""
+    g._reset_oracle_state()
+    monkeypatch.setenv("GT_RUNTIME_LEDGER", str(tmp_path / "led.jsonl"))
+    monkeypatch.setenv("GT_GLOBAL_ARBITER", "0")
+    monkeypatch.setattr(g, "_GT_BASELINE", False)
+    monkeypatch.setattr(g, "_ORACLE_ROUTE", True)
+    monkeypatch.setattr(g, "_oracle_delivered_hashes", set())
+    monkeypatch.setattr(g, "_HOOK_FIRE_COUNTS", {})
+    monkeypatch.setattr(g, "_seen", set())
+    monkeypatch.setattr(g, "_action_count", 10)
+    monkeypatch.setattr(g, "_oracle_edited_rels", {"src/foo.py"})
+    monkeypatch.setattr(g, "_oracle_nonedit_streak", 0)
+    monkeypatch.setattr(
+        g,
+        "_classify",
+        lambda cmd: (
+            ("test_result", "src/foo.py")
+            if "pytest" in cmd else ("post_edit", "src/foo.py")
+        ),
+    )
+    monkeypatch.setattr(g, "_effective_cmd", lambda action: action.get("command", ""))
+    monkeypatch.setattr(g, "_detect_phase", lambda: g.Phase.VERIFY)
+    monkeypatch.setattr(g, "_load_obligations_v2", lambda: {"obligations_version": 2})
+    calls = {"v2": 0, "legacy": 0}
+
+    def _v2_candidate():
+        calls["v2"] += 1
+        if calls["v2"] == 1:
+            return (5.0, "\nV2_REQUIREMENTS")
+        return None
+
+    def _legacy_candidate():
+        calls["legacy"] += 1
+        return (5.0, "\nLEGACY_REQUIREMENTS")
+
+    monkeypatch.setattr(g, "_unexercised_clause_candidate", _v2_candidate)
+    monkeypatch.setattr(g, "_obligation_nudge_block", _legacy_candidate)
+
+    early = {"output": ""}
+    g._augment_output({"command": "sed -i s/a/b/ src/foo.py"}, early)
+    assert not (early.get("output") or "")
+    assert calls == {"v2": 0, "legacy": 0}
+
+    monkeypatch.setattr(g, "_oracle_nonedit_streak", 0)
+    monkeypatch.setattr(g, "_oracle_edited_rels", {"src/foo.py"})
+    out = {"output": ""}
+    g._augment_output({"command": "pytest -q"}, out)
+    delivered = out.get("output") or ""
+    assert "V2_REQUIREMENTS" in delivered
+    assert "LEGACY_REQUIREMENTS" not in delivered
+    assert calls == {"v2": 1, "legacy": 0}
+    assert g._HOOK_FIRE_COUNTS.get("obligation.unexercised") == 1
+    assert not g._HOOK_FIRE_COUNTS.get("spec.obligation")
+
+
+def test_r5_review_obligation_selector_preserves_v2_lane_and_identity(monkeypatch):
+    monkeypatch.setattr(g, "_load_obligations_v2", lambda: {"obligations_version": 2})
+    monkeypatch.setattr(
+        g,
+        "_unexercised_clause_candidate",
+        lambda: (5.0, "V2"),
+    )
+    monkeypatch.setattr(g, "_obligation_nudge_block", lambda: (5.0, "LEGACY"))
+    assert g._review_obligation_candidate() == (
+        "obligation.unexercised",
+        (5.0, "V2"),
+        True,
+    )
+
+    monkeypatch.setattr(g, "_load_obligations_v2", lambda: None)
+    assert g._review_obligation_candidate() == (
+        "spec.obligation",
+        (5.0, "LEGACY"),
+        False,
+    )
+
+
+def test_r5_v2_earned_silence_never_falls_through_to_legacy(monkeypatch):
+    calls = {"legacy": 0}
+    monkeypatch.setattr(g, "_load_obligations_v2", lambda: {"obligations_version": 2})
+    monkeypatch.setattr(g, "_unexercised_clause_candidate", lambda: None)
+
+    def _legacy_candidate():
+        calls["legacy"] += 1
+        return (5.0, "LEGACY")
+
+    monkeypatch.setattr(g, "_obligation_nudge_block", _legacy_candidate)
+    assert g._review_obligation_candidate() == (
+        "obligation.unexercised",
+        None,
+        True,
+    )
+    assert calls["legacy"] == 0
+
+
+def test_r5_v2_absent_preserves_legacy_review_delivery(monkeypatch, tmp_path):
+    g._reset_oracle_state()
+    monkeypatch.setenv("GT_RUNTIME_LEDGER", str(tmp_path / "led.jsonl"))
+    monkeypatch.setenv("GT_GLOBAL_ARBITER", "0")
+    monkeypatch.setattr(g, "_GT_BASELINE", False)
+    monkeypatch.setattr(g, "_ORACLE_ROUTE", True)
+    monkeypatch.setattr(g, "_oracle_delivered_hashes", set())
+    monkeypatch.setattr(g, "_HOOK_FIRE_COUNTS", {})
+    monkeypatch.setattr(g, "_seen", set())
+    monkeypatch.setattr(g, "_action_count", 10)
+    monkeypatch.setattr(g, "_oracle_edited_rels", {"src/foo.py"})
+    monkeypatch.setattr(g, "_oracle_nonedit_streak", 3)
+    monkeypatch.setattr(g, "_classify", lambda cmd: ("test_result", "src/foo.py"))
+    monkeypatch.setattr(g, "_effective_cmd", lambda action: "pytest -q")
+    monkeypatch.setattr(g, "_load_obligations_v2", lambda: None)
+    monkeypatch.setattr(
+        g, "_obligation_nudge_block", lambda: (100.0, "\nLEGACY_REQUIREMENTS")
+    )
+
+    out = {"output": ""}
+    g._augment_output({"command": "pytest -q"}, out)
+
+    assert "LEGACY_REQUIREMENTS" in (out.get("output") or "")
+    assert g._HOOK_FIRE_COUNTS.get("spec.obligation") == 1
+    assert not g._HOOK_FIRE_COUNTS.get("obligation.unexercised")
+
+
 # ============================================================================ #
 # R6 — _evidence must not latch the fire-once _seen on an EMPTY evidence
 # ============================================================================ #

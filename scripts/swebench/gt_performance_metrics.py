@@ -17,6 +17,7 @@ Library import:
 from __future__ import annotations
 
 import json
+import glob
 import math
 import os
 import re
@@ -48,6 +49,112 @@ def _safe_load_json(path: str) -> Any:
             return json.load(f)
     except (OSError, json.JSONDecodeError, TypeError):
         return None
+
+
+_LEDGER_LAYER_FACT: dict[str, str] = {
+    "l3b.evidence": "caller_contract",
+    "l3b.contract": "caller_contract",
+    "l3.contract": "caller_contract",
+    "consensus.scope": "localization",
+    "consensus.scope_map": "localization",
+    "post_search.localize": "localization",
+    "spec.obligation": "obligations",
+    "obligation.resurface": "obligations",
+    "obligation.unexercised": "obligations",
+    "detect.coherence": "recovery",
+    "detect.loop": "recovery",
+    "recovery": "recovery",
+    "nudge": "recovery",
+    "edit.syntax": "syntax_result",
+    "verify.horizon.advisory": "covering_red",
+    "completion_cert": "submit_refusal",
+    "submit_gate": "submit_refusal",
+    "cochange": "cochange_prior",
+}
+_FACT_CLASSES = {
+    "obligations", "localization", "def_partition", "caller_contract",
+    "syntax_result", "signature_delta", "covering_red", "submit_refusal",
+    "cochange_prior", "newfile_precedent", "recovery",
+}
+
+
+def _entry_fact_class(entry: dict) -> str | None:
+    layer = str(entry.get("ledger_layer") or entry.get("kind") or "").strip()
+    if layer.startswith("ga."):
+        layer = layer[3:]
+    if layer.startswith("gateway."):
+        layer = layer.split(".", 1)[1]
+    if layer in _FACT_CLASSES:
+        return layer
+    return _LEDGER_LAYER_FACT.get(layer)
+
+
+def _visible_receipts(consumption: dict | None, fact_class: str | None = None) -> list[dict]:
+    if not isinstance(consumption, dict):
+        return []
+    ledger_present = bool(consumption.get("runtime_ledger_path"))
+    out: list[dict] = []
+    for entry in consumption.get("entries") or []:
+        if not isinstance(entry, dict) or entry.get("source") != "trajectory":
+            continue
+        if ledger_present and entry.get("joined") is not True:
+            continue
+        if int(entry.get("receipt") or 0) < 1:
+            continue
+        if fact_class is not None and _entry_fact_class(entry) != fact_class:
+            continue
+        out.append(entry)
+    return out
+
+
+def _authoritative_consumption(consumption: dict | None) -> bool:
+    """True when exact-byte runtime-ledger joins are the delivery authority.
+
+    An authoritative ledger may be correctly quiet for a fact class. That empty
+    class result must never reopen the legacy tag heuristic.
+    """
+    return bool(
+        isinstance(consumption, dict) and consumption.get("runtime_ledger_path")
+    )
+
+
+def _receipt_message_indices(entries: list[dict]) -> set[int]:
+    out: set[int] = set()
+    for entry in entries:
+        value = entry.get("msg_index")
+        if isinstance(value, int) and not isinstance(value, bool):
+            out.add(value)
+    return out
+
+
+def _load_consumption(trajectory_path: str, artifacts_dir: str,
+                      instance_id: str | None) -> dict:
+    """Build the exact-byte receipt ledger for the performance readers."""
+    try:
+        try:
+            from consumption_ledger import ledger_from_trajectory_path
+        except ImportError:
+            from scripts.swebench.consumption_ledger import ledger_from_trajectory_path
+        bases = [os.path.dirname(os.path.abspath(trajectory_path))]
+        if artifacts_dir:
+            bases.append(os.path.abspath(artifacts_dir))
+        hits: list[str] = []
+        for base in dict.fromkeys(bases):
+            hits.extend(glob.glob(os.path.join(base, "gt_runtime_ledger*.jsonl")))
+            hits.extend(glob.glob(os.path.join(base, "**", "gt_runtime_ledger*.jsonl"), recursive=True))
+        hits = sorted(dict.fromkeys(hits))
+        scoped = [p for p in hits if instance_id and instance_id in os.path.basename(p)]
+        ledger = scoped[0] if scoped else (hits[0] if len(hits) == 1 else None)
+        return ledger_from_trajectory_path(
+            trajectory_path, runtime_ledger_path=ledger
+        )
+    except Exception as exc:  # collection must be explicit, never a false zero
+        return {
+            "schema": "gt.consumption_ledger.v2",
+            "status": "UNMEASURED",
+            "reason": f"consumption_ledger_error:{type(exc).__name__}",
+            "entries": [],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +501,11 @@ _GOLD_DERIVED_FIELDS: dict[str, tuple[str, ...]] = {
         "gold_in_L1_top_k", "gold_rank", "gold_never_reached", "first_gold_view_step",
         "files_to_gold_view", "steps_to_gold_view", "files_to_gold_edit",
         "steps_to_gold_edit", "localization_precision", "localization_recall",
-        "false_file_rate", "gold_view_precision", "wasted_views", "navigation_directness",
+        "false_file_rate", "exploration_ratio", "gold_view_precision", "wasted_views",
+        "navigation_directness", "self_localization_needed",
+    ),
+    "edit_quality": (
+        "edit_attempts_per_gold", "first_edit_correctness",
     ),
     "scope_completeness": (
         "scope_coverage", "scope_excess", "multi_file_discovery", "scope_gap_files",
@@ -412,6 +523,132 @@ def _null_gold_derived(out: dict) -> None:
             for k in fields:
                 if k in sec:
                     sec[k] = None
+
+
+def _applicability(
+    applicable: bool, predicate: str, reason: str,
+) -> dict[str, object]:
+    """Return the explicit contract consumed by ``gt_run_metrics``."""
+    return {
+        "applicable": applicable,
+        "predicate": predicate,
+        "reason": reason,
+    }
+
+
+def build_metric_applicability(
+    performance: dict,
+    behavioral_impact: dict | None = None,
+    *,
+    behavioral_collection_succeeded: bool = False,
+) -> dict[str, dict[str, dict[str, object]]]:
+    """Build auditable applicability from objective metric denominators.
+
+    An absent or failed collection produces no non-applicability claim: the run
+    aggregator will correctly classify the missing value as ``UNMEASURED``.
+    ``applicable=True`` is retained for known denominators whose outcome was not
+    observed (for example, true gold exists but the agent never reached it).
+    """
+    contracts: dict[str, dict[str, dict[str, object]]] = {}
+
+    if (
+        isinstance(performance, dict)
+        and not performance.get("error")
+        and performance.get("status") != "UNMEASURED"
+    ):
+        n_gold = int(performance.get("n_gold_files") or 0)
+        gold_source = str(performance.get("gold_source") or "none")
+        has_true_gold = gold_source in {"true_gold", "dataset_gold"} and n_gold > 0
+        gold_contract = _applicability(
+            has_true_gold,
+            "n_gold_files > 0",
+            "true gold file denominator is available"
+            if has_true_gold else "true gold file denominator is absent",
+        )
+        for section, fields in _GOLD_DERIVED_FIELDS.items():
+            contracts.setdefault(section, {}).update(
+                {field: dict(gold_contract) for field in fields}
+            )
+
+        localization = performance.get("localization") or {}
+        n_gold_edited = int(localization.get("_gold_edited_count") or 0)
+        first_edit_applicable = has_true_gold and n_gold_edited > 0
+        contracts.setdefault("edit_quality", {})["first_edit_correctness"] = (
+            _applicability(
+                first_edit_applicable,
+                "gold_files_edited > 0",
+                "at least one true-gold file was edited"
+                if first_edit_applicable else "no true-gold file was edited",
+            )
+        )
+
+        interface = performance.get("interface_preservation") or {}
+        n_contract_warnings = int(interface.get("_contract_warning_count") or 0)
+        contracts.setdefault("interface_preservation", {})[
+            "contract_compliance_rate"
+        ] = _applicability(
+            n_contract_warnings > 0,
+            "contract_warning_count > 0",
+            "at least one caller-contract warning was delivered"
+            if n_contract_warnings > 0 else "no caller-contract warning was delivered",
+        )
+
+        verify = performance.get("verify_before_submit") or {}
+        n_obligations = int(verify.get("_obligations_delivered") or 0)
+        contracts.setdefault("verify_before_submit", {})[
+            "obligation_test_rate"
+        ] = _applicability(
+            n_obligations > 0,
+            "obligations_delivered > 0",
+            "at least one obligation was delivered"
+            if n_obligations > 0 else "no obligation was delivered",
+        )
+
+        attribution = performance.get("gt_attribution") or {}
+        n_nudges = int(attribution.get("_nudges_delivered") or 0)
+        contracts.setdefault("gt_attribution", {})["nudge_action_rate"] = (
+            _applicability(
+                n_nudges > 0,
+                "nudges_delivered > 0",
+                "at least one recovery nudge was delivered"
+                if n_nudges > 0 else "no recovery nudge was delivered",
+            )
+        )
+
+    if (
+        behavioral_collection_succeeded
+        and isinstance(behavioral_impact, dict)
+        and not behavioral_impact.get("collection_error")
+    ):
+        total_deliveries = int(behavioral_impact.get("total_deliveries") or 0)
+        total_pivots = int(behavioral_impact.get("total_pivots") or 0)
+        per_tag = behavioral_impact.get("per_tag_impact") or {}
+        recovery_deliveries = 0
+        if isinstance(per_tag, dict):
+            recovery = per_tag.get("recovery") or {}
+            if isinstance(recovery, dict):
+                recovery_deliveries = int(recovery.get("total") or 0)
+        section = contracts.setdefault("behavioral_impact", {})
+        section["per_tag_impact"] = _applicability(
+            total_deliveries > 0,
+            "total_deliveries > 0",
+            "at least one byte-joined GT delivery was observed"
+            if total_deliveries > 0 else "no byte-joined GT delivery was observed",
+        )
+        section["gt_tokens_per_pivot"] = _applicability(
+            total_pivots > 0,
+            "total_pivots > 0",
+            "at least one diagnostic action pivot was observed"
+            if total_pivots > 0 else "no diagnostic action pivot was observed",
+        )
+        section["nudge_compliance_rate"] = _applicability(
+            recovery_deliveries > 0,
+            "recovery_deliveries > 0",
+            "at least one byte-joined recovery nudge was delivered"
+            if recovery_deliveries > 0 else "no byte-joined recovery nudge was delivered",
+        )
+
+    return contracts
 
 
 def _parse_gold_from_diff(submission: str) -> list[str]:
@@ -542,7 +779,7 @@ def _parse_timeline(messages: list[dict]) -> list[dict]:
     timeline = []
     step = 0
 
-    for m in messages:
+    for msg_index, m in enumerate(messages):
         role = m.get("role", "")
         content = m.get("content") or ""
         if not isinstance(content, str):
@@ -562,6 +799,7 @@ def _parse_timeline(messages: list[dict]) -> list[dict]:
 
             timeline.append({
                 "role": "assistant",
+                "msg_index": msg_index,
                 "step": step,
                 "cmd": full_cmd,
                 "tc_json": tc_json,
@@ -588,6 +826,7 @@ def _parse_timeline(messages: list[dict]) -> list[dict]:
 
             timeline.append({
                 "role": "observation",
+                "msg_index": msg_index,
                 "step": step,
                 "cmd": "",
                 "content": content,
@@ -831,26 +1070,34 @@ def _compute_edit_quality(timeline: list[dict], gold_files: list[str],
 # Section 3: Interface Preservation
 # ---------------------------------------------------------------------------
 
-def _compute_interface_preservation(timeline: list[dict]) -> dict:
-    """Track <gt-contract> [CALLERS] warnings and whether the agent respected them."""
+def _compute_interface_preservation(timeline: list[dict], consumption: dict | None = None) -> dict:
+    """Track byte-proven caller contracts and whether the agent respected them."""
     # Collect all contract warnings delivered: which files got CALLERS warnings?
     warned_files: set[str] = set()  # files for which agent received a CALLERS warning
     contract_obs_indices: list[int] = []  # indices in timeline with contract observations
 
-    for i, ev in enumerate(timeline):
-        if ev["role"] != "observation":
-            continue
-        contract_text = ev.get("contract_content", "")
-        if not contract_text:
-            continue
-        if _CALLERS_WARNING_PATTERN.search(contract_text):
-            # Try to identify the file this contract is about
-            # The observation usually precedes an edit to the file
-            for j in range(i + 1, min(i + 5, len(timeline))):
-                if timeline[j]["role"] == "assistant" and timeline[j].get("edited_file"):
-                    warned_files.add(timeline[j]["edited_file"])
-                    break
-            contract_obs_indices.append(i)
+    native_contracts = _visible_receipts(consumption, "caller_contract")
+    if native_contracts or _authoritative_consumption(consumption):
+        for entry in native_contracts:
+            fp = _norm_path(str(entry.get("file_path") or ""))
+            if fp:
+                warned_files.add(fp)
+            contract_obs_indices.append(int(entry.get("msg_index") or 0))
+    else:
+        for i, ev in enumerate(timeline):
+            if ev["role"] != "observation":
+                continue
+            contract_text = ev.get("contract_content", "")
+            if not contract_text:
+                continue
+            if _CALLERS_WARNING_PATTERN.search(contract_text):
+                # Try to identify the file this contract is about
+                # The observation usually precedes an edit to the file
+                for j in range(i + 1, min(i + 5, len(timeline))):
+                    if timeline[j]["role"] == "assistant" and timeline[j].get("edited_file"):
+                        warned_files.add(timeline[j]["edited_file"])
+                        break
+                contract_obs_indices.append(i)
 
     n_warnings = len(contract_obs_indices)
     # For each warned file, check if the agent changed the function signature
@@ -934,7 +1181,7 @@ def _compute_scope_completeness(timeline: list[dict], gold_files: list[str]) -> 
 # Section 5: Stuck / Recovery
 # ---------------------------------------------------------------------------
 
-def _compute_stuck_recovery(timeline: list[dict]) -> dict:
+def _compute_stuck_recovery(timeline: list[dict], consumption: dict | None = None) -> dict:
     assistant_events = [ev for ev in timeline if ev["role"] == "assistant"]
 
     # Degenerate loop detection: same cmd repeated >=3 times consecutively
@@ -985,8 +1232,14 @@ def _compute_stuck_recovery(timeline: list[dict]) -> dict:
 
     # nudge_recovery_steps: steps between a nudge observation and next edit/test
     nudge_recovery_steps_list = []
+    native_nudges = _visible_receipts(consumption, "recovery")
+    authoritative = _authoritative_consumption(consumption)
+    native_by_msg = _receipt_message_indices(native_nudges)
     for i, ev in enumerate(timeline):
-        if ev["role"] != "observation" or not ev.get("nudge_delivered"):
+        is_native = ev.get("msg_index") in native_by_msg
+        if ev["role"] != "observation" or not (
+            is_native or (not authoritative and ev.get("nudge_delivered"))
+        ):
             continue
         nudge_step = ev["step"]
         # Find next edit or test after this nudge
@@ -1016,7 +1269,7 @@ def _compute_stuck_recovery(timeline: list[dict]) -> dict:
 # Section 6: Verify-before-submit
 # ---------------------------------------------------------------------------
 
-def _compute_verify_before_submit(timeline: list[dict]) -> dict:
+def _compute_verify_before_submit(timeline: list[dict], consumption: dict | None = None) -> dict:
     assistant_events = [ev for ev in timeline if ev["role"] == "assistant"]
     n_steps = len(assistant_events)
 
@@ -1045,7 +1298,10 @@ def _compute_verify_before_submit(timeline: list[dict]) -> dict:
 
     # obligation_test_rate: obligations_tested / obligations_edited
     # We look for <gt-obligations> delivery count and tests that follow
-    obligations_delivered = sum(
+    native_obligations = _visible_receipts(consumption, "obligations")
+    obligations_delivered = len(native_obligations) if (
+        native_obligations or _authoritative_consumption(consumption)
+    ) else sum(
         1 for ev in timeline
         if ev["role"] == "observation" and "obligations" in ev.get("gt_tags", [])
     )
@@ -1062,6 +1318,7 @@ def _compute_verify_before_submit(timeline: list[dict]) -> dict:
         "verify_gap": verify_gap,
         "_total_edits": total_edits,
         "_n_steps": n_steps,
+        "_obligations_delivered": obligations_delivered,
     }
 
 
@@ -1069,7 +1326,8 @@ def _compute_verify_before_submit(timeline: list[dict]) -> dict:
 # Section 8: GT Attribution
 # ---------------------------------------------------------------------------
 
-def _compute_gt_attribution(timeline: list[dict], brief_txt: str) -> dict:
+def _compute_gt_attribution(timeline: list[dict], brief_txt: str,
+                            consumption: dict | None = None) -> dict:
     l1_top5 = _parse_l1_ranking(brief_txt)[:5]
     l1_top5_set = set(l1_top5)
 
@@ -1088,15 +1346,23 @@ def _compute_gt_attribution(timeline: list[dict], brief_txt: str) -> dict:
     # contract_consulted_rate: did agent view a file's contract BEFORE editing it?
     # Proxy: was a <gt-contract> observation received before the edit step for that file?
     contract_view_steps: dict[str, int] = {}  # file -> last step with contract for it
-    for i, ev in enumerate(timeline):
-        if ev["role"] != "observation" or not ev.get("contract_content"):
-            continue
-        # Associate with the next edited file
-        for j in range(i + 1, min(i + 5, len(timeline))):
-            if timeline[j]["role"] == "assistant" and timeline[j].get("edited_file"):
-                f = timeline[j]["edited_file"]
-                contract_view_steps[f] = ev["step"]
-                break
+    native_contracts = _visible_receipts(consumption, "caller_contract")
+    if native_contracts or _authoritative_consumption(consumption):
+        step_by_msg = {ev.get("msg_index"): ev.get("step", 0) for ev in timeline}
+        for entry in native_contracts:
+            fp = _norm_path(str(entry.get("file_path") or ""))
+            if fp:
+                contract_view_steps[fp] = int(step_by_msg.get(entry.get("msg_index"), 0))
+    else:
+        for i, ev in enumerate(timeline):
+            if ev["role"] != "observation" or not ev.get("contract_content"):
+                continue
+            # Associate with the next edited file
+            for j in range(i + 1, min(i + 5, len(timeline))):
+                if timeline[j]["role"] == "assistant" and timeline[j].get("edited_file"):
+                    f = timeline[j]["edited_file"]
+                    contract_view_steps[f] = ev["step"]
+                    break
 
     edited_files: list[tuple[int, str]] = []  # (step, file)
     for ev in timeline:
@@ -1105,28 +1371,41 @@ def _compute_gt_attribution(timeline: list[dict], brief_txt: str) -> dict:
 
     edits_with_prior_contract = sum(
         1 for step, f in edited_files
-        if f in contract_view_steps and contract_view_steps[f] < step
+        if any(_path_match(f, cf) and cstep < step
+               for cf, cstep in contract_view_steps.items())
     )
     n_edits = len(edited_files)
     contract_consulted_rate = d8(edits_with_prior_contract / n_edits) if n_edits else 0.0
 
     # obligation_completion_rate: obligations_addressed / obligations_delivered
-    obligations_delivered = sum(
+    native_obligations = _visible_receipts(consumption, "obligations")
+    authoritative = _authoritative_consumption(consumption)
+    obligations_delivered = len(native_obligations) if (
+        native_obligations or authoritative
+    ) else sum(
         1 for ev in timeline
         if ev["role"] == "observation" and "obligations" in ev.get("gt_tags", [])
     )
     # We approximate "addressed" as edits that followed an obligation delivery
     # (within 10 steps)
     obligation_followed_edits = 0
+    native_obligation_msgs = _receipt_message_indices(native_obligations)
     for i, ev in enumerate(timeline):
-        if ev["role"] != "observation" or "obligations" not in ev.get("gt_tags", []):
+        is_native = ev.get("msg_index") in native_obligation_msgs
+        if ev["role"] != "observation" or not (
+            is_native or (
+                not authoritative and "obligations" in ev.get("gt_tags", [])
+            )
+        ):
             continue
         obs_step = ev["step"]
         for j in range(i + 1, len(timeline)):
             next_ev = timeline[j]
             if next_ev["role"] == "assistant" and next_ev["step"] > obs_step + 10:
                 break
-            if next_ev["role"] == "assistant" and next_ev.get("is_edit"):
+            if next_ev["role"] == "assistant" and (
+                next_ev.get("is_edit") or next_ev.get("is_test")
+            ):
                 obligation_followed_edits += 1
                 break
     obligation_completion_rate = d8(
@@ -1134,13 +1413,20 @@ def _compute_gt_attribution(timeline: list[dict], brief_txt: str) -> dict:
     ) if obligations_delivered else 0.0
 
     # nudge_action_rate: nudges followed by correct action / nudges
-    nudges_delivered = sum(
+    native_nudges = _visible_receipts(consumption, "recovery")
+    nudges_delivered = len(native_nudges) if (
+        native_nudges or authoritative
+    ) else sum(
         1 for ev in timeline
         if ev["role"] == "observation" and ev.get("nudge_delivered")
     )
     nudge_correct_actions = 0
+    native_nudge_msgs = _receipt_message_indices(native_nudges)
     for i, ev in enumerate(timeline):
-        if ev["role"] != "observation" or not ev.get("nudge_delivered"):
+        is_native = ev.get("msg_index") in native_nudge_msgs
+        if ev["role"] != "observation" or not (
+            is_native or (not authoritative and ev.get("nudge_delivered"))
+        ):
             continue
         for j in range(i + 1, min(i + 3, len(timeline))):
             if timeline[j]["role"] == "assistant":
@@ -1152,9 +1438,21 @@ def _compute_gt_attribution(timeline: list[dict], brief_txt: str) -> dict:
 
     # scope_chain_followed: did agent open files listed in gt-scope?
     all_scope_files: list[str] = []
-    for ev in timeline:
-        if ev["role"] == "observation":
-            all_scope_files.extend(ev.get("scope_files", []))
+    native_scope = _visible_receipts(consumption, "localization")
+    if native_scope or authoritative:
+        for entry in native_scope:
+            fp = _norm_path(str(entry.get("file_path") or ""))
+            if fp:
+                all_scope_files.append(fp)
+            text = str(entry.get("rendered_text") or "")
+            all_scope_files.extend(_norm_path(p) for p in re.findall(
+                r"([\w./-]+\.(?:py|go|ts|js|java|rs|cpp|c|h|rb|php|swift|kt|cs))\b",
+                text,
+            ))
+    else:
+        for ev in timeline:
+            if ev["role"] == "observation":
+                all_scope_files.extend(ev.get("scope_files", []))
     scope_files_set = set(all_scope_files)
     scope_files_opened = sum(
         1 for f in scope_files_set
@@ -1181,7 +1479,8 @@ def _compute_gt_attribution(timeline: list[dict], brief_txt: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
-                               gold_files: list[str]) -> dict:
+                               gold_files: list[str],
+                               consumption: dict | None = None) -> dict:
     gold_set = set(_norm_path(g) for g in gold_files if g)
     info = trajectory.get("info", {}) or {}
     model_stats = info.get("model_stats", {}) or {}
@@ -1233,7 +1532,10 @@ def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
 
     # gt_token_overhead: gt_injected_tokens / total_prompt_tokens
     # GT blocks: chars / 4 as token estimate
-    gt_observation_chars = sum(
+    visible = _visible_receipts(consumption)
+    gt_observation_chars = sum(int(e.get("chars") or 0) for e in visible) if (
+        visible or _authoritative_consumption(consumption)
+    ) else sum(
         len(ev.get("content", ""))
         for ev in timeline
         if ev["role"] == "observation" and ev.get("has_gt")
@@ -1251,6 +1553,10 @@ def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
         "total_tokens_in": total_tokens_in,
         "total_tokens_out": total_tokens_out,
         "total_cost_usd": d8(total_cost_usd),
+        # This denominator exists only at run scope. Keep the mandatory key in
+        # every per-task record, but never fabricate a per-task substitute.
+        "cost_per_resolved": None,
+        "cost_per_resolved_scope": "run_aggregate",
         "cache_hit_rate": cache_hit_rate,
         "tokens_per_gold_edit": tokens_per_gold_edit,
         "gt_token_overhead": gt_token_overhead,
@@ -1270,6 +1576,7 @@ def compute_performance_metrics(
     gold_files: list[str] | None = None,
     instance_id: str | None = None,
     gold_jsonl: str | None = None,
+    consumption_ledger: dict | None = None,
 ) -> dict:
     """Compute all performance metrics from sections 1-6, 8-9.
 
@@ -1296,7 +1603,11 @@ def compute_performance_metrics(
     try:
         trajectory = _safe_load_json(trajectory_path) if trajectory_path else None
         if not isinstance(trajectory, dict):
-            trajectory = {}
+            out.update({
+                "status": "UNMEASURED",
+                "reason": "trajectory_unavailable_or_invalid",
+            })
+            return out
 
         messages = trajectory.get("messages", []) or []
         info = trajectory.get("info", {}) or {}
@@ -1348,16 +1659,22 @@ def compute_performance_metrics(
 
         # Parse timeline
         timeline = _parse_timeline(messages)
+        if consumption_ledger is None:
+            consumption_ledger = _load_consumption(
+                trajectory_path, artifacts_dir, instance_id
+            )
 
         # Sections
         s1 = _compute_localization(timeline, gold_files, brief_txt)
         s2 = _compute_edit_quality(timeline, gold_files, submission)
-        s3 = _compute_interface_preservation(timeline)
+        s3 = _compute_interface_preservation(timeline, consumption_ledger)
         s4 = _compute_scope_completeness(timeline, gold_files)
-        s5 = _compute_stuck_recovery(timeline)
-        s6 = _compute_verify_before_submit(timeline)
-        s8 = _compute_gt_attribution(timeline, brief_txt)
-        s9 = _compute_token_efficiency(trajectory, timeline, gold_files)
+        s5 = _compute_stuck_recovery(timeline, consumption_ledger)
+        s6 = _compute_verify_before_submit(timeline, consumption_ledger)
+        s8 = _compute_gt_attribution(timeline, brief_txt, consumption_ledger)
+        s9 = _compute_token_efficiency(
+            trajectory, timeline, gold_files, consumption_ledger
+        )
 
         out.update({
             "localization": s1,
@@ -1375,13 +1692,23 @@ def compute_performance_metrics(
             "n_gold_files": len(gold_files),
             "brief_found": bool(brief_txt),
             "submission_found": bool(submission),
+            "consumption_ledger_schema": (
+                consumption_ledger.get("schema")
+                if isinstance(consumption_ledger, dict) else None
+            ),
+            "native_delivery_rows_joined": (
+                consumption_ledger.get("ledger_rows_joined")
+                if isinstance(consumption_ledger, dict) else None
+            ),
         })
 
-        # G1: under a submission-proxy "gold" every gold-derived metric is circular
-        # (it measures agreement with the agent's OWN patch, even on a failed task).
-        # Emit them as null so no fabricated score is read as real.
-        if gold_source == "submission_proxy":
+        # G1 + MANDATORY_METRICS persistence rule 6: a submission-proxy "gold"
+        # is circular, and no gold at all has no denominator. In both cases every
+        # mandatory localization metric plus the other gold-dependent fields is
+        # N/A, never a fabricated false/999/0 score.
+        if gold_source in {"submission_proxy", "none"}:
             _null_gold_derived(out)
+        out["metric_applicability"] = build_metric_applicability(out)
     except Exception as exc:  # noqa: BLE001 — never crash the caller
         out["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
         import traceback

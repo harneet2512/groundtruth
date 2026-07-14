@@ -299,7 +299,32 @@ import hashlib as _hashlib
 _V2_BULLET_RE = re.compile(r"^\s*[-*+•]\s+(.+)$")
 _V2_LABEL_LINE_RE = re.compile(r"^([A-Z][A-Za-z /`_-]{1,40}):\s*$")
 _V2_LABEL_REST_RE = re.compile(r"^([A-Za-z][^:\n]{0,60}):\s+(.+)$")
-_V2_HEADING_RE = re.compile(r"^\s*#{1,6}\s")
+_V2_ATX_HEADING_RE = re.compile(r"^\s*#{1,6}\s+(.+?)\s*#*\s*$")
+_V2_BOLD_HEADING_RE = re.compile(r"^\s*\*\*([^*\n]{1,80})\*\*:?\s*$")
+_V2_COMMENT_HEADING_RE = re.compile(
+    r"^\s*([A-Za-z][^:\n]{0,60}):\s*<!--.*-->\s*$"
+)
+_V2_DESCRIPTIVE_SECTION_RE = re.compile(
+    r"^(?:describe\s+the\s+bug|bug\s+description|actual(?:\s+behaviou?r)?|"
+    r"current(?:\s+behaviou?r)?|summary|"
+    r"what\s+do\s+you\s+see\s+instead|additional\s+(?:context|information))$",
+    re.I,
+)
+_V2_PROCESS_SECTION_RE = re.compile(
+    r"^(?:(?:what\s+)?steps?\s+(?:can\s+)?reproduce(?:\s+the\s+bug)?|"
+    r"to\s+reproduce|reproduction|repro|returns?|output|traceback|logs?|"
+    r"environment|versions?|tests?|testing|alternatives?|motivation|checklist|"
+    r"i\s+have|what\s+version.*|what\s+runtime.*|"
+    r"the\s+author\s+should\s+do\s+the\s+followings?,?\s+if\s+applicable)$",
+    re.I,
+)
+_V2_EXPECTED_SECTION_RE = re.compile(
+    r"^(?:(?:what\s+is\s+the\s+)?expected(?:\s+behaviou?r)?|"
+    r"desired(?:\s+behaviou?r)?|proposal|proposed(?:\s+behaviou?r)?|"
+    r"requirements?|acceptance\s+criteria|solution|fix|"
+    r"ideas?\s+of\s+implementation|what\s+changed)$",
+    re.I,
+)
 # Mapping arrows: '->' / '→' ONLY (never '=>', which is lambda syntax and lives
 # inside code spans — treating it as a mapping would shred `(items) => result`).
 _V2_ARROW_SPLIT_RE = re.compile(r"\s*(?:->|→)\s*")
@@ -307,9 +332,11 @@ _V2_COND_RE = re.compile(
     r"^(?:if|when|while|unless|once|after|before|whenever)\b", re.I
 )
 _V2_IMPERATIVE_RE = re.compile(
-    r"^(?:add|implement|make|support|provide|introduce|expose|allow|ensure|"
+    r"^(?:(?:correctly|properly|safely|consistently|gracefully|fully)\s+)?"
+    r"(?:add|implement|make|support|provide|introduce|expose|allow|ensure|"
     r"return|raise|skip|run|call|use|keep|preserve|clear|reject|emit|stop|"
-    r"retry|default|rename|remove|drop|split|convert|record|create|apply)\b",
+    r"retry|default|rename|remove|drop|split|convert|record|create|apply|"
+    r"handle|fix|update|replace|refactor)\b",
     re.I,
 )
 _V2_SIGNATURE_RE = re.compile(
@@ -337,6 +364,15 @@ _V2_MANDATORY_RE = re.compile(
 )
 _V2_EXPECTED_MODAL_RE = re.compile(
     r"\b(?:should|expected to|needs? to|has to|have to|required)\b", re.I
+)
+_V2_SUGGESTION_RE = re.compile(
+    r"\b(?:i\s+(?:think|suggest|propose|would\s+like|prefer)|"
+    r"would\s+be\s+(?:helpful|useful|better|preferable|desirable))\b",
+    re.I,
+)
+_V2_REQUEST_MODAL_RE = re.compile(
+    r"\b(?:must|shall|should|expected to|needs? to|has to|have to|required)\b",
+    re.I,
 )
 _V2_CALL_SHAPE_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 
@@ -425,7 +461,7 @@ def _v2_classify(decision_text: str) -> tuple[str, str, int] | None:
         return None
     low = t.lower()
     mandatory = bool(_V2_MANDATORY_RE.search(t))
-    expected = bool(_V2_EXPECTED_MODAL_RE.search(t))
+    expected = bool(_V2_EXPECTED_MODAL_RE.search(t) or _V2_SUGGESTION_RE.search(t))
     behavior = bool(_V2_BEHAVIOR_RE.search(t))
     imperative = bool(_V2_IMPERATIVE_RE.match(t))
     conditional = bool(
@@ -467,6 +503,40 @@ def _v2_classify(decision_text: str) -> tuple[str, str, int] | None:
         mod, s = _strength()
         return "behavior", mod, s
     return None
+
+
+def _v2_heading_text(line: str) -> str | None:
+    """Return a normalized structural heading, never its following prose.
+
+    GitHub issue templates commonly use ATX headings, bold-only headings, and
+    label-only lines.  Treating those labels as prose created obligations such
+    as ``Returns:`` and joined ``Describe the bug`` to the first observation.
+    """
+    stripped = line.strip()
+    match = _V2_ATX_HEADING_RE.match(stripped)
+    if match:
+        return match.group(1).strip().strip("*_").rstrip(":?!").strip()
+    match = _V2_BOLD_HEADING_RE.match(stripped)
+    if match:
+        return match.group(1).strip().rstrip(":?!").strip()
+    match = _V2_COMMENT_HEADING_RE.match(stripped)
+    if match:
+        return match.group(1).strip().rstrip(":?!").strip()
+    match = _V2_LABEL_LINE_RE.match(stripped)
+    if match:
+        return match.group(1).strip().strip("`*_").rstrip(":?!").strip()
+    return None
+
+
+def _v2_section_role(heading: str) -> str:
+    normalized = " ".join(heading.split()).strip()
+    if _V2_DESCRIPTIVE_SECTION_RE.fullmatch(normalized):
+        return "descriptive"
+    if _V2_PROCESS_SECTION_RE.fullmatch(normalized):
+        return "process"
+    if _V2_EXPECTED_SECTION_RE.fullmatch(normalized):
+        return "expected"
+    return "neutral"
 
 
 def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
@@ -512,7 +582,8 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         spec.all_keywords |= kws
 
     def _process_candidate(text: str, bullet_label_syms: set[str],
-                           bullet_fallback: tuple[str, str, int] | None) -> None:
+                           bullet_fallback: tuple[str, str, int] | None,
+                           section_role: str = "neutral") -> None:
         parent = _v2_clause_id(text, 0)
         for idx, piece in enumerate(_v2_split_semicolons(text)):
             mapping = _v2_is_arrow_mapping(piece)
@@ -536,25 +607,49 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             cls = _v2_classify(decision)
             if cls is None and bullet_fallback is not None:
                 cls = bullet_fallback
+            if cls is None and section_role == "expected" and len(decision) >= 8:
+                cls = ("behavior", "expected", 2)
             if cls is None:
                 continue
             kind, modality, strength = cls
+            if section_role == "process":
+                continue
+            # Current-state/reproduction prose is evidence about the defect,
+            # not a completion requirement.  Retain only explicit requirement
+            # grammar there; an imperative repro step ("Run ...") is not one.
+            if section_role == "descriptive" and not (
+                _V2_REQUEST_MODAL_RE.search(decision)
+                or _V2_SUGGESTION_RE.search(decision)
+            ):
+                continue
+            # The first unheaded paragraph is normally a GitHub title/current-
+            # state synopsis.  Declarative behavior there is not an obligation,
+            # while an instruction-style title ("Add ...") remains expected.
+            if section_role == "title" and strength <= 1:
+                continue
+            if section_role == "expected" and strength < 2:
+                modality, strength = "expected", 2
             _emit(piece, kind, modality, strength, parent, idx, bullet_label_syms)
 
     # ── Stage A: block segmentation ──────────────────────────────────────────
     in_fence = False
     label_syms: set[str] = set()
     prose: list[str] = []
+    section_role = "title"
+    first_block = True
+    parity_candidates: list[tuple[str, str]] = []
 
     def _flush_prose() -> None:
         if not prose:
             return
         block = " ".join(prose)
         prose.clear()
+        role = section_role
         for sent in _SENT_SPLIT_RE.split(block):
             sent = sent.strip()
             if sent and len(sent) >= 8:
-                _process_candidate(sent, set(), None)
+                parity_candidates.append((sent, role))
+                _process_candidate(sent, set(), None, role)
 
     for raw in issue_text.split("\n"):
         line = raw.rstrip()
@@ -564,14 +659,25 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             continue
         if in_fence:
             continue
-        if not line.strip() or _V2_HEADING_RE.match(line):
+        if not line.strip():
             _flush_prose()
             label_syms = set()
+            if first_block:
+                first_block = False
+                if section_role == "title":
+                    section_role = "neutral"
             continue
-        lab = _V2_LABEL_LINE_RE.match(line.strip())
-        if lab:
+        heading = _v2_heading_text(line)
+        if heading is not None:
             _flush_prose()
-            label_syms = _idents(lab.group(1))
+            first_block = False
+            role = _v2_section_role(heading)
+            if role != "neutral":
+                section_role = role
+                label_syms = set()
+            else:
+                section_role = "neutral"
+                label_syms = _idents(heading)
             continue
         bm = _V2_BULLET_RE.match(line)
         if bm:
@@ -595,7 +701,8 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                     fallback = _v2_classify(_p)
                     if fallback is not None:
                         break
-            _process_candidate(content, set(label_syms), fallback)
+            parity_candidates.append((content, section_role))
+            _process_candidate(content, set(label_syms), fallback, section_role)
             continue
         nm = re.match(r"^\s*\d+[.)]\s+(.+)$", line)
         if nm:
@@ -603,37 +710,57 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             content = nm.group(1).strip()
             cls = _v2_classify(content)
             if cls:
-                _process_candidate(content, set(label_syms), None)
+                parity_candidates.append((content, section_role))
+                _process_candidate(content, set(label_syms), None, section_role)
             else:
-                _emit(line.strip(), "repro", "descriptive", 0,
-                      _v2_clause_id(line.strip(), 0), 0)
+                # Numbered items in a requirement section can be useful
+                # checklist rows; numbered repro steps are observations only.
+                if section_role not in {"descriptive", "process"}:
+                    _emit(line.strip(), "repro", "descriptive", 0,
+                          _v2_clause_id(line.strip(), 0), 0)
             continue
         prose.append(line.strip())
     _flush_prose()
 
-    # ── v1-parity sweep: v2 is a strict SUPERSET of real v1 recall by
-    # construction. Any sentence the v1 classifier accepts — outside fenced
-    # code and headings (v2's deliberate junk filters) — that no v2 clause
-    # already covers (containment either way) is emitted at declarative
-    # strength, so it sinks to the bottom of the T1 ordering but is never LOST
-    # from the checklist. This is what makes the held-out gate hold on every
-    # issue shape without per-corpus carve-outs.
-    stripped = _FENCE_RE.sub(" ", issue_text)
-    stripped = "\n".join(
-        ln for ln in stripped.split("\n") if not _V2_HEADING_RE.match(ln)
-    )
+    # ── section-preserving v1 parity sweep: retain v1's useful classifier
+    # recall only inside the same structural role assigned above.  Raw parity
+    # was unsound: it resurrected fenced/process/current-state false positives
+    # that Stage A had deliberately rejected (for example ``Returns:``).
     covered = [" ".join(o.verbatim_text.split()).lower() for o in spec.obligations]
-    for sent in _SENT_SPLIT_RE.split(stripped):
+    for sent, role in parity_candidates:
         sent = sent.strip()
         if not sent or len(sent) < 8:
             continue
         kind = _classify_kind(sent)
         if not kind:
             continue
+        if role == "process":
+            continue
+        decision = sent
+        lm = _V2_LABEL_REST_RE.match(sent)
+        if lm and len(lm.group(1).split()) <= 6:
+            decision = lm.group(2)
+        if role == "descriptive" and not (
+            _V2_REQUEST_MODAL_RE.search(decision)
+            or _V2_SUGGESTION_RE.search(decision)
+        ):
+            continue
+        if role == "title" and not (
+            _V2_MANDATORY_RE.search(decision)
+            or _V2_EXPECTED_MODAL_RE.search(decision)
+            or _V2_SUGGESTION_RE.search(decision)
+            or _V2_IMPERATIVE_RE.match(decision)
+        ):
+            continue
         key = " ".join(sent.rstrip(".").split()).lower()
         if any((key in c) or (c in key) for c in covered):
             continue
-        _emit(sent, kind, "declarative", 1, _v2_clause_id(sent, 0), 0)
+        modality, strength = ("expected", 2) if role == "expected" else ("declarative", 1)
+        if _V2_MANDATORY_RE.search(decision):
+            modality, strength = "mandatory", 3
+        elif _V2_EXPECTED_MODAL_RE.search(decision) or _V2_SUGGESTION_RE.search(decision):
+            modality, strength = "expected", 2
+        _emit(sent, kind, modality, strength, _v2_clause_id(sent, 0), 0)
         covered.append(key)
 
     return spec

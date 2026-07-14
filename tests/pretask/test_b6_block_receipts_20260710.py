@@ -122,8 +122,23 @@ def test_empty_brief_yields_no_receipts():
 
 def test_flag_default_off(monkeypatch):
     monkeypatch.delenv("GT_BLOCK_RECEIPTS", raising=False)
+    monkeypatch.delenv("GT_INSEAM_METRICS", raising=False)
     assert _block_receipts_on() is False
     monkeypatch.setenv("GT_BLOCK_RECEIPTS", "1")
+    assert _block_receipts_on() is True
+
+
+def test_inseam_metrics_activates_receipts_with_explicit_override(monkeypatch):
+    monkeypatch.delenv("GT_BLOCK_RECEIPTS", raising=False)
+    monkeypatch.setenv("GT_INSEAM_METRICS", "1")
+    assert _block_receipts_on() is True
+
+    # The older dedicated switch remains an explicit operator override in both
+    # directions, including a kill-switch while Profile-2 instrumentation is on.
+    monkeypatch.setenv("GT_BLOCK_RECEIPTS", "0")
+    assert _block_receipts_on() is False
+    monkeypatch.setenv("GT_BLOCK_RECEIPTS", "1")
+    monkeypatch.setenv("GT_INSEAM_METRICS", "0")
     assert _block_receipts_on() is True
 
 
@@ -208,3 +223,32 @@ def test_instrumentation_is_brief_text_byte_identical(tmp_path, monkeypatch, _se
         assert r["content_hash"] == hashlib.sha256(
             on.brief_text[s:e].encode("utf-8")
         ).hexdigest(), r
+
+
+def test_profile_inseam_receipts_are_brief_text_byte_identical(
+    tmp_path, monkeypatch, _semantic_off
+):
+    """Profile-2's existing instrumentation capability populates the receipt
+    sidecar without changing a single delivered brief byte."""
+    db = str(tmp_path / "g.db")
+    _build_graph(db)
+    root = tmp_path / "repo"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "config.py").write_text(
+        "def apply_defaults(cfg):\n    return cfg\n", encoding="utf-8"
+    )
+    (root / "pkg" / "loader.py").write_text(
+        "def load_config():\n    return apply_defaults({})\n", encoding="utf-8"
+    )
+    issue = "apply_defaults mutates the caller mapping; correct apply_defaults in config"
+
+    monkeypatch.delenv("GT_BLOCK_RECEIPTS", raising=False)
+    monkeypatch.delenv("GT_INSEAM_METRICS", raising=False)
+    off = generate_v1r_brief(issue, str(root), db)
+    assert off.block_receipts == []
+
+    monkeypatch.setenv("GT_INSEAM_METRICS", "1")
+    on = generate_v1r_brief(issue, str(root), db)
+
+    assert on.brief_text == off.brief_text
+    assert on.block_receipts

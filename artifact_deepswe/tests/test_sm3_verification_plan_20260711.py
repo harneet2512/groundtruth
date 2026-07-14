@@ -47,6 +47,10 @@ class _Green:
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     monkeypatch.setattr(g, "_GT_BASELINE", False)
+    # Every emission test exercises the execution-enabled production branch.
+    # Pin the prerequisite here so suite order or a prior flag-off test cannot
+    # silently turn an emission assertion into a no-op.
+    monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
     monkeypatch.setattr(g, "_action_count", 9, raising=False)
     monkeypatch.setattr(g, "_last_test_step", None, raising=False)
     monkeypatch.setattr(g, "_last_covering_result", None, raising=False)
@@ -111,6 +115,13 @@ def test_flag_off_emission_is_noop(monkeypatch):
     assert g._verification_plan_emission({"x.py"}, {"foo"}) is None
 
 
+def test_execute_flag_off_emission_is_noop(monkeypatch):
+    """The plan flag alone cannot execute repo commands without explicit execution."""
+    monkeypatch.setenv("GT_VERIFICATION_PLAN", "1")
+    monkeypatch.delenv("GT_VERIFY_EXECUTE", raising=False)
+    assert g._verification_plan_emission({"x.py"}, {"foo"}) is None
+
+
 def test_attributed_unit_red_delivers_and_feeds_submit(monkeypatch):
     monkeypatch.setenv("GT_VERIFICATION_PLAN", "1")
     cov_detail = {"verdict": "fail", "ran": ["t.py"]}
@@ -151,6 +162,53 @@ def test_syntax_red_wins_before_unit(monkeypatch):
     monkeypatch.setattr(nr, "render_covering_failure_native", lambda *a, **k: "UNIT")
     block = g._verification_plan_emission({"x.py"}, {"foo"})
     assert block == "SyntaxError: bad token", "syntax rung precedes unit in plan order"
+
+
+def test_replay_plan_syntax_uses_parse_boundary_not_pytest_boundary(
+    monkeypatch, tmp_path,
+):
+    """A pytest-only covering executor must not make the plan's syntax rung dark."""
+    monkeypatch.setenv("GT_VERIFICATION_PLAN", "1")
+    monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
+    source = tmp_path / "pkg" / "mod.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def foo(:\n", encoding="utf-8")
+    plan = vp.VerificationPlan(
+        patch_revision="p", graph_revision="g", changed_entities=("foo",),
+        obligations=(), edited_files=("pkg/mod.py",), checks=(
+            vp.Check(
+                kind="syntax", command=None, selection_basis="edit_check",
+                covered_entities=("foo",), confidence="high",
+                attribution_requirement="none", targets=("pkg/mod.py",),
+            ),
+        ),
+    )
+    monkeypatch.setattr(g, "_root", lambda: str(tmp_path))
+    monkeypatch.setattr(vp, "build_verification_plan", lambda *a, **k: plan)
+    parse_calls = []
+    covering_calls = []
+
+    def parse_executor(cmd, cwd, timeout):
+        parse_calls.append((cmd, cwd, timeout))
+        return 1, "", (
+            '  File "/testbed/pkg/mod.py", line 1\n'
+            "    def foo(:\n"
+            "            ^\n"
+            "SyntaxError: invalid syntax\n"
+        )
+
+    def pytest_only_executor(cmd, cwd, timeout):
+        covering_calls.append((cmd, cwd, timeout))
+        return None, "", "replay_verification_unsupported_command"
+
+    monkeypatch.setattr(g, "_build_edit_check_executor", lambda: parse_executor)
+    monkeypatch.setattr(g, "_build_verification_executor", lambda: pytest_only_executor)
+
+    block = g._verification_plan_emission({"pkg/mod.py"}, {"foo"})
+
+    assert block and "SyntaxError" in block
+    assert parse_calls, "syntax must use the dedicated parse executor"
+    assert not covering_calls, "pytest-only executor must not receive ast.parse argv"
 
 
 def test_integration_red_is_host_side_only(monkeypatch):

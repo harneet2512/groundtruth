@@ -55,8 +55,9 @@ feature has NOT landed) the scenario is ``SKIP:flag-not-built`` — an HONEST fi
 false green. The MOMENT SS-0/SS-1 gives the flag an effect, the scenario auto-activates and
 enforces the standard (PASS/FAIL). S9/S10 are always-on invariants.
 
-EXIT: ``0`` iff every scenario is PASS or ``SKIP:flag-not-built``; else ``1``. A FAIL means a
-LANDED SS feature violates the standard. Report -> ``ss_gate_report.json``.
+EXIT: ``0`` only for the exact terminal shape S0..S11 with PASS=11, S8 as the sole honest
+structural SKIP, FAIL=0, ERROR=0. Any other SKIP means required wiring is absent and is RED.
+Report -> ``ss_gate_report.json``.
 """
 from __future__ import annotations
 
@@ -65,8 +66,10 @@ import copy
 import datetime
 import json
 import os
+import re
 import shutil
 import sqlite3
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -107,6 +110,10 @@ _ORACLE_RUN_LOCK = Path("/tmp/ssr_replay_oracle.lock")
 
 class OracleLockStateError(RuntimeError):
     """An existing oracle lock cannot be proven to name a valid owner PID."""
+
+
+class GateDriverError(RuntimeError):
+    """The deterministic gate driver could not reproduce a recorded event exactly."""
 
 
 def _pid_alive(pid: int) -> bool:
@@ -337,6 +344,117 @@ def _all_gt_env_keys() -> list[str]:
     return [k for k in os.environ if k.startswith("GT_")]
 
 
+def _structured_str_replace(action: dict) -> bool:
+    return isinstance(action, dict) and action.get("command") == "str_replace"
+
+
+def _confined_target(root: Path, raw_path: object) -> Path:
+    """Resolve one fixture-relative target without permitting filesystem escape."""
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise GateDriverError("str_replace path must be a non-empty relative string")
+    candidate = Path(raw_path)
+    if candidate.is_absolute() or candidate.drive or ".." in candidate.parts:
+        raise GateDriverError(f"str_replace target is outside fixture repo: {raw_path!r}")
+    root_resolved = root.resolve(strict=True)
+    target = root_resolved.joinpath(candidate)
+    try:
+        resolved = target.resolve(strict=True)
+        resolved.relative_to(root_resolved)
+    except (OSError, ValueError) as exc:
+        raise GateDriverError(
+            f"str_replace target is absent or outside fixture repo: {raw_path!r}"
+        ) from exc
+    if target.is_symlink() or not resolved.is_file():
+        raise GateDriverError(f"str_replace target must be a regular non-symlink file: {raw_path!r}")
+    return resolved
+
+
+def _materialize_str_replace(root: Path, action: dict) -> Path:
+    """Apply one confined, exact structured replacement and verify its postimage."""
+    if not _structured_str_replace(action):
+        raise GateDriverError("only structured str_replace actions may be materialized")
+    target = _confined_target(root, action.get("path"))
+    old = action.get("old_str")
+    new = action.get("new_str")
+    if not isinstance(old, str) or not isinstance(new, str) or not old:
+        raise GateDriverError("str_replace requires non-empty old_str and string new_str")
+    old_bytes = old.encode("utf-8")
+    new_bytes = new.encode("utf-8")
+    before = target.read_bytes()
+    count = before.count(old_bytes)
+    if count != 1:
+        raise GateDriverError(
+            f"str_replace old bytes must occur exactly once in {action.get('path')!r}; found {count}"
+        )
+    after = before.replace(old_bytes, new_bytes, 1)
+    mode = stat.S_IMODE(target.stat().st_mode)
+    tmp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="wb", dir=target.parent, prefix=f".{target.name}.ss_gate.",
+                suffix=".tmp", delete=False) as handle:
+            tmp_name = handle.name
+            handle.write(after)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, target)
+        tmp_name = None
+    except OSError as exc:
+        raise GateDriverError(f"atomic str_replace failed for {action.get('path')!r}") from exc
+    finally:
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
+    if target.read_bytes() != after:
+        raise GateDriverError(f"str_replace postimage verification failed for {action.get('path')!r}")
+    return target
+
+
+def _drive_event(g, root: Path, ev: Event) -> dict:
+    """Drive one event in preimage -> mutation -> observation order, fail closed."""
+    out = {"output": ev.output, "returncode": ev.rc}
+    if _structured_str_replace(ev.action):
+        capture = getattr(g, "_ss_capture_write_preimage", None)
+        if not callable(capture):
+            raise GateDriverError("replay seam lacks preimage capture hook")
+        try:
+            capture(ev.action)
+        except Exception as exc:  # noqa: BLE001
+            raise GateDriverError("preimage capture failed") from exc
+        if ev.rc == 0:
+            _materialize_str_replace(root, ev.action)
+    try:
+        g._augment_output(ev.action, out)
+    except Exception as exc:  # noqa: BLE001
+        raise GateDriverError("seam augmentation failed") from exc
+    return out
+
+
+def _read_runtime_ledger(path: Path) -> list[dict]:
+    """Read JSONL without silently discarding corrupt or non-object evidence rows."""
+    if not path.exists():
+        raise GateDriverError(f"runtime ledger is missing: {path}")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise GateDriverError(f"runtime ledger is unreadable: {path}") from exc
+    rows: list[dict] = []
+    for line_no, raw in enumerate(lines, start=1):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise GateDriverError(f"runtime ledger has invalid JSON at line {line_no}") from exc
+        if not isinstance(row, dict):
+            raise GateDriverError(f"runtime ledger row {line_no} is not an object")
+        rows.append(row)
+    return rows
+
+
 class RealSeamDriver:
     """Drives the REAL ``gt_mini_patch`` seam over the fixture repo. Public entry points only."""
 
@@ -379,6 +497,10 @@ class RealSeamDriver:
             db = str(tmp / "graph.db")
             _build_graph_db(db, self.spec)
             ledger = tmp / "led.jsonl"
+            # Establish the proof sink before the seam runs. A stream may honestly emit
+            # zero rows, but a missing artifact after this point means the sink was removed
+            # or never remained writable and must still fail closed in _read_runtime_ledger.
+            ledger.touch(exist_ok=False)
 
             # HERMETIC ENV (SS-6b): strip the ENTIRE ambient GT_* namespace, then apply ONLY
             # the gate's pinned core (Profile-2) + this arm's GT_SS_* overrides. A leaked
@@ -428,17 +550,13 @@ class RealSeamDriver:
             g._reset_oracle_state()
             try:
                 g._RUNTIME_LEDGER = g._ProductLedger()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                raise GateDriverError("could not initialize runtime ledger") from exc
 
             obs: list[Obs] = []
             for ev in events:
-                out = {"output": ev.output, "returncode": ev.rc}
-                before = out["output"]
-                try:
-                    g._augment_output(ev.action, out)
-                except Exception:  # noqa: BLE001 — a seam fault is a delivery-of-nothing here
-                    pass
+                before = ev.output
+                out = _drive_event(g, root, ev)
                 obs.append(Obs(before=before, after=out.get("output") or ""))
 
             # SS-2 (S11): AFTER the stream, exercise the submit boundary N times (while the
@@ -450,19 +568,10 @@ class RealSeamDriver:
             for _ in range(max(0, int(submit_attempts))):
                 try:
                     refusals.append(str(g._ss_submit_red_refusal() or ""))
-                except Exception:  # noqa: BLE001 — a submit-gate fault is a refusal-of-nothing here
-                    refusals.append("")
+                except Exception as exc:  # noqa: BLE001
+                    raise GateDriverError("submit-red seam call failed") from exc
 
-            rows: list[dict] = []
-            if ledger.is_file():
-                for line in ledger.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rows.append(json.loads(line))
-                    except Exception:  # noqa: BLE001
-                        pass
+            rows = _read_runtime_ledger(ledger)
             rows = _scrub_paths(rows, tmp)
             return SeamResult(observations=obs, ledger=rows, submit_refusals=refusals)
         finally:
@@ -807,9 +916,27 @@ def scenario_s3(driver) -> ScenarioResult:
     nonfire_fired = bool(on_nf.rows_with_reason("ss_coherence")) or on_nf.any_delta_contains("coherence")
     fire_row = on_fire.rows_with_reason("ss_coherence")
     fire_fired = bool(fire_row) or on_fire.any_delta_contains("coherence")
-    exact_count = on_fire.any_delta_contains("3") or any("3" in str(r.get("reason") or "") for r in fire_row)
-    core_ok = (not nonfire_fired) and fire_fired and exact_count
-    detail = f"nonfire_fired={nonfire_fired} (want False); fire_fired={fire_fired}; exact_count_3={exact_count}"
+    exact_witness = re.compile(
+        rf"\brewritten\s+{re.escape(Path(_MOD_A).name)}\s+3\s+times\s+with\s+"
+        r"no\s+passing\s+test\s+between\s+edits\b",
+        re.IGNORECASE,
+    )
+    witness_iterations = {
+        index for index, obs in enumerate(on_fire.observations, start=1)
+        if exact_witness.search(obs.delta)
+    }
+    exact_count = witness_iterations == {3}
+    bound_row = any(
+        str(row.get("layer") or "") == "detect.coherence"
+        and str(row.get("reason") or "") == "ss_coherence"
+        and str(row.get("file_path") or "").replace("\\", "/") == _MOD_A
+        and int(row.get("iteration") or -1) == 3
+        and int(row.get("iteration") or -1) in witness_iterations
+        for row in fire_row
+    )
+    core_ok = (not nonfire_fired) and fire_fired and exact_count and bound_row
+    detail = (f"nonfire_fired={nonfire_fired} (want False); fire_fired={fire_fired}; "
+              f"exact_count_3={exact_count}; bound_row={bound_row}")
     return _gate("S3", "COHERENCE", flag, subs, core_ok, detail, built)
 
 
@@ -909,14 +1036,28 @@ def scenario_s6(driver) -> ScenarioResult:
     ]
     on1, off, base, subs = _det_and_byteid(driver, events, flag)
     built = _has_effect(on1, off)
-    late_row = bool(on1.rows_with_reason("ss_late"))
+    late_rows = on1.rows_with_reason("ss_late")
+    late_row = bool(late_rows)
     on_delivered = on1.delivered_rows()
     off_delivered = off.delivered_rows()
-    # ON: the resurfaced partition is late-dropped (ss_late) -> strictly fewer delivered rows
-    # than the OFF arm, which delivers it. late_row names the reason.
-    core_ok = (late_row and len(on_delivered) < len(off_delivered))
+    # A correct late-drop removes the TARGET fact, not the whole observation dose. Under the
+    # global arbiter a different eligible fallback may fill the slot, so comparing total row
+    # counts falsely rejects correct behavior. Join the suppressed target to delivery rows by
+    # canonical kind suffix + file identity: OFF must deliver it and ON must not.
+    def _identity(row):
+        layer = str(row.get("layer") or "")
+        kind = layer.split(".", 1)[-1] if "." in layer else layer
+        return kind, str(row.get("file_path") or "").replace("\\", "/").lower()
+
+    late_ids = {_identity(row) for row in late_rows}
+    on_ids = {_identity(row) for row in on_delivered}
+    off_ids = {_identity(row) for row in off_delivered}
+    target_delivered_off = late_ids <= off_ids if late_ids else False
+    target_delivered_on = bool(late_ids & on_ids)
+    core_ok = late_row and target_delivered_off and not target_delivered_on
     detail = (f"ss_late_row={late_row}; on_delivered={len(on_delivered)} "
-              f"off_delivered={len(off_delivered)} (want on<off)")
+              f"off_delivered={len(off_delivered)}; target_delivered_off="
+              f"{target_delivered_off}; target_delivered_on={target_delivered_on}")
     return _gate("S6", "LATE-DROP", flag, subs, core_ok, detail, built)
 
 
@@ -1037,24 +1178,30 @@ def scenario_s9(driver) -> ScenarioResult:
 # ══════════════════════════════════════════════════════════════════════════════
 def scenario_s10(driver) -> ScenarioResult:
     flag = "(invariant: all GT_SS_* off)"
-    combined: list[Event] = []
-    for stream in _all_streams():
-        combined.extend(stream)
     # A properly flag-gated SS feature is byte-identical whether every GT_SS_* is UNSET or
     # explicitly "0" — both in the model observation stream AND in the (temp-scrubbed) ledger.
     # This bites a feature that fires-when-0 or fires-when-unset differently. (We do NOT flag a
     # baked host-side telemetry reason like the pre-existing `ss_ack` row: it is present in BOTH
     # arms, so unset==zeroed still holds — the correct, non-false-positive invariant.)
-    unset = driver.run(combined, {})
-    zeroed = driver.run(combined, {k: "0" for k in _SS_FLAGS})
-    obs_identical = unset.obs_stream() == zeroed.obs_stream()
-    ledger_identical = _norm_ledger(unset.ledger) == _norm_ledger(zeroed.ledger)
-    subs = [
-        ("unset==explicit-0 observation stream", PASS if obs_identical else FAIL),
-        ("unset==explicit-0 ledger (temp-scrubbed)", PASS if ledger_identical else FAIL),
-    ]
-    verdict = PASS if (obs_identical and ledger_identical) else FAIL
-    detail = f"obs_byte_identical={obs_identical}; ledger_identical={ledger_identical}"
+    subs: list[tuple[str, str]] = []
+    failures: list[str] = []
+    for index, stream in enumerate(_all_streams()):
+        unset = driver.run(stream, {})
+        zeroed = driver.run(stream, {k: "0" for k in _SS_FLAGS})
+        obs_identical = unset.obs_stream() == zeroed.obs_stream()
+        ledger_identical = _norm_ledger(unset.ledger) == _norm_ledger(zeroed.ledger)
+        subs.extend([
+            (f"stream#{index} unset==explicit-0 observation stream",
+             PASS if obs_identical else FAIL),
+            (f"stream#{index} unset==explicit-0 ledger (temp-scrubbed)",
+             PASS if ledger_identical else FAIL),
+        ])
+        if not (obs_identical and ledger_identical):
+            failures.append(
+                f"stream#{index}:obs_byte_identical={obs_identical},ledger_identical={ledger_identical}"
+            )
+    verdict = PASS if not failures else FAIL
+    detail = "; ".join(failures) if failures else "all streams byte-identical with SS unset vs explicit-0"
     return ScenarioResult("S10", "BYTE-IDENTITY-OFF", flag, verdict, detail, subs)
 
 
@@ -1123,7 +1270,16 @@ def run_all(driver) -> list[ScenarioResult]:
 
 
 def _exit_code(results: list[ScenarioResult]) -> int:
-    return 0 if all(r.verdict in (PASS, SKIP) for r in results) else 1
+    expected_ids = [f"S{i}" for i in range(12)]
+    if [r.sid for r in results] != expected_ids:
+        return 1
+    if any(r.verdict == SKIP for r in results if r.sid != "S8"):
+        return 1
+    expected_verdicts = {"S8": SKIP}
+    if any(r.verdict != expected_verdicts.get(r.sid, PASS) for r in results):
+        return 1
+    counts = {v: sum(r.verdict == v for r in results) for v in (PASS, FAIL, SKIP, ERROR)}
+    return 0 if counts == {PASS: 11, FAIL: 0, SKIP: 1, ERROR: 0} else 1
 
 
 def _table(results: list[ScenarioResult]) -> str:
@@ -1202,20 +1358,24 @@ def main(argv=None) -> int:
         ],
     }
     out_path = Path(args.out)
+    report_written = False
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        report_written = True
     except Exception as exc:  # noqa: BLE001
-        sys.stderr.write(f"[ss_gate] WARN: could not write report: {exc}\n")
+        sys.stderr.write(f"[ss_gate] FATAL: could not write report: {exc}\n")
+        code = 2
 
     sys.stdout.write(f"\n# SS-6 SUPER-SAIYAN acceptance gate — {ts}\n")
     sys.stdout.write(_table(results) + "\n")
     sys.stdout.write(
         f"\n  PASS={counts[PASS]} FAIL={counts[FAIL]} {SKIP}={counts[SKIP]} ERROR={counts[ERROR]}"
         f" / {len(results)} scenarios\n")
-    sys.stdout.write(f"  report -> {out_path}\n")
+    sys.stdout.write(
+        f"  report {'->' if report_written else 'NOT WRITTEN:'} {out_path}\n")
     sys.stdout.write(f"  EXIT {code} ({'GREEN' if code == 0 else 'RED'})"
-                     f" — 0 iff every scenario is PASS or {SKIP}\n")
+                     " — 0 only for exact S0..S11 / PASS=11 / S8-SKIP=1 / FAIL=ERROR=0\n")
     return code
 
 

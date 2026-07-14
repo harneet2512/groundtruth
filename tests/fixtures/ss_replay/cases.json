@@ -2,13 +2,60 @@
   "schema": "ss.replay_oracle_cases.v1",
   "source_run": "29236533134",
   "trajectories": "D:/gt_runs/29236533134/art/<task>/mini-swe-agent.trajectory.json",
-  "note": "Every case is a byte-verified finding from the 29-task causal audit. The replay-oracle replays recorded event streams through the SS-flagged seam and asserts these outcomes. PRESERVE cases are cardinal: killing a known P5 fails the oracle.",
+  "note": "Every case is a byte-verified finding from the 29-task causal audit. The replay-oracle replays recorded event streams through the SS-flagged seam and asserts these outcomes. A PRESERVE row whose why names P5 is cardinal. HISTORICAL_INVALID retains raw receipts that fail an SS gate; their acknowledgment never transfers to corrected bytes or placement.",
   "preserve": [
-    {"task": "conan-io__conan-17123", "delivery": "consensus.scope m25", "why": "P5 consumed (G5+U) — scope constraint, agent verified GT-named file", "assert": "still delivered, bytes equivalent, boundary unchanged"},
     {"task": "geopandas__geopandas-3471", "delivery": "edit.syntax m101", "why": "P5 consumed (G7+U) — real IndentationError from blind sed", "assert": "still delivered at edit boundary"},
     {"task": "dynaconf__dynaconf-1225", "delivery": "edit.syntax m219", "why": "P5 consumed — real SyntaxError, agent reverted", "assert": "still delivered"},
-    {"task": "hiyouga__llama-factory-7505", "delivery": "recovery m116", "why": "recovery on true repeated failing test (redundant but legitimate)", "assert": "recovery-v2 predicate still qualifies it (verify: second identical failing observation)", "review": true},
-    {"task": "python-babel__babel-1179", "delivery": "detect.coherence m97", "why": "one of the ~4 ACCURATE coherence firings (4 real writes m64/m86/m94/m98, no test between)", "assert": "coherence-v2 still fires with exact count 4"}
+    {"task": "hiyouga__llama-factory-7505", "delivery": "recovery m116", "why": "recovery on true repeated failing test (redundant but legitimate)", "assert": "recovery-v2 predicate still qualifies it (verify: second identical failing observation)", "review": true}
+  ],
+  "historical_invalid": [
+    {
+      "task": "conan-io__conan-17123",
+      "delivery": "consensus.scope m25",
+      "recorded_iteration": 12,
+      "recorded_chars": 367,
+      "recorded_sha": "d5beca5ac5aa94ef",
+      "fails_gates": ["correct_info", "correct_rl_adhered_time", "fair_probe"],
+      "acknowledgment": "HISTORICAL_ONLY_NOT_TRANSFERABLE",
+      "why": "The raw receipt is immutable, but its claim 'You edited 1' was triggered by pair 8 writing only /tmp/patch_code.py; no repository source changed before pair 13. Historical acknowledgment cannot promote false bytes or transfer to corrected bytes."
+    },
+    {
+      "task": "conan-io__conan-17123",
+      "delivery": "spec.obligation m37",
+      "recorded_iteration": 18,
+      "recorded_chars": 488,
+      "recorded_sha": "c7c99bf45759b744",
+      "fails_gates": ["correct_info", "correct_rl_adhered_time", "fair_probe"],
+      "acknowledgment": "HISTORICAL_ONLY_NOT_TRANSFERABLE",
+      "why": "The raw receipt is immutable, but pair 15 already exercised inverse matching over concrete patterns and observed the expected outcomes; the agent accepted that behavioral proof before the obligation arrived. The later edited-untested claim is false, late, and non-causal."
+    }
+  ],
+  "corrected_boundaries": [
+    {
+      "task": "conan-io__conan-17123",
+      "label": "consensus.scope after first real source write",
+      "layer": "consensus.scope",
+      "after_real_source_write_pair": 13,
+      "decision_pair": 19,
+      "expected_iteration": 20,
+      "expected_outcome": "delivered",
+      "expected_chars": 367,
+      "expected_sha": "7ab99be457a48275",
+      "acknowledgment": "UNPROVEN_LIVE_REQUIRED",
+      "why": "Corrected write truth rejects the scratch-only pair 8 and permits localization only at the recurring search/review boundary after the real pair 13 source write."
+    },
+    {
+      "task": "conan-io__conan-17123",
+      "label": "same-turn stale obligation after behavioral proof",
+      "layer": "spec.obligation",
+      "passing_test_pair": 16,
+      "expected_iteration": 17,
+      "expected_outcome": "suppressed",
+      "expected_reason": "ss_late",
+      "expected_chars": 0,
+      "acknowledgment": "NOT_APPLICABLE_SUPPRESSED",
+      "why": "Pair 15 executes the inverse-match code path with concrete negated patterns, observes the expected results, and the assistant accepts them before this boundary. The edited-untested claim must be suppressed; an unrelated green test alone would not be sufficient."
+    }
   ],
   "suppress_step_behind": [
     {"task": "conan-io__conan-17092", "deliveries": ["l3b m9", "l3b m10", "l3b m13", "l3b m17", "l3b m28"], "why": "caller rows for files agent was reading (SELF_ACQUIRED/NATIVE priors)", "assert": "reason=ss_step_behind", "note": "m13 may survive if its entity set contains genuinely novel cross-file entities the agent had not touched — oracle accepts deliver-or-suppress for m13, requires suppress for pure-echo instances"},
@@ -34,6 +81,7 @@
     {"task": "geopandas__geopandas-3471", "delivery": "detect.coherence m109", "actual_writes": 3, "claimed": 5},
     {"task": "modelcontextprotocol__python-sdk-222", "deliveries": ["detect.coherence m76 (2 writes, claimed 4)", "detect.coherence m80 (3 writes, claimed 4)"]},
     {"task": "privacyidea__privacyidea-4223", "delivery": "detect.coherence m117", "actual_writes": 2, "claimed": 4},
+    {"task": "python-babel__babel-1179", "delivery": "detect.coherence m97", "actual_success": 2, "claimed": 4, "note": "passing test at m75 resets the window; successful writes m86/m94 precede m97"},
     "assert: ALL either silent (count<=2 or test intervened) or fire with the EXACT verified write count"
   ],
   "suppress_recovery_misfire": [
@@ -55,8 +103,16 @@
   "suppress_late": [
     {"task": "python-babel__babel-1179", "deliveries": ["spec.obligation m73", "obligation.resurface m87"], "why": "requirement verified GREEN at m67/m75 before delivery", "assert": "reason=ss_late"},
     {"task": "beetbox__beets-5457", "delivery": "obligation.resurface m201", "why": "covering F2P passed m193 before delivery"},
-    {"task": "arviz-devs__arviz-2413", "delivery": "spec.obligation m71", "why": "passing covering evidence m67/m69 preceded it"},
-    {"task": "conan-io__conan-17123", "delivery": "spec.obligation m37", "why": "stale [edited,untested] after passing tests m33/m35"}
+    {"task": "arviz-devs__arviz-2413", "delivery": "spec.obligation m71", "stale_subjects": ["TypeError"], "stale_clauses": [{"clause_id": "c540af28", "subject_digest": "12640b0408021195", "artifact_issue_sha256": "35246fcb5ade066508473192fd4f3aacdd7e3e04e4605573f4392c9b4afe5cae"}], "why": "passing covering evidence m67/m69 preceded it"}
+  ],
+  "audit_only": [
+    {"task": "aws-cloudformation__cfn-lint-3749", "why": "no named case; repo snapshot absent from current archive, so full-run coverage is explicitly blocked"},
+    {"task": "beeware__briefcase-2075", "why": "no named case; repo snapshot absent from current archive, so full-run coverage is explicitly blocked"},
+    {"task": "bridgecrewio__checkov-6893", "why": "no named case; repo snapshot absent from current archive, so full-run coverage is explicitly blocked"},
+    {"task": "facebookresearch__hydra-3005", "why": "zero-char ga.trace_frame witness; repo snapshot absent from current archive, so replay coverage is explicitly blocked"},
+    {"task": "ipython__ipython-14798", "why": "no named case; repo snapshot absent from current archive, so full-run coverage is explicitly blocked"},
+    {"task": "jupyterlab__jupyter-ai-1294", "why": "no named case; repo snapshot absent from current archive, so full-run coverage is explicitly blocked"},
+    {"task": "keras-team__keras-20443", "why": "no named case; repo snapshot absent from current archive, so full-run coverage is explicitly blocked"}
   ],
   "invariants": {
     "leak": "0 test identifiers across all replayed deliveries (unchanged)",

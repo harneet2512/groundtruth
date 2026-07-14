@@ -888,6 +888,7 @@ def run_plan(
     plan: VerificationPlan,
     executor: Executor | None = None,
     *,
+    syntax_executor: Executor | None = None,
     repo_root: str = "",
     per_file_timeout: int = 120,
     total_budget_seconds: int = 300,
@@ -902,7 +903,10 @@ def run_plan(
     results: list[CheckResult] = []
     for check in plan.checks:
         try:
-            res = _run_one(check, plan, executor, repo_root, per_file_timeout, total_budget_seconds)
+            res = _run_one(
+                check, plan, executor,
+                executor if syntax_executor is None else syntax_executor,
+                repo_root, per_file_timeout, total_budget_seconds)
         except Exception as exc:  # noqa: BLE001 -- a rung must never brick the loop
             res = CheckResult(
                 kind=check.kind, selection_basis=check.selection_basis,
@@ -922,6 +926,7 @@ def _run_one(
     check: Check,
     plan: VerificationPlan,
     executor: Executor | None,
+    syntax_executor: Executor | None,
     repo_root: str,
     per_file_timeout: int,
     total_budget_seconds: int,
@@ -943,7 +948,7 @@ def _run_one(
         per: list[dict[str, Any]] = []
         n_err = n_ok = 0
         for f in check.targets:
-            r = check_edit_syntax(f, repo_root, executor=executor)
+            r = check_edit_syntax(f, repo_root, executor=syntax_executor)
             per.append(r)
             if r.get("verdict") == "syntax_error":
                 n_err += 1

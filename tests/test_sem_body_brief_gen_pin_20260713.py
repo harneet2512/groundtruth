@@ -65,6 +65,28 @@ def test_substrate_proof_step_carries_sem_body_and_content_leg() -> None:
     )
 
 
+def test_substrate_proof_step_activates_inseam_receipts_at_brief_generation() -> None:
+    """The agent-only Profile-2 fan-out is too late for the substrate proof's
+    V1RBriefResult. Pin the existing capability on the exact generator step."""
+    step = _substrate_proof_step()
+    env = step.get("env") or {}
+    assert str(env.get("GT_INSEAM_METRICS", "")).strip() == "1", (
+        "the exact substrate-proof step that runs substrate_proof.sh must set "
+        "GT_INSEAM_METRICS=1; an occurrence only in the later agent fan-out cannot "
+        f"populate generator-time block receipts (got {env.get('GT_INSEAM_METRICS')!r})"
+    )
+    assert step.get("if") == "${{ inputs.baseline != true }}", (
+        "generator-time in-seam instrumentation must remain inside the existing "
+        "GT-only proof step; the baseline/control arm must still skip it"
+    )
+    sh = _SP.read_text(encoding="utf-8")
+    projection = '-e GT_INSEAM_METRICS="${GT_INSEAM_METRICS:-0}"'
+    assert sh.count(projection) == 2, (
+        "substrate_proof.sh must project the workflow pin into BOTH gt-run-proof "
+        "container branches; step-level env alone dies at the docker boundary"
+    )
+
+
 def test_brief_form_flags_projected_into_the_proof_container():
     """Smoke-#3 finding (run 29234478242): the brief GENERATOR flags must survive ALL THREE
     projection links (workflow step env -> substrate_proof.sh env -> docker -e) or the brief

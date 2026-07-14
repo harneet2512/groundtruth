@@ -7,7 +7,7 @@ def beta():
 
 
 def run():
-    return "b"
+    return 'b'
 
 
 def consumer():

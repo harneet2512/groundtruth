@@ -624,6 +624,32 @@ def test_run_plan_syntax_error_is_red(tmp_path, direct_graph):
     assert green(syn, plan).status == "red"
 
 
+def test_run_plan_routes_syntax_through_dedicated_executor(tmp_path, direct_graph):
+    src_dir = tmp_path / "repo-dedicated"
+    (src_dir / "pkg").mkdir(parents=True)
+    (src_dir / "pkg" / "mod.py").write_text("def edited_fn(:\n", encoding="utf-8")
+    plan = build_verification_plan(direct_graph, str(src_dir), ["edited_fn"])
+    parse_calls = []
+
+    def parse_executor(cmd, cwd, timeout):
+        parse_calls.append((cmd, cwd, timeout))
+        return 1, "", "SyntaxError: invalid syntax"
+
+    def covering_executor(cmd, cwd, timeout):
+        if cmd and cmd[0] != "pytest":
+            raise AssertionError("non-pytest argv reached covering executor")
+        return 0, "1 passed", ""
+
+    results = run_plan(
+        plan, executor=covering_executor, syntax_executor=parse_executor,
+        repo_root=str(src_dir),
+    )
+    syn = [r for r in results if r.kind == "syntax"][0]
+
+    assert syn.verdict == "syntax_error"
+    assert parse_calls and parse_calls[0][0][:3] == ["python", "-I", "-c"]
+
+
 # ---------------------------------------------------------------------------
 # MUTATION HARNESSES (embedded, monkeypatched — prove the tests bite)
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ _MOD_PATH = os.path.join(_REPO, "scripts", "swebench", "consumption_ledger.py")
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("consumption_ledger_v2_test", _MOD_PATH)
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -74,7 +75,7 @@ def test_mini_shape_delivered_and_acted_red_pin():
             {"role": "user", "content": "<pr_description>fix the widget</pr_description>"},
             {"role": "assistant", "content": "Let me look at the code."},
             _tool(f"<returncode>0</returncode>\n<output>\ncode here\n{block}</output>"),
-            _assistant("Now I will edit b.py to fix widget_run.", "sed -n '1,50p' a/b.py"),
+            _assistant("Now I will edit b.py to fix widget_run.", "sed -i 's/old/new/' a/b.py"),
             _tool("<returncode>0</returncode>\n<output>\ndone</output>"),
         ],
     }
@@ -135,6 +136,182 @@ def test_level2_requires_assistant_text_not_tool_output():
     assert e["acted_msg_index"] is None
 
 
+def test_passive_read_can_reference_but_cannot_promote_acted():
+    block = _evidence_block("z/zoom.py", symbol="zoomlevel")
+    traj = {
+        "messages": [
+            {"role": "user", "content": "task"},
+            _tool(f"<output>{block}</output>"),
+            _assistant("I will inspect zoom.py before deciding.", "sed -n '1,80p' z/zoom.py"),
+        ],
+    }
+
+    out = CL.build_consumption_ledger(traj)
+    entry = [x for x in out["entries"] if x.get("receipt")][0]
+
+    assert entry["receipt"] == 2
+    assert entry["referenced_msg_index"] == 2
+    assert entry["acted_msg_index"] is None
+    assert out["gt_blocks_consumed"] == 0
+
+
+def test_passive_read_without_prose_remains_delivered_only():
+    block = _evidence_block("z/zoom.py", symbol="zoomlevel")
+    traj = {
+        "messages": [
+            _tool(f"<output>{block}</output>"),
+            _assistant("Inspecting.", "cat z/zoom.py"),
+        ],
+    }
+
+    entry = CL.build_consumption_ledger(traj)["entries"][0]
+
+    assert entry["receipt"] == 1
+    assert entry["referenced_msg_index"] is None
+    assert entry["acted_msg_index"] is None
+
+
+def test_named_mutation_promotes_acted_without_narration():
+    block = _evidence_block("z/zoom.py", symbol="zoomlevel")
+    traj = {
+        "messages": [
+            _tool(f"<output>{block}</output>"),
+            _assistant("Applying the correction.", "sed -i 's/old/new/' z/zoom.py"),
+        ],
+    }
+
+    entry = CL.build_consumption_ledger(traj)["entries"][0]
+
+    assert entry["receipt"] == 3
+    assert entry["referenced_msg_index"] is None
+    assert entry["acted_msg_index"] == 1
+
+
+def test_named_verification_promotes_acted_without_narration():
+    block = _evidence_block("z/zoom.py", symbol="zoomlevel")
+    traj = {
+        "messages": [
+            _tool(f"<output>{block}</output>"),
+            _assistant("Checking the result.", "python -m py_compile z/zoom.py"),
+        ],
+    }
+
+    entry = CL.build_consumption_ledger(traj)["entries"][0]
+
+    assert entry["receipt"] == 3
+    assert entry["acted_msg_index"] == 1
+    assert entry["verification_followup"] is True
+
+
+def test_passive_target_read_and_separate_unscoped_test_do_not_combine():
+    block = _evidence_block("z/zoom.py", symbol="zoomlevel")
+    traj = {
+        "messages": [
+            _tool(f"<output>{block}</output>"),
+            _assistant("Checking.", "cat z/zoom.py", "pytest -q"),
+        ],
+    }
+
+    entry = CL.build_consumption_ledger(traj)["entries"][0]
+
+    assert entry["receipt"] == 1
+    assert entry["acted_msg_index"] is None
+    assert entry["verification_followup"] is False
+
+
+def test_structured_editor_function_name_and_target_form_one_action():
+    block = _evidence_block("z/zoom.py", symbol="zoomlevel")
+    action = {
+        "role": "assistant",
+        "content": "Applying the correction.",
+        "tool_calls": [{
+            "type": "function",
+            "function": {
+                "name": "str_replace",
+                "arguments": json.dumps({
+                    "path": "z/zoom.py",
+                    "old_str": "old",
+                    "new_str": "new",
+                }),
+            },
+        }],
+    }
+    traj = {"messages": [_tool(f"<output>{block}</output>"), action]}
+
+    entry = CL.build_consumption_ledger(traj)["entries"][0]
+
+    assert entry["receipt"] == 3
+    assert entry["acted_msg_index"] == 1
+
+
+def test_legacy_function_call_name_and_target_form_one_action():
+    block = _evidence_block("z/zoom.py", symbol="zoomlevel")
+    action = {
+        "role": "assistant",
+        "content": "Applying the correction.",
+        "function_call": {
+            "name": "write_file",
+            "arguments": json.dumps({
+                "path": "z/zoom.py",
+                "content": "replacement",
+            }),
+        },
+    }
+    traj = {"messages": [_tool(f"<output>{block}</output>"), action]}
+
+    entry = CL.build_consumption_ledger(traj)["entries"][0]
+
+    assert entry["receipt"] == 3
+    assert entry["acted_msg_index"] == 1
+
+
+def test_python_writelines_rewrite_promotes_acted():
+    path = "geopandas/tools/_random.py"
+    block = _evidence_block(path, symbol="sample_points")
+    command = """python - <<'PY'
+lines = ['replacement\n']
+with open('geopandas/tools/_random.py', 'w') as f:
+    f.writelines(lines)
+PY"""
+    traj = {
+        "messages": [
+            _tool(f"<output>{block}</output>"),
+            _assistant("Applying the rewrite.", command),
+        ],
+    }
+
+    entry = CL.build_consumption_ledger(traj)["entries"][0]
+
+    assert entry["receipt"] == 3
+    assert entry["acted_msg_index"] == 1
+
+
+def test_python_write_mode_open_is_mutating_but_read_mode_is_not():
+    block = _evidence_block("z/zoom.py", symbol="zoomlevel")
+    write_traj = {
+        "messages": [
+            _tool(f"<output>{block}</output>"),
+            _assistant("Resetting the file.", "python -c \"open('z/zoom.py', 'w').close()\""),
+        ],
+    }
+    read_traj = {
+        "messages": [
+            _tool(f"<output>{block}</output>"),
+            _assistant(
+                "Inspecting.",
+                "python -c \"open('z/zoom.py', 'r').readlines()\"",
+            ),
+        ],
+    }
+
+    write_entry = CL.build_consumption_ledger(write_traj)["entries"][0]
+    read_entry = CL.build_consumption_ledger(read_traj)["entries"][0]
+
+    assert write_entry["receipt"] == 3
+    assert read_entry["receipt"] == 1
+    assert read_entry["acted_msg_index"] is None
+
+
 # --------------------------------------------------------------------------- #
 # ORDERING GUARD — reference BEFORE the delivery must not count
 # --------------------------------------------------------------------------- #
@@ -145,7 +322,10 @@ def test_reference_before_delivery_does_not_count():
         "messages": [
             {"role": "user", "content": "task"},
             # assistant references widget.py / render_widget BEFORE the block is delivered
-            _assistant("I think render_widget in widget.py is relevant.", "cat w/widget.py"),
+            _assistant(
+                "I think render_widget in widget.py is relevant.",
+                "sed -i 's/old/new/' w/widget.py",
+            ),
             _tool(f"<output>{block}</output>"),
             # nothing after the delivery
             _assistant("Submitting now.", "echo done"),

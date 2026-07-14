@@ -25,11 +25,13 @@ import pytest
 
 import gt_mini_patch as g
 from groundtruth.runtime import gateway as gw
+from groundtruth.runtime import global_arbiter as ga
 from groundtruth.runtime.adapters import miniswe as ad
 from groundtruth.runtime.evidence_envelope import (
     RECEIPT_ACTED,
     RECEIPT_DELIVERED,
-    RECEIPT_REFERENCED,
+    VERIFIED,
+    EvidenceEnvelope,
 )
 
 _CORPUS = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "gateway_corpus"
@@ -86,6 +88,33 @@ def _run_output(cmd, output, *, rc=0):
     return out["output"]
 
 
+def _gateway_env(kind, *, target, fact_id, payload):
+    return EvidenceEnvelope.build(
+        producer="gateway-regression",
+        fact_id=fact_id,
+        target=target,
+        evidence_type=kind,
+        payload=(payload,),
+        provenance=(),
+        confidence=0.9,
+        tier=VERIFIED,
+    )
+
+
+def _drive_fake_gateway_pool(monkeypatch, envelopes):
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GLOBAL_ARBITER", "1")
+    monkeypatch.setattr(gw, "augment", lambda _event, _state: list(envelopes))
+    out = {"output": "base observation", "returncode": 0}
+    pool = []
+    g._gt_gateway_deliver(
+        {"command": "grep -rn run ."}, out, "grep -rn run .",
+        "base observation", pool=pool,
+    )
+    g._global_pool_flush(pool, kkind="post_search", kf="", krel="")
+    return out, pool
+
+
 # --------------------------------------------------------------------------- #
 # flag-OFF is a byte-identical no-op splice
 # --------------------------------------------------------------------------- #
@@ -97,6 +126,107 @@ def test_flag_off_no_op(seam, monkeypatch):
     g._augment_output(action, out)
     assert out["output"] == before          # gateway added nothing
     assert not g._gt_gateway_deliveries      # nothing recorded
+
+
+# --------------------------------------------------------------------------- #
+# Global-pool gateway fallback: local preselection must not destroy candidates.
+# --------------------------------------------------------------------------- #
+def test_global_pool_keeps_fallback_when_local_winner_is_globally_internal(
+    seam, monkeypatch,
+):
+    high = _gateway_env(
+        "trace_frame", target="a/x.py", fact_id="run",
+        payload="HIGH local-priority candidate",
+    )
+    fallback = _gateway_env(
+        "cochange_partner", target="b/y.py", fact_id="helper",
+        payload="USEFUL global fallback",
+    )
+    real_rank = ga.rank_of
+    monkeypatch.setattr(
+        ga, "rank_of", lambda kind: None if kind == "trace_frame" else real_rank(kind)
+    )
+
+    out, _pool = _drive_fake_gateway_pool(monkeypatch, [high, fallback])
+
+    assert "USEFUL global fallback" in out["output"]
+    assert "HIGH local-priority candidate" not in out["output"]
+
+
+def test_global_pool_keeps_fallback_when_local_winner_is_already_acquired(
+    seam, monkeypatch,
+):
+    high = _gateway_env(
+        "def_ref_partition", target="a/x.py", fact_id="run",
+        payload="HIGH acquired localization",
+    )
+    fallback = _gateway_env(
+        "cochange_partner", target="b/y.py", fact_id="helper",
+        payload="USEFUL acquired fallback",
+    )
+    g._EPISODE.read_targets.add("a/x.py")
+
+    out, _pool = _drive_fake_gateway_pool(monkeypatch, [high, fallback])
+
+    assert "USEFUL acquired fallback" in out["output"]
+    assert "HIGH acquired localization" not in out["output"]
+
+
+def test_global_pool_keeps_fallback_when_local_winner_is_redundant(
+    seam, monkeypatch,
+):
+    monkeypatch.setenv("GT_SS_ARBITER_V2", "1")
+    g._search_seen["run"] = {"answered": True}
+    high = _gateway_env(
+        "def_ref_partition", target="a/x.py", fact_id="run",
+        payload="HIGH redundant localization",
+    )
+    fallback = _gateway_env(
+        "cochange_partner", target="b/y.py", fact_id="helper",
+        payload="USEFUL redundant fallback",
+    )
+
+    out, pool = _drive_fake_gateway_pool(monkeypatch, [high, fallback])
+
+    assert pool[0][0].redundant_with_delivered is True
+    # Acquired suppression and delivered-fact redundancy have distinct identities:
+    # the former is path-scoped, while the latter is keyed by the producer's symbol.
+    assert pool[0][0].symbol == "a/x.py"
+    assert pool[0][0].fact_id == "run"
+    assert "USEFUL redundant fallback" in out["output"]
+    assert "HIGH redundant localization" not in out["output"]
+
+
+def test_literal_localization_is_an_external_global_class():
+    assert ga.class_of_kind("localization") == "localization"
+    assert ga.rank_of("localization") == ga.RANK_LADDER["localization"]
+
+
+def test_global_off_keeps_local_gateway_arbitration_bytes(seam, monkeypatch):
+    high = _gateway_env(
+        "trace_frame", target="a/x.py", fact_id="run",
+        payload="LOCAL WINNER BYTES",
+    )
+    fallback = _gateway_env(
+        "cochange_partner", target="b/y.py", fact_id="helper",
+        payload="LOWER BYTES",
+    )
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GLOBAL_ARBITER", "0")
+    monkeypatch.setattr(gw, "augment", lambda _event, _state: [high, fallback])
+    out = {"output": "base observation", "returncode": 0}
+    expected_delta = ad.render_envelope(
+        high, native=False, def_facts_renderer=g._gateway_def_render
+    )
+
+    g._gt_gateway_deliver(
+        {"command": "grep -rn run ."}, out, "grep -rn run .",
+        "base observation", pool=None,
+    )
+
+    assert out["output"] == g._join_lane_output(
+        "base observation", expected_delta
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -16,6 +16,7 @@ committed mutation check bites the flag guard and the verdict guard.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import sys
 from pathlib import Path
 
@@ -94,6 +95,41 @@ def test_producer_fires_on_broken_source_edit(_repo, monkeypatch):
     assert "SyntaxError" in block
     assert not contains_gt_tag(block)
     assert not contains_test_identity(block)
+
+
+def test_edit_check_executor_factory_defaults_to_live_env_executor(monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(gmp, "_build_env_executor", lambda: sentinel)
+    assert gmp._build_edit_check_executor() is sentinel
+
+
+def test_producer_uses_only_dedicated_edit_check_executor(_repo, monkeypatch):
+    monkeypatch.setenv("GT_EDIT_CHECK", "1")
+    rel = _write(_repo, "pkg/mod.py", _BROKEN_PY)
+    monkeypatch.setattr(
+        gmp, "_build_env_executor",
+        lambda: (_ for _ in ()).throw(AssertionError("unrelated factory called")))
+    monkeypatch.setattr(gmp, "_build_edit_check_executor", lambda: None)
+    assert gmp._edit_syntax_candidate(rel) is not None
+
+
+def test_verification_plan_requires_explicit_execution_enable(monkeypatch):
+    """A configured plan must never fall back to host subprocess execution."""
+    from groundtruth.runtime import verification_plan as vp
+
+    @dataclass(frozen=True)
+    class _Plan:
+        checks: tuple = ()
+
+    calls: list[object] = []
+    monkeypatch.setenv("GT_VERIFICATION_PLAN", "1")
+    monkeypatch.setenv("GT_VERIFY_EXECUTE", "0")
+    monkeypatch.setattr(vp, "build_verification_plan", lambda *_a, **_k: _Plan())
+    monkeypatch.setattr(
+        vp, "run_plan", lambda *a, **k: calls.append((a, k)) or [])
+
+    assert gmp._verification_plan_emission({"pkg/mod.py"}, {"mod"}) is None
+    assert calls == []
 
 
 def test_producer_byte_identical_off(_repo, monkeypatch):

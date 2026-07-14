@@ -80,11 +80,13 @@ OFF-flag fixpoint FIRST, per task, and GATES every case on it:
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime
 import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,7 +97,9 @@ _REPO = Path(__file__).resolve().parents[2]
 _SRC = _REPO / "src"
 _ART = _REPO / "artifact_deepswe"
 _DEFAULT_CASES = _REPO / "tests" / "fixtures" / "ss_replay" / "cases.json"
+_DEFAULT_TOOLCHAINS = _REPO / "tests" / "fixtures" / "ss_replay" / "toolchains.json"
 _DEFAULT_RECORDED = Path("D:/gt_runs/29236533134/art")
+_MATERIALIZATION_OUTPUT_LIMIT = 8192
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -299,10 +303,24 @@ def reconstruct_task(task: str, recorded_root: Path) -> ReconstructedTask:
                     residual.append(f"seal {sha} ({n}c) still present in raw-native of m{i}")
         else:
             native = stripped[i]
-        rc = 0
+        wrapper_rc: int | None = None
         mrc = re.match(r"\s*<returncode>(-?\d+)</returncode>", content)
         if mrc:
-            rc = int(mrc.group(1))
+            wrapper_rc = int(mrc.group(1))
+        extra = m.get("extra") if isinstance(m.get("extra"), dict) else {}
+        if "returncode" in extra:
+            extra_rc = extra["returncode"]
+            if isinstance(extra_rc, bool) or not isinstance(extra_rc, int):
+                raise ValueError(
+                    f"{task} tool message {i}: extra.returncode must be an int, "
+                    f"got {type(extra_rc).__name__}")
+            if wrapper_rc is not None and wrapper_rc != extra_rc:
+                raise ValueError(
+                    f"{task} tool message {i}: returncode mismatch "
+                    f"extra={extra_rc} wrapper={wrapper_rc}")
+            rc = extra_rc
+        else:
+            rc = wrapper_rc if wrapper_rc is not None else 0
         pairs.append((cmd, native))
         rcs.append(rc)
 
@@ -650,6 +668,48 @@ def _remove_junction(link: Path) -> None:
         _run_quiet(["cmd", "/c", "rmdir", str(link)])
 
 
+def stage_current_v2_obligations(recorded_artifacts: Path, target_dir: Path) -> Path:
+    """Stage the current obligation producer for an ON-arm replay.
+
+    Historical artifacts remain untouched in OFF so the delivered-plane
+    fixpoint stays meaningful. ON is regenerated from the task's raw issue by
+    the production extractor, issue-SHA-bound, leak-screened, and atomically
+    installed into the cert mirror consumed by the seam.
+    """
+    issue_path = recorded_artifacts / "issue.txt"
+    if not issue_path.is_file():
+        raise SeamReplayBlocked(
+            f"current v2 obligation staging requires {issue_path}"
+        )
+    issue_text = issue_path.read_text(encoding="utf-8")
+    from groundtruth.pretask.spec import extract_spec_v2
+    from groundtruth.runtime.native_render import prose_leaks_test_identity
+
+    clean: list[dict] = []
+    for row in extract_spec_v2(issue_text).to_serializable(version=2):
+        verbatim = str(row.get("verbatim_text") or "")
+        symbols = [str(s) for s in (row.get("symbols") or [])]
+        if prose_leaks_test_identity(verbatim):
+            continue
+        if any(prose_leaks_test_identity(symbol) for symbol in symbols):
+            continue
+        clean.append(row)
+
+    import hashlib
+    payload = {
+        "obligations_version": 2,
+        "issue_sha256": hashlib.sha256(issue_text.encode("utf-8")).hexdigest(),
+        "render_path_tokens": [],
+        "clauses": clean,
+    }
+    target_dir.mkdir(parents=True, exist_ok=True)
+    out = target_dir / "gt_obligations_v2.json"
+    tmp = target_dir / ".gt_obligations_v2.json.tmp"
+    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, out)
+    return out
+
+
 class TaskMirrors:
     """Per-task setup/teardown of the container-path mirrors. Snapshot repos are mounted at
     /testbed via a junction; when edit-application mutates them, teardown restores the exact
@@ -660,7 +720,7 @@ class TaskMirrors:
         self.recorded = recorded_root / task
         self.snapshot = snapshot_root / task
 
-    def setup(self) -> None:
+    def setup(self, *, stage_current_v2: bool = False) -> None:
         import shutil
         if not self.snapshot.is_dir():
             raise SeamReplayBlocked(f"{self.task}: no repo snapshot at {self.snapshot}")
@@ -703,6 +763,8 @@ class TaskMirrors:
             for f in art_src.iterdir():
                 if f.is_file():
                     shutil.copyfile(f, _MIRROR_ARTIFACTS / f.name)
+        if stage_current_v2:
+            stage_current_v2_obligations(art_src, _MIRROR_ARTIFACTS)
         # /opt/gt: gt-index binary (both extensionless + .exe for CreateProcess) + root file
         _MIRROR_OPT_GT.mkdir(parents=True, exist_ok=True)
         bin_src = _REPO / "gt-index" / "gt-index.exe"
@@ -766,6 +828,10 @@ def child_env(recorded_root: Path, task: str, ledger_path: Path,
         "GT_PROOF_MODE": "1",
         "GT_CONTAINERIZED": "1",
         "GT_PORTABLE_SUBSTRATE": "1",
+        # Recorded observations already contain the agent's test outputs. Replaying
+        # those bytes through the seam must not launch covering tests on the host;
+        # container-only executed-test rows form an honest prefix boundary instead.
+        "GT_VERIFY_EXECUTE": "0",
         "GT_HOST_GRAPH_DB": "/gt_artifacts/graph.db",
         "GT_CERT_DIR": "/gt_artifacts",
         "GT_INDEX_BIN": "/opt/gt/gt-index",
@@ -782,6 +848,9 @@ def child_env(recorded_root: Path, task: str, ledger_path: Path,
         "TRANSFORMERS_OFFLINE": "1",
         "HF_HUB_DISABLE_TELEMETRY": "1",
         "PYTHONIOENCODING": "utf-8",
+        # Match the Linux recording's UTF-8 default for ordinary open() calls,
+        # not only stdout/stderr. Load-bearing for non-ASCII source rewrites.
+        "PYTHONUTF8": "1",
     })
     for k, v in (ss_env or {}).items():
         if v is None:
@@ -818,11 +887,92 @@ _EDIT_PY_HEREDOC = re.compile(r"^\s*python[0-9.]*\s*<<")
 _EDIT_PY_INLINE = re.compile(r"^\s*python[0-9.]*\s+-c\s", re.DOTALL)   # python3 -c "<script>"
 _EDIT_DENY = re.compile(
     r"\b(curl|wget|pip|pytest|npm|rm\s+-rf\s+/|ssh|scp)\b")
+@dataclass(frozen=True)
+class MaterializedTarget:
+    """Byte-level evidence for one path touched by a replayed mutation."""
+
+    path: str
+    before_sha256: str | None
+    after_sha256: str | None
+    changed: bool
+    confined: bool
+
+    def as_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "before_sha256": self.before_sha256,
+            "after_sha256": self.after_sha256,
+            "changed": self.changed,
+            "confined": self.confined,
+        }
+
+
+@dataclass(frozen=True)
+class MaterializationReceipt:
+    """Auditable result of classifying and, when safe, materializing one command."""
+
+    candidate: bool
+    executed: bool
+    applied: bool
+    reason: str
+    rc: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    targets: list[MaterializedTarget] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return {
+            "candidate": self.candidate,
+            "executed": self.executed,
+            "applied": self.applied,
+            "reason": self.reason,
+            "rc": self.rc,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "targets": [target.as_dict() for target in self.targets],
+        }
+
+
+@dataclass(frozen=True)
+class PythonWritePlan:
+    candidate: bool
+    safe: bool
+    reason: str
+    source: str = ""
+    targets: tuple[str, ...] = ()
 
 
 def _head_of(cmd: str) -> str:
-    cut = cmd.find("<<")
-    return cmd if cut < 0 else cmd[:cut]
+    """Return the shell prefix before an unquoted heredoc operator.
+
+    ``<<`` inside quoted program text (for example Python's left-shift operator in
+    ``python -c`` source) is data, not shell syntax.
+    """
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(cmd):
+        char = cmd[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if quote != "'" and char == "\\":
+            escaped = True
+            index += 1
+            continue
+        if char == "'" and quote != '"':
+            quote = None if quote == "'" else "'"
+            index += 1
+            continue
+        if char == '"' and quote != "'":
+            quote = None if quote == '"' else '"'
+            index += 1
+            continue
+        if quote is None and cmd.startswith("<<", index):
+            return cmd[:index]
+        index += 1
+    return cmd
 
 
 def _normalize_crlf(repo_root: str) -> None:
@@ -856,17 +1006,34 @@ def _rewrite_container_paths(cmd: str) -> str:
     """Rewrite /testbed and /tmp to their drive-mirrored Windows forms in the command PREFIX
     only (heredoc bodies are file CONTENT and must stay byte-exact)."""
     drive = os.path.splitdrive(os.getcwd())[0] or "D:"
-    cut = cmd.find("<<")
-    head, tail = (cmd, "") if cut < 0 else (cmd[:cut], cmd[cut:])
+    head = _head_of(cmd)
+    tail = cmd[len(head):]
     head = head.replace("$(cat /tmp/gt_root.txt)", "/testbed")
     head = head.replace("/testbed", f"{drive}/testbed").replace("/tmp/", f"{drive}/tmp/")
     return head + tail
 
 
+def _shell_redirect_targets(cmd: str) -> list[str]:
+    """Return shell output-redirection targets without inspecting quoted program text.
+
+    Python ``-c`` source and heredoc bodies can contain ordinary ``>`` comparisons.  A
+    regex over the raw command cannot distinguish those bytes from shell syntax; shlex can.
+    """
+    lexer = shlex.shlex(_head_of(cmd), posix=True, punctuation_chars=";&|<>")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    tokens = list(lexer)
+    return [tokens[index + 1] for index, token in enumerate(tokens[:-1])
+            if token in {">", ">>"}]
+
+
 def _redirect_targets_ok(cmd: str) -> bool:
-    """Every redirect target must live under /testbed, /tmp, or be repo-relative."""
-    for m in re.finditer(r">{1,2}\s*([^\s;|&]+)", cmd):
-        t = m.group(1).strip("'\"")
+    """Every shell redirect target must live under /testbed, /tmp, or be repo-relative."""
+    try:
+        targets = _shell_redirect_targets(cmd)
+    except ValueError:
+        return False
+    for t in targets:
         if t in ("/dev/null", "&1", "&2") or t.startswith("&"):
             continue
         if t.startswith(("/testbed", "/tmp", "D:/testbed", "D:/tmp")):
@@ -890,59 +1057,785 @@ def _find_bash() -> str:
     return "bash"
 
 
-def apply_edit_command(cmd: str, cwd: str) -> tuple[bool, str]:
-    """Execute one recorded agent command IFF it is an allowlisted file mutation.
-    Returns (executed, note)."""
+def _decode_output(value: bytes | str | None) -> str:
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else value.decode("utf-8", errors="replace")
+    if len(text) <= _MATERIALIZATION_OUTPUT_LIMIT:
+        return text
+    marker = f"\n...[truncated {len(text) - _MATERIALIZATION_OUTPUT_LIMIT} chars]...\n"
+    budget = _MATERIALIZATION_OUTPUT_LIMIT - len(marker)
+    head = budget // 2
+    return text[:head] + marker + text[-(budget - head):]
+
+
+def _sha256_path(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _git_dirty_paths(cwd: str) -> set[str]:
+    """Return every tracked-dirty or untracked, non-ignored repo path without mutating git."""
     import subprocess
-    body = _strip_lead_cd(cmd or "")
+    dirty: set[str] = set()
+    for argv in (["git", "-C", cwd, "diff", "HEAD", "--name-only", "-z"],
+                 ["git", "-C", cwd, "ls-files", "--others", "--exclude-standard", "-z"]):
+        result = subprocess.run(argv, capture_output=True, timeout=30)
+        if result.returncode == 0:
+            dirty.update(part.decode("utf-8", errors="surrogateescape")
+                         for part in result.stdout.split(b"\0") if part)
+    return dirty
+
+
+def _baseline_hash(cwd: str, relative: str) -> str | None:
+    import subprocess
+    result = subprocess.run(["git", "-C", cwd, "show", f"HEAD:{relative}"],
+                            capture_output=True, timeout=30)
+    return hashlib.sha256(result.stdout).hexdigest() if result.returncode == 0 else None
+
+
+def _confined_path(raw: str, cwd: str) -> tuple[str, Path, bool]:
+    """Normalize a command target and prove it remains in the repo mirror or mirror /tmp."""
+    token = raw.strip().strip("'\"")
+    drive = os.path.splitdrive(os.path.abspath(cwd))[0] or "D:"
+    token_path = Path(token)
+    explicit_tmp = token.startswith("/tmp/") or (
+        token_path.is_absolute()
+        and (Path(f"{drive}/tmp").resolve(strict=False) == token_path.resolve(strict=False)
+             or Path(f"{drive}/tmp").resolve(strict=False) in token_path.resolve(strict=False).parents))
+    if token.startswith("/testbed/"):
+        path = Path(cwd) / token[len("/testbed/"):]
+    elif token == "/testbed":
+        path = Path(cwd)
+    elif token.startswith("/tmp/"):
+        path = Path(f"{drive}/tmp") / token[len("/tmp/"):]
+    else:
+        path = Path(token)
+        if not path.is_absolute():
+            path = Path(cwd) / path
+    resolved = path.resolve(strict=False)
+    roots = (Path(cwd).resolve(strict=False), Path(f"{drive}/tmp").resolve(strict=False))
+    confined = resolved == roots[0] or roots[0] in resolved.parents
+    if explicit_tmp:
+        confined = confined or resolved == roots[1] or roots[1] in resolved.parents
+    if roots[0] == resolved or roots[0] in resolved.parents:
+        label = resolved.relative_to(roots[0]).as_posix() or "."
+    else:
+        label = resolved.as_posix()
+    return label, resolved, confined
+
+
+def _declared_targets(body: str, cwd: str) -> tuple[dict[str, Path], list[str]]:
+    """Extract statically named targets; git-state capture finds dynamic repo writes too."""
+    try:
+        raw_targets = _shell_redirect_targets(body)
+    except ValueError:
+        raw_targets = []
+    raw_targets.extend(m.group(1) for m in re.finditer(
+        r"\bPath\s*\(\s*['\"]([^'\"]+)['\"]\s*\)\s*\."
+        r"(?:write_text|write_bytes|replace|rename|unlink)\s*\(", body))
+    raw_targets.extend(m.group(1) for m in re.finditer(
+        r"\bopen\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"][wax+][^'\"]*['\"]", body))
+    raw_targets.extend(_explicit_restore_targets(body))
+    head = _head_of(body).strip()
+    try:
+        words = shlex.split(head, posix=True)
+    except ValueError:
+        words = []
+    if words and re.match(r"sed$", words[0]) and any("i" in w[1:] for w in words[1:] if w.startswith("-")):
+        raw_targets.extend(_sed_target_tokens(words))
+    elif words and words[0] == "mkdir":
+        raw_targets.extend(w for w in words[1:] if not w.startswith("-"))
+    elif words and words[0] == "touch":
+        raw_targets.extend(w for w in words[1:] if not w.startswith("-"))
+    elif words and words[0] in {"cp", "mv"} and len(words) >= 3:
+        raw_targets.extend(w for w in words[1:] if not w.startswith("-"))
+    elif words and words[0] == "tee" and len(words) >= 2:
+        raw_targets.extend(w for w in words[1:] if not w.startswith("-"))
+    patch_targets, _ = _patch_header_targets(body)
+    raw_targets.extend(patch_targets)
+    targets: dict[str, Path] = {}
+    unsafe: list[str] = []
+    for raw in raw_targets:
+        if raw in {"/dev/null", "&1", "&2"} or raw.startswith("&"):
+            continue
+        label, path, confined = _confined_path(raw, cwd)
+        targets[label] = path
+        if not confined:
+            unsafe.append(raw)
+    return targets, unsafe
+
+
+def _sed_target_tokens(words: list[str]) -> list[str]:
+    """Return every statically named input file of an in-place ``sed`` command."""
+    targets: list[str] = []
+    explicit_program = False
+    positional_program_seen = False
+    index = 1
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            index += 1
+            if not explicit_program and not positional_program_seen and index < len(words):
+                positional_program_seen = True
+                index += 1
+            targets.extend(words[index:])
+            break
+        if word in {"-e", "--expression", "-f", "--file"}:
+            explicit_program = True
+            index += 2
+            continue
+        if word.startswith(("--expression=", "--file=")):
+            explicit_program = True
+            index += 1
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        if not explicit_program and not positional_program_seen:
+            positional_program_seen = True
+        else:
+            targets.append(word)
+        index += 1
+    return targets
+
+
+def _patch_header_targets(body: str) -> tuple[list[str], str | None]:
+    """Extract patch targets from inline unified/git headers.
+
+    Patch application without visible headers is not statically auditable and is refused by
+    ``_shell_preflight``. Both old and new sides are retained; ``/dev/null`` is the sole
+    non-file sentinel.
+    """
+    head = _head_of(body)
+    if not re.search(r"(?:^|[;&]\s*)(?:patch\b|git\s+apply\b)", head):
+        return [], None
+    targets: list[str] = []
+    for line in body.splitlines():
+        if line.startswith("diff --git "):
+            try:
+                parts = shlex.split(line, posix=True)
+            except ValueError:
+                return [], "patch-header-parse"
+            if len(parts) != 4:
+                return [], "patch-header-parse"
+            targets.extend(parts[2:4])
+        elif line.startswith(("--- ", "+++ ")):
+            raw = line[4:].split("\t", 1)[0].strip()
+            if raw:
+                try:
+                    parsed = shlex.split(raw, posix=True)
+                except ValueError:
+                    return [], "patch-header-parse"
+                if len(parsed) != 1:
+                    return [], "patch-header-parse"
+                targets.append(parsed[0])
+    normalized: list[str] = []
+    for target in targets:
+        if target == "/dev/null":
+            continue
+        normalized.append(target[2:] if target.startswith(("a/", "b/")) else target)
+    if not normalized:
+        return [], "patch-targets-unavailable"
+    return list(dict.fromkeys(normalized)), None
+
+
+def _patch_preflight(body: str, cwd: str) -> tuple[bool, str]:
+    head = _head_of(body)
+    if not re.search(r"(?:^|[;&]\s*)(?:patch\b|git\s+apply\b)", head):
+        return True, "not-patch"
+    try:
+        words = shlex.split(head, posix=True)
+    except ValueError as exc:
+        return False, f"unsafe-patch:parse:{type(exc).__name__}"
+    if "--unsafe-paths" in words:
+        return False, "unsafe-patch:unsafe-paths"
+    targets, error = _patch_header_targets(body)
+    if error:
+        return False, f"unsafe-patch:{error}"
+    unsafe = [target for target in targets if not _confined_path(target, cwd)[2]]
+    if unsafe:
+        return False, "unsafe-patch:patch-target-outside-roots:" + ",".join(unsafe)
+    return True, "patch-safe"
+
+
+def _explicit_restore_targets(body: str) -> list[str]:
+    """Statically named paths in an explicit git checkout/restore segment."""
+    targets: list[str] = []
+    for match in re.finditer(
+            r"(?:^|&&|;)\s*git\s+(?:checkout|restore)\b(.*?)(?=&&|;|$)",
+            _head_of(body), re.DOTALL):
+        try:
+            words = shlex.split(match.group(1), posix=True)
+        except ValueError:
+            continue
+        targets.extend(word for word in words if word != "--" and not word.startswith("-"))
+    return targets
+
+
+def _python_source(body: str) -> tuple[str | None, str]:
+    """Extract Python source without executing shell interpolation."""
+    scratch = _EDIT_SCRATCH_PY.match(body)
+    if scratch:
+        drive = os.path.splitdrive(os.getcwd())[0] or "D:"
+        script = Path(scratch.group(1).replace("/tmp/", f"{drive}/tmp/"))
+        try:
+            return script.read_text(encoding="utf-8"), "scratch"
+        except (OSError, UnicodeError) as exc:
+            return None, f"scratch-unreadable:{type(exc).__name__}"
+    if _EDIT_PY_INLINE.match(body):
+        try:
+            words = shlex.split(body, posix=True)
+        except ValueError as exc:
+            return None, f"inline-shell-parse:{type(exc).__name__}"
+        try:
+            index = words.index("-c")
+        except ValueError:
+            return None, "inline-missing-c"
+        return (words[index + 1], "inline") if index + 1 < len(words) else (None, "inline-empty")
+    if _EDIT_PY_HEREDOC.match(body):
+        match = re.match(r"^\s*python[0-9.]*\s*<<\s*['\"]?([A-Za-z_][\w]*)['\"]?\s*\r?\n"
+                         r"(.*)\r?\n\1\s*$", body, re.DOTALL)
+        return (match.group(2), "heredoc") if match else (None, "heredoc-parse")
+    return None, "not-python-shape"
+
+
+def _attribute_name(node: ast.AST) -> str | None:
+    parts: list[str] = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+class _PythonWriteAnalyzer(ast.NodeVisitor):
+    """Conservative static write plan; ambiguity rejects the script before execution."""
+
+    _WRITE_NAMES = {
+        "write", "writelines", "truncate", "write_text", "write_bytes", "open",
+        "rename", "replace", "unlink", "remove", "move", "copy", "copy2", "copyfile",
+        "copytree", "rmtree", "mkdir", "makedirs", "touch",
+    }
+    _UNSAFE_CALLS = {
+        "eval", "exec", "compile", "os.system", "os.popen", "subprocess.run",
+        "subprocess.call", "subprocess.Popen", "subprocess.check_call",
+        "subprocess.check_output", "runpy.run_path", "runpy.run_module",
+        "os.chdir", "os.fchdir", "os.chroot", "os.link", "os.symlink",
+        "shutil.make_archive", "shutil.unpack_archive", "tempfile.NamedTemporaryFile",
+        "tempfile.TemporaryFile", "tempfile.mkstemp", "tempfile.mkdtemp",
+        "pickle.dump", "json.dump", "yaml.dump",
+    }
+    _SAFE_NAMES = {
+        "print", "repr", "len", "str", "int", "float", "bool", "bytes", "bytearray", "list",
+        "dict", "set", "tuple", "enumerate", "range", "zip", "min", "max", "sum",
+        "sorted", "reversed", "isinstance", "issubclass", "any", "all", "open",
+        "Path", "pathlib.Path", "os.path.join", "posixpath.join", "re.sub", "re.subn",
+        "json.loads", "json.dumps",
+    }
+    _SAFE_METHODS = {
+        "read", "readline", "readlines", "read_text", "read_bytes", "replace", "split",
+        "rsplit", "splitlines", "join", "strip", "lstrip", "rstrip", "startswith",
+        "endswith", "format", "encode", "decode", "lower", "upper", "casefold", "find",
+        "index", "count", "get", "items", "keys", "values", "append", "extend",
+        "insert", "pop", "sort", "reverse",
+    }
+    # Candidate mutation scripts need only these inert stdlib helpers in the
+    # recorded corpus. Repo/local imports can execute arbitrary import-time code
+    # before a declared write, so they are rejected before execution.
+    _SAFE_IMPORT_ROOTS = {"pathlib", "re", "os", "sys", "json"}
+
+    def __init__(self, cwd: str):
+        self.cwd = cwd
+        self.values: dict[str, str] = {}
+        self.path_vars: set[str] = set()
+        self.temp_vars: set[str] = set()
+        self.aliases: dict[str, str] = {}
+        self.writer_handles: set[str] = set()
+        self.targets: list[str] = []
+        self.mutation_scopes: list[str] = []
+        self.unscoped_mutation = False
+        self.candidate = False
+        self.errors: list[str] = []
+
+    def _name(self, node: ast.AST) -> str | None:
+        name = _attribute_name(node)
+        if not name:
+            return None
+        head, dot, tail = name.partition(".")
+        canonical = self.aliases.get(head, head)
+        return canonical + (dot + tail if dot else "")
+
+    def _value(self, node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            return self.values.get(node.id)
+        if isinstance(node, ast.Call) and self._name(node.func) in {"Path", "pathlib.Path"}:
+            return self._value(node.args[0]) if len(node.args) == 1 else None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
+            left, right = self._value(node.left), self._value(node.right)
+            if left is not None and right is not None:
+                return str(Path(left) / right) if isinstance(node.op, ast.Div) else left + right
+        if isinstance(node, ast.Call) and self._name(node.func) in {"os.path.join", "posixpath.join"}:
+            parts = [self._value(arg) for arg in node.args]
+            if parts and all(part is not None for part in parts):
+                return str(Path(parts[0] or "").joinpath(*(part or "" for part in parts[1:])))
+        return None
+
+    def _mode(self, node: ast.Call, positional: int) -> str | None:
+        mode_node = node.args[positional] if len(node.args) > positional else None
+        for keyword in node.keywords:
+            if keyword.arg == "mode":
+                mode_node = keyword.value
+        return self._value(mode_node) if mode_node is not None else "r"
+
+    def _is_path_expr(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in self.path_vars
+        if isinstance(node, ast.Call):
+            return self._name(node.func) in {"Path", "pathlib.Path"}
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            return self._is_path_expr(node.left)
+        return False
+
+    def _is_temp_expr(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in self.temp_vars
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
+            return self._is_temp_expr(node.left) and self._is_safe_temp_suffix(node.right)
+        if isinstance(node, ast.Call):
+            name = self._name(node.func)
+            if name == "tempfile.mkdtemp":
+                return True
+            if name in {"Path", "pathlib.Path"}:
+                return len(node.args) == 1 and self._is_temp_expr(node.args[0])
+            if name in {"os.path.join", "posixpath.join"}:
+                return (bool(node.args) and self._is_temp_expr(node.args[0])
+                        and all(self._is_safe_temp_suffix(arg) for arg in node.args[1:]))
+        return False
+
+    def _is_safe_temp_suffix(self, node: ast.AST) -> bool:
+        value = self._value(node)
+        if value is None or Path(value).is_absolute() or re.match(r"^[A-Za-z]:", value):
+            return False
+        return ".." not in re.split(r"[/\\]+", value)
+
+    def _target(self, node: ast.AST | None, operation: str) -> None:
+        self.candidate = True
+        if node is not None and self._is_temp_expr(node):
+            self.mutation_scopes.append("temporary")
+            return
+        self.mutation_scopes.append("repo-or-unknown")
+        value = self._value(node) if node is not None else None
+        if value is None:
+            self.errors.append(f"{operation}:dynamic-target")
+            return
+        _, _, confined = _confined_path(value, self.cwd)
+        if not confined:
+            self.errors.append(f"{operation}:outside-roots:{value}")
+            return
+        self.targets.append(value)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            if alias.name.partition(".")[0] not in self._SAFE_IMPORT_ROOTS:
+                self.errors.append(f"unsafe-import:{alias.name}")
+            self.aliases[alias.asname or alias.name] = alias.name
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        module = node.module or ""
+        if node.level or module.partition(".")[0] not in self._SAFE_IMPORT_ROOTS:
+            self.errors.append(f"unsafe-import:{'.' * node.level}{module}")
+        for alias in node.names:
+            self.aliases[alias.asname or alias.name] = f"{module}.{alias.name}".strip(".")
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        value = self._value(node.value)
+        for target in node.targets:
+            if isinstance(target, ast.Name) and value is not None:
+                self.values[target.id] = value
+            if isinstance(target, ast.Name) and self._is_path_expr(node.value):
+                self.path_vars.add(target.id)
+            if isinstance(target, ast.Name) and self._is_temp_expr(node.value):
+                self.temp_vars.add(target.id)
+            if isinstance(target, ast.Name) and isinstance(node.value, ast.Call):
+                if self._is_write_open(node.value):
+                    self.writer_handles.add(target.id)
+        self.generic_visit(node)
+
+    def visit_With(self, node: ast.With) -> None:
+        for item in node.items:
+            if isinstance(item.context_expr, ast.Call) and self._is_write_open(item.context_expr):
+                if isinstance(item.optional_vars, ast.Name):
+                    self.writer_handles.add(item.optional_vars.id)
+        self.generic_visit(node)
+
+    def _is_write_open(self, node: ast.Call) -> bool:
+        name = self._name(node.func)
+        if name == "open":
+            mode = self._mode(node, 1)
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == "open":
+            mode = self._mode(node, 0)
+        else:
+            return False
+        return mode is not None and any(flag in mode for flag in "wax+")
+
+    def visit_Call(self, node: ast.Call) -> None:
+        name = self._name(node.func)
+        attr = node.func.attr if isinstance(node.func, ast.Attribute) else None
+        known_call = (name in self._SAFE_NAMES or attr in self._SAFE_METHODS
+                      or name in self._UNSAFE_CALLS or attr in self._WRITE_NAMES
+                      or bool(name and (name.endswith("Error") or name.endswith("Exception"))))
+        if name == "tempfile.mkdtemp":
+            self.candidate = True
+            self.mutation_scopes.append("temporary")
+        elif name in self._UNSAFE_CALLS:
+            self.candidate = True
+            self.unscoped_mutation = True
+            self.errors.append(f"unsafe-call:{name}")
+        elif name == "open":
+            mode = self._mode(node, 1)
+            if mode is None:
+                self.candidate = True
+                self.errors.append("open:dynamic-mode")
+            elif any(flag in mode for flag in "wax+"):
+                self._target(node.args[0] if node.args else None, "open")
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == "open":
+            mode = self._mode(node, 0)
+            if mode is None:
+                self.candidate = True
+                self.errors.append("Path.open:dynamic-mode")
+            elif any(flag in mode for flag in "wax+"):
+                self._target(node.func.value, "Path.open")
+        elif isinstance(node.func, ast.Attribute) and node.func.attr in {"write_text", "write_bytes",
+                                                                         "unlink", "touch", "mkdir"}:
+            self._target(node.func.value, f"Path.{node.func.attr}")
+        elif (isinstance(node.func, ast.Attribute)
+              and node.func.attr in {"rename", "replace"}
+              and self._is_path_expr(node.func.value)):
+            self._target(node.func.value, f"Path.{node.func.attr}:source")
+            self._target(node.args[0] if node.args else None, f"Path.{node.func.attr}:dest")
+        elif name in {"os.rename", "os.replace", "shutil.move", "shutil.copy", "shutil.copy2",
+                      "shutil.copyfile", "shutil.copytree"}:
+            self._target(node.args[0] if node.args else None, f"{name}:source")
+            self._target(node.args[1] if len(node.args) > 1 else None, f"{name}:dest")
+        elif name in {"os.remove", "os.unlink", "shutil.rmtree", "os.mkdir", "os.makedirs"}:
+            self._target(node.args[0] if node.args else None, name)
+        elif isinstance(node.func, ast.Attribute) and node.func.attr in {"write", "writelines",
+                                                                         "truncate"}:
+            owner = self._name(node.func.value)
+            chained_write_open = isinstance(node.func.value, ast.Call) and self._is_write_open(node.func.value)
+            if owner in {"sys.stdout", "sys.stderr"}:
+                pass
+            elif owner not in self.writer_handles and not chained_write_open:
+                self.candidate = True
+                self.unscoped_mutation = True
+                self.errors.append(f"unknown-writer:{owner or '<dynamic>'}.{node.func.attr}")
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == "replace":
+            pass  # ordinary str/bytes replacement; Path.replace was handled above
+        elif isinstance(node.func, ast.Attribute) and node.func.attr in self._WRITE_NAMES:
+            self.candidate = True
+            self.unscoped_mutation = True
+            self.errors.append(f"unknown-write-call:{name or node.func.attr}")
+        if not known_call:
+            self.errors.append(f"unknown-call:{name or '<dynamic>'}")
+        self.generic_visit(node)
+
+
+def _python_write_plan(body: str, cwd: str) -> PythonWritePlan:
+    source, source_kind = _python_source(body)
+    if source is None:
+        return PythonWritePlan(True, False, f"unsafe-python:{source_kind}")
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return PythonWritePlan(True, False, f"unsafe-python:syntax:{exc.msg}", source)
+    analyzer = _PythonWriteAnalyzer(cwd)
+    analyzer.visit(tree)
+    if not analyzer.candidate:
+        return PythonWritePlan(False, True, "read-only-python", source)
+    if (analyzer.mutation_scopes
+            and all(scope == "temporary" for scope in analyzer.mutation_scopes)
+            and not analyzer.unscoped_mutation):
+        # Replay needs repository byte evolution, not disposable scratch state.
+        # Do not execute temporary-only inspection scripts; their arbitrary
+        # imports and calls therefore cannot create host-side replay effects.
+        return PythonWritePlan(False, True, "temporary-only-python", source)
+    if analyzer.errors:
+        return PythonWritePlan(True, False, "unsafe-python:" + ";".join(analyzer.errors), source,
+                               tuple(dict.fromkeys(analyzer.targets)))
+    return PythonWritePlan(True, True, "python-write", source,
+                           tuple(dict.fromkeys(analyzer.targets)))
+
+
+def _mutation_candidate(body: str) -> tuple[bool, str]:
     if not body:
         return False, "empty"
     head = _head_of(body)
-    scratch = _EDIT_SCRATCH_PY.match(body)
-    if scratch:
-        # (a) agent-authored scratch patch script (materialized by an earlier applied
-        # heredoc): run it with the HOST python, cwd=the mirrored working tree. Rootless
-        # POSIX paths inside the script resolve against the current drive (the mirror trick).
-        drive = os.path.splitdrive(os.getcwd())[0] or "D:"
-        script = scratch.group(1).replace("/tmp/", f"{drive}/tmp/")
-        if not Path(script).is_file():
-            return False, "scratch-script-absent"
-        try:
-            r = subprocess.run([sys.executable, script], cwd=cwd,
-                               capture_output=True, timeout=60)
-            _normalize_crlf(cwd)
-            return True, f"scratch-py rc={r.returncode}"
-        except Exception as exc:  # noqa: BLE001
-            return True, f"exec-fault:{type(exc).__name__}"
-    if _EDIT_PY_HEREDOC.match(body) or (_EDIT_PY_INLINE.match(body)
-                                        and not _EDIT_DENY.search(body)):
-        # (b)/(c) inline python mutation script (heredoc or -c): run through bash with the
-        # interpreter token normalized to the host python (python3 is rarely on Windows
-        # PATH), then normalize CRLF back to LF (Windows text-mode writes) so file bytes
-        # match the recorded container's.
-        rewritten = _rewrite_container_paths(cmd)
-        rewritten = re.sub(r"\bpython[0-9.]*(?=\s*<<|\s+-c\s)",
-                           f'"{sys.executable}"'.replace("\\", "/"), rewritten, count=1)
-        try:
-            r = subprocess.run([_find_bash(), "-c", rewritten], cwd=cwd,
-                               capture_output=True, timeout=60)
-            _normalize_crlf(cwd)
-            return True, f"py-inline rc={r.returncode}"
-        except Exception as exc:  # noqa: BLE001
-            return True, f"exec-fault:{type(exc).__name__}"
-    if not _EDIT_ALLOW.match(body) or _EDIT_DENY.search(head):
+    if _EDIT_DENY.search(head):
+        return False, "denied"
+    if re.match(r"^git\s+(?:diff|add)\b", body):
+        return False, "read-only-or-index-only-git"
+    redirect_targets = [
+        match.group(1).strip("'\"")
+        for match in re.finditer(r">{1,2}\s*([^\s;|&]+)", head)
+    ]
+    has_write_redirect = any(
+        target not in {"/dev/null", "&1", "&2"} and not target.startswith("&")
+        for target in redirect_targets
+    )
+    if re.match(r"^(?:cat|echo|printf)\b", body) and not has_write_redirect:
+        return False, "read-only-shell-output"
+    if _EDIT_SCRATCH_PY.match(body) or _EDIT_PY_HEREDOC.match(body) or _EDIT_PY_INLINE.match(body):
+        plan = _python_write_plan(body, os.getcwd())
+        return plan.candidate, plan.reason
+    if not _EDIT_ALLOW.match(body):
         return False, "not-allowlisted"
-    if re.search(r"\bpython[0-9.]*\s", head):
-        return False, "python-outside-scratch-shape"   # only the two script shapes run
-    if not _redirect_targets_ok(head):
-        return False, "redirect-target-outside-roots"
-    rewritten = _rewrite_container_paths(cmd)
+    return True, "allowlisted-write"
+
+
+def _project_allowlisted_state_prefix(body: str) -> tuple[str, bool]:
+    """Keep a bare git-stash transition before a denied diagnostic tail.
+
+    Tests remain non-executable in replay, but discarding the preceding stash
+    would make a later recorded ``git stash pop`` observe fabricated git state.
+    The projection is deliberately limited to the exact argument-free prefix.
+    """
+    match = re.match(r"^\s*(git\s+stash)\s*&&\s*(.+)$", body, re.DOTALL)
+    if not match or not _EDIT_DENY.search(match.group(2)):
+        return body, False
+    return match.group(1), True
+
+
+def _shell_preflight(body: str, cwd: str) -> tuple[bool, str]:
+    """Prove every simple command in an allowlisted shell mutation is confined.
+
+    Quoted separators remain ordinary shlex words. Unquoted ``;``/``&&`` chains
+    are allowed only when every segment is independently allowlisted; pipelines,
+    backgrounding, command/process substitution, and backticks are rejected.
+    """
+    head = _head_of(body)
+    if _has_active_shell_expansion(head):
+        return False, "unsafe-shell:dynamic-execution"
+    patch_safe, patch_reason = _patch_preflight(body, cwd)
+    if not patch_safe:
+        return False, patch_reason
     try:
-        r = subprocess.run([_find_bash(), "-c", rewritten], cwd=cwd,
-                           capture_output=True, timeout=60)
-        return True, f"rc={r.returncode}"
+        lexer = shlex.shlex(head, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError as exc:
+        return False, f"unsafe-shell:parse:{type(exc).__name__}"
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in {"|", "||", "&"}:
+            return False, f"unsafe-shell:operator:{token}"
+        if token in {";", "&&"}:
+            if not segments[-1]:
+                return False, "unsafe-shell:empty-segment"
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    if not segments or not segments[-1]:
+        return False, "unsafe-shell:empty-segment"
+    for words in segments:
+        if words[0] == "cd":
+            if len(words) != 2:
+                return False, "unsafe-shell:dynamic-cd"
+            _, _, confined = _confined_path(words[1], cwd)
+            if not confined:
+                return False, "unsafe-shell:cd-outside-roots"
+            continue
+        rendered = " ".join(
+            word if word in {">", ">>", "<", "<<"} else shlex.quote(word)
+            for word in words
+        )
+        if not _EDIT_ALLOW.match(rendered):
+            return False, f"unsafe-shell:not-allowlisted:{words[0]}"
+        if not _redirect_targets_ok(rendered):
+            return False, "unsafe-shell:redirect-outside-roots"
+        _, unsafe = _declared_targets(rendered, cwd)
+        if unsafe:
+            return False, "unsafe-shell:target-outside-roots:" + ",".join(unsafe)
+    return True, "shell-safe"
+
+
+def _has_active_shell_expansion(command: str) -> bool:
+    """Return whether Bash can evaluate substitution syntax in ``command``.
+
+    Backticks and ``$(`` inside single quotes are literal bytes (the dynaconf
+    recording uses them in a single-quoted sed program). The same tokens are
+    executable outside single quotes, including inside double quotes. Escaped
+    tokens are literal and therefore do not trigger this guard.
+    """
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if quote != "'" and char == "\\":
+            escaped = True
+            index += 1
+            continue
+        if char == "'" and quote != '"':
+            quote = None if quote == "'" else "'"
+            index += 1
+            continue
+        if char == '"' and quote != "'":
+            quote = None if quote == '"' else '"'
+            index += 1
+            continue
+        if quote != "'":
+            if char == "`" or command.startswith("$(", index):
+                return True
+            if quote is None and (command.startswith("<(", index)
+                                  or command.startswith(">(", index)):
+                return True
+        index += 1
+    return False
+
+
+def _capture_state(cwd: str, declared: dict[str, Path]) -> dict[str, str | None]:
+    state = {rel: _sha256_path(Path(cwd) / rel) for rel in _git_dirty_paths(cwd)}
+    state.update({label: _sha256_path(path) for label, path in declared.items()})
+    return state
+
+
+def _target_receipts(cwd: str, declared: dict[str, Path], before: dict[str, str | None],
+                     after: dict[str, str | None]) -> list[MaterializedTarget]:
+    receipts: list[MaterializedTarget] = []
+    for label in sorted(set(before) | set(after)):
+        path = declared.get(label, Path(cwd) / label)
+        _, _, confined = _confined_path(str(path), cwd)
+        before_hash = before.get(label) if label in before else _baseline_hash(cwd, label)
+        after_hash = after.get(label) if label in after else _baseline_hash(cwd, label)
+        receipts.append(MaterializedTarget(label, before_hash, after_hash,
+                                           before_hash != after_hash, confined))
+    return receipts
+
+
+def apply_edit_command(cmd: str, cwd: str, mutation_executor=None) -> MaterializationReceipt:
+    """Materialize one proven write candidate and return byte-level, fail-closed evidence."""
+    import subprocess
+    body = _strip_lead_cd(cmd or "")
+    body, projected_prefix = _project_allowlisted_state_prefix(body)
+    python_shape = bool(_EDIT_SCRATCH_PY.match(body) or _EDIT_PY_HEREDOC.match(body)
+                        or _EDIT_PY_INLINE.match(body))
+    python_plan = _python_write_plan(body, cwd) if python_shape else None
+    if python_plan is not None:
+        candidate, reason = python_plan.candidate, python_plan.reason
+    else:
+        candidate, reason = _mutation_candidate(body)
+    if not candidate:
+        return MaterializationReceipt(False, False, False, reason)
+    if python_plan is not None and not python_plan.safe:
+        return MaterializationReceipt(True, False, False, python_plan.reason)
+    if python_plan is None:
+        shell_safe, shell_reason = _shell_preflight(body, cwd)
+        if not shell_safe:
+            return MaterializationReceipt(True, False, False, shell_reason)
+    head = _head_of(body)
+    if not _redirect_targets_ok(head):
+        return MaterializationReceipt(True, False, False, "redirect-target-outside-roots")
+    declared, unsafe_declared = _declared_targets(body, cwd)
+    if unsafe_declared:
+        return MaterializationReceipt(
+            True, False, False, "target-outside-roots:" + ",".join(unsafe_declared))
+    if python_plan is not None:
+        for raw in python_plan.targets:
+            label, path, _ = _confined_path(raw, cwd)
+            declared[label] = path
+    before = _capture_state(cwd, declared)
+    scratch = _EDIT_SCRATCH_PY.match(body)
+    execution_env = os.environ.copy()
+    execution_env["PYTHONUTF8"] = "1"
+    try:
+        if scratch:
+            drive = os.path.splitdrive(os.getcwd())[0] or "D:"
+            script = scratch.group(1).replace("/tmp/", f"{drive}/tmp/")
+            if not Path(script).is_file():
+                return MaterializationReceipt(True, False, False, "scratch-script-absent")
+            result = subprocess.run([sys.executable, "-P", script], cwd=cwd,
+                                    capture_output=True, timeout=60, env=execution_env)
+        elif _EDIT_PY_HEREDOC.match(body) or _EDIT_PY_INLINE.match(body):
+            rewritten = _rewrite_container_paths(cmd)
+            rewritten = re.sub(r"\bpython[0-9.]*(?=\s*<<|\s+-c\s)",
+                               (f'"{sys.executable}" -P').replace("\\", "/"),
+                               rewritten, count=1)
+            result = subprocess.run([_find_bash(), "-c", rewritten], cwd=cwd,
+                                    capture_output=True, timeout=60, env=execution_env)
+            _normalize_crlf(cwd)
+        elif mutation_executor is not None and re.match(
+                r"^\s*sed\s+(?:-[A-Za-z]*i[A-Za-z]*|--in-place(?:=[^\s]+)?)(?:\s|$)", body):
+            rc, stdout, stderr = mutation_executor(body, cwd, 60)
+            if rc is None:
+                after = _capture_state(cwd, declared)
+                targets = _target_receipts(cwd, declared, before, after)
+                return MaterializationReceipt(
+                    True, False, False, stderr or "replay_mutation_unavailable",
+                    None, stdout, stderr, targets)
+            result = subprocess.CompletedProcess(
+                ["replay-mutation-executor"], rc,
+                stdout.encode("utf-8"), stderr.encode("utf-8"))
+        else:
+            execution_command = body if projected_prefix else cmd
+            result = subprocess.run([_find_bash(), "-c",
+                                     _rewrite_container_paths(execution_command)],
+                                    cwd=cwd, capture_output=True, timeout=60,
+                                    env=execution_env)
+        after = _capture_state(cwd, declared)
+        targets = _target_receipts(cwd, declared, before, after)
+        confined_change = any(target.changed and target.confined for target in targets)
+        applied = result.returncode == 0 and confined_change
+        restore_labels = {
+            _confined_path(raw, cwd)[0] for raw in _explicit_restore_targets(body)
+        }
+        target_by_label = {target.path: target for target in targets}
+        explicit_restore = (
+            bool(restore_labels)
+            and restore_labels <= target_by_label.keys()
+            and all(not target_by_label[label].changed for label in restore_labels)
+        )
+        final_reason = "materialized" if applied else (
+            f"rc={result.returncode}" if result.returncode else (
+                "materialized-explicit-restore" if explicit_restore
+                else "materialized-same-bytes"))
+        return MaterializationReceipt(True, True, applied, final_reason, result.returncode,
+                                      _decode_output(result.stdout), _decode_output(result.stderr),
+                                      targets)
     except Exception as exc:  # noqa: BLE001
-        return True, f"exec-fault:{type(exc).__name__}"
+        after = _capture_state(cwd, declared)
+        targets = _target_receipts(cwd, declared, before, after)
+        return MaterializationReceipt(True, True, False, f"exec-fault:{type(exc).__name__}",
+                                      None, "", str(exc), targets)
+
+
+def _materialization_error(receipt: MaterializationReceipt, recorded_rc: int,
+                           pair: int) -> str | None:
+    """Require safe execution and exact return-code parity with the recorded command.
+
+    A successful write command may legitimately leave the target bytes unchanged. Historical
+    ``post_edit`` rows are producer telemetry, not proof that an edit landed, so byte-change
+    truth remains in the target receipts and the corrected seam's pre/post-image classifier.
+    """
+    if not receipt.candidate:
+        return None
+    if not receipt.executed:
+        return f"pair {pair}: recorded mutation was unsafe to materialize ({receipt.reason})"
+    if receipt.rc != recorded_rc:
+        return (f"pair {pair}: replay returncode {receipt.rc} != "
+                f"recorded returncode {recorded_rc}")
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -961,13 +1854,44 @@ def replay_child_main(task: str, recorded_root: Path, out_path: Path,
     if ledger.is_file():
         ledger.unlink()
     import gt_mini_patch as g  # noqa: E402 — fresh install in THIS process
+    from ss_replay_toolchain import (  # noqa: E402
+        build_replay_mutation_executor,
+        install_replay_edit_executor,
+        install_replay_verification_executor,
+        load_replay_toolchain,
+    )
+    install_replay_edit_executor(g, task, _DEFAULT_TOOLCHAINS)
+    install_replay_verification_executor(
+        g, task, _DEFAULT_TOOLCHAINS, _MIRROR_TESTBED)
+    replay_toolchain = load_replay_toolchain(task, _DEFAULT_TOOLCHAINS)
+    mutation_executor = (build_replay_mutation_executor(replay_toolchain)
+                         if replay_toolchain is not None else None)
     applied: list[dict] = []
+    materialization_error: str | None = None
     for k, (cmd, native) in enumerate(recon.pairs):
         rc = recon.rcs[k] if k < len(recon.rcs) else 0
         if apply_edits and cmd:
-            ran, note = apply_edit_command(cmd, cwd=str(_MIRROR_TESTBED))
-            if ran:
-                applied.append({"pair": k, "cmd": cmd[:160], "note": note})
+            capture_preimage = getattr(g, "_ss_capture_write_preimage", None)
+            if not callable(capture_preimage):
+                materialization_error = (
+                    f"pair {k}: replay seam lacks pre-materialization byte capture"
+                )
+                break
+            try:
+                capture_preimage({"command": cmd})
+            except BaseException as exc:  # noqa: BLE001 - replay fidelity fails closed
+                materialization_error = (
+                    f"pair {k}: pre-materialization capture failed "
+                    f"({type(exc).__name__}: {exc})"
+                )
+                break
+            receipt = apply_edit_command(
+                cmd, cwd=str(_MIRROR_TESTBED), mutation_executor=mutation_executor)
+            if receipt.candidate:
+                applied.append({"pair": k, "cmd": cmd[:160], **receipt.as_dict()})
+                materialization_error = _materialization_error(receipt, rc, k)
+                if materialization_error:
+                    break  # never pair a recorded-success observation with the wrong disk state
         out = {"output": native, "returncode": rc}
         try:
             g._augment_output({"command": cmd}, out)
@@ -987,6 +1911,7 @@ def replay_child_main(task: str, recorded_root: Path, out_path: Path,
                 except Exception:  # noqa: BLE001
                     pass
     out_path.write_text(json.dumps({"task": task, "rows": rows, "applied": applied,
+                                    "materialization_error": materialization_error,
                                     "n_pairs": len(recon.pairs)}), encoding="utf-8")
     return 0
 
@@ -1021,11 +1946,11 @@ def spawn_replay(task: str, recorded_root: Path, snapshot_root: Path, arm_ss_env
         try:
             payload = json.loads(out_json.read_text(encoding="utf-8"))
             return {"rows": _join_payloads(payload), "applied": payload.get("applied", []),
-                    "error": None}
+                    "error": payload.get("materialization_error")}
         except Exception:  # noqa: BLE001 — fall through to a fresh replay
             pass
     try:
-        mirrors.setup()
+        mirrors.setup(stage_current_v2=(arm == "on"))
         env = child_env(recorded_root, task, led, arm_ss_env)
         cmd = [sys.executable, str(Path(__file__).resolve()), "--replay-one", task,
                "--recorded-root", str(recorded_root), "--child-out", str(out_json),
@@ -1040,7 +1965,7 @@ def spawn_replay(task: str, recorded_root: Path, snapshot_root: Path, arm_ss_env
                     "error": f"child rc={r.returncode}: {(r.stderr or r.stdout)[-400:]}"}
         payload = json.loads(out_json.read_text(encoding="utf-8"))
         return {"rows": _join_payloads(payload), "applied": payload.get("applied", []),
-                "error": None}
+                "error": payload.get("materialization_error")}
     except SeamReplayBlocked as exc:
         return {"rows": [], "applied": [], "error": f"blocked: {exc}"}
     except Exception as exc:  # noqa: BLE001
@@ -1101,7 +2026,6 @@ class FixpointResult:
         stamps, arbitration losers, L6 counters) are reported but do not gate — any hidden
         state contamination that MATTERS must surface in later delivered bytes, which DO gate."""
         return self.replayed and (self.strict or self.channel)
-
 
 def _tag_diff(op: str, row: dict) -> str:
     """Root-cause tag for one diverging row (heuristic, for the report table)."""
@@ -1265,6 +2189,7 @@ _LAYER_ALIAS = {
     "l3b": "l3b.evidence", "l3.contract": "l3.contract", "consensus.scope": "consensus.scope",
     "edit.syntax": "edit.syntax", "recovery": "recovery", "detect.coherence": "detect.coherence",
     "spec.obligation": "spec.obligation", "obligation.resurface": "obligation.resurface",
+    "obligation.unexercised": "obligation.unexercised",
     "verify.horizon": "verify.horizon", "gateway.def_ref_partition": "gateway",
 }
 
@@ -1272,6 +2197,8 @@ _LAYER_ALIAS = {
 def _layer_matches(manifest_layer: str, ledger_layer: str) -> bool:
     want = _LAYER_ALIAS.get(manifest_layer.strip().lower(), manifest_layer.strip().lower())
     ll = str(ledger_layer).strip().lower()
+    if want == "spec.obligation" and ll == "obligation.unexercised":
+        return True
     return ll == want or ll.startswith(want) or want in ll
 
 
@@ -1370,14 +2297,71 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
             for r in rep:
                 if not _layer_matches(layer, r.get("layer", "")):
                     continue
-                if use_sha and r.get("content_sha256_16") in shas:
-                    hits.append(r)
-                    continue
                 it = r.get("iteration")
-                if it is not None and any(abs(int(it) - e) <= tol for e in exps):
+                at_boundary = it is not None and any(abs(int(it) - e) <= tol for e in exps)
+                if at_boundary and (not use_sha or r.get("content_sha256_16") in shas):
                     hits.append(r)
             return hits
-        return _rows_matching(rep, layer, mnum)
+        expected_homes = {
+            int(loc) for row in rec_matches
+            if (loc := row.get("home_msg", row.get("m"))) is not None
+        }
+        expected_iterations = {
+            int(row["iteration"]) for row in rec_matches if row.get("iteration") is not None
+        }
+        hits = []
+        for row in rep:
+            if not _layer_matches(layer, row.get("layer", "")):
+                continue
+            loc = row.get("home_msg", row.get("m"))
+            if loc is not None:
+                if any(abs(int(loc) - expected) <= tol for expected in expected_homes):
+                    hits.append(row)
+                continue
+            iteration = row.get("iteration")
+            if iteration is not None and any(
+                    abs(int(iteration) - expected) <= tol
+                    for expected in expected_iterations):
+                hits.append(row)
+        if use_sha:
+            shas = {r.get("content_sha256_16") for r in rec_matches
+                    if r.get("content_sha256_16")}
+            hits = [r for r in hits if r.get("content_sha256_16") in shas]
+        return hits
+
+    def _coherence_rep_match(rep: list[dict], task: str, layer: str,
+                             rec_matches: list[dict], mnum: int | None) -> list[dict]:
+        """Match a count claim only to its exact historical decision boundary.
+
+        Mainline replay has a fidelity map, so `_rep_match(..., tol=0)` uses the
+        mapped recorded iteration. Direct/stub callers may omit fidelity while
+        supplying either home-message rows or real child-ledger iteration-only
+        rows. Missing one coordinate must never become a wildcard: use the other
+        exact recorded coordinate, and reject rows carrying neither.
+        """
+        fx = _fx(task)
+        if fx is not None and fx.replayed:
+            return _rep_match(rep, task, layer, rec_matches, mnum, tol=0)
+        expected_homes = {
+            int(loc) for r in rec_matches
+            if (loc := r.get("home_msg", r.get("m"))) is not None
+        }
+        expected_iterations = {
+            int(r["iteration"]) for r in rec_matches if r.get("iteration") is not None
+        }
+        hits = []
+        for r in rep:
+            if not _layer_matches(layer, r.get("layer", "")):
+                continue
+            loc = r.get("home_msg", r.get("m"))
+            if loc is not None:
+                if int(loc) in expected_homes:
+                    hits.append(r)
+                continue
+            iteration = r.get("iteration")
+            if iteration is not None and int(iteration) in expected_iterations:
+                hits.append(r)
+        return hits
 
     # ---- PRESERVE (incl. the 3 CARDINAL P5s) --------------------------------
     for c in cases.get("preserve", []):
@@ -1397,7 +2381,8 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
             out.append(CaseVerdict("preserve", c["task"], c["delivery"], SKIP,
                                    f"seam-blocked: {blocked_note}", card))
             continue
-        still = [r for r in _rep_match(rep, c["task"], layer, rec, mnum, use_sha=True)
+        still = [r for r in _rep_match(
+            rep, c["task"], layer, rec, mnum, use_sha=True, tol=0)
                  if r.get("delivered")]
         if still:
             loc = still[0].get("home_msg") or still[0].get("iteration")
@@ -1417,6 +2402,107 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
                 detail = "preserve delivery ABSENT after replay (no same-layer delivery at all)"
             out.append(CaseVerdict("preserve", c["task"], c["delivery"], FAIL,
                                    ("CARDINAL P5 KILLED — " if card else "") + detail, card))
+
+    # ---- CORRECTED BOUNDARIES ------------------------------------------------
+    # A raw historical receipt is immutable, but it is not automatically a valid SS witness.
+    # ``historical_invalid`` retains the exact recorded row while naming the seven-gate failures
+    # that disqualify it. ``corrected_boundaries`` then judges an explicit corrected-seam event
+    # directly. This is deliberately CASE-LOCAL: it does not call or alter ``_gate_reason``, does
+    # not mutate ``FixpointResult``, and cannot turn an unfaithful OFF replay into a faithful one.
+    # Delivered corrected rows must explicitly remain live-ack UNPROVEN; a historical receipt is
+    # never transferred to changed bytes or placement.
+    for c in cases.get("historical_invalid", []):
+        task = c["task"]
+        layer, mnum = _parse_delivery(c["delivery"])
+        rec = _rows_matching(rec_rows(task), layer, mnum, tol=0)
+        failures = {str(x) for x in (c.get("fails_gates") or [])}
+        canonical_gates = {
+            "delivered", "correct_info", "correct_rl_adhered_time", "acknowledged",
+            "leak", "dose", "fair_probe",
+        }
+        exact = [r for r in rec
+                 if int(r.get("iteration") or -1) == int(c.get("recorded_iteration") or -2)
+                 and int(r.get("chars") or 0) == int(c.get("recorded_chars") or 0)
+                 and r.get("content_sha256_16") == c.get("recorded_sha")]
+        valid_manifest = bool(failures) and failures <= canonical_gates and (
+            c.get("acknowledgment") == "HISTORICAL_ONLY_NOT_TRANSFERABLE")
+        if exact and valid_manifest:
+            out.append(CaseVerdict(
+                "historical_invalid", task, c["delivery"], PASS,
+                "raw receipt preserved; invalid SS witness (" + ",".join(sorted(failures))
+                + "); acknowledgment not transferable", False))
+        else:
+            detail = ("invalid historical manifest" if not valid_manifest
+                      else "raw historical row/bytes/placement not preserved")
+            out.append(CaseVerdict(
+                "historical_invalid", task, c["delivery"], FAIL, detail, False))
+
+    for c in cases.get("corrected_boundaries", []):
+        task = c["task"]
+        label = str(c.get("label") or c.get("layer") or "corrected boundary")
+        layer = str(c.get("layer") or "")
+        expected_it = int(c.get("expected_iteration") or -1)
+        expected_outcome = str(c.get("expected_outcome") or "")
+        expected_chars = int(c.get("expected_chars") or 0)
+        rep = rep_rows(task)
+        if rep is None:
+            out.append(CaseVerdict(
+                "corrected_boundary", task, label, SKIP,
+                f"seam-blocked: {blocked_note}", False))
+            continue
+        pair = c.get("decision_pair", c.get("passing_test_pair"))
+        if pair is None or int(pair) + 1 != expected_it:
+            out.append(CaseVerdict(
+                "corrected_boundary", task, label, FAIL,
+                "corrected boundary must name its chronological pair and exact next iteration",
+                False))
+            continue
+        at_boundary = [r for r in rep if _layer_matches(layer, r.get("layer", ""))
+                       and int(r.get("iteration") or -1) == expected_it]
+        delivered = [r for r in at_boundary if r.get("delivered")]
+        if expected_outcome == "delivered":
+            # Explicitly prevent replay/offline evidence from manufacturing a live receipt.
+            if c.get("acknowledgment") != "UNPROVEN_LIVE_REQUIRED":
+                out.append(CaseVerdict(
+                    "corrected_boundary", task, label, FAIL,
+                    "delivered corrected boundary must keep live acknowledgment UNPROVEN", False))
+                continue
+            exact = [r for r in delivered
+                     if int(r.get("chars") or 0) == expected_chars
+                     and r.get("content_sha256_16") == c.get("expected_sha")]
+            if exact:
+                out.append(CaseVerdict(
+                    "corrected_boundary", task, label, PASS,
+                    f"corrected delivery at iteration {expected_it}; live acknowledgment UNPROVEN",
+                    False))
+            else:
+                anywhere = [(r.get("iteration"), r.get("content_sha256_16")) for r in rep
+                            if _layer_matches(layer, r.get("layer", "")) and r.get("delivered")]
+                out.append(CaseVerdict(
+                    "corrected_boundary", task, label, FAIL,
+                    f"expected exact corrected delivery at iteration {expected_it}; saw {anywhere[:4]}",
+                    False))
+        elif expected_outcome == "suppressed":
+            expected_reason = str(c.get("expected_reason") or "")
+            exact = [r for r in at_boundary
+                     if not r.get("delivered")
+                     and int(r.get("chars") or 0) == expected_chars
+                     and "suppressed" in str(r.get("outcome") or "")
+                     and str(r.get("reason") or "") == expected_reason]
+            ack_honest = c.get("acknowledgment") == "NOT_APPLICABLE_SUPPRESSED"
+            if exact and not delivered and ack_honest:
+                out.append(CaseVerdict(
+                    "corrected_boundary", task, label, PASS,
+                    f"same-turn suppression at iteration {expected_it} ({expected_reason})", False))
+            else:
+                out.append(CaseVerdict(
+                    "corrected_boundary", task, label, FAIL,
+                    f"missing attributed same-turn suppression at iteration {expected_it} "
+                    f"({expected_reason})", False))
+        else:
+            out.append(CaseVerdict(
+                "corrected_boundary", task, label, FAIL,
+                f"unsupported expected_outcome={expected_outcome!r}", False))
 
     # ---- SUPPRESS families (step_behind / semantic_dup / provenance / late) --
     def suppress_family(section: str, reason_tok: str):
@@ -1440,22 +2526,91 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
                     out.append(CaseVerdict(section, c["task"], dv, SKIP,
                                            f"seam-blocked: {blocked_note}", False))
                     continue
-                delivered = [r for r in _rep_match(rep, c["task"], layer, rec, mnum)
-                             if r.get("delivered")]
-                supp = [r for r in rep if _layer_matches(layer, r.get("layer", ""))
-                        and reason_tok in str(r.get("reason") or r.get("outcome") or "")]
-                # conan-17092 m13 step_behind: oracle accepts deliver-OR-suppress (novelty may survive).
-                allow_survive = (section == "suppress_step_behind" and "m13" in dv
-                                 and c["task"] == "conan-io__conan-17092")
-                if not delivered or supp:
+                boundary_rows = _rep_match(
+                    rep, c["task"], layer, rec, mnum, tol=0)
+                stale_subjects = [
+                    str(subject).strip().lower()
+                    for subject in (c.get("stale_subjects") or [])
+                    if str(subject).strip()
+                ]
+                stale_clauses = [
+                    clause for clause in (c.get("stale_clauses") or [])
+                    if isinstance(clause, dict)
+                ]
+                stale_term_digest_sets: list[set[str]] = []
+                if stale_subjects:
+                    from groundtruth.runtime.obligations import obligation_subject_terms
+                    for subject in stale_subjects:
+                        stale_term_digest_sets.append({
+                            hashlib.sha256(term.encode("utf-8")).hexdigest()[:16]
+                            for term in obligation_subject_terms(subject)
+                        })
+
+                def _delivers_stale_subject(row: dict) -> bool:
+                    if not row.get("delivered"):
+                        return False
+                    if not stale_subjects:
+                        return True
+                    payload = str(row.get("payload") or "").lower()
+                    if not payload:
+                        return True  # missing payload cannot prove the stale fact absent
+                    return any(subject in payload for subject in stale_subjects)
+
+                delivered = [r for r in boundary_rows if _delivers_stale_subject(r)]
+                boundary_suppressions = [
+                    r for r in boundary_rows
+                    if not r.get("delivered")
+                    and "suppressed" in str(r.get("outcome") or "")
+                    and reason_tok in str(r.get("reason") or "")
+                ]
+
+                if stale_clauses:
+                    def _matches_exact_clause(row: dict, expected: dict) -> bool:
+                        expected_clause = str(expected.get("clause_id") or "")
+                        expected_subject = str(expected.get("subject_digest") or "")
+                        expected_artifact = str(
+                            expected.get("artifact_issue_sha256") or "")
+                        return bool(
+                            expected_clause and expected_subject and expected_artifact
+                            and str(row.get("clause_id") or "") == expected_clause
+                            and str(row.get("subject_digest") or "") == expected_subject
+                            and str(row.get("artifact_issue_sha256") or "")
+                            == expected_artifact
+                        )
+
+                    suppression_complete = all(
+                        any(_matches_exact_clause(row, expected)
+                            for row in boundary_suppressions)
+                        for expected in stale_clauses
+                    )
+                elif stale_subjects:
+                    expected_artifact = str(
+                        c.get("artifact_issue_sha256") or "")
+
+                    def _matches_subject(row: dict, required: set[str]) -> bool:
+                        row_terms = set(row.get("subject_term_digests") or [])
+                        return bool(
+                            required and expected_artifact
+                            and str(row.get("artifact_issue_sha256") or "")
+                            == expected_artifact
+                            and required <= row_terms
+                        )
+
+                    suppression_complete = bool(stale_term_digest_sets) and all(
+                        any(_matches_subject(row, required)
+                            for row in boundary_suppressions)
+                        for required in stale_term_digest_sets
+                    )
+                else:
+                    suppression_complete = bool(boundary_suppressions)
+
+                if suppression_complete and not delivered:
                     out.append(CaseVerdict(section, c["task"], dv, PASS,
-                                           f"suppressed ({reason_tok})" if supp else "absent after replay", False))
-                elif allow_survive:
-                    out.append(CaseVerdict(section, c["task"], dv, PASS,
-                                           "accepted survive (novel cross-file entity per manifest note)", False))
+                                           f"boundary-local suppression ({reason_tok})", False))
                 else:
                     out.append(CaseVerdict(section, c["task"], dv, FAIL,
-                                           f"still delivered with no {reason_tok} reason", False))
+                                           f"missing boundary-local attributed suppression "
+                                           f"({reason_tok}); target delivered={bool(delivered)}", False))
 
     suppress_family("suppress_step_behind", SS_REASON["step_behind"])
     suppress_family("suppress_semantic_dup", SS_REASON["semantic_dup"])
@@ -1474,7 +2629,7 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
             # a per-delivery inline count may override (e.g. "detect.coherence m245 (3 writes, claimed 4)")
             inline = re.search(r"\((\d+)\s+(?:writes?|real edit|success)", dv)
             true_ct = int(inline.group(1)) if inline else actual
-            rec = _rows_matching(rec_rows(c["task"]), layer, mnum)
+            rec = _rows_matching(rec_rows(c["task"]), layer, mnum, tol=0)
             rep = rep_rows(c["task"])
             if not rec:
                 out.append(CaseVerdict("coherence", c["task"], dv, SKIP, "no recorded coherence delivery", False))
@@ -1486,7 +2641,11 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
             if rep is None:
                 out.append(CaseVerdict("coherence", c["task"], dv, SKIP, f"seam-blocked: {blocked_note}", False))
                 continue
-            fired = [r for r in _rep_match(rep, c["task"], layer, rec, mnum) if r.get("delivered")]
+            # A coherence count is true only at the decision boundary it
+            # describes. A later same-layer firing can follow another real write
+            # and is a distinct event, not evidence about this historical case.
+            fired = [r for r in _coherence_rep_match(
+                rep, c["task"], layer, rec, mnum) if r.get("delivered")]
             if not fired:
                 out.append(CaseVerdict("coherence", c["task"], dv, PASS, "silent (count<=2 / test intervened)", False))
                 continue
@@ -1587,14 +2746,16 @@ def evaluate_invariants(recorded: dict[str, list[Delivery]],
 
     # choose the delivery stream to scan
     if replayed is not None:
+        raw_streams = replayed
         streams = {t: [r for r in rows if _is_delivered(r) or bool(r.get("delivered"))]
-                   for t, rows in replayed.items()}
+                   for t, rows in raw_streams.items()}
         payload_of = lambda r: str(r.get("payload") or r.get("delta") or "")
         chars_of = lambda r: int(r.get("chars", r.get("chars_delivered") or 0) or 0)
         iter_of = lambda r: int(r.get("home_msg", r.get("iteration") or 0) or 0)
         outcome_delivered = lambda r: _is_delivered(r) if "chars_delivered" in r else bool(r.get("delivered"))
     else:
         streams = {t: dels for t, dels in recorded.items()}  # Delivery objects
+        raw_streams = recorded_rows
         payload_of = lambda d: d.payload
         chars_of = lambda d: d.chars
         iter_of = lambda d: d.home_msg
@@ -1626,9 +2787,16 @@ def evaluate_invariants(recorded: dict[str, list[Delivery]],
 
     # (3) zero delivered rows with 0 bytes
     empties: list[str] = []
-    for t, rows in streams.items():
+    for t, rows in raw_streams.items():
         for r in rows:
-            if outcome_delivered(r) and chars_of(r) == 0:
+            if isinstance(r, dict):
+                raw_delivered = ("delivered" in str(r.get("outcome") or "")
+                                 or bool(r.get("delivered")))
+                raw_chars = int(r.get("chars", r.get("chars_delivered") or 0) or 0)
+            else:
+                raw_delivered = "delivered" in str(r.outcome or "")
+                raw_chars = int(r.chars or 0)
+            if raw_delivered and raw_chars == 0:
                 empties.append(t)
                 break
     out.append(InvariantResult(f"no empty payload ({src_label})", PASS if not empties else FAIL,
@@ -1678,6 +2846,8 @@ def validate_manifest(cases: dict, recorded: dict[str, list[Delivery]]) -> list[
 
     for c in cases.get("preserve", []):
         check("preserve", c["task"], c["delivery"])
+    for c in cases.get("historical_invalid", []):
+        check("historical_invalid", c["task"], c["delivery"])
     for section in ("suppress_step_behind", "suppress_semantic_dup"):
         for c in cases.get(section, []):
             for dv in c["deliveries"]:
@@ -1716,6 +2886,73 @@ def _manifest_tasks(cases: dict) -> list[str]:
     return sorted(tasks)
 
 
+def _select_cases(cases: dict, selected_tasks: set[str]) -> dict:
+    """Return the manifest slice owned by ``selected_tasks``.
+
+    Scalar metadata, invariant declarations, and non-dict family notes are preserved. Case
+    dictionaries for other tasks are removed, so a diagnostic ``--tasks`` replay cannot acquire
+    manifest findings or REPLAY_UNFAITHFUL verdicts from work it explicitly did not request.
+    Selecting the full task universe is byte-for-byte equivalent at the data-model level.
+    """
+    selected: dict = {}
+    for name, value in cases.items():
+        if not isinstance(value, list):
+            selected[name] = value
+            continue
+        selected[name] = [item for item in value
+                          if not isinstance(item, dict)
+                          or "task" not in item
+                          or item["task"] in selected_tasks]
+    return selected
+
+
+def _audit_coverage_findings(cases: dict,
+                             fidelity: dict[str, FixpointResult]) -> list[str]:
+    """Audit-only trajectories have no named delivery case to gate them indirectly.
+
+    Require their OFF replay to reach the delivered-plane fixpoint explicitly. Otherwise a
+    nominally full run could skip an un-snapshotted trajectory and still claim whole-run green.
+    """
+    findings: list[str] = []
+    for case in cases.get("audit_only", []):
+        if not isinstance(case, dict) or "task" not in case:
+            continue
+        task = case["task"]
+        fx = fidelity.get(task)
+        if fx is None or not fx.replayed:
+            detail = fx.error if fx is not None and fx.error else "no fixpoint result"
+            findings.append(f"{task}: not replayed ({detail}); {case.get('why', '')}")
+        elif not fx.faithful:
+            findings.append(
+                f"{task}: unfaithful at iteration {fx.boundary_iter:g}; {case.get('why', '')}")
+    return findings
+
+
+def _full_coverage_findings(tasks: list[str], fidelity: dict[str, FixpointResult],
+                            verdicts: list[CaseVerdict], full_scope: bool) -> list[str]:
+    """Require complete fidelity only for the default whole-manifest proof run.
+
+    Targeted ``--tasks`` runs are diagnostic: their trusted-prefix and inconclusive verdicts
+    remain useful and keep the existing exit semantics. A default run is the terminal proof,
+    so every task and every named case must be fully judgeable.
+    """
+    if not full_scope:
+        return []
+    findings: list[str] = []
+    for task in tasks:
+        fx = fidelity.get(task)
+        if fx is None or not fx.replayed:
+            detail = fx.error if fx is not None and fx.error else "no fixpoint result"
+            findings.append(f"{task}: not replayed ({detail})")
+        elif not fx.faithful:
+            findings.append(f"{task}: unfaithful at iteration {fx.boundary_iter:g}")
+    for verdict in verdicts:
+        if verdict.verdict == REPLAY_UNFAITHFUL:
+            findings.append(
+                f"{verdict.task}:{verdict.label}: REPLAY_UNFAITHFUL ({verdict.reason})")
+    return findings
+
+
 def _table(headers: list[str], rows: list[list[str]]) -> str:
     widths = [max([len(str(h))] + [len(str(r[i])) for r in rows]) for i, h in enumerate(headers)]
     line = lambda cols: "  " + " | ".join(str(c).ljust(widths[i]) for i, c in enumerate(cols))
@@ -1731,7 +2968,8 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
 _SS_FLAGS_ALL = ("GT_SS_NOVELTY", "GT_SS_DEDUP2", "GT_SS_COHERENCE_V2",
                  "GT_SS_RECOVERY_V2", "GT_SS_PROVENANCE", "GT_SS_LATE_DROP",
                  "GT_SS_ACK_METRICS", "GT_SS_ARBITER_V2", "GT_SS_EXEC_TRUTH",
-                 "GT_SS_SUBMIT_RED", "GT_SS_ACK_FORM", "GT_SS_ELIGIBILITY")
+                 "GT_SS_SUBMIT_RED", "GT_SS_ACK_FORM", "GT_SS_ELIGIBILITY",
+                 "GT_SS_EDIT_DIAG")
 
 
 def main(argv=None) -> int:
@@ -1776,6 +3014,7 @@ def main(argv=None) -> int:
     if args.tasks:
         keep = {t.strip() for t in args.tasks.split(",") if t.strip()}
         tasks = [t for t in tasks if t in keep]
+    active_cases = _select_cases(cases, set(tasks)) if args.tasks else cases
     work_dir = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix="ssr2_"))
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1792,7 +3031,7 @@ def main(argv=None) -> int:
     residuals = {t: r.residual_leaks for t, r in recon.items() if r.residual_leaks}
 
     # ── manifest validation ──────────────────────────────────────────────────
-    manifest_findings = validate_manifest(cases, recorded_deliveries)
+    manifest_findings = validate_manifest(active_cases, recorded_deliveries)
 
     # ── SS-R2 STEP 1 (per task): OFF-flag replay -> FIXPOINT GATE ────────────
     # The off-arm (every GT_SS_* unset) must reproduce the RECORDED ledger; a task that
@@ -1813,7 +3052,9 @@ def main(argv=None) -> int:
                                work_dir, arm="off")
             fx = diff_ledgers(t, recorded_rows.get(t, []), off["rows"], error=off["error"] or "")
             fidelity[t] = fx
-            applied_log[t] = {"off_applied": sum(1 for a in off["applied"] if "cmd" in a),
+            applied_log[t] = {"off_applied": sum(1 for a in off["applied"]
+                                                         if a.get("applied") is True),
+                              "off_materialization": off["applied"],
                               "off_error": off["error"]}
         except BaseException as exc:  # noqa: BLE001 — incl. KeyboardInterrupt-adjacent faults
             if isinstance(exc, KeyboardInterrupt):
@@ -1834,7 +3075,9 @@ def main(argv=None) -> int:
                 on = spawn_replay(t, recorded_root, snapshots_root, ss_on, args.apply_edits,
                                   work_dir, arm="on")
                 replayed_on[t] = on["rows"]
-                applied_log[t]["on_applied"] = sum(1 for a in on["applied"] if "cmd" in a)
+                applied_log[t]["on_applied"] = sum(1 for a in on["applied"]
+                                                        if a.get("applied") is True)
+                applied_log[t]["on_materialization"] = on["applied"]
                 applied_log[t]["on_error"] = on["error"]
             except BaseException as exc:  # noqa: BLE001
                 if isinstance(exc, KeyboardInterrupt):
@@ -1846,11 +3089,10 @@ def main(argv=None) -> int:
     prefix_only = sorted(t for t, fx in fidelity.items()
                          if fx.replayed and not fx.faithful and fx.boundary_iter > 0)
     untrusted = sorted(t for t, fx in fidelity.items() if not fx.replayed)
+    coverage_findings = _audit_coverage_findings(active_cases, fidelity)
 
-    # SS built-probes (mirrors ss_gate's SKIP:flag-not-built): globally — any ss_* reason
-    # anywhere or any faithful task whose ON-arm differs from the recording; per FAMILY —
-    # the family's reason token must appear in SOME ON-arm ledger for its suppress cases to
-    # be judged FAIL (an engine that is not landed yet is an honest SKIP, never a false RED).
+    # SS build telemetry is diagnostic only. A named terminal case remains FAIL when its
+    # required suppression is absent; engine darkness must never downgrade proof to SKIP.
     ss_built = False
     for t in trusted + prefix_only:
         fx = fidelity[t]
@@ -1864,26 +3106,10 @@ def main(argv=None) -> int:
                 [_channel_key(r) for r in recorded_rows.get(t, [])]:
             ss_built = True
             break
-    _all_on_reasons = " ".join(str(r.get("reason") or "") for rows in replayed_on.values()
-                               for r in rows)
-    family_token = {
-        "suppress_step_behind": "ss_step_behind", "suppress_semantic_dup": "ss_semantic_dup",
-        "suppress_provenance": "ss_provenance", "suppress_late": "ss_late",
-        "coherence": "ss_coherence", "recovery_misfire": "ss_recovery",
-        "recovery_earlier": "ss_recovery",
-    }
-    family_built = {sec: (tok in _all_on_reasons) for sec, tok in family_token.items()}
-
     # ── LAYER 3: oracle (fixpoint-gated) ─────────────────────────────────────
-    verdicts = evaluate_cases(cases, recorded_deliveries, replayed_on, None, fidelity)
-    verdicts = [
-        CaseVerdict(v.section, v.task, v.label, SKIP,
-                    f"flag-not-built ({family_token.get(v.section)} never appears in any "
-                    f"ON-arm ledger)", v.cardinal)
-        if (v.verdict == FAIL and v.section in family_token
-            and not family_built.get(v.section, True)) else v
-        for v in verdicts
-    ]
+    verdicts = evaluate_cases(active_cases, recorded_deliveries, replayed_on, None, fidelity)
+    full_coverage_findings = _full_coverage_findings(
+        tasks, fidelity, verdicts, full_scope=not bool(args.tasks))
     trusted_on = {t: replayed_on.get(t, []) for t in trusted + prefix_only}
     invariants = evaluate_invariants(recorded_deliveries, trusted_on or None, recorded_rows,
                                      "no trusted replays" if not trusted_on else None)
@@ -1898,7 +3124,8 @@ def main(argv=None) -> int:
     invariants.append(InvariantResult(
         "off-flag fixpoint (per task, delivered plane — THE GATE)",
         PASS if (n_rep and n_faith == n_rep) else SKIP,
-        f"{n_faith}/{n_rep} replayed tasks faithful; unfaithful tasks' cases are REPLAY_UNFAITHFUL"))
+        f"{n_faith}/{n_rep} replayed tasks faithful; remaining unfaithful tasks' cases "
+        "are REPLAY_UNFAITHFUL"))
 
     # ── tallies + exit ───────────────────────────────────────────────────────
     n_fail = sum(1 for v in verdicts if v.verdict == FAIL)
@@ -1909,6 +3136,8 @@ def main(argv=None) -> int:
     cardinal_unf = [v for v in verdicts if v.cardinal and v.verdict == REPLAY_UNFAITHFUL]
     inv_fail = [i for i in invariants if i.verdict == FAIL]
     hard_fail = (n_fail > 0 or bool(cardinal_kills) or bool(manifest_findings)
+                 or bool(coverage_findings)
+                 or bool(full_coverage_findings)
                  or bool(residuals) or bool(recon_errors) or bool(inv_fail))
     if hard_fail:
         exit_code = 1
@@ -1924,6 +3153,13 @@ def main(argv=None) -> int:
         "apply_edits": bool(args.apply_edits), "ss_built": ss_built,
         "tasks_reconstructed": sorted(recon), "reconstruction_errors": recon_errors,
         "residual_seal_leaks": residuals, "manifest_findings": manifest_findings,
+        "coverage_findings": coverage_findings,
+        "full_coverage": {
+            "required": not bool(args.tasks),
+            "status": ("NOT_REQUIRED" if args.tasks else
+                       "PASS" if not full_coverage_findings else "FAIL"),
+            "findings": full_coverage_findings,
+        },
         "fixpoint": {t: {"strict": fx.strict, "channel": fx.channel, "replayed": fx.replayed,
                          "boundary_iter": fx.boundary_iter if fx.boundary_iter != float("inf") else None,
                          "rows_recorded": fx.n_recorded, "rows_replayed": fx.n_replayed,
@@ -1951,11 +3187,20 @@ def main(argv=None) -> int:
           + (f" ({len(recon_errors)} errors)" if recon_errors else ""))
     print(f"  reconstruction: residual seal leaks in {len(residuals)} task(s)"
           + (f" {list(residuals)[:3]}" if residuals else " (0 — every seal stripped cleanly)"))
-    print(f"  manifest      : {len(cases_delivery_count(cases))} case-deliveries; "
+    print(f"  manifest      : {len(cases_delivery_count(active_cases))} case-deliveries; "
           f"{len(manifest_findings)} discrepancy(ies)")
     for f in manifest_findings:
         print("     ! " + f)
-    print(f"  SS engines    : {'BUILT (flags have effect)' if ss_built else 'NOT BUILT (GT_SS_* no-op; suppress FAILs -> SKIP)'}")
+    print(f"  coverage      : {len(coverage_findings)} audit-only gap(s)")
+    for f in coverage_findings:
+        print("     ! " + f)
+    full_coverage_status = ("NOT_REQUIRED" if args.tasks else
+                            "PASS" if not full_coverage_findings else "FAIL")
+    print(f"  full coverage : {full_coverage_status}"
+          f" ({len(full_coverage_findings)} gap(s); required={not bool(args.tasks)})")
+    for f in full_coverage_findings:
+        print("     ! " + f)
+    print(f"  SS engines    : {'BUILT (flags have effect)' if ss_built else 'NOT OBSERVED (terminal case failures remain FAIL)'}")
 
     print("\n  ── per-task OFF-flag fixpoint (the gate) ──")
     fx_rows = []
@@ -1996,6 +3241,12 @@ def cases_delivery_count(cases: dict) -> list[str]:
     out: list[str] = []
     for c in cases.get("preserve", []):
         out.append(c["delivery"])
+    for c in cases.get("historical_invalid", []):
+        if isinstance(c, dict):
+            out.append(c["delivery"])
+    for c in cases.get("corrected_boundaries", []):
+        if isinstance(c, dict):
+            out.append(str(c.get("label") or c.get("layer") or "corrected boundary"))
     for section in ("suppress_step_behind", "suppress_semantic_dup"):
         for c in cases.get(section, []):
             out.extend(c["deliveries"])

@@ -29,6 +29,11 @@ _METRIC_FIELDS = (
     "effective_w_sem", "semantic_signal_count",
     "rendered_candidate_count", "k_sem_top", "sem_components",
     "localization_proof",
+    # ACQ phase-A: V1R already computes these witnesses. Keep them across the
+    # gate->emit boundary so the sealed cache retains acquisition provenance.
+    # Sidecar-only: none participates in ``brief_text``.
+    "graph_edge_count", "structural_signal_count", "fts5_signal_count",
+    "block_receipts", "tokenizer_used", "budget_suppressed",
     # B-4: persist the localization confidence tier so the L5b verify-horizon reader
     # (gt_mini_patch._brief_confidence_tier) can consume it. Previously omitted -> the
     # tier never reached the agent -> the LOW-tier verify advisory shipped DEAD.

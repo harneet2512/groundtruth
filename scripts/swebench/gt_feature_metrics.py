@@ -33,6 +33,7 @@ from __future__ import annotations
 import glob
 import hashlib
 import json
+import math
 import os
 import sys
 from collections import Counter, defaultdict
@@ -57,6 +58,16 @@ from gt_feature_schema import (  # noqa: E402
     new_lifecycle,
     not_eligible,
     unmeasured,
+)
+from gt_feature_inventory import (  # noqa: E402
+    canonical_feature_inventory,
+    performance_metric_definitions,
+)
+from groundtruth.runtime.feature_lineage import (  # noqa: E402
+    CAP_BYTE_OWNER_IDS,
+    CAP_ELIGIBILITY_IDS,
+    CAP_MEDIATOR_IDS,
+    cap_role_for,
 )
 
 # ---------------------------------------------------------------------------
@@ -101,15 +112,13 @@ def _profile_registry():
 # these require a matched baseline/holdout behavioural delta.
 _DIRECT_MEMBER_FACTCLASS: dict[str, str] = {
     "GT_EDIT_CHECK": "syntax_result",
-    "GT_VERIFY_EXECUTE": "covering_red",
-    "GT_VERIFICATION_PLAN": "covering_red",
-    "GT_COMPLETION_CERT": "submit_refusal",
     "GT_PATCH_DELTA": "signature_delta",
     "GT_CHANGE_SURFACE": "newfile_precedent",
     "GT_HYPOTHESIS": "recovery",
     "GT_LOC_RESLOT": "localization",
-    "GT_CONTENT_LEG": "localization",
-    "GT_SEM_BODY": "localization",
+    "GT_SS_COHERENCE_V2": "cochange_prior",
+    "GT_SS_SUBMIT_RED": "submit_refusal",
+    "GT_CERT_DELIVERY": "submit_refusal",
 }
 
 # INFRASTRUCTURE members → the fact class(es) they MEDIATE (render / freshen / arbitrate /
@@ -130,11 +139,15 @@ _INFRA_MEMBER_MEDIATES: dict[str, tuple[str, ...]] = {
     "GT_STEER_NATIVE": ("recovery",),       # native rendering of the steer/recovery fact
     "GT_POST_SEARCH_NATIVE": ("def_partition",),          # native def-partition render
     "GT_SCOPE_NATIVE": ("localization",),   # native scope constraint (localization surface)
-    "GT_CERT_DELIVERY": ("submit_refusal",),              # model-facing completion cert
     "GT_CONTRACT_MODE": ("caller_contract",),             # contract shaping
     "GT_CONTRACT_BILATERAL": ("caller_contract",),        # bilateral contract shaping
     "GT_D7_RELATEDNESS": ("cochange_prior",),             # relatedness → companion/cochange
     "GT_OBLIGATION_FRESHNESS": ("obligations",),          # obligation freshness
+    "GT_VERIFY_EXECUTE": ("covering_red",),
+    "GT_VERIFICATION_PLAN": ("covering_red",),
+    "GT_COMPLETION_CERT": ("submit_refusal",),
+    "GT_CONTENT_LEG": ("localization",),
+    "GT_SEM_BODY": ("localization",),
     # W10 RL-native FORM sweep (2026-07-13) — the same native-render family as
     # GT_STEER_NATIVE/GT_POST_SEARCH_NATIVE/GT_SCOPE_NATIVE: FORM of an existing class,
     # never a new fact producer. Caught by the 2-task smoke (run 29232070057): the
@@ -153,14 +166,12 @@ _INFRA_MEMBER_MEDIATES: dict[str, tuple[str, ...]] = {
     "GT_SS_ARBITER_V2": (),                               # the one-dose arbiter (defer/relax/empty-guard)
     "GT_SS_NOVELTY": (),                                  # novelty gate across all classes
     "GT_SS_DEDUP2": (),                                   # 2nd-order cross-plane dedup, all classes
-    "GT_SS_COHERENCE_V2": ("cochange_prior",),            # companion/coherence re-detection
     "GT_SS_RECOVERY_V2": ("recovery",),                  # recovery selection v2
     "GT_SS_PROVENANCE": (),                               # provenance/seal on every delivery
     "GT_SS_LATE_DROP": (),                                # late-fact drop timing, all classes
     "GT_SS_ACK_METRICS": (),                              # host-side ack telemetry only
     "GT_SS_ACK_FORM": (),                                 # SS-5 FORM: preamble reframes reading of ALL classes + obligations checklist
     "GT_SS_EXEC_TRUTH": ("covering_red",),                # SS-2 mediator: runner-eligible covering selection; kills unexecuted assurances
-    "GT_SS_SUBMIT_RED": ("submit_refusal",),              # SS-2 mediator: submit gate consumes observed RED (reached only under GT_VERIFY_EXECUTE=1)
     "GT_SS_ELIGIBILITY": (),                              # SS-4 mediator: cd-$() prefix widening for search isolation (post_search/loc legs)
     "GT_SS_SHADOW": (),                                   # SS-8 mediator: shadow-holdout deliver/withhold across ALL participating advisory classes (E10 causal instrument; inert at rate 0)
 }
@@ -170,17 +181,19 @@ _INFRA_MEMBER_MEDIATES: dict[str, tuple[str, ...]] = {
 # table is not drifting from the code). Only the members whose module IS the producer.
 _MODULE_PRODUCER_MEMBERS: dict[str, str] = {
     "GT_EDIT_CHECK": "edit_check",
-    "GT_VERIFY_EXECUTE": "covering_runner",
-    "GT_COMPLETION_CERT": "submit_gate",
     "GT_PATCH_DELTA": "patch_delta",
     "GT_CHANGE_SURFACE": "change_surface",
 }
 
 
 def member_role(member: str) -> str:
-    if member in _DIRECT_MEMBER_FACTCLASS:
+    try:
+        cap_role = cap_role_for(member)
+    except ValueError as exc:
+        raise KeyError(f"gt_feature_metrics: unclassified CAP member {member!r}") from exc
+    if cap_role == "byte_owner":
         return ROLE_DIRECT
-    if member in _INFRA_MEMBER_MEDIATES:
+    if cap_role in {"eligibility", "mediator"}:
         return ROLE_INFRA
     raise KeyError(
         f"gt_feature_metrics: Profile-2 member {member!r} is UNCLASSIFIED — add it to "
@@ -211,6 +224,10 @@ def _import_time_crosscheck() -> None:
     rp, fr = _profile_registry()
     members = set(rp.PROFILE_MEMBERS["2"])
     classified = set(_DIRECT_MEMBER_FACTCLASS) | set(_INFRA_MEMBER_MEDIATES)
+    if set(_DIRECT_MEMBER_FACTCLASS) != set(CAP_BYTE_OWNER_IDS):
+        raise ValueError("gt_feature_metrics: byte-owner table drift from feature_lineage")
+    if set(_INFRA_MEMBER_MEDIATES) != set(CAP_ELIGIBILITY_IDS | CAP_MEDIATOR_IDS):
+        raise ValueError("gt_feature_metrics: CAP control table drift from feature_lineage")
     # (a) every profile member is classified; no stray classification for a non-member.
     missing = members - classified
     if missing:
@@ -264,9 +281,13 @@ _LEGACY_LAYER_FACTCLASS: dict[str, str] = {
     "l3b.evidence": "caller_contract",
     "l3.contract": "caller_contract",
     "consensus.scope_map": "localization",
+    "consensus.scope": "localization",
+    "edit.syntax": "syntax_result",
+    "semantic_drift": "cochange_prior",
     "spec.obligation": "obligations",
     "obligation.resurface": "obligations",
     "verify.horizon.advisory": "covering_red",
+    "verify.horizon.executed": "covering_red",
     "detect.coherence": "recovery",
     "detect.loop": "recovery",
     "recovery": "recovery",
@@ -287,13 +308,17 @@ def layer_to_fact_class(layer: str) -> str | None:
     for p in _INFRA_LAYER_PREFIXES:
         if lay == p or lay.startswith(p + "."):
             return None
-    if lay.startswith("gateway."):
-        et = lay.split(".", 1)[1]
-        _, fr = _profile_registry()
-        reg = fr.registration_for(et)
-        if reg is not None:
-            return reg.fact_class
-    return _LEGACY_LAYER_FACTCLASS.get(lay)
+    mapped = _LEGACY_LAYER_FACTCLASS.get(lay)
+    if mapped is not None:
+        return mapped
+    # Runtime rows may carry a registry evidence-type directly (including an
+    # arbiter ``ga.`` prefix), while Gateway rows namespace it as ``gateway.*``.
+    # Resolve both through the executable registry before declaring the layer
+    # infrastructure-only/unmapped.
+    evidence_type = lay.split(".", 1)[1] if lay.startswith("gateway.") else lay
+    _, fr = _profile_registry()
+    reg = fr.registration_for(evidence_type)
+    return reg.fact_class if reg is not None else None
 
 
 def is_arbiter_candidate(layer: str) -> bool:
@@ -347,12 +372,246 @@ def load_jsonl(path: str) -> list[dict]:
     return rows
 
 
+def _visible_audit_inputs_complete(
+    trajectory_path: str | None, ledger_path: str | None,
+) -> bool:
+    """True only when both visible-byte audit inputs parse completely."""
+    if not trajectory_path or not ledger_path:
+        return False
+    try:
+        with open(trajectory_path, encoding="utf-8") as fh:
+            trajectory = json.load(fh)
+        if not isinstance(trajectory, dict) or not isinstance(
+            trajectory.get("messages"), list
+        ):
+            return False
+        with open(ledger_path, encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if not isinstance(json.loads(line), dict):
+                    return False
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        return False
+    return True
+
+
 def _find_one(task_dir: str, *patterns: str) -> str | None:
     for pat in patterns:
         hits = sorted(glob.glob(os.path.join(task_dir, pat)))
         if hits:
             return hits[0]
     return None
+
+
+def _find_named_input(task_dir: str, filename: str, *, locations: int = 3) -> str | None:
+    """Find an exact-name task input in the task dir or its two run parents.
+
+    The live workflow places feature inputs across ``/tmp/gt/<task>`` and
+    ``/tmp``.  The lookup is intentionally bounded and never glob-selects a
+    different task's artifact.
+    """
+    current = os.path.abspath(task_dir)
+    if locations < 1:
+        raise ValueError("gt_feature_metrics: named-input locations must be positive")
+    for _ in range(locations):
+        candidate = os.path.join(current, filename)
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def _performance_value_status(raw: Any, value_type: str) -> str:
+    """Validate one per-task PERF value against the run collector contract."""
+    from gt_run_metrics import _contract_number
+
+    if value_type == "run_ratio":
+        return "NOT_APPLICABLE"
+    if raw is None:
+        return "NOT_APPLICABLE"
+    if value_type == "bool":
+        return "MEASURED" if isinstance(raw, bool) else "UNMEASURED"
+    if value_type == "bool_per_file":
+        return (
+            "MEASURED"
+            if isinstance(raw, dict)
+            and bool(raw)
+            and all(isinstance(value, bool) for value in raw.values())
+            else "NOT_APPLICABLE" if isinstance(raw, dict) and not raw
+            else "UNMEASURED"
+        )
+    if value_type == "per_tag_rate_dict":
+        if isinstance(raw, dict) and not raw:
+            return "NOT_APPLICABLE"
+        if not isinstance(raw, dict):
+            return "UNMEASURED"
+        for tag, counts in raw.items():
+            if not isinstance(tag, str) or not tag or not isinstance(counts, dict):
+                return "UNMEASURED"
+            total = counts.get("total")
+            pivots = counts.get("pivots")
+            if (
+                isinstance(total, bool) or not isinstance(total, int) or total <= 0
+                or isinstance(pivots, bool) or not isinstance(pivots, int)
+                or pivots < 0 or pivots > total
+            ):
+                return "UNMEASURED"
+        return "MEASURED"
+    return "MEASURED" if _contract_number(raw, value_type) is not None else "UNMEASURED"
+
+
+def _value_honors_8dp(value: Any) -> bool:
+    """True iff every numeric leaf can be represented without losing >8dp precision."""
+    if value is None or isinstance(value, (bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value) and round(value, 8) == value
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _value_honors_8dp(item)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _performance_feature_records(
+    task: str, task_dir: str,
+) -> tuple[dict[str, dict[str, Any]], list[str], str | None]:
+    definitions = performance_metric_definitions()
+    path = _find_named_input(task_dir, f"gt_deep_metrics_{task}.json")
+    payload = _load_json(path) if path else None
+    artifact = os.path.basename(path) if path else None
+    records: dict[str, dict[str, Any]] = {}
+    missing: list[str] = []
+
+    identity_ok = isinstance(payload, dict) and payload.get("task_id") == task
+    artifact_schema_valid = bool(
+        identity_ok and payload.get("schema") == "gt_deep_metrics.v2"
+    )
+    precision_decimals = payload.get("precision_decimals") if identity_ok else None
+    if path and not identity_ok:
+        missing.append("PERF.task_identity")
+    for section, metrics in definitions.items():
+        section_payload: Any = None
+        if identity_ok:
+            if section == "behavioral_impact":
+                section_payload = payload.get(section)
+            else:
+                performance = payload.get("performance")
+                section_payload = performance.get(section) if isinstance(performance, dict) else None
+        for name, value_type in metrics:
+            if value_type == "run_ratio":
+                records[name] = {
+                    "family": "PERF", "status": "NOT_APPLICABLE",
+                    "source": "gt_run_metrics", "source_artifact": None,
+                    "value": None, "value_type": value_type,
+                    "metric_structure_valid": True,
+                    "value_precision_valid": True,
+                    "artifact_schema_valid": False,
+                    "precision_decimals": None,
+                    "formula_provenance": f"MANDATORY_METRICS.md#{section}.{name}",
+                    "denominator_provenance": f"mandatory_contract:{value_type}",
+                    "coverage_scope": "run",
+                    "reason": "run-level ratio; measured only after run aggregation",
+                }
+                continue
+            present = isinstance(section_payload, dict) and name in section_payload
+            raw = section_payload.get(name) if present else None
+            status = _performance_value_status(raw, value_type) if present else "UNMEASURED"
+            if status == "UNMEASURED":
+                missing.append(f"PERF.{name}")
+            records[name] = {
+                "family": "PERF", "status": status,
+                "source": "gt_deep_metrics", "source_artifact": artifact,
+                "value": raw if status == "MEASURED" else None,
+                "value_type": value_type,
+                "metric_structure_valid": status in {"MEASURED", "NOT_APPLICABLE"},
+                "value_precision_valid": _value_honors_8dp(raw) if present else False,
+                "artifact_schema_valid": artifact_schema_valid,
+                "precision_decimals": precision_decimals,
+                "formula_provenance": f"MANDATORY_METRICS.md#{section}.{name}",
+                "denominator_provenance": f"mandatory_contract:{value_type}",
+                "coverage_scope": "run" if value_type == "run_ratio" else "task",
+                "reason": None if status == "MEASURED" else (
+                    "not applicable for this task" if status == "NOT_APPLICABLE"
+                    else "required metric missing or malformed"
+                ),
+            }
+    return records, sorted(set(missing)), path
+
+
+def _run_ratio_feature_record(
+    run_id: str,
+    artifact_path: str | None,
+    *,
+    section: str,
+    name: str,
+    value_type: str,
+    expected_tasks: int,
+) -> dict[str, Any]:
+    """Validate one run-ratio row from the authoritative gt_run_metrics.v2 artifact."""
+    payload = _load_json(artifact_path) if artifact_path else None
+    metric: Any = None
+    if isinstance(payload, dict):
+        mandatory = payload.get("mandatory_performance")
+        section_payload = mandatory.get(section) if isinstance(mandatory, dict) else None
+        metric = section_payload.get(name) if isinstance(section_payload, dict) else None
+    status = metric.get("status") if isinstance(metric, dict) else None
+    value = metric.get("value") if isinstance(metric, dict) else None
+    measured_value_valid = (
+        status == "MEASURED"
+        and isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(float(value)) and float(value) >= 0.0
+        and isinstance(payload, dict) and payload.get("resolved", 0) > 0
+    )
+    not_applicable_valid = (
+        status == "NOT_APPLICABLE" and value is None
+        and isinstance(payload, dict) and payload.get("resolved") == 0
+    )
+    contract_valid = bool(
+        isinstance(payload, dict)
+        and payload.get("schema") == "gt_run_metrics.v2"
+        and payload.get("run_id") == run_id
+        and payload.get("precision_decimals") == 8
+        and payload.get("mandatory_performance_metric_count") == 58
+        and payload.get("mandatory_performance_collection_complete") is True
+        and payload.get("tasks") == expected_tasks
+        and isinstance(metric, dict)
+        and metric.get("value_type") == value_type
+        and metric.get("aggregation") == "ratio_of_run_total_cost_to_resolved_count"
+        and metric.get("missing_tasks") == []
+        and metric.get("measured_tasks") == expected_tasks
+        and (measured_value_valid or not_applicable_valid)
+        and isinstance(payload.get("token_efficiency"), dict)
+        and payload["token_efficiency"].get(name) == value
+        and payload["token_efficiency"].get("cost_collection_complete") is True
+    )
+    return {
+        "family": "PERF",
+        "status": status if contract_valid else "UNMEASURED",
+        "source": "gt_run_metrics",
+        "source_artifact": (
+            os.path.basename(artifact_path)
+            if contract_valid and isinstance(artifact_path, str) else None
+        ),
+        "value": value if contract_valid and status == "MEASURED" else None,
+        "value_type": value_type,
+        "metric_structure_valid": contract_valid,
+        "value_precision_valid": contract_valid and _value_honors_8dp(value),
+        "artifact_schema_valid": contract_valid,
+        "precision_decimals": 8 if contract_valid else None,
+        "formula_provenance": f"MANDATORY_METRICS.md#{section}.{name}",
+        "denominator_provenance": "gt_run_metrics:run total_cost_usd/resolved count",
+        "coverage_scope": "run",
+        "task_coverage_valid": contract_valid,
+        "aggregate_coverage_valid": contract_valid,
+        "reason": None if contract_valid else "run-level metric artifact missing or malformed",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -584,17 +843,25 @@ def _consumption_by_fact_class(
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     ledger = mod.build_consumption_ledger(trajectory, runtime_ledger_path=runtime_ledger_path)
-    per_class = ledger.get("per_class", {}) or {}
     out: dict[str, dict] = defaultdict(lambda: {"delivered": 0, "referenced": 0, "acted": 0, "max_level": 0})
-    for kind, pc in per_class.items():
-        fc = _CONSUMPTION_KIND_FACTCLASS.get(kind)
+    ledger_join_required = bool(runtime_ledger_path)
+    for entry in ledger.get("entries", []) or []:
+        if not isinstance(entry, dict) or entry.get("source") != "trajectory":
+            continue
+        if ledger_join_required and entry.get("joined") is not True:
+            continue
+        kind = str(entry.get("kind") or "")
+        fc = layer_to_fact_class(str(entry.get("ledger_layer") or kind))
+        if fc is None:
+            fc = _CONSUMPTION_KIND_FACTCLASS.get(kind)
         if fc is None:
             continue
+        lvl = int(entry.get("receipt") or 0)
         agg = out[fc]
-        agg["delivered"] += pc.get("delivered", 0)
-        agg["referenced"] += pc.get("referenced", 0)
-        agg["acted"] += pc.get("acted", 0)
-        agg["max_level"] = max(agg["max_level"], pc.get("max_level", 0))
+        agg["delivered"] += 1
+        agg["referenced"] += int(lvl >= 2)
+        agg["acted"] += int(lvl >= 3)
+        agg["max_level"] = max(agg["max_level"], lvl)
     return dict(out), ledger
 
 
@@ -892,6 +1159,376 @@ def verdict_for(lifecycle: dict[str, Any], role: str) -> str:
     return VERDICT_HOLD
 
 
+def ss_gate_readiness(
+    lifecycle: dict[str, Any],
+    *,
+    byte_proven: bool,
+    leak_free: bool | None,
+    dose_ok: bool | None,
+    fair_probe: bool | None,
+    live_witness: bool,
+    chronological_time: bool | None = None,
+) -> dict[str, Any]:
+    """Fail-closed projection of the seven SS-LIVE gates for one feature.
+
+    ``None`` means the artifact cannot prove that gate. Offline fixture/replay
+    evidence may populate individual gates, but the terminal bit additionally
+    requires an explicitly identified live witness.
+    """
+    delivered = _val(lifecycle.get("delivered"))
+    truth = _val(lifecycle.get("truth_valid"))
+    authority = _val(lifecycle.get("authority_valid"))
+    stale = _val(lifecycle.get("stale"))
+    late = _val(lifecycle.get("expired_late"))
+    receipt = _val(lifecycle.get("receipt_level"))
+
+    delivered_byte_proven = bool(delivered is True and byte_proven)
+    if truth is False or authority is False:
+        correct_info: bool | None = False
+    elif truth is True and authority is True:
+        correct_info = True
+    else:
+        correct_info = None
+
+    if stale is True or late is True:
+        correct_time: bool | None = False
+    elif chronological_time is True or chronological_time is False:
+        correct_time = chronological_time
+    else:
+        correct_time = None
+
+    acknowledged = receipt >= 2 if isinstance(receipt, int) else None
+    gates: dict[str, bool | None] = {
+        "delivered_byte_proven": delivered_byte_proven,
+        "correct_info": correct_info,
+        "correct_rl_adhered_time": correct_time,
+        "acknowledged": acknowledged,
+        "leak_zero": leak_free if isinstance(leak_free, bool) else None,
+        "dose_lte_one": dose_ok if isinstance(dose_ok, bool) else None,
+        "fair_probe": fair_probe,
+    }
+    return _readiness_from_gates(gates, live_witness=live_witness)
+
+
+_SS_GATE_NAMES = (
+    "delivered_byte_proven",
+    "correct_info",
+    "correct_rl_adhered_time",
+    "acknowledged",
+    "leak_zero",
+    "dose_lte_one",
+    "fair_probe",
+)
+
+_MEASUREMENT_GATE_NAMES = (
+    "artifact_valid",
+    "metric_structure_valid",
+    "precision_8dp",
+    "formula_provenance",
+    "denominator_provenance",
+    "applicability_resolved",
+    "task_coverage",
+    "aggregate_coverage",
+)
+
+_INFRA_CONTROL_GATE_NAMES = (
+    "runtime_member_control_receipt",
+    "mediated_fact_ids",
+    "mediation_correct",
+    "mediation_causal_fair_probe",
+)
+_SUPPORT_GATE_NAMES = (
+    "supported_fact_delivery_join",
+    "candidate_local_contribution",
+    "source_contribution_correct",
+    "timing_inherited_from_fact_delivery",
+    "source_causal_fair_probe",
+)
+
+
+def _readiness_from_gates(
+    gates: dict[str, bool | None], *, live_witness: bool = False,
+) -> dict[str, Any]:
+    """Normalize one seven-gate projection without manufacturing live proof."""
+    if tuple(gates) != _SS_GATE_NAMES:
+        raise ValueError(
+            "gt_feature_metrics: SS readiness gate order/schema drift; got "
+            f"{list(gates)}"
+        )
+    blockers = [name for name, value in gates.items() if value is not True]
+    if not live_witness:
+        blockers.append("live_witness")
+    return {
+        "gates": gates,
+        "live_witness": bool(live_witness),
+        "ss_live": bool(live_witness and all(value is True for value in gates.values())),
+        "blockers": blockers,
+    }
+
+
+def _typed_readiness(
+    role: str,
+    gates: dict[str, bool | None],
+    *,
+    gate_names: tuple[str, ...],
+    live_witness: bool = False,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Normalize a non-delivery readiness contract without borrowing SS delivery gates."""
+    if tuple(gates) != gate_names:
+        raise ValueError(
+            f"gt_feature_metrics: {role} readiness gate order/schema drift; got {list(gates)}"
+        )
+    blockers = [name for name, value in gates.items() if value is not True]
+    if not live_witness:
+        blockers.append("live_witness")
+    complete = all(value is True for value in gates.values())
+    out: dict[str, Any] = {
+        "role": role,
+        "gates": gates,
+        "live_witness": bool(live_witness),
+        "ss_live": bool(live_witness and complete),
+        f"{role}_complete": complete,
+        "blockers": blockers,
+    }
+    if extra:
+        out.update(extra)
+    return out
+
+
+def _measurement_only_readiness(
+    record: dict[str, Any] | None = None,
+    *,
+    aggregate_coverage: bool = False,
+    live_witness: bool = False,
+) -> dict[str, Any]:
+    """Typed PERF terminal: measurement validity/coverage, never model delivery."""
+    row = record or {}
+    status = row.get("status")
+    applicability_resolved = status in {"MEASURED", "NOT_APPLICABLE"}
+    task_scope = row.get("coverage_scope") == "task"
+    artifact_valid = bool(
+        applicability_resolved
+        and row.get("artifact_schema_valid") is True
+        and isinstance(row.get("source_artifact"), str)
+        and bool(row.get("source_artifact"))
+        and (task_scope or row.get("source") == "gt_run_metrics")
+    )
+    gates: dict[str, bool | None] = {
+        "artifact_valid": artifact_valid,
+        "metric_structure_valid": row.get("metric_structure_valid") is True,
+        "precision_8dp": bool(
+            row.get("precision_decimals") == 8
+            and row.get("value_precision_valid") is True
+        ),
+        "formula_provenance": bool(row.get("formula_provenance")),
+        "denominator_provenance": bool(row.get("denominator_provenance")),
+        "applicability_resolved": applicability_resolved,
+        "task_coverage": bool(
+            applicability_resolved
+            and (task_scope or row.get("task_coverage_valid") is True)
+        ),
+        "aggregate_coverage": bool(aggregate_coverage),
+    }
+    return _typed_readiness(
+        "measurement",
+        gates,
+        gate_names=_MEASUREMENT_GATE_NAMES,
+        live_witness=live_witness,
+        extra={
+            "coverage": {
+                "declared_scope": row.get("coverage_scope"),
+                "task": applicability_resolved,
+                "aggregate": bool(aggregate_coverage),
+            }
+        },
+    )
+
+
+def _infra_control_readiness(
+    member: str,
+    fact_classes: tuple[str, ...],
+    fact_lifecycles: dict[str, dict[str, Any]],
+    *,
+    ledger_artifact: str,
+    live_witness: bool = False,
+) -> dict[str, Any]:
+    """Typed CAP-control terminal with links, never copied FACT delivery gates."""
+    scope = sorted(fact_classes or tuple(fact_lifecycles))
+
+    def linked(field: str) -> list[str]:
+        return [
+            fact_id for fact_id in scope
+            if _val(fact_lifecycles.get(fact_id, {}).get(field)) is True
+        ]
+
+    eligible_fact_ids = linked("eligible")
+    produced_fact_ids = linked("produced")
+    delivered_fact_ids = linked("delivered")
+    mediation = {
+        "status": "UNMEASURED",
+        "linked_fact_ids": scope,
+        "runtime_linked_fact_ids": [],
+        "runtime_linkage_reason": "exact profile-member control receipt unavailable",
+        "eligible_fact_ids": eligible_fact_ids,
+        "produced_fact_ids": produced_fact_ids,
+        "delivered_fact_ids": delivered_fact_ids,
+        "source_artifact": ledger_artifact,
+    }
+    gates: dict[str, bool | None] = {
+        # The current collector has no exact per-member control receipt. Keep
+        # this unknown rather than inheriting any linked FACT producer's seal.
+        "runtime_member_control_receipt": None,
+        "mediated_fact_ids": True if scope else None,
+        "mediation_correct": None,
+        "mediation_causal_fair_probe": None,
+    }
+    return _typed_readiness(
+        "infra_control",
+        gates,
+        gate_names=_INFRA_CONTROL_GATE_NAMES,
+        live_witness=live_witness,
+        extra={"member": member, "mediation": mediation},
+    )
+
+
+def _valid_readiness_projection(value: object) -> bool:
+    """Validate the canonical object and its derived terminal/blocker fields."""
+    if not isinstance(value, dict):
+        return False
+    gates = value.get("gates")
+    if not isinstance(gates, dict):
+        return False
+    role = value.get("role")
+    gate_names = {
+        None: _SS_GATE_NAMES,
+        "measurement": _MEASUREMENT_GATE_NAMES,
+        "infra_control": _INFRA_CONTROL_GATE_NAMES,
+        "support": _SUPPORT_GATE_NAMES,
+    }.get(role, ())
+    if not gate_names or tuple(gates) != gate_names:
+        return False
+    if any(gate is not True and gate is not False and gate is not None
+           for gate in gates.values()):
+        return False
+    live_witness = value.get("live_witness")
+    ss_live = value.get("ss_live")
+    if not isinstance(live_witness, bool) or not isinstance(ss_live, bool):
+        return False
+    complete = all(gate is True for gate in gates.values())
+    expected_live = live_witness and complete
+    expected_blockers = [name for name, gate in gates.items() if gate is not True]
+    if not live_witness:
+        expected_blockers.append("live_witness")
+    if ss_live is not expected_live or value.get("blockers") != expected_blockers:
+        return False
+    if role is not None and value.get(f"{role}_complete") is not complete:
+        return False
+    return True
+
+
+def _acquisition_readiness(
+    record: dict[str, Any], *, leak_free: bool | None, dose_ok: bool | None,
+) -> dict[str, Any]:
+    """Project ACQ support evidence without borrowing the FACT delivery gates."""
+    receipt = record.get("receipt_level")
+    seal = record.get("content_sha256_16")
+    candidate_local = bool(
+        isinstance(record.get("source_artifact"), str)
+        and record.get("source_artifact")
+        and isinstance(record.get("block_id"), str)
+        and record.get("block_id")
+        and isinstance(seal, str)
+        and seal
+    )
+    joined = bool(
+        record.get("status") == "MEASURED"
+        and candidate_local
+        and isinstance(receipt, int) and not isinstance(receipt, bool)
+        and receipt >= 2
+    )
+    return _typed_readiness(
+        "support",
+        {
+            "supported_fact_delivery_join": joined,
+            "candidate_local_contribution": candidate_local,
+            # Source truth, inherited timing, and causal contribution require
+            # producer-owned fields/ablation that brief receipt v1 does not carry.
+            "source_contribution_correct": None,
+            "timing_inherited_from_fact_delivery": None,
+            "source_causal_fair_probe": None,
+        },
+        gate_names=_SUPPORT_GATE_NAMES,
+        live_witness=False,
+    )
+
+
+def _row_has_seal_join(
+    row: dict[str, Any], entries: object,
+) -> bool:
+    """Whether one exact producer row is byte-joined into a model observation."""
+    if not isinstance(entries, list):
+        return False
+    seal = row.get("content_sha256_16")
+    chars = row.get("chars_delivered")
+    if not isinstance(seal, str) or not seal:
+        return False
+    if not isinstance(chars, int) or isinstance(chars, bool) or chars <= 0:
+        return False
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("source") != "trajectory":
+            continue
+        if entry.get("joined") is not True or entry.get("join_method") != "seal":
+            continue
+        if entry.get("content_sha256_16") != seal or entry.get("chars") != chars:
+            continue
+        if entry.get("ledger_layer") != row.get("layer"):
+            continue
+        return True
+    return False
+
+
+def _member_delivery_byte_proven(
+    member: str,
+    rows: list[dict],
+    consumption_ledger: dict[str, Any],
+) -> bool:
+    """True only for an exact CAP-member producer seal joined to visible bytes.
+
+    Fact-class or layer agreement is insufficient because several capabilities
+    produce or mediate the same class.  Current rows without the explicit
+    ``profile_member`` producer identity therefore remain fail-closed.
+    """
+    if cap_role_for(member) != "byte_owner":
+        return False
+    entries = consumption_ledger.get("entries")
+    for row in rows:
+        if row.get("profile_member") != member:
+            continue
+        if row.get("outcome") != "delivered":
+            continue
+        if _row_has_seal_join(row, entries):
+            return True
+    return False
+
+
+def _fact_delivery_byte_proven(
+    fact_class: str,
+    rows: list[dict],
+    consumption_ledger: dict[str, Any],
+) -> bool:
+    """True only when a row for this exact FACT class has a seal join."""
+    entries = consumption_ledger.get("entries")
+    for row in rows:
+        if row.get("outcome") != "delivered":
+            continue
+        if layer_to_fact_class(str(row.get("layer") or "")) != fact_class:
+            continue
+        if _row_has_seal_join(row, entries):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Leak canary — no task id / gold path on any model-facing field.
 # ---------------------------------------------------------------------------
@@ -958,6 +1595,14 @@ def _infra_member_lifecycle(
     lc["cost_delta"] = unmeasured("infrastructure: mediation-only")
     lc["state_changed"] = not_eligible("infra mediates; owns no direct state predicate")
     lc["harmful"] = measured(False, source_artifact=ledger_artifact)
+    for field in (
+        "delivered", "expired_late", "stale", "native_valid",
+        "render_observation_hash_match", "receipt_level", "reacquired",
+    ):
+        lc[field] = not_eligible(
+            "infra control owns mediation, not a downstream FACT delivery",
+            source_artifact=ledger_artifact,
+        )
 
     if member == "GT_GLOBAL_ARBITER":
         cand = int(infra_signals["arbiter_candidates"])
@@ -975,44 +1620,22 @@ def _infra_member_lifecycle(
         lc["eligible"] = measured(staged, source_artifact=ledger_artifact)
         lc["not_eligible"] = measured(not staged, source_artifact=ledger_artifact)
         lc["produced"] = measured(staged, source_artifact=ledger_artifact)
-        lc["delivered"] = not_eligible("freshness is host-side; not delivered as model bytes")
-        lc["native_valid"] = not_eligible("no model-facing render")
-        lc["receipt_level"] = not_eligible("freshness has no receipt")
         return lc
 
     scope = list(fcs) if fcs else list(fact_lifecycles)
     elig = any(_val(fact_lifecycles[fc].get("eligible")) for fc in scope)
     prod = any(_val(fact_lifecycles[fc].get("produced")) for fc in scope)
-    deliv = any(_val(fact_lifecycles[fc].get("delivered")) for fc in scope)
-    native = any(_val(fact_lifecycles[fc].get("native_valid")) for fc in scope)
     abstain = any(_val(fact_lifecycles[fc].get("correct_abstain")) for fc in scope)
-    receipts = [_val(fact_lifecycles[fc].get("receipt_level")) for fc in scope]
-    receipts = [r for r in receipts if isinstance(r, int)]
     lc["eligible"] = measured(bool(elig), source_artifact=ledger_artifact)
     lc["not_eligible"] = measured(not elig, source_artifact=ledger_artifact)
     lc["produced"] = measured(bool(prod), source_artifact=ledger_artifact)
-    lc["delivered"] = measured(bool(deliv), source_artifact=ledger_artifact)
     # a mediator whose class correctly abstained (e.g. cert render on a clean submit) is a
     # correct abstain, NOT dark.
-    if not deliv and abstain:
+    if abstain:
         lc["correct_abstain"] = measured(True, source_artifact=ledger_artifact)
-    if deliv:
-        lc["native_valid"] = measured(bool(native), source_artifact=ledger_artifact)
     # a SCOPED mediator inherits the timing/freshness failure of the class it shaped: if the
     # delivered mediated fact was stale/late, the mediation failed (→ FIX). A KERNEL mediator
     # (fcs empty) touches all classes and must NOT inherit any single class's failure.
-    if fcs:
-        stale_any = any(_val(fact_lifecycles[fc].get("stale")) for fc in scope)
-        late_any = any(_val(fact_lifecycles[fc].get("expired_late")) for fc in scope)
-        if stale_any:
-            lc["stale"] = measured(True, source_artifact=ledger_artifact)
-        if late_any:
-            lc["expired_late"] = measured(True, source_artifact=ledger_artifact)
-    if receipts:
-        lc["receipt_level"] = measured(max(receipts), source_artifact=traj_artifact)
-    else:
-        lc["receipt_level"] = unmeasured("mediated classes carry no tag-based receipt (native)",
-                                         source_artifact=ledger_artifact)
     return lc
 
 
@@ -1041,10 +1664,131 @@ def member_record(
     verdict = verdict_for(lc, role)
     return {
         "role": role,
+        "cap_role": cap_role_for(member),
         "fact_classes": list(fcs) if fcs else ["*kernel*"],
         "lifecycle": lc,
         "summary": feature_summary_from_lifecycle(lc, verdict),
         "verdict": verdict,
+    }
+
+
+def _acquisition_feature_records(
+    task_dir: str,
+    consumption_ledger: dict[str, Any],
+    trajectory: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Collect exact source-to-receipt ACQ proofs when the persisted brief exists."""
+    inventory = canonical_feature_inventory()["ACQ"]
+    # Unlike task-named deep metrics, brief_result has no task id in its
+    # filename. Bound it to the task directory or its immediate substrate
+    # parent so a run-root sidecar can never contaminate sibling tasks.
+    brief_path = _find_named_input(task_dir, "brief_result.json", locations=2)
+    brief_payload = _load_json(brief_path) if brief_path else None
+    if brief_path is not None and not isinstance(brief_payload, dict):
+        raise ValueError(
+            f"gt_feature_metrics: malformed required ACQ artifact {brief_path!r}"
+        )
+    try:
+        from acq_provenance import collect_acq_provenance
+    except ImportError:
+        collector_available = False
+        records = {
+            name: {
+                "status": "UNMEASURED", "source_artifact": None,
+                "receipt_level": None, "blocker": "acq_provenance_collector_unavailable",
+                "block_id": None, "content_sha256_16": None,
+            }
+            for name in inventory
+        }
+    else:
+        collector_available = True
+        records = collect_acq_provenance(brief_payload, consumption_ledger, trajectory)
+
+    if tuple(records) != tuple(inventory):
+        raise ValueError(
+            "gt_feature_metrics: ACQ collector name/order drift; expected "
+            f"{list(inventory)}, got {list(records)}"
+        )
+    missing: list[str] = []
+    if brief_path is None:
+        missing.append("acq_provenance")
+    if not collector_available:
+        missing.append("acq_provenance_collector")
+    normalized: dict[str, dict[str, Any]] = {}
+    for name, raw in records.items():
+        if not isinstance(raw, dict) or raw.get("status") not in {"MEASURED", "UNMEASURED"}:
+            raise ValueError(f"gt_feature_metrics: malformed ACQ record for {name!r}")
+        record = dict(raw)
+        record["family"] = "ACQ"
+        record["source"] = "acq_provenance"
+        normalized[name] = record
+    return normalized, sorted(set(missing))
+
+
+def _canonical_task_features(
+    task: str,
+    task_dir: str,
+    cap_features: dict[str, dict],
+    fact_classes: dict[str, dict],
+    fact_readiness: dict[str, dict[str, Any]],
+    consumption_ledger: dict[str, Any],
+    trajectory: dict[str, Any],
+    *,
+    leak_free: bool | None,
+    dose_ok: bool | None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Build the explicit 128-row task ledger without mutating legacy fields."""
+    inventory = canonical_feature_inventory()
+    master: dict[str, dict[str, Any]] = {}
+    acq, acq_missing = _acquisition_feature_records(
+        task_dir, consumption_ledger, trajectory
+    )
+    for record in acq.values():
+        record["ss_readiness"] = _acquisition_readiness(
+            record, leak_free=leak_free, dose_ok=dose_ok
+        )
+    master.update(acq)
+    for name in inventory["CAP"]:
+        if name not in cap_features:
+            raise ValueError(f"gt_feature_metrics: missing legacy CAP record {name!r}")
+        master[name] = {
+            "family": "CAP", "status": "MEASURED", "source": "features",
+            "source_artifact": "gt.feature_metrics.v1", "record_ref": f"features.{name}",
+            "ss_readiness": cap_features[name]["ss_readiness"],
+        }
+    for name in inventory["FACT"]:
+        if name not in fact_classes:
+            raise ValueError(f"gt_feature_metrics: missing legacy FACT record {name!r}")
+        master[name] = {
+            "family": "FACT", "status": "MEASURED", "source": "fact_classes",
+            "source_artifact": "gt.feature_metrics.v1", "record_ref": f"fact_classes.{name}",
+            "ss_readiness": fact_readiness[name],
+        }
+    performance, perf_missing, deep_path = _performance_feature_records(task, task_dir)
+    for record in performance.values():
+        record["ss_readiness"] = _measurement_only_readiness(record)
+    master.update(performance)
+
+    expected = {name: family for family, names in inventory.items() for name in names}
+    actual = {name: record.get("family") for name, record in master.items()}
+    inventory_complete = actual == expected and all(
+        _valid_readiness_projection(record.get("ss_readiness"))
+        for record in master.values()
+    )
+    missing_required_inputs: list[str] = []
+    if deep_path is None:
+        missing_required_inputs.append("deep_metrics")
+    missing_required_inputs.extend(item for item in acq_missing if "." not in item)
+    missing_feature_inputs = sorted(
+        item for item in acq_missing + perf_missing if "." in item
+    )
+    return master, {
+        "family_counts": {family: len(names) for family, names in inventory.items()},
+        "inventory_count": len(master),
+        "inventory_complete": inventory_complete,
+        "required_inputs_complete": not missing_required_inputs and not missing_feature_inputs,
+        "missing_required_inputs": sorted(missing_required_inputs),
+        "missing_feature_inputs": missing_feature_inputs,
     }
 
 
@@ -1080,6 +1824,10 @@ def collect_task(
     timeline = _timeline(traj)
     ledger_by_fc = classify_ledger(rows)
     consumption_by_fc, cons_ledger = _consumption_by_fact_class(traj, ledger_path)
+    visible_audit_complete = (
+        _visible_audit_inputs_complete(traj_path, ledger_path)
+        and cons_ledger.get("schema") == "gt.consumption_ledger.v2"
+    )
     state_by_fc = state_predicates(timeline, ledger_by_fc)
     infra_signals = _infra_signals(rows, ledger_by_fc)
 
@@ -1116,7 +1864,64 @@ def collect_task(
     delivered_files: set[str] = set()
     for b in ledger_by_fc.values():
         delivered_files |= set(b.get("delivered_files", set()))
-    leaks = leak_canary(delivered_files, task, list(gold_paths or []))
+    leaks = set(leak_canary(delivered_files, task, list(gold_paths or [])))
+    # The SS leak gate applies to the exact model-visible payload bytes, not
+    # merely their file identities. The consumption ledger performs that scan
+    # while it seal-joins each delivery; preserve every hit here so the run
+    # aggregate fails closed.
+    leaks.update(cons_ledger.get("test_identity_leak_hits") or [])
+
+    doses_by_observation: Counter = Counter()
+    for entry in cons_ledger.get("entries") or []:
+        if not isinstance(entry, dict) or entry.get("source") != "trajectory":
+            continue
+        if int(entry.get("receipt") or 0) < 1:
+            continue
+        msg_index = entry.get("msg_index")
+        if isinstance(msg_index, int):
+            doses_by_observation[msg_index] += 1
+    max_dose = max(doses_by_observation.values(), default=0)
+    dose_violations = sum(1 for count in doses_by_observation.values() if count > 1)
+    leak_gate: bool | None = not leaks if visible_audit_complete else None
+    dose_gate: bool | None = dose_violations == 0 if visible_audit_complete else None
+
+    # The collector is an artifact grader, not a live-run authority. It exposes
+    # the exact gate holes per feature but cannot manufacture the terminal live
+    # witness or a causal fair-probe result.
+    for member, feature in features.items():
+        cap_role = cap_role_for(member)
+        if cap_role != "byte_owner":
+            feature["ss_readiness"] = _infra_control_readiness(
+                member,
+                member_fact_classes(member),
+                fact_lifecycles,
+                ledger_artifact=ledger_artifact,
+            )
+            feature["ss_readiness"]["cap_role"] = cap_role
+        else:
+            byte_proven = _member_delivery_byte_proven(member, rows, cons_ledger)
+            feature["ss_readiness"] = ss_gate_readiness(
+                feature["lifecycle"],
+                byte_proven=byte_proven,
+                leak_free=leak_gate,
+                dose_ok=dose_gate,
+                fair_probe=None,
+                live_witness=False,
+            )
+            feature["ss_readiness"]["cap_role"] = cap_role
+
+    fact_readiness: dict[str, dict[str, Any]] = {}
+    for fact_class, lifecycle in fact_lifecycles.items():
+        fact_readiness[fact_class] = ss_gate_readiness(
+            lifecycle,
+            byte_proven=_fact_delivery_byte_proven(
+                fact_class, rows, cons_ledger
+            ),
+            leak_free=leak_gate,
+            dose_ok=dose_gate,
+            fair_probe=None,
+            live_witness=False,
+        )
 
     endpoints = behavioural_endpoints(timeline)
     baseline_endpoints = None
@@ -1129,6 +1934,10 @@ def collect_task(
         fc: {k: v for k, v in lc.items() if not k.startswith("_")}
         for fc, lc in fact_lifecycles.items()
     }
+    ss_features, ss_integrity = _canonical_task_features(
+        task, task_dir, features, fc_json, fact_readiness, cons_ledger, traj,
+        leak_free=leak_gate, dose_ok=dose_gate,
+    )
     return {
         "schema": "gt.feature_metrics.v1",
         "grader_version": GRADER_VERSION,
@@ -1143,6 +1952,9 @@ def collect_task(
         },
         "features": features,
         "fact_classes": fc_json,
+        "ss_feature_inventory_schema": "gt.ss_feature_inventory.v1",
+        "ss_features": ss_features,
+        "ss_integrity": ss_integrity,
         "atomic_events": [e.to_json() for e in events],
         "behavioural_endpoints": {
             "gt_on": endpoints,
@@ -1153,8 +1965,10 @@ def collect_task(
             "enabled_members": members,
             "members_present": sorted(features),
             "all_members_present": sorted(features) == sorted(members),
-            "leak_canary": leaks,
+            "leak_canary": sorted(leaks),
             "leak_count": len(leaks),
+            "max_dose_per_observation": max_dose,
+            "dose_violation_count": dose_violations,
             "consumption_schema": cons_ledger.get("schema"),
             "ledger_rows": len(rows),
         },
@@ -1253,7 +2067,13 @@ def write_task_metrics(record: dict, out_dir: str) -> tuple[str, str]:
 # Fail-closed run aggregate.
 # ---------------------------------------------------------------------------
 
-def aggregate_run(run_id: str, task_records: list[dict], profile: str = "2") -> dict[str, Any]:
+def aggregate_run(
+    run_id: str,
+    task_records: list[dict],
+    profile: str = "2",
+    *,
+    run_metrics_artifact: str | None = None,
+) -> dict[str, Any]:
     """Aggregate per-task records into the three run-level artifacts.
 
     REFUSES (integrity.publishable=False) if ANY enabled feature record is absent from ANY
@@ -1272,8 +2092,111 @@ def aggregate_run(run_id: str, task_records: list[dict], profile: str = "2") -> 
     integrity: dict[str, Any] = {
         "schema": "gt.metric_integrity.v1", "grader_version": GRADER_VERSION,
         "run_id": run_id, "profile": profile, "enabled_members": enabled,
-        "missing_records": [], "leak_total": 0, "reconciliation": {}, "publishable": True,
+        "missing_records": [], "leak_total": 0, "dose_violation_total": 0,
+        "reconciliation": {}, "publishable": True,
     }
+    canonical = canonical_feature_inventory()
+    perf_contracts = {
+        name: (section, value_type)
+        for section, definitions in performance_metric_definitions().items()
+        for name, value_type in definitions
+    }
+    ss_run_features: dict[str, dict[str, Any]] = {}
+    ss_integrity: dict[str, Any] = {
+        "schema": "gt.ss_feature_inventory.integrity.v1",
+        "expected_family_counts": {family: len(names) for family, names in canonical.items()},
+        "expected_feature_count": 128,
+        "missing_records": [],
+        "tasks_with_inventory_drift": [],
+        "tasks_with_incomplete_inputs": [],
+        "publishable": bool(task_records),
+    }
+
+    for family, names in canonical.items():
+        for name in names:
+            statuses: Counter = Counter()
+            present = 0
+            task_feature_rows: list[dict[str, Any]] = []
+            for rec in task_records:
+                feature = rec.get("ss_features", {}).get(name)
+                if not isinstance(feature, dict) or feature.get("family") != family:
+                    ss_integrity["missing_records"].append({
+                        "task": rec.get("task"), "family": family, "feature": name,
+                    })
+                    ss_integrity["publishable"] = False
+                    continue
+                present += 1
+                task_feature_rows.append(feature)
+                statuses[str(feature.get("status") or "UNMEASURED")] += 1
+            ss_run_features[name] = {
+                "family": family,
+                "present_in_tasks": present,
+                "statuses": dict(statuses),
+            }
+            if family == "PERF" and task_feature_rows:
+                section, value_type = perf_contracts[name]
+                resolved = all(
+                    row.get("status") in {"MEASURED", "NOT_APPLICABLE"}
+                    for row in task_feature_rows
+                )
+                if value_type == "run_ratio":
+                    aggregate_record = _run_ratio_feature_record(
+                        run_id,
+                        run_metrics_artifact,
+                        section=section,
+                        name=name,
+                        value_type=value_type,
+                        expected_tasks=len(task_records),
+                    )
+                    aggregate_coverage = aggregate_record["aggregate_coverage_valid"]
+                else:
+                    first = dict(task_feature_rows[0])
+                    aggregate_record = {
+                        **first,
+                        "status": "MEASURED" if resolved else "UNMEASURED",
+                        "source_artifact": "gt.feature_metrics.run.v1",
+                        "artifact_schema_valid": bool(
+                            all(
+                                row.get("artifact_schema_valid") is True
+                                for row in task_feature_rows
+                            )
+                        ),
+                        "precision_decimals": (
+                            8 if all(row.get("precision_decimals") == 8
+                                     for row in task_feature_rows) else None
+                        ),
+                        "value_precision_valid": all(
+                            row.get("value_precision_valid") is True
+                            for row in task_feature_rows
+                        ),
+                    }
+                    aggregate_coverage = bool(
+                        task_records and present == len(task_records) and resolved
+                    )
+                ss_run_features[name]["measurement"] = aggregate_record
+                ss_run_features[name]["ss_readiness"] = _measurement_only_readiness(
+                    aggregate_record,
+                    aggregate_coverage=aggregate_coverage,
+                )
+    for rec in task_records:
+        if not rec.get("ss_integrity", {}).get("inventory_complete", False):
+            ss_integrity["tasks_with_inventory_drift"].append(rec.get("task"))
+            ss_integrity["publishable"] = False
+        if not rec.get("ss_integrity", {}).get("required_inputs_complete", False):
+            ss_integrity["tasks_with_incomplete_inputs"].append(rec.get("task"))
+            ss_integrity["publishable"] = False
+    ss_integrity["tasks_with_incomplete_inputs"] = sorted(
+        str(task) for task in ss_integrity["tasks_with_incomplete_inputs"]
+    )
+    ss_integrity["tasks_with_inventory_drift"] = sorted(
+        str(task) for task in ss_integrity["tasks_with_inventory_drift"]
+    )
+    ss_integrity["missing_records"] = sorted(
+        ss_integrity["missing_records"],
+        key=lambda row: (str(row.get("task")), row["family"], row["feature"]),
+    )
+    run_metrics["ss_feature_inventory_schema"] = "gt.ss_feature_inventory.run.v1"
+    run_metrics["ss_features"] = ss_run_features
 
     for member in enabled:
         verdicts: Counter = Counter()
@@ -1332,21 +2255,32 @@ def aggregate_run(run_id: str, task_records: list[dict], profile: str = "2") -> 
         })
 
     leak_total = 0
+    dose_violation_total = 0
     atomic_total = 0
     for rec in task_records:
         leak_total += rec.get("integrity", {}).get("leak_count", 0)
+        dose_violation_total += rec.get("integrity", {}).get("dose_violation_count", 0)
         atomic_total += len(rec.get("atomic_events", []))
         if not rec.get("integrity", {}).get("all_members_present", False):
             integrity["publishable"] = False
     integrity["leak_total"] = leak_total
     if leak_total > 0:
         integrity["publishable"] = False
+    integrity["dose_violation_total"] = dose_violation_total
+    if dose_violation_total > 0:
+        integrity["publishable"] = False
     integrity["reconciliation"] = {
         "atomic_events_total": atomic_total,
         "tasks_reconciled": len(task_records),
         "enabled_member_count": len(enabled),
     }
-    return {"run_metrics": run_metrics, "effects": effects, "integrity": integrity}
+    integrity["ss_128"] = ss_integrity
+    return {
+        "run_metrics": run_metrics,
+        "effects": effects,
+        "integrity": integrity,
+        "ss_integrity": ss_integrity,
+    }
 
 
 def write_run_aggregate(run_id: str, agg: dict, out_dir: str) -> dict[str, str]:
@@ -1387,6 +2321,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--baseline-root", default=None)
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--out", default=None, help="run-level output dir (default: run_dir)")
+    ap.add_argument(
+        "--run-metrics-artifact", default=None,
+        help="validated gt_run_metrics.v2 input for run-ratio PERF rows",
+    )
     args = ap.parse_args(argv)
 
     run_dir = args.run_dir
@@ -1406,16 +2344,26 @@ def main(argv: list[str] | None = None) -> int:
         print("gt_feature_metrics: no task dirs with a mini trajectory", file=sys.stderr)
         return 2
 
-    agg = aggregate_run(run_id, records, profile=args.profile)
+    agg = aggregate_run(
+        run_id,
+        records,
+        profile=args.profile,
+        run_metrics_artifact=args.run_metrics_artifact,
+    )
     paths = write_run_aggregate(run_id, agg, out_dir)
-    publishable = agg["integrity"]["publishable"]
+    publishable = (
+        agg["integrity"]["publishable"]
+        and agg["ss_integrity"]["publishable"]
+    )
     print("gt_feature_metrics: " + str(len(records)) + " tasks, publishable=" + str(publishable))
     for k, p in paths.items():
         print("  " + k + ": " + p)
     if not publishable:
         print("gt_feature_metrics: INTEGRITY FAILURE - aggregate refuses to publish "
               "(missing_records=" + str(len(agg["integrity"]["missing_records"])) +
-              ", leak_total=" + str(agg["integrity"]["leak_total"]) + ")", file=sys.stderr)
+              ", leak_total=" + str(agg["integrity"]["leak_total"]) +
+              ", dose_violation_total=" +
+              str(agg["integrity"]["dose_violation_total"]) + ")", file=sys.stderr)
         return 3
     return 0
 

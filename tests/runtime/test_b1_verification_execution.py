@@ -182,6 +182,33 @@ def test_pass_preferred_over_earlier_unavailable(monkeypatch):
     assert r["verdict"] == "pass"
 
 
+def test_executor_rc_none_before_spawn_is_not_executed():
+    def rejected(_cmd, _cwd, _timeout):
+        return None, "", "replay_verification_unsupported_command"
+
+    result = cr._run_via_executor(
+        rejected, "/repo", ["pytest", "a/test_mod.py"],
+        timeout=10, max_output_chars=4000,
+    )
+
+    assert result["executed"] is False
+    assert result["timed_out"] is False
+
+
+def test_executor_timeout_preserves_started_and_timed_out_truth():
+    def timed_out(_cmd, _cwd, _timeout):
+        return None, "", "replay_verification_timeout"
+
+    result = cr._run_via_executor(
+        timed_out, "/repo", ["pytest", "a/test_mod.py"],
+        timeout=10, max_output_chars=4000,
+    )
+
+    assert result["executed"] is True
+    assert result["timed_out"] is True
+    assert result["reason"] == "timeout"
+
+
 # ---------------------------------------------------------------------------
 # native_render — Format D: anonymized native failure block
 #   KEEP error-class + native value-comparison + AGENT-own-source frames.

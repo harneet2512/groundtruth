@@ -315,7 +315,8 @@ class V1RBriefResult:
     # consumed. Each entry: ``{block_id, fact_class, label, char_span:[start,end],
     # content_hash}``. HOST-SIDE METADATA — NEVER rendered into ``brief_text`` (the
     # brief bytes are byte-identical whether this is populated or not). Empty unless
-    # ``GT_BLOCK_RECEIPTS`` is set (default off, additive). No ranking effect.
+    # ``GT_BLOCK_RECEIPTS`` explicitly enables them, or ``GT_INSEAM_METRICS``
+    # enables them when the dedicated flag is absent. No ranking effect.
     block_receipts: list[dict] = field(default_factory=list)
     # B-31 (Brief-F9): which token counter produced ``token_estimate`` /governed the
     # DOSE rail — ``"gte-modernbert-bpe"`` (the baked HF BPE vocabulary) or
@@ -1557,10 +1558,19 @@ _BLOCK_FACT_CLASS: dict[str, str] = {
 
 
 def _block_receipts_on() -> bool:
-    """GT_BLOCK_RECEIPTS master switch — default OFF, additive (never touches the
-    brief bytes either way). When OFF, ``block_receipts`` stays empty."""
+    """Whether host-side brief block receipts are enabled.
+
+    ``GT_BLOCK_RECEIPTS`` remains the explicit override. When absent, the
+    already-profiled ``GT_INSEAM_METRICS`` capability enables receipts. With
+    neither present the metadata stays off. Brief bytes never depend on this.
+    """
     import os as _os
-    return (_os.environ.get("GT_BLOCK_RECEIPTS") or "").strip().lower() not in (
+    _flag = (
+        _os.environ.get("GT_BLOCK_RECEIPTS")
+        if "GT_BLOCK_RECEIPTS" in _os.environ
+        else _os.environ.get("GT_INSEAM_METRICS")
+    )
+    return (_flag or "").strip().lower() not in (
         "", "0", "false", "no",
     )
 
@@ -2461,11 +2471,18 @@ _OBLIGATION_LINE_CHARS = 200  # per-obligation verbatim cap
 
 
 def _obligations_v2_on() -> bool:
-    """GT_OBLIGATIONS_V2 master switch — default OFF, byte-identical when off."""
+    """Resolve structured obligations for the production Profile-2 path.
+
+    ``GT_OBLIGATIONS_V2`` remains an explicit diagnostic override/kill switch.
+    When it is absent, the live workflow's explicit Profile-2 activation owns
+    this behavior through the existing obligation capability; no extra CAP row
+    or unreceipted feature flag is introduced.
+    """
     import os as _os
-    return (_os.environ.get("GT_OBLIGATIONS_V2") or "").strip().lower() not in (
-        "", "0", "false", "no",
-    )
+    _raw = _os.environ.get("GT_OBLIGATIONS_V2")
+    if _raw is not None and _raw.strip():
+        return _raw.strip().lower() not in ("0", "false", "no", "off")
+    return (_os.environ.get("GT_RL_PROFILE") or "").strip() == "2"
 
 
 def _dynamic_obligation_budget(n_clauses: int) -> int:
@@ -2495,19 +2512,23 @@ def _v2_order_key(row: dict) -> tuple:
     )
 
 
-def _write_obligations_v2_artifact(rows: list[dict], gold_path_tokens: set[str]) -> None:
+def _write_obligations_v2_artifact(
+    rows: list[dict], gold_path_tokens: set[str], issue_text: str
+) -> None:
     """T2: persist the FULL leak-screened clause list next to the anchors file —
     gt_obligations_v2.json (machine, incl. render_path_tokens so the in-container
     T3 screen applies the IDENTICAL leak rule) + gt_obligations.md (the agent's
     checklist; issue-verbatim rows only — adds structure, zero new information).
     Fail-open: the artifact must never break the brief."""
     try:
+        import hashlib as _hashlib_v2
         import json as _j
         import os as _os
         target_dir = _os.path.dirname(_anchors_path(for_write=True)) or "/tmp"
         clean = [{k: v for k, v in o.items() if not k.startswith("_")} for o in rows]
         payload = {
             "obligations_version": 2,
+            "issue_sha256": _hashlib_v2.sha256(issue_text.encode("utf-8")).hexdigest(),
             "render_path_tokens": sorted(gold_path_tokens),
             "clauses": clean,
         }
@@ -2623,15 +2644,16 @@ def _expected_behavior_spec(issue_text: str):
 # A rendered obligation row is ``  - [<kind>] <verbatim>`` (kind tag) or ``  - <verbatim>``. The
 # ``[<kind>]`` classifier is one of the extractor's fixed grammar classes (error/signature/behavior/
 # compat/repro); ``repro`` is a REPRODUCTION FRAGMENT ("when I run X I get Y"), not an imperative
-# requirement, so it is dropped. A leading plea/opinion opener or a trailing ``?`` marks a
-# non-requirement sentence (a plea/question) — also dropped. Everything else is a requirement/
+# requirement, so it is dropped. A direct conversational ask or a trailing ``?`` marks a
+# non-requirement sentence (a request/question) — also dropped. First-person product proposals
+# remain requirements: politeness/epistemic hedging does not erase requested behavior. Everything else is a requirement/
 # directive the extractor already validated as requirement grammar, and is KEPT.
 _OBLIGATION_ROW_KIND_RE = _re.compile(r"^\[(?P<kind>[a-z][a-z_]*)\]\s+(?P<text>.*)$")
 _REPRO_KINDS = frozenset({"repro"})
 _OBLIGATION_PLEA_RE = _re.compile(
     r"^(?:please\b|could\s+you\b|can\s+(?:you|we|someone|somebody)\b"
-    r"|would\s+(?:you|it\s+be)\b|i\s+(?:wish|hope|think|believe|feel|would\s+like|'?d\s+like)\b"
-    r"|it\s+would\s+be\b|any\s+chance\b|is\s+there\s+(?:a|any|some)\b|thank(?:s|\s+you)\b)",
+    r"|would\s+you\b|any\s+chance\b|is\s+there\s+(?:a|any|some)\b"
+    r"|thank(?:s|\s+you)\b)",
     _re.IGNORECASE,
 )
 
@@ -2651,7 +2673,7 @@ def _parse_obligation_row(row: str) -> tuple[str, str]:
 
 def _obligation_is_imperative(kind: str, text: str) -> bool:
     """SS-5 requirement-extractor discipline: True iff the obligation row is an IMPERATIVE
-    requirement item (keep), False for a repro fragment or a plea/question (drop). Pure +
+    requirement item (keep), False for a repro fragment or direct ask/question (drop). Pure +
     deterministic — SELECTS requirement sentences, never paraphrases (LLM-free; a rewrite could
     change meaning). Contract mirrors what an SS-2 runtime extractor would expose, so a future
     shared helper can substitute without changing callers."""
@@ -2762,6 +2784,19 @@ def _render_obligations_block(
             with open(_anchors_path(), encoding="utf-8") as _obl_f:
                 _obl_data = _obl_json.load(_obl_f)
             _persisted = _obl_data.get("obligations") or []
+            if _obligations_v2_on():
+                # V2 artifacts are task-bound.  A shared /tmp fallback can
+                # outlive its producer; version alone cannot prevent a valid
+                # artifact from another issue being laundered into this brief.
+                import hashlib as _obl_hashlib
+                _issue_sha = _obl_hashlib.sha256(
+                    issue_text.encode("utf-8")
+                ).hexdigest()
+                if (
+                    _obl_data.get("obligations_version") != 2
+                    or _obl_data.get("issue_sha256") != _issue_sha
+                ):
+                    _persisted = []
             if _persisted:
                 from groundtruth.pretask.spec import Obligation, IssueSpec
                 if _obligations_v2_on():
@@ -2852,7 +2887,7 @@ def _render_obligations_block(
                 continue
             o["_doc_index"] = _di
             rows.append(o)
-        _write_obligations_v2_artifact(rows, gold_path_tokens)
+        _write_obligations_v2_artifact(rows, gold_path_tokens, issue_text)
         gated = rows if not require_anchor else [
             o for o in rows
             if _rel_gate((o.get("verbatim_text") or ""), None, fn_tokens)
@@ -4516,7 +4551,7 @@ def generate_v1r_brief(
             _nm_brief = _reduce_brief_to_minimal(_nm_brief)
         # Brief-F7: B-6 per-block receipts also cover the fact-bearing no-match brief
         # (its <gt-obligations> block). Same PURE read as the matched path; brief bytes
-        # unchanged. Empty unless GT_BLOCK_RECEIPTS is set.
+        # unchanged. Empty unless receipt/in-seam instrumentation is enabled.
         _nm_receipts = _brief_block_receipts(_nm_brief) if _block_receipts_on() else []
         return V1RBriefResult(
             files=[],
@@ -4760,7 +4795,11 @@ def generate_v1r_brief(
             if _obligations_v2_on():
                 # artifact-wins split-brain rule: consumers trust THIS stamp over
                 # their own env, so host and container can never disagree.
+                import hashlib as _hashlib_anch
                 _anch_payload["obligations_version"] = 2
+                _anch_payload["issue_sha256"] = _hashlib_anch.sha256(
+                    issue_text.encode("utf-8")
+                ).hexdigest()
             # B10 hardening: write to the per-task path, but if that fails (e.g. a
             # misconfigured/absent $GT_CERT_DIR pointing at a nonexistent dir) fall back to
             # the always-writable /tmp so the anchors artifact is never SILENTLY lost.

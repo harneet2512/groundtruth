@@ -5,18 +5,21 @@ Two schemas share this module:
 
 * ``gt.consumption_ledger.v2`` (mini-swe-agent trajectories) — the live product
   surface. A trajectory is ``{"messages": [{"role": ..., "content": ...}], ...}``.
-  A GT delivery is a model-visible message (``user`` = the step-0 brief bundle,
-  ``tool`` = per-view/per-edit runtime evidence) whose content carries a
-  ``<gt-*>`` block. Each delivery gets a monotone RECEIPT along the ladder:
+  A GT delivery is exact sealed bytes in a model-visible message (``user`` = the
+  step-0 brief bundle, ``tool`` = per-view/per-edit runtime evidence). Native
+  Profile-2 deliveries are tag-free and are located by
+  ``content_sha256_16`` + ``chars_delivered``. Legacy ``<gt-*>`` blocks remain
+  readable for backward compatibility. Each delivery gets a monotone RECEIPT:
     - level 1 (delivered): the GT bytes are present in a model-visible message.
     - level 2 (referenced): a LATER **assistant-role** message's prose text
       (model-authored only, never tool output) names an entity from the block.
-    - level 3 (acted): a LATER assistant message's emitted shell command targets
-      a file/symbol named in the block (view/edit/test of the delivered target).
+    - level 3 (acted): a LATER assistant message emits a relevant mutating or
+      verification command targeting a file/symbol named in the block. Passive
+      view/read/search commands are reacquisition, never implementation.
     - level 4 (resolved) is out of scope for v2 -> ``resolved_state = None``.
   ``consumed`` == receipt >= 3 (ACTION, not token overlap). When a runtime ledger
-  is supplied, each delivered ledger row is joined to its trajectory block
-  (content match primary: file + byte-length; iteration alignment secondary).
+  is supplied, a sealed row joins only when its exact rendered bytes occur in
+  the trajectory. Unsealed legacy rows retain the historical file/length join.
   Unjoined ledger rows are surfaced (never dropped) as ``source="ledger_only"``.
 
 * ``gt.consumption_ledger.v1`` (legacy pier/OH step lists) — a list of step dicts
@@ -70,10 +73,169 @@ _SYMBOL_STOP = {
 # than ``chars_delivered``; 16 comfortably absorbs framing/whitespace drift.
 _JOIN_TOL = 16
 
+# Level-3 requires a decision/action that can implement or test the delivered
+# constraint. Merely naming the target in cat/sed -n/grep is reacquisition and
+# cannot prove consumption. These patterns classify command intent; entity
+# relevance is checked separately against exact delivered file/symbol tokens.
+_MUTATING_COMMAND_RE = re.compile(
+    r"(?:^|[;&|\s])(?:"
+    r"apply_patch|patch(?:\s|$)|git\s+apply|"
+    r"sed\s+-i(?:\S*)?|perl\s+-p?i(?:\S*)?|"
+    r"tee(?:\s|$)|truncate(?:\s|$)|touch(?:\s|$)|"
+    r"rm(?:\s|$)|mv(?:\s|$)|cp(?:\s|$)|"
+    r"str_replace|create_file|write_file|overwrite|insert|"
+    r"black(?:\s|$)|ruff\s+format|prettier(?:\s|$)|go\s+fmt"
+    r")|(?:^|[;&|\s])(?:cat|printf|echo)\b[^\n]*?(?<![<>])>{1,2}(?!>)",
+    re.I,
+)
+_PYTHON_MUTATING_COMMAND_RE = re.compile(
+    r"(?:^|[;&|\s])(?:python(?:3(?:\.\d+)*)?|py)\b[\s\S]*?(?:"
+    r"\.(?:write|writelines|write_text|write_bytes)\s*\(|"
+    r"\bopen\s*\(\s*[^,\n]+,\s*[\"'][^\"']*[wax+][^\"']*[\"']|"
+    r"\bopen\s*\([^)]*\bmode\s*=\s*[\"'][^\"']*[wax+][^\"']*[\"']|"
+    r"\.open\s*\(\s*[\"'][^\"']*[wax+][^\"']*[\"']"
+    r")",
+    re.I,
+)
+_VERIFICATION_COMMAND_RE = re.compile(
+    r"(?:^|[;&|\s])(?:"
+    r"pytest|py\.test|unittest|tox|nox|vitest|jest|"
+    r"cargo\s+(?:test|check)|go\s+(?:test|vet)|"
+    r"npm\s+(?:test|run\s+(?:test|build|lint))|"
+    r"yarn\s+(?:test|run\s+(?:test|build|lint))|"
+    r"pnpm\s+(?:test|run\s+(?:test|build|lint))|"
+    r"python\s+-m\s+(?:pytest|unittest|py_compile|compileall)|"
+    r"mypy|pyright|ruff\s+check|flake8|pylint|tsc|"
+    r"mvn\s+test|gradle\s+test|make\s+test"
+    r")\b",
+    re.I,
+)
+
 
 def _content_hash16(text: str) -> str:
     """sha256 hex[:16] of the exact bytes (v2 entries carry this)."""
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _locate_seal(content: str, n_chars: int, sha16: str) -> int | None:
+    """Locate the exact sealed delivery window in model-visible ``content``.
+
+    The seam records character length and hashes the UTF-8 rendered bytes. Try
+    the ASCII-equivalent byte window first, then the authoritative character
+    window for non-ASCII payloads. Basename, iteration, and length proximity
+    are not byte-delivery proof.
+    """
+    if not content or n_chars <= 0 or not sha16:
+        return None
+    raw = content.encode("utf-8")
+    if n_chars <= len(raw):
+        for start in range(0, len(raw) - n_chars + 1):
+            if hashlib.sha256(raw[start:start + n_chars]).hexdigest()[:16] != sha16:
+                continue
+            try:
+                return len(raw[:start].decode("utf-8"))
+            except UnicodeDecodeError:
+                continue
+    if n_chars <= len(content):
+        for start in range(0, len(content) - n_chars + 1):
+            window = content[start:start + n_chars]
+            if hashlib.sha256(window.encode("utf-8")).hexdigest()[:16] == sha16:
+                return start
+    return None
+
+
+def _typed_lineage_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate the additive v1 lineage columns from one sealed ledger row.
+
+    This transports producer claims; it does not convert receipt into causality
+    or infer absent features from a layer, flag, or rendered text.
+    """
+    if row.get("lineage_schema") != "gt.feature_lineage.v1":
+        return None
+    text_keys = (
+        "runtime_producer_id", "registered_producer_id", "evidence_type",
+        "fact_class", "required_event", "actual_event", "receipt_predicate",
+        "causal_eval", "causal_probe_id",
+    )
+    if any(not isinstance(row.get(key), str) for key in text_keys):
+        return None
+    refs = row.get("feature_ids")
+    if not isinstance(refs, list) or not refs:
+        return None
+    try:
+        from groundtruth.runtime.feature_lineage import (
+            FeatureRef,
+            build_lineage,
+            lineage_to_dict,
+        )
+    except Exception:
+        return None
+    normalized: list[dict[str, str]] = []
+    typed_refs = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            return None
+        category, feature_id, role = (
+            ref.get("category"), ref.get("feature_id"), ref.get("role"))
+        # v1 producers create FACT and explicit byte-owning CAP rows only.
+        # ACQ/PERF are reserved schema categories, not inferred here.
+        if category not in {"CAP", "FACT"}:
+            return None
+        if not isinstance(feature_id, str) or not feature_id:
+            return None
+        if not isinstance(role, str) or not role:
+            return None
+        try:
+            typed_refs.append(FeatureRef(category, feature_id, role))
+        except ValueError:
+            return None
+        normalized.append({
+            "category": category, "feature_id": feature_id, "role": role,
+        })
+    if tuple(typed_refs) != tuple(sorted(set(typed_refs))):
+        return None
+    fact_refs = [
+        ref for ref in normalized
+        if ref["category"] == "FACT" and ref["role"] == "fact"
+    ]
+    if fact_refs != [{
+        "category": "FACT", "feature_id": row["fact_class"], "role": "fact",
+    }]:
+        return None
+    producer_match = row.get("producer_registration_match")
+    causal_proven = row.get("causal_contribution_proven")
+    reactive = row.get("reactive")
+    if not all(isinstance(value, bool) for value in (
+            producer_match, causal_proven, reactive)):
+        return None
+    cap_ids = tuple(
+        ref["feature_id"] for ref in normalized if ref["category"] == "CAP"
+    )
+    try:
+        rebuilt = build_lineage(
+            runtime_producer_id=row["runtime_producer_id"],
+            evidence_type=row["evidence_type"],
+            actual_event=row["actual_event"],
+            cap_feature_ids=cap_ids,
+        )
+    except ValueError:
+        return None
+    if rebuilt is None:
+        return None
+    expected = lineage_to_dict(rebuilt)
+    observed = {
+        "schema": row["lineage_schema"],
+        **{key: row[key] for key in text_keys},
+        "producer_registration_match": producer_match,
+        "features": normalized,
+        "causal_contribution_proven": causal_proven,
+        "reactive": reactive,
+    }
+    # Delivery-ledger lineage is accepted only when it exactly matches current
+    # registry/owner authorities.  Receipt never self-promotes causal credit.
+    if not expected["producer_registration_match"] or observed != expected:
+        return None
+    return expected
 
 
 # --------------------------------------------------------------------------- #
@@ -166,39 +328,76 @@ def _as_mini_messages(trajectory: list[dict] | dict) -> list[dict] | None:
     return None
 
 
-def _emitted_commands(msg: dict) -> str:
-    """Model-authored shell command text emitted by an assistant message.
+def _emitted_commands(msg: dict) -> list[str]:
+    """Model-authored actions emitted by one assistant message.
 
     Prefers ``extra.actions[*].command`` (mini canonical), falls back to
     ``tool_calls[*].function.arguments`` (OpenAI tool-call JSON). This is the
-    level-3 (acted) signal only — never used for level-2 references.
+    level-3 (acted) signal only — never used for level-2 references. Actions
+    remain separate so a passive target read cannot borrow an unrelated test's
+    verification verb. Structured editor paths are retained for relevance.
     """
     parts: list[str] = []
+
+    def _action_text(obj: dict, action_name: object = None) -> str:
+        values: list[str] = []
+        if isinstance(action_name, str) and action_name:
+            values.append(action_name)
+        command = obj.get("command")
+        if isinstance(command, str) and command not in values:
+            values.append(command)
+        for key in ("path", "file_path", "file"):
+            value = obj.get(key)
+            if isinstance(value, str) and value not in values:
+                values.append(value)
+        return " ".join(values)
+
     extra = msg.get("extra")
     if isinstance(extra, dict):
         for act in extra.get("actions") or []:
-            if isinstance(act, dict) and isinstance(act.get("command"), str):
-                parts.append(act["command"])
+            if isinstance(act, dict):
+                text = _action_text(act, act.get("name"))
+                if text:
+                    parts.append(text)
     if not parts:
         for tc in msg.get("tool_calls") or []:
             if not isinstance(tc, dict):
                 continue
             fn = tc.get("function") or {}
             args = fn.get("arguments")
+            action_name = fn.get("name")
             if isinstance(args, str):
                 try:
                     obj = json.loads(args)
-                    cmd = obj.get("command") if isinstance(obj, dict) else None
-                    if isinstance(cmd, str):
-                        parts.append(cmd)
+                    text = (
+                        _action_text(obj, action_name)
+                        if isinstance(obj, dict) else ""
+                    )
+                    if text:
+                        parts.append(text)
                         continue
                 except ValueError:
                     pass
-                parts.append(args)
+                parts.append(" ".join(
+                    value for value in (action_name, args) if isinstance(value, str)
+                ))
     fc = msg.get("function_call")
     if isinstance(fc, dict) and isinstance(fc.get("arguments"), str):
-        parts.append(fc["arguments"])
-    return "\n".join(parts)
+        args = fc["arguments"]
+        action_name = fc.get("name")
+        try:
+            obj = json.loads(args)
+            text = (
+                _action_text(obj, action_name) if isinstance(obj, dict) else ""
+            )
+            parts.append(text or " ".join(
+                value for value in (action_name, args) if isinstance(value, str)
+            ))
+        except ValueError:
+            parts.append(" ".join(
+                value for value in (action_name, args) if isinstance(value, str)
+            ))
+    return parts
 
 
 def _assistant_prose(msg: dict) -> str:
@@ -257,6 +456,18 @@ def _named_in(text: str, pats: list[re.Pattern[str]]) -> bool:
     return any(p.search(text) for p in pats)
 
 
+def _action_kind(command: str) -> str | None:
+    """Classify only repository-changing or verification commands for receipt 3."""
+    if _VERIFICATION_COMMAND_RE.search(command):
+        return "verification"
+    if (
+        _MUTATING_COMMAND_RE.search(command)
+        or _PYTHON_MUTATING_COMMAND_RE.search(command)
+    ):
+        return "mutation"
+    return None
+
+
 def _build_v2(
     messages: list[dict],
     *,
@@ -266,7 +477,7 @@ def _build_v2(
 
     # Pre-compute per-message model-authored channels once.
     assistant_prose: list[str] = [""] * n
-    assistant_cmd: list[str] = [""] * n
+    assistant_cmd: list[list[str]] = [[] for _ in range(n)]
     tool_ordinal: list[int | None] = [None] * n
     ord_counter = 0
     for i, m in enumerate(messages):
@@ -277,6 +488,30 @@ def _build_v2(
         elif role == "tool":
             ord_counter += 1
             tool_ordinal[i] = ord_counter
+
+    def _receipt_for(i: int, block: str, file_attr: str | None) -> tuple[int, int | None, int | None, bool]:
+        """Receipt ladder for one byte-proven model-visible delivery."""
+        files, symbols = _block_entities(block, file_attr)
+        pats = _entity_patterns(files, symbols)
+        receipt = 1
+        ref_idx: int | None = None
+        act_idx: int | None = None
+        verif = False
+        for j in range(i + 1, n):
+            if messages[j].get("role") != "assistant":
+                continue
+            if ref_idx is None and pats and _named_in(assistant_prose[j], pats):
+                ref_idx = j
+                receipt = max(receipt, 2)
+            for cmd in assistant_cmd[j]:
+                action_kind = _action_kind(cmd)
+                relevant = bool(pats and _named_in(cmd, pats))
+                if act_idx is None and action_kind is not None and relevant:
+                    act_idx = j
+                    receipt = max(receipt, 3)
+                if not verif and action_kind == "verification" and relevant:
+                    verif = True
+        return receipt, ref_idx, act_idx, verif
 
     # 1) Extract every model-visible GT block as a delivery.
     entries: list[dict[str, Any]] = []
@@ -296,27 +531,7 @@ def _build_v2(
             kind = _TAG_KIND.get(tag, tag)
             fa = _FILE_ATTR_RE.search(block)
             file_attr = fa.group(1) if fa else None
-            files, symbols = _block_entities(block, file_attr)
-            pats = _entity_patterns(files, symbols)
-
-            # 2) Receipt ladder over LATER messages (strict msg_index > i).
-            receipt = 1
-            ref_idx: int | None = None
-            act_idx: int | None = None
-            verif = False
-            for j in range(i + 1, n):
-                if messages[j].get("role") != "assistant":
-                    continue
-                if ref_idx is None and pats and _named_in(assistant_prose[j], pats):
-                    ref_idx = j
-                    receipt = max(receipt, 2)
-                cmd = assistant_cmd[j]
-                if cmd:
-                    if act_idx is None and pats and _named_in(cmd, pats):
-                        act_idx = j
-                        receipt = max(receipt, 3)
-                    if not verif and re.search(r"\b(pytest|unittest|py\.test|tox|nox)\b|python -m pytest", cmd):
-                        verif = True
+            receipt, ref_idx, act_idx, verif = _receipt_for(i, block, file_attr)
 
             entries.append({
                 "msg_index": i,
@@ -325,6 +540,7 @@ def _build_v2(
                 "delivery_channel": channel,
                 "file_path": file_attr,
                 "chars": len(block),
+                "rendered_text": block,
                 "content_sha256_16": _content_hash16(block),
                 "receipt": receipt,
                 "referenced_msg_index": ref_idx,
@@ -348,6 +564,20 @@ def _build_v2(
         ledger_rows_delivered = len(rows)
         used: set[int] = set()
 
+        # Mutable observation buffers prevent two duplicate ledger rows from
+        # claiming the same byte window. Only channels the model actually saw
+        # are eligible for Gate-1 delivery proof.
+        visible_buffers: list[str] = []
+        for m in messages:
+            role, mtype = m.get("role"), m.get("type")
+            content = m.get("content")
+            visible_buffers.append(
+                content if isinstance(content, str) and (
+                    role in ("user", "tool", "system", "exit")
+                    or mtype == "function_call_output"
+                ) else ""
+            )
+
         def _basename_match(bf: str | None, rf: str | None) -> bool:
             if not bf or not rf:
                 return False
@@ -359,34 +589,96 @@ def _build_v2(
             it = row.get("iteration")
             chosen: int | None = None
             method = None
-            # primary: file basename + byte-length within tolerance,
-            # tie-broken by iteration/ordinal proximity.
-            cands = [
-                k for k, e in enumerate(entries)
-                if k not in used
-                and e["source"] == "trajectory"
-                and _basename_match(e["file_path"], rf)
-                and abs(e["chars"] - chars) <= _JOIN_TOL
-            ]
-            if cands:
-                def _prox(k: int) -> tuple[int, int]:
-                    e = entries[k]
-                    o = e["tool_ordinal"]
-                    d = abs(o - it) if (o is not None and isinstance(it, int)) else 10**6
-                    return (d, abs(e["chars"] - chars))
-                chosen = min(cands, key=_prox)
-                method = "content"
-            elif isinstance(it, int):
-                # secondary: the block sitting in the it-th tool message.
-                icands = [
+            seal = str(row.get("content_sha256_16") or "")
+
+            # SS-LIVE Gate 1: a sealed row joins only by its exact rendered
+            # bytes. Locate and consume the matching observation window.
+            seal_home: int | None = None
+            seal_payload = ""
+            if seal and chars > 0:
+                for msg_index, content in enumerate(visible_buffers):
+                    offset = _locate_seal(content, chars, seal)
+                    if offset is None:
+                        continue
+                    seal_home = msg_index
+                    seal_payload = content[offset:offset + chars]
+                    visible_buffers[msg_index] = content[:offset] + content[offset + chars:]
+                    break
+
+                if seal_home is not None:
+                    # A legacy tagged block may already represent these exact
+                    # bytes. Enrich it instead of double-counting the delivery.
+                    exact = [
+                        k for k, e in enumerate(entries)
+                        if k not in used
+                        and e["source"] == "trajectory"
+                        and e["msg_index"] == seal_home
+                        and e["content_sha256_16"] == seal
+                        and e["chars"] == chars
+                    ]
+                    if exact:
+                        chosen = exact[0]
+                    else:
+                        receipt, ref_idx, act_idx, verif = _receipt_for(
+                            seal_home, seal_payload, str(rf) or None
+                        )
+                        leak_hits.update(scan_test_identity_leaks(seal_payload))
+                        entries.append({
+                            "msg_index": seal_home,
+                            "tool_ordinal": tool_ordinal[seal_home],
+                            "kind": str(row.get("layer") or "unknown"),
+                            "delivery_channel": (
+                                "brief" if messages[seal_home].get("role") == "user"
+                                else "runtime"
+                            ),
+                            "file_path": str(rf) or None,
+                            "chars": chars,
+                            "rendered_text": seal_payload,
+                            "content_sha256_16": seal,
+                            "receipt": receipt,
+                            "referenced_msg_index": ref_idx,
+                            "acted_msg_index": act_idx,
+                            "resolved_state": None,
+                            "verification_followup": verif,
+                            "joined": None,
+                            "ledger_layer": None,
+                            "ledger_event_type": None,
+                            "ledger_chars": None,
+                            "join_method": None,
+                            "source": "trajectory",
+                        })
+                        chosen = len(entries) - 1
+                    method = "seal"
+
+            # Backward compatibility only: old runtime ledgers predate seals.
+            # They may use the historical file/length/iteration heuristic, but
+            # such a join is not SS byte-proof and is labeled accordingly.
+            if chosen is None and not seal:
+                cands = [
                     k for k, e in enumerate(entries)
                     if k not in used
                     and e["source"] == "trajectory"
-                    and e["tool_ordinal"] == it
+                    and _basename_match(e["file_path"], rf)
+                    and abs(e["chars"] - chars) <= _JOIN_TOL
                 ]
-                if icands:
-                    chosen = icands[0]
-                    method = "iteration"
+                if cands:
+                    def _prox(k: int) -> tuple[int, int]:
+                        e = entries[k]
+                        o = e["tool_ordinal"]
+                        d = abs(o - it) if (o is not None and isinstance(it, int)) else 10**6
+                        return (d, abs(e["chars"] - chars))
+                    chosen = min(cands, key=_prox)
+                    method = "legacy_content"
+                elif isinstance(it, int):
+                    icands = [
+                        k for k, e in enumerate(entries)
+                        if k not in used
+                        and e["source"] == "trajectory"
+                        and e["tool_ordinal"] == it
+                    ]
+                    if icands:
+                        chosen = icands[0]
+                        method = "legacy_iteration"
             if chosen is not None:
                 used.add(chosen)
                 ledger_rows_joined += 1
@@ -396,6 +688,10 @@ def _build_v2(
                 e["ledger_layer"] = row.get("layer")
                 e["ledger_event_type"] = row.get("event_type")
                 e["ledger_chars"] = chars
+                if method == "seal":
+                    lineage = _typed_lineage_from_row(row)
+                    if lineage is not None:
+                        e["feature_lineage"] = lineage
             else:
                 # host-only delivery not visible as a block — never drop it.
                 entries.append({
@@ -405,7 +701,8 @@ def _build_v2(
                     "delivery_channel": "runtime",
                     "file_path": rf or None,
                     "chars": chars,
-                    "content_sha256_16": None,
+                    "rendered_text": None,
+                    "content_sha256_16": seal or None,
                     "receipt": None,  # not model-visible as a block; cannot verify
                     "referenced_msg_index": None,
                     "acted_msg_index": None,

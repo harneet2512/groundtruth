@@ -74,6 +74,20 @@ def _trial_steps() -> list[dict]:
     raise AssertionError("no job contains the paid agent-launch step (_GT_PROFILE_EXPORTS)")
 
 
+def _trial_step_named(name: str) -> dict:
+    for step in _trial_steps():
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"no trial step named {name!r}")
+
+
+def _step_named(name: str) -> dict:
+    for step in _all_steps():
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"no workflow step named {name!r}")
+
+
 def _index_of(steps: list[dict], token: str) -> int:
     for i, s in enumerate(steps):
         if token in (s.get("run") or ""):
@@ -154,6 +168,102 @@ def test_identity_artifact_carries_the_resolved_identity_fields() -> None:
     # seam/runner identity = the hashes of the staged seam + runner (both cp'd into /opt/gt).
     assert "gt_mini_patch.py" in joined, "seam_sha256 must hash artifact_deepswe/gt_mini_patch.py"
     assert "gt_headless_runner.py" in joined, "runner_sha256 must hash artifact_deepswe/gt_headless_runner.py"
+
+
+def test_checkout_commit_is_resolved_from_git_before_substrate_proof() -> None:
+    steps = _trial_steps()
+    resolve = _trial_step_named("Resolve checked-out GT commit")
+    run = "\n".join(_code_lines(resolve.get("run") or ""))
+    assert "git rev-parse --verify 'HEAD^{commit}'" in run
+    assert "^[0-9a-f]{40,64}$" in run, "the resolved object must be validated as a canonical commit SHA"
+    assert 'GT_CHECKOUT_SHA=$GT_CHECKOUT_SHA' in run and 'GT_GITHUB_SHA=$GT_CHECKOUT_SHA' in run
+    assert "$GITHUB_ENV" in run, "the exact checkout identity must propagate to later trial steps"
+    resolve_idx = steps.index(resolve)
+    assert resolve_idx < _index_of(steps, "substrate_proof.sh")
+    assert resolve_idx < _index_of(steps, "gt.run_identity.v1")
+
+
+def test_identity_uses_checkout_sha_and_keeps_dispatch_sha_separate() -> None:
+    step = next(s for s in _trial_steps() if "gt.run_identity.v1" in (s.get("run") or ""))
+    run = "\n".join(_code_lines(step.get("run") or ""))
+    env = step.get("env") or {}
+    assert "GT_CHECKOUT_SHA" in run
+    assert "gt_ref_resolved_source" in run and "git_rev_parse_head" in run
+    assert "workflow_dispatch_sha" in run
+    assert env.get("GT_ID_GT_REF_REQUESTED") == "${{ inputs.gt_ref || 'gt-trial' }}"
+    assert env.get("GT_ID_WORKFLOW_DISPATCH_SHA") == "${{ github.sha }}"
+    assert env.get("GT_ID_GT_REF_RESOLVED") != "${{ github.sha }}", (
+        "github.sha identifies the workflow dispatch ref, not necessarily the checked-out gt_ref"
+    )
+
+
+def test_identity_producer_fails_closed_on_writer_or_content_failure() -> None:
+    run = "\n".join(_code_lines(_step_run_containing("gt.run_identity.v1")))
+    assert '|| echo "WARN: gt_run_identity.json write failed"' not in run
+    assert "IDENTITY_WRITE_FAILED" in run
+    assert "IDENTITY_CONTENT_INVALID" in run
+    assert "rm -f /tmp/gt_out/gt_run_identity.json" in run, (
+        "a writer failure must not leave a stale prior identity available to the paid recheck"
+    )
+    assert "os.replace" in run, "identity publication must be atomic"
+    for token in (
+        "gt.run_identity.v1",
+        "re.fullmatch",
+        "gt_ref_resolved",
+        "seam_sha256",
+        "runner_sha256",
+        "workflow_run_id",
+        "substrate_digest_expected",
+        "substrate_digest_actual",
+    ):
+        assert token in run
+    assert "IDENTITY_FAILURE_CODE" in run and "gt.proof_status.v1" in run
+    assert run.index("IDENTITY_WRITE_FAILED") < run.index('if [ -n "$IDENTITY_FAILURE_CODE" ]')
+
+
+def test_paid_step_independently_rechecks_identity_before_proof_and_spend() -> None:
+    paid = _step_run_containing("_GT_PROFILE_EXPORTS")
+    pre_spend = paid[: paid.index("HOST_GT_INJECT=/tmp/gt_inject/opt/gt")]
+    assert "if ! python3 <<'PY'" in pre_spend, "paid launch must execute the identity validator"
+    assert "/tmp/gt_out/gt_run_identity.json" in pre_spend
+    assert "GT_RUN_IDENTITY_FAIL" in pre_spend
+    assert "re.fullmatch" in pre_spend
+    assert "re.compile(r'^[0-9a-f]{40,64}$')" in pre_spend
+    assert "re.compile(r'^[0-9a-f]{64}$')" in pre_spend
+    for token in (
+        "gt.run_identity.v1",
+        "GT_CHECKOUT_SHA",
+        "GITHUB_RUN_ID",
+        "seam_sha256",
+        "runner_sha256",
+        "substrate_digest_expected",
+        "substrate_digest_actual",
+    ):
+        assert token in pre_spend
+    assert pre_spend.index("gt_run_identity.json") < pre_spend.index("PROOF_STATE=")
+    marker = pre_spend.index("GT_RUN_IDENTITY_FAIL")
+    assert "exit 1" in pre_spend[marker: marker + 300]
+
+
+def test_substrate_and_per_task_provenance_use_exact_checkout_identity() -> None:
+    proof = next(s for s in _trial_steps() if "substrate_proof.sh" in (s.get("run") or ""))
+    assert (proof.get("env") or {}).get("GT_GITHUB_SHA") != "${{ github.sha }}", (
+        "substrate proof must inherit checkout-derived GT_GITHUB_SHA from GITHUB_ENV"
+    )
+    collect = _step_run_containing("gt.live_lite_run_provenance.v1")
+    assert "gt_run_identity.json" in collect
+    assert "identity.get('gt_ref_resolved')" in collect
+    assert "os.environ.get('GITHUB_SHA')" not in collect
+
+
+def test_summary_gt_commit_is_consensus_from_trial_identity_artifacts() -> None:
+    run = _step_named("Aggregate SWE-bench Pro results").get("run") or ""
+    assert "gt_run_identity.json" in run
+    assert "GT_IDENTITY_CONSENSUS_FAILED" in run
+    assert "missing" in run and "invalid" in run
+    provenance_line = next(ln for ln in run.splitlines() if "**Provenance**" in ln)
+    assert "$GT_COMMIT" in provenance_line
+    assert "${{ github.sha }}" not in provenance_line
 
 
 def test_actual_digest_comes_from_docker_inspect_of_the_expected_ref() -> None:

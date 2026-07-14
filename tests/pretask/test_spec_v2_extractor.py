@@ -25,6 +25,29 @@ MOBLY = "mobly-grouped-test-barriers"
 HAPPY_DOM = "happy-dom-abort-pending-body-reads"
 
 
+_TEMPLATE_SEMANTICS = """Categorical input apparently not supported by `plot_hdi()`
+
+**Describe the bug**
+The function currently does not support categorical values.
+The default `smooth=True` throws an implementation error.
+
+**To Reproduce**
+Returns:
+Setting `smooth=False` does not return the expected plot.
+
+**Expected behavior**
+I expect the behavior to mirror `bambi.interpret`.
+
+**Additional context**
+Version 1.2.3.
+
+---
+
+I think a TypeError informing the user that categorical strings are unsupported
+would be helpful.
+"""
+
+
 def _clauses_with_symbol(spec, sym: str):
     return [
         o for o in spec.obligations
@@ -87,6 +110,77 @@ def test_spec_v2_happydom_compat():
     assert any("remain readable" in o.verbatim_text for o in compat), (
         "'bodies should remain readable after shutdown' must classify compat"
     )
+
+
+def test_spec_v2_template_sections_exclude_observed_state_and_labels():
+    """Issue-template observations are evidence/context, not requirements.
+
+    The extractor must retain the reporter's expected/proposed outcomes without
+    turning the title, current bug, reproduction result, or a label-only line
+    into independent completion obligations.
+    """
+    rows = extract_spec_v2(_TEMPLATE_SEMANTICS).obligations
+    text = [o.verbatim_text for o in rows]
+
+    assert any("mirror `bambi.interpret`" in row for row in text)
+    assert any("TypeError informing the user" in row for row in text)
+    assert not any("apparently not supported" in row for row in text)
+    assert not any("currently does not support" in row for row in text)
+    assert not any("smooth=True" in row for row in text)
+    assert not any("smooth=False" in row for row in text)
+    assert "Returns:" not in text
+
+
+def test_spec_v2_descriptive_section_keeps_explicit_requirement_grammar():
+    issue = """**Describe the bug**
+The current parser crashes on empty input. It must return an empty list instead.
+"""
+    text = [o.verbatim_text for o in extract_spec_v2(issue).obligations]
+    assert not any("currently" in row for row in text)
+    assert any("must return an empty list" in row for row in text)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "fix(parser): handle invalid header names",
+        "pkg: Correctly handle dependency upgrades",
+        "refactor: replace the legacy state bridge",
+    ],
+)
+def test_spec_v2_action_titles_are_requirements(title):
+    rows = extract_spec_v2(title).obligations
+    assert len(rows) == 1
+    assert rows[0].modality_strength >= 2
+
+
+def test_spec_v2_process_and_reproduction_sections_are_not_requirements():
+    issue = """Add safe empty-input handling.
+
+### To Reproduce
+1. Run `parse(\"\")`; it must currently crash with ValueError.
+
+### The author should do the following, if applicable
+- [x] MUST run the formatter.
+- [ ] Add documentation.
+
+### Testing
+Return `fallback_value` from the fixture.
+"""
+    text = [o.verbatim_text for o in extract_spec_v2(issue).obligations]
+    assert text == ["Add safe empty-input handling"]
+
+
+def test_spec_v2_normative_heading_promotes_plain_outcome():
+    issue = """Parser output is inconsistent.
+
+### Desired behavior
+Empty input maps to an empty list.
+"""
+    rows = extract_spec_v2(issue).obligations
+    assert [o.verbatim_text for o in rows] == ["Empty input maps to an empty list"]
+    assert rows[0].modality == "expected"
+    assert rows[0].modality_strength == 2
 
 
 # ── 6. inline code spans are never arrow-split ───────────────────────────────

@@ -841,16 +841,24 @@ def _root() -> str:
     return "/"
 
 
-# SUBPROCESS-WRITE CATCH-ALL (mtime baseline). _edit_target is a STRING parser:
+# SUBPROCESS-WRITE CATCH-ALL (content baseline). _edit_target is a STRING parser:
 # it cannot see a write done INSIDE a subprocess script (`python3 /tmp/x.py`
 # whose body writes Lexer.js). This snapshots mtime+size of tracked source files
 # under the repo root so a post-command diff catches a source mutation by ANY
 # write channel (subprocess/codegen/build/compiler), language-agnostic via the
-# existing _SRC_EXT set. Bounded: stat() only (no read), file-count capped,
-# excludes scratch/vendor; correct-or-quiet (any walk error -> empty baseline ->
-# no fallback fire).
+# existing _SRC_EXT set. The bounded first scan hashes source files once; later
+# scans reuse hashes while metadata is stable and force a fresh hash for the
+# parser-identified target. Uncertain paths stay correct-or-quiet.
 _GT_MTIME_SCAN_CAP = int(os.environ.get("GT_MTIME_SCAN_CAP", "20000"))
-_mtime_baseline: dict[str, tuple[float, int]] = {}
+class _SourceSnapshot:
+    """Bounded source-tree observation with explicit completeness truth."""
+
+    def __init__(self, state=None, *, complete: bool = True):
+        self.state = state or {}
+        self.complete = bool(complete)
+
+
+_mtime_baseline = _SourceSnapshot()
 _mtime_baseline_seeded = False
 _MTIME_PRUNE_DIRS = frozenset({
     ".git", "node_modules", "vendor", ".venv", "venv", "__pycache__",
@@ -858,60 +866,134 @@ _MTIME_PRUNE_DIRS = frozenset({
 })
 
 
-def _scan_source_mtimes(root: str) -> dict[str, tuple[float, int]]:
-    """(abs_path -> (mtime, size)) for every TRACKED source file under ``root``.
-    stat-only (no read), capped at _GT_MTIME_SCAN_CAP files, prunes VCS/dep/
-    cache dirs and scratch markers. Empty on any error (correct-or-quiet)."""
-    out: dict[str, tuple[float, int]] = {}
+def _source_content_sha256(path: str) -> str:
+    """Full SHA-256 of one source file, or ``""`` when it cannot be read."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def _scan_source_state(root: str, previous=None, force_hash: "set[str] | None" = None,
+                       *, content_proof: "bool | None" = None) -> _SourceSnapshot:
+    """Return ``abs_path -> (mtime_ns, size, content_sha256)`` for source files.
+
+    In content-proof mode every observed source is re-hashed. Metadata cannot be
+    the correctness boundary: an opaque generator can preserve size and mtime
+    while changing bytes in a path the command parser never names. Outside V2,
+    the legacy metadata-only observation remains available.
+    """
+    proof = (_ss_coherence_v2_on() or _ss_recovery_v2_on()) \
+        if content_proof is None else bool(content_proof)
+    prior_state = previous.state if isinstance(previous, _SourceSnapshot) else (previous or {})
+    out: dict[str, tuple[int, int, str]] = {}
+    complete = True
     # FAIL-CLOSED (review): _root() fails-open to "/" if gt_root.txt is absent.
     # NEVER walk a filesystem root (would seed stdlib /usr/lib paths and could
     # misroute one into the post_edit dispatch). Reject "/", "\\", drive-roots.
     if (not root or root in ("/", "\\") or root.rstrip("/\\").endswith(":")
             or not os.path.isdir(root)):
-        return out
+        return _SourceSnapshot(out, complete=False)
     seen = 0
+    forced = {
+        confined for p in (force_hash or set()) if p
+        for confined in [_ss_confined_repo_source_abs(p, root)] if confined
+    }
+
+    def observe(ap: str) -> None:
+        nonlocal complete
+        try:
+            st = os.stat(ap)
+        except OSError:
+            return
+        meta = (int(st.st_mtime_ns), int(st.st_size))
+        prior = prior_state.get(ap)
+        if not proof:
+            out[ap] = (meta[0], meta[1], "")
+        else:
+            digest = _source_content_sha256(ap)
+            if not digest:
+                complete = False
+                if prior is not None:
+                    out[ap] = prior
+            else:
+                out[ap] = (meta[0], meta[1], digest)
+
     try:
+        for ap in sorted(forced):
+            if os.path.isfile(ap) and _has_source_ext(ap):
+                observe(ap)
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in _MTIME_PRUNE_DIRS]
-            for fn in filenames:
+            dirnames[:] = sorted(d for d in dirnames if d not in _MTIME_PRUNE_DIRS)
+            for fn in sorted(filenames):
                 if not _has_source_ext(fn):
                     continue
-                ap = os.path.join(dirpath, fn)
-                if any(m in ("/" + ap.replace("\\", "/").lower())
-                       for m in _SCRATCH_DIR_MARKERS):
+                ap = os.path.abspath(os.path.join(dirpath, fn))
+                if ap in forced:
                     continue
-                try:
-                    st = os.stat(ap)
-                except OSError:
+                # Scratch policy is repo-relative. A legitimate checkout rooted
+                # under the operating system's temp directory is still the repo;
+                # only scratch directories *inside* it are excluded.
+                rel_ap = os.path.relpath(ap, root).replace("\\", "/")
+                if any(m in ("/" + rel_ap.lower()) for m in _SCRATCH_DIR_MARKERS):
                     continue
-                out[ap] = (st.st_mtime, st.st_size)
+                observe(ap)
                 seen += 1
                 if seen >= _GT_MTIME_SCAN_CAP:
-                    return out
+                    return _SourceSnapshot(out, complete=False)
     except Exception:  # noqa: BLE001 — walk error -> quiet, no fallback fire
-        return {}
-    return out
+        return _SourceSnapshot(out, complete=False)
+    return _SourceSnapshot(out, complete=complete)
 
 
-def _subprocess_write_targets(root: str) -> list[str]:
-    """Tracked source files whose (mtime,size) CHANGED (or that newly appeared)
-    since the last baseline — the catch-all for a write done via a subprocess
-    the command parser cannot see. Re-seeds the baseline in place. Empty when
-    the baseline is unseeded or nothing changed (correct-or-quiet)."""
+def _subprocess_write_targets(root: str, *, force_paths: "set[str] | None" = None,
+                              content_proof: "bool | None" = None) -> list[str]:
+    """Return tracked source paths whose bytes changed or newly appeared.
+
+    Metadata only selects re-hash candidates. A parser-identified target is
+    always re-hashed and can prove deletion; unforced disappearance remains
+    quiet because a bounded walk cannot distinguish deletion from an unvisited
+    path. The baseline is refreshed after every observation.
+    """
     global _mtime_baseline, _mtime_baseline_seeded
+    proof = (_ss_coherence_v2_on() or _ss_recovery_v2_on()) \
+        if content_proof is None else bool(content_proof)
+    forced_abs = {
+        confined for p in (force_paths or set()) if p
+        for confined in [_ss_confined_repo_source_abs(p, root)] if confined
+    }
     if not _mtime_baseline_seeded:
-        _mtime_baseline = _scan_source_mtimes(root)
+        _mtime_baseline = _scan_source_state(
+            root, force_hash=forced_abs, content_proof=proof)
         _mtime_baseline_seeded = True
         return []
-    now = _scan_source_mtimes(root)
+    before = _mtime_baseline
+    now = _scan_source_state(root, before, forced_abs, content_proof=proof)
     changed: list[str] = []
-    for ap, sig in now.items():
-        if _mtime_baseline.get(ap) != sig:
+    for ap, sig in now.state.items():
+        prior = before.state.get(ap)
+        if prior is None and before.complete:
             changed.append(ap)
+        elif prior is not None and ((prior[2] != sig[2]) if proof else prior[:2] != sig[:2]):
+            changed.append(ap)
+    changed.extend(
+        ap for ap in forced_abs
+        if ap in before.state and ap not in now.state and not os.path.exists(ap)
+    )
+    # When both walks are complete, every disappeared source path is a proven
+    # deletion.  This matters for multi-file rm/mv/patch commands: the string
+    # classifier names at most one target, but coherence chronology must count
+    # every source whose bytes ceased to exist.  An incomplete walk stays quiet.
+    if before.complete and now.complete:
+        changed.extend(ap for ap in before.state if ap not in now.state)
     _mtime_baseline = now
     # DETERMINISM (Fable R7): `now` is built by os.walk (FS-order), so `changed` — and the
     # consumer's changed[0] pick — was OS-order-dependent. Sort for a stable file pick.
-    return sorted(changed)
+    return sorted(set(changed))
 
 
 # Fable R7: file-REVERTING git ops bump mtimes without being an agent edit — the mtime
@@ -2388,26 +2470,28 @@ def _to_repo_rel(f: str, root: str) -> str:
          (legitimate when the agent somehow surfaced a host path).
       3. Any other absolute path: fall back to relpath (prior behaviour) — it
          won't match the graph, but that's a quiet miss, not a false hit.
-      4. Already-relative path: pass through unchanged.
+      4. Already-relative path: preserve it with POSIX separators.
 
     The container-root strip touches ONLY absolute paths, so a legitimate
     top-level repo dir named `testbed/` (relative) is never over-stripped."""
     if not f:
         return f
     nf = f.replace("\\", "/")
-    if nf.startswith("/"):
+    is_abs = nf.startswith("/") or bool(re.match(r"^[A-Za-z]:/", nf))
+    if is_abs:
         for cr in _CONTAINER_ROOTS:
             if nf.startswith(cr):
                 return nf[len(cr):]
         if root:
             nroot = root.replace("\\", "/").rstrip("/") + "/"
-            if nf.startswith(nroot):
+            if nf.lower().startswith(nroot.lower()):
                 return nf[len(nroot):]
         try:
-            return os.path.relpath(f, root) if root else f
+            rel = os.path.relpath(f, root) if root else nf
+            return rel.replace("\\", "/")
         except (ValueError, TypeError):
-            return f
-    return f
+            return nf
+    return nf
 
 
 # ---------------------------------------------------------------------------
@@ -6151,6 +6235,7 @@ def _reset_oracle_state() -> None:
     for isolation, it must clear EVERY producer/latch global — a missed one leaks stale "already
     fired" state and silently reddens/greens the next case (a measurement-integrity bug)."""
     global _action_count, _oracle_nonedit_streak, _oracle_obligation_fired
+    global _mtime_baseline, _mtime_baseline_seeded
     global _consensus_fired, _cochange_fired, _l5_fired, _oblig_resurface_fired
     global _obligation_tracker, _obligation_tracker_anchors
     global _last_budget_pending
@@ -6211,6 +6296,8 @@ def _reset_oracle_state() -> None:
     global _ISSUE_TEXT_CACHE
     _ISSUE_TEXT_CACHE = None
     _action_count = 0
+    _mtime_baseline = _SourceSnapshot()
+    _mtime_baseline_seeded = False
     _oracle_nonedit_streak = 0
     _oracle_obligation_fired = False
     _oracle_test_count = 0           # bug #4: reset test-evidence on retry
@@ -6225,6 +6312,7 @@ def _reset_oracle_state() -> None:
     _oracle_edited_rels.clear()
     # GT_OBLIGATIONS_V2 (F3 reset law: every latch clears here)
     _unexercised_emitted.clear()
+    _unexercised_late_suppressed.clear()
     global _obligations_v2_cache
     _obligations_v2_cache = None
     _oracle_tested_tokens.clear()
@@ -6440,6 +6528,7 @@ _oblig_resurface_fired = False
 # persisted render_path_tokens); a leaky row drops whole (fail closed).
 
 _unexercised_emitted: set[str] = set()
+_unexercised_late_suppressed: set[str] = set()
 _obligations_v2_cache: dict | None = None
 _V2_LEAK_TEST_RE = re.compile(r"\b(?:test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
 _V2_LEAK_F2P_RE = re.compile(
@@ -6467,10 +6556,11 @@ def _load_obligations_v2() -> dict | None:
 
 
 class _V2ClauseView:
-    __slots__ = ("idx", "verbatim", "subject_symbols", "sym_parts")
+    __slots__ = ("idx", "clause_id", "verbatim", "subject_symbols", "sym_parts")
 
     def __init__(self, idx: int, clause: dict):
         self.idx = idx
+        self.clause_id = str(clause.get("clause_id") or idx)
         self.verbatim = str(clause.get("verbatim_text") or "")
         self.subject_symbols = frozenset(
             s for s in (clause.get("subject_symbols") or ()) if isinstance(s, str)
@@ -6501,6 +6591,42 @@ def _v2_exercise_statuses():
         views, _edited_symbols_for_obligations(), _oracle_tested_tokens)
 
 
+def _v2_clause_fresh_behavioral_proof(view) -> "dict | None":
+    """Leak-safe identity for checked clause proof newer than its last edit."""
+    try:
+        from groundtruth.runtime.obligations import (
+            classify_checked_behavioral_proof,
+            obligation_subject_terms,
+        )
+        subjects = obligation_subject_terms(str(getattr(view, "verbatim", "") or ""))
+        if not subjects:
+            return None
+        last_edit = _ss_last_relevant_edit_turn(subjects)
+        for command, output, returncode, turn in _ss_behavioral_probe_events:
+            proof = classify_checked_behavioral_proof(
+                command, output, returncode, subjects, turn=turn
+            )
+            if proof is None or proof.turn <= last_edit:
+                continue
+            subject_digest = hashlib.sha256(
+                "|".join(sorted(subjects)).encode("utf-8")
+            ).hexdigest()[:16]
+            subject_term_digests = [
+                hashlib.sha256(subject.encode("utf-8")).hexdigest()[:16]
+                for subject in sorted(subjects)
+            ]
+            return {
+                "clause_id": str(getattr(view, "clause_id", view.idx)),
+                "subject_digest": subject_digest,
+                "subject_term_digests": subject_term_digests,
+                "proof_turn": int(proof.turn),
+                "last_relevant_edit_turn": int(last_edit),
+            }
+        return None
+    except Exception:  # noqa: BLE001 -- proof uncertainty must retain the clause
+        return None
+
+
 def _unexercised_clause_candidate() -> tuple[float, str] | None:
     """T3 candidate for the VERIFY/SUBMIT site (see block comment above)."""
     if _GT_BASELINE or len(_unexercised_emitted) >= 2:
@@ -6508,11 +6634,50 @@ def _unexercised_clause_candidate() -> tuple[float, str] | None:
     statuses = _v2_exercise_statuses()
     if statuses is None:
         return None
+    data = _load_obligations_v2() or {}
+    if _ss_late_drop_on():
+        try:
+            from groundtruth.runtime.obligations import (
+                CLAUSE_EDITED_UNEXERCISED,
+                CLAUSE_UNADDRESSED,
+            )
+            renderable = {CLAUSE_EDITED_UNEXERCISED, CLAUSE_UNADDRESSED}
+        except Exception:  # noqa: BLE001 -- proof uncertainty retains every clause
+            renderable = set()
+        retained = []
+        suppressed = []
+        for view, status in statuses:
+            proof_meta = (
+                _v2_clause_fresh_behavioral_proof(view)
+                if status in renderable else None
+            )
+            if proof_meta is not None:
+                suppressed.append(proof_meta)
+            else:
+                retained.append((view, status))
+        for proof_meta in suppressed:
+            identity = {
+                **proof_meta,
+                "artifact_issue_sha256": str(data.get("issue_sha256") or ""),
+            }
+            suppression_key = hashlib.sha256(
+                json.dumps(identity, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:16]
+            if suppression_key not in _unexercised_late_suppressed:
+                _unexercised_late_suppressed.add(suppression_key)
+                _runtime_ledger_record(
+                    kind="obligation.unexercised",
+                    outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason="ss_late",
+                    extra=identity,
+                )
+        statuses = retained
+        if not statuses:
+            return None
     try:
         from groundtruth.runtime.obligations import render_unexercised_block
     except Exception:  # noqa: BLE001
         return None
-    data = _load_obligations_v2() or {}
     path_tokens = [
         t.lower() for t in (data.get("render_path_tokens") or ())
         if isinstance(t, str) and len(t) >= 3
@@ -6785,6 +6950,21 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         return (sev, payload)
     except Exception:  # noqa: BLE001 -- never break the agent loop
         return None
+
+
+def _review_obligation_candidate():
+    """Select the review-boundary producer and its delivery class.
+
+    V2 keeps its honest ``obligation.unexercised`` identity and Lane-A semantics;
+    the legacy status checklist remains a ``spec.obligation`` steer.
+    """
+    if _load_obligations_v2() is not None:
+        return (
+            "obligation.unexercised",
+            _unexercised_clause_candidate(),
+            True,
+        )
+    return "spec.obligation", _obligation_nudge_block(), False
 
 
 # Kinds the gate suppressed THIS turn as a re-armable loss (outranked /
@@ -7137,6 +7317,67 @@ def _runtime_ledger_record(
         for _ek, _ev in extra.items():
             _row.setdefault(_ek, _ev)
     _ledger_line_direct(_row)
+
+
+# Exact CAP producer attribution for the durable delivery row.  This is deliberately
+# narrower than the Profile-2 registry: most members mediate ranking, arbitration,
+# freshness, or a shared class and therefore do not uniquely own rendered bytes.
+_LANE_PROFILE_MEMBER_OWNERS: dict[str, str] = {
+    "edit.syntax": "GT_EDIT_CHECK",
+    "recovery": "GT_HYPOTHESIS",
+}
+
+
+def _lane_profile_member_extra(kind: str) -> "dict[str, str] | None":
+    """Return ledger attribution only for an active, single-owner lane payload."""
+    member = _LANE_PROFILE_MEMBER_OWNERS.get(kind or "")
+    if not member or _GT_BASELINE or os.environ.get(member) != "1":
+        return None
+    return {"profile_member": member}
+
+
+def _gateway_profile_member_extra(envelope) -> "dict[str, str] | None":
+    """Return exact producer attribution for the two exclusive Gateway engines.
+
+    Both producer and evidence class must match.  A producer label by itself is not
+    enough because new/shared classes must fail closed until their ownership is read
+    and proven at the delivery seam.
+    """
+    if _GT_BASELINE or envelope is None:
+        return None
+    producer = str(getattr(envelope, "producer", "") or "")
+    evidence_type = str(getattr(envelope, "evidence_type", "") or "")
+    member = None
+    if producer == "patch_delta" and evidence_type in {
+            "signature_mismatch", "companion_surface"}:
+        member = "GT_PATCH_DELTA"
+    elif producer == "change_surface" and (
+            evidence_type == "new_file_destination"
+            or evidence_type.startswith("missing_role:")):
+        member = "GT_CHANGE_SURFACE"
+    if not member or os.environ.get(member) != "1":
+        return None
+    return {"profile_member": member}
+
+
+def _feature_lineage_extra(lineage) -> dict:
+    """Return additive typed lineage columns; unavailable engines fail quiet."""
+    if lineage is None:
+        return {}
+    try:
+        from groundtruth.runtime.feature_lineage import lineage_ledger_extra
+        return lineage_ledger_extra(lineage)
+    except Exception:  # noqa: BLE001 - audit metadata never breaks delivery
+        return {}
+
+
+def _gateway_delivery_extra(envelope) -> dict:
+    """Combine typed lineage with the legacy active-member observation."""
+    extra = _feature_lineage_extra(getattr(envelope, "lineage", None))
+    legacy = _gateway_profile_member_extra(envelope)
+    if legacy:
+        extra.update(legacy)
+    return extra
 
 
 # ---------------------------------------------------------------------------
@@ -7832,7 +8073,7 @@ def _executed_covering_emission(covering: list[dict],
         try:
             import inspect as _inspect
             if "executor" in _inspect.signature(run_covering_tests).parameters:
-                _ex = _build_env_executor()
+                _ex = _build_verification_executor()
                 if _ex is not None:
                     _run_kwargs["executor"] = _ex
         except (TypeError, ValueError):  # unintrospectable signature -> default path
@@ -7994,11 +8235,14 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
     only this wave (no leak-safe generic renderer). Feeds ``_last_covering_result`` /
     ``_last_test_outcome_failed`` from the EXECUTED unit verdict (submit-gate parity).
 
-    Fail-closed + byte-identical when the flag is off (early return). Suppressed if the
+    Execution requires both ``GT_VERIFICATION_PLAN=1`` and ``GT_VERIFY_EXECUTE=1``;
+    either flag off is byte-identical and performs zero runner work. Suppressed if the
     agent already ran a test this turn (mirror of ``_executed_covering_emission``).
     Correct-or-quiet on any error; an unattributed RED never false-delivers (invariant ②)."""
     global _last_test_outcome_failed, _last_covering_result
-    if os.environ.get("GT_VERIFICATION_PLAN") != "1" or _GT_BASELINE:
+    if (os.environ.get("GT_VERIFICATION_PLAN") != "1"
+            or os.environ.get("GT_VERIFY_EXECUTE") != "1"
+            or _GT_BASELINE):
         return None
     if _last_test_step == _action_count:  # agent already ran a test this turn
         return None
@@ -8023,8 +8267,14 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
         from dataclasses import replace as _dc_replace
         plan = _dc_replace(
             plan, checks=tuple(c for c in plan.checks if c.kind in ("syntax", "unit")))
-        results = run_plan(plan, executor=_build_env_executor(), repo_root=root,
-                           per_file_timeout=20, total_budget_seconds=35)
+        results = run_plan(
+            plan,
+            executor=_build_verification_executor(),
+            syntax_executor=_build_edit_check_executor(),
+            repo_root=root,
+            per_file_timeout=20,
+            total_budget_seconds=35,
+        )
         # Capture the unit rung verdict for the submit gate (parity with the covering path).
         for res in results:
             if res.kind == "unit":
@@ -8089,7 +8339,7 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
     except Exception:  # noqa: BLE001 -- engine absent in-container -> E no-ops
         return None
     try:
-        _ex = _build_env_executor()  # None -> host subprocess / in-process ast.parse
+        _ex = _build_edit_check_executor()  # replay may pin only this parse-only boundary
         res = check_edit_syntax(rel, _root(), executor=_ex)
     except Exception:  # noqa: BLE001 -- the checker must never break the loop
         return None
@@ -8274,11 +8524,13 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
     reframe (severity _SEV_OBLIGATION) still wins when a pivot IS present, so the pivot-path
     behaviour is unchanged.
 
-    Flag GT_HYPOTHESIS (default OFF -> classify never selects a disposition, so
-    ``_gt_hypothesis_recovery`` is None -> None -> byte-identical). ``edit_bound=True``: the
-    trigger IS the failure observation (bound to POST_VIEW/POST_EDIT/TEST_RESULT in the
-    context policy), so it waives the empty-focus relevance suppression like every other
-    event-bound producer. Correct-or-quiet: any fault -> None.
+    Flag GT_HYPOTHESIS (default OFF -> None -> byte-identical). Under
+    GT_SS_RECOVERY_V2, a canonical repeated failing-test identity may select the existing
+    generic ``D_REQUEST_NEW_HYPOTHESIS`` recovery even when the legacy prose-fingerprint
+    classifier selected nothing. ``edit_bound=True``: the trigger IS the failure observation
+    (bound to POST_VIEW/POST_EDIT/TEST_RESULT in the context policy), so it waives the
+    empty-focus relevance suppression like every other event-bound producer.
+    Correct-or-quiet: any fault -> None.
 
     W6 FIX 1b (2026-07-12): under GT_GLOBAL_ARBITER (the config where FIX 1a resurrects this
     candidate onto the ladder) the candidate is additionally gated by :func:`_recovery_stall_active`
@@ -8289,22 +8541,56 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
     delivery) is BYTE-IDENTICAL to before this fix."""
     if _GT_BASELINE or os.environ.get("GT_HYPOTHESIS") != "1":
         return None
-    if not _gt_hypothesis_recovery:
-        return None
+    selection = _gt_hypothesis_recovery
+    recovery_v2 = _ss_recovery_v2_on()
+    current_failure_key = (
+        _ss_current_failure_event[1]
+        if (_ss_current_failure_event is not None
+            and _ss_current_failure_event[0] == _action_count)
+        else ""
+    )
+    typed_falsification = False
+    if recovery_v2 and current_failure_key and selection:
+        try:
+            from groundtruth.runtime.hypothesis_ledger import D_HYPOTHESIS_FALSIFIED
+            typed_falsification = selection[0] == D_HYPOTHESIS_FALSIFIED
+        except Exception:  # noqa: BLE001 -- absent typed vocabulary stays quiet
+            typed_falsification = False
+    recovery_v2_eligible = bool(
+        recovery_v2
+        and current_failure_key
+        and (_ss_test_fail_counts.get(current_failure_key, 0) >= 2
+             or typed_falsification)
+    )
+    if not selection:
+        # The canonical counter persists until its failing identity passes or source changes,
+        # but fallback SELECTION is an event decision: release only on the qualifying failing
+        # test observation itself, never on a later unrelated command/pass.
+        if not recovery_v2_eligible:
+            return None
+        try:
+            from groundtruth.runtime.hypothesis_ledger import D_REQUEST_NEW_HYPOTHESIS
+            imperative = _hypothesis_imperative_map().get(D_REQUEST_NEW_HYPOTHESIS)
+            if not imperative:
+                return None
+            selection = (D_REQUEST_NEW_HYPOTHESIS, imperative)
+        except Exception:  # noqa: BLE001 -- missing recovery vocabulary stays quiet
+            return None
     # W6 FIX 1b — the STALL GATE (arbiter-scoped, so arbiter-off is byte-identical). FIX 1a makes
     # this candidate DELIVERABLE via the pool; without the gate, the classifier's over-fire (a
     # benign recurring "0 failed" summary reading as a repeated failure) would ship nudges to a
     # progressing agent. Suppress unless a genuine repetition/stall is sensed; log the drop so the
     # suppression is auditable (never a silent drop).
-    # GT_SS_RECOVERY_V2 (feature 4): REPLACE the fingerprint-based stall sensor with a
-    # deterministic repeat gate — the SAME test-classified command observed FAILING >=2x
-    # with NO intervening edit. Eligibility flips True at the 2nd qualifying repeat, so a
-    # genuine stall delivers at repeat-2 (killing the dynaconf "suppressed 11x then too
-    # late" death) while a passing / one-off / differing-output turn stays ineligible
-    # (killing the two privacyidea misfires). Off -> the legacy arbiter-scoped stall gate
-    # (byte-identical).
-    if _ss_recovery_v2_on():
-        if not _ss_recovery_eligible():
+    # GT_SS_RECOVERY_V2 (feature 4): gate recovery on a CURRENT genuine failing-test event.
+    # The deterministic repeat gate uses the SAME canonical failing-test identity >=2x
+    # with NO intervening edit; this remains the Dynaconf path. A complementary typed
+    # D_HYPOTHESIS_FALSIFIED selection proves the same fingerprint recurred AFTER an edit;
+    # that edit intentionally reset the canonical counter, so requiring both predicates
+    # would make post-edit falsification impossible. No arbitrary legacy selection can use
+    # this exception, and later non-test turns have no current failure event, preserving the
+    # PrivacyIdea suppressions. Off -> the legacy arbiter-scoped stall gate (byte-identical).
+    if recovery_v2:
+        if not recovery_v2_eligible:
             try:
                 _record_hook_suppress("recovery", reason="ss_recovery_gate")
                 _runtime_ledger_record(
@@ -8326,8 +8612,7 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
         return None
     try:
         from groundtruth.runtime.native_render import render_recovery_native
-        text = render_recovery_native(
-            _gt_hypothesis_recovery[0], _gt_hypothesis_recovery[1])
+        text = render_recovery_native(selection[0], selection[1])
     except Exception:  # noqa: BLE001 -- recovery framing must never break the gate
         return None
     if not text:
@@ -8337,7 +8622,7 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
     # >=2x with no intervening edit) RELEASED recovery at this qualifying repeat. Provenance/
     # measurement only — the delivered imperative bytes are unchanged. Emitted ONLY under the
     # flag, so the flag-off ledger is byte-identical.
-    if _ss_recovery_v2_on():
+    if recovery_v2:
         try:
             _runtime_ledger_record(
                 kind="recovery",
@@ -10033,6 +10318,10 @@ def _persist_receipt(env, *, kind: str, transition: str) -> None:
             "action_index": globals().get("_action_count", 0),
             "envelope": _env_to_dict(env),
         }
+        lineage = getattr(env, "lineage", None)
+        if lineage is not None:
+            from groundtruth.runtime.feature_lineage import lineage_to_dict
+            rec["lineage"] = lineage_to_dict(lineage)
         try:
             import time as _t
             rec["ts_ms"] = int(_t.time() * 1000)
@@ -10633,6 +10922,77 @@ def _gt_edit_overlay_transaction(action) -> None:
                 pass
 
 
+def _gt_gateway_pool_envelope(
+        winner, *, pool, out, ev, native: bool,
+        render_envelope, fits_budget, seal_delivery,
+        contains_gt_tag, contains_test_identity) -> bool:
+    """Preflight and pool one Gateway envelope without committing loser state.
+
+    Returns ``True`` only when the arbiter engine was unavailable and the helper
+    therefore committed this envelope inline; the caller must then stop to keep
+    the observation at one dose.  A leak/budget/SS-screen rejection returns
+    ``False`` so later Gateway envelopes remain available as fallbacks.
+
+    This helper is reachable only when the global pool already exists.  The
+    standalone path deliberately remains in :func:`_gt_gateway_deliver`, using
+    the adapter's historical single-envelope arbitration byte-for-byte.
+    """
+    global _gt_gateway_chain_head
+    delta = render_envelope(
+        winner, native=native, def_facts_renderer=_gateway_def_render)
+    if (not delta or (native and contains_gt_tag(delta))
+            or contains_test_identity(delta)):
+        if delta:
+            _runtime_ledger_record(
+                kind="gateway." + (winner.evidence_type or "fact"),
+                outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason="leak_guard", file_path=winner.target or "")
+        return False
+    if not fits_budget(delta, max_delta_chars=_GT_GATEWAY_MAX_DELTA):
+        _runtime_ledger_record(
+            kind="gateway." + (winner.evidence_type or "fact"),
+            outcome=_ProductSignalOutcome.SUPPRESSED_BUDGET,
+            reason="gateway_budget", file_path=winner.target or "")
+        return False
+
+    def _commit_gateway(
+            _winner=winner, _delta=delta, _native=native) -> None:
+        global _gt_gateway_chain_head
+        _prev = out.get("output") or ""
+        _shipped = _join_lane_output(_prev, _delta)[len(_prev):]
+        rendered = _shipped.encode("utf-8", "surrogatepass")
+        _tob = _prev.encode("utf-8", "surrogatepass")
+        sealed, _gt_gateway_chain_head = seal_delivery(
+            _winner,
+            episode_id=getattr(_EPISODE, "episode_id", ""),
+            event_id=str(_action_count),
+            parent_hash=_gt_gateway_chain_head,
+            rendered_bytes=rendered,
+            renderer_id=("native" if _native else "tagged"),
+            tool_output_bytes=_tob,
+            boundary=(str(len(_tob)) + ":" +
+                      (_winner.evidence_type or "gw")).encode("utf-8"),
+            dedup_chain=_EPISODE.delivered_dedup,
+        )
+        _gt_gateway_deliveries.append(sealed)
+        _persist_receipt(sealed, kind="gateway", transition="delivered")
+        _xsession_flush()
+        _gt_gateway_append(out, _shipped)
+        try:
+            _runtime_ledger_record(
+                kind="gateway." + (_winner.evidence_type or "fact"),
+                outcome=_ProductSignalOutcome.DELIVERED,
+                chars=len(_delta), file_path=_winner.target or "",
+                content=_delta,
+                extra=_gateway_delivery_extra(_winner))
+        except Exception:  # noqa: BLE001
+            pass
+
+    return _global_pool_add_gateway(
+        pool, winner, native, _commit_gateway,
+        ev_kind=getattr(ev, "kind", ""), rendered_text=delta)
+
+
 def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
     """THE ONE CALL: complete THIS observation with one gateway.augment() dose.
 
@@ -10644,12 +11004,12 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
     is swallowed and can NEVER undo the Lane-A/B delivery that already ran.
 
     SM-5 (2026-07-11): when ``pool`` is a list (``GT_GLOBAL_ARBITER`` on), the gateway
-    still runs its full produce path (receipt promotion, exclusion, augment, its OWN
-    <=1 arbitration, render, leak, budget) but instead of APPENDING it stashes
+    preserves every preflight-valid Gateway envelope instead of selecting a local
+    winner before the global eligibility filters run. It stashes each envelope as a
     ``(candidate, commit_thunk)`` into ``pool`` — so the ONE global ranked competition
     (:func:`_global_pool_flush`) decides whether the gateway's fact or a Lane-A/steer
-    fact is the single dose. ``pool is None`` (default / flag off) => the commit runs
-    inline exactly as before (byte-identical)."""
+    fact is the single dose. ``pool is None`` (default / flag off) keeps the adapter's
+    historical local arbitration and commits inline exactly as before (byte-identical)."""
     if not _gt_gateway_on() or not isinstance(out, dict):
         return
     global _gt_gateway_chain_head
@@ -10769,9 +11129,31 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
             # REAL). Empty until GT_EDIT_OVERLAY populates it via _gt_edit_overlay_transaction
             # -> byte-identical when the flag is off (the overlay stays {}).
             episode_overlay=_gt_episode_overlay)
-        winner = _ad_arbitrate(_gw_augment(ev, st))
-        if winner is None:
+        gateway_envelopes = _gw_augment(ev, st)
+        if pool is None:
+            # Preserve the standalone/global-off adapter arbitration exactly.
+            winner = _ad_arbitrate(gateway_envelopes)
+            gateway_envelopes = [] if winner is None else [winner]
+        if not gateway_envelopes:
             return
+        if pool is not None:
+            # Preserve every preflight-valid envelope until the ONE global
+            # arbiter applies dedup/acquired/redundant filters and ranking.
+            native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
+            for gateway_envelope in gateway_envelopes:
+                committed_inline = _gt_gateway_pool_envelope(
+                    gateway_envelope,
+                    pool=pool, out=out, ev=ev, native=native,
+                    render_envelope=_ad_render,
+                    fits_budget=_ad_fits_budget,
+                    seal_delivery=_ad_seal,
+                    contains_gt_tag=contains_gt_tag,
+                    contains_test_identity=contains_test_identity,
+                )
+                if committed_inline:
+                    return
+            return
+        winner = gateway_envelopes[0]
         # D-8 (2026-07-10): the Gateway's own render mode is keyed to GT_GATEWAY_NATIVE,
         # DECOUPLED from GT_POST_SEARCH_NATIVE (the post_search FORMAT arm) — so a FORM
         # A/B on one surface no longer contaminates the other. Default OFF = tagged
@@ -10844,20 +11226,13 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
                     kind="gateway." + (winner.evidence_type or "fact"),
                     outcome=_ProductSignalOutcome.DELIVERED,
                     chars=len(delta), file_path=winner.target or "",
-                    content=delta)  # W2 seal: the delivered gateway block (seal_scope=block, uniform w/ lanes)
+                    content=delta,
+                    extra=_gateway_delivery_extra(winner))
             except Exception:  # noqa: BLE001
                 pass
         # SM-5: under the global arbiter, STASH the produced gateway candidate + its commit
         # thunk into the shared pool instead of delivering — the ONE ranked competition
         # decides. pool None (flag off) -> deliver inline (byte-identical).
-        if pool is not None:
-            # SM-5 2b: thread the REAL event kind (ev.kind = search/view/edit/test/submit)
-            # so the candidate's correct-time repair_support is judged against THIS turn,
-            # not a hardcoded post_edit. `ev` is the normalize_event result in scope here.
-            _global_pool_add_gateway(pool, winner, native, _commit_gateway,
-                                     ev_kind=getattr(ev, "kind", ""),
-                                     rendered_text=delta)
-            return
         _commit_gateway()
     except Exception:  # noqa: BLE001 — isolated; must never break the agent loop
         _crash_emit("gateway.augment")
@@ -10993,6 +11368,27 @@ _GA_KKIND_ORDINAL: dict = {"post_search": 1, "post_view": 2, "post_edit": 3}
 _GA_GATEWAY_KIND_ORDINAL: dict = {
     "search": 1, "view": 2, "edit": 3, "test": 4, "submit": 5, "other": 0}
 
+# SS-10 reg-1: Lane-B already receives the product-owned rich Event, but historically
+# projected timing from the shell-only ``kkind``.  A pytest command commonly has kkind=None,
+# which mislabeled TEST_RESULT as ordinal 0 and let a localization steer fire before its
+# recurring review boundary.  Match by enum VALUE so the product enum and import fallback share
+# one adapter contract.  V2-off returns None, preserving _ga_make_candidate's legacy kkind path.
+_GA_EVENT_VALUE_ORDINAL: dict = {
+    "task_start": 0,
+    "review_transition": 1,
+    "post_view": 2,
+    "post_edit": 3,
+    "test_result": 4,
+    "pre_submit": 5,
+}
+
+
+def _ga_rich_event_ordinal(event) -> "int | None":
+    if not _ss_enabled("GT_SS_ARBITER_V2") or event is None:
+        return None
+    value = getattr(event, "value", "")
+    return _GA_EVENT_VALUE_ORDINAL.get(str(value or ""))
+
 # SM-10 (2026-07-12) — the PREVENTIVE ladder classes. A PREVENTIVE fact's VALUE is to STEER a
 # decision the agent is ABOUT to make: localization before it commits a search branch; a caller /
 # companion contract AT the edit so the callers/companions are updated in the SAME change. Once
@@ -11090,10 +11486,11 @@ def _ga_unified_dedup_key(producer: str, evidence_type: str, target: str,
 
 
 def _ga_make_candidate(plane: str, kind: str, *, dedup_key: str, target: str = "",
+                       fact_id: str = "",
                        tier: str = "INFO", confidence: float = 0.0,
                        kkind: str = "", seq: int = 0, suppressible: bool = False,
                        current_ordinal: "int | None" = None,
-                       rendered_chars: int = -1):
+                       rendered_chars: int = -1, lineage=None):
     """Build a global_arbiter.Candidate projected onto the ladder. Returns None when the
     engine is unavailable (the flush then delivers nothing — correct-or-quiet).
 
@@ -11127,7 +11524,13 @@ def _ga_make_candidate(plane: str, kind: str, *, dedup_key: str, target: str = "
     # recurring review boundary makes the relaxation a DISPLACEMENT, not a rescue). See
     # _SS_OBL_RELAX_CLASSES.
     _obl_open = bool(_v2 and cls in _SS_OBL_RELAX_CLASSES and _ss_obligations_open())
-    _redundant = bool(_v2 and suppressible and target and _ss_def_ref_delivered(target))
+    # ``target`` is normally a FILE and drives acquired-file suppression.  The
+    # def/ref ledger is keyed by the producer-natural SYMBOL, so redundancy must
+    # use ``fact_id`` rather than overloading the path-shaped target (which made
+    # the v2 redundant-retire branch structurally false for Gateway facts).
+    _redundant = bool(
+        _v2 and suppressible and fact_id and _ss_def_ref_delivered(fact_id)
+    )
     return Candidate(
         plane=plane, kind=kind, dedup_key=dedup_key or "",
         symbol=(_norm_fp(target) if (suppressible and target) else ""),
@@ -11135,7 +11538,9 @@ def _ga_make_candidate(plane: str, kind: str, *, dedup_key: str, target: str = "
         boundary_ordinal=boundary, current_ordinal=cur,
         suppressible_if_acquired=bool(suppressible), seq=int(seq),
         rendered_chars=int(rendered_chars),
-        obligations_open=_obl_open, redundant_with_delivered=_redundant)
+        obligations_open=_obl_open, redundant_with_delivered=_redundant,
+        fact_id=fact_id or "",
+        lineage=lineage)
 
 
 # SM-5 F (2026-07-12, cardinal #50) — GENERALIZED Lane-A latch rollback.
@@ -11259,7 +11664,8 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
             return
     key = _ga_unified_dedup_key(kind, kind, krel or kf or "", "", [win_text])
     cand = _ga_make_candidate(_GA_PLANE_STEER, kind, dedup_key=key,
-                              target=krel or kf or "", kkind=kkind, seq=len(pool))
+                              target=krel or kf or "", kkind=kkind, seq=len(pool),
+                              current_ordinal=_ga_rich_event_ordinal(event))
     if cand is None:
         # engine absent -> deliver inline (bulkhead: never silently drop the steer).
         _deliver_gate_winner(out, cmd, win_text, kkind=kkind, kf=kf, krel=krel,
@@ -11271,7 +11677,7 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
 
 
 def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str = "",
-                             rendered_text: str = "") -> None:
+                             rendered_text: str = "") -> bool:
     """SM-5: stash the produced Gateway fact (its envelope already carries the UNIFIED
     dedup_key) + its commit thunk. Gateway localization facts ARE acquisition-suppressible
     (this generalizes the gateway's own EXACT_HIT/ZERO_ABSENT acquisition gates to the
@@ -11312,7 +11718,7 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
             _runtime_ledger_record(
                 kind="ga." + et, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
                 reason=_reason, file_path=getattr(winner, "target", "") or "")
-            return
+            return False
         # This localization candidate SURVIVED the SS content screen. When GT_SS_NOVELTY is
         # the active acquisition authority, its ENTITY-SET verdict SUPERSEDES the arbiter's
         # coarser target-file ``already_acquired`` (global_arbiter REASON_ACQUIRED keys on the
@@ -11329,15 +11735,18 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
     cand = _ga_make_candidate(
         _GA_PLANE_GATEWAY, et, dedup_key=getattr(winner, "dedup_key", "") or "",
         target=getattr(winner, "target", "") or "",
+        fact_id=getattr(winner, "fact_id", "") or "",
         tier=getattr(winner, "tier", "INFO") or "INFO",
         confidence=float(getattr(winner, "confidence", 0.0) or 0.0),
         current_ordinal=_GA_GATEWAY_KIND_ORDINAL.get(ev_kind or "", 0),
         seq=len(pool), suppressible=_arb_suppressible,
-        rendered_chars=len(_payload))  # '' -> 0 = KNOWN-empty (arbiter rejects); never -1 here
+        rendered_chars=len(_payload),
+        lineage=getattr(winner, "lineage", None))
     if cand is None:
         _thunk()
-        return
+        return True
     pool.append((cand, _thunk))
+    return False
 
 
 def _global_pool_flush(pool, *, kkind, kf, krel) -> None:
@@ -11418,7 +11827,8 @@ def _global_pool_flush(pool, *, kkind, kf, krel) -> None:
                        else _ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY)
                 _runtime_ledger_record(kind="ga." + c.kind, outcome=_oc,
                                        reason="global_arbiter:" + reason,
-                                       file_path=c.symbol or "")
+                                       file_path=c.symbol or "",
+                                       extra=_feature_lineage_extra(c.lineage))
             except Exception:  # noqa: BLE001
                 pass
             # a Lane-B steer LOSER consumed its fire-once latch at production but shipped
@@ -11499,7 +11909,8 @@ def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_ba
             kind=_last_gate_winner_kind,
             outcome=_ProductSignalOutcome.DELIVERED,
             chars=len(win_text), file_path=krel or kf or "", event=event,
-            content=win_text)  # W2 seal: the delivered steer block (whole-obs boundary not cheaply here)
+            content=win_text,
+            extra=_lane_profile_member_extra(_last_gate_winner_kind))
         # SS (features 2/7): record the delivered steer's entity set + queue the ack watch.
         _ss_record_delivered(_last_gate_winner_kind, win_text)
         # RL-1 (GT_LANE_ENVELOPE): seal over the SAME bytes; base_output = pre-append obs.
@@ -11540,9 +11951,13 @@ _GA_PLANE_GATEWAY = "gateway"
 _ss_acquired_files: "set[str]" = set()      # rels the agent itself viewed/edited/greped
 _ss_acquired_symbols: "set[str]" = set()    # symbols the agent itself greped/edited
 _ss_edit_events: "list[tuple[str, int, bool]]" = []   # (exact_rel, step, write_ok)
+_ss_edit_proof_events: "list[tuple[str, int, str, bool]]" = []  # rel, step, cmd, write_ok
 _ss_test_events: "list[tuple[int, bool]]" = []         # (step, passed)
 _ss_pass_tokens: "set[str]" = set()         # tokens observed in PASSING test events
 _ss_test_fail_counts: "dict[str, int]" = {}  # normalized test cmd -> consecutive fails, edit-cleared
+_ss_failure_keys_by_test_cmd: "dict[str, set[str]]" = {}  # test cmd -> canonical failure keys
+_ss_current_failure_event: "tuple[int, str] | None" = None  # (step, canonical failure key)
+_ss_behavioral_probe_events: "list[tuple[str, str, object, int]]" = []
 _ss_delivered_entsets: "dict[str, list[frozenset]]" = {}  # fact class -> delivered entity sets
 _ss_pending_acks: "list[dict]" = []          # deliveries awaiting a model acknowledgment
 _ss_obl_open_cache: "tuple[int, bool]" = (-1, False)  # (action_count, value) per-turn memo
@@ -11563,12 +11978,17 @@ def _ss_reset() -> None:
     cross-case test reuse) starts on a fresh slate. Byte-identical in production
     (fresh process per attempt); these are host-side only (never model bytes)."""
     global _ss_obl_open_cache, _ss_last_failing_test, _ss_submit_red_fired
+    global _ss_current_failure_event
     _ss_acquired_files.clear()
     _ss_acquired_symbols.clear()
     _ss_edit_events.clear()
+    _ss_edit_proof_events.clear()
     _ss_test_events.clear()
     _ss_pass_tokens.clear()
     _ss_test_fail_counts.clear()
+    _ss_failure_keys_by_test_cmd.clear()
+    _ss_current_failure_event = None
+    _ss_behavioral_probe_events.clear()
     _ss_delivered_entsets.clear()
     _ss_pending_acks.clear()
     _ss_obl_open_cache = (-1, False)
@@ -11750,12 +12170,15 @@ def _ss_code_idents(text: str) -> "set[str]":
     identifiers (len>=4) plus call/dotted symbols. Lowercase prose words carry no
     ``_`` and no internal caps, so they are excluded (correct-or-quiet)."""
     out: "set[str]" = set()
-    for tok in _BLOCK_TOKEN_RE.findall(text or ""):
+    # Renderer control attributes (for example reason="test_evidence_gap") are
+    # transport metadata, never obligation subjects.
+    subject_text = re.sub(r"</?gt-[^>]*>", "", text or "")
+    for tok in _BLOCK_TOKEN_RE.findall(subject_text):
         if len(tok) < 4:
             continue
         if "_" in tok or (any(c.isupper() for c in tok[1:]) and any(c.islower() for c in tok)):
             out.add(tok)
-    out |= _ss_extract_symbols(text)
+    out |= _ss_extract_symbols(subject_text)
     return out
 
 
@@ -11899,10 +12322,103 @@ def _ss_late_drop_suppresses(kind: str, text: str, *, is_loc: bool = False) -> b
     symbol not passing-tested -> deliver."""
     if kind not in _SS_OBLIGATION_KINDS and not is_loc:
         return False
+    if kind in _SS_OBLIGATION_KINDS:
+        try:
+            from groundtruth.runtime.obligations import (
+                classify_checked_behavioral_proof,
+                rendered_obligation_subject_groups,
+            )
+            groups = rendered_obligation_subject_groups(text)
+            if not groups:
+                return False
+            return all(any(
+                    (proof := classify_checked_behavioral_proof(
+                        command, output, returncode, group, turn=turn)) is not None
+                    and proof.turn > _ss_last_relevant_edit_turn(group)
+                    for command, output, returncode, turn in _ss_behavioral_probe_events)
+                    for group in groups)
+        except Exception:  # noqa: BLE001 -- structured proof failure is correct-or-quiet
+            return False
     syms = _ss_code_idents(text)
     if not syms:
         return False
     return all(s in _ss_pass_tokens for s in syms)
+
+
+def _ss_edit_semantic_entities(command: str) -> "set[str] | None":
+    """Code entities changed by an inspectable edit command; None means opaque.
+
+    Paths are deliberately removed: a cleanup in the same file is not automatically a
+    behavior edit.  Definitions are the stable relation carrier—a subject-bearing class edit
+    associates its methods with that obligation, so a later method-body edit invalidates the
+    proof without treating an unrelated import/format cleanup as stale.
+    """
+    cmd = command or ""
+    sed = re.search(r"\bs(?:ed)?\b[^\n]*?['\"]s(.)(.*?)\1(.*?)\1", cmd)
+    if sed:
+        mutation = sed.group(2) + "\n" + sed.group(3)
+    elif "<<" in cmd or re.search(r"(?:>|>>|tee\s+)\s*[^\s]+", cmd):
+        mutation = cmd
+    else:
+        return None
+    for path in _ss_path_tokens(mutation):
+        mutation = mutation.replace(path, " ")
+    entities = {
+        token.lower() for token in _BLOCK_TOKEN_RE.findall(mutation) if len(token) >= 4
+    }
+    entities.update(
+        name.lower()
+        for name in re.findall(r"\b(?:class|def|func|function)\s+([A-Za-z_]\w*)", mutation)
+    )
+    return entities
+
+
+def _ss_defined_entities(command: str) -> "set[str]":
+    return {
+        name.lower()
+        for name in re.findall(
+            r"\b(?:class|def|func|function)\s+([A-Za-z_]\w*)", command or "")
+    }
+
+
+def _ss_last_relevant_edit_turn(subjects) -> int:
+    """Last successful behavior edit relevant to one obligation subject group.
+
+    Relevance starts from the rendered subject and expands only through definitions on an edit
+    that directly named that subject.  Opaque writes invalidate conservatively.  A same-file
+    cleanup with no subject/associated definition overlap does not erase a later proof.
+    """
+    subject_entities = {str(subject).strip().lower() for subject in subjects if str(subject).strip()}
+    related = set(subject_entities)
+    last = -1
+    for _rel, step, command, succeeded in _ss_edit_proof_events:
+        if not succeeded:
+            continue
+        entities = _ss_edit_semantic_entities(command)
+        if entities is None:
+            last = max(last, step)
+            continue
+        if entities & related:
+            last = max(last, step)
+            related.update(_ss_defined_entities(command))
+    return last
+
+
+def _ss_record_behavioral_proof(*, command: str, output: str, returncode) -> None:
+    """Retain one native command/result event for later obligation-scoped proof.
+
+    The obligation subject is not known at command time.  Classification therefore
+    happens only at the late-drop boundary, where the rendered obligation supplies a
+    structured subject group.  This record is host-side only and makes no receipt or
+    acknowledgment claim.
+    """
+    try:
+        if command and output:
+            event = (str(command), str(output), returncode, int(_action_count))
+            if event not in _ss_behavioral_probe_events:
+                _ss_behavioral_probe_events.append(event)
+    except Exception:  # noqa: BLE001 -- observation must never break the turn
+        pass
 
 
 def _ss_any_content_gate_on() -> bool:
@@ -11952,7 +12468,7 @@ def _ss_record_delivered(kind: str, text: str, root: str = "", *, is_loc: bool =
 
 # --- coherence V2 (feature 3) ----------------------------------------------
 def _ss_coherence_churn(rel: str) -> "int | None":
-    """Validated churn for ``rel``: successful writes to THIS EXACT path (edit-event records —
+    """Validated churn for ``rel``: byte-proven successful writes to THIS EXACT path (edit-event records —
     never reindex/hook fires, view reads, or basename collisions) SINCE THE LAST PASSING TEST.
     Returns the churn (>=3) or None (<=2 qualifying writes).
 
@@ -12153,9 +12669,17 @@ _SS_WRITE_FAIL_RE = re.compile(
     r"|\bfatal:|unexpected eof", re.IGNORECASE)
 
 
-def _ss_write_ok(orig_out: str) -> bool:
-    """A write is counted as SUCCESSFUL unless its observation carries a clear edit-
-    failure marker (conservative: correct-or-quiet)."""
+def _ss_write_ok(orig_out: str, *, returncode=None) -> bool:
+    """Return whether an observed source-write command actually succeeded.
+
+    The harness-normalized return code is authoritative whenever it is available.  The
+    textual marker classifier is retained only for historical/replay observations that
+    genuinely lack a return code.
+    """
+    if returncode is not None:
+        # bool is an int subclass, and 0.0 compares equal to 0. Neither is the
+        # harness's documented normalized integer return-code contract.
+        return type(returncode) is int and returncode == 0
     return not bool(_SS_WRITE_FAIL_RE.search(orig_out or ""))
 
 
@@ -12183,6 +12707,34 @@ def _ss_is_scratch_path(p: str) -> bool:
     work — a scratch write is not 'overwriting your own source blind')."""
     low = ("/" + (p or "").replace("\\", "/").lstrip("./").lstrip("/")).lower()
     return any(m in low for m in _SCRATCH_DIR_MARKERS)
+
+
+def _ss_valid_repo_source_rel(path: str) -> bool:
+    """True only for a normalized source path confined to the repository domain."""
+    normalized = (path or "").replace("\\", "/")
+    if (not normalized or normalized.startswith("/")
+            or re.match(r"^[A-Za-z]:/", normalized)):
+        return False
+    parts = tuple(part for part in normalized.split("/") if part not in ("", "."))
+    if not parts or ".." in parts:
+        return False
+    return _is_repo_source_path("/".join(parts))
+
+
+def _ss_confined_repo_source_abs(path: str, root: str) -> "str | None":
+    """Resolve one declared target only when it is a non-scratch source under ROOT."""
+    if not path or not root:
+        return None
+    root_abs = os.path.abspath(root)
+    target_abs = os.path.abspath(
+        path if os.path.isabs(path) else os.path.join(root_abs, path))
+    try:
+        if os.path.normcase(os.path.commonpath([root_abs, target_abs])) != os.path.normcase(root_abs):
+            return None
+        rel = os.path.relpath(target_abs, root_abs).replace("\\", "/")
+    except (OSError, TypeError, ValueError):
+        return None
+    return target_abs if _ss_valid_repo_source_rel(rel) else None
 
 
 def _ss_write_target_noexec(cmd: str) -> "str | None":
@@ -12259,12 +12811,64 @@ def _ss_cmd_writes_source(cmd: str) -> bool:
     return True                                       # unrecognized -> assume a real write
 
 
-def _ss_record_edit(rel: str, cmd: str, orig_out: str) -> None:
+def _ss_byte_proof_targets(cmd: str, classified: "str | None" = None) -> "set[str]":
+    """Known destination paths that deserve an exact pre/post byte comparison."""
+    if classified:
+        return {classified}
+    first = (cmd or "").split("\n", 1)[0]
+    if re.match(r"^\s*(?:cp|mv|rm)\b", first):
+        toks = _src_tokens(first)
+        if toks:
+            return {toks[-1]}
+    return set()
+
+
+def _ss_write_observation_required(cmd: str, kind: "str | None",
+                                   path: "str | None") -> bool:
+    """Whether this turn must advance the source-write observation baseline.
+
+    The OFF arm is an immutable compatibility contract and therefore retains the
+    legacy observation on every command.  V2 uses exact target evidence plus the
+    semantic write classifier, so read/import/temp-only turns do no content I/O.
+    """
+    if not (_ss_coherence_v2_on() or _ss_recovery_v2_on()):
+        return True
+    return (bool(_ss_byte_proof_targets(
+                cmd, path if kind == "post_edit" else None))
+            or _ss_cmd_writes_source(cmd))
+
+
+def _ss_capture_write_preimage(action_or_cmd) -> None:
+    """Capture V2 byte truth immediately before an external command is applied.
+
+    The live environment wrapper calls this itself. Replay/direct seam drivers
+    that materialize edits before calling ``_augment_output`` must call this hook
+    first with the same action (or normalized command string).
+    """
+    if _GT_BASELINE or not _ORACLE_ROUTE or not (
+            _ss_coherence_v2_on() or _ss_recovery_v2_on()):
+        return
+    cmd = (action_or_cmd if isinstance(action_or_cmd, str)
+           else _effective_cmd(action_or_cmd))
+    kind, path = _classify(cmd)
+    targets = _ss_byte_proof_targets(cmd, path if kind == "post_edit" else None)
+    # Known read-only observations cannot mutate source state. Avoid a whole-tree
+    # byte scan on the dominant search/read/test path; opaque or explicit write
+    # commands remain conservatively observed.
+    if not targets and not _ss_cmd_writes_source(cmd):
+        return
+    _subprocess_write_targets(
+        _root(), force_paths=targets, content_proof=True)
+
+
+def _ss_record_edit(rel: str, cmd: str, orig_out: str, *, returncode=None,
+                    bytes_changed: "bool | None" = None) -> None:
     """Record a genuine per-turn SOURCE-edit event for coherence-V2 + recovery-V2:
     (exact rel, step, ok). SS-10 (reg #2/#3): a non-source-write (read / move / scratch-only
     write) is SKIPPED — it neither enters the churn ledger (inflating the delivered count) nor
     clears the recovery fail-repeat streak (only a genuine code change resets 'same failing
-    command'). A real edit clears the recovery counters (an intervening edit resets the streak)."""
+    command'). A successful byte-changing edit clears the recovery counters; observations
+    without an RC retain the historical reset behavior for replay compatibility."""
     try:
         # The recorded/off arm predates semantic write classification: its post-edit sensor
         # already established a file change, and retaining that event is required for exact
@@ -12272,10 +12876,29 @@ def _ss_record_edit(rel: str, cmd: str, orig_out: str) -> None:
         # Production Profile-2 enables both consumers, so corrected successful-source-write
         # semantics remain unchanged there; either feature alone also gets the correction.
         _v2_write_semantics = _ss_coherence_v2_on() or _ss_recovery_v2_on()
-        if _v2_write_semantics and not _ss_cmd_writes_source(cmd):
+        if _v2_write_semantics and not _ss_valid_repo_source_rel(rel):
+            return
+        # Byte proof is stronger than command-shape parsing (cp/mv/rm and opaque
+        # generators are valid write channels when the exact source bytes moved).
+        if _v2_write_semantics and bytes_changed is not True and not _ss_cmd_writes_source(cmd):
             return  # not a source write -> do not count as churn / do not reset recovery
-        _ss_edit_events.append((rel or "", _action_count, _ss_write_ok(orig_out)))
-        _ss_test_fail_counts.clear()  # no-intervening-edit rule for recovery-V2
+        write_ok = _ss_write_ok(orig_out, returncode=returncode)
+        if _v2_write_semantics:
+            # In V2, command success proves only that the write ATTEMPT ran.  Coherence
+            # counts landed code-state transitions, so the event's success bit also
+            # requires an exact byte delta.  False/unknown byte truth stays non-churn.
+            write_ok = write_ok and bytes_changed is True
+        _ss_edit_events.append((rel or "", _action_count, write_ok))
+        _ss_edit_proof_events.append((rel or "", _action_count, cmd or "", write_ok))
+        if ((write_ok and (not _v2_write_semantics or bytes_changed is True))
+                or (returncode is None and bytes_changed is None)):
+            # no-intervening-successful-edit rule for recovery-V2: a rejected write did
+            # not change source and therefore cannot break a repeated-failure streak.
+            # A same-byte successful attempt neither counts for coherence nor resets
+            # recovery because the failing code state did not change. The absent-RC
+            # compatibility arm deliberately preserves the pre-change replay contract.
+            _ss_test_fail_counts.clear()
+            _ss_failure_keys_by_test_cmd.clear()
     except Exception:  # noqa: BLE001
         pass
 
@@ -12313,8 +12936,9 @@ def _ss_record_test(cmd: str, orig_out: str, failed: bool, passed: bool) -> None
     (the agent's own command + step); a PASSING such event clears it (the last touching event
     went green). A test that touches no edit does not change it. Consumed only at the submit
     boundary under the flag; populated unconditionally (host-side, zero observation bytes)."""
-    global _ss_last_failing_test
+    global _ss_last_failing_test, _ss_current_failure_event
     try:
+        _ss_current_failure_event = None
         _ss_test_events.append((_action_count, passed))
         if passed:
             _ss_pass_tokens.update(
@@ -12322,11 +12946,51 @@ def _ss_record_test(cmd: str, orig_out: str, failed: bool, passed: bool) -> None
             _ss_pass_tokens.update(
                 t for t in _BLOCK_TOKEN_RE.findall(cmd or "") if len(t) >= 3)
         norm = (cmd or "").strip()
+        failure_key = norm
+        passing_names: tuple[str, ...] = ()
+        if failed:
+            try:
+                from groundtruth.runtime.test_runner import _parse_failing_test_names
+                failure_names = tuple(sorted(set(
+                    _parse_failing_test_names(orig_out or ""))))
+            except Exception:  # noqa: BLE001 -- absent parser keeps legacy command identity
+                failure_names = ()
+            if failure_names:
+                failure_key = "test_identity:" + "|".join(failure_names)
+        elif passed:
+            try:
+                from groundtruth.runtime.test_runner import (
+                    _parse_passing_test_names,
+                    _parse_requested_test_names,
+                )
+                passing_names = tuple(sorted(set(
+                    _parse_passing_test_names(orig_out or "")
+                    + _parse_requested_test_names(norm))))
+            except Exception:  # noqa: BLE001 -- absent parser keeps legacy command clearing
+                passing_names = ()
         if norm:
             if failed:
-                _ss_test_fail_counts[norm] = _ss_test_fail_counts.get(norm, 0) + 1
+                _ss_test_fail_counts[failure_key] = (
+                    _ss_test_fail_counts.get(failure_key, 0) + 1)
+                _ss_failure_keys_by_test_cmd.setdefault(norm, set()).add(failure_key)
+                _ss_current_failure_event = (_action_count, failure_key)
             elif passed:
                 _ss_test_fail_counts.pop(norm, None)
+                for key in _ss_failure_keys_by_test_cmd.pop(norm, set()):
+                    _ss_test_fail_counts.pop(key, None)
+                if passing_names:
+                    passed_set = set(passing_names)
+                    cleared = {
+                        key for key in _ss_test_fail_counts
+                        if key.startswith("test_identity:")
+                        and set(key.removeprefix("test_identity:").split("|")) <= passed_set
+                    }
+                    for key in cleared:
+                        _ss_test_fail_counts.pop(key, None)
+                    for alias, keys in list(_ss_failure_keys_by_test_cmd.items()):
+                        keys.difference_update(cleared)
+                        if not keys:
+                            _ss_failure_keys_by_test_cmd.pop(alias, None)
         # SS-2 submit-RED: the LAST test event touching an edited surface sets/clears the latch.
         if norm and (failed or passed) and _ss_test_touches_edit(cmd, orig_out):
             _ss_last_failing_test = {"cmd": norm, "step": _action_count} if failed else None
@@ -12399,6 +13063,7 @@ def _augment_output(action, out) -> None:
         # loop signature) works unchanged. A bash action passes through untouched.
         cmd = _effective_cmd(action)
         _orig_out = out.get("output") or ""  # the command's own output (for failure detect)
+        _returncode = out.get("returncode")   # normalized command truth; None means absent
 
         if not _GT_BASELINE and _ORACLE_ROUTE:
             # ---- STAGE-4 ORACLE ROUTING: producers -> candidates -> ONE gate ----
@@ -12439,6 +13104,7 @@ def _augment_output(action, out) -> None:
                 # here so a prior-turn WINNER's un-consumed rollback can never mis-fire.
                 _lane_a_rearm_pending.clear()
             _krel = ""  # bound on post_edit; hardening for the guarded uses below
+            _chg: list[str] = []
             _kkind, _kf = _classify(cmd)
             # SM-2b (2026-07-11) replacement-delivers TRIPWIRE — computed ONCE per turn: does
             # the Gateway's cross-language caller_contract producer provably deliver an
@@ -12454,14 +13120,26 @@ def _augment_output(action, out) -> None:
             # changed, route the FIRST changed file through the SAME post_edit
             # path. Only on a fast-path miss -> no double-fire. Correct-or-quiet:
             # a non-write command changes nothing -> empty -> no fallback edit.
-            if _kkind != "post_edit":
+            _v2_write_truth = _ss_coherence_v2_on() or _ss_recovery_v2_on()
+            # OFF is a strict compatibility arm: preserve the legacy whole-tree
+            # metadata observation on every command.  Only V2 may use the corrected
+            # command classifier to avoid content I/O on proven non-write turns.
+            _write_observation = _ss_write_observation_required(cmd, _kkind, _kf)
+            if not _write_observation:
+                # The pre-execution hook applies the same predicate. Keeping both
+                # sides aligned means read/search/test turns do zero content I/O.
+                _chg = []
+            elif _kkind != "post_edit":
                 # R7 (Fable): still CALL the diff (re-seeds the mtime baseline so the next
                 # command diffs against post-git state — no stale-baseline refire), but a
                 # file-reverting git op must NOT fabricate a phantom post_edit from the
                 # mtime bump it causes. Suppress the fabrication for those commands only.
                 _git_revert = bool(_GIT_REVERT_RE.search(cmd or ""))
                 try:
-                    _chg = _subprocess_write_targets(_root())
+                    _chg = _subprocess_write_targets(
+                        _root(), force_paths=(
+                            _ss_byte_proof_targets(cmd, _kf)
+                            if _v2_write_truth else None))
                 except Exception:  # noqa: BLE001 — fallback isolated
                     _chg = []
                 if _chg and not _git_revert:
@@ -12476,13 +13154,45 @@ def _augment_output(action, out) -> None:
                 # lock-step so the NEXT command diffs against post-edit state
                 # (avoids re-reporting this same change on the next command).
                 try:
-                    _subprocess_write_targets(_root())
+                    _chg = _subprocess_write_targets(
+                        _root(), force_paths=(
+                            _ss_byte_proof_targets(cmd, _kf)
+                            if _v2_write_truth else None))
                 except Exception:  # noqa: BLE001
-                    pass
+                    _chg = []
+            # Path identity follows the host filesystem.  In particular, Windows
+            # path case must not turn one byte-proven edit into a false no-op.
+            _changed_by_key = {
+                os.path.normcase(os.path.abspath(_p)): os.path.abspath(_p)
+                for _p in _chg if _p
+            }
+            _changed_abs = set(_changed_by_key)
+            # Under V2, classification proves only an ATTEMPT.  Record that
+            # chronology, but no code-state producer may observe post_edit until
+            # an exact byte delta proves that source state actually landed.
+            if _v2_write_truth and _kkind == "post_edit" and _kf:
+                _attempt_root = _root()
+                _attempt_abs = os.path.normcase(os.path.abspath(
+                    _kf if os.path.isabs(_kf) else os.path.join(_attempt_root, _kf)))
+                if _attempt_abs not in _changed_abs:
+                    if _changed_by_key:
+                        # The parser found an attempted/no-op target, while exact
+                        # tree bytes prove the same command landed another source.
+                        # Route the deterministic first changed path; do not let
+                        # the parser hit hide a real write.
+                        _kkind, _kf = "post_edit", _changed_by_key[sorted(_changed_by_key)[0]]
+                    else:
+                        _ss_record_edit(
+                            _to_repo_rel(_kf, _attempt_root), cmd or "", _orig_out,
+                            returncode=_returncode, bytes_changed=False)
+                        _kkind, _kf = None, None
             if _kkind == "post_edit" and _kf:
                 _source_edit_count += 1
                 _kroot = _root()
                 _krel = _to_repo_rel(_kf, _kroot)
+                _kabs = os.path.normcase(os.path.abspath(
+                    _kf if os.path.isabs(_kf) else os.path.join(_kroot, _kf)))
+                _bytes_changed = _kabs in _changed_abs
                 _oracle_edited_rels.add(_krel)
                 _oracle_nonedit_streak = 0
                 # edit EVIDENCE tokens (plan §5.2 "edited?"): the edit command
@@ -12520,12 +13230,27 @@ def _augment_output(action, out) -> None:
                 _edit_churn[_krel] = _edit_churn.get(_krel, 0) + 1
                 # SS features 3/4: record a genuine per-turn edit event (exact rel,
                 # step, write-ok) for coherence-V2's exact-path churn + the no-passing-
-                # test-between check, and clear the recovery-V2 fail-repeat streak (an
-                # intervening edit resets "same failing command"). Host-side; consumed
+                # test-between check. A successful edit clears recovery-V2's fail-repeat
+                # streak (absent-RC replay keeps its legacy reset). Host-side; consumed
                 # only under the SS flags (byte-identical off). Also mark the edited
                 # tokens as agent-acquired symbols for the novelty gate.
-                _ss_record_edit(_krel, cmd or "", _orig_out)
+                _ss_record_edit(
+                    _krel, cmd or "", _orig_out, returncode=_returncode,
+                    bytes_changed=_bytes_changed)
                 _ss_acquired_symbols.update(_edit_toks)
+                # An opaque command can land several source paths in one turn.
+                # Preserve the single delivery arbiter by producing from the
+                # deterministic primary path only, while recording every other
+                # byte-proven path in the code-state chronology.
+                if _v2_write_truth:
+                    for _other_key in sorted(_changed_abs - {_kabs}):
+                        _other_abs = _changed_by_key[_other_key]
+                        _other_rel = _to_repo_rel(_other_abs, _kroot)
+                        _ss_record_edit(
+                            _other_rel, cmd or "", _orig_out,
+                            returncode=_returncode, bytes_changed=True)
+                        _oracle_edited_rels.add(_other_rel)
+                        _edit_churn[_other_rel] = _edit_churn.get(_other_rel, 0) + 1
                 # H0 (Stage 4): open an edit->test cycle at the FIRST source
                 # edit after the last observed test result.
                 if _cycle_edit_start is None:
@@ -12698,6 +13423,11 @@ def _augment_output(action, out) -> None:
                 # host-side, consumed only under the SS flags (byte-identical off).
                 _ss_passed = bool(_TEST_PASS_RE.search(_orig_out)) and not _last_test_outcome_failed
                 _ss_record_test(cmd or "", _orig_out, _last_test_outcome_failed, _ss_passed)
+            # Product-owned checked behavioral proof is classified later against the
+            # exact obligation subject.  Retain the native pre-GT observation only;
+            # arbitrary rc=0 scripts receive no credit unless the strict classifier bites.
+            _ss_record_behavioral_proof(
+                command=cmd or "", output=_orig_out, returncode=_returncode)
             # L3b: evidence candidate (view/edit keyed) — RELEVANCE-gated, but
             # the view/edit event bounds relevance (§15.3 VIEW policy): when the
             # trigger IS a resolved post_view/post_edit, waive the empty-focus
@@ -12798,13 +13528,25 @@ def _augment_output(action, out) -> None:
                 # D3 fix: at >90% budget, produce obligation on ANY turn with edits
                 # (drop nonedit_streak requirement — agent may edit up to submit).
                 _budget_now = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
-                _oblig_gate = (_oracle_edited_rels and (
-                    _oracle_nonedit_streak >= 3 or _budget_now > 0.90))
+                _v2_obligations_active = _load_obligations_v2() is not None
+                _legacy_oblig_ready = (
+                    _oracle_nonedit_streak >= 3 or _budget_now > 0.90
+                )
+                _v2_oblig_ready = _event == Event.TEST_RESULT
+                _oblig_gate = bool(_oracle_edited_rels) and (
+                    _v2_oblig_ready
+                    if _v2_obligations_active else _legacy_oblig_ready
+                )
                 if _oblig_gate:
+                    _ob_kind = (
+                        "obligation.unexercised" if _v2_obligations_active
+                        else "spec.obligation"
+                    )
+                    _ob_lane_a = False
                     try:
-                        _ob = _obligation_nudge_block()
+                        _ob_kind, _ob, _ob_lane_a = _review_obligation_candidate()
                     except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                        _crash_emit("spec.obligation")
+                        _crash_emit(_ob_kind)
                         _ob = None
                     if _ob is not None:
                         # SS features 6/1: an obligation checklist whose symbols were
@@ -12813,16 +13555,26 @@ def _augment_output(action, out) -> None:
                         # the steer pool. Off -> the candidate is appended exactly as
                         # before (byte-identical).
                         _ob_late = _ss_late_drop_on() and _ss_late_drop_suppresses(
-                            "spec.obligation", _ob[1])
+                            _ob_kind, _ob[1])
                         _ob_behind = (not _ob_late) and _ss_novelty_on() and \
-                            _ss_novelty_suppresses("spec.obligation", _ob[1], _root())
+                            _ss_novelty_suppresses(_ob_kind, _ob[1], _root())
                         if _ob_late or _ob_behind:
                             _runtime_ledger_record(
-                                kind="spec.obligation",
+                                kind=_ob_kind,
                                 outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
                                 reason=("ss_late" if _ob_late else "ss_step_behind"))
+                        elif _ob_lane_a:
+                            if _ga_on:
+                                _global_pool_add_lane_a(
+                                    _ga_pool, out, cmd, [(_ob_kind, _ob[1])],
+                                    krel=(_krel or _kf or ""), event=_event,
+                                    kkind=_kkind)
+                            else:
+                                _lane_a_deliver(
+                                    out, cmd, [(_ob_kind, _ob[1])],
+                                    krel=(_krel or _kf or ""), event=_event)
                         else:
-                            cands.append((_ob[0], "spec.obligation", _ob[1], True))
+                            cands.append((_ob[0], _ob_kind, _ob[1], True))
                 # L5 nudges: premise-sensed event candidates (latches unchanged).
                 # Stage 3: loop_arm=False — detect.loop owns loops on this route.
                 # FIX 1 (2026-06-11): scaffold_arm=False — scaffold_trap RETIRED on
@@ -12926,11 +13678,7 @@ def _augment_output(action, out) -> None:
                         _obl_reason = "obligation.resurface"
                         if _load_obligations_v2() is not None:
                             _obl_reason = "obligation.unexercised"
-                            try:
-                                _obr = _unexercised_clause_candidate()
-                            except Exception:  # noqa: BLE001 — one producer must not kill the gate
-                                _crash_emit("obligation.unexercised")
-                                _obr = None
+                            _obr = None
                         else:
                             try:
                                 _obr = _obligation_resurface_candidate()
@@ -13216,14 +13964,28 @@ def _build_env_executor():
 
     The mini-swe env.execute takes a {"command": <str>} action + positional cwd +
     keyword timeout and returns {"output": <merged stdout+stderr>, "returncode": int}.
-    stderr is "" here because those envs merge it into stdout; the DOCUMENTED fallback
-    exit code is 1 whenever the env returns no usable returncode (correct-or-quiet:
-    an ambiguous run degrades the covering verdict to unavailable, never a false RED)."""
+    stderr is "" here because those envs merge it into stdout. A missing or invalid
+    return code remains ``None`` so ambiguous execution degrades to unavailable."""
     env = _GT_LIVE_ENV
     orig = _GT_LIVE_ORIG_EXECUTE
     if env is None or orig is None:
         return None
+    import inspect as _inspect
     import shlex as _shlex
+
+    # Determine compatibility before executing. Retrying after a TypeError can
+    # execute a mutating command twice when the error came from inside execute.
+    _timeout_style = "keyword"
+    try:
+        _params = _inspect.signature(orig).parameters
+        _timeout_param = _params.get("timeout")
+        if _timeout_param is not None:
+            if _timeout_param.kind is _inspect.Parameter.POSITIONAL_ONLY:
+                _timeout_style = "positional"
+        elif not any(p.kind is _inspect.Parameter.VAR_KEYWORD for p in _params.values()):
+            _timeout_style = "absent"
+    except (TypeError, ValueError):
+        pass
 
     def _executor(cmd, cwd, timeout):
         try:
@@ -13232,21 +13994,45 @@ def _build_env_executor():
             else:
                 cmd_str = str(cmd)
             action = {"command": cmd_str}
-            try:
-                res = orig(env, action, cwd or "", timeout=int(timeout))
-            except TypeError:
-                # Env execute signature variance (no keyword timeout) — positional only.
+            if _timeout_style == "absent":
                 res = orig(env, action, cwd or "")
+            elif _timeout_style == "positional":
+                # Env execute signature variance (no keyword timeout) — positional only.
+                res = orig(env, action, cwd or "", int(timeout))
+            else:
+                res = orig(env, action, cwd or "", timeout=int(timeout))
             if isinstance(res, dict):
                 code = res.get("returncode")
-                return (int(code) if code is not None else 1,
-                        res.get("output") or "", "")
-            # Unknown return shape -> documented fallback (exit 1, passthrough str).
-            return (1, str(res or ""), "")
+                normalized_code = code if type(code) is int else None
+                output = res.get("output")
+                if output is not None and type(output) is not str:
+                    return (None, "", "")
+                return (normalized_code, output or "", "")
+            return (None, "", "")
         except Exception as _e:  # noqa: BLE001 — the seam must never be destabilized
-            return (1, "", f"gt_executor_unavailable: {type(_e).__name__}")
+            return (None, "", f"gt_executor_unavailable: {type(_e).__name__}")
 
     return _executor
+
+
+def _build_edit_check_executor():
+    """Executor boundary dedicated to the at-edit parse-only checker.
+
+    Production delegates to the live agent environment exactly as before. The
+    replay harness replaces only this factory with its recorded-toolchain
+    executor, leaving verification-plan, covering-test, and submit consumers on
+    ``_build_env_executor``.
+    """
+    return _build_env_executor()
+
+
+def _build_verification_executor():
+    """Executor boundary for GT-owned covering and verification-plan commands.
+
+    Production uses the live environment. Replay replaces only this boundary with
+    a digest-pinned task-image executor, leaving unrelated env consumers untouched.
+    """
+    return _build_env_executor()
 
 
 # ---------------------------------------------------------------------------
@@ -13506,9 +14292,11 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
         # pre-commit block (the D7 headline) — it INTEGRATES with (replaces) this existing
         # appender's bytes, never a second dose (the dedup + bounce below are unchanged).
         rejection = ""
+        _cert_rendered = False
         if _deliver_cert and cert is not None:
             try:
                 rejection = _completion_cert_block(cert, verdict)
+                _cert_rendered = bool(rejection)
             except Exception:  # noqa: BLE001 -- a cert-render fault falls back to the plain refusal
                 rejection = ""
         if not rejection:
@@ -13523,6 +14311,16 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
         _oracle_delivered_hashes.add(hc)          # stamp (the dedup ledger)
         _gt_submit_bounce_count += 1
         _gt_submit_record(verdict, blocked=True)
+        # The returned rejection IS this submit observation's model-facing payload.  Attribute
+        # only the native CompletionCertificate form to its exact delivery member; the plain
+        # submit-gate fallback and GT_COMPLETION_CERT's host-only build remain unattributed.
+        _runtime_ledger_record(
+            kind="submit_refusal",
+            outcome=_ProductSignalOutcome.DELIVERED,
+            chars=len(rejection), content=rejection,
+            extra=({"profile_member": "GT_CERT_DELIVERY"}
+                   if _cert_rendered and os.environ.get("GT_CERT_DELIVERY") == "1"
+                   else None))
         return {"output": rejection, "returncode": 1}
     except Exception:  # noqa: BLE001 — a gate crash must NEVER brick a run (fail-open)
         return None
@@ -13536,6 +14334,15 @@ def _wrap_execute(orig):
         # (the true, agent-class-agnostic submit chokepoint). No-op / byte-identical
         # when the flag is off: the `else` branch is the exact legacy path (no
         # try/except, no gate code runs).
+        # Seed the source-byte pre-image before the first command. Without this,
+        # a task whose first action is an edit has no before-state and a no-op is
+        # indistinguishable from a landed write at the post-command seam.
+        if not _GT_BASELINE and _ORACLE_ROUTE and (
+                _ss_coherence_v2_on() or _ss_recovery_v2_on()):
+            try:
+                _ss_capture_write_preimage(action)
+            except Exception:  # noqa: BLE001 -- observation must never break execute
+                pass
         if not _GT_BASELINE and os.environ.get("GT_VERIFY_EXECUTE") == "1":
             try:
                 _gt_publish_live_env(self, orig)

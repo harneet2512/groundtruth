@@ -6,7 +6,7 @@
 # No graph.db needed — substrate reads the uploaded graph_certificate.json (gt_deep_metrics cert fallback).
 #
 # usage: run_local_deep_metrics.sh <run_id> [repo]
-set -uo pipefail
+set -euo pipefail
 RUN_ID="${1:?usage: run_local_deep_metrics.sh <run_id> [repo]}"
 REPO="${2:-harneet2512/groundtruth}"
 GT="/d/Groundtruth"
@@ -47,19 +47,5 @@ done
 echo "  computed $n tasks"
 
 echo "[3/3] aggregate (resolved + paired) -> $MET/AGGREGATE.json"
-python - "$MET" "$BASELINE" <<'PY'
-import json,glob,os,sys
-met,baseline=sys.argv[1],sys.argv[2]
-base=set(json.load(open(baseline)).get("resolved_ids",[]))
-rows=[json.load(open(f)) for f in glob.glob(os.path.join(met,"gt_deep_metrics_*.json"))]
-res=[r for r in rows if r.get("resolved") is True]
-flips=[r["task_id"] for r in rows if r.get("resolved") is True and r["task_id"] not in base]
-regr=[r["task_id"] for r in rows if r.get("resolved") is False and r["task_id"] in base]
-agg={"tasks":len(rows),"resolved":len(res),
-     "flips_vs_baseline":sorted(flips),"flip_count":len(flips),
-     "regressions":sorted(regr),"regression_count":len(regr),
-     "baseline_resolved":len(base)}
-json.dump(agg,open(os.path.join(met,"AGGREGATE.json"),"w"),indent=2)
-print(json.dumps(agg,indent=2))
-PY
+python "$GT/scripts/swebench/gt_run_metrics.py" "$MET" "$BASELINE" --run-id "$RUN_ID"
 echo "DONE -> $MET"

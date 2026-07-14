@@ -56,6 +56,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from .feature_lineage import DeliveryLineage
+
 __all__ = [
     "Candidate",
     "ArbitrationResult",
@@ -150,6 +152,10 @@ _KIND_TO_CLASS: dict[str, str] = {
     "trace_frame": "localization",
     "new_file_destination": "localization",
     "missing_role": "localization",
+    # Ranked localization emits the literal fact class. Class names that can enter
+    # the pool must resolve like their producer aliases (the same defensive rule
+    # used by ``recovery``), or the global arbiter rejects a valid dose as INTERNAL.
+    "localization": "localization",
     "post_search.localize": "localization",
     "consensus.scope_map": "localization",
     "consensus.scope": "localization",
@@ -286,6 +292,13 @@ class Candidate:
     rendered_chars: int = -1          # bytes the plane WILL render: 0 => empty (reject); -1 => unknown (skip)
     obligations_open: bool = False    # a preventive fact whose pre-submit-completeness point is still live
     redundant_with_delivered: bool = False  # localization superseded by an already-delivered def_ref_partition
+    # Producer-natural semantic identity. ``symbol`` above is deliberately the
+    # acquisition target (normally a repo-relative path); keeping ``fact_id``
+    # distinct prevents path-vs-symbol confusion when the seam proves that a
+    # localization fact was superseded by an earlier def/ref answer.
+    fact_id: str = field(default="", compare=False)
+    # Audit-only typed identity. Arbitration never reads it.
+    lineage: "DeliveryLineage | None" = field(default=None, compare=False)
 
     @property
     def tier_rank(self) -> int:

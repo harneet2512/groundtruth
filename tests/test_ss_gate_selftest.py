@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import stat
 import sys
 
 import pytest
@@ -23,6 +24,124 @@ if str(_SS_DIR) not in sys.path:
     sys.path.insert(0, str(_SS_DIR))
 
 import ss_gate as G  # noqa: E402
+
+
+def test_str_replace_materializer_changes_exactly_one_match_and_preserves_mode(tmp_path):
+    target = tmp_path / "pkg" / "mod.py"
+    target.parent.mkdir()
+    target.write_text("before\nreturn 'a'\nafter\n", encoding="utf-8")
+    target.chmod(0o640)
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+
+    changed = G._materialize_str_replace(
+        tmp_path,
+        {"command": "str_replace", "path": "pkg/mod.py",
+         "old_str": "return 'a'", "new_str": "return 'b'"},
+    )
+
+    assert changed == target.resolve()
+    assert target.read_text(encoding="utf-8") == "before\nreturn 'b'\nafter\n"
+    assert stat.S_IMODE(target.stat().st_mode) == original_mode
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["../escape.py", "pkg/../../escape.py", "/absolute.py", "C:/absolute.py"],
+)
+def test_str_replace_materializer_rejects_paths_outside_repo(tmp_path, path):
+    with pytest.raises(G.GateDriverError):
+        G._materialize_str_replace(
+            tmp_path,
+            {"command": "str_replace", "path": path,
+             "old_str": "old", "new_str": "new"},
+        )
+
+
+def test_str_replace_materializer_rejects_missing_or_nonunique_old_bytes(tmp_path):
+    target = tmp_path / "mod.py"
+    action = {"command": "str_replace", "path": "mod.py",
+              "old_str": "old", "new_str": "new"}
+    target.write_text("no match", encoding="utf-8")
+    with pytest.raises(G.GateDriverError, match="exactly once"):
+        G._materialize_str_replace(tmp_path, action)
+    target.write_text("old old", encoding="utf-8")
+    with pytest.raises(G.GateDriverError, match="exactly once"):
+        G._materialize_str_replace(tmp_path, action)
+
+
+def test_drive_event_orders_preimage_then_materialization_then_augment(tmp_path):
+    target = tmp_path / "mod.py"
+    target.write_text("old", encoding="utf-8")
+    calls = []
+
+    class Seam:
+        def _ss_capture_write_preimage(self, action):
+            calls.append(("preimage", target.read_text(encoding="utf-8"), action["path"]))
+
+        def _augment_output(self, action, out):
+            calls.append(("augment", target.read_text(encoding="utf-8"), action["path"]))
+
+    ev = G.Event(
+        action={"command": "str_replace", "path": "mod.py",
+                "old_str": "old", "new_str": "new"},
+        rc=0,
+    )
+    G._drive_event(Seam(), tmp_path, ev)
+
+    assert calls == [("preimage", "old", "mod.py"), ("augment", "new", "mod.py")]
+
+
+def test_drive_event_captures_but_does_not_materialize_failed_write(tmp_path):
+    target = tmp_path / "mod.py"
+    target.write_text("old", encoding="utf-8")
+    calls = []
+
+    class Seam:
+        def _ss_capture_write_preimage(self, _action):
+            calls.append("preimage")
+
+        def _augment_output(self, _action, _out):
+            calls.append("augment")
+
+    ev = G.Event(
+        action={"command": "str_replace", "path": "mod.py",
+                "old_str": "old", "new_str": "new"},
+        rc=1,
+    )
+    G._drive_event(Seam(), tmp_path, ev)
+
+    assert calls == ["preimage", "augment"]
+    assert target.read_text(encoding="utf-8") == "old"
+
+
+def test_drive_event_fails_closed_when_preimage_hook_is_missing(tmp_path):
+    target = tmp_path / "mod.py"
+    target.write_text("old", encoding="utf-8")
+
+    class Seam:
+        def _augment_output(self, _action, _out):
+            raise AssertionError("must not augment without preimage capture")
+
+    ev = G.Event(
+        action={"command": "str_replace", "path": "mod.py",
+                "old_str": "old", "new_str": "new"},
+        rc=0,
+    )
+    with pytest.raises(G.GateDriverError, match="preimage"):
+        G._drive_event(Seam(), tmp_path, ev)
+    assert target.read_text(encoding="utf-8") == "old"
+
+
+def test_runtime_ledger_reader_fails_closed_on_invalid_json(tmp_path):
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text('{"valid": true}\nnot-json\n', encoding="utf-8")
+    with pytest.raises(G.GateDriverError, match="ledger"):
+        G._read_runtime_ledger(ledger)
+
+
+def test_runtime_ledger_reader_fails_closed_when_file_is_missing(tmp_path):
+    with pytest.raises(G.GateDriverError, match="missing"):
+        G._read_runtime_ledger(tmp_path / "missing-ledger.jsonl")
 
 
 # --------------------------------------------------------------------------- #
@@ -287,6 +406,73 @@ def test_mutation_latedrop_wrong_reason_bites_s6():
     assert r.verdict == G.FAIL, f"gate FAILED to bite an unauditable late-drop: {r.verdict} {r.detail}"
 
 
+def test_s6_accepts_unrelated_fallback_after_target_fact_is_late_dropped():
+    """A correct late-drop removes the targeted fact, not the whole observation dose.
+
+    Once Gateway fallbacks survive until global arbitration, an unrelated eligible fact may
+    legitimately fill the one-dose slot. S6 must identify the late target by fact/file identity
+    instead of requiring fewer total deliveries in the ON arm.
+    """
+    def behavior(events, ss_env, submit_attempts=0):
+        del submit_attempts
+        on = ss_env.get("GT_SS_LATE_DROP") == "1"
+        second_before = events[-1].output or ""
+        if on:
+            fallback = "\npkg/other.py:4:other"
+            ledger = [
+                dict(layer="ga.def_ref_partition", file_path="pkg/db.py",
+                     outcome="suppressed_hidden_only", reason="ss_late",
+                     chars_delivered=0, iteration=2),
+                dict(layer="gateway.localization", file_path="pkg/other.py",
+                     outcome="delivered", reason="", chars_delivered=len(fallback),
+                     iteration=2),
+            ]
+            second_after = second_before + fallback
+        else:
+            target = "\npkg/db.py:6:late_probe"
+            ledger = [
+                dict(layer="gateway.def_ref_partition", file_path="pkg/db.py",
+                     outcome="delivered", reason="", chars_delivered=len(target),
+                     iteration=2),
+            ]
+            second_after = second_before + target
+        return G.SeamResult(
+            observations=[G.Obs(events[0].output or "", events[0].output or ""),
+                          G.Obs(second_before, second_after)],
+            ledger=ledger,
+        )
+
+    result = G.scenario_s6(G.FakeSeamDriver(behavior))
+    assert result.verdict == G.PASS, result.detail
+
+
+def test_s6_rejects_late_row_when_the_same_target_still_delivers():
+    """A host-side ``ss_late`` row is not proof if the target bytes still ship."""
+    def behavior(events, ss_env, submit_attempts=0):
+        del submit_attempts
+        target = "\npkg/db.py:6:late_probe"
+        second_before = events[-1].output or ""
+        ledger = []
+        if ss_env.get("GT_SS_LATE_DROP") == "1":
+            ledger.append(
+                dict(layer="ga.def_ref_partition", file_path="pkg/db.py",
+                     outcome="suppressed_hidden_only", reason="ss_late",
+                     chars_delivered=0, iteration=2)
+            )
+        ledger.append(
+            dict(layer="gateway.def_ref_partition", file_path="pkg/db.py",
+                 outcome="delivered", reason="", chars_delivered=len(target), iteration=2)
+        )
+        return G.SeamResult(
+            observations=[G.Obs(events[0].output or "", events[0].output or ""),
+                          G.Obs(second_before, second_before + target)],
+            ledger=ledger,
+        )
+
+    result = G.scenario_s6(G.FakeSeamDriver(behavior))
+    assert result.verdict == G.FAIL, result.detail
+
+
 def test_mutation_arbiter_detects_but_delivers_bites_s8():
     """An ARBITER_V2 empty-payload guard that detects the empty envelope (records the drop
     reason) but FAILS to suppress it — the chars=0 degenerate row still delivers — violates S8.
@@ -325,6 +511,123 @@ def test_mutation_fires_on_green_bites_s11():
     block — S11 must FAIL it (green must stay silent)."""
     r = G.scenario_s11(_driver({"fires_on_green"}))
     assert r.verdict == G.FAIL, f"gate FAILED to bite a fire-on-green submit refusal: {r.verdict} {r.detail}"
+
+
+def test_s3_requires_exact_rendered_coherence_count_not_incidental_digit():
+    def behavior(events, ss_env):
+        before = [G.Obs(ev.output or "", ev.output or "") for ev in events]
+        if ss_env.get("GT_SS_COHERENCE_V2") != "1" or len(events) != 3:
+            return G.SeamResult(observations=before, ledger=[])
+        delta = "\nGT: you have rewritten mod_a.py 13 times with no passing test between edits"
+        before[-1] = G.Obs(events[-1].output or "", (events[-1].output or "") + delta)
+        return G.SeamResult(
+            observations=before,
+            ledger=[{"outcome": "delivered", "reason": "ss_coherence",
+                     "chars_delivered": len(delta), "iteration": 3}],
+        )
+
+    result = G.scenario_s3(G.FakeSeamDriver(behavior))
+    assert result.verdict == G.FAIL
+    assert "exact_count_3=False" in result.detail
+
+
+@pytest.mark.parametrize(
+    "row_patch",
+    [
+        {"file_path": "pkg/mod_b.py"},
+        {"iteration": 2},
+        {"layer": "detect.loop"},
+        {"reason": "ss_other"},
+    ],
+)
+def test_s3_requires_exact_witness_bound_to_matching_ledger_home(row_patch):
+    def behavior(events, ss_env):
+        observations = [G.Obs(ev.output or "", ev.output or "") for ev in events]
+        if ss_env.get("GT_SS_COHERENCE_V2") != "1" or len(events) != 3:
+            return G.SeamResult(observations=observations, ledger=[])
+        delta = "\nGT: you have rewritten mod_a.py 3 times with no passing test between edits"
+        observations[2] = G.Obs(events[2].output or "", (events[2].output or "") + delta)
+        row = {"layer": "detect.coherence", "file_path": "pkg/mod_a.py",
+               "outcome": "suppressed_internal_only", "reason": "ss_coherence",
+               "chars_delivered": 0, "iteration": 3}
+        row.update(row_patch)
+        return G.SeamResult(observations=observations, ledger=[row])
+
+    result = G.scenario_s3(G.FakeSeamDriver(behavior))
+    assert result.verdict == G.FAIL
+    assert "bound_row=False" in result.detail
+
+
+def test_s3_accepts_exact_witness_and_matching_ledger_home():
+    def behavior(events, ss_env):
+        observations = [G.Obs(ev.output or "", ev.output or "") for ev in events]
+        if ss_env.get("GT_SS_COHERENCE_V2") != "1" or len(events) != 3:
+            return G.SeamResult(observations=observations, ledger=[])
+        delta = "\nGT: you have rewritten mod_a.py 3 times with no passing test between edits"
+        observations[2] = G.Obs(events[2].output or "", (events[2].output or "") + delta)
+        return G.SeamResult(
+            observations=observations,
+            ledger=[{"layer": "detect.coherence", "file_path": "pkg/mod_a.py",
+                     "outcome": "suppressed_internal_only", "reason": "ss_coherence",
+                     "chars_delivered": 0, "iteration": 3}],
+        )
+
+    result = G.scenario_s3(G.FakeSeamDriver(behavior))
+    assert result.verdict == G.PASS, result.detail
+
+
+def test_s10_checks_byte_identity_independently_per_stream():
+    calls = []
+
+    def behavior(events, ss_env):
+        calls.append((len(events), dict(ss_env)))
+        return G.SeamResult(
+            observations=[G.Obs(ev.output or "", ev.output or "") for ev in events],
+            ledger=[],
+        )
+
+    result = G.scenario_s10(G.FakeSeamDriver(behavior))
+    assert result.verdict == G.PASS
+    assert len(calls) == 2 * len(G._all_streams())
+    assert len(result.subchecks) == 2 * len(G._all_streams())
+    assert all(name.startswith("stream#") for name, _ in result.subchecks)
+
+
+def test_exit_code_requires_exact_s0_through_s11_shape_and_only_s8_skip():
+    correct = [G.ScenarioResult(f"S{i}", f"n{i}", "f", G.PASS, "") for i in range(12)]
+    correct[8].verdict = G.SKIP
+    assert G._exit_code(correct) == 0
+
+    wrong_skip = [G.ScenarioResult(r.sid, r.name, r.flag, r.verdict, r.detail) for r in correct]
+    wrong_skip[7].verdict = G.SKIP
+    assert G._exit_code(wrong_skip) == 1
+
+    duplicate = [G.ScenarioResult(r.sid, r.name, r.flag, r.verdict, r.detail) for r in correct]
+    duplicate[-1].sid = "S10"
+    assert G._exit_code(duplicate) == 1
+
+    missing = correct[:-1]
+    assert G._exit_code(missing) == 1
+
+
+def test_main_returns_nonzero_when_report_cannot_be_written(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    exact = [G.ScenarioResult(f"S{i}", f"n{i}", "f", G.PASS, "") for i in range(12)]
+    exact[8].verdict = G.SKIP
+    monkeypatch.setattr(G, "_oracle_lock_holder", lambda: None)
+    monkeypatch.setattr(G, "RealSeamDriver", lambda: SimpleNamespace(name="fake"))
+    monkeypatch.setattr(G, "_channel_canary", lambda _driver: (True, "live"))
+    monkeypatch.setattr(G, "run_all", lambda _driver: exact[1:])
+
+    def fail_write(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pathlib.Path, "write_text", fail_write)
+    assert G.main(["--out", str(tmp_path / "report.json")]) != 0
+    captured = capsys.readouterr()
+    assert "FATAL: could not write report" in captured.err
+    assert "report NOT WRITTEN:" in captured.out
 
 
 # --------------------------------------------------------------------------- #

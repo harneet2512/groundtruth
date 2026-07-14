@@ -106,6 +106,9 @@ def test_ack_requires_brief_native(monkeypatch):
     ("repro", "expected 5 but got 3", False),
     ("behavior", "Please add a flag for this", False),        # plea
     ("behavior", "could you make this configurable", False),
+    ("behavior", "I think a TypeError would be helpful to users", True),
+    ("behavior", "It would be helpful to return an empty list", True),
+    ("behavior", "I would like the parser to preserve ordering", True),
     ("behavior", "why does it fail on empty input?", False),  # question
     ("behavior", "", False),                                  # empty
 ])

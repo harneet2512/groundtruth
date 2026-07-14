@@ -84,6 +84,7 @@ from groundtruth.runtime.evidence_envelope import (
     EvidenceEnvelope,
 )
 from groundtruth.runtime.evidence_envelope import validate as _validate_envelope
+from groundtruth.runtime.feature_lineage import build_lineage
 from groundtruth.runtime.fact_registry import (
     EVENTS as fr_EVENTS,
 )
@@ -1378,7 +1379,8 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
             body_lines: list[str], evidence: list[tuple[str, int]], tier: str,
             producer: str, symbol: str = "",
             confidence: float | None = None,
-            native_args: "dict | None" = None) -> EvidenceEnvelope:
+            native_args: "dict | None" = None,
+            cap_feature_ids: "tuple[str, ...]" = ()) -> EvidenceEnvelope:
     """Build the CANONICAL EvidenceEnvelope for one fact. Leak filtering happens
     HERE, before the build, so the derived dedup key hashes exactly the shipped
     payload+provenance (the F1 content discipline). The symbol rides ``fact_id``.
@@ -1395,6 +1397,12 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
     # on). Keyed by evidence_type, NOT producer, so two classes of one producer stale
     # independently. valid_until == graph_rev on an old graph.db (no sub-revs).
     graph_rev, valid_until = _revisions_for(state, fact_kind)
+    lineage = build_lineage(
+        runtime_producer_id=producer,
+        evidence_type=fact_kind,
+        actual_event=event.kind or EVENT_STEP0,
+        cap_feature_ids=cap_feature_ids,
+    )
     return EvidenceEnvelope.build(
         producer=producer,
         fact_id=symbol,
@@ -1411,6 +1419,7 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
         estimated_cost_tokens=(len("\n".join(body)) + 3) // 4,
         measured=False,
         native_args=native_args,
+        lineage=lineage,
     )
 
 
@@ -1692,7 +1701,8 @@ def _produce_change_surface(event: ToolEvent, state: GatewayState) -> list[Evide
         body += [ev for ev in d.evidence[:4] if not _body_line_leaky(ev)]
         out.append(_mk_add(state, event, fact_kind="new_file_destination", target=d.suggested_path,
                            body_lines=body, evidence=[], tier=HYPOTHESIS,
-                           producer="change_surface", symbol=d.entity))
+                           producer="change_surface", symbol=d.entity,
+                           cap_feature_ids=("GT_CHANGE_SURFACE",)))
     for m in res.missing_roles:
         tgt = m.registration_file or (m.sibling_files[0] if m.sibling_files else m.entity)
         if _is_leaky(tgt):
@@ -1701,7 +1711,8 @@ def _produce_change_surface(event: ToolEvent, state: GatewayState) -> list[Evide
         body = [ev for ev in m.evidence[:4] if not _body_line_leaky(ev)]
         out.append(_mk_add(state, event, fact_kind=f"missing_role:{m.role}", target=tgt,
                            body_lines=body, evidence=ev_rows,
-                           tier=HYPOTHESIS, producer="change_surface", symbol=m.entity))
+                           tier=HYPOTHESIS, producer="change_surface", symbol=m.entity,
+                           cap_feature_ids=("GT_CHANGE_SURFACE",)))
     return out
 
 
@@ -1742,8 +1753,9 @@ def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[Evidence
         out.append(_mk_add(state, event, fact_kind="signature_mismatch", target=sm.caller_file,
                            body_lines=body, evidence=[(sm.caller_file, sm.caller_line)],
                            tier=WARNING, producer="patch_delta", symbol=sm.symbol,
-                           confidence=max(0.0, min(1.0, sm.confidence)),
-                           native_args={
+                            confidence=max(0.0, min(1.0, sm.confidence)),
+                            cap_feature_ids=("GT_PATCH_DELTA",),
+                            native_args={
                                "caller_file": sm.caller_file,
                                "caller_line": sm.caller_line,
                                "symbol": sm.symbol,
@@ -1764,6 +1776,7 @@ def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[Evidence
         out.append(_mk_add(state, event, fact_kind="companion_surface", target=cs.file,
                            body_lines=body, evidence=ev_rows,
                            tier=WARNING, producer="patch_delta", symbol=cs.symbol,
+                           cap_feature_ids=("GT_PATCH_DELTA",),
                            native_args={
                                "file": cs.file,
                                "line": (ev_rows[0][1] if ev_rows else None),

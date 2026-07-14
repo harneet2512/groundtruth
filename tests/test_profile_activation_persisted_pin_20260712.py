@@ -101,6 +101,55 @@ def test_trial_step_persist_is_gt_only_and_collected() -> None:
     )
 
 
+def test_profile_preflight_failure_aborts_before_agent_spend() -> None:
+    """A failed Profile-2 preflight must stop inside the container before mini-swe-agent.
+
+    The post-run ``GT_PROFILE_UNPROVEN`` gate protects citation integrity, but it is too late
+    to protect model spend.  The resolver command therefore must not swallow its status with
+    ``|| true``; both a non-zero resolver and an empty export set must exit before the seam is
+    installed or the paid agent command can run.
+    """
+    run = _step_run_containing("_GT_PROFILE_EXPORTS")
+    code = "\n".join(_code_lines(run))
+    resolver_line = next(
+        ln for ln in _code_lines(run)
+        if "_GT_PROFILE_EXPORTS=" in ln and "rl_profile --emit-exports" in ln
+    )
+    assert "|| true" not in resolver_line, (
+        "the in-container Profile-2 resolver must preserve its non-zero status; swallowing it "
+        "spends model budget with the whole profile dark"
+    )
+    abort = code.index("GT_RL_PREFLIGHT_ABORT_BEFORE_SPEND")
+    install = code.index('[ -f /opt/gt/gt_mini_patch.py ]')
+    assert abort < install, "the profile-preflight abort must precede seam install / agent spend"
+    assert "exit 1" in code[abort:install], (
+        "the before-spend profile-preflight marker must be followed by a non-zero exit"
+    )
+
+
+def test_profile_activation_receipt_write_failure_aborts_before_agent_spend() -> None:
+    """Activation without its durable proof must not proceed into a paid agent run."""
+    run = _step_run_containing("_GT_PROFILE_EXPORTS")
+    code = "\n".join(_code_lines(run))
+    write = code.index("/gt_out/gt_profile_activation.json")
+    install = code.index('[ -f /opt/gt/gt_mini_patch.py ]')
+    window = code[write:install]
+    assert "GT_PROFILE_RECEIPT_ABORT_BEFORE_SPEND" in window, (
+        "failure to persist the durable activation proof must emit a before-spend abort marker"
+    )
+    marker = window.index("GT_PROFILE_RECEIPT_ABORT_BEFORE_SPEND")
+    assert "exit 1" in window[marker:], (
+        "a profile-activation receipt write failure must exit before seam install / agent spend"
+    )
+    write_line = next(
+        ln for ln in _code_lines(run)
+        if "/gt_out/gt_profile_activation.json" in ln and "GTPA_PROFILE=" in ln
+    )
+    assert "WARN gt_profile_activation.json write failed" not in write_line, (
+        "the receipt writer must not reduce an uncitable activation to a warning"
+    )
+
+
 def test_collect_step_copies_the_in_seam_profile_receipt() -> None:
     # WIRING (W2+W3 integration, orchestrator LIPI 2026-07-12): gt_mini_patch._install() writes the
     # IN-SEAM receipt gt_profile_receipt.json into dirname(GT_RUNTIME_LEDGER) = /gt_out — the

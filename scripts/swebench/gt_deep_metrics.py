@@ -1514,20 +1514,8 @@ def build(task: str, results_dir: str, log_path: str = "",
     if (not traj.get("action_count")) and log_text:
         traj["has_patch"] = traj.get("has_patch") or _log_has_patch(log_text)
 
-    # GT Behavioral Impact — measures whether GT deliveries CHANGE agent behavior.
-    # A "pivot" = the agent's action type changed after receiving GT content.
-    behavioral_impact = {"total_deliveries": 0, "total_pivots": 0, "impact_rate": 0.0, "per_tag": {}}
-    try:
-        from gt_behavioral_impact import analyze_trajectory as _analyze_bi
-        tj_path = _find_miniswe_trajectory(task, results_dir)
-        if tj_path:
-            tj_data = _load_json(tj_path)
-            if isinstance(tj_data, dict):
-                bi = _analyze_bi(tj_data)
-                behavioral_impact = bi.get("summary", behavioral_impact)
-    except Exception:
-        pass
-
+    # Token accounting is separate from behavioral attribution. Action-type
+    # transitions are computed below only after the exact receipt ledger exists.
     token_accounting_source = "gt_run_summary" if per_layer_raw else "none"
     fallback_per_layer, fallback_layers, fallback_tokens = _trajectory_layer_fallback(traj)
     if not per_layer_raw and fallback_tokens > 0:
@@ -1613,6 +1601,7 @@ def build(task: str, results_dir: str, log_path: str = "",
         "enforcement_semantics": "hard_block_only",
     }
     ledger_path = ""
+    consumption_error = None
     mini_traj = _find_miniswe_trajectory(task, results_dir)
     if mini_traj:
         try:
@@ -1646,8 +1635,42 @@ def build(task: str, results_dir: str, log_path: str = "",
                     json.dump(consumption, lf, indent=2)
             except OSError:
                 ledger_path = ""
-        except Exception:
-            pass
+        except Exception as exc:
+            consumption_error = type(exc).__name__
+
+    # Action-type transitions are diagnostic only. Reuse the exact sealed-byte
+    # receipt ledger built above so tagless Profile-2 deliveries are counted once
+    # and ledger-only (DARK) rows are excluded. Causality remains UNMEASURED here;
+    # only a matched/shadow design can establish it.
+    behavioral_impact = {
+        "total_deliveries": 0,
+        "total_pivots": 0,
+        "impact_rate": 0.0,
+        "impact_rate_semantics": "diagnostic_action_type_transition",
+        "causal_status": "UNMEASURED",
+        "gt_tokens_injected": None,
+        "gt_tokens_injected_units": None,
+        "gt_tokens_per_pivot": None,
+        "nudge_compliance_rate": None,
+        "per_tag": {},
+        "per_tag_impact": {},
+    }
+    if mini_traj and consumption_error is None:
+        try:
+            from gt_behavioral_impact import analyze_trajectory as _analyze_bi
+
+            tj_data = _load_json(mini_traj)
+            if isinstance(tj_data, dict):
+                bi = _analyze_bi(tj_data, consumption_ledger=consumption)
+                behavioral_impact = bi.get("summary", behavioral_impact)
+            else:
+                behavioral_impact["collection_error"] = "invalid_trajectory"
+        except Exception as exc:
+            behavioral_impact["collection_error"] = type(exc).__name__
+    elif consumption_error is not None:
+        behavioral_impact["collection_error"] = (
+            "consumption_ledger_error:" + consumption_error
+        )
 
     # Defect-3: on the mini shape the step-0 brief is a bundle of <gt-*> blocks inside the
     # m1 USER message (NOT a <gt-task-brief> tag), so the legacy tag counter reported
@@ -1799,7 +1822,24 @@ def build(task: str, results_dir: str, log_path: str = "",
             "total_deliveries": behavioral_impact.get("total_deliveries", 0),
             "total_pivots": behavioral_impact.get("total_pivots", 0),
             "impact_rate": d8(behavioral_impact.get("impact_rate", 0)),
+            "impact_rate_semantics": behavioral_impact.get(
+                "impact_rate_semantics", "diagnostic_action_type_transition"
+            ),
+            "causal_status": behavioral_impact.get("causal_status", "UNMEASURED"),
+            "gt_tokens_injected": behavioral_impact.get("gt_tokens_injected"),
+            "gt_tokens_injected_units": behavioral_impact.get(
+                "gt_tokens_injected_units"
+            ),
+            "gt_tokens_per_pivot": behavioral_impact.get("gt_tokens_per_pivot"),
+            "nudge_compliance_rate": behavioral_impact.get("nudge_compliance_rate"),
             "per_tag": behavioral_impact.get("per_tag", {}),
+            "per_tag_impact": behavioral_impact.get(
+                "per_tag_impact", behavioral_impact.get("per_tag", {})
+            ),
+            **(
+                {"collection_error": behavioral_impact["collection_error"]}
+                if "collection_error" in behavioral_impact else {}
+            ),
         },
         "gt_blocks_delivered": d8(consumption.get("gt_blocks_delivered", 0)),
         "gt_blocks_consumed": d8(consumption.get("gt_blocks_consumed", 0)),
@@ -1834,7 +1874,10 @@ def build(task: str, results_dir: str, log_path: str = "",
     # call needs no broad guard.) A genuinely-absent trajectory is an explicit UNMEASURED
     # marker, never a silent empty dict (defect #1 / #6 / #7).
     try:
-        from gt_performance_metrics import compute_performance_metrics
+        from gt_performance_metrics import (
+            build_metric_applicability,
+            compute_performance_metrics,
+        )
     except ImportError as exc:
         # Path-independent fallback: the module is a SIBLING of this file by construction,
         # so load it by path (the same pattern as the consumption-ledger load above) before
@@ -1855,15 +1898,27 @@ def build(task: str, results_dir: str, log_path: str = "",
         _pm_mod = _ilu.module_from_spec(_pm_spec)
         _pm_spec.loader.exec_module(_pm_mod)  # a broken module raises here — fail loud
         compute_performance_metrics = _pm_mod.compute_performance_metrics
+        build_metric_applicability = _pm_mod.build_metric_applicability
     tj_path = _find_miniswe_trajectory(task, results_dir)
     if tj_path:
         # instance_id=task lets the perf reader resolve TRUE dataset gold from the
         # SWE-bench `patch` (GT_GOLD_JSONL / --gold-jsonl) -> gold_source="dataset_gold"
         # so steps_to_gold_* COMPUTE instead of nulling on the submission proxy.
         # OFFLINE-ONLY: the gold set lands only inside deep["performance"].
-        deep["performance"] = compute_performance_metrics(tj_path, results_dir, instance_id=task)
+        deep["performance"] = compute_performance_metrics(
+            tj_path, results_dir, instance_id=task, consumption_ledger=consumption
+        )
     else:
         deep["performance"] = {"status": "UNMEASURED", "reason": "no_miniswe_trajectory"}
+    deep["metric_applicability"] = build_metric_applicability(
+        deep["performance"],
+        deep["behavioral_impact"],
+        behavioral_collection_succeeded=bool(
+            mini_traj
+            and consumption_error is None
+            and "collection_error" not in deep["behavioral_impact"]
+        ),
+    )
     return deep
 
 

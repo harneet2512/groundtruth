@@ -22,11 +22,20 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+import traceback
 
 import pytest
 
 from groundtruth.runtime.edit_check import caller_diff_advisory, check_edit_syntax
 from groundtruth.runtime.native_render import contains_gt_tag
+
+
+# Profile-2 activates the stable diagnostic refinement in production. Tests in
+# this module exercise that posture unless a case explicitly proves the OFF arm.
+@pytest.fixture(autouse=True)
+def _stable_python_diagnostic_profile_member(monkeypatch):
+    monkeypatch.setenv("GT_SS_EDIT_DIAG", "1")
+
 
 # --- graph.db fixture (mirrors tests/runtime/test_b1_covering_selection.py) ---
 _NODES_SCHEMA = (
@@ -148,6 +157,313 @@ def test_broken_py_via_fake_executor_syntax_error(tmp_path):
     assert "invalid syntax" in res["diagnostic"].lower(), res
 
 
+def test_python_syntax_diagnostic_is_interpreter_version_stable(tmp_path):
+    """Python 3.10 subprocess frames and in-process parsing render identical bytes."""
+    f = tmp_path / "stable.py"
+    f.write_text("def foo():\nreturn 1\n", encoding="utf-8")
+
+    local = check_edit_syntax(str(f), str(tmp_path))
+    py310 = (
+        'Traceback (most recent call last):\n'
+        '  File "<string>", line 1, in <module>\n'
+        '  File "/usr/local/lib/python3.10/ast.py", line 50, in parse\n'
+        '    return compile(source, filename, mode, flags,\n'
+        f'  File "/testbed/{f.name}", line 2\n'
+        "    return 1\n"
+        "    ^\n"
+        "IndentationError: expected an indented block after function definition on line 1\n"
+    )
+    container = check_edit_syntax(
+        str(f), str(tmp_path), executor=_fake_executor(1, "", py310)
+    )
+
+    assert local["verdict"] == container["verdict"] == "syntax_error"
+    assert local["diagnostic"] == container["diagnostic"]
+    assert f'File "{f.name}", line 2' in local["diagnostic"]
+    assert "ast.py" not in local["diagnostic"]
+
+
+def test_python_syntax_diagnostic_flag_off_preserves_recorded_bytes(tmp_path, monkeypatch):
+    """The SS refinement kill-switch preserves the pre-SS model-facing bytes."""
+    monkeypatch.setenv("GT_SS_EDIT_DIAG", "0")
+    f = tmp_path / "_random.py"
+    f.write_text("value = 1\n", encoding="utf-8")
+    recorded = (
+        "Traceback (most recent call last):\n"
+        '  File "<string>", line 1, in <module>\n'
+        '  File "/usr/local/lib/python3.10/ast.py", line 50, in parse\n'
+        "    return compile(source, filename, mode, flags,\n"
+        '  File "/testbed/_random.py", line 88\n'
+        "                    mask = shapely_contains(geom, batch)\n"
+        "                   ^\n"
+        "IndentationError: unexpected indent\n"
+    )
+
+    result = check_edit_syntax(
+        str(f), str(tmp_path), executor=_fake_executor(1, "", recorded)
+    )
+
+    assert result["verdict"] == "syntax_error"
+    assert result["diagnostic"] == recorded.strip()
+
+
+def test_python_syntax_diagnostic_flag_off_preserves_in_process_bytes(
+    tmp_path, monkeypatch
+):
+    """The explicit legacy switch applies when no live-env executor is available too."""
+    monkeypatch.setenv("GT_SS_EDIT_DIAG", "0")
+    f = tmp_path / "in_process.py"
+    f.write_text("                    mask = value\n", encoding="utf-8")
+    try:
+        compile(f.read_bytes(), f.name, "exec", flags=0, dont_inherit=True)
+    except SyntaxError as exc:
+        expected = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+    else:  # pragma: no cover - the fixture is intentionally invalid Python
+        pytest.fail("invalid Python fixture unexpectedly compiled")
+
+    result = check_edit_syntax(str(f), str(tmp_path))
+
+    assert result["verdict"] == "syntax_error"
+    assert result["diagnostic"] == expected
+
+
+@pytest.mark.parametrize(
+    ("profile", "stable"),
+    [("2", True), ("0", False)],
+)
+def test_python_syntax_diagnostic_defaults_follow_effective_profile(
+    tmp_path, monkeypatch, profile, stable
+):
+    """The internal refinement follows Profile-2 without becoming a CAP member."""
+    monkeypatch.delenv("GT_SS_EDIT_DIAG", raising=False)
+    monkeypatch.setenv("GT_RL_PROFILE", profile)
+    f = tmp_path / "profiled.py"
+    f.write_text("value = 1\n", encoding="utf-8")
+    native = (
+        "Traceback (most recent call last):\n"
+        '  File "<string>", line 1, in <module>\n'
+        '  File "/usr/local/lib/python3.10/ast.py", line 50, in parse\n'
+        "    return compile(source, filename, mode, flags,\n"
+        '  File "/testbed/profiled.py", line 9\n'
+        "    value = (\n"
+        "            ^\n"
+        "SyntaxError: '(' was never closed\n"
+    )
+
+    result = check_edit_syntax(
+        str(f), str(tmp_path), executor=_fake_executor(1, "", native)
+    )
+
+    assert ("ast.py" not in result["diagnostic"]) is stable
+    if not stable:
+        assert result["diagnostic"] == native.strip()
+
+
+def test_python_syntax_diagnostic_does_not_fabricate_from_internal_frame(tmp_path):
+    f = tmp_path / "stable.py"
+    f.write_text("def ok():\n    return 1\n", encoding="utf-8")
+    internal_only = (
+        "Traceback (most recent call last):\n"
+        '  File "<string>", line 1, in <module>\n'
+        '  File "/usr/local/lib/python3.10/ast.py", line 50, in parse\n'
+        "    return compile(source, filename, mode, flags,\n"
+        "SyntaxError: invalid syntax\n"
+    )
+
+    result = check_edit_syntax(
+        str(f), str(tmp_path), executor=_fake_executor(1, "", internal_only)
+    )
+
+    assert result["verdict"] == "syntax_error"
+    assert result["diagnostic"] == "SyntaxError: invalid syntax"
+    assert f.name not in result["diagnostic"]
+    assert "line 50" not in result["diagnostic"]
+
+
+def test_python_syntax_diagnostic_ignores_different_source_frame(tmp_path):
+    f = tmp_path / "expected.py"
+    f.write_text("value = 1\n", encoding="utf-8")
+    wrong_file = (
+        '  File "/testbed/other.py", line 17\n'
+        "    value = (\n"
+        "            ^\n"
+        "SyntaxError: '(' was never closed\n"
+    )
+
+    result = check_edit_syntax(
+        str(f), str(tmp_path), executor=_fake_executor(1, "", wrong_file)
+    )
+
+    assert result["diagnostic"] == "SyntaxError: '(' was never closed"
+
+
+@pytest.mark.parametrize(
+    "container_root",
+    ["/testbed", "/home/user", "/workspace", "/app", "/repo"],
+)
+def test_python_syntax_diagnostic_accepts_exact_container_mount_identity(
+    tmp_path, container_root
+):
+    pkg = tmp_path / ".pkg"
+    pkg.mkdir()
+    f = pkg / ".hidden.py"
+    f.write_text("value = 1\n", encoding="utf-8")
+    native = (
+        f'  File "{container_root}/.pkg/.hidden.py", line 4\n'
+        "    value = (\n"
+        "            ^\n"
+        "SyntaxError: '(' was never closed\n"
+    )
+
+    result = check_edit_syntax(
+        ".pkg/.hidden.py", str(tmp_path), executor=_fake_executor(1, "", native)
+    )
+
+    assert result["diagnostic"].startswith('File ".pkg/.hidden.py", line 4\n')
+
+
+def test_python_syntax_diagnostic_normalizes_explicit_relative_segment(tmp_path):
+    f = tmp_path / "pkg" / ".hidden.py"
+    f.parent.mkdir()
+    f.write_text("value = 1\n", encoding="utf-8")
+    native = (
+        '  File "/testbed/pkg/.hidden.py", line 4\n'
+        "    value = (\n"
+        "            ^\n"
+        "SyntaxError: '(' was never closed\n"
+    )
+
+    result = check_edit_syntax(
+        "./pkg/.hidden.py", str(tmp_path), executor=_fake_executor(1, "", native)
+    )
+
+    assert result["diagnostic"].startswith('File "./pkg/.hidden.py", line 4\n')
+
+
+@pytest.mark.parametrize(
+    "wrong_frame",
+    [
+        "/elsewhere/pkg/same.py",       # same relative suffix, wrong mount
+        "/testbed/hidden.py",           # must not strip the leading dot
+    ],
+)
+def test_python_syntax_diagnostic_rejects_colliding_frame_identity(
+    tmp_path, wrong_frame
+):
+    rel = "pkg/same.py" if "same.py" in wrong_frame else ".hidden.py"
+    f = tmp_path / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("value = 1\n", encoding="utf-8")
+    native = (
+        f'  File "{wrong_frame}", line 9\n'
+        "    value = (\n"
+        "            ^\n"
+        "SyntaxError: '(' was never closed\n"
+    )
+
+    result = check_edit_syntax(
+        rel, str(tmp_path), executor=_fake_executor(1, "", native)
+    )
+
+    assert result["diagnostic"] == "SyntaxError: '(' was never closed"
+
+
+def test_python_syntax_diagnostic_requires_matching_final_source_frame(tmp_path):
+    f = tmp_path / "pkg" / "target.py"
+    f.parent.mkdir()
+    f.write_text("value = 1\n", encoding="utf-8")
+    native = (
+        '  File "/testbed/pkg/target.py", line 9\n'
+        "    value = (\n"
+        "            ^\n"
+        '  File "/usr/local/lib/python3.10/ast.py", line 50, in parse\n'
+        "    return compile(source, filename, mode, flags)\n"
+        "SyntaxError: invalid syntax\n"
+    )
+
+    result = check_edit_syntax(
+        "pkg/target.py", str(tmp_path), executor=_fake_executor(1, "", native)
+    )
+
+    assert result["diagnostic"] == "SyntaxError: invalid syntax"
+
+
+def test_python_tabbed_diagnostic_is_host_container_byte_stable(tmp_path):
+    f = tmp_path / "tabbed.py"
+    f.write_bytes(b"def f():\n\treturn (\n")
+    local = check_edit_syntax(str(f), str(tmp_path))
+    native = (
+        '  File "/testbed/tabbed.py", line 2\n'
+        "    \treturn (\n"
+        "    \t       ^\n"
+        "SyntaxError: '(' was never closed\n"
+    )
+
+    container = check_edit_syntax(
+        str(f), str(tmp_path), executor=_fake_executor(1, "", native)
+    )
+
+    assert local["diagnostic"].encode() == container["diagnostic"].encode()
+    assert "    \t       ^" in local["diagnostic"]
+
+
+def test_python_declared_source_encoding_is_honored(tmp_path):
+    f = tmp_path / "latin1.py"
+    f.write_bytes(b"# coding: latin-1\ncaf\xe9 = 1\n")
+
+    result = check_edit_syntax(str(f), str(tmp_path))
+
+    assert result["verdict"] == "ok", result
+
+
+def test_python_executor_command_parses_raw_bytes(tmp_path):
+    f = tmp_path / "latin1.py"
+    f.write_bytes(b"# coding: latin-1\ncaf\xe9 = 1\n")
+    seen = []
+
+    def executor(cmd, cwd, timeout):
+        seen.append(cmd)
+        return 0, "", ""
+
+    assert check_edit_syntax(str(f), str(tmp_path), executor=executor)["verdict"] == "ok"
+    command = seen[0]
+    assert command[:3] == ["python", "-I", "-c"]
+    command_source = command[command.index("-c") + 1]
+    assert "'rb'" in command_source
+    assert "errors='replace'" not in command_source
+
+
+def test_python_subprocess_parser_isolated_from_repo_module_shadow(tmp_path):
+    """A broken repo-local ``ast.py`` is not evidence about the edited file."""
+    (tmp_path / "ast.py").write_text("def broken(:\n", encoding="utf-8")
+    target = tmp_path / "target.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+
+    result = check_edit_syntax(
+        str(target), str(tmp_path), executor=_real_local_executor
+    )
+
+    assert result["verdict"] == "ok", result
+
+
+def test_hostile_string_subclass_from_executor_degrades_unavailable(tmp_path):
+    """Executor output must be plain text, not code-bearing ``str`` subclasses."""
+    f = tmp_path / "hostile.py"
+    f.write_text("value = 1\n", encoding="utf-8")
+
+    class HostileText(str):
+        def strip(self, *args, **kwargs):
+            raise RuntimeError("must not execute subclass methods")
+
+    result = check_edit_syntax(
+        str(f), str(tmp_path),
+        executor=_fake_executor(1, "", HostileText("SyntaxError: invalid syntax")),
+    )
+
+    assert result["verdict"] == "unavailable", result
+    assert result["reason"] == "spawn_error", result
+
+
 # ===========================================================================
 # check_edit_syntax — JavaScript (fake executor, deterministic + cross-platform)
 # ===========================================================================
@@ -241,6 +557,37 @@ def test_none_exit_code_unavailable(tmp_path):
         str(f), str(tmp_path), executor=_fake_executor(None, "some output", "")
     )
     assert res["verdict"] == "unavailable", res
+
+
+@pytest.mark.parametrize("invalid_rc", [False, 0.0, "0"])
+def test_executor_returncode_contract_is_strict(tmp_path, invalid_rc):
+    f = tmp_path / "x.js"
+    f.write_text("const x = 1;\n")
+
+    res = check_edit_syntax(
+        str(f), str(tmp_path), executor=_fake_executor(invalid_rc, "", "")
+    )
+
+    assert res["verdict"] == "unavailable", res
+    assert res["reason"] == "spawn_error", res
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [([], ""), ("", {}), (b"SyntaxError: invalid syntax", "")],
+)
+def test_executor_non_string_output_contract_degrades_unavailable(
+    tmp_path, stdout, stderr
+):
+    f = tmp_path / "x.js"
+    f.write_text("const x = 1;\n")
+
+    res = check_edit_syntax(
+        str(f), str(tmp_path), executor=_fake_executor(1, stdout, stderr)
+    )
+
+    assert res["verdict"] == "unavailable", res
+    assert res["reason"] == "spawn_error", res
 
 
 def test_timeout_unavailable(tmp_path):

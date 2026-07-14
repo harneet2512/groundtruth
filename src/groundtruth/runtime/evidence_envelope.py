@@ -115,6 +115,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
+from .feature_lineage import DeliveryLineage
+
 from groundtruth.delivery.path_policy import is_deliverable
 
 __all__ = [
@@ -379,6 +381,9 @@ class EvidenceEnvelope:
     # LIVE object via ``dataclasses.replace`` (the seal) — the delivery path renders the
     # object BEFORE any JSON round-trip — never through serialization.
     native_args: "dict | None" = field(default=None, compare=False)
+    # Typed feature lineage is an audit-only sidecar.  Like ``native_args`` it is
+    # excluded from identity, serialization, rendering, and the dedup key.
+    lineage: "DeliveryLineage | None" = field(default=None, compare=False)
 
     # explicit field order — the source of deterministic (de)serialization order.
     # ClassVar so it is NOT a dataclass field (never in __init__/__eq__/to_dict).
@@ -438,6 +443,7 @@ class EvidenceEnvelope:
         delivery_reason: str = "",
         suppression_reason: str = "",
         native_args: "dict | None" = None,
+        lineage: "DeliveryLineage | None" = None,
     ) -> EvidenceEnvelope:
         """Construct an envelope with the dedup key DERIVED (never hand-set) and the
         freshness token defaulted to ``graph_revision`` (a fact is valid until the graph
@@ -491,6 +497,7 @@ class EvidenceEnvelope:
             delivery_reason=delivery_reason,
             suppression_reason=suppression_reason,
             native_args=native_args,
+            lineage=lineage,
         )
 
 

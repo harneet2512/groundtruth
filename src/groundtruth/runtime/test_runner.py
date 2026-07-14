@@ -749,11 +749,50 @@ def _parse_test_output(text: str, command: list[str]) -> dict[str, int]:
 
 
 def _parse_failing_test_names(text: str) -> list[str]:
+    """Return stable failing-test identities from native runner output.
+
+    Pytest prints both ``nodeid FAILED [NN%]`` progress rows and
+    ``FAILED nodeid - detail`` summary rows.  Parse the nodeid from either side
+    of the marker; never treat the progress bracket as a test name.
+    """
     names: list[str] = []
-    for pattern in (r"FAILED\s+([^\s]+)", r"^--- FAIL:\s+([^\s(]+)"):
+    for pattern in (
+        r"^(\S+::\S+)\s+FAILED(?:\s|$)",
+        r"^FAILED\s+(\S+::\S+?)(?:\s+-|\s*$)",
+        r"^--- FAIL:\s+([^\s(]+)",
+    ):
         for match in re.findall(pattern, text, re.MULTILINE):
             if match not in names:
                 names.append(match)
+    return names[:20]
+
+
+def _parse_passing_test_names(text: str) -> list[str]:
+    """Return stable pytest node identities explicitly reported as passing."""
+    names: list[str] = []
+    for pattern in (
+        r"^(\S+::\S+)\s+PASSED(?:\s|$)",
+        r"^PASSED\s+(\S+::\S+?)(?:\s|$)",
+    ):
+        for match in re.findall(pattern, text or "", re.MULTILINE):
+            if match not in names:
+                names.append(match)
+    return names[:20]
+
+
+def _parse_requested_test_names(command: str) -> list[str]:
+    """Return explicit node IDs selected by a successful pytest command."""
+    try:
+        words = shlex.split(command or "", posix=True)
+    except ValueError:
+        return []
+    names: list[str] = []
+    for word in words:
+        if word.startswith("-") or "::" not in word:
+            continue
+        nodeid = word.replace("\\", "/")
+        if nodeid not in names:
+            names.append(nodeid)
     return names[:20]
 
 

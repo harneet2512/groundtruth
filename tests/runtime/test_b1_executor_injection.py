@@ -30,6 +30,8 @@ import pytest
 from groundtruth.runtime import test_runner as tr
 from groundtruth.runtime.test_runner import (
     _parse_failing_test_names,
+    _parse_passing_test_names,
+    _parse_requested_test_names,
     _parse_test_output,
     execute_test_command,
     make_env_executor,
@@ -119,6 +121,34 @@ def test_executor_bad_shape_is_spawn_error_not_crash(monkeypatch):
     res = execute_test_command("/repo", ["pytest", "x"], executor=bad)
     assert res["executed"] is False
     assert res["reason"] == "spawn_error"
+
+
+def test_pytest_progress_failure_name_is_the_nodeid_not_progress_bracket():
+    text = (
+        "tests/test_cli.py::test_inspect_no_args FAILED                 [ 89%]\n"
+        "=========================== 1 failed in 0.03s ===========================\n"
+    )
+
+    assert _parse_failing_test_names(text) == [
+        "tests/test_cli.py::test_inspect_no_args"
+    ]
+
+
+def test_pytest_summary_and_progress_forms_share_one_failure_identity():
+    progress = "tests/test_cli.py::test_inspect_no_args FAILED [100%]\n"
+    summary = (
+        "FAILED tests/test_cli.py::test_inspect_no_args - assert False\n"
+    )
+
+    assert _parse_failing_test_names(progress) == _parse_failing_test_names(summary)
+
+
+def test_pytest_passing_and_requested_nodeids_are_canonicalized():
+    nodeid = "tests/test_cli.py::test_inspect_no_args"
+    assert _parse_passing_test_names(f"{nodeid} PASSED [100%]\n") == [nodeid]
+    assert _parse_passing_test_names(f"PASSED {nodeid}\n") == [nodeid]
+    assert _parse_requested_test_names(f"pytest {nodeid} -x") == [nodeid]
+    assert _parse_requested_test_names(f'pytest "{nodeid}" -x') == [nodeid]
 
 
 def test_executor_timeout_is_timed_out(monkeypatch):

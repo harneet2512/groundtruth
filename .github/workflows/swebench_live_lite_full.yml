@@ -467,6 +467,18 @@ jobs:
           ref: ${{ inputs.gt_ref || 'gt-trial' }}
           lfs: false
 
+      - name: Resolve checked-out GT commit
+        shell: bash
+        run: |
+          GT_CHECKOUT_SHA="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ ! "$GT_CHECKOUT_SHA" =~ ^[0-9a-f]{40,64}$ ]]; then
+            echo "GT_CHECKOUT_IDENTITY_INVALID: git rev-parse returned no canonical commit" >&2
+            exit 1
+          fi
+          echo "GT_CHECKOUT_SHA=$GT_CHECKOUT_SHA" >> "$GITHUB_ENV"
+          echo "GT_GITHUB_SHA=$GT_CHECKOUT_SHA" >> "$GITHUB_ENV"
+          echo "[GT] checkout identity: $GT_CHECKOUT_SHA"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -706,7 +718,6 @@ jobs:
           GT_MATRIX_LANGUAGE: ${{ matrix.language }}
           GT_INPUTS_ASSETS_REPO: ${{ inputs.assets_repo }}
           GT_GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
-          GT_GITHUB_SHA: ${{ github.sha }}
           GT_PROOF_HARNESS: deepswe
           GT_MATRIX_IMAGE: ${{ env.LL_TASK_IMAGE }}
           # Super Mode (Profile-2): mine the semantic body channels (body_terms/string_literals)
@@ -730,34 +741,40 @@ jobs:
           # obligations as a plain checklist (no <gt-*> tags). Baseline arm skips this step.
           GT_BRIEF_MINIMAL: '1'
           GT_BRIEF_NATIVE: '1'
+          # Profile fan-out happens in the later paid-agent step, after V1R brief
+          # generation. Activate the existing host-side capability here so the
+          # sealed brief_result.json retains per-block acquisition receipts.
+          GT_INSEAM_METRICS: '1'
         run: bash scripts/ci/substrate_proof.sh
         # ^^ Inline shell code was extracted to scripts/ci/substrate_proof.sh to stay
         # under GHA's 21,000-character expression limit. All ${{ }} values are passed
         # as env vars above; the script behaviour is identical to the former inline block.
 
-      - name: Run-identity gate (gt_math R01-R04 — resolved identity + fail-closed digest parity before spend)
+      - name: Run-identity gate (gt_math R01-R04 — resolved identity + fail-closed integrity before spend)
         # Runs AFTER the substrate proof (which loads/pulls the pinned image) and BEFORE the paid
         # agent step. continue-on-error + !cancelled() mirror the sibling proof/trial steps: the
-        # spend-prevention is the proof_status=failed belt below (the paid step's existing
-        # PROOF_STATE!=ok gate then refuses), so job-status semantics stay identical to today.
+        # spend-prevention uses two belts: proof_status=failed below and the paid step's independent
+        # identity-artifact validation. Job-status semantics stay identical to today.
         if: ${{ !cancelled() }}
         continue-on-error: true
         env:
-          GT_ID_GT_REF_REQUESTED: ${{ inputs.gt_ref }}
-          GT_ID_GT_REF_RESOLVED: ${{ github.sha }}
+          GT_ID_GT_REF_REQUESTED: ${{ inputs.gt_ref || 'gt-trial' }}
+          GT_ID_WORKFLOW_DISPATCH_SHA: ${{ github.sha }}
           GT_ID_WORKFLOW_RUN_ID: ${{ github.run_id }}
           GT_ID_BASELINE: ${{ inputs.baseline == true && '1' || '0' }}
         run: |
           # gt_math R01-R04: emit ONE resolved run-identity artifact + FAIL CLOSED before any model
-          # spend if the substrate actually present on THIS runner does not match the pinned digest the
-          # workflow asked for. Known trap (memory: "latest tag != latest good"): a stale cached tarball
+          # spend if its checkout/hashes/run binding is invalid or the substrate actually present on
+          # THIS runner does not match the pinned digest. Known trap: a stale cached tarball
           # or a :latest fallback silently loads the WRONG substrate -> GT_REQUIRE_LSP fail-closed 5/5.
           # Applies to BOTH arms (both WRITE the identity artifact); the baseline arm has no expected
           # digest / consumes no substrate, so the digest gate is a no-op there (record only). Commit
           # parity is RECORDED, NOT gated: the baked substrate_build_commit and the synced run commit
           # differ BY DESIGN (run_manifest.commit_parity == "mismatch" is EXPECTED), so gating on it
-          # would fail every legitimate baked-vs-synced run. Gate ONLY on the substrate digest.
+          # would fail every legitimate baked-vs-synced run. Gate identity integrity + substrate
+          # digest binding, but never gate on baked-vs-synced commit parity.
           mkdir -p /tmp/gt_out /tmp/gt
+          rm -f /tmp/gt_out/gt_run_identity.json
           EXPECTED_DIGEST="${GT_SUBSTRATE_DIGEST:-}"
           ACTUAL_DIGEST=""
           DIGEST_PRESENT=0
@@ -772,11 +789,14 @@ jobs:
           # so the checkout copy hashes to the staged copy). sha256sum, cut the leading hex field.
           SEAM_SHA="$(sha256sum artifact_deepswe/gt_mini_patch.py 2>/dev/null | cut -d' ' -f1 || true)"
           RUNNER_SHA="$(sha256sum artifact_deepswe/gt_headless_runner.py 2>/dev/null | cut -d' ' -f1 || true)"
+          IDENTITY_FAILURE_CODE=""
+          IDENTITY_FAILURE_DETAIL=""
+          IDENTITY_WRITER_RC=0
           # RESOLVED-IDENTITY ARTIFACT (always written, both arms). commit_parity is read from the
           # substrate run_manifest.json and RECORDED here (never gated — see the header note).
           GT_ID_EXPECTED="$EXPECTED_DIGEST" GT_ID_ACTUAL="$ACTUAL_DIGEST" \
           GT_ID_SEAM="$SEAM_SHA" GT_ID_RUNNER="$RUNNER_SHA" \
-          python3 << 'PY' || echo "WARN: gt_run_identity.json write failed"
+          python3 << 'PY' || IDENTITY_WRITER_RC=$?
           import json, os
           os.makedirs('/tmp/gt_out', exist_ok=True)
           mani = {}
@@ -792,7 +812,9 @@ jobs:
               'substrate_digest_expected': os.environ.get('GT_ID_EXPECTED') or '',
               'substrate_digest_actual': os.environ.get('GT_ID_ACTUAL') or '',
               'gt_ref_requested': os.environ.get('GT_ID_GT_REF_REQUESTED') or '',
-              'gt_ref_resolved': os.environ.get('GT_ID_GT_REF_RESOLVED') or '',
+              'gt_ref_resolved': os.environ.get('GT_CHECKOUT_SHA') or '',
+              'gt_ref_resolved_source': 'git_rev_parse_head',
+              'workflow_dispatch_sha': os.environ.get('GT_ID_WORKFLOW_DISPATCH_SHA') or '',
               'seam_sha256': os.environ.get('GT_ID_SEAM') or '',
               'runner_sha256': os.environ.get('GT_ID_RUNNER') or '',
               'workflow_run_id': os.environ.get('GT_ID_WORKFLOW_RUN_ID') or '',
@@ -800,22 +822,68 @@ jobs:
               'commit_parity_recorded': mani.get('commit_parity'),
               'substrate_build_commit': mani.get('substrate_build_commit'),
           }
-          open('/tmp/gt_out/gt_run_identity.json', 'w', encoding='utf-8').write(json.dumps(doc, indent=2))
+          target = '/tmp/gt_out/gt_run_identity.json'
+          temporary = target + f'.tmp.{os.getpid()}'
+          with open(temporary, 'w', encoding='utf-8') as f:
+              json.dump(doc, f, indent=2)
+              f.flush()
+              os.fsync(f.fileno())
+          os.replace(temporary, target)
           print('[GT] run-identity: ' + json.dumps(doc))
           PY
-          # FAIL-CLOSED PARITY (digest ONLY). Baseline / unpinned -> nothing to compare -> proceed.
-          # A missing pinned image before spend => write proof_status=failed (the paid step's existing
-          # PROOF_STATE!=ok gate then refuses, so NO model spend) + emit the marker + exit 1.
+          if [ "$IDENTITY_WRITER_RC" != "0" ]; then
+            IDENTITY_FAILURE_CODE="IDENTITY_WRITE_FAILED"
+            IDENTITY_FAILURE_DETAIL="gt_run_identity.json could not be published atomically"
+          elif ! GT_ID_EXPECTED="$EXPECTED_DIGEST" GT_ID_ACTUAL="$ACTUAL_DIGEST" \
+            GT_ID_SEAM="$SEAM_SHA" GT_ID_RUNNER="$RUNNER_SHA" python3 << 'PY'
+          import json, os, re
+          with open('/tmp/gt_out/gt_run_identity.json', encoding='utf-8') as f:
+              doc = json.load(f)
+          canonical = re.compile(r'^[0-9a-f]{40,64}$')
+          digest = re.compile(r'^[0-9a-f]{64}$')
+          required = {
+              'schema': doc.get('schema') == 'gt.run_identity.v1',
+              'gt_ref_resolved': bool(canonical.fullmatch(str(doc.get('gt_ref_resolved') or ''))),
+              'gt_ref_matches_checkout': doc.get('gt_ref_resolved') == os.environ.get('GT_CHECKOUT_SHA'),
+              'gt_ref_resolved_source': doc.get('gt_ref_resolved_source') == 'git_rev_parse_head',
+              'workflow_dispatch_sha': bool(canonical.fullmatch(str(doc.get('workflow_dispatch_sha') or ''))),
+              'seam_sha256': bool(digest.fullmatch(str(doc.get('seam_sha256') or ''))),
+              'seam_matches_checkout': doc.get('seam_sha256') == os.environ.get('GT_ID_SEAM'),
+              'runner_sha256': bool(digest.fullmatch(str(doc.get('runner_sha256') or ''))),
+              'runner_matches_checkout': doc.get('runner_sha256') == os.environ.get('GT_ID_RUNNER'),
+              'workflow_run_id': bool(re.fullmatch(r'[0-9]+', str(doc.get('workflow_run_id') or ''))),
+              'workflow_run_matches': str(doc.get('workflow_run_id') or '') == os.environ.get('GT_ID_WORKFLOW_RUN_ID'),
+          }
+          expected = os.environ.get('GT_ID_EXPECTED') or ''
+          actual = os.environ.get('GT_ID_ACTUAL') or ''
+          if os.environ.get('GT_ID_BASELINE') != '1' and expected:
+              required['substrate_digest_binding'] = (
+                  actual == expected
+                  and doc.get('substrate_digest_expected') == expected
+                  and doc.get('substrate_digest_actual') == actual
+              )
+          failed = sorted(name for name, passed in required.items() if not passed)
+          if failed:
+              raise SystemExit('invalid run identity fields: ' + ','.join(failed))
+          PY
+          then
+            IDENTITY_FAILURE_CODE="IDENTITY_CONTENT_INVALID"
+            IDENTITY_FAILURE_DETAIL="gt_run_identity.json failed schema/hash/checkout/digest validation"
+          elif [ "${GT_ID_BASELINE:-0}" != "1" ] && [ -n "$EXPECTED_DIGEST" ] && [ "$DIGEST_PRESENT" != "1" ]; then
+            IDENTITY_FAILURE_CODE="IDENTITY_DIGEST_MISMATCH"
+            IDENTITY_FAILURE_DETAIL="pinned substrate not present locally before paid run"
+          fi
+
+          if [ -n "$IDENTITY_FAILURE_CODE" ]; then
+            IDENTITY_FAILURE_CODE="$IDENTITY_FAILURE_CODE" IDENTITY_FAILURE_DETAIL="$IDENTITY_FAILURE_DETAIL" \
+              python3 -c "import json,os,time; os.makedirs('/tmp/gt',exist_ok=True); json.dump({'schema':'gt.proof_status.v1','state':'failed','code':os.environ['IDENTITY_FAILURE_CODE'],'detail':os.environ['IDENTITY_FAILURE_DETAIL'],'ts':time.time()}, open('/tmp/gt/proof_status.json','w'))" 2>/dev/null || true
+            echo "GT_IDENTITY_MISMATCH: ${IDENTITY_FAILURE_CODE}: ${IDENTITY_FAILURE_DETAIL} -- refusing to spend" | tee -a trial_output.log
+            exit 1
+          fi
           if [ "${GT_ID_BASELINE:-0}" != "1" ] && [ -n "$EXPECTED_DIGEST" ]; then
-            if [ "$DIGEST_PRESENT" = "1" ]; then
-              echo "[GT] run-identity OK: pinned substrate present locally before spend (expected == actual: $EXPECTED_DIGEST)"
-            else
-              python3 -c "import json,os,time; os.makedirs('/tmp/gt',exist_ok=True); json.dump({'schema':'gt.proof_status.v1','state':'failed','code':'IDENTITY_DIGEST_MISMATCH','detail':'pinned substrate not present locally before paid run','ts':time.time()}, open('/tmp/gt/proof_status.json','w'))" 2>/dev/null || true
-              echo "GT_IDENTITY_MISMATCH: pinned substrate ${EXPECTED_DIGEST} not resolvable as a local image before the paid agent run (expected != actual: wrong/stale/unloaded substrate) -- refusing to spend" | tee -a trial_output.log
-              exit 1
-            fi
+            echo "[GT] run-identity OK: schema, checkout, hashes, run id, and pinned substrate digest validated before spend"
           else
-            echo "[GT] run-identity: no expected substrate digest / baseline arm -- digest gate skipped (identity recorded only)"
+            echo "[GT] run-identity OK: schema, checkout, hashes, and run id validated (digest binding not applicable)"
           fi
 
       - name: Run GT Pro trial
@@ -834,6 +902,42 @@ jobs:
         run: |
           echo "=== SWE-bench Pro GT Trial: $MTASK (lang=$MLANG model=$INPUT_MODEL) ==="
           echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
+          if ! python3 <<'PY'
+          import hashlib, json, os, re
+          from pathlib import Path
+          identity_path = Path('/tmp/gt_out/gt_run_identity.json')
+          with identity_path.open(encoding='utf-8') as f:
+              doc = json.load(f)
+          canonical = re.compile(r'^[0-9a-f]{40,64}$')
+          digest = re.compile(r'^[0-9a-f]{64}$')
+          file_sha = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+          required = {
+              'schema': doc.get('schema') == 'gt.run_identity.v1',
+              'gt_ref_resolved': bool(canonical.fullmatch(str(doc.get('gt_ref_resolved') or ''))),
+              'gt_ref_matches_checkout': doc.get('gt_ref_resolved') == os.environ.get('GT_CHECKOUT_SHA'),
+              'gt_ref_resolved_source': doc.get('gt_ref_resolved_source') == 'git_rev_parse_head',
+              'workflow_dispatch_sha': bool(canonical.fullmatch(str(doc.get('workflow_dispatch_sha') or ''))),
+              'seam_sha256': bool(digest.fullmatch(str(doc.get('seam_sha256') or ''))),
+              'seam_matches_checkout': doc.get('seam_sha256') == file_sha('artifact_deepswe/gt_mini_patch.py'),
+              'runner_sha256': bool(digest.fullmatch(str(doc.get('runner_sha256') or ''))),
+              'runner_matches_checkout': doc.get('runner_sha256') == file_sha('artifact_deepswe/gt_headless_runner.py'),
+              'workflow_run_id': bool(re.fullmatch(r'[0-9]+', str(doc.get('workflow_run_id') or ''))),
+              'workflow_run_matches': str(doc.get('workflow_run_id') or '') == os.environ.get('GITHUB_RUN_ID'),
+          }
+          expected = os.environ.get('GT_SUBSTRATE_DIGEST') or ''
+          if os.environ.get('INPUT_BASELINE') != 'true' and expected:
+              required['substrate_digest_binding'] = (
+                  doc.get('substrate_digest_expected') == expected
+                  and doc.get('substrate_digest_actual') == expected
+              )
+          failed = sorted(name for name, passed in required.items() if not passed)
+          if failed:
+              raise SystemExit('invalid run identity fields: ' + ','.join(failed))
+          PY
+          then
+            echo "GT_RUN_IDENTITY_FAIL: missing, malformed, stale, or digest-unbound gt_run_identity.json; refusing paid agent run" | tee -a trial_output.log
+            exit 1
+          fi
           PROOF_STATE=$(python3 - <<'PY'
           import json, pathlib
           p = pathlib.Path("/tmp/gt/proof_status.json")
@@ -1208,10 +1312,16 @@ jobs:
                 # -> profile dark EXACTLY on the uv-branch images (same divergence class as B5).
                 export GT_CAPABILITY_RECEIPT="$(PYTHONPATH=/opt/gt "$GT_PY" -m groundtruth.runtime.capability_receipt --emit-json 2>/tmp/gt_receipt_err.txt || echo "{}")"
                 echo "[GT] capability receipt: ${GT_CAPABILITY_RECEIPT}"
-                _GT_PROFILE_EXPORTS="$(PYTHONPATH=/opt/gt "$GT_PY" -m groundtruth.runtime.rl_profile --emit-exports 2>/tmp/gt_profile_err.txt || true)"
-                if [ -n "${_GT_PROFILE_EXPORTS}" ]; then
-                  eval "${_GT_PROFILE_EXPORTS}"
-                  echo "[GT] RL profile ${GT_RL_PROFILE:-2} activated in-container ($(printf %s "${_GT_PROFILE_EXPORTS}" | grep -c export) members): $(printf %s "${_GT_PROFILE_EXPORTS}" | tr "\n" " ")"
+                if ! _GT_PROFILE_EXPORTS="$(PYTHONPATH=/opt/gt "$GT_PY" -m groundtruth.runtime.rl_profile --emit-exports 2>/tmp/gt_profile_err.txt)"; then
+                  echo "GT_RL_PREFLIGHT_ABORT_BEFORE_SPEND: profile resolver failed: $(cat /tmp/gt_profile_err.txt 2>/dev/null)"
+                  exit 1
+                fi
+                if [ -z "${_GT_PROFILE_EXPORTS}" ]; then
+                  echo "GT_RL_PREFLIGHT_ABORT_BEFORE_SPEND: profile resolver emitted no members: $(cat /tmp/gt_profile_err.txt 2>/dev/null)"
+                  exit 1
+                fi
+                eval "${_GT_PROFILE_EXPORTS}"
+                echo "[GT] RL profile ${GT_RL_PROFILE:-2} activated in-container ($(printf %s "${_GT_PROFILE_EXPORTS}" | grep -c export) members): $(printf %s "${_GT_PROFILE_EXPORTS}" | tr "\n" " ")"
                   # PERSIST the activation as a DURABLE artifact so the section-4 auditor can PROVE
                   # Profile-2 was live: the stdout log line above is NOT collected, and a GT-on task
                   # with no gt_profile_activation.json is treated as INFRA by the liveness step below.
@@ -1221,10 +1331,11 @@ jobs:
                   # capability_receipt --emit-json) is embedded as a parsed object, and a non-object
                   # receipt is omitted so the file is still written. Members are read from the SAME
                   # _GT_PROFILE_EXPORTS just eval-ed, so the record matches what was activated.
-                  GTPA_PROFILE="${GT_RL_PROFILE:-2}" GTPA_EXPORTS="${_GT_PROFILE_EXPORTS}" GTPA_RECEIPT="${GT_CAPABILITY_RECEIPT:-}" PYTHONPATH=/opt/gt "$GT_PY" -c "import json,os; ex=os.environ.get(\"GTPA_EXPORTS\") or \"\"; members=[l.split(\"=\",1)[0].split()[1] for l in ex.splitlines() if l.strip().startswith(\"export \") and \"=\" in l]; rr=(os.environ.get(\"GTPA_RECEIPT\") or \"\").strip(); doc={\"schema\": \"gt.profile_activation.v1\", \"profile\": os.environ.get(\"GTPA_PROFILE\") or \"\", \"members\": members}; doc.update({\"capability_receipt\": json.loads(rr)} if rr.startswith(\"{\") else {}); open(\"/gt_out/gt_profile_activation.json\", \"w\", encoding=\"utf-8\").write(json.dumps(doc, indent=2))" 2>/tmp/gt_profile_act_err.txt && echo "[GT] wrote gt_profile_activation.json ($(printf %s "${_GT_PROFILE_EXPORTS}" | grep -c export) members)" || echo "[GT] WARN gt_profile_activation.json write failed: $(cat /tmp/gt_profile_act_err.txt 2>/dev/null)"
-                else
-                  echo "[GT] RL profile NOT activated (off or preflight abort): $(cat /tmp/gt_profile_err.txt 2>/dev/null)"
+                if ! GTPA_PROFILE="${GT_RL_PROFILE:-2}" GTPA_EXPORTS="${_GT_PROFILE_EXPORTS}" GTPA_RECEIPT="${GT_CAPABILITY_RECEIPT:-}" PYTHONPATH=/opt/gt "$GT_PY" -c "import json,os; ex=os.environ.get(\"GTPA_EXPORTS\") or \"\"; members=[l.split(\"=\",1)[0].split()[1] for l in ex.splitlines() if l.strip().startswith(\"export \") and \"=\" in l]; rr=(os.environ.get(\"GTPA_RECEIPT\") or \"\").strip(); doc={\"schema\": \"gt.profile_activation.v1\", \"profile\": os.environ.get(\"GTPA_PROFILE\") or \"\", \"members\": members}; doc.update({\"capability_receipt\": json.loads(rr)} if rr.startswith(\"{\") else {}); open(\"/gt_out/gt_profile_activation.json\", \"w\", encoding=\"utf-8\").write(json.dumps(doc, indent=2))" 2>/tmp/gt_profile_act_err.txt; then
+                  echo "GT_PROFILE_RECEIPT_ABORT_BEFORE_SPEND: activation proof write failed: $(cat /tmp/gt_profile_act_err.txt 2>/dev/null)"
+                  exit 1
                 fi
+                echo "[GT] wrote gt_profile_activation.json ($(printf %s "${_GT_PROFILE_EXPORTS}" | grep -c export) members)"
               fi
 
               # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence).
@@ -1290,11 +1401,11 @@ jobs:
               git add -A -N 2>/dev/null || true
               git diff HEAD > /gt_out/agent_patch.diff 2>/dev/null || true
               git diff HEAD > /gt_out/git_diff_head.diff 2>/dev/null || true
-              # SS-3 defect-3: preserve the agent's CURATED patch as a candidate so the
+              # SS-3 defect-3: preserve the agent-authored CURATED patch as a candidate so the
               # host-side capture can prefer it over `git diff HEAD` (which sweeps in any
               # repro-generated binaries — model.keras/*.h5 — as un-applyable "Binary files
               # differ" blocks). Binary exclusion itself is done host-side by
-              # patch_capture_filter.py (keys on git's own binary marker, extension-general).
+              # patch_capture_filter.py (keys on the git binary marker, extension-general).
               cp /tmp/patch.txt /gt_out/agent_curated.patch 2>/dev/null || true
               # last-resort backup only if the clean git diff produced nothing (no tracked changes):
               [ -s /gt_out/agent_patch.diff ] || cp /tmp/patch.txt /gt_out/agent_patch.diff 2>/dev/null || true
@@ -1549,10 +1660,17 @@ jobs:
           mkdir -p "/tmp/gt/${{ matrix.task }}"
           cp /tmp/gt_out/mini-swe-agent.trajectory.json "/tmp/gt/${{ matrix.task }}/" 2>/dev/null || true
           cp /tmp/gt_out/mini-swe-agent.trajectory.json trial_results/ 2>/dev/null || true
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
+            cp /tmp/gt_out/gt_runtime_ledger.jsonl "/tmp/gt/${{ matrix.task }}/gt_runtime_ledger_${{ matrix.task }}.jsonl"
+            # Acquisition provenance is persisted by the substrate brief producer.
+            # Preserve it at the task artifact root: the bounded offline reader
+            # intentionally does not search arbitrary nested artifact directories.
+            cp /tmp/gt/brief_result.json trial_results/brief_result.json
+          fi
 
           # Deep 8-dp metrics.
           cp /tmp/gt/gt_run_summary*.json "trial_results/" 2>/dev/null || true
-          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
+          GT_GOLD_JSONL=benchmarks/data/swebench_live_lite.jsonl PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
           cp "/tmp/gt_deep_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
           cp "/tmp/gt_deep_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
 
@@ -1563,7 +1681,6 @@ jobs:
           # there too so the grader reads the whole task from one dir. Same PYTHONPATH pattern as the
           # gt_deep_metrics line. Its nonzero (per-task aggregate refusal) is swallowed like
           # DEEP_METRICS_WARN — the METRICS-COMPLETE gate below is the fail-closed artifact check.
-          cp /tmp/gt_out/gt_runtime_ledger.jsonl "/tmp/gt/${{ matrix.task }}/gt_runtime_ledger_${{ matrix.task }}.jsonl" 2>/dev/null || true
           cp /tmp/gt_out/gt_oracle_events.jsonl  "/tmp/gt/${{ matrix.task }}/gt_oracle_events_${{ matrix.task }}.jsonl"  2>/dev/null || true
           PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_feature_metrics.py /tmp/gt --profile 2 --run-id "${{ matrix.task }}" 2>&1 | tail -3 || echo FEATURE_METRICS_WARN
           cp "/tmp/gt/${{ matrix.task }}/gt_feature_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
@@ -1577,8 +1694,22 @@ jobs:
           python3 -c "import json,sys,os; t=sys.argv[1]; p='/tmp/gt_deep_metrics_'+t+'.json'; d=(json.load(open(p,encoding='utf-8')) if os.path.exists(p) else {}); e=d.get('efficiency') or {}; a=d.get('agent') or {}; r=d.get('resolved'); rs=('YES' if r is True else ('NO' if r is False else '?')); print('[METRICS %s] resolved=%s steps=%s first_edit=%s tokens_total=%s cost_usd=%s traj=%s'%(t,rs,a.get('action_count'),a.get('first_edit_action'),e.get('llm_tokens_total'),(e.get('llm_cost_usd') or e.get('recorded_cost_usd')),d.get('trajectory_source')))" "${{ matrix.task }}" 2>/dev/null | tee -a trial_output.log || echo METRICS_LINE_WARN
 
           # Run provenance.
-          python3 -c "import json,os; json.dump({'schema':'gt.live_lite_run_provenance.v1','task':'${{ matrix.task }}','language':'${{ matrix.language }}','gt_git_commit':os.environ.get('GITHUB_SHA') or None,'substrate_digest':os.environ.get('GT_SUBSTRATE_DIGEST') or None,'workflow_run_id':os.environ.get('GITHUB_RUN_ID') or None},open('trial_results/gt_artifacts/run_provenance.json','w'),indent=2)" \
-            || echo "WARN: run_provenance.json write failed"
+          python3 - << 'PY' || echo "WARN: run_provenance.json write failed"
+          import json, os
+          with open('trial_results/gt_artifacts/gt_run_identity.json', encoding='utf-8') as f:
+              identity = json.load(f)
+          doc = {
+              'schema': 'gt.live_lite_run_provenance.v1',
+              'task': '${{ matrix.task }}',
+              'language': '${{ matrix.language }}',
+              'gt_git_commit': identity.get('gt_ref_resolved') or None,
+              'workflow_dispatch_sha': identity.get('workflow_dispatch_sha') or None,
+              'substrate_digest': os.environ.get('GT_SUBSTRATE_DIGEST') or None,
+              'workflow_run_id': os.environ.get('GITHUB_RUN_ID') or None,
+          }
+          with open('trial_results/gt_artifacts/run_provenance.json', 'w', encoding='utf-8') as f:
+              json.dump(doc, f, indent=2)
+          PY
 
           # Outcome classification — reads jobs/<ts>/<task>__*/result.json (verifier_result)
           # + the bridged verifier/reward.json + trial_output.log markers (NOT reward.txt).
@@ -1603,6 +1734,12 @@ jobs:
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
             # GT-on arm ONLY: the full v3 per-task set (feature metrics + the two already-gated proofs).
             [ -s "trial_results/gt_feature_metrics_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_feature_metrics_${{ matrix.task }}.json"
+            [ -s "trial_results/brief_result.json" ] || _MM_MISSING="$_MM_MISSING brief_result.json"
+            # Presence alone is insufficient: the feature collector must prove the exact
+            # 12 ACQ + 47 CAP + 11 FACT + 58 PERF ledger and all required inputs.
+            python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); s=d.get("ss_integrity") or {}; f=d.get("ss_features") or {}; sys.exit(0 if len(f)==128 and s.get("inventory_complete") is True and s.get("required_inputs_complete") is True else 1)' \
+              "trial_results/gt_feature_metrics_${{ matrix.task }}.json" \
+              || _MM_MISSING="$_MM_MISSING gt_feature_metrics_ss128_integrity"
             [ -s "trial_results/gt_artifacts/gt_profile_activation.json" ]    || _MM_MISSING="$_MM_MISSING gt_profile_activation.json"
             [ -s "trial_results/gt_artifacts/gt_run_identity.json" ]          || _MM_MISSING="$_MM_MISSING gt_run_identity.json"
           fi
@@ -1644,11 +1781,291 @@ jobs:
           path: /tmp/all
           pattern: ll-full-*
 
+      - name: Build canonical PERF and exact-128 diagnosis
+        env:
+          GT_EXPECTED_MATRIX: ${{ needs.prepare.outputs.matrix }}
+          GT_EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
+          GT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          export GT_DIAG_DIR=/tmp/gt-diagnosis
+          mkdir -p "$GT_DIAG_DIR"
+          GT_EXPECTED_POPULATION_RC=0
+          GT_RUN_METRICS_RC=0
+          GT_FEATURE_POPULATION_RC=0
+          GT_FEATURE_METRICS_RC=0
+          GT_SS_DIAGNOSIS_JSON_RC=0
+          GT_SS_DIAGNOSIS_MD_RC=0
+
+          # Bind the diagnosis to the exact prepared population. The matrix is
+          # authoritative; downloaded artifacts and embedded task ids are checked
+          # against this list independently below.
+          python3 - <<'PY' || GT_EXPECTED_POPULATION_RC=$?
+          import json
+          import os
+          from collections import Counter
+          from pathlib import Path
+
+          try:
+              matrix = json.loads(os.environ["GT_EXPECTED_MATRIX"])
+              expected_total = int(os.environ["GT_EXPECTED_TOTAL"])
+          except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+              raise SystemExit(f"GT_EXPECTED_POPULATION_INVALID: {type(exc).__name__}")
+          include = matrix.get("include") if isinstance(matrix, dict) else None
+          if not isinstance(include, list):
+              raise SystemExit("GT_EXPECTED_POPULATION_INVALID: matrix.include is not a list")
+          task_ids = [row.get("task") if isinstance(row, dict) else None for row in include]
+          invalid = [index for index, task in enumerate(task_ids)
+                     if not isinstance(task, str) or not task]
+          duplicate_tasks = sorted(
+              task for task, count in Counter(task_ids).items()
+              if isinstance(task, str) and count > 1
+          )
+          if invalid or duplicate_tasks or not task_ids or len(task_ids) != expected_total:
+              raise SystemExit(
+                  "GT_EXPECTED_POPULATION_INVALID: "
+                  f"expected_total={expected_total} rows={len(task_ids)} "
+                  f"invalid={invalid} duplicate_tasks={duplicate_tasks}"
+              )
+          target = Path(os.environ["GT_DIAG_DIR"]) / "expected_tasks.json"
+          target.write_text(json.dumps({"task_ids": task_ids}, indent=2), encoding="utf-8")
+          PY
+
+          if [ -s "$GT_DIAG_DIR/expected_tasks.json" ]; then
+            python3 scripts/swebench/gt_run_metrics.py /tmp/all \
+              --run-id "$GT_RUN_ID" \
+              --expected-tasks-file "$GT_DIAG_DIR/expected_tasks.json" \
+              --output "$GT_DIAG_DIR/gt_run_metrics_v2_${GT_RUN_ID}.json" \
+              || GT_RUN_METRICS_RC=$?
+          else
+            GT_RUN_METRICS_RC=125
+          fi
+
+          # Deep-metric identity and task-artifact identity are separate seams.
+          # The canonical v2 producer checked the former; check the latter before
+          # recomputing the exact 128-row feature inventory.
+          python3 - <<'PY' || GT_FEATURE_POPULATION_RC=$?
+          import glob
+          import json
+          import os
+          from collections import Counter
+          from pathlib import Path
+
+          expected = json.loads(
+              (Path(os.environ["GT_DIAG_DIR"]) / "expected_tasks.json").read_text(encoding="utf-8")
+          )["task_ids"]
+          actual = []
+          for root in sorted(glob.glob("/tmp/all/ll-full-*")):
+              if not os.path.isdir(root):
+                  continue
+              if not os.path.isfile(os.path.join(root, "mini-swe-agent.trajectory.json")):
+                  continue
+              actual.append(os.path.basename(root).removeprefix("ll-full-"))
+          expected_counts = Counter(expected)
+          actual_counts = Counter(actual)
+          missing_tasks = sorted(set(expected_counts) - set(actual_counts))
+          unexpected_tasks = sorted(set(actual_counts) - set(expected_counts))
+          duplicate_tasks = sorted(task for task, count in actual_counts.items() if count > 1)
+          if missing_tasks or duplicate_tasks or unexpected_tasks or len(actual) != len(expected):
+              raise SystemExit(
+                  "GT_FEATURE_POPULATION_INVALID: "
+                  f"missing_tasks={missing_tasks} duplicate_tasks={duplicate_tasks} "
+                  f"unexpected_tasks={unexpected_tasks} expected={len(expected)} actual={len(actual)}"
+              )
+          PY
+
+          if [ -s "$GT_DIAG_DIR/gt_run_metrics_v2_${GT_RUN_ID}.json" ]; then
+            python3 scripts/swebench/gt_feature_metrics.py /tmp/all \
+              --profile 2 \
+              --run-id "$GT_RUN_ID" \
+              --run-metrics-artifact "$GT_DIAG_DIR/gt_run_metrics_v2_${GT_RUN_ID}.json" \
+              --out "$GT_DIAG_DIR" \
+              || GT_FEATURE_METRICS_RC=$?
+
+            python3 scripts/swebench/ss_live_diagnosis.py /tmp/all \
+              --run-metrics "$GT_DIAG_DIR/gt_run_metrics_v2_${GT_RUN_ID}.json" \
+              --output "$GT_DIAG_DIR/ss_live_diagnosis_${GT_RUN_ID}.json" \
+              || GT_SS_DIAGNOSIS_JSON_RC=$?
+            python3 scripts/swebench/ss_live_diagnosis.py /tmp/all \
+              --run-metrics "$GT_DIAG_DIR/gt_run_metrics_v2_${GT_RUN_ID}.json" \
+              --format markdown \
+              --output "$GT_DIAG_DIR/ss_live_diagnosis_${GT_RUN_ID}.md" \
+              || GT_SS_DIAGNOSIS_MD_RC=$?
+          else
+            GT_FEATURE_METRICS_RC=125
+            GT_SS_DIAGNOSIS_JSON_RC=125
+            GT_SS_DIAGNOSIS_MD_RC=125
+          fi
+
+          # Record every stage before failing. The bundle remains available for
+          # diagnosis even when mandatory collection or integrity is incomplete.
+          export GT_EXPECTED_POPULATION_RC GT_RUN_METRICS_RC
+          export GT_FEATURE_POPULATION_RC GT_FEATURE_METRICS_RC
+          export GT_SS_DIAGNOSIS_JSON_RC GT_SS_DIAGNOSIS_MD_RC
+          GT_MANIFEST_RC=0
+          python3 - <<'PY' || GT_MANIFEST_RC=$?
+          import json
+          import os
+          from collections import Counter
+          from pathlib import Path
+
+          root = Path(os.environ["GT_DIAG_DIR"])
+          run_id = os.environ["GT_RUN_ID"]
+          issues = []
+          stage_exit_codes = {
+              name.lower(): int(os.environ[name])
+              for name in (
+                  "GT_EXPECTED_POPULATION_RC",
+                  "GT_RUN_METRICS_RC",
+                  "GT_FEATURE_POPULATION_RC",
+                  "GT_FEATURE_METRICS_RC",
+                  "GT_SS_DIAGNOSIS_JSON_RC",
+                  "GT_SS_DIAGNOSIS_MD_RC",
+              )
+          }
+
+          def load_object(path):
+              try:
+                  value = json.loads(path.read_text(encoding="utf-8"))
+              except (OSError, json.JSONDecodeError) as exc:
+                  issues.append(f"{path.name}:{type(exc).__name__}")
+                  return None
+              if not isinstance(value, dict):
+                  issues.append(f"{path.name}:not_object")
+                  return None
+              return value
+
+          expected_doc = load_object(root / "expected_tasks.json")
+          expected = expected_doc.get("task_ids", []) if expected_doc else []
+          if not isinstance(expected, list):
+              issues.append("expected_tasks.json:task_ids_not_list")
+              expected = []
+
+          canonical_path = root / f"gt_run_metrics_v2_{run_id}.json"
+          feature_path = root / f"gt_run_metrics_{run_id}.json"
+          integrity_path = root / f"gt_metric_integrity_{run_id}.json"
+          diagnosis_json_path = root / f"ss_live_diagnosis_{run_id}.json"
+          diagnosis_md_path = root / f"ss_live_diagnosis_{run_id}.md"
+          canonical = load_object(canonical_path)
+          feature = load_object(feature_path)
+          integrity = load_object(integrity_path)
+          diagnosis = load_object(diagnosis_json_path)
+
+          if canonical and (
+              canonical.get("schema") != "gt_run_metrics.v2"
+              or canonical.get("mandatory_performance_metric_count") != 58
+              or canonical.get("mandatory_performance_collection_complete") is not True
+          ):
+              issues.append("canonical_perf_incomplete")
+
+          ss_features = feature.get("ss_features") if feature else None
+          if not isinstance(ss_features, dict) or len(ss_features) != 128:
+              issues.append("GT_EXACT_128_INVALID: len(ss_features) != 128")
+              ss_features = {}
+          family_counts = Counter(
+              row.get("family") for row in ss_features.values() if isinstance(row, dict)
+          )
+          expected_families = {"ACQ": 12, "CAP": 47, "FACT": 11, "PERF": 58}
+          coverage_failures = sorted(
+              name for name, row in ss_features.items()
+              if not isinstance(row, dict)
+              or row.get("present_in_tasks") != len(expected)
+          )
+          ss_integrity = (integrity.get("ss_128") or {}) if integrity else {}
+          if (
+              not feature
+              or feature.get("schema") != "gt.feature_metrics.run.v1"
+              or feature.get("run_id") != run_id
+              or feature.get("n_tasks") != len(expected)
+              or dict(family_counts) != expected_families
+              or coverage_failures
+              or not integrity
+              or integrity.get("publishable") is not True
+              or ss_integrity.get("publishable") is not True
+          ):
+              issues.append("GT_EXACT_128_INVALID")
+          if not diagnosis or diagnosis.get("feature_count") != 128:
+              issues.append("ss_live_diagnosis_not_exact_128")
+          if not diagnosis_md_path.is_file() or diagnosis_md_path.stat().st_size == 0:
+              issues.append("ss_live_diagnosis_markdown_missing")
+
+          failed_stages = sorted(
+              name for name, code in stage_exit_codes.items() if code != 0
+          )
+          issues.extend(f"stage_failed:{name}" for name in failed_stages)
+          manifest = {
+              "schema": "gt.diagnosis_bundle.v1",
+              "run_id": run_id,
+              "expected_task_ids": expected,
+              "expected_task_count": len(expected),
+              "canonical_perf_artifact": canonical_path.name,
+              "exact_128_artifact": feature_path.name,
+              "ss_live_diagnosis_json": diagnosis_json_path.name,
+              "ss_live_diagnosis_markdown": diagnosis_md_path.name,
+              "family_counts": expected_families,
+              "stage_exit_codes": stage_exit_codes,
+              "integrity_issues": sorted(set(issues)),
+              "publishable": not issues,
+          }
+          (root / "diagnosis_manifest.json").write_text(
+              json.dumps(manifest, indent=2), encoding="utf-8"
+          )
+          if issues:
+              (root / "DIAGNOSIS_BUNDLE_FAILED").write_text(
+                  "\n".join(sorted(set(issues))) + "\n", encoding="utf-8"
+              )
+          PY
+
+          if [ "$GT_MANIFEST_RC" -ne 0 ] \
+            || [ "$GT_EXPECTED_POPULATION_RC" -ne 0 ] \
+            || [ "$GT_RUN_METRICS_RC" -ne 0 ] \
+            || [ "$GT_FEATURE_POPULATION_RC" -ne 0 ] \
+            || [ "$GT_FEATURE_METRICS_RC" -ne 0 ] \
+            || [ "$GT_SS_DIAGNOSIS_JSON_RC" -ne 0 ] \
+            || [ "$GT_SS_DIAGNOSIS_MD_RC" -ne 0 ] \
+            || [ -s "$GT_DIAG_DIR/DIAGNOSIS_BUNDLE_FAILED" ]; then
+            echo "GT_DIAGNOSIS_BUNDLE_FAILED: artifacts preserved in $GT_DIAG_DIR"
+            exit 1
+          fi
+
+      - name: Upload GT diagnosis bundle
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-diagnosis-${{ github.run_id }}
+          path: /tmp/gt-diagnosis/
+          retention-days: 30
+          if-no-files-found: error
+
       - name: Aggregate SWE-bench Pro results
         run: |
+          GT_COMMIT="$(python3 - <<'PY'
+          import glob, json, os, re
+          roots = sorted(path for path in glob.glob('/tmp/all/ll-full-*') if os.path.isdir(path))
+          paths = [os.path.join(root, 'gt_artifacts', 'gt_run_identity.json') for root in roots]
+          missing = [path for path in paths if not os.path.isfile(path)]
+          values = set()
+          invalid = []
+          for path in paths:
+              if path in missing:
+                  continue
+              with open(path, encoding='utf-8') as f:
+                  value = (json.load(f).get('gt_ref_resolved') or '').strip()
+              if re.fullmatch(r'[0-9a-f]{40,64}', value):
+                  values.add(value)
+              else:
+                  invalid.append(path)
+          if not roots or missing or invalid or len(values) != 1:
+              raise SystemExit(
+                  'GT_IDENTITY_CONSENSUS_FAILED: '
+                  f'values={sorted(values)} artifacts={len(roots)} missing={missing} invalid={invalid}'
+              )
+          print(next(iter(values)))
+          PY
+          )"
           echo "## SWE-bench Pro full benchmark — ${{ needs.prepare.outputs.total }} tasks" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Provenance** — GT commit: \`${{ github.sha }}\` | Pro-OS clone SHA: \`${{ needs.prepare.outputs.bench_sha }}\` | substrate digest: \`${GT_SUBSTRATE_DIGEST:-<unset>}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Provenance** — GT commit: \`$GT_COMMIT\` | Pro-OS clone SHA: \`${{ needs.prepare.outputs.bench_sha }}\` | substrate digest: \`${GT_SUBSTRATE_DIGEST:-<unset>}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           RAN=0; TOTAL=0; LAUNCH_FAIL=0
           for d in /tmp/all/ll-full-*; do

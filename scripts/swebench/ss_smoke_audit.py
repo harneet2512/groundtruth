@@ -62,13 +62,21 @@ from pathlib import Path
 # ── repo layout ──────────────────────────────────────────────────────────────
 _REPO = Path(__file__).resolve().parents[2]
 _SWE = _REPO / "scripts" / "swebench"
+_SRC = _REPO / "src"
 if str(_SWE) not in sys.path:
     sys.path.insert(0, str(_SWE))
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 # The DELIVERY LEDGER JOIN is the proven, byte-verified reconstruction from the SS replay
 # oracle. We import it READ-ONLY (no seam install, no product mutation) — this is the
 # "reuse the proven join approach" the SS-9 mandate calls for.
 import ss_replay_oracle as sso  # noqa: E402  (reconstruct_task / locate_seal / _commands_of)
+import consumption_ledger as cl  # noqa: E402  (shared sealed receipt classifier)
+from groundtruth.runtime.obligations import (  # noqa: E402
+    classify_checked_behavioral_proof,
+    rendered_obligation_subject_groups,
+)
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -199,7 +207,24 @@ def acquisition_before(msgs: list[dict], home: int) -> set[str]:
 # A "rewrite" is an actual file MUTATION: sed -i, a redirect (> / >>) into the file, tee into
 # it, or a python open(...,'w'/'a') on it. A `cat`/`sed -n`/`grep` READ is NOT a rewrite — the
 # coherence producer's known bug conflates reads with rewrites, which this recompute exposes.
-def _writes_to_basename(msgs: list[dict], basename: str) -> list[int]:
+_WRITE_FAIL_RE = re.compile(
+    r"no such file|cannot (?:open|find|stat|create)|patch failed|does not apply|hunk .*failed|"
+    r"malformed|command not found|permission denied|no replacement|did not appear|"
+    r"multiple occurrences|fatal:|unexpected eof",
+    re.IGNORECASE,
+)
+
+
+def _write_result_ok(content: str) -> bool:
+    """Whether the recorded tool result proves a successful write attempt."""
+    rc = _RETURNCODE.search(content or "")
+    if not rc or int(rc.group(1)) != 0:
+        return False
+    return not _WRITE_FAIL_RE.search(content or "")
+
+
+def _writes_to_basename(msgs: list[dict], basename: str, *, before: int | None = None,
+                        passing: list[int] | None = None) -> list[int]:
     """Message indices of write-COMMANDS that mutate a REPO file with basename ``basename``.
 
     A write is: ``sed -i FILE``, a redirect/tee whose TARGET basename == ``basename`` (and is
@@ -207,11 +232,10 @@ def _writes_to_basename(msgs: list[dict], basename: str) -> list[int]:
     Reads (``cat``/``sed -n``/``grep``/``open(FILE)``) are NOT writes — the coherence producer's
     known bug is conflating them, which this recompute exposes.
 
-    Semantics note: this counts write-ACTIONS observable in the trajectory. It cannot know
-    whether an edit LANDED (a python read-modify-write whose old-string missed is a no-op; the
-    manifest's hand-verified ``actual_landed`` differs there). Distinguishing landed vs attempted
-    needs execution, which a static ``$0`` smoke tool does not do — so the count is conservative
-    (it may equal a buggy over-claim on reverted/no-op edits; it never under-counts a real write).
+    Semantics note: this pairs each candidate write with its recorded tool result, rejects
+    nonzero exits and known failure/no-op markers, stops at the delivery observation, and when
+    given passing-test indices resets the count after the latest prior passing test.
+    This independently reproduces the producer's successful-write and post-GREEN semantics.
     """
     if not basename:
         return []
@@ -221,25 +245,26 @@ def _writes_to_basename(msgs: list[dict], basename: str) -> list[int]:
     # redirect / tee TARGET tokens; we keep only those whose basename matches and isn't scratch
     redir_tgt = re.compile(r">>?\s*([^\s|;&'\"]+)")
     tee_tgt = re.compile(r"\btee\b\s+(?:-a\s+)?([^\s|;&'\"]+)")
+    upper = len(msgs) if before is None else max(0, min(before, len(msgs)))
+    prior_green = [i for i in (passing or []) if i < upper]
+    lower = max(prior_green) if prior_green else -1
     out: list[int] = []
-    for i, m in enumerate(msgs):
-        if m.get("role") != "assistant":
+    for result_msg, (command_msg, command) in _command_events_by_tool_message(msgs).items():
+        if result_msg >= upper or command_msg <= lower:
             continue
         wrote = False
-        for c in sso._commands_of(m):
-            if basename not in c:
-                continue
-            if sed_i.search(c) or openw.search(c):
+        if basename in command:
+            if sed_i.search(command) or openw.search(command):
                 wrote = True
-                break
-            for tgt in redir_tgt.findall(c) + tee_tgt.findall(c):
-                if _basename(tgt) == basename and not is_scratch_path(tgt):
-                    wrote = True
-                    break
-            if wrote:
-                break
-        if wrote:
-            out.append(i)
+            else:
+                for tgt in redir_tgt.findall(command) + tee_tgt.findall(command):
+                    if _basename(tgt) == basename and not is_scratch_path(tgt):
+                        wrote = True
+                        break
+        content = msgs[result_msg].get("content", "")
+        result = content if isinstance(content, str) else ""
+        if wrote and _write_result_ok(result) and command_msg not in out:
+            out.append(command_msg)
     return out
 
 
@@ -250,34 +275,195 @@ _COHERENCE_CLAIM = re.compile(r"rewritten\s+([^\s]+?)\s+(\d+)\s+times", re.IGNOR
 # PASSING-TEST DETECTION (for the late check)
 # ══════════════════════════════════════════════════════════════════════════════
 _TESTCMD = re.compile(r"\b(?:pytest|py\.test|python[0-9.]*\s+-m\s+pytest|unittest|nosetests|tox)\b")
+_PROBE_CMD = re.compile(
+    r"\b(?:python[0-9.]*\s+(?:-c\b|-\s*<<|<<)|node\s+(?:-e\b|<<)|go\s+run\b)")
 _RETURNCODE = re.compile(r"\s*<returncode>(-?\d+)</returncode>")
+_POSITIVE_PASS_SUMMARY = re.compile(
+    r"^[=\s]*[1-9]\d*\s+passed"
+    r"(?:,\s*\d+\s+(?:skipped|deselected|xfailed|xpassed|warnings?))*"
+    r"(?:\s+in\s+[0-9.]+s)?[=\s]*$", re.IGNORECASE | re.MULTILINE)
+_POSITIVE_FAILURE_COUNT = re.compile(r"\b([1-9]\d*)\s+(?:failed|errors?)\b", re.IGNORECASE)
+_OBL_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def passing_test_msgs(msgs: list[dict]) -> list[int]:
     """Tool-observation indices where a test RUN passed (rc==0, 'passed', no failure marker)."""
     out: list[int] = []
-    pending: list[str] = []
+    commands = _commands_by_tool_message(msgs)
     for i, m in enumerate(msgs):
         role = m.get("role")
-        if role == "assistant":
-            pending = sso._commands_of(m)
-            continue
         if role != "tool":
             continue
-        cmd = pending.pop(0) if pending else ""
+        cmd = commands.get(i, "")
         content = m.get("content", "") if isinstance(m.get("content"), str) else ""
         if not _TESTCMD.search(cmd):
             continue
-        low = content.lower()
-        if "passed" not in low:
-            continue
         rc = _RETURNCODE.match(content)
-        rcv = int(rc.group(1)) if rc else 0
-        # the summary segment BEFORE the pass count must not report failures/errors
-        head = low.split("passed", 1)[0][-60:]
-        if rcv == 0 and " failed" not in head and " error" not in head:
+        if not rc:
+            continue
+        rcv = int(rc.group(1))
+        # Require a structured positive pass count. Substring checks admit `0 passed`,
+        # `bypassed`, and negated prose, all of which falsely reset the coherence boundary.
+        if (rcv == 0 and _POSITIVE_PASS_SUMMARY.search(content)
+                and not _POSITIVE_FAILURE_COUNT.search(content)):
             out.append(i)
     return out
+
+
+def _command_events_by_tool_message(msgs: list[dict]) -> dict[int, tuple[int, str]]:
+    """Pair each result with ``(assistant index, command)`` without losing call IDs."""
+    pending: list[tuple[str | None, int, str]] = []
+    paired: dict[int, tuple[int, str]] = {}
+    for index, message in enumerate(msgs):
+        if message.get("role") == "assistant":
+            calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
+            if calls:
+                for call in calls:
+                    if not isinstance(call, dict):
+                        continue
+                    call_id = str(call.get("id")) if call.get("id") else None
+                    try:
+                        args = json.loads((call.get("function") or {}).get("arguments") or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    command = args.get("command") if isinstance(args, dict) else None
+                    if isinstance(command, str) and command.strip():
+                        pending.append((call_id, index, command))
+            else:
+                pending.extend((None, index, command) for command in sso._commands_of(message))
+            continue
+        if message.get("role") != "tool" or not pending:
+            continue
+        tool_id = str(message.get("tool_call_id") or "")
+        if tool_id:
+            matches = [pos for pos, (call_id, _message_index, _command) in enumerate(pending)
+                       if call_id == tool_id]
+            if len(matches) == 1:
+                _call_id, message_index, command = pending.pop(matches[0])
+                paired[index] = (message_index, command)
+        elif len(pending) == 1 and pending[0][0] is None:
+            _call_id, message_index, command = pending.pop(0)
+            paired[index] = (message_index, command)
+    return paired
+
+
+def _commands_by_tool_message(msgs: list[dict]) -> dict[int, str]:
+    """Pair actions to results by tool-call id; use FIFO only when unambiguous."""
+    return {result: command for result, (_assistant, command)
+            in _command_events_by_tool_message(msgs).items()}
+
+
+def _obligation_term_groups(payload: str) -> list[set[str]]:
+    """Canonical term set for every independently rendered obligation row."""
+    return [set(group) for group in rendered_obligation_subject_groups(payload)]
+
+
+def _terms_covered(terms: set[str], command: str, output: str) -> bool:
+    if not terms:
+        return False
+    evidence = {token.lower() for token in _OBL_TOKEN.findall(
+        (command or "") + "\n" + (output or ""))}
+    for term in terms:
+        if term in evidence:
+            continue
+        if "_" in term and any(term in token for token in evidence):
+            continue
+        if any(term in re.split(r"[_\d]+", token) for token in evidence if "_" in token):
+            continue
+        # One-way, bounded inflection: a sufficiently distinctive obligation term may
+        # appear in evidence as its ordinary verb form (match -> matching/matches).
+        # Never stem evidence back to a shorter token: that made `unit` match `united`.
+        if len(term) >= 5 and any(token in {term + "s", term + "es", term + "ed", term + "ing"}
+                                  for token in evidence):
+            continue
+        return False
+    return True
+
+
+def _assistant_accepted_probe(msgs: list[dict], probe_msg: int, home_msg: int) -> bool:
+    for message in msgs[probe_msg + 1:home_msg]:
+        if message.get("role") == "tool":
+            return False
+        if message.get("role") != "assistant":
+            continue
+        prose = str(message.get("content") or "").strip().lower()
+        # Receipt must be the assistant's affirmative statement, not a positive phrase
+        # embedded under negation (`does not mean all tests passed`, `false that ...`).
+        positive = re.compile(
+            r"^(?:all (?:tests?|checks?) pass(?:ed)?|"
+            r"all (?:looks?|results?) correct|"
+            r"(?:it|that|this|they) (?:works?|passes?) correctly|"
+            r"results? (?:are|look) correct)\b")
+        commands = " ".join(sso._commands_of(message))
+        lines = prose.splitlines(keepends=True)
+        for line_index, raw_line in enumerate(lines):
+            paragraph = raw_line.rstrip("\r\n").lstrip(" -*_`#")
+            match = positive.match(paragraph)
+            if not match:
+                continue
+            tail = paragraph[match.end():] + "".join(lines[line_index + 1:])
+            tail = tail.lstrip(" \t\r\n*_`")
+            if tail.startswith("?"):
+                continue
+            tail = tail.lstrip(".!: \t")
+            if not tail:
+                return True
+            # A positive receipt may share the turn with a stated next verification
+            # action, but only when that same assistant message actually launches a test.
+            if (re.fullmatch(
+                    r"(?:now\s+)?let me\s+(?:run|check|verify|test)\b[^.\n]*[.!:]?",
+                    tail)
+                    and _TESTCMD.search(commands)):
+                return True
+        return False
+    return False
+
+
+def _probe_has_checked_expectations(command: str, output: str, terms: set[str],
+                                    *, returncode: int = 0, turn: int = 0) -> bool:
+    """Delegate intrinsic execution truth; chronology and acknowledgment stay here."""
+    return classify_checked_behavioral_proof(
+        command, output, returncode, terms, turn=turn) is not None
+
+
+def _transport_result(content: str) -> tuple[int, str] | None:
+    """Parse the trajectory wrapper while preserving the original command output bytes."""
+    match = _RETURNCODE.match(content or "")
+    if not match:
+        return None
+    output = (content or "")[match.end():]
+    if output.startswith("\r\n"):
+        output = output[2:]
+    elif output.startswith("\n"):
+        output = output[1:]
+    return int(match.group(1)), output
+
+
+def requirement_evidence_before(payload: str, msgs: list[dict], home_msg: int,
+                                passing: list[int]) -> int | None:
+    """First prior evidence covering any complete, independently rendered row."""
+    groups = _obligation_term_groups(payload)
+    if not groups:
+        return None
+    commands = _commands_by_tool_message(msgs)
+    for index, message in enumerate(msgs[:home_msg + 1]):
+        if message.get("role") != "tool":
+            continue
+        command = commands.get(index, "")
+        output = str(message.get("content") or "")
+        if index in passing and any(
+                _terms_covered(terms, command, output) for terms in groups):
+            return index
+        result = _transport_result(output)
+        if (bool(_PROBE_CMD.search(command))
+                and result is not None
+                and result[0] == 0
+                and _assistant_accepted_probe(msgs, index, home_msg)):
+            if any(_probe_has_checked_expectations(
+                    command, result[1], terms,
+                    returncode=result[0], turn=index) for terms in groups):
+                return index
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -305,11 +491,13 @@ class DeliveryGrade:
     violations: list[Violation] = field(default_factory=list)
     ack_ledger: bool = False       # SS-0 ledger ack field present+true
     ack_independent: int = -1      # msg index of the first later assistant reference, or -1
+    acted_independent: int = -1    # later entity-targeting assistant command, or -1
+    receipt_level: int = 1         # 1 delivered, 2 referenced, 3 relevant action
     pbucket: str = ""
 
     @property
     def acknowledged(self) -> bool:
-        return self.ack_ledger or self.ack_independent >= 0
+        return self.receipt_level >= 2 or self.ack_ledger or self.ack_independent >= 0
 
     @property
     def clean(self) -> bool:
@@ -353,13 +541,15 @@ def _basename(p: str) -> str:
 
 
 def grade_delivery(d: "sso.Delivery", msgs: list[dict], acq_cache: dict,
-                   passing: list[int], ledger_row: dict) -> DeliveryGrade:
+                   passing: list[int], ledger_row: dict,
+                   receipt_level: int = 1) -> DeliveryGrade:
     payload = d.payload or ""
     head = payload.strip().replace("\n", " ")[:80]
     joined = d.home_msg >= 0
     g = DeliveryGrade(home_msg=d.home_msg, iteration=d.iteration, layer=d.layer,
                       chars=d.chars, file_path=str(d.file_path or ""),
-                      payload_head=head, joined=joined)
+                      payload_head=head, joined=joined,
+                      receipt_level=max(1, int(receipt_level or 1)))
     if not joined:
         g.violations.append(Violation("unjoined", "1", d.home_msg, d.layer,
                                       f"seal {d.sha16} ({d.chars}c) not located in observation stream",
@@ -387,18 +577,20 @@ def grade_delivery(d: "sso.Delivery", msgs: list[dict], acq_cache: dict,
 
     # ── (b) LATE ────────────────────────────────────────────────────────────────
     if d.layer in OBLIGATION_LAYERS:
-        prior_pass = [j for j in passing if j <= d.home_msg]
-        if prior_pass:
+        evidence_msg = requirement_evidence_before(payload, msgs, d.home_msg, passing)
+        if evidence_msg is not None:
             g.violations.append(Violation("late", "b", d.home_msg, d.layer,
-                                          "passing test evidence at m%s precedes obligation"
-                                          % prior_pass[0], head))
+                                          "requirement-covering evidence at m%s precedes obligation"
+                                          % evidence_msg, head))
 
     # ── (c1) COHERENCE MISCOUNT ──────────────────────────────────────────────────
     if d.layer in COHERENCE_LAYERS:
         mm = _COHERENCE_CLAIM.search(payload)
         if mm:
             fname, claimed = _basename(mm.group(1)), int(mm.group(2))
-            actual = len(_writes_to_basename(msgs, fname))
+            actual = len(_writes_to_basename(
+                msgs, fname, before=d.home_msg, passing=passing,
+            ))
             if claimed != actual:
                 g.violations.append(Violation("coherence_miscount", "c", d.home_msg, d.layer,
                                               f"claims rewritten {fname} {claimed}x; actual "
@@ -434,19 +626,18 @@ def grade_delivery(d: "sso.Delivery", msgs: list[dict], acq_cache: dict,
     ack_field = ledger_row.get("ack") if isinstance(ledger_row, dict) else None
     if ack_field in (True, 1, "1", "true", "acked", "referenced", "acted"):
         g.ack_ledger = True
+        g.receipt_level = max(g.receipt_level, 2)
 
     # ── (3) ACKNOWLEDGMENT — independent later-reference check ────────────────────
     g.ack_independent = _first_reference(d, msgs)
+    if g.ack_independent >= 0:
+        g.receipt_level = max(g.receipt_level, 2)
+    g.acted_independent = _first_action_reference(d, msgs)
     return g
 
 
-def _first_reference(d: "sso.Delivery", msgs: list[dict]) -> int:
-    """Index of the first LATER assistant message that references a delivered entity, or -1.
-
-    Entities = the delivery's own (non-scratch) file basename + the basenames of the files it
-    cited. This is the SS-independent acknowledgment probe (does the agent's own text/action
-    later register the fact), separate from the host-side ack field.
-    """
+def _delivery_entities(d: "sso.Delivery") -> set[str]:
+    """Non-scratch file entities carried by one delivery."""
     ents: set[str] = set()
     fp = str(d.file_path or "")
     if fp and not is_scratch_path(fp):
@@ -460,7 +651,12 @@ def _first_reference(d: "sso.Delivery", msgs: list[dict]) -> int:
     for p in PATH_TOK.findall(payload):
         if not is_scratch_path(p):
             ents.add(_basename(p))
-    ents = {e for e in ents if e and len(e) >= 4}
+    return {e for e in ents if e and len(e) >= 4}
+
+
+def _first_reference(d: "sso.Delivery", msgs: list[dict]) -> int:
+    """First later assistant prose/action reference to a delivered entity, or -1."""
+    ents = _delivery_entities(d)
     if not ents:
         return -1
     pats = [re.compile(r"\b" + re.escape(e) + r"\b") for e in ents]
@@ -471,6 +667,28 @@ def _first_reference(d: "sso.Delivery", msgs: list[dict]) -> int:
         blob = m.get("content", "") if isinstance(m.get("content"), str) else ""
         blob += " " + " ".join(sso._commands_of(m))
         if any(p.search(blob) for p in pats):
+            return i
+    return -1
+
+
+def _first_action_reference(d: "sso.Delivery", msgs: list[dict]) -> int:
+    """First later assistant command targeting a delivered entity, or -1.
+
+    This is deliberately separate from generic receipt 3. For a scope constraint,
+    inspecting a named not-yet-touched file is the relevant scope-validation
+    action; for other classes the shared receipt classifier still requires a
+    mutation or verification command.
+    """
+    ents = _delivery_entities(d)
+    if not ents:
+        return -1
+    pats = [re.compile(r"\b" + re.escape(e) + r"\b") for e in ents]
+    for i in range(d.home_msg + 1, len(msgs)):
+        m = msgs[i]
+        if m.get("role") != "assistant":
+            continue
+        commands = " ".join(sso._commands_of(m))
+        if commands and any(p.search(commands) for p in pats):
             return i
     return -1
 
@@ -506,7 +724,10 @@ def _assign_pbucket(g: DeliveryGrade) -> str:
         return "P2"
     if "late" in kinds:
         return "P3"
-    if g.acknowledged and g.layer in P5_CLASSES:
+    acted = g.receipt_level >= 3 or (
+        g.layer == "consensus.scope" and g.acted_independent >= 0
+    )
+    if acted and g.layer in P5_CLASSES:
         return "P5"
     return "P3a-ack"
 
@@ -607,6 +828,18 @@ def audit_task(task: str, root: Path) -> TaskReport:
     msgs = traj["messages"]
     passing = passing_test_msgs(msgs)
     seal_rows = _ledger_rows_by_seal(task_dir, task)
+    receipt_ledger = cl.build_consumption_ledger(
+        traj, runtime_ledger_path=str(task_dir / f"gt_runtime_ledger_{task}.jsonl")
+    )
+    receipt_by_seal: dict[str, int] = {}
+    for entry in receipt_ledger.get("entries") or []:
+        if not isinstance(entry, dict) or entry.get("joined") is not True:
+            continue
+        seal = str(entry.get("content_sha256_16") or "")
+        if seal:
+            receipt_by_seal[seal] = max(
+                receipt_by_seal.get(seal, 0), int(entry.get("receipt") or 0)
+            )
     acq_cache: dict[int, set[str]] = {}
 
     grades: list[DeliveryGrade] = []
@@ -617,7 +850,10 @@ def audit_task(task: str, root: Path) -> TaskReport:
         if d.chars <= 0 or "delivered" not in d.outcome or "shadow_holdout" in d.outcome:
             continue
         ledger_row = seal_rows.get(d.sha16 or "", {})
-        grades.append(grade_delivery(d, msgs, acq_cache, passing, ledger_row))
+        grades.append(grade_delivery(
+            d, msgs, acq_cache, passing, ledger_row,
+            receipt_level=receipt_by_seal.get(d.sha16 or "", 1),
+        ))
 
     apply_dose(grades)
 

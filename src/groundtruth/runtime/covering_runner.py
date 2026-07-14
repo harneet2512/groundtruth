@@ -400,6 +400,22 @@ def _run_via_executor(
     start = time.perf_counter()
     try:
         rc, stdout, stderr = executor(command, repo_root, timeout)
+    except subprocess.TimeoutExpired:
+        return {
+            "executed": True,
+            "command": command,
+            "reason": "timeout",
+            "environment_failure_class": None,
+            "exit_code": None,
+            "duration_ms": int((time.perf_counter() - start) * 1000),
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "failing_test_names": [],
+            "timed_out": True,
+            "stdout_tail": "",
+            "stderr_tail": "",
+        }
     except Exception as exc:  # noqa: BLE001 -- executor failure == spawn error == unavailable
         return {
             "executed": False,
@@ -419,6 +435,26 @@ def _run_via_executor(
         }
     stdout = stdout or ""
     stderr = stderr or ""
+    if rc is None:
+        timed_out = stderr in {
+            "replay_verification_timeout",
+            "replay_toolchain_timeout",
+        }
+        return {
+            "executed": timed_out,
+            "command": command,
+            "reason": "timeout" if timed_out else "executor_unavailable",
+            "environment_failure_class": None,
+            "exit_code": None,
+            "duration_ms": int((time.perf_counter() - start) * 1000),
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "failing_test_names": [],
+            "timed_out": timed_out,
+            "stdout_tail": stdout[-max_output_chars:],
+            "stderr_tail": stderr[-max_output_chars:],
+        }
     combined = stdout + "\n" + stderr
     parsed = _parse_test_output(combined, command)
     return {
@@ -485,7 +521,7 @@ def _git(
     return (stdout or "").strip()
 
 
-def _container_base_path(repo_root: str) -> str:
+def _container_base_path(repo_root: str, *, base_root: str | None = None) -> str:
     """Derive a CONTAINER-side worktree path from ``repo_root`` — NEVER a host
     ``tempfile`` dir (which resolves on the ORCHESTRATOR host and is invisible
     inside the task's container).
@@ -497,7 +533,7 @@ def _container_base_path(repo_root: str) -> str:
     cannot inject backslashes into a Linux container path. The random token keeps
     concurrent post_edit hooks from colliding."""
     base = repo_root.replace("\\", "/").rstrip("/")
-    parent = posixpath.dirname(base) or base or "/"
+    parent = (base_root or posixpath.dirname(base) or base or "/").rstrip("/") or "/"
     return posixpath.join(parent, ".gt_base_" + uuid.uuid4().hex[:12])
 
 
@@ -528,16 +564,20 @@ def _make_base_worktree(
             wt = os.path.join(parent, "base")
             if (_git(repo_root, ["worktree", "add", "--detach", wt, "HEAD"]) is None
                     or not os.path.isdir(wt)):
-                shutil.rmtree(parent, ignore_errors=True)
+                _cleanup_base_worktree(repo_root, wt, parent)
                 return None
             return wt, parent
         # Container/executor path: host tempfile is invisible in the remote namespace.
-        wt = _container_base_path(repo_root)
+        executor_base = getattr(executor, "_gt_base_worktree_root", None)
+        if executor_base is not None and not isinstance(executor_base, str):
+            return None
+        wt = _container_base_path(repo_root, base_root=executor_base)
         if _git(
             repo_root, ["worktree", "add", "--detach", wt, "HEAD"], executor=executor
         ) is None:
-            # Best-effort unregister a half-created worktree, then quiet (no leak).
-            _git(repo_root, ["worktree", "remove", "--force", wt], executor=executor)
+            # An add can fail after creating the checkout or its git metadata.
+            # Use the normal ordered cleanup so neither half is left behind.
+            _cleanup_base_worktree(repo_root, wt, "", executor=executor)
             return None
         return wt, ""  # no host parent to rmtree; cleanup removes wt via executor
     except Exception:  # noqa: BLE001
@@ -557,7 +597,6 @@ def _cleanup_base_worktree(
     half-created residue. ``executor=None`` -> byte-identical host cleanup."""
     try:
         _git(repo_root, ["worktree", "remove", "--force", wt], executor=executor)
-        _git(repo_root, ["worktree", "prune"], executor=executor)
     except Exception:  # noqa: BLE001
         pass
     if executor is None:
@@ -567,6 +606,12 @@ def _cleanup_base_worktree(
             executor(["rm", "-rf", wt], repo_root, 30)
         except Exception:  # noqa: BLE001
             pass
+    # Prune only after physical deletion. If `worktree remove` failed, pruning
+    # while the checkout still existed would preserve its stale registration.
+    try:
+        _git(repo_root, ["worktree", "prune"], executor=executor)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def differential_attribution(

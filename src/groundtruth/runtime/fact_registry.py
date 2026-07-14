@@ -53,6 +53,7 @@ __all__ = [
     "REGISTRY",
     "registration",
     "registration_for",
+    "producer_matches",
     "required_event",
     "earliest_event_for",
     "required_renderer",
@@ -616,6 +617,35 @@ def registration_for(evidence_type: str) -> "FactRegistration | None":
     return REGISTRY.get(canon) if canon is not None else None
 
 
+# Fine evidence types are allowed to have a live producer whose name differs
+# from the canonical class producer.  This is an explicit authority table, not
+# a string/prefix inference: adding a new producer requires registering it here.
+_EVIDENCE_TYPE_PRODUCERS: dict[str, frozenset[str]] = {
+    "localization": frozenset({"v1r_brief", "ranked_localization"}),
+    "def_ref_partition": frozenset({"def_ref_partition"}),
+    "name_fold": frozenset({"name_fold"}),
+    "wrong_surface": frozenset({"wrong_surface"}),
+    "body_concept": frozenset({"body_concept"}),
+    "trace_frame": frozenset({"trace"}),
+    "caller_break": frozenset({"caller_contract"}),
+    "covering_verdict": frozenset({"covering"}),
+}
+
+
+def producer_matches(evidence_type: str, runtime_producer_id: str) -> bool:
+    """Whether a runtime producer is authoritative for this evidence type."""
+
+    reg = registration_for(evidence_type)
+    if reg is None or not runtime_producer_id:
+        return False
+    evidence_base = (evidence_type or "").strip().split(":", 1)[0]
+    allowed = _EVIDENCE_TYPE_PRODUCERS.get(
+        evidence_type,
+        _EVIDENCE_TYPE_PRODUCERS.get(evidence_base, frozenset({reg.producer})),
+    )
+    return runtime_producer_id in allowed
+
+
 def required_event(evidence_type: str) -> str | None:
     """The LAST-useful delivery boundary (``deliver_by``, a fine :data:`EVENTS` name) for a
     shipped ``evidence_type``, or ``None`` when unregistered. Honors the per-evidence-type
@@ -787,6 +817,17 @@ def freshness_surfaces(evidence_type: str) -> tuple[str, ...] | None:
 # to the registry so a future edit that makes them DIVERGE fails LOUD at import.
 # --------------------------------------------------------------------------- #
 def _self_check_executable() -> None:
+    for evidence_type, producers in _EVIDENCE_TYPE_PRODUCERS.items():
+        if registration_for(evidence_type) is None:
+            raise ValueError(
+                f"fact_registry: producer authority {evidence_type!r} resolves to no class"
+            )
+        if not producers or not all(
+            isinstance(producer, str) and producer.strip() for producer in producers
+        ):
+            raise ValueError(
+                f"fact_registry: producer authority {evidence_type!r} is empty/malformed"
+            )
     # every per-type freshness key must resolve to a registered class, list only KNOWN DB
     # surfaces, be non-empty, and NOT also be patch-bound.
     for et, surfaces in FRESHNESS_SURFACES.items():

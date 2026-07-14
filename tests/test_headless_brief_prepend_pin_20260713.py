@@ -27,6 +27,8 @@ reddens test_baseline_arm_task_is_byte_identical.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 import types
 from pathlib import Path
@@ -63,6 +65,46 @@ def test_gt_arm_prepends_brief_before_issue(tmp_path):
     )
     assert _ISSUE in task, "the original issue text must be preserved after the brief"
     assert task == _BRIEF + "\n\n" + _ISSUE, "brief and issue must be joined by exactly one blank line"
+
+
+def test_gt_arm_records_exact_producer_seal_without_changing_task_bytes(tmp_path):
+    brief = tmp_path / "brief.txt"
+    ledger = tmp_path / "gt_runtime_ledger.jsonl"
+    brief.write_bytes(_BRIEF.encode("utf-8"))
+    env = {
+        "GT_RUN_TASK": _ISSUE,
+        "GT_BRIEF_FILE": str(brief),
+        "GT_INSEAM_METRICS": "1",
+        "GT_RUNTIME_LEDGER": str(ledger),
+    }
+
+    task = ghr._resolve_task(env)
+
+    assert task == _BRIEF + "\n\n" + _ISSUE
+    row = json.loads(ledger.read_text(encoding="utf-8").strip())
+    assert row["layer"] == "brief.task"
+    assert row["event_type"] == "task_start"
+    assert row["outcome"] == "delivered"
+    assert row["chars_delivered"] == len(_BRIEF)
+    assert row["content_sha256_16"] == hashlib.sha256(
+        _BRIEF.encode("utf-8")
+    ).hexdigest()[:16]
+    assert row["seal_scope"] == "block"
+
+
+def test_brief_producer_seal_is_default_off(tmp_path):
+    brief = tmp_path / "brief.txt"
+    ledger = tmp_path / "gt_runtime_ledger.jsonl"
+    brief.write_bytes(_BRIEF.encode("utf-8"))
+
+    task = ghr._resolve_task({
+        "GT_RUN_TASK": _ISSUE,
+        "GT_BRIEF_FILE": str(brief),
+        "GT_RUNTIME_LEDGER": str(ledger),
+    })
+
+    assert task == _BRIEF + "\n\n" + _ISSUE
+    assert not ledger.exists()
 
 
 def test_baseline_arm_task_is_byte_identical(tmp_path):

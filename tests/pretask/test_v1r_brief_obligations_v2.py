@@ -6,12 +6,14 @@ symbols fix, the three-tier leak guard, and flag-off inertness."""
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from groundtruth.pretask.v1r_brief import (
     _dynamic_obligation_budget,
+    _obligations_v2_on,
     _render_obligations_block,
     _v2_order_key,
 )
@@ -23,12 +25,34 @@ TRUE_MYTH = (_FIX / "true-myth-iterable-collection-combinators.md").read_text(
 _CAP = lambda s: s  # noqa: E731 — identity body-line cap for tests
 
 
+def _issue_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 @pytest.fixture()
 def v2_env(monkeypatch, tmp_path):
     monkeypatch.setenv("GT_OBLIGATIONS_V2", "1")
     monkeypatch.setenv("GT_CERT_DIR", str(tmp_path))
     monkeypatch.delenv("GT_ANCHORS_PATH", raising=False)
     return tmp_path
+
+
+def test_profile2_activates_v2_without_legacy_flag(monkeypatch):
+    monkeypatch.delenv("GT_OBLIGATIONS_V2", raising=False)
+    monkeypatch.setenv("GT_RL_PROFILE", "2")
+    assert _obligations_v2_on()
+
+
+def test_explicit_v2_zero_is_profile2_kill_switch(monkeypatch):
+    monkeypatch.setenv("GT_RL_PROFILE", "2")
+    monkeypatch.setenv("GT_OBLIGATIONS_V2", "0")
+    assert not _obligations_v2_on()
+
+
+def test_explicit_profile_off_keeps_v2_off(monkeypatch):
+    monkeypatch.delenv("GT_OBLIGATIONS_V2", raising=False)
+    monkeypatch.setenv("GT_RL_PROFILE", "0")
+    assert not _obligations_v2_on()
 
 
 # ── 8a. dynamic budget ────────────────────────────────────────────────────────
@@ -81,6 +105,8 @@ def test_v2_artifact_written(v2_env):
 # ── 10. persisted-bridge carries symbols (leak check regains its symbol leg) ─
 def test_persisted_bridge_symbol_leak_drops(v2_env):
     anchors = {
+        "obligations_version": 2,
+        "issue_sha256": _issue_sha256("irrelevant"),
         "obligations": [
             {
                 # verbatim is CLEAN — only the symbols field carries the leak;
@@ -112,6 +138,46 @@ def test_persisted_bridge_symbol_leak_drops(v2_env):
     block = "\n".join(lines)
     assert "collector" not in block, "symbol-borne leak must drop the clause whole"
     assert "filterMap" in block
+
+
+def test_v2_rejects_unversioned_persisted_obligations(v2_env):
+    stale = {
+        "issue_sha256": _issue_sha256(TRUE_MYTH),
+        "obligations": [{
+            "verbatim_text": "apply_defaults MUST mutate the caller mapping",
+            "kind": "behavior",
+        }]
+    }
+    (v2_env / "gt_issue_anchors.json").write_text(
+        json.dumps(stale), encoding="utf-8"
+    )
+    block = "\n".join(_render_obligations_block(
+        TRUE_MYTH, files=[], cap=_CAP, anchor_symbols={"filterMap"},
+    ))
+    assert "filterMap" in block
+    assert "apply_defaults" not in block
+
+
+def test_v2_rejects_cross_issue_persisted_obligations(v2_env):
+    stale = {
+        "obligations_version": 2,
+        "issue_sha256": "0" * 64,
+        "obligations": [{
+            "verbatim_text": "the stale_parser should return stale output",
+            "kind": "behavior",
+            "modality": "expected",
+            "modality_strength": 2,
+            "subject_symbols": ["stale_parser"],
+        }],
+    }
+    (v2_env / "gt_issue_anchors.json").write_text(
+        json.dumps(stale), encoding="utf-8"
+    )
+    block = "\n".join(_render_obligations_block(
+        TRUE_MYTH, files=[], cap=_CAP, anchor_symbols={"filterMap"},
+    ))
+    assert "filterMap" in block
+    assert "stale_parser" not in block
 
 
 # ── 11. leak guard at T1 AND T2 (T3 pinned in the detector suite) ────────────

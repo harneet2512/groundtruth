@@ -32,6 +32,7 @@ def gmp(monkeypatch, tmp_path):
     importlib.reload(m) if getattr(m, "_obligations_v2_cache", None) else None
     m._obligations_v2_cache = None
     m._unexercised_emitted.clear()
+    m._unexercised_late_suppressed.clear()
     m._oracle_tested_tokens.clear()
     m._oracle_edited_tokens.clear()
     return m, tmp_path
@@ -75,6 +76,142 @@ def test_t3_exercised_clause_not_flagged(gmp):
         assert "filterMap" not in got[1].split("could not be auto-checked")[0]
 
 
+def test_t3_fresh_behavioral_proof_filters_only_proven_clause(
+    gmp, monkeypatch
+):
+    m, tmp = gmp
+    monkeypatch.setenv("GT_SS_LATE_DROP", "1")
+    monkeypatch.setenv("GT_RUNTIME_LEDGER", str(tmp / "ledger.jsonl"))
+    payload = {
+        "obligations_version": 2,
+        "issue_sha256": "a" * 64,
+        "render_path_tokens": [],
+        "clauses": [
+            {
+                "verbatim_text": "TypeError must reject categorical values",
+                "subject_symbols": ["TypeError"],
+                "symbols": ["TypeError"],
+            },
+            {
+                "verbatim_text": "render_predictions must support grouped values",
+                "subject_symbols": ["render_predictions"],
+                "symbols": ["render_predictions"],
+            },
+        ],
+    }
+    (tmp / "gt_obligations_v2.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        m,
+        "_v2_clause_fresh_behavioral_proof",
+        lambda view: (
+            {
+                "clause_id": "0",
+                "subject_digest": "b" * 16,
+                "subject_term_digests": ["c" * 16],
+                "proof_turn": 8,
+                "last_relevant_edit_turn": 3,
+            }
+            if view.idx == 0 else None
+        ),
+    )
+
+    got = m._unexercised_clause_candidate()
+
+    assert got is not None
+    assert "TypeError" not in got[1]
+    assert "render_predictions" in got[1]
+    rows = [
+        json.loads(line)
+        for line in (tmp / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [(row["layer"], row["reason"]) for row in rows] == [
+        ("obligation.unexercised", "ss_late")
+    ]
+    assert rows[0]["subject_digest"] == "b" * 16
+    assert rows[0]["subject_term_digests"] == ["c" * 16]
+    assert rows[0]["artifact_issue_sha256"] == "a" * 64
+    assert rows[0]["proof_turn"] == 8
+
+
+def test_t3_exercised_clause_never_manufactures_late_suppression(
+    gmp, monkeypatch
+):
+    m, tmp = gmp
+    monkeypatch.setenv("GT_SS_LATE_DROP", "1")
+    ledger = tmp / "ledger.jsonl"
+    monkeypatch.setenv("GT_RUNTIME_LEDGER", str(ledger))
+    payload = {
+        "obligations_version": 2,
+        "issue_sha256": "a" * 64,
+        "render_path_tokens": [],
+        "clauses": [{
+            "verbatim_text": "filterMap must preserve mapped values",
+            "subject_symbols": ["filterMap"],
+            "symbols": ["filterMap"],
+        }],
+    }
+    (tmp / "gt_obligations_v2.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    m._oracle_tested_tokens.add("test_filterMap")
+    monkeypatch.setattr(
+        m,
+        "_v2_clause_fresh_behavioral_proof",
+        lambda view: {
+            "clause_id": "0",
+            "subject_digest": "b" * 16,
+            "subject_term_digests": ["c" * 16],
+            "proof_turn": 8,
+            "last_relevant_edit_turn": 3,
+        },
+    )
+
+    assert m._unexercised_clause_candidate() is None
+    assert not ledger.exists()
+
+
+def test_t3_new_proof_generation_records_new_suppression(gmp, monkeypatch):
+    m, tmp = gmp
+    monkeypatch.setenv("GT_SS_LATE_DROP", "1")
+    ledger = tmp / "ledger.jsonl"
+    monkeypatch.setenv("GT_RUNTIME_LEDGER", str(ledger))
+    payload = {
+        "obligations_version": 2,
+        "issue_sha256": "a" * 64,
+        "render_path_tokens": [],
+        "clauses": [{
+            "verbatim_text": "TypeError must reject categorical values",
+            "subject_symbols": ["TypeError"],
+            "symbols": ["TypeError"],
+        }],
+    }
+    (tmp / "gt_obligations_v2.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    proof_turn = {"value": 8}
+    monkeypatch.setattr(
+        m,
+        "_v2_clause_fresh_behavioral_proof",
+        lambda view: {
+            "clause_id": "0",
+            "subject_digest": "b" * 16,
+            "subject_term_digests": ["c" * 16],
+            "proof_turn": proof_turn["value"],
+            "last_relevant_edit_turn": proof_turn["value"] - 1,
+        },
+    )
+
+    assert m._unexercised_clause_candidate() is None
+    assert m._unexercised_clause_candidate() is None
+    proof_turn["value"] = 10
+    assert m._unexercised_clause_candidate() is None
+
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert [row["proof_turn"] for row in rows] == [8, 10]
+
+
 # ── t16: inactive without the artifact — v1 site behavior preserved ──────────
 def test_t3_inactive_without_artifact(gmp):
     m, _tmp = gmp
@@ -104,6 +241,7 @@ def test_t3_reset_law_clears_latch_and_cache(gmp):
     assert m._unexercised_emitted
     m._reset_oracle_state()
     assert not m._unexercised_emitted
+    assert not m._unexercised_late_suppressed
     assert m._obligations_v2_cache is None
 
 

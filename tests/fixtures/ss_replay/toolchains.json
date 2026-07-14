@@ -1,0 +1,45 @@
+{
+  "schema": "gt.ss_replay_toolchains.v1",
+  "tasks": {
+    "dynaconf__dynaconf-1225": {
+      "image": "ghcr.io/harneet2512/sweb.eval.x86_64.dynaconf_1776_dynaconf-1225@sha256:293ed3ea6d3fcf1c1f1cb58ed2a710082b27d12b3010f54715b3b38389e3b294",
+      "image_config_sha256": "fd40921b6ffa5a3bfbe2f843a5463e5ee0d6c39ae48f7cf7b7611a16c6588e43",
+      "platform": "linux/amd64",
+      "repo_root": "/testbed",
+      "python_version": "3.9.22",
+      "python_env_sha256": "8c136d199d3637a1fce98a16adc809c1d83c922d02d41f3614b34f8b6e7d38ec",
+      "evidence": [
+        ".github/workflows/swebench_live_lite_full.yml: task-to-image mapping",
+        "recorded edit.syntax payload: /usr/local/lib/python3.9/ast.py",
+        "arm-4 task-image digest was not artifacted; this digest is a behaviorally exact immutable reproducer"
+      ]
+    },
+    "geopandas__geopandas-3471": {
+      "image": "ghcr.io/harneet2512/sweb.eval.x86_64.geopandas_1776_geopandas-3471@sha256:6da45321e4f52208ab8b74210a7cfd264d731624ebcecfaba82960cbcdf0d979",
+      "image_config_sha256": "7a13afe9fbfebe8ffe39094e4efb9c2deb1ab73dab5598f1fa5de36bb85311cf",
+      "platform": "linux/amd64",
+      "repo_root": "/testbed",
+      "python_version": "3.10.17",
+      "python_env_sha256": "4c68050f049d1b4ac5aadd0df5f27941c0350d2a9e7ab0907ee5eb5225d9d6b0",
+      "evidence": [
+        ".github/workflows/swebench_live_lite_full.yml: task-to-image mapping",
+        "trial_output.log: py=3.10.17 exe=/usr/local/bin/python3",
+        "recorded message 101: /usr/local/lib/python3.10/ast.py",
+        "arm-4 task-image digest was not artifacted; this digest is a behaviorally exact immutable reproducer"
+      ]
+    },
+    "iterative__dvc-10711": {
+      "image": "ghcr.io/harneet2512/sweb.eval.x86_64.iterative_1776_dvc-10711@sha256:cca0747b2cf44e4b50ab28e69655eb051d6a9c1a33b336bd436374b9e03438d1",
+      "image_config_sha256": "549147f3f9a6a8e03529661bf5d31a3b0acddad9fbead33a26b7bd55ad07b906",
+      "platform": "linux/amd64",
+      "repo_root": "/testbed",
+      "python_version": "3.9.22",
+      "python_env_sha256": "8c136d199d3637a1fce98a16adc809c1d83c922d02d41f3614b34f8b6e7d38ec",
+      "evidence": [
+        ".github/workflows/swebench_live_lite_full.yml: task-to-image mapping",
+        "recorded edit.syntax payload: /usr/local/lib/python3.9/ast.py",
+        "arm-4 task-image digest was not artifacted; this digest is a behaviorally exact immutable reproducer"
+      ]
+    }
+  }
+}

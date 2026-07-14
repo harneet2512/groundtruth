@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import ast
 import os
+import posixpath
 import re
 import subprocess
 import traceback
@@ -98,6 +99,9 @@ _PARSE_FRAME_RE = re.compile(
     re.IGNORECASE,
 )
 _GT_TAG_RE = re.compile(r"<gt-[^>]*>", re.IGNORECASE)
+_PY_FILE_RE = re.compile(r'^\s*File "([^"]+)", line (\d+)(?:,.*)?$')
+_PY_ERROR_RE = re.compile(r"^(SyntaxError|IndentationError|TabError):\s*(.*)$")
+_CONTAINER_REPO_ROOTS = ("/testbed", "/home/user", "/workspace", "/app", "/repo")
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +154,42 @@ def check_edit_syntax(
 
     cwd = repo_root or os.path.dirname(abs_path) or "."
     rc, out, err, status = _execute(cmd, cwd, timeout, executor)
-    return _classify(rc, out, err, status, ext, cmd)
+    result = _classify(rc, out, err, status, ext, cmd)
+    # SS edit-diagnostic refinement. The explicit kill-switch preserves the
+    # executor's legacy diagnostic bytes; Profile-2 activates the stable
+    # source-only diagnostic in production. Exact replay fidelity still depends
+    # on executing under the recorded interpreter/toolchain.
+    if (
+        ext == ".py"
+        and result.get("verdict") == "syntax_error"
+        and _ss_edit_diag_enabled()
+    ):
+        normalized = _normalize_python_syntax_diagnostic(
+            str(result.get("diagnostic") or ""), rel_name,
+            abs_path=abs_path, repo_root=repo_root,
+        )
+        if normalized:
+            result["diagnostic"] = normalized
+    return result
+
+
+def _ss_edit_diag_enabled() -> bool:
+    """Resolve the internal edit.syntax behavior version without adding a CAP row.
+
+    An explicit non-empty ``GT_SS_EDIT_DIAG`` is the replay/debug kill-switch.
+    Otherwise the existing effective RL profile controls the refinement: Profile-2
+    emits stable source-only diagnostics; an explicit legacy/off profile preserves
+    the legacy formatting path (and executor bytes when an executor is supplied).
+    """
+    explicit = os.environ.get("GT_SS_EDIT_DIAG")
+    if explicit is not None and explicit.strip() != "":
+        return explicit.strip() == "1"
+    try:
+        from groundtruth.runtime.rl_profile import resolve_default_token
+
+        return resolve_default_token(os.environ) == "2"
+    except Exception:  # noqa: BLE001 -- a profile-resolution fault preserves legacy bytes
+        return False
 
 
 def _build_check_command(ext: str, path: str) -> list[str] | None:
@@ -163,9 +202,8 @@ def _build_check_command(ext: str, path: str) -> list[str] | None:
     if ext == ".py":
         # ast.parse only — no bytecode cache written (unlike py_compile). Encoding-safe.
         return [
-            "python", "-c",
-            "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8',errors='replace')"
-            ".read(), sys.argv[1])",
+            "python", "-I", "-c",
+            "import ast,sys; ast.parse(open(sys.argv[1],'rb').read(), sys.argv[1])",
             path,
         ]
     if ext in (".js", ".mjs", ".cjs"):
@@ -181,7 +219,8 @@ def _build_check_command(ext: str, path: str) -> list[str] | None:
 def _check_py_in_process(abs_path: str, ext: str, rel_name: str | None = None) -> dict[str, Any]:
     """Parse ``abs_path`` with ``ast.parse`` in-process. No subprocess, no bytecode.
 
-    Encoding-safe read (utf-8 / replace). A SyntaxError (incl. IndentationError) is
+    Raw-byte parsing honors the source's declared encoding. A SyntaxError
+    (incl. IndentationError) is
     POSITIVE evidence -> ``syntax_error`` with the native Python error text. A file
     we cannot read, or a non-SyntaxError parse fault (e.g. null bytes -> ValueError),
     is ambiguous -> ``unavailable`` (correct-or-quiet).
@@ -190,20 +229,145 @@ def _check_py_in_process(abs_path: str, ext: str, rel_name: str | None = None) -
     ``File "…"`` line so the model reads the same path it edited (default: basename,
     the pre-L-1b behaviour, for direct callers that pass none)."""
     try:
-        with open(abs_path, encoding="utf-8", errors="replace") as fh:
+        with open(abs_path, "rb") as fh:
             src = fh.read()
     except OSError:
         return _verdict("unavailable", reason="unreadable_file", ext=ext, checker=["ast.parse"])
     try:
         ast.parse(src, filename=rel_name or os.path.basename(abs_path))
     except SyntaxError as exc:
-        diag = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        # The in-process path must obey the same behavior switch as the executor path.
+        # Replay commonly has no live environment executor, so an unconditional stable
+        # formatter here would silently defeat the explicit legacy/off kill-switch.
+        if _ss_edit_diag_enabled():
+            diag = _format_python_syntax_error(exc, rel_name or os.path.basename(abs_path))
+        else:
+            diag = "".join(traceback.format_exception_only(type(exc), exc)).strip()
         return _verdict("syntax_error", reason="parse_error", ext=ext,
                         checker=["ast.parse"], diagnostic=_bound_text(diag))
     except (ValueError, RecursionError, MemoryError):
         # Not a grammar syntax error (e.g. null bytes) -> do not overclaim.
         return _verdict("unavailable", reason="parse_ambiguous", ext=ext, checker=["ast.parse"])
     return _verdict("ok", reason="parsed", ext=ext, checker=["ast.parse"])
+
+
+def _python_diagnostic(
+    *, rel_name: str, line: int, source: str, offset: int | None,
+    error_type: str, message: str,
+) -> str:
+    """Render the stable, native Python syntax-error subset used across runtimes."""
+    parts = [f'File "{rel_name}", line {max(1, int(line or 1))}']
+    source = (source or "").rstrip("\r\n")
+    if source:
+        parts.append("    " + source)
+        if isinstance(offset, int) and offset > 0:
+            prefix = "".join("\t" if char == "\t" else " " for char in source[:offset - 1])
+            parts.append("    " + prefix + "^")
+    parts.append(f"{error_type}: {message}".rstrip())
+    return "\n".join(parts)
+
+
+def _format_python_syntax_error(exc: SyntaxError, rel_name: str) -> str:
+    return _python_diagnostic(
+        rel_name=rel_name,
+        line=int(exc.lineno or 1),
+        source=str(exc.text or ""),
+        offset=int(exc.offset) if isinstance(exc.offset, int) else None,
+        error_type=type(exc).__name__,
+        message=str(getattr(exc, "msg", "") or exc),
+    )
+
+
+def _normalize_python_syntax_diagnostic(
+    text: str,
+    rel_name: str,
+    *,
+    abs_path: str = "",
+    repo_root: str = "",
+) -> str:
+    """Remove interpreter stack frames while preserving the parser's own error facts.
+
+    Python's ``ast.parse`` subprocess includes version-specific ``ast.py`` frames.  Only the
+    final source frame, source line, caret position, exception class, and message are stable
+    model-facing facts.
+    """
+    lines = (text or "").splitlines()
+    error_index = next(
+        (index for index in range(len(lines) - 1, -1, -1)
+         if _PY_ERROR_RE.match(lines[index].strip())),
+        None,
+    )
+    if error_index is None:
+        return ""
+    error_match = _PY_ERROR_RE.match(lines[error_index].strip())
+    assert error_match is not None
+    # A SyntaxError's source details belong only to the final traceback frame.
+    # Searching farther backward can splice a target frame to a later internal one.
+    frame_rows = [
+        (index, match)
+        for index in range(error_index)
+        if (match := _PY_FILE_RE.match(lines[index])) is not None
+    ]
+    if not frame_rows:
+        return f"{error_match.group(1)}: {error_match.group(2)}".rstrip()
+    file_index, file_match = frame_rows[-1]
+    if not _python_frame_matches(
+        file_match.group(1), rel_name, abs_path=abs_path, repo_root=repo_root
+    ):
+        return f"{error_match.group(1)}: {error_match.group(2)}".rstrip()
+    source = ""
+    offset: int | None = None
+    if file_index + 1 < error_index:
+        displayed = lines[file_index + 1]
+        source = displayed[4:] if displayed.startswith("    ") else displayed.strip()
+    if file_index + 2 < error_index:
+        caret = lines[file_index + 2]
+        caret = caret[4:] if caret.startswith("    ") else caret
+        position = caret.find("^")
+        if position >= 0:
+            offset = position + 1
+    return _python_diagnostic(
+        rel_name=rel_name,
+        line=int(file_match.group(2)),
+        source=source,
+        offset=offset,
+        error_type=error_match.group(1),
+        message=error_match.group(2),
+    )
+
+
+def _python_frame_matches(
+    frame_path: str,
+    rel_name: str,
+    *,
+    abs_path: str = "",
+    repo_root: str = "",
+) -> bool:
+    """Whether a traceback frame names the source file being checked.
+
+    Accept the exact repository-relative identity, exact host identity, or that
+    same identity under a known task-container mount. Arbitrary suffix matches
+    are forbidden because another checkout can contain the same relative path.
+    """
+    def _norm(path: str) -> str:
+        value = (path or "").replace("\\", "/")
+        if not value:
+            return ""
+        while "//" in value:
+            value = value.replace("//", "/")
+        return posixpath.normpath(value).rstrip("/")
+
+    frame = _norm(frame_path)
+    rel = _norm(rel_name)
+    if not frame or not rel or frame.startswith("<"):
+        return False
+    identities = {rel}
+    if abs_path:
+        identities.add(_norm(abs_path))
+    if repo_root:
+        identities.add(_norm(repo_root) + "/" + rel)
+    identities.update(root + "/" + rel for root in _CONTAINER_REPO_ROOTS)
+    return frame in identities
 
 
 def _execute(
@@ -223,7 +387,11 @@ def _execute(
             return None, "", "", "timeout"
         except Exception:  # noqa: BLE001 -- OSError/FileNotFoundError/etc == spawn failure
             return None, "", "", "spawn_error"
-        return int(rc), out or "", err or "", "ran"
+        if type(rc) is not int:
+            return None, "", "", "spawn_error"
+        if not all(value is None or type(value) is str for value in (out, err)):
+            return None, "", "", "spawn_error"
+        return rc, out or "", err or "", "ran"
     try:
         ret = executor(list(cmd), cwd, timeout)
     except subprocess.TimeoutExpired:
@@ -233,17 +401,12 @@ def _execute(
     if not isinstance(ret, (tuple, list)) or len(ret) != 3:
         return None, "", "", "spawn_error"
     rc_raw, out, err = ret
-    rc: int | None
-    if rc_raw is None:
-        rc = None
-    elif isinstance(rc_raw, int) and not isinstance(rc_raw, bool):
-        rc = rc_raw
-    else:
-        try:
-            rc = int(rc_raw)
-        except (TypeError, ValueError):
-            rc = None  # contract violation -> ambiguous -> unavailable
-    return rc, ("" if out is None else str(out)), ("" if err is None else str(err)), "ran"
+    if rc_raw is not None and type(rc_raw) is not int:
+        return None, "", "", "spawn_error"
+    if not all(value is None or type(value) is str for value in (out, err)):
+        return None, "", "", "spawn_error"
+    rc: int | None = rc_raw
+    return rc, ("" if out is None else out), ("" if err is None else err), "ran"
 
 
 def _classify(

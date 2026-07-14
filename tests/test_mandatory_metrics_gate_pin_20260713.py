@@ -57,6 +57,13 @@ def _all_steps() -> list[dict]:
     return out
 
 
+def _step_named(name: str) -> dict:
+    for step in _all_steps():
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"no workflow step named {name!r}")
+
+
 def _step_run_containing(token: str) -> str:
     for step in _all_steps():
         run = step.get("run")
@@ -122,6 +129,35 @@ def test_collect_runs_gt_feature_metrics_with_task_id() -> None:
     joined = "\n".join(code)
     assert joined.index("gt_deep_metrics.py") < joined.index("gt_feature_metrics.py"), (
         "gt_feature_metrics.py must be invoked AFTER the existing gt_deep_metrics.py line"
+    )
+
+
+def test_deep_metrics_receives_task_scoped_authoritative_runtime_ledger() -> None:
+    code = "\n".join(_code_lines(_collect_run()))
+    ledger_copy = (
+        'cp /tmp/gt_out/gt_runtime_ledger.jsonl '
+        '"/tmp/gt/${{ matrix.task }}/gt_runtime_ledger_${{ matrix.task }}.jsonl"'
+    )
+    assert ledger_copy in code, (
+        "the sealed runtime ledger must be copied beside the task-scoped trajectory so the "
+        "deep-metrics consumption reader can byte-join tagless native deliveries"
+    )
+    ledger_line = next(line for line in code.splitlines() if ledger_copy in line)
+    assert "|| true" not in ledger_line, "a failed GT-on ledger copy must not fall back silently"
+    assert 'GT_BASELINE_FLAG:-0' in code[: code.index(ledger_copy)], (
+        "the hard ledger requirement must be scoped to GT-on; baseline has no GT runtime ledger"
+    )
+    assert code.index(ledger_copy) < code.index("gt_deep_metrics.py"), (
+        "the authoritative runtime ledger must exist BEFORE gt_deep_metrics.py runs"
+    )
+
+
+def test_deep_metrics_receives_authoritative_swebench_gold_jsonl() -> None:
+    code = "\n".join(_code_lines(_collect_run()))
+    deep_line = next(line for line in code.splitlines() if "gt_deep_metrics.py" in line)
+    assert "GT_GOLD_JSONL=benchmarks/data/swebench_live_lite.jsonl" in deep_line, (
+        "the live producer must receive the existing authoritative dataset path; otherwise 22 "
+        "gold-dependent PERF rows are falsely classified NOT_APPLICABLE"
     )
 
 
@@ -215,3 +251,53 @@ def test_docker_block_single_quote_is_balanced() -> None:
         "introduced and will close the block early (the agent never launches)"
     )
     assert run.count("bash -c " + _APOS) == 1, "expected exactly one `bash -c '` opener in the trial step"
+
+
+# ── 6. PRE-RUN DIAGNOSIS INPUTS + EXACT RUN POPULATION ────────────────────────────
+
+
+def test_collect_preserves_brief_result_for_downloaded_recomputation() -> None:
+    collect = "\n".join(_code_lines(_collect_run()))
+    copy = "cp /tmp/gt/brief_result.json trial_results/brief_result.json"
+    assert copy in collect, (
+        "Collect must preserve brief_result.json at the task artifact root; "
+        "gt_feature_metrics' bounded named-input lookup does not search gt_artifacts/"
+    )
+    gate = _gate_block(_collect_run())
+    assert "trial_results/brief_result.json" in gate, (
+        "the GT-on metrics gate must fail closed if brief_result.json was not preserved"
+    )
+
+
+def test_summarize_builds_canonical_v2_and_exact_128_diagnosis_once() -> None:
+    step = _step_named("Build canonical PERF and exact-128 diagnosis")
+    env = step.get("env") or {}
+    assert env.get("GT_EXPECTED_MATRIX") == "${{ needs.prepare.outputs.matrix }}"
+    assert env.get("GT_EXPECTED_TOTAL") == "${{ needs.prepare.outputs.total }}"
+    assert env.get("GT_RUN_ID") == "${{ github.run_id }}"
+    run = step.get("run") or ""
+    assert run.count("scripts/swebench/gt_run_metrics.py") == 1
+    assert "--expected-tasks-file" in run
+    assert "gt_run_metrics_v2_${GT_RUN_ID}.json" in run
+    assert run.index("gt_run_metrics.py") < run.index("gt_feature_metrics.py")
+    assert "--run-metrics-artifact" in run
+    assert "--out \"$GT_DIAG_DIR\"" in run
+    for required_guard in (
+        "GT_EXPECTED_TOTAL",
+        "Counter(task_ids)",
+        "missing_tasks",
+        "duplicate_tasks",
+        "unexpected_tasks",
+        "len(ss_features) != 128",
+        "present_in_tasks",
+    ):
+        assert required_guard in run, f"diagnosis step lacks fail-closed guard {required_guard!r}"
+
+
+def test_diagnosis_bundle_is_distinct_and_always_uploaded() -> None:
+    upload = _step_named("Upload GT diagnosis bundle")
+    assert upload.get("if") == "${{ always() }}"
+    config = upload.get("with") or {}
+    assert config.get("name") == "gt-diagnosis-${{ github.run_id }}"
+    assert config.get("path") == "/tmp/gt-diagnosis/"
+    assert config.get("if-no-files-found") == "error"

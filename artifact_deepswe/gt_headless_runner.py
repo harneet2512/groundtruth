@@ -32,6 +32,8 @@ authoritative step count, not this exit code.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sys
 
@@ -41,6 +43,43 @@ def _bc(msg: str) -> None:
     exactly how far the runner got when it produces no trajectory."""
     sys.stderr.write(f"[GT-RUNNER] {msg}\n")
     sys.stderr.flush()
+
+
+def _record_brief_delivery(e: dict, brief_text: str) -> None:
+    """Seal the exact step-0 brief at its existing delivery owner.
+
+    Host metadata only: this never changes the task string.  Profile-2's
+    existing in-seam metrics flag activates the row; absent/failed ledger I/O
+    leaves the delivery intact but its ACQ proof honestly unmeasured.
+    """
+    if (e.get("GT_INSEAM_METRICS") or "").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        return
+    path = (e.get("GT_RUNTIME_LEDGER") or "").strip()
+    if not path:
+        return
+    row = {
+        "layer": "brief.task",
+        "event_type": "task_start",
+        "file_path": "",
+        "outcome": "delivered",
+        "reason": "step0_brief_prepend",
+        "chars_delivered": len(brief_text),
+        "iteration": 0,
+        "content_sha256_16": hashlib.sha256(
+            brief_text.encode("utf-8", "surrogatepass")
+        ).hexdigest()[:16],
+        "seal_scope": "block",
+    }
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+    except (OSError, TypeError, ValueError) as exc:
+        _bc(f"WARN brief delivery seal unavailable ({type(exc).__name__})")
 
 
 def _resolve_task(e: dict) -> str:
@@ -73,6 +112,7 @@ def _resolve_task(e: dict) -> str:
     if not brief_text.strip():
         _bc(f"empty brief -> task unchanged (@ {brief_path})")
         return task
+    _record_brief_delivery(e, brief_text)
     _bc(f"brief prepended ({len(brief_text)} chars @ {brief_path})")
     return brief_text + "\n\n" + task
 

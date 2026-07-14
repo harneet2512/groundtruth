@@ -135,8 +135,9 @@ def test_recovery_candidate_v2_gate(monkeypatch):
     imp = g._hypothesis_imperative_map()[hl.D_REQUEST_NEW_HYPOTHESIS]
     g._gt_hypothesis_recovery = (hl.D_REQUEST_NEW_HYPOTHESIS, imp)
     g._ss_test_fail_counts.clear()
+    g._ss_record_test("pytest x", "1 failed", True, False)
     assert g._recovery_candidate() is None              # not eligible -> suppressed
-    g._ss_test_fail_counts["pytest x"] = 2
+    g._ss_record_test("pytest x", "1 failed", True, False)
     rc = g._recovery_candidate()
     assert rc is not None and rc[1] == "recovery"        # released at repeat-2
 

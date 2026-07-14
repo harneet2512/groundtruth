@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GT Behavioral Impact — measures whether GT deliveries CHANGE agent behavior.
+"""GT Behavioral Impact — measures action transitions around GT deliveries.
 
 For every GT block delivered to the agent (<gt-evidence>, <gt-contract>,
 <gt-nudge>, <gt-scope>, <gt-verify>, <gt-obligations>), this module captures:
@@ -7,8 +7,9 @@ For every GT block delivered to the agent (<gt-evidence>, <gt-contract>,
   - the agent's action TYPE after the delivery
   - whether the type CHANGED (a behavioral pivot)
 
-A PIVOT = GT caused the agent to do something different. The aggregate
-"pivots / deliveries" is the GT behavioral impact rate — the causal metric.
+A PIVOT means the classified action type changed after delivery. It is a
+diagnostic temporal association, not evidence that GT caused the action.
+Consumption and causality require receipt and matched/shadow evidence.
 
 Usage:
   python gt_behavioral_impact.py <trajectory.json> [--out impact.json]
@@ -19,7 +20,6 @@ tool_calls). Outputs per-delivery records + aggregate.
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
 
@@ -60,6 +60,36 @@ _GT_TAGS = re.compile(
     r"<gt-(evidence|contract|scope|nudge|verify|obligations)"
 )
 
+_DELIVERY_CLASS = {
+    "evidence": "caller_contract",
+    "contract": "caller_contract",
+    "l3b.evidence": "caller_contract",
+    "l3b.contract": "caller_contract",
+    "l3.contract": "caller_contract",
+    "scope": "localization",
+    "consensus.scope_map": "localization",
+    "consensus.scope": "localization",
+    "edit.syntax": "syntax_result",
+    "semantic_drift": "cochange_prior",
+    "nudge": "recovery",
+    "detect.coherence": "recovery",
+    "detect.loop": "recovery",
+    "verify": "covering_red",
+    "verify.horizon.advisory": "covering_red",
+    "verify.horizon.executed": "covering_red",
+    "obligations": "obligations",
+    "spec.obligation": "obligations",
+    "obligation.resurface": "obligations",
+}
+
+
+def _delivery_class(layer: str) -> str:
+    """Stable metric class for a tagged kind or native runtime-ledger layer."""
+    normalized = (layer or "unknown").removeprefix("ga.")
+    if normalized.startswith("gateway."):
+        normalized = normalized.split(".", 1)[1]
+    return _DELIVERY_CLASS.get(normalized, normalized)
+
 
 def classify_action(text: str) -> str:
     """Classify an agent action into a behavioral type."""
@@ -85,7 +115,7 @@ def _extract_gt_tags(content: str) -> list[str]:
     return _GT_TAGS.findall(content)
 
 
-def analyze_trajectory(trajectory: dict) -> dict:
+def analyze_trajectory(trajectory: dict, *, consumption_ledger: dict | None = None) -> dict:
     """Analyze a pier/mini-swe-agent trajectory for GT behavioral impact.
 
     Returns {deliveries: [...], summary: {...}}.
@@ -96,7 +126,7 @@ def analyze_trajectory(trajectory: dict) -> dict:
     timeline: list[dict] = []
     step = 0
 
-    for m in messages:
+    for msg_index, m in enumerate(messages):
         role = m.get("role", "")
         content = m.get("content") or ""
 
@@ -108,6 +138,7 @@ def analyze_trajectory(trajectory: dict) -> dict:
             action_type = classify_action(full_text)
             timeline.append({
                 "role": "assistant",
+                "msg_index": msg_index,
                 "step": step,
                 "action_type": action_type,
                 "text_preview": full_text[:120],
@@ -117,30 +148,67 @@ def analyze_trajectory(trajectory: dict) -> dict:
             gt_tags = _extract_gt_tags(content) if isinstance(content, str) else []
             timeline.append({
                 "role": "observation",
+                "msg_index": msg_index,
                 "step": step,
                 "gt_tags": gt_tags,
                 "has_gt": bool(gt_tags),
                 "text_preview": (content[:120] if isinstance(content, str) else ""),
             })
 
-    # Find every GT delivery and pair it with before/after agent actions
+    # A receipt ledger is authoritative when supplied: it includes tagless native
+    # Profile-2 bytes joined to runtime rows by content seal. Tag scanning remains
+    # only as a backward-compatible fallback for historical trajectories.
+    scan_timeline = timeline
+    gt_chars_injected = 0
+    if consumption_ledger is not None:
+        join_required = bool(
+            consumption_ledger.get("runtime_ledger_path")
+            or consumption_ledger.get("ledger_rows_delivered")
+        )
+        scan_timeline = [e for e in timeline if e.get("role") == "assistant"]
+        for receipt in consumption_ledger.get("entries", []):
+            if receipt.get("source") != "trajectory" or receipt.get("receipt") is None:
+                continue
+            if join_required and receipt.get("joined") is not True:
+                continue
+            home = receipt.get("msg_index")
+            if not isinstance(home, int):
+                continue
+            kind = _delivery_class(str(
+                receipt.get("ledger_layer") or receipt.get("kind") or "unknown"
+            ))
+            chars = int(receipt.get("chars") or 0)
+            gt_chars_injected += chars
+            scan_timeline.append({
+                "role": "observation",
+                "msg_index": home,
+                "step": receipt.get("tool_ordinal") or 0,
+                "gt_tags": [kind],
+                "has_gt": True,
+                "chars": chars,
+            })
+        scan_timeline.sort(key=lambda e: (
+            int(e.get("msg_index", -1)), 0 if e.get("role") == "observation" else 1
+        ))
+
+    # Find every GT delivery and pair it with before/after agent actions.
     deliveries = []
-    for i, entry in enumerate(timeline):
+    for i, entry in enumerate(scan_timeline):
         if entry.get("role") != "observation" or not entry.get("has_gt"):
             continue
 
         # Find the last assistant action BEFORE this observation
         action_before = None
         for j in range(i - 1, -1, -1):
-            if timeline[j].get("role") == "assistant":
-                action_before = timeline[j]
+            if scan_timeline[j].get("role") == "assistant":
+                action_before = scan_timeline[j]
                 break
 
         # Find the next assistant action AFTER this observation
         action_after = None
-        for j in range(i + 1, len(timeline)):
-            if timeline[j].get("role") == "assistant":
-                action_after = timeline[j]
+        for j in range(i + 1, len(scan_timeline)):
+            if scan_timeline[j].get("role") == "assistant":
+                action_after = scan_timeline[j]
                 break
 
         before_type = action_before["action_type"] if action_before else "none"
@@ -154,6 +222,7 @@ def analyze_trajectory(trajectory: dict) -> dict:
             "action_after": after_type,
             "pivot": pivot,
             "transition": f"{before_type} -> {after_type}" if pivot else f"{before_type} (no change)",
+            "chars": int(entry.get("chars") or 0),
         }
         deliveries.append(delivery)
 
@@ -182,6 +251,17 @@ def analyze_trajectory(trajectory: dict) -> dict:
         "total_deliveries": total,
         "total_pivots": pivots,
         "impact_rate": round(impact_rate, 8),
+        "impact_rate_semantics": "diagnostic_action_type_transition",
+        "causal_status": "UNMEASURED",
+        "gt_tokens_injected": gt_chars_injected if consumption_ledger is not None else None,
+        "gt_tokens_injected_units": (
+            "rendered_chars_exact" if consumption_ledger is not None else None
+        ),
+        "gt_tokens_per_pivot": (
+            round(gt_chars_injected / pivots, 8)
+            if consumption_ledger is not None and pivots > 0 else None
+        ),
+        "nudge_compliance_rate": None,
         "transitions": transitions,
         "per_tag": {
             tag: {
@@ -192,6 +272,9 @@ def analyze_trajectory(trajectory: dict) -> dict:
             for tag, v in sorted(tag_pivots.items())
         },
     }
+    # Mandatory-metrics contract name. Keep ``per_tag`` as a compatibility
+    # alias for existing report readers during migration.
+    summary["per_tag_impact"] = summary["per_tag"]
 
     return {"deliveries": deliveries, "summary": summary}
 
@@ -211,11 +294,17 @@ def main():
     with open(traj_path) as f:
         traj = json.load(f)
 
-    result = analyze_trajectory(traj)
+    try:
+        from consumption_ledger import ledger_from_trajectory_path
+    except ImportError:
+        from scripts.swebench.consumption_ledger import ledger_from_trajectory_path
+
+    receipts = ledger_from_trajectory_path(traj_path)
+    result = analyze_trajectory(traj, consumption_ledger=receipts)
     s = result["summary"]
 
     print(f"GT Behavioral Impact: {s['total_pivots']}/{s['total_deliveries']} "
-          f"deliveries caused a pivot ({s['impact_rate']:.1%})")
+          f"deliveries were followed by an action-type pivot ({s['impact_rate']:.1%})")
     print()
     print("Per-tag breakdown:")
     for tag, v in s["per_tag"].items():

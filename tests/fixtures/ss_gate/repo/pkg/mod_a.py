@@ -6,7 +6,7 @@ def alpha():
 
 
 def run():
-    return "a"
+    return 'a'
 
 
 def shared_helper():
