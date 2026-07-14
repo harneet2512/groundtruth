@@ -24,6 +24,11 @@ import re
 import sys
 from typing import Any
 
+try:
+    from trajectory_usage import extract_trajectory_usage
+except ImportError:
+    from scripts.swebench.trajectory_usage import extract_trajectory_usage
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -801,6 +806,12 @@ def _parse_timeline(messages: list[dict]) -> list[dict]:
                 "role": "assistant",
                 "msg_index": msg_index,
                 "step": step,
+                "timestamp_ms": (
+                    int(float((m.get("extra") or {}).get("timestamp")) * 1000)
+                    if isinstance(m.get("extra"), dict)
+                    and isinstance((m.get("extra") or {}).get("timestamp"), (int, float))
+                    else None
+                ),
                 "cmd": full_cmd,
                 "tc_json": tc_json,
                 "viewed_file": viewed_file,
@@ -845,6 +856,98 @@ def _parse_timeline(messages: list[dict]) -> list[dict]:
             })
 
     return timeline
+
+
+def _runtime_post_edits(consumption: dict | None) -> list[dict[str, Any]]:
+    """Read timestamped repository mutations from the authoritative runtime ledger."""
+    if not isinstance(consumption, dict):
+        return []
+    path = consumption.get("runtime_ledger_path")
+    if not isinstance(path, str) or not os.path.isfile(path):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(row, dict) or row.get("event_type") != "post_edit":
+                    continue
+                file_path = _norm_path(str(row.get("file_path") or ""))
+                timestamp = row.get("timestamp_ms")
+                if not file_path or not isinstance(timestamp, (int, float)):
+                    continue
+                key = (int(timestamp), file_path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({"timestamp_ms": int(timestamp), "file_path": file_path})
+    except OSError:
+        return []
+    return sorted(rows, key=lambda row: (row["timestamp_ms"], row["file_path"]))
+
+
+def _reconcile_authoritative_edits(
+    timeline: list[dict], consumption: dict | None,
+) -> tuple[list[dict], int]:
+    """Enrich command-derived edits with timestamp-joined ``post_edit`` paths.
+
+    The delivery ledger is not a complete successful-write journal: a quiet edit may
+    have no GT row at all.  Its rows can therefore add observed paths, but must never
+    erase command-derived edits merely because at least one ledger row exists.
+    """
+    rows = _runtime_post_edits(consumption)
+    assistants = [event for event in timeline if event.get("role") == "assistant"]
+    timestamped = [event for event in assistants if event.get("timestamp_ms") is not None]
+    if not rows or not timestamped:
+        return timeline, 0
+
+    joined: list[tuple[dict, str]] = []
+    for row in rows:
+        homes = [
+            event for event in timestamped
+            if int(event["timestamp_ms"]) <= row["timestamp_ms"]
+        ]
+        if homes:
+            joined.append((homes[-1], row["file_path"]))
+    if not joined:
+        return timeline, 0
+
+    seen: set[tuple[int, str]] = {
+        (int(event["step"]), str(event["edited_file"]))
+        for event in assistants
+        if event.get("is_edit") and event.get("edited_file")
+    }
+    authoritative_seen: set[tuple[int, str]] = set()
+    additions: list[dict] = []
+    for home, file_path in joined:
+        key = (int(home["step"]), file_path)
+        if key in authoritative_seen:
+            continue
+        authoritative_seen.add(key)
+        if key in seen:
+            home["runtime_post_edit_confirmed"] = True
+            continue
+        if home.get("edited_file") is None:
+            home["edited_file"] = file_path
+            home["is_edit"] = True
+            home["runtime_post_edit_enriched"] = True
+        else:
+            synthetic = dict(home)
+            synthetic["edited_file"] = file_path
+            synthetic["is_edit"] = True
+            synthetic["authoritative_edit_synthetic"] = True
+            additions.append(synthetic)
+        seen.add(key)
+    timeline.extend(additions)
+    timeline.sort(key=lambda event: (
+        int(event.get("msg_index", -1)),
+        1 if event.get("authoritative_edit_synthetic") else 0,
+    ))
+    return timeline, len(authoritative_seen)
 
 
 # ---------------------------------------------------------------------------
@@ -1484,12 +1587,13 @@ def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
     gold_set = set(_norm_path(g) for g in gold_files if g)
     info = trajectory.get("info", {}) or {}
     model_stats = info.get("model_stats", {}) or {}
+    usage = extract_trajectory_usage(trajectory)
 
-    total_tokens_in = int(model_stats.get("prompt_tokens", 0) or 0)
-    total_tokens_out = int(model_stats.get("completion_tokens", 0) or 0)
+    total_tokens_in = usage["prompt_tokens"]
+    total_tokens_out = usage["completion_tokens"]
     total_steps = int(model_stats.get("api_calls", 0) or 0)
-    cache_hit = int(model_stats.get("prompt_cache_hit_tokens", 0) or 0)
-    cache_miss = int(model_stats.get("prompt_cache_miss_tokens", 0) or 0)
+    cache_hit = usage["cache_hit_tokens"]
+    cache_miss = usage["cache_miss_tokens"]
 
     # recorded cost (litellm)
     total_cost_usd = 0.0
@@ -1499,8 +1603,11 @@ def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
             total_cost_usd = float(cv)
             break
 
-    cache_total = cache_hit + cache_miss
-    cache_hit_rate = d8(cache_hit / cache_total) if cache_total else 0.0
+    cache_total = (
+        cache_hit + cache_miss
+        if cache_hit is not None and cache_miss is not None else None
+    )
+    cache_hit_rate = d8(cache_hit / cache_total) if cache_total else None
 
     # gold_files_edited
     gold_edited_set: set[str] = set()
@@ -1528,7 +1635,7 @@ def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
     n_gold_edited = len(gold_edited_set)
     tokens_per_gold_edit = d8(
         (total_tokens_in + total_tokens_out) / n_gold_edited
-    ) if n_gold_edited else 0.0
+    ) if n_gold_edited and total_tokens_in is not None and total_tokens_out is not None else None
 
     # gt_token_overhead: gt_injected_tokens / total_prompt_tokens
     # GT blocks: chars / 4 as token estimate
@@ -1541,7 +1648,7 @@ def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
         if ev["role"] == "observation" and ev.get("has_gt")
     )
     gt_injected_tokens = gt_observation_chars / 4.0
-    gt_token_overhead = d8(gt_injected_tokens / total_tokens_in) if total_tokens_in else 0.0
+    gt_token_overhead = d8(gt_injected_tokens / total_tokens_in) if total_tokens_in else None
 
     # wasted_token_rate: tokens on non-gold file reads/edits / total
     total_non_idle_steps = gold_steps + non_gold_steps
@@ -1552,6 +1659,8 @@ def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
         "total_steps": total_steps,
         "total_tokens_in": total_tokens_in,
         "total_tokens_out": total_tokens_out,
+        "usage_source": usage["source"],
+        "usage_records": usage["usage_records"],
         "total_cost_usd": d8(total_cost_usd),
         # This denominator exists only at run scope. Keep the mandatory key in
         # every per-task record, but never fabricate a per-task substitute.
@@ -1663,6 +1772,9 @@ def compute_performance_metrics(
             consumption_ledger = _load_consumption(
                 trajectory_path, artifacts_dir, instance_id
             )
+        timeline, authoritative_post_edit_count = _reconcile_authoritative_edits(
+            timeline, consumption_ledger
+        )
 
         # Sections
         s1 = _compute_localization(timeline, gold_files, brief_txt)
@@ -1700,6 +1812,11 @@ def compute_performance_metrics(
                 consumption_ledger.get("ledger_rows_joined")
                 if isinstance(consumption_ledger, dict) else None
             ),
+            "edit_path_source": (
+                "command_plus_runtime_post_edit" if authoritative_post_edit_count
+                else "command_fallback"
+            ),
+            "authoritative_post_edit_count": authoritative_post_edit_count,
         })
 
         # G1 + MANDATORY_METRICS persistence rule 6: a submission-proxy "gold"

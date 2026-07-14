@@ -1591,7 +1591,8 @@ jobs:
           # it is re-declared here rather than inherited.
           GT_BASELINE_FLAG: ${{ inputs.baseline == true && '1' || '0' }}
         run: |
-          mkdir -p trial_results trial_results/gt_artifacts
+          TASK_ARTIFACT_ROOT="/tmp/gt/${{ matrix.task }}"
+          mkdir -p trial_results trial_results/gt_artifacts "$TASK_ARTIFACT_ROOT"
           cp trial_output.log trial_results/ 2>/dev/null || true
           cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
           # D4 (2026-07-12): the agent writes these to the /gt_out bind-mount = host /tmp/gt_out
@@ -1625,11 +1626,7 @@ jobs:
           cp /tmp/gt/run_provenance.json trial_results/gt_artifacts/run_provenance.json 2>/dev/null || true
           cp /tmp/pro_eval_output.txt trial_results/ 2>/dev/null || true
 
-          # GT_INSTANCE_ID binds the pairing key on the mini path (no pier result.json → the
-          # reconciler otherwise reads instance_id=null and false-stamps INFRA); report.json +
-          # reward.txt at trial_results/ are the report-authoritative grading sources.
-          GT_INSTANCE_ID="${{ matrix.task }}" GT_MATRIX_TASK="${{ matrix.task }}" \
-            GT_TRIAL_LOG=trial_output.log python3 scripts/swebench/task_truth.py jobs trial_results/task_truth.json 2>/dev/null || true
+          # Preserve any pier-shaped adjuncts for backward-compatible readers.
           if [ -d jobs ]; then
             mkdir -p trial_results/jobs
             find jobs -type f \( -name 'result.json' -o -name 'patch.diff' -o -name '*.patch' -o -name '*.trajectory.json' -o -name '*.json' -o -name '*.log' \) -size -25M -print0 \
@@ -1658,22 +1655,34 @@ jobs:
           # deep-metrics reader scans /tmp/gt AND task-scopes hits (rejects any path missing the
           # task id — _find_miniswe_trajectory L483, pinned by test). So bridge it into a TASK-NAMED
           # subdir /tmp/gt/<task>/ (path now carries the id → reader accepts) + the artifact.
-          mkdir -p "/tmp/gt/${{ matrix.task }}"
-          cp /tmp/gt_out/mini-swe-agent.trajectory.json "/tmp/gt/${{ matrix.task }}/" 2>/dev/null || true
+          cp /tmp/gt_out/mini-swe-agent.trajectory.json "$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json" 2>/dev/null || true
           cp /tmp/gt_out/mini-swe-agent.trajectory.json trial_results/ 2>/dev/null || true
+          cp trial_results/report.json "$TASK_ARTIFACT_ROOT/report.json" 2>/dev/null || true
+          cp trial_results/reward.txt "$TASK_ARTIFACT_ROOT/reward.txt" 2>/dev/null || true
+          cp /tmp/gt_out/gt_oracle_events.jsonl "$TASK_ARTIFACT_ROOT/gt_oracle_events_${{ matrix.task }}.jsonl" 2>/dev/null || true
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
-            cp /tmp/gt_out/gt_runtime_ledger.jsonl "/tmp/gt/${{ matrix.task }}/gt_runtime_ledger_${{ matrix.task }}.jsonl"
+            cp /tmp/gt_out/gt_runtime_ledger.jsonl "$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl"
             # Acquisition provenance is persisted by the substrate brief producer.
             # Preserve it at the task artifact root: the bounded offline reader
             # intentionally does not search arbitrary nested artifact directories.
             cp /tmp/gt/brief_result.json trial_results/brief_result.json
           fi
 
+          # TASK_TRUTH_INITIAL: deep metrics consumes this outcome authority. Build it only after
+          # the explicit task root contains both the evaluator verdict and the native trajectory.
+          GT_INSTANCE_ID="${{ matrix.task }}" GT_MATRIX_TASK="${{ matrix.task }}" \
+            GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
+            GT_RUNTIME_LEDGER="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl" \
+            GT_ORACLE_EVENTS="$TASK_ARTIFACT_ROOT/gt_oracle_events_${{ matrix.task }}.jsonl" \
+            python3 scripts/swebench/task_truth.py "$TASK_ARTIFACT_ROOT" "$TASK_ARTIFACT_ROOT/task_truth.json" \
+            || echo "TASK_TRUTH_INITIAL_WARN"
+
           # Deep 8-dp metrics.
           cp /tmp/gt/gt_run_summary*.json "trial_results/" 2>/dev/null || true
           GT_GOLD_JSONL=benchmarks/data/swebench_live_lite.jsonl PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
           cp "/tmp/gt_deep_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
           cp "/tmp/gt_deep_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
+          cp "/tmp/gt_deep_metrics_${{ matrix.task }}.json" "$TASK_ARTIFACT_ROOT/" 2>/dev/null || true
 
           # Per-feature v3 behavioural-contract metrics (MANDATORY_METRICS.md §12, gt.feature_metrics.v1).
           # gt_feature_metrics reads a run_dir of per-task subdirs holding a mini trajectory + runtime
@@ -1682,7 +1691,7 @@ jobs:
           # there too so the grader reads the whole task from one dir. Same PYTHONPATH pattern as the
           # gt_deep_metrics line. Its nonzero (per-task aggregate refusal) is swallowed like
           # DEEP_METRICS_WARN — the METRICS-COMPLETE gate below is the fail-closed artifact check.
-          cp /tmp/gt_out/gt_oracle_events.jsonl  "/tmp/gt/${{ matrix.task }}/gt_oracle_events_${{ matrix.task }}.jsonl"  2>/dev/null || true
+          cp /tmp/gt_out/gt_oracle_events.jsonl  "$TASK_ARTIFACT_ROOT/gt_oracle_events_${{ matrix.task }}.jsonl"  2>/dev/null || true
           PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_feature_metrics.py /tmp/gt --profile 2 --run-id "${{ matrix.task }}" 2>&1 | tail -3 || echo FEATURE_METRICS_WARN
           cp "/tmp/gt/${{ matrix.task }}/gt_feature_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
           cp "/tmp/gt/${{ matrix.task }}/gt_feature_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
@@ -1712,12 +1721,24 @@ jobs:
               json.dump(doc, f, indent=2)
           PY
 
-          # Outcome classification — reads jobs/<ts>/<task>__*/result.json (verifier_result)
-          # + the bridged verifier/reward.json + trial_output.log markers (NOT reward.txt).
+          # Outcome classification reads the explicit task root: evaluator report/reward,
+          # native trajectory, and trial-log markers share one task identity.
           GT_INSTANCE_ID="${{ matrix.task }}" GT_MATRIX_TASK="${{ matrix.task }}" \
-            GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
+            GT_TASK_DIR="$TASK_ARTIFACT_ROOT" GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
             GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
-            python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
+            python3 scripts/verify/deepswe_outcome.py "$TASK_ARTIFACT_ROOT" || echo "WARN: outcome extract failed"
+
+          # TASK_TRUTH_FINAL: regenerate after deep metrics and outcome exist. Only this finalized
+          # ledger is uploaded, so pre-metrics null enrichment cannot survive collection.
+          GT_INSTANCE_ID="${{ matrix.task }}" GT_MATRIX_TASK="${{ matrix.task }}" \
+            GT_TASK_DIR="$TASK_ARTIFACT_ROOT" GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
+            GT_RUNTIME_LEDGER="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl" \
+            GT_ORACLE_EVENTS="$TASK_ARTIFACT_ROOT/gt_oracle_events_${{ matrix.task }}.jsonl" \
+            GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
+            python3 scripts/swebench/task_truth.py "$TASK_ARTIFACT_ROOT" "$TASK_ARTIFACT_ROOT/task_truth.json" \
+            || echo "TASK_TRUTH_FINAL_WARN"
+          cp "$TASK_ARTIFACT_ROOT/task_truth.json" trial_results/task_truth.json 2>/dev/null || true
+          cp "$TASK_ARTIFACT_ROOT/reconciled_substrate_verdict.json" trial_results/reconciled_substrate_verdict.json 2>/dev/null || true
           find trial_results -type f 2>/dev/null | head -40 || true
 
           # ── METRICS-COMPLETE gate (P1; MANDATORY_METRICS.md line 1: "A run without its metrics is
@@ -1788,6 +1809,7 @@ jobs:
           GT_EXPECTED_MATRIX: ${{ needs.prepare.outputs.matrix }}
           GT_EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
           GT_RUN_ID: ${{ github.run_id }}
+          PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics
         run: |
           set -euo pipefail
           export GT_DIAG_DIR=/tmp/gt-diagnosis

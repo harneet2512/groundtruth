@@ -1838,6 +1838,26 @@ def _canonical_task_features(
     }
 
 
+def _model_observation_owners(messages: list[dict[str, Any]]) -> dict[int, int]:
+    """Map environment-message indices to the policy call that observes them.
+
+    Parallel tool calls are serialized as multiple contiguous ``tool`` messages, but
+    the model receives that whole batch in one subsequent inference observation.
+    Counting each tool message as an independent observation hides double doses.
+    The terminal sentinel groups trailing environment messages when no later policy
+    call exists; assistant messages themselves are not environment observations.
+    """
+    owner = len(messages)
+    owners: dict[int, int] = {}
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            owner = index
+            continue
+        owners[index] = owner
+    return owners
+
+
 # ---------------------------------------------------------------------------
 # Per-task collection.
 # ---------------------------------------------------------------------------
@@ -1917,6 +1937,8 @@ def collect_task(
     # aggregate fails closed.
     leaks.update(cons_ledger.get("test_identity_leak_hits") or [])
 
+    messages = traj.get("messages", []) or []
+    observation_owners = _model_observation_owners(messages)
     doses_by_observation: Counter = Counter()
     for entry in cons_ledger.get("entries") or []:
         if not isinstance(entry, dict) or entry.get("source") != "trajectory":
@@ -1925,7 +1947,7 @@ def collect_task(
             continue
         msg_index = entry.get("msg_index")
         if isinstance(msg_index, int):
-            doses_by_observation[msg_index] += 1
+            doses_by_observation[observation_owners.get(msg_index, msg_index)] += 1
     max_dose = max(doses_by_observation.values(), default=0)
     dose_violations = sum(1 for count in doses_by_observation.values() if count > 1)
     leak_gate: bool | None = not leaks if visible_audit_complete else None

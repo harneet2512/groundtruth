@@ -296,6 +296,33 @@ def test_integrity_rejects_more_than_one_gt_dose_in_an_observation(tmp_path):
     assert g.aggregate_run("run-dose", [rec], profile="2")["integrity"]["publishable"] is False
 
 
+def test_integrity_groups_parallel_tool_results_into_one_model_observation(tmp_path):
+    """Every contiguous tool-result batch feeds one subsequent model policy call."""
+    first = "src/a.py:1 preserve alpha"
+    second = "src/b.py:2 preserve beta"
+    rows = [
+        _delivered("gateway.trace_frame", chars=len(first),
+                   content_sha256_16=_sha16(first)),
+        _delivered("edit.syntax", chars=len(second),
+                   content_sha256_16=_sha16(second)),
+    ]
+    messages = [
+        _asst("parallel tool calls"),
+        _tool(first),
+        _tool(second),
+        _asst("consume both results"),
+    ]
+
+    rec = g.collect_task(
+        "synthetic__parallel-double-dose",
+        _write_task(tmp_path, messages=messages, ledger_rows=rows),
+        profile="2",
+    )
+
+    assert rec["integrity"]["max_dose_per_observation"] == 2
+    assert rec["integrity"]["dose_violation_count"] == 1
+
+
 # =========================================================================== #
 # stale delivered fact => FIX verdict, zero efficacy credit
 # =========================================================================== #

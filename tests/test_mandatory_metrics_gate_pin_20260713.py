@@ -136,7 +136,7 @@ def test_deep_metrics_receives_task_scoped_authoritative_runtime_ledger() -> Non
     code = "\n".join(_code_lines(_collect_run()))
     ledger_copy = (
         'cp /tmp/gt_out/gt_runtime_ledger.jsonl '
-        '"/tmp/gt/${{ matrix.task }}/gt_runtime_ledger_${{ matrix.task }}.jsonl"'
+        '"$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl"'
     )
     assert ledger_copy in code, (
         "the sealed runtime ledger must be copied beside the task-scoped trajectory so the "
@@ -149,6 +149,9 @@ def test_deep_metrics_receives_task_scoped_authoritative_runtime_ledger() -> Non
     )
     assert code.index(ledger_copy) < code.index("gt_deep_metrics.py"), (
         "the authoritative runtime ledger must exist BEFORE gt_deep_metrics.py runs"
+    )
+    assert 'TASK_ARTIFACT_ROOT="/tmp/gt/${{ matrix.task }}"' in code, (
+        "the runtime ledger path must resolve through the explicit task-scoped root"
     )
 
 

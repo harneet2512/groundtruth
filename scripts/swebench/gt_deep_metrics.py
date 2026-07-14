@@ -543,8 +543,8 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
         # first_edit_action None = NOT DETECTED (never 0 → poisons first-edit deltas).
         "action_count": 0, "assistant_steps": 0, "edits": 0, "first_edit_action": None,
         "has_patch": False, "resolved": None,
-        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-        "cache_hit_tokens": 0, "cache_miss_tokens": 0, "cost_usd": 0.0,
+        "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
+        "cache_hit_tokens": None, "cache_miss_tokens": None, "cost_usd": None,
         # cost the model/litellm ITSELF recorded per call (model-agnostic, summed);
         # preferred over keyed recompute when present (gemini etc. are not DeepSeek-priced).
         "recorded_cost_usd": 0.0, "cost_source": "",
@@ -583,6 +583,22 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
             out["cost_source"] = f"trajectory_model_stats.{ck}"
             break
 
+    try:
+        from trajectory_usage import extract_trajectory_usage
+    except ImportError:
+        from scripts.swebench.trajectory_usage import extract_trajectory_usage
+    shared_usage = extract_trajectory_usage(d)
+    out["prompt_tokens"] = shared_usage["prompt_tokens"]
+    out["completion_tokens"] = shared_usage["completion_tokens"]
+    out["total_tokens"] = (
+        out["prompt_tokens"] + out["completion_tokens"]
+        if shared_usage["prompt_tokens"] is not None
+        and shared_usage["completion_tokens"] is not None else None
+    )
+    out["cache_hit_tokens"] = shared_usage["cache_hit_tokens"]
+    out["cache_miss_tokens"] = shared_usage["cache_miss_tokens"]
+    out["usage_source"] = shared_usage["source"]
+
     # SHAPE-AWARE parse — mini-swe-agent emits two message shapes and we must read BOTH
     # correctly or every agent-behaviour + token + cost metric false-zeros:
     #   chat:           role in {assistant, tool, user}; action in tool_calls; usage in
@@ -617,19 +633,6 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
             usage = m.get("usage")
             if not isinstance(usage, dict):
                 usage = (extra.get("response") or {}).get("usage")
-            if isinstance(usage, dict):
-                pin = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
-                pout = int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0)
-                ptot = int(usage.get("total_tokens", pin + pout) or 0)
-                cached = int((usage.get("input_tokens_details") or {}).get(
-                    "cached_tokens", usage.get("prompt_cache_hit_tokens", 0)) or 0)
-                _miss = usage.get("prompt_cache_miss_tokens")
-                miss = int(_miss) if isinstance(_miss, (int, float)) else max(pin - cached, 0)
-                out["prompt_tokens"] += pin
-                out["completion_tokens"] += pout
-                out["total_tokens"] += ptot
-                out["cache_hit_tokens"] += cached
-                out["cache_miss_tokens"] += miss
             if not out["cost_source"]:
                 rc = usage.get("cost") if isinstance(usage, dict) else None
                 if not isinstance(rc, (int, float)):
@@ -717,7 +720,9 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
         if not out["cost_source"]:
             out["cost_source"] = "trajectory_recorded"
         out["cost_estimate"] = False
-    else:
+    elif all(out[key] is not None for key in (
+        "cache_hit_tokens", "cache_miss_tokens", "completion_tokens"
+    )):
         p = _deepseek_price_for(out["model"] or "deepseek-v4-flash")
         out["cost_usd"] = d8(
             out["cache_hit_tokens"] / 1e6 * p["hit"]
@@ -726,6 +731,10 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
         )
         out["cost_source"] = "deepseek_keyed_recompute"
         out["cost_estimate"] = True
+    else:
+        out["cost_usd"] = None
+        out["cost_source"] = "unavailable"
+        out["cost_estimate"] = None
     return out
 
 
@@ -1526,7 +1535,7 @@ def build(task: str, results_dir: str, log_path: str = "",
     cost = _from_cost_log(log_path)
     # DeepSWE: no [GT_COST] log lines (litellm unmapped) — derive tokens + DeepSeek-priced
     # cost from the pier trajectory's per-call usage (incl cache hit/miss) instead.
-    if (not cost["llm_calls"]) and mini.get("found") and mini.get("total_tokens"):
+    if (not cost["llm_calls"]) and mini.get("found"):
         cost = {
             "llm_calls": mini["action_count"],
             "llm_tokens_in": mini["prompt_tokens"],
@@ -1535,12 +1544,16 @@ def build(task: str, results_dir: str, log_path: str = "",
             "llm_cost_usd": mini["cost_usd"],
         }
     actions = traj.get("action_count", 0) or 0
-    llm_total = cost["llm_tokens_in"] + cost["llm_tokens_out"]
+    llm_total = (
+        cost["llm_tokens_in"] + cost["llm_tokens_out"]
+        if cost["llm_tokens_in"] is not None and cost["llm_tokens_out"] is not None
+        else None
+    )
     # token/cost EFFICIENCY (the constitution's honest token story: GT injection vs LLM usage)
     efficiency = {
         "model": mini.get("model") or "",
         "cost_source": (mini.get("cost_source") or "deepseek_priced_trajectory")
-        if (mini.get("found") and mini.get("total_tokens")) else "gt_cost_log",
+        if mini.get("found") else "gt_cost_log",
         "cost_estimate": bool(
             (mini.get("cost_source") or "").endswith("recompute")
             or (mini.get("cost_source") or "") == "deepseek_priced_trajectory"
@@ -1549,16 +1562,16 @@ def build(task: str, results_dir: str, log_path: str = "",
         "llm_tokens_in": d8(cost["llm_tokens_in"]),
         "llm_tokens_out": d8(cost["llm_tokens_out"]),
         "llm_tokens_cached": d8(cost["llm_tokens_cached"]),
-        "llm_cache_hit_tokens": d8(mini.get("cache_hit_tokens", 0)),
-        "llm_cache_miss_tokens": d8(mini.get("cache_miss_tokens", 0)),
+        "llm_cache_hit_tokens": d8(mini.get("cache_hit_tokens")),
+        "llm_cache_miss_tokens": d8(mini.get("cache_miss_tokens")),
         "llm_tokens_total": d8(llm_total),
         "llm_cost_usd": d8(cost["llm_cost_usd"]),
         "gt_injected_tokens_total": d8(inj_tokens_total),
         "gt_injected_tokens_source": token_accounting_source,
-        "tokens_per_action": d8(llm_total / actions) if actions else 0.0,
-        "cost_per_action_usd": d8(cost["llm_cost_usd"] / actions) if actions else 0.0,
+        "tokens_per_action": d8(llm_total / actions) if actions and llm_total is not None else None,
+        "cost_per_action_usd": d8(cost["llm_cost_usd"] / actions) if actions and cost["llm_cost_usd"] is not None else None,
         # GT's added context as a fraction of total LLM input — the honest overhead figure
-        "gt_injection_overhead_pct": d8(100.0 * inj_tokens_total / cost["llm_tokens_in"]) if cost["llm_tokens_in"] else 0.0,
+        "gt_injection_overhead_pct": d8(100.0 * inj_tokens_total / cost["llm_tokens_in"]) if cost["llm_tokens_in"] else None,
     }
     if truth_data:
         outcome_block = truth_data.get("outcome") or {}

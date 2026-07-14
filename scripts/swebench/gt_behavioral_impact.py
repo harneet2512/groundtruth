@@ -160,6 +160,8 @@ def analyze_trajectory(trajectory: dict, *, consumption_ledger: dict | None = No
     # only as a backward-compatible fallback for historical trajectories.
     scan_timeline = timeline
     gt_chars_injected = 0
+    recovery_delivered = 0
+    recovery_acted = 0
     if consumption_ledger is not None:
         join_required = bool(
             consumption_ledger.get("runtime_ledger_path")
@@ -167,7 +169,8 @@ def analyze_trajectory(trajectory: dict, *, consumption_ledger: dict | None = No
         )
         scan_timeline = [e for e in timeline if e.get("role") == "assistant"]
         for receipt in consumption_ledger.get("entries", []):
-            if receipt.get("source") != "trajectory" or receipt.get("receipt") is None:
+            level = int(receipt.get("receipt") or 0)
+            if receipt.get("source") != "trajectory" or level < 1:
                 continue
             if join_required and receipt.get("joined") is not True:
                 continue
@@ -177,6 +180,10 @@ def analyze_trajectory(trajectory: dict, *, consumption_ledger: dict | None = No
             kind = _delivery_class(str(
                 receipt.get("ledger_layer") or receipt.get("kind") or "unknown"
             ))
+            if kind == "recovery" and level >= 1:
+                recovery_delivered += 1
+                if level >= 3:
+                    recovery_acted += 1
             chars = int(receipt.get("chars") or 0)
             gt_chars_injected += chars
             scan_timeline.append({
@@ -261,7 +268,12 @@ def analyze_trajectory(trajectory: dict, *, consumption_ledger: dict | None = No
             round(gt_chars_injected / pivots, 8)
             if consumption_ledger is not None and pivots > 0 else None
         ),
-        "nudge_compliance_rate": None,
+        "nudge_compliance_rate": (
+            round(recovery_acted / recovery_delivered, 8)
+            if recovery_delivered else None
+        ),
+        "nudge_compliance_numerator": recovery_acted,
+        "nudge_compliance_denominator": recovery_delivered,
         "transitions": transitions,
         "per_tag": {
             tag: {
