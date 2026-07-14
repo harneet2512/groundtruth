@@ -436,3 +436,94 @@ def test_real_seam_hermetic_under_leaked_gt_baseline():
             os.environ.pop("GT_BASELINE", None)
         else:
             os.environ["GT_BASELINE"] = prior
+
+
+# --------------------------------------------------------------------------- #
+# 6) ORACLE/GATE RUN-LOCK INTERLOCK (SS-10) — both programs junction-mirror the
+#    same drive-global paths. The gate must fail before constructing its driver
+#    when a live oracle owns the lock, while a dead holder is merely stale. The
+#    gate is a reader only: it never creates, steals, or deletes the oracle lock.
+# --------------------------------------------------------------------------- #
+def test_oracle_lock_holder_distinguishes_live_from_stale(tmp_path, monkeypatch):
+    lock = tmp_path / "ssr_replay_oracle.lock"
+    lock.write_text("4242", encoding="utf-8")
+    monkeypatch.setattr(G, "_ORACLE_RUN_LOCK", lock)
+
+    monkeypatch.setattr(G, "_pid_alive", lambda pid: pid == 4242)
+    assert G._oracle_lock_holder() == 4242
+    assert lock.read_text(encoding="utf-8") == "4242"  # reader never mutates ownership
+
+    monkeypatch.setattr(G, "_pid_alive", lambda _pid: False)
+    assert G._oracle_lock_holder() is None
+    assert lock.is_file(), "the gate must never delete the oracle-owned lock"
+
+
+@pytest.mark.parametrize("contents", ["", "not-a-pid", "0", "-7"])
+def test_oracle_lock_holder_fails_closed_on_invalid_existing_lock(tmp_path, monkeypatch, contents):
+    lock = tmp_path / "ssr_replay_oracle.lock"
+    lock.write_text(contents, encoding="utf-8")
+    monkeypatch.setattr(G, "_ORACLE_RUN_LOCK", lock)
+
+    with pytest.raises(G.OracleLockStateError):
+        G._oracle_lock_holder()
+    assert lock.read_text(encoding="utf-8") == contents
+
+
+def test_oracle_lock_holder_fails_closed_when_lock_metadata_is_unreadable(monkeypatch):
+    class UnreadableLock:
+        def exists(self):
+            raise OSError("access denied")
+
+        def __str__(self):
+            return "unreadable-oracle-lock"
+
+    monkeypatch.setattr(G, "_ORACLE_RUN_LOCK", UnreadableLock())
+    with pytest.raises(G.OracleLockStateError):
+        G._oracle_lock_holder()
+
+
+def test_pid_alive_matches_exact_tasklist_pid_not_substring(monkeypatch):
+    import subprocess
+
+    class Result:
+        returncode = 0
+        stdout = '"python.exe","1234","Console","1","10,000 K"\n'
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: Result())
+    assert G._pid_alive(123) is False
+    assert G._pid_alive(1234) is True
+
+
+def test_main_aborts_before_driver_when_lock_state_is_invalid(tmp_path, monkeypatch, capsys):
+    lock = tmp_path / "ssr_replay_oracle.lock"
+    lock.write_text("corrupt", encoding="utf-8")
+    monkeypatch.setattr(G, "_ORACLE_RUN_LOCK", lock)
+
+    def _must_not_construct():
+        raise AssertionError("gate constructed RealSeamDriver with unknown lock ownership")
+
+    monkeypatch.setattr(G, "RealSeamDriver", _must_not_construct)
+    code = G.main(["--out", str(tmp_path / "must-not-exist.json")])
+    err = capsys.readouterr().err
+
+    assert code == 2
+    assert "run-lock state is invalid" in err
+    assert lock.read_text(encoding="utf-8") == "corrupt"
+
+
+def test_main_aborts_before_driver_when_live_oracle_holds_lock(tmp_path, monkeypatch, capsys):
+    lock = tmp_path / "ssr_replay_oracle.lock"
+    lock.write_text("5151", encoding="utf-8")
+    monkeypatch.setattr(G, "_ORACLE_RUN_LOCK", lock)
+    monkeypatch.setattr(G, "_pid_alive", lambda pid: pid == 5151)
+
+    def _must_not_construct():
+        raise AssertionError("gate constructed RealSeamDriver while oracle lock was live")
+
+    monkeypatch.setattr(G, "RealSeamDriver", _must_not_construct)
+    code = G.main(["--out", str(tmp_path / "must-not-exist.json")])
+    err = capsys.readouterr().err
+
+    assert code == 2
+    assert "run-lock held by oracle run 5151" in err
+    assert lock.read_text(encoding="utf-8") == "5151"

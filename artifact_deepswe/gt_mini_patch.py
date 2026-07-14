@@ -57,6 +57,16 @@ def _ledger_line_direct(entry: dict) -> None:
     timestamp_ms/iteration). Best-effort: telemetry must NEVER break the agent
     loop. Defined EARLY so the runtime-import fallback below can also use it."""
     try:
+        # SS-10 reg #5 (2026-07-13) — the GENERAL "no empty delivery" invariant at the DURABLE
+        # writer (the net for EVERY direct-dict row: ss_ack + any future direct emit). A row that
+        # claims outcome="delivered" with NO bytes (chars_delivered<=0) is INTERNAL TELEMETRY, not
+        # a model-facing delivery — the raw ledger must not lie. Downgrade to internal-only,
+        # preserving every other field (event_type/reason/ack/content_sha256_16), so an ack row
+        # stays joinable by its sha + ``ack`` field. Delivery views already require chars>0
+        # (_is_delivered / the oracle fixpoint), so this is invisible to them and never changes a
+        # model byte. Idempotent with the _runtime_ledger_record guard (already downgraded there).
+        if entry.get("outcome") == "delivered" and int(entry.get("chars_delivered") or 0) <= 0:
+            entry["outcome"] = "suppressed_internal_only"
         path = os.environ.get("GT_RUNTIME_LEDGER", "/tmp/gt_runtime_ledger.jsonl")
         parent = os.path.dirname(path)
         if parent:
@@ -215,6 +225,7 @@ except Exception as _e:  # noqa: BLE001
         SUPPRESSED_DUPLICATE = "suppressed_duplicate"
         SUPPRESSED_BUDGET = "suppressed_budget"
         SUPPRESSED_HIDDEN_ONLY = "suppressed_hidden_only"  # D-10: gateway leak-guard drop
+        SUPPRESSED_INTERNAL_ONLY = "suppressed_internal_only"  # SS-10 reg #5: chars<=0 telemetry
         PROVIDER_FAILED = "provider_failed"
 
 try:
@@ -5338,10 +5349,28 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
     global _l6_no_binary_warned, _l6_reindex_failed_warned, _l6_probe_emitted
     # GT_SS_PROVENANCE (feature 5): a scratch / generated-artifact / outside-root write
     # must NEVER enter the graph — reindexing tmp/patch_fix.py or htmlcov/*.js pollutes
-    # the context graph with agent scratch. Skip the reindex trigger for those path
-    # classes. Off -> byte-identical (the guard is never consulted).
-    if _ss_provenance_on() and _ss_provenance_bad_path(rel, root):
-        return
+    # the context graph with agent scratch. So the graph-MUTATING `gt-index -file` reindex
+    # is skipped for those path classes (below).
+    #
+    # SS-10 reg #1 (2026-07-13) — but the skip must NOT bypass the L6 CACHE-INVALIDATION +
+    # freshness bookkeeping. The review-transition scope gate keys on that per-edit freshness
+    # signal; an EARLY `return` here (the pre-fix form) made a scratch write (pair8 `cat >
+    # /tmp/patch_code.py`) invisible to L6 under GT_SS_PROVENANCE, which DEFERRED the cardinal
+    # P5 consensus.scope from its on-time review-transition (iter12, recorded bytes) to a LATER
+    # review-transition (iter20, a different/later scope map) — the second reg-1 displacer
+    # (measured: disabling this skip restored scope@iter12 with the recorded sha). The fix:
+    # invalidate the stale cache for EVERY edit (scratch included, so freshness advances
+    # identically to the non-provenance arm), then skip ONLY the graph-writing subprocess for a
+    # bad path. Off -> `_bad` is False -> byte-identical (the reindex runs exactly as before).
+    # SS-10 reg #1: skip the reindex ONLY for a bad path that gt-index would ACTUALLY index —
+    # i.e. one UNDER the root (a generated dir like htmlcov/ / build/, where the reindex WOULD add
+    # scratch nodes = real pollution). An OUTSIDE-root bad path (absolute /tmp/patch_code.py, a
+    # ../ escape) is NOT indexed by `gt-index -file=… -root=…` (0 nodes, a graph no-op), so
+    # skipping it yields ZERO pollution benefit and only DEFERS the L6 freshness the review-
+    # transition scope gate reads (the measured cardinal reg-1 kill). Run its no-op reindex so
+    # freshness advances exactly as the non-provenance arm. Byte-identical when provenance off.
+    _ss_bad_path = bool(_ss_provenance_on() and _ss_provenance_bad_path(rel, root)
+                        and _ss_reindex_targets_root(rel, root))
     if _substrate_active() and os.environ.get("GT_L6_FRESH") != "1":
         return  # substrate graph is authoritative + read-only; never mutate/rebuild it.
     # GT_L6_FRESH: _db_path() returns the writable work-copy (NOT the mount), so the
@@ -5353,6 +5382,16 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
             os.remove(_GT_INDEX_CACHE)
     except Exception:  # noqa: BLE001
         pass
+    # SS-10 reg #1: the stale cache is now invalidated for a bad-path (scratch/generated) write
+    # too, so L6 freshness advances identically to the non-provenance arm and the review-
+    # transition scope gate is no longer deferred. Only the graph-MUTATING `gt-index -file`
+    # subprocess is skipped (below) so scratch code never enters the context graph. The skip is
+    # SILENT (no L6 emit) — it honors the pre-existing provenance-skip contract (a bad-path write
+    # produces no reindex activity) while still advancing freshness via the cache invalidation
+    # above; the ONLY behavioral change vs the pre-fix early-return is that the cache is now
+    # invalidated first. Byte-identical when GT_SS_PROVENANCE is off (_ss_bad_path is False).
+    if _ss_bad_path:
+        return
     try:
         gt_index = os.environ.get("GT_INDEX_BIN", "/tmp/gt-index")
         db = _db_path()
@@ -7039,6 +7078,15 @@ def _runtime_ledger_record(
     extra: "dict | None" = None,
 ) -> None:
     ev = event.value if event is not None else ""
+    # SS-10 reg #5 (2026-07-13) — a DELIVERED outcome with NO bytes (chars<=0) is a lie: the block
+    # never reached the model (a telemetry/measurement row — ga.<kind> repair_support label,
+    # detect.coherence / recovery V2 measurement). Downgrade to internal-only telemetry HERE so
+    # BOTH sinks (the in-process object below AND the durable row) record it honestly, preserving
+    # the reason. Delivery views already gate on chars>0, so this is invisible to them + byte-
+    # identical to the model. A real delivery (chars>0) is untouched.
+    if getattr(outcome, "value", outcome) == "delivered" and int(chars or 0) <= 0:
+        outcome = getattr(_ProductSignalOutcome, "SUPPRESSED_INTERNAL_ONLY",
+                          "suppressed_internal_only")
     # In-process object (used for the in-process summary / retry state); may be the
     # no-op stub when a runtime module is missing — never the durable sink.
     try:
@@ -10955,6 +11003,21 @@ _GA_GATEWAY_KIND_ORDINAL: dict = {
 # "late" is their nature, so they are NEVER suppressed for it. Distinguished by CLASS (the ladder),
 # not an ordinal magic number: repair_support is the WHEN, this set is the WHICH-CLASSES-CARE.
 _GA_PREVENTIVE_CLASSES = frozenset({"caller_contract", "causal_chain", "localization"})
+# SS-10 (2026-07-13, cardinal reg-1 fix — conan-17123 consensus.scope m25 displacement).
+# The GT_SS_ARBITER_V2 ``obligations_open`` relaxation (_repair_support: a LATE preventive fact
+# with a live pre-submit-completeness point is NOT repair_support -> NOT deferred -> delivers
+# NOW) is scoped to the EDIT-BOUND preventive classes ONLY. Their decision boundary is the EDIT
+# (ordinal 3); once the agent stops editing that file the boundary does NOT recur, so the
+# relaxation legitimately rescues them from PERMANENT silence. localization is EXCLUDED: its
+# boundary is a SEARCH/review-transition (ordinal 1) that RECURS, so the seam's own
+# repair_support defer-and-refire ALREADY delivers a late localization fact ON-TIME at the next
+# review-transition. Relaxing it there does not prevent silence — it DISPLACES the sacred on-time
+# delivery to an earlier off-boundary (test/view) event, consuming the fire-once latch so the
+# review-transition delivery never fires (the measured cardinal kill: OFF delivered
+# consensus.scope on review_transition, V2 delivered it on test_result). Excluding localization
+# restores the exact OFF deferral for scope. Byte-identical when GT_SS_ARBITER_V2 is off (_v2
+# gates the whole signal); a strict SUBSET of _GA_PREVENTIVE_CLASSES so no new class is relaxed.
+_SS_OBL_RELAX_CLASSES = frozenset({"caller_contract", "causal_chain"})
 # telemetry reason for a preventive winner demoted for missing its decision boundary.
 _GA_REASON_REPAIR_LATE = "repair_support_late"
 
@@ -11060,7 +11123,10 @@ def _ga_make_candidate(plane: str, kind: str, *, dedup_key: str, target: str = "
            else _GA_KKIND_ORDINAL.get(kkind or "", 0))
     boundary = _GA_CLASS_BOUNDARY.get(cls, cur)
     _v2 = _ss_enabled("GT_SS_ARBITER_V2")
-    _obl_open = bool(_v2 and cls in _GA_PREVENTIVE_CLASSES and _ss_obligations_open())
+    # SS-10 reg-1: relaxation is EDIT-BOUND-preventive only (localization excluded — its
+    # recurring review boundary makes the relaxation a DISPLACEMENT, not a rescue). See
+    # _SS_OBL_RELAX_CLASSES.
+    _obl_open = bool(_v2 and cls in _SS_OBL_RELAX_CLASSES and _ss_obligations_open())
     _redundant = bool(_v2 and suppressible and target and _ss_def_ref_delivered(target))
     return Candidate(
         plane=plane, kind=kind, dedup_key=dedup_key or "",
@@ -11126,9 +11192,35 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
     thunk delivers exactly that ONE block via the existing `_lane_a_deliver` (reused
     whole — no re-implementation). Lane-A candidates are NOT acquisition-suppressible
     (conservative: a Lane-A contract/scope/post_search fact is never wrongly dropped)."""
+    _ss_root = _root() if _ss_any_content_gate_on() else ""
     for kind, text in lane_a:
         if not text:
             continue
+        # SS-10 reg #4 (2026-07-13): the SS provenance/late/novelty/dedup2 screen at the LANE-A
+        # POOL-ADD chokepoint — mirrors the gateway (`_global_pool_add_gateway`). Under the global
+        # arbiter a Lane-A fact reaches the model only if it WINS the single dose, so the screen in
+        # its delivery thunk (`_lane_a_deliver`) fires for winners ONLY — a step-behind / late /
+        # scratch-citing Lane-A fact that LOSES was never screened, so ss_late / ss_provenance never
+        # appeared on the lane plane (they only appeared on the gateway). Screening HERE, before the
+        # candidate competes, records the ss_* reason on the lane plane AND removes noise from the
+        # competition (a scratch/late fact never displaces a real dose). is_loc=False mirrors the
+        # legacy `_lane_a_deliver` screen (a Lane-A fact is never acquisition-suppressed). A
+        # production-latched Lane-A kind un-burns its fire-once latch via the SM-5 F rollback so it
+        # re-competes (deferred, not destroyed); a delivery-latched kind registered no rollback and
+        # is a no-op. Byte-identical off: _ss_any_content_gate_on() False -> the screen never runs.
+        if _ss_any_content_gate_on():
+            _supp, _reason = _ss_screen_delivery(kind, text, _ss_root, is_loc=False)
+            if _supp:
+                _runtime_ledger_record(
+                    kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason=_reason, file_path=krel or "", event=event)
+                _rb = _lane_a_rearm_pending.get(kind)
+                if _rb is not None:
+                    try:
+                        _rb()
+                    except Exception:  # noqa: BLE001 — rollback is best-effort
+                        pass
+                continue
         key = _ga_unified_dedup_key(kind, kind, krel or "", "", [text])
         cand = _ga_make_candidate(_GA_PLANE_LANE_A, kind, dedup_key=key,
                                   target=krel or "", kkind=kkind, seq=len(pool))
@@ -11148,6 +11240,23 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
     envelope key over the gate text (the plane's own `_last_gate_winner_hash` legacy dedup
     still runs inside the thunk as a backstop)."""
     kind = _last_gate_winner_kind or "steer"
+    # SS-10 reg #4 (2026-07-13): the SS provenance/late screen at the STEER POOL-ADD chokepoint.
+    # The steer delivery path (`_deliver_gate_winner`) applies NO SS content gate at all (only the
+    # inert shadow-holdout), so a steer citing ONLY scratch paths (dvc m31 shape) or an obligation
+    # steer whose symbols went GREEN was NEVER screened — ss_provenance / ss_late never appeared on
+    # the steer plane. Screening HERE (before the steer competes) records the ss_* reason on the
+    # steer plane and re-arms the steer's fire-once latch so it re-competes (deferred, not
+    # destroyed). is_loc=False so the reg-1 localization scope steer (consensus.scope, whose recurring
+    # review-transition delivery is the sacred P5) is NEVER acquisition/late-suppressed here — only
+    # provenance (scratch-path) and the obligation-kind late-drop apply. Byte-identical off.
+    if win_text and _ss_any_content_gate_on():
+        _supp, _reason = _ss_screen_delivery(kind, win_text, _root(), is_loc=False)
+        if _supp:
+            _runtime_ledger_record(
+                kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason=_reason, file_path=krel or kf or "", event=event)
+            _rearm_latches({kind}, kkind=kkind, kf=kf, krel=krel)
+            return
     key = _ga_unified_dedup_key(kind, kind, krel or kf or "", "", [win_text])
     cand = _ga_make_candidate(_GA_PLANE_STEER, kind, dedup_key=key,
                               target=krel or kf or "", kkind=kkind, seq=len(pool))
@@ -11694,6 +11803,26 @@ def _ss_provenance_bad_path(path: str, root: str = "") -> bool:
     return False
 
 
+def _ss_reindex_targets_root(rel: str, root: str = "") -> bool:
+    """True iff ``gt-index -file=rel -root=root`` would ACTUALLY index ``rel`` — i.e. ``rel``
+    resolves UNDER ``root`` (a reindex could add nodes, so a bad-path skip is a real pollution
+    guard). An OUTSIDE-root path (a ``../`` escape, or an absolute path not under root /
+    container-root) is not indexed (0 nodes = a graph no-op); skipping ITS reindex only defers L6
+    freshness with no pollution benefit, so this returns False and the (harmless) reindex runs.
+    Mirrors ``_ss_provenance_bad_path``'s under-root test — the one source of the root check."""
+    p = (rel or "").replace("\\", "/").strip()
+    if not p:
+        return False
+    if p.startswith("../") or "/../" in p:
+        return False
+    if p.startswith("/") or (len(p) >= 2 and p[1] == ":"):  # absolute (POSIX or Windows drive)
+        nroot = (root or "").replace("\\", "/").rstrip("/")
+        if nroot and (p == nroot or p.startswith(nroot + "/")):
+            return True
+        return any(p.startswith(cr) for cr in globals().get("_CONTAINER_ROOTS", ()))
+    return True  # relative -> under root
+
+
 def _ss_line_has_bad_path(line: str, root: str) -> bool:
     return any(_ss_provenance_bad_path(tok, root) for tok in _ss_path_tokens(line))
 
@@ -11823,17 +11952,28 @@ def _ss_record_delivered(kind: str, text: str, root: str = "", *, is_loc: bool =
 
 # --- coherence V2 (feature 3) ----------------------------------------------
 def _ss_coherence_churn(rel: str) -> "int | None":
-    """Validated churn for ``rel``: count ONLY successful writes to THIS EXACT path
-    (edit-event records — never reindex/hook fires, view reads, or basename
-    collisions), and require NO passing test between the first and last counted write.
-    Returns the churn (>=3) or None (<=2 writes, or a passing test intervened)."""
+    """Validated churn for ``rel``: successful writes to THIS EXACT path (edit-event records —
+    never reindex/hook fires, view reads, or basename collisions) SINCE THE LAST PASSING TEST.
+    Returns the churn (>=3) or None (<=2 qualifying writes).
+
+    SS-10 (2026-07-13, reg #2/#3) — STREAK-SINCE-LAST-PASS replaces the old "no passing test
+    between the first and last write" span check. A passing test is a GREEN CHECKPOINT: it
+    RESETS the blind-overwrite baseline, it does not permanently disqualify the file. Counting
+    only writes AFTER the most recent green fixes BOTH observed regressions:
+      * (#2 babel) a mid-stream pass used to KILL an accurate firing — the agent went green,
+        then RE-BROKE and overwrote the file 3 more times blind. Those post-green writes ARE
+        churn; the span check discarded them. Now they fire with the true count.
+      * (#3 over-count) writes BEFORE the last green are RESOLVED work, not blind churn —
+        including them inflated the delivered "rewritten N times" (fired 4 where the true
+        post-green write count was 2). The count the model sees now equals the verified
+        post-green write count, so the nudge never overstates.
+    A file with <=2 writes since the last green is not blind-overwriting -> None."""
     writes = [step for (r, step, ok) in _ss_edit_events if r == rel and ok]
+    _last_pass = max((s for (s, passed) in _ss_test_events if passed), default=None)
+    if _last_pass is not None:
+        writes = [w for w in writes if w > _last_pass]
     if len(writes) <= 2:
         return None
-    lo, hi = writes[0], writes[-1]
-    for (step, passed) in _ss_test_events:
-        if passed and lo < step < hi:
-            return None  # a passing test between edits -> not "overwriting blind"
     return len(writes)
 
 
@@ -12019,11 +12159,121 @@ def _ss_write_ok(orig_out: str) -> bool:
     return not bool(_SS_WRITE_FAIL_RE.search(orig_out or ""))
 
 
+# SS-10 (2026-07-13, reg #2/#3) — SOURCE-WRITE classifier for the coherence / recovery edit
+# ledger. The coherence nudge delivers the write COUNT to the model ("rewritten N times"), so
+# a non-source-write must NOT enter _ss_edit_events (it would inflate N) and must NOT clear the
+# recovery fail-repeat streak (only a genuine code change resets 'same failing command'). This
+# is host-side only (byte-identical when the SS flags are off — _ss_edit_events is read solely
+# under a flag). Parameter-free, task-agnostic.
+_SS_INTERP_RE = re.compile(
+    r"(?:^|[|&;]\s*|\s)(?:python[0-9.]*|node|deno|bun|ruby|perl|php|Rscript|npx)\b"
+    r"|(?:^|[|&;]\s*|\s)(?:go\s+run|cargo\s+run|make)\b")
+_SS_DIRECT_SCRIPT_RE = re.compile(
+    r"(?:^|[|&;]\s*|\s)(?:python[0-9.]*|node|deno|bun|ruby|perl|php|Rscript)"
+    r"\s+(['\"]?)([^\s'\";|&]+)\1")
+# a CLEAR read/inspect/move verb — a non-write when it carries no source-write target.
+_SS_READ_ONLY_RE = re.compile(
+    r"^\s*(?:cat|bat|less|more|head|tail|grep|egrep|fgrep|rg|ag|ls|ll|dir|find|wc|"
+    r"diff|stat|file|cd|pwd|echo|printf|awk|cut|sort|uniq|tr|nl|xxd|od|hexdump|"
+    r"cp|mv|touch|mkdir|rmdir|rm|which|type|git)\b")
+
+
+def _ss_is_scratch_path(p: str) -> bool:
+    """True iff PATH lives under a scratch/temp/cache dir (staging, never the agent's tracked
+    work — a scratch write is not 'overwriting your own source blind')."""
+    low = ("/" + (p or "").replace("\\", "/").lstrip("./").lstrip("/")).lower()
+    return any(m in low for m in _SCRATCH_DIR_MARKERS)
+
+
+def _ss_write_target_noexec(cmd: str) -> "str | None":
+    """The source file a NON-interpreter command writes via a shell REDIRECT (EITHER side of a
+    ``<<`` marker — ``cat > f <<EOF`` AND the ``cat <<EOF > f`` hole ``_edit_target`` misses) or an
+    in-place editor (sed -i / tee / patch). The heredoc BODY is DATA, NOT executed, so it is NEVER
+    scanned for py/js writes — a ``cat > /tmp/x.py <<EOF ... open('src.py','w') ...`` writes the
+    SCRIPT to scratch, not src.py. A REAL source redirect target wins immediately; when only a
+    scratch redirect exists it is returned (the caller rejects it); no source target -> None."""
+    if not cmd:
+        return None
+    first = cmd.split("\n", 1)[0]
+    nohd = cmd.split("<<", 1)[0] if "<<" in cmd else cmd
+    scan = nohd + (" " + first.split("<<", 1)[1] if "<<" in first else "")
+    scratch_only: "str | None" = None
+    for mm in re.finditer(r">>?\s*([^\s'\"<>|&;]+)", scan):
+        t = mm.group(1).strip("\"'`()")
+        if _has_source_ext(t) and "*" not in t and "$" not in t:
+            if _ss_is_scratch_path(t):
+                scratch_only = scratch_only or t
+            else:
+                return t                              # a REAL source redirect target wins
+    if _is_patch_apply(cmd):
+        pt = _patch_apply_target(cmd)
+        if pt:
+            return pt
+    if _EDIT_KW_RE.search(first.lstrip()) or _EDIT_KW_RE.search(first):
+        toks = _src_tokens(nohd)
+        if toks:
+            return toks[-1]
+    return scratch_only                               # only a scratch redirect (or nothing)
+
+
+def _ss_cmd_writes_source(cmd: str) -> bool:
+    """True iff CMD genuinely writes a REPO-SOURCE file (feeds the coherence / recovery edit
+    ledger). Recognizes an interpreter subprocess (python/node/... — the args/heredoc body are
+    EXECUTED, so `python3 /tmp/staged.py`, `python - <<PY > src.py`, `python -c "open(x,'w')"` all
+    write source), a patch-application, and a shell REDIRECT / in-place editor whose target is a
+    NON-scratch source file. Returns False for a CLEAR non-write — a pure read/inspect, a
+    move/copy, or a write whose ONLY target is scratch/temp (a `cat > /tmp/x.py <<EOF` staging
+    script; its body is DATA, not an executed write). CONSERVATIVE: when no target is parsed and
+    the verb is not a clear read/move, defaults True so a real (mtime-detected) write is never
+    dropped from the count."""
+    if not cmd:
+        return False
+    first = cmd.split("\n", 1)[0]
+    if _SS_INTERP_RE.search(first):
+        # An interpreter invocation is write-capable, not proof of a write.  Inline/heredoc
+        # code must carry an explicit real-source target; a direct script execution remains
+        # conservative because the script body is external and may write source dynamically.
+        # This excludes import/introspection probes (`python -c "from ...; print(...)"`) that
+        # mtime fallback can otherwise mis-credit as a third edit on the following turn.
+        body_target = _edit_target(cmd)
+        if body_target:
+            return not _ss_is_scratch_path(body_target)
+        shell_target = _ss_write_target_noexec(cmd)
+        if shell_target is not None:
+            return not _ss_is_scratch_path(shell_target)
+        direct = _SS_DIRECT_SCRIPT_RE.search(first)
+        if direct and not direct.group(2).startswith("-") and _has_source_ext(direct.group(2)):
+            return True
+        # go/cargo/make may perform source generation behind an external build definition;
+        # when the mtime detector found a source change, retain that conservative evidence.
+        if re.search(r"(?:^|[|&;]\s*|\s)(?:go\s+run|cargo\s+run|make)\b", first):
+            return True
+        return False
+    if _is_patch_apply(cmd):
+        return True
+    tgt = _ss_write_target_noexec(cmd)               # redirect / editor target; body NOT scanned
+    if tgt is not None:
+        return not _ss_is_scratch_path(tgt)           # real source write; scratch-only -> False
+    if _SS_READ_ONLY_RE.match(first.lstrip()):
+        return False                                  # a bare read / move / inspect -> non-write
+    return True                                       # unrecognized -> assume a real write
+
+
 def _ss_record_edit(rel: str, cmd: str, orig_out: str) -> None:
-    """Record a genuine per-turn source-edit event for coherence-V2 + recovery-V2:
-    (exact rel, step, ok). An edit clears the recovery fail-repeat counters (an
-    intervening edit resets the 'same failing command' streak)."""
+    """Record a genuine per-turn SOURCE-edit event for coherence-V2 + recovery-V2:
+    (exact rel, step, ok). SS-10 (reg #2/#3): a non-source-write (read / move / scratch-only
+    write) is SKIPPED — it neither enters the churn ledger (inflating the delivered count) nor
+    clears the recovery fail-repeat streak (only a genuine code change resets 'same failing
+    command'). A real edit clears the recovery counters (an intervening edit resets the streak)."""
     try:
+        # The recorded/off arm predates semantic write classification: its post-edit sensor
+        # already established a file change, and retaining that event is required for exact
+        # replay fixpoint. Apply the stricter classifier only when a V2 consumer is enabled.
+        # Production Profile-2 enables both consumers, so corrected successful-source-write
+        # semantics remain unchanged there; either feature alone also gets the correction.
+        _v2_write_semantics = _ss_coherence_v2_on() or _ss_recovery_v2_on()
+        if _v2_write_semantics and not _ss_cmd_writes_source(cmd):
+            return  # not a source write -> do not count as churn / do not reset recovery
         _ss_edit_events.append((rel or "", _action_count, _ss_write_ok(orig_out)))
         _ss_test_fail_counts.clear()  # no-intervening-edit rule for recovery-V2
     except Exception:  # noqa: BLE001

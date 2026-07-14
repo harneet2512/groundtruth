@@ -95,6 +95,67 @@ SKIP = "SKIP:flag-not-built"
 ERROR = "ERROR"
 
 
+# ── SS-R3 RUN-LOCK INTEROCK (SS-10) ───────────────────────────────────────────
+# The replay-oracle (scripts/swebench/ss_replay_oracle.py) and THIS gate BOTH junction-mirror
+# the drive-global \testbed / \gt_artifacts / \opt\gt / \tmp paths, so they can NEVER run
+# concurrently (each swaps junctions under the other's children -> cross-contaminated ledgers).
+# The oracle takes an exclusive pid-stamped lock; the gate checks it at startup and FAILS FAST
+# with the holder pid instead of corrupting a live oracle run. We only READ the lock — never
+# create or delete it (the oracle owns its lifecycle; a stale lock from a dead pid is ignored).
+_ORACLE_RUN_LOCK = Path("/tmp/ssr_replay_oracle.lock")
+
+
+class OracleLockStateError(RuntimeError):
+    """An existing oracle lock cannot be proven to name a valid owner PID."""
+
+
+def _pid_alive(pid: int) -> bool:
+    import csv
+    import subprocess
+    try:
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                           capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            return True
+        output = r.stdout or ""
+        if "no tasks are running" in output.lower():
+            return False
+        rows = list(csv.reader(output.splitlines()))
+        parsed_pids = {
+            int(row[1].strip()) for row in rows
+            if len(row) >= 2 and row[1].strip().isdigit()
+        }
+        return pid in parsed_pids if parsed_pids else True
+    except Exception:  # noqa: BLE001 — unknown -> assume alive (fail safe: don't run concurrently)
+        return True
+
+
+def _oracle_lock_holder() -> "int | None":
+    """The LIVE pid holding the replay-oracle run-lock, or None (no lock / stale/dead holder)."""
+    try:
+        if not _ORACLE_RUN_LOCK.exists():
+            return None
+        if not _ORACLE_RUN_LOCK.is_file():
+            raise OracleLockStateError(
+                f"oracle run-lock is not a regular file: {_ORACLE_RUN_LOCK}"
+            )
+        raw = _ORACLE_RUN_LOCK.read_text(encoding="utf-8").strip()
+        pid = int(raw)
+    except OracleLockStateError:
+        raise
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise OracleLockStateError(
+            f"cannot establish oracle run-lock ownership: {_ORACLE_RUN_LOCK}"
+        ) from exc
+    if pid <= 0:
+        raise OracleLockStateError(
+            f"oracle run-lock contains an invalid PID: {_ORACLE_RUN_LOCK}"
+        )
+    if _pid_alive(pid):
+        return pid
+    return None
+
+
 class SSGateChannelDead(RuntimeError):
     """The fixture-graph delivery channel is provably DEAD in the CORE arm (GT-on, no
     ``GT_SS_*`` flags) — graph.db built empty, or the gateway def/ref partition produced
@@ -872,8 +933,12 @@ def scenario_s7(driver) -> ScenarioResult:
     ]
     on1, off, base, subs = _det_and_byteid(driver, events, flag)
     built = _has_effect(on1, off)
-    acked = [r for r in on1.delivered_rows_any() if r.get("ack") is True]
-    unacked = [r for r in on1.delivered_rows_any() if r.get("ack") is False]
+    # SS-10 reg #5 (2026-07-13): an ack row is an ANNOTATION, not a delivery — it no longer
+    # claims outcome="delivered" (a chars=0 delivered row is a lie; downgraded to internal-only
+    # at the ledger writer). Read the ack field over the FULL ledger, keyed on the ``ack`` flag
+    # the ack instrument stamps (independent of outcome), not delivered_rows_any().
+    acked = [r for r in on1.ledger if r.get("ack") is True]
+    unacked = [r for r in on1.ledger if r.get("ack") is False]
     core_ok = bool(acked)   # at least one delivery acknowledged; ack field present
     detail = f"ack_true_rows={len(acked)}; ack_false_rows={len(unacked)}"
     return _gate("S7", "ACK", flag, subs, core_ok, detail, built)
@@ -1079,6 +1144,25 @@ def main(argv=None) -> int:
                          "(hermeticity debug: seam path, graph.db row counts, L6 probe, profile "
                          "posture, def/ref classification, per-arm delivered rows)")
     args = ap.parse_args(argv)
+
+    # SS-10 INTEROCK: the gate and the replay-oracle both mirror the drive-global junctions
+    # and CANNOT run concurrently; abort fast if a live oracle holds the run-lock.
+    try:
+        _holder = _oracle_lock_holder()
+    except OracleLockStateError as exc:
+        sys.stderr.write(
+            f"[ss_gate] ABORT: run-lock state is invalid ({exc}); ownership is unknown, "
+            "so the gate will not construct the seam. Inspect the oracle process and lock "
+            "manually; never delete a lock owned by a live run.\n"
+        )
+        return 2
+    if _holder is not None:
+        sys.stderr.write(
+            f"[ss_gate] ABORT: run-lock held by oracle run {_holder} ({_ORACLE_RUN_LOCK}). The "
+            f"gate and the replay-oracle both junction-mirror the drive-global \\testbed / "
+            f"\\gt_artifacts / \\opt\\gt / \\tmp paths and cannot run concurrently — wait for the "
+            f"oracle to finish (never delete its lock), then retry.\n")
+        return 2
 
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     try:
