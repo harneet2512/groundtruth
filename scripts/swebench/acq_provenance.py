@@ -16,16 +16,18 @@ from typing import Any
 try:  # package import (tests / ``python -m``)
     from scripts.swebench import consumption_ledger as _consumption
     from scripts.swebench.gt_feature_inventory import ACQ_FEATURES
+    from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
 except ModuleNotFoundError:  # direct script-dir import used by gt_feature_metrics CLI
     import consumption_ledger as _consumption  # type: ignore[no-redef]
     from gt_feature_inventory import ACQ_FEATURES  # type: ignore[no-redef]
+    from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
 
 
 _BRIEF_SCHEMA = "gt.brief_result.v1"
 _CONSUMPTION_SCHEMA = "gt.consumption_ledger.v2"
 
-# Single authority for the candidate-local ACQ components v1 can prove. The
-# proof manifest imports this so the supported 6-of-12 set cannot drift.
+# Single authority for candidate-local ACQ source witnesses. The proof manifest
+# imports this mapping so its authority contract cannot drift from the collector.
 ACQ_SOURCE_COMPONENTS: dict[str, str] = {
     "graph_validity": "graph_edge_count+witness_verified",
     "structural_depth": "structural_signal_count+components.reach",
@@ -33,7 +35,16 @@ ACQ_SOURCE_COMPONENTS: dict[str, str] = {
     "semantic_embedder": "semantic_signal_count+components.sem",
     "body_retrieval": "components.body|components.content",
     "cochange_history": "components.commit",
+    "resolution_honesty": "acquisition_sources.resolution_honesty",
+    "type_intelligence": "acquisition_sources.type_intelligence",
+    "LSP": "acquisition_sources.LSP",
+    "freshness_basis": "acquisition_sources.freshness_basis",
+    "repo_scope": "acquisition_sources.repo_scope",
+    "determinism": "acquisition_sources.determinism",
 }
+
+_TYPE_RESOLUTION_METHODS = frozenset({"type_flow", "import_type"})
+_LSP_RESOLUTION_METHODS = frozenset({"lsp", "lsp_verified"})
 
 
 def _sha256(text: str) -> str:
@@ -69,6 +80,91 @@ def _path_in_block(path: str, rendered: str) -> bool:
         rf"(?<![{path_char}]){re.escape(normalized_path)}(?![{path_char}])",
         normalized_render,
     ) is not None
+
+
+def _sha256_value(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if len(normalized) != 64 or re.fullmatch(r"[0-9a-f]{64}", normalized) is None:
+        return None
+    return normalized
+
+
+def _method_set(value: object) -> frozenset[str]:
+    if not isinstance(value, list) or not value:
+        return frozenset()
+    methods: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            return frozenset()
+        methods.add(item.strip().lower())
+    return frozenset(methods)
+
+
+def _extended_source_features(proof: Mapping[str, Any]) -> tuple[str, ...]:
+    """Validate typed candidate-local source witnesses, correct-or-quiet.
+
+    Each witness proves a different acquisition property.  The shapes are
+    deliberately non-interchangeable: an LSP availability flag is not an LSP
+    contribution, a file hash is not repeatability, and a resolved scope without
+    candidate/active partition identity is not repo scoping.
+    """
+    raw = proof.get("acquisition_sources")
+    if not isinstance(raw, Mapping):
+        return ()
+    found: list[str] = []
+
+    resolution = raw.get("resolution_honesty")
+    if isinstance(resolution, Mapping) and resolution.get("kind") == "resolution_methods":
+        methods = _method_set(resolution.get("methods"))
+        deterministic = {str(m).strip().lower() for m in DETERMINISTIC_RESOLUTION_METHODS}
+        if resolution.get("all_verified") is True and methods and methods <= deterministic:
+            found.append("resolution_honesty")
+
+    type_source = raw.get("type_intelligence")
+    if isinstance(type_source, Mapping) and type_source.get("kind") == "type_resolution":
+        methods = _method_set(type_source.get("methods"))
+        if methods and methods <= _TYPE_RESOLUTION_METHODS:
+            found.append("type_intelligence")
+
+    lsp_source = raw.get("LSP")
+    if isinstance(lsp_source, Mapping) and lsp_source.get("kind") == "lsp_resolution":
+        methods = _method_set(lsp_source.get("methods"))
+        if methods and methods <= _LSP_RESOLUTION_METHODS:
+            found.append("LSP")
+
+    freshness = raw.get("freshness_basis")
+    if isinstance(freshness, Mapping) and freshness.get("kind") == "content_revision":
+        indexed = _sha256_value(freshness.get("indexed_sha256"))
+        observed = _sha256_value(freshness.get("observed_sha256"))
+        if indexed is not None and indexed == observed:
+            found.append("freshness_basis")
+
+    scope = raw.get("repo_scope")
+    if isinstance(scope, Mapping) and scope.get("kind") == "repo_partition":
+        active = scope.get("active_repo_id")
+        candidate = scope.get("candidate_repo_id")
+        if (
+            scope.get("is_multi_repo") is True
+            and scope.get("resolved") is True
+            and isinstance(active, int) and not isinstance(active, bool)
+            and candidate == active
+        ):
+            found.append("repo_scope")
+
+    repeat = raw.get("determinism")
+    if isinstance(repeat, Mapping) and repeat.get("kind") == "repeat_identity":
+        identities = repeat.get("canonical_sha256")
+        runs = repeat.get("runs")
+        if (
+            isinstance(runs, int) and not isinstance(runs, bool) and runs >= 2
+            and isinstance(identities, list) and len(identities) == runs
+        ):
+            digests = [_sha256_value(value) for value in identities]
+            if all(digest is not None for digest in digests) and len(set(digests)) == 1:
+                found.append("determinism")
+    return tuple(found)
 
 
 def _source_features(proof: Mapping[str, Any], metrics: Mapping[str, Any]) -> tuple[str, ...]:
@@ -107,6 +203,7 @@ def _source_features(proof: Mapping[str, Any], metrics: Mapping[str, Any]) -> tu
         found.append("body_retrieval")
     if _positive(components.get("commit")):
         found.append("cochange_history")
+    found.extend(_extended_source_features(proof))
     return tuple(found)
 
 

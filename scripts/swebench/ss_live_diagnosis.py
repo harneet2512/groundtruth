@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -368,6 +369,192 @@ def _find_one(directory: Path, pattern: str) -> Path | None:
     return matches[0] if len(matches) == 1 else None
 
 
+_PROFILE_BINDING_ARTIFACTS = (
+    "gt_run_identity.json",
+    "gt_profile_activation.json",
+    "gt_profile_receipt.json",
+)
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_PINNED_IMAGE_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
+
+
+def _diagnosis_integrity(
+    tasks: dict[str, tuple[Path, dict[str, Any]]],
+    run_metrics: dict[str, Any],
+    expected_members: tuple[str, ...],
+) -> dict[str, Any]:
+    """Bind each diagnosis task to immutable run and in-agent Profile-2 proof.
+
+    These receipts prove run/profile identity only. They never prove delivery,
+    timing, acknowledgment, causal contribution, or the terminal SS-LIVE bit.
+    """
+    expected = set(expected_members)
+    expected_run_id = str(run_metrics.get("run_id") or "")
+    task_records: dict[str, dict[str, Any]] = {}
+    consensus_rows: list[tuple[str, str, str]] = []
+
+    for task, (metrics_path, _metrics) in sorted(tasks.items()):
+        artifact_dir = metrics_path.parent / "gt_artifacts"
+        payloads: dict[str, dict[str, Any]] = {}
+        issues: list[str] = []
+        artifacts: dict[str, dict[str, Any]] = {}
+        for filename in _PROFILE_BINDING_ARTIFACTS:
+            path = artifact_dir / filename
+            if not path.is_file():
+                issues.append(f"missing:{filename}")
+                artifacts[filename] = {"path": f"gt_artifacts/{filename}", "loaded": False}
+                continue
+            try:
+                payloads[filename] = _load_json(path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                issues.append(f"malformed:{filename}")
+                artifacts[filename] = {"path": f"gt_artifacts/{filename}", "loaded": False}
+            else:
+                artifacts[filename] = {"path": f"gt_artifacts/{filename}", "loaded": True}
+
+        identity = payloads.get("gt_run_identity.json")
+        if identity is not None:
+            if identity.get("schema") != "gt.run_identity.v1":
+                issues.append("run_identity:schema")
+            resolved = identity.get("gt_ref_resolved")
+            if not isinstance(resolved, str) or _COMMIT_RE.fullmatch(resolved) is None:
+                issues.append("run_identity:gt_ref_resolved")
+            for field in ("seam_sha256", "runner_sha256"):
+                value = identity.get(field)
+                if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+                    issues.append(f"run_identity:{field}")
+            expected_digest = identity.get("substrate_digest_expected")
+            actual_digest = identity.get("substrate_digest_actual")
+            if (
+                not isinstance(expected_digest, str)
+                or _PINNED_IMAGE_RE.fullmatch(expected_digest) is None
+                or actual_digest != expected_digest
+            ):
+                issues.append("run_identity:substrate_digest")
+            workflow_run_id = str(identity.get("workflow_run_id") or "")
+            if not expected_run_id or workflow_run_id != expected_run_id:
+                issues.append("run_identity:workflow_run_id")
+            requested = identity.get("gt_ref_requested")
+            if (
+                not isinstance(requested, str)
+                or _COMMIT_RE.fullmatch(requested) is None
+                or requested != resolved
+            ):
+                issues.append("run_identity:gt_ref_binding")
+            if identity.get("baseline") is not False:
+                issues.append("run_identity:baseline")
+            if not any(issue.startswith("run_identity:") for issue in issues):
+                consensus_rows.append((str(resolved), str(actual_digest), workflow_run_id))
+
+        activation = payloads.get("gt_profile_activation.json")
+        activation_members: set[str] = set()
+        if activation is not None:
+            if activation.get("schema") != "gt.profile_activation.v1":
+                issues.append("profile_activation:schema")
+            if str(activation.get("profile") or "") != "2":
+                issues.append("profile_activation:profile_mismatch")
+            raw_members = activation.get("members")
+            if (
+                not isinstance(raw_members, list)
+                or any(not isinstance(member, str) for member in raw_members)
+                or len(raw_members) != len(set(raw_members))
+            ):
+                issues.append("profile_activation:members_malformed")
+            else:
+                activation_members = set(raw_members)
+                if activation_members != expected:
+                    issues.append("profile_activation:members_mismatch")
+
+        receipt = payloads.get("gt_profile_receipt.json")
+        receipt_members: set[str] = set()
+        patched_classes: list[str] = []
+        if receipt is not None:
+            if receipt.get("schema") != "gt.profile_receipt.v1":
+                issues.append("profile_receipt:schema")
+            if str(receipt.get("gt_rl_profile") or "") != "2":
+                issues.append("profile_receipt:profile_mismatch")
+            raw_members = receipt.get("members_on")
+            if (
+                not isinstance(raw_members, list)
+                or any(not isinstance(member, str) for member in raw_members)
+                or len(raw_members) != len(set(raw_members))
+            ):
+                issues.append("profile_receipt:members_malformed")
+            else:
+                receipt_members = set(raw_members)
+                if not expected.issubset(receipt_members):
+                    issues.append("profile_receipt:members_mismatch")
+            source = receipt.get("member_source")
+            if (
+                not isinstance(source, dict)
+                or not expected.issubset(source)
+                or any(source.get(member) not in {"inherited", "resolved"} for member in expected)
+            ):
+                issues.append("profile_receipt:member_source")
+            raw_patched = receipt.get("patched_classes")
+            if (
+                not isinstance(raw_patched, list)
+                or not raw_patched
+                or any(not isinstance(name, str) or not name for name in raw_patched)
+            ):
+                issues.append("profile_receipt:patched_classes")
+            else:
+                patched_classes = raw_patched
+
+        if activation is not None and receipt is not None and (
+            activation_members != expected or not activation_members.issubset(receipt_members)
+        ):
+            issues.append("profile_binding:member_disagreement")
+
+        issues = sorted(set(issues))
+        task_records[task] = {
+            "status": "BOUND" if not issues else "UNMEASURED",
+            "issues": issues,
+            "artifacts": artifacts,
+            "identity": {
+                "workflow_run_id": identity.get("workflow_run_id") if identity else None,
+                "gt_ref_resolved": identity.get("gt_ref_resolved") if identity else None,
+                "substrate_digest": identity.get("substrate_digest_actual") if identity else None,
+            },
+            "profile": {
+                "requested": "2",
+                "activation_member_count": len(activation_members),
+                "receipt_member_count": len(receipt_members),
+                "patched_classes": patched_classes,
+            },
+        }
+
+    consensus = sorted(set(consensus_rows))
+    run_issues: list[str] = []
+    if not tasks:
+        run_issues.append("no_tasks")
+    if len(consensus) != 1 or len(consensus_rows) != len(tasks):
+        run_issues.append("run_identity_consensus")
+    incomplete = [task for task, record in task_records.items() if record["status"] != "BOUND"]
+    complete = bool(tasks) and not incomplete and not run_issues
+    return {
+        "schema": "gt.ss_live_diagnosis.integrity.v1",
+        "publishable": complete,
+        "identity_profile_binding_complete": complete,
+        "required_artifacts": list(_PROFILE_BINDING_ARTIFACTS),
+        "expected_profile": "2",
+        "expected_member_count": len(expected),
+        "run_issues": run_issues,
+        "incomplete_tasks": incomplete,
+        "identity_consensus": (
+            {
+                "gt_ref_resolved": consensus[0][0],
+                "substrate_digest": consensus[0][1],
+                "workflow_run_id": consensus[0][2],
+            }
+            if len(consensus) == 1 else None
+        ),
+        "tasks": task_records,
+        "proof_scope": "identity_and_profile_only_no_ss_live_promotion",
+    }
+
+
 def _task_artifacts(
     metrics_path: Path, metrics: dict[str, Any]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
@@ -434,6 +621,9 @@ def diagnose_run(run_dir: Path | str, run_metrics_path: Path | str) -> dict[str,
     run_metrics = _load_json(Path(run_metrics_path))
     _validate_run_metrics_population(run_metrics, len(tasks))
     run_perf = _run_perf_rows(run_metrics)
+    diagnosis_integrity = _diagnosis_integrity(
+        tasks, run_metrics, inventory["CAP"]
+    )
     contexts = {
         task: _task_artifacts(path, metrics)
         for task, (path, metrics) in tasks.items()
@@ -495,6 +685,7 @@ def diagnose_run(run_dir: Path | str, run_metrics_path: Path | str) -> dict[str,
         "feature_count": len(rows_out),
         "task_count": len(tasks),
         "family_counts": {family: len(features) for family, features in inventory.items()},
+        "integrity": diagnosis_integrity,
         "rows": rows_out,
     }
 
@@ -533,7 +724,7 @@ def main(argv: list[str] | None = None) -> int:
         output.write_text(rendered, encoding="utf-8")
     else:
         print(rendered, end="")
-    return 0
+    return 0 if result["integrity"]["publishable"] is True else 3
 
 
 if __name__ == "__main__":

@@ -77,8 +77,11 @@ _BASHISM_RE = re.compile(
 # or a `-m pip`). We require the literal `pip install ` token at a command
 # boundary (start, after ; & |, or a word boundary) and reject it when it is
 # preceded on the same line by a module-runner prefix.
-_BARE_PIP_RE = re.compile(r"(?:^|[;&|]\s*|\b)pip\s+install\s", re.MULTILINE)
-_PIP_OK_PREFIX_RE = re.compile(r"(?:python3?|uv)\s+-m\s+pip\s+install\s|-m\s+pip\s+install\s")
+_PIP_INSTALL_RE = re.compile(r"\bpip\s+install\s")
+_PIP_RUNNER_SUFFIX_RE = re.compile(
+    r"(?:\bpython3?\s+-m|\buv(?:\s+-m)?|(?:^|\s)-m)\s*$"
+)
+_SHELL_COMMAND_BOUNDARY_RE = re.compile(r"&&|\|\||[;|]")
 
 # CLASS 3: dataset fetch markers and their two required guards.
 _DATASET_USE_RE = re.compile(r"load_dataset\s*\(|from\s+datasets\s+import\b")
@@ -379,6 +382,31 @@ def _significant_run_lines(step: Step) -> list[str]:
     return step.run_lines
 
 
+def _has_bare_pip_install(line: str) -> bool:
+    """Return True when any shell command invokes pip without a bound runner."""
+    single_quoted = False
+    double_quoted = False
+    escaped = False
+    quote_state: list[tuple[bool, bool]] = []
+    for char in line:
+        quote_state.append((single_quoted, double_quoted))
+        if escaped:
+            escaped = False
+        elif char == "\\" and not single_quoted:
+            escaped = True
+        elif char == "'" and not double_quoted:
+            single_quoted = not single_quoted
+        elif char == '"' and not single_quoted:
+            double_quoted = not double_quoted
+    for match in _PIP_INSTALL_RE.finditer(line):
+        if quote_state[match.start()] != (False, False):
+            continue
+        command_prefix = _SHELL_COMMAND_BOUNDARY_RE.split(line[: match.start()])[-1]
+        if not _PIP_RUNNER_SUFFIX_RE.search(command_prefix):
+            return True
+    return False
+
+
 def lint_step(file_label: str, step: Step) -> list[str]:
     violations: list[str] = []
     run_text = step.run_text()
@@ -399,7 +427,9 @@ def lint_step(file_label: str, step: Step) -> list[str]:
     for ln in step.run_lines:
         if ln.startswith("__ENV__ "):
             continue
-        if _BARE_PIP_RE.search(ln) and not _PIP_OK_PREFIX_RE.search(ln):
+        if ln.lstrip().startswith("#"):
+            continue
+        if _has_bare_pip_install(ln):
             violations.append(
                 f"{file_label}:{step.name}: CLASS2(bare pip): {ln.strip()}"
             )

@@ -184,6 +184,58 @@ def test_class2_python_m_pip_clean(tmp_path):
     assert "CLASS2" not in _classes(wl.lint_file(wf))
 
 
+def test_class2_uv_pip_clean(tmp_path):
+    wf = _write(
+        tmp_path,
+        """
+        name: t
+        jobs:
+          prepare:
+            runs-on: ubuntu-latest
+            steps:
+              - name: uv-pip
+                run: |
+                  uv pip install --python /opt/venv/bin/python requests
+        """,
+    )
+    assert "CLASS2" not in _classes(wl.lint_file(wf))
+
+
+def test_class2_comment_is_not_a_command(tmp_path):
+    wf = _write(
+        tmp_path,
+        """
+        name: t
+        jobs:
+          prepare:
+            runs-on: ubuntu-latest
+            steps:
+              - name: documented-pip
+                run: |
+                  # A bare pip install would select the wrong interpreter.
+                  python -m pip install requests
+        """,
+    )
+    assert "CLASS2" not in _classes(wl.lint_file(wf))
+
+
+def test_class2_quoted_diagnostic_is_not_a_command(tmp_path):
+    wf = _write(
+        tmp_path,
+        """
+        name: t
+        jobs:
+          prepare:
+            runs-on: ubuntu-latest
+            steps:
+              - name: documented-pip
+                run: |
+                  python -m pip install requests || echo "pip install failed"
+        """,
+    )
+    assert "CLASS2" not in _classes(wl.lint_file(wf))
+
+
 def test_class2_bare_pip_after_or_caught(tmp_path):
     # `import datasets || pip install datasets` — bare pip after `||`.
     wf = _write(
@@ -197,6 +249,23 @@ def test_class2_bare_pip_after_or_caught(tmp_path):
               - name: guard-bare-pip
                 run: |
                   python3 -c "import datasets" || pip install datasets
+        """,
+    )
+    assert "CLASS2" in _classes(wl.lint_file(wf))
+
+
+def test_class2_bare_fallback_after_module_pip_caught(tmp_path):
+    wf = _write(
+        tmp_path,
+        """
+        name: t
+        jobs:
+          prepare:
+            runs-on: ubuntu-latest
+            steps:
+              - name: mixed-pip
+                run: |
+                  python -m pip install requests || pip install requests
         """,
     )
     assert "CLASS2" in _classes(wl.lint_file(wf))
@@ -431,6 +500,7 @@ def test_main_returns_0_on_clean(tmp_path):
     [
         os.path.join(".github", "workflows", "swebench_300task.yml"),
         os.path.join(".github", "workflows", "deepswe_full.yml"),
+        os.path.join(".github", "workflows", "swebench_live_lite_full.yml"),
         os.path.join(".github", "actions", "setup-eval", "action.yml"),
     ],
 )

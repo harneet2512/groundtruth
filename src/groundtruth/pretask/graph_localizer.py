@@ -877,6 +877,10 @@ class Witness:
     hop: int
     src_symbol: str
     dst_symbol: str
+    # Exact resolver provenance for edge witnesses. Empty for lexical DEFINES /
+    # grep/path seeds and legacy synthetic witnesses. This is audit-only source
+    # lineage; it does not affect strength, ordering, or rendered bytes.
+    resolution_method: str = ""
 
     def strength(self) -> float:
         conf = self.confidence if self.confidence > 0 else (1.0 if self.verified else 0.5)
@@ -3141,6 +3145,7 @@ def localize(
                                 hop=hop,
                                 src_symbol=src_sym,
                                 dst_symbol=dst_sym,
+                                resolution_method=str(method or "").strip().lower(),
                             )
                         )
                         if nbr_id not in visited_ids:
@@ -3205,6 +3210,7 @@ def localize(
                             verified=False, confidence=0.45,
                             hop=w.hop, src_symbol=w.src_symbol,
                             dst_symbol=w.dst_symbol,
+                            resolution_method=w.resolution_method,
                         ))
                     else:
                         new_wits.append(w)

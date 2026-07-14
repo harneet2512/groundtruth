@@ -28,6 +28,37 @@ def _metric(value, status="MEASURED") -> dict:
     return {"value": value, "status": status}
 
 
+def _write_binding_artifacts(task_dir: Path, run_id: str = "run-1") -> None:
+    artifacts = task_dir / "gt_artifacts"
+    artifacts.mkdir(exist_ok=True)
+    members = list(inventory.canonical_feature_inventory()["CAP"])
+    digest = "ghcr.io/example/gt-substrate@sha256:" + "d" * 64
+    (artifacts / "gt_run_identity.json").write_text(json.dumps({
+        "schema": "gt.run_identity.v1",
+        "substrate_digest_expected": digest,
+        "substrate_digest_actual": digest,
+        "gt_ref_requested": "a" * 40,
+        "gt_ref_resolved": "a" * 40,
+        "seam_sha256": "b" * 64,
+        "runner_sha256": "c" * 64,
+        "workflow_run_id": run_id,
+        "baseline": False,
+    }), encoding="utf-8")
+    (artifacts / "gt_profile_activation.json").write_text(json.dumps({
+        "schema": "gt.profile_activation.v1",
+        "profile": "2",
+        "members": members,
+    }), encoding="utf-8")
+    (artifacts / "gt_profile_receipt.json").write_text(json.dumps({
+        "schema": "gt.profile_receipt.v1",
+        "gt_rl_profile": "2",
+        "members_on": members,
+        "member_source": {member: "inherited" for member in members},
+        "patched_classes": ["minisweagent.environments.local.LocalEnvironment"],
+        "pid": 123,
+    }), encoding="utf-8")
+
+
 def _lineage(feature: str, family: str = "FACT", *, causal: bool = False) -> dict:
     return {
         "schema": "gt.feature_lineage.v1",
@@ -318,6 +349,7 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
     (task_dir / f"gt_deep_metrics_{task}.json").write_text(json.dumps({
         "schema": "gt_deep_metrics.v2", "task_id": task,
     }), encoding="utf-8")
+    _write_binding_artifacts(task_dir)
 
     mandatory = {}
     for section, definitions in inventory.performance_metric_definitions().items():
@@ -327,7 +359,8 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
         }
     run_metrics = tmp_path / "gt_run_metrics_v2_run.json"
     run_metrics.write_text(json.dumps({
-        "schema": "gt_run_metrics.v2", "mandatory_performance_metric_count": 58,
+        "schema": "gt_run_metrics.v2", "run_id": "run-1",
+        "mandatory_performance_metric_count": 58,
         "mandatory_performance": mandatory,
         "mandatory_performance_collection_complete": True,
         "tasks": 1,
@@ -341,6 +374,9 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
     result = diagnosis.diagnose_run(tmp_path, run_metrics)
 
     assert result["feature_count"] == 128
+    assert result["integrity"]["publishable"] is True
+    assert result["integrity"]["identity_profile_binding_complete"] is True
+    assert result["integrity"]["tasks"][task]["status"] == "BOUND"
     assert len(result["rows"]) == 128
     assert [(row["family"], row["feature"]) for row in result["rows"]] == [
         (family, name) for family, names in inv.items() for name in names
@@ -384,6 +420,96 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
         "UNMEASURED:required_inputs_incomplete"
     )
     assert incomplete_by_name["gold_rank"]["run_bucket"] == "MEASURED"
+
+
+def test_diagnosis_integrity_fails_closed_on_missing_or_mismatched_profile_receipt(
+    tmp_path: Path,
+) -> None:
+    task_dir = tmp_path / "repo__task-1"
+    task_dir.mkdir()
+    _write_binding_artifacts(task_dir)
+    (task_dir / "gt_artifacts" / "gt_profile_receipt.json").unlink()
+
+    integrity = diagnosis._diagnosis_integrity(
+        {"repo__task-1": (task_dir / "gt_feature_metrics_repo__task-1.json", {})},
+        {"run_id": "run-1"},
+        inventory.canonical_feature_inventory()["CAP"],
+    )
+
+    assert integrity["publishable"] is False
+    assert integrity["identity_profile_binding_complete"] is False
+    task = integrity["tasks"]["repo__task-1"]
+    assert task["status"] == "UNMEASURED"
+    assert task["issues"] == ["missing:gt_profile_receipt.json"]
+
+    _write_binding_artifacts(task_dir)
+    receipt_path = task_dir / "gt_artifacts" / "gt_profile_receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["gt_rl_profile"] = "1"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    integrity = diagnosis._diagnosis_integrity(
+        {"repo__task-1": (task_dir / "gt_feature_metrics_repo__task-1.json", {})},
+        {"run_id": "run-1"},
+        inventory.canonical_feature_inventory()["CAP"],
+    )
+    assert integrity["publishable"] is False
+    assert "profile_receipt:profile_mismatch" in integrity["tasks"][
+        "repo__task-1"
+    ]["issues"]
+
+
+def test_diagnosis_integrity_requires_exact_gt_on_identity_and_member_sources(
+    tmp_path: Path,
+) -> None:
+    task = "repo__task-1"
+    task_dir = tmp_path / task
+    task_dir.mkdir()
+    _write_binding_artifacts(task_dir)
+    artifacts = task_dir / "gt_artifacts"
+
+    identity_path = artifacts / "gt_run_identity.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity["gt_ref_requested"] = "mutable-branch"
+    identity["baseline"] = True
+    identity_path.write_text(json.dumps(identity), encoding="utf-8")
+
+    receipt_path = artifacts / "gt_profile_receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    member = next(iter(receipt["member_source"]))
+    receipt["member_source"][member] = "fabricated"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    integrity = diagnosis._diagnosis_integrity(
+        {task: (task_dir / f"gt_feature_metrics_{task}.json", {})},
+        {"run_id": "run-1"},
+        inventory.canonical_feature_inventory()["CAP"],
+    )
+
+    issues = integrity["tasks"][task]["issues"]
+    assert "run_identity:gt_ref_binding" in issues
+    assert "run_identity:baseline" in issues
+    assert "profile_receipt:member_source" in issues
+
+
+def test_cli_writes_unpublishable_diagnosis_then_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(diagnosis, "diagnose_run", lambda *_args: {
+        "schema": "gt.ss_live_diagnosis.v1",
+        "feature_count": 128,
+        "integrity": {"publishable": False},
+        "rows": [],
+    })
+    output = tmp_path / "diagnosis.json"
+
+    assert diagnosis.main([
+        str(tmp_path), "--run-metrics", str(tmp_path / "run.json"),
+        "--output", str(output),
+    ]) == 3
+    assert json.loads(output.read_text(encoding="utf-8"))["integrity"] == {
+        "publishable": False,
+    }
 
 
 def test_task_artifacts_build_exact_seal_join_with_typed_lineage(tmp_path: Path) -> None:

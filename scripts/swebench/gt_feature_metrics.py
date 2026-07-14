@@ -426,14 +426,36 @@ def _find_named_input(task_dir: str, filename: str, *, locations: int = 3) -> st
     return None
 
 
-def _performance_value_status(raw: Any, value_type: str) -> str:
-    """Validate one per-task PERF value against the run collector contract."""
+def _performance_value_status(
+    raw: Any,
+    value_type: str,
+    *,
+    applicability_state: str,
+    applicability: dict[str, Any] | None,
+) -> str:
+    """Validate one per-task PERF value against the run collector contract.
+
+    Null and empty structured values carry no observation.  They are
+    ``NOT_APPLICABLE`` only when the producer supplied the same explicit,
+    machine-auditable applicability contract used by ``gt_run_metrics``.
+    """
     from gt_run_metrics import _contract_number
 
     if value_type == "run_ratio":
         return "NOT_APPLICABLE"
-    if raw is None:
-        return "NOT_APPLICABLE"
+    if applicability_state == "invalid":
+        return "UNMEASURED"
+    no_observation = (
+        raw is None
+        or (
+            value_type in {"bool_per_file", "per_tag_rate_dict"}
+            and isinstance(raw, dict) and not raw
+        )
+    )
+    if applicability is not None and applicability["applicable"] is False:
+        return "NOT_APPLICABLE" if no_observation else "UNMEASURED"
+    if no_observation:
+        return "UNMEASURED"
     if value_type == "bool":
         return "MEASURED" if isinstance(raw, bool) else "UNMEASURED"
     if value_type == "bool_per_file":
@@ -442,12 +464,9 @@ def _performance_value_status(raw: Any, value_type: str) -> str:
             if isinstance(raw, dict)
             and bool(raw)
             and all(isinstance(value, bool) for value in raw.values())
-            else "NOT_APPLICABLE" if isinstance(raw, dict) and not raw
             else "UNMEASURED"
         )
     if value_type == "per_tag_rate_dict":
-        if isinstance(raw, dict) and not raw:
-            return "NOT_APPLICABLE"
         if not isinstance(raw, dict):
             return "UNMEASURED"
         for tag, counts in raw.items():
@@ -482,6 +501,8 @@ def _value_honors_8dp(value: Any) -> bool:
 def _performance_feature_records(
     task: str, task_dir: str,
 ) -> tuple[dict[str, dict[str, Any]], list[str], str | None]:
+    from gt_run_metrics import _applicability_contract
+
     definitions = performance_metric_definitions()
     path = _find_named_input(task_dir, f"gt_deep_metrics_{task}.json")
     payload = _load_json(path) if path else None
@@ -522,7 +543,19 @@ def _performance_feature_records(
                 continue
             present = isinstance(section_payload, dict) and name in section_payload
             raw = section_payload.get(name) if present else None
-            status = _performance_value_status(raw, value_type) if present else "UNMEASURED"
+            applicability_state, applicability = (
+                _applicability_contract(payload, section, name)
+                if identity_ok else ("absent", None)
+            )
+            status = (
+                _performance_value_status(
+                    raw,
+                    value_type,
+                    applicability_state=applicability_state,
+                    applicability=applicability,
+                )
+                if present else "UNMEASURED"
+            )
             if status == "UNMEASURED":
                 missing.append(f"PERF.{name}")
             records[name] = {
@@ -537,6 +570,7 @@ def _performance_feature_records(
                 "formula_provenance": f"MANDATORY_METRICS.md#{section}.{name}",
                 "denominator_provenance": f"mandatory_contract:{value_type}",
                 "coverage_scope": "run" if value_type == "run_ratio" else "task",
+                "applicability": applicability,
                 "reason": None if status == "MEASURED" else (
                     "not applicable for this task" if status == "NOT_APPLICABLE"
                     else "required metric missing or malformed"
@@ -563,14 +597,25 @@ def _run_ratio_feature_record(
         metric = section_payload.get(name) if isinstance(section_payload, dict) else None
     status = metric.get("status") if isinstance(metric, dict) else None
     value = metric.get("value") if isinstance(metric, dict) else None
+    applicability = metric.get("applicability") if isinstance(metric, dict) else None
+    applicability_valid = bool(
+        isinstance(applicability, dict)
+        and isinstance(applicability.get("applicable"), bool)
+        and isinstance(applicability.get("predicate"), str)
+        and bool(applicability["predicate"].strip())
+        and isinstance(applicability.get("reason"), str)
+        and bool(applicability["reason"].strip())
+    )
     measured_value_valid = (
         status == "MEASURED"
+        and applicability_valid and applicability["applicable"] is True
         and isinstance(value, (int, float)) and not isinstance(value, bool)
         and math.isfinite(float(value)) and float(value) >= 0.0
         and isinstance(payload, dict) and payload.get("resolved", 0) > 0
     )
     not_applicable_valid = (
         status == "NOT_APPLICABLE" and value is None
+        and applicability_valid and applicability["applicable"] is False
         and isinstance(payload, dict) and payload.get("resolved") == 0
     )
     contract_valid = bool(
@@ -608,6 +653,7 @@ def _run_ratio_feature_record(
         "formula_provenance": f"MANDATORY_METRICS.md#{section}.{name}",
         "denominator_provenance": "gt_run_metrics:run total_cost_usd/resolved count",
         "coverage_scope": "run",
+        "applicability": applicability if applicability_valid else None,
         "task_coverage_valid": contract_valid,
         "aggregate_coverage_valid": contract_valid,
         "reason": None if contract_valid else "run-level metric artifact missing or malformed",

@@ -13,6 +13,7 @@ import os
 import re as _re
 import sqlite3
 import subprocess
+import hashlib
 from dataclasses import dataclass, field
 
 # Single source of truth for the categorical correct-or-quiet rule lives in
@@ -273,6 +274,103 @@ class FileEntry:
     # function_names) out of the [INFO] drop. Without this the one signal that
     # correctly identified gold died at the FileEntry boundary (BUG-3).
     anchor_prox: float = 0.0
+
+
+def _candidate_acquisition_sources(
+    graph_db: str,
+    repo_root: str,
+    file_path: str,
+    resolution_methods: set[str] | frozenset[str],
+) -> dict[str, dict[str, object]]:
+    """Return candidate-local acquisition lineage without changing delivery.
+
+    Only positive, independently checkable source contributions are emitted.
+    Missing legacy columns, an unreadable checkout, a single-repo no-op scope,
+    or an unresolved partition all abstain. Repeatability is intentionally not
+    synthesized here: a single generation cannot prove ``determinism``.
+    """
+    methods = {
+        str(method).strip().lower() for method in resolution_methods
+        if isinstance(method, str) and str(method).strip()
+    }
+    deterministic = {str(m).strip().lower() for m in DETERMINISTIC_RESOLUTION_METHODS}
+    verified = methods & deterministic
+    sources: dict[str, dict[str, object]] = {}
+    if verified:
+        sources["resolution_honesty"] = {
+            "kind": "resolution_methods",
+            "methods": sorted(verified),
+            "all_verified": methods <= deterministic,
+        }
+        type_methods = verified & {"type_flow", "import_type"}
+        if type_methods:
+            sources["type_intelligence"] = {
+                "kind": "type_resolution",
+                "methods": sorted(type_methods),
+            }
+        lsp_methods = verified & {"lsp", "lsp_verified"}
+        if lsp_methods:
+            sources["LSP"] = {
+                "kind": "lsp_resolution",
+                "methods": sorted(lsp_methods),
+            }
+
+    if not graph_db or not file_path:
+        return sources
+    normalized_path = file_path.replace("\\", "/").lstrip("./").lstrip("/")
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            hash_cols = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(file_hashes)").fetchall()
+            }
+            hash_col = "content_hash" if "content_hash" in hash_cols else (
+                "hash" if "hash" in hash_cols else ""
+            )
+            if hash_col:
+                row = conn.execute(
+                    f"SELECT {hash_col} FROM file_hashes WHERE file_path = ? LIMIT 1",
+                    (normalized_path,),
+                ).fetchone()
+                indexed = str(row[0]).strip().lower() if row and row[0] else ""
+                try:
+                    with open(os.path.join(repo_root, normalized_path), "rb") as source_file:
+                        observed = hashlib.sha256(source_file.read()).hexdigest()
+                except OSError:
+                    observed = ""
+                if _re.fullmatch(r"[0-9a-f]{64}", indexed) and indexed == observed:
+                    sources["freshness_basis"] = {
+                        "kind": "content_revision",
+                        "indexed_sha256": indexed,
+                        "observed_sha256": observed,
+                    }
+
+            from groundtruth.index.repo_scope import for_read
+
+            scope = for_read(conn, repo_root)
+            if scope.is_multi_repo and scope.resolved and scope.active_repo_id is not None:
+                node_cols = {
+                    str(row[1]) for row in conn.execute("PRAGMA table_info(nodes)").fetchall()
+                }
+                if "repo_id" in node_cols:
+                    repo_rows = conn.execute(
+                        "SELECT DISTINCT repo_id FROM nodes WHERE file_path = ? AND repo_id IS NOT NULL",
+                        (normalized_path,),
+                    ).fetchall()
+                    repo_ids = {int(row[0]) for row in repo_rows if row and row[0] is not None}
+                    if repo_ids == {scope.active_repo_id}:
+                        sources["repo_scope"] = {
+                            "kind": "repo_partition",
+                            "is_multi_repo": True,
+                            "resolved": True,
+                            "active_repo_id": scope.active_repo_id,
+                            "candidate_repo_id": scope.active_repo_id,
+                        }
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+    return sources
 
 
 @dataclass(frozen=True)
@@ -4740,6 +4838,7 @@ def generate_v1r_brief(
     _loc: LocalizerResult | None = None
     _witness_by_file: dict[str, str] = {}
     _witness_verified_by_file: dict[str, bool] = {}
+    _resolution_methods_by_file: dict[str, frozenset[str]] = {}
     _loc_conf_by_file: dict[str, float] = {}
     # The localizer's OWN rank per file (0 = its #1). This is the authoritative
     # structural localization order; the brief MUST honor it for witnessed files
@@ -4826,6 +4925,12 @@ def generate_v1r_brief(
             cf = cand.file_path
             _witness_by_file[cf] = cand.render_witness()
             _witness_verified_by_file[cf] = cand.has_verified_witness
+            _resolution_methods_by_file[cf] = frozenset(
+                str(getattr(witness, "resolution_method", "") or "").strip().lower()
+                for witness in cand.witnesses
+                if getattr(witness, "verified", False)
+                and str(getattr(witness, "resolution_method", "") or "").strip()
+            )
             _loc_conf_by_file[cf] = cand.confidence
             _loc_rank_by_file[cf] = _ci
             if _is_non_source_candidate_path(cf):
@@ -5688,6 +5793,18 @@ def generate_v1r_brief(
             "path_component": float(_components.get("path", 0.0) or 0.0),
             "witness_component": float(_components.get("witness", 0.0) or 0.0),
             "entered_via": str(_r.get("entered_via", "") if isinstance(_r, dict) else ""),
+            "acquisition_sources": _candidate_acquisition_sources(
+                graph_db,
+                repo_root,
+                str(getattr(_e, "path", "") or ""),
+                _resolution_methods_by_file.get(
+                    str(getattr(_e, "path", "") or ""),
+                    _resolution_methods_by_file.get(
+                        str(getattr(_e, "path", "") or "").replace("\\", "/").lstrip("./").lstrip("/"),
+                        frozenset(),
+                    ),
+                ),
+            ),
         })
 
     # --- AUDIT snapshots (READ-ONLY; gated by GT_AUDIT_DIR; no ranking effect) ---

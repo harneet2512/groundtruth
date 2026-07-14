@@ -35,7 +35,13 @@ def _runtime_join(tmp_path, brief, trajectory, *, producer_seal):
     )
 
 
-def _artifacts(tmp_path, *, receipt: int = 2, producer_seal: bool = True):
+def _artifacts(
+    tmp_path,
+    *,
+    receipt: int = 2,
+    producer_seal: bool = True,
+    extended_sources: bool = False,
+):
     # Production shape: GT_BRIEF_NATIVE has already rendered plain obligations;
     # GT_BRIEF_MINIMAL removes localization narration and reduces file entries
     # to their rank/path header before block receipts are computed.
@@ -69,6 +75,38 @@ def _artifacts(tmp_path, *, receipt: int = 2, producer_seal: bool = True):
                 "witness": "load called by run [CALLS]",
                 "witness_verified": True,
                 "components": {"reach": 0.5, "lex": 0.8, "sem": 0.7},
+                "acquisition_sources": ({
+                    "resolution_honesty": {
+                        "kind": "resolution_methods",
+                        "methods": ["import", "type_flow", "lsp"],
+                        "all_verified": True,
+                    },
+                    "type_intelligence": {
+                        "kind": "type_resolution",
+                        "methods": ["type_flow"],
+                    },
+                    "LSP": {
+                        "kind": "lsp_resolution",
+                        "methods": ["lsp"],
+                    },
+                    "freshness_basis": {
+                        "kind": "content_revision",
+                        "indexed_sha256": "a" * 64,
+                        "observed_sha256": "a" * 64,
+                    },
+                    "repo_scope": {
+                        "kind": "repo_partition",
+                        "is_multi_repo": True,
+                        "resolved": True,
+                        "active_repo_id": 7,
+                        "candidate_repo_id": 7,
+                    },
+                    "determinism": {
+                        "kind": "repeat_identity",
+                        "runs": 2,
+                        "canonical_sha256": ["b" * 64, "b" * 64],
+                    },
+                } if extended_sources else {}),
             }],
             "block_receipts": receipts,
         },
@@ -122,6 +160,41 @@ def test_real_v2_producer_seal_is_split_into_production_shaped_source_receipts(t
         "freshness_basis", "repo_scope", "determinism",
     ):
         assert rows[feature]["status"] == "UNMEASURED"
+
+
+def test_typed_candidate_local_sources_join_to_the_same_sealed_file_receipt(tmp_path):
+    payload, ledger, trajectory = _artifacts(tmp_path, extended_sources=True)
+    rows = collect_acq_provenance(payload, ledger, trajectory)
+
+    for feature in (
+        "resolution_honesty", "type_intelligence", "LSP",
+        "freshness_basis", "repo_scope", "determinism",
+    ):
+        assert rows[feature]["status"] == "MEASURED"
+        assert rows[feature]["block_id"] == "file-entry-1"
+        assert rows[feature]["receipt_level"] == 2
+
+
+@pytest.mark.parametrize(
+    ("feature", "mutation"),
+    [
+        ("resolution_honesty", {"all_verified": False}),
+        ("type_intelligence", {"methods": ["name_match"]}),
+        ("LSP", {"methods": ["import"]}),
+        ("freshness_basis", {"observed_sha256": "c" * 64}),
+        ("repo_scope", {"candidate_repo_id": 8}),
+        ("determinism", {"canonical_sha256": ["b" * 64, "c" * 64]}),
+    ],
+)
+def test_extended_source_claims_fail_closed_when_their_own_proof_disagrees(
+    tmp_path, feature, mutation,
+):
+    payload, ledger, trajectory = _artifacts(tmp_path, extended_sources=True)
+    source = payload["metrics"]["localization_proof"][0]["acquisition_sources"][feature]
+    source.update(mutation)
+
+    row = collect_acq_provenance(payload, ledger, trajectory)[feature]
+    assert row["status"] == "UNMEASURED"
 
 
 @pytest.mark.parametrize("mutation", ["hash", "span", "source", "source_suffix"])

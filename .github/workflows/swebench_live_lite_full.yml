@@ -153,9 +153,7 @@ jobs:
           # is not killed before the paid matrix for a missing optional reference.
           # Hard lint failures (bash-isms, bare-pip, swallowed ops) still abort.
           python scripts/verify/workflow_lint.py \
-            .github/workflows/swebench_pro_full.yml \
-            .github/actions/setup-eval/action.yml \
-            || echo "::warning::lint incomplete (setup-eval/action.yml may be absent in Pro path) — review before scaling to full mode"
+            .github/workflows/swebench_live_lite_full.yml
 
       - name: Digest precheck (fail-closed at run level — abort BEFORE the paid matrix)
         shell: bash
@@ -1217,7 +1215,7 @@ jobs:
               # (system pip + uv tool venv), else every task rewards 0 at step 1. The GT_PY-targeted
               # belt AFTER interpreter resolution (below) is the load-bearing guarantee; these --with/
               # pip additions cover the happy path. GUARD: single-quoted docker block — NO apostrophe.
-              pip install --quiet datacurve-pier fastapi orjson 2>/dev/null || pip install --quiet mini-swe-agent fastapi orjson 2>/dev/null || {
+              python -m pip install --quiet datacurve-pier fastapi orjson 2>/dev/null || python -m pip install --quiet mini-swe-agent fastapi orjson 2>/dev/null || {
                 curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
                 export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
                 uv tool install --python 3.11 --with fastapi --with orjson mini-swe-agent 2>/dev/null || uv tool install --with fastapi --with orjson mini-swe-agent 2>/dev/null
@@ -1276,7 +1274,7 @@ jobs:
                 if ! "$GT_PY" -c "import $_dep" >/dev/null 2>&1; then
                   "$GT_PY" -m pip install --quiet "$_dep" >/dev/null 2>&1 \
                     || uv pip install --python "$GT_PY" "$_dep" >/dev/null 2>&1 \
-                    || pip install --quiet "$_dep" >/dev/null 2>&1 || true
+                    || python -m pip install --quiet "$_dep" >/dev/null 2>&1 || true
                 fi
                 "$GT_PY" -c "import $_dep" >/dev/null 2>&1 \
                   && echo "[GT] litellm dep OK in GT_PY: $_dep" \
@@ -1462,6 +1460,10 @@ jobs:
             echo "GT_PROFILE_UNPROVEN: no gt_profile_activation.json in the agent-output dir (RL profile activation unproven; treated as INFRA like AGENT_DID_NOT_RUN)"
             exit 1
           fi
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ ! -s /tmp/gt_out/gt_profile_receipt.json ]; then
+            echo "GT_PROFILE_UNPROVEN: no gt_profile_receipt.json from the patched agent process (Profile-2 forwarding unproven; task is not citable)"
+            exit 1
+          fi
           # BRIEF-DELIVERY PROOF (W16 guard, 2026-07-13): the step-0 brief ran DARK on every
           # mini run before W16 because generation != delivery. Fail closed: on the GT arm,
           # when a non-empty brief was generated, its head bytes MUST appear in the agent's
@@ -1614,10 +1616,9 @@ jobs:
           # this cp lands it in the cherry-picked artifact next to run_provenance.json.
           cp /tmp/gt_out/gt_run_identity.json trial_results/gt_artifacts/gt_run_identity.json 2>/dev/null || true
           # In-SEAM profile receipt (W2, written by gt_mini_patch._install() into dirname of
-          # GT_RUNTIME_LEDGER = /gt_out): the STRONGER activation proof (agent-process env +
-          # patched classes). Collected but deliberately NOT part of the fail-closed liveness
-          # gate -- the receipt is best-effort in the seam (an OSError there must never mark a
-          # healthy run INFRA); the gate rides gt_profile_activation.json above.
+          # GT_RUNTIME_LEDGER = /gt_out): the stronger activation proof (agent-process env +
+          # patched classes). The seam write is best-effort to avoid crashing the agent; the
+          # post-run liveness and metrics gates mark a missing receipt uncitable.
           cp /tmp/gt_out/gt_profile_receipt.json trial_results/gt_artifacts/gt_profile_receipt.json 2>/dev/null || true
                     cp /tmp/gt/issue_manifest.json trial_results/gt_artifacts/issue_manifest.json 2>/dev/null || true
           cp /tmp/gt/adapter_witness.json trial_results/adapter_witness.json 2>/dev/null || true
@@ -1741,6 +1742,7 @@ jobs:
               "trial_results/gt_feature_metrics_${{ matrix.task }}.json" \
               || _MM_MISSING="$_MM_MISSING gt_feature_metrics_ss128_integrity"
             [ -s "trial_results/gt_artifacts/gt_profile_activation.json" ]    || _MM_MISSING="$_MM_MISSING gt_profile_activation.json"
+            [ -s "trial_results/gt_artifacts/gt_profile_receipt.json" ]       || _MM_MISSING="$_MM_MISSING gt_profile_receipt.json"
             [ -s "trial_results/gt_artifacts/gt_run_identity.json" ]          || _MM_MISSING="$_MM_MISSING gt_run_identity.json"
           fi
           if [ -n "$_MM_MISSING" ]; then

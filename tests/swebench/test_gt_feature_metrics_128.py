@@ -549,6 +549,75 @@ def test_present_but_incomplete_deep_metrics_fails_closed_per_metric(tmp_path: P
     assert record["ss_integrity"]["required_inputs_complete"] is False
 
 
+@pytest.mark.parametrize(
+    ("section", "name", "raw"),
+    [
+        ("localization", "gold_rank", None),
+        ("edit_quality", "first_edit_correctness", {}),
+        ("behavioral_impact", "per_tag_impact", {}),
+    ],
+)
+def test_task_perf_null_or_empty_needs_explicit_non_applicability(
+    tmp_path: Path, section: str, name: str, raw: object,
+) -> None:
+    task = f"synthetic__missing-applicability-{name}"
+    deep = _complete_deep_metrics(task)
+    target = (
+        deep["behavioral_impact"]
+        if section == "behavioral_impact"
+        else deep["performance"][section]
+    )
+    target[name] = raw
+    deep["metric_applicability"].get(section, {}).pop(name, None)
+    _write_task(tmp_path, task, deep_metrics=deep)
+
+    records, missing, _source = metrics._performance_feature_records(
+        task, str(tmp_path)
+    )
+
+    assert records[name]["status"] == "UNMEASURED"
+    assert f"PERF.{name}" in missing
+
+
+@pytest.mark.parametrize(
+    ("section", "name", "raw"),
+    [
+        ("localization", "gold_rank", None),
+        ("edit_quality", "first_edit_correctness", {}),
+        ("behavioral_impact", "per_tag_impact", {}),
+    ],
+)
+def test_task_perf_explicit_non_applicability_is_preserved(
+    tmp_path: Path, section: str, name: str, raw: object,
+) -> None:
+    task = f"synthetic__explicit-applicability-{name}"
+    deep = _complete_deep_metrics(task)
+    target = (
+        deep["behavioral_impact"]
+        if section == "behavioral_impact"
+        else deep["performance"][section]
+    )
+    target[name] = raw
+    deep["metric_applicability"].setdefault(section, {})[name] = {
+        "applicable": False,
+        "predicate": "fixture opportunity exists",
+        "reason": "fixture has no applicable opportunity",
+    }
+    _write_task(tmp_path, task, deep_metrics=deep)
+
+    records, missing, _source = metrics._performance_feature_records(
+        task, str(tmp_path)
+    )
+
+    assert records[name]["status"] == "NOT_APPLICABLE"
+    assert f"PERF.{name}" not in missing
+    assert records[name]["applicability"] == {
+        "applicable": False,
+        "predicate": "fixture opportunity exists",
+        "reason": "fixture has no applicable opportunity",
+    }
+
+
 def test_deep_metrics_lookup_is_task_exact_and_matches_live_layout(tmp_path: Path) -> None:
     task = "synthetic__layout"
     task_dir = tmp_path / "gt" / task
@@ -646,6 +715,59 @@ def test_run_aggregate_joins_validated_run_ratio_artifact(tmp_path: Path) -> Non
     assert cost["measurement"]["source_artifact"] == run_path.name
     assert all(cost["ss_readiness"]["gates"].values())
     assert cost["ss_readiness"]["measurement_complete"] is True
+
+
+@pytest.mark.parametrize("applicability", [None, {"applicable": False}])
+def test_run_ratio_requires_matching_explicit_applicability(
+    tmp_path: Path, applicability: dict | None,
+) -> None:
+    task = "synthetic__run-ratio-applicability"
+    deep = _complete_deep_metrics(task)
+    deep["resolved"] = True
+    deep["performance"]["token_efficiency"]["total_cost_usd"] = 2.5
+    _write_task(tmp_path, task, deep_metrics=deep)
+    record = metrics.collect_task(task, str(tmp_path), profile="2")
+    run_payload = gt_run_metrics.aggregate_run_metrics([deep])
+    run_payload["run_id"] = "run-ratio-applicability"
+    run_payload["mandatory_performance"]["token_efficiency"][
+        "cost_per_resolved"
+    ]["applicability"] = applicability
+    run_path = tmp_path / "gt_run_metrics_run-ratio-applicability.json"
+    run_path.write_text(json.dumps(run_payload), encoding="utf-8")
+
+    aggregate = metrics.aggregate_run(
+        "run-ratio-applicability", [record], profile="2",
+        run_metrics_artifact=str(run_path),
+    )
+
+    cost = aggregate["run_metrics"]["ss_features"]["cost_per_resolved"]
+    assert cost["measurement"]["status"] == "UNMEASURED"
+    assert cost["ss_readiness"]["gates"]["applicability_resolved"] is False
+
+
+def test_run_ratio_accepts_explicit_non_applicability_for_zero_resolves(
+    tmp_path: Path,
+) -> None:
+    task = "synthetic__run-ratio-not-applicable"
+    deep = _complete_deep_metrics(task)
+    deep["resolved"] = False
+    deep["performance"]["token_efficiency"]["total_cost_usd"] = 2.5
+    _write_task(tmp_path, task, deep_metrics=deep)
+    record = metrics.collect_task(task, str(tmp_path), profile="2")
+    run_payload = gt_run_metrics.aggregate_run_metrics([deep])
+    run_payload["run_id"] = "run-ratio-not-applicable"
+    run_path = tmp_path / "gt_run_metrics_run-ratio-not-applicable.json"
+    run_path.write_text(json.dumps(run_payload), encoding="utf-8")
+
+    aggregate = metrics.aggregate_run(
+        "run-ratio-not-applicable", [record], profile="2",
+        run_metrics_artifact=str(run_path),
+    )
+
+    cost = aggregate["run_metrics"]["ss_features"]["cost_per_resolved"]
+    assert cost["measurement"]["status"] == "NOT_APPLICABLE"
+    assert cost["measurement"]["applicability"]["applicable"] is False
+    assert all(cost["ss_readiness"]["gates"].values())
 
 
 @pytest.mark.parametrize("artifact", ["missing", "malformed"])

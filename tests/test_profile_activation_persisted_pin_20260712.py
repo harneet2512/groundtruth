@@ -150,14 +150,14 @@ def test_profile_activation_receipt_write_failure_aborts_before_agent_spend() ->
     )
 
 
-def test_collect_step_copies_the_in_seam_profile_receipt() -> None:
+def test_in_seam_profile_receipt_is_collected_and_required() -> None:
     # WIRING (W2+W3 integration, orchestrator LIPI 2026-07-12): gt_mini_patch._install() writes the
     # IN-SEAM receipt gt_profile_receipt.json into dirname(GT_RUNTIME_LEDGER) = /gt_out — the
     # STRONGER activation proof (agent-process env + patched classes, vs the fan-out step's
     # shell-side record). The Collect step cherry-picks files, so without an explicit cp the
     # receipt is written in-container and silently dropped (a dark artifact — the exact defect
-    # class this wave closes). Deliberately NOT part of the fail-closed liveness gate: the seam
-    # write is best-effort (an OSError there must never mark a healthy run INFRA).
+    # class this wave closes). The seam writer stays best-effort so artifact I/O cannot crash the
+    # agent; the post-run gates still mark a run without this stronger proof as uncitable.
     collect = _step_run_containing("mkdir -p trial_results trial_results/gt_artifacts")
     code = "\n".join(_code_lines(collect))
     assert "/tmp/gt_out/gt_profile_receipt.json" in code, (
@@ -167,12 +167,29 @@ def test_collect_step_copies_the_in_seam_profile_receipt() -> None:
     assert "trial_results/gt_artifacts/gt_profile_receipt.json" in code, (
         "the receipt must land in gt_artifacts/ next to gt_profile_activation.json"
     )
-    # and the fail-closed gate must NOT ride the best-effort receipt (only the activation file).
+    # Both post-run gates require the receipt; shell activation alone is insufficient proof.
     liveness = _step_run_containing("AGENT_DID_NOT_RUN")
-    assert "gt_profile_receipt.json" not in "\n".join(_code_lines(liveness)), (
-        "the liveness gate must not fail-close on the best-effort in-seam receipt — an OSError in "
-        "the seam would mark a healthy run INFRA; the gate rides gt_profile_activation.json"
+    assert "gt_profile_receipt.json" in "\n".join(_code_lines(liveness)), (
+        "the liveness gate must fail closed when the in-agent profile receipt is absent"
     )
+    metrics = _step_run_containing("GT_METRICS_COMPLETE")
+    assert any(
+        "[ -s" in ln and "gt_artifacts/gt_profile_receipt.json" in ln
+        for ln in _code_lines(metrics)
+    ), (
+        "the uploaded-artifact completeness gate must require the in-agent receipt"
+    )
+
+
+def test_pre_matrix_lint_checks_this_workflow_fail_closed() -> None:
+    step = next(s for s in _steps() if s.get("name", "").startswith("Workflow lint"))
+    code_lines = _code_lines(step["run"])
+    target = ".github/workflows/swebench_live_lite_full.yml"
+    assert target in "\n".join(code_lines), (
+        "the paid workflow must lint its own resolved revision before the matrix"
+    )
+    target_line = next(ln for ln in code_lines if target in ln)
+    assert "||" not in target_line, "self-lint must fail closed before the paid matrix"
 
 
 # ── 2. LIVENESS: fail closed on a GT-on task with no activation proof ─────────────────────────
