@@ -288,3 +288,64 @@ def test_semantic_drift_still_detects_a_deleted_elif_guard(tmp_path, monkeypatch
     out = _g._semantic_drift_candidate("x.py")
     assert out is not None
     assert "not url.startswith('https" in out[1]
+
+
+def test_semantic_drift_ignores_explicit_line_continuation_reformat(
+    tmp_path, monkeypatch
+):
+    """Reflowing an unchanged guard across a continued line is not guard loss."""
+    monkeypatch.setattr(_g, "_root", lambda: str(tmp_path))
+    before = (
+        "def week(value, weekday):\n"
+        "    if value == 1 and weekday >= 4:\n"
+        "        return 0\n"
+        "    return value\n"
+    )
+    after = (
+        "def week(value, weekday):\n"
+        "    if value == 1 and \\\n"
+        "            weekday >= 4:\n"
+        "        return 0\n"
+        "    return value\n"
+    )
+    assert _g._sem_extract(after)[0] == _g._sem_extract(before)[0]
+    (tmp_path / "x.py").write_text(before, encoding="utf-8")
+    _g._sem_cache.clear()
+    _g._sem_seed("x.py")
+    (tmp_path / "x.py").write_text(after, encoding="utf-8")
+    _g._last_test_outcome_failed = False
+
+    assert _g._semantic_drift_candidate("x.py") is None
+
+
+def test_semantic_drift_preserves_parenthesized_reflow_until_real_deletion(
+    tmp_path, monkeypatch
+):
+    """Implicit multiline layout stays quiet without erasing the guard baseline."""
+    monkeypatch.setattr(_g, "_root", lambda: str(tmp_path))
+    before = (
+        "def week(value, weekday):\n"
+        "    if value == 1 and weekday >= 4:\n"
+        "        return 0\n"
+        "    return value\n"
+    )
+    reflowed = (
+        "def week(value, weekday):\n"
+        "    if (\n"
+        "        value == 1 and weekday >= 4\n"
+        "    ):\n"
+        "        return 0\n"
+        "    return value\n"
+    )
+    deleted = "def week(value, weekday):\n    return value\n"
+    (tmp_path / "x.py").write_text(before, encoding="utf-8")
+    _g._sem_cache.clear()
+    _g._sem_seed("x.py")
+    _g._last_test_outcome_failed = False
+
+    (tmp_path / "x.py").write_text(reflowed, encoding="utf-8")
+    assert _g._semantic_drift_candidate("x.py") is None
+
+    (tmp_path / "x.py").write_text(deleted, encoding="utf-8")
+    out = _g._semantic_drift_candidate("x.py")
+    assert out is not None and "semantic_drift" in out[1]

@@ -6359,19 +6359,41 @@ _sem_cache: dict[str, tuple[frozenset, frozenset]] = {}
 
 
 def _sem_extract(text: str) -> tuple[frozenset, frozenset]:
+    source = text or ""
+    # Compare logical guard statements, not their physical line layout. Explicit
+    # continuations are syntax-preserving in Python and C-family preprocessors;
+    # leaving them split makes the line-bounded guard regex fabricate a deletion
+    # when an edit only reformats an existing condition.
+    logical_source = re.sub(r"\\\r?\n[ \t]*", " ", source)
     guards: set[str] = set()
-    for m in _SEM_GUARD_RE.finditer(text or ""):
-        region = text[m.end():m.end() + 200]
+    for m in _SEM_GUARD_RE.finditer(logical_source):
+        region = logical_source[m.end():m.end() + 200]
         # exit idioms across languages: return (all), raise (py), throw (js/ts/
         # java), panic (go/rust). A guarded early-exit is what makes this an
         # invariant worth watching for silent deletion.
         if any(kw in region for kw in ("return", "raise", "throw", "panic")):
-            cond = m.group(1).strip()[:120]
+            cond = " ".join(m.group(1).split())[:120]
             if cond:
                 guards.add(cond)
-    returns = {ln.strip()[:120] for ln in (text or "").splitlines()
+    returns = {ln.strip()[:120] for ln in source.splitlines()
                if ln.strip().startswith("return ") or ln.strip() == "return"}
     return frozenset(guards), frozenset(returns)
+
+
+def _sem_layout_key(text: str) -> str:
+    """Remove statement-layout trivia while retaining condition spelling."""
+    return re.sub(r"\\\r?\n|\s+", "", text or "")
+
+
+def _sem_guard_spelling_present(guard: str, source: str) -> bool:
+    """Return whether ``guard`` still begins an if/elif condition in ``source``."""
+    key = _sem_layout_key(guard)
+    if not key:
+        return False
+    source_key = _sem_layout_key(source)
+    return re.search(
+        r"(?<![A-Za-z0-9_])(?:if|elif)\(*" + re.escape(key), source_key
+    ) is not None
 
 
 def _sem_seed(rel: str) -> None:
@@ -6401,6 +6423,17 @@ def _semantic_drift_candidate(rel: str) -> tuple[float, str] | None:
         return None
     guards, returns = _sem_extract(text)
     prev = _sem_cache.get(rel)
+    if prev is not None:
+        # A pure layout change can move an unchanged condition outside the
+        # line-bounded extractor (for example ``if (\n ... \n):``). Preserve
+        # that invariant when its normalized spelling is still present. This
+        # both prevents a false warning now and retains the baseline needed to
+        # detect a real deletion on a later edit.
+        preserved = {
+            guard for guard in prev[0]
+            if _sem_guard_spelling_present(guard, text)
+        }
+        guards = frozenset(set(guards) | preserved)
     _sem_cache[rel] = (guards, returns)
     if prev is None:
         return None  # first sight = baseline snapshot, never a drift signal
