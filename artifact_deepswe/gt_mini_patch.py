@@ -6616,6 +6616,7 @@ def _reset_oracle_state() -> None:
     # suites reset by hand.
     global _detect_loop_fired, _detect_loop_epoch_step, _coherence_last_rel
     global _last_test_outcome_failed, _last_test_step, _cycle_edit_start
+    global _last_verify_executed_identity
     global _recovery_repeat_fp
     # W6 FIX 1b: the per-turn recovery REPETITION flag (set fresh at the top of every
     # `_gt_hypothesis_classify_turn`, consumed same-turn by `_recovery_stall_active`). Clear it
@@ -6640,6 +6641,7 @@ def _reset_oracle_state() -> None:
     # `_last_test_step` mis-reads "already tested this turn". Clear to their init
     # defaults (byte-identical in production: fresh process per attempt).
     _last_test_outcome_failed = False
+    _last_verify_executed_identity = None
     _last_test_step = None
     _cycle_edit_start = None
     _test_cycle_spans.clear()
@@ -7881,14 +7883,55 @@ _EXACT_PROFILE_ACTUAL_EVENTS: dict[str, str] = {
 }
 
 
+# Reviewed producer authority for legacy/reactive lane blocks. This table is the
+# only bridge from a lane ``kind`` to registry lineage: neither payload text,
+# task identity, enabled flags, nor arbiter class may create FACT attribution.
+_LANE_REGISTERED_PRODUCERS: dict[str, tuple[str, str]] = {
+    "obligation.unexercised": ("spec", "obligation_unexercised"),
+    "detect.loop": ("governor", "recovery"),
+    "detect.coherence": ("ss_coherence_v2", "coherence_collapse"),
+}
+
+_LANE_INTRINSIC_ACTUAL_EVENTS: dict[str, str] = {
+    # These producers execute/observe their named world event internally; the
+    # surrounding tool observation may be an edit or review transition.
+    "detect.loop": "failure_obs",
+}
+
+
+def _lane_registered_lineage(kind: str, event):
+    """Build typed lineage from exact lane producer authority, or stay quiet."""
+    intrinsic = None
+    if kind == "verify.horizon.executed":
+        intrinsic = globals().get("_last_verify_executed_identity")
+    binding = (intrinsic[:2] if intrinsic is not None
+               else _LANE_REGISTERED_PRODUCERS.get(kind or ""))
+    if binding is None:
+        return None
+    actual_event = (intrinsic[2] if intrinsic is not None else
+                    _LANE_INTRINSIC_ACTUAL_EVENTS.get(kind or "")
+                    or _EXACT_PROFILE_ACTUAL_EVENTS.get(kind or "") or str(
+                        getattr(event, "value", event) or "policy_turn"))
+    try:
+        from groundtruth.runtime.feature_lineage import build_lineage
+        lineage = build_lineage(
+            runtime_producer_id=binding[0], evidence_type=binding[1],
+            actual_event=actual_event)
+        if lineage is None or not lineage.producer_registration_match:
+            return None
+        return lineage
+    except Exception:  # noqa: BLE001 -- attribution cannot change delivery
+        return None
+
+
 def _exact_profile_delivery_extra(
         member: str, kind: str, text: str, target: str, event) -> dict:
     """Join one active exact-profile byte owner to its registered producer/FACT.
 
     The CAP remains the explicit ``profile_member`` because exact-profile owners are
     intentionally not authorized as typed-lineage CAP refs.  FACT lineage is added
-    only when the byte-owner authority itself names a FACT; coherence therefore stays
-    FACT-less instead of receiving an arbitration-class alias.
+    only when the byte-owner authority itself names a reviewed FACT; no arbitration
+    class or payload token can manufacture that identity.
     """
     extra = _lane_final_extra(kind, text, target)
     if _GT_BASELINE or os.environ.get(member) != "1":
@@ -7908,9 +7951,12 @@ def _exact_profile_delivery_extra(
         actual_event = _EXACT_PROFILE_ACTUAL_EVENTS.get(kind)
         if not actual_event:
             return extra
+        evidence_type = (
+            "coherence_collapse" if kind == "detect.coherence"
+            else binding.fact_class)
         lineage = build_lineage(
             runtime_producer_id=binding.producer,
-            evidence_type=binding.fact_class,
+            evidence_type=evidence_type,
             actual_event=actual_event,
         )
         if lineage is not None and lineage.producer_registration_match:
@@ -7920,7 +7966,8 @@ def _exact_profile_delivery_extra(
     return extra
 
 
-def _lane_delivery_extra(kind: str, text: str, target: str, event) -> "dict | None":
+def _lane_delivery_extra(
+        kind: str, text: str, target: str, event, *, lineage=None) -> "dict | None":
     """Delivery-row identity plus honest exact-profile producer lineage."""
     member = _LANE_PROFILE_MEMBER_OWNERS.get(kind or "")
     if member:
@@ -7929,12 +7976,9 @@ def _lane_delivery_extra(kind: str, text: str, target: str, event) -> "dict | No
     # Exact lane producer authority. This is deliberately not inferred from
     # layer naming or payload text: only a reviewed producer/evidence/boundary
     # binding may attach FACT lineage to delivered bytes.
-    registered = {
-        "obligation.unexercised": ("spec", "obligation_unexercised"),
-    }.get(kind or "")
-    if registered:
-        actual_event = str(getattr(event, "value", event) or "")
-        extra.update(_registered_delivery_extra(*registered, actual_event))
+    lineage = lineage or _lane_registered_lineage(kind, event)
+    if lineage is not None:
+        extra.update(_feature_lineage_extra(lineage))
     return extra
 
 
@@ -8501,6 +8545,10 @@ _last_test_outcome_failed: bool = False
 # submit gate can reuse it instead of re-running the covering tests at submit time.
 # None until the covering runner has actually run once. Reset per task/attempt.
 _last_covering_result: "dict | None" = None
+# Exact producer/FACT/event for the most recently produced
+# ``verify.horizon.executed`` bytes. The shared lane kind can represent either a
+# syntax diagnostic or a covering RED, so kind-only attribution is forbidden.
+_last_verify_executed_identity: "tuple[str, str, str] | None" = None
 
 
 def _estimate_v() -> int:
@@ -8727,7 +8775,8 @@ def _executed_covering_emission(covering: list[dict],
     not a lexical parse of the agent's own output. Suppressed if the agent already
     ran a test this turn (Fable §6.2 — redundant, and risks a second identity
     surface). Correct-or-quiet on any error."""
-    global _last_test_outcome_failed, _last_covering_result
+    global _last_test_outcome_failed, _last_covering_result, _last_verify_executed_identity
+    _last_verify_executed_identity = None
     if os.environ.get("GT_VERIFY_EXECUTE") != "1" or _GT_BASELINE:
         return None
     if _last_test_step == _action_count:  # agent already ran a test this turn
@@ -8811,6 +8860,8 @@ def _executed_covering_emission(covering: list[dict],
                 outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
                 reason="covering_none_produced", chars=0)
             return None
+        _last_verify_executed_identity = (
+            "covering_runner", "covering_red", "test_result")
         return block
     except Exception:  # noqa: BLE001 -- correct-or-quiet; never destabilize the loop
         return None
@@ -8923,7 +8974,8 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
     either flag off is byte-identical and performs zero runner work. Suppressed if the
     agent already ran a test this turn (mirror of ``_executed_covering_emission``).
     Correct-or-quiet on any error; an unattributed RED never false-delivers (invariant ②)."""
-    global _last_test_outcome_failed, _last_covering_result
+    global _last_test_outcome_failed, _last_covering_result, _last_verify_executed_identity
+    _last_verify_executed_identity = None
     if (os.environ.get("GT_VERIFICATION_PLAN") != "1"
             or os.environ.get("GT_VERIFY_EXECUTE") != "1"
             or _GT_BASELINE):
@@ -8986,6 +9038,9 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
             else:
                 continue  # build/type/integration RED -> HOST-side only this wave
             if block and not contains_gt_tag(block) and not contains_test_identity(block):
+                if res.kind == "unit":
+                    _last_verify_executed_identity = (
+                        "covering_runner", "covering_red", "test_result")
                 return block
         # W14 FIX 1 (2026-07-13): the progressive plan reached its end without a deliverable RED
         # rung -> nothing produced. Host row only (ZERO observation bytes) so an executed-count
@@ -12910,7 +12965,8 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
             "post_search" if kind == "post_search.localize" else kkind)
         cand = _ga_make_candidate(
             _GA_PLANE_LANE_A, kind, dedup_key=key,
-            target=subject_path, kkind=candidate_kkind, seq=len(pool))
+            target=subject_path, kkind=candidate_kkind, seq=len(pool),
+            lineage=_lane_registered_lineage(kind, item_event))
         if cand is None:
             # engine absent -> deliver inline (degrade to the pre-SM-5 plane behavior,
             # never a silent drop). Consistent with the steer/gateway add-helpers.
@@ -12959,13 +13015,16 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
             _rearm_latches({kind}, kkind=kkind, kf=kf, krel=krel)
             return
     key = _ga_unified_dedup_key(kind, kind, krel or kf or "", "", [win_text])
+    _steer_lineage = _lane_registered_lineage(kind, event)
     cand = _ga_make_candidate(_GA_PLANE_STEER, kind, dedup_key=key,
                               target=krel or kf or "", kkind=kkind, seq=len(pool),
-                              current_ordinal=_ga_rich_event_ordinal(event))
+                              current_ordinal=_ga_rich_event_ordinal(event),
+                              lineage=_steer_lineage)
     if cand is None:
         # engine absent -> deliver inline (bulkhead: never silently drop the steer).
         _deliver_gate_winner(out, cmd, win_text, kkind=kkind, kf=kf, krel=krel,
-                             event=event, steer_base=steer_base)
+                             event=event, steer_base=steer_base,
+                             lineage=_steer_lineage)
         return
     _prepared_steer = _steer_native(win_text) if _steer_native_on() else win_text
     _winner_kind = _last_gate_winner_kind
@@ -12982,7 +13041,7 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
             before = out.get("output") or ""
             _deliver_gate_winner(
                 out, cmd, t, kkind=kkind, kf=kf, krel=krel, event=event,
-                steer_base=steer_base)
+                steer_base=steer_base, lineage=getattr(cand, "lineage", None))
             after = out.get("output") or ""
             _record_cross_plane_final_controls(cand, after[len(before):])
         finally:
@@ -13393,7 +13452,8 @@ def _commit_batch_arbitration(state, result, winner, plans) -> object:
                 plan.output, spec.get("cmd", ""), spec.get("kind", winner.kind),
                 spec.get("winner_hash", ""), plan.decision,
                 krel=spec.get("krel", ""), kf=spec.get("kf", ""),
-                event=spec.get("event"), steer_base=spec.get("steer_base", ""))
+                event=spec.get("event"), steer_base=spec.get("steer_base", ""),
+                lineage=getattr(winner, "lineage", None))
         else:
             plan.thunk()
         winner_dedup = getattr(winner, "dedup_key", "") or ""
@@ -13686,7 +13746,9 @@ def install_observation_batch_commit(agent) -> bool:
         return False
 
 
-def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_base) -> None:
+def _deliver_gate_winner(
+        out, cmd, win_text, *, kkind, kf, krel, event, steer_base,
+        lineage=None) -> None:
     """The Lane-B gate-winner delivery, FACTORED from the inline oracle-route steer path
     (RL-3 native transform -> B-15 leak-checked append -> D-5 hash stamp -> ledger note ->
     hook fire -> runtime ledger -> RL-1 seal; else Seam-F4 latch re-arm on a 0-byte drop).
@@ -13718,7 +13780,8 @@ def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_ba
             chars=len(win_text), file_path=krel or kf or "", event=event,
             content=win_text,
             extra=_lane_delivery_extra(
-                _last_gate_winner_kind, win_text, krel or kf or "", event))
+                _last_gate_winner_kind, win_text, krel or kf or "", event,
+                lineage=lineage))
         # SS (features 2/7): record the delivered steer's entity set + queue the ack watch.
         _ss_record_delivered(_last_gate_winner_kind, win_text)
         # RL-1 (GT_LANE_ENVELOPE): seal over the SAME bytes; base_output = pre-append obs.
@@ -13732,7 +13795,7 @@ def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_ba
 
 # plane constants mirrored locally so the hot delivery path needs no import to name them.
 def _commit_prepared_steer(out, cmd, kind: str, winner_hash: str, decision: dict,
-                           *, krel, kf, event, steer_base) -> None:
+                           *, krel, kf, event, steer_base, lineage=None) -> None:
     """Commit a frozen eligible steer without re-running shadow/leak/budget gates."""
     text = decision["payload"]
     out["output"] = (out.get("output") or "") + decision["shipped_suffix"]
@@ -13746,7 +13809,8 @@ def _commit_prepared_steer(out, cmd, kind: str, winner_hash: str, decision: dict
         file_path=krel or kf or "", event=event,
         content=decision["shipped_suffix"],
         extra=_lane_delivery_extra(
-            kind, decision["shipped_suffix"], krel or kf or "", event))
+            kind, decision["shipped_suffix"], krel or kf or "", event,
+            lineage=lineage))
     _ss_record_delivered(kind, text)
     _seal_lane_delivery(
         kind, decision["shipped_suffix"], krel or kf or "",

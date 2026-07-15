@@ -68,7 +68,7 @@ def test_lane_owner_allowlist_covers_only_single_owner_payloads(monkeypatch):
     assert g._lane_profile_member_extra("verify.horizon.executed") is None
 
 
-def test_plan_shaped_executed_delivery_is_not_falsely_attributed(monkeypatch):
+def test_plan_syntax_delivery_stays_unmeasured_without_concrete_identity(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(g, "_runtime_ledger_record", lambda **kw: calls.append(kw))
     monkeypatch.setattr(g, "_GT_BASELINE", False)
@@ -77,6 +77,7 @@ def test_plan_shaped_executed_delivery_is_not_falsely_attributed(monkeypatch):
     monkeypatch.setenv("GT_VERIFICATION_PLAN", "1")
     monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
     monkeypatch.setenv("GT_LANE_ENVELOPE", "0")
+    monkeypatch.setattr(g, "_last_verify_executed_identity", None)
 
     payload = "$ python -m py_compile src/example.py\nSyntaxError\n[exit 1]"
     out = {"output": "edit result"}
@@ -87,8 +88,10 @@ def test_plan_shaped_executed_delivery_is_not_falsely_attributed(monkeypatch):
 
     delivered = [row for row in calls if row.get("content") == payload]
     assert len(delivered) == 1
-    assert delivered[0]["extra"]["candidate_id"]
-    assert "fact_class" not in delivered[0]["extra"]
+    extra = delivered[0]["extra"]
+    assert extra["candidate_id"]
+    assert "fact_class" not in extra
+    assert "profile_member" not in extra
 
 
 def test_gateway_owner_requires_exact_producer_class_pair_and_active_member(monkeypatch):

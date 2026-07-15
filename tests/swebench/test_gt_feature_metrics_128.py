@@ -20,6 +20,9 @@ import gt_feature_inventory as inventory  # noqa: E402
 import gt_run_metrics  # noqa: E402
 from artifact_deepswe import ledger_attestation  # noqa: E402
 from groundtruth.runtime import fact_registry, rl_profile  # noqa: E402
+from groundtruth.runtime.feature_lineage import (  # noqa: E402
+    build_lineage, lineage_ledger_extra,
+)
 from groundtruth.pretask.v1r_brief import (  # noqa: E402
     _brief_block_receipts,
     _reduce_brief_to_minimal,
@@ -659,12 +662,27 @@ def test_legacy_projection_excluding_additive_readiness_is_byte_identical(
         projection, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
 
-    # Intentional CAP authority correction: coherence has exact sealed-member
-    # attribution but no registered FACT lineage, so it remains UNMEASURED instead
-    # of inheriting another FACT producer's lifecycle.
+    # Intentional authority correction: the exact coherence byte owner now carries
+    # its reviewed governor/recovery FACT binding. Empty inputs remain unpromoted;
+    # the hash changes only because the declared authority is serialized.
     assert hashlib.sha256(encoded).hexdigest() == (
-        "a604c4a7f05e5659e10a3d278cccc161438aa5947526ed33c8f328424eb972bf"
+        "e2b5c62ca3f56ba8b65eb0db86ca79db16926da021120ef38574fc040f8d49b8"
     )
+
+
+def test_coherence_exact_profile_row_binds_cap_and_recovery_fact() -> None:
+    lineage = build_lineage(
+        runtime_producer_id="ss_coherence_v2",
+        evidence_type="coherence_collapse",
+        actual_event="edit_result",
+    )
+    row = {
+        "layer": "detect.coherence",
+        "profile_member": "GT_SS_COHERENCE_V2",
+        **lineage_ledger_extra(lineage),
+    }
+    assert metrics._atomic_row_identity(row) == (
+        "GT_SS_COHERENCE_V2", "recovery")
 
 
 def test_present_but_incomplete_deep_metrics_fails_closed_per_metric(tmp_path: Path) -> None:

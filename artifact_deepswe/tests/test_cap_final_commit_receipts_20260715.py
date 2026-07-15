@@ -82,14 +82,158 @@ def test_lane_delivery_lineage_is_registered_and_never_inferred_from_arbiter(mon
     assert "lineage_schema" not in legacy
 
 
-def test_coherence_delivery_does_not_fabricate_fact_lineage(monkeypatch):
+def test_coherence_delivery_carries_exact_recovery_lineage(monkeypatch):
     monkeypatch.setenv("GT_SS_COHERENCE_V2", "1")
     extra = g._lane_delivery_extra(
         "detect.coherence", "two verified writes", "src/widget.py", g.Event.POST_EDIT)
     assert extra["profile_member"] == "GT_SS_COHERENCE_V2"
     assert extra["candidate_id"]
-    assert "fact_class" not in extra
-    assert "lineage_schema" not in extra
+    assert extra["fact_class"] == "recovery"
+    assert extra["runtime_producer_id"] == "ss_coherence_v2"
+    assert extra["registered_producer_id"] == "governor"
+    assert extra["producer_registration_match"] is True
+    assert extra["evidence_type"] == "coherence_collapse"
+    assert extra["required_event"] == "edit_result"
+    assert extra["actual_event"] == "edit_result"
+    assert extra["feature_ids"] == [
+        {"category": "FACT", "feature_id": "recovery", "role": "fact"}
+    ]
+
+
+def test_reactive_lane_kinds_carry_only_exact_supported_lineage(monkeypatch):
+    cases = {
+        "obligation.unexercised": ("spec", "obligations", "test_result"),
+        "detect.loop": ("governor", "recovery", "failure_obs"),
+    }
+    for kind, (producer, fact_class, actual_event) in cases.items():
+        extra = g._lane_delivery_extra(
+            kind, "exact sealed bytes", "src/widget.py",
+            g.Event.TEST_RESULT,
+        )
+        assert extra["runtime_producer_id"] == producer
+        assert extra["registered_producer_id"] == producer
+        assert extra["producer_registration_match"] is True
+        assert extra["fact_class"] == fact_class
+        assert extra["actual_event"] == actual_event
+        assert extra["feature_ids"] == [
+            {"category": "FACT", "feature_id": fact_class, "role": "fact"}
+        ]
+
+    monkeypatch.setattr(
+        g, "_last_verify_executed_identity",
+        ("covering_runner", "covering_red", "test_result"))
+    executed = g._lane_delivery_extra(
+        "verify.horizon.executed", "covering RED", "src/widget.py",
+        g.Event.REVIEW_TRANSITION)
+    assert executed["fact_class"] == "covering_red"
+    assert executed["actual_event"] == executed["required_event"] == "test_result"
+
+    monkeypatch.setattr(g, "_last_verify_executed_identity", None)
+    for unsupported_kind in (
+        "consensus.scope", "consensus.scope_map", "verify.horizon.advisory",
+        "verify.horizon.urgent", "verify.horizon.pivot", "verify.horizon.gate",
+        "arbitrary.scope-looking-name",
+    ):
+        unsupported = g._lane_delivery_extra(
+            unsupported_kind, "exact bytes", "src/widget.py", g.Event.POST_VIEW)
+        assert "fact_class" not in unsupported
+        assert "lineage_schema" not in unsupported
+
+
+def test_reactive_steer_candidate_binds_fact_opportunity(monkeypatch):
+    pool = []
+    rows = []
+    monkeypatch.setattr(g, "_last_gate_winner_kind", "detect.loop")
+    monkeypatch.setattr(g, "_last_gate_winner_hash", "")
+    monkeypatch.setattr(g, "_ss_any_content_gate_on", lambda: False)
+    monkeypatch.setattr(
+        g, "_append_batch_candidate",
+        lambda target, candidate, thunk, *args, **kwargs:
+            target.append((candidate, thunk)),
+    )
+    monkeypatch.setenv("GT_STEER_NATIVE", "0")
+
+    g._global_pool_add_steer(
+        pool, {"output": "base"}, "pytest", "break the repeated loop",
+        kkind="", kf="", krel="src/widget.py", event=g.Event.TEST_RESULT,
+        steer_base="base",
+    )
+
+    assert len(pool) == 1
+    candidate = pool[0][0]
+    assert candidate.lineage.fact_class == "recovery"
+    assert candidate.lineage.runtime_producer_id == "governor"
+
+    monkeypatch.setattr(g, "_inseam_metrics_on", lambda: True)
+    monkeypatch.setattr(g, "_ledger_line_direct", lambda row: rows.append(row) or True)
+    state = {
+        "observation_id": "1" * 64,
+        "parent_policy_sha256": "2" * 64,
+        "parent_policy_chars": 4,
+        "action_batch_sha256": "3" * 64,
+        "batch_start_iteration": 1,
+        "pool": pool,
+    }
+    g._record_batch_opportunities(
+        state, {id(candidate): SimpleNamespace(disposition="deliver")}, candidate)
+    assert rows[0]["attribution_status"] == "BOUND"
+    assert rows[0]["feature_refs"] == [
+        {"category": "FACT", "feature_id": "recovery", "role": "fact"}
+    ]
+
+
+def test_reactive_lineage_is_observation_byte_neutral(monkeypatch):
+    monkeypatch.setattr(g, "_runtime_ledger_record", lambda **kwargs: None)
+    monkeypatch.setattr(g, "_last_gate_winner_kind", "detect.loop")
+    monkeypatch.setattr(g, "_last_gate_winner_hash", "")
+    monkeypatch.setenv("GT_LANE_ENVELOPE", "0")
+
+    def deliver() -> bytes:
+        out = {"output": "base"}
+        g._deliver_gate_winner(
+            out, "pytest", "break the repeated loop", kkind="", kf="",
+            krel="src/widget.py", event=g.Event.TEST_RESULT,
+            steer_base="base")
+        return out["output"].encode()
+
+    with_lineage = deliver()
+    monkeypatch.setattr(g, "_LANE_REGISTERED_PRODUCERS", {})
+    without_lineage = deliver()
+    assert with_lineage == without_lineage == b"base\nbreak the repeated loop"
+
+
+def test_covering_execution_stamps_concrete_lineage_identity(tmp_path, monkeypatch):
+    import groundtruth.runtime.covering_runner as covering_runner
+    import groundtruth.runtime.native_render as native_render
+
+    test_file = tmp_path / "covering.py"
+    test_file.write_text("pass\n", encoding="utf-8")
+    monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
+    monkeypatch.setattr(g, "_GT_BASELINE", False)
+    monkeypatch.setattr(g, "_last_test_step", None)
+    monkeypatch.setattr(g, "_action_count", 4)
+    monkeypatch.setattr(g, "_root", lambda: str(tmp_path))
+    monkeypatch.setattr(g, "_build_verification_executor", lambda: None)
+    monkeypatch.setattr(
+        covering_runner, "run_covering_tests",
+        lambda *args, **kwargs: {"verdict": "fail", "ran": ["covering.py"]},
+    )
+    monkeypatch.setattr(
+        covering_runner, "is_red_attributable", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        native_render, "render_covering_failure_native",
+        lambda *args, **kwargs: "covering failure",
+    )
+
+    block = g._executed_covering_emission(
+        [{"file": "covering.py"}], {"src/widget.py"}, {"widget"})
+    assert block == "covering failure"
+    assert g._last_verify_executed_identity == (
+        "covering_runner", "covering_red", "test_result")
+    lineage = g._lane_registered_lineage(
+        "verify.horizon.executed", g.Event.REVIEW_TRANSITION)
+    assert lineage.fact_class == "covering_red"
+    assert lineage.actual_event == lineage.required_event == "test_result"
 
 
 def test_submit_red_has_authorized_typed_byte_owner():

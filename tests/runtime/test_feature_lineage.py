@@ -67,6 +67,28 @@ def test_test_result_obligation_has_registered_boundary_lineage() -> None:
     assert lineage.features == (FeatureRef("FACT", "obligations", "fact"),)
 
 
+def test_coherence_v2_is_an_explicit_recovery_producer() -> None:
+    lineage = build_lineage(
+        runtime_producer_id="ss_coherence_v2",
+        evidence_type="coherence_collapse",
+        actual_event="edit_result",
+    )
+    assert lineage is not None
+    assert lineage.runtime_producer_id == "ss_coherence_v2"
+    assert lineage.registered_producer_id == "governor"
+    assert lineage.producer_registration_match is True
+    assert lineage.fact_class == "recovery"
+    assert lineage.required_event == "edit_result"
+
+    mismatch = build_lineage(
+        runtime_producer_id="coherence_by_name_only",
+        evidence_type="coherence_collapse",
+        actual_event="edit_result",
+    )
+    assert mismatch is not None
+    assert mismatch.producer_registration_match is False
+
+
 def test_dynamic_alias_keeps_fine_evidence_type() -> None:
     lineage = build_lineage(
         runtime_producer_id="change_surface",
@@ -244,4 +266,4 @@ def test_cap_byte_owner_mechanism_authority_is_total_and_exact() -> None:
     coherence = CAP_BYTE_OWNER_MECHANISMS["GT_SS_COHERENCE_V2"]
     assert coherence.bindings[0].producer == "ss_coherence_v2"
     assert coherence.bindings[0].layer == "detect.coherence"
-    assert coherence.bindings[0].fact_class is None
+    assert coherence.bindings[0].fact_class == "recovery"
