@@ -240,6 +240,97 @@ def _control_participation_record(
         })
 
 
+# Native/form controls decide before the global lane arbiter commits a winner.  Keep
+# their decision out of the ledger until the exact producer result is the candidate
+# whose sealed suffix actually reaches the observation.  The key deliberately binds
+# action + lane kind + producer bytes: a losing candidate cannot be credited to a
+# byte-identical candidate on a later turn or in another fact class.
+_terminal_lane_controls: dict[
+    tuple[int, str, str], list[tuple[str, str, str, str]]
+] = {}
+
+
+def _terminal_lane_control_key(kind: str, producer_text: str) -> tuple[int, str, str]:
+    seal = hashlib.sha256(
+        producer_text.encode("utf-8", "surrogatepass")
+    ).hexdigest()[:16]
+    return (
+        max(0, int(globals().get("_action_count", 0) or 0)),
+        kind,
+        seal,
+    )
+
+
+def _stage_terminal_lane_control(
+    kind: str,
+    producer_text: str,
+    *,
+    feature_id: str,
+    decision_site: str,
+    decision: str,
+    reason: str,
+) -> None:
+    """Stage a decision reached by a real producer transform; emit no proof row."""
+    if not _inseam_metrics_on() or not kind or not producer_text:
+        return
+    descriptor = (feature_id, decision_site, decision, reason)
+    staged = _terminal_lane_controls.setdefault(
+        _terminal_lane_control_key(kind, producer_text), [])
+    if descriptor not in staged:
+        staged.append(descriptor)
+
+
+def _record_terminal_lane_controls(
+    kind: str,
+    producer_text: str,
+    shipped_suffix: str,
+    target: str,
+    *,
+    fact_class: str = "",
+    candidate_id: str = "",
+) -> None:
+    """Commit staged controls only for their exact, sealed terminal lane winner."""
+    if not _inseam_metrics_on() or not producer_text or not shipped_suffix:
+        return
+    staged = _terminal_lane_controls.pop(
+        _terminal_lane_control_key(kind, producer_text), [])
+    if not staged:
+        return
+    try:
+        if not fact_class:
+            from groundtruth.runtime.global_arbiter import class_of_kind
+            fact_class = class_of_kind(kind) or ""
+        if fact_class:
+            from groundtruth.runtime.fact_registry import is_registered
+            if not is_registered(fact_class):
+                return
+        if not candidate_id:
+            candidate_id = _lane_final_extra(kind, shipped_suffix, target).get(
+                "candidate_id", "")
+        if not fact_class or not candidate_id:
+            return
+        for feature_id, decision_site, decision, reason in staged:
+            _control_participation_record(
+                feature_id,
+                decision_site,
+                decision,
+                candidate_bytes=shipped_suffix,
+                fact_class=fact_class,
+                candidate_id=candidate_id,
+                reason=reason,
+            )
+    except Exception:  # noqa: BLE001 -- measurement cannot affect delivered bytes
+        return
+
+
+def _discard_terminal_lane_controls(iterations) -> None:
+    """Drop uncommitted control decisions at their policy-observation boundary."""
+    doomed = {max(0, int(value or 0)) for value in iterations}
+    for key in tuple(_terminal_lane_controls):
+        if key[0] in doomed:
+            _terminal_lane_controls.pop(key, None)
+
+
 # Graceful import of groundtruth.runtime.* — these modules live in the substrate's
 # baked src/ tree. If the import path isn't available (container bootstrap timing,
 # missing substrate, dev environment), fall back to inline stubs so the core
@@ -3803,7 +3894,16 @@ def _fmt_def_facts(sym: str, info: dict, root: str) -> str:
     render tag-free/native (``_fmt_def_facts_native``); default off keeps this exact
     tagged shape (byte-identical — the 32 pins hold)."""
     if os.environ.get("GT_POST_SEARCH_NATIVE") == "1":
-        return _fmt_def_facts_native(sym, info, root)
+        result = _fmt_def_facts_native(sym, info, root)
+        if result:
+            _stage_terminal_lane_control(
+                "post_search.localize", result,
+                feature_id="GT_POST_SEARCH_NATIVE",
+                decision_site="mini_seam.post_search.native_render",
+                decision="APPLIED",
+                reason="native_search_render_selected",
+            )
+        return result
     defs = info["def_sites"]
     ndef = len(defs)
     lines = [f'<gt-search-facts symbol="{sym}">']
@@ -5095,7 +5195,15 @@ def _evidence(cmd: str) -> str:
     # Guarded -> byte-identical no-op when GT_GLOBAL_ARBITER is off.
     _arm_lane_a_rearm("l3b.evidence", lambda k=key: _seen.discard(k))
     if native:
-        return "\n" + ev  # bare native rows, no <gt-evidence> frame
+        result = "\n" + ev  # bare native rows, no <gt-evidence> frame
+        _stage_terminal_lane_control(
+            "l3b.evidence", result,
+            feature_id="GT_EVIDENCE_NATIVE",
+            decision_site="mini_seam.evidence.native_render",
+            decision="APPLIED",
+            reason="native_evidence_render_selected",
+        )
+        return result
     return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
 
 
@@ -5404,6 +5512,47 @@ def _bilateral_consumption(con, target_id, target_name: str,
             + " — preserve these consumption contracts")
 
 
+def _stage_contract_terminal_controls(
+    result: str,
+    *,
+    native: bool,
+    mode_on: bool,
+    mode_applied: bool,
+    bilateral_reached: bool,
+    bilateral_applied: bool,
+) -> str:
+    """Stage only contract decisions that actually reached terminal selection."""
+    if not result:
+        return result
+    if native:
+        _stage_terminal_lane_control(
+            "l3.contract", result,
+            feature_id="GT_CONTRACT_NATIVE",
+            decision_site="mini_seam.contract.native_render",
+            decision="APPLIED",
+            reason="native_contract_render_selected",
+        )
+    if mode_on:
+        _stage_terminal_lane_control(
+            "l3.contract", result,
+            feature_id="GT_CONTRACT_MODE",
+            decision_site="mini_seam.contract.mode_selection",
+            decision="APPLIED" if mode_applied else "NO_EFFECT",
+            reason=("mode_condition_selected" if mode_applied
+                    else "mode_decision_reached_without_byte_effect"),
+        )
+    if bilateral_reached:
+        _stage_terminal_lane_control(
+            "l3.contract", result,
+            feature_id="GT_CONTRACT_BILATERAL",
+            decision_site="mini_seam.contract.bilateral_selection",
+            decision="APPLIED" if bilateral_applied else "NO_EFFECT",
+            reason=("bilateral_contract_appended" if bilateral_applied
+                    else "bilateral_decision_reached_without_byte_effect"),
+        )
+    return result
+
+
 def _graph_contract_block(rel: str, *, action=None, cmd: str = "") -> str:
     """CROSS-LANGUAGE per-edit contract (parity with OH post_edit [SIGNATURE]/[CALLERS]).
     gt_hook.verify is Python-AST-only — it no-ops on every Go/Rust/TS/JS edit
@@ -5442,6 +5591,7 @@ def _graph_contract_block(rel: str, *, action=None, cmd: str = "") -> str:
         rows: list = []
         preserve: list[str] = []
         bilateral: str = ""  # B-20: bilateral caller-consumption line (default-OFF -> '')
+        _bilateral_reached = False
         try:
             # Caller COUNT discipline (bug #2 — curation_map._verified_neighbor_count
             # parity): count ONLY deterministic-method edges, confidence >= 0.7,
@@ -5546,6 +5696,7 @@ def _graph_contract_block(rel: str, *, action=None, cmd: str = "") -> str:
             # B-20: bilateral caller-consumption for the TOP (most-called) function.
             # Read INSIDE the con block (needs the live connection); default-OFF -> ''.
             if rows and has_method and _contract_bilateral_on():
+                _bilateral_reached = True
                 bilateral = _bilateral_consumption(
                     con, rows[0][0], rows[0][1], det_sql, conf_gate)
             # FORM A/B (GT_CONTRACT_NATIVE): the preserved arm renders bare rg-style caller ROWS
@@ -5577,7 +5728,18 @@ def _graph_contract_block(rel: str, *, action=None, cmd: str = "") -> str:
         _inseam_eligible("l3.contract", rel)
         _inseam_stamp("l3.contract", rel, tier="CERTIFIED", conf=0.7)
         if _native:
-            return _graph_contract_native(rel, rows, _sig_changes, _native_caller_rows)
+            result = _graph_contract_native(
+                rel, rows, _sig_changes, _native_caller_rows)
+            return _stage_contract_terminal_controls(
+                result,
+                native=True,
+                mode_on=_mode_on,
+                # Native rendering derives the same signature delta without
+                # GT_CONTRACT_MODE; that flag cannot claim the native bytes.
+                mode_applied=False,
+                bilateral_reached=_bilateral_reached,
+                bilateral_applied=False,
+            )
         out = [f'<gt-contract file="{os.path.basename(rel)}">']
         for _id, name, sig, ncallers, nfiles in rows:
             out.append(f"[SIGNATURE] {sig}")
@@ -5602,10 +5764,26 @@ def _graph_contract_block(rel: str, *, action=None, cmd: str = "") -> str:
         # sites" when the TOP function's signature is actually changing. Suppress the
         # bilateral preserve-line in that case (correct-or-quiet: "update the call sites"
         # is the message). Byte-identical when GT_CONTRACT_MODE off (_sig_changes is {}).
-        if bilateral and (not rows or rows[0][1] not in _sig_changes):
+        _bilateral_applied = bool(
+            bilateral and (not rows or rows[0][1] not in _sig_changes))
+        if _bilateral_applied:
             out.append(bilateral)
         out.append("</gt-contract>")
-        return "\n" + "\n".join(out)
+        result = "\n" + "\n".join(out)
+        _mode_applied = bool(
+            _mode_on and any(
+                ncallers and int(ncallers) > 0
+                and (name in _sig_changes or _is_create)
+                for _id, name, _sig, ncallers, _nfiles in rows
+            ))
+        return _stage_contract_terminal_controls(
+            result,
+            native=False,
+            mode_on=_mode_on,
+            mode_applied=_mode_applied,
+            bilateral_reached=_bilateral_reached,
+            bilateral_applied=_bilateral_applied,
+        )
     except Exception:  # noqa: BLE001 -- correct-or-quiet
         return ""
 
@@ -6123,13 +6301,15 @@ def _l5_nudge(cmd: str, out_text: str = "",
             return _nudge_native(
                 '\n<gt-nudge reason="loop">\nGT: you have repeated the same command 4+ '
                 "times with no progress. Stop, re-read the last error, and change approach "
-                "(open a different file or test a new hypothesis).\n</gt-nudge>")
+                "(open a different file or test a new hypothesis).\n</gt-nudge>",
+                kind="l5.stuck")
     if scaffold_arm and _action_count >= 25 and _source_edit_count == 0:
         _l5_fired = True
         return _nudge_native(
             '\n<gt-nudge reason="scaffold_trap">\nGT: 25+ actions and no source-file edit '
             "yet — you are likely stuck exploring/scaffolding. Use the brief's gt-scope to "
-            "localize and make a concrete edit to a SOURCE file now.\n</gt-nudge>")
+            "localize and make a concrete edit to a SOURCE file now.\n</gt-nudge>",
+            kind="l5.stuck")
     return ""
 
 
@@ -6321,7 +6501,8 @@ def _l5_no_test_evidence_nudge(cmd: str, out_text: str) -> str:
             "no visible test results (likely killed/timed out before any test ran). You have "
             "NOT observed a single test execute — do not conclude tests pass, and do not "
             "submit yet. Run a narrower target (one test name / one module) or raise the "
-            "timeout until you see real pass/fail output.\n</gt-nudge>")
+            "timeout until you see real pass/fail output.\n</gt-nudge>",
+            kind="l5.no_test")
     return ""
 
 
@@ -6447,7 +6628,9 @@ def _degenerate_loop_candidate(cmd: str, raw_obs: str,
             "different hypothesis, or a narrower test)."
         )
     return (float(_SEV_DETECT),
-            _nudge_native(f'\n<gt-nudge reason="degenerate_loop">\n{body}\n</gt-nudge>'))
+            _nudge_native(
+                f'\n<gt-nudge reason="degenerate_loop">\n{body}\n</gt-nudge>',
+                kind="detect.loop"))
 
 
 def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
@@ -6512,7 +6695,9 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
         except Exception:  # noqa: BLE001 — measurement must never break the producer
             pass
     return (float(_SEV_DETECT),
-            _nudge_native(f'\n<gt-nudge reason="coherence_collapse">\n{body}\n</gt-nudge>'))
+            _nudge_native(
+                f'\n<gt-nudge reason="coherence_collapse">\n{body}\n</gt-nudge>',
+                kind="detect.coherence"))
 
 
 def _l5_failure_nudge(cmd: str, out_text: str) -> str:
@@ -6559,7 +6744,8 @@ def _l5_failure_nudge(cmd: str, out_text: str) -> str:
         return _nudge_native(
             '\n<gt-nudge reason="failure_persisted">\nGT: the same test failure has '
             "persisted across your edit(s) — your current hypothesis is likely wrong. "
-            "Re-read the failing assertion and reconsider the root cause / target file.\n</gt-nudge>")
+            "Re-read the failing assertion and reconsider the root cause / target file.\n</gt-nudge>",
+            kind="l5.failure")
     return ""
 
 
@@ -6613,7 +6799,8 @@ def _l5_unresolved_build_guard(cmd: str, out_text: str, phase) -> str:
         "run reported %d unresolved compile/type-check error(s). The grader builds your "
         "patch — a passing subset of runtime tests does NOT clear a broken build. Resolve "
         "them before you submit; do not skip, silence, or delete the failing check."
-        "\n</gt-nudge>" % _n)
+        "\n</gt-nudge>" % _n,
+        kind="l5.build_fail")
 
 
 # Semantic-drift candidate (2026-06-23): wires the previously-DEAD
@@ -6751,7 +6938,8 @@ def _semantic_drift_candidate(rel: str) -> tuple[float, str] | None:
                 "\n<gt-nudge reason=\"semantic_drift\">\nGT: your edit to %s removed a %s "
                 "that was present before -- confirm that deletion is intended, not an "
                 "accidental regression of existing behavior.\n</gt-nudge>"
-                % (rel, " and a ".join(bits))))
+                % (rel, " and a ".join(bits)),
+                kind="semantic_drift"))
 
 
 # ---------------------------------------------------------------------------
@@ -6891,6 +7079,7 @@ def _reset_oracle_state() -> None:
     global _gt_gateway_chain_head, _gt_gateway_deliveries
     _gt_gateway_chain_head = ""
     _gt_gateway_deliveries = []
+    _terminal_lane_controls.clear()
     # A partial/aborted parallel tool turn must never leak candidates into the
     # next attempt's policy observation.
     try:
@@ -7727,7 +7916,8 @@ def _obligation_resurface_candidate() -> tuple[float, str] | None:
                 "\n<gt-nudge reason=\"obligation_resurface\">\nGT: before you submit, the "
                 "issue requires the following -- re-read it against your patch and confirm "
                 "it is handled (passing local tests does NOT prove the requirement is met):\n%s\n"
-                "</gt-nudge>" % "\n".join(lines)))
+                "</gt-nudge>" % "\n".join(lines),
+                kind="obligation.resurface"))
 
 
 def _obligation_nudge_block() -> tuple[float, str] | None:
@@ -10415,7 +10605,16 @@ def _consensus_scope_block(rel: str) -> str:
     # (both owned by a concurrent coder this session — NOT edited here). In-process/local it is
     # a plain env read, so the FORM A/B is fully testable now without that container wiring.
     if os.environ.get("GT_SCOPE_NATIVE") == "1":
-        return _consensus_scope_native(neigh)
+        result = _consensus_scope_native(neigh)
+        if result:
+            _stage_terminal_lane_control(
+                "consensus.scope_map", result,
+                feature_id="GT_SCOPE_NATIVE",
+                decision_site="mini_seam.scope.native_render",
+                decision="APPLIED",
+                reason="native_scope_render_selected",
+            )
+        return result
 
     def _short(p: str) -> str:
         r = (p or "").replace("\\", "/")
@@ -11763,7 +11962,7 @@ def _steer_native_on() -> bool:
         "", "0", "false", "no", "off")
 
 
-def _steer_native(text: str) -> str:
+def _steer_native(text: str, *, kind: str = "", stage_control: bool = True) -> str:
     """RL-3 (flag GT_STEER_NATIVE): render a Lane-B steer in the NATIVE environment
     voice — strip the ``<gt-nudge>``/``<gt-verify>`` wrapper tags and any leading
     ``GT:`` imperative marker, leaving the plain body (the SHORT·ACTIVE·AT-DECISION
@@ -11771,7 +11970,16 @@ def _steer_native(text: str) -> str:
     the covering RED / edit_check syntax transcript) passes through UNCHANGED so its
     line structure is never mangled. Default-off byte-identical (caller-gated)."""
     if not text or "<gt-" not in text:
-        return text  # already native (covering RED / edit_check) -> untouched
+        result = text  # already native (covering RED / edit_check) -> untouched
+        if result and kind and stage_control:
+            _stage_terminal_lane_control(
+                kind, result,
+                feature_id="GT_STEER_NATIVE",
+                decision_site="mini_seam.steer.native_render",
+                decision="NO_EFFECT",
+                reason="steer_native_decision_reached_already_native",
+            )
+        return result
     kept: list[str] = []
     for ln in text.splitlines():
         s = ln.rstrip()
@@ -11785,7 +11993,16 @@ def _steer_native(text: str) -> str:
         if s.strip():
             kept.append(s)
     body = "\n".join(kept).strip()
-    return ("\n" + body + "\n") if body else ""
+    result = ("\n" + body + "\n") if body else ""
+    if result and kind and stage_control:
+        _stage_terminal_lane_control(
+            kind, result,
+            feature_id="GT_STEER_NATIVE",
+            decision_site="mini_seam.steer.native_render",
+            decision="APPLIED",
+            reason="native_steer_render_selected",
+        )
+    return result
 
 
 def _nudge_native_on() -> bool:
@@ -11799,7 +12016,7 @@ def _nudge_native_on() -> bool:
         "", "0", "false", "no", "off")
 
 
-def _nudge_native(block: str) -> str:
+def _nudge_native(block: str, *, kind: str = "") -> str:
     """FORM A/B B-arm (GT_NUDGE_NATIVE): render a ``<gt-nudge reason=…>`` block BODY-ONLY, dropping
     the frame. REUSES :func:`_steer_native` (W6's stall-gated steer transform) VERBATIM — a SINGLE
     source — so the producer-level native form is IDENTICAL to the delivery-time GT_STEER_NATIVE
@@ -11811,7 +12028,17 @@ def _nudge_native(block: str) -> str:
     byte-identical: returns ``block`` unchanged."""
     if not _nudge_native_on():
         return block
-    return _steer_native(block)
+    result = _steer_native(block, stage_control=False)
+    if result and kind:
+        _stage_terminal_lane_control(
+            kind, result,
+            feature_id="GT_NUDGE_NATIVE",
+            decision_site="mini_seam.nudge.native_render",
+            decision="APPLIED" if result != block else "NO_EFFECT",
+            reason=("native_nudge_render_selected" if result != block
+                    else "nudge_native_decision_reached_without_byte_effect"),
+        )
+    return result
 
 
 def _join_lane_output(prev: str, block: str) -> str:
@@ -11942,9 +12169,18 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
             from groundtruth.runtime.global_arbiter import class_of_kind
             fact_class = class_of_kind(kind)
             if fact_class and is_registered(fact_class):
+                candidate_id = getattr(env, "dedup_key", "") or ""
                 common = dict(
                     candidate_bytes=_shipped, fact_class=fact_class,
-                    candidate_id=getattr(env, "dedup_key", "") or "")
+                    candidate_id=candidate_id)
+                _record_terminal_lane_controls(
+                    kind,
+                    producer_text if producer_text is not None else text,
+                    _shipped,
+                    target,
+                    fact_class=fact_class,
+                    candidate_id=candidate_id,
+                )
                 _control_participation_record(
                     "GT_LANE_ENVELOPE",
                     "mini_seam.lane_envelope.candidate_conversion", "APPLIED",
@@ -13052,6 +13288,9 @@ def _clear_tool_observation_batch(state=None) -> None:
     state = state or _batch_context.get()
     if state is None:
         return
+    start = max(0, int(state.get("batch_start_iteration") or 0))
+    count = len(state.get("observed_keys") or ())
+    _discard_terminal_lane_controls(range(start + 1, start + count + 1))
     with _batch_lock:
         _batch_owners.pop(state.get("serial"), None)
     token = state.pop("token", None)
@@ -13686,7 +13925,8 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
                              event=event, steer_base=steer_base,
                              lineage=_steer_lineage)
         return
-    _prepared_steer = _steer_native(win_text) if _steer_native_on() else win_text
+    _prepared_steer = (
+        _steer_native(win_text, kind=kind) if _steer_native_on() else win_text)
     _winner_kind = _last_gate_winner_kind
     _winner_hash = _last_gate_winner_hash
 
@@ -14432,7 +14672,8 @@ def _deliver_gate_winner(
     # RL-3 (GT_STEER_NATIVE): native voice BEFORE the append + seal so delivered bytes ==
     # sealed rendered_bytes. Default-off: byte-identical.
     if _steer_native_on():
-        win_text = _steer_native(win_text)
+        win_text = _steer_native(
+            win_text, kind=_last_gate_winner_kind or "steer")
     # SS-8 SHADOW-HOLDOUT: this gate-winning steer WOULD deliver; a deterministic seed may
     # WITHHOLD it (zero model bytes + a shadow_holdout row carrying the withheld render's sha).
     # Spend the winner hash so it dedups exactly like the deliver arm (the steer won its dose
@@ -16860,8 +17101,10 @@ def _augment_output(action, out) -> None:
                 if not _batch_defer:
                     _global_pool_flush(
                         _ga_pool, kkind=_kkind, kf=_kf, krel=_krel)
+                    _discard_terminal_lane_controls({_action_count})
             else:
                 _gt_gateway_deliver(action, out, cmd, _orig_out)
+                _discard_terminal_lane_controls({_action_count})
             return
 
         # ---- LEGACY PATH (GT_ORACLE_ROUTE=0): unconditional appends ----
