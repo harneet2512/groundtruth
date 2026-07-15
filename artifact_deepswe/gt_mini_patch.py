@@ -1093,14 +1093,294 @@ def _subprocess_write_targets(root: str, *, force_paths: "set[str] | None" = Non
     return sorted(set(changed))
 
 
-# Fable R7: file-REVERTING git ops bump mtimes without being an agent edit — the mtime
-# catch-all must NOT fabricate a phantom post_edit from `git checkout`/`stash`/`reset`/
-# `restore`/`clean`/`revert` or a reverse `git apply`. A forward `git apply <patch>` IS a
-# real edit and is caught by the patch-application family (never reaches the mtime fallback).
-_GIT_REVERT_RE = re.compile(
+# Fable R7: file-reverting git operations can bump mtimes without changing bytes. The legacy
+# metadata catch-all must not fabricate a post_edit for them. V2 instead observes exact bytes:
+# a standalone restore that changes confined source is a real state transition, while a compound
+# edit+restore with no net byte delta stays quiet. A forward `git apply` is handled separately.
+_GIT_REVERT_FALLBACK_RE = re.compile(
     r"\bgit\s+(?:checkout|stash|reset|restore|clean|revert)\b"
     r"|\bgit\s+apply\s+(?:-R\b|--reverse\b)"
 )
+_GIT_RESTORE_SUBCOMMANDS = frozenset(
+    {"checkout", "stash", "reset", "restore", "clean", "revert"}
+)
+_GIT_GLOBAL_VALUE_OPTIONS = frozenset({
+    "-C", "-c", "--config-env", "--exec-path", "--git-dir",
+    "--namespace", "--super-prefix", "--work-tree",
+})
+_SHELL_CONTROL_TOKENS = frozenset(
+    {"&&", "||", ";", "|", "&", "(", ")", "{", "}"}
+)
+_SHELL_PUNCTUATION = frozenset("();&|")
+_SHELL_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_ENV_VALUE_OPTIONS = frozenset({"-C", "--chdir", "-S", "--split-string", "-u", "--unset"})
+_SUDO_VALUE_OPTIONS = frozenset({
+    "-C", "--close-from", "-D", "--chdir", "-g", "--group", "-h", "--host",
+    "-p", "--prompt", "-r", "--role", "-R", "--chroot", "-t", "--type",
+    "-T", "--command-timeout", "-u", "--user",
+})
+
+
+def _shell_arithmetic_end(line: str, start: int) -> int:
+    """Return the end of a Bash ``$((...))``/``((...))`` arithmetic region.
+
+    Shift operators inside arithmetic are expressions, never heredoc declarations.
+    An unterminated region consumes the rest of this physical line, which is the
+    conservative shell-parse result: no later bytes on that line are executable.
+    """
+    if line.startswith("$((", start):
+        i = start + 3
+    elif line.startswith("((", start):
+        i = start + 2
+    else:
+        return start
+    depth = 2
+    quote = ""
+    while i < len(line):
+        char = line[i]
+        if quote:
+            if char == "\\":
+                i += 2
+                continue
+            if char == quote:
+                quote = ""
+            i += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == "\\":
+            i += 2
+            continue
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return len(line)
+
+
+def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
+    """Return executable ``<<[-]word`` declarations, excluding shifts/``<<<``."""
+    found: list[tuple[str, bool]] = []
+    quote = ""
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if quote:
+            if char == "\\" and quote == '"':
+                i += 2
+                continue
+            if char == quote:
+                quote = ""
+            i += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+            i += 1
+            continue
+        if line.startswith("$((", i) or line.startswith("((", i):
+            i = _shell_arithmetic_end(line, i)
+            continue
+        if char == "\\":
+            i += 2
+            continue
+        if char == "#" and (i == 0 or line[i - 1].isspace()):
+            break
+        if line.startswith("<<<", i):
+            i += 3
+            continue
+        if not line.startswith("<<", i):
+            i += 1
+            continue
+        i += 2
+        strip_tabs = i < len(line) and line[i] == "-"
+        if strip_tabs:
+            i += 1
+        while i < len(line) and line[i] in " \t":
+            i += 1
+        if i >= len(line):
+            break
+        delimiter_quote = line[i] if line[i] in ("'", '"') else ""
+        if delimiter_quote:
+            i += 1
+            start = i
+            while i < len(line) and line[i] != delimiter_quote:
+                i += 1
+            delimiter = line[start:i]
+            if i < len(line):
+                i += 1
+        else:
+            start = i
+            while (i < len(line) and not line[i].isspace()
+                   and line[i] not in "<>;&|"):
+                i += 1
+            delimiter = line[start:i].replace("\\", "")
+        if delimiter:
+            found.append((delimiter, strip_tabs))
+    return found
+
+
+def _shell_without_heredoc_bodies(text: str) -> str:
+    """Keep executable shell lines while removing declared heredoc bodies."""
+    executable: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    for line in (text or "").splitlines():
+        if pending:
+            delimiter, strip_tabs = pending[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                pending.pop(0)
+            continue
+        executable.append(line)
+        pending.extend(_heredoc_delimiters(line))
+    return "\n".join(executable)
+
+
+def _shell_command_word(tokens: list[str], start: int) -> int:
+    """Return the command-word index after bounded assignments/wrappers."""
+    i = start
+    while i < len(tokens) and _SHELL_ASSIGNMENT_RE.match(tokens[i]):
+        i += 1
+    while i < len(tokens):
+        wrapper = tokens[i]
+        if wrapper == "command":
+            i += 1
+            while i < len(tokens):
+                if tokens[i] == "--":
+                    i += 1
+                    break
+                if tokens[i] in ("-v", "-V"):
+                    return len(tokens)  # inspection only; the operand is not executed
+                if not tokens[i].startswith("-"):
+                    break
+                i += 1
+            continue
+        if wrapper == "exec":
+            i += 1
+            while i < len(tokens):
+                if tokens[i] == "--":
+                    i += 1
+                    break
+                if tokens[i] == "-a":
+                    i += 2  # the following argv[0] label is not the executable
+                    continue
+                if not tokens[i].startswith("-"):
+                    break
+                i += 1
+            continue
+        if wrapper not in ("env", "sudo"):
+            break
+        value_options = _ENV_VALUE_OPTIONS if wrapper == "env" else _SUDO_VALUE_OPTIONS
+        i += 1
+        while i < len(tokens):
+            token = tokens[i]
+            if token in value_options:
+                i += 2
+                continue
+            if token.startswith("--") and "=" in token:
+                i += 1
+                continue
+            if token.startswith("-"):
+                i += 1
+                continue
+            if wrapper == "env" and _SHELL_ASSIGNMENT_RE.match(token):
+                i += 1
+                continue
+            break
+    return i
+
+
+def _split_shell_control_runs(tokens: list[str]) -> list[str]:
+    """Split shlex punctuation runs without destroying ``&&``/``||`` operators."""
+    normalized: list[str] = []
+    for token in tokens:
+        if not token or any(char not in _SHELL_PUNCTUATION for char in token):
+            normalized.append(token)
+            continue
+        i = 0
+        while i < len(token):
+            pair = token[i:i + 2]
+            if pair in ("&&", "||"):
+                normalized.append(pair)
+                i += 2
+            else:
+                normalized.append(token[i])
+                i += 1
+    return normalized
+
+
+def _git_restore_transition_command(cmd: str) -> bool:
+    """Whether CMD invokes a Git operation that can restore tracked source bytes.
+
+    Git accepts global options between the executable and subcommand. Parse that
+    grammar instead of assuming the subcommand immediately follows ``git``.
+    Malformed shell text falls back to the conservative legacy recognizer.
+    """
+    import shlex
+
+    shell_text = re.sub(r"\\\r?\n", " ", cmd or "")
+    executable_text = _shell_without_heredoc_bodies(shell_text)
+    executable_text = executable_text.replace("\r\n", ";").replace("\n", ";")
+    executable_text = executable_text.replace("\r", ";")
+    try:
+        # The command is executed by the container shell even when the audit host
+        # is Windows. Retain control operators as tokens even when they are attached
+        # to adjacent words (``cd x&&git restore``).
+        lexer = shlex.shlex(executable_text, posix=True, punctuation_chars="();&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = _split_shell_control_runs(list(lexer))
+    except ValueError:
+        return bool(_GIT_REVERT_FALLBACK_RE.search(executable_text))
+    command_positions = {0}
+    command_positions.update(
+        index + 1 for index, token in enumerate(tokens)
+        if token in _SHELL_CONTROL_TOKENS and index + 1 < len(tokens)
+    )
+    for start in sorted(command_positions):
+        start = _shell_command_word(tokens, start)
+        if start >= len(tokens):
+            continue
+        token = tokens[start]
+        executable = os.path.basename(token).lower()
+        if executable not in ("git", "git.exe"):
+            continue
+        i = start + 1
+        while i < len(tokens):
+            current = tokens[i]
+            if current in _SHELL_CONTROL_TOKENS:
+                break
+            if current == "--":
+                i += 1
+                break
+            if current in _GIT_GLOBAL_VALUE_OPTIONS:
+                i += 2
+                continue
+            if (current.startswith("-C") and current != "-C"
+                    or current.startswith("-c") and current != "-c"):
+                i += 1
+                continue
+            if current.startswith("--") and "=" in current:
+                i += 1
+                continue
+            if current.startswith("-"):
+                i += 1
+                continue
+            break
+        if i >= len(tokens) or tokens[i] in _SHELL_CONTROL_TOKENS:
+            continue
+        subcommand = tokens[i]
+        if subcommand in _GIT_RESTORE_SUBCOMMANDS:
+            return True
+        if subcommand == "apply":
+            for option in tokens[i + 1:]:
+                if option in _SHELL_CONTROL_TOKENS:
+                    break
+                if option in ("-R", "--reverse"):
+                    return True
+    return False
 
 
 # Python/Node in-place file WRITE (the agent's DOMINANT JS edit shape: a python heredoc
@@ -14995,7 +15275,8 @@ def _ss_write_observation_required(cmd: str, kind: "str | None",
         return True
     return (bool(_ss_byte_proof_targets(
                 cmd, path if kind == "post_edit" else None))
-            or _ss_cmd_writes_source(cmd))
+            or _ss_cmd_writes_source(cmd)
+            or _git_restore_transition_command(cmd or ""))
 
 
 def _ss_capture_write_preimage(action_or_cmd) -> None:
@@ -15015,7 +15296,8 @@ def _ss_capture_write_preimage(action_or_cmd) -> None:
     # Known read-only observations cannot mutate source state. Avoid a whole-tree
     # byte scan on the dominant search/read/test path; opaque or explicit write
     # commands remain conservatively observed.
-    if not targets and not _ss_cmd_writes_source(cmd):
+    if (not targets and not _ss_cmd_writes_source(cmd)
+            and not _git_restore_transition_command(cmd or "")):
         return
     _subprocess_write_targets(
         _root(), force_paths=targets, content_proof=True)
@@ -15342,11 +15624,11 @@ def _augment_output(action, out) -> None:
                 # sides aligned means read/search/test turns do zero content I/O.
                 _chg = []
             elif _kkind != "post_edit":
-                # R7 (Fable): still CALL the diff (re-seeds the mtime baseline so the next
-                # command diffs against post-git state — no stale-baseline refire), but a
-                # file-reverting git op must NOT fabricate a phantom post_edit from the
-                # mtime bump it causes. Suppress the fabrication for those commands only.
-                _git_revert = bool(_GIT_REVERT_RE.search(cmd or ""))
+                # R7 (Fable): still call the diff so the next command compares against the
+                # post-git state. Legacy metadata observation suppresses restore-family mtime
+                # bumps. V2 routes only an exact byte-proven transition, so standalone restores
+                # count and compound edit+restore net-zero actions remain quiet.
+                _git_revert = _git_restore_transition_command(cmd or "")
                 try:
                     _chg = _subprocess_write_targets(
                         _root(), force_paths=(
@@ -15354,7 +15636,7 @@ def _augment_output(action, out) -> None:
                             if _v2_write_truth else None))
                 except Exception:  # noqa: BLE001 — fallback isolated
                     _chg = []
-                if _chg and not _git_revert:
+                if _chg and (not _git_revert or _v2_write_truth):
                     _kkind, _kf = "post_edit", _chg[0]
                     print("[GT_META] subprocess_write_fallback n=%d f=%s"
                           % (len(_chg), _kf), file=sys.stderr, flush=True)

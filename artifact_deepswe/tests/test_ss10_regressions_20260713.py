@@ -525,9 +525,14 @@ def test_r3_compound_revert_then_rewrite_counts_only_landed_byte_changes(monkeyp
     # Scratch-only heredoc: its body mentions the source but is DATA, never executed here.
     observe("cd /testbed && cat > /tmp/fix.py <<'PY'\nopen('pkg/mod.py','w')\nPY")
     # One shell action performs a temporary edit and restores it before observation.
+    compound = (
+        "cd /testbed && sed -i '1i# probe' pkg/mod.py "
+        "&& git checkout -- pkg/mod.py"
+    )
+    g._ss_capture_write_preimage({"command": compound})
     target.write_text("# probe\n" + original, encoding="utf-8")
     target.write_text(original, encoding="utf-8")
-    observe("cd /testbed && sed -i '1i# probe' pkg/mod.py && git checkout -- pkg/mod.py")
+    observe(compound)
     # Replay mtime fallback attributed the restored file's delayed mtime to this next command;
     # the semantic write verifier must reject the import-only interpreter probe.
     g._ss_record_edit(
@@ -544,6 +549,260 @@ def test_r3_compound_revert_then_rewrite_counts_only_landed_byte_changes(monkeyp
     writes = [e for e in g._ss_edit_events if e[0] == "pkg/mod.py" and e[2]]
     assert len(writes) == 1
     assert g._ss_coherence_churn("pkg/mod.py") is None
+
+
+def test_r3_standalone_restore_counts_exact_byte_transition(monkeypatch, tmp_path):
+    """A standalone restore is a real V2 state transition when exact bytes change."""
+    root = tmp_path / "repo"
+    target = root / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    original = "def run():\n    return 1\n"
+    target.write_text(original.replace("1", "2"), encoding="utf-8")
+    monkeypatch.setattr(g, "_root", lambda: str(root))
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "1")
+    g._reset_oracle_state()
+
+    cmd = "git checkout -- pkg/mod.py"
+    action = {"command": cmd}
+    g._ss_capture_write_preimage(action)
+    target.write_text(original, encoding="utf-8")
+    g._augment_output(action, {"output": "", "returncode": 0})
+
+    writes = [e for e in g._ss_edit_events if e[0] == "pkg/mod.py" and e[2]]
+    assert len(writes) == 1
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    (
+        "git -C /testbed checkout -- pkg/mod.py",
+        "git --work-tree=/testbed restore pkg/mod.py",
+    ),
+)
+def test_r3_restore_with_git_global_options_counts_byte_transition(
+    cmd, monkeypatch, tmp_path
+):
+    """Git global options do not hide the restore subcommand from V2 byte truth."""
+    root = tmp_path / "repo"
+    target = root / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    original = "value = 1\n"
+    target.write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.setattr(g, "_root", lambda: str(root))
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "1")
+    g._reset_oracle_state()
+
+    action = {"command": cmd}
+    g._ss_capture_write_preimage(action)
+    target.write_text(original, encoding="utf-8")
+    g._augment_output(action, {"output": "", "returncode": 0})
+
+    assert [e[0] for e in g._ss_edit_events if e[2]] == ["pkg/mod.py"]
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    (
+        "cd /testbed;git checkout -- pkg/mod.py",
+        "cd /testbed&&git restore pkg/mod.py",
+        "true|git reset --hard pkg/mod.py",
+        "python -c \"print(1 << 2)\"; git restore pkg/mod.py",
+        "grep x <<<$s; git restore pkg/mod.py",
+        "printf '<<'; git checkout -- pkg/mod.py",
+        "sudo git restore pkg/mod.py",
+        "env FOO=1 git checkout -- pkg/mod.py",
+        "(git reset --hard pkg/mod.py)",
+        "shift=$((1 << 3))\ngit restore pkg/mod.py",
+        "exec -a gt-wrapper git restore pkg/mod.py",
+        "{ git restore pkg/mod.py; }",
+    ),
+)
+def test_r3_restore_after_attached_shell_control_counts_transition(
+    cmd, monkeypatch, tmp_path
+):
+    """Attached shell controls still place Git at an executable command boundary."""
+    root = tmp_path / "repo"
+    target = root / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.setattr(g, "_root", lambda: str(root))
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "1")
+    g._reset_oracle_state()
+
+    assert g._git_restore_transition_command(cmd) is True
+    action = {"command": cmd}
+    g._ss_capture_write_preimage(action)
+    target.write_text("value = 1\n", encoding="utf-8")
+    g._augment_output(action, {"output": "", "returncode": 0})
+
+    assert [e[0] for e in g._ss_edit_events if e[2]] == ["pkg/mod.py"]
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    (
+        "echo git checkout -- pkg/mod.py",
+        "printf %s git restore pkg/mod.py",
+        "printf '%s\n' 'git restore pkg/mod.py'",
+    ),
+)
+def test_r3_git_words_in_arguments_are_not_restore_commands(cmd):
+    assert g._git_restore_transition_command(cmd) is False
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    (
+        "command -v git restore pkg/mod.py",
+        "exec -a gt-wrapper echo git restore pkg/mod.py",
+        "{ printf '%s' 'git restore pkg/mod.py'; }",
+        "shift=$((1 << 3))",
+    ),
+)
+def test_r3_nonexecuted_git_words_remain_nonrestore(cmd):
+    assert g._git_restore_transition_command(cmd) is False
+
+
+def test_r3_restore_after_executable_newline_counts_transition(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    target = root / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.setattr(g, "_root", lambda: str(root))
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "1")
+    g._reset_oracle_state()
+
+    cmd = "cd /testbed\ngit restore pkg/mod.py"
+    action = {"command": cmd}
+    g._ss_capture_write_preimage(action)
+    target.write_text("value = 1\n", encoding="utf-8")
+    g._augment_output(action, {"output": "", "returncode": 0})
+
+    assert g._git_restore_transition_command(cmd) is True
+    assert [e[0] for e in g._ss_edit_events if e[2]] == ["pkg/mod.py"]
+
+
+def test_r3_heredoc_data_is_not_parsed_as_restore_command():
+    cmd = "cat > /tmp/plan <<'EOF'\ngit restore pkg/mod.py\nEOF"
+    assert g._git_restore_transition_command(cmd) is False
+
+
+def test_r3_arithmetic_shift_is_not_a_heredoc():
+    """Bash arithmetic ``<<`` must not consume later executable shell lines."""
+    cmd = "shift=$((1 << 3))\ngit restore pkg/mod.py"
+    assert g._shell_without_heredoc_bodies(cmd) == cmd
+    assert g._git_restore_transition_command(cmd) is True
+
+
+def test_r3_restore_after_heredoc_terminator_is_executable():
+    cmd = "cat > /tmp/plan <<'EOF'\nnotes only\nEOF\ngit restore pkg/mod.py"
+    assert g._git_restore_transition_command(cmd) is True
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    (
+        "cd /testbed\ngit restore pkg/mod.py",
+        "sudo git restore pkg/mod.py",
+        "env FOO=1 git checkout -- pkg/mod.py",
+        "(git reset --hard pkg/mod.py)",
+        "shift=$((1 << 3))\ngit restore pkg/mod.py",
+        "exec -a gt-wrapper git restore pkg/mod.py",
+        "{ git restore pkg/mod.py; }",
+    ),
+)
+def test_r3_restore_legacy_off_stays_suppressed(cmd, monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    target = root / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.setattr(g, "_root", lambda: str(root))
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "0")
+    monkeypatch.setenv("GT_SS_RECOVERY_V2", "0")
+    g._reset_oracle_state()
+    g._augment_output(
+        {"command": "cat pkg/mod.py"},
+        {"output": target.read_text(encoding="utf-8"), "returncode": 0},
+    )
+
+    target.write_text("value = 1\n", encoding="utf-8")
+    out = {"output": "native checkout output", "returncode": 0}
+    g._augment_output({"command": cmd}, out)
+
+    assert out["output"] == "native checkout output"
+    assert g._ss_edit_events == []
+
+
+def test_r3_multi_file_restore_records_every_byte_transition(monkeypatch, tmp_path):
+    """One restore action records every confined source path whose bytes changed."""
+    root = tmp_path / "repo"
+    targets = [root / "pkg" / "a.py", root / "pkg" / "b.py"]
+    for target in targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.setattr(g, "_root", lambda: str(root))
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "1")
+    g._reset_oracle_state()
+
+    cmd = "git restore pkg/a.py pkg/b.py"
+    action = {"command": cmd}
+    g._ss_capture_write_preimage(action)
+    for target in targets:
+        target.write_text("value = 1\n", encoding="utf-8")
+    g._augment_output(action, {"output": "", "returncode": 0})
+
+    writes = sorted(e[0] for e in g._ss_edit_events if e[2])
+    assert writes == ["pkg/a.py", "pkg/b.py"]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "rewrite", "expected_success"),
+    ((0, True, 1), (7, True, 0), (0, False, 0)),
+)
+def test_r3_restore_counts_only_successful_byte_transitions(
+    returncode, rewrite, expected_success, monkeypatch, tmp_path
+):
+    root = tmp_path / "repo"
+    target = root / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.setattr(g, "_root", lambda: str(root))
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "1")
+    g._reset_oracle_state()
+
+    action = {"command": "git restore pkg/mod.py"}
+    g._ss_capture_write_preimage(action)
+    if rewrite:
+        target.write_text("value = 1\n", encoding="utf-8")
+    g._augment_output(action, {"output": "", "returncode": returncode})
+
+    successes = [event for event in g._ss_edit_events if event[2]]
+    assert len(successes) == expected_success
+    assert g._ss_coherence_churn("pkg/mod.py") is None
+
+
+def test_r3_standalone_restore_legacy_off_keeps_observation_bytes(monkeypatch, tmp_path):
+    """The recorded/off arm retains revert suppression and changes no observation bytes."""
+    root = tmp_path / "repo"
+    target = root / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    original = "def run():\n    return 1\n"
+    target.write_text(original.replace("1", "2"), encoding="utf-8")
+    monkeypatch.setattr(g, "_root", lambda: str(root))
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "0")
+    monkeypatch.setenv("GT_SS_RECOVERY_V2", "0")
+    g._reset_oracle_state()
+
+    g._augment_output(
+        {"command": "cat pkg/mod.py"},
+        {"output": target.read_text(encoding="utf-8"), "returncode": 0},
+    )
+    target.write_text(original, encoding="utf-8")
+    out = {"output": "native checkout output", "returncode": 0}
+    g._augment_output({"command": "git checkout -- pkg/mod.py"}, out)
+
+    assert out["output"] == "native checkout output"
+    assert g._ss_edit_events == []
 
 
 # ═════════════════════════════════════════════════════════════════════════════
