@@ -3,12 +3,71 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
 from groundtruth.runtime import brief_cache
+
+
+def test_atomic_publication_sets_world_readable_mode_before_replace(tmp_path, monkeypatch):
+    """The published handoff must not inherit NamedTemporaryFile's private mode."""
+    events = []
+    real_chmod = os.chmod
+    real_replace = os.replace
+
+    def record_chmod(path, mode):
+        events.append(("chmod", mode))
+        return real_chmod(path, mode)
+
+    def record_replace(src, dst):
+        events.append(("replace", None))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(brief_cache.os, "chmod", record_chmod)
+    monkeypatch.setattr(brief_cache.os, "replace", record_replace)
+
+    brief_cache._atomic_write_payload(str(tmp_path / "brief.json"), {"ok": True})
+
+    assert events == [("chmod", 0o644), ("replace", None)]
+
+
+def test_initial_persist_uses_atomic_publication_before_determinism_verdict(
+    tmp_path, monkeypatch,
+):
+    """A refused repeat proof must still leave its primary handoff readable."""
+    events = []
+    real_chmod = os.chmod
+    real_replace = os.replace
+
+    def record_chmod(path, mode):
+        events.append(("chmod", mode))
+        return real_chmod(path, mode)
+
+    def record_replace(src, dst):
+        events.append(("replace", None))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(brief_cache.os, "chmod", record_chmod)
+    monkeypatch.setattr(brief_cache.os, "replace", record_replace)
+    first = _deterministic_result("primary diagnostic")
+
+    primary = brief_cache.persist_brief(
+        str(tmp_path), first.brief_text, first, identity="request-id"
+    )
+    verdict = brief_cache.verify_independent_generation(
+        str(tmp_path), primary,
+        lambda: _deterministic_result("different diagnostic"),
+        expect_identity="request-id",
+    )
+
+    assert verdict["matched"] is False
+    assert events == [("chmod", 0o644), ("replace", None)]
+    assert brief_cache.load_cached_brief(
+        str(tmp_path), expect_identity="request-id"
+    )["brief_text"] == "primary diagnostic"
 
 
 def _deterministic_result(text: str) -> SimpleNamespace:

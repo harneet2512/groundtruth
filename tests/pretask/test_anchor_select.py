@@ -18,6 +18,7 @@ deterministic stub embedder so no model download / ONNX runtime is required.
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -205,6 +206,35 @@ class _CountingModel:
         self.max_batch = max(self.max_batch, len(t))
         self.total += len(t)
         return np.ones((len(t), 8), dtype=np.float32) / np.sqrt(8.0)
+
+
+def test_independent_generation_does_not_reuse_opaque_matrix_cache(repo):
+    """A process boundary must not change shared passage-cache state.
+
+    The former graph-adjacent pickle stored only assembled per-file matrices.
+    Loading it in a fresh process skipped passage assembly/encoding and therefore
+    left the shared content-addressed passage cache cold for graph_localizer.  A
+    second same-input acquisition could consequently rank a different bounded
+    passage set. Simulate that boundary by clearing process-local caches while
+    leaving any graph-adjacent artifact in place.
+    """
+    repo_root, db = repo
+    first = _CountingModel()
+    anchor_select._SYMVEC_CACHE.clear()
+    anchor_select._get_file_embeddings(db, repo_root, first, issue_text="serialize_payload")
+    assert first.total > 0
+
+    anchor_select._EMBED_CACHE.clear()
+    anchor_select._SYMVEC_CACHE.clear()
+    second = _CountingModel()
+    anchor_select._get_file_embeddings(db, repo_root, second, issue_text="serialize_payload")
+
+    assert second.total == first.total
+    assert anchor_select._SYMVEC_CACHE
+    cache_dir = Path(db).parent / ".embed_cache"
+    assert not cache_dir.exists(), (
+        f"semantically opaque cross-process matrix cache was published at {cache_dir}"
+    )
 
 
 def _make_big_db(path: str, *, n_files: int, syms_per_file: int) -> None:

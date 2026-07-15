@@ -1720,7 +1720,9 @@ jobs:
           fi
           if [ "${AGENT_STEPS:-0}" -eq 0 ]; then
             # exit statuses can contain underscores/parens — anchor on the steps= field only
-            AGENT_STEPS=$(grep "headless agent finished" trial_output.log 2>/dev/null | grep -oE "steps=[0-9]+" | grep -oE "[0-9]+" | tail -1)
+            # A missing finish line is diagnostic input, not this step's terminal decision:
+            # tolerate grep's no-match under pipefail, then let AGENT_DID_NOT_RUN fail closed.
+            AGENT_STEPS=$(grep "headless agent finished" trial_output.log 2>/dev/null | grep -oE "steps=[0-9]+" | grep -oE "[0-9]+" | tail -1 || true)
             AGENT_STEPS=${AGENT_STEPS:-0}
           fi
           echo "GT wiring check (trajectory-based): gt_blocks=$GT_BLOCKS agent_steps=$AGENT_STEPS"
@@ -2051,7 +2053,7 @@ jobs:
           cp "/tmp/gt_deep_metrics_${GT_TASK_ID}.json" "$TASK_ARTIFACT_ROOT/" 2>/dev/null || true
 
           # Mandatory per-task details, derived from the exact task-scoped trajectory.
-          GT_GOLD_JSONL=benchmarks/data/swebench_live_lite.jsonl PYTHONPATH=${GT_WORKSPACE}/src:${GT_WORKSPACE}/scripts/swebench:${GT_WORKSPACE}/scripts/metrics python3 scripts/swebench/gt_performance_metrics.py "$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json" /tmp/gt --instance-id "${GT_TASK_ID}" --gold-jsonl benchmarks/data/swebench_live_lite.jsonl --out "trial_results/gt_performance_metrics_${GT_TASK_ID}.json" 2>&1 | tail -2 || echo PERF_METRICS_WARN
+          GT_GOLD_JSONL=benchmarks/data/swebench_live_lite.jsonl PYTHONPATH=${GT_WORKSPACE}/src:${GT_WORKSPACE}/scripts/swebench:${GT_WORKSPACE}/scripts/metrics python3 scripts/swebench/gt_performance_metrics.py "$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json" /tmp/gt --instance-id "${GT_TASK_ID}" --gold-jsonl benchmarks/data/swebench_live_lite.jsonl --task-truth "$TASK_ARTIFACT_ROOT/task_truth.json" --out "trial_results/gt_performance_metrics_${GT_TASK_ID}.json" 2>&1 | tail -2 || echo PERF_METRICS_WARN
           PYTHONPATH=${GT_WORKSPACE}/scripts/swebench python3 scripts/swebench/gt_behavioral_impact.py "$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json" --out "trial_results/gt_behavioral_impact_${GT_TASK_ID}.json" 2>&1 | tail -2 || echo IMPACT_METRICS_WARN
 
           # Per-feature v3 behavioural-contract metrics (MANDATORY_METRICS.md §12, gt.feature_metrics.v1).

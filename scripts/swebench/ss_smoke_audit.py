@@ -28,8 +28,10 @@ WHAT IT COMPUTES, per task, CHRONOLOGICALLY (parse messages in order; never grep
        (b) LATE — an obligation/requirement reminder delivered at/after PASSING test evidence
            for the requirement already existed. Applies to spec.obligation / obligation.resurface
            / verify.horizon.advisory.
-       (c) WRONG-INFO — (c1) coherence "rewritten <file> N times" whose N != the independently
-           counted write-commands to that file; (c2) provenance: a payload / file_path citing a
+       (c) WRONG-INFO — (c1) coherence "rewritten <file> N times" whose N cannot be exactly
+           joined from exact-path successful byte-changing producer proofs since the latest
+           passing test; absent/ambiguous proof is blocking UNMEASURED. (c2) provenance: a
+           payload / file_path citing a
            tmp / scratch / generated path (never a repo source); (c3) an unexecuted covering
            assurance (a covering-verdict claim with no execution evidence in the payload).
        (d) LEAK — word-boundary test-identifier scan (pytest node-ids, ::-qualified test ids,
@@ -57,7 +59,7 @@ import os
 import re
 import sys
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # ── repo layout ──────────────────────────────────────────────────────────────
 _REPO = Path(__file__).resolve().parents[2]
@@ -207,6 +209,8 @@ def acquisition_before(msgs: list[dict], home: int) -> set[str]:
 # A "rewrite" is an actual file MUTATION: sed -i, a redirect (> / >>) into the file, tee into
 # it, or a python open(...,'w'/'a') on it. A `cat`/`sed -n`/`grep` READ is NOT a rewrite — the
 # coherence producer's known bug conflates reads with rewrites, which this recompute exposes.
+# Legacy diagnostic helper retained for historical fixture inspection only. SS grading does not
+# call it; command/result text cannot establish a durable source mutation.
 _WRITE_FAIL_RE = re.compile(
     r"no such file|cannot (?:open|find|stat|create)|patch failed|does not apply|hunk .*failed|"
     r"malformed|command not found|permission denied|no replacement|did not appear|"
@@ -471,7 +475,7 @@ def requirement_evidence_before(payload: str, msgs: list[dict], home_msg: int,
 # ══════════════════════════════════════════════════════════════════════════════
 @dataclass
 class Violation:
-    kind: str          # step_behind | late | coherence_miscount | provenance | unexecuted_cover | leak | dose | unjoined
+    kind: str          # step_behind | late | coherence_miscount | coherence_unmeasured | ...
     check: str         # a | b | c | d | e
     home_msg: int
     layer: str
@@ -533,6 +537,110 @@ class TaskReport:
         return (not self.violations) and (not self.unjoined) and self.ack_count > 0
 
 
+@dataclass(frozen=True)
+class CoherenceWriteProof:
+    measured: bool
+    count: int | None
+    write_steps: tuple[int, ...] = ()
+    latest_passing_test_step: int | None = None
+    reason: str = ""
+
+
+def _proof_step(row: dict) -> int | None:
+    """Return one unambiguous non-negative producer action step."""
+    values = [row.get(name) for name in ("action_step", "iteration") if name in row]
+    if not values or any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                         for value in values):
+        return None
+    if len(set(values)) != 1:
+        return None
+    return values[0]
+
+
+def _exact_repo_relative_path(value: object) -> str | None:
+    """Accept only canonical forward-slash repository-relative paths."""
+    if not isinstance(value, str) or not value or "\\" in value:
+        return None
+    path = PurePosixPath(value)
+    if path.is_absolute() or value != path.as_posix() or any(part in ("", ".", "..")
+                                                             for part in path.parts):
+        return None
+    return value
+
+
+def coherence_write_proof(rows: list[dict], file_path: str, *, delivery_iteration: int,
+                          delivery_seal: str) -> CoherenceWriteProof:
+    """Count exact-path successful byte-changing writes in the current producer episode.
+
+    The episode begins strictly after the latest passing ``test_proof`` and ends at the exact
+    sealed delivery row. A write proof may share the delivery iteration because the producer
+    records the landed write before rendering coherence; ledger order, not an incorrect numeric
+    ``<`` assumption, establishes that it preceded delivery. Missing, malformed, contradictory,
+    or duplicate proof rows fail closed; command text is never consulted.
+    """
+    exact_path = _exact_repo_relative_path(file_path)
+    if exact_path is None or isinstance(delivery_iteration, bool) \
+            or not isinstance(delivery_iteration, int) or delivery_iteration < 0:
+        return CoherenceWriteProof(False, None, reason="ambiguous path or delivery iteration")
+
+    delivery_positions = [index for index, row in enumerate(rows) if isinstance(row, dict)
+                          and row.get("outcome") == "delivered"
+                          and row.get("content_sha256_16") == delivery_seal]
+    if len(delivery_positions) != 1:
+        return CoherenceWriteProof(False, None,
+                                   reason="exact sealed delivery boundary absent or ambiguous")
+    bounded_rows = rows[:delivery_positions[0]]
+    proof_rows = [row for row in bounded_rows if isinstance(row, dict)
+                  and row.get("event_type") in {"source_write_proof", "test_proof"}]
+    if not proof_rows:
+        return CoherenceWriteProof(False, None, reason="producer proof receipts absent")
+
+    parsed: list[tuple[str, int, dict]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for row in proof_rows:
+        event_type = str(row.get("event_type"))
+        step = _proof_step(row)
+        if step is None:
+            return CoherenceWriteProof(False, None, reason="malformed producer proof step")
+        if step > delivery_iteration:
+            return CoherenceWriteProof(False, None,
+                                       reason="proof chronology exceeds delivery iteration")
+        if event_type == "source_write_proof":
+            path = _exact_repo_relative_path(row.get("file_path"))
+            if path is None or type(row.get("write_ok")) is not bool \
+                    or type(row.get("bytes_changed")) is not bool:
+                return CoherenceWriteProof(False, None, reason="malformed source_write_proof")
+            identity = (event_type, step, path)
+        else:
+            if type(row.get("passed")) is not bool:
+                return CoherenceWriteProof(False, None, reason="malformed test_proof")
+            identity = (event_type, step, "")
+        if identity in seen:
+            return CoherenceWriteProof(False, None, reason="duplicate producer proof receipt")
+        seen.add(identity)
+        parsed.append((event_type, step, row))
+
+    test_steps = {step for kind, step, _row in parsed if kind == "test_proof"}
+    write_steps_all = {step for kind, step, _row in parsed if kind == "source_write_proof"}
+    if test_steps & write_steps_all:
+        return CoherenceWriteProof(False, None,
+                                   reason="ambiguous write/test ordering at one action step")
+
+    passing_steps = [step for kind, step, row in parsed
+                     if kind == "test_proof" and row["passed"] is True]
+    latest_pass = max(passing_steps) if passing_steps else None
+    lower = latest_pass if latest_pass is not None else -1
+    path_receipts = [(step, row) for kind, step, row in parsed
+                     if kind == "source_write_proof" and row["file_path"] == exact_path]
+    if not path_receipts:
+        return CoherenceWriteProof(False, None, latest_passing_test_step=latest_pass,
+                                   reason="exact-path source_write_proof receipts absent")
+    write_steps = tuple(step for step, row in path_receipts
+                        if step > lower and row["write_ok"] is True
+                        and row["bytes_changed"] is True)
+    return CoherenceWriteProof(True, len(write_steps), write_steps, latest_pass)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PER-DELIVERY GRADING
 # ══════════════════════════════════════════════════════════════════════════════
@@ -542,6 +650,7 @@ def _basename(p: str) -> str:
 
 def grade_delivery(d: "sso.Delivery", msgs: list[dict], acq_cache: dict,
                    passing: list[int], ledger_row: dict,
+                   proof_rows: list[dict] | None = None,
                    receipt_level: int = 1) -> DeliveryGrade:
     payload = d.payload or ""
     head = payload.strip().replace("\n", " ")[:80]
@@ -587,14 +696,26 @@ def grade_delivery(d: "sso.Delivery", msgs: list[dict], acq_cache: dict,
     if d.layer in COHERENCE_LAYERS:
         mm = _COHERENCE_CLAIM.search(payload)
         if mm:
-            fname, claimed = _basename(mm.group(1)), int(mm.group(2))
-            actual = len(_writes_to_basename(
-                msgs, fname, before=d.home_msg, passing=passing,
-            ))
-            if claimed != actual:
+            claimed_path, claimed = mm.group(1), int(mm.group(2))
+            exact_path = str(d.file_path or "")
+            if _basename(claimed_path) != _basename(exact_path):
+                proof = CoherenceWriteProof(False, None,
+                                            reason="ambiguous claimed/delivery path")
+            else:
+                proof = coherence_write_proof(
+                    proof_rows or [], exact_path, delivery_iteration=d.iteration,
+                    delivery_seal=str(d.sha16 or ""),
+                )
+            if not proof.measured:
+                g.violations.append(Violation(
+                    "coherence_unmeasured", "c", d.home_msg, d.layer,
+                    f"UNMEASURED: {proof.reason}", head,
+                ))
+            elif claimed != proof.count:
                 g.violations.append(Violation("coherence_miscount", "c", d.home_msg, d.layer,
-                                              f"claims rewritten {fname} {claimed}x; actual "
-                                              f"write-commands = {actual}", head))
+                                              f"claims rewritten {exact_path} {claimed}x; durable "
+                                              f"post-GREEN byte-changing writes = {proof.count}",
+                                              head))
 
     # ── (c2) PROVENANCE (tmp / scratch / generated) ─────────────────────────────
     prov = scratch_paths_in(str(d.file_path or "")) + scratch_paths_in(payload)
@@ -710,15 +831,16 @@ def apply_dose(grades: list[DeliveryGrade]) -> None:
 def _assign_pbucket(g: DeliveryGrade) -> str:
     """Worst-first P-bucket (SS pipeline rollup). Precedence P1 > P2 > P3 > P5 > P3a-ack.
 
-    P1  bad info reached / attempted at the model (coherence miscount, scratch provenance,
-        leak, dose, or an unexecuted covering assurance, or a failed byte-join).
+    P1  bad or unprovable info reached / attempted at the model (coherence miscount/unmeasured,
+        scratch provenance, leak, dose, unexecuted covering assurance, or failed byte-join).
     P2  step_behind (the agent had self-acquired the fact — the SS 'very bad' rung).
     P3  late (delivered after the requirement already had passing evidence).
     P5  clean + acknowledged + an executed/companion/recovery class (the consumed-good rung).
     P3a-ack  every other clean delivery (delivered novel; acknowledged-or-not, non-P5 class).
     """
     kinds = {v.kind for v in g.violations}
-    if kinds & {"coherence_miscount", "provenance", "leak", "dose", "unexecuted_cover", "unjoined"}:
+    if kinds & {"coherence_miscount", "coherence_unmeasured", "provenance", "leak", "dose",
+                "unexecuted_cover", "unjoined"}:
         return "P1"
     if "step_behind" in kinds:
         return "P2"
@@ -852,6 +974,7 @@ def audit_task(task: str, root: Path) -> TaskReport:
         ledger_row = seal_rows.get(d.sha16 or "", {})
         grades.append(grade_delivery(
             d, msgs, acq_cache, passing, ledger_row,
+            proof_rows=recon.raw_rows,
             receipt_level=receipt_by_seal.get(d.sha16 or "", 1),
         ))
 

@@ -199,7 +199,7 @@ def _derived_rows() -> dict[str, dict[str, Any]]:
                     )
                 elif name in {"p2p_regression_rate", "caller_breakage_count"}:
                     producer_authority = (
-                        "gt_deep_metrics._verifier_interface_metrics"
+                        "task_truth._build_verifier_truth"
                     )
                 else:
                     section_producers = {

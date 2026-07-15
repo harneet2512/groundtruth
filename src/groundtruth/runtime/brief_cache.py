@@ -104,6 +104,10 @@ def _atomic_write_payload(path: str, payload: dict[str, Any]) -> None:
         ) as handle:
             temp_path = handle.name
             json.dump(payload, handle, sort_keys=True)
+        # Publish with the cross-runner handoff mode already in place. Applying
+        # chmod after replace would expose a transient destination inherited from
+        # NamedTemporaryFile's private default mode.
+        os.chmod(temp_path, 0o644)
         os.replace(temp_path, path)
     finally:
         if temp_path:
@@ -255,8 +259,7 @@ def persist_brief(out_dir: str, brief_text: str, result_obj: Any = None,
         "metrics": _extract_metrics(result_obj),
     }
     try:
-        with open(cache_path(out_dir), "w", encoding="utf-8") as fh:
-            json.dump(d, fh)
+        _atomic_write_payload(cache_path(out_dir), d)
     except (OSError, TypeError):
         pass
     return d

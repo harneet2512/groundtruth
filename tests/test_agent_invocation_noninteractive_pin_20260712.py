@@ -167,6 +167,27 @@ def test_liveness_check_is_trajectory_based_not_stdout_grep() -> None:
         )
 
 
+def test_liveness_fallback_no_match_reaches_fail_closed_marker() -> None:
+    """A missing runner finish line must not abort before AGENT_DID_NOT_RUN is emitted.
+
+    GitHub runs multiline shell steps with ``bash -e -o pipefail``.  A bare no-match
+    ``grep | ...`` inside an assignment therefore terminates the step immediately,
+    bypassing the explicit zero-step classification that downstream diagnosis relies on.
+    """
+    checks = [r for r in _all_runs() if r and "AGENT_DID_NOT_RUN" in r]
+    assert checks, "no liveness-check step found"
+    for run in checks:
+        fallback = next(
+            line.strip()
+            for line in run.splitlines()
+            if line.strip().startswith("AGENT_STEPS=$(grep ")
+        )
+        assert fallback.endswith("|| true)"), (
+            "the finish-line fallback must tolerate grep no-match so execution reaches "
+            f"the explicit AGENT_DID_NOT_RUN gate: {fallback!r}"
+        )
+
+
 def test_receipt_and_profile_run_under_resolved_interpreter() -> None:
     # D3 pin: capability_receipt + rl_profile exports must run under $GT_PY — bare `python` is
     # <3.10 on 155/300 images (the same divergence class as B5) -> empty receipt -> profile dark.

@@ -1322,6 +1322,35 @@ def _compute_interface_preservation(timeline: list[dict], consumption: dict | No
     }
 
 
+def verifier_interface_metrics(truth_data: object) -> dict[str, int | float | None]:
+    """Project validated evaluator counts into mandatory interface metrics."""
+    result: dict[str, int | float | None] = {
+        "p2p_regression_rate": None,
+        "caller_breakage_count": None,
+    }
+    if not isinstance(truth_data, dict):
+        return result
+    verifier = truth_data.get("verifier_truth")
+    if not isinstance(verifier, dict) or verifier.get("schema") != "gt.verifier_truth.v1":
+        return result
+    if verifier.get("valid") is not True:
+        return result
+    total = verifier.get("p2p_total")
+    failed = verifier.get("p2p_failed")
+    if (
+        isinstance(total, int) and not isinstance(total, bool) and total > 0
+        and isinstance(failed, int) and not isinstance(failed, bool)
+        and 0 <= failed <= total
+    ):
+        result["p2p_regression_rate"] = d8(failed / total)
+    # This field is intentionally nullable.  It may be populated only by a
+    # future caller-aware verifier join, never inferred from failed test count.
+    breakages = verifier.get("caller_breakage_count")
+    if isinstance(breakages, int) and not isinstance(breakages, bool) and breakages >= 0:
+        result["caller_breakage_count"] = breakages
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Section 4: Scope Completeness
 # ---------------------------------------------------------------------------
@@ -1779,6 +1808,7 @@ def compute_performance_metrics(
     instance_id: str | None = None,
     gold_jsonl: str | None = None,
     consumption_ledger: dict | None = None,
+    verifier_truth: dict | None = None,
 ) -> dict:
     """Compute all performance metrics from sections 1-6, 8-9.
 
@@ -1873,6 +1903,7 @@ def compute_performance_metrics(
         s1 = _compute_localization(timeline, gold_files, brief_txt)
         s2 = _compute_edit_quality(timeline, gold_files, submission)
         s3 = _compute_interface_preservation(timeline, consumption_ledger)
+        s3.update(verifier_interface_metrics(verifier_truth))
         s4 = _compute_scope_completeness(timeline, gold_files)
         s5 = _compute_stuck_recovery(timeline, consumption_ledger)
         s6 = _compute_verify_before_submit(timeline, consumption_ledger)
@@ -1953,6 +1984,7 @@ def main() -> int:
     gold_flag = _opt("--gold")
     instance_id = _opt("--instance-id") or None
     gold_jsonl = _opt("--gold-jsonl") or None
+    task_truth_path = _opt("--task-truth")
     out_path = _opt("--out") or os.path.join(
         artifacts_dir, "gt_performance_metrics.json"
     )
@@ -1965,7 +1997,11 @@ def main() -> int:
 
     result = compute_performance_metrics(
         trajectory_path, artifacts_dir, gold_files,
-        instance_id=instance_id, gold_jsonl=gold_jsonl)
+        instance_id=instance_id, gold_jsonl=gold_jsonl,
+        verifier_truth=(
+            _safe_load_json(task_truth_path) if task_truth_path else None
+        ),
+    )
 
     try:
         with open(out_path, "w", encoding="utf-8") as f:

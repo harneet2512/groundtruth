@@ -134,8 +134,7 @@ def test_off_both_halves_identical_and_props_only(tmp_path, monkeypatch):
     loc_fp, _ = _assemble_symbol_passages(db, {_normalize("svc/redis.py")}, body_on=False)
     loc = loc_fp[_normalize("svc/redis.py")][0]
 
-    # ONE fresh anchor encode (a second call on the same db would hit the disk .embed_cache
-    # and skip the encode, capturing nothing). GT_SEM_BODY is unset -> OFF path.
+    # ONE fresh anchor encode. GT_SEM_BODY is unset -> OFF path.
     anchor_select._EMBED_CACHE.clear()
     anchor_select._SYMVEC_CACHE.clear()
     model = _CapturingModel()

@@ -69,7 +69,7 @@ def _command_message(cmd: str) -> dict:
 @arm4
 def test_conan17092_m55_coherence_miscount_flagged():
     r = _audit("conan-io__conan-17092")
-    assert "coherence_miscount" in _viol_kinds_at(r, 55)
+    assert "coherence_unmeasured" in _viol_kinds_at(r, 55)
 
 
 @arm4
@@ -117,9 +117,9 @@ def test_dynaconf_m219_edit_syntax_clean():
 
 @arm4
 def test_babel_m97_post_delivery_write_does_not_satisfy_claim():
-    """At m97 only post-GREEN writes m86/m94 count; m98 cannot retroactively satisfy it."""
+    """Legacy arm-4 has no durable write receipts and must fail closed."""
     r = _audit("python-babel__babel-1179")
-    assert "coherence_miscount" in _viol_kinds_at(r, 97)
+    assert "coherence_unmeasured" in _viol_kinds_at(r, 97)
 
 
 @arm4
@@ -232,6 +232,104 @@ def test_write_counter_requires_explicit_success_and_pairs_by_tool_call_id():
     assert ssa._writes_to_basename(msgs, "dates.py") == [0]
 
 
+def test_coherence_receipts_count_exact_path_successful_byte_changes_after_latest_green():
+    rows = [
+        {"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+         "action_step": 2, "write_ok": True, "bytes_changed": True},
+        {"event_type": "test_proof", "action_step": 3, "passed": True},
+        {"event_type": "source_write_proof", "file_path": "other/dates.py",
+         "action_step": 4, "write_ok": True, "bytes_changed": True},
+        {"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+         "action_step": 5, "write_ok": False, "bytes_changed": True},
+        {"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+         "action_step": 6, "write_ok": True, "bytes_changed": False},
+        {"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+         "action_step": 7, "write_ok": True, "bytes_changed": True},
+        {"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+         "action_step": 8, "write_ok": True, "bytes_changed": True},
+        {"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+         "action_step": 9, "write_ok": True, "bytes_changed": True},
+        {"outcome": "delivered", "content_sha256_16": "seal"},
+        {"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+         "action_step": 9, "write_ok": True, "bytes_changed": True},
+    ]
+
+    proof = ssa.coherence_write_proof(rows, "pkg/dates.py", delivery_iteration=9,
+                                      delivery_seal="seal")
+
+    assert proof.measured is True
+    assert proof.count == 3
+    assert proof.write_steps == (7, 8, 9)
+    assert proof.latest_passing_test_step == 3
+
+
+@pytest.mark.parametrize("rows,detail", [
+    ([], "absent"),
+    ([{"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+       "action_step": 2, "write_ok": True}], "malformed"),
+    ([{"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+       "action_step": 2, "write_ok": True, "bytes_changed": True},
+      {"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+       "action_step": 2, "write_ok": True, "bytes_changed": True}], "duplicate"),
+    ([{"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+       "action_step": 2, "write_ok": True, "bytes_changed": True},
+      {"event_type": "test_proof", "action_step": 2, "passed": True}], "ambiguous"),
+])
+def test_coherence_receipts_fail_closed_when_absent_or_ambiguous(rows, detail):
+    rows = [*rows, {"outcome": "delivered", "content_sha256_16": "seal"}]
+    proof = ssa.coherence_write_proof(rows, "pkg/dates.py", delivery_iteration=9,
+                                      delivery_seal="seal")
+
+    assert proof.measured is False
+    assert proof.count is None
+    assert detail in proof.reason
+
+
+def test_coherence_grade_never_falls_back_to_trajectory_command_text(monkeypatch):
+    delivery = ssa.sso.Delivery(
+        iteration=9, event_type="semantic_drift", layer="detect.coherence",
+        outcome="delivered", reason="", chars=38,
+        payload="you have rewritten pkg/dates.py 1 times", file_path="pkg/dates.py",
+        sha16="0123456789abcdef", home_msg=2,
+    )
+    msgs = [
+        _command_message("sed -i s/a/b/ pkg/dates.py"),
+        {"role": "tool", "content": "<returncode>0</returncode>\nchanged"},
+        {"role": "tool", "content": delivery.payload},
+    ]
+    monkeypatch.setattr(ssa, "_writes_to_basename", lambda *_a, **_k: [0], raising=False)
+
+    grade = ssa.grade_delivery(
+        delivery, msgs, {}, [], {}, proof_rows=[], receipt_level=1,
+    )
+
+    violation = next(v for v in grade.violations if v.kind == "coherence_unmeasured")
+    assert "UNMEASURED" in violation.detail
+
+
+def test_coherence_grade_accepts_matching_durable_receipts():
+    delivery = ssa.sso.Delivery(
+        iteration=9, event_type="semantic_drift", layer="detect.coherence",
+        outcome="delivered", reason="", chars=38,
+        payload="you have rewritten pkg/dates.py 2 times", file_path="pkg/dates.py",
+        sha16="0123456789abcdef", home_msg=0,
+    )
+    rows = [
+        {"event_type": "test_proof", "action_step": 3, "passed": True},
+        {"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+         "action_step": 7, "write_ok": True, "bytes_changed": True},
+        {"event_type": "source_write_proof", "file_path": "pkg/dates.py",
+         "action_step": 8, "write_ok": True, "bytes_changed": True},
+        {"outcome": "delivered", "content_sha256_16": delivery.sha16},
+    ]
+
+    grade = ssa.grade_delivery(delivery, [{"role": "tool", "content": delivery.payload}],
+                               {}, [], {}, proof_rows=rows)
+
+    assert not ({"coherence_miscount", "coherence_unmeasured"}
+                & {violation.kind for violation in grade.violations})
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # GENERALIZATION — not overfit to the six named tasks
 # ══════════════════════════════════════════════════════════════════════════════
@@ -244,7 +342,7 @@ def test_write_counter_requires_explicit_success_and_pairs_by_tool_call_id():
 ])
 def test_more_coherence_miscounts_flagged(task, home):
     r = _audit(task)
-    assert "coherence_miscount" in _viol_kinds_at(r, home)
+    assert "coherence_unmeasured" in _viol_kinds_at(r, home)
 
 
 @arm4

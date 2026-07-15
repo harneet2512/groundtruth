@@ -347,16 +347,16 @@ def test_embed_memory_cache_is_model_keyed(tmp_path):
     )
 
 
-def test_embed_disk_cache_is_model_keyed(tmp_path):
-    """A .embed_cache pkl written under the e5 identity must MISS under gte
-    (the disk short-circuit was also keyed without model identity)."""
+def test_embed_matrix_cache_is_process_local(tmp_path):
+    """Embedding matrices must not be published beside graph.db."""
     a = _fresh_anchor_select()
     db = str(tmp_path / "graph.db")
     _mini_graph(db)
 
     _, m_e5 = a._get_file_embeddings(db, str(tmp_path), _DimEmbedder(E5_MODEL, E5_DIM))
     assert m_e5["src/app.py"].shape[1] == E5_DIM
-    # Drop the memory cache so only the on-disk pkl could satisfy the next call.
+    assert not (Path(db).parent / ".embed_cache").exists()
+    # A fresh process-equivalent call recomputes under the requested model.
     a._EMBED_CACHE.clear()
 
     _, m_gte = a._get_file_embeddings(
@@ -367,9 +367,8 @@ def test_embed_disk_cache_is_model_keyed(tmp_path):
     )
 
 
-def test_embed_disk_cache_width_mismatch_is_miss(tmp_path):
-    """Defense-in-depth: a pkl under the CORRECT key whose matrices have the WRONG
-    vector width (stale/corrupt) is treated as a MISS and recomputed."""
+def test_legacy_embed_disk_cache_is_ignored(tmp_path):
+    """A legacy matrix pickle is semantically opaque and must never be consumed."""
     a = _fresh_anchor_select()
     db = str(tmp_path / "graph.db")
     _mini_graph(db)
@@ -377,7 +376,9 @@ def test_embed_disk_cache_width_mismatch_is_miss(tmp_path):
     key = a._cache_key(db, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DIM)
     cache_dir = Path(db).parent / ".embed_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    forged = (["src/app.py"], {"src/app.py": np.zeros((1, E5_DIM), dtype=np.float32)})
+    forged = (["src/app.py"], {
+        "src/app.py": np.zeros((1, DEFAULT_EMBED_DIM), dtype=np.float32)
+    })
     with open(cache_dir / f"{key}.pkl", "wb") as f:
         pickle.dump(forged, f)
 
@@ -385,8 +386,9 @@ def test_embed_disk_cache_width_mismatch_is_miss(tmp_path):
         db, str(tmp_path), _DimEmbedder(DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DIM)
     )
     assert m["src/app.py"].shape[1] == DEFAULT_EMBED_DIM, (
-        "wrong-width pkl matrices were consumed instead of being treated as a miss"
+        "legacy disk matrices were consumed instead of being ignored"
     )
+    assert np.any(m["src/app.py"]), "forged zero matrix was consumed"
 
 
 # ---------------------------------------------------------------------------

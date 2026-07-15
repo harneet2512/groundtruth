@@ -43,7 +43,7 @@ def test_static_perf_authorities_name_real_producers() -> None:
         )
     for name in ("p2p_regression_rate", "caller_breakage_count"):
         assert perf[name]["producer_authority"] == (
-            "gt_deep_metrics._verifier_interface_metrics"
+            "task_truth._build_verifier_truth"
         )
 
 
@@ -83,13 +83,15 @@ def test_verifier_interface_metrics_require_canonical_truth() -> None:
     }
     assert deep_metrics._verifier_interface_metrics({
         "verifier_truth": {
-            "schema": "gt.verifier_truth.v1", "p2p_total": 4, "p2p_failed": 1,
+            "schema": "gt.verifier_truth.v1", "valid": True,
+            "p2p_total": 4, "p2p_failed": 1,
             "caller_breakage_count": 2,
         },
     }) == {"p2p_regression_rate": 0.25, "caller_breakage_count": 2}
     assert deep_metrics._verifier_interface_metrics({
         "verifier_truth": {
-            "schema": "gt.verifier_truth.v1", "p2p_total": 0, "p2p_failed": 0,
+            "schema": "gt.verifier_truth.v1", "valid": True,
+            "p2p_total": 0, "p2p_failed": 0,
             "caller_breakage_count": -1,
         },
     }) == {"p2p_regression_rate": None, "caller_breakage_count": None}

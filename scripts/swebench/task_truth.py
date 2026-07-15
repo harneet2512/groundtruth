@@ -352,11 +352,59 @@ def _truth_authority_map() -> dict[str, str]:
         "runtime_witness": "task_truth.runtime_witness",
         "brief_delivery": "task_truth.brief_provenance",
         "verifier_semantics": "task_truth.verifier_semantics",
+        "verifier_truth": "official report.json tests_status.PASS_TO_PASS",
         "obligations": "task_truth.obligation_status",
         "patch_hygiene": "task_truth.patch_hygiene",
         "trajectory_integrity": "task_truth.trajectory_integrity",
         "consumption": "gt_consumption_ledger.json via task_truth.deep_metrics",
     }
+
+
+def _build_verifier_truth(report: dict | None, instance_id: str | None) -> dict[str, Any]:
+    """Build count-only interface truth from the official evaluator report.
+
+    The report is evaluator-only data.  Test identifiers never leave this
+    function: downstream metric producers receive only a validated denominator
+    and failure count.  PASS_TO_PASS failures prove regressions, but they do not
+    identify distinct production callers, so caller breakage remains unmeasured.
+    """
+    base: dict[str, Any] = {
+        "schema": "gt.verifier_truth.v1",
+        "authority": "official_swebench_report.tests_status.PASS_TO_PASS",
+        "source_present": False,
+        "valid": False,
+        "p2p_total": None,
+        "p2p_failed": None,
+        "caller_breakage_count": None,
+        "caller_breakage_unmeasured_reason": "caller_aware_verifier_join_absent",
+    }
+    if not isinstance(report, dict) or not isinstance(instance_id, str) or not instance_id:
+        return base
+    entry = report.get(instance_id)
+    if not isinstance(entry, dict):
+        return base
+    base["source_present"] = True
+    tests_status = entry.get("tests_status")
+    p2p = tests_status.get("PASS_TO_PASS") if isinstance(tests_status, dict) else None
+    if not isinstance(p2p, dict):
+        return base
+    success = p2p.get("success")
+    failure = p2p.get("failure")
+    if not isinstance(success, list) or not isinstance(failure, list):
+        return base
+    if any(not isinstance(item, str) or not item for item in success + failure):
+        return base
+    # Duplicate or contradictory identifiers make the denominator ambiguous.
+    if len(set(success)) != len(success) or len(set(failure)) != len(failure):
+        return base
+    if set(success).intersection(failure):
+        return base
+    base.update({
+        "valid": True,
+        "p2p_total": len(success) + len(failure),
+        "p2p_failed": len(failure),
+    })
+    return base
 
 
 def _augment_artifacts_root(jobs_dir: str, artifacts: dict[str, str | None]) -> dict[str, str | None]:
@@ -652,6 +700,7 @@ def build_task_truth(
         "patch_hygiene": patch_hygiene or {},
         "reconciled": reconciled,
         "brief_provenance": brief_prov,
+        "verifier_truth": _build_verifier_truth(report, iid),
         "verifier_semantics": verifier_semantics,
         "oracle_events_status": {
             "path": arts.oracle_events,

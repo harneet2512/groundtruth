@@ -1458,28 +1458,10 @@ def _delivery_from_runtime_ledger(
 
 
 def _verifier_interface_metrics(truth_data: object) -> dict[str, int | float | None]:
-    """Return interface metrics only from the canonical verifier-truth contract."""
-    result: dict[str, int | float | None] = {
-        "p2p_regression_rate": None,
-        "caller_breakage_count": None,
-    }
-    if not isinstance(truth_data, dict):
-        return result
-    verifier = truth_data.get("verifier_truth")
-    if not isinstance(verifier, dict) or verifier.get("schema") != "gt.verifier_truth.v1":
-        return result
-    total = verifier.get("p2p_total")
-    failed = verifier.get("p2p_failed")
-    if (
-        isinstance(total, int) and not isinstance(total, bool) and total > 0
-        and isinstance(failed, int) and not isinstance(failed, bool)
-        and 0 <= failed <= total
-    ):
-        result["p2p_regression_rate"] = d8(failed / total)
-    breakages = verifier.get("caller_breakage_count")
-    if isinstance(breakages, int) and not isinstance(breakages, bool) and breakages >= 0:
-        result["caller_breakage_count"] = breakages
-    return result
+    """Compatibility wrapper around the shared PERF projection."""
+    from gt_performance_metrics import verifier_interface_metrics
+
+    return verifier_interface_metrics(truth_data)
 
 
 def build(task: str, results_dir: str, log_path: str = "",
@@ -1948,11 +1930,9 @@ def build(task: str, results_dir: str, log_path: str = "",
         # so steps_to_gold_* COMPUTE instead of nulling on the submission proxy.
         # OFFLINE-ONLY: the gold set lands only inside deep["performance"].
         deep["performance"] = compute_performance_metrics(
-            tj_path, results_dir, instance_id=task, consumption_ledger=consumption
+            tj_path, results_dir, instance_id=task, consumption_ledger=consumption,
+            verifier_truth=truth_data,
         )
-        interface = deep["performance"].get("interface_preservation")
-        if isinstance(interface, dict):
-            interface.update(_verifier_interface_metrics(truth_data))
     else:
         deep["performance"] = {"status": "UNMEASURED", "reason": "no_miniswe_trajectory"}
     deep["metric_applicability"] = build_metric_applicability(

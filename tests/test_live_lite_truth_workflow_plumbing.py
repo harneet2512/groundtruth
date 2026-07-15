@@ -64,6 +64,9 @@ def test_collect_finalizes_truth_from_explicit_task_root() -> None:
     assert run.index(root_assignment) < run.index(trajectory_bridge)
     assert run.index(trajectory_bridge) < run.index(initial_truth)
     assert run.index(initial_truth) < run.index(deep_metrics)
+    standalone = run.index("scripts/swebench/gt_performance_metrics.py")
+    assert run.index(initial_truth) < standalone
+    assert '--task-truth "$TASK_ARTIFACT_ROOT/task_truth.json"' in run
     assert run.index(deep_metrics) < run.index(final_truth)
     assert run.index(final_truth) < run.index("GT_METRICS_COMPLETE")
     assert 'cp "$TASK_ARTIFACT_ROOT/task_truth.json" trial_results/task_truth.json' in run

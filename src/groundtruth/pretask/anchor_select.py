@@ -15,7 +15,6 @@ from __future__ import annotations
 import hashlib
 import math
 import os
-import pickle
 import re
 import sqlite3
 import sys
@@ -211,7 +210,7 @@ def _embed(texts: list[str], model: object, *, is_query: bool = False) -> np.nda
 #   sym1     = per-FILE symbol-bag summary (one vector/file; was raw text[:600]).
 #   sym2-fn  = per-SYMBOL passages aggregated by MaxSim (CHANGE 1) — one vector per
 #              indexed symbol, file score = MaxSim over its symbols. Bumping past
-#              sym1 abandons every stale file-bag .pkl so the two shapes never mix.
+#              sym1 separates the process-local matrix cache from the old file-bag shape.
 # Single-sourced from embed.PASSAGE_CACHE_VERSION (2026-06-09) so the shared
 # passage-vector cache key can never drift between the two semantic halves.
 _SUMMARY_VERSION = PASSAGE_CACHE_VERSION
@@ -224,13 +223,13 @@ def _cache_key(
     *,
     body_on: bool | None = None,
 ) -> str:
-    """Cache key for the per-graph file-embedding matrices.
+    """Cache key for the process-local per-graph file-embedding matrices.
 
     MODEL-KEYED (bug fix 2026-06-09): the key folds in the embedder IDENTITY
     (model name + dim) alongside the graph signature. Before this, the key was
     md5(db:mtime:size:version) ONLY — a gte<->e5 model switch on the same graph
-    short-circuited into the OTHER model's matrices (memory dict + .embed_cache
-    pkl), which either dim-crashes the matmul (384 vs 768) or, worse, silently
+    short-circuited into the OTHER model's in-memory matrices, which either
+    dim-crashes the matmul (384 vs 768) or, worse, silently
     scores with stale foreign-model vectors. The identity is computed BEFORE any
     cache lookup (see _get_file_embeddings)."""
     db_path = Path(graph_db)
@@ -242,21 +241,6 @@ def _cache_key(
         f"{_SUMMARY_VERSION}:{model_name}:{dim}:sem_body={int(body_on)}"
     )
     return hashlib.md5(sig.encode()).hexdigest()
-
-
-def _matrices_match_dim(file_matrix: dict, dim: int) -> bool:
-    """True iff EVERY cached per-file matrix is a 2-D array whose vector width
-    equals the CURRENT model's dim. A pkl written under a different-dim model (or
-    a corrupted one) is treated as a cache MISS and recomputed — never consumed
-    (correct-or-quiet: stale vectors must not silently rank files)."""
-    try:
-        for m in file_matrix.values():
-            arr = np.asarray(m)
-            if arr.ndim != 2 or int(arr.shape[1]) != int(dim):
-                return False
-        return True
-    except Exception:
-        return False
 
 
 def _anchor_passage_budget() -> int:
@@ -341,40 +325,23 @@ def _get_file_embeddings(
 
     A file with ZERO indexed symbols falls back to its ``_file_summary`` text as ONE
     passage (a strict superset of today's behaviour). Empty/blank passages are never
-    embedded (correct-or-quiet). Cached in memory AND, per UNIQUE passage, in
-    ``_SYMVEC_CACHE`` so only cache-misses are encoded (one batched ONNX pass)."""
+    embedded (correct-or-quiet). Cached in process memory and, per UNIQUE passage,
+    in ``_SYMVEC_CACHE`` so only cache-misses are encoded (one batched ONNX pass).
+
+    The assembled matrix is intentionally not persisted beside ``graph.db``. A
+    matrix-only cache cannot restore the shared per-passage cache used by the
+    downstream bounded graph-localizer pass, so its presence changed acquisition
+    results across otherwise identical processes.
+    """
     # Model identity FIRST — before any cache lookup — so the cache key is
     # model-keyed and a gte<->e5 switch can never reuse the other model's
     # matrices (bug fix 2026-06-09: the key previously had NO model identity and
-    # both the memory dict and the .embed_cache pkl short-circuited before
-    # _model_identity ran).
+    # the memory dict short-circuited before _model_identity ran).
     model_name, dim = _model_identity(model)
     _body_on = os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
     key = _cache_key(graph_db, model_name, dim, body_on=_body_on)
     if key in _EMBED_CACHE:
         return _EMBED_CACHE[key]
-
-    # Try disk cache
-    cache_dir = Path(graph_db).parent / ".embed_cache"
-    cache_file = cache_dir / f"{key}.pkl"
-    if cache_file.exists():
-        try:
-            with open(cache_file, "rb") as f:
-                result = pickle.load(f)
-            # Validate the on-disk shape matches the sym2-fn contract (a dict of
-            # per-file matrices); a stale sym1 .pkl (np.ndarray value) is ignored.
-            # ALSO validate every matrix's vector WIDTH against the CURRENT model
-            # dim — a stale different-dim pkl is a MISS, never silently consumed.
-            if (
-                isinstance(result, tuple)
-                and len(result) == 2
-                and isinstance(result[1], dict)
-                and _matrices_match_dim(result[1], dim)
-            ):
-                _EMBED_CACHE[key] = result
-                return result
-        except Exception:
-            pass  # corrupt/legacy cache -> recompute below (correct-or-quiet)
 
     conn = sqlite3.connect(graph_db)
     c = conn.cursor()
@@ -508,14 +475,6 @@ def _get_file_embeddings(
 
     result = (file_paths, file_matrix)
     _EMBED_CACHE[key] = result
-
-    # Save disk cache (best-effort; a read-only dir must not break the brief).
-    try:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        with open(cache_file, "wb") as f:
-            pickle.dump(result, f)
-    except Exception:
-        pass
 
     return result
 
