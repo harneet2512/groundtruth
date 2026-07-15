@@ -481,7 +481,9 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
     assert by_name["gold_rank"]["run_measurement"] == gold_rank_aggregate
     assert by_name["gold_rank"]["task_measurements"][task]["status"] == "NOT_APPLICABLE"
     assert by_name["patch_size"]["run_bucket"] == "NOT_APPLICABLE"
-    assert by_name["caller_contract"]["task_buckets"][task] == "UNMEASURED:missing_lineage"
+    assert by_name["caller_contract"]["task_buckets"][task] == (
+        "UNMEASURED:no_bound_opportunity"
+    )
     assert by_name[first_acq]["task_buckets"][task] == (
         "UNMEASURED:support:source_contribution_correct"
     )
@@ -611,7 +613,7 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
         "UNMEASURED:support:source_contribution_correct"
     )
     assert incomplete_by_name["caller_contract"]["task_buckets"][task] == (
-        "UNMEASURED:missing_lineage"
+        "UNMEASURED:no_bound_opportunity"
     )
     assert incomplete_by_name["gold_rank"]["run_bucket"] == "MEASURED"
 

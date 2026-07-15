@@ -236,6 +236,113 @@ def classify_delivery_feature(
     return "SEALED_DELIVERED_UNGRADED"
 
 
+def _bound_delivery_opportunity(record: object) -> tuple[bool | None, str]:
+    """Return terminal eligibility only from a validated bound opportunity.
+
+    ``eligible_opportunity`` historically means that a formatter-visible
+    candidate existed.  The candidate-local ``delivery_eligible`` values are
+    the authoritative eligibility decision.  Recompute their aggregate here
+    so a broad lifecycle heuristic can never promote a terminal delivery row.
+    """
+    if record is None:
+        return None, "no_bound_opportunity"
+    if not isinstance(record, dict):
+        return None, "malformed_bound_opportunity"
+    if record.get("status") != "BOUND":
+        if record.get("status") == "UNMEASURED":
+            reason = record.get("reason")
+            return None, str(reason) if isinstance(reason, str) and reason else (
+                "unbound_opportunity"
+            )
+        return None, "malformed_bound_opportunity"
+
+    evidence = record.get("decision_boundary_evidence")
+    count = record.get("opportunity_count")
+    eligible_count = record.get("delivery_eligible_count")
+    selected_count = record.get("selected_count")
+    if (
+        not isinstance(evidence, list)
+        or not evidence
+        or not isinstance(count, int)
+        or isinstance(count, bool)
+        or count != len(evidence)
+        or not isinstance(eligible_count, int)
+        or isinstance(eligible_count, bool)
+        or not isinstance(selected_count, int)
+        or isinstance(selected_count, bool)
+    ):
+        return None, "malformed_bound_opportunity"
+    if any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("delivery_eligible"), bool)
+        or not isinstance(item.get("selected"), bool)
+        or (item.get("selected") is True and item.get("delivery_eligible") is not True)
+        or item.get("parent_policy_joined") is not True
+        for item in evidence
+    ):
+        return None, "malformed_bound_opportunity"
+    observed_eligible = sum(item["delivery_eligible"] is True for item in evidence)
+    observed_selected = sum(item["selected"] is True for item in evidence)
+    if (
+        eligible_count != observed_eligible
+        or selected_count != observed_selected
+        or eligible_count < 0
+        or eligible_count > count
+        or selected_count < 0
+        or selected_count > count
+        or selected_count > eligible_count
+    ):
+        return None, "malformed_bound_opportunity"
+    return eligible_count > 0, "bound_delivery_opportunity"
+
+
+def classify_bound_delivery_feature(
+    feature: str,
+    family: str,
+    lifecycle: dict[str, Any],
+    readiness: dict[str, Any],
+    ledger_rows: list[dict[str, Any]],
+    joined_entries: list[dict[str, Any]],
+    opportunity: object,
+    *,
+    artifacts_attested: bool,
+) -> str:
+    """Join bound opportunity truth to one candidate-delivery terminal row."""
+    eligible, reason = _bound_delivery_opportunity(opportunity)
+    if eligible is None:
+        return f"UNMEASURED:{reason}"
+    if eligible is False:
+        return "NOT_ELIGIBLE"
+    if artifacts_attested is not True:
+        return "UNMEASURED:artifact_attestation_incomplete"
+
+    rows = [
+        row for row in ledger_rows
+        if _lineage_has_feature(_lineage_from_row(row), feature, family)
+    ]
+    entries = [
+        entry for entry in joined_entries
+        if _lineage_has_feature(entry.get("feature_lineage"), feature, family)
+        and entry.get("source") == "trajectory"
+        and entry.get("joined") is True
+        and entry.get("join_method") == "seal"
+    ]
+    if not rows and not entries:
+        return "DARK_ELIGIBLE_NO_PRODUCER"
+
+    # Opportunity evidence, not the legacy lifecycle eligibility heuristic,
+    # owns this terminal decision.  Preserve the remaining lifecycle fields
+    # for truth/freshness grading only.
+    bound_lifecycle = dict(lifecycle)
+    bound_lifecycle["eligible"] = {
+        "status": "MEASURED", "value": True,
+        "source_artifact": "feature.opportunity",
+    }
+    return classify_delivery_feature(
+        feature, family, bound_lifecycle, readiness, ledger_rows, joined_entries
+    )
+
+
 def classify_typed_terminal(record: object, expected_role: str) -> str:
     """Classify support/control terminals without borrowing delivery gates."""
     if expected_role not in TYPED_TERMINAL_GATES or not isinstance(record, dict):
@@ -996,10 +1103,22 @@ def diagnose_run(
                         ).get(feature, _opportunity_record(feature_row))
                         task_buckets[task] = classify_cap_control(feature, control_row)
                     else:
-                        task_buckets[task] = classify_delivery_feature(
+                        task_opportunity = opportunity.get("features", {}).get(
+                            feature, _opportunity_record(feature_row)
+                        )
+                        task_attested = (
+                            diagnosis_integrity.get("tasks", {}).get(task, {}).get(
+                                "status"
+                            ) == "BOUND"
+                            and isinstance(integrity, dict)
+                            and integrity.get("required_inputs_complete") is True
+                            and integrity.get("visible_audit_complete") is True
+                        )
+                        task_buckets[task] = classify_bound_delivery_feature(
                             feature, family,
                             _task_lifecycle(metrics, feature, family),
-                            readiness, ledger_rows, entries,
+                            readiness, ledger_rows, entries, task_opportunity,
+                            artifacts_attested=task_attested,
                         )
                 run_bucket = _aggregate_bucket(task_buckets)
             task_opportunities: dict[str, dict[str, Any]] = {}
