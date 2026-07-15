@@ -24,7 +24,7 @@ echo "[1/3] downloading task-* + gt-gate-deep-* artifacts of run $RUN_ID -> $ART
 # clear the gh run-log zip cache on C: between batches (it bloats the system drive)
 rm -f "/c/Users/Lenovo/AppData/Local/GitHub CLI/run-log-"*.zip 2>/dev/null
 for nm in $(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --paginate \
-            --jq '.artifacts[].name' | grep -E '^(task-|gt-gate-deep-)' | sort -u); do
+            --jq '.artifacts[].name' | grep -E "^(task-|gt-gate-deep-|gt-diagnosis-$RUN_ID$)" | sort -u); do
   [ -d "$ART/$nm" ] && continue
   gh run download "$RUN_ID" -R "$REPO" -n "$nm" -D "$ART/$nm" >/dev/null 2>&1 \
     && echo "  dl $nm" || echo "  MISS $nm"
@@ -47,5 +47,11 @@ done
 echo "  computed $n tasks"
 
 echo "[3/3] aggregate (resolved + paired) -> $MET/AGGREGATE.json"
-python "$GT/scripts/swebench/gt_run_metrics.py" "$MET" "$BASELINE" --run-id "$RUN_ID"
+EXPECTED_TASKS="$ART/gt-diagnosis-$RUN_ID/expected_tasks.json"
+if [ ! -s "$EXPECTED_TASKS" ]; then
+  echo "FATAL: canonical expected task population missing: $EXPECTED_TASKS" >&2
+  exit 1
+fi
+python "$GT/scripts/swebench/gt_run_metrics.py" "$MET" "$BASELINE" \
+  --run-id "$RUN_ID" --expected-tasks-file "$EXPECTED_TASKS"
 echo "DONE -> $MET"

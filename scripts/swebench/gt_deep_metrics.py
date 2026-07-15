@@ -1457,6 +1457,31 @@ def _delivery_from_runtime_ledger(
     return out
 
 
+def _verifier_interface_metrics(truth_data: object) -> dict[str, int | float | None]:
+    """Return interface metrics only from the canonical verifier-truth contract."""
+    result: dict[str, int | float | None] = {
+        "p2p_regression_rate": None,
+        "caller_breakage_count": None,
+    }
+    if not isinstance(truth_data, dict):
+        return result
+    verifier = truth_data.get("verifier_truth")
+    if not isinstance(verifier, dict) or verifier.get("schema") != "gt.verifier_truth.v1":
+        return result
+    total = verifier.get("p2p_total")
+    failed = verifier.get("p2p_failed")
+    if (
+        isinstance(total, int) and not isinstance(total, bool) and total > 0
+        and isinstance(failed, int) and not isinstance(failed, bool)
+        and 0 <= failed <= total
+    ):
+        result["p2p_regression_rate"] = d8(failed / total)
+    breakages = verifier.get("caller_breakage_count")
+    if isinstance(breakages, int) and not isinstance(breakages, bool) and breakages >= 0:
+        result["caller_breakage_count"] = breakages
+    return result
+
+
 def build(task: str, results_dir: str, log_path: str = "",
           db_path: str = "", pipeline_arg: str = "") -> dict:
     summ = _load_json(f"/tmp/gt_run_summary_{task}.json") or {}
@@ -1658,7 +1683,7 @@ def build(task: str, results_dir: str, log_path: str = "",
     behavioral_impact = {
         "total_deliveries": 0,
         "total_pivots": 0,
-        "impact_rate": 0.0,
+        "impact_rate": None,
         "impact_rate_semantics": "diagnostic_action_type_transition",
         "causal_status": "UNMEASURED",
         "gt_tokens_injected": None,
@@ -1834,7 +1859,11 @@ def build(task: str, results_dir: str, log_path: str = "",
         "behavioral_impact": {
             "total_deliveries": behavioral_impact.get("total_deliveries", 0),
             "total_pivots": behavioral_impact.get("total_pivots", 0),
-            "impact_rate": d8(behavioral_impact.get("impact_rate", 0)),
+            "impact_rate": (
+                d8(behavioral_impact.get("impact_rate"))
+                if int(behavioral_impact.get("total_deliveries") or 0) > 0
+                else None
+            ),
             "impact_rate_semantics": behavioral_impact.get(
                 "impact_rate_semantics", "diagnostic_action_type_transition"
             ),
@@ -1921,6 +1950,9 @@ def build(task: str, results_dir: str, log_path: str = "",
         deep["performance"] = compute_performance_metrics(
             tj_path, results_dir, instance_id=task, consumption_ledger=consumption
         )
+        interface = deep["performance"].get("interface_preservation")
+        if isinstance(interface, dict):
+            interface.update(_verifier_interface_metrics(truth_data))
     else:
         deep["performance"] = {"status": "UNMEASURED", "reason": "no_miniswe_trajectory"}
     deep["metric_applicability"] = build_metric_applicability(

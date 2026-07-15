@@ -60,6 +60,9 @@ def seam(tmp_path, monkeypatch):
     monkeypatch.setattr(g, "_POST_SEARCH_ON", False)
     monkeypatch.delenv("GT_POST_SEARCH_NATIVE", raising=False)
     monkeypatch.delenv("GT_GLOBAL_ARBITER", raising=False)
+    # The global pool is legal only behind the installed observation-batch commit
+    # handshake. This suite exercises arbitration itself with a single action.
+    monkeypatch.setattr(g, "_batch_commit_installed", True)
     g._reset_oracle_state()
     yield db
     g._reset_oracle_state()

@@ -52,6 +52,7 @@ Usage with pier:
 from __future__ import annotations
 
 import base64
+import ast
 import logging
 import os
 import re
@@ -289,7 +290,21 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         "episode_state.py",
         "evidence_envelope.py",
         "fact_registry.py",
+        # Typed FACT/CAP authority used by evidence envelopes and the additive
+        # control-participation schema. Depends only on fact_registry (above).
+        "feature_lineage.py",
         "gateway.py",
+        # Exact CAP-control participation schema used by the mini-seam's host-only
+        # decision receipts. Stdlib + feature_lineage/fact_registry only (both
+        # shipped), so the runtime package remains import-closed.
+        "control_participation.py",
+        # The seam imports this with package form
+        # ``from groundtruth.runtime import rl_profile`` during install-time
+        # production-default resolution.  It is stdlib-only at module scope.
+        "rl_profile.py",
+        # Pure deterministic E10 assignment kernel consulted by the seam at the
+        # delivery chokepoint. Stdlib-only; required for Profile-2 shadow receipts.
+        "shadow_holdout.py",
         # SM-3 "Super Mode" engine activation (2026-07-11): four BUILT-but-DARK
         # engines wired into gt_mini_patch behind default-OFF flags. gt_mini_patch
         # imports them at MODULE scope (regex-caught regardless of flag branch), so
@@ -375,16 +390,26 @@ _INJECTED_GT_MODULES: frozenset[str] = frozenset(
     for name in names
 )
 
+# Package modules are injected too: `_inject_steps_b64` creates each directory
+# and its `__init__.py`.  A `from groundtruth.runtime import gateway` statement
+# therefore depends on the real injected package, not on a separately listed
+# source file. Derive these identities from the same package map so the coverage
+# guard remains fail-closed without falsely rejecting a package import.
+_INJECTED_GT_PACKAGES: frozenset[str] = frozenset(
+    {"groundtruth"}
+    | {
+        "groundtruth." + ".".join(parts[:index])
+        for subdir in _PRODUCT_PACKAGE_MODULES
+        for parts in (subdir.replace("/", ".").split("."),)
+        for index in range(1, len(parts) + 1)
+    }
+)
+
 
 # Module-scope `from groundtruth... import` statements at the top level of a file
 # (indent 0). Submodule imports inside a try/except are still indented under the
 # try, so we match `from groundtruth.<a>.<b> import` regardless of leading
 # whitespace but only `from ... import` (not `import groundtruth` bare).
-_GT_IMPORT_RE = re.compile(
-    r"^\s*from\s+(groundtruth(?:\.[A-Za-z_][\w]*)+)\s+import\b", re.MULTILINE
-)
-
-
 def gt_mini_patch_required_modules(patch_source: str | None = None) -> set[str]:
     """Every `groundtruth.*` module gt_mini_patch.py imports at module scope.
 
@@ -401,7 +426,28 @@ def gt_mini_patch_required_modules(patch_source: str | None = None) -> set[str]:
             src = _PATCH_PATH.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return set()
-    return {m.group(1) for m in _GT_IMPORT_RE.finditer(src)}
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        # A patch that cannot be parsed cannot be proven import-closed.
+        raise RuntimeError("gt_mini_patch.py is not valid Python; import coverage unknown")
+    required: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        module = node.module
+        if module != "groundtruth" and not module.startswith("groundtruth."):
+            continue
+        if module in _INJECTED_GT_PACKAGES:
+            # Injected __init__.py files are deliberately empty.  Package-form
+            # imports therefore resolve each imported name as a real submodule;
+            # checking only the package would accept an absent module silently.
+            for alias in node.names:
+                if alias.name != "*":
+                    required.add(f"{module}.{alias.name}")
+        else:
+            required.add(module)
+    return required
 
 
 def _assert_gt_mini_patch_imports_covered(patch_source: str | None = None) -> None:

@@ -4,6 +4,7 @@ import pytest
 
 from groundtruth.runtime.fact_registry import REGISTRY
 from groundtruth.runtime.feature_lineage import (
+    CAP_BYTE_OWNER_MECHANISMS,
     CAP_BYTE_OWNER_IDS,
     CAP_ELIGIBILITY_IDS,
     CAP_FEATURE_IDS,
@@ -210,3 +211,24 @@ def test_cap_role_authority_is_total_and_has_exact_byte_owners() -> None:
     }
     assert cap_role_for("GT_SS_ELIGIBILITY") == "eligibility"
     assert cap_role_for("GT_GLOBAL_ARBITER") == "mediator"
+
+
+def test_cap_byte_owner_mechanism_authority_is_total_and_exact() -> None:
+    assert set(CAP_BYTE_OWNER_MECHANISMS) == set(CAP_BYTE_OWNER_IDS)
+    assert {
+        feature_id: authority.mechanism
+        for feature_id, authority in CAP_BYTE_OWNER_MECHANISMS.items()
+    } == {
+        "GT_CHANGE_SURFACE": "typed_lineage",
+        "GT_PATCH_DELTA": "typed_lineage",
+        "GT_LOC_RESLOT": "typed_lineage",
+        "GT_SS_SUBMIT_RED": "typed_lineage",
+        "GT_EDIT_CHECK": "exact_profile_member",
+        "GT_HYPOTHESIS": "exact_profile_member",
+        "GT_SS_COHERENCE_V2": "exact_profile_member",
+        "GT_CERT_DELIVERY": "exact_profile_member",
+    }
+    coherence = CAP_BYTE_OWNER_MECHANISMS["GT_SS_COHERENCE_V2"]
+    assert coherence.bindings[0].producer == "ss_coherence_v2"
+    assert coherence.bindings[0].layer == "detect.coherence"
+    assert coherence.bindings[0].fact_class is None

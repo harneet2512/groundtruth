@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import copy
+import json
 
 import pytest
 
@@ -149,7 +151,7 @@ def test_real_v2_producer_seal_is_split_into_production_shaped_source_receipts(t
         r for r in payload["metrics"]["block_receipts"]
         if r["block_id"] == "file-entry-1"
     )
-    assert rows["graph_validity"]["content_sha256_16"] == _sha(
+    assert rows["graph_validity"]["block_content_sha256_16"] == _sha(
         payload["brief_text"][
             file_receipt["char_span"][0]:file_receipt["char_span"][1]
         ]
@@ -173,6 +175,158 @@ def test_typed_candidate_local_sources_join_to_the_same_sealed_file_receipt(tmp_
         assert rows[feature]["status"] == "MEASURED"
         assert rows[feature]["block_id"] == "file-entry-1"
         assert rows[feature]["receipt_level"] == 2
+
+
+def test_acq_row_preserves_source_block_and_actual_producer_seal_identities(tmp_path):
+    payload, ledger, trajectory = _artifacts(tmp_path, extended_sources=True)
+    row = collect_acq_provenance(payload, ledger, trajectory)["freshness_basis"]
+    producer = ledger["entries"][0]
+    block = next(
+        receipt
+        for receipt in payload["metrics"]["block_receipts"]
+        if receipt["block_id"] == "file-entry-1"
+    )
+
+    # Gate 1 is owned by the producer seal.  The candidate block has a distinct
+    # identity that proves which bytes inside that sealed payload came from ACQ.
+    assert row["content_sha256_16"] == producer["content_sha256_16"]
+    assert row["chars_delivered"] == producer["chars"]
+    assert row["block_content_sha256_16"] == block["content_hash"][:16]
+    assert row["block_char_span"] == block["char_span"]
+    assert row["producer_payload_scope"] == "whole_brief"
+    assert row["producer_entry_index"] == 0
+    assert row["producer_ledger_layer"] == producer["ledger_layer"]
+    assert row["delivery_message_index"] == 0
+    assert row["receipt_evidence"] == {
+        "referenced_message_index": 1,
+        "acted_message_index": None,
+    }
+    assert row["source_artifact"] == "brief_result.json"
+    assert row["source_fields"] == [
+        "metrics.localization_proof[0].acquisition_sources.freshness_basis"
+    ]
+
+    # A source-to-receipt join is not source truth, chronological timing, or a
+    # causal fair probe.  Those remain unknown until their own live authorities join.
+    assert row["source_contribution_correct"] is None
+    assert row["timing_inherited_from_fact_delivery"] is None
+    assert row["source_causal_fair_probe"] is None
+
+
+def test_exact_block_producer_seal_is_a_valid_gate_one_identity(tmp_path):
+    payload, _, trajectory = _artifacts(tmp_path, extended_sources=True)
+    block_receipt = next(
+        receipt for receipt in payload["metrics"]["block_receipts"]
+        if receipt["block_id"] == "file-entry-1"
+    )
+    start, end = block_receipt["char_span"]
+    block = payload["brief_text"][start:end]
+    ledger_path = tmp_path / "exact_block_runtime_ledger.jsonl"
+    ledger_path.write_text(json.dumps({
+        "layer": "brief.localization",
+        "event_type": "brief",
+        "file_path": "src/pkg/loader.py",
+        "outcome": "delivered",
+        "chars_delivered": len(block),
+        "content_sha256_16": _sha(block)[:16],
+        "iteration": 0,
+    }) + "\n", encoding="utf-8")
+    ledger = build_consumption_ledger(
+        trajectory, runtime_ledger_path=str(ledger_path)
+    )
+
+    row = collect_acq_provenance(payload, ledger, trajectory)["freshness_basis"]
+    assert row["status"] == "MEASURED"
+    assert row["content_sha256_16"] == _sha(block)[:16]
+    assert row["chars_delivered"] == len(block)
+    assert row["producer_payload_scope"] == "exact_block"
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [("chars", "1"), ("ledger_chars", 1.0), ("msg_index", False)],
+)
+def test_malformed_producer_seal_types_fail_closed(tmp_path, field, bad_value):
+    payload, ledger, trajectory = _artifacts(tmp_path)
+    ledger["entries"][0][field] = bad_value
+
+    row = collect_acq_provenance(payload, ledger, trajectory)["graph_validity"]
+    assert row["status"] == "UNMEASURED"
+    assert row["content_sha256_16"] is None
+    assert row["chars_delivered"] is None
+    assert row["blocker"] == "producer_seal_absent"
+
+
+def test_strongest_receipt_wins_with_first_candidate_as_stable_tie_break(tmp_path):
+    payload, _, trajectory = _artifacts(tmp_path, receipt=1)
+    brief = payload["brief_text"].replace(
+        "</gt-task-brief>", "2. src/pkg/other.py\n</gt-task-brief>"
+    )
+    payload["brief_text"] = brief
+    payload["brief_sha256"] = _sha(brief)
+    payload["metrics"]["block_receipts"] = _brief_block_receipts(brief)
+    second = copy.deepcopy(payload["metrics"]["localization_proof"][0])
+    second.update({"rank": 2, "path": "src/pkg/other.py"})
+    payload["metrics"]["localization_proof"].append(second)
+    trajectory["messages"][0]["content"] = brief + "\n\nFix the issue."
+    trajectory["messages"][1] = {
+        "role": "assistant",
+        "content": "I will inspect src/pkg/loader.py.",
+        "extra": {"actions": [{"command": "pytest src/pkg/loader.py"}]},
+    }
+    trajectory["messages"].append({
+        "role": "assistant", "content": "I will inspect src/pkg/other.py."
+    })
+    ledger = _runtime_join(tmp_path, brief, trajectory, producer_seal=True)
+
+    row = collect_acq_provenance(payload, ledger, trajectory)["graph_validity"]
+    assert row["receipt_level"] == 3
+    assert row["block_id"] == "file-entry-1"
+    assert row["receipt_evidence"]["acted_message_index"] == 1
+
+
+def test_every_acq_surface_names_its_exact_source_fields(tmp_path):
+    payload, ledger, trajectory = _artifacts(tmp_path, extended_sources=True)
+    components = payload["metrics"]["localization_proof"][0]["components"]
+    components.update({"body": 1.0, "cochange": 3.0})
+    rows = collect_acq_provenance(payload, ledger, trajectory)
+
+    expected = {
+        "graph_validity": [
+            "metrics.graph_edge_count",
+            "metrics.localization_proof[0].witness_verified",
+            "metrics.localization_proof[0].witness",
+        ],
+        "structural_depth": [
+            "metrics.structural_signal_count",
+            "metrics.localization_proof[0].components.reach",
+        ],
+        "lexical_FTS5": [
+            "metrics.fts5_signal_count",
+            "metrics.localization_proof[0].components.lex",
+        ],
+        "semantic_embedder": [
+            "metrics.semantic_signal_count",
+            "metrics.localization_proof[0].components.sem",
+        ],
+        "body_retrieval": [
+            "metrics.localization_proof[0].components.body",
+        ],
+        "cochange_history": [
+            "metrics.localization_proof[0].components.cochange",
+        ],
+    }
+    expected.update({
+        feature: [
+            f"metrics.localization_proof[0].acquisition_sources.{feature}"
+        ]
+        for feature in (
+            "resolution_honesty", "type_intelligence", "LSP",
+            "freshness_basis", "repo_scope", "determinism",
+        )
+    })
+    assert tuple(rows) == ACQ_FEATURES
+    assert {feature: rows[feature]["source_fields"] for feature in rows} == expected
 
 
 @pytest.mark.parametrize(
@@ -259,6 +413,8 @@ def test_auditor_recomputed_tag_entry_without_producer_seal_never_promotes(tmp_p
     row = collect_acq_provenance(payload, ledger, trajectory)["graph_validity"]
     assert row["status"] == "UNMEASURED"
     assert row["blocker"] == "producer_seal_absent"
+    assert row["content_sha256_16"] is None
+    assert row["chars_delivered"] is None
 
 
 def test_nonseal_join_method_never_promotes_acquisition(tmp_path):
@@ -268,12 +424,14 @@ def test_nonseal_join_method_never_promotes_acquisition(tmp_path):
     row = collect_acq_provenance(payload, ledger, trajectory)["graph_validity"]
     assert row["status"] == "UNMEASURED"
     assert row["blocker"] == "producer_seal_absent"
+    assert row["content_sha256_16"] is None
+    assert row["chars_delivered"] is None
 
 
 def test_candidate_local_body_and_history_sources_require_an_acted_receipt(tmp_path):
     payload, ledger, trajectory = _artifacts(tmp_path)
     components = payload["metrics"]["localization_proof"][0]["components"]
-    components.update({"body": 0.6, "commit": 0.4})
+    components.update({"body": 1.0, "cochange": 3.0})
     trajectory["messages"][1]["extra"] = {
         "actions": [{"command": "pytest src/pkg/loader.py"}]
     }
@@ -282,3 +440,26 @@ def test_candidate_local_body_and_history_sources_require_an_acted_receipt(tmp_p
     assert rows["body_retrieval"]["status"] == "MEASURED"
     assert rows["cochange_history"]["status"] == "MEASURED"
     assert rows["body_retrieval"]["receipt_level"] == 3
+    assert rows["cochange_history"]["receipt_level"] == 3
+
+
+def test_zero_candidate_repeat_identity_is_observed_without_delivery_promotion(tmp_path):
+    payload, _, _ = _artifacts(tmp_path)
+    digest = "a" * 64
+    payload["metrics"]["localization_proof"] = []
+    payload["metrics"]["block_receipts"] = []
+    payload["metrics"]["determinism_witness"] = {
+        "kind": "repeat_identity",
+        "runs": 2,
+        "canonical_sha256": [digest, digest],
+    }
+
+    row = collect_acq_provenance(payload, {}, None)["determinism"]
+
+    assert row["status"] == "UNMEASURED"
+    assert row["source_artifact"] == "brief_result.json"
+    assert row["source_fields"] == ["metrics.determinism_witness"]
+    assert row["blocker"] == "candidate_delivery_absent"
+    assert row["content_sha256_16"] is None
+    assert row["chars_delivered"] is None
+    assert row["receipt_level"] is None

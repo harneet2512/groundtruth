@@ -1,26 +1,18 @@
-"""Single-generation brief cache (A1, 2026-06-13) — generate the v1r brief ONCE per proof.
+"""Gate-to-emit brief cache plus independent acquisition determinism proof.
 
-The substrate proof generated the brief TWICE: gate3b (``foundational_gates``, a
-SEPARATE subprocess that runs FIRST) called ``generate_v1r_brief`` to MEASURE the
-embedder-consumption metrics, and ``emit_brief`` (``gt_run_proof``, later) called it
-AGAIN to WRITE ``brief.txt``. Two generations across a process boundary mean the
-gate-certified brief can DIVERGE from the delivered brief (any nondeterminism), and
-the most expensive proof stage runs twice.
-
-This module shares one ``V1RBriefResult`` across the process boundary via a small
-on-disk artifact (``<out_dir>/brief_result.json``): the FIRST caller (gate3b)
-generates + persists; the SECOND (emit_brief) loads it. Result: ONE generation, and
-the certified brief text + sha == the delivered ``brief.txt`` by construction.
-
-FAIL-SAFE: any cache miss / read error / write error falls back to generating
-(``generated=True``) — it degrades to the prior double-generation, it NEVER breaks
-the proof or blocks ``brief.txt``. So this is a pure optimization with a safety net.
+The foundational-gate subprocess persists the authoritative ``V1RBriefResult``.
+The later emit stage loads those exact bytes, executes the same acquisition once
+independently, and attaches a repeat witness only when their canonical identities
+match. The second execution never replaces the model-visible gate artifact.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import copy
+import tempfile
+from dataclasses import dataclass
 from typing import Any, Optional
 
 BRIEF_CACHE_BASENAME = "brief_result.json"
@@ -33,7 +25,7 @@ _METRIC_FIELDS = (
     # gate->emit boundary so the sealed cache retains acquisition provenance.
     # Sidecar-only: none participates in ``brief_text``.
     "graph_edge_count", "structural_signal_count", "fts5_signal_count",
-    "block_receipts", "tokenizer_used", "budget_suppressed",
+    "block_receipts", "control_participation", "tokenizer_used", "budget_suppressed",
     # B-4: persist the localization confidence tier so the L5b verify-horizon reader
     # (gt_mini_patch._brief_confidence_tier) can consume it. Previously omitted -> the
     # tier never reached the agent -> the LOW-tier verify advisory shipped DEAD.
@@ -72,21 +64,162 @@ def _extract_metrics(obj: Any) -> dict:
     return out
 
 
-def request_identity(issue_text: str, graph: str) -> str:
-    """Identity of a brief REQUEST — sha256 of (issue text + graph file path + size).
-    A cached brief may be reused ONLY when this matches the request; a different task
-    (different issue) or a rebuilt graph (different size) MUST miss → regenerate. This
-    is the guard against cross-task contamination: a reused ``out_dir`` (e.g. a codespace
-    that runs several tasks through one /tmp/gt) must NOT serve a prior task's brief."""
+def _canonical_acquisition_sha256(payload: Any) -> str:
+    """Hash exact brief text and persisted ACQ data, excluding this witness."""
+    if isinstance(payload, dict) and isinstance(payload.get("metrics"), dict):
+        brief_text = payload.get("brief_text")
+        metrics = copy.deepcopy(payload["metrics"])
+    else:
+        brief_text = getattr(payload, "brief_text", None)
+        metrics = copy.deepcopy(_extract_metrics(payload))
+    if not isinstance(brief_text, str) or not brief_text.strip():
+        raise ValueError("brief determinism: missing brief text")
+    proofs = metrics.get("localization_proof")
+    if not isinstance(proofs, list):
+        raise ValueError("brief determinism: localization proof is not a list")
+    metrics.pop("determinism_witness", None)
+    for proof in proofs:
+        if not isinstance(proof, dict):
+            raise ValueError("brief determinism: malformed localization proof")
+        sources = proof.get("acquisition_sources")
+        if isinstance(sources, dict):
+            sources.pop("determinism", None)
+    canonical = json.dumps(
+        {"brief_text": brief_text.strip(), "metrics": metrics},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _atomic_write_payload(path: str, payload: dict[str, Any]) -> None:
+    """Atomically replace one JSON cache artifact in its existing directory."""
+    parent = os.path.dirname(path) or "."
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=parent, delete=False,
+        ) as handle:
+            temp_path = handle.name
+            json.dump(payload, handle, sort_keys=True)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+
+def verify_independent_generation(
+    out_dir: str,
+    primary: dict[str, Any],
+    generate_again: Any,
+    *,
+    expect_identity: str,
+) -> dict[str, Any]:
+    """Execute a second same-input acquisition and persist equal identities.
+
+    Cache reuse is not an execution. The primary model-visible bytes remain the
+    delivery authority; the second result is used only as a repeat witness.
+    """
+    if not isinstance(primary, dict) or primary.get("identity") != expect_identity:
+        raise ValueError("brief determinism: primary request identity mismatch")
+    first_sha = _canonical_acquisition_sha256(primary)
+    second_sha = _canonical_acquisition_sha256(generate_again())
+    identities = [first_sha, second_sha]
+    verdict = {"matched": first_sha == second_sha, "canonical_sha256": identities}
+    if not verdict["matched"]:
+        return verdict
+
+    current = load_cached_brief(out_dir, expect_identity=expect_identity)
+    if current is None or _canonical_acquisition_sha256(current) != first_sha:
+        raise ValueError("brief determinism: primary cache changed before witness join")
+    metrics = current.get("metrics")
+    proofs = metrics.get("localization_proof") if isinstance(metrics, dict) else None
+    if not isinstance(proofs, list):
+        raise ValueError("brief determinism: localization proof is not a list")
+    witness = {
+        "kind": "repeat_identity",
+        "runs": 2,
+        "canonical_sha256": identities,
+    }
+    # A deterministic acquisition may honestly produce a non-empty brief with no
+    # localized file candidate (for example a new-file task). Repeat identity is
+    # still a run-level fact; candidate-local copies exist only when candidates do.
+    for proof in proofs:
+        if not isinstance(proof, dict):
+            raise ValueError("brief determinism: malformed candidate proof")
+        sources = proof.setdefault("acquisition_sources", {})
+        if not isinstance(sources, dict):
+            raise ValueError("brief determinism: malformed acquisition sources")
+        sources["determinism"] = dict(witness)
+    metrics["determinism_witness"] = dict(witness)
+    _atomic_write_payload(cache_path(out_dir), current)
+    return verdict
+
+
+def _graph_state_sha256(graph: str) -> str:
+    """Hash the SQLite database and its committed WAL carrier, if present."""
+    state = hashlib.sha256()
+    found = False
+    for suffix in ("", "-wal"):
+        path = f"{graph}{suffix}"
+        try:
+            size = os.path.getsize(path)
+            state.update(suffix.encode("ascii"))
+            state.update(str(size).encode("ascii"))
+            state.update(b"\x00")
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    state.update(chunk)
+            found = True
+        except OSError:
+            if suffix == "":
+                state.update(b"nostat")
+    return state.hexdigest() if found else "nostat"
+
+
+@dataclass(frozen=True)
+class RequestIdentityHandoff:
+    """One immutable graph snapshot identity shared across an emit operation."""
+
+    value: str
+    issue_text: str
+    graph: str
+    graph_state_sha256: str
+
+
+def capture_request_identity(issue_text: str, graph: str) -> RequestIdentityHandoff:
+    graph_state = _graph_state_sha256(graph)
     h = hashlib.sha256()
     h.update((issue_text or "").encode("utf-8", "replace"))
     h.update(b"\x00")
-    try:
-        st = os.stat(graph)
-        h.update(f"{graph}|{st.st_size}".encode("utf-8", "replace"))
-    except OSError:
-        h.update(f"{graph}|nostat".encode("utf-8", "replace"))
-    return h.hexdigest()
+    h.update(os.path.abspath(graph).encode("utf-8", "replace"))
+    h.update(b"\x00")
+    h.update(graph_state.encode("ascii"))
+    return RequestIdentityHandoff(
+        value=h.hexdigest(), issue_text=issue_text or "", graph=graph,
+        graph_state_sha256=graph_state,
+    )
+
+
+def validate_request_identity(handoff: RequestIdentityHandoff) -> None:
+    """Fail closed if the graph (including WAL state) changed during the handoff."""
+    if _graph_state_sha256(handoff.graph) != handoff.graph_state_sha256:
+        raise ValueError("brief determinism: graph changed during identity handoff")
+
+
+def request_identity(issue_text: str, graph: str) -> str:
+    """Identity of a brief request, bound to issue text and exact graph bytes.
+
+    A different issue or any rebuilt graph, including a same-size replacement, must
+    miss and regenerate. This
+    is the guard against cross-task contamination: a reused ``out_dir`` (e.g. a codespace
+    that runs several tasks through one /tmp/gt) must NOT serve a prior task's brief."""
+    return capture_request_identity(issue_text, graph).value
 
 
 def load_cached_brief(out_dir: str, expect_identity: Optional[str] = None) -> Optional[dict]:
@@ -130,7 +263,8 @@ def persist_brief(out_dir: str, brief_text: str, result_obj: Any = None,
 
 
 def get_or_generate(out_dir: str, issue_text: str, work: str, graph: str,
-                    generator: Any = None) -> dict:
+                    generator: Any = None,
+                    identity_handoff: RequestIdentityHandoff | None = None) -> dict:
     """Single-generation entry point. Returns
     ``{schema, brief_text, brief_sha256, metrics, generated: bool}``.
 
@@ -139,7 +273,12 @@ def get_or_generate(out_dir: str, issue_text: str, work: str, graph: str,
     ``generate_v1r_brief``), persists it, and returns (``generated=True``).
     Raising is left to the caller's contract — ``generator`` exceptions propagate so
     the proof can fail closed on a brief that cannot be produced."""
-    ident = request_identity(issue_text, graph)
+    if identity_handoff is not None:
+        if identity_handoff.issue_text != (issue_text or "") or identity_handoff.graph != graph:
+            raise ValueError("brief cache: identity handoff request mismatch")
+        ident = identity_handoff.value
+    else:
+        ident = request_identity(issue_text, graph)
     cached = load_cached_brief(out_dir, expect_identity=ident)
     if cached is not None:
         out = dict(cached)

@@ -260,13 +260,20 @@ def test_provenance_reindex_exclusion_off_is_inert(monkeypatch):
 # --------------------------------------------------------------------------- #
 # Feature 6 — LATE-DROP (obligation covered by a GREEN test)
 # --------------------------------------------------------------------------- #
-def test_late_drop_predicate():
-    g._ss_pass_tokens.clear()
-    g._ss_pass_tokens.update({"get_user", "ImportTask"})
-    green = "obligation: get_user and ImportTask must be handled"
+def test_late_drop_predicate(monkeypatch):
+    _base(monkeypatch)
+    g._action_count = 5
+    g._ss_record_behavioral_proof(
+        command="""python3 - <<'PY'
+from pkg.policy import inverse_match
+print(f'allow: {inverse_match("allow")}')  # True
+print(f'deny: {inverse_match("deny")}')  # False
+PY""",
+        output="allow: True\ndeny: False", returncode=0)
+    green = '[edited, untested] "inverse_match behavior"'
     assert g._ss_late_drop_suppresses("obligation.unexercised", green) is True
     # a symbol NOT covered by a passing test -> deliver
-    partial = "obligation: get_user and untested_helper must be handled"
+    partial = '[edited, untested] "untested_helper behavior"'
     assert g._ss_late_drop_suppresses("obligation.unexercised", partial) is False
     # non-obligation classes are exempt
     assert g._ss_late_drop_suppresses("l3.contract", green) is False
@@ -277,8 +284,16 @@ def test_late_drop_delivery_suppressed(monkeypatch):
     monkeypatch.setattr(g, "_root", lambda: "")
     recs = _capture(monkeypatch)
     monkeypatch.setenv("GT_SS_LATE_DROP", "1")
-    g._ss_pass_tokens.update({"resolve_path"})
-    block = ("obligation.unexercised", "\n<gt-nudge>\nresolve_path is untested\n</gt-nudge>")
+    g._action_count = 5
+    g._ss_record_behavioral_proof(
+        command="""python3 - <<'PY'
+from pkg.policy import inverse_match
+print(f'allow: {inverse_match("allow")}')  # True
+print(f'deny: {inverse_match("deny")}')  # False
+PY""",
+        output="allow: True\ndeny: False", returncode=0)
+    block = ("obligation.unexercised",
+             '[edited, untested] "inverse_match behavior"')
     out: dict = {}
     g._lane_a_deliver(out, "cmd", [block], krel="x.py", event=None)
     assert (out.get("output") or "") == ""  # dropped: the symbol was already GREEN-tested

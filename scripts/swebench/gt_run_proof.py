@@ -972,20 +972,66 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
     artifact — never a WARN. Returns (ok, detail); the caller fails closed on ok=False with
     GT_ARTIFACT_MISSING. ``generator`` is injectable for tests; default = the real
     generate_v1r_brief (which also writes the issue anchors mirrored below)."""
-    # A1 (2026-06-13): generate the brief ONCE per proof. gate3b (foundational_gates,
-    # the earlier subprocess) persists its V1RBriefResult to <out_dir>/brief_result.json;
-    # load it here (no second generation) and write brief.txt from it, so the
-    # gate-certified brief == the delivered brief by sha. Fail-safe: a cache miss
-    # regenerates (degrades to the prior double-generation, never blocks brief.txt).
+    # gate3b persists the authoritative V1RBriefResult. Load it, independently
+    # execute the same acquisition once, and attach a repeat witness only when
+    # canonical identities match. The second result never replaces gate bytes.
     try:
-        from groundtruth.runtime.brief_cache import get_or_generate
-        result = get_or_generate(out_dir, issue_text, work, graph, generator=generator)
+        from groundtruth.runtime.brief_cache import (
+            capture_request_identity,
+            get_or_generate,
+            validate_request_identity,
+            verify_independent_generation,
+        )
+        _identity_handoff = capture_request_identity(issue_text, graph)
+        result = get_or_generate(
+            out_dir, issue_text, work, graph, generator=generator,
+            identity_handoff=_identity_handoff,
+        )
+        _reused_gate = not result.get("generated", True)
         bt = (result.get("brief_text") or "").strip()
     except Exception as e:
         return False, f"brief generation raised (no swallow in proof): {type(e).__name__}: {e}"
     if not bt:
         return False, ("portable brief EMPTY — proof mode requires a non-empty brief.txt "
                        "(the agent consumes /gt_artifacts/brief.txt; there is no host fallback)")
+    # The gate/cache acquisition above is the sole delivery authority. Its generator writes
+    # support sidecars into /tmp, so capture those exact bytes BEFORE the independent witness
+    # executes. Execution 2 proves repeat identity only; it may write divergent /tmp sidecars
+    # and must never replace any model-visible or support artifact from the primary execution.
+    _mirror_cert_sidecars(out_dir)
+    try:
+        if generator is None:
+            from groundtruth.pretask.v1r_brief import generate_v1r_brief as _generator
+        else:
+            _generator = generator
+
+        def _independent_generation():
+            return _generator(
+                issue_text=issue_text,
+                repo_root=work,
+                graph_db=graph,
+                bug_id="portable",
+            )
+
+        _determinism = verify_independent_generation(
+            out_dir,
+            result,
+            _independent_generation,
+            expect_identity=_identity_handoff.value,
+        )
+        if _determinism.get("matched") is not True:
+            return False, (
+                "DETERMINISM_MISMATCH: independent same-input brief acquisition "
+                "produced different canonical identities"
+            )
+        result = get_or_generate(
+            out_dir, issue_text, work, graph, generator=generator,
+            identity_handoff=_identity_handoff,
+        )
+        bt = (result.get("brief_text") or "").strip()
+        validate_request_identity(_identity_handoff)
+    except Exception as e:
+        return False, f"brief determinism proof raised: {type(e).__name__}: {e}"
     try:
         from groundtruth.runtime.localization_diagnostic import validate_brief_payload
 
@@ -1035,10 +1081,12 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
             bf.write(bt)
     except OSError as e:
         return False, f"brief.txt write failed: {e}"
-    _mirror_cert_sidecars(out_dir)
     _sha = result.get("brief_sha256", "")
-    _reused = not result.get("generated", True)
-    return True, f"{len(bt)} chars sha256={_sha[:12]} reused_gate_brief={_reused}"
+    _reused = _reused_gate
+    return True, (
+        f"{len(bt)} chars sha256={_sha[:12]} reused_gate_brief={_reused} "
+        "determinism_matched=True"
+    )
 
 
 def probe_workspace_metadata(language: str, source_root: str, env: dict[str, str]) -> dict[str, object]:

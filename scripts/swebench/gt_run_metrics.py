@@ -301,6 +301,37 @@ def validate_task_performance_record(performance: object) -> list[str]:
     return issues
 
 
+def _deep_metric_record_issues(row: object) -> list[str]:
+    """Validate the canonical deep wrapper and every task-scope producer section."""
+    if not isinstance(row, dict):
+        return ["record:not_object"]
+    issues: list[str] = []
+    if row.get("schema") != "gt_deep_metrics.v2":
+        issues.append("record:deep_schema")
+    if row.get("precision_decimals") != 8:
+        issues.append("record:deep_precision")
+    if not isinstance(row.get("task_id"), str) or not row["task_id"]:
+        issues.append("record:task_id")
+    performance = row.get("performance")
+    issues.extend(
+        f"performance:{issue}" for issue in validate_task_performance_record(performance)
+    )
+    behavioral = row.get("behavioral_impact")
+    if not isinstance(behavioral, dict):
+        issues.append("behavioral_impact:section")
+    elif behavioral.get("collection_error"):
+        issues.append("behavioral_impact:collection_error")
+    if not isinstance(row.get("metric_applicability"), dict):
+        issues.append("record:metric_applicability")
+    for metric, value_type in _MANDATORY_METRICS["behavioral_impact"]:
+        state, _value, _contract = _metric_state(
+            row, "behavioral_impact", metric, value_type
+        )
+        if state not in {"measured", "not_applicable"}:
+            issues.append(f"behavioral_impact.{metric}:{state}")
+    return sorted(set(issues))
+
+
 def _distribution(
     records: list[dict], section: str, metric: str, value_type: str
 ) -> dict:
@@ -547,12 +578,18 @@ def aggregate_run_metrics(
     expected = set(expected_counts)
     observed_names: list[str] = []
     invalid_task_records: list[str] = []
+    invalid_deep_metric_records: dict[str, list[str]] = {}
     for index, row in enumerate(records):
         task = row.get("task_id")
         if isinstance(task, str) and task:
             observed_names.append(task)
         else:
             invalid_task_records.append(f"record:{index}")
+        deep_issues = _deep_metric_record_issues(row)
+        if deep_issues:
+            invalid_deep_metric_records[
+                str(task) if isinstance(task, str) and task else f"record:{index}"
+            ] = deep_issues
     observed_counts = Counter(observed_names)
     observed = set(observed_counts)
     duplicate_tasks = sorted(
@@ -605,6 +642,8 @@ def aggregate_run_metrics(
         collection_failures.append("duplicate_expected_tasks")
     if invalid_task_records:
         collection_failures.append("invalid_task_ids")
+    if invalid_deep_metric_records:
+        collection_failures.append("invalid_deep_metric_records")
     if not records:
         collection_failures.append("no_task_records")
     if metrics_with_missing:
@@ -629,6 +668,7 @@ def aggregate_run_metrics(
             "unexpected_tasks": unexpected_tasks,
             "invalid_task_records": invalid_task_records,
         },
+        "invalid_deep_metric_records": dict(sorted(invalid_deep_metric_records.items())),
         "mandatory_performance_metric_count": _MANDATORY_METRIC_COUNT,
         "mandatory_performance_collection_complete": (
             bool(records) and not collection_failures

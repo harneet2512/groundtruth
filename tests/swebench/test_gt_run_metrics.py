@@ -317,6 +317,16 @@ def test_explicit_na_record_is_collection_complete(tmp_path, monkeypatch) -> Non
         row, "token_efficiency", "total_cost_usd", applicable=True,
         predicate="cost_record_present", reason="fixture carries recorded cost",
     )
+    row["schema"] = "gt_deep_metrics.v2"
+    row["precision_decimals"] = 8
+    row["performance"]["schema"] = "gt_performance_metrics.v1"
+    row["performance"]["token_efficiency"]["cost_per_resolved"] = None
+    row["performance"]["token_efficiency"]["cost_per_resolved_scope"] = "run_aggregate"
+    row["performance"]["metric_applicability"] = {
+        section: dict(contracts)
+        for section, contracts in row["metric_applicability"].items()
+        if section != "behavioral_impact"
+    }
     baseline = tmp_path / "baseline.json"
     baseline.write_text(json.dumps({"resolved_ids": []}), encoding="utf-8")
     (tmp_path / "gt_deep_metrics_na.json").write_text(json.dumps(row), encoding="utf-8")

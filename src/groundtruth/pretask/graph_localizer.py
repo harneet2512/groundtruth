@@ -1044,6 +1044,12 @@ class LocalizerResult:
     # embedder is off / no candidate scored — degrades the symbol-naming stage to its
     # prior in-degree behavior byte-identically (correct-or-quiet).
     symbol_semrank_by_file: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
+    # Render-neutral mediator evidence.  Paths are normalized and restricted to
+    # candidates that survive this localizer's final top-k.
+    content_leg_paths: frozenset[str] = frozenset()
+    content_leg_decision: str = "NO_EFFECT"
+    content_leg_reason: str = "feature_not_reached"
+    semantic_body_paths: frozenset[str] = frozenset()
 
 
 def _normalize(fp: str) -> str:
@@ -2213,7 +2219,11 @@ def _boilerplate_stoplist(node_terms: "dict[int, str]") -> "set[str]":
 _sem_body_noop_warned = False  # C1: one-shot latch for the body-less-graph warning
 
 
-def _symbol_body_map(conn: "sqlite3.Connection", body_on: bool) -> "dict[int, str]":
+def _symbol_body_map(
+    conn: "sqlite3.Connection",
+    body_on: bool,
+    enriched_node_ids_out: "set[int] | None" = None,
+) -> "dict[int, str]":
     """node_id -> the ``body_snippet`` passed to ``symbol_passage`` — the SINGLE source
     of per-symbol passage BODY, shared by BOTH semantic halves
     (``graph_localizer._assemble_symbol_passages`` and
@@ -2310,6 +2320,7 @@ def _symbol_body_map(conn: "sqlite3.Connection", body_on: bool) -> "dict[int, st
            | set(node_terms) | set(node_docstring) | set(node_props2))
     out: dict[int, str] = {}
     for nid in ids:
+        off_body = " ".join(node_body.get(nid, []))
         _terms = " ".join(t for t in node_terms.get(nid, "").split() if t not in stop)
         # G5 fixed-salience template: the domain-vocabulary channels LEAD so a verbose
         # docstring or calls list cannot truncate them out of symbol_passage's char cap.
@@ -2321,13 +2332,16 @@ def _symbol_body_map(conn: "sqlite3.Connection", body_on: bool) -> "dict[int, st
             " ".join(node_props2.get(nid, [])),
         ) if x).strip()
         if not body:
-            body = " ".join(node_body.get(nid, []))  # degrade -> today's OFF props
+            body = off_body  # degrade -> today's OFF props
         out[nid] = body
+        if enriched_node_ids_out is not None and body and body != off_body:
+            enriched_node_ids_out.add(nid)
     return out
 
 
 def _assemble_symbol_passages(
     graph_db: str, want: "set[str]", body_on: bool, want_sym: bool = False,
+    enriched_files_out: "set[str] | None" = None,
 ) -> "tuple[dict[str, list[str]], dict[str, list[str]]]":
     """Build per-file ordered per-symbol passages from graph.db (NO file I/O).
 
@@ -2344,7 +2358,11 @@ def _assemble_symbol_passages(
     file_symnames: dict[str, list[str]] = {}
     conn = sqlite3.connect(graph_db)
     try:
-        body_map = _symbol_body_map(conn, body_on)
+        enriched_node_ids: set[int] = set()
+        body_map = _symbol_body_map(
+            conn, body_on,
+            enriched_node_ids if enriched_files_out is not None else None,
+        )
         # B-Finding1b (Fable LIPI): ORDER BY id so the per-file 80-passage cap picks a
         # DETERMINISTIC set of symbols. Without it the cap took whichever 80 SQLite's query plan
         # returned (de-facto rowid order today, but not guaranteed across indexes / SQLite
@@ -2361,6 +2379,8 @@ def _assemble_symbol_passages(
             passage = symbol_passage(nm or "", sig or "", body)
             if passage:  # correct-or-quiet: never embed a blank symbol
                 file_passages.setdefault(k, []).append(passage)
+                if enriched_files_out is not None and int(nid) in enriched_node_ids:
+                    enriched_files_out.add(k)
                 if want_sym:
                     file_symnames.setdefault(k, []).append(str(nm or ""))
     finally:
@@ -2371,6 +2391,7 @@ def _assemble_symbol_passages(
 def _semantic_score_by_file(
     issue_text: str, graph_db: str, files: "Iterable[str]",
     *, symbol_scores_out: "dict[str, list[tuple[str, float]]] | None" = None,
+    body_enriched_files_out: "set[str] | None" = None,
 ) -> dict[str, float]:
     """Semantic similarity between the issue and each candidate file's CODE CONTENT.
 
@@ -2440,8 +2461,12 @@ def _semantic_score_by_file(
     # passages, BYTE-IDENTICAL to the pre-C2b code; ON -> the graph.db body-channel template
     # (no file I/O — the query-time disk read is retired, so repo_root is no longer needed).
     _body_on = os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
+    _enriched_files: set[str] = set()
     try:
-        file_passages, file_symnames = _assemble_symbol_passages(graph_db, want, _body_on, _want_sym)
+        file_passages, file_symnames = _assemble_symbol_passages(
+            graph_db, want, _body_on, _want_sym,
+            _enriched_files if body_enriched_files_out is not None else None,
+        )
     except sqlite3.Error as _e:
         if _proof_on:
             _proof.require(False, "semantic_db_read", str(_e))
@@ -2554,6 +2579,8 @@ def _semantic_score_by_file(
         _nz = sum(1 for v in _res.values() if v and v > 0)
         _proof.require(_nz > 0, "semantic_ranks_nonzero",
                        f"all {len(_res)} semantic ranks zero/flat for {len(want)} candidates")
+    if body_enriched_files_out is not None:
+        body_enriched_files_out.update(_enriched_files & set(_res))
     return _res
 
 
@@ -2578,6 +2605,10 @@ def localize(
     """
     import math
     import sys
+
+    _content_candidate_paths: set[str] = set()
+    _content_decision = "NO_EFFECT"
+    _content_reason = "feature_not_reached"
 
     if not graph_db or not os.path.exists(graph_db):
         return LocalizerResult([], [], 0.0, False, "no_graph_db")
@@ -2822,6 +2853,8 @@ def localize(
             except Exception as _cfts_err:
                 print(f"[GT L1] content-fts leg: FAILED: {_cfts_err}", file=sys.stderr)
                 _cfts = []
+                _content_decision = "ERROR"
+                _content_reason = "content_fts_query_failed"
             if _cfts and not grep_recalled:
                 # GREP-EMPTY FALLBACK (UNCHANGED): the lexical slot is VACANT, so a lossy top-K
                 # BM25 hit beats no floor at all — fill the grep slot exactly as before. The
@@ -2836,6 +2869,9 @@ def localize(
                         _existing_ids_c.add(_nid)
                         _seed_provenance[_nid] = ("CONTENT_SEED", "")
                 _content_leg_used = True
+                _content_candidate_paths.update(_normalize(row[2]) for row in _cfts)
+                _content_decision = "APPLIED"
+                _content_reason = "vacant_lexical_slot"
                 print(
                     f"[GT L1] content-fts leg: filled vacant lexical slot with "
                     f"{len(_cfts)} BM25 body-content candidates",
@@ -2859,11 +2895,23 @@ def localize(
                             seeds.append((_nid, _cname, _cfp))
                             _existing_ids_c.add(_nid)
                             _seed_provenance[_nid] = ("CONTENT_SEED", "")
+                    _content_candidate_paths.update(_content_fusion_score)
+                    _content_decision = "APPLIED"
+                    _content_reason = "margin_cleared"
                     print(
                         f"[GT L1] content-fts FUSION leg: margin>={_mthr:.4f} cleared, "
                         f"{len(_content_fusion_score)} distinct body-content files fused",
                         file=sys.stderr,
                     )
+                else:
+                    _content_decision = "SUPPRESSED"
+                    _content_reason = (
+                        "margin_uncalibrated" if _mthr is None
+                        else "margin_not_cleared"
+                    )
+            elif not _cfts and _content_decision != "ERROR":
+                _content_decision = "NO_EFFECT"
+                _content_reason = "no_content_fts_candidates"
 
         # FTS5-TO-SEED (mechanism C): BM25 retrieval over the nodes_fts
         # virtual table. Matches grep's recall by searching function names,
@@ -3626,9 +3674,11 @@ def localize(
     # symbol-naming stage can rank within-file leaves by the same signal. The float
     # return is unchanged; _symbol_semrank stays {} when the embedder is off.
     _symbol_semrank: dict[str, list[tuple[str, float]]] = {}
+    _semantic_body_scored_files: set[str] = set()
     _sem = _semantic_score_by_file(
         issue_text, graph_db, [c.file_path for c in _sem_pool],
         symbol_scores_out=_symbol_semrank,
+        body_enriched_files_out=_semantic_body_scored_files,
     )
     # Rank ONLY scored candidates: a file with no semantic score (outside the pool,
     # over the encode budget, or no embeddable symbols) must fall to rank _BIG
@@ -3784,6 +3834,11 @@ def localize(
                 f"depth={_depth_authority(_c)} score={_c.score}\n"
             )
     candidates = candidates[:top_k]
+    _final_candidate_paths = {_normalize(c.file_path) for c in candidates}
+    _content_terminal_paths = frozenset(
+        _content_candidate_paths & _final_candidate_paths)
+    _semantic_body_terminal_paths = frozenset(
+        _semantic_body_scored_files & _final_candidate_paths)
 
     # ---- SCOPE CHAINS (structural edit-scope from graph edges) ----
     # Opens its own connection — the BFS conn is already closed above.
@@ -3834,6 +3889,10 @@ def localize(
             scope_chains=_chains, graph_stats=_stats,
             agreement_by_file=_agreement_by_file, signals_by_file=_signals_by_file,
             n_components=_n_components, symbol_semrank_by_file=_symbol_semrank,
+            content_leg_paths=_content_terminal_paths,
+            content_leg_decision=_content_decision,
+            content_leg_reason=_content_reason,
+            semantic_body_paths=_semantic_body_terminal_paths,
         )
 
     verified = [c for c in candidates if c.has_verified_witness]
@@ -3914,4 +3973,8 @@ def localize(
         scope_chains=_chains, graph_stats=_stats,
         agreement_by_file=_agreement_by_file, signals_by_file=_signals_by_file,
         n_components=_n_components, symbol_semrank_by_file=_symbol_semrank,
+        content_leg_paths=_content_terminal_paths,
+        content_leg_decision=_content_decision,
+        content_leg_reason=_content_reason,
+        semantic_body_paths=_semantic_body_terminal_paths,
     )

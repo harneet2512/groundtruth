@@ -217,7 +217,13 @@ def _embed(texts: list[str], model: object, *, is_query: bool = False) -> np.nda
 _SUMMARY_VERSION = PASSAGE_CACHE_VERSION
 
 
-def _cache_key(graph_db: str, model_name: str = "", dim: int = 0) -> str:
+def _cache_key(
+    graph_db: str,
+    model_name: str = "",
+    dim: int = 0,
+    *,
+    body_on: bool | None = None,
+) -> str:
     """Cache key for the per-graph file-embedding matrices.
 
     MODEL-KEYED (bug fix 2026-06-09): the key folds in the embedder IDENTITY
@@ -229,9 +235,11 @@ def _cache_key(graph_db: str, model_name: str = "", dim: int = 0) -> str:
     cache lookup (see _get_file_embeddings)."""
     db_path = Path(graph_db)
     stat = db_path.stat() if db_path.exists() else None
+    if body_on is None:
+        body_on = os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
     sig = (
         f"{graph_db}:{stat.st_mtime if stat else 0}:{stat.st_size if stat else 0}:"
-        f"{_SUMMARY_VERSION}:{model_name}:{dim}"
+        f"{_SUMMARY_VERSION}:{model_name}:{dim}:sem_body={int(body_on)}"
     )
     return hashlib.md5(sig.encode()).hexdigest()
 
@@ -341,7 +349,8 @@ def _get_file_embeddings(
     # both the memory dict and the .embed_cache pkl short-circuited before
     # _model_identity ran).
     model_name, dim = _model_identity(model)
-    key = _cache_key(graph_db, model_name, dim)
+    _body_on = os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
+    key = _cache_key(graph_db, model_name, dim, body_on=_body_on)
     if key in _EMBED_CACHE:
         return _EMBED_CACHE[key]
 
@@ -384,7 +393,6 @@ def _get_file_embeddings(
     # Imported at call time: no module-level import edge to graph_localizer, no cycle.
     from groundtruth.pretask.graph_localizer import _symbol_body_map
 
-    _body_on = os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
     body_map = _symbol_body_map(conn, _body_on)
 
     # Per-file ordered list of symbol passages (carry the existing 60/symbol cap).
@@ -512,6 +520,37 @@ def _get_file_embeddings(
     return result
 
 
+def _semantic_body_files(graph_db: str) -> set[str]:
+    """Files whose capped anchor passages differ under ``GT_SEM_BODY``.
+
+    This recomputes only passage provenance, never vectors.  It therefore works
+    for both fresh encodes and memory/disk cache hits while preserving the public
+    embedding return contract.
+    """
+    if os.environ.get("GT_SEM_BODY", "") in ("", "0", "false", "no"):
+        return set()
+    from groundtruth.pretask.graph_localizer import _symbol_body_map
+
+    conn = sqlite3.connect(graph_db)
+    try:
+        enriched: set[int] = set()
+        _symbol_body_map(conn, True, enriched)
+        counts: dict[str, int] = {}
+        files: set[str] = set()
+        for nid, file_path in conn.execute(
+            "SELECT id, file_path FROM nodes WHERE is_test=0 ORDER BY id"
+        ):
+            fp = _norm_path(file_path)
+            if not fp or counts.get(fp, 0) >= 60:
+                continue
+            counts[fp] = counts.get(fp, 0) + 1
+            if int(nid) in enriched:
+                files.add(fp)
+        return files
+    finally:
+        conn.close()
+
+
 def semantic_top_k(
     issue_text: str,
     repo_root: str,
@@ -520,6 +559,7 @@ def semantic_top_k(
     k_sem_top: int = 20,
     *,
     score_all: bool = False,
+    body_enriched_files_out: set[str] | None = None,
 ) -> dict[str, float]:
     """Return {file_path: cosine_score} for semantically similar files.
 
@@ -582,22 +622,29 @@ def semantic_top_k(
     if score_all:
         # Full component-score map: keep only finite, strictly-positive scores
         # (correct-or-quiet — never surface 0/NaN as a semantic signal).
-        return {
+        result = {
             fp: float(score)
             for fp, score in ranked
             if math.isfinite(score) and score > 0.0
         }
+        if body_enriched_files_out is not None:
+            body_enriched_files_out.update(
+                set(result) & _semantic_body_files(graph_db))
+        return result
     # SEED map: same strictly-positive discipline as the component map (fix
     # 2026-06-09). A zero/negative-cosine file carries NO semantic evidence —
     # admitting it as a "semantic_top_k" SEED (anchor + candidate membership)
     # injected up to k_sem_top no-signal files whenever the embedder was dead or
     # the corpus mismatched (a zero embedder now yields an EMPTY seed map, not
     # 20 fake semantic anchors). Correct-or-quiet at the filter level.
-    return {
+    result = {
         fp: float(score)
         for fp, score in ranked[:k_sem_top]
         if math.isfinite(score) and score > 0.0
     }
+    if body_enriched_files_out is not None:
+        body_enriched_files_out.update(set(result) & _semantic_body_files(graph_db))
+    return result
 
 
 def select_anchors(
@@ -610,6 +657,7 @@ def select_anchors(
     k_sem_top: int = 20,
     k_lex_top: int = 10,
     tau_anchor: float = 0.30,
+    body_enriched_files_out: set[str] | None = None,
 ) -> tuple[list[AnchorRecord], dict[str, float], dict[str, float]]:
     """Run Stage A anchor selection.
 
@@ -631,12 +679,13 @@ def select_anchors(
           embedding matmul (``_get_file_embeddings`` memoises the encode).
     """
     sem_seed_scores = semantic_top_k(
-        issue_text, repo_root, graph_db, model, k_sem_top=k_sem_top
+        issue_text, repo_root, graph_db, model, k_sem_top=k_sem_top,
     )
     # Full cosine map for the component term (no seed effect). Cheap: reuses the
     # cached file embeddings, only re-runs the matmul + sort.
     sem_all_scores = semantic_top_k(
-        issue_text, repo_root, graph_db, model, score_all=True
+        issue_text, repo_root, graph_db, model, score_all=True,
+        body_enriched_files_out=body_enriched_files_out,
     )
     # Anchor/seed logic operates on the bounded seed map (unchanged behaviour).
     sem_scores = sem_seed_scores

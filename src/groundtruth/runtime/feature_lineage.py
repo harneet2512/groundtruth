@@ -9,7 +9,8 @@ accepted only as an explicit producer claim.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from types import MappingProxyType
+from typing import Iterable, Mapping
 
 from .fact_registry import is_reactive, producer_matches, registration_for, required_event
 
@@ -66,18 +67,92 @@ if not (CAP_BYTE_OWNER_IDS | CAP_ELIGIBILITY_IDS) <= CAP_FEATURE_IDS:
     raise ValueError("CAP role set contains an unknown feature")
 CAP_MEDIATOR_IDS = CAP_FEATURE_IDS - CAP_BYTE_OWNER_IDS - CAP_ELIGIBILITY_IDS
 
-# Exact byte-owner bindings that are wired through ``build_lineage`` today.
-# The other declared byte owners use different live producers and remain
-# unsupported here until those producer seams attach typed lineage explicitly.
-_TYPED_CAP_OWNER_BINDINGS: dict[str, frozenset[tuple[str, str, str]]] = {
-    "GT_CHANGE_SURFACE": frozenset({
-        ("change_surface", "new_file_destination", "newfile_precedent"),
+
+@dataclass(frozen=True, order=True)
+class CAPByteOwnerBinding:
+    """One exact producer/layer/FACT binding for a CAP byte owner."""
+
+    producer: str
+    layer: str
+    fact_class: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.producer, str) or not self.producer.strip():
+            raise ValueError("CAP byte-owner producer must be a non-empty string")
+        if not isinstance(self.layer, str) or not self.layer.strip():
+            raise ValueError("CAP byte-owner layer must be a non-empty string")
+        if self.fact_class is not None and (
+            not isinstance(self.fact_class, str) or not self.fact_class.strip()
+        ):
+            raise ValueError("CAP byte-owner fact_class must be None or non-empty")
+
+
+@dataclass(frozen=True)
+class CAPByteOwnerMechanism:
+    """The sole permitted attribution mechanism for one byte-owning CAP."""
+
+    mechanism: str
+    bindings: tuple[CAPByteOwnerBinding, ...]
+
+    def __post_init__(self) -> None:
+        if self.mechanism not in {"typed_lineage", "exact_profile_member"}:
+            raise ValueError(f"unknown CAP byte-owner mechanism: {self.mechanism!r}")
+        if not self.bindings or self.bindings != tuple(sorted(set(self.bindings))):
+            raise ValueError("CAP byte-owner bindings must be non-empty, unique, and sorted")
+        if self.mechanism == "typed_lineage" and any(
+            binding.fact_class is None for binding in self.bindings
+        ):
+            raise ValueError("typed lineage requires a registered FACT class")
+
+
+def _bindings(*rows: tuple[str, str, str | None]) -> tuple[CAPByteOwnerBinding, ...]:
+    return tuple(sorted(CAPByteOwnerBinding(*row) for row in rows))
+
+
+# One authority for all eight byte owners.  Exact-profile-member rows deliberately
+# do not claim typed FACT lineage.  In particular, coherence has no registry FACT
+# identity; its proof is the exact member + layer + sealed rendered bytes only.
+CAP_BYTE_OWNER_MECHANISMS: Mapping[str, CAPByteOwnerMechanism] = MappingProxyType({
+    "GT_CHANGE_SURFACE": CAPByteOwnerMechanism("typed_lineage", _bindings(
         ("change_surface", "missing_role", "newfile_precedent"),
-    }),
-    "GT_PATCH_DELTA": frozenset({
-        ("patch_delta", "signature_mismatch", "signature_delta"),
+        ("change_surface", "new_file_destination", "newfile_precedent"),
+    )),
+    "GT_PATCH_DELTA": CAPByteOwnerMechanism("typed_lineage", _bindings(
         ("patch_delta", "companion_surface", "signature_delta"),
-    }),
+        ("patch_delta", "signature_mismatch", "signature_delta"),
+    )),
+    "GT_LOC_RESLOT": CAPByteOwnerMechanism("typed_lineage", _bindings(
+        ("ranked_localization", "localization", "localization"),
+    )),
+    "GT_SS_SUBMIT_RED": CAPByteOwnerMechanism("typed_lineage", _bindings(
+        ("submit_gate", "submit_refusal", "submit_refusal"),
+    )),
+    "GT_EDIT_CHECK": CAPByteOwnerMechanism("exact_profile_member", _bindings(
+        ("edit_check", "edit.syntax", "syntax_result"),
+    )),
+    "GT_HYPOTHESIS": CAPByteOwnerMechanism("exact_profile_member", _bindings(
+        ("governor", "recovery", "recovery"),
+    )),
+    "GT_SS_COHERENCE_V2": CAPByteOwnerMechanism("exact_profile_member", _bindings(
+        ("ss_coherence_v2", "detect.coherence", None),
+    )),
+    "GT_CERT_DELIVERY": CAPByteOwnerMechanism("exact_profile_member", _bindings(
+        ("submit_gate", "submit_refusal", "submit_refusal"),
+    )),
+})
+if set(CAP_BYTE_OWNER_MECHANISMS) != set(CAP_BYTE_OWNER_IDS):
+    raise ValueError("CAP byte-owner mechanism table must cover exactly all byte owners")
+
+# Compatibility view used by ``build_lineage``.  It is derived, never separately
+# authored, so typed authorization cannot drift from the eight-row authority.
+_TYPED_CAP_OWNER_BINDINGS: dict[str, frozenset[tuple[str, str, str]]] = {
+    feature_id: frozenset(
+        (binding.producer, binding.layer, binding.fact_class)
+        for binding in authority.bindings
+        if binding.fact_class is not None
+    )
+    for feature_id, authority in CAP_BYTE_OWNER_MECHANISMS.items()
+    if authority.mechanism == "typed_lineage"
 }
 
 
@@ -287,6 +362,9 @@ def lineage_ledger_extra(lineage: DeliveryLineage | None) -> dict:
 
 
 __all__ = [
+    "CAPByteOwnerBinding",
+    "CAPByteOwnerMechanism",
+    "CAP_BYTE_OWNER_MECHANISMS",
     "DeliveryLineage",
     "CAP_BYTE_OWNER_IDS",
     "CAP_ELIGIBILITY_IDS",

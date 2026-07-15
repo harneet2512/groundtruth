@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import enum
 import contextvars
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -51,7 +51,7 @@ import threading
 _LEDGER_WRITE_FAILURES = 0
 
 
-def _ledger_line_direct(entry: dict) -> None:
+def _ledger_line_direct(entry: dict) -> bool:
     """Append ONE JSON line to the HARVESTED runtime ledger, bypassing both the
     (possibly-stubbed) ``_RUNTIME_LEDGER`` object and the old truncate-rewrite
     flush. DURABLE by construction — each record hits disk immediately, so
@@ -85,9 +85,11 @@ def _ledger_line_direct(entry: dict) -> None:
                 entry["timestamp_ms"] = 0
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
+        return True
     except Exception:  # noqa: BLE001
         global _LEDGER_WRITE_FAILURES
         _LEDGER_WRITE_FAILURES += 1
+        return False
 
 
 def ledger_write_failures() -> int:
@@ -153,6 +155,89 @@ def _inseam_stamp(kind: str, file_path: str, *, tier: str, conf: float) -> None:
         "outcome": "produced", "reason": "authority_stamp", "chars_delivered": 0,
         "tier": tier, "conf": round(float(conf), 8),
         "iteration": globals().get("_action_count", 0)})
+
+
+def _control_participation_record(
+    feature_id: str,
+    decision_site: str,
+    decision: str,
+    *,
+    candidate_bytes: str = "",
+    fact_class: "str | None" = None,
+    candidate_id: str = "",
+    reason: str = "",
+) -> None:
+    """Persist one typed CAP-control decision without claiming byte ownership.
+
+    This is called *inside* executable control branches.  It never enumerates
+    enabled flags and never writes DeliveryLineage ``feature_ids``.  Candidate
+    bytes, when a control gates a render, are represented only by exact length +
+    seal; the bytes themselves never enter telemetry.
+    """
+    if not _inseam_metrics_on():
+        return
+    try:
+        from groundtruth.runtime.control_participation import (
+            build_control_participation, participation_to_dict,
+        )
+        record = build_control_participation(
+            feature_id=feature_id,
+            decision_site=decision_site,
+            decision=decision,
+            iteration=max(0, int(globals().get("_action_count", 0) or 0)),
+            candidate_bytes=candidate_bytes,
+            fact_class=fact_class,
+            candidate_id=candidate_id,
+            reason=reason,
+        )
+        payload = participation_to_dict(record)
+        participation_decision = payload.pop("decision")
+        _ledger_line_direct({
+            "layer": "control.participation",
+            "event_type": "control_decision",
+            "file_path": "",
+            "outcome": (
+                "measurement_failed" if participation_decision == "ERROR"
+                else "evaluated"
+            ),
+            "reason": "typed_control_participation",
+            "chars_delivered": 0,
+            "iteration": payload.pop("iteration"),
+            "participation_decision": participation_decision,
+            **payload,
+        })
+    except Exception as exc:  # noqa: BLE001 -- instrumentation never changes delivery
+        # A schema/import failure is not a valid participation decision. Persist a
+        # distinct failure row so absence/NO_EFFECT can never be inferred.
+        seal = (
+            hashlib.sha256(candidate_bytes.encode("utf-8", "surrogatepass"))
+            .hexdigest()[:16] if candidate_bytes else ""
+        )
+        try:
+            from groundtruth.runtime.feature_lineage import cap_role_for
+            control_role = cap_role_for(feature_id)
+        except Exception:  # noqa: BLE001 -- failure row remains explicitly untrusted
+            control_role = "unknown"
+        _ledger_line_direct({
+            "schema": "gt.control_participation.v1",
+            "layer": "control.participation",
+            "event_type": "control_decision",
+            "file_path": "",
+            "outcome": "measurement_failed",
+            "reason": f"control_record_error:{type(exc).__name__}",
+            "chars_delivered": 0,
+            "iteration": max(0, int(globals().get("_action_count", 0) or 0)),
+            "participation_decision": "ERROR",
+            "control_ref": {
+                "category": "CAP", "feature_id": feature_id,
+                "role": control_role,
+            },
+            "decision_site": decision_site,
+            "candidate_chars": len(candidate_bytes),
+            "candidate_sha256_16": seal,
+            "fact_class": fact_class,
+            "candidate_id": candidate_id,
+        })
 
 
 # Graceful import of groundtruth.runtime.* — these modules live in the substrate's
@@ -3258,10 +3343,22 @@ def _strip_leading_cd_prefix(cmd: str) -> str:
     the isolation reject holds. Returns the input unchanged when no such prefix exists
     (byte-identical). Flag OFF -> the W13 bare-token regex ONLY (byte-identical to today);
     flag ON -> ALSO the ``cd $(...)``/quoted/backtick/``$VAR`` command-substitution cd."""
-    rx = _CD_PREFIX_WIDE_RE if _ss_eligibility_on() else _CD_PREFIX_RE
+    wide_on = _ss_eligibility_on()
+    rx = _CD_PREFIX_WIDE_RE if wide_on else _CD_PREFIX_RE
     s = cmd or ""
+    participation_recorded = False
     while True:
         m = rx.match(s)
+        if wide_on and not participation_recorded:
+            bare_match = _CD_PREFIX_RE.match(s)
+            _control_participation_record(
+                "GT_SS_ELIGIBILITY",
+                "mini_seam.cd_prefix.command_substitution",
+                "APPLIED" if (m is not None and bare_match is None) else "NO_EFFECT",
+                reason=("widened_prefix" if (m is not None and bare_match is None)
+                        else "bare_or_nonmatching_prefix"),
+            )
+            participation_recorded = True
         if not m:
             return s
         s = s[m.end():]
@@ -5473,12 +5570,24 @@ def _covering_tests_for_symbols(symbol_names: set[str]) -> list[dict]:
             # (covering_runner.runner_eligible_files == the executed path's os.path.exists gate).
             # Off -> byte-identical (no disk check; every consumer sees the graph result unchanged).
             if _ss_exec_truth_on() and results:
+                _before_eligibility = len(results)
+                _eligibility_error = None
                 try:
                     from groundtruth.runtime.covering_runner import runner_eligible_files
                     _ok = set(runner_eligible_files([r["file"] for r in results], _root()))
                     results = [r for r in results if r["file"] in _ok]
-                except Exception:  # noqa: BLE001 — eligibility filter must never break selection
-                    pass
+                except Exception as exc:  # noqa: BLE001 — eligibility filter must never break selection
+                    _eligibility_error = exc
+                _control_participation_record(
+                    "GT_SS_EXEC_TRUTH",
+                    "mini_seam.covering_selection.runner_eligibility",
+                    ("ERROR" if _eligibility_error is not None else
+                     "APPLIED" if len(results) < _before_eligibility else "NO_EFFECT"),
+                    reason=((f"runner_filter_error:{type(_eligibility_error).__name__}"
+                             if _eligibility_error is not None else
+                            "phantom_removed" if len(results) < _before_eligibility
+                            else "all_candidates_runnable")),
+                )
             return results
         finally:
             con.close()
@@ -7220,11 +7329,24 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         if _obligation_freshness_on():
             global _prev_obl_edited
             _new_edits = set(_obl_edited) - _prev_obl_edited
+            _freshness_transitions = []
+            _freshness_error = None
             if _new_edits:
                 try:
-                    tracker.apply_edit_freshness(_new_edits, _action_count)
-                except Exception:  # noqa: BLE001 — freshness never breaks the path
-                    pass
+                    _freshness_transitions = tracker.apply_edit_freshness(
+                        _new_edits, _action_count)
+                except Exception as exc:  # noqa: BLE001 — freshness never breaks the path
+                    _freshness_error = exc
+            _control_participation_record(
+                "GT_OBLIGATION_FRESHNESS",
+                "mini_seam.obligation_nudge.freshness_demotion",
+                ("ERROR" if _freshness_error is not None else
+                 "APPLIED" if _freshness_transitions else "NO_EFFECT"),
+                reason=((f"freshness_error:{type(_freshness_error).__name__}"
+                         if _freshness_error is not None else
+                         "tested_obligation_demoted" if _freshness_transitions
+                         else "no_stale_tested_obligation")),
+            )
             _prev_obl_edited = set(_obl_edited)
         _persist_obligation_status(tracker)
         statuses = tracker.statuses_tuple(
@@ -7602,8 +7724,14 @@ def _runtime_ledger_record(
     event=None,
     content: "str | None" = None,
     extra: "dict | None" = None,
-) -> None:
-    ev = event.value if event is not None else ""
+) -> bool:
+    if event is None:
+        ev = ""
+    elif isinstance(event, str):
+        ev = event
+    else:
+        value = getattr(event, "value", "")
+        ev = value if isinstance(value, str) else ""
     # SS-10 reg #5 (2026-07-13) — a DELIVERED outcome with NO bytes (chars<=0) is a lie: the block
     # never reached the model (a telemetry/measurement row — ga.<kind> repair_support label,
     # detect.coherence / recovery V2 measurement). Downgrade to internal-only telemetry HERE so
@@ -7662,7 +7790,7 @@ def _runtime_ledger_record(
     if extra:
         for _ek, _ev in extra.items():
             _row.setdefault(_ek, _ev)
-    _ledger_line_direct(_row)
+    return _ledger_line_direct(_row)
 
 
 # Exact CAP producer attribution for the durable delivery row.  This is deliberately
@@ -7671,6 +7799,7 @@ def _runtime_ledger_record(
 _LANE_PROFILE_MEMBER_OWNERS: dict[str, str] = {
     "edit.syntax": "GT_EDIT_CHECK",
     "recovery": "GT_HYPOTHESIS",
+    "detect.coherence": "GT_SS_COHERENCE_V2",
 }
 
 
@@ -7720,10 +7849,136 @@ def _feature_lineage_extra(lineage) -> dict:
 def _gateway_delivery_extra(envelope) -> dict:
     """Combine typed lineage with the legacy active-member observation."""
     extra = _feature_lineage_extra(getattr(envelope, "lineage", None))
+    candidate_id = str(getattr(envelope, "dedup_key", "") or "")
+    if candidate_id:
+        extra["candidate_id"] = candidate_id
     legacy = _gateway_profile_member_extra(envelope)
     if legacy:
         extra.update(legacy)
     return extra
+
+
+def _lane_final_extra(kind: str, text: str, target: str) -> dict:
+    """Exact delivery-row identity shared with terminal lane controls."""
+    try:
+        from groundtruth.runtime.evidence_envelope import EvidenceEnvelope
+        from groundtruth.runtime.fact_registry import is_registered
+        from groundtruth.runtime.global_arbiter import class_of_kind
+        env = EvidenceEnvelope.build(
+            producer=kind or "lane", fact_id="", target=target or "",
+            evidence_type=kind or "lane", payload=(text,))
+        fact_class = class_of_kind(kind)
+        if not fact_class or not is_registered(fact_class) or not env.dedup_key:
+            return {}
+        return {"candidate_id": env.dedup_key, "fact_class": fact_class}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _attach_exact_gateway_byte_owner(envelope, actual_event: str):
+    """Attach a typed byte owner only for an exact authorized producer/class pair."""
+    if (getattr(envelope, "producer", "") != "ranked_localization"
+            or getattr(envelope, "evidence_type", "") != "localization"):
+        return envelope
+    try:
+        from groundtruth.runtime.feature_lineage import build_lineage
+        lineage = build_lineage(
+            runtime_producer_id="ranked_localization",
+            evidence_type="localization", actual_event=actual_event,
+            cap_feature_ids=("GT_LOC_RESLOT",))
+        return replace(envelope, lineage=lineage) if lineage is not None else envelope
+    except Exception:  # noqa: BLE001 -- attribution cannot change delivery
+        return envelope
+
+
+def _record_gateway_final_controls(
+        envelope, final_bytes: str, *, native: bool, globally_arbitrated: bool,
+        provenance_decision: str = "") -> None:
+    """Record only controls that actually executed on this committed gateway winner."""
+    try:
+        from groundtruth.runtime.fact_registry import registration_for
+        registration = registration_for(getattr(envelope, "evidence_type", "") or "")
+        if registration is None:
+            return
+        fact_class = registration.fact_class
+        candidate_id = getattr(envelope, "dedup_key", "") or ""
+        if not candidate_id or not final_bytes:
+            return
+        common = dict(candidate_bytes=final_bytes, fact_class=fact_class,
+                      candidate_id=candidate_id)
+        if native:
+            _control_participation_record(
+                "GT_GATEWAY_NATIVE", "mini_seam.gateway.native_render", "APPLIED",
+                reason="native_render_committed", **common)
+        if globally_arbitrated:
+            _control_participation_record(
+                "GT_GLOBAL_ARBITER", "mini_seam.global_arbiter.winner_selection",
+                "APPLIED", reason="gateway_winner_committed", **common)
+            if _ss_enabled("GT_SS_ARBITER_V2"):
+                _control_participation_record(
+                    "GT_SS_ARBITER_V2", "mini_seam.global_arbiter.v2_selection",
+                    "NO_EFFECT", reason="winner_preserved", **common)
+        if provenance_decision:
+            _control_participation_record(
+                "GT_SS_PROVENANCE", "mini_seam.delivery.provenance_seal",
+                provenance_decision,
+                reason=("candidate_sanitized" if provenance_decision == "APPLIED"
+                        else "candidate_already_clean"), **common)
+        if _inseam_metrics_on():
+            _control_participation_record(
+                "GT_INSEAM_METRICS", "mini_seam.inseam_metrics.fact_observation",
+                "APPLIED", reason="final_delivery_observed", **common)
+    except Exception:  # noqa: BLE001 -- telemetry never changes committed bytes
+        return
+
+
+def _record_cross_plane_final_controls(candidate, final_bytes: str) -> None:
+    """Record the actual cross-plane winner after its plane commit appended bytes."""
+    if not final_bytes:
+        return
+    try:
+        from groundtruth.runtime.fact_registry import is_registered
+        from groundtruth.runtime.global_arbiter import class_of_kind
+        fact_class = class_of_kind(getattr(candidate, "kind", "") or "")
+        candidate_id = getattr(candidate, "dedup_key", "") or ""
+        if not fact_class or not is_registered(fact_class) or not candidate_id:
+            return
+        common = dict(candidate_bytes=final_bytes, fact_class=fact_class,
+                      candidate_id=candidate_id)
+        _control_participation_record(
+            "GT_GLOBAL_ARBITER", "mini_seam.global_arbiter.winner_selection",
+            "APPLIED", reason="cross_plane_winner_committed", **common)
+        if _ss_enabled("GT_SS_ARBITER_V2"):
+            _control_participation_record(
+                "GT_SS_ARBITER_V2", "mini_seam.global_arbiter.v2_selection",
+                "NO_EFFECT", reason="winner_preserved", **common)
+    except Exception:  # noqa: BLE001 -- metadata cannot change delivery
+        return
+
+
+def _record_lane_provenance_control(
+        kind: str, original_text: str, final_text: str, target: str,
+        decision: str) -> None:
+    try:
+        from groundtruth.runtime.fact_registry import is_registered
+        from groundtruth.runtime.global_arbiter import class_of_kind
+        fact_class = class_of_kind(kind)
+        if not fact_class or not is_registered(fact_class):
+            return
+        candidate_id = _lane_final_extra(
+            kind, final_text or original_text, target).get(
+            "candidate_id", "")
+        if not candidate_id:
+            return
+        _control_participation_record(
+            "GT_SS_PROVENANCE", "mini_seam.delivery.provenance_seal", decision,
+            candidate_bytes=final_text, fact_class=fact_class,
+            candidate_id=candidate_id,
+            reason=("candidate_sanitized" if decision == "APPLIED" else
+                    "candidate_fully_suppressed" if decision == "SUPPRESSED" else
+                    "candidate_already_clean"))
+    except Exception:  # noqa: BLE001
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -7941,6 +8196,11 @@ def _ledger_judge_pending(cmd: str) -> None:
         if related_on and acted:
             # consumed only if the action touches ANY target this kind was sent for.
             kind_acted = any(_cmd_touches_target(cmd, t) for t in tgts)
+            _control_participation_record(
+                "GT_D7_RELATEDNESS", "mini_seam.receipt_judge.relatedness",
+                "APPLIED" if kind_acted else "SUPPRESSED",
+                reason="related_action" if kind_acted else "unrelated_action",
+            )
             if not kind_acted:
                 continue  # unrelated action: neither consumed nor an ignore this turn
         else:
@@ -8908,6 +9168,13 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
         and (_ss_test_fail_counts.get(current_failure_key, 0) >= 2
              or typed_falsification)
     )
+    if recovery_v2:
+        _control_participation_record(
+            "GT_SS_RECOVERY_V2", "mini_seam.recovery_candidate.v2_gate",
+            "APPLIED" if recovery_v2_eligible else "NO_EFFECT",
+            reason=("repeat_or_typed_falsification" if recovery_v2_eligible
+                    else "no_current_qualifying_failure"),
+        )
     if not selection:
         # The canonical counter persists until its failing identity passes or source changes,
         # but fallback SELECTION is an event decision: release only on the qualifying failing
@@ -10289,6 +10556,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
         try:
             if not text:
                 continue  # correct-or-quiet: empty producer stays silent
+            _provenance_original = text
+            _provenance_decision = ""
             # Seam-F1 (LEAK LAW, bounce 2026-07-10): the Lane-A append below writes
             # model-facing bytes DIRECTLY (via _join_lane_output, not _gt_deliver_append),
             # so the ONE leak chokepoint MUST run here too — the oracle route
@@ -10318,11 +10587,17 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 _ptext = _ss_provenance_filter(text, _ss_root)
                 if _ptext != text:
                     if not _ss_payload_has_content(_ptext):
+                        _record_lane_provenance_control(
+                            kind, _provenance_original, "", subject_path,
+                            "SUPPRESSED")
                         _runtime_ledger_record(
                             kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
                             reason="ss_provenance", file_path=subject_path, event=item_event)
                         continue
                     text = _ptext
+                    _provenance_decision = "APPLIED"
+                else:
+                    _provenance_decision = "NO_EFFECT"
             # Shared precedence: late -> semantic duplicate -> step-behind.
             _supp, _reason = _ss_screen_delivery(
                 kind, text, _ss_root, is_loc=False,
@@ -10419,7 +10694,13 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 file_path=subject_path,
                 event=item_event,
                 content=text,  # W2 seal: the delivered lane block (never the whole observation)
+                extra={**_lane_final_extra(kind, text, subject_path),
+                       **(_lane_profile_member_extra(kind) or {})},
             )
+            if _provenance_decision:
+                _record_lane_provenance_control(
+                    kind, _provenance_original, text, subject_path,
+                    _provenance_decision)
             # SS (features 2/7): record the delivered entity set + queue the ack watch.
             _ss_record_delivered(kind, text, _ss_root)
             # RL-1 (flag GT_LANE_ENVELOPE): seal an envelope over the SAME delivered
@@ -10483,7 +10764,13 @@ def _commit_prepared_lane(out, cmd, kind: str, decision: dict, *, krel, event) -
     _runtime_ledger_record(
         kind=kind, outcome=_ProductSignalOutcome.DELIVERED,
         chars=len(shipped_suffix), file_path=krel or "", event=event,
-        content=shipped_suffix)
+        content=shipped_suffix,
+        extra={**_lane_final_extra(kind, shipped_suffix, krel or ""),
+               **(_lane_profile_member_extra(kind) or {})})
+    if decision.get("provenance_decision"):
+        _record_lane_provenance_control(
+            kind, decision.get("provenance_original", text), shipped_suffix,
+            krel or "", decision["provenance_decision"])
     _ss_record_delivered(kind, text, decision.get("root", ""))
     _seal_lane_delivery(kind, shipped_suffix, krel or "", base_output=base_output)
     if kind == "l3b.evidence" and _last_budget_pending:
@@ -10921,6 +11208,25 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
         _gt_gateway_deliveries.append(sealed)
         # B-14: persist the sealed lane envelope (level-1 delivered) durably.
         _persist_receipt(sealed, kind="lane", transition="delivered")
+        try:
+            from groundtruth.runtime.fact_registry import is_registered
+            from groundtruth.runtime.global_arbiter import class_of_kind
+            fact_class = class_of_kind(kind)
+            if fact_class and is_registered(fact_class):
+                common = dict(
+                    candidate_bytes=_shipped, fact_class=fact_class,
+                    candidate_id=getattr(env, "dedup_key", "") or "")
+                _control_participation_record(
+                    "GT_LANE_ENVELOPE",
+                    "mini_seam.lane_envelope.candidate_conversion", "APPLIED",
+                    reason="lane_delivery_sealed", **common)
+                if _inseam_metrics_on():
+                    _control_participation_record(
+                        "GT_INSEAM_METRICS",
+                        "mini_seam.inseam_metrics.fact_observation", "APPLIED",
+                        reason="final_delivery_observed", **common)
+        except Exception:  # noqa: BLE001 -- metadata cannot change delivery
+            pass
     except Exception:  # noqa: BLE001 — bookkeeping must NEVER break the delivery
         pass
 
@@ -11386,7 +11692,8 @@ def _render_gateway_envelope(render_envelope, envelope, *, native: bool) -> str:
 def _gt_gateway_pool_envelope(
         winner, *, pool, out, ev, native: bool,
         render_envelope, fits_budget, seal_delivery,
-        contains_gt_tag, contains_test_identity) -> bool:
+        contains_gt_tag, contains_test_identity,
+        provenance_decision: str = "") -> bool:
     """Preflight and pool one Gateway envelope without committing loser state.
 
     Returns ``True`` only when the arbiter engine was unavailable and the helper
@@ -11439,6 +11746,9 @@ def _gt_gateway_pool_envelope(
         _persist_receipt(sealed, kind="gateway", transition="delivered")
         _xsession_flush()
         _gt_gateway_append(out, _shipped)
+        _record_gateway_final_controls(
+            _winner, _shipped, native=_native, globally_arbitrated=True,
+            provenance_decision=provenance_decision)
         try:
             _runtime_ledger_record(
                 kind="gateway." + (_winner.evidence_type or "fact"),
@@ -11589,8 +11899,18 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
             # drop a base-read fact about a file the agent structurally edited (freshness made
             # REAL). Empty until GT_EDIT_OVERLAY populates it via _gt_edit_overlay_transaction
             # -> byte-identical when the flag is off (the overlay stays {}).
-            episode_overlay=_gt_episode_overlay)
-        gateway_envelopes = _gw_augment(ev, st)
+            episode_overlay=_gt_episode_overlay,
+            # The gateway owns these terminal decisions; the seam owns the one
+            # typed durable writer. None when metrics are off preserves all bytes
+            # and avoids even constructing metadata.
+            control_recorder=(
+                _control_participation_record if _inseam_metrics_on() else None
+            ))
+        gateway_envelopes = [
+            _attach_exact_gateway_byte_owner(envelope, getattr(ev, "kind", "") or "other")
+            for envelope in _gw_augment(ev, st)
+        ]
+        _provenance_decisions = {}
         if _ss_provenance_on():
             _clean_gateway_envelopes = []
             _clean_gateway_seen = set()
@@ -11604,6 +11924,8 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
                         reason="ss_provenance",
                         file_path=getattr(_gateway_envelope, "target", "") or "")
                     continue
+                _provenance_decisions[getattr(_clean, "dedup_key", "") or ""] = (
+                    "APPLIED" if _clean != _gateway_envelope else "NO_EFFECT")
                 _clean_key = getattr(_clean, "dedup_key", "") or ""
                 if (_clean_key in _EPISODE.delivered_dedup
                         or _clean_key in _clean_gateway_seen):
@@ -11630,6 +11952,8 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
                     seal_delivery=_ad_seal,
                     contains_gt_tag=contains_gt_tag,
                     contains_test_identity=contains_test_identity,
+                    provenance_decision=_provenance_decisions.get(
+                        getattr(gateway_envelope, "dedup_key", "") or "", ""),
                 )
                 if committed_inline:
                     return
@@ -11701,6 +12025,10 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
             # BYTE-PRESERVING append (AFTER the seal commit): observation verbatim + the
             # boundary-joined delta. Still a pure suffix (TITO law 1).
             _gt_gateway_append(out, _shipped)
+            _record_gateway_final_controls(
+                winner, _shipped, native=native, globally_arbitrated=False,
+                provenance_decision=_provenance_decisions.get(
+                    getattr(winner, "dedup_key", "") or "", ""))
             try:
                 _runtime_ledger_record(
                     kind="gateway." + (winner.evidence_type or "fact"),
@@ -12126,12 +12454,19 @@ def _rendered_contains_exact_suffix(rendered, output_index: int, suffix: str) ->
 def _prepare_batch_delivery(candidate, thunk, spec: dict) -> _BatchDeliveryPlan:
     """Purely finalize exactly what render and commit will share."""
     text = str(spec.get("payload") or "")
+    provenance_original = text
+    provenance_decision = ""
     plane = getattr(candidate, "plane", "")
     root = _root() if (_ss_provenance_on() or _ss_novelty_on()
                        or _ss_dedup2_on()) else ""
     if plane == _GA_PLANE_LANE_A and _ss_provenance_on():
         text = _ss_provenance_filter(text, root)
+        provenance_decision = "APPLIED" if text != provenance_original else "NO_EFFECT"
     if not text or (plane == _GA_PLANE_LANE_A and not _ss_payload_has_content(text)):
+        if plane == _GA_PLANE_LANE_A and _ss_provenance_on() and provenance_original:
+            _record_lane_provenance_control(
+                candidate.kind, provenance_original, "", str(spec.get("krel") or ""),
+                "SUPPRESSED")
         decision = {"payload": "", "reason": "empty", "root": root}
         return _BatchDeliveryPlan(
             candidate, thunk, spec["out"], "", bool(spec.get("join")),
@@ -12154,6 +12489,9 @@ def _prepare_batch_delivery(candidate, thunk, spec: dict) -> _BatchDeliveryPlan:
             "suppressed", decision)
 
     decision = {"payload": text, "root": root}
+    if provenance_decision:
+        decision.update(provenance_original=provenance_original,
+                        provenance_decision=provenance_decision)
     legacy_hash = str(spec.get("winner_hash") or "")
     if plane == _GA_PLANE_LANE_A:
         legacy_hash = _oracle_content_hash(text)
@@ -12504,10 +12842,13 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
                 out, cmd, [(kind, text, subject_path)],
                 krel=subject_path, event=item_event)
             continue
+        def _commit_lane(k=kind, t=text, s=subject_path, e=item_event, c=cand):
+            before = out.get("output") or ""
+            _lane_a_deliver(out, cmd, [(k, t, s)], krel=s, event=e)
+            after = out.get("output") or ""
+            _record_cross_plane_final_controls(c, after[len(before):])
         _append_batch_candidate(
-            pool, cand, (lambda k=kind, t=text, s=subject_path, e=item_event:
-                         _lane_a_deliver(
-                             out, cmd, [(k, t, s)], krel=s, event=e)),
+            pool, cand, _commit_lane,
             out, text, join=True, kkind=kkind, krel=subject_path,
             rollback=_lane_a_rearm_pending.get(kind),
             prepared_extra={
@@ -12562,9 +12903,12 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
         _last_gate_winner_kind = winner_kind
         _last_gate_winner_hash = winner_hash
         try:
+            before = out.get("output") or ""
             _deliver_gate_winner(
                 out, cmd, t, kkind=kkind, kf=kf, krel=krel, event=event,
                 steer_base=steer_base)
+            after = out.get("output") or ""
+            _record_cross_plane_final_controls(cand, after[len(before):])
         finally:
             _last_gate_winner_kind = saved_kind
             _last_gate_winner_hash = saved_hash
@@ -12946,13 +13290,19 @@ def _commit_batch_arbitration(state, result, winner, plans) -> object:
             decision = plan.decision
             shadow_key = decision.get("shadow_key", "")
             would_ship = decision["shipped_suffix"]
-            _runtime_ledger_record(
+            durable = _runtime_ledger_record(
                 kind=winner.kind, outcome="shadow_holdout",
                 reason="ss_shadow_holdout", chars=0,
                 file_path=context.get("krel", ""),
                 content=would_ship,
                 extra={"chars_would": len(would_ship),
                        "dedup_key": shadow_key})
+            _control_participation_record(
+                "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
+                "APPLIED" if durable else "ERROR",
+                candidate_bytes=would_ship,
+                reason="holdout" if durable else "holdout_ledger_write_failed",
+            )
             if winner.plane == _GA_PLANE_LANE_A:
                 _oracle_delivered_hashes.add(decision["content_state_hash"])
                 _oracle_delivered_hashes.add(decision["content_hash"])
@@ -13452,9 +13802,22 @@ def _ss_shadow_would_withhold(kind: str, dedup_key: str, text: str) -> bool:
         return False
     try:
         from groundtruth.runtime.shadow_holdout import HOLDOUT, assign
-        return assign(
+        withheld = assign(
             _ss_shadow_task_id(), kind, dedup_key or "", _ss_shadow_rate()) == HOLDOUT
-    except Exception:  # noqa: BLE001
+        # A HOLDOUT is recorded only after its durable row commits at the actual
+        # delivery chokepoint. A deliver verdict is already terminal here.
+        if not withheld:
+            _control_participation_record(
+                "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
+                "NO_EFFECT", candidate_bytes=text, reason="deliver",
+            )
+        return withheld
+    except Exception as exc:  # noqa: BLE001
+        _control_participation_record(
+            "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
+            "ERROR", candidate_bytes=text,
+            reason=f"assignment_error:{type(exc).__name__}",
+        )
         return False
 
 
@@ -13474,7 +13837,7 @@ def _ss_shadow_withheld(kind: str, dedup_key: str, text: str, *,
         return False
     try:
         from groundtruth.runtime.shadow_holdout import canonical_class as _sh_canon
-        _runtime_ledger_record(
+        durable = _runtime_ledger_record(
             kind=kind,
             outcome="shadow_holdout",
             reason="ss_shadow_holdout",
@@ -13489,8 +13852,23 @@ def _ss_shadow_withheld(kind: str, dedup_key: str, text: str, *,
                 "shadow_rate": _ss_shadow_rate(),
             },
         )
+        if not durable:
+            _control_participation_record(
+                "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
+                "ERROR", candidate_bytes=text, reason="holdout_ledger_write_failed",
+            )
+            return False
+        _control_participation_record(
+            "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
+            "APPLIED", candidate_bytes=text, reason="holdout",
+        )
         return True
-    except Exception:  # noqa: BLE001 — the instrument must NEVER withhold-on-error or crash delivery
+    except Exception as exc:  # noqa: BLE001 — the instrument must NEVER withhold-on-error or crash delivery
+        _control_participation_record(
+            "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
+            "ERROR", candidate_bytes=text,
+            reason=f"holdout_commit_error:{type(exc).__name__}",
+        )
         return False
 
 
@@ -13906,15 +14284,35 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
         filt = _ss_provenance_filter(text, root)
         if filt != text and not _ss_payload_has_content(filt):
             return True, "ss_provenance"
-    if _ss_late_drop_on() and _ss_late_drop_suppresses(kind, text, is_loc=is_loc):
-        return True, "ss_late"
-    if _ss_dedup2_on() and _ss_dedup2_suppresses(kind, text, root, is_loc=is_loc):
-        return True, "ss_semantic_dup"
-    if (_ss_novelty_on()
-            and _ss_closed_subject_suppresses(kind, subject_path, event)):
-        return True, "ss_step_behind"
-    if _ss_novelty_on() and _ss_novelty_suppresses(kind, text, root, is_loc=is_loc):
-        return True, "ss_step_behind"
+    if _ss_late_drop_on():
+        late = _ss_late_drop_suppresses(kind, text, is_loc=is_loc)
+        _control_participation_record(
+            "GT_SS_LATE_DROP", "mini_seam.ss_content_decision.late_drop",
+            "APPLIED" if late else "NO_EFFECT", candidate_bytes=text,
+            reason="late" if late else "on_time",
+        )
+        if late:
+            return True, "ss_late"
+    if _ss_dedup2_on():
+        duplicate = _ss_dedup2_suppresses(kind, text, root, is_loc=is_loc)
+        _control_participation_record(
+            "GT_SS_DEDUP2", "mini_seam.ss_content_decision.semantic_dedup",
+            "APPLIED" if duplicate else "NO_EFFECT", candidate_bytes=text,
+            reason="semantic_duplicate" if duplicate else "novel_entity_set",
+        )
+        if duplicate:
+            return True, "ss_semantic_dup"
+    if _ss_novelty_on():
+        step_behind = _ss_closed_subject_suppresses(
+            kind, subject_path, event) or _ss_novelty_suppresses(
+                kind, text, root, is_loc=is_loc)
+        _control_participation_record(
+            "GT_SS_NOVELTY", "mini_seam.ss_content_decision.novelty",
+            "APPLIED" if step_behind else "NO_EFFECT", candidate_bytes=text,
+            reason="step_behind" if step_behind else "novel_entity",
+        )
+        if step_behind:
+            return True, "ss_step_behind"
     return False, ""
 
 
@@ -14496,7 +14894,7 @@ def _ss_record_test(cmd: str, orig_out: str, failed: bool, passed: bool) -> None
         pass
 
 
-def _ss_submit_red_refusal() -> str:
+def _ss_submit_red_refusal(*, record_candidate: bool = True) -> str:
     """SS-2 (GT_SS_SUBMIT_RED): at the submit boundary, consume the agent's OWN unresolved
     observed test RED — the conan-17092 class (the agent observed a gold-relevant test FAIL
     at m106, rationalized it away, and stamped submit_clean). Covering SELECTION was empty on
@@ -14534,11 +14932,13 @@ def _ss_submit_red_refusal() -> str:
     if not line or contains_gt_tag(line):
         return ""
     _ss_submit_red_fired = True
-    try:
-        _runtime_ledger_record(kind="submit_gate", outcome="submit_blocked",
-                               reason="ss_submit_red", chars=len(line))
-    except Exception:  # noqa: BLE001
-        pass
+    if record_candidate:
+        try:
+            _runtime_ledger_record(
+                kind="submit_gate", outcome="submit_blocked",
+                reason="ss_submit_red", chars=len(line))
+        except Exception:  # noqa: BLE001
+            pass
     return line
 
 
@@ -15824,8 +16224,22 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
             # silent (single dose, ledger rows both times). Off / no unresolved RED -> "" ->
             # byte-identical to the pre-SS-2 allow path. Additive: only reached on _allow, so it
             # never double-blocks a head that already blocked (covering fail keeps its own path).
-            _ss_red = _ss_submit_red_refusal()
+            _ss_red = _ss_submit_red_refusal(record_candidate=False)
             if _ss_red:
+                try:
+                    from groundtruth.runtime.feature_lineage import build_lineage
+                    _ss_red_lineage = build_lineage(
+                        runtime_producer_id="submit_gate",
+                        evidence_type="submit_refusal", actual_event="submit",
+                        cap_feature_ids=("GT_SS_SUBMIT_RED",))
+                    _runtime_ledger_record(
+                        kind="submit_gate", outcome="submit_blocked",
+                        reason="ss_submit_red", chars=len(_ss_red), content=_ss_red,
+                        extra=_feature_lineage_extra(_ss_red_lineage))
+                except Exception:  # noqa: BLE001 -- attribution never changes refusal
+                    _runtime_ledger_record(
+                        kind="submit_gate", outcome="submit_blocked",
+                        reason="ss_submit_red", chars=len(_ss_red), content=_ss_red)
                 _gt_submit_bounce_count += 1
                 return {"output": _ss_red, "returncode": 1}
             # clean / gate_overridden / gate_crash -> submission proceeds (host record).

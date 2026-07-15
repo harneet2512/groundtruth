@@ -576,6 +576,23 @@ def build_metric_applicability(
             )
 
         localization = performance.get("localization") or {}
+        n_edited = int(localization.get("_unique_edited") or 0)
+        n_viewed = int(localization.get("_unique_viewed") or 0)
+        for metric in ("localization_precision", "false_file_rate", "exploration_ratio"):
+            contracts.setdefault("localization", {})[metric] = _applicability(
+                has_true_gold and n_edited > 0,
+                "true_gold_available and unique_edited_files > 0",
+                "true gold and at least one edited file provide the metric denominator"
+                if has_true_gold and n_edited > 0
+                else "true gold or the edited-file denominator is absent",
+            )
+        contracts.setdefault("localization", {})["gold_view_precision"] = _applicability(
+            has_true_gold and n_viewed > 0,
+            "true_gold_available and unique_viewed_files > 0",
+            "true gold and at least one viewed file provide the metric denominator"
+            if has_true_gold and n_viewed > 0
+            else "true gold or the viewed-file denominator is absent",
+        )
         n_gold_edited = int(localization.get("_gold_edited_count") or 0)
         first_edit_applicable = has_true_gold and n_gold_edited > 0
         contracts.setdefault("edit_quality", {})["first_edit_correctness"] = (
@@ -584,6 +601,33 @@ def build_metric_applicability(
                 "gold_files_edited > 0",
                 "at least one true-gold file was edited"
                 if first_edit_applicable else "no true-gold file was edited",
+            )
+        )
+        contracts.setdefault("edit_quality", {})["edit_attempts_per_gold"] = (
+            _applicability(
+                first_edit_applicable,
+                "true_gold_files_edited > 0",
+                "at least one true-gold file was edited"
+                if first_edit_applicable else "no true-gold file was edited",
+            )
+        )
+
+        scope = performance.get("scope_completeness") or {}
+        scope_edits = int(scope.get("_total_edited_count") or 0)
+        contracts.setdefault("scope_completeness", {})["scope_excess"] = _applicability(
+            has_true_gold and scope_edits > 0,
+            "true_gold_available and unique_edited_files > 0",
+            "true gold and at least one edited file provide the metric denominator"
+            if has_true_gold and scope_edits > 0
+            else "true gold or the edited-file denominator is absent",
+        )
+        contracts.setdefault("scope_completeness", {})["multi_file_discovery"] = (
+            _applicability(
+                has_true_gold and n_gold > 1,
+                "true_gold_files > 1",
+                "the task has multiple true-gold files"
+                if has_true_gold and n_gold > 1
+                else "the task does not have multiple true-gold files",
             )
         )
 
@@ -598,7 +642,31 @@ def build_metric_applicability(
             if n_contract_warnings > 0 else "no caller-contract warning was delivered",
         )
 
+        edit_quality = performance.get("edit_quality") or {}
+        total_edits = int(edit_quality.get("_total_edits") or 0)
+        contracts.setdefault("edit_quality", {})["edit_revert_rate"] = _applicability(
+            total_edits > 0,
+            "total_edits > 0",
+            "at least one edit exists" if total_edits > 0 else "no edit denominator exists",
+        )
+
+        stuck = performance.get("stuck_recovery") or {}
+        nudge_recoveries = stuck.get("_nudge_recoveries") or []
+        contracts.setdefault("stuck_recovery", {})["nudge_recovery_steps"] = _applicability(
+            bool(nudge_recoveries),
+            "nudge_recovery_observations > 0",
+            "at least one nudge recovery interval exists"
+            if nudge_recoveries else "no nudge recovery interval exists",
+        )
+
         verify = performance.get("verify_before_submit") or {}
+        verify_edits = int(verify.get("_total_edits") or 0)
+        for metric in ("test_edit_ratio", "verify_gap"):
+            contracts.setdefault("verify_before_submit", {})[metric] = _applicability(
+                verify_edits > 0,
+                "total_edits > 0",
+                "at least one edit exists" if verify_edits > 0 else "no edit denominator exists",
+            )
         n_obligations = int(verify.get("_obligations_delivered") or 0)
         contracts.setdefault("verify_before_submit", {})[
             "obligation_test_rate"
@@ -619,6 +687,23 @@ def build_metric_applicability(
                 if n_nudges > 0 else "no recovery nudge was delivered",
             )
         )
+        attribution_denominators = {
+            "L1_followed_rate": (int(attribution.get("_l1_count") or 0), "L1_top5_count > 0"),
+            "contract_consulted_rate": (int(attribution.get("_edits_count") or 0), "total_edits > 0"),
+            "obligation_completion_rate": (
+                int(attribution.get("_obligations_delivered") or 0),
+                "obligations_delivered > 0",
+            ),
+            "scope_chain_followed": (
+                int(attribution.get("_scope_files_count") or 0), "scope_files_listed > 0",
+            ),
+        }
+        for metric, (denominator, predicate) in attribution_denominators.items():
+            contracts.setdefault("gt_attribution", {})[metric] = _applicability(
+                denominator > 0,
+                predicate,
+                "metric denominator exists" if denominator > 0 else "metric denominator is absent",
+            )
 
     if (
         behavioral_collection_succeeded
@@ -634,6 +719,12 @@ def build_metric_applicability(
             if isinstance(recovery, dict):
                 recovery_deliveries = int(recovery.get("total") or 0)
         section = contracts.setdefault("behavioral_impact", {})
+        section["impact_rate"] = _applicability(
+            total_deliveries > 0,
+            "total_deliveries > 0",
+            "at least one byte-joined GT delivery was observed"
+            if total_deliveries > 0 else "no byte-joined GT delivery was observed",
+        )
         section["per_tag_impact"] = _applicability(
             total_deliveries > 0,
             "total_deliveries > 0",
@@ -1029,11 +1120,11 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
     n_viewed = len(unique_viewed)
     n_gold_viewed = len(gold_viewed_set)
 
-    localization_precision = d8(n_gold_edited / n_edited) if n_edited else 0.0
+    localization_precision = d8(n_gold_edited / n_edited) if n_edited else None
     localization_recall = d8(n_gold_edited / n_gold) if n_gold else 0.0
-    false_file_rate = d8((n_edited - n_gold_edited) / n_edited) if n_edited else 0.0
-    exploration_ratio = d8(n_viewed / n_edited) if n_edited else d8(n_viewed)
-    gold_view_precision = d8(n_gold_viewed / n_viewed) if n_viewed else 0.0
+    false_file_rate = d8((n_edited - n_gold_edited) / n_edited) if n_edited else None
+    exploration_ratio = d8(n_viewed / n_edited) if n_edited else None
+    gold_view_precision = d8(n_gold_viewed / n_viewed) if n_viewed else None
     wasted_views = max(0, n_viewed - n_gold_viewed)
 
     # self_localization_needed: grep/find/rg commands before first gold view
@@ -1124,7 +1215,7 @@ def _compute_edit_quality(timeline: list[dict], gold_files: list[str],
         _path_match(f, g) for g in gold_set)}
     n_gold_edited = len(gold_edited)
     total_gold_edits = sum(gold_edited.values())
-    edit_attempts_per_gold = d8(total_gold_edits / n_gold_edited) if n_gold_edited else 0.0
+    edit_attempts_per_gold = d8(total_gold_edits / n_gold_edited) if n_gold_edited else None
     rewrite_count = sum(1 for c in edit_counts.values() if c > 1)
 
     # Compile failures: observation after an edit that has build-fail markers
@@ -1141,7 +1232,7 @@ def _compute_edit_quality(timeline: list[dict], gold_files: list[str],
     revert_count = sum(1 for ev in timeline
                        if ev["role"] == "assistant" and ev.get("is_revert"))
     total_edits = sum(edit_counts.values())
-    edit_revert_rate = d8(revert_count / total_edits) if total_edits else 0.0
+    edit_revert_rate = d8(revert_count / total_edits) if total_edits else None
 
     # first_edit_correctness: per gold file — did the FIRST edit survive to final patch?
     patch_files = set(_norm_path(p) for p in _parse_gold_from_diff(submission or ""))
@@ -1224,8 +1315,8 @@ def _compute_interface_preservation(timeline: list[dict], consumption: dict | No
     return {
         "contract_compliance_rate": contract_compliance_rate,
         "signature_changes_warned": signature_changes_warned,
-        "p2p_regression_rate": 0.0,  # requires verifier — filled by gt_deep_metrics
-        "caller_breakage_count": 0,  # requires verifier
+        "p2p_regression_rate": None,  # requires canonical verifier truth
+        "caller_breakage_count": None,  # requires canonical verifier truth
         "_warned_files": list(warned_files),
         "_contract_warning_count": n_warnings,
     }
@@ -1254,12 +1345,10 @@ def _compute_scope_completeness(timeline: list[dict], gold_files: list[str]) -> 
     n_edited = len(edited_files)
 
     scope_coverage = d8(len(gold_edited) / n_gold) if n_gold else 0.0
-    scope_excess = d8(len(non_gold_edited) / n_edited) if n_edited else 0.0
+    scope_excess = d8(len(non_gold_edited) / n_edited) if n_edited else None
 
     # multi_file_discovery: for multi-file gold tasks, were the 2nd/3rd files found?
-    multi_file_discovery = False
-    if n_gold > 1:
-        multi_file_discovery = len(gold_edited) >= 2
+    multi_file_discovery = len(gold_edited) >= 2 if n_gold > 1 else None
 
     # scope_gap_files: gold files the agent NEVER opened
     gold_never_opened = []
@@ -1277,6 +1366,7 @@ def _compute_scope_completeness(timeline: list[dict], gold_files: list[str]) -> 
         "_gold_gap_list": gold_never_opened,
         "_gold_edited_count": len(gold_edited),
         "_non_gold_edited_count": len(non_gold_edited),
+        "_total_edited_count": n_edited,
     }
 
 
@@ -1355,7 +1445,7 @@ def _compute_stuck_recovery(timeline: list[dict], consumption: dict | None = Non
 
     nudge_recovery_steps = (
         int(sum(nudge_recovery_steps_list) / len(nudge_recovery_steps_list))
-        if nudge_recovery_steps_list else 0
+        if nudge_recovery_steps_list else None
     )
 
     return {
@@ -1378,14 +1468,14 @@ def _compute_verify_before_submit(timeline: list[dict], consumption: dict | None
 
     test_runs_total = sum(1 for ev in assistant_events if ev.get("is_test"))
     total_edits = sum(1 for ev in assistant_events if ev.get("is_edit"))
-    test_edit_ratio = d8(test_runs_total / total_edits) if total_edits else 0.0
+    test_edit_ratio = d8(test_runs_total / total_edits) if total_edits else None
 
     # test_before_submit: any test in last 5 steps before submit
     last_5 = assistant_events[-5:] if len(assistant_events) >= 5 else assistant_events
     test_before_submit = any(ev.get("is_test") for ev in last_5)
 
     # verify_gap: steps between last edit and next test
-    verify_gap = 0
+    verify_gap = None
     last_edit_step = None
     for ev in assistant_events:
         if ev.get("is_edit"):
@@ -1395,7 +1485,7 @@ def _compute_verify_before_submit(timeline: list[dict], consumption: dict | None
             if ev["step"] > last_edit_step and ev.get("is_test"):
                 verify_gap = ev["step"] - last_edit_step
                 break
-        if verify_gap == 0 and last_edit_step:
+        if verify_gap is None and last_edit_step is not None:
             # no test after last edit
             verify_gap = n_steps - last_edit_step
 
@@ -1444,7 +1534,7 @@ def _compute_gt_attribution(timeline: list[dict], brief_txt: str,
         1 for f in l1_top5_set
         if any(_path_match(f, v) for v in viewed_set)
     )
-    l1_followed_rate = d8(l1_files_opened / len(l1_top5)) if l1_top5 else 0.0
+    l1_followed_rate = d8(l1_files_opened / len(l1_top5)) if l1_top5 else None
 
     # contract_consulted_rate: did agent view a file's contract BEFORE editing it?
     # Proxy: was a <gt-contract> observation received before the edit step for that file?
@@ -1478,7 +1568,7 @@ def _compute_gt_attribution(timeline: list[dict], brief_txt: str,
                for cf, cstep in contract_view_steps.items())
     )
     n_edits = len(edited_files)
-    contract_consulted_rate = d8(edits_with_prior_contract / n_edits) if n_edits else 0.0
+    contract_consulted_rate = d8(edits_with_prior_contract / n_edits) if n_edits else None
 
     # obligation_completion_rate: obligations_addressed / obligations_delivered
     native_obligations = _visible_receipts(consumption, "obligations")
@@ -1513,7 +1603,7 @@ def _compute_gt_attribution(timeline: list[dict], brief_txt: str,
                 break
     obligation_completion_rate = d8(
         obligation_followed_edits / obligations_delivered
-    ) if obligations_delivered else 0.0
+    ) if obligations_delivered else None
 
     # nudge_action_rate: nudges followed by correct action / nudges
     native_nudges = _visible_receipts(consumption, "recovery")
@@ -1562,7 +1652,7 @@ def _compute_gt_attribution(timeline: list[dict], brief_txt: str,
         if any(_path_match(f, v) for v in viewed_set)
     )
     scope_chain_followed = d8(scope_files_opened / len(scope_files_set)) \
-        if scope_files_set else 0.0
+        if scope_files_set else None
 
     return {
         "L1_followed_rate": l1_followed_rate,
@@ -1571,7 +1661,10 @@ def _compute_gt_attribution(timeline: list[dict], brief_txt: str,
         "nudge_action_rate": nudge_action_rate,
         "scope_chain_followed": scope_chain_followed,
         "_l1_top5": l1_top5,
+        "_l1_count": len(l1_top5),
         "_l1_files_opened": l1_files_opened,
+        "_edits_count": n_edits,
+        "_obligations_delivered": obligations_delivered,
         "_nudges_delivered": nudges_delivered,
         "_scope_files_count": len(scope_files_set),
     }
@@ -1596,7 +1689,7 @@ def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
     cache_miss = usage["cache_miss_tokens"]
 
     # recorded cost (litellm)
-    total_cost_usd = 0.0
+    total_cost_usd = None
     for ck in ("instance_cost", "cost", "total_cost"):
         cv = model_stats.get(ck)
         if isinstance(cv, (int, float)) and cv > 0:

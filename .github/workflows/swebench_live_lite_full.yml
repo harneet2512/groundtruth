@@ -43,6 +43,10 @@ on:
         description: "Concurrent jobs (default 20; lower if runner ceiling below 20)"
         required: true
         default: "20"
+      shadow_rate:
+        description: "Deterministic SS shadow-holdout fraction in [0,1]. Exact request is validated and sealed; default 0 withholds nothing."
+        required: true
+        default: "0"
       assets_repo:
         description: "owner/repo hosting the shared GHCR image cache + pipeline-assets-v1 release"
         required: true
@@ -94,11 +98,10 @@ env:
   GT_REQUIRE_LSP: ${{ inputs.baseline == true && '0' || '1' }}
   # Legitimacy: per-task graph built FRESH in-container from THIS task's repo.
   GT_FORBID_PREBUILT_GRAPH: ${{ inputs.baseline == true && '0' || '1' }}
-  # Legitimacy: arm the commit-parity gate (parity with deepswe_full.yml) so a
-  # stale-bake / wrong-commit proof FAILS CLOSED (consumed by substrate_proof.sh).
-  # Commit parity OFF: substrate baked from ebf28d8e, workflow-only fixes since
-  # then don't change baked code (Go binary + Python). Re-enable after next rebuild.
-  GT_REQUIRE_COMMIT_PARITY: "0"
+  # Paid GT-on runs require the substrate build and prepared checkout to be the
+  # same immutable commit. Baseline is rejected in prepare; its zero remains a
+  # defensive value for unreachable control-arm branches.
+  GT_REQUIRE_COMMIT_PARITY: ${{ inputs.baseline == true && '0' || '1' }}
   # HF must be fully offline.
   HF_DATASETS_OFFLINE: "1"
   TRANSFORMERS_OFFLINE: "1"
@@ -136,10 +139,28 @@ jobs:
       total: ${{ steps.gen.outputs.total }}
       bench_sha: ${{ steps.pro_bench_clone.outputs.bench_sha }}
       gt_sha: ${{ steps.resolve_gt.outputs.gt_sha }}
+      shadow_rate_requested: ${{ steps.shadow_rate.outputs.requested }}
+      shadow_rate_effective: ${{ steps.shadow_rate.outputs.effective }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.gt_ref || 'gt-trial' }}
+
+      - name: Paid-run identity precheck (GT-on, max-parallel 20 only)
+        shell: bash
+        env:
+          GT_INPUT_BASELINE: ${{ inputs.baseline }}
+          GT_INPUT_MAX_PARALLEL: ${{ inputs.max_parallel }}
+        run: |
+          if [ "$GT_INPUT_BASELINE" = "true" ]; then
+            echo "GT_PAID_IDENTITY_PRECHECK_FAILED: baseline dispatches are prohibited" >&2
+            exit 1
+          fi
+          if [ "$GT_INPUT_MAX_PARALLEL" != "20" ]; then
+            echo "GT_PAID_IDENTITY_PRECHECK_FAILED: max_parallel must be exactly 20" >&2
+            exit 1
+          fi
+          echo "GT_PAID_IDENTITY_PRECHECK_OK: arm=GT-on max_parallel=20"
 
       - name: Resolve requested GT ref once
         id: resolve_gt
@@ -153,9 +174,68 @@ jobs:
           echo "gt_sha=$GT_PREPARED_SHA" >> "$GITHUB_OUTPUT"
           echo "[GT] prepared immutable identity: $GT_PREPARED_SHA"
 
+      - name: Shadow-rate precheck (fail-closed before paid matrix)
+        id: shadow_rate
+        shell: bash
+        env:
+          GT_SHADOW_RATE_REQUESTED: ${{ inputs.shadow_rate }}
+        run: |
+          python3 <<'PY'
+          from decimal import Decimal, InvalidOperation
+          import os
+          import re
+
+          raw = os.environ.get("GT_SHADOW_RATE_REQUESTED", "")
+          if len(raw) > 32 or re.fullmatch(r"(?:0(?:\.[0-9]+)?|1(?:\.0+)?)", raw) is None:
+              raise SystemExit(
+                  "GT_SHADOW_RATE_INVALID: expected an unpadded decimal in [0,1] "
+                  "using forms 0, 0.<digits>, 1, or 1.0..."
+              )
+          try:
+              value = Decimal(raw)
+          except InvalidOperation as exc:
+              raise SystemExit("GT_SHADOW_RATE_INVALID: decimal parse failed") from exc
+          if not Decimal("0") <= value <= Decimal("1"):
+              raise SystemExit("GT_SHADOW_RATE_INVALID: value outside [0,1]")
+          effective = format(value, "f").rstrip("0").rstrip(".") if "." in format(value, "f") else format(value, "f")
+          effective = effective or "0"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
+              stream.write(f"requested={raw}\n")
+              stream.write(f"effective={effective}\n")
+          print(f"shadow rate validated: requested={raw!r} effective={effective!r}")
+          PY
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Generate exact-128 static feature authority manifest
+        id: feature_preflight
+        if: ${{ inputs.baseline != true }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          PYTHONPATH="${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench" \
+            python3 scripts/swebench/gt_dispatch_feature_preflight.py \
+              --output artifacts/gt_static_dispatch_feature_manifest.json
+
+      - name: Persist static feature authority manifest
+        if: ${{ inputs.baseline != true && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-static-feature-authority-${{ github.run_id }}
+          path: artifacts/gt_static_dispatch_feature_manifest.json
+          if-no-files-found: error
+
+      - name: Enforce static feature authority preflight before paid matrix
+        if: ${{ inputs.baseline != true }}
+        shell: bash
+        run: |
+          if [ "${{ steps.feature_preflight.outcome }}" != "success" ]; then
+            echo "GT_STATIC_FEATURE_PREFLIGHT_FAILED: exact-128 authority manifest is incomplete" >&2
+            exit 1
+          fi
 
       - name: Workflow lint — catch CI bug classes before the paid matrix
         shell: bash
@@ -464,13 +544,18 @@ jobs:
     runs-on: ubuntu-latest
     name: "${{ matrix.task }} (${{ matrix.language }})"
     timeout-minutes: 150
+    env:
+      # Preserve the dispatch token for audit while exposing only the validated canonical
+      # value to the deterministic seam. Both values are cross-checked in sealed artifacts.
+      GT_SS_SHADOW_RATE_REQUESTED: ${{ needs.prepare.outputs.shadow_rate_requested }}
+      GT_SS_SHADOW_RATE: ${{ needs.prepare.outputs.shadow_rate_effective }}
     defaults:
       run:
         shell: bash
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
-      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+      max-parallel: 20
     steps:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
@@ -780,27 +865,28 @@ jobs:
           GT_ID_WORKFLOW_DISPATCH_SHA: ${{ github.sha }}
           GT_ID_WORKFLOW_RUN_ID: ${{ github.run_id }}
           GT_ID_BASELINE: ${{ inputs.baseline == true && '1' || '0' }}
+          GT_ID_MAX_PARALLEL_REQUESTED: ${{ inputs.max_parallel }}
         run: |
           # gt_math R01-R04: emit ONE resolved run-identity artifact + FAIL CLOSED before any model
           # spend if its checkout/hashes/run binding is invalid or the substrate actually present on
           # THIS runner does not match the pinned digest. Known trap: a stale cached tarball
           # or a :latest fallback silently loads the WRONG substrate -> GT_REQUIRE_LSP fail-closed 5/5.
-          # Applies to BOTH arms (both WRITE the identity artifact); the baseline arm has no expected
-          # digest / consumes no substrate, so the digest gate is a no-op there (record only). Commit
-          # parity is RECORDED, NOT gated: the baked substrate_build_commit and the synced run commit
-          # differ BY DESIGN (run_manifest.commit_parity == "mismatch" is EXPECTED), so gating on it
-          # would fail every legitimate baked-vs-synced run. Gate identity integrity + substrate
-          # digest binding, but never gate on baked-vs-synced commit parity.
+          # Prepare rejects baseline dispatches. Defensive baseline branches remain, but every paid
+          # GT-on run requires exact digest, image ID, workflow/prepared/resolved commit, and baked/run
+          # commit parity before model spend.
           mkdir -p /tmp/gt_out /tmp/gt
           rm -f /tmp/gt_out/gt_run_identity.json
           EXPECTED_DIGEST="${GT_SUBSTRATE_DIGEST:-}"
           ACTUAL_DIGEST=""
+          SUBSTRATE_IMAGE_ID=""
           DIGEST_PRESENT=0
           if [ -n "$EXPECTED_DIGEST" ] && command -v docker >/dev/null 2>&1; then
             if docker image inspect "$EXPECTED_DIGEST" >/dev/null 2>&1; then
-              DIGEST_PRESENT=1
-              ACTUAL_DIGEST="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$EXPECTED_DIGEST" 2>/dev/null | grep -F '@sha256:' | head -1 || true)"
-              [ -n "$ACTUAL_DIGEST" ] || ACTUAL_DIGEST="$EXPECTED_DIGEST"
+              ACTUAL_DIGEST="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$EXPECTED_DIGEST" 2>/dev/null | grep -Fx "$EXPECTED_DIGEST" | head -1 || true)"
+              SUBSTRATE_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$EXPECTED_DIGEST" 2>/dev/null || true)"
+              if [ -n "$ACTUAL_DIGEST" ] && [[ "$SUBSTRATE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                DIGEST_PRESENT=1
+              fi
             fi
           fi
           # seam/runner identity = the sha256 of the files that are cp'd into /opt/gt (identical bytes,
@@ -810,9 +896,10 @@ jobs:
           IDENTITY_FAILURE_CODE=""
           IDENTITY_FAILURE_DETAIL=""
           IDENTITY_WRITER_RC=0
-          # RESOLVED-IDENTITY ARTIFACT (always written, both arms). commit_parity is read from the
-          # substrate run_manifest.json and RECORDED here (never gated — see the header note).
+          # RESOLVED-IDENTITY ARTIFACT. commit_parity is read from the substrate manifest and
+          # required again by this identity validator before the paid GT-on launch.
           GT_ID_EXPECTED="$EXPECTED_DIGEST" GT_ID_ACTUAL="$ACTUAL_DIGEST" \
+          GT_ID_SUBSTRATE_IMAGE_ID="$SUBSTRATE_IMAGE_ID" \
           GT_ID_SEAM="$SEAM_SHA" GT_ID_RUNNER="$RUNNER_SHA" \
           python3 << 'PY' || IDENTITY_WRITER_RC=$?
           import json, os
@@ -829,6 +916,7 @@ jobs:
               'schema': 'gt.run_identity.v1',
               'substrate_digest_expected': os.environ.get('GT_ID_EXPECTED') or '',
               'substrate_digest_actual': os.environ.get('GT_ID_ACTUAL') or '',
+              'substrate_image_id': os.environ.get('GT_ID_SUBSTRATE_IMAGE_ID') or '',
               'gt_ref_requested': os.environ.get('GT_ID_GT_REF_REQUESTED') or '',
               'gt_ref_prepared_sha': os.environ.get('GT_PREPARED_SHA') or '',
               'gt_ref_resolved': os.environ.get('GT_CHECKOUT_SHA') or '',
@@ -838,6 +926,10 @@ jobs:
               'runner_sha256': os.environ.get('GT_ID_RUNNER') or '',
               'workflow_run_id': os.environ.get('GT_ID_WORKFLOW_RUN_ID') or '',
               'baseline': os.environ.get('GT_ID_BASELINE') == '1',
+              'max_parallel_requested': os.environ.get('GT_ID_MAX_PARALLEL_REQUESTED') or '',
+              'max_parallel_effective': 20,
+              'shadow_rate_requested': os.environ.get('GT_SS_SHADOW_RATE_REQUESTED') or '',
+              'shadow_rate_effective': os.environ.get('GT_SS_SHADOW_RATE') or '',
               'commit_parity_recorded': mani.get('commit_parity'),
               'substrate_build_commit': mani.get('substrate_build_commit'),
           }
@@ -854,6 +946,7 @@ jobs:
             IDENTITY_FAILURE_CODE="IDENTITY_WRITE_FAILED"
             IDENTITY_FAILURE_DETAIL="gt_run_identity.json could not be published atomically"
           elif ! GT_ID_EXPECTED="$EXPECTED_DIGEST" GT_ID_ACTUAL="$ACTUAL_DIGEST" \
+            GT_ID_SUBSTRATE_IMAGE_ID="$SUBSTRATE_IMAGE_ID" \
             GT_ID_SEAM="$SEAM_SHA" GT_ID_RUNNER="$RUNNER_SHA" python3 << 'PY'
           import json, os, re
           with open('/tmp/gt_out/gt_run_identity.json', encoding='utf-8') as f:
@@ -868,20 +961,37 @@ jobs:
               'gt_ref_matches_checkout': doc.get('gt_ref_resolved') == os.environ.get('GT_CHECKOUT_SHA'),
               'gt_ref_resolved_source': doc.get('gt_ref_resolved_source') == 'git_rev_parse_head',
               'workflow_dispatch_sha': bool(canonical.fullmatch(str(doc.get('workflow_dispatch_sha') or ''))),
+              'workflow_dispatch_matches_prepared': doc.get('workflow_dispatch_sha') == doc.get('gt_ref_prepared_sha'),
               'seam_sha256': bool(digest.fullmatch(str(doc.get('seam_sha256') or ''))),
               'seam_matches_checkout': doc.get('seam_sha256') == os.environ.get('GT_ID_SEAM'),
               'runner_sha256': bool(digest.fullmatch(str(doc.get('runner_sha256') or ''))),
               'runner_matches_checkout': doc.get('runner_sha256') == os.environ.get('GT_ID_RUNNER'),
               'workflow_run_id': bool(re.fullmatch(r'[0-9]+', str(doc.get('workflow_run_id') or ''))),
               'workflow_run_matches': str(doc.get('workflow_run_id') or '') == os.environ.get('GT_ID_WORKFLOW_RUN_ID'),
+              'shadow_rate_requested': doc.get('shadow_rate_requested') == os.environ.get('GT_SS_SHADOW_RATE_REQUESTED'),
+              'shadow_rate_effective': doc.get('shadow_rate_effective') == os.environ.get('GT_SS_SHADOW_RATE'),
+              'shadow_rate_effective_canonical': bool(re.fullmatch(r'(?:0|1|0\.[0-9]*[1-9])', str(doc.get('shadow_rate_effective') or ''))),
+              'max_parallel_requested': doc.get('max_parallel_requested') == '20',
+              'max_parallel_effective': doc.get('max_parallel_effective') == 20,
           }
           expected = os.environ.get('GT_ID_EXPECTED') or ''
           actual = os.environ.get('GT_ID_ACTUAL') or ''
           if os.environ.get('GT_ID_BASELINE') != '1' and expected:
+              parity = doc.get('commit_parity_recorded')
+              prepared = doc.get('gt_ref_prepared_sha')
               required['substrate_digest_binding'] = (
-                  actual == expected
+                  bool(actual) and actual == expected
                   and doc.get('substrate_digest_expected') == expected
                   and doc.get('substrate_digest_actual') == actual
+                  and doc.get('substrate_image_id') == os.environ.get('GT_ID_SUBSTRATE_IMAGE_ID')
+                  and bool(re.fullmatch(r'sha256:[0-9a-f]{64}', str(doc.get('substrate_image_id') or '')))
+              )
+              required['commit_parity_exact'] = (
+                  isinstance(parity, dict)
+                  and parity.get('status') == 'match'
+                  and parity.get('substrate_build_commit') == prepared
+                  and parity.get('run_commit') == prepared
+                  and doc.get('substrate_build_commit') == prepared
               )
           failed = sorted(name for name, passed in required.items() if not passed)
           if failed:
@@ -940,18 +1050,34 @@ jobs:
               'gt_ref_matches_checkout': doc.get('gt_ref_resolved') == os.environ.get('GT_CHECKOUT_SHA'),
               'gt_ref_resolved_source': doc.get('gt_ref_resolved_source') == 'git_rev_parse_head',
               'workflow_dispatch_sha': bool(canonical.fullmatch(str(doc.get('workflow_dispatch_sha') or ''))),
+              'workflow_dispatch_matches_prepared': doc.get('workflow_dispatch_sha') == doc.get('gt_ref_prepared_sha'),
               'seam_sha256': bool(digest.fullmatch(str(doc.get('seam_sha256') or ''))),
               'seam_matches_checkout': doc.get('seam_sha256') == file_sha('artifact_deepswe/gt_mini_patch.py'),
               'runner_sha256': bool(digest.fullmatch(str(doc.get('runner_sha256') or ''))),
               'runner_matches_checkout': doc.get('runner_sha256') == file_sha('artifact_deepswe/gt_headless_runner.py'),
               'workflow_run_id': bool(re.fullmatch(r'[0-9]+', str(doc.get('workflow_run_id') or ''))),
               'workflow_run_matches': str(doc.get('workflow_run_id') or '') == os.environ.get('GITHUB_RUN_ID'),
+              'shadow_rate_requested': doc.get('shadow_rate_requested') == os.environ.get('GT_SS_SHADOW_RATE_REQUESTED'),
+              'shadow_rate_effective': doc.get('shadow_rate_effective') == os.environ.get('GT_SS_SHADOW_RATE'),
+              'shadow_rate_effective_canonical': bool(re.fullmatch(r'(?:0|1|0\.[0-9]*[1-9])', str(doc.get('shadow_rate_effective') or ''))),
+              'max_parallel_requested': doc.get('max_parallel_requested') == '20',
+              'max_parallel_effective': doc.get('max_parallel_effective') == 20,
           }
           expected = os.environ.get('GT_SUBSTRATE_DIGEST') or ''
           if os.environ.get('INPUT_BASELINE') != 'true' and expected:
+              parity = doc.get('commit_parity_recorded')
+              prepared = doc.get('gt_ref_prepared_sha')
               required['substrate_digest_binding'] = (
                   doc.get('substrate_digest_expected') == expected
                   and doc.get('substrate_digest_actual') == expected
+                  and bool(re.fullmatch(r'sha256:[0-9a-f]{64}', str(doc.get('substrate_image_id') or '')))
+              )
+              required['commit_parity_exact'] = (
+                  isinstance(parity, dict)
+                  and parity.get('status') == 'match'
+                  and parity.get('substrate_build_commit') == prepared
+                  and parity.get('run_commit') == prepared
+                  and doc.get('substrate_build_commit') == prepared
               )
           failed = sorted(name for name, passed in required.items() if not passed)
           if failed:
@@ -1126,14 +1252,86 @@ jobs:
           _GHCR_IMG="ghcr.io/$REPO_OWNER/${BASENAME}:latest"
           _DH_IMG="docker.io/starryzhang/${BASENAME}:latest"
           if docker pull "$_GHCR_IMG" 2>/dev/null; then
+            TASK_IMAGE_REQUESTED="$_GHCR_IMG"
             echo "[GT_META] Live Lite image from GHCR: $_GHCR_IMG"
           elif docker pull "$_DH_IMG" 2>/dev/null; then
-            _GHCR_IMG="$_DH_IMG"
+            TASK_IMAGE_REQUESTED="$_DH_IMG"
             echo "[GT_META] Live Lite image from DockerHub: $_DH_IMG"
           else
             echo "::error::Image not found: $_GHCR_IMG or $_DH_IMG"
             exit 1
           fi
+          TASK_IMAGE_REPOSITORY="${TASK_IMAGE_REQUESTED%:*}"
+          TASK_IMAGE_CANONICAL_REPOSITORY="${TASK_IMAGE_REPOSITORY#docker.io/}"
+          TASK_IMAGE_REPODIGEST="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$TASK_IMAGE_REQUESTED" 2>/dev/null | while IFS= read -r candidate; do case "$candidate" in "${TASK_IMAGE_REPOSITORY}@sha256:"*|"${TASK_IMAGE_CANONICAL_REPOSITORY}@sha256:"*) printf '%s\n' "$candidate"; break ;; esac; done)"
+          TASK_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$TASK_IMAGE_REQUESTED" 2>/dev/null || true)"
+          if [[ ! "$TASK_IMAGE_REPODIGEST" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]] \
+             || [[ ! "$TASK_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "GT_TASK_IMAGE_IDENTITY_FAIL: requested=$TASK_IMAGE_REQUESTED repo_digest=$TASK_IMAGE_REPODIGEST image_id=$TASK_IMAGE_ID" >&2
+            exit 1
+          fi
+          TASK_IMAGE_IMMUTABLE="$TASK_IMAGE_REPODIGEST"
+          TASK_IMAGE_IMMUTABLE_ID="$(docker image inspect --format '{{.Id}}' "$TASK_IMAGE_IMMUTABLE" 2>/dev/null || true)"
+          if [ "$TASK_IMAGE_IMMUTABLE_ID" != "$TASK_IMAGE_ID" ]; then
+            echo "GT_TASK_IMAGE_IDENTITY_FAIL: immutable digest id=$TASK_IMAGE_IMMUTABLE_ID requested-tag id=$TASK_IMAGE_ID" >&2
+            exit 1
+          fi
+          if ! GT_TASK_IDENTITY_TASK="$MTASK" \
+          GT_TASK_IMAGE_REQUESTED="$TASK_IMAGE_REQUESTED" \
+          GT_TASK_IMAGE_REPODIGEST="$TASK_IMAGE_REPODIGEST" \
+          GT_TASK_IMAGE_ID="$TASK_IMAGE_ID" python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          target = Path('/tmp/gt_out/gt_run_identity.json')
+          document = json.loads(target.read_text(encoding='utf-8'))
+          if document.get('schema') != 'gt.run_identity.v1':
+              raise SystemExit('GT_TASK_IMAGE_IDENTITY_FAIL: invalid run identity schema')
+          document.update({
+              'task': os.environ['GT_TASK_IDENTITY_TASK'],
+              'task_image_requested': os.environ['GT_TASK_IMAGE_REQUESTED'],
+              'task_image_repo_digest': os.environ['GT_TASK_IMAGE_REPODIGEST'],
+              'task_image_id': os.environ['GT_TASK_IMAGE_ID'],
+          })
+          temporary = target.with_suffix(f'.json.tmp.{os.getpid()}')
+          with temporary.open('w', encoding='utf-8') as stream:
+              json.dump(document, stream, indent=2)
+              stream.flush()
+              os.fsync(stream.fileno())
+          os.replace(temporary, target)
+          PY
+          then
+            echo "GT_TASK_IMAGE_IDENTITY_FAIL: identity enrichment failed" >&2
+            exit 1
+          fi
+          if ! GT_TASK_IDENTITY_TASK="$MTASK" \
+            GT_TASK_IMAGE_REQUESTED="$TASK_IMAGE_REQUESTED" \
+            GT_TASK_IMAGE_REPODIGEST="$TASK_IMAGE_REPODIGEST" \
+            GT_TASK_IMAGE_ID="$TASK_IMAGE_ID" python3 <<'PY'
+          import json
+          import os
+
+          with open('/tmp/gt_out/gt_run_identity.json', encoding='utf-8') as stream:
+              document = json.load(stream)
+          stored_task = document.get('task')
+          stored_task_image_requested = document.get('task_image_requested')
+          stored_task_image_repo_digest = document.get('task_image_repo_digest')
+          stored_task_image_id = document.get('task_image_id')
+          expected = (
+              os.environ['GT_TASK_IDENTITY_TASK'],
+              os.environ['GT_TASK_IMAGE_REQUESTED'],
+              os.environ['GT_TASK_IMAGE_REPODIGEST'],
+              os.environ['GT_TASK_IMAGE_ID'],
+          )
+          if (stored_task, stored_task_image_requested, stored_task_image_repo_digest, stored_task_image_id) != expected:
+              raise SystemExit('stored task-image identity does not match observed Docker identity')
+          PY
+          then
+            echo "GT_TASK_IMAGE_IDENTITY_FAIL: stored identity validation failed" >&2
+            exit 1
+          fi
+          echo "[GT_META] immutable task image: $TASK_IMAGE_IMMUTABLE id=$TASK_IMAGE_ID"
 
           # ── SWE-Pro: direct container execution (NO pier) ─────────────────
           # The GHCR task image is already pulled. Run the agent DIRECTLY inside
@@ -1215,6 +1413,8 @@ jobs:
             -e GT_INDEX_BIN="/opt/gt/gt-index" \
             -e GT_L6_FRESH="1" \
             -e GT_RL_PROFILE="${GT_RL_PROFILE:-2}" \
+            -e GT_SS_SHADOW_RATE_REQUESTED="${GT_SS_SHADOW_RATE_REQUESTED}" \
+            -e GT_SS_SHADOW_RATE="${GT_SS_SHADOW_RATE}" \
             -e GT_ORACLE_EVENTS="/gt_out/gt_oracle_events.jsonl" \
             -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
@@ -1222,7 +1422,7 @@ jobs:
             -e GT_BASELINE=$GT_BASELINE_FLAG \
             $MODEL_ENV \
             --entrypoint "" \
-            "$_GHCR_IMG" \
+            "$TASK_IMAGE_IMMUTABLE" \
             bash -c '
               set -e
               # Find repo root (/testbed for SWE-bench images, /app for others)
@@ -1363,7 +1563,7 @@ jobs:
                   # capability_receipt --emit-json) is embedded as a parsed object, and a non-object
                   # receipt is omitted so the file is still written. Members are read from the SAME
                   # _GT_PROFILE_EXPORTS just eval-ed, so the record matches what was activated.
-                if ! GTPA_PROFILE="${GT_RL_PROFILE:-2}" GTPA_EXPORTS="${_GT_PROFILE_EXPORTS}" GTPA_RECEIPT="${GT_CAPABILITY_RECEIPT:-}" PYTHONPATH=/opt/gt "$GT_PY" -c "import json,os; ex=os.environ.get(\"GTPA_EXPORTS\") or \"\"; members=[l.split(\"=\",1)[0].split()[1] for l in ex.splitlines() if l.strip().startswith(\"export \") and \"=\" in l]; rr=(os.environ.get(\"GTPA_RECEIPT\") or \"\").strip(); doc={\"schema\": \"gt.profile_activation.v1\", \"profile\": os.environ.get(\"GTPA_PROFILE\") or \"\", \"members\": members}; doc.update({\"capability_receipt\": json.loads(rr)} if rr.startswith(\"{\") else {}); open(\"/gt_out/gt_profile_activation.json\", \"w\", encoding=\"utf-8\").write(json.dumps(doc, indent=2))" 2>/tmp/gt_profile_act_err.txt; then
+                if ! GTPA_PROFILE="${GT_RL_PROFILE:-2}" GTPA_EXPORTS="${_GT_PROFILE_EXPORTS}" GTPA_RECEIPT="${GT_CAPABILITY_RECEIPT:-}" PYTHONPATH=/opt/gt "$GT_PY" -c "import json,os; ex=os.environ.get(\"GTPA_EXPORTS\") or \"\"; members=[l.split(\"=\",1)[0].split()[1] for l in ex.splitlines() if l.strip().startswith(\"export \") and \"=\" in l]; rr=(os.environ.get(\"GTPA_RECEIPT\") or \"\").strip(); doc={\"schema\": \"gt.profile_activation.v1\", \"profile\": os.environ.get(\"GTPA_PROFILE\") or \"\", \"members\": members, \"shadow_rate_requested\": os.environ.get(\"GT_SS_SHADOW_RATE_REQUESTED\") or \"\", \"shadow_rate_effective\": os.environ.get(\"GT_SS_SHADOW_RATE\") or \"\"}; doc.update({\"capability_receipt\": json.loads(rr)} if rr.startswith(\"{\") else {}); open(\"/gt_out/gt_profile_activation.json\", \"w\", encoding=\"utf-8\").write(json.dumps(doc, indent=2))" 2>/tmp/gt_profile_act_err.txt; then
                   echo "GT_PROFILE_RECEIPT_ABORT_BEFORE_SPEND: activation proof write failed: $(cat /tmp/gt_profile_act_err.txt 2>/dev/null)"
                   exit 1
                 fi
@@ -2003,6 +2203,7 @@ jobs:
           import hashlib
           import json
           import os
+          import re
           from pathlib import Path
 
           from artifact_deepswe.ledger_attestation import validate_attestation
@@ -2071,10 +2272,38 @@ jobs:
               and batch.get("mini_swe_version") == "2.4.5"
           ):
               raise SystemExit("GT_TASK_COMPLETION_INVALID:batch_activation")
+          parity = identity.get("commit_parity_recorded")
+          prepared = identity.get("gt_ref_prepared_sha")
+          expected_substrate = os.environ.get("GT_SUBSTRATE_DIGEST", "")
           if (identity.get("schema") != "gt.run_identity.v1"
                   or identity.get("workflow_run_id") != os.environ.get("GITHUB_RUN_ID", "")
-                  or identity.get("baseline") is not False):
+                  or identity.get("baseline") is not False
+                  or identity.get("max_parallel_requested") != "20"
+                  or identity.get("max_parallel_effective") != 20
+                  or identity.get("gt_ref_resolved") != prepared
+                  or identity.get("workflow_dispatch_sha") != prepared
+                  or identity.get("substrate_digest_expected") != expected_substrate
+                  or identity.get("substrate_digest_actual") != expected_substrate
+                  or re.fullmatch(r"sha256:[0-9a-f]{64}", str(identity.get("substrate_image_id") or "")) is None
+                  or not isinstance(parity, dict)
+                  or parity.get("status") != "match"
+                  or parity.get("substrate_build_commit") != prepared
+                  or parity.get("run_commit") != prepared
+                  or identity.get("substrate_build_commit") != prepared
+                  or identity.get("task") != task
+                  or re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", str(identity.get("task_image_repo_digest") or "")) is None
+                  or re.fullmatch(r"sha256:[0-9a-f]{64}", str(identity.get("task_image_id") or "")) is None
+                  or not str(identity.get("task_image_requested") or "").endswith(":latest")):
               raise SystemExit("GT_TASK_COMPLETION_INVALID:run_identity")
+          expected_requested = os.environ.get("GT_SS_SHADOW_RATE_REQUESTED", "")
+          expected_effective = os.environ.get("GT_SS_SHADOW_RATE", "")
+          if not (
+              identity.get("shadow_rate_requested") == expected_requested
+              and identity.get("shadow_rate_effective") == expected_effective
+              and activation.get("shadow_rate_requested") == expected_requested
+              and activation.get("shadow_rate_effective") == expected_effective
+          ):
+              raise SystemExit("GT_TASK_COMPLETION_INVALID:shadow_rate")
 
           # The graders consume the uploaded copies. Prove that those exact bytes
           # are the bytes used by the task-local collectors, rather than merely
@@ -2100,6 +2329,8 @@ jobs:
               "task": task,
               "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
               "status": "COMPLETE",
+              "shadow_rate_requested": identity["shadow_rate_requested"],
+              "shadow_rate_effective": identity["shadow_rate_effective"],
               "artifact_sha256": {
                   name: hashlib.sha256(path.read_bytes()).hexdigest()
                   for name, path in artifact_paths.items()

@@ -1216,6 +1216,7 @@ def run_v74(
     weights: dict[str, float] | None = None,
     focus_size: int = DEFAULT_FOCUS_SIZE,
     commit_scores: dict[str, float] | None = None,
+    semantic_body_paths_out: set[str] | None = None,
 ) -> V74BriefResult:
     """Run the v7.4 scorer for one bug.
 
@@ -1275,6 +1276,7 @@ def run_v74(
         k_sem_top=k_sem_top,
         k_lex_top=k_lex_top,
         tau_anchor=tau_anchor,
+        body_enriched_files_out=semantic_body_paths_out,
     )
 
     trusted = [a.path for a in anchors if a.trusted_for_expansion]

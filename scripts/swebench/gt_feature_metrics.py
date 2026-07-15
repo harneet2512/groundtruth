@@ -70,11 +70,17 @@ from feature_opportunity import (  # noqa: E402
     collect_feature_opportunities,
 )
 from groundtruth.runtime.feature_lineage import (  # noqa: E402
+    CAP_BYTE_OWNER_MECHANISMS,
     CAP_BYTE_OWNER_IDS,
     CAP_ELIGIBILITY_IDS,
     CAP_MEDIATOR_IDS,
     cap_role_for,
 )
+from groundtruth.runtime.control_participation import (  # noqa: E402
+    CONTROL_PARTICIPATION_SCHEMA,
+    ControlParticipation,
+)
+from groundtruth.runtime.fact_registry import producer_matches, registration_for  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fail-loud loaders — a truly-absent dependency is a COLLECTION FAILURE, not
@@ -116,15 +122,24 @@ def _profile_registry():
 
 # DIRECT-value producer members → the registry fact class they PRODUCE. Efficacy claims for
 # these require a matched baseline/holdout behavioural delta.
-_DIRECT_MEMBER_FACTCLASS: dict[str, str] = {
-    "GT_EDIT_CHECK": "syntax_result",
-    "GT_PATCH_DELTA": "signature_delta",
-    "GT_CHANGE_SURFACE": "newfile_precedent",
-    "GT_HYPOTHESIS": "recovery",
-    "GT_LOC_RESLOT": "localization",
-    "GT_SS_COHERENCE_V2": "cochange_prior",
-    "GT_SS_SUBMIT_RED": "submit_refusal",
-    "GT_CERT_DELIVERY": "submit_refusal",
+def _owner_fact_class(feature_id: str) -> str | None:
+    classes = {
+        binding.fact_class
+        for binding in CAP_BYTE_OWNER_MECHANISMS[feature_id].bindings
+        if binding.fact_class is not None
+    }
+    if len(classes) > 1:
+        raise ValueError(
+            f"gt_feature_metrics: {feature_id} has ambiguous byte-owner FACT classes"
+        )
+    return next(iter(classes), None)
+
+
+# Compatibility projection for lifecycle grouping. The sole mechanism authority is
+# CAP_BYTE_OWNER_MECHANISMS; coherence intentionally has no fabricated FACT identity.
+_DIRECT_MEMBER_FACTCLASS: dict[str, str | None] = {
+    feature_id: _owner_fact_class(feature_id)
+    for feature_id in CAP_BYTE_OWNER_MECHANISMS
 }
 
 # INFRASTRUCTURE members → the fact class(es) they MEDIATE (render / freshen / arbitrate /
@@ -212,7 +227,8 @@ def member_fact_classes(member: str) -> tuple[str, ...]:
     """The fact classes a member produces (direct) or mediates (infra). Empty = kernel
     mediator (all classes)."""
     if member in _DIRECT_MEMBER_FACTCLASS:
-        return (_DIRECT_MEMBER_FACTCLASS[member],)
+        fact_class = _DIRECT_MEMBER_FACTCLASS[member]
+        return (fact_class,) if fact_class is not None else ()
     return _INFRA_MEMBER_MEDIATES[member]
 
 
@@ -232,6 +248,14 @@ def _import_time_crosscheck() -> None:
     classified = set(_DIRECT_MEMBER_FACTCLASS) | set(_INFRA_MEMBER_MEDIATES)
     if set(_DIRECT_MEMBER_FACTCLASS) != set(CAP_BYTE_OWNER_IDS):
         raise ValueError("gt_feature_metrics: byte-owner table drift from feature_lineage")
+    expected_owner_classes = {
+        feature_id: _owner_fact_class(feature_id)
+        for feature_id in CAP_BYTE_OWNER_MECHANISMS
+    }
+    if _DIRECT_MEMBER_FACTCLASS != expected_owner_classes:
+        raise ValueError(
+            "gt_feature_metrics: byte-owner FACT projection drift from mechanism authority"
+        )
     if set(_INFRA_MEMBER_MEDIATES) != set(CAP_ELIGIBILITY_IDS | CAP_MEDIATOR_IDS):
         raise ValueError("gt_feature_metrics: CAP control table drift from feature_lineage")
     # (a) every profile member is classified; no stray classification for a non-member.
@@ -244,6 +268,8 @@ def _import_time_crosscheck() -> None:
     # (b) every declared fact class resolves in the registry.
     all_classes = set(fr.all_fact_classes())
     for m, fc in _DIRECT_MEMBER_FACTCLASS.items():
+        if fc is None:
+            continue
         if fc not in all_classes:
             raise ValueError(f"gt_feature_metrics: {m} → unknown fact class {fc!r}")
     for m, fcs in _INFRA_MEMBER_MEDIATES.items():
@@ -251,7 +277,7 @@ def _import_time_crosscheck() -> None:
             if fc not in all_classes:
                 raise ValueError(f"gt_feature_metrics: {m} mediates unknown class {fc!r}")
     # (c) every registry fact class is produced or mediated by >=1 member (coverage).
-    covered = set(_DIRECT_MEMBER_FACTCLASS.values())
+    covered = {fc for fc in _DIRECT_MEMBER_FACTCLASS.values() if fc is not None}
     for fcs in _INFRA_MEMBER_MEDIATES.values():
         covered |= set(fcs)
     uncovered = all_classes - covered
@@ -266,11 +292,14 @@ def _import_time_crosscheck() -> None:
                 f"gt_feature_metrics: {m} module {mod!r} basename != producer {producer!r} "
                 f"(table drift vs rl_profile._MEMBER_CAPABILITY_MODULE)"
             )
-        reg = fr.registration(_DIRECT_MEMBER_FACTCLASS[m])
+        fact_class = _DIRECT_MEMBER_FACTCLASS[m]
+        if fact_class is None:
+            raise ValueError(f"gt_feature_metrics: {m} module producer has no FACT class")
+        reg = fr.registration(fact_class)
         if reg is not None and reg.producer != producer:
             raise ValueError(
                 f"gt_feature_metrics: {m} declared producer {producer!r} != registry "
-                f"producer {reg.producer!r} for {_DIRECT_MEMBER_FACTCLASS[m]!r}"
+                f"producer {reg.producer!r} for {fact_class!r}"
             )
 
 
@@ -376,6 +405,31 @@ def load_jsonl(path: str) -> list[dict]:
     except OSError:
         pass
     return rows
+
+
+def load_jsonl_strict(path: str) -> tuple[list[dict], list[int]]:
+    """Load JSONL while retaining malformed line numbers for fail-closed audits."""
+    rows: list[dict] = []
+    invalid: list[int] = []
+    if not path or not os.path.isfile(path):
+        return rows, invalid
+    try:
+        with open(path, encoding="utf-8", errors="strict") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                try:
+                    value = json.loads(line)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    invalid.append(line_number)
+                    continue
+                if not isinstance(value, dict):
+                    invalid.append(line_number)
+                    continue
+                rows.append(value)
+    except (OSError, UnicodeDecodeError):
+        invalid.append(0)
+    return rows, invalid
 
 
 def _visible_audit_inputs_complete(
@@ -557,6 +611,13 @@ def _performance_feature_records(
                 )
                 if present else "UNMEASURED"
             )
+            if (
+                section == "behavioral_impact"
+                and identity_ok
+                and isinstance(payload.get("behavioral_impact"), dict)
+                and payload["behavioral_impact"].get("collection_error")
+            ):
+                status = "UNMEASURED"
             if status == "UNMEASURED":
                 missing.append(f"PERF.{name}")
             records[name] = {
@@ -599,6 +660,7 @@ def _run_ratio_feature_record(
     status = metric.get("status") if isinstance(metric, dict) else None
     value = metric.get("value") if isinstance(metric, dict) else None
     applicability = metric.get("applicability") if isinstance(metric, dict) else None
+    population = payload.get("task_population") if isinstance(payload, dict) else None
     applicability_valid = bool(
         isinstance(applicability, dict)
         and isinstance(applicability.get("applicable"), bool)
@@ -627,6 +689,15 @@ def _run_ratio_feature_record(
         and payload.get("mandatory_performance_metric_count") == 58
         and payload.get("mandatory_performance_collection_complete") is True
         and payload.get("tasks") == expected_tasks
+        and isinstance(population, dict)
+        and population.get("expected_count") == expected_tasks
+        and population.get("observed_record_count") == expected_tasks
+        and population.get("observed_unique_count") == expected_tasks
+        and population.get("missing_tasks") == []
+        and population.get("duplicate_tasks") == []
+        and population.get("unexpected_tasks") == []
+        and population.get("invalid_task_records") == []
+        and payload.get("invalid_deep_metric_records") == {}
         and isinstance(metric, dict)
         and metric.get("value_type") == value_type
         and metric.get("aggregation") == "ratio_of_run_total_cost_to_resolved_count"
@@ -658,6 +729,80 @@ def _run_ratio_feature_record(
         "task_coverage_valid": contract_valid,
         "aggregate_coverage_valid": contract_valid,
         "reason": None if contract_valid else "run-level metric artifact missing or malformed",
+    }
+
+
+def _run_distribution_feature_record(
+    run_id: str,
+    artifact_path: str | None,
+    task_rows: list[dict[str, Any]],
+    *,
+    section: str,
+    name: str,
+    value_type: str,
+    expected_tasks: int,
+) -> dict[str, Any]:
+    """Bind one task-scope PERF row to its canonical complete run distribution."""
+    payload = _load_json(artifact_path) if artifact_path else None
+    metric: Any = None
+    if isinstance(payload, dict):
+        mandatory = payload.get("mandatory_performance")
+        section_payload = mandatory.get(section) if isinstance(mandatory, dict) else None
+        metric = section_payload.get(name) if isinstance(section_payload, dict) else None
+    population = payload.get("task_population") if isinstance(payload, dict) else None
+    status = metric.get("status") if isinstance(metric, dict) else None
+    measured_tasks = metric.get("measured_tasks") if isinstance(metric, dict) else None
+    not_applicable = metric.get("not_applicable_tasks") if isinstance(metric, dict) else None
+    task_rows_resolved = bool(task_rows) and len(task_rows) == expected_tasks and all(
+        row.get("status") in {"MEASURED", "NOT_APPLICABLE"} for row in task_rows
+    )
+    contract_valid = bool(
+        isinstance(payload, dict)
+        and payload.get("schema") == "gt_run_metrics.v2"
+        and payload.get("run_id") == run_id
+        and payload.get("precision_decimals") == 8
+        and payload.get("mandatory_performance_metric_count") == 58
+        and payload.get("mandatory_performance_collection_complete") is True
+        and payload.get("tasks") == expected_tasks
+        and isinstance(population, dict)
+        and population.get("expected_count") == expected_tasks
+        and population.get("observed_record_count") == expected_tasks
+        and population.get("observed_unique_count") == expected_tasks
+        and population.get("missing_tasks") == []
+        and population.get("duplicate_tasks") == []
+        and population.get("unexpected_tasks") == []
+        and population.get("invalid_task_records") == []
+        and payload.get("invalid_deep_metric_records") == {}
+        and isinstance(metric, dict)
+        and metric.get("value_type") == value_type
+        and status in {"MEASURED", "NOT_APPLICABLE"}
+        and metric.get("missing_tasks") == []
+        and metric.get("unmeasured_tasks") == []
+        and metric.get("failed_tasks") == []
+        and isinstance(measured_tasks, int) and not isinstance(measured_tasks, bool)
+        and isinstance(not_applicable, list)
+        and measured_tasks + len(not_applicable) == expected_tasks
+        and task_rows_resolved
+    )
+    first = dict(task_rows[0]) if task_rows else {}
+    return {
+        **first,
+        "status": status if contract_valid else "UNMEASURED",
+        "source": "gt_run_metrics",
+        "source_artifact": (
+            os.path.basename(artifact_path)
+            if contract_valid and isinstance(artifact_path, str) else None
+        ),
+        "value": None,
+        "value_type": value_type,
+        "metric_structure_valid": contract_valid,
+        "value_precision_valid": contract_valid,
+        "artifact_schema_valid": contract_valid,
+        "precision_decimals": 8 if contract_valid else None,
+        "coverage_scope": "run",
+        "task_coverage_valid": task_rows_resolved,
+        "aggregate_coverage_valid": contract_valid,
+        "reason": None if contract_valid else "canonical run distribution missing or malformed",
     }
 
 
@@ -1018,6 +1163,281 @@ def native_visible_by_fact_class(rows: list[dict], messages: list[dict]) -> dict
         if fc is not None:
             out[fc] += 1
     return dict(out)
+
+
+def _control_participation_evidence(
+    rows: list[dict], messages: list[dict], consumption_ledger: dict[str, Any],
+    brief_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate typed control rows and join mediator candidates without inference.
+
+    A profile flag, nearby class delivery, or same-iteration row is never evidence.
+    Mediators require the producer contract, concrete candidate id/class/bytes, and a
+    later delivered row with the exact class + length + seal. Observation/receipt data
+    comes only from the existing final-delivery seal join.
+    """
+    records: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    joins: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    invalid_rows: list[int] = []
+    invalid_brief_rows: list[int] = []
+    observation_join = join_native_delivery(rows, messages)
+    entries = consumption_ledger.get("entries")
+    entries = entries if isinstance(entries, list) else []
+
+    for index, row in enumerate(rows):
+        if not (
+            row.get("layer") == "control.participation"
+            or row.get("schema") == CONTROL_PARTICIPATION_SCHEMA
+        ):
+            continue
+        try:
+            control_ref = row.get("control_ref")
+            if not isinstance(control_ref, dict) or set(control_ref) != {
+                "category", "feature_id", "role",
+            } or control_ref.get("category") != "CAP":
+                raise ValueError("malformed control_ref")
+            if (
+                row.get("schema") != CONTROL_PARTICIPATION_SCHEMA
+                or row.get("layer") != "control.participation"
+                or row.get("event_type") != "control_decision"
+                or row.get("outcome") != "evaluated"
+                or row.get("chars_delivered") != 0
+                or row.get("participation_decision") == "ERROR"
+                or not isinstance(row.get("reason"), str)
+            ):
+                raise ValueError("non-terminal or failed participation row")
+            record = ControlParticipation(
+                schema=row["schema"],
+                feature_id=control_ref["feature_id"],
+                role=control_ref["role"],
+                decision_site=row.get("decision_site"),
+                decision=row.get("participation_decision"),
+                iteration=row.get("iteration"),
+                candidate_chars=row.get("candidate_chars"),
+                candidate_sha256_16=row.get("candidate_sha256_16"),
+                fact_class=row.get("fact_class"),
+                candidate_id=row.get("candidate_id"),
+                reason=row.get("reason"),
+            )
+            if record.role == "mediator" and record.decision == "APPLIED" and (
+                not record.candidate_id
+                or record.candidate_chars <= 0
+                or not record.candidate_sha256_16
+            ):
+                raise ValueError("mediator candidate identity incomplete")
+        except (KeyError, TypeError, ValueError):
+            invalid_rows.append(index)
+            continue
+
+        item = {
+            "row_index": index,
+            "feature_id": record.feature_id,
+            "role": record.role,
+            "decision_site": record.decision_site,
+            "decision": record.decision,
+            "iteration": record.iteration,
+            "candidate_chars": record.candidate_chars,
+            "candidate_sha256_16": record.candidate_sha256_16,
+            "fact_class": record.fact_class,
+            "candidate_id": record.candidate_id,
+        }
+        records[record.feature_id].append(item)
+        if (
+            record.role != "mediator"
+            or record.decision not in {"APPLIED", "NO_EFFECT"}
+            or not record.candidate_id
+            or record.candidate_chars <= 0
+            or not record.candidate_sha256_16
+        ):
+            continue
+
+        for delivery_index in range(index + 1, len(rows)):
+            delivery = rows[delivery_index]
+            if delivery.get("outcome") != "delivered":
+                continue
+            if delivery.get("lineage_schema") != "gt.feature_lineage.v1":
+                continue
+            if delivery.get("fact_class") != record.fact_class:
+                continue
+            runtime_producer = delivery.get("runtime_producer_id")
+            registered_producer = delivery.get("registered_producer_id")
+            evidence_type = delivery.get("evidence_type")
+            fact_registration = (
+                registration_for(evidence_type) if isinstance(evidence_type, str) else None
+            )
+            if (
+                delivery.get("producer_registration_match") is not True
+                or not isinstance(runtime_producer, str)
+                or not runtime_producer
+                or not isinstance(registered_producer, str)
+                or not registered_producer
+                or fact_registration is None
+                or fact_registration.producer != registered_producer
+                or fact_registration.fact_class != record.fact_class
+                or not producer_matches(evidence_type, runtime_producer)
+            ):
+                continue
+            if (
+                delivery.get("chars_delivered") != record.candidate_chars
+                or delivery.get("content_sha256_16") != record.candidate_sha256_16
+            ):
+                continue
+            downstream_id = delivery.get("candidate_id")
+            if downstream_id != record.candidate_id:
+                continue
+            receipt_level = 0
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("source") != "trajectory":
+                    continue
+                entry_chars = entry.get("ledger_chars", entry.get("chars"))
+                if (
+                    entry.get("content_sha256_16") == record.candidate_sha256_16
+                    and entry_chars == record.candidate_chars
+                    and entry.get("ledger_layer") == delivery.get("layer")
+                    and entry.get("joined") is True
+                    and entry.get("join_method") == "seal"
+                ):
+                    receipt_level = max(receipt_level, int(entry.get("receipt") or 0))
+            joins[record.feature_id].append({
+                **item,
+                "delivery_row_index": delivery_index,
+                "delivery_layer": delivery.get("layer"),
+                "observation_message_index": observation_join.get(delivery_index),
+                "observation_joined": observation_join.get(delivery_index) is not None,
+                "receipt_level": receipt_level,
+            })
+            break
+
+    if brief_payload is not None:
+        try:
+            from acq_provenance import _block_receipt, _producer_delivery_home, _validated_blocks
+
+            if brief_payload.get("schema") != "gt.brief_result.v1":
+                raise ValueError("unsupported brief result schema")
+            brief = brief_payload.get("brief_text")
+            metrics = brief_payload.get("metrics")
+            if (
+                not isinstance(brief, str)
+                or not brief
+                or brief_payload.get("brief_sha256")
+                != hashlib.sha256(brief.encode("utf-8", "surrogatepass")).hexdigest()
+                or not isinstance(metrics, dict)
+            ):
+                raise ValueError("malformed whole brief identity")
+            raw_receipts = metrics.get("block_receipts")
+            blocks_by_id = _validated_blocks(brief, raw_receipts)
+            if not isinstance(raw_receipts, list):
+                raise ValueError("block_receipts must be a list")
+            blocks: dict[str, dict[str, Any]] = {}
+            for receipt in raw_receipts:
+                if not isinstance(receipt, dict):
+                    raise ValueError("block receipt must be an object")
+                candidate_id = receipt.get("candidate_id")
+                block_id = receipt.get("block_id")
+                if (
+                    not isinstance(candidate_id, str)
+                    or not candidate_id
+                    or candidate_id in blocks
+                    or block_id not in blocks_by_id
+                ):
+                    raise ValueError("block receipt candidate identity is not exact and unique")
+                blocks[candidate_id] = blocks_by_id[block_id]
+            raw_controls = metrics.get("control_participation", [])
+            if not isinstance(raw_controls, list):
+                raise ValueError("control_participation must be a list")
+            parent_home = _producer_delivery_home((brief,), entries, messages)
+        except (ImportError, TypeError, ValueError):
+            invalid_brief_rows.append(-1)
+            raw_controls = []
+            blocks = {}
+            parent_home = None
+
+        for brief_index, raw in enumerate(raw_controls):
+            try:
+                if not isinstance(raw, dict):
+                    raise ValueError("control row must be an object")
+                control_ref = raw.get("control_ref")
+                if not isinstance(control_ref, dict) or set(control_ref) != {
+                    "category", "feature_id", "role",
+                } or control_ref.get("category") != "CAP":
+                    raise ValueError("malformed control_ref")
+                if raw.get("schema") != CONTROL_PARTICIPATION_SCHEMA or raw.get("decision") == "ERROR":
+                    raise ValueError("failed participation row")
+                record = ControlParticipation(
+                    schema=raw["schema"],
+                    feature_id=control_ref["feature_id"],
+                    role=control_ref["role"],
+                    decision_site=raw.get("decision_site"),
+                    decision=raw.get("decision"),
+                    iteration=raw.get("iteration"),
+                    candidate_chars=raw.get("candidate_chars"),
+                    candidate_sha256_16=raw.get("candidate_sha256_16"),
+                    fact_class=raw.get("fact_class"),
+                    candidate_id=raw.get("candidate_id"),
+                    reason=raw.get("reason"),
+                )
+            except (KeyError, TypeError, ValueError):
+                invalid_brief_rows.append(brief_index)
+                continue
+
+            item = {
+                "row_index": None,
+                "brief_row_index": brief_index,
+                "source_artifact": "brief_result.json",
+                "feature_id": record.feature_id,
+                "role": record.role,
+                "decision_site": record.decision_site,
+                "decision": record.decision,
+                "iteration": record.iteration,
+                "candidate_chars": record.candidate_chars,
+                "candidate_sha256_16": record.candidate_sha256_16,
+                "fact_class": record.fact_class,
+                "candidate_id": record.candidate_id,
+            }
+            records[record.feature_id].append(item)
+            if (
+                record.role != "mediator"
+                or record.decision not in {"APPLIED", "NO_EFFECT"}
+                or record.candidate_chars <= 0
+                or not record.candidate_sha256_16
+            ):
+                continue
+            block = blocks.get(record.candidate_id)
+            if (
+                block is None
+                or block.get("fact_class") != record.fact_class
+                or block.get("chars") != record.candidate_chars
+                or str(block.get("sha256") or "")[:16] != record.candidate_sha256_16
+            ):
+                invalid_brief_rows.append(brief_index)
+                continue
+            if parent_home is None:
+                continue
+            candidate_path = (
+                record.candidate_id.split(":", 1)[1]
+                if record.candidate_id.startswith("localization:") else ""
+            )
+            block_receipt = _block_receipt(
+                block, candidate_path, messages, parent_home["msg_index"],
+            )
+            joins[record.feature_id].append({
+                **item,
+                "delivery_row_index": None,
+                "delivery_layer": parent_home["ledger_layer"],
+                "parent_brief_content_sha256_16": parent_home["content_sha256_16"],
+                "observation_message_index": parent_home["msg_index"],
+                "observation_joined": True,
+                "receipt_level": int(block_receipt["level"] or 1),
+                "referenced_message_index": block_receipt["referenced_message_index"],
+                "acted_message_index": block_receipt["acted_message_index"],
+            })
+    return {
+        "records": dict(records),
+        "joins": dict(joins),
+        "invalid_rows": sorted(set(invalid_rows)),
+        "invalid_brief_rows": sorted(set(invalid_brief_rows)),
+        "valid": not invalid_rows and not invalid_brief_rows,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1400,8 +1820,8 @@ def _measurement_only_readiness(
         "denominator_provenance": bool(row.get("denominator_provenance")),
         "applicability_resolved": applicability_resolved,
         "task_coverage": bool(
-            applicability_resolved
-            and (task_scope or row.get("task_coverage_valid") is True)
+            (applicability_resolved and task_scope)
+            or row.get("task_coverage_valid") is True
         ),
         "aggregate_coverage": bool(aggregate_coverage),
     }
@@ -1426,10 +1846,15 @@ def _infra_control_readiness(
     fact_lifecycles: dict[str, dict[str, Any]],
     *,
     ledger_artifact: str,
+    control_evidence: dict[str, Any] | None = None,
     live_witness: bool = False,
 ) -> dict[str, Any]:
     """Typed CAP-control terminal with links, never copied FACT delivery gates."""
     scope = sorted(fact_classes or tuple(fact_lifecycles))
+    evidence = control_evidence or {}
+    records = list((evidence.get("records") or {}).get(member) or [])
+    joins = list((evidence.get("joins") or {}).get(member) or [])
+    role = cap_role_for(member)
 
     def linked(field: str) -> list[str]:
         return [
@@ -1440,21 +1865,29 @@ def _infra_control_readiness(
     eligible_fact_ids = linked("eligible")
     produced_fact_ids = linked("produced")
     delivered_fact_ids = linked("delivered")
+    runtime_linked = sorted({
+        str(join["fact_class"]) for join in joins if join.get("fact_class") in scope
+    })
+    control_receipt = bool(joins) if role == "mediator" else bool(records)
     mediation = {
-        "status": "UNMEASURED",
+        "status": "MEASURED" if control_receipt else "UNMEASURED",
         "linked_fact_ids": scope,
-        "runtime_linked_fact_ids": [],
-        "runtime_linkage_reason": "exact profile-member control receipt unavailable",
+        "runtime_linked_fact_ids": runtime_linked,
+        "runtime_linkage_reason": (
+            "exact typed control candidate joined to downstream FACT delivery"
+            if control_receipt else "exact profile-member control receipt unavailable"
+        ),
         "eligible_fact_ids": eligible_fact_ids,
         "produced_fact_ids": produced_fact_ids,
         "delivered_fact_ids": delivered_fact_ids,
         "source_artifact": ledger_artifact,
     }
+    if control_evidence is not None:
+        mediation["participation_records"] = records
+        mediation["participation_joins"] = joins
     gates: dict[str, bool | None] = {
-        # The current collector has no exact per-member control receipt. Keep
-        # this unknown rather than inheriting any linked FACT producer's seal.
-        "runtime_member_control_receipt": None,
-        "mediated_fact_ids": True if scope else None,
+        "runtime_member_control_receipt": True if control_receipt else None,
+        "mediated_fact_ids": True if runtime_linked else None,
         "mediation_correct": None,
         "mediation_causal_fair_probe": None,
     }
@@ -1569,19 +2002,64 @@ def _member_delivery_byte_proven(
     rows: list[dict],
     consumption_ledger: dict[str, Any],
 ) -> bool:
-    """True only for an exact CAP-member producer seal joined to visible bytes.
-
-    Fact-class or layer agreement is insufficient because several capabilities
-    produce or mediate the same class.  Current rows without the explicit
-    ``profile_member`` producer identity therefore remain fail-closed.
-    """
+    """Prove a byte owner through its one authorized attribution mechanism."""
     if cap_role_for(member) != "byte_owner":
+        return False
+    authority = CAP_BYTE_OWNER_MECHANISMS.get(member)
+    if authority is None:
         return False
     entries = consumption_ledger.get("entries")
     for row in rows:
-        if row.get("profile_member") != member:
-            continue
         if row.get("outcome") != "delivered":
+            continue
+        if authority.mechanism == "typed_lineage":
+            refs = row.get("feature_ids")
+            if not isinstance(refs, list) or {
+                "category": "CAP", "feature_id": member, "role": "byte_owner",
+            } not in refs:
+                continue
+            evidence_type = row.get("evidence_type")
+            runtime_producer = row.get("runtime_producer_id")
+            registered_producer = row.get("registered_producer_id")
+            fact_class = row.get("fact_class")
+            fact_registration = (
+                registration_for(evidence_type) if isinstance(evidence_type, str) else None
+            )
+            evidence_base = (
+                evidence_type.split(":", 1)[0] if isinstance(evidence_type, str) else ""
+            )
+            binding_matches = any(
+                binding.producer == runtime_producer
+                and binding.layer == evidence_base
+                and binding.fact_class == fact_class
+                for binding in authority.bindings
+            )
+            if (
+                row.get("lineage_schema") != "gt.feature_lineage.v1"
+                or row.get("producer_registration_match") is not True
+                or fact_registration is None
+                or fact_registration.fact_class != fact_class
+                or fact_registration.producer != registered_producer
+                or not isinstance(runtime_producer, str)
+                or not producer_matches(evidence_type, runtime_producer)
+                or not binding_matches
+            ):
+                continue
+        elif authority.mechanism == "exact_profile_member":
+            if row.get("profile_member") != member:
+                continue
+            layer = str(row.get("layer") or "")
+            binding_matches = any(
+                binding.layer == layer
+                and (
+                    binding.fact_class is None
+                    or layer_to_fact_class(layer) == binding.fact_class
+                )
+                for binding in authority.bindings
+            )
+            if not binding_matches:
+                continue
+        else:
             continue
         if _row_has_seal_join(row, entries):
             return True
@@ -1593,16 +2071,97 @@ def _fact_delivery_byte_proven(
     rows: list[dict],
     consumption_ledger: dict[str, Any],
 ) -> bool:
-    """True only when a row for this exact FACT class has a seal join."""
+    """True only for authoritative typed FACT lineage with an exact seal join."""
     entries = consumption_ledger.get("entries")
     for row in rows:
         if row.get("outcome") != "delivered":
             continue
-        if layer_to_fact_class(str(row.get("layer") or "")) != fact_class:
+        if row.get("lineage_schema") != "gt.feature_lineage.v1":
+            continue
+        if row.get("fact_class") != fact_class:
+            continue
+        evidence_type = row.get("evidence_type")
+        runtime_producer = row.get("runtime_producer_id")
+        registered_producer = row.get("registered_producer_id")
+        fact_registration = (
+            registration_for(evidence_type) if isinstance(evidence_type, str) else None
+        )
+        if (
+            row.get("producer_registration_match") is not True
+            or fact_registration is None
+            or fact_registration.fact_class != fact_class
+            or fact_registration.producer != registered_producer
+            or not isinstance(runtime_producer, str)
+                or not producer_matches(evidence_type, runtime_producer)
+        ):
             continue
         if _row_has_seal_join(row, entries):
             return True
     return False
+
+
+def _exact_profile_owner_lifecycle(
+    member: str,
+    rows: list[dict],
+    consumption_ledger: dict[str, Any],
+    *,
+    ledger_artifact: str,
+    traj_artifact: str,
+) -> dict[str, Any]:
+    """Lifecycle facts provable without borrowing a registered FACT lifecycle."""
+    lc = new_lifecycle("exact_profile_member_observation_not_proven")
+    authority = CAP_BYTE_OWNER_MECHANISMS.get(member)
+    if authority is None or authority.mechanism != "exact_profile_member":
+        return lc
+    entries = consumption_ledger.get("entries")
+    entries = entries if isinstance(entries, list) else []
+    for row in rows:
+        if (
+            row.get("outcome") != "delivered"
+            or row.get("profile_member") != member
+        ):
+            continue
+        layer = str(row.get("layer") or "")
+        if not any(
+            binding.layer == layer
+            and (
+                binding.fact_class is None
+                or layer_to_fact_class(layer) == binding.fact_class
+            )
+            for binding in authority.bindings
+        ):
+            continue
+        lc["eligible"] = measured(True, source_artifact=ledger_artifact)
+        lc["not_eligible"] = measured(False, source_artifact=ledger_artifact)
+        lc["produced"] = measured(True, source_artifact=ledger_artifact)
+        lc["authority_valid"] = measured(True, source_artifact=ledger_artifact)
+        if not _row_has_seal_join(row, entries):
+            lc["delivered"] = measured(False, source_artifact=ledger_artifact)
+            continue
+        receipt = 1
+        source_messages: list[int] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("source") != "trajectory":
+                continue
+            entry_chars = entry.get("ledger_chars", entry.get("chars"))
+            if (
+                entry.get("joined") is True
+                and entry.get("join_method") == "seal"
+                and entry.get("content_sha256_16") == row.get("content_sha256_16")
+                and entry_chars == row.get("chars_delivered")
+                and entry.get("ledger_layer") == layer
+            ):
+                receipt = max(receipt, int(entry.get("receipt") or 0))
+                if isinstance(entry.get("msg_index"), int):
+                    source_messages.append(entry["msg_index"])
+        lc["delivered"] = measured(
+            True, source_artifact=traj_artifact, source_messages=sorted(set(source_messages))
+        )
+        lc["receipt_level"] = measured(
+            receipt, source_artifact=traj_artifact, source_messages=sorted(set(source_messages))
+        )
+        return lc
+    return lc
 
 
 # ---------------------------------------------------------------------------
@@ -1723,6 +2282,8 @@ def member_record(
     *,
     ledger_artifact: str,
     traj_artifact: str,
+    owner_rows: list[dict] | None = None,
+    consumption_ledger: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the per-feature record (lifecycle + compact summary + verdict) for one member.
 
@@ -1730,8 +2291,17 @@ def member_record(
     role = member_role(member)
     fcs = member_fact_classes(member)
     if role == ROLE_DIRECT:
-        fc = fcs[0]
-        lc = {k: v for k, v in fact_lifecycles[fc].items() if not k.startswith("_")}
+        if fcs:
+            fc = fcs[0]
+            lc = {k: v for k, v in fact_lifecycles[fc].items() if not k.startswith("_")}
+        else:
+            lc = _exact_profile_owner_lifecycle(
+                member,
+                owner_rows or [],
+                consumption_ledger or {},
+                ledger_artifact=ledger_artifact,
+                traj_artifact=traj_artifact,
+            )
     else:
         lc = _infra_member_lifecycle(
             member, fcs, fact_lifecycles, infra_signals, baseline_status,
@@ -1741,7 +2311,7 @@ def member_record(
     return {
         "role": role,
         "cap_role": cap_role_for(member),
-        "fact_classes": list(fcs) if fcs else ["*kernel*"],
+        "fact_classes": list(fcs) if fcs else (["*kernel*"] if role == ROLE_INFRA else []),
         "lifecycle": lc,
         "summary": feature_summary_from_lifecycle(lc, verdict),
         "verdict": verdict,
@@ -1917,7 +2487,9 @@ def collect_task(
         traj = {"messages": []}
     ledger_path = _find_one(task_dir, "gt_runtime_ledger_*.jsonl", "gt_runtime_ledger*.jsonl")
     oracle_path = _find_one(task_dir, "gt_oracle_events_*.jsonl")
-    rows = load_jsonl(ledger_path) if ledger_path else []
+    rows, malformed_ledger_lines = (
+        load_jsonl_strict(ledger_path) if ledger_path else ([], [])
+    )
     oracle_rows = load_jsonl(oracle_path) if oracle_path else []
 
     ledger_artifact = os.path.basename(ledger_path) if ledger_path else "runtime_ledger:absent"
@@ -1926,6 +2498,12 @@ def collect_task(
     timeline = _timeline(traj)
     ledger_by_fc = classify_ledger(rows)
     consumption_by_fc, cons_ledger = _consumption_by_fact_class(traj, ledger_path)
+    brief_path = _find_named_input(task_dir, "brief_result.json", locations=2)
+    brief_payload = _load_json(brief_path) if brief_path else None
+    control_evidence = _control_participation_evidence(
+        rows, traj.get("messages", []) or [], cons_ledger,
+        brief_payload if isinstance(brief_payload, dict) else None,
+    )
     physical_identity_conflicts = _physical_identity_conflicts(
         cons_ledger.get("entries")
     )
@@ -1967,6 +2545,7 @@ def collect_task(
         features[m] = member_record(
             m, fact_lifecycles, infra_signals, baseline_status,
             ledger_artifact=ledger_artifact, traj_artifact=traj_artifact,
+            owner_rows=rows, consumption_ledger=cons_ledger,
         )
 
     events = _atomic_events(task, rows, ledger_artifact)
@@ -2021,6 +2600,7 @@ def collect_task(
                 member_fact_classes(member),
                 fact_lifecycles,
                 ledger_artifact=ledger_artifact,
+                control_evidence=control_evidence,
             )
             feature["ss_readiness"]["cap_role"] = cap_role
         else:
@@ -2082,6 +2662,11 @@ def collect_task(
         missing = set(ss_integrity.get("missing_required_inputs") or [])
         missing.add("visible_audit")
         ss_integrity["missing_required_inputs"] = sorted(missing)
+    if malformed_ledger_lines or not control_evidence["valid"]:
+        ss_integrity["required_inputs_complete"] = False
+        missing = set(ss_integrity.get("missing_required_inputs") or [])
+        missing.add("control_participation_integrity")
+        ss_integrity["missing_required_inputs"] = sorted(missing)
     return {
         "schema": "gt.feature_metrics.v1",
         "grader_version": GRADER_VERSION,
@@ -2115,6 +2700,19 @@ def collect_task(
             "dose_violation_count": dose_violations,
             "consumption_schema": cons_ledger.get("schema"),
             "ledger_rows": len(rows),
+            **({"runtime_ledger_malformed_lines": malformed_ledger_lines}
+               if malformed_ledger_lines else {}),
+            **({
+                "control_participation_valid": (
+                    not malformed_ledger_lines and control_evidence["valid"]
+                ),
+                "control_participation_invalid_rows": control_evidence["invalid_rows"],
+                "control_participation_invalid_brief_rows": control_evidence["invalid_brief_rows"],
+            } if any(
+                row.get("layer") == "control.participation"
+                or row.get("schema") == CONTROL_PARTICIPATION_SCHEMA
+                for row in rows
+            ) or malformed_ledger_lines or brief_payload is not None else {}),
         },
     }
 
@@ -2123,6 +2721,8 @@ def _atomic_events(task: str, rows: list[dict], ledger_artifact: str) -> list[Fe
     """One FeatureMetricEvent per DELIVERED ledger row, mapped to its producing member."""
     fc_to_member: dict[str, str] = {}
     for m, fc in _DIRECT_MEMBER_FACTCLASS.items():
+        if fc is None:
+            continue
         fc_to_member.setdefault(fc, m)
     for m, fcs in _INFRA_MEMBER_MEDIATES.items():
         for fc in fcs:
@@ -2251,6 +2851,7 @@ def aggregate_run(
         "expected_family_counts": {family: len(names) for family, names in canonical.items()},
         "expected_feature_count": 128,
         "missing_records": [],
+        "perf_aggregate_failures": [],
         "tasks_with_inventory_drift": [],
         "tasks_with_incomplete_inputs": [],
         "publishable": bool(task_records),
@@ -2294,29 +2895,19 @@ def aggregate_run(
                     )
                     aggregate_coverage = aggregate_record["aggregate_coverage_valid"]
                 else:
-                    first = dict(task_feature_rows[0])
-                    aggregate_record = {
-                        **first,
-                        "status": "MEASURED" if resolved else "UNMEASURED",
-                        "source_artifact": "gt.feature_metrics.run.v1",
-                        "artifact_schema_valid": bool(
-                            all(
-                                row.get("artifact_schema_valid") is True
-                                for row in task_feature_rows
-                            )
-                        ),
-                        "precision_decimals": (
-                            8 if all(row.get("precision_decimals") == 8
-                                     for row in task_feature_rows) else None
-                        ),
-                        "value_precision_valid": all(
-                            row.get("value_precision_valid") is True
-                            for row in task_feature_rows
-                        ),
-                    }
-                    aggregate_coverage = bool(
-                        task_records and present == len(task_records) and resolved
+                    aggregate_record = _run_distribution_feature_record(
+                        run_id,
+                        run_metrics_artifact,
+                        task_feature_rows,
+                        section=section,
+                        name=name,
+                        value_type=value_type,
+                        expected_tasks=len(task_records),
                     )
+                    aggregate_coverage = aggregate_record["aggregate_coverage_valid"]
+                if not aggregate_coverage:
+                    ss_integrity["perf_aggregate_failures"].append(name)
+                    ss_integrity["publishable"] = False
                 ss_run_features[name]["measurement"] = aggregate_record
                 ss_run_features[name]["ss_readiness"] = _measurement_only_readiness(
                     aggregate_record,
@@ -2338,6 +2929,9 @@ def aggregate_run(
     ss_integrity["missing_records"] = sorted(
         ss_integrity["missing_records"],
         key=lambda row: (str(row.get("task")), row["family"], row["feature"]),
+    )
+    ss_integrity["perf_aggregate_failures"] = sorted(
+        set(ss_integrity["perf_aggregate_failures"])
     )
     run_metrics["ss_feature_inventory_schema"] = "gt.ss_feature_inventory.run.v1"
     run_metrics["ss_features"] = ss_run_features

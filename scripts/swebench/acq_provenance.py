@@ -34,7 +34,7 @@ ACQ_SOURCE_COMPONENTS: dict[str, str] = {
     "lexical_FTS5": "fts5_signal_count+components.lex",
     "semantic_embedder": "semantic_signal_count+components.sem",
     "body_retrieval": "components.body|components.content",
-    "cochange_history": "components.commit",
+    "cochange_history": "components.cochange",
     "resolution_honesty": "acquisition_sources.resolution_honesty",
     "type_intelligence": "acquisition_sources.type_intelligence",
     "LSP": "acquisition_sources.LSP",
@@ -42,6 +42,52 @@ ACQ_SOURCE_COMPONENTS: dict[str, str] = {
     "repo_scope": "acquisition_sources.repo_scope",
     "determinism": "acquisition_sources.determinism",
 }
+
+# Executable source of each persisted candidate-local witness.  This is distinct
+# from this module's collector authority and from brief_cache's terminal artifact
+# persistence.  Keep the keys exact with ACQ_SOURCE_COMPONENTS.
+ACQ_PRODUCER_AUTHORITIES: dict[str, tuple[str, ...]] = {
+    "graph_validity": (
+        "groundtruth.pretask.graph_localizer.localize",
+        "groundtruth.pretask.v1r_brief._l1_signal_counts",
+    ),
+    "structural_depth": (
+        "groundtruth.pretask.v7_4_brief._score_variant_C",
+        "groundtruth.pretask.v1r_brief._l1_signal_counts",
+    ),
+    "lexical_FTS5": (
+        "groundtruth.pretask.v7_4_brief.lexical_file_search",
+        "groundtruth.pretask.v7_4_brief._score_variant_C",
+        "groundtruth.pretask.v1r_brief._l1_signal_counts",
+    ),
+    "semantic_embedder": (
+        "groundtruth.pretask.anchor_select.select_anchors",
+        "groundtruth.pretask.v7_4_brief._score_variant_C",
+        "groundtruth.pretask.v1r_brief._l1_signal_counts",
+    ),
+    "body_retrieval": (
+        "groundtruth.pretask.graph_localizer._content_fts_candidates",
+        "groundtruth.pretask.graph_localizer.localize",
+        "groundtruth.pretask.anchor_select.select_anchors",
+        "groundtruth.pretask.v7_4_brief.run_v74",
+        "groundtruth.pretask.v1r_brief.generate_v1r_brief",
+    ),
+    "cochange_history": (
+        "groundtruth.pretask.v1r_brief._expand_via_cochange",
+    ),
+    **{
+        name: ("groundtruth.pretask.v1r_brief._candidate_acquisition_sources",)
+        for name in (
+            "resolution_honesty", "type_intelligence", "LSP",
+            "freshness_basis", "repo_scope",
+        )
+    },
+    "determinism": (
+        "groundtruth.runtime.brief_cache.verify_independent_generation",
+    ),
+}
+if set(ACQ_PRODUCER_AUTHORITIES) != set(ACQ_SOURCE_COMPONENTS):
+    raise ValueError("ACQ producer-authority inventory drift")
 
 _TYPE_RESOLUTION_METHODS = frozenset({"type_flow", "import_type"})
 _LSP_RESOLUTION_METHODS = frozenset({"lsp", "lsp_verified"})
@@ -60,6 +106,21 @@ def _empty(blocker: str) -> dict[str, dict[str, Any]]:
             "blocker": blocker,
             "block_id": None,
             "content_sha256_16": None,
+            "chars_delivered": None,
+            "block_content_sha256_16": None,
+            "block_char_span": None,
+            "producer_payload_scope": None,
+            "producer_entry_index": None,
+            "producer_ledger_layer": None,
+            "delivery_message_index": None,
+            "receipt_evidence": {
+                "referenced_message_index": None,
+                "acted_message_index": None,
+            },
+            "source_fields": [],
+            "source_contribution_correct": None,
+            "timing_inherited_from_fact_delivery": None,
+            "source_causal_fair_probe": None,
         }
         for feature in ACQ_FEATURES
     }
@@ -100,6 +161,20 @@ def _method_set(value: object) -> frozenset[str]:
             return frozenset()
         methods.add(item.strip().lower())
     return frozenset(methods)
+
+
+def _valid_repeat_witness(value: object) -> bool:
+    if not isinstance(value, Mapping) or value.get("kind") != "repeat_identity":
+        return False
+    identities = value.get("canonical_sha256")
+    runs = value.get("runs")
+    if (
+        not isinstance(runs, int) or isinstance(runs, bool) or runs < 2
+        or not isinstance(identities, list) or len(identities) != runs
+    ):
+        return False
+    digests = [_sha256_value(item) for item in identities]
+    return all(digest is not None for digest in digests) and len(set(digests)) == 1
 
 
 def _extended_source_features(proof: Mapping[str, Any]) -> tuple[str, ...]:
@@ -145,25 +220,29 @@ def _extended_source_features(proof: Mapping[str, Any]) -> tuple[str, ...]:
     if isinstance(scope, Mapping) and scope.get("kind") == "repo_partition":
         active = scope.get("active_repo_id")
         candidate = scope.get("candidate_repo_id")
-        if (
+        multi_repo_proven = (
             scope.get("is_multi_repo") is True
             and scope.get("resolved") is True
             and isinstance(active, int) and not isinstance(active, bool)
+            and isinstance(candidate, int) and not isinstance(candidate, bool)
             and candidate == active
-        ):
+        )
+        proof_path = str(proof.get("path") or "").replace("\\", "/").lstrip("./").lstrip("/")
+        candidate_path = str(scope.get("candidate_path") or "").replace("\\", "/").lstrip("./").lstrip("/")
+        single_repo_proven = (
+            scope.get("is_multi_repo") is False
+            and scope.get("resolved") is True
+            and scope.get("scope_mode") == "single_repo_noop"
+            and active is None
+            and candidate is None
+            and bool(proof_path)
+            and candidate_path == proof_path
+        )
+        if multi_repo_proven or single_repo_proven:
             found.append("repo_scope")
 
-    repeat = raw.get("determinism")
-    if isinstance(repeat, Mapping) and repeat.get("kind") == "repeat_identity":
-        identities = repeat.get("canonical_sha256")
-        runs = repeat.get("runs")
-        if (
-            isinstance(runs, int) and not isinstance(runs, bool) and runs >= 2
-            and isinstance(identities, list) and len(identities) == runs
-        ):
-            digests = [_sha256_value(value) for value in identities]
-            if all(digest is not None for digest in digests) and len(set(digests)) == 1:
-                found.append("determinism")
+    if _valid_repeat_witness(raw.get("determinism")):
+        found.append("determinism")
     return tuple(found)
 
 
@@ -201,7 +280,7 @@ def _source_features(proof: Mapping[str, Any], metrics: Mapping[str, Any]) -> tu
         found.append("semantic_embedder")
     if _positive(components.get("body")) or _positive(components.get("content")):
         found.append("body_retrieval")
-    if _positive(components.get("commit")):
+    if _positive(components.get("cochange")):
         found.append("cochange_history")
     found.extend(_extended_source_features(proof))
     return tuple(found)
@@ -239,6 +318,7 @@ def _validated_blocks(brief: str, raw: object) -> dict[str, dict[str, Any]]:
         blocks[block_id] = {
             "rendered_text": rendered,
             "chars": end - start,
+            "char_span": [start, end],
             "sha256": digest,
             "fact_class": fact_class,
             "label": label,
@@ -261,8 +341,8 @@ def _producer_delivery_home(
     payloads: tuple[str, ...],
     entries: object,
     messages: list[dict[str, Any]],
-) -> int | None:
-    """Return the message holding an exact producer-sealed payload.
+) -> dict[str, Any] | None:
+    """Return the exact producer seal and observation home for a payload.
 
     An auditor-recomputed ``<gt-*>`` entry is not a delivery seal.  The v2
     entry must be joined by the seal path to an actual runtime-ledger producer
@@ -270,7 +350,7 @@ def _producer_delivery_home(
     """
     if not isinstance(entries, list):
         return None
-    for entry in entries:
+    for entry_index, entry in enumerate(entries):
         if not isinstance(entry, Mapping) or entry.get("source") != "trajectory":
             continue
         if entry.get("joined") is not True or entry.get("join_method") != "seal":
@@ -282,15 +362,17 @@ def _producer_delivery_home(
                 continue
             if entry.get("content_sha256_16") != _sha256(payload)[:16]:
                 continue
-            try:
-                entry_chars = int(entry.get("chars") or 0)
-                ledger_chars = int(entry.get("ledger_chars") or 0)
-            except (TypeError, ValueError):
+            entry_chars = entry.get("chars")
+            ledger_chars = entry.get("ledger_chars")
+            if (
+                not isinstance(entry_chars, int) or isinstance(entry_chars, bool)
+                or not isinstance(ledger_chars, int) or isinstance(ledger_chars, bool)
+            ):
                 continue
             msg_index = entry.get("msg_index")
             if (
                 entry_chars != len(payload) or ledger_chars != len(payload)
-                or not isinstance(msg_index, int)
+                or not isinstance(msg_index, int) or isinstance(msg_index, bool)
             ):
                 continue
             if msg_index < 0 or msg_index >= len(messages):
@@ -300,23 +382,36 @@ def _producer_delivery_home(
                 continue
             content = message.get("content")
             if isinstance(content, str) and payload in content:
-                return msg_index
+                return {
+                    "entry_index": entry_index,
+                    "msg_index": msg_index,
+                    "payload": payload,
+                    "content_sha256_16": str(entry["content_sha256_16"]),
+                    "chars_delivered": entry_chars,
+                    "ledger_layer": str(entry["ledger_layer"]),
+                }
     return None
 
 
-def _block_receipt_level(
+def _block_receipt(
     block: Mapping[str, Any],
     file_path: str,
     messages: list[dict[str, Any]],
     delivery_home: int | None,
-) -> int | None:
-    """Apply W1's receipt ladder to one exact persisted brief sub-block."""
+) -> dict[str, int | None]:
+    """Apply W1's receipt ladder and retain exact assistant evidence homes."""
     if delivery_home is None:
-        return None
+        return {
+            "level": None,
+            "referenced_message_index": None,
+            "acted_message_index": None,
+        }
     rendered = str(block["rendered_text"])
     files, symbols = _consumption._block_entities(rendered, file_path)
     patterns = _consumption._entity_patterns(files, symbols)
     level = 1
+    referenced_message_index: int | None = None
+    acted_message_index: int | None = None
     for index in range(delivery_home + 1, len(messages)):
         message = messages[index]
         if message.get("role") != "assistant":
@@ -325,6 +420,8 @@ def _block_receipt_level(
             _consumption._assistant_prose(message), patterns
         ):
             level = max(level, 2)
+            if referenced_message_index is None:
+                referenced_message_index = index
         for command in _consumption._emitted_commands(message):
             if (
                 patterns
@@ -332,7 +429,49 @@ def _block_receipt_level(
                 and _consumption._action_kind(command) is not None
             ):
                 level = max(level, 3)
-    return level
+                if acted_message_index is None:
+                    acted_message_index = index
+    return {
+        "level": level,
+        "referenced_message_index": referenced_message_index,
+        "acted_message_index": acted_message_index,
+    }
+
+
+def _source_field_paths(
+    feature: str,
+    proof_index: int,
+    proof: Mapping[str, Any],
+) -> list[str]:
+    """Return the exact persisted fields that support one ACQ row.
+
+    These are data lineage pointers, not truth/timing/causality verdicts.  A
+    compound source names every field required by its admission predicate.
+    """
+    base = f"metrics.localization_proof[{proof_index}]"
+    if feature == "graph_validity":
+        return [
+            "metrics.graph_edge_count",
+            f"{base}.witness_verified",
+            f"{base}.witness",
+        ]
+    if feature == "structural_depth":
+        return ["metrics.structural_signal_count", f"{base}.components.reach"]
+    if feature == "lexical_FTS5":
+        return ["metrics.fts5_signal_count", f"{base}.components.lex"]
+    if feature == "semantic_embedder":
+        return ["metrics.semantic_signal_count", f"{base}.components.sem"]
+    components = proof.get("components")
+    components = components if isinstance(components, Mapping) else {}
+    if feature == "body_retrieval":
+        return [
+            f"{base}.components.{name}"
+            for name in ("body", "content")
+            if _positive(components.get(name))
+        ]
+    if feature == "cochange_history":
+        return [f"{base}.components.cochange"]
+    return [f"{base}.acquisition_sources.{feature}"]
 
 
 def collect_acq_provenance(
@@ -360,7 +499,19 @@ def collect_acq_provenance(
     rows = _empty("source_witness_absent")
     blocks = _validated_blocks(brief, metrics.get("block_receipts"))
     proofs = metrics.get("localization_proof")
-    if not blocks or not isinstance(proofs, list):
+    if not isinstance(proofs, list):
+        return rows
+    if not proofs and _valid_repeat_witness(metrics.get("determinism_witness")):
+        # Repeatability exists at acquisition-run scope, but without a rendered
+        # candidate there is no block, producer delivery, or assistant receipt to
+        # which this ACQ row can attach. Record the source and remain UNMEASURED.
+        rows["determinism"].update({
+            "source_artifact": "brief_result.json",
+            "blocker": "candidate_delivery_absent",
+            "source_fields": ["metrics.determinism_witness"],
+        })
+        return rows
+    if not blocks:
         return rows
     if consumption_ledger:
         if consumption_ledger.get("schema") != _CONSUMPTION_SCHEMA:
@@ -390,14 +541,18 @@ def collect_acq_provenance(
         features = _source_features(proof, metrics)
         if not features:
             continue
-        delivery_home = _producer_delivery_home(
+        delivery = _producer_delivery_home(
             (str(block["rendered_text"]), brief), entries, messages
         )
-        level = _block_receipt_level(block, path, messages, delivery_home)
+        delivery_home = delivery.get("msg_index") if delivery is not None else None
+        receipt = _block_receipt(block, path, messages, delivery_home)
+        level = receipt["level"]
         for feature in features:
+            source_fields = _source_field_paths(feature, proof_index, proof)
+            producer_payload = str(delivery.get("payload", "")) if delivery else ""
             candidate = {
                 "status": "MEASURED" if level is not None and level >= 2 else "UNMEASURED",
-                "source_artifact": f"brief_result.json#metrics.localization_proof[{proof_index}]",
+                "source_artifact": "brief_result.json" if source_fields else None,
                 "receipt_level": level,
                 "blocker": (
                     None if level is not None and level >= 2
@@ -405,14 +560,40 @@ def collect_acq_provenance(
                     else "producer_seal_absent"
                 ),
                 "block_id": block_id,
-                "content_sha256_16": str(block["sha256"])[:16],
+                # Gate-1 identity belongs to the actual producer-sealed payload.
+                # The exact candidate sub-block remains separately addressable.
+                "content_sha256_16": (
+                    delivery.get("content_sha256_16") if delivery else None
+                ),
+                "chars_delivered": delivery.get("chars_delivered") if delivery else None,
+                "block_content_sha256_16": str(block["sha256"])[:16],
+                "block_char_span": list(block["char_span"]),
+                "producer_payload_scope": (
+                    "exact_block" if producer_payload == str(block["rendered_text"])
+                    else "whole_brief" if producer_payload == brief
+                    else None
+                ),
+                "producer_entry_index": delivery.get("entry_index") if delivery else None,
+                "producer_ledger_layer": delivery.get("ledger_layer") if delivery else None,
+                "delivery_message_index": delivery_home,
+                "receipt_evidence": {
+                    "referenced_message_index": receipt["referenced_message_index"],
+                    "acted_message_index": receipt["acted_message_index"],
+                },
+                "source_fields": source_fields,
+                # This join proves support provenance and acknowledgment only.
+                # Independent live authorities must populate the other gates.
+                "source_contribution_correct": None,
+                "timing_inherited_from_fact_delivery": None,
+                "source_causal_fair_probe": None,
             }
             current = rows[feature]
             current_level = current.get("receipt_level")
-            if (
-                candidate["status"] == "MEASURED"
-                or current_level is None
-                or (level is not None and level > current_level)
+            # Retain the strongest receipt. Equal-strength candidates keep the
+            # first proof-index/rank encountered, giving a stable tie-break.
+            if current.get("block_id") is None or (
+                level is not None
+                and (current_level is None or level > current_level)
             ):
                 rows[feature] = candidate
     return rows

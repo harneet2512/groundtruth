@@ -157,9 +157,23 @@ def test_guard_raises_on_uncovered_import(agent_mod):
         agent_mod._assert_gt_mini_patch_imports_covered(fake_src)
 
 
+def test_guard_resolves_package_form_import_to_exact_submodule(agent_mod):
+    fake_src = "from groundtruth.runtime import definitely_not_shipped\n"
+    required = agent_mod.gt_mini_patch_required_modules(fake_src)
+    assert required == {"groundtruth.runtime.definitely_not_shipped"}
+    with pytest.raises(RuntimeError, match="definitely_not_shipped"):
+        agent_mod._assert_gt_mini_patch_imports_covered(fake_src)
+
+
+def test_package_form_rl_profile_import_is_really_shipped(agent_mod):
+    required = agent_mod.gt_mini_patch_required_modules()
+    assert "groundtruth.runtime.rl_profile" in required
+    assert "groundtruth.runtime.rl_profile" in agent_mod._INJECTED_GT_MODULES
+
+
 def test_guard_ignores_bare_import_groundtruth(agent_mod):
     """`import groundtruth` (no submodule) is not a from-import the allow-list must
-    cover; the regex only flags `from groundtruth.<pkg> import`."""
+    cover; the AST guard only evaluates `from groundtruth.<pkg> import`."""
     src = "import groundtruth\nimport os\nfrom groundtruth.runtime.ledger import Ledger\n"
     required = agent_mod.gt_mini_patch_required_modules(src)
     assert required == {"groundtruth.runtime.ledger"}

@@ -61,7 +61,7 @@ def _complete_deep_metrics(task: str) -> dict:
         "task_id": task,
         "schema": "gt_deep_metrics.v2",
         "precision_decimals": 8,
-        "performance": {},
+        "performance": {"schema": "gt_performance_metrics.v1"},
         "behavioral_impact": {},
         "metric_applicability": {},
     }
@@ -87,6 +87,12 @@ def _complete_deep_metrics(task: str) -> dict:
                 }
             else:
                 target[name] = 0
+    record["performance"]["token_efficiency"]["cost_per_resolved_scope"] = "run_aggregate"
+    record["performance"]["metric_applicability"] = {
+        section: dict(contracts)
+        for section, contracts in record["metric_applicability"].items()
+        if section != "behavioral_impact"
+    }
     return record
 
 
@@ -403,7 +409,7 @@ def test_cap_readiness_never_inherits_an_unattributed_fact_delivery(tmp_path: Pa
         "features"
     ]["GT_CONTRACT_NATIVE"]["ss_readiness"]
     fact_readiness = record["ss_features"]["caller_contract"]["ss_readiness"]
-    assert fact_readiness["gates"]["delivered_byte_proven"] is True
+    assert fact_readiness["gates"]["delivered_byte_proven"] is False
     assert fact_readiness["gates"]["correct_info"] is None
     assert fact_readiness["gates"]["fair_probe"] is None
     assert fact_readiness["ss_live"] is False
@@ -511,6 +517,12 @@ def test_fact_byte_proof_requires_exact_class_and_seal_join() -> None:
         "outcome": "delivered",
         "chars_delivered": 12,
         "content_sha256_16": "b" * 16,
+        "lineage_schema": "gt.feature_lineage.v1",
+        "evidence_type": "caller_contract",
+        "runtime_producer_id": "contract_map",
+        "registered_producer_id": "contract_map",
+        "producer_registration_match": True,
+        "fact_class": "caller_contract",
     }
     entry = {
         "source": "trajectory",
@@ -647,10 +659,11 @@ def test_legacy_projection_excluding_additive_readiness_is_byte_identical(
         projection, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
 
-    # Intentional CAP-role correction: only feature_lineage byte owners inherit
-    # producer lifecycle; mediator/eligibility rows remain typed controls.
+    # Intentional CAP authority correction: coherence has exact sealed-member
+    # attribution but no registered FACT lineage, so it remains UNMEASURED instead
+    # of inheriting another FACT producer's lifecycle.
     assert hashlib.sha256(encoded).hexdigest() == (
-        "652a66e5edefd1d407e9f5593732b601805ea86b96f92b95f051388f3791e18a"
+        "a604c4a7f05e5659e10a3d278cccc161438aa5947526ed33c8f328424eb972bf"
     )
 
 
@@ -792,7 +805,7 @@ def test_aggregate_requires_every_canonical_row_from_every_task(tmp_path: Path) 
     assert aggregate["ss_integrity"]["tasks_with_inventory_drift"] == [task]
 
 
-def test_run_aggregate_completes_task_scoped_perf_coverage_only(tmp_path: Path) -> None:
+def test_run_aggregate_keeps_task_coverage_but_requires_canonical_run_coverage(tmp_path: Path) -> None:
     task = "synthetic__perf-aggregate"
     _write_task(tmp_path, task, deep_metrics=_complete_deep_metrics(task))
     record = metrics.collect_task(task, str(tmp_path), profile="2")
@@ -802,8 +815,8 @@ def test_run_aggregate_completes_task_scoped_perf_coverage_only(tmp_path: Path) 
     gold = aggregate["run_metrics"]["ss_features"]["gold_rank"]["ss_readiness"]
     assert gold["role"] == "measurement"
     assert gold["gates"]["task_coverage"] is True
-    assert gold["gates"]["aggregate_coverage"] is True
-    assert gold["measurement_complete"] is True
+    assert gold["gates"]["aggregate_coverage"] is False
+    assert gold["measurement_complete"] is False
     assert gold["ss_live"] is False
     cost = aggregate["run_metrics"]["ss_features"]["cost_per_resolved"]["ss_readiness"]
     assert cost["gates"]["artifact_valid"] is False
@@ -817,7 +830,7 @@ def test_run_aggregate_joins_validated_run_ratio_artifact(tmp_path: Path) -> Non
     deep["performance"]["token_efficiency"]["total_cost_usd"] = 2.5
     _write_task(tmp_path, task, deep_metrics=deep)
     record = metrics.collect_task(task, str(tmp_path), profile="2")
-    run_payload = gt_run_metrics.aggregate_run_metrics([deep])
+    run_payload = gt_run_metrics.aggregate_run_metrics([deep], expected_task_ids=[task])
     run_payload["run_id"] = "run-ratio"
     run_path = tmp_path / "gt_run_metrics_run-ratio.json"
     run_path.write_text(json.dumps(run_payload), encoding="utf-8")
@@ -843,7 +856,7 @@ def test_run_ratio_requires_matching_explicit_applicability(
     deep["performance"]["token_efficiency"]["total_cost_usd"] = 2.5
     _write_task(tmp_path, task, deep_metrics=deep)
     record = metrics.collect_task(task, str(tmp_path), profile="2")
-    run_payload = gt_run_metrics.aggregate_run_metrics([deep])
+    run_payload = gt_run_metrics.aggregate_run_metrics([deep], expected_task_ids=[task])
     run_payload["run_id"] = "run-ratio-applicability"
     run_payload["mandatory_performance"]["token_efficiency"][
         "cost_per_resolved"
@@ -870,7 +883,7 @@ def test_run_ratio_accepts_explicit_non_applicability_for_zero_resolves(
     deep["performance"]["token_efficiency"]["total_cost_usd"] = 2.5
     _write_task(tmp_path, task, deep_metrics=deep)
     record = metrics.collect_task(task, str(tmp_path), profile="2")
-    run_payload = gt_run_metrics.aggregate_run_metrics([deep])
+    run_payload = gt_run_metrics.aggregate_run_metrics([deep], expected_task_ids=[task])
     run_payload["run_id"] = "run-ratio-not-applicable"
     run_path = tmp_path / "gt_run_metrics_run-ratio-not-applicable.json"
     run_path.write_text(json.dumps(run_payload), encoding="utf-8")

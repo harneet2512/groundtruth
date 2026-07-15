@@ -285,8 +285,9 @@ def _candidate_acquisition_sources(
     """Return candidate-local acquisition lineage without changing delivery.
 
     Only positive, independently checkable source contributions are emitted.
-    Missing legacy columns, an unreadable checkout, a single-repo no-op scope,
-    or an unresolved partition all abstain. Repeatability is intentionally not
+    Missing legacy columns, an unreadable checkout, or an unresolved partition
+    all abstain. A single-repo no-op is emitted only when the indexed candidate
+    bytes equal the active checkout bytes. Repeatability is intentionally not
     synthesized here: a single generation cannot prove ``determinism``.
     """
     methods = {
@@ -327,6 +328,7 @@ def _candidate_acquisition_sources(
             hash_col = "content_hash" if "content_hash" in hash_cols else (
                 "hash" if "hash" in hash_cols else ""
             )
+            candidate_revision_current = False
             if hash_col:
                 row = conn.execute(
                     f"SELECT {hash_col} FROM file_hashes WHERE file_path = ? LIMIT 1",
@@ -339,6 +341,7 @@ def _candidate_acquisition_sources(
                 except OSError:
                     observed = ""
                 if _re.fullmatch(r"[0-9a-f]{64}", indexed) and indexed == observed:
+                    candidate_revision_current = True
                     sources["freshness_basis"] = {
                         "kind": "content_revision",
                         "indexed_sha256": indexed,
@@ -348,7 +351,17 @@ def _candidate_acquisition_sources(
             from groundtruth.index.repo_scope import for_read
 
             scope = for_read(conn, repo_root)
-            if scope.is_multi_repo and scope.resolved and scope.active_repo_id is not None:
+            if not scope.is_multi_repo and scope.resolved and candidate_revision_current:
+                sources["repo_scope"] = {
+                    "kind": "repo_partition",
+                    "is_multi_repo": False,
+                    "resolved": True,
+                    "scope_mode": "single_repo_noop",
+                    "active_repo_id": None,
+                    "candidate_repo_id": None,
+                    "candidate_path": normalized_path,
+                }
+            elif scope.is_multi_repo and scope.resolved and scope.active_repo_id is not None:
                 node_cols = {
                     str(row[1]) for row in conn.execute("PRAGMA table_info(nodes)").fetchall()
                 }
@@ -416,6 +429,9 @@ class V1RBriefResult:
     # ``GT_BLOCK_RECEIPTS`` explicitly enables them, or ``GT_INSEAM_METRICS``
     # enables them when the dedicated flag is absent. No ranking effect.
     block_receipts: list[dict] = field(default_factory=list)
+    # Typed CAP terminal decisions generated while assembling this exact brief.
+    # Sidecar only; never rendered into brief_text.
+    control_participation: list[dict] = field(default_factory=list)
     # B-31 (Brief-F9): which token counter produced ``token_estimate`` /governed the
     # DOSE rail — ``"gte-modernbert-bpe"`` (the baked HF BPE vocabulary) or
     # ``"char4-estimate"`` (the char/4 fallback when no tokenizer.json is configured).
@@ -1748,6 +1764,44 @@ def _reduce_brief_to_minimal(text: str) -> str:
     return "\n".join(out_lines)
 
 
+def _brief_minimal_participation(before: str, after: str) -> list[dict]:
+    """Typed sidecar for the terminal minimal-brief reduction decision."""
+    if not _block_receipts_on():
+        return []
+    try:
+        from groundtruth.runtime.control_participation import (
+            build_control_participation,
+            participation_to_dict,
+        )
+        record = build_control_participation(
+            feature_id="GT_BRIEF_MINIMAL",
+            decision_site="pretask.v1r_brief.minimal_reduction",
+            decision="APPLIED" if after != before else "NO_EFFECT",
+            iteration=0,
+            candidate_bytes=before,
+            reason="brief_reduced" if after != before else "already_minimal",
+        )
+        return [participation_to_dict(record)]
+    except Exception as exc:  # sidecar failure never changes brief bytes
+        import hashlib as _hashlib
+        return [{
+            "schema": "gt.control_participation.v1",
+            "control_ref": {
+                "category": "CAP", "feature_id": "GT_BRIEF_MINIMAL",
+                "role": "eligibility",
+            },
+            "decision_site": "pretask.v1r_brief.minimal_reduction",
+            "decision": "ERROR",
+            "iteration": 0,
+            "candidate_chars": len(before),
+            "candidate_sha256_16": (
+                _hashlib.sha256(before.encode("utf-8", "surrogatepass"))
+                .hexdigest()[:16] if before else ""
+            ),
+            "reason": f"control_record_error:{type(exc).__name__}",
+        }]
+
+
 # The retired step-0 narration markers a minimal (SM-6 B) brief MUST NOT contain, and the
 # obligation marker it MUST retain. Kept in lockstep with :data:`_BRIEF_MINIMAL_DROP_LABELS`
 # + :func:`_reduce_brief_to_minimal` (the SM-7 gate reddens on a drift). These are the
@@ -1816,7 +1870,17 @@ def _fact_class_for_label(label: str) -> str | None:
     return _BLOCK_FACT_CLASS.get(label)
 
 
-def _brief_block_receipts(brief_text: str) -> list[dict]:
+def _localization_candidate_id(file_path: str) -> str:
+    """Stable identity shared by a ranked file and its rendered file-entry block."""
+    normalized = str(file_path or "").replace("\\", "/").lstrip("./").lstrip("/")
+    return f"localization:{normalized}" if normalized else "localization:none"
+
+
+def _brief_block_receipts(
+    brief_text: str,
+    *,
+    localization_candidate_ids: list[str] | None = None,
+) -> list[dict]:
     """B-6: assign each fact-bearing brief block a STABLE, DISTINCT delivery receipt.
 
     Reuses the deterministic :func:`_segment_brief_blocks` segmentation (the SAME
@@ -1852,6 +1916,7 @@ def _brief_block_receipts(brief_text: str) -> list[dict]:
     receipts: list[dict] = []
     offset = 0
     _seen: dict[str, int] = {}
+    _file_entry_index = 0
     for b in blocks:
         seg = b["text"]
         start = offset
@@ -1864,14 +1929,201 @@ def _brief_block_receipts(brief_text: str) -> list[dict]:
         k = _seen.get(label, 0)
         _seen[label] = k + 1
         block_id = label if _label_total.get(label, 0) <= 1 else f"{label}#{k}"
+        if label.startswith("file-entry"):
+            candidate_id = (
+                localization_candidate_ids[_file_entry_index]
+                if localization_candidate_ids is not None
+                and _file_entry_index < len(localization_candidate_ids)
+                else f"brief:block:{block_id}"
+            )
+            _file_entry_index += 1
+        else:
+            candidate_id = f"brief:block:{block_id}"
         receipts.append({
             "block_id": block_id,
             "fact_class": fact_class,
             "label": label,
+            "candidate_id": candidate_id,
             "char_span": [start, end],
             "content_hash": _hashlib.sha256(seg.encode("utf-8")).hexdigest(),
         })
     return receipts
+
+
+def _terminal_pretask_mediator_participation(
+    brief_text: str,
+    block_receipts: list[dict],
+    *,
+    budget_suppressed: list[str] | None = None,
+    content_paths: set[str] | frozenset[str] | None = None,
+    content_decision: str = "NO_EFFECT",
+    content_reason: str = "no_content_candidate",
+    semantic_anchor_paths: set[str] | frozenset[str] | None = None,
+    semantic_localizer_paths: set[str] | frozenset[str] | None = None,
+) -> list[dict]:
+    """Build terminal mediator rows from the final, model-visible brief only.
+
+    Ranking/rendering may execute repeatedly while the token rail tightens.  This
+    function runs after that loop and joins controls only to blocks that survived
+    into ``brief_text``.  It is a pure sidecar builder and never changes the brief.
+    """
+    if not _block_receipts_on():
+        return []
+    import hashlib as _hashlib
+    import os as _os
+
+    suppressed = set(budget_suppressed or ())
+    content_ids = {_localization_candidate_id(p) for p in (content_paths or ())}
+    anchor_ids = {_localization_candidate_id(p) for p in (semantic_anchor_paths or ())}
+    localizer_ids = {
+        _localization_candidate_id(p) for p in (semantic_localizer_paths or ())
+    }
+    receipts_by_id = {
+        str(r.get("candidate_id", "")): r
+        for r in block_receipts
+        if isinstance(r, dict) and r.get("candidate_id")
+    }
+
+    def _exact_bytes(receipt: dict | None) -> str:
+        if not receipt:
+            return ""
+        span = receipt.get("char_span")
+        if (
+            not isinstance(span, list) or len(span) != 2
+            or type(span[0]) is not int or type(span[1]) is not int
+            or span[0] < 0 or span[1] < span[0] or span[1] > len(brief_text)
+        ):
+            return ""
+        return brief_text[span[0]:span[1]]
+
+    rows: list[dict] = []
+
+    def _append(
+        feature_id: str,
+        decision_site: str,
+        decision: str,
+        fact_class: str,
+        candidate_id: str,
+        candidate_bytes: str,
+        reason: str,
+    ) -> None:
+        try:
+            from groundtruth.runtime.control_participation import (
+                build_control_participation,
+                participation_to_dict,
+            )
+            rows.append(participation_to_dict(build_control_participation(
+                feature_id=feature_id,
+                decision_site=decision_site,
+                decision=decision,
+                iteration=0,
+                candidate_bytes=candidate_bytes,
+                fact_class=fact_class,
+                candidate_id=candidate_id,
+                reason=reason,
+            )))
+        except Exception as exc:  # sidecar failure never changes delivered bytes
+            seal = (
+                _hashlib.sha256(candidate_bytes.encode("utf-8", "surrogatepass"))
+                .hexdigest()[:16] if candidate_bytes else ""
+            )
+            rows.append({
+                "schema": "gt.control_participation.v1",
+                "control_ref": {
+                    "category": "CAP", "feature_id": feature_id, "role": "mediator",
+                },
+                "decision_site": decision_site,
+                "decision": "ERROR",
+                "iteration": 0,
+                "candidate_chars": len(candidate_bytes),
+                "candidate_sha256_16": seal,
+                "fact_class": fact_class,
+                "candidate_id": candidate_id,
+                "reason": f"control_record_error:{type(exc).__name__}",
+            })
+
+    obligation = next(
+        (r for r in block_receipts if r.get("fact_class") == "obligations"), None)
+    obligation_bytes = _exact_bytes(obligation)
+    obligation_id = (
+        str(obligation.get("candidate_id")) if obligation
+        else "brief:block:obligations:none"
+    )
+    native_on = _brief_native_on()
+    native_terminal = bool(
+        obligation_bytes and _OBLIGATION_NATIVE_HEADER in obligation_bytes)
+    if native_on:
+        native_decision = "APPLIED" if native_terminal else (
+            "SUPPRESSED" if "obligations" in suppressed else "NO_EFFECT")
+        _append(
+            "GT_BRIEF_NATIVE", "pretask.v1r_brief.native_render",
+            native_decision, "obligations", obligation_id, obligation_bytes,
+            "native_obligations_terminal" if native_terminal else (
+                "token_rail" if native_decision == "SUPPRESSED"
+                else "no_terminal_obligations_block"),
+        )
+
+    ack_on = _ss_ack_form_on()
+    if ack_on:
+        if not native_on:
+            ack_decision, ack_reason = "NO_EFFECT", "requires_brief_native"
+        elif native_terminal:
+            ack_decision, ack_reason = "APPLIED", "imperative_native_checklist_terminal"
+        elif "obligations" in suppressed:
+            ack_decision, ack_reason = "SUPPRESSED", "token_rail"
+        else:
+            ack_decision, ack_reason = "NO_EFFECT", "no_imperative_obligation"
+        _append(
+            "GT_SS_ACK_FORM", "pretask.v1r_brief.ack_requirement_filter",
+            ack_decision, "obligations", obligation_id, obligation_bytes, ack_reason,
+        )
+
+    if (_os.environ.get("GT_CONTENT_LEG") or "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    ):
+        surviving = sorted(content_ids & set(receipts_by_id))
+        for candidate_id in surviving:
+            _append(
+                "GT_CONTENT_LEG", "pretask.v1r_brief.content_bm25_rank",
+                "APPLIED", "localization", candidate_id,
+                _exact_bytes(receipts_by_id[candidate_id]), content_reason,
+            )
+        if not surviving:
+            terminal_decision = (
+                content_decision if content_decision in {"ERROR", "SUPPRESSED"}
+                else "NO_EFFECT"
+            )
+            _append(
+                "GT_CONTENT_LEG", "pretask.v1r_brief.content_bm25_rank",
+                terminal_decision, "localization", "localization:content:none", "",
+                content_reason if terminal_decision in {"ERROR", "SUPPRESSED"}
+                else "no_final_content_candidate",
+            )
+
+    if (_os.environ.get("GT_SEM_BODY") or "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    ):
+        semantic_ids = anchor_ids | localizer_ids
+        surviving = sorted(semantic_ids & set(receipts_by_id))
+        for candidate_id in surviving:
+            in_anchor = candidate_id in anchor_ids
+            in_localizer = candidate_id in localizer_ids
+            reason = (
+                "anchor_and_localizer" if in_anchor and in_localizer
+                else "anchor_only" if in_anchor else "localizer_only"
+            )
+            _append(
+                "GT_SEM_BODY", "pretask.v1r_brief.semantic_body_rank",
+                "APPLIED", "localization", candidate_id,
+                _exact_bytes(receipts_by_id[candidate_id]), reason,
+            )
+        if not surviving:
+            _append(
+                "GT_SEM_BODY", "pretask.v1r_brief.semantic_body_rank",
+                "NO_EFFECT", "localization", "localization:semantic-body:none", "",
+                "no_final_semantic_body_candidate",
+            )
+    return rows
 
 
 # B-30: HARD dose-rail enforcement. The budget loops in ``generate_v1r_brief``
@@ -2117,6 +2369,22 @@ def _l1_signal_counts(
         if _edge_cache[path]:
             graph_edges += 1
     return graph_edges, sem, struct, fts5
+
+
+def _terminal_acquisition_components(
+    components: dict[str, float],
+    candidate_path: str,
+    *,
+    body_paths: set[str] | frozenset[str],
+) -> dict[str, float]:
+    """Attach only terminal, candidate-local acquisition participation facts."""
+    out = dict(components)
+    normalized_body = {_gl_normalize(path) for path in body_paths}
+    if _gl_normalize(candidate_path) in normalized_body:
+        # Boolean participation, not a fabricated similarity magnitude: this
+        # candidate survived after a real content-FTS or body-embedding leg.
+        out["body"] = 1.0
+    return out
 
 
 # --- Decision 26: Cross-Domain Bridging via Co-Change + Test Co-Import ---
@@ -4587,6 +4855,7 @@ def generate_v1r_brief(
         except Exception:
             pass
 
+    _semantic_anchor_paths: set[str] = set()
     v74 = run_v74(
         issue_text,
         repo_root,
@@ -4606,6 +4875,7 @@ def generate_v1r_brief(
         min_confidence=EDGE_CONFIDENCE_FLOOR,
         weights=weights,
         focus_size=max_files,
+        semantic_body_paths_out=_semantic_anchor_paths,
     )
 
     if not v74.ranked_full:
@@ -4639,6 +4909,7 @@ def generate_v1r_brief(
         # over-cap brief. Idempotent: a brief already within budget is byte-identical
         # and _nm_suppressed stays empty.
         _nm_suppressed: list[str] = []
+        _nm_control_participation: list[dict] = []
         if _count_tokens(_nm_brief) > max_brief_tokens:
             _nm_brief, _nm_suppressed = _enforce_token_rail(_nm_brief, max_brief_tokens)
         # SM-6 (B): apply the SAME minimal reduction so GT_BRIEF_MINIMAL yields a minimal
@@ -4646,11 +4917,22 @@ def generate_v1r_brief(
         # note + obligations, so the reducer is a no-op here (nothing to drop); applied for
         # uniformity. DEFAULT-OFF -> byte-identical.
         if _brief_minimal_on():
+            _nm_before_minimal = _nm_brief
             _nm_brief = _reduce_brief_to_minimal(_nm_brief)
+            _nm_control_participation = _brief_minimal_participation(
+                _nm_before_minimal, _nm_brief)
         # Brief-F7: B-6 per-block receipts also cover the fact-bearing no-match brief
         # (its <gt-obligations> block). Same PURE read as the matched path; brief bytes
         # unchanged. Empty unless receipt/in-seam instrumentation is enabled.
         _nm_receipts = _brief_block_receipts(_nm_brief) if _block_receipts_on() else []
+        _nm_control_participation.extend(
+            _terminal_pretask_mediator_participation(
+                _nm_brief,
+                _nm_receipts,
+                budget_suppressed=_nm_suppressed,
+                semantic_anchor_paths=_semantic_anchor_paths,
+            )
+        )
         return V1RBriefResult(
             files=[],
             brief_text=_nm_brief,
@@ -4662,6 +4944,7 @@ def generate_v1r_brief(
             sem_components=[],
             budget_suppressed=_nm_suppressed,
             block_receipts=_nm_receipts,
+            control_participation=_nm_control_participation,
             tokenizer_used=_tokenizer_kind(),
         )
 
@@ -5724,8 +6007,12 @@ def generate_v1r_brief(
     # receipts below. Retires <gt-graph-map>/<gt-localization>/contract narration, keeps
     # obligations + minimal 'which file' orientation (localization rides reactive
     # def_partition). BAKED: dormant until the SM-8 rebake sets the flag at generation.
+    _control_participation: list[dict] = []
     if _brief_minimal_on():
+        _before_minimal = brief_text
         brief_text = _reduce_brief_to_minimal(brief_text)
+        _control_participation = _brief_minimal_participation(
+            _before_minimal, brief_text)
 
     # --- L1 signal-provenance counts (observability; no ranking effect) ---
     # Count over the DELIVERED candidate set (.files == _loc_files[:max_files]).
@@ -5768,6 +6055,14 @@ def generate_v1r_brief(
     ]
     _eff_w_sem = float(getattr(v74, "effective_w_sem", 0.0) or 0.0)
     _k_sem_top = int(getattr(v74, "k_sem_top_effective", 0) or 0)
+    _terminal_body_paths = {
+        _gl_normalize(str(_p))
+        for _p in (
+            set(_semantic_anchor_paths)
+            | set(getattr(_loc, "content_leg_paths", frozenset()) or ())
+            | set(getattr(_loc, "semantic_body_paths", frozenset()) or ())
+        )
+    }
     _localization_proof: list[dict[str, object]] = []
     for _i, (_e, _r) in enumerate(zip(_delivered, _aligned_records), start=1):
         _comps_raw = (_r.get("components", {}) if isinstance(_r, dict) else {}) or {}
@@ -5777,9 +6072,15 @@ def generate_v1r_brief(
                 _components[str(_ck)] = float(_cv or 0.0)
             except Exception:
                 continue
+        _proof_path = str(getattr(_e, "path", "") or "")
+        _components = _terminal_acquisition_components(
+            _components, _proof_path, body_paths=_terminal_body_paths,
+        )
         _localization_proof.append({
+            "candidate_id": _localization_candidate_id(
+                _proof_path),
             "rank": _i,
-            "path": getattr(_e, "path", ""),
+            "path": _proof_path,
             "score": float(getattr(_e, "score", 0.0) or 0.0),
             "function_names": list(getattr(_e, "function_names", []) or [])[:8],
             "witness": getattr(_e, "witness", "") or "",
@@ -5863,7 +6164,33 @@ def generate_v1r_brief(
     # Computed from the FINAL brief_text so spans/hashes match exactly what the agent
     # sees. A PURE READ — brief_text is NOT modified, so the delivered brief bytes are
     # byte-identical whether or not receipts are populated.
-    _block_receipts = _brief_block_receipts(brief_text) if _block_receipts_on() else []
+    _rendered_candidate_ids = [
+        _localization_candidate_id(str(getattr(_e, "path", "") or ""))
+        for _e in entries
+    ]
+    _block_receipts = (
+        _brief_block_receipts(
+            brief_text,
+            localization_candidate_ids=_rendered_candidate_ids,
+        )
+        if _block_receipts_on() else []
+    )
+    _control_participation.extend(
+        _terminal_pretask_mediator_participation(
+            brief_text,
+            _block_receipts,
+            budget_suppressed=_budget_suppressed,
+            content_paths=set(getattr(_loc, "content_leg_paths", frozenset()) or ()),
+            content_decision=str(
+                getattr(_loc, "content_leg_decision", "NO_EFFECT") or "NO_EFFECT"),
+            content_reason=str(
+                getattr(_loc, "content_leg_reason", "no_content_candidate")
+                or "no_content_candidate"),
+            semantic_anchor_paths=_semantic_anchor_paths,
+            semantic_localizer_paths=set(
+                getattr(_loc, "semantic_body_paths", frozenset()) or ()),
+        )
+    )
 
     result = V1RBriefResult(
         files=_delivered,
@@ -5882,6 +6209,7 @@ def generate_v1r_brief(
         localization_proof=_localization_proof,
         budget_suppressed=_budget_suppressed,
         block_receipts=_block_receipts,
+        control_participation=_control_participation,
         tokenizer_used=_tokenizer_kind(),  # Brief-F9: which token counter ran
     )
 

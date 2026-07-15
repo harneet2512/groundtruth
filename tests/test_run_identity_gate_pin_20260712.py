@@ -13,11 +13,9 @@ FIX (this file pins it), in the trial job of swebench_live_lite_full.yml:
      BEFORE the paid agent-launch step, writes gt_run_identity.json (schema gt.run_identity.v1) into
      the /gt_out bind-mount dir — substrate_digest_expected/actual, gt_ref_requested/resolved,
      seam_sha256, runner_sha256, workflow_run_id. Written on BOTH arms.
-  2. FAIL-CLOSED PARITY: if the pinned substrate digest is not present locally before spend
-     (actual != expected), emit GT_IDENTITY_MISMATCH + exit 1 (and write proof_status=failed so the
-     paid step's existing PROOF_STATE!=ok gate refuses — no model spend). Gate ONLY on digest.
-  3. COMMIT PARITY is RECORDED, NOT gated: baked substrate_build_commit vs synced run commit differ
-     BY DESIGN (run_manifest.commit_parity == "mismatch" is EXPECTED). The gate must never exit on it.
+  2. FAIL-CLOSED IDENTITY: the independently observed substrate RepoDigest/Image ID, workflow SHA,
+     prepared/resolved SHA, and baked/run commit must all match before spend.
+  3. COMMIT PARITY is both recorded and required for every paid GT-on run.
   4. Collect copies gt_run_identity.json into trial_results/gt_artifacts/ (the dir is cherry-picked).
 
 CRITICAL invariant kept green (the docker `bash -c '` block trap): the paid agent step is ONE
@@ -306,8 +304,8 @@ def test_summary_gt_commit_is_consensus_from_trial_identity_artifacts() -> None:
 
 def test_actual_digest_comes_from_docker_inspect_of_the_expected_ref() -> None:
     joined = "\n".join(_code_lines(_step_run_containing("gt.run_identity.v1")))
-    assert "docker inspect" in joined, (
-        "the ACTUAL substrate digest must be read from `docker inspect` of the locally-loaded image"
+    assert "docker image inspect" in joined, (
+        "the ACTUAL substrate digest must be read from `docker image inspect` of the locally-loaded image"
     )
     assert "GT_SUBSTRATE_DIGEST" in joined, (
         "the EXPECTED digest is the workflow's GT_SUBSTRATE_DIGEST (the pull input/var)"
@@ -341,49 +339,20 @@ def test_digest_gate_is_scoped_to_the_non_baseline_arm() -> None:
     )
 
 
-# ── 4. COMMIT PARITY: recorded, never gated ──────────────────────────────────────────────────────
+# ── 4. COMMIT PARITY: recorded and required ──────────────────────────────────────────────────────
 
 
-def test_commit_parity_is_recorded_but_not_gated() -> None:
-    # gt_math known-good semantics: the baked substrate_build_commit and the synced run commit differ
-    # BY DESIGN (run_manifest.commit_parity == "mismatch" is EXPECTED). The gate must NEVER fail-close
-    # on commit parity — only on the substrate digest. Two-part pin:
-    #   (1) LOAD-BEARING invariant: the step has EXACTLY ONE `exit 1`, and it belongs to the
-    #       GT_IDENTITY_MISMATCH digest gate. A second `exit 1` would be another gate — the exact
-    #       regression (a commit-parity gate) this test forbids.
-    #   (2) PROXIMITY (the requested form): no `exit 1` within N chars of any `commit_parity` mention.
-    #       LIMIT (documented, by design): this is a proximity heuristic keyed to the current layout
-    #       (the commit_parity RECORD sites sit far above the lone digest gate). It does not prove
-    #       semantic non-gating on its own — (1) is the invariant that does; (2) catches a regression
-    #       that plants an exit next to the record site. Comments are excluded (code lines only), so a
-    #       commit_parity MENTION in a comment cannot trip it.
-    code = _code_lines(_step_run_containing("gt.run_identity.v1"))
-    joined = "\n".join(code)
-    # (1)
-    assert joined.count("exit 1") == 1, (
-        "the run-identity step must have EXACTLY ONE `exit 1` (the digest gate); a second exit would "
-        "be a second gate — commit parity (or anything else) must never be a second fail-close"
-    )
-    ex = joined.index("exit 1")
-    gate = joined.rfind("GT_IDENTITY_MISMATCH", 0, ex)
-    assert gate != -1 and ex - gate < 400, (
-        "the single `exit 1` must belong to the GT_IDENTITY_MISMATCH digest gate"
-    )
-    # commit parity must actually be RECORDED (present in the identity step).
-    assert "commit_parity" in joined, "commit parity must be RECORDED in the identity artifact"
-    # (2)
-    N = 250
-    start = 0
-    while True:
-        i = joined.find("commit_parity", start)
-        if i == -1:
-            break
-        seg = joined[max(0, i - N): i + N]
-        assert "exit 1" not in seg, (
-            f"an `exit 1` sits within {N} chars of a commit_parity mention — commit parity must be "
-            f"RECORDED, never GATED (see this test's LIMIT note for the check's precise scope)"
-        )
-        start = i + len("commit_parity")
+def test_commit_parity_is_recorded_and_required() -> None:
+    joined = "\n".join(_code_lines(_step_run_containing("gt.run_identity.v1")))
+    for token in (
+        "commit_parity_recorded",
+        "commit_parity_exact",
+        "parity.get('status') == 'match'",
+        "parity.get('substrate_build_commit') == prepared",
+        "parity.get('run_commit') == prepared",
+        "doc.get('substrate_build_commit') == prepared",
+    ):
+        assert token in joined
 
 
 # ── 5. COLLECT: the identity artifact reaches the uploaded task artifact ──────────────────────────

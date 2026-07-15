@@ -166,7 +166,10 @@ def test_gateway_commit_threads_exact_envelope_owner(monkeypatch):
 
     delivered = [row for row in calls if row.get("content")]
     assert len(delivered) == 1
-    assert delivered[0]["extra"] == {"profile_member": "GT_PATCH_DELTA"}
+    assert delivered[0]["extra"] == {
+        "profile_member": "GT_PATCH_DELTA",
+        "candidate_id": winner.dedup_key,
+    }
     assert delivered[0]["content"] in out["output"]
 
 
@@ -224,3 +227,28 @@ def test_profile_attribution_does_not_change_delivery_bytes(monkeypatch):
         "profile_member": "GT_HYPOTHESIS"
     }
     assert on == off == b"base\nsame rendered bytes"
+
+
+def test_mediator_participation_persists_concrete_fact_identity(monkeypatch):
+    rows: list[dict] = []
+    monkeypatch.setattr(g, "_inseam_metrics_on", lambda: True)
+    monkeypatch.setattr(g, "_ledger_line_direct", lambda row: rows.append(row) or True)
+
+    g._control_participation_record(
+        "GT_XSESSION_RANKUP",
+        "gateway.xsession_rankup.boost",
+        "APPLIED",
+        candidate_bytes="exact post-control candidate",
+        fact_class="caller_contract",
+        candidate_id="abc123",
+        reason="ladder_boost:2",
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "evaluated"
+    assert rows[0]["control_ref"] == {
+        "category": "CAP", "feature_id": "GT_XSESSION_RANKUP", "role": "mediator",
+    }
+    assert rows[0]["fact_class"] == "caller_contract"
+    assert rows[0]["candidate_id"] == "abc123"
+    assert rows[0]["candidate_sha256_16"]

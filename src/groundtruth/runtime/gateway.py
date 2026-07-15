@@ -82,6 +82,7 @@ from groundtruth.runtime.evidence_envelope import (
     VERIFIED,
     WARNING,
     EvidenceEnvelope,
+    render_bytes as _envelope_candidate_bytes,
 )
 from groundtruth.runtime.evidence_envelope import validate as _validate_envelope
 from groundtruth.runtime.feature_lineage import build_lineage
@@ -262,6 +263,9 @@ class GatewayState:
     # :func:`route_delivery` under ``GT_EDIT_OVERLAY`` to drop a base-read fact about an
     # edited file. Empty (default) -> byte-identical, the overlay is a no-op.
     episode_overlay: dict = field(default_factory=dict)
+    # Optional host-side instrumentation sink. The gateway owns these decisions,
+    # while the live seam owns durable ledger I/O. None is an exact no-op.
+    control_recorder: object | None = None
 
     @property
     def ledger(self) -> dict[str, dict[str, object]]:
@@ -390,6 +394,48 @@ def _xsession_on() -> bool:
     )
 
 
+def _record_control(
+    state: GatewayState,
+    feature_id: str,
+    decision_site: str,
+    decision: str,
+    *,
+    candidate_bytes: str = "",
+    fact_class: str | None = None,
+    candidate_id: str = "",
+    reason: str = "",
+) -> None:
+    """Forward one terminal control decision to the seam's typed metadata sink."""
+    recorder = getattr(state, "control_recorder", None)
+    if not callable(recorder):
+        return
+    try:
+        extra = {"candidate_bytes": candidate_bytes, "reason": reason}
+        if fact_class is not None:
+            extra["fact_class"] = fact_class
+        if candidate_id:
+            extra["candidate_id"] = candidate_id
+        recorder(feature_id, decision_site, decision, **extra)
+    except Exception:  # instrumentation never changes gateway routing
+        pass
+
+
+def _candidate_control_identity(env: EvidenceEnvelope) -> tuple[str, str]:
+    """Return the gateway candidate's exact canonical bytes and concrete FACT class.
+
+    This is the post-control envelope commitment, before the mini-seam chooses a
+    tagged/native presentation.  It is deterministic and never guesses a class:
+    an unregistered envelope has no mediator identity and is rejected upstream.
+    """
+    registration = _fr_registration_for(env.evidence_type)
+    if registration is None:
+        raise ValueError(f"unregistered evidence type: {env.evidence_type!r}")
+    return (
+        _envelope_candidate_bytes(env).decode("utf-8", "strict"),
+        registration.fact_class,
+    )
+
+
 # SM-9c FIRST SLICE — the learned policy acts on exactly ONE fact class. Bounding the
 # effect to ``caller_contract`` keeps the first cross-session slice small + auditable; the
 # remaining classes are OWED (they pass through untouched, in their original order).
@@ -433,8 +479,27 @@ def _apply_xsession_policy(
         return out
     kept: list[EvidenceEnvelope] = []
     for a in out:
-        canon = _xm_canonical(a.evidence_type)
-        if canon in _XSESSION_POLICY_CLASSES and _xm_inert(policy, canon):
+        try:
+            canon = _xm_canonical(a.evidence_type)
+            inert = bool(
+                canon in _XSESSION_POLICY_CLASSES and _xm_inert(policy, canon)
+            )
+        except Exception as exc:
+            _record_control(
+                state, "GT_XSESSION_MEMORY",
+                "gateway.xsession_policy.inert_suppression", "ERROR",
+                reason=f"policy_error:{type(exc).__name__}",
+            )
+            kept.append(a)
+            continue
+        if canon in _XSESSION_POLICY_CLASSES:
+            _record_control(
+                state, "GT_XSESSION_MEMORY",
+                "gateway.xsession_policy.inert_suppression",
+                "APPLIED" if inert else "NO_EFFECT",
+                reason="inert_class" if inert else "class_not_inert",
+            )
+        if inert:
             continue  # LEARNED SUPPRESS: delivered here before, never once consumed
         kept.append(a)
     # LEARNED RANK-UP: stable sort (Python sort is stable) by descending policy rank; a
@@ -502,10 +567,38 @@ def _apply_xsession_rankup(
         if boost > 0:
             na = dict(a.native_args or {})
             na["_xsession_boost"] = int(boost)  # reserved arbitration side-car key
-            stamped.append(replace(a, native_args=na))
+            boosted = replace(a, native_args=na)
+            stamped.append(boosted)
             changed = True
+            try:
+                candidate_bytes, fact_class = _candidate_control_identity(boosted)
+                _record_control(
+                    state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
+                    "APPLIED", candidate_bytes=candidate_bytes,
+                    fact_class=fact_class, candidate_id=boosted.dedup_key,
+                    reason=f"ladder_boost:{int(boost)}",
+                )
+            except Exception as exc:
+                _record_control(
+                    state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
+                    "ERROR", reason=f"identity_error:{type(exc).__name__}",
+                )
         else:
             stamped.append(a)
+            if canon in _XSESSION_POLICY_CLASSES:
+                try:
+                    candidate_bytes, fact_class = _candidate_control_identity(a)
+                    _record_control(
+                        state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
+                        "NO_EFFECT", candidate_bytes=candidate_bytes,
+                        fact_class=fact_class, candidate_id=a.dedup_key,
+                        reason="no_ladder_boost",
+                    )
+                except Exception as exc:
+                    _record_control(
+                        state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
+                        "ERROR", reason=f"identity_error:{type(exc).__name__}",
+                    )
     return stamped if changed else out  # SAME object when nothing stamped (byte-identical)
 
 
@@ -2108,25 +2201,61 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
     # its own edit-derived fact (patch_delta) is fresh, not a stale base read. Gated by
     # GT_EDIT_OVERLAY + a non-empty overlay ⇒ byte-identical when off/empty.
     if _episode_overlay_on():
-        overlay = getattr(state, "episode_overlay", None)
-        if overlay:
-            tf = _norm_fp(env.target or "")
-            entry = overlay.get(tf) if tf else None
-            if isinstance(entry, dict) and entry.get("changed"):
-                edited_now = {_norm_fp(f) for f in (event.changed_files or ())}
-                if tf not in edited_now:
-                    return ROUTE_STALE
+        try:
+            overlay = getattr(state, "episode_overlay", None)
+            stale = False
+            if overlay:
+                tf = _norm_fp(env.target or "")
+                entry = overlay.get(tf) if tf else None
+                if isinstance(entry, dict) and entry.get("changed"):
+                    edited_now = {_norm_fp(f) for f in (event.changed_files or ())}
+                    stale = tf not in edited_now
+            _record_control(
+                state, "GT_EDIT_OVERLAY",
+                "gateway.route_delivery.episode_overlay",
+                "APPLIED" if stale else "NO_EFFECT",
+                reason="stale_base_fact" if stale else "fresh_or_untracked_target",
+            )
+            if stale:
+                return ROUTE_STALE
+        except Exception as exc:
+            _record_control(
+                state, "GT_EDIT_OVERLAY",
+                "gateway.route_delivery.episode_overlay", "ERROR",
+                reason=f"overlay_error:{type(exc).__name__}",
+            )
     cur = _event_ordinal(event.kind)
     want: int | None = None
-    if _registry_enforce():
+    registry_on = _registry_enforce()
+    registry_error = False
+    if registry_on:
         # An observation-REACTIVE fact (trace_frame) is produced from and delivered at the
         # current observation — on-time by construction, so its boundary is the firing event
         # itself (only freshness above gates it). A fixed-lifecycle fact derives ``want`` from
         # its DECLARED registry ``deliver_by`` (not the self-stamp), so a genuinely wrong-event
         # fact DEFERs/EXPIREs.
-        want = cur if _fr_is_reactive(env.evidence_type) else _registry_want_ordinal(env.evidence_type)
+        try:
+            want = (
+                cur if _fr_is_reactive(env.evidence_type)
+                else _registry_want_ordinal(env.evidence_type)
+            )
+        except Exception as exc:
+            registry_error = True
+            _record_control(
+                state, "GT_REGISTRY_ENFORCE",
+                "gateway.route_delivery.registry_timing", "ERROR",
+                reason=f"registry_timing_error:{type(exc).__name__}",
+            )
     if want is None:
         want = _event_ordinal(env.preferred_event)  # OFF / unregistered -> byte-identical
+    if registry_on and not registry_error:
+        _record_control(
+            state, "GT_REGISTRY_ENFORCE",
+            "gateway.route_delivery.registry_timing",
+            "APPLIED" if cur != want else "NO_EFFECT",
+            reason=("too_early" if cur < want else
+                    "too_late" if cur > want else "declared_boundary_match"),
+        )
     if cur < want:
         return ROUTE_DEFER
     if cur > want:
@@ -2175,15 +2304,22 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     outcome = classify_outcome(event, state)
 
     additions: list[EvidenceEnvelope] = []
+    edit_bridge_candidates: list[EvidenceEnvelope] = []
     # kind-dispatched producers (independent of the search-outcome lattice)
     if event.kind == KIND_EDIT:
         if _patch_delta_producer_on():  # kill-switch; see _patch_delta_producer_on docstring
-            additions += _produce_patch_delta(event, state)
+            produced = _produce_patch_delta(event, state)
+            additions += produced
+            if event.edit_before_after:
+                edit_bridge_candidates += produced
         # SM-2b: the CROSS-LANGUAGE caller-contract break — the graph-based replacement for
         # the legacy l3.contract/l3b.evidence caller-break patch_delta (ast-only) cannot
         # produce on a non-Python edit. Both are caller-break families; arbitration keeps the
         # per-turn dose at <=1 (signature_mismatch out-ranks caller_break on a Python edit).
-        additions += _produce_caller_contract(event, state)
+        produced = _produce_caller_contract(event, state)
+        additions += produced
+        if event.edit_before_after:
+            edit_bridge_candidates += produced
     elif event.kind == KIND_TEST:
         additions += _produce_covering(event, state)
     elif event.kind == KIND_SEARCH and _loc_reslot_on():
@@ -2249,11 +2385,30 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
         # flag derives ``want`` from the registry ``deliver_by`` instead of the self-stamp.)
         # OFF ⇒ skipped ⇒ byte-identical. A registered class always has a renderer, so this
         # never rejects a real fact — it guards a future renderer-less / mis-declared class.
-        if _registry_enforce() and (
-            _fr_registration_for(a.evidence_type) is None
-            or not _fr_required_renderer(a.evidence_type)
-        ):
-            continue
+        if _registry_enforce():
+            try:
+                renderer_missing = (
+                    _fr_registration_for(a.evidence_type) is None
+                    or not _fr_required_renderer(a.evidence_type)
+                )
+                _record_control(
+                    state, "GT_REGISTRY_ENFORCE",
+                    "gateway.augment.renderer_enforcement",
+                    "APPLIED" if renderer_missing else "NO_EFFECT",
+                    reason=("renderer_missing" if renderer_missing
+                            else "renderer_available"),
+                )
+            except Exception as exc:
+                # Existing enforcement is fail-closed; preserve that behavior,
+                # but distinguish the failed measurement from a valid drop.
+                renderer_missing = True
+                _record_control(
+                    state, "GT_REGISTRY_ENFORCE",
+                    "gateway.augment.renderer_enforcement", "ERROR",
+                    reason=f"registry_renderer_error:{type(exc).__name__}",
+                )
+            if renderer_missing:
+                continue
         if _is_leaky(a.target):
             continue
         if _validate_envelope(a):
@@ -2274,4 +2429,37 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     #   * _apply_xsession_rankup — WINNER PROMOTION (GT_XSESSION_RANKUP): stamp a ladder
     #     boost onto a consumed class so it can WIN the adapter's <=1 dose. Runs LAST, on the
     #     already-eligible list, so it re-ranks (never bypasses timing/freshness/leak/dedup).
-    return _apply_xsession_rankup(_apply_xsession_policy(out, state), state)
+    final = _apply_xsession_rankup(_apply_xsession_policy(out, state), state)
+    final_keys = {candidate.dedup_key for candidate in final}
+    for candidate in final:
+        try:
+            candidate_bytes, fact_class = _candidate_control_identity(candidate)
+            _record_control(
+                state, "GT_GATEWAY", "gateway.augment.candidate_admission", "APPLIED",
+                candidate_bytes=candidate_bytes, fact_class=fact_class,
+                candidate_id=candidate.dedup_key, reason="candidate_admitted",
+            )
+        except Exception as exc:
+            _record_control(
+                state, "GT_GATEWAY", "gateway.augment.candidate_admission", "ERROR",
+                reason=f"identity_error:{type(exc).__name__}",
+            )
+    for candidate in edit_bridge_candidates:
+        try:
+            candidate_bytes, fact_class = _candidate_control_identity(candidate)
+            admitted = candidate.dedup_key in final_keys
+            _record_control(
+                state, "GT_GATEWAY_EDIT_BRIDGES",
+                "gateway.augment.edit_bridge_candidate",
+                "APPLIED" if admitted else "SUPPRESSED",
+                candidate_bytes=candidate_bytes if admitted else "",
+                fact_class=fact_class, candidate_id=candidate.dedup_key,
+                reason="candidate_admitted" if admitted else "candidate_filtered",
+            )
+        except Exception as exc:
+            _record_control(
+                state, "GT_GATEWAY_EDIT_BRIDGES",
+                "gateway.augment.edit_bridge_candidate", "ERROR",
+                reason=f"identity_error:{type(exc).__name__}",
+            )
+    return final

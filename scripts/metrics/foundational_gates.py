@@ -1003,8 +1003,8 @@ def gate_embedder_consumption(db: str, repo: str, issue_text: str) -> bool:
 
 def _persist_brief_for_emit(result_obj, issue_text: str, graph: str) -> None:
     """A1: persist the gate's generated V1RBriefResult to GT_BRIEF_CACHE_DIR (the proof
-    out dir) so emit_brief in gt_run_proof REUSES it instead of regenerating — one brief
-    per proof, gate-certified == delivered.
+    out dir) so emit_brief keeps it as the delivery authority. Emit independently
+    regenerates only to prove canonical identity and never replaces these bytes.
 
     The identity MUST match what emit_brief's get_or_generate computes, else the cache
     ALWAYS misses (the A1 dead-cache bug): persist with request_identity(issue_text, graph)
@@ -1083,8 +1083,8 @@ def _load_brief_metrics(db: str, repo: str, issue_text: str):
             r = fn(issue_text=issue_text, repo_root=repo, graph_db=db)
             ex = _extract(r)
             if ex is not None:
-                # A1 (2026-06-13): persist THIS generated brief so emit_brief reuses it
-                # (single generation per proof — gate-certified == delivered by sha). Key it
+                # Persist THIS generated brief as the delivery authority. Emit performs
+                # one independent execution only for canonical identity proof. Key it
                 # on the SAME (issue_text, graph) pair emit_brief uses so the cache HITS.
                 _persist_brief_for_emit(r, issue_text, db)
                 return ex

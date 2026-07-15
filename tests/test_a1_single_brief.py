@@ -1,12 +1,13 @@
-"""A1 (Priority B) — the substrate proof generates the v1r brief ONCE.
+"""A1 cache identity plus independent acquisition determinism proof.
 
 gate3b (foundational_gates, the earlier subprocess) generates + PERSISTS its
 V1RBriefResult to <out_dir>/brief_result.json; emit_brief (gt_run_proof, later)
 LOADS it instead of regenerating. Locks:
   1. brief_cache.get_or_generate: generate once, reuse on the second call, stable sha.
   2. fail-safe: a cache miss regenerates (never blocks brief.txt).
-  3. end-to-end: gate persist -> emit_brief reuse (generator NOT called twice),
+  3. end-to-end: gate persist -> emit preserves the gate bytes,
      brief.txt == the gate's brief, gate sha == delivered sha.
+  4. emit executes one fresh same-input acquisition and persists equal identities.
 """
 from __future__ import annotations
 
@@ -34,6 +35,12 @@ class _FakeResult:
         self.rendered_candidate_count = 5
         self.k_sem_top = 2
         self.sem_components = [0.1, 0.2]
+        self.localization_proof = [{
+            "rank": 1,
+            "path": "pkg/loader.py",
+            "components": {"lex": 0.8},
+            "acquisition_sources": {},
+        }]
 
 
 def test_brief_cache_single_generation_and_stable_sha():
@@ -90,13 +97,22 @@ def test_gate_persist_then_emit_reuses(tmp_path, monkeypatch):
 
     def gen(issue_text, repo_root, graph_db, bug_id):
         calls["n"] += 1
-        return _FakeResult("REGENERATED — SHOULD NOT HAPPEN")
+        return _FakeResult("THE GATE BRIEF")
 
     ok, detail = gp.emit_brief(str(tmp_path), "issue text", "/work", "g.db", generator=gen)
     assert ok, detail
-    assert calls["n"] == 0, "emit_brief regenerated instead of reusing the gate brief"
+    assert calls["n"] == 1, "emit_brief did not execute an independent witness run"
     assert (tmp_path / "brief.txt").read_text(encoding="utf-8").strip() == "THE GATE BRIEF"
     assert "reused_gate_brief=True" in detail
+    assert "determinism_matched=True" in detail
+    from groundtruth.runtime.brief_cache import load_cached_brief
+    persisted = load_cached_brief(str(tmp_path))
+    assert persisted is not None
+    witness = persisted["metrics"]["localization_proof"][0][
+        "acquisition_sources"
+    ]["determinism"]
+    assert witness["runs"] == 2
+    assert len(set(witness["canonical_sha256"])) == 1
 
 
 def test_gate_persist_identity_mismatch_forces_regeneration(tmp_path, monkeypatch):
@@ -120,9 +136,66 @@ def test_gate_persist_identity_mismatch_forces_regeneration(tmp_path, monkeypatc
 
     ok, detail = gp.emit_brief(str(tmp_path), "issue text", "/work", "g.db", generator=gen)
     assert ok, detail
-    assert calls["n"] == 1, "emit_brief served a stale different-issue brief (identity guard dead)"
+    assert calls["n"] == 2, "emit_brief did not generate and independently verify the fresh brief"
     assert (tmp_path / "brief.txt").read_text(encoding="utf-8").strip() == "FRESH::issue text"
     assert "reused_gate_brief=False" in detail
+
+
+def test_gate_cache_runs_independent_witness_and_fails_closed_on_mismatch(
+    tmp_path, monkeypatch,
+):
+    fg = _load("fg_a1_det_red", "scripts/metrics/foundational_gates.py")
+    gp = _load("gp_a1_det_red", "scripts/swebench/gt_run_proof.py")
+    monkeypatch.setenv("GT_BRIEF_CACHE_DIR", str(tmp_path))
+    fg._persist_brief_for_emit(_FakeResult("FIRST"), "issue text", "g.db")
+    calls = {"n": 0}
+
+    def gen(issue_text, repo_root, graph_db, bug_id):
+        calls["n"] += 1
+        return _FakeResult("SECOND")
+
+    ok, detail = gp.emit_brief(
+        str(tmp_path), "issue text", "/work", "g.db", generator=gen
+    )
+
+    assert calls["n"] == 1
+    assert ok is False
+    assert "DETERMINISM_MISMATCH" in detail
+    assert not (tmp_path / "brief.txt").exists()
+
+
+def test_independent_witness_cannot_replace_primary_sidecars(tmp_path, monkeypatch):
+    """Execution 2 is identity evidence only; none of its support artifacts may ship."""
+    fg = _load("fg_a1_sidecar", "scripts/metrics/foundational_gates.py")
+    gp = _load("gp_a1_sidecar", "scripts/swebench/gt_run_proof.py")
+    monkeypatch.setenv("GT_BRIEF_CACHE_DIR", str(tmp_path))
+    fg._persist_brief_for_emit(_FakeResult("PRIMARY BRIEF"), "issue text", "g.db")
+
+    sidecar_src = tmp_path / "sidecar-src"
+    sidecar_src.mkdir()
+    sidecar = sidecar_src / "gt_issue_anchors.json"
+    primary_bytes = b'{"authority":"primary"}'
+    second_bytes = b'{"authority":"execution-2"}'
+    sidecar.write_bytes(primary_bytes)
+
+    mirror = gp._mirror_cert_sidecars
+    monkeypatch.setattr(
+        gp,
+        "_mirror_cert_sidecars",
+        lambda out_dir: mirror(out_dir, src_dir=str(sidecar_src)),
+    )
+
+    def gen(issue_text, repo_root, graph_db, bug_id):
+        sidecar.write_bytes(second_bytes)
+        return _FakeResult("PRIMARY BRIEF")
+
+    ok, detail = gp.emit_brief(
+        str(tmp_path), "issue text", "/work", "g.db", generator=gen
+    )
+
+    assert ok, detail
+    assert sidecar.read_bytes() == second_bytes, "test did not create divergent execution-2 bytes"
+    assert (tmp_path / "gt_issue_anchors.json").read_bytes() == primary_bytes
 
 
 def test_emit_brief_generates_and_writes_when_no_cache(tmp_path):
@@ -136,9 +209,55 @@ def test_emit_brief_generates_and_writes_when_no_cache(tmp_path):
 
     ok, detail = gp.emit_brief(str(tmp_path), "issue", "/work", "g.db", generator=gen)
     assert ok, detail
-    assert calls["n"] == 1
+    assert calls["n"] == 2
     assert (tmp_path / "brief.txt").read_text(encoding="utf-8").strip() == "FRESH BRIEF"
     assert "reused_gate_brief=False" in detail
+
+
+def test_emit_brief_accepts_deterministic_non_candidate_brief(tmp_path):
+    gp = _load("gp_a1_no_candidates", "scripts/swebench/gt_run_proof.py")
+    calls = {"n": 0}
+
+    def gen(issue_text, repo_root, graph_db, bug_id):
+        calls["n"] += 1
+        result = _FakeResult("CREATE A NEW FILE")
+        result.localization_proof = []
+        return result
+
+    ok, detail = gp.emit_brief(
+        str(tmp_path), "new-file issue", "/work", "g.db", generator=gen
+    )
+
+    assert ok, detail
+    assert calls["n"] == 2
+    assert (tmp_path / "brief.txt").read_text("utf-8") == "CREATE A NEW FILE"
+    assert "determinism_matched=True" in detail
+
+
+def test_emit_hashes_graph_snapshot_only_at_capture_and_final_validation(
+    tmp_path, monkeypatch,
+):
+    gp = _load("gp_a1_identity_handoff", "scripts/swebench/gt_run_proof.py")
+    from groundtruth.runtime import brief_cache
+
+    graph = tmp_path / "graph.db"
+    graph.write_bytes(b"graph state")
+    calls = {"n": 0}
+    real_hash = brief_cache._graph_state_sha256
+
+    def counted_hash(path):
+        calls["n"] += 1
+        return real_hash(path)
+
+    monkeypatch.setattr(brief_cache, "_graph_state_sha256", counted_hash)
+
+    ok, detail = gp.emit_brief(
+        str(tmp_path), "issue", "/work", str(graph),
+        generator=lambda **_: _FakeResult("STABLE BRIEF"),
+    )
+
+    assert ok, detail
+    assert calls["n"] == 2
 
 
 def test_emit_brief_empty_fails_closed(tmp_path):
