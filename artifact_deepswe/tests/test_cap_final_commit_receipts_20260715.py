@@ -82,22 +82,17 @@ def test_lane_delivery_lineage_is_registered_and_never_inferred_from_arbiter(mon
     assert "lineage_schema" not in legacy
 
 
-def test_coherence_delivery_carries_exact_recovery_lineage(monkeypatch):
+def test_coherence_delivery_retains_owner_without_fabricated_fact_lineage(
+    monkeypatch,
+):
     monkeypatch.setenv("GT_SS_COHERENCE_V2", "1")
     extra = g._lane_delivery_extra(
         "detect.coherence", "two verified writes", "src/widget.py", g.Event.POST_EDIT)
     assert extra["profile_member"] == "GT_SS_COHERENCE_V2"
     assert extra["candidate_id"]
-    assert extra["fact_class"] == "recovery"
-    assert extra["runtime_producer_id"] == "ss_coherence_v2"
-    assert extra["registered_producer_id"] == "governor"
-    assert extra["producer_registration_match"] is True
-    assert extra["evidence_type"] == "coherence_collapse"
-    assert extra["required_event"] == "edit_result"
-    assert extra["actual_event"] == "edit_result"
-    assert extra["feature_ids"] == [
-        {"category": "FACT", "feature_id": "recovery", "role": "fact"}
-    ]
+    assert "fact_class" not in extra
+    assert "lineage_schema" not in extra
+    assert "feature_ids" not in extra
 
 
 def test_reactive_lane_kinds_carry_only_exact_supported_lineage(monkeypatch):
