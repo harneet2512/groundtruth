@@ -7249,6 +7249,30 @@ def _v2_obligation_truth():
     )
 
 
+def _v2_obligation_result_ready() -> bool:
+    """Whether this observation produced clause-scoped execution evidence.
+
+    A custom executable probe is a semantic verification-result boundary even
+    when its shell carrier is not a named test runner.  Relevance comes from the
+    same exact subject-bound truth projection used by the renderer; an unrelated
+    successful command therefore cannot open the obligation delivery gate.
+    """
+    truth = _v2_obligation_truth()
+    if truth is None:
+        return False
+    return any(
+        (
+            row.exercise is not None
+            and int(row.exercise.turn) == int(_action_count)
+        )
+        or (
+            row.proof is not None
+            and int(row.proof.turn) == int(_action_count)
+        )
+        for row in truth
+    )
+
+
 def _v2_clause_fresh_behavioral_proof(view) -> "dict | None":
     """Leak-safe identity for checked clause proof newer than its last edit."""
     try:
@@ -16140,7 +16164,10 @@ def _augment_output(action, out) -> None:
                 _legacy_oblig_ready = (
                     _oracle_nonedit_streak >= 3 or _budget_now > 0.90
                 )
-                _v2_oblig_ready = _event == Event.TEST_RESULT
+                _v2_oblig_ready = (
+                    _event == Event.TEST_RESULT
+                    or _v2_obligation_result_ready()
+                )
                 _oblig_gate = bool(_oracle_edited_rels) and (
                     _v2_oblig_ready
                     if _v2_obligations_active else _legacy_oblig_ready

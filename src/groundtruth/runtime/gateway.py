@@ -89,6 +89,7 @@ from groundtruth.runtime.feature_lineage import build_lineage
 from groundtruth.runtime.fact_registry import (
     EVENTS as fr_EVENTS,
 )
+from groundtruth.runtime.fact_registry import EVENT_FAILURE_OBS
 from groundtruth.runtime.fact_registry import (
     FRESHNESS_SURFACES as fr_FRESHNESS_SURFACES,
 )
@@ -1473,7 +1474,8 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
             producer: str, symbol: str = "",
             confidence: float | None = None,
             native_args: "dict | None" = None,
-            cap_feature_ids: "tuple[str, ...]" = ()) -> EvidenceEnvelope:
+            cap_feature_ids: "tuple[str, ...]" = (),
+            actual_event: str = "") -> EvidenceEnvelope:
     """Build the CANONICAL EvidenceEnvelope for one fact. Leak filtering happens
     HERE, before the build, so the derived dedup key hashes exactly the shipped
     payload+provenance (the F1 content discipline). The symbol rides ``fact_id``.
@@ -1493,7 +1495,7 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
     lineage = build_lineage(
         runtime_producer_id=producer,
         evidence_type=fact_kind,
-        actual_event=event.kind or EVENT_STEP0,
+        actual_event=actual_event or event.kind or EVENT_STEP0,
         cap_feature_ids=cap_feature_ids,
     )
     return EvidenceEnvelope.build(
@@ -1822,7 +1824,7 @@ def _produce_trace(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelo
         return [_mk_add(state, event, fact_kind="trace_frame", target=rel,
                         body_lines=[f"deepest in-repo frame: {loc}"],
                         evidence=[(rel, fr.line)], tier=WARNING, producer="trace",
-                        symbol=fr.func or rel)]
+                        symbol=fr.func or rel, actual_event=EVENT_FAILURE_OBS)]
     return []
 
 
@@ -2164,6 +2166,21 @@ def _registry_want_ordinal(evidence_type: str) -> int | None:
     return _FINE_EVENT_TO_COARSE_ORDINAL.get(ev, 0)
 
 
+def _reactive_semantic_event(
+        env: EvidenceEnvelope, event: ToolEvent, state: GatewayState) -> str | None:
+    """Return the classifier-proven fine event for a reactive candidate.
+
+    Carrier kinds such as ``test`` and ``other`` are not evidence that a failure
+    observation occurred.  The current reactive producer is the trace-frame
+    localizer, whose semantic boundary exists only when the raw observation has
+    a permitted in-repository stack frame.
+    """
+    evidence_base = (env.evidence_type or "").split(":", 1)[0]
+    if evidence_base == "trace_frame" and _has_repo_trace(event, state):
+        return EVENT_FAILURE_OBS
+    return None
+
+
 def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState) -> str:
     """B-12: enforce the envelope's timing + freshness as REAL routing. Returns one of
     :data:`ROUTE_DELIVER` / :data:`ROUTE_DEFER` / :data:`ROUTE_EXPIRED_LATE` /
@@ -2229,16 +2246,23 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
     registry_on = _registry_enforce()
     registry_error = False
     if registry_on:
-        # An observation-REACTIVE fact (trace_frame) is produced from and delivered at the
-        # current observation — on-time by construction, so its boundary is the firing event
-        # itself (only freshness above gates it). A fixed-lifecycle fact derives ``want`` from
-        # its DECLARED registry ``deliver_by`` (not the self-stamp), so a genuinely wrong-event
-        # fact DEFERs/EXPIREs.
+        # Reactive means carrier-independent, not self-authorizing. The raw
+        # observation must prove the registry's fine semantic event. Fixed
+        # lifecycle facts continue to derive ``want`` from their declaration.
         try:
-            want = (
-                cur if _fr_is_reactive(env.evidence_type)
-                else _registry_want_ordinal(env.evidence_type)
-            )
+            if _fr_is_reactive(env.evidence_type):
+                required = _fr_required_event(env.evidence_type)
+                actual = _reactive_semantic_event(env, event, state)
+                if actual is None or actual != required:
+                    _record_control(
+                        state, "GT_REGISTRY_ENFORCE",
+                        "gateway.route_delivery.registry_timing", "APPLIED",
+                        reason="reactive_semantic_event_unproven",
+                    )
+                    return ROUTE_DEFER
+                want = cur
+            else:
+                want = _registry_want_ordinal(env.evidence_type)
         except Exception as exc:
             registry_error = True
             _record_control(

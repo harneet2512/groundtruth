@@ -136,16 +136,17 @@ def test_route_registry_want_expires_late_event_under_enforcement(monkeypatch):
     assert gw.route_delivery(env, ev, st) == gw.ROUTE_EXPIRED_LATE  # on: 5 > 1
 
 
-def test_reactive_trace_frame_is_on_time_at_any_observation(monkeypatch):
-    """A reactive trace_frame is on-time at WHATEVER observation carries it (test/view/edit/
-    other), while a fixed-lifecycle def_ref_partition on those same non-search events EXPIRES.
-    MUTATION-2 restated: empty _REACTIVE_EVIDENCE_TYPES -> trace_frame pins to failure_obs(4)
-    and a trace on a view/other event DEFER/EXPIREs -> this bites."""
+def test_reactive_trace_frame_requires_semantic_failure_observation(monkeypatch):
+    """Carrier kind is irrelevant, but classifier-proven traceback content is mandatory."""
     monkeypatch.setenv("GT_REGISTRY_ENFORCE", "1")
     st = gw.GatewayState()
+    monkeypatch.setattr(gw, "_has_repo_trace", lambda _event, _state: True)
     for kind in ("test", "view", "edit", "other", "submit"):
         env = _env("trace_frame", preferred_event="test")
         assert gw.route_delivery(env, gw.ToolEvent(kind=kind), st) == gw.ROUTE_DELIVER, kind
+    monkeypatch.setattr(gw, "_has_repo_trace", lambda _event, _state: False)
+    forged = _env("trace_frame", preferred_event="test")
+    assert gw.route_delivery(forged, gw.ToolEvent(kind="other"), st) != gw.ROUTE_DELIVER
     # contrast: a FIXED-boundary class is NOT reactive -> wrong-event routing bites.
     env_fixed = _env("def_ref_partition", preferred_event="search")
     assert gw.route_delivery(env_fixed, gw.ToolEvent(kind="view"), st) == gw.ROUTE_EXPIRED_LATE
@@ -175,6 +176,8 @@ _RECONCILIATION = [
 def test_reconciliation_every_producer_passes_enforcement(monkeypatch, kind, etype, fine_event):
     monkeypatch.setenv("GT_REGISTRY_ENFORCE", "1")
     assert fr.required_event(etype) == fine_event
+    if fr.is_reactive(etype):
+        monkeypatch.setattr(gw, "_has_repo_trace", lambda _event, _state: True)
     st = gw.GatewayState()
     env = _env(etype, preferred_event=kind)
     assert gw.route_delivery(env, gw.ToolEvent(kind=kind), st) == gw.ROUTE_DELIVER
@@ -282,7 +285,11 @@ def test_trace_frame_augment_delivers_on_test_under_enforcement(tmp_path, monkey
     )
     ev = gw.ToolEvent(kind="test", command="pytest -q", output=out, action_index=1)
     envs = gw.augment(ev, gw.GatewayState(graph_db=db, repo_root=str(tmp_path)))
-    assert any(e.evidence_type == "trace_frame" and "svc/watch.py" in e.target for e in envs)
+    trace = next(e for e in envs if e.evidence_type == "trace_frame")
+    assert "svc/watch.py" in trace.target
+    assert trace.lineage is not None
+    assert trace.lineage.required_event == "failure_obs"
+    assert trace.lineage.actual_event == "failure_obs"
 
 
 # =========================================================================== #

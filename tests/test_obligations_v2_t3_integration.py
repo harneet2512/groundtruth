@@ -55,7 +55,8 @@ def _write_artifact(tmp_path: Path) -> None:
 
 
 def _write_single_clause_artifact(
-    tmp_path: Path, verbatim: str, *, clause_id: str = "clause-1"
+    tmp_path: Path, verbatim: str, *, clause_id: str = "clause-1",
+    subject_symbols: tuple[str, ...] = (),
 ) -> None:
     payload = {
         "obligations_version": 2,
@@ -64,7 +65,7 @@ def _write_single_clause_artifact(
         "clauses": [{
             "clause_id": clause_id,
             "verbatim_text": verbatim,
-            "subject_symbols": [],
+            "subject_symbols": list(subject_symbols),
             "symbols": [],
         }],
     }
@@ -320,6 +321,41 @@ print('right:', repr(second))
     )
 
     assert m._v2_clause_fresh_behavioral_proof(view) is not None
+
+
+def test_t3_clause_relevant_custom_result_is_a_semantic_verify_boundary(gmp):
+    m, tmp = gmp
+    _write_single_clause_artifact(
+        tmp, "`render_value` must preserve grouped values",
+        subject_symbols=("render_value",),
+    )
+    m._action_count = 12
+    m._ss_record_behavioral_proof(
+        command="python3 -c \"print(render_value('grouped'))\"",
+        output="grouped",
+        returncode=0,
+    )
+
+    assert m._v2_obligation_result_ready() is True
+    candidate = m._unexercised_clause_candidate()
+    assert candidate is not None
+    assert "exercised, result unproven" in candidate[1]
+
+
+def test_t3_unrelated_success_is_not_a_semantic_verify_boundary(gmp):
+    m, tmp = gmp
+    _write_single_clause_artifact(
+        tmp, "`render_value` must preserve grouped values",
+        subject_symbols=("render_value",),
+    )
+    m._action_count = 12
+    m._ss_record_behavioral_proof(
+        command="python3 -c \"print(6 * 7)\"",
+        output="42",
+        returncode=0,
+    )
+
+    assert m._v2_obligation_result_ready() is False
 
 
 @pytest.mark.parametrize(
