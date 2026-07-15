@@ -845,13 +845,29 @@ def scenario_s1(driver) -> ScenarioResult:
     ]
     built = _has_effect(on_supp, off_supp) or _has_effect(on_surv, driver.run(surv_events, {flag: "0"}))
 
-    grep_supp_delta = on_supp.observations[-1].delta if on_supp.observations else ""
-    grep_surv_delta = on_surv.observations[-1].delta if on_surv.observations else ""
-    suppressed_row = bool(on_supp.rows_with_reason("ss_step_behind"))
-    core_ok = (grep_supp_delta == "" and suppressed_row and grep_surv_delta != "")
-    detail = (f"suppressed-grep-delta={'empty' if grep_supp_delta=='' else 'DELIVERED'}; "
-              f"ss_step_behind_row={suppressed_row}; survive-grep-delta="
-              f"{'DELIVERED' if grep_surv_delta else 'empty'}")
+    # A correct novelty drop removes the TARGET fact, not the whole observation dose.
+    # Under the global arbiter an unrelated still-novel fallback may fill the slot, so a
+    # raw final-delta assertion falsely rejects correct suppression. Join the exact
+    # def/ref target across its suppression and delivery rows by canonical kind + path.
+    def _identity(row):
+        layer = str(row.get("layer") or "")
+        kind = layer.split(".", 1)[-1] if "." in layer else layer
+        path = str(row.get("file_path") or "").replace("\\", "/").lower()
+        return kind, path
+
+    target_suppressed = {
+        _identity(row) for row in on_supp.rows_with_reason("ss_step_behind")
+        if _identity(row)[0] == "def_ref_partition"
+    }
+    on_delivered = {_identity(row) for row in on_supp.delivered_rows()}
+    survive_delivered = {_identity(row) for row in on_surv.delivered_rows()}
+    target_delivered_on = bool(target_suppressed & on_delivered)
+    target_survived = bool(target_suppressed & survive_delivered)
+    core_ok = bool(target_suppressed) and not target_delivered_on and target_survived
+    detail = (f"target_step_behind={bool(target_suppressed)}; "
+              f"target_delivered_on={target_delivered_on}; "
+              f"target_survived={target_survived}; "
+              f"suppressed_observation_deliveries={len(on_supp.delivered_rows())}")
     return _gate("S1", "STEP-BEHIND", flag, subs, core_ok, detail, built)
 
 

@@ -305,7 +305,7 @@ def _fake_seam(mutations=frozenset()):
                         want_suppress = ((not step_behind) if "invert_suppression" in mut else step_behind)
                         do_suppress = ss_on and want_suppress
                         if do_suppress:
-                            ledger.append(dict(layer="gateway", event_type="", file_path=deffiles[0],
+                            ledger.append(dict(layer="gateway.def_ref_partition", event_type="", file_path=deffiles[0],
                                                outcome="suppressed_hidden_only", reason="ss_step_behind",
                                                chars_delivered=0, iteration=it))
                         else:
@@ -314,7 +314,7 @@ def _fake_seam(mutations=frozenset()):
                             if "leak_test_token" in mut:
                                 block += "\ntests/test_pkg.py:6: test_run"   # a model-facing leak
                             after = before + block
-                            ledger.append(dict(layer="gateway", event_type="", file_path=deffiles[0],
+                            ledger.append(dict(layer="gateway.def_ref_partition", event_type="", file_path=deffiles[0],
                                                outcome="delivered", reason="",
                                                chars_delivered=len(block), iteration=it))
                             if "double_dose" in mut:               # a SECOND payload on one observation
@@ -388,6 +388,79 @@ def test_mutation_invert_suppression_bites_s1():
     (inverted) violates S1 — the gate must FAIL it, not pass or skip."""
     r = G.scenario_s1(_driver({"invert_suppression"}))
     assert r.verdict == G.FAIL, f"gate FAILED to bite inverted step-behind: {r.verdict} {r.detail}"
+
+
+def test_s1_accepts_unrelated_fallback_after_target_fact_is_step_behind():
+    """A correct novelty drop removes the target fact, not the whole observation dose.
+
+    The global arbiter may select a different, still-novel fact after the step-behind
+    def/ref partition is removed. S1 must join the suppression to its target identity
+    instead of requiring the complete observation delta to be empty.
+    """
+    def behavior(events, ss_env, submit_attempts=0):
+        del submit_attempts
+        on = ss_env.get("GT_SS_NOVELTY") == "1"
+        observations = [G.Obs(ev.output or "", ev.output or "") for ev in events]
+        ledger = []
+        is_suppressed_episode = len(events) == 3
+        if is_suppressed_episode and on:
+            fallback = "\npkg/util.py:4:sig_target"
+            observations[-1] = G.Obs(
+                events[-1].output or "", (events[-1].output or "") + fallback)
+            ledger = [
+                dict(layer="ga.def_ref_partition", file_path="pkg/mod_a.py",
+                     outcome="suppressed_hidden_only", reason="ss_step_behind",
+                     chars_delivered=0, iteration=3),
+                dict(layer="gateway.localization", file_path="pkg/util.py",
+                     outcome="delivered", reason="", chars_delivered=len(fallback),
+                     iteration=3),
+            ]
+        else:
+            target = "\npkg/mod_a.py:8:run\npkg/mod_b.py:9:run"
+            observations[-1] = G.Obs(
+                events[-1].output or "", (events[-1].output or "") + target)
+            ledger = [
+                dict(layer="gateway.def_ref_partition", file_path="pkg/mod_a.py",
+                     outcome="delivered", reason="", chars_delivered=len(target),
+                     iteration=len(events)),
+            ]
+        return G.SeamResult(observations=observations, ledger=ledger)
+
+    result = G.scenario_s1(G.FakeSeamDriver(behavior))
+    assert result.verdict == G.PASS, result.detail
+
+
+def test_s1_rejects_step_behind_row_when_same_target_is_marked_delivered():
+    """A suppression row is not proof when its exact target also has a delivery row."""
+    def behavior(events, ss_env, submit_attempts=0):
+        del submit_attempts
+        observations = [G.Obs(ev.output or "", ev.output or "") for ev in events]
+        target = "\npkg/mod_a.py:8:run\npkg/mod_b.py:9:run"
+        is_suppressed_episode = len(events) == 3
+        ledger = []
+        if is_suppressed_episode and ss_env.get("GT_SS_NOVELTY") == "1":
+            # Contradictory product evidence: the same fact is both suppressed and
+            # delivered. Keep model bytes empty so a raw-delta-only gate would miss it.
+            ledger = [
+                dict(layer="ga.def_ref_partition", file_path="pkg/mod_a.py",
+                     outcome="suppressed_hidden_only", reason="ss_step_behind",
+                     chars_delivered=0, iteration=3),
+                dict(layer="gateway.def_ref_partition", file_path="pkg/mod_a.py",
+                     outcome="delivered", reason="", chars_delivered=len(target),
+                     iteration=3),
+            ]
+        else:
+            observations[-1] = G.Obs(
+                events[-1].output or "", (events[-1].output or "") + target)
+            ledger = [
+                dict(layer="gateway.def_ref_partition", file_path="pkg/mod_a.py",
+                     outcome="delivered", reason="", chars_delivered=len(target),
+                     iteration=len(events)),
+            ]
+        return G.SeamResult(observations=observations, ledger=ledger)
+
+    result = G.scenario_s1(G.FakeSeamDriver(behavior))
+    assert result.verdict == G.FAIL, result.detail
 
 
 def test_mutation_dedup2_wrong_reason_bites_s2():
