@@ -134,7 +134,7 @@ def _symbol_anchors(
             matched.setdefault(file_path, []).append(sym_name)
 
     # Sort by number of matched symbols (more matches = stronger anchor)
-    ranked = sorted(matched.items(), key=lambda kv: len(kv[1]), reverse=True)
+    ranked = sorted(matched.items(), key=lambda item: (-len(item[1]), item[0]))
     return {fp: "symbol_match" for fp, _ in ranked[:k_anchor]}
 
 
@@ -277,8 +277,8 @@ def _budget_priority_order(
     ``_symbol_anchors`` uses). This is a CHEAP pure-Python pass over passages already
     built in memory — no DB, no embed, inside the demand-scope cost bound.
 
-    Stable: a higher-overlap file sorts ahead of a lower-overlap one; ties keep the
-    original ``file_paths`` order (Python's sort is stable). When ``issue_text`` is
+    Stable: a higher-overlap file sorts ahead of a lower-overlap one; non-empty
+    overlap ties use canonical path. When ``issue_text`` is
     blank (no issue tokens) EVERY file scores 0 overlap, so the order is byte-
     identical to the input — issue-less / warm-cache callers are unchanged.
     Generalized: pure lexical token overlap, no gold labels, no benchmark logic."""
@@ -303,8 +303,9 @@ def _budget_priority_order(
                 parts.update(_normalize_identifier(tok))
         return len(parts & issue_parts)
 
-    # Higher overlap first; stable sort preserves DB order within an overlap tier.
-    return sorted(file_paths, key=_overlap, reverse=True)
+    # Higher overlap first; canonical path is the final tie-break. Raw DB order
+    # must not decide which equal-overlap file spends a bounded encode slot.
+    return sorted(file_paths, key=lambda fp: (-_overlap(fp), _norm_path(fp)))
 
 
 def _get_file_embeddings(
@@ -348,9 +349,11 @@ def _get_file_embeddings(
     c.execute("SELECT DISTINCT file_path FROM nodes WHERE is_test = 0")
     # Ingress point (semantic): canonicalize before these become the keys of the
     # cosine map (semantic_top_k -> sem_scores) so they match the symbol + lexical
-    # pipes (#18). dict.fromkeys preserves order and de-dups paths that differ only
-    # by separator/prefix.
-    file_paths = list(dict.fromkeys(_norm_path(row[0]) for row in c.fetchall() if row[0]))
+    # pipes (#18). De-duplicate separator/prefix variants, then sort so DB
+    # insertion order cannot reach a bounded semantic cut.
+    file_paths = sorted(
+        dict.fromkeys(_norm_path(row[0]) for row in c.fetchall() if row[0])
+    )
 
     # Per-symbol passage BODY comes from the SHARED assembler (the SAME source the
     # localizer half — graph_localizer._assemble_symbol_passages — reads), so a given
@@ -362,16 +365,21 @@ def _get_file_embeddings(
 
     body_map = _symbol_body_map(conn, _body_on)
 
-    # Per-file ordered list of symbol passages (carry the existing 60/symbol cap).
+    # Per-file source-identity-ordered symbol passages (carry the existing 60 cap).
     file_passages: dict[str, list[str]] = {fp: [] for fp in file_paths}
-    for _id, _fp, _nm, _sig in c.execute(
-        # C2 (Fable 2026-07-05): ORDER BY id — the 60/symbol cap keeps WHICHEVER rows
-        # arrive first, so an unordered scan makes the kept passage set (and thus the
-        # embedding) nondeterministic across indexings. Parity with the localizer half
-        # (graph_localizer._assemble_symbol_passages), which orders by id.
-        "SELECT id, file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test = 0 "
-        "ORDER BY id"
-    ):
+    _symbol_rows = c.execute(
+        # The cap keeps whichever rows arrive first. Stable source identity below,
+        # rather than node insertion id, decides which rows survive across rebuilds.
+        "SELECT id, file_path, name, COALESCE(signature,''), start_line, end_line "
+        "FROM nodes WHERE is_test = 0"
+    ).fetchall()
+    _symbol_rows.sort(key=lambda row: (
+        _norm_path(str(row[1] or "")),
+        row[4] is None, int(row[4] or 0),
+        row[5] is None, int(row[5] or 0),
+        str(row[2] or ""), str(row[3] or ""), int(row[0] or 0),
+    ))
+    for _id, _fp, _nm, _sig, _sl, _el in _symbol_rows:
         _k = _norm_path(_fp)
         if not _k or _k not in file_passages or len(file_passages[_k]) >= 60:
             continue
@@ -420,9 +428,11 @@ def _get_file_embeddings(
     # ALREADY in caller-priority order, this half builds file_paths itself with no
     # priority signal. Order the budget visit by issue-token overlap (the SAME
     # lexical signal _symbol_anchors uses: a file's symbols + path normalized parts
-    # intersected with the issue's normalized parts), highest overlap first; ties
-    # keep DB order (stable sort). issue_text="" (no issue) => unchanged DB order, so
-    # warm-cache and issue-less callers are byte-identical. This only reorders WHICH
+    # intersected with the issue's normalized parts), highest overlap first; ties use
+    # canonical path so equivalent graph insertions spend the same bounded slots.
+    # issue_text="" preserves the supplied order; the current DB ingress is already
+    # canonicalized, so warm-cache and issue-less callers remain deterministic.
+    # This only reorders WHICH
     # files spend the cold-path encode budget — the returned file_paths list and the
     # path-keyed score map are unchanged (generalized, no gold labels, no benchmark
     # logic).
@@ -577,7 +587,7 @@ def semantic_top_k(
         score = aggregate_symbol_cosines(cosines, alpha=alpha, top_k=top_k)
         file_scores.append((fp, float(score)))
 
-    ranked = sorted(file_scores, key=lambda x: x[1], reverse=True)
+    ranked = sorted(file_scores, key=lambda item: (-item[1], item[0]))
     if score_all:
         # Full component-score map: keep only finite, strictly-positive scores
         # (correct-or-quiet — never surface 0/NaN as a semantic signal).

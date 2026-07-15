@@ -41,27 +41,20 @@ def _build_100_symbol_db(tmp_path):
     return db
 
 
-def test_bfinding1b_passage_cap_is_deterministic_first_80_by_id(tmp_path):
-    """B-Finding1b: the per-file 80-passage cap selects a DETERMINISTIC set — ORDER BY id → the 80
-    lowest-id symbols, in id order — so measure_brief is reproducible and the deferred L4(b)
-    relevance-ordering is a clean follow-on. (SQLite's default scan is already id-order today for an
-    INTEGER PRIMARY KEY, so this locks the contract as a GUARANTEE against future index/plan/schema
-    changes; the structural companion below is the RED-provable half.)
-    """
+def test_bfinding1b_passage_cap_is_deterministic_first_80_by_source_identity(tmp_path):
+    """The cap uses stable source identity, never graph insertion identity."""
     db = _build_100_symbol_db(tmp_path)
     key = gl._normalize("src/mod.py")
     _passages, symnames = gl._assemble_symbol_passages(db, {key}, False, True)
     got = symnames[key]
     assert len(got) == 80, f"cap should keep exactly 80, got {len(got)}"
-    assert got == [f"sym{i:03d}" for i in range(1, 81)], "cap must keep the 80 lowest-id symbols, in id order"
+    assert got == [f"sym{i:03d}" for i in range(1, 81)]
 
 
-def test_bfinding1b_passage_cap_query_is_explicitly_ordered():
-    """The determinism guarantee is structural: the passage-cap SELECT must be explicitly
-    `ORDER BY id`, not rely on SQLite's default scan order.
-
-    Mutation: dropping `ORDER BY id` from the SELECT reddens this.
-    """
+def test_bfinding1b_passage_cap_has_explicit_source_identity_sort():
+    """Fetched rows are source-sorted before the bounded cut."""
     src = inspect.getsource(gl._assemble_symbol_passages)
-    # Match the SQL fragment specifically (the surrounding comment also mentions ORDER BY id).
-    assert "is_test=0 ORDER BY id" in src, "the 80-cap SELECT must be deterministically ordered by id"
+    assert "_symbol_rows.sort" in src
+    assert '_normalize(str(row[1] or ""))' in src
+    assert "row[4] is None" in src
+    assert 'str(row[2] or "")' in src

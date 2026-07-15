@@ -4830,7 +4830,8 @@ def _apply_evidence_rrf(
     Fuses per-class (lexical/semantic/structural/path/historical) reciprocal-rank
     scores so a file backed by MANY independent evidence classes ranks above a
     single-signal file, tie-broken by class count, raw strength, then the
-    localizer's own rank and the incoming order.
+    localizer's own rank and canonical path (incoming order only breaks duplicate-
+    path ties).
 
     P0 #2 fix (2026-07-01) — two defects in the pre-extraction inline version:
       (1) The ``strength > 0`` filter SILENTLY DROPPED records whose evidence
@@ -4920,13 +4921,27 @@ def _apply_evidence_rrf(
 
     def _rrf_evidence_scores(recs: list[dict]) -> dict[int, float]:
         scores = {id(rec): 0.0 for rec in recs}
+
+        def _path(rec: dict) -> str:
+            return _gl_normalize(str(rec.get("path", "") or ""))
+
+        def _loc_rank(rec: dict) -> int:
+            try:
+                return int(rec.get("_loc_rank", 10 ** 6))
+            except (TypeError, ValueError):
+                return 10 ** 6
+
         for cls in ("lexical", "semantic", "structural", "path", "historical"):
             ranked = []
             for idx, rec in enumerate(recs):
                 val = _positive_evidence_classes(rec).get(cls, 0.0)
                 if val > 0.0:
                     ranked.append((idx, rec, val))
-            ranked.sort(key=lambda item: (-item[2], item[0]))
+            ranked.sort(
+                key=lambda item: (
+                    -item[2], _loc_rank(item[1]), _path(item[1]), item[0]
+                )
+            )
             for rank, (_idx, rec, _val) in enumerate(ranked, start=1):
                 scores[id(rec)] += 1.0 / float(60 + rank)
         return scores
@@ -4969,6 +4984,7 @@ def _apply_evidence_rrf(
                 -_class_count(item[1]),
                 -item[2],
                 int(item[1].get("_loc_rank", 10 ** 6)),
+                _gl_normalize(str(item[1].get("path", "") or "")),
                 item[0],
             )
         )

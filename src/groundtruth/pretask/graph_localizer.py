@@ -481,7 +481,7 @@ def _fts5_candidates(
                       bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
                FROM nodes_fts
                WHERE nodes_fts MATCH ?
-               ORDER BY score
+               ORDER BY score, file_path, name, rowid
                LIMIT ?"""
         _fts_params: tuple = (match_expr, limit)
     else:
@@ -493,7 +493,7 @@ def _fts5_candidates(
                FROM nodes_fts
                JOIN nodes n ON n.id = nodes_fts.rowid
                WHERE nodes_fts MATCH ? AND COALESCE(n.is_test, 0) = 0""" + _f_n + """
-               ORDER BY score
+               ORDER BY score, nodes_fts.file_path, nodes_fts.name, nodes_fts.rowid
                LIMIT ?"""
         _fts_params = (match_expr, *_p_n, limit)
     try:
@@ -1180,7 +1180,9 @@ def _seed_node_rows(
     _f_bare, _p_bare = _repo_frag(scope)
     _f_c, _p_c = _repo_frag(scope, "c")
     out: list[tuple[int, str, str]] = []
-    anchors_l = list(anchors)
+    # A set's iteration order varies with PYTHONHASHSEED. The 400-item chunk
+    # boundary is observable, so establish one canonical anchor order first.
+    anchors_l = sorted(anchors)
     # Chunk to stay under SQLite's variable limit on huge anchor sets.
     for i in range(0, len(anchors_l), 400):
         chunk = anchors_l[i : i + 400]
@@ -1206,7 +1208,7 @@ def _seed_node_rows(
     # recall addition — a dotted anchor that resolves seeds its REAL definition
     # node; unresolvable dotted anchors stay non-seeding (correct-or-quiet).
     _seen_ids = {nid for nid, _, _ in out}
-    for anc in anchors:
+    for anc in sorted(anchors):
         if "." not in anc:
             continue
         parts = [p for p in anc.split(".") if p]
@@ -1233,6 +1235,9 @@ def _seed_node_rows(
             if r and r[0] is not None and r[2] and int(r[0]) not in _seen_ids:
                 _seen_ids.add(int(r[0]))
                 out.append((int(r[0]), str(r[1]), _normalize(str(r[2]))))
+    # SQLite row order is physical state, not relevance. Traversal is capped
+    # downstream, so use a semantic total order before returning the seeds.
+    out.sort(key=lambda row: (row[2], row[1], row[0]))
     return out
 
 
@@ -1302,10 +1307,18 @@ def _path_to_seeds(
                 break
             try:
                 rows = conn.execute(
-                    "SELECT id, name, file_path FROM nodes "
+                    "SELECT id, name, file_path FROM ("
+                    "SELECT id, name, file_path, "
+                    "ROW_NUMBER() OVER ("
+                    "PARTITION BY file_path ORDER BY name, "
+                    "CASE WHEN start_line IS NULL THEN 1 ELSE 0 END, start_line, "
+                    "CASE WHEN end_line IS NULL THEN 1 ELSE 0 END, end_line, "
+                    "COALESCE(signature,''), id"
+                    ") AS file_rank FROM nodes "
                     "WHERE file_path LIKE ? AND is_test = 0 "
-                    "AND label IN ('Function','Method','Class')" + _f_bare + " "
-                    "LIMIT 5",
+                    "AND label IN ('Function','Method','Class')" + _f_bare + ") "
+                    "WHERE file_rank = 1 "
+                    "ORDER BY file_path, name, id LIMIT 5",
                     (pat,) + _p_bare,
                 ).fetchall()
                 if rows:
@@ -1334,7 +1347,8 @@ def _path_to_seeds(
         try:
             all_files = [
                 r[0] for r in conn.execute(
-                    "SELECT DISTINCT file_path FROM nodes WHERE is_test = 0" + _f_bare,
+                    "SELECT DISTINCT file_path FROM nodes WHERE is_test = 0" + _f_bare
+                    + " ORDER BY file_path",
                     _p_bare,
                 ).fetchall() if r[0]
             ]
@@ -1344,7 +1358,7 @@ def _path_to_seeds(
                 hit_count = sum(1 for t in path_tokens if t in fp_lower)
                 if hit_count >= 2:
                     compound_hits.append((fp, hit_count))
-            compound_hits.sort(key=lambda x: -x[1])
+            compound_hits.sort(key=lambda item: (-item[1], _normalize(item[0])))
             compound_new: list[tuple[int, str, str]] = []
             for fp, _hc in compound_hits[:limit]:
                 nfp = _normalize(fp)
@@ -1353,7 +1367,7 @@ def _path_to_seeds(
                 rows = conn.execute(
                     "SELECT id, name FROM nodes WHERE file_path = ? "
                     "AND is_test = 0 AND label IN ('Function','Method','Class')" + _f_bare + " "
-                    "LIMIT 1", (fp,) + _p_bare
+                    "ORDER BY name, id LIMIT 1", (fp,) + _p_bare
                 ).fetchall()
                 if rows and rows[0][0] is not None:
                     nid = int(rows[0][0])
@@ -1507,8 +1521,9 @@ def _grep_to_seeds(
             ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".cs",
         )  # Fable #9: match the rg leg's coverage on rg-less hosts (was missing tsx/jsx/kt/…)
         try:
-            for dirpath, _, filenames in os.walk(repo_root):
-                for fname in filenames:
+            for dirpath, dirnames, filenames in os.walk(repo_root):
+                dirnames.sort()
+                for fname in sorted(filenames):
                     if not any(fname.endswith(ext) for ext in _source_exts):
                         continue
                     fpath = os.path.join(dirpath, fname)
@@ -1545,7 +1560,7 @@ def _grep_to_seeds(
         except OSError:
             file_scores.append((fp, 1))
 
-    file_scores.sort(key=lambda x: -x[1])
+    file_scores.sort(key=lambda x: (-x[1], _normalize(x[0])))
     top_files = [fp for fp, _ in file_scores[:max_seeds]]
 
     # Map hit files to enclosing graph nodes
@@ -1558,7 +1573,7 @@ def _grep_to_seeds(
                 "SELECT id, name, file_path FROM nodes "
                 "WHERE file_path = ? AND is_test = 0 "
                 "AND label IN ('Function','Method','Class','Interface') "
-                "LIMIT 5",
+                "ORDER BY name, id LIMIT 5",
                 (norm,),
             ).fetchall()
         except sqlite3.Error:
@@ -2363,15 +2378,19 @@ def _assemble_symbol_passages(
             conn, body_on,
             enriched_node_ids if enriched_files_out is not None else None,
         )
-        # B-Finding1b (Fable LIPI): ORDER BY id so the per-file 80-passage cap picks a
-        # DETERMINISTIC set of symbols. Without it the cap took whichever 80 SQLite's query plan
-        # returned (de-facto rowid order today, but not guaranteed across indexes / SQLite
-        # versions) — a reproducibility hazard for measure_brief. Parity with incremental.go's
-        # capped queries. (The relevance-first ordering of the cap — so a gold symbol past #80 is
-        # not invisible — is the separately-measured L4(b), deferred to the Phase-4 ranking pass.)
-        for nid, fp, nm, sig, _sl, _el in conn.execute(
+        # The cap uses stable source identity, not graph insertion id. Relevance-first
+        # selection within the cap is a separate measured concern.
+        _symbol_rows = conn.execute(
             "SELECT id, file_path, name, COALESCE(signature,''), "
-            "start_line, end_line FROM nodes WHERE is_test=0 ORDER BY id"):
+            "start_line, end_line FROM nodes WHERE is_test=0"
+        ).fetchall()
+        _symbol_rows.sort(key=lambda row: (
+            _normalize(str(row[1] or "")),
+            row[4] is None, int(row[4] or 0),
+            row[5] is None, int(row[5] or 0),
+            str(row[2] or ""), str(row[3] or ""), int(row[0] or 0),
+        ))
+        for nid, fp, nm, sig, _sl, _el in _symbol_rows:
             k = _normalize(fp)
             if k not in want or len(file_passages.get(k, [])) >= 80:
                 continue
@@ -2573,7 +2592,7 @@ def _semantic_score_by_file(
                 if _c > _best.get(_nm, -1.0):
                     _best[_nm] = _c
             symbol_scores_out[f] = sorted(  # type: ignore[index]
-                _best.items(), key=lambda kv: -kv[1]
+                _best.items(), key=lambda kv: (-kv[1], kv[0])
             )
     if _proof_on and _res:
         _nz = sum(1 for v in _res.values() if v and v > 0)
@@ -2620,6 +2639,7 @@ def localize(
             issue_anchors = IssueAnchors()
 
     anchors = {a for a in issue_anchors.symbols if len(a) >= _MIN_ANCHOR_LEN}
+    anchor_list = sorted(anchors)
     # Phase 1 (grep-floor): issue-token-node-name anchors are a TIE-BREAK HINT, not
     # the seed. Do NOT early-return when no issue token equals a node name — grep
     # recall (string match over file CONTENT, incl. data-access sites like
@@ -2667,7 +2687,7 @@ def localize(
                 conn.close()
             except sqlite3.Error:
                 pass
-            return LocalizerResult([], list(anchors), 0.0, False, "multi_repo_unresolved")
+            return LocalizerResult([], anchor_list, 0.0, False, "multi_repo_unresolved")
         has_conf, has_method = _has_columns(conn)
         # trust_tier column (schema v15.2+): when present, a SUPPRESSED edge is
         # HARD-EXCLUDED at admission per the categorical filter (CLAUDE.md edge
@@ -2948,7 +2968,7 @@ def localize(
                 conn.close()
             except sqlite3.Error:
                 pass
-            return LocalizerResult([], list(anchors), 0.0, False, "no_anchor_hit")
+            return LocalizerResult([], anchor_list, 0.0, False, "no_anchor_hit")
 
         # Seed files themselves are hop-0 candidates: the issue named a symbol that
         # lives there. Witness = self-anchor (the named symbol is defined here).
@@ -3208,7 +3228,7 @@ def localize(
                 conn.close()
             except sqlite3.Error:
                 pass
-            return LocalizerResult([], list(anchors), 0.0, False, "no_witness",
+            return LocalizerResult([], anchor_list, 0.0, False, "no_witness",
                                    graph_stats=_stats)
 
         # ---- PATH DECAY SCORING (KGCompass-style) ----
@@ -3685,7 +3705,7 @@ def localize(
     # (≈0 RRF mass) — never inherit a small list-position rank from a 0.0 default.
     _sem_order = sorted(
         (c for c in candidates if _normalize(c.file_path) in _sem),
-        key=lambda c: -_sem.get(_normalize(c.file_path), 0.0),
+        key=lambda c: (-_sem.get(_normalize(c.file_path), 0.0), c.file_path),
     ) if _sem else []
     _sem_rank = {id(c): i for i, c in enumerate(_sem_order)}
 
@@ -3698,7 +3718,10 @@ def localize(
     # double-count the lexical signal; it is its OWN leg in the fusion + agreement vote.
     _content_order = sorted(
         (c for c in candidates if _normalize(c.file_path) in _content_fusion_score),
-        key=lambda c: -_content_fusion_score.get(_normalize(c.file_path), 0.0),
+        key=lambda c: (
+            -_content_fusion_score.get(_normalize(c.file_path), 0.0),
+            c.file_path,
+        ),
     ) if _content_fusion_score else []
     _content_rank = {id(c): i for i, c in enumerate(_content_order)}
 
@@ -3885,7 +3908,7 @@ def localize(
     best = candidates[0]
     if not best.has_verified_witness:
         return LocalizerResult(
-            candidates, list(anchors), best.confidence, False, "top_unverified",
+            candidates, anchor_list, best.confidence, False, "top_unverified",
             scope_chains=_chains, graph_stats=_stats,
             agreement_by_file=_agreement_by_file, signals_by_file=_signals_by_file,
             n_components=_n_components, symbol_semrank_by_file=_symbol_semrank,
@@ -3969,7 +3992,7 @@ def localize(
             )
 
     return LocalizerResult(
-        candidates, list(anchors), best.confidence, confident, gate_reason,
+        candidates, anchor_list, best.confidence, confident, gate_reason,
         scope_chains=_chains, graph_stats=_stats,
         agreement_by_file=_agreement_by_file, signals_by_file=_signals_by_file,
         n_components=_n_components, symbol_semrank_by_file=_symbol_semrank,
