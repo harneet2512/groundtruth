@@ -80,6 +80,7 @@ on:
 permissions:
   contents: read
   packages: read
+  checks: write
 
 env:
   PYTHONUTF8: "1"
@@ -1030,9 +1031,15 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           REPO_OWNER: ${{ github.repository_owner }}
           GH_TOKEN_SECRET: ${{ secrets.GITHUB_TOKEN }}
+          GT_LIVE_CHECK_TOKEN: ${{ github.token }}
         run: |
           echo "=== SWE-bench Pro GT Trial: $MTASK (lang=$MLANG model=$INPUT_MODEL) ==="
           echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
+          # At max_parallel=20, 120s stays below the repository GITHUB_TOKEN
+          # REST budget while still exposing progress during a locked job view.
+          python3 scripts/ci/live_check_update.py "$MTASK" --interval 120 &
+          _GT_LIVE_CHECK_PID=$!
+          trap 'kill "$_GT_LIVE_CHECK_PID" 2>/dev/null; wait "$_GT_LIVE_CHECK_PID" 2>/dev/null || true' EXIT
           if ! python3 <<'PY'
           import hashlib, json, os, re
           from pathlib import Path
@@ -1221,7 +1228,7 @@ jobs:
               sleep 8
             done ) &
           _RESMON_PID=$!
-          trap 'kill "$_RESMON_PID" 2>/dev/null; wait "$_RESMON_PID" 2>/dev/null || true' EXIT
+          trap 'kill "$_RESMON_PID" "$_GT_LIVE_CHECK_PID" 2>/dev/null; wait "$_RESMON_PID" 2>/dev/null || true; wait "$_GT_LIVE_CHECK_PID" 2>/dev/null || true' EXIT
 
           set +e
           set -o pipefail
