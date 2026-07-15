@@ -268,6 +268,9 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # quiet: ship exactly what the live path imports, no more).
         "covering_runner.py",
         "native_render.py",
+        # Producer-neutral, stdlib-only identity kernel joining acknowledged
+        # native syntax failures across edit-check and covering-RED producers.
+        "ack_failure_identity.py",
         "submit_gate.py",
         "patch_auditor.py",
         "test_runner.py",

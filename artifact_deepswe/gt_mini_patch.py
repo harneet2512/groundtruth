@@ -9299,6 +9299,10 @@ def _executed_covering_emission(covering: list[dict],
                 outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
                 reason="covering_none_produced", chars=0)
             return None
+        failure_identity = _ss_covering_failure_identity(cres, block)
+        if _ss_ack_failure_suppresses(
+                "verify.horizon.executed", block, failure_identity):
+            return None
         _last_verify_executed_identity = (
             "covering_runner", "covering_red", "test_result")
         return block
@@ -9477,6 +9481,16 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
             else:
                 continue  # build/type/integration RED -> HOST-side only this wave
             if block and not contains_gt_tag(block) and not contains_test_identity(block):
+                failure_identity = (
+                    _ss_diagnostic_failure_identity(
+                        str(serr.get("diagnostic") or ""))
+                    if (res.kind == "syntax" and serr is not None)
+                    else (_ss_covering_failure_identity(cres, block)
+                          if res.kind == "unit" else None)
+                )
+                if _ss_ack_failure_suppresses(
+                        "verify.horizon.executed", block, failure_identity):
+                    return None
                 if res.kind == "unit":
                     _last_verify_executed_identity = (
                         "covering_runner", "covering_red", "test_result")
@@ -9525,6 +9539,9 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
         return None
     block = render_syntax_error_native(res)
     if not block:
+        return None
+    failure_identity = _ss_build_syntax_failure_identity(rel, res.get("diagnostic") or "")
+    if _ss_ack_failure_suppresses("edit.syntax", block, failure_identity):
         return None
     return (float(_SEV_NUDGE_VERIFY), "edit.syntax", block, True)
 
@@ -14347,6 +14364,11 @@ _ss_behavioral_probe_events: "list[tuple[str, str, object, int]]" = []
 # established by a GT delivery or by a step-behind verdict proving native acquisition.
 _ss_known_entsets: "dict[str, list[frozenset]]" = {}
 _ss_pending_acks: "list[dict]" = []          # deliveries awaiting a model acknowledgment
+# Producer-neutral failure identities staged by (kind, exact rendered-byte seal).
+# A set value is intentional: if the same producer bytes map to multiple source
+# states, delivery attribution is ambiguous and the watcher stays quiet.
+_ss_failure_identities_by_delivery: "dict[tuple[str, str], set]" = {}
+_ss_acknowledged_failure_identities: "set" = set()
 _ss_obl_open_cache: "tuple[int, bool]" = (-1, False)  # (action_count, value) per-turn memo
 # SS-2 (2026-07-13, GT_SS_SUBMIT_RED) — the agent's OWN unresolved observed test RED.
 # `_ss_last_failing_test`: the most recent test event the agent ran that FAILED while
@@ -14378,6 +14400,8 @@ def _ss_reset() -> None:
     _ss_behavioral_probe_events.clear()
     _ss_known_entsets.clear()
     _ss_pending_acks.clear()
+    _ss_failure_identities_by_delivery.clear()
+    _ss_acknowledged_failure_identities.clear()
     _ss_obl_open_cache = (-1, False)
     _ss_last_failing_test = None
     _ss_submit_red_fired = False
@@ -15172,20 +15196,137 @@ def _ss_ack_snippet(text: str) -> str:
     return ""
 
 
+def _ss_source_state_sha256(rel: str, root: str = "") -> str:
+    """Exact current bytes for one confined repository source, or ``""``."""
+    if not _ss_valid_repo_source_rel(rel):
+        return ""
+    root = root or _root()
+    absolute = _ss_confined_repo_source_abs(rel, root)
+    return _source_content_sha256(absolute) if absolute else ""
+
+
+def _ss_build_syntax_failure_identity(rel: str, diagnostic: str):
+    """Build complete source-state-bound identity; incomplete truth stays quiet."""
+    if not _ss_ack_metrics_on():
+        return None
+    try:
+        from groundtruth.runtime.ack_failure_identity import (
+            build_syntax_failure_identity,
+        )
+        root = _root()
+        return build_syntax_failure_identity(
+            _norm_fp(rel), _ss_source_state_sha256(rel, root), diagnostic or "",
+            repo_root=root,
+        )
+    except Exception:  # noqa: BLE001 -- identity bookkeeping cannot break delivery
+        return None
+
+
+def _ss_diagnostic_failure_identity(diagnostic: str):
+    """Identity for a diagnostic implicating exactly one edited source."""
+    if not _ss_ack_metrics_on() or not diagnostic:
+        return None
+    try:
+        from groundtruth.runtime.ack_failure_identity import implicated_source_path
+        rel = implicated_source_path(
+            diagnostic, set(_oracle_edited_rels), repo_root=_root()
+        )
+    except Exception:  # noqa: BLE001 -- ambiguous/missing provenance stays quiet
+        return None
+    return _ss_build_syntax_failure_identity(rel or "", diagnostic)
+
+
+def _ss_covering_failure_identity(result: dict, rendered: str = ""):
+    """Identity for a covering diagnostic implicating exactly one edited source."""
+    if not isinstance(result, dict):
+        return None
+    diagnostic = ((result.get("stdout_tail") or "") + "\n"
+                  + (result.get("stderr_tail") or ""))
+    identity = _ss_diagnostic_failure_identity(diagnostic)
+    if identity is None or not rendered:
+        return identity
+    try:
+        from groundtruth.runtime.ack_failure_identity import (
+            syntax_payload_is_exhausted,
+        )
+        lines = rendered.splitlines()
+        # Native covering framing is salience only; the remaining leak-scrubbed
+        # lines are the semantic payload whose novelty must be exhausted.
+        if not lines or not (
+            lines[0] == "A covering test fails:"
+            or (
+                lines[0].startswith("Your change to `")
+                and lines[0].endswith("fails a covering test:")
+            )
+        ):
+            return None
+        semantic = "\n".join(lines[1:])
+        return identity if syntax_payload_is_exhausted(identity, semantic) else None
+    except Exception:  # noqa: BLE001 -- unjudgeable payload remains eligible
+        return None
+
+
+def _ss_ack_failure_suppresses(kind: str, text: str, identity) -> bool:
+    """Register a complete candidate identity and suppress only after exact ack.
+
+    Producer kind is deliberately absent from ``identity`` so an acknowledged
+    syntax_result can retire an equivalent covering_red. It remains in the
+    delivery lookup key only to bind the identity to the exact bytes that were
+    actually delivered and watched.
+    """
+    if not _ss_ack_metrics_on() or not text:
+        return False
+    seal = hashlib.sha256(
+        text.encode("utf-8", "surrogatepass")
+    ).hexdigest()[:16]
+    staged = _ss_failure_identities_by_delivery.setdefault((kind, seal), set())
+    # ``None`` is retained as explicit ambiguity. A prior complete candidate
+    # with identical bytes must not be attached to a later delivery whose live
+    # source identity could not be proven.
+    staged.add(identity)
+    if identity is None:
+        return False
+    if identity not in _ss_acknowledged_failure_identities:
+        return False
+    try:
+        _runtime_ledger_record(
+            kind=kind,
+            outcome=_ProductSignalOutcome.SUPPRESSED_DUPLICATE,
+            reason="acknowledged_failure_identity",
+            chars=0,
+            file_path=getattr(identity, "source_path", ""),
+            event="acknowledged_failure_duplicate",
+        )
+    except Exception:  # noqa: BLE001 -- observability cannot change suppression truth
+        pass
+    return True
+
+
 def _ss_note_delivery_for_ack(kind: str, text: str) -> None:
     """Queue a delivered block for the acknowledgment watch (host-side only)."""
     if not _ss_ack_metrics_on() or not text:
         return
     try:
-        _ss_pending_acks.append({
+        seal = hashlib.sha256(
+            text.encode("utf-8", "surrogatepass")
+        ).hexdigest()[:16]
+        identities = _ss_failure_identities_by_delivery.pop((kind, seal), set())
+        record = {
             "kind": kind,
             "ents": _ss_entity_set(text),
             "paths": frozenset(_ss_extract_paths(text)),
             "symbols": frozenset(_ss_extract_symbols(text)),
             "snip": _ss_ack_snippet(text).lower(),
             "step": _action_count,
-            "sha": hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:16],
-        })
+            "sha": seal,
+        }
+        # Exact one-to-one attribution only. Multiple candidate identities for
+        # identical bytes are incomplete delivery provenance and cannot suppress.
+        if len(identities) == 1:
+            identity = next(iter(identities))
+            if identity is not None:
+                record["failure_identity"] = identity
+        _ss_pending_acks.append(record)
     except Exception:  # noqa: BLE001
         pass
 
@@ -15264,6 +15405,9 @@ def _ss_scan_acks(model_text: str) -> None:
         if not acked:
             acked = _ss_ack_snippet_matches(model_text or "", rec.get("snip", ""))
         if acked:
+            identity = rec.get("failure_identity")
+            if identity is not None:
+                _ss_acknowledged_failure_identities.add(identity)
             _ss_emit_ack_row(rec, True)
         elif _action_count - int(rec.get("step", 0)) > _SS_ACK_WINDOW:
             _ss_emit_ack_row(rec, False)
@@ -15516,6 +15660,10 @@ def _ss_record_edit(rel: str, cmd: str, orig_out: str, *, returncode=None,
             # compatibility arm deliberately preserves the pre-change replay contract.
             _ss_test_fail_counts.clear()
             _ss_failure_keys_by_test_cmd.clear()
+            # Candidate-to-delivery bindings describe the previous exact source
+            # state. A landed byte transition invalidates them; acknowledged
+            # identities remain safely hash-bound and therefore do not match.
+            _ss_failure_identities_by_delivery.clear()
     except Exception:  # noqa: BLE001
         pass
 
