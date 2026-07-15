@@ -64,7 +64,10 @@ def test_initial_persist_uses_atomic_publication_before_determinism_verdict(
     )
 
     assert verdict["matched"] is False
-    assert events == [("chmod", 0o644), ("replace", None)]
+    assert events == [
+        ("chmod", 0o644), ("replace", None),
+        ("chmod", 0o644), ("replace", None),
+    ]
     assert brief_cache.load_cached_brief(
         str(tmp_path), expect_identity="request-id"
     )["brief_text"] == "primary diagnostic"
@@ -140,6 +143,8 @@ def test_independent_equal_generation_persists_candidate_local_repeat_identity(t
         str(tmp_path), first.brief_text, first, identity="request-id"
     )
     calls = {"count": 0}
+    stale_diagnostic = tmp_path / brief_cache.BRIEF_DETERMINISM_DIAGNOSTIC_BASENAME
+    stale_diagnostic.write_text('{"stale":true}', encoding="utf-8")
 
     def generate_again():
         calls["count"] += 1
@@ -153,6 +158,7 @@ def test_independent_equal_generation_persists_candidate_local_repeat_identity(t
     assert calls["count"] == 1
     assert len(verdict["canonical_sha256"]) == 2
     assert len(set(verdict["canonical_sha256"])) == 1
+    assert not stale_diagnostic.exists()
     loaded = brief_cache.load_cached_brief(str(tmp_path), expect_identity="request-id")
     assert loaded is not None
     assert loaded["brief_text"] == "same sealed brief"
@@ -183,6 +189,15 @@ def test_independent_mismatch_fails_closed_without_persisting_claim(tmp_path):
     assert loaded is not None
     proof = loaded["metrics"]["localization_proof"][0]
     assert "determinism" not in proof["acquisition_sources"]
+    diagnostic_path = tmp_path / brief_cache.BRIEF_DETERMINISM_DIAGNOSTIC_BASENAME
+    diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+    assert diagnostic["schema"] == "gt.brief_determinism_mismatch.v1"
+    assert diagnostic["canonical_sha256"] == verdict["canonical_sha256"]
+    assert diagnostic["difference_count"] >= 1
+    assert diagnostic["differences"][0]["json_pointer"] == "/brief_text"
+    serialized = diagnostic_path.read_text(encoding="utf-8")
+    assert "first brief" not in serialized
+    assert "different brief" not in serialized
 
 
 def test_request_identity_changes_when_graph_bytes_change_at_same_size(tmp_path):

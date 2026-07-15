@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 BRIEF_CACHE_BASENAME = "brief_result.json"
+BRIEF_DETERMINISM_DIAGNOSTIC_BASENAME = "brief_determinism_mismatch.json"
 BRIEF_RESULT_SCHEMA = "gt.brief_result.v1"
 _METRIC_FIELDS = (
     "effective_w_sem", "semantic_signal_count",
@@ -64,8 +65,8 @@ def _extract_metrics(obj: Any) -> dict:
     return out
 
 
-def _canonical_acquisition_sha256(payload: Any) -> str:
-    """Hash exact brief text and persisted ACQ data, excluding this witness."""
+def _canonical_acquisition_payload(payload: Any) -> dict[str, Any]:
+    """Return exact brief text + persisted ACQ data, excluding this witness."""
     if isinstance(payload, dict) and isinstance(payload.get("metrics"), dict):
         brief_text = payload.get("brief_text")
         metrics = copy.deepcopy(payload["metrics"])
@@ -84,14 +85,76 @@ def _canonical_acquisition_sha256(payload: Any) -> str:
         sources = proof.get("acquisition_sources")
         if isinstance(sources, dict):
             sources.pop("determinism", None)
+    return {"brief_text": brief_text.strip(), "metrics": metrics}
+
+
+def _canonical_payload_sha256(payload: dict[str, Any]) -> str:
     canonical = json.dumps(
-        {"brief_text": brief_text.strip(), "metrics": metrics},
+        payload,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _canonical_acquisition_sha256(payload: Any) -> str:
+    """Hash exact brief text and persisted ACQ data, excluding this witness."""
+    return _canonical_payload_sha256(_canonical_acquisition_payload(payload))
+
+
+_MISSING = object()
+
+
+def _value_fingerprint(value: Any) -> dict[str, str]:
+    if value is _MISSING:
+        return {"type": "missing", "sha256_16": ""}
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return {
+        "type": type(value).__name__,
+        "sha256_16": hashlib.sha256(encoded).hexdigest()[:16],
+    }
+
+
+def _bounded_payload_diff(
+    primary: Any, repeat: Any, *, limit: int = 32,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Return stable hash-only JSON-pointer differences, bounded for diagnostics."""
+    differences: list[dict[str, Any]] = []
+    truncated = False
+
+    def walk(left: Any, right: Any, pointer: str) -> None:
+        nonlocal truncated
+        if len(differences) >= limit:
+            truncated = True
+            return
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in sorted(set(left) | set(right)):
+                escaped = str(key).replace("~", "~0").replace("/", "~1")
+                walk(left.get(key, _MISSING), right.get(key, _MISSING),
+                     f"{pointer}/{escaped}")
+            return
+        if isinstance(left, list) and isinstance(right, list):
+            for index in range(max(len(left), len(right))):
+                walk(
+                    left[index] if index < len(left) else _MISSING,
+                    right[index] if index < len(right) else _MISSING,
+                    f"{pointer}/{index}",
+                )
+            return
+        if left != right or type(left) is not type(right):
+            differences.append({
+                "json_pointer": pointer or "/",
+                "primary": _value_fingerprint(left),
+                "repeat": _value_fingerprint(right),
+            })
+
+    walk(primary, repeat, "")
+    return differences, truncated
 
 
 def _atomic_write_payload(path: str, payload: dict[str, Any]) -> None:
@@ -131,12 +194,32 @@ def verify_independent_generation(
     """
     if not isinstance(primary, dict) or primary.get("identity") != expect_identity:
         raise ValueError("brief determinism: primary request identity mismatch")
-    first_sha = _canonical_acquisition_sha256(primary)
-    second_sha = _canonical_acquisition_sha256(generate_again())
+    first_payload = _canonical_acquisition_payload(primary)
+    second_payload = _canonical_acquisition_payload(generate_again())
+    first_sha = _canonical_payload_sha256(first_payload)
+    second_sha = _canonical_payload_sha256(second_payload)
     identities = [first_sha, second_sha]
     verdict = {"matched": first_sha == second_sha, "canonical_sha256": identities}
     if not verdict["matched"]:
+        differences, truncated = _bounded_payload_diff(first_payload, second_payload)
+        diagnostic = {
+            "schema": "gt.brief_determinism_mismatch.v1",
+            "canonical_sha256": identities,
+            "difference_count": len(differences),
+            "differences_truncated": truncated,
+            "differences": differences,
+        }
+        _atomic_write_payload(
+            os.path.join(out_dir, BRIEF_DETERMINISM_DIAGNOSTIC_BASENAME),
+            diagnostic,
+        )
         return verdict
+
+    diagnostic_path = os.path.join(out_dir, BRIEF_DETERMINISM_DIAGNOSTIC_BASENAME)
+    try:
+        os.unlink(diagnostic_path)
+    except FileNotFoundError:
+        pass
 
     current = load_cached_brief(out_dir, expect_identity=expect_identity)
     if current is None or _canonical_acquisition_sha256(current) != first_sha:
