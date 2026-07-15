@@ -66,6 +66,31 @@ def test_extractor_stamps_the_actual_structural_source_region() -> None:
     ]
 
 
+def test_html_comments_and_details_have_structural_region_truth() -> None:
+    issue = """<!--
+### Expected behavior
+`comment_only` must become a requirement.
+-->
+<details><summary>Troubleshooting</summary>
+`repro_probe` must currently be run twice.
+</details>
+<details><summary>Expected behavior</summary>
+`required_fn` must preserve empty values.
+</details>
+<details><summary>Implementation notes</summary>
+`design_note` should use a cache.
+</details>
+"""
+
+    rows = extract_spec_v2(issue).to_serializable(version=2)
+    by_text = {row["verbatim_text"]: row["region"] for row in rows}
+
+    assert not any("comment_only" in text for text in by_text)
+    assert not any("repro_probe" in text for text in by_text)
+    assert by_text["`required_fn` must preserve empty values"] == "normative"
+    assert by_text["`design_note` should use a cache"] == "evidence"
+
+
 def test_failed_related_execution_is_exercise_evidence_not_behavioral_proof() -> None:
     command = "python -m pytest tests/test_parser.py -k parse_item"
     output = "test_parse_item FAILED\n1 failed in 0.04s"
@@ -132,7 +157,7 @@ def test_nonnormative_regions_never_enter_delivery_or_metric_denominator() -> No
     assert ob.obligation_truth_summary(truth)["n_normative"] == 1
 
 
-def test_high_specificity_subject_subset_covers_broader_clause() -> None:
+def test_partial_high_specificity_subject_set_does_not_cover_broader_clause() -> None:
     view = _View(
         idx=0,
         verbatim="`parse_item` must preserve `EmptyValue` instances",
@@ -146,15 +171,11 @@ def test_high_specificity_subject_subset_covers_broader_clause() -> None:
         frozenset({"parse_item"}), 5, "direct_checked_calls"
     )
 
-    attempted = ob.obligation_truth_statuses(
-        [view], set(), [exercise], []
-    )
-    proven = ob.obligation_truth_statuses(
-        [view], set(), [exercise], [proof]
-    )
+    attempted = ob.obligation_truth_statuses([view], set(), [exercise], [])
+    proven = ob.obligation_truth_statuses([view], set(), [exercise], [proof])
 
-    assert attempted[0].state is ob.ObligationTruthState.EXERCISED_UNPROVEN
-    assert proven[0].state is ob.ObligationTruthState.PROVEN
+    assert attempted[0].state is ob.ObligationTruthState.UNEXERCISED
+    assert proven[0].state is ob.ObligationTruthState.UNEXERCISED
 
 
 def test_plain_word_subset_does_not_cover_a_broader_clause() -> None:

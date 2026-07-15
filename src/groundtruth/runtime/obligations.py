@@ -741,19 +741,10 @@ def obligation_truth_statuses(
             continue
         eligible_symbols = _credit_eligible_symbols(view)
         subjects = _normalize_subjects(eligible_symbols)
-        specific_subjects = _normalize_subjects(
-            symbol for symbol in eligible_symbols if _is_compound_symbol(symbol)
-        )
         after_turn = int(freshness.get(getattr(view, "idx", -1), -1))
 
         def covers(item_subjects: frozenset[str]) -> bool:
-            if item_subjects == subjects:
-                return bool(subjects)
-            return bool(
-                item_subjects
-                and item_subjects < subjects
-                and item_subjects <= specific_subjects
-            )
+            return bool(subjects) and item_subjects == subjects
 
         proof = next(
             (

@@ -316,7 +316,7 @@ _V2_DESCRIPTIVE_SECTION_RE = re.compile(
 _V2_PROCESS_SECTION_RE = re.compile(
     r"^(?:(?:what\s+)?steps?\s+(?:can\s+)?reproduce(?:\s+the\s+bug)?|"
     r"to\s+reproduce|reproduction|repro|returns?|output|traceback|logs?|"
-    r"environment|versions?|tests?|testing|alternatives?|motivation|checklist|"
+    r"environment|versions?|tests?|testing|troubleshooting|alternatives?|motivation|checklist|"
     r"i\s+have|what\s+version.*|what\s+runtime.*|"
     r"the\s+author\s+should\s+do\s+the\s+followings?,?\s+if\s+applicable)$",
     re.I,
@@ -391,6 +391,34 @@ _V2_OBSERVED_STATE_RE = re.compile(
     re.I,
 )
 _V2_CALL_SHAPE_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+_V2_DETAILS_OPEN_RE = re.compile(r"<details\b[^>]*>", re.I)
+_V2_DETAILS_CLOSE_RE = re.compile(r"</details\s*>", re.I)
+_V2_SUMMARY_RE = re.compile(r"<summary\b[^>]*>(.*?)</summary\s*>", re.I)
+
+
+def _v2_strip_html_comments(text: str) -> str:
+    """Remove HTML comments while preserving their newline geometry."""
+    out: list[str] = []
+    cursor = 0
+    while True:
+        start = text.find("<!--", cursor)
+        if start < 0:
+            out.append(text[cursor:])
+            break
+        out.append(text[cursor:start])
+        end = text.find("-->", start + 4)
+        if end < 0:
+            out.append(" " + "\n" * text[start:].count("\n"))
+            break
+        comment = text[start:end + 3]
+        out.append(" " + "\n" * comment.count("\n"))
+        cursor = end + 3
+    return "".join(out)
+
+
+def _v2_details_role(summary: str) -> str:
+    role = _v2_section_role(summary.strip().rstrip(":?!"))
+    return "descriptive" if role == "neutral" else role
 
 
 def _v2_clause_id(verbatim: str, part_index: int) -> str:
@@ -595,11 +623,30 @@ def classify_spec_v2_regions(issue_text: str) -> tuple[SpecRegion, ...]:
             regions.append(SpecRegion(kind, heading, "\n".join(body).strip()))
         body.clear()
 
-    for raw in (issue_text or "").splitlines():
+    detail_parents: list[tuple[str, str]] = []
+    for raw in _v2_strip_html_comments(issue_text or "").splitlines():
         if raw.strip().startswith("```"):
             in_fence = not in_fence
             if heading:
                 body.append(raw)
+            continue
+        summary = None if in_fence else _V2_SUMMARY_RE.search(raw)
+        if not in_fence and _V2_DETAILS_OPEN_RE.search(raw):
+            flush()
+            detail_parents.append((heading, kind))
+            heading = ""
+            kind = "evidence"
+        if summary is not None:
+            flush()
+            heading = summary.group(1).strip()
+            kind = _v2_region_for_role(_v2_details_role(heading))
+            if _V2_DETAILS_CLOSE_RE.search(raw):
+                flush()
+                heading, kind = detail_parents.pop() if detail_parents else ("", "evidence")
+            continue
+        if not in_fence and _V2_DETAILS_CLOSE_RE.search(raw):
+            flush()
+            heading, kind = detail_parents.pop() if detail_parents else ("", "evidence")
             continue
         candidate = None if in_fence else _v2_heading_text(raw)
         if candidate is not None:
@@ -732,6 +779,7 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
     section_role = "title"
     first_block = True
     parity_candidates: list[tuple[str, str]] = []
+    details_roles: list[str] = []
 
     def _flush_prose() -> None:
         if not prose:
@@ -745,13 +793,33 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 parity_candidates.append((sent, role))
                 _process_candidate(sent, set(), None, role)
 
-    for raw in issue_text.split("\n"):
+    for raw in _v2_strip_html_comments(issue_text).split("\n"):
         line = raw.rstrip()
         if line.strip().startswith("```"):
             in_fence = not in_fence
             _flush_prose()
             continue
         if in_fence:
+            continue
+        summary = _V2_SUMMARY_RE.search(line)
+        if _V2_DETAILS_OPEN_RE.search(line):
+            _flush_prose()
+            details_roles.append(section_role)
+            section_role = "descriptive"
+            label_syms = set()
+        if summary is not None:
+            _flush_prose()
+            section_role = _v2_details_role(summary.group(1))
+            label_syms = set()
+            if _V2_DETAILS_CLOSE_RE.search(line):
+                section_role = details_roles.pop() if details_roles else "neutral"
+            continue
+        if _V2_DETAILS_CLOSE_RE.search(line):
+            _flush_prose()
+            section_role = details_roles.pop() if details_roles else "neutral"
+            label_syms = set()
+            continue
+        if _V2_DETAILS_OPEN_RE.search(line):
             continue
         if not line.strip():
             _flush_prose()
