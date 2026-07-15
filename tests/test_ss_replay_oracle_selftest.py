@@ -1856,6 +1856,8 @@ def test_child_feeds_successful_same_byte_write_regardless_of_post_edit_telemetr
 
         @staticmethod
         def _augment_output(action, out):
+            assert FakeSeam._batch_commit_installed is True
+            assert FakeSeam._batch_install_failed is False
             calls.append(action)
 
     receipt = sro.MaterializationReceipt(

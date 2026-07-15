@@ -428,6 +428,19 @@ class StubSeamDriver:
         self._task = ""
 
 
+def _arm_serial_observation_boundary(g) -> None:
+    """Declare the replay driver's one-action-per-observation ownership.
+
+    Production must install the formatter-level batch commit before the global
+    arbiter may emit.  This replay driver has no formatter because each call to
+    ``_augment_output`` is already one complete recorded observation.  Arm that
+    equivalent boundary explicitly so the production fail-closed guard remains
+    intact while serial replay still exercises the real delivery seam.
+    """
+    g._batch_install_failed = False
+    g._batch_commit_installed = True
+
+
 class MiniSeamDriver:
     """Drives the REAL ``gt_mini_patch`` seam over a task, mirroring ss_gate.py's RealSeamDriver
     idiom (import = install; arm Profile-2 + the per-arm ``GT_SS_*`` flags; point _db_path/_root;
@@ -463,6 +476,7 @@ class MiniSeamDriver:
         os.environ.pop("GT_BASELINE", None)
         import gt_mini_patch as g  # noqa: E402 — import side effects ARE the seam install
         from groundtruth.runtime import rl_profile as rp  # noqa: E402
+        _arm_serial_observation_boundary(g)
         self._g = g
         core = dict(rp.resolve_profile({"GT_RL_PROFILE": "2"}))
         core["GT_RL_PROFILE"] = "2"
@@ -1854,6 +1868,7 @@ def replay_child_main(task: str, recorded_root: Path, out_path: Path,
     if ledger.is_file():
         ledger.unlink()
     import gt_mini_patch as g  # noqa: E402 — fresh install in THIS process
+    _arm_serial_observation_boundary(g)
     from ss_replay_toolchain import (  # noqa: E402
         build_replay_mutation_executor,
         install_replay_edit_executor,

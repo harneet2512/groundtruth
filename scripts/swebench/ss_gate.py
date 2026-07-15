@@ -455,6 +455,17 @@ def _read_runtime_ledger(path: Path) -> list[dict]:
     return rows
 
 
+def _arm_serial_observation_boundary(g) -> None:
+    """Declare the gate driver's one-action-per-observation ownership.
+
+    The live agent needs the formatter-level batch transaction.  Gate fixtures
+    call the seam once for each complete observation, so this serial driver is
+    itself the equivalent commit boundary.
+    """
+    g._batch_install_failed = False
+    g._batch_commit_installed = True
+
+
 class RealSeamDriver:
     """Drives the REAL ``gt_mini_patch`` seam over the fixture repo. Public entry points only."""
 
@@ -466,6 +477,7 @@ class RealSeamDriver:
         os.environ.pop("GT_BASELINE", None)
         import gt_mini_patch as g  # noqa: E402 — import side effects are the seam install
         from groundtruth.runtime import rl_profile as rp  # noqa: E402
+        _arm_serial_observation_boundary(g)
         self.g = g
         # The full Profile-2 member map (every member -> "1"), plus the master switches.
         core = dict(rp.resolve_profile({"GT_RL_PROFILE": "2"}))
