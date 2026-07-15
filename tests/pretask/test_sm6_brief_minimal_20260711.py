@@ -1,15 +1,15 @@
 r"""SM-6 (B) — the step-0 baked-brief reduction (GT_BRIEF_MINIMAL). 2026-07-11.
 
-The plan: ``Brief step-0 -> obligations + minimal orientation ONLY`` — retire
-``<gt-graph-map>`` / ``<gt-localization>`` / contract narration; localization rides the
-REACTIVE ``def_partition`` (post_search) channel instead of the proactive step-0 brief
-(whose localization efficacy measured ~null).
+The plan: ``Brief step-0 -> obligations + calibrated minimal orientation`` — retire
+graph-map and contract narration; HIGH keeps one file header, while MEDIUM/LOW keep
+their compact contention and grep hedge. Reactive ``def_partition`` remains the
+post-search follow-up channel.
 
 CARDINAL invariants (the LIPI checks all by execution):
   * FLAG-GATED, DEFAULT-OFF, BYTE-IDENTICAL WHEN OFF — the reducer is invoked ONLY inside
     ``if _brief_minimal_on():`` at BOTH generate_v1r_brief return sites (AST pin), and
     ``_brief_minimal_on()`` is False for every off-token.
-  * KEEPS obligations + minimal 'which file' orientation; DROPS the three named surfaces.
+  * KEEPS obligations + calibrated minimal orientation; MEDIUM/LOW retain contention + hedge.
   * NO DARK GAP: ``def_partition`` is an enabled Profile-2 fact class + ``post_search`` a
     Profile-2 event bridge, so removing brief localization does not blind the agent.
   * LEAK = 0: the reducer never introduces a test identity (it only removes bytes).
@@ -120,8 +120,89 @@ def test_reduction_keeps_obligations_and_minimal_orientation():
     assert "2. src/db.py (set_parse)" in red
 
 
+def test_medium_minimal_preserves_compact_contention_and_honest_visible_count():
+    """MEDIUM is a contention set, never a naked singular file assertion."""
+    full = "\n".join([
+        '<gt-localization confidence="medium">',
+        "Candidate edit targets (reason over these — confirm the edit target with grep):",
+        "  1. src/localizer-first.py — guessed_leaf",
+        "  2. src/evidence-first.py — verified_leaf",
+        "  3. .github/workflows/check.yml",
+        "</gt-localization>",
+        "<gt-task-brief>",
+        "1. src/evidence-first.py (verified_leaf)",
+        "   Callers: one",
+        "2. src/localizer-first.py (guessed_leaf)",
+        "   Callers: two",
+        "</gt-task-brief>",
+    ])
+
+    red = v._reduce_brief_to_minimal(full)
+
+    assert '<gt-localization confidence="medium">' in red
+    assert "confirm the edit target with grep" in red
+    assert "1. src/localizer-first.py" in red
+    assert "2. src/evidence-first.py" in red
+    # The file-entry headers would duplicate and contradict the contention block.
+    assert red.count("src/localizer-first.py") == 1
+    assert red.count("src/evidence-first.py") == 1
+    visible = v._model_visible_localization_entries(
+        red,
+        [
+            v.FileEntry(path="src/evidence-first.py", score=0.9),
+            v.FileEntry(path="src/localizer-first.py", score=0.8),
+            v.FileEntry(path=".github/workflows/check.yml", score=0.7),
+            v.FileEntry(path="src/dark.py", score=0.6),
+        ],
+    )
+    assert [entry.path for entry in visible] == [
+        "src/evidence-first.py", "src/localizer-first.py", ".github/workflows/check.yml",
+    ]
+    candidate_ids = [v._localization_candidate_id(entry.path) for entry in visible]
+    receipts = v._brief_block_receipts(
+        red, localization_candidate_ids=candidate_ids,
+    )
+    localization_receipts = [
+        receipt for receipt in receipts
+        if receipt["fact_class"] == "localization"
+    ]
+    assert [receipt["candidate_id"] for receipt in localization_receipts] == candidate_ids
+    assert all(
+        receipt["label"] == "localization-header"
+        for receipt in localization_receipts
+    )
+    assert len({tuple(receipt["char_span"]) for receipt in localization_receipts}) == len(
+        candidate_ids
+    )
+    for receipt, entry in zip(localization_receipts, visible):
+        start, end = receipt["char_span"]
+        assert entry.path in red[start:end]
+
+
+def test_contention_receipts_recover_normalization_equivalent_visible_paths():
+    for visible_path in (
+        "./.github/workflows/check.yml",
+        "././src/module.py",
+        "/src/absolute-tolerated.py",
+    ):
+        text = "\n".join((
+            '<gt-localization confidence="medium">',
+            f"  1. {visible_path}",
+            "</gt-localization>",
+        ))
+        candidate_id = v._localization_candidate_id(visible_path)
+        receipts = v._brief_block_receipts(
+            text, localization_candidate_ids=[candidate_id],
+        )
+        assert len(receipts) == 1
+        receipt = receipts[0]
+        assert receipt["candidate_id"] == candidate_id
+        start, end = receipt["char_span"]
+        assert text[start:end] == f"  1. {visible_path}"
+
+
 # --------------------------------------------------------------------------- #
-# DROP — the three named surfaces + their narration are retired.
+# DROP — HIGH localization and heavy narration are retired.
 # --------------------------------------------------------------------------- #
 def test_reduction_drops_graph_map_and_localization():
     red = v._reduce_brief_to_minimal(_FULL_BRIEF)

@@ -164,6 +164,53 @@ def test_real_v2_producer_seal_is_split_into_production_shaped_source_receipts(t
         assert rows[feature]["status"] == "UNMEASURED"
 
 
+def test_minimal_contention_candidate_joins_shared_header_bytes(tmp_path):
+    """A retained MEDIUM candidate keeps source->block->seal->receipt lineage."""
+    payload, _, trajectory = _artifacts(tmp_path)
+    brief = "\n".join([
+        '<gt-localization confidence="medium">',
+        "Candidate edit targets (reason over these — confirm the edit target with grep):",
+        "  1. ./.github/scripts/check.py — load",
+        "  2. src/pkg/other.py — parse",
+        "</gt-localization>",
+        "<gt-task-brief>",
+        "Requirements to satisfy (from the issue):",
+        "- [ ] preserve loader behavior",
+        "</gt-task-brief>",
+    ])
+    candidate_id = "localization:.github/scripts/check.py"
+    payload["brief_text"] = brief
+    payload["brief_sha256"] = _sha(brief)
+    payload["metrics"]["localization_proof"][0]["path"] = (
+        "./.github/scripts/check.py"
+    )
+    payload["metrics"]["localization_proof"][0]["candidate_id"] = candidate_id
+    payload["metrics"]["block_receipts"] = _brief_block_receipts(
+        brief,
+        localization_candidate_ids=[
+            candidate_id, "localization:src/pkg/other.py",
+        ],
+    )
+    trajectory["messages"][0]["content"] = brief + "\n\nFix the issue."
+    trajectory["messages"][1]["content"] = (
+        "I will preserve ./.github/scripts/check.py behavior."
+    )
+    ledger = _runtime_join(tmp_path, brief, trajectory, producer_seal=True)
+
+    row = collect_acq_provenance(payload, ledger, trajectory)["graph_validity"]
+
+    assert row["status"] == "MEASURED"
+    assert row["receipt_level"] == 2
+    assert row["block_id"] == "localization-header:candidate-1"
+    receipt = next(
+        item for item in payload["metrics"]["block_receipts"]
+        if item.get("candidate_id") == candidate_id
+    )
+    start, end = receipt["char_span"]
+    assert brief[start:end] == "  1. ./.github/scripts/check.py — load"
+    assert row["block_content_sha256_16"] == receipt["content_hash"][:16]
+
+
 def test_typed_candidate_local_sources_join_to_the_same_sealed_file_receipt(tmp_path):
     payload, ledger, trajectory = _artifacts(tmp_path, extended_sources=True)
     rows = collect_acq_provenance(payload, ledger, trajectory)

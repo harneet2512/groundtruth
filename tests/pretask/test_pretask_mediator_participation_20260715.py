@@ -72,6 +72,54 @@ def test_terminal_mediators_share_exact_final_block_identity(monkeypatch) -> Non
     assert len({(r["control_ref"]["feature_id"], r["candidate_id"]) for r in rows}) == len(rows)
 
 
+def test_minimal_contention_mediators_join_shared_header_identity(monkeypatch) -> None:
+    monkeypatch.setenv("GT_INSEAM_METRICS", "1")
+    monkeypatch.setenv("GT_CONTENT_LEG", "1")
+    monkeypatch.setenv("GT_SEM_BODY", "1")
+    text = "\n".join((
+        '<gt-localization confidence="medium">',
+        "Candidate edit targets (confirm with grep):",
+        "  1. ././src/alpha.py — alpha",
+        "  2. /src/beta.py — beta",
+        "</gt-localization>",
+    ))
+    candidate_ids = [
+        v1r._localization_candidate_id("././src/alpha.py"),
+        v1r._localization_candidate_id("/src/beta.py"),
+    ]
+    receipts = v1r._brief_block_receipts(
+        text, localization_candidate_ids=candidate_ids,
+    )
+    rows = v1r._terminal_pretask_mediator_participation(
+        text,
+        receipts,
+        content_paths={"/src/beta.py"},
+        content_decision="APPLIED",
+        content_reason="margin_cleared",
+        semantic_anchor_paths={"././src/alpha.py"},
+        semantic_localizer_paths={"././src/alpha.py", "/src/beta.py"},
+    )
+
+    applied = [row for row in rows if row["decision"] == "APPLIED"]
+    assert {
+        (row["control_ref"]["feature_id"], row["candidate_id"])
+        for row in applied
+    } == {
+        ("GT_CONTENT_LEG", candidate_ids[1]),
+        ("GT_SEM_BODY", candidate_ids[0]),
+        ("GT_SEM_BODY", candidate_ids[1]),
+    }
+    receipts_by_id = {receipt["candidate_id"]: receipt for receipt in receipts}
+    for row in applied:
+        receipt = receipts_by_id[row["candidate_id"]]
+        start, end = receipt["char_span"]
+        exact_line = text[start:end]
+        assert row["candidate_chars"] == len(exact_line)
+        assert row["candidate_sha256_16"] == hashlib.sha256(
+            exact_line.encode("utf-8", "surrogatepass")
+        ).hexdigest()[:16]
+
+
 def test_terminal_mediators_do_not_promote_non_survivors(monkeypatch) -> None:
     monkeypatch.setenv("GT_INSEAM_METRICS", "1")
     monkeypatch.setenv("GT_CONTENT_LEG", "1")

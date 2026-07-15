@@ -619,11 +619,19 @@ def test_51a_generate_brief_full_carries_retired_surfaces(tmp_path, monkeypatch,
     """FLAG OFF (baseline): generate_v1r_brief produces the FULL step-0 brief carrying
     <gt-localization>, <gt-graph-map>, contract narration, AND <gt-obligations>. The
     certificate reports it NOT minimal (a real, non-vacuous baseline)."""
+    from groundtruth.pretask import v1r_brief as v1r
     from groundtruth.pretask.v1r_brief import brief_minimal_certificate, generate_v1r_brief
     db = _brief_fixture(tmp_path)
     monkeypatch.delenv("GT_BRIEF_MINIMAL", raising=False)
     monkeypatch.setenv("GT_GRAPH_MAP_DEMAND", "1")   # allow the graph-map into the baseline
     monkeypatch.delenv("GT_GATEWAY", raising=False)  # (gateway would retire the graph-map)
+    monkeypatch.setattr(
+        v1r,
+        "_localization_header_for_entries",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("minimal contention renderer reached while flag off")
+        ),
+    )
     full = generate_v1r_brief(_MINIMAL_ISSUE, str(tmp_path), db).brief_text
 
     assert "<gt-localization" in full
@@ -636,23 +644,43 @@ def test_51a_generate_brief_full_carries_retired_surfaces(tmp_path, monkeypatch,
 
 
 def test_51b_generate_brief_minimal_drops_retired_keeps_obligations(tmp_path, monkeypatch, _semantic_off):
-    """FLAG ON: generate_v1r_brief produces a MINIMAL brief — the three named surfaces are
-    RETIRED while <gt-obligations> + minimal 'which file' orientation are RETAINED. The
-    certificate CERTIFIES minimalization occurred (the SM-8 arm-integrity gate)."""
+    """FLAG ON retires heavy narration but preserves calibrated MEDIUM contention.
+
+    The certificate still proves minimalization and retained obligations.
+    """
     from groundtruth.pretask.v1r_brief import brief_minimal_certificate, generate_v1r_brief
     db = _brief_fixture(tmp_path)
     monkeypatch.setenv("GT_BRIEF_MINIMAL", "1")
     monkeypatch.setenv("GT_GRAPH_MAP_DEMAND", "1")
     monkeypatch.delenv("GT_GATEWAY", raising=False)
-    mini = generate_v1r_brief(_MINIMAL_ISSUE, str(tmp_path), db).brief_text
+    result = generate_v1r_brief(
+        _MINIMAL_ISSUE, str(tmp_path), db, max_files=2,
+    )
+    mini = result.brief_text
 
-    assert "<gt-localization" not in mini
+    # MEDIUM/LOW localization is a calibrated contention set: its confidence,
+    # alternatives, and grep hedge are part of minimal orientation, not narration.
+    assert '<gt-localization confidence="medium">' in mini
+    assert "confirm the edit target with grep" in mini
     assert "<gt-graph-map>" not in mini
     assert not any(t in mini for t in ("Callers:", "Context:", "EDIT-TARGET CONTRACTS",
                                        "Related files", "Scope chain", "Expected behavior"))
     assert "<gt-obligations>" in mini                       # obligations retained
     import re as _re
     assert _re.search(r"(?m)^\s*\d+\.\s+pkg/config\.py", mini)  # minimal 'which file' orientation
+    loc_block = _re.search(
+        r'<gt-localization\b[^>]*>\n(.*?)\n</gt-localization>',
+        mini,
+        _re.DOTALL,
+    )
+    assert loc_block is not None
+    visible_paths = _re.findall(
+        r"(?m)^\s*\d+\.\s+([^\s]+)", loc_block.group(1),
+    )
+    assert visible_paths == [entry.path for entry in result.files]
+    assert result.rendered_candidate_count == len(result.files) == len(visible_paths)
+    assert [proof["path"] for proof in result.localization_proof] == visible_paths
+    assert len(visible_paths) <= 2
     # THE CERTIFICATE the Fable reviewer required — SM-8 rebake calls this on its baked brief.
     cert = brief_minimal_certificate(mini)
     assert cert["minimal"] is True, cert

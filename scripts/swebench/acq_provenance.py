@@ -298,12 +298,17 @@ def _validated_blocks(brief: str, raw: object) -> dict[str, dict[str, Any]]:
         block_id = receipt.get("block_id")
         fact_class = receipt.get("fact_class")
         label = receipt.get("label")
+        candidate_id = receipt.get("candidate_id")
         span = receipt.get("char_span")
         digest = receipt.get("content_hash")
         if not isinstance(block_id, str) or not block_id or block_id in blocks:
             raise ValueError("acq provenance: block ids must be non-empty and unique")
         if not isinstance(fact_class, str) or not isinstance(label, str):
             raise ValueError(f"acq provenance: block classification missing for {block_id}")
+        if candidate_id is not None and (
+            not isinstance(candidate_id, str) or not candidate_id
+        ):
+            raise ValueError(f"acq provenance: malformed candidate id for {block_id}")
         if (
             not isinstance(span, list) or len(span) != 2
             or not all(isinstance(v, int) and not isinstance(v, bool) for v in span)
@@ -316,12 +321,14 @@ def _validated_blocks(brief: str, raw: object) -> dict[str, dict[str, Any]]:
         if not isinstance(digest, str) or digest != _sha256(rendered):
             raise ValueError(f"acq provenance: block content hash mismatch for {block_id}")
         blocks[block_id] = {
+            "block_id": block_id,
             "rendered_text": rendered,
             "chars": end - start,
             "char_span": [start, end],
             "sha256": digest,
             "fact_class": fact_class,
             "label": label,
+            "candidate_id": candidate_id,
         }
     return blocks
 
@@ -532,12 +539,29 @@ def collect_acq_provenance(
             continue
         block_id = f"file-entry-{rank}"
         block = blocks.get(block_id)
-        if block is None:
-            continue
-        if block["fact_class"] != "localization" or block["label"] != block_id:
-            continue
-        if not _path_in_block(path, str(block["rendered_text"])):
-            continue
+        if not (
+            block is not None
+            and block["fact_class"] == "localization"
+            and block["label"] == block_id
+            and _path_in_block(path, str(block["rendered_text"]))
+        ):
+            # Minimal MEDIUM/LOW intentionally has no duplicate file-entry blocks:
+            # every visible candidate is sealed to the shared contention header.
+            # Join only through the producer-issued candidate identity plus exact
+            # path bytes; never infer a candidate from rank or path existence alone.
+            proof_candidate_id = proof.get("candidate_id")
+            matches = [
+                candidate_block for candidate_block in blocks.values()
+                if candidate_block["fact_class"] == "localization"
+                and candidate_block["label"] == "localization-header"
+                and isinstance(proof_candidate_id, str)
+                and candidate_block.get("candidate_id") == proof_candidate_id
+                and _path_in_block(path, str(candidate_block["rendered_text"]))
+            ]
+            if len(matches) != 1:
+                continue
+            block = matches[0]
+            block_id = str(block["block_id"])
         features = _source_features(proof, metrics)
         if not features:
             continue

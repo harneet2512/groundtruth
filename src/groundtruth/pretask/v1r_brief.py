@@ -14,7 +14,7 @@ import re as _re
 import sqlite3
 import subprocess
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 # Single source of truth for the categorical correct-or-quiet rule lives in
 # curation_map: an edge is a caller FACT only when its resolution_method is
@@ -1532,7 +1532,9 @@ def _brief_native_on() -> bool:
     ``<gt-obligations>`` tag block). When ON the SAME obligation rows render as a plain requirements
     checklist (``- [ ] <obligation>`` under a one-line plain header, NO ``<gt-*>`` tag). REBAKE-
     RELEVANT: read at brief-GENERATION, dormant + byte-identical on a pre-baked / off run. Retires
-    ONLY the obligations FRAME; the localization/graph-map surfaces retire via GT_BRIEF_MINIMAL."""
+    ONLY the obligations FRAME; GT_BRIEF_MINIMAL retires graph/contract narration and
+    retains calibrated MEDIUM/LOW localization contention when singularizing it would
+    overstate confidence."""
     import os as _os
     return (_os.environ.get("GT_BRIEF_NATIVE") or "").strip().lower() not in (
         "", "0", "false", "no", "off")
@@ -1694,28 +1696,27 @@ def _block_receipts_on() -> bool:
 #
 # DEFAULT-OFF, byte-identical when off, and BAKED (the brief is generated at substrate-
 # build time and consumed read-only in-container — gt_agent._substrate_brief), so this
-# reduction has ZERO effect on any run until the flag is set at the SM-8 REBAKE. It gates
-# the RETIREMENT of the three heavy step-0 narration surfaces the plan named
-# (<gt-graph-map> / <gt-localization> / contract narration), keeping ONLY obligations +
-# a minimal 'which file' orientation. Localization is NOT lost: it rides the REACTIVE
-# def_partition/post_search channel (a Profile-2 enabled fact class, rl_profile
-# PROFILE_MANIFESTS['2'].enabled_fact_classes), which answers the agent's OWN grep with
-# definition facts at the moment localization is decided — the efficacy channel the
-# measured-null proactive brief localization never was.
+# reduction has ZERO effect on any run until the flag is set at the SM-8 REBAKE.
+# Graph-map and contract narration are retired. HIGH reduces to one orientation
+# header; MEDIUM/LOW retain compact confidence, contention, and the grep hedge so
+# uncertainty cannot become a singular assertion. Reactive def_partition/post_search
+# remains the follow-up localization channel after the agent's own search.
 # --------------------------------------------------------------------------- #
 def _brief_minimal_on() -> bool:
     """GT_BRIEF_MINIMAL master switch — default OFF, byte-identical. When OFF the brief is
     generated exactly as before (the reducer is never invoked). When ON (set only at the
     SM-8 substrate rebake) the step-0 brief is reduced to obligations + minimal
-    orientation; the graph-map / localization / contract-narration surfaces are retired."""
+    orientation; graph-map and contract narration are retired, while MEDIUM/LOW
+    localization contention is retained as an indivisible calibrated fact."""
     import os as _os
     return (_os.environ.get("GT_BRIEF_MINIMAL") or "").strip().lower() not in (
         "", "0", "false", "no", "off",
     )
 
 
-# The segmented-block labels the minimal reduction DROPS whole. ``localization-header``
-# (<gt-localization>) and ``graph-map`` (<gt-graph-map>) are the two named tagged blocks;
+# The segmented-block labels the minimal reduction normally DROPS whole. A MEDIUM/LOW
+# ``localization-header`` is conditionally retained; HIGH drops it and keeps one file header.
+# ``graph-map`` (<gt-graph-map>) is always dropped;
 # ``edit-target-contracts`` + ``companion`` (Other candidates cross-file facts / Related
 # files / Scope chain) are the contract/scope NARRATION; ``expected-behavior`` is the
 # issue-spec echo. A ``file-entry`` block is REDUCED to its header line (the minimal
@@ -1733,19 +1734,33 @@ def _reduce_brief_to_minimal(text: str) -> str:
     Reuses the B-30 rail's :func:`_segment_brief_blocks` — the ONE tested brief taxonomy —
     so the reduction tracks the exact block boundaries the token enforcer already trusts.
     KEEPS: the ``<gt-task-brief>`` scaffold, the ``<gt-obligations>`` block, the
-    orientation-note, and each file-entry's HEADER line (the 'which file' orientation).
-    DROPS whole: ``<gt-graph-map>``, ``<gt-localization>``, ``EDIT-TARGET CONTRACTS``, the
+    orientation-note, plus either a HIGH file-entry header or the MEDIUM/LOW compact
+    localization contention block. DROPS whole: ``<gt-graph-map>``, HIGH
+    ``<gt-localization>``, ``EDIT-TARGET CONTRACTS``, the
     per-file contract/caller/call evidence bodies, the cross-file 'Other candidates'/scope
     hints, and the 'Expected behavior' echo. PURE + deterministic; NEVER called when
     GT_BRIEF_MINIMAL is off (byte-identical). Idempotent: re-reducing a minimal brief
     returns it unchanged (its blocks are already only kept labels + header-only entries)."""
     blocks = _segment_brief_blocks(text)
+    # MEDIUM/LOW is not a singular localization assertion: its confidence label,
+    # contention set, and grep-confirmation hedge are one indivisible fact.  The
+    # old reducer dropped that block but retained a file-entry header, converting
+    # uncertainty into a naked top-1 steer.  Keep the already-compact contention
+    # block and suppress duplicate file-entry headers.  HIGH remains on the prior
+    # minimal path (one orientation header, no localization narration).
+    _loc_tier = _localization_confidence_tier(text)
+    _keep_contention = _loc_tier in {"medium", "low"}
     kept: list[str] = []
     for b in blocks:
         label = b["label"]
+        if label == "localization-header" and _keep_contention:
+            kept.append(b["text"])
+            continue
         if label in _BRIEF_MINIMAL_DROP_LABELS:
             continue
         if label.startswith("file-entry"):
+            if _keep_contention:
+                continue
             head = b["text"].split("\n", 1)[0]
             if head.strip():
                 kept.append(head)  # minimal orientation: the header, not the contract body
@@ -1762,6 +1777,51 @@ def _reduce_brief_to_minimal(text: str) -> str:
     while out_lines and out_lines[-1].strip() == "":
         out_lines.pop()
     return "\n".join(out_lines)
+
+
+def _localization_confidence_tier(text: str) -> str:
+    """Return the rendered localization tier, or ``""`` when absent/unknown."""
+    match = _re.search(
+        r'<gt-localization\b[^>]*\bconfidence=["\'](high|medium|low)["\']',
+        text or "",
+        _re.IGNORECASE,
+    )
+    return match.group(1).lower() if match else ""
+
+
+def _model_visible_localization_entries(
+    brief_text: str,
+    candidates: list[FileEntry],
+) -> list[FileEntry]:
+    """Return candidates whose paths occur in a model-visible candidate block.
+
+    ``.files`` and ``rendered_candidate_count`` are delivery claims.  They must be
+    joined to the final bytes, not to the wider internal ranking list.  Restrict
+    matching to localization headers and file-entry blocks so a path mentioned only
+    as a caller/neighbor is not promoted to a delivered edit candidate.
+    """
+    candidate_blocks = [
+        block["text"]
+        for block in _segment_brief_blocks(brief_text or "")
+        if block["label"] == "localization-header"
+        or block["label"].startswith("file-entry")
+    ]
+    if not candidate_blocks:
+        return []
+    visible = "\n".join(candidate_blocks).replace("\\", "/")
+    out: list[FileEntry] = []
+    for entry in candidates:
+        raw_path = str(entry.path or "").replace("\\", "/")
+        normalized_path = _gl_normalize(raw_path)
+        variants = [path for path in dict.fromkeys((raw_path, normalized_path)) if path]
+        if not variants:
+            continue
+        if any(_re.search(
+            rf"(?<![A-Za-z0-9_./-]){_re.escape(path)}(?![A-Za-z0-9_./-])",
+            visible,
+        ) for path in variants):
+            out.append(entry)
+    return out
 
 
 def _brief_minimal_participation(before: str, after: str) -> list[dict]:
@@ -1805,12 +1865,12 @@ def _brief_minimal_participation(before: str, after: str) -> list[dict]:
 # The retired step-0 narration markers a minimal (SM-6 B) brief MUST NOT contain, and the
 # obligation marker it MUST retain. Kept in lockstep with :data:`_BRIEF_MINIMAL_DROP_LABELS`
 # + :func:`_reduce_brief_to_minimal` (the SM-7 gate reddens on a drift). These are the
-# byte-level shadows of the dropped BLOCK labels: ``localization-header`` -> ``<gt-localization``,
+# byte-level shadows of always-dropped BLOCK labels. HIGH localization is checked
+# conditionally by :func:`brief_minimal_certificate`; MEDIUM/LOW is minimal-safe.
 # ``graph-map`` -> ``<gt-graph-map>``, ``edit-target-contracts``/``companion`` -> the contract/
 # caller/scope narration lines, ``expected-behavior`` -> the issue-spec echo.
 _BRIEF_MINIMAL_RETIRED_MARKERS: tuple[str, ...] = (
     "<gt-graph-map>",
-    "<gt-localization",
     "EDIT-TARGET CONTRACTS",
     "Callers:",
     "Calls:",
@@ -1847,6 +1907,14 @@ def brief_minimal_certificate(brief_text: str) -> dict:
     """
     text = brief_text or ""
     retired = [m for m in _BRIEF_MINIMAL_RETIRED_MARKERS if m in text]
+    # A compact MEDIUM/LOW contention block is now part of minimal orientation:
+    # removing it changes calibrated uncertainty into a singular assertion.  HIGH
+    # localization narration remains retired because its one file-entry header is
+    # sufficient orientation.
+    if "<gt-localization" in text and _localization_confidence_tier(text) not in {
+        "medium", "low",
+    }:
+        retired.append("<gt-localization")
     # ITEM-5: the obligations contract is retained under EITHER frame — the ``<gt-obligations>`` tag
     # (default) OR the GT_BRIEF_NATIVE plain checklist header — so a combined MINIMAL+NATIVE rebake
     # still certifies obligations_present (the native form has no tag to match).
@@ -1872,7 +1940,7 @@ def _fact_class_for_label(label: str) -> str | None:
 
 def _localization_candidate_id(file_path: str) -> str:
     """Stable identity shared by a ranked file and its rendered file-entry block."""
-    normalized = str(file_path or "").replace("\\", "/").lstrip("./").lstrip("/")
+    normalized = _gl_normalize(str(file_path or ""))
     return f"localization:{normalized}" if normalized else "localization:none"
 
 
@@ -1912,6 +1980,9 @@ def _brief_block_receipts(
     _label_total: dict[str, int] = {}
     for _lab in fact_labels:
         _label_total[_lab] = _label_total.get(_lab, 0) + 1
+    _has_file_entries = any(
+        block["label"].startswith("file-entry") for block in blocks
+    )
 
     receipts: list[dict] = []
     offset = 0
@@ -1929,6 +2000,56 @@ def _brief_block_receipts(
         k = _seen.get(label, 0)
         _seen[label] = k + 1
         block_id = label if _label_total.get(label, 0) <= 1 else f"{label}#{k}"
+        if (
+            label == "localization-header"
+            and not _has_file_entries
+            and localization_candidate_ids
+        ):
+            # Minimal MEDIUM/LOW renders the whole contention set in this one
+            # physical block and intentionally drops duplicate file-entry blocks.
+            # Emit one logical candidate join per visible candidate, sealed to
+            # that candidate's exact header line.  These subspans are metadata
+            # inside one physical delivery, not multiple doses.
+            for candidate_index, candidate_id in enumerate(
+                localization_candidate_ids, start=1,
+            ):
+                prefix = "localization:"
+                candidate_path = (
+                    candidate_id[len(prefix):]
+                    if candidate_id.startswith(prefix) else ""
+                )
+                matches = list(_re.finditer(
+                    rf"(?m)^[ \t]*\d+\.[ \t]+(?:\./)*/?"
+                    rf"{_re.escape(candidate_path)}"
+                    rf"(?![A-Za-z0-9_./-])",
+                    seg.replace("\\", "/"),
+                )) if candidate_path else []
+                line_spans = {
+                    (
+                        seg.rfind("\n", 0, match.start()) + 1,
+                        (
+                            len(seg)
+                            if seg.find("\n", match.end()) < 0
+                            else seg.find("\n", match.end())
+                        ),
+                    )
+                    for match in matches
+                }
+                if len(line_spans) != 1:
+                    continue
+                line_start, line_end = next(iter(line_spans))
+                candidate_bytes = seg[line_start:line_end]
+                receipts.append({
+                    "block_id": f"{block_id}:candidate-{candidate_index}",
+                    "fact_class": fact_class,
+                    "label": label,
+                    "candidate_id": candidate_id,
+                    "char_span": [start + line_start, start + line_end],
+                    "content_hash": _hashlib.sha256(
+                        candidate_bytes.encode("utf-8")
+                    ).hexdigest(),
+                })
+            continue
         if label.startswith("file-entry"):
             candidate_id = (
                 localization_candidate_ids[_file_entry_index]
@@ -4472,6 +4593,53 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     return "\n".join(out), shown[0].file_path
 
 
+def _localization_header_for_entries(
+    loc: LocalizerResult | None,
+    graph_db: str,
+    issue_text: str,
+    entries: list[FileEntry],
+) -> tuple[str, str, str]:
+    """Render one localization order without letting a weak pipe override another.
+
+    HIGH is a singular, structurally gated target and retains the historical
+    localizer-primary contract.  MEDIUM/LOW are contention sets: order their shared
+    candidates by the terminal evidence order already represented by ``entries``.
+    The input objects are never mutated.
+    """
+    header, primary = _localization_header(loc, graph_db, issue_text)
+    tier = _localization_confidence_tier(header)
+    if tier not in {"medium", "low"} or loc is None or not loc.candidates or not entries:
+        return header, primary, tier
+
+    terminal_rank = {
+        _gl_normalize(entry.path): index for index, entry in enumerate(entries)
+    }
+    original_rank = {id(candidate): index for index, candidate in enumerate(loc.candidates)}
+    shared = [
+        candidate for candidate in loc.candidates
+        if _gl_normalize(candidate.file_path) in terminal_rank
+    ]
+    if not shared:
+        # No candidate has terminal evidence.  Under minimal mode the normal
+        # file-entry renderer remains the honest orientation; do not retain an
+        # unjoinable localizer-only contention block.
+        return "", "", ""
+    ordered = sorted(
+        shared,
+        key=lambda candidate: (
+            terminal_rank.get(_gl_normalize(candidate.file_path), 10**6),
+            original_rank[id(candidate)],
+        ),
+    )
+    if len(ordered) == len(loc.candidates) and all(
+        a is b for a, b in zip(ordered, loc.candidates)
+    ):
+        return header, primary, tier
+    ordered_loc = replace(loc, candidates=ordered)
+    header, primary = _localization_header(ordered_loc, graph_db, issue_text)
+    return header, primary, _localization_confidence_tier(header)
+
+
 # Language-invariant generic identifiers — code builtins + ubiquitous collection methods that are
 # NEVER localization anchors even when an issue mentions them (the code equivalent of anchors.py's
 # _NL_FUNCTION_WORDS English-function-word filter — a LANGUAGE invariant, NOT a per-task blocklist;
@@ -5742,20 +5910,30 @@ def generate_v1r_brief(
             )
         )
 
-    # ---- L1 CROSS-WIRE FIX (single ordering source) ----
-    # Build the localization header HERE, BEFORE the L1-SCOPE block reads
-    # `entries[0]`, and make the file `<gt-localization>` names #1 the SAME
-    # `entries[0]` that L1-SCOPE, `render_brief`'s file list, the graph-map, and the
-    # EDIT-TARGET CONTRACTS block all key off. Previously the header was built far
-    # below (after L1-SCOPE/render) on `_loc.candidates`, while `entries` carried a
-    # SEPARATELY-ordered list — so `<gt-localization>` and the `files[0]`-keyed
-    # sub-blocks could name DIFFERENT #1 files (the confirmed cfn-lint-3749 self-
-    # contradiction). Reordering `entries` so its head equals the header's primary
-    # makes every brief sub-block consume one ordering verbatim. Pure reorder (no
-    # entry added/dropped); correct-or-quiet (no header / no match -> entries
-    # untouched); generalized (path-normalized match, no per-repo logic).
-    _loc_header, _loc_primary = _localization_header(_loc, graph_db, issue_text)
-    if _loc_header and _loc_primary and entries:
+    # ---- L1 CROSS-WIRE FIX (confidence-aware single ordering source) ----
+    # HIGH is a singular structural target, so its localizer primary aligns every
+    # file-keyed block. MEDIUM/LOW are contention sets: their header follows the
+    # already-terminal evidence order and MUST NOT reorder `entries`. This prevents
+    # a weak localizer #1 from overriding stronger fused evidence while keeping the
+    # brief internally consistent. Pure reorder of a frozen localizer view; no
+    # candidate is added/dropped and the inputs are not mutated.
+    if _brief_minimal_on():
+        # Minimal bytes and their telemetry share one bounded population.  Apply
+        # max_files before either renderer so no visible header candidate can sit
+        # outside `.files`/localization_proof.
+        entries = entries[:max_files]
+        _loc_header, _loc_primary, _loc_tier = _localization_header_for_entries(
+            _loc, graph_db, issue_text, entries,
+        )
+    else:
+        # The weak-order correction belongs to GT_BRIEF_MINIMAL's calibrated
+        # contention contract.  Keep the historical renderer call path exact when
+        # that flag is off; profile kill-switches must restore prior bytes.
+        _loc_header, _loc_primary = _localization_header(
+            _loc, graph_db, issue_text,
+        )
+        _loc_tier = _localization_confidence_tier(_loc_header)
+    if _loc_tier == "high" and _loc_header and _loc_primary and entries:
         _lp_norm = _gl_normalize(_loc_primary)
         _pi = next(
             (i for i, e in enumerate(entries) if _gl_normalize(e.path) == _lp_norm),
@@ -5951,10 +6129,11 @@ def generate_v1r_brief(
     brief_text = _render(_body_cap)
     tok = _count_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
 
-    # Decouple localization BREADTH from the evidence token budget. The delivered
-    # candidate list (.files) keeps the full rank-ordered localization set; only the
-    # rendered EVIDENCE bodies in brief_text are trimmed to the token rail. Before
-    # this, the trim popped entries -> .files, gutting localization to 1-2 files and
+    # Decouple localization BREADTH from the evidence token budget while rendering.
+    # `_loc_files` keeps the full rank-ordered set through detail trimming; after the
+    # final bytes are assembled, `.files` is joined back to paths actually visible in
+    # candidate blocks. Before the decoupling, trimming prematurely gutted localization
+    # to 1-2 files and
     # dropping golds the localizer ranked #0-#5 (proven on the held-out sweep:
     # geopandas-3226 gold @rank0 and sqllineage-557 @rank5 vanished from .files even
     # though the ranker placed them at/near the top; delivered Recall@5 fell to 0.40
@@ -5977,7 +6156,7 @@ def generate_v1r_brief(
     # rendered entries until under budget. This counts the FULL brief_text — which
     # already includes the (now-leading) <gt-graph-map> via _with_graph_map — so the
     # graph-map's bytes are inside the rail too. Floored at a readable minimum;
-    # rank-neutral (.files / candidate order untouched). Idempotent: a brief already
+    # rank-neutral (candidate order untouched). Idempotent: a brief already
     # under budget never enters this loop and is byte-identical to before.
     _BODY_CAP_FLOOR = 80
     while tok > max_brief_tokens and _body_cap > _BODY_CAP_FLOOR:
@@ -5994,7 +6173,7 @@ def generate_v1r_brief(
     # 244/242/242 tokens; the declared cap was never enforced). Enforce it as an
     # inviolable ceiling: drop whole rendered brief blocks lowest-priority first,
     # record what was suppressed, and truncate the residue only as a last resort.
-    # Rank/localizer untouched (.files == _loc_files, captured before the loops);
+    # Rank/localizer untouched (`_loc_files` was captured before the loops);
     # this trims DOSE, never which files the agent is told to consider. Idempotent:
     # a brief already within budget is unchanged (byte-identical) and _budget_suppressed
     # stays empty.
@@ -6015,11 +6194,11 @@ def generate_v1r_brief(
             _before_minimal, brief_text)
 
     # --- L1 signal-provenance counts (observability; no ranking effect) ---
-    # Count over the DELIVERED candidate set (.files == _loc_files[:max_files]).
+    # Count over the DELIVERED candidate set (final-byte joined; identical to `.files`).
     # Align each delivered entry to its top_records dict (carrying run_v74
     # `components`) by path so semantic/structural/fts5 contributions are read
     # from the ACTUAL signals computed during localization, not re-derived.
-    _delivered = _loc_files[:max_files]
+    _delivered = _model_visible_localization_entries(brief_text, _loc_files)
     _rec_by_path: dict[str, dict] = {}
     for _r in top_records:
         _rp = str(_r.get("path", ""))
@@ -6166,7 +6345,7 @@ def generate_v1r_brief(
     # byte-identical whether or not receipts are populated.
     _rendered_candidate_ids = [
         _localization_candidate_id(str(getattr(_e, "path", "") or ""))
-        for _e in entries
+        for _e in _delivered
     ]
     _block_receipts = (
         _brief_block_receipts(
@@ -6219,7 +6398,7 @@ def generate_v1r_brief(
             import json as _json
 
             l1_items = []
-            for entry in entries:
+            for entry in _delivered:
                 # confidence_score now reflects the GRAPH-TRAVERSAL witness
                 # strength (graph_localizer) when this file was witnessed, falling
                 # back to the v74 lexical score otherwise. This is the fix for the
@@ -6262,7 +6441,7 @@ def generate_v1r_brief(
             # close that gap. Deterministic-provenance + stdlib-shadow-guarded
             # (_resolved_witnesses_for_file); a name_match is NEVER emitted here.
             _primary_emitted = False
-            for entry in entries:
+            for entry in _delivered:
                 try:
                     _wits = _resolved_witnesses_for_file(graph_db, entry.path, repo_root)
                 except Exception:
@@ -6311,7 +6490,7 @@ def generate_v1r_brief(
             )
             structured = {
                 "candidates": l1_items,
-                "candidate_count": len(entries),
+                "candidate_count": len(_delivered),
                 # Provenance counts (same definitions as the V1RBriefResult fields):
                 # a candidate counts toward a signal iff that signal contributed a
                 # nonzero score / a real graph edge exists. These let a fail-closed
@@ -6330,10 +6509,10 @@ def generate_v1r_brief(
                 "k_sem_top": _k_sem_top,
                 "sem_components": _sem_components,
                 # legacy proxy (callees present) kept for back-compat readers
-                "neighbor_present_count": sum(1 for e in entries if e.callees),
-                "signature_count": sum(1 for e in entries if e.functions),
-                "witnessed_count": sum(1 for e in entries if e.witness),
-                "verified_witness_count": sum(1 for e in entries if e.witness_verified),
+                "neighbor_present_count": sum(1 for e in _delivered if e.callees),
+                "signature_count": sum(1 for e in _delivered if e.functions),
+                "witnessed_count": sum(1 for e in _delivered if e.witness),
+                "verified_witness_count": sum(1 for e in _delivered if e.witness_verified),
                 # Resolved deterministic call-edge witnesses surfaced at iter-0 — the
                 # signal the audited run reported as 0 / 'N/A'.
                 "l1_candidates_with_call_edge_count": _call_edge_count,
@@ -6341,7 +6520,7 @@ def generate_v1r_brief(
                 "warnings": [],
                 "abstain_reason": None,
             }
-            if not entries:
+            if not _delivered:
                 structured["abstain_reason"] = "no_candidates"
             with open("/tmp/gt_l1_structured.json", "w") as _f:
                 _json.dump(structured, _f)

@@ -756,6 +756,7 @@ from groundtruth.pretask.v1r_brief import (  # noqa: E402
     _top_function_names,
     _resolved_witnesses_for_file,
     _gl_normalize,
+    _localization_header_for_entries,
 )
 from groundtruth.pretask.graph_localizer import (  # noqa: E402
     Candidate,
@@ -854,6 +855,52 @@ def test_l1_alignment_moves_loc_primary_to_entries_front():
     assert entries[0].path == "src/gold.py"          # == _loc.candidates[0] (Pipe A)
     # the other entries keep their relative order behind the pinned primary
     assert [e.path for e in entries] == ["src/gold.py", "src/hub.py", "src/other.py"]
+
+
+def test_medium_header_follows_terminal_evidence_order_without_reordering_entries(tmp_path: Path):
+    """A non-HIGH localizer #1 cannot override the terminal evidence ordering."""
+    db = str(tmp_path / "g.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+              file_path TEXT, start_line INTEGER, is_test INTEGER DEFAULT 0);
+           CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
+              target_id INTEGER, type TEXT, source_line INTEGER,
+              resolution_method TEXT, confidence REAL DEFAULT 0.5);"""
+    )
+    conn.commit(); conn.close()
+    loc = _loc_result(
+        [
+            _cand("src/localizer-first.py", score=0.9, anchor="a1"),
+            _cand("src/evidence-first.py", score=0.8, anchor="a2"),
+            _cand("src/third.py", score=0.7, anchor="a3"),
+            _cand("src/localizer-only.py", score=0.6, anchor="a4"),
+        ],
+        anchors=["a1", "a2", "a3", "a4"],
+        agree={
+            _gl_normalize("src/localizer-first.py"): 1,
+            _gl_normalize("src/evidence-first.py"): 2,
+            _gl_normalize("src/third.py"): 1,
+        },
+    )
+    entries = [
+        FileEntry(path="src/evidence-first.py", score=0.95),
+        FileEntry(path="src/localizer-first.py", score=0.70),
+    ]
+
+    header, primary, tier = _localization_header_for_entries(
+        loc, db, "behavioral failure", entries,
+    )
+
+    assert tier == "medium"
+    assert primary == "src/evidence-first.py"
+    assert "1. src/evidence-first.py" in header
+    assert header.index("src/evidence-first.py") < header.index("src/localizer-first.py")
+    assert "src/third.py" not in header
+    assert "src/localizer-only.py" not in header
+    assert [entry.path for entry in entries] == [
+        "src/evidence-first.py", "src/localizer-first.py",
+    ]
 
 
 def test_localization_tier_medium_when_agreed_candidate_below_top(tmp_path: Path):
