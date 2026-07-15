@@ -453,6 +453,157 @@ def test_oracle_suppression_requires_attribution_at_exact_boundary_and_target_ab
         cases, recorded, unmapped_wrong_boundary, None)[0].verdict == sro.FAIL
 
 
+def test_oracle_provenance_accepts_exact_sealed_filtered_delivery():
+    """A mixed historical partition may remain delivered after every forbidden row is removed."""
+    task = "T"
+    cases = {"suppress_provenance": [{
+        "task": task,
+        "delivery": "gateway.def_ref_partition m7",
+        "paths": ["htmlcov/coverage_html_cb_*.js"],
+    }]}
+    recorded = {task: [_rec(
+        "gateway.def_ref_partition", 7, 127,
+        payload=("htmlcov/coverage_html_cb_a.js:1:event\n"
+                 "pkg/event.py:4:event"),
+    )]}
+    clean = "pkg/event.py:4:event"
+    replayed = {task: [_rep(
+        "gateway.def_ref_partition", 7, len(clean), payload=clean,
+        sha16=sro._sha16(clean.encode("utf-8")),
+    )]}
+
+    verdict = sro.evaluate_cases(cases, recorded, replayed, None)[0]
+
+    assert verdict.verdict == sro.PASS
+    assert "filtered delivery" in verdict.reason
+
+
+def test_oracle_provenance_filtered_delivery_requires_exact_evidence_type():
+    """A clean neighboring gateway fact cannot stand in for the manifest's target fact."""
+    task = "T"
+    cases = {"suppress_provenance": [{
+        "task": task,
+        "delivery": "gateway.def_ref_partition m7",
+        "paths": ["htmlcov/coverage_html_cb_*.js"],
+    }]}
+    recorded = {task: [_rec(
+        "gateway.def_ref_partition", 7, 127,
+        payload=("htmlcov/coverage_html_cb_a.js:1:event\n"
+                 "pkg/event.py:4:event"),
+    )]}
+    clean = "pkg/event.py:4:event"
+
+    unrelated = sro.evaluate_cases(
+        cases, recorded,
+        {task: [_rep(
+            "gateway.localization", 7, len(clean), payload=clean,
+            sha16=sro._sha16(clean.encode("utf-8")),
+        )]}, None,
+    )[0]
+    exact = sro.evaluate_cases(
+        cases, recorded,
+        {task: [_rep(
+            "gateway.def_ref_partition", 7, len(clean), payload=clean,
+            sha16=sro._sha16(clean.encode("utf-8")),
+        )]}, None,
+    )[0]
+
+    assert unrelated.verdict == sro.FAIL
+    assert exact.verdict == sro.PASS
+
+
+def test_oracle_provenance_target_suppression_ignores_unrelated_gateway_delivery():
+    """Only delivery of the suppressed evidence type can invalidate its suppression."""
+    task = "T"
+    cases = {"suppress_provenance": [{
+        "task": task,
+        "delivery": "gateway.def_ref_partition m7",
+        "paths": ["htmlcov/coverage_html_cb_*.js"],
+    }]}
+    recorded = {task: [_rec(
+        "gateway.def_ref_partition", 7, 127,
+        payload=("htmlcov/coverage_html_cb_a.js:1:event\n"
+                 "pkg/event.py:4:event"),
+    )]}
+    suppression = _rep(
+        "gateway.def_ref_partition", 7, 0,
+        reason="ss_provenance", outcome="suppressed_hidden_only",
+    )
+    clean = "pkg/other.py:4:other"
+    unrelated_delivery = _rep(
+        "gateway.localization", 7, len(clean), payload=clean,
+        sha16=sro._sha16(clean.encode("utf-8")),
+    )
+    target_delivery = _rep(
+        "gateway.def_ref_partition", 7, len(clean), payload=clean,
+        sha16=sro._sha16(clean.encode("utf-8")),
+    )
+
+    unrelated = sro.evaluate_cases(
+        cases, recorded, {task: [suppression, unrelated_delivery]}, None,
+    )[0]
+    target = sro.evaluate_cases(
+        cases, recorded, {task: [suppression, target_delivery]}, None,
+    )[0]
+
+    assert unrelated.verdict == sro.PASS
+    assert target.verdict == sro.FAIL
+
+
+def test_oracle_provenance_rejects_unsealed_or_forbidden_delivery():
+    """Delivery credit requires exact bytes, and any surviving forbidden path remains a failure."""
+    task = "T"
+    cases = {"suppress_provenance": [{
+        "task": task,
+        "delivery": "gateway.def_ref_partition m7",
+        "paths": ["htmlcov/coverage_html_cb_*.js"],
+    }]}
+    recorded = {task: [_rec(
+        "gateway.def_ref_partition", 7, 127,
+        payload="htmlcov/coverage_html_cb_a.js:1:event\npkg/event.py:4:event",
+    )]}
+    dirty = "htmlcov/coverage_html_cb_a.js:1:event\npkg/event.py:4:event"
+    unsealed_clean = "pkg/event.py:4:event"
+
+    dirty_verdict = sro.evaluate_cases(
+        cases, recorded,
+        {task: [_rep(
+            "gateway.def_ref_partition", 7, len(dirty), payload=dirty,
+            sha16=sro._sha16(dirty.encode("utf-8")),
+        )]}, None,
+    )[0]
+    unsealed_verdict = sro.evaluate_cases(
+        cases, recorded,
+        {task: [_rep(
+            "gateway.def_ref_partition", 7, len(unsealed_clean),
+            payload=unsealed_clean, sha16="0" * 16,
+        )]}, None,
+    )[0]
+
+    assert dirty_verdict.verdict == sro.FAIL
+    assert unsealed_verdict.verdict == sro.FAIL
+
+
+@pytest.mark.parametrize(
+    ("payload", "forbidden"),
+    [
+        ("tmp/patch.py:4:run", True),
+        ("/tmp/change.py:4:run", True),
+        ("build/generated.js:4:run", True),
+        ("pkg/__pycache__/mod.py:4:run", True),
+        ("coverage.xml:4:run", True),
+        (".git/config:4:run", True),
+        ("../outside.py:4:run", True),
+        ("C:/outside/mod.py:4:run", True),
+        ("/testbed/pkg/mod.py:4:run", False),
+        ("pkg/mod.py:4:run", False),
+        ("coverage.value is a dotted symbol", False),
+    ],
+)
+def test_oracle_provenance_path_classification_is_general(payload, forbidden):
+    assert sro._payload_has_forbidden_provenance(payload) is forbidden
+
+
 @pytest.mark.parametrize(
     ("target_home", "target_iteration", "neighbor_iteration"),
     [(9, 5, 6), (10, 6, 5)],

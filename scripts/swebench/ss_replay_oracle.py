@@ -124,6 +124,60 @@ SS_REASON = {
     "late": "ss_late",
 }
 
+_PROVENANCE_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:)?(?:\.\.[/\\]|[/\\])?[\w.+\-]+"
+    r"(?:[/\\][\w.+\-]+)+"
+    r"|(?<![\w.])[\w+\-]+\."
+    r"(?:py|pyi|js|jsx|mjs|cjs|ts|tsx|go|rs|java|kt|c|h|cc|cpp|hpp|rb|php|cs|"
+    r"swift|scala|txt|md|rst|cfg|ini|toml|json|yaml|yml|xml|po)(?!\w)",
+    re.IGNORECASE,
+)
+_PROVENANCE_GENERATED_SEGMENTS = frozenset({
+    "htmlcov", ".git", "node_modules", "dist", "build", "__pycache__",
+})
+_PROVENANCE_CONTAINER_ROOTS = (
+    "/testbed/", "/home/user/", "/workspace/", "/app/", "/repo/",
+)
+
+
+def _provenance_bad_path(path: str) -> bool:
+    """Independent oracle predicate for scratch/generated/outside-root citations."""
+    value = (path or "").replace("\\", "/").strip()
+    if not value:
+        return False
+    if value.startswith("../") or "/../" in value:
+        return True
+    if len(value) >= 2 and value[1] == ":":
+        return True
+    if value.startswith("/") and not any(
+            value.startswith(root) for root in _PROVENANCE_CONTAINER_ROOTS):
+        return True
+    parts = value.lstrip("/").split("/")
+    parents = [part.lower() for part in parts[:-1]]
+    base = parts[-1].lower() if parts else ""
+    if any(part in {"tmp", "temp", ".tmp"} for part in parents):
+        return True
+    if any(part in _PROVENANCE_GENERATED_SEGMENTS or part.startswith("coverage")
+           for part in parents):
+        return True
+    return base == ".coverage" or base.startswith("coverage.")
+
+
+def _payload_has_forbidden_provenance(payload: str) -> bool:
+    return any(_provenance_bad_path(path)
+               for path in _PROVENANCE_PATH_RE.findall(payload or ""))
+
+
+def _exact_sealed_payload(row: dict) -> bool:
+    """True only when the replay's joined payload exactly matches its delivery seal."""
+    payload = row.get("payload")
+    if not isinstance(payload, str) or not payload:
+        return False
+    chars = int(row.get("chars", row.get("chars_delivered")) or 0)
+    seal = str(row.get("content_sha256_16") or "")
+    return chars == len(payload) and seal == _sha16(
+        payload.encode("utf-8", "surrogatepass"))
+
 # A delivered row is "delivered with bytes" iff outcome mentions delivered and chars>0.
 def _is_delivered(row: dict) -> bool:
     return "delivered" in str(row.get("outcome") or "") and int(row.get("chars_delivered") or 0) > 0
@@ -2217,6 +2271,20 @@ def _layer_matches(manifest_layer: str, ledger_layer: str) -> bool:
     return ll == want or ll.startswith(want) or want in ll
 
 
+def _exact_evidence_type_matches(manifest_layer: str, ledger_layer: str) -> bool:
+    """Match the canonical evidence type, without the historical owner-layer alias.
+
+    ``gateway.def_ref_partition`` was historically recorded under the broad
+    ``gateway`` owner, so `_layer_matches` must retain that alias to find the
+    recorded boundary.  Replay rows expose the concrete evidence type in their
+    layer suffix; credit for a filtered delivery must bind to that suffix rather
+    than to an arbitrary neighboring ``gateway.*`` fact.
+    """
+    expected = manifest_layer.strip().lower().rsplit(".", 1)[-1]
+    actual = str(ledger_layer or "").strip().lower().rsplit(".", 1)[-1]
+    return bool(expected and actual == expected)
+
+
 def _rows_matching(rows: list[dict], layer: str, mnum: int | None, tol: int = 3):
     """Rows of the given layer near message m (via home_msg on Delivery, else iteration proximity)."""
     out = []
@@ -2622,13 +2690,32 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
                 else:
                     suppression_complete = bool(boundary_suppressions)
 
-                if suppression_complete and not delivered:
+                target_deliveries = delivered
+                if section == "suppress_provenance":
+                    target_deliveries = [
+                        row for row in delivered
+                        if _exact_evidence_type_matches(
+                            layer, row.get("layer", ""))
+                    ]
+                filtered_delivery = bool(target_deliveries) and all(
+                    _exact_sealed_payload(row)
+                    and not _payload_has_forbidden_provenance(
+                        str(row.get("payload") or ""))
+                    for row in target_deliveries
+                )
+                if (section == "suppress_provenance" and filtered_delivery
+                        and not suppression_complete):
+                    out.append(CaseVerdict(
+                        section, c["task"], dv, PASS,
+                        "boundary-local exact sealed filtered delivery", False))
+                elif suppression_complete and not target_deliveries:
                     out.append(CaseVerdict(section, c["task"], dv, PASS,
                                            f"boundary-local suppression ({reason_tok})", False))
                 else:
                     out.append(CaseVerdict(section, c["task"], dv, FAIL,
                                            f"missing boundary-local attributed suppression "
-                                           f"({reason_tok}); target delivered={bool(delivered)}", False))
+                                           f"({reason_tok}); target delivered="
+                                           f"{bool(target_deliveries)}", False))
 
     suppress_family("suppress_step_behind", SS_REASON["step_behind"])
     suppress_family("suppress_semantic_dup", SS_REASON["semantic_dup"])
