@@ -300,6 +300,7 @@ import hashlib as _hashlib
 
 _V2_BULLET_RE = re.compile(r"^\s*[-*+•]\s+(.+)$")
 _V2_BRACKET_TITLE_RE = re.compile(r"^\s*\[[^\]\n]{1,30}\]\s+(.+)$")
+_V2_CHECKBOX_RE = re.compile(r"^\s*\[[ xX]\]\s+(.+)$")
 _V2_LABEL_LINE_RE = re.compile(r"^([A-Z][A-Za-z /`_-]{1,40}):\s*$")
 _V2_LABEL_REST_RE = re.compile(r"^([A-Za-z][^:\n]{0,60}):\s+(.+)$")
 _V2_ATX_HEADING_RE = re.compile(r"^\s*#{1,6}\s+(.+?)\s*#*\s*$")
@@ -307,14 +308,23 @@ _V2_BOLD_HEADING_RE = re.compile(r"^\s*\*\*([^*\n]{1,80})\*\*:?\s*$")
 _V2_COMMENT_HEADING_RE = re.compile(
     r"^\s*([A-Za-z][^:\n]{0,60}):\s*<!--.*-->\s*$"
 )
+_V2_STANDALONE_MEDIA_RE = re.compile(
+    r"^\s*(?:"
+    r"!\[[^\]\n]*\]\([^\n]*\)"
+    r"|!\[[^\]\n]*\]\[[^\]\n]*\]"
+    r"|<img\b[^>\n]*?/?>"
+    r")\s*$",
+    re.I,
+)
 _V2_DESCRIPTIVE_SECTION_RE = re.compile(
     r"^(?:describe\s+the\s+bug|bug\s+description|actual(?:\s+behaviou?r)?|"
-    r"current(?:\s+behaviou?r)?|summary|"
+    r"current(?:\s+behaviou?r)?|problem|summary|"
     r"what\s+do\s+you\s+see\s+instead|additional\s+(?:context|information))$",
     re.I,
 )
 _V2_PROCESS_SECTION_RE = re.compile(
-    r"^(?:(?:what\s+)?steps?\s+(?:can\s+)?reproduce(?:\s+the\s+bug)?|"
+    r"^(?:(?:what\s+)?steps?\s+(?:(?:can\s+)?reproduce|to\s+reproduce)"
+    r"(?:\s+the\s+bug)?|"
     r"to\s+reproduce|reproduction|repro|returns?|output|traceback|logs?|"
     r"environment|versions?|tests?|testing|troubleshooting|alternatives?|motivation|checklist|"
     r"i\s+have|what\s+version.*|what\s+runtime.*|"
@@ -324,7 +334,7 @@ _V2_PROCESS_SECTION_RE = re.compile(
 _V2_EXPECTED_SECTION_RE = re.compile(
     r"^(?:(?:what\s+is\s+the\s+)?expected(?:\s+behaviou?r)?|"
     r"desired(?:\s+behaviou?r)?|proposal|proposed(?:\s+behaviou?r)?|"
-    r"requirements?|acceptance\s+criteria|solution|fix|"
+    r"requirements?|acceptance\s+criteria|(?:possible\s+)?solution|fix|"
     r"ideas?\s+of\s+implementation|what\s+changed)$",
     re.I,
 )
@@ -366,7 +376,8 @@ _V2_MANDATORY_RE = re.compile(
     r"\b(?:must|shall|never|always|cannot|can't|will not|won't)\b", re.I
 )
 _V2_EXPECTED_MODAL_RE = re.compile(
-    r"\b(?:should|expected to|needs? to(?=\s+(?:be\b|[A-Za-z_]))|has to|have to|required)\b", re.I
+    r"\b(?:should|expected to|needs? to(?=\s+(?:be\b|[A-Za-z_]))|has to|have to|"
+    r"(?:is|are)\s+required|required\s+to)\b", re.I
 )
 _V2_SUGGESTION_RE = re.compile(
     r"\b(?:i\s+(?:think|suggest|propose|would\s+like|prefer)|"
@@ -374,7 +385,8 @@ _V2_SUGGESTION_RE = re.compile(
     re.I,
 )
 _V2_REQUEST_MODAL_RE = re.compile(
-    r"\b(?:must|shall|should|expected to|needs? to(?=\s+(?:be\b|[A-Za-z_]))|has to|have to|required)\b",
+    r"\b(?:must|shall|should|expected to|needs? to(?=\s+(?:be\b|[A-Za-z_]))|has to|have to|"
+    r"(?:is|are)\s+required|required\s+to)\b",
     re.I,
 )
 _V2_REQUEST_QUESTION_RE = re.compile(
@@ -388,6 +400,26 @@ _V2_OBSERVED_STATE_RE = re.compile(
     r"still\s+(?:requires?|fails?|throws?|errors?)|"
     r"does(?:n't|\s+not)\s+(?:fit|work|support)|"
     r"not\s+(?:working|supported))\b",
+    re.I,
+)
+_V2_ATTESTATION_RE = re.compile(
+    r"^\s*(?:\([^)]*(?:optional|required)[^)]*\)\s*)?"
+    r"(?:i|we)(?:\s+have|'ve|\u2019ve)?\s+"
+    r"(?:check(?:ed)?|confirm(?:ed)?|verif(?:y|ied)|search(?:ed)?|"
+    r"read|review(?:ed)?|test(?:ed)?|agree(?:d)?|acknowledg(?:e|ed))\b",
+    re.I,
+)
+_V2_NEGATIVE_OBSERVED_TITLE_RE = re.compile(
+    r"^\s*(?:won't|will\s+not|can't|cannot|doesn't|does\s+not|"
+    r"fails?\s+to|unable\s+to)\b",
+    re.I,
+)
+_V2_CURRENT_WORKAROUND_RE = re.compile(
+    r"\byou\s+(?:need|have)\s+to\s+(?:write|call|run|use|perform|repeat)\b",
+    re.I,
+)
+_V2_CONTEXT_EXAMPLE_RE = re.compile(
+    r"\b(?:common\s+practice|for\s+example|for\s+instance|e\.g\.?)\b",
     re.I,
 )
 _V2_CALL_SHAPE_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
@@ -746,6 +778,23 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 modality, strength = "expected", 2
             if section_role == "process":
                 continue
+            if _V2_ATTESTATION_RE.match(decision) and not (
+                _V2_REQUEST_MODAL_RE.search(decision)
+                or _V2_SUGGESTION_RE.search(decision)
+                or _V2_IMPERATIVE_RE.match(decision)
+            ):
+                continue
+            if (
+                section_role == "descriptive"
+                and _V2_CURRENT_WORKAROUND_RE.search(decision)
+            ):
+                continue
+            if _V2_CONTEXT_EXAMPLE_RE.search(decision) and not (
+                _V2_REQUEST_MODAL_RE.search(decision)
+                or _V2_SUGGESTION_RE.search(decision)
+                or _V2_IMPERATIVE_RE.match(decision)
+            ):
+                continue
             if _V2_OBSERVED_STATE_RE.search(decision) and not (
                 _V2_REQUEST_MODAL_RE.search(decision)
                 or _V2_SUGGESTION_RE.search(decision)
@@ -764,6 +813,15 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             # state synopsis.  Declarative behavior there is not an obligation,
             # while an instruction-style title ("Add ...") remains expected.
             if section_role == "title" and strength <= 1:
+                continue
+            if (
+                section_role == "title"
+                and _V2_NEGATIVE_OBSERVED_TITLE_RE.match(decision)
+                and not (
+                    _V2_REQUEST_MODAL_RE.search(decision)
+                    or _V2_SUGGESTION_RE.search(decision)
+                )
+            ):
                 continue
             if section_role == "expected" and strength < 2:
                 modality, strength = "expected", 2
@@ -829,6 +887,12 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 if section_role == "title":
                     section_role = "neutral"
             continue
+        # Presentation-only media is neither issue prose nor a requirement.
+        # Flush before dropping it so an image cannot be joined to the next
+        # normative sentence and inherit that sentence's requirement grammar.
+        if _V2_STANDALONE_MEDIA_RE.fullmatch(line):
+            _flush_prose()
+            continue
         heading = _v2_heading_text(line)
         if heading is not None:
             _flush_prose()
@@ -856,6 +920,12 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         if bm:
             _flush_prose()
             content = bm.group(1).strip()
+            checkbox = _V2_CHECKBOX_RE.match(content)
+            if checkbox:
+                # Checkbox state is presentation, not requirement prose. Task
+                # checklists are acceptance lists even when rows omit modals;
+                # process and reproduction checklists remain non-normative.
+                content = checkbox.group(1).strip()
             # bullet-level fallback: if the bullet AS A WHOLE — or ANY of its
             # semicolon sub-pieces — classifies, non-classifying sub-pieces
             # inherit that class (sub-requirements of one requirement line;
@@ -874,8 +944,20 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                     fallback = _v2_classify(_p)
                     if fallback is not None:
                         break
-            parity_candidates.append((content, section_role))
-            _process_candidate(content, set(label_syms), fallback, section_role)
+            if (
+                fallback is None
+                and checkbox is not None
+                and section_role not in {"descriptive", "process"}
+            ):
+                fallback = ("behavior", "expected", 2)
+            candidate_role = section_role
+            if (
+                checkbox is not None
+                and section_role not in {"descriptive", "process"}
+            ):
+                candidate_role = "expected"
+            parity_candidates.append((content, candidate_role))
+            _process_candidate(content, set(label_syms), fallback, candidate_role)
             continue
         nm = re.match(r"^\s*\d+[.)]\s+(.+)$", line)
         if nm:
@@ -916,6 +998,20 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             decision = lm.group(2)
         if decision.rstrip().endswith("?"):
             continue
+        if _V2_ATTESTATION_RE.match(decision) and not (
+            _V2_REQUEST_MODAL_RE.search(decision)
+            or _V2_SUGGESTION_RE.search(decision)
+            or _V2_IMPERATIVE_RE.match(decision)
+        ):
+            continue
+        if role == "descriptive" and _V2_CURRENT_WORKAROUND_RE.search(decision):
+            continue
+        if _V2_CONTEXT_EXAMPLE_RE.search(decision) and not (
+            _V2_REQUEST_MODAL_RE.search(decision)
+            or _V2_SUGGESTION_RE.search(decision)
+            or _V2_IMPERATIVE_RE.match(decision)
+        ):
+            continue
         if _V2_OBSERVED_STATE_RE.search(decision) and not (
             _V2_REQUEST_MODAL_RE.search(decision)
             or _V2_SUGGESTION_RE.search(decision)
@@ -932,6 +1028,15 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             or _V2_EXPECTED_MODAL_RE.search(decision)
             or _V2_SUGGESTION_RE.search(decision)
             or _V2_IMPERATIVE_RE.match(decision)
+        ):
+            continue
+        if (
+            role == "title"
+            and _V2_NEGATIVE_OBSERVED_TITLE_RE.match(decision)
+            and not (
+                _V2_REQUEST_MODAL_RE.search(decision)
+                or _V2_SUGGESTION_RE.search(decision)
+            )
         ):
             continue
         key = " ".join(sent.rstrip(".").split()).lower()

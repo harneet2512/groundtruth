@@ -3323,6 +3323,7 @@ def _render_obligations_block(
                         subject_symbols=frozenset(o.get("subject_symbols") or ()),
                         parent_id=o.get("parent_id", ""),
                         part_index=int(o.get("part_index") or 0),
+                        region=o.get("region", "normative"),
                     ) for o in _persisted if isinstance(o, dict) and o.get("verbatim_text")]
                 else:
                     _obls = [Obligation(
@@ -3396,12 +3397,19 @@ def _render_obligations_block(
             o["_doc_index"] = _di
             rows.append(o)
         _write_obligations_v2_artifact(rows, gold_path_tokens, issue_text)
-        gated = rows if not require_anchor else [
-            o for o in rows
+        # The internal artifact retains every structurally classified row for
+        # audit/provenance. Only normative rows are requirements that may enter
+        # the model observation; process/evidence rows are never completion
+        # obligations, even when their text overlaps the localized symbols.
+        deliverable = [
+            o for o in rows if o.get("region", "normative") == "normative"
+        ]
+        gated = deliverable if not require_anchor else [
+            o for o in deliverable
             if _rel_gate((o.get("verbatim_text") or ""), None, fn_tokens)
         ]
         gated.sort(key=_v2_order_key)
-        k = _dynamic_obligation_budget(len(rows))
+        k = _dynamic_obligation_budget(len(deliverable))
         rendered_v2: list[str] = []
         seen_v2: set[str] = set()
         for o in gated:

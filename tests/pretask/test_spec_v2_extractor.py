@@ -171,6 +171,25 @@ Return `fallback_value` from the fixture.
     assert text == ["Add safe empty-input handling"]
 
 
+def test_spec_v2_steps_to_reproduce_heading_is_process():
+    issue = """Add safe empty-input handling.
+
+### Steps to reproduce
+1. Generate an empty fixture.
+2. Check the emitted manifest.
+
+### Expected behavior
+The parser should return an empty list.
+"""
+
+    rows = extract_spec_v2(issue).obligations
+
+    assert [(row.region, row.verbatim_text) for row in rows] == [
+        ("normative", "Add safe empty-input handling"),
+        ("normative", "The parser should return an empty list"),
+    ]
+
+
 def test_spec_v2_normative_heading_promotes_plain_outcome():
     issue = """Parser output is inconsistent.
 
@@ -200,6 +219,104 @@ Is it possible to add `--force` so `state.json` is removed when unreadable?
     assert not any("manual intervention" in row for row in text)
     assert not any("100%" in row for row in text)
     assert not any("What shall happen" in row for row in text)
+
+
+def test_spec_v2_excludes_standalone_markdown_media_from_requirements():
+    issue = """Parser output is inconsistent.
+
+### Expected behavior
+![Add parser support](https://github.com/user-attachments/assets/example.png)
+`parse_item` must preserve empty values.
+"""
+
+    rows = extract_spec_v2(issue).obligations
+
+    assert [row.verbatim_text for row in rows] == [
+        "`parse_item` must preserve empty values"
+    ]
+    assert rows[0].subject_symbols == frozenset({"parse_item"})
+
+
+def test_spec_v2_task_checklist_rows_are_normative_without_modal_words():
+    issue = """Add current-branch feature parity.
+- [x] Insert token and related tests
+- [ ] load_file source_metadata
+- [x] json.dumps defaults to repr on CLI
+- [x] `--json` on list must not echo
+"""
+
+    rows = extract_spec_v2(issue).obligations
+
+    assert [row.verbatim_text for row in rows] == [
+        "Add current-branch feature parity",
+        "Insert token and related tests",
+        "load_file source_metadata",
+        "json.dumps defaults to repr on CLI",
+        "`--json` on list must not echo",
+    ]
+    assert [row.modality for row in rows] == [
+        "expected",
+        "expected",
+        "expected",
+        "expected",
+        "mandatory",
+    ]
+
+
+def test_spec_v2_confirmation_checklists_remain_process_metadata():
+    issue = """Fix biased point sampling.
+- [x] I have checked that this issue has not already been reported.
+- [x] I have confirmed this bug exists on the latest version.
+- [ ] (optional) I have confirmed this bug exists on the main branch.
+
+### Have you read the CONTRIBUTING guide?
+- [x] I've read the CONTRIBUTING guide
+
+### Expected behavior
+`sample_points` should produce a centered distribution.
+I have confirmed that a reference sampler produces the expected distribution.
+"""
+
+    rows = extract_spec_v2(issue).obligations
+
+    assert [row.verbatim_text for row in rows] == [
+        "Fix biased point sampling",
+        "`sample_points` should produce a centered distribution",
+    ]
+
+
+def test_spec_v2_negative_observed_title_does_not_become_requirement():
+    issue = """Won't handle future time
+The system clock was set to 2040 and the import failed.
+
+I don't think it should restrict date/time.
+"""
+
+    rows = extract_spec_v2(issue).obligations
+
+    assert [row.verbatim_text for row in rows] == [
+        "I don't think it should restrict date/time"
+    ]
+
+
+def test_spec_v2_problem_workarounds_and_examples_are_evidence():
+    issue = """Add get_value to the state context.
+
+### Problem
+In a one-value handler, you need to write two lines to read the value.
+
+### Possible solution
+Add a get_value function that takes a key.
+
+This is common practice for repositories that ignore all files except those required, e.g. docs.
+"""
+
+    rows = extract_spec_v2(issue).obligations
+
+    assert [row.verbatim_text for row in rows] == [
+        "Add get_value to the state context",
+        "Add a get_value function that takes a key",
+    ]
 
 
 # ── 6. inline code spans are never arrow-split ───────────────────────────────

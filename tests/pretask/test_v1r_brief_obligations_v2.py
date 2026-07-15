@@ -140,6 +140,110 @@ def test_persisted_bridge_symbol_leak_drops(v2_env):
     assert "filterMap" in block
 
 
+def test_persisted_bridge_preserves_region_and_renders_only_normative(v2_env):
+    issue = "region-bound issue"
+    anchors = {
+        "obligations_version": 2,
+        "issue_sha256": _issue_sha256(issue),
+        "obligations": [
+            {
+                "verbatim_text": "the parser should preserve empty values",
+                "kind": "behavior",
+                "symbols": ["parser"],
+                "keywords": [],
+                "checkable_forms": [],
+                "clause_id": "norm",
+                "modality": "expected",
+                "modality_strength": 2,
+                "subject_symbols": ["parser"],
+                "parent_id": "",
+                "part_index": 0,
+                "region": "normative",
+            },
+            {
+                "verbatim_text": "the reference sampler produces expected output",
+                "kind": "behavior",
+                "symbols": ["sampler"],
+                "keywords": [],
+                "checkable_forms": [],
+                "clause_id": "evidence",
+                "modality": "declarative",
+                "modality_strength": 1,
+                "subject_symbols": ["sampler"],
+                "parent_id": "",
+                "part_index": 1,
+                "region": "evidence",
+            },
+        ],
+    }
+    (v2_env / "gt_issue_anchors.json").write_text(
+        json.dumps(anchors), encoding="utf-8"
+    )
+
+    block = "\n".join(
+        _render_obligations_block(
+            issue,
+            files=[],
+            cap=_CAP,
+            anchor_symbols={"parser", "sampler"},
+        )
+    )
+    payload = json.loads(
+        (v2_env / "gt_obligations_v2.json").read_text(encoding="utf-8")
+    )
+
+    assert "preserve empty values" in block
+    assert "reference sampler" not in block
+    assert {row["clause_id"]: row["region"] for row in payload["clauses"]} == {
+        "norm": "normative",
+        "evidence": "evidence",
+    }
+
+
+def test_nonnormative_rows_cannot_inflate_model_visible_budget(v2_env):
+    issue = "dose-bound issue"
+
+    def row(index: int, region: str) -> dict:
+        return {
+            "verbatim_text": f"parser behavior clause {index} should remain stable",
+            "kind": "behavior",
+            "symbols": ["parser"],
+            "keywords": [],
+            "checkable_forms": [],
+            "clause_id": f"c{index}",
+            "modality": "expected",
+            "modality_strength": 2,
+            "subject_symbols": ["parser"],
+            "parent_id": "",
+            "part_index": index,
+            "region": region,
+        }
+
+    anchors = {
+        "obligations_version": 2,
+        "issue_sha256": _issue_sha256(issue),
+        "obligations": [
+            *(row(index, "normative") for index in range(6)),
+            *(row(index, "evidence") for index in range(6, 25)),
+        ],
+    }
+    (v2_env / "gt_issue_anchors.json").write_text(
+        json.dumps(anchors), encoding="utf-8"
+    )
+
+    block = _render_obligations_block(
+        issue,
+        files=[],
+        cap=_CAP,
+        anchor_symbols={"parser"},
+        require_anchor=False,
+    )
+    delivered = [line for line in block if line.lstrip().startswith("- ")]
+
+    assert len(delivered) == _dynamic_obligation_budget(6) == 4
+    assert not any("clause 6 " in line for line in delivered)
+
+
 def test_v2_rejects_unversioned_persisted_obligations(v2_env):
     stale = {
         "issue_sha256": _issue_sha256(TRUE_MYTH),
