@@ -22,7 +22,7 @@ across English issue bodies for any repo/language.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 # ----------------------------------------------------------------- regex set
 _IDENT_RE = re.compile(
@@ -77,6 +77,20 @@ _IMPL_FOR_RE = re.compile(r"\bimpl\s+([A-Za-z_][\w:]*)\s+for\s+([A-Za-z_][\w:]*)
 
 
 @dataclass(frozen=True)
+class VerificationCase:
+    """Issue-authored example attached to one normative obligation.
+
+    A verification case is guidance, not an additional completion obligation.
+    The fenced body and its explicit introducer remain verbatim so downstream
+    consumers can distinguish issue evidence from generated advice.
+    """
+
+    verbatim_text: str
+    language: str = ""
+    introduced_by: str = ""
+
+
+@dataclass(frozen=True)
 class Obligation:
     """One requirement mined from the issue text.
 
@@ -104,6 +118,8 @@ class Obligation:
     parent_id: str = ""            # clause_id of enclosing compound (provenance)
     part_index: int = 0            # position within the parent compound
     region: str = "normative"      # normative | process | evidence (v2 only)
+    source_variants: tuple[str, ...] = ()
+    verification_cases: tuple[VerificationCase, ...] = ()
 
 
 @dataclass
@@ -140,6 +156,15 @@ class IssueSpec:
                     parent_id=o.parent_id,
                     part_index=o.part_index,
                     region=o.region,
+                    source_variants=list(o.source_variants),
+                    verification_cases=[
+                        {
+                            "verbatim_text": case.verbatim_text,
+                            "language": case.language,
+                            "introduced_by": case.introduced_by,
+                        }
+                        for case in o.verification_cases
+                    ],
                 )
             rows.append(row)
         return rows
@@ -431,6 +456,40 @@ _V2_CALL_SHAPE_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 _V2_DETAILS_OPEN_RE = re.compile(r"<details\b[^>]*>", re.I)
 _V2_DETAILS_CLOSE_RE = re.compile(r"</details\s*>", re.I)
 _V2_SUMMARY_RE = re.compile(r"<summary\b[^>]*>(.*?)</summary\s*>", re.I)
+_V2_EXAMPLE_INTRO_RE = re.compile(
+    r"^(?:for\s+example|for\s+instance|examples?|e\.g\.)\s*:\s*$", re.I
+)
+_V2_NEGATIVE_POLARITY_RE = re.compile(
+    r"\b(?:must\s+not|should\s+not|shall\s+not|will\s+not|"
+    r"cannot|can't|won't|never)\b",
+    re.I,
+)
+_V2_CANONICAL_MODAL_RE = re.compile(
+    r"\b(?:must(?:\s+not)?|should(?:\s+not)?|shall(?:\s+not)?|"
+    r"will\s+not|cannot|can't|won't|never|always|expected\s+to|"
+    r"needs?\s+to|has\s+to|have\s+to|(?:is|are)\s+required(?:\s+to)?|"
+    r"required\s+to)\b",
+    re.I,
+)
+_V2_CANONICAL_PREDICATES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("return", re.compile(r"\breturn(?:s|ed|ing)?\b", re.I)),
+    ("raise", re.compile(r"\brais(?:e|es|ed|ing)\b", re.I)),
+    ("throw", re.compile(r"\bthrow(?:s|ing)?|\bthrew\b|\bthrown\b", re.I)),
+    ("accept", re.compile(r"\baccept(?:s|ed|ing)?\b", re.I)),
+    ("emit", re.compile(r"\bemit(?:s|ted|ting)?\b", re.I)),
+    ("yield", re.compile(r"\byield(?:s|ed|ing)?\b", re.I)),
+    ("produce", re.compile(r"\bproduc(?:e|es|ed|ing)\b", re.I)),
+    ("output", re.compile(r"\boutput(?:s|ted|ting)?\b", re.I)),
+    ("reject", re.compile(r"\breject(?:s|ed|ing)?\b", re.I)),
+    ("resolve", re.compile(r"\bresolv(?:e|es|ed|ing)\b", re.I)),
+    ("ignore", re.compile(r"\bignor(?:e|es|ed|ing)\b", re.I)),
+    ("preserve", re.compile(r"\bpreserv(?:e|es|ed|ing)\b", re.I)),
+    ("require", re.compile(r"\brequir(?:e|es|ed|ing)\b", re.I)),
+    ("support", re.compile(r"\bsupport(?:s|ed|ing)?\b", re.I)),
+    ("handle", re.compile(r"\bhandl(?:e|es|ed|ing)\b", re.I)),
+    ("default", re.compile(r"\bdefault(?:s|ed|ing)?\b", re.I)),
+    ("fail", re.compile(r"\bfail(?:s|ed|ing)?\b", re.I)),
+)
 
 
 def _v2_strip_html_comments(text: str) -> str:
@@ -698,6 +757,93 @@ def classify_spec_v2_regions(issue_text: str) -> tuple[SpecRegion, ...]:
     return tuple(regions)
 
 
+def _v2_predicate_identity(
+    verbatim: str, subject_symbols: frozenset[str]
+) -> tuple[str, tuple[str, ...]] | None:
+    """Return a conservative, grammar-only predicate identity.
+
+    Identity exists only for the extractor's controlled behavior vocabulary.
+    Modality and explicit subject spellings are removed because they are stored
+    as independent merge dimensions; every remaining predicate/object token
+    must agree.  Unknown prose therefore stays unmerged (correct-or-quiet).
+    """
+    normalized = _V2_CANONICAL_MODAL_RE.sub(" ", verbatim.replace("`", ""))
+    for subject in sorted(subject_symbols, key=lambda value: (-len(value), value)):
+        normalized = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(subject)}(?![A-Za-z0-9_])",
+            " ",
+            normalized,
+            flags=re.I,
+        )
+    normalized = " ".join(normalized.lower().split())
+    for lemma, pattern in _V2_CANONICAL_PREDICATES:
+        match = pattern.search(normalized)
+        if match is None:
+            continue
+        tail = normalized[match.end():]
+        tokens = tuple(re.findall(r"[a-z0-9_]+(?:\.[a-z0-9_]+)*", tail))
+        return lemma, tokens
+    return None
+
+
+def _v2_canonicalize_obligations(
+    obligations: list[Obligation],
+    cases_by_source: dict[str, list[VerificationCase]],
+) -> list[Obligation]:
+    """Merge only obligations with an explicit, fully equal semantic key.
+
+    The key is deliberately stricter than textual similarity: normative region,
+    kind, exact explicit-subject set, polarity, and controlled predicate/object
+    identity must all agree.  This prevents similarity from collapsing opposing
+    or merely related requirements while removing modality-only duplicates.
+    """
+    canonical: list[Obligation] = []
+    positions: dict[tuple[object, ...], int] = {}
+    for obligation in obligations:
+        variants = obligation.source_variants or (obligation.verbatim_text,)
+        attached = tuple(cases_by_source.get(obligation.verbatim_text, ()))
+        current = replace(
+            obligation,
+            source_variants=variants,
+            verification_cases=attached,
+        )
+        subjects = frozenset(symbol.casefold() for symbol in current.subject_symbols)
+        predicate = _v2_predicate_identity(current.verbatim_text, current.subject_symbols)
+        if current.region != "normative" or not subjects or predicate is None:
+            canonical.append(current)
+            continue
+        key = (
+            current.region,
+            current.kind,
+            tuple(sorted(subjects)),
+            bool(_V2_NEGATIVE_POLARITY_RE.search(current.verbatim_text)),
+            predicate,
+        )
+        prior_index = positions.get(key)
+        if prior_index is None:
+            positions[key] = len(canonical)
+            canonical.append(current)
+            continue
+        prior = canonical[prior_index]
+        combined_variants = prior.source_variants + tuple(
+            variant for variant in current.source_variants
+            if variant not in prior.source_variants
+        )
+        combined_cases = prior.verification_cases + tuple(
+            case for case in current.verification_cases
+            if case not in prior.verification_cases
+        )
+        winner = (
+            current if current.modality_strength > prior.modality_strength else prior
+        )
+        canonical[prior_index] = replace(
+            winner,
+            source_variants=combined_variants,
+            verification_cases=combined_cases,
+        )
+    return canonical
+
+
 def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
     """GT_OBLIGATIONS_V2 extractor: Stage A (blocks) / B (atomic) / C (classify).
 
@@ -708,16 +854,20 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
     if not issue_text:
         return spec
     seen: set[str] = set()
+    cases_by_source: dict[str, list[VerificationCase]] = {}
+    last_emitted_source = ""
+    last_emitted_region = ""
 
     def _emit(verbatim: str, kind: str, modality: str, strength: int,
               parent_id: str, part_index: int,
               context_symbols: set[str] | None = None,
               region: str = "normative") -> None:
+        nonlocal last_emitted_source, last_emitted_region
         v = verbatim.strip().rstrip(".")
         if not v or len(v) < 8:
             return
         key = " ".join(v.split()).lower()
-        if key in seen or len(spec.obligations) >= max_obligations:
+        if key in seen:
             return
         seen.add(key)
         subj = _v2_subject_symbols(v) | (context_symbols or set())
@@ -738,9 +888,12 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             parent_id=parent_id,
             part_index=part_index,
             region=region,
+            source_variants=(v,),
         ))
         spec.all_symbols |= set(subj) | broad
         spec.all_keywords |= kws
+        last_emitted_source = v
+        last_emitted_region = region
 
     def _process_candidate(text: str, bullet_label_syms: set[str],
                            bullet_fallback: tuple[str, str, int] | None,
@@ -852,27 +1005,74 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
     first_block = True
     parity_candidates: list[tuple[str, str]] = []
     details_roles: list[str] = []
+    pending_example_intro = ""
+    pending_example_source = ""
+    fence_example_source = ""
+    fence_example_intro = ""
+    fence_language = ""
+    fence_body: list[str] = []
 
     def _flush_prose() -> None:
+        nonlocal last_emitted_source, last_emitted_region
         if not prose:
             return
         block = " ".join(prose)
         prose.clear()
+        emitted_before = len(spec.obligations)
         role = section_role
         for sent in _V2_SENT_SPLIT_RE.split(block):
             sent = sent.strip()
             if sent and len(sent) >= 8:
                 parity_candidates.append((sent, role))
                 _process_candidate(sent, set(), None, role)
+        if len(spec.obligations) == emitted_before:
+            # Unclassified intervening prose breaks the adjacency from an older
+            # obligation to a later example introducer.
+            last_emitted_source = ""
+            last_emitted_region = ""
 
     for raw in _v2_strip_html_comments(issue_text).split("\n"):
         line = raw.rstrip()
         if line.strip().startswith("```"):
-            in_fence = not in_fence
-            _flush_prose()
+            if not in_fence:
+                _flush_prose()
+                in_fence = True
+                fence_language = line.strip()[3:].strip()
+                fence_example_source = pending_example_source
+                fence_example_intro = pending_example_intro
+                fence_body = []
+            else:
+                in_fence = False
+                body = "\n".join(fence_body).strip()
+                if fence_example_source and body:
+                    cases_by_source.setdefault(fence_example_source, []).append(
+                        VerificationCase(
+                            verbatim_text=body,
+                            language=fence_language,
+                            introduced_by=fence_example_intro,
+                        )
+                    )
+                fence_example_source = ""
+                fence_example_intro = ""
+                fence_language = ""
+                fence_body = []
+            pending_example_intro = ""
+            pending_example_source = ""
             continue
         if in_fence:
+            if fence_example_source:
+                fence_body.append(raw)
             continue
+        if _V2_EXAMPLE_INTRO_RE.fullmatch(line.strip()):
+            _flush_prose()
+            pending_example_intro = line.strip()
+            pending_example_source = (
+                last_emitted_source if last_emitted_region == "normative" else ""
+            )
+            continue
+        if pending_example_intro and line.strip():
+            pending_example_intro = ""
+            pending_example_source = ""
         summary = _V2_SUMMARY_RE.search(line)
         if _V2_DETAILS_OPEN_RE.search(line):
             _flush_prose()
@@ -906,10 +1106,14 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         # normative sentence and inherit that sentence's requirement grammar.
         if _V2_STANDALONE_MEDIA_RE.fullmatch(line):
             _flush_prose()
+            last_emitted_source = ""
+            last_emitted_region = ""
             continue
         heading = _v2_heading_text(line)
         if heading is not None:
             _flush_prose()
+            last_emitted_source = ""
+            last_emitted_region = ""
             first_block = False
             role = _v2_section_role(heading)
             if role != "neutral":
@@ -922,6 +1126,8 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         title_match = _V2_BRACKET_TITLE_RE.match(line)
         if title_match:
             _flush_prose()
+            last_emitted_source = ""
+            last_emitted_region = ""
             first_block = False
             content = title_match.group(1).strip()
             if _v2_classify(content) is not None:
@@ -933,6 +1139,8 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         bm = _V2_BULLET_RE.match(line)
         if bm:
             _flush_prose()
+            last_emitted_source = ""
+            last_emitted_region = ""
             content = bm.group(1).strip()
             checkbox = _V2_CHECKBOX_RE.match(content)
             if checkbox:
@@ -976,6 +1184,8 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         nm = re.match(r"^\s*\d+[.)]\s+(.+)$", line)
         if nm:
             _flush_prose()
+            last_emitted_source = ""
+            last_emitted_region = ""
             content = nm.group(1).strip()
             cls = _v2_classify(content)
             if cls:
@@ -1076,12 +1286,26 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         )
         covered.append(key)
 
+    spec.obligations = _v2_canonicalize_obligations(
+        spec.obligations, cases_by_source
+    )[:max(0, max_obligations)]
+    # Union views are projections of the final canonical denominator, not the
+    # pre-merge collector.  Rebuild after both merge and limit so telemetry and
+    # relevance cannot retain a discarded variant or truncated obligation.
+    spec.all_symbols = set().union(*(
+        set(obligation.symbols) | set(obligation.subject_symbols)
+        for obligation in spec.obligations
+    )) if spec.obligations else set()
+    spec.all_keywords = set().union(*(
+        set(obligation.keywords) for obligation in spec.obligations
+    )) if spec.obligations else set()
     return spec
 
 
 __all__ = [
     "Obligation",
     "IssueSpec",
+    "VerificationCase",
     "SpecRegion",
     "classify_spec_v2_regions",
     "extract_spec",
