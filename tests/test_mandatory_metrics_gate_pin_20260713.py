@@ -493,7 +493,7 @@ def test_summarize_builds_canonical_v2_and_exact_128_diagnosis_once() -> None:
         "missing_tasks",
         "duplicate_tasks",
         "unexpected_tasks",
-        "len(ss_features) != 128",
+        "GT_EXACT_128_CARDINALITY_INVALID",
         "present_in_tasks",
     ):
         assert required_guard in run, f"diagnosis step lacks fail-closed guard {required_guard!r}"

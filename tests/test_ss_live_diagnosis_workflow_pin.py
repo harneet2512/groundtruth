@@ -1,7 +1,10 @@
 """Pins the summarize job's evidence-preserving, fail-closed diagnosis bundle."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import yaml
 
@@ -33,6 +36,38 @@ def test_collectors_are_captured_and_use_exact_download_root() -> None:
     assert '--expected-tasks-file "$GT_DIAG_DIR/expected_tasks.json"' in run
     assert "|| GT_FEATURE_METRICS_RC=$?" in run
     assert 'gt_run_metrics_v2_${GT_RUN_ID}.json' in run
+
+
+def test_summarize_pythonpath_can_import_feature_collector_dependencies() -> None:
+    """Reproduce the summarize step's declared import environment, not the test runner's."""
+    step = _step("Build canonical PERF and exact-128 diagnosis")
+    configured = step["env"]["PYTHONPATH"].split(":")
+    pythonpath = os.pathsep.join(
+        part.replace("${{ github.workspace }}", str(ROOT)) for part in configured
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = pythonpath
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/swebench/gt_feature_metrics.py"), "--help"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_manifest_distinguishes_missing_exact_128_artifact_from_bad_cardinality() -> None:
+    run = _step("Build canonical PERF and exact-128 diagnosis")["run"]
+    missing = 'issues.append("GT_EXACT_128_ARTIFACT_MISSING")'
+    cardinality = 'issues.append(f"GT_EXACT_128_CARDINALITY_INVALID: {feature_count}")'
+
+    assert missing in run
+    assert cardinality in run
+    assert run.index(missing) < run.index(cardinality)
 
 
 def test_exact_128_live_diagnosis_uses_canonical_v2_artifact() -> None:

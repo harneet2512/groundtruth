@@ -2403,7 +2403,7 @@ jobs:
           GT_EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
           GT_RUN_ID: ${{ github.run_id }}
           GT_TRIAL_RESULT: ${{ needs.trial.result }}
-          PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics
         run: |
           set -euo pipefail
           export GT_DIAG_DIR=/tmp/gt-diagnosis
@@ -2638,10 +2638,16 @@ jobs:
           ):
               issues.append("canonical_perf_incomplete")
 
-          ss_features = feature.get("ss_features") if feature else None
-          if not isinstance(ss_features, dict) or len(ss_features) != 128:
-              issues.append("GT_EXACT_128_INVALID: len(ss_features) != 128")
+          if feature is None:
+              issues.append("GT_EXACT_128_ARTIFACT_MISSING")
               ss_features = {}
+              feature_count = None
+          else:
+              ss_features = feature.get("ss_features")
+              feature_count = len(ss_features) if isinstance(ss_features, dict) else None
+              if feature_count != 128:
+                  issues.append(f"GT_EXACT_128_CARDINALITY_INVALID: {feature_count}")
+                  ss_features = {}
           family_counts = Counter(
               row.get("family") for row in ss_features.values() if isinstance(row, dict)
           )
