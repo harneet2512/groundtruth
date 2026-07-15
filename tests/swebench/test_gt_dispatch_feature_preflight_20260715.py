@@ -77,7 +77,7 @@ def test_acq_component_authorities_name_the_actual_construction_chain() -> None:
         "groundtruth.pretask.v1r_brief._l1_signal_counts",
     ]
     assert features["lexical_FTS5"]["producer_authority"] == [
-        "groundtruth.pretask.v7_4_brief.lexical_file_search",
+        "groundtruth.pretask.hybrid.lexical_file_search",
         "groundtruth.pretask.v7_4_brief._score_variant_C",
         "groundtruth.pretask.v1r_brief._l1_signal_counts",
     ]
@@ -121,7 +121,37 @@ def test_compound_acq_authority_requires_every_callable(monkeypatch) -> None:
 
     manifest = preflight.build_static_dispatch_manifest()
     row = manifest["features"]["lexical_FTS5"]
-    assert row["blocked_by"] == ["missing_executable_acq_producer_authority"]
+    assert row["blocked_by"] == ["missing_source_declared_acq_producer_authority"]
+
+
+def test_checkout_source_accepts_only_direct_exact_callable_declarations() -> None:
+    assert preflight._source_declares_callable(
+        "groundtruth.pretask.hybrid", "lexical_file_search",
+    ) is True
+    assert preflight._source_declares_callable(
+        "groundtruth.pretask.v7_4_brief", "lexical_file_search",
+    ) is False
+    assert preflight._source_declares_callable(
+        "groundtruth.pretask.hybrid", "not_a_real_callable",
+    ) is False
+    assert preflight._checkout_module_source(
+        "groundtruth.pretask.Hybrid",
+    ) is None
+
+
+def test_source_authority_never_falls_through_to_an_installed_copy(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(preflight, "_SOURCE_ROOTS", (tmp_path,))
+    preflight._checkout_module_source.cache_clear()
+    preflight._source_declares_callable.cache_clear()
+    try:
+        assert preflight._source_declares_callable(
+            "groundtruth.pretask.hybrid", "lexical_file_search",
+        ) is False
+    finally:
+        preflight._checkout_module_source.cache_clear()
+        preflight._source_declares_callable.cache_clear()
 
 
 def test_static_manifest_validates_after_canonical_json_round_trip() -> None:
@@ -184,5 +214,36 @@ def test_cli_is_valid_under_exact_workflow_pythonpath(tmp_path: Path) -> None:
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert payload["manifest"]["feature_count"] == 128
+    assert payload["preflight"]["valid"] is True
+    assert payload["preflight"]["blocked_features"] == []
+
+
+def test_cli_static_authority_does_not_depend_on_host_site_packages(
+    tmp_path: Path,
+) -> None:
+    """The prepare host is not the substrate that executes ACQ producers."""
+    output = tmp_path / "static_feature_manifest_no_site.json"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join((
+        str(ROOT / "src"), str(ROOT / "scripts" / "swebench"),
+    ))
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(ROOT / "scripts" / "swebench" / "gt_dispatch_feature_preflight.py"),
+            "--output", str(output),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert completed.returncode == 0, completed.stdout + completed.stderr
     assert payload["preflight"]["valid"] is True
     assert payload["preflight"]["blocked_features"] == []

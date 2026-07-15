@@ -56,7 +56,7 @@ ACQ_PRODUCER_AUTHORITIES: dict[str, tuple[str, ...]] = {
         "groundtruth.pretask.v1r_brief._l1_signal_counts",
     ),
     "lexical_FTS5": (
-        "groundtruth.pretask.v7_4_brief.lexical_file_search",
+        "groundtruth.pretask.hybrid.lexical_file_search",
         "groundtruth.pretask.v7_4_brief._score_variant_C",
         "groundtruth.pretask.v1r_brief._l1_signal_counts",
     ),

@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Fail-closed static dispatch audit for the exact 128-feature inventory.
 
-The manifest is derived from executable authority tables.  It proves only that
-static producer/control, collector, relationship, and artifact plumbing exists;
-it never proves runtime opportunity, delivery, acknowledgment, or SS-LIVE.
+The manifest is derived from source-declared authority tables in this checkout.
+It proves only that static producer/control, collector, relationship, and
+artifact plumbing exists; it never proves runtime executability, opportunity,
+delivery, acknowledgment, or SS-LIVE.
 """
 from __future__ import annotations
 
 import argparse
-import importlib
+import ast
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,8 @@ SCHEMA = "gt.static_dispatch_feature_manifest.v1"
 AUTHORITY_FIELDS = (
     "producer_authority", "collector_authority", "evidence_relationship", "terminal_artifact",
 )
+_ROOT = Path(__file__).resolve().parents[2]
+_SOURCE_ROOTS = (_ROOT / "src", _ROOT / "scripts" / "swebench")
 
 
 def _perf_authorities() -> dict[str, tuple[str, str]]:
@@ -37,16 +41,65 @@ def _perf_authorities() -> dict[str, tuple[str, str]]:
     }
 
 
+@lru_cache(maxsize=None)
+def _checkout_module_source(module_name: str) -> Path | None:
+    """Resolve a module from this checkout with exact-case path components."""
+    if not module_name or any(not part for part in module_name.split(".")):
+        return None
+    parts = module_name.split(".")
+    relative_candidates = (
+        (*parts[:-1], f"{parts[-1]}.py"),
+        (*parts, "__init__.py"),
+    )
+    for root in _SOURCE_ROOTS:
+        for relative in relative_candidates:
+            current = root
+            matched = True
+            for component in relative:
+                try:
+                    if component not in {entry.name for entry in current.iterdir()}:
+                        matched = False
+                        break
+                except OSError:
+                    matched = False
+                    break
+                current /= component
+            if matched and current.is_file():
+                return current
+    return None
+
+
+@lru_cache(maxsize=None)
+def _source_declares_callable(module_name: str, attribute: str) -> bool:
+    """Verify an exact direct declaration without importing runtime deps.
+
+    The prepare runner is a static-audit host, not the substrate that executes
+    acquisition.  Optional runtime dependencies may therefore be absent there.
+    Reading the checkout module's AST preserves a strict authority check: only
+    an exact top-level callable declaration is accepted; import aliases, missing
+    modules, syntax errors, and nonexistent attributes remain blocked.
+    """
+    source = _checkout_module_source(module_name)
+    if source is None:
+        return False
+    try:
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    except (OSError, SyntaxError, UnicodeError):
+        return False
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and node.name == attribute
+        for node in tree.body
+    )
+
+
 def _callable_authority(path: object) -> bool:
     if isinstance(path, (list, tuple)):
         return bool(path) and all(_callable_authority(item) for item in path)
     if not isinstance(path, str) or "." not in path:
         return False
     module_name, attribute = path.rsplit(".", 1)
-    try:
-        return callable(getattr(importlib.import_module(module_name), attribute, None))
-    except ImportError:
-        return False
+    return _source_declares_callable(module_name, attribute)
 
 
 def _derived_rows() -> dict[str, dict[str, Any]]:
@@ -62,7 +115,7 @@ def _derived_rows() -> dict[str, dict[str, Any]]:
                 if not component:
                     blocked_by.append("missing_acq_source_component")
                 if not _callable_authority(producer):
-                    blocked_by.append("missing_executable_acq_producer_authority")
+                    blocked_by.append("missing_source_declared_acq_producer_authority")
                 row = {
                     "family": family,
                     # JSON is the artifact boundary. Materialize compound ACQ
@@ -165,7 +218,7 @@ def _derived_rows() -> dict[str, dict[str, Any]]:
                         f"gt_performance_metrics.{section_producers[section]}"
                     )
                 if not _callable_authority(producer_authority):
-                    blocked_by.append("missing_executable_perf_producer_authority")
+                    blocked_by.append("missing_source_declared_perf_producer_authority")
                 row = {
                     "family": family,
                     "producer_authority": producer_authority,
@@ -194,7 +247,10 @@ def build_static_dispatch_manifest() -> dict[str, Any]:
         "feature_count": len(rows),
         "dynamic_opportunity_proven": False,
         "ss_live_proven": False,
-        "meaning": "static executable-authority completeness only; never dynamic or SS proof",
+        "meaning": (
+            "static checkout source-declared authority completeness only; "
+            "never runtime-executability, dynamic, or SS proof"
+        ),
         "features": rows,
     }
 
