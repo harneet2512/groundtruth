@@ -22,6 +22,21 @@ def _trial_run() -> str:
     raise AssertionError("paid trial run block not found")
 
 
+def _trial_steps() -> list[dict]:
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    return [
+        step for step in doc["jobs"]["trial"]["steps"]
+        if isinstance(step, dict)
+    ]
+
+
+def _trial_step(name: str) -> dict:
+    for step in _trial_steps():
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"trial step not found: {name}")
+
+
 def test_live_heartbeat_identifies_task_and_observable_progress() -> None:
     run = _trial_run()
     assert "[GT_HEARTBEAT]" in run
@@ -103,3 +118,61 @@ def test_failure_log_and_partial_artifacts_are_always_uploaded() -> None:
     assert "gt_heartbeat.log" in progress["with"]["path"]
     assert progress["with"]["if-no-files-found"] == "error"
     assert upload["with"]["if-no-files-found"] == "error"
+
+
+def test_truth_bearing_steps_do_not_launder_failure_conclusions() -> None:
+    """A failed proof must be red where it fails, not green until Collect fails."""
+    for name in (
+        "GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo",
+        "Run-identity gate (gt_math R01-R04 — resolved identity + fail-closed integrity before spend)",
+        "Run GT Pro trial",
+        "Verify GT wiring (trajectory-based liveness + delivery check)",
+    ):
+        step = _trial_step(name)
+        assert step.get("continue-on-error") is not True, (
+            f"{name} must expose its nonzero result as a failed GitHub step; "
+            "always-run artifact steps already preserve diagnostics"
+        )
+
+
+def test_failure_visibility_preserves_always_run_diagnostics_and_matrix_progress() -> None:
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    trial = doc["jobs"]["trial"]
+    assert trial["strategy"]["fail-fast"] is False
+
+    for name in (
+        "Upload post-agent diagnostic snapshot",
+        "Run official SWE-bench-Live evaluator (this instance, warm image, offline dataset)",
+        "Collect results",
+        "Upload results",
+        "Cleanup runner disk (post-upload, non-critical)",
+    ):
+        assert _trial_step(name).get("if") == "always()", (
+            f"{name} must still run after an earlier truth-bearing step fails"
+        )
+
+    assert doc["jobs"]["summarize"].get("if") == "always()"
+
+
+def test_post_failure_diagnostics_recheck_identity_and_proof_before_any_spend() -> None:
+    """`!cancelled()` keeps diagnosis alive; the paid boundary must still fail closed."""
+    for name in (
+        "Run-identity gate (gt_math R01-R04 — resolved identity + fail-closed integrity before spend)",
+        "Run GT Pro trial",
+        "Verify GT wiring (trajectory-based liveness + delivery check)",
+    ):
+        assert _trial_step(name).get("if") == "${{ !cancelled() }}"
+
+    paid = str(_trial_step("Run GT Pro trial").get("run") or "")
+    spend_boundary = paid.index("GT_C_ARTIFACTS=/gt_artifacts")
+    pre_spend = paid[:spend_boundary]
+    assert "/tmp/gt_out/gt_run_identity.json" in pre_spend
+    assert "GT_RUN_IDENTITY_FAIL" in pre_spend
+    assert "PROOF_STATE=" in pre_spend
+    assert 'if [ "$INPUT_BASELINE" != "true" ] && [ "$PROOF_STATE" != "ok" ]' in pre_spend
+    assert "GT_RUN_PROOF_FAIL" in pre_spend
+    assert pre_spend.count("exit 1") >= 2
+
+    assert paid.index("GT_RUN_IDENTITY_FAIL") < spend_boundary
+    assert paid.index("GT_RUN_PROOF_FAIL") < spend_boundary
+    assert paid.index("_GT_PROFILE_EXPORTS") > spend_boundary

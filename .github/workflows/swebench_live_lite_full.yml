@@ -815,7 +815,6 @@ jobs:
       - name: GT substrate proof (handoff §B-AFTER/§D/§G) — pre-agent, pinned, read-only repo
         # Baseline arm consumes no substrate — skip the proof entirely.
         if: ${{ inputs.baseline != true }}
-        continue-on-error: true
         env:
           GT_MATRIX_TASK: ${{ matrix.task }}
           GT_MATRIX_LANGUAGE: ${{ matrix.language }}
@@ -855,11 +854,10 @@ jobs:
 
       - name: Run-identity gate (gt_math R01-R04 — resolved identity + fail-closed integrity before spend)
         # Runs AFTER the substrate proof (which loads/pulls the pinned image) and BEFORE the paid
-        # agent step. continue-on-error + !cancelled() mirror the sibling proof/trial steps: the
-        # spend-prevention uses two belts: proof_status=failed below and the paid step's independent
-        # identity-artifact validation. Job-status semantics stay identical to today.
+        # agent step. A nonzero result stays visible on this step; the always-run collection/upload
+        # steps preserve diagnostics independently. Spend prevention still uses two belts:
+        # proof_status=failed below and the paid step's independent identity-artifact validation.
         if: ${{ !cancelled() }}
-        continue-on-error: true
         env:
           GT_ID_GT_REF_REQUESTED: ${{ inputs.gt_ref || 'gt-trial' }}
           GT_ID_WORKFLOW_DISPATCH_SHA: ${{ github.sha }}
@@ -1019,7 +1017,6 @@ jobs:
 
       - name: Run GT Pro trial
         if: ${{ !cancelled() }}
-        continue-on-error: true
         env:
           MTASK: ${{ matrix.task }}
           MLANG: ${{ matrix.language }}
@@ -1810,7 +1807,6 @@ jobs:
           if-no-files-found: error
 
       - name: Verify GT wiring (trajectory-based liveness + delivery check)
-        continue-on-error: true
         if: ${{ !cancelled() }}
         env:
           # Arm selector for the GT-on-only profile-proof gate below (same expression as the trial
