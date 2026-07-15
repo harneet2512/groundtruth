@@ -139,3 +139,51 @@ def test_genuine_loop_after_progress_fires_without_calibration_rewarm(g, monkeyp
     assert first is None and second is None
     assert third is not None
     assert "identical native output and return code 3 times" in third[1]
+
+
+def test_all_ss_off_retains_legacy_loop_and_state_identity(g, monkeypatch):
+    """The replay counterfactual must be byte-identical to the pre-V2 detector."""
+    _reset(g, monkeypatch)
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "0")
+    monkeypatch.setenv("GT_SS_RECOVERY_V2", "0")
+
+    command = "cat privacyidea/lib/eventhandler/requestmangler.py"
+    output = "same native source bytes"
+    assert g._degenerate_loop_candidate(command, output, 0) is None
+    first_signature = g._traj_loop_sigs[-1]
+    first_state = g._traj_state_keys[-1]
+    assert g._degenerate_loop_candidate(command, output, 1) is None
+
+    # Legacy detect.loop deliberately predates explicit return-code identity.
+    assert first_signature == command + "\x00" + g._obs_collapse(output)
+    assert g._traj_loop_sigs[-1] == first_signature
+    assert first_state == "post_view\x00privacyidea/lib/eventhandler/requestmangler.py"
+    assert g._traj_state_keys[-1] == first_state
+
+
+def test_all_ss_off_retains_legacy_detect_loop_payload(g, monkeypatch):
+    _reset(g, monkeypatch)
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "0")
+    monkeypatch.setenv("GT_SS_RECOVERY_V2", "0")
+    command = "cat privacyidea/lib/eventhandler/requestmangler.py"
+    output = "same native source bytes"
+    signature = command + "\x00" + g._obs_collapse(output)
+    state_key = "post_view\x00privacyidea/lib/eventhandler/requestmangler.py"
+    g._traj_loop_sigs.extend([signature, signature])
+    g._traj_state_keys.extend([state_key] * 12)
+    g._lr_history.extend([0.0] * 24)
+    g._nsr_history.extend([1.0] * 24)
+
+    candidate = g._degenerate_loop_candidate(command, output, 0)
+
+    assert candidate is not None
+    payload = candidate[1]
+    body = (
+        "GT: you have run this exact command with this exact output 3 times, "
+        "and your recent actions are producing almost no new state \u2014 this is "
+        "a degenerate loop, not progress. If you edited a compiled binary's source, "
+        "REBUILD before re-running; otherwise re-read the last real error and try a "
+        "different approach (different file, different hypothesis, or a narrower test)."
+    )
+    assert payload == g._nudge_native(
+        f'\n<gt-nudge reason="degenerate_loop">\n{body}\n</gt-nudge>')

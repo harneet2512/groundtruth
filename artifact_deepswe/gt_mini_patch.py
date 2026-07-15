@@ -1659,6 +1659,23 @@ def _behavior_loop_signature(cmd: str, raw_obs: str, returncode=None) -> str | N
         _behavior_result_preimage(norm, raw_obs, returncode)).hexdigest()
 
 
+def _legacy_behavior_loop_signature(cmd: str, raw_obs: str) -> str | None:
+    """Pre-V2 detect.loop identity retained for the all-SS-off counterfactual."""
+    norm = (cmd or "").strip()
+    return norm + "\x00" + _obs_collapse(raw_obs) if norm else None
+
+
+def _legacy_behavior_state_key(cmd: str, raw_obs: str) -> str:
+    """Pre-V2 TIDE state identity retained for byte-identity-off replay."""
+    kind, fpath = _classify(cmd)
+    if kind and fpath:
+        return f"{kind}\x00{fpath}"
+    import hashlib as _h
+    head = (cmd or "").strip().split(None, 1)[0] if (cmd or "").strip() else ""
+    oh = _h.sha256(_obs_collapse(raw_obs).encode("utf-8", "replace")).hexdigest()[:8]
+    return f"cmd\x00{head}\x00{oh}"
+
+
 def _behavior_state_key(cmd: str, raw_obs: str, returncode=None) -> str:
     """Content-aware TIDE node identity for one action/result pair.
 
@@ -5973,9 +5990,18 @@ def _degenerate_loop_candidate(cmd: str, raw_obs: str,
     the trajectory-stream bookkeeping).  Returns (severity, payload) or None."""
     global _detect_loop_fired
     import statistics as _st
-    _sync_detect_loop_progress_epoch()
-    sig = _behavior_loop_signature(cmd, raw_obs, returncode)
-    _traj_state_keys.append(_behavior_state_key(cmd, raw_obs, returncode))
+    v2_behavior = _ss_coherence_v2_on() or _ss_recovery_v2_on()
+    if v2_behavior:
+        _sync_detect_loop_progress_epoch()
+        sig = _behavior_loop_signature(cmd, raw_obs, returncode)
+        state_key = _behavior_state_key(cmd, raw_obs, returncode)
+    else:
+        # The recorded counterfactual predates explicit return-code/full-output
+        # identities. SS-off is a byte-preservation contract, so retain that
+        # complete detector semantics rather than only disabling epoch resets.
+        sig = _legacy_behavior_loop_signature(cmd, raw_obs)
+        state_key = _legacy_behavior_state_key(cmd, raw_obs)
+    _traj_state_keys.append(state_key)
     if sig:
         _traj_loop_sigs.append(sig)
     lr = compute_loop_ratio(_traj_loop_sigs)
@@ -5995,15 +6021,25 @@ def _degenerate_loop_candidate(cmd: str, raw_obs: str,
     if not fire:
         return None
     _detect_loop_fired = True
-    body = (
-        f"GT: the same normalized command produced identical native output and "
-        f"return code {reps} times "
-        "within the current byte-proven source-state epoch, and recent "
-        "command/result-state novelty is below this trajectory's prior norm. "
-        "Repeating the unchanged state is not adding evidence. Change one state "
-        "variable before retrying: inspect the controlling source or configuration, "
-        "make a byte-changing edit, rebuild if applicable, or run a discriminating probe."
-    )
+    if v2_behavior:
+        body = (
+            f"GT: the same normalized command produced identical native output and "
+            f"return code {reps} times "
+            "within the current byte-proven source-state epoch, and recent "
+            "command/result-state novelty is below this trajectory's prior norm. "
+            "Repeating the unchanged state is not adding evidence. Change one state "
+            "variable before retrying: inspect the controlling source or configuration, "
+            "make a byte-changing edit, rebuild if applicable, or run a discriminating probe."
+        )
+    else:
+        body = (
+            f"GT: you have run this exact command with this exact output {reps} "
+            "times, and your recent actions are producing almost no new state \u2014 "
+            "this is a degenerate loop, not progress. If you edited a compiled "
+            "binary's source, REBUILD before re-running; otherwise re-read the "
+            "last real error and try a different approach (different file, "
+            "different hypothesis, or a narrower test)."
+        )
     return (float(_SEV_DETECT),
             _nudge_native(f'\n<gt-nudge reason="degenerate_loop">\n{body}\n</gt-nudge>'))
 
