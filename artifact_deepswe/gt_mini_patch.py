@@ -3894,6 +3894,35 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
     return block
 
 
+def _search_localize_subject(cmd: str) -> str:
+    """Return the unique repo-relative definition target for a bare-symbol search.
+
+    This is delivery metadata, not a second producer: the existing search block
+    already contains the def/caller facts. An ambiguous or unavailable graph
+    yields no subject so final observation arbitration stays correct-or-quiet.
+    """
+    sym = _search_pattern(cmd)
+    if not sym:
+        return ""
+    db = _db_path()
+    if not db or not os.path.isfile(db):
+        return ""
+    con = _connect_ro(db)
+    if con is None:
+        return ""
+    try:
+        info = _resolve_symbol_defs(con, sym, _root())
+    except Exception:  # noqa: BLE001 -- delivery metadata may only abstain
+        return ""
+    finally:
+        con.close()
+    if not info:
+        return ""
+    files = {_norm_fp(_to_repo_rel(fp, _root()))
+             for fp, _line in info.get("def_sites", ()) if fp}
+    return next(iter(files)) if len(files) == 1 else ""
+
+
 # --------------------------------------------------------------------------- #
 # T0->T2 localization RE-SLOT — the GO-LIVE half (GT_LOC_RESLOT, default-OFF).
 #
@@ -6193,6 +6222,14 @@ def _semantic_drift_candidate(rel: str) -> tuple[float, str] | None:
         return None  # first sight = baseline snapshot, never a drift signal
     lost_g = prev[0] - guards
     lost_r = prev[1] - returns
+    # A changed return expression is not evidence that a control-flow path
+    # disappeared.  The live matplotlib smoke transformed one return while
+    # preserving the function's return-path cardinality; exact-line set
+    # subtraction called that a removal and confidently steered the model wrong.
+    # Stay correct-or-quiet unless the conservative textual return count itself
+    # decreases.  Guard loss remains independently actionable.
+    if len(returns) >= len(prev[1]):
+        lost_r = frozenset()
     if not lost_g and not lost_r:
         return None
     # SD-1 (2026-07-10): suppress during an active REPAIR cycle. When the last observed
@@ -9919,12 +9956,25 @@ def _dcc_candidate_families(con, footprint: set, orig_out: str, root: str) -> di
     return fam
 
 
+def _lane_a_parts(item, default_subject: str = "") -> tuple[str, str, str]:
+    """Normalize a Lane-A item with optional explicit subject metadata."""
+    kind, text = item[:2]
+    subject = item[2] if len(item) > 2 else default_subject
+    return str(kind), str(text or ""), str(subject or "")
+
+
+def _lane_a_event(kind: str, default_event):
+    """Return the producer's real decision event, including search Lane-A."""
+    return "post_search" if kind == "post_search.localize" else default_event
+
+
 def _dcc_files_in_lane_a(lane_a, root: str) -> set:
     """Repo-rel file paths already NAMED in THIS turn's other lane_a blocks — the
     same-turn half of the novelty subtraction (avoids re-naming a file the contract
     / cochange / scope-map / post_search / evidence block already surfaced)."""
     named: set = set()
-    for _kind, text in lane_a:
+    for item in lane_a:
+        _kind, text, _subject = _lane_a_parts(item)
         for tok in _DCC_PATHTOK_RE.findall(text or ""):
             if "/" in tok or "." in tok:
                 named.add(_norm_fp(_to_repo_rel(tok, root)))
@@ -10173,7 +10223,9 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
     # on -> compute once, byte-identical when all off (never queried).
     _ss_root = _root() if (_ss_provenance_on() or _ss_novelty_on()
                            or _ss_dedup2_on()) else ""
-    for kind, text in lane_a:
+    for item in lane_a:
+        kind, text, subject_path = _lane_a_parts(item, krel or "")
+        item_event = _lane_a_event(kind, event)
         _record_hook_fire(kind)  # count the FIRE before any correct-or-quiet skip
         try:
             if not text:
@@ -10193,8 +10245,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     kind=kind,
                     outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
                     reason="leak_guard",
-                    file_path=krel or "",
-                    event=event,
+                    file_path=subject_path,
+                    event=item_event,
                 )
                 continue
             # ── SS delivery gates (features 5/1/6/2) — each behind its OWN flag,
@@ -10209,18 +10261,20 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     if not _ss_payload_has_content(_ptext):
                         _runtime_ledger_record(
                             kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
-                            reason="ss_provenance", file_path=krel or "", event=event)
+                            reason="ss_provenance", file_path=subject_path, event=item_event)
                         continue
                     text = _ptext
             # Shared precedence: late -> semantic duplicate -> step-behind.
-            _supp, _reason = _ss_screen_delivery(kind, text, _ss_root, is_loc=False)
+            _supp, _reason = _ss_screen_delivery(
+                kind, text, _ss_root, is_loc=False,
+                subject_path=subject_path, event=item_event)
             if _supp:
                 _runtime_ledger_record(
                     kind=kind,
                     outcome=(_ProductSignalOutcome.SUPPRESSED_DUPLICATE
                              if _reason == "ss_semantic_dup"
                              else _ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY),
-                    reason=_reason, file_path=krel or "", event=event)
+                    reason=_reason, file_path=subject_path, event=item_event)
                 continue
             h = _oracle_content_hash(text)
             # B5 (token bloat, fastapi witness): a Lane-A block is a state-INDEPENDENT
@@ -10239,8 +10293,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     kind=kind,
                     outcome=_ProductSignalOutcome.SUPPRESSED_DUPLICATE,
                     reason="delivered",
-                    file_path=krel or "",
-                    event=event,
+                    file_path=subject_path,
+                    event=item_event,
                 )
                 continue
             # D-7 (RL-1, flag GT_LANE_ENVELOPE): law-8 drop-whole — an over-budget lane
@@ -10251,8 +10305,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     kind=kind,
                     outcome=_ProductSignalOutcome.SUPPRESSED_BUDGET,
                     reason="lane_budget",
-                    file_path=krel or "",
-                    event=event,
+                    file_path=subject_path,
+                    event=item_event,
                 )
                 continue
             # SS-8 SHADOW-HOLDOUT (flag GT_SS_SHADOW, rate GT_SS_SHADOW_RATE, both default
@@ -10262,7 +10316,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             # leak-safe). Spend the SAME content hashes as the deliver arm so the withheld fact
             # dedups identically (one shadow row per distinct content, mirroring one DELIVERED
             # row) and does not re-compete. Byte-identical when the flag is off or the rate is 0.
-            if _ss_shadow_withheld(kind, hc, text, file_path=krel or "", event=event):
+            if _ss_shadow_withheld(
+                    kind, hc, text, file_path=subject_path, event=item_event):
                 _oracle_delivered_hashes.add(h)
                 _oracle_delivered_hashes.add(hc)
                 continue
@@ -10282,10 +10337,10 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             if kind == "l3.cochange":
                 global _cochange_fired
                 _cochange_fired = True
-            elif kind == "l3.contract" and krel:
+            elif kind == "l3.contract" and subject_path:
                 # latch under the SAME key _graph_contract_block's guard checks
                 # (rel == _krel == this krel on the post_edit path).
-                _contract_seen.add(krel)
+                _contract_seen.add(subject_path)
             elif kind == "obligation.resurface":
                 global _oblig_resurface_fired
                 _oblig_resurface_fired = True
@@ -10297,13 +10352,13 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 _psy = _search_pattern(cmd)
                 if _psy:
                     _ledger_mark_answered(_norm_stem(_psy), text)
-            _ledger_note_delivery(kind, cmd, krel or "")  # S-1: carry the target
+            _ledger_note_delivery(kind, cmd, subject_path)  # S-1: carry the target
             _runtime_ledger_record(
                 kind=kind,
                 outcome=_ProductSignalOutcome.DELIVERED,
                 chars=len(text),
-                file_path=krel or "",
-                event=event,
+                file_path=subject_path,
+                event=item_event,
                 content=text,  # W2 seal: the delivered lane block (never the whole observation)
             )
             # SS (features 2/7): record the delivered entity set + queue the ack watch.
@@ -10311,7 +10366,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             # RL-1 (flag GT_LANE_ENVELOPE): seal an envelope over the SAME delivered
             # bytes — advance the shared chain, stamp the dedup_key, record a receipt-
             # tracked delivery. Pure bookkeeping; no-op + byte-identical when off.
-            _seal_lane_delivery(kind, text, krel or "", base_output=_base_out)
+            _seal_lane_delivery(kind, text, subject_path, base_output=_base_out)
             # D1 budget-commit re-wire (risk note #5): l3b.evidence's text was
             # budget-trimmed by _budget_trim, which staged the trimmed lines in
             # _last_budget_pending.  In the old monolith the commit fired only on
@@ -11710,7 +11765,8 @@ def _register_precommitted_batch_dose(state, action, out) -> bool:
 def _attach_batch_candidate(pool, candidate, out, payload: str, *, join: bool,
                             kkind="", kf="", krel="", rollback=None,
                             is_loc: bool = False,
-                            knowledge_authority: bool = True) -> bool:
+                            knowledge_authority: bool = True,
+                            prepared_extra: "dict | None" = None) -> bool:
     """Build and attach complete producer ownership before pool publication."""
     state = _batch_context.get()
     if state is None or state.get("pool") is not pool:
@@ -11729,6 +11785,13 @@ def _attach_batch_candidate(pool, candidate, out, payload: str, *, join: bool,
         "is_loc": bool(is_loc),
         "knowledge_authority": bool(knowledge_authority),
     }
+    if prepared_extra:
+        overlap = set(prepared).intersection(prepared_extra)
+        if overlap:
+            raise ValueError(
+                "batch preparation metadata cannot replace core fields: "
+                + ", ".join(sorted(overlap)))
+        prepared.update(prepared_extra)
     state["contexts"][id(candidate)] = context
     state["prepared"][id(candidate)] = prepared
     if rollback is not None:
@@ -11739,7 +11802,8 @@ def _attach_batch_candidate(pool, candidate, out, payload: str, *, join: bool,
 def _append_batch_candidate(pool, candidate, thunk, out, payload: str, *, join: bool,
                             kkind="", kf="", krel="", rollback=None,
                             is_loc: bool = False,
-                            knowledge_authority: bool = True) -> None:
+                            knowledge_authority: bool = True,
+                            prepared_extra: "dict | None" = None) -> None:
     """Publish only a fully owned candidate; rollback once on publication failure."""
     state = _batch_context.get()
     owns_batch = state is not None and state.get("pool") is pool
@@ -11755,7 +11819,8 @@ def _append_batch_candidate(pool, candidate, thunk, out, payload: str, *, join: 
         attached = _attach_batch_candidate(
             pool, candidate, out, payload, join=join,
             kkind=kkind, kf=kf, krel=krel, rollback=rollback,
-            is_loc=is_loc, knowledge_authority=knowledge_authority)
+            is_loc=is_loc, knowledge_authority=knowledge_authority,
+            prepared_extra=prepared_extra)
         if owns_batch and not attached:
             raise RuntimeError("GT batch candidate ownership was not attached")
         pool.append((candidate, thunk))
@@ -11830,7 +11895,8 @@ def _prepare_batch_delivery(candidate, thunk, spec: dict) -> _BatchDeliveryPlan:
             candidate, thunk, spec["out"], "", bool(spec.get("join")),
             "suppressed", decision)
     suppressed, reason = _ss_content_decision(
-        candidate.kind, text, root, is_loc=bool(spec.get("is_loc")))
+        candidate.kind, text, root, is_loc=bool(spec.get("is_loc")),
+        subject_path=str(spec.get("krel") or ""), event=spec.get("event"))
     if suppressed:
         # Preserve the screened fact host-side so a final step-behind verdict can
         # commit its already-known entity set after formatter success. The plan's
@@ -12138,10 +12204,13 @@ def _dcc_latch_rollback(fp_key, enqueued) -> None:
 def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> None:
     """SM-5: stash each Lane-A block as (candidate, thunk) instead of delivering. The
     thunk delivers exactly that ONE block via the existing `_lane_a_deliver` (reused
-    whole — no re-implementation). Lane-A candidates are NOT acquisition-suppressible
-    (conservative: a Lane-A contract/scope/post_search fact is never wrongly dropped)."""
+    whole — no re-implementation). Subject-bound candidates carry an explicit target:
+    prospective search facts remain eligible, while closed post-view/post-edit facts
+    are correctly suppressed by the SS timing screen."""
     _ss_root = _root() if _ss_any_content_gate_on() else ""
-    for kind, text in lane_a:
+    for item in lane_a:
+        kind, text, subject_path = _lane_a_parts(item, krel or "")
+        item_event = _lane_a_event(kind, event)
         if not text:
             continue
         _batch_state = _batch_context.get()
@@ -12154,17 +12223,20 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
         # scratch-citing Lane-A fact that LOSES was never screened, so ss_late / ss_provenance never
         # appeared on the lane plane (they only appeared on the gateway). Screening HERE, before the
         # candidate competes, records the ss_* reason on the lane plane AND removes noise from the
-        # competition (a scratch/late fact never displaces a real dose). is_loc=False mirrors the
-        # legacy `_lane_a_deliver` screen (a Lane-A fact is never acquisition-suppressed). A
+        # competition (a scratch/late fact never displaces a real dose). is_loc=False preserves
+        # the legacy entity-screen semantics; explicit subject metadata separately closes facts
+        # whose target was already body-acquired. A
         # production-latched Lane-A kind un-burns its fire-once latch via the SM-5 F rollback so it
         # re-competes (deferred, not destroyed); a delivery-latched kind registered no rollback and
         # is a no-op. Byte-identical off: _ss_any_content_gate_on() False -> the screen never runs.
         if _ss_any_content_gate_on() and not _batch_owned:
-            _supp, _reason = _ss_screen_delivery(kind, text, _ss_root, is_loc=False)
+            _supp, _reason = _ss_screen_delivery(
+                kind, text, _ss_root, is_loc=False,
+                subject_path=subject_path, event=item_event)
             if _supp:
                 _runtime_ledger_record(
                     kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
-                    reason=_reason, file_path=krel or "", event=event)
+                    reason=_reason, file_path=subject_path, event=item_event)
                 _rb = _lane_a_rearm_pending.get(kind)
                 if _rb is not None:
                     try:
@@ -12172,22 +12244,28 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
                     except Exception:  # noqa: BLE001 — rollback is best-effort
                         pass
                 continue
-        key = _ga_unified_dedup_key(kind, kind, krel or "", "", [text])
-        cand = _ga_make_candidate(_GA_PLANE_LANE_A, kind, dedup_key=key,
-                                  target=krel or "", kkind=kkind, seq=len(pool))
+        key = _ga_unified_dedup_key(kind, kind, subject_path, "", [text])
+        candidate_kkind = (
+            "post_search" if kind == "post_search.localize" else kkind)
+        cand = _ga_make_candidate(
+            _GA_PLANE_LANE_A, kind, dedup_key=key,
+            target=subject_path, kkind=candidate_kkind, seq=len(pool))
         if cand is None:
             # engine absent -> deliver inline (degrade to the pre-SM-5 plane behavior,
             # never a silent drop). Consistent with the steer/gateway add-helpers.
-            _lane_a_deliver(out, cmd, [(kind, text)], krel=(krel or ""), event=event)
+            _lane_a_deliver(
+                out, cmd, [(kind, text, subject_path)],
+                krel=subject_path, event=item_event)
             continue
         _append_batch_candidate(
-            pool, cand, (lambda k=kind, t=text: _lane_a_deliver(
-                out, cmd, [(k, t)], krel=(krel or ""), event=event)),
-            out, text, join=True, kkind=kkind, krel=krel,
-            rollback=_lane_a_rearm_pending.get(kind))
-        if _batch_state is not None and _batch_state.get("pool") is pool:
-            _batch_state["prepared"][id(cand)].update(
-                cmd=cmd, kind=kind, krel=krel or "", event=event)
+            pool, cand, (lambda k=kind, t=text, s=subject_path, e=item_event:
+                         _lane_a_deliver(
+                             out, cmd, [(k, t, s)], krel=s, event=e)),
+            out, text, join=True, kkind=kkind, krel=subject_path,
+            rollback=_lane_a_rearm_pending.get(kind),
+            prepared_extra={
+                "cmd": cmd, "kind": kind, "krel": subject_path,
+                "event": item_event})
 
 
 def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
@@ -12816,8 +12894,8 @@ def install_observation_batch_commit(agent) -> bool:
         try:
             for plan in suppressed_plans:
                 _reason = plan.decision.get("reason", "suppressed")
+                _spec = state["prepared"].get(id(plan.candidate), {})
                 if _reason == "ss_step_behind":
-                    _spec = state["prepared"].get(id(plan.candidate), {})
                     _ss_remember_known(
                         plan.candidate.kind,
                         plan.decision.get("payload", ""),
@@ -12831,7 +12909,8 @@ def install_observation_batch_commit(agent) -> bool:
                              if _reason in {"ss_semantic_dup", "delivered"}
                              else _ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY),
                     reason=_reason,
-                    file_path=getattr(plan.candidate, "symbol", "") or "")
+                    file_path=str(_spec.get("krel") or ""),
+                    event=_spec.get("event"))
                 _batch_rearm_candidate(state, plan.candidate)
             winner = (_commit_batch_arbitration(
                 state, arbitration, planned_winner, plans)
@@ -13528,8 +13607,32 @@ def _ss_any_content_gate_on() -> bool:
             or _ss_dedup2_on() or _ss_ack_metrics_on())
 
 
+_SS_CLOSED_SUBJECT_KINDS = frozenset({
+    "l3.contract", "l3b.evidence", "post_search.localize",
+})
+
+
+def _ss_closed_subject_suppresses(kind: str, subject_path: str, event) -> bool:
+    """True when a subject-bound fact is born after its shaping decision closed.
+
+    Caller/contract evidence produced at ``post_view`` or ``post_edit`` cannot
+    retroactively improve the choice to inspect or change that subject.  Novel
+    cross-file occurrences in the payload do not reopen the already-paid target
+    decision.  The same fact remains eligible at a prospective search boundary.
+    """
+    if kind not in _SS_CLOSED_SUBJECT_KINDS or not subject_path:
+        return False
+    value = str(getattr(event, "value", event) or "").lower()
+    if value in {"post_view", "post_edit"}:
+        return True
+    if value == "post_search":
+        return _norm_fp(subject_path) in _ss_acquired_files
+    return False
+
+
 def _ss_content_decision(kind: str, text: str, root: str = "", *,
-                         is_loc: bool = False) -> "tuple[bool, str]":
+                         is_loc: bool = False, subject_path: str = "",
+                         event=None) -> "tuple[bool, str]":
     """Pure SS-0 suppression decision over a would-be delivery.
 
     Precedence is provenance -> late -> semantic duplicate -> step-behind. A semantic
@@ -13546,6 +13649,9 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
         return True, "ss_late"
     if _ss_dedup2_on() and _ss_dedup2_suppresses(kind, text, root, is_loc=is_loc):
         return True, "ss_semantic_dup"
+    if (_ss_novelty_on()
+            and _ss_closed_subject_suppresses(kind, subject_path, event)):
+        return True, "ss_step_behind"
     if _ss_novelty_on() and _ss_novelty_suppresses(kind, text, root, is_loc=is_loc):
         return True, "ss_step_behind"
     return False, ""
@@ -13553,9 +13659,12 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
 
 def _ss_screen_delivery(kind: str, text: str, root: str = "", *,
                         is_loc: bool = False,
-                        knowledge_authority: bool = True) -> "tuple[bool, str]":
+                        knowledge_authority: bool = True,
+                        subject_path: str = "", event=None) -> "tuple[bool, str]":
     """Shared Lane/Gateway screen plus the step-behind knowledge commit."""
-    suppress, reason = _ss_content_decision(kind, text, root, is_loc=is_loc)
+    suppress, reason = _ss_content_decision(
+        kind, text, root, is_loc=is_loc,
+        subject_path=subject_path, event=event)
     if suppress and reason == "ss_step_behind":
         # Step-behind proves the model already acquired this correct fact. Remember
         # it so a later byte-distinct subset is attributed as semantic duplication.
@@ -14509,16 +14618,20 @@ def _augment_output(action, out) -> None:
             # A drops it). NEVER leaks a test name.
             try:
                 _la_search = _search_localize_block(cmd, _orig_out)
+                _la_search_subject = (
+                    _search_localize_subject(cmd) if _la_search else "")
             except Exception:  # noqa: BLE001 — Lane A producer isolated
                 _crash_emit("post_search.localize")
                 _la_search = ""
+                _la_search_subject = ""
             # CONDITIONAL append (Fable #4): only enqueue a NON-empty block, so the
             # flag-off run is truly inert — no `post_search.localize` key gets written
             # to the fire-count artifact (`_record_hook_fire` fires before the empty-
             # skip in _lane_a_deliver), and "fired" now means "a grep was answered",
             # not "every command". Empty -> nothing enqueued -> byte-identical.
             if _la_search:
-                lane_a.append(("post_search.localize", _la_search))
+                lane_a.append((
+                    "post_search.localize", _la_search, _la_search_subject))
             # tested EVIDENCE tokens (plan §5.2 "tested?"): a real test-runner
             # invocation whose output carries an observed pass/fail result —
             # mirrors gt_oracle_sense.DerivedState.tested_tokens (tokens of the

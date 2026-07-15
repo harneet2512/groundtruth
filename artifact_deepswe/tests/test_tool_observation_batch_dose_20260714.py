@@ -280,6 +280,50 @@ def test_finalizer_suppresses_leak_before_render(monkeypatch):
     assert plan.disposition == "suppressed" and plan.suffix == ""
 
 
+def test_search_metadata_reaches_finalizer_and_sibling_acquisition_suppresses(
+        monkeypatch):
+    subject = "src/widget.py"
+    payload = "src/widget.py:10:class Widget"
+    action = {"command": "rg Widget src"}
+    out = {"output": "base", "returncode": 0}
+
+    monkeypatch.setattr(g, "_ss_novelty_on", lambda: True)
+    monkeypatch.setattr(g, "_ss_provenance_on", lambda: False)
+    monkeypatch.setattr(g, "_ss_late_drop_on", lambda: False)
+    monkeypatch.setattr(g, "_ss_dedup2_on", lambda: False)
+    monkeypatch.setattr(g, "_payload_leaks_test_identity", lambda text: False)
+    monkeypatch.setattr(g, "_ss_payload_has_content", lambda text: True)
+    monkeypatch.setattr(g, "_ss_novelty_suppresses", lambda *args, **kwargs: False)
+
+    state = g._begin_observation_batch(
+        SimpleNamespace(), SimpleNamespace(), [action])
+    try:
+        assert g._register_batch_execute(state, action, out)
+        g._global_pool_add_lane_a(
+            state["pool"], out, action["command"],
+            [("post_search.localize", payload, subject)],
+            krel="", event=None, kkind="post_search")
+
+        assert len(state["pool"]) == 1
+        candidate, thunk = state["pool"][0]
+        prepared = state["prepared"][id(candidate)]
+        assert candidate.current_ordinal == 1
+        assert prepared["krel"] == subject
+        assert prepared["event"] == "post_search"
+
+        # A sibling result in the same policy observation body-acquired the
+        # target after production but before final observation arbitration.
+        g._ss_acquired_files.add(subject)
+        plan = g._prepare_batch_delivery(candidate, thunk, prepared)
+    finally:
+        g._ss_acquired_files.discard(subject)
+        g._clear_tool_observation_batch(state)
+
+    assert plan.disposition == "suppressed"
+    assert plan.suffix == ""
+    assert plan.decision["reason"] == "ss_step_behind"
+
+
 @pytest.mark.parametrize("plane", [g._GA_PLANE_LANE_A, g._GA_PLANE_STEER,
                                     g._GA_PLANE_GATEWAY])
 def test_finalizer_holdout_is_winning_zero_byte_plan(monkeypatch, plane):
@@ -500,6 +544,36 @@ def test_final_stepbehind_commits_known_fact_only_after_formatter(monkeypatch):
     assert remembered == [("fake.one", "GT:one", {
         "is_loc": False, "knowledge_authority": True})]
     assert any(row.get("reason") == "ss_step_behind" for row in rows)
+
+
+def test_final_stepbehind_ledger_preserves_subject_and_event(monkeypatch):
+    _wire_fake_candidates(monkeypatch)
+    rows = []
+    monkeypatch.setattr(
+        g, "_ss_content_decision",
+        lambda *args, **kwargs: (True, "ss_step_behind"))
+    monkeypatch.setattr(g, "_runtime_ledger_record", lambda **row: rows.append(row))
+
+    def gateway(action, out, cmd, orig_out, *, pool=None):
+        candidate = SimpleNamespace(
+            kind="post_search.localize", plane=g._GA_PLANE_LANE_A,
+            dedup_key="preview", symbol="", lineage=None)
+        g._append_batch_candidate(
+            pool, candidate, lambda: None, out, "preview", join=True,
+            krel="src/widget.py",
+            prepared_extra={
+                "krel": "src/widget.py", "event": "post_search"})
+
+    monkeypatch.setattr(g, "_gt_gateway_deliver", gateway)
+    agent = _Agent()
+    assert g.install_observation_batch_commit(agent)
+    rendered = agent.execute_actions(
+        {"extra": {"actions": [{"command": "rg Widget src"}]}})
+
+    row = next(row for row in rows if row.get("reason") == "ss_step_behind")
+    assert rendered[0]["content"] == "base:rg Widget src"
+    assert row["file_path"] == "src/widget.py"
+    assert row["event"] == "post_search"
 
 
 def test_gateway_ledger_seals_exact_boundary_joined_suffix(monkeypatch):

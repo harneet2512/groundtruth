@@ -88,6 +88,21 @@ def _fresh(cmd, out):
     return g._search_localize_block(cmd, out)
 
 
+def test_unique_symbol_search_carries_prospective_subject(on):
+    assert g._search_localize_subject("grep -rn parse_widget .") == "app/widget.py"
+
+
+def test_ambiguous_symbol_search_has_no_single_subject(on):
+    con = sqlite3.connect(on)
+    con.execute(
+        "INSERT INTO nodes(id,label,name,file_path,start_line,end_line,is_test,language) "
+        "VALUES(5,'Function','parse_widget','other/widget.py',7,12,0,'python')")
+    con.commit()
+    con.close()
+
+    assert g._search_localize_subject("grep -rn parse_widget .") == ""
+
+
 # ---- CLASS 1: NAME-FOLD ------------------------------------------------------
 def test_namefold_camel_to_snake(on):
     """grep the camelCase form (zero hits) -> answer with the snake def it maps to."""

@@ -602,3 +602,25 @@ def test_r9_lost_brace_guard_triggers_drift(monkeypatch, tmp_path):
     assert res is not None, "a deleted brace-language guard must fire drift"
     _sev, payload = res
     assert "semantic_drift" in payload
+
+
+def test_semantic_drift_does_not_call_transformed_return_a_removal(
+        monkeypatch, tmp_path):
+    """Changing a return expression while preserving the function's return-path
+    cardinality is not evidence that a return path was removed."""
+    monkeypatch.setattr(g, "_sem_cache", {})
+    monkeypatch.setattr(g, "_root", lambda: str(tmp_path))
+    f = tmp_path / "wrapper.cpp"
+    f.write_text(
+        "long value() {\n"
+        "    return raw_value;\n"
+        "}\n", encoding="utf-8")
+    assert g._semantic_drift_candidate("wrapper.cpp") is None
+
+    f.write_text(
+        "long value() {\n"
+        "    const auto normalized = normalize(raw_value);\n"
+        "    return normalized;\n"
+        "}\n", encoding="utf-8")
+
+    assert g._semantic_drift_candidate("wrapper.cpp") is None

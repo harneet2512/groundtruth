@@ -77,6 +77,50 @@ def test_novelty_delivers_when_entity_not_acquired(monkeypatch):
     assert "<gt-contract>" in (out.get("output") or "")  # DELIVERED (novel file)
 
 
+@pytest.mark.parametrize("event", ["post_view", "post_edit"])
+def test_closed_subject_boundary_suppresses_mixed_novel_caller_fact(
+        monkeypatch, event):
+    """A novel cross-file occurrence cannot make a fact timely after its subject
+    body/read or edit decision has already completed in the same observation."""
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    payload = "src/subject.py run()\nsrc/novel.py helper()"
+
+    suppressed, reason = g._ss_screen_delivery(
+        "l3b.evidence", payload, "", subject_path="src/subject.py", event=event)
+
+    assert suppressed is True
+    assert reason == "ss_step_behind"
+
+
+def test_open_search_boundary_preserves_mixed_novel_caller_fact(monkeypatch):
+    """The same caller fact remains eligible when emitted at a still-open search
+    boundary before the agent has selected and body-read the subject file."""
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    payload = "src/subject.py run()\nsrc/novel.py helper()"
+
+    suppressed, reason = g._ss_screen_delivery(
+        "l3b.evidence", payload, "", subject_path="src/subject.py", event="post_search")
+
+    assert suppressed is False
+    assert reason == ""
+
+
+def test_search_preview_is_suppressed_if_same_observation_acquired_target(
+        monkeypatch):
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    g._ss_acquired_files.add("src/subject.py")
+
+    suppressed, reason = g._ss_screen_delivery(
+        "post_search.localize", "src/subject.py:10:run", "",
+        subject_path="src/subject.py", event="post_search")
+
+    assert suppressed is True
+    assert reason == "ss_step_behind"
+
+
 def test_novelty_off_delivers_stepbehind_block(monkeypatch):
     """RED anchor: flag OFF -> the step-behind block MUST deliver (byte-identical pre-SS)."""
     _base(monkeypatch)  # GT_SS_NOVELTY not set
