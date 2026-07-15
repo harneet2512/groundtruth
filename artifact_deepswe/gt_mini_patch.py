@@ -11311,6 +11311,78 @@ def _gt_edit_overlay_transaction(action) -> None:
                 pass
 
 
+def _ss_sanitize_gateway_envelope(envelope, root: str = ""):
+    """Return the one provenance-clean Gateway envelope, or ``None`` when none remains.
+
+    Provenance is part of the evidence identity, not merely display text.  Under the
+    provenance feature, remove bad path-bearing payload rows, provenance rows, and native
+    renderer rows together; repair a bad target from the first surviving source; and derive
+    the dedup key again from exactly that sanitized structure.  The original object is
+    returned unchanged when the feature is off or no sanitation is necessary.
+    """
+    if not _ss_provenance_on():
+        return envelope
+    payload = tuple(
+        line for line in (getattr(envelope, "payload", ()) or ())
+        if not _ss_line_has_bad_path(str(line), root)
+    )
+    provenance = tuple(
+        (path, line) for path, line in (getattr(envelope, "provenance", ()) or ())
+        if not _ss_provenance_bad_path(path, root)
+    )
+    target = str(getattr(envelope, "target", "") or "")
+    if _ss_provenance_bad_path(target, root):
+        target = str(provenance[0][0]) if provenance else ""
+
+    native_args = getattr(envelope, "native_args", None)
+    if isinstance(native_args, dict) and "rows" in native_args:
+        native_args = dict(native_args)
+        native_args["rows"] = [
+            row for row in (native_args.get("rows") or ())
+            if row and not _ss_provenance_bad_path(str(row[0]), root)
+        ]
+
+    changed = (
+        payload != tuple(getattr(envelope, "payload", ()) or ())
+        or provenance != tuple(getattr(envelope, "provenance", ()) or ())
+        or target != str(getattr(envelope, "target", "") or "")
+        or native_args != getattr(envelope, "native_args", None)
+    )
+    if not changed:
+        return envelope
+    # A source-backed fact with no surviving source is not evidence.  Header/prose lines
+    # cannot rescue it; suppress correct-or-quiet before arbitration or rendering.
+    if getattr(envelope, "provenance", ()) and not provenance:
+        return None
+    if not payload or not target:
+        return None
+    try:
+        from dataclasses import replace
+        from groundtruth.runtime.evidence_envelope import (
+            content_signature, derive_dedup_key)
+        dedup_key = derive_dedup_key(
+            envelope.producer, envelope.evidence_type, target, envelope.fact_id,
+            content_signature(payload, provenance))
+        marker_args = dict(native_args) if isinstance(native_args, dict) else {}
+        marker_args["_ss_provenance_sanitized"] = True
+        return replace(
+            envelope, target=target, payload=payload, provenance=provenance,
+            dedup_key=dedup_key, native_args=marker_args)
+    except Exception:  # noqa: BLE001 -- malformed evidence is correct-or-quiet
+        return None
+
+
+def _render_gateway_envelope(render_envelope, envelope, *, native: bool) -> str:
+    """Render sanitized structure without re-querying the dirty source graph."""
+    sanitized = bool(
+        isinstance(getattr(envelope, "native_args", None), dict)
+        and envelope.native_args.get("_ss_provenance_sanitized")
+    )
+    return render_envelope(
+        envelope, native=native,
+        def_facts_renderer=None if sanitized else _gateway_def_render)
+
+
 def _gt_gateway_pool_envelope(
         winner, *, pool, out, ev, native: bool,
         render_envelope, fits_budget, seal_delivery,
@@ -11327,8 +11399,8 @@ def _gt_gateway_pool_envelope(
     the adapter's historical single-envelope arbitration byte-for-byte.
     """
     global _gt_gateway_chain_head
-    delta = render_envelope(
-        winner, native=native, def_facts_renderer=_gateway_def_render)
+    delta = _render_gateway_envelope(
+        render_envelope, winner, native=native)
     if (not delta or (native and contains_gt_tag(delta))
             or contains_test_identity(delta)):
         if delta:
@@ -11519,6 +11591,26 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
             # -> byte-identical when the flag is off (the overlay stays {}).
             episode_overlay=_gt_episode_overlay)
         gateway_envelopes = _gw_augment(ev, st)
+        if _ss_provenance_on():
+            _clean_gateway_envelopes = []
+            _clean_gateway_seen = set()
+            for _gateway_envelope in gateway_envelopes:
+                _clean = _ss_sanitize_gateway_envelope(_gateway_envelope, _root())
+                if _clean is None:
+                    _runtime_ledger_record(
+                        kind="gateway." + (
+                            getattr(_gateway_envelope, "evidence_type", "") or "fact"),
+                        outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                        reason="ss_provenance",
+                        file_path=getattr(_gateway_envelope, "target", "") or "")
+                    continue
+                _clean_key = getattr(_clean, "dedup_key", "") or ""
+                if (_clean_key in _EPISODE.delivered_dedup
+                        or _clean_key in _clean_gateway_seen):
+                    continue
+                _clean_gateway_seen.add(_clean_key)
+                _clean_gateway_envelopes.append(_clean)
+            gateway_envelopes = _clean_gateway_envelopes
         if pool is None:
             # Preserve the standalone/global-off adapter arbitration exactly.
             winner = _ad_arbitrate(gateway_envelopes)
@@ -11550,8 +11642,7 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
         # (name_fold / wrong_surface / trace_frame / body_concept) ride THIS flag; the
         # shared def-facts renderer keeps its own GT_POST_SEARCH_NATIVE dispatch.
         native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
-        delta = _ad_render(winner, native=native,
-                           def_facts_renderer=_gateway_def_render)
+        delta = _render_gateway_envelope(_ad_render, winner, native=native)
         # leak-law (ABI §5): native must be tag-free; NEVER a test identity anywhere.
         if (not delta or (native and contains_gt_tag(delta))
                 or contains_test_identity(delta)):
@@ -13414,10 +13505,15 @@ def _ss_provenance_bad_path(path: str, root: str = "") -> bool:
     # (c) parent-escape
     if p.startswith("../") or "/../" in p:
         return True
-    # (c) absolute path not under the repo/container root
-    if p.startswith("/"):
+    # (c) absolute path not under the repo/container root (POSIX or Windows drive).
+    # Drive paths compare case-insensitively; POSIX paths preserve case semantics.
+    is_drive_abs = len(p) >= 3 and p[1] == ":" and p[2] == "/"
+    if p.startswith("/") or is_drive_abs:
         nroot = (root or "").replace("\\", "/").rstrip("/")
-        under = bool(nroot) and (p == nroot or p.startswith(nroot + "/"))
+        cmp_p = p.casefold() if is_drive_abs else p
+        cmp_root = nroot.casefold() if is_drive_abs else nroot
+        under = bool(nroot) and (
+            cmp_p == cmp_root or cmp_p.startswith(cmp_root + "/"))
         if not under:
             for cr in globals().get("_CONTAINER_ROOTS", ()):
                 if p.startswith(cr):

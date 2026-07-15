@@ -17,6 +17,13 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import gt_mini_patch as g  # noqa: E402
+from groundtruth.runtime import gateway as gw  # noqa: E402
+from groundtruth.runtime.adapters import miniswe as ad  # noqa: E402
+from groundtruth.runtime.evidence_envelope import (  # noqa: E402
+    VERIFIED,
+    EvidenceEnvelope,
+    validate,
+)
 
 
 def _base(monkeypatch):
@@ -52,6 +59,8 @@ def test_provenance_bad_path_classes():
     assert not g._ss_provenance_bad_path("src/foo.py")
     assert not g._ss_provenance_bad_path("/repo/src/foo.py", "/repo")
     assert not g._ss_provenance_bad_path("/testbed/pkg/mod.go")              # container root
+    assert g._ss_provenance_bad_path("C:/outside/generated.py", "D:/repo")
+    assert not g._ss_provenance_bad_path("D:/repo/src/real.py", "D:/repo")
 
 
 def test_provenance_drops_scratch_line_keeps_real(monkeypatch):
@@ -89,6 +98,135 @@ def test_provenance_off_delivers_scratch_line(monkeypatch):
     out: dict = {}
     g._lane_a_deliver(out, "cmd", [block], krel="x.py", event=None)
     assert "tmp/patch_fix.py" in (out.get("output") or "")
+
+
+def _mixed_gateway_envelope():
+    return EvidenceEnvelope.build(
+        producer="def_ref_partition", fact_id="event",
+        target="htmlcov/coverage_html_cb_6fb7b396.js",
+        evidence_type="def_ref_partition",
+        payload=(
+            "def: htmlcov/coverage_html_cb_6fb7b396.js:115",
+            "def: htmlcov/coverage_html_cb_6fb7b396.js:144",
+            "def: privacyidea/lib/event.py:36",
+        ),
+        provenance=(
+            ("htmlcov/coverage_html_cb_6fb7b396.js", 115),
+            ("htmlcov/coverage_html_cb_6fb7b396.js", 144),
+            ("privacyidea/lib/event.py", 36),
+        ),
+        confidence=0.9, tier=VERIFIED,
+    )
+
+
+def _deliver_gateway(monkeypatch, envelope, *, pooled: bool):
+    _base(monkeypatch)
+    monkeypatch.setattr(g, "_root", lambda: "/testbed")
+    monkeypatch.setattr(g, "_POST_SEARCH_ON", False)
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_SS_PROVENANCE", "1")
+    monkeypatch.setenv("GT_GLOBAL_ARBITER", "1" if pooled else "0")
+    monkeypatch.setattr(gw, "augment", lambda _event, _state: [envelope])
+    out = {"output": "base", "returncode": 0}
+    pool = [] if pooled else None
+    g._gt_gateway_deliver(
+        {"command": "grep -rn event ."}, out, "grep -rn event .", "base", pool=pool)
+    if pooled:
+        g._global_pool_flush(pool, kkind="post_search", kf="", krel="")
+    return out
+
+
+def test_gateway_provenance_sanitizes_mixed_envelope_before_all_delivery_owners(monkeypatch):
+    outputs = []
+    for pooled in (False, True):
+        out = _deliver_gateway(monkeypatch, _mixed_gateway_envelope(), pooled=pooled)
+        outputs.append(out["output"])
+        assert "htmlcov/" not in out["output"]
+        assert "privacyidea/lib/event.py:36" in out["output"]
+        sealed = g._gt_gateway_deliveries[-1]
+        assert sealed.target == "privacyidea/lib/event.py"
+        assert sealed.provenance == (("privacyidea/lib/event.py", 36),)
+        assert sealed.payload == ("def: privacyidea/lib/event.py:36",)
+        assert validate(sealed) == []
+    assert outputs[0] == outputs[1]
+
+
+def test_gateway_provenance_suppresses_all_bad_envelope(monkeypatch):
+    bad = _mixed_gateway_envelope()
+    bad = EvidenceEnvelope.build(
+        producer=bad.producer, fact_id=bad.fact_id, target=bad.target,
+        evidence_type=bad.evidence_type, payload=bad.payload[:2],
+        provenance=bad.provenance[:2], confidence=bad.confidence, tier=bad.tier)
+    for pooled in (False, True):
+        out = _deliver_gateway(monkeypatch, bad, pooled=pooled)
+        assert out["output"] == "base"
+        assert g._gt_gateway_deliveries == []
+
+
+def test_gateway_provenance_rechecks_clean_dedup_across_turns(monkeypatch):
+    for pooled in (False, True):
+        _base(monkeypatch)
+        monkeypatch.setattr(g, "_root", lambda: "/testbed")
+        monkeypatch.setattr(g, "_POST_SEARCH_ON", False)
+        monkeypatch.setenv("GT_GATEWAY", "1")
+        monkeypatch.setenv("GT_SS_PROVENANCE", "1")
+        monkeypatch.setenv("GT_GLOBAL_ARBITER", "1" if pooled else "0")
+        monkeypatch.setattr(gw, "augment", lambda _event, _state: [_mixed_gateway_envelope()])
+
+        outputs = []
+        for _turn in range(2):
+            out = {"output": "base", "returncode": 0}
+            pool = [] if pooled else None
+            g._gt_gateway_deliver(
+                {"command": "grep -rn event ."}, out,
+                "grep -rn event .", "base", pool=pool)
+            if pooled:
+                g._global_pool_flush(pool, kkind="post_search", kf="", krel="")
+            outputs.append(out["output"])
+        assert "privacyidea/lib/event.py:36" in outputs[0]
+        assert outputs[1] == "base"
+        assert len(g._gt_gateway_deliveries) == 1
+
+
+def test_gateway_provenance_collapses_same_call_clean_key_before_pool(monkeypatch):
+    first = _mixed_gateway_envelope()
+    second = EvidenceEnvelope.build(
+        producer=first.producer, fact_id=first.fact_id,
+        target="dist/generated.js", evidence_type=first.evidence_type,
+        payload=("def: dist/generated.js:9", "def: privacyidea/lib/event.py:36"),
+        provenance=(("dist/generated.js", 9), ("privacyidea/lib/event.py", 36)),
+        confidence=first.confidence, tier=first.tier)
+    real_arbitrate = ad.arbitrate
+    for pooled in (False, True):
+        _base(monkeypatch)
+        monkeypatch.setattr(g, "_root", lambda: "/testbed")
+        monkeypatch.setattr(g, "_POST_SEARCH_ON", False)
+        monkeypatch.setenv("GT_GATEWAY", "1")
+        monkeypatch.setenv("GT_SS_PROVENANCE", "1")
+        monkeypatch.setenv("GT_GLOBAL_ARBITER", "1" if pooled else "0")
+        monkeypatch.setattr(gw, "augment", lambda _event, _state: [first, second])
+        arbitration_inputs = []
+        monkeypatch.setattr(
+            ad, "arbitrate",
+            lambda envs: arbitration_inputs.append(list(envs)) or real_arbitrate(envs))
+        out = {"output": "base", "returncode": 0}
+        pool = [] if pooled else None
+        g._gt_gateway_deliver(
+            {"command": "grep -rn event ."}, out,
+            "grep -rn event .", "base", pool=pool)
+        if pooled:
+            assert len(pool) == 1
+            assert pool[0][0].dedup_key == g._ss_sanitize_gateway_envelope(
+                first, "/testbed").dedup_key
+        else:
+            assert len(arbitration_inputs) == 1
+            assert len(arbitration_inputs[0]) == 1
+
+
+def test_gateway_provenance_flag_off_preserves_original_envelope_bytes(monkeypatch):
+    env = _mixed_gateway_envelope()
+    monkeypatch.delenv("GT_SS_PROVENANCE", raising=False)
+    assert g._ss_sanitize_gateway_envelope(env, "/testbed") is env
 
 
 def test_provenance_excludes_reindex_trigger(monkeypatch):
