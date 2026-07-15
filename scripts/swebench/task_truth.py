@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -258,6 +259,108 @@ def _turns_from_mini_trajectory(path: str | None) -> list[Turn]:
     return turns
 
 
+def _source_write_truth(path: str | None) -> dict[str, Any] | None:
+    """Read exact chronological source-write truth from the producer ledger.
+
+    ``source_write_proof`` is an internal producer receipt, not a delivery. Its
+    exact post-command byte comparison is stronger than parsing shell syntax.
+    Whole-task edit truth retains every successful byte-changing write, while a
+    separate coherence episode resets after each passing ``test_proof``. Once a
+    source receipt is present, malformed proof rows fail closed rather than
+    silently reverting to weaker command inference.
+    """
+    proof_rows = [
+        row for row in _load_jsonl(path or "")
+        if row.get("layer") == "ss.coherence.proof"
+        and row.get("event_type") in {"source_write_proof", "test_proof"}
+    ]
+    source_count = sum(
+        row.get("event_type") == "source_write_proof" for row in proof_rows
+    )
+    if source_count == 0:
+        return None
+
+    successful_all: list[tuple[int, str]] = []
+    successful_since_pass: list[tuple[int, str]] = []
+    seen: set[tuple[str, int, str]] = set()
+    step_kinds: dict[int, str] = {}
+    previous_step = -1
+    test_count = 0
+    latest_pass: int | None = None
+    for row in proof_rows:
+        event_type = row.get("event_type")
+        step = row.get("action_step")
+        iteration = row.get("iteration")
+        rel = row.get("file_path")
+        normalized = _normalize_repo_path(rel) if isinstance(rel, str) else ""
+        valid_path = bool(
+            normalized
+            and not normalized.startswith("/")
+            and not re.match(r"^[A-Za-z]:/", normalized)
+            and ".." not in normalized.split("/")
+        )
+        common_valid = (
+            row.get("outcome") == "suppressed_internal_only"
+            and type(row.get("chars_delivered")) is int
+            and row.get("chars_delivered") == 0
+            and isinstance(step, int) and not isinstance(step, bool) and step >= 0
+            and isinstance(iteration, int) and not isinstance(iteration, bool)
+            and iteration == step
+            and step >= previous_step
+        )
+        if event_type == "source_write_proof":
+            event_valid = (
+                row.get("reason") == "exact_post_command_write_result"
+                and valid_path
+                and type(row.get("write_ok")) is bool
+                and type(row.get("bytes_changed")) is bool
+            )
+            identity = (event_type, step, normalized)
+        else:
+            event_valid = (
+                row.get("reason") == "classified_test_result"
+                and normalized == ""
+                and type(row.get("passed")) is bool
+            )
+            identity = (event_type, step, "")
+        same_step_kind = step_kinds.get(step) if isinstance(step, int) else None
+        if not (
+            common_valid and event_valid and identity not in seen
+            and (same_step_kind is None or same_step_kind == event_type)
+        ):
+            return {
+                "valid": False,
+                "count": source_count,
+                "test_count": sum(
+                    row.get("event_type") == "test_proof" for row in proof_rows
+                ),
+                "successful_all": [],
+                "successful_since_pass": [],
+                "latest_pass": None,
+                "error": "malformed_or_nonchronological_producer_proof",
+            }
+        previous_step = step
+        seen.add(identity)
+        step_kinds[step] = event_type
+        if event_type == "test_proof":
+            test_count += 1
+            if row["passed"]:
+                successful_since_pass.clear()
+                latest_pass = step
+        elif row["write_ok"] and row["bytes_changed"]:
+            successful_all.append((step, normalized))
+            successful_since_pass.append((step, normalized))
+    return {
+        "valid": True,
+        "count": source_count,
+        "test_count": test_count,
+        "successful_all": successful_all,
+        "successful_since_pass": successful_since_pass,
+        "latest_pass": latest_pass,
+        "error": None,
+    }
+
+
 def _trajectory_state_summary(artifacts: dict[str, str | None]) -> dict[str, Any]:
     step_limit_raw = os.environ.get("GT_STEP_LIMIT")
     try:
@@ -266,6 +369,48 @@ def _trajectory_state_summary(artifacts: dict[str, str | None]) -> dict[str, Any
         step_limit = None
     turns = _turns_from_mini_trajectory(artifacts.get("mini_trajectory"))
     state = derive_state(turns, step_limit=step_limit)
+    write_truth = _source_write_truth(artifacts.get("runtime_ledger"))
+    if write_truth is not None and write_truth["valid"]:
+        successful_all = write_truth["successful_all"]
+        state.edited_files = {path for _step, path in successful_all}
+        state.source_edit_count = len(successful_all)
+        state.nonedit_streak = (
+            max(0, state.action_count - successful_all[-1][0]) if successful_all else 0
+        )
+    if write_truth is None:
+        edit_authority = "trajectory_command_inference"
+        edit_valid = True
+        proof_count = 0
+        test_proof_count = 0
+        latest_passing_test_step = None
+        coherence_write_count = None
+        coherence_edited_files: list[str] = []
+        source_edit_count: int | None = state.source_edit_count
+        edited_files = sorted(state.edited_files)[:20]
+        edit_error = None
+    elif write_truth["valid"]:
+        edit_authority = "ss.coherence.proof/source_write_proof"
+        edit_valid = True
+        proof_count = write_truth["count"]
+        test_proof_count = write_truth["test_count"]
+        latest_passing_test_step = write_truth["latest_pass"]
+        coherence_successful = write_truth["successful_since_pass"]
+        coherence_write_count = len(coherence_successful)
+        coherence_edited_files = sorted({path for _step, path in coherence_successful})[:20]
+        source_edit_count = state.source_edit_count
+        edited_files = sorted(state.edited_files)[:20]
+        edit_error = None
+    else:
+        edit_authority = "invalid_ss.coherence.proof/source_write_proof"
+        edit_valid = False
+        proof_count = write_truth["count"]
+        test_proof_count = write_truth["test_count"]
+        latest_passing_test_step = None
+        coherence_write_count = None
+        coherence_edited_files = []
+        source_edit_count = None
+        edited_files = []
+        edit_error = write_truth["error"]
     return {
         "phase_policy_version": PHASE_POLICY_VERSION,
         "turns_observed": len(turns),
@@ -274,8 +419,16 @@ def _trajectory_state_summary(artifacts: dict[str, str | None]) -> dict[str, Any
         "step_limit": state.step_limit,
         "budget_fraction": round(state.budget_fraction, 8),
         "viewed_files": sorted(state.viewed_files)[:20],
-        "edited_files": sorted(state.edited_files)[:20],
-        "source_edit_count": state.source_edit_count,
+        "edited_files": edited_files,
+        "source_edit_count": source_edit_count,
+        "edit_truth_authority": edit_authority,
+        "edit_truth_valid": edit_valid,
+        "edit_truth_error": edit_error,
+        "source_write_proof_count": proof_count,
+        "test_proof_count": test_proof_count,
+        "latest_passing_test_step": latest_passing_test_step,
+        "coherence_write_count": coherence_write_count,
+        "coherence_edited_files": coherence_edited_files,
         "test_count": state.test_count,
         "test_evidence_seen": state.test_evidence_seen,
         "last_test_failed": state.last_test_failed,

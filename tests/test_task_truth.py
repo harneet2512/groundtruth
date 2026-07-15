@@ -152,6 +152,188 @@ def test_task_truth_includes_product_runtime_control_surface():
         assert runtime["adapter_witness"]["gt_meta_present"] is True
 
 
+def test_task_truth_prefers_chronological_source_write_receipts(tmp_path, monkeypatch):
+    """Exact byte receipts outrank lossy command-shape edit inference."""
+    task = "org__project-1"
+    trial = tmp_path / "run" / f"{task}__attempt"
+    agent = trial / "agent"
+    agent.mkdir(parents=True)
+    (trial / "result.json").write_text(json.dumps({
+        "n_agent_steps": 4,
+        "verifier_result": {"rewards": {"reward": 0.0}},
+        "task_name": "org/project",
+        "info": {"submission": ""},
+    }), encoding="utf-8")
+    # Command inference sees two writes to the wrong file.  Producer receipts
+    # prove that only one byte-changing write landed, in a .pyi source file.
+    (agent / "mini-swe-agent.trajectory.json").write_text(json.dumps({"messages": [
+        {"action": {"command": "python -c \"open('src/wrong.py','w').write('x')\""}},
+        {"action": {"command": "python -c \"open('src/wrong.py','w').write('y')\""}},
+    ]}), encoding="utf-8")
+    ledger = trial / "gt_runtime_ledger.jsonl"
+    ledger.write_text("\n".join(json.dumps(row) for row in [
+        {
+            "layer": "ss.coherence.proof", "event_type": "source_write_proof",
+            "outcome": "suppressed_internal_only",
+            "reason": "exact_post_command_write_result", "chars_delivered": 0,
+            "action_step": 1, "iteration": 1, "file_path": "src/api.pyi",
+            "write_ok": True, "bytes_changed": False,
+        },
+        {
+            "layer": "ss.coherence.proof", "event_type": "source_write_proof",
+            "outcome": "suppressed_internal_only",
+            "reason": "exact_post_command_write_result", "chars_delivered": 0,
+            "action_step": 2, "iteration": 2, "file_path": "src/api.pyi",
+            "write_ok": True, "bytes_changed": True,
+        },
+    ]) + "\n", encoding="utf-8")
+    monkeypatch.setenv("GT_RUNTIME_LEDGER", str(ledger))
+
+    truth = tt.build_task_truth(str(tmp_path), instance_id=task)
+    state = truth["trajectory_state"]
+
+    assert state["edit_truth_authority"] == "ss.coherence.proof/source_write_proof"
+    assert state["source_write_proof_count"] == 2
+    assert state["edited_files"] == ["src/api.pyi"]
+    assert state["source_edit_count"] == 1
+
+
+def test_task_truth_falls_back_only_when_source_write_receipts_are_absent(
+    tmp_path, monkeypatch,
+):
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+    trajectory.write_text(json.dumps({"messages": [
+        {"action": {"command": "python -c \"open('src/inferred.py','w').write('x')\""}},
+    ]}), encoding="utf-8")
+    monkeypatch.delenv("GT_RUNTIME_LEDGER", raising=False)
+
+    summary = tt._trajectory_state_summary({
+        "mini_trajectory": str(trajectory), "runtime_ledger": None,
+    })
+
+    assert summary["edit_truth_authority"] == "trajectory_command_inference"
+    assert summary["source_write_proof_count"] == 0
+    assert summary["edited_files"] == ["src/inferred.py"]
+    assert summary["source_edit_count"] == 1
+
+
+def test_task_truth_does_not_fallback_over_malformed_source_write_receipt(
+    tmp_path,
+):
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+    trajectory.write_text(json.dumps({"messages": [
+        {"action": {"command": "python -c \"open('src/inferred.py','w').write('x')\""}},
+    ]}), encoding="utf-8")
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text(json.dumps({
+        "layer": "ss.coherence.proof", "event_type": "source_write_proof",
+        "outcome": "suppressed_internal_only",
+        "reason": "exact_post_command_write_result", "chars_delivered": 0,
+        "action_step": 1, "iteration": 1, "file_path": "../escape.py",
+        "write_ok": True, "bytes_changed": True,
+    }) + "\n", encoding="utf-8")
+
+    summary = tt._trajectory_state_summary({
+        "mini_trajectory": str(trajectory), "runtime_ledger": str(ledger),
+    })
+
+    assert summary["edit_truth_authority"].startswith("invalid_ss.coherence.proof")
+    assert summary["edit_truth_valid"] is False
+    assert summary["source_edit_count"] is None
+    assert summary["edited_files"] == []
+
+
+def test_task_truth_resets_write_window_after_passing_test_receipt(tmp_path):
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+    trajectory.write_text(json.dumps({"messages": []}), encoding="utf-8")
+    common = {
+        "layer": "ss.coherence.proof", "outcome": "suppressed_internal_only",
+        "chars_delivered": 0,
+    }
+    rows = [
+        {**common, "event_type": "source_write_proof",
+         "reason": "exact_post_command_write_result", "action_step": 1,
+         "iteration": 1, "file_path": "src/before.py", "write_ok": True,
+         "bytes_changed": True},
+        {**common, "event_type": "test_proof", "reason": "classified_test_result",
+         "action_step": 2, "iteration": 2, "file_path": "", "passed": True},
+        {**common, "event_type": "source_write_proof",
+         "reason": "exact_post_command_write_result", "action_step": 3,
+         "iteration": 3, "file_path": "src/after.py", "write_ok": True,
+         "bytes_changed": False},
+        {**common, "event_type": "source_write_proof",
+         "reason": "exact_post_command_write_result", "action_step": 4,
+         "iteration": 4, "file_path": "src/after.py", "write_ok": True,
+         "bytes_changed": True},
+    ]
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    summary = tt._trajectory_state_summary({
+        "mini_trajectory": str(trajectory), "runtime_ledger": str(ledger),
+    })
+
+    assert summary["edit_truth_valid"] is True
+    assert summary["source_write_proof_count"] == 3
+    assert summary["test_proof_count"] == 1
+    assert summary["latest_passing_test_step"] == 2
+    assert summary["source_edit_count"] == 2
+    assert summary["edited_files"] == ["src/after.py", "src/before.py"]
+    assert summary["coherence_write_count"] == 1
+    assert summary["coherence_edited_files"] == ["src/after.py"]
+
+
+def test_task_truth_fails_closed_on_malformed_test_proof(tmp_path):
+    common = {
+        "layer": "ss.coherence.proof", "outcome": "suppressed_internal_only",
+        "chars_delivered": 0,
+    }
+    rows = [
+        {**common, "event_type": "source_write_proof",
+         "reason": "exact_post_command_write_result", "action_step": 1,
+         "iteration": 1, "file_path": "src/app.py", "write_ok": True,
+         "bytes_changed": True},
+        {**common, "event_type": "test_proof", "reason": "classified_test_result",
+         "action_step": 2, "iteration": 2, "file_path": "", "passed": "yes"},
+    ]
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    summary = tt._trajectory_state_summary({
+        "mini_trajectory": None, "runtime_ledger": str(ledger),
+    })
+
+    assert summary["edit_truth_valid"] is False
+    assert summary["source_edit_count"] is None
+    assert summary["edited_files"] == []
+
+
+def test_final_passing_test_preserves_whole_task_edits(tmp_path):
+    common = {
+        "layer": "ss.coherence.proof", "outcome": "suppressed_internal_only",
+        "chars_delivered": 0,
+    }
+    rows = [
+        {**common, "event_type": "source_write_proof",
+         "reason": "exact_post_command_write_result", "action_step": 1,
+         "iteration": 1, "file_path": "src/app.py", "write_ok": True,
+         "bytes_changed": True},
+        {**common, "event_type": "test_proof", "reason": "classified_test_result",
+         "action_step": 2, "iteration": 2, "file_path": "", "passed": True},
+    ]
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    summary = tt._trajectory_state_summary({
+        "mini_trajectory": None, "runtime_ledger": str(ledger),
+    })
+
+    assert summary["source_edit_count"] == 1
+    assert summary["edited_files"] == ["src/app.py"]
+    assert summary["coherence_write_count"] == 0
+    assert summary["coherence_edited_files"] == []
+
+
 def test_native_mini_messages_pair_tool_calls_without_scanning_instructions(tmp_path):
     trajectory = tmp_path / "mini-swe-agent.trajectory.json"
 
