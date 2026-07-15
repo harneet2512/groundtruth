@@ -9,7 +9,8 @@ Ground truth is the byte-verified case manifest ``tests/fixtures/ss_replay/cases
         - conan-17092  detect.coherence m55  (claims 4 rewrites, only 2 real writes)
         - babel-1179   spec.obligation m73 + obligation.resurface m87  (delivered after GREEN)
         - loguru-1297  l3.contract m19        (tmp/patch_fix.py scratch provenance)
-  * the tool does NOT false-flag the three known-good P5 deliveries
+  * the tool does NOT false-flag the three historical manually adjudicated P5 deliveries;
+    their fair-probe bit is supplied explicitly because chronology alone cannot prove causality
         - conan-17123  consensus.scope m25
         - geopandas    edit.syntax m101
         - dynaconf     edit.syntax m219
@@ -42,11 +43,19 @@ arm4 = pytest.mark.skipif(not _HAVE_ARM4, reason="arm-4 recorded data not presen
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 _CACHE: dict[str, ssa.TaskReport] = {}
+_TRUSTED_HISTORICAL_FAIR_PROBES = {
+    "d5beca5ac5aa94ef": True,  # conan-17123 consensus.scope m25
+    "b9f54ab8192512f3": True,  # geopandas edit.syntax m101
+    "a2eae29caac4eadb": True,  # dynaconf edit.syntax m219
+}
 
 
 def _audit(task: str) -> ssa.TaskReport:
     if task not in _CACHE:
-        _CACHE[task] = ssa.audit_task(task, ARM4)
+        _CACHE[task] = ssa.audit_task(
+            task, ARM4,
+            trusted_fair_probe_by_seal=_TRUSTED_HISTORICAL_FAIR_PROBES,
+        )
     return _CACHE[task]
 
 
@@ -91,13 +100,16 @@ def test_loguru_m19_tmp_provenance_flagged():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# REQUIRED: the three known-good P5 deliveries MUST NOT be flagged
+# REQUIRED: the three historical P5 deliveries survive audit with explicit trusted fair evidence
 # ══════════════════════════════════════════════════════════════════════════════
 @arm4
 def test_conan17123_m25_consensus_scope_clean():
     r = _audit("conan-io__conan-17123")
     assert _viol_kinds_at(r, 25) == set()
     g = next(d for d in r.deliveries if d.home_msg == 25)
+    assert g.fair_probe is True
+    assert g.fair_probe_state == "FAIR_PROVEN"
+    assert g.fair_probe_source == "TRUSTED_SEAL_EVIDENCE"
     assert g.pbucket == "P5"
 
 
@@ -106,6 +118,9 @@ def test_geopandas_m101_edit_syntax_clean():
     r = _audit("geopandas__geopandas-3471")
     assert _viol_kinds_at(r, 101) == set()
     g = next(d for d in r.deliveries if d.home_msg == 101)
+    assert g.fair_probe is True
+    assert g.fair_probe_state == "FAIR_PROVEN"
+    assert g.fair_probe_source == "TRUSTED_SEAL_EVIDENCE"
     assert g.pbucket == "P5"
 
 
@@ -113,6 +128,11 @@ def test_geopandas_m101_edit_syntax_clean():
 def test_dynaconf_m219_edit_syntax_clean():
     r = _audit("dynaconf__dynaconf-1225")
     assert _viol_kinds_at(r, 219) == set()
+    g = next(d for d in r.deliveries if d.home_msg == 219)
+    assert g.fair_probe is True
+    assert g.fair_probe_state == "FAIR_PROVEN"
+    assert g.fair_probe_source == "TRUSTED_SEAL_EVIDENCE"
+    assert g.pbucket == "P5"
 
 
 @arm4
@@ -433,7 +453,7 @@ def test_dose_flags_second_payload_same_home():
     assert grades[1].violations and grades[1].violations[0].kind == "dose"
 
 
-def test_p5_requires_acted_receipt_not_reference_only():
+def test_p5_requires_acted_receipt_and_explicit_fair_probe():
     referenced = ssa.DeliveryGrade(
         home_msg=9, iteration=4, layer="edit.syntax", chars=50,
         file_path="pkg/mod.py", payload_head="syntax", joined=True,
@@ -444,10 +464,53 @@ def test_p5_requires_acted_receipt_not_reference_only():
         file_path="pkg/mod.py", payload_head="syntax", joined=True,
         receipt_level=3,
     )
+    fair = ssa.DeliveryGrade(
+        home_msg=9, iteration=4, layer="edit.syntax", chars=50,
+        file_path="pkg/mod.py", payload_head="syntax", joined=True,
+        receipt_level=3, fair_probe=True,
+    )
 
     assert referenced.acknowledged is True
     assert ssa._assign_pbucket(referenced) != "P5"
-    assert ssa._assign_pbucket(acted) == "P5"
+    assert acted.fair_probe_state == "FAIR_UNMEASURED"
+    assert ssa._assign_pbucket(acted) == "P3a-ack"
+    assert fair.fair_probe_state == "FAIR_PROVEN"
+    assert ssa._assign_pbucket(fair) == "P5"
+
+
+def test_explicit_failed_fair_probe_never_promotes_acted_delivery():
+    acted = ssa.DeliveryGrade(
+        home_msg=9, iteration=4, layer="edit.syntax", chars=50,
+        file_path="pkg/mod.py", payload_head="syntax", joined=True,
+        receipt_level=3, fair_probe=False,
+    )
+
+    assert acted.fair_probe_state == "FAIR_REJECTED"
+    assert ssa._assign_pbucket(acted) == "P3a-ack"
+
+
+def test_trusted_fair_evidence_is_exact_seal_bound_and_cannot_override_rejection():
+    unknown = ssa.DeliveryGrade(
+        home_msg=9, iteration=4, layer="edit.syntax", chars=50,
+        file_path="pkg/mod.py", payload_head="syntax", joined=True,
+        receipt_level=3,
+    )
+    rejected = ssa.DeliveryGrade(
+        home_msg=9, iteration=4, layer="edit.syntax", chars=50,
+        file_path="pkg/mod.py", payload_head="syntax", joined=True,
+        receipt_level=3, fair_probe=False,
+        fair_probe_source="CHRONOLOGY_MODEL_PLANNED",
+    )
+
+    ssa._join_trusted_fair_probe(unknown, "a" * 16, {"b" * 16: True})
+    assert unknown.fair_probe is None
+    ssa._join_trusted_fair_probe(unknown, "a" * 16, {"a" * 16: True})
+    assert unknown.fair_probe is True
+    assert unknown.fair_probe_source == "TRUSTED_SEAL_EVIDENCE"
+
+    ssa._join_trusted_fair_probe(rejected, "a" * 16, {"a" * 16: True})
+    assert rejected.fair_probe is False
+    assert rejected.fair_probe_source == "CHRONOLOGY_MODEL_PLANNED"
 
 
 def test_model_planned_action_is_step_behind_without_erasing_receipt():
@@ -504,6 +567,8 @@ def test_model_planned_action_is_step_behind_without_erasing_receipt():
         "prior_knowledge_state": "MODEL_PLANNED",
         "prior_knowledge_msg": 0,
         "fair_probe": False,
+        "fair_probe_state": "FAIR_REJECTED",
+        "fair_probe_source": "CHRONOLOGY_MODEL_PLANNED",
         "pbucket": "P2",
     }
 
@@ -533,14 +598,43 @@ def test_prior_mention_without_commitment_does_not_invent_model_plan():
     assert "step_behind" not in {violation.kind for violation in grade.violations}
 
 
-def test_scope_p5_accepts_later_target_inspection_as_scope_action():
+def test_non_obligation_action_without_causal_proof_stays_fair_unmeasured():
+    """Do not infer a non-obligation fair probe from action chronology alone."""
+    payload = "A covering check found a missing helper in pkg/dates.py"
+    delivery = ssa.sso.Delivery(
+        iteration=1, event_type="post_edit", layer="verify.horizon.executed",
+        outcome="delivered", reason="", chars=len(payload), payload=payload,
+        file_path="pkg/dates.py", sha16="c" * 16, home_msg=2,
+    )
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "I will add the missing helper in pkg/dates.py next.",
+        },
+        {"role": "tool", "content": "context"},
+        {"role": "tool", "content": payload},
+        _command_message("python -c \"open('pkg/dates.py','a').write('helper')\""),
+    ]
+
+    grade = ssa.grade_delivery(delivery, msgs, {}, [], {}, receipt_level=3)
+
+    assert grade.receipt_level == 3
+    assert grade.prior_knowledge_state == "UNKNOWN"
+    assert grade.prior_knowledge_msg == -1
+    assert grade.fair_probe is None
+    assert grade.fair_probe_state == "FAIR_UNMEASURED"
+    assert ssa._assign_pbucket(grade) == "P3a-ack"
+
+
+def test_scope_action_without_fair_probe_remains_unmeasured():
     scope = ssa.DeliveryGrade(
         home_msg=9, iteration=4, layer="consensus.scope", chars=50,
         file_path="pkg/mod.py", payload_head="scope", joined=True,
         receipt_level=2, acted_independent=12,
     )
 
-    assert ssa._assign_pbucket(scope) == "P5"
+    assert scope.fair_probe_state == "FAIR_UNMEASURED"
+    assert ssa._assign_pbucket(scope) == "P3a-ack"
 
 
 def test_shadow_holdout_row_skipped_not_graded(tmp_path):

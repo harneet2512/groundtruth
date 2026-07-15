@@ -58,6 +58,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -500,6 +501,7 @@ class DeliveryGrade:
     prior_knowledge_state: str = "UNKNOWN"
     prior_knowledge_msg: int = -1
     fair_probe: bool | None = None
+    fair_probe_source: str = "UNMEASURED"
     pbucket: str = ""
 
     @property
@@ -509,6 +511,15 @@ class DeliveryGrade:
     @property
     def clean(self) -> bool:
         return not self.violations and self.joined
+
+    @property
+    def fair_probe_state(self) -> str:
+        """Fail-closed causal status without collapsing the tri-state evidence field."""
+        if self.fair_probe is True:
+            return "FAIR_PROVEN"
+        if self.fair_probe is False:
+            return "FAIR_REJECTED"
+        return "FAIR_UNMEASURED"
 
 
 @dataclass
@@ -765,6 +776,7 @@ def grade_delivery(d: "sso.Delivery", msgs: list[dict], acq_cache: dict,
         g.prior_knowledge_state = "MODEL_PLANNED"
         g.prior_knowledge_msg = planned_msg
         g.fair_probe = False
+        g.fair_probe_source = "CHRONOLOGY_MODEL_PLANNED"
         g.violations.append(Violation(
             "step_behind", "a", d.home_msg, d.layer,
             f"MODEL_PLANNED at m{planned_msg} before delivery; later action was precommitted",
@@ -848,10 +860,10 @@ _VERIFY_COMMITMENT = re.compile(
 def _model_planned_before(d: "sso.Delivery", msgs: list[dict], acted_msg: int) -> int:
     """Return the prior assistant message that committed a later reminder action.
 
-    This is intentionally narrower than token overlap.  Only reminder/obligation
+    This is intentionally narrower than token overlap. Only reminder/obligation
     deliveries are eligible, a later assistant command must target an entity carried
     by the delivery, and the earlier model-authored prose must contain an explicit
-    future-action commitment tied to that same entity.  Reads, tentative discussion,
+    future-action commitment tied to that same entity. Reads, tentative discussion,
     and bare entity mentions do not establish ``MODEL_PLANNED``.
     """
     if d.layer not in OBLIGATION_LAYERS or acted_msg <= d.home_msg:
@@ -903,7 +915,8 @@ def _assign_pbucket(g: DeliveryGrade) -> str:
         scratch provenance, leak, dose, unexecuted covering assurance, or failed byte-join).
     P2  step_behind (the agent had self-acquired the fact — the SS 'very bad' rung).
     P3  late (delivered after the requirement already had passing evidence).
-    P5  clean + acknowledged + an executed/companion/recovery class (the consumed-good rung).
+    P5  clean + acknowledged + an executed/companion/recovery class + explicitly proven fair
+        probe (the consumed-good rung). Unknown causal evidence fails closed as FAIR_UNMEASURED.
     P3a-ack  every other clean delivery (delivered novel; acknowledged-or-not, non-P5 class).
     """
     kinds = {v.kind for v in g.violations}
@@ -917,9 +930,21 @@ def _assign_pbucket(g: DeliveryGrade) -> str:
     acted = g.receipt_level >= 3 or (
         g.layer == "consensus.scope" and g.acted_independent >= 0
     )
-    if acted and g.layer in P5_CLASSES:
+    if acted and g.layer in P5_CLASSES and g.fair_probe is True:
         return "P5"
     return "P3a-ack"
+
+
+def _join_trusted_fair_probe(
+    grade: DeliveryGrade,
+    seal: str,
+    evidence: Mapping[str, bool] | None,
+) -> None:
+    """Fill an unknown fair-probe bit from exact seal-bound external evidence."""
+    trusted = evidence.get(seal) if evidence is not None else None
+    if grade.fair_probe is None and type(trusted) is bool:
+        grade.fair_probe = trusted
+        grade.fair_probe_source = "TRUSTED_SEAL_EVIDENCE"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1011,7 +1036,19 @@ def _reconstruct_cached(task: str, root: Path) -> "sso.ReconstructedTask":
     return recon
 
 
-def audit_task(task: str, root: Path) -> TaskReport:
+def audit_task(
+    task: str,
+    root: Path,
+    *,
+    trusted_fair_probe_by_seal: Mapping[str, bool] | None = None,
+) -> TaskReport:
+    """Audit one task, optionally joining externally adjudicated causal evidence.
+
+    Chronology alone may reject a fair probe, but it never fabricates a positive
+    counterfactual. A trusted mapping is keyed by the delivery's byte seal and can
+    fill only an otherwise-unmeasured causal bit; it cannot override a chronological
+    rejection.
+    """
     task_dir = root / task
     recon = _reconstruct_cached(task, root)
     traj = json.loads((task_dir / "mini-swe-agent.trajectory.json").read_text(encoding="utf-8"))
@@ -1040,11 +1077,15 @@ def audit_task(task: str, root: Path) -> TaskReport:
         if d.chars <= 0 or "delivered" not in d.outcome or "shadow_holdout" in d.outcome:
             continue
         ledger_row = seal_rows.get(d.sha16 or "", {})
-        grades.append(grade_delivery(
+        grade = grade_delivery(
             d, msgs, acq_cache, passing, ledger_row,
             proof_rows=recon.raw_rows,
             receipt_level=receipt_by_seal.get(d.sha16 or "", 1),
-        ))
+        )
+        _join_trusted_fair_probe(
+            grade, str(d.sha16 or ""), trusted_fair_probe_by_seal
+        )
+        grades.append(grade)
 
     apply_dose(grades)
 
@@ -1161,6 +1202,8 @@ def build_report(reports: list[TaskReport]) -> dict:
                      "prior_knowledge_state": d.prior_knowledge_state,
                      "prior_knowledge_msg": d.prior_knowledge_msg,
                      "fair_probe": d.fair_probe,
+                     "fair_probe_state": d.fair_probe_state,
+                     "fair_probe_source": d.fair_probe_source,
                      "pbucket": d.pbucket}
                     for d in r.deliveries if d.acknowledged
                 ],
