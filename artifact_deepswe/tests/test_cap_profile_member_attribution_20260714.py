@@ -87,7 +87,8 @@ def test_plan_shaped_executed_delivery_is_not_falsely_attributed(monkeypatch):
 
     delivered = [row for row in calls if row.get("content") == payload]
     assert len(delivered) == 1
-    assert delivered[0].get("extra") is None
+    assert delivered[0]["extra"]["candidate_id"]
+    assert "fact_class" not in delivered[0]["extra"]
 
 
 def test_gateway_owner_requires_exact_producer_class_pair_and_active_member(monkeypatch):

@@ -192,6 +192,70 @@ def test_r2_v2_churn_requires_changed_bytes_after_pass(monkeypatch):
     assert g._ss_coherence_churn(rel) == 3
 
 
+def test_coherence_producer_emits_exact_source_write_proof(monkeypatch):
+    rows = []
+    monkeypatch.setattr(g, "_GT_BASELINE", False)
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "1")
+    monkeypatch.setenv("GT_INSEAM_METRICS", "0")
+    monkeypatch.setattr(g, "_action_count", 7)
+    monkeypatch.setattr(g, "_ledger_line_direct", lambda row: rows.append(row) or True)
+
+    g._ss_record_edit(
+        "pkg/mod.py", "sed -i s/a/a/ pkg/mod.py", "", returncode=0,
+        bytes_changed=False)
+
+    proof = [row for row in rows if row.get("event_type") == "source_write_proof"]
+    assert proof == [{
+        "layer": "ss.coherence.proof",
+        "event_type": "source_write_proof",
+        "file_path": "pkg/mod.py",
+        "outcome": "suppressed_internal_only",
+        "reason": "exact_post_command_write_result",
+        "chars_delivered": 0,
+        "iteration": 7,
+        "action_step": 7,
+        "write_ok": True,
+        "bytes_changed": False,
+    }]
+    from scripts.swebench.ss_smoke_audit import coherence_write_proof
+    seal = "a" * 16
+    consumed = coherence_write_proof(
+        proof + [{
+            "outcome": "delivered", "content_sha256_16": seal,
+            "iteration": 7,
+        }],
+        "pkg/mod.py", delivery_iteration=7, delivery_seal=seal)
+    assert consumed.measured is True
+    assert consumed.count == 0
+    assert consumed.write_steps == ()
+
+
+def test_coherence_producer_emits_test_proof_only_under_profile_flags(monkeypatch):
+    rows = []
+    monkeypatch.setattr(g, "_GT_BASELINE", False)
+    monkeypatch.setattr(g, "_action_count", 9)
+    monkeypatch.setattr(g, "_ledger_line_direct", lambda row: rows.append(row) or True)
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "0")
+    monkeypatch.setenv("GT_INSEAM_METRICS", "0")
+    g._ss_record_test("pytest -q", "1 passed", failed=False, passed=True)
+    assert rows == []
+
+    monkeypatch.setenv("GT_INSEAM_METRICS", "1")
+    g._ss_record_test("pytest -q", "1 passed", failed=False, passed=True)
+    proof = [row for row in rows if row.get("event_type") == "test_proof"]
+    assert proof == [{
+        "layer": "ss.coherence.proof",
+        "event_type": "test_proof",
+        "file_path": "",
+        "outcome": "suppressed_internal_only",
+        "reason": "classified_test_result",
+        "chars_delivered": 0,
+        "iteration": 9,
+        "action_step": 9,
+        "passed": True,
+    }]
+
+
 def test_r1_obl_relax_excludes_localization(monkeypatch):
     monkeypatch.setenv("GT_SS_ARBITER_V2", "1")
     monkeypatch.setenv("GT_GLOBAL_ARBITER", "1")

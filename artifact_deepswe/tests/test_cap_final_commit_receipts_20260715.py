@@ -77,7 +77,9 @@ def test_lane_delivery_lineage_is_registered_and_never_inferred_from_arbiter(mon
 
     legacy = g._lane_delivery_extra(
         "l3.contract", "legacy contract", "src/widget.py", g.Event.POST_VIEW)
-    assert legacy is None
+    assert legacy["candidate_id"]
+    assert "fact_class" not in legacy
+    assert "lineage_schema" not in legacy
 
 
 def test_coherence_delivery_does_not_fabricate_fact_lineage(monkeypatch):

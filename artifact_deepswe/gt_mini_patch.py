@@ -7922,7 +7922,7 @@ def _lane_delivery_extra(kind: str, text: str, target: str, event) -> "dict | No
     member = _LANE_PROFILE_MEMBER_OWNERS.get(kind or "")
     if member:
         return _exact_profile_delivery_extra(member, kind, text, target, event)
-    return None
+    return _lane_final_extra(kind, text, target)
 
 
 def _registered_delivery_extra(
@@ -13826,6 +13826,52 @@ def _ss_novelty_on() -> bool:      return _ss_enabled("GT_SS_NOVELTY")
 def _ss_dedup2_on() -> bool:       return _ss_enabled("GT_SS_DEDUP2")
 def _ss_coherence_v2_on() -> bool: return _ss_enabled("GT_SS_COHERENCE_V2")
 def _ss_recovery_v2_on() -> bool:  return _ss_enabled("GT_SS_RECOVERY_V2")
+
+
+def _ss_coherence_proofs_on() -> bool:
+    """Whether durable producer truth is required by coherence or live audit."""
+    return not _GT_BASELINE and (_ss_coherence_v2_on() or _inseam_metrics_on())
+
+
+def _ss_emit_source_write_proof(
+        rel: str, *, write_ok: bool, bytes_changed: bool) -> None:
+    """Persist exact post-command source-byte truth without claiming delivery."""
+    if (not _ss_coherence_proofs_on() or not _ss_valid_repo_source_rel(rel)
+            or type(write_ok) is not bool or type(bytes_changed) is not bool):
+        return
+    try:
+        _runtime_ledger_record(
+            kind="ss.coherence.proof",
+            outcome=_ProductSignalOutcome.SUPPRESSED_INTERNAL_ONLY,
+            reason="exact_post_command_write_result",
+            chars=0,
+            file_path=rel,
+            event="source_write_proof",
+            extra={
+                "action_step": _action_count,
+                "write_ok": write_ok,
+                "bytes_changed": bytes_changed,
+            },
+        )
+    except Exception:  # noqa: BLE001 -- audit I/O cannot change coherence state
+        return
+
+
+def _ss_emit_test_proof(*, passed: bool) -> None:
+    """Persist one classified test result without exposing test identity or bytes."""
+    if not _ss_coherence_proofs_on() or type(passed) is not bool:
+        return
+    try:
+        _runtime_ledger_record(
+            kind="ss.coherence.proof",
+            outcome=_ProductSignalOutcome.SUPPRESSED_INTERNAL_ONLY,
+            reason="classified_test_result",
+            chars=0,
+            event="test_proof",
+            extra={"action_step": _action_count, "passed": passed},
+        )
+    except Exception:  # noqa: BLE001 -- audit I/O cannot change test state
+        return
 def _ss_provenance_on() -> bool:   return _ss_enabled("GT_SS_PROVENANCE")
 def _ss_late_drop_on() -> bool:    return _ss_enabled("GT_SS_LATE_DROP")
 def _ss_ack_metrics_on() -> bool:  return _ss_enabled("GT_SS_ACK_METRICS")
@@ -14827,7 +14873,11 @@ def _ss_record_edit(rel: str, cmd: str, orig_out: str, *, returncode=None,
         # generators are valid write channels when the exact source bytes moved).
         if _v2_write_semantics and bytes_changed is not True and not _ss_cmd_writes_source(cmd):
             return  # not a source write -> do not count as churn / do not reset recovery
-        write_ok = _ss_write_ok(orig_out, returncode=returncode)
+        command_write_ok = _ss_write_ok(orig_out, returncode=returncode)
+        if type(returncode) is int and type(bytes_changed) is bool:
+            _ss_emit_source_write_proof(
+                rel, write_ok=command_write_ok, bytes_changed=bytes_changed)
+        write_ok = command_write_ok
         if _v2_write_semantics:
             # In V2, command success proves only that the write ATTEMPT ran.  Coherence
             # counts landed code-state transitions, so the event's success bit also
@@ -14901,6 +14951,7 @@ def _ss_record_test(cmd: str, orig_out: str, failed: bool, passed: bool) -> None
         if _ss_stash_agent_state_probe(cmd):
             return
         _ss_test_events.append((_action_count, passed))
+        _ss_emit_test_proof(passed=passed)
         if passed:
             _ss_pass_tokens.update(
                 t for t in _BLOCK_TOKEN_RE.findall(orig_out or "") if len(t) >= 3)
