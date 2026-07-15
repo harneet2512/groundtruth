@@ -18,6 +18,7 @@ from groundtruth.pretask.v1r_brief import (
     _localization_header,
     _localization_header_for_entries,
     _model_visible_localization_entries,
+    render_brief,
 )
 
 
@@ -151,6 +152,17 @@ def test_explicit_cross_language_paths_have_permitted_provenance(
     assert anchors.path_provenance[path] == "EXPLICIT_PATH"
 
 
+def test_traceback_only_path_is_weak_provenance_not_an_exact_candidate(
+    tmp_path: Path,
+) -> None:
+    db = _graph(tmp_path / "graph.db", [("parse", "src/parser.py", "python")])
+    issue = 'Traceback (most recent call last):\n  File "src/parser.py", line 8, in parse'
+    anchors = extract_issue_anchors(issue, db)
+
+    assert anchors.path_provenance["src/parser.py"] == "TRACEBACK_PATH"
+    assert _exact_issue_named_files(issue, db, anchors) == {}
+
+
 def test_short_explicit_path_is_guaranteed_without_stem_shape_heuristics(
     tmp_path: Path,
 ) -> None:
@@ -188,6 +200,20 @@ def test_header_never_appends_an_arbitrary_resolved_edge_tail(monkeypatch) -> No
     assert "src/candidate.py" in header
     assert "src/other.py" not in header
     assert "resolved caller:" not in header
+
+
+def test_candidate_local_trusted_witness_survives_in_file_entry() -> None:
+    brief = render_brief([
+        FileEntry(
+            "src/candidate.py",
+            1.0,
+            witness="candidate_local() calls trusted_symbol() [CALLS]",
+            witness_verified=True,
+            relevance_grade="VERIFIED",
+        )
+    ])
+
+    assert "Witness: candidate_local() calls trusted_symbol() [CALLS]" in brief
 
 
 def test_visible_candidate_membership_uses_numbered_candidate_lines_only() -> None:

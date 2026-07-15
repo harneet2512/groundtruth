@@ -108,6 +108,34 @@ def test_both_reducer_call_sites_are_flag_gated():
     assert guarded == total, f"{total - guarded} reducer call site(s) NOT flag-gated"
 
 
+def test_candidate_population_alignment_is_minimal_flag_gated():
+    """The terminal-entry header rewrite must not alter historical full-mode bytes."""
+    tree = ast.parse(_SRC.read_text(encoding="utf-8"))
+    guarded = 0
+    total = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        if "_brief_minimal_on" not in ast.unparse(node.test):
+            continue
+        for call in ast.walk(node):
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "_localization_header_for_entries"
+            ):
+                guarded += 1
+    for call in ast.walk(tree):
+        if (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "_localization_header_for_entries"
+        ):
+            total += 1
+    assert total == 1
+    assert guarded == total
+
+
 # --------------------------------------------------------------------------- #
 # KEEP — obligations + minimal orientation survive.
 # --------------------------------------------------------------------------- #

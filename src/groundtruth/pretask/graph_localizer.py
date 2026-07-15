@@ -3900,7 +3900,11 @@ def localize(
                 f"depth={_depth_authority(_c)} score={_c.score}\n"
             )
     candidates = candidates[:top_k]
-    _explicit_issue_paths = set(getattr(issue_anchors, "paths", None) or set())
+    _path_provenance = getattr(issue_anchors, "path_provenance", None) or {}
+    _explicit_issue_paths = {
+        path for path in (getattr(issue_anchors, "paths", None) or set())
+        if _path_provenance.get(path, "EXPLICIT_PATH") == "EXPLICIT_PATH"
+    }
     candidates = [
         replace(
             candidate,

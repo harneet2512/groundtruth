@@ -4711,10 +4711,11 @@ def _exact_issue_named_files(
     for token in tuple(trusted_symbols):
         toks.update(part for part in token.replace("::", ".").split(".") if part)
     toks |= {t.lower() for t in toks}
+    path_provenance = getattr(issue_anchors, "path_provenance", None) or {}
     explicit_paths = {
         _gl_normalize(path)
         for path in (getattr(issue_anchors, "paths", None) or set())
-        if path
+        if path and path_provenance.get(path, "EXPLICIT_PATH") == "EXPLICIT_PATH"
     }
     out: dict[str, list[str]] = {}
     if not toks and not explicit_paths:
@@ -5956,10 +5957,11 @@ def generate_v1r_brief(
         _wit_conf = _loc_conf_by_file.get(path) or _loc_conf_by_file.get(_pn) or 0.0
         _relevance = _relevance_by_file.get(path) or _relevance_by_file.get(_pn) or ""
         if not _relevance:
+            _path_provenance = getattr(_anchors_obj, "path_provenance", None) or {}
             _explicit_paths = {
                 _gl_normalize(p)
                 for p in (getattr(_anchors_obj, "paths", None) or set())
-                if p
+                if p and _path_provenance.get(p, "EXPLICIT_PATH") == "EXPLICIT_PATH"
             }
             if _pn in _explicit_paths or rec.get("_exact_issue_named"):
                 _relevance = "VERIFIED"
@@ -6014,13 +6016,21 @@ def generate_v1r_brief(
     # a weak localizer #1 from overriding stronger fused evidence while keeping the
     # brief internally consistent. Pure reorder of a frozen localizer view; no
     # candidate is added/dropped and the inputs are not mutated.
-    # Full and minimal renders share one bounded candidate population. A localizer-
-    # only path cannot appear in the header while being absent from FileEntry,
-    # `.files`, and localization_proof.
-    entries = entries[:max_files]
-    _loc_header, _loc_primary, _loc_tier = _localization_header_for_entries(
-        _loc, graph_db, issue_text, entries,
-    )
+    if _brief_minimal_on():
+        # Minimal bytes and their telemetry share one bounded population. Apply
+        # max_files before either renderer so no visible header candidate can sit
+        # outside `.files`/localization_proof.
+        entries = entries[:max_files]
+        _loc_header, _loc_primary, _loc_tier = _localization_header_for_entries(
+            _loc, graph_db, issue_text, entries,
+        )
+    else:
+        # Preserve the historical full renderer exactly when the kill-switch is
+        # off. Candidate-population alignment is a Profile-2/minimal behavior.
+        _loc_header, _loc_primary = _localization_header(
+            _loc, graph_db, issue_text,
+        )
+        _loc_tier = _localization_confidence_tier(_loc_header)
     if _loc_tier == "high" and _loc_header and _loc_primary and entries:
         _lp_norm = _gl_normalize(_loc_primary)
         _pi = next(

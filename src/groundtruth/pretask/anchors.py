@@ -448,6 +448,29 @@ def _extract_paths(text: str) -> set[str]:
     return out
 
 
+def _extract_path_provenance(text: str) -> dict[str, str]:
+    """Classify source paths as explicit issue references or traceback-only.
+
+    A path mentioned anywhere outside a structured traceback line is explicit;
+    otherwise it remains weak traceback context. This is occurrence-based, so a
+    reporter who repeats a stack path in their own diagnosis upgrades it honestly.
+    """
+    traceback_paths: set[str] = set()
+    explicit_paths: set[str] = set()
+    for line in (text or "").splitlines():
+        line_paths = _extract_paths(line)
+        if not line_paths:
+            continue
+        if _TRACEBACK_LINE_RE.search(line):
+            traceback_paths.update(line_paths)
+        else:
+            explicit_paths.update(line_paths)
+    return {
+        path: ("EXPLICIT_PATH" if path in explicit_paths else "TRACEBACK_PATH")
+        for path in sorted(traceback_paths | explicit_paths)
+    }
+
+
 def _extract_test_names(text: str) -> set[str]:
     """Pull pytest-style test function names from the issue body."""
     return {m.group(1) for m in _TEST_NAME_RE.finditer(text)}
@@ -755,5 +778,5 @@ def extract_issue_anchors(
         code_symbols=code_symbols,
         unresolved_code_symbols=unresolved_code_symbols,
         symbol_provenance=symbol_provenance,
-        path_provenance={path: "EXPLICIT_PATH" for path in _extract_paths(issue_text)},
+        path_provenance=_extract_path_provenance(issue_text),
     )
