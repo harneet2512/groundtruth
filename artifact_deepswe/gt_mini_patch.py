@@ -280,6 +280,31 @@ def _stage_terminal_lane_control(
         staged.append(descriptor)
 
 
+def _retarget_terminal_lane_controls(
+    kind: str,
+    producer_text: str,
+    transformed_text: str,
+) -> None:
+    """Move staged controls with their candidate through a native transform.
+
+    A transform changes the terminal transaction key.  Moving (rather than copying)
+    the descriptors prevents the pre-transform candidate from receiving credit, while
+    descriptor de-duplication preserves one decision when a transform is repeated.
+    Empty transforms discard the staged candidate because no bytes can ship.
+    """
+    if not kind or not producer_text or producer_text == transformed_text:
+        return
+    staged = _terminal_lane_controls.pop(
+        _terminal_lane_control_key(kind, producer_text), [])
+    if not staged or not transformed_text:
+        return
+    target = _terminal_lane_controls.setdefault(
+        _terminal_lane_control_key(kind, transformed_text), [])
+    for descriptor in staged:
+        if descriptor not in target:
+            target.append(descriptor)
+
+
 def _terminal_delivery_identity(
     delivery_extra: "dict | None",
 ) -> "tuple[str, str] | None":
@@ -9423,6 +9448,51 @@ def _structural_risk_note() -> tuple[str, bool]:
 _last_covering_candidate_input = None  # host-only producer input; never model-facing
 
 
+def _stage_verification_terminal_controls(
+    block: str,
+    *,
+    evidence_type: str,
+    verification_plan: bool,
+) -> None:
+    """Stage execution controls only after a leak-safe RED is deliverable.
+
+    ``block`` is the exact native producer result offered to the lane arbiter.  The
+    shared terminal transaction later retargets the record to the shipped suffix and
+    commits it only when this candidate wins.  Producer identity is explicit at the
+    call site; no lane-kind or payload inference is permitted.
+    """
+    if not block or evidence_type not in {"covering_red", "syntax_result"}:
+        return
+    reason = (
+        "attributed_covering_red_selected"
+        if evidence_type == "covering_red" and not verification_plan
+        else (
+            "verification_plan_"
+            f"{'unit' if evidence_type == 'covering_red' else 'syntax'}_red_selected"
+        )
+    )
+    _stage_terminal_lane_control(
+        "verify.horizon.executed",
+        block,
+        feature_id="GT_VERIFY_EXECUTE",
+        decision_site="mini_seam.verification.execution",
+        decision="APPLIED",
+        reason=reason,
+    )
+    if verification_plan:
+        _stage_terminal_lane_control(
+            "verify.horizon.executed",
+            block,
+            feature_id="GT_VERIFICATION_PLAN",
+            decision_site="mini_seam.verification.plan_selection",
+            decision="APPLIED",
+            reason=(
+                "progressive_"
+                f"{'unit' if evidence_type == 'covering_red' else 'syntax'}_red_selected"
+            ),
+        )
+
+
 def _executed_covering_emission(covering: list[dict],
                                 edited_rels: "set[str] | list[str]",
                                 edited_syms: "set[str] | list[str]") -> str | None:
@@ -9579,6 +9649,8 @@ def _executed_covering_emission(covering: list[dict],
             _last_covering_candidate_input = None
         _last_verify_executed_identity = (
             "covering_runner", "covering_red", "test_result")
+        _stage_verification_terminal_controls(
+            block, evidence_type="covering_red", verification_plan=False)
         return block
     except Exception:  # noqa: BLE001 -- correct-or-quiet; never destabilize the loop
         return None
@@ -9692,6 +9764,7 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
     agent already ran a test this turn (mirror of ``_executed_covering_emission``).
     Correct-or-quiet on any error; an unattributed RED never false-delivers (invariant ②)."""
     global _last_test_outcome_failed, _last_covering_result, _last_verify_executed_identity
+    global _last_covering_candidate_input
     _last_verify_executed_identity = None
     if (os.environ.get("GT_VERIFICATION_PLAN") != "1"
             or os.environ.get("GT_VERIFY_EXECUTE") != "1"
@@ -9699,6 +9772,12 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
         return None
     if _last_test_step == _action_count:  # agent already ran a test this turn
         return None
+    # VerificationPlan results do not carry the typed, source-bound candidate input
+    # built by the direct covering producer.  Clear any prior direct-producer value
+    # before this producer runs so neither a plan syntax RED nor a plan unit RED can
+    # inherit and persist stale covering truth.  Delivery lineage remains exact; truth
+    # attestation stays honestly absent until this producer constructs its own input.
+    _last_covering_candidate_input = None
     try:
         from groundtruth.runtime.native_render import (
             contains_gt_tag, contains_test_identity, render_covering_failure_native,
@@ -9765,9 +9844,16 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
                 if _ss_ack_failure_suppresses(
                         "verify.horizon.executed", block, failure_identity):
                     return None
-                if res.kind == "unit":
+                if res.kind == "syntax":
+                    _last_verify_executed_identity = (
+                        "edit_check", "syntax_result", "edit_result")
+                    _stage_verification_terminal_controls(
+                        block, evidence_type="syntax_result", verification_plan=True)
+                elif res.kind == "unit":
                     _last_verify_executed_identity = (
                         "covering_runner", "covering_red", "test_result")
+                    _stage_verification_terminal_controls(
+                        block, evidence_type="covering_red", verification_plan=True)
                 return block
         # W14 FIX 1 (2026-07-13): the progressive plan reached its end without a deliverable RED
         # rung -> nothing produced. Host row only (ZERO observation bytes) so an executed-count
@@ -12044,6 +12130,8 @@ def _steer_native(text: str, *, kind: str = "", stage_control: bool = True) -> s
             kept.append(s)
     body = "\n".join(kept).strip()
     result = ("\n" + body + "\n") if body else ""
+    if kind:
+        _retarget_terminal_lane_controls(kind, text, result)
     if result and kind and stage_control:
         _stage_terminal_lane_control(
             kind, result,
