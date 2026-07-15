@@ -54,6 +54,19 @@ def test_fine_alias_keeps_runtime_identity_and_explicit_cap_owner() -> None:
     )
 
 
+def test_test_result_obligation_has_registered_boundary_lineage() -> None:
+    lineage = build_lineage(
+        runtime_producer_id="spec",
+        evidence_type="obligation_unexercised",
+        actual_event="test_result",
+    )
+    assert lineage is not None
+    assert lineage.producer_registration_match is True
+    assert lineage.fact_class == "obligations"
+    assert lineage.required_event == "test_result"
+    assert lineage.features == (FeatureRef("FACT", "obligations", "fact"),)
+
+
 def test_dynamic_alias_keeps_fine_evidence_type() -> None:
     lineage = build_lineage(
         runtime_producer_id="change_surface",

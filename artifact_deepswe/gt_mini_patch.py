@@ -7922,7 +7922,17 @@ def _lane_delivery_extra(kind: str, text: str, target: str, event) -> "dict | No
     member = _LANE_PROFILE_MEMBER_OWNERS.get(kind or "")
     if member:
         return _exact_profile_delivery_extra(member, kind, text, target, event)
-    return _lane_final_extra(kind, text, target)
+    extra = _lane_final_extra(kind, text, target)
+    # Exact lane producer authority. This is deliberately not inferred from
+    # layer naming or payload text: only a reviewed producer/evidence/boundary
+    # binding may attach FACT lineage to delivered bytes.
+    registered = {
+        "obligation.unexercised": ("spec", "obligation_unexercised"),
+    }.get(kind or "")
+    if registered:
+        actual_event = str(getattr(event, "value", event) or "")
+        extra.update(_registered_delivery_extra(*registered, actual_event))
+    return extra
 
 
 def _registered_delivery_extra(

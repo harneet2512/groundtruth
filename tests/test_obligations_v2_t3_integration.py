@@ -349,6 +349,21 @@ def test_t3_fresh_dynamic_proof_retires_unverifiable_clause(
     assert rows[0]["boundary"] == "test_result"
 
 
+def test_unexercised_delivery_row_carries_typed_obligation_lineage(gmp):
+    m, _tmp = gmp
+    extra = m._lane_delivery_extra(
+        "obligation.unexercised", "verify the reported requirement", "",
+        m.Event.TEST_RESULT,
+    )
+    assert extra["producer_registration_match"] is True
+    assert extra["fact_class"] == "obligations"
+    assert extra["actual_event"] == "test_result"
+    assert extra["required_event"] == "test_result"
+    assert extra["feature_ids"] == [
+        {"category": "FACT", "feature_id": "obligations", "role": "fact"}
+    ]
+
+
 @pytest.mark.parametrize(
     ("command", "output", "returncode"),
     [
