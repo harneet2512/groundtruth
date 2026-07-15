@@ -35,6 +35,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 from typing import Any, Iterable
@@ -80,7 +81,12 @@ from groundtruth.runtime.control_participation import (  # noqa: E402
     CONTROL_PARTICIPATION_SCHEMA,
     ControlParticipation,
 )
-from groundtruth.runtime.fact_registry import producer_matches, registration_for  # noqa: E402
+from groundtruth.runtime.fact_registry import (  # noqa: E402
+    FACT_ROLE_INTERNAL_SUPPORT,
+    fact_role_for,
+    producer_matches,
+    registration_for,
+)
 
 # ---------------------------------------------------------------------------
 # Fail-loud loaders — a truly-absent dependency is a COLLECTION FAILURE, not
@@ -1769,6 +1775,13 @@ _SUPPORT_GATE_NAMES = (
     "timing_inherited_from_fact_delivery",
     "source_causal_fair_probe",
 )
+_INTERNAL_SUPPORT_GATE_NAMES = (
+    "runtime_support_receipt",
+    "supported_candidate_id",
+    "downstream_decision_join",
+    "support_correct",
+    "support_causal_fair_probe",
+)
 
 
 def _readiness_from_gates(
@@ -1932,6 +1945,118 @@ def _infra_control_readiness(
     )
 
 
+def _internal_fact_support_readiness(
+    fact_class: str,
+    lifecycle: dict[str, Any],
+    source_record: dict[str, Any],
+    *,
+    ledger_artifact: str,
+) -> dict[str, Any]:
+    """Typed internal FACT terminal; never projects model-delivery gates.
+
+    The cochange source is not a second model delivery. It contributes to one
+    localization candidate already sealed and acknowledged by the brief path.
+    Truth and causality remain separate gates and are never inferred from use.
+    """
+    candidate_id = source_record.get("candidate_id")
+    candidate_path = source_record.get("candidate_path")
+    seal = source_record.get("content_sha256_16")
+    chars = source_record.get("chars_delivered")
+    block_seal = source_record.get("block_content_sha256_16")
+    block_span = source_record.get("block_char_span")
+    delivery_home = source_record.get("delivery_message_index")
+    receipt_level = source_record.get("receipt_level")
+    receipt_evidence = source_record.get("receipt_evidence")
+    normalized_path = str(candidate_path or "").replace("\\", "/")
+    while normalized_path.startswith("./"):
+        normalized_path = normalized_path[2:]
+    normalized_path = normalized_path.lstrip("/")
+    receipt_index = None
+    if isinstance(receipt_evidence, dict):
+        receipt_index = (
+            receipt_evidence.get("acted_message_index")
+            if isinstance(receipt_level, int) and receipt_level >= 3
+            else receipt_evidence.get("referenced_message_index")
+        )
+    exact_source_field = any(
+        isinstance(field, str)
+        and re.fullmatch(
+            r"metrics\.localization_proof\[\d+\]\.components\.cochange",
+            field,
+        )
+        for field in source_record.get("source_fields") or []
+    )
+    runtime_receipt = bool(
+        source_record.get("status") == "MEASURED"
+        and source_record.get("source_artifact") == "brief_result.json"
+        and exact_source_field
+        and isinstance(seal, str) and re.fullmatch(r"[0-9a-f]{16}", seal)
+        and isinstance(chars, int) and not isinstance(chars, bool) and chars > 0
+        and isinstance(source_record.get("producer_entry_index"), int)
+        and not isinstance(source_record.get("producer_entry_index"), bool)
+        and isinstance(source_record.get("producer_ledger_layer"), str)
+        and bool(source_record.get("producer_ledger_layer"))
+        and isinstance(delivery_home, int) and not isinstance(delivery_home, bool)
+        and delivery_home >= 0
+        and isinstance(receipt_level, int) and not isinstance(receipt_level, bool)
+        and receipt_level >= 2
+        and isinstance(receipt_index, int) and not isinstance(receipt_index, bool)
+        and receipt_index > delivery_home
+    )
+    candidate_bound = bool(
+        runtime_receipt
+        and isinstance(candidate_id, str)
+        and candidate_id == f"localization:{normalized_path}"
+        and isinstance(candidate_path, str) and bool(candidate_path)
+        and isinstance(block_seal, str)
+        and re.fullmatch(r"[0-9a-f]{16}", block_seal)
+        and isinstance(block_span, list) and len(block_span) == 2
+        and all(isinstance(value, int) and not isinstance(value, bool) for value in block_span)
+        and 0 <= block_span[0] < block_span[1]
+        and (
+            (
+                source_record.get("producer_payload_scope") == "whole_brief"
+                and block_span[1] <= chars
+            )
+            or (
+                source_record.get("producer_payload_scope") == "exact_block"
+                and block_span[1] - block_span[0] == chars
+            )
+        )
+    )
+    downstream_join = bool(
+        candidate_bound
+        and source_record.get("supported_fact_class") == "localization"
+    )
+
+    def producer_gate(field: str) -> bool | None:
+        value = source_record.get(field)
+        return value if isinstance(value, bool) else None
+
+    return _typed_readiness(
+        "internal_support",
+        {
+            "runtime_support_receipt": True if runtime_receipt else None,
+            "supported_candidate_id": True if candidate_bound else None,
+            "downstream_decision_join": True if downstream_join else None,
+            "support_correct": producer_gate("source_contribution_correct"),
+            "support_causal_fair_probe": producer_gate("source_causal_fair_probe"),
+        },
+        gate_names=_INTERNAL_SUPPORT_GATE_NAMES,
+        live_witness=False,
+        extra={
+            "fact_class": fact_class,
+            "source_artifact": ledger_artifact,
+            "legacy_lifecycle_present": bool(lifecycle),
+            "delivery_gates_inapplicable": True,
+            "candidate_id": candidate_id,
+            "supported_fact_class": source_record.get("supported_fact_class"),
+            "downstream_delivery_seal": seal,
+            "downstream_receipt_level": receipt_level,
+        },
+    )
+
+
 def _valid_readiness_projection(value: object) -> bool:
     """Validate the canonical object and its derived terminal/blocker fields."""
     if not isinstance(value, dict):
@@ -1945,6 +2070,7 @@ def _valid_readiness_projection(value: object) -> bool:
         "measurement": _MEASUREMENT_GATE_NAMES,
         "infra_control": _INFRA_CONTROL_GATE_NAMES,
         "support": _SUPPORT_GATE_NAMES,
+        "internal_support": _INTERNAL_SUPPORT_GATE_NAMES,
     }.get(role, ())
     if not gate_names or tuple(gates) != gate_names:
         return False
@@ -2409,9 +2535,9 @@ def _canonical_task_features(
     cap_features: dict[str, dict],
     fact_classes: dict[str, dict],
     fact_readiness: dict[str, dict[str, Any]],
-    consumption_ledger: dict[str, Any],
-    trajectory: dict[str, Any],
     opportunity_by_feature: dict[str, dict[str, Any]],
+    acq: dict[str, dict[str, Any]],
+    acq_missing: list[str],
     *,
     leak_free: bool | None,
     dose_ok: bool | None,
@@ -2419,9 +2545,6 @@ def _canonical_task_features(
     """Build the explicit 128-row task ledger without mutating legacy fields."""
     inventory = canonical_feature_inventory()
     master: dict[str, dict[str, Any]] = {}
-    acq, acq_missing = _acquisition_feature_records(
-        task_dir, consumption_ledger, trajectory
-    )
     for record in acq.values():
         record["ss_readiness"] = _acquisition_readiness(
             record, leak_free=leak_free, dose_ok=dose_ok
@@ -2532,6 +2655,9 @@ def collect_task(
     consumption_by_fc, cons_ledger = _consumption_by_fact_class(traj, ledger_path)
     brief_path = _find_named_input(task_dir, "brief_result.json", locations=2)
     brief_payload = _load_json(brief_path) if brief_path else None
+    acq_records, acq_missing = _acquisition_feature_records(
+        task_dir, cons_ledger, traj
+    )
     control_evidence = _control_participation_evidence(
         rows, traj.get("messages", []) or [], cons_ledger,
         brief_payload if isinstance(brief_payload, dict) else None,
@@ -2649,16 +2775,24 @@ def collect_task(
 
     fact_readiness: dict[str, dict[str, Any]] = {}
     for fact_class, lifecycle in fact_lifecycles.items():
-        fact_readiness[fact_class] = ss_gate_readiness(
-            lifecycle,
-            byte_proven=_fact_delivery_byte_proven(
-                fact_class, rows, cons_ledger
-            ),
-            leak_free=leak_gate,
-            dose_ok=dose_gate,
-            fair_probe=None,
-            live_witness=False,
-        )
+        if fact_role_for(fact_class) == FACT_ROLE_INTERNAL_SUPPORT:
+            fact_readiness[fact_class] = _internal_fact_support_readiness(
+                fact_class,
+                lifecycle,
+                acq_records["cochange_history"],
+                ledger_artifact=ledger_artifact,
+            )
+        else:
+            fact_readiness[fact_class] = ss_gate_readiness(
+                lifecycle,
+                byte_proven=_fact_delivery_byte_proven(
+                    fact_class, rows, cons_ledger
+                ),
+                leak_free=leak_gate,
+                dose_ok=dose_gate,
+                fair_probe=None,
+                live_witness=False,
+            )
 
     endpoints = behavioural_endpoints(timeline)
     baseline_endpoints = None
@@ -2672,8 +2806,10 @@ def collect_task(
         for fc, lc in fact_lifecycles.items()
     }
     ss_features, ss_integrity = _canonical_task_features(
-        task, task_dir, features, fc_json, fact_readiness, cons_ledger, traj,
+        task, task_dir, features, fc_json, fact_readiness,
         opportunity_projection["features"],
+        acq_records,
+        acq_missing,
         leak_free=leak_gate, dose_ok=dose_gate,
     )
     ss_integrity["feature_opportunity"] = opportunity_projection["integrity"]

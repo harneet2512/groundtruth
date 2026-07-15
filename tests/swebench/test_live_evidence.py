@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 
+from scripts.swebench import live_evidence
 from scripts.swebench.live_evidence import validate_live_evidence
 
 
@@ -421,6 +422,22 @@ def test_rejects_unknown_feature_or_wrong_typed_role() -> None:
     report = _validate(case)
     assert "delivery-0:features:unknown:GT_NOT_REAL" in report["errors"]
     assert "delivery-0:features:role_mismatch:syntax_result" in report["errors"]
+
+
+def test_cochange_internal_support_cannot_be_claimed_as_physical_delivery() -> None:
+    errors: list[str] = []
+    keys = live_evidence._validate_features(
+        [{
+            "feature_id": "cochange_prior",
+            "family": "FACT",
+            "role": "internal_support",
+        }],
+        "delivery-0",
+        errors,
+    )
+
+    assert keys == (("cochange_prior", "FACT", "internal_support"),)
+    assert errors == ["delivery-0:features:not_delivery_bound:cochange_prior"]
 
 
 def test_rejects_lineage_claim_not_owned_by_physical_delivery() -> None:

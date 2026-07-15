@@ -39,7 +39,11 @@ except ModuleNotFoundError:
         normalized_right_censor_observation,
     )
 
-from groundtruth.runtime.fact_registry import REGISTRY  # noqa: E402
+from groundtruth.runtime.fact_registry import (  # noqa: E402
+    FACT_ROLE_INTERNAL_SUPPORT,
+    REGISTRY,
+    fact_role_for,
+)
 from groundtruth.runtime.feature_lineage import cap_role_for  # noqa: E402
 
 
@@ -80,6 +84,10 @@ MEASUREMENT_LIVE_PROOF_DEPENDENCIES = (
 FACT_RUNTIME_OWNERSHIP_PROOFS = (
     "runtime_evidence_type_registration", "runtime_producer_id",
     "required_event_match", "reactive_classification",
+)
+INTERNAL_FACT_SUPPORT_PROOFS = (
+    "runtime_support_receipt", "supported_candidate_id",
+    "downstream_decision_join", "support_correct", "support_causal_fair_probe",
 )
 ROW_FIELDS = (
     "family", "role", "terminal_contract", "eligibility", "ownership", "required_artifact_contracts",
@@ -253,6 +261,58 @@ def _cap_row(name: str) -> dict[str, Any]:
 
 def _fact_row(name: str) -> dict[str, Any]:
     registration = REGISTRY[name]
+    if fact_role_for(name) == FACT_ROLE_INTERNAL_SUPPORT:
+        return {
+            "family": "FACT", "role": "internal_support",
+            "terminal_contract": {
+                "kind": "internal_support_control",
+                "success": (
+                    "typed internal contribution is joined to a downstream decision "
+                    "with a causal support probe"
+                ),
+                "independent_delivery_gates": False,
+            },
+            "eligibility": {
+                "authority": "typed internal producer opportunity receipt",
+                "predicate": f"internal_opportunity({name}) == true",
+            },
+            "ownership": {
+                "exact": False, "kind": "internal_fact_support", "producer": None,
+                "layers": [], "candidate_producer": registration.producer,
+                "candidate_fact_class": name,
+                "runtime_requirements": list(INTERNAL_FACT_SUPPORT_PROOFS),
+                "authority": "fact_registry.fact_role_for + internal producer receipt",
+            },
+            "required_artifact_contracts": _writers(
+                "brief_result", "runtime_ledger", "trajectory"
+            ),
+            "observed_artifact_requirements": [
+                "brief_result", "runtime_ledger", "trajectory",
+            ],
+            "truth_authority": {
+                "internal_support_only": True,
+                "freshness_dependencies": list(registration.freshness_deps),
+                "missing_writer": (
+                    "brief_result.metrics.localization_proof[].cochange_evidence "
+                    "with exact cochange rows and cochange revision"
+                ),
+            },
+            "chronological_boundary_authority": None,
+            "receipt_rule": {
+                "independent_receipt": False,
+                "rule": (
+                    "join a typed internal contribution to its downstream decision; "
+                    "never claim a model-facing delivery receipt"
+                ),
+            },
+            "causal_fair_probe_requirement": registration.causal_eval,
+            "offline_proof_dependencies": list(PER_FEATURE_OFFLINE_PROOF_DEPENDENCIES),
+            "live_proof_dependencies": list(INTERNAL_FACT_SUPPORT_PROOFS),
+            "BLOCKED_BY": [
+                "COCHANGE_INTERNAL_TRUTH_WITNESS_ABSENT",
+                "COCHANGE_INTERNAL_CAUSAL_PROBE_ABSENT",
+            ],
+        }
     return {
         "family": "FACT", "role": "fact_delivery",
         "terminal_contract": {
@@ -878,7 +938,8 @@ def preflight_ss_proof(
     if mode == "dispatch":
         buckets = {
             "support_ready": [], "capability_support_ready": [], "infra_control_ready": [],
-            "fact_delivery_ready": [], "measurement_ready": [],
+            "fact_delivery_ready": [], "internal_support_ready": [],
+            "measurement_ready": [],
             "unknown": pending, "blocked": blocked,
         }
         status = "dispatch_not_integrated_audit_only"
@@ -886,6 +947,7 @@ def preflight_ss_proof(
         buckets = {
             "support_complete": [], "capability_support_complete": [],
             "infra_control_complete": [], "fact_delivery_complete": [],
+            "internal_support_complete": [],
             "measurement_complete": [], "incomplete": pending, "blocked": blocked,
         }
         status = "postrun_audit_only_no_promotion"
@@ -918,5 +980,6 @@ def preflight_ss_proof(
 __all__ = [
     "ROW_FIELDS", "PER_FEATURE_OFFLINE_PROOF_DEPENDENCIES",
     "GLOBAL_OFFLINE_PROOF_DEPENDENCIES", "DELIVERY_LIVE_PROOF_DEPENDENCIES",
-    "FACT_RUNTIME_OWNERSHIP_PROOFS", "build_ss_proof_manifest", "preflight_ss_proof",
+    "FACT_RUNTIME_OWNERSHIP_PROOFS", "INTERNAL_FACT_SUPPORT_PROOFS",
+    "build_ss_proof_manifest", "preflight_ss_proof",
 ]

@@ -105,6 +105,9 @@ def _empty(blocker: str) -> dict[str, dict[str, Any]]:
             "receipt_level": None,
             "blocker": blocker,
             "block_id": None,
+            "candidate_id": None,
+            "candidate_path": None,
+            "supported_fact_class": None,
             "content_sha256_16": None,
             "chars_delivered": None,
             "block_content_sha256_16": None,
@@ -584,6 +587,9 @@ def collect_acq_provenance(
                     else "producer_seal_absent"
                 ),
                 "block_id": block_id,
+                "candidate_id": block.get("candidate_id"),
+                "candidate_path": path,
+                "supported_fact_class": block.get("fact_class"),
                 # Gate-1 identity belongs to the actual producer-sealed payload.
                 # The exact candidate sub-block remains separately addressable.
                 "content_sha256_16": (

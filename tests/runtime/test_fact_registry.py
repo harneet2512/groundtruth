@@ -18,6 +18,7 @@ Pins:
 from __future__ import annotations
 
 import pytest
+from dataclasses import replace
 
 from groundtruth.runtime import fact_registry as fr
 
@@ -62,6 +63,28 @@ def test_registry_is_complete():
     # mismatch and the length check fail). Restore to go GREEN.
     assert set(fr.all_fact_classes()) == set(EXPECTED_FACT_CLASSES)
     assert len(fr.REGISTRY) == len(EXPECTED_FACT_CLASSES) == 11
+
+
+def test_fact_roles_keep_cochange_internal_without_changing_fact_inventory():
+    assert fr.fact_role_for("cochange_prior") == "internal_support"
+    assert fr.ack_expected("cochange_prior") is False
+    assert fr.ack_expected("cochange_partner") is False
+    assert {
+        fact_class
+        for fact_class in fr.all_fact_classes()
+        if fr.fact_role_for(fact_class) == "fact_delivery"
+    } == EXPECTED_FACT_CLASSES - {"cochange_prior"}
+    assert len(fr.all_fact_classes()) == 11
+
+
+def test_internal_support_with_ack_expected_fails_registry_self_check():
+    original = fr.REGISTRY["cochange_prior"]
+    fr.REGISTRY["cochange_prior"] = replace(original, ack_expected=True)
+    try:
+        with pytest.raises(ValueError, match="internal support cannot expect delivery ack"):
+            fr._self_check()
+    finally:
+        fr.REGISTRY["cochange_prior"] = original
 
 
 def test_registry_key_matches_fact_class():

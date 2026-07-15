@@ -21,6 +21,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from groundtruth.runtime.feature_lineage import cap_role_for  # noqa: E402
+from groundtruth.runtime.fact_registry import fact_role_for  # noqa: E402
 from scripts.swebench.consumption_ledger import scan_test_identity_leaks  # noqa: E402
 from scripts.swebench.gt_feature_inventory import (  # noqa: E402
     canonical_feature_inventory,
@@ -110,7 +111,10 @@ def _expected_feature_roles() -> dict[str, tuple[str, str]]:
     for feature in inventory["CAP"]:
         roles[feature] = ("CAP", cap_roles[cap_role_for(feature)])
     for feature in inventory["FACT"]:
-        roles[feature] = ("FACT", "fact_delivery")
+        role = fact_role_for(feature)
+        if role is None:
+            raise ValueError(f"live_evidence: unregistered FACT role {feature!r}")
+        roles[feature] = ("FACT", role)
     for feature in inventory["PERF"]:
         roles[feature] = ("PERF", "measurement")
     return roles
@@ -151,7 +155,9 @@ def _validate_features(
             errors.append(f"{prefix}:features:unknown:{feature}")
         elif expected != (family, role):
             errors.append(f"{prefix}:features:role_mismatch:{feature}")
-        elif role in {"infra_control", "eligibility_control", "measurement"}:
+        elif role in {
+            "infra_control", "eligibility_control", "internal_support", "measurement",
+        }:
             errors.append(f"{prefix}:features:not_delivery_bound:{feature}")
         keys.append(key)
     if len(keys) != len(set(keys)):

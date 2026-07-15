@@ -474,6 +474,81 @@ def test_no_late_counter_is_not_authoritative_chronological_proof():
     assert readiness["gates"]["correct_rl_adhered_time"] is None
 
 
+def test_cochange_internal_support_never_borrows_delivery_gates():
+    readiness = g._internal_fact_support_readiness(
+        "cochange_prior",
+        {"delivered": s.measured(True)},
+        {
+            "status": "MEASURED",
+            "candidate_id": "localization:src/pkg.py",
+            "candidate_path": "src/pkg.py",
+            "supported_fact_class": "localization",
+            "source_artifact": "brief_result.json",
+            "source_fields": ["metrics.localization_proof[0].components.cochange"],
+            "content_sha256_16": "a" * 16,
+            "chars_delivered": 42,
+            "block_content_sha256_16": "b" * 16,
+            "block_char_span": [0, 10],
+            "producer_payload_scope": "whole_brief",
+            "producer_entry_index": 0,
+            "producer_ledger_layer": "brief",
+            "delivery_message_index": 0,
+            "receipt_level": 2,
+            "receipt_evidence": {
+                "referenced_message_index": 1,
+                "acted_message_index": None,
+            },
+            "source_contribution_correct": None,
+            "source_causal_fair_probe": None,
+        },
+        ledger_artifact="runtime.jsonl",
+    )
+
+    assert readiness["role"] == "internal_support"
+    assert readiness["delivery_gates_inapplicable"] is True
+    assert "delivered_byte_proven" not in readiness["gates"]
+    assert readiness["gates"] == {
+        "runtime_support_receipt": True,
+        "supported_candidate_id": True,
+        "downstream_decision_join": True,
+        "support_correct": None,
+        "support_causal_fair_probe": None,
+    }
+    assert readiness["ss_live"] is False
+
+
+def test_cochange_internal_support_fails_closed_without_candidate_identity():
+    readiness = g._internal_fact_support_readiness(
+        "cochange_prior",
+        {},
+        {
+            "status": "MEASURED",
+            "candidate_id": None,
+            "candidate_path": "src/pkg.py",
+            "supported_fact_class": "localization",
+            "source_artifact": "brief_result.json",
+            "source_fields": ["metrics.localization_proof[0].components.cochange"],
+            "content_sha256_16": "a" * 16,
+            "chars_delivered": 42,
+            "block_content_sha256_16": "b" * 16,
+            "block_char_span": [0, 10],
+            "producer_payload_scope": "whole_brief",
+            "producer_entry_index": 0,
+            "producer_ledger_layer": "brief",
+            "delivery_message_index": 0,
+            "receipt_level": 2,
+            "receipt_evidence": {
+                "referenced_message_index": 1,
+                "acted_message_index": None,
+            },
+        },
+        ledger_artifact="runtime.jsonl",
+    )
+
+    assert readiness["gates"]["supported_candidate_id"] is None
+    assert readiness["gates"]["downstream_decision_join"] is None
+
+
 def test_collector_never_promotes_unknown_truth_or_fair_probe(tmp_path):
     payload = "src/pkg.py:12 preserve callers"
     row = _delivered(

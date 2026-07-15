@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import copy
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -61,7 +63,10 @@ def _artifacts(
         "</gt-task-brief>",
     ])
     brief = _reduce_brief_to_minimal(full)
-    receipts = _brief_block_receipts(brief)
+    candidate_id = "localization:src/pkg/loader.py"
+    receipts = _brief_block_receipts(
+        brief, localization_candidate_ids=[candidate_id]
+    )
     payload = {
         "schema": "gt.brief_result.v1",
         "brief_text": brief,
@@ -72,6 +77,7 @@ def _artifacts(
             "fts5_signal_count": 1,
             "semantic_signal_count": 1,
             "localization_proof": [{
+                "candidate_id": candidate_id,
                 "rank": 1,
                 "path": "src/pkg/loader.py",
                 "witness": "load called by run [CALLS]",
@@ -488,6 +494,53 @@ def test_candidate_local_body_and_history_sources_require_an_acted_receipt(tmp_p
     assert rows["cochange_history"]["status"] == "MEASURED"
     assert rows["body_retrieval"]["receipt_level"] == 3
     assert rows["cochange_history"]["receipt_level"] == 3
+
+
+def test_cochange_history_preserves_candidate_to_downstream_fact_join(tmp_path):
+    payload, ledger, trajectory = _artifacts(tmp_path)
+    payload["metrics"]["localization_proof"][0]["components"]["cochange"] = 3.0
+
+    row = collect_acq_provenance(payload, ledger, trajectory)["cochange_history"]
+
+    assert row["candidate_id"] == "localization:src/pkg/loader.py"
+    assert row["supported_fact_class"] == "localization"
+    assert row["candidate_path"] == "src/pkg/loader.py"
+    assert row["status"] == "MEASURED"
+    assert row["content_sha256_16"] == ledger["entries"][0]["content_sha256_16"]
+    assert row["chars_delivered"] == ledger["entries"][0]["chars"]
+    assert row["delivery_message_index"] == 0
+    assert row["receipt_level"] == 2
+    assert row["receipt_evidence"]["referenced_message_index"] == 1
+
+
+def test_task_collector_joins_cochange_internal_support_to_localization_receipt(
+    tmp_path,
+):
+    scripts = str(Path(__file__).resolve().parents[2] / "scripts" / "swebench")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import gt_feature_metrics
+
+    payload, _ledger, trajectory = _artifacts(tmp_path)
+    payload["metrics"]["localization_proof"][0]["components"]["cochange"] = 3.0
+    (tmp_path / "brief_result.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    (tmp_path / "mini-swe-agent.trajectory.json").write_text(
+        json.dumps(trajectory), encoding="utf-8"
+    )
+
+    record = gt_feature_metrics.collect_task("org__repo-1", str(tmp_path))
+    readiness = record["ss_features"]["cochange_prior"]["ss_readiness"]
+
+    assert readiness["role"] == "internal_support"
+    assert readiness["candidate_id"] == "localization:src/pkg/loader.py"
+    assert readiness["supported_fact_class"] == "localization"
+    assert readiness["gates"]["runtime_support_receipt"] is True
+    assert readiness["gates"]["supported_candidate_id"] is True
+    assert readiness["gates"]["downstream_decision_join"] is True
+    assert readiness["gates"]["support_correct"] is None
+    assert readiness["gates"]["support_causal_fair_probe"] is None
 
 
 def test_zero_candidate_repeat_identity_is_observed_without_delivery_promotion(tmp_path):

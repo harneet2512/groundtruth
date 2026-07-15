@@ -3,7 +3,7 @@
 RL-adherent delivery has ONE unifying rule that must hold BEFORE any producer renders a
 byte: **every model-facing fact class is statically registered, and an UNREGISTERED fact
 must never render.** This module is that registry — a pure, deterministic, LLM-free table
-mapping each of the 11 §1 fact classes to the decision it is meant to change, the
+mapping each of the 11 §1 FACT inventory rows to the decision it is meant to change, the
 observation boundary at which it is still useful, the surface + native renderer that carry
 it, its dose ceiling, its freshness dependencies, and how a receipt / causal contribution
 is graded for it.
@@ -66,6 +66,7 @@ __all__ = [
     "renderable",
     "assert_registered",
     "all_fact_classes",
+    "fact_role_for",
     "UnregisteredFactError",
     # executable-registry structures (SM-0 Super Mode spine)
     "FRESHNESS_SURFACES",
@@ -74,6 +75,9 @@ __all__ = [
     "EVENTS",
     "SURFACES",
     "RENDERERS",
+    "FACT_ROLE_DELIVERY",
+    "FACT_ROLE_INTERNAL_SUPPORT",
+    "FACT_ROLES",
     # event names (§1 fine observation boundaries)
     "EVENT_TASK_START",
     "EVENT_SEARCH_RESULT",
@@ -138,6 +142,15 @@ RENDERERS: frozenset[str] = frozenset(
     }
 )
 
+# Proof/measurement role of a FACT inventory row. This is deliberately separate
+# from render routing: all 11 rows remain in the canonical FACT inventory, while
+# an internal producer input cannot borrow model-facing delivery gates.
+FACT_ROLE_DELIVERY = "fact_delivery"
+FACT_ROLE_INTERNAL_SUPPORT = "internal_support"
+FACT_ROLES: frozenset[str] = frozenset(
+    {FACT_ROLE_DELIVERY, FACT_ROLE_INTERNAL_SUPPORT}
+)
+
 # max_dose sentinel for the ONE unbounded fact class (obligations = the whole plan, not a
 # single dose). §1 renders this as "—"; kept as the literal §1 cell value for fidelity.
 _DOSE_UNBOUNDED = "—"
@@ -156,8 +169,7 @@ class UnregisteredFactError(LookupError):
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class FactRegistration:
-    """One immutable fact-class registration — the static declaration of a model-facing
-    fact's decision, timing, surface, form, dose, freshness, and grading.
+    """One immutable FACT-inventory registration and its typed proof contract.
 
     Frozen so the table is a constant (no producer can mutate a registration at runtime).
     ``freshness_deps`` is a ``tuple`` (the immutable form of §1's list) so the dataclass is
@@ -175,9 +187,10 @@ class FactRegistration:
     freshness_deps: tuple[str, ...] = field(default=())  # revisions that stale the fact
     receipt_predicate: str = ""  # NAME of the non-reacquisition receipt predicate (for now)
     causal_eval: str = ""        # the paired/counterfactual method that grades causality
+    fact_role: str = FACT_ROLE_DELIVERY  # terminal proof role; inventory membership unchanged
     # SS-1 (2026-07-13) — METADATA ONLY (consumed by telemetry; NO behavior change). Whether a
-    # consumption ACK is expected for this class (every §1 class declares a receipt_predicate,
-    # so an ack IS expected). Read by the ack-metrics telemetry (GT_SS_ACK_METRICS); the
+    # consumption ACK is expected for this class. Internal support rows set this false even
+    # when they retain a downstream-effect predicate. Read by ack-metrics telemetry; the
     # delivery kernel never branches on it, so it cannot alter a single delivered byte.
     ack_expected: bool = True
 
@@ -195,6 +208,8 @@ def _reg(
     freshness_deps: tuple[str, ...],
     receipt_predicate: str,
     causal_eval: str,
+    fact_role: str = FACT_ROLE_DELIVERY,
+    ack_expected: bool = True,
 ) -> FactRegistration:
     """Build one registration (keyword-only so a column is never mis-positioned)."""
     return FactRegistration(
@@ -209,11 +224,13 @@ def _reg(
         freshness_deps=freshness_deps,
         receipt_predicate=receipt_predicate,
         causal_eval=causal_eval,
+        fact_role=fact_role,
+        ack_expected=ack_expected,
     )
 
 
 # --------------------------------------------------------------------------- #
-# THE REGISTRY — the 11 model-facing fact classes of verifyandobserve.md §1.
+# THE REGISTRY — the 11 FACT inventory rows of verifyandobserve.md §1.
 #
 # Every row is verbatim from the §1 spine table. earliest_event == deliver_by for all (a
 # fact about an action is useful only in the observation carrying that action's result);
@@ -352,6 +369,11 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         freshness_deps=("cochange_rev",),     # §1: cochange_rev
         receipt_predicate="opened_companion_file",
         causal_eval="paired_companion_hit_rate",
+        # Gateway consumes cochange as a ranking prior and explicitly emits no
+        # envelope/native bytes. Keep the canonical FACT row, but never grade it
+        # as a fabricated model-facing delivery.
+        fact_role=FACT_ROLE_INTERNAL_SUPPORT,
+        ack_expected=False,
     ),
     _reg(
         "newfile_precedent",
@@ -502,6 +524,15 @@ def _self_check() -> None:
         # the telemetry join that reads it) — fail LOUD at import like the other field guards.
         if not isinstance(reg.ack_expected, bool):
             raise ValueError(f"fact_registry: {key}.ack_expected is not a bool")
+        if reg.fact_role not in FACT_ROLES:
+            raise ValueError(f"fact_registry: {key}.fact_role {reg.fact_role!r}")
+        if (
+            reg.fact_role == FACT_ROLE_INTERNAL_SUPPORT
+            and reg.ack_expected is not False
+        ):
+            raise ValueError(
+                f"fact_registry: {key} internal support cannot expect delivery ack"
+            )
     # Graph-F2: the evidence-type alias map is part of the vocabulary contract — a bad
     # alias must fail LOUD at import, never silently mis-route (or silence) a shipped fact.
     for src, dst in _EVIDENCE_TYPE_ALIASES.items():
@@ -528,7 +559,7 @@ def registration(fact_class: str) -> FactRegistration | None:
 
 
 def is_registered(fact_class: str) -> bool:
-    """True iff ``fact_class`` is a known model-facing fact class."""
+    """True iff ``fact_class`` is a known canonical FACT inventory row."""
     return fact_class in REGISTRY
 
 
@@ -568,9 +599,19 @@ def assert_registered(fact_class: str) -> FactRegistration:
 
 def all_fact_classes() -> tuple[str, ...]:
     """All registered fact classes, deterministically SORTED (stable across calls/processes
-    — no set-iteration order leaks in). The canonical enumeration of the model-facing fact
-    universe."""
+    — no set-iteration order leaks in). The canonical 11-row FACT inventory; consult
+    :func:`fact_role_for` before applying a model-delivery proof contract."""
     return tuple(sorted(REGISTRY))
+
+
+def fact_role_for(fact_class: str) -> str | None:
+    """Typed proof role for a canonical or shipped FACT identity.
+
+    ``None`` is fail-closed for unregistered identities. Inventory membership,
+    renderer routing, and model-visible bytes are intentionally unchanged.
+    """
+    reg = registration_for(fact_class)
+    return reg.fact_role if reg is not None else None
 
 
 # --------------------------------------------------------------------------- #

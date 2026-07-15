@@ -102,7 +102,28 @@ def test_v3_manifest_is_exact_128_and_preserves_typed_roles() -> None:
     assert result["features"]["GT_HYPOTHESIS"]["role"] == "capability_support"
     assert result["features"]["GT_GATEWAY"]["role"] == "infra_control"
     assert result["features"]["syntax_result"]["role"] == "fact_delivery"
+    assert result["features"]["cochange_prior"]["role"] == "internal_support"
     assert result["features"]["gold_rank"]["role"] == "measurement"
+
+
+def test_cochange_fact_row_is_internal_support_not_fabricated_delivery() -> None:
+    row = manifest.build_ss_proof_manifest(SCOREBOARD)["features"]["cochange_prior"]
+
+    assert row["family"] == "FACT"
+    assert row["role"] == "internal_support"
+    assert row["terminal_contract"]["independent_delivery_gates"] is False
+    assert row["terminal_contract"]["kind"] == "internal_support_control"
+    assert not (
+        set(row["live_proof_dependencies"])
+        & set(manifest.DELIVERY_LIVE_PROOF_DEPENDENCIES)
+    )
+    assert row["chronological_boundary_authority"] is None
+    assert row["receipt_rule"]["independent_receipt"] is False
+    assert row["BLOCKED_BY"] == [
+        "COCHANGE_INTERNAL_TRUTH_WITNESS_ABSENT",
+        "COCHANGE_INTERNAL_CAUSAL_PROBE_ABSENT",
+    ]
+    assert "cochange_evidence" in row["truth_authority"]["missing_writer"]
 
 
 def test_cap_terminal_contracts_distinguish_byte_owners_mediators_and_eligibility() -> None:
@@ -148,19 +169,25 @@ def test_cap_terminal_contracts_distinguish_byte_owners_mediators_and_eligibilit
 
 def test_preflight_is_explicitly_audit_only_and_never_dispatch_ready(tmp_path: Path) -> None:
     proof_manifest = manifest.build_ss_proof_manifest(SCOREBOARD)
+    blocked = sum(
+        bool(row["BLOCKED_BY"]) for row in proof_manifest["features"].values()
+    )
     report = manifest.preflight_ss_proof(
         proof_manifest, task_context=_context(tmp_path), canonical_artifacts={}
     )
     assert report["dispatch_ready_enabled"] is False
     assert report["proof_promotion_enabled"] is False
     assert report["dispatch_integration"] == "absent:no production caller"
-    assert report["counts"]["unknown"] == 122
-    assert report["counts"]["blocked"] == 6
+    assert report["counts"]["unknown"] == 128 - blocked
+    assert report["counts"]["blocked"] == blocked
     assert sum(value for key, value in report["counts"].items() if key.endswith("_ready")) == 0
 
 
 def test_synthetic_wrapper_exploit_cannot_complete_any_feature(tmp_path: Path) -> None:
     proof_manifest = manifest.build_ss_proof_manifest(SCOREBOARD)
+    blocked = sum(
+        bool(row["BLOCKED_BY"]) for row in proof_manifest["features"].values()
+    )
     wrapper = _write_json(tmp_path, "pass.json", {
         "schema": "anything", "verdict": "PASS", "ss_live": True,
         "features": {name: {"verdict": "PASS"} for name in proof_manifest["features"]},
@@ -171,8 +198,8 @@ def test_synthetic_wrapper_exploit_cannot_complete_any_feature(tmp_path: Path) -
         proof_receipts={name: wrapper for name in proof_manifest["features"]},
         feature_fixture_refs={name: wrapper for name in proof_manifest["features"]},
     )
-    assert report["counts"]["incomplete"] == 122
-    assert report["counts"]["blocked"] == 6
+    assert report["counts"]["incomplete"] == 128 - blocked
+    assert report["counts"]["blocked"] == blocked
     assert sum(value for key, value in report["counts"].items() if key.endswith("_complete")) == 0
     assert report["audits"]["fixture_burden"]["valid"] is False
     assert report["audits"]["live_seven_gates"]["smoke_summary_input_ignored"] is True
@@ -357,10 +384,13 @@ def test_artifact_reader_fails_closed(tmp_path: Path, breakage: str) -> None:
 
 def test_missing_context_bindings_are_named_and_never_rounded_up(tmp_path: Path) -> None:
     proof_manifest = manifest.build_ss_proof_manifest(SCOREBOARD)
+    blocked = sum(
+        bool(row["BLOCKED_BY"]) for row in proof_manifest["features"].values()
+    )
     report = manifest.preflight_ss_proof(
         proof_manifest, mode="postrun", task_context={"proof_root": str(tmp_path)}
     )
-    assert report["counts"]["incomplete"] == 122
+    assert report["counts"]["incomplete"] == 128 - blocked
     assert "missing_run_id" in report["audits"]["gate_x2"]["errors"]
     assert "missing_task_id" in report["audits"]["runtime"]["errors"]
     assert "missing_seam_sha256" in report["audits"]["feature_metrics"]["errors"]
