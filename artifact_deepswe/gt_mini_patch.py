@@ -6334,7 +6334,10 @@ def _l5_unresolved_build_guard(cmd: str, out_text: str, phase) -> str:
 # brace-language `if (cond) {` / `if cond {` is captured structurally the same as
 # a Python `if cond:`. `.` does not cross newlines, so the non-greedy capture ends
 # at the first `:`/`{` on the line (never spanning statements).
-_SEM_GUARD_RE = re.compile(r"\bif\b\s*(.+?)\s*[:{]", re.M)
+# Python ``elif`` is still a conditional guard. Treating only bare ``if`` as a
+# guard turns an if->elif refactor into a fabricated deletion warning even when
+# the condition and guarded exit are byte-identical.
+_SEM_GUARD_RE = re.compile(r"\b(?:if|elif)\b\s*(.+?)\s*[:{]", re.M)
 _sem_cache: dict[str, tuple[frozenset, frozenset]] = {}
 
 

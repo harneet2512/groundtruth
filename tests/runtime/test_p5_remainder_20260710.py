@@ -235,3 +235,56 @@ def test_sd1_fires_when_tests_green(tmp_path, monkeypatch):
     _g._last_test_outcome_failed = False   # green/unknown -> the regression warning fires
     out = _g._semantic_drift_candidate("x.py")
     assert out is not None and "semantic_drift" in out[1]
+
+
+def test_semantic_drift_does_not_call_if_to_elif_a_guard_deletion(
+    tmp_path, monkeypatch
+):
+    """Changing branch position preserves the guard and must stay silent."""
+    monkeypatch.setattr(_g, "_root", lambda: str(tmp_path))
+    before = (
+        "def normalize(url):\n"
+        "    if url.startswith('http://'):\n"
+        "        return url\n"
+        "    if not url.startswith('https://'):\n"
+        "        return 'https://' + url\n"
+        "    return url\n"
+    )
+    after = before.replace(
+        "    if not url.startswith('https://'):\n",
+        "    elif not url.startswith('https://'):\n",
+    )
+    (tmp_path / "x.py").write_text(before, encoding="utf-8")
+    _g._sem_cache.clear()
+    _g._sem_seed("x.py")
+    (tmp_path / "x.py").write_text(after, encoding="utf-8")
+    _g._last_test_outcome_failed = False
+
+    assert _g._semantic_drift_candidate("x.py") is None
+
+
+def test_semantic_drift_still_detects_a_deleted_elif_guard(tmp_path, monkeypatch):
+    monkeypatch.setattr(_g, "_root", lambda: str(tmp_path))
+    before = (
+        "def normalize(url):\n"
+        "    if url.startswith('http://'):\n"
+        "        return url\n"
+        "    elif not url.startswith('https://'):\n"
+        "        return 'https://' + url\n"
+        "    return url\n"
+    )
+    after = (
+        "def normalize(url):\n"
+        "    if url.startswith('http://'):\n"
+        "        return url\n"
+        "    return url\n"
+    )
+    (tmp_path / "x.py").write_text(before, encoding="utf-8")
+    _g._sem_cache.clear()
+    _g._sem_seed("x.py")
+    (tmp_path / "x.py").write_text(after, encoding="utf-8")
+    _g._last_test_outcome_failed = False
+
+    out = _g._semantic_drift_candidate("x.py")
+    assert out is not None
+    assert "not url.startswith('https" in out[1]
