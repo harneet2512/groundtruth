@@ -124,7 +124,7 @@ def test_workflow_yaml_parses() -> None:
 def test_collect_runs_gt_feature_metrics_with_task_id() -> None:
     collect = _collect_run()
     code = _code_lines(collect)
-    hits = [ln for ln in code if "gt_feature_metrics.py" in ln and "matrix.task" in ln]
+    hits = [ln for ln in code if "gt_feature_metrics.py" in ln and "GT_TASK_ID" in ln]
     assert hits, (
         "the Collect step must INVOKE scripts/swebench/gt_feature_metrics.py in a CODE line carrying "
         "the task id (${{ matrix.task }}) — found only in a comment, or without the task id, or not "
@@ -156,10 +156,10 @@ def test_deep_metrics_receives_task_scoped_authoritative_runtime_ledger() -> Non
     assert code.index(ledger_copy) < code.index("gt_deep_metrics.py"), (
         "the authoritative runtime ledger must exist BEFORE gt_deep_metrics.py runs"
     )
-    assert 'TASK_ARTIFACT_ROOT="/tmp/gt/${{ matrix.task }}"' in code, (
+    assert 'TASK_ARTIFACT_ROOT="/tmp/gt/${GT_TASK_ID}"' in code, (
         "the runtime ledger path must resolve through the explicit task-scoped root"
     )
-    assert '_GT_LEDGER_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl"' in code
+    assert '_GT_LEDGER_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${GT_TASK_ID}.jsonl"' in code
 
 
 def test_missing_gt_inputs_do_not_abort_failure_artifact_collection_early() -> None:
@@ -176,7 +176,7 @@ def test_missing_gt_inputs_do_not_abort_failure_artifact_collection_early() -> N
     assert "GT_COLLECTION_COPY_FAIL:brief_result.json" in collect
     gate = _gate_block(_collect_run())
     assert "trial_results/brief_result.json" in gate
-    assert "gt_runtime_ledger_${{ matrix.task }}.jsonl" in gate
+    assert "gt_runtime_ledger_${GT_TASK_ID}.jsonl" in gate
 
 
 def test_deep_metrics_receives_authoritative_swebench_gold_jsonl() -> None:
@@ -198,14 +198,14 @@ def test_collect_persists_task_scoped_performance_and_behavioral_detail() -> Non
         line for line in code.splitlines() if "gt_behavioral_impact.py" in line
     )
     for line, output in (
-        (performance_line, "gt_performance_metrics_${{ matrix.task }}.json"),
-        (behavioral_line, "gt_behavioral_impact_${{ matrix.task }}.json"),
+        (performance_line, "gt_performance_metrics_${GT_TASK_ID}.json"),
+        (behavioral_line, "gt_behavioral_impact_${GT_TASK_ID}.json"),
     ):
         assert task_trajectory in line, (
             "mandatory detail collectors must read the exact task-scoped trajectory"
         )
         assert output in line and "trial_results/" in line
-    assert "--instance-id \"${{ matrix.task }}\"" in performance_line
+    assert "--instance-id \"${GT_TASK_ID}\"" in performance_line
     assert "--gold-jsonl benchmarks/data/swebench_live_lite.jsonl" in performance_line
     assert code.index("gt_deep_metrics.py") < code.index("gt_performance_metrics.py")
     assert code.index("gt_deep_metrics.py") < code.index("gt_behavioral_impact.py")
@@ -218,8 +218,8 @@ def test_gate_checks_all_four_gt_artifacts_and_fails_closed() -> None:
     run = _step_run_containing("GT_METRICS_INCOMPLETE")
     gate = _gate_block(run)
     for artifact in (
-        "gt_deep_metrics_${{ matrix.task }}.json",
-        "gt_feature_metrics_${{ matrix.task }}.json",
+        "gt_deep_metrics_${GT_TASK_ID}.json",
+        "gt_feature_metrics_${GT_TASK_ID}.json",
         "gt_profile_activation.json",
         "gt_run_identity.json",
     ):
@@ -252,8 +252,8 @@ def test_gate_checks_all_four_gt_artifacts_and_fails_closed() -> None:
 def test_gate_validates_mandatory_detail_shape_and_deep_parity() -> None:
     gate = _gate_block(_step_run_containing("GT_METRICS_INCOMPLETE"))
     for artifact in (
-        "gt_performance_metrics_${{ matrix.task }}.json",
-        "gt_behavioral_impact_${{ matrix.task }}.json",
+        "gt_performance_metrics_${GT_TASK_ID}.json",
+        "gt_behavioral_impact_${GT_TASK_ID}.json",
     ):
         assert artifact in gate
     for required_validation in (
@@ -395,21 +395,21 @@ def test_baseline_arm_requires_all_harness_metrics_but_not_gt_proofs() -> None:
     )
     guard = gate.index("GT_BASELINE")
     for common_metric in (
-        "gt_deep_metrics_${{ matrix.task }}.json",
-        "gt_performance_metrics_${{ matrix.task }}.json",
-        "gt_behavioral_impact_${{ matrix.task }}.json",
+        "gt_deep_metrics_${GT_TASK_ID}.json",
+        "gt_performance_metrics_${GT_TASK_ID}.json",
+        "gt_behavioral_impact_${GT_TASK_ID}.json",
     ):
         assert gate.index(common_metric) < guard, (
             f"{common_metric!r} must be required unconditionally on both arms"
         )
     # gt_deep_metrics is required on BOTH arms → checked BEFORE the guard (unconditional).
-    assert gate.index("gt_deep_metrics_${{ matrix.task }}.json") < guard, (
+    assert gate.index("gt_deep_metrics_${GT_TASK_ID}.json") < guard, (
         "gt_deep_metrics_<task>.json must be required unconditionally (both arms), i.e. BEFORE the "
         "GT_BASELINE guard"
     )
     # the three GT-only artifacts are required only on the GT arm → checked AFTER the guard.
     for gt_only in (
-        "gt_feature_metrics_${{ matrix.task }}.json",
+        "gt_feature_metrics_${GT_TASK_ID}.json",
         "gt_profile_activation.json",
         "gt_run_identity.json",
     ):

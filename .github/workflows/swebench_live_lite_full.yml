@@ -1888,8 +1888,11 @@ jobs:
           # trial + liveness steps' GT_BASELINE_FLAG). Step env does not carry over between steps, so
           # it is re-declared here rather than inherited.
           GT_BASELINE_FLAG: ${{ inputs.baseline == true && '1' || '0' }}
+          GT_TASK_ID: ${{ matrix.task }}
+          GT_TASK_LANGUAGE: ${{ matrix.language }}
+          GT_WORKSPACE: ${{ github.workspace }}
         run: |
-          TASK_ARTIFACT_ROOT="/tmp/gt/${{ matrix.task }}"
+          TASK_ARTIFACT_ROOT="/tmp/gt/${GT_TASK_ID}"
           mkdir -p trial_results trial_results/gt_artifacts "$TASK_ARTIFACT_ROOT"
           # Refresh the uploaded copy even when a later diagnostic fails closed.
           trap 'cp trial_output.log trial_results/trial_output.log 2>/dev/null || true' EXIT
@@ -1940,11 +1943,11 @@ jobs:
           cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
 
           # Harvest deep-telemetry trio.
-          cp /tmp/gt_out/gt_oracle_events.jsonl "trial_results/gt_oracle_events_${{ matrix.task }}.jsonl" 2>/dev/null || true
+          cp /tmp/gt_out/gt_oracle_events.jsonl "trial_results/gt_oracle_events_${GT_TASK_ID}.jsonl" 2>/dev/null || true
           _gt_telemetry_recovered=0
           for _f in gt_runtime_ledger.jsonl gt_hook_fire_counts.json; do
             if [ -s "/tmp/gt_out/$_f" ]; then
-              cp "/tmp/gt_out/$_f" "trial_results/${_f%.*}_${{ matrix.task }}.${_f##*.}" 2>/dev/null \
+              cp "/tmp/gt_out/$_f" "trial_results/${_f%.*}_${GT_TASK_ID}.${_f##*.}" 2>/dev/null \
                 && _gt_telemetry_recovered=$((_gt_telemetry_recovered + 1))
             fi
           done
@@ -1963,27 +1966,27 @@ jobs:
           cp /tmp/gt_out/mini-swe-agent.trajectory.json trial_results/ 2>/dev/null || true
           cp trial_results/report.json "$TASK_ARTIFACT_ROOT/report.json" 2>/dev/null || true
           cp trial_results/reward.txt "$TASK_ARTIFACT_ROOT/reward.txt" 2>/dev/null || true
-          cp /tmp/gt_out/gt_oracle_events.jsonl "$TASK_ARTIFACT_ROOT/gt_oracle_events_${{ matrix.task }}.jsonl" 2>/dev/null || true
+          cp /tmp/gt_out/gt_oracle_events.jsonl "$TASK_ARTIFACT_ROOT/gt_oracle_events_${GT_TASK_ID}.jsonl" 2>/dev/null || true
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
             if [ -s "/tmp/gt_out/gt_runtime_ledger.jsonl" ]; then
-              _GT_LEDGER_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl"
+              _GT_LEDGER_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${GT_TASK_ID}.jsonl"
               if ! cp /tmp/gt_out/gt_runtime_ledger.jsonl "$_GT_LEDGER_DEST"; then
                 rm -f "$_GT_LEDGER_DEST"
                 echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger.jsonl" | tee -a trial_output.log
-              elif ! cp "$_GT_LEDGER_DEST" "trial_results/gt_runtime_ledger_${{ matrix.task }}.jsonl"; then
-                rm -f "trial_results/gt_runtime_ledger_${{ matrix.task }}.jsonl"
+              elif ! cp "$_GT_LEDGER_DEST" "trial_results/gt_runtime_ledger_${GT_TASK_ID}.jsonl"; then
+                rm -f "trial_results/gt_runtime_ledger_${GT_TASK_ID}.jsonl"
                 echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger_task.jsonl" | tee -a trial_output.log
               fi
             else
               echo "GT_COLLECTION_MISSING:gt_runtime_ledger.jsonl" | tee -a trial_output.log
             fi
             if [ -s "/tmp/gt_out/gt_runtime_ledger_attestation.json" ]; then
-              _GT_ATTEST_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_attestation_${{ matrix.task }}.json"
+              _GT_ATTEST_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_attestation_${GT_TASK_ID}.json"
               if ! GT_LEDGER_SOURCE=/tmp/gt_out/gt_runtime_ledger.jsonl \
                 GT_LEDGER_DEST="$_GT_LEDGER_DEST" \
                 GT_ATTEST_SOURCE=/tmp/gt_out/gt_runtime_ledger_attestation.json \
                 GT_ATTEST_DEST="$_GT_ATTEST_DEST" \
-                PYTHONPATH="${{ github.workspace }}" python3 - <<'PY'
+                PYTHONPATH="${GT_WORKSPACE}" python3 - <<'PY'
           import json
           import os
 
@@ -2011,8 +2014,8 @@ jobs:
               then
                 rm -f "$_GT_ATTEST_DEST"
                 echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger_attestation_regeneration" | tee -a trial_output.log
-              elif ! cp "$_GT_ATTEST_DEST" "trial_results/gt_runtime_ledger_attestation_${{ matrix.task }}.json"; then
-                rm -f "trial_results/gt_runtime_ledger_attestation_${{ matrix.task }}.json"
+              elif ! cp "$_GT_ATTEST_DEST" "trial_results/gt_runtime_ledger_attestation_${GT_TASK_ID}.json"; then
+                rm -f "trial_results/gt_runtime_ledger_attestation_${GT_TASK_ID}.json"
                 echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger_attestation_task.json" | tee -a trial_output.log
               fi
             else
@@ -2033,23 +2036,23 @@ jobs:
 
           # TASK_TRUTH_INITIAL: deep metrics consumes this outcome authority. Build it only after
           # the explicit task root contains both the evaluator verdict and the native trajectory.
-          GT_INSTANCE_ID="${{ matrix.task }}" GT_MATRIX_TASK="${{ matrix.task }}" \
+          GT_INSTANCE_ID="${GT_TASK_ID}" GT_MATRIX_TASK="${GT_TASK_ID}" \
             GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
-            GT_RUNTIME_LEDGER="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl" \
-            GT_ORACLE_EVENTS="$TASK_ARTIFACT_ROOT/gt_oracle_events_${{ matrix.task }}.jsonl" \
+            GT_RUNTIME_LEDGER="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${GT_TASK_ID}.jsonl" \
+            GT_ORACLE_EVENTS="$TASK_ARTIFACT_ROOT/gt_oracle_events_${GT_TASK_ID}.jsonl" \
             python3 scripts/swebench/task_truth.py "$TASK_ARTIFACT_ROOT" "$TASK_ARTIFACT_ROOT/task_truth.json" \
             || echo "TASK_TRUTH_INITIAL_WARN"
 
           # Deep 8-dp metrics.
           cp /tmp/gt/gt_run_summary*.json "trial_results/" 2>/dev/null || true
-          GT_GOLD_JSONL=benchmarks/data/swebench_live_lite.jsonl PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
-          cp "/tmp/gt_deep_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
-          cp "/tmp/gt_deep_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
-          cp "/tmp/gt_deep_metrics_${{ matrix.task }}.json" "$TASK_ARTIFACT_ROOT/" 2>/dev/null || true
+          GT_GOLD_JSONL=benchmarks/data/swebench_live_lite.jsonl PYTHONPATH=${GT_WORKSPACE}/src:${GT_WORKSPACE}/scripts/swebench:${GT_WORKSPACE}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${GT_TASK_ID}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
+          cp "/tmp/gt_deep_metrics_${GT_TASK_ID}.json" trial_results/ 2>/dev/null || true
+          cp "/tmp/gt_deep_metrics_${GT_TASK_ID}.md"   trial_results/ 2>/dev/null || true
+          cp "/tmp/gt_deep_metrics_${GT_TASK_ID}.json" "$TASK_ARTIFACT_ROOT/" 2>/dev/null || true
 
           # Mandatory per-task details, derived from the exact task-scoped trajectory.
-          GT_GOLD_JSONL=benchmarks/data/swebench_live_lite.jsonl PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_performance_metrics.py "$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json" /tmp/gt --instance-id "${{ matrix.task }}" --gold-jsonl benchmarks/data/swebench_live_lite.jsonl --out "trial_results/gt_performance_metrics_${{ matrix.task }}.json" 2>&1 | tail -2 || echo PERF_METRICS_WARN
-          PYTHONPATH=${{ github.workspace }}/scripts/swebench python3 scripts/swebench/gt_behavioral_impact.py "$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json" --out "trial_results/gt_behavioral_impact_${{ matrix.task }}.json" 2>&1 | tail -2 || echo IMPACT_METRICS_WARN
+          GT_GOLD_JSONL=benchmarks/data/swebench_live_lite.jsonl PYTHONPATH=${GT_WORKSPACE}/src:${GT_WORKSPACE}/scripts/swebench:${GT_WORKSPACE}/scripts/metrics python3 scripts/swebench/gt_performance_metrics.py "$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json" /tmp/gt --instance-id "${GT_TASK_ID}" --gold-jsonl benchmarks/data/swebench_live_lite.jsonl --out "trial_results/gt_performance_metrics_${GT_TASK_ID}.json" 2>&1 | tail -2 || echo PERF_METRICS_WARN
+          PYTHONPATH=${GT_WORKSPACE}/scripts/swebench python3 scripts/swebench/gt_behavioral_impact.py "$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json" --out "trial_results/gt_behavioral_impact_${GT_TASK_ID}.json" 2>&1 | tail -2 || echo IMPACT_METRICS_WARN
 
           # Per-feature v3 behavioural-contract metrics (MANDATORY_METRICS.md §12, gt.feature_metrics.v1).
           # gt_feature_metrics reads a run_dir of per-task subdirs holding a mini trajectory + runtime
@@ -2058,17 +2061,17 @@ jobs:
           # there too so the grader reads the whole task from one dir. Same PYTHONPATH pattern as the
           # gt_deep_metrics line. Its nonzero (per-task aggregate refusal) is swallowed like
           # DEEP_METRICS_WARN — the METRICS-COMPLETE gate below is the fail-closed artifact check.
-          cp /tmp/gt_out/gt_oracle_events.jsonl  "$TASK_ARTIFACT_ROOT/gt_oracle_events_${{ matrix.task }}.jsonl"  2>/dev/null || true
-          PYTHONPATH=${{ github.workspace }}:${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_feature_metrics.py /tmp/gt --profile 2 --run-id "${{ matrix.task }}" 2>&1 | tail -3 || echo FEATURE_METRICS_WARN
-          cp "/tmp/gt/${{ matrix.task }}/gt_feature_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
-          cp "/tmp/gt/${{ matrix.task }}/gt_feature_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
-          cp "/tmp/gt/gt_run_metrics_${{ matrix.task }}.json"     trial_results/gt_artifacts/ 2>/dev/null || true
-          cp "/tmp/gt/gt_feature_effects_${{ matrix.task }}.json" trial_results/gt_artifacts/ 2>/dev/null || true
-          cp "/tmp/gt/gt_metric_integrity_${{ matrix.task }}.json" trial_results/gt_artifacts/ 2>/dev/null || true
+          cp /tmp/gt_out/gt_oracle_events.jsonl  "$TASK_ARTIFACT_ROOT/gt_oracle_events_${GT_TASK_ID}.jsonl"  2>/dev/null || true
+          PYTHONPATH=${GT_WORKSPACE}:${GT_WORKSPACE}/src:${GT_WORKSPACE}/scripts/swebench:${GT_WORKSPACE}/scripts/metrics python3 scripts/swebench/gt_feature_metrics.py /tmp/gt --profile 2 --run-id "${GT_TASK_ID}" 2>&1 | tail -3 || echo FEATURE_METRICS_WARN
+          cp "/tmp/gt/${GT_TASK_ID}/gt_feature_metrics_${GT_TASK_ID}.json" trial_results/ 2>/dev/null || true
+          cp "/tmp/gt/${GT_TASK_ID}/gt_feature_metrics_${GT_TASK_ID}.md"   trial_results/ 2>/dev/null || true
+          cp "/tmp/gt/gt_run_metrics_${GT_TASK_ID}.json"     trial_results/gt_artifacts/ 2>/dev/null || true
+          cp "/tmp/gt/gt_feature_effects_${GT_TASK_ID}.json" trial_results/gt_artifacts/ 2>/dev/null || true
+          cp "/tmp/gt/gt_metric_integrity_${GT_TASK_ID}.json" trial_results/gt_artifacts/ 2>/dev/null || true
           # Per-task metrics laid out DIRECTLY as this task finishes (visible in the log + the
           # artifact), computed from the just-written gt_deep_metrics json: resolved, steps,
           # first-useful-edit, tokens, cost, trajectory source. One grep-able [METRICS task] line.
-          python3 -c "import json,sys,os; t=sys.argv[1]; p='/tmp/gt_deep_metrics_'+t+'.json'; d=(json.load(open(p,encoding='utf-8')) if os.path.exists(p) else {}); e=d.get('efficiency') or {}; a=d.get('agent') or {}; r=d.get('resolved'); rs=('YES' if r is True else ('NO' if r is False else '?')); print('[METRICS %s] resolved=%s steps=%s first_edit=%s tokens_total=%s cost_usd=%s traj=%s'%(t,rs,a.get('action_count'),a.get('first_edit_action'),e.get('llm_tokens_total'),(e.get('llm_cost_usd') or e.get('recorded_cost_usd')),d.get('trajectory_source')))" "${{ matrix.task }}" 2>/dev/null | tee -a trial_output.log || echo METRICS_LINE_WARN
+          python3 -c "import json,sys,os; t=sys.argv[1]; p='/tmp/gt_deep_metrics_'+t+'.json'; d=(json.load(open(p,encoding='utf-8')) if os.path.exists(p) else {}); e=d.get('efficiency') or {}; a=d.get('agent') or {}; r=d.get('resolved'); rs=('YES' if r is True else ('NO' if r is False else '?')); print('[METRICS %s] resolved=%s steps=%s first_edit=%s tokens_total=%s cost_usd=%s traj=%s'%(t,rs,a.get('action_count'),a.get('first_edit_action'),e.get('llm_tokens_total'),(e.get('llm_cost_usd') or e.get('recorded_cost_usd')),d.get('trajectory_source')))" "${GT_TASK_ID}" 2>/dev/null | tee -a trial_output.log || echo METRICS_LINE_WARN
 
           # Run provenance.
           python3 - << 'PY' || echo "WARN: run_provenance.json write failed"
@@ -2077,8 +2080,8 @@ jobs:
               identity = json.load(f)
           doc = {
               'schema': 'gt.live_lite_run_provenance.v1',
-              'task': '${{ matrix.task }}',
-              'language': '${{ matrix.language }}',
+              'task': os.environ['GT_TASK_ID'],
+              'language': os.environ['GT_TASK_LANGUAGE'],
               'gt_git_commit': identity.get('gt_ref_resolved') or None,
               'workflow_dispatch_sha': identity.get('workflow_dispatch_sha') or None,
               'substrate_digest': os.environ.get('GT_SUBSTRATE_DIGEST') or None,
@@ -2090,7 +2093,7 @@ jobs:
 
           # Outcome classification reads the explicit task root: evaluator report/reward,
           # native trajectory, and trial-log markers share one task identity.
-          GT_INSTANCE_ID="${{ matrix.task }}" GT_MATRIX_TASK="${{ matrix.task }}" \
+          GT_INSTANCE_ID="${GT_TASK_ID}" GT_MATRIX_TASK="${GT_TASK_ID}" \
             GT_TASK_DIR="$TASK_ARTIFACT_ROOT" GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
             GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
             python3 scripts/verify/deepswe_outcome.py "$TASK_ARTIFACT_ROOT" || echo "WARN: outcome extract failed"
@@ -2098,10 +2101,10 @@ jobs:
           # TASK_TRUTH_FINAL: regenerate after deep metrics and outcome exist. Only this finalized
           # ledger is uploaded, so pre-metrics null enrichment cannot survive collection.
           rm -f "$TASK_ARTIFACT_ROOT/task_truth.json" trial_results/task_truth.json
-          GT_INSTANCE_ID="${{ matrix.task }}" GT_MATRIX_TASK="${{ matrix.task }}" \
+          GT_INSTANCE_ID="${GT_TASK_ID}" GT_MATRIX_TASK="${GT_TASK_ID}" \
             GT_TASK_DIR="$TASK_ARTIFACT_ROOT" GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
-            GT_RUNTIME_LEDGER="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl" \
-            GT_ORACLE_EVENTS="$TASK_ARTIFACT_ROOT/gt_oracle_events_${{ matrix.task }}.jsonl" \
+            GT_RUNTIME_LEDGER="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${GT_TASK_ID}.jsonl" \
+            GT_ORACLE_EVENTS="$TASK_ARTIFACT_ROOT/gt_oracle_events_${GT_TASK_ID}.jsonl" \
             GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
             python3 scripts/swebench/task_truth.py "$TASK_ARTIFACT_ROOT" "$TASK_ARTIFACT_ROOT/task_truth.json" \
             || echo "TASK_TRUTH_FINAL_WARN"
@@ -2121,17 +2124,17 @@ jobs:
           rm -f trial_results/gt_task_completion.json
           _MM_MISSING=""
           # deep-metrics is required on BOTH arms (baseline has no GT artifacts, but always has this).
-          [ -s "trial_results/gt_deep_metrics_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_deep_metrics_${{ matrix.task }}.json"
-          [ -s "trial_results/gt_performance_metrics_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_performance_metrics_${{ matrix.task }}.json"
-          [ -s "trial_results/gt_behavioral_impact_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_behavioral_impact_${{ matrix.task }}.json"
+          [ -s "trial_results/gt_deep_metrics_${GT_TASK_ID}.json" ] || _MM_MISSING="$_MM_MISSING gt_deep_metrics_${GT_TASK_ID}.json"
+          [ -s "trial_results/gt_performance_metrics_${GT_TASK_ID}.json" ] || _MM_MISSING="$_MM_MISSING gt_performance_metrics_${GT_TASK_ID}.json"
+          [ -s "trial_results/gt_behavioral_impact_${GT_TASK_ID}.json" ] || _MM_MISSING="$_MM_MISSING gt_behavioral_impact_${GT_TASK_ID}.json"
           [ -s "trial_results/task_truth.json" ] || _MM_MISSING="$_MM_MISSING task_truth.json"
           python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); t=d.get("trajectory_state") or {}; i=d.get("trajectory_integrity") or {}; sys.exit(0 if d.get("schema")=="gt.task_truth.v1" and isinstance(t.get("turns_observed"),int) and t.get("turns_observed")>=0 and int(i.get("mini_bytes") or 0)>0 else 1)' \
             "trial_results/task_truth.json" \
             || _MM_MISSING="$_MM_MISSING task_truth_trajectory_integrity"
           if ! python3 - \
-            "trial_results/gt_deep_metrics_${{ matrix.task }}.json" \
-            "trial_results/gt_performance_metrics_${{ matrix.task }}.json" \
-            "trial_results/gt_behavioral_impact_${{ matrix.task }}.json" <<'PY'
+            "trial_results/gt_deep_metrics_${GT_TASK_ID}.json" \
+            "trial_results/gt_performance_metrics_${GT_TASK_ID}.json" \
+            "trial_results/gt_behavioral_impact_${GT_TASK_ID}.json" <<'PY'
           import json, sys
           from gt_run_metrics import validate_task_performance_record
 
@@ -2174,14 +2177,14 @@ jobs:
           fi
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
             # GT-on arm ONLY: the full v3 per-task set (feature metrics + the two already-gated proofs).
-            [ -s "trial_results/gt_feature_metrics_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_feature_metrics_${{ matrix.task }}.json"
+            [ -s "trial_results/gt_feature_metrics_${GT_TASK_ID}.json" ] || _MM_MISSING="$_MM_MISSING gt_feature_metrics_${GT_TASK_ID}.json"
             [ -s "trial_results/brief_result.json" ] || _MM_MISSING="$_MM_MISSING brief_result.json"
-            [ -s "trial_results/gt_runtime_ledger_${{ matrix.task }}.jsonl" ] || _MM_MISSING="$_MM_MISSING gt_runtime_ledger_${{ matrix.task }}.jsonl"
-            [ -s "$TASK_ARTIFACT_ROOT/gt_runtime_ledger_attestation_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_runtime_ledger_attestation_${{ matrix.task }}.json"
+            [ -s "trial_results/gt_runtime_ledger_${GT_TASK_ID}.jsonl" ] || _MM_MISSING="$_MM_MISSING gt_runtime_ledger_${GT_TASK_ID}.jsonl"
+            [ -s "$TASK_ARTIFACT_ROOT/gt_runtime_ledger_attestation_${GT_TASK_ID}.json" ] || _MM_MISSING="$_MM_MISSING gt_runtime_ledger_attestation_${GT_TASK_ID}.json"
             # Presence alone is insufficient: the feature collector must prove the exact
             # 12 ACQ + 47 CAP + 11 FACT + 58 PERF ledger and all required inputs.
             python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); s=d.get("ss_integrity") or {}; f=d.get("ss_features") or {}; sys.exit(0 if len(f)==128 and s.get("inventory_complete") is True and s.get("required_inputs_complete") is True and s.get("visible_audit_complete") is True else 1)' \
-              "trial_results/gt_feature_metrics_${{ matrix.task }}.json" \
+              "trial_results/gt_feature_metrics_${GT_TASK_ID}.json" \
               || _MM_MISSING="$_MM_MISSING gt_feature_metrics_ss128_integrity"
             [ -s "trial_results/gt_artifacts/gt_agent_exit.json" ] || _MM_MISSING="$_MM_MISSING gt_agent_exit.json"
             python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); sys.exit(0 if int(d.get("return_code", -1)) == 0 and d.get("trajectory_present") is True else 1)' \
@@ -2197,9 +2200,9 @@ jobs:
             exit 1
           fi
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
-            GT_TASK_ID="${{ matrix.task }}" GT_TASK_ROOT="$TASK_ARTIFACT_ROOT" \
+            GT_TASK_ROOT="$TASK_ARTIFACT_ROOT" \
               GT_COMPLETION_OUT="trial_results/gt_task_completion.json" \
-              PYTHONPATH="${{ github.workspace }}" python3 - <<'PY'
+              PYTHONPATH="${GT_WORKSPACE}" python3 - <<'PY'
           import hashlib
           import json
           import os

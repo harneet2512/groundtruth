@@ -48,7 +48,7 @@ def test_summarize_exposes_repo_python_modules() -> None:
 
 def test_collect_finalizes_truth_from_explicit_task_root() -> None:
     run = _step("trial", "Collect results")["run"]
-    root_assignment = 'TASK_ARTIFACT_ROOT="/tmp/gt/${{ matrix.task }}"'
+    root_assignment = 'TASK_ARTIFACT_ROOT="/tmp/gt/${GT_TASK_ID}"'
     trajectory_bridge = (
         'cp /tmp/gt_out/mini-swe-agent.trajectory.json '
         '"$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json"'
@@ -80,7 +80,7 @@ def test_collect_uploads_the_exact_task_scoped_runtime_ledger() -> None:
     )
     uploaded_copy = (
         'cp "$_GT_LEDGER_DEST" '
-        '"trial_results/gt_runtime_ledger_${{ matrix.task }}.jsonl"'
+        '"trial_results/gt_runtime_ledger_${GT_TASK_ID}.jsonl"'
     )
     completion = 'artifact_paths = {'
 
@@ -98,7 +98,7 @@ def test_collect_rebinds_attestation_to_the_task_scoped_ledger_name() -> None:
     )
     uploaded = (
         'cp "$_GT_ATTEST_DEST" '
-        '"trial_results/gt_runtime_ledger_attestation_${{ matrix.task }}.json"'
+        '"trial_results/gt_runtime_ledger_attestation_${GT_TASK_ID}.json"'
     )
 
     assert source_validation in run
@@ -106,6 +106,37 @@ def test_collect_rebinds_attestation_to_the_task_scoped_ledger_name() -> None:
     assert renamed_validation in run
     assert uploaded in run
     assert run.index(source_validation) < run.index(regenerated) < run.index(uploaded)
+
+
+def test_collect_uses_step_env_without_oversized_run_expression() -> None:
+    step = _step("trial", "Collect results")
+    env = step["env"]
+    run = step["run"]
+
+    assert env["GT_TASK_ID"] == "${{ matrix.task }}"
+    assert env["GT_TASK_LANGUAGE"] == "${{ matrix.language }}"
+    assert env["GT_WORKSPACE"] == "${{ github.workspace }}"
+    assert "${{" not in run
+    assert 'TASK_ARTIFACT_ROOT="/tmp/gt/${GT_TASK_ID}"' in run
+    assert "'task': os.environ['GT_TASK_ID']" in run
+    assert "'language': os.environ['GT_TASK_LANGUAGE']" in run
+    assert 'PYTHONPATH="${GT_WORKSPACE}"' in run
+
+
+def test_no_oversized_run_scalar_contains_workflow_expressions() -> None:
+    # TemplateReader converts a scalar containing expressions into one format()
+    # expression and escapes literal braces, so generated length can exceed raw
+    # YAML length. Keep a conservative raw-scalar ceiling below GitHub's 21k cap.
+    limit = 10_000
+    for job_name, job in _workflow()["jobs"].items():
+        for step in job.get("steps", []):
+            run = step.get("run") if isinstance(step, dict) else None
+            if isinstance(run, str) and "${{" in run:
+                assert len(run) < limit, (
+                    f"{job_name}/{step.get('name', '<unnamed>')} has a {len(run)}-character "
+                    "run scalar containing a workflow expression; GitHub compiles the whole "
+                    "scalar into one generated expression and rejects it above 21,000 characters"
+                )
 
 
 def test_metrics_gate_requires_final_parsed_task_truth() -> None:
