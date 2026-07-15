@@ -2717,25 +2717,81 @@ def collect_task(
     }
 
 
+def _atomic_row_identity(row: dict[str, Any]) -> tuple[str, str] | None:
+    """Validate the exact CAP-byte-owner/FACT identity carried by one row.
+
+    Layer names and profile membership are not producer authority. Typed owners
+    must match the registry and the byte-owner binding; exact-profile owners must
+    additionally name their active member and registered FACT lineage.
+    """
+    if row.get("lineage_schema") != "gt.feature_lineage.v1":
+        return None
+    evidence_type = row.get("evidence_type")
+    runtime_producer = row.get("runtime_producer_id")
+    fact_class = row.get("fact_class")
+    registration = (
+        registration_for(evidence_type) if isinstance(evidence_type, str) else None
+    )
+    if (
+        row.get("producer_registration_match") is not True
+        or registration is None
+        or registration.fact_class != fact_class
+        or registration.producer != row.get("registered_producer_id")
+        or not isinstance(runtime_producer, str)
+        or not producer_matches(evidence_type, runtime_producer)
+    ):
+        return None
+    refs = row.get("feature_ids")
+    if not isinstance(refs, list) or not any(
+        isinstance(ref, dict)
+        and ref.get("category") == "FACT"
+        and ref.get("feature_id") == fact_class
+        and ref.get("role") == "fact"
+        for ref in refs
+    ):
+        return None
+    cap_refs = [
+        ref.get("feature_id") for ref in refs
+        if isinstance(ref, dict)
+        and ref.get("category") == "CAP"
+        and ref.get("role") == "byte_owner"
+    ]
+    if len(cap_refs) == 1:
+        member = cap_refs[0]
+        authority = CAP_BYTE_OWNER_MECHANISMS.get(member)
+        evidence_base = evidence_type.split(":", 1)[0]
+        if authority is not None and authority.mechanism == "typed_lineage" and any(
+            binding.producer == runtime_producer
+            and binding.layer == evidence_base
+            and binding.fact_class == fact_class
+            for binding in authority.bindings
+        ):
+            return str(member), str(fact_class)
+        return None
+    if cap_refs:
+        return None
+    member = row.get("profile_member")
+    authority = CAP_BYTE_OWNER_MECHANISMS.get(member)
+    layer = str(row.get("layer") or "")
+    if authority is not None and authority.mechanism == "exact_profile_member" and any(
+        binding.layer == layer and binding.fact_class == fact_class
+        for binding in authority.bindings
+    ):
+        return str(member), str(fact_class)
+    return None
+
+
 def _atomic_events(task: str, rows: list[dict], ledger_artifact: str) -> list[FeatureMetricEvent]:
-    """One FeatureMetricEvent per DELIVERED ledger row, mapped to its producing member."""
-    fc_to_member: dict[str, str] = {}
-    for m, fc in _DIRECT_MEMBER_FACTCLASS.items():
-        if fc is None:
-            continue
-        fc_to_member.setdefault(fc, m)
-    for m, fcs in _INFRA_MEMBER_MEDIATES.items():
-        for fc in fcs:
-            fc_to_member.setdefault(fc, m)
+    """One event per delivered row with exact typed byte-owner authority."""
     events: list[FeatureMetricEvent] = []
     counter: Counter = Counter()
     for idx, r in enumerate(rows):
         if str(r.get("outcome") or "") != "delivered":
             continue
-        fc = layer_to_fact_class(str(r.get("layer") or ""))
-        if fc is None:
+        identity = _atomic_row_identity(r)
+        if identity is None:
             continue
-        member = fc_to_member.get(fc, "GT_GATEWAY")
+        member, fc = identity
         counter[(member, fc)] += 1
         chars = int(r.get("chars_delivered") or 0)
         events.append(FeatureMetricEvent(

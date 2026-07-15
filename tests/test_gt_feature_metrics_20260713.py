@@ -125,6 +125,68 @@ def test_real_runtime_layers_map_to_fact_classes(layer, fact_class):
     # row disappear from FACT receipt metrics even though its sealed bytes reached the model.
 
 
+def test_atomic_events_reject_legacy_layer_inference_without_typed_authority():
+    rows = [_delivered("semantic_drift", event="post_edit", chars=120)]
+    assert g._atomic_events("task", rows, "ledger.jsonl") == []
+
+
+def test_atomic_events_use_exact_typed_cap_and_fact_lineage():
+    rows = [_delivered(
+        "gateway.signature_mismatch", event="edit_result", chars=120,
+        lineage_schema="gt.feature_lineage.v1",
+        runtime_producer_id="patch_delta",
+        registered_producer_id="patch_delta",
+        producer_registration_match=True,
+        evidence_type="signature_mismatch",
+        fact_class="signature_delta",
+        feature_ids=[
+            {"category": "CAP", "feature_id": "GT_PATCH_DELTA", "role": "byte_owner"},
+            {"category": "FACT", "feature_id": "signature_delta", "role": "fact"},
+        ],
+    )]
+    events = g._atomic_events("task", rows, "ledger.jsonl")
+    assert len(events) == 1
+    assert events[0].feature == "GT_PATCH_DELTA"
+    assert events[0].fact_class == "signature_delta"
+
+
+def test_atomic_events_reject_forged_typed_owner():
+    rows = [_delivered(
+        "gateway.signature_mismatch", event="edit_result", chars=120,
+        lineage_schema="gt.feature_lineage.v1",
+        runtime_producer_id="caller_claim",
+        registered_producer_id="patch_delta",
+        producer_registration_match=True,
+        evidence_type="signature_mismatch",
+        fact_class="signature_delta",
+        feature_ids=[
+            {"category": "CAP", "feature_id": "GT_PATCH_DELTA", "role": "byte_owner"},
+            {"category": "FACT", "feature_id": "signature_delta", "role": "fact"},
+        ],
+    )]
+    assert g._atomic_events("task", rows, "ledger.jsonl") == []
+
+
+def test_atomic_events_accept_exact_profile_owner_with_typed_fact():
+    rows = [_delivered(
+        "edit.syntax", event="edit_result", chars=80,
+        profile_member="GT_EDIT_CHECK",
+        lineage_schema="gt.feature_lineage.v1",
+        runtime_producer_id="edit_check",
+        registered_producer_id="edit_check",
+        producer_registration_match=True,
+        evidence_type="syntax_result",
+        fact_class="syntax_result",
+        feature_ids=[
+            {"category": "FACT", "feature_id": "syntax_result", "role": "fact"},
+        ],
+    )]
+    events = g._atomic_events("task", rows, "ledger.jsonl")
+    assert len(events) == 1
+    assert events[0].feature == "GT_EDIT_CHECK"
+    assert events[0].fact_class == "syntax_result"
+
+
 # =========================================================================== #
 # 3. native/tag-free facts detected through the content SEAL (defect #2)
 # =========================================================================== #
