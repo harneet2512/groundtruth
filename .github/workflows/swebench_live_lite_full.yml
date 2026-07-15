@@ -1918,6 +1918,13 @@ jobs:
                    proof_progress.json proof_failure.json proof_status.json dep_store_manifest.json; do
             cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
           done
+          if [ -e "/tmp/gt/brief_determinism_mismatch.json" ]; then
+            if ! cp "/tmp/gt/brief_determinism_mismatch.json" "trial_results/gt_artifacts/brief_determinism_mismatch.json"; then
+              rm -f "trial_results/gt_artifacts/brief_determinism_mismatch.json"
+              echo "GT_COLLECTION_COPY_FAIL:brief_determinism_mismatch.json" | tee -a trial_output.log
+              exit 1
+            fi
+          fi
           cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
           cp /tmp/gt_out/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
           # Durable profile-activation proof (written in-container to /gt_out): the section-4 auditor
