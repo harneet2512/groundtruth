@@ -291,6 +291,40 @@ def test_feature_metrics_flags_acq_without_ablation_and_delivery_shaped_perf(tmp
     assert "feature_metrics_acq_ablation_absent:graph_validity" in audit["errors"]
 
 
+def test_feature_metrics_accepts_right_censored_as_measurement_only(tmp_path: Path) -> None:
+    proof_manifest = manifest.build_ss_proof_manifest(SCOREBOARD)
+    rows = _canonical_rows(proof_manifest)
+    rows["files_to_gold_view"].update({
+        "status": "RIGHT_CENSORED",
+        "value": None,
+        "observation": {
+            "state": "RIGHT_CENSORED", "event": "first_gold_view",
+            "clock": "unique_files", "lower_bound": 3,
+            "terminal_horizon": 3, "terminal_status": "Submitted",
+        },
+    })
+    record = {
+        "schema": "gt.feature_metrics.v1", "run_id": BASE_CONTEXT["run_id"],
+        "task": BASE_CONTEXT["task_id"], "seam_sha256": BASE_CONTEXT["seam_sha256"],
+        "ss_features": rows,
+        "ss_integrity": {
+            "inventory_complete": True, "required_inputs_complete": True, "publishable": True,
+        },
+    }
+    reference = _write_json(tmp_path, "feature-metrics-censored.json", record)
+
+    audit = manifest._audit_feature_metrics(reference, _context(tmp_path), proof_manifest)
+
+    assert "feature_metrics_perf_contract_invalid:files_to_gold_view" not in audit["errors"]
+
+    rows["files_to_gold_view"]["observation"]["terminal_status"] = "Crashed"
+    bad_reference = _write_json(tmp_path, "feature-metrics-bad-censor.json", record)
+    bad_audit = manifest._audit_feature_metrics(
+        bad_reference, _context(tmp_path), proof_manifest
+    )
+    assert "feature_metrics_perf_contract_invalid:files_to_gold_view" in bad_audit["errors"]
+
+
 def test_run_metrics_actual_contract_still_requires_seam_binding(tmp_path: Path) -> None:
     proof_manifest = manifest.build_ss_proof_manifest(SCOREBOARD)
     record = _run_metrics(proof_manifest)

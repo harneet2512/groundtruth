@@ -157,6 +157,49 @@ def _section(row: dict, section: str) -> dict:
 
 _ABSENT = object()
 
+_RIGHT_CENSORED_METRICS: dict[tuple[str, str], tuple[str, str]] = {
+    ("localization", "files_to_gold_view"): ("first_gold_view", "unique_files"),
+    ("localization", "steps_to_gold_view"): ("first_gold_view", "assistant_steps"),
+    ("localization", "files_to_gold_edit"): ("first_gold_edit", "unique_files"),
+    ("localization", "steps_to_gold_edit"): ("first_gold_edit", "assistant_steps"),
+}
+_RIGHT_CENSOR_TERMINALS = {"Submitted", "LimitsExceeded"}
+
+
+def normalized_right_censor_observation(
+    section: str, metric: str, observation: object,
+) -> dict[str, Any] | None:
+    """Validate and normalize one non-event terminal-horizon observation."""
+    expected = _RIGHT_CENSORED_METRICS.get((section, metric))
+    if (
+        expected is None
+        or not isinstance(observation, dict)
+        or observation.get("state") != "RIGHT_CENSORED"
+        or observation.get("event") != expected[0]
+        or observation.get("clock") != expected[1]
+        or observation.get("terminal_status") not in _RIGHT_CENSOR_TERMINALS
+    ):
+        return None
+    lower_bound = observation.get("lower_bound")
+    terminal_horizon = observation.get("terminal_horizon")
+    if (
+        isinstance(lower_bound, bool)
+        or not isinstance(lower_bound, int)
+        or lower_bound < 0
+        or isinstance(terminal_horizon, bool)
+        or not isinstance(terminal_horizon, int)
+        or terminal_horizon != lower_bound
+    ):
+        return None
+    return {
+        "state": "RIGHT_CENSORED",
+        "event": expected[0],
+        "clock": expected[1],
+        "lower_bound": lower_bound,
+        "terminal_horizon": terminal_horizon,
+        "terminal_status": observation["terminal_status"],
+    }
+
 
 def _applicability_contract(
     row: dict, section: str, metric: str,
@@ -192,11 +235,20 @@ def _applicability_contract(
         or not isinstance(reason, str) or not reason.strip()
     ):
         return "invalid", None
-    return "valid", {
+    normalized: dict[str, Any] = {
         "applicable": applicable,
         "predicate": predicate,
         "reason": reason,
     }
+    observation = contract.get("observation", _ABSENT)
+    if observation is not _ABSENT:
+        normalized_observation = normalized_right_censor_observation(
+            section, metric, observation
+        )
+        if applicable is not True or normalized_observation is None:
+            return "invalid", None
+        normalized["observation"] = normalized_observation
+    return "valid", normalized
 
 
 def _metric_state(
@@ -224,6 +276,12 @@ def _metric_state(
         or (value_type in {"bool_per_file", "per_tag_rate_dict"}
             and isinstance(raw, dict) and not raw)
     )
+    observation = contract.get("observation") if contract is not None else None
+    if observation is not None:
+        return (
+            ("right_censored", float(observation["lower_bound"]), contract)
+            if no_observation else ("failed", None, contract)
+        )
     if contract is not None and contract["applicable"] is False:
         return (
             ("not_applicable", None, contract)
@@ -296,7 +354,7 @@ def validate_task_performance_record(performance: object) -> list[str]:
             state, _value, _contract = _metric_state(
                 row, section, metric, value_type
             )
-            if state not in {"measured", "not_applicable"}:
+            if state not in {"measured", "not_applicable", "right_censored"}:
                 issues.append(f"{section}.{metric}:{state}")
     return issues
 
@@ -327,7 +385,7 @@ def _deep_metric_record_issues(row: object) -> list[str]:
         state, _value, _contract = _metric_state(
             row, "behavioral_impact", metric, value_type
         )
-        if state not in {"measured", "not_applicable"}:
+        if state not in {"measured", "not_applicable", "right_censored"}:
             issues.append(f"behavioral_impact.{metric}:{state}")
     return sorted(set(issues))
 
@@ -340,6 +398,8 @@ def _distribution(
     failed: list[str] = []
     not_applicable: list[str] = []
     applicability: dict[str, dict[str, Any]] = {}
+    event_observed: list[str] = []
+    right_censored: list[str] = []
     for row in records:
         task = _task_name(row)
         state, value, contract = _metric_state(
@@ -350,6 +410,11 @@ def _distribution(
         if state == "measured":
             assert value is not None
             values.append(value)
+            event_observed.append(task)
+        elif state == "right_censored":
+            assert value is not None
+            values.append(value)
+            right_censored.append(task)
         elif state == "not_applicable":
             not_applicable.append(task)
         elif state == "failed":
@@ -360,7 +425,10 @@ def _distribution(
     missing = sorted(set(unmeasured + failed))
     result = {
         "value_type": value_type,
-        "aggregation": "per_task_distribution",
+        "aggregation": (
+            "event_or_terminal_horizon_distribution"
+            if right_censored else "per_task_distribution"
+        ),
         "status": (
             "FAILED" if failed
             else "UNMEASURED" if unmeasured
@@ -375,8 +443,22 @@ def _distribution(
         "unmeasured_tasks": sorted(unmeasured),
         "failed_tasks": sorted(failed),
         "not_applicable_tasks": sorted(not_applicable),
+        "event_observed_tasks": sorted(event_observed),
+        "right_censored_tasks": sorted(right_censored),
         "applicability": dict(sorted(applicability.items())),
     }
+    if right_censored:
+        result.update({
+            "summary_target": "observed_effort_until_event_or_terminal_horizon",
+            "event_time_mean_lower_bound": result["mean"],
+            "event_time_median_lower_bound": result["median"],
+            "censor_rate": _d8(len(right_censored) / len(values)),
+            "semantics": (
+                "raw event times remain null for censored tasks; mean/median summarize "
+                "exact events or observed terminal horizons and are lower bounds on "
+                "the corresponding latent event-time summaries"
+            ),
+        })
     if value_type == "bool":
         result["semantics"] = "true=1,false=0; mean is true_rate"
     elif value_type == "bool_per_file":

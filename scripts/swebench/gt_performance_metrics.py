@@ -592,6 +592,18 @@ def _applicability(
     }
 
 
+_RIGHT_CENSORED_LOCALIZATION: dict[str, tuple[str, str, str]] = {
+    "files_to_gold_view": ("first_gold_view", "unique_files", "_unique_viewed"),
+    "steps_to_gold_view": ("first_gold_view", "assistant_steps", "_terminal_step"),
+    "files_to_gold_edit": ("first_gold_edit", "unique_files", "_unique_edited"),
+    "steps_to_gold_edit": ("first_gold_edit", "assistant_steps", "_terminal_step"),
+}
+_RIGHT_CENSOR_TERMINALS = {
+    "submitted": "Submitted",
+    "limitsexceeded": "LimitsExceeded",
+}
+
+
 def build_metric_applicability(
     performance: dict,
     behavioral_impact: dict | None = None,
@@ -645,6 +657,26 @@ def build_metric_applicability(
             else "true gold or the viewed-file denominator is absent",
         )
         n_gold_edited = int(localization.get("_gold_edited_count") or 0)
+        terminal_status = _RIGHT_CENSOR_TERMINALS.get(
+            str(performance.get("terminal_status") or "").casefold()
+        )
+        if has_true_gold and terminal_status is not None:
+            for metric, (event, clock, bound_field) in (
+                _RIGHT_CENSORED_LOCALIZATION.items()
+            ):
+                if localization.get(metric) is not None:
+                    continue
+                bound = localization.get(bound_field)
+                if isinstance(bound, bool) or not isinstance(bound, int) or bound < 0:
+                    continue
+                contracts["localization"][metric]["observation"] = {
+                    "state": "RIGHT_CENSORED",
+                    "event": event,
+                    "clock": clock,
+                    "lower_bound": bound,
+                    "terminal_horizon": bound,
+                    "terminal_status": terminal_status,
+                }
         first_edit_applicable = has_true_gold and n_gold_edited > 0
         contracts.setdefault("edit_quality", {})["first_edit_correctness"] = (
             _applicability(
@@ -661,6 +693,22 @@ def build_metric_applicability(
                 "at least one true-gold file was edited"
                 if first_edit_applicable else "no true-gold file was edited",
             )
+        )
+        token_efficiency = performance.get("token_efficiency") or {}
+        n_token_gold_edited = int(token_efficiency.get("_n_gold_edited") or 0)
+        token_ratio_applicable = has_true_gold and n_token_gold_edited > 0
+        contracts.setdefault("token_efficiency", {})[
+            "tokens_per_gold_edit"
+        ] = _applicability(
+            token_ratio_applicable,
+            "true_gold_available and gold_files_edited > 0",
+            (
+                "one or more true-gold files were edited"
+                if token_ratio_applicable
+                else "no true-gold file was edited"
+                if has_true_gold
+                else "true gold file denominator is absent"
+            ),
         )
 
         scope = performance.get("scope_completeness") or {}
@@ -1114,6 +1162,14 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
 
     unique_viewed = list(dict.fromkeys(viewed_order))
     unique_edited = list(dict.fromkeys(edited_order))
+    terminal_step = max(
+        (
+            int(ev.get("step") or 0)
+            for ev in timeline
+            if ev.get("role") == "assistant"
+        ),
+        default=0,
+    )
 
     # G2: suffix-tolerant gold match — the same tolerance the L1-rank match below
     # uses, so a viewed path spelled differently than the normalized gold (repo-
@@ -1231,6 +1287,7 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
         "_unique_edited": n_edited,
         "_gold_edited_count": n_gold_edited,
         "_gold_viewed_count": n_gold_viewed,
+        "_terminal_step": terminal_step,
         "_l1_top5": top5,
     }
 
@@ -1979,6 +2036,7 @@ def compute_performance_metrics(
             "n_gold_files": len(gold_files),
             "brief_found": bool(brief_txt),
             "submission_found": bool(submission),
+            "terminal_status": str(info.get("exit_status") or ""),
             "consumption_ledger_schema": (
                 consumption_ledger.get("schema")
                 if isinstance(consumption_ledger, dict) else None

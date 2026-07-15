@@ -516,64 +516,6 @@ def _find_named_input(task_dir: str, filename: str, *, locations: int = 3) -> st
     return None
 
 
-def _performance_value_status(
-    raw: Any,
-    value_type: str,
-    *,
-    applicability_state: str,
-    applicability: dict[str, Any] | None,
-) -> str:
-    """Validate one per-task PERF value against the run collector contract.
-
-    Null and empty structured values carry no observation.  They are
-    ``NOT_APPLICABLE`` only when the producer supplied the same explicit,
-    machine-auditable applicability contract used by ``gt_run_metrics``.
-    """
-    from gt_run_metrics import _contract_number
-
-    if value_type == "run_ratio":
-        return "NOT_APPLICABLE"
-    if applicability_state == "invalid":
-        return "UNMEASURED"
-    no_observation = (
-        raw is None
-        or (
-            value_type in {"bool_per_file", "per_tag_rate_dict"}
-            and isinstance(raw, dict) and not raw
-        )
-    )
-    if applicability is not None and applicability["applicable"] is False:
-        return "NOT_APPLICABLE" if no_observation else "UNMEASURED"
-    if no_observation:
-        return "UNMEASURED"
-    if value_type == "bool":
-        return "MEASURED" if isinstance(raw, bool) else "UNMEASURED"
-    if value_type == "bool_per_file":
-        return (
-            "MEASURED"
-            if isinstance(raw, dict)
-            and bool(raw)
-            and all(isinstance(value, bool) for value in raw.values())
-            else "UNMEASURED"
-        )
-    if value_type == "per_tag_rate_dict":
-        if not isinstance(raw, dict):
-            return "UNMEASURED"
-        for tag, counts in raw.items():
-            if not isinstance(tag, str) or not tag or not isinstance(counts, dict):
-                return "UNMEASURED"
-            total = counts.get("total")
-            pivots = counts.get("pivots")
-            if (
-                isinstance(total, bool) or not isinstance(total, int) or total <= 0
-                or isinstance(pivots, bool) or not isinstance(pivots, int)
-                or pivots < 0 or pivots > total
-            ):
-                return "UNMEASURED"
-        return "MEASURED"
-    return "MEASURED" if _contract_number(raw, value_type) is not None else "UNMEASURED"
-
-
 def _value_honors_8dp(value: Any) -> bool:
     """True iff every numeric leaf can be represented without losing >8dp precision."""
     if value is None or isinstance(value, (bool, int)):
@@ -591,7 +533,7 @@ def _value_honors_8dp(value: Any) -> bool:
 def _performance_feature_records(
     task: str, task_dir: str,
 ) -> tuple[dict[str, dict[str, Any]], list[str], str | None]:
-    from gt_run_metrics import _applicability_contract
+    from gt_run_metrics import _metric_state
 
     definitions = performance_metric_definitions()
     path = _find_named_input(task_dir, f"gt_deep_metrics_{task}.json")
@@ -633,19 +575,17 @@ def _performance_feature_records(
                 continue
             present = isinstance(section_payload, dict) and name in section_payload
             raw = section_payload.get(name) if present else None
-            applicability_state, applicability = (
-                _applicability_contract(payload, section, name)
-                if identity_ok else ("absent", None)
+            state, _normalized_value, applicability = (
+                _metric_state(payload, section, name, value_type)
+                if identity_ok else ("unmeasured", None, None)
             )
-            status = (
-                _performance_value_status(
-                    raw,
-                    value_type,
-                    applicability_state=applicability_state,
-                    applicability=applicability,
-                )
-                if present else "UNMEASURED"
-            )
+            status = {
+                "measured": "MEASURED",
+                "not_applicable": "NOT_APPLICABLE",
+                "right_censored": "RIGHT_CENSORED",
+                "unmeasured": "UNMEASURED",
+                "failed": "UNMEASURED",
+            }[state]
             if (
                 section == "behavioral_impact"
                 and identity_ok
@@ -660,15 +600,24 @@ def _performance_feature_records(
                 "source": "gt_deep_metrics", "source_artifact": artifact,
                 "value": raw if status == "MEASURED" else None,
                 "value_type": value_type,
-                "metric_structure_valid": status in {"MEASURED", "NOT_APPLICABLE"},
-                "value_precision_valid": _value_honors_8dp(raw) if present else False,
+                "metric_structure_valid": status in {
+                    "MEASURED", "NOT_APPLICABLE", "RIGHT_CENSORED",
+                },
+                "value_precision_valid": (
+                    True if status == "RIGHT_CENSORED"
+                    else _value_honors_8dp(raw) if present else False
+                ),
                 "artifact_schema_valid": artifact_schema_valid,
                 "precision_decimals": precision_decimals,
                 "formula_provenance": f"MANDATORY_METRICS.md#{section}.{name}",
                 "denominator_provenance": f"mandatory_contract:{value_type}",
                 "coverage_scope": "run" if value_type == "run_ratio" else "task",
                 "applicability": applicability,
-                "reason": None if status == "MEASURED" else (
+                "observation": (
+                    applicability.get("observation")
+                    if isinstance(applicability, dict) else None
+                ),
+                "reason": None if status in {"MEASURED", "RIGHT_CENSORED"} else (
                     "not applicable for this task" if status == "NOT_APPLICABLE"
                     else "required metric missing or malformed"
                 ),
@@ -788,8 +737,16 @@ def _run_distribution_feature_record(
     status = metric.get("status") if isinstance(metric, dict) else None
     measured_tasks = metric.get("measured_tasks") if isinstance(metric, dict) else None
     not_applicable = metric.get("not_applicable_tasks") if isinstance(metric, dict) else None
+    right_censored = metric.get("right_censored_tasks") if isinstance(metric, dict) else None
+    task_censored = sorted(
+        str(row.get("_task"))
+        for row in task_rows
+        if row.get("status") == "RIGHT_CENSORED"
+    )
     task_rows_resolved = bool(task_rows) and len(task_rows) == expected_tasks and all(
-        row.get("status") in {"MEASURED", "NOT_APPLICABLE"} for row in task_rows
+        row.get("status") in {
+            "MEASURED", "NOT_APPLICABLE", "RIGHT_CENSORED",
+        } for row in task_rows
     )
     contract_valid = bool(
         isinstance(payload, dict)
@@ -816,10 +773,13 @@ def _run_distribution_feature_record(
         and metric.get("failed_tasks") == []
         and isinstance(measured_tasks, int) and not isinstance(measured_tasks, bool)
         and isinstance(not_applicable, list)
+        and isinstance(right_censored, list)
+        and right_censored == task_censored
         and measured_tasks + len(not_applicable) == expected_tasks
         and task_rows_resolved
     )
     first = dict(task_rows[0]) if task_rows else {}
+    first.pop("_task", None)
     return {
         **first,
         "status": status if contract_valid else "UNMEASURED",
@@ -1839,7 +1799,9 @@ def _measurement_only_readiness(
     """Typed PERF terminal: measurement validity/coverage, never model delivery."""
     row = record or {}
     status = row.get("status")
-    applicability_resolved = status in {"MEASURED", "NOT_APPLICABLE"}
+    applicability_resolved = status in {
+        "MEASURED", "NOT_APPLICABLE", "RIGHT_CENSORED",
+    }
     task_scope = row.get("coverage_scope") == "task"
     artifact_valid = bool(
         applicability_resolved
@@ -3005,7 +2967,7 @@ def aggregate_run(
                     ss_integrity["publishable"] = False
                     continue
                 present += 1
-                task_feature_rows.append(feature)
+                task_feature_rows.append({**feature, "_task": rec.get("task")})
                 statuses[str(feature.get("status") or "UNMEASURED")] += 1
             ss_run_features[name] = {
                 "family": family,
@@ -3014,10 +2976,6 @@ def aggregate_run(
             }
             if family == "PERF" and task_feature_rows:
                 section, value_type = perf_contracts[name]
-                resolved = all(
-                    row.get("status") in {"MEASURED", "NOT_APPLICABLE"}
-                    for row in task_feature_rows
-                )
                 if value_type == "run_ratio":
                     aggregate_record = _run_ratio_feature_record(
                         run_id,

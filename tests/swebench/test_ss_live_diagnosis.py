@@ -478,6 +478,7 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
         "UNMEASURED:eligibility_control:terminal_contract_unavailable"
     )
     assert diagnosis._perf_status({"status": "PARTIAL"}) == "FAILED"
+    assert diagnosis._perf_status({"status": "RIGHT_CENSORED"}) == "RIGHT_CENSORED"
     rendered = diagnosis.render_markdown(result)
     assert rendered.count("\n") == 139
     assert "requested_tasks=1" in rendered

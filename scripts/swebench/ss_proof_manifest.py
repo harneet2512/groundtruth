@@ -24,6 +24,7 @@ try:
         layer_to_fact_class,
         member_fact_classes,
     )
+    from scripts.swebench.gt_run_metrics import normalized_right_censor_observation
 except ModuleNotFoundError:
     from acq_provenance import ACQ_SOURCE_COMPONENTS  # type: ignore[no-redef]
     from gt_feature_inventory import (  # type: ignore[no-redef]
@@ -33,6 +34,9 @@ except ModuleNotFoundError:
     from gt_feature_metrics import (  # type: ignore[no-redef]
         layer_to_fact_class,
         member_fact_classes,
+    )
+    from gt_run_metrics import (  # type: ignore[no-redef]
+        normalized_right_censor_observation,
     )
 
 from groundtruth.runtime.fact_registry import REGISTRY  # noqa: E402
@@ -770,8 +774,20 @@ def _audit_feature_metrics(
             forbidden = {"delivered_byte_proven", "acknowledged", "fair_probe"}
             if forbidden.intersection(gates):
                 errors.append(f"feature_metrics_perf_delivery_shape:{name}")
+            status = item.get("status")
+            censor_valid = True
+            if status == "RIGHT_CENSORED":
+                censor_valid = bool(
+                    item.get("value") is None
+                    and normalized_right_censor_observation(
+                        row["ownership"]["section"], name, item.get("observation")
+                    ) is not None
+                )
             if (
-                item.get("status") not in {"MEASURED", "NOT_APPLICABLE"}
+                status not in {
+                    "MEASURED", "NOT_APPLICABLE", "RIGHT_CENSORED",
+                }
+                or not censor_valid
                 or item.get("source") not in {"gt_deep_metrics", "gt_run_metrics"}
                 or item.get("metric_structure_valid") is not True
                 or item.get("artifact_schema_valid") is not True

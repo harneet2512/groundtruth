@@ -795,6 +795,120 @@ def test_task_perf_explicit_non_applicability_is_preserved(
     }
 
 
+def test_task_perf_right_censoring_is_preserved_without_live_promotion(
+    tmp_path: Path,
+) -> None:
+    task = "synthetic__right-censored"
+    deep = _complete_deep_metrics(task)
+    deep["performance"]["localization"]["files_to_gold_view"] = None
+    deep["metric_applicability"].setdefault("localization", {})[
+        "files_to_gold_view"
+    ] = {
+        "applicable": True,
+        "predicate": "n_gold_files > 0",
+        "reason": "true gold file denominator is available",
+        "observation": {
+            "state": "RIGHT_CENSORED",
+            "event": "first_gold_view",
+            "clock": "unique_files",
+            "lower_bound": 3,
+            "terminal_horizon": 3,
+            "terminal_status": "Submitted",
+        },
+    }
+    deep["performance"].setdefault("metric_applicability", {}).setdefault(
+        "localization", {}
+    )["files_to_gold_view"] = copy.deepcopy(
+        deep["metric_applicability"]["localization"]["files_to_gold_view"]
+    )
+    _write_task(tmp_path, task, deep_metrics=deep)
+
+    records, missing, _source = metrics._performance_feature_records(
+        task, str(tmp_path)
+    )
+    row = records["files_to_gold_view"]
+    readiness = metrics._measurement_only_readiness(row)
+
+    assert row["status"] == "RIGHT_CENSORED"
+    assert row["value"] is None
+    assert row["observation"]["lower_bound"] == 3
+    assert "PERF.files_to_gold_view" not in missing
+    assert readiness["gates"]["applicability_resolved"] is True
+    assert readiness["live_witness"] is False
+    assert readiness["ss_live"] is False
+
+
+def test_run_perf_right_censoring_requires_exact_task_identity(
+    tmp_path: Path,
+) -> None:
+    """A matching censor count cannot hide a run/task population misjoin."""
+    task = "synthetic__right-censored"
+    deep = _complete_deep_metrics(task)
+    deep["performance"]["localization"]["files_to_gold_view"] = None
+    deep["metric_applicability"].setdefault("localization", {})[
+        "files_to_gold_view"
+    ] = {
+        "applicable": True,
+        "predicate": "n_gold_files > 0",
+        "reason": "true gold file denominator is available",
+        "observation": {
+            "state": "RIGHT_CENSORED",
+            "event": "first_gold_view",
+            "clock": "unique_files",
+            "lower_bound": 3,
+            "terminal_horizon": 3,
+            "terminal_status": "Submitted",
+        },
+    }
+    deep["performance"].setdefault("metric_applicability", {}).setdefault(
+        "localization", {}
+    )["files_to_gold_view"] = copy.deepcopy(
+        deep["metric_applicability"]["localization"]["files_to_gold_view"]
+    )
+    _write_task(tmp_path, task, deep_metrics=deep)
+    task_records, _missing, _source = metrics._performance_feature_records(
+        task, str(tmp_path)
+    )
+    run_metrics = gt_run_metrics.aggregate_run_metrics(
+        [deep], expected_task_ids=[task]
+    )
+    run_metrics["run_id"] = "run-1"
+    run_metric = run_metrics["mandatory_performance"]["localization"][
+        "files_to_gold_view"
+    ]
+    run_path = tmp_path / "gt_run_metrics.json"
+    run_path.write_text(json.dumps(run_metrics), encoding="utf-8")
+
+    task_rows = [{**task_records["files_to_gold_view"], "_task": task}]
+    valid = metrics._run_distribution_feature_record(
+        "run-1",
+        str(run_path),
+        task_rows,
+        section="localization",
+        name="files_to_gold_view",
+        value_type="nonnegative_int",
+        expected_tasks=1,
+    )
+    assert valid["status"] == "MEASURED"
+    assert "_task" not in valid
+
+    run_metric["right_censored_tasks"] = ["synthetic__different-task"]
+    run_path.write_text(json.dumps(run_metrics), encoding="utf-8")
+
+    row = metrics._run_distribution_feature_record(
+        "run-1",
+        str(run_path),
+        task_rows,
+        section="localization",
+        name="files_to_gold_view",
+        value_type="nonnegative_int",
+        expected_tasks=1,
+    )
+
+    assert row["status"] == "UNMEASURED"
+    assert row["metric_structure_valid"] is False
+
+
 def test_deep_metrics_lookup_is_task_exact_and_matches_live_layout(tmp_path: Path) -> None:
     task = "synthetic__layout"
     task_dir = tmp_path / "gt" / task

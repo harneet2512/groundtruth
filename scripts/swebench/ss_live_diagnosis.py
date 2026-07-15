@@ -36,7 +36,9 @@ DELIVERY_BUCKETS = (
     "ACKNOWLEDGED",
     "CAUSAL_P5",
 )
-PERF_BUCKETS = ("MEASURED", "NOT_APPLICABLE", "UNMEASURED", "FAILED")
+PERF_BUCKETS = (
+    "MEASURED", "NOT_APPLICABLE", "RIGHT_CENSORED", "UNMEASURED", "FAILED",
+)
 TYPED_TERMINAL_GATES = {
     "support": (
         "supported_fact_delivery_join", "candidate_local_contribution",
@@ -336,7 +338,7 @@ def _perf_status(value: object) -> str:
     if not isinstance(value, dict):
         return "UNMEASURED"
     status = value.get("status")
-    if status in PERF_BUCKETS[:3]:
+    if status in PERF_BUCKETS[:4]:
         return str(status)
     return "FAILED"
 
