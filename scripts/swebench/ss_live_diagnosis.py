@@ -58,6 +58,20 @@ def _load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _load_expected_task_ids(path: Path) -> tuple[str, ...]:
+    """Load the independently frozen task population in manifest order."""
+    payload = _load_json(path)
+    raw = payload.get("task_ids")
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or any(not isinstance(task, str) or not task for task in raw)
+        or len(raw) != len(set(raw))
+    ):
+        raise ValueError(f"expected-task manifest is malformed: {path}")
+    return tuple(raw)
+
+
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open(encoding="utf-8") as handle:
@@ -363,23 +377,65 @@ def _validate_task_metrics(
         raise ValueError(f"task feature integrity contract is malformed: {path}")
 
 
-def _validate_run_metrics_population(run_metrics: dict[str, Any], task_count: int) -> None:
+def _validate_run_metrics_population(
+    run_metrics: dict[str, Any], task_count: int,
+) -> bool:
+    """Validate population arithmetic and report whether collection is complete.
+
+    A structurally valid incomplete population remains diagnosable.  The caller
+    marks it non-publishable instead of losing the exact expected-task matrix.
+    """
     population = run_metrics.get("task_population")
+    observed_records = population.get("observed_record_count") if isinstance(
+        population, dict
+    ) else None
+    observed_unique = population.get("observed_unique_count") if isinstance(
+        population, dict
+    ) else None
+    expected_count = population.get("expected_count", task_count) if isinstance(
+        population, dict
+    ) else None
+    missing = population.get("missing_tasks") if isinstance(population, dict) else None
+    duplicate = population.get("duplicate_tasks") if isinstance(population, dict) else None
+    unexpected = population.get("unexpected_tasks") if isinstance(population, dict) else None
+    invalid = population.get("invalid_task_records") if isinstance(population, dict) else None
     if (
         not isinstance(run_metrics.get("mandatory_performance_collection_complete"), bool)
-        or run_metrics.get("tasks") != task_count
         or not isinstance(population, dict)
-        or population.get("observed_record_count") != task_count
-        or population.get("observed_unique_count") != task_count
-        or population.get("missing_tasks") != []
-        or population.get("duplicate_tasks") != []
-        or population.get("unexpected_tasks") != []
-        or population.get("invalid_task_records") != []
+        or expected_count != task_count
+        or not isinstance(run_metrics.get("tasks"), int)
+        or isinstance(run_metrics.get("tasks"), bool)
+        or not isinstance(observed_records, int)
+        or isinstance(observed_records, bool)
+        or not isinstance(observed_unique, int)
+        or isinstance(observed_unique, bool)
+        or run_metrics.get("tasks") != observed_records
+        or observed_unique < 0
+        or observed_unique > observed_records
+        or any(not isinstance(value, list) for value in (
+            missing, duplicate, unexpected, invalid,
+        ))
+        or any(not isinstance(task, str) or not task for rows in (
+            missing, duplicate, unexpected,
+        ) for task in rows)
+        or observed_unique + len(missing) - len(unexpected) != task_count
     ):
         raise ValueError("run metrics population/integrity does not match diagnosis tasks")
+    return bool(
+        run_metrics["mandatory_performance_collection_complete"]
+        and observed_records == task_count
+        and observed_unique == task_count
+        and missing == []
+        and duplicate == []
+        and unexpected == []
+        and invalid == []
+    )
 
 
-def _validate_deep_metric_tasks(root: Path, expected_tasks: set[str]) -> None:
+def _validate_deep_metric_tasks(
+    root: Path, expected_tasks: tuple[str, ...],
+) -> dict[str, list[str]]:
+    """Validate deep-metric identities without hiding the diagnosis artifact."""
     observed: list[str] = []
     for path in sorted(root.rglob("gt_deep_metrics_*.json")):
         record = _load_json(path)
@@ -388,12 +444,11 @@ def _validate_deep_metric_tasks(root: Path, expected_tasks: set[str]) -> None:
             raise ValueError(f"deep metrics identity/schema is malformed: {path}")
         observed.append(task)
     counts = Counter(observed)
-    if (
-        set(counts) != expected_tasks
-        or any(count != 1 for count in counts.values())
-        or len(observed) != len(expected_tasks)
-    ):
-        raise ValueError("deep-metric tasks do not match feature-metric tasks")
+    return {
+        "missing": [task for task in expected_tasks if task not in counts],
+        "duplicate": sorted(task for task, count in counts.items() if count != 1),
+        "unexpected": sorted(set(counts) - set(expected_tasks)),
+    }
 
 
 def _find_one(directory: Path, pattern: str) -> Path | None:
@@ -736,12 +791,18 @@ def _aggregate_bucket(task_buckets: dict[str, str]) -> str:
     return next(bucket for bucket in order if bucket in counts)
 
 
-def diagnose_run(run_dir: Path | str, run_metrics_path: Path | str) -> dict[str, Any]:
+def diagnose_run(
+    run_dir: Path | str,
+    run_metrics_path: Path | str,
+    *,
+    expected_tasks_path: Path | str | None = None,
+) -> dict[str, Any]:
     """Build one exact canonical row per feature plus explicit per-task buckets."""
     root = Path(run_dir)
     inventory = canonical_feature_inventory()
     feature_paths = sorted(root.rglob("gt_feature_metrics_*.json"))
-    tasks: dict[str, tuple[Path, dict[str, Any]]] = {}
+    discovered_tasks: dict[str, tuple[Path, dict[str, Any]]] = {}
+    duplicate_feature_tasks: set[str] = set()
     for path in feature_paths:
         record = _load_json(path)
         if record.get("schema") != "gt.feature_metrics.v1":
@@ -750,17 +811,103 @@ def diagnose_run(run_dir: Path | str, run_metrics_path: Path | str) -> dict[str,
         if not isinstance(task, str) or not task:
             raise ValueError(f"feature metrics missing task identity: {path}")
         _validate_task_metrics(record, inventory, path)
-        if task in tasks:
-            raise ValueError(f"duplicate feature metrics for task {task!r}")
-        tasks[task] = (path, record)
+        if task in discovered_tasks:
+            duplicate_feature_tasks.add(task)
+            continue
+        discovered_tasks[task] = (path, record)
 
-    _validate_deep_metric_tasks(root, set(tasks))
+    if expected_tasks_path is None:
+        task_order = tuple(sorted(discovered_tasks))
+    else:
+        task_order = _load_expected_task_ids(Path(expected_tasks_path))
+    expected_set = set(task_order)
+    unexpected_feature_tasks = tuple(sorted(set(discovered_tasks) - expected_set))
+    duplicate_feature_metric_tasks = tuple(sorted(duplicate_feature_tasks))
+    duplicate_expected_tasks = tuple(
+        task for task in task_order if task in duplicate_feature_tasks
+    )
+    missing_tasks = tuple(
+        task for task in task_order if task not in discovered_tasks
+    )
+    unavailable_tasks = {
+        **{task: "missing_feature_metrics" for task in missing_tasks},
+        **{task: "duplicate_feature_metrics" for task in duplicate_expected_tasks},
+    }
+    tasks = {
+        task: value for task, value in discovered_tasks.items()
+        if task in expected_set and task not in duplicate_feature_tasks
+    }
+
+    deep_metric_population = _validate_deep_metric_tasks(root, task_order)
+    missing_deep_metric_tasks = tuple(deep_metric_population["missing"])
     run_metrics = _load_json(Path(run_metrics_path))
-    _validate_run_metrics_population(run_metrics, len(tasks))
+    run_metrics_population_complete = _validate_run_metrics_population(
+        run_metrics, len(task_order)
+    )
     run_perf = _run_perf_rows(run_metrics)
     diagnosis_integrity = _diagnosis_integrity(
         tasks, run_metrics, inventory["CAP"]
     )
+    diagnosis_integrity["feature_record_population"] = {
+        "expected": list(task_order),
+        "missing": list(missing_tasks),
+        "duplicate": list(duplicate_feature_metric_tasks),
+        "unexpected": list(unexpected_feature_tasks),
+    }
+    diagnosis_integrity["deep_metric_population"] = deep_metric_population
+    if not run_metrics_population_complete:
+        diagnosis_integrity["run_issues"] = sorted(set([
+            *diagnosis_integrity["run_issues"], "run_metrics_population_incomplete",
+        ]))
+        diagnosis_integrity["publishable"] = False
+        diagnosis_integrity["identity_profile_binding_complete"] = False
+    if missing_deep_metric_tasks:
+        diagnosis_integrity["run_issues"] = sorted(set([
+            *diagnosis_integrity["run_issues"], "missing_deep_metrics",
+        ]))
+        diagnosis_integrity["publishable"] = False
+        diagnosis_integrity["identity_profile_binding_complete"] = False
+    for issue, members in (
+        ("duplicate_feature_metrics", duplicate_feature_metric_tasks),
+        ("unexpected_feature_metrics", unexpected_feature_tasks),
+        ("duplicate_deep_metrics", tuple(deep_metric_population["duplicate"])),
+        ("unexpected_deep_metrics", tuple(deep_metric_population["unexpected"])),
+    ):
+        if members:
+            diagnosis_integrity["run_issues"] = sorted(set([
+                *diagnosis_integrity["run_issues"], issue,
+            ]))
+            diagnosis_integrity["publishable"] = False
+            diagnosis_integrity["identity_profile_binding_complete"] = False
+    if missing_tasks:
+        for task in missing_tasks:
+            diagnosis_integrity["tasks"][task] = {
+                "status": "UNMEASURED",
+                "issues": ["feature_metrics:missing"],
+                "artifacts": {},
+                "identity": {},
+                "profile": {},
+            }
+        diagnosis_integrity["run_issues"] = sorted(set(
+            [*diagnosis_integrity["run_issues"], "missing_feature_metrics"]
+        ))
+        diagnosis_integrity["incomplete_tasks"] = sorted(set(
+            [*diagnosis_integrity["incomplete_tasks"], *missing_tasks]
+        ))
+        diagnosis_integrity["publishable"] = False
+        diagnosis_integrity["identity_profile_binding_complete"] = False
+    for task in duplicate_expected_tasks:
+        diagnosis_integrity["tasks"][task] = {
+            "status": "UNMEASURED",
+            "issues": ["feature_metrics:duplicate"],
+            "artifacts": {},
+            "identity": {},
+            "profile": {},
+        }
+    if duplicate_expected_tasks:
+        diagnosis_integrity["incomplete_tasks"] = sorted(set([
+            *diagnosis_integrity["incomplete_tasks"], *duplicate_expected_tasks,
+        ]))
     contexts = {
         task: _task_artifacts(path, metrics)
         for task, (path, metrics) in tasks.items()
@@ -770,12 +917,20 @@ def diagnose_run(run_dir: Path | str, run_metrics_path: Path | str) -> dict[str,
         for feature in features:
             task_buckets: dict[str, str] = {}
             if family == "PERF":
-                for task, (_path, metrics) in sorted(tasks.items()):
+                for task in task_order:
+                    if task in unavailable_tasks:
+                        task_buckets[task] = "UNMEASURED:" + unavailable_tasks[task]
+                        continue
+                    _path, metrics = tasks[task]
                     row = (metrics.get("ss_features") or {}).get(feature)
                     task_buckets[task] = _perf_status(row)
                 run_bucket = run_perf[feature]
             else:
-                for task, (_path, metrics) in sorted(tasks.items()):
+                for task in task_order:
+                    if task in unavailable_tasks:
+                        task_buckets[task] = "UNMEASURED:" + unavailable_tasks[task]
+                        continue
+                    _path, metrics = tasks[task]
                     ledger_rows, entries, opportunity, artifact_error = contexts[task]
                     integrity = metrics.get("ss_integrity")
                     if (
@@ -813,35 +968,50 @@ def diagnose_run(run_dir: Path | str, run_metrics_path: Path | str) -> dict[str,
                             readiness, ledger_rows, entries,
                         )
                 run_bucket = _aggregate_bucket(task_buckets)
+            task_opportunities: dict[str, dict[str, Any]] = {}
+            for task in task_order:
+                if task in unavailable_tasks:
+                    task_opportunities[task] = {
+                        "status": "UNMEASURED",
+                        "reason": unavailable_tasks[task],
+                        "eligible_opportunity": None,
+                        "decision_boundary_evidence": [],
+                    }
+                    continue
+                _path, metrics = tasks[task]
+                opportunity = contexts[task][2]
+                task_opportunities[task] = (
+                    opportunity.get("features", {}).get(
+                        feature,
+                        _opportunity_record(
+                            (metrics.get("ss_features") or {}).get(feature)
+                        ),
+                    )
+                    if family in {"CAP", "FACT"}
+                    else {
+                        "status": "NOT_APPLICABLE",
+                        "reason": f"{family.lower()}_has_no_candidate_delivery_contract",
+                    }
+                )
             rows_out.append({
                 "feature": feature,
                 "family": family,
                 "run_bucket": run_bucket,
                 "task_buckets": task_buckets,
                 "bucket_counts": dict(sorted(Counter(task_buckets.values()).items())),
-                "task_opportunities": {
-                    task: (
-                        opportunity.get("features", {}).get(
-                            feature,
-                            _opportunity_record(
-                                (metrics.get("ss_features") or {}).get(feature)
-                            ),
-                        )
-                        if family in {"CAP", "FACT"}
-                        else {
-                            "status": "NOT_APPLICABLE",
-                            "reason": f"{family.lower()}_has_no_candidate_delivery_contract",
-                        }
-                    )
-                    for task, (_path, metrics) in sorted(tasks.items())
-                    for opportunity in (contexts[task][2],)
-                },
+                "task_opportunities": task_opportunities,
             })
 
     return {
         "schema": "gt.ss_live_diagnosis.v1",
         "feature_count": len(rows_out),
-        "task_count": len(tasks),
+        "task_count": len(task_order),
+        "observed_task_count": len(tasks),
+        "observed_feature_record_count": len(feature_paths),
+        "missing_feature_metric_tasks": list(missing_tasks),
+        "duplicate_feature_metric_tasks": list(duplicate_feature_metric_tasks),
+        "unexpected_feature_metric_tasks": list(unexpected_feature_tasks),
+        "missing_deep_metric_tasks": list(missing_deep_metric_tasks),
         "family_counts": {family: len(features) for family, features in inventory.items()},
         "integrity": diagnosis_integrity,
         "rows": rows_out,
@@ -849,7 +1019,22 @@ def diagnose_run(run_dir: Path | str, run_metrics_path: Path | str) -> dict[str,
 
 
 def render_markdown(result: dict[str, Any]) -> str:
+    missing = result.get("missing_feature_metric_tasks") or []
+    missing_deep = result.get("missing_deep_metric_tasks") or []
     lines = [
+        f"requested_tasks={result.get('task_count', 0)}",
+        f"observed_feature_records={result.get('observed_feature_record_count', 0)}",
+        f"usable_expected_task_records={result.get('observed_task_count', 0)}",
+        "missing_feature_records=" + (", ".join(missing) if missing else "NONE"),
+        "duplicate_feature_records=" + (
+            ", ".join(result.get("duplicate_feature_metric_tasks") or []) or "NONE"
+        ),
+        "unexpected_feature_records=" + (
+            ", ".join(result.get("unexpected_feature_metric_tasks") or []) or "NONE"
+        ),
+        "missing_deep_metrics=" + (", ".join(missing_deep) if missing_deep else "NONE"),
+        f"publishable={str(result.get('integrity', {}).get('publishable') is True).lower()}",
+        "",
         "| Family | Feature | Run bucket | Per-task buckets |",
         "|---|---|---|---|",
     ]
@@ -867,11 +1052,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir")
     parser.add_argument("--run-metrics", required=True)
+    parser.add_argument(
+        "--expected-tasks",
+        help="frozen JSON task population; missing records remain explicit UNMEASURED cells",
+    )
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
 
-    result = diagnose_run(args.run_dir, args.run_metrics)
+    diagnose_kwargs = (
+        {"expected_tasks_path": args.expected_tasks}
+        if args.expected_tasks is not None else {}
+    )
+    result = diagnose_run(args.run_dir, args.run_metrics, **diagnose_kwargs)
     rendered = (
         json.dumps(result, indent=2, sort_keys=False) + "\n"
         if args.format == "json" else render_markdown(result)

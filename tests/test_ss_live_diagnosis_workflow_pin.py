@@ -30,6 +30,7 @@ def test_collectors_are_captured_and_use_exact_download_root() -> None:
     assert "|| GT_RUN_METRICS_RC=$?" in run
     assert "GT_FEATURE_METRICS_RC=0" in run
     assert "scripts/swebench/gt_feature_metrics.py /tmp/all" in run
+    assert '--expected-tasks-file "$GT_DIAG_DIR/expected_tasks.json"' in run
     assert "|| GT_FEATURE_METRICS_RC=$?" in run
     assert 'gt_run_metrics_v2_${GT_RUN_ID}.json' in run
 
@@ -40,6 +41,9 @@ def test_exact_128_live_diagnosis_uses_canonical_v2_artifact() -> None:
     assert run.count(command) == 2, "the bundle must contain machine and human diagnosis"
     assert run.count(
         '--run-metrics "$GT_DIAG_DIR/gt_run_metrics_v2_${GT_RUN_ID}.json"'
+    ) == 2
+    assert run.count(
+        '--expected-tasks "$GT_DIAG_DIR/expected_tasks.json"'
     ) == 2
     assert 'ss_live_diagnosis_${GT_RUN_ID}.json' in run
     assert 'ss_live_diagnosis_${GT_RUN_ID}.md' in run

@@ -254,7 +254,7 @@ def test_exact_inventory_and_run_population_fail_closed(tmp_path: Path) -> None:
             "inventory_complete": True, "required_inputs_complete": False,
         },
     }, inventory_map, tmp_path / "metrics.json")
-    diagnosis._validate_run_metrics_population({
+    assert diagnosis._validate_run_metrics_population({
         "mandatory_performance_collection_complete": False,
         "tasks": 1,
         "task_population": {
@@ -262,13 +262,31 @@ def test_exact_inventory_and_run_population_fail_closed(tmp_path: Path) -> None:
             "missing_tasks": [], "duplicate_tasks": [],
             "unexpected_tasks": [], "invalid_task_records": [],
         },
-    }, 1)
+    }, 1) is False
+
+    assert diagnosis._validate_run_metrics_population({
+        "mandatory_performance_collection_complete": False,
+        "tasks": 1,
+        "task_population": {
+            "expected_count": 2,
+            "observed_record_count": 1, "observed_unique_count": 1,
+            "missing_tasks": ["repo__missing"], "duplicate_tasks": [],
+            "unexpected_tasks": [], "invalid_task_records": [],
+        },
+    }, 2) is False
     (tmp_path / "gt_deep_metrics_repo__task-1.json").write_text(json.dumps({
         "schema": "gt_deep_metrics.v2", "task_id": "repo__task-1",
     }), encoding="utf-8")
-    diagnosis._validate_deep_metric_tasks(tmp_path, {"repo__task-1"})
-    with pytest.raises(ValueError, match="do not match"):
-        diagnosis._validate_deep_metric_tasks(tmp_path, {"repo__task-2"})
+    assert diagnosis._validate_deep_metric_tasks(
+        tmp_path, ("repo__task-1",)
+    ) == {"missing": [], "duplicate": [], "unexpected": []}
+    assert diagnosis._validate_deep_metric_tasks(
+        tmp_path, ("repo__task-2",)
+    ) == {
+        "missing": ["repo__task-2"],
+        "duplicate": [],
+        "unexpected": ["repo__task-1"],
+    }
 
 
 def test_delivery_bucket_precedence_and_missing_lineage_fail_closed() -> None:
@@ -458,13 +476,105 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
         "UNMEASURED:eligibility_control:terminal_contract_unavailable"
     )
     assert diagnosis._perf_status({"status": "PARTIAL"}) == "FAILED"
-    assert diagnosis.render_markdown(result).count("\n") == 130
+    rendered = diagnosis.render_markdown(result)
+    assert rendered.count("\n") == 139
+    assert "requested_tasks=1" in rendered
+    assert "missing_feature_records=NONE" in rendered
     output = tmp_path / "diagnosis.json"
     assert diagnosis.main([
         str(tmp_path), "--run-metrics", str(run_metrics),
         "--output", str(output),
     ]) == 0
     assert json.loads(output.read_text(encoding="utf-8"))["feature_count"] == 128
+
+    expected_tasks = tmp_path / "expected_tasks.json"
+    missing_task = "repo__pre-agent-failure"
+    expected_tasks.write_text(json.dumps({
+        "task_ids": [task, missing_task],
+    }), encoding="utf-8")
+    (tmp_path / f"gt_deep_metrics_{missing_task}.json").write_text(json.dumps({
+        "schema": "gt_deep_metrics.v2", "task_id": missing_task,
+    }), encoding="utf-8")
+    expected_run = json.loads(run_metrics.read_text(encoding="utf-8"))
+    expected_run["tasks"] = 2
+    expected_run["task_population"].update({
+        "expected_count": 2,
+        "observed_record_count": 2,
+        "observed_unique_count": 2,
+    })
+    run_metrics.write_text(json.dumps(expected_run), encoding="utf-8")
+
+    scoped = diagnosis.diagnose_run(
+        tmp_path, run_metrics, expected_tasks_path=expected_tasks,
+    )
+    scoped_by_name = {row["feature"]: row for row in scoped["rows"]}
+    assert scoped["task_count"] == 2
+    assert scoped["observed_task_count"] == 1
+    assert scoped["missing_feature_metric_tasks"] == [missing_task]
+    assert scoped["missing_deep_metric_tasks"] == []
+    assert scoped["integrity"]["deep_metric_population"] == {
+        "missing": [], "duplicate": [], "unexpected": [],
+    }
+    assert scoped["integrity"]["publishable"] is False
+    assert scoped["integrity"]["tasks"][missing_task] == {
+        "status": "UNMEASURED",
+        "issues": ["feature_metrics:missing"],
+        "artifacts": {},
+        "identity": {},
+        "profile": {},
+    }
+    assert scoped_by_name["caller_contract"]["task_buckets"][missing_task] == (
+        "UNMEASURED:missing_feature_metrics"
+    )
+    assert scoped_by_name["gold_rank"]["task_buckets"][missing_task] == (
+        "UNMEASURED:missing_feature_metrics"
+    )
+
+    duplicate_dir = tmp_path / "duplicate"
+    duplicate_dir.mkdir()
+    (duplicate_dir / f"gt_feature_metrics_{task}.json").write_text(
+        feature_path.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    unexpected_task = "repo__unexpected"
+    unexpected_record = json.loads(feature_path.read_text(encoding="utf-8"))
+    unexpected_record["task"] = unexpected_task
+    unexpected_dir = tmp_path / "unexpected"
+    unexpected_dir.mkdir()
+    (unexpected_dir / f"gt_feature_metrics_{unexpected_task}.json").write_text(
+        json.dumps(unexpected_record), encoding="utf-8"
+    )
+
+    contaminated = diagnosis.diagnose_run(
+        tmp_path, run_metrics, expected_tasks_path=expected_tasks,
+    )
+    contaminated_by_name = {row["feature"]: row for row in contaminated["rows"]}
+    assert contaminated["integrity"]["publishable"] is False
+    assert contaminated["duplicate_feature_metric_tasks"] == [task]
+    assert contaminated["unexpected_feature_metric_tasks"] == [unexpected_task]
+    assert contaminated_by_name["caller_contract"]["task_buckets"][task] == (
+        "UNMEASURED:duplicate_feature_metrics"
+    )
+    assert unexpected_task not in contaminated_by_name["caller_contract"]["task_buckets"]
+    contaminated_markdown = diagnosis.render_markdown(contaminated)
+    assert "observed_feature_records=3" in contaminated_markdown
+    assert "usable_expected_task_records=0" in contaminated_markdown
+    assert f"duplicate_feature_records={task}" in contaminated_markdown
+    assert f"unexpected_feature_records={unexpected_task}" in contaminated_markdown
+
+    (duplicate_dir / f"gt_feature_metrics_{task}.json").unlink()
+    duplicate_dir.rmdir()
+    (unexpected_dir / f"gt_feature_metrics_{unexpected_task}.json").unlink()
+    unexpected_dir.rmdir()
+
+    (tmp_path / f"gt_deep_metrics_{missing_task}.json").unlink()
+
+    expected_run["tasks"] = 1
+    expected_run["task_population"].update({
+        "expected_count": 1,
+        "observed_record_count": 1,
+        "observed_unique_count": 1,
+    })
+    run_metrics.write_text(json.dumps(expected_run), encoding="utf-8")
 
     incomplete_task = json.loads(feature_path.read_text(encoding="utf-8"))
     incomplete_task["ss_integrity"]["required_inputs_complete"] = False

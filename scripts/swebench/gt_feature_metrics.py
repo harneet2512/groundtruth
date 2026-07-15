@@ -2873,6 +2873,7 @@ def aggregate_run(
     profile: str = "2",
     *,
     run_metrics_artifact: str | None = None,
+    expected_task_ids: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-task records into the three run-level artifacts.
 
@@ -2881,9 +2882,39 @@ def aggregate_run(
     valid record; a MISSING record is not. The CLI turns publishable=False into a nonzero
     exit."""
     enabled = profile_members(profile)
+    observed_task_ids = [record.get("task") for record in task_records]
+    if any(not isinstance(task, str) or not task for task in observed_task_ids):
+        raise ValueError("task records must carry non-empty string identities")
+    observed_counts = Counter(observed_task_ids)
+    explicit_expected_population = expected_task_ids is not None
+    if isinstance(expected_task_ids, (str, bytes)):
+        raise ValueError("expected task population must be a sequence of task identities")
+    expected = (
+        list(expected_task_ids) if expected_task_ids is not None
+        else [str(task) for task in observed_task_ids]
+    )
+    if (
+        (explicit_expected_population and not expected)
+        or any(not isinstance(task, str) or not task for task in expected)
+        or len(expected) != len(set(expected))
+    ):
+        raise ValueError("expected task population must contain unique non-empty strings")
+    expected_set = set(expected)
+    missing_task_records = [task for task in expected if task not in observed_counts]
+    unexpected_task_records = sorted(
+        str(task) for task in observed_counts if task not in expected_set
+    )
+    duplicate_task_records = sorted(
+        str(task) for task, count in observed_counts.items() if count > 1
+    )
+    population_complete = not (
+        missing_task_records or unexpected_task_records or duplicate_task_records
+    )
     run_metrics: dict[str, Any] = {
         "schema": "gt.feature_metrics.run.v1", "grader_version": GRADER_VERSION,
-        "run_id": run_id, "profile": profile, "n_tasks": len(task_records), "features": {},
+        "run_id": run_id, "profile": profile, "n_tasks": len(expected),
+        "observed_task_count": len(task_records), "expected_task_ids": expected,
+        "features": {},
     }
     effects: dict[str, Any] = {
         "schema": "gt.feature_effects.v1", "grader_version": GRADER_VERSION,
@@ -2893,6 +2924,9 @@ def aggregate_run(
         "schema": "gt.metric_integrity.v1", "grader_version": GRADER_VERSION,
         "run_id": run_id, "profile": profile, "enabled_members": enabled,
         "missing_records": [], "leak_total": 0, "dose_violation_total": 0,
+        "missing_task_records": missing_task_records,
+        "unexpected_task_records": unexpected_task_records,
+        "duplicate_task_records": duplicate_task_records,
         "reconciliation": {}, "publishable": True,
     }
     canonical = canonical_feature_inventory()
@@ -2907,11 +2941,16 @@ def aggregate_run(
         "expected_family_counts": {family: len(names) for family, names in canonical.items()},
         "expected_feature_count": 128,
         "missing_records": [],
+        "missing_task_records": missing_task_records,
+        "unexpected_task_records": unexpected_task_records,
+        "duplicate_task_records": duplicate_task_records,
         "perf_aggregate_failures": [],
         "tasks_with_inventory_drift": [],
         "tasks_with_incomplete_inputs": [],
-        "publishable": bool(task_records),
+        "publishable": bool(task_records) and population_complete,
     }
+    if not population_complete:
+        integrity["publishable"] = False
 
     for family, names in canonical.items():
         for name in names:
@@ -2947,7 +2986,7 @@ def aggregate_run(
                         section=section,
                         name=name,
                         value_type=value_type,
-                        expected_tasks=len(task_records),
+                        expected_tasks=len(expected),
                     )
                     aggregate_coverage = aggregate_record["aggregate_coverage_valid"]
                 else:
@@ -2958,7 +2997,7 @@ def aggregate_run(
                         section=section,
                         name=name,
                         value_type=value_type,
-                        expected_tasks=len(task_records),
+                        expected_tasks=len(expected),
                     )
                     aggregate_coverage = aggregate_record["aggregate_coverage_valid"]
                 if not aggregate_coverage:
@@ -3068,6 +3107,7 @@ def aggregate_run(
     integrity["reconciliation"] = {
         "atomic_events_total": atomic_total,
         "tasks_reconciled": len(task_records),
+        "tasks_expected": len(expected),
         "enabled_member_count": len(enabled),
     }
     integrity["ss_128"] = ss_integrity
@@ -3121,6 +3161,10 @@ def main(argv: list[str] | None = None) -> int:
         "--run-metrics-artifact", default=None,
         help="validated gt_run_metrics.v2 input for run-ratio PERF rows",
     )
+    ap.add_argument(
+        "--expected-tasks-file", default=None,
+        help="JSON task population; absent task records remain an integrity failure",
+    )
     args = ap.parse_args(argv)
 
     run_dir = args.run_dir
@@ -3130,21 +3174,32 @@ def main(argv: list[str] | None = None) -> int:
     run_id = args.run_id or os.path.basename(os.path.normpath(run_dir))
     out_dir = args.out or run_dir
 
+    expected_task_ids = None
+    if args.expected_tasks_file is not None:
+        expected_payload = _load_json(args.expected_tasks_file)
+        expected_task_ids = (
+            expected_payload.get("task_ids")
+            if isinstance(expected_payload, dict) else None
+        )
+        if not isinstance(expected_task_ids, list) or not expected_task_ids:
+            print("gt_feature_metrics: malformed expected-task manifest", file=sys.stderr)
+            return 2
+
     records: list[dict] = []
     for task, d in _iter_task_dirs(run_dir):
         rec = collect_task(task, d, profile=args.profile, baseline_root=args.baseline_root)
         write_task_metrics(rec, d)
         records.append(rec)
 
-    if not records:
+    if not records and expected_task_ids is None:
         print("gt_feature_metrics: no task dirs with a mini trajectory", file=sys.stderr)
         return 2
-
     agg = aggregate_run(
         run_id,
         records,
         profile=args.profile,
         run_metrics_artifact=args.run_metrics_artifact,
+        expected_task_ids=expected_task_ids,
     )
     paths = write_run_aggregate(run_id, agg, out_dir)
     publishable = (
@@ -3157,6 +3212,8 @@ def main(argv: list[str] | None = None) -> int:
     if not publishable:
         print("gt_feature_metrics: INTEGRITY FAILURE - aggregate refuses to publish "
               "(missing_records=" + str(len(agg["integrity"]["missing_records"])) +
+              ", missing_task_records=" +
+              str(len(agg["integrity"]["missing_task_records"])) +
               ", leak_total=" + str(agg["integrity"]["leak_total"]) +
               ", dose_violation_total=" +
               str(agg["integrity"]["dose_violation_total"]) + ")", file=sys.stderr)

@@ -2540,16 +2540,19 @@ jobs:
             python3 scripts/swebench/gt_feature_metrics.py /tmp/all \
               --profile 2 \
               --run-id "$GT_RUN_ID" \
+              --expected-tasks-file "$GT_DIAG_DIR/expected_tasks.json" \
               --run-metrics-artifact "$GT_DIAG_DIR/gt_run_metrics_v2_${GT_RUN_ID}.json" \
               --out "$GT_DIAG_DIR" \
               || GT_FEATURE_METRICS_RC=$?
 
             python3 scripts/swebench/ss_live_diagnosis.py /tmp/all \
               --run-metrics "$GT_DIAG_DIR/gt_run_metrics_v2_${GT_RUN_ID}.json" \
+              --expected-tasks "$GT_DIAG_DIR/expected_tasks.json" \
               --output "$GT_DIAG_DIR/ss_live_diagnosis_${GT_RUN_ID}.json" \
               || GT_SS_DIAGNOSIS_JSON_RC=$?
             python3 scripts/swebench/ss_live_diagnosis.py /tmp/all \
               --run-metrics "$GT_DIAG_DIR/gt_run_metrics_v2_${GT_RUN_ID}.json" \
+              --expected-tasks "$GT_DIAG_DIR/expected_tasks.json" \
               --format markdown \
               --output "$GT_DIAG_DIR/ss_live_diagnosis_${GT_RUN_ID}.md" \
               || GT_SS_DIAGNOSIS_MD_RC=$?

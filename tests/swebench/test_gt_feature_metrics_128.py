@@ -209,6 +209,36 @@ def test_missing_deep_metrics_is_explicit_and_fails_canonical_integrity(tmp_path
     assert aggregate["ss_integrity"]["tasks_with_incomplete_inputs"] == [task]
 
 
+def test_expected_population_preserves_zero_record_aggregate_artifacts(
+    tmp_path: Path,
+) -> None:
+    expected = tmp_path / "expected.json"
+    expected.write_text(json.dumps({"task_ids": ["repo__pre-agent-failure"]}), encoding="utf-8")
+    out = tmp_path / "out"
+
+    assert metrics.main([
+        str(tmp_path), "--run-id", "run-zero", "--out", str(out),
+        "--expected-tasks-file", str(expected),
+    ]) == 3
+
+    run = json.loads((out / "gt_run_metrics_run-zero.json").read_text(encoding="utf-8"))
+    integrity = json.loads(
+        (out / "gt_metric_integrity_run-zero.json").read_text(encoding="utf-8")
+    )
+    assert run["n_tasks"] == 1
+    assert run["observed_task_count"] == 0
+    assert integrity["missing_task_records"] == ["repo__pre-agent-failure"]
+    assert integrity["publishable"] is False
+
+
+def test_implicit_empty_population_remains_a_nonpublishable_legacy_aggregate() -> None:
+    aggregate = metrics.aggregate_run("run-empty", [], profile="2")
+
+    assert aggregate["run_metrics"]["n_tasks"] == 0
+    assert aggregate["integrity"]["publishable"] is False
+    assert aggregate["ss_integrity"]["publishable"] is False
+
+
 @pytest.mark.parametrize("ledger_text", ["", "not-json\n"])
 def test_visible_audit_input_missingness_fails_closed(
     tmp_path: Path, ledger_text: str, monkeypatch: pytest.MonkeyPatch,
@@ -821,6 +851,30 @@ def test_aggregate_requires_every_canonical_row_from_every_task(tmp_path: Path) 
     aggregate = metrics.aggregate_run("run-extra", [record], profile="2")
     assert aggregate["ss_integrity"]["publishable"] is False
     assert aggregate["ss_integrity"]["tasks_with_inventory_drift"] == [task]
+
+
+def test_aggregate_preserves_expected_population_when_task_record_is_missing(
+    tmp_path: Path,
+) -> None:
+    task = "synthetic__observed"
+    missing = "synthetic__pre-agent-failure"
+    _write_task(tmp_path, task, deep_metrics=_complete_deep_metrics(task))
+    record = metrics.collect_task(task, str(tmp_path), profile="2")
+
+    aggregate = metrics.aggregate_run(
+        "run-population", [record], profile="2",
+        expected_task_ids=[task, missing],
+    )
+
+    assert aggregate["run_metrics"]["n_tasks"] == 2
+    assert aggregate["run_metrics"]["observed_task_count"] == 1
+    assert aggregate["integrity"]["missing_task_records"] == [missing]
+    assert aggregate["ss_integrity"]["missing_task_records"] == [missing]
+    assert aggregate["integrity"]["publishable"] is False
+    assert aggregate["ss_integrity"]["publishable"] is False
+    assert aggregate["run_metrics"]["ss_features"]["gold_rank"][
+        "present_in_tasks"
+    ] == 1
 
 
 def test_run_aggregate_keeps_task_coverage_but_requires_canonical_run_coverage(tmp_path: Path) -> None:
