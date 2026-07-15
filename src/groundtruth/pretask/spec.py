@@ -422,6 +422,11 @@ _V2_CONTEXT_EXAMPLE_RE = re.compile(
     r"\b(?:common\s+practice|for\s+example|for\s+instance|e\.g\.?)\b",
     re.I,
 )
+_V2_COMMON_PRACTICE_RE = re.compile(r"\bcommon\s+practice\b", re.I)
+_V2_SENT_SPLIT_RE = re.compile(
+    r"(?<!e\.g\.)(?<!i\.e\.)(?<=[.!?])\s+|\n+",
+    re.I,
+)
 _V2_CALL_SHAPE_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
 _V2_DETAILS_OPEN_RE = re.compile(r"<details\b[^>]*>", re.I)
 _V2_DETAILS_CLOSE_RE = re.compile(r"</details\s*>", re.I)
@@ -789,10 +794,19 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 and _V2_CURRENT_WORKAROUND_RE.search(decision)
             ):
                 continue
-            if _V2_CONTEXT_EXAMPLE_RE.search(decision) and not (
-                _V2_REQUEST_MODAL_RE.search(decision)
-                or _V2_SUGGESTION_RE.search(decision)
-                or _V2_IMPERATIVE_RE.match(decision)
+            if (
+                (
+                    _V2_COMMON_PRACTICE_RE.search(decision)
+                    or (
+                        section_role != "expected"
+                        and _V2_CONTEXT_EXAMPLE_RE.search(decision)
+                    )
+                )
+                and not (
+                    _V2_REQUEST_MODAL_RE.search(decision)
+                    or _V2_SUGGESTION_RE.search(decision)
+                    or _V2_IMPERATIVE_RE.match(decision)
+                )
             ):
                 continue
             if _V2_OBSERVED_STATE_RE.search(decision) and not (
@@ -845,7 +859,7 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         block = " ".join(prose)
         prose.clear()
         role = section_role
-        for sent in _SENT_SPLIT_RE.split(block):
+        for sent in _V2_SENT_SPLIT_RE.split(block):
             sent = sent.strip()
             if sent and len(sent) >= 8:
                 parity_candidates.append((sent, role))
@@ -1006,10 +1020,19 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             continue
         if role == "descriptive" and _V2_CURRENT_WORKAROUND_RE.search(decision):
             continue
-        if _V2_CONTEXT_EXAMPLE_RE.search(decision) and not (
-            _V2_REQUEST_MODAL_RE.search(decision)
-            or _V2_SUGGESTION_RE.search(decision)
-            or _V2_IMPERATIVE_RE.match(decision)
+        if (
+            (
+                _V2_COMMON_PRACTICE_RE.search(decision)
+                or (
+                    role != "expected"
+                    and _V2_CONTEXT_EXAMPLE_RE.search(decision)
+                )
+            )
+            and not (
+                _V2_REQUEST_MODAL_RE.search(decision)
+                or _V2_SUGGESTION_RE.search(decision)
+                or _V2_IMPERATIVE_RE.match(decision)
+            )
         ):
             continue
         if _V2_OBSERVED_STATE_RE.search(decision) and not (

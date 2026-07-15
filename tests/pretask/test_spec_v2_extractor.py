@@ -319,6 +319,22 @@ This is common practice for repositories that ignore all files except those requ
     ]
 
 
+def test_spec_v2_expected_examples_remain_normative_and_atomic():
+    issue = """Parser output is inconsistent.
+
+### Expected behavior
+The parser should accept JSON values, for example lists and dictionaries.
+It should preserve container values, e.g. nested mappings and tuples.
+"""
+
+    rows = extract_spec_v2(issue).obligations
+
+    assert [row.verbatim_text for row in rows] == [
+        "The parser should accept JSON values, for example lists and dictionaries",
+        "It should preserve container values, e.g. nested mappings and tuples",
+    ]
+
+
 # ── 6. inline code spans are never arrow-split ───────────────────────────────
 def test_spec_v2_no_split_inside_code_spans():
     spec = extract_spec_v2(_load(TRUE_MYTH))
