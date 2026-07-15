@@ -216,7 +216,9 @@ def test_replay_derives_exact29_and_rejects_self_attested_feature_coverage(tmp_p
     assert "replay_missing_run_or_seam_binding" in audit["errors"]
 
 
-def test_runtime_filters_delivered_before_ownership_and_joins_exact_bytes(tmp_path: Path) -> None:
+def test_runtime_joins_exact_bytes_but_ignores_untrusted_truth_timing_flags(
+    tmp_path: Path,
+) -> None:
     payload = "syntax result for src/module.py"
     seal = hashlib.sha256(payload.encode()).hexdigest()[:16]
     binding = {
@@ -248,8 +250,8 @@ def test_runtime_filters_delivered_before_ownership_and_joins_exact_bytes(tmp_pa
     assert delivery["fact_class"] == "syntax_result"
     assert delivery["profile_member"] is None
     assert delivery["delivered_byte_proven"] is True
-    assert delivery["correct_info"] is True
-    assert delivery["correct_rl_adhered_time"] is True
+    assert delivery["correct_info"] is None
+    assert delivery["correct_rl_adhered_time"] is None
     assert delivery["acknowledged"] is True
     assert delivery["fair_probe"] is None
 

@@ -693,17 +693,12 @@ def _audit_runtime(
             "fact_class": fact,
             "profile_member": member if isinstance(member, str) else None,
             "delivered_byte_proven": True,
-            "correct_info": (
-                True if row.get("truth_valid") is True and row.get("freshness_valid") is True
-                else False
-                if row.get("truth_valid") is False or row.get("freshness_valid") is False
-                else None
-            ),
-            "correct_rl_adhered_time": (
-                True if row.get("timing_verdict") == "ON_TIME"
-                else False if row.get("timing_verdict") in {"LATE", "STEP_BEHIND"}
-                else None
-            ),
+            # The generic delivery writer owns bytes and routing telemetry, not
+            # semantic truth or chronological adjudication.  Row-level summary
+            # flags are therefore untrusted input; typed producer/adjudicator
+            # artifacts must establish these gates in the live-evidence join.
+            "correct_info": None,
+            "correct_rl_adhered_time": None,
             "acknowledged": _later_acknowledges(
                 trajectory, home, str(row.get("file_path") or "")
             ),
