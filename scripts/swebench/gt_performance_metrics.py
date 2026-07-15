@@ -269,32 +269,75 @@ def _norm_path(p: str) -> str:
     return p
 
 
-def _decode_tool_args(tool_calls_json: str) -> dict:
-    """Attempt to parse the structured arguments from a tool_calls JSON dump.
+def _decode_tool_args_with_presence(tool_calls_json: str) -> tuple[bool, dict]:
+    """Decode the first structured arguments object and retain its presence.
 
     mini-swe-agent stores: tool_calls = [{"function": {"arguments": "<json-string>"}}]
     The outer JSON.dumps() escapes the inner JSON, so we need two decode levels.
-    Returns the first decoded arguments dict, or {} on any failure.
+    ``(True, {})`` is intentionally distinct from decode failure ``(False, {})``.
     """
     if not tool_calls_json:
-        return {}
+        return False, {}
     try:
         tc = json.loads(tool_calls_json)
         if not isinstance(tc, list) or not tc:
-            return {}
+            return False, {}
         args_raw = tc[0].get("function", {}).get("arguments", "")
         if isinstance(args_raw, dict):
-            return args_raw
+            return True, args_raw
         if isinstance(args_raw, str):
-            return json.loads(args_raw)
+            decoded = json.loads(args_raw)
+            if isinstance(decoded, dict):
+                return True, decoded
     except (json.JSONDecodeError, KeyError, IndexError, TypeError):
         pass
-    return {}
+    return False, {}
+
+
+def _decode_tool_args(tool_calls_json: str) -> dict:
+    """Return decoded structured arguments, or ``{}`` on any failure.
+
+    This compatibility wrapper preserves the existing API for edit, test,
+    search, and revert classification.  View extraction additionally needs the
+    presence bit so a valid empty object cannot fall through to model prose.
+    """
+    return _decode_tool_args_with_presence(tool_calls_json)[1]
 
 
 _VIEW_VERBS = {"view", "open", "read", "show", "display"}
 _EDIT_VERBS_SET = {"str_replace", "create", "insert", "write", "overwrite", "edit", "modify"}
 _NON_EDIT_VERBS_SET = {"view", "open", "read", "undo_edit", "undo", "show", "display"}
+
+
+def _extract_shell_viewed_file(command: str) -> str | None:
+    """Return the file operand of one read-only shell command, if present."""
+    if not command:
+        return None
+
+    # ``sed -n`` consumes an address/program before its file operand.  Treating
+    # the first token after ``-n`` as the file loses every normal quoted range
+    # such as ``sed -n '596,1000p' sh.py``.
+    file_token = r"[^\s|;&<>\"'\\]+"
+    match = re.search(
+        r"(?:^|[;&|]\s*)sed\s+-n(?:\s+-e)?\s+"
+        r"(?:'[^']*'|\"[^\"]*\"|\S+)\s+(?:--\s+)?(" + file_token + r")",
+        command,
+        re.I,
+    )
+    if match:
+        return _norm_path(match.group(1))
+
+    match = re.search(
+        r"(?:^|\s)(?:cat|head|tail|bat|less|more)\s+"
+        r"(?:-[^\s]+\s+)*(" + file_token + r")",
+        command,
+        re.I,
+    )
+    if match:
+        path = match.group(1).strip()
+        if "/" in path or "." in path:
+            return _norm_path(path)
+    return None
 
 
 def _extract_viewed_file(tool_calls_json: str, full_cmd: str) -> str | None:
@@ -304,8 +347,8 @@ def _extract_viewed_file(tool_calls_json: str, full_cmd: str) -> str | None:
     Returns None if not found.
     """
     # 1. Structured parse of tool_calls
-    args = _decode_tool_args(tool_calls_json)
-    if args:
+    structured_present, args = _decode_tool_args_with_presence(tool_calls_json)
+    if structured_present:
         verb = str(args.get("command") or "").lower()
         path = str(args.get("path") or args.get("file_path") or "")
         if path and verb in _VIEW_VERBS:
@@ -314,14 +357,12 @@ def _extract_viewed_file(tool_calls_json: str, full_cmd: str) -> str | None:
             # command might be the shell command itself (bash agent)
             # or "view" already captured above — only return for explicit view verbs
             pass
-        # Some agents use just {"command": "cat src/foo.py"} as a bash call
+        # Some agents use just {"command": "cat src/foo.py"} as a bash call.
+        # A successfully decoded tool call is authoritative: assistant prose in
+        # ``full_cmd`` is not another command surface and must not manufacture a
+        # view (for example, "look more broadly" -> a fake ``broadly.`` path).
         bash_cmd = str(args.get("command") or "")
-        if bash_cmd:
-            m = re.search(r"(?:^|\s)(?:cat|head|tail|bat|less|more)\s+(?:-[^\s]+\s+)*([^\s|;&<>\"']+)", bash_cmd, re.I)
-            if m:
-                p = m.group(1).strip()
-                if "/" in p or "." in p:
-                    return _norm_path(p)
+        return _extract_shell_viewed_file(bash_cmd)
 
     # 2. Regex fallback on the full concatenated command string
     # Try unescaped structured patterns first
@@ -342,13 +383,8 @@ def _extract_viewed_file(tool_calls_json: str, full_cmd: str) -> str | None:
         if m:
             return _norm_path(m.group(1))
 
-    # Shell command fallback
-    m = re.search(r"(?:^|\s)(?:cat|head|tail|bat|less|more|sed\s+-n)\s+(?:-[^\s]+\s+)*([^\s|;&<>\"']+)", full_cmd, re.I)
-    if m:
-        p = m.group(1).strip()
-        if "/" in p or "." in p:
-            return _norm_path(p)
-    return None
+    # Shell fallback is reserved for genuinely unstructured/legacy records.
+    return _extract_shell_viewed_file(full_cmd)
 
 
 def _extract_edited_file(tool_calls_json: str, full_cmd: str) -> str | None:

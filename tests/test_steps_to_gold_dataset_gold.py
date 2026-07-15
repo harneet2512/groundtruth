@@ -114,6 +114,62 @@ def test_sed_with_spaces_edit_target_is_the_file_not_the_script() -> None:
     assert f == "aiogram/fsm/context.py", f
 
 
+def test_structured_sed_range_is_a_view_and_ignores_assistant_prose(
+    tmp_path: Path,
+) -> None:
+    """A decoded mini tool call is authoritative for view extraction.
+
+    The address expression belongs to ``sed``; the following token is the file.
+    Assistant prose must never become a second command-parsing surface when the
+    structured command is available.
+    """
+    turn = _bash("cd /testbed && sed -n '596,1000p' sh.py")
+    tool_calls_json = json.dumps(turn["tool_calls"])
+    full_cmd = tool_calls_json + " I need more decoy.py before deciding."
+
+    assert pm._extract_viewed_file(tool_calls_json, full_cmd) == "sh.py"
+
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+    turn["content"] = "I need more decoy.py before deciding."
+    trajectory.write_text(json.dumps({
+        "messages": [turn, {"role": "tool", "content": "source"}],
+        "info": {"submission": ""},
+    }), encoding="utf-8")
+    result = pm.compute_performance_metrics(
+        str(trajectory), str(tmp_path), gold_files=["sh.py"]
+    )
+
+    assert result["localization"]["first_gold_view_step"] == 1
+    assert result["localization"]["files_to_gold_view"] == 0
+    assert result["localization"]["steps_to_gold_view"] == 0
+
+
+def test_structured_non_view_does_not_fall_through_to_assistant_prose() -> None:
+    """Structured non-view commands cannot acquire a view from model prose."""
+    turn = _bash("cd /testbed && grep -n 'RunningCommand' sh.py")
+    tool_calls_json = json.dumps(turn["tool_calls"])
+    full_cmd = tool_calls_json + " I need more decoy.py before deciding."
+
+    assert pm._extract_viewed_file(tool_calls_json, full_cmd) is None
+
+
+def test_empty_structured_args_do_not_fall_through_to_assistant_prose() -> None:
+    """A valid empty arguments object still establishes structured authority."""
+    tool_calls_json = json.dumps([{
+        "function": {"name": "bash", "arguments": json.dumps({})},
+    }])
+    full_cmd = tool_calls_json + " I need more decoy.py before deciding."
+
+    assert pm._extract_viewed_file(tool_calls_json, full_cmd) is None
+
+
+def test_unstructured_sed_range_preserves_legacy_fallback() -> None:
+    """Older trajectories without tool-call arguments retain shell parsing."""
+    assert pm._extract_viewed_file(
+        "", "cd /testbed && sed -n '596,1000p' sh.py"
+    ) == "sh.py"
+
+
 # =========================================================================== wiring
 def test_dataset_gold_is_preferred_and_timing_computes() -> None:
     """The core mission: dataset gold -> gold_source=dataset_gold (NOT proxy),
