@@ -6550,6 +6550,7 @@ def _reset_oracle_state() -> None:
     _oblig_final_shot_fired = False
     _l5_finish_fired = False
     _l5_failure_fired = False
+    _test_fail_history.clear()
     _stash_depth = 0
     _baseline_fail_sigs.clear()
     _l5_build_fail_fired = False

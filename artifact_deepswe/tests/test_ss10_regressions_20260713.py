@@ -1230,11 +1230,13 @@ def test_r5_attempt_reset_clears_stash_window_and_baseline_failure_memory(monkey
     """A partial stash turn or prior baseline signature cannot leak to a new attempt."""
     monkeypatch.setattr(g, "_stash_depth", 1)
     monkeypatch.setattr(g, "_baseline_fail_sigs", {"old failure"})
+    monkeypatch.setattr(g, "_test_fail_history", ["old failure"])
 
     g._reset_oracle_state()
 
     assert g._stash_depth == 0
     assert g._baseline_fail_sigs == set()
+    assert g._test_fail_history == []
 
 
 def test_r5_combined_stash_probe_closes_depth_in_same_turn(monkeypatch):
