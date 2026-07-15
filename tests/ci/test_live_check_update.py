@@ -16,6 +16,10 @@ def test_summary_is_payload_free_and_reports_only_operational_metadata(tmp_path:
     heartbeat.write_text(
         "[GT_HEARTBEAT] task=repo__task phase=trial ledger_rows=3 "
         "oracle_rows=1 trajectory_bytes=420 mem=100/200MB "
+        "progress_age_s=8 container_mem=12.5GiB/12.7GiB container_pids=42 "
+        "container_top_rss_kb=123456 container_oom=0 swap_used_mb=7 "
+        "container_mem_current_bytes=1024 container_mem_peak_bytes=2048 "
+        "container_oom_kill_count=0 "
         "SECRET_ASSERTION=do-not-publish\n"
         "ignored model payload SECRET_ASSERTION\n",
         encoding="utf-8",
@@ -41,6 +45,15 @@ def test_summary_is_payload_free_and_reports_only_operational_metadata(tmp_path:
 
     assert title == "repo__task: agent_running"
     assert "ledger_rows=3" in summary
+    assert "progress_age_s=8" in summary
+    assert "container_mem=12.5GiB/12.7GiB" in summary
+    assert "container_pids=42" in summary
+    assert "container_top_rss_kb=123456" in summary
+    assert "container_oom=0" in summary
+    assert "container_mem_current_bytes=1024" in summary
+    assert "container_mem_peak_bytes=2048" in summary
+    assert "container_oom_kill_count=0" in summary
+    assert "swap_used_mb=7" in summary
     assert "trajectory_bytes: `24`" in summary
     assert "trial_log_bytes:" in summary
     assert "SECRET_ASSERTION" not in summary

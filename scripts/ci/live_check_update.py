@@ -46,6 +46,27 @@ def _last_heartbeat(path: Path) -> str:
         ("ledger_rows", r"\bledger_rows=(\d{1,20})\b"),
         ("oracle_rows", r"\boracle_rows=(\d{1,20})\b"),
         ("trajectory_bytes", r"\btrajectory_bytes=(\d{1,20})\b"),
+        ("progress_age_s", r"\bprogress_age_s=(\d{1,20})\b"),
+        (
+            "container_mem",
+            r"\bcontainer_mem=(\d+(?:\.\d+)?[KMGT]?i?B/\d+(?:\.\d+)?[KMGT]?i?B)\b",
+        ),
+        ("container_pids", r"\bcontainer_pids=(\d{1,20})\b"),
+        ("container_top_rss_kb", r"\bcontainer_top_rss_kb=(\d{1,20})\b"),
+        ("container_oom", r"\bcontainer_oom=([01])\b"),
+        (
+            "container_mem_current_bytes",
+            r"\bcontainer_mem_current_bytes=(\d{1,20})\b",
+        ),
+        (
+            "container_mem_peak_bytes",
+            r"\bcontainer_mem_peak_bytes=(\d{1,20})\b",
+        ),
+        (
+            "container_oom_kill_count",
+            r"\bcontainer_oom_kill_count=(\d{1,20})\b",
+        ),
+        ("swap_used_mb", r"\bswap_used_mb=(\d{1,20})\b"),
         ("mem", r"\bmem=(\d{1,20}/\d{1,20}MB)\b"),
         ("disk_used", r"\bdisk_used=(\d{1,20}/\d{1,20}MB)\b"),
         ("disk_free", r"\bfree=(\d{1,20}MB)\b"),
