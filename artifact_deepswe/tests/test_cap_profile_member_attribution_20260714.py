@@ -138,7 +138,13 @@ def test_gate_winner_threads_owner_only_to_exact_sealed_delivery(monkeypatch):
 
     delivered = [row for row in calls if row.get("content") == payload]
     assert len(delivered) == 1
-    assert delivered[0]["extra"] == {"profile_member": "GT_EDIT_CHECK"}
+    extra = delivered[0]["extra"]
+    assert extra["profile_member"] == "GT_EDIT_CHECK"
+    assert extra["runtime_producer_id"] == "edit_check"
+    assert extra["registered_producer_id"] == "edit_check"
+    assert extra["producer_registration_match"] is True
+    assert extra["fact_class"] == "syntax_result"
+    assert extra["actual_event"] == "edit_result"
     assert out["output"].endswith(payload)
 
 
@@ -196,7 +202,13 @@ def test_completion_delivery_attributes_render_owner_not_telemetry_builder(
     assert out is not None and out["returncode"] == 1
     delivered = [row for row in calls if row.get("content") == out["output"]]
     assert len(delivered) == 1
-    assert delivered[0]["extra"] == {"profile_member": "GT_CERT_DELIVERY"}
+    extra = delivered[0]["extra"]
+    assert extra["profile_member"] == "GT_CERT_DELIVERY"
+    assert extra["runtime_producer_id"] == "submit_gate"
+    assert extra["registered_producer_id"] == "submit_gate"
+    assert extra["producer_registration_match"] is True
+    assert extra["fact_class"] == "submit_refusal"
+    assert extra["actual_event"] == "submit"
     assert all(
         row.get("profile_member") != "GT_COMPLETION_CERT" for row in calls
     ), "the host-only certificate builder must not receive model-byte credit"

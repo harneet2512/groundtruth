@@ -46,6 +46,12 @@ except ImportError:  # injected runner + sibling module inside /opt/gt
 
 
 _BRIEF_LEDGER_WRITE_FAILURES = 0
+_COMPOUND_LINEAGE_SCHEMA = "gt.compound_feature_lineage.v1"
+_REGISTERED_BRIEF_BLOCKS = {
+    "localization-header": ("localization", "v1r_brief"),
+    "obligations": ("obligations", "spec"),
+    "expected-behavior": ("obligations", "spec"),
+}
 
 
 def _bc(msg: str) -> None:
@@ -53,6 +59,96 @@ def _bc(msg: str) -> None:
     exactly how far the runner got when it produces no trajectory."""
     sys.stderr.write(f"[GT-RUNNER] {msg}\n")
     sys.stderr.flush()
+
+
+def _brief_delivery_extra(e: dict, brief_text: str) -> dict:
+    """Validate the producer sidecar and type each delivered brief block.
+
+    A task-start brief is compound evidence, so it deliberately has no whole-row
+    FACT alias. Unknown legacy block labels remain visible but untyped.
+    """
+    brief_path = (e.get("GT_BRIEF_FILE") or "/gt_artifacts/brief.txt").strip()
+    result_path = os.path.join(os.path.dirname(brief_path), "brief_result.json")
+    try:
+        with open(result_path, encoding="utf-8") as fh:
+            result = json.load(fh)
+        if (
+            result.get("schema") != "gt.brief_result.v1"
+            or result.get("brief_text") != brief_text
+        ):
+            return {}
+        receipts = (result.get("metrics") or {}).get("block_receipts")
+        if not isinstance(receipts, list):
+            return {}
+        from groundtruth.runtime.feature_lineage import build_lineage, lineage_to_dict
+
+        blocks = []
+        seen: set[str] = set()
+        last_end = 0
+        for receipt in receipts:
+            if not isinstance(receipt, dict):
+                return {}
+            block_id = receipt.get("block_id")
+            candidate_id = receipt.get("candidate_id")
+            span = receipt.get("char_span")
+            full_hash = receipt.get("content_hash")
+            declared = receipt.get("fact_class")
+            label = receipt.get("label")
+            if (
+                not isinstance(block_id, str) or not block_id or block_id in seen
+                or not isinstance(candidate_id, str) or not candidate_id
+                or not isinstance(span, list) or len(span) != 2
+                or not all(isinstance(n, int) and not isinstance(n, bool) for n in span)
+                or span[0] < 0 or span[0] >= span[1] or span[1] > len(brief_text)
+                or not isinstance(full_hash, str) or len(full_hash) != 64
+                or not isinstance(declared, str) or not declared
+                or not isinstance(label, str) or not label
+            ):
+                return {}
+            if span[0] < last_end:
+                return {}
+            block = brief_text[span[0]:span[1]]
+            digest = hashlib.sha256(block.encode("utf-8", "surrogatepass")).hexdigest()
+            if digest != full_hash:
+                return {}
+            seen.add(block_id)
+            last_end = span[1]
+            item = {
+                "block_id": block_id,
+                "label": label,
+                "candidate_id": candidate_id,
+                "char_span": span,
+                "chars_delivered": len(block),
+                "content_sha256_16": digest[:16],
+                "declared_fact_class": declared,
+                "transport_producer_id": "v1r_brief",
+            }
+            registered = (
+                ("localization", "v1r_brief")
+                if label.startswith("file-entry-")
+                else _REGISTERED_BRIEF_BLOCKS.get(label)
+            )
+            if registered is None:
+                item["lineage_status"] = "UNREGISTERED_BLOCK_LABEL"
+            else:
+                expected_fact, producer = registered
+                if declared != expected_fact:
+                    return {}
+                lineage = build_lineage(
+                    runtime_producer_id=producer,
+                    evidence_type=declared, actual_event="task_start")
+                if lineage is None or not lineage.producer_registration_match:
+                    return {}
+                item["lineage_status"] = "REGISTERED"
+                item["lineage"] = lineage_to_dict(lineage)
+            blocks.append(item)
+        return {
+            "compound_lineage_schema": _COMPOUND_LINEAGE_SCHEMA,
+            "compound_delivery": True,
+            "block_lineage": blocks,
+        }
+    except (ImportError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
 
 
 def _record_brief_delivery(e: dict, brief_text: str) -> None:
@@ -82,6 +178,7 @@ def _record_brief_delivery(e: dict, brief_text: str) -> None:
         ).hexdigest()[:16],
         "seal_scope": "block",
     }
+    row.update(_brief_delivery_extra(e, brief_text))
     try:
         parent = os.path.dirname(path)
         if parent:

@@ -7862,16 +7862,81 @@ def _lane_final_extra(kind: str, text: str, target: str) -> dict:
     """Exact delivery-row identity shared with terminal lane controls."""
     try:
         from groundtruth.runtime.evidence_envelope import EvidenceEnvelope
-        from groundtruth.runtime.fact_registry import is_registered
-        from groundtruth.runtime.global_arbiter import class_of_kind
         env = EvidenceEnvelope.build(
             producer=kind or "lane", fact_id="", target=target or "",
             evidence_type=kind or "lane", payload=(text,))
-        fact_class = class_of_kind(kind)
-        if not fact_class or not is_registered(fact_class) or not env.dedup_key:
-            return {}
-        return {"candidate_id": env.dedup_key, "fact_class": fact_class}
+        return {"candidate_id": env.dedup_key} if env.dedup_key else {}
     except Exception:  # noqa: BLE001
+        return {}
+
+
+_EXACT_PROFILE_ACTUAL_EVENTS: dict[str, str] = {
+    "edit.syntax": "edit_result",
+    "recovery": "failure_obs",
+    "detect.coherence": "edit_result",
+    "submit_refusal": "submit",
+}
+
+
+def _exact_profile_delivery_extra(
+        member: str, kind: str, text: str, target: str, event) -> dict:
+    """Join one active exact-profile byte owner to its registered producer/FACT.
+
+    The CAP remains the explicit ``profile_member`` because exact-profile owners are
+    intentionally not authorized as typed-lineage CAP refs.  FACT lineage is added
+    only when the byte-owner authority itself names a FACT; coherence therefore stays
+    FACT-less instead of receiving an arbitration-class alias.
+    """
+    extra = _lane_final_extra(kind, text, target)
+    if _GT_BASELINE or os.environ.get(member) != "1":
+        return extra
+    try:
+        from groundtruth.runtime.feature_lineage import (
+            CAP_BYTE_OWNER_MECHANISMS, build_lineage, lineage_ledger_extra)
+        authority = CAP_BYTE_OWNER_MECHANISMS.get(member)
+        if authority is None or authority.mechanism != "exact_profile_member":
+            return extra
+        binding = next((b for b in authority.bindings if b.layer == kind), None)
+        if binding is None:
+            return extra
+        extra["profile_member"] = member
+        if binding.fact_class is None:
+            return extra
+        actual_event = _EXACT_PROFILE_ACTUAL_EVENTS.get(kind)
+        if not actual_event:
+            return extra
+        lineage = build_lineage(
+            runtime_producer_id=binding.producer,
+            evidence_type=binding.fact_class,
+            actual_event=actual_event,
+        )
+        if lineage is not None and lineage.producer_registration_match:
+            extra.update(lineage_ledger_extra(lineage))
+    except Exception:  # noqa: BLE001 -- attribution cannot change delivery
+        pass
+    return extra
+
+
+def _lane_delivery_extra(kind: str, text: str, target: str, event) -> "dict | None":
+    """Delivery-row identity plus honest exact-profile producer lineage."""
+    member = _LANE_PROFILE_MEMBER_OWNERS.get(kind or "")
+    if member:
+        return _exact_profile_delivery_extra(member, kind, text, target, event)
+    return None
+
+
+def _registered_delivery_extra(
+        producer: str, evidence_type: str, actual_event: str) -> dict:
+    """Typed FACT lineage for a delivery whose producer is known at the seam."""
+    try:
+        from groundtruth.runtime.feature_lineage import build_lineage
+        lineage = build_lineage(
+            runtime_producer_id=producer, evidence_type=evidence_type,
+            actual_event=actual_event)
+        if lineage is None or not lineage.producer_registration_match:
+            return {}
+        return _feature_lineage_extra(lineage)
+    except Exception:  # noqa: BLE001 -- attribution cannot change delivery
         return {}
 
 
@@ -10694,8 +10759,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 file_path=subject_path,
                 event=item_event,
                 content=text,  # W2 seal: the delivered lane block (never the whole observation)
-                extra={**_lane_final_extra(kind, text, subject_path),
-                       **(_lane_profile_member_extra(kind) or {})},
+                extra=_lane_delivery_extra(kind, text, subject_path, item_event),
             )
             if _provenance_decision:
                 _record_lane_provenance_control(
@@ -10765,8 +10829,7 @@ def _commit_prepared_lane(out, cmd, kind: str, decision: dict, *, krel, event) -
         kind=kind, outcome=_ProductSignalOutcome.DELIVERED,
         chars=len(shipped_suffix), file_path=krel or "", event=event,
         content=shipped_suffix,
-        extra={**_lane_final_extra(kind, shipped_suffix, krel or ""),
-               **(_lane_profile_member_extra(kind) or {})})
+        extra=_lane_delivery_extra(kind, shipped_suffix, krel or "", event))
     if decision.get("provenance_decision"):
         _record_lane_provenance_control(
             kind, decision.get("provenance_original", text), shipped_suffix,
@@ -13641,7 +13704,8 @@ def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_ba
             outcome=_ProductSignalOutcome.DELIVERED,
             chars=len(win_text), file_path=krel or kf or "", event=event,
             content=win_text,
-            extra=_lane_profile_member_extra(_last_gate_winner_kind))
+            extra=_lane_delivery_extra(
+                _last_gate_winner_kind, win_text, krel or kf or "", event))
         # SS (features 2/7): record the delivered steer's entity set + queue the ack watch.
         _ss_record_delivered(_last_gate_winner_kind, win_text)
         # RL-1 (GT_LANE_ENVELOPE): seal over the SAME bytes; base_output = pre-append obs.
@@ -13668,7 +13732,8 @@ def _commit_prepared_steer(out, cmd, kind: str, winner_hash: str, decision: dict
         chars=len(decision["shipped_suffix"]),
         file_path=krel or kf or "", event=event,
         content=decision["shipped_suffix"],
-        extra=_lane_profile_member_extra(kind))
+        extra=_lane_delivery_extra(
+            kind, decision["shipped_suffix"], krel or kf or "", event))
     _ss_record_delivered(kind, text)
     _seal_lane_delivery(
         kind, decision["shipped_suffix"], krel or kf or "",
@@ -16280,9 +16345,13 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
             kind="submit_refusal",
             outcome=_ProductSignalOutcome.DELIVERED,
             chars=len(rejection), content=rejection,
-            extra=({"profile_member": "GT_CERT_DELIVERY"}
-                   if _cert_rendered and os.environ.get("GT_CERT_DELIVERY") == "1"
-                   else None))
+            extra=(
+                _exact_profile_delivery_extra(
+                    "GT_CERT_DELIVERY", "submit_refusal", rejection, "", "submit")
+                if _cert_rendered and os.environ.get("GT_CERT_DELIVERY") == "1"
+                else _registered_delivery_extra(
+                    "submit_gate", "submit_refusal", "submit")
+            ))
         return {"output": rejection, "returncode": 1}
     except Exception:  # noqa: BLE001 — a gate crash must NEVER brick a run (fail-open)
         return None

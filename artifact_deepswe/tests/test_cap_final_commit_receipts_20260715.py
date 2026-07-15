@@ -61,6 +61,35 @@ def test_coherence_has_exact_single_owner_at_delivery(monkeypatch):
     }
 
 
+def test_lane_delivery_lineage_is_registered_and_never_inferred_from_arbiter(monkeypatch):
+    monkeypatch.setenv("GT_EDIT_CHECK", "1")
+    edit = g._lane_delivery_extra(
+        "edit.syntax", "syntax is valid", "src/widget.py", g.Event.POST_EDIT)
+    assert edit["profile_member"] == "GT_EDIT_CHECK"
+    assert edit["runtime_producer_id"] == "edit_check"
+    assert edit["registered_producer_id"] == "edit_check"
+    assert edit["producer_registration_match"] is True
+    assert edit["fact_class"] == "syntax_result"
+    assert edit["actual_event"] == "edit_result"
+    assert edit["feature_ids"] == [
+        {"category": "FACT", "feature_id": "syntax_result", "role": "fact"}
+    ]
+
+    legacy = g._lane_delivery_extra(
+        "l3.contract", "legacy contract", "src/widget.py", g.Event.POST_VIEW)
+    assert legacy is None
+
+
+def test_coherence_delivery_does_not_fabricate_fact_lineage(monkeypatch):
+    monkeypatch.setenv("GT_SS_COHERENCE_V2", "1")
+    extra = g._lane_delivery_extra(
+        "detect.coherence", "two verified writes", "src/widget.py", g.Event.POST_EDIT)
+    assert extra["profile_member"] == "GT_SS_COHERENCE_V2"
+    assert extra["candidate_id"]
+    assert "fact_class" not in extra
+    assert "lineage_schema" not in extra
+
+
 def test_submit_red_has_authorized_typed_byte_owner():
     lineage = build_lineage(
         runtime_producer_id="submit_gate", evidence_type="submit_refusal",

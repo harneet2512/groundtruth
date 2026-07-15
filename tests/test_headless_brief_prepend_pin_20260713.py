@@ -92,6 +92,63 @@ def test_gt_arm_records_exact_producer_seal_without_changing_task_bytes(tmp_path
     assert row["seal_scope"] == "block"
 
 
+def test_brief_delivery_records_validated_block_lineage_without_whole_fact_alias(tmp_path):
+    brief_text = "<gt-task-brief>\n<gt-obligations>\n- preserve behavior\n</gt-obligations>\n</gt-task-brief>"
+    brief = tmp_path / "brief.txt"
+    ledger = tmp_path / "gt_runtime_ledger.jsonl"
+    brief.write_text(brief_text, encoding="utf-8", newline="")
+    block = "<gt-obligations>\n- preserve behavior\n</gt-obligations>"
+    start = brief_text.index(block)
+    (tmp_path / "brief_result.json").write_text(json.dumps({
+        "schema": "gt.brief_result.v1",
+        "brief_text": brief_text,
+        "metrics": {"block_receipts": [{
+            "block_id": "obligations",
+            "fact_class": "obligations",
+            "label": "obligations",
+            "candidate_id": "brief:block:obligations",
+            "char_span": [start, start + len(block)],
+            "content_hash": hashlib.sha256(block.encode()).hexdigest(),
+        }]},
+    }), encoding="utf-8")
+
+    ghr._resolve_task({
+        "GT_RUN_TASK": _ISSUE, "GT_BRIEF_FILE": str(brief),
+        "GT_INSEAM_METRICS": "1", "GT_RUNTIME_LEDGER": str(ledger),
+    })
+    row = json.loads(ledger.read_text(encoding="utf-8"))
+    assert row["compound_lineage_schema"] == "gt.compound_feature_lineage.v1"
+    assert "fact_class" not in row and "lineage_schema" not in row
+    assert len(row["block_lineage"]) == 1
+    item = row["block_lineage"][0]
+    assert item["candidate_id"] == "brief:block:obligations"
+    assert item["content_sha256_16"] == hashlib.sha256(block.encode()).hexdigest()[:16]
+    assert item["lineage"]["fact_class"] == "obligations"
+    assert item["lineage"]["runtime_producer_id"] == "spec"
+    assert item["lineage"]["producer_registration_match"] is True
+
+
+def test_brief_delivery_keeps_unregistered_block_label_untyped(tmp_path):
+    brief_text = "<gt-task-brief>\nEDIT-TARGET CONTRACTS\n  keep api\n</gt-task-brief>"
+    brief = tmp_path / "brief.txt"
+    brief.write_text(brief_text, encoding="utf-8", newline="")
+    block = "EDIT-TARGET CONTRACTS\n  keep api"
+    start = brief_text.index(block)
+    (tmp_path / "brief_result.json").write_text(json.dumps({
+        "schema": "gt.brief_result.v1", "brief_text": brief_text,
+        "metrics": {"block_receipts": [{
+            "block_id": "edit-target-contracts", "fact_class": "contract",
+            "label": "edit-target-contracts", "candidate_id": "brief:block:contract",
+            "char_span": [start, start + len(block)],
+            "content_hash": hashlib.sha256(block.encode()).hexdigest(),
+        }]},
+    }), encoding="utf-8")
+    extra = ghr._brief_delivery_extra({"GT_BRIEF_FILE": str(brief)}, brief_text)
+    item = extra["block_lineage"][0]
+    assert item["lineage_status"] == "UNREGISTERED_BLOCK_LABEL"
+    assert "lineage" not in item
+
+
 def test_brief_producer_seal_is_default_off(tmp_path):
     brief = tmp_path / "brief.txt"
     ledger = tmp_path / "gt_runtime_ledger.jsonl"
