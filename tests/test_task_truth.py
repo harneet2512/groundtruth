@@ -152,6 +152,46 @@ def test_task_truth_includes_product_runtime_control_surface():
         assert runtime["adapter_witness"]["gt_meta_present"] is True
 
 
+def test_native_mini_messages_pair_tool_calls_without_scanning_instructions(tmp_path):
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+
+    def assistant(call_id: str, command: str) -> dict:
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": json.dumps({"command": command}),
+                },
+            }],
+        }
+
+    trajectory.write_text(json.dumps({"messages": [
+        {"role": "system", "content": "Available tags include <gt-nudge>."},
+        {"role": "user", "content": "Template mentions <gt-contract> but sends neither."},
+        assistant("view", "sed -n '1,40p' src/app.py"),
+        {"role": "tool", "tool_call_id": "view", "content": "def old(): pass"},
+        assistant("edit", "python -c \"open('src/app.py','w').write('def new(): pass')\""),
+        {"role": "tool", "tool_call_id": "edit", "content": "Done\n<gt-evidence>verified</gt-evidence>"},
+        assistant("test", "pytest tests/test_app.py"),
+        {"role": "tool", "tool_call_id": "test", "content": "1 passed"},
+    ]}), encoding="utf-8")
+
+    turns = tt._turns_from_mini_trajectory(str(trajectory))
+    state = tt.derive_state(turns)
+
+    assert len(turns) == 3
+    assert state.viewed_files == {"src/app.py"}
+    assert state.edited_files == {"src/app.py"}
+    assert state.source_edit_count == 1
+    assert state.test_count == 1
+    assert state.test_evidence_seen is True
+    assert state.delivered_markers == [(2, "gt-evidence", "")]
+
+
 def test_reconciled_substrate_verdict_shape():
     truth = {
         "instance_id": "abs-module-cache-flags",

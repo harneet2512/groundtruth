@@ -131,11 +131,72 @@ def _first_str(*values: Any) -> str:
     return ""
 
 
+def _tool_call_command(call: Any) -> str:
+    """Extract a command from one native chat-completions tool call."""
+    if not isinstance(call, dict):
+        return ""
+    function = call.get("function")
+    if not isinstance(function, dict):
+        return ""
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (TypeError, ValueError):
+            return ""
+    return _first_str(arguments)
+
+
+def _turns_from_native_messages(messages: list[Any]) -> list[Turn]:
+    """Pair assistant tool calls with their tool-result observations.
+
+    System/user instruction text is not an action observation and must never be
+    scanned for delivery markers.  The call id is the lossless join key used by
+    mini-swe-agent's stored chat-completions trajectory.
+    """
+    pending: dict[str, str] = {}
+    turns: list[Turn] = []
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role == "assistant":
+            calls = item.get("tool_calls")
+            if not isinstance(calls, list):
+                continue
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                call_id = call.get("id")
+                command = _tool_call_command(call)
+                if isinstance(call_id, str) and call_id and command:
+                    pending[call_id] = command
+        elif role == "tool":
+            call_id = item.get("tool_call_id")
+            if not isinstance(call_id, str) or call_id not in pending:
+                continue
+            observation = _first_str(item.get("content"), item.get("output"))
+            turns.append(Turn(
+                command=pending.pop(call_id),
+                observation=observation,
+                full_observation=observation,
+            ))
+    return turns
+
+
 def _turns_from_mini_trajectory(path: str | None) -> list[Turn]:
     data = _load_json(path or "") or {}
     raw = data.get("messages") or data.get("trajectory") or data.get("steps") or []
     if not isinstance(raw, list):
         return []
+    if data.get("messages") is raw and any(
+        isinstance(item, dict)
+        and item.get("role") == "assistant"
+        and isinstance(item.get("tool_calls"), list)
+        and item["tool_calls"]
+        for item in raw
+    ):
+        return _turns_from_native_messages(raw)
     turns: list[Turn] = []
     for item in raw:
         if not isinstance(item, dict):
