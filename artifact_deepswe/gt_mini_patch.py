@@ -11579,7 +11579,9 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             # RL-1 (flag GT_LANE_ENVELOPE): seal an envelope over the SAME delivered
             # bytes — advance the shared chain, stamp the dedup_key, record a receipt-
             # tracked delivery. Pure bookkeeping; no-op + byte-identical when off.
-            _seal_lane_delivery(kind, text, subject_path, base_output=_base_out)
+            _seal_lane_delivery(
+                kind, text, subject_path, base_output=_base_out,
+                producer_text=_provenance_original)
             # D1 budget-commit re-wire (risk note #5): l3b.evidence's text was
             # budget-trimmed by _budget_trim, which staged the trimmed lines in
             # _last_budget_pending.  In the old monolith the commit fired only on

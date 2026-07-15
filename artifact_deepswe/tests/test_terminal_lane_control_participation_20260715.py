@@ -176,3 +176,87 @@ def test_all_eight_native_lane_controls_stage_only_at_real_decisions(
         "GT_SCOPE_NATIVE",
         "GT_STEER_NATIVE",
     }
+
+
+def _lane_filter_harness(monkeypatch) -> list[dict]:
+    rows = _capture(monkeypatch)
+    monkeypatch.setenv("GT_SS_PROVENANCE", "1")
+    monkeypatch.setenv("GT_LANE_ENVELOPE", "1")
+    monkeypatch.setattr(g, "_root", lambda: "repo")
+    monkeypatch.setattr(g, "_record_hook_fire", lambda *_args: None)
+    monkeypatch.setattr(g, "_payload_leaks_test_identity", lambda _text: False)
+    monkeypatch.setattr(g, "_ss_screen_delivery", lambda *_args, **_kwargs: (False, ""))
+    monkeypatch.setattr(g, "_oracle_content_hash", lambda text: "state:" + text)
+    monkeypatch.setattr(g, "_oracle_delivered_hashes", set())
+    monkeypatch.setattr(g, "_lane_fits_budget", lambda _text: True)
+    monkeypatch.setattr(g, "_ss_shadow_withheld", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(g, "_ledger_note_delivery", lambda *_args: None)
+    monkeypatch.setattr(g, "_runtime_ledger_record", lambda **_kwargs: None)
+    monkeypatch.setattr(g, "_lane_delivery_extra", lambda *_args: {})
+    monkeypatch.setattr(g, "_record_lane_provenance_control", lambda *_args: None)
+    monkeypatch.setattr(g, "_ss_record_delivered", lambda *_args: None)
+
+    def seal(kind, final_text, target, *, base_output="", producer_text=None) -> None:
+        del base_output
+        g._record_terminal_lane_controls(
+            kind,
+            producer_text if producer_text is not None else final_text,
+            final_text,
+            target,
+        )
+
+    monkeypatch.setattr(g, "_seal_lane_delivery", seal)
+    return rows
+
+
+def test_lane_provenance_rewrite_matches_original_stage_to_final_bytes(
+    monkeypatch,
+) -> None:
+    rows = _lane_filter_harness(monkeypatch)
+    original = "src/mod.py:8: caller\n/tmp/scratch.py:2: noise"
+    final = "src/mod.py:8: caller"
+    monkeypatch.setattr(g, "_ss_provenance_filter", lambda *_args: final)
+    g._stage_terminal_lane_control(
+        "l3.contract", original,
+        feature_id="GT_CONTRACT_NATIVE",
+        decision_site="mini_seam.contract.native_render",
+        decision="APPLIED",
+        reason="native_contract_render",
+    )
+
+    out: dict = {}
+    g._lane_a_deliver(
+        out, "edit", [("l3.contract", original, "src/mod.py")],
+        krel="src/mod.py", event=None)
+
+    assert out["output"] == final
+    native = [row for row in rows
+              if row.get("control_ref", {}).get("feature_id") == "GT_CONTRACT_NATIVE"]
+    assert len(native) == 1
+    assert native[0]["candidate_chars"] == len(final)
+    assert native[0]["candidate_sha256_16"] == hashlib.sha256(
+        final.encode()).hexdigest()[:16]
+
+
+def test_lane_provenance_zero_content_suppression_cannot_attribute(
+    monkeypatch,
+) -> None:
+    rows = _lane_filter_harness(monkeypatch)
+    original = "/tmp/scratch.py:2: noise"
+    monkeypatch.setattr(g, "_ss_provenance_filter", lambda *_args: "")
+    g._stage_terminal_lane_control(
+        "l3.contract", original,
+        feature_id="GT_CONTRACT_NATIVE",
+        decision_site="mini_seam.contract.native_render",
+        decision="APPLIED",
+        reason="native_contract_render",
+    )
+
+    out: dict = {}
+    g._lane_a_deliver(
+        out, "edit", [("l3.contract", original, "src/mod.py")],
+        krel="src/mod.py", event=None)
+
+    assert (out.get("output") or "") == ""
+    assert not any(row.get("control_ref", {}).get("feature_id") == "GT_CONTRACT_NATIVE"
+                   for row in rows)
