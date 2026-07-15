@@ -43,7 +43,7 @@ import re as _re
 import sqlite3
 import statistics
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from groundtruth.pretask.anchors import IssueAnchors, extract_issue_anchors
 from groundtruth.pretask.curation_map import (
@@ -908,6 +908,17 @@ class Candidate:
     lex_hits: int  # # of issue terms intersecting this file's symbol/path identifiers
     degree: int
     confidence: float  # best-witness strength, 0..1 (drives the render gate)
+    # Issue relevance is deliberately separate from structural edge validity.
+    # One deterministic edge proves that edge; it does not prove this file is an
+    # edit target for the current issue.
+    relevance_grade: str = "INFO"
+
+    @property
+    def edge_verified(self) -> bool:
+        return any(
+            w.verified and w.direction != "defines_anchor"
+            for w in self.witnesses
+        )
 
     @property
     def has_verified_witness(self) -> bool:
@@ -1074,6 +1085,38 @@ def _normalize(fp: str) -> str:
     if text.startswith("/"):
         text = text[1:]
     return text
+
+
+def _candidate_relevance_grade(
+    file_path: str,
+    witnesses: list[Witness],
+    *,
+    trusted_anchors: set[str],
+    explicit_paths: set[str],
+    independent_signals: list[str] | tuple[str, ...] = (),
+) -> str:
+    """Grade candidate-local issue relevance without laundering edge truth.
+
+    VERIFIED requires an explicit issue path, an exact trusted definition, or a
+    deterministic candidate-local relation descended from a trusted anchor.
+    Multiple independent retrieval legs earn WARNING; a single retrieval/edge
+    signal is INFO; no support is ABSTAIN.
+    """
+    normalized = _normalize(file_path)
+    normalized_paths = {_normalize(path) for path in explicit_paths if path}
+    if normalized and normalized in normalized_paths:
+        return "VERIFIED"
+    trusted = {(anchor or "").lower() for anchor in trusted_anchors if anchor}
+    for witness in witnesses:
+        if not witness.verified or (witness.anchor or "").lower() not in trusted:
+            continue
+        if witness.direction == "defines_anchor" or witness.edge_type in {"CALLS", "IMPORTS"}:
+            return "VERIFIED"
+    if len(set(independent_signals)) >= 2:
+        return "WARNING"
+    if witnesses or independent_signals:
+        return "INFO"
+    return "ABSTAIN"
 
 
 def _struct_witness_tier(c: "Candidate") -> int:
@@ -3857,6 +3900,22 @@ def localize(
                 f"depth={_depth_authority(_c)} score={_c.score}\n"
             )
     candidates = candidates[:top_k]
+    _explicit_issue_paths = set(getattr(issue_anchors, "paths", None) or set())
+    candidates = [
+        replace(
+            candidate,
+            relevance_grade=_candidate_relevance_grade(
+                candidate.file_path,
+                candidate.witnesses,
+                trusted_anchors=anchors,
+                explicit_paths=_explicit_issue_paths,
+                independent_signals=_signals_by_file.get(
+                    _normalize(candidate.file_path), []
+                ),
+            ),
+        )
+        for candidate in candidates
+    ]
     _final_candidate_paths = {_normalize(c.file_path) for c in candidates}
     _content_terminal_paths = frozenset(
         _content_candidate_paths & _final_candidate_paths)
@@ -3906,9 +3965,10 @@ def localize(
     #   - TOIS 2025 caveat: QPP thresholds don't transfer across collections,
     #     so all checks use per-task distribution metrics (MAD, CV), not absolutes.
     best = candidates[0]
-    if not best.has_verified_witness:
+    if best.relevance_grade != "VERIFIED":
         return LocalizerResult(
-            candidates, anchor_list, best.confidence, False, "top_unverified",
+            candidates, anchor_list, best.confidence, False,
+            f"top_relevance_{best.relevance_grade.lower()}",
             scope_chains=_chains, graph_stats=_stats,
             agreement_by_file=_agreement_by_file, signals_by_file=_signals_by_file,
             n_components=_n_components, symbol_semrank_by_file=_symbol_semrank,
@@ -3918,7 +3978,7 @@ def localize(
             semantic_body_paths=_semantic_body_terminal_paths,
         )
 
-    verified = [c for c in candidates if c.has_verified_witness]
+    verified = [c for c in candidates if c.relevance_grade == "VERIFIED"]
     scores = sorted((c.score for c in candidates), reverse=True)
 
     if len(candidates) == 1:

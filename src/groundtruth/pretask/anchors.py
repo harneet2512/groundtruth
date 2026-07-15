@@ -1,10 +1,10 @@
 """Module 1 — Issue-text anchor extraction.
 
 Extracts symbol names, file paths, and test names from an issue body using
-deterministic regex patterns. Symbols are then cross-checked against
-``nodes.name`` in graph.db so that natural-language false positives
-(e.g. ``broken``, ``implementation``) are dropped before they leak into the
-PPR seed set.
+deterministic regex patterns. Symbol identity is cross-checked against
+``nodes.name`` in graph.db, while issue provenance independently decides
+whether the match is trusted for graph seeding. A unique graph name does not
+turn ordinary issue prose into a code reference.
 
 Pure regex + sqlite. No LLM, no tree-sitter dependency at runtime — fenced
 code blocks are scanned with the same identifier regex as prose, which is
@@ -234,6 +234,10 @@ class IssueAnchors:
     # self-localize. Empty when no graph is provided (without a graph we
     # cannot KNOW a token is unresolved — abstain).
     unresolved_code_symbols: set[str] = field(default_factory=set)
+    # Per-anchor provenance is the relevance authority. Graph uniqueness proves
+    # identity only; it never upgrades prose into a trusted issue anchor.
+    symbol_provenance: dict[str, str] = field(default_factory=dict)
+    path_provenance: dict[str, str] = field(default_factory=dict)
 
 
 # Backtick-wrapped inline code: `symbol` or `module.symbol`
@@ -401,11 +405,35 @@ def _extract_title_region(text: str) -> str:
         if ln.strip():
             region.append(ln.strip().lstrip("#").strip())  # title = first non-empty line
             break
-    for ln in lines:  # markdown ATX headings anywhere are section titles
-        s = ln.strip()
-        if s.startswith("#"):
-            region.append(s.lstrip("#").strip())
     return "\n".join(region)
+
+
+_TRACEBACK_LINE_RE = re.compile(
+    r"(?im)^\s*(?:traceback\b|file\s+['\"]|at\s+[A-Za-z_$]|\w[^\n]*:\d+(?::\d+)?)"
+)
+
+
+def _extract_traceback_identifiers(text: str) -> set[str]:
+    """Identifiers on explicit stack/trace location lines (weak provenance)."""
+    out: set[str] = set()
+    for line in (text or "").splitlines():
+        if _TRACEBACK_LINE_RE.search(line):
+            out.update(_extract_raw_identifiers(line))
+    return out
+
+
+def _title_code_identifiers(title: str) -> set[str]:
+    """Graph-confirmable code-shaped identifiers on the actual summary line."""
+    out: set[str] = set()
+    for token in _extract_raw_identifiers(title):
+        if (
+            "." in token
+            or "_" in token
+            or (token != token.lower() and token != token.upper())
+            or re.search(rf"\b{re.escape(token)}\s*(?:\(|::)", title)
+        ):
+            out.add(token)
+    return out
 
 
 def _extract_paths(text: str) -> set[str]:
@@ -589,8 +617,8 @@ def extract_issue_anchors(
             continue
         after_filter.add(tok)
 
-    resolved = _cross_check_against_graph(after_filter, graph_db_path)
-    resolved = _drop_generic_hubs(resolved, graph_db_path)
+    resolved_graph = _cross_check_against_graph(after_filter, graph_db_path)
+    resolved_graph = _drop_generic_hubs(resolved_graph, graph_db_path)
 
     # QUALIFIED dotted anchors (fix 2026-06-10 — §4 anchor-extraction defect):
     # a dotted token (``Class.method`` / ``module.func``) can never survive the
@@ -602,10 +630,10 @@ def extract_issue_anchors(
     # generic-hub gate — qualification structurally disambiguates (it is the
     # opposite of a homonym). Correct-or-quiet: unconfirmed dotted tokens stay out.
     _qualified_dotted = _resolve_qualified_dotted(
-        {t for t in after_filter if "." in t and t not in resolved},
+        {t for t in after_filter if "." in t and t not in resolved_graph},
         graph_db_path,
     )
-    resolved |= _qualified_dotted
+    resolved_graph |= _qualified_dotted
 
     # `Type::method` qualified pairs (2026-06-10, DeepSWE non-Python audit):
     # Rust/C++ path syntax decomposes under _IDENT_RE into two bare tokens that
@@ -619,18 +647,15 @@ def extract_issue_anchors(
         for m in _QUALIFIED_COLON_RE.finditer(issue_text)
     }
     _colon_confirmed = _resolve_qualified_dotted(
-        {t for t in _colon_pairs if t not in resolved}, graph_db_path,
+        {t for t in _colon_pairs if t not in resolved_graph}, graph_db_path,
     )
     _qualified_dotted |= _colon_confirmed
-    resolved |= _colon_confirmed
+    resolved_graph |= _colon_confirmed
 
-    # PROVENANCE tier (BugLocator ICSE 2012; Schröter MSR 2010): the resolved
-    # symbols that also occur in the TITLE / heading region are the high-signal
-    # localization anchors; everything else (body + pasted traceback) is the
-    # weak tier. Consumers rank title_symbols first so stack-frame pollution
-    # (main/import_asis/apply_choice…) no longer ties with the titled target.
-    _title_idents = _extract_raw_identifiers(_extract_title_region(issue_text))
-    title_symbols = {s for s in resolved if s in _title_idents}
+    # Summary provenance: only code-shaped identifiers on the actual first
+    # non-empty issue line qualify. Markdown body headings remain prose queries;
+    # traceback identifiers are recorded separately as weak provenance.
+    _title_idents = _title_code_identifiers(_extract_title_region(issue_text))
 
     # CODE provenance (Reformulate, Retrieve, Localize arXiv:2512.07022, 2025;
     # Query Reduction for Bug Localization Mejia-Bernal et al. JSS 2025):
@@ -640,7 +665,12 @@ def extract_issue_anchors(
     # "check" in "configure and check trusted_hosts" doesn't seed a false graph
     # witness to json/tag.py::check() (the flask-5637 mislocalization).
     _code_idents = _extract_code_region_identifiers(issue_text)
-    code_symbols = {s for s in resolved if s in _code_idents}
+    code_symbols = {s for s in resolved_graph if s in _code_idents}
+    title_symbols = {s for s in resolved_graph if s in _title_idents}
+    # Graph membership proves identity, not issue relevance. Only explicit code
+    # provenance or a code-shaped identifier on the actual summary line seeds
+    # traversal. Body prose/headings/tracebacks remain lexical query material.
+    resolved = set(_qualified_dotted) | code_symbols | title_symbols
     # Remove prose-only common words from the main anchor set. They stay in
     # symbols_raw for telemetry but don't seed the graph localizer. This is
     # STRONGER than downweighting — a false seed produces a false witness that
@@ -678,6 +708,21 @@ def extract_issue_anchors(
             _prose_demoted.add(s)
             resolved.discard(s)
 
+    _traceback_idents = _extract_traceback_identifiers(issue_text)
+    symbol_provenance: dict[str, str] = {}
+    for symbol in sorted(resolved_graph):
+        if symbol in _qualified_dotted:
+            provenance = "QUALIFIED_CODE"
+        elif symbol in code_symbols:
+            provenance = "CODE_SYMBOL"
+        elif symbol in title_symbols:
+            provenance = "TITLE_SYMBOL"
+        elif symbol in _traceback_idents:
+            provenance = "TRACEBACK"
+        else:
+            provenance = "PROSE_QUERY"
+        symbol_provenance[symbol] = provenance
+
     # GREENFIELD tier (2026-06-10): reporter-marked code tokens that resolved
     # to NOTHING in the graph. Only meaningful WITH a graph (without one we
     # cannot know a token is unresolved — abstain, keep empty). Language
@@ -709,4 +754,6 @@ def extract_issue_anchors(
         title_symbols=title_symbols,
         code_symbols=code_symbols,
         unresolved_code_symbols=unresolved_code_symbols,
+        symbol_provenance=symbol_provenance,
+        path_provenance={path: "EXPLICIT_PATH" for path in _extract_paths(issue_text)},
     )

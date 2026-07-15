@@ -274,6 +274,9 @@ class FileEntry:
     # function_names) out of the [INFO] drop. Without this the one signal that
     # correctly identified gold died at the FileEntry boundary (BUG-3).
     anchor_prox: float = 0.0
+    # Candidate-local issue relevance from graph_localizer. This is distinct
+    # from witness_verified/edge truth and is the authority for confidence tags.
+    relevance_grade: str = ""
 
 
 def _candidate_acquisition_sources(
@@ -1800,15 +1803,20 @@ def _model_visible_localization_entries(
     matching to localization headers and file-entry blocks so a path mentioned only
     as a caller/neighbor is not promoted to a delivered edit candidate.
     """
-    candidate_blocks = [
-        block["text"]
-        for block in _segment_brief_blocks(brief_text or "")
-        if block["label"] == "localization-header"
-        or block["label"].startswith("file-entry")
-    ]
-    if not candidate_blocks:
+    candidate_lines: list[str] = []
+    for block in _segment_brief_blocks(brief_text or ""):
+        if (
+            block["label"] != "localization-header"
+            and not block["label"].startswith("file-entry")
+        ):
+            continue
+        candidate_lines.extend(
+            line.replace("\\", "/")
+            for line in block["text"].splitlines()
+            if _re.match(r"^\s*\d+\.\s+", line)
+        )
+    if not candidate_lines:
         return []
-    visible = "\n".join(candidate_blocks).replace("\\", "/")
     out: list[FileEntry] = []
     for entry in candidates:
         raw_path = str(entry.path or "").replace("\\", "/")
@@ -1816,10 +1824,14 @@ def _model_visible_localization_entries(
         variants = [path for path in dict.fromkeys((raw_path, normalized_path)) if path]
         if not variants:
             continue
-        if any(_re.search(
-            rf"(?<![A-Za-z0-9_./-]){_re.escape(path)}(?![A-Za-z0-9_./-])",
-            visible,
-        ) for path in variants):
+        if any(
+            _re.match(
+                rf"^\s*\d+\.\s+{_re.escape(path)}(?![A-Za-z0-9_./-])",
+                line,
+            )
+            for path in variants
+            for line in candidate_lines
+        ):
             out.append(entry)
     return out
 
@@ -2704,7 +2716,16 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     Cursor-style honesty per .claude/CLAUDE.md: never present low-confidence
     guesses as confident ranked facts.
     """
-    # HI-tier rendering format from _caller_contract_for_file is
+    relevance_grade = str(getattr(entry, "relevance_grade", "") or "").upper()
+    if relevance_grade:
+        if relevance_grade == "VERIFIED":
+            return "[VERIFIED]"
+        if relevance_grade == "WARNING":
+            return "[WARNING]"
+        return "[INFO]"
+
+    # Legacy/non-localizer fallback. HI-tier rendering format from
+    # _caller_contract_for_file is
     # "func_name() in file.py:line `code`". Anchor on "() in " to avoid
     # false positives from paths containing the substring " in ".
     contract_has_func_names = "() in " in (entry.contract or "")
@@ -4403,7 +4424,9 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     ]
     if _kept:
         cands = _kept
-    _evidenced = sum(1 for c in cands if c.has_verified_witness) or 3
+    _evidenced = sum(
+        1 for c in cands if getattr(c, "relevance_grade", "") == "VERIFIED"
+    ) or 3
     K = min(max(3, _evidenced), 6, len(cands))
     shown = cands[:K]
 
@@ -4548,9 +4571,6 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
             # off => "" => byte-identical to today. SAME lines, SAME order.
             _rc = f"  — {_sig_receipt(c.file_path)}" if _ledger else ""
             out.append(f"  {i}. {c.file_path}{_rc}")
-            _wt = _resolved_witness_tail(graph_db, c.file_path)
-            if _wt:
-                out.append(f"     {_wt}")
         out.append("</gt-localization>")
         return "\n".join(out), shown[0].file_path
 
@@ -4586,9 +4606,6 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         # gap where the header's candidates carried no call-edge witness and the
         # resolution only reached the agent reactively (post_view, iters 8/10/49).
         # Deterministic + stdlib-shadow-guarded; correct-or-quiet (no fact -> no line).
-        _wt = _resolved_witness_tail(graph_db, c.file_path)
-        if _wt:
-            out.append(f"     {_wt}")
     out.append("</gt-localization>")
     return "\n".join(out), shown[0].file_path
 
@@ -4606,14 +4623,9 @@ def _localization_header_for_entries(
     candidates by the terminal evidence order already represented by ``entries``.
     The input objects are never mutated.
     """
-    header, primary = _localization_header(loc, graph_db, issue_text)
-    tier = _localization_confidence_tier(header)
-    if tier not in {"medium", "low"} or loc is None or not loc.candidates or not entries:
-        return header, primary, tier
-
-    terminal_rank = {
-        _gl_normalize(entry.path): index for index, entry in enumerate(entries)
-    }
+    if loc is None or not loc.candidates or not entries:
+        return "", "", ""
+    terminal_rank = {_gl_normalize(entry.path): index for index, entry in enumerate(entries)}
     original_rank = {id(candidate): index for index, candidate in enumerate(loc.candidates)}
     shared = [
         candidate for candidate in loc.candidates
@@ -4624,17 +4636,16 @@ def _localization_header_for_entries(
         # file-entry renderer remains the honest orientation; do not retain an
         # unjoinable localizer-only contention block.
         return "", "", ""
-    ordered = sorted(
-        shared,
-        key=lambda candidate: (
-            terminal_rank.get(_gl_normalize(candidate.file_path), 10**6),
-            original_rank[id(candidate)],
-        ),
-    )
-    if len(ordered) == len(loc.candidates) and all(
-        a is b for a, b in zip(ordered, loc.candidates)
-    ):
-        return header, primary, tier
+    initial_header, _initial_primary = _localization_header(loc, graph_db, issue_text)
+    initial_tier = _localization_confidence_tier(initial_header)
+    ordered = list(shared)
+    if initial_tier in {"medium", "low"}:
+        ordered.sort(
+            key=lambda candidate: (
+                terminal_rank.get(_gl_normalize(candidate.file_path), 10**6),
+                original_rank[id(candidate)],
+            )
+        )
     ordered_loc = replace(loc, candidates=ordered)
     header, primary = _localization_header(ordered_loc, graph_db, issue_text)
     return header, primary, _localization_confidence_tier(header)
@@ -4685,10 +4696,28 @@ def _exact_issue_named_files(
     """
     import re as _re
     import sqlite3 as _sq
-    toks = set(_re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text or ""))
+    if issue_anchors is None:
+        try:
+            from groundtruth.pretask.anchors import extract_issue_anchors
+            issue_anchors = extract_issue_anchors(issue_text, graph_db)
+        except Exception:
+            issue_anchors = None
+    trusted_symbols = (
+        set(getattr(issue_anchors, "symbols", None) or set())
+        | set(getattr(issue_anchors, "title_symbols", None) or set())
+        | set(getattr(issue_anchors, "code_symbols", None) or set())
+    )
+    toks = set(trusted_symbols)
+    for token in tuple(trusted_symbols):
+        toks.update(part for part in token.replace("::", ".").split(".") if part)
     toks |= {t.lower() for t in toks}
+    explicit_paths = {
+        _gl_normalize(path)
+        for path in (getattr(issue_anchors, "paths", None) or set())
+        if path
+    }
     out: dict[str, list[str]] = {}
-    if not toks:
+    if not toks and not explicit_paths:
         return out
     # Reporter-confirmed provenance (title / backtick code) — exempts ONLY the
     # short-name shape skip below, never the dunder/generic/ambiguity gates.
@@ -4700,6 +4729,19 @@ def _exact_issue_named_files(
     _MAX_FILES_PER_NAME = 3  # a name spread across >3 files is generic, not a specific anchor
     try:
         c = _sq.connect(graph_db)
+        # An exact reporter-supplied path is already candidate-local provenance.
+        # It does not need a long or distinctive basename: those heuristics only
+        # protect prose-derived stems.  Confirm membership against the graph so a
+        # nonexistent/scratch path is still correct-or-quiet.
+        for (fp,) in c.execute(
+            "SELECT DISTINCT file_path FROM nodes "
+            "WHERE is_test=0 AND file_path IS NOT NULL"
+        ):
+            if fp and _gl_normalize(str(fp)) in explicit_paths:
+                stem = os.path.splitext(os.path.basename(str(fp).replace("\\", "/")))[0]
+                out.setdefault(str(fp), [])
+                if stem and stem not in out[str(fp)]:
+                    out[str(fp)].append(stem)
         _name_files: dict[str, set[str]] = {}
         for name, fp in c.execute(
             "SELECT DISTINCT name, file_path FROM nodes "
@@ -4747,12 +4789,7 @@ def _exact_issue_named_files(
             # merely the bare word in prose. A bare-word match floods the guarantee on a
             # long issue (8 files here) and the downstream _promote[:3] cap then drops the
             # real gold. Module-reference is the specific "the issue names this file" signal.
-            if _re.search(
-                rf"{_re.escape(stem)}\.py\b|\.{_re.escape(stem)}\b|\b{_re.escape(stem)}\."
-                rf"|\b{_re.escape(stem)}\s+(?:plugin|module|file|script)\b"
-                rf"|\b(?:plugin|module|file|script)\s+{_re.escape(stem)}\b",
-                issue_text or "", _re.IGNORECASE,
-            ):
+            if _gl_normalize(str(fp)) in explicit_paths:
                 _stem_files.setdefault(stem, set()).add(fp)
         for stem, files in _stem_files.items():
             if len(files) > _MAX_FILES_PER_NAME:                # ambiguous stem -> not a specific anchor
@@ -5305,6 +5342,7 @@ def generate_v1r_brief(
     _loc: LocalizerResult | None = None
     _witness_by_file: dict[str, str] = {}
     _witness_verified_by_file: dict[str, bool] = {}
+    _relevance_by_file: dict[str, str] = {}
     _resolution_methods_by_file: dict[str, frozenset[str]] = {}
     _loc_conf_by_file: dict[str, float] = {}
     # The localizer's OWN rank per file (0 = its #1). This is the authoritative
@@ -5356,6 +5394,12 @@ def generate_v1r_brief(
                 "code_symbols": sorted(getattr(_anchors_obj, "code_symbols", set())),
                 "unresolved_code_symbols": sorted(
                     getattr(_anchors_obj, "unresolved_code_symbols", set())),
+                "symbol_provenance": dict(sorted(
+                    (getattr(_anchors_obj, "symbol_provenance", {}) or {}).items()
+                )),
+                "path_provenance": dict(sorted(
+                    (getattr(_anchors_obj, "path_provenance", {}) or {}).items()
+                )),
                 "obligations": _obligations,
             }
             if _obligations_v2_on():
@@ -5390,8 +5434,12 @@ def generate_v1r_brief(
         _promoted: list[dict] = []
         for _ci, cand in enumerate(_loc.candidates):
             cf = cand.file_path
-            _witness_by_file[cf] = cand.render_witness()
-            _witness_verified_by_file[cf] = cand.has_verified_witness
+            _relevance = str(getattr(cand, "relevance_grade", "INFO") or "INFO")
+            _relevance_by_file[cf] = _relevance
+            _witness_by_file[cf] = (
+                cand.render_witness() if _relevance == "VERIFIED" else ""
+            )
+            _witness_verified_by_file[cf] = _relevance == "VERIFIED"
             _resolution_methods_by_file[cf] = frozenset(
                 str(getattr(witness, "resolution_method", "") or "").strip().lower()
                 for witness in cand.witnesses
@@ -5810,6 +5858,13 @@ def generate_v1r_brief(
         _back: list[dict] = []    # coincidence -> append below native top, capped
         for _fp in sorted(_ein_n):                               # DETERMINISM (B5-4): dict-from-set order
             if _fp in _in_top:
+                # Preserve the trusted exact-name provenance on an already-present
+                # record. Later vendor filtering can remove its stronger sibling;
+                # without this stamp the surviving source record becomes hollow and
+                # the terminal RRF incorrectly drops it.
+                for _existing_record in top_records:
+                    if _rfp(_existing_record) == _fp:
+                        _existing_record["_exact_issue_named"] = True
                 continue
             _r = _bp.get(_fp) or {"path": _fp, "score": _topsc + 0.01,
                                   "functions": _ein_n[_fp][:3], "witnesses": [], "_exact_issue_named": True}
@@ -5899,6 +5954,31 @@ def generate_v1r_brief(
             _witness_verified_by_file.get(path) or _witness_verified_by_file.get(_pn)
         )
         _wit_conf = _loc_conf_by_file.get(path) or _loc_conf_by_file.get(_pn) or 0.0
+        _relevance = _relevance_by_file.get(path) or _relevance_by_file.get(_pn) or ""
+        if not _relevance:
+            _explicit_paths = {
+                _gl_normalize(p)
+                for p in (getattr(_anchors_obj, "paths", None) or set())
+                if p
+            }
+            if _pn in _explicit_paths or rec.get("_exact_issue_named"):
+                _relevance = "VERIFIED"
+            else:
+                _comps = rec.get("components") or {}
+                _classes = {
+                    "lexical": float(_comps.get("lex", 0.0) or 0.0)
+                    + float(_comps.get("code_def", 0.0) or 0.0),
+                    "semantic": float(_comps.get("sem", 0.0) or 0.0),
+                    "structural": float(_comps.get("reach", 0.0) or 0.0)
+                    + float(_comps.get("anchor_prox", 0.0) or 0.0)
+                    + float(_comps.get("witness", 0.0) or 0.0),
+                    "path": float(_comps.get("path", 0.0) or 0.0),
+                    "historical": float(_comps.get("frame", 0.0) or 0.0),
+                }
+                _relevance = (
+                    "WARNING" if sum(value > 0 for value in _classes.values()) >= 2
+                    else "INFO"
+                )
         # v74 anchor proximity for this candidate (edge-independent issue-subject
         # signal) — carried onto the FileEntry so _entry_confidence_tier can keep an
         # anchor-matched file out of the [INFO] drop (BUG-3). Records are dicts with a
@@ -5923,6 +6003,7 @@ def generate_v1r_brief(
                 witness_verified=_wit_ver,
                 localizer_confidence=_wit_conf,
                 anchor_prox=_aprox,
+                relevance_grade=_relevance,
             )
         )
 
@@ -5933,22 +6014,13 @@ def generate_v1r_brief(
     # a weak localizer #1 from overriding stronger fused evidence while keeping the
     # brief internally consistent. Pure reorder of a frozen localizer view; no
     # candidate is added/dropped and the inputs are not mutated.
-    if _brief_minimal_on():
-        # Minimal bytes and their telemetry share one bounded population.  Apply
-        # max_files before either renderer so no visible header candidate can sit
-        # outside `.files`/localization_proof.
-        entries = entries[:max_files]
-        _loc_header, _loc_primary, _loc_tier = _localization_header_for_entries(
-            _loc, graph_db, issue_text, entries,
-        )
-    else:
-        # The weak-order correction belongs to GT_BRIEF_MINIMAL's calibrated
-        # contention contract.  Keep the historical renderer call path exact when
-        # that flag is off; profile kill-switches must restore prior bytes.
-        _loc_header, _loc_primary = _localization_header(
-            _loc, graph_db, issue_text,
-        )
-        _loc_tier = _localization_confidence_tier(_loc_header)
+    # Full and minimal renders share one bounded candidate population. A localizer-
+    # only path cannot appear in the header while being absent from FileEntry,
+    # `.files`, and localization_proof.
+    entries = entries[:max_files]
+    _loc_header, _loc_primary, _loc_tier = _localization_header_for_entries(
+        _loc, graph_db, issue_text, entries,
+    )
     if _loc_tier == "high" and _loc_header and _loc_primary and entries:
         _lp_norm = _gl_normalize(_loc_primary)
         _pi = next(
@@ -6280,6 +6352,7 @@ def generate_v1r_brief(
             "function_names": list(getattr(_e, "function_names", []) or [])[:8],
             "witness": getattr(_e, "witness", "") or "",
             "witness_verified": bool(getattr(_e, "witness_verified", False)),
+            "relevance_grade": str(getattr(_e, "relevance_grade", "INFO") or "INFO"),
             "localizer_confidence": float(getattr(_e, "localizer_confidence", 0.0) or 0.0),
             "anchor_prox": float(getattr(_e, "anchor_prox", 0.0) or 0.0),
             "components": _components,
@@ -6439,6 +6512,7 @@ def generate_v1r_brief(
                         "confidence_score": _conf,
                         "witnessed": bool(entry.witness),
                         "witness_verified": entry.witness_verified,
+                        "relevance_grade": entry.relevance_grade,
                         "witness": entry.witness,
                         "source": "graph_traversal" if entry.witness else "graph_db",
                         "reason": _reason,
