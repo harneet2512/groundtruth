@@ -11846,15 +11846,49 @@ def _batch_identity(actions) -> tuple[str, tuple[str, ...]]:
     return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()[:16], keys
 
 
-def _begin_observation_batch(owner, model, actions):
+def _batch_action_sha256(keys) -> str:
+    """Full-width audit identity for the exact canonical action-key batch."""
+    raw = json.dumps(tuple(keys or ()), separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _policy_observation_id(start_iteration: int, parent_sha256: str,
+                           action_sha256: str) -> str:
+    """Unambiguous host-only identity for one parent-policy observation."""
+    framed = (
+        b"gt.observation.v1\x00"
+        + int(start_iteration).to_bytes(8, "big", signed=False)
+        + bytes.fromhex(parent_sha256)
+        + bytes.fromhex(action_sha256)
+    )
+    return hashlib.sha256(framed).hexdigest()
+
+
+def _begin_observation_batch(owner, model, actions, *, parent_message=None):
     global _observation_batch_serial
     identity, keys = _batch_identity(actions)
+    parent_content = (
+        parent_message.get("content", "")
+        if isinstance(parent_message, dict) else ""
+    )
+    if not isinstance(parent_content, str):
+        parent_content = ""
+    parent_sha256 = hashlib.sha256(
+        parent_content.encode("utf-8", "surrogatepass")).hexdigest()
+    action_sha256 = _batch_action_sha256(keys)
+    start_iteration = max(0, int(globals().get("_action_count", 0) or 0))
     with _batch_lock:
         _observation_batch_serial += 1
         state = {
             "serial": _observation_batch_serial,
             "owner": id(owner), "model": id(model),
             "identity": identity, "action_keys": keys,
+            "batch_start_iteration": start_iteration,
+            "parent_policy_sha256": parent_sha256,
+            "parent_policy_chars": len(parent_content),
+            "action_batch_sha256": action_sha256,
+            "observation_id": _policy_observation_id(
+                start_iteration, parent_sha256, action_sha256),
             "pool": [], "contexts": {}, "rollbacks": {}, "prepared": {},
             "excluded": [], "observed_keys": [], "outputs": [], "invalid": False,
             "precommitted_doses": [],
@@ -11866,6 +11900,69 @@ def _begin_observation_batch(owner, model, actions):
         _batch_owners[state["serial"]] = state
         state["token"] = _batch_context.set(state)
     return state
+
+
+def _record_batch_opportunities(state, plans, planned_winner) -> None:
+    """Persist formatter-validated candidate opportunities without model bytes.
+
+    Raw parent prose, actions, candidate kinds, symbols, payloads, and dedup keys
+    are deliberately excluded.  Typed lineage is the only feature authority;
+    absent or producer-mismatched lineage remains explicitly UNMEASURED.
+    """
+    if not _inseam_metrics_on():
+        return
+    observation_id = str(state.get("observation_id") or "")
+    for ordinal, (candidate, _thunk) in enumerate(state.get("pool") or ()):
+        kind_sha256 = hashlib.sha256(
+            str(getattr(candidate, "kind", "") or "").encode(
+                "utf-8", "surrogatepass")).hexdigest()
+        dedup_sha256 = hashlib.sha256(
+            str(getattr(candidate, "dedup_key", "") or "").encode(
+                "utf-8", "surrogatepass")).hexdigest()
+        opportunity_id = hashlib.sha256(
+            b"gt.opportunity.v1\x00"
+            + bytes.fromhex(observation_id)
+            + ordinal.to_bytes(8, "big", signed=False)
+            + bytes.fromhex(kind_sha256)
+            + bytes.fromhex(dedup_sha256)
+        ).hexdigest()
+        lineage_extra = _feature_lineage_extra(
+            getattr(candidate, "lineage", None))
+        feature_refs = lineage_extra.get("feature_ids") or []
+        if (feature_refs
+                and lineage_extra.get("producer_registration_match") is True):
+            attribution_status = "BOUND"
+            attribution_reason = "typed_lineage"
+        else:
+            feature_refs = []
+            attribution_status = "UNMEASURED"
+            attribution_reason = (
+                "producer_registration_mismatch"
+                if lineage_extra else "typed_lineage_absent")
+        plan = plans.get(id(candidate))
+        _ledger_line_direct({
+            "layer": "feature.opportunity",
+            "event_type": "policy_observation",
+            "file_path": "",
+            "outcome": "eligible",
+            "reason": "formatter_visible_candidate",
+            "chars_delivered": 0,
+            "iteration": int(state.get("batch_start_iteration") or 0),
+            "observation_id": observation_id,
+            "opportunity_id": opportunity_id,
+            "parent_policy_sha256": state.get("parent_policy_sha256", ""),
+            "parent_policy_chars": int(state.get("parent_policy_chars") or 0),
+            "action_batch_sha256": state.get("action_batch_sha256", ""),
+            "candidate_ordinal": ordinal,
+            "candidate_kind_sha256": kind_sha256,
+            "candidate_dedup_sha256": dedup_sha256,
+            "delivery_eligible": bool(
+                plan is not None and plan.disposition != "suppressed"),
+            "selected": candidate is planned_winner,
+            "feature_refs": feature_refs,
+            "attribution_status": attribution_status,
+            "attribution_reason": attribution_reason,
+        })
 
 
 def _clear_tool_observation_batch(state=None) -> None:
@@ -13036,6 +13133,14 @@ def install_observation_batch_commit(agent) -> bool:
             _discard_tool_observation_batch("batch_overlap", state)
             return original(message, outputs, *args, **kwargs)
 
+        # Host-only audit binding.  At this point the formatter has succeeded,
+        # an intended delivery survived exact-suffix verification, and overlap
+        # has been excluded.  The rows do not participate in rendering or dose.
+        try:
+            _record_batch_opportunities(state, plans, planned_winner)
+        except Exception:  # noqa: BLE001 - audit metadata never breaks the agent loop
+            pass
+
         # Phase 2 consumes the same frozen result. Formatter-visible bytes are
         # already fixed at this point; an ordinary commit fault cannot honestly
         # be converted back to zero-dose after durable ledger/receipt writes may
@@ -13129,7 +13234,8 @@ def install_observation_batch_commit(agent) -> bool:
     def _execute_with_gt_batch(message, *args, **kwargs):
         actions = (message.get("extra", {}).get("actions", [])
                    if isinstance(message, dict) else [])
-        state = _begin_observation_batch(agent, model, actions)
+        state = _begin_observation_batch(
+            agent, model, actions, parent_message=message)
         try:
             return original_execute(message, *args, **kwargs)
         finally:
