@@ -75,6 +75,22 @@ _PASSAGE_TOKEN_WINDOW = 128
 _E5_QUERY_TOKEN_WINDOW = 512
 _GTE_QUERY_TOKEN_WINDOW = 1024
 
+
+def _deterministic_session_options(ort_module):
+    """Build the single CPU inference policy used by every GT ONNX embedder.
+
+    Embedding scores feed rank-based fusion, where a sub-ULP reduction difference
+    can become a full reciprocal-rank step.  Pin execution at the runtime owner
+    instead of relying on harness-specific OpenMP environment variables: ONNX
+    Runtime owns its own thread pools, and GT is deterministic across every host.
+    """
+    options = ort_module.SessionOptions()
+    options.execution_mode = ort_module.ExecutionMode.ORT_SEQUENTIAL
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
+    options.add_session_config_entry("session.use_deterministic_compute", "1")
+    return options
+
 # GT_PASSAGE_WIDE (default OFF): the per-SYMBOL passage window (_PASSAGE_TOKEN_WINDOW =
 # 128) is memory-conservative and was tuned for the RETIRED e5 encoder. The current
 # default embedder (gte-modernbert-base) supports 8192 and the QUERY side already uses
@@ -232,7 +248,12 @@ class EmbeddingModel:
             tokenizer.enable_truncation(max_length=_pw)
 
             self._tokenizer = tokenizer
-            self._session = ort_mod.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+            session_options = _deterministic_session_options(ort_mod)
+            self._session = ort_mod.InferenceSession(
+                str(onnx_path),
+                sess_options=session_options,
+                providers=["CPUExecutionProvider"],
+            )
             # Introspect the declared inputs ONCE. ModernBERT's ONNX declares only
             # input_ids + attention_mask (no token_type_ids); e5's declares all three.
             # Feeding an input the graph does not declare raises in onnxruntime, so we

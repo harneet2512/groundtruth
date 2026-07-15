@@ -28,6 +28,7 @@ import re
 import time
 import threading
 from dataclasses import dataclass, asdict, field
+from numbers import Real
 from pathlib import Path
 from typing import Any, Literal
 
@@ -902,6 +903,36 @@ def _total_score(components: dict[str, float], weights: dict[str, float]) -> flo
 # generic sentence-transformer adds ~2-3pp, so "det" is near-free + on-thesis).
 _RRF_SIGNALS_FULL = ("sem", "lex", "reach", "anchor_prox", "path", "frame", "code_def")
 _RRF_SIGNALS_DET = ("lex", "reach", "anchor_prox", "path", "frame", "code_def")
+_FUSION_COMPONENT_DECIMALS = 6
+
+
+def _canonicalize_fusion_components(
+    components_map: dict[str, dict[str, float]],
+) -> dict[str, dict[str, float]]:
+    """Return the component map at the scorer's declared numeric precision.
+
+    ``RankedFile.components`` has always exposed six decimal places, but RRF
+    previously ranked the hidden higher-precision values.  Tiny backend reduction
+    noise could therefore leave every persisted component equal while changing a
+    reciprocal rank and the final score.  Fusion and its proof artifact now consume
+    one numeric contract.  Non-finite sentinels retain their existing behavior and
+    the input map is never mutated.
+    """
+    import math
+
+    return {
+        file_path: {
+            component: (
+                round(float(value), _FUSION_COMPONENT_DECIMALS)
+                if isinstance(value, Real)
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                else value
+            )
+            for component, value in components.items()
+        }
+        for file_path, components in components_map.items()
+    }
 
 
 def _rrf_fuse(
@@ -1727,6 +1758,16 @@ def run_v74(
         return out
 
     _rrf_mode = os.environ.get("GT_RRF_FUSION", "").strip().lower()
+    _rrf_modes = {
+        "wrrf", "sem_primary", "dense_primary",
+        "1", "on", "full", "rrf",
+        "det", "deterministic", "nosem",
+    }
+    if _rrf_mode in _rrf_modes:
+        # RRF is discontinuous at a rank swap.  Consume the same six-decimal
+        # component contract that RankedFile persists, while leaving the legacy
+        # linear path exactly unchanged when GT_RRF_FUSION is unset.
+        components_map = _canonicalize_fusion_components(components_map)
     if _rrf_mode in ("wrrf", "sem_primary", "dense_primary"):
         _rrf = _rrf_fuse(components_map, all_files, _RRF_SIGNALS_FULL, weights=_wrrf_weights())
         scored = [(fp, _hub_demote(fp, _rrf.get(fp, 0.0)), components_map[fp]) for fp in all_files]

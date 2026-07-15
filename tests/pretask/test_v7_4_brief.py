@@ -6,6 +6,7 @@ without a real gt-index run.
 """
 from __future__ import annotations
 
+import math
 import sqlite3
 import textwrap
 from pathlib import Path
@@ -554,6 +555,60 @@ def _rrf_run_tokens_score(monkeypatch, tiny_db_v74, tiny_repo, hub_pen_for_token
     by_path = {r["path"]: r for r in result.ranked_full}
     assert "src/tokens.py" in by_path, "tokens.py must be a candidate"
     return by_path["src/tokens.py"]
+
+
+def test_numeric_canonicalization_is_rrf_only(
+    tiny_db_v74: str, tiny_repo: str, monkeypatch
+):
+    """The default linear scorer retains its exact historical numeric inputs."""
+    from groundtruth.pretask import v7_4_brief as _b
+
+    monkeypatch.delenv("GT_RRF_FUSION", raising=False)
+
+    def _must_not_run(_components):
+        raise AssertionError("linear scoring must not canonicalize RRF components")
+
+    monkeypatch.setattr(_b, "_canonicalize_fusion_components", _must_not_run)
+    result = _b.run_v74(
+        issue_text="Token tokenize parse_expr handling",
+        repo_root=tiny_repo,
+        graph_db=tiny_db_v74,
+        gold_files=[],
+        ablation="C",
+    )
+    assert result.ranked_full
+
+
+def test_rrf_run_canonicalizes_at_the_live_fusion_boundary(
+    tiny_db_v74: str, tiny_repo: str, monkeypatch
+):
+    from groundtruth.pretask import v7_4_brief as _b
+
+    monkeypatch.setenv("GT_RRF_FUSION", "on")
+    original = _b._canonicalize_fusion_components
+    seen: list[dict[str, dict[str, float]]] = []
+
+    def _record(components):
+        canonical = original(components)
+        seen.append(canonical)
+        return canonical
+
+    monkeypatch.setattr(_b, "_canonicalize_fusion_components", _record)
+    result = _b.run_v74(
+        issue_text="Token tokenize parse_expr handling",
+        repo_root=tiny_repo,
+        graph_db=tiny_db_v74,
+        gold_files=[],
+        ablation="C",
+    )
+    assert result.ranked_full
+    assert len(seen) == 1
+    assert all(
+        value == round(value, 6)
+        for components in seen[0].values()
+        for value in components.values()
+        if isinstance(value, (int, float)) and math.isfinite(value)
+    )
 
 
 def test_item20_rrf_mode_applies_hub_demotion(
