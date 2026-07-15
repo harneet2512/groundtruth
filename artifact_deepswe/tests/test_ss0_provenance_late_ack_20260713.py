@@ -343,6 +343,36 @@ def test_ack_true_on_entity_reference(monkeypatch):
     assert g._ss_pending_acks == []                     # consumed
 
 
+def test_ack_symbol_requires_an_exact_identifier_reference(monkeypatch):
+    """A symbol substring inside an unrelated word is not an acknowledgment."""
+    monkeypatch.setattr(g, "_GT_BASELINE", False)
+    monkeypatch.setenv("GT_SS_ACK_METRICS", "1")
+    g._ss_pending_acks.clear()
+    rows: list = []
+    monkeypatch.setattr(g, "_ledger_line_direct", lambda r: rows.append(r))
+    g._action_count = 5
+    g._ss_note_delivery_for_ack("l3.contract", "call render() before returning")
+    g._action_count = 6
+    g._ss_scan_acks("the renderer configuration is unrelated")
+    assert rows == []
+    assert len(g._ss_pending_acks) == 1
+
+
+def test_ack_path_requires_an_exact_path_token(monkeypatch):
+    """A delivered path must not match a longer, different path token."""
+    monkeypatch.setattr(g, "_GT_BASELINE", False)
+    monkeypatch.setenv("GT_SS_ACK_METRICS", "1")
+    g._ss_pending_acks.clear()
+    rows: list = []
+    monkeypatch.setattr(g, "_ledger_line_direct", lambda r: rows.append(r))
+    g._action_count = 5
+    g._ss_note_delivery_for_ack("l3.contract", "inspect src/foo.py")
+    g._action_count = 6
+    g._ss_scan_acks("inspect src/foo.py.bak instead")
+    assert rows == []
+    assert len(g._ss_pending_acks) == 1
+
+
 def test_ack_false_after_window(monkeypatch):
     monkeypatch.setattr(g, "_GT_BASELINE", False)
     monkeypatch.setenv("GT_SS_ACK_METRICS", "1")

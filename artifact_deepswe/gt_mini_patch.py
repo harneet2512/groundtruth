@@ -15180,12 +15180,54 @@ def _ss_note_delivery_for_ack(kind: str, text: str) -> None:
         _ss_pending_acks.append({
             "kind": kind,
             "ents": _ss_entity_set(text),
+            "paths": frozenset(_ss_extract_paths(text)),
+            "symbols": frozenset(_ss_extract_symbols(text)),
             "snip": _ss_ack_snippet(text).lower(),
             "step": _action_count,
             "sha": hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:16],
         })
     except Exception:  # noqa: BLE001
         pass
+
+
+def _ss_ack_anchor_matches(model_text: str, rec: dict) -> bool:
+    """Return whether a later model message names an exact delivered anchor.
+
+    Paths and code symbols are typed separately because their lexical boundaries differ.
+    Raw substring membership is not evidence of acknowledgment: ``render`` inside
+    ``renderer`` and ``src/foo.py`` inside ``src/foo.py.bak`` name different entities.
+    The fallback to ``ents`` preserves pending records restored from an older snapshot.
+    """
+    text = model_text or ""
+    paths = rec.get("paths")
+    symbols = rec.get("symbols")
+    if paths is None and symbols is None:
+        paths = frozenset(
+            entity for entity in rec.get("ents", ())
+            if "/" in entity or "\\" in entity or "." in entity)
+        symbols = frozenset(set(rec.get("ents", ())) - set(paths))
+    path_edge = r"A-Za-z0-9_./\\+\-"
+    for path in paths or ():
+        if path and re.search(
+                rf"(?<![{path_edge}]){re.escape(path)}(?![{path_edge}])",
+                text, re.IGNORECASE):
+            return True
+    for symbol in symbols or ():
+        if len(symbol) >= 4 and re.search(
+                rf"(?<![{path_edge}]){re.escape(symbol)}(?![{path_edge}])",
+                text, re.IGNORECASE):
+            return True
+    return False
+
+
+def _ss_ack_snippet_matches(model_text: str, snippet: str) -> bool:
+    """Match the distinctive rendered excerpt without accepting token-prefix aliases."""
+    if not snippet:
+        return False
+    edge = r"A-Za-z0-9_./\\+\-"
+    return bool(re.search(
+        rf"(?<![{edge}]){re.escape(snippet)}(?![{edge}])",
+        model_text or "", re.IGNORECASE))
 
 
 def _ss_emit_ack_row(rec: dict, acked: bool) -> None:
@@ -15213,15 +15255,14 @@ def _ss_scan_acks(model_text: str) -> None:
     ack:true (+ ack_m offset) or, past the window, ack:false. Host-side only."""
     if not _ss_ack_metrics_on() or not _ss_pending_acks:
         return
-    mt = (model_text or "").lower()
     still: "list[dict]" = []
     for rec in _ss_pending_acks:
         if int(rec.get("step", 0)) >= _action_count:
             still.append(rec)  # delivered this very turn -> not "subsequent" yet
             continue
-        acked = any(len(e) >= 4 and e.lower() in mt for e in rec.get("ents", ()))
-        if not acked and rec.get("snip") and rec["snip"] in mt:
-            acked = True
+        acked = _ss_ack_anchor_matches(model_text or "", rec)
+        if not acked:
+            acked = _ss_ack_snippet_matches(model_text or "", rec.get("snip", ""))
         if acked:
             _ss_emit_ack_row(rec, True)
         elif _action_count - int(rec.get("step", 0)) > _SS_ACK_WINDOW:
