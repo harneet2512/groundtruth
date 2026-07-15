@@ -100,7 +100,7 @@ def _docker_block(run: str) -> str:
     marker = "bash -c "
     i = run.index(marker) + len(marker)
     assert run[i] == _APOS, "the docker invocation must open with a single-quoted bash -c argument"
-    tail = run.index("2>&1 | tee trial_output.log", i)
+    tail = run.index("2>&1 | tee -a trial_output.log", i)
     close = run.rindex(_APOS, i, tail)
     return run[i:close + 1]
 
@@ -142,8 +142,10 @@ def test_deep_metrics_receives_task_scoped_authoritative_runtime_ledger() -> Non
         "the sealed runtime ledger must be copied beside the task-scoped trajectory so the "
         "deep-metrics consumption reader can byte-join tagless native deliveries"
     )
-    ledger_line = next(line for line in code.splitlines() if ledger_copy in line)
-    assert "|| true" not in ledger_line, "a failed GT-on ledger copy must not fall back silently"
+    assert "GT_COLLECTION_MISSING:gt_runtime_ledger.jsonl" in code, (
+        "a missing ledger must be diagnosed explicitly without aborting collection before the "
+        "remaining failure evidence and metrics can be harvested"
+    )
     assert 'GT_BASELINE_FLAG:-0' in code[: code.index(ledger_copy)], (
         "the hard ledger requirement must be scoped to GT-on; baseline has no GT runtime ledger"
     )
@@ -153,6 +155,21 @@ def test_deep_metrics_receives_task_scoped_authoritative_runtime_ledger() -> Non
     assert 'TASK_ARTIFACT_ROOT="/tmp/gt/${{ matrix.task }}"' in code, (
         "the runtime ledger path must resolve through the explicit task-scoped root"
     )
+
+
+def test_missing_gt_inputs_do_not_abort_failure_artifact_collection_early() -> None:
+    collect = "\n".join(_code_lines(_collect_run()))
+    deep = collect.index("gt_deep_metrics.py")
+    for source, marker in (
+        ("/tmp/gt_out/gt_runtime_ledger.jsonl", "GT_COLLECTION_MISSING:gt_runtime_ledger.jsonl"),
+        ("/tmp/gt/brief_result.json", "GT_COLLECTION_MISSING:brief_result.json"),
+    ):
+        assert f'if [ -s "{source}" ]' in collect
+        assert marker in collect
+        assert collect.index(marker) < deep
+    gate = _gate_block(_collect_run())
+    assert "trial_results/brief_result.json" in gate
+    assert "gt_runtime_ledger_${{ matrix.task }}.jsonl" in gate
 
 
 def test_deep_metrics_receives_authoritative_swebench_gold_jsonl() -> None:

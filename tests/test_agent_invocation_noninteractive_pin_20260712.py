@@ -205,3 +205,32 @@ def test_runner_self_installs_gt_delivery_in_process() -> None:
     )
     # and it must respect the control arm (no GT load under GT_BASELINE=1)
     assert 'GT_BASELINE' in src, "the runner must skip the gt_mini_patch import in the baseline arm"
+
+
+def test_runner_exit_is_preserved_after_patch_capture() -> None:
+    """A failed agent must stay failed while still exporting its partial patch/artifacts."""
+    run = _trial_run()
+    code = "\n".join(
+        line for line in run.splitlines() if not line.strip().startswith("#")
+    )
+    launch = _agent_launch_line(run)
+    assert "|| true" not in launch, "the headless runner exit code must not be erased"
+    assert "GT_RUNNER_RC=0" in code
+    assert "|| GT_RUNNER_RC=$?" in launch
+    launch_pos = code.index(launch)
+    rc_init = code.rfind("GT_RUNNER_RC=0", 0, launch_pos)
+    patch_capture = code.index("git diff HEAD > /gt_out/agent_patch.diff", launch_pos)
+    terminal_exit = code.index('exit "$GT_RUNNER_RC"', patch_capture)
+    assert rc_init >= 0
+    assert rc_init < launch_pos < patch_capture < terminal_exit
+
+
+def test_outer_pipeline_captures_docker_status_before_any_fallback() -> None:
+    run = _trial_run()
+    lines = [line.strip() for line in run.splitlines() if line.strip()]
+    tee_index = next(
+        index for index, line in enumerate(lines)
+        if "2>&1 | tee" in line and "trial_output.log" in line
+    )
+    assert "|| true" not in lines[tee_index]
+    assert lines[tee_index + 1] == "AGENT_RC=${PIPESTATUS[0]}"
