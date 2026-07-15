@@ -299,6 +299,9 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # Immutable, render-neutral source/graph inputs retained by Gateway
         # producers for later truth/freshness attestation. Stdlib-only.
         "producer_inputs.py",
+        # Immutable syntax-check observation retained by the mini seam for
+        # producer-owned truth/freshness attestation. Stdlib-only.
+        "syntax_observation.py",
         "gateway.py",
         # Exact CAP-control participation schema used by the mini-seam's host-only
         # decision receipts. Stdlib + feature_lineage/fact_registry only (both

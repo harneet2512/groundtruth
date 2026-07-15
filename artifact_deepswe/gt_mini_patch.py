@@ -9507,6 +9507,9 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
         return None
 
 
+_last_edit_syntax_observation = None  # host-only producer input; never model-facing
+
+
 def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
     """E — at-edit SYNTAX validation (SWE-agent linter-guard parity, +3.0pp NeurIPS
     2024; ~51.7% of edits carry a catchable error). Run the repo's OWN parse-only
@@ -9521,6 +9524,8 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
     LEAK-LAW: skip test files — E validates a SOURCE edit; a test path in the
     diagnostic would trip the model-facing identity invariant. ``rel`` is the agent's
     OWN just-edited file (never a hidden grader target), so naming it is not a leak."""
+    global _last_edit_syntax_observation
+    _last_edit_syntax_observation = None
     if os.environ.get("GT_EDIT_CHECK") != "1" or _GT_BASELINE:
         return None
     if not rel or _is_post_search_testpath((rel or "").replace("\\", "/")):
@@ -9530,6 +9535,14 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
         from groundtruth.runtime.native_render import render_syntax_error_native
     except Exception:  # noqa: BLE001 -- engine absent in-container -> E no-ops
         return None
+    _syntax_source_before = None
+    try:
+        _syntax_root = _root()
+        _syntax_path = rel if os.path.isabs(rel) else os.path.join(_syntax_root, rel)
+        with open(_syntax_path, "rb") as _syntax_source_file:
+            _syntax_source_before = _syntax_source_file.read()
+    except Exception:  # noqa: BLE001 -- unavailable bytes do not suppress a true native RED
+        pass
     try:
         _ex = _build_edit_check_executor()  # replay may pin only this parse-only boundary
         res = check_edit_syntax(rel, _root(), executor=_ex)
@@ -9543,6 +9556,25 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
     failure_identity = _ss_build_syntax_failure_identity(rel, res.get("diagnostic") or "")
     if _ss_ack_failure_suppresses("edit.syntax", block, failure_identity):
         return None
+    try:
+        from groundtruth.runtime.syntax_observation import build_syntax_observation
+        from groundtruth.runtime.fact_registry import EVENT_EDIT_RESULT
+
+        root = _root()
+        source_path = rel if os.path.isabs(rel) else os.path.join(root, rel)
+        with open(source_path, "rb") as source_file:
+            source_bytes = source_file.read()
+        if _syntax_source_before is None or source_bytes != _syntax_source_before:
+            raise ValueError("syntax source changed during check")
+        _last_edit_syntax_observation = build_syntax_observation(
+            file_path=rel,
+            source_bytes=source_bytes,
+            check_result=res,
+            actual_event=EVENT_EDIT_RESULT,
+            rendered_block=block,
+        )
+    except Exception:  # noqa: BLE001 -- missing host bytes cannot suppress a true native RED
+        _last_edit_syntax_observation = None
     return (float(_SEV_NUDGE_VERIFY), "edit.syntax", block, True)
 
 
