@@ -146,6 +146,45 @@ def _contract_number(value: object, value_type: str) -> float | None:
     raise ValueError(f"unsupported mandatory metric value type: {value_type}")
 
 
+def _normalized_per_tag_rate_dict(
+    value: object,
+) -> dict[str, tuple[int, int, float]] | None:
+    """Validate the canonical per-tag impact mapping.
+
+    The producer emits ``tag -> {total, pivots, rate}``. Counts own the
+    denominator and ``rate`` must be their 8-decimal quotient; accepting either
+    a scalar-only map or a disagreeing redundant rate would give the task and
+    run collectors different meanings for the same mandatory metric.
+    """
+    if not isinstance(value, dict) or not value:
+        return None
+    normalized: dict[str, tuple[int, int, float]] = {}
+    for tag, counts in value.items():
+        if not isinstance(tag, str) or not tag or not isinstance(counts, dict):
+            return None
+        if not {"total", "pivots", "rate"}.issubset(counts):
+            return None
+        total = _finite_number(counts.get("total"))
+        pivots = _finite_number(counts.get("pivots"))
+        rate = _finite_number(counts.get("rate"))
+        if (
+            total is None
+            or pivots is None
+            or rate is None
+            or not total.is_integer()
+            or not pivots.is_integer()
+            or total <= 0
+            or pivots < 0
+            or pivots > total
+        ):
+            return None
+        expected_rate = _d8(pivots / total)
+        if _d8(rate) != expected_rate:
+            return None
+        normalized[tag] = (int(total), int(pivots), expected_rate)
+    return normalized
+
+
 def _section(row: dict, section: str) -> dict:
     if section == "behavioral_impact":
         value = row.get(section)
@@ -256,7 +295,7 @@ def _metric_state(
     section: str,
     metric: str,
     value_type: str,
-) -> tuple[str, float | None, dict[str, Any] | None]:
+) -> tuple[str, Any, dict[str, Any] | None]:
     """Classify one task value without inferring applicability from raw nulls.
 
     States are ``measured``, ``not_applicable``, ``unmeasured``, and ``failed``.
@@ -290,7 +329,7 @@ def _metric_state(
     if no_observation:
         return "unmeasured", None, contract
 
-    value: float | None
+    value: Any
     if value_type == "bool":
         value = float(raw) if isinstance(raw, bool) else None
     elif value_type == "bool_per_file":
@@ -301,6 +340,8 @@ def _metric_state(
             and all(isinstance(item, bool) for item in raw.values())
             else None
         )
+    elif value_type == "per_tag_rate_dict":
+        value = _normalized_per_tag_rate_dict(raw)
     else:
         value = _contract_number(raw, value_type)
     return (
@@ -500,33 +541,10 @@ def _per_tag_distribution(records: list[dict], section: str, metric: str) -> dic
             valid_by_task.append((task, False, task_values))
             continue
 
-        available = isinstance(raw, dict)
-        malformed = False
-        if isinstance(raw, dict):
-            for raw_tag, raw_counts in raw.items():
-                if not isinstance(raw_tag, str) or not isinstance(raw_counts, dict):
-                    malformed = True
-                    continue
-                total = _finite_number(raw_counts.get("total"))
-                pivots = _finite_number(raw_counts.get("pivots"))
-                if (
-                    total is None
-                    or pivots is None
-                    or not total.is_integer()
-                    or not pivots.is_integer()
-                    or total <= 0
-                    or pivots < 0
-                    or pivots > total
-                ):
-                    malformed = True
-                    continue
-                task_values[raw_tag] = (
-                    int(total), int(pivots), pivots / total
-                )
-        if malformed:
-            available = False
-            task_values = {}
-        elif available:
+        normalized = _normalized_per_tag_rate_dict(raw)
+        available = normalized is not None
+        if normalized is not None:
+            task_values = normalized
             all_tags.update(task_values)
         if not available:
             outer_failed.append(task)

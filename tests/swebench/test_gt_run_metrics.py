@@ -499,6 +499,23 @@ def test_per_tag_impact_reports_task_distribution_and_pooled_denominator() -> No
     assert metric["missing_tasks"] == ["d"]
 
 
+def test_per_tag_impact_rejects_rate_that_disagrees_with_counts() -> None:
+    row = _row("mismatched-rate", False, 1.0)
+    row["behavioral_impact"] = {
+        "per_tag_impact": {
+            "recovery": {"total": 2, "pivots": 1, "rate": 1.0},
+        },
+    }
+
+    metric = aggregate_run_metrics([row])["mandatory_performance"][
+        "behavioral_impact"
+    ]["per_tag_impact"]
+
+    assert metric["status"] == "FAILED"
+    assert metric["failed_tasks"] == ["mismatched-rate"]
+    assert metric["tags"] == {}
+
+
 def test_cost_per_resolved_is_one_run_ratio_not_task_mean() -> None:
     result = aggregate_run_metrics([
         _row("a", True, 1.0),

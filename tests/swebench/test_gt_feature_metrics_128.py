@@ -495,6 +495,32 @@ def test_perf_readiness_fails_closed_on_schema_precision_or_structure(tmp_path: 
     assert metrics._value_honors_8dp(0.123456789) is False
 
 
+def test_per_tag_impact_accepts_canonical_count_and_rate_mapping(tmp_path: Path) -> None:
+    task = "synthetic__perf-per-tag-canonical"
+    deep = _complete_deep_metrics(task)
+    deep["behavioral_impact"]["per_tag_impact"] = {
+        "recovery": {"total": 2, "pivots": 1, "rate": 0.5},
+        "syntax_result": {"total": 3, "pivots": 2, "rate": 0.66666667},
+    }
+    deep["metric_applicability"]["behavioral_impact"]["per_tag_impact"] = {
+        "applicable": True,
+        "predicate": "total_deliveries > 0",
+        "reason": "byte-joined deliveries provide per-tag denominators",
+    }
+    _write_task(tmp_path, task, deep_metrics=deep)
+
+    record = metrics.collect_task(task, str(tmp_path), profile="2")
+    feature = record["ss_features"]["per_tag_impact"]
+
+    assert feature["status"] == "MEASURED"
+    assert feature["value"] == deep["behavioral_impact"]["per_tag_impact"]
+    assert feature["metric_structure_valid"] is True
+    assert feature["value_precision_valid"] is True
+    assert "PERF.per_tag_impact" not in record["ss_integrity"][
+        "missing_feature_inputs"
+    ]
+
+
 def test_infra_cap_emits_mediation_links_without_inheriting_fact_delivery() -> None:
     fact = metrics.new_lifecycle("fixture")
     fact["eligible"] = metrics.measured(True, source_artifact="ledger")
