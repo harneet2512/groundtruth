@@ -14,6 +14,7 @@ import re as _re
 import sqlite3
 import subprocess
 import hashlib
+import json
 from dataclasses import dataclass, field, replace
 
 # Single source of truth for the categorical correct-or-quiet rule lives in
@@ -2550,11 +2551,14 @@ def _expand_via_cochange(
     """Find files in other modules that co-changed with symptom files in git history."""
     symptom_dirs = {os.path.dirname(f) for f in symptom_files}
     cochange_counts: dict[str, int] = {}
+    cochange_rows: dict[str, list[dict[str, object]]] = {}
+    source_revision = ""
+    current_commit = ""
 
     # Get last 100 commits
     try:
         result = subprocess.run(
-            ["git", "log", "--oneline", "--name-only", "-100"],
+            ["git", "log", "--format=%H", "--name-only", "-100"],
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -2567,48 +2571,88 @@ def _expand_via_cochange(
     except Exception:
         return []
 
-    # Parse commits — each commit block starts with a hash line, followed by file paths
+    # Parse commits through one flush path so blank separators are not required.
     current_files: list[str] = []
+
+    def _flush_commit() -> None:
+        if not current_commit or not current_files:
+            return
+        symptom_paths = sorted({f for f in current_files if f in symptom_files})
+        if not symptom_paths:
+            return
+        for candidate in dict.fromkeys(current_files):
+            if (
+                candidate in symptom_files
+                or os.path.dirname(candidate) in symptom_dirs
+            ):
+                continue
+            cochange_counts[candidate] = cochange_counts.get(candidate, 0) + 1
+            cochange_rows.setdefault(candidate, []).append({
+                "commit": current_commit,
+                "symptom_paths": symptom_paths,
+            })
+
     for line in result.stdout.splitlines():
         line = line.strip()
         if not line:
-            # End of commit block — check for co-changes
-            if current_files:
-                symptom_in_commit = any(f in current_files for f in symptom_files)
-                if symptom_in_commit:
-                    for f in current_files:
-                        if os.path.dirname(f) not in symptom_dirs and f not in symptom_files:
-                            cochange_counts[f] = cochange_counts.get(f, 0) + 1
+            _flush_commit()
+            current_commit = ""
             current_files = []
-        elif _re.match(r"^[0-9a-f]{7,12}\s", line):
-            # This is a commit hash line (e.g., "abc1234 Fix bug")
-            # Process previous block
-            if current_files:
-                symptom_in_commit = any(f in current_files for f in symptom_files)
-                if symptom_in_commit:
-                    for f in current_files:
-                        if os.path.dirname(f) not in symptom_dirs and f not in symptom_files:
-                            cochange_counts[f] = cochange_counts.get(f, 0) + 1
+        elif _re.fullmatch(r"[0-9a-f]{40}", line):
+            _flush_commit()
+            current_commit = line
+            if not source_revision:
+                source_revision = line
             current_files = []
         else:
-            # This is a file path
             current_files.append(line)
 
-    # Process final block
-    if current_files:
-        symptom_in_commit = any(f in current_files for f in symptom_files)
-        if symptom_in_commit:
-            for f in current_files:
-                if os.path.dirname(f) not in symptom_dirs and f not in symptom_files:
-                    cochange_counts[f] = cochange_counts.get(f, 0) + 1
+    _flush_commit()
 
     # Rank by co-change frequency, require >= 2
     ranked = sorted(cochange_counts.items(), key=lambda x: (-x[1], x[0]))
     return [
-        {"path": f, "score": 0.0, "components": {"cochange": count}, "entered_via": "cochange"}
+        {
+            "path": f,
+            "score": 0.0,
+            "components": {"cochange": count},
+            "entered_via": "cochange",
+            "cochange_evidence": _cochange_evidence(
+                candidate_path=f,
+                source_revision=source_revision,
+                source_rows=cochange_rows.get(f, []),
+                history_limit=100,
+            ),
+        }
         for f, count in ranked[:max_expansion]
         if count >= 2
     ]
+
+
+def _cochange_evidence(
+    *,
+    candidate_path: str,
+    source_revision: str,
+    source_rows: list[dict[str, object]],
+    history_limit: int,
+) -> dict[str, object]:
+    """Build a stable producer-owned truth/freshness witness for one bridge."""
+    evidence: dict[str, object] = {
+        "kind": "cochange_history",
+        "source": "git_log",
+        "source_revision": source_revision,
+        "history_limit": history_limit,
+        "candidate_path": candidate_path,
+        "count": len(source_rows),
+        "source_rows": source_rows,
+    }
+    canonical = json.dumps(
+        evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    evidence["source_identity_sha256"] = hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    return evidence
 
 
 def _expand_via_test_coimport(
@@ -6420,6 +6464,11 @@ def generate_v1r_brief(
             "path_component": float(_components.get("path", 0.0) or 0.0),
             "witness_component": float(_components.get("witness", 0.0) or 0.0),
             "entered_via": str(_r.get("entered_via", "") if isinstance(_r, dict) else ""),
+            "cochange_evidence": (
+                _r.get("cochange_evidence")
+                if isinstance(_r, dict) and _components.get("cochange", 0.0) > 0.0
+                else None
+            ),
             "acquisition_sources": _candidate_acquisition_sources(
                 graph_db,
                 repo_root,

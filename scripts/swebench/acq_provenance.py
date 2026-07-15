@@ -9,6 +9,7 @@ a matching basename, or a silent delivery can never promote an ACQ row.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -34,7 +35,7 @@ ACQ_SOURCE_COMPONENTS: dict[str, str] = {
     "lexical_FTS5": "fts5_signal_count+components.lex",
     "semantic_embedder": "semantic_signal_count+components.sem",
     "body_retrieval": "components.body|components.content",
-    "cochange_history": "components.cochange",
+    "cochange_history": "components.cochange+cochange_evidence",
     "resolution_honesty": "acquisition_sources.resolution_honesty",
     "type_intelligence": "acquisition_sources.type_intelligence",
     "LSP": "acquisition_sources.LSP",
@@ -134,6 +135,58 @@ def _positive(value: object) -> bool:
         return float(value or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _valid_cochange_evidence(
+    proof: Mapping[str, Any], candidate_path: str,
+) -> bool:
+    """Validate producer-owned cochange rows; aggregate scores are insufficient."""
+    evidence = proof.get("cochange_evidence")
+    components = proof.get("components")
+    components = components if isinstance(components, Mapping) else {}
+    if not isinstance(evidence, Mapping):
+        return False
+    count = evidence.get("count")
+    rows = evidence.get("source_rows")
+    if (
+        evidence.get("kind") != "cochange_history"
+        or evidence.get("source") != "git_log"
+        or evidence.get("candidate_path") != candidate_path
+        or not isinstance(evidence.get("source_revision"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", str(evidence["source_revision"])) is None
+        or not isinstance(evidence.get("history_limit"), int)
+        or isinstance(evidence.get("history_limit"), bool)
+        or evidence.get("history_limit") != 100
+        or not isinstance(count, int) or isinstance(count, bool) or count < 2
+        or not isinstance(rows, list) or len(rows) != count
+        or not _positive(components.get("cochange"))
+        or float(components.get("cochange", 0.0)) != float(count)
+    ):
+        return False
+    commits: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            return False
+        commit = row.get("commit")
+        symptoms = row.get("symptom_paths")
+        if (
+            not isinstance(commit, str)
+            or re.fullmatch(r"[0-9a-f]{40}", commit) is None
+            or commit in commits
+            or not isinstance(symptoms, list) or not symptoms
+            or any(not isinstance(path, str) or not path for path in symptoms)
+            or symptoms != sorted(set(symptoms))
+            or candidate_path in symptoms
+        ):
+            return False
+        commits.add(commit)
+    unsigned = dict(evidence)
+    identity = unsigned.pop("source_identity_sha256", None)
+    canonical = json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return isinstance(identity, str) and identity == expected
 
 
 def _path_in_block(path: str, rendered: str) -> bool:
@@ -283,7 +336,12 @@ def _source_features(proof: Mapping[str, Any], metrics: Mapping[str, Any]) -> tu
         found.append("semantic_embedder")
     if _positive(components.get("body")) or _positive(components.get("content")):
         found.append("body_retrieval")
-    if _positive(components.get("cochange")):
+    path = proof.get("path")
+    if (
+        _positive(components.get("cochange"))
+        and isinstance(path, str)
+        and _valid_cochange_evidence(proof, path)
+    ):
         found.append("cochange_history")
     found.extend(_extended_source_features(proof))
     return tuple(found)
@@ -480,7 +538,10 @@ def _source_field_paths(
             if _positive(components.get(name))
         ]
     if feature == "cochange_history":
-        return [f"{base}.components.cochange"]
+        return [
+            f"{base}.components.cochange",
+            f"{base}.cochange_evidence",
+        ]
     return [f"{base}.acquisition_sources.{feature}"]
 
 
@@ -613,7 +674,9 @@ def collect_acq_provenance(
                 "source_fields": source_fields,
                 # This join proves support provenance and acknowledgment only.
                 # Independent live authorities must populate the other gates.
-                "source_contribution_correct": None,
+                "source_contribution_correct": (
+                    True if feature == "cochange_history" else None
+                ),
                 "timing_inherited_from_fact_delivery": None,
                 "source_causal_fair_probe": None,
             }

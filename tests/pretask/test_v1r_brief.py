@@ -14,11 +14,106 @@ import pytest
 
 from groundtruth.pretask.v1r_brief import (
     FileEntry,
+    _expand_via_cochange,
     _top_functions,
     _caller_contract_for_file,
     render_brief,
     generate_v1r_brief,
 )
+
+
+def test_cochange_expansion_retains_exact_producer_rows_and_revision(monkeypatch) -> None:
+    revision = "a" * 40
+    second = "b" * 40
+    stdout = "\n".join([
+        revision,
+        "src/symptom.py",
+        "pkg/fix.py",
+        "",
+        second,
+        "src/symptom.py",
+        "pkg/fix.py",
+        "pkg/other.py",
+        "",
+    ])
+
+    monkeypatch.setattr(
+        "groundtruth.pretask.v1r_brief.subprocess.run",
+        lambda *args, **kwargs: MagicMock(returncode=0, stdout=stdout),
+    )
+
+    rows = _expand_via_cochange(["src/symptom.py"], "/repo")
+
+    assert rows[0]["path"] == "pkg/fix.py"
+    assert rows[0]["components"]["cochange"] == 2
+    evidence = rows[0]["cochange_evidence"]
+    assert evidence["kind"] == "cochange_history"
+    assert evidence["source"] == "git_log"
+    assert evidence["source_revision"] == revision
+    assert evidence["candidate_path"] == "pkg/fix.py"
+    assert evidence["count"] == 2
+    assert evidence["source_rows"] == [
+        {"commit": revision, "symptom_paths": ["src/symptom.py"]},
+        {"commit": second, "symptom_paths": ["src/symptom.py"]},
+    ]
+    assert len(evidence["source_identity_sha256"]) == 64
+
+
+def test_cochange_expansion_flushes_adjacent_commit_headers(monkeypatch) -> None:
+    first = "a" * 40
+    second = "b" * 40
+    stdout = "\n".join([
+        first,
+        "src/symptom.py",
+        "pkg/fix.py",
+        second,
+        "src/symptom.py",
+        "pkg/fix.py",
+    ])
+    monkeypatch.setattr(
+        "groundtruth.pretask.v1r_brief.subprocess.run",
+        lambda *args, **kwargs: MagicMock(returncode=0, stdout=stdout),
+    )
+
+    rows = _expand_via_cochange(["src/symptom.py"], "/repo")
+
+    assert rows[0]["components"]["cochange"] == 2
+    assert [
+        row["commit"] for row in rows[0]["cochange_evidence"]["source_rows"]
+    ] == [first, second]
+
+
+def test_cochange_snapshot_revision_can_be_newer_than_candidate_rows(monkeypatch) -> None:
+    newest = "f" * 40
+    older_one = "a" * 40
+    older_two = "b" * 40
+    stdout = "\n".join([
+        newest,
+        "src/symptom.py",
+        "pkg/only-newest.py",
+        "",
+        older_one,
+        "src/symptom.py",
+        "pkg/fix.py",
+        "",
+        older_two,
+        "src/symptom.py",
+        "pkg/fix.py",
+    ])
+    monkeypatch.setattr(
+        "groundtruth.pretask.v1r_brief.subprocess.run",
+        lambda *args, **kwargs: MagicMock(returncode=0, stdout=stdout),
+    )
+
+    rows = _expand_via_cochange(["src/symptom.py"], "/repo")
+
+    assert [row["path"] for row in rows] == ["pkg/fix.py"]
+    evidence = rows[0]["cochange_evidence"]
+    assert evidence["source_revision"] == newest
+    assert [row["commit"] for row in evidence["source_rows"]] == [
+        older_one,
+        older_two,
+    ]
 
 
 # --- TTD: categorical correct-or-quiet caller gate (wire.md #2) -------------

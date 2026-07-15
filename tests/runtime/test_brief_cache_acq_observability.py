@@ -96,6 +96,33 @@ def _deterministic_result(text: str) -> SimpleNamespace:
     )
 
 
+def test_cochange_truth_sidecar_preserves_exact_brief_bytes(tmp_path):
+    from groundtruth.pretask.v1r_brief import _cochange_evidence
+
+    text = "1. pkg/loader.py\n    Signature: load(config)"
+    result = _deterministic_result(text)
+    result.localization_proof[0]["components"]["cochange"] = 2.0
+    result.localization_proof[0]["cochange_evidence"] = _cochange_evidence(
+        candidate_path="pkg/loader.py",
+        source_revision="f" * 40,
+        source_rows=[
+            {"commit": "a" * 40, "symptom_paths": ["src/symptom.py"]},
+            {"commit": "b" * 40, "symptom_paths": ["src/symptom.py"]},
+        ],
+        history_limit=100,
+    )
+
+    persisted = brief_cache.persist_brief(
+        str(tmp_path), text, result, identity="request-id"
+    )
+
+    assert persisted["brief_text"].encode("utf-8") == text.encode("utf-8")
+    assert persisted["brief_sha256"] == brief_cache.brief_sha256(text)
+    assert persisted["metrics"]["localization_proof"][0][
+        "cochange_evidence"
+    ] == result.localization_proof[0]["cochange_evidence"]
+
+
 def test_acq_observability_fields_survive_persist_and_load(tmp_path):
     receipts = [
         {

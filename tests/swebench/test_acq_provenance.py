@@ -342,6 +342,9 @@ def test_every_acq_surface_names_its_exact_source_fields(tmp_path):
     payload, ledger, trajectory = _artifacts(tmp_path, extended_sources=True)
     components = payload["metrics"]["localization_proof"][0]["components"]
     components.update({"body": 1.0, "cochange": 3.0})
+    payload["metrics"]["localization_proof"][0]["cochange_evidence"] = (
+        _cochange_evidence(count=3)
+    )
     rows = collect_acq_provenance(payload, ledger, trajectory)
 
     expected = {
@@ -367,6 +370,7 @@ def test_every_acq_surface_names_its_exact_source_fields(tmp_path):
         ],
         "cochange_history": [
             "metrics.localization_proof[0].components.cochange",
+            "metrics.localization_proof[0].cochange_evidence",
         ],
     }
     expected.update({
@@ -485,6 +489,9 @@ def test_candidate_local_body_and_history_sources_require_an_acted_receipt(tmp_p
     payload, ledger, trajectory = _artifacts(tmp_path)
     components = payload["metrics"]["localization_proof"][0]["components"]
     components.update({"body": 1.0, "cochange": 3.0})
+    payload["metrics"]["localization_proof"][0]["cochange_evidence"] = (
+        _cochange_evidence(count=3)
+    )
     trajectory["messages"][1]["extra"] = {
         "actions": [{"command": "pytest src/pkg/loader.py"}]
     }
@@ -499,6 +506,9 @@ def test_candidate_local_body_and_history_sources_require_an_acted_receipt(tmp_p
 def test_cochange_history_preserves_candidate_to_downstream_fact_join(tmp_path):
     payload, ledger, trajectory = _artifacts(tmp_path)
     payload["metrics"]["localization_proof"][0]["components"]["cochange"] = 3.0
+    payload["metrics"]["localization_proof"][0]["cochange_evidence"] = (
+        _cochange_evidence(count=3)
+    )
 
     row = collect_acq_provenance(payload, ledger, trajectory)["cochange_history"]
 
@@ -511,6 +521,75 @@ def test_cochange_history_preserves_candidate_to_downstream_fact_join(tmp_path):
     assert row["delivery_message_index"] == 0
     assert row["receipt_level"] == 2
     assert row["receipt_evidence"]["referenced_message_index"] == 1
+    assert row["source_contribution_correct"] is True
+
+
+def _cochange_evidence(*, count: int = 3, source_revision: str | None = None) -> dict:
+    from groundtruth.pretask.v1r_brief import _cochange_evidence
+
+    revisions = [chr(ord("a") + index) * 40 for index in range(count)]
+    return _cochange_evidence(
+        candidate_path="src/pkg/loader.py",
+        source_revision=source_revision or revisions[0],
+        source_rows=[
+            {"commit": revision, "symptom_paths": ["src/symptom.py"]}
+            for revision in revisions
+        ],
+        history_limit=100,
+    )
+
+
+def test_cochange_history_rejects_aggregate_without_exact_producer_witness(tmp_path):
+    payload, ledger, trajectory = _artifacts(tmp_path)
+    payload["metrics"]["localization_proof"][0]["components"]["cochange"] = 3.0
+
+    row = collect_acq_provenance(payload, ledger, trajectory)["cochange_history"]
+
+    assert row["status"] == "UNMEASURED"
+    assert row["blocker"] == "source_witness_absent"
+    assert row["source_contribution_correct"] is None
+
+
+def test_cochange_history_rejects_tampered_source_count(tmp_path):
+    payload, ledger, trajectory = _artifacts(tmp_path)
+    proof = payload["metrics"]["localization_proof"][0]
+    proof["components"]["cochange"] = 3.0
+    proof["cochange_evidence"] = _cochange_evidence(count=3)
+    proof["cochange_evidence"]["count"] = 4
+
+    row = collect_acq_provenance(payload, ledger, trajectory)["cochange_history"]
+
+    assert row["status"] == "UNMEASURED"
+    assert row["source_contribution_correct"] is None
+
+
+def test_cochange_history_rejects_source_row_changed_after_identity(tmp_path):
+    payload, ledger, trajectory = _artifacts(tmp_path)
+    proof = payload["metrics"]["localization_proof"][0]
+    proof["components"]["cochange"] = 3.0
+    proof["cochange_evidence"] = _cochange_evidence(count=3)
+    proof["cochange_evidence"]["source_rows"][1]["symptom_paths"].append(
+        "src/zzz.py"
+    )
+
+    row = collect_acq_provenance(payload, ledger, trajectory)["cochange_history"]
+
+    assert row["status"] == "UNMEASURED"
+    assert row["source_contribution_correct"] is None
+
+
+def test_cochange_history_accepts_newer_snapshot_than_contributing_rows(tmp_path):
+    payload, ledger, trajectory = _artifacts(tmp_path)
+    proof = payload["metrics"]["localization_proof"][0]
+    proof["components"]["cochange"] = 3.0
+    proof["cochange_evidence"] = _cochange_evidence(
+        count=3, source_revision="f" * 40,
+    )
+
+    row = collect_acq_provenance(payload, ledger, trajectory)["cochange_history"]
+
+    assert row["status"] == "MEASURED"
+    assert row["source_contribution_correct"] is True
 
 
 def test_task_collector_joins_cochange_internal_support_to_localization_receipt(
@@ -523,6 +602,9 @@ def test_task_collector_joins_cochange_internal_support_to_localization_receipt(
 
     payload, _ledger, trajectory = _artifacts(tmp_path)
     payload["metrics"]["localization_proof"][0]["components"]["cochange"] = 3.0
+    payload["metrics"]["localization_proof"][0]["cochange_evidence"] = (
+        _cochange_evidence(count=3)
+    )
     (tmp_path / "brief_result.json").write_text(
         json.dumps(payload), encoding="utf-8"
     )
@@ -539,7 +621,7 @@ def test_task_collector_joins_cochange_internal_support_to_localization_receipt(
     assert readiness["gates"]["runtime_support_receipt"] is True
     assert readiness["gates"]["supported_candidate_id"] is True
     assert readiness["gates"]["downstream_decision_join"] is True
-    assert readiness["gates"]["support_correct"] is None
+    assert readiness["gates"]["support_correct"] is True
     assert readiness["gates"]["support_causal_fair_probe"] is None
 
 
