@@ -71,7 +71,6 @@ _LEDGER_LAYER_FACT: dict[str, str] = {
     "recovery": "recovery",
     "nudge": "recovery",
     "edit.syntax": "syntax_result",
-    "verify.horizon.advisory": "covering_red",
     "completion_cert": "submit_refusal",
     "submit_gate": "submit_refusal",
     "cochange": "cochange_prior",
@@ -84,7 +83,23 @@ _FACT_CLASSES = {
 
 
 def _entry_fact_class(entry: dict) -> str | None:
+    lineage = entry.get("feature_lineage")
     layer = str(entry.get("ledger_layer") or entry.get("kind") or "").strip()
+    if (
+        isinstance(lineage, dict)
+        and lineage.get("schema") == "gt.feature_lineage.v1"
+        and lineage.get("producer_registration_match") is True
+        and lineage.get("fact_class") in _FACT_CLASSES
+        and not (
+            lineage.get("fact_class") == "covering_red"
+            and layer.startswith("verify.horizon.")
+            and (
+                layer != "verify.horizon.executed"
+                or lineage.get("runtime_producer_id") != "covering_runner"
+            )
+        )
+    ):
+        return str(lineage["fact_class"])
     if layer.startswith("ga."):
         layer = layer[3:]
     if layer.startswith("gateway."):

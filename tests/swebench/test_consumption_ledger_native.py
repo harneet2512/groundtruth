@@ -8,10 +8,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "swebench"))
 
 from scripts.swebench.consumption_ledger import build_consumption_ledger
-from scripts.swebench.gt_performance_metrics import compute_performance_metrics
-from scripts.swebench.gt_feature_metrics import _consumption_by_fact_class
+from scripts.swebench.gt_performance_metrics import (
+    _entry_fact_class,
+    compute_performance_metrics,
+)
+from scripts.swebench.gt_feature_metrics import (
+    _consumption_by_fact_class,
+    classify_ledger,
+    layer_to_fact_class,
+)
 from scripts.swebench.gt_behavioral_impact import analyze_trajectory, main as behavioral_main
 from scripts.swebench import gt_deep_metrics
+from groundtruth.runtime.feature_lineage import build_lineage, lineage_to_dict
 
 
 def _write_ledger(path: Path, payload: str, *, present_hash: bool = True) -> None:
@@ -254,6 +262,75 @@ def test_behavioral_impact_normalizes_native_runtime_layer() -> None:
     result = analyze_trajectory(trajectory, consumption_ledger=receipts)
 
     assert result["summary"]["per_tag_impact"]["syntax_result"]["total"] == 1
+
+
+def test_covering_red_requires_typed_executed_covering_runner_ownership(
+    tmp_path: Path,
+) -> None:
+    advisory = "Run a focused verification before completion."
+    executed = "$ pytest -q tests/unit\nFAILED tests/unit\n[exit 1]"
+    lineage = build_lineage(
+        runtime_producer_id="covering_runner",
+        evidence_type="covering_verdict",
+        actual_event="test_result",
+    )
+    assert lineage is not None
+    ledger_lineage = lineage_to_dict(lineage)
+    ledger_lineage["lineage_schema"] = ledger_lineage.pop("schema")
+    ledger_lineage["feature_ids"] = ledger_lineage.pop("features")
+    rows = [
+        {
+            "layer": "verify.horizon.advisory",
+            "event_type": "review_transition",
+            "iteration": 1,
+            "outcome": "delivered",
+            "chars_delivered": len(advisory),
+            "content_sha256_16": hashlib.sha256(advisory.encode()).hexdigest()[:16],
+            "file_path": "src/pkg.py",
+            **ledger_lineage,
+        },
+        {
+            "layer": "verify.horizon.executed",
+            "event_type": "test_result",
+            "iteration": 2,
+            "outcome": "delivered",
+            "chars_delivered": len(executed),
+            "content_sha256_16": hashlib.sha256(executed.encode()).hexdigest()[:16],
+            "file_path": "src/pkg.py",
+            **ledger_lineage,
+        },
+    ]
+    ledger = tmp_path / "gt_runtime_ledger_task.jsonl"
+    ledger.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+    )
+    trajectory = {
+        "messages": [
+            {"role": "tool", "content": advisory},
+            {"role": "assistant", "content": "I will run the focused test."},
+            {"role": "tool", "content": executed},
+            {"role": "assistant", "content": "The covering failure identifies the repair."},
+        ]
+    }
+
+    receipts = build_consumption_ledger(
+        trajectory, runtime_ledger_path=str(ledger)
+    )
+    by_fact, _full = _consumption_by_fact_class(trajectory, str(ledger))
+    covering_entries = [
+        entry for entry in receipts["entries"]
+        if _entry_fact_class(entry) == "covering_red"
+    ]
+    impact = analyze_trajectory(trajectory, consumption_ledger=receipts)["summary"]
+
+    assert layer_to_fact_class("verify.horizon.advisory") is None
+    assert layer_to_fact_class("verify.horizon.executed") is None
+    assert classify_ledger(rows)["covering_red"]["delivered"] == 1
+    assert by_fact["covering_red"]["delivered"] == 1
+    assert len(covering_entries) == 1
+    assert covering_entries[0]["ledger_layer"] == "verify.horizon.executed"
+    assert impact["per_tag_impact"]["covering_red"]["total"] == 1
+    assert impact["per_tag_impact"]["verify.horizon.advisory"]["total"] == 1
 
 
 def test_deep_metrics_behavioral_impact_uses_shared_native_receipts(

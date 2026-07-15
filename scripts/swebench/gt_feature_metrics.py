@@ -321,8 +321,6 @@ _LEGACY_LAYER_FACTCLASS: dict[str, str] = {
     "semantic_drift": "cochange_prior",
     "spec.obligation": "obligations",
     "obligation.resurface": "obligations",
-    "verify.horizon.advisory": "covering_red",
-    "verify.horizon.executed": "covering_red",
     "detect.coherence": "recovery",
     "detect.loop": "recovery",
     "recovery": "recovery",
@@ -354,6 +352,43 @@ def layer_to_fact_class(layer: str) -> str | None:
     _, fr = _profile_registry()
     reg = fr.registration_for(evidence_type)
     return reg.fact_class if reg is not None else None
+
+
+def _typed_fact_class(payload: object) -> str | None:
+    """Return a FACT only from registry-valid producer lineage.
+
+    Layer names are routing labels, not ownership.  In particular, the generic
+    verification advisory cannot borrow ``covering_red`` from the executed
+    covering runner merely because both share the verify horizon.
+    """
+    if not isinstance(payload, dict):
+        return None
+    lineage = payload.get("feature_lineage")
+    row = lineage if isinstance(lineage, dict) else payload
+    if row.get("schema", row.get("lineage_schema")) != "gt.feature_lineage.v1":
+        return None
+    evidence_type = row.get("evidence_type")
+    runtime_producer = row.get("runtime_producer_id")
+    registered_producer = row.get("registered_producer_id")
+    fact_class = row.get("fact_class")
+    registration = (
+        registration_for(evidence_type) if isinstance(evidence_type, str) else None
+    )
+    if (
+        row.get("producer_registration_match") is not True
+        or registration is None
+        or registration.fact_class != fact_class
+        or registration.producer != registered_producer
+        or not isinstance(runtime_producer, str)
+        or not producer_matches(evidence_type, runtime_producer)
+    ):
+        return None
+    layer = str(payload.get("ledger_layer") or payload.get("layer") or "")
+    if fact_class == "covering_red" and layer.startswith("verify.horizon.") and (
+        layer != "verify.horizon.executed" or runtime_producer != "covering_runner"
+    ):
+        return None
+    return str(fact_class)
 
 
 def is_arbiter_candidate(layer: str) -> bool:
@@ -832,7 +867,7 @@ def classify_ledger(rows: list[dict]) -> dict[str, dict[str, Any]]:
     })
     for idx, r in enumerate(rows):
         layer = str(r.get("layer") or "")
-        fc = layer_to_fact_class(layer)
+        fc = _typed_fact_class(r) or layer_to_fact_class(layer)
         if fc is None:
             continue
         b = per[fc]
@@ -1071,7 +1106,9 @@ def _consumption_by_fact_class(
             continue
         seen_physical.add(physical_id)
         kind = str(entry.get("kind") or "")
-        fc = layer_to_fact_class(str(entry.get("ledger_layer") or kind))
+        fc = _typed_fact_class(entry) or layer_to_fact_class(
+            str(entry.get("ledger_layer") or kind)
+        )
         if fc is None:
             fc = _CONSUMPTION_KIND_FACTCLASS.get(kind)
         if fc is None:
@@ -1159,7 +1196,9 @@ def native_visible_by_fact_class(rows: list[dict], messages: list[dict]) -> dict
     for idx, mi in join.items():
         if mi is None:
             continue
-        fc = layer_to_fact_class(str(rows[idx].get("layer") or ""))
+        fc = _typed_fact_class(rows[idx]) or layer_to_fact_class(
+            str(rows[idx].get("layer") or "")
+        )
         if fc is not None:
             out[fc] += 1
     return dict(out)

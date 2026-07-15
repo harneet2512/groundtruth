@@ -116,7 +116,6 @@ def test_import_crosscheck_catches_bad_factclass(monkeypatch):
     ("edit.syntax", "syntax_result"),
     ("semantic_drift", "cochange_prior"),
     ("ga.trace_frame", "localization"),
-    ("verify.horizon.executed", "covering_red"),
 ])
 def test_real_runtime_layers_map_to_fact_classes(layer, fact_class):
     """Every layer observed as delivered in arm-4 must enter its canonical FACT lifecycle."""

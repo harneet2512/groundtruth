@@ -74,18 +74,31 @@ _DELIVERY_CLASS = {
     "nudge": "recovery",
     "detect.coherence": "recovery",
     "detect.loop": "recovery",
-    "verify": "covering_red",
-    "verify.horizon.advisory": "covering_red",
-    "verify.horizon.executed": "covering_red",
     "obligations": "obligations",
     "spec.obligation": "obligations",
     "obligation.resurface": "obligations",
 }
 
 
-def _delivery_class(layer: str) -> str:
+def _delivery_class(layer: str, feature_lineage: object = None) -> str:
     """Stable metric class for a tagged kind or native runtime-ledger layer."""
     normalized = (layer or "unknown").removeprefix("ga.")
+    if (
+        isinstance(feature_lineage, dict)
+        and feature_lineage.get("schema") == "gt.feature_lineage.v1"
+        and feature_lineage.get("producer_registration_match") is True
+        and isinstance(feature_lineage.get("fact_class"), str)
+        and feature_lineage.get("fact_class")
+        and not (
+            feature_lineage.get("fact_class") == "covering_red"
+            and normalized.startswith("verify.horizon.")
+            and (
+                normalized != "verify.horizon.executed"
+                or feature_lineage.get("runtime_producer_id") != "covering_runner"
+            )
+        )
+    ):
+        return str(feature_lineage["fact_class"])
     if normalized.startswith("gateway."):
         normalized = normalized.split(".", 1)[1]
     return _DELIVERY_CLASS.get(normalized, normalized)
@@ -179,7 +192,7 @@ def analyze_trajectory(trajectory: dict, *, consumption_ledger: dict | None = No
                 continue
             kind = _delivery_class(str(
                 receipt.get("ledger_layer") or receipt.get("kind") or "unknown"
-            ))
+            ), receipt.get("feature_lineage"))
             if kind == "recovery" and level >= 1:
                 recovery_delivered += 1
                 if level >= 3:

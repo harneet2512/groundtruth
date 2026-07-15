@@ -640,7 +640,9 @@ _EVIDENCE_TYPE_PRODUCERS: dict[str, frozenset[str]] = {
     "body_concept": frozenset({"body_concept"}),
     "trace_frame": frozenset({"trace"}),
     "caller_break": frozenset({"caller_contract"}),
-    "covering_verdict": frozenset({"covering"}),
+    # Gateway envelopes use the compact ``covering`` producer id; the native
+    # mini-seam execution path is owned by the concrete covering_runner engine.
+    "covering_verdict": frozenset({"covering", "covering_runner"}),
 }
 
 
