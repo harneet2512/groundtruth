@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .covering_runner import CoveringAttribution
+from .evidence_envelope import EvidenceEnvelope
 from .fact_registry import EVENT_EDIT_RESULT, EVENT_TEST_RESULT, registration_for, required_event
 from .producer_attestation import (
     ATTESTATION_SCHEMA,
@@ -48,12 +49,15 @@ def _path_artifact_id(prefix: str, path: str) -> str:
     return f"{prefix}-{_sha(path.encode('utf-8', 'surrogatepass'))}.bin"
 
 
-def syntax_candidate_id(observation: SyntaxObservation) -> str:
-    return "syntax:" + _sha(observation.canonical_json().encode("utf-8"))
-
-
-def covering_candidate_id(candidate: "CoveringCandidateInput") -> str:
-    return "covering:" + _sha(candidate.canonical_bytes())
+def lane_delivery_candidate_id(kind: str, target: str, shipped_suffix: str) -> str:
+    """Reproduce the exact final envelope identity owned by `_seal_lane_delivery`."""
+    return EvidenceEnvelope.build(
+        producer=kind or "lane",
+        fact_id="",
+        target=target or "",
+        evidence_type=kind or "lane",
+        payload=(shipped_suffix,),
+    ).dedup_key
 
 
 @dataclass(frozen=True)
@@ -230,6 +234,7 @@ def finalize_syntax_attestation(
     source_bytes: bytes,
     producer_block: str,
     shipped_suffix: str,
+    target: str,
     candidate_id: str,
     delivery_seal: str,
 ) -> FinalAttestationInputs:
@@ -275,7 +280,10 @@ def finalize_syntax_attestation(
         and observation.rendered_bytes_length == len(rendered_bytes)
         and shipped_bytes in (rendered_bytes, b"\n" + rendered_bytes)
         and delivery_seal == _sha(shipped_bytes)[:16]
-        and candidate_id == syntax_candidate_id(observation)
+        and target.replace("\\", "/") == observation.file_path.replace("\\", "/")
+        and candidate_id == lane_delivery_candidate_id(
+            "edit.syntax", target, shipped_suffix
+        )
     )
     return _final(
         evidence_type="syntax_result",
@@ -303,6 +311,7 @@ def finalize_covering_attestation(
     *,
     producer_block: str,
     shipped_suffix: str,
+    target: str,
     candidate_id: str,
     delivery_seal: str,
 ) -> FinalAttestationInputs:
@@ -372,7 +381,10 @@ def finalize_covering_attestation(
         and candidate.rendered_bytes_length == len(rendered_bytes)
         and shipped_bytes in (rendered_bytes, b"\n" + rendered_bytes)
         and delivery_seal == _sha(shipped_bytes)[:16]
-        and candidate_id == covering_candidate_id(candidate)
+        and target.replace("\\", "/") in source_paths
+        and candidate_id == lane_delivery_candidate_id(
+            "verify.horizon.executed", target, shipped_suffix
+        )
     )
     source_proofs = tuple(
         ProofRef("source_revision", by_id[source.artifact_id], "$")
@@ -405,8 +417,7 @@ __all__ = [
     "EditedSourceInput",
     "FinalAttestationInputs",
     "build_covering_candidate_input",
-    "covering_candidate_id",
     "finalize_covering_attestation",
     "finalize_syntax_attestation",
-    "syntax_candidate_id",
+    "lane_delivery_candidate_id",
 ]

@@ -306,7 +306,9 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # covering_runner/fact_registry/syntax_observation (above) and the
         # producer-attestation schema immediately below.
         "producer_attestation.py",
+        "attestation_store.py",
         "lane_attestation.py",
+        "gateway_attestation_factory.py",
         "gateway.py",
         # Exact CAP-control participation schema used by the mini-seam's host-only
         # decision receipts. Stdlib + feature_lineage/fact_registry only (both

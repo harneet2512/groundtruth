@@ -11445,7 +11445,9 @@ def _commit_prepared_lane(out, cmd, kind: str, decision: dict, *, krel, event) -
             kind, decision.get("provenance_original", text), shipped_suffix,
             krel or "", decision["provenance_decision"])
     _ss_record_delivered(kind, text, decision.get("root", ""))
-    _seal_lane_delivery(kind, shipped_suffix, krel or "", base_output=base_output)
+    _seal_lane_delivery(
+        kind, shipped_suffix, krel or "", base_output=base_output,
+        producer_text=text)
     if kind == "l3b.evidence" and _last_budget_pending:
         try:
             _PRODUCT_BUDGETER.commit_delivered(_last_budget_pending)
@@ -11836,7 +11838,57 @@ def _lane_fits_budget(text: str) -> bool:
         return True
 
 
-def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str = "") -> None:
+def _attestation_output_root() -> str:
+    return os.path.join(os.environ.get("GT_C_OUT") or "/gt_out", "producer_attestations")
+
+
+def _persist_lane_producer_attestation(
+        kind: str, target: str, producer_block: str, shipped_suffix: str,
+        candidate_id: str, delivery_seal: str) -> None:
+    """Persist typed lane truth only for the exact final delivered candidate."""
+    try:
+        from groundtruth.runtime.attestation_store import persist_attestation
+        from groundtruth.runtime.lane_attestation import (
+            finalize_covering_attestation, finalize_syntax_attestation)
+
+        final = None
+        if kind == "edit.syntax":
+            observation = globals().get("_last_edit_syntax_observation")
+            if observation is None:
+                return
+            source_path = target if os.path.isabs(target) else os.path.join(_root(), target)
+            with open(source_path, "rb") as source_file:
+                source_bytes = source_file.read()
+            final = finalize_syntax_attestation(
+                observation,
+                source_bytes=source_bytes,
+                producer_block=producer_block,
+                shipped_suffix=shipped_suffix,
+                target=target,
+                candidate_id=candidate_id,
+                delivery_seal=delivery_seal,
+            )
+        elif kind == "verify.horizon.executed":
+            candidate = globals().get("_last_covering_candidate_input")
+            if candidate is None:
+                return
+            final = finalize_covering_attestation(
+                candidate,
+                producer_block=producer_block,
+                shipped_suffix=shipped_suffix,
+                target=target,
+                candidate_id=candidate_id,
+                delivery_seal=delivery_seal,
+            )
+        if final is not None:
+            persist_attestation(
+                final.attestation, final.artifact_mapping(), _attestation_output_root())
+    except Exception:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+        return
+
+
+def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str = "",
+                        producer_text: "str | None" = None) -> None:
     """RL-1: route an ALREADY-DELIVERED lane block through EvidenceEnvelope build ->
     validate -> seal — advancing the SHARED gateway hash-chain, stamping the envelope
     dedup_key into _EPISODE.delivered_dedup (dual-stamp; the legacy content-hash stamp
@@ -11881,6 +11933,10 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
         _gt_gateway_deliveries.append(sealed)
         # B-14: persist the sealed lane envelope (level-1 delivered) durably.
         _persist_receipt(sealed, kind="lane", transition="delivered")
+        _persist_lane_producer_attestation(
+            kind, target, producer_text if producer_text is not None else text,
+            _shipped, getattr(env, "dedup_key", "") or "",
+            getattr(sealed, "rendered_bytes_hash", "")[:16])
         try:
             from groundtruth.runtime.fact_registry import is_registered
             from groundtruth.runtime.global_arbiter import class_of_kind
@@ -12362,6 +12418,30 @@ def _render_gateway_envelope(render_envelope, envelope, *, native: bool) -> str:
         def_facts_renderer=None if sanitized else _gateway_def_render)
 
 
+def _persist_gateway_producer_attestation(winner, shipped: str, sealed) -> None:
+    """Persist typed Gateway truth only after the exact envelope wins and seals."""
+    try:
+        from groundtruth.runtime.attestation_store import persist_attestation
+        from groundtruth.runtime.fact_registry import required_event
+        from groundtruth.runtime.gateway_attestation_factory import (
+            build_gateway_attestation)
+
+        actual_event = str(
+            getattr(getattr(winner, "lineage", None), "actual_event", "")
+            or required_event(getattr(winner, "evidence_type", "") or "")
+            or "")
+        final, artifacts = build_gateway_attestation(
+            winner,
+            delivery_seal=getattr(sealed, "rendered_bytes_hash", "")[:16],
+            shipped_bytes=shipped.encode("utf-8", "surrogatepass"),
+            actual_event=actual_event,
+            open_event=actual_event,
+        )
+        persist_attestation(final, artifacts, _attestation_output_root())
+    except Exception:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+        return
+
+
 def _gt_gateway_pool_envelope(
         winner, *, pool, out, ev, native: bool,
         render_envelope, fits_budget, seal_delivery,
@@ -12417,6 +12497,7 @@ def _gt_gateway_pool_envelope(
         )
         _gt_gateway_deliveries.append(sealed)
         _persist_receipt(sealed, kind="gateway", transition="delivered")
+        _persist_gateway_producer_attestation(_winner, _shipped, sealed)
         _xsession_flush()
         _gt_gateway_append(out, _shipped)
         _record_gateway_final_controls(
@@ -12692,6 +12773,7 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
             _gt_gateway_deliveries.append(sealed)
             # B-14: persist the sealed envelope (level-1 delivered) durably.
             _persist_receipt(sealed, kind="gateway", transition="delivered")
+            _persist_gateway_producer_attestation(winner, _shipped, sealed)
             # SM-9c WRITE: record this fresh delivery (level-1) in the durable per-repo
             # store so a class delivered on the final turn is captured at least as delivered.
             _xsession_flush()
@@ -14407,7 +14489,7 @@ def _commit_prepared_steer(out, cmd, kind: str, winner_hash: str, decision: dict
     _ss_record_delivered(kind, text)
     _seal_lane_delivery(
         kind, decision["shipped_suffix"], krel or kf or "",
-        base_output=steer_base)
+        base_output=steer_base, producer_text=text)
 
 
 _GA_PLANE_LANE_A = "lane_a"

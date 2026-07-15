@@ -9,10 +9,9 @@ from pathlib import Path
 from groundtruth.runtime.covering_runner import CoveringAttribution
 from groundtruth.runtime.lane_attestation import (
     build_covering_candidate_input,
-    covering_candidate_id,
     finalize_covering_attestation,
     finalize_syntax_attestation,
-    syntax_candidate_id,
+    lane_delivery_candidate_id,
 )
 from groundtruth.runtime.producer_attestation import PASS, UNMEASURED, validate
 from groundtruth.runtime.syntax_observation import build_syntax_observation
@@ -45,7 +44,8 @@ def test_syntax_factory_passes_only_exact_complete_join():
         source_bytes=source,
         producer_block=block,
         shipped_suffix=block,
-        candidate_id=syntax_candidate_id(observation),
+        target="src/mod.py",
+        candidate_id=lane_delivery_candidate_id("edit.syntax", "src/mod.py", block),
         delivery_seal=hashlib.sha256(block.encode()).hexdigest()[:16],
     )
 
@@ -68,7 +68,10 @@ def test_syntax_factory_downgrades_mismatch_or_missing_to_unmeasured():
             source_bytes=changed_source,
             producer_block=changed_block,
             shipped_suffix=changed_block,
-            candidate_id=syntax_candidate_id(observation),
+            target="src/mod.py",
+            candidate_id=lane_delivery_candidate_id(
+                "edit.syntax", "src/mod.py", changed_block
+            ),
             delivery_seal=hashlib.sha256(changed_block.encode()).hexdigest()[:16],
         )
         assert validate(final.attestation) == ()
@@ -117,7 +120,10 @@ def test_covering_factory_binds_result_sources_files_event_and_rendered_candidat
         candidate,
         producer_block=block,
         shipped_suffix=block,
-        candidate_id=covering_candidate_id(candidate),
+        target="src/mod.py",
+        candidate_id=lane_delivery_candidate_id(
+            "verify.horizon.executed", "src/mod.py", block
+        ),
         delivery_seal=hashlib.sha256(block.encode()).hexdigest()[:16],
     )
 
@@ -144,7 +150,10 @@ def test_covering_factory_incomplete_attribution_or_render_is_unmeasured():
             value,
             producer_block=rendered,
             shipped_suffix=rendered,
-            candidate_id=covering_candidate_id(value),
+            target="src/mod.py",
+            candidate_id=lane_delivery_candidate_id(
+                "verify.horizon.executed", "src/mod.py", rendered
+            ),
             delivery_seal=hashlib.sha256(rendered.encode()).hexdigest()[:16],
         )
         assert validate(final.attestation) == ()
@@ -203,7 +212,8 @@ def test_finalizer_accepts_only_the_lane_boundary_newline_transformation():
         source_bytes=source,
         producer_block=block,
         shipped_suffix=shipped,
-        candidate_id=syntax_candidate_id(observation),
+        target="src/mod.py",
+        candidate_id=lane_delivery_candidate_id("edit.syntax", "src/mod.py", shipped),
         delivery_seal=hashlib.sha256(shipped.encode()).hexdigest()[:16],
     )
     assert final.attestation.truth_verdict == PASS
@@ -214,7 +224,10 @@ def test_finalizer_accepts_only_the_lane_boundary_newline_transformation():
         source_bytes=source,
         producer_block=block,
         shipped_suffix="\n\n" + block,
-        candidate_id=syntax_candidate_id(observation),
+        target="src/mod.py",
+        candidate_id=lane_delivery_candidate_id(
+            "edit.syntax", "src/mod.py", "\n\n" + block
+        ),
         delivery_seal=hashlib.sha256(("\n\n" + block).encode()).hexdigest()[:16],
     )
     assert invalid.attestation.truth_verdict == UNMEASURED
@@ -223,11 +236,15 @@ def test_finalizer_accepts_only_the_lane_boundary_newline_transformation():
 def test_syntax_factory_rejects_wrong_seal_candidate_or_event():
     observation, source, block = _syntax_complete()
     cases = (
-        (observation, syntax_candidate_id(observation), "0" * 16),
+        (
+            observation,
+            lane_delivery_candidate_id("edit.syntax", "src/mod.py", block),
+            "0" * 16,
+        ),
         (observation, "syntax:wrong", hashlib.sha256(block.encode()).hexdigest()[:16]),
         (
             dataclasses.replace(observation, actual_event="test_result"),
-            syntax_candidate_id(dataclasses.replace(observation, actual_event="test_result")),
+            lane_delivery_candidate_id("edit.syntax", "src/mod.py", block),
             hashlib.sha256(block.encode()).hexdigest()[:16],
         ),
     )
@@ -237,6 +254,7 @@ def test_syntax_factory_rejects_wrong_seal_candidate_or_event():
             source_bytes=source,
             producer_block=block,
             shipped_suffix=block,
+            target="src/mod.py",
             candidate_id=candidate_id,
             delivery_seal=seal,
         )
@@ -256,7 +274,10 @@ def test_covering_factory_rejects_file_or_event_join_mismatch():
             value,
             producer_block=block,
             shipped_suffix=block,
-            candidate_id=covering_candidate_id(value),
+            target="src/mod.py",
+            candidate_id=lane_delivery_candidate_id(
+                "verify.horizon.executed", "src/mod.py", block
+            ),
             delivery_seal=hashlib.sha256(block.encode()).hexdigest()[:16],
         )
         assert validate(final.attestation) == ()
