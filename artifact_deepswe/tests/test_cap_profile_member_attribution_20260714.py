@@ -204,7 +204,15 @@ def test_completion_delivery_attributes_render_owner_not_telemetry_builder(
     out = g._gt_gate_submit_exception(object(), "submit", Submitted())
 
     assert out is not None and out["returncode"] == 1
-    delivered = [row for row in calls if row.get("content") == out["output"]]
+    assert not [row for row in calls if row.get("content") == out["output"]]
+    pending = out.pop("_gt_pending_delivery")
+    g._commit_precommitted_batch_dose({
+        "payload": out["output"], "pending_delivery": pending,
+    })
+    delivered = [
+        row for row in calls
+        if row.get("content") == out["output"] and row.get("outcome") == "delivered"
+    ]
     assert len(delivered) == 1
     extra = delivered[0]["extra"]
     assert extra["profile_member"] == "GT_CERT_DELIVERY"

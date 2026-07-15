@@ -12456,16 +12456,47 @@ def _register_precommitted_batch_dose(state, action, out) -> bool:
     """Own a native GT refusal produced before ``_augment_output``.
 
     The formatter treats it as the observation's sole dose and discards every
-    deferred sibling candidate.  The refusal's existing delivery bookkeeping is
-    preserved; this helper only makes its observation ownership explicit.
+    deferred sibling candidate.  Delivery bookkeeping is intentionally pending
+    until the formatter proves the exact refusal bytes are model-visible.
     """
+    if state is not None and state.get("precommitted_doses"):
+        return False
     if not _register_batch_execute(state, action, out):
         return False
+    pending_delivery = (
+        out.pop("_gt_pending_delivery", None) if isinstance(out, dict) else None
+    )
     state["precommitted_doses"].append({
         "output_index": len(state["outputs"]) - 1,
         "payload": str((out or {}).get("output") or ""),
+        "pending_delivery": pending_delivery,
     })
     return True
+
+
+def _commit_precommitted_batch_dose(dose: dict) -> None:
+    """Commit a submit refusal only after exact formatter visibility is proven."""
+    global _gt_submit_bounce_count, _ss_submit_red_fired
+    pending = dose.get("pending_delivery") if isinstance(dose, dict) else None
+    if not isinstance(pending, dict):
+        return
+    content_hash = pending.get("content_hash")
+    payload = dose.get("payload")
+    if not isinstance(content_hash, str) or not content_hash or not isinstance(payload, str):
+        return
+    if content_hash in _oracle_delivered_hashes:
+        return
+    _gt_submit_record(pending.get("verdict"), blocked=True)
+    _runtime_ledger_record(
+        kind="submit_refusal",
+        outcome=_ProductSignalOutcome.DELIVERED,
+        chars=len(payload), content=payload,
+        extra=pending.get("extra"),
+    )
+    _oracle_delivered_hashes.add(content_hash)
+    _gt_submit_bounce_count += 1
+    if pending.get("ss_submit_red") is True:
+        _ss_submit_red_fired = True
 
 
 def _attach_batch_candidate(pool, candidate, out, payload: str, *, join: bool,
@@ -13557,6 +13588,17 @@ def install_observation_batch_commit(agent) -> bool:
                     "reason": ("precommitted_submit_not_visible" if not visible
                                else "multiple_precommitted_submit_doses"),
                     "iteration": globals().get("_action_count", 0)})
+            else:
+                try:
+                    _commit_precommitted_batch_dose(first)
+                except Exception as exc:  # noqa: BLE001 -- audit commit cannot hide bytes
+                    _ledger_line_direct({
+                        "layer": "global_arbiter", "event_type": "pre_submit",
+                        "file_path": "", "outcome": "provider_failed",
+                        "chars_delivered": len(str(first.get("payload") or "")),
+                        "reason": ("submit_delivery_commit_failed:"
+                                   + type(exc).__name__)[:200],
+                        "iteration": globals().get("_action_count", 0)})
             _discard_tool_observation_batch("batch_precommitted_winner", state)
             return rendered
 
@@ -15124,8 +15166,8 @@ def _ss_submit_red_refusal(*, record_candidate: bool = True) -> str:
         return ""
     if not line or contains_gt_tag(line):
         return ""
-    _ss_submit_red_fired = True
     if record_candidate:
+        _ss_submit_red_fired = True
         try:
             _runtime_ledger_record(
                 kind="submit_gate", outcome="submit_blocked",
@@ -16425,16 +16467,25 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
                         runtime_producer_id="submit_gate",
                         evidence_type="submit_refusal", actual_event="submit",
                         cap_feature_ids=("GT_SS_SUBMIT_RED",))
-                    _runtime_ledger_record(
-                        kind="submit_gate", outcome="submit_blocked",
-                        reason="ss_submit_red", chars=len(_ss_red), content=_ss_red,
-                        extra=_feature_lineage_extra(_ss_red_lineage))
+                    _ss_red_extra = _feature_lineage_extra(_ss_red_lineage)
                 except Exception:  # noqa: BLE001 -- attribution never changes refusal
-                    _runtime_ledger_record(
-                        kind="submit_gate", outcome="submit_blocked",
-                        reason="ss_submit_red", chars=len(_ss_red), content=_ss_red)
-                _gt_submit_bounce_count += 1
-                return {"output": _ss_red, "returncode": 1}
+                    _ss_red_extra = _registered_delivery_extra(
+                        "submit_gate", "submit_refusal", "submit")
+                _ss_red_hash = (
+                    "c:" + hashlib.sha256(_ss_red.encode("utf-8")).hexdigest()[:16]
+                )
+                if _ss_red_hash in _oracle_delivered_hashes:
+                    return None
+                return {
+                    "output": _ss_red,
+                    "returncode": 1,
+                    "_gt_pending_delivery": {
+                        "content_hash": _ss_red_hash,
+                        "verdict": verdict,
+                        "extra": _ss_red_extra,
+                        "ss_submit_red": True,
+                    },
+                }
             # clean / gate_overridden / gate_crash -> submission proceeds (host record).
             # A CLEAN cert on an allow delivers NOTHING (correct-or-quiet) — the block below
             # is SUBORDINATE to the head block decision, so the cert never turns allow -> block.
@@ -16463,24 +16514,24 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
         hc = "c:" + hashlib.sha256(rejection.encode("utf-8")).hexdigest()[:16]  # D-2: 16 hex
         if hc in _oracle_delivered_hashes:
             return None
-        _oracle_delivered_hashes.add(hc)          # stamp (the dedup ledger)
-        _gt_submit_bounce_count += 1
-        _gt_submit_record(verdict, blocked=True)
-        # The returned rejection IS this submit observation's model-facing payload.  Attribute
-        # only the native CompletionCertificate form to its exact delivery member; the plain
-        # submit-gate fallback and GT_COMPLETION_CERT's host-only build remain unattributed.
-        _runtime_ledger_record(
-            kind="submit_refusal",
-            outcome=_ProductSignalOutcome.DELIVERED,
-            chars=len(rejection), content=rejection,
-            extra=(
+        # The environment boundary only prepares the refusal.  The formatter commits
+        # delivery, dedup, and bounce state after proving these exact bytes visible.
+        # Until then, this is a blocked action result, not a delivered GT fact.
+        pending_extra = (
                 _exact_profile_delivery_extra(
                     "GT_CERT_DELIVERY", "submit_refusal", rejection, "", "submit")
                 if _cert_rendered and os.environ.get("GT_CERT_DELIVERY") == "1"
                 else _registered_delivery_extra(
-                    "submit_gate", "submit_refusal", "submit")
-            ))
-        return {"output": rejection, "returncode": 1}
+                    "submit_gate", "submit_refusal", "submit"))
+        return {
+            "output": rejection,
+            "returncode": 1,
+            "_gt_pending_delivery": {
+                "content_hash": hc,
+                "verdict": verdict,
+                "extra": pending_extra,
+            },
+        }
     except Exception:  # noqa: BLE001 — a gate crash must NEVER brick a run (fail-open)
         return None
 
@@ -16513,11 +16564,11 @@ def _wrap_execute(orig):
                 _blocked = _gt_gate_submit_exception(self, action, _e)
                 if _blocked is not None:
                     _state = _batch_context.get()
-                    if _state is not None:
-                        if not _register_precommitted_batch_dose(
-                                _state, action, _blocked):
-                            globals()["_batch_install_failed"] = True
-                            _blocked["output"] = ""
+                    if _state is None or not _register_precommitted_batch_dose(
+                            _state, action, _blocked):
+                        globals()["_batch_install_failed"] = True
+                        _blocked.pop("_gt_pending_delivery", None)
+                        raise  # no formatter ownership: fail open with original Submitted
                     return _blocked            # BLOCK: swallow Submitted, agent continues
                 raise                          # ALLOW / not-a-submit: propagate unchanged
         else:

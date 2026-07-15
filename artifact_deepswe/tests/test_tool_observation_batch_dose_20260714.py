@@ -667,3 +667,133 @@ def test_native_precommitted_submit_refusal_owns_observation(monkeypatch, comman
     contents = [row["content"] for row in rendered]
     assert sum("NATIVE_REFUSAL" in content for content in contents) == 1
     assert all("GT:sibling" not in content for content in contents)
+
+
+def test_submit_refusal_delivery_commits_only_after_exact_formatter_visibility(monkeypatch):
+    _wire_fake_candidates(monkeypatch)
+    rows = []
+    content_hash = "c:" + "a" * 16
+    monkeypatch.setattr(g, "_runtime_ledger_record", lambda **row: rows.append(row))
+    monkeypatch.setattr(g, "_gt_submit_record", lambda *a, **k: None)
+    monkeypatch.setattr(g, "_gt_submit_bounce_count", 0, raising=False)
+    g._oracle_delivered_hashes.discard(content_hash)
+
+    class _SubmitEnv(_Env):
+        def execute(self, action):
+            out = {
+                "output": "NATIVE_REFUSAL", "returncode": 1,
+                "_gt_pending_delivery": {
+                    "content_hash": content_hash,
+                    "verdict": SimpleNamespace(reason="hygiene"),
+                    "extra": {"fact_class": "submit_refusal"},
+                },
+            }
+            assert g._register_precommitted_batch_dose(
+                g._batch_context.get(), action, out)
+            assert not rows
+            assert content_hash not in g._oracle_delivered_hashes
+            assert g._gt_submit_bounce_count == 0
+            return out
+
+    agent = _Agent()
+    agent.env = _SubmitEnv()
+    assert g.install_observation_batch_commit(agent)
+    rendered = agent.execute_actions({
+        "extra": {"actions": [{"command": "submit"}]},
+    })
+
+    assert rendered == [{"role": "tool", "content": "NATIVE_REFUSAL"}]
+    delivered = [row for row in rows if row.get("outcome") == "delivered"]
+    assert len(delivered) == 1
+    assert delivered[0]["content"] == "NATIVE_REFUSAL"
+    assert delivered[0]["chars"] == len("NATIVE_REFUSAL")
+    assert content_hash in g._oracle_delivered_hashes
+    assert g._gt_submit_bounce_count == 1
+    g._commit_precommitted_batch_dose({
+        "payload": "NATIVE_REFUSAL",
+        "pending_delivery": {
+            "content_hash": content_hash,
+            "verdict": SimpleNamespace(reason="hygiene"),
+            "extra": {"fact_class": "submit_refusal"},
+        },
+    })
+    assert len([row for row in rows if row.get("outcome") == "delivered"]) == 1
+    assert g._gt_submit_bounce_count == 1
+
+
+def test_submit_refusal_formatter_failure_never_commits_delivery(monkeypatch):
+    _wire_fake_candidates(monkeypatch)
+    rows = []
+    content_hash = "c:" + "b" * 16
+    monkeypatch.setattr(g, "_runtime_ledger_record", lambda **row: rows.append(row))
+    monkeypatch.setattr(g, "_gt_submit_record", lambda *a, **k: None)
+    monkeypatch.setattr(g, "_gt_submit_bounce_count", 0, raising=False)
+    g._oracle_delivered_hashes.discard(content_hash)
+
+    class _SubmitEnv(_Env):
+        def execute(self, action):
+            out = {
+                "output": "NATIVE_REFUSAL", "returncode": 1,
+                "_gt_pending_delivery": {
+                    "content_hash": content_hash,
+                    "verdict": SimpleNamespace(reason="hygiene"),
+                    "extra": {"fact_class": "submit_refusal"},
+                },
+            }
+            assert g._register_precommitted_batch_dose(
+                g._batch_context.get(), action, out)
+            return out
+
+    agent = _Agent(_Model(raises=True))
+    agent.env = _SubmitEnv()
+    assert g.install_observation_batch_commit(agent)
+    with pytest.raises(RuntimeError, match="format failed"):
+        agent.execute_actions({"extra": {"actions": [{"command": "submit"}]}})
+
+    assert not [row for row in rows if row.get("outcome") == "delivered"]
+    assert content_hash not in g._oracle_delivered_hashes
+    assert g._gt_submit_bounce_count == 0
+
+
+def test_second_precommitted_refusal_fails_open_instead_of_deadlocking(monkeypatch):
+    _wire_fake_candidates(monkeypatch)
+    monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
+    monkeypatch.setattr(g, "_batch_install_failed", False)
+    monkeypatch.setattr(g, "_gt_submit_bounce_count", 0, raising=False)
+
+    class Submitted(Exception):
+        pass
+
+    counter = {"n": 0}
+
+    def prepare(_env, _action, _exc):
+        counter["n"] += 1
+        return {
+            "output": "REFUSAL", "returncode": 1,
+            "_gt_pending_delivery": {
+                "content_hash": "c:" + str(counter["n"]) * 16,
+                "verdict": SimpleNamespace(reason="hygiene"),
+                "extra": {"fact_class": "submit_refusal"},
+            },
+        }
+
+    monkeypatch.setattr(g, "_gt_gate_submit_exception", prepare)
+
+    def submit(_env, _action, *args, **kwargs):
+        raise Submitted()
+
+    class _SubmitEnv:
+        execute = g._wrap_execute(submit)
+
+    agent = _Agent()
+    agent.env = _SubmitEnv()
+    assert g.install_observation_batch_commit(agent)
+
+    with pytest.raises(Submitted):
+        agent.execute_actions({"extra": {"actions": [
+            {"command": "submit-one"}, {"command": "submit-two"},
+        ]}})
+
+    assert counter["n"] == 2
+    assert g._gt_submit_bounce_count == 0
+    assert g._batch_context.get() is None

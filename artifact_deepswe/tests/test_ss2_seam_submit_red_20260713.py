@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import gt_mini_patch as g  # noqa: E402
@@ -146,9 +148,36 @@ def test_gate_blocks_once_then_allows(monkeypatch):
     blocked = g._gt_gate_submit_exception(object(), {"command": "echo done"}, exc)
     assert isinstance(blocked, dict) and blocked.get("returncode") == 1
     assert "pre-commit hook failed:" in blocked.get("output", "")
+    assert g._ss_submit_red_fired is False
+    pending = blocked.pop("_gt_pending_delivery")
+    g._commit_precommitted_batch_dose({
+        "payload": blocked["output"], "pending_delivery": pending,
+    })
+    assert g._ss_submit_red_fired is True
     # 2nd submit -> ALLOW (None -> the caller re-raises Submitted -> submission proceeds).
     allowed = g._gt_gate_submit_exception(object(), {"command": "echo done"}, exc)
     assert allowed is None
+
+
+def test_gate_without_formatter_ownership_does_not_spend_submit_red(monkeypatch):
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
+    monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
+    monkeypatch.setattr(g, "_ORACLE_ROUTE", False)
+    _stub_head_allows(monkeypatch)
+    records = _capture(monkeypatch)
+    monkeypatch.setattr(g, "_ss_last_failing_test", {"cmd": "pytest -q", "step": 4})
+    g._batch_context.set(None)
+
+    def submit(_env, _action, *args, **kwargs):
+        raise Submitted()
+
+    with pytest.raises(Submitted):
+        g._wrap_execute(submit)(object(), {"command": "submit"})
+
+    assert g._ss_submit_red_fired is False
+    assert g._gt_submit_bounce_count == 0
+    assert not [row for row in records if row.get("outcome") == "delivered"]
 
 
 def test_gate_allows_when_no_observed_red(monkeypatch):

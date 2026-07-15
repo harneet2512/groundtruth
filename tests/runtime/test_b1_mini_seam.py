@@ -216,6 +216,14 @@ def _assert_native_refusal(rej: dict) -> str:
     return txt
 
 
+def _commit_visible_refusal(rej: dict) -> None:
+    """Model the formatter's exact-visible commit after inspecting refusal bytes."""
+    pending = rej.pop("_gt_pending_delivery")
+    gmp._commit_precommitted_batch_dose({
+        "payload": rej["output"], "pending_delivery": pending,
+    })
+
+
 _BINARY_HYGIENE = {"blocking": True, "reason": "binary_file_in_diff",
                    "detail": "refusing to commit binary artifact(s): weights.bin"}
 _COVERING_RED = {"verdict": "fail", "reason": "ran",
@@ -247,7 +255,24 @@ def test_submit_gate_covering_red_bounces(monkeypatch):
     rej = gmp._gt_gate_submit_exception(object(), {"command": "x"}, _Submitted())
     txt = _assert_native_refusal(rej)
     assert "covering" in txt.lower()
+    _commit_visible_refusal(rej)
     assert gmp._gt_submit_bounce_count == 1
+
+
+def test_submit_gate_without_formatter_ownership_fails_open(monkeypatch):
+    """A refusal cannot block or count when no formatter batch can own its bytes."""
+    _submit_env(monkeypatch, _BINARY_HYGIENE, None)
+    monkeypatch.setattr(gmp, "_ORACLE_ROUTE", False)
+    gmp._batch_context.set(None)
+
+    def submit(_env, _action, *args, **kwargs):
+        raise _Submitted()
+
+    wrapped = gmp._wrap_execute(submit)
+    with pytest.raises(_Submitted):
+        wrapped(object(), {"command": "submit"})
+    assert gmp._gt_submit_bounce_count == 0
+    assert not gmp._oracle_delivered_hashes
 
 
 def test_submit_gate_bounces_once_then_fails_open(monkeypatch):
@@ -269,6 +294,7 @@ def test_submit_gate_bounces_once_then_fails_open(monkeypatch):
     # FIRST submit -> BLOCK, bounce -> 1.
     r1 = gmp._gt_gate_submit_exception(object(), {"command": "x"}, _Submitted())
     _assert_native_refusal(r1)
+    _commit_visible_refusal(r1)
     assert gmp._gt_submit_bounce_count == 1
     # SECOND submit (still dirty, DIFFERENT detail) -> FAIL-OPEN -> allow (None).
     r2 = gmp._gt_gate_submit_exception(object(), {"command": "x"}, _Submitted())
@@ -284,6 +310,7 @@ def test_submit_gate_dedup_suppresses_identical_refusal(monkeypatch):
     _submit_env(monkeypatch, _BINARY_HYGIENE, None)  # SAME hygiene each call
     r1 = gmp._gt_gate_submit_exception(object(), {"command": "x"}, _Submitted())
     txt = _assert_native_refusal(r1)
+    _commit_visible_refusal(r1)
     hc = "c:" + __import__("hashlib").sha256(txt.encode("utf-8")).hexdigest()[:16]  # D-2
     assert hc in gmp._oracle_delivered_hashes, "refusal must stamp the dedup ledger"
     # reset the cap guard so DEDUP alone decides the second identical attempt.
