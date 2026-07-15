@@ -298,6 +298,30 @@ print('right:', repr(second))  # possible result B 2024
     assert m._v2_clause_fresh_behavioral_proof(view) is None
 
 
+def test_t3_disjunctive_alternatives_accept_repeated_allowed_result(gmp):
+    """Every checked case may resolve to the same member of an allowed A-or-B set."""
+    m, _tmp = gmp
+    view = m._V2ClauseView(0, {
+        "verbatim_text": "I expect result A 2023 or possibly result B 2024",
+        "subject_symbols": [],
+        "symbols": [],
+    })
+    command = '''python3 -c "
+first = render_value('left')
+second = render_value('right')
+print('left:', repr(first))
+print('right:', repr(second))
+"'''
+    m._action_count = 9
+    m._ss_record_behavioral_proof(
+        command=command,
+        output="left: 'result A 2023'\nright: 'result A 2023'",
+        returncode=0,
+    )
+
+    assert m._v2_clause_fresh_behavioral_proof(view) is not None
+
+
 @pytest.mark.parametrize(
     ("clause", "command", "output"),
     [

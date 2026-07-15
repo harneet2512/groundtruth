@@ -7418,10 +7418,26 @@ def _v2_checked_probe_covers_clause(view, command: str, output: str, returncode)
         for part in re.split(r"\b(?:or|possibly|possible)\b", clause, flags=re.IGNORECASE)
     ]
     concrete = [terms for terms in alternatives if any(any(c.isdigit() for c in t) for t in terms)]
-    output_terms = {
-        token.lower() for token in _V2_PROOF_TOKEN_RE.findall("\n".join(dynamic_output))
-    }
-    return bool(len(concrete) >= 2 and all(terms <= output_terms for terms in concrete))
+    dynamic_term_sets = [
+        {
+            token.lower()
+            for token in _V2_PROOF_TOKEN_RE.findall(observed_value)
+        }
+        for observed_value in dynamic_output
+    ]
+    # The requirement alternatives are an allowed-result set, not a coverage
+    # checklist.  Every independently evaluated result must belong to that set,
+    # but two cases may legitimately resolve to the same alternative (A, A for
+    # an "A or B" contract).  Keep each dynamic suffix separate so one valid
+    # result cannot launder an unrelated result through a union of output terms.
+    return bool(
+        len(concrete) >= 2
+        and dynamic_term_sets
+        and all(
+            any(terms <= observed for terms in concrete)
+            for observed in dynamic_term_sets
+        )
+    )
 
 
 def _v2_partition_fresh_proofs(statuses, *, kind: str, boundary: str):
