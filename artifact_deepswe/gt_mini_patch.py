@@ -48,6 +48,9 @@ import sys
 import threading
 
 
+_LEDGER_WRITE_FAILURES = 0
+
+
 def _ledger_line_direct(entry: dict) -> None:
     """Append ONE JSON line to the HARVESTED runtime ledger, bypassing both the
     (possibly-stubbed) ``_RUNTIME_LEDGER`` object and the old truncate-rewrite
@@ -83,7 +86,13 @@ def _ledger_line_direct(entry: dict) -> None:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
     except Exception:  # noqa: BLE001
-        pass
+        global _LEDGER_WRITE_FAILURES
+        _LEDGER_WRITE_FAILURES += 1
+
+
+def ledger_write_failures() -> int:
+    """Return durable-writer failures for the terminal ledger attestation."""
+    return _LEDGER_WRITE_FAILURES
 
 
 def _crash_emit(kind: str, exc: "BaseException | None" = None) -> None:

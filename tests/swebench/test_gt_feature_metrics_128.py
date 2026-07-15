@@ -18,6 +18,7 @@ for path in (ROOT / "src", ROOT / "scripts" / "swebench"):
 import gt_feature_metrics as metrics  # noqa: E402
 import gt_feature_inventory as inventory  # noqa: E402
 import gt_run_metrics  # noqa: E402
+from artifact_deepswe import ledger_attestation  # noqa: E402
 from groundtruth.runtime import fact_registry, rl_profile  # noqa: E402
 from groundtruth.pretask.v1r_brief import (  # noqa: E402
     _brief_block_receipts,
@@ -35,9 +36,19 @@ def _write_task(task_dir: Path, task: str, *, deep_metrics: dict | None = None) 
         }),
         encoding="utf-8",
     )
-    (task_dir / f"gt_runtime_ledger_{task}.jsonl").write_text(
-        json.dumps({"outcome": "shadow_holdout", "fact_class": "fixture"}) + "\n",
+    ledger = task_dir / f"gt_runtime_ledger_{task}.jsonl"
+    ledger.write_text(
+        json.dumps({
+            "layer": "fixture", "event_type": "fixture", "file_path": "",
+            "outcome": "shadow_holdout", "reason": "fixture",
+            "chars_delivered": 0, "iteration": 0,
+        }) + "\n",
         encoding="utf-8",
+    )
+    ledger_attestation.write_attestation(
+        ledger,
+        task_dir / f"gt_runtime_ledger_attestation_{task}.json",
+        write_failures=0,
     )
     if deep_metrics is not None:
         (task_dir / f"gt_deep_metrics_{task}.json").write_text(
@@ -216,6 +227,59 @@ def test_visible_audit_input_missingness_fails_closed(
     assert "visible_audit" in record["ss_integrity"]["missing_required_inputs"]
 
 
+def test_visible_audit_rejects_arbitrary_json_object_even_with_forged_attestation(
+    tmp_path: Path,
+) -> None:
+    trajectory = tmp_path / "trajectory.json"
+    trajectory.write_text(
+        json.dumps({"messages": [{"role": "user", "content": "x"}]}),
+        encoding="utf-8",
+    )
+    ledger = tmp_path / "gt_runtime_ledger_task.jsonl"
+    ledger.write_text('{"anything":"goes"}\n', encoding="utf-8")
+    attestation = tmp_path / "gt_runtime_ledger_attestation_task.json"
+    raw = ledger.read_bytes()
+    attestation.write_text(json.dumps({
+        "schema": "gt.runtime_ledger_attestation.v1",
+        "ledger_filename": ledger.name,
+        "row_count": 1,
+        "byte_count": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "final_newline": True,
+        "write_failures": 0,
+    }), encoding="utf-8")
+
+    assert metrics._visible_audit_inputs_complete(str(trajectory), str(ledger)) is False
+
+
+def test_visible_audit_rejects_ledger_changed_after_terminal_attestation(
+    tmp_path: Path,
+) -> None:
+    trajectory = tmp_path / "trajectory.json"
+    trajectory.write_text(
+        json.dumps({"messages": [{"role": "user", "content": "x"}]}),
+        encoding="utf-8",
+    )
+    ledger = tmp_path / "gt_runtime_ledger_task.jsonl"
+    ledger.write_text(json.dumps({
+        "layer": "fixture", "event_type": "fixture", "file_path": "",
+        "outcome": "eligible", "reason": "fixture", "chars_delivered": 0,
+        "iteration": 0,
+    }) + "\n", encoding="utf-8")
+    ledger_attestation.write_attestation(
+        ledger, tmp_path / "gt_runtime_ledger_attestation_task.json",
+        write_failures=0,
+    )
+    with ledger.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "layer": "late", "event_type": "late", "file_path": "",
+            "outcome": "eligible", "reason": "after-terminal",
+            "chars_delivered": 0, "iteration": 1,
+        }) + "\n")
+
+    assert metrics._visible_audit_inputs_complete(str(trajectory), str(ledger)) is False
+
+
 def test_collect_task_wires_real_brief_receipt_into_acq_master(tmp_path: Path) -> None:
     task = "synthetic__acq"
     _write_task(tmp_path, task, deep_metrics=_complete_deep_metrics(task))
@@ -261,11 +325,19 @@ def test_collect_task_wires_real_brief_receipt_into_acq_master(tmp_path: Path) -
     }), encoding="utf-8")
     (tmp_path / f"gt_runtime_ledger_{task}.jsonl").write_text(json.dumps({
         "layer": "brief.task",
+        "event_type": "task_start",
+        "file_path": "",
         "outcome": "delivered",
+        "reason": "step0_brief_prepend",
         "chars_delivered": len(brief),
         "content_sha256_16": sha(brief)[:16],
         "iteration": 0,
     }) + "\n", encoding="utf-8")
+    ledger_attestation.write_attestation(
+        tmp_path / f"gt_runtime_ledger_{task}.jsonl",
+        tmp_path / f"gt_runtime_ledger_attestation_{task}.json",
+        write_failures=0,
+    )
     (tmp_path / "mini-swe-agent.trajectory.json").write_text(json.dumps({
         "messages": [
             {"role": "user", "content": brief + "\n\nFix the issue."},

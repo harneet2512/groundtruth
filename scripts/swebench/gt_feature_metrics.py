@@ -39,6 +39,8 @@ import sys
 from collections import Counter, defaultdict
 from typing import Any, Iterable
 
+from artifact_deepswe.ledger_attestation import validate_attestation
+
 # repo schema + registries (fail loud if the substrate lacks them — a collection failure,
 # never a silent empty record).
 from gt_feature_schema import (  # noqa: E402
@@ -385,18 +387,11 @@ def _visible_audit_inputs_complete(
             trajectory.get("messages"), list
         ) or not trajectory["messages"]:
             return False
-        ledger_rows = 0
-        with open(ledger_path, encoding="utf-8") as fh:
-            for raw_line in fh:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                if not isinstance(json.loads(line), dict):
-                    return False
-                ledger_rows += 1
+        if not validate_attestation(ledger_path):
+            return False
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError):
         return False
-    return ledger_rows > 0
+    return True
 
 
 def _find_one(task_dir: str, *patterns: str) -> str | None:

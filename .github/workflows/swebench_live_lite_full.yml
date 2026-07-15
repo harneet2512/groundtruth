@@ -971,6 +971,7 @@ jobs:
           # `mini-swe-agent` CLI is the INTERACTIVE mini app and never reaches agent.run() in a
           # headless container (0 steps). This runner builds model+local-env+DefaultAgent and runs.
           cp artifact_deepswe/gt_headless_runner.py "${HOST_GT_INJECT}/"
+          cp artifact_deepswe/ledger_attestation.py "${HOST_GT_INJECT}/"
           cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
@@ -1461,6 +1462,7 @@ jobs:
             /tmp/gt_out/gt_agent_exit.json
             /tmp/gt_out/mini-swe-agent.trajectory.json
             /tmp/gt_out/gt_runtime_ledger.jsonl
+            /tmp/gt_out/gt_runtime_ledger_attestation.json
             /tmp/gt_out/gt_oracle_events.jsonl
             /tmp/gt_out/gt_hook_fire_counts.json
             /tmp/gt_out/gt_profile_activation.json
@@ -1518,6 +1520,16 @@ jobs:
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ ! -s /tmp/gt_out/gt_batch_activation.json ]; then
             echo "GT_BATCH_UNPROVEN: no gt_batch_activation.json from the agent process (one-dose observation boundary unproven; task is not citable)"
             exit 1
+          fi
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ ! -s /tmp/gt_out/gt_runtime_ledger_attestation.json ]; then
+            echo "GT_LEDGER_ATTESTATION_UNPROVEN: terminal runtime-ledger proof is missing; task is not citable"
+            exit 1
+          fi
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
+            PYTHONPATH="${{ github.workspace }}" python3 -c 'import sys; from artifact_deepswe.ledger_attestation import validate_attestation; sys.exit(0 if validate_attestation(sys.argv[1], sys.argv[2]) else 1)' /tmp/gt_out/gt_runtime_ledger.jsonl /tmp/gt_out/gt_runtime_ledger_attestation.json || {
+              echo "GT_LEDGER_ATTESTATION_UNPROVEN: terminal runtime-ledger proof does not match harvested bytes; task is not citable"
+              exit 1
+            }
           fi
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
             python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); sys.exit(0 if d.get("schema")=="gt.batch_activation.v1" and d.get("required") is True and d.get("wrapper_attached") is True and d.get("result")=="installed" and d.get("mini_swe_version")=="2.4.5" else 1)' /tmp/gt_out/gt_batch_activation.json || {
@@ -1686,6 +1698,7 @@ jobs:
           # post-run liveness and metrics gates mark a missing receipt uncitable.
           cp /tmp/gt_out/gt_profile_receipt.json trial_results/gt_artifacts/gt_profile_receipt.json 2>/dev/null || true
           cp /tmp/gt_out/gt_batch_activation.json trial_results/gt_artifacts/gt_batch_activation.json 2>/dev/null || true
+          cp /tmp/gt_out/gt_runtime_ledger_attestation.json trial_results/gt_artifacts/gt_runtime_ledger_attestation.json 2>/dev/null || true
           cp /tmp/gt_out/gt_agent_exit.json trial_results/gt_artifacts/gt_agent_exit.json 2>/dev/null || true
                     cp /tmp/gt/issue_manifest.json trial_results/gt_artifacts/issue_manifest.json 2>/dev/null || true
           cp /tmp/gt/adapter_witness.json trial_results/adapter_witness.json 2>/dev/null || true
@@ -1736,6 +1749,18 @@ jobs:
             else
               echo "GT_COLLECTION_MISSING:gt_runtime_ledger.jsonl" | tee -a trial_output.log
             fi
+            if [ -s "/tmp/gt_out/gt_runtime_ledger_attestation.json" ]; then
+              _GT_ATTEST_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_attestation_${{ matrix.task }}.json"
+              if ! cp /tmp/gt_out/gt_runtime_ledger_attestation.json "$_GT_ATTEST_DEST"; then
+                rm -f "$_GT_ATTEST_DEST"
+                echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger_attestation.json" | tee -a trial_output.log
+              elif ! cp "$_GT_ATTEST_DEST" "trial_results/gt_runtime_ledger_attestation_${{ matrix.task }}.json"; then
+                rm -f "trial_results/gt_runtime_ledger_attestation_${{ matrix.task }}.json"
+                echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger_attestation_task.json" | tee -a trial_output.log
+              fi
+            else
+              echo "GT_COLLECTION_MISSING:gt_runtime_ledger_attestation.json" | tee -a trial_output.log
+            fi
             # Acquisition provenance is persisted by the substrate brief producer.
             # Preserve it at the task artifact root: the bounded offline reader
             # intentionally does not search arbitrary nested artifact directories.
@@ -1773,7 +1798,7 @@ jobs:
           # gt_deep_metrics line. Its nonzero (per-task aggregate refusal) is swallowed like
           # DEEP_METRICS_WARN — the METRICS-COMPLETE gate below is the fail-closed artifact check.
           cp /tmp/gt_out/gt_oracle_events.jsonl  "$TASK_ARTIFACT_ROOT/gt_oracle_events_${{ matrix.task }}.jsonl"  2>/dev/null || true
-          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_feature_metrics.py /tmp/gt --profile 2 --run-id "${{ matrix.task }}" 2>&1 | tail -3 || echo FEATURE_METRICS_WARN
+          PYTHONPATH=${{ github.workspace }}:${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_feature_metrics.py /tmp/gt --profile 2 --run-id "${{ matrix.task }}" 2>&1 | tail -3 || echo FEATURE_METRICS_WARN
           cp "/tmp/gt/${{ matrix.task }}/gt_feature_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
           cp "/tmp/gt/${{ matrix.task }}/gt_feature_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
           cp "/tmp/gt/gt_run_metrics_${{ matrix.task }}.json"     trial_results/gt_artifacts/ 2>/dev/null || true
@@ -1839,6 +1864,7 @@ jobs:
             [ -s "trial_results/gt_feature_metrics_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_feature_metrics_${{ matrix.task }}.json"
             [ -s "trial_results/brief_result.json" ] || _MM_MISSING="$_MM_MISSING brief_result.json"
             [ -s "trial_results/gt_runtime_ledger_${{ matrix.task }}.jsonl" ] || _MM_MISSING="$_MM_MISSING gt_runtime_ledger_${{ matrix.task }}.jsonl"
+            [ -s "$TASK_ARTIFACT_ROOT/gt_runtime_ledger_attestation_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_runtime_ledger_attestation_${{ matrix.task }}.json"
             # Presence alone is insufficient: the feature collector must prove the exact
             # 12 ACQ + 47 CAP + 11 FACT + 58 PERF ledger and all required inputs.
             python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); s=d.get("ss_integrity") or {}; f=d.get("ss_features") or {}; sys.exit(0 if len(f)==128 and s.get("inventory_complete") is True and s.get("required_inputs_complete") is True and s.get("visible_audit_complete") is True else 1)' \

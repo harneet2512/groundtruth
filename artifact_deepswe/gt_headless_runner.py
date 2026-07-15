@@ -39,6 +39,14 @@ import os
 import sys
 import time
 
+try:
+    from artifact_deepswe import ledger_attestation
+except ImportError:  # injected runner + sibling module inside /opt/gt
+    import ledger_attestation  # type: ignore[no-redef]
+
+
+_BRIEF_LEDGER_WRITE_FAILURES = 0
+
 
 def _bc(msg: str) -> None:
     """Flushed breadcrumb to stderr — survives a SIGKILL/hang (unbuffered), so the trial log shows
@@ -81,6 +89,8 @@ def _record_brief_delivery(e: dict, brief_text: str) -> None:
         with open(path, "a", encoding="utf-8", newline="\n") as fh:
             fh.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
     except (OSError, TypeError, ValueError) as exc:
+        global _BRIEF_LEDGER_WRITE_FAILURES
+        _BRIEF_LEDGER_WRITE_FAILURES += 1
         _bc(f"WARN brief delivery seal unavailable ({type(exc).__name__})")
 
 
@@ -307,6 +317,27 @@ def run(env: dict | None = None) -> int:
     exit_status = result.get("exit_status") if isinstance(result, dict) else "?"
     _bc(f"headless agent finished: exit={exit_status} steps={steps} cost={cost}")
     print(f"[GT] headless agent finished: exit={exit_status} steps={steps} cost={cost}")
+    if e.get("GT_BASELINE") != "1":
+        try:
+            seam_failures = int(gt_mini_patch.ledger_write_failures())
+            attestation = ledger_attestation.write_attestation(
+                e.get("GT_RUNTIME_LEDGER") or "/tmp/gt_runtime_ledger.jsonl",
+                write_failures=_BRIEF_LEDGER_WRITE_FAILURES + seam_failures,
+            )
+            _bc(
+                "runtime ledger terminal attestation "
+                f"rows={attestation['row_count']} bytes={attestation['byte_count']} "
+                f"sha256={attestation['sha256']}"
+            )
+            if attestation["write_failures"] != 0:
+                _bc(
+                    "FATAL: runtime ledger writer reported "
+                    f"{attestation['write_failures']} failure(s)"
+                )
+                return 2
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
+            _bc(f"FATAL: runtime ledger attestation failed: {type(exc).__name__}: {exc}")
+            return 2
     return 0
 
 

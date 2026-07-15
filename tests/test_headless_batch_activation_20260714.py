@@ -20,10 +20,18 @@ class _Agent:
 
     def run(self, task):
         self._captured["task"] = task
+        ledger = Path(self._captured["ledger"])
+        ledger.write_text(json.dumps({
+            "layer": "fixture", "event_type": "fixture", "file_path": "",
+            "outcome": "eligible", "reason": "fixture", "chars_delivered": 0,
+            "iteration": 0,
+        }) + "\n", encoding="utf-8")
         return {"exit_status": "Submitted"}
 
 
-def _install_fake_runtime(monkeypatch, captured: dict, *, install_result: bool) -> None:
+def _install_fake_runtime(
+    monkeypatch, captured: dict, *, install_result: bool, write_failures: int = 0,
+) -> None:
     agent = _Agent(captured)
     pkg = types.ModuleType("minisweagent")
     pkg.__version__ = "2.4.5"
@@ -53,11 +61,12 @@ def _install_fake_runtime(monkeypatch, captured: dict, *, install_result: bool) 
         return install_result
 
     patch.install_observation_batch_commit = install
+    patch.ledger_write_failures = lambda: write_failures
     monkeypatch.setitem(sys.modules, "gt_mini_patch", patch)
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
-    return {
+    env = {
         "GT_RUN_MODEL": "deepseek/deepseek-v4-flash",
         "GT_RUN_TASK": "Fix the issue.",
         "GT_BRIEF_FILE": str(tmp_path / "missing-brief.txt"),
@@ -67,6 +76,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
         "GT_RL_PROFILE": "2",
         "GT_GLOBAL_ARBITER": "1",
     }
+    return env
 
 
 def test_profile2_install_failure_stops_before_agent_run(tmp_path, monkeypatch):
@@ -84,6 +94,7 @@ def test_profile2_install_failure_stops_before_agent_run(tmp_path, monkeypatch):
 
 def test_profile2_install_success_is_receipted_before_agent_run(tmp_path, monkeypatch):
     captured: dict = {}
+    captured["ledger"] = str(tmp_path / "gt_runtime_ledger_task.jsonl")
     _install_fake_runtime(monkeypatch, captured, install_result=True)
 
     assert runner.run(_env(tmp_path)) == 0
@@ -94,6 +105,25 @@ def test_profile2_install_success_is_receipted_before_agent_run(tmp_path, monkey
     assert receipt["wrapper_attached"] is True
     assert receipt["result"] == "installed"
     assert receipt["mini_swe_version"] == "2.4.5"
+    attestation = json.loads(
+        (tmp_path / "gt_runtime_ledger_attestation_task.json").read_text(encoding="utf-8")
+    )
+    assert attestation["schema"] == "gt.runtime_ledger_attestation.v1"
+    assert attestation["row_count"] == 1
+    assert attestation["write_failures"] == 0
+
+
+def test_profile2_ledger_write_failure_is_terminal_and_attested(tmp_path, monkeypatch):
+    captured = {"ledger": str(tmp_path / "gt_runtime_ledger_task.jsonl")}
+    _install_fake_runtime(
+        monkeypatch, captured, install_result=True, write_failures=1,
+    )
+
+    assert runner.run(_env(tmp_path)) == 2
+    attestation = json.loads(
+        (tmp_path / "gt_runtime_ledger_attestation_task.json").read_text(encoding="utf-8")
+    )
+    assert attestation["write_failures"] == 1
 
 
 def test_workflow_pins_and_requires_batch_receipt():
@@ -106,3 +136,5 @@ def test_workflow_pins_and_requires_batch_receipt():
     assert workflow.count("mini-swe-agent==2.4.5") == 4
     assert "GT_BATCH_UNPROVEN" in workflow
     assert "trial_results/gt_artifacts/gt_batch_activation.json" in workflow
+    assert "GT_LEDGER_ATTESTATION_UNPROVEN" in workflow
+    assert "gt_runtime_ledger_attestation_${{ matrix.task }}.json" in workflow
