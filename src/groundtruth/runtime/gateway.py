@@ -122,6 +122,7 @@ from groundtruth.runtime.producer_inputs import (
     PRODUCER_INPUTS_SCHEMA,
     CallerEvidenceRow,
     ProducerInputs,
+    SignatureChange,
     SourceState,
 )
 
@@ -1902,7 +1903,18 @@ def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[Evidence
                 edge_id=getattr(sm, "edge_id", None),
                 definition_id=getattr(sm, "definition_id", None),
             ),),
-            graph_revision=graph_revision,
+                graph_revision=graph_revision,
+                signature_changes=(SignatureChange(
+                    symbol=sm.symbol,
+                    edited_file=getattr(sm, "edited_file", ""),
+                    before_parameters=None,
+                    after_parameters=None,
+                    old_min_params=getattr(sm, "old_min_params", None),
+                    old_max_params=getattr(sm, "old_max_params", None),
+                    new_min_params=getattr(sm, "new_min_params", None),
+                    new_max_params=getattr(sm, "new_max_params", None),
+                    positional_args=getattr(sm, "positional_args", None),
+                ),),
         )
         out.append(_mk_add(state, event, fact_kind="signature_mismatch", target=sm.caller_file,
                            body_lines=body, evidence=[(sm.caller_file, sm.caller_line)],
@@ -2138,6 +2150,8 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
     try:
         for cf, ba in sorted(eba.items()):
             before, after = ba if isinstance(ba, tuple) else (None, ba)
+            before_parameters = _defs_params(before or "")
+            after_parameters = _defs_params(after or "")
             rel = _norm_fp(_to_repo_rel(cf, state.repo_root))
             if not rel or _is_leaky(rel):
                 continue
@@ -2175,6 +2189,17 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
                         for site in sites
                     ),
                     graph_revision=graph_revision,
+                    signature_changes=(SignatureChange(
+                        symbol=sym,
+                        edited_file=rel,
+                        before_parameters=tuple(before_parameters[sym]),
+                        after_parameters=tuple(after_parameters[sym]),
+                        old_min_params=None,
+                        old_max_params=None,
+                        new_min_params=None,
+                        new_max_params=None,
+                        positional_args=None,
+                    ),),
                 )
                 out.append(_mk_add(state, event, fact_kind="caller_break", target=rel,
                                    body_lines=body,

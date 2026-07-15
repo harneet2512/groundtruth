@@ -11,6 +11,7 @@ from groundtruth.runtime.producer_inputs import (
     PRODUCER_INPUTS_SCHEMA,
     CallerEvidenceRow,
     ProducerInputs,
+    SignatureChange,
     SourceState,
 )
 from groundtruth.runtime.patch_delta import SignatureMismatch
@@ -108,6 +109,17 @@ def test_caller_contract_retains_typed_fact_caller_rows_without_byte_drift(
             ),
         ),
         graph_revision="graph-rev-7",
+        signature_changes=(SignatureChange(
+            symbol="get_user",
+            edited_file="src/api.py",
+            before_parameters=("uid",),
+            after_parameters=("uid", "name"),
+            old_min_params=None,
+            old_max_params=None,
+            new_min_params=None,
+            new_max_params=None,
+            positional_args=None,
+        ),),
     )
     assert env.provenance == (("app/main.py", 2),)
     without_inputs = dataclasses.replace(env, producer_inputs=None)
@@ -157,6 +169,17 @@ def test_signature_delta_carries_exact_before_after_caller_and_graph_inputs(
     assert inputs.before_state.sha256 == _sha(before)
     assert inputs.after_state.sha256 == _sha(after)
     assert inputs.graph_revision == "graph-rev-9"
+    assert inputs.signature_changes == (SignatureChange(
+        symbol="get_user",
+        edited_file="src/api.py",
+        before_parameters=None,
+        after_parameters=None,
+        old_min_params=1,
+        old_max_params=1,
+        new_min_params=2,
+        new_max_params=2,
+        positional_args=1,
+    ),)
     assert inputs.caller_rows == (
         CallerEvidenceRow(
             identity="use",
@@ -200,6 +223,7 @@ def test_source_state_and_producer_inputs_are_transitively_immutable() -> None:
         after_state=source,
         caller_rows=(row,),
         graph_revision="graph",
+        signature_changes=(),
     )
 
     assert dataclasses.is_dataclass(inputs)

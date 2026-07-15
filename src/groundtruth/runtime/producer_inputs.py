@@ -37,6 +37,26 @@ class CallerEvidenceRow:
     definition_id: int | None = None
 
 
+@dataclass(frozen=True, order=True)
+class SignatureChange:
+    """Exact semantic signature delta used by a producer decision.
+
+    Cross-language caller-contract detection records parameter identities. The
+    Python arity checker records positional bounds and the observed call arity.
+    Inapplicable fields are ``None`` rather than inferred.
+    """
+
+    symbol: str
+    edited_file: str
+    before_parameters: tuple[str, ...] | None
+    after_parameters: tuple[str, ...] | None
+    old_min_params: int | None
+    old_max_params: int | None
+    new_min_params: int | None
+    new_max_params: int | None
+    positional_args: int | None
+
+
 @dataclass(frozen=True)
 class ProducerInputs:
     """Structured inputs for one final evidence candidate."""
@@ -48,11 +68,13 @@ class ProducerInputs:
     after_state: SourceState | None
     caller_rows: tuple[CallerEvidenceRow, ...]
     graph_revision: str
+    signature_changes: tuple[SignatureChange, ...] = ()
 
 
 __all__ = [
     "PRODUCER_INPUTS_SCHEMA",
     "CallerEvidenceRow",
     "ProducerInputs",
+    "SignatureChange",
     "SourceState",
 ]
