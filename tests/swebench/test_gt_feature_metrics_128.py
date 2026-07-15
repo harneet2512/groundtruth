@@ -196,6 +196,7 @@ def test_missing_deep_metrics_is_explicit_and_fails_canonical_integrity(tmp_path
 
     aggregate = metrics.aggregate_run("run-missing", [record], profile="2")
     assert aggregate["ss_integrity"]["publishable"] is False
+    assert aggregate["integrity"]["publishable"] is False
     assert aggregate["ss_integrity"]["tasks_with_incomplete_inputs"] == [task]
 
 

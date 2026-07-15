@@ -1770,15 +1770,47 @@ jobs:
               if ! cp /tmp/gt_out/gt_runtime_ledger.jsonl "$_GT_LEDGER_DEST"; then
                 rm -f "$_GT_LEDGER_DEST"
                 echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger.jsonl" | tee -a trial_output.log
+              elif ! cp "$_GT_LEDGER_DEST" "trial_results/gt_runtime_ledger_${{ matrix.task }}.jsonl"; then
+                rm -f "trial_results/gt_runtime_ledger_${{ matrix.task }}.jsonl"
+                echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger_task.jsonl" | tee -a trial_output.log
               fi
             else
               echo "GT_COLLECTION_MISSING:gt_runtime_ledger.jsonl" | tee -a trial_output.log
             fi
             if [ -s "/tmp/gt_out/gt_runtime_ledger_attestation.json" ]; then
               _GT_ATTEST_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_attestation_${{ matrix.task }}.json"
-              if ! cp /tmp/gt_out/gt_runtime_ledger_attestation.json "$_GT_ATTEST_DEST"; then
+              if ! GT_LEDGER_SOURCE=/tmp/gt_out/gt_runtime_ledger.jsonl \
+                GT_LEDGER_DEST="$_GT_LEDGER_DEST" \
+                GT_ATTEST_SOURCE=/tmp/gt_out/gt_runtime_ledger_attestation.json \
+                GT_ATTEST_DEST="$_GT_ATTEST_DEST" \
+                PYTHONPATH="${{ github.workspace }}" python3 - <<'PY'
+          import json
+          import os
+
+          from artifact_deepswe.ledger_attestation import (
+              validate_attestation,
+              write_attestation,
+          )
+
+          source_ledger = os.environ["GT_LEDGER_SOURCE"]
+          source_attestation = os.environ["GT_ATTEST_SOURCE"]
+          if not validate_attestation(source_ledger, source_attestation):
+              raise SystemExit("source runtime-ledger attestation is invalid")
+          with open(source_attestation, encoding="utf-8") as stream:
+              source_document = json.load(stream)
+          write_attestation(
+              os.environ["GT_LEDGER_DEST"],
+              os.environ["GT_ATTEST_DEST"],
+              write_failures=source_document["write_failures"],
+          )
+          if not validate_attestation(
+              os.environ["GT_LEDGER_DEST"], os.environ["GT_ATTEST_DEST"]
+          ):
+              raise SystemExit("task-scoped runtime-ledger attestation is invalid")
+          PY
+              then
                 rm -f "$_GT_ATTEST_DEST"
-                echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger_attestation.json" | tee -a trial_output.log
+                echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger_attestation_regeneration" | tee -a trial_output.log
               elif ! cp "$_GT_ATTEST_DEST" "trial_results/gt_runtime_ledger_attestation_${{ matrix.task }}.json"; then
                 rm -f "trial_results/gt_runtime_ledger_attestation_${{ matrix.task }}.json"
                 echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger_attestation_task.json" | tee -a trial_output.log
@@ -1886,6 +1918,7 @@ jobs:
           # captures every collected artifact — the same "run captured but not citable" semantics as the
           # liveness step's GT_PROFILE_UNPROVEN. Check the UPLOADED copies in trial_results/ (what the
           # section-4 auditor actually reads), not the /tmp sources.
+          rm -f trial_results/gt_task_completion.json
           _MM_MISSING=""
           # deep-metrics is required on BOTH arms (baseline has no GT artifacts, but always has this).
           [ -s "trial_results/gt_deep_metrics_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_deep_metrics_${{ matrix.task }}.json"
@@ -1963,6 +1996,123 @@ jobs:
             echo "GT_METRICS_INCOMPLETE:${_MM_MISSING} - a run without its metrics is NOT done (MANDATORY_METRICS.md line 1); this task is not citable" | tee -a trial_output.log
             exit 1
           fi
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
+            GT_TASK_ID="${{ matrix.task }}" GT_TASK_ROOT="$TASK_ARTIFACT_ROOT" \
+              GT_COMPLETION_OUT="trial_results/gt_task_completion.json" \
+              PYTHONPATH="${{ github.workspace }}" python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          from artifact_deepswe.ledger_attestation import validate_attestation
+
+          task = os.environ["GT_TASK_ID"]
+          root = Path(os.environ["GT_TASK_ROOT"])
+          out = Path(os.environ["GT_COMPLETION_OUT"])
+          artifact_paths = {
+              "mini-swe-agent.trajectory.json": out.parent / "mini-swe-agent.trajectory.json",
+              "brief_result.json": out.parent / "brief_result.json",
+              "task_truth.json": out.parent / "task_truth.json",
+              "gt_artifacts/gt_agent_exit.json": out.parent / "gt_artifacts/gt_agent_exit.json",
+              "gt_artifacts/gt_profile_activation.json": out.parent / "gt_artifacts/gt_profile_activation.json",
+              "gt_artifacts/gt_profile_receipt.json": out.parent / "gt_artifacts/gt_profile_receipt.json",
+              "gt_artifacts/gt_batch_activation.json": out.parent / "gt_artifacts/gt_batch_activation.json",
+              "gt_artifacts/gt_run_identity.json": out.parent / "gt_artifacts/gt_run_identity.json",
+              f"gt_runtime_ledger_{task}.jsonl": root / f"gt_runtime_ledger_{task}.jsonl",
+              f"gt_runtime_ledger_attestation_{task}.json": root / f"gt_runtime_ledger_attestation_{task}.json",
+              f"gt_deep_metrics_{task}.json": out.parent / f"gt_deep_metrics_{task}.json",
+              f"gt_feature_metrics_{task}.json": out.parent / f"gt_feature_metrics_{task}.json",
+              f"gt_performance_metrics_{task}.json": out.parent / f"gt_performance_metrics_{task}.json",
+              f"gt_behavioral_impact_{task}.json": out.parent / f"gt_behavioral_impact_{task}.json",
+          }
+          missing = [name for name, path in artifact_paths.items() if not path.is_file()]
+          if missing:
+              raise SystemExit(f"GT_TASK_COMPLETION_MISSING:{','.join(missing)}")
+
+          load = lambda name: json.loads(artifact_paths[name].read_text(encoding="utf-8"))
+          trajectory = load("mini-swe-agent.trajectory.json")
+          brief = load("brief_result.json")
+          truth = load("task_truth.json")
+          agent_exit = load("gt_artifacts/gt_agent_exit.json")
+          activation = load("gt_artifacts/gt_profile_activation.json")
+          profile_receipt = load("gt_artifacts/gt_profile_receipt.json")
+          batch = load("gt_artifacts/gt_batch_activation.json")
+          identity = load("gt_artifacts/gt_run_identity.json")
+          if not isinstance(trajectory, dict) or not isinstance(trajectory.get("messages"), list):
+              raise SystemExit("GT_TASK_COMPLETION_INVALID:trajectory")
+          brief_text = brief.get("brief_text") if isinstance(brief, dict) else None
+          brief_metrics = brief.get("metrics") if isinstance(brief, dict) else None
+          if (not isinstance(brief, dict)
+                  or brief.get("schema") != "gt.brief_result.v1"
+                  or not isinstance(brief_text, str)
+                  or not brief_text.strip()
+                  or not isinstance(brief_metrics, dict)
+                  or brief.get("brief_sha256") != hashlib.sha256(
+                      brief_text.strip().encode("utf-8")
+                  ).hexdigest()):
+              raise SystemExit("GT_TASK_COMPLETION_INVALID:brief_result")
+          if truth.get("schema") != "gt.task_truth.v1" or truth.get("instance_id") != task:
+              raise SystemExit("GT_TASK_COMPLETION_INVALID:task_truth")
+          if (agent_exit.get("schema") != "gt.agent_exit.v1"
+                  or agent_exit.get("task") != task
+                  or int(agent_exit.get("return_code", -1)) != 0
+                  or agent_exit.get("trajectory_present") is not True):
+              raise SystemExit("GT_TASK_COMPLETION_INVALID:agent_exit")
+          if activation.get("schema") != "gt.profile_activation.v1" or str(activation.get("profile")) != "2":
+              raise SystemExit("GT_TASK_COMPLETION_INVALID:profile_activation")
+          if profile_receipt.get("schema") != "gt.profile_receipt.v1" or str(profile_receipt.get("gt_rl_profile")) != "2":
+              raise SystemExit("GT_TASK_COMPLETION_INVALID:profile_receipt")
+          if not (
+              batch.get("schema") == "gt.batch_activation.v1"
+              and batch.get("required") is True
+              and batch.get("wrapper_attached") is True
+              and batch.get("result") == "installed"
+              and batch.get("mini_swe_version") == "2.4.5"
+          ):
+              raise SystemExit("GT_TASK_COMPLETION_INVALID:batch_activation")
+          if (identity.get("schema") != "gt.run_identity.v1"
+                  or identity.get("workflow_run_id") != os.environ.get("GITHUB_RUN_ID", "")
+                  or identity.get("baseline") is not False):
+              raise SystemExit("GT_TASK_COMPLETION_INVALID:run_identity")
+
+          # The graders consume the uploaded copies. Prove that those exact bytes
+          # are the bytes used by the task-local collectors, rather than merely
+          # sealing a later copy with the same filename.
+          source_paths = {
+              "mini-swe-agent.trajectory.json": root / "mini-swe-agent.trajectory.json",
+              "brief_result.json": Path("/tmp/gt/brief_result.json"),
+              "gt_artifacts/gt_run_identity.json": Path("/tmp/gt_out/gt_run_identity.json"),
+          }
+          for name, source in source_paths.items():
+              if (not source.is_file()
+                      or hashlib.sha256(source.read_bytes()).digest()
+                      != hashlib.sha256(artifact_paths[name].read_bytes()).digest()):
+                  raise SystemExit(f"GT_TASK_COMPLETION_INVALID:source_parity:{name}")
+          if not validate_attestation(
+              str(artifact_paths[f"gt_runtime_ledger_{task}.jsonl"]),
+              str(artifact_paths[f"gt_runtime_ledger_attestation_{task}.json"]),
+          ):
+              raise SystemExit("GT_TASK_COMPLETION_INVALID:terminal_ledger")
+
+          document = {
+              "schema": "gt.task_completion.v1",
+              "task": task,
+              "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+              "status": "COMPLETE",
+              "artifact_sha256": {
+                  name: hashlib.sha256(path.read_bytes()).hexdigest()
+                  for name, path in artifact_paths.items()
+              },
+          }
+          temporary = out.with_name(f".{out.name}.tmp")
+          with temporary.open("w", encoding="utf-8") as stream:
+              json.dump(document, stream, indent=2)
+              stream.flush()
+              os.fsync(stream.fileno())
+          os.replace(temporary, out)
+          PY
+          fi
           echo "GT_METRICS_COMPLETE: mandatory per-task metric artifacts all present"
 
       - name: Upload results
@@ -2002,17 +2152,23 @@ jobs:
           GT_EXPECTED_MATRIX: ${{ needs.prepare.outputs.matrix }}
           GT_EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
           GT_RUN_ID: ${{ github.run_id }}
+          GT_TRIAL_RESULT: ${{ needs.trial.result }}
           PYTHONPATH: ${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics
         run: |
           set -euo pipefail
           export GT_DIAG_DIR=/tmp/gt-diagnosis
           mkdir -p "$GT_DIAG_DIR"
           GT_EXPECTED_POPULATION_RC=0
+          GT_TRIAL_POPULATION_RC=0
           GT_RUN_METRICS_RC=0
           GT_FEATURE_POPULATION_RC=0
           GT_FEATURE_METRICS_RC=0
           GT_SS_DIAGNOSIS_JSON_RC=0
           GT_SS_DIAGNOSIS_MD_RC=0
+          if [ "$GT_TRIAL_RESULT" != "success" ]; then
+            echo "GT_TRIAL_POPULATION_INCOMPLETE: aggregate trial result=$GT_TRIAL_RESULT"
+            GT_TRIAL_POPULATION_RC=1
+          fi
 
           # Bind the diagnosis to the exact prepared population. The matrix is
           # authoritative; downloaded artifacts and embedded task ids are checked
@@ -2063,8 +2219,10 @@ jobs:
           # recomputing the exact 128-row feature inventory.
           python3 - <<'PY' || GT_FEATURE_POPULATION_RC=$?
           import glob
+          import hashlib
           import json
           import os
+          import re
           from collections import Counter
           from pathlib import Path
 
@@ -2077,7 +2235,58 @@ jobs:
                   continue
               if not os.path.isfile(os.path.join(root, "mini-swe-agent.trajectory.json")):
                   continue
-              actual.append(os.path.basename(root).removeprefix("ll-full-"))
+              task = os.path.basename(root).removeprefix("ll-full-")
+              receipt_path = Path(root) / "gt_task_completion.json"
+              try:
+                  receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+              except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                  raise SystemExit(
+                      f"GT_FEATURE_POPULATION_INVALID: completion receipt {task}: {type(exc).__name__}"
+                  )
+              if (
+                  not isinstance(receipt, dict)
+                  or receipt.get("schema") != "gt.task_completion.v1"
+                  or receipt.get("task") != task
+                  or receipt.get("workflow_run_id") != os.environ["GT_RUN_ID"]
+                  or receipt.get("status") != "COMPLETE"
+              ):
+                  raise SystemExit(
+                      f"GT_FEATURE_POPULATION_INVALID: completion receipt contract {task}"
+                  )
+              hashes = receipt.get("artifact_sha256")
+              expected_hashes = {
+                  "mini-swe-agent.trajectory.json",
+                  "brief_result.json",
+                  "task_truth.json",
+                  "gt_artifacts/gt_agent_exit.json",
+                  "gt_artifacts/gt_profile_activation.json",
+                  "gt_artifacts/gt_profile_receipt.json",
+                  "gt_artifacts/gt_batch_activation.json",
+                  "gt_artifacts/gt_run_identity.json",
+                  f"gt_runtime_ledger_{task}.jsonl",
+                  f"gt_runtime_ledger_attestation_{task}.json",
+                  f"gt_deep_metrics_{task}.json",
+                  f"gt_feature_metrics_{task}.json",
+                  f"gt_performance_metrics_{task}.json",
+                  f"gt_behavioral_impact_{task}.json",
+              }
+              if not isinstance(hashes, dict) or set(hashes) != expected_hashes:
+                  raise SystemExit(
+                      f"GT_FEATURE_POPULATION_INVALID: completion receipt inventory {task}"
+                  )
+              for relative, expected_hash in hashes.items():
+                  artifact = Path(root) / relative
+                  if (
+                      not isinstance(relative, str)
+                      or not isinstance(expected_hash, str)
+                      or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None
+                      or not artifact.is_file()
+                      or hashlib.sha256(artifact.read_bytes()).hexdigest() != expected_hash
+                  ):
+                      raise SystemExit(
+                          f"GT_FEATURE_POPULATION_INVALID: completion receipt hash {task}:{relative}"
+                      )
+              actual.append(task)
           expected_counts = Counter(expected)
           actual_counts = Counter(actual)
           missing_tasks = sorted(set(expected_counts) - set(actual_counts))
@@ -2116,7 +2325,7 @@ jobs:
 
           # Record every stage before failing. The bundle remains available for
           # diagnosis even when mandatory collection or integrity is incomplete.
-          export GT_EXPECTED_POPULATION_RC GT_RUN_METRICS_RC
+          export GT_EXPECTED_POPULATION_RC GT_TRIAL_POPULATION_RC GT_RUN_METRICS_RC
           export GT_FEATURE_POPULATION_RC GT_FEATURE_METRICS_RC
           export GT_SS_DIAGNOSIS_JSON_RC GT_SS_DIAGNOSIS_MD_RC
           GT_MANIFEST_RC=0
@@ -2132,7 +2341,8 @@ jobs:
           stage_exit_codes = {
               name.lower(): int(os.environ[name])
               for name in (
-                  "GT_EXPECTED_POPULATION_RC",
+                   "GT_EXPECTED_POPULATION_RC",
+                   "GT_TRIAL_POPULATION_RC",
                   "GT_RUN_METRICS_RC",
                   "GT_FEATURE_POPULATION_RC",
                   "GT_FEATURE_METRICS_RC",
@@ -2235,6 +2445,7 @@ jobs:
 
           if [ "$GT_MANIFEST_RC" -ne 0 ] \
             || [ "$GT_EXPECTED_POPULATION_RC" -ne 0 ] \
+            || [ "$GT_TRIAL_POPULATION_RC" -ne 0 ] \
             || [ "$GT_RUN_METRICS_RC" -ne 0 ] \
             || [ "$GT_FEATURE_POPULATION_RC" -ne 0 ] \
             || [ "$GT_FEATURE_METRICS_RC" -ne 0 ] \

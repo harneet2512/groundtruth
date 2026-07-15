@@ -58,6 +58,68 @@ def _write_binding_artifacts(task_dir: Path, run_id: str = "run-1") -> None:
         "patched_classes": ["minisweagent.environments.local.LocalEnvironment"],
         "pid": 123,
     }), encoding="utf-8")
+    _write_completion_receipt(task_dir, run_id)
+
+
+def _completion_artifact_names(task: str) -> tuple[str, ...]:
+    return (
+        "mini-swe-agent.trajectory.json",
+        "brief_result.json",
+        "task_truth.json",
+        "gt_artifacts/gt_run_identity.json",
+        "gt_artifacts/gt_agent_exit.json",
+        "gt_artifacts/gt_profile_activation.json",
+        "gt_artifacts/gt_profile_receipt.json",
+        "gt_artifacts/gt_batch_activation.json",
+        f"gt_runtime_ledger_{task}.jsonl",
+        f"gt_runtime_ledger_attestation_{task}.json",
+        f"gt_deep_metrics_{task}.json",
+        f"gt_feature_metrics_{task}.json",
+        f"gt_performance_metrics_{task}.json",
+        f"gt_behavioral_impact_{task}.json",
+    )
+
+
+def _write_completion_receipt(task_dir: Path, run_id: str = "run-1") -> None:
+    task = task_dir.name
+    artifacts = task_dir / "gt_artifacts"
+    artifacts.mkdir(exist_ok=True)
+    defaults = {
+        "mini-swe-agent.trajectory.json": {"messages": []},
+        "brief_result.json": {},
+        "task_truth.json": {"schema": "gt.task_truth.v1", "instance_id": task},
+        "gt_artifacts/gt_agent_exit.json": {
+            "schema": "gt.agent_exit.v1", "task": task, "return_code": 0,
+            "trajectory_present": True,
+        },
+        "gt_artifacts/gt_batch_activation.json": {
+            "schema": "gt.batch_activation.v1", "required": True,
+            "wrapper_attached": True, "result": "installed", "mini_swe_version": "2.4.5",
+        },
+        f"gt_runtime_ledger_{task}.jsonl": "",
+        f"gt_runtime_ledger_attestation_{task}.json": {},
+        f"gt_deep_metrics_{task}.json": {},
+        f"gt_feature_metrics_{task}.json": {},
+        f"gt_performance_metrics_{task}.json": {},
+        f"gt_behavioral_impact_{task}.json": {},
+    }
+    for relative, value in defaults.items():
+        path = task_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            continue
+        path.write_text(
+            value if isinstance(value, str) else json.dumps(value), encoding="utf-8"
+        )
+    hashes = {
+        relative: hashlib.sha256((task_dir / relative).read_bytes()).hexdigest()
+        for relative in _completion_artifact_names(task)
+    }
+    (task_dir / "gt_task_completion.json").write_text(json.dumps({
+        "schema": "gt.task_completion.v1", "task": task,
+        "workflow_run_id": run_id, "status": "COMPLETE",
+        "artifact_sha256": hashes,
+    }), encoding="utf-8")
 
 
 def _lineage(feature: str, family: str = "FACT", *, causal: bool = False) -> dict:
@@ -441,7 +503,8 @@ def test_diagnosis_integrity_fails_closed_on_missing_or_mismatched_profile_recei
     assert integrity["identity_profile_binding_complete"] is False
     task = integrity["tasks"]["repo__task-1"]
     assert task["status"] == "UNMEASURED"
-    assert task["issues"] == ["missing:gt_profile_receipt.json"]
+    assert "missing:gt_profile_receipt.json" in task["issues"]
+    assert "task_completion:artifact_missing:gt_artifacts/gt_profile_receipt.json" in task["issues"]
 
     _write_binding_artifacts(task_dir)
     receipt_path = task_dir / "gt_artifacts" / "gt_profile_receipt.json"
@@ -458,6 +521,55 @@ def test_diagnosis_integrity_fails_closed_on_missing_or_mismatched_profile_recei
     assert "profile_receipt:profile_mismatch" in integrity["tasks"][
         "repo__task-1"
     ]["issues"]
+
+
+def test_diagnosis_integrity_requires_task_completion_receipt_and_bound_hashes(
+    tmp_path: Path,
+) -> None:
+    task = "repo__task-1"
+    task_dir = tmp_path / task
+    task_dir.mkdir()
+    _write_binding_artifacts(task_dir)
+    receipt_path = task_dir / "gt_task_completion.json"
+    receipt_path.unlink()
+
+    missing = diagnosis._diagnosis_integrity(
+        {task: (task_dir / f"gt_feature_metrics_{task}.json", {})},
+        {"run_id": "run-1"}, inventory.canonical_feature_inventory()["CAP"],
+    )
+    assert missing["publishable"] is False
+    assert "task_completion:missing" in missing["tasks"][task]["issues"]
+
+    _write_completion_receipt(task_dir)
+    (task_dir / "task_truth.json").write_text("{}", encoding="utf-8")
+    tampered = diagnosis._diagnosis_integrity(
+        {task: (task_dir / f"gt_feature_metrics_{task}.json", {})},
+        {"run_id": "run-1"}, inventory.canonical_feature_inventory()["CAP"],
+    )
+    assert tampered["publishable"] is False
+    assert "task_completion:artifact_hash:task_truth.json" in tampered["tasks"][task]["issues"]
+
+
+def test_task_completion_receipt_seals_trajectory_brief_and_run_identity(tmp_path: Path) -> None:
+    task = "repo__task-1"
+    task_dir = tmp_path / task
+    task_dir.mkdir()
+    _write_binding_artifacts(task_dir)
+
+    expected = set(diagnosis._completion_artifact_names(task))
+    assert {
+        "mini-swe-agent.trajectory.json",
+        "brief_result.json",
+        "gt_artifacts/gt_run_identity.json",
+    } <= expected
+
+    (task_dir / "brief_result.json").write_text('{"tampered":true}', encoding="utf-8")
+    result = diagnosis._diagnosis_integrity(
+        {task: (task_dir / f"gt_feature_metrics_{task}.json", {})},
+        {"run_id": "run-1"}, inventory.canonical_feature_inventory()["CAP"],
+    )
+    assert result["publishable"] is False
+    assert "task_completion:artifact_hash:brief_result.json" in result["tasks"][task]["issues"]
 
 
 def test_diagnosis_integrity_requires_exact_gt_on_identity_and_member_sources(
@@ -505,6 +617,7 @@ def test_diagnosis_integrity_accepts_symbolic_ref_bound_to_prepared_commit(
     identity = json.loads(identity_path.read_text(encoding="utf-8"))
     identity["gt_ref_requested"] = "release/ss-diagnosis-20260714"
     identity_path.write_text(json.dumps(identity), encoding="utf-8")
+    _write_completion_receipt(task_dir)
 
     integrity = diagnosis._diagnosis_integrity(
         {task: (task_dir / f"gt_feature_metrics_{task}.json", {})},
@@ -605,10 +718,11 @@ def test_task_artifacts_build_exact_seal_join_with_typed_lineage(tmp_path: Path)
         "messages": [{"role": "tool", "content": payload}],
     }), encoding="utf-8")
 
-    rows, entries, error = diagnosis._task_artifacts(metrics_path, {})
+    rows, entries, opportunity, error = diagnosis._task_artifacts(metrics_path, {})
 
     assert error is None
     assert rows == [row]
     assert len(entries) == 1
     assert entries[0]["join_method"] == "seal"
     assert entries[0]["feature_lineage"]["fact_class"] == "caller_contract"
+    assert opportunity["features"]["caller_contract"]["status"] == "UNMEASURED"

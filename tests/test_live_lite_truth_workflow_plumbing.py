@@ -73,6 +73,41 @@ def test_collect_finalizes_truth_from_explicit_task_root() -> None:
     ) in run
 
 
+def test_collect_uploads_the_exact_task_scoped_runtime_ledger() -> None:
+    run = _step("trial", "Collect results")["run"]
+    root_copy = (
+        'cp /tmp/gt_out/gt_runtime_ledger.jsonl "$_GT_LEDGER_DEST"'
+    )
+    uploaded_copy = (
+        'cp "$_GT_LEDGER_DEST" '
+        '"trial_results/gt_runtime_ledger_${{ matrix.task }}.jsonl"'
+    )
+    completion = 'artifact_paths = {'
+
+    assert root_copy in run
+    assert uploaded_copy in run
+    assert run.index(root_copy) < run.index(uploaded_copy) < run.index(completion)
+
+
+def test_collect_rebinds_attestation_to_the_task_scoped_ledger_name() -> None:
+    run = _step("trial", "Collect results")["run"]
+    source_validation = "validate_attestation(source_ledger, source_attestation)"
+    regenerated = "write_attestation("
+    renamed_validation = (
+        'os.environ["GT_LEDGER_DEST"], os.environ["GT_ATTEST_DEST"]'
+    )
+    uploaded = (
+        'cp "$_GT_ATTEST_DEST" '
+        '"trial_results/gt_runtime_ledger_attestation_${{ matrix.task }}.json"'
+    )
+
+    assert source_validation in run
+    assert regenerated in run
+    assert renamed_validation in run
+    assert uploaded in run
+    assert run.index(source_validation) < run.index(regenerated) < run.index(uploaded)
+
+
 def test_metrics_gate_requires_final_parsed_task_truth() -> None:
     run = _step("trial", "Collect results")["run"]
     gate = run[run.index('_MM_MISSING=""'):]
@@ -84,6 +119,70 @@ def test_metrics_gate_requires_final_parsed_task_truth() -> None:
     assert 't.get("turns_observed")>=0' in gate
     assert 'int(i.get("mini_bytes") or 0)>0' in gate
     assert "task_truth_trajectory_integrity" in gate
+
+
+def test_summarize_requires_completion_receipt_for_every_expected_task() -> None:
+    step = _step("summarize", "Build canonical PERF and exact-128 diagnosis")
+    run = step["run"]
+
+    assert step["env"]["GT_TRIAL_RESULT"] == "${{ needs.trial.result }}"
+    assert "gt_task_completion.json" in run
+    assert 'receipt.get("schema") != "gt.task_completion.v1"' in run
+    assert 'receipt.get("task") != task' in run
+    assert 'receipt.get("workflow_run_id") != os.environ["GT_RUN_ID"]' in run
+    assert "GT_FEATURE_POPULATION_INVALID" in run
+    assert "GT_TRIAL_POPULATION_RC" in run
+    assert 'GT_TRIAL_RESULT" != "success' in run
+
+
+def test_completion_receipt_binds_every_live_verdict_input() -> None:
+    run = _step("trial", "Collect results")["run"]
+    summarize = _step("summarize", "Build canonical PERF and exact-128 diagnosis")["run"]
+    receipt_writer = run[run.index("artifact_paths = {"):run.index("document = {")]
+    receipt_reader = summarize[
+        summarize.index("expected_hashes = {"):
+        summarize.index("if not isinstance(hashes, dict)")
+    ]
+
+    # These are the raw, task-local authorities consumed by the live diagnosis
+    # and ACQ provenance join. Sealing only their derived summaries permits a
+    # post-completion artifact substitution to change the SS verdict silently.
+    required = {
+        "mini-swe-agent.trajectory.json",
+        "brief_result.json",
+        "gt_artifacts/gt_run_identity.json",
+    }
+    for relative in required:
+        literal = f'"{relative}"'
+        assert literal in receipt_writer
+        assert literal in receipt_reader
+
+    assert (
+        '"mini-swe-agent.trajectory.json": '
+        'out.parent / "mini-swe-agent.trajectory.json"'
+    ) in receipt_writer
+    assert '"brief_result.json": out.parent / "brief_result.json"' in receipt_writer
+    assert (
+        '"gt_artifacts/gt_run_identity.json": '
+        'out.parent / "gt_artifacts/gt_run_identity.json"'
+    ) in receipt_writer
+    assert 'trajectory = load("mini-swe-agent.trajectory.json")' in run
+    assert 'identity = load("gt_artifacts/gt_run_identity.json")' in run
+    assert 'brief = load("brief_result.json")' in run
+    assert 'identity.get("workflow_run_id") != os.environ.get("GITHUB_RUN_ID", "")' in run
+    assert "GT_TASK_COMPLETION_INVALID:trajectory" in run
+    assert "GT_TASK_COMPLETION_INVALID:brief_result" in run
+    assert "GT_TASK_COMPLETION_INVALID:run_identity" in run
+    assert '"mini-swe-agent.trajectory.json": root / "mini-swe-agent.trajectory.json"' in run
+    assert '"brief_result.json": Path("/tmp/gt/brief_result.json")' in run
+    assert (
+        '"gt_artifacts/gt_run_identity.json": '
+        'Path("/tmp/gt_out/gt_run_identity.json")'
+    ) in run
+    assert "GT_TASK_COMPLETION_INVALID:source_parity:{name}" in run
+    assert 'brief.get("brief_sha256") != hashlib.sha256(' in run
+    assert "os.fsync(stream.fileno())" in run
+    assert "os.replace(temporary, out)" in run
 
 
 def test_explicit_task_root_truth_observes_agent_and_final_deep_metrics(

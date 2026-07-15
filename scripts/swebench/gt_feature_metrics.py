@@ -65,6 +65,10 @@ from gt_feature_inventory import (  # noqa: E402
     canonical_feature_inventory,
     performance_metric_definitions,
 )
+from feature_opportunity import (  # noqa: E402
+    attach_opportunity_evidence,
+    collect_feature_opportunities,
+)
 from groundtruth.runtime.feature_lineage import (  # noqa: E402
     CAP_BYTE_OWNER_IDS,
     CAP_ELIGIBILITY_IDS,
@@ -1805,6 +1809,7 @@ def _canonical_task_features(
     fact_readiness: dict[str, dict[str, Any]],
     consumption_ledger: dict[str, Any],
     trajectory: dict[str, Any],
+    opportunity_by_feature: dict[str, dict[str, Any]],
     *,
     leak_free: bool | None,
     dose_ok: bool | None,
@@ -1823,19 +1828,19 @@ def _canonical_task_features(
     for name in inventory["CAP"]:
         if name not in cap_features:
             raise ValueError(f"gt_feature_metrics: missing legacy CAP record {name!r}")
-        master[name] = {
+        master[name] = attach_opportunity_evidence({
             "family": "CAP", "status": "MEASURED", "source": "features",
             "source_artifact": "gt.feature_metrics.v1", "record_ref": f"features.{name}",
             "ss_readiness": cap_features[name]["ss_readiness"],
-        }
+        }, opportunity_by_feature[name])
     for name in inventory["FACT"]:
         if name not in fact_classes:
             raise ValueError(f"gt_feature_metrics: missing legacy FACT record {name!r}")
-        master[name] = {
+        master[name] = attach_opportunity_evidence({
             "family": "FACT", "status": "MEASURED", "source": "fact_classes",
             "source_artifact": "gt.feature_metrics.v1", "record_ref": f"fact_classes.{name}",
             "ss_readiness": fact_readiness[name],
-        }
+        }, opportunity_by_feature[name])
     performance, perf_missing, deep_path = _performance_feature_records(task, task_dir)
     for record in performance.values():
         record["ss_readiness"] = _measurement_only_readiness(record)
@@ -1843,7 +1848,12 @@ def _canonical_task_features(
 
     expected = {name: family for family, names in inventory.items() for name in names}
     actual = {name: record.get("family") for name, record in master.items()}
-    inventory_complete = actual == expected and all(
+    opportunity_complete = all(
+        isinstance(master[name].get("opportunity_evidence"), dict)
+        and master[name]["opportunity_evidence"].get("status") in {"BOUND", "UNMEASURED"}
+        for family in ("CAP", "FACT") for name in inventory[family]
+    )
+    inventory_complete = actual == expected and opportunity_complete and all(
         _valid_readiness_projection(record.get("ss_readiness"))
         for record in master.values()
     )
@@ -1972,6 +1982,11 @@ def collect_task(
     leaks.update(cons_ledger.get("test_identity_leak_hits") or [])
 
     messages = traj.get("messages", []) or []
+    opportunity_projection = collect_feature_opportunities(
+        rows,
+        messages,
+        canonical_feature_inventory(),
+    )
     observation_owners = _model_observation_owners(messages)
     physical_by_observation: dict[int, set[str]] = defaultdict(set)
     for entry_index, entry in enumerate(cons_ledger.get("entries") or []):
@@ -2046,8 +2061,15 @@ def collect_task(
     }
     ss_features, ss_integrity = _canonical_task_features(
         task, task_dir, features, fc_json, fact_readiness, cons_ledger, traj,
+        opportunity_projection["features"],
         leak_free=leak_gate, dose_ok=dose_gate,
     )
+    ss_integrity["feature_opportunity"] = opportunity_projection["integrity"]
+    if opportunity_projection["integrity"]["publishable"] is not True:
+        ss_integrity["required_inputs_complete"] = False
+        missing = set(ss_integrity.get("missing_required_inputs") or [])
+        missing.add("feature_opportunity_integrity")
+        ss_integrity["missing_required_inputs"] = sorted(missing)
     ss_integrity["visible_audit_complete"] = visible_audit_complete
     ss_integrity["physical_identity_conflict_count"] = len(
         physical_identity_conflicts
@@ -2390,6 +2412,8 @@ def aggregate_run(
         integrity["publishable"] = False
     integrity["dose_violation_total"] = dose_violation_total
     if dose_violation_total > 0:
+        integrity["publishable"] = False
+    if not ss_integrity["publishable"]:
         integrity["publishable"] = False
     integrity["reconciliation"] = {
         "atomic_events_total": atomic_total,

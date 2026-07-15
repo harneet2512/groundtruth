@@ -8,6 +8,7 @@ missing lineage record is an explicit UNMEASURED state, never DARK.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from collections import Counter
@@ -18,6 +19,7 @@ from gt_feature_inventory import (
     canonical_feature_inventory,
     performance_metric_definitions,
 )
+from feature_opportunity import collect_feature_opportunities
 from consumption_ledger import _typed_lineage_from_row
 from groundtruth.runtime.feature_lineage import FeatureRef, cap_role_for
 
@@ -260,15 +262,45 @@ def classify_typed_terminal(record: object, expected_role: str) -> str:
     return f"UNMEASURED:{expected_role}:live_witness"
 
 
+def _opportunity_record(record: object) -> dict[str, Any]:
+    """Return only the additive, non-promoting opportunity projection."""
+    if not isinstance(record, dict):
+        return {
+            "status": "UNMEASURED", "reason": "no_bound_opportunity",
+            "eligible_opportunity": None, "decision_boundary_evidence": [],
+        }
+    value = record.get("opportunity_evidence")
+    if value is None:
+        return {
+            "status": "UNMEASURED", "reason": "no_bound_opportunity",
+            "eligible_opportunity": None, "decision_boundary_evidence": [],
+        }
+    if not isinstance(value, dict) or value.get("status") not in {"BOUND", "UNMEASURED"}:
+        return {
+            "status": "UNMEASURED", "reason": "opportunity_record_malformed",
+            "eligible_opportunity": None, "decision_boundary_evidence": [],
+        }
+    return value
+
+
 def classify_cap_control(feature: str, record: object) -> str:
     """Classify non-byte-owning CAP roles by their own terminal contract."""
     role = cap_role_for(feature)
     if role == "mediator":
         return classify_typed_terminal(record, "infra_control")
     if role == "eligibility":
-        # The current task artifact exposes an infra-control projection for
-        # eligibility engines, not the required opportunity-decision contract.
-        return "UNMEASURED:eligibility_control:terminal_contract_unavailable"
+        opportunity = _opportunity_record(record)
+        if opportunity.get("status") != "BOUND":
+            if opportunity.get("reason") == "no_bound_opportunity":
+                return "UNMEASURED:eligibility_control:terminal_contract_unavailable"
+            return (
+                "UNMEASURED:eligibility_control:"
+                + str(opportunity.get("reason") or "opportunity_unavailable")
+            )
+        # A validated parent-policy anchor proves the candidate opportunity,
+        # not whether the model had already committed to the action.  The
+        # chronological gt-math audit owns that terminal timing verdict.
+        return "UNMEASURED:eligibility_control:chronological_decision_audit_pending"
     return "FAILED:capability_support:unexpected_control_dispatch"
 
 
@@ -377,6 +409,67 @@ _PROFILE_BINDING_ARTIFACTS = (
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PINNED_IMAGE_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
+
+
+def _completion_artifact_names(task: str) -> tuple[str, ...]:
+    """Artifacts atomically bound by the task-completion receipt."""
+    return (
+        "mini-swe-agent.trajectory.json",
+        "brief_result.json",
+        "task_truth.json",
+        "gt_artifacts/gt_run_identity.json",
+        "gt_artifacts/gt_agent_exit.json",
+        "gt_artifacts/gt_profile_activation.json",
+        "gt_artifacts/gt_profile_receipt.json",
+        "gt_artifacts/gt_batch_activation.json",
+        f"gt_runtime_ledger_{task}.jsonl",
+        f"gt_runtime_ledger_attestation_{task}.json",
+        f"gt_deep_metrics_{task}.json",
+        f"gt_feature_metrics_{task}.json",
+        f"gt_performance_metrics_{task}.json",
+        f"gt_behavioral_impact_{task}.json",
+    )
+
+
+def _task_completion_issues(
+    task_dir: Path, task: str, workflow_run_id: str,
+) -> list[str]:
+    """Validate one atomic completion receipt and every artifact it seals."""
+    path = task_dir / "gt_task_completion.json"
+    if not path.is_file():
+        return ["task_completion:missing"]
+    try:
+        receipt = _load_json(path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ["task_completion:malformed"]
+
+    issues: list[str] = []
+    if receipt.get("schema") != "gt.task_completion.v1":
+        issues.append("task_completion:schema")
+    if receipt.get("task") != task:
+        issues.append("task_completion:task")
+    if receipt.get("workflow_run_id") != workflow_run_id:
+        issues.append("task_completion:workflow_run_id")
+    if receipt.get("status") != "COMPLETE":
+        issues.append("task_completion:status")
+    hashes = receipt.get("artifact_sha256")
+    expected = _completion_artifact_names(task)
+    if not isinstance(hashes, dict) or set(hashes) != set(expected):
+        issues.append("task_completion:artifact_inventory")
+        hashes = hashes if isinstance(hashes, dict) else {}
+    for relative in expected:
+        artifact = task_dir / relative
+        if not artifact.is_file():
+            issues.append(f"task_completion:artifact_missing:{relative}")
+            continue
+        expected_hash = hashes.get(relative)
+        if not isinstance(expected_hash, str) or _SHA256_RE.fullmatch(expected_hash) is None:
+            issues.append(f"task_completion:artifact_digest:{relative}")
+            continue
+        actual_hash = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        if actual_hash != expected_hash:
+            issues.append(f"task_completion:artifact_hash:{relative}")
+    return sorted(set(issues))
 
 
 def _valid_requested_ref(value: object) -> bool:
@@ -522,6 +615,10 @@ def _diagnosis_integrity(
         ):
             issues.append("profile_binding:member_disagreement")
 
+        issues.extend(_task_completion_issues(
+            metrics_path.parent, task, expected_run_id,
+        ))
+
         issues = sorted(set(issues))
         task_records[task] = {
             "status": "BOUND" if not issues else "UNMEASURED",
@@ -554,7 +651,9 @@ def _diagnosis_integrity(
         "schema": "gt.ss_live_diagnosis.integrity.v1",
         "publishable": complete,
         "identity_profile_binding_complete": complete,
-        "required_artifacts": list(_PROFILE_BINDING_ARTIFACTS),
+        "required_artifacts": [
+            *list(_PROFILE_BINDING_ARTIFACTS), "gt_task_completion.json",
+        ],
         "expected_profile": "2",
         "expected_member_count": len(expected),
         "run_issues": run_issues,
@@ -576,12 +675,14 @@ def _diagnosis_integrity(
 
 def _task_artifacts(
     metrics_path: Path, metrics: dict[str, Any]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+) -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], str | None,
+]:
     directory = metrics_path.parent
     trajectory_path = _find_one(directory, "mini-swe-agent.trajectory.json")
     ledger_path = _find_one(directory, "gt_runtime_ledger*.jsonl")
     if trajectory_path is None or ledger_path is None:
-        return [], [], "missing_artifacts"
+        return [], [], {}, "missing_artifacts"
     try:
         trajectory = _load_json(trajectory_path)
         rows = _load_jsonl(ledger_path)
@@ -591,10 +692,27 @@ def _task_artifacts(
         )
         entries = ledger.get("entries")
         if not isinstance(entries, list):
-            return rows, [], "malformed_consumption_ledger"
-        return rows, [entry for entry in entries if isinstance(entry, dict)], None
+            return rows, [], {}, "malformed_consumption_ledger"
+        messages = trajectory.get("messages")
+        if not isinstance(messages, list):
+            return rows, [], {}, "malformed_trajectory_messages"
+        opportunity = collect_feature_opportunities(
+            rows,
+            messages,
+            canonical_feature_inventory(),
+        )
+        if opportunity["integrity"].get("publishable") is not True:
+            return rows, [entry for entry in entries if isinstance(entry, dict)], opportunity, (
+                "malformed_feature_opportunity"
+            )
+        return (
+            rows,
+            [entry for entry in entries if isinstance(entry, dict)],
+            opportunity,
+            None,
+        )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        return [], [], f"artifact_error:{type(exc).__name__}"
+        return [], [], {}, f"artifact_error:{type(exc).__name__}"
 
 
 def _aggregate_bucket(task_buckets: dict[str, str]) -> str:
@@ -658,7 +776,7 @@ def diagnose_run(run_dir: Path | str, run_metrics_path: Path | str) -> dict[str,
                 run_bucket = run_perf[feature]
             else:
                 for task, (_path, metrics) in sorted(tasks.items()):
-                    ledger_rows, entries, artifact_error = contexts[task]
+                    ledger_rows, entries, opportunity, artifact_error = contexts[task]
                     integrity = metrics.get("ss_integrity")
                     if (
                         isinstance(integrity, dict)
@@ -683,7 +801,11 @@ def diagnose_run(run_dir: Path | str, run_metrics_path: Path | str) -> dict[str,
                                 feature_row, "support"
                             )
                     elif family == "CAP" and cap_role_for(feature) != "byte_owner":
-                        task_buckets[task] = classify_cap_control(feature, feature_row)
+                        control_row = dict(feature_row) if isinstance(feature_row, dict) else {}
+                        control_row["opportunity_evidence"] = opportunity.get(
+                            "features", {}
+                        ).get(feature, _opportunity_record(feature_row))
+                        task_buckets[task] = classify_cap_control(feature, control_row)
                     else:
                         task_buckets[task] = classify_delivery_feature(
                             feature, family,
@@ -697,6 +819,23 @@ def diagnose_run(run_dir: Path | str, run_metrics_path: Path | str) -> dict[str,
                 "run_bucket": run_bucket,
                 "task_buckets": task_buckets,
                 "bucket_counts": dict(sorted(Counter(task_buckets.values()).items())),
+                "task_opportunities": {
+                    task: (
+                        opportunity.get("features", {}).get(
+                            feature,
+                            _opportunity_record(
+                                (metrics.get("ss_features") or {}).get(feature)
+                            ),
+                        )
+                        if family in {"CAP", "FACT"}
+                        else {
+                            "status": "NOT_APPLICABLE",
+                            "reason": f"{family.lower()}_has_no_candidate_delivery_contract",
+                        }
+                    )
+                    for task, (_path, metrics) in sorted(tasks.items())
+                    for opportunity in (contexts[task][2],)
+                },
             })
 
     return {

@@ -129,6 +129,95 @@ def test_sealed_byte_window_reports_character_offsets_for_unicode(tmp_path: Path
     assert gt_feature_metrics._row_has_seal_join(row, result["entries"]) is True
 
 
+def test_ambiguous_duplicate_seal_occurrence_fails_visible_audit(
+    tmp_path: Path,
+) -> None:
+    payload = "src/pkg.py:9 preserve callers"
+    ledger = tmp_path / "gt_runtime_ledger_task.jsonl"
+    _write_ledger(ledger, [_row(payload)])
+
+    result = build_consumption_ledger(
+        {
+            "messages": [
+                {"role": "user", "content": payload},
+                {"role": "tool", "content": payload},
+            ]
+        },
+        runtime_ledger_path=str(ledger),
+    )
+
+    assert result["ledger_rows_joined"] == 0
+    assert result["exact_seal_ambiguity_count"] == 1
+    assert result["exact_seal_ambiguities"][0]["candidate_physical_ids"] == [
+        f"m0:0:{len(payload)}",
+        f"m1:0:{len(payload)}",
+    ]
+    assert result["visible_audit_complete"] is False
+    assert all(
+        entry.get("msg_index") is None
+        for entry in result["entries"]
+        if entry.get("source") == "ledger_only"
+    )
+
+
+def test_terminal_exit_content_is_not_model_visible_delivery(tmp_path: Path) -> None:
+    payload = "src/pkg.py:9 preserve callers"
+    ledger = tmp_path / "gt_runtime_ledger_task.jsonl"
+    _write_ledger(ledger, [_row(payload)])
+
+    result = build_consumption_ledger(
+        {
+            "messages": [
+                {"role": "assistant", "content": "submit"},
+                {"role": "exit", "content": payload},
+            ]
+        },
+        runtime_ledger_path=str(ledger),
+    )
+
+    assert result["ledger_rows_joined"] == 0
+    assert result["gt_blocks_delivered"] == 0
+    assert not any(
+        entry.get("source") == "trajectory" for entry in result["entries"]
+    )
+
+
+def test_hidden_ledger_file_path_cannot_manufacture_acknowledgment(
+    tmp_path: Path,
+) -> None:
+    payload = "verify this invariant"
+    row = _row(payload, layer="obligation.unexercised")
+    row["file_path"] = "tests/test_pkg.py"
+    ledger = tmp_path / "gt_runtime_ledger_task.jsonl"
+    _write_ledger(ledger, [row])
+
+    result = build_consumption_ledger(
+        {
+            "messages": [
+                {"role": "tool", "content": payload},
+                {
+                    "role": "assistant",
+                    "content": "I will run the relevant check",
+                    "tool_calls": [{"function": {
+                        "name": "bash",
+                        "arguments": json.dumps({
+                            "command": "pytest tests/test_pkg.py",
+                        }),
+                    }}],
+                },
+            ]
+        },
+        runtime_ledger_path=str(ledger),
+    )
+
+    entry = next(e for e in result["entries"] if e.get("joined") is True)
+    assert entry["file_path"] == "tests/test_pkg.py"
+    assert entry["receipt"] == 1
+    assert entry["referenced_msg_index"] is None
+    assert entry["acted_msg_index"] is None
+    assert entry["verification_followup"] is False
+
+
 def test_distinct_unjoined_visible_tag_fails_authoritative_audit_completeness(
     tmp_path: Path,
 ) -> None:
@@ -197,7 +286,7 @@ def test_partial_overlap_does_not_promote_unsealed_legacy_tag(tmp_path: Path) ->
 
 
 def test_merged_owner_recomputes_receipt_and_producer_fields(tmp_path: Path) -> None:
-    tag = "<gt-nudge>verify the requirement</gt-nudge>"
+    tag = "<gt-nudge>verify tests/test_pkg.py</gt-nudge>"
     sealed = "\n" + tag
     ledger = tmp_path / "gt_runtime_ledger_task.jsonl"
     row = _row(sealed, layer="obligation.unexercised")

@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""Fail-closed joins for host-only ``feature.opportunity`` ledger rows.
+
+Opportunity rows prove only that a formatter-visible candidate existed at one
+policy observation.  They do not prove delivery, timing, acknowledgment, or
+causal effect and therefore never mutate an SS readiness object.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from collections import defaultdict
+from typing import Any
+
+from groundtruth.runtime.feature_lineage import FeatureRef
+
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_REF_KEYS = frozenset({"category", "feature_id", "role"})
+
+
+def policy_observation_id(
+    start_iteration: int, parent_sha256: str, action_sha256: str,
+) -> str:
+    """Rebuild the seam's framed policy-observation identity."""
+    framed = (
+        b"gt.observation.v1\x00"
+        + int(start_iteration).to_bytes(8, "big", signed=False)
+        + bytes.fromhex(parent_sha256)
+        + bytes.fromhex(action_sha256)
+    )
+    return hashlib.sha256(framed).hexdigest()
+
+
+def feature_opportunity_id(
+    observation_id: str,
+    ordinal: int,
+    kind_sha256: str,
+    dedup_sha256: str,
+) -> str:
+    """Rebuild the seam's framed candidate-opportunity identity."""
+    framed = (
+        b"gt.opportunity.v1\x00"
+        + bytes.fromhex(observation_id)
+        + int(ordinal).to_bytes(8, "big", signed=False)
+        + bytes.fromhex(kind_sha256)
+        + bytes.fromhex(dedup_sha256)
+    )
+    return hashlib.sha256(framed).hexdigest()
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _action_batch_sha256(actions: list[Any]) -> str:
+    keys = tuple(
+        json.dumps(action, sort_keys=True, separators=(",", ":"), default=str)
+        for action in actions
+    )
+    raw = json.dumps(keys, separators=(",", ":"), ensure_ascii=False)
+    return _sha256_text(raw)
+
+
+def _policy_observations(
+    messages: list[Any],
+) -> dict[str, list[tuple[int, int]]]:
+    """Index exact parent policies using the seam's cumulative action clock."""
+    result: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    action_count = 0
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content", "")
+        if not isinstance(content, str):
+            continue
+        extra = message.get("extra")
+        actions = extra.get("actions", []) if isinstance(extra, dict) else []
+        if not isinstance(actions, list):
+            continue
+        parent_sha = _sha256_text(content)
+        action_sha = _action_batch_sha256(actions)
+        observation_id = policy_observation_id(action_count, parent_sha, action_sha)
+        result[observation_id].append((index, len(content)))
+        action_count += len(actions)
+    return dict(result)
+
+
+def _identifiable_refs(
+    raw_refs: object, inventory: dict[str, tuple[str, ...]],
+) -> list[str]:
+    """Recover only canonical IDs for assigning a malformed-row blocker."""
+    if not isinstance(raw_refs, list):
+        return []
+    found: list[str] = []
+    for raw in raw_refs:
+        if not isinstance(raw, dict):
+            continue
+        category, feature_id = raw.get("category"), raw.get("feature_id")
+        if category in {"CAP", "FACT"} and feature_id in inventory[category]:
+            found.append(str(feature_id))
+    return sorted(set(found))
+
+
+def _validated_refs(
+    raw_refs: object, inventory: dict[str, tuple[str, ...]],
+) -> tuple[list[dict[str, str]], list[str]]:
+    issues: list[str] = []
+    if not isinstance(raw_refs, list) or not raw_refs:
+        return [], ["feature_refs"]
+    typed: list[FeatureRef] = []
+    for raw in raw_refs:
+        if not isinstance(raw, dict) or set(raw) != _REF_KEYS:
+            issues.append("feature_ref_shape")
+            continue
+        try:
+            ref = FeatureRef(raw["category"], raw["feature_id"], raw["role"])
+        except (KeyError, TypeError, ValueError):
+            issues.append("feature_ref_value")
+            continue
+        if ref.category not in {"CAP", "FACT"}:
+            issues.append("feature_ref_category")
+            continue
+        if ref.feature_id not in inventory[ref.category]:
+            issues.append("feature_ref_inventory")
+            continue
+        typed.append(ref)
+    if len(typed) != len(raw_refs):
+        return [], sorted(set(issues))
+    if typed != sorted(set(typed)):
+        issues.append("feature_ref_order_or_duplicate")
+    fact_refs = [ref for ref in typed if ref.category == "FACT"]
+    cap_refs = [ref for ref in typed if ref.category == "CAP"]
+    if len(fact_refs) != 1 or len(cap_refs) > 1:
+        issues.append("feature_ref_cardinality")
+    if issues:
+        return [], sorted(set(issues))
+    return [
+        {"category": ref.category, "feature_id": ref.feature_id, "role": ref.role}
+        for ref in typed
+    ], []
+
+
+def _validate_bound_row(
+    row: dict[str, Any],
+    inventory: dict[str, tuple[str, ...]],
+    parent_index: dict[str, list[tuple[int, int]]],
+) -> tuple[list[dict[str, str]], list[str], int | None]:
+    issues: list[str] = []
+    if row.get("event_type") != "policy_observation":
+        issues.append("event_type")
+    if row.get("outcome") != "eligible" or row.get("reason") != "formatter_visible_candidate":
+        issues.append("outcome")
+    if row.get("chars_delivered") != 0:
+        issues.append("chars_delivered")
+    if row.get("attribution_status") != "BOUND" or row.get("attribution_reason") != "typed_lineage":
+        issues.append("producer_binding")
+
+    for field in (
+        "observation_id", "opportunity_id", "parent_policy_sha256",
+        "action_batch_sha256", "candidate_kind_sha256", "candidate_dedup_sha256",
+    ):
+        if not isinstance(row.get(field), str) or _HEX64.fullmatch(row[field]) is None:
+            issues.append(field)
+    for field in ("iteration", "parent_policy_chars", "candidate_ordinal"):
+        value = row.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            issues.append(field)
+    for field in ("delivery_eligible", "selected"):
+        if not isinstance(row.get(field), bool):
+            issues.append(field)
+
+    refs, ref_issues = _validated_refs(row.get("feature_refs"), inventory)
+    issues.extend(ref_issues)
+    if not issues:
+        expected_observation = policy_observation_id(
+            row["iteration"], row["parent_policy_sha256"], row["action_batch_sha256"]
+        )
+        if row["observation_id"] != expected_observation:
+            issues.append("observation_id_mismatch")
+        expected_opportunity = feature_opportunity_id(
+            row["observation_id"], row["candidate_ordinal"],
+            row["candidate_kind_sha256"], row["candidate_dedup_sha256"],
+        )
+        if row["opportunity_id"] != expected_opportunity:
+            issues.append("opportunity_id_mismatch")
+    parent_hits = parent_index.get(str(row.get("observation_id") or ""), [])
+    parent_message_index = parent_hits[0][0] if len(parent_hits) == 1 else None
+    if len(parent_hits) != 1:
+        issues.append("parent_policy_join")
+    elif row.get("parent_policy_chars") != parent_hits[0][1]:
+        issues.append("parent_policy_chars_mismatch")
+    return refs, sorted(set(issues)), parent_message_index
+
+
+def _unmeasured(reason: str) -> dict[str, Any]:
+    return {
+        "status": "UNMEASURED",
+        "reason": reason,
+        "eligible_opportunity": None,
+        "opportunity_count": 0,
+        "delivery_eligible_count": 0,
+        "selected_count": 0,
+        "decision_boundary_evidence": [],
+    }
+
+
+def collect_feature_opportunities(
+    ledger_rows: list[dict[str, Any]],
+    messages: list[Any],
+    inventory: dict[str, tuple[str, ...]],
+) -> dict[str, Any]:
+    """Validate and project candidate opportunities onto exact CAP/FACT IDs.
+
+    The parent-policy join exposes the chronological anchor needed by a later
+    precommit audit.  ``decision_open`` deliberately remains unknown here.
+    """
+    feature_ids = tuple(inventory["CAP"]) + tuple(inventory["FACT"])
+    records = {feature: _unmeasured("no_bound_opportunity") for feature in feature_ids}
+    evidence: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    invalid_by_feature: dict[str, set[str]] = defaultdict(set)
+    parent_index = _policy_observations(messages)
+    seen_ids: set[str] = set()
+    malformed_rows = 0
+    unbound_rows = 0
+    bound_rows = 0
+
+    for row_index, row in enumerate(ledger_rows):
+        if not isinstance(row, dict) or row.get("layer") != "feature.opportunity":
+            continue
+        identifiable = _identifiable_refs(row.get("feature_refs"), inventory)
+        if row.get("attribution_status") != "BOUND" or row.get("attribution_reason") != "typed_lineage":
+            unbound_rows += 1
+            for feature in identifiable:
+                invalid_by_feature[feature].add("producer_binding")
+            continue
+        refs, issues, parent_message_index = _validate_bound_row(
+            row, inventory, parent_index
+        )
+        opportunity_id = row.get("opportunity_id")
+        if isinstance(opportunity_id, str) and opportunity_id in seen_ids:
+            issues.append("duplicate_opportunity_id")
+        if isinstance(opportunity_id, str):
+            seen_ids.add(opportunity_id)
+        target_features = identifiable or [ref["feature_id"] for ref in refs]
+        if issues:
+            malformed_rows += 1
+            for feature in target_features:
+                invalid_by_feature[feature].update(issues)
+            continue
+        bound_rows += 1
+        boundary = {
+            "ledger_index": row_index,
+            "observation_id": row["observation_id"],
+            "opportunity_id": row["opportunity_id"],
+            "iteration": row["iteration"],
+            "parent_message_index": parent_message_index,
+            "parent_policy_sha256": row["parent_policy_sha256"],
+            "action_batch_sha256": row["action_batch_sha256"],
+            "parent_policy_joined": True,
+            "delivery_eligible": row["delivery_eligible"],
+            "selected": row["selected"],
+            "decision_open": None,
+            "precommit_status": "UNMEASURED:chronological_audit_required",
+        }
+        for ref in refs:
+            evidence[ref["feature_id"]].append(boundary)
+
+    for feature in feature_ids:
+        if invalid_by_feature.get(feature):
+            records[feature] = _unmeasured(
+                "invalid_bound_opportunity:" + ",".join(sorted(invalid_by_feature[feature]))
+            )
+            continue
+        feature_evidence = evidence.get(feature, [])
+        if not feature_evidence:
+            continue
+        records[feature] = {
+            "status": "BOUND",
+            "reason": "producer_matched_typed_lineage",
+            "eligible_opportunity": True,
+            "opportunity_count": len(feature_evidence),
+            "delivery_eligible_count": sum(
+                item["delivery_eligible"] is True for item in feature_evidence
+            ),
+            "selected_count": sum(item["selected"] is True for item in feature_evidence),
+            "decision_boundary_evidence": feature_evidence,
+        }
+    return {
+        "features": records,
+        "integrity": {
+            "schema": "gt.feature_opportunity.integrity.v1",
+            "publishable": malformed_rows == 0,
+            "bound_rows": bound_rows,
+            "unbound_rows": unbound_rows,
+            "malformed_rows": malformed_rows,
+            "proof_scope": "eligibility_anchor_only_no_ss_live_promotion",
+        },
+    }
+
+
+def attach_opportunity_evidence(
+    feature_row: dict[str, Any], evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach an additive audit projection without touching terminal readiness."""
+    result = dict(feature_row)
+    result["opportunity_evidence"] = evidence
+    return result
+
+
+__all__ = [
+    "attach_opportunity_evidence",
+    "collect_feature_opportunities",
+    "feature_opportunity_id",
+    "policy_observation_id",
+]

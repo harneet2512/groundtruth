@@ -441,17 +441,25 @@ def _assistant_prose(msg: dict) -> str:
     return c if isinstance(c, str) else ""
 
 
-def _block_entities(block: str, file_attr: str | None) -> tuple[set[str], set[str]]:
+def _block_entities(
+    block: str, _host_file_attr: str | None = None,
+) -> tuple[set[str], set[str]]:
     """(file_tokens, symbols) delivered by a GT block.
 
-    Files: the ``file="..."`` attr plus any source-path tokens in the body, each
-    as both full path and basename. Symbols: extracted only from structured
-    evidence/contract markers (never free-text) to keep false-references low.
+    Files come only from the exact model-visible bytes: a ``file="..."`` attr
+    inside the block or a source-path token in its body, each as both full path
+    and basename. Host-side ledger metadata is deliberately excluded because it
+    cannot prove that the model received an entity. Symbols are extracted only
+    from structured evidence/contract markers (never free-text) to keep false
+    references low. ``_host_file_attr`` remains as a compatibility parameter for
+    existing callers, but is intentionally never used as receipt evidence.
     """
     files: set[str] = set()
+    file_attr = _FILE_ATTR_RE.search(block)
     if file_attr:
-        files.add(file_attr)
-        files.add(os.path.basename(file_attr))
+        delivered_path = file_attr.group(1)
+        files.add(delivered_path)
+        files.add(os.path.basename(delivered_path))
     for f in _PATH_RE.findall(block):
         files.add(f)
         files.add(os.path.basename(f))
@@ -524,9 +532,9 @@ def _build_v2(
             ord_counter += 1
             tool_ordinal[i] = ord_counter
 
-    def _receipt_for(i: int, block: str, file_attr: str | None) -> tuple[int, int | None, int | None, bool]:
+    def _receipt_for(i: int, block: str) -> tuple[int, int | None, int | None, bool]:
         """Receipt ladder for one byte-proven model-visible delivery."""
-        files, symbols = _block_entities(block, file_attr)
+        files, symbols = _block_entities(block)
         pats = _entity_patterns(files, symbols)
         receipt = 1
         ref_idx: int | None = None
@@ -566,7 +574,7 @@ def _build_v2(
             kind = _TAG_KIND.get(tag, tag)
             fa = _FILE_ATTR_RE.search(block)
             file_attr = fa.group(1) if fa else None
-            receipt, ref_idx, act_idx, verif = _receipt_for(i, block, file_attr)
+            receipt, ref_idx, act_idx, verif = _receipt_for(i, block)
 
             entries.append({
                 "msg_index": i,
@@ -600,6 +608,7 @@ def _build_v2(
     join_rate: float | None = None
     ledger_rows_delivered = 0
     ledger_rows_joined = 0
+    exact_seal_ambiguities: list[dict[str, Any]] = []
     if runtime_ledger_path and os.path.isfile(runtime_ledger_path):
         rows = _load_delivered_ledger_rows(runtime_ledger_path)
         ledger_rows_delivered = len(rows)
@@ -616,7 +625,7 @@ def _build_v2(
             content = m.get("content")
             visible_buffers.append(
                 content if isinstance(content, str) and (
-                    role in ("user", "tool", "system", "exit")
+                    role in ("user", "tool", "system")
                     or mtype == "function_call_output"
                 ) else ""
             )
@@ -627,7 +636,7 @@ def _build_v2(
                 return False
             return os.path.basename(bf) == os.path.basename(rf)
 
-        for row in rows:
+        for row_index, row in enumerate(rows):
             rf = row.get("file_path") or ""
             chars = int(row.get("chars_delivered") or 0)
             it = row.get("iteration")
@@ -642,17 +651,29 @@ def _build_v2(
             seal_span: tuple[int, int] | None = None
             seal_payload = ""
             if seal and chars > 0:
+                candidates: list[tuple[int, tuple[int, int]]] = []
                 for msg_index, content in enumerate(visible_buffers):
                     for span in _locate_seal_spans(content, chars, seal):
                         if any(_spans_overlap(span, prior) for prior in claimed_spans[msg_index]):
                             continue
-                        seal_home = msg_index
-                        seal_span = span
-                        seal_payload = content[span[0]:span[1]]
-                        claimed_spans[msg_index].append(span)
-                        break
-                    if seal_home is not None:
-                        break
+                        candidates.append((msg_index, span))
+
+                if len(candidates) == 1:
+                    seal_home, seal_span = candidates[0]
+                    seal_payload = visible_buffers[seal_home][
+                        seal_span[0]:seal_span[1]
+                    ]
+                    claimed_spans[seal_home].append(seal_span)
+                elif len(candidates) > 1:
+                    exact_seal_ambiguities.append({
+                        "ledger_row_index": row_index,
+                        "content_sha256_16": seal,
+                        "chars_delivered": chars,
+                        "candidate_physical_ids": [
+                            _physical_id(msg_index, span[0], span[1])
+                            for msg_index, span in candidates
+                        ],
+                    })
 
                 if seal_home is not None and seal_span is not None:
                     # Legacy tags and sealed windows are two representations of
@@ -681,7 +702,7 @@ def _build_v2(
                         ]
                         legacy_span = legacy_spans[0]
                         receipt, ref_idx, act_idx, verif = _receipt_for(
-                            seal_home, seal_payload, str(rf) or None
+                            seal_home, seal_payload
                         )
                         e["legacy_span_start"], e["legacy_span_end"] = legacy_span
                         e["legacy_spans"] = [list(span) for span in legacy_spans]
@@ -706,7 +727,7 @@ def _build_v2(
                         e["verification_followup"] = verif
                     else:
                         receipt, ref_idx, act_idx, verif = _receipt_for(
-                            seal_home, seal_payload, str(rf) or None
+                            seal_home, seal_payload
                         )
                         entries.append({
                             "msg_index": seal_home,
@@ -901,9 +922,12 @@ def _build_v2(
         "unjoined_visible_tag_ids": unjoined_visible_tags,
         "physical_identity_conflict_count": len(physical_identity_conflicts),
         "physical_identity_conflict_ids": physical_identity_conflicts,
+        "exact_seal_ambiguity_count": len(exact_seal_ambiguities),
+        "exact_seal_ambiguities": exact_seal_ambiguities,
         "visible_audit_complete": (
             len(unjoined_visible_tags) == 0
             and not physical_identity_conflicts
+            and not exact_seal_ambiguities
             if runtime_ledger_path and os.path.isfile(runtime_ledger_path)
             else True
         ),

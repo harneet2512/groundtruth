@@ -233,7 +233,11 @@ def test_aggregate_reconciles_and_fail_closed(tmp_path):
     r1 = g.collect_task("t1", d1, profile="2")
     r2 = g.collect_task("t2", d2, profile="2")
     agg = g.aggregate_run("run-x", [r1, r2], profile="2")
-    assert agg["integrity"]["publishable"] is True
+    # These legacy fixtures intentionally lack the canonical SS inputs. The
+    # headline integrity bit must fold that failure instead of contradicting
+    # the nested SS integrity artifact.
+    assert agg["ss_integrity"]["publishable"] is False
+    assert agg["integrity"]["publishable"] is False
     assert agg["integrity"]["reconciliation"]["enabled_member_count"] == len(rp.PROFILE_MEMBERS["2"])
     # now DELETE a feature record from one task → aggregate must REFUSE to publish.
     del r2["features"]["GT_GATEWAY"]

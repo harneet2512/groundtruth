@@ -232,6 +232,11 @@ def test_gate_checks_all_four_gt_artifacts_and_fails_closed() -> None:
     assert 'return_code", -1)) == 0' in gate
     assert 'trajectory_present") is True' in gate
     assert "visible_audit_complete" in gate
+    assert "gt_task_completion.json" in gate
+    assert "gt.task_completion.v1" in gate
+    assert "os.replace" in gate
+    assert gate.index("if [ -n \"$_MM_MISSING\" ]") < gate.index("gt_task_completion.json")
+    assert gate.index("gt_task_completion.json") < gate.index("GT_METRICS_COMPLETE")
     idx = gate.index("GT_METRICS_INCOMPLETE")
     window = gate[idx: idx + 400]
     assert "exit 1" in window, (
