@@ -102,18 +102,20 @@ def test_t3_filtermap_flagged_unexercised(gmp):
     got = m._unexercised_clause_candidate()
     assert got is not None
     block = got[1]
-    assert "filterMap" in block and "unexercised_clauses" in block
+    assert "normative requirement truth" in block
+    assert "[not exercised]" in block
+    assert "<gt-" not in block
     assert not m._V2_LEAK_TEST_RE.search(block.replace("test/run output", ""))
 
 
 # ── t14: exercising the clause silences it ───────────────────────────────────
-def test_t3_exercised_clause_not_flagged(gmp):
+def test_t3_token_mention_alone_does_not_retire_clause(gmp):
     m, tmp = gmp
     _write_artifact(tmp)
     m._oracle_tested_tokens.add("test_filtermap")  # substring credit (compound)
     got = m._unexercised_clause_candidate()
-    if got is not None:
-        assert "filterMap" not in got[1].split("could not be auto-checked")[0]
+    assert got is not None
+    assert "filterMap" in got[1]
 
 
 def test_t3_fresh_behavioral_proof_filters_only_proven_clause(
@@ -142,19 +144,11 @@ def test_t3_fresh_behavioral_proof_filters_only_proven_clause(
     (tmp / "gt_obligations_v2.json").write_text(
         json.dumps(payload), encoding="utf-8"
     )
-    monkeypatch.setattr(
-        m,
-        "_v2_clause_fresh_behavioral_proof",
-        lambda view: (
-            {
-                "clause_id": "0",
-                "subject_digest": "b" * 16,
-                "subject_term_digests": ["c" * 16],
-                "proof_turn": 8,
-                "last_relevant_edit_turn": 3,
-            }
-            if view.idx == 0 else None
-        ),
+    m._action_count = 8
+    m._ss_record_behavioral_proof(
+        command="python -m pytest -k TypeError",
+        output="1 passed in 0.02s",
+        returncode=0,
     )
 
     got = m._unexercised_clause_candidate()
@@ -169,13 +163,11 @@ def test_t3_fresh_behavioral_proof_filters_only_proven_clause(
     assert [(row["layer"], row["reason"]) for row in rows] == [
         ("obligation.unexercised", "ss_late")
     ]
-    assert rows[0]["subject_digest"] == "b" * 16
-    assert rows[0]["subject_term_digests"] == ["c" * 16]
     assert rows[0]["artifact_issue_sha256"] == "a" * 64
     assert rows[0]["proof_turn"] == 8
 
 
-def test_t3_exercised_clause_never_manufactures_late_suppression(
+def test_t3_failed_exercise_is_unproven_and_never_manufactures_suppression(
     gmp, monkeypatch
 ):
     m, tmp = gmp
@@ -195,20 +187,16 @@ def test_t3_exercised_clause_never_manufactures_late_suppression(
     (tmp / "gt_obligations_v2.json").write_text(
         json.dumps(payload), encoding="utf-8"
     )
-    m._oracle_tested_tokens.add("test_filterMap")
-    monkeypatch.setattr(
-        m,
-        "_v2_clause_fresh_behavioral_proof",
-        lambda view: {
-            "clause_id": "0",
-            "subject_digest": "b" * 16,
-            "subject_term_digests": ["c" * 16],
-            "proof_turn": 8,
-            "last_relevant_edit_turn": 3,
-        },
+    m._action_count = 8
+    m._ss_record_behavioral_proof(
+        command="python -m pytest -k filterMap",
+        output="1 failed in 0.02s",
+        returncode=1,
     )
 
-    assert m._unexercised_clause_candidate() is None
+    candidate = m._unexercised_clause_candidate()
+    assert candidate is not None
+    assert "[exercised, result unproven]" in candidate[1]
     assert not ledger.exists()
 
 
@@ -230,22 +218,18 @@ def test_t3_new_proof_generation_records_new_suppression(gmp, monkeypatch):
     (tmp / "gt_obligations_v2.json").write_text(
         json.dumps(payload), encoding="utf-8"
     )
-    proof_turn = {"value": 8}
-    monkeypatch.setattr(
-        m,
-        "_v2_clause_fresh_behavioral_proof",
-        lambda view: {
-            "clause_id": "0",
-            "subject_digest": "b" * 16,
-            "subject_term_digests": ["c" * 16],
-            "proof_turn": proof_turn["value"],
-            "last_relevant_edit_turn": proof_turn["value"] - 1,
-        },
-    )
+    def record_proof(turn):
+        m._action_count = turn
+        m._ss_record_behavioral_proof(
+            command="python -m pytest -k TypeError",
+            output="1 passed in 0.02s",
+            returncode=0,
+        )
 
+    record_proof(8)
     assert m._unexercised_clause_candidate() is None
     assert m._unexercised_clause_candidate() is None
-    proof_turn["value"] = 10
+    record_proof(10)
     assert m._unexercised_clause_candidate() is None
 
     rows = [json.loads(line) for line in ledger.read_text().splitlines()]
@@ -321,7 +305,7 @@ print('right:', repr(second))  # possible result B 2024
         (_BABEL_CLAUSE, _BABEL_COMMAND, _BABEL_OUTPUT),
     ],
 )
-def test_t3_fresh_dynamic_proof_retires_unverifiable_clause(
+def test_t3_dynamic_probe_cannot_promote_subjectless_clause(
     gmp, monkeypatch, clause, command, output
 ):
     m, tmp = gmp
@@ -334,19 +318,14 @@ def test_t3_fresh_dynamic_proof_retires_unverifiable_clause(
         command=command, output=output, returncode=0
     )
 
-    statuses = m._v2_exercise_statuses()
-    assert statuses is not None
-    from groundtruth.runtime.obligations import CLAUSE_UNVERIFIABLE
-    assert statuses[0][1] == CLAUSE_UNVERIFIABLE
-    assert m._unexercised_clause_candidate() is None
-
-    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
-    assert len(rows) == 1
-    assert rows[0]["layer"] == "obligation.unexercised"
-    assert rows[0]["reason"] == "ss_late"
-    assert rows[0]["chars_delivered"] == 0
-    assert rows[0]["clause_id"] == "clause-1"
-    assert rows[0]["boundary"] == "test_result"
+    truth = m._v2_obligation_truth()
+    assert truth is not None
+    from groundtruth.runtime.obligations import ObligationTruthState
+    assert truth[0].state is ObligationTruthState.UNVERIFIABLE
+    candidate = m._unexercised_clause_candidate()
+    assert candidate is not None
+    assert "could not be verified automatically" in candidate[1]
+    assert not ledger.exists()
 
 
 def test_unexercised_delivery_row_carries_typed_obligation_lineage(gmp):
@@ -482,7 +461,7 @@ def test_t3_dynamic_proof_before_relevant_edit_is_stale(gmp, monkeypatch):
     assert not ledger.exists()
 
 
-def test_t3_unverifiable_dynamic_proof_attributes_resurface_silence(
+def test_t3_subjectless_probe_does_not_attribute_resurface_silence(
     gmp, monkeypatch
 ):
     m, tmp = gmp
@@ -497,11 +476,7 @@ def test_t3_unverifiable_dynamic_proof_attributes_resurface_silence(
 
     m._v2_attribute_resurface_silence()
 
-    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
-    assert len(rows) == 1
-    assert rows[0]["layer"] == "obligation.resurface"
-    assert rows[0]["boundary"] == "post_edit"
-    assert rows[0]["chars_delivered"] == 0
+    assert not ledger.exists()
 
 
 def test_t3_unverifiable_dynamic_proof_is_inert_when_late_drop_off(
@@ -519,7 +494,7 @@ def test_t3_unverifiable_dynamic_proof_is_inert_when_late_drop_off(
     got = m._unexercised_clause_candidate()
 
     assert got is not None
-    assert "could not be auto-checked" in got[1]
+    assert "could not be verified automatically" in got[1]
     assert not ledger.exists()
 
 
@@ -542,16 +517,11 @@ def test_t3_resurface_boundary_attributes_earned_v2_silence(gmp, monkeypatch):
     (tmp / "gt_obligations_v2.json").write_text(
         json.dumps(payload), encoding="utf-8"
     )
-    monkeypatch.setattr(
-        m,
-        "_v2_clause_fresh_behavioral_proof",
-        lambda _view: {
-            "clause_id": "clause-1",
-            "subject_digest": "b" * 16,
-            "subject_term_digests": ["c" * 16],
-            "proof_turn": 8,
-            "last_relevant_edit_turn": 3,
-        },
+    m._action_count = 8
+    m._ss_record_behavioral_proof(
+        command="python -m pytest -k render_value",
+        output="1 passed in 0.02s",
+        returncode=0,
     )
     m._oracle_edited_tokens.add("render_value")
     m._action_count = 12
@@ -576,7 +546,7 @@ def test_t3_resurface_silence_is_byte_and_ledger_inert_when_late_drop_off(
     monkeypatch.setenv("GT_RUNTIME_LEDGER", str(ledger))
     monkeypatch.setattr(
         m,
-        "_v2_exercise_statuses",
+        "_v2_obligation_truth",
         lambda: (_ for _ in ()).throw(AssertionError("flag-off must not inspect V2")),
     )
     observation = {"output": "native bytes"}
@@ -597,14 +567,36 @@ def test_t3_inactive_without_artifact(gmp):
 # ── t18: dose — at most 2 emissions, deduped by status vector ────────────────
 def test_t3_dose_max_two_and_dedup(gmp):
     m, tmp = gmp
-    _write_artifact(tmp)
+    payload = {
+        "obligations_version": 2,
+        "render_path_tokens": [],
+        "clauses": [{
+            "clause_id": "filter-map",
+            "verbatim_text": "filterMap must preserve mapped values",
+            "subject_symbols": ["filterMap"],
+            "symbols": ["filterMap"],
+        }],
+    }
+    (tmp / "gt_obligations_v2.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
     first = m._unexercised_clause_candidate()
     assert first is not None
     assert m._unexercised_clause_candidate() is None  # same vector -> dedup
-    m._oracle_tested_tokens.add("filterMap")  # vector changes
+    m._action_count = 4
+    m._ss_record_behavioral_proof(
+        command="python -m pytest -k filterMap",
+        output="1 failed in 0.02s",
+        returncode=1,
+    )
     second = m._unexercised_clause_candidate()
     assert second is not None
-    m._oracle_tested_tokens.add("partition")  # vector changes again
+    m._action_count = 5
+    m._ss_record_behavioral_proof(
+        command="python -m pytest -k filterMap",
+        output="1 passed in 0.02s",
+        returncode=0,
+    )
     assert m._unexercised_clause_candidate() is None  # hard cap 2
 
 
@@ -655,5 +647,6 @@ def test_t3_coverage_v2_in_status_artifact(gmp, monkeypatch):
 
     m._persist_obligation_status(_Tr(), turn=1)
     snap = json.loads(status_path.read_text(encoding="utf-8"))
-    assert snap["coverage_v2"]["coverage_version"] == 2
-    assert "coverage_exercised" in snap["coverage_v2"]
+    assert snap["coverage_v2"]["coverage_version"] == 3
+    assert "proof_coverage" in snap["coverage_v2"]
+    assert "n_exercised_unproven" in snap["coverage_v2"]

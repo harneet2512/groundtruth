@@ -7177,7 +7177,9 @@ def _load_obligations_v2() -> dict | None:
 
 
 class _V2ClauseView:
-    __slots__ = ("idx", "clause_id", "verbatim", "subject_symbols", "sym_parts")
+    __slots__ = (
+        "idx", "clause_id", "verbatim", "subject_symbols", "sym_parts", "region",
+    )
 
     def __init__(self, idx: int, clause: dict):
         self.idx = idx
@@ -7186,6 +7188,7 @@ class _V2ClauseView:
         self.subject_symbols = frozenset(
             s for s in (clause.get("subject_symbols") or ()) if isinstance(s, str)
         )
+        self.region = str(clause.get("region") or "normative")
         parts: set[str] = set()
         for s in (clause.get("symbols") or ()):
             if isinstance(s, str):
@@ -7194,9 +7197,8 @@ class _V2ClauseView:
         self.sym_parts = frozenset(parts)
 
 
-def _v2_exercise_statuses():
-    """[(view, status)] over the artifact clauses, or None when v2 inactive.
-    Shared by the T3 candidate and the status persist (one source of truth)."""
+def _v2_obligation_truth():
+    """Authoritative v2 lifecycle over artifact subjects and observed executions."""
     data = _load_obligations_v2()
     if not data:
         return None
@@ -7204,12 +7206,47 @@ def _v2_exercise_statuses():
     if not clauses:
         return None
     try:
-        from groundtruth.runtime.obligations import exercise_statuses
+        from groundtruth.runtime.obligations import (
+            BehavioralProof,
+            classify_checked_behavioral_proof,
+            classify_exercise_evidence,
+            obligation_truth_statuses,
+        )
     except Exception:  # noqa: BLE001 — product pkg absent -> quiet
         return None
     views = [_V2ClauseView(i, c) for i, c in enumerate(clauses)]
-    return exercise_statuses(
-        views, _edited_symbols_for_obligations(), _oracle_tested_tokens)
+    exercises = []
+    proofs = []
+    after_turn_by_id = {}
+    for view in views:
+        subjects = view.subject_symbols
+        after_turn_by_id[view.idx] = _ss_last_relevant_edit_turn(subjects)
+        for command, output, returncode, turn in _ss_behavioral_probe_events:
+            exercise = classify_exercise_evidence(
+                command, output, returncode, subjects, turn=turn,
+            )
+            if exercise is not None:
+                exercises.append(exercise)
+            proof = classify_checked_behavioral_proof(
+                command, output, returncode, subjects, turn=turn,
+            )
+            if proof is None and _v2_checked_probe_covers_clause(
+                    view, command, output, returncode):
+                normalized = frozenset(
+                    str(subject).strip().lower()
+                    for subject in subjects if str(subject).strip()
+                )
+                if normalized:
+                    proof = BehavioralProof(normalized, int(turn), "checked_live_probe")
+            if proof is not None:
+                proofs.append(proof)
+    return obligation_truth_statuses(
+        views,
+        _edited_symbols_for_obligations(),
+        exercises,
+        proofs,
+        after_turn_by_id=after_turn_by_id,
+    )
 
 
 def _v2_clause_fresh_behavioral_proof(view) -> "dict | None":
@@ -7441,31 +7478,61 @@ def _v2_partition_fresh_proofs(statuses, *, kind: str, boundary: str):
     return retained
 
 
+def _v2_attribute_proven_truth(rows, *, kind: str, boundary: str) -> None:
+    """Record earned silence from the same proof rows used by live rendering."""
+    if not _ss_late_drop_on():
+        return
+    try:
+        from groundtruth.runtime.obligations import ObligationTruthState
+    except Exception:  # noqa: BLE001 — attribution must never break delivery
+        return
+    data = _load_obligations_v2() or {}
+    for row in rows or ():
+        if row.state is not ObligationTruthState.PROVEN or row.proof is None:
+            continue
+        clause_id = str(getattr(row.view, "clause_id", row.view.idx))
+        identity = {
+            "clause_id": clause_id,
+            "artifact_issue_sha256": str(data.get("issue_sha256") or ""),
+            "boundary": boundary,
+            "proof_turn": int(row.proof.turn),
+        }
+        suppression_key = hashlib.sha256(json.dumps({
+            **identity, "kind": kind,
+        }, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        if suppression_key in _unexercised_late_suppressed:
+            continue
+        _unexercised_late_suppressed.add(suppression_key)
+        _runtime_ledger_record(
+            kind=kind,
+            outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+            reason="ss_late",
+            extra=identity,
+        )
+
+
 def _v2_attribute_resurface_silence() -> None:
     """Account for earned V2 silence at the retired post-edit resurface boundary."""
     if not _ss_late_drop_on():
         return
-    statuses = _v2_exercise_statuses()
-    if statuses is not None:
-        _v2_partition_fresh_proofs(
-            statuses, kind="obligation.resurface", boundary="post_edit")
+    truth = _v2_obligation_truth()
+    if truth is not None:
+        _v2_attribute_proven_truth(
+            truth, kind="obligation.resurface", boundary="post_edit")
 
 
 def _unexercised_clause_candidate() -> tuple[float, str] | None:
     """T3 candidate for the VERIFY/SUBMIT site (see block comment above)."""
     if _GT_BASELINE or len(_unexercised_emitted) >= 2:
         return None
-    statuses = _v2_exercise_statuses()
-    if statuses is None:
+    truth = _v2_obligation_truth()
+    if truth is None:
         return None
     data = _load_obligations_v2() or {}
-    if _ss_late_drop_on():
-        statuses = _v2_partition_fresh_proofs(
-            statuses, kind="obligation.unexercised", boundary="test_result")
-        if not statuses:
-            return None
+    _v2_attribute_proven_truth(
+        truth, kind="obligation.unexercised", boundary="test_result")
     try:
-        from groundtruth.runtime.obligations import render_unexercised_block
+        from groundtruth.runtime.obligations import render_obligation_truth_block
     except Exception:  # noqa: BLE001
         return None
     path_tokens = [
@@ -7479,11 +7546,11 @@ def _unexercised_clause_candidate() -> tuple[float, str] | None:
         low = row.lower()
         return any(t in low for t in path_tokens)
 
-    block = render_unexercised_block(statuses, max_listed=6, leak_screen=_leaky)
+    block = render_obligation_truth_block(truth, max_listed=6, leak_screen=_leaky)
     if not block:
         return None
     vec = hashlib.sha256(
-        "|".join(f"{v.idx}:{s}" for v, s in statuses).encode("utf-8")
+        "|".join(f"{row.view.idx}:{row.state.value}" for row in truth).encode("utf-8")
     ).hexdigest()[:8]
     if vec in _unexercised_emitted:
         return None
@@ -7927,12 +7994,14 @@ def _persist_obligation_status(tracker, *, turn: int | None = None) -> None:
             "obligations": tracker.snapshot(),
         }
         # GT_OBLIGATIONS_V2: attach the exercised-clause coverage summary when
-        # the T2 artifact is active — the §4 audit's coverage_exercised source.
+        # the T2 artifact is active. Delivery and metrics consume the same truth
+        # rows, so a failed exercise cannot be rendered one way and aggregated
+        # another way.
         try:
-            _st = _v2_exercise_statuses()
-            if _st is not None:
-                from groundtruth.runtime.obligations import coverage_summary
-                snap["coverage_v2"] = coverage_summary(_st)
+            _truth = _v2_obligation_truth()
+            if _truth is not None:
+                from groundtruth.runtime.obligations import obligation_truth_summary
+                snap["coverage_v2"] = obligation_truth_summary(_truth)
         except Exception:  # noqa: BLE001 — telemetry must never break the loop
             pass
         path = os.environ.get("GT_OBLIGATION_STATUS", "/tmp/gt/obligation_status.json")
