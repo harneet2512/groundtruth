@@ -497,6 +497,9 @@ class DeliveryGrade:
     ack_independent: int = -1      # msg index of the first later assistant reference, or -1
     acted_independent: int = -1    # later entity-targeting assistant command, or -1
     receipt_level: int = 1         # 1 delivered, 2 referenced, 3 relevant action
+    prior_knowledge_state: str = "UNKNOWN"
+    prior_knowledge_msg: int = -1
+    fair_probe: bool | None = None
     pbucket: str = ""
 
     @property
@@ -754,6 +757,19 @@ def grade_delivery(d: "sso.Delivery", msgs: list[dict], acq_cache: dict,
     if g.ack_independent >= 0:
         g.receipt_level = max(g.receipt_level, 2)
     g.acted_independent = _first_action_reference(d, msgs)
+    planned_msg = _model_planned_before(d, msgs, g.acted_independent)
+    if planned_msg >= 0:
+        # The receipt remains an honest record of what happened after delivery.
+        # It cannot make the delivery timely or causal when the model had already
+        # committed the same entity-targeting action before seeing the bytes.
+        g.prior_knowledge_state = "MODEL_PLANNED"
+        g.prior_knowledge_msg = planned_msg
+        g.fair_probe = False
+        g.violations.append(Violation(
+            "step_behind", "a", d.home_msg, d.layer,
+            f"MODEL_PLANNED at m{planned_msg} before delivery; later action was precommitted",
+            head,
+        ))
     return g
 
 
@@ -811,6 +827,58 @@ def _first_action_reference(d: "sso.Delivery", msgs: list[dict]) -> int:
         commands = " ".join(sso._commands_of(m))
         if commands and any(p.search(commands) for p in pats):
             return i
+    return -1
+
+
+_MUTATION_COMMITMENT = re.compile(
+    r"\b(?:i(?:'ll|\s+will|'m\s+going\s+to|\s+am\s+going\s+to)|"
+    r"we(?:'ll|\s+will)|let\s+me|now\s+i(?:'ll|\s+will))\s+"
+    r"(?:also\s+)?(?:implement|fix|modify|edit|change|update|write|apply|"
+    r"correct|replace|add|remove|create)\b",
+    re.IGNORECASE,
+)
+_VERIFY_COMMITMENT = re.compile(
+    r"\b(?:i(?:'ll|\s+will|'m\s+going\s+to|\s+am\s+going\s+to)|"
+    r"we(?:'ll|\s+will)|let\s+me|now\s+i(?:'ll|\s+will))\s+"
+    r"(?:also\s+)?(?:run|check|verify|test)\b",
+    re.IGNORECASE,
+)
+
+
+def _model_planned_before(d: "sso.Delivery", msgs: list[dict], acted_msg: int) -> int:
+    """Return the prior assistant message that committed a later reminder action.
+
+    This is intentionally narrower than token overlap.  Only reminder/obligation
+    deliveries are eligible, a later assistant command must target an entity carried
+    by the delivery, and the earlier model-authored prose must contain an explicit
+    future-action commitment tied to that same entity.  Reads, tentative discussion,
+    and bare entity mentions do not establish ``MODEL_PLANNED``.
+    """
+    if d.layer not in OBLIGATION_LAYERS or acted_msg <= d.home_msg:
+        return -1
+    entities = _delivery_entities(d)
+    if not entities:
+        return -1
+    patterns = [re.compile(r"\b" + re.escape(entity) + r"\b") for entity in entities]
+    later = msgs[acted_msg] if acted_msg < len(msgs) else {}
+    later_commands = " ".join(sso._commands_of(later))
+    if not later_commands or not any(pattern.search(later_commands) for pattern in patterns):
+        return -1
+
+    # The nearest prior commitment is the operative decision boundary.  Looking
+    # backwards avoids attributing a later concrete edit plan to an earlier,
+    # superseded exploration plan about the same file.
+    for index in range(d.home_msg - 1, -1, -1):
+        message = msgs[index]
+        if message.get("role") != "assistant":
+            continue
+        prose = message.get("content")
+        prose = prose if isinstance(prose, str) else ""
+        if not (_MUTATION_COMMITMENT.search(prose) or _VERIFY_COMMITMENT.search(prose)):
+            continue
+        authored = prose + " " + " ".join(sso._commands_of(message))
+        if any(pattern.search(authored) for pattern in patterns):
+            return index
     return -1
 
 
@@ -1088,7 +1156,12 @@ def build_report(reports: list[TaskReport]) -> dict:
                 ],
                 "acks": [
                     {"delivery_m": d.home_msg, "layer": d.layer,
-                     "ack_ledger": d.ack_ledger, "ack_independent_m": d.ack_independent}
+                     "ack_ledger": d.ack_ledger, "ack_independent_m": d.ack_independent,
+                     "acted_independent_m": d.acted_independent,
+                     "prior_knowledge_state": d.prior_knowledge_state,
+                     "prior_knowledge_msg": d.prior_knowledge_msg,
+                     "fair_probe": d.fair_probe,
+                     "pbucket": d.pbucket}
                     for d in r.deliveries if d.acknowledged
                 ],
                 "pbuckets": {

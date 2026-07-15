@@ -450,6 +450,89 @@ def test_p5_requires_acted_receipt_not_reference_only():
     assert ssa._assign_pbucket(acted) == "P5"
 
 
+def test_model_planned_action_is_step_behind_without_erasing_receipt():
+    """A later action cannot make a delivery timely when the model committed it first."""
+    payload = (
+        "you edited pkg/progbar.py but no verification output was observed; "
+        "run the narrowest relevant check"
+    )
+    delivery = ssa.sso.Delivery(
+        iteration=1, event_type="post_view", layer="verify.horizon.advisory",
+        outcome="delivered", reason="", chars=len(payload), payload=payload,
+        file_path="pkg/progbar.py", sha16="a" * 16, home_msg=2,
+    )
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "Let me implement the fix in pkg/progbar.py.",
+            "tool_calls": [{"function": {
+                "name": "bash",
+                "arguments": json.dumps({
+                    "command": "python -c \"open('pkg/progbar.py','w').write('first')\""
+                }),
+            }}],
+        },
+        {"role": "tool", "content": "<returncode>0</returncode>\nchanged"},
+        {"role": "tool", "content": payload},
+        _command_message(
+            "python -c \"open('pkg/progbar.py','w').write('corrected')\""),
+    ]
+
+    grade = ssa.grade_delivery(
+        delivery, msgs, {}, [], {}, receipt_level=3,
+    )
+
+    assert grade.receipt_level == 3
+    assert grade.acknowledged is True
+    assert grade.prior_knowledge_state == "MODEL_PLANNED"
+    assert grade.prior_knowledge_msg == 0
+    assert grade.fair_probe is False
+    assert "step_behind" in {violation.kind for violation in grade.violations}
+    assert ssa._assign_pbucket(grade) == "P2"
+
+    grade.pbucket = ssa._assign_pbucket(grade)
+    report = ssa.build_report([ssa.TaskReport(
+        task="repo__task", n_messages=len(msgs), resolved=False,
+        deliveries=[grade], residual_leaks=[], ss_reason_counts={},
+    )])
+    assert report["tasks"][0]["acks"][0] == {
+        "delivery_m": 2,
+        "layer": "verify.horizon.advisory",
+        "ack_ledger": False,
+        "ack_independent_m": 3,
+        "acted_independent_m": 3,
+        "prior_knowledge_state": "MODEL_PLANNED",
+        "prior_knowledge_msg": 0,
+        "fair_probe": False,
+        "pbucket": "P2",
+    }
+
+
+def test_prior_mention_without_commitment_does_not_invent_model_plan():
+    payload = "pkg/progbar.py has a new verified constraint"
+    delivery = ssa.sso.Delivery(
+        iteration=1, event_type="post_view", layer="verify.horizon.advisory",
+        outcome="delivered", reason="", chars=len(payload), payload=payload,
+        file_path="pkg/progbar.py", sha16="b" * 16, home_msg=2,
+    )
+    msgs = [
+        {"role": "assistant", "content": "I found pkg/progbar.py; the next action is undecided."},
+        {"role": "tool", "content": "context"},
+        {"role": "tool", "content": payload},
+        _command_message(
+            "python -c \"open('pkg/progbar.py','w').write('novel')\""),
+    ]
+
+    grade = ssa.grade_delivery(
+        delivery, msgs, {}, [], {}, receipt_level=3,
+    )
+
+    assert grade.prior_knowledge_state == "UNKNOWN"
+    assert grade.prior_knowledge_msg == -1
+    assert grade.fair_probe is None
+    assert "step_behind" not in {violation.kind for violation in grade.violations}
+
+
 def test_scope_p5_accepts_later_target_inspection_as_scope_action():
     scope = ssa.DeliveryGrade(
         home_msg=9, iteration=4, layer="consensus.scope", chars=50,
