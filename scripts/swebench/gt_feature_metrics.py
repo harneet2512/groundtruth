@@ -383,8 +383,9 @@ def _visible_audit_inputs_complete(
             trajectory = json.load(fh)
         if not isinstance(trajectory, dict) or not isinstance(
             trajectory.get("messages"), list
-        ):
+        ) or not trajectory["messages"]:
             return False
+        ledger_rows = 0
         with open(ledger_path, encoding="utf-8") as fh:
             for raw_line in fh:
                 line = raw_line.strip()
@@ -392,9 +393,10 @@ def _visible_audit_inputs_complete(
                     continue
                 if not isinstance(json.loads(line), dict):
                     return False
+                ledger_rows += 1
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError):
         return False
-    return True
+    return ledger_rows > 0
 
 
 def _find_one(task_dir: str, *patterns: str) -> str | None:
@@ -2006,6 +2008,12 @@ def collect_task(
         task, task_dir, features, fc_json, fact_readiness, cons_ledger, traj,
         leak_free=leak_gate, dose_ok=dose_gate,
     )
+    ss_integrity["visible_audit_complete"] = visible_audit_complete
+    if not visible_audit_complete:
+        ss_integrity["required_inputs_complete"] = False
+        missing = set(ss_integrity.get("missing_required_inputs") or [])
+        missing.add("visible_audit")
+        ss_integrity["missing_required_inputs"] = sorted(missing)
     return {
         "schema": "gt.feature_metrics.v1",
         "grader_version": GRADER_VERSION,

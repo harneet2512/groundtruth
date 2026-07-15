@@ -29,12 +29,16 @@ def _write_task(task_dir: Path, task: str, *, deep_metrics: dict | None = None) 
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "mini-swe-agent.trajectory.json").write_text(
         json.dumps({
-            "messages": [], "info": {"submission": ""},
+            "messages": [{"role": "user", "content": "fixture task"}],
+            "info": {"submission": ""},
             "trajectory_format": "mini-swe-agent",
         }),
         encoding="utf-8",
     )
-    (task_dir / f"gt_runtime_ledger_{task}.jsonl").write_text("", encoding="utf-8")
+    (task_dir / f"gt_runtime_ledger_{task}.jsonl").write_text(
+        json.dumps({"outcome": "shadow_holdout", "fact_class": "fixture"}) + "\n",
+        encoding="utf-8",
+    )
     if deep_metrics is not None:
         (task_dir / f"gt_deep_metrics_{task}.json").write_text(
             json.dumps(deep_metrics), encoding="utf-8"
@@ -182,6 +186,34 @@ def test_missing_deep_metrics_is_explicit_and_fails_canonical_integrity(tmp_path
     aggregate = metrics.aggregate_run("run-missing", [record], profile="2")
     assert aggregate["ss_integrity"]["publishable"] is False
     assert aggregate["ss_integrity"]["tasks_with_incomplete_inputs"] == [task]
+
+
+@pytest.mark.parametrize("ledger_text", ["", "not-json\n"])
+def test_visible_audit_input_missingness_fails_closed(
+    tmp_path: Path, ledger_text: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = "synthetic__visible-audit"
+    _write_task(tmp_path, task, deep_metrics=_complete_deep_metrics(task))
+    (tmp_path / f"gt_runtime_ledger_{task}.jsonl").write_text(
+        ledger_text, encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        metrics,
+        "_acquisition_feature_records",
+        lambda _task_dir, _ledger, _trajectory: (
+            {
+                name: {"family": "ACQ", "status": "MEASURED"}
+                for name in inventory.ACQ_FEATURES
+            },
+            [],
+        ),
+    )
+
+    record = metrics.collect_task(task, str(tmp_path), profile="2")
+
+    assert record["ss_integrity"]["visible_audit_complete"] is False
+    assert record["ss_integrity"]["required_inputs_complete"] is False
+    assert "visible_audit" in record["ss_integrity"]["missing_required_inputs"]
 
 
 def test_collect_task_wires_real_brief_receipt_into_acq_master(tmp_path: Path) -> None:
@@ -513,6 +545,17 @@ def test_legacy_projection_excluding_additive_readiness_is_byte_identical(
 ) -> None:
     task = "synthetic__empty"
     _write_task(tmp_path, task)
+    # Preserve the historical empty-input fixture for the byte-off contract.
+    # Visible-audit completeness is additive SS integrity and must not alter
+    # any legacy projection bytes for the same stored inputs.
+    (tmp_path / "mini-swe-agent.trajectory.json").write_text(
+        json.dumps({
+            "messages": [], "info": {"submission": ""},
+            "trajectory_format": "mini-swe-agent",
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / f"gt_runtime_ledger_{task}.jsonl").write_text("", encoding="utf-8")
     (tmp_path / f"gt_runtime_ledger_{task}.jsonl").rename(
         tmp_path / "gt_runtime_ledger_synthetic.jsonl"
     )

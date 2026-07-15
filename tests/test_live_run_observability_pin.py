@@ -27,7 +27,7 @@ def test_live_heartbeat_identifies_task_and_observable_progress() -> None:
     assert "[GT_HEARTBEAT]" in run
     for field in (
         "task=$MTASK",
-        "phase=agent",
+        "phase=trial",
         "ledger_rows=",
         "oracle_rows=",
         "trajectory_bytes=",
@@ -35,6 +35,9 @@ def test_live_heartbeat_identifies_task_and_observable_progress() -> None:
     ):
         assert field in run, f"heartbeat lacks {field}"
     assert "sleep 8" in run
+    assert "gt_heartbeat.log" in run
+    heartbeat_line = next(line for line in run.splitlines() if "[GT_HEARTBEAT]" in line)
+    assert "trial_output.log" not in heartbeat_line
 
 
 def test_failure_log_and_partial_artifacts_are_always_uploaded() -> None:
@@ -51,4 +54,6 @@ def test_failure_log_and_partial_artifacts_are_always_uploaded() -> None:
     assert "trial_output.log" in collect.get("run", "")
     assert progress["with"]["name"] == "ll-progress-${{ matrix.task }}"
     assert "/tmp/gt_out/gt_agent_exit.json" in progress["with"]["path"]
-    assert upload["with"]["if-no-files-found"] == "warn"
+    assert "gt_heartbeat.log" in progress["with"]["path"]
+    assert progress["with"]["if-no-files-found"] == "error"
+    assert upload["with"]["if-no-files-found"] == "error"

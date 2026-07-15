@@ -135,8 +135,7 @@ def test_collect_runs_gt_feature_metrics_with_task_id() -> None:
 def test_deep_metrics_receives_task_scoped_authoritative_runtime_ledger() -> None:
     code = "\n".join(_code_lines(_collect_run()))
     ledger_copy = (
-        'cp /tmp/gt_out/gt_runtime_ledger.jsonl '
-        '"$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl"'
+        'cp /tmp/gt_out/gt_runtime_ledger.jsonl "$_GT_LEDGER_DEST"'
     )
     assert ledger_copy in code, (
         "the sealed runtime ledger must be copied beside the task-scoped trajectory so the "
@@ -155,6 +154,7 @@ def test_deep_metrics_receives_task_scoped_authoritative_runtime_ledger() -> Non
     assert 'TASK_ARTIFACT_ROOT="/tmp/gt/${{ matrix.task }}"' in code, (
         "the runtime ledger path must resolve through the explicit task-scoped root"
     )
+    assert '_GT_LEDGER_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl"' in code
 
 
 def test_missing_gt_inputs_do_not_abort_failure_artifact_collection_early() -> None:
@@ -167,6 +167,8 @@ def test_missing_gt_inputs_do_not_abort_failure_artifact_collection_early() -> N
         assert f'if [ -s "{source}" ]' in collect
         assert marker in collect
         assert collect.index(marker) < deep
+    assert "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger.jsonl" in collect
+    assert "GT_COLLECTION_COPY_FAIL:brief_result.json" in collect
     gate = _gate_block(_collect_run())
     assert "trial_results/brief_result.json" in gate
     assert "gt_runtime_ledger_${{ matrix.task }}.jsonl" in gate
@@ -198,6 +200,10 @@ def test_gate_checks_all_four_gt_artifacts_and_fails_closed() -> None:
             f"(a run without its metrics is NOT done)"
         )
     assert "GT_METRICS_INCOMPLETE" in gate, "the gate must emit the GT_METRICS_INCOMPLETE marker"
+    assert "gt_agent_exit.json" in gate
+    assert 'return_code", -1)) == 0' in gate
+    assert 'trajectory_present") is True' in gate
+    assert "visible_audit_complete" in gate
     idx = gate.index("GT_METRICS_INCOMPLETE")
     window = gate[idx: idx + 400]
     assert "exit 1" in window, (

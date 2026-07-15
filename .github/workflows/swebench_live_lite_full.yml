@@ -1058,18 +1058,18 @@ jobs:
               _GT_LEDGER_ROWS=$(wc -l < /tmp/gt_out/gt_runtime_ledger.jsonl 2>/dev/null || echo 0)
               _GT_ORACLE_ROWS=$(wc -l < /tmp/gt_out/gt_oracle_events.jsonl 2>/dev/null || echo 0)
               _GT_TRAJ_BYTES=$(stat -c %s /tmp/gt_out/mini-swe-agent.trajectory.json 2>/dev/null || echo 0)
-              echo "[GT_HEARTBEAT] task=$MTASK phase=agent $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              echo "[GT_HEARTBEAT] task=$MTASK phase=trial $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                 "ledger_rows=${_GT_LEDGER_ROWS//[[:space:]]/}" \
                 "oracle_rows=${_GT_ORACLE_ROWS//[[:space:]]/}" \
                 "trajectory_bytes=${_GT_TRAJ_BYTES//[[:space:]]/}" \
                 "$(free -m 2>/dev/null | awk '/Mem:/{printf "mem=%d/%dMB", $3,$2}')" \
                 "$(df -m / 2>/dev/null | awk 'NR==2{printf "disk_used=%d/%dMB free=%dMB", $3,$2,$4}')" \
                 "containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')" \
-                | tee -a trial_output.log
+                | tee -a gt_heartbeat.log
               sleep 8
             done ) &
           _RESMON_PID=$!
-          trap 'kill "$_RESMON_PID" 2>/dev/null' EXIT
+          trap 'kill "$_RESMON_PID" 2>/dev/null; wait "$_RESMON_PID" 2>/dev/null || true' EXIT
 
           set +e
           set -o pipefail
@@ -1419,7 +1419,6 @@ jobs:
               exit "$GT_RUNNER_RC"
             ' 2>&1 | tee -a trial_output.log
           AGENT_RC=${PIPESTATUS[0]}
-          set -e
           echo "=== Pro Trial complete (agent rc=$AGENT_RC) ===" | tee -a trial_output.log
           AGENT_RC="$AGENT_RC" MTASK="$MTASK" python3 - <<'PY'
           import json, os, time
@@ -1438,12 +1437,17 @@ jobs:
           }
           (out / "gt_agent_exit.json").write_text(json.dumps(document, indent=2), encoding="utf-8")
           PY
+          GT_AGENT_STATUS_RC=$?
+          if [ "$GT_AGENT_STATUS_RC" -ne 0 ]; then
+            echo "GT_AGENT_EXIT_WRITE_FAIL: rc=$GT_AGENT_STATUS_RC" | tee -a trial_output.log
+          fi
 
           if [ "$AGENT_RC" -eq 137 ] || grep -qE "OOMKilled|exit code 137" trial_output.log; then
             echo "GT_AGENT_OOM: agent container hit the memory cap (rc/exit=137)" | tee -a trial_output.log
           elif [ "$AGENT_RC" -ne 0 ]; then
             echo "AGENT_RUN_FAIL: agent exited rc=$AGENT_RC" | tee -a trial_output.log
           fi
+          set -e
           # NEVER exit 1 from trial — Collect/Upload MUST run to capture partial artifacts.
 
       - name: Upload post-agent diagnostic snapshot
@@ -1453,6 +1457,7 @@ jobs:
           name: ll-progress-${{ matrix.task }}
           path: |
             trial_output.log
+            gt_heartbeat.log
             /tmp/gt_out/gt_agent_exit.json
             /tmp/gt_out/mini-swe-agent.trajectory.json
             /tmp/gt_out/gt_runtime_ledger.jsonl
@@ -1463,7 +1468,7 @@ jobs:
             /tmp/gt_out/gt_batch_activation.json
             /tmp/gt_out/agent_patch.diff
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Verify GT wiring (trajectory-based liveness + delivery check)
         continue-on-error: true
@@ -1652,6 +1657,7 @@ jobs:
           # Refresh the uploaded copy even when a later diagnostic fails closed.
           trap 'cp trial_output.log trial_results/trial_output.log 2>/dev/null || true' EXIT
           cp trial_output.log trial_results/ 2>/dev/null || true
+          cp gt_heartbeat.log trial_results/ 2>/dev/null || true
           cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
           # D4 (2026-07-12): the agent writes these to the /gt_out bind-mount = host /tmp/gt_out
           # (/tmp/gt is the SUBSTRATE artifacts dir) — the old /tmp/gt paths never matched.
@@ -1722,7 +1728,11 @@ jobs:
           cp /tmp/gt_out/gt_oracle_events.jsonl "$TASK_ARTIFACT_ROOT/gt_oracle_events_${{ matrix.task }}.jsonl" 2>/dev/null || true
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
             if [ -s "/tmp/gt_out/gt_runtime_ledger.jsonl" ]; then
-              cp /tmp/gt_out/gt_runtime_ledger.jsonl "$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl"
+              _GT_LEDGER_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl"
+              if ! cp /tmp/gt_out/gt_runtime_ledger.jsonl "$_GT_LEDGER_DEST"; then
+                rm -f "$_GT_LEDGER_DEST"
+                echo "GT_COLLECTION_COPY_FAIL:gt_runtime_ledger.jsonl" | tee -a trial_output.log
+              fi
             else
               echo "GT_COLLECTION_MISSING:gt_runtime_ledger.jsonl" | tee -a trial_output.log
             fi
@@ -1730,7 +1740,10 @@ jobs:
             # Preserve it at the task artifact root: the bounded offline reader
             # intentionally does not search arbitrary nested artifact directories.
             if [ -s "/tmp/gt/brief_result.json" ]; then
-              cp /tmp/gt/brief_result.json trial_results/brief_result.json
+              if ! cp /tmp/gt/brief_result.json trial_results/brief_result.json; then
+                rm -f trial_results/brief_result.json
+                echo "GT_COLLECTION_COPY_FAIL:brief_result.json" | tee -a trial_output.log
+              fi
             else
               echo "GT_COLLECTION_MISSING:brief_result.json" | tee -a trial_output.log
             fi
@@ -1828,9 +1841,13 @@ jobs:
             [ -s "trial_results/gt_runtime_ledger_${{ matrix.task }}.jsonl" ] || _MM_MISSING="$_MM_MISSING gt_runtime_ledger_${{ matrix.task }}.jsonl"
             # Presence alone is insufficient: the feature collector must prove the exact
             # 12 ACQ + 47 CAP + 11 FACT + 58 PERF ledger and all required inputs.
-            python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); s=d.get("ss_integrity") or {}; f=d.get("ss_features") or {}; sys.exit(0 if len(f)==128 and s.get("inventory_complete") is True and s.get("required_inputs_complete") is True else 1)' \
+            python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); s=d.get("ss_integrity") or {}; f=d.get("ss_features") or {}; sys.exit(0 if len(f)==128 and s.get("inventory_complete") is True and s.get("required_inputs_complete") is True and s.get("visible_audit_complete") is True else 1)' \
               "trial_results/gt_feature_metrics_${{ matrix.task }}.json" \
               || _MM_MISSING="$_MM_MISSING gt_feature_metrics_ss128_integrity"
+            [ -s "trial_results/gt_artifacts/gt_agent_exit.json" ] || _MM_MISSING="$_MM_MISSING gt_agent_exit.json"
+            python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); sys.exit(0 if int(d.get("return_code", -1)) == 0 and d.get("trajectory_present") is True else 1)' \
+              "trial_results/gt_artifacts/gt_agent_exit.json" \
+              || _MM_MISSING="$_MM_MISSING gt_agent_exit_status"
             [ -s "trial_results/gt_artifacts/gt_profile_activation.json" ]    || _MM_MISSING="$_MM_MISSING gt_profile_activation.json"
             [ -s "trial_results/gt_artifacts/gt_profile_receipt.json" ]       || _MM_MISSING="$_MM_MISSING gt_profile_receipt.json"
             [ -s "trial_results/gt_artifacts/gt_batch_activation.json" ]      || _MM_MISSING="$_MM_MISSING gt_batch_activation.json"
@@ -1849,7 +1866,7 @@ jobs:
           name: ll-full-${{ matrix.task }}
           path: trial_results/
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Cleanup runner disk (post-upload, non-critical)
         if: always()
