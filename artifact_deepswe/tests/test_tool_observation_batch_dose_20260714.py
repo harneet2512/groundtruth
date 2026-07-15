@@ -293,8 +293,6 @@ def test_search_metadata_reaches_finalizer_and_sibling_acquisition_suppresses(
     monkeypatch.setattr(g, "_ss_dedup2_on", lambda: False)
     monkeypatch.setattr(g, "_payload_leaks_test_identity", lambda text: False)
     monkeypatch.setattr(g, "_ss_payload_has_content", lambda text: True)
-    monkeypatch.setattr(g, "_ss_novelty_suppresses", lambda *args, **kwargs: False)
-
     state = g._begin_observation_batch(
         SimpleNamespace(), SimpleNamespace(), [action])
     try:
@@ -321,6 +319,24 @@ def test_search_metadata_reaches_finalizer_and_sibling_acquisition_suppresses(
 
     assert plan.disposition == "suppressed"
     assert plan.suffix == ""
+    assert plan.decision["reason"] == "ss_step_behind"
+
+
+def test_finalizer_screens_claim_against_its_own_native_result(monkeypatch):
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    monkeypatch.setattr(g, "_ss_provenance_on", lambda: False)
+    monkeypatch.setattr(g, "_ss_late_drop_on", lambda: False)
+    monkeypatch.setattr(g, "_ss_dedup2_on", lambda: False)
+    monkeypatch.setattr(g, "_payload_leaks_test_identity", lambda text: False)
+    monkeypatch.setattr(g, "_ss_payload_has_content", lambda text: True)
+    candidate = SimpleNamespace(kind="l3b.evidence", plane=g._GA_PLANE_LANE_A)
+    plan = g._prepare_batch_delivery(
+        candidate, lambda: None,
+        {"out": {"output": "src/widget.py parse_config()"},
+         "payload": "src/widget.py parse_config()", "join": True},
+    )
+
+    assert plan.disposition == "suppressed"
     assert plan.decision["reason"] == "ss_step_behind"
 
 

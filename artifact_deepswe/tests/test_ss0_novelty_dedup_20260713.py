@@ -78,16 +78,29 @@ def test_novelty_delivers_when_entity_not_acquired(monkeypatch):
 
 
 @pytest.mark.parametrize("event", ["post_view", "post_edit"])
-def test_closed_subject_boundary_suppresses_mixed_novel_caller_fact(
+def test_closed_subject_boundary_preserves_mixed_novel_caller_fact(
         monkeypatch, event):
-    """A novel cross-file occurrence cannot make a fact timely after its subject
-    body/read or edit decision has already completed in the same observation."""
+    """A downstream caller decision stays open when the fact adds a novel path."""
     _base(monkeypatch)
     monkeypatch.setenv("GT_SS_NOVELTY", "1")
     payload = "src/subject.py run()\nsrc/novel.py helper()"
 
     suppressed, reason = g._ss_screen_delivery(
         "l3b.evidence", payload, "", subject_path="src/subject.py", event=event)
+
+    assert suppressed is False
+    assert reason == ""
+
+
+def test_post_view_subject_only_claim_suppresses_when_acquired(monkeypatch):
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    g._ss_acquired_files.add("src/subject.py")
+
+    suppressed, reason = g._ss_screen_delivery(
+        "l3b.evidence", "src/subject.py run()", "",
+        subject_path="src/subject.py", event="post_view",
+    )
 
     assert suppressed is True
     assert reason == "ss_step_behind"
@@ -105,6 +118,105 @@ def test_open_search_boundary_preserves_mixed_novel_caller_fact(monkeypatch):
 
     assert suppressed is False
     assert reason == ""
+
+
+def test_same_native_observation_suppresses_complete_actionable_claim(monkeypatch):
+    """A fact adds nothing when its exact entities are already in this result."""
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+
+    suppressed, reason = g._ss_content_decision(
+        "l3b.evidence", "src/widget.py parse_config()", "",
+        native_text="Traceback:\nsrc/widget.py parse_config()\nfailed",
+    )
+
+    assert suppressed is True
+    assert reason == "ss_step_behind"
+
+
+def test_same_native_observation_preserves_claim_with_new_entity(monkeypatch):
+    """Containment is exact: one additional entity keeps the GT fact eligible."""
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+
+    suppressed, reason = g._ss_content_decision(
+        "l3b.evidence", "src/widget.py parse_config() repair_schema()", "",
+        native_text="Traceback in src/widget.py while calling parse_config()",
+    )
+
+    assert suppressed is False
+    assert reason == ""
+
+
+def test_same_entities_with_new_relation_remain_eligible(monkeypatch):
+    """Entity coincidence cannot erase a novel actionable relation."""
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    native = "src/a.py foo() failed; src/b.py bar() exists"
+    claim = "src/b.py bar() calls src/a.py foo()"
+    assert g._ss_entity_set(native) == g._ss_entity_set(claim)
+
+    suppressed, reason = g._ss_content_decision(
+        "l3b.evidence", claim, "", native_text=native,
+    )
+
+    assert suppressed is False
+    assert reason == ""
+
+
+def test_native_claim_comparison_preserves_semantic_indentation(monkeypatch):
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    claim = "if ready:\n    src/widget.py parse_config()"
+    native = "if ready:\nsrc/widget.py parse_config()"
+
+    suppressed, reason = g._ss_content_decision(
+        "l3b.evidence", claim, "", native_text=native,
+    )
+
+    assert suppressed is False
+    assert reason == ""
+
+
+def test_same_native_observation_does_not_suppress_timing_nudge(monkeypatch):
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+
+    suppressed, reason = g._ss_content_decision(
+        "recovery", "src/widget.py parse_config()", "",
+        native_text="src/widget.py parse_config()",
+    )
+
+    assert suppressed is False
+    assert reason == ""
+
+
+def test_novel_gateway_caller_relation_survives_edit_boundary(monkeypatch):
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+
+    suppressed, reason = g._ss_content_decision(
+        "caller_contract", "src/caller.py invoke() calls src/widget.py parse_config()", "",
+        subject_path="src/widget.py", event="post_edit",
+        native_text="edited src/widget.py parse_config()",
+    )
+
+    assert suppressed is False
+    assert reason == ""
+
+
+def test_native_equivalent_gateway_claim_is_step_behind_at_edit(monkeypatch):
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    claim = "src/caller.py invoke() calls src/widget.py parse_config()"
+
+    suppressed, reason = g._ss_content_decision(
+        "caller_contract", claim, "", subject_path="src/widget.py",
+        event="post_edit", native_text=f"edit result:\n{claim}",
+    )
+
+    assert suppressed is True
+    assert reason == "ss_step_behind"
 
 
 def test_search_preview_is_suppressed_if_same_observation_acquired_target(

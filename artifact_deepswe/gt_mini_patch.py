@@ -11064,7 +11064,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             # Shared precedence: late -> semantic duplicate -> step-behind.
             _supp, _reason = _ss_screen_delivery(
                 kind, text, _ss_root, is_loc=False,
-                subject_path=subject_path, event=item_event)
+                subject_path=subject_path, event=item_event,
+                native_text=str(out.get("output") or ""))
             if _supp:
                 _runtime_ledger_record(
                     kind=kind,
@@ -12970,7 +12971,8 @@ def _prepare_batch_delivery(candidate, thunk, spec: dict) -> _BatchDeliveryPlan:
             "suppressed", decision)
     suppressed, reason = _ss_content_decision(
         candidate.kind, text, root, is_loc=bool(spec.get("is_loc")),
-        subject_path=str(spec.get("krel") or ""), event=spec.get("event"))
+        subject_path=str(spec.get("krel") or ""), event=spec.get("event"),
+        native_text=str(spec["out"].get("output") or ""))
     if suppressed:
         # Preserve the screened fact host-side so a final step-behind verdict can
         # commit its already-known entity set after formatter success. The plan's
@@ -13301,15 +13303,16 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
         # appeared on the lane plane (they only appeared on the gateway). Screening HERE, before the
         # candidate competes, records the ss_* reason on the lane plane AND removes noise from the
         # competition (a scratch/late fact never displaces a real dose). is_loc=False preserves
-        # the legacy entity-screen semantics; explicit subject metadata separately closes facts
-        # whose target was already body-acquired. A
+        # the legacy entity-screen semantics; exact native-claim and acquisition truth decide
+        # whether subject-bound evidence is redundant. A
         # production-latched Lane-A kind un-burns its fire-once latch via the SM-5 F rollback so it
         # re-competes (deferred, not destroyed); a delivery-latched kind registered no rollback and
         # is a no-op. Byte-identical off: _ss_any_content_gate_on() False -> the screen never runs.
         if _ss_any_content_gate_on() and not _batch_owned:
             _supp, _reason = _ss_screen_delivery(
                 kind, text, _ss_root, is_loc=False,
-                subject_path=subject_path, event=item_event)
+                subject_path=subject_path, event=item_event,
+                native_text=str(out.get("output") or ""))
             if _supp:
                 _runtime_ledger_record(
                     kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
@@ -13368,7 +13371,10 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
     # review-transition delivery is the sacred P5) is NEVER acquisition/late-suppressed here — only
     # provenance (scratch-path) and the obligation-kind late-drop apply. Byte-identical off.
     if win_text and _ss_any_content_gate_on() and not _batch_owned:
-        _supp, _reason = _ss_screen_delivery(kind, win_text, _root(), is_loc=False)
+        _supp, _reason = _ss_screen_delivery(
+            kind, win_text, _root(), is_loc=False,
+            subject_path=krel or kf or "", event=event,
+            native_text=str(out.get("output") or ""))
         if _supp:
             _runtime_ledger_record(
                 kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
@@ -13471,6 +13477,9 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
             _supp, _reason = _ss_screen_delivery(
                 et, _payload, _ss_root, is_loc=suppressible,
                 knowledge_authority=_knowledge_authority,
+                subject_path=getattr(winner, "target", "") or "",
+                event=ev_kind,
+                native_text=str((out or {}).get("output") or ""),
             )
             if _supp:
                 _runtime_ledger_record(
@@ -13510,7 +13519,8 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
     _append_batch_candidate(
         pool, cand, _thunk, out, _payload, join=True,
         krel=getattr(winner, "target", "") or "",
-        is_loc=suppressible, knowledge_authority=_knowledge_authority)
+        is_loc=suppressible, knowledge_authority=_knowledge_authority,
+        prepared_extra={"event": ev_kind})
     return False
 
 
@@ -14638,7 +14648,8 @@ def _ss_novelty_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool
     symbol greped/edited. ``is_loc`` (a localization-class gateway fact — the def/ref
     partition) is gated too. Non-factual (nudge) kinds are never gated. Correct-or-quiet:
     any un-acquired entity -> deliver."""
-    if kind not in _SS_NOVELTY_GATED and not is_loc:
+    if (kind not in _SS_NOVELTY_GATED
+            and kind != "post_search.localize" and not is_loc):
         return False
     paths = _ss_extract_paths(text, root)
     syms = _ss_extract_symbols(text)
@@ -14806,32 +14817,41 @@ def _ss_any_content_gate_on() -> bool:
             or _ss_dedup2_on() or _ss_ack_metrics_on())
 
 
-_SS_CLOSED_SUBJECT_KINDS = frozenset({
-    "l3.contract", "l3b.evidence", "post_search.localize",
-})
+def _ss_native_contains_claim(kind: str, text: str, native_text: str,
+                              root: str = "", *, is_loc: bool = False) -> bool:
+    """True when this observation already contains the complete actionable claim.
 
-
-def _ss_closed_subject_suppresses(kind: str, subject_path: str, event) -> bool:
-    """True when a subject-bound fact is born after its shaping decision closed.
-
-    Caller/contract evidence produced at ``post_view`` or ``post_edit`` cannot
-    retroactively improve the choice to inspect or change that subject.  Novel
-    cross-file occurrences in the payload do not reopen the already-paid target
-    decision.  The same fact remains eligible at a prospective search boundary.
+    Require an exact normalized sequence of substantive claim lines.  Entity-set
+    equality is insufficient because the same entities can express a new caller or
+    contract relation.  There is no fuzzy threshold; any changed relation stays
+    eligible.  Timing/salience classes never close on native repetition.
     """
-    if kind not in _SS_CLOSED_SUBJECT_KINDS or not subject_path:
+    if _ss_dedup_group(kind) is None and not is_loc:
         return False
-    value = str(getattr(event, "value", event) or "").lower()
-    if value in {"post_view", "post_edit"}:
-        return True
-    if value == "post_search":
-        return _norm_fp(subject_path) in _ss_acquired_files
-    return False
+    del root  # exact claim identity is independent of path spelling normalization
+
+    def _claim_lines(value: str) -> "tuple[str, ...]":
+        lines = []
+        for line in (value or "").strip().splitlines():
+            marker = line.strip()
+            if (not marker or marker.startswith("<gt-")
+                    or marker.startswith("</gt-")):
+                continue
+            lines.append(line)
+        return tuple(lines)
+
+    claim = _claim_lines(text)
+    observed = _claim_lines(native_text)
+    if not claim or len(claim) > len(observed):
+        return False
+    width = len(claim)
+    return any(observed[index:index + width] == claim
+               for index in range(len(observed) - width + 1))
 
 
 def _ss_content_decision(kind: str, text: str, root: str = "", *,
                          is_loc: bool = False, subject_path: str = "",
-                         event=None) -> "tuple[bool, str]":
+                         event=None, native_text: str = "") -> "tuple[bool, str]":
     """Pure SS-0 suppression decision over a would-be delivery.
 
     Precedence is provenance -> late -> semantic duplicate -> step-behind. A semantic
@@ -14863,8 +14883,8 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
         if duplicate:
             return True, "ss_semantic_dup"
     if _ss_novelty_on():
-        step_behind = _ss_closed_subject_suppresses(
-            kind, subject_path, event) or _ss_novelty_suppresses(
+        step_behind = _ss_native_contains_claim(
+            kind, text, native_text, root, is_loc=is_loc) or _ss_novelty_suppresses(
                 kind, text, root, is_loc=is_loc)
         _control_participation_record(
             "GT_SS_NOVELTY", "mini_seam.ss_content_decision.novelty",
@@ -14879,11 +14899,12 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
 def _ss_screen_delivery(kind: str, text: str, root: str = "", *,
                         is_loc: bool = False,
                         knowledge_authority: bool = True,
-                        subject_path: str = "", event=None) -> "tuple[bool, str]":
+                        subject_path: str = "", event=None,
+                        native_text: str = "") -> "tuple[bool, str]":
     """Shared Lane/Gateway screen plus the step-behind knowledge commit."""
     suppress, reason = _ss_content_decision(
         kind, text, root, is_loc=is_loc,
-        subject_path=subject_path, event=event)
+        subject_path=subject_path, event=event, native_text=native_text)
     if suppress and reason == "ss_step_behind":
         # Step-behind proves the model already acquired this correct fact. Remember
         # it so a later byte-distinct subset is attributed as semantic duplication.

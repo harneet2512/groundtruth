@@ -20,7 +20,6 @@ def test_novelty_and_dedup_emit_only_when_their_decisions_execute(monkeypatch) -
     monkeypatch.setattr(g, "_ss_dedup2_on", lambda: True)
     monkeypatch.setattr(g, "_ss_dedup2_suppresses", lambda *a, **k: False)
     monkeypatch.setattr(g, "_ss_novelty_on", lambda: True)
-    monkeypatch.setattr(g, "_ss_closed_subject_suppresses", lambda *a, **k: False)
     monkeypatch.setattr(g, "_ss_novelty_suppresses", lambda *a, **k: True)
 
     text = "[VERIFIED] src/pkg.py:7 keeps Thing.call()"
