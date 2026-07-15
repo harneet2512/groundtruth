@@ -162,7 +162,7 @@ environment:
 
 model:
   observation_template: |
-    {% if output.exception_info -%}
+    {% if output.exception_info is defined and output.exception_info -%}
     <exception>{{output.exception_info}}</exception>
     {% endif -%}
     <returncode>{{output.returncode}}</returncode>
