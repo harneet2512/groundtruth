@@ -103,6 +103,7 @@ class Obligation:
     subject_symbols: frozenset[str] = frozenset()  # high-specificity exercise keys
     parent_id: str = ""            # clause_id of enclosing compound (provenance)
     part_index: int = 0            # position within the parent compound
+    region: str = "normative"      # normative | process | evidence (v2 only)
 
 
 @dataclass
@@ -138,6 +139,7 @@ class IssueSpec:
                     subject_symbols=sorted(o.subject_symbols),
                     parent_id=o.parent_id,
                     part_index=o.part_index,
+                    region=o.region,
                 )
             rows.append(row)
         return rows
@@ -553,6 +555,61 @@ def _v2_section_role(heading: str) -> str:
     return "neutral"
 
 
+@dataclass(frozen=True)
+class SpecRegion:
+    """One heading-delimited issue region classified from document structure.
+
+    The classification describes the author's document region, not whether an
+    individual sentence happens to contain a modal verb.  This keeps repro
+    instructions and observed failures out of the normative denominator.
+    """
+
+    kind: str
+    heading: str
+    text: str
+
+
+def classify_spec_v2_regions(issue_text: str) -> tuple[SpecRegion, ...]:
+    """Classify headed v2 regions as normative, process, or evidence.
+
+    Unknown headings fail closed to evidence.  Unheaded prose remains the
+    extractor's title/neutral grammar path and is not fabricated into a
+    structural region.
+    """
+    regions: list[SpecRegion] = []
+    heading = ""
+    kind = "evidence"
+    body: list[str] = []
+    in_fence = False
+
+    def flush() -> None:
+        if heading:
+            regions.append(SpecRegion(kind, heading, "\n".join(body).strip()))
+        body.clear()
+
+    for raw in (issue_text or "").splitlines():
+        if raw.strip().startswith("```"):
+            in_fence = not in_fence
+            if heading:
+                body.append(raw)
+            continue
+        candidate = None if in_fence else _v2_heading_text(raw)
+        if candidate is not None:
+            flush()
+            heading = candidate
+            role = _v2_section_role(candidate)
+            kind = {
+                "expected": "normative",
+                "process": "process",
+                "descriptive": "evidence",
+            }.get(role, "evidence")
+            continue
+        if heading:
+            body.append(raw)
+    flush()
+    return tuple(regions)
+
+
 def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
     """GT_OBLIGATIONS_V2 extractor: Stage A (blocks) / B (atomic) / C (classify).
 
@@ -591,6 +648,7 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             subject_symbols=frozenset(subj),
             parent_id=parent_id,
             part_index=part_index,
+            region="normative",
         ))
         spec.all_symbols |= set(subj) | broad
         spec.all_keywords |= kws
@@ -812,4 +870,11 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
     return spec
 
 
-__all__ = ["Obligation", "IssueSpec", "extract_spec", "extract_spec_v2"]
+__all__ = [
+    "Obligation",
+    "IssueSpec",
+    "SpecRegion",
+    "classify_spec_v2_regions",
+    "extract_spec",
+    "extract_spec_v2",
+]

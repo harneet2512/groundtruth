@@ -9,6 +9,7 @@ from enum import Enum
 
 
 OBLIGATION_VERSION = "gt.runtime.obligations.v1"
+OBLIGATION_TRUTH_VERSION = "gt.runtime.obligation_truth.v1"
 
 
 class ObligationLifecycle(str, Enum):
@@ -50,6 +51,37 @@ class BehavioralProof:
     subjects: frozenset[str]
     turn: int
     kind: str
+
+
+@dataclass(frozen=True)
+class ExerciseEvidence:
+    """Immutable evidence that a subject participated in an execution.
+
+    Exercise is success-neutral.  A failed or inconclusive related command is
+    useful coverage evidence, but it is never a ``BehavioralProof``.
+    """
+
+    subjects: frozenset[str]
+    turn: int
+    source: str
+    returncode: int
+
+
+class ObligationTruthState(str, Enum):
+    """Truth states shared by live delivery and aggregate metrics."""
+
+    UNEXERCISED = "unexercised"
+    EXERCISED_UNPROVEN = "exercised_unproven"
+    PROVEN = "proven"
+
+
+@dataclass(frozen=True)
+class ObligationTruth:
+    view: object
+    state: ObligationTruthState
+    edited: bool
+    exercise: ExerciseEvidence | None = None
+    proof: BehavioralProof | None = None
 
 
 class BehavioralProofState:
@@ -393,6 +425,24 @@ def classify_checked_behavioral_proof(command: str, output: str, returncode,
     return None
 
 
+def classify_exercise_evidence(command: str, output: str, returncode,
+                               subjects, *, turn: int) -> ExerciseEvidence | None:
+    """Return related-execution evidence without making a success claim.
+
+    Exact integer process status is retained as observed.  Subject coverage is
+    required across the original command/result bytes; empty, prose-only, or
+    unrelated observations remain quiet.
+    """
+    if type(returncode) is not int:  # bool is not an observed process status
+        return None
+    key = _normalize_subjects(subjects)
+    if not key or not (command or "").strip():
+        return None
+    if not _terms_covered(key, command, output):
+        return None
+    return ExerciseEvidence(key, int(turn), "related_execution", returncode)
+
+
 @dataclass
 class ObligationRecord:
     id: int
@@ -658,6 +708,113 @@ def clause_exercised(view, tested_tokens: set[str]) -> bool:
             if sym in tested:  # case-sensitive exact token only
                 return True
     return False
+
+
+def obligation_truth_statuses(
+    views,
+    edited_tokens,
+    exercise_evidence=(),
+    behavioral_proofs=(),
+    *,
+    after_turn_by_id=None,
+) -> list[ObligationTruth]:
+    """Project one authoritative normative-obligation lifecycle.
+
+    Delivery and metrics receive the same immutable rows.  Process/evidence
+    regions are excluded before the denominator is formed.  Proof wins over
+    exercise; exercise never promotes itself to proof.
+    """
+    edited = set(edited_tokens or ())
+    evidence = tuple(
+        item for item in (exercise_evidence or ())
+        if isinstance(item, ExerciseEvidence)
+    )
+    proofs = tuple(
+        item for item in (behavioral_proofs or ())
+        if isinstance(item, BehavioralProof)
+    )
+    freshness = dict(after_turn_by_id or {})
+    rows: list[ObligationTruth] = []
+    for view in views or ():
+        if getattr(view, "region", "normative") != "normative":
+            continue
+        subjects = _normalize_subjects(_credit_eligible_symbols(view))
+        after_turn = int(freshness.get(getattr(view, "idx", -1), -1))
+        proof = next(
+            (
+                item for item in reversed(proofs)
+                if item.subjects == subjects and item.turn > after_turn
+            ),
+            None,
+        )
+        exercise = next(
+            (
+                item for item in reversed(evidence)
+                if item.subjects == subjects and item.turn > after_turn
+            ),
+            None,
+        )
+        touched, _confidence = overlap(view, edited)
+        if proof is not None:
+            state = ObligationTruthState.PROVEN
+        elif exercise is not None:
+            state = ObligationTruthState.EXERCISED_UNPROVEN
+        else:
+            state = ObligationTruthState.UNEXERCISED
+        rows.append(ObligationTruth(view, state, bool(touched), exercise, proof))
+    return rows
+
+
+def obligation_truth_summary(rows) -> dict:
+    """Aggregate the exact lifecycle rows used by the renderer."""
+    truth = tuple(row for row in (rows or ()) if isinstance(row, ObligationTruth))
+    counts = {state: 0 for state in ObligationTruthState}
+    for row in truth:
+        counts[row.state] += 1
+    total = len(truth)
+    return {
+        "coverage_version": 3,
+        "truth_version": OBLIGATION_TRUTH_VERSION,
+        "n_normative": total,
+        "n_unexercised": counts[ObligationTruthState.UNEXERCISED],
+        "n_exercised_unproven": counts[ObligationTruthState.EXERCISED_UNPROVEN],
+        "n_proven": counts[ObligationTruthState.PROVEN],
+        "proof_coverage": (
+            counts[ObligationTruthState.PROVEN] / total if total else 1.0
+        ),
+    }
+
+
+def render_obligation_truth_block(rows, *, max_listed: int = 6, leak_screen=None) -> str:
+    """Render only unmet normative truth, distinguishing attempt from proof."""
+    truth = tuple(row for row in (rows or ()) if isinstance(row, ObligationTruth))
+    unmet = tuple(row for row in truth if row.state is not ObligationTruthState.PROVEN)
+    if not unmet:
+        return ""
+    lines: list[str] = []
+    for row in unmet:
+        if len(lines) >= max_listed:
+            break
+        quote = (getattr(row.view, "verbatim", "") or "")[:160]
+        mark = (
+            "[exercised, result unproven]"
+            if row.state is ObligationTruthState.EXERCISED_UNPROVEN
+            else "[not exercised]"
+        )
+        rendered = f'{mark} "{quote}"'
+        if leak_screen is not None and leak_screen(rendered):
+            continue
+        lines.append(rendered)
+    hidden = len(unmet) - len(lines)
+    if hidden > 0 and lines:
+        lines.append(f"(+{hidden} more unproven requirement(s))")
+    if not lines:
+        return ""
+    return "\n".join([
+        "GT: normative requirement truth from observed execution:",
+        *lines,
+        "Exercise each requirement and require successful behavioral proof before submit.",
+    ])
 
 
 def exercise_statuses(views, edited_tokens, tested_tokens):
