@@ -61,6 +61,7 @@ LLM-free, deterministic, stdlib + sqlite3 only.
 from __future__ import annotations
 
 import ast
+import hashlib
 import keyword
 import os
 import re
@@ -143,6 +144,12 @@ class SignatureMismatch:
     positional_args: int
     confidence: float
     tier: str = "WARNING"
+    resolution_method: str = ""
+    before_sha256: str = ""
+    after_sha256: str = ""
+    caller_source_sha256: str = ""
+    edge_id: int | None = None
+    definition_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -477,7 +484,7 @@ def _fact_callers(
     try:
         rows = con.execute(
             f"SELECT ns.name, ns.file_path, {srcfile_sel}, e.source_line, {conf_expr}, "
-            "nt.file_path "
+            "nt.file_path, LOWER(TRIM(e.resolution_method)), e.id, e.target_id "
             "FROM edges e "
             "JOIN nodes ns ON ns.id = e.source_id "
             "JOIN nodes nt ON nt.id = e.target_id "
@@ -492,7 +499,7 @@ def _fact_callers(
     except sqlite3.Error:
         return []
     out: list[dict[str, Any]] = []
-    for caller, caller_file, src_file, src_line, conf, target_file in rows:
+    for caller, caller_file, src_file, src_line, conf, target_file, method, edge_id, target_id in rows:
         if not caller or src_line is None:
             continue
         # Belt-and-braces exact re-check: the SQL IN list already excludes any
@@ -516,6 +523,9 @@ def _fact_callers(
             "site_file": (src_file or caller_file or ""),
             "line": line_no,
             "confidence": conf_f,
+            "resolution_method": str(method or ""),
+            "edge_id": int(edge_id) if edge_id is not None else None,
+            "definition_id": int(target_id) if target_id is not None else None,
         })
     return out
 
@@ -526,6 +536,7 @@ def _line_at(
     line_no: int,
     edited_after: dict[str, str],
     cache: dict[str, list[str]],
+    source_hashes: dict[str, str] | None = None,
 ) -> str:
     """The source text at ``rel_file:line_no`` — from the diff's AFTER content when
     the caller file is itself edited (so a call the agent already fixed reads with
@@ -534,14 +545,25 @@ def _line_at(
     lines = cache.get(norm)
     if lines is None:
         if norm in edited_after:
-            lines = edited_after[norm].splitlines()
+            source_text = edited_after[norm]
+            lines = source_text.splitlines()
         else:
             try:
-                with open(os.path.join(repo_root, norm), encoding="utf-8", errors="ignore") as fh:
-                    lines = fh.read().splitlines()
+                with open(os.path.join(repo_root, norm), "rb") as fh:
+                    source_bytes = fh.read()
+                    source_text = source_bytes.decode("utf-8", errors="ignore")
+                    lines = source_text.splitlines()
             except OSError:
+                source_bytes = b""
+                source_text = ""
                 lines = []
         cache[norm] = lines
+        if source_hashes is not None and source_text:
+            exact_bytes = (
+                edited_after[norm].encode("utf-8")
+                if norm in edited_after else source_bytes
+            )
+            source_hashes[norm] = hashlib.sha256(exact_bytes).hexdigest()
     if 0 < line_no <= len(lines):
         return lines[line_no - 1]
     return ""
@@ -561,6 +583,7 @@ def _signature_advisories(
         return []
     out: list[SignatureMismatch] = []
     line_cache: dict[str, list[str]] = {}
+    source_hashes: dict[str, str] = {}
     try:
         for raw_path, (before, after) in edited_files.items():
             if before is None:
@@ -588,7 +611,8 @@ def _signature_advisories(
                     continue  # positional bounds unchanged -> nothing to break
                 for site in _fact_callers(con, name, edited_file):
                     line = _line_at(
-                        repo_root, site["site_file"], site["line"], edited_after, line_cache
+                        repo_root, site["site_file"], site["line"], edited_after,
+                        line_cache, source_hashes,
                     )
                     if not line:
                         continue
@@ -616,6 +640,14 @@ def _signature_advisories(
                             call_site_text=line.strip(),
                             positional_args=n_args,
                             confidence=site["confidence"],
+                            resolution_method=site["resolution_method"],
+                            before_sha256=hashlib.sha256(before.encode("utf-8")).hexdigest(),
+                            after_sha256=hashlib.sha256(after.encode("utf-8")).hexdigest(),
+                            caller_source_sha256=source_hashes.get(
+                                _norm(site["site_file"]), ""
+                            ),
+                            edge_id=site["edge_id"],
+                            definition_id=site["definition_id"],
                         ))
                         if len(out) >= _MAX_SIGNATURE_ROWS:
                             break

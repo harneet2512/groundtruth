@@ -384,6 +384,10 @@ class EvidenceEnvelope:
     # Typed feature lineage is an audit-only sidecar.  Like ``native_args`` it is
     # excluded from identity, serialization, rendering, and the dedup key.
     lineage: "DeliveryLineage | None" = field(default=None, compare=False)
+    # Structured producer inputs are retained for later producer-owned truth /
+    # freshness attestation. They are audit-only and deliberately excluded from
+    # identity, serialization, rendering, and the dedup key.
+    producer_inputs: "object | None" = field(default=None, compare=False)
 
     # explicit field order — the source of deterministic (de)serialization order.
     # ClassVar so it is NOT a dataclass field (never in __init__/__eq__/to_dict).
@@ -444,6 +448,7 @@ class EvidenceEnvelope:
         suppression_reason: str = "",
         native_args: "dict | None" = None,
         lineage: "DeliveryLineage | None" = None,
+        producer_inputs: "object | None" = None,
     ) -> EvidenceEnvelope:
         """Construct an envelope with the dedup key DERIVED (never hand-set) and the
         freshness token defaulted to ``graph_revision`` (a fact is valid until the graph
@@ -498,6 +503,7 @@ class EvidenceEnvelope:
             suppression_reason=suppression_reason,
             native_args=native_args,
             lineage=lineage,
+            producer_inputs=producer_inputs,
         )
 
 

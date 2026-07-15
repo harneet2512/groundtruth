@@ -118,6 +118,12 @@ from groundtruth.runtime.fact_registry import (
     required_renderer as _fr_required_renderer,
 )
 from groundtruth.runtime.native_render import render_covering_failure_native
+from groundtruth.runtime.producer_inputs import (
+    PRODUCER_INPUTS_SCHEMA,
+    CallerEvidenceRow,
+    ProducerInputs,
+    SourceState,
+)
 
 # Producer engines (traces / change_surface / patch_delta) are OPTIONAL module-scope
 # imports (W2 ship-closure, 2026-07-10): try-wrapped so `import gateway` never crashes
@@ -1218,6 +1224,7 @@ def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
     has_conf = "confidence" in cols
     has_meta = "metadata" in cols
     conf_gate = f"AND COALESCE(e.confidence,0) >= {_FACT_CONF_FLOOR} " if has_conf else ""
+    conf_sel = "COALESCE(e.confidence,1.0)" if has_conf else "1.0"
     qmarks = ",".join("?" * len(def_ids))
     use_em = _edge_metadata_ready(con)
     if use_em:
@@ -1225,7 +1232,8 @@ def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
         # edge with no receiver_type still returns its caller row exactly once — the
         # (edge_id,key) PK guarantees at most one receiver_type row per edge.
         sql = (
-            f"SELECT ns.name, ns.file_path, e.source_line, em.value "
+            f"SELECT ns.name, ns.file_path, e.source_line, em.value, "
+            f"{conf_sel}, LOWER(TRIM(e.resolution_method)), e.id, e.target_id "
             f"FROM edges e JOIN nodes ns ON ns.id=e.source_id "
             f"LEFT JOIN edge_metadata em ON em.edge_id=e.id AND em.key='receiver_type' "
             f"WHERE e.target_id IN ({qmarks}) AND e.type='CALLS' "
@@ -1235,7 +1243,8 @@ def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
     else:
         meta_sel = "e.metadata" if has_meta else "NULL"
         sql = (
-            f"SELECT ns.name, ns.file_path, e.source_line, {meta_sel} "
+            f"SELECT ns.name, ns.file_path, e.source_line, {meta_sel}, "
+            f"{conf_sel}, LOWER(TRIM(e.resolution_method)), e.id, e.target_id "
             f"FROM edges e JOIN nodes ns ON ns.id=e.source_id "
             f"WHERE e.target_id IN ({qmarks}) AND e.type='CALLS' "
             f"AND COALESCE(ns.is_test,0)=0 "
@@ -1247,8 +1256,16 @@ def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
         return [], []
     callers: list[dict] = []
     receivers: set[str] = set()
-    for name, fp, line, meta in rows:
-        callers.append({"name": name or "", "file": fp or "", "line": int(line or 0)})
+    for name, fp, line, meta, confidence, resolution_method, edge_id, target_id in rows:
+        callers.append({
+            "name": name or "",
+            "file": fp or "",
+            "line": int(line or 0),
+            "confidence": float(confidence),
+            "resolution_method": str(resolution_method or ""),
+            "edge_id": int(edge_id) if edge_id is not None else None,
+            "definition_id": int(target_id) if target_id is not None else None,
+        })
         if meta:
             if use_em:
                 receivers.add(str(meta))  # em.value IS the normalized receiver_type
@@ -1474,6 +1491,7 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
             producer: str, symbol: str = "",
             confidence: float | None = None,
             native_args: "dict | None" = None,
+            producer_inputs: "ProducerInputs | None" = None,
             cap_feature_ids: "tuple[str, ...]" = (),
             actual_event: str = "") -> EvidenceEnvelope:
     """Build the CANONICAL EvidenceEnvelope for one fact. Leak filtering happens
@@ -1498,7 +1516,7 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
         actual_event=actual_event or event.kind or EVENT_STEP0,
         cap_feature_ids=cap_feature_ids,
     )
-    return EvidenceEnvelope.build(
+    envelope = EvidenceEnvelope.build(
         producer=producer,
         fact_id=symbol,
         target=target,
@@ -1515,7 +1533,14 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
         measured=False,
         native_args=native_args,
         lineage=lineage,
+        producer_inputs=producer_inputs,
     )
+    if producer_inputs is not None:
+        envelope = replace(
+            envelope,
+            producer_inputs=replace(producer_inputs, candidate_id=envelope.dedup_key),
+        )
+    return envelope
 
 
 def _def_partition_body(info: dict) -> list[str]:
@@ -1845,11 +1870,46 @@ def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[Evidence
         # SM-10: attach the STRUCTURED arity fields so the adapter can render the SM-1
         # mypy/gopls arity diagnostic natively (native_render.render_signature_delta_native)
         # instead of _render_generic prose. Side-car only — identity/dedup UNCHANGED.
+        graph_revision, _valid_until = _revisions_for(state, "signature_mismatch")
+        before_state = SourceState(
+            file=sm.edited_file,
+            sha256=getattr(sm, "before_sha256", ""),
+            revision=f"edit:{event.action_index}:before",
+        ) if getattr(sm, "before_sha256", "") else None
+        after_state = SourceState(
+            file=sm.edited_file,
+            sha256=getattr(sm, "after_sha256", ""),
+            revision=f"edit:{event.action_index}:after",
+        ) if getattr(sm, "after_sha256", "") else None
+        caller_state = SourceState(
+            file=sm.caller_file,
+            sha256=getattr(sm, "caller_source_sha256", ""),
+            revision="source:" + getattr(sm, "caller_source_sha256", ""),
+        ) if getattr(sm, "caller_source_sha256", "") else None
+        producer_inputs = ProducerInputs(
+            schema=PRODUCER_INPUTS_SCHEMA,
+            evidence_type="signature_mismatch",
+            candidate_id="",
+            before_state=before_state,
+            after_state=after_state,
+            caller_rows=(CallerEvidenceRow(
+                identity=sm.caller,
+                file=sm.caller_file,
+                line=sm.caller_line,
+                confidence=sm.confidence,
+                resolution_method=getattr(sm, "resolution_method", "") or None,
+                source_state=caller_state,
+                edge_id=getattr(sm, "edge_id", None),
+                definition_id=getattr(sm, "definition_id", None),
+            ),),
+            graph_revision=graph_revision,
+        )
         out.append(_mk_add(state, event, fact_kind="signature_mismatch", target=sm.caller_file,
                            body_lines=body, evidence=[(sm.caller_file, sm.caller_line)],
                            tier=WARNING, producer="patch_delta", symbol=sm.symbol,
                             confidence=max(0.0, min(1.0, sm.confidence)),
                             cap_feature_ids=("GT_PATCH_DELTA",),
+                            producer_inputs=producer_inputs,
                             native_args={
                                "caller_file": sm.caller_file,
                                "caller_line": sm.caller_line,
@@ -1992,12 +2052,13 @@ def _sig_changed_symbols(before: str, after: str) -> list[str]:
     return sorted(n for n in a if n in b and a[n] != b[n])
 
 
-def _fact_callers_of_symbol_in_file(con, sym: str, rel: str, root: str) -> list[tuple[str, int]]:
+def _fact_callers_of_symbol_in_file(con, sym: str, rel: str, root: str) -> list[dict]:
     """FACT-tier (deterministic resolution_method AND conf>=0.7), NON-test, CROSS-FILE callers
     of ``sym`` DEFINED in ``rel`` (graph frame) — the callers a signature change breaks that the
-    agent is NOT looking at. Returns ``[(caller_rel, line)]`` deduped to ONE row per distinct
-    (caller_name, caller_file), leak-filtered (a test/vendored caller file is dropped). Reuses
-    :func:`_fact_callers` so the FACT gate is byte-identical to def_partition's."""
+    agent is NOT looking at. Returns typed identity/file/line/confidence/resolution rows,
+    deduped to ONE row per distinct (caller_name, caller_file), and leak-filtered (a
+    test/vendored caller file is dropped). Reuses :func:`_fact_callers` so the FACT gate
+    is byte-identical to def_partition's."""
     labels_sql = ",".join("?" * len(_DEF_LABELS))
     try:
         drows = con.execute(
@@ -2013,7 +2074,7 @@ def _fact_callers_of_symbol_in_file(con, sym: str, rel: str, root: str) -> list[
     callers, _receivers = _fact_callers(con, def_ids)
     nrel = _norm_fp(rel)
     seen: set[tuple[str, str]] = set()
-    out: list[tuple[str, int]] = []
+    out: list[dict] = []
     for c in callers:
         cf = _norm_fp(_to_repo_rel(c.get("file") or "", root))
         if not cf or cf == nrel:            # cross-file only
@@ -2024,9 +2085,39 @@ def _fact_callers_of_symbol_in_file(con, sym: str, rel: str, root: str) -> list[
         if key in seen:
             continue
         seen.add(key)
-        out.append((cf, int(c.get("line") or 0)))
-    out.sort()
+        out.append({
+            "identity": c.get("name") or "",
+            "file": cf,
+            "line": int(c.get("line") or 0),
+            "confidence": c.get("confidence"),
+            "resolution_method": c.get("resolution_method") or None,
+            "edge_id": c.get("edge_id"),
+            "definition_id": c.get("definition_id"),
+        })
+    out.sort(key=lambda row: (row["file"], row["line"], row["identity"]))
     return out
+
+
+def _source_state_for_file(
+    event: ToolEvent, state: GatewayState, file_path: str
+) -> SourceState | None:
+    """Exact UTF-8 source state observed for a caller, or ``None`` on a miss."""
+    rel = _norm_fp(_to_repo_rel(file_path, state.repo_root))
+    text: str | None = None
+    for edited_file, before_after in (event.edit_before_after or {}).items():
+        if _norm_fp(_to_repo_rel(edited_file, state.repo_root)) == rel:
+            _before, text = before_after
+            break
+    if text is None:
+        try:
+            with open(os.path.join(state.repo_root, rel), "rb") as source:
+                source_bytes = source.read()
+        except OSError:
+            return None
+        digest = hashlib.sha256(source_bytes).hexdigest()
+    else:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return SourceState(file=rel, sha256=digest, revision="source:" + digest)
 
 
 def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -2055,12 +2146,41 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
                 if not sites:
                     continue
                 n_callers = len(sites)
-                n_files = len({f for f, _ in sites})
+                n_files = len({site["file"] for site in sites})
                 body = [f"{sym}() signature changed — {n_callers} caller(s) in "
                         f"{n_files} file(s); update the call sites"]
+                graph_revision, _valid_until = _revisions_for(state, "caller_break")
+                producer_inputs = ProducerInputs(
+                    schema=PRODUCER_INPUTS_SCHEMA,
+                    evidence_type="caller_break",
+                    candidate_id="",
+                    before_state=SourceState(
+                        file=rel,
+                        sha256=hashlib.sha256((before or "").encode("utf-8")).hexdigest(),
+                        revision=f"edit:{event.action_index}:before",
+                    ),
+                    after_state=SourceState(
+                        file=rel,
+                        sha256=hashlib.sha256((after or "").encode("utf-8")).hexdigest(),
+                        revision=f"edit:{event.action_index}:after",
+                    ),
+                    caller_rows=tuple(
+                        CallerEvidenceRow(
+                            identity=site["identity"], file=site["file"],
+                            line=site["line"], confidence=site["confidence"],
+                            resolution_method=site["resolution_method"],
+                            source_state=_source_state_for_file(event, state, site["file"]),
+                            edge_id=site["edge_id"], definition_id=site["definition_id"],
+                        )
+                        for site in sites
+                    ),
+                    graph_revision=graph_revision,
+                )
                 out.append(_mk_add(state, event, fact_kind="caller_break", target=rel,
-                                   body_lines=body, evidence=sites, tier=WARNING,
-                                   producer="caller_contract", symbol=sym))
+                                   body_lines=body,
+                                   evidence=[(site["file"], site["line"]) for site in sites],
+                                   tier=WARNING, producer="caller_contract", symbol=sym,
+                                   producer_inputs=producer_inputs))
     finally:
         con.close()
     return out

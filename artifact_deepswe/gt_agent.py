@@ -296,6 +296,9 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # Typed FACT/CAP authority used by evidence envelopes and the additive
         # control-participation schema. Depends only on fact_registry (above).
         "feature_lineage.py",
+        # Immutable, render-neutral source/graph inputs retained by Gateway
+        # producers for later truth/freshness attestation. Stdlib-only.
+        "producer_inputs.py",
         "gateway.py",
         # Exact CAP-control participation schema used by the mini-seam's host-only
         # decision receipts. Stdlib + feature_lineage/fact_registry only (both
