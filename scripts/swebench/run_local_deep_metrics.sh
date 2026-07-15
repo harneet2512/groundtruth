@@ -1,57 +1,123 @@
 #!/usr/bin/env bash
-# Local mandatory-metrics pipeline (CLAUDE.md "Deep per-run logging at 8-dp").
-# Downloads a GHA run's per-task artifacts to D: and computes, per task:
-#   gt_deep_metrics_<task>.json   (8-dp: agent behavior + substrate-from-cert + lsp + embedder + outcome)
-#   gt_metrics_delta_<task>.json  (paired vs the mini-swe GT-off 83/300 baseline)
-# No graph.db needed — substrate reads the uploaded graph_certificate.json (gt_deep_metrics cert fallback).
+# Download and rebuild the canonical run-level PERF + exact-128 diagnosis bundle.
+# The per-task ll-full artifacts are the immutable live population; this script
+# aggregates them locally without launching either a GT-off or a paid run.
 #
 # usage: run_local_deep_metrics.sh <run_id> [repo]
 set -euo pipefail
+
 RUN_ID="${1:?usage: run_local_deep_metrics.sh <run_id> [repo]}"
 REPO="${2:-harneet2512/groundtruth}"
 GT="/d/Groundtruth"
-ROOT="/d/gt_runs/$RUN_ID"                       # D: has the space; C: does NOT
-ART="$ROOT/artifacts"; MET="$ROOT/metrics"
-# mini-swe GT-off 83/300 = the TRUE baseline (CLAUDE.md). The [3/3] aggregate needs a real
-# resolved_ids LIST; a summary file that only carries a resolved COUNT makes the pairing read an
-# empty set (every resolve looks like a flip, 0 regressions). The 83 file has the list. Override
-# via GT_BASELINE_RESOLVED.
-BASELINE="${GT_BASELINE_RESOLVED:-$GT/.claude/reports/mini_gtoff_baseline_83/resolved_ids.json}"
-GTDM="$GT/scripts/swebench/gt_deep_metrics.py"
+ROOT="/d/gt_runs/$RUN_ID"
+ART="$ROOT/artifacts"
+POP="$ART"
+MET="$ROOT/metrics"
+DIAG="$ART/gt-diagnosis-$RUN_ID"
+EXPECTED_TASKS="$DIAG/expected_tasks.json"
+RUN_METRICS="$MET/gt_run_metrics_v2_${RUN_ID}.json"
+export PYTHONPATH="$GT:$GT/src:$GT/scripts/swebench:${PYTHONPATH:-}"
+
 mkdir -p "$ART" "$MET"
 
-echo "[1/3] downloading task-* + gt-gate-deep-* artifacts of run $RUN_ID -> $ART"
-# clear the gh run-log zip cache on C: between batches (it bloats the system drive)
-rm -f "/c/Users/Lenovo/AppData/Local/GitHub CLI/run-log-"*.zip 2>/dev/null
-for nm in $(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --paginate \
-            --jq '.artifacts[].name' | grep -E "^(task-|gt-gate-deep-|gt-diagnosis-$RUN_ID$)" | sort -u); do
-  [ -d "$ART/$nm" ] && continue
-  gh run download "$RUN_ID" -R "$REPO" -n "$nm" -D "$ART/$nm" >/dev/null 2>&1 \
-    && echo "  dl $nm" || echo "  MISS $nm"
+echo "[1/5] downloading canonical ll-full + diagnosis artifacts for run $RUN_ID"
+# Clear the gh run-log zip cache on C: between batches (it bloats the system drive).
+rm -f "/c/Users/Lenovo/AppData/Local/GitHub CLI/run-log-"*.zip 2>/dev/null || true
+ARTIFACT_LIST="$MET/.canonical_artifact_names"
+gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --paginate \
+  --jq '.artifacts[].name' \
+  | grep -E "^(ll-full-|gt-diagnosis-$RUN_ID$)" \
+  | sort -u >"$ARTIFACT_LIST"
+mapfile -t ARTIFACT_NAMES <"$ARTIFACT_LIST"
+rm -f "$ARTIFACT_LIST"
+if [ "${#ARTIFACT_NAMES[@]}" -eq 0 ]; then
+  echo "FATAL: run $RUN_ID has no canonical ll-full/diagnosis artifacts" >&2
+  exit 1
+fi
+for name in "${ARTIFACT_NAMES[@]}"; do
+  [ -d "$ART/$name" ] && continue
+  gh run download "$RUN_ID" -R "$REPO" -n "$name" -D "$ART/$name" >/dev/null
+  echo "  downloaded $name"
 done
 
-echo "[2/3] computing per-task deep metrics + paired deltas -> $MET"
-n=0
-for td in "$ART"/task-*; do
-  [ -d "$td" ] || continue
-  t="$(basename "$td")"; t="${t#task-}"
-  cp "$td"/gt_debug/gt_run_summary_*.json /tmp/ 2>/dev/null || true
-  cp "$td"/gt_debug/gt_layer_events_*.jsonl /tmp/ 2>/dev/null || true
-  cp "$td"/gt_debug/gt_agent_events_*.jsonl /tmp/ 2>/dev/null || true
-  cert="$ART/gt-gate-deep-$t/gt"
-  GT_CERT_DIR="$cert" python "$GTDM" "$t" "$td/results" \
-     --baseline "$BASELINE" --out "$MET/gt_deep_metrics_$t.json" >/dev/null 2>&1
-  cp "/tmp/gt_metrics_delta_$t.json" "$MET/" 2>/dev/null || true
-  n=$((n+1))
-done
-echo "  computed $n tasks"
-
-echo "[3/3] aggregate (resolved + paired) -> $MET/AGGREGATE.json"
-EXPECTED_TASKS="$ART/gt-diagnosis-$RUN_ID/expected_tasks.json"
+echo "[2/5] binding the exact per-task population"
 if [ ! -s "$EXPECTED_TASKS" ]; then
   echo "FATAL: canonical expected task population missing: $EXPECTED_TASKS" >&2
   exit 1
 fi
-python "$GT/scripts/swebench/gt_run_metrics.py" "$MET" "$BASELINE" \
-  --run-id "$RUN_ID" --expected-tasks-file "$EXPECTED_TASKS"
+TASK_LIST="$MET/.canonical_task_population"
+python - "$EXPECTED_TASKS" "$POP" >"$TASK_LIST" <<'PY'
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+manifest = Path(sys.argv[1])
+population_root = Path(sys.argv[2])
+payload = json.loads(manifest.read_text(encoding="utf-8"))
+expected = payload.get("task_ids") if isinstance(payload, dict) else None
+if (
+    not isinstance(expected, list)
+    or not expected
+    or any(not isinstance(task, str) or not task for task in expected)
+    or len(expected) != len(set(expected))
+):
+    raise SystemExit(f"FATAL: malformed expected task population: {manifest}")
+
+observed = [
+    path.name.removeprefix("ll-full-")
+    for path in sorted(population_root.glob("ll-full-*"))
+    if path.is_dir()
+]
+counts = Counter(observed)
+missing = [task for task in expected if task not in counts]
+unexpected = sorted(set(observed) - set(expected))
+duplicate = sorted(task for task, count in counts.items() if count != 1)
+if missing or unexpected or duplicate or len(observed) != len(expected):
+    raise SystemExit(
+        "FATAL: canonical task population mismatch: "
+        f"missing={missing} unexpected={unexpected} duplicate={duplicate} "
+        f"expected={len(expected)} observed={len(observed)}"
+    )
+for task in expected:
+    task_dir = population_root / f"ll-full-{task}"
+    required = (
+        task_dir / "mini-swe-agent.trajectory.json",
+        task_dir / f"gt_deep_metrics_{task}.json",
+        task_dir / "gt_task_completion.json",
+    )
+    absent = [str(path) for path in required if not path.is_file()]
+    if absent:
+        raise SystemExit(f"FATAL: canonical task artifacts missing for {task}: {absent}")
+    print(task)
+PY
+mapfile -t EXPECTED_TASK_IDS <"$TASK_LIST"
+rm -f "$TASK_LIST"
+echo "  bound ${#EXPECTED_TASK_IDS[@]} tasks"
+
+echo "[3/5] canonical 58-PERF run metrics -> $RUN_METRICS"
+python "$GT/scripts/swebench/gt_run_metrics.py" "$POP" \
+  --run-id "$RUN_ID" \
+  --expected-tasks-file "$EXPECTED_TASKS" \
+  --output "$RUN_METRICS"
+
+echo "[4/5] exact-128 feature metrics -> $MET"
+python "$GT/scripts/swebench/gt_feature_metrics.py" "$POP" \
+  --profile 2 \
+  --run-id "$RUN_ID" \
+  --expected-tasks-file "$EXPECTED_TASKS" \
+  --run-metrics-artifact "$RUN_METRICS" \
+  --out "$MET"
+
+echo "[5/5] SS-LIVE diagnosis -> $MET"
+python "$GT/scripts/swebench/ss_live_diagnosis.py" "$POP" \
+  --run-metrics "$RUN_METRICS" \
+  --expected-tasks "$EXPECTED_TASKS" \
+  --output "$MET/ss_live_diagnosis_${RUN_ID}.json"
+python "$GT/scripts/swebench/ss_live_diagnosis.py" "$POP" \
+  --run-metrics "$RUN_METRICS" \
+  --expected-tasks "$EXPECTED_TASKS" \
+  --format markdown \
+  --output "$MET/ss_live_diagnosis_${RUN_ID}.md"
+
 echo "DONE -> $MET"

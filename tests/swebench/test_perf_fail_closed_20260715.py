@@ -212,6 +212,24 @@ def test_explicitly_absent_denominator_is_not_applicable(
 
 def test_local_recompute_uses_diagnosis_expected_population() -> None:
     script = (ROOT / "scripts" / "swebench" / "run_local_deep_metrics.sh").read_text(encoding="utf-8")
+    assert "ll-full-" in script
+    assert 'grep -E "^(ll-full-|gt-diagnosis-$RUN_ID$)"' in script
+    assert 'grep -E "^(task-' not in script
     assert "gt-diagnosis-$RUN_ID" in script
     assert "expected_tasks.json" in script
-    assert "--expected-tasks-file" in script
+    run_metrics = '"$MET/gt_run_metrics_v2_${RUN_ID}.json"'
+    assert f'RUN_METRICS={run_metrics}' in script
+    assert script.count('--expected-tasks-file "$EXPECTED_TASKS"') == 2
+    assert 'gt_feature_metrics.py" "$POP"' in script
+    assert '--run-metrics-artifact "$RUN_METRICS"' in script
+    assert script.count('ss_live_diagnosis.py" "$POP"') == 2
+    assert '--run-metrics "$RUN_METRICS"' in script
+    assert '--expected-tasks "$EXPECTED_TASKS"' in script
+    assert 'ss_live_diagnosis_${RUN_ID}.json' in script
+    assert 'ss_live_diagnosis_${RUN_ID}.md' in script
+    assert "AGGREGATE.json" not in script
+
+    run_stage = script.index('gt_run_metrics.py" "$POP"')
+    feature_stage = script.index('gt_feature_metrics.py" "$POP"')
+    diagnosis_stage = script.index('ss_live_diagnosis.py" "$POP"')
+    assert run_stage < feature_stage < diagnosis_stage
