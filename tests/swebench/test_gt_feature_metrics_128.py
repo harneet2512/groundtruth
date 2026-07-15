@@ -917,6 +917,7 @@ def test_run_perf_right_censoring_requires_exact_task_identity(
     )
     assert valid["status"] == "MEASURED"
     assert "_task" not in valid
+    assert valid["run_aggregate"] == run_metric
 
     run_metric["right_censored_tasks"] = ["synthetic__different-task"]
     run_path.write_text(json.dumps(run_metrics), encoding="utf-8")
@@ -933,6 +934,56 @@ def test_run_perf_right_censoring_requires_exact_task_identity(
 
     assert row["status"] == "UNMEASURED"
     assert row["metric_structure_valid"] is False
+
+
+def test_run_perf_not_applicable_requires_exact_task_identity(tmp_path: Path) -> None:
+    """A matching N/A count cannot substitute a different task identity."""
+    task = "synthetic__not-applicable"
+    deep = _complete_deep_metrics(task)
+    deep["performance"]["scope_completeness"]["multi_file_discovery"] = None
+    applicability = {
+        "applicable": False,
+        "predicate": "n_gold_files > 1",
+        "reason": "fixture has no multi-file gold scope",
+    }
+    deep["metric_applicability"].setdefault("scope_completeness", {})[
+        "multi_file_discovery"
+    ] = applicability
+    deep["performance"].setdefault("metric_applicability", {}).setdefault(
+        "scope_completeness", {}
+    )["multi_file_discovery"] = copy.deepcopy(applicability)
+    _write_task(tmp_path, task, deep_metrics=deep)
+    task_records, _missing, _source = metrics._performance_feature_records(
+        task, str(tmp_path)
+    )
+    run_metrics = gt_run_metrics.aggregate_run_metrics(
+        [deep], expected_task_ids=[task]
+    )
+    run_metrics["run_id"] = "run-1"
+    run_metric = run_metrics["mandatory_performance"]["scope_completeness"][
+        "multi_file_discovery"
+    ]
+    run_path = tmp_path / "gt_run_metrics.json"
+    run_path.write_text(json.dumps(run_metrics), encoding="utf-8")
+    task_rows = [{**task_records["multi_file_discovery"], "_task": task}]
+
+    valid = metrics._run_distribution_feature_record(
+        "run-1", str(run_path), task_rows,
+        section="scope_completeness", name="multi_file_discovery",
+        value_type="bool", expected_tasks=1,
+    )
+    assert valid["status"] == "NOT_APPLICABLE"
+    assert valid["run_aggregate"] == run_metric
+
+    run_metric["not_applicable_tasks"] = ["synthetic__different-task"]
+    run_path.write_text(json.dumps(run_metrics), encoding="utf-8")
+    invalid = metrics._run_distribution_feature_record(
+        "run-1", str(run_path), task_rows,
+        section="scope_completeness", name="multi_file_discovery",
+        value_type="bool", expected_tasks=1,
+    )
+    assert invalid["status"] == "UNMEASURED"
+    assert invalid["metric_structure_valid"] is False
 
 
 def test_deep_metrics_lookup_is_task_exact_and_matches_live_layout(tmp_path: Path) -> None:
@@ -1053,6 +1104,9 @@ def test_run_aggregate_joins_validated_run_ratio_artifact(tmp_path: Path) -> Non
 
     cost = aggregate["run_metrics"]["ss_features"]["cost_per_resolved"]
     assert cost["measurement"]["value"] == 2.5
+    assert cost["measurement"]["run_aggregate"] == run_payload[
+        "mandatory_performance"
+    ]["token_efficiency"]["cost_per_resolved"]
     assert cost["measurement"]["source_artifact"] == run_path.name
     assert all(cost["ss_readiness"]["gates"].values())
     assert cost["ss_readiness"]["measurement_complete"] is True

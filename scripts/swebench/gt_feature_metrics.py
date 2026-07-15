@@ -710,6 +710,7 @@ def _run_ratio_feature_record(
         "denominator_provenance": "gt_run_metrics:run total_cost_usd/resolved count",
         "coverage_scope": "run",
         "applicability": applicability if applicability_valid else None,
+        "run_aggregate": metric if contract_valid else None,
         "task_coverage_valid": contract_valid,
         "aggregate_coverage_valid": contract_valid,
         "reason": None if contract_valid else "run-level metric artifact missing or malformed",
@@ -738,15 +739,48 @@ def _run_distribution_feature_record(
     measured_tasks = metric.get("measured_tasks") if isinstance(metric, dict) else None
     not_applicable = metric.get("not_applicable_tasks") if isinstance(metric, dict) else None
     right_censored = metric.get("right_censored_tasks") if isinstance(metric, dict) else None
-    task_censored = sorted(
-        str(row.get("_task"))
-        for row in task_rows
-        if row.get("status") == "RIGHT_CENSORED"
+    event_observed = metric.get("event_observed_tasks") if isinstance(metric, dict) else None
+    task_ids = [row.get("_task") for row in task_rows]
+    task_identity_valid = bool(
+        len(task_ids) == expected_tasks
+        and all(isinstance(task, str) and bool(task) for task in task_ids)
+        and len(set(task_ids)) == expected_tasks
     )
-    task_rows_resolved = bool(task_rows) and len(task_rows) == expected_tasks and all(
-        row.get("status") in {
+    task_measured = sorted(
+        task for row, task in zip(task_rows, task_ids)
+        if row.get("status") == "MEASURED" and isinstance(task, str)
+    )
+    task_not_applicable = sorted(
+        task for row, task in zip(task_rows, task_ids)
+        if row.get("status") == "NOT_APPLICABLE" and isinstance(task, str)
+    )
+    task_censored = sorted(
+        task for row, task in zip(task_rows, task_ids)
+        if row.get("status") == "RIGHT_CENSORED" and isinstance(task, str)
+    )
+    task_rows_resolved = bool(
+        task_identity_valid
+        and all(row.get("status") in {
             "MEASURED", "NOT_APPLICABLE", "RIGHT_CENSORED",
-        } for row in task_rows
+        } for row in task_rows)
+        and len(task_measured) + len(task_not_applicable) + len(task_censored)
+        == expected_tasks
+    )
+    aggregate_partition_valid = bool(
+        isinstance(not_applicable, list)
+        and all(isinstance(task, str) for task in not_applicable)
+        and sorted(not_applicable) == task_not_applicable
+        and isinstance(right_censored, list)
+        and all(isinstance(task, str) for task in right_censored)
+        and sorted(right_censored) == task_censored
+        and isinstance(measured_tasks, int) and not isinstance(measured_tasks, bool)
+        and measured_tasks == len(task_measured) + len(task_censored)
+        and (
+            value_type == "per_tag_rate_dict" and event_observed is None
+            or isinstance(event_observed, list)
+            and all(isinstance(task, str) for task in event_observed)
+            and sorted(event_observed) == task_measured
+        )
     )
     contract_valid = bool(
         isinstance(payload, dict)
@@ -771,11 +805,7 @@ def _run_distribution_feature_record(
         and metric.get("missing_tasks") == []
         and metric.get("unmeasured_tasks") == []
         and metric.get("failed_tasks") == []
-        and isinstance(measured_tasks, int) and not isinstance(measured_tasks, bool)
-        and isinstance(not_applicable, list)
-        and isinstance(right_censored, list)
-        and right_censored == task_censored
-        and measured_tasks + len(not_applicable) == expected_tasks
+        and aggregate_partition_valid
         and task_rows_resolved
     )
     first = dict(task_rows[0]) if task_rows else {}
@@ -795,6 +825,7 @@ def _run_distribution_feature_record(
         "artifact_schema_valid": contract_valid,
         "precision_decimals": 8 if contract_valid else None,
         "coverage_scope": "run",
+        "run_aggregate": metric if contract_valid else None,
         "task_coverage_valid": task_rows_resolved,
         "aggregate_coverage_valid": contract_valid,
         "reason": None if contract_valid else "canonical run distribution missing or malformed",

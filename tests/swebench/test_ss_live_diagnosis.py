@@ -435,9 +435,21 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
     _write_binding_artifacts(task_dir)
 
     mandatory = {}
+    gold_rank_aggregate = {
+        "status": "MEASURED", "value_type": "nonnegative_int",
+        "aggregation": "mean_median_over_measured_tasks",
+        "mean": 2.0, "median": 2.0, "measured_tasks": 1,
+        "event_observed_tasks": [task], "not_applicable_tasks": [],
+        "right_censored_tasks": [], "missing_tasks": [],
+        "unmeasured_tasks": [], "failed_tasks": [],
+    }
     for section, definitions in inventory.performance_metric_definitions().items():
         mandatory[section] = {
-            name: {"status": "MEASURED" if name == "gold_rank" else "NOT_APPLICABLE"}
+            name: (
+                gold_rank_aggregate
+                if name == "gold_rank"
+                else {"status": "NOT_APPLICABLE"}
+            )
             for name, _ in definitions
         }
     run_metrics = tmp_path / "gt_run_metrics_v2_run.json"
@@ -466,6 +478,8 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
     ]
     by_name = {row["feature"]: row for row in result["rows"]}
     assert by_name["gold_rank"]["run_bucket"] == "MEASURED"
+    assert by_name["gold_rank"]["run_measurement"] == gold_rank_aggregate
+    assert by_name["gold_rank"]["task_measurements"][task]["status"] == "NOT_APPLICABLE"
     assert by_name["patch_size"]["run_bucket"] == "NOT_APPLICABLE"
     assert by_name["caller_contract"]["task_buckets"][task] == "UNMEASURED:missing_lineage"
     assert by_name[first_acq]["task_buckets"][task] == (
@@ -481,6 +495,7 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
     assert diagnosis._perf_status({"status": "RIGHT_CENSORED"}) == "RIGHT_CENSORED"
     rendered = diagnosis.render_markdown(result)
     assert rendered.count("\n") == 139
+    assert '"mean":2.0' in rendered
     assert "requested_tasks=1" in rendered
     assert "missing_feature_records=NONE" in rendered
     output = tmp_path / "diagnosis.json"

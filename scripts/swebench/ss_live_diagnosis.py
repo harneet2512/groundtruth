@@ -356,19 +356,20 @@ def _requires_visible_audit(feature: str, family: str) -> bool:
     )
 
 
-def _run_perf_rows(run_metrics: dict[str, Any]) -> dict[str, str]:
+def _run_perf_rows(run_metrics: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if run_metrics.get("schema") != "gt_run_metrics.v2":
         raise ValueError("run metrics must use canonical gt_run_metrics.v2")
     if run_metrics.get("mandatory_performance_metric_count") != 58:
         raise ValueError("run metrics must declare exactly 58 mandatory PERF rows")
     mandatory = run_metrics.get("mandatory_performance")
     mandatory = mandatory if isinstance(mandatory, dict) else {}
-    result: dict[str, str] = {}
+    result: dict[str, dict[str, Any]] = {}
     for section, definitions in performance_metric_definitions().items():
         section_rows = mandatory.get(section)
         section_rows = section_rows if isinstance(section_rows, dict) else {}
         for feature, _value_type in definitions:
-            result[feature] = _perf_status(section_rows.get(feature))
+            metric = section_rows.get(feature)
+            result[feature] = dict(metric) if isinstance(metric, dict) else {}
     return result
 
 
@@ -942,6 +943,8 @@ def diagnose_run(
     for family, features in inventory.items():
         for feature in features:
             task_buckets: dict[str, str] = {}
+            task_measurements: dict[str, dict[str, Any]] = {}
+            run_measurement: dict[str, Any] | None = None
             if family == "PERF":
                 for task in task_order:
                     if task in unavailable_tasks:
@@ -950,7 +953,11 @@ def diagnose_run(
                     _path, metrics = tasks[task]
                     row = (metrics.get("ss_features") or {}).get(feature)
                     task_buckets[task] = _perf_status(row)
-                run_bucket = run_perf[feature]
+                    task_measurements[task] = (
+                        dict(row) if isinstance(row, dict) else {}
+                    )
+                run_measurement = run_perf[feature]
+                run_bucket = _perf_status(run_measurement)
             else:
                 for task in task_order:
                     if task in unavailable_tasks:
@@ -1020,14 +1027,18 @@ def diagnose_run(
                         "reason": f"{family.lower()}_has_no_candidate_delivery_contract",
                     }
                 )
-            rows_out.append({
+            output_row = {
                 "feature": feature,
                 "family": family,
                 "run_bucket": run_bucket,
                 "task_buckets": task_buckets,
                 "bucket_counts": dict(sorted(Counter(task_buckets.values()).items())),
                 "task_opportunities": task_opportunities,
-            })
+            }
+            if family == "PERF":
+                output_row["run_measurement"] = run_measurement
+                output_row["task_measurements"] = task_measurements
+            rows_out.append(output_row)
 
     return {
         "schema": "gt.ss_live_diagnosis.v1",
@@ -1062,15 +1073,21 @@ def render_markdown(result: dict[str, Any]) -> str:
         "missing_deep_metrics=" + (", ".join(missing_deep) if missing_deep else "NONE"),
         f"publishable={str(result.get('integrity', {}).get('publishable') is True).lower()}",
         "",
-        "| Family | Feature | Run bucket | Per-task buckets |",
-        "|---|---|---|---|",
+        "| Family | Feature | Run bucket | Run measurement | Per-task buckets |",
+        "|---|---|---|---|---|",
     ]
     for row in result.get("rows", []):
         tasks = "; ".join(
             f"{task}={bucket}" for task, bucket in row["task_buckets"].items()
         )
+        run_measurement = row.get("run_measurement")
+        measurement = (
+            json.dumps(run_measurement, sort_keys=True, separators=(",", ":"))
+            if isinstance(run_measurement, dict) else ""
+        ).replace("|", "\\|")
         lines.append(
-            f"| {row['family']} | {row['feature']} | {row['run_bucket']} | {tasks} |"
+            f"| {row['family']} | {row['feature']} | {row['run_bucket']} | "
+            f"{measurement} | {tasks} |"
         )
     return "\n".join(lines) + "\n"
 
