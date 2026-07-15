@@ -219,7 +219,15 @@ def test_covering_execution_stamps_concrete_lineage_identity(tmp_path, monkeypat
         lambda *args, **kwargs: {"verdict": "fail", "ran": ["covering.py"]},
     )
     monkeypatch.setattr(
-        covering_runner, "is_red_attributable", lambda *args, **kwargs: True)
+        covering_runner, "attribute_covering_red", lambda *args, **kwargs:
+        covering_runner.CoveringAttribution(
+            attributed=True,
+            method="differential",
+            current_verdict="fail",
+            base_verdict="pass",
+            implicated_edited_paths=("src/widget.py",),
+            covering_files=("covering.py",),
+        ))
     monkeypatch.setattr(
         native_render, "render_covering_failure_native",
         lambda *args, **kwargs: "covering failure",

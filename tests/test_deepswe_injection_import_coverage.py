@@ -293,3 +293,10 @@ def test_b1_engines_and_transitive_deps_are_shipped(agent_mod):
         "groundtruth.runtime.repo_adapters", # transitive: patch_auditor, test_runner
     ):
         assert dotted in shipped, f"{dotted} must be shipped for B1 to load in-container"
+
+
+def test_lane_attestation_factory_and_schema_are_shipped(agent_mod):
+    """Covering staging must not import-fail/quiet inside the live container."""
+    shipped = set(agent_mod._INJECTED_GT_MODULES)
+    assert "groundtruth.runtime.lane_attestation" in shipped
+    assert "groundtruth.runtime.producer_attestation" in shipped

@@ -114,7 +114,11 @@ def test_none_produced_pin_on_empty_render(monkeypatch, tmp_path):
     rows = _emission_env(monkeypatch, tmp_path)
     monkeypatch.setattr(cr, "run_covering_tests",
                         lambda root, files, **kw: {"verdict": "fail", "ran": files})
-    monkeypatch.setattr(cr, "is_red_attributable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        cr, "attribute_covering_red", lambda *a, **k: cr.CoveringAttribution(
+            attributed=True, method="differential", current_verdict="fail",
+            base_verdict="pass", implicated_edited_paths=("mod.py",),
+            covering_files=("test_mod.py",)))
     monkeypatch.setattr(nr, "render_covering_failure_native", lambda *a, **k: "")  # empty render
     out = g._executed_covering_emission([{"file": "test_mod.py"}], {"mod.py"}, {"foo"})
     assert out is None
@@ -128,6 +132,7 @@ def test_fix1_plan_none_produced(monkeypatch, tmp_path):
     deliverable RED rung."""
     import groundtruth.runtime.verification_plan as vp
     monkeypatch.setenv("GT_VERIFICATION_PLAN", "1")
+    monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
     monkeypatch.setattr(g, "_GT_BASELINE", False)
     monkeypatch.setattr(g, "_last_test_step", None, raising=False)
     monkeypatch.setattr(g, "_action_count", 5, raising=False)
@@ -276,7 +281,11 @@ def test_byte_identity_delivery_and_suppression(monkeypatch, tmp_path):
     _emission_env(monkeypatch, tmp_path)  # spies _runtime_ledger_record too (host rows only)
     EXPECT = "\n$ pytest\nTypeError\n[exit 1]\n"
     monkeypatch.setattr(nr, "render_covering_failure_native", lambda *a, **k: EXPECT)
-    monkeypatch.setattr(cr, "is_red_attributable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        cr, "attribute_covering_red", lambda *a, **k: cr.CoveringAttribution(
+            attributed=True, method="differential", current_verdict="fail",
+            base_verdict="pass", implicated_edited_paths=("mod.py",),
+            covering_files=("test_mod.py",)))
     monkeypatch.setattr(cr, "run_covering_tests",
                         lambda root, files, **kw: {"verdict": "fail", "ran": files,
                                                    "exit_code": 1, "stdout_tail": "TypeError",

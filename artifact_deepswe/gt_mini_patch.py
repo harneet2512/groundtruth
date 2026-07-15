@@ -9199,6 +9199,9 @@ def _structural_risk_note() -> tuple[str, bool]:
     return (note, er.score >= _RISK_TRIGGER)
 
 
+_last_covering_candidate_input = None  # host-only producer input; never model-facing
+
+
 def _executed_covering_emission(covering: list[dict],
                                 edited_rels: "set[str] | list[str]",
                                 edited_syms: "set[str] | list[str]") -> str | None:
@@ -9215,6 +9218,8 @@ def _executed_covering_emission(covering: list[dict],
     ran a test this turn (Fable §6.2 — redundant, and risks a second identity
     surface). Correct-or-quiet on any error."""
     global _last_test_outcome_failed, _last_covering_result, _last_verify_executed_identity
+    global _last_covering_candidate_input
+    _last_covering_candidate_input = None
     _last_verify_executed_identity = None
     if os.environ.get("GT_VERIFY_EXECUTE") != "1" or _GT_BASELINE:
         return None
@@ -9222,7 +9227,7 @@ def _executed_covering_emission(covering: list[dict],
         return None
     try:
         from groundtruth.runtime.covering_runner import (
-            is_red_attributable, run_covering_tests)
+            attribute_covering_red, is_red_attributable, run_covering_tests)
         from groundtruth.runtime.native_render import render_covering_failure_native
         root = _root()
         files = [c["file"] for c in (covering or [])
@@ -9236,6 +9241,19 @@ def _executed_covering_emission(covering: list[dict],
                 outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
                 reason="covering_no_covering", chars=0)
             return None
+        _covering_sources_before = {}
+        for _edited_rel in sorted({str(path) for path in (edited_rels or ()) if path}):
+            try:
+                _edited_path = (_edited_rel if os.path.isabs(_edited_rel)
+                                else os.path.join(root, _edited_rel))
+                with open(_edited_path, "rb") as _edited_file:
+                    _edited_bytes = _edited_file.read()
+                _covering_sources_before[_edited_rel.replace("\\", "/")] = (
+                    _edited_bytes,
+                    "edit:" + hashlib.sha256(_edited_bytes).hexdigest(),
+                )
+            except Exception:  # noqa: BLE001 -- missing bytes => future UNMEASURED
+                continue
         # FIX 3 (executor threading): route the covering run through the live env's
         # execute when the covering runner accepts an `executor` param — so a remote
         # Docker/Singularity env runs the tests IN the container, not on the host.
@@ -9275,11 +9293,24 @@ def _executed_covering_emission(covering: list[dict],
         # failures that leave no agent frame. No git / no base tree -> differential
         # unavailable -> frames-only -> correct-or-quiet (identical to the old
         # frames-only seam on a non-git repo). Same small in-loop caps as the run.
-        if not is_red_attributable(
+        _covering_attribution = attribute_covering_red(
+            cres, edited_rels or [], test_files=ran_tf,
+            repo_root=root, covering_files=files,
+            executor=_run_kwargs.get("executor"),
+            per_file_timeout=20, total_budget_seconds=35)
+        _covering_attributed = _covering_attribution.attributed
+        if not _covering_attributed and _covering_attribution.method == "trace_frame":
+            # Preserve legacy basename-only delivery. Structured truth remains
+            # unattributed and therefore finalizes as UNMEASURED. This compatibility
+            # call cannot repeat the base differential: method=trace_frame proves the
+            # pure frame predicate already matched, so is_red_attributable returns at
+            # its frame-first branch before consulting the base tree.
+            _covering_attributed = is_red_attributable(
                 cres, edited_rels or [], test_files=ran_tf,
                 repo_root=root, covering_files=files,
                 executor=_run_kwargs.get("executor"),
-                per_file_timeout=20, total_budget_seconds=35):
+                per_file_timeout=20, total_budget_seconds=35)
+        if not _covering_attributed:
             # W14 FIX 1: a real RED that the edit did not plausibly cause -> suppressed
             # (correct-or-quiet); record the class so the None return is diagnosable.
             _runtime_ledger_record(
@@ -9303,6 +9334,28 @@ def _executed_covering_emission(covering: list[dict],
         if _ss_ack_failure_suppresses(
                 "verify.horizon.executed", block, failure_identity):
             return None
+        try:
+            from groundtruth.runtime.fact_registry import EVENT_TEST_RESULT
+            from groundtruth.runtime.lane_attestation import build_covering_candidate_input
+
+            _unchanged_sources = {}
+            for _edited_rel, (_before_bytes, _revision) in _covering_sources_before.items():
+                _edited_path = (_edited_rel if os.path.isabs(_edited_rel)
+                                else os.path.join(root, _edited_rel))
+                with open(_edited_path, "rb") as _edited_file:
+                    _after_bytes = _edited_file.read()
+                if _after_bytes == _before_bytes:
+                    _unchanged_sources[_edited_rel] = (_before_bytes, _revision)
+            _last_covering_candidate_input = build_covering_candidate_input(
+                attribution=_covering_attribution,
+                current_result=cres,
+                edited_sources=_unchanged_sources,
+                covering_files=files,
+                actual_event=EVENT_TEST_RESULT,
+                rendered_block=block,
+            )
+        except Exception:  # noqa: BLE001 -- delivery remains; proof stays absent
+            _last_covering_candidate_input = None
         _last_verify_executed_identity = (
             "covering_runner", "covering_red", "test_result")
         return block

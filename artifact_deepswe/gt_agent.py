@@ -302,6 +302,11 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # Immutable syntax-check observation retained by the mini seam for
         # producer-owned truth/freshness attestation. Stdlib-only.
         "syntax_observation.py",
+        # Pure producer-owned lane attestation factories. Import-closed through
+        # covering_runner/fact_registry/syntax_observation (above) and the
+        # producer-attestation schema immediately below.
+        "producer_attestation.py",
+        "lane_attestation.py",
         "gateway.py",
         # Exact CAP-control participation schema used by the mini-seam's host-only
         # decision receipts. Stdlib + feature_lineage/fact_registry only (both
