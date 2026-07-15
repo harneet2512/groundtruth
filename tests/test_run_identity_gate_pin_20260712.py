@@ -74,6 +74,10 @@ def _trial_steps() -> list[dict]:
     raise AssertionError("no job contains the paid agent-launch step (_GT_PROFILE_EXPORTS)")
 
 
+def _job(name: str) -> dict:
+    return _doc()["jobs"][name]
+
+
 def _trial_step_named(name: str) -> dict:
     for step in _trial_steps():
         if step.get("name") == name:
@@ -98,11 +102,11 @@ def _index_of(steps: list[dict], token: str) -> int:
 def _docker_block(run: str) -> str:
     """The single-quoted `bash -c '...'` argument, opening quote THROUGH closing quote (inclusive),
     delimited by the unique `bash -c '` opener and the terminating apostrophe that precedes
-    `2>&1 | tee trial_output.log` (the docker block's tee sink)."""
+    `2>&1 | tee -a trial_output.log` (the append-only docker log sink)."""
     marker = "bash -c "
     i = run.index(marker) + len(marker)
     assert run[i] == _APOS, "the docker invocation must open with a single-quoted bash -c argument"
-    tail = run.index("2>&1 | tee trial_output.log", i)
+    tail = run.index("2>&1 | tee -a trial_output.log", i)
     close = run.rindex(_APOS, i, tail)
     return run[i:close + 1]
 
@@ -159,6 +163,7 @@ def test_identity_artifact_carries_the_resolved_identity_fields() -> None:
         "substrate_digest_expected",
         "substrate_digest_actual",
         "gt_ref_requested",
+        "gt_ref_prepared_sha",
         "gt_ref_resolved",
         "seam_sha256",
         "runner_sha256",
@@ -181,6 +186,37 @@ def test_checkout_commit_is_resolved_from_git_before_substrate_proof() -> None:
     resolve_idx = steps.index(resolve)
     assert resolve_idx < _index_of(steps, "substrate_proof.sh")
     assert resolve_idx < _index_of(steps, "gt.run_identity.v1")
+
+
+def test_prepare_resolves_gt_ref_once_and_downstream_checkouts_are_immutable() -> None:
+    prepare = _job("prepare")
+    assert prepare["outputs"]["gt_sha"] == "${{ steps.resolve_gt.outputs.gt_sha }}"
+    resolve = next(step for step in prepare["steps"] if step.get("id") == "resolve_gt")
+    run = "\n".join(_code_lines(resolve.get("run") or ""))
+    assert "git rev-parse --verify 'HEAD^{commit}'" in run
+    assert "^[0-9a-f]{40,64}$" in run
+    assert "gt_sha=$GT_PREPARED_SHA" in run and "$GITHUB_OUTPUT" in run
+
+    trial_checkout = _trial_step_named("Checkout GroundTruth")
+    summarize_checkout = next(
+        step for step in _job("summarize")["steps"]
+        if step.get("uses") == "actions/checkout@v4"
+    )
+    immutable = "${{ needs.prepare.outputs.gt_sha }}"
+    assert trial_checkout["with"]["ref"] == immutable
+    assert summarize_checkout["with"]["ref"] == immutable
+
+
+def test_trial_checkout_must_equal_prepare_resolved_sha() -> None:
+    resolve = _trial_step_named("Resolve checked-out GT commit")
+    run = "\n".join(_code_lines(resolve.get("run") or ""))
+    assert (resolve.get("env") or {}).get("GT_PREPARED_SHA") == (
+        "${{ needs.prepare.outputs.gt_sha }}"
+    )
+    assert '"$GT_CHECKOUT_SHA" != "$GT_PREPARED_SHA"' in run
+    assert "GT_CHECKOUT_IDENTITY_MISMATCH" in run
+    assert "exit 1" in run
+    assert "GT_PREPARED_SHA=$GT_PREPARED_SHA" in run
 
 
 def test_identity_uses_checkout_sha_and_keeps_dispatch_sha_separate() -> None:
@@ -209,6 +245,7 @@ def test_identity_producer_fails_closed_on_writer_or_content_failure() -> None:
     for token in (
         "gt.run_identity.v1",
         "re.fullmatch",
+        "gt_ref_prepared_sha",
         "gt_ref_resolved",
         "seam_sha256",
         "runner_sha256",
@@ -233,6 +270,7 @@ def test_paid_step_independently_rechecks_identity_before_proof_and_spend() -> N
     for token in (
         "gt.run_identity.v1",
         "GT_CHECKOUT_SHA",
+        "gt_ref_prepared_sha",
         "GITHUB_RUN_ID",
         "seam_sha256",
         "runner_sha256",

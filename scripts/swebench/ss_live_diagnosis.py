@@ -379,6 +379,16 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PINNED_IMAGE_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 
 
+def _valid_requested_ref(value: object) -> bool:
+    """Accept a bounded Git branch/tag/SHA spelling, never an empty/control value."""
+    return bool(
+        isinstance(value, str)
+        and 0 < len(value) <= 1024
+        and value == value.strip()
+        and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value)
+    )
+
+
 def _diagnosis_integrity(
     tasks: dict[str, tuple[Path, dict[str, Any]]],
     run_metrics: dict[str, Any],
@@ -392,7 +402,7 @@ def _diagnosis_integrity(
     expected = set(expected_members)
     expected_run_id = str(run_metrics.get("run_id") or "")
     task_records: dict[str, dict[str, Any]] = {}
-    consensus_rows: list[tuple[str, str, str]] = []
+    consensus_rows: list[tuple[str, str, str, str, str]] = []
 
     for task, (metrics_path, _metrics) in sorted(tasks.items()):
         artifact_dir = metrics_path.parent / "gt_artifacts"
@@ -436,16 +446,21 @@ def _diagnosis_integrity(
             if not expected_run_id or workflow_run_id != expected_run_id:
                 issues.append("run_identity:workflow_run_id")
             requested = identity.get("gt_ref_requested")
+            prepared = identity.get("gt_ref_prepared_sha")
             if (
-                not isinstance(requested, str)
-                or _COMMIT_RE.fullmatch(requested) is None
-                or requested != resolved
+                not _valid_requested_ref(requested)
+                or not isinstance(prepared, str)
+                or _COMMIT_RE.fullmatch(prepared) is None
+                or prepared != resolved
             ):
                 issues.append("run_identity:gt_ref_binding")
             if identity.get("baseline") is not False:
                 issues.append("run_identity:baseline")
             if not any(issue.startswith("run_identity:") for issue in issues):
-                consensus_rows.append((str(resolved), str(actual_digest), workflow_run_id))
+                consensus_rows.append((
+                    str(requested), str(prepared), str(resolved),
+                    str(actual_digest), workflow_run_id,
+                ))
 
         activation = payloads.get("gt_profile_activation.json")
         activation_members: set[str] = set()
@@ -514,6 +529,8 @@ def _diagnosis_integrity(
             "artifacts": artifacts,
             "identity": {
                 "workflow_run_id": identity.get("workflow_run_id") if identity else None,
+                "gt_ref_requested": identity.get("gt_ref_requested") if identity else None,
+                "gt_ref_prepared_sha": identity.get("gt_ref_prepared_sha") if identity else None,
                 "gt_ref_resolved": identity.get("gt_ref_resolved") if identity else None,
                 "substrate_digest": identity.get("substrate_digest_actual") if identity else None,
             },
@@ -544,9 +561,11 @@ def _diagnosis_integrity(
         "incomplete_tasks": incomplete,
         "identity_consensus": (
             {
-                "gt_ref_resolved": consensus[0][0],
-                "substrate_digest": consensus[0][1],
-                "workflow_run_id": consensus[0][2],
+                "gt_ref_requested": consensus[0][0],
+                "gt_ref_prepared_sha": consensus[0][1],
+                "gt_ref_resolved": consensus[0][2],
+                "substrate_digest": consensus[0][3],
+                "workflow_run_id": consensus[0][4],
             }
             if len(consensus) == 1 else None
         ),

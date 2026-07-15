@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from typing import Any
 
 # deepswe_outcome is imported lazily in build_task_truth to avoid circular imports
@@ -134,17 +135,20 @@ def _first_str(*values: Any) -> str:
 def _tool_call_command(call: Any) -> str:
     """Extract a command from one native chat-completions tool call."""
     if not isinstance(call, dict):
-        return ""
+        raise ValueError("native trajectory tool call is not an object")
     function = call.get("function")
     if not isinstance(function, dict):
-        return ""
+        raise ValueError("native trajectory tool call has no function object")
     arguments = function.get("arguments")
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
         except (TypeError, ValueError):
-            return ""
-    return _first_str(arguments)
+            raise ValueError("native trajectory tool arguments are malformed") from None
+    command = _first_str(arguments)
+    if not command:
+        raise ValueError("native trajectory tool call has no command")
+    return command
 
 
 def _turns_from_native_messages(messages: list[Any]) -> list[Turn]:
@@ -155,45 +159,77 @@ def _turns_from_native_messages(messages: list[Any]) -> list[Turn]:
     mini-swe-agent's stored chat-completions trajectory.
     """
     pending: dict[str, str] = {}
+    seen_call_ids: set[str] = set()
     turns: list[Turn] = []
     for item in messages:
         if not isinstance(item, dict):
-            continue
+            raise ValueError("native trajectory message is not an object")
         role = item.get("role")
         if role == "assistant":
             calls = item.get("tool_calls")
-            if not isinstance(calls, list):
+            if calls is None:
+                # Narrative assistant messages are valid and are not actions.
                 continue
+            if not isinstance(calls, list):
+                raise ValueError("native trajectory assistant tool_calls is not a list")
             for call in calls:
                 if not isinstance(call, dict):
-                    continue
+                    raise ValueError("native trajectory tool call is not an object")
                 call_id = call.get("id")
                 command = _tool_call_command(call)
-                if isinstance(call_id, str) and call_id and command:
-                    pending[call_id] = command
+                if not isinstance(call_id, str) or not call_id:
+                    raise ValueError("native trajectory tool call has no id")
+                if call_id in seen_call_ids:
+                    raise ValueError("native trajectory has duplicate tool-call id")
+                seen_call_ids.add(call_id)
+                pending[call_id] = command
         elif role == "tool":
             call_id = item.get("tool_call_id")
             if not isinstance(call_id, str) or call_id not in pending:
-                continue
+                raise ValueError("native trajectory has unmatched tool result")
             observation = _first_str(item.get("content"), item.get("output"))
             turns.append(Turn(
                 command=pending.pop(call_id),
                 observation=observation,
                 full_observation=observation,
             ))
+        elif role == "exit":
+            if not pending:
+                # Older mini-swe-agent artifacts append terminal framing after
+                # the final tool result.  It is not a second action.
+                continue
+            if len(pending) != 1:
+                raise ValueError("native trajectory exit does not identify one pending call")
+            _call_id, command = pending.popitem()
+            observation = _first_str(item.get("content"), item.get("output"))
+            turns.append(Turn(
+                command=command,
+                observation=observation,
+                full_observation=observation,
+            ))
+        elif role in {"system", "user"}:
+            # Instruction/narrative records are valid but never observations.
+            continue
+        else:
+            raise ValueError(f"native trajectory has unsupported message role: {role!r}")
+    if pending:
+        raise ValueError("native trajectory ends with unmatched tool calls")
     return turns
 
 
 def _turns_from_mini_trajectory(path: str | None) -> list[Turn]:
-    data = _load_json(path or "") or {}
+    if not path or not os.path.isfile(path):
+        return []
+    data = _load_json(path)
+    if data is None:
+        raise ValueError("native trajectory document is malformed or not an object")
     raw = data.get("messages") or data.get("trajectory") or data.get("steps") or []
     if not isinstance(raw, list):
-        return []
+        raise ValueError("native trajectory document has no message list")
+    if any(not isinstance(item, dict) for item in raw):
+        raise ValueError("native trajectory message is not an object")
     if data.get("messages") is raw and any(
-        isinstance(item, dict)
-        and item.get("role") == "assistant"
-        and isinstance(item.get("tool_calls"), list)
-        and item["tool_calls"]
+        isinstance(item, dict) and isinstance(item.get("role"), str)
         for item in raw
     ):
         return _turns_from_native_messages(raw)
@@ -632,8 +668,25 @@ def write_task_truth(jobs_dir: str, out_path: str | None = None, **kwargs: Any) 
     if not out_path:
         trial_dir = _find_trial_artifacts(jobs_dir).get("trial_dir")
         out_path = os.path.join(trial_dir or jobs_dir, "task_truth.json")
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(truth, fh, indent=2)
+    out_dir = os.path.dirname(os.path.abspath(out_path))
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=out_dir, prefix=".task_truth.",
+            suffix=".tmp", delete=False,
+        ) as fh:
+            temp_path = fh.name
+            json.dump(truth, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_path, out_path)
+        temp_path = ""
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
     write_reconciled_substrate_verdict(truth, os.path.dirname(out_path))
     return out_path
 

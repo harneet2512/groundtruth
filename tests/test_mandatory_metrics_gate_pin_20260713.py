@@ -17,8 +17,8 @@ FIX (this file pins it), in the Collect step of swebench_live_lite_full.yml:
      gt_profile_activation.json, gt_run_identity.json. Any missing => emit GT_METRICS_INCOMPLETE
      (tee'd to the trial log, citing MANDATORY_METRICS.md) + `exit 1`, the SAME fail-closed style as
      GT_PROFILE_UNPROVEN.
-  3. BASELINE (control) arm: only gt_deep_metrics_<task>.json is required (no GT artifacts exist
-     there) — the GT-only three sit under the GT_BASELINE guard.
+  3. BOTH arms require deep, performance-detail, and behavioral-detail metrics; GT-only proof
+     artifacts remain under the GT_BASELINE guard.
 
 WHERE the gate lives (justified): NOT in the liveness step but at the END of Collect, BECAUSE the
 per-task metric artifacts are PRODUCED in Collect (the two metric CLIs run there); the liveness step
@@ -34,7 +34,12 @@ pin below re-asserts the block stayed quote-balanced.
 """
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import textwrap
 
 import yaml
 
@@ -183,6 +188,29 @@ def test_deep_metrics_receives_authoritative_swebench_gold_jsonl() -> None:
     )
 
 
+def test_collect_persists_task_scoped_performance_and_behavioral_detail() -> None:
+    code = "\n".join(_code_lines(_collect_run()))
+    task_trajectory = '"$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json"'
+    performance_line = next(
+        line for line in code.splitlines() if "gt_performance_metrics.py" in line
+    )
+    behavioral_line = next(
+        line for line in code.splitlines() if "gt_behavioral_impact.py" in line
+    )
+    for line, output in (
+        (performance_line, "gt_performance_metrics_${{ matrix.task }}.json"),
+        (behavioral_line, "gt_behavioral_impact_${{ matrix.task }}.json"),
+    ):
+        assert task_trajectory in line, (
+            "mandatory detail collectors must read the exact task-scoped trajectory"
+        )
+        assert output in line and "trial_results/" in line
+    assert "--instance-id \"${{ matrix.task }}\"" in performance_line
+    assert "--gold-jsonl benchmarks/data/swebench_live_lite.jsonl" in performance_line
+    assert code.index("gt_deep_metrics.py") < code.index("gt_performance_metrics.py")
+    assert code.index("gt_deep_metrics.py") < code.index("gt_behavioral_impact.py")
+
+
 # ── 2. the gate: all 4 GT-arm artifacts, GT_METRICS_INCOMPLETE, exit 1 (fail-closed) ──────────
 
 
@@ -213,16 +241,162 @@ def test_gate_checks_all_four_gt_artifacts_and_fails_closed() -> None:
     )
 
 
-# ── 3. baseline (control) arm requires ONLY gt_deep_metrics (GT_BASELINE guard shape) ─────────
+# ── 3. both arms require harness metrics; GT proofs stay under the baseline guard ────────────
 
 
-def test_baseline_arm_requires_only_deep_metrics() -> None:
+def test_gate_validates_mandatory_detail_shape_and_deep_parity() -> None:
+    gate = _gate_block(_step_run_containing("GT_METRICS_INCOMPLETE"))
+    for artifact in (
+        "gt_performance_metrics_${{ matrix.task }}.json",
+        "gt_behavioral_impact_${{ matrix.task }}.json",
+    ):
+        assert artifact in gate
+    for required_validation in (
+        "performance_detail_invalid",
+        "behavioral_detail_invalid",
+        "performance_deep_parity",
+        "behavioral_deep_parity",
+        'isinstance(impact.get("deliveries"), list)',
+        'deep.get("performance") != performance',
+    ):
+        assert required_validation in gate, (
+            f"mandatory detail gate lacks validation {required_validation!r}"
+        )
+
+
+def test_mandatory_detail_validator_rejects_shape_and_parity_defects(
+    tmp_path: Path,
+) -> None:
+    gate = _gate_block(_step_run_containing("GT_METRICS_INCOMPLETE"))
+    start = gate.index("import json, sys")
+    validator = textwrap.dedent(gate[start:gate.index("\nPY", start)])
+    from scripts.swebench.gt_run_metrics import _MANDATORY_METRICS
+
+    performance = {
+        "schema": "gt_performance_metrics.v1",
+        "metric_applicability": {},
+    }
+    sample_by_type = {
+        "bool": True,
+        "bool_per_file": {"src/example.py": True},
+        "rate": 0.5,
+        "nonnegative_int": 1,
+        "nonnegative_number": 1.0,
+        "run_ratio": None,
+    }
+    for section, definitions in _MANDATORY_METRICS.items():
+        if section == "behavioral_impact":
+            continue
+        performance[section] = {
+            metric: sample_by_type[value_type]
+            for metric, value_type in definitions
+        }
+    performance["token_efficiency"]["cost_per_resolved_scope"] = "run_aggregate"
+    summary = {
+        "total_deliveries": 0, "total_pivots": 0, "impact_rate": 0.0,
+        "per_tag_impact": {}, "gt_tokens_injected": 0,
+        "nudge_compliance_rate": None,
+    }
+
+    def run(deep: dict, perf: dict, impact: dict) -> subprocess.CompletedProcess[str]:
+        paths = []
+        for index, payload in enumerate((deep, perf, impact)):
+            path = tmp_path / f"detail_{index}.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            paths.append(str(path))
+        return subprocess.run(
+            [sys.executable, "-c", validator, *paths],
+            text=True, capture_output=True, check=False,
+            env={
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join((
+                    str(_ROOT / "src"),
+                    str(_ROOT / "scripts" / "swebench"),
+                    str(_ROOT / "scripts" / "metrics"),
+                )),
+            },
+        )
+
+    deep = {"performance": performance, "behavioral_impact": dict(summary)}
+    impact = {"deliveries": [], "summary": dict(summary)}
+    assert run(deep, performance, impact).returncode == 0
+
+    empty_sections = {
+        "schema": "gt_performance_metrics.v1",
+        "metric_applicability": {},
+        **{
+            section: {}
+            for section in _MANDATORY_METRICS
+            if section != "behavioral_impact"
+        },
+    }
+    empty = run({**deep, "performance": empty_sections}, empty_sections, impact)
+    assert empty.returncode != 0
+    assert "performance_detail_invalid" in empty.stderr
+
+    missing_metric = json.loads(json.dumps(performance))
+    del missing_metric["localization"]["gold_rank"]
+    missing = run(
+        {**deep, "performance": missing_metric}, missing_metric, impact
+    )
+    assert missing.returncode != 0
+    assert "localization.gold_rank:unmeasured" in missing.stderr
+
+    non_applicable = json.loads(json.dumps(performance))
+    non_applicable["localization"]["gold_rank"] = None
+    non_applicable["metric_applicability"] = {
+        "localization": {
+            "gold_rank": {
+                "applicable": False,
+                "predicate": "n_gold_files > 0",
+                "reason": "true gold file denominator is absent",
+            }
+        }
+    }
+    assert run(
+        {**deep, "performance": non_applicable}, non_applicable, impact
+    ).returncode == 0
+
+    invalid_applicability = json.loads(json.dumps(non_applicable))
+    invalid_applicability["metric_applicability"]["localization"]["gold_rank"].pop(
+        "reason"
+    )
+    assert run(
+        {**deep, "performance": invalid_applicability},
+        invalid_applicability,
+        impact,
+    ).returncode != 0
+
+    wrong_schema = {**performance, "schema": "gt_performance_metrics.v0"}
+    schema_result = run(
+        {**deep, "performance": wrong_schema}, wrong_schema, impact
+    )
+    assert schema_result.returncode != 0
+    assert "record:schema" in schema_result.stderr
+
+    malformed_performance = dict(performance)
+    malformed_performance.pop("token_efficiency")
+    assert run(deep, malformed_performance, impact).returncode != 0
+    assert run(deep, performance, {"deliveries": {}, "summary": summary}).returncode != 0
+    assert run({**deep, "performance": {}}, performance, impact).returncode != 0
+    divergent = {**deep, "behavioral_impact": {**summary, "total_pivots": 1}}
+    assert run(divergent, performance, impact).returncode != 0
+
+
+def test_baseline_arm_requires_all_harness_metrics_but_not_gt_proofs() -> None:
     gate = _gate_block(_step_run_containing("GT_METRICS_INCOMPLETE"))
     assert "GT_BASELINE" in gate, (
-        "the gate must carry a GT_BASELINE guard so the baseline (control) arm requires ONLY "
-        "gt_deep_metrics (no GT artifacts exist on the baseline arm)"
+        "the gate must carry a GT_BASELINE guard for GT-only proof artifacts"
     )
     guard = gate.index("GT_BASELINE")
+    for common_metric in (
+        "gt_deep_metrics_${{ matrix.task }}.json",
+        "gt_performance_metrics_${{ matrix.task }}.json",
+        "gt_behavioral_impact_${{ matrix.task }}.json",
+    ):
+        assert gate.index(common_metric) < guard, (
+            f"{common_metric!r} must be required unconditionally on both arms"
+        )
     # gt_deep_metrics is required on BOTH arms → checked BEFORE the guard (unconditional).
     assert gate.index("gt_deep_metrics_${{ matrix.task }}.json") < guard, (
         "gt_deep_metrics_<task>.json must be required unconditionally (both arms), i.e. BEFORE the "

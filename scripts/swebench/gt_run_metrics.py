@@ -251,6 +251,56 @@ def _metric_state(
     )
 
 
+def validate_task_performance_record(performance: object) -> list[str]:
+    """Return semantic contract failures for one standalone PERF detail record.
+
+    The run aggregator remains the authority for the exact mandatory inventory,
+    value types, and applicability semantics.  Behavioral-impact rows live in
+    their separate detail artifact and ``cost_per_resolved`` is intentionally a
+    run-scope ratio; every other PERF value must be measured or carry a valid
+    non-applicability contract.
+    """
+    if not isinstance(performance, dict):
+        return ["record:not_object"]
+
+    issues: list[str] = []
+    if performance.get("schema") != "gt_performance_metrics.v1":
+        issues.append("record:schema")
+    if performance.get("error"):
+        issues.append("record:error")
+    if performance.get("status") == "UNMEASURED":
+        issues.append("record:unmeasured")
+    if not isinstance(performance.get("metric_applicability"), dict):
+        issues.append("record:metric_applicability")
+
+    row = {
+        "performance": performance,
+        "metric_applicability": performance.get("metric_applicability"),
+    }
+    for section, definitions in _MANDATORY_METRICS.items():
+        if section == "behavioral_impact":
+            continue
+        section_data = performance.get(section)
+        if not isinstance(section_data, dict):
+            issues.append(f"{section}:section")
+            continue
+        for metric, value_type in definitions:
+            if value_type == "run_ratio":
+                if (
+                    metric not in section_data
+                    or section_data.get(metric) is not None
+                    or section_data.get(metric + "_scope") != "run_aggregate"
+                ):
+                    issues.append(f"{section}.{metric}:run_scope_contract")
+                continue
+            state, _value, _contract = _metric_state(
+                row, section, metric, value_type
+            )
+            if state not in {"measured", "not_applicable"}:
+                issues.append(f"{section}.{metric}:{state}")
+    return issues
+
+
 def _distribution(
     records: list[dict], section: str, metric: str, value_type: str
 ) -> dict:

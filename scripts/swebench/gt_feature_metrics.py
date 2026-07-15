@@ -873,6 +873,23 @@ def _baseline_trajectory_path(task: str, baseline_root: str | None) -> str | Non
 # Consumption receipts (W1 v2) — the ONLY consumption source; tool output cannot promote.
 # ---------------------------------------------------------------------------
 
+def _physical_identity_conflicts(entries: object) -> set[str]:
+    """Return physical ids with non-identical owners, independent of entry order."""
+    claims: dict[str, set[str]] = defaultdict(set)
+    if not isinstance(entries, list):
+        return set()
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("source") != "trajectory":
+            continue
+        physical_id = entry.get("physical_id")
+        if not isinstance(physical_id, str) or not physical_id:
+            continue
+        claims[physical_id].add(json.dumps(
+            entry, sort_keys=True, ensure_ascii=False, default=str
+        ))
+    return {physical_id for physical_id, variants in claims.items() if len(variants) > 1}
+
+
 def _consumption_by_fact_class(
     trajectory: dict, runtime_ledger_path: str | None,
 ) -> "tuple[dict[str, dict], dict]":
@@ -888,11 +905,22 @@ def _consumption_by_fact_class(
     ledger = mod.build_consumption_ledger(trajectory, runtime_ledger_path=runtime_ledger_path)
     out: dict[str, dict] = defaultdict(lambda: {"delivered": 0, "referenced": 0, "acted": 0, "max_level": 0})
     ledger_join_required = bool(runtime_ledger_path)
-    for entry in ledger.get("entries", []) or []:
+    conflict_ids = _physical_identity_conflicts(ledger.get("entries"))
+    conflict_ids.update(ledger.get("physical_identity_conflict_ids") or [])
+    seen_physical: set[str] = set()
+    for entry_index, entry in enumerate(ledger.get("entries", []) or []):
         if not isinstance(entry, dict) or entry.get("source") != "trajectory":
             continue
         if ledger_join_required and entry.get("joined") is not True:
             continue
+        physical_id = str(
+            entry.get("physical_id") or f"entry:{entry_index}"
+        )
+        if physical_id in conflict_ids:
+            continue
+        if physical_id in seen_physical:
+            continue
+        seen_physical.add(physical_id)
         kind = str(entry.get("kind") or "")
         fc = layer_to_fact_class(str(entry.get("ledger_layer") or kind))
         if fc is None:
@@ -1523,7 +1551,8 @@ def _row_has_seal_join(
             continue
         if entry.get("joined") is not True or entry.get("join_method") != "seal":
             continue
-        if entry.get("content_sha256_16") != seal or entry.get("chars") != chars:
+        entry_chars = entry.get("ledger_chars", entry.get("chars"))
+        if entry.get("content_sha256_16") != seal or entry_chars != chars:
             continue
         if entry.get("ledger_layer") != row.get("layer"):
             continue
@@ -1887,9 +1916,17 @@ def collect_task(
     timeline = _timeline(traj)
     ledger_by_fc = classify_ledger(rows)
     consumption_by_fc, cons_ledger = _consumption_by_fact_class(traj, ledger_path)
+    physical_identity_conflicts = _physical_identity_conflicts(
+        cons_ledger.get("entries")
+    )
+    physical_identity_conflicts.update(
+        cons_ledger.get("physical_identity_conflict_ids") or []
+    )
     visible_audit_complete = (
         _visible_audit_inputs_complete(traj_path, ledger_path)
         and cons_ledger.get("schema") == "gt.consumption_ledger.v2"
+        and cons_ledger.get("visible_audit_complete") is True
+        and not physical_identity_conflicts
     )
     state_by_fc = state_predicates(timeline, ledger_by_fc)
     infra_signals = _infra_signals(rows, ledger_by_fc)
@@ -1936,15 +1973,23 @@ def collect_task(
 
     messages = traj.get("messages", []) or []
     observation_owners = _model_observation_owners(messages)
-    doses_by_observation: Counter = Counter()
-    for entry in cons_ledger.get("entries") or []:
+    physical_by_observation: dict[int, set[str]] = defaultdict(set)
+    for entry_index, entry in enumerate(cons_ledger.get("entries") or []):
         if not isinstance(entry, dict) or entry.get("source") != "trajectory":
             continue
         if int(entry.get("receipt") or 0) < 1:
             continue
         msg_index = entry.get("msg_index")
         if isinstance(msg_index, int):
-            doses_by_observation[observation_owners.get(msg_index, msg_index)] += 1
+            owner = observation_owners.get(msg_index, msg_index)
+            physical_id = str(
+                entry.get("physical_id") or f"entry:{entry_index}"
+            )
+            physical_by_observation[owner].add(physical_id)
+    doses_by_observation = Counter({
+        owner: len(physical_ids)
+        for owner, physical_ids in physical_by_observation.items()
+    })
     max_dose = max(doses_by_observation.values(), default=0)
     dose_violations = sum(1 for count in doses_by_observation.values() if count > 1)
     leak_gate: bool | None = not leaks if visible_audit_complete else None
@@ -2004,6 +2049,12 @@ def collect_task(
         leak_free=leak_gate, dose_ok=dose_gate,
     )
     ss_integrity["visible_audit_complete"] = visible_audit_complete
+    ss_integrity["physical_identity_conflict_count"] = len(
+        physical_identity_conflicts
+    )
+    ss_integrity["physical_identity_conflict_ids"] = sorted(
+        physical_identity_conflicts
+    )
     if not visible_audit_complete:
         ss_integrity["required_inputs_complete"] = False
         missing = set(ss_integrity.get("missing_required_inputs") or [])

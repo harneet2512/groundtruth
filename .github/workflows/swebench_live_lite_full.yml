@@ -135,10 +135,23 @@ jobs:
       matrix: ${{ steps.gen.outputs.matrix }}
       total: ${{ steps.gen.outputs.total }}
       bench_sha: ${{ steps.pro_bench_clone.outputs.bench_sha }}
+      gt_sha: ${{ steps.resolve_gt.outputs.gt_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.gt_ref || 'gt-trial' }}
+
+      - name: Resolve requested GT ref once
+        id: resolve_gt
+        shell: bash
+        run: |
+          GT_PREPARED_SHA="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ ! "$GT_PREPARED_SHA" =~ ^[0-9a-f]{40,64}$ ]]; then
+            echo "GT_PREPARED_IDENTITY_INVALID: requested ref did not resolve to a canonical commit" >&2
+            exit 1
+          fi
+          echo "gt_sha=$GT_PREPARED_SHA" >> "$GITHUB_OUTPUT"
+          echo "[GT] prepared immutable identity: $GT_PREPARED_SHA"
 
       - uses: actions/setup-python@v5
         with:
@@ -462,18 +475,25 @@ jobs:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.gt_ref || 'gt-trial' }}
+          ref: ${{ needs.prepare.outputs.gt_sha }}
           lfs: false
 
       - name: Resolve checked-out GT commit
         shell: bash
+        env:
+          GT_PREPARED_SHA: ${{ needs.prepare.outputs.gt_sha }}
         run: |
           GT_CHECKOUT_SHA="$(git rev-parse --verify 'HEAD^{commit}')"
           if [[ ! "$GT_CHECKOUT_SHA" =~ ^[0-9a-f]{40,64}$ ]]; then
             echo "GT_CHECKOUT_IDENTITY_INVALID: git rev-parse returned no canonical commit" >&2
             exit 1
           fi
+          if [ "$GT_CHECKOUT_SHA" != "$GT_PREPARED_SHA" ]; then
+            echo "GT_CHECKOUT_IDENTITY_MISMATCH: prepared=$GT_PREPARED_SHA checkout=$GT_CHECKOUT_SHA" >&2
+            exit 1
+          fi
           echo "GT_CHECKOUT_SHA=$GT_CHECKOUT_SHA" >> "$GITHUB_ENV"
+          echo "GT_PREPARED_SHA=$GT_PREPARED_SHA" >> "$GITHUB_ENV"
           echo "GT_GITHUB_SHA=$GT_CHECKOUT_SHA" >> "$GITHUB_ENV"
           echo "[GT] checkout identity: $GT_CHECKOUT_SHA"
 
@@ -810,6 +830,7 @@ jobs:
               'substrate_digest_expected': os.environ.get('GT_ID_EXPECTED') or '',
               'substrate_digest_actual': os.environ.get('GT_ID_ACTUAL') or '',
               'gt_ref_requested': os.environ.get('GT_ID_GT_REF_REQUESTED') or '',
+              'gt_ref_prepared_sha': os.environ.get('GT_PREPARED_SHA') or '',
               'gt_ref_resolved': os.environ.get('GT_CHECKOUT_SHA') or '',
               'gt_ref_resolved_source': 'git_rev_parse_head',
               'workflow_dispatch_sha': os.environ.get('GT_ID_WORKFLOW_DISPATCH_SHA') or '',
@@ -841,6 +862,8 @@ jobs:
           digest = re.compile(r'^[0-9a-f]{64}$')
           required = {
               'schema': doc.get('schema') == 'gt.run_identity.v1',
+              'gt_ref_prepared_sha': bool(canonical.fullmatch(str(doc.get('gt_ref_prepared_sha') or ''))),
+              'gt_ref_prepared_matches_checkout': doc.get('gt_ref_prepared_sha') == os.environ.get('GT_CHECKOUT_SHA'),
               'gt_ref_resolved': bool(canonical.fullmatch(str(doc.get('gt_ref_resolved') or ''))),
               'gt_ref_matches_checkout': doc.get('gt_ref_resolved') == os.environ.get('GT_CHECKOUT_SHA'),
               'gt_ref_resolved_source': doc.get('gt_ref_resolved_source') == 'git_rev_parse_head',
@@ -911,6 +934,8 @@ jobs:
           file_sha = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
           required = {
               'schema': doc.get('schema') == 'gt.run_identity.v1',
+              'gt_ref_prepared_sha': bool(canonical.fullmatch(str(doc.get('gt_ref_prepared_sha') or ''))),
+              'gt_ref_prepared_matches_checkout': doc.get('gt_ref_prepared_sha') == os.environ.get('GT_CHECKOUT_SHA'),
               'gt_ref_resolved': bool(canonical.fullmatch(str(doc.get('gt_ref_resolved') or ''))),
               'gt_ref_matches_checkout': doc.get('gt_ref_resolved') == os.environ.get('GT_CHECKOUT_SHA'),
               'gt_ref_resolved_source': doc.get('gt_ref_resolved_source') == 'git_rev_parse_head',
@@ -1790,6 +1815,10 @@ jobs:
           cp "/tmp/gt_deep_metrics_${{ matrix.task }}.md"   trial_results/ 2>/dev/null || true
           cp "/tmp/gt_deep_metrics_${{ matrix.task }}.json" "$TASK_ARTIFACT_ROOT/" 2>/dev/null || true
 
+          # Mandatory per-task details, derived from the exact task-scoped trajectory.
+          GT_GOLD_JSONL=benchmarks/data/swebench_live_lite.jsonl PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_performance_metrics.py "$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json" /tmp/gt --instance-id "${{ matrix.task }}" --gold-jsonl benchmarks/data/swebench_live_lite.jsonl --out "trial_results/gt_performance_metrics_${{ matrix.task }}.json" 2>&1 | tail -2 || echo PERF_METRICS_WARN
+          PYTHONPATH=${{ github.workspace }}/scripts/swebench python3 scripts/swebench/gt_behavioral_impact.py "$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json" --out "trial_results/gt_behavioral_impact_${{ matrix.task }}.json" 2>&1 | tail -2 || echo IMPACT_METRICS_WARN
+
           # Per-feature v3 behavioural-contract metrics (MANDATORY_METRICS.md §12, gt.feature_metrics.v1).
           # gt_feature_metrics reads a run_dir of per-task subdirs holding a mini trajectory + runtime
           # ledger + oracle events; it writes gt_feature_metrics_<task>.json into that task subdir. The
@@ -1836,6 +1865,7 @@ jobs:
 
           # TASK_TRUTH_FINAL: regenerate after deep metrics and outcome exist. Only this finalized
           # ledger is uploaded, so pre-metrics null enrichment cannot survive collection.
+          rm -f "$TASK_ARTIFACT_ROOT/task_truth.json" trial_results/task_truth.json
           GT_INSTANCE_ID="${{ matrix.task }}" GT_MATRIX_TASK="${{ matrix.task }}" \
             GT_TASK_DIR="$TASK_ARTIFACT_ROOT" GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
             GT_RUNTIME_LEDGER="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${{ matrix.task }}.jsonl" \
@@ -1859,6 +1889,56 @@ jobs:
           _MM_MISSING=""
           # deep-metrics is required on BOTH arms (baseline has no GT artifacts, but always has this).
           [ -s "trial_results/gt_deep_metrics_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_deep_metrics_${{ matrix.task }}.json"
+          [ -s "trial_results/gt_performance_metrics_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_performance_metrics_${{ matrix.task }}.json"
+          [ -s "trial_results/gt_behavioral_impact_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_behavioral_impact_${{ matrix.task }}.json"
+          [ -s "trial_results/task_truth.json" ] || _MM_MISSING="$_MM_MISSING task_truth.json"
+          python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); t=d.get("trajectory_state") or {}; i=d.get("trajectory_integrity") or {}; sys.exit(0 if d.get("schema")=="gt.task_truth.v1" and isinstance(t.get("turns_observed"),int) and t.get("turns_observed")>=0 and int(i.get("mini_bytes") or 0)>0 else 1)' \
+            "trial_results/task_truth.json" \
+            || _MM_MISSING="$_MM_MISSING task_truth_trajectory_integrity"
+          if ! python3 - \
+            "trial_results/gt_deep_metrics_${{ matrix.task }}.json" \
+            "trial_results/gt_performance_metrics_${{ matrix.task }}.json" \
+            "trial_results/gt_behavioral_impact_${{ matrix.task }}.json" <<'PY'
+          import json, sys
+          from gt_run_metrics import validate_task_performance_record
+
+          try:
+              deep, performance, impact = (
+                  json.load(open(path, encoding="utf-8")) for path in sys.argv[1:4]
+              )
+          except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError):
+              print("performance_detail_invalid behavioral_detail_invalid", file=sys.stderr)
+              raise SystemExit(1)
+          performance_issues = validate_task_performance_record(performance)
+          if performance_issues:
+              print(
+                  "performance_detail_invalid:" + ",".join(performance_issues),
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          summary = impact.get("summary") if isinstance(impact, dict) else None
+          if (not isinstance(impact, dict)
+                  or not isinstance(impact.get("deliveries"), list)
+                  or not isinstance(summary, dict)
+                  or any(key not in summary for key in (
+                      "total_deliveries", "total_pivots", "impact_rate",
+                      "per_tag_impact", "gt_tokens_injected",
+                      "nudge_compliance_rate"))):
+              print("behavioral_detail_invalid", file=sys.stderr)
+              raise SystemExit(1)
+          if deep.get("performance") != performance:
+              print("performance_deep_parity", file=sys.stderr)
+              raise SystemExit(1)
+          deep_behavioral = deep.get("behavioral_impact")
+          if (not isinstance(deep_behavioral, dict)
+                  or any(summary.get(key) != value
+                         for key, value in deep_behavioral.items())):
+              print("behavioral_deep_parity", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+          then
+            _MM_MISSING="$_MM_MISSING mandatory_metric_detail_invalid_or_parity"
+          fi
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
             # GT-on arm ONLY: the full v3 per-task set (feature metrics + the two already-gated proofs).
             [ -s "trial_results/gt_feature_metrics_${{ matrix.task }}.json" ] || _MM_MISSING="$_MM_MISSING gt_feature_metrics_${{ matrix.task }}.json"
@@ -1911,7 +1991,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.gt_ref || 'gt-trial' }}
+          ref: ${{ needs.prepare.outputs.gt_sha }}
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/all

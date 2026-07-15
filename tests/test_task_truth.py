@@ -192,6 +192,133 @@ def test_native_mini_messages_pair_tool_calls_without_scanning_instructions(tmp_
     assert state.delivered_markers == [(2, "gt-evidence", "")]
 
 
+def test_native_zero_action_messages_never_scan_instruction_markers(tmp_path):
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+    trajectory.write_text(json.dumps({"messages": [
+        {"role": "system", "content": "Available tag <gt-nudge>."},
+        {"role": "user", "content": "Template tag <gt-contract>."},
+        {"role": "assistant", "content": "", "tool_calls": []},
+    ]}), encoding="utf-8")
+
+    turns = tt._turns_from_mini_trajectory(str(trajectory))
+
+    assert turns == []
+    assert tt.derive_state(turns).delivered_markers == []
+
+
+def test_native_terminal_exit_completes_the_pending_action(tmp_path):
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+    trajectory.write_text(json.dumps({"messages": [
+        {
+            "role": "assistant", "content": "", "tool_calls": [{
+                "id": "submit", "type": "function",
+                "function": {"name": "bash", "arguments": json.dumps({
+                    "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+                })},
+            }],
+        },
+        {"role": "exit", "content": "submitted"},
+    ]}), encoding="utf-8")
+
+    turns = tt._turns_from_mini_trajectory(str(trajectory))
+
+    assert len(turns) == 1
+    assert turns[0].command == "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    assert turns[0].observation == "submitted"
+
+
+def test_native_terminal_exit_after_matched_result_is_framing_only(tmp_path):
+    """Older trajectories record LimitsExceeded after the final result."""
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+    trajectory.write_text(json.dumps({"messages": [
+        {
+            "role": "assistant", "content": "", "tool_calls": [{
+                "id": "last", "type": "function",
+                "function": {"name": "bash", "arguments": json.dumps({
+                    "command": "pytest -q",
+                })},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "last", "content": "1 passed"},
+        {"role": "exit", "content": "LimitsExceeded"},
+    ]}), encoding="utf-8")
+
+    turns = tt._turns_from_mini_trajectory(str(trajectory))
+
+    assert len(turns) == 1
+    assert turns[0].command == "pytest -q"
+    assert turns[0].observation == "1 passed"
+
+
+def test_native_reused_resolved_tool_call_id_fails_closed(tmp_path):
+    call = lambda command: {
+        "role": "assistant", "content": "", "tool_calls": [{
+            "id": "reused", "type": "function",
+            "function": {"name": "bash", "arguments": json.dumps({
+                "command": command,
+            })},
+        }],
+    }
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+    trajectory.write_text(json.dumps({"messages": [
+        call("first"),
+        {"role": "tool", "tool_call_id": "reused", "content": "one"},
+        call("second"),
+        {"role": "tool", "tool_call_id": "reused", "content": "two"},
+    ]}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate tool-call id"):
+        tt._turns_from_mini_trajectory(str(trajectory))
+
+
+@pytest.mark.parametrize("messages", [
+    [{"role": "assistant", "tool_calls": []}, "corrupt-record"],
+    [{"role": "assistant", "tool_calls": {"id": "not-a-list"}}],
+    [{"role": "unsupported", "content": "not native schema"}],
+])
+def test_native_malformed_message_containers_fail_closed(tmp_path, messages):
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+    trajectory.write_text(json.dumps({"messages": messages}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="native trajectory"):
+        tt._turns_from_mini_trajectory(str(trajectory))
+
+
+def test_native_malformed_json_document_fails_closed(tmp_path):
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+    trajectory.write_text("{", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="native trajectory document"):
+        tt._turns_from_mini_trajectory(str(trajectory))
+
+
+@pytest.mark.parametrize("failure", ["duplicate", "malformed", "unmatched"])
+def test_native_malformed_pairing_fails_closed(tmp_path, failure):
+    call = {
+        "role": "assistant", "content": "", "tool_calls": [{
+            "id": "same", "type": "function",
+            "function": {"name": "bash", "arguments": json.dumps({
+                "command": "sed -n '1,2p' src/app.py",
+            })},
+        }],
+    }
+    messages = [call]
+    if failure == "duplicate":
+        messages.extend([
+            call,
+            {"role": "tool", "tool_call_id": "same", "content": "x"},
+        ])
+    elif failure == "malformed":
+        messages[0]["tool_calls"][0]["function"]["arguments"] = "{"
+    else:
+        messages = [{"role": "tool", "tool_call_id": "missing", "content": "x"}]
+    trajectory = tmp_path / "mini-swe-agent.trajectory.json"
+    trajectory.write_text(json.dumps({"messages": messages}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="native trajectory"):
+        tt._turns_from_mini_trajectory(str(trajectory))
+
+
 def test_reconciled_substrate_verdict_shape():
     truth = {
         "instance_id": "abs-module-cache-flags",

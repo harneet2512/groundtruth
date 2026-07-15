@@ -117,31 +117,66 @@ def _content_hash16(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
-def _locate_seal(content: str, n_chars: int, sha16: str) -> int | None:
-    """Locate the exact sealed delivery window in model-visible ``content``.
+def _locate_seal_spans(
+    content: str, n_chars: int, sha16: str,
+) -> list[tuple[int, int]]:
+    """Locate exact sealed windows as half-open *character* spans.
 
     The seam records character length and hashes the UTF-8 rendered bytes. Try
     the ASCII-equivalent byte window first, then the authoritative character
-    window for non-ASCII payloads. Basename, iteration, and length proximity
-    are not byte-delivery proof.
+    window for non-ASCII payloads. A byte-sized match is converted back to
+    character offsets before it is returned; callers must never slice a Python
+    string with UTF-8 byte offsets.
     """
     if not content or n_chars <= 0 or not sha16:
-        return None
+        return []
+    spans: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
     raw = content.encode("utf-8")
     if n_chars <= len(raw):
         for start in range(0, len(raw) - n_chars + 1):
-            if hashlib.sha256(raw[start:start + n_chars]).hexdigest()[:16] != sha16:
+            raw_window = raw[start:start + n_chars]
+            if hashlib.sha256(raw_window).hexdigest()[:16] != sha16:
                 continue
             try:
-                return len(raw[:start].decode("utf-8"))
+                char_start = len(raw[:start].decode("utf-8"))
+                char_end = char_start + len(raw_window.decode("utf-8"))
             except UnicodeDecodeError:
                 continue
+            span = (char_start, char_end)
+            if span not in seen:
+                spans.append(span)
+                seen.add(span)
     if n_chars <= len(content):
         for start in range(0, len(content) - n_chars + 1):
             window = content[start:start + n_chars]
             if hashlib.sha256(window.encode("utf-8")).hexdigest()[:16] == sha16:
-                return start
-    return None
+                span = (start, start + n_chars)
+                if span not in seen:
+                    spans.append(span)
+                    seen.add(span)
+    return spans
+
+
+def _locate_seal(content: str, n_chars: int, sha16: str) -> int | None:
+    """Backward-compatible first-match offset for internal/contract callers."""
+    spans = _locate_seal_spans(content, n_chars, sha16)
+    return spans[0][0] if spans else None
+
+
+def _spans_overlap(left: tuple[int, int], right: tuple[int, int]) -> bool:
+    """Return whether non-empty half-open character spans share visible bytes."""
+    return left[0] < right[1] and right[0] < left[1]
+
+
+def _span_contains(outer: tuple[int, int], inner: tuple[int, int]) -> bool:
+    """Return whether ``outer`` fully accounts for ``inner``."""
+    return outer[0] <= inner[0] and inner[1] <= outer[1]
+
+
+def _physical_id(msg_index: int, start: int, end: int) -> str:
+    """Stable identity for one physical model-visible character interval."""
+    return f"m{msg_index}:{start}:{end}"
 
 
 def _typed_lineage_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -553,6 +588,12 @@ def _build_v2(
                 "ledger_chars": None,
                 "join_method": None,
                 "source": "trajectory",
+                "legacy_tag": True,
+                "span_start": mm.start(),
+                "span_end": mm.end(),
+                "physical_span_start": mm.start(),
+                "physical_span_end": mm.end(),
+                "physical_id": _physical_id(i, mm.start(), mm.end()),
             })
 
     # 3) Join delivered runtime-ledger rows to trajectory blocks.
@@ -563,11 +604,13 @@ def _build_v2(
         rows = _load_delivered_ledger_rows(runtime_ledger_path)
         ledger_rows_delivered = len(rows)
         used: set[int] = set()
+        merged_aliases: set[int] = set()
 
-        # Mutable observation buffers prevent two duplicate ledger rows from
-        # claiming the same byte window. Only channels the model actually saw
-        # are eligible for Gate-1 delivery proof.
+        # Track claimed spans without rewriting observation text. Rewriting a
+        # buffer shifts every later character offset and corrupts Unicode and
+        # same-message reconciliation.
         visible_buffers: list[str] = []
+        claimed_spans: list[list[tuple[int, int]]] = []
         for m in messages:
             role, mtype = m.get("role"), m.get("type")
             content = m.get("content")
@@ -577,6 +620,7 @@ def _build_v2(
                     or mtype == "function_call_output"
                 ) else ""
             )
+            claimed_spans.append([])
 
         def _basename_match(bf: str | None, rf: str | None) -> bool:
             if not bf or not rf:
@@ -588,41 +632,82 @@ def _build_v2(
             chars = int(row.get("chars_delivered") or 0)
             it = row.get("iteration")
             chosen: int | None = None
+            aliases: list[int] = []
             method = None
             seal = str(row.get("content_sha256_16") or "")
 
             # SS-LIVE Gate 1: a sealed row joins only by its exact rendered
             # bytes. Locate and consume the matching observation window.
             seal_home: int | None = None
+            seal_span: tuple[int, int] | None = None
             seal_payload = ""
             if seal and chars > 0:
                 for msg_index, content in enumerate(visible_buffers):
-                    offset = _locate_seal(content, chars, seal)
-                    if offset is None:
-                        continue
-                    seal_home = msg_index
-                    seal_payload = content[offset:offset + chars]
-                    visible_buffers[msg_index] = content[:offset] + content[offset + chars:]
-                    break
+                    for span in _locate_seal_spans(content, chars, seal):
+                        if any(_spans_overlap(span, prior) for prior in claimed_spans[msg_index]):
+                            continue
+                        seal_home = msg_index
+                        seal_span = span
+                        seal_payload = content[span[0]:span[1]]
+                        claimed_spans[msg_index].append(span)
+                        break
+                    if seal_home is not None:
+                        break
 
-                if seal_home is not None:
-                    # A legacy tagged block may already represent these exact
-                    # bytes. Enrich it instead of double-counting the delivery.
-                    exact = [
+                if seal_home is not None and seal_span is not None:
+                    # Legacy tags and sealed windows are two representations of
+                    # one physical delivery only when the byte-proven sealed
+                    # window fully contains the legacy framing. Partial overlap
+                    # cannot account for the tag and must remain unjoined.
+                    overlapping = [
                         k for k, e in enumerate(entries)
                         if k not in used
                         and e["source"] == "trajectory"
                         and e["msg_index"] == seal_home
-                        and e["content_sha256_16"] == seal
-                        and e["chars"] == chars
+                        and e.get("legacy_tag") is True
+                        and isinstance(e.get("span_start"), int)
+                        and isinstance(e.get("span_end"), int)
+                        and _span_contains(
+                            seal_span, (int(e["span_start"]), int(e["span_end"]))
+                        )
                     ]
-                    if exact:
-                        chosen = exact[0]
+                    if overlapping:
+                        chosen = overlapping[0]
+                        aliases = overlapping[1:]
+                        e = entries[chosen]
+                        legacy_spans = [
+                            (int(entries[k]["span_start"]), int(entries[k]["span_end"]))
+                            for k in overlapping
+                        ]
+                        legacy_span = legacy_spans[0]
+                        receipt, ref_idx, act_idx, verif = _receipt_for(
+                            seal_home, seal_payload, str(rf) or None
+                        )
+                        e["legacy_span_start"], e["legacy_span_end"] = legacy_span
+                        e["legacy_spans"] = [list(span) for span in legacy_spans]
+                        e["span_start"], e["span_end"] = seal_span
+                        e["physical_span_start"] = seal_span[0]
+                        e["physical_span_end"] = seal_span[1]
+                        e["physical_id"] = _physical_id(
+                            seal_home, seal_span[0], seal_span[1]
+                        )
+                        e["kind"] = str(row.get("layer") or "unknown")
+                        e["delivery_channel"] = (
+                            "brief" if messages[seal_home].get("role") == "user"
+                            else "runtime"
+                        )
+                        e["file_path"] = str(rf) or None
+                        e["rendered_text"] = seal_payload
+                        e["chars"] = len(seal_payload)
+                        e["content_sha256_16"] = seal
+                        e["receipt"] = receipt
+                        e["referenced_msg_index"] = ref_idx
+                        e["acted_msg_index"] = act_idx
+                        e["verification_followup"] = verif
                     else:
                         receipt, ref_idx, act_idx, verif = _receipt_for(
                             seal_home, seal_payload, str(rf) or None
                         )
-                        leak_hits.update(scan_test_identity_leaks(seal_payload))
                         entries.append({
                             "msg_index": seal_home,
                             "tool_ordinal": tool_ordinal[seal_home],
@@ -632,7 +717,7 @@ def _build_v2(
                                 else "runtime"
                             ),
                             "file_path": str(rf) or None,
-                            "chars": chars,
+                            "chars": len(seal_payload),
                             "rendered_text": seal_payload,
                             "content_sha256_16": seal,
                             "receipt": receipt,
@@ -646,8 +731,17 @@ def _build_v2(
                             "ledger_chars": None,
                             "join_method": None,
                             "source": "trajectory",
+                            "legacy_tag": False,
+                            "span_start": seal_span[0],
+                            "span_end": seal_span[1],
+                            "physical_span_start": seal_span[0],
+                            "physical_span_end": seal_span[1],
+                            "physical_id": _physical_id(
+                                seal_home, seal_span[0], seal_span[1]
+                            ),
                         })
                         chosen = len(entries) - 1
+                    leak_hits.update(scan_test_identity_leaks(seal_payload))
                     method = "seal"
 
             # Backward compatibility only: old runtime ledgers predate seals.
@@ -681,6 +775,8 @@ def _build_v2(
                         method = "legacy_iteration"
             if chosen is not None:
                 used.add(chosen)
+                used.update(aliases)
+                merged_aliases.update(aliases)
                 ledger_rows_joined += 1
                 e = entries[chosen]
                 e["joined"] = True
@@ -714,7 +810,21 @@ def _build_v2(
                     "ledger_chars": chars,
                     "join_method": None,
                     "source": "ledger_only",
+                    "legacy_tag": False,
+                    "span_start": None,
+                    "span_end": None,
+                    "physical_span_start": None,
+                    "physical_span_end": None,
+                    "physical_id": None,
                 })
+        # One canonical entry owns each physical interval. Keeping overlapping
+        # legacy aliases would make downstream readers rediscover the exact
+        # double-count this reconciliation removes.
+        if merged_aliases:
+            entries = [
+                entry for index, entry in enumerate(entries)
+                if index not in merged_aliases
+            ]
         # trajectory blocks with no ledger match keep joined=False (host silent).
         for e in entries:
             if e["source"] == "trajectory" and e["joined"] is None:
@@ -725,15 +835,39 @@ def _build_v2(
             else None
         )
 
+    unjoined_visible_tags = [
+        e["physical_id"] for e in entries
+        if e.get("source") == "trajectory"
+        and e.get("legacy_tag") is True
+        and e.get("joined") is False
+    ]
+
     # 4) Aggregate.
     visible = [e for e in entries if e["source"] == "trajectory"]
-    delivered = len(visible)
-    consumed = sum(1 for e in visible if (e["receipt"] or 0) >= 3)
-    referenced = sum(1 for e in visible if (e["receipt"] or 0) >= 2)
-    verification_followup = sum(1 for e in visible if e["verification_followup"])
+    physical_groups: dict[str, list[dict[str, Any]]] = {}
+    for index, entry in enumerate(visible):
+        identity = str(entry.get("physical_id") or f"entry:{index}")
+        physical_groups.setdefault(identity, []).append(entry)
+
+    def _stable_claim(entry: dict[str, Any]) -> str:
+        return json.dumps(entry, sort_keys=True, ensure_ascii=False, default=str)
+
+    physical_identity_conflicts = sorted(
+        identity for identity, group in physical_groups.items()
+        if len({_stable_claim(entry) for entry in group}) > 1
+    )
+    unique_visible = [
+        min(group, key=_stable_claim) for group in physical_groups.values()
+    ]
+    delivered = len(unique_visible)
+    consumed = sum(1 for e in unique_visible if (e["receipt"] or 0) >= 3)
+    referenced = sum(1 for e in unique_visible if (e["receipt"] or 0) >= 2)
+    verification_followup = sum(
+        1 for e in unique_visible if e["verification_followup"]
+    )
 
     per_class: dict[str, dict[str, int]] = {}
-    for e in visible:
+    for e in unique_visible:
         pc = per_class.setdefault(
             e["kind"], {"delivered": 0, "referenced": 0, "acted": 0, "max_level": 0}
         )
@@ -757,12 +891,22 @@ def _build_v2(
         # v2 additions -----------------------------------------------------------
         "gt_blocks_referenced": referenced,
         "receipt_ladder": {"1": "delivered", "2": "referenced", "3": "acted", "4": "resolved (out of scope v2)"},
-        "receipt_distribution": _receipt_distribution(visible),
+        "receipt_distribution": _receipt_distribution(unique_visible),
         "per_class": per_class,
         "join_rate": join_rate,
         "ledger_rows_delivered": ledger_rows_delivered,
         "ledger_rows_joined": ledger_rows_joined,
         "runtime_ledger_path": runtime_ledger_path,
+        "unjoined_visible_tag_count": len(unjoined_visible_tags),
+        "unjoined_visible_tag_ids": unjoined_visible_tags,
+        "physical_identity_conflict_count": len(physical_identity_conflicts),
+        "physical_identity_conflict_ids": physical_identity_conflicts,
+        "visible_audit_complete": (
+            len(unjoined_visible_tags) == 0
+            and not physical_identity_conflicts
+            if runtime_ledger_path and os.path.isfile(runtime_ledger_path)
+            else True
+        ),
         # SS-3 defect-4: structural test-identity leaks in the delivered GT bytes.
         # MUST be [] — any hit disqualifies a consumption claim (answer leakage).
         "test_identity_leak_hits": sorted(leak_hits),

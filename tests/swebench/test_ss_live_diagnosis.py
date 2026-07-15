@@ -38,6 +38,7 @@ def _write_binding_artifacts(task_dir: Path, run_id: str = "run-1") -> None:
         "substrate_digest_expected": digest,
         "substrate_digest_actual": digest,
         "gt_ref_requested": "a" * 40,
+        "gt_ref_prepared_sha": "a" * 40,
         "gt_ref_resolved": "a" * 40,
         "seam_sha256": "b" * 64,
         "runner_sha256": "c" * 64,
@@ -470,7 +471,8 @@ def test_diagnosis_integrity_requires_exact_gt_on_identity_and_member_sources(
 
     identity_path = artifacts / "gt_run_identity.json"
     identity = json.loads(identity_path.read_text(encoding="utf-8"))
-    identity["gt_ref_requested"] = "mutable-branch"
+    identity["gt_ref_requested"] = "release/ss-diagnosis"
+    identity["gt_ref_prepared_sha"] = "e" * 40
     identity["baseline"] = True
     identity_path.write_text(json.dumps(identity), encoding="utf-8")
 
@@ -490,6 +492,65 @@ def test_diagnosis_integrity_requires_exact_gt_on_identity_and_member_sources(
     assert "run_identity:gt_ref_binding" in issues
     assert "run_identity:baseline" in issues
     assert "profile_receipt:member_source" in issues
+
+
+def test_diagnosis_integrity_accepts_symbolic_ref_bound_to_prepared_commit(
+    tmp_path: Path,
+) -> None:
+    task = "repo__task-1"
+    task_dir = tmp_path / task
+    task_dir.mkdir()
+    _write_binding_artifacts(task_dir)
+    identity_path = task_dir / "gt_artifacts" / "gt_run_identity.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity["gt_ref_requested"] = "release/ss-diagnosis-20260714"
+    identity_path.write_text(json.dumps(identity), encoding="utf-8")
+
+    integrity = diagnosis._diagnosis_integrity(
+        {task: (task_dir / f"gt_feature_metrics_{task}.json", {})},
+        {"run_id": "run-1"},
+        inventory.canonical_feature_inventory()["CAP"],
+    )
+
+    assert integrity["publishable"] is True
+    assert integrity["tasks"][task]["status"] == "BOUND"
+    assert integrity["identity_consensus"]["gt_ref_requested"] == (
+        "release/ss-diagnosis-20260714"
+    )
+    assert integrity["identity_consensus"]["gt_ref_prepared_sha"] == "a" * 40
+
+
+def test_diagnosis_integrity_rejects_malformed_ref_and_cross_task_disagreement(
+    tmp_path: Path,
+) -> None:
+    tasks = {}
+    for index in (1, 2):
+        task = f"repo__task-{index}"
+        task_dir = tmp_path / task
+        task_dir.mkdir()
+        _write_binding_artifacts(task_dir)
+        identity_path = task_dir / "gt_artifacts" / "gt_run_identity.json"
+        identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        identity["gt_ref_requested"] = f"release/ss-{index}"
+        identity_path.write_text(json.dumps(identity), encoding="utf-8")
+        tasks[task] = (task_dir / f"gt_feature_metrics_{task}.json", {})
+
+    integrity = diagnosis._diagnosis_integrity(
+        tasks, {"run_id": "run-1"}, inventory.canonical_feature_inventory()["CAP"]
+    )
+    assert integrity["publishable"] is False
+    assert integrity["run_issues"] == ["run_identity_consensus"]
+
+    first = tmp_path / "repo__task-1" / "gt_artifacts" / "gt_run_identity.json"
+    identity = json.loads(first.read_text(encoding="utf-8"))
+    identity["gt_ref_requested"] = "bad ref\n"
+    first.write_text(json.dumps(identity), encoding="utf-8")
+    malformed = diagnosis._diagnosis_integrity(
+        {"repo__task-1": tasks["repo__task-1"]},
+        {"run_id": "run-1"},
+        inventory.canonical_feature_inventory()["CAP"],
+    )
+    assert "run_identity:gt_ref_binding" in malformed["tasks"]["repo__task-1"]["issues"]
 
 
 def test_cli_writes_unpublishable_diagnosis_then_exits_nonzero(

@@ -73,6 +73,19 @@ def test_collect_finalizes_truth_from_explicit_task_root() -> None:
     ) in run
 
 
+def test_metrics_gate_requires_final_parsed_task_truth() -> None:
+    run = _step("trial", "Collect results")["run"]
+    gate = run[run.index('_MM_MISSING=""'):]
+    final = run[run.index("# TASK_TRUTH_FINAL:"):run.index('_MM_MISSING=""')]
+
+    assert 'rm -f "$TASK_ARTIFACT_ROOT/task_truth.json" trial_results/task_truth.json' in final
+    assert '[ -s "trial_results/task_truth.json" ]' in gate
+    assert 'd.get("schema")=="gt.task_truth.v1"' in gate
+    assert 't.get("turns_observed")>=0' in gate
+    assert 'int(i.get("mini_bytes") or 0)>0' in gate
+    assert "task_truth_trajectory_integrity" in gate
+
+
 def test_explicit_task_root_truth_observes_agent_and_final_deep_metrics(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -92,8 +105,16 @@ def test_explicit_task_root_truth_observes_agent_and_final_deep_metrics(
             ),
         },
         "messages": [
-            {"role": "assistant", "content": "inspect", "tool_calls": []},
-            {"role": "tool", "content": "done"},
+            {
+                "role": "assistant", "content": "inspect", "tool_calls": [{
+                    "id": "inspect-1", "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": json.dumps({"command": "sed -n '1,20p' conan.py"}),
+                    },
+                }],
+            },
+            {"role": "tool", "tool_call_id": "inspect-1", "content": "done"},
         ],
     }
     (task_root / "mini-swe-agent.trajectory.json").write_text(
