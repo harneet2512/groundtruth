@@ -8,8 +8,12 @@ cannot be silently forgotten again."""
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
 import os
 import tempfile
+
+import pytest
 
 _PROOF_PATH = os.path.join(
     os.path.dirname(__file__), "..", "scripts", "swebench", "gt_run_proof.py"
@@ -29,11 +33,21 @@ def test_cert_sidecars_enumeration_includes_obligations_v2():
 
 def test_mirror_copies_present_obligations_files():
     with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
-        for name in ("gt_issue_anchors.json", "gt_obligations_v2.json",
-                     "gt_obligations.md"):
-            with open(os.path.join(src, name), "w", encoding="utf-8") as f:
-                f.write("{}" if name.endswith(".json") else "- [ ] x")
-        mirrored = _mod._mirror_cert_sidecars(out, src_dir=src)
+        issue_sha = hashlib.sha256(b"current issue").hexdigest()
+        checklist = b"- [ ] x\n"
+        with open(os.path.join(src, "gt_issue_anchors.json"), "w", encoding="utf-8") as f:
+            json.dump({"issue_sha256": issue_sha}, f)
+        with open(os.path.join(src, "gt_obligations_v2.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "obligations_version": 2,
+                "issue_sha256": issue_sha,
+                "checklist_sha256": hashlib.sha256(checklist).hexdigest(),
+            }, f)
+        with open(os.path.join(src, "gt_obligations.md"), "wb") as f:
+            f.write(checklist)
+        mirrored = _mod._mirror_cert_sidecars(
+            out, expected_issue_sha256=issue_sha, src_dir=src
+        )
         assert set(mirrored) == set(_mod._CERT_SIDECARS)
         for name in _mod._CERT_SIDECARS:
             assert os.path.exists(os.path.join(out, name)), f"{name} not mirrored"
@@ -42,15 +56,58 @@ def test_mirror_copies_present_obligations_files():
 def test_mirror_is_noop_when_absent():
     # flag-off / absent source -> byte-identical no-op (nothing mirrored, no error)
     with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
-        assert _mod._mirror_cert_sidecars(out, src_dir=src) == []
+        assert _mod._mirror_cert_sidecars(
+            out, expected_issue_sha256=hashlib.sha256(b"issue").hexdigest(), src_dir=src
+        ) == []
         assert os.listdir(out) == []
 
 
 def test_mirror_partial_only_present():
-    # anchors present, obligations absent (flag off) -> only anchors mirrored
+    # Profile-off anchors remain issue-bound; only the v2 schema marker/bundle is absent.
     with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        issue_sha = hashlib.sha256(b"issue").hexdigest()
         with open(os.path.join(src, "gt_issue_anchors.json"), "w") as f:
-            f.write("{}")
-        mirrored = _mod._mirror_cert_sidecars(out, src_dir=src)
+            json.dump({"issue_sha256": issue_sha}, f)
+        mirrored = _mod._mirror_cert_sidecars(
+            out, expected_issue_sha256=issue_sha, src_dir=src
+        )
         assert mirrored == ["gt_issue_anchors.json"]
         assert not os.path.exists(os.path.join(out, "gt_obligations_v2.json"))
+
+
+def test_mirror_rejects_stale_issue_without_overwriting_destination():
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        current_sha = hashlib.sha256(b"current issue").hexdigest()
+        stale_sha = hashlib.sha256(b"stale issue").hexdigest()
+        destination = os.path.join(out, "gt_issue_anchors.json")
+        with open(destination, "wb") as f:
+            f.write(b"certified-current-bytes")
+        with open(os.path.join(src, "gt_issue_anchors.json"), "w", encoding="utf-8") as f:
+            json.dump({"issue_sha256": stale_sha}, f)
+
+        with pytest.raises(_mod.SidecarIdentityError):
+            _mod._mirror_cert_sidecars(
+                out, expected_issue_sha256=current_sha, src_dir=src
+            )
+
+        with open(destination, "rb") as f:
+            assert f.read() == b"certified-current-bytes"
+
+
+def test_mirror_rejects_checklist_not_bound_to_obligations_payload():
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+        issue_sha = hashlib.sha256(b"issue").hexdigest()
+        with open(os.path.join(src, "gt_obligations_v2.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "obligations_version": 2,
+                "issue_sha256": issue_sha,
+                "checklist_sha256": hashlib.sha256(b"expected checklist").hexdigest(),
+            }, f)
+        with open(os.path.join(src, "gt_obligations.md"), "wb") as f:
+            f.write(b"different checklist")
+
+        with pytest.raises(_mod.SidecarIdentityError):
+            _mod._mirror_cert_sidecars(
+                out, expected_issue_sha256=issue_sha, src_dir=src
+            )
+        assert os.listdir(out) == []

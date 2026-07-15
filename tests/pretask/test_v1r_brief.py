@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
+import json
 import sqlite3
+import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -284,6 +288,62 @@ def test_generate_v1r_brief_carries_graph_map_no_laundering(
     assert "<gt-graph-map>" in result.brief_text
     assert "load" in result.brief_text  # real import caller surfaced
     assert "find_files() in" not in result.brief_text  # name_match never laundered
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+def test_profile_off_anchor_artifact_is_still_bound_to_exact_issue(
+    mock_v74: MagicMock, tmp_path: Path, monkeypatch
+) -> None:
+    """The anchors channel is issue-bound independently of obligations-v2.
+
+    Profile-off changes model-visible obligation behavior, not the identity
+    contract of the support artifact later admitted by gt-run-proof.
+    """
+    issue = "fix account walk traversal"
+    db, repo = _walk_db(tmp_path, [(3, 1, "import", 1.0, 1)])
+    cert_dir = tmp_path / "cert"
+    cert_dir.mkdir()
+    monkeypatch.setenv("GT_CERT_DIR", str(cert_dir))
+    monkeypatch.setenv("GT_OBLIGATIONS_V2", "0")
+    monkeypatch.delenv("GT_ANCHORS_PATH", raising=False)
+    mock_v74.return_value = MagicMock(
+        ranked_full=[{
+            "path": "beancount/core/account.py",
+            "score": 0.9,
+            "components": {"path": 0.0},
+        }]
+    )
+
+    result = generate_v1r_brief(issue, repo, db)
+
+    payload = json.loads(
+        (cert_dir / "gt_issue_anchors.json").read_text(encoding="utf-8")
+    )
+    assert payload["issue_sha256"] == hashlib.sha256(issue.encode("utf-8")).hexdigest()
+    assert "obligations_version" not in payload
+
+    # Exercise the actual proof caller with the real profile-off producer bytes.
+    proof_path = Path(__file__).resolve().parents[2] / "scripts" / "swebench" / "gt_run_proof.py"
+    proof_spec = importlib.util.spec_from_file_location("gt_run_proof_profile_off", proof_path)
+    assert proof_spec and proof_spec.loader
+    proof = importlib.util.module_from_spec(proof_spec)
+    sys.modules[proof_spec.name] = proof
+    proof_spec.loader.exec_module(proof)
+    out_dir = tmp_path / "proof-out"
+    out_dir.mkdir()
+    monkeypatch.setenv("GT_CERT_SIDECAR_SOURCE_DIR", str(cert_dir))
+    monkeypatch.setenv("GT_BRIEF_CACHE_DIR", str(out_dir))
+
+    ok, detail = proof.emit_brief(
+        str(out_dir), issue, repo, db, generator=lambda **_kwargs: result
+    )
+
+    assert ok, detail
+    mirrored = json.loads(
+        (out_dir / "gt_issue_anchors.json").read_text(encoding="utf-8")
+    )
+    assert mirrored["issue_sha256"] == payload["issue_sha256"]
+    assert "obligations_version" not in mirrored
 
 
 def test_medium_scope_distinct_files_gates_name_match(tmp_path: Path) -> None:

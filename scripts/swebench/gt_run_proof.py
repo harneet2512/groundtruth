@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 # The artifact contract the external benchmark team relies on (all written under --out).
 # brief.txt IS part of the contract (P0.1-c): the agent CONSUMES /gt_artifacts/brief.txt
@@ -948,19 +949,97 @@ def aggregate_lsp_verdicts(lang_verdicts: dict, *, require_lsp: bool, any_succes
 _CERT_SIDECARS = ("gt_issue_anchors.json", "gt_obligations_v2.json", "gt_obligations.md")
 
 
-def _mirror_cert_sidecars(out_dir: str, src_dir: str = "/tmp") -> list[str]:
-    """Copy each present sidecar from ``src_dir`` into ``out_dir``. Missing source =
-    skip (flag-off / absent = no-op). Returns the basenames actually mirrored."""
+class SidecarIdentityError(ValueError):
+    """A cert sidecar is not bound to the issue being proved."""
+
+
+def _mirror_cert_sidecars(
+    out_dir: str,
+    *,
+    expected_issue_sha256: str,
+    src_dir: str = "/tmp",
+) -> list[str]:
+    """Mirror only sidecars bound to the expected issue.
+
+    All present sources are validated before any destination is changed. The
+    obligations JSON binds the exact Markdown checklist bytes by digest. Missing
+    inputs are a flag-off no-op; partial, malformed, stale, or mismatched bundles
+    fail closed. Each destination file is published by atomic replacement after
+    validation; this function does not claim a multi-file atomic filesystem commit.
+    """
+    if (
+        len(expected_issue_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in expected_issue_sha256)
+    ):
+        raise SidecarIdentityError("expected issue identity is not lowercase SHA-256")
+    paths = {name: os.path.join(src_dir, name) for name in _CERT_SIDECARS}
+    present = {name for name, path in paths.items() if os.path.isfile(path)}
+    if not present:
+        return []
+
+    raw: dict[str, bytes] = {}
+    for name in present:
+        try:
+            with open(paths[name], "rb") as fh:
+                raw[name] = fh.read()
+        except OSError as exc:
+            raise SidecarIdentityError(f"cannot read cert sidecar {name}: {exc}") from exc
+
+    parsed: dict[str, dict] = {}
+    for name in ("gt_issue_anchors.json", "gt_obligations_v2.json"):
+        if name not in present:
+            continue
+        try:
+            value = json.loads(raw[name].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SidecarIdentityError(f"malformed cert sidecar {name}") from exc
+        if not isinstance(value, dict):
+            raise SidecarIdentityError(f"cert sidecar {name} is not a JSON object")
+        if value.get("issue_sha256") != expected_issue_sha256:
+            raise SidecarIdentityError(f"cert sidecar {name} has wrong issue identity")
+        parsed[name] = value
+
+    obligation_names = {"gt_obligations_v2.json", "gt_obligations.md"}
+    obligation_present = present & obligation_names
+    if obligation_present and obligation_present != obligation_names:
+        raise SidecarIdentityError("incomplete obligations sidecar bundle")
+    if obligation_present:
+        manifest = parsed["gt_obligations_v2.json"]
+        if manifest.get("obligations_version") != 2:
+            raise SidecarIdentityError("unsupported obligations sidecar version")
+        actual = hashlib.sha256(raw["gt_obligations.md"]).hexdigest()
+        if manifest.get("checklist_sha256") != actual:
+            raise SidecarIdentityError("obligations checklist digest mismatch")
+
     mirrored: list[str] = []
-    for name in _CERT_SIDECARS:
-        src = os.path.join(src_dir, name)
-        if os.path.exists(src):
+    staged: list[tuple[str, str]] = []
+    try:
+        for name in _CERT_SIDECARS:
+            if name not in present:
+                continue
+            fd, tmp = tempfile.mkstemp(prefix=f".{name}.", dir=out_dir)
             try:
-                shutil.copy(src, os.path.join(out_dir, name))
-                mirrored.append(name)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(raw[name])
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            staged.append((tmp, os.path.join(out_dir, name)))
+        for tmp, destination in staged:
+            os.replace(tmp, destination)
+            mirrored.append(os.path.basename(destination))
+        return mirrored
+    finally:
+        for tmp, _destination in staged:
+            try:
+                os.unlink(tmp)
             except OSError:
                 pass
-    return mirrored
 
 
 def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generator=None):
@@ -995,10 +1074,17 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
         return False, ("portable brief EMPTY — proof mode requires a non-empty brief.txt "
                        "(the agent consumes /gt_artifacts/brief.txt; there is no host fallback)")
     # The gate/cache acquisition above is the sole delivery authority. Its generator writes
-    # support sidecars into /tmp, so capture those exact bytes BEFORE the independent witness
-    # executes. Execution 2 proves repeat identity only; it may write divergent /tmp sidecars
-    # and must never replace any model-visible or support artifact from the primary execution.
-    _mirror_cert_sidecars(out_dir)
+    # support sidecars into the configured source (default /tmp), so capture those exact
+    # bytes BEFORE the independent witness executes. Execution 2 proves repeat identity only;
+    # it may write divergent sidecars and must never replace model-visible/support artifacts.
+    try:
+        _mirror_cert_sidecars(
+            out_dir,
+            expected_issue_sha256=hashlib.sha256(issue_text.encode("utf-8")).hexdigest(),
+            src_dir=os.environ.get("GT_CERT_SIDECAR_SOURCE_DIR", "/tmp"),
+        )
+    except (SidecarIdentityError, OSError) as e:
+        return False, f"brief sidecar identity validation failed: {e}"
     try:
         if generator is None:
             from groundtruth.pretask.v1r_brief import generate_v1r_brief as _generator

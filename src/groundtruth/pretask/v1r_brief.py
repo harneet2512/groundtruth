@@ -3034,12 +3034,6 @@ def _write_obligations_v2_artifact(
         import os as _os
         target_dir = _os.path.dirname(_anchors_path(for_write=True)) or "/tmp"
         clean = [{k: v for k, v in o.items() if not k.startswith("_")} for o in rows]
-        payload = {
-            "obligations_version": 2,
-            "issue_sha256": _hashlib_v2.sha256(issue_text.encode("utf-8")).hexdigest(),
-            "render_path_tokens": sorted(gold_path_tokens),
-            "clauses": clean,
-        }
         md = ["# GT obligations checklist — every requirement extracted from the issue",
               "# Verify each before submitting; tick what you have EXERCISED with a test.",
               ""]
@@ -3050,6 +3044,13 @@ def _write_obligations_v2_artifact(
                 f"{o.get('modality','')}) \"{verb}\""
             )
         md_text = "\n".join(md) + "\n"
+        payload = {
+            "obligations_version": 2,
+            "issue_sha256": _hashlib_v2.sha256(issue_text.encode("utf-8")).hexdigest(),
+            "checklist_sha256": _hashlib_v2.sha256(md_text.encode("utf-8")).hexdigest(),
+            "render_path_tokens": sorted(gold_path_tokens),
+            "clauses": clean,
+        }
         # Dual-write target_dir AND /tmp — mirrors the gt_issue_anchors.json persist
         # resilience (this fn's sibling). The proof harness (gt_run_proof.emit_brief)
         # mirrors /tmp/gt_obligations_v2.json -> out_dir into the cert-dir handoff, so
@@ -3061,12 +3062,32 @@ def _write_obligations_v2_artifact(
             _dirs.append("/tmp")
         for _d in _dirs:
             try:
-                with open(_os.path.join(_d, "gt_obligations_v2.json"), "w",
-                          encoding="utf-8") as f:
-                    _j.dump(payload, f)
-                with open(_os.path.join(_d, "gt_obligations.md"), "w",
-                          encoding="utf-8") as f:
-                    f.write(md_text)
+                import tempfile as _tempfile_v2
+
+                def _atomic_text(_path: str, _text: str) -> None:
+                    _fd, _tmp = _tempfile_v2.mkstemp(
+                        prefix=f".{_os.path.basename(_path)}.", dir=_d
+                    )
+                    try:
+                        with _os.fdopen(_fd, "w", encoding="utf-8", newline="") as _f:
+                            _f.write(_text)
+                            _f.flush()
+                            _os.fsync(_f.fileno())
+                        _os.replace(_tmp, _path)
+                    except BaseException:
+                        try:
+                            _os.unlink(_tmp)
+                        except OSError:
+                            pass
+                        raise
+
+                # JSON is the bundle commit marker: publish checklist bytes first,
+                # then atomically replace their identity/digest-bearing manifest.
+                _atomic_text(_os.path.join(_d, "gt_obligations.md"), md_text)
+                _atomic_text(
+                    _os.path.join(_d, "gt_obligations_v2.json"),
+                    _j.dumps(payload),
+                )
             except OSError:
                 continue
     except Exception:
@@ -5411,14 +5432,18 @@ def generate_v1r_brief(
                 )),
                 "obligations": _obligations,
             }
+            # Every anchors artifact is task-bound, regardless of whether the
+            # optional v2 obligations renderer is active. Proof admission uses
+            # this identity to reject a stale canonical filename from another
+            # issue; obligations_version remains the conditional schema marker.
+            import hashlib as _hashlib_anch
+            _anch_payload["issue_sha256"] = _hashlib_anch.sha256(
+                issue_text.encode("utf-8")
+            ).hexdigest()
             if _obligations_v2_on():
                 # artifact-wins split-brain rule: consumers trust THIS stamp over
                 # their own env, so host and container can never disagree.
-                import hashlib as _hashlib_anch
                 _anch_payload["obligations_version"] = 2
-                _anch_payload["issue_sha256"] = _hashlib_anch.sha256(
-                    issue_text.encode("utf-8")
-                ).hexdigest()
             # B10 hardening: write to the per-task path, but if that fails (e.g. a
             # misconfigured/absent $GT_CERT_DIR pointing at a nonexistent dir) fall back to
             # the always-writable /tmp so the anchors artifact is never SILENTLY lost.
@@ -5428,8 +5453,23 @@ def generate_v1r_brief(
                 _anch_targets.append("/tmp/gt_issue_anchors.json")
             for _ap in _anch_targets:
                 try:
-                    with open(_ap, "w", encoding="utf-8") as _af:
-                        _json_anch.dump(_anch_payload, _af)
+                    import tempfile as _tempfile_anch
+                    _ad = os.path.dirname(_ap) or "."
+                    _afd, _atmp = _tempfile_anch.mkstemp(
+                        prefix=f".{os.path.basename(_ap)}.", dir=_ad
+                    )
+                    try:
+                        with os.fdopen(_afd, "w", encoding="utf-8", newline="") as _af:
+                            _json_anch.dump(_anch_payload, _af)
+                            _af.flush()
+                            os.fsync(_af.fileno())
+                        os.replace(_atmp, _ap)
+                    except BaseException:
+                        try:
+                            os.unlink(_atmp)
+                        except OSError:
+                            pass
+                        raise
                     break
                 except OSError:
                     continue

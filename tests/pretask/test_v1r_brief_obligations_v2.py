@@ -95,11 +95,14 @@ def test_v2_artifact_written(v2_env):
     assert md.is_file() and js.is_file()
     payload = json.loads(js.read_text(encoding="utf-8"))
     assert payload["obligations_version"] == 2
+    assert payload["issue_sha256"] == _issue_sha256(TRUE_MYTH)
     assert "render_path_tokens" in payload
     assert any("filterMap" in c["verbatim_text"] for c in payload["clauses"])
     # the artifact carries MORE clauses than the rendered top-K can
     assert len(payload["clauses"]) >= 4
-    assert "- [ ] (" in md.read_text(encoding="utf-8")
+    md_bytes = md.read_bytes()
+    assert "- [ ] (" in md_bytes.decode("utf-8")
+    assert payload["checklist_sha256"] == hashlib.sha256(md_bytes).hexdigest()
 
 
 # ── 10. persisted-bridge carries symbols (leak check regains its symbol leg) ─

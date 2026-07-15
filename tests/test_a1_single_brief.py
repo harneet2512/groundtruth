@@ -12,10 +12,21 @@ LOADS it instead of regenerating. Locks:
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cert_sidecar_source(tmp_path, monkeypatch):
+    source = tmp_path / "cert-sidecar-source"
+    source.mkdir()
+    monkeypatch.setenv("GT_CERT_SIDECAR_SOURCE_DIR", str(source))
 
 
 def _load(modname: str, rel: str):
@@ -174,15 +185,24 @@ def test_independent_witness_cannot_replace_primary_sidecars(tmp_path, monkeypat
     sidecar_src = tmp_path / "sidecar-src"
     sidecar_src.mkdir()
     sidecar = sidecar_src / "gt_issue_anchors.json"
-    primary_bytes = b'{"authority":"primary"}'
-    second_bytes = b'{"authority":"execution-2"}'
+    issue_sha = hashlib.sha256(b"issue text").hexdigest()
+    primary_bytes = json.dumps({
+        "authority": "primary", "issue_sha256": issue_sha,
+    }).encode()
+    second_bytes = json.dumps({
+        "authority": "execution-2", "issue_sha256": issue_sha,
+    }).encode()
     sidecar.write_bytes(primary_bytes)
 
     mirror = gp._mirror_cert_sidecars
     monkeypatch.setattr(
         gp,
         "_mirror_cert_sidecars",
-        lambda out_dir: mirror(out_dir, src_dir=str(sidecar_src)),
+        lambda out_dir, *, expected_issue_sha256, src_dir=None: mirror(
+            out_dir,
+            expected_issue_sha256=expected_issue_sha256,
+            src_dir=str(sidecar_src),
+        ),
     )
 
     def gen(issue_text, repo_root, graph_db, bug_id):
