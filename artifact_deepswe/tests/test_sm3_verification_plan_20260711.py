@@ -130,14 +130,20 @@ def test_attributed_unit_red_delivers_and_feeds_submit(monkeypatch):
         _Res("unit", "fail", cov_detail, attribution_satisfied=True,
              covered_entities=("foo",)),
     ])
-    monkeypatch.setattr(nr, "render_covering_failure_native",
-                        lambda *a, **k: "a covering test is failing")
+    rendered_symbols = []
+    monkeypatch.setattr(g, "_edited_symbol_spans", lambda: set())
+    monkeypatch.setattr(
+        nr, "render_covering_failure_native",
+        lambda *a, **k: rendered_symbols.append(k.get("edited_symbol")) or
+        "a covering test is failing",
+    )
     block = g._verification_plan_emission({"x.py"}, {"foo"})
     assert block == "a covering test is failing"
     assert g._last_test_outcome_failed is True
     # submit parity: the unit verdict is captured for the gate.
     assert g._last_covering_result and g._last_covering_result.get("verdict") == "fail"
     assert not nr.contains_test_identity(block)
+    assert rendered_symbols == [None]
 
 
 def test_unattributed_unit_red_does_not_deliver(monkeypatch):

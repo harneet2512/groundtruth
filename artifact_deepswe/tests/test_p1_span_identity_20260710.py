@@ -88,6 +88,19 @@ def test_selection_prefers_spans_falls_back_to_tokens(wired):
     assert m._edited_symbols_for_selection() == {"sed", "uid", "return"}
 
 
+def test_model_visible_symbol_claim_requires_graph_span(wired):
+    m, _tmp = wired
+    m._oracle_edited_tokens.update({"False", "PYEOF", "Could"})
+    assert m._verified_edited_symbol_for_rendering(
+        m._edited_symbols_for_selection()
+    ) is None
+
+    m._oracle_edited_lines_by_file["a/x.py"] = [(3, 3)]
+    selected = m._edited_symbols_for_selection()
+    assert selected == {"get_user"}
+    assert m._verified_edited_symbol_for_rendering(selected) == "get_user"
+
+
 def test_body_edit_selects_covering_test(wired):
     m, _tmp = wired
     m._oracle_edited_lines_by_file["a/x.py"] = [(3, 3)]

@@ -4606,6 +4606,23 @@ def _edited_symbols_for_selection() -> "set[str]":
     return spans if spans else set(_oracle_edited_tokens)
 
 
+def _verified_edited_symbol_for_rendering(
+    selected_symbols: "set[str] | list[str]",
+) -> "str | None":
+    """Return a model-safe edited-symbol claim, or ``None`` for generic wording.
+
+    Token fallbacks remain useful for internal covering selection, but they are
+    not structural proof that the agent edited a symbol.  Only a graph node whose
+    span overlaps an exact edited line may be named in model-visible text.
+    """
+    spans = _edited_symbol_spans()
+    if not spans:
+        return None
+    selected = {str(symbol) for symbol in (selected_symbols or ()) if symbol}
+    candidates = spans & selected if selected else spans
+    return next(iter(sorted(candidates)), None)
+
+
 def _edited_symbols_for_obligations() -> "set[str]":
     """The edited-token set AUGMENTED with the span-derived enclosing-symbol names for
     obligation edit-credit (O-1/P1(d)): a span symbol is genuinely edited, so the UNION
@@ -8849,7 +8866,7 @@ def _executed_covering_emission(covering: list[dict],
                 reason="covering_unattributable", chars=0)
             return None
         _last_test_outcome_failed = True  # V-3: executed verdict drives the verify axis
-        sym = next(iter(sorted(edited_syms)), None) if edited_syms else None
+        sym = _verified_edited_symbol_for_rendering(edited_syms)
         block = render_covering_failure_native(cres, edited_symbol=sym, test_files=ran_tf)
         if not block:
             # W14 FIX 1: an attributed RED the native renderer could not surface -> NOTHING
@@ -9033,7 +9050,7 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
                 cres = res.detail if isinstance(res.detail, dict) else {"verdict": "fail"}
                 _last_test_outcome_failed = True  # executed verdict drives the verify axis
                 block = render_covering_failure_native(
-                    cres, edited_symbol=syms[0],
+                    cres, edited_symbol=_verified_edited_symbol_for_rendering(syms),
                     test_files=cres.get("ran") or list(res.covered_entities))  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
             else:
                 continue  # build/type/integration RED -> HOST-side only this wave

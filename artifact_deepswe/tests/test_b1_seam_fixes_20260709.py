@@ -224,12 +224,23 @@ def test_f3_executor_routes_through_live_env(monkeypatch, tmp_path):
                 "stderr_tail": err, "command": ["pytest"], "failing_test_names": []}
 
     monkeypatch.setattr(cr, "run_covering_tests", _stub_run)
+    rendered_symbols = []
+    import groundtruth.runtime.native_render as nr
+    monkeypatch.setattr(g, "_edited_symbol_spans", lambda: set())
+    monkeypatch.setattr(
+        nr, "render_covering_failure_native",
+        lambda *a, **k: rendered_symbols.append(k.get("edited_symbol")) or
+        "A covering test fails:\nTypeError",
+    )
 
     cov = [{"file": "test_mod.py", "confidence": 0.9}]
     block = g._executed_covering_emission(cov, {"mod.py"}, {"foo"})
     assert calls, "executor did NOT route through the live env (bridge not threaded)"
     assert calls[0][0] and "pytest" in calls[0][0], calls
     assert block, "the emission should still proceed to a Format-D block"
+    assert rendered_symbols == [None], (
+        "a token-only selection may not become a model-visible edited-symbol claim"
+    )
 
 
 def test_f3_absent_executor_param_is_safe_fallback(monkeypatch, tmp_path):
