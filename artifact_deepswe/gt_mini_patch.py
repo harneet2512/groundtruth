@@ -5830,6 +5830,16 @@ _stash_depth = 0
 _baseline_fail_sigs: set[str] = set()
 
 
+def _stash_baseline_probe(cmd: str) -> bool:
+    """True when ``cmd`` observes the repository with agent edits stashed.
+
+    Pure by design: ``_l5_failure_nudge`` remains the sole owner of advancing
+    ``_stash_depth`` once per turn, while earlier consumers classify the same
+    turn without double-counting push/pop commands.
+    """
+    return bool(_stash_depth > 0 or _STASH_PUSH_RE.search(cmd or ""))
+
+
 def _failure_lines(text: str) -> list[str]:
     """TEST-failure lines only: zero-count-safe (_TEST_FAIL_STRICT_RE) AND
     not patch/apply bookkeeping. Shared by the live governor and the
@@ -6077,7 +6087,7 @@ def _l5_failure_nudge(cmd: str, out_text: str) -> str:
     # itself a baseline window, whatever it pops later in the same command.
     _pushes = len(_STASH_PUSH_RE.findall(cmd or ""))
     _pops = len(_STASH_POP_RE.findall(cmd or ""))
-    _turn_is_stashed = _stash_depth > 0 or _pushes > 0
+    _turn_is_stashed = _stash_baseline_probe(cmd)
     _stash_depth = max(0, _stash_depth + _pushes - _pops)
     if _l5_failure_fired or _GT_BASELINE or not out_text:
         return ""
@@ -6368,6 +6378,7 @@ def _reset_oracle_state() -> None:
     global _source_edit_count, _oracle_review_fired, _oblig_final_shot_fired
     global _l5_finish_fired, _l5_failure_fired, _l5_notest_fired, _marker_sent
     global _l5_build_fail_fired
+    global _stash_depth
     global _horizon_urgent_fired, _horizon_pivot_fired, _horizon_gate_fire_count
     # A6 (2026-07-05): latches ADDED this session. _ROOT_FALLBACK_ACTIVE is behaviour-
     # affecting (gates _snippet_attests) — a leak from a root-missing case would drop rows
@@ -6539,6 +6550,8 @@ def _reset_oracle_state() -> None:
     _oblig_final_shot_fired = False
     _l5_finish_fired = False
     _l5_failure_fired = False
+    _stash_depth = 0
+    _baseline_fail_sigs.clear()
     _l5_build_fail_fired = False
     _l5_notest_fired = False
     _marker_sent = False
@@ -14156,6 +14169,17 @@ def _ss_test_touches_edit(cmd: str, orig_out: str) -> bool:
     return False
 
 
+def _ss_stash_agent_state_probe(cmd: str) -> bool:
+    """Whether SS edited-state consumers must ignore this stash baseline probe.
+
+    The SS feature gates keep their disabled compatibility arm unchanged.
+    """
+    return bool(
+        _stash_baseline_probe(cmd)
+        and (_ss_coherence_v2_on() or _ss_recovery_v2_on() or _ss_submit_red_on())
+    )
+
+
 def _ss_record_test(cmd: str, orig_out: str, failed: bool, passed: bool) -> None:
     """Record an observed test event: (step, passed) for coherence-V2's interval check,
     the passing-token set for late-drop, and the per-command fail streak for
@@ -14169,6 +14193,11 @@ def _ss_record_test(cmd: str, orig_out: str, failed: bool, passed: bool) -> None
     global _ss_last_failing_test, _ss_current_failure_event
     try:
         _ss_current_failure_event = None
+        # A stash-window result describes the repository baseline, not the
+        # agent's edited source state.  It must not alter coherence, recovery,
+        # or submit-RED state.  The caller still retains observation telemetry.
+        if _ss_stash_agent_state_probe(cmd):
+            return
         _ss_test_events.append((_action_count, passed))
         if passed:
             _ss_pass_tokens.update(
@@ -14645,9 +14674,11 @@ def _augment_output(action, out) -> None:
             # invocation whose output carries an observed pass/fail result —
             # mirrors gt_oracle_sense.DerivedState.tested_tokens (tokens of the
             # observed output AND the test command itself).
+            _stash_test_probe = False
             if _TEST_RUNNER_RE.search(cmd or "") and (
                     _TEST_FAIL_RE.search(_orig_out)
                     or _TEST_PASS_RE.search(_orig_out)):
+                _stash_test_probe = _ss_stash_agent_state_probe(cmd or "")
                 # bug #4(b): record an observed test result so _detect_phase can
                 # reach VERIFY (derive_phase: test_count > 0 -> VERIFY). Mirrors
                 # trajectory_state.update_state on Event.TEST_RESULT.
@@ -14661,23 +14692,25 @@ def _augment_output(action, out) -> None:
                 # A cycle opened at the first source edit after the last
                 # result closes here; its span feeds the V median.
                 global _last_test_step, _last_test_outcome_failed
-                if _cycle_edit_start is not None:
+                if not _stash_test_probe and _cycle_edit_start is not None:
                     span = _action_count - _cycle_edit_start
                     if span > 0:
                         _test_cycle_spans.append(span)
                     _cycle_edit_start = None
-                _last_test_step = _action_count
+                if not _stash_test_probe:
+                    _last_test_step = _action_count
                 # RECENCY: pivot keys on the MOST RECENT outcome (env-shaped
                 # failures never count — the failure_persisted discipline).
                 # Stage 5: zero-count-safe via _failure_lines — a green
                 # `… 0 failed …` line is a PASS, never a pivot trigger.
-                _last_test_outcome_failed = bool(
-                    _failure_lines(_orig_out)
-                    and not _ENV_FAIL_RE.search(_orig_out))
+                if not _stash_test_probe:
+                    _last_test_outcome_failed = bool(
+                        _failure_lines(_orig_out)
+                        and not _ENV_FAIL_RE.search(_orig_out))
                 # Stage-1 coherence reset (mirrors the sensor): an observed
                 # PASSING result clears per-file churn — re-edits after this
                 # are a new cycle, not thrash.
-                if _TEST_PASS_RE.search(_orig_out):
+                if not _stash_test_probe and _TEST_PASS_RE.search(_orig_out):
                     _edit_churn.clear()
                 # SS features 3/4/6: record the observed test event — (step, passed)
                 # for coherence-V2's interval check, the passing-token set for
@@ -14985,10 +15018,11 @@ def _augment_output(action, out) -> None:
                 # SM-3 HypothesisLedger (GT_HYPOTHESIS): classify THIS turn over the shared
                 # _EPISODE + observation BEFORE the verify-horizon candidate, so a pivot can
                 # frame its steer from the classification. Host-side only unless a pivot fires.
-                try:
-                    _gt_hypothesis_classify_turn(cmd or "", _orig_out or "")
-                except Exception:  # noqa: BLE001 — classification must not kill the gate
-                    pass
+                if not _stash_test_probe:
+                    try:
+                        _gt_hypothesis_classify_turn(cmd or "", _orig_out or "")
+                    except Exception:  # noqa: BLE001 — classification must not kill the gate
+                        pass
                 # VERIFICATION HORIZON (Stage C H2): budget-aware self-verify candidate
                 try:
                     _vh = _verification_horizon_candidate()

@@ -1153,6 +1153,114 @@ def test_r5_partial_nodeid_pass_does_not_clear_multi_failure_identity():
     assert len(g._ss_test_fail_counts) == 1
 
 
+def test_r5_stash_counterfactual_does_not_advance_agent_state_failure(monkeypatch):
+    """A test against stashed source is evidence about the repo baseline, not the
+    agent's current edited state.  It must not release recovery or replace submit-RED."""
+    monkeypatch.setenv("GT_SS_RECOVERY_V2", "1")
+    monkeypatch.setattr(g, "_oracle_edited_rels", {"pkg/policy.py"})
+    monkeypatch.setattr(g, "_action_count", 1)
+    failure = "pkg/policy.py:8: assertion failed\n1 failed"
+    live_cmd = "pytest tests/test_policy.py -q"
+    g._ss_record_test(live_cmd, failure, failed=True, passed=False)
+    prior_submit_red = dict(g._ss_last_failing_test or {})
+
+    monkeypatch.setattr(g, "_action_count", 2)
+    baseline_cmd = "git stash && pytest tests/test_policy.py -q ; git stash pop"
+    g._ss_record_test(baseline_cmd, failure, failed=True, passed=False)
+
+    assert g._ss_test_fail_counts == {live_cmd: 1}
+    assert g._ss_current_failure_event is None
+    assert g._ss_last_failing_test == prior_submit_red
+    assert g._ss_test_events == [(1, False)]
+    assert g._ss_recovery_eligible() is False
+
+
+def test_r5_open_stash_window_test_does_not_advance_agent_state_failure(monkeypatch):
+    """The same rule applies when stash push/test/pop occupy separate turns."""
+    monkeypatch.setenv("GT_SS_RECOVERY_V2", "1")
+    failure = "FAILED tests/test_policy.py::test_rule - assert False\n1 failed"
+    cmd = "pytest tests/test_policy.py::test_rule -q"
+
+    monkeypatch.setattr(g, "_action_count", 1)
+    g._ss_record_test(cmd, failure, failed=True, passed=False)
+    assert g._l5_failure_nudge("git stash", "") == ""
+
+    monkeypatch.setattr(g, "_action_count", 2)
+    g._ss_record_test(cmd, failure, failed=True, passed=False)
+    assert g._ss_test_fail_counts == {
+        "test_identity:tests/test_policy.py::test_rule": 1,
+    }
+    assert g._ss_current_failure_event is None
+    assert g._ss_recovery_eligible() is False
+
+    assert g._l5_failure_nudge("git stash pop", "") == ""
+    monkeypatch.setattr(g, "_action_count", 3)
+    g._ss_record_test(cmd, failure, failed=True, passed=False)
+    assert g._ss_recovery_eligible() is True
+
+
+def test_r5_stash_counterfactual_does_not_replace_recent_outcome_or_classify(monkeypatch):
+    """The live caller must not feed a baseline probe to recovery recency/classification."""
+    monkeypatch.setenv("GT_HYPOTHESIS", "1")
+    monkeypatch.setenv("GT_SS_RECOVERY_V2", "1")
+    monkeypatch.setattr(g, "_last_test_outcome_failed", False)
+    monkeypatch.setattr(g, "_source_edit_count", 1)
+    monkeypatch.setattr(g, "_oracle_edited_rels", {"pkg/policy.py"})
+    classified: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        g, "_gt_hypothesis_classify_turn",
+        lambda cmd, out: classified.append((cmd, out)),
+    )
+
+    out = {
+        "output": "FAILED tests/test_policy.py::test_rule - assert False\n1 failed",
+        "returncode": 1,
+    }
+    g._augment_output(
+        {"command": "git stash && pytest tests/test_policy.py::test_rule -q ; git stash pop"},
+        out,
+    )
+
+    assert g._last_test_outcome_failed is False
+    assert g._ss_current_failure_event is None
+    assert classified == []
+
+
+def test_r5_attempt_reset_clears_stash_window_and_baseline_failure_memory(monkeypatch):
+    """A partial stash turn or prior baseline signature cannot leak to a new attempt."""
+    monkeypatch.setattr(g, "_stash_depth", 1)
+    monkeypatch.setattr(g, "_baseline_fail_sigs", {"old failure"})
+
+    g._reset_oracle_state()
+
+    assert g._stash_depth == 0
+    assert g._baseline_fail_sigs == set()
+
+
+def test_r5_combined_stash_probe_closes_depth_in_same_turn(monkeypatch):
+    monkeypatch.setattr(g, "_stash_depth", 0)
+    cmd = "git stash && pytest tests/test_policy.py -q ; git stash pop"
+
+    assert g._stash_baseline_probe(cmd) is True
+    assert g._l5_failure_nudge(cmd, "1 failed") == ""
+    assert g._stash_depth == 0
+
+
+def test_r5_ss_flags_off_preserve_legacy_test_state(monkeypatch):
+    """With every consuming SS feature disabled, host state is byte-compatible."""
+    for key in ("GT_SS_COHERENCE_V2", "GT_SS_RECOVERY_V2", "GT_SS_SUBMIT_RED"):
+        monkeypatch.delenv(key, raising=False)
+    cmd = "git stash && pytest tests/test_policy.py::test_rule -q ; git stash pop"
+    failure = "FAILED tests/test_policy.py::test_rule - assert False\n1 failed"
+
+    g._ss_record_test(cmd, failure, failed=True, passed=False)
+
+    assert g._ss_test_fail_counts == {
+        "test_identity:tests/test_policy.py::test_rule": 1,
+    }
+    assert g._ss_current_failure_event == (g._action_count, next(iter(g._ss_test_fail_counts)))
+
+
 def test_flag_off_no_ss_reasons(monkeypatch):
     drv = _Driver(monkeypatch)
     events = [
