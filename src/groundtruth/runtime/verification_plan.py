@@ -130,8 +130,8 @@ from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
 from groundtruth.runtime.covering_runner import (
     _connect_ro,
     _edge_columns,
+    attribute_covering_red,
     build_covering_command,
-    is_red_attributable,
     run_covering_tests,
     select_covering_tests,
 )
@@ -978,11 +978,16 @@ def _run_one(
         )
         verdict = res.get("verdict", "unavailable")
         if verdict == "fail":
-            attributed = is_red_attributable(
+            attribution = attribute_covering_red(
                 res, set(plan.edited_files),
                 test_files=list(check.targets), repo_root=repo_root,
                 covering_files=list(check.targets), executor=executor,
             )
+            attributed = attribution.attributed
+            # Add producer-owned causal evidence to host-side plan telemetry.
+            # This never enters a renderer or changes model-observation bytes.
+            res = dict(res)
+            res["attribution"] = attribution.to_dict()
         elif verdict == "pass":
             # F5 ATTRIBUTION HONESTY: only a fact_covering-basis pass is
             # self-attributed — the FACT edge (deterministic resolution + conf>=0.7)

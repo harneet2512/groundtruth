@@ -33,6 +33,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
@@ -51,6 +52,34 @@ _PYTEST_NO_TESTS_EXIT = 5
 # re-declared literal (Fable F6b: literal drift is the whack-a-mole d0684d83 fought).
 # A covering test must reach the edited symbol through a RESOLVED (non-guess) edge.
 _DETERMINISTIC_METHODS = DETERMINISTIC_RESOLUTION_METHODS
+
+
+@dataclass(frozen=True)
+class CoveringAttribution:
+    """Producer-owned causal evidence for one covering-test RED.
+
+    This is deliberately separate from the rendered failure bytes.  It records
+    the exact structured observations used by the covering producer to decide
+    attribution, without asking a downstream auditor to reconstruct truth from
+    prose.  Tuple-valued path sets make the value immutable and deterministic.
+    """
+
+    attributed: bool
+    method: str | None  # trace_frame | differential; None when no proof leg ran
+    current_verdict: str
+    base_verdict: str  # not_run | pass | fail | unavailable
+    implicated_edited_paths: tuple[str, ...]
+    covering_files: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attributed": self.attributed,
+            "method": self.method,
+            "current_verdict": self.current_verdict,
+            "base_verdict": self.base_verdict,
+            "implicated_edited_paths": list(self.implicated_edited_paths),
+            "covering_files": list(self.covering_files),
+        }
 
 
 def _connect_ro(db_path: str):
@@ -614,39 +643,50 @@ def _cleanup_base_worktree(
         pass
 
 
-def differential_attribution(
+def _differential_attribution_result(
     repo_root: str,
     covering_files: list[str],
     current_result: dict[str, Any] | None,
     *,
+    edited_files: tuple[str, ...] = (),
     executor: Executor | None = None,
     per_file_timeout: int = 120,
     total_budget_seconds: int = 300,
     max_output_chars: int = 4000,
-) -> bool:
-    """Attribute a covering RED by DIFFERENCE against the pre-edit base tree.
+) -> CoveringAttribution:
+    """Return structured DIFFERENTIAL evidence against the pre-edit base tree.
 
     Runs the SAME ``covering_files`` (same budget caps) against a ``git worktree``
-    checked out at HEAD. Returns:
-      * ``True``  when the base is GREEN (POSITIVE pass) — the current run is red
-        only because of the working-tree edit => attributed => deliver.
-      * ``False`` when the base is ALSO red (pre-existing failure — this kills the
-        false-block vector), or the base is ``unavailable`` (no git / worktree add
-        failed / timeout / no positive pass), or the current run was not a fail.
+    checked out at HEAD. Only current-RED + base-GREEN is attributable; every
+    ambiguous outcome retains its observed verdict but fails toward quiet."""
+    current_verdict = (
+        str(current_result.get("verdict"))
+        if isinstance(current_result, dict) and current_result.get("verdict")
+        else "unavailable"
+    )
+    recorded_covering = tuple(sorted({str(f) for f in covering_files if f}))
 
-    Correct-or-quiet by construction: attribution requires POSITIVE base-green
-    evidence; every ambiguous outcome returns ``False`` (never a false red)."""
+    def _result(base_verdict: str, attributed: bool = False) -> CoveringAttribution:
+        return CoveringAttribution(
+            attributed=attributed,
+            method="differential",
+            current_verdict=current_verdict,
+            base_verdict=base_verdict,
+            implicated_edited_paths=edited_files,
+            covering_files=recorded_covering,
+        )
+
     if not repo_root or not covering_files:
-        return False
+        return _result("unavailable")
     # Attribution is a CONJUNCTION: current-RED AND base-GREEN. Proceed ONLY when
     # the CURRENT verdict is exactly "fail" — a stray call with None/{}/missing
     # verdict must NOT reach the base run (base-green alone is zero evidence the
     # edit broke anything; fail toward QUIET).
     if not isinstance(current_result, dict) or current_result.get("verdict") != "fail":
-        return False
+        return _result("not_run")
     made = _make_base_worktree(repo_root, executor=executor)
     if made is None:
-        return False  # no reachable base tree -> cannot compare -> quiet
+        return _result("unavailable")
     wt, parent = made
     try:
         base = run_covering_tests(
@@ -658,11 +698,115 @@ def differential_attribution(
             executor=executor,
         )
     except Exception:  # noqa: BLE001 -- any base-run explosion -> quiet
-        return False
+        return _result("unavailable")
     finally:
         _cleanup_base_worktree(repo_root, wt, parent, executor=executor)
-    # POSITIVE base-green (+ current-red, established by the caller) => attributed.
-    return base.get("verdict") == "pass"
+    base_verdict = str(base.get("verdict") or "unavailable")
+    return _result(base_verdict, attributed=base_verdict == "pass")
+
+
+def differential_attribution(
+    repo_root: str,
+    covering_files: list[str],
+    current_result: dict[str, Any] | None,
+    *,
+    executor: Executor | None = None,
+    per_file_timeout: int = 120,
+    total_budget_seconds: int = 300,
+    max_output_chars: int = 4000,
+) -> bool:
+    """Compatibility boolean for differential covering attribution."""
+    return _differential_attribution_result(
+        repo_root,
+        covering_files,
+        current_result,
+        executor=executor,
+        per_file_timeout=per_file_timeout,
+        total_budget_seconds=total_budget_seconds,
+        max_output_chars=max_output_chars,
+    ).attributed
+
+
+def attribute_covering_red(
+    current_result: dict[str, Any] | None,
+    edited_files: set[str] | list[str],
+    *,
+    test_files: list[str] | set[str] | None = None,
+    repo_root: str | None = None,
+    covering_files: list[str] | None = None,
+    executor: Executor | None = None,
+    per_file_timeout: int = 120,
+    total_budget_seconds: int = 300,
+    max_output_chars: int = 4000,
+) -> CoveringAttribution:
+    """Produce immutable attribution evidence, trying frames before differential.
+
+    A traceback records only the edited path actually implicated by the deepest
+    non-test frame. A differential cannot narrow causality further, so it records
+    the complete sorted edited-file set.
+    """
+    from groundtruth.runtime.native_render import deepest_agent_frame, is_edit_attributed
+
+    current = current_result or {}
+    current_verdict = str(current.get("verdict") or "unavailable")
+    edited = tuple(sorted({str(f) for f in (edited_files or ()) if f}))
+    covering = tuple(sorted({str(f) for f in (covering_files or ()) if f}))
+    if current_verdict != "fail":
+        return CoveringAttribution(
+            attributed=False,
+            method=None,
+            current_verdict=current_verdict,
+            base_verdict="not_run",
+            implicated_edited_paths=(),
+            covering_files=covering,
+        )
+    if is_edit_attributed(current, edited_files, test_files=test_files):
+        frame = deepest_agent_frame(current, test_files)
+        frame_path = frame[0] if frame is not None else ""
+
+        def _norm(path: str) -> str:
+            # Normalize separators without introducing a basename-only identity.
+            return (path or "").replace("\\", "/").lstrip("./").strip()
+
+        norm_frame = _norm(frame_path)
+        norm_root = _norm(repo_root or "").rstrip("/")
+        if norm_root and norm_frame.startswith(norm_root + "/"):
+            norm_frame = norm_frame[len(norm_root) + 1 :]
+        implicated = tuple(
+            path
+            for path in edited
+            if _norm(path) == norm_frame
+        )
+        return CoveringAttribution(
+            # Basename fallback is inherently ambiguous when multiple edited
+            # paths share that basename. Structured producer truth fails closed;
+            # the compatibility boolean below retains historical behaviour.
+            attributed=len(implicated) == 1,
+            method="trace_frame",
+            current_verdict=current_verdict,
+            base_verdict="not_run",
+            implicated_edited_paths=implicated,
+            covering_files=covering,
+        )
+    if not repo_root or not covering_files:
+        return CoveringAttribution(
+            attributed=False,
+            method=None,
+            current_verdict=current_verdict,
+            base_verdict="not_run",
+            implicated_edited_paths=(),
+            covering_files=covering,
+        )
+    return _differential_attribution_result(
+        repo_root,
+        covering_files,
+        current_result,
+        edited_files=edited,
+        executor=executor,
+        per_file_timeout=per_file_timeout,
+        total_budget_seconds=total_budget_seconds,
+        max_output_chars=max_output_chars,
+    )
 
 
 def is_red_attributable(
@@ -688,18 +832,21 @@ def is_red_attributable(
     Cost: the base run happens ONLY on the frame-miss path (crashes short-circuit
     before any subprocess). No ``repo_root``/``covering_files`` => frames-only =>
     quiet on an unattributed assertion. Reads no environment / no globals."""
+    # Preserve the historical boolean contract (including basename fallback)
+    # for existing seam callers. New truth-bearing consumers must use
+    # attribute_covering_red(), which rejects ambiguous basename matches.
     from groundtruth.runtime.native_render import is_edit_attributed
 
     if is_edit_attributed(current_result or {}, edited_files, test_files=test_files):
         return True
-    if not repo_root or not covering_files:
-        return False  # differential unavailable -> frames-only -> correct-or-quiet
-    return differential_attribution(
-        repo_root,
-        covering_files,
+    return attribute_covering_red(
         current_result,
+        edited_files,
+        test_files=test_files,
+        repo_root=repo_root,
+        covering_files=covering_files,
         executor=executor,
         per_file_timeout=per_file_timeout,
         total_budget_seconds=total_budget_seconds,
         max_output_chars=max_output_chars,
-    )
+    ).attributed
