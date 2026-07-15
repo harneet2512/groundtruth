@@ -2211,7 +2211,7 @@ def _rows_matching(rows: list[dict], layer: str, mnum: int | None, tol: int = 3)
         loc = r.get("home_msg", r.get("m"))
         if loc is None:
             loc = None
-        if mnum is None or loc is None or abs(int(loc) - mnum) <= tol:
+        if mnum is None or (loc is not None and abs(int(loc) - mnum) <= tol):
             out.append(r)
     return out
 
@@ -2367,7 +2367,7 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
     for c in cases.get("preserve", []):
         layer, mnum = _parse_delivery(c["delivery"])
         card = _is_cardinal_preserve(c)
-        rec = _rows_matching(rec_rows(c["task"]), layer, mnum)
+        rec = _rows_matching(rec_rows(c["task"]), layer, mnum, tol=0)
         rep = rep_rows(c["task"])
         if not rec:
             out.append(CaseVerdict("preserve", c["task"], c["delivery"], SKIP,
@@ -2512,7 +2512,10 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
             dvs = c.get("deliveries") or ([c["delivery"]] if "delivery" in c else [])
             for dv in dvs:
                 layer, mnum = _parse_delivery(dv)
-                rec = _rows_matching(rec_rows(c["task"]), layer, mnum)
+                # A manifest delivery names one exact historical observation. Adjacent
+                # same-layer messages can carry different facts and outcomes; admitting
+                # them here lets a neighboring delivery/suppression contaminate this case.
+                rec = _rows_matching(rec_rows(c["task"]), layer, mnum, tol=0)
                 rep = rep_rows(c["task"])
                 if not rec:
                     out.append(CaseVerdict(section, c["task"], dv, SKIP,

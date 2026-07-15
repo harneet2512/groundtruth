@@ -278,6 +278,33 @@ def test_oracle_preserve_requires_exact_mapped_boundary_and_exact_sha():
     assert sro.evaluate_cases(cases, recorded, wrong_sha, None, {"T": fx})[0].verdict == sro.FAIL
 
 
+def test_oracle_preserve_target_does_not_borrow_adjacent_same_layer_seal():
+    cases = {"preserve": [{
+        "task": "T", "delivery": "l3b m9", "why": "NOVEL_PRESERVE",
+    }]}
+    recorded = {"T": [
+        sro.Delivery(
+            "l3b.evidence", "post_view", 5, 100, "a" * 16, 9,
+            "delivered", "", "", payload="first",
+        ),
+        sro.Delivery(
+            "l3b.evidence", "post_view", 6, 100, "b" * 16, 10,
+            "delivered", "", "", payload="neighbor",
+        ),
+    ]}
+    fx = sro.FixpointResult(
+        "T", True, True, True, float("inf"), 8, 8,
+        drift_map=[(5, 5), (6, 6)],
+    )
+    neighbor_only = {"T": [{
+        "layer": "l3b.evidence", "iteration": 6, "chars_delivered": 100,
+        "outcome": "delivered", "content_sha256_16": "b" * 16,
+    }]}
+    verdict = sro.evaluate_cases(
+        cases, recorded, neighbor_only, None, fidelity={"T": fx})[0]
+    assert verdict.verdict == sro.FAIL
+
+
 def test_cardinal_flag_excludes_invalid_historical_witness():
     cases = json.loads((_REPO / "tests" / "fixtures" / "ss_replay" / "cases.json").read_text("utf-8"))
     cardinals = [c for c in cases["preserve"] if sro._is_cardinal_preserve(c)]
@@ -424,6 +451,46 @@ def test_oracle_suppression_requires_attribution_at_exact_boundary_and_target_ab
     unmapped_wrong_boundary = {task: [dict(suppressed, iteration=6)]}
     assert sro.evaluate_cases(
         cases, recorded, unmapped_wrong_boundary, None)[0].verdict == sro.FAIL
+
+
+@pytest.mark.parametrize(
+    ("target_home", "target_iteration", "neighbor_iteration"),
+    [(9, 5, 6), (10, 6, 5)],
+)
+def test_oracle_suppression_recorded_target_does_not_absorb_adjacent_same_layer_delivery(
+        target_home, target_iteration, neighbor_iteration):
+    """One neighboring l3b outcome cannot change the audited message's verdict."""
+    task = "T"
+    cases = {"suppress_step_behind": [{
+        "task": task, "delivery": f"l3b m{target_home}", "why": "echo",
+    }]}
+    recorded = {task: [
+        sro.Delivery(
+            "l3b.evidence", "post_view", 5, 100, "a" * 16, 9,
+            "delivered", "", "", payload="first",
+        ),
+        sro.Delivery(
+            "l3b.evidence", "post_view", 6, 100, "b" * 16, 10,
+            "delivered", "", "", payload="second",
+        ),
+    ]}
+    fx = sro.FixpointResult(
+        task, True, True, True, float("inf"), 8, 8,
+        drift_map=[(5, 5), (6, 6)],
+    )
+    replayed = {task: [{
+        "layer": "l3b.evidence", "iteration": target_iteration,
+        "chars_delivered": 0, "outcome": "suppressed_hidden_only",
+        "reason": "ss_step_behind",
+    }, {
+        "layer": "l3b.evidence", "iteration": neighbor_iteration,
+        "chars_delivered": 100, "outcome": "delivered",
+        "content_sha256_16": "c" * 16,
+    }]}
+
+    verdict = sro.evaluate_cases(
+        cases, recorded, replayed, None, fidelity={task: fx})[0]
+    assert verdict.verdict == sro.PASS
 
 
 def test_oracle_late_suppression_allows_only_nonstale_remainder():
@@ -663,6 +730,19 @@ def test_oracle_coherence_count_is_scoped_to_exact_decision_boundary():
     iteration_boundary_bad = sro.evaluate_cases(
         cases, recorded, later_by_iteration, None, fidelity=None)[0]
     assert iteration_boundary_bad.verdict == sro.FAIL
+
+
+def test_exact_recorded_boundary_rejects_missing_home_coordinate():
+    """Missing location evidence cannot wildcard-match an exact manifest boundary."""
+    rows = [{"layer": "l3b.evidence", "home_msg": None, "iteration": 99}]
+
+    assert sro._rows_matching(rows, "l3b", 9, tol=0) == []
+
+
+def test_exact_recorded_boundary_rejects_adjacent_home_coordinate():
+    rows = [{"layer": "l3b.evidence", "home_msg": 10, "iteration": 4}]
+
+    assert sro._rows_matching(rows, "l3b", 9, tol=0) == []
 
 
 def test_invariants_leak_dose_empty_bite():

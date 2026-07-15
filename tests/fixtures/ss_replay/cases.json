@@ -6,7 +6,11 @@
   "preserve": [
     {"task": "geopandas__geopandas-3471", "delivery": "edit.syntax m101", "why": "P5 consumed (G7+U) — real IndentationError from blind sed", "assert": "still delivered at edit boundary"},
     {"task": "dynaconf__dynaconf-1225", "delivery": "edit.syntax m219", "why": "P5 consumed — real SyntaxError, agent reverted", "assert": "still delivered"},
-    {"task": "hiyouga__llama-factory-7505", "delivery": "recovery m116", "why": "recovery on true repeated failing test (redundant but legitimate)", "assert": "recovery-v2 predicate still qualifies it (verify: second identical failing observation)", "review": true}
+    {"task": "hiyouga__llama-factory-7505", "delivery": "recovery m116", "why": "recovery on true repeated failing test (redundant but legitimate)", "assert": "recovery-v2 predicate still qualifies it (verify: second identical failing observation)", "review": true},
+    {"task": "conan-io__conan-17092", "delivery": "l3b m9", "why": "NOVEL_PRESERVE: payload names cross-file entities not yet acquired by the agent", "assert": "still delivered at the exact boundary with the recorded seal"},
+    {"task": "conan-io__conan-17092", "delivery": "l3b m10", "why": "NOVEL_PRESERVE: payload names cross-file entities not yet acquired by the agent", "assert": "still delivered at the exact boundary with the recorded seal"},
+    {"task": "conan-io__conan-17092", "delivery": "l3b m17", "why": "NOVEL_PRESERVE: payload names cross-file entities not yet acquired by the agent", "assert": "still delivered at the exact boundary with the recorded seal"},
+    {"task": "conan-io__conan-17092", "delivery": "l3b m28", "why": "NOVEL_PRESERVE: payload names cross-file entities not yet acquired by the agent", "assert": "still delivered at the exact boundary with the recorded seal"}
   ],
   "historical_invalid": [
     {
@@ -58,7 +62,7 @@
     }
   ],
   "suppress_step_behind": [
-    {"task": "conan-io__conan-17092", "deliveries": ["l3b m9", "l3b m10", "l3b m13", "l3b m17", "l3b m28"], "why": "caller rows for files agent was reading (SELF_ACQUIRED/NATIVE priors)", "assert": "reason=ss_step_behind", "note": "m13 may survive if its entity set contains genuinely novel cross-file entities the agent had not touched — oracle accepts deliver-or-suppress for m13, requires suppress for pure-echo instances"},
+    {"task": "conan-io__conan-17092", "deliveries": ["l3b m13"], "why": "all cited migrations entities were already acquired from the agent's own targeted read", "assert": "reason=ss_step_behind at the exact boundary"},
     {"task": "deepset-ai__haystack-8997", "deliveries": ["l3b m7"], "why": "off-target callers while agent read the file itself", "assert": "suppressed or filtered"},
     {"task": "pydata__xarray-10076", "deliveries": ["l3b m13", "l3b m19", "l3b m25"], "why": "refs agent had already read (NATIVE_OUTPUT_GIVEN)", "assert": "reason=ss_step_behind"}
   ],
