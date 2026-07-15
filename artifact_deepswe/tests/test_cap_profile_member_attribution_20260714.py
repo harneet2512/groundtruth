@@ -86,7 +86,7 @@ def test_plan_syntax_delivery_stays_unmeasured_without_concrete_identity(monkeyp
         event=None, steer_base="edit result",
     )
 
-    delivered = [row for row in calls if row.get("content") == payload]
+    delivered = [row for row in calls if row.get("content") == "\n" + payload]
     assert len(delivered) == 1
     extra = delivered[0]["extra"]
     assert extra["candidate_id"]
@@ -140,7 +140,7 @@ def test_gate_winner_threads_owner_only_to_exact_sealed_delivery(monkeypatch):
         event=None, steer_base="tool output",
     )
 
-    delivered = [row for row in calls if row.get("content") == payload]
+    delivered = [row for row in calls if row.get("content") == "\n" + payload]
     assert len(delivered) == 1
     extra = delivered[0]["extra"]
     assert extra["profile_member"] == "GT_EDIT_CHECK"

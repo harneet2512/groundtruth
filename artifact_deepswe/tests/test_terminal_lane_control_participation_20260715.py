@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import gt_mini_patch as g
 
@@ -14,14 +15,18 @@ def _capture(monkeypatch) -> list[dict]:
     return rows
 
 
+def _exact(kind: str, text: str, event=g.Event.TEST_RESULT) -> dict:
+    return g._lane_delivery_extra(kind, text, "src/mod.py", event)
+
+
 def test_terminal_lane_controls_bind_only_committed_exact_suffix(monkeypatch) -> None:
     rows = _capture(monkeypatch)
-    produced = "src/mod.py:8: caller"
+    produced = "break the repeated loop"
     shipped = "\n" + produced
     g._stage_terminal_lane_control(
-        "l3.contract", produced,
-        feature_id="GT_CONTRACT_NATIVE",
-        decision_site="mini_seam.contract.native_render",
+        "detect.loop", produced,
+        feature_id="GT_NUDGE_NATIVE",
+        decision_site="mini_seam.nudge.native_render",
         decision="APPLIED",
         reason="native_contract_render",
     )
@@ -29,13 +34,14 @@ def test_terminal_lane_controls_bind_only_committed_exact_suffix(monkeypatch) ->
     # Producing/staging is not terminal evidence.
     assert rows == []
     g._record_terminal_lane_controls(
-        "l3.contract", produced, shipped, "src/mod.py",
+        "detect.loop", produced, shipped, "src/mod.py",
+        delivery_extra=_exact("detect.loop", produced),
     )
 
     assert len(rows) == 1
     row = rows[0]
-    assert row["control_ref"]["feature_id"] == "GT_CONTRACT_NATIVE"
-    assert row["fact_class"] == "caller_contract"
+    assert row["control_ref"]["feature_id"] == "GT_NUDGE_NATIVE"
+    assert row["fact_class"] == "recovery"
     assert row["candidate_id"]
     assert row["candidate_chars"] == len(shipped)
     assert row["candidate_sha256_16"] == hashlib.sha256(shipped.encode()).hexdigest()[:16]
@@ -59,28 +65,30 @@ def test_terminal_lane_controls_do_not_cross_kind_or_uncommitted_candidate(monke
 
 def test_terminal_lane_controls_emit_multiple_real_decisions_once(monkeypatch) -> None:
     rows = _capture(monkeypatch)
-    produced = "contract bytes"
+    produced = "recovery bytes"
     for feature, site, decision in (
-        ("GT_CONTRACT_MODE", "mini_seam.contract.mode_selection", "NO_EFFECT"),
-        ("GT_CONTRACT_BILATERAL", "mini_seam.contract.bilateral_selection", "APPLIED"),
+        ("GT_NUDGE_NATIVE", "mini_seam.nudge.native_render", "NO_EFFECT"),
+        ("GT_STEER_NATIVE", "mini_seam.steer.native_render", "APPLIED"),
     ):
         g._stage_terminal_lane_control(
-            "l3.contract", produced,
+            "detect.loop", produced,
             feature_id=feature, decision_site=site, decision=decision,
             reason="terminal_decision_reached",
         )
 
     g._record_terminal_lane_controls(
-        "l3.contract", produced, produced, "src/mod.py",
+        "detect.loop", produced, produced, "src/mod.py",
+        delivery_extra=_exact("detect.loop", produced),
     )
     g._record_terminal_lane_controls(
-        "l3.contract", produced, produced, "src/mod.py",
+        "detect.loop", produced, produced, "src/mod.py",
+        delivery_extra=_exact("detect.loop", produced),
     )
 
     assert [(r["control_ref"]["feature_id"], r["participation_decision"])
             for r in rows] == [
-        ("GT_CONTRACT_MODE", "NO_EFFECT"),
-        ("GT_CONTRACT_BILATERAL", "APPLIED"),
+        ("GT_NUDGE_NATIVE", "NO_EFFECT"),
+        ("GT_STEER_NATIVE", "APPLIED"),
     ]
 
 
@@ -192,20 +200,10 @@ def _lane_filter_harness(monkeypatch) -> list[dict]:
     monkeypatch.setattr(g, "_ss_shadow_withheld", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(g, "_ledger_note_delivery", lambda *_args: None)
     monkeypatch.setattr(g, "_runtime_ledger_record", lambda **_kwargs: None)
-    monkeypatch.setattr(g, "_lane_delivery_extra", lambda *_args: {})
     monkeypatch.setattr(g, "_record_lane_provenance_control", lambda *_args: None)
     monkeypatch.setattr(g, "_ss_record_delivered", lambda *_args: None)
 
-    def seal(kind, final_text, target, *, base_output="", producer_text=None) -> None:
-        del base_output
-        g._record_terminal_lane_controls(
-            kind,
-            producer_text if producer_text is not None else final_text,
-            final_text,
-            target,
-        )
-
-    monkeypatch.setattr(g, "_seal_lane_delivery", seal)
+    monkeypatch.setattr(g, "_seal_lane_delivery", lambda *_args, **_kwargs: None)
     return rows
 
 
@@ -217,21 +215,21 @@ def test_lane_provenance_rewrite_matches_original_stage_to_final_bytes(
     final = "src/mod.py:8: caller"
     monkeypatch.setattr(g, "_ss_provenance_filter", lambda *_args: final)
     g._stage_terminal_lane_control(
-        "l3.contract", original,
-        feature_id="GT_CONTRACT_NATIVE",
-        decision_site="mini_seam.contract.native_render",
+        "obligation.unexercised", original,
+        feature_id="GT_NUDGE_NATIVE",
+        decision_site="mini_seam.nudge.native_render",
         decision="APPLIED",
         reason="native_contract_render",
     )
 
     out: dict = {}
     g._lane_a_deliver(
-        out, "edit", [("l3.contract", original, "src/mod.py")],
+        out, "edit", [("obligation.unexercised", original, "src/mod.py")],
         krel="src/mod.py", event=None)
 
     assert out["output"] == final
     native = [row for row in rows
-              if row.get("control_ref", {}).get("feature_id") == "GT_CONTRACT_NATIVE"]
+              if row.get("control_ref", {}).get("feature_id") == "GT_NUDGE_NATIVE"]
     assert len(native) == 1
     assert native[0]["candidate_chars"] == len(final)
     assert native[0]["candidate_sha256_16"] == hashlib.sha256(
@@ -245,18 +243,152 @@ def test_lane_provenance_zero_content_suppression_cannot_attribute(
     original = "/tmp/scratch.py:2: noise"
     monkeypatch.setattr(g, "_ss_provenance_filter", lambda *_args: "")
     g._stage_terminal_lane_control(
-        "l3.contract", original,
-        feature_id="GT_CONTRACT_NATIVE",
-        decision_site="mini_seam.contract.native_render",
+        "obligation.unexercised", original,
+        feature_id="GT_NUDGE_NATIVE",
+        decision_site="mini_seam.nudge.native_render",
         decision="APPLIED",
         reason="native_contract_render",
     )
 
     out: dict = {}
     g._lane_a_deliver(
-        out, "edit", [("l3.contract", original, "src/mod.py")],
+        out, "edit", [("obligation.unexercised", original, "src/mod.py")],
         krel="src/mod.py", event=None)
 
     assert (out.get("output") or "") == ""
-    assert not any(row.get("control_ref", {}).get("feature_id") == "GT_CONTRACT_NATIVE"
+    assert not any(row.get("control_ref", {}).get("feature_id") == "GT_NUDGE_NATIVE"
                    for row in rows)
+
+
+def test_terminal_control_requires_exact_delivery_lineage(monkeypatch) -> None:
+    rows = _capture(monkeypatch)
+    produced = "break the repeated loop"
+    g._stage_terminal_lane_control(
+        "detect.loop", produced,
+        feature_id="GT_NUDGE_NATIVE",
+        decision_site="mini_seam.nudge.native_render",
+        decision="APPLIED",
+        reason="native_nudge_render",
+    )
+    exact = g._lane_delivery_extra(
+        "detect.loop", produced, "src/mod.py", g.Event.TEST_RESULT)
+
+    g._record_terminal_lane_controls(
+        "detect.loop", produced, produced, "src/mod.py",
+        delivery_extra=exact,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["fact_class"] == "recovery"
+    assert rows[0]["candidate_id"] == exact["candidate_id"]
+
+
+def test_terminal_control_cannot_infer_authority_from_arbiter_class(
+    monkeypatch,
+) -> None:
+    rows = _capture(monkeypatch)
+    produced = "src/mod.py:8: caller"
+    g._stage_terminal_lane_control(
+        "l3.contract", produced,
+        feature_id="GT_CONTRACT_NATIVE",
+        decision_site="mini_seam.contract.native_render",
+        decision="APPLIED",
+        reason="native_contract_render",
+    )
+
+    g._record_terminal_lane_controls(
+        "l3.contract", produced, produced, "src/mod.py",
+        delivery_extra=g._lane_delivery_extra(
+            "l3.contract", produced, "src/mod.py", g.Event.POST_EDIT),
+    )
+
+    assert rows == []
+
+
+def test_steer_terminal_commit_precedes_delivery_and_collector_joins(
+    monkeypatch,
+) -> None:
+    scripts = Path(__file__).resolve().parents[2] / "scripts" / "swebench"
+    monkeypatch.syspath_prepend(str(scripts))
+    import gt_feature_metrics as metrics
+
+    rows = _capture(monkeypatch)
+    monkeypatch.setenv("GT_STEER_NATIVE", "1")
+    monkeypatch.setenv("GT_LANE_ENVELOPE", "1")
+    monkeypatch.setattr(g, "_ledger_note_delivery", lambda *_args: None)
+    monkeypatch.setattr(g, "_record_hook_fire", lambda *_args: None)
+    monkeypatch.setattr(g, "_ss_record_delivered", lambda *_args: None)
+    monkeypatch.setattr(g, "_persist_receipt", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        g, "_persist_lane_producer_attestation", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(g, "_gt_gateway_chain_head", "")
+    monkeypatch.setattr(g, "_gt_gateway_deliveries", [])
+    g._EPISODE.delivered_dedup.clear()
+
+    out = {"output": "native tool output"}
+    produced = g._steer_native(
+        "break the repeated loop", kind="detect.loop")
+    g._commit_prepared_steer(
+        out, "pytest", "detect.loop", "",
+        {"payload": produced, "shipped_suffix": "\n" + produced},
+        krel="src/mod.py", kf="", event=g.Event.TEST_RESULT,
+        steer_base="native tool output",
+    )
+
+    shipped = "\nbreak the repeated loop"
+    control_index = next(
+        index for index, row in enumerate(rows)
+        if row.get("control_ref", {}).get("feature_id") == "GT_STEER_NATIVE")
+    delivery_index = next(
+        index for index, row in enumerate(rows)
+        if row.get("layer") == "detect.loop" and row.get("outcome") == "delivered")
+    assert control_index < delivery_index
+    control = rows[control_index]
+    delivery = rows[delivery_index]
+    sealed = g._gt_gateway_deliveries[-1]
+    assert control["candidate_id"] == delivery["candidate_id"] == sealed.dedup_key
+    assert control["candidate_chars"] == delivery["chars_delivered"] == len(shipped)
+    assert control["candidate_sha256_16"] == delivery["content_sha256_16"]
+
+    consumption = {"entries": [{
+        "source": "trajectory", "joined": True, "join_method": "seal",
+        "content_sha256_16": delivery["content_sha256_16"],
+        "ledger_chars": len(shipped), "ledger_layer": "detect.loop",
+        "msg_index": 0, "receipt": 1,
+    }]}
+    evidence = metrics._control_participation_evidence(
+        rows, [{"role": "tool", "content": out["output"]}], consumption)
+    joins = evidence["joins"]["GT_STEER_NATIVE"]
+    assert len(joins) == 1
+    assert joins[0]["delivery_row_index"] == delivery_index
+    assert joins[0]["observation_joined"] is True
+
+
+def test_lane_envelope_uses_covering_lineage_not_arbiter_class(
+    monkeypatch,
+) -> None:
+    rows = _capture(monkeypatch)
+    monkeypatch.setenv("GT_LANE_ENVELOPE", "1")
+    monkeypatch.setattr(
+        g, "_last_verify_executed_identity",
+        ("covering_runner", "covering_red", "test_result"))
+    monkeypatch.setattr(g, "_persist_receipt", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        g, "_persist_lane_producer_attestation", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(g, "_gt_gateway_chain_head", "")
+    monkeypatch.setattr(g, "_gt_gateway_deliveries", [])
+    g._EPISODE.delivered_dedup.clear()
+    text = "covering RED"
+    extra = g._lane_delivery_extra(
+        "verify.horizon.executed", text, "src/mod.py",
+        g.Event.REVIEW_TRANSITION)
+
+    g._seal_lane_delivery(
+        "verify.horizon.executed", text, "src/mod.py",
+        delivery_extra=extra)
+
+    lane = next(row for row in rows
+                if row.get("control_ref", {}).get("feature_id") == "GT_LANE_ENVELOPE")
+    assert lane["fact_class"] == "covering_red"
+    assert lane["candidate_id"] == extra["candidate_id"]
+    assert all(row.get("fact_class") != "executed_world_fact" for row in rows)

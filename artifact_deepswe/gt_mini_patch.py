@@ -280,14 +280,53 @@ def _stage_terminal_lane_control(
         staged.append(descriptor)
 
 
+def _terminal_delivery_identity(
+    delivery_extra: "dict | None",
+) -> "tuple[str, str] | None":
+    """Return exact registered FACT/candidate identity; never infer from lane kind."""
+    try:
+        exact = delivery_extra if isinstance(delivery_extra, dict) else {}
+        fact_class = exact.get("fact_class")
+        candidate_id = exact.get("candidate_id")
+        if (
+            exact.get("lineage_schema") != "gt.feature_lineage.v1"
+            or exact.get("producer_registration_match") is not True
+            or not isinstance(exact.get("runtime_producer_id"), str)
+            or not exact.get("runtime_producer_id")
+            or not isinstance(exact.get("registered_producer_id"), str)
+            or not exact.get("registered_producer_id")
+            or not isinstance(exact.get("evidence_type"), str)
+            or not exact.get("evidence_type")
+            or not isinstance(fact_class, str)
+            or not fact_class
+            or not isinstance(candidate_id, str)
+            or not candidate_id
+        ):
+            return None
+        from groundtruth.runtime.fact_registry import (
+            is_registered, producer_matches, registration_for)
+        registration = registration_for(exact["evidence_type"])
+        if (
+            not is_registered(fact_class)
+            or registration is None
+            or registration.producer != exact["registered_producer_id"]
+            or registration.fact_class != fact_class
+            or not producer_matches(
+                exact["evidence_type"], exact["runtime_producer_id"])
+        ):
+            return None
+        return fact_class, candidate_id
+    except Exception:  # noqa: BLE001 -- measurement cannot affect delivered bytes
+        return None
+
+
 def _record_terminal_lane_controls(
     kind: str,
     producer_text: str,
     shipped_suffix: str,
     target: str,
     *,
-    fact_class: str = "",
-    candidate_id: str = "",
+    delivery_extra: "dict | None" = None,
 ) -> None:
     """Commit staged controls only for their exact, sealed terminal lane winner."""
     if not _inseam_metrics_on() or not producer_text or not shipped_suffix:
@@ -296,19 +335,11 @@ def _record_terminal_lane_controls(
         _terminal_lane_control_key(kind, producer_text), [])
     if not staged:
         return
+    identity = _terminal_delivery_identity(delivery_extra)
+    if identity is None:
+        return
+    fact_class, candidate_id = identity
     try:
-        if not fact_class:
-            from groundtruth.runtime.global_arbiter import class_of_kind
-            fact_class = class_of_kind(kind) or ""
-        if fact_class:
-            from groundtruth.runtime.fact_registry import is_registered
-            if not is_registered(fact_class):
-                return
-        if not candidate_id:
-            candidate_id = _lane_final_extra(kind, shipped_suffix, target).get(
-                "candidate_id", "")
-        if not fact_class or not candidate_id:
-            return
         for feature_id, decision_site, decision, reason in staged:
             _control_participation_record(
                 feature_id,
@@ -11534,6 +11565,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             # Lane-A blocks (the tagged contract/evidence/scope all open with `\n`).
             _base_out = out.get("output") or ""  # B-32: base observation before the append
             out["output"] = _join_lane_output(_base_out, text)
+            _shipped_suffix = out["output"][len(_base_out):]
             _oracle_delivered_hashes.add(h)
             _oracle_delivered_hashes.add(hc)
             # bug #5 / C3 / C6: consume the producer fire-once latches ONLY on a
@@ -11561,14 +11593,23 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 if _psy:
                     _ledger_mark_answered(_norm_stem(_psy), text)
             _ledger_note_delivery(kind, cmd, subject_path)  # S-1: carry the target
+            _delivery_extra = _lane_delivery_extra(
+                kind, text, subject_path, item_event)
+            _seal_lane_delivery(
+                kind, text, subject_path, base_output=_base_out,
+                producer_text=_provenance_original, identity_text=text,
+                delivery_extra=_delivery_extra)
+            _record_terminal_lane_controls(
+                kind, _provenance_original, _shipped_suffix, subject_path,
+                delivery_extra=_delivery_extra)
             _runtime_ledger_record(
                 kind=kind,
                 outcome=_ProductSignalOutcome.DELIVERED,
-                chars=len(text),
+                chars=len(_shipped_suffix),
                 file_path=subject_path,
                 event=item_event,
-                content=text,  # W2 seal: the delivered lane block (never the whole observation)
-                extra=_lane_delivery_extra(kind, text, subject_path, item_event),
+                content=_shipped_suffix,
+                extra=_delivery_extra,
             )
             if _provenance_decision:
                 _record_lane_provenance_control(
@@ -11579,9 +11620,6 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
             # RL-1 (flag GT_LANE_ENVELOPE): seal an envelope over the SAME delivered
             # bytes — advance the shared chain, stamp the dedup_key, record a receipt-
             # tracked delivery. Pure bookkeeping; no-op + byte-identical when off.
-            _seal_lane_delivery(
-                kind, text, subject_path, base_output=_base_out,
-                producer_text=_provenance_original)
             # D1 budget-commit re-wire (risk note #5): l3b.evidence's text was
             # budget-trimmed by _budget_trim, which staged the trimmed lines in
             # _last_budget_pending.  In the old monolith the commit fired only on
@@ -11636,19 +11674,29 @@ def _commit_prepared_lane(out, cmd, kind: str, decision: dict, *, krel, event) -
         if pattern:
             _ledger_mark_answered(_norm_stem(pattern), text)
     _ledger_note_delivery(kind, cmd, krel or "")
+    delivery_extra = _lane_delivery_extra(
+        kind, text, krel or "", event)
+    _seal_lane_delivery(
+        kind, shipped_suffix, krel or "", base_output=base_output,
+        producer_text=decision.get("provenance_original", text),
+        identity_text=text, delivery_extra=delivery_extra)
+    _record_terminal_lane_controls(
+        kind,
+        decision.get("provenance_original", text),
+        shipped_suffix,
+        krel or "",
+        delivery_extra=delivery_extra,
+    )
     _runtime_ledger_record(
         kind=kind, outcome=_ProductSignalOutcome.DELIVERED,
         chars=len(shipped_suffix), file_path=krel or "", event=event,
         content=shipped_suffix,
-        extra=_lane_delivery_extra(kind, shipped_suffix, krel or "", event))
+        extra=delivery_extra)
     if decision.get("provenance_decision"):
         _record_lane_provenance_control(
             kind, decision.get("provenance_original", text), shipped_suffix,
             krel or "", decision["provenance_decision"])
     _ss_record_delivered(kind, text, decision.get("root", ""))
-    _seal_lane_delivery(
-        kind, shipped_suffix, krel or "", base_output=base_output,
-        producer_text=text)
     if kind == "l3b.evidence" and _last_budget_pending:
         try:
             _PRODUCT_BUDGETER.commit_delivered(_last_budget_pending)
@@ -12117,7 +12165,9 @@ def _persist_lane_producer_attestation(
 
 
 def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str = "",
-                        producer_text: "str | None" = None) -> None:
+                        producer_text: "str | None" = None,
+                        identity_text: "str | None" = None,
+                        delivery_extra: "dict | None" = None) -> None:
     """RL-1: route an ALREADY-DELIVERED lane block through EvidenceEnvelope build ->
     validate -> seal — advancing the SHARED gateway hash-chain, stamping the envelope
     dedup_key into _EPISODE.delivered_dedup (dual-stamp; the legacy content-hash stamp
@@ -12135,7 +12185,8 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
     try:
         env = EvidenceEnvelope.build(
             producer=kind or "lane", fact_id="", target=target or "",
-            evidence_type=kind or "lane", payload=(text,))
+            evidence_type=kind or "lane",
+            payload=(identity_text if identity_text is not None else text,))
         if validate(env):  # a law violation -> skip bookkeeping (bytes already shipped)
             return
         # Seam-F1 (Fable-LIPI round-2, 2026-07-11): seal what ACTUALLY ships — the boundary-joined
@@ -12167,22 +12218,14 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
             _shipped, getattr(env, "dedup_key", "") or "",
             getattr(sealed, "rendered_bytes_hash", "")[:16])
         try:
-            from groundtruth.runtime.fact_registry import is_registered
-            from groundtruth.runtime.global_arbiter import class_of_kind
-            fact_class = class_of_kind(kind)
-            if fact_class and is_registered(fact_class):
-                candidate_id = getattr(env, "dedup_key", "") or ""
+            identity = _terminal_delivery_identity(delivery_extra)
+            if identity is not None:
+                fact_class, candidate_id = identity
+                if candidate_id != (getattr(env, "dedup_key", "") or ""):
+                    return
                 common = dict(
                     candidate_bytes=_shipped, fact_class=fact_class,
                     candidate_id=candidate_id)
-                _record_terminal_lane_controls(
-                    kind,
-                    producer_text if producer_text is not None else text,
-                    _shipped,
-                    target,
-                    fact_class=fact_class,
-                    candidate_id=candidate_id,
-                )
                 _control_participation_record(
                     "GT_LANE_ENVELOPE",
                     "mini_seam.lane_envelope.candidate_conversion", "APPLIED",
@@ -14687,24 +14730,34 @@ def _deliver_gate_winner(
         return
     # B-15: leak-validating chokepoint (join-mode). A leaky/empty steer ships 0 bytes.
     if win_text and _gt_deliver_append(out, win_text, join=True):
+        shipped_suffix = (out.get("output") or "")[len(steer_base):]
         # D-5: stamp the delivered-hash ATOMICALLY with the append.
         if _last_gate_winner_hash:
             _oracle_delivered_hashes.add(_last_gate_winner_hash)
         _ledger_note_delivery(_last_gate_winner_kind, cmd, krel or kf or "")  # S-1 target
         _record_hook_fire(_last_gate_winner_kind)  # Lane-B winners count too
+        delivery_extra = _lane_delivery_extra(
+            _last_gate_winner_kind, win_text, krel or kf or "", event,
+            lineage=lineage)
+        _seal_lane_delivery(
+            _last_gate_winner_kind, win_text, krel or kf or "",
+            base_output=steer_base, delivery_extra=delivery_extra)
+        _record_terminal_lane_controls(
+            _last_gate_winner_kind,
+            win_text,
+            shipped_suffix,
+            krel or kf or "",
+            delivery_extra=delivery_extra,
+        )
         _runtime_ledger_record(
             kind=_last_gate_winner_kind,
             outcome=_ProductSignalOutcome.DELIVERED,
-            chars=len(win_text), file_path=krel or kf or "", event=event,
-            content=win_text,
-            extra=_lane_delivery_extra(
-                _last_gate_winner_kind, win_text, krel or kf or "", event,
-                lineage=lineage))
+            chars=len(shipped_suffix), file_path=krel or kf or "", event=event,
+            content=shipped_suffix,
+            extra=delivery_extra)
         # SS (features 2/7): record the delivered steer's entity set + queue the ack watch.
         _ss_record_delivered(_last_gate_winner_kind, win_text)
         # RL-1 (GT_LANE_ENVELOPE): seal over the SAME bytes; base_output = pre-append obs.
-        _seal_lane_delivery(_last_gate_winner_kind, win_text, krel or kf or "",
-                            base_output=steer_base)
     else:
         # Seam-F4: won the gate but 0 bytes (native-render collapse / B-15 leak refusal) —
         # re-arm the fire-once latch consumed at production (deferred, not destroyed).
@@ -14721,18 +14774,22 @@ def _commit_prepared_steer(out, cmd, kind: str, winner_hash: str, decision: dict
         _oracle_delivered_hashes.add(winner_hash)
     _ledger_note_delivery(kind, cmd, krel or kf or "")
     _record_hook_fire(kind)
+    delivery_extra = _lane_delivery_extra(
+        kind, text, krel or kf or "", event, lineage=lineage)
+    _seal_lane_delivery(
+        kind, decision["shipped_suffix"], krel or kf or "",
+        base_output=steer_base, producer_text=text, identity_text=text,
+        delivery_extra=delivery_extra)
+    _record_terminal_lane_controls(
+        kind, text, decision["shipped_suffix"], krel or kf or "",
+        delivery_extra=delivery_extra)
     _runtime_ledger_record(
         kind=kind, outcome=_ProductSignalOutcome.DELIVERED,
         chars=len(decision["shipped_suffix"]),
         file_path=krel or kf or "", event=event,
         content=decision["shipped_suffix"],
-        extra=_lane_delivery_extra(
-            kind, decision["shipped_suffix"], krel or kf or "", event,
-            lineage=lineage))
+        extra=delivery_extra)
     _ss_record_delivered(kind, text)
-    _seal_lane_delivery(
-        kind, decision["shipped_suffix"], krel or kf or "",
-        base_output=steer_base, producer_text=text)
 
 
 _GA_PLANE_LANE_A = "lane_a"
