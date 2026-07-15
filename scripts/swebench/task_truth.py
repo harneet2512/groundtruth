@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 from typing import Any
@@ -360,13 +361,79 @@ def _truth_authority_map() -> dict[str, str]:
     }
 
 
-def _build_verifier_truth(report: dict | None, instance_id: str | None) -> dict[str, Any]:
+_FACT_EDGE_METHODS = frozenset({
+    "same_file", "import", "verified_unique", "type_flow", "lsp",
+})
+
+
+def _normalize_repo_path(path: str) -> str:
+    return path.replace("\\", "/").removeprefix("./")
+
+
+def _join_failed_test_callers(
+    failures: list[str], graph_path: str, changed_paths: set[str],
+) -> tuple[int | None, int, bool]:
+    """Join evaluator-only failed probes to graph-proven callers of edited files.
+
+    No test identifier is returned.  Any missing/ambiguous probe or candidate-only
+    edge makes the count unmeasured instead of manufacturing caller attribution.
+    """
+    changed = {_normalize_repo_path(path) for path in changed_paths if path}
+    if not failures or not changed or not os.path.isfile(graph_path):
+        return (0, 0, True) if not failures else (None, 0, False)
+    joined_node_ids: set[int] = set()
+    try:
+        with sqlite3.connect(f"file:{graph_path}?mode=ro", uri=True) as connection:
+            for identifier in failures:
+                parts = identifier.split("::")
+                if len(parts) < 2:
+                    return None, len(joined_node_ids), False
+                test_path = _normalize_repo_path(parts[0])
+                test_name = parts[-1].split("[", 1)[0]
+                nodes = connection.execute(
+                    "SELECT id FROM nodes "
+                    "WHERE is_test = 1 AND file_path = ? AND name = ?",
+                    (test_path, test_name),
+                ).fetchall()
+                if len(nodes) != 1:
+                    return None, len(joined_node_ids), False
+                node_id = int(nodes[0][0])
+                targets = connection.execute(
+                    "SELECT t.file_path, e.resolution_method, e.confidence "
+                    "FROM edges e JOIN nodes t ON t.id = e.target_id "
+                    "WHERE e.source_id = ?",
+                    (node_id,),
+                ).fetchall()
+                reaches_edit = any(
+                    _normalize_repo_path(str(path)) in changed
+                    and str(method) in _FACT_EDGE_METHODS
+                    and isinstance(confidence, (int, float))
+                    and float(confidence) >= 0.9
+                    for path, method, confidence in targets
+                )
+                if not reaches_edit:
+                    return None, len(joined_node_ids), False
+                joined_node_ids.add(node_id)
+    except (OSError, sqlite3.DatabaseError, TypeError, ValueError):
+        return None, len(joined_node_ids), False
+    return len(joined_node_ids), len(failures), True
+
+
+def _build_verifier_truth(
+    report: dict | None,
+    instance_id: str | None,
+    *,
+    graph_path: str | None = None,
+    changed_paths: set[str] | None = None,
+) -> dict[str, Any]:
     """Build count-only interface truth from the official evaluator report.
 
     The report is evaluator-only data.  Test identifiers never leave this
     function: downstream metric producers receive only a validated denominator
     and failure count.  PASS_TO_PASS failures prove regressions, but they do not
-    identify distinct production callers, so caller breakage remains unmeasured.
+    identify distinct production callers by itself.  Failed probes count only
+    after a graph-proven join to an edited production file; zero failures proves
+    the empty caller-breakage set directly.
     """
     base: dict[str, Any] = {
         "schema": "gt.verifier_truth.v1",
@@ -404,6 +471,14 @@ def _build_verifier_truth(report: dict | None, instance_id: str | None) -> dict[
         "p2p_total": len(success) + len(failure),
         "p2p_failed": len(failure),
     })
+    caller_count, joined_failures, join_complete = _join_failed_test_callers(
+        failure, graph_path or "", changed_paths or set(),
+    )
+    base["caller_breakage_count"] = caller_count
+    base["caller_joined_failures"] = joined_failures
+    base["caller_join_complete"] = join_complete
+    if join_complete:
+        base.pop("caller_breakage_unmeasured_reason", None)
     return base
 
 
@@ -431,6 +506,13 @@ def _augment_artifacts_root(jobs_dir: str, artifacts: dict[str, str | None]) -> 
                 artifacts["trial_dir"] = root
             break
     return artifacts
+
+
+def _task_graph_path(jobs_dir: str) -> str | None:
+    """Locate only the task-scoped graph; never search sibling task roots."""
+    task_root = os.path.abspath(jobs_dir)
+    candidate = os.path.join(task_root, "graph.db")
+    return candidate if os.path.isfile(candidate) else None
 
 
 def _root_reward_fallback(jobs_dir: str) -> float | None:
@@ -700,7 +782,18 @@ def build_task_truth(
         "patch_hygiene": patch_hygiene or {},
         "reconciled": reconciled,
         "brief_provenance": brief_prov,
-        "verifier_truth": _build_verifier_truth(report, iid),
+        "verifier_truth": _build_verifier_truth(
+            report,
+            iid,
+            graph_path=_task_graph_path(jobs_dir),
+            changed_paths={
+                str(row.get("path"))
+                for row in (patch_hygiene or {}).get("files", [])
+                if isinstance(row, dict)
+                and row.get("class") == "source_fix"
+                and isinstance(row.get("path"), str)
+            },
+        ),
         "verifier_semantics": verifier_semantics,
         "oracle_events_status": {
             "path": arts.oracle_events,
