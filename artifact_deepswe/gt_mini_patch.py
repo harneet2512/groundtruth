@@ -36,6 +36,8 @@ through it.
 from __future__ import annotations
 
 import enum
+import contextvars
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -43,6 +45,7 @@ import sys as _sys
 import re
 import subprocess
 import sys
+import threading
 
 
 def _ledger_line_direct(entry: dict) -> None:
@@ -1613,29 +1616,73 @@ _STATE_WINDOW = 12  # the live loop window (gt_gt §12) — the TIDE window K
 
 
 def _obs_collapse(obs: str, n: int = 400) -> str:
-    """Collapsed-observation prefix — the no-new-state proof half of the live
-    loop signature (gt_mini_patch._l5_nudge / gt_oracle._loop_signature)."""
+    """Legacy collapsed-observation prefix used by the windowed L5 arm."""
     return " ".join((obs or "").split())[:n]
 
 
-def _behavior_state_key(cmd: str, raw_obs: str) -> str:
-    """TIDE state-graph node identity for ONE action: (action TYPE, TARGET
-    file) when the command classifies as an edit/view — an action is 'new'
-    iff its target file+type hasn't appeared in the recent window — else the
-    command head token + a collapsed-observation hash (a non-file action is
-    'new' when it produces new output)."""
-    kind, fpath = _classify(cmd)
-    if kind and fpath:
-        return f"{kind}\x00{fpath}"
+def _behavior_result_preimage(cmd: str, raw_obs: str, returncode=None) -> bytes:
+    """Canonical length-delimited identity of one model-visible native result.
+
+    UTF-8 ``surrogatepass`` is injective over Python strings; unlike ``replace``
+    it cannot collapse distinct undecodable output. Length framing prevents
+    command/stdout/returncode boundary ambiguity.
+    """
+    norm = str(cmd or "").strip()
+    output = str(raw_obs or "")
+    if returncode is None:
+        rc = "missing"
+    elif type(returncode) is int:
+        rc = f"int:{returncode}"
+    else:
+        rc = f"{type(returncode).__name__}:{returncode!r}"
+    fields = ("gt.behavior-result.v1", norm, output, rc)
+    encoded = [field.encode("utf-8", "surrogatepass") for field in fields]
+    return b"".join(len(field).to_bytes(8, "big") + field for field in encoded)
+
+
+def _behavior_loop_signature(cmd: str, raw_obs: str, returncode=None) -> str | None:
+    """SHA-256 identity over normalized command, full output, and explicit rc."""
+    norm = (cmd or "").strip()
+    if not norm:
+        return None
     import hashlib as _h
-    head = (cmd or "").strip().split(None, 1)[0] if (cmd or "").strip() else ""
-    oh = _h.sha256(_obs_collapse(raw_obs).encode("utf-8", "replace")).hexdigest()[:8]
-    return f"cmd\x00{head}\x00{oh}"
+    return _h.sha256(
+        _behavior_result_preimage(norm, raw_obs, returncode)).hexdigest()
+
+
+def _behavior_state_key(cmd: str, raw_obs: str, returncode=None) -> str:
+    """Content-aware TIDE node identity for one action/result pair.
+
+    File/type alone is not a state identity: two different edits of one file,
+    or a view before and after an edit, are progress. Preserve structural
+    kind/target while binding it to the full command and raw result.
+    """
+    kind, fpath = _classify(cmd)
+    result_identity = _behavior_loop_signature(cmd, raw_obs, returncode) or "empty-command"
+    if kind and fpath:
+        target = str(fpath).replace("\\", "/")
+        return f"{kind}\x00{target}\x00{result_identity}"
+    return f"cmd\x00{result_identity}"
+
+
+def _advance_behavior_progress_epoch(current_epoch: int, successful_steps,
+                                     loop_signatures) -> tuple[int, bool]:
+    """Apply the shared byte-proven source-progress epoch contract.
+
+    Exact-repeat membership is cleared only when a strictly newer successful
+    byte-change step exists. Dynamic state/calibration history is intentionally
+    owned by the caller and remains trajectory-wide.
+    """
+    latest = max((int(step) for step in successful_steps), default=-1)
+    if latest <= int(current_epoch):
+        return int(current_epoch), False
+    loop_signatures.clear()
+    return latest, True
 
 
 def compute_loop_ratio(signatures) -> float:
     """TIDE Loop Ratio (deterministic form): the fraction of actions whose
-    full (command, collapsed-observation) signature occurs >=2 times in the
+    full (normalized-command, native-output, returncode) signature occurs >=2 times in the
     trajectory — actions inside recurring identical-state cycles / length.
     A no-new-state revisit contributes; a same-command-NEW-observation
     iteration does not (the 2026-06-10 '13453 false fire' discipline: same
@@ -5843,18 +5890,44 @@ _traj_loop_sigs: list[str] = []
 _lr_history: list[float] = []
 _nsr_history: list[float] = []
 _detect_loop_fired = False
+_detect_loop_epoch_step = -1
 _coherence_fired_files: set[str] = set()
 _coherence_last_rel: str | None = None
 
 
-def _degenerate_loop_candidate(cmd: str, raw_obs: str) -> tuple[float, str] | None:
+def _sync_detect_loop_progress_epoch() -> int:
+    """Advance detect.loop after a byte-proven successful source transition.
+
+    Coherence-V2's edit ledger is the live/replay shared source of exact write
+    truth: an ``ok`` row requires returncode 0 and changed source bytes.  A loop
+    recurrence cannot span that state transition.  Failed, same-byte, opaque,
+    or merely classified edits do not reset the detector.
+    """
+    global _detect_loop_epoch_step, _detect_loop_fired
+    if not (_ss_coherence_v2_on() or _ss_recovery_v2_on()):
+        return _detect_loop_epoch_step
+    _detect_loop_epoch_step, advanced = _advance_behavior_progress_epoch(
+        _detect_loop_epoch_step,
+        (step for _rel, step, ok in _ss_edit_events if ok),
+        _traj_loop_sigs,
+    )
+    if advanced:
+        # Exact recurrence membership is source-state-local. Dynamic lr/nsr
+        # calibration remains trajectory-wide, so real post-edit loops do not
+        # wait another 2*window turns to become observable.
+        _detect_loop_fired = False
+    return _detect_loop_epoch_step
+
+
+def _degenerate_loop_candidate(cmd: str, raw_obs: str,
+                               returncode=None) -> tuple[float, str] | None:
     """detect.loop producer — called EVERY turn on the oracle route (it owns
     the trajectory-stream bookkeeping).  Returns (severity, payload) or None."""
     global _detect_loop_fired
     import statistics as _st
-    norm = (cmd or "").strip()
-    sig = (norm + "\x00" + _obs_collapse(raw_obs)) if norm else None
-    _traj_state_keys.append(_behavior_state_key(cmd, raw_obs))
+    _sync_detect_loop_progress_epoch()
+    sig = _behavior_loop_signature(cmd, raw_obs, returncode)
+    _traj_state_keys.append(_behavior_state_key(cmd, raw_obs, returncode))
     if sig:
         _traj_loop_sigs.append(sig)
     lr = compute_loop_ratio(_traj_loop_sigs)
@@ -5875,12 +5948,13 @@ def _degenerate_loop_candidate(cmd: str, raw_obs: str) -> tuple[float, str] | No
         return None
     _detect_loop_fired = True
     body = (
-        f"GT: you have run this exact command with this exact output {reps} "
-        "times, and your recent actions are producing almost no new state — "
-        "this is a degenerate loop, not progress. If you edited a compiled "
-        "binary's source, REBUILD before re-running; otherwise re-read the "
-        "last real error and try a different approach (different file, "
-        "different hypothesis, or a narrower test)."
+        f"GT: the same normalized command produced identical native output and "
+        f"return code {reps} times "
+        "within the current byte-proven source-state epoch, and recent "
+        "command/result-state novelty is below this trajectory's prior norm. "
+        "Repeating the unchanged state is not adding evidence. Change one state "
+        "variable before retrying: inspect the controlling source or configuration, "
+        "make a byte-changing edit, rebuild if applicable, or run a discriminating probe."
     )
     return (float(_SEV_DETECT),
             _nudge_native(f'\n<gt-nudge reason="degenerate_loop">\n{body}\n</gt-nudge>'))
@@ -6282,6 +6356,12 @@ def _reset_oracle_state() -> None:
     global _gt_gateway_chain_head, _gt_gateway_deliveries
     _gt_gateway_chain_head = ""
     _gt_gateway_deliveries = []
+    # A partial/aborted parallel tool turn must never leak candidates into the
+    # next attempt's policy observation.
+    try:
+        _discard_tool_observation_batch("batch_attempt_reset")
+    except NameError:  # module import before the batch helpers are defined
+        pass
     # SM-4: the episode overlay is per-attempt edit state — clear it so a retry starts on a
     # fresh slate (a file edited in attempt-1 is not treated as stale in attempt-2).
     _gt_episode_overlay.clear()
@@ -6329,7 +6409,7 @@ def _reset_oracle_state() -> None:
     # nudge — a measurement-integrity bug. Byte-identical in production (fresh
     # process/attempt). These are the same attempt-scoped globals the delivery-stage
     # suites reset by hand.
-    global _detect_loop_fired, _coherence_last_rel
+    global _detect_loop_fired, _detect_loop_epoch_step, _coherence_last_rel
     global _last_test_outcome_failed, _last_test_step, _cycle_edit_start
     global _recovery_repeat_fp
     # W6 FIX 1b: the per-turn recovery REPETITION flag (set fresh at the top of every
@@ -6343,6 +6423,7 @@ def _reset_oracle_state() -> None:
     _nsr_history.clear()
     _coherence_fired_files.clear()
     _detect_loop_fired = False
+    _detect_loop_epoch_step = -1
     _coherence_last_rel = None
     # F3 reset law (Fable 2026-07-10): the detect.loop/coherence cluster's SIBLINGS —
     # the EDIT->TEST cycle + last-observed-test-outcome recency bookkeeping — are the
@@ -6606,7 +6687,9 @@ def _v2_clause_fresh_behavioral_proof(view) -> "dict | None":
             proof = classify_checked_behavioral_proof(
                 command, output, returncode, subjects, turn=turn
             )
-            if proof is None or proof.turn <= last_edit:
+            proof_turn = int(proof.turn) if proof is not None else int(turn)
+            if (proof is None and not _v2_checked_probe_covers_clause(
+                    view, command, output, returncode)) or proof_turn <= last_edit:
                 continue
             subject_digest = hashlib.sha256(
                 "|".join(sorted(subjects)).encode("utf-8")
@@ -6619,12 +6702,213 @@ def _v2_clause_fresh_behavioral_proof(view) -> "dict | None":
                 "clause_id": str(getattr(view, "clause_id", view.idx)),
                 "subject_digest": subject_digest,
                 "subject_term_digests": subject_term_digests,
-                "proof_turn": int(proof.turn),
+                "proof_turn": proof_turn,
                 "last_relevant_edit_turn": int(last_edit),
             }
         return None
     except Exception:  # noqa: BLE001 -- proof uncertainty must retain the clause
         return None
+
+
+_V2_PROOF_PROSE = frozenset({
+    "another", "behavior", "does", "expect", "expected", "format", "handled",
+    "have", "just", "like", "more", "must", "possibly", "possible", "preserve",
+    "requirement", "rules", "should", "support", "supported", "this", "they",
+    "true", "false", "useful", "values", "would",
+})
+_V2_PROOF_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_][A-Za-z0-9_.:-]*\b")
+
+
+def _v2_proof_terms(text: str) -> "set[str]":
+    """Behavior-bearing terms from issue prose for a checked-probe relation test.
+
+    These terms establish only that the executed probe concerns the clause.  Dynamic truth
+    still comes from an exact rc=0 plus a checked result shape below; prose overlap alone can
+    never retire an obligation.
+    """
+    return {
+        token.lower() for token in _V2_PROOF_TOKEN_RE.findall(text or "")
+        if (len(token) >= 4 or any(char.isdigit() for char in token))
+        and token.lower() not in _V2_PROOF_PROSE
+    }
+
+
+def _v2_relation_stems(text: str) -> "set[str]":
+    """Comparable identifier stems for one evaluated expression.
+
+    The small suffix fold joins ordinary API morphology (``matcher.matches`` to
+    ``matching``) without admitting prose elsewhere in the command.
+    """
+    stems: "set[str]" = set()
+    for token in _V2_PROOF_TOKEN_RE.findall(text or ""):
+        for part in re.split(r"[.:-]", token.lower()):
+            if len(part) < 4:
+                continue
+            stem = part
+            for suffix in ("ing", "ers", "er", "es", "s"):
+                if stem.endswith(suffix) and len(stem) - len(suffix) >= 4:
+                    stem = stem[:-len(suffix)]
+                    break
+            stems.add(stem)
+    return stems
+
+
+def _v2_expression_covers_relation(expression: str, relation_terms: "set[str]") -> bool:
+    relation_stems = {
+        stem for term in relation_terms for stem in _v2_relation_stems(term)
+    }
+    return bool(relation_stems & _v2_relation_stems(expression))
+
+
+def _v2_call_derived_output_bindings(
+    command: str,
+) -> "list[tuple[str, str]] | None":
+    """Terms printed from variables assigned call results, excluding static labels.
+
+    The output line is joined to its print statement by the literal prefix preceding
+    the result variable.  Only the suffix after that prefix is dynamic evidence; a
+    hard-coded expectation in the label/comment cannot prove itself.
+    """
+    assignments = dict(re.findall(
+        r"^\s*([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\([^\n]*\))\s*$",
+        command or "", re.MULTILINE))
+    if not assignments:
+        return None
+    bindings: "list[tuple[str, str]]" = []
+    for line in (command or "").splitlines():
+        printed = re.search(r"\bprint\s*\((.*)\)\s*(?:#.*)?$", line)
+        if not printed:
+            continue
+        body = printed.group(1)
+        for variable in assignments:
+            match = re.search(rf"\b{re.escape(variable)}\b", body)
+            if not match:
+                continue
+            prefix_source = body[:match.start()]
+            literals = [
+                value for _quote, value in re.findall(r"(['\"])(.*?)\1", prefix_source)
+            ]
+            if literals:
+                bindings.append((variable, " ".join(literals)))
+            break
+    if len(bindings) < 2:
+        return None
+    return bindings
+
+
+def _v2_checked_probe_covers_clause(view, command: str, output: str, returncode) -> bool:
+    """Conservative fallback for checked native probes outside the core parser's shapes.
+
+    Two generalized shapes are admitted: a >=2-case Boolean call matrix whose observed values
+    exactly match inline expectations, or >=2 call-derived printed values covering every
+    concrete alternative in a literal requirement.  Both require exact integer rc=0 and a
+    command/relation join; arbitrary successful scripts and unrelated GREEN remain ineligible.
+    """
+    if type(returncode) is not int or returncode != 0 or not command or not output:
+        return False
+    clause = str(getattr(view, "verbatim", "") or "")
+    relation_terms = _v2_proof_terms(clause)
+
+    checked: "list[str]" = []
+    for line in command.splitlines():
+        marker = re.search(r"#\s*(True|False)\b", line)
+        expression = (
+            re.search(r"\{([^{}]*\([^{}]*\)[^{}]*)\}", line[:marker.start()])
+            if marker else None
+        )
+        if (marker and expression
+                and _v2_expression_covers_relation(expression.group(1), relation_terms)):
+            checked.append(marker.group(1))
+    observed = re.findall(r":\s*(True|False)\s*$", output, re.MULTILINE)
+    if len(checked) >= 2 and observed == checked:
+        return True
+
+    bindings = _v2_call_derived_output_bindings(command)
+    output_lines = [line for line in output.splitlines() if line.strip()]
+    if bindings is None or len(output_lines) < 2:
+        return False
+    dynamic_output: "list[str]" = []
+    for _variable, prefix in bindings:
+        matches = [line for line in output_lines if line.strip().startswith(prefix)]
+        if len(matches) != 1:
+            return False
+        suffix = matches[0].strip()[len(prefix):].strip()
+        if not suffix:
+            return False
+        dynamic_output.append(suffix)
+    alternatives = [
+        _v2_proof_terms(part)
+        for part in re.split(r"\b(?:or|possibly|possible)\b", clause, flags=re.IGNORECASE)
+    ]
+    concrete = [terms for terms in alternatives if any(any(c.isdigit() for c in t) for t in terms)]
+    output_terms = {
+        token.lower() for token in _V2_PROOF_TOKEN_RE.findall("\n".join(dynamic_output))
+    }
+    return bool(len(concrete) >= 2 and all(terms <= output_terms for terms in concrete))
+
+
+def _v2_partition_fresh_proofs(statuses, *, kind: str, boundary: str):
+    """Remove strictly proven clauses and ledger why each produced zero bytes.
+
+    ``CLAUSE_UNVERIFIABLE`` means the static subject-symbol classifier could not exercise the
+    clause.  It remains eligible for retirement only when the independent, fresh checked-probe
+    path proves it dynamically; absent that proof, its status and rendered bytes are retained.
+    """
+    if not _ss_late_drop_on():
+        return list(statuses or ())
+    try:
+        from groundtruth.runtime.obligations import (
+            CLAUSE_EDITED_UNEXERCISED,
+            CLAUSE_UNADDRESSED,
+            CLAUSE_UNVERIFIABLE,
+        )
+        dynamically_provable = {
+            CLAUSE_EDITED_UNEXERCISED,
+            CLAUSE_UNADDRESSED,
+            CLAUSE_UNVERIFIABLE,
+        }
+    except Exception:  # noqa: BLE001 -- proof uncertainty retains every clause
+        return list(statuses or ())
+    data = _load_obligations_v2() or {}
+    retained = []
+    for view, status in statuses or ():
+        proof_meta = (
+            _v2_clause_fresh_behavioral_proof(view)
+            if status in dynamically_provable else None
+        )
+        if proof_meta is None:
+            retained.append((view, status))
+            continue
+        identity = {
+            **proof_meta,
+            "artifact_issue_sha256": str(data.get("issue_sha256") or ""),
+            "boundary": boundary,
+        }
+        suppression_key = hashlib.sha256(json.dumps({
+            **identity,
+            "kind": kind,
+            "iteration": int(_action_count),
+        }, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        if suppression_key in _unexercised_late_suppressed:
+            continue
+        _unexercised_late_suppressed.add(suppression_key)
+        _runtime_ledger_record(
+            kind=kind,
+            outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+            reason="ss_late",
+            extra=identity,
+        )
+    return retained
+
+
+def _v2_attribute_resurface_silence() -> None:
+    """Account for earned V2 silence at the retired post-edit resurface boundary."""
+    if not _ss_late_drop_on():
+        return
+    statuses = _v2_exercise_statuses()
+    if statuses is not None:
+        _v2_partition_fresh_proofs(
+            statuses, kind="obligation.resurface", boundary="post_edit")
 
 
 def _unexercised_clause_candidate() -> tuple[float, str] | None:
@@ -6636,42 +6920,8 @@ def _unexercised_clause_candidate() -> tuple[float, str] | None:
         return None
     data = _load_obligations_v2() or {}
     if _ss_late_drop_on():
-        try:
-            from groundtruth.runtime.obligations import (
-                CLAUSE_EDITED_UNEXERCISED,
-                CLAUSE_UNADDRESSED,
-            )
-            renderable = {CLAUSE_EDITED_UNEXERCISED, CLAUSE_UNADDRESSED}
-        except Exception:  # noqa: BLE001 -- proof uncertainty retains every clause
-            renderable = set()
-        retained = []
-        suppressed = []
-        for view, status in statuses:
-            proof_meta = (
-                _v2_clause_fresh_behavioral_proof(view)
-                if status in renderable else None
-            )
-            if proof_meta is not None:
-                suppressed.append(proof_meta)
-            else:
-                retained.append((view, status))
-        for proof_meta in suppressed:
-            identity = {
-                **proof_meta,
-                "artifact_issue_sha256": str(data.get("issue_sha256") or ""),
-            }
-            suppression_key = hashlib.sha256(
-                json.dumps(identity, sort_keys=True).encode("utf-8")
-            ).hexdigest()[:16]
-            if suppression_key not in _unexercised_late_suppressed:
-                _unexercised_late_suppressed.add(suppression_key)
-                _runtime_ledger_record(
-                    kind="obligation.unexercised",
-                    outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
-                    reason="ss_late",
-                    extra=identity,
-                )
-        statuses = retained
+        statuses = _v2_partition_fresh_proofs(
+            statuses, kind="obligation.unexercised", boundary="test_result")
         if not statuses:
             return None
     try:
@@ -9962,23 +10212,15 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                             reason="ss_provenance", file_path=krel or "", event=event)
                         continue
                     text = _ptext
-            # (1) NOVELTY / step-behind — every entity already acquired by the agent.
-            if _ss_novelty_on() and _ss_novelty_suppresses(kind, text, _ss_root):
+            # Shared precedence: late -> semantic duplicate -> step-behind.
+            _supp, _reason = _ss_screen_delivery(kind, text, _ss_root, is_loc=False)
+            if _supp:
                 _runtime_ledger_record(
-                    kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
-                    reason="ss_step_behind", file_path=krel or "", event=event)
-                continue
-            # (6) LATE-DROP — an obligation whose symbols were already GREEN-tested.
-            if _ss_late_drop_on() and _ss_late_drop_suppresses(kind, text):
-                _runtime_ledger_record(
-                    kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
-                    reason="ss_late", file_path=krel or "", event=event)
-                continue
-            # (2) ENTITY-SET dedup — this fact's entities ⊆ a prior same-class delivery.
-            if _ss_dedup2_on() and _ss_dedup2_suppresses(kind, text, _ss_root):
-                _runtime_ledger_record(
-                    kind=kind, outcome=_ProductSignalOutcome.SUPPRESSED_DUPLICATE,
-                    reason="ss_semantic_dup", file_path=krel or "", event=event)
+                    kind=kind,
+                    outcome=(_ProductSignalOutcome.SUPPRESSED_DUPLICATE
+                             if _reason == "ss_semantic_dup"
+                             else _ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY),
+                    reason=_reason, file_path=krel or "", event=event)
                 continue
             h = _oracle_content_hash(text)
             # B5 (token bloat, fastapi witness): a Lane-A block is a state-INDEPENDENT
@@ -10104,6 +10346,39 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
 # TITO hash-chain + receipt ledger. The heavy decision logic lives in the pure
 # adapter (groundtruth.runtime.adapters.miniswe); this is the harness splice.
 # ---------------------------------------------------------------------------
+def _commit_prepared_lane(out, cmd, kind: str, decision: dict, *, krel, event) -> None:
+    """Commit a frozen eligible Lane-A decision without re-running final gates."""
+    global _cochange_fired, _oblig_resurface_fired
+    text = decision["payload"]
+    shipped_suffix = decision["shipped_suffix"]
+    base_output = out.get("output") or ""
+    out["output"] = base_output + shipped_suffix
+    _oracle_delivered_hashes.add(decision["content_state_hash"])
+    _oracle_delivered_hashes.add(decision["content_hash"])
+    if kind == "l3.cochange":
+        _cochange_fired = True
+    elif kind == "l3.contract" and krel:
+        _contract_seen.add(krel)
+    elif kind == "obligation.resurface":
+        _oblig_resurface_fired = True
+    elif kind == "post_search.localize":
+        pattern = _search_pattern(cmd)
+        if pattern:
+            _ledger_mark_answered(_norm_stem(pattern), text)
+    _ledger_note_delivery(kind, cmd, krel or "")
+    _runtime_ledger_record(
+        kind=kind, outcome=_ProductSignalOutcome.DELIVERED,
+        chars=len(shipped_suffix), file_path=krel or "", event=event,
+        content=shipped_suffix)
+    _ss_record_delivered(kind, text, decision.get("root", ""))
+    _seal_lane_delivery(kind, shipped_suffix, krel or "", base_output=base_output)
+    if kind == "l3b.evidence" and _last_budget_pending:
+        try:
+            _PRODUCT_BUDGETER.commit_delivered(_last_budget_pending)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 _GT_GATEWAY_MAX_DELTA = int(os.environ.get("GT_GATEWAY_MAX_DELTA", "4000") or "4000")
 
 
@@ -10481,8 +10756,8 @@ def _lane_fits_budget(text: str) -> bool:
     the adapter's fits_budget so the lane and gateway share ONE budget law; correct-or-
     quiet fallback (adapter absent) admits the block (pre-RL-1 behaviour)."""
     try:
-        from groundtruth.runtime.adapters.miniswe import fits_budget as _fb
-        return _fb(text, max_delta_chars=_GT_LANE_MAX_DELTA)
+        return bool(text) and len(
+            text.encode("utf-8", "surrogatepass")) <= _GT_LANE_MAX_DELTA
     except Exception:  # noqa: BLE001 — adapter absent -> do not gate (byte-identical)
         return True
 
@@ -10982,15 +11257,15 @@ def _gt_gateway_pool_envelope(
             _runtime_ledger_record(
                 kind="gateway." + (_winner.evidence_type or "fact"),
                 outcome=_ProductSignalOutcome.DELIVERED,
-                chars=len(_delta), file_path=_winner.target or "",
-                content=_delta,
+                chars=len(_shipped), file_path=_winner.target or "",
+                content=_shipped,
                 extra=_gateway_delivery_extra(_winner))
         except Exception:  # noqa: BLE001
             pass
 
     return _global_pool_add_gateway(
         pool, winner, native, _commit_gateway,
-        ev_kind=getattr(ev, "kind", ""), rendered_text=delta)
+        ev_kind=getattr(ev, "kind", ""), rendered_text=delta, out=out)
 
 
 def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
@@ -11225,8 +11500,8 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
                 _runtime_ledger_record(
                     kind="gateway." + (winner.evidence_type or "fact"),
                     outcome=_ProductSignalOutcome.DELIVERED,
-                    chars=len(delta), file_path=winner.target or "",
-                    content=delta,
+                    chars=len(_shipped), file_path=winner.target or "",
+                    content=_shipped,
                     extra=_gateway_delivery_extra(winner))
             except Exception:  # noqa: BLE001
                 pass
@@ -11340,6 +11615,274 @@ def _global_arbiter_on() -> bool:
         return False
     return os.environ.get("GT_GLOBAL_ARBITER", "").strip().lower() not in (
         "", "0", "false", "no", "off")
+
+
+# Context-local ownership keeps independent agent loops from sharing a pool.
+# The process mapping is only an overlap guard: if two contexts overlap, BOTH
+# are marked invalid and therefore zero-dose at their formatter boundaries.
+_batch_context = contextvars.ContextVar("gt_observation_batch", default=None)
+_batch_owners: dict[int, dict] = {}
+_batch_lock = threading.RLock()
+_observation_batch_serial = 0
+_batch_install_failed = False
+_batch_commit_installed = False
+
+
+def _batch_action_key(action) -> str:
+    try:
+        return json.dumps(action, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:  # noqa: BLE001
+        return repr(action)
+
+
+def _batch_identity(actions) -> tuple[str, tuple[str, ...]]:
+    keys = tuple(_batch_action_key(action) for action in (actions or ()))
+    raw = json.dumps(keys, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()[:16], keys
+
+
+def _begin_observation_batch(owner, model, actions):
+    global _observation_batch_serial
+    identity, keys = _batch_identity(actions)
+    with _batch_lock:
+        _observation_batch_serial += 1
+        state = {
+            "serial": _observation_batch_serial,
+            "owner": id(owner), "model": id(model),
+            "identity": identity, "action_keys": keys,
+            "pool": [], "contexts": {}, "rollbacks": {}, "prepared": {},
+            "excluded": [], "observed_keys": [], "outputs": [], "invalid": False,
+            "precommitted_doses": [],
+        }
+        if _batch_owners:
+            state["invalid"] = True
+            for other in _batch_owners.values():
+                other["invalid"] = True
+        _batch_owners[state["serial"]] = state
+        state["token"] = _batch_context.set(state)
+    return state
+
+
+def _clear_tool_observation_batch(state=None) -> None:
+    state = state or _batch_context.get()
+    if state is None:
+        return
+    with _batch_lock:
+        _batch_owners.pop(state.get("serial"), None)
+    token = state.pop("token", None)
+    if token is not None:
+        try:
+            _batch_context.reset(token)
+        except (LookupError, ValueError):
+            _batch_context.set(None)
+
+
+def _register_batch_execute(state, action, out) -> bool:
+    """Incrementally join one execute to the handshake before any producer runs."""
+    if state is None or _batch_context.get() is not state:
+        return False
+    index = len(state["observed_keys"])
+    key = _batch_action_key(action)
+    if index >= len(state["action_keys"]) or key != state["action_keys"][index]:
+        _discard_tool_observation_batch("batch_action_mismatch", state)
+        return False
+    state["observed_keys"].append(key)
+    state["outputs"].append(out)
+    return True
+
+
+def _register_precommitted_batch_dose(state, action, out) -> bool:
+    """Own a native GT refusal produced before ``_augment_output``.
+
+    The formatter treats it as the observation's sole dose and discards every
+    deferred sibling candidate.  The refusal's existing delivery bookkeeping is
+    preserved; this helper only makes its observation ownership explicit.
+    """
+    if not _register_batch_execute(state, action, out):
+        return False
+    state["precommitted_doses"].append({
+        "output_index": len(state["outputs"]) - 1,
+        "payload": str((out or {}).get("output") or ""),
+    })
+    return True
+
+
+def _attach_batch_candidate(pool, candidate, out, payload: str, *, join: bool,
+                            kkind="", kf="", krel="", rollback=None,
+                            is_loc: bool = False,
+                            knowledge_authority: bool = True) -> bool:
+    """Build and attach complete producer ownership before pool publication."""
+    state = _batch_context.get()
+    if state is None or state.get("pool") is not pool:
+        return state is None
+    index = len(state["observed_keys"]) - 1
+    if index < 0:
+        return False
+    context = {
+        "kkind": kkind or "", "kf": kf or "", "krel": krel or "",
+        "action_index": index,
+        "action_key": state["observed_keys"][index],
+        "producer_iteration": int(_action_count),
+    }
+    prepared = {
+        "out": out, "payload": payload or "", "join": bool(join),
+        "is_loc": bool(is_loc),
+        "knowledge_authority": bool(knowledge_authority),
+    }
+    state["contexts"][id(candidate)] = context
+    state["prepared"][id(candidate)] = prepared
+    if rollback is not None:
+        state["rollbacks"][id(candidate)] = rollback
+    return True
+
+
+def _append_batch_candidate(pool, candidate, thunk, out, payload: str, *, join: bool,
+                            kkind="", kf="", krel="", rollback=None,
+                            is_loc: bool = False,
+                            knowledge_authority: bool = True) -> None:
+    """Publish only a fully owned candidate; rollback once on publication failure."""
+    state = _batch_context.get()
+    owns_batch = state is not None and state.get("pool") is pool
+    rolled_back = False
+
+    def _rollback_once():
+        nonlocal rolled_back
+        if not rolled_back and rollback is not None:
+            rolled_back = True
+            rollback()
+
+    try:
+        attached = _attach_batch_candidate(
+            pool, candidate, out, payload, join=join,
+            kkind=kkind, kf=kf, krel=krel, rollback=rollback,
+            is_loc=is_loc, knowledge_authority=knowledge_authority)
+        if owns_batch and not attached:
+            raise RuntimeError("GT batch candidate ownership was not attached")
+        pool.append((candidate, thunk))
+    except BaseException:
+        if owns_batch:
+            state["contexts"].pop(id(candidate), None)
+            state["prepared"].pop(id(candidate), None)
+            state["rollbacks"].pop(id(candidate), None)
+        _rollback_once()
+        raise
+
+
+@dataclass(frozen=True)
+class _BatchDeliveryPlan:
+    candidate: object
+    thunk: object
+    output: dict
+    suffix: str
+    join: bool
+    disposition: str
+    decision: dict
+
+
+def _rendered_contains_exact_suffix(rendered, output_index: int, suffix: str) -> bool:
+    """Require exact bytes in the corresponding API-visible message content.
+
+    ``extra.raw_output`` is trajectory metadata that mini-swe strips before the
+    model API call, so it can never establish delivery. Multimodal content counts
+    only through explicit text/content blocks, never arbitrary metadata or URLs.
+    """
+    if not suffix:
+        return True
+    if not isinstance(rendered, (list, tuple)) or output_index >= len(rendered):
+        return False
+    message = rendered[output_index]
+    if not isinstance(message, dict) or "content" not in message:
+        return False
+    stack = [message.get("content")]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, str):
+            if suffix in value:
+                return True
+        elif isinstance(value, (list, tuple)):
+            stack.extend(value)
+        elif isinstance(value, dict):
+            text = value.get("text")
+            if isinstance(text, str):
+                stack.append(text)
+            nested = value.get("content")
+            if isinstance(nested, (str, list, tuple)):
+                stack.append(nested)
+    return False
+
+
+def _prepare_batch_delivery(candidate, thunk, spec: dict) -> _BatchDeliveryPlan:
+    """Purely finalize exactly what render and commit will share."""
+    text = str(spec.get("payload") or "")
+    plane = getattr(candidate, "plane", "")
+    root = _root() if (_ss_provenance_on() or _ss_novelty_on()
+                       or _ss_dedup2_on()) else ""
+    if plane == _GA_PLANE_LANE_A and _ss_provenance_on():
+        text = _ss_provenance_filter(text, root)
+    if not text or (plane == _GA_PLANE_LANE_A and not _ss_payload_has_content(text)):
+        decision = {"payload": "", "reason": "empty", "root": root}
+        return _BatchDeliveryPlan(
+            candidate, thunk, spec["out"], "", bool(spec.get("join")),
+            "suppressed", decision)
+    if _payload_leaks_test_identity(text):
+        decision = {"payload": "", "reason": "leak_guard", "root": root}
+        return _BatchDeliveryPlan(
+            candidate, thunk, spec["out"], "", bool(spec.get("join")),
+            "suppressed", decision)
+    suppressed, reason = _ss_content_decision(
+        candidate.kind, text, root, is_loc=bool(spec.get("is_loc")))
+    if suppressed:
+        # Preserve the screened fact host-side so a final step-behind verdict can
+        # commit its already-known entity set after formatter success. The plan's
+        # empty suffix, not destruction of the fact, enforces zero model bytes.
+        decision = {"payload": text, "reason": reason, "root": root}
+        return _BatchDeliveryPlan(
+            candidate, thunk, spec["out"], "", bool(spec.get("join")),
+            "suppressed", decision)
+
+    decision = {"payload": text, "root": root}
+    legacy_hash = str(spec.get("winner_hash") or "")
+    if plane == _GA_PLANE_LANE_A:
+        legacy_hash = _oracle_content_hash(text)
+        content_hash = "c:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        decision.update(content_state_hash=legacy_hash, content_hash=content_hash)
+        if (legacy_hash in _oracle_delivered_hashes
+                or content_hash in _oracle_delivered_hashes):
+            decision.update(payload="", reason="delivered")
+            return _BatchDeliveryPlan(
+                candidate, thunk, spec["out"], "", bool(spec.get("join")),
+                "suppressed", decision)
+    elif legacy_hash and legacy_hash in _oracle_delivered_hashes:
+        decision.update(payload="", reason="delivered")
+        return _BatchDeliveryPlan(
+            candidate, thunk, spec["out"], "", bool(spec.get("join")),
+            "suppressed", decision)
+    if plane != _GA_PLANE_GATEWAY and _lane_envelope_on() and not _lane_fits_budget(text):
+        decision.update(payload="", reason="lane_budget")
+        return _BatchDeliveryPlan(
+            candidate, thunk, spec["out"], "", bool(spec.get("join")),
+            "suppressed", decision)
+    shadow_key = (decision.get("content_hash") or legacy_hash
+                  or str(getattr(candidate, "dedup_key", "") or ""))
+    if _ss_shadow_would_withhold(candidate.kind, shadow_key, text):
+        base = spec["out"].get("output") or ""
+        shipped_suffix = (
+            _join_lane_output(base, text)[len(base):]
+            if spec.get("join") else text)
+        decision.update(
+            payload=text, shipped_suffix=shipped_suffix,
+            shadow_key=shadow_key, reason="shadow_holdout")
+        return _BatchDeliveryPlan(
+            candidate, thunk, spec["out"], "", bool(spec.get("join")),
+            "holdout", decision)
+    base = spec["out"].get("output") or ""
+    shipped_suffix = (
+        _join_lane_output(base, text)[len(base):]
+        if spec.get("join") else text)
+    decision["shipped_suffix"] = shipped_suffix
+    return _BatchDeliveryPlan(
+        candidate, thunk, spec["out"], shipped_suffix, False,
+        "deliver", decision)
 
 
 # ladder class -> the coarse decision-boundary ordinal (correct-time labeling); the
@@ -11601,6 +12144,9 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
     for kind, text in lane_a:
         if not text:
             continue
+        _batch_state = _batch_context.get()
+        _batch_owned = (
+            _batch_state is not None and _batch_state.get("pool") is pool)
         # SS-10 reg #4 (2026-07-13): the SS provenance/late/novelty/dedup2 screen at the LANE-A
         # POOL-ADD chokepoint — mirrors the gateway (`_global_pool_add_gateway`). Under the global
         # arbiter a Lane-A fact reaches the model only if it WINS the single dose, so the screen in
@@ -11613,7 +12159,7 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
         # production-latched Lane-A kind un-burns its fire-once latch via the SM-5 F rollback so it
         # re-competes (deferred, not destroyed); a delivery-latched kind registered no rollback and
         # is a no-op. Byte-identical off: _ss_any_content_gate_on() False -> the screen never runs.
-        if _ss_any_content_gate_on():
+        if _ss_any_content_gate_on() and not _batch_owned:
             _supp, _reason = _ss_screen_delivery(kind, text, _ss_root, is_loc=False)
             if _supp:
                 _runtime_ledger_record(
@@ -11634,8 +12180,14 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
             # never a silent drop). Consistent with the steer/gateway add-helpers.
             _lane_a_deliver(out, cmd, [(kind, text)], krel=(krel or ""), event=event)
             continue
-        pool.append((cand, (lambda k=kind, t=text: _lane_a_deliver(
-            out, cmd, [(k, t)], krel=(krel or ""), event=event))))
+        _append_batch_candidate(
+            pool, cand, (lambda k=kind, t=text: _lane_a_deliver(
+                out, cmd, [(k, t)], krel=(krel or ""), event=event)),
+            out, text, join=True, kkind=kkind, krel=krel,
+            rollback=_lane_a_rearm_pending.get(kind))
+        if _batch_state is not None and _batch_state.get("pool") is pool:
+            _batch_state["prepared"][id(cand)].update(
+                cmd=cmd, kind=kind, krel=krel or "", event=event)
 
 
 def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
@@ -11645,6 +12197,8 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
     envelope key over the gate text (the plane's own `_last_gate_winner_hash` legacy dedup
     still runs inside the thunk as a backstop)."""
     kind = _last_gate_winner_kind or "steer"
+    _batch_state = _batch_context.get()
+    _batch_owned = _batch_state is not None and _batch_state.get("pool") is pool
     # SS-10 reg #4 (2026-07-13): the SS provenance/late screen at the STEER POOL-ADD chokepoint.
     # The steer delivery path (`_deliver_gate_winner`) applies NO SS content gate at all (only the
     # inert shadow-holdout), so a steer citing ONLY scratch paths (dvc m31 shape) or an obligation
@@ -11654,7 +12208,7 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
     # destroyed). is_loc=False so the reg-1 localization scope steer (consensus.scope, whose recurring
     # review-transition delivery is the sacred P5) is NEVER acquisition/late-suppressed here — only
     # provenance (scratch-path) and the obligation-kind late-drop apply. Byte-identical off.
-    if win_text and _ss_any_content_gate_on():
+    if win_text and _ss_any_content_gate_on() and not _batch_owned:
         _supp, _reason = _ss_screen_delivery(kind, win_text, _root(), is_loc=False)
         if _supp:
             _runtime_ledger_record(
@@ -11671,13 +12225,37 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
         _deliver_gate_winner(out, cmd, win_text, kkind=kkind, kf=kf, krel=krel,
                              event=event, steer_base=steer_base)
         return
-    pool.append((cand, (lambda t=win_text: _deliver_gate_winner(
-        out, cmd, t, kkind=kkind, kf=kf, krel=krel, event=event,
-        steer_base=steer_base))))
+    _prepared_steer = _steer_native(win_text) if _steer_native_on() else win_text
+    _winner_kind = _last_gate_winner_kind
+    _winner_hash = _last_gate_winner_hash
+
+    def _commit_steer(t=win_text, winner_kind=_winner_kind,
+                      winner_hash=_winner_hash):
+        global _last_gate_winner_kind, _last_gate_winner_hash
+        saved_kind = _last_gate_winner_kind
+        saved_hash = _last_gate_winner_hash
+        _last_gate_winner_kind = winner_kind
+        _last_gate_winner_hash = winner_hash
+        try:
+            _deliver_gate_winner(
+                out, cmd, t, kkind=kkind, kf=kf, krel=krel, event=event,
+                steer_base=steer_base)
+        finally:
+            _last_gate_winner_kind = saved_kind
+            _last_gate_winner_hash = saved_hash
+
+    _append_batch_candidate(
+        pool, cand, _commit_steer,
+        out, _prepared_steer, join=True, kkind=kkind, kf=kf, krel=krel)
+    if _batch_state is not None and _batch_state.get("pool") is pool:
+        _batch_state["prepared"][id(cand)].update(
+            winner_hash=_winner_hash, cmd=cmd, kind=_winner_kind,
+            kkind=kkind or "", kf=kf or "", krel=krel or "",
+            event=event, steer_base=steer_base)
 
 
 def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str = "",
-                             rendered_text: str = "") -> bool:
+                             rendered_text: str = "", out=None) -> bool:
     """SM-5: stash the produced Gateway fact (its envelope already carries the UNIFIED
     dedup_key) + its commit thunk. Gateway localization facts ARE acquisition-suppressible
     (this generalizes the gateway's own EXACT_HIT/ZERO_ABSENT acquisition gates to the
@@ -11711,14 +12289,31 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
     _payload = str(rendered_text or "")
     _arb_suppressible = suppressible
     _thunk = commit_thunk
+    _knowledge_authority = True
+    _batch_state = _batch_context.get()
+    _batch_owned = _batch_state is not None and _batch_state.get("pool") is pool
     if _ss_any_content_gate_on():
         _ss_root = _root()
-        _supp, _reason = _ss_screen_delivery(et, _payload, _ss_root, is_loc=suppressible)
-        if _supp:
-            _runtime_ledger_record(
-                kind="ga." + et, outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
-                reason=_reason, file_path=getattr(winner, "target", "") or "")
-            return False
+        # Only a VERIFIED envelope with source provenance may become semantic
+        # knowledge.  Native acquisition can still make a low-authority candidate
+        # step-behind, but it does not prove that candidate's asserted relation.
+        _knowledge_authority = (
+            str(getattr(winner, "tier", "") or "") == "VERIFIED"
+            and float(getattr(winner, "confidence", 0.0) or 0.0) >= 0.7
+            and bool(getattr(winner, "provenance", ()) or ())
+        )
+        if not _batch_owned:
+            _supp, _reason = _ss_screen_delivery(
+                et, _payload, _ss_root, is_loc=suppressible,
+                knowledge_authority=_knowledge_authority,
+            )
+            if _supp:
+                _runtime_ledger_record(
+                    kind="ga." + et,
+                    outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason=_reason,
+                    file_path=getattr(winner, "target", "") or "")
+                return False
         # This localization candidate SURVIVED the SS content screen. When GT_SS_NOVELTY is
         # the active acquisition authority, its ENTITY-SET verdict SUPERSEDES the arbiter's
         # coarser target-file ``already_acquired`` (global_arbiter REASON_ACQUIRED keys on the
@@ -11729,9 +12324,11 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
         # still threaded into the record wrap below. Byte-identical when novelty is off.
         if suppressible and _ss_novelty_on():
             _arb_suppressible = False
-        def _thunk(_o=commit_thunk, _k=et, _t=_payload, _r=_ss_root, _loc=suppressible):  # noqa: E731
+        def _thunk(_o=commit_thunk, _k=et, _t=_payload, _r=_ss_root, _loc=suppressible,
+                   _auth=_knowledge_authority):  # noqa: E731
             _o()
-            _ss_record_delivered(_k, _t, _r, is_loc=_loc)
+            _ss_record_delivered(
+                _k, _t, _r, is_loc=_loc, knowledge_authority=_auth)
     cand = _ga_make_candidate(
         _GA_PLANE_GATEWAY, et, dedup_key=getattr(winner, "dedup_key", "") or "",
         target=getattr(winner, "target", "") or "",
@@ -11745,11 +12342,44 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
     if cand is None:
         _thunk()
         return True
-    pool.append((cand, _thunk))
+    _append_batch_candidate(
+        pool, cand, _thunk, out, _payload, join=True,
+        krel=getattr(winner, "target", "") or "",
+        is_loc=suppressible, knowledge_authority=_knowledge_authority)
     return False
 
 
-def _global_pool_flush(pool, *, kkind, kf, krel) -> None:
+def _global_pool_plan(pool):
+    """Pure arbitration: choose one winner without committing producer state."""
+    if not pool:
+        return None, None
+    from groundtruth.runtime.global_arbiter import REASON_OUTRANKED, arbitrate
+
+    acquired = {_norm_fp(rel) for rel in _oracle_edited_rels}
+    try:
+        acquired |= {_norm_fp(rel)
+                     for rel in (getattr(_EPISODE, "read_targets", None) or ())}
+    except Exception:  # noqa: BLE001
+        pass
+    result = arbitrate(
+        [candidate for candidate, _thunk in pool], acquired=acquired,
+        delivered=_EPISODE.delivered_dedup)
+    winner = result.winner
+    if winner is not None and result.repair_support and _ga_is_preventive(winner.kind):
+        result.losers.append((winner, _GA_REASON_REPAIR_LATE))
+        winner = None
+        for index, (candidate, reason) in enumerate(result.losers):
+            if reason == REASON_OUTRANKED and _ga_candidate_on_time(candidate):
+                winner = candidate
+                result.losers.pop(index)
+                result.repair_support = (
+                    winner.current_ordinal > winner.boundary_ordinal)
+                break
+    return result, winner
+
+
+def _global_pool_flush(pool, *, kkind, kf, krel, candidate_context=None,
+                       candidate_rollbacks=None):
     """SM-5: run the ONE ranked competition over the whole pool, deliver AT MOST ONE
     global dose (its plane's own commit thunk), and LOG every loser with its reason
     (the generalized loser log). Every LOSER re-arms whatever fire-once latch its producer
@@ -11835,7 +12465,14 @@ def _global_pool_flush(pool, *, kkind, kf, krel) -> None:
             # 0 bytes -> re-arm so it re-competes on a later turn (deferred, not destroyed).
             if c.plane == PLANE_STEER:
                 try:
-                    _rearm_latches({c.kind}, kkind=kkind, kf=kf, krel=krel)
+                    _ctx = (candidate_context or {}).get(id(c))
+                    if isinstance(_ctx, dict):
+                        _ctx = (_ctx.get("kkind", ""), _ctx.get("kf", ""),
+                                _ctx.get("krel", ""))
+                    if not _ctx:
+                        _ctx = (kkind, kf, krel)
+                    _rearm_latches(
+                        {c.kind}, kkind=_ctx[0], kf=_ctx[1], krel=_ctx[2])
                 except Exception:  # noqa: BLE001
                     pass
             # SM-5 F (#50): GENERIC per-candidate rollback — invoke the OPAQUE zero-arg
@@ -11846,7 +12483,9 @@ def _global_pool_flush(pool, *, kkind, kf, krel) -> None:
             # kind latches how. A candidate that attached no rollback (a steer, a gateway, or
             # a DELIVERY-latched Lane-A kind) -> `.get` is None -> no-op. Winners are never in
             # `res.losers`, so a delivered winner's latch is never rolled back (no re-fire).
-            _rb = _lane_a_rearm_pending.get(c.kind)
+            _rb = (candidate_rollbacks or {}).get(id(c))
+            if _rb is None:
+                _rb = _lane_a_rearm_pending.get(c.kind)
             if _rb is not None:
                 try:
                     _rb()
@@ -11856,7 +12495,21 @@ def _global_pool_flush(pool, *, kkind, kf, krel) -> None:
             return
         for c, thunk in pool:
             if c is winner:
-                thunk()  # the plane's own delivery (byte-identical to standalone)
+                # A batch winner is committed after every sibling action executed.
+                # Temporarily restore its producer iteration so seals/ledger rows
+                # name the action that produced the fact, not the observation
+                # owner's final sibling iteration.
+                global _action_count
+                _saved_iteration = _action_count
+                _winner_ctx = (candidate_context or {}).get(id(c), {})
+                if isinstance(_winner_ctx, dict):
+                    _action_count = int(
+                        _winner_ctx.get("producer_iteration", _action_count))
+                try:
+                    thunk()  # the plane's own delivery
+                except BaseException:
+                    _action_count = _saved_iteration
+                    raise
                 try:
                     if c.dedup_key:
                         _EPISODE.delivered_dedup.add(c.dedup_key)  # unified cross-plane dedup
@@ -11874,9 +12527,402 @@ def _global_pool_flush(pool, *, kkind, kf, krel) -> None:
                             reason="repair_support", file_path=c.symbol or "")
                     except Exception:  # noqa: BLE001
                         pass
-                break
+                _action_count = _saved_iteration
+                return c
     except Exception:  # noqa: BLE001 — arbitration must never break the loop / double-dose
         _crash_emit("global_arbiter.flush")
+    return None
+
+
+def _batch_rearm_candidate(state, candidate) -> None:
+    context = state["contexts"].get(id(candidate), {})
+    if getattr(candidate, "plane", "") == _GA_PLANE_STEER:
+        _rearm_latches(
+            {candidate.kind}, kkind=context.get("kkind", ""),
+            kf=context.get("kf", ""), krel=context.get("krel", ""))
+    rollback = state["rollbacks"].get(id(candidate))
+    if rollback is not None:
+        rollback()
+
+
+def _batch_memory_snapshot() -> dict:
+    """Bounded journal for in-memory mutations made by one frozen commit."""
+    return {
+        "episode_dedup": set(_EPISODE.delivered_dedup),
+        "oracle_hashes": set(_oracle_delivered_hashes),
+        "contract_seen": set(_contract_seen),
+        "cochange_fired": _cochange_fired,
+        "oblig_resurface_fired": _oblig_resurface_fired,
+        "known_entsets": {key: list(value) for key, value in _ss_known_entsets.items()},
+        "pending_acks": [dict(value) for value in _ss_pending_acks],
+        "gateway_deliveries": list(_gt_gateway_deliveries),
+        "gateway_chain": _gt_gateway_chain_head,
+        "hook_counts": dict(_HOOK_FIRE_COUNTS),
+        "search_seen": {
+            key: {field: (set(value) if isinstance(value, set)
+                          else list(value) if isinstance(value, list) else value)
+                  for field, value in entry.items()}
+            for key, entry in _search_seen.items()},
+        "ledger_entries": list(getattr(_RUNTIME_LEDGER, "_entries", [])),
+    }
+
+
+def _restore_batch_memory(snapshot: dict) -> None:
+    global _cochange_fired, _oblig_resurface_fired, _gt_gateway_chain_head
+    _EPISODE.delivered_dedup.clear()
+    _EPISODE.delivered_dedup.update(snapshot["episode_dedup"])
+    _oracle_delivered_hashes.clear()
+    _oracle_delivered_hashes.update(snapshot["oracle_hashes"])
+    _contract_seen.clear()
+    _contract_seen.update(snapshot["contract_seen"])
+    _cochange_fired = snapshot["cochange_fired"]
+    _oblig_resurface_fired = snapshot["oblig_resurface_fired"]
+    _ss_known_entsets.clear()
+    _ss_known_entsets.update(snapshot["known_entsets"])
+    _ss_pending_acks[:] = snapshot["pending_acks"]
+    _gt_gateway_deliveries[:] = snapshot["gateway_deliveries"]
+    _gt_gateway_chain_head = snapshot["gateway_chain"]
+    _HOOK_FIRE_COUNTS.clear()
+    _HOOK_FIRE_COUNTS.update(snapshot["hook_counts"])
+    _search_seen.clear()
+    _search_seen.update(snapshot["search_seen"])
+    if hasattr(_RUNTIME_LEDGER, "_entries"):
+        _RUNTIME_LEDGER._entries[:] = snapshot["ledger_entries"]
+
+
+def _commit_batch_arbitration(state, result, winner, plans) -> object:
+    """Commit one frozen arbitration result; never re-run eligibility or arbitration."""
+    from groundtruth.runtime.global_arbiter import REASON_DEDUP
+
+    for candidate, reason in result.losers:
+        try:
+            _record_hook_suppress(candidate.kind, reason="ga_" + reason)
+            _runtime_ledger_record(
+                kind="ga." + candidate.kind,
+                outcome=(_ProductSignalOutcome.SUPPRESSED_DUPLICATE
+                         if reason == REASON_DEDUP
+                         else _ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY),
+                reason="global_arbiter:" + reason,
+                file_path=getattr(candidate, "symbol", "") or "",
+                extra=_feature_lineage_extra(getattr(candidate, "lineage", None)))
+        finally:
+            _batch_rearm_candidate(state, candidate)
+    if winner is None:
+        return None
+
+    plan = plans[id(winner)]
+    spec = state["prepared"][id(winner)]
+    context = state["contexts"].get(id(winner), {})
+    global _action_count
+    saved_iteration = _action_count
+    _action_count = int(context.get("producer_iteration", _action_count))
+    try:
+        if plan.disposition == "holdout":
+            decision = plan.decision
+            shadow_key = decision.get("shadow_key", "")
+            would_ship = decision["shipped_suffix"]
+            _runtime_ledger_record(
+                kind=winner.kind, outcome="shadow_holdout",
+                reason="ss_shadow_holdout", chars=0,
+                file_path=context.get("krel", ""),
+                content=would_ship,
+                extra={"chars_would": len(would_ship),
+                       "dedup_key": shadow_key})
+            if winner.plane == _GA_PLANE_LANE_A:
+                _oracle_delivered_hashes.add(decision["content_state_hash"])
+                _oracle_delivered_hashes.add(decision["content_hash"])
+            elif spec.get("winner_hash"):
+                _oracle_delivered_hashes.add(spec["winner_hash"])
+        elif winner.plane == _GA_PLANE_LANE_A:
+            _commit_prepared_lane(
+                plan.output, spec.get("cmd", ""), spec.get("kind", winner.kind),
+                plan.decision, krel=spec.get("krel", ""), event=spec.get("event"))
+        elif winner.plane == _GA_PLANE_STEER:
+            _commit_prepared_steer(
+                plan.output, spec.get("cmd", ""), spec.get("kind", winner.kind),
+                spec.get("winner_hash", ""), plan.decision,
+                krel=spec.get("krel", ""), kf=spec.get("kf", ""),
+                event=spec.get("event"), steer_base=spec.get("steer_base", ""))
+        else:
+            plan.thunk()
+        winner_dedup = getattr(winner, "dedup_key", "") or ""
+        if winner_dedup:
+            _EPISODE.delivered_dedup.add(winner_dedup)
+        if result.repair_support:
+            _runtime_ledger_record(
+                kind="ga." + winner.kind,
+                outcome=_ProductSignalOutcome.DELIVERED,
+                reason="repair_support",
+                file_path=getattr(winner, "symbol", "") or "")
+        return winner
+    finally:
+        _action_count = saved_iteration
+
+
+def _discard_tool_observation_batch(reason: str, state=None) -> None:
+    """Drop a malformed/stale batch without burning any producer latch."""
+    state = state or _batch_context.get()
+    if state is None:
+        return
+    try:
+        for cand, _thunk in list(state["pool"]):
+            try:
+                _record_hook_suppress(cand.kind, reason=reason)
+            except Exception:  # noqa: BLE001
+                pass
+            ctx = state["contexts"].get(id(cand), {})
+            try:
+                _rearm_latches(
+                    {cand.kind}, kkind=ctx.get("kkind", ""),
+                    kf=ctx.get("kf", ""), krel=ctx.get("krel", ""))
+            except Exception:  # noqa: BLE001
+                pass
+            rollback = state["rollbacks"].get(id(cand))
+            if rollback is not None:
+                try:
+                    rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+    finally:
+        _clear_tool_observation_batch(state)
+
+
+def install_observation_batch_commit(agent) -> bool:
+    """Atomically install the execute handshake and formatter commit boundary."""
+    global _batch_install_failed, _batch_commit_installed
+    model = getattr(agent, "model", None)
+    original = getattr(model, "format_observation_messages", None)
+    original_execute = getattr(agent, "execute_actions", None)
+    if (not callable(original) or not callable(original_execute)
+            or getattr(agent, "_gt_batch_commit_installed", False)):
+        _discard_tool_observation_batch("batch_install_unavailable")
+        _batch_install_failed = True
+        _batch_commit_installed = False
+        return False
+
+    def _format_with_gt_batch(message, outputs, *args, **kwargs):
+        state = _batch_context.get()
+        if state is None:
+            return original(message, outputs, *args, **kwargs)
+        actions = (message.get("extra", {}).get("actions", [])
+                   if isinstance(message, dict) else [])
+        identity, keys = _batch_identity(actions)
+        valid = (not state.get("invalid")
+            and
+            state["owner"] == id(agent) and state["model"] == id(model)
+            and identity == state["identity"] and keys == state["action_keys"]
+            and tuple(state["observed_keys"]) == keys[:len(outputs or [])]
+            and len(state["outputs"]) == len(outputs or [])
+            and all(a is b for a, b in zip(state["outputs"], outputs or []))
+        )
+        if not valid:
+            _discard_tool_observation_batch("batch_identity_mismatch", state)
+            return original(message, outputs, *args, **kwargs)
+
+        # A submit refusal is produced at the environment exception boundary,
+        # before ordinary augmentation.  It is already the GT dose for this
+        # observation: discard/re-arm all deferred siblings and verify that the
+        # refusal survives in the API-visible content at its own tool index.
+        precommitted = list(state.get("precommitted_doses") or ())
+        if precommitted:
+            for duplicate in precommitted[1:]:
+                index = int(duplicate.get("output_index", -1))
+                if 0 <= index < len(outputs):
+                    outputs[index]["output"] = ""
+            try:
+                rendered = original(message, outputs, *args, **kwargs)
+            except BaseException:
+                _discard_tool_observation_batch("batch_precommitted_formatter_exception", state)
+                raise
+            first = precommitted[0]
+            visible = _rendered_contains_exact_suffix(
+                rendered, int(first.get("output_index", -1)),
+                str(first.get("payload") or ""))
+            if not visible or len(precommitted) > 1:
+                _ledger_line_direct({
+                    "layer": "global_arbiter", "event_type": "pre_submit",
+                    "file_path": "", "outcome": "provider_failed",
+                    "chars_delivered": 0,
+                    "reason": ("precommitted_submit_not_visible" if not visible
+                               else "multiple_precommitted_submit_doses"),
+                    "iteration": globals().get("_action_count", 0)})
+            _discard_tool_observation_batch("batch_precommitted_winner", state)
+            return rendered
+
+        # Phase 1 is pure: finalize every intent, then arbitrate exactly once.
+        try:
+            plans = {}
+            eligible_pool = []
+            suppressed_plans = []
+            for candidate, thunk in state["pool"]:
+                spec = state["prepared"].get(id(candidate))
+                if not isinstance(spec, dict):
+                    raise RuntimeError("batch candidate has no preparation record")
+                plan = _prepare_batch_delivery(candidate, thunk, spec)
+                plans[id(candidate)] = plan
+                if plan.disposition == "suppressed":
+                    suppressed_plans.append(plan)
+                else:
+                    eligible_pool.append((candidate, thunk))
+            arbitration, planned_winner = _global_pool_plan(eligible_pool)
+        except Exception:  # noqa: BLE001
+            _discard_tool_observation_batch("batch_plan_failed", state)
+            return original(message, outputs, *args, **kwargs)
+        base_outputs = [dict(output) for output in outputs]
+        shadow_outputs = [dict(output) for output in outputs]
+        planned_delivery = None
+        output_index = None
+        if planned_winner is not None:
+            planned_delivery = plans[id(planned_winner)]
+            try:
+                output_index = next(
+                    index for index, output in enumerate(outputs)
+                    if output is planned_delivery.output)
+            except StopIteration:
+                _discard_tool_observation_batch("batch_prepare_output_mismatch", state)
+                return original(message, outputs, *args, **kwargs)
+            previous = shadow_outputs[output_index].get("output") or ""
+            shadow_outputs[output_index]["output"] = (
+                _join_lane_output(previous, planned_delivery.suffix)
+                if planned_delivery.join
+                else previous + planned_delivery.suffix)
+        try:
+            rendered = original(message, shadow_outputs, *args, **kwargs)
+        except BaseException:
+            # No producer commit has run, so complete rollback means only re-arming
+            # candidates whose producers latched while preparing the pool.
+            _discard_tool_observation_batch("batch_formatter_exception", state)
+            raise
+
+        if (planned_delivery is not None
+                and planned_delivery.disposition == "deliver"
+                and not _rendered_contains_exact_suffix(
+                    rendered, output_index, planned_delivery.suffix)):
+            _discard_tool_observation_batch("batch_formatter_clipped", state)
+            return original(message, outputs, *args, **kwargs)
+
+        # Another owner may have begun while the formatter was running. The
+        # overlap guard poisons both observations; discard this pool and render
+        # the unchanged tool results so neither policy observation receives GT.
+        if state.get("invalid"):
+            _discard_tool_observation_batch("batch_overlap", state)
+            return original(message, outputs, *args, **kwargs)
+
+        # Phase 2 consumes the same frozen result. Formatter-visible bytes are
+        # already fixed at this point; an ordinary commit fault cannot honestly
+        # be converted back to zero-dose after durable ledger/receipt writes may
+        # have occurred. Preserve the validated dose and mark it provider-failed.
+        memory_snapshot = _batch_memory_snapshot()
+        try:
+            for plan in suppressed_plans:
+                _reason = plan.decision.get("reason", "suppressed")
+                if _reason == "ss_step_behind":
+                    _spec = state["prepared"].get(id(plan.candidate), {})
+                    _ss_remember_known(
+                        plan.candidate.kind,
+                        plan.decision.get("payload", ""),
+                        plan.decision.get("root", ""),
+                        is_loc=bool(_spec.get("is_loc")),
+                        knowledge_authority=bool(
+                            _spec.get("knowledge_authority", True)))
+                _runtime_ledger_record(
+                    kind="ga." + plan.candidate.kind,
+                    outcome=(_ProductSignalOutcome.SUPPRESSED_DUPLICATE
+                             if _reason in {"ss_semantic_dup", "delivered"}
+                             else _ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY),
+                    reason=_reason,
+                    file_path=getattr(plan.candidate, "symbol", "") or "")
+                _batch_rearm_candidate(state, plan.candidate)
+            winner = (_commit_batch_arbitration(
+                state, arbitration, planned_winner, plans)
+                if arbitration is not None else None)
+            if winner is not planned_winner:
+                raise RuntimeError("batch committed a different winner")
+            if winner is not None:
+                actual = planned_delivery.output.get("output") or ""
+                expected = shadow_outputs[output_index].get("output") or ""
+                if actual != expected:
+                    raise RuntimeError("batch commit bytes differ from frozen plan")
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                _restore_batch_memory(memory_snapshot)
+                for output, before in zip(outputs, base_outputs):
+                    output.clear()
+                    output.update(before)
+                _clear_tool_observation_batch(state)
+                raise
+            preserve_visible = bool(
+                planned_delivery is not None
+                and planned_delivery.disposition == "deliver")
+            if preserve_visible:
+                _restore_batch_memory(memory_snapshot)
+                expected = shadow_outputs[output_index].get("output") or ""
+                planned_delivery.output["output"] = expected
+                decision = planned_delivery.decision
+                if planned_winner.plane == _GA_PLANE_LANE_A:
+                    _oracle_delivered_hashes.add(decision["content_state_hash"])
+                    _oracle_delivered_hashes.add(decision["content_hash"])
+                else:
+                    winner_hash = state["prepared"][id(planned_winner)].get("winner_hash")
+                    if winner_hash:
+                        _oracle_delivered_hashes.add(winner_hash)
+                if getattr(planned_winner, "dedup_key", ""):
+                    _EPISODE.delivered_dedup.add(planned_winner.dedup_key)
+            else:
+                _restore_batch_memory(memory_snapshot)
+                if planned_winner is not None:
+                    try:
+                        _batch_rearm_candidate(state, planned_winner)
+                    except Exception:  # noqa: BLE001
+                        pass
+            try:
+                _runtime_ledger_record(
+                    kind=("ga." + planned_winner.kind
+                          if planned_winner is not None else "global_arbiter"),
+                    outcome="provider_failed",
+                    reason=("batch_commit_failed:" + type(exc).__name__)[:200],
+                    chars=(len(planned_delivery.suffix)
+                           if preserve_visible else 0),
+                    content=(planned_delivery.suffix
+                             if preserve_visible else ""))
+            except Exception:  # noqa: BLE001
+                pass
+            _clear_tool_observation_batch(state)
+            if preserve_visible:
+                return rendered
+            for output, before in zip(outputs, base_outputs):
+                output.clear()
+                output.update(before)
+            return original(message, outputs, *args, **kwargs)
+        _clear_tool_observation_batch(state)
+        return rendered
+
+    def _execute_with_gt_batch(message, *args, **kwargs):
+        actions = (message.get("extra", {}).get("actions", [])
+                   if isinstance(message, dict) else [])
+        state = _begin_observation_batch(agent, model, actions)
+        try:
+            return original_execute(message, *args, **kwargs)
+        finally:
+            if state is not None and _batch_context.get() is state:
+                _discard_tool_observation_batch("batch_uncommitted", state)
+
+    try:
+        model.format_observation_messages = _format_with_gt_batch
+        agent.execute_actions = _execute_with_gt_batch
+        agent._gt_batch_commit_installed = True
+        _batch_install_failed = False
+        _batch_commit_installed = True
+        return True
+    except Exception:  # noqa: BLE001
+        try:
+            model.format_observation_messages = original
+        except Exception:  # noqa: BLE001
+            pass
+        _discard_tool_observation_batch("batch_install_failed")
+        _batch_install_failed = True
+        _batch_commit_installed = False
+        return False
 
 
 def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_base) -> None:
@@ -11923,6 +12969,27 @@ def _deliver_gate_winner(out, cmd, win_text, *, kkind, kf, krel, event, steer_ba
 
 
 # plane constants mirrored locally so the hot delivery path needs no import to name them.
+def _commit_prepared_steer(out, cmd, kind: str, winner_hash: str, decision: dict,
+                           *, krel, kf, event, steer_base) -> None:
+    """Commit a frozen eligible steer without re-running shadow/leak/budget gates."""
+    text = decision["payload"]
+    out["output"] = (out.get("output") or "") + decision["shipped_suffix"]
+    if winner_hash:
+        _oracle_delivered_hashes.add(winner_hash)
+    _ledger_note_delivery(kind, cmd, krel or kf or "")
+    _record_hook_fire(kind)
+    _runtime_ledger_record(
+        kind=kind, outcome=_ProductSignalOutcome.DELIVERED,
+        chars=len(decision["shipped_suffix"]),
+        file_path=krel or kf or "", event=event,
+        content=decision["shipped_suffix"],
+        extra=_lane_profile_member_extra(kind))
+    _ss_record_delivered(kind, text)
+    _seal_lane_delivery(
+        kind, decision["shipped_suffix"], krel or kf or "",
+        base_output=steer_base)
+
+
 _GA_PLANE_LANE_A = "lane_a"
 _GA_PLANE_STEER = "steer"
 _GA_PLANE_GATEWAY = "gateway"
@@ -11958,7 +13025,9 @@ _ss_test_fail_counts: "dict[str, int]" = {}  # normalized test cmd -> consecutiv
 _ss_failure_keys_by_test_cmd: "dict[str, set[str]]" = {}  # test cmd -> canonical failure keys
 _ss_current_failure_event: "tuple[int, str] | None" = None  # (step, canonical failure key)
 _ss_behavioral_probe_events: "list[tuple[str, str, object, int]]" = []
-_ss_delivered_entsets: "dict[str, list[frozenset]]" = {}  # fact class -> delivered entity sets
+# Facts the model already knows, keyed by semantic fact group. Knowledge can be
+# established by a GT delivery or by a step-behind verdict proving native acquisition.
+_ss_known_entsets: "dict[str, list[frozenset]]" = {}
 _ss_pending_acks: "list[dict]" = []          # deliveries awaiting a model acknowledgment
 _ss_obl_open_cache: "tuple[int, bool]" = (-1, False)  # (action_count, value) per-turn memo
 # SS-2 (2026-07-13, GT_SS_SUBMIT_RED) — the agent's OWN unresolved observed test RED.
@@ -11989,7 +13058,7 @@ def _ss_reset() -> None:
     _ss_failure_keys_by_test_cmd.clear()
     _ss_current_failure_event = None
     _ss_behavioral_probe_events.clear()
-    _ss_delivered_entsets.clear()
+    _ss_known_entsets.clear()
     _ss_pending_acks.clear()
     _ss_obl_open_cache = (-1, False)
     _ss_last_failing_test = None
@@ -12042,6 +13111,18 @@ def _ss_shadow_task_id() -> str:
     return seed + "|" + base
 
 
+def _ss_shadow_would_withhold(kind: str, dedup_key: str, text: str) -> bool:
+    """Pure shadow assignment used by two-phase observation preparation."""
+    if not text or not _ss_shadow_on():
+        return False
+    try:
+        from groundtruth.runtime.shadow_holdout import HOLDOUT, assign
+        return assign(
+            _ss_shadow_task_id(), kind, dedup_key or "", _ss_shadow_rate()) == HOLDOUT
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _ss_shadow_withheld(kind: str, dedup_key: str, text: str, *,
                         file_path: str = "", event=None) -> bool:
     """SS-8 chokepoint consult. Called AFTER a fact won arbitration and passed EVERY SS screen
@@ -12054,14 +13135,10 @@ def _ss_shadow_withheld(kind: str, dedup_key: str, text: str, *,
     (deliver normally) when the flag is off, the rate is 0, the class is a cardinal safety
     class, or the bucket lands on DELIVER. FAIL-OPEN: any fault -> False (never accidentally
     withhold or crash the delivery path)."""
-    if not text or not _ss_shadow_on():
+    if not _ss_shadow_would_withhold(kind, dedup_key, text):
         return False
     try:
-        from groundtruth.runtime.shadow_holdout import (
-            HOLDOUT as _SH_HOLDOUT, assign as _sh_assign, canonical_class as _sh_canon)
-        if _sh_assign(_ss_shadow_task_id(), kind, dedup_key or "",
-                      _ss_shadow_rate()) != _SH_HOLDOUT:
-            return False
+        from groundtruth.runtime.shadow_holdout import canonical_class as _sh_canon
         _runtime_ledger_record(
             kind=kind,
             outcome="shadow_holdout",
@@ -12296,7 +13373,7 @@ def _ss_novelty_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool
 
 def _ss_dedup2_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool = False) -> bool:
     """Feature 2 ENTITY-SET dedup: True iff this fact's entity set is EQUAL TO or a
-    SUBSET OF an already-delivered fact in the SAME dedup GROUP (episode-scoped
+    SUBSET OF a fact already known to the model in the SAME dedup GROUP (episode-scoped
     containment — kills the byte-distinct semantic repeat that byte-dedup passes, incl.
     the CROSS-class conan-17092 migrations cluster). Parameter-free (subset test); NO
     fuzzy similarity threshold (a threshold risks suppressing a novel fact and breaks
@@ -12308,10 +13385,30 @@ def _ss_dedup2_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool 
     ents = _ss_entity_set(text, root)
     if not ents:
         return False
-    for prior in _ss_delivered_entsets.get(grp, ()):  # equal or subset of a prior in-group fact
+    for prior in _ss_known_entsets.get(grp, ()):  # equal or subset of a prior known fact
         if ents <= prior:
             return True
     return False
+
+
+def _ss_remember_known(kind: str, text: str, root: str = "", *, is_loc: bool = False,
+                       knowledge_authority: bool = True) -> None:
+    """Commit one correct fact the model demonstrably knows.
+
+    Only real deliveries and ``ss_step_behind`` suppressions call this function.
+    Invalid, late, leaky, over-budget, and arbitration-loser candidates never do.
+    """
+    if not knowledge_authority or not _ss_dedup2_on() or not text:
+        return
+    grp = _ss_dedup_group(kind) or ("localization" if is_loc else None)
+    if grp is None:
+        return
+    ents = _ss_entity_set(text, root)
+    if not ents:
+        return
+    bucket = _ss_known_entsets.setdefault(grp, [])
+    if ents not in bucket:
+        bucket.append(ents)
 
 
 def _ss_late_drop_suppresses(kind: str, text: str, *, is_loc: bool = False) -> bool:
@@ -12322,6 +13419,8 @@ def _ss_late_drop_suppresses(kind: str, text: str, *, is_loc: bool = False) -> b
     symbol not passing-tested -> deliver."""
     if kind not in _SS_OBLIGATION_KINDS and not is_loc:
         return False
+
+
     if kind in _SS_OBLIGATION_KINDS:
         try:
             from groundtruth.runtime.obligations import (
@@ -12429,38 +13528,51 @@ def _ss_any_content_gate_on() -> bool:
             or _ss_dedup2_on() or _ss_ack_metrics_on())
 
 
-def _ss_screen_delivery(kind: str, text: str, root: str = "", *,
-                        is_loc: bool = False) -> "tuple[bool, str]":
-    """Run the SS-0 content gates over a would-be delivery (provenance -> novelty ->
-    late-drop -> dedup2). Returns (suppress, reason). This is the ONE screen shared by
-    the gateway/steer pool-add paths (which BYPASS ``_lane_a_deliver``) so the SS gates
-    reach the DEF/REF partition + steer facts under the production Super-Mode arbiter,
-    not only the Lane-A blocks. Each branch is flag-gated -> (False, '') when all off."""
+def _ss_content_decision(kind: str, text: str, root: str = "", *,
+                         is_loc: bool = False) -> "tuple[bool, str]":
+    """Pure SS-0 suppression decision over a would-be delivery.
+
+    Precedence is provenance -> late -> semantic duplicate -> step-behind. A semantic
+    repeat must retain that attribution even when its entities were also acquired
+    natively. Returns ``(suppress, reason)`` without mutating episode state. Each
+    branch is flag-gated -> ``(False, '')`` when all gates are off."""
     # provenance: suppress WHOLE only when filtering leaves no content (the gateway text
     # is already rendered — a partial bad line stays, correct-or-quiet).
     if _ss_provenance_on():
         filt = _ss_provenance_filter(text, root)
         if filt != text and not _ss_payload_has_content(filt):
             return True, "ss_provenance"
-    if _ss_novelty_on() and _ss_novelty_suppresses(kind, text, root, is_loc=is_loc):
-        return True, "ss_step_behind"
     if _ss_late_drop_on() and _ss_late_drop_suppresses(kind, text, is_loc=is_loc):
         return True, "ss_late"
     if _ss_dedup2_on() and _ss_dedup2_suppresses(kind, text, root, is_loc=is_loc):
         return True, "ss_semantic_dup"
+    if _ss_novelty_on() and _ss_novelty_suppresses(kind, text, root, is_loc=is_loc):
+        return True, "ss_step_behind"
     return False, ""
 
 
-def _ss_record_delivered(kind: str, text: str, root: str = "", *, is_loc: bool = False) -> None:
+def _ss_screen_delivery(kind: str, text: str, root: str = "", *,
+                        is_loc: bool = False,
+                        knowledge_authority: bool = True) -> "tuple[bool, str]":
+    """Shared Lane/Gateway screen plus the step-behind knowledge commit."""
+    suppress, reason = _ss_content_decision(kind, text, root, is_loc=is_loc)
+    if suppress and reason == "ss_step_behind":
+        # Step-behind proves the model already acquired this correct fact. Remember
+        # it so a later byte-distinct subset is attributed as semantic duplication.
+        _ss_remember_known(
+            kind, text, root, is_loc=is_loc,
+            knowledge_authority=knowledge_authority)
+    return suppress, reason
+
+
+def _ss_record_delivered(kind: str, text: str, root: str = "", *, is_loc: bool = False,
+                         knowledge_authority: bool = True) -> None:
     """On a REAL delivered outcome: record the entity set (feature 2) + queue an ack
     watch (feature 7). Both gated -> no-op + zero extra state when the flags are off."""
     try:
-        if _ss_dedup2_on() and text:
-            grp = _ss_dedup_group(kind) or ("localization" if is_loc else None)
-            if grp is not None:
-                ents = _ss_entity_set(text, root)
-                if ents:
-                    _ss_delivered_entsets.setdefault(grp, []).append(ents)
+        _ss_remember_known(
+            kind, text, root, is_loc=is_loc,
+            knowledge_authority=knowledge_authority)
         _ss_note_delivery_for_ack(kind, text)
     except Exception:  # noqa: BLE001 — bookkeeping must never break delivery
         pass
@@ -13065,6 +14177,25 @@ def _augment_output(action, out) -> None:
         _orig_out = out.get("output") or ""  # the command's own output (for failure detect)
         _returncode = out.get("returncode")   # normalized command truth; None means absent
 
+        # Preserve the exact PRE-INJECTION native stdout for stateless replay/sensing.
+        # ``extra`` is trajectory-only (mini-swe removes it before model calls). The
+        # ordinary ``raw_output`` field is captured after this function returns and
+        # therefore includes appended tag-free GT bytes; it cannot be the loop identity.
+        if not _GT_BASELINE and _ORACLE_ROUTE and (
+                _ss_coherence_v2_on() or _ss_recovery_v2_on()):
+            _native_extra = out.setdefault("extra", {})
+            if isinstance(_native_extra, dict):
+                _native_extra["gt_native_raw_output"] = _orig_out
+
+        # Once a native submit refusal owns this policy observation, later
+        # sibling results still join the formatter handshake but cannot produce
+        # another GT candidate.  The formatter will discard any earlier pool.
+        _active_batch = _batch_context.get()
+        if (_active_batch is not None
+                and _active_batch.get("precommitted_doses")):
+            _register_batch_execute(_active_batch, action, out)
+            return
+
         if not _GT_BASELINE and _ORACLE_ROUTE:
             # ---- STAGE-4 ORACLE ROUTING: producers -> candidates -> ONE gate ----
             global _oracle_nonedit_streak, _oracle_review_fired, \
@@ -13097,7 +14228,17 @@ def _augment_output(action, out) -> None:
             # per-turn pool instead of delivering inline; a single flush arbitrates <=1
             # global dose. None (flag off) -> every plane delivers inline (byte-identical).
             _ga_on = _global_arbiter_on()
-            _ga_pool: "list | None" = [] if _ga_on else None
+            if _ga_on and not _batch_commit_installed:
+                return
+            _batch_state = _batch_context.get() if _ga_on else None
+            _batch_defer = _batch_state is not None
+            if _batch_defer and not _register_batch_execute(
+                    _batch_state, action, out):
+                # A handshake mismatch invalidates the complete observation. Do not
+                # let this action fall back to an immediate per-result delivery.
+                return
+            _ga_pool: "list | None" = (
+                _batch_state["pool"] if _batch_defer else ([] if _ga_on else None))
             if _ga_on:
                 # SM-5 F (#50): fresh per-turn Lane-A rollback registry — the producers
                 # (which run later this turn) re-populate it; the flush reads it. Cleared
@@ -13615,8 +14756,17 @@ def _augment_output(action, out) -> None:
                 # path could deliver -> cattrs12 fired=True but delivered=0. 2026-06-23)
                 # DELIVERY-ENGINE STAGE 3 — behavioral detectors over the Stage-1
                 # signals (TIDE degenerate loop; TRAJEVAL coherence collapse).
+                # Persist the exact byte-progress epoch edge into trajectory-only
+                # metadata. mini-swe strips ``extra`` before the next model call;
+                # gt_oracle_sense reads it to apply this same shared epoch contract.
+                if _v2_write_truth:
+                    _out_extra = out.setdefault("extra", {})
+                    if isinstance(_out_extra, dict):
+                        _out_extra["gt_source_progress"] = any(
+                            step == _action_count and ok
+                            for _rel, step, ok in _ss_edit_events)
                 try:
-                    _dl = _degenerate_loop_candidate(cmd, _orig_out)
+                    _dl = _degenerate_loop_candidate(cmd, _orig_out, _returncode)
                 except Exception:  # noqa: BLE001 — one producer must not kill the gate
                     _crash_emit("detect.loop")
                     _dl = None
@@ -13679,6 +14829,7 @@ def _augment_output(action, out) -> None:
                         if _load_obligations_v2() is not None:
                             _obl_reason = "obligation.unexercised"
                             _obr = None
+                            _v2_attribute_resurface_silence()
                         else:
                             try:
                                 _obr = _obligation_resurface_candidate()
@@ -13855,7 +15006,9 @@ def _augment_output(action, out) -> None:
                 # arbiter runs first), then ONE flush runs the global ranked competition
                 # over {Lane-A blocks, steer, gateway fact} and delivers AT MOST ONE dose.
                 _gt_gateway_deliver(action, out, cmd, _orig_out, pool=_ga_pool)
-                _global_pool_flush(_ga_pool, kkind=_kkind, kf=_kf, krel=_krel)
+                if not _batch_defer:
+                    _global_pool_flush(
+                        _ga_pool, kkind=_kkind, kf=_kf, krel=_krel)
             else:
                 _gt_gateway_deliver(action, out, cmd, _orig_out)
             return
@@ -14353,6 +15506,12 @@ def _wrap_execute(orig):
             except BaseException as _e:  # noqa: BLE001 — submit chokepoint
                 _blocked = _gt_gate_submit_exception(self, action, _e)
                 if _blocked is not None:
+                    _state = _batch_context.get()
+                    if _state is not None:
+                        if not _register_precommitted_batch_dose(
+                                _state, action, _blocked):
+                            globals()["_batch_install_failed"] = True
+                            _blocked["output"] = ""
                     return _blocked            # BLOCK: swallow Submitted, agent continues
                 raise                          # ALLOW / not-a-submit: propagate unchanged
         else:

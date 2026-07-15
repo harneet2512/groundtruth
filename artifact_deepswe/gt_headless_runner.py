@@ -33,9 +33,11 @@ authoritative step count, not this exit code.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import sys
+import time
 
 
 def _bc(msg: str) -> None:
@@ -117,6 +119,90 @@ def _resolve_task(e: dict) -> str:
     return brief_text + "\n\n" + task
 
 
+def _env_on(value: object) -> bool:
+    return str(value or "").strip().lower() not in {"", "0", "false", "no", "off", "none"}
+
+
+def _batch_hook_required(e: dict) -> bool:
+    """Whether this run promises observation-level one-dose arbitration."""
+    if str(e.get("GT_BASELINE") or "") == "1":
+        return False
+    profile = str(e.get("GT_RL_PROFILE") or "").strip().lower()
+    return (
+        profile == "2"
+        or _env_on(e.get("GT_GLOBAL_ARBITER"))
+        or _env_on(e.get("GT_PROOF_MODE"))
+        or _env_on(e.get("GT_REQUIRE_FULL_STACK"))
+    )
+
+
+def _batch_receipt_path(e: dict) -> str:
+    explicit = str(e.get("GT_BATCH_ACTIVATION_RECEIPT") or "").strip()
+    if explicit:
+        return explicit
+    anchor = str(e.get("GT_RUNTIME_LEDGER") or e.get("GT_RUN_OUTPUT") or "").strip()
+    parent = os.path.dirname(anchor) if anchor else "/tmp"
+    return os.path.join(parent or ".", "gt_batch_activation.json")
+
+
+def _mini_swe_version() -> str:
+    try:
+        import minisweagent
+
+        version = str(getattr(minisweagent, "__version__", "") or "").strip()
+        if version:
+            return version
+    except Exception:  # noqa: BLE001 -- metadata fallback remains available
+        pass
+    try:
+        return importlib.metadata.version("mini-swe-agent")
+    except Exception:  # noqa: BLE001 -- missing/broken metadata is recorded as unknown
+        return ""
+
+
+def _qualified_class(value: object) -> str:
+    cls = value.__class__
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _write_batch_activation_receipt(
+    e: dict,
+    *,
+    agent: object,
+    required: bool,
+    result: str,
+    attached: bool,
+) -> bool:
+    """Persist post-agent proof that the observation commit boundary is attached."""
+    path = _batch_receipt_path(e)
+    receipt = {
+        "schema": "gt.batch_activation.v1",
+        "required": bool(required),
+        "result": str(result or ""),
+        "wrapper_attached": bool(attached),
+        "agent_class": _qualified_class(agent),
+        "model_class": _qualified_class(getattr(agent, "model", None)),
+        "mini_swe_version": _mini_swe_version(),
+        "gt_rl_profile": str(e.get("GT_RL_PROFILE") or ""),
+        "global_arbiter_on": _env_on(e.get("GT_GLOBAL_ARBITER")),
+        "pid": os.getpid(),
+        "timestamp_ms": int(time.time() * 1000),
+    }
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(receipt, fh, sort_keys=True, separators=(",", ":"))
+            fh.write("\n")
+        os.replace(tmp, path)
+        return True
+    except (OSError, TypeError, ValueError) as exc:
+        _bc(f"WARN batch activation receipt unavailable ({type(exc).__name__} @ {path})")
+        return False
+
+
 def run(env: dict | None = None) -> int:
     """Build model + local env + DefaultAgent from the env contract and run one task.
 
@@ -156,6 +242,7 @@ def run(env: dict | None = None) -> int:
     # import (breadcrumb the WARN, keep running) — the proof marker + harness gate enforce
     # fail-closed at the run boundary, not here. Breadcrumb the patched set so the trial log proves
     # delivery ATTACHED, not merely that the agent ran.
+    gt_mini_patch = None
     if e.get("GT_BASELINE") != "1":
         _here = os.path.dirname(os.path.abspath(__file__))
         if _here not in sys.path:
@@ -182,6 +269,36 @@ def run(env: dict | None = None) -> int:
     # default_type="default" -> the non-interactive DefaultAgent (a pure while-True step loop). This
     # is the single line that fixes the 0-step wash: NEVER "interactive" here.
     agent = get_agent(model, env_obj, agent_cfg, default_type="default")
+    batch_required = _batch_hook_required(e)
+    batch_result = "patch_import_unavailable"
+    batch_attached = False
+    if gt_mini_patch is not None:
+        try:
+            installed = bool(gt_mini_patch.install_observation_batch_commit(agent))
+            batch_attached = bool(
+                installed and getattr(agent, "_gt_batch_commit_installed", False)
+            )
+            batch_result = "installed" if batch_attached else "install_unavailable"
+            if not batch_attached:
+                _bc("WARN GT batch handshake unavailable")
+        except Exception as _exc:  # noqa: BLE001 -- report before the paid call
+            batch_result = f"install_error:{type(_exc).__name__}"
+            _bc(f"WARN GT batch-commit install failed: {type(_exc).__name__}: {_exc}")
+    receipt_written = True
+    if e.get("GT_BASELINE") != "1":
+        receipt_written = _write_batch_activation_receipt(
+            e,
+            agent=agent,
+            required=batch_required,
+            result=batch_result,
+            attached=batch_attached,
+        )
+    if batch_required and (not batch_attached or not receipt_written):
+        _bc(
+            "FATAL: required observation batch hook is unproven; "
+            "refusing paid agent.run()"
+        )
+        return 2
     _bc("agent built — entering agent.run()")
 
     result = agent.run(task)

@@ -68,8 +68,10 @@ def patch_mod():
     return _load(_PATCH_PATH, "gt_mini_patch_stage1")
 
 
-def _turn(sense_mod, i, cmd, obs=""):
-    return sense_mod.Turn(index=i, command=cmd, raw_obs=obs, full_obs=obs)
+def _turn(sense_mod, i, cmd, obs="", *, rc=0, source_progress=False):
+    return sense_mod.Turn(
+        index=i, command=cmd, raw_obs=obs, full_obs=obs,
+        returncode=rc, source_progress=source_progress)
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +84,8 @@ def test_sensor_binds_live_formulas(sense_mod, patch_mod):
     assert sense_mod._gmp is not None
     assert sense_mod.compute_loop_ratio is sense_mod._gmp.compute_loop_ratio
     assert sense_mod.compute_new_state_rate is sense_mod._gmp.compute_new_state_rate
+    assert sense_mod._behavior_loop_signature is sense_mod._gmp._behavior_loop_signature
+    assert sense_mod._advance_behavior_progress_epoch is sense_mod._gmp._advance_behavior_progress_epoch
     assert sense_mod.symbol_tested is sense_mod._gmp.symbol_tested
     assert sense_mod.edit_coverage_ratio is sense_mod._gmp.edit_coverage_ratio
     assert sense_mod.test_coverage_ratio is sense_mod._gmp.test_coverage_ratio
@@ -92,6 +96,34 @@ def test_sensor_binds_live_formulas(sense_mod, patch_mod):
 #    SPREAD between other actions — the old window-12 detector's blind spot).
 # ---------------------------------------------------------------------------
 class TestLoopRatio:
+    def test_trajectory_loader_preserves_native_result_and_progress(self, sense_mod):
+        messages = [
+            {"role": "assistant", "extra": {"actions": [
+                {"command": "pytest -q", "tool_call_id": "call-1"}
+            ]}},
+            {"role": "tool", "tool_call_id": "call-1",
+             "content": "<returncode>1</returncode>\n<output>templated</output>",
+             "extra": {"gt_native_raw_output": "native stdout",
+                       "raw_output": "native stdout\nRepository check: clean",
+                       "returncode": 1,
+                       "gt_source_progress": True}},
+        ]
+        turns = sense_mod.messages_to_turns(messages)
+        assert len(turns) == 1
+        assert turns[0].raw_obs == "native stdout"
+        assert turns[0].returncode == 1
+        assert turns[0].source_progress is True
+        # The post-augmentation raw_output contains a native, tag-free GT line;
+        # sensor identity must still equal the live pre-injection identity.
+        assert sense_mod._behavior_loop_signature(
+            turns[0].command, turns[0].raw_obs, turns[0].returncode
+        ) == sense_mod._gmp._behavior_loop_signature(
+            "pytest -q", "native stdout", 1)
+        assert sense_mod._behavior_loop_signature(
+            turns[0].command, turns[0].raw_obs, turns[0].returncode
+        ) != sense_mod._gmp._behavior_loop_signature(
+            "pytest -q", "native stdout\nRepository check: clean", 1)
+
     def test_distinct_actions_zero(self, sense_mod):
         turns = [_turn(sense_mod, i, f"cat file_{i}.py", f"content {i}")
                  for i in range(20)]
@@ -123,6 +155,36 @@ class TestLoopRatio:
                  for i in range(10)]
         st = sense_mod.sense(turns)
         assert st.loop_ratio == 0.0
+
+    def test_same_stdout_different_returncode_is_not_identical(self, sense_mod):
+        turns = [
+            _turn(sense_mod, 0, "pytest -q", "same output", rc=0),
+            _turn(sense_mod, 1, "pytest -q", "same output", rc=1),
+        ]
+        st = sense_mod.sense(turns)
+        assert len(set(st.loop_signatures)) == 2
+        assert st.loop_ratio == 0.0
+
+    def test_only_byte_proven_progress_resets_repeat_epoch(self, sense_mod):
+        repeated = [
+            _turn(sense_mod, 0, "pytest -q", "same failure", rc=1),
+            _turn(sense_mod, 1, "pytest -q", "same failure", rc=1),
+        ]
+        syntactic_only = _turn(
+            sense_mod, 2, "sed -i 's/a/b/' src/core.py", "", rc=0,
+            source_progress=False)
+        no_reset = sense_mod.sense(repeated + [syntactic_only])
+        assert sum(1 for sig in no_reset.loop_signatures
+                   if sig == no_reset.loop_signatures[0]) == 2
+
+        proven = _turn(
+            sense_mod, 2, "sed -i 's/a/b/' src/core.py", "", rc=0,
+            source_progress=True)
+        reset = sense_mod.sense(repeated + [proven] + [
+            _turn(sense_mod, 3, "pytest -q", "same failure", rc=1)
+        ])
+        assert len(reset.loop_signatures) == 2
+        assert reset.loop_signatures[0] != reset.loop_signatures[1]
 
 
 # ---------------------------------------------------------------------------

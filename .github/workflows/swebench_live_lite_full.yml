@@ -1199,7 +1199,7 @@ jobs:
               echo "[GT] repo root: $REPO_ROOT"
 
               # Install mini-swe-agent (not in task images — they are bare repos).
-              # mini-swe-agent 2.4.3 requires Python >=3.10, but 155/300 Live Lite
+              # mini-swe-agent 2.4.5 requires Python >=3.10, but 155/300 Live Lite
               # images ship Python 3.6/3.8/3.9 (audited via the registry config blob),
               # where `pip install mini-swe-agent` FAILS. So the uv fallback MUST
               # provision its own managed Python 3.11 (`--python 3.11`) — deterministic
@@ -1215,10 +1215,10 @@ jobs:
               # (system pip + uv tool venv), else every task rewards 0 at step 1. The GT_PY-targeted
               # belt AFTER interpreter resolution (below) is the load-bearing guarantee; these --with/
               # pip additions cover the happy path. GUARD: single-quoted docker block — NO apostrophe.
-              python -m pip install --quiet datacurve-pier fastapi orjson 2>/dev/null || python -m pip install --quiet mini-swe-agent fastapi orjson 2>/dev/null || {
+              python -m pip install --quiet datacurve-pier mini-swe-agent==2.4.5 fastapi orjson 2>/dev/null || python -m pip install --quiet mini-swe-agent==2.4.5 fastapi orjson 2>/dev/null || {
                 curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
                 export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
-                uv tool install --python 3.11 --with fastapi --with orjson mini-swe-agent 2>/dev/null || uv tool install --with fastapi --with orjson mini-swe-agent 2>/dev/null
+                uv tool install --python 3.11 --with fastapi --with orjson mini-swe-agent==2.4.5 2>/dev/null || uv tool install --with fastapi --with orjson mini-swe-agent==2.4.5 2>/dev/null
               }
               # Verify installation
               if ! command -v mini-swe-agent >/dev/null 2>&1; then
@@ -1464,6 +1464,16 @@ jobs:
             echo "GT_PROFILE_UNPROVEN: no gt_profile_receipt.json from the patched agent process (Profile-2 forwarding unproven; task is not citable)"
             exit 1
           fi
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ ! -s /tmp/gt_out/gt_batch_activation.json ]; then
+            echo "GT_BATCH_UNPROVEN: no gt_batch_activation.json from the agent process (one-dose observation boundary unproven; task is not citable)"
+            exit 1
+          fi
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
+            python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); sys.exit(0 if d.get("schema")=="gt.batch_activation.v1" and d.get("required") is True and d.get("wrapper_attached") is True and d.get("result")=="installed" and d.get("mini_swe_version")=="2.4.5" else 1)' /tmp/gt_out/gt_batch_activation.json || {
+              echo "GT_BATCH_UNPROVEN: batch activation receipt is invalid or version-mismatched; task is not citable"
+              exit 1
+            }
+          fi
           # BRIEF-DELIVERY PROOF (W16 guard, 2026-07-13): the step-0 brief ran DARK on every
           # mini run before W16 because generation != delivery. Fail closed: on the GT arm,
           # when a non-empty brief was generated, its head bytes MUST appear in the agent's
@@ -1621,6 +1631,7 @@ jobs:
           # patched classes). The seam write is best-effort to avoid crashing the agent; the
           # post-run liveness and metrics gates mark a missing receipt uncitable.
           cp /tmp/gt_out/gt_profile_receipt.json trial_results/gt_artifacts/gt_profile_receipt.json 2>/dev/null || true
+          cp /tmp/gt_out/gt_batch_activation.json trial_results/gt_artifacts/gt_batch_activation.json 2>/dev/null || true
                     cp /tmp/gt/issue_manifest.json trial_results/gt_artifacts/issue_manifest.json 2>/dev/null || true
           cp /tmp/gt/adapter_witness.json trial_results/adapter_witness.json 2>/dev/null || true
           cp /tmp/gt/run_provenance.json trial_results/gt_artifacts/run_provenance.json 2>/dev/null || true
@@ -1764,6 +1775,7 @@ jobs:
               || _MM_MISSING="$_MM_MISSING gt_feature_metrics_ss128_integrity"
             [ -s "trial_results/gt_artifacts/gt_profile_activation.json" ]    || _MM_MISSING="$_MM_MISSING gt_profile_activation.json"
             [ -s "trial_results/gt_artifacts/gt_profile_receipt.json" ]       || _MM_MISSING="$_MM_MISSING gt_profile_receipt.json"
+            [ -s "trial_results/gt_artifacts/gt_batch_activation.json" ]      || _MM_MISSING="$_MM_MISSING gt_batch_activation.json"
             [ -s "trial_results/gt_artifacts/gt_run_identity.json" ]          || _MM_MISSING="$_MM_MISSING gt_run_identity.json"
           fi
           if [ -n "$_MM_MISSING" ]; then

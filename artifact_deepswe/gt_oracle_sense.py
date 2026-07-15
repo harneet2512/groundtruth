@@ -100,6 +100,8 @@ if _gmp is not None:
     # twin-drift mitigation). Research: TIDE arXiv 2602.02196, TRAJEVAL
     # arXiv 2603.24631, arXiv 2604.02547 (see gt_mini_patch for full notes).
     _behavior_state_key = _gmp._behavior_state_key
+    _behavior_loop_signature = _gmp._behavior_loop_signature
+    _advance_behavior_progress_epoch = _gmp._advance_behavior_progress_epoch
     _obs_collapse = _gmp._obs_collapse
     compute_loop_ratio = _gmp.compute_loop_ratio
     compute_new_state_rate = _gmp.compute_new_state_rate
@@ -140,11 +142,40 @@ else:  # pragma: no cover - exercised only if gt_mini_patch is truly absent
     def _obs_collapse(obs, n=400):  # type: ignore
         return " ".join((obs or "").split())[:n]
 
-    def _behavior_state_key(cmd, raw_obs):  # type: ignore
+    def _behavior_result_preimage(cmd, raw_obs, returncode=None):  # type: ignore
+        norm = str(cmd or "").strip()
+        output = str(raw_obs or "")
+        if returncode is None:
+            rc = "missing"
+        elif type(returncode) is int:
+            rc = f"int:{returncode}"
+        else:
+            rc = f"{type(returncode).__name__}:{returncode!r}"
+        encoded = [
+            field.encode("utf-8", "surrogatepass")
+            for field in ("gt.behavior-result.v1", norm, output, rc)
+        ]
+        return b"".join(len(field).to_bytes(8, "big") + field for field in encoded)
+
+    def _behavior_loop_signature(cmd, raw_obs, returncode=None):  # type: ignore
         import hashlib as _h
-        head = (cmd or "").strip().split(None, 1)[0] if (cmd or "").strip() else ""
-        oh = _h.sha256(_obs_collapse(raw_obs).encode("utf-8", "replace")).hexdigest()[:8]
-        return f"cmd\x00{head}\x00{oh}"
+        norm = (cmd or "").strip()
+        if not norm:
+            return None
+        return _h.sha256(
+            _behavior_result_preimage(norm, raw_obs, returncode)).hexdigest()
+
+    def _behavior_state_key(cmd, raw_obs, returncode=None):  # type: ignore
+        identity = _behavior_loop_signature(cmd, raw_obs, returncode) or "empty-command"
+        return f"cmd\x00{identity}"
+
+    def _advance_behavior_progress_epoch(  # type: ignore
+            current_epoch, successful_steps, loop_signatures):
+        latest = max((int(step) for step in successful_steps), default=-1)
+        if latest <= int(current_epoch):
+            return int(current_epoch), False
+        loop_signatures.clear()
+        return latest, True
 
     def compute_loop_ratio(signatures):  # type: ignore
         sigs = list(signatures or ())
@@ -229,12 +260,16 @@ class Turn:
     `raw_obs`  — the observation with GT's own injected blocks STRIPPED (the text
                  the command itself produced — what a faithful replay decides on).
     `full_obs` — the observation exactly as recorded (incl. any GT blocks).
+    `returncode` — the explicit native result code (None only when absent).
+    `source_progress` — live-seam proof that source bytes changed successfully.
     `index`    — the assistant-message index in the original messages array.
     """
     index: int
     command: str
     raw_obs: str
     full_obs: str
+    returncode: object = None
+    source_progress: bool = False
 
 
 def _command_from_assistant(msg: dict) -> str | None:
@@ -361,14 +396,37 @@ def messages_to_turns(messages: list[dict]) -> list[Turn]:
             elif pos < len(following):
                 obs_msg = following[pos]
             full_obs = _content_text(obs_msg) if obs_msg else ""
+            extra = (
+                obs_msg.get("extra")
+                if isinstance(obs_msg, dict) and isinstance(obs_msg.get("extra"), dict)
+                else {}
+            )
+            native_value = extra.get("gt_native_raw_output")
+            raw_value = extra.get("raw_output")
+            if isinstance(native_value, str):
+                # Exact live pre-injection bytes: do not strip marker-shaped native
+                # repository output, and exclude later tag-free GT appendages.
+                raw_obs = native_value
+            else:
+                post_augmentation = raw_value if isinstance(raw_value, str) else full_obs
+                raw_obs = strip_gt(post_augmentation)
+            returncode = extra.get("returncode") if "returncode" in extra else None
+            if returncode is None:
+                rc_match = re.match(r"\s*<returncode>(-?\d+)</returncode>", full_obs)
+                if rc_match:
+                    returncode = int(rc_match.group(1))
             turns.append(Turn(index=i, command=cmd,
-                              raw_obs=strip_gt(full_obs), full_obs=full_obs))
+                              raw_obs=raw_obs, full_obs=full_obs,
+                              returncode=returncode,
+                              source_progress=(extra.get("gt_source_progress") is True)))
     return turns
 
 
 def load_trajectory(path: str) -> list[Turn]:
     """Load a mini-swe `*.trajectory.json` (or a bare messages list) -> Turns."""
-    with open(path, encoding="utf-8", errors="replace") as f:
+    # Strict decode preserves identity: replacement decoding can collapse two
+    # distinct native outputs before the shared behavior signature sees them.
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, dict):
         messages = data.get("messages") or data.get("history") or []
@@ -516,6 +574,8 @@ def sense(turns: list[Turn]) -> DerivedState:
     seen_source_edit = False
     nonedit_streak = 0
     phase = "ORIENT"
+    loop_epoch = -1
+    successful_progress_steps: list[int] = []
     for ti, turn in enumerate(turns):
         cmd = turn.command
         raw = turn.raw_obs
@@ -524,10 +584,14 @@ def sense(turns: list[Turn]) -> DerivedState:
         # ── Stage-1 behavioral state graph (TIDE): one node key per action,
         # one full no-new-state signature per non-empty command (matching the
         # live loop window's append discipline). ──────────────────────────────
-        st.state_keys.append(_behavior_state_key(cmd, raw))
-        if (cmd or "").strip():
-            st.loop_signatures.append(
-                (cmd or "").strip() + "\x00" + _obs_collapse(raw))
+        if turn.source_progress:
+            successful_progress_steps.append(ti)
+        loop_epoch, _advanced = _advance_behavior_progress_epoch(
+            loop_epoch, successful_progress_steps, st.loop_signatures)
+        st.state_keys.append(_behavior_state_key(cmd, raw, turn.returncode))
+        sig = _behavior_loop_signature(cmd, raw, turn.returncode)
+        if sig is not None:
+            st.loop_signatures.append(sig)
 
         kind, fpath = _classify(cmd)
         is_source_edit = (kind == "post_edit" and bool(fpath))

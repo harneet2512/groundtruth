@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import os
 import sys
+from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -132,6 +135,175 @@ def test_dedup2_group_crosses_classes(monkeypatch):
     g._lane_a_deliver(o2, "cmd", [b2], krel="migrations.py", event=None)
     assert (o2.get("output") or "") == ""  # cross-class containment suppresses
     assert any(r.get("reason") == "ss_semantic_dup" for r in recs)
+
+
+def test_stepbehind_fact_becomes_known_for_later_cross_class_subset(monkeypatch):
+    """A fact already known through native acquisition is a semantic prior even when GT
+    correctly withheld its first rendering as step-behind."""
+    _base(monkeypatch)
+    recs = _capture(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    monkeypatch.setenv("GT_SS_DEDUP2", "1")
+    g._ss_acquired_files.add("conans/client/migrations.py")
+
+    first = ("l3b.evidence", "conans/client/migrations.py migrate_settings_file() update_file()")
+    g._lane_a_deliver({}, "cmd", [first], krel="conans/client/migrations.py", event=None)
+    second = ("l3.contract", "conans/client/migrations.py migrate_settings_file()")
+    g._lane_a_deliver({}, "cmd", [second], krel="conans/client/migrations.py", event=None)
+
+    assert [r.get("reason") for r in recs] == ["ss_step_behind", "ss_semantic_dup"]
+
+
+def test_known_fact_decision_has_lane_gateway_parity_and_reset(monkeypatch):
+    _base(monkeypatch)
+    recs = _capture(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    monkeypatch.setenv("GT_SS_DEDUP2", "1")
+    g._ss_acquired_files.add("src/known.py")
+    commits: list[str] = []
+    winner = SimpleNamespace(
+        evidence_type="def_ref_partition", target="src/known.py",
+        tier="VERIFIED", confidence=1.0, provenance=(("src/known.py", 1),),
+    )
+
+    g._global_pool_add_gateway(
+        [], winner, True, lambda: commits.append("first"), ev_kind="search",
+        rendered_text="src/known.py run() helper()",
+    )
+    g._global_pool_add_gateway(
+        [], winner, True, lambda: commits.append("second"), ev_kind="search",
+        rendered_text="src/known.py run()",
+    )
+
+    assert commits == []
+    assert [r.get("reason") for r in recs] == ["ss_step_behind", "ss_semantic_dup"]
+    assert g._ss_known_entsets
+    g._ss_reset()
+    assert g._ss_known_entsets == {}
+
+
+def test_unverified_gateway_stepbehind_never_seeds_semantic_known(monkeypatch):
+    """A path hit proves acquisition, not the truth of a low-authority envelope."""
+    _base(monkeypatch)
+    recs = _capture(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    monkeypatch.setenv("GT_SS_DEDUP2", "1")
+    g._ss_acquired_files.add("src/known.py")
+    winner = SimpleNamespace(
+        evidence_type="def_ref_partition", target="src/known.py",
+        tier="INFO", confidence=0.0, provenance=(("src/known.py", 1),),
+    )
+
+    g._global_pool_add_gateway(
+        [], winner, True, lambda: None, ev_kind="search",
+        rendered_text="src/known.py run() helper()",
+    )
+    g._global_pool_add_gateway(
+        [], winner, True, lambda: None, ev_kind="search",
+        rendered_text="src/known.py run()",
+    )
+
+    assert [r.get("reason") for r in recs] == ["ss_step_behind", "ss_step_behind"]
+    assert g._ss_known_entsets == {}
+
+
+def test_unverified_gateway_delivery_never_seeds_semantic_known(monkeypatch):
+    """Receipt of an advisory envelope does not upgrade it into dedup authority."""
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_DEDUP2", "1")
+    committed: list[str] = []
+    winner = SimpleNamespace(
+        evidence_type="def_ref_partition", target="src/novel.py",
+        tier="INFO", confidence=0.0, provenance=(("src/novel.py", 1),),
+    )
+
+    pool: list = []
+    g._global_pool_add_gateway(
+        pool, winner, True, lambda: committed.append("delivered"), ev_kind="search",
+        rendered_text="src/novel.py helper()",
+    )
+    if pool:
+        pool[0][1]()
+
+    assert committed == ["delivered"]
+    assert g._ss_known_entsets == {}
+
+
+@pytest.mark.parametrize(("tier", "confidence", "provenance"), [
+    ("INFO", 1.0, (("src/known.py", 1),)),
+    ("VERIFIED", 0.69, (("src/known.py", 1),)),
+    ("VERIFIED", 1.0, ()),
+])
+def test_gateway_knowledge_authority_fails_closed_each_contract_dimension(
+        monkeypatch, tier, confidence, provenance):
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    monkeypatch.setenv("GT_SS_DEDUP2", "1")
+    g._ss_acquired_files.add("src/known.py")
+    winner = SimpleNamespace(
+        evidence_type="def_ref_partition", target="src/known.py",
+        tier=tier, confidence=confidence, provenance=provenance,
+    )
+
+    g._global_pool_add_gateway(
+        [], winner, True, lambda: None, ev_kind="search",
+        rendered_text="src/known.py run()",
+    )
+
+    assert g._ss_known_entsets == {}
+
+
+def test_novel_cross_file_fact_survives_and_does_not_precommit_known_state(monkeypatch):
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    monkeypatch.setenv("GT_SS_DEDUP2", "1")
+    g._ss_acquired_files.add("src/subject.py")
+    block = ("l3b.evidence", "src/subject.py run()\nsrc/novel.py helper()")
+    out: dict = {}
+    g._lane_a_deliver(out, "cmd", [block], krel="src/subject.py", event=None)
+    assert "src/novel.py" in (out.get("output") or "")
+    # The delivered commit, not the preflight decision, owns known-state mutation.
+    assert len(g._ss_known_entsets.get("caller_facts", ())) == 1
+
+
+def test_nonknowledge_suppressions_and_arbiter_losers_never_seed_known(monkeypatch):
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_DEDUP2", "1")
+    monkeypatch.setenv("GT_SS_PROVENANCE", "1")
+    assert g._ss_screen_delivery("l3.contract", "/tmp/bad.py helper()", "")[1] == "ss_provenance"
+    assert g._ss_known_entsets == {}
+
+    monkeypatch.delenv("GT_SS_PROVENANCE")
+    monkeypatch.setenv("GT_SS_LATE_DROP", "1")
+    monkeypatch.setattr(g, "_ss_late_drop_suppresses", lambda *a, **k: True)
+    assert g._ss_screen_delivery("l3.contract", "src/a.py helper()", "")[1] == "ss_late"
+    assert g._ss_known_entsets == {}
+
+    monkeypatch.delenv("GT_SS_LATE_DROP")
+    winner = SimpleNamespace(
+        evidence_type="def_ref_partition", target="src/novel.py",
+        dedup_key="novel-key", fact_id="fact", tier="VERIFIED",
+        confidence=1.0, lineage=None,
+    )
+    pool: list = []
+    g._global_pool_add_gateway(
+        pool, winner, True, lambda: None, ev_kind="search",
+        rendered_text="src/novel.py helper()",
+    )
+    assert len(pool) == 1  # eligible but not committed: model knows nothing yet
+    assert g._ss_known_entsets == {}
+
+
+def test_content_flags_off_do_not_mutate_known_state(monkeypatch):
+    _base(monkeypatch)
+    g._ss_acquired_files.add("src/a.py")
+    out: dict = {}
+    g._lane_a_deliver(
+        out, "cmd", [("l3.contract", "src/a.py helper()")],
+        krel="src/a.py", event=None,
+    )
+    assert "src/a.py" in (out.get("output") or "")
+    assert g._ss_known_entsets == {}
 
 
 def test_dedup2_obligation_outside_group(monkeypatch):
