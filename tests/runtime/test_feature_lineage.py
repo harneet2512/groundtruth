@@ -266,4 +266,4 @@ def test_cap_byte_owner_mechanism_authority_is_total_and_exact() -> None:
     coherence = CAP_BYTE_OWNER_MECHANISMS["GT_SS_COHERENCE_V2"]
     assert coherence.bindings[0].producer == "ss_coherence_v2"
     assert coherence.bindings[0].layer == "detect.coherence"
-    assert coherence.bindings[0].fact_class == "recovery"
+    assert coherence.bindings[0].fact_class is None

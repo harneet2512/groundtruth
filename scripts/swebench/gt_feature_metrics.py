@@ -327,7 +327,6 @@ _LEGACY_LAYER_FACTCLASS: dict[str, str] = {
     "semantic_drift": "cochange_prior",
     "spec.obligation": "obligations",
     "obligation.resurface": "obligations",
-    "detect.coherence": "recovery",
     "detect.loop": "recovery",
     "recovery": "recovery",
     "completion_cert": "submit_refusal",
@@ -2886,11 +2885,13 @@ def collect_task(
 
 
 def _atomic_row_identity(row: dict[str, Any]) -> tuple[str, str] | None:
-    """Validate the exact CAP-byte-owner/FACT identity carried by one row.
+    """Validate an exact joint CAP-byte-owner/FACT identity carried by one row.
 
     Layer names and profile membership are not producer authority. Typed owners
     must match the registry and the byte-owner binding; exact-profile owners must
-    additionally name their active member and registered FACT lineage.
+    additionally name their active member and registered FACT lineage. A factless
+    exact-profile owner (coherence) is absent from this FACT event projection;
+    its own CAP lifecycle is collected separately.
     """
     if row.get("lineage_schema") != "gt.feature_lineage.v1":
         return None

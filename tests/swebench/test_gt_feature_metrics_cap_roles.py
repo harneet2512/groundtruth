@@ -13,12 +13,12 @@ for path in (ROOT / "src", ROOT / "scripts" / "swebench"):
 
 import gt_feature_metrics as metrics  # noqa: E402  # pyright: ignore[reportMissingImports]
 from groundtruth.runtime import fact_registry  # noqa: E402
-from groundtruth.runtime.feature_lineage import (
+from groundtruth.runtime.feature_lineage import (  # noqa: E402
     CAP_BYTE_OWNER_MECHANISMS,
     CAP_BYTE_OWNER_IDS,
     CAP_ELIGIBILITY_IDS,
     CAP_MEDIATOR_IDS,
-)  # noqa: E402
+)
 
 
 def _fact_lifecycles() -> dict[str, dict]:
@@ -46,6 +46,7 @@ def test_cap_role_authority_partitions_all_profile_members() -> None:
     assert len(CAP_MEDIATOR_IDS) == 26
     assert set(metrics._DIRECT_MEMBER_FACTCLASS) == set(CAP_BYTE_OWNER_IDS)
     assert metrics._DIRECT_MEMBER_FACTCLASS["GT_SS_COHERENCE_V2"] is None
+    assert metrics.layer_to_fact_class("detect.coherence") is None
     assert set(metrics._DIRECT_MEMBER_FACTCLASS) == set(CAP_BYTE_OWNER_MECHANISMS)
     assert set(metrics._INFRA_MEMBER_MEDIATES) == (
         set(CAP_ELIGIBILITY_IDS) | set(CAP_MEDIATOR_IDS)

@@ -111,8 +111,8 @@ def _bindings(*rows: tuple[str, str, str | None]) -> tuple[CAPByteOwnerBinding, 
 
 # One authority for all eight byte owners. Exact-profile-member rows claim a FACT
 # only when the byte-producing mechanism has a reviewed canonical identity. The
-# coherence detector is a governor recovery fact: it observes edit churn and asks
-# the agent to pivot, rather than asserting a co-change relationship.
+# coherence detector owns its exact lane bytes but has no canonical FACT identity:
+# its V2 row is internal measurement and its nudge must not fabricate recovery.
 CAP_BYTE_OWNER_MECHANISMS: Mapping[str, CAPByteOwnerMechanism] = MappingProxyType({
     "GT_CHANGE_SURFACE": CAPByteOwnerMechanism("typed_lineage", _bindings(
         ("change_surface", "missing_role", "newfile_precedent"),
@@ -135,7 +135,7 @@ CAP_BYTE_OWNER_MECHANISMS: Mapping[str, CAPByteOwnerMechanism] = MappingProxyTyp
         ("governor", "recovery", "recovery"),
     )),
     "GT_SS_COHERENCE_V2": CAPByteOwnerMechanism("exact_profile_member", _bindings(
-        ("ss_coherence_v2", "detect.coherence", "recovery"),
+        ("ss_coherence_v2", "detect.coherence", None),
     )),
     "GT_CERT_DELIVERY": CAPByteOwnerMechanism("exact_profile_member", _bindings(
         ("submit_gate", "submit_refusal", "submit_refusal"),
