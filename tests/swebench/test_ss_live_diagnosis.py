@@ -420,6 +420,8 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
         "ss_features": ss_features, "features": {}, "fact_classes": {},
         "ss_integrity": {
             "inventory_complete": True, "required_inputs_complete": True,
+            "missing_required_inputs": [], "missing_feature_inputs": [],
+            "visible_audit_complete": True,
         },
     }), encoding="utf-8")
     (task_dir / "mini-swe-agent.trajectory.json").write_text(
@@ -578,6 +580,9 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
 
     incomplete_task = json.loads(feature_path.read_text(encoding="utf-8"))
     incomplete_task["ss_integrity"]["required_inputs_complete"] = False
+    incomplete_task["ss_integrity"]["missing_feature_inputs"] = [
+        "caller_breakage_count",
+    ]
     feature_path.write_text(json.dumps(incomplete_task), encoding="utf-8")
     incomplete_run = json.loads(run_metrics.read_text(encoding="utf-8"))
     incomplete_run["mandatory_performance_collection_complete"] = False
@@ -587,12 +592,29 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
     incomplete_by_name = {row["feature"]: row for row in incomplete["rows"]}
     assert incomplete["feature_count"] == 128
     assert incomplete_by_name[first_acq]["task_buckets"][task] == (
-        "UNMEASURED:required_inputs_incomplete"
+        "UNMEASURED:support:source_contribution_correct"
     )
     assert incomplete_by_name["caller_contract"]["task_buckets"][task] == (
-        "UNMEASURED:required_inputs_incomplete"
+        "UNMEASURED:missing_lineage"
     )
     assert incomplete_by_name["gold_rank"]["run_bucket"] == "MEASURED"
+
+    visible_incomplete = json.loads(feature_path.read_text(encoding="utf-8"))
+    visible_incomplete["ss_integrity"]["visible_audit_complete"] = False
+    visible_incomplete["ss_integrity"]["missing_required_inputs"] = ["visible_audit"]
+    feature_path.write_text(json.dumps(visible_incomplete), encoding="utf-8")
+
+    fail_closed = diagnosis.diagnose_run(tmp_path, run_metrics)
+    fail_closed_by_name = {row["feature"]: row for row in fail_closed["rows"]}
+    assert fail_closed_by_name[first_acq]["task_buckets"][task] == (
+        "UNMEASURED:visible_audit_incomplete"
+    )
+    assert fail_closed_by_name["caller_contract"]["task_buckets"][task] == (
+        "UNMEASURED:visible_audit_incomplete"
+    )
+    assert fail_closed_by_name["GT_GATEWAY"]["task_buckets"][task] == (
+        "UNMEASURED:infra_control:runtime_member_control_receipt"
+    )
 
 
 def test_diagnosis_integrity_fails_closed_on_missing_or_mismatched_profile_receipt(

@@ -341,6 +341,19 @@ def _perf_status(value: object) -> str:
     return "FAILED"
 
 
+def _requires_visible_audit(feature: str, family: str) -> bool:
+    """Whether this row's terminal contract depends on model-visible bytes.
+
+    ACQ support is joined through a delivered FACT, while FACT and byte-owning
+    CAP rows directly own delivered bytes.  CAP eligibility and mediation rows
+    have separate typed control contracts and must not inherit a delivery gate
+    they do not own.
+    """
+    return family in {"ACQ", "FACT"} or (
+        family == "CAP" and cap_role_for(feature) == "byte_owner"
+    )
+
+
 def _run_perf_rows(run_metrics: dict[str, Any]) -> dict[str, str]:
     if run_metrics.get("schema") != "gt_run_metrics.v2":
         raise ValueError("run metrics must use canonical gt_run_metrics.v2")
@@ -848,6 +861,17 @@ def diagnose_run(
     diagnosis_integrity = _diagnosis_integrity(
         tasks, run_metrics, inventory["CAP"]
     )
+    incomplete_input_tasks = sorted(
+        task for task, (_path, metrics) in tasks.items()
+        if isinstance(metrics.get("ss_integrity"), dict)
+        and metrics["ss_integrity"].get("required_inputs_complete") is False
+    )
+    if incomplete_input_tasks:
+        diagnosis_integrity["run_issues"] = sorted(set([
+            *diagnosis_integrity["run_issues"], "task_feature_inputs_incomplete",
+        ]))
+        diagnosis_integrity["publishable"] = False
+    diagnosis_integrity["task_feature_inputs_incomplete"] = incomplete_input_tasks
     diagnosis_integrity["feature_record_population"] = {
         "expected": list(task_order),
         "missing": list(missing_tasks),
@@ -935,9 +959,10 @@ def diagnose_run(
                     integrity = metrics.get("ss_integrity")
                     if (
                         isinstance(integrity, dict)
-                        and integrity.get("required_inputs_complete") is False
+                        and integrity.get("visible_audit_complete") is not True
+                        and _requires_visible_audit(feature, family)
                     ):
-                        task_buckets[task] = "UNMEASURED:required_inputs_incomplete"
+                        task_buckets[task] = "UNMEASURED:visible_audit_incomplete"
                         continue
                     if artifact_error is not None:
                         task_buckets[task] = f"UNMEASURED:{artifact_error}"
