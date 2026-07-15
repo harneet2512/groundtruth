@@ -657,7 +657,10 @@ def select_anchors(
     # Ingress point (lexical): hybrid.py forward-slashes h.file but does NOT strip
     # the leading ./ or / — run it through the same canonical normalizer so the
     # lexical keys match the semantic + symbol pipes (#18).
-    lex_files = {_norm_path(h.file) for h in lex_hits}
+    # lexical_file_search already returns relevance rank. De-duplicate in that
+    # first-seen order; a set made equal-semantic-score anchors depend on each
+    # process's randomized hash seed, breaking independent acquisition identity.
+    lex_files = list(dict.fromkeys(_norm_path(h.file) for h in lex_hits))
 
     anchor_map: dict[str, dict] = {}
 
@@ -696,5 +699,7 @@ def select_anchors(
             }
 
     anchors = [AnchorRecord(**v) for v in anchor_map.values()]
+    # Stable sorting retains each producer's order inside equal-score groups;
+    # lexical ties therefore keep the deterministic relevance order above.
     anchors.sort(key=lambda a: a.semantic_score, reverse=True)
     return anchors, sem_seed_scores, sem_all_scores

@@ -165,6 +165,33 @@ def test_seed_and_component_maps_are_canonical(repo, monkeypatch):
     assert "pkg/core.py" in all_scores
 
 
+def test_equal_score_lexical_anchors_preserve_retriever_order(repo, monkeypatch):
+    """A hash set must not scramble the ranked lexical anchor prefix."""
+    repo_root, db = repo
+    monkeypatch.setattr(anchor_select, "semantic_top_k", lambda *a, **k: {})
+    monkeypatch.setattr(anchor_select, "_symbol_anchors", lambda *a, **k: {})
+    ranked = [
+        "pkg/priority_07.py",
+        "pkg/priority_02.py",
+        "pkg/priority_19.py",
+        "pkg/priority_01.py",
+        "pkg/priority_13.py",
+    ]
+    monkeypatch.setattr(
+        anchor_select,
+        "lexical_file_search",
+        lambda *a, **k: [
+            SignalHit(file=path, score=float(100 - i), detail="bm25")
+            for i, path in enumerate(ranked + [ranked[0]])
+        ],
+    )
+
+    anchors, _seed, _all = select_anchors(
+        "same issue", repo_root, db, _StubModel()
+    )
+    assert [anchor.path for anchor in anchors] == ranked
+
+
 # ---- #47: dead structural_seed_expand removed -------------------------------
 
 
