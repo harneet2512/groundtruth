@@ -73,6 +73,7 @@ class ObligationTruthState(str, Enum):
     UNEXERCISED = "unexercised"
     EXERCISED_UNPROVEN = "exercised_unproven"
     PROVEN = "proven"
+    UNVERIFIABLE = "unverifiable"
 
 
 @dataclass(frozen=True)
@@ -738,24 +739,40 @@ def obligation_truth_statuses(
     for view in views or ():
         if getattr(view, "region", "normative") != "normative":
             continue
-        subjects = _normalize_subjects(_credit_eligible_symbols(view))
+        eligible_symbols = _credit_eligible_symbols(view)
+        subjects = _normalize_subjects(eligible_symbols)
+        specific_subjects = _normalize_subjects(
+            symbol for symbol in eligible_symbols if _is_compound_symbol(symbol)
+        )
         after_turn = int(freshness.get(getattr(view, "idx", -1), -1))
+
+        def covers(item_subjects: frozenset[str]) -> bool:
+            if item_subjects == subjects:
+                return bool(subjects)
+            return bool(
+                item_subjects
+                and item_subjects < subjects
+                and item_subjects <= specific_subjects
+            )
+
         proof = next(
             (
                 item for item in reversed(proofs)
-                if item.subjects == subjects and item.turn > after_turn
+                if covers(item.subjects) and item.turn > after_turn
             ),
             None,
         )
         exercise = next(
             (
                 item for item in reversed(evidence)
-                if item.subjects == subjects and item.turn > after_turn
+                if covers(item.subjects) and item.turn > after_turn
             ),
             None,
         )
         touched, _confidence = overlap(view, edited)
-        if proof is not None:
+        if not subjects:
+            state = ObligationTruthState.UNVERIFIABLE
+        elif proof is not None:
             state = ObligationTruthState.PROVEN
         elif exercise is not None:
             state = ObligationTruthState.EXERCISED_UNPROVEN
@@ -772,6 +789,8 @@ def obligation_truth_summary(rows) -> dict:
     for row in truth:
         counts[row.state] += 1
     total = len(truth)
+    unverifiable = counts[ObligationTruthState.UNVERIFIABLE]
+    verifiable = total - unverifiable
     return {
         "coverage_version": 3,
         "truth_version": OBLIGATION_TRUTH_VERSION,
@@ -779,8 +798,10 @@ def obligation_truth_summary(rows) -> dict:
         "n_unexercised": counts[ObligationTruthState.UNEXERCISED],
         "n_exercised_unproven": counts[ObligationTruthState.EXERCISED_UNPROVEN],
         "n_proven": counts[ObligationTruthState.PROVEN],
+        "n_unverifiable": unverifiable,
+        "n_verifiable": verifiable,
         "proof_coverage": (
-            counts[ObligationTruthState.PROVEN] / total if total else 1.0
+            counts[ObligationTruthState.PROVEN] / verifiable if verifiable else 1.0
         ),
     }
 
@@ -796,11 +817,12 @@ def render_obligation_truth_block(rows, *, max_listed: int = 6, leak_screen=None
         if len(lines) >= max_listed:
             break
         quote = (getattr(row.view, "verbatim", "") or "")[:160]
-        mark = (
-            "[exercised, result unproven]"
-            if row.state is ObligationTruthState.EXERCISED_UNPROVEN
-            else "[not exercised]"
-        )
+        if row.state is ObligationTruthState.EXERCISED_UNPROVEN:
+            mark = "[exercised, result unproven]"
+        elif row.state is ObligationTruthState.UNVERIFIABLE:
+            mark = "[could not be verified automatically]"
+        else:
+            mark = "[not exercised]"
         rendered = f'{mark} "{quote}"'
         if leak_screen is not None and leak_screen(rendered):
             continue

@@ -50,6 +50,22 @@ Run `parse_item` against an empty fixture.
     assert rows[0]["region"] == "normative"
 
 
+def test_extractor_stamps_the_actual_structural_source_region() -> None:
+    issue = """### Describe the bug
+`parse_item` must currently be called twice to preserve empty values.
+
+### Expected behavior
+`parse_item` must preserve empty values in one call.
+"""
+
+    rows = extract_spec_v2(issue).to_serializable(version=2)
+
+    assert [(row["region"], row["verbatim_text"]) for row in rows] == [
+        ("evidence", "`parse_item` must currently be called twice to preserve empty values"),
+        ("normative", "`parse_item` must preserve empty values in one call"),
+    ]
+
+
 def test_failed_related_execution_is_exercise_evidence_not_behavioral_proof() -> None:
     command = "python -m pytest tests/test_parser.py -k parse_item"
     output = "test_parse_item FAILED\n1 failed in 0.04s"
@@ -114,3 +130,64 @@ def test_nonnormative_regions_never_enter_delivery_or_metric_denominator() -> No
 
     assert [row.view.idx for row in truth] == [0]
     assert ob.obligation_truth_summary(truth)["n_normative"] == 1
+
+
+def test_high_specificity_subject_subset_covers_broader_clause() -> None:
+    view = _View(
+        idx=0,
+        verbatim="`parse_item` must preserve `EmptyValue` instances",
+        subject_symbols=frozenset({"parse_item", "EmptyValue"}),
+        sym_parts=frozenset({"parse_item", "EmptyValue"}),
+    )
+    exercise = ob.ExerciseEvidence(
+        frozenset({"parse_item"}), 4, "related_execution", 1
+    )
+    proof = ob.BehavioralProof(
+        frozenset({"parse_item"}), 5, "direct_checked_calls"
+    )
+
+    attempted = ob.obligation_truth_statuses(
+        [view], set(), [exercise], []
+    )
+    proven = ob.obligation_truth_statuses(
+        [view], set(), [exercise], [proof]
+    )
+
+    assert attempted[0].state is ob.ObligationTruthState.EXERCISED_UNPROVEN
+    assert proven[0].state is ob.ObligationTruthState.PROVEN
+
+
+def test_plain_word_subset_does_not_cover_a_broader_clause() -> None:
+    view = _View(
+        idx=0,
+        verbatim="The parser must preserve behavior",
+        subject_symbols=frozenset({"parser", "behavior"}),
+        sym_parts=frozenset({"parser", "behavior"}),
+    )
+    evidence = ob.ExerciseEvidence(
+        frozenset({"parser"}), 4, "related_execution", 0
+    )
+
+    truth = ob.obligation_truth_statuses([view], set(), [evidence], [])
+
+    assert truth[0].state is ob.ObligationTruthState.UNEXERCISED
+
+
+def test_symbol_free_normative_clause_is_unverifiable_not_unexercised() -> None:
+    view = _View(
+        idx=0,
+        verbatim="Registered objects must remain paired one to one",
+        subject_symbols=frozenset(),
+        sym_parts=frozenset(),
+    )
+
+    truth = ob.obligation_truth_statuses([view], set(), [], [])
+
+    assert truth[0].state is ob.ObligationTruthState.UNVERIFIABLE
+    block = ob.render_obligation_truth_block(truth)
+    assert "could not be verified automatically" in block
+    assert "[not exercised]" not in block
+    summary = ob.obligation_truth_summary(truth)
+    assert summary["n_unverifiable"] == 1
+    assert summary["n_verifiable"] == 0
+    assert summary["proof_coverage"] == 1.0

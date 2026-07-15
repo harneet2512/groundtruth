@@ -555,6 +555,14 @@ def _v2_section_role(heading: str) -> str:
     return "neutral"
 
 
+def _v2_region_for_role(role: str) -> str:
+    return {
+        "expected": "normative",
+        "process": "process",
+        "descriptive": "evidence",
+    }.get(role, "normative")
+
+
 @dataclass(frozen=True)
 class SpecRegion:
     """One heading-delimited issue region classified from document structure.
@@ -572,9 +580,9 @@ class SpecRegion:
 def classify_spec_v2_regions(issue_text: str) -> tuple[SpecRegion, ...]:
     """Classify headed v2 regions as normative, process, or evidence.
 
-    Unknown headings fail closed to evidence.  Unheaded prose remains the
-    extractor's title/neutral grammar path and is not fabricated into a
-    structural region.
+    Known template headings use the same role map as ``extract_spec_v2``.
+    Unknown headings remain neutral/normative candidates whose individual
+    sentences still have to pass the extractor's requirement grammar.
     """
     regions: list[SpecRegion] = []
     heading = ""
@@ -598,11 +606,7 @@ def classify_spec_v2_regions(issue_text: str) -> tuple[SpecRegion, ...]:
             flush()
             heading = candidate
             role = _v2_section_role(candidate)
-            kind = {
-                "expected": "normative",
-                "process": "process",
-                "descriptive": "evidence",
-            }.get(role, "evidence")
+            kind = _v2_region_for_role(role)
             continue
         if heading:
             body.append(raw)
@@ -623,7 +627,8 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
 
     def _emit(verbatim: str, kind: str, modality: str, strength: int,
               parent_id: str, part_index: int,
-              context_symbols: set[str] | None = None) -> None:
+              context_symbols: set[str] | None = None,
+              region: str = "normative") -> None:
         v = verbatim.strip().rstrip(".")
         if not v or len(v) < 8:
             return
@@ -648,7 +653,7 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             subject_symbols=frozenset(subj),
             parent_id=parent_id,
             part_index=part_index,
-            region="normative",
+            region=region,
         ))
         spec.all_symbols |= set(subj) | broad
         spec.all_keywords |= kws
@@ -664,6 +669,7 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                     piece,
                     "error" if _V2_ERROR_TOKEN_RE.search(mapping[1]) else "behavior",
                     "mandatory", 3, parent, idx, bullet_label_syms,
+                    _v2_region_for_role(section_role),
                 )
                 continue
             decision = piece
@@ -714,7 +720,10 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 continue
             if section_role == "expected" and strength < 2:
                 modality, strength = "expected", 2
-            _emit(piece, kind, modality, strength, parent, idx, bullet_label_syms)
+            _emit(
+                piece, kind, modality, strength, parent, idx,
+                bullet_label_syms, _v2_region_for_role(section_role),
+            )
 
     # ── Stage A: block segmentation ──────────────────────────────────────────
     in_fence = False
@@ -813,7 +822,8 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 # checklist rows; numbered repro steps are observations only.
                 if section_role not in {"descriptive", "process"}:
                     _emit(line.strip(), "repro", "descriptive", 0,
-                          _v2_clause_id(line.strip(), 0), 0)
+                          _v2_clause_id(line.strip(), 0), 0,
+                          region=_v2_region_for_role(section_role))
             continue
         prose.append(line.strip())
     _flush_prose()
@@ -864,7 +874,10 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             modality, strength = "mandatory", 3
         elif _V2_EXPECTED_MODAL_RE.search(decision) or _V2_SUGGESTION_RE.search(decision):
             modality, strength = "expected", 2
-        _emit(sent, kind, modality, strength, _v2_clause_id(sent, 0), 0)
+        _emit(
+            sent, kind, modality, strength, _v2_clause_id(sent, 0), 0,
+            region=_v2_region_for_role(role),
+        )
         covered.append(key)
 
     return spec
