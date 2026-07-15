@@ -1432,7 +1432,7 @@ def _compute_scope_completeness(timeline: list[dict], gold_files: list[str]) -> 
 
     # scope_gap_files: gold files the agent NEVER opened
     gold_never_opened = []
-    for g in gold_set:
+    for g in sorted(gold_set):
         viewed = any(_path_match(g, v) for v in viewed_files)
         edited = any(_path_match(g, e) for e in edited_files)
         if not viewed and not edited:
