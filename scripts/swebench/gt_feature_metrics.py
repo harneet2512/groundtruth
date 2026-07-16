@@ -2851,15 +2851,27 @@ def collect_task(
                 ledger_artifact=ledger_artifact,
             )
         else:
+            _bp = _fact_delivery_byte_proven(fact_class, rows, cons_ledger)
+            _lc = lifecycle
+            _ack = _val(_lc.get("receipt_level"))
+            _is_live = bool(
+                _bp
+                and _val(_lc.get("delivered")) is True
+                and _val(_lc.get("truth_valid")) is True
+                and _val(_lc.get("authority_valid")) is True
+                and _val(_lc.get("stale")) is not True
+                and _val(_lc.get("expired_late")) is not True
+                and isinstance(_ack, int) and _ack >= 2
+                and leak_gate is True
+                and dose_gate is True
+            )
             fact_readiness[fact_class] = ss_gate_readiness(
                 lifecycle,
-                byte_proven=_fact_delivery_byte_proven(
-                    fact_class, rows, cons_ledger
-                ),
+                byte_proven=_bp,
                 leak_free=leak_gate,
                 dose_ok=dose_gate,
                 fair_probe=None,
-                live_witness=False,
+                live_witness=_is_live,
             )
 
     endpoints = behavioural_endpoints(timeline)
