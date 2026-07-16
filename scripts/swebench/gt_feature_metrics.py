@@ -70,6 +70,7 @@ from feature_opportunity import (  # noqa: E402
     attach_opportunity_evidence,
     collect_feature_opportunities,
 )
+from live_run_provenance import detect_live_run  # noqa: E402
 from groundtruth.runtime.feature_lineage import (  # noqa: E402
     CAP_BYTE_OWNER_MECHANISMS,
     CAP_BYTE_OWNER_IDS,
@@ -2007,6 +2008,7 @@ def _internal_fact_support_readiness(
     source_record: dict[str, Any],
     *,
     ledger_artifact: str,
+    live_witness: bool = False,
 ) -> dict[str, Any]:
     """Typed internal FACT terminal; never projects model-delivery gates.
 
@@ -2100,8 +2102,9 @@ def _internal_fact_support_readiness(
         },
         gate_names=_INTERNAL_SUPPORT_GATE_NAMES,
         # Offline evidence never sets the live bit; a receipt-chain join does not
-        # distinguish a paid trajectory from a replay. Needs a live-run receipt join.
-        live_witness=False,
+        # distinguish a paid trajectory from a replay. The live bit is supplied only
+        # from run-provenance (live_run_provenance), never inferred from the join.
+        live_witness=live_witness,
         extra={
             "fact_class": fact_class,
             "source_artifact": ledger_artifact,
@@ -2153,6 +2156,7 @@ def _valid_readiness_projection(value: object) -> bool:
 
 def _acquisition_readiness(
     record: dict[str, Any], *, leak_free: bool | None, dose_ok: bool | None,
+    live_witness: bool = False,
 ) -> dict[str, Any]:
     """Project ACQ support evidence without borrowing the FACT delivery gates."""
     receipt = record.get("receipt_level")
@@ -2185,10 +2189,11 @@ def _acquisition_readiness(
             "source_causal_fair_probe": None,
         },
         gate_names=_SUPPORT_GATE_NAMES,
-        # Offline evidence never sets the live bit (gt_gt.md execution ledger).
-        # Gates 1-6 passing does not distinguish a paid trajectory from a replay;
-        # live_witness needs an explicit live-run receipt join, not gate inference.
-        live_witness=False,
+        # Offline evidence never sets the live bit (gt_gt.md execution ledger). Gates
+        # 1-6 passing does not distinguish a paid trajectory from a replay; the terminal
+        # live bit is joined ONLY from run-provenance artifacts (live_run_provenance),
+        # never inferred here.
+        live_witness=live_witness,
     )
 
 
@@ -2604,13 +2609,14 @@ def _canonical_task_features(
     *,
     leak_free: bool | None,
     dose_ok: bool | None,
+    live_witness: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Build the explicit 128-row task ledger without mutating legacy fields."""
     inventory = canonical_feature_inventory()
     master: dict[str, dict[str, Any]] = {}
     for record in acq.values():
         record["ss_readiness"] = _acquisition_readiness(
-            record, leak_free=leak_free, dose_ok=dose_ok
+            record, leak_free=leak_free, dose_ok=dose_ok, live_witness=live_witness
         )
     master.update(acq)
     for name in inventory["CAP"]:
@@ -2699,6 +2705,12 @@ def collect_task(
     Never fabricates: every fact class + every enabled member appears; missing evidence is
     UNMEASURED/NOT_ELIGIBLE; resolution is not consulted for any credit."""
     _, fr = _profile_registry()
+    # Terminal live bit: joined ONLY from run-provenance artifacts (seam receipt +
+    # workflow-only activation + non-baseline run identity + no replay report), never
+    # inferred from delivery quality or gate passage (the fabrication reverted in
+    # ea0eb16c0). A replay can mint the receipt, so the receipt alone is insufficient.
+    _live = detect_live_run(task_dir)
+    _live_witness = _live.verdict == "LIVE_PAID"
     traj_path = _find_one(task_dir, "mini-swe-agent.trajectory.json")
     traj = _load_json(traj_path) if traj_path else None
     if not isinstance(traj, dict):
@@ -2832,7 +2844,7 @@ def collect_task(
                 leak_free=leak_gate,
                 dose_ok=dose_gate,
                 fair_probe=None,
-                live_witness=False,
+                live_witness=_live_witness,
             )
             feature["ss_readiness"]["cap_role"] = cap_role
 
@@ -2844,6 +2856,7 @@ def collect_task(
                 lifecycle,
                 acq_records["cochange_history"],
                 ledger_artifact=ledger_artifact,
+                live_witness=_live_witness,
             )
         else:
             fact_readiness[fact_class] = ss_gate_readiness(
@@ -2857,9 +2870,9 @@ def collect_task(
                 # never inferred from instrument presence or gate quality.
                 fair_probe=None,
                 # Offline evidence never sets the live bit: gates 1-6 passing does
-                # not distinguish a paid trajectory from a replay/fixture. This
-                # stays False until an explicit live-run receipt is joined.
-                live_witness=False,
+                # not distinguish a paid trajectory from a replay/fixture. The bit is
+                # joined ONLY from run-provenance artifacts (detect_live_run above).
+                live_witness=_live_witness,
             )
 
     endpoints = behavioural_endpoints(timeline)
@@ -2879,7 +2892,11 @@ def collect_task(
         acq_records,
         acq_missing,
         leak_free=leak_gate, dose_ok=dose_gate,
+        live_witness=_live_witness,
     )
+    # Full provenance object for audit: which artifacts proved (or failed to prove)
+    # the terminal live bit, and every named fail-closed reason.
+    ss_integrity["live_run_provenance"] = _live.as_dict()
     ss_integrity["feature_opportunity"] = opportunity_projection["integrity"]
     if opportunity_projection["integrity"]["publishable"] is not True:
         ss_integrity["required_inputs_complete"] = False
