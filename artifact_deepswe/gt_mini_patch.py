@@ -9040,6 +9040,19 @@ def _record_gateway_final_controls(
             return
         common = dict(candidate_bytes=final_bytes, fact_class=fact_class,
                       candidate_id=candidate_id)
+        # B-GW (2026-07-16): close the GT_GATEWAY mediator join. The admission-time row
+        # (gateway.augment.candidate_admission) stamps the PRE-render candidate identity, so
+        # its seal can never equal this committed delivery's content_sha256_16. Record the
+        # committed-delivery identity HERE — where the gateway path owns `final_bytes` — via
+        # the gateway's own producer, so the exact join closes. Fires unconditionally for
+        # EVERY committed gateway winner (parity with the delivery row + GT_GLOBAL_ARBITER),
+        # independent of the native / global-arbiter / provenance branches below.
+        try:
+            from groundtruth.runtime.gateway import record_committed_delivery
+            record_committed_delivery(
+                envelope, final_bytes, _control_participation_record)
+        except Exception:  # noqa: BLE001 -- telemetry never changes committed bytes
+            pass
         if native and not caller_specific_controls:
             _control_participation_record(
                 "GT_GATEWAY_NATIVE", "mini_seam.gateway.native_render", "APPLIED",

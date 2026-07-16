@@ -170,6 +170,12 @@ CONTROL_DECISION_CONTRACTS = {
     ),
     "GT_GATEWAY": _mediator(
         "GT_GATEWAY", "gateway.augment.candidate_admission",
+        # The admission site stamps the PRE-render candidate identity (eligibility /
+        # decision chronology: the candidate was admitted BEFORE delivery). It can never
+        # join a delivery, whose sealed bytes are the FINAL rendered form. The committed
+        # site carries the seam's committed-delivery identity so the exact mediation join
+        # closes (B-GW, 2026-07-16) — mirroring GT_GATEWAY_NATIVE.
+        "mini_seam.gateway.candidate_committed",
     ),
     "GT_GATEWAY_EDIT_BRIDGES": _mediator(
         "GT_GATEWAY_EDIT_BRIDGES", "gateway.augment.edit_bridge_candidate",

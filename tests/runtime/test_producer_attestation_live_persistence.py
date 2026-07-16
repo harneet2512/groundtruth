@@ -169,10 +169,16 @@ def test_exact_caller_attestation_records_specific_controls_not_generic_native(
     )
 
     controls = {row["control_ref"]["feature_id"]: row for row in rows}
+    # The GENERIC native receipt (GT_GATEWAY_NATIVE) still abstains — the specific caller
+    # controls own the render. B-GW: the BASE GT_GATEWAY mediator DOES record its committed
+    # delivery here (a caller_break is a gateway-delivered fact; its join must close), at the
+    # committed-delivery site — this is distinct from the generic native receipt.
+    assert "GT_GATEWAY_NATIVE" not in controls
     assert set(controls) == {
         "GT_CONTRACT_NATIVE", "GT_CONTRACT_MODE",
         "GT_CONTRACT_BILATERAL", "GT_EVIDENCE_NATIVE",
-        "GT_INSEAM_METRICS",
+        "GT_INSEAM_METRICS", "GT_GATEWAY",
     }
+    assert controls["GT_GATEWAY"]["decision_site"] == "mini_seam.gateway.candidate_committed"
     assert controls["GT_CONTRACT_BILATERAL"]["participation_decision"] == "NO_EFFECT"
     assert all(row["candidate_id"] == envelope.dedup_key for row in controls.values())

@@ -170,6 +170,9 @@ __all__ = [
     # B-12 timing/freshness routing + B-21 revision-scoped latch key
     "route_delivery",
     "delivery_latch_key",
+    # B-GW committed-delivery mediation recorder
+    "record_committed_delivery",
+    "GATEWAY_COMMITTED_SITE",
     "ROUTE_DELIVER", "ROUTE_DEFER", "ROUTE_EXPIRED_LATE", "ROUTE_STALE",
     # kinds
     "KIND_SEARCH", "KIND_VIEW", "KIND_EDIT", "KIND_TEST", "KIND_SUBMIT", "KIND_OTHER",
@@ -443,6 +446,59 @@ def _candidate_control_identity(env: EvidenceEnvelope) -> tuple[str, str]:
         _envelope_candidate_bytes(env).decode("utf-8", "strict"),
         registration.fact_class,
     )
+
+
+# The seam-committed GT_GATEWAY mediation site (B-GW, 2026-07-16). The admission-time row
+# (:func:`augment` -> ``gateway.augment.candidate_admission``) stamps the PRE-render
+# candidate bytes (``_candidate_control_identity`` == ``_envelope_candidate_bytes``); the
+# seam then RE-renders + RE-keys the winner to its tagged/native presentation, so the
+# admission seal can NEVER equal the delivered ``content_sha256_16`` and its mediator join
+# can never close. :func:`record_committed_delivery` writes a SUPPLEMENTARY GT_GATEWAY row
+# at THIS site carrying the COMMITTED-delivery identity — the seam's own final shipped bytes
+# + the delivered candidate_id — so the exact join (chars + seal + candidate_id + iteration)
+# closes, exactly as GT_GATEWAY_NATIVE already does. The admission row is preserved (it is
+# the decision-precedes-delivery chronology anchor).
+GATEWAY_COMMITTED_SITE = "mini_seam.gateway.candidate_committed"
+
+
+def record_committed_delivery(
+    env: EvidenceEnvelope,
+    final_bytes: str,
+    recorder: object | None,
+    *,
+    decision: str = "APPLIED",
+    reason: str = "candidate_committed",
+) -> None:
+    """Record the GT_GATEWAY mediator at the COMMITTED-delivery identity.
+
+    Called by the gateway's OWN delivery path (the seam's ``_record_gateway_final_controls``,
+    where the winner's final shipped bytes are known) once the winner is committed. It emits
+    ONE GT_GATEWAY control row at :data:`GATEWAY_COMMITTED_SITE` whose ``candidate_bytes`` are
+    EXACTLY the caller's committed ``final_bytes`` (the bytes actually appended to the model's
+    observation) and whose ``candidate_id`` is the winner's canonical ``dedup_key`` — the same
+    identity the delivery ledger row carries — so the grader's exact mediation join closes.
+
+    NON-FORGING + correct-or-quiet: the recorded seal is derived from the caller's real
+    committed bytes, never copied from an unrelated source; it emits NOTHING (never a
+    fabricated identity) when there is no recorder, when ``final_bytes`` is empty (nothing was
+    shipped), when the class is unregistered, or when the envelope has no canonical
+    ``dedup_key``. Instrumentation only — it never changes routing or the delivered bytes."""
+    if not callable(recorder) or not final_bytes:
+        return
+    try:
+        registration = _fr_registration_for(env.evidence_type)
+        candidate_id = getattr(env, "dedup_key", "") or ""
+        if registration is None or not candidate_id:
+            return
+        recorder(
+            "GT_GATEWAY", GATEWAY_COMMITTED_SITE, decision,
+            candidate_bytes=final_bytes,
+            fact_class=registration.fact_class,
+            candidate_id=candidate_id,
+            reason=reason,
+        )
+    except Exception:  # noqa: BLE001 — instrumentation never changes gateway routing
+        return
 
 
 # SM-9c FIRST SLICE — the learned policy acts on exactly ONE fact class. Bounding the
