@@ -1459,7 +1459,12 @@ def _compute_interface_preservation(timeline: list[dict], consumption: dict | No
         "signature_changes_warned": signature_changes_warned,
         "p2p_regression_rate": None,  # requires canonical verifier truth
         "caller_breakage_count": None,  # requires canonical verifier truth
-        "_warned_files": list(warned_files),
+        # DETERMINISM: warned_files is a set; list(set) iteration order is
+        # PYTHONHASHSEED-dependent, so the deep-metrics embedder and the standalone
+        # performance writer (separate processes) emitted the SAME files in DIFFERENT
+        # orders and the byte-exact parity gate failed. sorted() at the producer makes
+        # every downstream serialization inherit one canonical order.
+        "_warned_files": sorted(warned_files),
         "_contract_warning_count": n_warnings,
     }
 
