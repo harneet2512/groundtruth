@@ -211,13 +211,63 @@ def _row_fact_class(evidence_type: str, row: dict) -> str | None:
     return fc if isinstance(fc, str) and registration_for(fc) is not None else None
 
 
+# Coarse seam observation phase -> fine fact_registry EVENTS token. The seam writes the
+# FINE registered event into ``actual_event`` for most classes (via its
+# ``_EXACT_PROFILE_ACTUAL_EVENTS`` / ``build_lineage`` contract — equal to the registry
+# ``required_event`` by construction), but the gateway search-family direct-emit path stamps
+# the COARSE observation phase (``search`` / ``post_view`` …) instead of the registry's fine
+# token. This map bridges ONLY the coarse phases that map UNAMBIGUOUSLY to exactly one fine
+# EVENTS token, per the ``≈`` correspondence documented on each EVENT constant
+# (``fact_registry.py`` lines 100-108). It is an EXPLICIT, closed table — never fuzzy: a token
+# not listed here (or already a fine token) is returned verbatim so an unregistered/unknown
+# event still fails closed downstream. The COMPOSITE boundaries (``first_view_edit`` /
+# ``failed_search`` / ``failure_obs``) have NO coarse ``≈`` equivalent and are deliberately
+# ABSENT — they are never a normalization target.
+#
+#   fact_registry.py:101  EVENT_SEARCH_RESULT = "search_result"  (≈ search)
+#   fact_registry.py:102  EVENT_FILE_VIEW     = "file_view"      (≈ view)
+#   fact_registry.py:103  EVENT_EDIT_RESULT   = "edit_result"    (≈ edit)
+#   fact_registry.py:104  EVENT_TEST_RESULT   = "test_result"    (≈ test)
+_COARSE_TO_FINE_EVENT: dict[str, str] = {
+    "search": "search_result",
+    "post_search": "search_result",
+    "view": "file_view",
+    "post_view": "file_view",
+    "edit": "edit_result",
+    "post_edit": "edit_result",
+    "test": "test_result",
+    "post_test": "test_result",
+}
+
+
+def _normalize_actual_event(event: str) -> str:
+    """Bridge a COARSE seam observation phase to its UNAMBIGUOUS fine fact_registry event.
+
+    Consults only the explicit, closed :data:`_COARSE_TO_FINE_EVENT` table; a token already
+    fine (or genuinely unknown) is returned VERBATIM so the fail-closed vocabulary gate in
+    ``chronological_adjudication._timing`` (``actual_event not in EVENTS`` / the non-reactive
+    ``actual_event != required_event`` check) still rejects it — normalization never coerces an
+    unregistered token into the vocabulary."""
+    return _COARSE_TO_FINE_EVENT.get(event, event)
+
+
 def _row_actual_event(row: dict) -> str:
-    """The row's fine observation event — the seam's ``event_type`` (SPEC), falling back to
-    the lineage ``actual_event`` when ``event_type`` is empty."""
-    ev = row.get("event_type")
+    """The row's fine observation event.
+
+    The seam writes TWO fields that can DIVERGE: the coarse HOOK PHASE in ``event_type``
+    (``post_edit`` / ``post_view`` / ``search`` — the delivery hook that carried the fact) and
+    the FINE registered event in ``actual_event`` (built from the seam's
+    ``_EXACT_PROFILE_ACTUAL_EVENTS`` + ``build_lineage`` contract in
+    ``artifact_deepswe.gt_mini_patch``, equal to the fact's registry ``required_event`` by
+    construction). The adjudicator grades against the FINE registry vocabulary, so prefer the
+    fine ``actual_event`` — normalized through :func:`_normalize_actual_event` for the gateway
+    search-family coarse drift (``search`` -> ``search_result``). Fall back to ``event_type``
+    ONLY when ``actual_event`` is absent/empty; that path is left UNNORMALIZED (a legacy /
+    unregistered row that fails closed regardless of its event label, preserved byte-for-byte)."""
+    ev = row.get("actual_event")
     if isinstance(ev, str) and ev.strip():
-        return ev.strip()
-    ev2 = row.get("actual_event")
+        return _normalize_actual_event(ev.strip())
+    ev2 = row.get("event_type")
     return ev2.strip() if isinstance(ev2, str) else ""
 
 
