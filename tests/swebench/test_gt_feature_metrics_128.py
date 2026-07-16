@@ -1323,3 +1323,185 @@ def test_live_collect_gate_validates_canonical_128_integrity_not_just_file_prese
     assert "inventory_complete" in gate
     assert "required_inputs_complete" in gate
     assert "ss_features" in gate and "128" in gate
+
+
+# ---------------------------------------------------------------------------
+# B-PL: per_tag_impact aggregate_coverage (defect 1) + PERF live_witness (defect 2)
+# ---------------------------------------------------------------------------
+
+import live_run_provenance as lrp  # noqa: E402
+
+
+def _live_paid_provenance() -> lrp.LiveRunProvenance:
+    """A fully-satisfied J1 provenance (verdict LIVE_PAID) for injection tests."""
+    return lrp.LiveRunProvenance(
+        receipt_present=True,
+        activation_present=True,
+        baseline_excluded=True,
+        replay_excluded=True,
+        profile_token="2",
+        verdict="LIVE_PAID",
+        reasons=(),
+    )
+
+
+def _measured_per_tag_deep(task: str) -> dict:
+    """A complete deep-metrics record whose per_tag_impact is MEASURED (applicable)."""
+    deep = _complete_deep_metrics(task)
+    deep["behavioral_impact"]["per_tag_impact"] = {
+        "recovery": {"total": 2, "pivots": 1, "rate": 0.5},
+    }
+    deep["metric_applicability"]["behavioral_impact"]["per_tag_impact"] = {
+        "applicable": True,
+        "predicate": "total_deliveries > 0",
+        "reason": "byte-joined deliveries provide per-tag denominators",
+    }
+    return deep
+
+
+def _two_task_live_run(tmp_path: Path, run_id: str):
+    """Build a clean 2-task run: records + a validated gt_run_metrics artifact path.
+
+    per_tag_impact is MEASURED on both tasks and the population is complete, so the run
+    artifact is collection-complete. Returns (records, run_path, run_payload)."""
+    tasks = [f"synthetic__bpl-{run_id}-1", f"synthetic__bpl-{run_id}-2"]
+    records: list[dict] = []
+    deeps: list[dict] = []
+    for task in tasks:
+        deep = _measured_per_tag_deep(task)
+        deeps.append(deep)
+        task_dir = tmp_path / task
+        _write_task(task_dir, task, deep_metrics=deep)
+        records.append(metrics.collect_task(task, str(task_dir), profile="2"))
+    run_payload = gt_run_metrics.aggregate_run_metrics(deeps, expected_task_ids=tasks)
+    run_payload["run_id"] = run_id
+    run_path = tmp_path / f"gt_run_metrics_{run_id}.json"
+    run_path.write_text(json.dumps(run_payload), encoding="utf-8")
+    return records, run_path, run_payload
+
+
+def test_per_tag_impact_reaches_aggregate_coverage_through_real_consumer(
+    tmp_path: Path,
+) -> None:
+    """DEFECT 1 e2e: per_tag_impact binds to aggregate_coverage=True through the REAL
+    run-scope consumer once the producer emits right_censored_tasks.
+
+    RED before the producer fix (aggregate_coverage_valid stays False because the run
+    distribution's right_censored_tasks is None); GREEN after."""
+    records, run_path, run_payload = _two_task_live_run(tmp_path, "run-perftag")
+
+    aggregate = metrics.aggregate_run(
+        "run-perftag", records, profile="2",
+        run_metrics_artifact=str(run_path),
+    )
+
+    perf = aggregate["run_metrics"]["ss_features"]["per_tag_impact"]
+    assert perf["measurement"]["status"] == "MEASURED"
+    assert perf["measurement"]["aggregate_coverage_valid"] is True
+    assert perf["ss_readiness"]["gates"]["aggregate_coverage"] is True
+    assert run_payload["mandatory_performance"]["behavioral_impact"][
+        "per_tag_impact"
+    ]["right_censored_tasks"] == []
+    assert "per_tag_impact" not in aggregate["ss_integrity"]["perf_aggregate_failures"]
+
+
+def test_measurement_readiness_ss_live_requires_live_witness_and_all_gates() -> None:
+    """DEFECT 2 unit: PERF terminal is ss_live only when live_witness AND every gate hold.
+
+    live_witness must never default True; provenance absence keeps ss_live False even on a
+    fully valid, coverage-complete record."""
+    valid_record = {
+        "status": "MEASURED",
+        "coverage_scope": "run",
+        "source": "gt_run_metrics",
+        "source_artifact": "gt_run_metrics_run.json",
+        "artifact_schema_valid": True,
+        "metric_structure_valid": True,
+        "precision_decimals": 8,
+        "value_precision_valid": True,
+        "formula_provenance": "MANDATORY_METRICS.md#x",
+        "denominator_provenance": "gt_run_metrics",
+        "task_coverage_valid": True,
+    }
+    live = metrics._measurement_only_readiness(
+        valid_record, aggregate_coverage=True, live_witness=True,
+    )
+    assert all(v is True for v in live["gates"].values())
+    assert live["live_witness"] is True
+    assert live["ss_live"] is True
+    assert live["blockers"] == []
+
+    dark = metrics._measurement_only_readiness(
+        valid_record, aggregate_coverage=True, live_witness=False,
+    )
+    assert all(v is True for v in dark["gates"].values())
+    assert dark["live_witness"] is False
+    assert dark["ss_live"] is False
+    assert dark["blockers"] == ["live_witness"]
+
+
+def test_run_aggregate_perf_live_witness_reflects_run_provenance(
+    tmp_path: Path,
+) -> None:
+    """DEFECT 2 e2e (run-scope, site 3473): the PERF run-aggregate ss_readiness carries the
+    J1 witness. LIVE_PAID on every task record + full coverage => live_witness True and
+    ss_live True; absent/NOT_LIVE provenance => live_witness False."""
+    records, run_path, _ = _two_task_live_run(tmp_path, "run-live")
+
+    for rec in records:
+        assert rec["ss_integrity"]["live_run_provenance"]["verdict"] == "NOT_LIVE"
+    dark = metrics.aggregate_run(
+        "run-live", records, profile="2", run_metrics_artifact=str(run_path),
+    )
+    dark_perf = dark["run_metrics"]["ss_features"]["per_tag_impact"]["ss_readiness"]
+    assert dark_perf["gates"]["aggregate_coverage"] is True
+    assert dark_perf["live_witness"] is False
+    assert dark_perf["ss_live"] is False
+
+    for rec in records:
+        rec["ss_integrity"]["live_run_provenance"] = _live_paid_provenance().as_dict()
+    live = metrics.aggregate_run(
+        "run-live", records, profile="2", run_metrics_artifact=str(run_path),
+    )
+    live_perf = live["run_metrics"]["ss_features"]["per_tag_impact"]["ss_readiness"]
+    assert live_perf["gates"]["aggregate_coverage"] is True
+    assert live_perf["live_witness"] is True
+    assert live_perf["ss_live"] is True
+
+
+def test_run_aggregate_live_witness_fails_closed_on_incomplete_population(
+    tmp_path: Path,
+) -> None:
+    """Even with a LIVE_PAID task record, an incomplete declared population is NOT a live
+    run at run scope (the aggregate binds the whole population)."""
+    records, run_path, _ = _two_task_live_run(tmp_path, "run-partial")
+    for rec in records:
+        rec["ss_integrity"]["live_run_provenance"] = _live_paid_provenance().as_dict()
+    expected = [rec["task"] for rec in records] + ["synthetic__never-ran"]
+
+    aggregate = metrics.aggregate_run(
+        "run-partial", records, profile="2",
+        run_metrics_artifact=str(run_path), expected_task_ids=expected,
+    )
+    perf = aggregate["run_metrics"]["ss_features"]["per_tag_impact"]["ss_readiness"]
+    assert perf["live_witness"] is False
+    assert perf["ss_live"] is False
+
+
+def test_per_task_perf_readiness_carries_j1_live_witness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEFECT 2 e2e (per-task, site 2738): the per-task PERF ss_readiness receives the same
+    _live_witness collect_task computed from detect_live_run. Synthetic run => False;
+    a stubbed LIVE_PAID provenance => True."""
+    task = "synthetic__bpl-per-task"
+    _write_task(tmp_path, task, deep_metrics=_measured_per_tag_deep(task))
+
+    dark = metrics.collect_task(task, str(tmp_path), profile="2")
+    assert dark["ss_features"]["per_tag_impact"]["ss_readiness"]["live_witness"] is False
+    assert dark["ss_features"]["gold_rank"]["ss_readiness"]["live_witness"] is False
+
+    monkeypatch.setattr(metrics, "detect_live_run", lambda _dir: _live_paid_provenance())
+    live = metrics.collect_task(task, str(tmp_path), profile="2")
+    assert live["ss_features"]["per_tag_impact"]["ss_readiness"]["live_witness"] is True
+    assert live["ss_features"]["gold_rank"]["ss_readiness"]["live_witness"] is True

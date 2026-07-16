@@ -2735,7 +2735,9 @@ def _canonical_task_features(
         }, opportunity_by_feature[name])
     performance, perf_missing, deep_path = _performance_feature_records(task, task_dir)
     for record in performance.values():
-        record["ss_readiness"] = _measurement_only_readiness(record)
+        record["ss_readiness"] = _measurement_only_readiness(
+            record, live_witness=live_witness,
+        )
     master.update(performance)
 
     expected = {name: family for family, names in inventory.items() for name in names}
@@ -3380,6 +3382,21 @@ def aggregate_run(
     population_complete = not (
         missing_task_records or unexpected_task_records or duplicate_task_records
     )
+    # Run-scope live witness (J1 authority, detect_live_run per collect_task): the run
+    # aggregate binds the WHOLE declared population, so it is live only if the population
+    # is complete AND every observed task record carries a LIVE_PAID provenance verdict.
+    # Absent, NOT_LIVE, or malformed provenance on any task fails closed — never
+    # default-True, mirroring the per-task witness that collect_task computed.
+    run_live_witness = bool(
+        task_records
+        and population_complete
+        and all(
+            isinstance(rec.get("ss_integrity"), dict)
+            and isinstance(rec["ss_integrity"].get("live_run_provenance"), dict)
+            and rec["ss_integrity"]["live_run_provenance"].get("verdict") == "LIVE_PAID"
+            for rec in task_records
+        )
+    )
     run_metrics: dict[str, Any] = {
         "schema": "gt.feature_metrics.run.v1", "grader_version": GRADER_VERSION,
         "run_id": run_id, "profile": profile, "n_tasks": len(expected),
@@ -3473,6 +3490,7 @@ def aggregate_run(
                 ss_run_features[name]["ss_readiness"] = _measurement_only_readiness(
                     aggregate_record,
                     aggregate_coverage=aggregate_coverage,
+                    live_witness=run_live_witness,
                 )
     for rec in task_records:
         if not rec.get("ss_integrity", {}).get("inventory_complete", False):

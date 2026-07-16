@@ -608,6 +608,15 @@ def _per_tag_distribution(records: list[dict], section: str, metric: str) -> dic
         "unmeasured_tasks": sorted(outer_unmeasured),
         "failed_tasks": sorted(outer_failed),
         "not_applicable_tasks": sorted(outer_not_applicable),
+        # per_tag_impact is a per-tag pivot RATE (pivots / deliveries). Every delivery's
+        # pivot outcome is fully observed at task end — there is no latent time-to-event
+        # with a censoring horizon (unlike survival distributions such as
+        # steps_to_gold_edit), so NO task can ever be right-censored for this metric. The
+        # honest value is therefore always the empty list. It is emitted (not omitted)
+        # because the run-scope consumer contract (_run_distribution_feature_record)
+        # requires every distribution metric to carry ``right_censored_tasks`` as a list;
+        # a missing key reads as ``None`` and fails ``aggregate_partition_valid``.
+        "right_censored_tasks": [],
         "applicability": dict(sorted(applicability.items())),
         "tags": tags,
     }

@@ -530,3 +530,49 @@ def test_cost_per_resolved_is_one_run_ratio_not_task_mean() -> None:
     assert metric["value"] == 4.0
     assert metric["mean"] is None
     assert metric["median"] is None
+
+
+def test_per_tag_distribution_emits_right_censored_tasks_as_a_list() -> None:
+    """PRODUCER-SHAPE (defect 1): the run-scope per_tag distribution MUST carry
+    ``right_censored_tasks`` as a list so the run consumer contract can bind it.
+
+    RED before the producer fix (key absent → KeyError below); GREEN after.
+    A per-tag pivot RATE can never be right-censored, so the honest value is []."""
+    measured = _row("measured", False, 1.0)
+    measured["behavioral_impact"] = {
+        "per_tag_impact": {"recovery": {"total": 2, "pivots": 1, "rate": 0.5}},
+    }
+    na = _row("not-applicable", False, 1.0)
+    na["behavioral_impact"] = {"per_tag_impact": {}}
+    _set_applicability(
+        na, "behavioral_impact", "per_tag_impact", applicable=False,
+        predicate="gt_delivery_present", reason="no GT deliveries",
+    )
+
+    metric = aggregate_run_metrics([measured, na])["mandatory_performance"][
+        "behavioral_impact"
+    ]["per_tag_impact"]
+
+    assert isinstance(metric["right_censored_tasks"], list)
+    assert metric["right_censored_tasks"] == []
+    # per_tag rate dicts have no latent event time, so the producer must NOT emit an
+    # event_observed_tasks partition — the consumer special-cases its absence.
+    assert "event_observed_tasks" not in metric
+
+
+def test_per_tag_distribution_right_censored_partition_matches_sibling_distribution() -> None:
+    """The per_tag distribution's task-partition keys are a superset of the plain
+    distribution's required partition keys (minus event_observed, which is N/A here)."""
+    row = _row("solo", False, 1.0)
+    row["behavioral_impact"] = {
+        "per_tag_impact": {"recovery": {"total": 2, "pivots": 1, "rate": 0.5}},
+    }
+    metric = aggregate_run_metrics([row])["mandatory_performance"][
+        "behavioral_impact"
+    ]["per_tag_impact"]
+    for key in (
+        "measured_tasks", "missing_tasks", "unmeasured_tasks",
+        "failed_tasks", "not_applicable_tasks", "right_censored_tasks",
+    ):
+        assert key in metric, key
+    assert isinstance(metric["right_censored_tasks"], list)
