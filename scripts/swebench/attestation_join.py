@@ -72,17 +72,22 @@ _STORE_ROOT_DIRNAME = "producer_attestations"
 # ``_ProductSignalOutcome.DELIVERED = "delivered"``).
 _DELIVERED = "delivered"
 
-# The FOUR fact classes that have a producer-attestation factory (lane_attestation +
-# gateway_attestation_factory). Only these may receive joined truth; every other class
-# stays UNMEASURED. This is the architectural attested set, NOT a benchmark selection:
+# The fact classes that have a producer-attestation factory (lane_attestation +
+# gateway_attestation_factory + submit_attestation). Only these may receive joined truth;
+# every other class stays UNMEASURED. This is the architectural attested set, NOT a
+# benchmark selection:
 #   syntax_result   <- edit_check       (finalize_syntax_attestation)
 #   covering_red    <- covering_runner  (finalize_covering_attestation, "covering_verdict")
 #   caller_contract <- contract_map     (gateway, "caller_break")
 #   signature_delta <- patch_delta      (gateway, "signature_mismatch"/"companion_surface")
+#   submit_refusal  <- submit_gate      (finalize_submit_refusal_attestation) — the PURE
+#                      gate kernel's BLOCK verdict, re-run on its own recorded inputs to
+#                      reproduce the refusal (truth+authority measured; freshness honest-dark).
 ATTESTED_FACT_CLASSES: tuple[str, ...] = (
     "caller_contract",
     "covering_red",
     "signature_delta",
+    "submit_refusal",
     "syntax_result",
 )
 

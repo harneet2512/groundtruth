@@ -309,6 +309,18 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         "attestation_store.py",
         "lane_attestation.py",
         "gateway_attestation_factory.py",
+        # B-ATT (2026-07-16): producer-owned truth attestation for the submit-gate
+        # refusal. gt_mini_patch imports it function-scope in
+        # _persist_submit_refusal_producer_attestation (behind a verdict.allow-is-False
+        # guard); it must ship or the seam's audit persistence no-ops in-container and
+        # submit_refusal truth stays UNMEASURED. Import-closed through submit_gate /
+        # lane_attestation / producer_attestation / fact_registry (all above) plus
+        # completion_control (below).
+        "submit_attestation.py",
+        # The submit_refusal candidate-identity kernel (submit_refusal_candidate_id) used
+        # by the seam AND by submit_attestation above. Stdlib + control_participation /
+        # evidence_envelope only (both shipped), so the set stays import-closed.
+        "completion_control.py",
         "gateway.py",
         # Exact CAP-control participation schema used by the mini-seam's host-only
         # decision receipts. Stdlib + feature_lineage/fact_registry only (both

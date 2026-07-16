@@ -2796,12 +2796,13 @@ def _apply_attestation_truth(
     fact_lifecycles: dict[str, dict],
     ledger_artifact: str,
 ) -> dict[str, Any]:
-    """SPEC-J2/J2b: populate lifecycle truth AND authority for the four attested fact
+    """SPEC-J2/J2b: populate lifecycle truth AND authority for the attested fact
     classes from the exactly-joined producer attestations, and return the join
     diagnostics.
 
-    Only ``syntax_result``/``covering_red``/``caller_contract``/``signature_delta`` may
-    receive joined truth (:data:`attestation_join.ATTESTED_FACT_CLASSES`). Truth is
+    Only the classes in :data:`attestation_join.ATTESTED_FACT_CLASSES`
+    (``syntax_result``/``covering_red``/``caller_contract``/``signature_delta``/
+    ``submit_refusal``) may receive joined truth. Truth is
     overridden ONLY when the join produced a bool (a validated attestation joined a
     DELIVERED row on the exact ``(candidate_id, delivery_seal)`` identity). Authority
     (J2b, the second leg of ``correct_info``) is overridden ONLY when the join set it —

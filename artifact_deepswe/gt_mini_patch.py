@@ -12665,6 +12665,44 @@ def _persist_lane_producer_attestation(
         return
 
 
+def _persist_submit_refusal_producer_attestation(
+        payload: str, candidate_id: str, verdict) -> None:
+    """Persist typed submit-gate truth only for the exact final delivered refusal.
+
+    Runs at the delivery-commit site (``_commit_precommitted_batch_dose``), AFTER the
+    formatter proved the exact refusal bytes model-visible and the runtime ledger row was
+    written. The delivery seal is recomputed EXACTLY as the ledger stamps it (truncated
+    sha256 over the shipped bytes, ``surrogatepass``) so the offline join matches on
+    ``(candidate_id, content_sha256_16)``. Pure audit persistence: any fault returns
+    without touching a single delivered byte."""
+    try:
+        if not isinstance(payload, str) or not payload or not isinstance(candidate_id, str):
+            return
+        # Only the PURE-gate BLOCK owns this attestation. An SS-2 observed-RED refusal
+        # (head ALLOWED, verdict.allow True) has a different truth authority we do not
+        # claim here — the factory would return UNMEASURED, so skip it entirely. Duck-typed
+        # on ``allow`` (GateVerdict is not imported at module scope); the factory does the
+        # strict isinstance + reproduction check.
+        if getattr(verdict, "allow", True) is not False:
+            return
+        from groundtruth.runtime.attestation_store import persist_attestation
+        from groundtruth.runtime.submit_attestation import (
+            finalize_submit_refusal_attestation)
+
+        delivery_seal = hashlib.sha256(
+            payload.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        final = finalize_submit_refusal_attestation(
+            verdict,
+            refusal_text=payload,
+            candidate_id=candidate_id,
+            delivery_seal=delivery_seal,
+        )
+        persist_attestation(
+            final.attestation, final.artifact_mapping(), _attestation_output_root())
+    except Exception:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+        return
+
+
 def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str = "",
                         producer_text: "str | None" = None,
                         identity_text: "str | None" = None,
@@ -13954,6 +13992,11 @@ def _commit_precommitted_batch_dose(dose: dict) -> None:
     _ss_record_delivered(
         "submit_refusal", payload, terminal_text=payload,
         delivery_extra=extra)
+    # W2/B-ATT: persist the producer-owned submit-gate truth for THIS exact delivered
+    # refusal (pure gate BLOCK re-run on its own recorded inputs). Audit-only; the join
+    # matches on (candidate_id, content_sha256_16) with the ledger row above.
+    _persist_submit_refusal_producer_attestation(
+        payload, extra.get("candidate_id"), pending.get("verdict"))
     _oracle_delivered_hashes.add(content_hash)
     _gt_submit_bounce_count += 1
     if pending.get("ss_submit_red") is True:
