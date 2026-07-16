@@ -1222,6 +1222,111 @@ def graph_file_paths_for_frame(graph_db: str) -> list[str]:
     return [str(r[0]).replace("\\", "/").lstrip("./").lstrip("/") for r in rows if r and r[0]]
 
 
+def _path_prior_scores(all_files: list[str], issue_text: str) -> dict[str, float]:
+    """IDF-weighted path-name prior: per-file score from basename + directory matches.
+
+    DETERMINISM (D6): the emitted score is a PURE FUNCTION of the input SET
+    {all_files, issue_text} — independent of ``_issue_words`` set-iteration order
+    (i.e. of ``PYTHONHASHSEED``). Every reduction over the issue-word set is a
+    ``max`` (commutative + associative + EXACT for IEEE-754 floats), so no
+    accumulation order can perturb the result. The pre-D6 directory pass instead
+    ``break``-ed on the FIRST set-matching word and used THAT word's idf; because
+    the word set iterates in hash-seeded order, two processes could select
+    different words → different ``0.4*idf`` → different path component → different
+    canonical brief identity (run 29534714080, beeware__briefcase-2075: the rank-1
+    ``components/path`` + ``score`` diverged across the two acquisition processes).
+    Taking the ``max`` over ALL matching words makes the directory pass order-free
+    AND consistent with the basename pass above it (which already max-reduces).
+    """
+    import math as _math_path
+    import re as _re_path
+
+    # Floor 3 (was 4): a 3-char term like "hex" is the SOLE discriminating signal
+    # for fmt/hex.rs, yet the old >=4 floor dropped it -> path=0 -> gold buried.
+    # Noise from short common words (lib/src/get/api) is now suppressed by IDF
+    # (high document-frequency -> ~0 weight) instead of a blunt length cutoff.
+    _issue_words_raw = set(w.lower() for w in _re_path.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 3)
+    # NEGATION detection (2026-06-27): issue phrases like "not request/response",
+    # "doesn't belong in X", "should not be in Y" negate the token that follows.
+    # A negated token DEMOTES path matches instead of promoting them. Generalized:
+    # any issue in any language where the reporter names a file/module to EXCLUDE.
+    _neg_patterns = _re_path.findall(
+        r"(?:not?\s+|doesn'?t\s+belong\s+in\s+|should\s+not\s+be\s+in\s+|"
+        r"not\s+in\s+|outside\s+of\s+|instead\s+of\s+)([A-Za-z_]\w{2,})",
+        issue_text, _re_path.IGNORECASE,
+    )
+    _negated_words = {w.lower() for w in _neg_patterns if len(w) >= 3}
+    _issue_words = _issue_words_raw - _negated_words
+
+    # IDF SPECIFICITY (BLUiR ASE 2013, file-name field): a path match is worth
+    # its term's rarity across THIS repo's paths, not a fixed exact/substring
+    # tier. df(term) = #files whose lowercased path contains the term. A term
+    # pinning ONE file (hex->1, hotp->1) gets full weight; a term in many files
+    # (token->~20, lib->hundreds) collapses toward 0. Per-repo + scale-invariant:
+    # idf_factor = log2(N/df)/log2(N) in [0,1]. This is the load-bearing fix for
+    # both the "rare term filtered by length" and the "specific term ties generic
+    # term" failure modes; the exact/substring tiers below only break ties WITHIN
+    # a specificity level.
+    _norm_paths = {fp: fp.replace("\\", "/").lstrip("./").lstrip("/").lower() for fp in all_files}
+    _N_files = max(2, len(all_files))
+    _logN = _math_path.log2(_N_files)
+    _idf: dict[str, float] = {}
+    for iw in _issue_words:
+        df = 0
+        for fp in all_files:
+            if iw in _norm_paths[fp]:
+                df += 1
+        # df==0 -> term matches nothing -> irrelevant (idf unused). df>=1.
+        _idf[iw] = (_math_path.log2(_N_files / max(1, df)) / _logN) if df > 0 else 0.0
+
+    path_scores: dict[str, float] = {}
+    for fp in all_files:
+        basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
+        score = 0.0
+        for iw in _issue_words:
+            idf = _idf.get(iw, 0.0)
+            if idf <= 0.0:
+                continue
+            if iw == basename:
+                tier = 1.0
+            elif iw in basename or basename in iw:
+                tier = 0.7
+            elif iw in basename.replace("_", ""):
+                tier = 0.5
+            else:
+                tier = 0.0
+            if tier > 0.0:
+                score = max(score, tier * idf)
+        # Negated-word demotion: if a NEGATED issue word matches the basename,
+        # halve the path score (the issue explicitly excluded this file/module).
+        for nw in _negated_words:
+            if nw == basename or nw in basename:
+                score *= 0.5
+        # Directory matches (IDF-weighted, floor 3 to match the basename pass).
+        # D6: reduce with max over ALL set-matching words (NO early break). The
+        # old `break` picked the first hash-seed-ordered match, making the score
+        # depend on set-iteration order. max is order-free and picks the strongest
+        # matching directory term — the same policy the basename pass uses.
+        for part in Path(fp).parts[:-1]:
+            part_l = part.lower()
+            if len(part_l) >= 3:
+                for iw in _issue_words:
+                    idf = _idf.get(iw, 0.0)
+                    if idf > 0.0 and (iw in part_l or part_l in iw):
+                        score = max(score, 0.4 * idf)
+        # internal/ demotion (2026-06-27): files under an internal/ directory
+        # are implementation details. When a public counterpart exists (same
+        # basename without internal/ prefix), the internal file scores lower.
+        # Generalized: Go convention (internal/ = package-private), but the
+        # pattern exists in any language with internal/private directories.
+        if "/internal/" in fp.replace("\\", "/"):
+            score *= 0.7
+        if score > 0:
+            path_scores[fp] = score
+
+    return path_scores
+
+
 def run_v74(
     issue_text: str,
     repo_root: str,
@@ -1596,87 +1701,9 @@ def run_v74(
 
     # Path-name prior: boost files whose path/name matches issue terms.
     # Uses bidirectional substring: "color" in issue matches "colorama" in filename.
-    import math as _math_path
-    import re as _re_path
-    # Floor 3 (was 4): a 3-char term like "hex" is the SOLE discriminating signal
-    # for fmt/hex.rs, yet the old >=4 floor dropped it -> path=0 -> gold buried.
-    # Noise from short common words (lib/src/get/api) is now suppressed by IDF
-    # (high document-frequency -> ~0 weight) instead of a blunt length cutoff.
-    _issue_words_raw = set(w.lower() for w in _re_path.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 3)
-    # NEGATION detection (2026-06-27): issue phrases like "not request/response",
-    # "doesn't belong in X", "should not be in Y" negate the token that follows.
-    # A negated token DEMOTES path matches instead of promoting them. Generalized:
-    # any issue in any language where the reporter names a file/module to EXCLUDE.
-    _neg_patterns = _re_path.findall(
-        r"(?:not?\s+|doesn'?t\s+belong\s+in\s+|should\s+not\s+be\s+in\s+|"
-        r"not\s+in\s+|outside\s+of\s+|instead\s+of\s+)([A-Za-z_]\w{2,})",
-        issue_text, _re_path.IGNORECASE,
-    )
-    _negated_words = {w.lower() for w in _neg_patterns if len(w) >= 3}
-    _issue_words = _issue_words_raw - _negated_words
-
-    # IDF SPECIFICITY (BLUiR ASE 2013, file-name field): a path match is worth
-    # its term's rarity across THIS repo's paths, not a fixed exact/substring
-    # tier. df(term) = #files whose lowercased path contains the term. A term
-    # pinning ONE file (hex->1, hotp->1) gets full weight; a term in many files
-    # (token->~20, lib->hundreds) collapses toward 0. Per-repo + scale-invariant:
-    # idf_factor = log2(N/df)/log2(N) in [0,1]. This is the load-bearing fix for
-    # both the "rare term filtered by length" and the "specific term ties generic
-    # term" failure modes; the exact/substring tiers below only break ties WITHIN
-    # a specificity level.
-    _norm_paths = {fp: fp.replace("\\", "/").lstrip("./").lstrip("/").lower() for fp in all_files}
-    _N_files = max(2, len(all_files))
-    _logN = _math_path.log2(_N_files)
-    _idf: dict[str, float] = {}
-    for iw in _issue_words:
-        df = 0
-        for fp in all_files:
-            if iw in _norm_paths[fp]:
-                df += 1
-        # df==0 -> term matches nothing -> irrelevant (idf unused). df>=1.
-        _idf[iw] = (_math_path.log2(_N_files / max(1, df)) / _logN) if df > 0 else 0.0
-
-    path_scores: dict[str, float] = {}
-    for fp in all_files:
-        basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
-        score = 0.0
-        for iw in _issue_words:
-            idf = _idf.get(iw, 0.0)
-            if idf <= 0.0:
-                continue
-            if iw == basename:
-                tier = 1.0
-            elif iw in basename or basename in iw:
-                tier = 0.7
-            elif iw in basename.replace("_", ""):
-                tier = 0.5
-            else:
-                tier = 0.0
-            if tier > 0.0:
-                score = max(score, tier * idf)
-        # Negated-word demotion: if a NEGATED issue word matches the basename,
-        # halve the path score (the issue explicitly excluded this file/module).
-        for nw in _negated_words:
-            if nw == basename or nw in basename:
-                score *= 0.5
-        # Directory matches (IDF-weighted, floor 3 to match the basename pass).
-        for part in Path(fp).parts[:-1]:
-            part_l = part.lower()
-            if len(part_l) >= 3:
-                for iw in _issue_words:
-                    idf = _idf.get(iw, 0.0)
-                    if idf > 0.0 and (iw in part_l or part_l in iw):
-                        score = max(score, 0.4 * idf)
-                        break
-        # internal/ demotion (2026-06-27): files under an internal/ directory
-        # are implementation details. When a public counterpart exists (same
-        # basename without internal/ prefix), the internal file scores lower.
-        # Generalized: Go convention (internal/ = package-private), but the
-        # pattern exists in any language with internal/private directories.
-        if "/internal/" in fp.replace("\\", "/"):
-            score *= 0.7
-        if score > 0:
-            path_scores[fp] = score
+    # D6: computed by _path_prior_scores — a pure, order-free (PYTHONHASHSEED-
+    # independent) function of {all_files, issue_text}. See its docstring.
+    path_scores = _path_prior_scores(all_files, issue_text)
 
     # Inject path + frame + code_def scores into components. Keyed by normalized path.
     for fp in all_files:
