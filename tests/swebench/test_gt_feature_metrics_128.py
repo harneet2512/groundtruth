@@ -20,6 +20,17 @@ import gt_feature_inventory as inventory  # noqa: E402
 import gt_run_metrics  # noqa: E402
 from artifact_deepswe import ledger_attestation  # noqa: E402
 from groundtruth.runtime import fact_registry, rl_profile  # noqa: E402
+from groundtruth.runtime.attestation_store import persist_attestation  # noqa: E402
+from groundtruth.runtime.producer_attestation import (  # noqa: E402
+    ATTESTATION_SCHEMA,
+    FRESHNESS,
+    PASS,
+    ArtifactRef,
+    DecisionBinding,
+    PredicateAttestation,
+    ProducerAttestation,
+    ProofRef,
+)
 from groundtruth.pretask.v1r_brief import (  # noqa: E402
     _brief_block_receipts,
     _reduce_brief_to_minimal,
@@ -1172,6 +1183,125 @@ def test_run_ratio_artifact_missing_or_malformed_fails_closed(
     cost = aggregate["run_metrics"]["ss_features"]["cost_per_resolved"]
     assert cost["ss_readiness"]["gates"]["artifact_valid"] is False
     assert cost["ss_readiness"]["measurement_complete"] is False
+
+
+def _caller_contract_attestation(
+    candidate_id: str, seal: str
+) -> tuple[ProducerAttestation, dict[str, bytes]]:
+    """A valid gateway ``caller_break`` attestation → the ``caller_contract`` class."""
+    source = b'{"callers":3,"files":2}'
+    ref = ArtifactRef(
+        kind="producer_input",
+        artifact_id="callers.json",
+        sha256=hashlib.sha256(source).hexdigest(),
+        revision="edit:11",
+    )
+    proof = ProofRef("producer_observation", ref, "$.callers")
+    attestation = ProducerAttestation(
+        schema=ATTESTATION_SCHEMA,
+        evidence_type="caller_break",
+        runtime_producer_id="caller_contract",
+        registered_producer_id="contract_map",
+        candidate_id=candidate_id,
+        delivery_seal=seal,
+        source_artifacts=(ref,),
+        truth_predicates=(
+            PredicateAttestation(
+                "TRUTH", "truth.callers", "callers", "preserved", "preserved", PASS,
+                (proof,),
+            ),
+        ),
+        freshness_predicates=(
+            PredicateAttestation(
+                FRESHNESS, "fresh.callers", "graph", "current", "current", PASS,
+                (proof,),
+            ),
+        ),
+        decision=DecisionBinding("how to modify a fn", "edit_result", "edit_result"),
+    )
+    return attestation, {"callers.json": source}
+
+
+def test_attestation_join_populates_truth_only_for_attested_class(tmp_path: Path) -> None:
+    task = "synthetic__attestation-join"
+    _write_task(tmp_path, task, deep_metrics=_complete_deep_metrics(task))
+    candidate_id = "caller:src/pkg.py:11"
+    seal = "d" * 16
+    attestation, artifacts = _caller_contract_attestation(candidate_id, seal)
+    persist_attestation(
+        attestation, artifacts, tmp_path / "art" / "producer_attestations"
+    )
+    payload = "src/pkg.py:11 preserve callers"
+    assert hashlib.sha256(payload.encode()).hexdigest()[:16] != seal  # seal is the join key
+    (tmp_path / f"gt_runtime_ledger_{task}.jsonl").write_text(json.dumps({
+        "layer": "l3.contract",
+        "event_type": "edit_result",
+        "outcome": "delivered",
+        "chars_delivered": len(payload),
+        "content_sha256_16": seal,
+        "candidate_id": candidate_id,
+        "evidence_type": "caller_break",
+        "fact_class": "caller_contract",
+        "file_path": "src/pkg.py",
+    }) + "\n", encoding="utf-8")
+    (tmp_path / "mini-swe-agent.trajectory.json").write_text(json.dumps({
+        "messages": [{"role": "tool", "content": payload}],
+        "info": {"submission": ""},
+    }), encoding="utf-8")
+
+    record = metrics.collect_task(task, str(tmp_path), profile="2")
+
+    # The attested class receives joined truth from the validated, seal-joined attestation.
+    truth = record["fact_classes"]["caller_contract"]["truth_valid"]
+    assert truth["status"] == "MEASURED"
+    assert truth["value"] is True
+    assert truth["source_artifact"] == "producer_attestations"
+    # J2 scopes to TRUTH only. authority_valid is a separate leg the attestation does
+    # not carry, so it stays UNMEASURED and the composite correct_info gate (truth AND
+    # authority) is honestly None — not fabricated True.
+    assert record["fact_classes"]["caller_contract"]["authority_valid"]["status"] == "UNMEASURED"
+    fact_readiness = record["ss_features"]["caller_contract"]["ss_readiness"]
+    assert fact_readiness["gates"]["correct_info"] is None
+
+    # Every other class stays UNMEASURED — no attestation, no inference.
+    for other in ("localization", "def_partition", "obligations", "syntax_result"):
+        assert record["fact_classes"][other]["truth_valid"]["status"] == "UNMEASURED"
+
+    diag = record["ss_integrity"]["attestation_join"]
+    assert diag["attestations_loaded"] == 1
+    assert diag["applied_truth_overrides"] == ["caller_contract"]
+    assert diag["joined_fact_classes"]["caller_contract"]["truth"] is True
+
+
+def test_attestation_join_seal_mismatch_leaves_truth_unmeasured(tmp_path: Path) -> None:
+    task = "synthetic__attestation-nojoin"
+    _write_task(tmp_path, task, deep_metrics=_complete_deep_metrics(task))
+    candidate_id = "caller:src/pkg.py:11"
+    attestation, artifacts = _caller_contract_attestation(candidate_id, "d" * 16)
+    persist_attestation(
+        attestation, artifacts, tmp_path / "art" / "producer_attestations"
+    )
+    payload = "src/pkg.py:11 preserve callers"
+    (tmp_path / f"gt_runtime_ledger_{task}.jsonl").write_text(json.dumps({
+        "layer": "l3.contract", "event_type": "edit_result", "outcome": "delivered",
+        "chars_delivered": len(payload),
+        "content_sha256_16": "e" * 16,  # seal does NOT match the attestation
+        "candidate_id": candidate_id,
+        "evidence_type": "caller_break", "fact_class": "caller_contract",
+        "file_path": "src/pkg.py",
+    }) + "\n", encoding="utf-8")
+    (tmp_path / "mini-swe-agent.trajectory.json").write_text(json.dumps({
+        "messages": [{"role": "tool", "content": payload}],
+        "info": {"submission": ""},
+    }), encoding="utf-8")
+
+    record = metrics.collect_task(task, str(tmp_path), profile="2")
+
+    assert record["fact_classes"]["caller_contract"]["truth_valid"]["status"] == "UNMEASURED"
+    assert record["ss_features"]["caller_contract"]["ss_readiness"]["gates"]["correct_info"] is None
+    diag = record["ss_integrity"]["attestation_join"]
+    assert diag["attestations_loaded"] == 1
+    assert diag["applied_truth_overrides"] == []
 
 
 def test_live_collect_gate_validates_canonical_128_integrity_not_just_file_presence() -> None:

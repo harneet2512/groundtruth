@@ -71,6 +71,12 @@ from feature_opportunity import (  # noqa: E402
     collect_feature_opportunities,
 )
 from live_run_provenance import detect_live_run  # noqa: E402
+from attestation_join import (  # noqa: E402
+    ATTESTED_FACT_CLASSES,
+    join_truth,
+    load_attestations,
+    truth_join_to_dict,
+)
 from groundtruth.runtime.feature_lineage import (  # noqa: E402
     CAP_BYTE_OWNER_MECHANISMS,
     CAP_BYTE_OWNER_IDS,
@@ -2692,6 +2698,50 @@ def _model_observation_owners(messages: list[dict[str, Any]]) -> dict[int, int]:
 # Per-task collection.
 # ---------------------------------------------------------------------------
 
+def _apply_attestation_truth(
+    task_dir: str,
+    rows: list[dict],
+    fact_lifecycles: dict[str, dict],
+    ledger_artifact: str,
+) -> dict[str, Any]:
+    """SPEC-J2: populate lifecycle truth for the four attested fact classes from the
+    exactly-joined producer attestations, and return the join diagnostics.
+
+    Only ``syntax_result``/``covering_red``/``caller_contract``/``signature_delta`` may
+    receive joined truth (:data:`attestation_join.ATTESTED_FACT_CLASSES`). Truth is
+    overridden ONLY when the join produced a bool (a validated attestation joined a
+    DELIVERED row on the exact ``(candidate_id, delivery_seal)`` identity); every other
+    class — and any attested class without a validated joined attestation — stays at its
+    honest UNMEASURED (the reverted ea0eb16c0 fabrication class is NOT reintroduced).
+    Pure and read-only over ``task_dir``.
+    """
+    load = load_attestations(task_dir)
+    joins = join_truth(load.attestations, rows)
+    applied: list[str] = []
+    for fc in ATTESTED_FACT_CLASSES:
+        tj = joins.get(fc)
+        if tj is None or not isinstance(tj.truth, bool):
+            continue
+        lifecycle = fact_lifecycles.get(fc)
+        if lifecycle is None:
+            continue
+        # source_artifact records provenance = the attestation store, not the ledger.
+        lifecycle["truth_valid"] = measured(
+            tj.truth, source_artifact="producer_attestations", source_messages=[]
+        )
+        applied.append(fc)
+    return {
+        "schema": "gt.attestation_join.v1",
+        "attestations_loaded": len(load.attestations),
+        "load_diagnostics": list(load.diagnostics),
+        "joined_fact_classes": {
+            fc: truth_join_to_dict(tj) for fc, tj in sorted(joins.items())
+        },
+        "applied_truth_overrides": sorted(applied),
+        "source_artifact": ledger_artifact,
+    }
+
+
 def collect_task(
     task: str,
     task_dir: str,
@@ -2771,6 +2821,14 @@ def collect_task(
             ledger_artifact=ledger_artifact, traj_artifact=traj_artifact,
             native_visible=native_visible.get(fc, 0),
         )
+
+    # SPEC-J2: override lifecycle truth for the four attested fact classes from the
+    # producer-attestation → delivered-ledger join (fail-closed; every other class and
+    # any unjoined attested class stays UNMEASURED). Must run AFTER the loop so it edits
+    # the assembled lifecycles; diagnostics are surfaced into ss_integrity below.
+    attestation_join_diag = _apply_attestation_truth(
+        task_dir, rows, fact_lifecycles, ledger_artifact
+    )
 
     members = profile_members(profile)
     features: dict[str, dict] = {}
@@ -2897,6 +2955,7 @@ def collect_task(
     # Full provenance object for audit: which artifacts proved (or failed to prove)
     # the terminal live bit, and every named fail-closed reason.
     ss_integrity["live_run_provenance"] = _live.as_dict()
+    ss_integrity["attestation_join"] = attestation_join_diag
     ss_integrity["feature_opportunity"] = opportunity_projection["integrity"]
     if opportunity_projection["integrity"]["publishable"] is not True:
         ss_integrity["required_inputs_complete"] = False
