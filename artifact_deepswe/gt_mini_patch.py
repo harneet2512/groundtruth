@@ -4142,7 +4142,9 @@ def _splice_search_note(block: str, note: str) -> str:
         lines.append("# " + note.strip().lstrip("(").rstrip(")"))
     else:
         lines.insert(1, note)
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    _retarget_terminal_lane_controls("post_search.localize", block, result)
+    return result
 
 
 def _class_namefold(con, sym: str, root: str) -> str:
@@ -4339,7 +4341,51 @@ def _class_honest_negative(con, sym: str, idx: int, root: str) -> str:
     ])
 
 
-def _search_localize_block(cmd: str, out: str | None = None) -> str:
+@dataclass(frozen=True)
+class _PostSearchDecision:
+    """Exact branch identity beside the unchanged model-facing render."""
+
+    text: str = ""
+    runtime_producer_id: str = ""
+    evidence_type: str = ""
+    actual_event: str = ""
+
+    def lineage(self):
+        """Build typed lineage only for an exact registered producer binding."""
+        if not (self.text and self.runtime_producer_id
+                and self.evidence_type and self.actual_event):
+            return None
+        try:
+            from groundtruth.runtime.feature_lineage import build_lineage
+            lineage = build_lineage(
+                runtime_producer_id=self.runtime_producer_id,
+                evidence_type=self.evidence_type,
+                actual_event=self.actual_event,
+            )
+            if lineage is None or not lineage.producer_registration_match:
+                return None
+            return lineage
+        except Exception:  # noqa: BLE001 -- metadata cannot change delivery
+            return None
+
+
+_last_post_search_decision = contextvars.ContextVar(
+    "gt_post_search_decision", default=_PostSearchDecision())
+
+
+def _post_search_decision(
+        text: str = "", runtime_producer_id: str = "",
+        evidence_type: str = "") -> _PostSearchDecision:
+    return _PostSearchDecision(
+        text=text,
+        runtime_producer_id=runtime_producer_id if text else "",
+        evidence_type=evidence_type if text else "",
+        actual_event="search_result" if text and evidence_type else "",
+    )
+
+
+def _search_localize_decision(
+        cmd: str, out: str | None = None) -> _PostSearchDecision:
     """LISTEN LATTICE producer. When ``out`` is None (no result info — the original
     call shape) it runs ONLY the DIRECT-DEF channel, byte-identical to the
     pre-lattice producer. When ``out`` is a string (production, threaded from
@@ -4347,21 +4393,23 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
     classes in fixed precedence. DEFAULT-OFF (GT_POST_SEARCH); correct-or-quiet
     (abstain / flag off -> '' -> Lane A drops it). NEVER surfaces a test name."""
     if _GT_BASELINE or not _POST_SEARCH_ON:
-        return ""
+        return _post_search_decision()
     sym = _search_pattern(cmd)
 
     # ---- out=None: original DIRECT-DEF path (pins + any no-output caller) --------
     if out is None:
         if not sym:
-            return ""
+            return _post_search_decision()
         db = _db_path()
         if not db or not os.path.isfile(db):
-            return ""
+            return _post_search_decision()
         con = _connect_ro(db)
         if con is None:
-            return ""
+            return _post_search_decision()
         try:
-            return _direct_def_block(con, sym, _root())
+            return _post_search_decision(
+                _direct_def_block(con, sym, _root()),
+                "post_search", "def_partition")
         finally:
             con.close()
 
@@ -4373,7 +4421,7 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
     # observation -> the lattice answers NOTHING and records NO probe (else it mints a
     # wrong-outcome / junk-stem ledger record that poisons later probe reasoning).
     if not _search_command_isolated(cmd):
-        return ""
+        return _post_search_decision()
     empty = _grep_result_empty(cmd, out)
     idx = _action_count  # the current action index (incremented before this call)
     # ledger accounting FIRST (lossless multi-token/alternation): record every bare
@@ -4407,18 +4455,24 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
         # accounting above ALREADY ran; _loc_reslot_block adds NO _ledger_record (single record)
         # and no _search_pattern-keyed answered-stamp (sym is None -> the D-4 delivery stamp
         # skips). Off / spent / no-rows / any fault -> "" == today's abstain (byte-identical).
-        return _loc_reslot_block()  # multi-token/regex/path: RE-SLOT dose or "" (accounted above)
+        return _post_search_decision(
+            _loc_reslot_block(), "ranked_localization", "localization")
 
     db = _db_path()
     if not db or not os.path.isfile(db):
-        return ""
+        return _post_search_decision()
     con = _connect_ro(db)
     if con is None:
-        return ""
+        return _post_search_decision()
     root = _root()
     try:
+        branch_producer = ""
+        branch_evidence = ""
         if not empty:
             block = _class_nontarget(con, sym, out, root)
+            if block:
+                branch_producer = "wrong_surface"
+                branch_evidence = "wrong_surface"
             if not block:
                 # BUG-B1 (2026-07-05): a bare-symbol grep WITH hits used to return ""
                 # here — the def/callers/test-ref partition was reachable ONLY on the
@@ -4434,23 +4488,43 @@ def _search_localize_block(cmd: str, out: str | None = None) -> str:
                 # here + the outer re-check on the SAME content hash self-suppressed EVERY
                 # hits-path delivery (mute since 2026-07-05).
                 block = _direct_def_block(con, sym, root, mark=False)
+                if block:
+                    branch_producer = "post_search"
+                    branch_evidence = "def_partition"
         else:
-            block = (_class_namefold(con, sym, root)
-                     or _class_bodyonly(con, sym, root)
-                     or _class_honest_negative(con, sym, idx, root))
+            block = _class_namefold(con, sym, root)
+            if block:
+                branch_producer = "name_fold"
+                branch_evidence = "name_fold"
+            else:
+                block = _class_bodyonly(con, sym, root)
+                if block:
+                    branch_producer = "body_concept"
+                    branch_evidence = "body_concept"
+                else:
+                    # No registered honest-negative FACT exists. It may render,
+                    # but must not borrow def-partition identity from the lane.
+                    block = _class_honest_negative(con, sym, idx, root)
     finally:
         con.close()
     if not block:
-        return ""
+        return _post_search_decision()
     stem = _norm_stem(sym)
     if _ledger_already_answered(stem, block):
-        return ""  # idempotence: never deliver the same fact twice
+        return _post_search_decision()  # idempotence: never deliver the same fact twice
     # D-4 (stamp-at-DELIVERY): do NOT mark answered here at PRODUCTION. The mark is
     # consumed in _lane_a_deliver's DELIVERED branch (kind == "post_search.localize"),
     # so a block Lane-A suppresses (cross-lane / content-hash dedup) never leaves a
     # phantom 'answered' stamp for bytes the agent never saw. The out=None PIN path is
     # unchanged — it keeps its own mark via _direct_def_block(...).
-    return block
+    return _post_search_decision(block, branch_producer, branch_evidence)
+
+
+def _search_localize_block(cmd: str, out: str | None = None) -> str:
+    """Compatibility string API; branch identity never enters rendered bytes."""
+    decision = _search_localize_decision(cmd, out)
+    _last_post_search_decision.set(decision)
+    return decision.text
 
 
 def _search_localize_subject(cmd: str) -> str:
@@ -8548,13 +8622,26 @@ def _gateway_delivery_extra(envelope) -> dict:
     return extra
 
 
-def _lane_final_extra(kind: str, text: str, target: str) -> dict:
+def _lane_envelope_identity(kind: str, lineage=None) -> tuple[str, str]:
+    """Use producer-selected registered identity, else the legacy lane identity."""
+    if lineage is not None and bool(
+            getattr(lineage, "producer_registration_match", False)):
+        producer = str(getattr(lineage, "runtime_producer_id", "") or "")
+        evidence_type = str(getattr(lineage, "evidence_type", "") or "")
+        if producer and evidence_type:
+            return producer, evidence_type
+    fallback = kind or "lane"
+    return fallback, fallback
+
+
+def _lane_final_extra(kind: str, text: str, target: str, *, lineage=None) -> dict:
     """Exact delivery-row identity shared with terminal lane controls."""
     try:
         from groundtruth.runtime.evidence_envelope import EvidenceEnvelope
+        producer, evidence_type = _lane_envelope_identity(kind, lineage)
         env = EvidenceEnvelope.build(
-            producer=kind or "lane", fact_id="", target=target or "",
-            evidence_type=kind or "lane", payload=(text,))
+            producer=producer, fact_id="", target=target or "",
+            evidence_type=evidence_type, payload=(text,), lineage=lineage)
         return {"candidate_id": env.dedup_key} if env.dedup_key else {}
     except Exception:  # noqa: BLE001
         return {}
@@ -8657,11 +8744,15 @@ def _lane_delivery_extra(
     member = _LANE_PROFILE_MEMBER_OWNERS.get(kind or "")
     if member:
         return _exact_profile_delivery_extra(member, kind, text, target, event)
-    extra = _lane_final_extra(kind, text, target)
+    selected_lineage = lineage
+    lineage = lineage or _lane_registered_lineage(kind, event)
+    # Only a producer-selected structured identity changes the envelope identity.
+    # Legacy lane lineage remains an additive audit sidecar, preserving its exact
+    # historical lane dedup/seal contract.
+    extra = _lane_final_extra(kind, text, target, lineage=selected_lineage)
     # Exact lane producer authority. This is deliberately not inferred from
     # layer naming or payload text: only a reviewed producer/evidence/boundary
     # binding may attach FACT lineage to delivered bytes.
-    lineage = lineage or _lane_registered_lineage(kind, event)
     if lineage is not None:
         extra.update(_feature_lineage_extra(lineage))
     return extra
@@ -11279,6 +11370,17 @@ def _lane_a_parts(item, default_subject: str = "") -> tuple[str, str, str]:
     return str(kind), str(text or ""), str(subject or "")
 
 
+def _lane_a_lineage(item):
+    """Return exact producer-selected lineage carried by a structured lane item."""
+    if len(item) <= 3:
+        return None
+    identity = item[3]
+    try:
+        return identity.lineage()
+    except Exception:  # noqa: BLE001 -- malformed metadata stays unlineaged
+        return None
+
+
 def _lane_a_event(kind: str, default_event):
     """Return the producer's real decision event, including search Lane-A."""
     return "post_search" if kind == "post_search.localize" else default_event
@@ -11541,6 +11643,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                            or _ss_dedup2_on()) else ""
     for item in lane_a:
         kind, text, subject_path = _lane_a_parts(item, krel or "")
+        item_lineage = _lane_a_lineage(item)
         item_event = _lane_a_event(kind, event)
         _record_hook_fire(kind)  # count the FIRE before any correct-or-quiet skip
         try:
@@ -11680,11 +11783,11 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     _ledger_mark_answered(_norm_stem(_psy), text)
             _ledger_note_delivery(kind, cmd, subject_path)  # S-1: carry the target
             _delivery_extra = _lane_delivery_extra(
-                kind, text, subject_path, item_event)
+                kind, text, subject_path, item_event, lineage=item_lineage)
             _seal_lane_delivery(
                 kind, text, subject_path, base_output=_base_out,
                 producer_text=_provenance_original, identity_text=text,
-                delivery_extra=_delivery_extra)
+                delivery_extra=_delivery_extra, lineage=item_lineage)
             _record_terminal_lane_controls(
                 kind, _provenance_original, _shipped_suffix, subject_path,
                 delivery_extra=_delivery_extra)
@@ -11740,7 +11843,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
 # TITO hash-chain + receipt ledger. The heavy decision logic lives in the pure
 # adapter (groundtruth.runtime.adapters.miniswe); this is the harness splice.
 # ---------------------------------------------------------------------------
-def _commit_prepared_lane(out, cmd, kind: str, decision: dict, *, krel, event) -> None:
+def _commit_prepared_lane(
+        out, cmd, kind: str, decision: dict, *, krel, event, lineage=None) -> None:
     """Commit a frozen eligible Lane-A decision without re-running final gates."""
     global _cochange_fired, _oblig_resurface_fired
     text = decision["payload"]
@@ -11761,11 +11865,11 @@ def _commit_prepared_lane(out, cmd, kind: str, decision: dict, *, krel, event) -
             _ledger_mark_answered(_norm_stem(pattern), text)
     _ledger_note_delivery(kind, cmd, krel or "")
     delivery_extra = _lane_delivery_extra(
-        kind, text, krel or "", event)
+        kind, text, krel or "", event, lineage=lineage)
     _seal_lane_delivery(
         kind, shipped_suffix, krel or "", base_output=base_output,
         producer_text=decision.get("provenance_original", text),
-        identity_text=text, delivery_extra=delivery_extra)
+        identity_text=text, delivery_extra=delivery_extra, lineage=lineage)
     _record_terminal_lane_controls(
         kind,
         decision.get("provenance_original", text),
@@ -12255,7 +12359,8 @@ def _persist_lane_producer_attestation(
 def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str = "",
                         producer_text: "str | None" = None,
                         identity_text: "str | None" = None,
-                        delivery_extra: "dict | None" = None) -> None:
+                        delivery_extra: "dict | None" = None,
+                        lineage=None) -> None:
     """RL-1: route an ALREADY-DELIVERED lane block through EvidenceEnvelope build ->
     validate -> seal — advancing the SHARED gateway hash-chain, stamping the envelope
     dedup_key into _EPISODE.delivered_dedup (dual-stamp; the legacy content-hash stamp
@@ -12271,10 +12376,12 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
     except Exception:  # noqa: BLE001 — engines absent in-container -> no bookkeeping
         return
     try:
+        producer, evidence_type = _lane_envelope_identity(kind, lineage)
         env = EvidenceEnvelope.build(
-            producer=kind or "lane", fact_id="", target=target or "",
-            evidence_type=kind or "lane",
-            payload=(identity_text if identity_text is not None else text,))
+            producer=producer, fact_id="", target=target or "",
+            evidence_type=evidence_type,
+            payload=(identity_text if identity_text is not None else text,),
+            lineage=lineage)
         if validate(env):  # a law violation -> skip bookkeeping (bytes already shipped)
             return
         # Seam-F1 (Fable-LIPI round-2, 2026-07-11): seal what ACTUALLY ships — the boundary-joined
@@ -13954,6 +14061,7 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
     _ss_root = _root() if _ss_any_content_gate_on() else ""
     for item in lane_a:
         kind, text, subject_path = _lane_a_parts(item, krel or "")
+        item_lineage = _lane_a_lineage(item)
         item_event = _lane_a_event(kind, event)
         if not text:
             continue
@@ -13989,23 +14097,29 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
                     except Exception:  # noqa: BLE001 — rollback is best-effort
                         pass
                 continue
-        key = _ga_unified_dedup_key(kind, kind, subject_path, "", [text])
+        identity_producer, identity_evidence = _lane_envelope_identity(
+            kind, item_lineage)
+        key = _ga_unified_dedup_key(
+            identity_producer, identity_evidence, subject_path, "", [text])
         candidate_kkind = (
             "post_search" if kind == "post_search.localize" else kkind)
         cand = _ga_make_candidate(
             _GA_PLANE_LANE_A, kind, dedup_key=key,
             target=subject_path, kkind=candidate_kkind, seq=len(pool),
-            lineage=_lane_registered_lineage(kind, item_event))
+            lineage=(item_lineage or _lane_registered_lineage(kind, item_event)))
         if cand is None:
             # engine absent -> deliver inline (degrade to the pre-SM-5 plane behavior,
             # never a silent drop). Consistent with the steer/gateway add-helpers.
             _lane_a_deliver(
-                out, cmd, [(kind, text, subject_path)],
+                out, cmd, [(kind, text, subject_path, item[3])]
+                if len(item) > 3 else [(kind, text, subject_path)],
                 krel=subject_path, event=item_event)
             continue
-        def _commit_lane(k=kind, t=text, s=subject_path, e=item_event, c=cand):
+        def _commit_lane(k=kind, t=text, s=subject_path, e=item_event, c=cand,
+                         ident=(item[3] if len(item) > 3 else None)):
             before = out.get("output") or ""
-            _lane_a_deliver(out, cmd, [(k, t, s)], krel=s, event=e)
+            lane_item = (k, t, s, ident) if ident is not None else (k, t, s)
+            _lane_a_deliver(out, cmd, [lane_item], krel=s, event=e)
             after = out.get("output") or ""
             _record_cross_plane_final_controls(c, after[len(before):])
         _append_batch_candidate(
@@ -14483,7 +14597,8 @@ def _commit_batch_arbitration(state, result, winner, plans) -> object:
         elif winner.plane == _GA_PLANE_LANE_A:
             _commit_prepared_lane(
                 plan.output, spec.get("cmd", ""), spec.get("kind", winner.kind),
-                plan.decision, krel=spec.get("krel", ""), event=spec.get("event"))
+                plan.decision, krel=spec.get("krel", ""), event=spec.get("event"),
+                lineage=getattr(winner, "lineage", None))
         elif winner.plane == _GA_PLANE_STEER:
             _commit_prepared_steer(
                 plan.output, spec.get("cmd", ""), spec.get("kind", winner.kind),
@@ -16735,11 +16850,20 @@ def _augment_output(action, out) -> None:
             # command. DEFAULT-OFF; correct-or-quiet (abstain / flag off -> '' -> Lane
             # A drops it). NEVER leaks a test name.
             try:
+                # Call the compatibility surface so existing harness substitutions
+                # still control whether this producer emits. The real implementation
+                # publishes its frozen decision beside the returned bytes; a substituted
+                # producer cannot inherit stale branch identity.
+                _last_post_search_decision.set(_post_search_decision())
                 _la_search = _search_localize_block(cmd, _orig_out)
+                _la_search_decision = _last_post_search_decision.get()
+                if _la_search_decision.text != _la_search:
+                    _la_search_decision = _post_search_decision()
                 _la_search_subject = (
                     _search_localize_subject(cmd) if _la_search else "")
             except Exception:  # noqa: BLE001 — Lane A producer isolated
                 _crash_emit("post_search.localize")
+                _la_search_decision = _post_search_decision()
                 _la_search = ""
                 _la_search_subject = ""
             # CONDITIONAL append (Fable #4): only enqueue a NON-empty block, so the
@@ -16749,7 +16873,8 @@ def _augment_output(action, out) -> None:
             # not "every command". Empty -> nothing enqueued -> byte-identical.
             if _la_search:
                 lane_a.append((
-                    "post_search.localize", _la_search, _la_search_subject))
+                    "post_search.localize", _la_search, _la_search_subject,
+                    _la_search_decision))
             # tested EVIDENCE tokens (plan §5.2 "tested?"): a real test-runner
             # invocation whose output carries an observed pass/fail result —
             # mirrors gt_oracle_sense.DerivedState.tested_tokens (tokens of the
