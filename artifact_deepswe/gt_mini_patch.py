@@ -13636,12 +13636,45 @@ def _commit_precommitted_batch_dose(dose: dict) -> None:
         return
     if content_hash in _oracle_delivered_hashes:
         return
+    extra = dict(pending.get("extra") or {})
+    try:
+        from groundtruth.runtime.completion_control import (
+            CompletionRefusalIdentity,
+            build_completion_cert_participation,
+            submit_refusal_candidate_id,
+        )
+        candidate_id = submit_refusal_candidate_id(payload)
+        extra["candidate_id"] = candidate_id
+        participation = build_completion_cert_participation(
+            CompletionRefusalIdentity(
+                final_candidate_text=payload,
+                candidate_id=candidate_id,
+                iteration=max(0, int(globals().get("_action_count", 0) or 0)),
+            ),
+            terminal_outcome="delivered",
+            completion_cert_enabled=(
+                pending.get("completion_cert_enabled") is True),
+            certificate_built=(pending.get("certificate_built") is True),
+            certificate_rendered=(pending.get("certificate_rendered") is True),
+        )
+        if participation is not None:
+            _control_participation_record(
+                participation.feature_id,
+                participation.decision_site,
+                participation.decision,
+                candidate_bytes=payload,
+                fact_class=participation.fact_class,
+                candidate_id=participation.candidate_id,
+                reason=participation.reason,
+            )
+    except Exception:  # noqa: BLE001 -- audit identity cannot hide delivered bytes
+        pass
     _gt_submit_record(pending.get("verdict"), blocked=True)
     _runtime_ledger_record(
         kind="submit_refusal",
         outcome=_ProductSignalOutcome.DELIVERED,
         chars=len(payload), content=payload,
-        extra=pending.get("extra"),
+        extra=extra,
     )
     _oracle_delivered_hashes.add(content_hash)
     _gt_submit_bounce_count += 1
@@ -17913,6 +17946,10 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
                 "content_hash": hc,
                 "verdict": verdict,
                 "extra": pending_extra,
+                "completion_cert_enabled": (
+                    os.environ.get("GT_COMPLETION_CERT") == "1"),
+                "certificate_built": cert is not None,
+                "certificate_rendered": _cert_rendered,
             },
         }
     except Exception:  # noqa: BLE001 — a gate crash must NEVER brick a run (fail-open)

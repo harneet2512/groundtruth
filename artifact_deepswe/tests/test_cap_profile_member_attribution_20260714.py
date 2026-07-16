@@ -6,6 +6,8 @@ that is not actually active must remain unattributed.
 """
 from __future__ import annotations
 
+import hashlib
+
 import gt_mini_patch as g
 from groundtruth.runtime import gateway as gw
 from groundtruth.runtime.evidence_envelope import EvidenceEnvelope
@@ -186,7 +188,10 @@ def test_gateway_commit_threads_exact_envelope_owner(monkeypatch):
 def test_completion_delivery_attributes_render_owner_not_telemetry_builder(
         tmp_path, monkeypatch):
     calls: list[dict] = []
+    control_rows: list[dict] = []
     monkeypatch.setattr(g, "_runtime_ledger_record", lambda **kw: calls.append(kw))
+    monkeypatch.setattr(
+        g, "_ledger_line_direct", lambda row: control_rows.append(row) or True)
     monkeypatch.setattr(g, "_GT_BASELINE", False)
     monkeypatch.setattr(g, "_root", lambda: str(tmp_path))
     monkeypatch.setattr(
@@ -199,6 +204,7 @@ def test_completion_delivery_attributes_render_owner_not_telemetry_builder(
     monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
     monkeypatch.setenv("GT_COMPLETION_CERT", "1")
     monkeypatch.setenv("GT_CERT_DELIVERY", "1")
+    monkeypatch.setenv("GT_INSEAM_METRICS", "1")
     g._oracle_delivered_hashes.clear()
 
     out = g._gt_gate_submit_exception(object(), "submit", Submitted())
@@ -206,6 +212,9 @@ def test_completion_delivery_attributes_render_owner_not_telemetry_builder(
     assert out is not None and out["returncode"] == 1
     assert not [row for row in calls if row.get("content") == out["output"]]
     pending = out.pop("_gt_pending_delivery")
+    assert pending["completion_cert_enabled"] is True
+    assert pending["certificate_built"] is True
+    assert pending["certificate_rendered"] is True
     g._commit_precommitted_batch_dose({
         "payload": out["output"], "pending_delivery": pending,
     })
@@ -221,6 +230,16 @@ def test_completion_delivery_attributes_render_owner_not_telemetry_builder(
     assert extra["producer_registration_match"] is True
     assert extra["fact_class"] == "submit_refusal"
     assert extra["actual_event"] == "submit"
+    assert extra["candidate_id"]
+    completion = [
+        row for row in control_rows
+        if row.get("control_ref", {}).get("feature_id") == "GT_COMPLETION_CERT"
+    ]
+    assert len(completion) == 1
+    assert completion[0]["participation_decision"] == "APPLIED"
+    assert completion[0]["candidate_id"] == extra["candidate_id"]
+    assert completion[0]["candidate_sha256_16"] == hashlib.sha256(
+        out["output"].encode()).hexdigest()[:16]
     assert all(
         row.get("profile_member") != "GT_COMPLETION_CERT" for row in calls
     ), "the host-only certificate builder must not receive model-byte credit"
