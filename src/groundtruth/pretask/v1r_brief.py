@@ -2084,6 +2084,113 @@ def _brief_block_receipts(
     return receipts
 
 
+def _candidate_local_contribution_sources(proof: dict) -> list[str]:
+    """Deterministically NAME the ACQ sources with a candidate-local witness in one
+    rendered candidate proof.
+
+    NAME-ONLY producer authority: this asserts which sources the producer used to
+    rank/render THIS candidate, from the producer's own generation data (the graph
+    witness, the v7.4 component values, the typed acquisition_sources it emitted).
+    The downstream collector RE-VALIDATES each named source's typed witness before it
+    may promote a row, so a name here is a producer assertion, not the whole proof.
+    ``cochange_history`` keeps its own self-sealed ``cochange_evidence`` path and is
+    intentionally excluded here (single authority per source)."""
+    found: list[str] = []
+    components = proof.get("components")
+    components = components if isinstance(components, dict) else {}
+
+    def _pos(value: object) -> bool:
+        try:
+            return float(value or 0.0) > 0.0
+        except (TypeError, ValueError):
+            return False
+
+    witness = proof.get("witness")
+    if (
+        proof.get("witness_verified") is True
+        and isinstance(witness, str)
+        and witness.strip()
+    ):
+        found.append("graph_validity")
+    if _pos(components.get("reach")):
+        found.append("structural_depth")
+    if _pos(components.get("lex")):
+        found.append("lexical_FTS5")
+    if _pos(components.get("sem")):
+        found.append("semantic_embedder")
+    if _pos(components.get("body")) or _pos(components.get("content")):
+        found.append("body_retrieval")
+    sources = proof.get("acquisition_sources")
+    if isinstance(sources, dict):
+        for name in (
+            "resolution_honesty", "type_intelligence", "LSP",
+            "freshness_basis", "repo_scope", "determinism",
+        ):
+            if isinstance(sources.get(name), dict):
+                found.append(name)
+    return sorted(set(found))
+
+
+def _attest_source_contributions(
+    localization_proof: list[dict],
+    block_receipts: list[dict],
+) -> None:
+    """Emit a producer-owned, self-sealed source-contribution attestation onto each
+    rendered candidate proof that maps 1:1 to a sealed localization block.
+
+    The attestation binds the candidate to the EXACT delivered block bytes
+    (``block_content_sha256`` == the block receipt's content hash) and names the ACQ
+    sources the producer used to render that candidate. It is self-sealed
+    (``attestation_sha256`` over the canonical attestation minus that field, the same
+    scheme as ``_cochange_evidence``'s ``source_identity_sha256``), so any downstream
+    tamper of the candidate binding, the block seal, or the source list is detectable.
+
+    HOST-SIDE METADATA — never rendered into ``brief_text``; a PURE derivation of the
+    already-computed proof + receipt data, so the delivered brief is byte-identical
+    whether or not attestations are populated. A candidate that does not map to exactly
+    one sealed localization block gets NO attestation (fail-closed -> the collector
+    keeps ``source_contribution_correct`` at ``None``)."""
+    seal_by_candidate: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for receipt in block_receipts:
+        if not isinstance(receipt, dict) or receipt.get("fact_class") != "localization":
+            continue
+        candidate_id = receipt.get("candidate_id")
+        digest = receipt.get("content_hash")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            continue
+        if not isinstance(digest, str) or _re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            continue
+        if candidate_id in seal_by_candidate and seal_by_candidate[candidate_id] != digest:
+            # More than one distinct localization block claims this candidate; the
+            # producer cannot attest a single delivered binding -> stay silent.
+            ambiguous.add(candidate_id)
+            continue
+        seal_by_candidate[candidate_id] = digest
+    for proof in localization_proof:
+        if not isinstance(proof, dict):
+            continue
+        candidate_id = proof.get("candidate_id")
+        if not isinstance(candidate_id, str) or candidate_id in ambiguous:
+            continue
+        digest = seal_by_candidate.get(candidate_id)
+        if digest is None:
+            continue  # candidate never rendered into a sealed localization block
+        attestation: dict[str, object] = {
+            "kind": "source_contribution",
+            "candidate_id": candidate_id,
+            "block_content_sha256": digest,
+            "sources": _candidate_local_contribution_sources(proof),
+        }
+        canonical = json.dumps(
+            attestation, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        )
+        attestation["attestation_sha256"] = hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest()
+        proof["contribution_attestation"] = attestation
+
+
 def _terminal_pretask_mediator_participation(
     brief_text: str,
     block_receipts: list[dict],
@@ -6550,6 +6657,11 @@ def generate_v1r_brief(
         )
         if _block_receipts_on() else []
     )
+    # B-ACQ: seal each rendered candidate's ACQ source contribution to its exact
+    # delivered block bytes. PURE metadata mutation on _localization_proof (already a
+    # sidecar); brief_text is untouched, so the delivered brief stays byte-identical.
+    if _block_receipts:
+        _attest_source_contributions(_localization_proof, _block_receipts)
     _control_participation.extend(
         _terminal_pretask_mediator_participation(
             brief_text,

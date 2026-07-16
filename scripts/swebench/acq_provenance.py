@@ -506,6 +506,53 @@ def _block_receipt(
     }
 
 
+def _valid_contribution_attestation(
+    proof: Mapping[str, Any],
+    block: Mapping[str, Any],
+    feature: str,
+) -> bool:
+    """Join the producer's self-sealed source-contribution attestation.
+
+    Returns True ONLY when the producer sealed THIS candidate to THIS exact delivered
+    block (``block_content_sha256`` == the validated block's content hash) and named
+    ``feature`` among its contributing sources.  This is a producer-owned authority
+    join, not a collector shape inference: an absent attestation, a broken self-seal, a
+    block-seal mismatch, a candidate mismatch, or a feature the producer did not attest
+    all fail closed (the caller keeps ``source_contribution_correct`` at ``None``).  The
+    feature's own typed witness is validated separately by ``_source_features`` — this
+    row is only reached for features that already passed that gate, so the True verdict
+    means producer-attested AND independently witness-confirmed."""
+    attestation = proof.get("contribution_attestation")
+    if not isinstance(attestation, Mapping):
+        return False
+    if attestation.get("kind") != "source_contribution":
+        return False
+    candidate_id = attestation.get("candidate_id")
+    block_seal = attestation.get("block_content_sha256")
+    sources = attestation.get("sources")
+    claimed = attestation.get("attestation_sha256")
+    if (
+        not isinstance(candidate_id, str) or not candidate_id
+        or candidate_id != proof.get("candidate_id")
+        or candidate_id != block.get("candidate_id")
+        or not isinstance(block_seal, str)
+        or re.fullmatch(r"[0-9a-f]{64}", block_seal) is None
+        or block_seal != block.get("sha256")
+        or not isinstance(sources, list)
+        or any(not isinstance(item, str) or not item for item in sources)
+        or sources != sorted(set(sources))
+        or not isinstance(claimed, str)
+    ):
+        return False
+    unsigned = {key: value for key, value in attestation.items() if key != "attestation_sha256"}
+    canonical = json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != claimed:
+        return False
+    return feature in sources
+
+
 def _source_field_paths(
     feature: str,
     proof_index: int,
@@ -676,8 +723,13 @@ def collect_acq_provenance(
                 # Independent live authorities must populate the other gates:
                 # collector shape-validation is not source truth, and an early
                 # delivery index is not chronological timing adjudication.
+                # cochange keeps its own self-sealed cochange_evidence authority; every
+                # other source's contribution correctness is the producer's self-sealed
+                # source-contribution attestation, joined here (absent/tampered -> None).
                 "source_contribution_correct": (
-                    True if feature == "cochange_history" else None
+                    True if feature == "cochange_history"
+                    else True if _valid_contribution_attestation(proof, block, feature)
+                    else None
                 ),
                 "timing_inherited_from_fact_delivery": None,
                 "source_causal_fair_probe": None,

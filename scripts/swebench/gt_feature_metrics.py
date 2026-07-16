@@ -2055,6 +2055,7 @@ def _internal_fact_support_readiness(
     *,
     ledger_artifact: str,
     live_witness: bool = False,
+    fair_probe_by_fc: dict[str, bool | None] | None = None,
 ) -> dict[str, Any]:
     """Typed internal FACT terminal; never projects model-delivery gates.
 
@@ -2137,6 +2138,17 @@ def _internal_fact_support_readiness(
         value = source_record.get(field)
         return value if isinstance(value, bool) else None
 
+    # SPEC-J4: the cochange support has no fair-probe design of its own — its causal verdict is
+    # the adjudicated fair-probe of the FACT class it contributed to (the localization candidate
+    # it was sealed and acknowledged into). INHERIT that bool; UNMEASURED -> None (fail-closed).
+    # Schema-distinct from the producer's own None default: the inheritance is marked explicitly.
+    supported_fc = source_record.get("supported_fact_class")
+    inherited_support_fair_probe: bool | None = None
+    if fair_probe_by_fc is not None and isinstance(supported_fc, str):
+        fp_candidate = fair_probe_by_fc.get(supported_fc)
+        if isinstance(fp_candidate, bool):
+            inherited_support_fair_probe = fp_candidate
+
     return _typed_readiness(
         "internal_support",
         {
@@ -2144,7 +2156,7 @@ def _internal_fact_support_readiness(
             "supported_candidate_id": True if candidate_bound else None,
             "downstream_decision_join": True if downstream_join else None,
             "support_correct": producer_gate("source_contribution_correct"),
-            "support_causal_fair_probe": producer_gate("source_causal_fair_probe"),
+            "support_causal_fair_probe": inherited_support_fair_probe,
         },
         gate_names=_INTERNAL_SUPPORT_GATE_NAMES,
         # Offline evidence never sets the live bit; a receipt-chain join does not
@@ -2160,6 +2172,10 @@ def _internal_fact_support_readiness(
             "supported_fact_class": source_record.get("supported_fact_class"),
             "downstream_delivery_seal": seal,
             "downstream_receipt_level": receipt_level,
+            **(
+                {"support_causal_fair_probe_inherited_from_fact": supported_fc}
+                if inherited_support_fair_probe is not None else {}
+            ),
         },
     )
 
@@ -2204,6 +2220,7 @@ def _acquisition_readiness(
     record: dict[str, Any], *, leak_free: bool | None, dose_ok: bool | None,
     live_witness: bool = False,
     fair_probe_by_fc: dict[str, bool | None] | None = None,
+    timing_by_fc: dict[str, bool | None] | None = None,
 ) -> dict[str, Any]:
     """Project ACQ support evidence without borrowing the FACT delivery gates."""
     receipt = record.get("receipt_level")
@@ -2232,20 +2249,36 @@ def _acquisition_readiness(
         candidate = fair_probe_by_fc.get(supported_fc)
         if isinstance(candidate, bool):
             inherited_fair_probe = candidate
-    extra = (
-        {"source_causal_fair_probe_inherited_from_fact": supported_fc}
-        if inherited_fair_probe is not None else None
-    )
+    # SPEC-J3: an ACQ candidate has no delivery timing of its own — its adhered-time is the
+    # supported FACT class's chronologically adjudicated delivery verdict. INHERIT that bool
+    # (ON_TIME -> True, LATE/STEP_BEHIND -> False); an UNMEASURED class stays None (fail-closed).
+    inherited_timing: bool | None = None
+    if timing_by_fc is not None and isinstance(supported_fc, str):
+        timing_candidate = timing_by_fc.get(supported_fc)
+        if isinstance(timing_candidate, bool):
+            inherited_timing = timing_candidate
+    # B-ACQ: source-contribution truth is the producer's OWN self-sealed attestation, joined by
+    # the collector (acq_provenance._valid_contribution_attestation) into the record. A collector
+    # shape-validation is NOT source truth (the 47dacfd0f class) — this reads a producer verdict
+    # only, staying None when the attestation is absent/tampered.
+    attested = record.get("source_contribution_correct")
+    source_contribution_correct = attested if isinstance(attested, bool) else None
+    extra_fields: dict[str, Any] = {}
+    if inherited_fair_probe is not None:
+        extra_fields["source_causal_fair_probe_inherited_from_fact"] = supported_fc
+    if inherited_timing is not None:
+        extra_fields["timing_inherited_from_fact_class"] = supported_fc
+    extra = extra_fields or None
     return _typed_readiness(
         "support",
         {
             "supported_fact_delivery_join": joined,
             "candidate_local_contribution": candidate_local,
-            # Source truth and inherited timing require producer-owned fields/ablation that brief
-            # receipt v1 does not carry (a collector shape-validation is NOT source truth — the
-            # 47dacfd0f class); they stay None until typed producer evidence is joined.
-            "source_contribution_correct": None,
-            "timing_inherited_from_fact_delivery": None,
+            # B-ACQ: producer-attested source-contribution truth (self-sealed to the delivered
+            # block); SPEC-J3 inherited delivery timing of the supported FACT class. Both stay
+            # None when their typed authority is absent — never manufactured here.
+            "source_contribution_correct": source_contribution_correct,
+            "timing_inherited_from_fact_delivery": inherited_timing,
             # SPEC-J4: inherited from the supported FACT class's adjudicated fair-probe verdict.
             "source_causal_fair_probe": inherited_fair_probe,
         },
@@ -2673,6 +2706,7 @@ def _canonical_task_features(
     dose_ok: bool | None,
     live_witness: bool = False,
     fair_probe_by_fc: dict[str, bool | None] | None = None,
+    timing_by_fc: dict[str, bool | None] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Build the explicit 128-row task ledger without mutating legacy fields."""
     inventory = canonical_feature_inventory()
@@ -2680,7 +2714,7 @@ def _canonical_task_features(
     for record in acq.values():
         record["ss_readiness"] = _acquisition_readiness(
             record, leak_free=leak_free, dose_ok=dose_ok, live_witness=live_witness,
-            fair_probe_by_fc=fair_probe_by_fc,
+            fair_probe_by_fc=fair_probe_by_fc, timing_by_fc=timing_by_fc,
         )
     master.update(acq)
     for name in inventory["CAP"]:
@@ -3020,6 +3054,9 @@ def collect_task(
                 acq_records["cochange_history"],
                 ledger_artifact=ledger_artifact,
                 live_witness=_live_witness,
+                # SPEC-J4: inherit the causal verdict of the FACT class the cochange
+                # component contributed to (its sealed localization candidate).
+                fair_probe_by_fc=fair_probe_by_fc,
             )
         else:
             fact_readiness[fact_class] = ss_gate_readiness(
@@ -3062,6 +3099,7 @@ def collect_task(
         leak_free=leak_gate, dose_ok=dose_gate,
         live_witness=_live_witness,
         fair_probe_by_fc=fair_probe_by_fc,
+        timing_by_fc=timing_by_fc,
     )
     # Full provenance object for audit: which artifacts proved (or failed to prove)
     # the terminal live bit, and every named fail-closed reason.
