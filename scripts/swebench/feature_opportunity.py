@@ -87,6 +87,34 @@ def _policy_observations(
     return dict(result)
 
 
+def _parent_content_index(
+    messages: list[Any],
+) -> dict[str, list[tuple[int, int]]]:
+    """Index parent-policy *content* by its sha256 — a clock-independent anchor.
+
+    The observation-id join in :func:`_policy_observations` re-derives the seam's
+    cumulative-action clock from the trajectory.  That clock is only a proxy: the
+    seam's real ``_action_count`` is skipped on some turns (e.g. the precommitted
+    handshake early-return) and saved/restored around winner-context replay, so a
+    well-formed row's ``observation_id`` can legitimately fail to reconstruct
+    offline even though its parent policy genuinely occurred.  Parent *content*
+    identity does not depend on that clock and can prove the anchor independently.
+    The message population mirrors :func:`_policy_observations` exactly."""
+    result: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content", "")
+        if not isinstance(content, str):
+            continue
+        extra = message.get("extra")
+        actions = extra.get("actions", []) if isinstance(extra, dict) else []
+        if not isinstance(actions, list):
+            continue
+        result[_sha256_text(content)].append((index, len(content)))
+    return dict(result)
+
+
 def _identifiable_refs(
     raw_refs: object, inventory: dict[str, tuple[str, ...]],
 ) -> list[str]:
@@ -146,6 +174,7 @@ def _validate_bound_row(
     row: dict[str, Any],
     inventory: dict[str, tuple[str, ...]],
     parent_index: dict[str, list[tuple[int, int]]],
+    content_index: dict[str, list[tuple[int, int]]],
 ) -> tuple[list[dict[str, str]], list[str], int | None]:
     issues: list[str] = []
     if row.get("event_type") != "policy_observation":
@@ -185,12 +214,35 @@ def _validate_bound_row(
         )
         if row["opportunity_id"] != expected_opportunity:
             issues.append("opportunity_id_mismatch")
-    parent_hits = parent_index.get(str(row.get("observation_id") or ""), [])
-    parent_message_index = parent_hits[0][0] if len(parent_hits) == 1 else None
-    if len(parent_hits) != 1:
+    # Parent-policy anchor. The observation-id (action-clock) join is the *precise*
+    # anchor when it reconstructs offline, but the seam's ``_action_count`` clock is
+    # not always reproducible from the trajectory (turn-skips + replay save/restore),
+    # so a well-formed row can miss it. A content-addressed match — the row's parent
+    # policy content genuinely appearing as a trajectory assistant message at the
+    # producer-recorded width — proves the anchor independently and is fail-closed:
+    #   * parent content ABSENT      -> "parent_policy_join"          (malformed)
+    #   * content present, width off -> "parent_policy_chars_mismatch" (malformed)
+    #   * content present + clock hit -> precise anchor
+    #   * content present, no/many clock hits -> content anchor (unique) or UNMEASURED
+    #     chronology (repeated content) — NEVER malformed for a legitimately-shaped row.
+    clock_hits = parent_index.get(str(row.get("observation_id") or ""), [])
+    content_hits = content_index.get(str(row.get("parent_policy_sha256") or ""), [])
+    parent_message_index: int | None = None
+    if not content_hits:
         issues.append("parent_policy_join")
-    elif row.get("parent_policy_chars") != parent_hits[0][1]:
-        issues.append("parent_policy_chars_mismatch")
+    else:
+        width_hits = [
+            (msg_index, chars) for msg_index, chars in content_hits
+            if chars == row.get("parent_policy_chars")
+        ]
+        if not width_hits:
+            issues.append("parent_policy_chars_mismatch")
+        elif len(clock_hits) == 1:
+            parent_message_index = clock_hits[0][0]
+            if clock_hits[0][1] != row.get("parent_policy_chars"):
+                issues.append("parent_policy_chars_mismatch")
+        elif len(width_hits) == 1:
+            parent_message_index = width_hits[0][0]
     return refs, sorted(set(issues)), parent_message_index
 
 
@@ -221,6 +273,7 @@ def collect_feature_opportunities(
     evidence: dict[str, list[dict[str, Any]]] = defaultdict(list)
     invalid_by_feature: dict[str, set[str]] = defaultdict(set)
     parent_index = _policy_observations(messages)
+    content_index = _parent_content_index(messages)
     seen_ids: set[str] = set()
     malformed_rows = 0
     unbound_rows = 0
@@ -236,7 +289,7 @@ def collect_feature_opportunities(
                 invalid_by_feature[feature].add("producer_binding")
             continue
         refs, issues, parent_message_index = _validate_bound_row(
-            row, inventory, parent_index
+            row, inventory, parent_index, content_index
         )
         opportunity_id = row.get("opportunity_id")
         if isinstance(opportunity_id, str) and opportunity_id in seen_ids:

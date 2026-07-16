@@ -185,6 +185,121 @@ def test_parent_message_index_preserves_non_dict_chronology() -> None:
     assert boundary["parent_message_index"] == 1
 
 
+def _filler_message(tag: str) -> dict:
+    """One assistant turn that advances the reconstructed action clock by 1 with
+    content distinct from any parent policy under test."""
+    return {
+        "role": "assistant",
+        "content": f"filler policy {tag}",
+        "extra": {"actions": [{"command": f"noop-{tag}"}]},
+    }
+
+
+# ---------------------------------------------------------------------------
+# SS-128 D3 regression: a BOUND row whose seam action-clock the offline
+# reconstruction cannot reproduce (turn-skips + winner-context replay leave
+# ``_action_count`` behind the trajectory's cumulative action count) must NOT be
+# graded MALFORMED when its parent policy genuinely occurred in the trajectory.
+# Minimal shape copied from the real offenders
+# (ll-full-cyclotruc__gitingest-94 ledger_index 183: iteration=18 while the
+# reconstructed clock at the matching parent content was 20;
+# ll-full-deepset-ai__haystack-8997 ledger_index 227/246 alike) — the row's
+# observation_id is self-consistent and its parent content is present, only the
+# action-clock join diverged.
+# ---------------------------------------------------------------------------
+
+def test_clock_divergent_bound_row_with_present_parent_is_not_malformed() -> None:
+    parent = "I will choose a destination for the new module."
+    actions = [{"command": "inspect package tree"}]
+    # ``_row`` bakes iteration=0 into observation_id, but the trajectory places the
+    # parent policy at reconstructed action-clock 2 (two prior single-action turns).
+    # The action-clock join therefore cannot reconstruct the row's observation_id —
+    # exactly the real defect — yet the parent content is present, uniquely, at idx 2.
+    row = _row(parent, actions)
+    messages = [
+        _filler_message("a"),
+        _filler_message("b"),
+        {"role": "assistant", "content": parent, "extra": {"actions": actions}},
+    ]
+    result = opportunities.collect_feature_opportunities(
+        [row], messages, inventory.canonical_feature_inventory(),
+    )
+    integrity = result["integrity"]
+    assert integrity["publishable"] is True
+    assert integrity["malformed_rows"] == 0
+    assert integrity["bound_rows"] == 1
+    for feature in ("GT_CHANGE_SURFACE", "newfile_precedent"):
+        evidence = result["features"][feature]
+        assert evidence["status"] == "BOUND"
+        boundary = evidence["decision_boundary_evidence"][0]
+        # anchored by content-addressed identity to the true parent message
+        assert boundary["parent_message_index"] == 2
+        assert boundary["parent_policy_joined"] is True
+
+
+def test_clock_divergent_row_with_repeated_parent_is_unmeasured_not_malformed() -> None:
+    # haystack ledger_index 219/255 shape: parent content (empty) recurs many times
+    # and the action clock diverged, so no unique offline anchor exists. This is an
+    # UNMEASURED chronology (parent_message_index=None), never MALFORMED.
+    parent = ""
+    actions = [{"command": "status"}]
+    row = _row(parent, actions)
+    repeat = {"role": "assistant", "content": parent, "extra": {"actions": actions}}
+    messages = [_filler_message("x"), _filler_message("y"), repeat, repeat, repeat]
+    result = opportunities.collect_feature_opportunities(
+        [row], messages, inventory.canonical_feature_inventory(),
+    )
+    assert result["integrity"]["publishable"] is True
+    assert result["integrity"]["malformed_rows"] == 0
+    boundary = (
+        result["features"]["newfile_precedent"]["decision_boundary_evidence"][0]
+    )
+    assert boundary["parent_message_index"] is None
+    assert boundary["parent_policy_joined"] is True
+
+
+def test_clock_divergent_row_with_absent_parent_still_fails_closed() -> None:
+    # TAMPER: same clock-divergent shape, but the parent policy NEVER occurred in the
+    # trajectory (the content-addressed anchor is the only integrity floor). A genuinely
+    # unjoinable parent must remain MALFORMED / publishable=False.
+    row = _row("a parent policy that never appears in the trajectory", [{"command": "x"}])
+    messages = [
+        _filler_message("a"),
+        _filler_message("b"),
+        {"role": "assistant", "content": "an entirely different policy",
+         "extra": {"actions": [{"command": "y"}]}},
+    ]
+    result = opportunities.collect_feature_opportunities(
+        [row], messages, inventory.canonical_feature_inventory(),
+    )
+    assert result["integrity"]["publishable"] is False
+    assert result["integrity"]["malformed_rows"] == 1
+    evidence = result["features"]["newfile_precedent"]
+    assert evidence["status"] == "UNMEASURED"
+    assert "parent_policy_join" in evidence["reason"]
+
+
+def test_clock_divergent_row_with_wrong_parent_width_still_fails_closed() -> None:
+    # TAMPER: parent content present but the producer-recorded width is wrong. The
+    # content-addressed anchor requires an exact width match, so this stays MALFORMED.
+    parent = "destination policy for a brand new file"
+    actions = [{"command": "inspect"}]
+    row = _row(parent, actions)
+    row["parent_policy_chars"] = row["parent_policy_chars"] + 7
+    messages = [
+        _filler_message("a"),
+        {"role": "assistant", "content": parent, "extra": {"actions": actions}},
+    ]
+    result = opportunities.collect_feature_opportunities(
+        [row], messages, inventory.canonical_feature_inventory(),
+    )
+    assert result["integrity"]["publishable"] is False
+    assert result["integrity"]["malformed_rows"] == 1
+    evidence = result["features"]["newfile_precedent"]
+    assert evidence["status"] == "UNMEASURED"
+    assert "parent_policy_chars_mismatch" in evidence["reason"]
+
+
 def test_attaching_opportunity_evidence_cannot_promote_ss_live() -> None:
     row = {
         "family": "FACT",
