@@ -9062,6 +9062,12 @@ def _record_gateway_final_controls(
             _control_participation_record(
                 "GT_INSEAM_METRICS", "mini_seam.inseam_metrics.fact_observation",
                 "APPLIED", reason="final_delivery_observed", **common)
+        if os.environ.get("GT_L6_FRESH") == "1" and _l6_graph_generation > 0:
+            _control_participation_record(
+                "GT_L6_FRESH", "mini_seam.graph_db.fresh_copy_selection",
+                "APPLIED",
+                reason=f"generation_{_l6_graph_generation}",
+                **common)
     except Exception:  # noqa: BLE001 -- telemetry never changes committed bytes
         return
 
@@ -9123,6 +9129,12 @@ def _record_cross_plane_final_controls(candidate, final_bytes: str) -> None:
             _control_participation_record(
                 "GT_SS_ARBITER_V2", "mini_seam.global_arbiter.v2_selection",
                 "NO_EFFECT", reason="winner_preserved", **common)
+        if os.environ.get("GT_L6_FRESH") == "1" and _l6_graph_generation > 0:
+            _control_participation_record(
+                "GT_L6_FRESH", "mini_seam.graph_db.fresh_copy_selection",
+                "APPLIED",
+                reason=f"generation_{_l6_graph_generation}",
+                **common)
     except Exception:  # noqa: BLE001 -- metadata cannot change delivery
         return
 
