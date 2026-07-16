@@ -77,6 +77,10 @@ from attestation_join import (  # noqa: E402
     load_attestations,
     truth_join_to_dict,
 )
+from chronology_extract import (  # noqa: E402  (SPEC-J3 timing join)
+    adjudicate_deliveries,
+    timing_by_fact_class,
+)
 from groundtruth.runtime.feature_lineage import (  # noqa: E402
     CAP_BYTE_OWNER_MECHANISMS,
     CAP_BYTE_OWNER_IDS,
@@ -245,6 +249,22 @@ def member_fact_classes(member: str) -> tuple[str, ...]:
         fact_class = _DIRECT_MEMBER_FACTCLASS[member]
         return (fact_class,) if fact_class is not None else ()
     return _INFRA_MEMBER_MEDIATES[member]
+
+
+def _member_chronological_time(
+    member: str, timing_by_fc: dict[str, bool | None]
+) -> bool | None:
+    """SPEC-J3: a byte-owner member's timing = the join over its owned fact class(es). True
+    only when every measured owned class is ON_TIME (and at least one is measured); False if
+    any owned class is LATE/STEP_BEHIND; None when no owned class is measured (fail-closed)."""
+    measured = [
+        timing_by_fc.get(fc)
+        for fc in member_fact_classes(member)
+        if timing_by_fc.get(fc) is not None
+    ]
+    if not measured:
+        return None
+    return all(measured)
 
 
 def profile_members(profile: str) -> list[str]:
@@ -2848,6 +2868,14 @@ def collect_task(
         task_dir, rows, fact_lifecycles, ledger_artifact
     )
 
+    # SPEC-J3: the chronology timing JOIN. Adjudicate every delivered ledger row against the
+    # trajectory (six exact message indices per delivery) into per-fact-class timing verdicts,
+    # feeding the ``correct_rl_adhered_time`` gate. Fail-closed: a class with no measured
+    # verdict yields ``None`` (``timing_by_fc.get`` below) so the gate stays UNMEASURED — it
+    # only tightens the gate to True (ON_TIME) / False (LATE/STEP_BEHIND) when it can prove it.
+    chronological_timing = adjudicate_deliveries(traj, rows)
+    timing_by_fc = timing_by_fact_class(chronological_timing)
+
     members = profile_members(profile)
     features: dict[str, dict] = {}
     for m in members:
@@ -2921,6 +2949,8 @@ def collect_task(
                 dose_ok=dose_gate,
                 fair_probe=None,
                 live_witness=_live_witness,
+                # SPEC-J3: the byte-owner's timing = its owned fact class(es), adjudicated.
+                chronological_time=_member_chronological_time(member, timing_by_fc),
             )
             feature["ss_readiness"]["cap_role"] = cap_role
 
@@ -2949,6 +2979,9 @@ def collect_task(
                 # not distinguish a paid trajectory from a replay/fixture. The bit is
                 # joined ONLY from run-provenance artifacts (detect_live_run above).
                 live_witness=_live_witness,
+                # SPEC-J3: per-fact-class timing verdict from the chronology join. None (an
+                # unmeasured class) leaves correct_rl_adhered_time as before (fail-closed).
+                chronological_time=timing_by_fc.get(fact_class),
             )
 
     endpoints = behavioural_endpoints(timeline)
@@ -2974,6 +3007,9 @@ def collect_task(
     # the terminal live bit, and every named fail-closed reason.
     ss_integrity["live_run_provenance"] = _live.as_dict()
     ss_integrity["attestation_join"] = attestation_join_diag
+    # SPEC-J3: per-fact-class timing verdicts + UNMEASURED reasons feeding the
+    # correct_rl_adhered_time gate (the delivery-row chronology join).
+    ss_integrity["chronological_timing"] = chronological_timing
     ss_integrity["feature_opportunity"] = opportunity_projection["integrity"]
     if opportunity_projection["integrity"]["publishable"] is not True:
         ss_integrity["required_inputs_complete"] = False
