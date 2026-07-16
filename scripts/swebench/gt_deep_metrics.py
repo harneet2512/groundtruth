@@ -1944,6 +1944,34 @@ def build(task: str, results_dir: str, log_path: str = "",
             and "collection_error" not in deep["behavioral_impact"]
         ),
     )
+    # --- ADDITIVE (B-TE): trajectory-economics section. PURE ADDITION — appends a
+    # single top-level key and mutates NO existing key. It never raises: a missing or
+    # broken module yields a stamped section, never a failed record. Everything else in
+    # `deep` is byte-identical to the pre-B-TE output.
+    try:
+        try:
+            from gt_trajectory_economics import compute_trajectory_economics as _cte
+        except ImportError:
+            import importlib.util as _ilu2
+            _te_path = os.path.join(os.path.dirname(__file__), "gt_trajectory_economics.py")
+            _te_spec = _ilu2.spec_from_file_location("gt_trajectory_economics_gdm", _te_path)
+            _te_mod = _ilu2.module_from_spec(_te_spec)
+            _te_spec.loader.exec_module(_te_mod)
+            _cte = _te_mod.compute_trajectory_economics
+        deep["trajectory_economics"] = _cte(
+            task, results_dir,
+            graph_db=db_resolved or "",
+            ledger_path=rl_delivery_path or "",
+            gold_jsonl=os.environ.get("GT_GOLD_JSONL", ""),
+        )
+    except Exception as _te_exc:  # noqa: BLE001 — additive section must never fail the record
+        deep["trajectory_economics"] = {
+            "schema": "gt.trajectory_economics.v1",
+            "precision_decimals": 8,
+            "deferred": ["divergence_step", "resolve_stability",
+                         "trajectory_determinism", "compaction_reorientation"],
+            "collection_error": f"{type(_te_exc).__name__}: {str(_te_exc)[:200]}",
+        }
     return deep
 
 
