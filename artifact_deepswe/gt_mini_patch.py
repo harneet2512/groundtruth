@@ -166,6 +166,7 @@ def _control_participation_record(
     fact_class: "str | None" = None,
     candidate_id: str = "",
     reason: str = "",
+    related_delivery_iteration: "int | None" = None,
 ) -> None:
     """Persist one typed CAP-control decision without claiming byte ownership.
 
@@ -189,6 +190,7 @@ def _control_participation_record(
             fact_class=fact_class,
             candidate_id=candidate_id,
             reason=reason,
+            related_delivery_iteration=related_delivery_iteration,
         )
         payload = participation_to_dict(record)
         participation_decision = payload.pop("decision")
@@ -12013,7 +12015,9 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     kind, _provenance_original, text, subject_path,
                     _provenance_decision)
             # SS (features 2/7): record the delivered entity set + queue the ack watch.
-            _ss_record_delivered(kind, text, _ss_root)
+            _ss_record_delivered(
+                kind, text, _ss_root, terminal_text=_shipped_suffix,
+                delivery_extra=_delivery_extra)
             # RL-1 (flag GT_LANE_ENVELOPE): seal an envelope over the SAME delivered
             # bytes — advance the shared chain, stamp the dedup_key, record a receipt-
             # tracked delivery. Pure bookkeeping; no-op + byte-identical when off.
@@ -12094,7 +12098,9 @@ def _commit_prepared_lane(
         _record_lane_provenance_control(
             kind, decision.get("provenance_original", text), shipped_suffix,
             krel or "", decision["provenance_decision"])
-    _ss_record_delivered(kind, text, decision.get("root", ""))
+    _ss_record_delivered(
+        kind, text, decision.get("root", ""), terminal_text=shipped_suffix,
+        delivery_extra=delivery_extra)
     if kind == "l3b.evidence" and _last_budget_pending:
         try:
             _PRODUCT_BUDGETER.commit_delivered(_last_budget_pending)
@@ -13478,12 +13484,16 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
                     getattr(winner, "dedup_key", "") or "", ""),
                 caller_specific_controls=_caller_controls)
             try:
+                _delivery_extra = _gateway_delivery_extra(winner)
                 _runtime_ledger_record(
                     kind="gateway." + (winner.evidence_type or "fact"),
                     outcome=_ProductSignalOutcome.DELIVERED,
                     chars=len(_shipped), file_path=winner.target or "",
                     content=_shipped,
-                    extra=_gateway_delivery_extra(winner))
+                    extra=_delivery_extra)
+                _ss_record_delivered(
+                    winner.evidence_type or "fact", delta,
+                    terminal_text=_shipped, delivery_extra=_delivery_extra)
             except Exception:  # noqa: BLE001
                 pass
         # SM-5: under the global arbiter, STASH the produced gateway candidate + its commit
@@ -13846,6 +13856,9 @@ def _commit_precommitted_batch_dose(dose: dict) -> None:
         chars=len(payload), content=payload,
         extra=extra,
     )
+    _ss_record_delivered(
+        "submit_refusal", payload, terminal_text=payload,
+        delivery_extra=extra)
     _oracle_delivered_hashes.add(content_hash)
     _gt_submit_bounce_count += 1
     if pending.get("ss_submit_red") is True:
@@ -14529,10 +14542,14 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
         if suppressible and _ss_novelty_on():
             _arb_suppressible = False
         def _thunk(_o=commit_thunk, _k=et, _t=_payload, _r=_ss_root, _loc=suppressible,
-                   _auth=_knowledge_authority):  # noqa: E731
+                   _auth=_knowledge_authority, _winner=winner):  # noqa: E731
+            _before = str((out or {}).get("output") or "")
             _o()
+            _after = str((out or {}).get("output") or "")
             _ss_record_delivered(
-                _k, _t, _r, is_loc=_loc, knowledge_authority=_auth)
+                _k, _t, _r, is_loc=_loc, knowledge_authority=_auth,
+                terminal_text=_after[len(_before):],
+                delivery_extra=_gateway_delivery_extra(_winner))
     cand = _ga_make_candidate(
         _GA_PLANE_GATEWAY, et, dedup_key=getattr(winner, "dedup_key", "") or "",
         target=getattr(winner, "target", "") or "",
@@ -15209,7 +15226,9 @@ def _deliver_gate_winner(
             content=shipped_suffix,
             extra=delivery_extra)
         # SS (features 2/7): record the delivered steer's entity set + queue the ack watch.
-        _ss_record_delivered(_last_gate_winner_kind, win_text)
+        _ss_record_delivered(
+            _last_gate_winner_kind, win_text, terminal_text=shipped_suffix,
+            delivery_extra=delivery_extra)
         # RL-1 (GT_LANE_ENVELOPE): seal over the SAME bytes; base_output = pre-append obs.
     else:
         # Seam-F4: won the gate but 0 bytes (native-render collapse / B-15 leak refusal) —
@@ -15242,7 +15261,9 @@ def _commit_prepared_steer(out, cmd, kind: str, winner_hash: str, decision: dict
         file_path=krel or kf or "", event=event,
         content=decision["shipped_suffix"],
         extra=delivery_extra)
-    _ss_record_delivered(kind, text)
+    _ss_record_delivered(
+        kind, text, terminal_text=decision["shipped_suffix"],
+        delivery_extra=delivery_extra)
 
 
 _GA_PLANE_LANE_A = "lane_a"
@@ -15967,15 +15988,21 @@ def _ss_screen_delivery(kind: str, text: str, root: str = "", *,
     return suppress, reason
 
 
-def _ss_record_delivered(kind: str, text: str, root: str = "", *, is_loc: bool = False,
-                         knowledge_authority: bool = True) -> None:
+def _ss_record_delivered(
+        kind: str, text: str, root: str = "", *, is_loc: bool = False,
+        knowledge_authority: bool = True, terminal_text: "str | None" = None,
+        delivery_extra: "dict | None" = None) -> None:
     """On a REAL delivered outcome: record the entity set (feature 2) + queue an ack
     watch (feature 7). Both gated -> no-op + zero extra state when the flags are off."""
     try:
+        final_text = text if terminal_text is None else terminal_text
+        if not final_text:
+            return
         _ss_remember_known(
             kind, text, root, is_loc=is_loc,
             knowledge_authority=knowledge_authority)
-        _ss_note_delivery_for_ack(kind, text)
+        _ss_note_delivery_for_ack(
+            kind, text, final_text=final_text, delivery_extra=delivery_extra)
     except Exception:  # noqa: BLE001 — bookkeeping must never break delivery
         pass
 
@@ -16222,15 +16249,24 @@ def _ss_ack_failure_suppresses(kind: str, text: str, identity) -> bool:
     return True
 
 
-def _ss_note_delivery_for_ack(kind: str, text: str) -> None:
+def _ss_note_delivery_for_ack(
+        kind: str, text: str, *, final_text: "str | None" = None,
+        delivery_extra: "dict | None" = None) -> None:
     """Queue a delivered block for the acknowledgment watch (host-side only)."""
     if not _ss_ack_metrics_on() or not text:
         return
     try:
-        seal = hashlib.sha256(
+        producer_seal = hashlib.sha256(
             text.encode("utf-8", "surrogatepass")
         ).hexdigest()[:16]
-        identities = _ss_failure_identities_by_delivery.pop((kind, seal), set())
+        shipped = text if final_text is None else final_text
+        if not shipped:
+            return
+        seal = hashlib.sha256(
+            shipped.encode("utf-8", "surrogatepass")
+        ).hexdigest()[:16]
+        identities = _ss_failure_identities_by_delivery.pop(
+            (kind, producer_seal), set())
         record = {
             "kind": kind,
             "ents": _ss_entity_set(text),
@@ -16239,7 +16275,11 @@ def _ss_note_delivery_for_ack(kind: str, text: str) -> None:
             "snip": _ss_ack_snippet(text).lower(),
             "step": _action_count,
             "sha": seal,
+            "final_text": shipped,
         }
+        terminal_identity = _terminal_delivery_identity(delivery_extra)
+        if terminal_identity is not None:
+            record["fact_class"], record["candidate_id"] = terminal_identity
         # Exact one-to-one attribution only. Multiple candidate identities for
         # identical bytes are incomplete delivery provenance and cannot suppress.
         if len(identities) == 1:
@@ -16308,6 +16348,43 @@ def _ss_emit_ack_row(rec: dict, acked: bool) -> None:
         "ack_m": _action_count - int(rec.get("step", _action_count)),
         "content_sha256_16": rec.get("sha", ""), "seal_scope": "block",
         "chars_delivered": 0, "iteration": _action_count})
+    try:
+        fact_class = rec.get("fact_class")
+        candidate_id = rec.get("candidate_id")
+        final_text = rec.get("final_text")
+        delivered_iteration = rec.get("step")
+        if not (
+            isinstance(fact_class, str) and fact_class
+            and isinstance(candidate_id, str) and candidate_id
+            and isinstance(final_text, str) and final_text
+            and type(delivered_iteration) is int
+            and delivered_iteration < _action_count
+        ):
+            return
+        from groundtruth.runtime.terminal_ack import (
+            TerminalAckIdentity, build_ack_participation)
+        participation = build_ack_participation(
+            TerminalAckIdentity(
+                candidate_text=final_text,
+                fact_class=fact_class,
+                candidate_id=candidate_id,
+                delivered_iteration=delivered_iteration,
+            ),
+            acknowledgment_iteration=_action_count,
+            acknowledged=bool(acked),
+        )
+        _control_participation_record(
+            participation.feature_id,
+            participation.decision_site,
+            participation.decision,
+            candidate_bytes=final_text,
+            fact_class=participation.fact_class,
+            candidate_id=participation.candidate_id,
+            reason=participation.reason,
+            related_delivery_iteration=participation.related_delivery_iteration,
+        )
+    except Exception:  # noqa: BLE001 -- receipt metrics never affect agent behavior
+        return
 
 
 def _ss_scan_acks(model_text: str) -> None:

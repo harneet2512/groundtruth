@@ -201,7 +201,8 @@ def _lane_filter_harness(monkeypatch) -> list[dict]:
     monkeypatch.setattr(g, "_ledger_note_delivery", lambda *_args: None)
     monkeypatch.setattr(g, "_runtime_ledger_record", lambda **_kwargs: None)
     monkeypatch.setattr(g, "_record_lane_provenance_control", lambda *_args: None)
-    monkeypatch.setattr(g, "_ss_record_delivered", lambda *_args: None)
+    monkeypatch.setattr(
+        g, "_ss_record_delivered", lambda *_args, **_kwargs: None)
 
     monkeypatch.setattr(g, "_seal_lane_delivery", lambda *_args, **_kwargs: None)
     return rows
@@ -317,7 +318,8 @@ def test_steer_terminal_commit_precedes_delivery_and_collector_joins(
     monkeypatch.setenv("GT_LANE_ENVELOPE", "1")
     monkeypatch.setattr(g, "_ledger_note_delivery", lambda *_args: None)
     monkeypatch.setattr(g, "_record_hook_fire", lambda *_args: None)
-    monkeypatch.setattr(g, "_ss_record_delivered", lambda *_args: None)
+    monkeypatch.setattr(
+        g, "_ss_record_delivered", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(g, "_persist_receipt", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         g, "_persist_lane_producer_attestation", lambda *_args, **_kwargs: None)

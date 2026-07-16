@@ -38,7 +38,8 @@ def _capture(monkeypatch) -> list[dict]:
     monkeypatch.setattr(g, "_gt_gateway_deliveries", [])
     monkeypatch.setattr(g, "_ledger_note_delivery", lambda *_args: None)
     monkeypatch.setattr(g, "_record_hook_fire", lambda *_args: None)
-    monkeypatch.setattr(g, "_ss_record_delivered", lambda *_args: None)
+    monkeypatch.setattr(
+        g, "_ss_record_delivered", lambda *_args, **_kwargs: None)
     g._terminal_lane_controls.clear()
     g._EPISODE.delivered_dedup.clear()
     return rows
