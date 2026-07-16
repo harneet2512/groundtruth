@@ -103,7 +103,7 @@ def test_exact_delivered_gateway_winner_persists_pass_attestation(
     seal = hashlib.sha256(shipped.encode()).hexdigest()
     monkeypatch.setenv("GT_C_OUT", str(tmp_path))
 
-    gmp._persist_gateway_producer_attestation(
+    attestation = gmp._persist_gateway_producer_attestation(
         envelope, shipped, SimpleNamespace(rendered_bytes_hash=seal)
     )
 
@@ -112,3 +112,67 @@ def test_exact_delivered_gateway_winner_persists_pass_attestation(
     assert stored["delivery_seal"] == seal[:16]
     assert stored["truth_verdict"] == "PASS"
     assert stored["freshness_verdict"] == "PASS"
+    assert attestation is not None
+    assert attestation.candidate_id == envelope.dedup_key
+
+
+def test_exact_caller_attestation_records_specific_controls_not_generic_native(
+    tmp_path, monkeypatch,
+) -> None:
+    envelope = EvidenceEnvelope.build(
+        producer="caller_contract", fact_id="f", target="src/api.py",
+        evidence_type="caller_break", payload=("caller contract",),
+        provenance=(("src/caller.py", 2),), graph_revision="graph-1",
+    )
+    inputs = ProducerInputs(
+        schema=PRODUCER_INPUTS_SCHEMA,
+        evidence_type="caller_break",
+        candidate_id=envelope.dedup_key,
+        before_state=_state("src/api.py", "a"),
+        after_state=_state("src/api.py", "b"),
+        caller_rows=(CallerEvidenceRow(
+            identity="use", file="src/caller.py", line=2, confidence=0.95,
+            resolution_method="import", source_state=_state("src/caller.py", "c"),
+            edge_id=7, definition_id=3,
+        ),),
+        graph_revision="graph-1",
+        signature_changes=(SignatureChange(
+            symbol="f", edited_file="src/api.py",
+            before_parameters=("x",), after_parameters=("x", "y"),
+            old_min_params=None, old_max_params=None,
+            new_min_params=None, new_max_params=None, positional_args=None,
+        ),),
+    )
+    envelope = replace(envelope, producer_inputs=inputs)
+    from groundtruth.runtime.adapters.miniswe import render_envelope
+    shipped = "\n" + render_envelope(envelope, native=True)
+    seal = hashlib.sha256(shipped.encode()).hexdigest()
+    monkeypatch.setenv("GT_C_OUT", str(tmp_path))
+    for feature in (
+        "GT_CONTRACT_NATIVE", "GT_CONTRACT_MODE",
+        "GT_CONTRACT_BILATERAL", "GT_EVIDENCE_NATIVE",
+    ):
+        monkeypatch.setenv(feature, "1")
+    monkeypatch.setattr(gmp, "_inseam_metrics_on", lambda: True)
+    rows = []
+    monkeypatch.setattr(gmp, "_ledger_line_direct", lambda row: rows.append(row) or True)
+
+    attestation = gmp._persist_gateway_producer_attestation(
+        envelope, shipped, SimpleNamespace(rendered_bytes_hash=seal)
+    )
+    specific = gmp._record_gateway_caller_contract_controls(
+        envelope, shipped, native=True, attestation=attestation,
+    )
+    gmp._record_gateway_final_controls(
+        envelope, shipped, native=True, globally_arbitrated=False,
+        caller_specific_controls=specific,
+    )
+
+    controls = {row["control_ref"]["feature_id"]: row for row in rows}
+    assert set(controls) == {
+        "GT_CONTRACT_NATIVE", "GT_CONTRACT_MODE",
+        "GT_CONTRACT_BILATERAL", "GT_EVIDENCE_NATIVE",
+        "GT_INSEAM_METRICS",
+    }
+    assert controls["GT_CONTRACT_BILATERAL"]["participation_decision"] == "NO_EFFECT"
+    assert all(row["candidate_id"] == envelope.dedup_key for row in controls.values())

@@ -287,7 +287,7 @@ def test_f3_steer_seal_receives_base_output(monkeypatch, tmp_path):
     monkeypatch.setenv("GT_LANE_ENVELOPE", "1")
     captured = {}
 
-    def _cap(kind, text, target, *, base_output=""):
+    def _cap(kind, text, target, *, base_output="", **_delivery_metadata):
         captured["base"] = base_output
 
     monkeypatch.setattr(g, "_seal_lane_delivery", _cap)

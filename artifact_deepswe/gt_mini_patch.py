@@ -8791,7 +8791,8 @@ def _attach_exact_gateway_byte_owner(envelope, actual_event: str):
 
 def _record_gateway_final_controls(
         envelope, final_bytes: str, *, native: bool, globally_arbitrated: bool,
-        provenance_decision: str = "") -> None:
+        provenance_decision: str = "",
+        caller_specific_controls: bool = False) -> None:
     """Record only controls that actually executed on this committed gateway winner."""
     try:
         from groundtruth.runtime.fact_registry import registration_for
@@ -8804,7 +8805,7 @@ def _record_gateway_final_controls(
             return
         common = dict(candidate_bytes=final_bytes, fact_class=fact_class,
                       candidate_id=candidate_id)
-        if native:
+        if native and not caller_specific_controls:
             _control_participation_record(
                 "GT_GATEWAY_NATIVE", "mini_seam.gateway.native_render", "APPLIED",
                 reason="native_render_committed", **common)
@@ -8828,6 +8829,43 @@ def _record_gateway_final_controls(
                 "APPLIED", reason="final_delivery_observed", **common)
     except Exception:  # noqa: BLE001 -- telemetry never changes committed bytes
         return
+
+
+def _record_gateway_caller_contract_controls(
+        envelope, final_bytes: str, *, native: bool, attestation) -> bool:
+    """Persist exact caller-contract controls after its final attested delivery.
+
+    Returns true only when the canonical caller-specific control family owns the
+    native selection, allowing the generic Gateway-native receipt to abstain.
+    """
+    try:
+        from groundtruth.runtime.gateway_attestation_factory import (
+            build_caller_contract_control_participation)
+
+        controlled = frozenset(
+            feature_id for feature_id in (
+                "GT_CONTRACT_NATIVE", "GT_CONTRACT_MODE",
+                "GT_CONTRACT_BILATERAL", "GT_EVIDENCE_NATIVE",
+            )
+            if os.environ.get(feature_id) == "1"
+        )
+        records = build_caller_contract_control_participation(
+            envelope,
+            attestation=attestation,
+            shipped_bytes=final_bytes.encode("utf-8", "surrogatepass"),
+            native=native,
+            enabled_features=controlled,
+            iteration=max(0, int(globals().get("_action_count", 0) or 0)),
+        )
+        for record in records:
+            _control_participation_record(
+                record.feature_id, record.decision_site, record.decision,
+                candidate_bytes=final_bytes, fact_class=record.fact_class,
+                candidate_id=record.candidate_id, reason=record.reason,
+            )
+        return bool(records)
+    except Exception:  # noqa: BLE001 -- telemetry never changes committed bytes
+        return False
 
 
 def _record_cross_plane_final_controls(candidate, final_bytes: str) -> None:
@@ -12894,7 +12932,7 @@ def _render_gateway_envelope(render_envelope, envelope, *, native: bool) -> str:
         def_facts_renderer=None if sanitized else _gateway_def_render)
 
 
-def _persist_gateway_producer_attestation(winner, shipped: str, sealed) -> None:
+def _persist_gateway_producer_attestation(winner, shipped: str, sealed):
     """Persist typed Gateway truth only after the exact envelope wins and seals."""
     try:
         from groundtruth.runtime.attestation_store import persist_attestation
@@ -12914,8 +12952,9 @@ def _persist_gateway_producer_attestation(winner, shipped: str, sealed) -> None:
             open_event=actual_event,
         )
         persist_attestation(final, artifacts, _attestation_output_root())
+        return final
     except Exception:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
-        return
+        return None
 
 
 def _gt_gateway_pool_envelope(
@@ -12973,12 +13012,16 @@ def _gt_gateway_pool_envelope(
         )
         _gt_gateway_deliveries.append(sealed)
         _persist_receipt(sealed, kind="gateway", transition="delivered")
-        _persist_gateway_producer_attestation(_winner, _shipped, sealed)
+        _attestation = _persist_gateway_producer_attestation(
+            _winner, _shipped, sealed)
         _xsession_flush()
         _gt_gateway_append(out, _shipped)
+        _caller_controls = _record_gateway_caller_contract_controls(
+            _winner, _shipped, native=_native, attestation=_attestation)
         _record_gateway_final_controls(
             _winner, _shipped, native=_native, globally_arbitrated=True,
-            provenance_decision=provenance_decision)
+            provenance_decision=provenance_decision,
+            caller_specific_controls=_caller_controls)
         try:
             _runtime_ledger_record(
                 kind="gateway." + (_winner.evidence_type or "fact"),
@@ -13249,17 +13292,21 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
             _gt_gateway_deliveries.append(sealed)
             # B-14: persist the sealed envelope (level-1 delivered) durably.
             _persist_receipt(sealed, kind="gateway", transition="delivered")
-            _persist_gateway_producer_attestation(winner, _shipped, sealed)
+            _attestation = _persist_gateway_producer_attestation(
+                winner, _shipped, sealed)
             # SM-9c WRITE: record this fresh delivery (level-1) in the durable per-repo
             # store so a class delivered on the final turn is captured at least as delivered.
             _xsession_flush()
             # BYTE-PRESERVING append (AFTER the seal commit): observation verbatim + the
             # boundary-joined delta. Still a pure suffix (TITO law 1).
             _gt_gateway_append(out, _shipped)
+            _caller_controls = _record_gateway_caller_contract_controls(
+                winner, _shipped, native=native, attestation=_attestation)
             _record_gateway_final_controls(
                 winner, _shipped, native=native, globally_arbitrated=False,
                 provenance_decision=_provenance_decisions.get(
-                    getattr(winner, "dedup_key", "") or "", ""))
+                    getattr(winner, "dedup_key", "") or "", ""),
+                caller_specific_controls=_caller_controls)
             try:
                 _runtime_ledger_record(
                     kind="gateway." + (winner.evidence_type or "fact"),

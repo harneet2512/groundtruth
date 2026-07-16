@@ -111,7 +111,7 @@ def test_rl1_on_seals_lane_delivery(wired, monkeypatch):
     assert len(m._gt_gateway_deliveries) == delivered_before + 1
     sealed = m._gt_gateway_deliveries[-1]
     assert sealed.receipt_state == "delivered"         # level-1 receipt
-    assert sealed.evidence_type == "post_search.localize"
+    assert sealed.evidence_type == "def_partition"
     assert len(sealed.rendered_bytes_hash) == 64       # law-6 delivery evidence
     assert sealed.dedup_key in m._EPISODE.delivered_dedup   # stamp-at-seal
     assert m._gt_gateway_chain_head                     # chain advanced
