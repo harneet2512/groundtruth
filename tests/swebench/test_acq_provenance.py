@@ -259,8 +259,10 @@ def test_acq_row_preserves_source_block_and_actual_producer_seal_identities(tmp_
         "metrics.localization_proof[0].acquisition_sources.freshness_basis"
     ]
 
-    assert row["source_contribution_correct"] is True
-    assert row["timing_inherited_from_fact_delivery"] is True
+    # A source-to-receipt join is not source truth, chronological timing, or a
+    # causal fair probe.  Those remain unknown until their own live authorities join.
+    assert row["source_contribution_correct"] is None
+    assert row["timing_inherited_from_fact_delivery"] is None
     assert row["source_causal_fair_probe"] is None
 
 

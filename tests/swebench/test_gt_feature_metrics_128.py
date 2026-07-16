@@ -397,8 +397,8 @@ def test_collect_task_wires_real_brief_receipt_into_acq_master(tmp_path: Path) -
     assert acq_readiness["gates"] == {
         "supported_fact_delivery_join": True,
         "candidate_local_contribution": True,
-        "source_contribution_correct": True,
-        "timing_inherited_from_fact_delivery": True,
+        "source_contribution_correct": None,
+        "timing_inherited_from_fact_delivery": None,
         "source_causal_fair_probe": None,
     }
     assert acq_readiness["support_complete"] is False

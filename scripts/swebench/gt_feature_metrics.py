@@ -2089,23 +2089,19 @@ def _internal_fact_support_readiness(
         value = source_record.get(field)
         return value if isinstance(value, bool) else None
 
-    _support_correct = producer_gate("source_contribution_correct")
-    _support_causal = producer_gate("source_causal_fair_probe")
-    _is_live = bool(
-        runtime_receipt and candidate_bound and downstream_join
-        and isinstance(_support_correct, bool) and _support_correct
-    )
     return _typed_readiness(
         "internal_support",
         {
             "runtime_support_receipt": True if runtime_receipt else None,
             "supported_candidate_id": True if candidate_bound else None,
             "downstream_decision_join": True if downstream_join else None,
-            "support_correct": _support_correct,
-            "support_causal_fair_probe": _support_causal,
+            "support_correct": producer_gate("source_contribution_correct"),
+            "support_causal_fair_probe": producer_gate("source_causal_fair_probe"),
         },
         gate_names=_INTERNAL_SUPPORT_GATE_NAMES,
-        live_witness=_is_live,
+        # Offline evidence never sets the live bit; a receipt-chain join does not
+        # distinguish a paid trajectory from a replay. Needs a live-run receipt join.
+        live_witness=False,
         extra={
             "fact_class": fact_class,
             "source_artifact": ledger_artifact,
@@ -2175,25 +2171,24 @@ def _acquisition_readiness(
         and isinstance(receipt, int) and not isinstance(receipt, bool)
         and receipt >= 2
     )
-    source_correct = record.get("source_contribution_correct")
-    timing = record.get("timing_inherited_from_fact_delivery")
-    fair_probe = record.get("source_causal_fair_probe")
-    is_live = bool(
-        joined
-        and isinstance(source_correct, bool) and source_correct
-        and isinstance(timing, bool) and timing
-    )
     return _typed_readiness(
         "support",
         {
             "supported_fact_delivery_join": joined,
             "candidate_local_contribution": candidate_local,
-            "source_contribution_correct": source_correct if isinstance(source_correct, bool) else None,
-            "timing_inherited_from_fact_delivery": timing if isinstance(timing, bool) else None,
-            "source_causal_fair_probe": fair_probe if isinstance(fair_probe, bool) else None,
+            # Source truth, inherited timing, and causal contribution require
+            # producer-owned fields/ablation that brief receipt v1 does not carry.
+            # A collector shape-validation is NOT source truth (the 47dacfd0f class);
+            # these stay None until typed producer/adjudicator evidence is joined.
+            "source_contribution_correct": None,
+            "timing_inherited_from_fact_delivery": None,
+            "source_causal_fair_probe": None,
         },
         gate_names=_SUPPORT_GATE_NAMES,
-        live_witness=is_live,
+        # Offline evidence never sets the live bit (gt_gt.md execution ledger).
+        # Gates 1-6 passing does not distinguish a paid trajectory from a replay;
+        # live_witness needs an explicit live-run receipt join, not gate inference.
+        live_witness=False,
     )
 
 
@@ -2851,27 +2846,20 @@ def collect_task(
                 ledger_artifact=ledger_artifact,
             )
         else:
-            _bp = _fact_delivery_byte_proven(fact_class, rows, cons_ledger)
-            _lc = lifecycle
-            _ack = _val(_lc.get("receipt_level"))
-            _is_live = bool(
-                _bp
-                and _val(_lc.get("delivered")) is True
-                and _val(_lc.get("truth_valid")) is True
-                and _val(_lc.get("authority_valid")) is True
-                and _val(_lc.get("stale")) is not True
-                and _val(_lc.get("expired_late")) is not True
-                and isinstance(_ack, int) and _ack >= 2
-                and leak_gate is True
-                and dose_gate is True
-            )
             fact_readiness[fact_class] = ss_gate_readiness(
                 lifecycle,
-                byte_proven=_bp,
+                byte_proven=_fact_delivery_byte_proven(
+                    fact_class, rows, cons_ledger
+                ),
                 leak_free=leak_gate,
                 dose_ok=dose_gate,
+                # A fair probe is a seal-bound causal RESULT (matched/shadow),
+                # never inferred from instrument presence or gate quality.
                 fair_probe=None,
-                live_witness=_is_live,
+                # Offline evidence never sets the live bit: gates 1-6 passing does
+                # not distinguish a paid trajectory from a replay/fixture. This
+                # stays False until an explicit live-run receipt is joined.
+                live_witness=False,
             )
 
     endpoints = behavioural_endpoints(timeline)

@@ -9062,11 +9062,17 @@ def _record_gateway_final_controls(
             _control_participation_record(
                 "GT_INSEAM_METRICS", "mini_seam.inseam_metrics.fact_observation",
                 "APPLIED", reason="final_delivery_observed", **common)
-        if os.environ.get("GT_L6_FRESH") == "1" and _l6_graph_generation > 0:
+        # GT_L6_FRESH participation binds to the SELECTION the site declares: the
+        # writable work copy was the graph this turn's producers read (_db_path
+        # returned it — _l6_work_db set iff staging succeeded). The reindex
+        # generation is carried as information only; it is NOT the guard — a
+        # generation count cannot prove the producer read post-reindex bytes
+        # (that join is the L6 carrier's job, still unbuilt).
+        if os.environ.get("GT_L6_FRESH") == "1" and _l6_work_db:
             _control_participation_record(
                 "GT_L6_FRESH", "mini_seam.graph_db.fresh_copy_selection",
                 "APPLIED",
-                reason=f"generation_{_l6_graph_generation}",
+                reason=f"workcopy_selected_generation_{_l6_graph_generation}",
                 **common)
     except Exception:  # noqa: BLE001 -- telemetry never changes committed bytes
         return
@@ -9129,11 +9135,17 @@ def _record_cross_plane_final_controls(candidate, final_bytes: str) -> None:
             _control_participation_record(
                 "GT_SS_ARBITER_V2", "mini_seam.global_arbiter.v2_selection",
                 "NO_EFFECT", reason="winner_preserved", **common)
-        if os.environ.get("GT_L6_FRESH") == "1" and _l6_graph_generation > 0:
+        # GT_L6_FRESH participation binds to the SELECTION the site declares: the
+        # writable work copy was the graph this turn's producers read (_db_path
+        # returned it — _l6_work_db set iff staging succeeded). The reindex
+        # generation is carried as information only; it is NOT the guard — a
+        # generation count cannot prove the producer read post-reindex bytes
+        # (that join is the L6 carrier's job, still unbuilt).
+        if os.environ.get("GT_L6_FRESH") == "1" and _l6_work_db:
             _control_participation_record(
                 "GT_L6_FRESH", "mini_seam.graph_db.fresh_copy_selection",
                 "APPLIED",
-                reason=f"generation_{_l6_graph_generation}",
+                reason=f"workcopy_selected_generation_{_l6_graph_generation}",
                 **common)
     except Exception:  # noqa: BLE001 -- metadata cannot change delivery
         return

@@ -203,6 +203,10 @@ CONTROL_DECISION_CONTRACTS = {
     ),
     "GT_SS_ACK_FORM": _mediator(
         "GT_SS_ACK_FORM",
+        # form_selection is the model-visible preamble swap in gt_agent (pre-agent,
+        # outside the runtime ledger). It is declared and currently UNWRITTEN — an
+        # honest dark site awaiting a pre-agent sidecar writer, not deleted to fit.
+        "mini_seam.acknowledgment.form_selection",
         "pretask.v1r_brief.ack_requirement_filter",
     ),
     "GT_SS_ACK_METRICS": _mediator(

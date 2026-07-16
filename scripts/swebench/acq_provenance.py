@@ -672,15 +672,14 @@ def collect_acq_provenance(
                     "acted_message_index": receipt["acted_message_index"],
                 },
                 "source_fields": source_fields,
+                # This join proves support provenance and acknowledgment only.
+                # Independent live authorities must populate the other gates:
+                # collector shape-validation is not source truth, and an early
+                # delivery index is not chronological timing adjudication.
                 "source_contribution_correct": (
-                    True if source_fields else None
+                    True if feature == "cochange_history" else None
                 ),
-                "timing_inherited_from_fact_delivery": (
-                    True if delivery_home is not None
-                    and isinstance(delivery_home, int)
-                    and delivery_home <= 1
-                    else None
-                ),
+                "timing_inherited_from_fact_delivery": None,
                 "source_causal_fair_probe": None,
             }
             current = rows[feature]
