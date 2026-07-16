@@ -31,7 +31,13 @@ def _base(monkeypatch, tmp_path):
 
 def _capture(monkeypatch):
     recs: list = []
-    monkeypatch.setattr(g, "_runtime_ledger_record", lambda **k: recs.append(k))
+
+    def record_committed(**row) -> bool:
+        """Capture a row while faithfully reporting a durable write."""
+        recs.append(row)
+        return True
+
+    monkeypatch.setattr(g, "_runtime_ledger_record", record_committed)
     return recs
 
 

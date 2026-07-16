@@ -288,9 +288,11 @@ GT_AE_ARGS=(
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the
   # container (gap G11). Point them into the writable mount so they survive.
+  --ae "GT_C_OUT=${GT_C_OUT}"
   --ae "GT_ORACLE_EVENTS=${GT_ORACLE_EVENTS:-${GT_C_OUT}/gt_oracle_events.jsonl}"
   --ae "GT_RUNTIME_LEDGER=${GT_RUNTIME_LEDGER:-${GT_C_OUT}/gt_runtime_ledger.jsonl}"
   --ae "GT_HOOK_FIRE_COUNTS=${GT_HOOK_FIRE_COUNTS:-${GT_C_OUT}/gt_hook_fire_counts.json}"
+  --ae "GT_L6_REVISION_ATTESTATIONS=${GT_L6_REVISION_ATTESTATIONS:-${GT_C_OUT}/gt_l6_revision_attestations.jsonl}"
 
   # ── SM-9c cross-session store DIR (BUG-2, 2026-07-12) -> host-mounted /gt_out ──
   # The durable per-repo causal-consumption ledger (xsession_memory) needs a WRITABLE

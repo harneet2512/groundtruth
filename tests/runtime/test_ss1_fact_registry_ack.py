@@ -21,11 +21,11 @@ from groundtruth.runtime import fact_registry as fr
 # --------------------------------------------------------------------------- #
 def test_ack_expected_metadata_present():
     # every registration carries a strict-bool ack_expected; every §1 class declares a
-    # receipt_predicate, so an ack IS expected -> all True.
+    # receipt_predicate; only delivery-role facts expect a model acknowledgment.
     for fc in fr.all_fact_classes():
         reg = fr.registration(fc)
         assert isinstance(reg.ack_expected, bool), fc
-        assert reg.ack_expected is True, fc
+        assert reg.ack_expected is (reg.fact_role == fr.FACT_ROLE_DELIVERY), fc
         assert reg.receipt_predicate  # the ack has a named non-reacquisition receipt
 
 

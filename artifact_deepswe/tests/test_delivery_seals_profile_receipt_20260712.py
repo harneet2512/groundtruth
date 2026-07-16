@@ -82,11 +82,14 @@ def test_no_content_row_unchanged(tmp_path, monkeypatch):
 # 1b. DELIVERY SEALS — call-site wiring (mutation-(a) sentinel)
 # ---------------------------------------------------------------------------
 def test_gate_winner_site_seals_the_block_not_the_whole_observation(monkeypatch):
-    """The gate-winner delivery threads the STEER BLOCK (win_text) as content — NOT the whole
-    post-append observation. Base observation is non-empty so block != whole-obs; a mutation that
-    passes out['output'] instead of win_text is caught here (the captured content would differ)."""
+    """Seal the exact rendered suffix, including its observation join boundary."""
     calls: list[dict] = []
-    monkeypatch.setattr(g, "_runtime_ledger_record", lambda **kw: calls.append(kw))
+
+    def record_committed(**row) -> bool:
+        calls.append(row)
+        return True
+
+    monkeypatch.setattr(g, "_runtime_ledger_record", record_committed)
     monkeypatch.setattr(g, "_GT_BASELINE", False)
     monkeypatch.setattr(g, "_last_gate_winner_kind", "l5.no_test")
     monkeypatch.setattr(g, "_last_gate_winner_hash", "")
@@ -104,10 +107,9 @@ def test_gate_winner_site_seals_the_block_not_the_whole_observation(monkeypatch)
                  or getattr(c.get("outcome"), "value", None) == "delivered"]
     assert delivered, "gate-winner did not record a DELIVERED row"
     d = delivered[-1]
-    assert "content" in d, "delivery site must thread the block as content="
-    assert d["content"] == win_text, (
-        "site must seal the BLOCK (win_text), not the whole observation "
-        f"({out['output']!r})")
+    shipped_suffix = out["output"][len(base):]
+    assert d["content"] == shipped_suffix == "\n" + win_text
+    assert d["chars"] == len(shipped_suffix)
     # the block is strictly SHORTER than the whole observation here — proves it's block-scoped
     assert d["content"] != out["output"]
     # and the model-facing append itself is byte-correct (base preserved as a pure prefix)
