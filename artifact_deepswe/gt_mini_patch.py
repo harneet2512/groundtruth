@@ -5335,6 +5335,27 @@ def _edited_symbols_for_obligations() -> "set[str]":
     return set(_oracle_edited_tokens) | _edited_symbol_spans()
 
 
+# B-LIN REV2 (2026-07-16): per-payload class of the POLYMORPHIC l3b.evidence lane. The lane
+# mixes CALLER-direction contract evidence ([CALLERS] + caller-direction [WITNESS]) with
+# non-caller blocks — CALLEE contracts (_edit_target_callee_contracts, the post_edit primary),
+# CALLEE-direction [WITNESS] lines, and [SIBLINGS] (no registered fact class). Only a payload
+# built EXCLUSIVELY from caller-direction contract blocks is a genuine ``caller_contract`` FACT;
+# anything mixed stays quiet (correct-or-quiet). The verdict is decided at COMPOSITION time in
+# ``_evidence_body`` from WHICH builders contributed (never by sniffing rendered bytes) and
+# recorded in ``_l3b_pure_caller_hashes`` keyed by the delivered payload's content hash, so the
+# delivery seam retrieves the build-time verdict without re-inspecting content.
+_l3b_pure_caller_hashes: set[str] = set()
+# transient composition verdict of the LAST _evidence_body call (single-threaded seam); read by
+# _evidence immediately after and recorded keyed by the FINAL delivered text.
+_l3b_last_pure_caller: bool = False
+
+
+def _l3b_content_key(text: str) -> str:
+    """Stable 16-hex key over a delivered l3b payload — the LOOKUP key for its build-time
+    composition verdict (``_l3b_pure_caller_hashes``), never itself a content classification."""
+    return hashlib.sha256((text or "").encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
 def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
     """Build the <gt-evidence> body from graph.db (pure SQL, cross-language).
 
@@ -5347,6 +5368,12 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
     This replaces the old gt_hook.py understand/verify shell-out, which was
     Python-ast-only (.py-filtered at gt_hook.py:4110) and therefore EMPTY on
     every Go/Rust/TS/JS file. graph.db is tree-sitter over ALL languages."""
+    # B-LIN REV2: reset this call's composition verdict. It becomes True ONLY if this payload
+    # ends up built EXCLUSIVELY from caller-direction contract blocks (see the flags below).
+    global _l3b_last_pure_caller
+    _l3b_last_pure_caller = False
+    _saw_caller_block = False       # >=1 caller-direction contract block ([CALLERS] / caller [WITNESS])
+    _saw_noncaller_block = False    # any callee contract / callee [WITNESS] / [SIBLINGS] block
     # 2026-06-10 fact-filter: a vendored/minified/generated file gets NO
     # evidence at all (correct-or-quiet — its edges are not facts).
     if _is_delivery_excluded(rel, root):
@@ -5384,6 +5411,7 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
                                                     repo_root=code_root):
                 if cl not in lines:
                     lines.append(cl)
+                    _saw_noncaller_block = True  # a callee contract is NOT caller_contract
         # Resolved cross-file witnesses (caller + callee FACTS) for both kinds.
         for w in _resolved_witnesses_for_file(con, dbrel, code_root, max_each=2):
             arrow = "called by" if w["direction"] == "caller" else "calls"
@@ -5397,6 +5425,12 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
             ln = f"[WITNESS] {sym} {arrow} -> {loc}{snippet}".rstrip()
             if ln not in lines:
                 lines.append(ln)
+                # a caller-direction witness ("X called by -> ...") is caller_contract; a
+                # callee-direction witness ("X calls -> ...") is a def/usage fact, not caller.
+                if w["direction"] == "caller":
+                    _saw_caller_block = True
+                else:
+                    _saw_noncaller_block = True
         # Caller-contract line for the viewed file (facts-first, unverified hint
         # only when no fact exists). Mainly meaningful on a view.
         if kind == "post_view":
@@ -5405,11 +5439,13 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
                 ln = f"[CALLERS] {cc}"
                 if ln not in lines:
                     lines.append(ln)
+                    _saw_caller_block = True  # caller contract = caller-direction
             sib = _sibling_context(con, dbrel, func_names)
             if sib:
                 ln = f"[SIBLINGS] {sib}"
                 if ln not in lines:
                     lines.append(ln)
+                    _saw_noncaller_block = True  # siblings have NO registered fact class
     except Exception:  # noqa: BLE001 -- correct-or-quiet
         return ""
     finally:
@@ -5417,6 +5453,10 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
             con.close()
         except Exception:  # noqa: BLE001
             pass
+    # B-LIN REV2 verdict: PURE caller_contract iff >=1 caller-direction block AND zero
+    # non-caller blocks. Conservative — any callee/sibling contribution disqualifies the
+    # whole (single, sealed) payload from a caller_contract stamp.
+    _l3b_last_pure_caller = bool(_saw_caller_block and not _saw_noncaller_block)
     return "\n".join(lines[:6]).strip()
 
 
@@ -5526,8 +5566,14 @@ def _evidence(cmd: str) -> str:
             decision="APPLIED",
             reason="native_evidence_render_selected",
         )
-        return result
-    return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
+    else:
+        result = f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
+    # B-LIN REV2: record THIS payload's build-time composition verdict keyed by the EXACT
+    # delivered text, so the delivery seam stamps caller_contract lineage only on a
+    # pure-caller-direction l3b payload. Host-side only; no model-facing byte changes.
+    if _l3b_last_pure_caller:
+        _l3b_pure_caller_hashes.add(_l3b_content_key(result))
+    return result
 
 
 _contract_seen: set[str] = set()
@@ -8891,6 +8937,30 @@ _LANE_REGISTERED_PRODUCERS: dict[str, tuple[str, str]] = {
     "obligation.unexercised": ("spec", "obligation_unexercised"),
     "detect.loop": ("governor", "recovery"),
     "detect.coherence": ("ss_coherence_v2", "coherence_collapse"),
+    # B-LIN (2026-07-16): the legacy caller-contract data plane.
+    #
+    # l3.contract is PURE caller_contract — the ``[SIGNATURE]`` / ``[CALLERS] N verified
+    # caller(s) ... preserve this interface`` / ``[RAISES]`` / ``[RETURNS]`` / ``[CONSUMED]``
+    # capsule (``_graph_contract_block``): every line serves "how to modify a fn". It is the
+    # ORIGINAL contract_map-family producer, NOT the SM-2b graph gateway ``caller_break``
+    # (producer ``caller_contract``) that REPLACES it — so the honest registered identity is
+    # ``contract_map``/``caller_contract``. Always eligible (no per-payload gate).
+    #
+    # l3b.evidence is POLYMORPHIC and must NOT be blanket-stamped (B-LIN REV2, LIPI bounce):
+    # ``_evidence_body`` composes CALLER-direction contract evidence ([CALLERS], caller-
+    # direction [WITNESS]) TOGETHER WITH non-caller blocks — CALLEE contracts
+    # (``_edit_target_callee_contracts``, the post_edit PRIMARY payload), CALLEE-direction
+    # [WITNESS] lines, and [SIBLINGS] (which has NO registered fact class at all). Typing a
+    # callee/sibling/mixed row ``caller_contract`` would bind it to a receipt it cannot satisfy
+    # (``preserved_caller_contract``) and inflate the caller_contract delivery share. So the
+    # l3b.evidence stamp is GATED PER PAYLOAD in ``_lane_registered_lineage``: it fires ONLY
+    # when this exact delivered payload was classified at COMPOSITION time (in ``_evidence_body``,
+    # from which builders contributed — never by sniffing rendered bytes) as EXCLUSIVELY
+    # caller-direction contract evidence. Any non-caller block -> quiet (untyped, exactly like
+    # today). Both entries stamp additive audit lineage only (``_lane_delivery_extra`` passes
+    # ``selected_lineage=None``), so model bytes / seal / dedup are unchanged.
+    "l3.contract": ("contract_map", "caller_contract"),
+    "l3b.evidence": ("contract_map", "caller_contract"),
 }
 
 _LANE_INTRINSIC_ACTUAL_EVENTS: dict[str, str] = {
@@ -8900,14 +8970,26 @@ _LANE_INTRINSIC_ACTUAL_EVENTS: dict[str, str] = {
 }
 
 
-def _lane_registered_lineage(kind: str, event):
-    """Build typed lineage from exact lane producer authority, or stay quiet."""
+def _lane_registered_lineage(kind: str, event, *, text: "str | None" = None):
+    """Build typed lineage from exact lane producer authority, or stay quiet.
+
+    ``text`` is the exact delivered payload. It gates the POLYMORPHIC ``l3b.evidence`` lane
+    (B-LIN REV2): the caller_contract stamp fires only when THIS payload was classified at
+    composition time as pure caller-direction contract evidence (recorded in
+    ``_l3b_pure_caller_hashes``). A mixed/callee/sibling payload — or one whose verdict is
+    unknown (text absent) — stays quiet. Other lanes ignore ``text``."""
     intrinsic = None
     if kind == "verify.horizon.executed":
         intrinsic = globals().get("_last_verify_executed_identity")
     binding = (intrinsic[:2] if intrinsic is not None
                else _LANE_REGISTERED_PRODUCERS.get(kind or ""))
     if binding is None:
+        return None
+    # B-LIN REV2 per-payload gate: l3b.evidence is only caller_contract when its build-time
+    # composition verdict says so. Correct-or-quiet: unknown text or a non-pure payload -> None.
+    if kind == "l3b.evidence" and (
+            not isinstance(text, str)
+            or _l3b_content_key(text) not in _l3b_pure_caller_hashes):
         return None
     actual_event = (intrinsic[2] if intrinsic is not None else
                     _LANE_INTRINSIC_ACTUAL_EVENTS.get(kind or "")
@@ -8975,7 +9057,9 @@ def _lane_delivery_extra(
     if member:
         return _exact_profile_delivery_extra(member, kind, text, target, event)
     selected_lineage = lineage
-    lineage = lineage or _lane_registered_lineage(kind, event)
+    # Thread the exact delivered payload so the l3b.evidence per-payload gate (B-LIN REV2)
+    # can consult its build-time composition verdict. Other lanes ignore ``text``.
+    lineage = lineage or _lane_registered_lineage(kind, event, text=text)
     # Only a producer-selected structured identity changes the envelope identity.
     # Legacy lane lineage remains an additive audit sidecar, preserving its exact
     # historical lane dedup/seal contract.
