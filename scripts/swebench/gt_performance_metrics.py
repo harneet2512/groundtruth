@@ -741,6 +741,40 @@ def build_metric_applicability(
             if n_contract_warnings > 0 else "no caller-contract warning was delivered",
         )
 
+        # p2p_regression_rate and caller_breakage_count are nullable verifier-derived
+        # metrics.  Emit a non-applicability contract ONLY when a VALID verifier truth
+        # supplies the objective denominator: absent/invalid verifier truth is a
+        # collection failure that must stay UNMEASURED (no contract), never laundered
+        # into N/A.  Applicability keys on the verifier's own p2p denominator and
+        # caller-join completeness — never on the null value — so a value that should
+        # exist but is missing (applicable=True + null) fails closed as UNMEASURED.
+        if bool(interface.get("_verifier_truth_valid")):
+            p2p_total = interface.get("_p2p_total")
+            p2p_has_denominator = (
+                isinstance(p2p_total, int) and not isinstance(p2p_total, bool)
+                and p2p_total > 0
+            )
+            contracts["interface_preservation"]["p2p_regression_rate"] = _applicability(
+                p2p_has_denominator,
+                "verifier_truth_valid and p2p_total > 0",
+                "a valid verifier truth reports a PASS_TO_PASS denominator"
+                if p2p_has_denominator
+                else "a valid verifier truth reports no PASS_TO_PASS denominator",
+            )
+            caller_join_complete = bool(interface.get("_caller_join_complete"))
+            caller_reason = interface.get("_caller_breakage_unmeasured_reason")
+            contracts["interface_preservation"]["caller_breakage_count"] = _applicability(
+                caller_join_complete,
+                "caller_aware_verifier_join_complete",
+                "the caller-aware verifier join completed"
+                if caller_join_complete
+                else (
+                    caller_reason
+                    if isinstance(caller_reason, str) and caller_reason.strip()
+                    else "caller_aware_verifier_join_absent"
+                ),
+            )
+
         edit_quality = performance.get("edit_quality") or {}
         total_edits = int(edit_quality.get("_total_edits") or 0)
         contracts.setdefault("edit_quality", {})["edit_revert_rate"] = _applicability(
@@ -1459,6 +1493,41 @@ def verifier_interface_metrics(truth_data: object) -> dict[str, int | float | No
     return result
 
 
+def verifier_interface_denominators(truth_data: object) -> dict[str, object]:
+    """Objective verifier-truth denominators for interface applicability.
+
+    ``p2p_regression_rate`` and ``caller_breakage_count`` are nullable
+    verifier-derived metrics.  A null on either can mean two different things —
+    a legitimate not-applicable state (no PASS_TO_PASS denominator; the
+    caller-aware join was absent) or a genuine collection failure.  The
+    difference is decided by the verifier's OWN machine-readable declarations
+    (``valid`` / ``p2p_total`` / ``caller_join_complete``), never by the null
+    value itself, so a missing-but-should-exist value can never launder into
+    N/A.  These underscore markers are consumed by ``build_metric_applicability``
+    and ignored by the mandatory-metric contract.
+    """
+    markers: dict[str, object] = {
+        "_verifier_truth_valid": False,
+        "_p2p_total": None,
+        "_caller_join_complete": False,
+        "_caller_breakage_unmeasured_reason": None,
+    }
+    if not isinstance(truth_data, dict):
+        return markers
+    verifier = truth_data.get("verifier_truth")
+    if not isinstance(verifier, dict) or verifier.get("schema") != "gt.verifier_truth.v1":
+        return markers
+    markers["_verifier_truth_valid"] = verifier.get("valid") is True
+    total = verifier.get("p2p_total")
+    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+        markers["_p2p_total"] = total
+    markers["_caller_join_complete"] = verifier.get("caller_join_complete") is True
+    reason = verifier.get("caller_breakage_unmeasured_reason")
+    if isinstance(reason, str) and reason.strip():
+        markers["_caller_breakage_unmeasured_reason"] = reason
+    return markers
+
+
 # ---------------------------------------------------------------------------
 # Section 4: Scope Completeness
 # ---------------------------------------------------------------------------
@@ -2012,6 +2081,7 @@ def compute_performance_metrics(
         s2 = _compute_edit_quality(timeline, gold_files, submission)
         s3 = _compute_interface_preservation(timeline, consumption_ledger)
         s3.update(verifier_interface_metrics(verifier_truth))
+        s3.update(verifier_interface_denominators(verifier_truth))
         s4 = _compute_scope_completeness(timeline, gold_files)
         s5 = _compute_stuck_recovery(timeline, consumption_ledger)
         s6 = _compute_verify_before_submit(timeline, consumption_ledger)
