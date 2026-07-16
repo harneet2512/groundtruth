@@ -167,6 +167,17 @@ def test_all_eight_native_lane_controls_stage_only_at_real_decisions(
         g, "_query_scope", lambda _rel: ["src/mod.py", "src/peer.py"])
     monkeypatch.setattr(g, "_consensus_scope_native", lambda _neigh: "scope")
     assert g._consensus_scope_block("src/mod.py") == "scope"
+    assert "GT_SCOPE_NATIVE" not in {feature for _kind, feature in calls}
+
+    from groundtruth.runtime.gateway import SearchScopeRelation, SearchScopeSelection
+    from groundtruth.runtime.native_render import render_related_files_native
+    scope_selection = SearchScopeSelection("rev", (
+        SearchScopeRelation("src/peer.py", "import", 1.0, 7),
+    ))
+    scoped, selected = g._splice_search_scope(
+        "src/mod.py:8:symbol", scope_selection, render_related_files_native)
+    assert selected == scope_selection
+    assert "related file to inspect" in scoped
 
     monkeypatch.setenv("GT_NUDGE_NATIVE", "1")
     g._nudge_native(

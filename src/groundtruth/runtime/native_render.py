@@ -774,6 +774,31 @@ def render_ranked_list_native(
     return render_def_rows_native(rows, test_files=test_files)
 
 
+def render_related_files_native(
+    relations: Any,
+    *,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    """Render certified scope relations as hedged search-time continuations.
+
+    These rows share the localization dose; they are suggestions to inspect, not
+    edit obligations.  The producer owns certification and revision binding.  The
+    renderer independently enforces the normal path-identity firewall.
+    """
+    tf = {_norm(t) for t in (test_files or [])}
+    out: list[str] = []
+    for relation in relations or ():
+        path = _norm(_cap(getattr(relation, "related_file", "")))
+        method = str(getattr(relation, "resolution_method", "") or "").strip().lower()
+        if not path or not method or _is_test_path(path, tf):
+            continue
+        row = _final_scrub(
+            f"{path}: note: related file to inspect (certified {method} relation)", tf)
+        if row.strip():
+            out.append(row)
+    return "\n".join(out)
+
+
 def render_body_concept_native(
     rows: Any,
     *,

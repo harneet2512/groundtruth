@@ -4485,6 +4485,8 @@ class _PostSearchDecision:
     runtime_producer_id: str = ""
     evidence_type: str = ""
     actual_event: str = ""
+    scope_graph_revision: str = ""
+    scope_relations: tuple[tuple[str, str, float, int], ...] = ()
 
     def lineage(self):
         """Build typed lineage only for an exact registered producer binding."""
@@ -4504,6 +4506,18 @@ class _PostSearchDecision:
         except Exception:  # noqa: BLE001 -- metadata cannot change delivery
             return None
 
+    def delivery_extra(self) -> dict:
+        if not (self.text and self.scope_graph_revision and self.scope_relations):
+            return {}
+        return {
+            "graph_revision": self.scope_graph_revision,
+            "scope_relations": [
+                {"related_file": path, "resolution_method": method,
+                 "confidence": confidence, "edge_id": edge_id}
+                for path, method, confidence, edge_id in self.scope_relations
+            ],
+        }
+
 
 _last_post_search_decision = contextvars.ContextVar(
     "gt_post_search_decision", default=_PostSearchDecision())
@@ -4511,12 +4525,16 @@ _last_post_search_decision = contextvars.ContextVar(
 
 def _post_search_decision(
         text: str = "", runtime_producer_id: str = "",
-        evidence_type: str = "") -> _PostSearchDecision:
+        evidence_type: str = "", *, scope_graph_revision: str = "",
+        scope_relations: tuple[tuple[str, str, float, int], ...] = (),
+        ) -> _PostSearchDecision:
     return _PostSearchDecision(
         text=text,
         runtime_producer_id=runtime_producer_id if text else "",
         evidence_type=evidence_type if text else "",
         actual_event="search_result" if text and evidence_type else "",
+        scope_graph_revision=scope_graph_revision if text else "",
+        scope_relations=scope_relations if text else (),
     )
 
 
@@ -4591,8 +4609,15 @@ def _search_localize_decision(
         # accounting above ALREADY ran; _loc_reslot_block adds NO _ledger_record (single record)
         # and no _search_pattern-keyed answered-stamp (sym is None -> the D-4 delivery stamp
         # skips). Off / spent / no-rows / any fault -> "" == today's abstain (byte-identical).
+        block, scope_selection = _loc_reslot_payload()
+        relations = tuple(
+            (row.related_file, row.resolution_method, row.confidence, row.edge_id)
+            for row in (getattr(scope_selection, "relations", ()) or ()))
         return _post_search_decision(
-            _loc_reslot_block(), "ranked_localization", "localization")
+            block, "ranked_localization", "localization",
+            scope_graph_revision=(getattr(scope_selection, "graph_revision", "")
+                                  if relations else ""),
+            scope_relations=relations)
 
     db = _db_path()
     if not db or not os.path.isfile(db):
@@ -4720,7 +4745,25 @@ def _loc_reslot_on() -> bool:
             "", "0", "false", "no", "off")
 
 
-def _loc_reslot_block() -> str:
+def _splice_search_scope(block: str, selection, renderer) -> tuple[str, object | None]:
+    """Append certified scope rows inside the existing localization dose."""
+    if not block or os.environ.get("GT_SCOPE_NATIVE") != "1":
+        return block, None
+    scope_block = renderer(getattr(selection, "relations", ()))
+    if not scope_block:
+        return block, None
+    result = block + "\n" + scope_block
+    _stage_terminal_lane_control(
+        "post_search.localize", result,
+        feature_id="GT_SCOPE_NATIVE",
+        decision_site="mini_seam.scope.native_render",
+        decision="APPLIED",
+        reason="certified_search_scope_shaped_localization",
+    )
+    return result, selection
+
+
+def _loc_reslot_payload():
     """GT's RANKED localization ANSWER as the post_search lattice's single dose (T0->T2 GO-LIVE).
     Called ONLY from ``_search_localize_block``'s ABSTAIN branch (a non-bare-symbol grep). Builds
     a minimal ``GatewayState`` over the SAME ``_EPISODE`` the (live-excluded) Gateway path uses,
@@ -4734,24 +4777,38 @@ def _loc_reslot_block() -> str:
     "" (byte-identical abstain). The latch is SPENT only on a non-empty delivered block."""
     global _loc_reslot_delivered
     if _GT_BASELINE or _loc_reslot_delivered or not _loc_reslot_on():
-        return ""
+        return "", None
     try:
         from groundtruth.runtime.gateway import GatewayState as _GatewayState
+        from groundtruth.runtime.gateway import SearchScopeSelection as _ScopeSelection
+        from groundtruth.runtime.gateway import _certified_search_scope as _scope
         from groundtruth.runtime.gateway import _ranked_localization_rows as _rlr
         from groundtruth.runtime.native_render import render_ranked_list_native as _rrl
+        from groundtruth.runtime.native_render import render_related_files_native as _rrs
     except Exception:  # noqa: BLE001 — product package absent in-container -> quiet
-        return ""
+        return "", None
+    empty_scope = _ScopeSelection()
     try:
         st = _GatewayState(graph_db=_db_path(), repo_root=_root(),
                            issue_text=_issue_text(), episode=_EPISODE)  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
         rows = _rlr(st)  # episode-memoized; SHARED with the (live-excluded) Gateway path
         block = _rrl(rows) if rows else ""
+        selection = empty_scope
+        if block and os.environ.get("GT_SCOPE_NATIVE") == "1":
+            selection = _scope(st, rows[0][0])
+            block, selected = _splice_search_scope(block, selection, _rrs)
+            selection = selected or empty_scope
     except Exception:  # noqa: BLE001 — a localizer / render fault degrades to no delivery
-        return ""
+        return "", empty_scope
     if not block or not block.strip():
-        return ""  # correct-or-quiet: no signal-bearing row -> byte-identical abstain
+        return "", empty_scope
     _loc_reslot_delivered = True  # SPEND the once-per-attempt latch at production
-    return block
+    return block, selection
+
+
+def _loc_reslot_block() -> str:
+    """Compatibility string surface for the single localization dose."""
+    return _loc_reslot_payload()[0]
 
 
 def _compact_sig(sig: str) -> str:
@@ -8911,7 +8968,8 @@ def _exact_profile_delivery_extra(
 
 
 def _lane_delivery_extra(
-        kind: str, text: str, target: str, event, *, lineage=None) -> "dict | None":
+        kind: str, text: str, target: str, event, *, lineage=None,
+        identity=None) -> "dict | None":
     """Delivery-row identity plus honest exact-profile producer lineage."""
     member = _LANE_PROFILE_MEMBER_OWNERS.get(kind or "")
     if member:
@@ -8927,6 +8985,11 @@ def _lane_delivery_extra(
     # binding may attach FACT lineage to delivered bytes.
     if lineage is not None:
         extra.update(_feature_lineage_extra(lineage))
+    try:
+        if identity is not None and getattr(identity, "text", None) == text:
+            extra.update(identity.delivery_extra())
+    except Exception:  # noqa: BLE001 -- malformed metadata stays absent
+        pass
     return extra
 
 
@@ -11024,14 +11087,6 @@ def _consensus_scope_block(rel: str) -> str:
     # a plain env read, so the FORM A/B is fully testable now without that container wiring.
     if os.environ.get("GT_SCOPE_NATIVE") == "1":
         result = _consensus_scope_native(neigh)
-        if result:
-            _stage_terminal_lane_control(
-                "consensus.scope_map", result,
-                feature_id="GT_SCOPE_NATIVE",
-                decision_site="mini_seam.scope.native_render",
-                decision="APPLIED",
-                reason="native_scope_render_selected",
-            )
         return result
 
     def _short(p: str) -> str:
@@ -11853,6 +11908,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                            or _ss_dedup2_on()) else ""
     for item in lane_a:
         kind, text, subject_path = _lane_a_parts(item, krel or "")
+        item_identity = item[3] if len(item) > 3 else None
         item_lineage = _lane_a_lineage(item)
         item_event = _lane_a_event(kind, event)
         _record_hook_fire(kind)  # count the FIRE before any correct-or-quiet skip
@@ -11993,7 +12049,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     _ledger_mark_answered(_norm_stem(_psy), text)
             _ledger_note_delivery(kind, cmd, subject_path)  # S-1: carry the target
             _delivery_extra = _lane_delivery_extra(
-                kind, text, subject_path, item_event, lineage=item_lineage)
+                kind, text, subject_path, item_event, lineage=item_lineage,
+                identity=item_identity)
             _seal_lane_delivery(
                 kind, text, subject_path, base_output=_base_out,
                 producer_text=_provenance_original, identity_text=text,
@@ -12056,7 +12113,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
 # adapter (groundtruth.runtime.adapters.miniswe); this is the harness splice.
 # ---------------------------------------------------------------------------
 def _commit_prepared_lane(
-        out, cmd, kind: str, decision: dict, *, krel, event, lineage=None) -> None:
+        out, cmd, kind: str, decision: dict, *, krel, event, lineage=None,
+        identity=None) -> None:
     """Commit a frozen eligible Lane-A decision without re-running final gates."""
     global _cochange_fired, _oblig_resurface_fired
     text = decision["payload"]
@@ -12077,7 +12135,7 @@ def _commit_prepared_lane(
             _ledger_mark_answered(_norm_stem(pattern), text)
     _ledger_note_delivery(kind, cmd, krel or "")
     delivery_extra = _lane_delivery_extra(
-        kind, text, krel or "", event, lineage=lineage)
+        kind, text, krel or "", event, lineage=lineage, identity=identity)
     _seal_lane_delivery(
         kind, shipped_suffix, krel or "", base_output=base_output,
         producer_text=decision.get("provenance_original", text),
@@ -14324,6 +14382,7 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
     _ss_root = _root() if _ss_any_content_gate_on() else ""
     for item in lane_a:
         kind, text, subject_path = _lane_a_parts(item, krel or "")
+        item_identity = item[3] if len(item) > 3 else None
         item_lineage = _lane_a_lineage(item)
         item_event = _lane_a_event(kind, event)
         if not text:
@@ -14391,7 +14450,7 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
             rollback=_lane_a_rearm_pending.get(kind),
             prepared_extra={
                 "cmd": cmd, "kind": kind, "krel": subject_path,
-                "event": item_event})
+                "event": item_event, "identity": item_identity})
 
 
 def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
@@ -14865,7 +14924,8 @@ def _commit_batch_arbitration(state, result, winner, plans) -> object:
             _commit_prepared_lane(
                 plan.output, spec.get("cmd", ""), spec.get("kind", winner.kind),
                 plan.decision, krel=spec.get("krel", ""), event=spec.get("event"),
-                lineage=getattr(winner, "lineage", None))
+                lineage=getattr(winner, "lineage", None),
+                identity=spec.get("identity"))
         elif winner.plane == _GA_PLANE_STEER:
             _commit_prepared_steer(
                 plan.output, spec.get("cmd", ""), spec.get("kind", winner.kind),

@@ -1592,6 +1592,105 @@ def _produce_def_ref_partition(event: ToolEvent, state: GatewayState, *, note: s
 # Bounded dose ("small", matching the registry ``localization.max_dose``). A design
 # starting point, NOT a fixture-tuned constant.
 _LOC_RESLOT_TOPN = 5
+_SEARCH_SCOPE_TOPN = 3
+_CERTIFIED_SCOPE_CONFIDENCE = 0.9
+
+
+@dataclass(frozen=True, order=True)
+class SearchScopeRelation:
+    """One certified structural neighbour of the selected localization anchor."""
+
+    related_file: str
+    resolution_method: str
+    confidence: float
+    edge_id: int
+
+
+@dataclass(frozen=True)
+class SearchScopeSelection:
+    """Revision-bound scope rows selected in one graph read transaction."""
+
+    graph_revision: str = ""
+    relations: tuple[SearchScopeRelation, ...] = ()
+
+
+def _certified_search_scope(
+    state: GatewayState, anchor_file: str,
+) -> SearchScopeSelection:
+    """Return certified structural neighbours for the ranked top file.
+
+    The graph revision and edges are read from the same SQLite snapshot.  Missing
+    provenance, an ambiguous graph-frame anchor, a legacy graph without a logical
+    revision, weak/name-match relations, and unsafe paths all fail closed.
+    """
+    db = state.graph_db or ""
+    if (not db or not anchor_file or _is_leaky(anchor_file)
+            or not os.path.isfile(db)):
+        return SearchScopeSelection()
+    con = _connect_ro(db)
+    if con is None:
+        return SearchScopeSelection()
+    try:
+        con.execute("BEGIN")
+        revision_row = con.execute(
+            "SELECT value FROM project_meta WHERE key='post_revision'"
+        ).fetchone()
+        revision = str(revision_row[0] or "") if revision_row else ""
+        if not revision:
+            return SearchScopeSelection()
+        graph_paths = [str(row[0] or "") for row in con.execute(
+            "SELECT DISTINCT file_path FROM nodes WHERE file_path IS NOT NULL"
+        )]
+        anchor_norm = _norm_fp(anchor_file)
+        anchors = [path for path in graph_paths
+                   if _norm_fp(_to_repo_rel(path, state.repo_root)) == anchor_norm]
+        if len(anchors) != 1:
+            return SearchScopeSelection(graph_revision=revision)
+        graph_anchor = anchors[0]
+        methods = tuple(sorted(DETERMINISTIC_RESOLUTION_METHODS))
+        marks = ",".join("?" for _ in methods)
+        rows = con.execute(
+            f"SELECT e.id, e.resolution_method, e.confidence, "
+            f"CASE WHEN src.file_path=? THEN dst.file_path ELSE src.file_path END "
+            f"FROM edges e JOIN nodes src ON src.id=e.source_id "
+            f"JOIN nodes dst ON dst.id=e.target_id "
+            f"WHERE (src.file_path=? OR dst.file_path=?) "
+            f"AND src.file_path<>dst.file_path "
+            f"AND UPPER(COALESCE(e.type,'')) IN ('CALLS','IMPORTS') "
+            f"AND LOWER(TRIM(COALESCE(e.resolution_method,''))) IN ({marks}) "
+            f"AND COALESCE(e.confidence,0)>=?",
+            (graph_anchor, graph_anchor, graph_anchor, *methods,
+             _CERTIFIED_SCOPE_CONFIDENCE),
+        ).fetchall()
+        best: dict[str, SearchScopeRelation] = {}
+        for edge_id, method, confidence, raw_related in rows:
+            related = _to_repo_rel(str(raw_related or ""), state.repo_root)
+            if not related or _norm_fp(related) == anchor_norm or _is_leaky(related):
+                continue
+            relation = SearchScopeRelation(
+                related_file=related,
+                resolution_method=str(method or "").strip().lower(),
+                confidence=float(confidence), edge_id=int(edge_id),
+            )
+            current = best.get(_norm_fp(related))
+            if current is None or (
+                -relation.confidence, relation.related_file,
+                relation.resolution_method, relation.edge_id
+            ) < (
+                -current.confidence, current.related_file,
+                current.resolution_method, current.edge_id
+            ):
+                best[_norm_fp(related)] = relation
+        selected = tuple(sorted(
+            best.values(),
+            key=lambda row: (-row.confidence, row.related_file,
+                             row.resolution_method, row.edge_id),
+        )[:_SEARCH_SCOPE_TOPN])
+        return SearchScopeSelection(revision, selected)
+    except (sqlite3.Error, TypeError, ValueError):
+        return SearchScopeSelection()
+    finally:
+        con.close()
 
 
 def _pick_candidate_symbol(con, file_path: str, anchors: set[str]) -> "tuple[str, int] | None":
