@@ -25,6 +25,12 @@ CONTROL_PARTICIPATION_SCHEMA = "gt.control_participation.v1"
 PARTICIPATION_DECISIONS = frozenset(
     {"APPLIED", "NO_EFFECT", "SUPPRESSED", "ERROR"}
 )
+CONTROL_PRECEDES_DELIVERY = "CONTROL_PRECEDES_DELIVERY"
+RECEIPT_FOLLOWS_DELIVERY = "RECEIPT_FOLLOWS_DELIVERY"
+PARTICIPATION_TEMPORAL_RELATIONS = frozenset({
+    CONTROL_PRECEDES_DELIVERY,
+    RECEIPT_FOLLOWS_DELIVERY,
+})
 
 
 @dataclass(frozen=True)
@@ -35,6 +41,7 @@ class ControlDecisionContract:
     measurement_status: str
     fact_class_required: bool = False
     unmeasured_reason: str = ""
+    temporal_relation: str = CONTROL_PRECEDES_DELIVERY
 
     def __post_init__(self) -> None:
         if self.feature_id not in CAP_FEATURE_IDS:
@@ -49,6 +56,13 @@ class ControlDecisionContract:
             raise ValueError("UNMEASURED control requires a reason")
         if not isinstance(self.fact_class_required, bool):
             raise ValueError("fact_class_required must be a bool")
+        if self.temporal_relation not in PARTICIPATION_TEMPORAL_RELATIONS:
+            raise ValueError("unknown temporal_relation")
+        if (
+            self.temporal_relation == RECEIPT_FOLLOWS_DELIVERY
+            and self.role != "mediator"
+        ):
+            raise ValueError("post-delivery receipt controls must be mediators")
         if self.role == "mediator" and not self.fact_class_required:
             raise ValueError("mediator controls require concrete FACT identity")
 
@@ -65,13 +79,18 @@ def _eligibility(
     )
 
 
-def _mediator(feature_id: str, *sites: str) -> ControlDecisionContract:
+def _mediator(
+    feature_id: str,
+    *sites: str,
+    temporal_relation: str = CONTROL_PRECEDES_DELIVERY,
+) -> ControlDecisionContract:
     return ControlDecisionContract(
         feature_id=feature_id,
         role="mediator",
         decision_sites=tuple(sites),
         measurement_status="SUPPORTED",
         fact_class_required=True,
+        temporal_relation=temporal_relation,
     )
 
 
@@ -188,7 +207,9 @@ CONTROL_DECISION_CONTRACTS = {
         "pretask.v1r_brief.ack_requirement_filter",
     ),
     "GT_SS_ACK_METRICS": _mediator(
-        "GT_SS_ACK_METRICS", "mini_seam.acknowledgment.receipt_grading",
+        "GT_SS_ACK_METRICS",
+        "mini_seam.acknowledgment.receipt_grading",
+        temporal_relation=RECEIPT_FOLLOWS_DELIVERY,
     ),
     "GT_SS_ARBITER_V2": _mediator(
         "GT_SS_ARBITER_V2",
@@ -236,6 +257,8 @@ class ControlParticipation:
     fact_class: str | None
     reason: str
     candidate_id: str = ""
+    temporal_relation: str = CONTROL_PRECEDES_DELIVERY
+    related_delivery_iteration: int | None = None
 
     def __post_init__(self) -> None:
         if self.schema != CONTROL_PARTICIPATION_SCHEMA:
@@ -254,6 +277,11 @@ class ControlParticipation:
                 f"unsupported decision site for {self.feature_id}: "
                 f"{self.decision_site!r}"
             )
+        if self.temporal_relation != contract.temporal_relation:
+            raise ValueError(
+                f"temporal relation mismatch for {self.feature_id}: "
+                f"{self.temporal_relation!r}"
+            )
         if self.decision not in PARTICIPATION_DECISIONS:
             raise ValueError(f"unknown participation decision: {self.decision!r}")
         if not isinstance(self.reason, str):
@@ -262,6 +290,20 @@ class ControlParticipation:
             raise ValueError(f"{self.decision} requires a non-empty reason")
         if type(self.iteration) is not int or self.iteration < 0:
             raise ValueError("iteration must be a non-negative integer")
+        if self.temporal_relation == RECEIPT_FOLLOWS_DELIVERY:
+            if (
+                type(self.related_delivery_iteration) is not int
+                or self.related_delivery_iteration < 0
+                or self.related_delivery_iteration >= self.iteration
+            ):
+                raise ValueError(
+                    "post-delivery receipt requires a non-negative delivery "
+                    "iteration strictly before the control iteration"
+                )
+        elif self.related_delivery_iteration is not None:
+            raise ValueError(
+                "pre-delivery controls cannot declare a related delivery iteration"
+            )
         if type(self.candidate_chars) is not int or self.candidate_chars < 0:
             raise ValueError("candidate_chars must be a non-negative integer")
         if bool(self.candidate_chars) != bool(self.candidate_sha256_16):
@@ -301,6 +343,7 @@ def build_control_participation(
     fact_class: str | None = None,
     candidate_id: str = "",
     reason: str = "",
+    related_delivery_iteration: int | None = None,
 ) -> ControlParticipation:
     contract = control_contract(feature_id)
     if contract.measurement_status != "SUPPORTED":
@@ -329,6 +372,8 @@ def build_control_participation(
         fact_class=fact_class,
         reason=reason,
         candidate_id=candidate_id,
+        temporal_relation=contract.temporal_relation,
+        related_delivery_iteration=related_delivery_iteration,
     )
 
 
@@ -347,6 +392,8 @@ def participation_to_dict(record: ControlParticipation) -> dict:
         "candidate_sha256_16": record.candidate_sha256_16,
         "fact_class": record.fact_class,
         "candidate_id": record.candidate_id,
+        "temporal_relation": record.temporal_relation,
+        "related_delivery_iteration": record.related_delivery_iteration,
         "reason": record.reason,
     }
 
@@ -354,6 +401,9 @@ def participation_to_dict(record: ControlParticipation) -> dict:
 __all__ = [
     "CONTROL_DECISION_CONTRACTS",
     "CONTROL_PARTICIPATION_SCHEMA",
+    "CONTROL_PRECEDES_DELIVERY",
+    "PARTICIPATION_TEMPORAL_RELATIONS",
+    "RECEIPT_FOLLOWS_DELIVERY",
     "ControlDecisionContract",
     "ControlParticipation",
     "build_control_participation",

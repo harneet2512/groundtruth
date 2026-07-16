@@ -34,6 +34,8 @@ def test_ack_participation_binds_original_terminal_candidate() -> None:
     assert payload["candidate_sha256_16"] == identity.candidate_sha256_16
     assert payload["fact_class"] == "submit_refusal"
     assert payload["candidate_id"] == "candidate:submit:1"
+    assert payload["temporal_relation"] == "RECEIPT_FOLLOWS_DELIVERY"
+    assert payload["related_delivery_iteration"] == 7
     assert "causal" not in repr(payload).lower()
 
 

@@ -26,6 +26,14 @@ def test_contract_is_total_for_all_decision_controls() -> None:
         and CONTROL_DECISION_CONTRACTS[feature_id].fact_class_required
         for feature_id in CAP_MEDIATOR_IDS
     )
+    assert CONTROL_DECISION_CONTRACTS[
+        "GT_SS_ACK_METRICS"
+    ].temporal_relation == "RECEIPT_FOLLOWS_DELIVERY"
+    assert all(
+        contract.temporal_relation == "CONTROL_PRECEDES_DELIVERY"
+        for feature_id, contract in CONTROL_DECISION_CONTRACTS.items()
+        if feature_id != "GT_SS_ACK_METRICS"
+    )
 
 
 def test_participation_is_typed_and_bound_to_exact_candidate_bytes() -> None:
@@ -52,6 +60,8 @@ def test_participation_is_typed_and_bound_to_exact_candidate_bytes() -> None:
         "candidate_sha256_16": "63352a96c04b446d",
         "fact_class": None,
         "candidate_id": "",
+        "temporal_relation": "CONTROL_PRECEDES_DELIVERY",
+        "related_delivery_iteration": None,
         "reason": "novel_entity",
     }
     assert "features" not in payload

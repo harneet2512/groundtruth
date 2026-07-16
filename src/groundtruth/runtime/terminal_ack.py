@@ -78,6 +78,7 @@ def build_ack_participation(
         candidate_bytes=exact.candidate_text,
         fact_class=exact.fact_class,
         candidate_id=exact.candidate_id,
+        related_delivery_iteration=exact.delivered_iteration,
         reason=(
             "later_assistant_acknowledgment_observed"
             if acknowledged

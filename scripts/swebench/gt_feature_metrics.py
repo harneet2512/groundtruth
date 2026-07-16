@@ -78,7 +78,9 @@ from groundtruth.runtime.feature_lineage import (  # noqa: E402
     cap_role_for,
 )
 from groundtruth.runtime.control_participation import (  # noqa: E402
+    CONTROL_PRECEDES_DELIVERY,
     CONTROL_PARTICIPATION_SCHEMA,
+    RECEIPT_FOLLOWS_DELIVERY,
     ControlParticipation,
 )
 from groundtruth.runtime.fact_registry import (  # noqa: E402
@@ -1207,9 +1209,11 @@ def _control_participation_evidence(
     """Validate typed control rows and join mediator candidates without inference.
 
     A profile flag, nearby class delivery, or same-iteration row is never evidence.
-    Mediators require the producer contract, concrete candidate id/class/bytes, and a
-    later delivered row with the exact class + length + seal. Observation/receipt data
-    comes only from the existing final-delivery seal join.
+    Mediators require the producer contract, concrete candidate id/class/bytes, and an
+    exact typed temporal relation to delivery. Ordinary controls precede a matching
+    delivery. Receipt graders follow the exact delivery they grade and additionally
+    require trajectory-authored receipt evidence. Observation/receipt data comes only
+    from the existing final-delivery seal join.
     """
     records: dict[str, list[dict[str, Any]]] = defaultdict(list)
     joins: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1253,6 +1257,10 @@ def _control_participation_evidence(
                 fact_class=row.get("fact_class"),
                 candidate_id=row.get("candidate_id"),
                 reason=row.get("reason"),
+                temporal_relation=row.get(
+                    "temporal_relation", CONTROL_PRECEDES_DELIVERY,
+                ),
+                related_delivery_iteration=row.get("related_delivery_iteration"),
             )
             if record.role == "mediator" and record.decision == "APPLIED" and (
                 not record.candidate_id
@@ -1275,6 +1283,8 @@ def _control_participation_evidence(
             "candidate_sha256_16": record.candidate_sha256_16,
             "fact_class": record.fact_class,
             "candidate_id": record.candidate_id,
+            "temporal_relation": record.temporal_relation,
+            "related_delivery_iteration": record.related_delivery_iteration,
         }
         records[record.feature_id].append(item)
         if (
@@ -1286,7 +1296,12 @@ def _control_participation_evidence(
         ):
             continue
 
-        for delivery_index in range(index + 1, len(rows)):
+        delivery_indices = (
+            range(index - 1, -1, -1)
+            if record.temporal_relation == RECEIPT_FOLLOWS_DELIVERY
+            else range(index + 1, len(rows))
+        )
+        for delivery_index in delivery_indices:
             delivery = rows[delivery_index]
             if delivery.get("outcome") != "delivered":
                 continue
@@ -1320,7 +1335,18 @@ def _control_participation_evidence(
             downstream_id = delivery.get("candidate_id")
             if downstream_id != record.candidate_id:
                 continue
+            delivery_iteration = delivery.get("iteration")
+            if record.temporal_relation == RECEIPT_FOLLOWS_DELIVERY:
+                if delivery_iteration != record.related_delivery_iteration:
+                    continue
+            elif (
+                type(delivery_iteration) is not int
+                or delivery_iteration < record.iteration
+            ):
+                continue
             receipt_level = 0
+            referenced_message_index = None
+            acted_message_index = None
             for entry in entries:
                 if not isinstance(entry, dict) or entry.get("source") != "trajectory":
                     continue
@@ -1332,14 +1358,37 @@ def _control_participation_evidence(
                     and entry.get("joined") is True
                     and entry.get("join_method") == "seal"
                 ):
-                    receipt_level = max(receipt_level, int(entry.get("receipt") or 0))
+                    candidate_receipt = int(entry.get("receipt") or 0)
+                    if candidate_receipt >= receipt_level:
+                        receipt_level = candidate_receipt
+                        referenced_message_index = entry.get("referenced_msg_index")
+                        acted_message_index = entry.get("acted_msg_index")
+            observation_message_index = observation_join.get(delivery_index)
+            if record.temporal_relation == RECEIPT_FOLLOWS_DELIVERY:
+                if observation_message_index is None:
+                    continue
+                later_receipt_message = (
+                    acted_message_index
+                    if receipt_level >= 3 else referenced_message_index
+                )
+                if record.decision == "APPLIED" and not (
+                    receipt_level >= 2
+                    and type(later_receipt_message) is int
+                    and later_receipt_message > observation_message_index
+                ):
+                    continue
+                if record.decision == "NO_EFFECT" and receipt_level != 1:
+                    continue
             joins[record.feature_id].append({
                 **item,
                 "delivery_row_index": delivery_index,
+                "delivery_iteration": delivery_iteration,
                 "delivery_layer": delivery.get("layer"),
-                "observation_message_index": observation_join.get(delivery_index),
-                "observation_joined": observation_join.get(delivery_index) is not None,
+                "observation_message_index": observation_message_index,
+                "observation_joined": observation_message_index is not None,
                 "receipt_level": receipt_level,
+                "referenced_message_index": referenced_message_index,
+                "acted_message_index": acted_message_index,
             })
             break
 
@@ -1410,6 +1459,12 @@ def _control_participation_evidence(
                     fact_class=raw.get("fact_class"),
                     candidate_id=raw.get("candidate_id"),
                     reason=raw.get("reason"),
+                    temporal_relation=raw.get(
+                        "temporal_relation", CONTROL_PRECEDES_DELIVERY,
+                    ),
+                    related_delivery_iteration=raw.get(
+                        "related_delivery_iteration"
+                    ),
                 )
             except (KeyError, TypeError, ValueError):
                 invalid_brief_rows.append(brief_index)
@@ -1428,6 +1483,8 @@ def _control_participation_evidence(
                 "candidate_sha256_16": record.candidate_sha256_16,
                 "fact_class": record.fact_class,
                 "candidate_id": record.candidate_id,
+                "temporal_relation": record.temporal_relation,
+                "related_delivery_iteration": record.related_delivery_iteration,
             }
             records[record.feature_id].append(item)
             if (
