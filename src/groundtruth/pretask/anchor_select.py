@@ -38,6 +38,19 @@ from groundtruth.memory.enrich.embed import (
 # Minimum identifier length to consider as a potential symbol match.
 _MIN_TOKEN_LEN = 3
 
+# Canonical quantization for the semantic top-k MEMBERSHIP cut (FIX 2, defense-in-depth).
+# The seed set is `ranked[:k_sem_top]`, ordered by raw cosine. Two files whose cosines differ
+# only by float-reduction noise (~1e-7 across thread-pool orders) can straddle the k-th slot,
+# so which file lands IN the seed set — a candidate-set-level flip — depends on reduction order.
+# That breaks brief determinism (the k_sem_top INTEGER flip). Quantizing the ORDERING score to
+# a fixed grid collapses sub-epsilon differences to an exact tie, which the deterministic
+# file-path tiebreak then resolves identically across runs. 4dp matches the precedent already
+# used for the localizer sort key (graph_localizer.py `_sem_led_key` rounds to 4). It changes
+# NO ranking semantics beyond sub-epsilon ties: cosines that genuinely differ at 1e-4 or coarser
+# keep their order; only noise-level ties (<5e-5) are merged, and the RETURNED score is the raw
+# cosine — the quantization touches the membership boundary only, never the stored value.
+_SEM_MEMBERSHIP_QUANT_DP = 4
+
 
 def _norm_path(path: str) -> str:
     """Canonicalize a file path to the project-wide form before it is used as a
@@ -587,7 +600,14 @@ def semantic_top_k(
         score = aggregate_symbol_cosines(cosines, alpha=alpha, top_k=top_k)
         file_scores.append((fp, float(score)))
 
-    ranked = sorted(file_scores, key=lambda item: (-item[1], item[0]))
+    # FIX 2: order the membership cut by the QUANTIZED score (raw value preserved in the tuple
+    # and in the returned map). Quantizing the sort key collapses float-reduction-noise ties so
+    # `ranked[:k_sem_top]` selects the same files regardless of the reduction order; the exact
+    # file-path secondary key breaks the resulting ties deterministically.
+    ranked = sorted(
+        file_scores,
+        key=lambda item: (-round(item[1], _SEM_MEMBERSHIP_QUANT_DP), item[0]),
+    )
     if score_all:
         # Full component-score map: keep only finite, strictly-positive scores
         # (correct-or-quiet — never surface 0/NaN as a semantic signal).

@@ -135,6 +135,27 @@ class _ProofTracker:
 # Where GT is baked in the substrate image (NOT a checkout, NOT host paths).
 GT_HOME = os.environ.get("GT_HOME", "/opt/gt")
 
+# ── Deterministic float-reduction pins (FIX 1) ───────────────────────────────────────────
+# The brief-determinism proof compares the PRIMARY brief (generated in the foundational_gates
+# SUBPROCESS) against a WITNESS brief (generated IN-PROCESS at emit_brief). Both reduce the
+# per-file embedding cosines with numpy/BLAS. ONNX inference is already single-threaded
+# (embed._deterministic_session_options), but the numpy/BLAS pooling + L2-normalisation that
+# follow read OMP/MKL/OpenBLAS/NumExpr thread counts at process start — and those are NOT set
+# anywhere in the live env. With >1 thread the two processes sum the reduction in different
+# orders, so a near-tie semantic cosine flips top-k membership -> the two briefs differ ->
+# DETERMINISM_MISMATCH (correctly caught by the Stage-1 gate). Pin every backend to ONE thread
+# so the reduction ORDER is fixed and both sides are byte-identical. setdefault (never clobber)
+# so a shell/Dockerfile pin or an explicit operator/test override still wins; applied at module
+# import — before numpy is first imported in this process — so the in-process witness is pinned.
+DETERMINISTIC_THREAD_PINS = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+for _pin_k, _pin_v in DETERMINISTIC_THREAD_PINS.items():
+    os.environ.setdefault(_pin_k, _pin_v)
+
 # ── Run provenance (Stage-5 audit: a run must prove WHICH code produced it) ──────────────
 # The runtime flags recorded in run_manifest.runtime_flags: the 8 proof-env flags the
 # substrate runs under (same set as required_env in the contract) PLUS
@@ -547,7 +568,16 @@ def clean_env_projection(src: dict) -> dict:
     for k, v in src.items():
         if _env_is_eval_leak(k):
             continue
-        if k in {"PATH", "HOME", "USER", "USERNAME", "SHELL"} or any(k.startswith(p) for p in allowed_prefixes):
+        # FIX 1: the deterministic thread pins (OMP/MKL/OpenBLAS/NumExpr) match none of the
+        # allowed prefixes, so without this the gate SUBPROCESS (which writes the PRIMARY brief)
+        # would run UN-pinned while the in-process witness is pinned -> the two reduce in
+        # different thread-pool orders -> DETERMINISM_MISMATCH. Pass them through so BOTH sides
+        # of the compare reduce under identical single-thread pins.
+        if (
+            k in {"PATH", "HOME", "USER", "USERNAME", "SHELL"}
+            or k in DETERMINISTIC_THREAD_PINS
+            or any(k.startswith(p) for p in allowed_prefixes)
+        ):
             out[k] = v
     return out
 

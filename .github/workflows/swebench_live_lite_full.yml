@@ -1004,8 +1004,14 @@ jobs:
           fi
 
           if [ -n "$IDENTITY_FAILURE_CODE" ]; then
-            IDENTITY_FAILURE_CODE="$IDENTITY_FAILURE_CODE" IDENTITY_FAILURE_DETAIL="$IDENTITY_FAILURE_DETAIL" \
-              python3 -c "import json,os,time; os.makedirs('/tmp/gt',exist_ok=True); json.dump({'schema':'gt.proof_status.v1','state':'failed','code':os.environ['IDENTITY_FAILURE_CODE'],'detail':os.environ['IDENTITY_FAILURE_DETAIL'],'ts':time.time()}, open('/tmp/gt/proof_status.json','w'))" 2>/dev/null || true
+            # FIX 3: do NOT blindly overwrite proof_status.json with the identity code. When the
+            # substrate proof already failed upstream (e.g. brief_emit -> DETERMINISM_MISMATCH),
+            # run_manifest.json was never written, so this gate computes IDENTITY_CONTENT_INVALID
+            # as a SYMPTOM. propagate_identity_failure.py carries the TRUE upstream code/detail
+            # forward (still state=failed, still refusing to spend) and records the identity code
+            # as a secondary field — an honest label instead of a misleading one.
+            GT_IDENTITY_PROOF_DIR=/tmp/gt \
+              python3 scripts/ci/propagate_identity_failure.py "$IDENTITY_FAILURE_CODE" "$IDENTITY_FAILURE_DETAIL" 2>/dev/null || true
             echo "GT_IDENTITY_MISMATCH: ${IDENTITY_FAILURE_CODE}: ${IDENTITY_FAILURE_DETAIL} -- refusing to spend" | tee -a trial_output.log
             exit 1
           fi

@@ -26,6 +26,19 @@ set -e
 
 HARNESS="${GT_PROOF_HARNESS:-deepswe}"
 
+# ── Deterministic float-reduction pins (FIX 1b) ──────────────────────────────────────────
+# The brief-determinism proof reduces the same embedding cosines twice (gate subprocess vs
+# in-process witness). numpy/BLAS pooling+normalisation read these thread counts at process
+# start; unset (the live env sets none), >1 thread reduces in different orders -> a near-tie
+# cosine flips top-k membership -> DETERMINISM_MISMATCH. Export them here so the gt-run-proof
+# CONTAINER process (below, `docker run ... -e OMP_NUM_THREADS ...`) starts pinned. This reaches
+# the runtime WITHOUT a substrate rebake (the container inherits the value at launch); the
+# Dockerfile ENV is the belt for the next rebake. Never lowers a gate; determinism only.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
+
 # ── SUBSTRATE-CONSUME pattern (mirrors swebench_300task.yml:919-944) ──────────
 # Replaces the OLD host/image split (§B BEFORE/invalid): NO host gt-index build,
 # NO host `groundtruth.resolve` LSP pass, NO host gates. The pinned substrate
@@ -625,6 +638,8 @@ if [ "$HARNESS" = "deepswe" ]; then
       -v "/tmp/gt/deps/cargo:/root/.cargo" \
       -v "/tmp/gt/deps/rustup:/root/.rustup" \
       -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
+      -e OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" -e MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}" \
+      -e OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" -e NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}" \
       -e GT_HOST_GRAPH_DB=/tmp/gt/graph.db \
       -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
       -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \
@@ -666,6 +681,8 @@ else
       -v "/tmp/gt/deps/cargo:/root/.cargo" \
       -v "/tmp/gt/deps/rustup:/root/.rustup" \
       -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
+      -e OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" -e MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}" \
+      -e OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" -e NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}" \
       -e GT_HOST_GRAPH_DB=/tmp/gt/graph.db \
       -e GT_REQUIRE_FTS5=1 -e GT_REQUIRE_EMBEDDER=1 -e GT_FORCE_ONNX_EMBEDDER=1 \
       -e GT_REQUIRE_LSP=1 -e GT_REQUIRE_FULL_STACK=1 -e GT_ISSUE_FILE=/work_issue.txt \

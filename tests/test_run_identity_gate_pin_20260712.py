@@ -252,7 +252,14 @@ def test_identity_producer_fails_closed_on_writer_or_content_failure() -> None:
         "substrate_digest_actual",
     ):
         assert token in run
-    assert "IDENTITY_FAILURE_CODE" in run and "gt.proof_status.v1" in run
+    # FIX 3 (D2): the fail-closed proof_status write was extracted to
+    # scripts/ci/propagate_identity_failure.py, which PROPAGATES a real upstream failure code
+    # (e.g. BRIEF_DETERMINISM_MISMATCH) instead of overwriting it with IDENTITY_CONTENT_INVALID.
+    # The invariant is unchanged: an identity failure still writes a fail-closed proof_status
+    # (schema gt.proof_status.v1). Assert the gate invokes the writer AND the writer emits the schema.
+    assert "IDENTITY_FAILURE_CODE" in run and "propagate_identity_failure.py" in run
+    _prop = (_ROOT / "scripts" / "ci" / "propagate_identity_failure.py").read_text(encoding="utf-8")
+    assert "gt.proof_status.v1" in _prop and '"state": "failed"' in _prop
     assert run.index("IDENTITY_WRITE_FAILED") < run.index('if [ -n "$IDENTITY_FAILURE_CODE" ]')
 
 
