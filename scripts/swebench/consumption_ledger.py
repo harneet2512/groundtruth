@@ -522,6 +522,11 @@ def _build_v2(
     assistant_prose: list[str] = [""] * n
     assistant_cmd: list[list[str]] = [[] for _ in range(n)]
     tool_ordinal: list[int | None] = [None] * n
+    # iteration (== Nth tool observation) -> message index of that observation.
+    # This is the authoritative delivery-boundary anchor for a sealed row: GT
+    # renders a delivery INTO the observation of its own iteration, so the
+    # sealed bytes cannot legitimately surface before that message.
+    ordinal_to_msg: dict[int, int] = {}
     ord_counter = 0
     for i, m in enumerate(messages):
         role = m.get("role")
@@ -531,6 +536,7 @@ def _build_v2(
         elif role == "tool":
             ord_counter += 1
             tool_ordinal[i] = ord_counter
+            ordinal_to_msg[ord_counter] = i
 
     def _receipt_for(i: int, block: str) -> tuple[int, int | None, int | None, bool]:
         """Receipt ladder for one byte-proven model-visible delivery."""
@@ -609,6 +615,7 @@ def _build_v2(
     ledger_rows_delivered = 0
     ledger_rows_joined = 0
     exact_seal_ambiguities: list[dict[str, Any]] = []
+    exact_seal_duplicate_windows: list[dict[str, Any]] = []
     if runtime_ledger_path and os.path.isfile(runtime_ledger_path):
         rows = _load_delivered_ledger_rows(runtime_ledger_path)
         ledger_rows_delivered = len(rows)
@@ -658,22 +665,70 @@ def _build_v2(
                             continue
                         candidates.append((msg_index, span))
 
-                if len(candidates) == 1:
-                    seal_home, seal_span = candidates[0]
-                    seal_payload = visible_buffers[seal_home][
-                        seal_span[0]:seal_span[1]
-                    ]
-                    claimed_spans[seal_home].append(seal_span)
-                elif len(candidates) > 1:
-                    exact_seal_ambiguities.append({
-                        "ledger_row_index": row_index,
-                        "content_sha256_16": seal,
-                        "chars_delivered": chars,
-                        "candidate_physical_ids": [
-                            _physical_id(msg_index, span[0], span[1])
-                            for msg_index, span in candidates
-                        ],
-                    })
+                if candidates:
+                    # Every candidate window is byte-identical by construction:
+                    # _locate_seal_spans only returns windows whose UTF-8 bytes
+                    # match this row's exact character/byte length AND its
+                    # content_sha256_16. The delivered bytes are therefore proven
+                    # present in the model-visible stream. When more than one such
+                    # window exists it is NOT a completeness failure -- the
+                    # delivery reconciles -- but the canonical physical home must
+                    # be chosen from the row's AUTHORITATIVE delivery iteration,
+                    # not from raw position. GT renders a delivery into the
+                    # observation of its own iteration, so the sealed bytes cannot
+                    # legitimately surface before that message; an earlier
+                    # byte-identical window is the agent independently producing
+                    # the same repo bytes (a pre-delivery collision) and must NOT
+                    # anchor the delivery (doing so would let _receipt_for count
+                    # pre-delivery actions as GT consumption). Select the earliest
+                    # unclaimed window at or after the delivery boundary. When the
+                    # boundary is unknown (no usable iteration) fall back to the
+                    # earliest window. Candidates are generated in (msg_index,
+                    # span) ascending order.
+                    boundary_msg = (
+                        ordinal_to_msg.get(it) if isinstance(it, int)
+                        and not isinstance(it, bool) else None
+                    )
+                    eligible = (
+                        [c for c in candidates if c[0] >= boundary_msg]
+                        if boundary_msg is not None else candidates
+                    )
+                    if eligible:
+                        seal_home, seal_span = eligible[0]
+                        seal_payload = visible_buffers[seal_home][
+                            seal_span[0]:seal_span[1]
+                        ]
+                        claimed_spans[seal_home].append(seal_span)
+                        if len(candidates) > 1:
+                            exact_seal_duplicate_windows.append({
+                                "ledger_row_index": row_index,
+                                "content_sha256_16": seal,
+                                "chars_delivered": chars,
+                                "delivery_boundary_msg_index": boundary_msg,
+                                "resolved_physical_id": _physical_id(
+                                    seal_home, seal_span[0], seal_span[1]
+                                ),
+                                "candidate_physical_ids": [
+                                    _physical_id(msg_index, span[0], span[1])
+                                    for msg_index, span in candidates
+                                ],
+                            })
+                    else:
+                        # Byte-identical windows exist but every one is BEFORE the
+                        # row's own delivery boundary: a genuine seal/attestation
+                        # inconsistency (the sealed bytes surface only ahead of the
+                        # iteration that claims to deliver them). This is not
+                        # reconcilable -- fail closed.
+                        exact_seal_ambiguities.append({
+                            "ledger_row_index": row_index,
+                            "content_sha256_16": seal,
+                            "chars_delivered": chars,
+                            "delivery_boundary_msg_index": boundary_msg,
+                            "candidate_physical_ids": [
+                                _physical_id(msg_index, span[0], span[1])
+                                for msg_index, span in candidates
+                            ],
+                        })
 
                 if seal_home is not None and seal_span is not None:
                     # Legacy tags and sealed windows are two representations of
@@ -924,6 +979,12 @@ def _build_v2(
         "physical_identity_conflict_ids": physical_identity_conflicts,
         "exact_seal_ambiguity_count": len(exact_seal_ambiguities),
         "exact_seal_ambiguities": exact_seal_ambiguities,
+        # Byte-identical duplicate windows for a single sealed delivery. These
+        # are RESOLVED to the earliest home (the delivery site) and are a
+        # non-blocking diagnostic -- they never make the visible-byte audit
+        # incomplete, because the delivered bytes are demonstrably present.
+        "exact_seal_duplicate_window_count": len(exact_seal_duplicate_windows),
+        "exact_seal_duplicate_windows": exact_seal_duplicate_windows,
         "visible_audit_complete": (
             len(unjoined_visible_tags) == 0
             and not physical_identity_conflicts

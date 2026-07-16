@@ -232,10 +232,13 @@ def _delivery_index_and_payload(
 ) -> tuple[int | None, str]:
     """The exact message index the row was delivered at + its rendered payload bytes.
 
-    Primary = the seal join (consumption_ledger._locate_seal_spans): an UNAMBIGUOUS exact
-    sealed window in the model-visible buffers. Ambiguous == unjoined (fail-closed, matching
-    the Gate-1 seal path). Fallback = the legacy iteration -> tool_ordinal mapping for a
-    seal-less row (which is UNMEASURED anyway — no seal to grade)."""
+    Primary = the seal join (consumption_ledger._locate_seal_spans): the exact sealed
+    window(s) in the model-visible buffers. When several byte-identical windows exist the
+    home is resolved EXACTLY as consumption_ledger._build_v2 does: the earliest unclaimed
+    window at or after the row's authoritative delivery boundary (iteration -> tool_ordinal
+    message index). Windows only before that boundary are a pre-delivery collision and the
+    row is unjoined (fail-closed). Fallback = the legacy iteration -> tool_ordinal mapping
+    for a seal-less row (which is UNMEASURED anyway — no seal to grade)."""
     seal = row.get("content_sha256_16")
     chars = int(row.get("chars_delivered") or 0)
     if _valid_seal(seal) and chars > 0:
@@ -243,11 +246,21 @@ def _delivery_index_and_payload(
         for msg_index, content in enumerate(buffers):
             for span in _locate_seal_spans(content, chars, str(seal)):
                 candidates.append((msg_index, span))
-        if len(candidates) == 1:
-            mi, (start, end) = candidates[0]
-            return mi, buffers[mi][start:end]
-        if len(candidates) > 1:
-            return None, ""  # ambiguous seal — unjoined, fail-closed
+        if candidates:
+            it_row = row.get("iteration")
+            boundary = (
+                tool_ordinal_index.get(it_row)
+                if isinstance(it_row, int) and not isinstance(it_row, bool)
+                else None
+            )
+            eligible = (
+                [c for c in candidates if c[0] >= boundary]
+                if boundary is not None else candidates
+            )
+            if eligible:
+                mi, (start, end) = eligible[0]
+                return mi, buffers[mi][start:end]
+            return None, ""  # every window precedes the delivery boundary — fail-closed
     # legacy fallback: iteration is the tool_ordinal (Nth tool message).
     it = row.get("iteration")
     if isinstance(it, int) and not isinstance(it, bool):

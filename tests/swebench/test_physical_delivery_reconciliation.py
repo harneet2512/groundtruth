@@ -129,12 +129,21 @@ def test_sealed_byte_window_reports_character_offsets_for_unicode(tmp_path: Path
     assert gt_feature_metrics._row_has_seal_join(row, result["entries"]) is True
 
 
-def test_ambiguous_duplicate_seal_occurrence_fails_visible_audit(
+def test_duplicate_byte_identical_seal_resolves_to_delivery_boundary_and_completes(
     tmp_path: Path,
 ) -> None:
+    # D4: one sealed delivery whose exact bytes appear in two byte-identical
+    # visible windows is NOT an audit failure -- the delivered bytes are proven
+    # present, so the delivery reconciles. The home is resolved from the row's
+    # authoritative delivery iteration: the earliest window at or after the
+    # boundary. The row is a post_view runtime delivery at iteration 1, whose
+    # observation is the tool message m1 (tool_ordinal 1); the byte-identical
+    # copy in the earlier user/brief message m0 is a pre-boundary echo and must
+    # NOT anchor the delivery. This is the corrected behavior; the pre-fix code
+    # abandoned the row and marked the audit incomplete.
     payload = "src/pkg.py:9 preserve callers"
     ledger = tmp_path / "gt_runtime_ledger_task.jsonl"
-    _write_ledger(ledger, [_row(payload)])
+    _write_ledger(ledger, [_row(payload)])  # iteration=1 -> boundary is tool m1
 
     result = build_consumption_ledger(
         {
@@ -146,18 +155,23 @@ def test_ambiguous_duplicate_seal_occurrence_fails_visible_audit(
         runtime_ledger_path=str(ledger),
     )
 
-    assert result["ledger_rows_joined"] == 0
-    assert result["exact_seal_ambiguity_count"] == 1
-    assert result["exact_seal_ambiguities"][0]["candidate_physical_ids"] == [
+    assert result["ledger_rows_joined"] == 1
+    assert result["exact_seal_ambiguity_count"] == 0
+    assert result["exact_seal_duplicate_window_count"] == 1
+    duplicate = result["exact_seal_duplicate_windows"][0]
+    assert duplicate["candidate_physical_ids"] == [
         f"m0:0:{len(payload)}",
         f"m1:0:{len(payload)}",
     ]
-    assert result["visible_audit_complete"] is False
-    assert all(
-        entry.get("msg_index") is None
-        for entry in result["entries"]
-        if entry.get("source") == "ledger_only"
-    )
+    assert duplicate["delivery_boundary_msg_index"] == 1
+    assert duplicate["resolved_physical_id"] == f"m1:0:{len(payload)}"
+    assert result["visible_audit_complete"] is True
+    joined = [
+        entry for entry in result["entries"]
+        if entry.get("source") == "trajectory" and entry.get("join_method") == "seal"
+    ]
+    assert len(joined) == 1
+    assert joined[0]["physical_id"] == f"m1:0:{len(payload)}"
 
 
 def test_terminal_exit_content_is_not_model_visible_delivery(tmp_path: Path) -> None:
