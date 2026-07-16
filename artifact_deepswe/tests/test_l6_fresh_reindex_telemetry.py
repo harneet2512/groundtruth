@@ -51,6 +51,9 @@ def _load_mini():
     spec = importlib.util.spec_from_file_location("gtmp_l6", str(_MINI))
     assert spec is not None and spec.loader is not None
     m = importlib.util.module_from_spec(spec)
+    # Python 3.12 dataclasses resolve postponed annotations through sys.modules.
+    # Register the dynamically loaded seam exactly as import machinery would.
+    sys.modules[spec.name] = m
     spec.loader.exec_module(m)
     return m
 

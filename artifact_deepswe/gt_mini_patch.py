@@ -2665,6 +2665,13 @@ def _guard_handoff_db(db: str) -> None:
 
 _l6_work_db: "str | None" = None
 _l6_probe_emitted = False
+# L6 immutable audit carriers.  These are observations of the real reindex seam,
+# not delivery or freshness promotions: a downstream producer must still prove it
+# read ``selected_db_after`` before any GT_L6_FRESH participation can exist.
+_l6_graph_generation = 0
+_l6_revision_attestations: list = []
+_l6_revision_commitments: list[str] = []
+_l6_revision_lock = threading.Lock()
 
 
 def _l6_emit(event: str, **fields) -> None:
@@ -2707,6 +2714,133 @@ def _l6_count_nodes(db: str, rel: str) -> int:
             con.close()
     except Exception:  # noqa: BLE001
         return -1
+
+
+def _l6_full_file_sha256(path: str) -> str:
+    """Full lowercase SHA-256 for exact L6 identities; ``""`` means unmeasured."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except (OSError, TypeError, ValueError):
+        return ""
+
+
+def _l6_stream_bytes(value) -> bytes:
+    """Normalize subprocess stream values without truncation or repr laundering."""
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8")
+    return bytes(value)
+
+
+def _l6_revision_sidecar_path() -> str:
+    override = os.environ.get("GT_L6_REVISION_ATTESTATIONS", "")
+    if override:
+        return override
+    ledger = os.environ.get("GT_RUNTIME_LEDGER", "/tmp/gt_runtime_ledger.jsonl")
+    return os.path.join(
+        os.path.dirname(ledger) or ".", "gt_l6_revision_attestations.jsonl"
+    )
+
+
+def _l6_record_revision(
+    *,
+    action_count: int,
+    repo_root: str,
+    edited_path: str,
+    edited_source_sha256: str,
+    source_db_path: str,
+    source_db_sha256: str,
+    selected_db_path: str,
+    selected_db_before_sha256: str,
+    selected_db_after_sha256: str,
+    argv: tuple[str, ...],
+    returncode: "int | None",
+    timed_out: bool,
+    exception_type: str,
+    stdout: bytes,
+    stderr: bytes,
+) -> None:
+    """Commit one actual invocation when every producer input has exact identity.
+
+    The append-only sidecar and in-memory object are audit evidence only.  This
+    function deliberately does not touch the runtime delivery ledger or any model
+    observation, and it never records ``GT_L6_FRESH`` control participation.
+    """
+    if not all(
+        (
+            edited_source_sha256,
+            source_db_sha256,
+            selected_db_before_sha256,
+            selected_db_after_sha256,
+        )
+    ):
+        return
+    try:
+        from groundtruth.runtime.l6_revision_attestation import (
+            L6_REVISION_ATTESTATION_SCHEMA,
+            DbIdentity,
+            L6RevisionAttestation,
+            SubprocessResult,
+            canonical_sha256,
+            to_dict,
+        )
+
+        global _l6_graph_generation
+        with _l6_revision_lock:
+            _l6_graph_generation += 1
+            generation = _l6_graph_generation
+            carrier = L6RevisionAttestation(
+                schema=L6_REVISION_ATTESTATION_SCHEMA,
+                action_count=int(action_count),
+                graph_generation=generation,
+                repo_root=repo_root,
+                edited_path=edited_path,
+                edited_source_sha256=edited_source_sha256,
+                source_db=DbIdentity(path=source_db_path, sha256=source_db_sha256),
+                selected_db_before=DbIdentity(
+                    path=selected_db_path, sha256=selected_db_before_sha256
+                ),
+                selected_db_after=DbIdentity(
+                    path=selected_db_path, sha256=selected_db_after_sha256
+                ),
+                subprocess=SubprocessResult(
+                    argv=argv,
+                    returncode=returncode,
+                    timed_out=timed_out,
+                    exception_type=exception_type,
+                    stdout_sha256=hashlib.sha256(stdout).hexdigest(),
+                    stdout_bytes=len(stdout),
+                    stderr_sha256=hashlib.sha256(stderr).hexdigest(),
+                    stderr_bytes=len(stderr),
+                ),
+            )
+            commitment = canonical_sha256(carrier)
+            _l6_revision_attestations.append(carrier)
+            _l6_revision_commitments.append(commitment)
+            record = {
+                "schema": "gt.l6_revision_audit.v1",
+                "canonical_sha256": commitment,
+                "attestation": to_dict(carrier),
+            }
+            try:
+                path = _l6_revision_sidecar_path()
+                parent = os.path.dirname(path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                with open(path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
+                    fh.write("\n")
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001 -- audit carrier must never break the agent loop
+        return
 
 
 def _file_sha256(path: str) -> str:
@@ -6321,13 +6455,32 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
             return
         if os.path.isfile(gt_index) and os.path.isfile(db):
             _n_before = _l6_count_nodes(db, rel)
+            _argv = (gt_index, f"-root={root}", f"-file={rel}", f"-output={db}")
+            _edited_abs = rel if os.path.isabs(rel) else os.path.join(root, rel)
+            _source_db = os.environ.get("GT_HOST_GRAPH_DB") or db
+            # Capture every producer input BEFORE invoking gt-index.  Empty means
+            # unmeasured and suppresses the immutable carrier, never the legacy reindex.
+            _edited_source_sha256 = _l6_full_file_sha256(_edited_abs)
+            _source_db_sha256 = _l6_full_file_sha256(_source_db)
+            _selected_db_before_sha256 = _l6_full_file_sha256(db)
             _rc = None
+            _timed_out = False
+            _exception_type = ""
+            _stdout = b""
+            _stderr = b""
             try:
                 _rc = subprocess.run(
-                    [gt_index, f"-root={root}", f"-file={rel}", f"-output={db}"],
+                    list(_argv),
                     capture_output=True, timeout=_HOOK_TIMEOUT,
                 )
+                _stdout = _l6_stream_bytes(_rc.stdout)
+                _stderr = _l6_stream_bytes(_rc.stderr)
             except (OSError, subprocess.TimeoutExpired) as _oe:
+                _exception_type = type(_oe).__name__
+                _timed_out = isinstance(_oe, subprocess.TimeoutExpired)
+                if _timed_out:
+                    _stdout = _l6_stream_bytes(getattr(_oe, "output", None))
+                    _stderr = _l6_stream_bytes(getattr(_oe, "stderr", None))
                 # LIPI #3: an exec-format / wrong-arch binary raises OSError (NOT a
                 # nonzero rc), and a reindex that exceeds _HOOK_TIMEOUT raises
                 # TimeoutExpired — BOTH were swallowed by the outer `except: pass` into a
@@ -6367,6 +6520,23 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
                 _n_after = _l6_count_nodes(db, rel)
                 _l6_emit("REINDEX_OK", file=rel, nodes_before=_n_before,
                          nodes_after=_n_after, db=db)
+            _l6_record_revision(
+                action_count=globals().get("_action_count", 0),
+                repo_root=root,
+                edited_path=rel,
+                edited_source_sha256=_edited_source_sha256,
+                source_db_path=_source_db,
+                source_db_sha256=_source_db_sha256,
+                selected_db_path=db,
+                selected_db_before_sha256=_selected_db_before_sha256,
+                selected_db_after_sha256=_l6_full_file_sha256(db),
+                argv=_argv,
+                returncode=(_rc.returncode if _rc is not None else None),
+                timed_out=_timed_out,
+                exception_type=_exception_type,
+                stdout=_stdout,
+                stderr=_stderr,
+            )
         elif not os.path.isfile(gt_index):
             # G05 (fail loud, not silent): the reindex binary is absent. On the
             # host-graph-injection path gt_agent ships the graph but NOT the ~49MB
