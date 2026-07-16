@@ -253,7 +253,9 @@ def test_augment_end_to_end_stamps_boost_on_consumed_caller_break(tmp_path, monk
         graph_db=db, repo_root=str(tmp_path),
         episode=es.EpisodeState(xsession_policy={"caller_contract": (5, 3)}))
     cbs = [a for a in gw.augment(ev, consumed) if a.evidence_type == "caller_break"]
-    assert cbs and cbs[0].native_args == {"_xsession_boost": 7}                 # live stamp
+    assert cbs and cbs[0].native_args["_xsession_boost"] == 7                  # live stamp
+    assert cbs[0].native_args["before_parameters"] == ("a",)
+    assert cbs[0].native_args["after_parameters"] == ("a", "b")
 
 
 def test_augment_flag_off_no_boost_byte_identical(tmp_path, monkeypatch):
@@ -269,7 +271,7 @@ def test_augment_flag_off_no_boost_byte_identical(tmp_path, monkeypatch):
         graph_db=db, repo_root=str(tmp_path),
         episode=es.EpisodeState(xsession_policy={"caller_contract": (5, 3)}))
     cbs = [a for a in gw.augment(ev, st) if a.evidence_type == "caller_break"]
-    assert cbs and cbs[0].native_args is None                                  # flag off -> unstamped
+    assert cbs and "_xsession_boost" not in cbs[0].native_args                 # flag off -> unstamped
 
 
 if __name__ == "__main__":  # pragma: no cover

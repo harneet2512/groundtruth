@@ -135,15 +135,19 @@ CONTROL_DECISION_CONTRACTS = {
     ),
     "GT_CONTRACT_BILATERAL": _mediator(
         "GT_CONTRACT_BILATERAL", "mini_seam.contract.bilateral_selection",
+        "gateway.caller_contract.bilateral_selection",
     ),
     "GT_CONTRACT_MODE": _mediator(
         "GT_CONTRACT_MODE", "mini_seam.contract.mode_selection",
+        "gateway.caller_contract.mode_selection",
     ),
     "GT_CONTRACT_NATIVE": _mediator(
         "GT_CONTRACT_NATIVE", "mini_seam.contract.native_render",
+        "gateway.caller_contract.native_render",
     ),
     "GT_EVIDENCE_NATIVE": _mediator(
         "GT_EVIDENCE_NATIVE", "mini_seam.evidence.native_render",
+        "gateway.caller_contract.caller_rows",
     ),
     "GT_GATEWAY": _mediator(
         "GT_GATEWAY", "gateway.augment.candidate_admission",

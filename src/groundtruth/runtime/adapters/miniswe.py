@@ -61,6 +61,7 @@ from groundtruth.runtime.gateway import ToolEvent, classify_command
 from groundtruth.runtime.native_render import (
     render_body_concept_native,
     render_caller_contract_native,
+    render_caller_usage_native,
     render_def_rows_native,
     render_ranked_list_native,
     render_registration_native,
@@ -292,8 +293,35 @@ def _render_caller_break(env: EvidenceEnvelope) -> str:
     n_files = len(_distinct_prov_files(env))
     if n_callers <= 0:
         return ""
-    return render_caller_contract_native(
-        env.fact_id, n_callers, n_files, def_file=env.target)
+    args = env.native_args or {}
+    before = args.get("before_parameters")
+    after = args.get("after_parameters")
+    delta = ""
+    if (
+        isinstance(before, tuple) and isinstance(after, tuple)
+        and before != after
+        and all(isinstance(item, str) and item for item in (*before, *after))
+    ):
+        delta = f"{', '.join(before)} -> {', '.join(after)}"
+    diagnostic = render_caller_contract_native(
+        env.fact_id, n_callers, n_files, def_file=env.target, sig_delta=delta)
+    if not diagnostic:
+        return ""
+    caller_rows = render_def_rows_native(args.get("caller_rows") or ())
+    usage_lines: list[str] = []
+    for row in args.get("caller_usage_rows") or ():
+        try:
+            caller_file, caller_line, symbol, usage_kind = row
+        except (TypeError, ValueError):
+            continue
+        rendered = render_caller_usage_native(
+            caller_file, caller_line, symbol, usage_kind,
+        )
+        if rendered and rendered not in usage_lines:
+            usage_lines.append(rendered)
+    return "\n".join(
+        part for part in (diagnostic, caller_rows, *usage_lines) if part
+    )
 
 
 def _render_signature_delta(env: EvidenceEnvelope) -> str:

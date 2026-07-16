@@ -38,6 +38,30 @@ class CallerEvidenceRow:
 
 
 @dataclass(frozen=True, order=True)
+class CallerUsageEvidenceRow:
+    """One source-attributed ``caller_usage`` property for a FACT caller.
+
+    The producer retains only usage rows whose graph property identifies the
+    exact caller node, callee, source line, extractor confidence, and source
+    revision.  Missing fields stay missing upstream; callers must never infer a
+    bilateral contract from a free-form property value alone.
+    """
+
+    property_id: int
+    caller_node_id: int
+    caller_identity: str
+    caller_file: str
+    usage_kind: str
+    callee: str
+    call_site: str
+    line: int
+    confidence: float
+    source_revision: str
+    extractor: str
+    evidence_method: str
+
+
+@dataclass(frozen=True, order=True)
 class SignatureChange:
     """Exact semantic signature delta used by a producer decision.
 
@@ -69,11 +93,13 @@ class ProducerInputs:
     caller_rows: tuple[CallerEvidenceRow, ...]
     graph_revision: str
     signature_changes: tuple[SignatureChange, ...] = ()
+    caller_usage_rows: tuple[CallerUsageEvidenceRow, ...] = ()
 
 
 __all__ = [
     "PRODUCER_INPUTS_SCHEMA",
     "CallerEvidenceRow",
+    "CallerUsageEvidenceRow",
     "ProducerInputs",
     "SignatureChange",
     "SourceState",

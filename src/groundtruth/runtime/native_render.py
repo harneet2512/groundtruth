@@ -641,6 +641,42 @@ def render_caller_contract_native(
     return _final_scrub(out, tf)
 
 
+_CALLER_USAGE_NATIVE_PHRASES: dict[str, str] = {
+    "boolean_check": "boolean-checked",
+    "destructure_tuple": "unpacked into multiple values",
+    "exception_guard": "used inside an exception guard",
+    "iterated": "iterated (expects an iterable)",
+}
+
+
+def render_caller_usage_native(
+    caller_file: str,
+    caller_line: Any,
+    symbol: str,
+    usage_kind: str,
+    *,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    """Render one typed caller-consumption fact as a compiler ``note:``.
+
+    Only the finite usage vocabulary emitted by gt-index's AST-parent
+    classifier has authority.  Unknown/malformed rows are quiet; no free-form
+    call-site text reaches the model observation.
+    """
+    path = _norm(_cap(caller_file))
+    sym = _cap(symbol).strip()
+    line = _int_or_none(caller_line)
+    phrase = _CALLER_USAGE_NATIVE_PHRASES.get(_cap(usage_kind).strip())
+    if not path or not sym or line is None or line <= 0 or phrase is None:
+        return ""
+    tf = {_norm(item) for item in (test_files or [])}
+    if _is_test_path(path, tf):
+        return ""
+    return _final_scrub(
+        f"{path}:{line}: note: {sym}() result is {phrase}", tf,
+    )
+
+
 def render_registration_native(
     file: str,
     line: Any,

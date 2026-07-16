@@ -274,8 +274,11 @@ def test_render_envelope_native_dispatch_for_caller_break(tmp_path, monkeypatch)
     # NATIVE: the SM-1 compiler CONTRACT diagnostic (path: error: ...), NOT tagged English
     native = ad.render_envelope(e, native=True)
     assert "<gt-" not in native
-    assert native == ("handler.go: error: Handle() signature changed; "
-                      "1 caller(s) in 1 file(s) must update the call sites\n")
+    assert native == (
+        "handler.go: error: Handle() signature changed (a -> a, b); "
+        "1 caller(s) in 1 file(s) must update the call sites\n"
+        "main.go:3:main\n"
+    )
     from groundtruth.runtime.native_render import contains_test_identity
     assert contains_test_identity(native) is False
 

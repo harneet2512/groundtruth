@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import AbstractSet, Any
 
+from .control_participation import ControlParticipation, build_control_participation
 from .evidence_envelope import EvidenceEnvelope
 from .fact_registry import EVENTS, producer_matches, registration_for, required_event
 from .producer_attestation import (
@@ -33,6 +34,7 @@ from .producer_attestation import (
 from .producer_inputs import (
     PRODUCER_INPUTS_SCHEMA,
     CallerEvidenceRow,
+    CallerUsageEvidenceRow,
     ProducerInputs,
     SignatureChange,
     SourceState,
@@ -94,6 +96,23 @@ def _change_dict(change: SignatureChange) -> dict[str, Any]:
     }
 
 
+def _usage_dict(row: CallerUsageEvidenceRow) -> dict[str, Any]:
+    return {
+        "property_id": row.property_id,
+        "caller_node_id": row.caller_node_id,
+        "caller_identity": row.caller_identity,
+        "caller_file": row.caller_file,
+        "usage_kind": row.usage_kind,
+        "callee": row.callee,
+        "call_site": row.call_site,
+        "line": row.line,
+        "confidence": row.confidence,
+        "source_revision": row.source_revision,
+        "extractor": row.extractor,
+        "evidence_method": row.evidence_method,
+    }
+
+
 def _input_payload(
     envelope: EvidenceEnvelope,
     *,
@@ -125,6 +144,9 @@ def _input_payload(
         "graph_revision": inputs.graph_revision,
         "signature_changes": [
             _change_dict(change) for change in inputs.signature_changes
+        ],
+        "caller_usage_rows": [
+            _usage_dict(row) for row in inputs.caller_usage_rows
         ],
     }
 
@@ -230,6 +252,29 @@ def _signature_change_complete(change: SignatureChange) -> bool:
     )
 
 
+def _complete_usage(row: CallerUsageEvidenceRow) -> bool:
+    return bool(
+        isinstance(row.property_id, int) and not isinstance(row.property_id, bool)
+        and row.property_id > 0
+        and isinstance(row.caller_node_id, int)
+        and not isinstance(row.caller_node_id, bool)
+        and row.caller_node_id > 0
+        and row.caller_identity.strip()
+        and row.caller_file.strip()
+        and row.usage_kind in {
+            "boolean_check", "destructure_tuple", "exception_guard", "iterated",
+        }
+        and row.callee.strip()
+        and row.call_site.strip()
+        and isinstance(row.line, int) and not isinstance(row.line, bool)
+        and row.line > 0
+        and isinstance(row.confidence, (int, float))
+        and not isinstance(row.confidence, bool)
+        and 0.7 <= float(row.confidence) <= 1.0
+        and row.source_revision.strip()
+        and row.extractor.strip()
+        and row.evidence_method.strip()
+    )
 def _artifact_bundle(
     envelope: EvidenceEnvelope,
     payload_bytes: bytes,
@@ -378,6 +423,24 @@ def build_gateway_attestation(
         and inputs.graph_revision
         and inputs.graph_revision == envelope.graph_revision
     )
+    usage_complete = bool(
+        not inputs.caller_usage_rows
+        or (
+            all(_complete_usage(row) for row in inputs.caller_usage_rows)
+            and all(
+                row.source_revision == inputs.graph_revision
+                for row in inputs.caller_usage_rows
+            )
+            and all(
+                any(
+                    caller.identity == usage.caller_identity
+                    and caller.file == usage.caller_file
+                    for caller in inputs.caller_rows
+                )
+                for usage in inputs.caller_usage_rows
+            )
+        )
+    )
     if envelope.evidence_type == "caller_break":
         semantic_complete = bool(
             len(inputs.signature_changes) == 1
@@ -388,9 +451,12 @@ def build_gateway_attestation(
             len(inputs.signature_changes) == 1
             and _signature_change_complete(inputs.signature_changes[0])
         )
-    truth_complete = common_complete and semantic_complete
-    freshness_complete = common_complete and semantic_complete
-    truth_paths = ("$.caller_rows", "$.signature_changes")
+    truth_complete = common_complete and semantic_complete and usage_complete
+    freshness_complete = common_complete and semantic_complete and usage_complete
+    truth_paths = (
+        "$.caller_rows", "$.signature_changes",
+        *(("$.caller_usage_rows",) if inputs.caller_usage_rows else ()),
+    )
     freshness_paths = (
         "$.before_state.sha256",
         "$.before_state.revision",
@@ -404,6 +470,10 @@ def build_gateway_attestation(
                 f"$.caller_rows[{index}].source_state.sha256",
                 f"$.caller_rows[{index}].source_state.revision",
             )
+        ),
+        *tuple(
+            f"$.caller_usage_rows[{index}].source_revision"
+            for index in range(len(inputs.caller_usage_rows))
         ),
     )
 
@@ -449,7 +519,110 @@ def build_gateway_attestation(
     return attestation, artifacts
 
 
+_CALLER_CONTRACT_CONTROL_SITES = {
+    "GT_CONTRACT_NATIVE": "gateway.caller_contract.native_render",
+    "GT_CONTRACT_MODE": "gateway.caller_contract.mode_selection",
+    "GT_CONTRACT_BILATERAL": "gateway.caller_contract.bilateral_selection",
+    "GT_EVIDENCE_NATIVE": "gateway.caller_contract.caller_rows",
+}
+
+
+def build_caller_contract_control_participation(
+    envelope: EvidenceEnvelope,
+    *,
+    attestation: ProducerAttestation,
+    shipped_bytes: bytes,
+    native: bool,
+    enabled_features: AbstractSet[str],
+    iteration: int,
+) -> tuple[ControlParticipation, ...]:
+    """Bind caller-contract CAP participation to one exact attested dose.
+
+    This pure integration API must be called only after the Gateway winner has
+    sealed.  It emits no delivery and never mentions ``GT_GATEWAY_NATIVE``: the
+    generic native adapter cannot claim caller-specific mode, caller-row, or
+    bilateral selection.  Any authority/seal/render mismatch is quiet.
+    """
+    if (
+        not native
+        or envelope.evidence_type != "caller_break"
+        or envelope.producer != "caller_contract"
+        or not isinstance(attestation, ProducerAttestation)
+        or validate(attestation)
+        or attestation.truth_verdict != PASS
+        or attestation.freshness_verdict != PASS
+        or attestation.candidate_id != envelope.dedup_key
+        or not isinstance(shipped_bytes, bytes)
+        or not shipped_bytes
+        or hashlib.sha256(shipped_bytes).hexdigest()[:16]
+        != attestation.delivery_seal
+        or not isinstance(iteration, int)
+        or isinstance(iteration, bool)
+        or iteration < 0
+    ):
+        return ()
+    try:
+        from .adapters.miniswe import render_envelope
+
+        expected = render_envelope(envelope, native=True).encode(
+            "utf-8", "surrogatepass"
+        )
+        input_bytes = canonical_producer_inputs_bytes(
+            envelope,
+            delivery_seal=attestation.delivery_seal,
+            actual_event=attestation.decision.required_event,
+            open_event=attestation.decision.open_event,
+        )
+    except Exception:
+        return ()
+    if shipped_bytes not in (expected, b"\n" + expected):
+        return ()
+    producer_input_refs = tuple(
+        ref for ref in attestation.source_artifacts
+        if ref.kind == "producer_inputs"
+    )
+    rendered_refs = tuple(
+        ref for ref in attestation.source_artifacts
+        if ref.kind == "rendered_candidate"
+    )
+    if (
+        len(producer_input_refs) != 1
+        or producer_input_refs[0].sha256 != hashlib.sha256(input_bytes).hexdigest()
+        or len(rendered_refs) != 1
+        or rendered_refs[0].sha256 != hashlib.sha256(shipped_bytes).hexdigest()
+    ):
+        return ()
+    inputs = envelope.producer_inputs
+    if not isinstance(inputs, ProducerInputs):
+        return ()
+    selected = set(enabled_features) & set(_CALLER_CONTRACT_CONTROL_SITES)
+    rows: list[ControlParticipation] = []
+    candidate_text = shipped_bytes.decode("utf-8", "surrogatepass")
+    for feature_id in sorted(selected):
+        decision = "APPLIED"
+        reason = {
+            "GT_CONTRACT_NATIVE": "canonical_native_contract_committed",
+            "GT_CONTRACT_MODE": "signature_change_mode_selected",
+            "GT_EVIDENCE_NATIVE": "typed_caller_rows_rendered",
+        }.get(feature_id, "typed_caller_usage_rendered")
+        if feature_id == "GT_CONTRACT_BILATERAL" and not inputs.caller_usage_rows:
+            decision = "NO_EFFECT"
+            reason = "no_typed_caller_usage"
+        rows.append(build_control_participation(
+            feature_id=feature_id,
+            decision_site=_CALLER_CONTRACT_CONTROL_SITES[feature_id],
+            decision=decision,
+            iteration=iteration,
+            candidate_bytes=candidate_text,
+            fact_class="caller_contract",
+            candidate_id=envelope.dedup_key,
+            reason=reason,
+        ))
+    return tuple(rows)
+
+
 __all__ = [
+    "build_caller_contract_control_participation",
     "build_gateway_attestation",
     "canonical_producer_inputs_bytes",
 ]

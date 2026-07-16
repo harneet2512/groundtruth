@@ -121,6 +121,7 @@ from groundtruth.runtime.native_render import render_covering_failure_native
 from groundtruth.runtime.producer_inputs import (
     PRODUCER_INPUTS_SCHEMA,
     CallerEvidenceRow,
+    CallerUsageEvidenceRow,
     ProducerInputs,
     SignatureChange,
     SourceState,
@@ -1234,7 +1235,7 @@ def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
         # (edge_id,key) PK guarantees at most one receiver_type row per edge.
         sql = (
             f"SELECT ns.name, ns.file_path, e.source_line, em.value, "
-            f"{conf_sel}, LOWER(TRIM(e.resolution_method)), e.id, e.target_id "
+            f"{conf_sel}, LOWER(TRIM(e.resolution_method)), e.id, e.target_id, e.source_id "
             f"FROM edges e JOIN nodes ns ON ns.id=e.source_id "
             f"LEFT JOIN edge_metadata em ON em.edge_id=e.id AND em.key='receiver_type' "
             f"WHERE e.target_id IN ({qmarks}) AND e.type='CALLS' "
@@ -1245,7 +1246,7 @@ def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
         meta_sel = "e.metadata" if has_meta else "NULL"
         sql = (
             f"SELECT ns.name, ns.file_path, e.source_line, {meta_sel}, "
-            f"{conf_sel}, LOWER(TRIM(e.resolution_method)), e.id, e.target_id "
+            f"{conf_sel}, LOWER(TRIM(e.resolution_method)), e.id, e.target_id, e.source_id "
             f"FROM edges e JOIN nodes ns ON ns.id=e.source_id "
             f"WHERE e.target_id IN ({qmarks}) AND e.type='CALLS' "
             f"AND COALESCE(ns.is_test,0)=0 "
@@ -1257,7 +1258,10 @@ def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
         return [], []
     callers: list[dict] = []
     receivers: set[str] = set()
-    for name, fp, line, meta, confidence, resolution_method, edge_id, target_id in rows:
+    for (
+        name, fp, line, meta, confidence, resolution_method, edge_id,
+        target_id, source_id,
+    ) in rows:
         callers.append({
             "name": name or "",
             "file": fp or "",
@@ -1266,6 +1270,7 @@ def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
             "resolution_method": str(resolution_method or ""),
             "edge_id": int(edge_id) if edge_id is not None else None,
             "definition_id": int(target_id) if target_id is not None else None,
+            "caller_node_id": int(source_id) if source_id is not None else None,
         })
         if meta:
             if use_em:
@@ -2105,9 +2110,103 @@ def _fact_callers_of_symbol_in_file(con, sym: str, rel: str, root: str) -> list[
             "resolution_method": c.get("resolution_method") or None,
             "edge_id": c.get("edge_id"),
             "definition_id": c.get("definition_id"),
+            "caller_node_id": c.get("caller_node_id"),
         })
     out.sort(key=lambda row: (row["file"], row["line"], row["identity"]))
     return out
+
+
+_CALLER_USAGE_KINDS = frozenset({
+    "boolean_check", "destructure_tuple", "exception_guard", "iterated",
+})
+
+
+def _typed_caller_usage_rows(
+    con: sqlite3.Connection, sites: list[dict], symbol: str, graph_revision: str,
+) -> tuple[CallerUsageEvidenceRow, ...]:
+    """Return exact, source-attributed usage properties for these caller rows.
+
+    ``caller_usage`` is optional graph enrichment.  It earns bilateral authority
+    only when the persisted property carries its own row identity, line,
+    confidence, extractor/method, and source revision.  Old or partial schemas
+    therefore remain quiet rather than upgrading a parsed string into truth.
+    """
+    try:
+        columns = {
+            str(row[1]) for row in con.execute("PRAGMA table_info(properties)")
+        }
+    except sqlite3.Error:
+        return ()
+    required = {
+        "id", "node_id", "kind", "value", "line", "confidence",
+        "extractor", "evidence_method", "source_revision",
+    }
+    if not required.issubset(columns):
+        return ()
+    site_by_node = {
+        int(site["caller_node_id"]): site
+        for site in sites
+        if isinstance(site.get("caller_node_id"), int)
+        and not isinstance(site.get("caller_node_id"), bool)
+    }
+    if not site_by_node:
+        return ()
+    placeholders = ",".join("?" * len(site_by_node))
+    try:
+        rows = con.execute(
+            "SELECT id,node_id,value,line,confidence,extractor,evidence_method,"
+            "source_revision FROM properties "
+            f"WHERE kind='caller_usage' AND node_id IN ({placeholders}) "
+            "ORDER BY node_id,line,id",
+            tuple(sorted(site_by_node)),
+        ).fetchall()
+    except sqlite3.Error:
+        return ()
+    out: list[CallerUsageEvidenceRow] = []
+    for (
+        property_id, node_id, value, line, confidence, extractor,
+        evidence_method, source_revision,
+    ) in rows:
+        if not isinstance(value, str) or ":" not in value:
+            continue
+        usage_kind, remainder = value.split(":", 1)
+        callee, separator, call_site = remainder.partition("|")
+        usage_kind = usage_kind.strip()
+        callee = callee.strip()
+        site = site_by_node.get(node_id)
+        if (
+            site is None
+            or usage_kind not in _CALLER_USAGE_KINDS
+            or callee != symbol
+            or not separator
+            or not call_site.strip()
+            or not isinstance(property_id, int) or isinstance(property_id, bool)
+            or property_id <= 0
+            or not isinstance(line, int) or isinstance(line, bool) or line <= 0
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool) or float(confidence) < 0.7
+            or not all(
+                isinstance(item, str) and item.strip()
+                for item in (extractor, evidence_method, source_revision)
+            )
+            or source_revision.strip() != graph_revision
+        ):
+            continue
+        out.append(CallerUsageEvidenceRow(
+            property_id=property_id,
+            caller_node_id=node_id,
+            caller_identity=str(site["identity"]),
+            caller_file=str(site["file"]),
+            usage_kind=usage_kind,
+            callee=callee,
+            call_site=call_site.strip(),
+            line=line,
+            confidence=float(confidence),
+            source_revision=source_revision.strip(),
+            extractor=extractor.strip(),
+            evidence_method=evidence_method.strip(),
+        ))
+    return tuple(sorted(set(out)))
 
 
 def _source_state_for_file(
@@ -2164,6 +2263,20 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
                 body = [f"{sym}() signature changed — {n_callers} caller(s) in "
                         f"{n_files} file(s); update the call sites"]
                 graph_revision, _valid_until = _revisions_for(state, "caller_break")
+                caller_usage_rows = _typed_caller_usage_rows(
+                    con, sites, sym, graph_revision,
+                )
+                signature_change = SignatureChange(
+                    symbol=sym,
+                    edited_file=rel,
+                    before_parameters=tuple(before_parameters[sym]),
+                    after_parameters=tuple(after_parameters[sym]),
+                    old_min_params=None,
+                    old_max_params=None,
+                    new_min_params=None,
+                    new_max_params=None,
+                    positional_args=None,
+                )
                 producer_inputs = ProducerInputs(
                     schema=PRODUCER_INPUTS_SCHEMA,
                     evidence_type="caller_break",
@@ -2189,22 +2302,28 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
                         for site in sites
                     ),
                     graph_revision=graph_revision,
-                    signature_changes=(SignatureChange(
-                        symbol=sym,
-                        edited_file=rel,
-                        before_parameters=tuple(before_parameters[sym]),
-                        after_parameters=tuple(after_parameters[sym]),
-                        old_min_params=None,
-                        old_max_params=None,
-                        new_min_params=None,
-                        new_max_params=None,
-                        positional_args=None,
-                    ),),
+                    signature_changes=(signature_change,),
+                    caller_usage_rows=caller_usage_rows,
                 )
                 out.append(_mk_add(state, event, fact_kind="caller_break", target=rel,
                                    body_lines=body,
                                    evidence=[(site["file"], site["line"]) for site in sites],
                                    tier=WARNING, producer="caller_contract", symbol=sym,
+                                   native_args={
+                                       "before_parameters": signature_change.before_parameters,
+                                       "after_parameters": signature_change.after_parameters,
+                                       "caller_rows": tuple(
+                                           (site["file"], site["line"], site["identity"])
+                                           for site in sites
+                                       ),
+                                       "caller_usage_rows": tuple(
+                                           (
+                                               row.caller_file, row.line, row.callee,
+                                               row.usage_kind,
+                                           )
+                                           for row in caller_usage_rows
+                                       ),
+                                   },
                                    producer_inputs=producer_inputs))
     finally:
         con.close()
