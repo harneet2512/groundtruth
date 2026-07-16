@@ -1222,7 +1222,7 @@ def _caller_contract_attestation(
     return attestation, {"callers.json": source}
 
 
-def test_attestation_join_populates_truth_only_for_attested_class(tmp_path: Path) -> None:
+def test_attestation_join_populates_truth_and_authority_for_attested_class(tmp_path: Path) -> None:
     task = "synthetic__attestation-join"
     _write_task(tmp_path, task, deep_metrics=_complete_deep_metrics(task))
     candidate_id = "caller:src/pkg.py:11"
@@ -1256,21 +1256,30 @@ def test_attestation_join_populates_truth_only_for_attested_class(tmp_path: Path
     assert truth["status"] == "MEASURED"
     assert truth["value"] is True
     assert truth["source_artifact"] == "producer_attestations"
-    # J2 scopes to TRUTH only. authority_valid is a separate leg the attestation does
-    # not carry, so it stays UNMEASURED and the composite correct_info gate (truth AND
-    # authority) is honestly None — not fabricated True.
-    assert record["fact_classes"]["caller_contract"]["authority_valid"]["status"] == "UNMEASURED"
+    # J2b: authority is the second leg of correct_info. The SAME validated, seal-joined
+    # PASS attestation grants it (registry-proved producer authority bound to the exact
+    # (candidate_id, delivery_seal) that joined a DELIVERED row). Both legs True → the
+    # composite correct_info gate finally MOVES to True. This is the registry-validated
+    # producer claim, NOT the reverted ea0eb16c0 inference-from-shape fabrication.
+    authority = record["fact_classes"]["caller_contract"]["authority_valid"]
+    assert authority["status"] == "MEASURED"
+    assert authority["value"] is True
+    assert authority["source_artifact"] == "producer_attestations"
     fact_readiness = record["ss_features"]["caller_contract"]["ss_readiness"]
-    assert fact_readiness["gates"]["correct_info"] is None
+    assert fact_readiness["gates"]["correct_info"] is True
 
-    # Every other class stays UNMEASURED — no attestation, no inference.
+    # Every other class stays UNMEASURED — no attestation, no inference. authority is
+    # join-gated: an attested-but-unjoined class (syntax_result) never receives it.
     for other in ("localization", "def_partition", "obligations", "syntax_result"):
         assert record["fact_classes"][other]["truth_valid"]["status"] == "UNMEASURED"
+        assert record["fact_classes"][other]["authority_valid"]["value"] is not True
 
     diag = record["ss_integrity"]["attestation_join"]
     assert diag["attestations_loaded"] == 1
     assert diag["applied_truth_overrides"] == ["caller_contract"]
+    assert diag["applied_authority_overrides"] == ["caller_contract"]
     assert diag["joined_fact_classes"]["caller_contract"]["truth"] is True
+    assert diag["joined_fact_classes"]["caller_contract"]["authority"] is True
 
 
 def test_attestation_join_seal_mismatch_leaves_truth_unmeasured(tmp_path: Path) -> None:

@@ -96,9 +96,19 @@ class TruthJoin:
     ``False`` when any FAILs. ``attestation_count`` counts ONLY joined attestations
     (unjoined contribute nothing). ``joined_delivery_row_indices`` are the indices, in
     the passed ledger-row list, of the DELIVERED rows that matched.
+
+    ``authority`` (J2b) is the second leg of the FACT ``correct_info`` gate. It is
+    ``True`` ONLY on a truth-PASS join — i.e. every joined attestation validated
+    (``producer_attestation.validate`` already proved the registered-producer claim:
+    ``registered_producer_id == registration.producer`` and ``producer_matches``),
+    the join was EXACT (candidate_id + delivery_seal to a DELIVERED row), AND the
+    truth predicates aggregated to PASS (``truth is True``). It is ``None`` otherwise
+    and is NEVER ``False``: no producer claims negative authority, so an absent or
+    non-PASS join is UNMEASURED, not a refutation (correct-or-quiet).
     """
 
     truth: bool | None
+    authority: bool | None
     freshness: bool | None
     attestation_count: int
     joined_delivery_row_indices: tuple[int, ...]
@@ -371,8 +381,15 @@ def join_truth(
             f"freshness={attestation.freshness_verdict}"
             for attestation, _ in items
         )
+        truth = _aggregate_bool(truth_verdicts)
+        # J2b: authority rides ONLY a truth-PASS join. Every item here already
+        # validated (load_attestations) and joined EXACTLY (the identity above), so
+        # the remaining condition is truth==PASS. Never False — a FAIL/UNMEASURED
+        # truth leaves authority UNMEASURED (None), not a negative claim.
+        authority = True if truth is True else None
         result[fact_class] = TruthJoin(
-            truth=_aggregate_bool(truth_verdicts),
+            truth=truth,
+            authority=authority,
             freshness=_aggregate_bool(freshness_verdicts),
             attestation_count=len(items),
             joined_delivery_row_indices=tuple(indices),
@@ -385,6 +402,7 @@ def truth_join_to_dict(join: TruthJoin) -> dict[str, Any]:
     """JSON-native projection of a :class:`TruthJoin` for the integrity sidecar."""
     return {
         "truth": join.truth,
+        "authority": join.authority,
         "freshness": join.freshness,
         "attestation_count": join.attestation_count,
         "joined_delivery_row_indices": list(join.joined_delivery_row_indices),

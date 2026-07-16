@@ -15,6 +15,21 @@ Documented biting mutations (each verified to fail a test, then restored):
     (``canonical_bytes(attestation) != raw_attestation``).
     ``test_tampered_bundle_is_rejected_with_reason`` then ACCEPTS the tampered bundle →
     attestations non-empty, no diagnostic. Bite confirmed.
+
+J2b (authority leg) biting mutations (each verified to fail, then restored):
+
+  * MUTATION C — join_truth: drop the truth-PASS guard on the authority leg (compute
+    ``authority=True`` on ANY join instead of ``True`` only when ``truth is True``).
+    ``test_authority_none_on_truth_fail_join`` /
+    ``test_authority_none_on_truth_none_join`` then WRONGLY report ``authority=True`` on a
+    FAIL / UNMEASURED join → authority no longer rides only a truth-PASS join. Bite
+    confirmed.
+
+  * MUTATION D — gt_feature_metrics._apply_attestation_truth: delete the
+    ``authority_valid`` override (leave it at its hard-wired UNMEASURED).
+    ``test_collect_task_correct_info_goes_true_for_attested_class`` then keeps
+    ``correct_info`` at ``None`` (truth True, authority None) — the gate never moves.
+    Bite confirmed.
 """
 
 from __future__ import annotations
@@ -30,12 +45,14 @@ for path in (ROOT / "src", ROOT / "scripts" / "swebench"):
         sys.path.insert(0, str(path))
 
 import attestation_join as aj  # noqa: E402
+import gt_feature_metrics as gfm  # noqa: E402
 from groundtruth.runtime.attestation_store import persist_attestation  # noqa: E402
 from groundtruth.runtime.producer_attestation import (  # noqa: E402
     ATTESTATION_SCHEMA,
     FAIL,
     FRESHNESS,
     PASS,
+    UNMEASURED,
     ArtifactRef,
     DecisionBinding,
     PredicateAttestation,
@@ -356,3 +373,172 @@ def test_multiple_attestations_one_fail_aggregates_to_false(tmp_path: Path) -> N
 
     assert joins["syntax_result"].attestation_count == 2
     assert joins["syntax_result"].truth is False  # any FAIL → False
+
+
+# --------------------------------------------------------------------------- #
+# J2b — the authority leg (correct_info's second half).
+#
+# authority rides ONLY a truth-PASS join: True when (validated ∧ exact-join ∧
+# truth=True); None otherwise. It is NEVER False — no producer claims negative
+# authority; absence is UNMEASURED (None), not a refutation.
+# --------------------------------------------------------------------------- #
+def test_authority_true_on_truth_pass_join(tmp_path: Path) -> None:
+    seal = "a" * 16
+    attestation, artifacts = _syntax_attestation(
+        candidate_id="edit:src/core.py:7", delivery_seal=seal
+    )
+    _persist(tmp_path, attestation, artifacts)
+    rows = [_delivered_row("edit:src/core.py:7", seal)]
+
+    joins = aj.join_truth(aj.load_attestations(str(tmp_path)).attestations, rows)
+
+    tj = joins["syntax_result"]
+    assert tj.truth is True
+    assert tj.authority is True  # rides the truth-PASS join
+
+
+def test_authority_none_on_truth_fail_join(tmp_path: Path) -> None:
+    # MUTATION C bites here: an unguarded authority leg would report True on a FAIL.
+    seal = "b" * 16
+    attestation, artifacts = _syntax_attestation(
+        candidate_id="edit:src/core.py:9", delivery_seal=seal, truth_verdict=FAIL
+    )
+    _persist(tmp_path, attestation, artifacts)
+    rows = [_delivered_row("edit:src/core.py:9", seal)]
+
+    tj = aj.join_truth(
+        aj.load_attestations(str(tmp_path)).attestations, rows
+    )["syntax_result"]
+
+    assert tj.truth is False
+    assert tj.authority is None  # correct-or-quiet: no authority on a truth-FAIL
+
+
+def test_authority_none_on_truth_none_join(tmp_path: Path) -> None:
+    # MUTATION C also bites here: an UNMEASURED truth aggregates to None; authority
+    # must NOT be granted.
+    seal = "c" * 16
+    attestation, artifacts = _syntax_attestation(
+        candidate_id="edit:src/core.py:11",
+        delivery_seal=seal,
+        truth_verdict=UNMEASURED,
+    )
+    _persist(tmp_path, attestation, artifacts)
+    rows = [_delivered_row("edit:src/core.py:11", seal)]
+
+    tj = aj.join_truth(
+        aj.load_attestations(str(tmp_path)).attestations, rows
+    )["syntax_result"]
+
+    assert tj.truth is None
+    assert tj.authority is None
+
+
+def test_authority_absent_on_seal_mismatch(tmp_path: Path) -> None:
+    # A valid PASS attestation that joins NOTHING (seal differs) grants no authority:
+    # authority can never be minted without an exact delivered-row join.
+    attestation, artifacts = _syntax_attestation(
+        candidate_id="edit:src/core.py:7", delivery_seal="a" * 16
+    )
+    _persist(tmp_path, attestation, artifacts)
+    rows = [_delivered_row("edit:src/core.py:7", "f" * 16)]  # seal differs
+
+    joins = aj.join_truth(aj.load_attestations(str(tmp_path)).attestations, rows)
+
+    assert joins == {}  # no join → no TruthJoin → no authority at all
+
+
+def test_truth_join_to_dict_surfaces_authority(tmp_path: Path) -> None:
+    seal = "a" * 16
+    attestation, artifacts = _syntax_attestation(
+        candidate_id="edit:src/core.py:7", delivery_seal=seal
+    )
+    _persist(tmp_path, attestation, artifacts)
+    rows = [_delivered_row("edit:src/core.py:7", seal)]
+
+    tj = aj.join_truth(
+        aj.load_attestations(str(tmp_path)).attestations, rows
+    )["syntax_result"]
+    projected = aj.truth_join_to_dict(tj)
+
+    assert projected["truth"] is True
+    assert projected["authority"] is True  # the leg is surfaced in the sidecar
+
+
+# --------------------------------------------------------------------------- #
+# J2b — end-to-end through collect_task: the gate finally MOVES.
+# --------------------------------------------------------------------------- #
+def _write_trajectory(task_dir: Path) -> None:
+    (task_dir / "mini-swe-agent.trajectory.json").write_text(
+        json.dumps({
+            "messages": [{"role": "user", "content": "fixture task"}],
+            "info": {"submission": ""},
+            "trajectory_format": "mini-swe-agent",
+        }),
+        encoding="utf-8",
+    )
+
+
+def _write_ledger(task_dir: Path, rows: list[dict]) -> None:
+    ledger = task_dir / "gt_runtime_ledger_synthetic.jsonl"
+    ledger.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+
+def test_collect_task_correct_info_goes_true_for_attested_class(tmp_path: Path) -> None:
+    # THE load-bearing test: a valid PASS bundle + a matching DELIVERED row drives
+    # correct_info (truth ∧ authority) to True for the attested class. Before J2b the
+    # authority leg was hard-wired UNMEASURED, so this gate could NEVER be True.
+    # MUTATION D (remove the authority override) keeps correct_info at None.
+    seal = "a" * 16
+    candidate = "edit:src/core.py:7"
+    attestation, artifacts = _syntax_attestation(
+        candidate_id=candidate, delivery_seal=seal
+    )
+    _persist(tmp_path, attestation, artifacts)
+    _write_trajectory(tmp_path)
+    _write_ledger(tmp_path, [_delivered_row(candidate, seal)])
+
+    record = gfm.collect_task("synthetic__attested-pass", str(tmp_path), profile="2")
+
+    fc = record["fact_classes"]["syntax_result"]
+    assert fc["truth_valid"]["value"] is True
+    assert fc["authority_valid"]["value"] is True  # J2b: the second leg is measured
+
+    readiness = record["ss_features"]["syntax_result"]["ss_readiness"]
+    assert readiness["gates"]["correct_info"] is True  # the gate MOVES
+
+    diag = record["ss_integrity"]["attestation_join"]
+    assert diag["applied_truth_overrides"] == ["syntax_result"]
+    assert diag["applied_authority_overrides"] == ["syntax_result"]
+    assert diag["joined_fact_classes"]["syntax_result"]["authority"] is True
+
+
+def test_collect_task_authority_is_join_gated_not_blanket(tmp_path: Path) -> None:
+    # The unattested-untouched pin, downstream: ONLY the joined attested class receives
+    # authority. Every other fact class — including attested-but-unjoined classes
+    # (covering_red/caller_contract/signature_delta here) and every unattested class —
+    # keeps its honest UNMEASURED authority (never True).
+    seal = "a" * 16
+    candidate = "edit:src/core.py:7"
+    attestation, artifacts = _syntax_attestation(
+        candidate_id=candidate, delivery_seal=seal
+    )
+    _persist(tmp_path, attestation, artifacts)
+    _write_trajectory(tmp_path)
+    _write_ledger(tmp_path, [_delivered_row(candidate, seal)])
+
+    record = gfm.collect_task("synthetic__join-gated", str(tmp_path), profile="2")
+
+    for fact_class, lifecycle in record["fact_classes"].items():
+        if fact_class == "syntax_result":
+            continue
+        assert lifecycle["authority_valid"]["value"] is not True, fact_class
+
+    # covering_red is an ATTESTED class, yet unjoined here → still UNMEASURED, proving
+    # authority is join-gated, not granted by attested-set membership.
+    assert record["fact_classes"]["covering_red"]["authority_valid"]["value"] is None
+    assert record["ss_integrity"]["attestation_join"]["applied_authority_overrides"] == [
+        "syntax_result"
+    ]

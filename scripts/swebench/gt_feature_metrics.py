@@ -2704,20 +2704,25 @@ def _apply_attestation_truth(
     fact_lifecycles: dict[str, dict],
     ledger_artifact: str,
 ) -> dict[str, Any]:
-    """SPEC-J2: populate lifecycle truth for the four attested fact classes from the
-    exactly-joined producer attestations, and return the join diagnostics.
+    """SPEC-J2/J2b: populate lifecycle truth AND authority for the four attested fact
+    classes from the exactly-joined producer attestations, and return the join
+    diagnostics.
 
     Only ``syntax_result``/``covering_red``/``caller_contract``/``signature_delta`` may
     receive joined truth (:data:`attestation_join.ATTESTED_FACT_CLASSES`). Truth is
     overridden ONLY when the join produced a bool (a validated attestation joined a
-    DELIVERED row on the exact ``(candidate_id, delivery_seal)`` identity); every other
-    class — and any attested class without a validated joined attestation — stays at its
-    honest UNMEASURED (the reverted ea0eb16c0 fabrication class is NOT reintroduced).
-    Pure and read-only over ``task_dir``.
+    DELIVERED row on the exact ``(candidate_id, delivery_seal)`` identity). Authority
+    (J2b, the second leg of ``correct_info``) is overridden ONLY when the join set it —
+    which happens ONLY on a truth-PASS join (``tj.authority`` is ``True`` or ``None``,
+    never ``False``); a FAIL/UNMEASURED join leaves ``authority_valid`` at its honest
+    hard-wired UNMEASURED. Every other class — and any attested class without a
+    validated joined attestation — stays UNMEASURED (the reverted ea0eb16c0 fabrication
+    class is NOT reintroduced). Pure and read-only over ``task_dir``.
     """
     load = load_attestations(task_dir)
     joins = join_truth(load.attestations, rows)
     applied: list[str] = []
+    applied_authority: list[str] = []
     for fc in ATTESTED_FACT_CLASSES:
         tj = joins.get(fc)
         if tj is None or not isinstance(tj.truth, bool):
@@ -2730,6 +2735,18 @@ def _apply_attestation_truth(
             tj.truth, source_artifact="producer_attestations", source_messages=[]
         )
         applied.append(fc)
+        # SPEC-J2b: authority is the second leg of correct_info. The join grants it
+        # (``tj.authority is True``) ONLY on a truth-PASS join — validated,
+        # exactly-joined, all-PASS. It is NEVER False (``authority`` is True or None),
+        # so this bool guard fires only to set True; a FAIL/UNMEASURED join leaves
+        # authority_valid at its honest hard-wired UNMEASURED (fail-closed).
+        if isinstance(tj.authority, bool):
+            lifecycle["authority_valid"] = measured(
+                tj.authority,
+                source_artifact="producer_attestations",
+                source_messages=[],
+            )
+            applied_authority.append(fc)
     return {
         "schema": "gt.attestation_join.v1",
         "attestations_loaded": len(load.attestations),
@@ -2738,6 +2755,7 @@ def _apply_attestation_truth(
             fc: truth_join_to_dict(tj) for fc, tj in sorted(joins.items())
         },
         "applied_truth_overrides": sorted(applied),
+        "applied_authority_overrides": sorted(applied_authority),
         "source_artifact": ledger_artifact,
     }
 
