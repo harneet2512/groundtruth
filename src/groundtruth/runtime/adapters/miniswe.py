@@ -339,14 +339,23 @@ def _render_signature_delta(env: EvidenceEnvelope) -> str:
 
 
 def _render_registration(env: EvidenceEnvelope) -> str:
-    """`companion_surface` (registers siblings X, Y but not Z) -> the SM-1 linter REGISTRATION
-    WARNING. The structured ``siblings`` LIST rides ``env.native_args`` (the companion producer
-    owns it — no prose re-parse); a missing file/line/siblings -> "" -> generic fallback."""
+    """`companion_surface` and `missing_role:*` -> the SM-1 linter REGISTRATION WARNING."""
     a = env.native_args or {}
     if not a:
         return ""
     return render_registration_native(
         a.get("file"), a.get("line"), a.get("symbol"), a.get("siblings"))
+
+
+def _render_new_file(env: EvidenceEnvelope) -> str:
+    """`new_file_destination` -> ripgrep-form path suggestion with _final_scrub."""
+    from ..native_render import _final_scrub, _is_test_path
+    target = (env.target or "").strip()
+    sym = (env.fact_id or "").strip()
+    if not target or _is_test_path(target):
+        return ""
+    row = f"{target}:1:{sym}" if sym else target
+    return _final_scrub(row, set())
 
 
 def _render_def_rows(env: EvidenceEnvelope) -> str:
@@ -430,6 +439,8 @@ _NATIVE_CLASS_RENDERERS: "dict[str, object]" = {
     "def_ref_partition": _render_def_rows,
     "signature_mismatch": _render_signature_delta,
     "companion_surface": _render_registration,
+    "missing_role": _render_registration,
+    "new_file_destination": _render_new_file,
     # T0->T2 re-slot (2026-07-12): the ranked localization ANSWER renders native at D2. A
     # native_args-less envelope maps to "" -> _render_generic (byte-identical); the dispatch
     # is native-only, so the tagged/default path is unchanged. Only the GT_LOC_RESLOT

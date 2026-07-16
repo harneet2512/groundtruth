@@ -2764,6 +2764,17 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
         # byte-identical (real producers always build a non-empty payload, so this rejects
         # only a degenerate empty-payload envelope, and only under the flag).
         if _ss_arbiter_v2_on() and not _envelope_has_bytes(a):
+            try:
+                _cand_bytes, _fc = _candidate_control_identity(a)
+                _record_control(
+                    state, "GT_SS_ARBITER_V2",
+                    "gateway.augment.empty_payload_guard", "APPLIED",
+                    candidate_bytes=_cand_bytes, fact_class=_fc,
+                    candidate_id=getattr(a, "dedup_key", "") or "",
+                    reason="empty_payload_dropped",
+                )
+            except Exception:
+                pass
             continue
         # SM-0 registry ENFORCEMENT (GT_REGISTRY_ENFORCE): bind producer -> the DECLARED
         # native renderer. A class with no available renderer has no native FORM to ride the

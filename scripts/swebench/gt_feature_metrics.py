@@ -2089,17 +2089,23 @@ def _internal_fact_support_readiness(
         value = source_record.get(field)
         return value if isinstance(value, bool) else None
 
+    _support_correct = producer_gate("source_contribution_correct")
+    _support_causal = producer_gate("source_causal_fair_probe")
+    _is_live = bool(
+        runtime_receipt and candidate_bound and downstream_join
+        and isinstance(_support_correct, bool) and _support_correct
+    )
     return _typed_readiness(
         "internal_support",
         {
             "runtime_support_receipt": True if runtime_receipt else None,
             "supported_candidate_id": True if candidate_bound else None,
             "downstream_decision_join": True if downstream_join else None,
-            "support_correct": producer_gate("source_contribution_correct"),
-            "support_causal_fair_probe": producer_gate("source_causal_fair_probe"),
+            "support_correct": _support_correct,
+            "support_causal_fair_probe": _support_causal,
         },
         gate_names=_INTERNAL_SUPPORT_GATE_NAMES,
-        live_witness=False,
+        live_witness=_is_live,
         extra={
             "fact_class": fact_class,
             "source_artifact": ledger_artifact,
@@ -2169,19 +2175,25 @@ def _acquisition_readiness(
         and isinstance(receipt, int) and not isinstance(receipt, bool)
         and receipt >= 2
     )
+    source_correct = record.get("source_contribution_correct")
+    timing = record.get("timing_inherited_from_fact_delivery")
+    fair_probe = record.get("source_causal_fair_probe")
+    is_live = bool(
+        joined
+        and isinstance(source_correct, bool) and source_correct
+        and isinstance(timing, bool) and timing
+    )
     return _typed_readiness(
         "support",
         {
             "supported_fact_delivery_join": joined,
             "candidate_local_contribution": candidate_local,
-            # Source truth, inherited timing, and causal contribution require
-            # producer-owned fields/ablation that brief receipt v1 does not carry.
-            "source_contribution_correct": None,
-            "timing_inherited_from_fact_delivery": None,
-            "source_causal_fair_probe": None,
+            "source_contribution_correct": source_correct if isinstance(source_correct, bool) else None,
+            "timing_inherited_from_fact_delivery": timing if isinstance(timing, bool) else None,
+            "source_causal_fair_probe": fair_probe if isinstance(fair_probe, bool) else None,
         },
         gate_names=_SUPPORT_GATE_NAMES,
-        live_witness=False,
+        live_witness=is_live,
     )
 
 

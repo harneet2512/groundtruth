@@ -203,7 +203,6 @@ CONTROL_DECISION_CONTRACTS = {
     ),
     "GT_SS_ACK_FORM": _mediator(
         "GT_SS_ACK_FORM",
-        "mini_seam.acknowledgment.form_selection",
         "pretask.v1r_brief.ack_requirement_filter",
     ),
     "GT_SS_ACK_METRICS": _mediator(
