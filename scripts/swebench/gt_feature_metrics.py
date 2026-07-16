@@ -81,6 +81,10 @@ from chronology_extract import (  # noqa: E402  (SPEC-J3 timing join)
     adjudicate_deliveries,
     timing_by_fact_class,
 )
+from fair_probe_result import (  # noqa: E402  (SPEC-J4 fair-probe result)
+    fair_probe_bool_by_fact_class,
+    join_fair_probes,
+)
 from groundtruth.runtime.feature_lineage import (  # noqa: E402
     CAP_BYTE_OWNER_MECHANISMS,
     CAP_BYTE_OWNER_IDS,
@@ -261,6 +265,22 @@ def _member_chronological_time(
         timing_by_fc.get(fc)
         for fc in member_fact_classes(member)
         if timing_by_fc.get(fc) is not None
+    ]
+    if not measured:
+        return None
+    return all(measured)
+
+
+def _member_fair_probe(
+    member: str, fair_probe_by_fc: dict[str, bool | None]
+) -> bool | None:
+    """SPEC-J4: a byte-owner member's fair-probe gate = the join over its owned fact class(es).
+    True only when every measured owned class is a proven causal result (CAUSAL/CAUSAL_PAIRED);
+    False if any owned class self-localized; None when no owned class is measured (fail-closed)."""
+    measured = [
+        fair_probe_by_fc.get(fc)
+        for fc in member_fact_classes(member)
+        if fair_probe_by_fc.get(fc) is not None
     ]
     if not measured:
         return None
@@ -2183,6 +2203,7 @@ def _valid_readiness_projection(value: object) -> bool:
 def _acquisition_readiness(
     record: dict[str, Any], *, leak_free: bool | None, dose_ok: bool | None,
     live_witness: bool = False,
+    fair_probe_by_fc: dict[str, bool | None] | None = None,
 ) -> dict[str, Any]:
     """Project ACQ support evidence without borrowing the FACT delivery gates."""
     receipt = record.get("receipt_level")
@@ -2201,18 +2222,32 @@ def _acquisition_readiness(
         and isinstance(receipt, int) and not isinstance(receipt, bool)
         and receipt >= 2
     )
+    # SPEC-J4: an ACQ candidate has no fair-probe design of its own — its causal contribution is
+    # the causal verdict of the FACT class it supports. INHERIT that verdict ONLY when it is a
+    # concrete bool (CAUSAL/CAUSAL_PAIRED -> True, SELF_LOCALIZED -> False); an UNMEASURED fact
+    # verdict stays None (fail-closed). The inheritance is marked explicitly, never silent.
+    supported_fc = record.get("supported_fact_class")
+    inherited_fair_probe: bool | None = None
+    if fair_probe_by_fc is not None and isinstance(supported_fc, str):
+        candidate = fair_probe_by_fc.get(supported_fc)
+        if isinstance(candidate, bool):
+            inherited_fair_probe = candidate
+    extra = (
+        {"source_causal_fair_probe_inherited_from_fact": supported_fc}
+        if inherited_fair_probe is not None else None
+    )
     return _typed_readiness(
         "support",
         {
             "supported_fact_delivery_join": joined,
             "candidate_local_contribution": candidate_local,
-            # Source truth, inherited timing, and causal contribution require
-            # producer-owned fields/ablation that brief receipt v1 does not carry.
-            # A collector shape-validation is NOT source truth (the 47dacfd0f class);
-            # these stay None until typed producer/adjudicator evidence is joined.
+            # Source truth and inherited timing require producer-owned fields/ablation that brief
+            # receipt v1 does not carry (a collector shape-validation is NOT source truth — the
+            # 47dacfd0f class); they stay None until typed producer evidence is joined.
             "source_contribution_correct": None,
             "timing_inherited_from_fact_delivery": None,
-            "source_causal_fair_probe": None,
+            # SPEC-J4: inherited from the supported FACT class's adjudicated fair-probe verdict.
+            "source_causal_fair_probe": inherited_fair_probe,
         },
         gate_names=_SUPPORT_GATE_NAMES,
         # Offline evidence never sets the live bit (gt_gt.md execution ledger). Gates
@@ -2220,6 +2255,7 @@ def _acquisition_readiness(
         # live bit is joined ONLY from run-provenance artifacts (live_run_provenance),
         # never inferred here.
         live_witness=live_witness,
+        extra=extra,
     )
 
 
@@ -2636,13 +2672,15 @@ def _canonical_task_features(
     leak_free: bool | None,
     dose_ok: bool | None,
     live_witness: bool = False,
+    fair_probe_by_fc: dict[str, bool | None] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """Build the explicit 128-row task ledger without mutating legacy fields."""
     inventory = canonical_feature_inventory()
     master: dict[str, dict[str, Any]] = {}
     for record in acq.values():
         record["ss_readiness"] = _acquisition_readiness(
-            record, leak_free=leak_free, dose_ok=dose_ok, live_witness=live_witness
+            record, leak_free=leak_free, dose_ok=dose_ok, live_witness=live_witness,
+            fair_probe_by_fc=fair_probe_by_fc,
         )
     master.update(acq)
     for name in inventory["CAP"]:
@@ -2787,6 +2825,7 @@ def collect_task(
     profile: str = "2",
     baseline_root: str | None = None,
     gold_paths: Iterable[str] | None = None,
+    paired_baseline: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     """Collect the full per-task feature-metrics record (schema gt.feature_metrics.v1).
 
@@ -2876,6 +2915,23 @@ def collect_task(
     chronological_timing = adjudicate_deliveries(traj, rows)
     timing_by_fc = timing_by_fact_class(chronological_timing)
 
+    # SPEC-J4: the fair-probe RESULT join. Turn shadow-holdout rows + the chronology into
+    # seal-bound MatchedProbe artifacts adjudicated through chronological_adjudication.adjudicate
+    # (the CAUSAL authority), feeding the ``fair_probe`` gate: True for CAUSAL/CAUSAL_PAIRED,
+    # False for SELF_LOCALIZED, None (absent) for UNMEASURED. The paired-baseline path takes the
+    # baseline verdict as an INPUT (from the caller); absent -> UNMEASURED. Fail-closed: no
+    # holdout + no self-acquire + no baseline input -> every class None -> byte-identical gate.
+    _pb = paired_baseline if isinstance(paired_baseline, dict) else {}
+    _gt_res = _pb.get("gt_resolved")
+    _base_res = _pb.get("baseline_resolved")
+    fair_probe_join = join_fair_probes(
+        traj, rows,
+        output_dir=task_dir, task_label=task,
+        gt_resolved=_gt_res if isinstance(_gt_res, bool) else None,
+        baseline_resolved=_base_res if isinstance(_base_res, bool) else None,
+    )
+    fair_probe_by_fc = fair_probe_bool_by_fact_class(fair_probe_join)
+
     members = profile_members(profile)
     features: dict[str, dict] = {}
     for m in members:
@@ -2947,7 +3003,8 @@ def collect_task(
                 byte_proven=byte_proven,
                 leak_free=leak_gate,
                 dose_ok=dose_gate,
-                fair_probe=None,
+                # SPEC-J4: the byte-owner's fair-probe = the join over its owned fact class(es).
+                fair_probe=_member_fair_probe(member, fair_probe_by_fc),
                 live_witness=_live_witness,
                 # SPEC-J3: the byte-owner's timing = its owned fact class(es), adjudicated.
                 chronological_time=_member_chronological_time(member, timing_by_fc),
@@ -2972,9 +3029,11 @@ def collect_task(
                 ),
                 leak_free=leak_gate,
                 dose_ok=dose_gate,
-                # A fair probe is a seal-bound causal RESULT (matched/shadow),
-                # never inferred from instrument presence or gate quality.
-                fair_probe=None,
+                # SPEC-J4: the seal-bound causal RESULT for this fact class (matched/shadow probe
+                # adjudicated through chronological_adjudication.adjudicate, or the paired-baseline
+                # path). Still NEVER inferred from instrument presence or gate quality — None when
+                # no probe adjudicated (fail-closed).
+                fair_probe=fair_probe_by_fc.get(fact_class),
                 # Offline evidence never sets the live bit: gates 1-6 passing does
                 # not distinguish a paid trajectory from a replay/fixture. The bit is
                 # joined ONLY from run-provenance artifacts (detect_live_run above).
@@ -3002,6 +3061,7 @@ def collect_task(
         acq_missing,
         leak_free=leak_gate, dose_ok=dose_gate,
         live_witness=_live_witness,
+        fair_probe_by_fc=fair_probe_by_fc,
     )
     # Full provenance object for audit: which artifacts proved (or failed to prove)
     # the terminal live bit, and every named fail-closed reason.
@@ -3010,6 +3070,9 @@ def collect_task(
     # SPEC-J3: per-fact-class timing verdicts + UNMEASURED reasons feeding the
     # correct_rl_adhered_time gate (the delivery-row chronology join).
     ss_integrity["chronological_timing"] = chronological_timing
+    # SPEC-J4: the fair-probe result join (per-fact-class verdicts + the seal-bound probe audit
+    # trail + the sealed sidecar path) feeding the ``fair_probe`` gate.
+    ss_integrity["fair_probe"] = fair_probe_join
     ss_integrity["feature_opportunity"] = opportunity_projection["integrity"]
     if opportunity_projection["integrity"]["publishable"] is not True:
         ss_integrity["required_inputs_complete"] = False
