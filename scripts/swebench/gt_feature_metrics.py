@@ -3813,7 +3813,15 @@ def main(argv: list[str] | None = None) -> int:
     records: list[dict] = []
     for task, d in _iter_task_dirs(run_dir):
         rec = collect_task(task, d, profile=args.profile, baseline_root=args.baseline_root)
-        write_task_metrics(rec, d)
+        # With --out, per-task records are written UNDER out_dir and the task dir is
+        # left byte-untouched: the in-container gt_task_completion.json seals the hash
+        # of the task dir's gt_feature_metrics_<task>.json, and an in-place re-grade
+        # (the summarize diagnosis pass) would break that binding for EVERY task
+        # (live witness: run 29553735978 — 30/30 'incomplete', publishable=false,
+        # while the same sealed artifacts evaluated without the in-place rewrite are
+        # publishable=true). Without --out (the in-container per-task collection that
+        # CREATES the sealed record), behavior is unchanged.
+        write_task_metrics(rec, d if args.out is None else out_dir)
         records.append(rec)
 
     if not records and expected_task_ids is None:
