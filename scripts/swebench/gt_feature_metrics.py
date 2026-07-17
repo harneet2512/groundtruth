@@ -2813,7 +2813,7 @@ def _apply_attestation_truth(
 
     Only the classes in :data:`attestation_join.ATTESTED_FACT_CLASSES`
     (``syntax_result``/``covering_red``/``caller_contract``/``signature_delta``/
-    ``submit_refusal``) may receive joined truth. Truth is
+    ``submit_refusal``/``recovery``) may receive joined truth. Truth is
     overridden ONLY when the join produced a bool (a validated attestation joined a
     DELIVERED row on the exact ``(candidate_id, delivery_seal)`` identity). Authority
     (J2b, the second leg of ``correct_info``) is overridden ONLY when the join set it —

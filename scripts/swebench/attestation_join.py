@@ -83,9 +83,14 @@ _DELIVERED = "delivered"
 #   submit_refusal  <- submit_gate      (finalize_submit_refusal_attestation) — the PURE
 #                      gate kernel's BLOCK verdict, re-run on its own recorded inputs to
 #                      reproduce the refusal (truth+authority measured; freshness honest-dark).
+#   recovery        <- ss_coherence_v2  (finalize_recovery_attestation, "coherence_collapse")
+#                      — the coherence-collapse steer's blind-overwrite churn count, re-derived
+#                      from the producer's own edit-event ledger to reproduce the delivered
+#                      "rewritten N times" claim (truth+authority measured; freshness honest-dark).
 ATTESTED_FACT_CLASSES: tuple[str, ...] = (
     "caller_contract",
     "covering_red",
+    "recovery",
     "signature_delta",
     "submit_refusal",
     "syntax_result",

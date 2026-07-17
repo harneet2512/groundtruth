@@ -6950,6 +6950,11 @@ _detect_loop_fired = False
 _detect_loop_epoch_step = -1
 _coherence_fired_files: set[str] = set()
 _coherence_last_rel: str | None = None
+# B-REC: host-only producer-input snapshot for the recovery-class (coherence_collapse)
+# attestation; NEVER model-facing. Captured at the coherence-collapse decision point
+# (`_coherence_collapse_candidate`, V2 path only), read at the sealed delivery in
+# `_persist_lane_producer_attestation`. None -> no attestation is persisted (correct-or-quiet).
+_last_recovery_candidate_input = None
 
 
 def _sync_detect_loop_progress_epoch() -> int:
@@ -7040,7 +7045,7 @@ def _degenerate_loop_candidate(cmd: str, raw_obs: str,
 
 def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
     """detect.coherence_collapse producer called after edit churn increments."""
-    global _coherence_last_rel
+    global _coherence_last_rel, _last_recovery_candidate_input
     if rel in _coherence_fired_files:
         return None
     # GT_SS_COHERENCE_V2 (feature 3): the "rewritten N times with no passing test
@@ -7099,6 +7104,27 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
                 reason="ss_coherence", file_path=rel, chars=0)
         except Exception:  # noqa: BLE001 — measurement must never break the producer
             pass
+    # B-REC (2026-07-16): capture the IMMUTABLE producer-owned churn snapshot for the
+    # recovery-class attestation — the exact edit/test event ledger the churn decision
+    # consumed, so the offline factory can RE-RUN the pure churn predicate and confirm the
+    # delivered "rewritten N times" claim. V2 path ONLY (the legacy `_edit_churn` counter is
+    # not reconstructable from events -> stays UNMEASURED). Audit-only host state: NOT
+    # model-facing, changes no delivered byte; any fault clears it (correct-or-quiet).
+    if _ss_coherence_v2_on():
+        try:
+            from groundtruth.runtime.recovery_attestation import (
+                build_recovery_candidate_input)
+            _last_recovery_candidate_input = build_recovery_candidate_input(
+                rel=rel,
+                edit_events=list(_ss_edit_events),
+                test_events=list(_ss_test_events),
+                anchored=bool(anchored),
+                coherence_v2=True,
+                churn=int(churn),
+                actual_event="edit_result",
+            )
+        except Exception:  # noqa: BLE001 -- attestation input cannot alter delivery
+            _last_recovery_candidate_input = None
     return (float(_SEV_DETECT),
             _nudge_native(
                 f'\n<gt-nudge reason="coherence_collapse">\n{body}\n</gt-nudge>',
@@ -12735,6 +12761,22 @@ def _persist_lane_producer_attestation(
             if candidate is None:
                 return
             final = finalize_covering_attestation(
+                candidate,
+                producer_block=producer_block,
+                shipped_suffix=shipped_suffix,
+                target=target,
+                candidate_id=candidate_id,
+                delivery_seal=delivery_seal,
+            )
+        elif kind == "detect.coherence":
+            # B-REC: the recovery-class (coherence_collapse) steer. Attest the delivered
+            # "rewritten N times" claim against the producer's OWN edit-event churn snapshot.
+            candidate = globals().get("_last_recovery_candidate_input")
+            if candidate is None:
+                return
+            from groundtruth.runtime.recovery_attestation import (
+                finalize_recovery_attestation)
+            final = finalize_recovery_attestation(
                 candidate,
                 producer_block=producer_block,
                 shipped_suffix=shipped_suffix,
