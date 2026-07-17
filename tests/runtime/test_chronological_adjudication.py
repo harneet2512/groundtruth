@@ -80,9 +80,15 @@ def test_delivery_at_commit_boundary_is_still_on_time() -> None:
 
 
 def test_wrong_event_or_missing_indices_fail_closed_unmeasured() -> None:
+    # B-BND (b2): ``covering_red`` is now REACTIVE (on-time by construction at its edit
+    # boundary), so it is no longer a valid "wrong-event" example — the wrong-event fail-closed
+    # contract is demonstrated on a NON-reactive fixed-boundary class (``syntax_result`` wants
+    # edit_result; ``file_view`` is the wrong event). The missing-index path is exercised on
+    # covering_red to keep its coverage: reactive skips only the event check, never the index
+    # checks, so a missing commit index still fails closed to UNMEASURED.
     wrong_event = adjudicate(
-        evidence_type="covering_red",
-        actual_event="edit_result",
+        evidence_type="syntax_result",
+        actual_event="file_view",
         delivery_seal="d" * 16,
         chronology=_chronology(),
     )

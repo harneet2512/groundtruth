@@ -126,11 +126,47 @@ def _tool_ordinal_to_index(messages: list[dict]) -> dict[int, int]:
     return out
 
 
-def _boundary_indices(messages: list[dict]) -> dict[str, list[int]]:
+# B-BND (b1/b3): the SEAM is the writer/authority for what an observation IS. Each runtime
+# ledger row records the coarse HOOK PHASE the seam classified for its ``iteration`` (the
+# submit interception it recorded, the post_edit it recorded), and the seam's classifier
+# (``gt_mini_patch._classify`` / ``_classify_action``) can DISAGREE with the grader-side
+# ``_parse_timeline`` edit/submit detection. Where they disagree the SEAM wins: its recorded
+# phase is a REAL event the seam actually observed, so the boundary is DERIVED from that
+# recorded event (mapped to a message index via the SAME iteration -> tool_ordinal join the
+# delivery uses), never synthesized. This map bridges the coarse seam phase -> the fine
+# fact_registry boundary EVENTS it opens. ``submit`` is handled from the ``submit_gate`` layer
+# (below), NOT event_type, because a submit interception carries event_type='' — the
+# interception identity lives in the ``layer``.
+_SEAM_PHASE_TO_BOUNDARIES: dict[str, tuple[str, ...]] = {
+    "post_edit": ("edit_result", "first_view_edit"),
+}
+# b1: the ledger ``layer`` that identifies a real submit INTERCEPTION the seam recorded (the
+# submit_gate evaluates every submit attempt; its row carries event_type='' so the identity is
+# the layer). Each such row opens a ``submit`` boundary at its iteration.
+_SUBMIT_INTERCEPTION_LAYER = "submit_gate"
+
+
+def _boundary_indices(
+    messages: list[dict],
+    ledger_rows: list[dict] | None = None,
+    tool_ordinal_index: dict[int, int] | None = None,
+) -> dict[str, list[int]]:
     """Message indices of each fine observation boundary, keyed by the fact_registry EVENTS
     name. Reuses gt_performance_metrics._parse_timeline (one source of truth for command
     classification): each observation carries the RESULT of its preceding assistant action,
-    so the boundary kind is read from that action's is_search / is_edit / is_test / view."""
+    so the boundary kind is read from that action's is_search / is_edit / is_test / view.
+
+    B-BND (b1/b3): when ``ledger_rows`` + ``tool_ordinal_index`` are supplied, the boundary set
+    is ADDITIVELY reconciled with the SEAM's own recorded events (the authority). A
+    ``submit_gate`` ledger row opens a ``submit`` boundary at its interception (b1: a mid-run
+    submit refusal has no terminal-exit boundary <= its delivery); a ``post_edit`` ledger row
+    opens an ``edit_result`` boundary at the edit the seam recorded (b3: the grader's
+    ``_parse_timeline`` edit detection can miss an edit the seam's ``_classify`` caught). Every
+    added boundary is a REAL recorded event mapped through the SAME iteration -> tool_ordinal
+    join the delivery uses, so a boundary is never synthesized and is guaranteed <= the delivery
+    it answers (the delivery's own eligible window is >= that same tool_ordinal). Fail-closed: a
+    row whose iteration has no tool message is skipped. Byte-identical to the old signature when
+    the two optional args are omitted (the fair_probe ``_boundary_indices(messages)`` path)."""
     try:
         from gt_performance_metrics import _parse_timeline
     except Exception:  # pragma: no cover - grader always has scripts/swebench on path
@@ -177,6 +213,30 @@ def _boundary_indices(messages: list[dict]) -> dict[str, list[int]]:
     submit_index = exit_index if exit_index is not None else last_obs_index
     if submit_index is not None:
         out["submit"].append(submit_index)
+
+    # B-BND (b1/b3): reconcile with the SEAM's recorded events (the authority). Additive only —
+    # a real recorded phase mapped to a message index via the delivery's OWN iteration ->
+    # tool_ordinal join; never removes a trajectory-parsed boundary, never synthesizes one.
+    if ledger_rows and tool_ordinal_index:
+        for row in ledger_rows:
+            if not isinstance(row, dict):
+                continue
+            it = row.get("iteration")
+            if not isinstance(it, int) or isinstance(it, bool):
+                continue
+            mi = tool_ordinal_index.get(it)
+            if mi is None:
+                continue
+            # b1: every submit interception the seam recorded is a submit boundary. The
+            # interception identity is the ``submit_gate`` layer (event_type=''), so a mid-run
+            # refusal delivered BEFORE the terminal exit now has a boundary <= its delivery.
+            if row.get("layer") == _SUBMIT_INTERCEPTION_LAYER:
+                out["submit"].append(mi)
+            # b3: an edit the seam's post_edit hook recorded opens an edit_result boundary even
+            # when the grader's _parse_timeline edit detection missed it (seam is authority).
+            for ev in _SEAM_PHASE_TO_BOUNDARIES.get(str(row.get("event_type") or ""), ()):  # noqa: E501
+                out[ev].append(mi)
+
     for ev in out:
         out[ev] = sorted(set(out[ev]))
     return out
@@ -333,19 +393,55 @@ def _decision_open_index(
     return max(prior) if prior else None
 
 
+# B-BND (b4): a few fact classes are COMMITTED by the agent's next DECISION ACT, not by a
+# repository mutation. The honest commit is read from the class's registry receipt predicate:
+#   * ``recovery`` — target_decision "whether to pivot", receipt_predicate
+#     "pivoted_after_steer": a pivot is a CHANGE OF COURSE (re-search / re-read / different
+#     edit), which NEED NOT mutate the tree, so mutation-only under-counts the commit.
+# For this class the commit is the first agent action of ANY kind after the boundary. Every
+# other class keeps the strict mutation predicate (an edit-shaping fact is committed by the
+# edit). NOTE deliberately EXCLUDED: ``submit_refusal`` — its decision "is completion allowed"
+# is committed by the next REPAIR (a mutation: go fix more), NOT any keystroke; widening it to
+# any-action mis-reads a non-repair turn as the commit and flips a genuinely on-time refusal to
+# LATE (measured: gitingest-94 ON_TIME under mutation-commit -> spurious LATE under any-action).
+# Keyed by the canonical registered fact class so a finer evidence_type / alias resolves
+# correctly (e.g. ``coherence_collapse`` -> ``recovery``).
+_PIVOT_COMMIT_CLASSES: frozenset[str] = frozenset({"recovery"})
+
+
+def _is_pivot_commit(evidence_type: str | None) -> bool:
+    """True iff the row's canonical fact class commits its decision by the next agent ACT (a
+    pivot/course change) rather than a repository mutation — read from the registry (b4)."""
+    reg = registration_for(evidence_type) if evidence_type else None
+    return reg is not None and reg.fact_class in _PIVOT_COMMIT_CLASSES
+
+
 def _decision_commit_index(
-    messages: list[dict], decision_open_index: int | None
+    messages: list[dict],
+    decision_open_index: int | None,
+    evidence_type: str | None = None,
 ) -> int | None:
-    """The message index of the agent's next STATE-CHANGING action after the boundary — the
-    first assistant message strictly after ``decision_open_index`` emitting a repository-
-    mutating command (consumption_ledger._action_kind == 'mutation'). Reads/searches/views do
-    not change state. ``None`` (fail-closed) when the decision was never committed."""
+    """The message index where the agent COMMITTED the row's decision after the boundary.
+
+    Default (edit-shaping facts): the first assistant message strictly after
+    ``decision_open_index`` emitting a repository-mutating command
+    (``consumption_ledger._action_kind == 'mutation'``); reads/searches/views do not change
+    state. B-BND (b4): for a PIVOT class (:func:`_is_pivot_commit` — e.g. ``recovery``, whose
+    receipt is ``pivoted_after_steer``) the commit is the first assistant message emitting a
+    command of ANY kind, because a pivot is a change of course that need not mutate the tree.
+    ``None`` (fail-closed) when the decision was never committed."""
     if decision_open_index is None:
         return None
+    pivot = _is_pivot_commit(evidence_type)
     for j in range(decision_open_index + 1, len(messages)):
         if messages[j].get("role") != "assistant":
             continue
-        for cmd in _emitted_commands(messages[j]):
+        cmds = _emitted_commands(messages[j])
+        if pivot:
+            if cmds:  # any agent action commits a pivot/course-change decision
+                return j
+            continue
+        for cmd in cmds:
             if _action_kind(cmd) == "mutation":
                 return j
     return None
@@ -471,7 +567,8 @@ def extract_chronologies(
     messages = _messages(trajectory)
     buffers = _visible_buffers(messages)
     tool_ordinal_index = _tool_ordinal_to_index(messages)
-    boundaries = _boundary_indices(messages)
+    # B-BND (b1/b3): reconcile the boundary set with the SEAM's own recorded submit/edit events.
+    boundaries = _boundary_indices(messages, ledger_rows, tool_ordinal_index)
 
     out: dict[int, ExtractedChronology] = {}
     for row_index, row in enumerate(ledger_rows):
@@ -492,7 +589,7 @@ def extract_chronologies(
         )
         required = required_event(evidence_type)
         decision_open = _decision_open_index(required, delivery_index, boundaries)
-        decision_commit = _decision_commit_index(messages, decision_open)
+        decision_commit = _decision_commit_index(messages, decision_open, evidence_type)
         native_acq = _native_acquisition_index(
             messages, delivery_index, payload, file_path
         )

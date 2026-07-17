@@ -647,6 +647,18 @@ _EVIDENCE_TYPE_DELIVER_BY: dict[str, str] = {
     # GT_REGISTRY_ENFORCE from EXPIRING a genuinely on-time edit-boundary caller-break while
     # still catching a truly wrong-event fact — exactly the trace_frame precedent above.
     "caller_break": EVENT_EDIT_RESULT,
+    # B-BND (b2): the SEAM's executed covering RED. Its canonical ``covering_red`` class
+    # declares deliver_by=test_result (a covering verdict riding the agent's OWN test result),
+    # but the ``covering_runner`` producer RUNS the covering test ITSELF at EDIT time and
+    # delivers the RED INTO the post_edit observation (``gt_mini_patch._executed_covering_
+    # emission`` stamps ``event_type='post_edit'`` and stages ``verify.horizon.executed``; the
+    # delivered ledger rows on keras/dynaconf carry event_type='post_edit'). So this producer's
+    # real last-useful boundary is ``edit_result`` (the edit it is targeting for the next
+    # repair), NOT the agent's later test_result — exactly the caller_break precedent. Keyed on
+    # the SEAM evidence_type ``covering_red`` ONLY; the GATEWAY's test-event covering wrap ships
+    # ``covering_verdict`` (``gateway._produce_covering`` fact_kind), which KEEPS the canonical
+    # test_result boundary — the two producers are split by evidence_type so neither is broken.
+    "covering_red": EVENT_EDIT_RESULT,
 }
 
 # Observation-REACTIVE evidence types: produced FROM the current observation's OWN content (a
@@ -656,7 +668,20 @@ _EVIDENCE_TYPE_DELIVER_BY: dict[str, str] = {
 # boundary check does NOT apply (only freshness still gates). This is precisely why
 # ``trace_frame`` must NOT be pinned to its canonical ``localization`` task_start boundary:
 # it is a reactive failure-observation localizer, not a step-0 brief.
-_REACTIVE_EVIDENCE_TYPES: frozenset[str] = frozenset({"trace_frame"})
+#
+# B-BND (b2): ``covering_red`` (the SEAM's executed covering RED) is ALSO on-time BY
+# CONSTRUCTION — GT runs the covering test and delivers the verdict SYNCHRONOUSLY into the same
+# post_edit observation, so it can never be LATE relative to the edit it targets. The seam,
+# however, stamps the delivered row's ``actual_event='test_result'`` (the canonical class
+# label) even though it delivers at the edit boundary; without reactive treatment the
+# adjudicator's non-reactive ``actual_event != required_event`` check (edit_result vs
+# test_result) would reject a genuinely on-time covering RED. Marking it reactive is the same
+# on-time-by-construction relaxation as trace_frame and is INERT on both live paths: the GATEWAY
+# reactive branch (gateway.route_delivery) only ever sees ``covering_verdict`` (never
+# ``covering_red``), and the seam's ``_ga_is_preventive`` gate already returns False for the
+# ``executed_world_fact`` ladder class (∉ _GA_PREVENTIVE_CLASSES) — so this cannot suppress or
+# re-time a single live delivery.
+_REACTIVE_EVIDENCE_TYPES: frozenset[str] = frozenset({"trace_frame", "covering_red"})
 
 
 def registration_for(evidence_type: str) -> "FactRegistration | None":
