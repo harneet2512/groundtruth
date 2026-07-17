@@ -29,7 +29,12 @@ def test_every_canonical_fact_gets_exact_fact_identity() -> None:
         assert lineage.fact_class == fact_class
         assert lineage.registered_producer_id == registration.producer
         assert lineage.producer_registration_match is True
-        assert lineage.required_event == registration.deliver_by
+        # B-BND: a fact class may carry a same-name evidence-type boundary override
+        # (_EVIDENCE_TYPE_DELIVER_BY, e.g. covering_red -> edit_result); the lineage's
+        # required_event follows the RESOLVED boundary, exactly as production does.
+        from groundtruth.runtime.fact_registry import _EVIDENCE_TYPE_DELIVER_BY
+        expected_event = _EVIDENCE_TYPE_DELIVER_BY.get(fact_class, registration.deliver_by)
+        assert lineage.required_event == expected_event
         assert lineage.receipt_predicate == registration.receipt_predicate
         assert lineage.features == (FeatureRef("FACT", fact_class, "fact"),)
         assert lineage.causal_eval == registration.causal_eval
@@ -230,10 +235,14 @@ def test_undeclared_cap_byte_owner_fails_closed() -> None:
 
 def test_cap_role_authority_is_total_and_has_exact_byte_owners() -> None:
     assert len(CAP_FEATURE_IDS) == 47
+    # P4 (B-TERM 2026-07-16): GT_SS_COHERENCE_V2 reclassified byte_owner → mediator (it had no
+    # canonical FACT identity, so the byte-owner bar was unsatisfiable). It now falls into the
+    # residual CAP_MEDIATOR_IDS; the total 47-CAP inventory is unchanged.
     assert CAP_BYTE_OWNER_IDS == {
         "GT_EDIT_CHECK", "GT_CHANGE_SURFACE", "GT_PATCH_DELTA", "GT_HYPOTHESIS",
-        "GT_LOC_RESLOT", "GT_SS_COHERENCE_V2", "GT_SS_SUBMIT_RED", "GT_CERT_DELIVERY",
+        "GT_LOC_RESLOT", "GT_SS_SUBMIT_RED", "GT_CERT_DELIVERY",
     }
+    assert cap_role_for("GT_SS_COHERENCE_V2") == "mediator"
     assert CAP_ELIGIBILITY_IDS == {
         "GT_OBLIGATION_FRESHNESS", "GT_SS_NOVELTY", "GT_SS_EXEC_TRUTH",
         "GT_EDIT_OVERLAY", "GT_SS_RECOVERY_V2", "GT_BRIEF_MINIMAL",
@@ -250,6 +259,9 @@ def test_cap_role_authority_is_total_and_has_exact_byte_owners() -> None:
 
 def test_cap_byte_owner_mechanism_authority_is_total_and_exact() -> None:
     assert set(CAP_BYTE_OWNER_MECHANISMS) == set(CAP_BYTE_OWNER_IDS)
+    # P4 (B-TERM 2026-07-16): the mechanism table covers EXACTLY the seven byte owners.
+    # GT_SS_COHERENCE_V2 is no longer here (reclassified control/mediator); its detect.coherence
+    # byte stamp lives only as a lane profile-member stamp, never a byte-owner mechanism.
     assert {
         feature_id: authority.mechanism
         for feature_id, authority in CAP_BYTE_OWNER_MECHANISMS.items()
@@ -260,10 +272,6 @@ def test_cap_byte_owner_mechanism_authority_is_total_and_exact() -> None:
         "GT_SS_SUBMIT_RED": "typed_lineage",
         "GT_EDIT_CHECK": "exact_profile_member",
         "GT_HYPOTHESIS": "exact_profile_member",
-        "GT_SS_COHERENCE_V2": "exact_profile_member",
         "GT_CERT_DELIVERY": "exact_profile_member",
     }
-    coherence = CAP_BYTE_OWNER_MECHANISMS["GT_SS_COHERENCE_V2"]
-    assert coherence.bindings[0].producer == "ss_coherence_v2"
-    assert coherence.bindings[0].layer == "detect.coherence"
-    assert coherence.bindings[0].fact_class is None
+    assert "GT_SS_COHERENCE_V2" not in CAP_BYTE_OWNER_MECHANISMS

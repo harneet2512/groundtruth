@@ -15,7 +15,9 @@ from groundtruth.runtime.feature_lineage import CAP_ELIGIBILITY_IDS, CAP_MEDIATO
 
 def test_contract_is_total_for_all_decision_controls() -> None:
     assert set(CONTROL_DECISION_CONTRACTS) == set(CAP_ELIGIBILITY_IDS | CAP_MEDIATOR_IDS)
-    assert len(CONTROL_DECISION_CONTRACTS) == 39
+    # P4 (B-TERM 2026-07-16): 39→40 — GT_SS_COHERENCE_V2 reclassified byte_owner → mediator adds
+    # one control decision contract (13 eligibility + 27 mediator).
+    assert len(CONTROL_DECISION_CONTRACTS) == 40
     assert control_contract("GT_SS_NOVELTY").measurement_status == "SUPPORTED"
     assert all(
         contract.measurement_status == "SUPPORTED"

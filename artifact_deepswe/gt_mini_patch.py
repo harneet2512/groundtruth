@@ -9084,6 +9084,14 @@ def _exact_profile_delivery_extra(
             CAP_BYTE_OWNER_MECHANISMS, build_lineage, lineage_ledger_extra)
         authority = CAP_BYTE_OWNER_MECHANISMS.get(member)
         if authority is None or authority.mechanism != "exact_profile_member":
+            # P4 (B-TERM 2026-07-16): a lane profile-member owner may be reclassified OUT of the
+            # byte-owner mechanism table (GT_SS_COHERENCE_V2 byte_owner → control/mediator) yet KEEP
+            # its exact ``detect.coherence`` byte stamp as lane byte evidence. Preserve the
+            # profile_member stamp from the lane owner table; such an owner NEVER gains typed FACT
+            # lineage (that path is byte-owner-only). Byte-identical to the pre-P4 coherence row
+            # (which set profile_member then returned, its binding.fact_class being None).
+            if _LANE_PROFILE_MEMBER_OWNERS.get(kind or "") == member:
+                extra["profile_member"] = member
             return extra
         binding = next((b for b in authority.bindings if b.layer == kind), None)
         if binding is None:

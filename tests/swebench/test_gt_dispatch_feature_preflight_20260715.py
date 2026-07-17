@@ -27,11 +27,17 @@ def test_static_manifest_derives_exact_inventory_and_accepts_all_authoritative_b
     result = preflight.validate_static_dispatch_manifest(manifest)
     assert result["valid"] is True
     assert result["blocked_features"] == []
+    # P4 (B-TERM 2026-07-16): coherence reclassified byte_owner → mediator. The static manifest
+    # now derives its CAP row from the control decision contract, not the byte-owner mechanism:
+    # its producer_authority is the executable decision site, and it rides the control terminal.
     coherence = manifest["features"]["GT_SS_COHERENCE_V2"]
-    assert coherence["producer_authority"]["mechanism"] == "exact_profile_member"
-    assert coherence["producer_authority"]["bindings"] == [
-        {"producer": "ss_coherence_v2", "layer": "detect.coherence", "fact_class": None}
-    ]
+    assert coherence["producer_authority"] == ["mini_seam.coherence.recovery_pivot"]
+    assert coherence["evidence_relationship"] == (
+        "control_participation->typed_FACT_candidate->sealed_delivery_observation"
+    )
+    assert coherence["collector_authority"] == (
+        "scripts.swebench.gt_feature_metrics.control_participation"
+    )
     for row in manifest["features"].values():
         assert "producer_authority" in row
         assert row["collector_authority"]

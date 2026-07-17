@@ -573,6 +573,10 @@ def test_infra_cap_emits_mediation_links_without_inheriting_fact_delivery() -> N
         "runtime_linkage_reason": "exact profile-member control receipt unavailable",
         "eligible_fact_ids": ["caller_contract"],
         "produced_fact_ids": ["caller_contract"],
+        # DECISION 1 (P5, B-TERM): additive audit fields. No control_evidence here → the declared-
+        # effect correctness and causal enrichment are both honestly UNMEASURED (None).
+        "declared_effect_correct": None,
+        "causal_fair_probe": None,
         "delivered_fact_ids": ["caller_contract"],
         "source_artifact": "ledger.jsonl",
     }
@@ -726,10 +730,12 @@ def test_legacy_projection_excluding_additive_readiness_is_byte_identical(
         projection, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
 
-    # Intentional authority correction: coherence retains its own CAP lifecycle
-    # without serializing a fabricated recovery FACT projection.
+    # P4 (B-TERM 2026-07-16): golden re-baselined for the coherence reclassification. The ONLY
+    # legacy-projection delta is GT_SS_COHERENCE_V2's member record moving byte_owner → mediator
+    # (role infrastructure, cap_role mediator, fact_classes ["recovery"], mediator lifecycle);
+    # verified coherence-only + deterministic. Every other member's bytes are unchanged.
     assert hashlib.sha256(encoded).hexdigest() == (
-        "a604c4a7f05e5659e10a3d278cccc161438aa5947526ed33c8f328424eb972bf"
+        "47c0f93a832795ba7c19367f690f6bfd04ee020890a4f46abcf0004dd3fcbe27"
     )
 
 

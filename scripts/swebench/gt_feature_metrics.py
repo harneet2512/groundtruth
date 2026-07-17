@@ -218,6 +218,13 @@ _INFRA_MEMBER_MEDIATES: dict[str, tuple[str, ...]] = {
     "GT_SS_EXEC_TRUTH": ("covering_red",),                # SS-2 mediator: runner-eligible covering selection; kills unexecuted assurances
     "GT_SS_ELIGIBILITY": (),                              # SS-4 mediator: cd-$() prefix widening for search isolation (post_search/loc legs)
     "GT_SS_SHADOW": (),                                   # SS-8 mediator: shadow-holdout deliver/withhold across ALL participating advisory classes (E10 causal instrument; inert at rate 0)
+    # P4 (B-TERM 2026-07-16): GT_SS_COHERENCE_V2 reclassified byte_owner → mediator
+    # (feature_lineage CAP_BYTE_OWNER_IDS). It mediates the ``recovery`` FACT class — the
+    # coherence-collapse detector shapes the recovery/pivot nudge: fact_registry aliases
+    # ``coherence_collapse`` → ``recovery`` (_EVIDENCE_TYPE_ALIASES) and authorizes producer
+    # ``ss_coherence_v2`` for it (_EVIDENCE_TYPE_PRODUCERS). Its SS-LIVE obligation is now
+    # live_control_mediation_effect, not the (unsatisfiable) byte-owner bar.
+    "GT_SS_COHERENCE_V2": ("recovery",),
 }
 
 # Backing-module → producer agreement drift-guard: these members' _MEMBER_CAPABILITY_MODULE
@@ -1570,13 +1577,93 @@ def _control_participation_evidence(
                 "referenced_message_index": block_receipt["referenced_message_index"],
                 "acted_message_index": block_receipt["acted_message_index"],
             })
+    correctness = _control_declared_effect_correctness(rows, records, joins)
     return {
         "records": dict(records),
         "joins": dict(joins),
+        "correctness": correctness,
         "invalid_rows": sorted(set(invalid_rows)),
         "invalid_brief_rows": sorted(set(invalid_brief_rows)),
         "valid": not invalid_rows and not invalid_brief_rows,
     }
+
+
+def _control_declared_effect_correctness(
+    rows: list[dict],
+    records: dict[str, list[dict[str, Any]]],
+    joins: dict[str, list[dict[str, Any]]],
+) -> dict[str, bool | None]:
+    """PRODUCT DECISION 1 (P5, B-TERM 2026-07-16): grade whether each control's DECLARED effect
+    matched the downstream ledger reality. Deterministic · producer-owned · re-verifiable · can
+    FAIL — and CORRECT-OR-QUIET: it emits a True/False verdict ONLY where the declaration has an
+    UNAMBIGUOUS downstream meaning, and ``None`` (honest UNMEASURED) wherever it does not.
+
+    Only two declarations have a role/polarity-independent downstream truth, so only these grade:
+
+    * MEDIATOR APPLIED → CORRECT iff the record EXACT-JOINED a downstream delivered row. The join
+      (``_control_participation_evidence``) already encodes the full producer/seal/candidate-id
+      contract, so a joined APPLIED is provably delivered. A mediator that DECLARES APPLIED and did
+      NOT join = INCORRECT (``False``, exposed) — the definitive lie the task names.
+    * MEDIATOR SUPPRESSED → CORRECT iff NO delivered row carries the exact suppressed candidate
+      bytes (seal+chars). A SUPPRESSED candidate whose exact bytes WERE delivered = INCORRECT
+      (``False``) — the suppression is contradicted by the ledger.
+
+    Everything else → ``None`` (UNMEASURED), deliberately, because a delivery-presence heuristic is
+    UNSOUND for it:
+      - MEDIATOR NO_EFFECT that JOINED → ``True`` (the join confirmed the delivered-but-ineffective
+        reality the receipt-follows / pre-delivery contract requires); NOT joined → ``None``
+        (a "no downstream effect" claim we cannot refute, not necessarily a lie).
+      - ELIGIBILITY controls (novelty/dedup/late-drop/shadow/…): the decision POLARITY is
+        control-specific — a gate's ``NO_EFFECT`` means it PASSED the candidate THROUGH (so the
+        candidate SHOULD be delivered), while ``APPLIED`` may mean it BLOCKED. That polarity is not
+        machine-derivable from the ledger, so delivery-presence cannot soundly grade it → ``None``.
+        (Eligibility controls are structurally incomplete regardless — they never join, so
+        ``mediated_fact_ids`` is ``None`` — hence ``None`` here loses no reachable completeness.)
+      - Any record with NO candidate identity (a zero-candidate no-op) → skipped (unverifiable).
+
+    Member rollup: ≥1 ``False`` → ``False`` (exposed); else ≥1 ``True`` → ``True``; else ``None``.
+    """
+    delivered_seals: set[tuple[str, int]] = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("outcome") != "delivered":
+            continue
+        seal = row.get("content_sha256_16")
+        chars = row.get("chars_delivered")
+        if isinstance(seal, str) and seal and isinstance(chars, int) and not isinstance(chars, bool):
+            delivered_seals.add((seal, chars))
+
+    def _has_identity(rec: dict[str, Any]) -> bool:
+        seal = rec.get("candidate_sha256_16")
+        chars = rec.get("candidate_chars")
+        return bool(seal) and isinstance(chars, int) and not isinstance(chars, bool) and chars > 0
+
+    def _carried(rec: dict[str, Any]) -> bool:
+        return (str(rec.get("candidate_sha256_16")), int(rec.get("candidate_chars"))) in delivered_seals
+
+    out: dict[str, bool | None] = {}
+    for feature_id, recs in records.items():
+        joined_keys = {
+            (join.get("row_index"), join.get("brief_row_index"))
+            for join in joins.get(feature_id, [])
+        }
+        verdicts: list[bool] = []
+        for rec in recs:
+            decision = rec.get("decision")
+            # eligibility gate polarity is not machine-derivable → never grade it (correct-or-quiet).
+            if rec.get("role") != "mediator" or not _has_identity(rec):
+                continue
+            rec_key = (rec.get("row_index"), rec.get("brief_row_index"))
+            if decision == "APPLIED":
+                verdicts.append(rec_key in joined_keys)          # joined → True, else False (lie)
+            elif decision == "NO_EFFECT":
+                if rec_key in joined_keys:
+                    verdicts.append(True)                        # delivered-but-ineffective, confirmed
+                # not joined → unverifiable "no effect" claim → contributes nothing (None-leaning)
+            elif decision == "SUPPRESSED":
+                verdicts.append(not _carried(rec))               # carried → False (suppression is a lie)
+            # any other decision (ERROR — already filtered upstream) is unverifiable.
+        out[feature_id] = (all(verdicts) if verdicts else None)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1865,11 +1952,20 @@ _MEASUREMENT_GATE_NAMES = (
     "aggregate_coverage",
 )
 
+# PRODUCT DECISION 1 (P5, B-TERM 2026-07-16): the control terminal's COMPLETENESS gates are the
+# THREE deterministic, producer-derived facts — the control's own runtime receipt, the exact
+# mediated FACT id(s) it joined, and whether its DECLARED effect matched what the ledger shows
+# downstream (mediation_correct, a REAL check that can FAIL). The causal fair-probe is NOT a
+# completeness gate here: a randomized/paired causal probe is registered per FACT class (gate 7 on
+# the FACT terminal, fair_probe_result.py), and a control's causal evidence RIDES the mediated
+# FACT's probe rather than being an independent control-grain probe. It is reported as a separate
+# enrichment field (``mediation_causal_fair_probe``) so ``infra_control_complete`` is REACHABLE
+# (previously it was structurally unreachable: mediation_correct and the causal probe were both
+# hardwired None for all 39/40 control CAPs).
 _INFRA_CONTROL_GATE_NAMES = (
     "runtime_member_control_receipt",
     "mediated_fact_ids",
     "mediation_correct",
-    "mediation_causal_fair_probe",
 )
 _SUPPORT_GATE_NAMES = (
     "supported_fact_delivery_join",
@@ -1995,9 +2091,22 @@ def _infra_control_readiness(
     *,
     ledger_artifact: str,
     control_evidence: dict[str, Any] | None = None,
+    fair_probe_by_fc: dict[str, bool | None] | None = None,
     live_witness: bool = False,
 ) -> dict[str, Any]:
-    """Typed CAP-control terminal with links, never copied FACT delivery gates."""
+    """Typed CAP-control terminal with links, never copied FACT delivery gates.
+
+    PRODUCT DECISION 1 (P5, B-TERM 2026-07-16): completeness = receipt + mediated_fact_ids +
+    ``mediation_correct``. ``mediation_correct`` is a REAL, producer-derived, re-verifiable check
+    (computed in ``_control_participation_evidence`` from the control's OWN ledger record vs the
+    downstream ledger reality): a control that DECLARES APPLIED with no exact-joined delivered row,
+    or SUPPRESSED whose exact candidate bytes were nonetheless delivered, grades ``False`` —
+    exposed, never silently passed. The causal fair-probe is reported as a SEPARATE enrichment
+    field (``mediation_causal_fair_probe``), NOT a completeness gate: a control's causal evidence
+    rides the mediated FACT class's registered probe (fair_probe_result.py). Absent probe → None
+    (honest). This makes ``infra_control_complete`` reachable, closing the prior structural block
+    (mediation_correct hardwired None → complete unreachable for all control CAPs).
+    """
     scope = sorted(fact_classes or tuple(fact_lifecycles))
     evidence = control_evidence or {}
     records = list((evidence.get("records") or {}).get(member) or [])
@@ -2017,6 +2126,18 @@ def _infra_control_readiness(
         str(join["fact_class"]) for join in joins if join.get("fact_class") in scope
     })
     control_receipt = bool(joins) if role == "mediator" else bool(records)
+    # DECISION 1: the control's declared effect matched the downstream ledger reality. Producer-
+    # owned (the ledger is the control's own record), deterministic, and re-verifiable. None when
+    # the control emitted no verifiable record (fail-closed UNMEASURED, never a manufactured pass).
+    mediation_correct = (
+        (evidence.get("correctness") or {}).get(member)
+        if control_evidence is not None else None
+    )
+    # DECISION 1: causal ENRICHMENT (never gates completeness). The control's causal evidence is
+    # the J4 fair-probe of the FACT class(es) it mediates (the same per-class join a byte owner
+    # reads via ``_member_fair_probe``). A kernel mediator (empty mediated scope) has no single
+    # mediated class → None; absent probe → None (honest).
+    mediation_causal_fair_probe = _member_fair_probe(member, fair_probe_by_fc or {})
     mediation = {
         "status": "MEASURED" if control_receipt else "UNMEASURED",
         "linked_fact_ids": scope,
@@ -2028,6 +2149,8 @@ def _infra_control_readiness(
         "eligible_fact_ids": eligible_fact_ids,
         "produced_fact_ids": produced_fact_ids,
         "delivered_fact_ids": delivered_fact_ids,
+        "declared_effect_correct": mediation_correct,
+        "causal_fair_probe": mediation_causal_fair_probe,
         "source_artifact": ledger_artifact,
     }
     if control_evidence is not None:
@@ -2036,15 +2159,19 @@ def _infra_control_readiness(
     gates: dict[str, bool | None] = {
         "runtime_member_control_receipt": True if control_receipt else None,
         "mediated_fact_ids": True if runtime_linked else None,
-        "mediation_correct": None,
-        "mediation_causal_fair_probe": None,
+        "mediation_correct": mediation_correct,
     }
     return _typed_readiness(
         "infra_control",
         gates,
         gate_names=_INFRA_CONTROL_GATE_NAMES,
         live_witness=live_witness,
-        extra={"member": member, "mediation": mediation},
+        extra={
+            "member": member,
+            "mediation": mediation,
+            # Enrichment mirror of the FACT terminal's gate-7 fair_probe: reported, not gating.
+            "mediation_causal_fair_probe": mediation_causal_fair_probe,
+        },
     )
 
 
@@ -3040,6 +3167,11 @@ def collect_task(
                 fact_lifecycles,
                 ledger_artifact=ledger_artifact,
                 control_evidence=control_evidence,
+                # DECISION 1: the control's causal enrichment rides the mediated FACT's J4 probe.
+                fair_probe_by_fc=fair_probe_by_fc,
+                # DECISION 1: parity with byte-owner/FACT terminals so infra_control_complete can
+                # reach ss_live under a real live witness (never fabricated — offline stays False).
+                live_witness=_live_witness,
             )
             feature["ss_readiness"]["cap_role"] = cap_role
         else:

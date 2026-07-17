@@ -225,6 +225,17 @@ CONTROL_DECISION_CONTRACTS = {
         "gateway.augment.empty_payload_guard",
         "mini_seam.global_arbiter.v2_selection",
     ),
+    # P4 (B-TERM 2026-07-16): GT_SS_COHERENCE_V2 was reclassified byte_owner → mediator
+    # (feature_lineage CAP_BYTE_OWNER_IDS). It mediates the ``recovery`` FACT class: the
+    # coherence-collapse detector shapes the recovery/pivot nudge (fact_registry aliases
+    # ``coherence_collapse`` → ``recovery`` and authorizes producer ``ss_coherence_v2`` for it).
+    # The decision site below is declared and currently UNWRITTEN in the seam — an honest dark
+    # site awaiting a ``_control_participation_record`` emitter at the coherence gate (mirrors the
+    # GT_SS_ACK_FORM.form_selection precedent). Until then the control terminal reads no rows and
+    # reports UNMEASURED (fail-closed) — never a fabricated effect.
+    "GT_SS_COHERENCE_V2": _mediator(
+        "GT_SS_COHERENCE_V2", "mini_seam.coherence.recovery_pivot",
+    ),
     "GT_SS_PROVENANCE": _mediator(
         "GT_SS_PROVENANCE", "mini_seam.delivery.provenance_seal",
     ),

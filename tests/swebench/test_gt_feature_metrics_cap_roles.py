@@ -41,12 +41,18 @@ def _infra() -> dict:
 
 
 def test_cap_role_authority_partitions_all_profile_members() -> None:
-    assert len(CAP_BYTE_OWNER_IDS) == 8
+    # P4 (B-TERM 2026-07-16): GT_SS_COHERENCE_V2 reclassified byte_owner → mediator. Counts move
+    # WITHIN CAP (byte_owner 8→7, mediator 26→27), inventory total unchanged (128).
+    assert len(CAP_BYTE_OWNER_IDS) == 7
     assert len(CAP_ELIGIBILITY_IDS) == 13
-    assert len(CAP_MEDIATOR_IDS) == 26
-    assert set(metrics._DIRECT_MEMBER_FACTCLASS) == set(CAP_BYTE_OWNER_IDS)
-    assert metrics._DIRECT_MEMBER_FACTCLASS["GT_SS_COHERENCE_V2"] is None
+    assert len(CAP_MEDIATOR_IDS) == 27
+    assert "GT_SS_COHERENCE_V2" not in CAP_BYTE_OWNER_IDS
+    assert metrics.cap_role_for("GT_SS_COHERENCE_V2") == "mediator"
+    # It now MEDIATES the recovery FACT (coherence_collapse → recovery), never a fabricated own FACT.
+    assert "GT_SS_COHERENCE_V2" not in metrics._DIRECT_MEMBER_FACTCLASS
+    assert metrics._INFRA_MEMBER_MEDIATES["GT_SS_COHERENCE_V2"] == ("recovery",)
     assert metrics.layer_to_fact_class("detect.coherence") is None
+    assert set(metrics._DIRECT_MEMBER_FACTCLASS) == set(CAP_BYTE_OWNER_IDS)
     assert set(metrics._DIRECT_MEMBER_FACTCLASS) == set(CAP_BYTE_OWNER_MECHANISMS)
     assert set(metrics._INFRA_MEMBER_MEDIATES) == (
         set(CAP_ELIGIBILITY_IDS) | set(CAP_MEDIATOR_IDS)
@@ -62,11 +68,13 @@ def test_import_crosscheck_rejects_role_table_drift(monkeypatch) -> None:
         metrics._import_time_crosscheck()
 
 
-def test_import_crosscheck_rejects_fabricated_coherence_fact(monkeypatch) -> None:
+def test_import_crosscheck_rejects_smuggling_coherence_back_as_byte_owner(monkeypatch) -> None:
+    # P4: coherence must not be re-smuggled into the byte-owner FACT projection (a fabricated own
+    # FACT for a control with no canonical FACT identity). The crosscheck rejects the added key.
     monkeypatch.setitem(
         metrics._DIRECT_MEMBER_FACTCLASS, "GT_SS_COHERENCE_V2", "recovery"
     )
-    with pytest.raises(ValueError, match="FACT projection drift"):
+    with pytest.raises(ValueError, match="byte-owner table drift"):
         metrics._import_time_crosscheck()
 
 
@@ -149,29 +157,37 @@ def test_exact_profile_owner_requires_authorized_layer_and_seal() -> None:
     ) is False
 
 
-def test_coherence_exact_delivery_has_own_lifecycle_but_cannot_be_ss_live() -> None:
-    row = {
-        "profile_member": "GT_SS_COHERENCE_V2", "layer": "detect.coherence",
-        "outcome": "delivered", "chars_delivered": 12,
-        "content_sha256_16": "a" * 16,
-    }
-    entry = {**_seal_entry("detect.coherence"), "receipt": 2, "msg_index": 7}
+def test_coherence_reclassified_as_mediator_grades_on_control_terminal() -> None:
+    # P4 (B-TERM 2026-07-16): coherence is a CONTROL/mediator now — it mediates the recovery FACT
+    # and is graded on the control terminal (live_control_mediation_effect), NOT the byte-owner bar
+    # (which was unsatisfiable: its host-side measurement row is chars=0 → never a delivered row).
     record = metrics.member_record(
         "GT_SS_COHERENCE_V2", _fact_lifecycles(), _infra(),
         metrics.BASELINE_UNAVAILABLE, ledger_artifact="ledger",
-        traj_artifact="trajectory", owner_rows=[row],
-        consumption_ledger={"entries": [entry]},
+        traj_artifact="trajectory",
     )
-    assert record["fact_classes"] == []
-    assert record["lifecycle"]["delivered"]["value"] is True
-    assert record["lifecycle"]["receipt_level"]["value"] == 2
-    assert record["lifecycle"]["truth_valid"]["status"] == "UNMEASURED"
-    readiness = metrics.ss_gate_readiness(
-        record["lifecycle"], byte_proven=metrics._member_delivery_byte_proven(
-            "GT_SS_COHERENCE_V2", [row], {"entries": [entry]}
-        ), leak_free=True, dose_ok=True, fair_probe=None, live_witness=False,
+    assert record["cap_role"] == "mediator"
+    assert record["fact_classes"] == ["recovery"]
+    # A mediator never copies FACT delivery credit into its own lifecycle.
+    assert record["lifecycle"]["delivered"]["status"] == "NOT_ELIGIBLE"
+    # The byte-owner delivery-proof path is inert for a non-byte-owner (fail-closed).
+    coherence_row = {
+        "profile_member": "GT_SS_COHERENCE_V2", "layer": "detect.coherence",
+        "outcome": "delivered", "chars_delivered": 12, "content_sha256_16": "a" * 16,
+    }
+    assert metrics._member_delivery_byte_proven(
+        "GT_SS_COHERENCE_V2", [coherence_row],
+        {"entries": [_seal_entry("detect.coherence")]},
+    ) is False
+    # Its control terminal is reachable and, absent any control.participation row, honestly
+    # UNMEASURED (fail-closed) — never a fabricated pass.
+    readiness = metrics._infra_control_readiness(
+        "GT_SS_COHERENCE_V2", ("recovery",), _fact_lifecycles(),
+        ledger_artifact="ledger", control_evidence={"records": {}, "joins": {}, "correctness": {}},
     )
-    assert readiness["gates"]["delivered_byte_proven"] is True
-    assert readiness["gates"]["correct_info"] is None
-    assert readiness["gates"]["correct_rl_adhered_time"] is None
-    assert readiness["ss_live"] is False
+    assert set(readiness["gates"]) == {
+        "runtime_member_control_receipt", "mediated_fact_ids", "mediation_correct",
+    }
+    assert readiness["gates"]["mediation_correct"] is None
+    assert readiness["infra_control_complete"] is False
+    assert readiness["mediation_causal_fair_probe"] is None

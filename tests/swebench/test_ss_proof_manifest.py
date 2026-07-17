@@ -130,15 +130,20 @@ def test_cap_terminal_contracts_distinguish_byte_owners_mediators_and_eligibilit
     """CAP proof shape comes from executable ownership, never direct/infra shorthand."""
     result = manifest.build_ss_proof_manifest(SCOREBOARD)
     rows = result["features"]
+    # P4 (B-TERM 2026-07-16): GT_SS_COHERENCE_V2 reclassified byte_owner → mediator; it now grades
+    # on the control-mediation terminal (see below), not the capability_delivery byte-owner bar.
     byte_owners = {
         "GT_EDIT_CHECK", "GT_CHANGE_SURFACE", "GT_PATCH_DELTA", "GT_HYPOTHESIS",
-        "GT_LOC_RESLOT", "GT_SS_COHERENCE_V2", "GT_SS_SUBMIT_RED", "GT_CERT_DELIVERY",
+        "GT_LOC_RESLOT", "GT_SS_SUBMIT_RED", "GT_CERT_DELIVERY",
     }
     assert {
         name for name in result["features"]
         if rows[name]["family"] == "CAP"
         and rows[name]["ownership"].get("cap_role") == "byte_owner"
     } == byte_owners
+    assert rows["GT_SS_COHERENCE_V2"]["ownership"]["cap_role"] == "mediator"
+    assert rows["GT_SS_COHERENCE_V2"]["terminal_contract"]["kind"] == "control_mediation"
+    assert rows["GT_SS_COHERENCE_V2"]["terminal_contract"]["independent_delivery_gates"] is False
     for name in byte_owners:
         assert rows[name]["terminal_contract"]["independent_delivery_gates"] is True
         assert rows[name]["terminal_contract"]["kind"] == "capability_delivery"

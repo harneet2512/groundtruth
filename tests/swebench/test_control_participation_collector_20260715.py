@@ -81,8 +81,16 @@ def test_mediator_requires_exact_downstream_fact_and_observation_seal(tmp_path) 
 
     assert readiness["gates"]["runtime_member_control_receipt"] is True
     assert readiness["gates"]["mediated_fact_ids"] is True
-    assert readiness["gates"]["mediation_correct"] is None
-    assert readiness["gates"]["mediation_causal_fair_probe"] is None
+    # DECISION 1 (P5, B-TERM): a mediator that DECLARES APPLIED and exact-joins a downstream
+    # delivered row is CORRECT (True), no longer hardwired None. The 3 completeness gates now pass
+    # → infra_control_complete is REACHABLE (True); ss_live stays False without a live witness.
+    assert readiness["gates"]["mediation_correct"] is True
+    assert "mediation_causal_fair_probe" not in readiness["gates"]
+    # The causal probe is ENRICHMENT (rides the mediated FACT's J4 probe), not a completeness gate;
+    # absent here → None (honest).
+    assert readiness["mediation_causal_fair_probe"] is None
+    assert readiness["infra_control_complete"] is True
+    assert readiness["mediation"]["declared_effect_correct"] is True
     assert readiness["mediation"]["runtime_linked_fact_ids"] == ["caller_contract"]
     join = readiness["mediation"]["participation_joins"][0]
     assert join["candidate_id"] == "contract:dedup-1"
@@ -213,9 +221,12 @@ def test_nonzero_no_effect_candidate_can_join_but_suppressed_cannot(tmp_path) ->
         "synthetic__control-preserved",
         _write_task(tmp_path, [no_effect, _delivered(payload)], payload),
     )
-    joins = record["features"]["GT_CONTRACT_NATIVE"]["ss_readiness"]["mediation"]["participation_joins"]
+    no_effect_readiness = record["features"]["GT_CONTRACT_NATIVE"]["ss_readiness"]
+    joins = no_effect_readiness["mediation"]["participation_joins"]
     assert len(joins) == 1
     assert joins[0]["decision"] == "NO_EFFECT"
+    # DECISION 1: a nonzero-candidate NO_EFFECT that exact-joins the delivered row is CORRECT.
+    assert no_effect_readiness["gates"]["mediation_correct"] is True
 
     suppressed_dir = tmp_path / "suppressed"
     suppressed_dir.mkdir()
@@ -224,9 +235,13 @@ def test_nonzero_no_effect_candidate_can_join_but_suppressed_cannot(tmp_path) ->
         "synthetic__control-suppressed",
         _write_task(suppressed_dir, [suppressed, _delivered(payload)], payload),
     )
-    assert suppressed_record["features"]["GT_CONTRACT_NATIVE"]["ss_readiness"]["mediation"][
-        "participation_joins"
-    ] == []
+    suppressed_readiness = suppressed_record["features"]["GT_CONTRACT_NATIVE"]["ss_readiness"]
+    assert suppressed_readiness["mediation"]["participation_joins"] == []
+    # DECISION 1 — the biting False case: the control DECLARED SUPPRESSED, yet a delivered row
+    # carries the exact suppressed candidate bytes → the declared effect is a LIE → mediation_correct
+    # is False (exposed, never silently passed).
+    assert suppressed_readiness["gates"]["mediation_correct"] is False
+    assert suppressed_readiness["infra_control_complete"] is False
 
 
 def test_legacy_layer_and_seal_cannot_byte_prove_fact_without_typed_lineage() -> None:

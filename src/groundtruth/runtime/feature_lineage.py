@@ -18,13 +18,23 @@ from .fact_registry import is_reactive, producer_matches, registration_for, requ
 LINEAGE_SCHEMA = "gt.feature_lineage.v1"
 FEATURE_CATEGORIES = frozenset({"ACQ", "CAP", "FACT", "PERF"})
 FEATURE_ROLES = frozenset({"fact", "byte_owner", "mediator", "eligibility"})
+# PRODUCT DECISION 2 (P4, B-TERM 2026-07-16) — GT_SS_COHERENCE_V2 is NO LONGER a byte owner.
+# It has no canonical FACT identity by design (its exact_profile_member stamp carried
+# ``fact_class=None``), so the 7-gate byte-owner bar was structurally UNSATISFIABLE for it (its
+# host-side measurement row is chars=0 → never a ``delivered`` row → ``delivered_byte_proven``
+# could never be True). Reclassified here as a CONTROL/mediator (it falls into the residual
+# CAP_MEDIATOR_IDS below): its SS-LIVE obligation becomes ``live_control_mediation_effect`` (the
+# control terminal), which IS satisfiable. Its exact ``detect.coherence`` byte stamp REMAINS as
+# byte evidence — but as a LANE profile-member stamp (``gt_mini_patch._LANE_PROFILE_MEMBER_OWNERS``),
+# not a byte-owner-mechanism stamp. The 128-row inventory count is unchanged (only the role moves
+# within CAP: byte_owner 8→7, mediator 26→27, eligibility 13). This is a revisitable product
+# decision, documented in code so it can be re-litigated.
 CAP_BYTE_OWNER_IDS = frozenset({
     "GT_EDIT_CHECK",
     "GT_CHANGE_SURFACE",
     "GT_PATCH_DELTA",
     "GT_HYPOTHESIS",
     "GT_LOC_RESLOT",
-    "GT_SS_COHERENCE_V2",
     "GT_SS_SUBMIT_RED",
     "GT_CERT_DELIVERY",
 })
@@ -109,10 +119,13 @@ def _bindings(*rows: tuple[str, str, str | None]) -> tuple[CAPByteOwnerBinding, 
     return tuple(sorted(CAPByteOwnerBinding(*row) for row in rows))
 
 
-# One authority for all eight byte owners. Exact-profile-member rows claim a FACT
-# only when the byte-producing mechanism has a reviewed canonical identity. The
-# coherence detector owns its exact lane bytes but has no canonical FACT identity:
-# its V2 row is internal measurement and its nudge must not fabricate recovery.
+# One authority for all seven byte owners. Exact-profile-member rows claim a FACT
+# only when the byte-producing mechanism has a reviewed canonical identity.
+# P4 (B-TERM 2026-07-16): GT_SS_COHERENCE_V2 was removed from this table when it was
+# reclassified byte_owner → control/mediator (see CAP_BYTE_OWNER_IDS above). It had no
+# canonical FACT identity (fact_class=None), so it could never satisfy the byte-owner bar;
+# its ``detect.coherence`` byte stamp now lives ONLY as a lane profile-member stamp
+# (``gt_mini_patch._LANE_PROFILE_MEMBER_OWNERS``), never fabricating a FACT.
 CAP_BYTE_OWNER_MECHANISMS: Mapping[str, CAPByteOwnerMechanism] = MappingProxyType({
     "GT_CHANGE_SURFACE": CAPByteOwnerMechanism("typed_lineage", _bindings(
         ("change_surface", "missing_role", "newfile_precedent"),
@@ -133,9 +146,6 @@ CAP_BYTE_OWNER_MECHANISMS: Mapping[str, CAPByteOwnerMechanism] = MappingProxyTyp
     )),
     "GT_HYPOTHESIS": CAPByteOwnerMechanism("exact_profile_member", _bindings(
         ("governor", "recovery", "recovery"),
-    )),
-    "GT_SS_COHERENCE_V2": CAPByteOwnerMechanism("exact_profile_member", _bindings(
-        ("ss_coherence_v2", "detect.coherence", None),
     )),
     "GT_CERT_DELIVERY": CAPByteOwnerMechanism("exact_profile_member", _bindings(
         ("submit_gate", "submit_refusal", "submit_refusal"),
