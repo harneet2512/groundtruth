@@ -275,6 +275,19 @@ _SUPER_MODE_MEMBERS: frozenset[str] = frozenset(
         # delivery chokepoints; forwarded in gt_ae_block.sh (with the rate knob); pinned in
         # test_ss8_* + the AE-forward completeness pin.
         "GT_SS_SHADOW",           # SS-8 — shadow-holdout causal instrument (E10)
+        # THE-17 wave activation (2026-07-17, user-ratified "activate and go"): the five
+        # audit-demanded behavior fixes join the coherent Profile-2 set. All are default-OFF
+        # direct os.environ reads at their decision sites (byte-identical when unset); none
+        # has a separately-importable capability module (code properties of the seam/runtime,
+        # per the GT_BRIEF_MINIMAL convention -> unmapped members are assumed available).
+        # GT_LOC_VENDOR_DEMOTE deliberately NOT activated (its builder gated it on a
+        # semantic-on measure_brief confirmation still owed).
+        "GT_SS_EDIT_PREVENTIVE",  # W2b/P10 — premature-reactive deferral: on-time preventive
+        #                           contract SHAPE wins the edit-boundary dose
+        "GT_INFRA_NOISE_GUARD",   # W4-1 — failure classifiers exclude pytest infra/teardown noise
+        "GT_HYP_CONTRA_GUARD",    # W4-2 — no wrong-target steer against corroborated targets
+        "GT_RECOVERY_ESCALATE",   # W4-3 — repeat-N recovery escalates to the imperative form
+        "GT_OBLIG_STEER_GUARD",   # W4-4 — obligation narrowing cannot exclude top-ranked files
     }
 )
 
