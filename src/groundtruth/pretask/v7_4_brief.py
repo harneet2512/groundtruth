@@ -203,7 +203,18 @@ def _adapt_weights_for_issue(
             import sqlite3 as _sq_scope
             _sc = _sq_scope.connect(graph_db)
             _anchor_files = set()
-            for sym in list(issue_anchors.symbols)[:10]:
+            # DETERMINISM (D7): sample the anchor symbols in a CANONICAL order. The
+            # symbols are a ``set`` (``IssueAnchors.symbols``), so ``list(set)[:10]``
+            # selected WHICH 10 in PYTHONHASHSEED-dependent iteration order. When the
+            # issue has >10 anchor symbols, two acquisition processes sampled DIFFERENT
+            # 10 -> a different ``_anchor_files`` count -> a different scope branch
+            # (single / multi / ambiguous) -> different W_LEX/W_PATH/W_REACH/W_PROX ->
+            # a different ranking -> a different canonical brief identity (the D6-class
+            # defect, now on the scope-weight lever: run 29544917048, aiogram-1594,
+            # diverging at control_participation/0 = the full pre-reduction brief).
+            # ``sorted`` makes the sampled subset a pure function of the set; the file
+            # COUNT is order-free, so a <=10-symbol issue is byte-identical to before.
+            for sym in sorted(issue_anchors.symbols)[:10]:
                 for (fp,) in _sc.execute(
                     "SELECT DISTINCT file_path FROM nodes WHERE name = ? AND is_test = 0",
                     (sym,),
