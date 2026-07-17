@@ -193,7 +193,12 @@ def _persist_brief_localization_attestations(e: dict, brief_text: str) -> None:
         from groundtruth.runtime.brief_attestation import (
             finalize_localization_attestation,
         )
-    except (ImportError, OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (ImportError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        # B-cluster sweep (2026-07-17): the SETUP failures (unreadable result, schema
+        # mismatch, import) were the only silent exits left — the per-receipt loop
+        # already breadcrumbs. An empty store must always be distinguishable from
+        # "attestation setup never ran" (the 0-bundle diagnosis class).
+        _bc(f"brief localization attestations skipped setup ({type(exc).__name__})")
         return
 
     proof_by_candidate: dict[str, dict] = {}

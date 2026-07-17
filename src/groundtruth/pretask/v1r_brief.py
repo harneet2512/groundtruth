@@ -3224,6 +3224,10 @@ def _write_obligations_v2_artifact(
                             _f.write(_text)
                             _f.flush()
                             _os.fsync(_f.fileno())
+                        # mkstemp is 0600; container-root writer vs non-root host reader
+                        # (W1a-PERM class, sweep A2 latent) — publish world-readable so a
+                        # future harvest of these artifacts can never silently EACCES.
+                        _os.chmod(_tmp, 0o644)
                         _os.replace(_tmp, _path)
                     except BaseException:
                         try:
@@ -5614,6 +5618,11 @@ def generate_v1r_brief(
                             _json_anch.dump(_anch_payload, _af)
                             _af.flush()
                             os.fsync(_af.fileno())
+                        # mkstemp is 0600 by contract; this artifact is harvested by a
+                        # NON-ROOT host cp while the container writes as root (W1a-PERM
+                        # class, sweep A1) — publish world-readable or the copy silently
+                        # EACCESes and the anchors artifact vanishes from the upload.
+                        os.chmod(_atmp, 0o644)
                         os.replace(_atmp, _ap)
                     except BaseException:
                         try:

@@ -8759,8 +8759,8 @@ def _persist_obligation_status(tracker, *, turn: int | None = None) -> None:
         ev = os.environ.get("GT_ORACLE_EVENTS", "/tmp/gt_oracle_events.jsonl")
         with open(ev, "a", encoding="utf-8") as fh:
             fh.write(_j.dumps(snap) + "\n")
-    except Exception:  # noqa: BLE001 -- telemetry must never break the loop
-        pass
+    except Exception as exc:  # noqa: BLE001 -- telemetry must never break the loop
+        _attestation_persist_failure_row("obligation_status", "", exc)
 
 
 def _maybe_persist_obligation_status() -> None:
@@ -12752,8 +12752,12 @@ def _persist_receipt(env, *, kind: str, transition: str) -> None:
             os.makedirs(parent, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
-    except Exception:  # noqa: BLE001 — persistence must NEVER break delivery
-        pass
+    except Exception as exc:  # noqa: BLE001 — persistence must NEVER break delivery
+        # B-cluster sweep (2026-07-17): the receipt-ladder sidecar IS the consumption
+        # evidence; its silent loss must leave a diagnosable trace (never break delivery).
+        _attestation_persist_failure_row(
+            f"receipt_sidecar:{kind}:{transition}",
+            str(getattr(env, "dedup_key", "") or ""), exc)
 
 
 _ISSUE_TEXT_CACHE: "str | None" = None
@@ -12941,6 +12945,28 @@ def _attestation_output_root() -> str:
     return os.path.join(os.environ.get("GT_C_OUT") or "/gt_out", "producer_attestations")
 
 
+def _attestation_persist_failure_row(kind: str, candidate_id: str, exc: BaseException) -> None:
+    """B-cluster sweep (2026-07-17): a swallowed attestation persist left an empty store
+    indistinguishable from "never produced" (the 0-bundle diagnoses, runs 29553735978 +
+    29594276655, took an hour each). Every producer-attestation persist wrapper now
+    writes ONE explicit measurement_failed ledger row on its swallow path — mirroring
+    _control_participation_record's failure row — so absence always carries its cause.
+    Audit metadata only; delivered bytes are untouched and this itself never raises."""
+    try:
+        _ledger_line_direct({
+            "layer": "attestation.persist",
+            "event_type": "attestation_persist",
+            "file_path": "",
+            "outcome": "measurement_failed",
+            "reason": f"attestation_persist_error:{kind}:{type(exc).__name__}",
+            "chars_delivered": 0,
+            "iteration": max(0, int(globals().get("_action_count", 0) or 0)),
+            "candidate_id": str(candidate_id or ""),
+        })
+    except Exception:  # noqa: BLE001 -- the failure row itself must never break the loop
+        return
+
+
 def _persist_lane_producer_attestation(
         kind: str, target: str, producer_block: str, shipped_suffix: str,
         candidate_id: str, delivery_seal: str) -> None:
@@ -12998,7 +13024,8 @@ def _persist_lane_producer_attestation(
         if final is not None:
             persist_attestation(
                 final.attestation, final.artifact_mapping(), _attestation_output_root())
-    except Exception:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+    except Exception as exc:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+        _attestation_persist_failure_row(kind, candidate_id, exc)
         return
 
 
@@ -13036,7 +13063,8 @@ def _persist_submit_refusal_producer_attestation(
         )
         persist_attestation(
             final.attestation, final.artifact_mapping(), _attestation_output_root())
-    except Exception:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+    except Exception as exc:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+        _attestation_persist_failure_row("submit_refusal", candidate_id, exc)
         return
 
 
@@ -13606,7 +13634,9 @@ def _persist_change_surface_producer_attestation(winner, shipped: str, sealed):
         persist_attestation(
             final.attestation, final.artifact_mapping(), _attestation_output_root())
         return final.attestation
-    except Exception:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+    except Exception as exc:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+        _attestation_persist_failure_row(
+            "newfile_precedent", str(getattr(winner, "dedup_key", "") or ""), exc)
         return None
 
 
@@ -13635,7 +13665,9 @@ def _persist_gateway_producer_attestation(winner, shipped: str, sealed):
         )
         persist_attestation(final, artifacts, _attestation_output_root())
         return final
-    except Exception:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+    except Exception as exc:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+        _attestation_persist_failure_row(
+            "gateway", str(getattr(winner, "dedup_key", "") or ""), exc)
         return None
 
 

@@ -357,13 +357,16 @@ def render_syntax_error_native(result: dict[str, Any]) -> str:
     Correct-or-quiet: "" for any verdict other than ``syntax_error`` and for an empty
     diagnostic. The engine already bounds + ``<gt-*>``-scrubs the diagnostic; this
     re-applies the model-facing invariants (tag-strip + bound) as defense in depth.
-    Leak-safe by CALLER contract: the seam checks only NON-test source edits (the
-    agent's own just-written file), so the diagnostic names no hidden test identity."""
+    Leak-safety ENFORCED here too (W5-sweep, 2026-07-17): both live callers already
+    guard test-path edits, but the renderer itself now runs ``_final_scrub`` per line
+    so leak-safety never again rests on a caller contract alone. On the callers'
+    real inputs (non-test source diagnostics) the scrub is a byte no-op."""
     if not result or result.get("verdict") != "syntax_error":
         return ""
     diag = _RE_GT_TAG.sub("", (result.get("diagnostic") or "")).strip()
     if not diag:
         return ""
+    diag = "\n".join(_final_scrub(ln) for ln in diag.splitlines())
     return _tail(diag, _MAX_BODY).strip()
 
 
@@ -415,12 +418,18 @@ def is_edit_attributed(
 
 def render_submit_rejection(reason: str, detail: str = "") -> str:
     """A submit refusal as a pre-commit / CI style failure (native, in-distribution).
-    Staged for B2 (the submit gate); the model reacts to a failed action + retries."""
+    Staged for B2 (the submit gate); the model reacts to a failed action + retries.
+
+    W5-sweep enforcement (2026-07-17): ``detail`` forwards gate_verdict hygiene text
+    that embeds agent-diff PATHS (``refusing to commit binary artifact(s): tests/x``),
+    and this renderer's fallback delivery path has no contains_test_identity
+    chokepoint backstop — so the firewall is enforced HERE, not asserted of callers.
+    Non-test reasons/details are byte-identical (``_final_scrub`` is a no-op)."""
     lines = ["pre-commit hook failed:"]
     if reason:
-        lines.append(reason)
+        lines.append(_final_scrub(reason))
     if detail:
-        lines.append(_tail(detail))
+        lines.append(_final_scrub(_tail(detail)))
     lines.append("commit aborted (exit 1)")
     return "\n".join(lines)
 
