@@ -275,19 +275,6 @@ _SUPER_MODE_MEMBERS: frozenset[str] = frozenset(
         # delivery chokepoints; forwarded in gt_ae_block.sh (with the rate knob); pinned in
         # test_ss8_* + the AE-forward completeness pin.
         "GT_SS_SHADOW",           # SS-8 — shadow-holdout causal instrument (E10)
-        # THE-17 wave activation (2026-07-17, user-ratified "activate and go"): the five
-        # audit-demanded behavior fixes join the coherent Profile-2 set. All are default-OFF
-        # direct os.environ reads at their decision sites (byte-identical when unset); none
-        # has a separately-importable capability module (code properties of the seam/runtime,
-        # per the GT_BRIEF_MINIMAL convention -> unmapped members are assumed available).
-        # GT_LOC_VENDOR_DEMOTE deliberately NOT activated (its builder gated it on a
-        # semantic-on measure_brief confirmation still owed).
-        "GT_SS_EDIT_PREVENTIVE",  # W2b/P10 — premature-reactive deferral: on-time preventive
-        #                           contract SHAPE wins the edit-boundary dose
-        "GT_INFRA_NOISE_GUARD",   # W4-1 — failure classifiers exclude pytest infra/teardown noise
-        "GT_HYP_CONTRA_GUARD",    # W4-2 — no wrong-target steer against corroborated targets
-        "GT_RECOVERY_ESCALATE",   # W4-3 — repeat-N recovery escalates to the imperative form
-        "GT_OBLIG_STEER_GUARD",   # W4-4 — obligation narrowing cannot exclude top-ranked files
     }
 )
 
@@ -298,6 +285,26 @@ PROFILE_MEMBERS: dict[str, frozenset[str]] = {
     # engines light up (all still default-OFF byte-identical until their flag is set to "1"
     # by the profile fan-out or an explicit env value).
     "2": _PROFILE_1_MEMBERS | _SUPER_MODE_MEMBERS,
+}
+
+# THE-17 wave activation (2026-07-17, user-ratified "activate and go"), CORRECTED after the
+# 29592317152 preflight refusal (CAP expected 47 rows, got 52): these five are BEHAVIOR
+# FLAGS (fix switches at seam/runtime decision sites), NOT inventory features — Profile-2
+# MEMBERSHIP doubles as the exact-128 CAP inventory (gt_feature_inventory reads
+# PROFILE_MEMBERS["2"]), so they must never join it. They are fanned to "1" by
+# resolve_profile_defaults alongside the members (same setdefault kill-switch semantics at
+# the seam), keeping the inventory at 47 CAP rows. All default-OFF byte-identical when no
+# profile is active. GT_LOC_VENDOR_DEMOTE deliberately excluded (semantic-on confirm owed).
+PROFILE_BEHAVIOR_FLAGS: dict[str, frozenset[str]] = {
+    "2": frozenset(
+        {
+            "GT_SS_EDIT_PREVENTIVE",  # W2b/P10 — edit-boundary premature-reactive deferral
+            "GT_INFRA_NOISE_GUARD",   # W4-1 — infra/teardown-noise exclusion
+            "GT_HYP_CONTRA_GUARD",    # W4-2 — no wrong-target steer vs corroborated targets
+            "GT_RECOVERY_ESCALATE",   # W4-3 — repeat-N recovery escalates, never weaker
+            "GT_OBLIG_STEER_GUARD",   # W4-4 — obligation narrowing cannot exclude top-ranked
+        }
+    ),
 }
 
 # Values (case-insensitive, stripped) that count as "OFF" for a member.
@@ -483,7 +490,10 @@ def resolve_profile_defaults(env: Mapping[str, str]) -> dict[str, str]:
     members = PROFILE_MEMBERS.get(token)
     if not members:
         return {}
-    return {member: "1" for member in sorted(members)}
+    # Behavior flags ride the same fan-out (and the seam's setdefault kill-switch) but are
+    # NOT members: they never enter the exact-128 inventory or membership counts.
+    flags = PROFILE_BEHAVIOR_FLAGS.get(token, frozenset())
+    return {name: "1" for name in sorted(members | flags)}
 
 
 def _registry_renderer(fact_class: str) -> Optional[str]:
