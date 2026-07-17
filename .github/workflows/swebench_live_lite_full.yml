@@ -2102,9 +2102,25 @@ jobs:
           # absent from all 30 harvested artifacts). Audit-only bytes; never model-facing. The
           # -d guard makes it a no-op on the baseline arm (no attestations persisted).
           if [ -d /tmp/gt_out/producer_attestations ]; then
+            # PERM TRIPWIRE (run 29594276655): the container persists as root; mkdtemp's 0700
+            # mode survived os.replace onto published bundles, so the non-root harvester's
+            # find/cp got silent EACCES and counted 0 while every bundle existed. The store
+            # now chmods bundles 0755 (attestation_store.py), but the harvest must NEVER be
+            # able to under-count silently again: compare non-root vs root visibility, flag
+            # any gap loudly, and recover root-visible bundles via sudo cp + chown-to-runner
+            # (a bare sudo cp would only move the EACCES to the non-root artifact upload).
+            _ATT_N=$(find /tmp/gt_out/producer_attestations -name entry.json 2>/dev/null | wc -l)
+            _ATT_NROOT=$(sudo find /tmp/gt_out/producer_attestations -name entry.json 2>/dev/null | wc -l)
+            if [ "${_ATT_N}" != "${_ATT_NROOT}" ]; then
+              echo "GT_ATTEST_PERM_ANOMALY: ${_ATT_NROOT} bundle(s) exist but only ${_ATT_N} readable by the non-root harvester" | tee -a trial_output.log
+              sudo find /tmp/gt_out/producer_attestations -maxdepth 3 -exec ls -ld {} \; 2>&1 | head -20 | tee -a trial_output.log
+              sudo chown -R "$(id -u):$(id -g)" /tmp/gt_out/producer_attestations 2>/dev/null || true
+              sudo chmod -R u+rwX,go+rX /tmp/gt_out/producer_attestations 2>/dev/null || true
+              _ATT_N=$(find /tmp/gt_out/producer_attestations -name entry.json 2>/dev/null | wc -l)
+            fi
             cp -r /tmp/gt_out/producer_attestations "$TASK_ARTIFACT_ROOT/producer_attestations" 2>/dev/null || true
             cp -r /tmp/gt_out/producer_attestations trial_results/producer_attestations 2>/dev/null || true
-            echo "producer-attestation store: harvested $(find /tmp/gt_out/producer_attestations -name entry.json 2>/dev/null | wc -l) bundle(s) into task root + trial_results" | tee -a trial_output.log
+            echo "producer-attestation store: harvested ${_ATT_N} bundle(s) into task root + trial_results" | tee -a trial_output.log
           else
             echo "producer-attestation store: none persisted on /tmp/gt_out (no producer_attestations dir)" | tee -a trial_output.log
           fi

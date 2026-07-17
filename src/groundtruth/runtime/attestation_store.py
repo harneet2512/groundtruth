@@ -193,6 +193,14 @@ def persist_attestation(
 
     index_root.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{key}.", dir=index_root))
+    # mkdtemp creates 0o700 (owner-only) by POSIX security contract, and os.replace
+    # below preserves that mode onto the published <key>/ bundle. The store is
+    # audit-only bytes harvested across a container-root -> host-non-root uid
+    # boundary (find/cp as the runner user), so an owner-only bundle dir yields a
+    # silent EACCES and the harvest counts 0 despite every bundle being present
+    # (live witness: run 29594276655, 15/15 tasks "harvested 0 bundle(s)").
+    # Publish world-traversable like every other dir this store creates.
+    os.chmod(temporary, 0o755)
     try:
         artifacts_dir = temporary / "artifacts"
         artifacts_dir.mkdir()
