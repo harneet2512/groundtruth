@@ -65,7 +65,10 @@ class CoveringAttribution:
     """
 
     attributed: bool
-    method: str | None  # trace_frame | differential; None when no proof leg ran
+    # trace_frame | differential | unresolved_covering; None when no proof leg ran.
+    # unresolved_covering: base-RED + current-RED on the SAME named test (an
+    # incomplete fix of a pre-existing covered failure — W2a).
+    method: str | None
     current_verdict: str
     base_verdict: str  # not_run | pass | fail | unavailable
     implicated_edited_paths: tuple[str, ...]
@@ -702,7 +705,37 @@ def _differential_attribution_result(
     finally:
         _cleanup_base_worktree(repo_root, wt, parent, executor=executor)
     base_verdict = str(base.get("verdict") or "unavailable")
-    return _result(base_verdict, attributed=base_verdict == "pass")
+    if base_verdict == "pass":
+        # REGRESSION: the covering test was GREEN at base and RED after the edit —
+        # the working-tree edit is the delta (highest-confidence attribution).
+        return _result(base_verdict, attributed=True)
+    # UNRESOLVED-TARGET (W2a, 2026-07-17): the covering test that reaches the edited
+    # symbol was RED at base AND is STILL RED after the edit, failing the SAME named
+    # test — a locally-green-but-incomplete fix that never resolved the covered
+    # failure. This is the DOMINANT SWE shape (the FAIL_TO_PASS target pre-exists the
+    # fix), which the base-GREEN-only gate silently dropped, letting incomplete fixes
+    # submit unchallenged (ipython-14798 / beets-5457 / geopandas / babel / loguru).
+    # The executed covering RED is the advisory's twin: the advisory says "run the
+    # covering test"; this RUNS it and shows the runner's OWN identity-scrubbed
+    # transcript. The failing-test-name OVERLAP is computed HOST-side only (never
+    # delivered — render_covering_failure_native scrubs identity) and keeps FP ~0
+    # (invariant ②): a base-red whose named failure does NOT persist, an un-named
+    # base-red, or an "unavailable"/"timeout" base stays UNATTRIBUTED (fail toward
+    # quiet). Zero added compute — the base run already ran; we USE its verdict
+    # instead of discarding it.
+    if base_verdict == "fail":
+        cur_names = {str(n) for n in (current_result.get("failing_test_names") or ()) if n}
+        base_names = {str(n) for n in (base.get("failing_test_names") or ()) if n}
+        if cur_names and base_names and (cur_names & base_names):
+            return CoveringAttribution(
+                attributed=True,
+                method="unresolved_covering",
+                current_verdict=current_verdict,
+                base_verdict=base_verdict,
+                implicated_edited_paths=edited_files,
+                covering_files=recorded_covering,
+            )
+    return _result(base_verdict, attributed=False)
 
 
 def differential_attribution(
