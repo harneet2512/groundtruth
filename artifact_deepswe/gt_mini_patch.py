@@ -14538,6 +14538,28 @@ _SS_OBL_RELAX_CLASSES = frozenset({"caller_contract", "causal_chain"})
 # telemetry reason for a preventive winner demoted for missing its decision boundary.
 _GA_REASON_REPAIR_LATE = "repair_support_late"
 
+# P10 (2026-07-17) — PREMATURE-REACTIVE DEFERRAL at the edit boundary (the SYMMETRIC
+# complement of _GA_REASON_REPAIR_LATE above). SM-10 demotes a LATE preventive winner (delivered
+# AFTER its decision boundary); the untreated mirror is a PREMATURE reactive winner (delivered
+# strictly BEFORE its own boundary) that outranks — by ladder CLASS — an on-time preventive
+# edit-bound contract whose decision boundary is NOW (the edit). Measured (this worktree): at a
+# post_edit turn ``obligation.unexercised`` (obligation_violation, boundary ordinal 5 = verify/
+# submit, rank 50) is NOT yet actionable — its edited-but-unexercised completeness concern belongs
+# at verify/submit — yet it takes the single dose ahead of the on-time ``l3.contract``
+# (caller_contract, boundary ordinal 3 = the edit, rank 40), starving the SHAPE contract at the
+# exact keep-vs-remove fork where it is outcome-determining (P10: l3.contract fired 5x, delivered
+# 0 bytes). The premature reactive fact is DEFERRED (re-arms + re-competes at its own boundary,
+# where it wins on-time) so the on-time preventive edit-bound fact takes the dose. This is the
+# WHICH-CLASSES-CARE set (distinguished by CLASS, not an ordinal magic number): ONLY a completeness/
+# gate class whose value is realized at a LATER boundary. executed_world_fact (an executed RED is a
+# REALIZED world-fact, actionable the instant it fires — never deferred), edit_violation (boundary
+# == the edit, never premature), recovery (a NOW stuck/loop nudge — the one proven-consumed form)
+# and causal_chain/caller_contract/localization (preventive, handled by the late rule) are ALL
+# EXCLUDED. A strict, minimal set: today just obligation_violation.
+_GA_PREMATURE_DEFERRABLE_CLASSES = frozenset({"obligation_violation"})
+# telemetry reason for a premature reactive winner deferred so an on-time preventive fact delivers.
+_GA_REASON_PREMATURE_EARLY = "reactive_early_displaced_edit_preventive"
+
 
 def _ga_is_preventive(kind: str) -> bool:
     """True iff ``kind`` projects onto a PREVENTIVE ladder class (guidance meant to arrive BEFORE
@@ -14584,6 +14606,58 @@ def _ga_candidate_on_time(c) -> bool:
     _ga_is_preventive False -> on-time True (never suppressed for lateness)."""
     late = getattr(c, "current_ordinal", 0) > getattr(c, "boundary_ordinal", 0)
     return not (late and _ga_is_preventive(getattr(c, "kind", "")))
+
+
+def _ga_is_premature_deferrable(c) -> bool:
+    """P10 (2026-07-17): True iff candidate ``c`` is a REACTIVE completeness/gate fact delivered
+    STRICTLY BEFORE its own decision boundary (``current_ordinal < boundary_ordinal`` — not yet
+    actionable) whose ladder class is in :data:`_GA_PREMATURE_DEFERRABLE_CLASSES` (today just
+    ``obligation_violation``: a verify/submit completeness gate). Such a fact must not take the
+    single dose ahead of an on-time preventive edit-bound fact — it defers to its own (later)
+    boundary and re-competes there. Correct-or-quiet: NOT early -> False; engine absent / an
+    unmapped (internal) kind -> False, so a fact GT cannot classify is NEVER deferred."""
+    early = getattr(c, "current_ordinal", 0) < getattr(c, "boundary_ordinal", 0)
+    if not early:
+        return False
+    try:
+        from groundtruth.runtime.global_arbiter import class_of_kind
+    except Exception:  # noqa: BLE001 — engine absent -> never deferred (correct-or-quiet)
+        return False
+    return class_of_kind(getattr(c, "kind", "")) in _GA_PREMATURE_DEFERRABLE_CLASSES
+
+
+def _ga_defer_premature_reactive(winner, losers):
+    """P10 (2026-07-17): the SYMMETRIC complement of the SM-10 late-preventive demotion. If
+    ``winner`` is a PREMATURE reactive completeness/gate fact (``_ga_is_premature_deferrable`` —
+    delivered before its verify/submit boundary, not yet actionable) AND an ON-TIME PREVENTIVE
+    edit-bound fact sits among the ``REASON_OUTRANKED`` losers, DEFER the premature winner (append
+    it to ``losers`` with :data:`_GA_REASON_PREMATURE_EARLY` so the flush's loser loop re-arms /
+    rolls it back — it re-competes at its own boundary, NOT destroyed) and PROMOTE the highest-
+    ranked on-time preventive fact as the SINGLE dose (removed from ``losers`` — it is delivering).
+    Returns ``(new_winner, repair_support)``. STAYS <=1 dose (re-pick, never add).
+
+    SAFE-GUARDS — every one makes the path byte-identical / no-op:
+      * ``GT_SS_EDIT_PREVENTIVE`` off -> return the winner untouched (byte-identical);
+      * ``winner`` not premature-deferrable (reactive-now / preventive / internal) -> untouched;
+      * NO on-time preventive replacement among the losers -> the premature winner is KEPT, so a
+        turn that has no preventive fact to protect is NEVER silenced (no regression to the
+        obligation delivery). Correct-or-quiet: engine absent -> the class test is False -> no-op."""
+    if winner is None:
+        return None, False
+    _rs = winner.current_ordinal > winner.boundary_ordinal
+    if not (_ss_edit_preventive_on() and _ga_is_premature_deferrable(winner)):
+        return winner, _rs
+    try:
+        from groundtruth.runtime.global_arbiter import REASON_OUTRANKED
+    except Exception:  # noqa: BLE001 — engine absent -> keep the winner (no-op)
+        return winner, _rs
+    for _i, (_lc, _lreason) in enumerate(losers):
+        if (_lreason == REASON_OUTRANKED and _ga_candidate_on_time(_lc)
+                and _ga_is_preventive(getattr(_lc, "kind", ""))):
+            losers.append((winner, _GA_REASON_PREMATURE_EARLY))
+            losers.pop(_i)
+            return _lc, (_lc.current_ordinal > _lc.boundary_ordinal)
+    return winner, _rs
 
 
 def _ga_unified_dedup_key(producer: str, evidence_type: str, target: str,
@@ -14996,6 +15070,10 @@ def _global_pool_plan(pool):
                 result.repair_support = (
                     winner.current_ordinal > winner.boundary_ordinal)
                 break
+    # P10 (2026-07-17): premature-reactive deferral at the edit boundary (symmetric complement of
+    # the SM-10 late-preventive demotion above). See _ga_defer_premature_reactive. Byte-identical
+    # when GT_SS_EDIT_PREVENTIVE is off.
+    winner, result.repair_support = _ga_defer_premature_reactive(winner, result.losers)
     return result, winner
 
 
@@ -15067,6 +15145,14 @@ def _global_pool_flush(pool, *, kkind, kf, krel, candidate_context=None,
                     res.repair_support = (
                         winner.current_ordinal > winner.boundary_ordinal)
                     break
+        # P10 (2026-07-17): premature-reactive deferral at the edit boundary (symmetric complement
+        # of the SM-10 late-preventive demotion above). A PREMATURE reactive completeness/gate fact
+        # (obligation_violation, delivered before its verify/submit boundary — not yet actionable)
+        # must not take the single dose ahead of an on-time preventive edit-bound contract whose
+        # decision boundary is NOW; the premature fact defers (re-arms below via the loser loop) and
+        # re-competes at its own boundary. STAYS <=1 dose. See _ga_defer_premature_reactive.
+        # Byte-identical when GT_SS_EDIT_PREVENTIVE is off.
+        winner, res.repair_support = _ga_defer_premature_reactive(winner, res.losers)
         for c, reason in res.losers:
             try:
                 _record_hook_suppress(c.kind, reason="ga_" + reason)
@@ -15810,6 +15896,8 @@ def _ss_late_drop_on() -> bool:    return _ss_enabled("GT_SS_LATE_DROP")
 def _ss_ack_metrics_on() -> bool:  return _ss_enabled("GT_SS_ACK_METRICS")
 def _ss_exec_truth_on() -> bool:   return _ss_enabled("GT_SS_EXEC_TRUTH")   # SS-2 feature 1/2
 def _ss_submit_red_on() -> bool:   return _ss_enabled("GT_SS_SUBMIT_RED")   # SS-2 feature 3
+def _ss_edit_preventive_on() -> bool:  # P10: premature-reactive deferral at the edit boundary
+    return _ss_enabled("GT_SS_EDIT_PREVENTIVE")
 
 
 # ── SS-8 SHADOW-HOLDOUT (flag GT_SS_SHADOW, rate GT_SS_SHADOW_RATE) — the E10 causal
