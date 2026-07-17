@@ -56,6 +56,7 @@ from typing import Any, ClassVar
 
 from groundtruth.runtime.episode_state import EpisodeState
 from groundtruth.runtime.evidence_envelope import ADVISORY, INFO, VERIFIED, WARNING
+from groundtruth.runtime.patterns import is_infra_noise
 from groundtruth.trajectory.classifier import FailureKind, is_env_failure
 
 __all__ = [
@@ -744,6 +745,10 @@ def classify_edit_contradicted_contract(
     fp = event.failure_fingerprint
     if not fp:
         return None
+    # W4 guard 1: a fingerprint sitting on a HARNESS infra/teardown observation is not
+    # the agent's source regression — never falsify a hypothesis from teardown noise.
+    if event.observation and is_infra_noise(event.observation):
+        return None
     if fp not in state.failure_fingerprints:
         return None  # a FRESH failure is not yet a contradiction
     prior_idx = _prior_failure_index(state, fp)
@@ -782,6 +787,10 @@ def classify_same_failure_unchanged_patch(
     when zero edits are recorded)."""
     fp = event.failure_fingerprint
     if not fp:
+        return None
+    # W4 guard 1: harness infra/teardown noise is never the agent's regression, so it
+    # cannot demand a new hypothesis (correct-or-quiet — wrong steering beats none).
+    if event.observation and is_infra_noise(event.observation):
         return None
     if fp not in state.failure_fingerprints:
         return None

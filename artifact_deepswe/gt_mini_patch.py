@@ -6777,6 +6777,7 @@ try:
         TEST_FAIL_RE as _TEST_FAIL_RE,
         TEST_PASS_RE as _TEST_PASS_RE,
         COMPILE_FAIL_RE as _COMPILE_FAIL_RE,
+        is_infra_noise as _is_infra_noise,  # W4 guard 1 (canonical)
     )
 except ImportError:
     _TEST_RUNNER_RE = re.compile(
@@ -6819,6 +6820,25 @@ except ImportError:
         r"(error\[E\d+\]|error: could not compile|\bSyntaxError\b"
         r"|cannot find (?:value|function|type|module|symbol)"
         r"|undefined:\s|\bTS\d{4,}:|compilation error)")
+    # W4 guard 1 inline mirror (patterns.py absent at .pth bootstrap) — MUST stay
+    # byte-equivalent to groundtruth.runtime.patterns.is_infra_noise.
+    _INFRA_NOISE_RE = re.compile(
+        r"pytest_unconfigure|_ensure_unconfigure|\bwrap_session\b"
+        r"|\bINTERNALERROR\b"
+        r"|pluginmanager\.(?:unregister|register)\b"
+        r"|plugin is not registered", re.IGNORECASE)
+    _INFRA_REAL_FAIL_RE = re.compile(
+        r"\b[1-9]\d* (?:failed|error|errors|failing)\b"
+        r"|\bFAILED\b"
+        r"|::\S+\s+ERROR\b", re.IGNORECASE)
+
+    def _is_infra_noise(text: str) -> bool:  # noqa: D401 — mirror of patterns.is_infra_noise
+        t = text or ""
+        if not _INFRA_NOISE_RE.search(t):
+            return False
+        if _INFRA_REAL_FAIL_RE.search(t):
+            return False
+        return True
 
 # Build / type-check command shapes (Move-2 unresolved-build guard). A test-
 # runner already matches _TEST_RUNNER_RE (compile errors surface inside e.g.
@@ -7122,6 +7142,19 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
         "blind. Run targeted verification FIRST to see what is actually "
         f"failing, then make one targeted edit.{hint}"
     )
+    # W4 guard 3 (flag GT_RECOVERY_ESCALATE): a thrash warning that was correct but
+    # IGNORED must escalate on repeat (dynaconf: 3 correct coherence warnings ignored
+    # into budget death — form too weak). The counter is RUN-LEVEL and shared with the
+    # typed recovery producer, so the Nth (N>=2) recovery-class warning gets the
+    # monotone short-active lead; the 1st is byte-identical. Off -> byte-identical.
+    if _w4_recovery_escalate_on():
+        global _recovery_deliver_count
+        _recovery_deliver_count += 1
+        try:
+            from groundtruth.runtime.content_guards import escalate_recovery_form
+            body = escalate_recovery_form(body, _recovery_deliver_count)
+        except Exception:  # noqa: BLE001 -- guard absent -> base body (byte-identical)
+            pass
     # GT_SS_COHERENCE_V2 measurement (ZERO model bytes): stamp a host-side ledger row
     # recording that the V2 gate (successful-writes-only, no-passing-test-between) is the
     # one that fired, carrying the EXACT churn count. Provenance/measurement only (per the
@@ -7189,6 +7222,13 @@ def _l5_failure_nudge(cmd: str, out_text: str) -> str:
     # Gate 2: env/tooling failure -> not hypothesis evidence -> silent.
     if _ENV_FAIL_RE.search(out_text):
         return ""
+    # Gate 2b (W4 guard 1, flag GT_INFRA_NOISE_GUARD): a failure marker that is
+    # HARNESS infra/teardown noise (a session-teardown/fixture/plugin-finalizer
+    # traceback on an otherwise passing run — hydra-3005's `AssertionError: plugin
+    # is not registered` inside `pytest_unconfigure`) is not the agent's
+    # regression. Off -> byte-identical.
+    if _w4_infra_noise_guard_on() and _is_infra_noise(out_text):
+        return ""
     # Gate 3: an explicit test/assertion failure marker is required — and
     # patch/apply bookkeeping lines never qualify (Stage-5 fd FP closure).
     fails = _failure_lines(out_text)
@@ -7205,6 +7245,16 @@ def _l5_failure_nudge(cmd: str, out_text: str) -> str:
         return ""
     _test_fail_history.append(sig)
     if _test_fail_history.count(sig) >= 2 and _source_edit_count >= 1:
+        # Gate 5 (W4 guard 2, flag GT_HYP_CONTRA_GUARD): do NOT assert "your
+        # hypothesis is likely wrong / reconsider the target file" when the agent's
+        # CURRENT target is corroborated by GT's own issue-anchor evidence (the
+        # sh-744 BAD_INFO_RESISTED false-fire — the target was RIGHT). Gold-agnostic:
+        # graph/issue-anchor agreement between the edited target and the anchors.
+        # Fail toward silence (a wrong-target steer against a right target is worse
+        # than none). Off -> byte-identical.
+        if _w4_hyp_contra_guard_on() and _current_target_gt_corroborated():
+            _l5_failure_fired = True  # burn the dose: do not re-attempt this steer
+            return ""
         _l5_failure_fired = True
         return _nudge_native(
             '\n<gt-nudge reason="failure_persisted">\nGT: the same test failure has '
@@ -9922,6 +9972,19 @@ def _obligation_symbol_set() -> set[str]:
                         syms.update(p for p in s.split(".") if len(p) >= 3)
         except Exception:  # noqa: BLE001 -- absent artifact -> dormant clause
             pass
+        # W4 guard 4 (flag GT_OBLIG_STEER_GUARD): the obligation narrowing domain must
+        # not EXCLUDE symbols that GT's independent issue-anchor evidence ranks highly
+        # (aiogram: the obligation steer narrowed away from rank-1 gold scene.py). Fail
+        # toward silence — UNION the ranked issue-anchor symbols in so narrowing can
+        # never drop them. Off -> byte-identical (raw obligation symbols only).
+        if _w4_oblig_steer_guard_on():
+            _oracle_focus()  # populate the pure issue-anchor set (no edit stems)
+            ranked_top = {s for s in (_oracle_focus_cache or set()) if len(s) >= 3}
+            try:
+                from groundtruth.runtime.content_guards import guarded_obligation_symbols
+                syms = guarded_obligation_symbols(syms, ranked_top)
+            except Exception:  # noqa: BLE001 -- guard absent -> raw set (byte-identical)
+                syms = syms | ranked_top if syms else syms
         _oblig_syms_cache = syms
     return _oblig_syms_cache
 
@@ -10508,6 +10571,11 @@ _gt_hypothesis_recovery: "tuple[str, str] | None" = None  # (disposition, impera
 # `_recovery_stall_active`. Default False -> byte-identical when the recovery layer is off.
 _recovery_repeat_fp: bool = False
 _HYPOTHESIS_IMPERATIVE_CACHE: "dict[str, str] | None" = None
+# W4 guard 3 — how many times the recovery class has been produced-for-delivery this
+# run. The Nth (N>=2) delivery ESCALATES the imperative form (advisory -> short-active),
+# never weaker on repeat (dynaconf: 3 correct thrash warnings ignored — form too weak).
+# Default 0; only advanced under GT_RECOVERY_ESCALATE, so off -> byte-identical.
+_recovery_deliver_count: int = 0
 
 
 def _hypothesis_imperative_map() -> "dict[str, str]":
@@ -10550,6 +10618,12 @@ def _hypothesis_failure_fingerprint(observation: str) -> str:
     failure memory so the repeat-detection classifiers become live across turns — it is
     NEVER emitted to the model (a hash, and the model surface is the generic imperative)."""
     obs = observation or ""
+    # W4 guard 1 (flag GT_INFRA_NOISE_GUARD): a harness infra/teardown observation is
+    # not the agent's regression, so it must not enter the failure-repeat memory (else
+    # the typed same_failure/edit_contradicted classifiers treat teardown noise as a
+    # recurring failure). Off -> byte-identical.
+    if _w4_infra_noise_guard_on() and _is_infra_noise(obs):
+        return ""
     _MARK = ("error", "failed", "failure", "exception", "traceback", "assert",
              "fatal", "not found", "cannot", "no such", "panic")
     low = obs.lower()
@@ -10757,9 +10831,23 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
         except Exception:  # noqa: BLE001 — auditability must never break the gate
             pass
         return None
+    # W4 guard 3 (flag GT_RECOVERY_ESCALATE): a recovery nudge that was correct but
+    # IGNORED must escalate on repeat from advisory to the proven-consumed SHORT·ACTIVE
+    # imperative — never weaker on a later repeat. The 1st delivery is byte-identical
+    # (level 0); the Nth (N>=2) prepends the monotone short-active lead. Off -> the
+    # base imperative, byte-identical.
+    imperative = selection[1]
+    if _w4_recovery_escalate_on():
+        global _recovery_deliver_count
+        _recovery_deliver_count += 1
+        try:
+            from groundtruth.runtime.content_guards import escalate_recovery_form
+            imperative = escalate_recovery_form(selection[1], _recovery_deliver_count)
+        except Exception:  # noqa: BLE001 -- guard absent -> base imperative (byte-identical)
+            imperative = selection[1]
     try:
         from groundtruth.runtime.native_render import render_recovery_native
-        text = render_recovery_native(selection[0], selection[1])
+        text = render_recovery_native(selection[0], imperative)
     except Exception:  # noqa: BLE001 -- recovery framing must never break the gate
         return None
     if not text:
@@ -10999,6 +11087,31 @@ def _oracle_focus() -> set[str]:
         if len(stem) >= 3:
             stems.add(stem)
     return _oracle_focus_cache | stems
+
+
+def _current_target_gt_corroborated() -> bool:
+    """W4 guard 2: True when the agent's CURRENT edit target agrees with GT's own
+    ISSUE-ANCHOR evidence — the gold-agnostic graph/issue-anchor agreement the
+    hypothesis-contradiction guard keys on. Anchors = the PURE issue-anchor set
+    (``_oracle_focus_cache``, WITHOUT the self-referential edited-file stems, so a
+    target never trivially corroborates itself); target tokens = the edited files'
+    symbol tokens + file stems. >=1 shared token => corroborated. Correct-or-quiet:
+    no anchors or no edits => False (genuine recovery still fires)."""
+    _oracle_focus()  # ensure _oracle_focus_cache is populated (pure anchor set)
+    anchors = _oracle_focus_cache or set()
+    if not anchors or not _oracle_edited_rels:
+        return False
+    target_tokens: set[str] = set()
+    for r in _oracle_edited_rels:
+        stem = os.path.splitext(os.path.basename(r))[0]
+        if len(stem) >= 3:
+            target_tokens.add(stem)
+        target_tokens |= set(_oracle_edited_tokens_by_file.get(r, set()))
+    try:
+        from groundtruth.runtime.content_guards import target_is_gt_corroborated
+        return target_is_gt_corroborated(target_tokens, anchors)
+    except Exception:  # noqa: BLE001 -- guard module absent -> no suppression (fire)
+        return bool(target_tokens & anchors)
 
 
 def _oracle_telemetry_write(suppressed, winner) -> None:
@@ -15845,6 +15958,11 @@ def _ss_novelty_on() -> bool:      return _ss_enabled("GT_SS_NOVELTY")
 def _ss_dedup2_on() -> bool:       return _ss_enabled("GT_SS_DEDUP2")
 def _ss_coherence_v2_on() -> bool: return _ss_enabled("GT_SS_COHERENCE_V2")
 def _ss_recovery_v2_on() -> bool:  return _ss_enabled("GT_SS_RECOVERY_V2")
+# W4 content guards — each default-OFF -> byte-identical to prior GT.
+def _w4_infra_noise_guard_on() -> bool: return _ss_enabled("GT_INFRA_NOISE_GUARD")
+def _w4_hyp_contra_guard_on() -> bool:  return _ss_enabled("GT_HYP_CONTRA_GUARD")
+def _w4_recovery_escalate_on() -> bool: return _ss_enabled("GT_RECOVERY_ESCALATE")
+def _w4_oblig_steer_guard_on() -> bool: return _ss_enabled("GT_OBLIG_STEER_GUARD")
 
 
 def _ss_coherence_proofs_on() -> bool:

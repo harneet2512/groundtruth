@@ -80,6 +80,66 @@ COMPILE_FAIL_RE = re.compile(
     r"|cannot find (?:value|function|type|module|symbol)"
     r"|undefined:\s|\bTS\d{4,}:|compilation error)")
 
+# ---------------------------------------------------------------------------
+# INFRA / TEARDOWN NOISE (W4 guard 1) — a failure marker that is NOT the agent's
+# regression: it originates in the TEST HARNESS ITSELF (session config/teardown,
+# fixture setup/teardown, a third-party pytest plugin's finalizer, or an internal
+# runner error), NOT in the code under edit. The motivating live false-fire
+# (facebookresearch/hydra-3005, smoke30 ss128): a fully PASSING run
+# (``389 passed in 1.51s``, returncode 0) whose tail carried a stray
+# ``AssertionError: plugin is not registered`` raised deep inside
+# ``pytest_unconfigure`` (the ``pytest_snail`` plugin's session-teardown) — the
+# governor's ``AssertionError`` marker matched and fired l5.failure ("your
+# hypothesis is likely wrong, reconsider the target file") on a green run.
+#
+# These frames name the HARNESS's OWN MACHINERY — the pytest session driver, its
+# config (un)configure path, its internal error, or the plugin registry. They can
+# NOT reflect the agent's source. DELIBERATELY EXCLUDED: pytest fixture
+# ``ERROR at setup/teardown of <test>`` — a fixture runs the AGENT'S code (measured:
+# jupyterlab/jupyter-ai-1294's ``ERROR at setup`` was a real ``ValueError`` in the
+# agent's ``config_manager.py:295``), so it is NOT harness noise. ENV_FAIL_RE already
+# covers COLLECTION errors + import shims; this is the complementary SESSION-teardown
+# / plugin-finalizer / INTERNALERROR class it does not carry.
+# ---------------------------------------------------------------------------
+INFRA_NOISE_RE = re.compile(
+    r"pytest_unconfigure|_ensure_unconfigure|\bwrap_session\b"
+    r"|\bINTERNALERROR\b"
+    r"|pluginmanager\.(?:unregister|register)\b"
+    r"|plugin is not registered",
+    re.IGNORECASE,
+)
+
+# A GENUINE test failure/error the run really had — a summary count ("3 failed",
+# "= 2 errors ="), a per-test node result ("test_x FAILED"/"FAILED test_x"), or a
+# short-summary "ERROR" node. When ANY is present the observation is NOT pure infra
+# noise even if a harness-machinery frame also appears, so is_infra_noise returns
+# False and a real regression still steers. The "0 failed" pass line never matches
+# (the count leg requires a [1-9] lead), so a fully green run stays noise.
+_GENUINE_FAILURE_RE = re.compile(
+    r"\b[1-9]\d* (?:failed|error|errors|failing)\b"   # summary count
+    r"|\bFAILED\b"                                     # per-test / short-summary FAILED
+    r"|::\S+\s+ERROR\b",                               # per-test node ERROR (`test::x ERROR`)
+    re.IGNORECASE)
+
+
+def is_infra_noise(text: str) -> bool:
+    """True when a failure marker in ``text`` is HARNESS infra/session-teardown noise,
+    not the agent's source regression. Requires (a) a harness-own-machinery signature
+    AND (b) NO genuine test failure/error (summary count, per-test FAILED, or per-test
+    ERROR node) — a run where a real test failed/errored is never suppressed even if a
+    plugin-finalizer frame coexists. Conservative + correct-or-quiet: fires only on the
+    harness-machinery shape with an otherwise-clean result, so a real assertion in a
+    test body (which does not carry these frames) is never called noise, and a fixture
+    error running agent code (``ERROR at setup of`` -> not in the signature set) is
+    never suppressed. Language-uniform on the dominant Python/pytest surface; other
+    runners fall through to False (unchanged behavior)."""
+    t = text or ""
+    if not INFRA_NOISE_RE.search(t):
+        return False
+    if _GENUINE_FAILURE_RE.search(t):
+        return False
+    return True
+
 
 __all__ = [
     "TEST_RUNNER_RE",
@@ -87,4 +147,6 @@ __all__ = [
     "TEST_FAIL_RE",
     "ENV_FAIL_RE",
     "COMPILE_FAIL_RE",
+    "INFRA_NOISE_RE",
+    "is_infra_noise",
 ]
