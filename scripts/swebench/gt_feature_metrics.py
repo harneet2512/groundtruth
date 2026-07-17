@@ -36,6 +36,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 from collections import Counter, defaultdict
 from typing import Any, Iterable
@@ -3763,6 +3764,75 @@ def write_run_aggregate(run_id: str, agg: dict, out_dir: str) -> dict[str, str]:
 # CLI.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# W1b — live-bit ORDERING fix. detect_live_run scans <task_dir> + <task_dir>/
+# gt_artifacts, but the live workflow writes the run-provenance identity artifacts
+# to the run's SHARED agent-output dir (/gt_out) and copies them into
+# trial_results/gt_artifacts only AFTER this in-container create pass runs — so the
+# collect evaluated provenance on a task dir that did not yet carry them and SEALED
+# the live bit false-dark (D9: the sealed record is authoritative, never rewritten).
+# This co-locates the three positive identity artifacts into <task_dir>/gt_artifacts
+# BEFORE detect_live_run, so the live bit is sealed against the complete set. It only
+# MOVES artifacts the run already produced next to the record; it changes no truth and
+# NEVER defaults to LIVE. Create pass only (never the --out re-grade → D9 preserved).
+# ---------------------------------------------------------------------------
+_PROVENANCE_STAGE_ARTIFACTS = (
+    "gt_profile_activation.json",  # workflow-only witness (the replay discriminator)
+    "gt_profile_receipt.json",     # in-seam attach witness
+    "gt_run_identity.json",        # non-baseline attestation
+)
+
+
+def stage_provenance_artifacts(task_dir: str, shared_dir: str | None) -> dict[str, str]:
+    """Co-locate the run-provenance identity artifacts from the run's SHARED output dir
+    into ``<task_dir>/gt_artifacts`` so ``detect_live_run`` seals the live bit against
+    the complete set. Ordering fix, not a truth change.
+
+    Fail-closed / non-fabricating (NEVER default-LIVE):
+      * copies ONLY a source that EXISTS and parses as a JSON object — a missing or
+        malformed source is skipped, leaving ``detect_live_run`` to fail closed;
+      * NEVER overwrites an already co-located artifact (idempotent; preserves the
+        authoritative assembled copy and never manufactures a two-location conflict);
+      * stages ONLY the three positive identity artifacts — never a replay report, so
+        ``replay_excluded`` stays honest;
+      * synthesizes NOTHING: every staged byte is a byte-for-byte copy of a real
+        produced artifact.
+
+    Returns ``{name: disposition}`` (``staged`` / ``present`` / ``absent`` /
+    ``malformed`` / ``no_shared_dir``) for the integrity trail. Copies nothing when
+    ``shared_dir`` is falsy or is not an existing directory.
+    """
+    if not shared_dir or not os.path.isdir(shared_dir):
+        return {name: "no_shared_dir" for name in _PROVENANCE_STAGE_ARTIFACTS}
+    dest_base = os.path.join(task_dir, "gt_artifacts")
+    dispositions: dict[str, str] = {}
+    for name in _PROVENANCE_STAGE_ARTIFACTS:
+        # already co-located (top-level task dir OR gt_artifacts) → never clobber the
+        # authoritative copy, and never introduce a differing second copy (ambiguity).
+        if os.path.isfile(os.path.join(dest_base, name)) or os.path.isfile(
+            os.path.join(task_dir, name)
+        ):
+            dispositions[name] = "present"
+            continue
+        src = os.path.join(shared_dir, name)
+        if not os.path.isfile(src):
+            dispositions[name] = "absent"
+            continue
+        try:
+            with open(src, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            dispositions[name] = "malformed"
+            continue
+        if not isinstance(data, dict):
+            dispositions[name] = "malformed"
+            continue
+        os.makedirs(dest_base, exist_ok=True)
+        shutil.copyfile(src, os.path.join(dest_base, name))  # byte-exact, no re-serialize
+        dispositions[name] = "staged"
+    return dispositions
+
+
 def _iter_task_dirs(run_dir: str) -> list[tuple[str, str]]:
     """(task, dir) for every subdir of run_dir that holds a mini trajectory."""
     out: list[tuple[str, str]] = []
@@ -3790,6 +3860,14 @@ def main(argv: list[str] | None = None) -> int:
         "--expected-tasks-file", default=None,
         help="JSON task population; absent task records remain an integrity failure",
     )
+    ap.add_argument(
+        "--shared-artifacts-dir",
+        default=os.environ.get("GT_SHARED_ARTIFACTS_DIR") or None,
+        help="run's SHARED agent-output dir (e.g. /gt_out) holding the run-provenance "
+        "identity artifacts; the CREATE pass (no --out) co-locates them into each task "
+        "dir BEFORE the live bit is sealed (W1b ordering fix). Fail-closed; never the "
+        "--out re-grade pass (D9 completion-hash binding preserved).",
+    )
     args = ap.parse_args(argv)
 
     run_dir = args.run_dir
@@ -3812,6 +3890,13 @@ def main(argv: list[str] | None = None) -> int:
 
     records: list[dict] = []
     for task, d in _iter_task_dirs(run_dir):
+        # W1b: on the CREATE pass ONLY (never the --out re-grade, which must leave the
+        # sealed task dir byte-untouched — D9), co-locate the run-provenance identity
+        # artifacts from the shared output dir into <d>/gt_artifacts BEFORE collect_task
+        # evaluates detect_live_run. Fail-closed: absent/malformed sources are skipped
+        # and the live bit stays NOT_LIVE.
+        if args.out is None and args.shared_artifacts_dir:
+            stage_provenance_artifacts(d, args.shared_artifacts_dir)
         rec = collect_task(task, d, profile=args.profile, baseline_root=args.baseline_root)
         # With --out, per-task records are written UNDER out_dir and the task dir is
         # left byte-untouched: the in-container gt_task_completion.json seals the hash

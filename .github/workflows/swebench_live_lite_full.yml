@@ -2184,8 +2184,16 @@ jobs:
           # there too so the grader reads the whole task from one dir. Same PYTHONPATH pattern as the
           # gt_deep_metrics line. Its nonzero (per-task aggregate refusal) is swallowed like
           # DEEP_METRICS_WARN — the METRICS-COMPLETE gate below is the fail-closed artifact check.
+          # W1b LIVE-BIT ORDERING FIX: the sealed record's live bit is joined by detect_live_run,
+          # which scans <task_dir> + <task_dir>/gt_artifacts. The three run-provenance identity
+          # artifacts (activation/receipt/run_identity) were written to /tmp/gt_out (the agent-output
+          # bind-mount) and are copied into trial_results/gt_artifacts ABOVE — NOT into /tmp/gt/<task>.
+          # --shared-artifacts-dir co-locates them into /tmp/gt/<task>/gt_artifacts BEFORE this CREATE
+          # pass seals the record, closing the permanent false-dark NOT_LIVE. Fail-closed inside the
+          # collector (baseline/absent/malformed sources stay NOT_LIVE); create pass only (the summarize
+          # --out re-grade never stages → D9 completion-hash binding preserved).
           cp /tmp/gt_out/gt_oracle_events.jsonl  "$TASK_ARTIFACT_ROOT/gt_oracle_events_${GT_TASK_ID}.jsonl"  2>/dev/null || true
-          PYTHONPATH=${GT_WORKSPACE}:${GT_WORKSPACE}/src:${GT_WORKSPACE}/scripts/swebench:${GT_WORKSPACE}/scripts/metrics python3 scripts/swebench/gt_feature_metrics.py /tmp/gt --profile 2 --run-id "${GT_TASK_ID}" 2>&1 | tail -3 || echo FEATURE_METRICS_WARN
+          PYTHONPATH=${GT_WORKSPACE}:${GT_WORKSPACE}/src:${GT_WORKSPACE}/scripts/swebench:${GT_WORKSPACE}/scripts/metrics python3 scripts/swebench/gt_feature_metrics.py /tmp/gt --profile 2 --run-id "${GT_TASK_ID}" --shared-artifacts-dir /tmp/gt_out 2>&1 | tail -3 || echo FEATURE_METRICS_WARN
           cp "/tmp/gt/${GT_TASK_ID}/gt_feature_metrics_${GT_TASK_ID}.json" trial_results/ 2>/dev/null || true
           cp "/tmp/gt/${GT_TASK_ID}/gt_feature_metrics_${GT_TASK_ID}.md"   trial_results/ 2>/dev/null || true
           cp "/tmp/gt/gt_run_metrics_${GT_TASK_ID}.json"     trial_results/gt_artifacts/ 2>/dev/null || true
