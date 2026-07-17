@@ -5356,6 +5356,28 @@ def _l3b_content_key(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
+def _l3b_pure_verdict(caller_blocks: int, noncaller_blocks: int, n_lines: int) -> bool:
+    """B-LINH H1 (2026-07-16): the FAIL-CLOSED composition verdict for the polymorphic
+    l3b.evidence lane. Decided at COMPOSITION time from WHICH builders contributed (the caller
+    / non-caller block COUNTS + the total appended-line count), never by sniffing rendered bytes.
+
+    PURE caller_contract iff ALL of:
+      (a) ``caller_blocks >= 1``       — at least one caller-direction contract block, AND
+      (b) ``noncaller_blocks == 0``    — zero callee/sibling (non-caller_contract) blocks, AND
+      (c) ``caller_blocks + noncaller_blocks == n_lines`` — the COVERAGE GUARD: every appended
+          line was classified into exactly one class.
+
+    (c) is the hardening over B-LIN REV2 (which used two booleans and so failed OPEN): a FUTURE
+    ``_evidence_body`` builder that appends a line WITHOUT incrementing either counter leaves the
+    classified sum below ``n_lines`` -> NON-pure. A new/unreviewed contributor is therefore treated
+    as non-caller until someone explicitly classifies it (new == non-pure by default). Empty
+    payload (n_lines == 0) -> False (quiet)."""
+    return bool(
+        caller_blocks >= 1
+        and noncaller_blocks == 0
+        and (caller_blocks + noncaller_blocks) == n_lines)
+
+
 def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
     """Build the <gt-evidence> body from graph.db (pure SQL, cross-language).
 
@@ -5372,8 +5394,18 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
     # ends up built EXCLUSIVELY from caller-direction contract blocks (see the flags below).
     global _l3b_last_pure_caller
     _l3b_last_pure_caller = False
-    _saw_caller_block = False       # >=1 caller-direction contract block ([CALLERS] / caller [WITNESS])
-    _saw_noncaller_block = False    # any callee contract / callee [WITNESS] / [SIBLINGS] block
+    # B-LINH H1 (2026-07-16): COUNT contributions per class (not booleans) so the verdict can
+    # fail CLOSED. The four current contributor sites below each classify EVERY line they append:
+    #   (1) _edit_target_callee_contracts -> non-caller;
+    #   (2) _resolved_witnesses_for_file  -> caller / non-caller by direction;
+    #   (3) _caller_contract_for_file [CALLERS] -> caller;
+    #   (4) _sibling_context [SIBLINGS]         -> non-caller.
+    # A FUTURE _evidence_body builder that appends a line WITHOUT incrementing either counter
+    # leaves (_caller_blocks + _noncaller_blocks) < len(lines); the coverage guard in the verdict
+    # below then classifies the whole payload NON-pure until someone explicitly classifies the new
+    # block. New == non-pure by default (conservative) — the exact fail-open class REV1 bounced.
+    _caller_blocks = 0       # caller-direction contract blocks ([CALLERS] / caller [WITNESS])
+    _noncaller_blocks = 0    # callee contracts / callee [WITNESS] / [SIBLINGS] (non-caller_contract)
     # 2026-06-10 fact-filter: a vendored/minified/generated file gets NO
     # evidence at all (correct-or-quiet — its edges are not facts).
     if _is_delivery_excluded(rel, root):
@@ -5411,7 +5443,7 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
                                                     repo_root=code_root):
                 if cl not in lines:
                     lines.append(cl)
-                    _saw_noncaller_block = True  # a callee contract is NOT caller_contract
+                    _noncaller_blocks += 1  # a callee contract is NOT caller_contract
         # Resolved cross-file witnesses (caller + callee FACTS) for both kinds.
         for w in _resolved_witnesses_for_file(con, dbrel, code_root, max_each=2):
             arrow = "called by" if w["direction"] == "caller" else "calls"
@@ -5428,9 +5460,9 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
                 # a caller-direction witness ("X called by -> ...") is caller_contract; a
                 # callee-direction witness ("X calls -> ...") is a def/usage fact, not caller.
                 if w["direction"] == "caller":
-                    _saw_caller_block = True
+                    _caller_blocks += 1
                 else:
-                    _saw_noncaller_block = True
+                    _noncaller_blocks += 1
         # Caller-contract line for the viewed file (facts-first, unverified hint
         # only when no fact exists). Mainly meaningful on a view.
         if kind == "post_view":
@@ -5439,13 +5471,13 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
                 ln = f"[CALLERS] {cc}"
                 if ln not in lines:
                     lines.append(ln)
-                    _saw_caller_block = True  # caller contract = caller-direction
+                    _caller_blocks += 1  # caller contract = caller-direction
             sib = _sibling_context(con, dbrel, func_names)
             if sib:
                 ln = f"[SIBLINGS] {sib}"
                 if ln not in lines:
                     lines.append(ln)
-                    _saw_noncaller_block = True  # siblings have NO registered fact class
+                    _noncaller_blocks += 1  # siblings have NO registered fact class
     except Exception:  # noqa: BLE001 -- correct-or-quiet
         return ""
     finally:
@@ -5453,10 +5485,12 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
             con.close()
         except Exception:  # noqa: BLE001
             pass
-    # B-LIN REV2 verdict: PURE caller_contract iff >=1 caller-direction block AND zero
-    # non-caller blocks. Conservative — any callee/sibling contribution disqualifies the
-    # whole (single, sealed) payload from a caller_contract stamp.
-    _l3b_last_pure_caller = bool(_saw_caller_block and not _saw_noncaller_block)
+    # B-LIN REV2 + B-LINH H1 verdict (FAIL-CLOSED, see _l3b_pure_verdict): pure caller_contract
+    # iff >=1 caller block, zero non-caller blocks, AND every appended line was classified (the
+    # coverage guard). Truncation-safe: a pure verdict means every appended line is a caller block,
+    # so lines[:6] keeps only caller blocks and cannot flip purity.
+    _l3b_last_pure_caller = _l3b_pure_verdict(
+        _caller_blocks, _noncaller_blocks, len(lines))
     return "\n".join(lines[:6]).strip()
 
 
@@ -12195,9 +12229,46 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 if _psy:
                     _ledger_mark_answered(_norm_stem(_psy), text)
             _ledger_note_delivery(kind, cmd, subject_path)  # S-1: carry the target
+            # B-LINH C1 (2026-07-16): re-key the l3b pure-caller verdict onto the FINAL delivered
+            # bytes at the true final-bytes point (the same `text` the seal + gate + ledger all use
+            # below — mirroring how the seal stamps identity from the shipped bytes). The build-time
+            # verdict was recorded in ``_evidence`` keyed by the UN-mutated payload; any pre-gate
+            # text mutation (today: GT_SS_PROVENANCE line-filtering at ~:12084) changes the bytes, so
+            # the gate's hash lookup — which keys on THIS final ``text`` — would MISS and a genuinely
+            # pure payload would silently never type (fail-closed but DEAD; the wave-2 hole). The
+            # provenance filter only DROPS lines (``_ss_provenance_filter`` keeps a subset, never
+            # transforms), so a filtered pure-caller payload is STILL exclusively caller-direction =>
+            # still pure; carry the verdict to the final key. Guarded on the pre-mutation original
+            # BEING in the pure set, so a NON-pure original (never in the set) can never be
+            # false-typed — the gate invariant holds. No-op when text is unmutated. This point is
+            # after every pre-gate mutation, so it is robust to any future mutation site too.
+            if (kind == "l3b.evidence" and text != _provenance_original
+                    and _l3b_content_key(_provenance_original) in _l3b_pure_caller_hashes):
+                _l3b_pure_caller_hashes.add(_l3b_content_key(text))
             _delivery_extra = _lane_delivery_extra(
                 kind, text, subject_path, item_event, lineage=item_lineage,
                 identity=item_identity)
+            # B-LINH observability (2026-07-16): stamp the l3b composition verdict on the DELIVERED
+            # runtime-ledger row so an offline reader can distinguish the three outcomes that were
+            # previously indistinguishable (wave-2: 3 delivered l3b rows, 0 typed, cause unknown):
+            #   "typed"            — pure caller-direction payload, lineage attached;
+            #   "pure_gate_missed" — pure at composition but lineage NOT attached (a real gate
+            #                        miss: e.g. build_lineage engine absent, or a future
+            #                        unre-keyed mutation) — the DEAD case C1 closes for provenance;
+            #   "non_pure"         — mixed/callee/sibling (correct-or-quiet, never eligible).
+            # Host-side ledger column only (additive ``extra``); the seal is over ``content`` (model
+            # bytes), never ``extra`` -> byte-identical to the model. Named distinctly from the
+            # brief manifest's ``lineage_status`` (gt_headless_runner) to avoid reader ambiguity.
+            if kind == "l3b.evidence":
+                _l3b_typed = bool(_delivery_extra and _delivery_extra.get("lineage_schema"))
+                if _l3b_typed:
+                    _l3b_comp = "typed"
+                elif _l3b_content_key(text) in _l3b_pure_caller_hashes:
+                    _l3b_comp = "pure_gate_missed"
+                else:
+                    _l3b_comp = "non_pure"
+                _delivery_extra = dict(_delivery_extra or {})
+                _delivery_extra["lineage_composition"] = _l3b_comp
             _seal_lane_delivery(
                 kind, text, subject_path, base_output=_base_out,
                 producer_text=_provenance_original, identity_text=text,
@@ -12281,8 +12352,27 @@ def _commit_prepared_lane(
         if pattern:
             _ledger_mark_answered(_norm_stem(pattern), text)
     _ledger_note_delivery(kind, cmd, krel or "")
+    # B-LINH C1 (arbiter path, 2026-07-16): mirror the main-loop re-key. The batch preparer
+    # applied GT_SS_PROVENANCE to decision["payload"] before freezing (see :14267), so the frozen
+    # ``text`` here can differ from the build-time key recorded in ``_evidence``. Re-key the pure
+    # verdict onto the final payload before the gate reads it below. Same fail-closed invariant:
+    # only an already-pure original propagates; a non-pure original is never in the set. No-op when
+    # unmutated (``provenance_original`` absent -> == text).
+    _l3b_prov_orig = decision.get("provenance_original", text)
+    if (kind == "l3b.evidence" and text != _l3b_prov_orig
+            and _l3b_content_key(_l3b_prov_orig) in _l3b_pure_caller_hashes):
+        _l3b_pure_caller_hashes.add(_l3b_content_key(text))
     delivery_extra = _lane_delivery_extra(
         kind, text, krel or "", event, lineage=lineage, identity=identity)
+    # B-LINH observability (arbiter path): stamp the l3b composition verdict, mirroring the
+    # main loop so offline readers see the same distinguishability on arbiter-delivered rows.
+    if kind == "l3b.evidence":
+        _l3b_typed = bool(delivery_extra and delivery_extra.get("lineage_schema"))
+        delivery_extra = dict(delivery_extra or {})
+        delivery_extra["lineage_composition"] = (
+            "typed" if _l3b_typed
+            else "pure_gate_missed"
+            if _l3b_content_key(text) in _l3b_pure_caller_hashes else "non_pure")
     _seal_lane_delivery(
         kind, shipped_suffix, krel or "", base_output=base_output,
         producer_text=decision.get("provenance_original", text),
