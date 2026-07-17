@@ -351,6 +351,7 @@ def _is_generic_symbol(sym: str) -> bool:
 
 from groundtruth.delivery.path_policy import is_generated as _is_generated
 from groundtruth.delivery.path_policy import is_test_path as _is_test_path_pp
+from groundtruth.delivery.path_policy import is_vendored_path as _is_vendored_path_pp
 
 
 # Test-file detection is delegated to the CANONICAL segment-based predicate
@@ -3867,6 +3868,18 @@ def localize(
         fp = c.file_path
         if _is_generated(fp):
             return 2
+        # W3 FIX 3 (name-index false-positive / vendored-asset demote): a VENDORED web asset
+        # (static/, vendor/, contrib assets, minified .min.js/.css — path_policy.is_vendored_path)
+        # can name-match ONE issue token inside a huge minified library and, on its hub in-degree,
+        # out-rank real source (measured: privacyidea static/contrib/js/jquery.js — deg=736 hub,
+        # lex=1 — ranked #1 while the gold eventhandler stayed at ~19). This is exactly the
+        # "hub demotion" lever BRIEFING §3/§4 names as CORRECT (NOT graph-reach). The existing
+        # strata only caught generated-suffix + test dirs, leaving vendored assets un-sunk.
+        # Harm-reduction / correct-or-quiet: no real-source gold is ever under a vendored path,
+        # so this can only remove noise. Uses the EXISTING policy predicate (no new heuristic).
+        # Call-time flag (default OFF → byte-identical; kill-switch = keep OFF; ship = "1").
+        if os.environ.get("GT_LOC_VENDOR_DEMOTE", "0") == "1" and _is_vendored_path_pp(fp):
+            return 1
         # B-Finding2 (Fable LIPI): use the CANONICAL segment-based test predicate
         # (path_policy.is_test_path) — the same one the brief-render filter uses — NOT a local
         # substring predicate. The old local `_is_test_file` still matched "testing/" as a
