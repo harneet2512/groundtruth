@@ -431,14 +431,21 @@ def render_ss_submit_red(test_command: str) -> str:
     FAIL, rationalized it away, and submitted a clean run). Native pre-commit/CI shape, ZERO
     ``<gt-*>`` tag.
 
-    LEAK-SAFE BY CONTRACT: the caller passes ONLY the agent's own observed test COMMAND (the
-    string the agent itself typed and already saw fail) — NEVER a graph/gold test name. This
-    renderer echoes that command inside a hook-failure block; it mints no identity of its own.
-    Correct-or-quiet: no command -> "" (the gate then stays silent)."""
+    LEAK-SAFE BY ENFORCEMENT (W5, live leak run 29594276655): the caller passes the agent's
+    own observed test COMMAND — but that command essentially always NAMES the failing test
+    file (``pytest tests/x/test_y.py``), and a hidden-test FILE identity on a GT-delivered
+    surface violates the structural leak=0 invariant even when self-acquired (both live
+    firings, haystack-8997 + llama-factory-7505, leaked exactly this way). So the echoed
+    command now passes the SAME ``_final_scrub`` firewall every sibling renderer uses —
+    the test-path token becomes ``<test>`` while the RED-status signal survives (the agent
+    has its own concrete command in its history). Belt: if identity still survives the
+    scrub, the renderer goes silent rather than leak (correct-or-quiet)."""
     cmd = (test_command or "").strip()
     if not cmd:
         return ""
-    cmd = _tail(cmd, 200)
+    cmd = _final_scrub(_tail(cmd, 200))
+    if contains_test_identity(cmd):
+        return ""
     return (
         "pre-commit hook failed:\n"
         f"pre-submit check: `{cmd}` was last observed FAILING and never re-run green\n"

@@ -95,11 +95,17 @@ def test_differential_delivers_on_assertion_when_base_green(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# RED-first #2: covering test red on BOTH base and current -> stay QUIET
-#   (pre-existing failure; kills the false-block vector).
+# RED-first #2 (contract UPDATED by W2a, e2abece00): covering test red on BOTH
+# base and current, failing the SAME named test -> the UNRESOLVED-TARGET shape
+# (a locally-green-but-incomplete fix) -> ATTRIBUTED via method
+# "unresolved_covering". The pre-W2a expectation (quiet on any base-red) let
+# incomplete fixes submit unchallenged (ipython-14798 / beets-5457 class); this
+# test was landed stale and caught by the full-suite run on 2026-07-17.
+# Quiet is still the verdict when the base-red is a DIFFERENT named failure
+# (no overlap -> not the covered target) — pinned below.
 # ---------------------------------------------------------------------------
 @_needs_git_pytest
-def test_differential_quiet_on_preexisting_failure(tmp_path: Path):
+def test_preexisting_same_name_failure_is_unresolved_covering(tmp_path: Path):
     repo = tmp_path / "r"
     repo.mkdir()
     _git_repo(repo, {
@@ -110,17 +116,49 @@ def test_differential_quiet_on_preexisting_failure(tmp_path: Path):
                 assert foo() == 2
         """),
     })
-    # working-tree edit is still wrong -> current RED too (unrelated to the failure)
+    # working-tree edit is still wrong -> current RED too, SAME failing test name
     (repo / "mod.py").write_text("def foo():\n    return 3\n")
 
     cres = cr.run_covering_tests(str(repo), ["test_mod.py"])
     assert cres["verdict"] == "fail", cres
 
-    # base is ALSO red -> the edit did not cause this -> NOT attributed -> quiet.
-    assert cr.is_red_attributable(
+    att = cr.attribute_covering_red(
         cres, {"mod.py"}, test_files=["test_mod.py"],
         repo_root=str(repo), covering_files=["test_mod.py"],
-    ) is False
+    )
+    assert att.attributed is True
+    assert att.method == "unresolved_covering"
+    assert att.base_verdict == "fail"
+
+
+@_needs_git_pytest
+def test_preexisting_different_name_failure_stays_quiet(tmp_path: Path):
+    # Base-red on a DIFFERENT named test than the current red -> no overlap ->
+    # NOT the covered target -> unattributed (fail toward quiet, W2a invariant ②).
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _git_repo(repo, {
+        "mod.py": "def foo():\n    return 1\ndef bar():\n    return 1\n",
+        "test_mod.py": textwrap.dedent("""
+            from mod import foo, bar
+            def test_bar():
+                assert bar() == 2
+        """),
+    })
+    # The edit rewrites the test file's target set: current red is test_foo only.
+    (repo / "test_mod.py").write_text(textwrap.dedent("""
+        from mod import foo, bar
+        def test_foo():
+            assert foo() == 2
+    """))
+    cres = cr.run_covering_tests(str(repo), ["test_mod.py"])
+    assert cres["verdict"] == "fail", cres
+
+    att = cr.attribute_covering_red(
+        cres, {"mod.py"}, test_files=["test_mod.py"],
+        repo_root=str(repo), covering_files=["test_mod.py"],
+    )
+    assert att.attributed is False
 
 
 # ---------------------------------------------------------------------------
