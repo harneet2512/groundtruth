@@ -2758,12 +2758,21 @@ def _canonical_task_features(
     missing_feature_inputs = sorted(
         item for item in acq_missing + perf_missing if "." in item
     )
+    # Honest-reporting invariant: required_inputs_complete is False whenever EITHER
+    # the artifact-level inputs OR the per-feature (dotted) inputs are missing, so
+    # the flag-bound named list must enumerate BOTH — a False flag with an empty
+    # missing_required_inputs is un-actionable (the culprit is unnamed). The dotted
+    # feature culprits keep their finer-grained missing_feature_inputs breakout too.
+    # This mirrors the downstream convention (visible_audit / control_participation)
+    # where every forced-False also names its culprit in missing_required_inputs.
+    missing_required_inputs.extend(missing_feature_inputs)
+    missing_required_inputs = sorted(set(missing_required_inputs))
     return master, {
         "family_counts": {family: len(names) for family, names in inventory.items()},
         "inventory_count": len(master),
         "inventory_complete": inventory_complete,
-        "required_inputs_complete": not missing_required_inputs and not missing_feature_inputs,
-        "missing_required_inputs": sorted(missing_required_inputs),
+        "required_inputs_complete": not missing_required_inputs,
+        "missing_required_inputs": missing_required_inputs,
         "missing_feature_inputs": missing_feature_inputs,
     }
 

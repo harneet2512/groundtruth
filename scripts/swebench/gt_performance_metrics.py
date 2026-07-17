@@ -1252,8 +1252,17 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
     gold_never_reached = first_gold_view_step is None
 
     edited_set = set(unique_edited)
-    gold_edited_set = edited_set & gold_set
-    gold_viewed_set = set(unique_viewed) & gold_set
+    # Gold membership MUST use the same suffix-tolerant _path_match as _is_gold
+    # (files_to_gold_edit/view above), _compute_edit_quality, scope, and token —
+    # NOT an exact set intersection. A runtime post_edit path normalizes to a
+    # './'-prefixed spelling (e.g. './beetsplug/lyrics.py') that exact `&` misses
+    # while every other section's _path_match matches, so the exact form under-
+    # counted _gold_edited_count to 0 even when gold WAS edited. That split made
+    # build_metric_applicability declare edit_attempts_per_gold/first_edit_correctness
+    # applicable=False while edit_quality carried a real value -> _metric_state
+    # returned "failed" (value present + applicable=False). One matcher, no split.
+    gold_edited_set = {f for f in edited_set if any(_path_match(f, g) for g in gold_set)}
+    gold_viewed_set = {v for v in unique_viewed if any(_path_match(v, g) for g in gold_set)}
 
     n_edited = len(edited_set)
     n_gold = len(gold_set)
