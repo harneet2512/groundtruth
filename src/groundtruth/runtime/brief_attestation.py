@@ -1,0 +1,230 @@
+"""Pure final-attestation factory for the step-0 brief's registry-routed blocks.
+
+The task-start brief is *compound* evidence: one delivery whose fact-bearing blocks
+are each sealed at BLOCK level (``content_sha256_16`` per block, computed over the
+exact delivered block bytes in ``gt_headless_runner._brief_delivery_extra``). The
+localization blocks are registry-routed to the ``v1r_brief`` producer of the
+``localization`` §1 class, so their per-block lineage already carries a
+``producer_registration_match``.  What was missing is the *attestation* leg: an
+immutable :class:`~groundtruth.runtime.producer_attestation.ProducerAttestation`
+bundle bound to a block's exact delivery seal, so that
+:mod:`attestation_join` can populate ``lifecycle.truth_valid``/``authority_valid``
+for the ``localization`` class exactly as it already does for the native lane classes
+(``syntax_result``/``covering_red``/…).
+
+This module is the localization counterpart of :mod:`groundtruth.runtime.lane_attestation`:
+a PURE factory that binds the producer's BUILD-TIME graph re-verification of one ranked
+candidate to that candidate's delivered block seal.  It never renders text, reads a
+repository, persists a file, or changes a model-facing byte — the persist step
+(:func:`groundtruth.runtime.attestation_store.persist_attestation`) is the caller's job,
+and an incomplete/unverified candidate yields an honestly UNMEASURED truth verdict.
+
+The build-time truth basis is the producer's own generation record:
+``witness_verified`` is ``True`` iff the graph localizer produced a VERIFIED graph
+witness for the candidate (``relevance_grade == "VERIFIED"`` — a resolved CALLS/IMPORTS
+edge/node against ``graph.db`` at build time; ``v1r_brief.py`` L5642).  A candidate the
+producer could not verify against the graph is attested UNMEASURED, never PASS.
+
+PURE · DETERMINISTIC · LLM-FREE · stdlib-only · no I/O. Two independent builds from the
+same inputs produce byte-identical :func:`~groundtruth.runtime.producer_attestation.canonical_bytes`.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from typing import Any
+
+from .fact_registry import registration_for, required_event
+from .producer_attestation import (
+    ATTESTATION_SCHEMA,
+    FRESHNESS,
+    PASS,
+    TRUTH,
+    UNMEASURED,
+    ArtifactRef,
+    DecisionBinding,
+    PredicateAttestation,
+    ProducerAttestation,
+    ProofRef,
+    validate,
+)
+
+# The one localization block class this factory attests. Kept explicit (not inferred
+# from a label) so a new brief block class never silently borrows this truth path.
+_LOCALIZATION_EVIDENCE_TYPE = "localization"
+_LOCALIZATION_RUNTIME_PRODUCER = "v1r_brief"
+# The chronological event at which the "which file to open" decision opens: the agent
+# reads the step-0 brief at task_start. (deliver_by / required_event stays search_result.)
+_OPEN_EVENT = "task_start"
+
+_SEAL_RE = re.compile(r"^[0-9a-f]{16}$")
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _canonical(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+@dataclass(frozen=True)
+class FinalAttestationInputs:
+    """A built attestation plus the exact artifact bytes to persist with it.
+
+    Mirrors :class:`groundtruth.runtime.lane_attestation.FinalAttestationInputs` so the
+    same persist call site (``persist_attestation(final.attestation,
+    final.artifact_mapping(), root)``) works unchanged.
+    """
+
+    attestation: ProducerAttestation
+    artifacts: tuple[tuple[str, bytes], ...]
+
+    def artifact_mapping(self) -> dict[str, bytes]:
+        return dict(self.artifacts)
+
+
+def _predicate(
+    kind: str,
+    predicate_id: str,
+    complete: bool,
+    proof_refs: tuple[ProofRef, ...],
+    observation: str,
+) -> PredicateAttestation:
+    return PredicateAttestation(
+        predicate_kind=kind,
+        predicate_id=predicate_id,
+        subject="step-0 brief localization candidate",
+        expectation=(
+            "producer re-verified the candidate node against graph.db at build time "
+            "and it maps 1:1 to the delivered brief block seal"
+        ),
+        observation=observation if complete else "",
+        verdict=PASS if complete else UNMEASURED,
+        proof_refs=proof_refs if complete else (),
+    )
+
+
+def finalize_localization_attestation(
+    *,
+    candidate_id: str,
+    delivery_seal: str,
+    block_content_sha256: str,
+    path: str,
+    rank: int,
+    witness: str,
+    witness_verified: bool,
+    graph_revision: str = "",
+) -> "FinalAttestationInputs | None":
+    """Bind the producer's build-time graph verification of one ranked candidate to its
+    delivered brief-block seal.
+
+    Returns ``None`` when a SOUND binding cannot be formed (a delivery seal that is not
+    16 lower-hex, an empty candidate id, or a ``block_content_sha256`` whose 16-hex
+    prefix is not the delivery seal) — there is no attestation to persist, and the class
+    stays UNMEASURED via the absent join (fail-closed).
+
+    When the binding is sound the attestation is always built; its TRUTH verdict is PASS
+    only when the candidate was graph-verified at build time (``witness_verified`` with a
+    non-empty witness, a non-empty path, and a positive rank) and UNMEASURED otherwise.
+    FRESHNESS is always UNMEASURED here: the delivered block seal proves *what* was
+    delivered, but this factory holds no runtime graph sub-revision proof, so freshness
+    stays honestly dark (the ``submit_refusal`` freshness precedent).
+    """
+    seal = str(delivery_seal or "")
+    full = str(block_content_sha256 or "")
+    cid = str(candidate_id or "")
+    if (
+        _SEAL_RE.match(seal) is None
+        or _FULL_SHA_RE.match(full) is None
+        or full[:16] != seal
+        or not cid.strip()
+    ):
+        return None
+
+    registration = registration_for(_LOCALIZATION_EVIDENCE_TYPE)
+    if registration is None:  # defensive — localization is a registered §1 class
+        return None
+
+    path_str = str(path or "")
+    witness_str = str(witness or "")
+    rank_ok = isinstance(rank, int) and not isinstance(rank, bool) and rank > 0
+    truth_complete = bool(
+        witness_verified is True
+        and path_str.strip()
+        and witness_str.strip()
+        and rank_ok
+    )
+
+    # The producer's own build-time verification record — a SMALL canonical artifact
+    # (never graph.db); its sha256 seals exactly the fields the truth predicate proves.
+    witness_record: dict[str, Any] = {
+        "candidate_id": cid,
+        "path": path_str,
+        "rank": int(rank) if rank_ok else 0,
+        "witness": witness_str,
+        "witness_verified": bool(witness_verified),
+        "block_content_sha256": full,
+    }
+    witness_bytes = _canonical(witness_record)
+    artifact_id = "localization-witness.json"
+    ref = ArtifactRef(
+        kind="localization_witness",
+        artifact_id=artifact_id,
+        sha256=_sha(witness_bytes),
+        revision=f"graph:{graph_revision or 'unversioned'}",
+    )
+    truth_proofs = tuple(sorted((
+        ProofRef("producer_graph_verification", ref, "$.witness_verified"),
+        ProofRef("candidate_path", ref, "$.path"),
+        ProofRef("rank_derivation", ref, "$.rank"),
+    )))
+
+    attestation = ProducerAttestation(
+        schema=ATTESTATION_SCHEMA,
+        evidence_type=_LOCALIZATION_EVIDENCE_TYPE,
+        runtime_producer_id=_LOCALIZATION_RUNTIME_PRODUCER,
+        registered_producer_id=registration.producer,
+        candidate_id=cid,
+        delivery_seal=seal,
+        source_artifacts=(ref,),
+        truth_predicates=(
+            _predicate(
+                TRUTH,
+                "localization:truth",
+                truth_complete,
+                truth_proofs,
+                "graph-verified candidate joins the delivered block seal",
+            ),
+        ),
+        freshness_predicates=(
+            _predicate(FRESHNESS, "localization:freshness", False, (), ""),
+        ),
+        decision=DecisionBinding(
+            decision_key=registration.target_decision,
+            open_event=_OPEN_EVENT,
+            required_event=required_event(_LOCALIZATION_EVIDENCE_TYPE) or "",
+        ),
+    )
+    errors = validate(attestation)
+    if errors:
+        # A build defect (unregistered/producer mismatch) must fail closed, not ship a
+        # malformed bundle. The caller treats None as "no attestation" (correct-or-quiet).
+        return None
+    return FinalAttestationInputs(attestation, ((artifact_id, witness_bytes),))
+
+
+__all__ = [
+    "FinalAttestationInputs",
+    "finalize_localization_attestation",
+]

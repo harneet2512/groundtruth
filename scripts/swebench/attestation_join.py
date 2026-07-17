@@ -87,9 +87,15 @@ _DELIVERED = "delivered"
 #                      — the coherence-collapse steer's blind-overwrite churn count, re-derived
 #                      from the producer's own edit-event ledger to reproduce the delivered
 #                      "rewritten N times" claim (truth+authority measured; freshness honest-dark).
+#   localization    <- v1r_brief        (brief_attestation.finalize_localization_attestation) —
+#                      the step-0 brief's registry-routed localization BLOCK, bound to its
+#                      per-block delivery seal (compound row block_lineage). Truth PASS iff the
+#                      producer graph-verified the candidate at BUILD time (witness_verified);
+#                      freshness honest-dark (no runtime graph sub-revision proof).
 ATTESTED_FACT_CLASSES: tuple[str, ...] = (
     "caller_contract",
     "covering_red",
+    "localization",
     "recovery",
     "signature_delta",
     "submit_refusal",
@@ -323,8 +329,40 @@ def load_attestations(task_dir: str) -> AttestationLoad:
 # --------------------------------------------------------------------------- #
 # The join.
 # --------------------------------------------------------------------------- #
+def _index_block_lineage(row: dict, position: int, index: dict[tuple[str, str], list[int]]) -> None:
+    """Expose a COMPOUND delivered row's per-block seals to the join.
+
+    The task-start brief is one DELIVERED ledger row with no top-level
+    ``(candidate_id, content_sha256_16)`` — its fact-bearing blocks are sealed
+    individually under ``block_lineage`` (``gt_headless_runner._brief_delivery_extra``:
+    each block carries its own ``candidate_id`` and ``content_sha256_16`` over the exact
+    delivered block bytes). Index each such block's identity → the compound row position
+    so a producer attestation sealed to a block (e.g. a ``localization`` brief block) can
+    join it on the SAME exact identity the native lane rows use. Purely additive: a
+    non-compound row (no ``block_lineage``) is unaffected.
+    """
+    blocks = row.get("block_lineage")
+    if not isinstance(blocks, list):
+        return
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        candidate_id = block.get("candidate_id")
+        seal = block.get("content_sha256_16")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            continue
+        if not isinstance(seal, str) or not seal:
+            continue
+        index[(candidate_id, seal)].append(position)
+
+
 def _delivered_row_index(ledger_rows: Iterable[Any]) -> dict[tuple[str, str], list[int]]:
-    """Map ``(candidate_id, content_sha256_16)`` → row indices, DELIVERED rows only."""
+    """Map ``(candidate_id, content_sha256_16)`` → row indices, DELIVERED rows only.
+
+    Indexes both a row's TOP-LEVEL seal identity (native lane rows) and, for a compound
+    delivery (the step-0 brief), every per-block seal under ``block_lineage`` — so a
+    brief-block attestation joins on the exact same identity contract.
+    """
     index: dict[tuple[str, str], list[int]] = defaultdict(list)
     for position, row in enumerate(ledger_rows or []):
         if not isinstance(row, dict):
@@ -332,6 +370,7 @@ def _delivered_row_index(ledger_rows: Iterable[Any]) -> dict[tuple[str, str], li
         outcome = row.get("outcome")
         if not isinstance(outcome, str) or outcome.lower() != _DELIVERED:
             continue
+        _index_block_lineage(row, position, index)
         candidate_id = row.get("candidate_id")
         seal = row.get("content_sha256_16")
         if not isinstance(candidate_id, str) or not candidate_id:

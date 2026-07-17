@@ -151,6 +151,100 @@ def _brief_delivery_extra(e: dict, brief_text: str) -> dict:
         return {}
 
 
+# The producer-attestation store root — MIRRORS gt_mini_patch._attestation_output_root()
+# (the same GT_C_OUT root the native lane / gateway classes persist to), so the grader's
+# load_attestations(task_dir) recursive glob finds brief-block bundles by the SAME mechanism.
+def _brief_attestation_root(e: dict) -> str:
+    return os.path.join(
+        (e.get("GT_C_OUT") or os.environ.get("GT_C_OUT") or "/gt_out"),
+        "producer_attestations",
+    )
+
+
+def _persist_brief_localization_attestations(e: dict, brief_text: str) -> None:
+    """Seal each delivered, graph-verified localization brief BLOCK with an immutable
+    producer attestation joinable to its per-block delivery seal.
+
+    Reads the SAME sealed ``brief_result.json`` the compound lineage row is built from
+    (its ``block_receipts`` give the exact block seal; its ``localization_proof`` gives
+    the producer's build-time graph verification), builds a
+    :func:`groundtruth.runtime.brief_attestation.finalize_localization_attestation`
+    bundle per registered localization block, and atomically persists it to the shared
+    attestation store.  HOST-SIDE, correct-or-quiet: any miss (absent proof, unverified
+    candidate → UNMEASURED, unreadable result, store I/O error) leaves the delivered
+    brief byte-identical and the class honestly unmeasured; it never raises.
+    """
+    brief_path = (e.get("GT_BRIEF_FILE") or "/gt_artifacts/brief.txt").strip()
+    result_path = os.path.join(os.path.dirname(brief_path), "brief_result.json")
+    try:
+        with open(result_path, encoding="utf-8") as fh:
+            result = json.load(fh)
+        if (
+            result.get("schema") != "gt.brief_result.v1"
+            or result.get("brief_text") != brief_text
+        ):
+            return
+        metrics = result.get("metrics") or {}
+        receipts = metrics.get("block_receipts")
+        proofs = metrics.get("localization_proof")
+        if not isinstance(receipts, list) or not isinstance(proofs, list):
+            return
+        from groundtruth.runtime.attestation_store import persist_attestation
+        from groundtruth.runtime.brief_attestation import (
+            finalize_localization_attestation,
+        )
+    except (ImportError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return
+
+    proof_by_candidate: dict[str, dict] = {}
+    for proof in proofs:
+        if not isinstance(proof, dict):
+            continue
+        cid = proof.get("candidate_id")
+        if isinstance(cid, str) and cid and cid not in proof_by_candidate:
+            proof_by_candidate[cid] = proof
+
+    root = _brief_attestation_root(e)
+    for receipt in receipts:
+        if not isinstance(receipt, dict) or receipt.get("fact_class") != "localization":
+            continue
+        candidate_id = receipt.get("candidate_id")
+        full_hash = receipt.get("content_hash")
+        span = receipt.get("char_span")
+        if (
+            not isinstance(candidate_id, str) or not candidate_id
+            or not isinstance(full_hash, str) or len(full_hash) != 64
+            or not isinstance(span, list) or len(span) != 2
+            or not all(isinstance(n, int) and not isinstance(n, bool) for n in span)
+            or span[0] < 0 or span[0] >= span[1] or span[1] > len(brief_text)
+        ):
+            continue
+        # Re-derive the seal from the delivered bytes: the attestation may only bind a
+        # seal that is exactly the delivered block's hash (defence against a stale receipt).
+        block = brief_text[span[0]:span[1]]
+        digest = hashlib.sha256(block.encode("utf-8", "surrogatepass")).hexdigest()
+        if digest != full_hash:
+            continue
+        proof = proof_by_candidate.get(candidate_id)
+        if proof is None:
+            continue
+        try:
+            final = finalize_localization_attestation(
+                candidate_id=candidate_id,
+                delivery_seal=digest[:16],
+                block_content_sha256=digest,
+                path=str(proof.get("path") or ""),
+                rank=proof.get("rank") if isinstance(proof.get("rank"), int) else 0,
+                witness=str(proof.get("witness") or ""),
+                witness_verified=proof.get("witness_verified") is True,
+            )
+            if final is None:
+                continue
+            persist_attestation(final.attestation, final.artifact_mapping(), root)
+        except Exception as exc:  # noqa: BLE001 -- correct-or-quiet host sidecar
+            _bc(f"brief localization attestation skipped ({type(exc).__name__})")
+
+
 def _record_brief_delivery(e: dict, brief_text: str) -> None:
     """Seal the exact step-0 brief at its existing delivery owner.
 
@@ -189,6 +283,9 @@ def _record_brief_delivery(e: dict, brief_text: str) -> None:
         global _BRIEF_LEDGER_WRITE_FAILURES
         _BRIEF_LEDGER_WRITE_FAILURES += 1
         _bc(f"WARN brief delivery seal unavailable ({type(exc).__name__})")
+    # Seal each delivered, graph-verified localization block with a joinable producer
+    # attestation (sidecar only; never changes the delivered brief bytes, correct-or-quiet).
+    _persist_brief_localization_attestations(e, brief_text)
 
 
 def _resolve_task(e: dict) -> str:
