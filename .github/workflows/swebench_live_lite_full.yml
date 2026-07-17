@@ -2090,6 +2090,24 @@ jobs:
           cp trial_results/report.json "$TASK_ARTIFACT_ROOT/report.json" 2>/dev/null || true
           cp trial_results/reward.txt "$TASK_ARTIFACT_ROOT/reward.txt" 2>/dev/null || true
           cp /tmp/gt_out/gt_oracle_events.jsonl "$TASK_ARTIFACT_ROOT/gt_oracle_events_${GT_TASK_ID}.jsonl" 2>/dev/null || true
+          # PRODUCER-ATTESTATION STORE HARVEST (W1a, 2026-07-17). The seam persists immutable
+          # ProducerAttestation bundles to <GT_C_OUT>/producer_attestations — GT_C_OUT is unset
+          # in the docker-run agent container, so it defaults to /gt_out/producer_attestations =
+          # host /tmp/gt_out/producer_attestations (the /gt_out bind-mount). The attestation_join
+          # grader globs task_dir/**/producer_attestations/index/*/entry.json, so the store MUST
+          # be co-located UNDER both graded task dirs: $TASK_ARTIFACT_ROOT (=/tmp/gt/<task>, the
+          # in-workflow gt_feature_metrics run_dir below) AND trial_results/ (uploaded as ll-full-
+          # <task> for offline grading). Without this copy the FACT correct_info join is
+          # structurally impossible — the store never leaves the runner (validation 29553735978:
+          # absent from all 30 harvested artifacts). Audit-only bytes; never model-facing. The
+          # -d guard makes it a no-op on the baseline arm (no attestations persisted).
+          if [ -d /tmp/gt_out/producer_attestations ]; then
+            cp -r /tmp/gt_out/producer_attestations "$TASK_ARTIFACT_ROOT/producer_attestations" 2>/dev/null || true
+            cp -r /tmp/gt_out/producer_attestations trial_results/producer_attestations 2>/dev/null || true
+            echo "producer-attestation store: harvested $(find /tmp/gt_out/producer_attestations -name entry.json 2>/dev/null | wc -l) bundle(s) into task root + trial_results" | tee -a trial_output.log
+          else
+            echo "producer-attestation store: none persisted on /tmp/gt_out (no producer_attestations dir)" | tee -a trial_output.log
+          fi
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
             if [ -s "/tmp/gt_out/gt_runtime_ledger.jsonl" ]; then
               _GT_LEDGER_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${GT_TASK_ID}.jsonl"
