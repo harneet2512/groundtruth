@@ -92,10 +92,16 @@ _DELIVERED = "delivered"
 #                      per-block delivery seal (compound row block_lineage). Truth PASS iff the
 #                      producer graph-verified the candidate at BUILD time (witness_verified);
 #                      freshness honest-dark (no runtime graph sub-revision proof).
+#   newfile_precedent <- change_surface (finalize_newfile_precedent_attestation) — the
+#                      REGISTRATION missing-role precedent, re-derived by re-running
+#                      change_surface's own registration derivation on the producer-captured
+#                      registry bytes (truth+authority measured; freshness MEASURED via the
+#                      captured git commit + blob anchor).
 ATTESTED_FACT_CLASSES: tuple[str, ...] = (
     "caller_contract",
     "covering_red",
     "localization",
+    "newfile_precedent",
     "recovery",
     "signature_delta",
     "submit_refusal",

@@ -140,9 +140,10 @@ try:
 except Exception:  # noqa: BLE001
     parse_stack_traces = None  # type: ignore[assignment]
 try:
-    from groundtruth.pretask.change_surface import detect_change_surface
+    from groundtruth.pretask.change_surface import ROLE_REGISTRATION, detect_change_surface
 except Exception:  # noqa: BLE001
     detect_change_surface = None  # type: ignore[assignment]
+    ROLE_REGISTRATION = "registration"  # type: ignore[assignment]
 try:
     from groundtruth.runtime.patch_delta import analyze_patch_delta
 except Exception:  # noqa: BLE001
@@ -331,6 +332,62 @@ def _change_surface_producer_on() -> bool:
     forward are untouched by this gate and MUST NOT be duplicated/re-added here; a kill-switch
     is not a new capability to enable."""
     return os.environ.get("GT_CHANGE_SURFACE", "1").strip() != "0"
+
+
+# B-NFP (2026-07-16): producer-owned snapshots for the newfile_precedent REGISTRATION claim,
+# captured AT PRODUCTION TIME so the offline attestation can re-derive the delivered precedent
+# from the producer's OWN inputs (the registry bytes + sibling members + a git commit anchor)
+# rather than reconstructing it from the output. Stashed keyed by the delivered candidate id
+# (envelope dedup_key); the seam pops it at the gateway seal site. Byte-identical to delivery:
+# this only records a side-car and NEVER alters the delivered envelope/bytes.
+_NEWFILE_PRECEDENT_SNAPSHOTS: dict = {}
+_NEWFILE_PRECEDENT_SNAPSHOT_CAP = 64
+_REPO_HEAD_CACHE: dict = {}
+
+
+def _repo_head(repo_root: str) -> str:
+    """The repo HEAD commit sha (the freshness commit anchor), or ``""`` when git is
+    unavailable. One bounded ``git rev-parse HEAD`` per repo_root, cached. Correct-or-quiet:
+    any fault yields ``""`` (freshness then stays honestly UNMEASURED)."""
+    if not repo_root:
+        return ""
+    if repo_root in _REPO_HEAD_CACHE:
+        return _REPO_HEAD_CACHE[repo_root]
+    head = ""
+    try:
+        import subprocess
+        proc = subprocess.run(
+            ["git", "-C", repo_root, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        out = (proc.stdout or "").strip()
+        if proc.returncode == 0 and len(out) == 40 and all(
+            c in "0123456789abcdef" for c in out
+        ):
+            head = out
+    except Exception:  # noqa: BLE001 — git absent/slow/erroring is not a signal
+        head = ""
+    _REPO_HEAD_CACHE[repo_root] = head
+    return head
+
+
+def _stash_newfile_precedent_snapshot(candidate_id: str, snapshot) -> None:
+    """Record one producer-owned registration snapshot keyed by the delivered candidate id.
+    Bounded (drops the oldest when full); never raises into the delivery path."""
+    if not candidate_id or snapshot is None:
+        return
+    try:
+        if len(_NEWFILE_PRECEDENT_SNAPSHOTS) >= _NEWFILE_PRECEDENT_SNAPSHOT_CAP:
+            _NEWFILE_PRECEDENT_SNAPSHOTS.pop(next(iter(_NEWFILE_PRECEDENT_SNAPSHOTS)), None)
+        _NEWFILE_PRECEDENT_SNAPSHOTS[candidate_id] = snapshot
+    except Exception:  # noqa: BLE001 — a side-car stash can never break delivery
+        return
+
+
+def pop_newfile_precedent_snapshot(candidate_id: str):
+    """Pop the producer-owned snapshot for a delivered candidate id (the seam calls this at
+    the gateway seal site). ``None`` when none was captured (attestation then not persisted)."""
+    return _NEWFILE_PRECEDENT_SNAPSHOTS.pop(candidate_id, None) if candidate_id else None
 
 
 def _patch_delta_producer_on() -> bool:
@@ -1990,11 +2047,42 @@ def _produce_change_surface(event: ToolEvent, state: GatewayState) -> list[Evide
             continue
         ev_rows = [(m.registration_file, ln) for ln, _ in m.registration_lines] if m.registration_file else []
         body = [ev for ev in m.evidence[:4] if not _body_line_leaky(ev)]
-        out.append(_mk_add(state, event, fact_kind=f"missing_role:{m.role}", target=tgt,
-                           body_lines=body, evidence=ev_rows,
-                           tier=HYPOTHESIS, producer="change_surface", symbol=m.entity,
-                           cap_feature_ids=("GT_CHANGE_SURFACE",)))
+        env = _mk_add(state, event, fact_kind=f"missing_role:{m.role}", target=tgt,
+                      body_lines=body, evidence=ev_rows,
+                      tier=HYPOTHESIS, producer="change_surface", symbol=m.entity,
+                      cap_feature_ids=("GT_CHANGE_SURFACE",))
+        out.append(env)
+        # B-NFP: capture the producer-owned registration snapshot (the exact registry bytes,
+        # sibling members, and git commit anchor the claim derives from) so the offline
+        # attestation can re-run change_surface's OWN derivation on these inputs. Only the
+        # REGISTRATION role carries re-derivable byte evidence; other roles/destinations are
+        # left honestly unattested (UNMEASURED). Byte-identical: never touches ``env``.
+        if m.role == ROLE_REGISTRATION and m.registration_file:
+            _capture_registration_snapshot(res, m, state, env.dedup_key)
     return out
+
+
+def _capture_registration_snapshot(res, missing_role, state, candidate_id: str) -> None:
+    """Build + stash the newfile_precedent registration snapshot for one delivered claim.
+    Correct-or-quiet: any capture fault leaves nothing stashed (no attestation persisted)."""
+    try:
+        from groundtruth.runtime.newfile_precedent_attestation import (
+            build_registration_snapshot)
+        members = next(
+            (g["members"] for g in res.sibling_groups
+             if g.get("registry_file") == missing_role.registration_file),
+            [],
+        )
+        snapshot = build_registration_snapshot(
+            entity=missing_role.entity,
+            registration_file=missing_role.registration_file,
+            members=members,
+            repo_root=state.repo_root,
+            repo_head=_repo_head(state.repo_root),
+        )
+        _stash_newfile_precedent_snapshot(candidate_id, snapshot)
+    except Exception:  # noqa: BLE001 — a side-car capture can never break delivery
+        return
 
 
 def _produce_trace(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:

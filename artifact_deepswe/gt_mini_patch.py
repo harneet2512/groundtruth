@@ -13457,8 +13457,44 @@ def _render_gateway_envelope(render_envelope, envelope, *, native: bool) -> str:
         def_facts_renderer=None if sanitized else _gateway_def_render)
 
 
+def _persist_change_surface_producer_attestation(winner, shipped: str, sealed):
+    """B-NFP: persist newfile_precedent truth for a delivered change_surface REGISTRATION
+    winner, re-deriving the precedent from the producer-owned snapshot captured at production
+    time. Only the registration missing-role is attested (it carries re-derivable byte
+    evidence); destinations + other roles stay honestly UNMEASURED. Pure audit persistence:
+    any fault returns without touching a single delivered byte."""
+    try:
+        evidence_type = str(getattr(winner, "evidence_type", "") or "")
+        if not evidence_type.startswith("missing_role:registration"):
+            return None
+        from groundtruth.runtime.gateway import pop_newfile_precedent_snapshot
+        snapshot = pop_newfile_precedent_snapshot(str(getattr(winner, "dedup_key", "") or ""))
+        if snapshot is None:
+            return None
+        from groundtruth.runtime.attestation_store import persist_attestation
+        from groundtruth.runtime.newfile_precedent_attestation import (
+            finalize_newfile_precedent_attestation)
+        delivery_seal = getattr(sealed, "rendered_bytes_hash", "")[:16]
+        final = finalize_newfile_precedent_attestation(
+            snapshot,
+            evidence_type=evidence_type,
+            delivered_block=shipped,
+            candidate_id=str(getattr(winner, "dedup_key", "") or ""),
+            delivery_seal=delivery_seal,
+        )
+        persist_attestation(
+            final.attestation, final.artifact_mapping(), _attestation_output_root())
+        return final.attestation
+    except Exception:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+        return None
+
+
 def _persist_gateway_producer_attestation(winner, shipped: str, sealed):
     """Persist typed Gateway truth only after the exact envelope wins and seals."""
+    # B-NFP: change_surface winners are attested through the newfile_precedent factory (they
+    # carry no ProducerInputs sidecar, so build_gateway_attestation cannot bind them).
+    if str(getattr(winner, "producer", "") or "") == "change_surface":
+        return _persist_change_surface_producer_attestation(winner, shipped, sealed)
     try:
         from groundtruth.runtime.attestation_store import persist_attestation
         from groundtruth.runtime.fact_registry import required_event
