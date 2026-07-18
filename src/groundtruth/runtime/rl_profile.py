@@ -30,7 +30,7 @@ import os
 import shlex
 import sys
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Mapping, MutableMapping, Optional, Sequence
+from typing import Callable, Iterable, Mapping, Optional, Sequence
 
 # ── The versioned profile registry ───────────────────────────────────────────
 # ``GT_RL_PROFILE=<version>`` -> the coherent member set that version activates.
@@ -173,6 +173,19 @@ _SUPER_MODE_MEMBERS: frozenset[str] = frozenset(
         # not a separately-importable module -> assumed available (never a FALSE abort; flag-off
         # is byte-identical anyway).
         "GT_LOC_RESLOT",          # re-slot — reactive ranked-localization at post-search (D2)
+        # POST_SEARCH master (2026-07-18, Cluster-5 ITEM 0): the MASTER enable for the whole
+        # seam post_search def-partition delivery lattice (gt_mini_patch.py:816 `_POST_SEARCH_ON`
+        # gates _search_localize_decision at :4588 — flag OFF -> the lattice abstains -> Lane A
+        # drops every post_search fact). Its FORM arm GT_POST_SEARCH_NATIVE was already a Profile-1
+        # member (renders the SAME def-facts in the native voice), but WITHOUT this master the
+        # producer never fires, so the form arm rendered nothing and gateway.localization stayed
+        # dead behind it. Adding the master lets the producer COMPETE (arbiter suppression still
+        # applies — this claims no delivery). Default-OFF direct os.environ read (byte-identical
+        # when GT_RL_PROFILE is unset). NO _MEMBER_CAPABILITY_MODULE entry: the capability is a
+        # seam code property (_search_localize_decision + _direct_def_block over graph.db), not a
+        # single importable module -> unmapped-by-convention like GT_LOC_RESLOT's sibling seam
+        # flags (never a FALSE abort; correct-or-quiet at runtime when no db/symbol).
+        "GT_POST_SEARCH",         # ITEM 0 — post_search lattice MASTER enable (form arm's master)
         # SM-3 D7 delivery (2026-07-12): the CompletionCertificate's NOT-CLEAN heads rendered
         # MODEL-FACING at the submit turn — a native pre-commit-hook failure block (one line per
         # failing head) at the dominant-failure decision point (D7). Companion to
@@ -290,10 +303,10 @@ PROFILE_MEMBERS: dict[str, frozenset[str]] = {
 # THE-17 wave activation (2026-07-17, user-ratified "activate and go"), CORRECTED after the
 # 29592317152 preflight refusal (CAP expected 47 rows, got 52): these five are BEHAVIOR
 # FLAGS (fix switches at seam/runtime decision sites), NOT inventory features — Profile-2
-# MEMBERSHIP doubles as the exact-128 CAP inventory (gt_feature_inventory reads
-# PROFILE_MEMBERS["2"]), so they must never join it. They are fanned to "1" by
-# resolve_profile_defaults alongside the members (same setdefault kill-switch semantics at
-# the seam), keeping the inventory at 47 CAP rows. All default-OFF byte-identical when no
+# MEMBERSHIP doubles as the exact-129 CAP inventory (gt_feature_inventory reads
+# PROFILE_MEMBERS["2"]; CAP == 48 after ITEM 0 added GT_POST_SEARCH), so they must never join
+# it. They are fanned to "1" by resolve_profile_defaults alongside the members (same setdefault
+# kill-switch semantics at the seam), keeping the CAP inventory at its member count. All default-OFF byte-identical when no
 # profile is active. GT_LOC_VENDOR_DEMOTE deliberately excluded (semantic-on confirm owed).
 PROFILE_BEHAVIOR_FLAGS: dict[str, frozenset[str]] = {
     "2": frozenset(
@@ -306,6 +319,49 @@ PROFILE_BEHAVIOR_FLAGS: dict[str, frozenset[str]] = {
         }
     ),
 }
+
+# ── Form-arm ↔ master consistency (ITEM 0b, 2026-07-18) ───────────────────────
+# A ``*_NATIVE`` member is the FORM arm of a delivery surface: it re-renders an existing fact
+# in the native (tag-free) voice. SOME surfaces ALSO have a MASTER enable flag that gates whether
+# the underlying producer runs at all — e.g. GT_GATEWAY for GT_GATEWAY_NATIVE, and GT_POST_SEARCH
+# for GT_POST_SEARCH_NATIVE. When such a master exists it MUST be a profile member too, or the
+# form arm renders nothing: the EXACT defect ITEM 0 fixed (GT_POST_SEARCH_NATIVE was an active
+# Profile-2 member while its GT_POST_SEARCH master was absent, so the whole post_search lattice
+# was dead behind it).
+#
+# The OTHER ``*_NATIVE`` arms are PURE form flips with NO separate master gate — their fact is
+# always produced (by the gateway / consensus / brief-gen) and the arm only changes rendering.
+# Those are genuinely master-less and are listed here WITH A REASON so the consistency check does
+# not raise a false gap on them. Deriving the split from a same-prefix master would be ambiguous
+# (GT_CONTRACT_MODE exists but is not GT_CONTRACT's producer gate), so the allowlist is explicit.
+_MASTERLESS_FORM_ARMS: dict[str, str] = {
+    "GT_STEER_NATIVE": "steer/oracle route has no separate GT_STEER producer gate — always produced when the gateway is on",
+    "GT_SCOPE_NATIVE": "pure render of the consensus scope block; no GT_SCOPE producer-enable flag",
+    "GT_CONTRACT_NATIVE": "render form of caller_contract (gated by GT_GATEWAY, not a GT_CONTRACT master)",
+    "GT_EVIDENCE_NATIVE": "evidence rg-row render form of caller_contract; no GT_EVIDENCE producer gate",
+    "GT_NUDGE_NATIVE": "nudge body-frame drop of the recovery/steer fact; no GT_NUDGE producer gate",
+    "GT_BRIEF_NATIVE": "brief obligations-checklist render at brief-gen; no GT_BRIEF producer gate",
+}
+
+
+def form_arm_master_gaps(token: str = "2") -> dict[str, str]:
+    """Every ``*_NATIVE`` FORM-arm member of profile ``token`` whose MASTER enable flag (the
+    name minus the ``_NATIVE`` suffix) is NEITHER also a member NOR a documented master-less
+    form arm (``_MASTERLESS_FORM_ARMS``). A non-empty result is a form-arm/master inconsistency —
+    the ITEM-0 defect class: the profile ships a native render for a producer it never enables.
+
+    PURE + deterministic. Returns ``{form_arm: derived_master_name}`` in sorted order.
+    """
+    members = PROFILE_MEMBERS.get(token, frozenset())
+    gaps: dict[str, str] = {}
+    for name in sorted(members):
+        if not name.endswith("_NATIVE") or name in _MASTERLESS_FORM_ARMS:
+            continue
+        master = name[: -len("_NATIVE")]
+        if master not in members:
+            gaps[name] = master
+    return gaps
+
 
 # Values (case-insensitive, stripped) that count as "OFF" for a member.
 _OFF_VALUES = {"", "0", "false", "no", "off"}

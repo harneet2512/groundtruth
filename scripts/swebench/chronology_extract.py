@@ -39,6 +39,7 @@ from groundtruth.runtime.chronological_adjudication import (
     ON_TIME,
     STEP_BEHIND,
     UNMEASURED,
+    WRONG_EVENT,
     Chronology,
     adjudicate,
 )
@@ -46,12 +47,16 @@ from groundtruth.runtime.fact_registry import EVENTS, registration_for, required
 
 # REUSE the consumption-ledger join machinery (do NOT reinvent a second divergent join).
 from consumption_ledger import (
+    PHYSICAL_DELIVERY_BOUND,
     _action_kind,
+    _assistant_prose,
     _block_entities,
     _emitted_commands,
     _entity_patterns,
     _locate_seal_spans,
     _named_in,
+    build_consumption_ledger,
+    physical_delivery_authority,
 )
 
 TIMING_JOIN_SCHEMA = "gt.chronological_timing_join.v1"
@@ -80,6 +85,11 @@ class ExtractedChronology:
     chronology: Chronology
     timing_verdict: str
     unmeasured_reason: str | None
+    physical_id: str | None = None
+    physical_join_state: str | None = None
+    # D (block-level chronology): set for a per-BLOCK adjudication carved out of a COMPOUND brief
+    # row (one declared_fact_class per block). ``None`` for an ordinary whole-row adjudication.
+    block_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -92,25 +102,6 @@ def _messages(trajectory: Any) -> list[dict]:
     if isinstance(trajectory, list):
         return [m for m in trajectory if isinstance(m, dict)]
     return []
-
-
-def _visible_buffers(messages: list[dict]) -> list[str]:
-    """Per-message model-visible content, exactly as consumption_ledger._build_v2 builds it
-    for the seal join (user/tool/system + function_call_output; everything else empty)."""
-    buffers: list[str] = []
-    for m in messages:
-        role, mtype = m.get("role"), m.get("type")
-        content = m.get("content")
-        buffers.append(
-            content
-            if isinstance(content, str)
-            and (
-                role in ("user", "tool", "system")
-                or mtype == "function_call_output"
-            )
-            else ""
-        )
-    return buffers
 
 
 def _tool_ordinal_to_index(messages: list[dict]) -> dict[int, int]:
@@ -334,50 +325,19 @@ def _row_actual_event(row: dict) -> str:
 # --------------------------------------------------------------------------- #
 # the six index derivations
 # --------------------------------------------------------------------------- #
-def _delivery_index_and_payload(
-    row: dict,
-    messages: list[dict],
-    buffers: list[str],
-    tool_ordinal_index: dict[int, int],
-) -> tuple[int | None, str]:
-    """The exact message index the row was delivered at + its rendered payload bytes.
+def _delivery_entity_patterns(payload: str, file_path: str) -> list:
+    """Word-boundary matchers for every entity the delivered fact names — the ONE entity
+    model shared by native-acquisition, decision-commit, and action detection. Entities are
+    extracted from the delivered payload bytes with consumption_ledger._block_entities
+    (files+symbols); when the payload names none, fall back to the row's file_path (the
+    existing J3 fallback). Reuses consumption_ledger._entity_patterns so there is never a
+    second, divergent matcher."""
+    files, symbols = _block_entities(payload) if payload else (set(), set())
+    if not files and not symbols and file_path:
+        import os as _os
 
-    Primary = the seal join (consumption_ledger._locate_seal_spans): the exact sealed
-    window(s) in the model-visible buffers. When several byte-identical windows exist the
-    home is resolved EXACTLY as consumption_ledger._build_v2 does: the earliest unclaimed
-    window at or after the row's authoritative delivery boundary (iteration -> tool_ordinal
-    message index). Windows only before that boundary are a pre-delivery collision and the
-    row is unjoined (fail-closed). Fallback = the legacy iteration -> tool_ordinal mapping
-    for a seal-less row (which is UNMEASURED anyway — no seal to grade)."""
-    seal = row.get("content_sha256_16")
-    chars = int(row.get("chars_delivered") or 0)
-    if _valid_seal(seal) and chars > 0:
-        candidates: list[tuple[int, tuple[int, int]]] = []
-        for msg_index, content in enumerate(buffers):
-            for span in _locate_seal_spans(content, chars, str(seal)):
-                candidates.append((msg_index, span))
-        if candidates:
-            it_row = row.get("iteration")
-            boundary = (
-                tool_ordinal_index.get(it_row)
-                if isinstance(it_row, int) and not isinstance(it_row, bool)
-                else None
-            )
-            eligible = (
-                [c for c in candidates if c[0] >= boundary]
-                if boundary is not None else candidates
-            )
-            if eligible:
-                mi, (start, end) = eligible[0]
-                return mi, buffers[mi][start:end]
-            return None, ""  # every window precedes the delivery boundary — fail-closed
-    # legacy fallback: iteration is the tool_ordinal (Nth tool message).
-    it = row.get("iteration")
-    if isinstance(it, int) and not isinstance(it, bool):
-        mi = tool_ordinal_index.get(it)
-        if mi is not None:
-            return mi, ""
-    return None, ""
+        files = {file_path, _os.path.basename(file_path)}
+    return _entity_patterns(files, symbols)
 
 
 def _decision_open_index(
@@ -393,56 +353,103 @@ def _decision_open_index(
     return max(prior) if prior else None
 
 
-# B-BND (b4): a few fact classes are COMMITTED by the agent's next DECISION ACT, not by a
-# repository mutation. The honest commit is read from the class's registry receipt predicate:
-#   * ``recovery`` — target_decision "whether to pivot", receipt_predicate
-#     "pivoted_after_steer": a pivot is a CHANGE OF COURSE (re-search / re-read / different
-#     edit), which NEED NOT mutate the tree, so mutation-only under-counts the commit.
-# For this class the commit is the first agent action of ANY kind after the boundary. Every
-# other class keeps the strict mutation predicate (an edit-shaping fact is committed by the
-# edit). NOTE deliberately EXCLUDED: ``submit_refusal`` — its decision "is completion allowed"
-# is committed by the next REPAIR (a mutation: go fix more), NOT any keystroke; widening it to
-# any-action mis-reads a non-repair turn as the commit and flips a genuinely on-time refusal to
-# LATE (measured: gitingest-94 ON_TIME under mutation-commit -> spurious LATE under any-action).
-# Keyed by the canonical registered fact class so a finer evidence_type / alias resolves
-# correctly (e.g. ``coherence_collapse`` -> ``recovery``).
+# A (per-class decision-commit kernel): the honest COMMIT of a delivered fact's decision is
+# class-specific, read from the registry receipt predicate. There are THREE commit modes,
+# keyed by the canonical registered fact class (resolved via ``registration_for(evidence_type)
+# .fact_class`` so a finer evidence_type / alias resolves correctly, e.g. ``coherence_collapse``
+# -> ``recovery``, ``trace_frame`` -> ``localization``):
+#
+#   * MUTATION commit — an EDIT-shaping fact is committed by the edit it shapes: the first later
+#     assistant message emitting a ``_action_kind=='mutation'`` command that NAMES a delivered
+#     payload entity. ``obligations`` ALSO accepts a plan-prose branch (its decision is the
+#     initial PLAN, committed when the agent states a plan step naming an obligation subject —
+#     the plan need not mutate the tree first). NOTE ``submit_refusal`` stays mutation-only: its
+#     "is completion allowed" decision is committed by the next REPAIR (a mutation: go fix more),
+#     NEVER any keystroke — widening it to any-action mis-reads a non-repair turn as the commit
+#     and flips a genuinely on-time refusal to LATE (measured: gitingest-94 ON_TIME under
+#     mutation-commit -> spurious LATE under any-action).
+#   * OPEN commit — a LOCALIZATION/def-inspection fact's decision ("which file to open" /
+#     "which def to inspect") is committed the moment the agent OPENS/READS the ranked or
+#     partitioned file: the first later assistant command that is a PASSIVE open/read/view
+#     (``_action_kind(cmd) is None``) naming a delivered entity. This reuses the SAME passive
+#     test as :func:`_native_acquisition_index` (do NOT reinvent it).
+#   * PIVOT commit — ``recovery`` (receipt ``pivoted_after_steer``) is a CHANGE OF COURSE
+#     (re-search / re-read / different edit) which need not mutate the tree, so the commit is
+#     the first later assistant message emitting a command of ANY kind.
+_MUTATION_COMMIT_CLASSES: frozenset[str] = frozenset({
+    "caller_contract",
+    "syntax_result",
+    "signature_delta",
+    "covering_red",
+    "submit_refusal",
+    "newfile_precedent",
+    "obligations",
+})
+_OPEN_COMMIT_CLASSES: frozenset[str] = frozenset({"localization", "def_partition"})
 _PIVOT_COMMIT_CLASSES: frozenset[str] = frozenset({"recovery"})
+
+
+def _commit_class(evidence_type: str | None) -> str | None:
+    """The row's canonical registered fact class (the key the commit-mode sets are keyed by),
+    or ``None`` when it resolves to no registered class (fail-closed)."""
+    reg = registration_for(evidence_type) if evidence_type else None
+    return reg.fact_class if reg is not None else None
 
 
 def _is_pivot_commit(evidence_type: str | None) -> bool:
     """True iff the row's canonical fact class commits its decision by the next agent ACT (a
-    pivot/course change) rather than a repository mutation — read from the registry (b4)."""
-    reg = registration_for(evidence_type) if evidence_type else None
-    return reg is not None and reg.fact_class in _PIVOT_COMMIT_CLASSES
+    pivot/course change) rather than a repository mutation — read from the registry."""
+    return _commit_class(evidence_type) in _PIVOT_COMMIT_CLASSES
 
 
 def _decision_commit_index(
     messages: list[dict],
     decision_open_index: int | None,
     evidence_type: str | None = None,
+    pats: list | None = None,
 ) -> int | None:
     """The message index where the agent COMMITTED the row's decision after the boundary.
 
-    Default (edit-shaping facts): the first assistant message strictly after
-    ``decision_open_index`` emitting a repository-mutating command
-    (``consumption_ledger._action_kind == 'mutation'``); reads/searches/views do not change
-    state. B-BND (b4): for a PIVOT class (:func:`_is_pivot_commit` — e.g. ``recovery``, whose
-    receipt is ``pivoted_after_steer``) the commit is the first assistant message emitting a
-    command of ANY kind, because a pivot is a change of course that need not mutate the tree.
-    ``None`` (fail-closed) when the decision was never committed."""
+    A (per-class kernel): the commit test is chosen by the row's canonical fact class
+    (:data:`_MUTATION_COMMIT_CLASSES` / :data:`_OPEN_COMMIT_CLASSES` /
+    :data:`_PIVOT_COMMIT_CLASSES`). ``pats`` are the delivered-entity matchers
+    (:func:`_delivery_entity_patterns`); a mutation/open commit must NAME a delivered entity
+    (when ``pats`` is empty — no entity could be extracted — the entity gate is skipped so the
+    older behaviour is preserved). ``None`` (fail-closed) when the decision was never committed.
+    """
     if decision_open_index is None:
         return None
-    pivot = _is_pivot_commit(evidence_type)
+    fclass = _commit_class(evidence_type)
+    pats = pats or []
+
+    def _names(text: str) -> bool:
+        # Entity gate: require a delivered entity when we have patterns; when none could be
+        # extracted, do not block the commit (fail-open on the entity gate only).
+        return (not pats) or _named_in(text, pats)
+
     for j in range(decision_open_index + 1, len(messages)):
-        if messages[j].get("role") != "assistant":
+        msg = messages[j]
+        if msg.get("role") != "assistant":
             continue
-        cmds = _emitted_commands(messages[j])
-        if pivot:
+        cmds = _emitted_commands(msg)
+        if fclass in _PIVOT_COMMIT_CLASSES:
             if cmds:  # any agent action commits a pivot/course-change decision
                 return j
             continue
+        if fclass in _OPEN_COMMIT_CLASSES:
+            # first PASSIVE open/read/view naming a delivered (ranked/partitioned) entity —
+            # the SAME passive predicate _native_acquisition_index uses.
+            for cmd in cmds:
+                if _action_kind(cmd) is None and _named_in(cmd, pats):
+                    return j
+            continue
+        # MUTATION commit (default + _MUTATION_COMMIT_CLASSES): the first mutation naming a
+        # delivered entity. obligations additionally accepts a plan-prose branch: the first
+        # assistant prose naming an obligation subject from the delivered block.
+        if fclass == "obligations" and pats and _named_in(_assistant_prose(msg), pats):
+            return j
         for cmd in cmds:
-            if _action_kind(cmd) == "mutation":
+            if _action_kind(cmd) == "mutation" and _names(cmd):
                 return j
     return None
 
@@ -457,12 +464,7 @@ def _native_acquisition_index(
     ``None`` when the agent did not self-acquire the fact first."""
     if delivery_index is None:
         return None
-    files, symbols = _block_entities(payload) if payload else (set(), set())
-    if not files and not symbols and file_path:
-        import os as _os
-
-        files = {file_path, _os.path.basename(file_path)}
-    pats = _entity_patterns(files, symbols)
+    pats = _delivery_entity_patterns(payload, file_path)
     if not pats:
         return None
     for j in range(0, delivery_index):
@@ -507,12 +509,7 @@ def _action_index(
     only the causal fair-probe branch; it never alters the timing verdict.)"""
     if delivery_index is None:
         return None
-    files, symbols = _block_entities(payload) if payload else (set(), set())
-    if not files and not symbols and file_path:
-        import os as _os
-
-        files = {file_path, _os.path.basename(file_path)}
-    pats = _entity_patterns(files, symbols)
+    pats = _delivery_entity_patterns(payload, file_path)
     if not pats:
         return None
     for j in range(delivery_index + 1, len(messages)):
@@ -533,10 +530,13 @@ def _unmeasured_reason(
     decision_commit_index: int | None,
     actual_event: str,
     verdict: str,
+    physical_join_reason: str | None = None,
 ) -> str | None:
     """The FIRST missing join that made a row UNMEASURED (observability only)."""
     if verdict != UNMEASURED:
         return None
+    if physical_join_reason:
+        return physical_join_reason
     if not _valid_seal(seal):
         return "no_delivery_seal"
     if registration_for(evidence_type) is None or required_event(evidence_type) is None:
@@ -553,6 +553,120 @@ def _unmeasured_reason(
 
 
 # --------------------------------------------------------------------------- #
+# E (logical-clock + binding assertions)
+# --------------------------------------------------------------------------- #
+def _binding_delivery_consistent(
+    row: dict,
+    delivery_index: int | None,
+    tool_ordinal_index: dict[int, int],
+) -> tuple[bool, str | None]:
+    """E (binding defense-in-depth): a delivered row's ``observation_binding`` names the
+    observation it was rendered into (``batch_start_iteration``). Assert the physical delivery
+    landed AT-OR-AFTER that observation's message — a delivery that precedes its own binding
+    observation is an impossible ordering (the seal joined bytes to a message BEFORE the
+    observation that produced them). Returns ``(False, reason)`` ONLY on that proven
+    inconsistency; otherwise ``(True, None)``. Additive + fail-safe: absent binding / absent
+    iteration mapping / unjoined delivery -> ``(True, None)`` (never weakens the seal join)."""
+    if delivery_index is None:
+        return True, None
+    binding = row.get("observation_binding")
+    if not isinstance(binding, dict):
+        return True, None
+    it = binding.get("batch_start_iteration")
+    if not isinstance(it, int) or isinstance(it, bool):
+        return True, None
+    obs_msg = tool_ordinal_index.get(it)
+    if obs_msg is None:
+        return True, None
+    if delivery_index < obs_msg:
+        return False, "observation_binding_precedes_delivery"
+    return True, None
+
+
+# --------------------------------------------------------------------------- #
+# per-delivery adjudication core (shared by the whole-row and per-block paths)
+# --------------------------------------------------------------------------- #
+def _adjudicate_delivery(
+    *,
+    row_index: int,
+    evidence_type: str,
+    fact_class: str | None,
+    actual_event: str,
+    seal_str: str,
+    delivery_index: int | None,
+    payload: str,
+    file_path: str,
+    physical_state: str | None,
+    physical_id: str | None,
+    physical_reason: str | None,
+    binding_reason: str | None,
+    block_id: str | None,
+    messages: list[dict],
+    boundaries: dict[str, list[int]],
+    ledger_rows: list[dict],
+    tool_ordinal_index: dict[int, int],
+) -> ExtractedChronology:
+    """Build one delivery's six-index chronology and its adjudicated timing verdict.
+
+    ``binding_reason`` (E) forces UNMEASURED when the observation-binding assertion failed.
+    ``block_id`` (D) is set for a per-block adjudication of a compound brief."""
+    required = required_event(evidence_type)
+    # A: the ONE entity model — decision-commit, native-acquisition, and action all match the
+    # SAME delivered-entity patterns.
+    pats = _delivery_entity_patterns(payload, file_path)
+    decision_open = _decision_open_index(required, delivery_index, boundaries)
+    decision_commit = _decision_commit_index(messages, decision_open, evidence_type, pats)
+    native_acq = _native_acquisition_index(messages, delivery_index, payload, file_path)
+    ack_index = _acknowledgment_index(seal_str, ledger_rows, tool_ordinal_index)
+    act_index = _action_index(messages, delivery_index, payload, file_path)
+
+    chronology = Chronology(
+        decision_open_index=decision_open,
+        delivery_index=delivery_index,
+        decision_commit_index=decision_commit,
+        native_acquisition_index=native_acq,
+        acknowledgment_index=ack_index,
+        action_index=act_index,
+    )
+
+    if binding_reason is not None:
+        verdict = UNMEASURED  # E: proven observation-binding inconsistency -> fail closed
+    elif _valid_seal(seal_str):
+        verdict = adjudicate(
+            evidence_type=evidence_type,
+            actual_event=actual_event,
+            delivery_seal=seal_str,
+            chronology=chronology,
+        ).timing_verdict
+    else:
+        verdict = UNMEASURED  # no seal to grade -> fail-closed
+
+    reason = _unmeasured_reason(
+        seal=seal_str,
+        evidence_type=evidence_type,
+        delivery_index=delivery_index,
+        decision_open_index=decision_open,
+        decision_commit_index=decision_commit,
+        actual_event=actual_event,
+        verdict=verdict,
+        physical_join_reason=binding_reason or physical_reason,
+    )
+    return ExtractedChronology(
+        ledger_row_index=row_index,
+        evidence_type=evidence_type,
+        fact_class=fact_class,
+        delivery_seal=seal_str,
+        actual_event=actual_event,
+        chronology=chronology,
+        timing_verdict=verdict,
+        unmeasured_reason=reason,
+        physical_id=physical_id,
+        physical_join_state=physical_state,
+        block_id=block_id,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # public API
 # --------------------------------------------------------------------------- #
 def extract_chronologies(
@@ -565,8 +679,12 @@ def extract_chronologies(
     exact message index or ``None``; a missing join is ``None`` so ``adjudicate`` returns
     ``UNMEASURED`` (fail-closed by construction)."""
     messages = _messages(trajectory)
-    buffers = _visible_buffers(messages)
     tool_ordinal_index = _tool_ordinal_to_index(messages)
+    consumption = build_consumption_ledger(
+        trajectory, runtime_ledger_rows=ledger_rows,
+    )
+    physical_authority = physical_delivery_authority(consumption)
+    physical_deliveries = physical_authority.get("deliveries", {})
     # B-BND (b1/b3): reconcile the boundary set with the SEAM's own recorded submit/edit events.
     boundaries = _boundary_indices(messages, ledger_rows, tool_ordinal_index)
 
@@ -584,67 +702,158 @@ def extract_chronologies(
         seal_str = str(seal) if isinstance(seal, str) else ""
         file_path = str(row.get("file_path") or "")
 
-        delivery_index, payload = _delivery_index_and_payload(
-            row, messages, buffers, tool_ordinal_index
+        physical = physical_deliveries.get(str(row_index), {})
+        physical_state = (
+            physical.get("state") if isinstance(physical, dict) else None
         )
-        required = required_event(evidence_type)
-        decision_open = _decision_open_index(required, delivery_index, boundaries)
-        decision_commit = _decision_commit_index(messages, decision_open, evidence_type)
-        native_acq = _native_acquisition_index(
-            messages, delivery_index, payload, file_path
-        )
-        ack_index = _acknowledgment_index(seal_str, ledger_rows, tool_ordinal_index)
-        act_index = _action_index(messages, delivery_index, payload, file_path)
-
-        chronology = Chronology(
-            decision_open_index=decision_open,
-            delivery_index=delivery_index,
-            decision_commit_index=decision_commit,
-            native_acquisition_index=native_acq,
-            acknowledgment_index=ack_index,
-            action_index=act_index,
-        )
-
-        if _valid_seal(seal_str):
-            verdict = adjudicate(
-                evidence_type=evidence_type,
-                actual_event=actual_event,
-                delivery_seal=seal_str,
-                chronology=chronology,
-            ).timing_verdict
+        if physical_state == PHYSICAL_DELIVERY_BOUND:
+            delivery_index = physical.get("msg_index")
+            payload = str(physical.get("rendered_text") or "")
+            physical_reason = None
         else:
-            verdict = UNMEASURED  # no seal to grade -> fail-closed
-
-        reason = _unmeasured_reason(
-            seal=seal_str,
-            evidence_type=evidence_type,
-            delivery_index=delivery_index,
-            decision_open_index=decision_open,
-            decision_commit_index=decision_commit,
-            actual_event=actual_event,
-            verdict=verdict,
+            delivery_index = None
+            payload = ""
+            physical_reason = (
+                str(physical.get("reason") or "physical_delivery_unjoined")
+                if isinstance(physical, dict)
+                else "physical_delivery_unjoined"
+            )
+        _binding_ok, binding_reason = _binding_delivery_consistent(
+            row, delivery_index, tool_ordinal_index
         )
-        out[row_index] = ExtractedChronology(
-            ledger_row_index=row_index,
+        out[row_index] = _adjudicate_delivery(
+            row_index=row_index,
             evidence_type=evidence_type,
             fact_class=fact_class,
-            delivery_seal=seal_str,
             actual_event=actual_event,
-            chronology=chronology,
-            timing_verdict=verdict,
-            unmeasured_reason=reason,
+            seal_str=seal_str,
+            delivery_index=delivery_index,
+            payload=payload,
+            file_path=file_path,
+            physical_state=str(physical_state) if physical_state is not None else None,
+            physical_id=(
+                str(physical.get("physical_id"))
+                if isinstance(physical, dict) and physical.get("physical_id")
+                else None
+            ),
+            physical_reason=physical_reason,
+            binding_reason=binding_reason,
+            block_id=None,
+            messages=messages,
+            boundaries=boundaries,
+            ledger_rows=ledger_rows,
+            tool_ordinal_index=tool_ordinal_index,
         )
     return out
 
 
+def extract_block_chronologies(
+    trajectory: Any, ledger_rows: list[dict]
+) -> list[ExtractedChronology]:
+    """D (block-level chronology): adjudicate each fact-bearing BLOCK of a COMPOUND brief row
+    as its OWN declared_fact_class, never collapsing the compound message to one verdict.
+
+    A compound brief row carries ``block_lineage`` (per-block ``candidate_id`` / ``char_span`` /
+    ``content_sha256_16`` block seal / ``declared_fact_class``). For every block whose
+    declared_fact_class resolves to a registered class, the block's delivery span is located at
+    its BLOCK ``content_sha256_16`` seal against the message the whole-brief physical delivery
+    landed in (never the whole-brief seal), and the block is adjudicated independently. Returns
+    a flat list (each carries ``block_id``); a row with no block_lineage / no bound physical
+    delivery contributes nothing (fail-closed)."""
+    messages = _messages(trajectory)
+    tool_ordinal_index = _tool_ordinal_to_index(messages)
+    consumption = build_consumption_ledger(trajectory, runtime_ledger_rows=ledger_rows)
+    physical_deliveries = physical_delivery_authority(consumption).get("deliveries", {})
+    boundaries = _boundary_indices(messages, ledger_rows, tool_ordinal_index)
+
+    out: list[ExtractedChronology] = []
+    for row_index, row in enumerate(ledger_rows):
+        if not isinstance(row, dict):
+            continue
+        if row.get("outcome") != "delivered" or int(row.get("chars_delivered") or 0) <= 0:
+            continue
+        block_lineage = row.get("block_lineage")
+        if not isinstance(block_lineage, list) or not block_lineage:
+            continue
+
+        physical = physical_deliveries.get(str(row_index), {})
+        if not isinstance(physical, dict) or physical.get("state") != PHYSICAL_DELIVERY_BOUND:
+            continue
+        brief_msg_index = physical.get("msg_index")
+        if not isinstance(brief_msg_index, int):
+            continue
+        # The exact message text the whole-brief delivery landed in — the block seals are
+        # located within THIS buffer (never the whole-brief seal).
+        brief_message = messages[brief_msg_index] if 0 <= brief_msg_index < len(messages) else {}
+        brief_content = brief_message.get("content")
+        brief_content = brief_content if isinstance(brief_content, str) else ""
+        file_path = str(row.get("file_path") or "")
+
+        for block in block_lineage:
+            if not isinstance(block, dict):
+                continue
+            declared = block.get("declared_fact_class")
+            block_seal = block.get("content_sha256_16")
+            block_id = block.get("block_id")
+            block_chars = block.get("chars_delivered")
+            if (
+                not isinstance(declared, str)
+                or registration_for(declared) is None
+                or not _valid_seal(block_seal)
+                or not isinstance(block_chars, int)
+                or isinstance(block_chars, bool)
+                or block_chars <= 0
+                or not isinstance(block_id, str)
+                or not block_id
+            ):
+                continue
+            # locate the BLOCK's delivery span at its own seal against the brief message.
+            spans = _locate_seal_spans(brief_content, int(block_chars), str(block_seal))
+            if not spans:
+                continue
+            block_payload = brief_content[spans[0][0]:spans[0][1]]
+            out.append(
+                _adjudicate_delivery(
+                    row_index=row_index,
+                    evidence_type=declared,
+                    fact_class=_row_fact_class(declared, {}),
+                    actual_event=_normalize_actual_event(str(row.get("event_type") or "")),
+                    seal_str=str(block_seal),
+                    delivery_index=brief_msg_index,
+                    payload=block_payload,
+                    file_path=file_path,
+                    physical_state=str(PHYSICAL_DELIVERY_BOUND),
+                    physical_id=_physical_block_id(brief_msg_index, spans[0], block_id),
+                    physical_reason=None,
+                    binding_reason=None,
+                    block_id=block_id,
+                    messages=messages,
+                    boundaries=boundaries,
+                    ledger_rows=ledger_rows,
+                    tool_ordinal_index=tool_ordinal_index,
+                )
+            )
+    return out
+
+
+def _physical_block_id(msg_index: int, span: tuple[int, int], block_id: str) -> str:
+    """Stable per-block physical identity for a compound-brief block adjudication."""
+    return f"m{msg_index}:{span[0]}:{span[1]}:{block_id}"
+
+
 def _class_verdict(verdicts: list[str]) -> tuple[str, bool | None]:
     """Roll delivered-row verdicts up to one class verdict + its ``correct_time`` bit:
-    ON_TIME only when every row is ON_TIME; LATE/STEP_BEHIND when any row is; else UNMEASURED.
-    ``correct_time``: ON_TIME->True, LATE/STEP_BEHIND->False, UNMEASURED->None (fail-closed)."""
+    ON_TIME only when every row is ON_TIME; LATE/WRONG_EVENT/STEP_BEHIND when any row is;
+    else UNMEASURED. ``correct_time``: ON_TIME->True, LATE/WRONG_EVENT/STEP_BEHIND->False
+    (a delivered row that is measured-and-wrong FAILS the gate), UNMEASURED->None (fail-closed).
+    C-cluster: WRONG_EVENT (a known-but-wrong delivery boundary) is a measured FALSE, never
+    an unmeasured gap."""
     if verdicts and all(v == ON_TIME for v in verdicts):
         return ON_TIME, True
     if any(v == LATE for v in verdicts):
         return LATE, False
+    if any(v == WRONG_EVENT for v in verdicts):
+        return WRONG_EVENT, False
     if any(v == STEP_BEHIND for v in verdicts):
         return STEP_BEHIND, False
     return UNMEASURED, None
@@ -659,11 +868,16 @@ def adjudicate_deliveries(trajectory: Any, ledger_rows: list[dict]) -> dict[str,
     is the per-row audit trail. Rows that resolve to no registered class are recorded in
     ``deliveries`` but never override a real class (fail-closed)."""
     chronologies = extract_chronologies(trajectory, ledger_rows)
+    # D: the per-BLOCK adjudications of every COMPOUND brief row, each carrying its own
+    # declared_fact_class. Folded in ALONGSIDE the whole-row chronologies so obligations /
+    # localization brief blocks are graded as their own class — never collapsed into one
+    # verdict on the (unregistered) compound brief row.
+    block_chronologies = extract_block_chronologies(trajectory, ledger_rows)
 
     by_class: dict[str, list[ExtractedChronology]] = {}
     deliveries: list[dict[str, Any]] = []
-    for row_index in sorted(chronologies):
-        ec = chronologies[row_index]
+
+    def _record(ec: ExtractedChronology) -> None:
         deliveries.append(
             {
                 "ledger_row_index": ec.ledger_row_index,
@@ -673,11 +887,19 @@ def adjudicate_deliveries(trajectory: Any, ledger_rows: list[dict]) -> dict[str,
                 "actual_event": ec.actual_event,
                 "timing_verdict": ec.timing_verdict,
                 "unmeasured_reason": ec.unmeasured_reason,
+                "physical_id": ec.physical_id,
+                "physical_join_state": ec.physical_join_state,
+                "block_id": ec.block_id,
                 "chronology": asdict(ec.chronology),
             }
         )
         if ec.fact_class is not None:
             by_class.setdefault(ec.fact_class, []).append(ec)
+
+    for row_index in sorted(chronologies):
+        _record(chronologies[row_index])
+    for ec in block_chronologies:
+        _record(ec)
 
     per_fact_class: dict[str, Any] = {}
     for fact_class, rows in sorted(by_class.items()):
@@ -692,6 +914,7 @@ def adjudicate_deliveries(trajectory: Any, ledger_rows: list[dict]) -> dict[str,
             "rows_total": len(rows),
             "rows_on_time": sum(1 for v in verdicts if v == ON_TIME),
             "rows_late": sum(1 for v in verdicts if v == LATE),
+            "rows_wrong_event": sum(1 for v in verdicts if v == WRONG_EVENT),
             "rows_step_behind": sum(1 for v in verdicts if v == STEP_BEHIND),
             "rows_unmeasured": sum(1 for v in verdicts if v == UNMEASURED),
             "unmeasured_reasons": reasons,
@@ -699,7 +922,7 @@ def adjudicate_deliveries(trajectory: Any, ledger_rows: list[dict]) -> dict[str,
 
     return {
         "schema": TIMING_JOIN_SCHEMA,
-        "delivered_rows_graded": len(chronologies),
+        "delivered_rows_graded": len(chronologies) + len(block_chronologies),
         "per_fact_class": per_fact_class,
         "deliveries": deliveries,
     }
@@ -720,6 +943,7 @@ __all__ = [
     "TIMING_JOIN_SCHEMA",
     "ExtractedChronology",
     "adjudicate_deliveries",
+    "extract_block_chronologies",
     "extract_chronologies",
     "timing_by_fact_class",
 ]

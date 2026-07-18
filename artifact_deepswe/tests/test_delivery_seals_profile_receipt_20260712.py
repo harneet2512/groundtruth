@@ -214,7 +214,12 @@ def test_gt_deliver_append_byte_identity():
 _FROZEN_COMPOSER_SRC_SHA16 = {
     "_join_lane_output": "fd62754bb81a0900",
     "_gt_gateway_append": "67b04d630a04517b",
-    "_gt_deliver_append": "d0ed3a19a2582ac4",
+    # Cluster-2c defect-10 (2026-07-17): re-frozen after the AUTHORIZED leak-guard
+    # close — the silent ``return False`` now records a named SUPPRESSED_HIDDEN_ONLY
+    # ledger row. The model-facing append is byte-identical on every leak-free payload
+    # (the record fires ONLY on a dropped test-identity payload); the sentinel keeps
+    # guarding the composer against unrelated drift.
+    "_gt_deliver_append": "374d806fdecec23a",
 }
 
 

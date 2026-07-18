@@ -54,6 +54,7 @@ def _row(parent: str, actions: list[dict]) -> dict:
         "candidate_ordinal": 0,
         "candidate_kind_sha256": kind_sha,
         "candidate_dedup_sha256": dedup_sha,
+        "candidate_id": "typed-dedup",
         "delivery_eligible": True,
         "selected": True,
         "feature_refs": [
@@ -298,6 +299,113 @@ def test_clock_divergent_row_with_wrong_parent_width_still_fails_closed() -> Non
     evidence = result["features"]["newfile_precedent"]
     assert evidence["status"] == "UNMEASURED"
     assert "parent_policy_chars_mismatch" in evidence["reason"]
+
+
+def _delivery_for_opportunity(opportunity: dict, *, eligible: bool = True) -> tuple[dict, dict]:
+    opportunity = dict(opportunity)
+    opportunity["delivery_eligible"] = eligible
+    binding = {
+        "schema": "gt.observation_binding.v1",
+        **{
+            key: opportunity[key]
+            for key in (
+                "observation_id", "opportunity_id", "parent_policy_sha256",
+                "parent_policy_chars", "action_batch_sha256", "candidate_ordinal",
+                "candidate_kind_sha256", "candidate_dedup_sha256", "candidate_id",
+            )
+        },
+        "batch_start_iteration": opportunity["iteration"],
+    }
+    delivered = {
+        "layer": "gateway.new_file_destination",
+        "event_type": "post_edit",
+        "outcome": "delivered",
+        "iteration": opportunity["iteration"],
+        "chars_delivered": 12,
+        "content_sha256_16": "a" * 16,
+        "candidate_id": opportunity["candidate_id"],
+        "observation_binding": binding,
+    }
+    consumption = {
+        "schema": "gt.consumption_ledger.v2",
+        "visible_audit_complete": True,
+        "entries": [{
+            "source": "trajectory", "joined": True, "join_method": "seal",
+            "runtime_ledger_index": 1, "msg_index": 1,
+            "span_start": 0, "span_end": 12, "physical_id": "m1:0:12",
+            "content_sha256_16": "a" * 16, "chars": 12, "ledger_chars": 12,
+            "candidate_id": opportunity["candidate_id"],
+            "observation_binding": binding,
+            "rendered_text": "visible fire",
+        }],
+    }
+    return delivered, consumption
+
+
+def test_delivery_fire_exact_binds_to_its_originating_opportunity() -> None:
+    parent = "parent"
+    actions = [{"command": "inspect"}]
+    opportunity = _row(parent, actions)
+    delivered, consumption = _delivery_for_opportunity(opportunity)
+    join_fn = getattr(opportunities, "join_opportunity_deliveries", None)
+    assert callable(join_fn), "Cluster 1 requires one deterministic opportunity/fire join"
+
+    joined = join_fn(
+        [opportunity, delivered],
+        [{"role": "assistant", "content": parent, "extra": {"actions": actions}}],
+        inventory.canonical_feature_inventory(),
+        consumption,
+    )
+
+    fire = joined["per_delivery"][0]
+    assert fire["state"] == "DELIVERED_FIRE"
+    assert fire["opportunity_id"] == opportunity["opportunity_id"]
+    assert fire["physical_id"] == "m1:0:12"
+    assert joined["features"]["newfile_precedent"]["worst_state"] == "DELIVERED_FIRE"
+
+
+def test_fire_without_exact_opportunity_surfaces_broken_binding_root_cause() -> None:
+    parent = "parent"
+    actions = [{"command": "inspect"}]
+    opportunity = _row(parent, actions)
+    delivered, consumption = _delivery_for_opportunity(opportunity)
+    delivered["observation_binding"] = dict(delivered["observation_binding"])
+    delivered["observation_binding"]["opportunity_id"] = "f" * 64
+    consumption["entries"][0]["observation_binding"] = delivered["observation_binding"]
+    join_fn = getattr(opportunities, "join_opportunity_deliveries", None)
+    assert callable(join_fn), "Cluster 1 requires one deterministic opportunity/fire join"
+
+    joined = join_fn(
+        [opportunity, delivered],
+        [{"role": "assistant", "content": parent, "extra": {"actions": actions}}],
+        inventory.canonical_feature_inventory(),
+        consumption,
+    )
+
+    fire = joined["per_delivery"][0]
+    assert fire["state"] == "BROKEN_BINDING"
+    assert fire["reason"] == "fire_without_exact_originating_opportunity"
+
+
+def test_delivery_contradicting_ineligible_opportunity_is_not_generic_unmeasured() -> None:
+    parent = "parent"
+    actions = [{"command": "inspect"}]
+    opportunity = _row(parent, actions)
+    opportunity["delivery_eligible"] = False
+    delivered, consumption = _delivery_for_opportunity(opportunity, eligible=False)
+    join_fn = getattr(opportunities, "join_opportunity_deliveries", None)
+    assert callable(join_fn), "Cluster 1 requires one deterministic opportunity/fire join"
+
+    joined = join_fn(
+        [opportunity, delivered],
+        [{"role": "assistant", "content": parent, "extra": {"actions": actions}}],
+        inventory.canonical_feature_inventory(),
+        consumption,
+    )
+
+    fire = joined["per_delivery"][0]
+    assert fire["state"] == "BROKEN_BINDING"
+    assert fire["reason"] == "delivery_contradicts_ineligible_opportunity"
 
 
 def test_attaching_opportunity_evidence_cannot_promote_ss_live() -> None:

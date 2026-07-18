@@ -245,6 +245,14 @@ MEMBER_EVIDENCE: dict[str, list[str]] = {
         A + "test_loc_reslot_live_seam_20260712.py::test_bare_symbol_grep_byte_unchanged_no_reslot",
         A + "test_loc_reslot_live_seam_20260712.py::test_test_candidate_dropped_leak_zero",
     ],
+    # ITEM 0 (2026-07-18): the post_search lattice MASTER enable. A seam-property member (like the
+    # SS masters) whose MEMBERSHIP + FORWARD + form-arm-master contract is proven by the dynamic
+    # completeness pins (membership + ae-forward) and the form-arm/master consistency check.
+    "GT_POST_SEARCH": [
+        R + "runtime/test_registry_enforce_20260711.py::test_profile_2_is_profile_1_plus_super_mode_members",
+        R + "runtime/test_ae_forward_profile2_completeness_20260712.py::test_super_mode_members_all_ae_forwarded",
+        R + "runtime/test_form_arm_master_consistency_20260718.py::test_gateway_and_post_search_masters_are_members_not_allowlisted",
+    ],
     "GT_CERT_DELIVERY": [
         A + "test_cert_delivery_d7_20260712.py::test_covering_block_delivers_native_cert_block_leak0",
         A + "test_cert_delivery_d7_20260712.py::test_hygiene_block_delivers_native_cert_block",
@@ -789,7 +797,7 @@ def main() -> int:
     n_pass = sum(1 for m in enabled if firing_verdicts[m] == PASS)
     L.append(f"- Firing: PASS={n_pass}, FAIL={sum(1 for m in enabled if firing_verdicts[m]==FAIL)}, "
              f"DARK-UNPROVEN={darks} / {len(enabled)} enabled members.")
-    L.append(f"- Cross-cutting: " + ", ".join(f"{n}={v}" for n, v in global_checks) + ".")
+    L.append("- Cross-cutting: " + ", ".join(f"{n}={v}" for n, v in global_checks) + ".")
     L.append(f"- **Gate verdict: {'GREEN (exit 0)' if exit_code == 0 else 'RED (exit ' + str(exit_code) + ')'}.**")
     if gap["verdict"] == FAIL:
         L.append("")

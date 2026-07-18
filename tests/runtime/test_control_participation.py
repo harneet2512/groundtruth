@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
+from groundtruth.runtime import evidence_envelope as envelope_module
 from groundtruth.runtime.control_participation import (
     CONTROL_DECISION_CONTRACTS,
     CONTROL_PARTICIPATION_SCHEMA,
@@ -17,7 +20,8 @@ def test_contract_is_total_for_all_decision_controls() -> None:
     assert set(CONTROL_DECISION_CONTRACTS) == set(CAP_ELIGIBILITY_IDS | CAP_MEDIATOR_IDS)
     # P4 (B-TERM 2026-07-16): 39→40 — GT_SS_COHERENCE_V2 reclassified byte_owner → mediator adds
     # one control decision contract (13 eligibility + 27 mediator).
-    assert len(CONTROL_DECISION_CONTRACTS) == 40
+    # ITEM 0 (2026-07-18): GT_POST_SEARCH added as a 14th eligibility control (40→41).
+    assert len(CONTROL_DECISION_CONTRACTS) == 41
     assert control_contract("GT_SS_NOVELTY").measurement_status == "SUPPORTED"
     assert all(
         contract.measurement_status == "SUPPORTED"
@@ -169,6 +173,60 @@ def test_candidate_chars_counts_unicode_characters_not_utf8_octets() -> None:
         candidate_bytes="é🙂",
     )
     assert record.candidate_chars == 2
+
+
+def test_control_participation_carries_exact_originating_observation_binding() -> None:
+    build_binding = getattr(envelope_module, "build_observation_binding", None)
+    assert callable(build_binding), "Cluster 1 requires one reusable observation-binding authority"
+    candidate_id = "candidate-1"
+    binding = build_binding(
+        batch_start_iteration=2,
+        parent_policy_sha256=hashlib.sha256(b"parent").hexdigest(),
+        parent_policy_chars=6,
+        action_batch_sha256=hashlib.sha256(b"actions").hexdigest(),
+        candidate_ordinal=0,
+        candidate_kind="gateway.caller_break",
+        candidate_id=candidate_id,
+    )
+    record = build_control_participation(
+        feature_id="GT_XSESSION_RANKUP",
+        decision_site="gateway.xsession_rankup.boost",
+        decision="APPLIED",
+        iteration=2,
+        candidate_bytes="post-control bytes",
+        fact_class="caller_contract",
+        candidate_id=candidate_id,
+        observation_binding=binding,
+    )
+
+    payload = participation_to_dict(record)
+    assert payload["observation_binding"]["observation_id"] == binding.observation_id
+    assert payload["observation_binding"]["opportunity_id"] == binding.opportunity_id
+
+
+def test_control_participation_rejects_cross_candidate_observation_reuse() -> None:
+    build_binding = getattr(envelope_module, "build_observation_binding", None)
+    assert callable(build_binding), "Cluster 1 requires one reusable observation-binding authority"
+    binding = build_binding(
+        batch_start_iteration=2,
+        parent_policy_sha256=hashlib.sha256(b"parent").hexdigest(),
+        parent_policy_chars=6,
+        action_batch_sha256=hashlib.sha256(b"actions").hexdigest(),
+        candidate_ordinal=0,
+        candidate_kind="gateway.caller_break",
+        candidate_id="candidate-1",
+    )
+    with pytest.raises(ValueError, match="observation_binding.*candidate_id"):
+        build_control_participation(
+            feature_id="GT_XSESSION_RANKUP",
+            decision_site="gateway.xsession_rankup.boost",
+            decision="APPLIED",
+            iteration=2,
+            candidate_bytes="post-control bytes",
+            fact_class="caller_contract",
+            candidate_id="candidate-2",
+            observation_binding=binding,
+        )
 
 
 def test_direct_construction_rejects_malformed_or_missing_reason() -> None:

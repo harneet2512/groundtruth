@@ -47,6 +47,10 @@ for path in (ROOT / "src", ROOT / "scripts" / "swebench"):
 import attestation_join as aj  # noqa: E402
 import gt_feature_metrics as gfm  # noqa: E402
 from groundtruth.runtime.attestation_store import persist_attestation  # noqa: E402
+from groundtruth.runtime.feature_lineage import (  # noqa: E402
+    build_lineage,
+    lineage_ledger_extra,
+)
 from groundtruth.runtime.producer_attestation import (  # noqa: E402
     ATTESTATION_SCHEMA,
     FAIL,
@@ -112,8 +116,19 @@ def _syntax_attestation(
     return attestation, {artifact_id: source_bytes}
 
 
+def _syntax_lineage_extra() -> dict:
+    """The EXACT typed FACT lineage columns the seam stamps on a delivered syntax row
+    (``_exact_profile_delivery_extra`` -> ``lineage_ledger_extra`` for edit.syntax)."""
+    return lineage_ledger_extra(build_lineage(
+        runtime_producer_id="edit_check",
+        evidence_type="syntax_result",
+        actual_event="edit_result",
+    ))
+
+
 def _delivered_row(candidate_id: str, seal: str, *, chars: int = 36) -> dict:
-    """A DELIVERED runtime-ledger row carrying the join identity the writer stamps."""
+    """A DELIVERED runtime-ledger row carrying the join identity + typed FACT lineage the
+    seam writer stamps (J6: a lineage-less row can no longer seat a truth join)."""
     return {
         "layer": "edit.syntax",
         "event_type": "edit_result",
@@ -125,6 +140,7 @@ def _delivered_row(candidate_id: str, seal: str, *, chars: int = 36) -> dict:
         "content_sha256_16": seal,
         "seal_scope": "block",
         "candidate_id": candidate_id,
+        **_syntax_lineage_extra(),
     }
 
 

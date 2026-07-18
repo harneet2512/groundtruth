@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Canonical, executable inventory for the 128 SS feature rows.
+"""Canonical, executable inventory for the 129 SS feature rows.
 
 Only the acquisition family is declared here: it is a product-level taxonomy,
 not a runtime flag registry.  The other three families are derived from their
@@ -26,7 +26,11 @@ ACQ_FEATURES: tuple[str, ...] = (
     "determinism",
 )
 
-EXPECTED_FAMILY_COUNTS = {"ACQ": 12, "CAP": 47, "FACT": 11, "PERF": 58}
+# CAP == len(PROFILE_MEMBERS["2"]). Cluster-5 ITEM 0 (2026-07-18) added GT_POST_SEARCH
+# (the post_search lattice MASTER enable — a genuine capability whose FORM arm
+# GT_POST_SEARCH_NATIVE was already inventoried but never fired without it), 47 -> 48,
+# total 128 -> 129.
+EXPECTED_FAMILY_COUNTS = {"ACQ": 12, "CAP": 48, "FACT": 11, "PERF": 58}
 
 
 def performance_metric_definitions() -> dict[str, tuple[tuple[str, str], ...]]:
@@ -40,7 +44,7 @@ def performance_metric_definitions() -> dict[str, tuple[tuple[str, str], ...]]:
 
 
 def canonical_feature_inventory() -> dict[str, tuple[str, ...]]:
-    """Return and validate the exact 12+47+11+58 feature universe."""
+    """Return and validate the exact 12+48+11+58 feature universe."""
     from groundtruth.runtime.fact_registry import all_fact_classes
     from groundtruth.runtime.rl_profile import PROFILE_MEMBERS
 
@@ -69,8 +73,8 @@ def canonical_feature_inventory() -> dict[str, tuple[str, ...]]:
             "gt_feature_inventory: feature names must be globally unique; duplicate rows "
             f"{duplicates}"
         )
-    if len(flattened) != 128:
+    if len(flattened) != 129:
         raise ValueError(
-            f"gt_feature_inventory: expected 128 globally unique rows, got {len(flattened)}"
+            f"gt_feature_inventory: expected 129 globally unique rows, got {len(flattened)}"
         )
     return inventory

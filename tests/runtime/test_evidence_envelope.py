@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from groundtruth.runtime import evidence_envelope as envelope_module
 from groundtruth.runtime.evidence_envelope import (
     ADVISORY,
     BLOCKING,
@@ -262,6 +263,46 @@ def test_roundtrip_through_json_exact_equality() -> None:
     env = _clean(blocking_eligibility=BLOCKING, measured=True)
     restored = from_dict(json.loads(json.dumps(to_dict(env))))
     assert restored == env
+
+
+def test_observation_binding_roundtrips_without_changing_rendered_bytes() -> None:
+    build = getattr(envelope_module, "build_observation_binding", None)
+    assert callable(build), "Cluster 1 requires one reusable observation-binding authority"
+    binding = build(
+        batch_start_iteration=3,
+        parent_policy_sha256=hashlib.sha256(b"parent").hexdigest(),
+        parent_policy_chars=6,
+        action_batch_sha256=hashlib.sha256(b"actions").hexdigest(),
+        candidate_ordinal=1,
+        candidate_kind="gateway.def_ref_partition",
+        candidate_id=_clean().dedup_key,
+    )
+    env = _clean(observation_binding=binding)
+
+    assert render_bytes(env) == render_bytes(_clean())
+    restored = from_dict(json.loads(json.dumps(to_dict(env))))
+    assert restored.observation_binding == binding
+    assert validate(restored) == []
+
+
+def test_observation_binding_rejects_mismatched_candidate_identity() -> None:
+    build = getattr(envelope_module, "build_observation_binding", None)
+    assert callable(build), "Cluster 1 requires one reusable observation-binding authority"
+    binding = build(
+        batch_start_iteration=0,
+        parent_policy_sha256=hashlib.sha256(b"parent").hexdigest(),
+        parent_policy_chars=6,
+        action_batch_sha256=hashlib.sha256(b"actions").hexdigest(),
+        candidate_ordinal=0,
+        candidate_kind="gateway.def_ref_partition",
+        candidate_id="different-candidate",
+    )
+    env = _clean(observation_binding=binding)
+
+    assert any(
+        "observation_binding" in issue and "candidate_id" in issue
+        for issue in validate(env)
+    )
 
 
 def test_to_dict_key_order_is_deterministic() -> None:

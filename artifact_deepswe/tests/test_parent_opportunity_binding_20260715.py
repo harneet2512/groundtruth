@@ -119,7 +119,15 @@ def _wire_lineage_free_candidates(
             lineage=None,
         )
         def thunk():
-            output["output"] = output["output"] + "\nGT:" + command
+            shipped = "\nGT:" + command
+            output["output"] = output["output"] + shipped
+            g._runtime_ledger_record(
+                kind="gateway." + command,
+                outcome=g._ProductSignalOutcome.DELIVERED,
+                chars=len(shipped),
+                content=shipped,
+                extra={"candidate_id": candidate.dedup_key},
+            )
         g._append_batch_candidate(
             pool, candidate, thunk, output, "GT:" + command, join=True
         )
@@ -186,6 +194,47 @@ def test_parallel_candidates_bind_exact_parent_without_persisting_prose(monkeypa
     assert "LEAK_CANARY_TEST_NAME" not in serialized
     assert "inspect-build" not in serialized
     assert "run-build" not in serialized
+
+
+def test_each_delivered_fire_carries_its_exact_observation_and_opportunity(monkeypatch):
+    rows: list[dict] = []
+    _wire_lineage_free_candidates(monkeypatch, rows)
+    agent = _Agent()
+    assert g.install_observation_batch_commit(agent)
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": "first parent",
+            "extra": {"actions": [
+                {"command": "first-a"}, {"command": "first-b"},
+            ]},
+        },
+        {
+            "role": "assistant",
+            "content": "second parent",
+            "extra": {"actions": [{"command": "second-a"}]},
+        },
+    ]
+    for message in messages:
+        agent.execute_actions(message)
+
+    opportunities = [row for row in rows if row.get("layer") == "feature.opportunity"]
+    deliveries = [
+        row for row in rows
+        if row.get("outcome") == "delivered" and row.get("chars_delivered", 0) > 0
+    ]
+    assert len(opportunities) == 3
+    assert len(deliveries) == 2
+    selected = {row["opportunity_id"]: row for row in opportunities if row["selected"]}
+    assert len(selected) == 2
+    for delivery in deliveries:
+        binding = delivery.get("observation_binding")
+        assert isinstance(binding, dict)
+        origin = selected[binding["opportunity_id"]]
+        assert binding["observation_id"] == origin["observation_id"]
+        assert binding["candidate_id"] == delivery["candidate_id"]
+        assert binding["candidate_ordinal"] == origin["candidate_ordinal"]
 
 
 def test_inseam_metrics_flag_changes_no_model_visible_byte(monkeypatch):
@@ -324,3 +373,23 @@ def test_formatter_failure_creates_no_observed_eligible_opportunity(monkeypatch)
         if row.get("layer") == "feature.opportunity"
         and row.get("outcome") == "eligible"
     ]
+
+
+def test_policy_observation_id_matches_shared_authority():
+    """The seam's local ``_policy_observation_id`` (its in-container degradation copy)
+    must be BYTE-IDENTICAL to the shared ``evidence_envelope.policy_observation_id`` over
+    many inputs — the two framed-identity implementations can never drift (LIPI, the
+    reader/writer-drift class this cluster closes)."""
+    from groundtruth.runtime.evidence_envelope import policy_observation_id as shared
+
+    cases = [
+        (0, _sha256_text("parent-a"), _sha256_text("[]")),
+        (1, _sha256_text("parent-b"), _sha256_text('[{"command":"x"}]')),
+        (18, _sha256_text(""), _sha256_text('["noop"]')),
+        (65535, _sha256_text("a" * 4000), _sha256_text("b" * 4000)),
+        (2**40, _sha256_text("café ☃"), _sha256_text("Δ")),
+    ]
+    for start_iteration, parent_sha, action_sha in cases:
+        assert g._policy_observation_id(start_iteration, parent_sha, action_sha) == shared(
+            start_iteration, parent_sha, action_sha
+        )

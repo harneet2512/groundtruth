@@ -261,8 +261,8 @@ def validate_static_dispatch_manifest(manifest: object) -> dict[str, Any]:
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         raise ValueError("static dispatch preflight: invalid manifest schema")
     features = manifest.get("features")
-    if not isinstance(features, dict) or len(features) != 128 or set(features) != set(expected_names):
-        raise ValueError("static dispatch preflight: manifest must contain exact 128 inventory")
+    if not isinstance(features, dict) or len(features) != 129 or set(features) != set(expected_names):
+        raise ValueError("static dispatch preflight: manifest must contain exact 129 inventory")
     counts = {family: len(names) for family, names in inventory.items()}
     if manifest.get("family_counts") != counts:
         raise ValueError("static dispatch preflight: family-count drift")

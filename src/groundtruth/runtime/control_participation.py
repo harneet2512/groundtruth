@@ -11,7 +11,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+from typing import Any
 
+from .evidence_envelope import (
+    ObservationBinding,
+    observation_binding_to_dict,
+    validate_observation_binding,
+)
 from .fact_registry import is_registered
 from .feature_lineage import (
     CAP_ELIGIBILITY_IDS,
@@ -129,6 +135,13 @@ CONTROL_DECISION_CONTRACTS = {
     ),
     "GT_SS_ELIGIBILITY": _eligibility(
         "GT_SS_ELIGIBILITY", "mini_seam.cd_prefix.command_substitution",
+    ),
+    # ITEM 0 (2026-07-18): the post_search lattice MASTER enable gate. Its executable decision
+    # site is the seam's _search_localize_decision master check (gt_mini_patch _POST_SEARCH_ON,
+    # gt_mini_patch.py:4588) that decides WHETHER the def-partition producer runs on the agent's
+    # own grep — the same lattice GT_SS_ELIGIBILITY widens.
+    "GT_POST_SEARCH": _eligibility(
+        "GT_POST_SEARCH", "mini_seam.post_search.lattice_master_enable",
     ),
     "GT_XSESSION_MEMORY": _eligibility(
         "GT_XSESSION_MEMORY",
@@ -279,6 +292,7 @@ class ControlParticipation:
     candidate_id: str = ""
     temporal_relation: str = CONTROL_PRECEDES_DELIVERY
     related_delivery_iteration: int | None = None
+    observation_binding: ObservationBinding | None = None
 
     def __post_init__(self) -> None:
         if self.schema != CONTROL_PARTICIPATION_SCHEMA:
@@ -351,6 +365,13 @@ class ControlParticipation:
             raise ValueError("candidate_id must be a string")
         if contract.fact_class_required and not self.candidate_id:
             raise ValueError("mediator candidate_id must be a non-empty canonical ID")
+        if self.observation_binding is not None:
+            issues = validate_observation_binding(
+                self.observation_binding,
+                expected_candidate_id=self.candidate_id or None,
+            )
+            if issues:
+                raise ValueError("observation_binding invalid: " + ",".join(issues))
 
 
 def build_control_participation(
@@ -364,6 +385,7 @@ def build_control_participation(
     candidate_id: str = "",
     reason: str = "",
     related_delivery_iteration: int | None = None,
+    observation_binding: ObservationBinding | None = None,
 ) -> ControlParticipation:
     contract = control_contract(feature_id)
     if contract.measurement_status != "SUPPORTED":
@@ -394,11 +416,12 @@ def build_control_participation(
         candidate_id=candidate_id,
         temporal_relation=contract.temporal_relation,
         related_delivery_iteration=related_delivery_iteration,
+        observation_binding=observation_binding,
     )
 
 
-def participation_to_dict(record: ControlParticipation) -> dict:
-    return {
+def participation_to_dict(record: ControlParticipation) -> dict[str, Any]:
+    payload = {
         "schema": record.schema,
         "control_ref": {
             "category": "CAP",
@@ -416,6 +439,11 @@ def participation_to_dict(record: ControlParticipation) -> dict:
         "related_delivery_iteration": record.related_delivery_iteration,
         "reason": record.reason,
     }
+    if record.observation_binding is not None:
+        payload["observation_binding"] = observation_binding_to_dict(
+            record.observation_binding
+        )
+    return payload
 
 
 __all__ = [

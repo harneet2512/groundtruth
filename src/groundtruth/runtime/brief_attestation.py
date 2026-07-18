@@ -56,6 +56,10 @@ from .producer_attestation import (
 # from a label) so a new brief block class never silently borrows this truth path.
 _LOCALIZATION_EVIDENCE_TYPE = "localization"
 _LOCALIZATION_RUNTIME_PRODUCER = "v1r_brief"
+# The task-start obligations block class. Its registered producer is ``spec`` (the issue
+# obligations extractor); its decision boundary is the initial plan at ``task_start``.
+_OBLIGATIONS_EVIDENCE_TYPE = "obligations"
+_OBLIGATIONS_RUNTIME_PRODUCER = "spec"
 # The chronological event at which the "which file to open" decision opens: the agent
 # reads the step-0 brief at task_start. (deliver_by / required_event stays search_result.)
 _OPEN_EVENT = "task_start"
@@ -100,15 +104,18 @@ def _predicate(
     complete: bool,
     proof_refs: tuple[ProofRef, ...],
     observation: str,
+    *,
+    subject: str = "step-0 brief localization candidate",
+    expectation: str = (
+        "producer re-verified the candidate node against graph.db at build time "
+        "and it maps 1:1 to the delivered brief block seal"
+    ),
 ) -> PredicateAttestation:
     return PredicateAttestation(
         predicate_kind=kind,
         predicate_id=predicate_id,
-        subject="step-0 brief localization candidate",
-        expectation=(
-            "producer re-verified the candidate node against graph.db at build time "
-            "and it maps 1:1 to the delivered brief block seal"
-        ),
+        subject=subject,
+        expectation=expectation,
         observation=observation if complete else "",
         verdict=PASS if complete else UNMEASURED,
         proof_refs=proof_refs if complete else (),
@@ -224,7 +231,144 @@ def finalize_localization_attestation(
     return FinalAttestationInputs(attestation, ((artifact_id, witness_bytes),))
 
 
+def finalize_obligations_attestation(
+    *,
+    candidate_id: str,
+    delivery_seal: str,
+    block_content_sha256: str,
+    issue_sha256: str,
+    issue_revision: str,
+    obligation_count: int,
+    obligations_digest: str,
+) -> "FinalAttestationInputs | None":
+    """Bind the extracted task-start obligations record to its delivered brief-block seal.
+
+    The obligations block is compound evidence: its fact-bearing bytes are sealed per block
+    (``block_content_sha256`` over the exact delivered obligations block). This factory binds
+    that seal to the producer's build-time obligations record — the EXACT issue/spec source
+    identity (``issue_sha256`` + ``issue_revision``) the obligations were extracted from, and
+    the digest + count of the extracted obligations (persisted in ``brief_result.json``).
+
+    Returns ``None`` when a SOUND binding cannot be formed (a delivery seal that is not 16
+    lower-hex; a ``block_content_sha256`` whose 16-hex prefix is not the seal; an empty
+    candidate id) — the class stays UNMEASURED via the absent join (fail-closed).
+
+    TRUTH is PASS only when the binding is sound AND the producer supplied a real obligations
+    record: a valid 64-hex ``issue_sha256``, a non-empty ``issue_revision``, a positive
+    ``obligation_count``, and a valid 64-hex ``obligations_digest``. A fabricated record
+    (bad/empty issue sha, zero obligations, bad digest) yields an honest UNMEASURED verdict,
+    never PASS. FRESHNESS rides the SAME issue binding — the obligations FACT's sole freshness
+    dependency is the issue (``fact_registry`` ``freshness_deps=("issue",)``), so a bound issue
+    revision is a real, re-verifiable freshness proof.
+    """
+    seal = str(delivery_seal or "")
+    full = str(block_content_sha256 or "")
+    cid = str(candidate_id or "")
+    if (
+        _SEAL_RE.match(seal) is None
+        or _FULL_SHA_RE.match(full) is None
+        or full[:16] != seal
+        or not cid.strip()
+    ):
+        return None
+
+    registration = registration_for(_OBLIGATIONS_EVIDENCE_TYPE)
+    if registration is None:  # defensive — obligations is a registered §1 class
+        return None
+
+    issue_sha = str(issue_sha256 or "")
+    issue_rev = str(issue_revision or "")
+    digest = str(obligations_digest or "")
+    count_ok = (
+        isinstance(obligation_count, int)
+        and not isinstance(obligation_count, bool)
+        and obligation_count > 0
+    )
+    complete = bool(
+        _FULL_SHA_RE.match(issue_sha) is not None
+        and issue_rev.strip()
+        and count_ok
+        and _FULL_SHA_RE.match(digest) is not None
+    )
+
+    # The producer's own build-time obligations record — a SMALL canonical artifact (never
+    # the whole issue); its sha256 seals exactly the fields the truth/freshness predicates
+    # prove: the source issue identity and the extracted obligations digest.
+    record: dict[str, Any] = {
+        "candidate_id": cid,
+        "issue_sha256": issue_sha,
+        "issue_revision": issue_rev,
+        "obligation_count": int(obligation_count) if count_ok else 0,
+        "obligations_digest": digest,
+        "block_content_sha256": full,
+    }
+    record_bytes = _canonical(record)
+    artifact_id = "obligations-record.json"
+    ref = ArtifactRef(
+        kind="obligations_record",
+        artifact_id=artifact_id,
+        sha256=_sha(record_bytes),
+        revision=issue_rev or f"issue:{issue_sha or 'unversioned'}",
+    )
+    truth_proofs = tuple(sorted((
+        ProofRef("issue_source_identity", ref, "$.issue_sha256"),
+        ProofRef("obligations_digest", ref, "$.obligations_digest"),
+        ProofRef("obligation_count", ref, "$.obligation_count"),
+    )))
+    freshness_proofs = tuple(sorted((
+        ProofRef("issue_source_identity", ref, "$.issue_sha256"),
+        ProofRef("issue_revision", ref, "$.issue_revision"),
+    )))
+
+    attestation = ProducerAttestation(
+        schema=ATTESTATION_SCHEMA,
+        evidence_type=_OBLIGATIONS_EVIDENCE_TYPE,
+        runtime_producer_id=_OBLIGATIONS_RUNTIME_PRODUCER,
+        registered_producer_id=registration.producer,
+        candidate_id=cid,
+        delivery_seal=seal,
+        source_artifacts=(ref,),
+        truth_predicates=(
+            _predicate(
+                TRUTH,
+                "obligations:truth",
+                complete,
+                truth_proofs,
+                "extracted obligations record binds the delivered block seal",
+                subject="step-0 brief obligations block",
+                expectation=(
+                    "producer extracted the obligations from the exact issue source "
+                    "and the record maps 1:1 to the delivered brief block seal"
+                ),
+            ),
+        ),
+        freshness_predicates=(
+            _predicate(
+                FRESHNESS,
+                "obligations:freshness",
+                complete,
+                freshness_proofs,
+                "obligations bound to the exact issue source revision",
+                subject="step-0 brief obligations block",
+                expectation=(
+                    "the delivered obligations bind the exact issue source revision"
+                ),
+            ),
+        ),
+        decision=DecisionBinding(
+            decision_key=registration.target_decision,
+            open_event=_OPEN_EVENT,
+            required_event=required_event(_OBLIGATIONS_EVIDENCE_TYPE) or "",
+        ),
+    )
+    errors = validate(attestation)
+    if errors:
+        return None
+    return FinalAttestationInputs(attestation, ((artifact_id, record_bytes),))
+
+
 __all__ = [
     "FinalAttestationInputs",
     "finalize_localization_attestation",
+    "finalize_obligations_attestation",
 ]

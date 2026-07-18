@@ -21,6 +21,10 @@ import gt_run_metrics  # noqa: E402
 from artifact_deepswe import ledger_attestation  # noqa: E402
 from groundtruth.runtime import fact_registry, rl_profile  # noqa: E402
 from groundtruth.runtime.attestation_store import persist_attestation  # noqa: E402
+from groundtruth.runtime.feature_lineage import (  # noqa: E402
+    build_lineage,
+    lineage_ledger_extra,
+)
 from groundtruth.runtime.producer_attestation import (  # noqa: E402
     ATTESTATION_SCHEMA,
     FRESHNESS,
@@ -115,7 +119,7 @@ def test_canonical_inventory_is_dynamic_exact_128() -> None:
 
     assert {family: len(names) for family, names in families.items()} == {
         "ACQ": 12,
-        "CAP": 47,
+        "CAP": 48,
         "FACT": 11,
         "PERF": 58,
     }
@@ -128,7 +132,7 @@ def test_canonical_inventory_is_dynamic_exact_128() -> None:
         for name, _ in definitions
     )
     flattened = [name for names in families.values() for name in names]
-    assert len(flattened) == len(set(flattened)) == 128
+    assert len(flattened) == len(set(flattened)) == 129
 
 
 def test_inventory_fails_loud_on_family_count_or_name_collision(monkeypatch) -> None:
@@ -169,12 +173,12 @@ def test_collect_task_adds_128_master_without_changing_legacy_features(
 
     assert set(record["features"]) == set(rl_profile.PROFILE_MEMBERS["2"])
     assert set(record["fact_classes"]) == set(fact_registry.all_fact_classes())
-    assert len(record["features"]) == 47
-    assert len(record["ss_features"]) == 128
+    assert len(record["features"]) == 48
+    assert len(record["ss_features"]) == 129
     assert record["ss_feature_inventory_schema"] == "gt.ss_feature_inventory.v1"
     assert record["ss_integrity"]["family_counts"] == {
         "ACQ": 12,
-        "CAP": 47,
+        "CAP": 48,
         "FACT": 11,
         "PERF": 58,
     }
@@ -201,7 +205,7 @@ def test_missing_deep_metrics_is_explicit_and_fails_canonical_integrity(tmp_path
 
     record = metrics.collect_task(task, str(tmp_path), profile="2")
 
-    assert len(record["ss_features"]) == 128
+    assert len(record["ss_features"]) == 129
     assert record["ss_features"]["gold_rank"]["status"] == "UNMEASURED"
     assert record["ss_features"]["gold_rank"]["value"] is None
     assert all(
@@ -730,12 +734,13 @@ def test_legacy_projection_excluding_additive_readiness_is_byte_identical(
         projection, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
 
-    # P4 (B-TERM 2026-07-16): golden re-baselined for the coherence reclassification. The ONLY
-    # legacy-projection delta is GT_SS_COHERENCE_V2's member record moving byte_owner → mediator
-    # (role infrastructure, cap_role mediator, fact_classes ["recovery"], mediator lifecycle);
-    # verified coherence-only + deterministic. Every other member's bytes are unchanged.
+    # P4 (B-TERM 2026-07-16): golden re-baselined for the coherence reclassification.
+    # ITEM 0 (2026-07-18): golden re-baselined again for the GT_POST_SEARCH member addition. The
+    # ONLY legacy-projection delta is one NEW member record (GT_POST_SEARCH: role infrastructure,
+    # cap_role eligibility, mediates def_partition) added to `features`; every pre-existing
+    # member's bytes are unchanged (deterministic additive growth of the enabled member set).
     assert hashlib.sha256(encoded).hexdigest() == (
-        "47c0f93a832795ba7c19367f690f6bfd04ee020890a4f46abcf0004dd3fcbe27"
+        "759bbefe4584353fd06b5c12096c606b978cb400b6899efe5032d75965ba36ef"
     )
 
 
@@ -1246,9 +1251,12 @@ def test_attestation_join_populates_truth_and_authority_for_attested_class(tmp_p
         "chars_delivered": len(payload),
         "content_sha256_16": seal,
         "candidate_id": candidate_id,
-        "evidence_type": "caller_break",
-        "fact_class": "caller_contract",
         "file_path": "src/pkg.py",
+        # J6: the real gateway seam stamps typed FACT lineage on the delivered row; the
+        # join now requires it (a lineage-less row can no longer seat a truth join).
+        **lineage_ledger_extra(build_lineage(
+            runtime_producer_id="caller_contract", evidence_type="caller_break",
+            actual_event="edit_result")),
     }) + "\n", encoding="utf-8")
     (tmp_path / "mini-swe-agent.trajectory.json").write_text(json.dumps({
         "messages": [{"role": "tool", "content": payload}],

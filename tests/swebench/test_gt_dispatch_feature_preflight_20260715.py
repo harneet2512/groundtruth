@@ -20,8 +20,8 @@ import gt_dispatch_feature_preflight as preflight  # noqa: E402
 def test_static_manifest_derives_exact_inventory_and_accepts_all_authoritative_byte_owners() -> None:
     manifest = preflight.build_static_dispatch_manifest()
     assert manifest["schema"] == "gt.static_dispatch_feature_manifest.v1"
-    assert manifest["family_counts"] == {"ACQ": 12, "CAP": 47, "FACT": 11, "PERF": 58}
-    assert len(manifest["features"]) == 128
+    assert manifest["family_counts"] == {"ACQ": 12, "CAP": 48, "FACT": 11, "PERF": 58}
+    assert len(manifest["features"]) == 129
     assert manifest["dynamic_opportunity_proven"] is False
     assert manifest["ss_live_proven"] is False
     result = preflight.validate_static_dispatch_manifest(manifest)
@@ -194,7 +194,7 @@ def test_static_preflight_never_accepts_inventory_drift() -> None:
     manifest = preflight.build_static_dispatch_manifest()
     broken = copy.deepcopy(manifest)
     broken["features"].pop("gold_rank")
-    with pytest.raises(ValueError, match="exact 128"):
+    with pytest.raises(ValueError, match="exact 129"):
         preflight.validate_static_dispatch_manifest(broken)
 
 
@@ -219,7 +219,7 @@ def test_cli_is_valid_under_exact_workflow_pythonpath(tmp_path: Path) -> None:
     )
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert payload["manifest"]["feature_count"] == 128
+    assert payload["manifest"]["feature_count"] == 129
     assert payload["preflight"]["valid"] is True
     assert payload["preflight"]["blocked_features"] == []
 

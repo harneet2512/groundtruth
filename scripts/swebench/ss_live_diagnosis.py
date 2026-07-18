@@ -486,7 +486,7 @@ def _validate_task_metrics(
     expected = {name: family for family, names in inventory.items() for name in names}
     rows = record.get("ss_features")
     if not isinstance(rows, dict) or set(rows) != set(expected):
-        raise ValueError(f"task feature inventory is not exact-128: {path}")
+        raise ValueError(f"task feature inventory is not exact-129: {path}")
     if any(not isinstance(rows[name], dict)
            or rows[name].get("family") != family
            for name, family in expected.items()):

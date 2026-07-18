@@ -436,6 +436,15 @@ class V1RBriefResult:
     # Typed CAP terminal decisions generated while assembling this exact brief.
     # Sidecar only; never rendered into brief_text.
     control_participation: list[dict] = field(default_factory=list)
+    # Cluster-2b: the producer's build-time obligations record — the EXACT issue source
+    # identity (issue_sha256 + revision) the task-start obligations block was extracted
+    # from, plus the extracted obligations digest + count, bound to the delivered
+    # obligations block's candidate_id + seal. HOST-SIDE METADATA — never rendered into
+    # brief_text (byte-identical whether populated or not). Empty when there is no
+    # delivered obligations block or no persisted extraction record (fail-closed: the
+    # obligations attestation then stays honestly UNMEASURED). Consumed by
+    # gt_headless_runner._persist_brief_obligations_attestations.
+    obligations_record: dict = field(default_factory=dict)
     # B-31 (Brief-F9): which token counter produced ``token_estimate`` /governed the
     # DOSE rail — ``"gte-modernbert-bpe"`` (the baked HF BPE vocabulary) or
     # ``"char4-estimate"`` (the char/4 fallback when no tokenizer.json is configured).
@@ -2189,6 +2198,84 @@ def _attest_source_contributions(
             canonical.encode("utf-8")
         ).hexdigest()
         proof["contribution_attestation"] = attestation
+
+
+def _build_obligations_record(
+    brief_text: str,
+    block_receipts: list[dict],
+    issue_text: str,
+) -> dict:
+    """Bind the delivered obligations block to its build-time extraction record.
+
+    Returns a canonical ``gt.obligations_record.v1`` sidecar (candidate_id + block seal +
+    the EXACT issue source identity + the extracted obligations digest/count) or ``{}``.
+
+    Fail-closed and PURE: it reads only the already-persisted V2 obligations artifact
+    (``gt_obligations_v2.json`` — written by ``_write_obligations_v2_artifact`` earlier in
+    this same brief generation), never re-extracts, and never touches ``brief_text``. Any
+    miss (no delivered obligations block, absent/mismatched artifact, span/hash mismatch)
+    returns ``{}`` so the obligations attestation stays honestly UNMEASURED rather than
+    binding a fabricated record."""
+    if not isinstance(block_receipts, list) or not (issue_text or "").strip():
+        return {}
+    receipt = next(
+        (r for r in block_receipts
+         if isinstance(r, dict) and r.get("fact_class") == "obligations"),
+        None,
+    )
+    if receipt is None:
+        return {}
+    candidate_id = receipt.get("candidate_id")
+    content_hash = receipt.get("content_hash")
+    span = receipt.get("char_span")
+    if (
+        not isinstance(candidate_id, str) or not candidate_id
+        or not isinstance(content_hash, str)
+        or _re.fullmatch(r"[0-9a-f]{64}", content_hash) is None
+        or not isinstance(span, list) or len(span) != 2
+        or not all(isinstance(n, int) and not isinstance(n, bool) for n in span)
+        or span[0] < 0 or span[0] >= span[1] or span[1] > len(brief_text)
+    ):
+        return {}
+    block = brief_text[span[0]:span[1]]
+    digest = hashlib.sha256(block.encode("utf-8", "surrogatepass")).hexdigest()
+    if digest != content_hash:
+        return {}
+    issue_sha = hashlib.sha256(issue_text.encode("utf-8")).hexdigest()
+    # Read the authoritative extracted obligations (V2 artifact) written this generation.
+    try:
+        artifact_path = os.path.join(
+            os.path.dirname(_anchors_path()) or "/tmp", "gt_obligations_v2.json"
+        )
+        with open(artifact_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("issue_sha256") != issue_sha:
+        return {}  # stale/cross-task artifact — never launder another issue's obligations
+    clauses = data.get("clauses")
+    if not isinstance(clauses, list) or not clauses:
+        return {}
+    verbatims = [
+        " ".join((c.get("verbatim_text") or "").split())
+        for c in clauses
+        if isinstance(c, dict) and (c.get("verbatim_text") or "").strip()
+    ]
+    if not verbatims:
+        return {}
+    obligations_digest = hashlib.sha256(
+        json.dumps(verbatims, sort_keys=False, separators=(",", ":"),
+                   ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema": "gt.obligations_record.v1",
+        "candidate_id": candidate_id,
+        "block_content_sha256": content_hash,
+        "issue_sha256": issue_sha,
+        "issue_revision": f"issue:{issue_sha}",
+        "obligation_count": len(verbatims),
+        "obligations_digest": obligations_digest,
+    }
 
 
 def _terminal_pretask_mediator_participation(
@@ -6671,6 +6758,13 @@ def generate_v1r_brief(
     # sidecar); brief_text is untouched, so the delivered brief stays byte-identical.
     if _block_receipts:
         _attest_source_contributions(_localization_proof, _block_receipts)
+    # Cluster-2b: bind the delivered obligations block to its build-time extraction record
+    # (sidecar; brief_text untouched, byte-identical). Empty when there is no obligations
+    # block or no persisted extraction (fail-closed -> obligations attestation UNMEASURED).
+    _obligations_record = (
+        _build_obligations_record(brief_text, _block_receipts, issue_text)
+        if _block_receipts else {}
+    )
     _control_participation.extend(
         _terminal_pretask_mediator_participation(
             brief_text,
@@ -6706,6 +6800,7 @@ def generate_v1r_brief(
         budget_suppressed=_budget_suppressed,
         block_receipts=_block_receipts,
         control_participation=_control_participation,
+        obligations_record=_obligations_record,
         tokenizer_used=_tokenizer_kind(),  # Brief-F9: which token counter ran
     )
 

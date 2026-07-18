@@ -122,6 +122,7 @@ from groundtruth.runtime.producer_inputs import (
     PRODUCER_INPUTS_SCHEMA,
     CallerEvidenceRow,
     CallerUsageEvidenceRow,
+    DefinitionRow,
     ProducerInputs,
     SignatureChange,
     SourceState,
@@ -1286,7 +1287,7 @@ def _resolve_symbol_defs(con, symbol: str, root: str) -> dict | None:
     labels_sql = ",".join("?" * len(_DEF_LABELS))
     try:
         rows = con.execute(
-            f"SELECT id, file_path, start_line FROM nodes "
+            f"SELECT id, file_path, start_line, label FROM nodes "
             f"WHERE name=? AND COALESCE(is_test,0)=0 AND COALESCE(start_line,0)>0 "
             f"AND label IN ({labels_sql}) ORDER BY file_path, start_line",
             (symbol, *_DEF_LABELS)).fetchall()
@@ -1299,10 +1300,19 @@ def _resolve_symbol_defs(con, symbol: str, root: str) -> dict | None:
         return None  # ambiguous common / stdlib-shadow name -> not a fact
     def_ids = [r[0] for r in rows]
     def_sites = [(_to_repo_rel(r[1] or "", root), int(r[2] or 0)) for r in rows]
+    # Typed def-partition rows (Cluster-2b): the concrete graph nodes the partition was
+    # built from — node id + label (kind) preserved for the producer attestation. A bare
+    # def-node lookup carries no edge resolution, so confidence/resolution_method stay None.
+    def_rows = [
+        (symbol, _to_repo_rel(r[1] or "", root), int(r[2] or 0),
+         str(r[3] or ""), int(r[0]))
+        for r in rows
+    ]
     callers, receiver_types = _fact_callers(con, def_ids)
     test_ref_count = _test_ref_count(con, def_ids)
     return {
         "def_sites": def_sites,
+        "def_rows": def_rows,
         "n_def_files": len({fp for fp, _ in def_sites}),
         "callers": callers,
         "receiver_types": receiver_types,
@@ -1487,7 +1497,7 @@ def _body_rows(con, sym: str, root: str) -> list[tuple]:
             pl = _passage_line(con, int(node_id), sym)
             if pl:
                 cite = pl
-        out.append((rel, cite, name or "", (label or "").lower()))
+        out.append((rel, cite, name or "", (label or "").lower(), int(node_id or 0)))
     return out
 
 
@@ -1677,6 +1687,48 @@ def _def_partition_body(info: dict) -> list[str]:
     return lines
 
 
+def _def_partition_inputs(
+    state: GatewayState, fact_kind: str, query: str, def_rows: "list[tuple]",
+) -> "ProducerInputs | None":
+    """Build the render-neutral producer sidecar for a def-partition fact.
+
+    ``def_rows`` are the ``(identity, file, line, kind, definition_id)`` tuples from
+    ``_resolve_symbol_defs``/``_body_rows``. ``graph_revision`` is read from the SAME
+    per-fact-class revision the envelope will stamp (``_revisions_for``), so the Gateway
+    attestation binds cleanly (``inputs.graph_revision == envelope.graph_revision``).
+    Correct-or-quiet: no rows -> None (the caller ships the fact without a sidecar, which
+    stays honestly UNMEASURED rather than fabricating an attestation)."""
+    if not def_rows or not (query or "").strip():
+        return None
+    graph_revision, _valid_until = _revisions_for(state, fact_kind)
+    if not graph_revision:
+        return None
+    rows = tuple(
+        DefinitionRow(
+            identity=str(identity),
+            file=str(fp),
+            line=int(line),
+            kind=str(kind),
+            definition_id=int(node_id),
+        )
+        for identity, fp, line, kind, node_id in def_rows
+        if fp and int(line) > 0 and str(kind).strip() and int(node_id) > 0
+    )
+    if not rows:
+        return None
+    return ProducerInputs(
+        schema=PRODUCER_INPUTS_SCHEMA,
+        evidence_type=fact_kind,
+        candidate_id="",
+        before_state=None,
+        after_state=None,
+        caller_rows=(),
+        graph_revision=graph_revision,
+        definition_rows=rows,
+        query_identity=str(query),
+    )
+
+
 def _produce_def_ref_partition(event: ToolEvent, state: GatewayState, *, note: str = "") -> list[EvidenceEnvelope]:
     sym = search_pattern(event.command)
     con = _open(state)
@@ -1690,9 +1742,11 @@ def _produce_def_ref_partition(event: ToolEvent, state: GatewayState, *, note: s
         return []
     body = ([note] if note else []) + _def_partition_body(info)
     target = info["def_sites"][0][0]
+    inputs = _def_partition_inputs(state, "def_ref_partition", sym, info.get("def_rows") or [])
     return [_mk_add(state, event, fact_kind="def_ref_partition", target=target,
                     body_lines=body, evidence=info["def_sites"], tier=VERIFIED,
-                    producer="def_ref_partition", symbol=sym)]
+                    producer="def_ref_partition", symbol=sym,
+                    producer_inputs=inputs)]
 
 
 # --------------------------------------------------------------------------- #
@@ -1924,9 +1978,18 @@ def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[Eviden
         return []
     body = ['your hits are all test/vendored copies; the definition is here']
     body += [f"def: {fp}:{ln}" for fp, ln in novel[:3]]
+    # Only the NOVEL def-sites (not among the agent's grep hits) are the delivered fact,
+    # so the sidecar carries exactly those rows.
+    novel_norm = {(_norm_fp(fp), int(ln)) for fp, ln in novel}
+    novel_rows = [
+        r for r in (info.get("def_rows") or [])
+        if (_norm_fp(r[1]), int(r[2])) in novel_norm
+    ]
+    inputs = _def_partition_inputs(state, "wrong_surface", sym, novel_rows)
     return [_mk_add(state, event, fact_kind="wrong_surface", target=novel[0][0],
                     body_lines=body, evidence=novel, tier=VERIFIED,
-                    producer="wrong_surface", symbol=sym)]
+                    producer="wrong_surface", symbol=sym,
+                    producer_inputs=inputs)]
 
 
 def _produce_name_fold(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -1946,9 +2009,13 @@ def _produce_name_fold(event: ToolEvent, state: GatewayState) -> list[EvidenceEn
     else:
         note = f'"{sym}" not found; indexed as "{variant}"'
     body = [note] + _def_partition_body(info)
+    # The fold resolves ``sym`` to the INDEXED name ``variant``; the def rows are keyed on
+    # ``variant`` (``_resolve_symbol_defs(con, variant)``), so the query identity is variant.
+    inputs = _def_partition_inputs(state, "name_fold", variant, info.get("def_rows") or [])
     return [_mk_add(state, event, fact_kind="name_fold", target=info["def_sites"][0][0],
                     body_lines=body, evidence=info["def_sites"], tier=VERIFIED,
-                    producer="name_fold", symbol=sym)]
+                    producer="name_fold", symbol=sym,
+                    producer_inputs=inputs)]
 
 
 def _produce_body(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -1963,19 +2030,29 @@ def _produce_body(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelop
     if not rows:
         return []
     body = [f'{len(rows)} function bodies mention "{sym}" (no name or path match)']
-    body += [f"in {label} {name} - {fp}:{ln}" for fp, ln, name, label in rows[:8]]
-    evidence = [(fp, ln) for fp, ln, _n, _l in rows[:8]]
+    body += [f"in {label} {name} - {fp}:{ln}" for fp, ln, name, label, _id in rows[:8]]
+    evidence = [(fp, ln) for fp, ln, _n, _l, _id in rows[:8]]
     # SM (2026-07-12): the concept-hit function bodies as (path,line,sym) rows so the adapter's
     # body_concept renderer emits the grep-native ROW block DIRECTLY (no re-parse of GT's prose).
     # The SYMBOL is the concept-bearing function NAME. Side-car only (compare=False, unserialized)
     # — identity / dedup / byte-chain UNCHANGED; native-render-only, so the tagged path is unmoved.
     # Leak is enforced at RENDER time (render_body_concept_native drops test-file rows), matching
     # the localization precedent — native_args is not leak-filtered by _mk_add.
-    native_rows = [(fp, ln, name) for fp, ln, name, _l in rows[:8]]
+    native_rows = [(fp, ln, name) for fp, ln, name, _l, _id in rows[:8]]
+    # def-partition sidecar (Cluster-2b): the concept-bearing function NODES that mention the
+    # query. identity is the concept-bearing function NAME (the row's own node), not the query
+    # symbol (which does not name-match any node — that is precisely the body-concept case).
+    def_rows = [
+        (name, fp, ln, label, node_id)
+        for fp, ln, name, label, node_id in rows[:8]
+        if name and node_id > 0
+    ]
+    inputs = _def_partition_inputs(state, "body_concept", sym, def_rows)
     return [_mk_add(state, event, fact_kind="body_concept", target=rows[0][0],
                     body_lines=body, evidence=evidence, tier=INFO,
                     producer="body_concept", symbol=sym,
-                    native_args={"rows": native_rows})]
+                    native_args={"rows": native_rows},
+                    producer_inputs=inputs)]
 
 
 def _edit_related_to_stem(edit_blob: str, sym: str) -> bool:

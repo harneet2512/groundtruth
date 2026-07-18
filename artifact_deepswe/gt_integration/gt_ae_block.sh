@@ -169,6 +169,14 @@ GT_AE_ARGS=(
   #    it here or the live seam stays DARK. Default 0 → byte-identical when unset; Profile-2
   #    activates it (rl_profile PROFILE_MEMBERS). ──
   --ae "GT_LOC_RESLOT=${GT_LOC_RESLOT:-0}"
+  # ── ITEM 0 (2026-07-18): the post_search lattice MASTER enable. GT_POST_SEARCH is read
+  #    in-container by gt_mini_patch (gt_mini_patch.py:816 `_POST_SEARCH_ON` gating
+  #    _search_localize_decision at :4588 — the whole def-partition/loc lattice). Its FORM arm
+  #    GT_POST_SEARCH_NATIVE was already forwarded, but WITHOUT this master the producer never
+  #    fires, so the form arm rendered nothing. pier DROPS host env, so forward it here or the
+  #    lattice stays DARK in-container even under an active Profile-2. Default 0 → byte-identical
+  #    when unset; Profile-2 fans it to 1 via resolve_profile (rl_profile PROFILE_MEMBERS). ──
+  --ae "GT_POST_SEARCH=${GT_POST_SEARCH:-0}"
   # ── SM-3 "Super Mode" engine-activation flags (2026-07-11). Read by gt_mini_patch;
   #    forwarded so they are enable-able in-container (else the engines stay DARK — the
   #    exact defect SM-3 closes). Default 0 → byte-identical when unset; Profile-2 fans

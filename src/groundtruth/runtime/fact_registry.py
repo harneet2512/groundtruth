@@ -604,6 +604,29 @@ def all_fact_classes() -> tuple[str, ...]:
     return tuple(sorted(REGISTRY))
 
 
+def evidence_grain_for(fact_class: str) -> tuple[str, ...]:
+    """The FINER producer / evidence-type identifiers that all COLLAPSE to canonical
+    ``fact_class`` — the grain the 11-key §1 vocabulary hides. For ``localization`` this surfaces
+    BOTH the ``trace_frame`` evidence-type alias AND the ``ranked_localization`` producer, so a
+    loc_reslot audit can tell a stack-frame localizer from a ranked-localization delivery even
+    though both share fact_class ``localization`` (Cluster-5 ITEM 3, 2026-07-18).
+
+    PURE + registry-derived — reads ONLY the existing authority tables and NEVER mutates the
+    canonical mapping: (a) evidence-type aliases whose canonical class is ``fact_class``,
+    (b) the class's registered producers (``_EVIDENCE_TYPE_PRODUCERS``), (c) the class's own
+    registration producer. Returns ``()`` for an unregistered class; sorted + de-duplicated.
+    """
+    canon = _canonical_fact_class(fact_class)
+    if canon is None or canon not in REGISTRY:
+        return ()
+    grain: set[str] = {src for src, dst in _EVIDENCE_TYPE_ALIASES.items() if dst == canon}
+    grain |= set(_EVIDENCE_TYPE_PRODUCERS.get(canon, frozenset()))
+    reg = REGISTRY.get(canon)
+    if reg is not None and getattr(reg, "producer", ""):
+        grain.add(reg.producer)
+    return tuple(sorted(grain))
+
+
 def fact_role_for(fact_class: str) -> str | None:
     """Typed proof role for a canonical or shipped FACT identity.
 

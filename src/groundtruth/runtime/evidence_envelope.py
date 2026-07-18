@@ -121,6 +121,14 @@ from groundtruth.delivery.path_policy import is_deliverable
 
 __all__ = [
     "EvidenceEnvelope",
+    "ObservationBinding",
+    "build_observation_binding",
+    "observation_binding_to_dict",
+    "observation_binding_from_dict",
+    "validate_observation_binding",
+    "observation_candidate_id",
+    "policy_observation_id",
+    "feature_opportunity_id",
     "content_signature",
     "derive_dedup_key",
     "validate",
@@ -215,6 +223,246 @@ def _is_hash_shaped(s: str) -> bool:
     return len(s) == _HASH_HEX_LEN and all(c in "0123456789abcdef" for c in s)
 
 
+OBSERVATION_BINDING_SCHEMA = "gt.observation_binding.v1"
+
+
+@dataclass(frozen=True)
+class ObservationBinding:
+    """Exact host-only identity of one candidate in one policy observation.
+
+    This is the shared atomic join key for opportunity, delivery, control, receipt,
+    and physical-span records. It is audit metadata only: no field is rendered or
+    participates in evidence dedup/content identity.
+    """
+
+    schema: str
+    observation_id: str
+    opportunity_id: str
+    batch_start_iteration: int
+    parent_policy_sha256: str
+    parent_policy_chars: int
+    action_batch_sha256: str
+    candidate_ordinal: int
+    candidate_kind_sha256: str
+    candidate_dedup_sha256: str
+    candidate_id: str
+
+
+def policy_observation_id(
+    start_iteration: int, parent_sha256: str, action_sha256: str,
+) -> str:
+    """Framed identity for one parent-policy observation and its exact action batch."""
+    framed = (
+        b"gt.observation.v1\x00"
+        + int(start_iteration).to_bytes(8, "big", signed=False)
+        + bytes.fromhex(parent_sha256)
+        + bytes.fromhex(action_sha256)
+    )
+    return hashlib.sha256(framed).hexdigest()
+
+
+def feature_opportunity_id(
+    observation_id: str,
+    ordinal: int,
+    kind_sha256: str,
+    dedup_sha256: str,
+) -> str:
+    """Framed identity for one candidate opportunity inside an observation."""
+    framed = (
+        b"gt.opportunity.v1\x00"
+        + bytes.fromhex(observation_id)
+        + int(ordinal).to_bytes(8, "big", signed=False)
+        + bytes.fromhex(kind_sha256)
+        + bytes.fromhex(dedup_sha256)
+    )
+    return hashlib.sha256(framed).hexdigest()
+
+
+def observation_candidate_id(candidate_id: str) -> str:
+    """Return the audit-safe canonical candidate identifier.
+
+    Existing content-addressed IDs are already opaque and remain byte-identical. Any
+    producer key that is not a 16/64-character lowercase hexadecimal digest is reduced
+    to its full SHA-256 identity so policy text, commands, paths, or symbols cannot be
+    copied into host-only observation metadata.
+    """
+    if not isinstance(candidate_id, str) or not candidate_id:
+        raise ValueError("candidate_id must be non-empty text")
+    if len(candidate_id) in {16, 64} and all(
+        char in "0123456789abcdef" for char in candidate_id
+    ):
+        return candidate_id
+    return hashlib.sha256(
+        candidate_id.encode("utf-8", "surrogatepass")
+    ).hexdigest()
+
+
+def build_observation_binding(
+    *,
+    batch_start_iteration: int,
+    parent_policy_sha256: str,
+    parent_policy_chars: int,
+    action_batch_sha256: str,
+    candidate_ordinal: int,
+    candidate_kind: str,
+    candidate_id: str,
+) -> ObservationBinding:
+    """Build the canonical candidate/observation binding from producer identities."""
+    if type(batch_start_iteration) is not int or batch_start_iteration < 0:
+        raise ValueError("batch_start_iteration must be a non-negative integer")
+    if type(parent_policy_chars) is not int or parent_policy_chars < 0:
+        raise ValueError("parent_policy_chars must be a non-negative integer")
+    if type(candidate_ordinal) is not int or candidate_ordinal < 0:
+        raise ValueError("candidate_ordinal must be a non-negative integer")
+    if not _is_hash_shaped(parent_policy_sha256) or not parent_policy_sha256:
+        raise ValueError("parent_policy_sha256 must be 64 lowercase hex chars")
+    if not _is_hash_shaped(action_batch_sha256) or not action_batch_sha256:
+        raise ValueError("action_batch_sha256 must be 64 lowercase hex chars")
+    if not isinstance(candidate_kind, str) or not candidate_kind:
+        raise ValueError("candidate_kind must be non-empty text")
+    if not isinstance(candidate_id, str) or not candidate_id:
+        raise ValueError("candidate_id must be non-empty text")
+    kind_sha256 = hashlib.sha256(
+        candidate_kind.encode("utf-8", "surrogatepass")
+    ).hexdigest()
+    dedup_sha256 = hashlib.sha256(
+        candidate_id.encode("utf-8", "surrogatepass")
+    ).hexdigest()
+    canonical_candidate_id = observation_candidate_id(candidate_id)
+    observation_id = policy_observation_id(
+        batch_start_iteration, parent_policy_sha256, action_batch_sha256,
+    )
+    return ObservationBinding(
+        schema=OBSERVATION_BINDING_SCHEMA,
+        observation_id=observation_id,
+        opportunity_id=feature_opportunity_id(
+            observation_id, candidate_ordinal, kind_sha256, dedup_sha256,
+        ),
+        batch_start_iteration=batch_start_iteration,
+        parent_policy_sha256=parent_policy_sha256,
+        parent_policy_chars=parent_policy_chars,
+        action_batch_sha256=action_batch_sha256,
+        candidate_ordinal=candidate_ordinal,
+        candidate_kind_sha256=kind_sha256,
+        candidate_dedup_sha256=dedup_sha256,
+        candidate_id=canonical_candidate_id,
+    )
+
+
+def validate_observation_binding(
+    binding: ObservationBinding, *, expected_candidate_id: str | None = None,
+) -> list[str]:
+    """Return every binding violation in deterministic order."""
+    issues: list[str] = []
+    if not isinstance(binding, ObservationBinding):
+        return ["observation_binding:wrong_type"]
+    if binding.schema != OBSERVATION_BINDING_SCHEMA:
+        issues.append("observation_binding:schema")
+    for field_name in (
+        "observation_id", "opportunity_id", "parent_policy_sha256",
+        "action_batch_sha256", "candidate_kind_sha256", "candidate_dedup_sha256",
+    ):
+        value = getattr(binding, field_name, "")
+        if not isinstance(value, str) or not value or not _is_hash_shaped(value):
+            issues.append(f"observation_binding:{field_name}")
+    for field_name in (
+        "batch_start_iteration", "parent_policy_chars", "candidate_ordinal",
+    ):
+        value = getattr(binding, field_name, None)
+        if type(value) is not int or value < 0:
+            issues.append(f"observation_binding:{field_name}")
+    if not isinstance(binding.candidate_id, str) or not binding.candidate_id:
+        issues.append("observation_binding:candidate_id")
+    if issues:
+        return issues
+    expected_observation = policy_observation_id(
+        binding.batch_start_iteration,
+        binding.parent_policy_sha256,
+        binding.action_batch_sha256,
+    )
+    if binding.observation_id != expected_observation:
+        issues.append("observation_binding:observation_id_mismatch")
+    expected_opportunity = feature_opportunity_id(
+        binding.observation_id,
+        binding.candidate_ordinal,
+        binding.candidate_kind_sha256,
+        binding.candidate_dedup_sha256,
+    )
+    if binding.opportunity_id != expected_opportunity:
+        issues.append("observation_binding:opportunity_id_mismatch")
+    expected_dedup_sha = hashlib.sha256(
+        binding.candidate_id.encode("utf-8", "surrogatepass")
+    ).hexdigest()
+    if binding.candidate_dedup_sha256 not in {
+        expected_dedup_sha,
+        binding.candidate_id,
+    }:
+        issues.append("observation_binding:candidate_dedup_sha256_mismatch")
+    if expected_candidate_id is not None:
+        try:
+            expected_candidate_id = observation_candidate_id(expected_candidate_id)
+        except ValueError:
+            issues.append("observation_binding:candidate_id_mismatch")
+        else:
+            if binding.candidate_id != expected_candidate_id:
+                issues.append("observation_binding:candidate_id_mismatch")
+    return issues
+
+
+def observation_binding_to_dict(binding: ObservationBinding) -> dict[str, Any]:
+    """Canonical JSON-native binding representation shared by every ledger/sidecar."""
+    return {
+        "schema": binding.schema,
+        "observation_id": binding.observation_id,
+        "opportunity_id": binding.opportunity_id,
+        "batch_start_iteration": binding.batch_start_iteration,
+        "parent_policy_sha256": binding.parent_policy_sha256,
+        "parent_policy_chars": binding.parent_policy_chars,
+        "action_batch_sha256": binding.action_batch_sha256,
+        "candidate_ordinal": binding.candidate_ordinal,
+        "candidate_kind_sha256": binding.candidate_kind_sha256,
+        "candidate_dedup_sha256": binding.candidate_dedup_sha256,
+        "candidate_id": binding.candidate_id,
+    }
+
+
+def _binding_nonnegative_int(value: object, field_name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"observation_binding {field_name} must be a non-negative integer")
+    return value
+
+
+def observation_binding_from_dict(value: object) -> ObservationBinding | None:
+    """Rebuild a binding; ``None`` remains the explicit legacy/no-policy state."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("observation_binding must be an object or null")
+    binding = ObservationBinding(
+        schema=str(value.get("schema", "")),
+        observation_id=str(value.get("observation_id", "")),
+        opportunity_id=str(value.get("opportunity_id", "")),
+        batch_start_iteration=_binding_nonnegative_int(
+            value.get("batch_start_iteration"), "batch_start_iteration"
+        ),
+        parent_policy_sha256=str(value.get("parent_policy_sha256", "")),
+        parent_policy_chars=_binding_nonnegative_int(
+            value.get("parent_policy_chars"), "parent_policy_chars"
+        ),
+        action_batch_sha256=str(value.get("action_batch_sha256", "")),
+        candidate_ordinal=_binding_nonnegative_int(
+            value.get("candidate_ordinal"), "candidate_ordinal"
+        ),
+        candidate_kind_sha256=str(value.get("candidate_kind_sha256", "")),
+        candidate_dedup_sha256=str(value.get("candidate_dedup_sha256", "")),
+        candidate_id=str(value.get("candidate_id", "")),
+    )
+    issues = validate_observation_binding(binding)
+    if issues:
+        raise ValueError("invalid observation_binding: " + ",".join(issues))
+    return binding
+
+
 # --------------------------------------------------------------------------- #
 # deterministic dedup derivation — the canonical key every producer must set.
 # --------------------------------------------------------------------------- #
@@ -245,7 +493,7 @@ class _UnencodableContent(ValueError):
     ``int(...)`` during obj construction) — Fable re-review finding F-B."""
 
 
-def _encode_commitment(obj: dict) -> bytes:
+def _encode_commitment(obj: dict[str, Any]) -> bytes:
     try:
         return json.dumps(
             obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -368,6 +616,10 @@ class EvidenceEnvelope:
     receipt_state: str = RECEIPT_NONE  # reward-attribution ladder (law 7)
     delivery_reason: str = ""  # why delivered (mutually exclusive with suppression)
     suppression_reason: str = ""  # why suppressed (mutually exclusive with delivery)
+    # Exact candidate-in-policy-observation identity. Audit-only and never rendered or
+    # included in the evidence dedup key; serialized so later receipt transitions retain
+    # the originating opportunity rather than borrowing the current turn.
+    observation_binding: "ObservationBinding | None" = field(default=None, compare=False)
 
     # --- SM-10 (2026-07-12) NATIVE-RENDER SIDE-CAR — structured args, NOT identity, NOT
     # serialized. A producer attaches the numeric/structured fields a per-class native
@@ -380,7 +632,7 @@ class EvidenceEnvelope:
     # every existing envelope is byte/hash/eq-identical (default None). It travels with the
     # LIVE object via ``dataclasses.replace`` (the seal) — the delivery path renders the
     # object BEFORE any JSON round-trip — never through serialization.
-    native_args: "dict | None" = field(default=None, compare=False)
+    native_args: "dict[str, Any] | None" = field(default=None, compare=False)
     # Typed feature lineage is an audit-only sidecar.  Like ``native_args`` it is
     # excluded from identity, serialization, rendering, and the dedup key.
     lineage: "DeliveryLineage | None" = field(default=None, compare=False)
@@ -417,6 +669,7 @@ class EvidenceEnvelope:
         "receipt_state",
         "delivery_reason",
         "suppression_reason",
+        "observation_binding",
     )
 
     @classmethod
@@ -446,7 +699,8 @@ class EvidenceEnvelope:
         receipt_state: str = RECEIPT_NONE,
         delivery_reason: str = "",
         suppression_reason: str = "",
-        native_args: "dict | None" = None,
+        observation_binding: "ObservationBinding | None" = None,
+        native_args: "dict[str, Any] | None" = None,
         lineage: "DeliveryLineage | None" = None,
         producer_inputs: "object | None" = None,
     ) -> EvidenceEnvelope:
@@ -501,6 +755,7 @@ class EvidenceEnvelope:
             receipt_state=receipt_state,
             delivery_reason=delivery_reason,
             suppression_reason=suppression_reason,
+            observation_binding=observation_binding,
             native_args=native_args,
             lineage=lineage,
             producer_inputs=producer_inputs,
@@ -617,6 +872,14 @@ def validate(env: EvidenceEnvelope) -> list[str]:
             "delivery_reason and suppression_reason are mutually exclusive "
             "(both set)"
         )
+
+    # (h) OBSERVATION BINDING — when present, the sidecar must be internally exact and
+    # name this envelope's canonical candidate identity. Legacy/unbound envelopes remain
+    # valid with ``None``; a partial or cross-candidate binding fails loudly.
+    if env.observation_binding is not None:
+        violations.extend(validate_observation_binding(
+            env.observation_binding, expected_candidate_id=env.dedup_key,
+        ))
 
     return violations
 
@@ -780,6 +1043,10 @@ def to_dict(env: EvidenceEnvelope) -> dict[str, Any]:
         "receipt_state": env.receipt_state,
         "delivery_reason": env.delivery_reason,
         "suppression_reason": env.suppression_reason,
+        "observation_binding": (
+            observation_binding_to_dict(env.observation_binding)
+            if env.observation_binding is not None else None
+        ),
     }
 
 
@@ -813,4 +1080,7 @@ def from_dict(d: dict[str, Any]) -> EvidenceEnvelope:
         receipt_state=str(d.get("receipt_state", RECEIPT_NONE)),
         delivery_reason=str(d.get("delivery_reason", "")),
         suppression_reason=str(d.get("suppression_reason", "")),
+        observation_binding=observation_binding_from_dict(
+            d.get("observation_binding")
+        ),
     )

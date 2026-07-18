@@ -281,8 +281,8 @@ def test_canonical_inventory_emits_exactly_128_selection_only_rows():
     inventory = canonical_feature_inventory()
     result = select_campaign(inventory, {}, {}, locked_tasks=["paid-task"])
 
-    assert len(result["rows"]) == 128
-    assert sum(len(inventory[family]) for family in inventory) == 128
+    assert len(result["rows"]) == 129
+    assert sum(len(inventory[family]) for family in inventory) == 129
     assert result["meaning"] == (
         "campaign planning only; no row is SS-LIVE proof or promotion"
     )

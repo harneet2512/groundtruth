@@ -42,10 +42,13 @@ def _infra() -> dict:
 
 def test_cap_role_authority_partitions_all_profile_members() -> None:
     # P4 (B-TERM 2026-07-16): GT_SS_COHERENCE_V2 reclassified byte_owner → mediator. Counts move
-    # WITHIN CAP (byte_owner 8→7, mediator 26→27), inventory total unchanged (128).
+    # WITHIN CAP (byte_owner 8→7, mediator 26→27).
+    # ITEM 0 (2026-07-18): GT_POST_SEARCH added as an ELIGIBILITY member (eligibility 13→14,
+    # CAP 47→48, inventory total 128→129).
     assert len(CAP_BYTE_OWNER_IDS) == 7
-    assert len(CAP_ELIGIBILITY_IDS) == 13
+    assert len(CAP_ELIGIBILITY_IDS) == 14
     assert len(CAP_MEDIATOR_IDS) == 27
+    assert metrics.cap_role_for("GT_POST_SEARCH") == "eligibility"
     assert "GT_SS_COHERENCE_V2" not in CAP_BYTE_OWNER_IDS
     assert metrics.cap_role_for("GT_SS_COHERENCE_V2") == "mediator"
     # It now MEDIATES the recovery FACT (coherence_collapse → recovery), never a fabricated own FACT.

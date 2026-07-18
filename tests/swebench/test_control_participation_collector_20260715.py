@@ -116,6 +116,40 @@ def test_wrong_site_error_or_class_cooccurrence_cannot_admit_control(tmp_path) -
     assert record["integrity"]["control_participation_invalid_rows"] == [0, 1]
 
 
+def test_cross_observation_control_reuse_cannot_join_delivery(tmp_path) -> None:
+    payload = "src/mod.py:12 preserve caller contract"
+    participation = _participation(payload)
+    delivery = _delivered(payload)
+    common = {
+        "schema": "gt.observation_binding.v1",
+        "opportunity_id": "2" * 64,
+        "batch_start_iteration": 4,
+        "parent_policy_sha256": "3" * 64,
+        "parent_policy_chars": 6,
+        "action_batch_sha256": "4" * 64,
+        "candidate_ordinal": 0,
+        "candidate_kind_sha256": "5" * 64,
+        "candidate_dedup_sha256": hashlib.sha256(
+            b"contract:dedup-1"
+        ).hexdigest(),
+        "candidate_id": "contract:dedup-1",
+    }
+    participation["observation_binding"] = {
+        **common, "observation_id": "1" * 64,
+    }
+    delivery["observation_binding"] = {
+        **common, "observation_id": "9" * 64,
+    }
+    record = metrics.collect_task(
+        "synthetic__control-cross-observation",
+        _write_task(tmp_path, [participation, delivery], payload),
+    )
+    readiness = record["features"]["GT_CONTRACT_NATIVE"]["ss_readiness"]
+
+    assert readiness["mediation"]["participation_joins"] == []
+    assert readiness["gates"]["runtime_member_control_receipt"] is None
+
+
 def test_candidate_id_and_exact_seal_are_both_load_bearing(tmp_path) -> None:
     payload = "src/mod.py:12 preserve caller contract"
     for index, participation in enumerate((

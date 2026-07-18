@@ -248,17 +248,35 @@ def parse_rate(rate: object) -> float:
     return r
 
 
-def _bucket(task_id: str, canon: str, dedup_key: str) -> int:
+def _bucket(
+    task_id: str, canon: str, dedup_key: str, predecision_id: str = ""
+) -> int:
     """The deterministic sha256 bucket in ``[0, 2**64)`` for one delivery instance. Folds the
     canonical class in (invariant 4: stratification) and the ``dedup_key`` (so distinct
     delivery instances of the same class get independent draws). Injective framing via the
-    unit separator; ``surrogatepass`` so a surrogate-bearing key can never raise."""
-    raw = _SEP.join((task_id or "", canon or "", dedup_key or ""))
+    unit separator; ``surrogatepass`` so a surrogate-bearing key can never raise.
+
+    B1 (Cluster-4): ``predecision_id`` OPTIONALLY folds the PRE-DECISION STATE identity into
+    the draw so two instances of the same class at DIFFERENT decision states draw
+    independently (the offline fair-probe pairing keys on this same identity). It is APPENDED
+    only when non-empty, so a bare ``(task_id, canon, dedup_key)`` call (the seam hot path,
+    which has no trajectory prefix at delivery time) is BYTE-IDENTICAL to the pre-Cluster-4
+    join — invariant 1 (deterministic/stateless) preserved, invariant 2 unaffected."""
+    parts = [task_id or "", canon or "", dedup_key or ""]
+    if predecision_id:
+        parts.append(predecision_id)
+    raw = _SEP.join(parts)
     digest = hashlib.sha256(raw.encode("utf-8", "surrogatepass")).digest()
     return int.from_bytes(digest[:8], "big")
 
 
-def assign(task_id: str, fact_class: str, dedup_key: str, rate: object) -> str:
+def assign(
+    task_id: str,
+    fact_class: str,
+    dedup_key: str,
+    rate: object,
+    predecision_id: str = "",
+) -> str:
     """The shadow-holdout verdict for one eligible delivery: ``DELIVER`` or ``HOLDOUT``.
 
     Consulted at the seam ONLY for a fact that has already won arbitration and passed every SS
@@ -272,7 +290,9 @@ def assign(task_id: str, fact_class: str, dedup_key: str, rate: object) -> str:
                                     per-class share, deterministic and reproducible.
 
     ``fact_class`` may be a canonical class, a finer evidence_type, a seam ``kind``, or a
-    ladder class — it is resolved via :func:`canonical_class`. Never raises."""
+    ladder class — it is resolved via :func:`canonical_class`. ``predecision_id`` (B1,
+    Cluster-4) is an OPTIONAL pre-decision-state identity folded into the draw; the seam hot
+    path omits it (byte-identical to the pre-Cluster-4 draw). Never raises."""
     r = parse_rate(rate)
     if r <= 0.0:
         return DELIVER
@@ -283,7 +303,11 @@ def assign(task_id: str, fact_class: str, dedup_key: str, rate: object) -> str:
         return HOLDOUT
     # integer threshold from the (deterministic, IEEE-754) product — no float in the compare.
     threshold = int(r * _HASH_SPACE)
-    return HOLDOUT if _bucket(task_id, canon, dedup_key) < threshold else DELIVER
+    return (
+        HOLDOUT
+        if _bucket(task_id, canon, dedup_key, predecision_id or "") < threshold
+        else DELIVER
+    )
 
 
 # --------------------------------------------------------------------------- #

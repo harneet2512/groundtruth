@@ -37,6 +37,10 @@ for path in (ROOT / "src", ROOT / "scripts" / "swebench"):
 import attestation_join as aj  # noqa: E402
 from groundtruth.pretask.change_surface import ROLE_REGISTRATION  # noqa: E402
 from groundtruth.runtime.attestation_store import persist_attestation  # noqa: E402
+from groundtruth.runtime.feature_lineage import (  # noqa: E402
+    build_lineage,
+    lineage_ledger_extra,
+)
 from groundtruth.runtime.newfile_precedent_attestation import (  # noqa: E402
     NewfilePrecedentSnapshot,
     finalize_newfile_precedent_attestation,
@@ -86,10 +90,11 @@ def _precedent_attestation(repo_head: str = "b" * 40):
 
 
 def _delivered_row(candidate_id: str, seal: str) -> dict:
-    """A DELIVERED gateway change_surface ledger row exactly as the seam writes it."""
+    """A DELIVERED gateway change_surface ledger row exactly as the seam writes it —
+    including the typed FACT lineage columns (J6: required to seat a truth join)."""
     return {
         "layer": "gateway.missing_role:registration",
-        "event_type": "search_result",
+        "event_type": "failed_search",
         "file_path": "providers/registry.py",
         "outcome": "delivered",
         "reason": "",
@@ -98,6 +103,11 @@ def _delivered_row(candidate_id: str, seal: str) -> dict:
         "content_sha256_16": seal,
         "seal_scope": "block",
         "candidate_id": candidate_id,
+        **lineage_ledger_extra(build_lineage(
+            runtime_producer_id="change_surface",
+            evidence_type=_EVIDENCE_TYPE,
+            actual_event="failed_search",
+        )),
     }
 
 

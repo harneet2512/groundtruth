@@ -80,12 +80,23 @@ from attestation_join import (  # noqa: E402
 )
 from chronology_extract import (  # noqa: E402  (SPEC-J3 timing join)
     adjudicate_deliveries,
+    extract_block_chronologies,
+    extract_chronologies,
     timing_by_fact_class,
+)
+from receipt_predicates import (  # noqa: E402  (B-cluster Gate 4 acknowledgment evaluators)
+    acknowledgment_by_fact_class,
 )
 from fair_probe_result import (  # noqa: E402  (SPEC-J4 fair-probe result)
     fair_probe_bool_by_fact_class,
     join_fair_probes,
 )
+from consumption_ledger import (  # noqa: E402  (DEFECT 7/8 per-fire byte authority + leak scanner)
+    PHYSICAL_DELIVERY_BOUND,
+    physical_delivery_authority,
+    scan_test_identity_leaks,
+)
+from live_evidence import _LEAK_RE  # noqa: E402  (DEFECT 7 per-fire leak class, reused verbatim)
 from groundtruth.runtime.feature_lineage import (  # noqa: E402
     CAP_BYTE_OWNER_MECHANISMS,
     CAP_BYTE_OWNER_IDS,
@@ -99,11 +110,15 @@ from groundtruth.runtime.control_participation import (  # noqa: E402
     RECEIPT_FOLLOWS_DELIVERY,
     ControlParticipation,
 )
+from groundtruth.runtime.evidence_envelope import (  # noqa: E402
+    observation_binding_from_dict,
+)
 from groundtruth.runtime.fact_registry import (  # noqa: E402
     FACT_ROLE_INTERNAL_SUPPORT,
     fact_role_for,
     producer_matches,
     registration_for,
+    required_renderer,
 )
 
 # ---------------------------------------------------------------------------
@@ -218,6 +233,7 @@ _INFRA_MEMBER_MEDIATES: dict[str, tuple[str, ...]] = {
     "GT_SS_ACK_FORM": (),                                 # SS-5 FORM: preamble reframes reading of ALL classes + obligations checklist
     "GT_SS_EXEC_TRUTH": ("covering_red",),                # SS-2 mediator: runner-eligible covering selection; kills unexecuted assurances
     "GT_SS_ELIGIBILITY": (),                              # SS-4 mediator: cd-$() prefix widening for search isolation (post_search/loc legs)
+    "GT_POST_SEARCH": ("def_partition",),                # ITEM 0: post_search lattice MASTER enable (eligibility gate for the def_partition producer)
     "GT_SS_SHADOW": (),                                   # SS-8 mediator: shadow-holdout deliver/withhold across ALL participating advisory classes (E10 causal instrument; inert at rate 0)
     # P4 (B-TERM 2026-07-16): GT_SS_COHERENCE_V2 reclassified byte_owner → mediator
     # (feature_lineage CAP_BYTE_OWNER_IDS). It mediates the ``recovery`` FACT class — the
@@ -283,12 +299,30 @@ def _member_fair_probe(
     member: str, fair_probe_by_fc: dict[str, bool | None]
 ) -> bool | None:
     """SPEC-J4: a byte-owner member's fair-probe gate = the join over its owned fact class(es).
-    True only when every measured owned class is a proven causal result (CAUSAL/CAUSAL_PAIRED);
+    True only when every measured owned class is a proven causal result (Cluster-4 B5:
+    CAUSAL/CAUSAL_FORK; CAUSAL_PAIRED is enrichment-only and never sets the gate);
     False if any owned class self-localized; None when no owned class is measured (fail-closed)."""
     measured = [
         fair_probe_by_fc.get(fc)
         for fc in member_fact_classes(member)
         if fair_probe_by_fc.get(fc) is not None
+    ]
+    if not measured:
+        return None
+    return all(measured)
+
+
+def _member_acknowledgment(
+    member: str, ack_by_fc: dict[str, bool | None]
+) -> bool | None:
+    """B-cluster Gate 4: a byte-owner member's acknowledgment = the join over its owned fact
+    class(es), using the registry-specific receipt evaluator rollup. True only when every
+    measured owned class acknowledged (>=1 measured); False if any owned class did NOT; None
+    when no owned class is measured (fail-closed -> the receipt-ladder fallback then applies)."""
+    measured = [
+        ack_by_fc.get(fc)
+        for fc in member_fact_classes(member)
+        if ack_by_fc.get(fc) is not None
     ]
     if not measured:
         return None
@@ -431,8 +465,12 @@ def _typed_fact_class(payload: object) -> str | None:
         return None
     evidence_type = row.get("evidence_type")
     runtime_producer = row.get("runtime_producer_id")
+    if not isinstance(evidence_type, str) or not evidence_type:
+        return None
     registered_producer = row.get("registered_producer_id")
     fact_class = row.get("fact_class")
+    if not isinstance(fact_class, str) or not fact_class:
+        return None
     registration = (
         registration_for(evidence_type) if isinstance(evidence_type, str) else None
     )
@@ -592,6 +630,57 @@ def _value_honors_8dp(value: Any) -> bool:
     return False
 
 
+# Per-metric provenance overrides (D2/D4/D5, 2026-07-18). The generic pointers
+# ``MANDATORY_METRICS.md#{section}.{name}`` / ``mandatory_contract:{value_type}`` neither name the
+# REAL formula basis nor the ACTUAL task-scope denominator. These overrides make each honest:
+# they name the underscore denominator source in the deep-metrics artifact and, for the two token
+# metrics that publish an ESTIMATE / STEP-PROXY rather than exact per-token attribution, DISCLOSE
+# that basis so a reader never mistakes a proxy for a measured token formula. Any (section, name)
+# not listed keeps the honest task-scope default (``gt_deep_metrics:performance.{section}.{name}``).
+_PERF_PROVENANCE_OVERRIDES: dict[tuple[str, str], dict[str, str]] = {
+    # D2: wasted_token_rate is a STEP proxy, NOT the §9 per-token formula (no per-step token
+    # attribution exists in the trajectory) — say so in formula_provenance so it is never
+    # mislabeled MEASURED-as-token.
+    ("token_efficiency", "wasted_token_rate"): {
+        "formula_provenance": "STEP-PROXY non_gold_steps/(gold_steps+non_gold_steps); NOT the "
+        "MANDATORY §9 per-token formula (no per-step token attribution in the trajectory)",
+        "denominator_provenance": "gt_deep_metrics:performance.token_efficiency._non_idle_step_count "
+        "(step-count proxy, not tokens)",
+    },
+    # D5: gt_token_overhead's numerator gt_injected_tokens is a chars/4 token ESTIMATE — disclose it.
+    ("token_efficiency", "gt_token_overhead"): {
+        "formula_provenance": "gt_injected_tokens(=gt_observation_chars/4 token ESTIMATE)/"
+        "total_tokens_in (MANDATORY_METRICS.md#token_efficiency.gt_token_overhead)",
+        "denominator_provenance": "gt_deep_metrics:performance.token_efficiency.total_tokens_in",
+    },
+    # D4: name the real underscore/field denominators for the gold-ratio task-scope rows.
+    ("token_efficiency", "tokens_per_gold_edit"): {
+        "denominator_provenance": "gt_deep_metrics:performance.token_efficiency._n_gold_edited",
+    },
+    ("localization", "localization_recall"): {
+        "denominator_provenance": "gt_deep_metrics:performance.localization.n_gold_files",
+    },
+    ("localization", "navigation_directness"): {
+        "denominator_provenance": "gt_deep_metrics:performance.localization.n_gold_files",
+    },
+    ("scope_completeness", "scope_coverage"): {
+        "denominator_provenance": "gt_deep_metrics:performance.scope_completeness.n_gold_files",
+    },
+}
+
+
+def _perf_provenance(section: str, name: str) -> tuple[str, str]:
+    """Honest (formula_provenance, denominator_provenance) for a task-scope PERF row. The default
+    denominator NAMES the real source field in the deep-metrics artifact (D4 — never the fake
+    ``mandatory_contract:<type>``); the override map refines the audit-named proxy/estimate rows."""
+    override = _PERF_PROVENANCE_OVERRIDES.get((section, name), {})
+    formula = override.get("formula_provenance", f"MANDATORY_METRICS.md#{section}.{name}")
+    denom = override.get(
+        "denominator_provenance", f"gt_deep_metrics:performance.{section}.{name}"
+    )
+    return formula, denom
+
+
 def _performance_feature_records(
     task: str, task_dir: str,
 ) -> tuple[dict[str, dict[str, Any]], list[str], str | None]:
@@ -604,20 +693,29 @@ def _performance_feature_records(
     records: dict[str, dict[str, Any]] = {}
     missing: list[str] = []
 
-    identity_ok = isinstance(payload, dict) and payload.get("task_id") == task
-    artifact_schema_valid = bool(
-        identity_ok and payload.get("schema") == "gt_deep_metrics.v2"
+    identity_payload = (
+        payload
+        if isinstance(payload, dict) and payload.get("task_id") == task
+        else None
     )
-    precision_decimals = payload.get("precision_decimals") if identity_ok else None
+    identity_ok = identity_payload is not None
+    artifact_schema_valid = bool(
+        identity_payload is not None
+        and identity_payload.get("schema") == "gt_deep_metrics.v2"
+    )
+    precision_decimals = (
+        identity_payload.get("precision_decimals")
+        if identity_payload is not None else None
+    )
     if path and not identity_ok:
         missing.append("PERF.task_identity")
     for section, metrics in definitions.items():
         section_payload: Any = None
-        if identity_ok:
+        if identity_payload is not None:
             if section == "behavioral_impact":
-                section_payload = payload.get(section)
+                section_payload = identity_payload.get(section)
             else:
-                performance = payload.get("performance")
+                performance = identity_payload.get("performance")
                 section_payload = performance.get(section) if isinstance(performance, dict) else None
         for name, value_type in metrics:
             if value_type == "run_ratio":
@@ -638,8 +736,8 @@ def _performance_feature_records(
             present = isinstance(section_payload, dict) and name in section_payload
             raw = section_payload.get(name) if present else None
             state, _normalized_value, applicability = (
-                _metric_state(payload, section, name, value_type)
-                if identity_ok else ("unmeasured", None, None)
+                _metric_state(identity_payload, section, name, value_type)
+                if identity_payload is not None else ("unmeasured", None, None)
             )
             status = {
                 "measured": "MEASURED",
@@ -650,9 +748,9 @@ def _performance_feature_records(
             }[state]
             if (
                 section == "behavioral_impact"
-                and identity_ok
-                and isinstance(payload.get("behavioral_impact"), dict)
-                and payload["behavioral_impact"].get("collection_error")
+                and identity_payload is not None
+                and isinstance(identity_payload.get("behavioral_impact"), dict)
+                and identity_payload["behavioral_impact"].get("collection_error")
             ):
                 status = "UNMEASURED"
             if status == "UNMEASURED":
@@ -671,8 +769,8 @@ def _performance_feature_records(
                 ),
                 "artifact_schema_valid": artifact_schema_valid,
                 "precision_decimals": precision_decimals,
-                "formula_provenance": f"MANDATORY_METRICS.md#{section}.{name}",
-                "denominator_provenance": f"mandatory_contract:{value_type}",
+                "formula_provenance": _perf_provenance(section, name)[0],
+                "denominator_provenance": _perf_provenance(section, name)[1],
                 "coverage_scope": "run" if value_type == "run_ratio" else "task",
                 "applicability": applicability,
                 "observation": (
@@ -707,24 +805,31 @@ def _run_ratio_feature_record(
     value = metric.get("value") if isinstance(metric, dict) else None
     applicability = metric.get("applicability") if isinstance(metric, dict) else None
     population = payload.get("task_population") if isinstance(payload, dict) else None
+    applicable = (
+        applicability.get("applicable") if isinstance(applicability, dict) else None
+    )
+    predicate = (
+        applicability.get("predicate") if isinstance(applicability, dict) else None
+    )
+    applicability_reason = (
+        applicability.get("reason") if isinstance(applicability, dict) else None
+    )
     applicability_valid = bool(
-        isinstance(applicability, dict)
-        and isinstance(applicability.get("applicable"), bool)
-        and isinstance(applicability.get("predicate"), str)
-        and bool(applicability["predicate"].strip())
-        and isinstance(applicability.get("reason"), str)
-        and bool(applicability["reason"].strip())
+        isinstance(applicable, bool)
+        and isinstance(predicate, str) and bool(predicate.strip())
+        and isinstance(applicability_reason, str)
+        and bool(applicability_reason.strip())
     )
     measured_value_valid = (
         status == "MEASURED"
-        and applicability_valid and applicability["applicable"] is True
+        and applicability_valid and applicable is True
         and isinstance(value, (int, float)) and not isinstance(value, bool)
         and math.isfinite(float(value)) and float(value) >= 0.0
         and isinstance(payload, dict) and payload.get("resolved", 0) > 0
     )
     not_applicable_valid = (
         status == "NOT_APPLICABLE" and value is None
-        and applicability_valid and applicability["applicable"] is False
+        and applicability_valid and applicable is False
         and isinstance(payload, dict) and payload.get("resolved") == 0
     )
     contract_valid = bool(
@@ -1257,6 +1362,47 @@ def native_visible_by_fact_class(rows: list[dict], messages: list[dict]) -> dict
     return dict(out)
 
 
+_NATIVE_RENDER_IDS: frozenset[str] = frozenset({"native", "lane"})
+
+
+def native_renderer_audit_by_fact_class(rows: list[dict]) -> dict[str, bool]:
+    """Per fact class, the exact registry-renderer audit verdict for its DELIVERED rows
+    (defect-5, run #2). Replaces the fabricated ``native_valid = measured(True)`` that
+    passed on MERE delivery.
+
+    A delivered row proves NATIVE form only when BOTH hold, joined on the same delivered
+    row (candidate+seal+span the seam already stamps):
+      * its ``renderer_id`` is a native-channel render (``native``/``lane``) — a bespoke
+        ``tagged`` <gt-*> render is NOT the registry native form; and
+      * its ``evidence_type`` resolves to a registered class with a required native
+        renderer (``fact_registry.required_renderer`` is not ``None``).
+
+    A class is native-valid True iff EVERY render-identity-carrying delivered row of that
+    class proves native form AND at least one such row exists; any ``tagged`` (or
+    renderer-mismatched) delivered row taints the class to False. A class whose delivered
+    rows carry NO render identity is ABSENT from this map → honest UNMEASURED upstream
+    (never a fabricated True)."""
+    verdict: dict[str, bool] = {}
+    for r in rows:
+        if not isinstance(r, dict) or str(r.get("outcome") or "") != "delivered":
+            continue
+        renderer_id = r.get("renderer_id")
+        if not isinstance(renderer_id, str) or not renderer_id:
+            continue  # no render identity → cannot audit this row (fail-closed)
+        fc = _typed_fact_class(r) or layer_to_fact_class(str(r.get("layer") or ""))
+        if fc is None:
+            continue
+        evidence_type = r.get("evidence_type")
+        native_ok = bool(
+            renderer_id in _NATIVE_RENDER_IDS
+            and isinstance(evidence_type, str)
+            and evidence_type
+            and required_renderer(evidence_type) is not None
+        )
+        verdict[fc] = native_ok if fc not in verdict else (verdict[fc] and native_ok)
+    return verdict
+
+
 def _control_participation_evidence(
     rows: list[dict], messages: list[dict], consumption_ledger: dict[str, Any],
     brief_payload: dict[str, Any] | None = None,
@@ -1300,22 +1446,43 @@ def _control_participation_evidence(
                 or not isinstance(row.get("reason"), str)
             ):
                 raise ValueError("non-terminal or failed participation row")
+            observation_binding = observation_binding_from_dict(
+                row.get("observation_binding")
+            )
+            decision_site = row.get("decision_site")
+            decision = row.get("participation_decision")
+            iteration = row.get("iteration")
+            candidate_chars = row.get("candidate_chars")
+            candidate_sha256_16 = row.get("candidate_sha256_16")
+            candidate_id = row.get("candidate_id")
+            reason = row.get("reason")
+            if (
+                not isinstance(decision_site, str)
+                or not isinstance(decision, str)
+                or type(iteration) is not int
+                or type(candidate_chars) is not int
+                or not isinstance(candidate_sha256_16, str)
+                or not isinstance(candidate_id, str)
+                or not isinstance(reason, str)
+            ):
+                raise ValueError("malformed participation scalar fields")
             record = ControlParticipation(
                 schema=row["schema"],
                 feature_id=control_ref["feature_id"],
                 role=control_ref["role"],
-                decision_site=row.get("decision_site"),
-                decision=row.get("participation_decision"),
-                iteration=row.get("iteration"),
-                candidate_chars=row.get("candidate_chars"),
-                candidate_sha256_16=row.get("candidate_sha256_16"),
+                decision_site=decision_site,
+                decision=decision,
+                iteration=iteration,
+                candidate_chars=candidate_chars,
+                candidate_sha256_16=candidate_sha256_16,
                 fact_class=row.get("fact_class"),
-                candidate_id=row.get("candidate_id"),
-                reason=row.get("reason"),
+                candidate_id=candidate_id,
+                reason=reason,
                 temporal_relation=row.get(
                     "temporal_relation", CONTROL_PRECEDES_DELIVERY,
                 ),
                 related_delivery_iteration=row.get("related_delivery_iteration"),
+                observation_binding=observation_binding,
             )
             if record.role == "mediator" and record.decision == "APPLIED" and (
                 not record.candidate_id
@@ -1367,9 +1534,9 @@ def _control_participation_evidence(
             runtime_producer = delivery.get("runtime_producer_id")
             registered_producer = delivery.get("registered_producer_id")
             evidence_type = delivery.get("evidence_type")
-            fact_registration = (
-                registration_for(evidence_type) if isinstance(evidence_type, str) else None
-            )
+            if not isinstance(evidence_type, str):
+                continue
+            fact_registration = registration_for(evidence_type)
             if (
                 delivery.get("producer_registration_match") is not True
                 or not isinstance(runtime_producer, str)
@@ -1380,6 +1547,20 @@ def _control_participation_evidence(
                 or fact_registration.producer != registered_producer
                 or fact_registration.fact_class != record.fact_class
                 or not producer_matches(evidence_type, runtime_producer)
+            ):
+                continue
+            try:
+                delivery_binding = observation_binding_from_dict(
+                    delivery.get("observation_binding")
+                )
+            except (TypeError, ValueError):
+                continue
+            if (
+                (record.observation_binding is None) != (delivery_binding is None)
+                or (
+                    record.observation_binding is not None
+                    and record.observation_binding != delivery_binding
+                )
             ):
                 continue
             if (
@@ -1413,6 +1594,21 @@ def _control_participation_evidence(
                     and entry.get("joined") is True
                     and entry.get("join_method") == "seal"
                 ):
+                    try:
+                        entry_binding = observation_binding_from_dict(
+                            entry.get("observation_binding")
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if (
+                        (record.observation_binding is None)
+                        != (entry_binding is None)
+                        or (
+                            record.observation_binding is not None
+                            and record.observation_binding != entry_binding
+                        )
+                    ):
+                        continue
                     candidate_receipt = int(entry.get("receipt") or 0)
                     if candidate_receipt >= receipt_level:
                         receipt_level = candidate_receipt
@@ -1448,8 +1644,13 @@ def _control_participation_evidence(
             break
 
     if brief_payload is not None:
+        block_receipt_fn = None
         try:
-            from acq_provenance import _block_receipt, _producer_delivery_home, _validated_blocks
+            from acq_provenance import (
+                _block_receipt as block_receipt_fn,
+                _producer_delivery_home,
+                _validated_blocks,
+            )
 
             if brief_payload.get("schema") != "gt.brief_result.v1":
                 raise ValueError("unsupported brief result schema")
@@ -1502,18 +1703,35 @@ def _control_participation_evidence(
                     raise ValueError("malformed control_ref")
                 if raw.get("schema") != CONTROL_PARTICIPATION_SCHEMA or raw.get("decision") == "ERROR":
                     raise ValueError("failed participation row")
+                decision_site = raw.get("decision_site")
+                decision = raw.get("decision")
+                iteration = raw.get("iteration")
+                candidate_chars = raw.get("candidate_chars")
+                candidate_sha256_16 = raw.get("candidate_sha256_16")
+                candidate_id = raw.get("candidate_id")
+                reason = raw.get("reason")
+                if (
+                    not isinstance(decision_site, str)
+                    or not isinstance(decision, str)
+                    or type(iteration) is not int
+                    or type(candidate_chars) is not int
+                    or not isinstance(candidate_sha256_16, str)
+                    or not isinstance(candidate_id, str)
+                    or not isinstance(reason, str)
+                ):
+                    raise ValueError("malformed brief participation scalar fields")
                 record = ControlParticipation(
                     schema=raw["schema"],
                     feature_id=control_ref["feature_id"],
                     role=control_ref["role"],
-                    decision_site=raw.get("decision_site"),
-                    decision=raw.get("decision"),
-                    iteration=raw.get("iteration"),
-                    candidate_chars=raw.get("candidate_chars"),
-                    candidate_sha256_16=raw.get("candidate_sha256_16"),
+                    decision_site=decision_site,
+                    decision=decision,
+                    iteration=iteration,
+                    candidate_chars=candidate_chars,
+                    candidate_sha256_16=candidate_sha256_16,
                     fact_class=raw.get("fact_class"),
-                    candidate_id=raw.get("candidate_id"),
-                    reason=raw.get("reason"),
+                    candidate_id=candidate_id,
+                    reason=reason,
                     temporal_relation=raw.get(
                         "temporal_relation", CONTROL_PRECEDES_DELIVERY,
                     ),
@@ -1558,13 +1776,13 @@ def _control_participation_evidence(
             ):
                 invalid_brief_rows.append(brief_index)
                 continue
-            if parent_home is None:
+            if parent_home is None or not callable(block_receipt_fn):
                 continue
             candidate_path = (
                 record.candidate_id.split(":", 1)[1]
                 if record.candidate_id.startswith("localization:") else ""
             )
-            block_receipt = _block_receipt(
+            block_receipt = block_receipt_fn(
                 block, candidate_path, messages, parent_home["msg_index"],
             )
             joins[record.feature_id].append({
@@ -1639,7 +1857,16 @@ def _control_declared_effect_correctness(
         return bool(seal) and isinstance(chars, int) and not isinstance(chars, bool) and chars > 0
 
     def _carried(rec: dict[str, Any]) -> bool:
-        return (str(rec.get("candidate_sha256_16")), int(rec.get("candidate_chars"))) in delivered_seals
+        seal = rec.get("candidate_sha256_16")
+        chars = rec.get("candidate_chars")
+        if (
+            not isinstance(seal, str)
+            or not seal
+            or type(chars) is not int
+            or chars <= 0
+        ):
+            return False
+        return (seal, chars) in delivered_seals
 
     out: dict[str, bool | None] = {}
     for feature_id, recs in records.items():
@@ -1722,10 +1949,10 @@ def fact_class_lifecycle(
     ledger_artifact: str,
     traj_artifact: str,
     native_visible: int = 0,
+    native_renderer_valid: bool | None = None,
 ) -> dict[str, Any]:
     """Assemble the universal lifecycle for one fact class from the offline evidence."""
-    lc = new_lifecycle("not_applicable_to_this_class")
-    reg = registry.registration(fc)
+    lc: dict[str, Any] = new_lifecycle("not_applicable_to_this_class")
     b = ledger_by_fc.get(fc, {})
     cons = consumption_by_fc.get(fc, {})
 
@@ -1758,10 +1985,12 @@ def fact_class_lifecycle(
                                        source_artifact=ledger_artifact)
         lc["authority_valid"] = unmeasured("no per-row tier/confidence in ledger",
                                            source_artifact=ledger_artifact)
-        lc["native_valid"] = measured(True, source_artifact=ledger_artifact)  # seam renders native
-        # boundary: did any delivered boundary match the registry deliver_by?
-        want = reg.deliver_by if reg else None
-        got = {x for x in b.get("delivered_boundaries", set()) if x}
+        # DEFECT-5 (run #2): native_valid is an EXACT registry-renderer audit, never a
+        # fabricated True on mere delivery. It is MEASURED only when the delivered rows
+        # carry a render identity to audit (renderer_id ↔ required_renderer); a
+        # render-identity-less delivery leaves the honest UNMEASURED default.
+        if isinstance(native_renderer_valid, bool):
+            lc["native_valid"] = measured(native_renderer_valid, source_artifact=ledger_artifact)
         lc["expired_late"] = measured(int(b.get("expired_late", 0)) > 0, source_artifact=ledger_artifact)
         lc["stale"] = measured(int(b.get("stale", 0)) > 0, source_artifact=ledger_artifact)
         lc["dose_tokens"] = measured(round(int(b.get("delivered_chars", 0)) / 4.0, 8),
@@ -1881,6 +2110,9 @@ def verdict_for(lifecycle: dict[str, Any], role: str) -> str:
     return VERDICT_HOLD
 
 
+_ACK_UNSET = object()  # B-cluster Gate 4: "no acknowledgment override supplied" sentinel.
+
+
 def ss_gate_readiness(
     lifecycle: dict[str, Any],
     *,
@@ -1890,12 +2122,21 @@ def ss_gate_readiness(
     fair_probe: bool | None,
     live_witness: bool,
     chronological_time: bool | None = None,
+    acknowledged: bool | None | object = _ACK_UNSET,
 ) -> dict[str, Any]:
     """Fail-closed projection of the seven SS-LIVE gates for one feature.
 
     ``None`` means the artifact cannot prove that gate. Offline fixture/replay
     evidence may populate individual gates, but the terminal bit additionally
     requires an explicitly identified live witness.
+
+    B-cluster (Gate 4): ``acknowledged`` accepts the registry-specific acknowledgment verdict
+    from :mod:`receipt_predicates` (True/False/None). When it is the ``_ACK_UNSET`` sentinel
+    (the historical direct callers), the ``acknowledged`` gate falls back to the receipt-ladder
+    value (``receipt_level >= 2``) BYTE-IDENTICALLY. When a definite bool is supplied it REPLACES
+    that value (the registry-specific acknowledgment is the authority); a supplied ``None`` is a
+    caller that measured nothing and also falls back to the receipt ladder (never weaker than the
+    existing signal).
     """
     delivered = _val(lifecycle.get("delivered"))
     truth = _val(lifecycle.get("truth_valid"))
@@ -1919,12 +2160,19 @@ def ss_gate_readiness(
     else:
         correct_time = None
 
-    acknowledged = receipt >= 2 if isinstance(receipt, int) else None
+    receipt_ack = receipt >= 2 if isinstance(receipt, int) else None
+    # B-cluster Gate 4: the registry-specific acknowledgment REPLACES the generic receipt ladder
+    # when the evaluator produced a definite bool; the sentinel / a None result falls back to the
+    # receipt ladder (byte-identical to the historical path; never weaker than the prior signal).
+    if acknowledged is _ACK_UNSET or acknowledged is None:
+        acknowledged_gate: bool | None = receipt_ack
+    else:
+        acknowledged_gate = bool(acknowledged)
     gates: dict[str, bool | None] = {
         "delivered_byte_proven": delivered_byte_proven,
         "correct_info": correct_info,
         "correct_rl_adhered_time": correct_time,
-        "acknowledged": acknowledged,
+        "acknowledged": acknowledged_gate,
         "leak_zero": leak_free if isinstance(leak_free, bool) else None,
         "dose_lte_one": dose_ok if isinstance(dose_ok, bool) else None,
         "fair_probe": fair_probe,
@@ -2369,8 +2617,9 @@ def _acquisition_readiness(
     )
     # SPEC-J4: an ACQ candidate has no fair-probe design of its own — its causal contribution is
     # the causal verdict of the FACT class it supports. INHERIT that verdict ONLY when it is a
-    # concrete bool (CAUSAL/CAUSAL_PAIRED -> True, SELF_LOCALIZED -> False); an UNMEASURED fact
-    # verdict stays None (fail-closed). The inheritance is marked explicitly, never silent.
+    # concrete bool (Cluster-4 B5: CAUSAL/CAUSAL_FORK -> True, SELF_LOCALIZED -> False;
+    # CAUSAL_PAIRED is enrichment-only -> None); an UNMEASURED fact verdict stays None
+    # (fail-closed). The inheritance is marked explicitly, never silent.
     supported_fc = record.get("supported_fact_class")
     inherited_fair_probe: bool | None = None
     if fair_probe_by_fc is not None and isinstance(supported_fc, str):
@@ -2470,6 +2719,8 @@ def _member_delivery_byte_proven(
             evidence_type = row.get("evidence_type")
             runtime_producer = row.get("runtime_producer_id")
             registered_producer = row.get("registered_producer_id")
+            if not isinstance(evidence_type, str) or not evidence_type:
+                continue
             fact_class = row.get("fact_class")
             fact_registration = (
                 registration_for(evidence_type) if isinstance(evidence_type, str) else None
@@ -2532,6 +2783,8 @@ def _fact_delivery_byte_proven(
         evidence_type = row.get("evidence_type")
         runtime_producer = row.get("runtime_producer_id")
         registered_producer = row.get("registered_producer_id")
+        if not isinstance(evidence_type, str) or not evidence_type:
+            continue
         fact_registration = (
             registration_for(evidence_type) if isinstance(evidence_type, str) else None
         )
@@ -2621,7 +2874,6 @@ def leak_canary(delivered_files: Iterable[str], task: str, gold_paths: Iterable[
     """Return leaked tokens found in model-facing delivered file identities. Zero is required.
     (This grader emits no hidden test identity itself; it scans what the seam delivered.)"""
     leaks: list[str] = []
-    task_tokens = {t for t in (task or "").replace("__", " ").replace("-", " ").split() if len(t) > 3}
     gold_set = {os.path.basename(g) for g in gold_paths if g}
     for f in delivered_files:
         base = os.path.basename(f or "")
@@ -2836,7 +3088,7 @@ def _canonical_task_features(
     fair_probe_by_fc: dict[str, bool | None] | None = None,
     timing_by_fc: dict[str, bool | None] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Build the explicit 128-row task ledger without mutating legacy fields."""
+    """Build the explicit 129-row task ledger without mutating legacy fields."""
     inventory = canonical_feature_inventory()
     master: dict[str, dict[str, Any]] = {}
     for record in acq.values():
@@ -2926,6 +3178,255 @@ def _model_observation_owners(messages: list[dict[str, Any]]) -> dict[int, int]:
 
 
 # ---------------------------------------------------------------------------
+# DEFECT 7 + 8 — per-FIRE gate grading (leak + dose) over the physical-delivery
+# authority. Today ``leak_zero`` / ``dose_lte_one`` are graded task-globally; this
+# grades EACH ``PHYSICAL_DELIVERY_BOUND`` record on its OWN rendered-text span and
+# its OWN policy-observation dose, so a single leaking / double-dosed fire is named
+# and taints run integrity (the existing run-global scan stays an ADDITIONAL
+# fail-closed condition). No new scanner / store / schema key: the leak class reuses
+# ``scan_test_identity_leaks`` + the live_evidence ``_LEAK_RE``; dose reuses the
+# ``observation_binding.observation_id`` join with the legacy ``_model_observation_owners``
+# fallback. Duplicate/ambiguous spans are already ``BROKEN_PHYSICAL_BINDING`` upstream.
+# ---------------------------------------------------------------------------
+PER_FIRE_GATE_SCHEMA = "gt.per_fire_gate.v1"
+
+
+def _fire_observation_key(
+    record: dict[str, Any], observation_owners: dict[int, int]
+) -> tuple[str, Any]:
+    """The policy-observation group key for ONE bound physical delivery.
+
+    Prefer the exact ``observation_binding.observation_id`` (the shared atomic join
+    key); fall back to the ``_model_observation_owners`` grouping of the delivery's
+    message index for legacy rows that predate the binding, and finally to the
+    runtime-ledger index so a keyless row can never silently merge with another."""
+    binding = record.get("observation_binding")
+    if isinstance(binding, dict):
+        obs_id = binding.get("observation_id")
+        if isinstance(obs_id, str) and obs_id:
+            return ("observation_id", obs_id)
+    msg_index = record.get("msg_index")
+    if isinstance(msg_index, int) and not isinstance(msg_index, bool):
+        return ("owner", observation_owners.get(msg_index, msg_index))
+    return ("runtime_ledger_index", record.get("runtime_ledger_index"))
+
+
+def _fire_leak_hits(text: str) -> list[str]:
+    """Exact test-identity leak tokens in one rendered span (DEFECT 7).
+
+    Reuses BOTH existing authorities verbatim: the structural
+    ``scan_test_identity_leaks`` (``::``-qualified ids / bare ``test_…`` / F2P markers)
+    AND the live_evidence ``_LEAK_RE`` class (adds the bare ``assert``/``assertion``
+    family). Never a new scanner."""
+    if not isinstance(text, str) or not text:
+        return []
+    hits: set[str] = set(scan_test_identity_leaks(text))
+    for match in _LEAK_RE.finditer(text):
+        hits.add(match.group(0))
+    return sorted(hits)
+
+
+def per_fire_gate_grades(
+    consumption_ledger: dict[str, Any],
+    observation_owners: dict[int, int] | None = None,
+) -> dict[str, Any]:
+    """Grade every PHYSICAL_DELIVERY_BOUND fire on its OWN leak + dose gate row.
+
+    * leak (DEFECT 7): scan the exact ``rendered_text`` span; a fire with any hit
+      fails its own ``leak_zero`` row and contributes its tokens to the run taint.
+    * dose (DEFECT 8): dose = the count of UNIQUE physical GT deliveries homed to the
+      same policy observation (``observation_id`` where present, else the legacy owner
+      grouping). A FACT row and its CAP byte-owner sharing one physical span dedupe to
+      ONE dose (grouped by ``physical_id``). A fire passes ``dose_lte_one`` only when
+      its observation dose is <= 1.
+
+    Pure/deterministic; ledger-only rows and BROKEN bindings are excluded (they are
+    not model-visible byte-proven fires)."""
+    observation_owners = observation_owners or {}
+    authority = physical_delivery_authority(
+        consumption_ledger if isinstance(consumption_ledger, dict) else {}
+    )
+    deliveries = authority.get("deliveries") if isinstance(authority, dict) else None
+    deliveries = deliveries if isinstance(deliveries, dict) else {}
+
+    bound: list[dict[str, Any]] = []
+    for _index, record in sorted(deliveries.items(), key=lambda kv: str(kv[0])):
+        if isinstance(record, dict) and record.get("state") == PHYSICAL_DELIVERY_BOUND:
+            bound.append(record)
+
+    # Unique physical spans per observation (dedupe FACT+CAP sharing one span).
+    obs_physical: dict[tuple[str, Any], set[str]] = defaultdict(set)
+    for record in bound:
+        key = _fire_observation_key(record, observation_owners)
+        phys = record.get("physical_id")
+        obs_physical[key].add(
+            str(phys) if isinstance(phys, str) and phys
+            else f"idx:{record.get('runtime_ledger_index')}"
+        )
+
+    fires: list[dict[str, Any]] = []
+    leak_hits: set[str] = set()
+    leaking_fire_count = 0
+    dose_violation_count = 0
+    max_dose = 0
+    for record in bound:
+        key = _fire_observation_key(record, observation_owners)
+        dose = len(obs_physical.get(key, ()))
+        max_dose = max(max_dose, dose)
+        fire_hits = _fire_leak_hits(record.get("rendered_text") or "")
+        leak_free = not fire_hits
+        dose_ok = dose <= 1
+        if fire_hits:
+            leaking_fire_count += 1
+            leak_hits.update(fire_hits)
+        if not dose_ok:
+            dose_violation_count += 1
+        fires.append({
+            "runtime_ledger_index": record.get("runtime_ledger_index"),
+            "physical_id": record.get("physical_id"),
+            "observation_group": f"{key[0]}:{key[1]}",
+            "dose": dose,
+            "leak_zero": leak_free,
+            "dose_lte_one": dose_ok,
+            "leak_hits": fire_hits,
+            "candidate_id": record.get("candidate_id"),
+        })
+    return {
+        "schema": PER_FIRE_GATE_SCHEMA,
+        "bound_fire_count": len(bound),
+        "leaking_fire_count": leaking_fire_count,
+        "dose_violation_count": dose_violation_count,
+        "max_dose": max_dose,
+        "leak_hits": sorted(leak_hits),
+        "fires": fires,
+    }
+
+
+# ---------------------------------------------------------------------------
+# DEFECT 9 — CAP byte-owner inheritance authority. A CAP byte-owner row inherits its
+# owned FACT's seven gate values ONLY through its ONE authorized mechanism
+# (feature_lineage.CAP_BYTE_OWNER_MECHANISMS): a typed_lineage row matching the exact
+# producer/layer/fact binding + registry, or an exact_profile_member layer stamp. An
+# unauthorized claim (wrong producer/layer/fact combination, or a profile stamp for a
+# member that does not own THIS row's layer) is surfaced as a NAMED ownership rejection
+# and never inherits. This mirrors ``_member_delivery_byte_proven``'s admission tests
+# exactly, but REPORTS the reject instead of silently declining to inherit.
+# ---------------------------------------------------------------------------
+BYTE_OWNER_OWNERSHIP_SCHEMA = "gt.byte_owner_ownership.v1"
+
+
+def _typed_cap_claim_reason(member: object, row: dict[str, Any]) -> str | None:
+    """None iff a typed CAP byte-owner ref on ``row`` is authorized; else the named
+    reject class. Mirrors ``_member_delivery_byte_proven`` typed_lineage admission."""
+    if not isinstance(member, str) or member not in CAP_BYTE_OWNER_IDS:
+        return "cap_ref_unknown_member"
+    authority = CAP_BYTE_OWNER_MECHANISMS.get(member)
+    if authority is None or authority.mechanism != "typed_lineage":
+        return "cap_ref_for_non_typed_owner"
+    evidence_type = row.get("evidence_type")
+    runtime_producer = row.get("runtime_producer_id")
+    registered_producer = row.get("registered_producer_id")
+    fact_class = row.get("fact_class")
+    if not isinstance(evidence_type, str) or not evidence_type:
+        return "typed_binding_mismatch"
+    fact_registration = registration_for(evidence_type)
+    evidence_base = evidence_type.split(":", 1)[0]
+    binding_matches = any(
+        binding.producer == runtime_producer
+        and binding.layer == evidence_base
+        and binding.fact_class == fact_class
+        for binding in authority.bindings
+    )
+    if (
+        row.get("lineage_schema") != "gt.feature_lineage.v1"
+        or row.get("producer_registration_match") is not True
+        or fact_registration is None
+        or fact_registration.fact_class != fact_class
+        or fact_registration.producer != registered_producer
+        or not isinstance(runtime_producer, str)
+        or not producer_matches(evidence_type, runtime_producer)
+        or not binding_matches
+    ):
+        return "typed_binding_mismatch"
+    return None
+
+
+def _profile_cap_claim_reason(member: str, row: dict[str, Any]) -> str | None:
+    """None iff a profile_member stamp is authorized (or is NOT a byte-owner claim at
+    all — a reclassified mediator lane stamp such as GT_SS_COHERENCE_V2 keeps its
+    ``detect.coherence`` byte stamp under P4 and never inherits FACT gates, so it is
+    not adjudicated here). Else the named reject class."""
+    if member not in CAP_BYTE_OWNER_IDS:
+        return None  # not a byte-owner claim (mediator/eligibility lane stamp) — P4
+    authority = CAP_BYTE_OWNER_MECHANISMS.get(member)
+    if authority is None or authority.mechanism != "exact_profile_member":
+        return "profile_stamp_for_typed_owner"
+    layer = str(row.get("layer") or "")
+    binding_matches = any(
+        binding.layer == layer
+        and (
+            binding.fact_class is None
+            or layer_to_fact_class(layer) == binding.fact_class
+        )
+        for binding in authority.bindings
+    )
+    return None if binding_matches else "profile_layer_mismatch"
+
+
+def byte_owner_ownership_audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """DEFECT 9: name every UNAUTHORIZED CAP byte-owner ownership claim in the ledger.
+
+    A delivered row can claim byte ownership two ways: a typed_lineage CAP ``byte_owner``
+    feature-ref, or an exact-profile ``profile_member`` stamp. Each claim is authorized
+    ONLY through the member's ``CAP_BYTE_OWNER_MECHANISMS`` binding; any other producer/
+    layer/fact combination (or a profile stamp for a member that does not own the row's
+    layer) is a named rejection. Deterministic, read-only, no inheritance side effect."""
+    rejections: list[dict[str, Any]] = []
+    for row_index, row in enumerate(rows or ()):
+        if not isinstance(row, dict) or row.get("outcome") != "delivered":
+            continue
+        refs = row.get("feature_ids")
+        if isinstance(refs, list):
+            for ref in refs:
+                if not (
+                    isinstance(ref, dict)
+                    and ref.get("category") == "CAP"
+                    and ref.get("role") == "byte_owner"
+                ):
+                    continue
+                member = ref.get("feature_id")
+                reason = _typed_cap_claim_reason(member, row)
+                if reason is not None:
+                    rejections.append({
+                        "row_index": row_index,
+                        "member": member if isinstance(member, str) else None,
+                        "mechanism": "typed_lineage",
+                        "reason": reason,
+                        "evidence_type": row.get("evidence_type"),
+                        "runtime_producer_id": row.get("runtime_producer_id"),
+                        "fact_class": row.get("fact_class"),
+                    })
+        member = row.get("profile_member")
+        if isinstance(member, str) and member:
+            reason = _profile_cap_claim_reason(member, row)
+            if reason is not None:
+                rejections.append({
+                    "row_index": row_index,
+                    "member": member,
+                    "mechanism": "exact_profile_member",
+                    "reason": reason,
+                    "layer": row.get("layer"),
+                    "fact_class": row.get("fact_class"),
+                })
+    return {
+        "schema": BYTE_OWNER_OWNERSHIP_SCHEMA,
+        "valid": not rejections,
+        "rejection_count": len(rejections),
+        "rejections": rejections,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Per-task collection.
 # ---------------------------------------------------------------------------
 
@@ -2955,12 +3456,30 @@ def _apply_attestation_truth(
     joins = join_truth(load.attestations, rows)
     applied: list[str] = []
     applied_authority: list[str] = []
+    applied_freshness: list[str] = []
     for fc in ATTESTED_FACT_CLASSES:
         tj = joins.get(fc)
-        if tj is None or not isinstance(tj.truth, bool):
+        if tj is None:
             continue
         lifecycle = fact_lifecycles.get(fc)
         if lifecycle is None:
+            continue
+        # SPEC-J2f (defect-4, run #2): the join carries a FRESHNESS verdict that was
+        # previously DISCARDED (only truth/authority were applied). Apply it to the
+        # gate-relevant ``stale`` leg — read by ss_gate_readiness.correct_rl_adhered_time
+        # and verdict_for. A joined freshness FAIL proves the delivered fact STALE
+        # (gate-relevant false); a joined freshness PASS proves it FRESH (stale=False,
+        # attestation provenance). An absent/UNMEASURED freshness (None — e.g. the
+        # honest-dark localization/covering/submit_refusal freshness) leaves the honest
+        # ledger-derived ``stale`` untouched (never fabricates a freshness verdict).
+        if isinstance(tj.freshness, bool):
+            lifecycle["stale"] = measured(
+                not tj.freshness,
+                source_artifact="producer_attestations",
+                source_messages=[],
+            )
+            applied_freshness.append(fc)
+        if not isinstance(tj.truth, bool):
             continue
         # source_artifact records provenance = the attestation store, not the ledger.
         lifecycle["truth_valid"] = measured(
@@ -2988,6 +3507,7 @@ def _apply_attestation_truth(
         },
         "applied_truth_overrides": sorted(applied),
         "applied_authority_overrides": sorted(applied_authority),
+        "applied_freshness_overrides": sorted(applied_freshness),
         "source_artifact": ledger_artifact,
     }
 
@@ -3062,6 +3582,7 @@ def collect_task(
     baseline_status = BASELINE_MATCHED if base_path else BASELINE_UNAVAILABLE
 
     native_visible = native_visible_by_fact_class(rows, traj.get("messages", []) or [])
+    native_renderer = native_renderer_audit_by_fact_class(rows)
     fact_lifecycles: dict[str, dict] = {}
     for fc in fr.all_fact_classes():
         fact_lifecycles[fc] = fact_class_lifecycle(
@@ -3071,6 +3592,7 @@ def collect_task(
             baseline_status=baseline_status, registry=fr,
             ledger_artifact=ledger_artifact, traj_artifact=traj_artifact,
             native_visible=native_visible.get(fc, 0),
+            native_renderer_valid=native_renderer.get(fc),
         )
 
     # SPEC-J2: override lifecycle truth for the four attested fact classes from the
@@ -3089,10 +3611,26 @@ def collect_task(
     chronological_timing = adjudicate_deliveries(traj, rows)
     timing_by_fc = timing_by_fact_class(chronological_timing)
 
+    # B-cluster Gate 4: the registry-specific ACKNOWLEDGMENT join. Run each delivered
+    # chronology (whole-row + compound-brief block) through its class's receipt-predicate
+    # evaluator and roll up per fact class. Fail-closed: a class with no measured acknowledgment
+    # yields None -> the ``acknowledged`` gate then falls back to the receipt ladder (byte-
+    # identical to the pre-B path). Uses the SAME chronology/attestation authorities as J3.
+    _ack_chronologies = list(extract_chronologies(traj, rows).values())
+    _ack_chronologies.extend(extract_block_chronologies(traj, rows))
+    _ack_attestations = load_attestations(task_dir).attestations
+    acknowledgment_by_fc = acknowledgment_by_fact_class(
+        _ack_chronologies,
+        messages=(traj.get("messages") if isinstance(traj, dict) else None),
+        ledger_rows=rows,
+        attestations=_ack_attestations,
+    )
+
     # SPEC-J4: the fair-probe RESULT join. Turn shadow-holdout rows + the chronology into
     # seal-bound MatchedProbe artifacts adjudicated through chronological_adjudication.adjudicate
-    # (the CAUSAL authority), feeding the ``fair_probe`` gate: True for CAUSAL/CAUSAL_PAIRED,
-    # False for SELF_LOCALIZED, None (absent) for UNMEASURED. The paired-baseline path takes the
+    # (the CAUSAL authority), feeding the ``fair_probe`` gate: True for CAUSAL/CAUSAL_FORK
+    # (Cluster-4 B5: CAUSAL_PAIRED is enrichment-only), False for SELF_LOCALIZED, None (absent)
+    # for UNMEASURED. The paired-baseline path takes the
     # baseline verdict as an INPUT (from the caller); absent -> UNMEASURED. Fail-closed: no
     # holdout + no self-acquire + no baseline input -> every class None -> byte-identical gate.
     _pb = paired_baseline if isinstance(paired_baseline, dict) else {}
@@ -3103,6 +3641,9 @@ def collect_task(
         output_dir=task_dir, task_label=task,
         gt_resolved=_gt_res if isinstance(_gt_res, bool) else None,
         baseline_resolved=_base_res if isinstance(_base_res, bool) else None,
+        # Cluster-4 B2/B3: the covering receipt (targeted_covering_failure) needs the
+        # producer attestations already loaded above for the Gate-4 acknowledgment join.
+        attestations=_ack_attestations,
     )
     fair_probe_by_fc = fair_probe_bool_by_fact_class(fair_probe_join)
 
@@ -3153,8 +3694,20 @@ def collect_task(
     })
     max_dose = max(doses_by_observation.values(), default=0)
     dose_violations = sum(1 for count in doses_by_observation.values() if count > 1)
+    # DEFECT 7 + 8: grade each PHYSICAL_DELIVERY_BOUND fire on its OWN leak span and
+    # its OWN observation dose (observation_id where present, legacy owner fallback).
+    # A leaking fire's exact tokens join the run-global leak taint (fail-closed), and a
+    # per-observation dose violation tightens the run dose gate — the existing task-
+    # global scans remain as ADDITIONAL fail-closed conditions, never replaced.
+    per_fire = per_fire_gate_grades(cons_ledger, observation_owners)
+    leaks.update(per_fire["leak_hits"])
+    # DEFECT 9: name every unauthorized CAP byte-owner ownership claim (never inherit).
+    byte_owner_ownership = byte_owner_ownership_audit(rows)
     leak_gate: bool | None = not leaks if visible_audit_complete else None
-    dose_gate: bool | None = dose_violations == 0 if visible_audit_complete else None
+    dose_gate: bool | None = (
+        (dose_violations == 0 and per_fire["dose_violation_count"] == 0)
+        if visible_audit_complete else None
+    )
 
     # The collector is an artifact grader, not a live-run authority. It exposes
     # the exact gate holes per feature but cannot manufacture the terminal live
@@ -3187,6 +3740,9 @@ def collect_task(
                 live_witness=_live_witness,
                 # SPEC-J3: the byte-owner's timing = its owned fact class(es), adjudicated.
                 chronological_time=_member_chronological_time(member, timing_by_fc),
+                # B-cluster Gate 4: the byte-owner's acknowledgment = the receipt-predicate
+                # evaluator join over its owned fact class(es).
+                acknowledged=_member_acknowledgment(member, acknowledgment_by_fc),
             )
             feature["ss_readiness"]["cap_role"] = cap_role
 
@@ -3223,6 +3779,9 @@ def collect_task(
                 # SPEC-J3: per-fact-class timing verdict from the chronology join. None (an
                 # unmeasured class) leaves correct_rl_adhered_time as before (fail-closed).
                 chronological_time=timing_by_fc.get(fact_class),
+                # B-cluster Gate 4: per-fact-class registry acknowledgment. None -> the
+                # ``acknowledged`` gate falls back to the receipt ladder (fail-closed).
+                acknowledged=acknowledgment_by_fc.get(fact_class),
             )
 
     endpoints = behavioural_endpoints(timeline)
@@ -3279,6 +3838,26 @@ def collect_task(
         missing = set(ss_integrity.get("missing_required_inputs") or [])
         missing.add("control_participation_integrity")
         ss_integrity["missing_required_inputs"] = sorted(missing)
+    # DEFECT 7 + 8: the itemized per-fire gate rows (leak span + observation dose).
+    ss_integrity["per_fire_gate"] = per_fire
+    # DEFECT 9: named CAP byte-owner ownership rejections (unauthorized inheritance).
+    ss_integrity["byte_owner_ownership"] = byte_owner_ownership
+    # A leaking or double-dosed fire, or an unauthorized ownership claim, is a
+    # fail-closed run-integrity fault (named culprit), consistent with the run-global
+    # leak/dose taints already folded into leak_gate/dose_gate above.
+    if per_fire["leaking_fire_count"] or per_fire["dose_violation_count"]:
+        ss_integrity["required_inputs_complete"] = False
+        missing = set(ss_integrity.get("missing_required_inputs") or [])
+        if per_fire["leaking_fire_count"]:
+            missing.add("per_fire_leak")
+        if per_fire["dose_violation_count"]:
+            missing.add("per_fire_dose")
+        ss_integrity["missing_required_inputs"] = sorted(missing)
+    if not byte_owner_ownership["valid"]:
+        ss_integrity["required_inputs_complete"] = False
+        missing = set(ss_integrity.get("missing_required_inputs") or [])
+        missing.add("byte_owner_ownership")
+        ss_integrity["missing_required_inputs"] = sorted(missing)
     return {
         "schema": "gt.feature_metrics.v1",
         "grader_version": GRADER_VERSION,
@@ -3310,6 +3889,9 @@ def collect_task(
             "leak_count": len(leaks),
             "max_dose_per_observation": max_dose,
             "dose_violation_count": dose_violations,
+            # DEFECT 7/8/9 per-fire + ownership rollups live in ``ss_integrity``
+            # (the additive SS surface) so the legacy ``integrity`` projection stays
+            # byte-identical; see ss_integrity.per_fire_gate / byte_owner_ownership.
             "consumption_schema": cons_ledger.get("schema"),
             "ledger_rows": len(rows),
             **({"runtime_ledger_malformed_lines": malformed_ledger_lines}
@@ -3342,7 +3924,11 @@ def _atomic_row_identity(row: dict[str, Any]) -> tuple[str, str] | None:
         return None
     evidence_type = row.get("evidence_type")
     runtime_producer = row.get("runtime_producer_id")
+    if not isinstance(evidence_type, str) or not evidence_type:
+        return None
     fact_class = row.get("fact_class")
+    if not isinstance(fact_class, str) or not fact_class:
+        return None
     registration = (
         registration_for(evidence_type) if isinstance(evidence_type, str) else None
     )
@@ -3365,10 +3951,12 @@ def _atomic_row_identity(row: dict[str, Any]) -> tuple[str, str] | None:
     ):
         return None
     cap_refs = [
-        ref.get("feature_id") for ref in refs
+        feature_id for ref in refs
         if isinstance(ref, dict)
         and ref.get("category") == "CAP"
         and ref.get("role") == "byte_owner"
+        and isinstance((feature_id := ref.get("feature_id")), str)
+        and feature_id
     ]
     if len(cap_refs) == 1:
         member = cap_refs[0]
@@ -3385,6 +3973,8 @@ def _atomic_row_identity(row: dict[str, Any]) -> tuple[str, str] | None:
     if cap_refs:
         return None
     member = row.get("profile_member")
+    if not isinstance(member, str) or not member:
+        return None
     authority = CAP_BYTE_OWNER_MECHANISMS.get(member)
     layer = str(row.get("layer") or "")
     if authority is not None and authority.mechanism == "exact_profile_member" and any(
@@ -3568,7 +4158,7 @@ def aggregate_run(
     ss_integrity: dict[str, Any] = {
         "schema": "gt.ss_feature_inventory.integrity.v1",
         "expected_family_counts": {family: len(names) for family, names in canonical.items()},
-        "expected_feature_count": 128,
+        "expected_feature_count": 129,
         "missing_records": [],
         "missing_task_records": missing_task_records,
         "unexpected_task_records": unexpected_task_records,
@@ -3581,6 +4171,7 @@ def aggregate_run(
     if not population_complete:
         integrity["publishable"] = False
 
+    from groundtruth.runtime import fact_registry as _fr_grain  # ITEM 3: pure grain accessor
     for family, names in canonical.items():
         for name in names:
             statuses: Counter = Counter()
@@ -3602,6 +4193,14 @@ def aggregate_run(
                 "present_in_tasks": present,
                 "statuses": dict(statuses),
             }
+            if family == "FACT":
+                # ITEM 3 (2026-07-18): surface the finer producer/evidence-type GRAIN alongside
+                # the canonical fact_class so a loc_reslot audit can tell (e.g.) trace_frame from
+                # ranked_localization even though both collapse to fact_class ``localization``.
+                # Registry-derived; the canonical §1 mapping is UNCHANGED.
+                ss_run_features[name]["evidence_grain"] = list(
+                    _fr_grain.evidence_grain_for(name)
+                )
             if family == "PERF" and task_feature_rows:
                 section, value_type = perf_contracts[name]
                 if value_type == "run_ratio":

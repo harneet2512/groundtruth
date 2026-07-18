@@ -229,7 +229,7 @@ def test_support_and_control_roles_do_not_borrow_delivery_lineage() -> None:
 
 def test_exact_inventory_and_run_population_fail_closed(tmp_path: Path) -> None:
     inventory_map = inventory.canonical_feature_inventory()
-    with pytest.raises(ValueError, match="exact-128"):
+    with pytest.raises(ValueError, match="exact-129"):
         diagnosis._validate_task_metrics(
             {"ss_features": {}, "ss_integrity": {}}, inventory_map,
             tmp_path / "metrics.json",
@@ -468,11 +468,11 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
 
     result = diagnosis.diagnose_run(tmp_path, run_metrics)
 
-    assert result["feature_count"] == 128
+    assert result["feature_count"] == 129
     assert result["integrity"]["publishable"] is True
     assert result["integrity"]["identity_profile_binding_complete"] is True
     assert result["integrity"]["tasks"][task]["status"] == "BOUND"
-    assert len(result["rows"]) == 128
+    assert len(result["rows"]) == 129
     assert [(row["family"], row["feature"]) for row in result["rows"]] == [
         (family, name) for family, names in inv.items() for name in names
     ]
@@ -496,7 +496,7 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
     assert diagnosis._perf_status({"status": "PARTIAL"}) == "FAILED"
     assert diagnosis._perf_status({"status": "RIGHT_CENSORED"}) == "RIGHT_CENSORED"
     rendered = diagnosis.render_markdown(result)
-    assert rendered.count("\n") == 139
+    assert rendered.count("\n") == 140
     assert '"mean":2.0' in rendered
     assert "requested_tasks=1" in rendered
     assert "missing_feature_records=NONE" in rendered
@@ -505,7 +505,7 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
         str(tmp_path), "--run-metrics", str(run_metrics),
         "--output", str(output),
     ]) == 0
-    assert json.loads(output.read_text(encoding="utf-8"))["feature_count"] == 128
+    assert json.loads(output.read_text(encoding="utf-8"))["feature_count"] == 129
 
     expected_tasks = tmp_path / "expected_tasks.json"
     missing_task = "repo__pre-agent-failure"
@@ -608,7 +608,7 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
 
     incomplete = diagnosis.diagnose_run(tmp_path, run_metrics)
     incomplete_by_name = {row["feature"]: row for row in incomplete["rows"]}
-    assert incomplete["feature_count"] == 128
+    assert incomplete["feature_count"] == 129
     assert incomplete_by_name[first_acq]["task_buckets"][task] == (
         "UNMEASURED:support:source_contribution_correct"
     )
@@ -821,7 +821,7 @@ def test_cli_writes_unpublishable_diagnosis_then_exits_nonzero(
 ) -> None:
     monkeypatch.setattr(diagnosis, "diagnose_run", lambda *_args: {
         "schema": "gt.ss_live_diagnosis.v1",
-        "feature_count": 128,
+        "feature_count": 129,
         "integrity": {"publishable": False},
         "rows": [],
     })

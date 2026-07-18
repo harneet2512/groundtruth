@@ -196,9 +196,11 @@ def test_body_concept_dispatch_leak_zero_on_test_row():
 # =========================================================================== #
 def test_produce_body_attaches_native_args(tmp_path, monkeypatch):
     db = _mk_graph(tmp_path, [{"id": 1, "name": "handle", "file_path": "svc/x.py"}])
+    # Cluster-2b: _body_rows now yields a 5th element (the node id) for the def-partition
+    # sidecar; the stub must match the real contract (leading 4 elements unchanged).
     monkeypatch.setattr(gw, "_body_rows",
-                        lambda con, sym, root: [("svc/x.py", 10, "handle", "Function"),
-                                                ("svc/y.py", 20, "process", "Method")])
+                        lambda con, sym, root: [("svc/x.py", 10, "handle", "Function", 1),
+                                                ("svc/y.py", 20, "process", "Method", 2)])
     ev = gw.ToolEvent(kind="search", command="grep -rn handle .", output="", action_index=0)
     st = gw.GatewayState(graph_db=db, repo_root=str(tmp_path))
     envs = gw._produce_body(ev, st)
@@ -218,7 +220,7 @@ def test_produce_body_native_args_neutral_to_identity(tmp_path, monkeypatch):
     the same fact built without it (identity/byte-chain unchanged)."""
     db = _mk_graph(tmp_path, [{"id": 1, "name": "handle", "file_path": "svc/x.py"}])
     monkeypatch.setattr(gw, "_body_rows",
-                        lambda con, sym, root: [("svc/x.py", 10, "handle", "Function")])
+                        lambda con, sym, root: [("svc/x.py", 10, "handle", "Function", 1)])
     ev = gw.ToolEvent(kind="search", command="grep -rn handle .", output="", action_index=0)
     st = gw.GatewayState(graph_db=db, repo_root=str(tmp_path))
     e = gw._produce_body(ev, st)[0]

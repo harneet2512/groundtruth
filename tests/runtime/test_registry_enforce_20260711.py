@@ -370,6 +370,10 @@ def test_profile_2_is_profile_1_plus_super_mode_members():
         # it IS mapped in _MEMBER_CAPABILITY_MODULE (fail-closed). Default-OFF; the rate knob
         # GT_SS_SHADOW_RATE defaults 0 so Profile-2 arms it INERT. Dropping/adding it here bites.
         "GT_SS_SHADOW",
+        # ITEM 0 (2026-07-18): the post_search lattice MASTER enable (the missing master of the
+        # already-active GT_POST_SEARCH_NATIVE form arm; gt_mini_patch _POST_SEARCH_ON). Default-OFF
+        # seam code property, unmapped-by-convention. Dropping/adding it here makes this bite.
+        "GT_POST_SEARCH",
     }
     # SM-4: GT_EDIT_OVERLAY is now profile-activated (model-facing stale-drop) -> PRESENT.
     assert "GT_EDIT_OVERLAY" in rp.PROFILE_MEMBERS["2"]

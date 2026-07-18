@@ -26,9 +26,10 @@ FEATURE_ROLES = frozenset({"fact", "byte_owner", "mediator", "eligibility"})
 # CAP_MEDIATOR_IDS below): its SS-LIVE obligation becomes ``live_control_mediation_effect`` (the
 # control terminal), which IS satisfiable. Its exact ``detect.coherence`` byte stamp REMAINS as
 # byte evidence — but as a LANE profile-member stamp (``gt_mini_patch._LANE_PROFILE_MEMBER_OWNERS``),
-# not a byte-owner-mechanism stamp. The 128-row inventory count is unchanged (only the role moves
-# within CAP: byte_owner 8→7, mediator 26→27, eligibility 13). This is a revisitable product
-# decision, documented in code so it can be re-litigated.
+# not a byte-owner-mechanism stamp. (That P4 role move was inventory-count-neutral: byte_owner
+# 8→7, mediator 26→27, eligibility 13.) SEPARATELY, Cluster-5 ITEM 0 (2026-07-18) added the
+# post_search master GT_POST_SEARCH as an ELIGIBILITY member — CAP 47→48, eligibility 13→14,
+# total inventory 128→129. This is a revisitable product decision, documented in code.
 CAP_BYTE_OWNER_IDS = frozenset({
     "GT_EDIT_CHECK",
     "GT_CHANGE_SURFACE",
@@ -52,6 +53,10 @@ CAP_ELIGIBILITY_IDS = frozenset({
     "GT_D7_RELATEDNESS",
     "GT_SS_SHADOW",
     "GT_SS_LATE_DROP",
+    # ITEM 0 (2026-07-18): the post_search lattice MASTER enable is an ELIGIBILITY gate — it
+    # decides WHETHER the post_search def-partition producer runs at all (gt_mini_patch
+    # _POST_SEARCH_ON), the same lattice GT_SS_ELIGIBILITY widens. Never owns bytes.
+    "GT_POST_SEARCH",
 })
 CAP_FEATURE_IDS = frozenset({
     "GT_CONTRACT_NATIVE", "GT_SS_ACK_METRICS", "GT_OBLIGATION_FRESHNESS",
@@ -70,6 +75,7 @@ CAP_FEATURE_IDS = frozenset({
     "GT_CONTENT_LEG", "GT_INSEAM_METRICS", "GT_SS_SHADOW",
     "GT_BRIEF_NATIVE", "GT_VERIFY_EXECUTE", "GT_CONTRACT_MODE",
     "GT_PATCH_DELTA", "GT_SS_LATE_DROP",
+    "GT_POST_SEARCH",  # ITEM 0 (2026-07-18): post_search lattice master enable (eligibility)
 })
 if CAP_BYTE_OWNER_IDS & CAP_ELIGIBILITY_IDS:
     raise ValueError("CAP role sets overlap")

@@ -178,9 +178,14 @@ def test_gateway_commit_threads_exact_envelope_owner(monkeypatch):
 
     delivered = [row for row in calls if row.get("content")]
     assert len(delivered) == 1
+    # The owner attribution is unchanged; the gateway delivery row additionally stamps the
+    # host-side render channel (DEFECT-5 `renderer_id`) for the offline registry-renderer
+    # audit. GT_GATEWAY_NATIVE=0 -> "tagged". This is additive audit metadata and never
+    # reaches the model bytes; the owner/candidate identity assertions stay exact.
     assert delivered[0]["extra"] == {
         "profile_member": "GT_PATCH_DELTA",
         "candidate_id": winner.dedup_key,
+        "renderer_id": "tagged",
     }
     assert delivered[0]["content"] in out["output"]
 

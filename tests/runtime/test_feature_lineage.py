@@ -234,10 +234,11 @@ def test_undeclared_cap_byte_owner_fails_closed() -> None:
 
 
 def test_cap_role_authority_is_total_and_has_exact_byte_owners() -> None:
-    assert len(CAP_FEATURE_IDS) == 47
+    assert len(CAP_FEATURE_IDS) == 48
     # P4 (B-TERM 2026-07-16): GT_SS_COHERENCE_V2 reclassified byte_owner → mediator (it had no
     # canonical FACT identity, so the byte-owner bar was unsatisfiable). It now falls into the
-    # residual CAP_MEDIATOR_IDS; the total 47-CAP inventory is unchanged.
+    # residual CAP_MEDIATOR_IDS.
+    # ITEM 0 (2026-07-18): GT_POST_SEARCH added as the 48th CAP member (eligibility 13→14).
     assert CAP_BYTE_OWNER_IDS == {
         "GT_EDIT_CHECK", "GT_CHANGE_SURFACE", "GT_PATCH_DELTA", "GT_HYPOTHESIS",
         "GT_LOC_RESLOT", "GT_SS_SUBMIT_RED", "GT_CERT_DELIVERY",
@@ -248,7 +249,7 @@ def test_cap_role_authority_is_total_and_has_exact_byte_owners() -> None:
         "GT_EDIT_OVERLAY", "GT_SS_RECOVERY_V2", "GT_BRIEF_MINIMAL",
         "GT_REGISTRY_ENFORCE", "GT_SS_DEDUP2", "GT_SS_ELIGIBILITY",
         "GT_XSESSION_MEMORY", "GT_D7_RELATEDNESS", "GT_SS_SHADOW",
-        "GT_SS_LATE_DROP",
+        "GT_SS_LATE_DROP", "GT_POST_SEARCH",
     }
     assert {cap_role_for(feature_id) for feature_id in CAP_FEATURE_IDS} == {
         "byte_owner", "mediator", "eligibility"

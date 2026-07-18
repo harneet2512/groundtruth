@@ -38,6 +38,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 
 try:
     from artifact_deepswe import ledger_attestation
@@ -61,7 +62,7 @@ def _bc(msg: str) -> None:
     sys.stderr.flush()
 
 
-def _brief_delivery_extra(e: dict, brief_text: str) -> dict:
+def _brief_delivery_extra(e: Mapping[str, str], brief_text: str) -> dict:
     """Validate the producer sidecar and type each delivered brief block.
 
     A task-start brief is compound evidence, so it deliberately has no whole-row
@@ -122,6 +123,7 @@ def _brief_delivery_extra(e: dict, brief_text: str) -> dict:
                 "content_sha256_16": digest[:16],
                 "declared_fact_class": declared,
                 "transport_producer_id": "v1r_brief",
+                "opportunity_exempt_reason": "task_start_pre_policy",
             }
             registered = (
                 ("localization", "v1r_brief")
@@ -154,14 +156,14 @@ def _brief_delivery_extra(e: dict, brief_text: str) -> dict:
 # The producer-attestation store root — MIRRORS gt_mini_patch._attestation_output_root()
 # (the same GT_C_OUT root the native lane / gateway classes persist to), so the grader's
 # load_attestations(task_dir) recursive glob finds brief-block bundles by the SAME mechanism.
-def _brief_attestation_root(e: dict) -> str:
+def _brief_attestation_root(e: Mapping[str, str]) -> str:
     return os.path.join(
         (e.get("GT_C_OUT") or os.environ.get("GT_C_OUT") or "/gt_out"),
         "producer_attestations",
     )
 
 
-def _persist_brief_localization_attestations(e: dict, brief_text: str) -> None:
+def _persist_brief_localization_attestations(e: Mapping[str, str], brief_text: str) -> None:
     """Seal each delivered, graph-verified localization brief BLOCK with an immutable
     producer attestation joinable to its per-block delivery seal.
 
@@ -201,7 +203,7 @@ def _persist_brief_localization_attestations(e: dict, brief_text: str) -> None:
         _bc(f"brief localization attestations skipped setup ({type(exc).__name__})")
         return
 
-    proof_by_candidate: dict[str, dict] = {}
+    proof_by_candidate: dict[str, dict[str, object]] = {}
     for proof in proofs:
         if not isinstance(proof, dict):
             continue
@@ -234,12 +236,13 @@ def _persist_brief_localization_attestations(e: dict, brief_text: str) -> None:
         if proof is None:
             continue
         try:
+            rank = proof.get("rank")
             final = finalize_localization_attestation(
                 candidate_id=candidate_id,
                 delivery_seal=digest[:16],
                 block_content_sha256=digest,
                 path=str(proof.get("path") or ""),
-                rank=proof.get("rank") if isinstance(proof.get("rank"), int) else 0,
+                rank=rank if type(rank) is int else 0,
                 witness=str(proof.get("witness") or ""),
                 witness_verified=proof.get("witness_verified") is True,
             )
@@ -250,7 +253,99 @@ def _persist_brief_localization_attestations(e: dict, brief_text: str) -> None:
             _bc(f"brief localization attestation skipped ({type(exc).__name__})")
 
 
-def _record_brief_delivery(e: dict, brief_text: str) -> None:
+def _persist_brief_obligations_attestations(e: Mapping[str, str], brief_text: str) -> None:
+    """Seal the delivered task-start obligations BLOCK with an immutable producer
+    attestation joinable to its per-block delivery seal.
+
+    Reads the SAME sealed ``brief_result.json`` the compound lineage row is built from
+    (its ``block_receipts`` give the exact obligations block seal; its
+    ``obligations_record`` gives the producer's build-time extraction identity — the exact
+    issue source sha/revision + the extracted obligations digest/count), builds a
+    :func:`groundtruth.runtime.brief_attestation.finalize_obligations_attestation` bundle,
+    and atomically persists it to the shared attestation store. HOST-SIDE,
+    correct-or-quiet: any miss (absent record, mismatched seal, unreadable result, store
+    I/O error) leaves the delivered brief byte-identical and the class honestly unmeasured;
+    it never raises.
+
+    NAMED GAP (fail-closed, never fabricated): the reactive ``obligation_unexercised`` form
+    has NO producer-owned, re-verifiable truth artifact (no persisted snapshot analogous to
+    ``obligations_record`` / ``newfile_precedent`` snapshot), so it is deliberately NOT
+    attested here — its truth stays UNMEASURED rather than inventing evidence.
+    """
+    brief_path = (e.get("GT_BRIEF_FILE") or "/gt_artifacts/brief.txt").strip()
+    result_path = os.path.join(os.path.dirname(brief_path), "brief_result.json")
+    try:
+        with open(result_path, encoding="utf-8") as fh:
+            result = json.load(fh)
+        if (
+            result.get("schema") != "gt.brief_result.v1"
+            or result.get("brief_text") != brief_text
+        ):
+            return
+        metrics = result.get("metrics") or {}
+        receipts = metrics.get("block_receipts")
+        record = metrics.get("obligations_record")
+        if not isinstance(receipts, list) or not isinstance(record, dict) or not record:
+            return
+        from groundtruth.runtime.attestation_store import persist_attestation
+        from groundtruth.runtime.brief_attestation import (
+            finalize_obligations_attestation,
+        )
+    except (ImportError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        _bc(f"brief obligations attestations skipped setup ({type(exc).__name__})")
+        return
+
+    if record.get("schema") != "gt.obligations_record.v1":
+        return
+    receipt = next(
+        (r for r in receipts
+         if isinstance(r, dict) and r.get("fact_class") == "obligations"),
+        None,
+    )
+    if receipt is None:
+        return
+    candidate_id = receipt.get("candidate_id")
+    full_hash = receipt.get("content_hash")
+    span = receipt.get("char_span")
+    if (
+        not isinstance(candidate_id, str) or not candidate_id
+        or not isinstance(full_hash, str) or len(full_hash) != 64
+        or not isinstance(span, list) or len(span) != 2
+        or not all(isinstance(n, int) and not isinstance(n, bool) for n in span)
+        or span[0] < 0 or span[0] >= span[1] or span[1] > len(brief_text)
+    ):
+        return
+    # Re-derive the seal from the delivered bytes (defence against a stale receipt) and
+    # cross-check the record's own bindings — the attestation may bind ONLY a seal that is
+    # exactly the delivered block's hash for the SAME candidate the record names.
+    block = brief_text[span[0]:span[1]]
+    digest = hashlib.sha256(block.encode("utf-8", "surrogatepass")).hexdigest()
+    if (
+        digest != full_hash
+        or record.get("candidate_id") != candidate_id
+        or record.get("block_content_sha256") != full_hash
+    ):
+        return
+    try:
+        count = record.get("obligation_count")
+        final = finalize_obligations_attestation(
+            candidate_id=candidate_id,
+            delivery_seal=digest[:16],
+            block_content_sha256=digest,
+            issue_sha256=str(record.get("issue_sha256") or ""),
+            issue_revision=str(record.get("issue_revision") or ""),
+            obligation_count=count if type(count) is int else 0,
+            obligations_digest=str(record.get("obligations_digest") or ""),
+        )
+        if final is None:
+            return
+        persist_attestation(
+            final.attestation, final.artifact_mapping(), _brief_attestation_root(e))
+    except Exception as exc:  # noqa: BLE001 -- correct-or-quiet host sidecar
+        _bc(f"brief obligations attestation skipped ({type(exc).__name__})")
+
+
+def _record_brief_delivery(e: Mapping[str, str], brief_text: str) -> None:
     """Seal the exact step-0 brief at its existing delivery owner.
 
     Host metadata only: this never changes the task string.  Profile-2's
@@ -276,6 +371,7 @@ def _record_brief_delivery(e: dict, brief_text: str) -> None:
             brief_text.encode("utf-8", "surrogatepass")
         ).hexdigest()[:16],
         "seal_scope": "block",
+        "opportunity_exempt_reason": "task_start_pre_policy",
     }
     row.update(_brief_delivery_extra(e, brief_text))
     try:
@@ -291,9 +387,12 @@ def _record_brief_delivery(e: dict, brief_text: str) -> None:
     # Seal each delivered, graph-verified localization block with a joinable producer
     # attestation (sidecar only; never changes the delivered brief bytes, correct-or-quiet).
     _persist_brief_localization_attestations(e, brief_text)
+    # Seal the delivered obligations block with a joinable producer attestation bound to the
+    # exact issue source + extracted obligations record (sidecar only; correct-or-quiet).
+    _persist_brief_obligations_attestations(e, brief_text)
 
 
-def _resolve_task(e: dict) -> str:
+def _resolve_task(e: Mapping[str, str]) -> str:
     """Resolve the agent task text: the guarded GT_RUN_TASK with the STEP-0 GT BRIEF prepended.
 
     THE B-wire (2026-07-13): the pier path prepended the curated step-0 brief onto the agent
@@ -332,7 +431,7 @@ def _env_on(value: object) -> bool:
     return str(value or "").strip().lower() not in {"", "0", "false", "no", "off", "none"}
 
 
-def _batch_hook_required(e: dict) -> bool:
+def _batch_hook_required(e: Mapping[str, str]) -> bool:
     """Whether this run promises observation-level one-dose arbitration."""
     if str(e.get("GT_BASELINE") or "") == "1":
         return False
@@ -345,7 +444,7 @@ def _batch_hook_required(e: dict) -> bool:
     )
 
 
-def _batch_receipt_path(e: dict) -> str:
+def _batch_receipt_path(e: Mapping[str, str]) -> str:
     explicit = str(e.get("GT_BATCH_ACTIVATION_RECEIPT") or "").strip()
     if explicit:
         return explicit
@@ -375,7 +474,7 @@ def _qualified_class(value: object) -> str:
 
 
 def _write_batch_activation_receipt(
-    e: dict,
+    e: Mapping[str, str],
     *,
     agent: object,
     required: bool,
@@ -517,6 +616,9 @@ def run(env: dict | None = None) -> int:
     _bc(f"headless agent finished: exit={exit_status} steps={steps} cost={cost}")
     print(f"[GT] headless agent finished: exit={exit_status} steps={steps} cost={cost}")
     if e.get("GT_BASELINE") != "1":
+        if gt_mini_patch is None:
+            _bc("FATAL: GT seam module unavailable at terminal attestation")
+            return 2
         try:
             seam_failures = int(gt_mini_patch.ledger_write_failures())
             attestation = ledger_attestation.write_attestation(

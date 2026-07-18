@@ -39,6 +39,10 @@ from groundtruth.runtime.attestation_store import persist_attestation  # noqa: E
 from groundtruth.runtime.completion_control import (  # noqa: E402
     submit_refusal_candidate_id,
 )
+from groundtruth.runtime.feature_lineage import (  # noqa: E402
+    build_lineage,
+    lineage_ledger_extra,
+)
 from groundtruth.runtime.submit_attestation import (  # noqa: E402
     finalize_submit_refusal_attestation,
 )
@@ -80,6 +84,13 @@ def _delivered_row(candidate_id: str, seal: str, payload: str = _REFUSAL) -> dic
         "content_sha256_16": seal,
         "seal_scope": "block",
         "candidate_id": candidate_id,
+        # J6: the seam now stamps typed FACT lineage on the submit-refusal delivered row
+        # (gt_mini_patch._commit_precommitted_batch_dose); required to seat a truth join.
+        **lineage_ledger_extra(build_lineage(
+            runtime_producer_id="submit_gate",
+            evidence_type="submit_refusal",
+            actual_event="submit",
+        )),
     }
 
 

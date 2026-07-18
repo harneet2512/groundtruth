@@ -35,16 +35,31 @@ from .producer_inputs import (
     PRODUCER_INPUTS_SCHEMA,
     CallerEvidenceRow,
     CallerUsageEvidenceRow,
+    DefinitionRow,
     ProducerInputs,
     SignatureChange,
     SourceState,
 )
 
 
+# Every gateway evidence_type whose semantic producer inputs are complete enough to
+# attest. The def-partition family (all four post_search variants) shares the canonical
+# ``def_partition`` fact class; each is bound to its own DefinitionRow evidence.
 _SUPPORTED: dict[str, str] = {
     "caller_break": "caller_contract",
     "signature_mismatch": "signature_delta",
+    "def_ref_partition": "def_partition",
+    "name_fold": "def_partition",
+    "wrong_surface": "def_partition",
+    "body_concept": "def_partition",
 }
+
+# The def-partition family: search-based facts (no before/after edit state, no caller
+# rows, no signature change) — their truth basis is the typed DefinitionRow set + the
+# graph revision they were read at + the exact query identity.
+_DEF_PARTITION_EVIDENCE: frozenset[str] = frozenset({
+    "def_ref_partition", "name_fold", "wrong_surface", "body_concept",
+})
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -96,6 +111,18 @@ def _change_dict(change: SignatureChange) -> dict[str, Any]:
     }
 
 
+def _definition_dict(row: DefinitionRow) -> dict[str, Any]:
+    return {
+        "identity": row.identity,
+        "file": row.file,
+        "line": row.line,
+        "kind": row.kind,
+        "definition_id": row.definition_id,
+        "confidence": row.confidence,
+        "resolution_method": row.resolution_method,
+    }
+
+
 def _usage_dict(row: CallerUsageEvidenceRow) -> dict[str, Any]:
     return {
         "property_id": row.property_id,
@@ -126,7 +153,7 @@ def _input_payload(
     registration = registration_for(envelope.evidence_type)
     if registration is None:
         raise ValueError("unsupported unregistered evidence type")
-    return {
+    payload: dict[str, Any] = {
         "schema": "gt.gateway_attestation_inputs.v1",
         "producer_inputs_schema": inputs.schema,
         "evidence_type": envelope.evidence_type,
@@ -149,6 +176,15 @@ def _input_payload(
             _usage_dict(row) for row in inputs.caller_usage_rows
         ],
     }
+    # def-partition structured search evidence — additive keys emitted ONLY when the
+    # producer carried them, so every edit-fact (caller_break / signature_mismatch)
+    # canonical byte payload is byte-identical to the pre-def-partition era.
+    if inputs.definition_rows or inputs.query_identity:
+        payload["query_identity"] = inputs.query_identity
+        payload["definition_rows"] = [
+            _definition_dict(row) for row in inputs.definition_rows
+        ]
+    return payload
 
 
 def canonical_producer_inputs_bytes(
@@ -275,6 +311,36 @@ def _complete_usage(row: CallerUsageEvidenceRow) -> bool:
         and row.extractor.strip()
         and row.evidence_method.strip()
     )
+def _complete_definition(row: DefinitionRow) -> bool:
+    """A def-partition definition row is complete when it names a concrete graph node.
+
+    Confidence / resolution_method are OPTIONAL (a bare def-node lookup has neither); when
+    present they must be well-formed. Identity, file, a positive line, a non-empty kind,
+    and a positive node id are all required — a fabricated row with a zero/absent id or a
+    bad line can never be complete (the ``def-partition row not consumed by producer``
+    mutation bites here)."""
+    if not (
+        isinstance(row.identity, str) and row.identity.strip()
+        and isinstance(row.file, str) and row.file.strip()
+        and isinstance(row.line, int) and not isinstance(row.line, bool) and row.line > 0
+        and isinstance(row.kind, str) and row.kind.strip()
+        and isinstance(row.definition_id, int)
+        and not isinstance(row.definition_id, bool) and row.definition_id > 0
+    ):
+        return False
+    if row.confidence is not None and not (
+        isinstance(row.confidence, (int, float))
+        and not isinstance(row.confidence, bool)
+        and 0.0 <= float(row.confidence) <= 1.0
+    ):
+        return False
+    if row.resolution_method is not None and not (
+        isinstance(row.resolution_method, str) and row.resolution_method.strip()
+    ):
+        return False
+    return True
+
+
 def _artifact_bundle(
     envelope: EvidenceEnvelope,
     payload_bytes: bytes,
@@ -415,67 +481,93 @@ def build_gateway_attestation(
     rendered_ref = next(
         ref for ref in source_refs if ref.kind == "rendered_candidate"
     )
-    common_complete = bool(
-        _complete_source(inputs.before_state)
-        and _complete_source(inputs.after_state)
-        and inputs.caller_rows
-        and all(_complete_caller(row) for row in inputs.caller_rows)
-        and inputs.graph_revision
-        and inputs.graph_revision == envelope.graph_revision
-    )
-    usage_complete = bool(
-        not inputs.caller_usage_rows
-        or (
-            all(_complete_usage(row) for row in inputs.caller_usage_rows)
-            and all(
-                row.source_revision == inputs.graph_revision
-                for row in inputs.caller_usage_rows
-            )
-            and all(
-                any(
-                    caller.identity == usage.caller_identity
-                    and caller.file == usage.caller_file
-                    for caller in inputs.caller_rows
-                )
-                for usage in inputs.caller_usage_rows
-            )
+    if envelope.evidence_type in _DEF_PARTITION_EVIDENCE:
+        # def-partition (post_search) FACT: the truth basis is the typed DefinitionRow
+        # set read at the graph revision the envelope shipped; no edit before/after state
+        # and no signature change exist for a search fact. Fail closed if the producer
+        # carried no definition rows, an incomplete row, no query identity, or a graph
+        # revision that does not match the delivered envelope's.
+        graph_bound = bool(
+            inputs.graph_revision
+            and inputs.graph_revision == envelope.graph_revision
         )
-    )
-    if envelope.evidence_type == "caller_break":
-        semantic_complete = bool(
-            len(inputs.signature_changes) == 1
-            and _caller_change_complete(inputs.signature_changes[0])
+        rows_complete = bool(
+            inputs.definition_rows
+            and all(_complete_definition(row) for row in inputs.definition_rows)
         )
+        truth_complete = bool(
+            graph_bound
+            and rows_complete
+            and inputs.query_identity.strip()
+        )
+        # Freshness for def_partition is the graph revision the definitions were read at
+        # (registry freshness_deps = nodes + edges_rev); the delivered seal proves what
+        # shipped, the graph revision binds it to the exact graph snapshot.
+        freshness_complete = truth_complete
+        truth_paths = ("$.definition_rows", "$.query_identity")
+        freshness_paths = ("$.graph_revision",)
     else:
-        semantic_complete = bool(
-            len(inputs.signature_changes) == 1
-            and _signature_change_complete(inputs.signature_changes[0])
+        common_complete = bool(
+            _complete_source(inputs.before_state)
+            and _complete_source(inputs.after_state)
+            and inputs.caller_rows
+            and all(_complete_caller(row) for row in inputs.caller_rows)
+            and inputs.graph_revision
+            and inputs.graph_revision == envelope.graph_revision
         )
-    truth_complete = common_complete and semantic_complete and usage_complete
-    freshness_complete = common_complete and semantic_complete and usage_complete
-    truth_paths = (
-        "$.caller_rows", "$.signature_changes",
-        *(("$.caller_usage_rows",) if inputs.caller_usage_rows else ()),
-    )
-    freshness_paths = (
-        "$.before_state.sha256",
-        "$.before_state.revision",
-        "$.after_state.sha256",
-        "$.after_state.revision",
-        "$.graph_revision",
-        *tuple(
-            path
-            for index in range(len(inputs.caller_rows))
-            for path in (
-                f"$.caller_rows[{index}].source_state.sha256",
-                f"$.caller_rows[{index}].source_state.revision",
+        usage_complete = bool(
+            not inputs.caller_usage_rows
+            or (
+                all(_complete_usage(row) for row in inputs.caller_usage_rows)
+                and all(
+                    row.source_revision == inputs.graph_revision
+                    for row in inputs.caller_usage_rows
+                )
+                and all(
+                    any(
+                        caller.identity == usage.caller_identity
+                        and caller.file == usage.caller_file
+                        for caller in inputs.caller_rows
+                    )
+                    for usage in inputs.caller_usage_rows
+                )
             )
-        ),
-        *tuple(
-            f"$.caller_usage_rows[{index}].source_revision"
-            for index in range(len(inputs.caller_usage_rows))
-        ),
-    )
+        )
+        if envelope.evidence_type == "caller_break":
+            semantic_complete = bool(
+                len(inputs.signature_changes) == 1
+                and _caller_change_complete(inputs.signature_changes[0])
+            )
+        else:
+            semantic_complete = bool(
+                len(inputs.signature_changes) == 1
+                and _signature_change_complete(inputs.signature_changes[0])
+            )
+        truth_complete = common_complete and semantic_complete and usage_complete
+        freshness_complete = common_complete and semantic_complete and usage_complete
+        truth_paths = (
+            "$.caller_rows", "$.signature_changes",
+            *(("$.caller_usage_rows",) if inputs.caller_usage_rows else ()),
+        )
+        freshness_paths = (
+            "$.before_state.sha256",
+            "$.before_state.revision",
+            "$.after_state.sha256",
+            "$.after_state.revision",
+            "$.graph_revision",
+            *tuple(
+                path
+                for index in range(len(inputs.caller_rows))
+                for path in (
+                    f"$.caller_rows[{index}].source_state.sha256",
+                    f"$.caller_rows[{index}].source_state.revision",
+                )
+            ),
+            *tuple(
+                f"$.caller_usage_rows[{index}].source_revision"
+                for index in range(len(inputs.caller_usage_rows))
+            ),
+        )
 
     attestation = ProducerAttestation(
         schema=ATTESTATION_SCHEMA,

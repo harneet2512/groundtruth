@@ -96,8 +96,8 @@ def _run_metrics(proof_manifest: dict) -> dict:
 def test_v3_manifest_is_exact_128_and_preserves_typed_roles() -> None:
     result = manifest.build_ss_proof_manifest(SCOREBOARD)
     assert result["schema"] == "gt.ss_proof_manifest.v3"
-    assert result["family_counts"] == {"ACQ": 12, "CAP": 47, "FACT": 11, "PERF": 58}
-    assert len(result["features"]) == 128
+    assert result["family_counts"] == {"ACQ": 12, "CAP": 48, "FACT": 11, "PERF": 58}
+    assert len(result["features"]) == 129
     assert result["features"]["graph_validity"]["role"] == "support"
     assert result["features"]["GT_HYPOTHESIS"]["role"] == "capability_support"
     assert result["features"]["GT_GATEWAY"]["role"] == "infra_control"
@@ -183,7 +183,7 @@ def test_preflight_is_explicitly_audit_only_and_never_dispatch_ready(tmp_path: P
     assert report["dispatch_ready_enabled"] is False
     assert report["proof_promotion_enabled"] is False
     assert report["dispatch_integration"] == "absent:no production caller"
-    assert report["counts"]["unknown"] == 128 - blocked
+    assert report["counts"]["unknown"] == 129 - blocked
     assert report["counts"]["blocked"] == blocked
     assert sum(value for key, value in report["counts"].items() if key.endswith("_ready")) == 0
 
@@ -203,7 +203,7 @@ def test_synthetic_wrapper_exploit_cannot_complete_any_feature(tmp_path: Path) -
         proof_receipts={name: wrapper for name in proof_manifest["features"]},
         feature_fixture_refs={name: wrapper for name in proof_manifest["features"]},
     )
-    assert report["counts"]["incomplete"] == 128 - blocked
+    assert report["counts"]["incomplete"] == 129 - blocked
     assert report["counts"]["blocked"] == blocked
     assert sum(value for key, value in report["counts"].items() if key.endswith("_complete")) == 0
     assert report["audits"]["fixture_burden"]["valid"] is False
@@ -395,7 +395,7 @@ def test_missing_context_bindings_are_named_and_never_rounded_up(tmp_path: Path)
     report = manifest.preflight_ss_proof(
         proof_manifest, mode="postrun", task_context={"proof_root": str(tmp_path)}
     )
-    assert report["counts"]["incomplete"] == 128 - blocked
+    assert report["counts"]["incomplete"] == 129 - blocked
     assert "missing_run_id" in report["audits"]["gate_x2"]["errors"]
     assert "missing_task_id" in report["audits"]["runtime"]["errors"]
     assert "missing_seam_sha256" in report["audits"]["feature_metrics"]["errors"]

@@ -62,6 +62,30 @@ class CallerUsageEvidenceRow:
 
 
 @dataclass(frozen=True, order=True)
+class DefinitionRow:
+    """One typed definition-site row retained from a post_search def-partition read.
+
+    The gateway def-partition producers (``_produce_def_ref_partition`` /
+    ``_produce_name_fold`` / ``_produce_wrong_surface`` / ``_produce_body``) resolve a
+    searched symbol to concrete graph DEFINITION nodes at a fixed graph revision. This
+    record preserves exactly what the producer consumed to render the partition: the
+    node's ``file``/``line``/``kind`` (label) and ``definition_id`` (graph node id).
+
+    ``confidence`` / ``resolution_method`` are OPTIONAL: a bare definition node has no
+    edge-style resolution provenance (it is an exact-name node lookup), so a body-concept
+    hit or an exact def-node lookup leaves them ``None`` rather than inferring a value.
+    """
+
+    identity: str            # the matched node name (the searched symbol / fold variant)
+    file: str
+    line: int
+    kind: str                # the graph node label (Function / Method / Class / ...)
+    definition_id: int
+    confidence: float | None = None
+    resolution_method: str | None = None
+
+
+@dataclass(frozen=True, order=True)
 class SignatureChange:
     """Exact semantic signature delta used by a producer decision.
 
@@ -94,12 +118,19 @@ class ProducerInputs:
     graph_revision: str
     signature_changes: tuple[SignatureChange, ...] = ()
     caller_usage_rows: tuple[CallerUsageEvidenceRow, ...] = ()
+    # def_partition (post_search) structured search evidence. Empty for every edit-fact
+    # producer (caller_break / signature_mismatch), so an existing producer's canonical
+    # input bytes are byte-identical. ``query_identity`` is the exact search operand the
+    # producer resolved (the symbol whose definitions were partitioned).
+    definition_rows: tuple[DefinitionRow, ...] = ()
+    query_identity: str = ""
 
 
 __all__ = [
     "PRODUCER_INPUTS_SCHEMA",
     "CallerEvidenceRow",
     "CallerUsageEvidenceRow",
+    "DefinitionRow",
     "ProducerInputs",
     "SignatureChange",
     "SourceState",

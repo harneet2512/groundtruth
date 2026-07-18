@@ -50,6 +50,7 @@ from groundtruth.runtime.attestation_store import (
     attestation_index_key,
 )
 from groundtruth.runtime.fact_registry import registration_for
+from groundtruth.runtime.feature_lineage import CAP_FEATURE_IDS, LINEAGE_SCHEMA
 from groundtruth.runtime.producer_attestation import (
     FAIL,
     PASS,
@@ -97,11 +98,24 @@ _DELIVERED = "delivered"
 #                      change_surface's own registration derivation on the producer-captured
 #                      registry bytes (truth+authority measured; freshness MEASURED via the
 #                      captured git commit + blob anchor).
+#   def_partition   <- post_search      (gateway_attestation_factory, "def_ref_partition"/
+#                      "name_fold"/"wrong_surface"/"body_concept") — the searched symbol's
+#                      graph DEFINITION rows read at a fixed graph revision, bound to the
+#                      delivered post_search grep-native block (truth + freshness MEASURED via
+#                      the graph revision the definitions were read at).
+#   obligations     <- spec             (brief_attestation.finalize_obligations_attestation) —
+#                      the task-start obligations BLOCK, bound to the EXACT issue source
+#                      identity (sha/revision) + the extracted obligations digest/count.
+#                      Truth + freshness MEASURED via the issue source binding. The reactive
+#                      ``obligation_unexercised`` form is a NAMED GAP: no re-verifiable
+#                      producer artifact, so it stays UNMEASURED (never fabricated).
 ATTESTED_FACT_CLASSES: tuple[str, ...] = (
     "caller_contract",
     "covering_red",
+    "def_partition",
     "localization",
     "newfile_precedent",
+    "obligations",
     "recovery",
     "signature_delta",
     "submit_refusal",
@@ -335,17 +349,62 @@ def load_attestations(task_dir: str) -> AttestationLoad:
 # --------------------------------------------------------------------------- #
 # The join.
 # --------------------------------------------------------------------------- #
-def _index_block_lineage(row: dict, position: int, index: dict[tuple[str, str], list[int]]) -> None:
+# J6 (Cluster-2b Defect-6): a DELIVERED row may seat a truth join ONLY when it stamps
+# REGISTERED lineage — one of the three forms the seam writer stamps:
+#   1. registered TYPED FACT lineage (``lineage_schema`` == the feature lineage schema with a
+#      non-empty ``fact_class``) — native/gateway rows (edit.syntax, gateway facts, ...);
+#   2. a REGISTERED compound BLOCK lineage entry (``lineage_status == "REGISTERED"`` + a
+#      ``lineage`` dict) — the step-0 brief blocks (localization / obligations);
+#   3. a registered ``profile_member`` owner (value ∈ the CAP inventory) — the exact-profile
+#      lane attribution used by a RECLASSIFIED byte owner that carries NO FACT lineage by
+#      product decision (GT_SS_COHERENCE_V2 on detect.coherence, P4). This is the third,
+#      equally-registered attribution form; without it the recovery-coherence truth join
+#      could never seat while P4 forbids fabricating a FACT identity on that row.
+# An identity-complete DELIVERED row/block carrying NONE of these is NOT indexed for join; it
+# is recorded as a lineage REJECTION so an attestation matching it surfaces a NAMED reason
+# distinct from a plain candidate/seal miss.
+_LINEAGE_REJECT_ROW = "delivered_row_missing_registered_lineage"
+_LINEAGE_REJECT_BLOCK = "block_lineage_unregistered"
+
+
+def _row_has_registered_lineage(row: dict) -> bool:
+    """True iff a native/gateway/lane delivered row stamps a REGISTERED attribution: typed
+    FACT lineage OR a registered ``profile_member`` CAP owner (the exact-profile lane form)."""
+    typed = (
+        row.get("lineage_schema") == LINEAGE_SCHEMA
+        and isinstance(row.get("fact_class"), str)
+        and bool(row["fact_class"].strip())
+    )
+    member = row.get("profile_member")
+    profile_owner = isinstance(member, str) and member in CAP_FEATURE_IDS
+    return bool(typed or profile_owner)
+
+
+def _block_is_registered(block: dict) -> bool:
+    """True iff a compound brief block carries REGISTERED block lineage."""
+    return (
+        block.get("lineage_status") == "REGISTERED"
+        and isinstance(block.get("lineage"), dict)
+    )
+
+
+def _index_block_lineage(
+    row: dict,
+    position: int,
+    index: dict[tuple[str, str], list[int]],
+    rejections: dict[tuple[str, str], str],
+) -> None:
     """Expose a COMPOUND delivered row's per-block seals to the join.
 
     The task-start brief is one DELIVERED ledger row with no top-level
     ``(candidate_id, content_sha256_16)`` — its fact-bearing blocks are sealed
     individually under ``block_lineage`` (``gt_headless_runner._brief_delivery_extra``:
     each block carries its own ``candidate_id`` and ``content_sha256_16`` over the exact
-    delivered block bytes). Index each such block's identity → the compound row position
-    so a producer attestation sealed to a block (e.g. a ``localization`` brief block) can
-    join it on the SAME exact identity the native lane rows use. Purely additive: a
-    non-compound row (no ``block_lineage``) is unaffected.
+    delivered block bytes). Index each REGISTERED block's identity → the compound row
+    position so a producer attestation sealed to a block (e.g. a ``localization`` or
+    ``obligations`` brief block) can join it on the SAME exact identity the native lane
+    rows use. An UNREGISTERED block is recorded as a lineage rejection, never indexed.
+    Purely additive: a non-compound row (no ``block_lineage``) is unaffected.
     """
     blocks = row.get("block_lineage")
     if not isinstance(blocks, list):
@@ -359,32 +418,51 @@ def _index_block_lineage(row: dict, position: int, index: dict[tuple[str, str], 
             continue
         if not isinstance(seal, str) or not seal:
             continue
-        index[(candidate_id, seal)].append(position)
+        key = (candidate_id, seal)
+        if _block_is_registered(block):
+            index[key].append(position)
+        else:
+            rejections.setdefault(key, _LINEAGE_REJECT_BLOCK)
 
 
-def _delivered_row_index(ledger_rows: Iterable[Any]) -> dict[tuple[str, str], list[int]]:
+def _delivered_row_index(
+    ledger_rows: Iterable[Any],
+) -> tuple[dict[tuple[str, str], list[int]], dict[tuple[str, str], str]]:
     """Map ``(candidate_id, content_sha256_16)`` → row indices, DELIVERED rows only.
 
-    Indexes both a row's TOP-LEVEL seal identity (native lane rows) and, for a compound
-    delivery (the step-0 brief), every per-block seal under ``block_lineage`` — so a
-    brief-block attestation joins on the exact same identity contract.
+    Indexes both a row's TOP-LEVEL seal identity (native/gateway lane rows) and, for a
+    compound delivery (the step-0 brief), every per-block seal under ``block_lineage`` — so
+    a brief-block attestation joins on the exact same identity contract.
+
+    J6: an identity-complete DELIVERED row/block is indexed ONLY when it stamps valid typed
+    FACT lineage (native/gateway) or registered block lineage (brief). One that does not is
+    added to the returned ``rejections`` map (``(candidate_id, seal)`` → named reason) so the
+    join can surface WHY a matching attestation was not seated — distinct from a plain
+    candidate/seal miss (which yields no entry at all).
     """
     index: dict[tuple[str, str], list[int]] = defaultdict(list)
+    rejections: dict[tuple[str, str], str] = {}
     for position, row in enumerate(ledger_rows or []):
         if not isinstance(row, dict):
             continue
         outcome = row.get("outcome")
         if not isinstance(outcome, str) or outcome.lower() != _DELIVERED:
             continue
-        _index_block_lineage(row, position, index)
+        _index_block_lineage(row, position, index, rejections)
         candidate_id = row.get("candidate_id")
         seal = row.get("content_sha256_16")
         if not isinstance(candidate_id, str) or not candidate_id:
             continue
         if not isinstance(seal, str) or not seal:
             continue
-        index[(candidate_id, seal)].append(position)
-    return index
+        key = (candidate_id, seal)
+        if _row_has_registered_lineage(row):
+            index[key].append(position)
+        elif key not in index:
+            # Only a lineage-less row is a rejection; never shadow a row already indexed
+            # (e.g. a registered brief block) at the same identity.
+            rejections.setdefault(key, _LINEAGE_REJECT_ROW)
+    return index, rejections
 
 
 def _aggregate_bool(verdicts: list[str]) -> bool | None:
@@ -411,19 +489,25 @@ def join_truth(
     delivered row contributes NOTHING (it is not counted, and cannot set truth). The
     returned dict contains ONLY fact classes with at least one joined attestation.
     """
-    delivered = _delivered_row_index(ledger_rows)
+    delivered, rejections = _delivered_row_index(ledger_rows)
     joined: dict[str, list[tuple[ProducerAttestation, list[int]]]] = defaultdict(list)
+    # J6: attestations whose identity matched a DELIVERED row/block that was rejected for
+    # missing lineage — surfaced as a NAMED reason (never a silent contributes-nothing).
+    lineage_rejected: dict[str, list[tuple[ProducerAttestation, str]]] = defaultdict(list)
     for attestation in attestations:
         registration = registration_for(attestation.evidence_type)
         if registration is None:
             continue  # validate() already guarantees registration; defensive skip.
         fact_class = registration.fact_class
-        row_indices = delivered.get(
-            (attestation.candidate_id, attestation.delivery_seal)
-        )
-        if not row_indices:
-            continue  # unjoined → contributes nothing
-        joined[fact_class].append((attestation, list(row_indices)))
+        key = (attestation.candidate_id, attestation.delivery_seal)
+        row_indices = delivered.get(key)
+        if row_indices:
+            joined[fact_class].append((attestation, list(row_indices)))
+            continue
+        reject_reason = rejections.get(key)
+        if reject_reason is not None:
+            lineage_rejected[fact_class].append((attestation, reject_reason))
+        # else: a plain candidate/seal miss → contributes nothing (no named reason).
 
     result: dict[str, TruthJoin] = {}
     for fact_class, items in joined.items():
@@ -448,6 +532,27 @@ def join_truth(
             freshness=_aggregate_bool(freshness_verdicts),
             attestation_count=len(items),
             joined_delivery_row_indices=tuple(indices),
+            reasons=reasons,
+        )
+    # J6: surface a NAMED lineage-rejection reason for a class whose ONLY matching delivered
+    # row/block lacked lineage — but never overwrite a real join (a class with one joined and
+    # one lineage-rejected attestation keeps its real, seated join). Truth/authority/freshness
+    # stay UNMEASURED (None): a lineage-rejected attestation is not seated, so it can grant no
+    # verdict — it is fail-closed, and the reason distinguishes it from a candidate/seal miss.
+    for fact_class, rejects in lineage_rejected.items():
+        if fact_class in result:
+            continue
+        reasons = tuple(
+            f"lineage_rejected:{reason} candidate={attestation.candidate_id!r} "
+            f"seal={attestation.delivery_seal}"
+            for attestation, reason in rejects
+        )
+        result[fact_class] = TruthJoin(
+            truth=None,
+            authority=None,
+            freshness=None,
+            attestation_count=0,
+            joined_delivery_row_indices=(),
             reasons=reasons,
         )
     return result

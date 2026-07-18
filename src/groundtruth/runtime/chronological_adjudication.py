@@ -17,6 +17,7 @@ from .fact_registry import EVENTS, is_reactive, registration_for, required_event
 ON_TIME = "ON_TIME"
 LATE = "LATE"
 STEP_BEHIND = "STEP_BEHIND"
+WRONG_EVENT = "WRONG_EVENT"
 UNMEASURED = "UNMEASURED"
 
 CAUSAL = "CAUSAL"
@@ -119,9 +120,22 @@ def _timing(
     if registration is None or wanted is None:
         return UNMEASURED, ""
     if actual_event not in EVENTS:
+        # C-cluster split: a GENUINELY-UNKNOWN event (not in the registry vocabulary) is
+        # unobservable — the join could not name what happened — so it stays UNMEASURED
+        # (fail-closed, unchanged). This is the ONLY event path that remains UNMEASURED.
         return UNMEASURED, wanted
+    # F (covering dual-label — DO NOT "fix"): the seam stamps ``covering_red`` deliveries with
+    # actual_event='test_result' (the canonical class label) while the registry override routes
+    # required_event('covering_red')='edit_result'; because covering_red ∈ _REACTIVE_EVIDENCE_TYPES,
+    # is_reactive() is True here and the wrong-event check below is deliberately bypassed — the
+    # RED is on-time-by-construction at the edit it targets. This is the intended contract; the
+    # WRONG_EVENT split intentionally does NOT apply to reactive types.
     if not is_reactive(evidence_type) and actual_event != wanted:
-        return UNMEASURED, wanted
+        # C-cluster split: the event is KNOWN (in the vocabulary) but is the WRONG boundary for
+        # a NON-reactive class — GT answered the wrong decision. That is a measured timing
+        # FAILURE (correct_time=False), NOT an unmeasured gap; splitting it out of UNMEASURED
+        # stops a real wrong-event fact from hiding behind "we couldn't measure it".
+        return WRONG_EVENT, wanted
     opened = chronology.decision_open_index
     delivered = chronology.delivery_index
     committed = chronology.decision_commit_index
@@ -136,6 +150,17 @@ def _timing(
             return UNMEASURED, wanted
         if acquired < delivered:
             return STEP_BEHIND, wanted
+    # E (logical-clock defense-in-depth): a post-delivery ACTION cannot precede or coincide
+    # with the delivery that caused it. ``action_index`` is derived only from messages STRICTLY
+    # after ``delivery_index``, so ``action_index <= delivered`` is an impossible ordering; if it
+    # ever appears the chronology is internally inconsistent and timing fails closed (UNMEASURED)
+    # rather than trusting an inverted clock. Additive: None (no action) leaves the verdict as-is.
+    acted = chronology.action_index
+    if acted is not None:
+        if not _index(acted):
+            return UNMEASURED, wanted
+        if acted <= delivered:
+            return UNMEASURED, wanted
     if delivered > committed:
         return LATE, wanted
     return ON_TIME, wanted
@@ -215,6 +240,7 @@ __all__ = [
     "STEP_BEHIND",
     "TIMING_SCHEMA",
     "UNMEASURED",
+    "WRONG_EVENT",
     "Adjudication",
     "Chronology",
     "MatchedProbe",

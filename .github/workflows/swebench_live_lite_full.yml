@@ -2347,8 +2347,8 @@ jobs:
             [ -s "trial_results/gt_runtime_ledger_${GT_TASK_ID}.jsonl" ] || _MM_MISSING="$_MM_MISSING gt_runtime_ledger_${GT_TASK_ID}.jsonl"
             [ -s "$TASK_ARTIFACT_ROOT/gt_runtime_ledger_attestation_${GT_TASK_ID}.json" ] || _MM_MISSING="$_MM_MISSING gt_runtime_ledger_attestation_${GT_TASK_ID}.json"
             # Presence alone is insufficient: the feature collector must prove the exact
-            # 12 ACQ + 47 CAP + 11 FACT + 58 PERF ledger and all required inputs.
-            python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); s=d.get("ss_integrity") or {}; f=d.get("ss_features") or {}; sys.exit(0 if len(f)==128 and s.get("inventory_complete") is True and s.get("required_inputs_complete") is True and s.get("visible_audit_complete") is True else 1)' \
+            # 12 ACQ + 48 CAP + 11 FACT + 58 PERF ledger and all required inputs.
+            python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); s=d.get("ss_integrity") or {}; f=d.get("ss_features") or {}; sys.exit(0 if len(f)==129 and s.get("inventory_complete") is True and s.get("required_inputs_complete") is True and s.get("visible_audit_complete") is True else 1)' \
               "trial_results/gt_feature_metrics_${GT_TASK_ID}.json" \
               || _MM_MISSING="$_MM_MISSING gt_feature_metrics_ss128_integrity"
             [ -s "trial_results/gt_artifacts/gt_agent_exit.json" ] || _MM_MISSING="$_MM_MISSING gt_agent_exit.json"
@@ -2794,13 +2794,13 @@ jobs:
           else:
               ss_features = feature.get("ss_features")
               feature_count = len(ss_features) if isinstance(ss_features, dict) else None
-              if feature_count != 128:
+              if feature_count != 129:
                   issues.append(f"GT_EXACT_128_CARDINALITY_INVALID: {feature_count}")
                   ss_features = {}
           family_counts = Counter(
               row.get("family") for row in ss_features.values() if isinstance(row, dict)
           )
-          expected_families = {"ACQ": 12, "CAP": 47, "FACT": 11, "PERF": 58}
+          expected_families = {"ACQ": 12, "CAP": 48, "FACT": 11, "PERF": 58}
           coverage_failures = sorted(
               name for name, row in ss_features.items()
               if not isinstance(row, dict)
@@ -2819,7 +2819,7 @@ jobs:
               or ss_integrity.get("publishable") is not True
           ):
               issues.append("GT_EXACT_128_INVALID")
-          if not diagnosis or diagnosis.get("feature_count") != 128:
+          if not diagnosis or diagnosis.get("feature_count") != 129:
               issues.append("ss_live_diagnosis_not_exact_128")
           if not diagnosis_md_path.is_file() or diagnosis_md_path.stat().st_size == 0:
               issues.append("ss_live_diagnosis_markdown_missing")

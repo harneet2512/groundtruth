@@ -40,8 +40,10 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import re
+from collections.abc import Callable, Mapping
 
 from groundtruth.runtime.evidence_envelope import (
+    ObservationBinding,
     RECEIPT_ACTED,
     RECEIPT_CAUSAL,
     RECEIPT_DELIVERED,
@@ -57,7 +59,7 @@ from groundtruth.runtime.evidence_envelope import (
     VERIFIED,
     WARNING,
 )
-from groundtruth.runtime.gateway import ToolEvent, classify_command
+from groundtruth.runtime.gateway import CoveringResult, ToolEvent, classify_command
 from groundtruth.runtime.native_render import (
     render_body_concept_native,
     render_caller_contract_native,
@@ -109,8 +111,8 @@ def normalize_event(
     *,
     cwd: str = "",
     changed_files: "tuple[str, ...]" = (),
-    edit_before_after: "dict | None" = None,
-    covering: "object | None" = None,
+    edit_before_after: "Mapping[str, tuple[str | None, str]] | None" = None,
+    covering: "CoveringResult | None" = None,
 ) -> ToolEvent:
     """Build the gateway :class:`ToolEvent` from the mini's raw per-turn values.
 
@@ -178,7 +180,7 @@ def _xsession_boost(env: EvidenceEnvelope) -> int:
         return 0
 
 
-def _priority(env: EvidenceEnvelope) -> tuple:
+def _priority(env: EvidenceEnvelope) -> tuple[int, int, float, str]:
     """A TOTAL deterministic order over envelopes (higher = deliver first).
 
     Ranked by evidence-type severity, then tier, then confidence, then the stable
@@ -217,7 +219,7 @@ def render_envelope(
     env: EvidenceEnvelope,
     *,
     native: bool,
-    def_facts_renderer: "object | None" = None,
+    def_facts_renderer: "Callable[[EvidenceEnvelope], str] | None" = None,
 ) -> str:
     """Render ONE envelope to the model-facing string that will be appended.
 
@@ -332,8 +334,12 @@ def _render_signature_delta(env: EvidenceEnvelope) -> str:
     a = env.native_args or {}
     if not a:
         return ""
+    caller_file = a.get("caller_file")
+    symbol = a.get("symbol")
+    if not isinstance(caller_file, str) or not isinstance(symbol, str):
+        return ""
     return render_signature_delta_native(
-        a.get("caller_file"), a.get("caller_line"), a.get("symbol"),
+        caller_file, a.get("caller_line"), symbol,
         expected_min=a.get("new_min_params"), expected_max=a.get("new_max_params"),
         given=a.get("positional_args"))
 
@@ -345,8 +351,12 @@ def _render_registration(env: EvidenceEnvelope) -> str:
     a = env.native_args or {}
     if not a:
         return ""
+    file_path = a.get("file")
+    symbol = a.get("symbol")
+    if not isinstance(file_path, str) or not isinstance(symbol, str):
+        return ""
     return render_registration_native(
-        a.get("file"), a.get("line"), a.get("symbol"), a.get("siblings"))
+        file_path, a.get("line"), symbol, a.get("siblings"))
 
 
 def _render_def_rows(env: EvidenceEnvelope) -> str:
@@ -424,7 +434,7 @@ def _render_scope(env: EvidenceEnvelope) -> str:
 #     here (not rebuilt), but no live gateway producer emits a ``scope`` evidence_type yet (see
 #     _render_scope), so the entry is unit-tested and inert on a live run until a registered
 #     scope producer exists (do NOT fake fields — the target must be a real must-touch file).
-_NATIVE_CLASS_RENDERERS: "dict[str, object]" = {
+_NATIVE_CLASS_RENDERERS: dict[str, Callable[[EvidenceEnvelope], str]] = {
     "trace_frame": _render_trace,
     "caller_break": _render_caller_break,
     "def_ref_partition": _render_def_rows,
@@ -503,6 +513,7 @@ def seal_delivery(
     tool_output_bytes: bytes = b"",
     boundary: bytes = b"",
     dedup_chain: "set[str] | None" = None,
+    observation_binding: "ObservationBinding | None" = None,
 ) -> "tuple[EvidenceEnvelope, str]":
     """Stamp a DELIVERED copy of ``env`` and return ``(sealed_copy, new_chain_head)``.
 
@@ -550,6 +561,7 @@ def seal_delivery(
         receipt_state=RECEIPT_DELIVERED,
         delivery_reason="gateway_augment",
         suppression_reason="",
+        observation_binding=observation_binding,
     )
     return sealed, new_head
 

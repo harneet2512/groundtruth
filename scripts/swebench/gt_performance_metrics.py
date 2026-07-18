@@ -1271,7 +1271,9 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
     n_gold_viewed = len(gold_viewed_set)
 
     localization_precision = d8(n_gold_edited / n_edited) if n_edited else None
-    localization_recall = d8(n_gold_edited / n_gold) if n_gold else 0.0
+    # D3 (2026-07-18): no gold denominator -> UNMEASURED (None), never a fabricated 0.0 that
+    # reads as a real "0% recall". Mirrors the sibling `else None` metrics above/below.
+    localization_recall = d8(n_gold_edited / n_gold) if n_gold else None
     false_file_rate = d8((n_edited - n_gold_edited) / n_edited) if n_edited else None
     exploration_ratio = d8(n_viewed / n_edited) if n_edited else None
     gold_view_precision = d8(n_gold_viewed / n_viewed) if n_viewed else None
@@ -1306,7 +1308,8 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
                 break
 
     gold_in_l1_top_k = gold_rank <= 5
-    navigation_directness = d8(gold_in_top5 / n_gold) if n_gold else 0.0
+    # D4 (2026-07-18): no gold denominator -> UNMEASURED (None), never a fabricated 0.0.
+    navigation_directness = d8(gold_in_top5 / n_gold) if n_gold else None
 
     return {
         "gold_in_L1_top_k": gold_in_l1_top_k,
@@ -1564,7 +1567,8 @@ def _compute_scope_completeness(timeline: list[dict], gold_files: list[str]) -> 
     n_gold = len(gold_set)
     n_edited = len(edited_files)
 
-    scope_coverage = d8(len(gold_edited) / n_gold) if n_gold else 0.0
+    # D5 (2026-07-18): no gold denominator -> UNMEASURED (None), never a fabricated 0.0.
+    scope_coverage = d8(len(gold_edited) / n_gold) if n_gold else None
     scope_excess = d8(len(non_gold_edited) / n_edited) if n_edited else None
 
     # multi_file_discovery: for multi-file gold tasks, were the 2nd/3rd files found?
@@ -1924,7 +1928,6 @@ def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
 
     # gold_files_edited
     gold_edited_set: set[str] = set()
-    non_gold_tokens = 0  # proxy: steps spent on non-gold files
     gold_steps = 0
     non_gold_steps = 0
 
@@ -1963,10 +1966,17 @@ def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
     gt_injected_tokens = gt_observation_chars / 4.0
     gt_token_overhead = d8(gt_injected_tokens / total_tokens_in) if total_tokens_in else None
 
-    # wasted_token_rate: tokens on non-gold file reads/edits / total
+    # wasted_token_rate (D2, 2026-07-18): the §9 MANDATORY formula is
+    # "tokens on non-gold file reads/edits / total" — a TOKEN-attributed ratio. The mini
+    # trajectory carries ONLY aggregate usage (no per-step / per-file token attribution), so a
+    # true token-based value is NOT computable. We publish the honest STEP PROXY instead —
+    # non_gold_steps / (gold_steps + non_gold_steps) — and gt_feature_metrics stamps its
+    # formula_provenance as a step proxy so it is never mislabeled as the measured token formula.
+    # No steps at all -> None (UNMEASURED); the former reachable `else 0.0` fabricated a real-
+    # looking 0% waste on an empty timeline and is removed.
     total_non_idle_steps = gold_steps + non_gold_steps
     wasted_token_rate = d8(non_gold_steps / total_non_idle_steps) \
-        if total_non_idle_steps else 0.0
+        if total_non_idle_steps else None
 
     return {
         "total_steps": total_steps,
@@ -1983,8 +1993,15 @@ def _compute_token_efficiency(trajectory: dict, timeline: list[dict],
         "tokens_per_gold_edit": tokens_per_gold_edit,
         "gt_token_overhead": gt_token_overhead,
         "wasted_token_rate": wasted_token_rate,
+        # Honest bases for the two token metrics that use ESTIMATES/PROXIES rather than
+        # exact per-token attribution (surfaced in each row's formula_provenance downstream):
+        #   gt_token_overhead  -> gt_injected_tokens is a chars/4 token ESTIMATE.
+        #   wasted_token_rate  -> a STEP proxy (non_gold_steps/non_idle_steps), NOT per-token.
+        "_gt_token_overhead_basis": "chars_over_4_token_estimate",
+        "_wasted_token_rate_basis": "step_proxy:non_gold_steps/non_idle_steps",
         "_gt_injected_tokens_est": d8(gt_injected_tokens),
         "_n_gold_edited": n_gold_edited,
+        "_non_idle_step_count": total_non_idle_steps,
     }
 
 

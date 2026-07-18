@@ -229,9 +229,12 @@ def test_b23_cites_matching_passage_line(tmp_path):
     finally:
         con.close()
     assert rows
-    rel, line, name, label = rows[0]
+    # Cluster-2b: _body_rows now carries the node id (5th element) for the def-partition
+    # producer sidecar; the leading (rel, line, name, label) contract is unchanged.
+    rel, line, name, label, node_id = rows[0]
     assert rel == "svc/h.py"
     assert line == 42          # the passage line, NOT the node start_line 10
+    assert node_id == 1
 
 
 def test_b23_fallback_cites_node_start_line_on_old_db(tmp_path):

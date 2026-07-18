@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "swebench"))
 
+from scripts.swebench import consumption_ledger as consumption
 from scripts.swebench.consumption_ledger import build_consumption_ledger
 from scripts.swebench import gt_feature_metrics
 
@@ -172,6 +173,66 @@ def test_duplicate_byte_identical_seal_resolves_to_delivery_boundary_and_complet
     ]
     assert len(joined) == 1
     assert joined[0]["physical_id"] == f"m1:0:{len(payload)}"
+
+
+def test_physical_authority_retains_runtime_row_and_observation_binding(tmp_path: Path) -> None:
+    payload_a = "src/a.py:4 preserve alpha"
+    payload_b = "src/b.py:8 preserve beta"
+    rows = [_row(payload_a), _row(payload_b, layer="edit.syntax")]
+    rows[0].update({
+        "observation_binding": {
+            "schema": "gt.observation_binding.v1",
+            "observation_id": "1" * 64,
+            "opportunity_id": "2" * 64,
+            "batch_start_iteration": 0,
+            "parent_policy_sha256": "3" * 64,
+            "parent_policy_chars": 7,
+            "action_batch_sha256": "4" * 64,
+            "candidate_ordinal": 0,
+            "candidate_kind_sha256": "5" * 64,
+            "candidate_dedup_sha256": "6" * 64,
+            "candidate_id": "candidate-a",
+        },
+        "candidate_id": "candidate-a",
+    })
+    rows[1]["iteration"] = 2
+    ledger = tmp_path / "gt_runtime_ledger_task.jsonl"
+    _write_ledger(ledger, rows)
+
+    result = build_consumption_ledger(
+        {"messages": [
+            {"role": "tool", "content": payload_a},
+            {"role": "tool", "content": payload_b},
+        ]},
+        runtime_ledger_path=str(ledger),
+    )
+    authority_fn = getattr(consumption, "physical_delivery_authority", None)
+    assert callable(authority_fn), "Cluster 1 requires one reusable physical-span authority"
+    authority = authority_fn(result)
+
+    first = authority["deliveries"]["0"]
+    assert first["state"] == "PHYSICAL_DELIVERY_BOUND"
+    assert first["physical_id"] == f"m0:0:{len(payload_a)}"
+    assert first["observation_binding"]["observation_id"] == "1" * 64
+    assert first["candidate_id"] == "candidate-a"
+
+
+def test_duplicate_runtime_claim_of_one_physical_span_is_broken_binding(tmp_path: Path) -> None:
+    payload = "src/pkg.py:9 preserve callers"
+    ledger = tmp_path / "gt_runtime_ledger_task.jsonl"
+    _write_ledger(ledger, [_row(payload), _row(payload)])
+
+    result = build_consumption_ledger(
+        {"messages": [{"role": "tool", "content": payload}]},
+        runtime_ledger_path=str(ledger),
+    )
+    authority_fn = getattr(consumption, "physical_delivery_authority", None)
+    assert callable(authority_fn), "Cluster 1 requires one reusable physical-span authority"
+    authority = authority_fn(result)
+
+    assert authority["deliveries"]["0"]["state"] == "PHYSICAL_DELIVERY_BOUND"
+    assert authority["deliveries"]["1"]["state"] == "BROKEN_PHYSICAL_BINDING"
+    assert authority["deliveries"]["1"]["reason"] == "physical_span_unavailable_or_already_claimed"
 
 
 def test_terminal_exit_content_is_not_model_visible_delivery(tmp_path: Path) -> None:

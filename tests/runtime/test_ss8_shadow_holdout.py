@@ -175,6 +175,26 @@ def test_class_is_folded_into_the_bucket():
     # holdout is no longer stratified — one class's draw mirrors another's).
 
 
+def test_predecision_id_folds_into_the_bucket_when_present():
+    # B1 (Cluster-4): the SAME (task, class, dedup_key) at TWO different pre-decision states must
+    # draw INDEPENDENTLY once the predecision identity is folded in.
+    a = sh._bucket("task", "localization", "k", "state-A")
+    b = sh._bucket("task", "localization", "k", "state-B")
+    assert a != b
+    # MUTATION[do not append predecision_id to the _bucket join] -> a == b -> RED.
+
+
+def test_empty_predecision_id_is_byte_identical_to_the_three_arg_bucket():
+    # the seam hot path has no trajectory prefix at delivery time; an empty predecision_id MUST
+    # leave the draw byte-identical to the pre-Cluster-4 three-arg join (invariant 1/2 preserved).
+    for cls in sh.PARTICIPATING_CLASSES:
+        for k in ("k1", "k2", "c:beef"):
+            assert sh._bucket("task", cls, k, "") == sh._bucket("task", cls, k)
+            assert sh.assign("task", cls, k, "0.5", "") == sh.assign("task", cls, k, "0.5")
+    # MUTATION[always append the (empty) predecision_id -> raw gains a trailing separator] ->
+    # the 4-arg empty draw diverges from the 3-arg draw -> RED.
+
+
 def test_per_class_holdout_fraction_approximates_rate():
     rate = "0.3"
     keys = [f"c:{i:08x}" for i in range(2000)]

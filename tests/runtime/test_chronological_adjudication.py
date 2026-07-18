@@ -12,6 +12,7 @@ from groundtruth.runtime.chronological_adjudication import (
     SELF_LOCALIZED,
     STEP_BEHIND,
     UNMEASURED,
+    WRONG_EVENT,
     Chronology,
     MatchedProbe,
     adjudicate,
@@ -57,11 +58,14 @@ def test_prior_native_acquisition_is_step_behind_and_rejects_fair_probe() -> Non
 
 
 def test_delivery_after_commit_is_late_even_at_named_registry_event() -> None:
+    # E (logical clock): a genuine LATE delivery has no VALID post-delivery action_index (a real
+    # action_index is always > delivery_index by construction), so it is None here; the default
+    # action_index=12 would be < delivery=13, which E now correctly rejects as an inverted clock.
     result = adjudicate(
         evidence_type="signature_mismatch",
         actual_event="edit_result",
         delivery_seal="c" * 16,
-        chronology=_chronology(delivery_index=13),
+        chronology=_chronology(delivery_index=13, action_index=None),
     )
 
     assert result.timing_verdict == LATE
@@ -69,11 +73,13 @@ def test_delivery_after_commit_is_late_even_at_named_registry_event() -> None:
 
 
 def test_delivery_at_commit_boundary_is_still_on_time() -> None:
+    # E: action_index=None (no post-delivery action) — the default action_index=12 would EQUAL
+    # delivery=12, which E rejects (action cannot coincide with its own delivery).
     result = adjudicate(
         evidence_type="signature_mismatch",
         actual_event="edit_result",
         delivery_seal="c" * 16,
-        chronology=_chronology(delivery_index=12),
+        chronology=_chronology(delivery_index=12, action_index=None),
     )
 
     assert result.timing_verdict == ON_TIME
@@ -99,7 +105,10 @@ def test_wrong_event_or_missing_indices_fail_closed_unmeasured() -> None:
         chronology=_chronology(decision_commit_index=None),
     )
 
-    assert wrong_event.timing_verdict == UNMEASURED
+    # C-cluster split: a KNOWN-but-wrong event for a non-reactive class is now a MEASURED
+    # timing FAILURE (WRONG_EVENT -> correct_time=False), no longer conflated with UNMEASURED.
+    assert wrong_event.timing_verdict == WRONG_EVENT
+    # a GENUINELY-missing index still fails closed to UNMEASURED (the only UNMEASURED path).
     assert missing.timing_verdict == UNMEASURED
 
 
@@ -144,6 +153,9 @@ def test_exact_matched_probe_can_prove_causality_only_for_same_seal_and_outcome(
 
 
 def test_ack_or_action_before_delivery_cannot_count() -> None:
+    # E (logical clock): an action_index at-or-before the delivery is an inverted clock — timing
+    # now fails CLOSED to UNMEASURED (an action cannot precede the delivery that caused it), and
+    # the fair probe still cannot count it (never CAUSAL from a pre-delivery action).
     result = adjudicate(
         evidence_type="syntax_result",
         actual_event="edit_result",
@@ -151,7 +163,7 @@ def test_ack_or_action_before_delivery_cannot_count() -> None:
         chronology=_chronology(acknowledgment_index=9, action_index=9),
     )
 
-    assert result.timing_verdict == ON_TIME
+    assert result.timing_verdict == UNMEASURED
     assert result.fair_probe_verdict == UNMEASURED
 
 

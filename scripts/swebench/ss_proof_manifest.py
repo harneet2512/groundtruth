@@ -109,8 +109,8 @@ def _scoreboard_inventory(path: str | Path) -> dict[str, tuple[str, ...]]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
         raise ValueError(f"ss proof manifest: scoreboard unreadable: {exc}") from exc
     raw = payload.get("feature_inventory") if isinstance(payload, dict) else None
-    if not isinstance(raw, dict) or raw.get("count") != 128:
-        raise ValueError("ss proof manifest: scoreboard inventory/count must declare exact 128")
+    if not isinstance(raw, dict) or raw.get("count") != 129:
+        raise ValueError("ss proof manifest: scoreboard inventory/count must declare exact 129")
     out: dict[str, tuple[str, ...]] = {}
     for family in ("ACQ", "CAP", "FACT", "PERF"):
         names = raw.get(family)
@@ -414,10 +414,10 @@ def build_ss_proof_manifest(scoreboard_path: str | Path | None = None) -> dict[s
             if tuple(row) != ROW_FIELDS:
                 raise ValueError(f"ss proof manifest: row schema drift for {name}")
             features[name] = row
-    if len(features) != 128:
-        raise ValueError(f"ss proof manifest: expected 128 unique rows, got {len(features)}")
+    if len(features) != 129:
+        raise ValueError(f"ss proof manifest: expected 129 unique rows, got {len(features)}")
     return {
-        "schema": SCHEMA, "feature_count": 128,
+        "schema": SCHEMA, "feature_count": 129,
         "family_counts": {family: len(names) for family, names in inventory.items()},
         "global_prerequisites": list(GLOBAL_OFFLINE_PROOF_DEPENDENCIES),
         "preflight_stage_order": dict(FAMILY_STAGE), "features": features,
@@ -900,8 +900,8 @@ def preflight_ss_proof(
 ) -> dict[str, Any]:
     """Audit actual producer artifacts without authorizing dispatch or proof promotion."""
     features = manifest.get("features")
-    if manifest.get("schema") != SCHEMA or not isinstance(features, Mapping) or len(features) != 128:
-        raise ValueError("ss proof preflight: invalid exact-128 v3 manifest")
+    if manifest.get("schema") != SCHEMA or not isinstance(features, Mapping) or len(features) != 129:
+        raise ValueError("ss proof preflight: invalid exact-129 v3 manifest")
     if mode not in {"dispatch", "postrun"}:
         raise ValueError(f"ss proof preflight: unsupported mode {mode!r}")
     context = task_context or {}

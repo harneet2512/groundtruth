@@ -59,11 +59,16 @@ def _live_input() -> RecoveryDecisionInput:
 
 
 def _delivered_row(candidate_id: str, seal: str) -> dict:
+    # J6: a detect.coherence row carries a registered ``profile_member`` owner
+    # (GT_SS_COHERENCE_V2) and NO typed FACT lineage by product decision (P4) — exactly what
+    # the live seam stamps (gt_mini_patch._lane_delivery_extra -> _exact_profile_delivery_extra).
+    # The truth join accepts a registered profile_member owner as a valid attribution witness.
     return {
         "layer": "detect.coherence",
         "outcome": "delivered",
         "candidate_id": candidate_id,
         "content_sha256_16": seal,
+        "profile_member": "GT_SS_COHERENCE_V2",
     }
 
 

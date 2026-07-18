@@ -23,6 +23,7 @@ from groundtruth.runtime import fact_registry as fr
 from groundtruth.runtime.chronological_adjudication import (
     ON_TIME,
     UNMEASURED,
+    WRONG_EVENT,
     Chronology,
     adjudicate,
 )
@@ -226,8 +227,9 @@ def test_b2_adjudicate_measures_the_saved_row_shape():
 
 
 def test_b2_MUTATION_dropping_reactive_rejects_the_saved_row():
-    # without reactive, the non-reactive check (actual_event 'test_result' != wanted
-    # 'edit_result') fails closed -> UNMEASURED. This is exactly the mismatch reactive covers.
+    # C-cluster split: without reactive, the non-reactive check (actual_event 'test_result' !=
+    # wanted 'edit_result') is a KNOWN-but-wrong event -> WRONG_EVENT (measured False), which is
+    # exactly the mismatch the reactive dual-label (F) is designed to bypass on the real path.
     ch = Chronology(decision_open_index=5, delivery_index=6, decision_commit_index=7,
                     native_acquisition_index=None, acknowledgment_index=None, action_index=None)
     saved = fr._REACTIVE_EVIDENCE_TYPES
@@ -235,7 +237,7 @@ def test_b2_MUTATION_dropping_reactive_rejects_the_saved_row():
         fr._REACTIVE_EVIDENCE_TYPES = frozenset({"trace_frame"})  # drop covering_red
         verdict = adjudicate(evidence_type="covering_red", actual_event="test_result",
                              delivery_seal="0" * 16, chronology=ch).timing_verdict
-        assert verdict == UNMEASURED
+        assert verdict == WRONG_EVENT
     finally:
         fr._REACTIVE_EVIDENCE_TYPES = saved
 

@@ -35,7 +35,6 @@ through it.
 """
 from __future__ import annotations
 
-import enum
 import contextvars
 from dataclasses import dataclass, replace
 import hashlib
@@ -46,9 +45,31 @@ import re
 import subprocess
 import sys
 import threading
+from typing import Any
 
 
 _LEDGER_WRITE_FAILURES = 0
+# The exact candidate-in-policy-observation identity currently being committed. A
+# ContextVar keeps independent agent loops isolated and lets every delivery/control/
+# receipt writer consume the same authority without threading parallel ad-hoc fields.
+_delivery_observation_context: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "gt_delivery_observation_binding", default=None,
+)
+
+
+def _current_observation_binding() -> Any:
+    return _delivery_observation_context.get()
+
+
+def _current_observation_binding_dict() -> "dict | None":
+    binding = _current_observation_binding()
+    if binding is None:
+        return None
+    try:
+        from groundtruth.runtime.evidence_envelope import observation_binding_to_dict
+        return observation_binding_to_dict(binding)
+    except Exception:  # noqa: BLE001 -- audit metadata cannot affect model bytes
+        return None
 
 
 def _ledger_line_direct(entry: dict) -> bool:
@@ -167,6 +188,7 @@ def _control_participation_record(
     candidate_id: str = "",
     reason: str = "",
     related_delivery_iteration: "int | None" = None,
+    observation_binding=None,
 ) -> None:
     """Persist one typed CAP-control decision without claiming byte ownership.
 
@@ -181,6 +203,14 @@ def _control_participation_record(
         from groundtruth.runtime.control_participation import (
             build_control_participation, participation_to_dict,
         )
+        from groundtruth.runtime.evidence_envelope import observation_binding_from_dict
+        binding = observation_binding
+        if binding is None:
+            binding = _current_observation_binding()
+        elif isinstance(binding, dict):
+            binding = observation_binding_from_dict(binding)
+        if binding is not None and candidate_id:
+            candidate_id = binding.candidate_id
         record = build_control_participation(
             feature_id=feature_id,
             decision_site=decision_site,
@@ -191,6 +221,7 @@ def _control_participation_record(
             candidate_id=candidate_id,
             reason=reason,
             related_delivery_iteration=related_delivery_iteration,
+            observation_binding=binding,
         )
         payload = participation_to_dict(record)
         participation_decision = payload.pop("decision")
@@ -220,6 +251,10 @@ def _control_participation_record(
             control_role = cap_role_for(feature_id)
         except Exception:  # noqa: BLE001 -- failure row remains explicitly untrusted
             control_role = "unknown"
+        failure_binding = (
+            observation_binding if isinstance(observation_binding, dict)
+            else _current_observation_binding_dict()
+        )
         _ledger_line_direct({
             "schema": "gt.control_participation.v1",
             "layer": "control.participation",
@@ -238,7 +273,11 @@ def _control_participation_record(
             "candidate_chars": len(candidate_bytes),
             "candidate_sha256_16": seal,
             "fact_class": fact_class,
-            "candidate_id": candidate_id,
+            "candidate_id": (
+                failure_binding.get("candidate_id", candidate_id)
+                if isinstance(failure_binding, dict) else candidate_id
+            ),
+            "observation_binding": failure_binding,
         })
 
 
@@ -8223,11 +8262,24 @@ def _v2_partition_fresh_proofs(statuses, *, kind: str, boundary: str):
 
 
 def _v2_attribute_proven_truth(rows, *, kind: str, boundary: str) -> None:
-    """Record earned silence from the same proof rows used by live rendering."""
+    """Record earned silence from the same proof rows used by live rendering.
+
+    G-cluster: the recorded ledger proved this attribution row emitted a PARTIAL identity
+    (clause_id + artifact_issue_sha256 + boundary + proof_turn) while the sibling writer
+    ``_v2_partition_fresh_proofs`` emitted the FULL identity (also subject_digest +
+    subject_term_digests). A suppress_late oracle case that matches on the clause/subject
+    digests (``_matches_exact_clause`` / ``_matches_subject``) therefore FAILED against this
+    writer's rows. Emit the SAME full identity here — derived EXACTLY as
+    ``_v2_clause_fresh_behavioral_proof`` derives it (``obligation_subject_terms`` then the two
+    sha256[:16] constructions). Attribution rows only; suppression DECISIONS unchanged;
+    model-facing bytes byte-identical."""
     if not _ss_late_drop_on():
         return
     try:
-        from groundtruth.runtime.obligations import ObligationTruthState
+        from groundtruth.runtime.obligations import (
+            ObligationTruthState,
+            obligation_subject_terms,
+        )
     except Exception:  # noqa: BLE001 — attribution must never break delivery
         return
     data = _load_obligations_v2() or {}
@@ -8235,8 +8287,18 @@ def _v2_attribute_proven_truth(rows, *, kind: str, boundary: str) -> None:
         if row.state is not ObligationTruthState.PROVEN or row.proof is None:
             continue
         clause_id = str(getattr(row.view, "clause_id", row.view.idx))
+        subjects = obligation_subject_terms(str(getattr(row.view, "verbatim", "") or ""))
+        subject_digest = hashlib.sha256(
+            "|".join(sorted(subjects)).encode("utf-8")
+        ).hexdigest()[:16]
+        subject_term_digests = [
+            hashlib.sha256(subject.encode("utf-8")).hexdigest()[:16]
+            for subject in sorted(subjects)
+        ]
         identity = {
             "clause_id": clause_id,
+            "subject_digest": subject_digest,
+            "subject_term_digests": subject_term_digests,
             "artifact_issue_sha256": str(data.get("issue_sha256") or ""),
             "boundary": boundary,
             "proof_turn": int(row.proof.turn),
@@ -8294,7 +8356,9 @@ def _unexercised_clause_candidate() -> tuple[float, str] | None:
     if not block:
         return None
     vec = hashlib.sha256(
-        "|".join(f"{row.view.idx}:{row.state.value}" for row in truth).encode("utf-8")
+        "|".join(
+            f"{getattr(row.view, 'idx', '')}:{row.state.value}" for row in truth
+        ).encode("utf-8")
     ).hexdigest()[:8]
     if vec in _unexercised_emitted:
         return None
@@ -8939,6 +9003,10 @@ def _runtime_ledger_record(
     if extra:
         for _ek, _ev in extra.items():
             _row.setdefault(_ek, _ev)
+    binding = _current_observation_binding_dict()
+    if binding is not None:
+        _row["observation_binding"] = binding
+        _row["candidate_id"] = binding["candidate_id"]
     return _ledger_line_direct(_row)
 
 
@@ -9173,6 +9241,13 @@ def _lane_delivery_extra(
     """Delivery-row identity plus honest exact-profile producer lineage."""
     member = _LANE_PROFILE_MEMBER_OWNERS.get(kind or "")
     if member:
+        # J6 note (Cluster-2b Defect-6): a RECLASSIFIED profile-member owner
+        # (GT_SS_COHERENCE_V2 on detect.coherence) stamps ONLY its ``profile_member`` here —
+        # never typed FACT lineage (that leg is byte-owner-only, P4 product decision, pinned
+        # by test_coherence_delivery_retains_owner_without_fabricated_fact_lineage). The
+        # offline attestation join therefore accepts a registered ``profile_member`` owner as
+        # a valid registered-attribution witness (attestation_join._row_has_registered_lineage),
+        # so the recovery-coherence truth join is seated WITHOUT fabricating a FACT identity.
         return _exact_profile_delivery_extra(member, kind, text, target, event)
     selected_lineage = lineage
     # Thread the exact delivered payload so the l3b.evidence per-payload gate (B-LIN REV2)
@@ -9240,8 +9315,6 @@ def _record_gateway_final_controls(
         candidate_id = getattr(envelope, "dedup_key", "") or ""
         if not candidate_id or not final_bytes:
             return
-        common = dict(candidate_bytes=final_bytes, fact_class=fact_class,
-                      candidate_id=candidate_id)
         # B-GW (2026-07-16): close the GT_GATEWAY mediator join. The admission-time row
         # (gateway.augment.candidate_admission) stamps the PRE-render candidate identity, so
         # its seal can never equal this committed delivery's content_sha256_16. Record the
@@ -9258,25 +9331,37 @@ def _record_gateway_final_controls(
         if native and not caller_specific_controls:
             _control_participation_record(
                 "GT_GATEWAY_NATIVE", "mini_seam.gateway.native_render", "APPLIED",
-                reason="native_render_committed", **common)
+                candidate_bytes=final_bytes,
+                fact_class=fact_class,
+                candidate_id=candidate_id,
+                reason="native_render_committed")
         if globally_arbitrated:
             _control_participation_record(
                 "GT_GLOBAL_ARBITER", "mini_seam.global_arbiter.winner_selection",
-                "APPLIED", reason="gateway_winner_committed", **common)
+                "APPLIED", candidate_bytes=final_bytes,
+                fact_class=fact_class, candidate_id=candidate_id,
+                reason="gateway_winner_committed")
             if _ss_enabled("GT_SS_ARBITER_V2"):
                 _control_participation_record(
                     "GT_SS_ARBITER_V2", "mini_seam.global_arbiter.v2_selection",
-                    "NO_EFFECT", reason="winner_preserved", **common)
+                    "NO_EFFECT", candidate_bytes=final_bytes,
+                    fact_class=fact_class, candidate_id=candidate_id,
+                    reason="winner_preserved")
         if provenance_decision:
             _control_participation_record(
                 "GT_SS_PROVENANCE", "mini_seam.delivery.provenance_seal",
                 provenance_decision,
+                candidate_bytes=final_bytes,
+                fact_class=fact_class,
+                candidate_id=candidate_id,
                 reason=("candidate_sanitized" if provenance_decision == "APPLIED"
-                        else "candidate_already_clean"), **common)
+                        else "candidate_already_clean"))
         if _inseam_metrics_on():
             _control_participation_record(
                 "GT_INSEAM_METRICS", "mini_seam.inseam_metrics.fact_observation",
-                "APPLIED", reason="final_delivery_observed", **common)
+                "APPLIED", candidate_bytes=final_bytes,
+                fact_class=fact_class, candidate_id=candidate_id,
+                reason="final_delivery_observed")
         # GT_L6_FRESH participation binds to the SELECTION the site declares: the
         # writable work copy was the graph this turn's producers read (_db_path
         # returned it — _l6_work_db set iff staging succeeded). The reindex
@@ -9287,8 +9372,10 @@ def _record_gateway_final_controls(
             _control_participation_record(
                 "GT_L6_FRESH", "mini_seam.graph_db.fresh_copy_selection",
                 "APPLIED",
-                reason=f"workcopy_selected_generation_{_l6_graph_generation}",
-                **common)
+                candidate_bytes=final_bytes,
+                fact_class=fact_class,
+                candidate_id=candidate_id,
+                reason=f"workcopy_selected_generation_{_l6_graph_generation}")
     except Exception:  # noqa: BLE001 -- telemetry never changes committed bytes
         return
 
@@ -9341,15 +9428,17 @@ def _record_cross_plane_final_controls(candidate, final_bytes: str) -> None:
         candidate_id = getattr(candidate, "dedup_key", "") or ""
         if not fact_class or not is_registered(fact_class) or not candidate_id:
             return
-        common = dict(candidate_bytes=final_bytes, fact_class=fact_class,
-                      candidate_id=candidate_id)
         _control_participation_record(
             "GT_GLOBAL_ARBITER", "mini_seam.global_arbiter.winner_selection",
-            "APPLIED", reason="cross_plane_winner_committed", **common)
+            "APPLIED", candidate_bytes=final_bytes,
+            fact_class=fact_class, candidate_id=candidate_id,
+            reason="cross_plane_winner_committed")
         if _ss_enabled("GT_SS_ARBITER_V2"):
             _control_participation_record(
                 "GT_SS_ARBITER_V2", "mini_seam.global_arbiter.v2_selection",
-                "NO_EFFECT", reason="winner_preserved", **common)
+                "NO_EFFECT", candidate_bytes=final_bytes,
+                fact_class=fact_class, candidate_id=candidate_id,
+                reason="winner_preserved")
         # GT_L6_FRESH participation binds to the SELECTION the site declares: the
         # writable work copy was the graph this turn's producers read (_db_path
         # returned it — _l6_work_db set iff staging succeeded). The reindex
@@ -9360,8 +9449,10 @@ def _record_cross_plane_final_controls(candidate, final_bytes: str) -> None:
             _control_participation_record(
                 "GT_L6_FRESH", "mini_seam.graph_db.fresh_copy_selection",
                 "APPLIED",
-                reason=f"workcopy_selected_generation_{_l6_graph_generation}",
-                **common)
+                candidate_bytes=final_bytes,
+                fact_class=fact_class,
+                candidate_id=candidate_id,
+                reason=f"workcopy_selected_generation_{_l6_graph_generation}")
     except Exception:  # noqa: BLE001 -- metadata cannot change delivery
         return
 
@@ -10109,6 +10200,50 @@ def _stage_verification_terminal_controls(
         )
 
 
+def _covering_implicated_sources(implicated_paths, sources_before, root: str):
+    """DEFECT-2 (Cluster-2a): select EXACTLY the implicated post-edit sources for the covering
+    attestation, RE-HASHING each at emission to prove it stayed byte-identical through the
+    covering run + render/delivery.
+
+    The covering completeness contract (lane_attestation.finalize_covering_attestation) requires
+    edited_sources to COVER attribution.implicated_edited_paths (+ the edit target) with exact
+    post-edit sha256/length/revision. The prior seam collected EVERY edited file that happened to
+    stay byte-identical across the run, which (a) never guaranteed the implicated set was present
+    (a normal edit — after != before — whose implicated path was absent left the set short ->
+    UNMEASURED) and (b) let a single UNRELATED changed edited file participate in / empty the set.
+
+    ``sources_before`` maps a forward-slash repo-rel path to ``(post_edit_bytes, revision)``
+    captured immediately BEFORE the covering run. For each implicated path this re-reads the file
+    NOW and requires byte-identity with that captured post-edit snapshot. Returns
+    ``(implicated_norm, sources, drift_reason)``: ``drift_reason`` is ``""`` only when every
+    implicated path was captured and is unchanged; otherwise a NAMED reason with an EMPTY source
+    map (fail closed — the delivered RED still ships, only the proof is withheld). Unrelated
+    edited-file churn is never consulted, so it can never invalidate the attestation.
+    """
+    implicated = tuple(
+        str(p).replace("\\", "/") for p in (implicated_paths or ()) if p
+    )
+    if not implicated:
+        return implicated, {}, "covering_no_implicated_source"
+    sources: dict = {}
+    for impl_rel in implicated:
+        captured = (sources_before or {}).get(impl_rel)
+        if captured is None:
+            return implicated, {}, "covering_source_uncaptured"
+        before_bytes, revision = captured
+        impl_path = (impl_rel if os.path.isabs(impl_rel)
+                     else os.path.join(root or "", impl_rel))
+        try:
+            with open(impl_path, "rb") as impl_file:
+                now_bytes = impl_file.read()
+        except Exception:  # noqa: BLE001 -- unreadable implicated source => cannot attest
+            return implicated, {}, "covering_source_changed_during_run"
+        if now_bytes != before_bytes:
+            return implicated, {}, "covering_source_changed_during_run"
+        sources[impl_rel] = (before_bytes, revision)
+    return implicated, sources, ""
+
+
 def _executed_covering_emission(covering: list[dict],
                                 edited_rels: "set[str] | list[str]",
                                 edited_syms: "set[str] | list[str]") -> str | None:
@@ -10245,22 +10380,37 @@ def _executed_covering_emission(covering: list[dict],
             from groundtruth.runtime.fact_registry import EVENT_TEST_RESULT
             from groundtruth.runtime.lane_attestation import build_covering_candidate_input
 
-            _unchanged_sources = {}
-            for _edited_rel, (_before_bytes, _revision) in _covering_sources_before.items():
-                _edited_path = (_edited_rel if os.path.isabs(_edited_rel)
-                                else os.path.join(root, _edited_rel))
-                with open(_edited_path, "rb") as _edited_file:
-                    _after_bytes = _edited_file.read()
-                if _after_bytes == _before_bytes:
-                    _unchanged_sources[_edited_rel] = (_before_bytes, _revision)
-            _last_covering_candidate_input = build_covering_candidate_input(
-                attribution=_covering_attribution,
-                current_result=cres,
-                edited_sources=_unchanged_sources,
-                covering_files=files,
-                actual_event=EVENT_TEST_RESULT,
-                rendered_block=block,
-            )
+            # DEFECT-2 (Cluster-2a): scope the covering attestation's edited_sources to EXACTLY
+            # the implicated paths, re-hashed at emission (see _covering_implicated_sources).
+            _implicated, _covering_sources, _covering_source_drift = (
+                _covering_implicated_sources(
+                    _covering_attribution.implicated_edited_paths,
+                    _covering_sources_before, root))
+            if _covering_source_drift:
+                # Fail closed: proof absent + named, never silently starved. The delivered
+                # native RED is untouched (returned below); this row records only the
+                # attestation gap, so it does NOT enter delivered/suppressed reconciliation.
+                _last_covering_candidate_input = None
+                _ledger_line_direct({
+                    "layer": "attestation.persist",
+                    "event_type": "attestation_persist",
+                    "file_path": "",
+                    "outcome": "measurement_failed",
+                    "reason": (_covering_source_drift or "covering_no_implicated_source"),
+                    "chars_delivered": 0,
+                    "iteration": max(0, int(globals().get("_action_count", 0) or 0)),
+                    "candidate_id": "",
+                })
+            else:
+                _last_covering_candidate_input = build_covering_candidate_input(
+                    attribution=replace(
+                        _covering_attribution, implicated_edited_paths=_implicated),
+                    current_result=cres,
+                    edited_sources=_covering_sources,
+                    covering_files=files,
+                    actual_event=EVENT_TEST_RESULT,
+                    rendered_block=block,
+                )
         except Exception:  # noqa: BLE001 -- delivery remains; proof stays absent
             _last_covering_candidate_input = None
         _last_verify_executed_identity = (
@@ -10435,6 +10585,8 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
             if green(res, plan).status != "red":
                 continue
             block = None
+            serr = None
+            cres = None
             if res.kind == "syntax":
                 serr = _first_syntax_error(res.detail)
                 if serr is not None:
@@ -10443,20 +10595,25 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
                 if not res.attribution_satisfied:
                     continue  # unattributed red must NOT false-deliver (invariant ②)
                 cres = res.detail if isinstance(res.detail, dict) else {"verdict": "fail"}
+                raw_test_files = cres.get("ran") or list(res.covered_entities)
+                test_files = [
+                    value for value in raw_test_files
+                    if isinstance(value, str)
+                ] if isinstance(raw_test_files, (list, tuple, set)) else []
                 _last_test_outcome_failed = True  # executed verdict drives the verify axis
                 block = render_covering_failure_native(
-                    cres, edited_symbol=_verified_edited_symbol_for_rendering(syms),
-                    test_files=cres.get("ran") or list(res.covered_entities))  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
+                    cres,
+                    edited_symbol=_verified_edited_symbol_for_rendering(syms),
+                    test_files=test_files)
             else:
                 continue  # build/type/integration RED -> HOST-side only this wave
             if block and not contains_gt_tag(block) and not contains_test_identity(block):
-                failure_identity = (
-                    _ss_diagnostic_failure_identity(
+                failure_identity = None
+                if res.kind == "syntax" and serr is not None:
+                    failure_identity = _ss_diagnostic_failure_identity(
                         str(serr.get("diagnostic") or ""))
-                    if (res.kind == "syntax" and serr is not None)
-                    else (_ss_covering_failure_identity(cres, block)
-                          if res.kind == "unit" else None)
-                )
+                elif res.kind == "unit" and cres is not None:
+                    failure_identity = _ss_covering_failure_identity(cres, block)
                 if _ss_ack_failure_suppresses(
                         "verify.horizon.executed", block, failure_identity):
                     return None
@@ -12667,7 +12824,8 @@ def _gt_gateway_append(out: dict, delta: str) -> None:
     out["output"] = (out.get("output") or "") + delta
 
 
-def _gt_deliver_append(out: dict, text: str, *, join: bool = False) -> bool:
+def _gt_deliver_append(
+        out: dict, text: str, *, join: bool = False, kind: str = "direct_append") -> bool:
     """B-15: the ONE model-facing delivery chokepoint for the direct-append lanes
     (legacy GT_ORACLE_ROUTE=0 blocks AND the oracle-route steer). Every GT byte
     appended here is LEAK-VALIDATED first, so the leak law governs ALL delivery — not
@@ -12679,12 +12837,25 @@ def _gt_deliver_append(out: dict, text: str, *, join: bool = False) -> bool:
     steer blocks), which is every real case."""
     if not text:
         return False
+    # D-10 (2026-07-17): the leak-guard drop here was SILENT — a NON-empty payload
+    # dropped for a test identity left NO ledger row, invisible to fired/delivered
+    # reconciliation (the inverse of D-1; the lane/gateway leak_guard already record it).
+    # Compute the verdict OUTSIDE the record so a telemetry fault can never fall through
+    # to the append. Fail-open on import-absent (engine not in-container) -> preserve
+    # behavior. Byte-identical for every leak-free payload: no record, append as before.
+    _leaks = False
     try:
         from groundtruth.runtime.native_render import contains_test_identity
-        if contains_test_identity(text):
-            return False  # leak law (ABI §5): never ship a test identity to the model
+        _leaks = bool(contains_test_identity(text))
     except Exception:  # noqa: BLE001 — engine absent in-container: preserve behavior
-        pass
+        _leaks = False
+    if _leaks:
+        _runtime_ledger_record(
+            kind=kind,
+            outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+            reason="leak_guard",
+        )
+        return False  # leak law (ABI §5): never ship a test identity to the model
     prev = out.get("output") or ""
     out["output"] = _join_lane_output(prev, text) if join else prev + text
     return True
@@ -13116,7 +13287,8 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
             rendered_bytes=rendered, renderer_id="lane",
             tool_output_bytes=base_output.encode("utf-8", "surrogatepass"),
             boundary=(str(len(base_output)) + ":" + (kind or "lane")).encode("utf-8"),
-            dedup_chain=_EPISODE.delivered_dedup)
+            dedup_chain=_EPISODE.delivered_dedup,
+            observation_binding=_current_observation_binding())
         _gt_gateway_deliveries.append(sealed)
         # B-14: persist the sealed lane envelope (level-1 delivered) durably.
         _persist_receipt(sealed, kind="lane", transition="delivered")
@@ -13130,18 +13302,21 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
                 fact_class, candidate_id = identity
                 if candidate_id != (getattr(env, "dedup_key", "") or ""):
                     return
-                common = dict(
-                    candidate_bytes=_shipped, fact_class=fact_class,
-                    candidate_id=candidate_id)
                 _control_participation_record(
                     "GT_LANE_ENVELOPE",
                     "mini_seam.lane_envelope.candidate_conversion", "APPLIED",
-                    reason="lane_delivery_sealed", **common)
+                    candidate_bytes=_shipped,
+                    fact_class=fact_class,
+                    candidate_id=candidate_id,
+                    reason="lane_delivery_sealed")
                 if _inseam_metrics_on():
                     _control_participation_record(
                         "GT_INSEAM_METRICS",
                         "mini_seam.inseam_metrics.fact_observation", "APPLIED",
-                        reason="final_delivery_observed", **common)
+                        candidate_bytes=_shipped,
+                        fact_class=fact_class,
+                        candidate_id=candidate_id,
+                        reason="final_delivery_observed")
         except Exception:  # noqa: BLE001 -- metadata cannot change delivery
             pass
     except Exception:  # noqa: BLE001 — bookkeeping must NEVER break the delivery
@@ -13534,6 +13709,57 @@ def _gt_edit_overlay_transaction(action) -> None:
                 pass
 
 
+def _ss_rebind_sanitized_producer_inputs(inputs, provenance, dedup_key: str):
+    """DEFECT-1 (Cluster-2a): re-bind a sanitized Gateway envelope's typed ProducerInputs to
+    the RE-DERIVED candidate identity, keeping ONLY the caller evidence that survived
+    provenance sanitization.
+
+    Provenance sanitization re-derives ``dedup_key`` from the cleaned payload/provenance, but
+    the producer's ``ProducerInputs.candidate_id`` was bound (at ``_mk_add``) to the PRE-sanitize
+    key. Left stale it makes ``build_gateway_attestation`` raise ``producer inputs candidate
+    mismatch`` -> the persist wrapper swallows it -> 0 bundles -> ``correct_info`` never True.
+
+    The rebind reconstructs the inputs from evidence the producer ACTUALLY consumed AND still
+    delivered: the caller rows whose ``(file, line)`` survive in the sanitized provenance, the
+    typed usage rows whose caller survives, and the unchanged before/after source state +
+    signature delta (these describe the edited symbol, not a provenance row). ``candidate_id`` is
+    re-bound to the new ``dedup_key`` (mirroring ``gateway._mk_add``'s bind). Fail closed: if no
+    caller row survives, return ``(None, "caller_rows")`` so the caller drops the sidecar and
+    records a NAMED gap rather than fabricating a caller the delivery no longer carries.
+
+    Returns ``(rebound_inputs_or_None, incomplete_field_or_None)``.
+    """
+    try:
+        from groundtruth.runtime.producer_inputs import ProducerInputs
+    except Exception:  # noqa: BLE001 -- engine absent -> leave sidecar untouched
+        return inputs, None
+    if not isinstance(inputs, ProducerInputs):
+        return inputs, None
+    surviving = {
+        (str(path).replace("\\", "/"), int(line)) for path, line in (provenance or ())
+    }
+    caller_rows = tuple(
+        row for row in inputs.caller_rows
+        if (str(row.file).replace("\\", "/"), int(row.line)) in surviving
+    )
+    if not caller_rows:
+        return None, "caller_rows"
+    survivor_callers = {
+        (str(row.identity), str(row.file).replace("\\", "/")) for row in caller_rows
+    }
+    usage_rows = tuple(
+        usage for usage in inputs.caller_usage_rows
+        if (str(usage.caller_identity), str(usage.caller_file).replace("\\", "/"))
+        in survivor_callers
+    )
+    return replace(
+        inputs,
+        candidate_id=dedup_key,
+        caller_rows=caller_rows,
+        caller_usage_rows=usage_rows,
+    ), None
+
+
 def _ss_sanitize_gateway_envelope(envelope, root: str = ""):
     """Return the one provenance-clean Gateway envelope, or ``None`` when none remains.
 
@@ -13588,9 +13814,28 @@ def _ss_sanitize_gateway_envelope(envelope, root: str = ""):
             content_signature(payload, provenance))
         marker_args = dict(native_args) if isinstance(native_args, dict) else {}
         marker_args["_ss_provenance_sanitized"] = True
+        # DEFECT-1: re-bind the typed ProducerInputs sidecar to the RE-DERIVED candidate id
+        # (and prune caller/usage evidence to the surviving provenance) so the downstream
+        # Gateway attestation binds cleanly instead of raising `candidate mismatch`. Fail
+        # closed: an incomplete rebind drops the sidecar and records the named gap.
+        rebound_inputs = getattr(envelope, "producer_inputs", None)
+        _pi_incomplete = ""
+        if rebound_inputs is not None:
+            rebound_inputs, _pi_incomplete = _ss_rebind_sanitized_producer_inputs(
+                rebound_inputs, provenance, dedup_key)
+        if _pi_incomplete:
+            try:
+                _runtime_ledger_record(
+                    kind="gateway." + (getattr(envelope, "evidence_type", "") or "fact"),
+                    outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason="producer_inputs_incomplete:" + _pi_incomplete,
+                    file_path=target or "")
+            except Exception:  # noqa: BLE001 -- the gap row must never break sanitation
+                pass
         return replace(
             envelope, target=target, payload=payload, provenance=provenance,
-            dedup_key=dedup_key, native_args=marker_args)
+            dedup_key=dedup_key, native_args=marker_args,
+            producer_inputs=rebound_inputs)
     except Exception:  # noqa: BLE001 -- malformed evidence is correct-or-quiet
         return None
 
@@ -13723,6 +13968,7 @@ def _gt_gateway_pool_envelope(
             boundary=(str(len(_tob)) + ":" +
                       (_winner.evidence_type or "gw")).encode("utf-8"),
             dedup_chain=_EPISODE.delivered_dedup,
+            observation_binding=_current_observation_binding(),
         )
         _gt_gateway_deliveries.append(sealed)
         _persist_receipt(sealed, kind="gateway", transition="delivered")
@@ -13737,12 +13983,22 @@ def _gt_gateway_pool_envelope(
             provenance_decision=provenance_decision,
             caller_specific_controls=_caller_controls)
         try:
+            # DEFECT-5 (run #2): stamp the sealed render channel onto the durable ledger
+            # row (host-side observability only; the model-facing append is unchanged /
+            # byte-identical) so the offline registry-renderer audit can prove NATIVE form
+            # instead of the grader fabricating native_valid=True on mere delivery.
+            # `_gateway_delivery_extra` returns a dict in production, but must never be
+            # assumed non-None here: a None extra made `.setdefault` raise INSIDE this
+            # swallowing try -> the delivered ledger row was silently dropped. Default to
+            # an empty dict so the render-channel stamp is always recorded.
+            _gw_extra = _gateway_delivery_extra(_winner) or {}
+            _gw_extra.setdefault("renderer_id", "native" if _native else "tagged")
             _runtime_ledger_record(
                 kind="gateway." + (_winner.evidence_type or "fact"),
                 outcome=_ProductSignalOutcome.DELIVERED,
                 chars=len(_shipped), file_path=_winner.target or "",
                 content=_shipped,
-                extra=_gateway_delivery_extra(_winner))
+                extra=_gw_extra)
         except Exception:  # noqa: BLE001
             pass
 
@@ -14002,7 +14258,8 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
                 rendered_bytes=rendered, renderer_id=("native" if native else "tagged"),
                 tool_output_bytes=_tob,
                 boundary=(str(len(_tob)) + ":" + (winner.evidence_type or "gw")).encode("utf-8"),
-                dedup_chain=_EPISODE.delivered_dedup)
+                dedup_chain=_EPISODE.delivered_dedup,
+                observation_binding=_current_observation_binding())
             _gt_gateway_deliveries.append(sealed)
             # B-14: persist the sealed envelope (level-1 delivered) durably.
             _persist_receipt(sealed, kind="gateway", transition="delivered")
@@ -14022,7 +14279,12 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
                     getattr(winner, "dedup_key", "") or "", ""),
                 caller_specific_controls=_caller_controls)
             try:
-                _delivery_extra = _gateway_delivery_extra(winner)
+                # DEFECT-5 (run #2): stamp the sealed render channel (native/tagged) onto
+                # the durable ledger row for the offline registry-renderer audit. Host-side
+                # observability only — the model-facing append stays byte-identical. Default
+                # to {} so a None extra can never make `.setdefault` raise into the swallow.
+                _delivery_extra = _gateway_delivery_extra(winner) or {}
+                _delivery_extra.setdefault("renderer_id", "native" if native else "tagged")
                 _runtime_ledger_record(
                     kind="gateway." + (winner.evidence_type or "fact"),
                     outcome=_ProductSignalOutcome.DELIVERED,
@@ -14149,7 +14411,9 @@ def _global_arbiter_on() -> bool:
 # Context-local ownership keeps independent agent loops from sharing a pool.
 # The process mapping is only an overlap guard: if two contexts overlap, BOTH
 # are marked invalid and therefore zero-dose at their formatter boundaries.
-_batch_context = contextvars.ContextVar("gt_observation_batch", default=None)
+_batch_context: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "gt_observation_batch", default=None,
+)
 _batch_owners: dict[int, dict] = {}
 _batch_lock = threading.RLock()
 _observation_batch_serial = 0
@@ -14178,17 +14442,29 @@ def _batch_action_sha256(keys) -> str:
 
 def _policy_observation_id(start_iteration: int, parent_sha256: str,
                            action_sha256: str) -> str:
-    """Unambiguous host-only identity for one parent-policy observation."""
-    framed = (
-        b"gt.observation.v1\x00"
-        + int(start_iteration).to_bytes(8, "big", signed=False)
-        + bytes.fromhex(parent_sha256)
-        + bytes.fromhex(action_sha256)
-    )
-    return hashlib.sha256(framed).hexdigest()
+    """Unambiguous host-only identity for one parent-policy observation.
+
+    DELEGATES to the single shared authority ``evidence_envelope.policy_observation_id``
+    (import-at-use, consistent with the ``build_observation_binding`` sites below) so the
+    seam and the offline grader can never drift on the framed-identity encoding. The inline
+    fallback is retained ONLY for the in-container degradation path where the full
+    ``groundtruth`` package is not importable; it is byte-identical by construction and
+    pinned so by ``test_policy_observation_id_matches_shared_authority``."""
+    try:
+        from groundtruth.runtime.evidence_envelope import policy_observation_id
+        return policy_observation_id(start_iteration, parent_sha256, action_sha256)
+    except Exception:  # noqa: BLE001 -- engines absent in-container -> byte-identical inline
+        framed = (
+            b"gt.observation.v1\x00"
+            + int(start_iteration).to_bytes(8, "big", signed=False)
+            + bytes.fromhex(parent_sha256)
+            + bytes.fromhex(action_sha256)
+        )
+        return hashlib.sha256(framed).hexdigest()
 
 
-def _begin_observation_batch(owner, model, actions, *, parent_message=None):
+def _begin_observation_batch(
+        owner, model, actions, *, parent_message=None) -> dict[str, Any]:
     global _observation_batch_serial
     identity, keys = _batch_identity(actions)
     parent_content = (
@@ -14203,7 +14479,7 @@ def _begin_observation_batch(owner, model, actions, *, parent_message=None):
     start_iteration = max(0, int(globals().get("_action_count", 0) or 0))
     with _batch_lock:
         _observation_batch_serial += 1
-        state = {
+        state: dict[str, Any] = {
             "serial": _observation_batch_serial,
             "owner": id(owner), "model": id(model),
             "identity": identity, "action_keys": keys,
@@ -14214,6 +14490,7 @@ def _begin_observation_batch(owner, model, actions, *, parent_message=None):
             "observation_id": _policy_observation_id(
                 start_iteration, parent_sha256, action_sha256),
             "pool": [], "contexts": {}, "rollbacks": {}, "prepared": {},
+            "opportunity_bindings": {},
             "excluded": [], "observed_keys": [], "outputs": [], "invalid": False,
             "precommitted_doses": [],
         }
@@ -14226,30 +14503,47 @@ def _begin_observation_batch(owner, model, actions, *, parent_message=None):
     return state
 
 
-def _record_batch_opportunities(state, plans, planned_winner) -> None:
-    """Persist formatter-validated candidate opportunities without model bytes.
+def _record_batch_opportunities(
+        state: dict[str, Any], plans, planned_winner) -> None:
+    """Bind and optionally persist every formatter-validated candidate opportunity.
 
-    Raw parent prose, actions, candidate kinds, symbols, payloads, and dedup keys
-    are deliberately excluded.  Typed lineage is the only feature authority;
-    absent or producer-mismatched lineage remains explicitly UNMEASURED.
+    Binding is always built because delivery/receipt identity depends on it. Ledger rows
+    remain gated by ``GT_INSEAM_METRICS`` and contain hashes/typed lineage only — never
+    parent prose, actions, payload bytes, or raw candidate kinds.
     """
-    if not _inseam_metrics_on():
+    try:
+        from groundtruth.runtime.evidence_envelope import (
+            build_observation_binding, observation_binding_to_dict)
+    except Exception:  # noqa: BLE001 -- delivery bytes must survive audit-engine absence
         return
-    observation_id = str(state.get("observation_id") or "")
-    for ordinal, (candidate, _thunk) in enumerate(state.get("pool") or ()):
-        kind_sha256 = hashlib.sha256(
-            str(getattr(candidate, "kind", "") or "").encode(
-                "utf-8", "surrogatepass")).hexdigest()
-        dedup_sha256 = hashlib.sha256(
-            str(getattr(candidate, "dedup_key", "") or "").encode(
-                "utf-8", "surrogatepass")).hexdigest()
-        opportunity_id = hashlib.sha256(
-            b"gt.opportunity.v1\x00"
-            + bytes.fromhex(observation_id)
-            + ordinal.to_bytes(8, "big", signed=False)
-            + bytes.fromhex(kind_sha256)
-            + bytes.fromhex(dedup_sha256)
-        ).hexdigest()
+    emit = _inseam_metrics_on()
+    bindings = state.setdefault("opportunity_bindings", {})
+    pool = state.get("pool")
+    if not isinstance(bindings, dict) or not isinstance(pool, list):
+        return
+    for ordinal, item in enumerate(pool):
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        candidate, _thunk = item
+        candidate_kind = str(getattr(candidate, "kind", "") or "")
+        candidate_id = str(getattr(candidate, "dedup_key", "") or "")
+        if not candidate_kind or not candidate_id:
+            continue
+        try:
+            binding = build_observation_binding(
+                batch_start_iteration=int(state.get("batch_start_iteration") or 0),
+                parent_policy_sha256=str(state.get("parent_policy_sha256") or ""),
+                parent_policy_chars=int(state.get("parent_policy_chars") or 0),
+                action_batch_sha256=str(state.get("action_batch_sha256") or ""),
+                candidate_ordinal=ordinal,
+                candidate_kind=candidate_kind,
+                candidate_id=candidate_id,
+            )
+        except (TypeError, ValueError):
+            continue
+        bindings[id(candidate)] = binding
+        if not emit:
+            continue
         lineage_extra = _feature_lineage_extra(
             getattr(candidate, "lineage", None))
         feature_refs = lineage_extra.get("feature_ids") or []
@@ -14264,6 +14558,7 @@ def _record_batch_opportunities(state, plans, planned_winner) -> None:
                 "producer_registration_mismatch"
                 if lineage_extra else "typed_lineage_absent")
         plan = plans.get(id(candidate))
+        binding_dict = observation_binding_to_dict(binding)
         _ledger_line_direct({
             "layer": "feature.opportunity",
             "event_type": "policy_observation",
@@ -14271,15 +14566,17 @@ def _record_batch_opportunities(state, plans, planned_winner) -> None:
             "outcome": "eligible",
             "reason": "formatter_visible_candidate",
             "chars_delivered": 0,
-            "iteration": int(state.get("batch_start_iteration") or 0),
-            "observation_id": observation_id,
-            "opportunity_id": opportunity_id,
-            "parent_policy_sha256": state.get("parent_policy_sha256", ""),
-            "parent_policy_chars": int(state.get("parent_policy_chars") or 0),
-            "action_batch_sha256": state.get("action_batch_sha256", ""),
-            "candidate_ordinal": ordinal,
-            "candidate_kind_sha256": kind_sha256,
-            "candidate_dedup_sha256": dedup_sha256,
+            "iteration": binding.batch_start_iteration,
+            "observation_id": binding.observation_id,
+            "opportunity_id": binding.opportunity_id,
+            "parent_policy_sha256": binding.parent_policy_sha256,
+            "parent_policy_chars": binding.parent_policy_chars,
+            "action_batch_sha256": binding.action_batch_sha256,
+            "candidate_ordinal": binding.candidate_ordinal,
+            "candidate_kind_sha256": binding.candidate_kind_sha256,
+            "candidate_dedup_sha256": binding.candidate_dedup_sha256,
+            "candidate_id": binding.candidate_id,
+            "observation_binding": binding_dict,
             "delivery_eligible": bool(
                 plan is not None and plan.disposition != "suppressed"),
             "selected": candidate is planned_winner,
@@ -14342,6 +14639,64 @@ def _register_precommitted_batch_dose(state, action, out) -> bool:
     return True
 
 
+def _bind_precommitted_batch_dose(state: dict, dose: dict):
+    """Create the submit-refusal opportunity at its formatter visibility boundary."""
+    payload = str(dose.get("payload") or "")
+    pending = dose.get("pending_delivery")
+    if not payload or not isinstance(pending, dict):
+        return None
+    try:
+        from groundtruth.runtime.completion_control import submit_refusal_candidate_id
+        from groundtruth.runtime.evidence_envelope import (
+            build_observation_binding, observation_binding_to_dict)
+        candidate_id = submit_refusal_candidate_id(payload)
+        extra = dict(pending.get("extra") or {})
+        extra["candidate_id"] = candidate_id
+        pending["extra"] = extra
+        binding = build_observation_binding(
+            batch_start_iteration=int(state.get("batch_start_iteration") or 0),
+            parent_policy_sha256=str(state.get("parent_policy_sha256") or ""),
+            parent_policy_chars=int(state.get("parent_policy_chars") or 0),
+            action_batch_sha256=str(state.get("action_batch_sha256") or ""),
+            candidate_ordinal=len(state.get("pool") or ()),
+            candidate_kind="submit_refusal",
+            candidate_id=candidate_id,
+        )
+        dose["observation_binding"] = binding
+        if _inseam_metrics_on():
+            feature_refs = extra.get("feature_ids") or []
+            bound = bool(feature_refs and extra.get("producer_registration_match") is True)
+            binding_dict = observation_binding_to_dict(binding)
+            _ledger_line_direct({
+                "layer": "feature.opportunity",
+                "event_type": "policy_observation",
+                "file_path": "",
+                "outcome": "eligible",
+                "reason": "formatter_visible_candidate",
+                "chars_delivered": 0,
+                "iteration": binding.batch_start_iteration,
+                "observation_id": binding.observation_id,
+                "opportunity_id": binding.opportunity_id,
+                "parent_policy_sha256": binding.parent_policy_sha256,
+                "parent_policy_chars": binding.parent_policy_chars,
+                "action_batch_sha256": binding.action_batch_sha256,
+                "candidate_ordinal": binding.candidate_ordinal,
+                "candidate_kind_sha256": binding.candidate_kind_sha256,
+                "candidate_dedup_sha256": binding.candidate_dedup_sha256,
+                "candidate_id": binding.candidate_id,
+                "observation_binding": binding_dict,
+                "delivery_eligible": True,
+                "selected": True,
+                "feature_refs": feature_refs if bound else [],
+                "attribution_status": "BOUND" if bound else "UNMEASURED",
+                "attribution_reason": (
+                    "typed_lineage" if bound else "typed_lineage_absent"),
+            })
+        return binding
+    except Exception:  # noqa: BLE001 -- audit identity cannot alter refusal bytes
+        return None
+
+
 def _commit_precommitted_batch_dose(dose: dict) -> None:
     """Commit a submit refusal only after exact formatter visibility is proven."""
     global _gt_submit_bounce_count, _ss_submit_red_fired
@@ -14388,6 +14743,15 @@ def _commit_precommitted_batch_dose(dose: dict) -> None:
     except Exception:  # noqa: BLE001 -- audit identity cannot hide delivered bytes
         pass
     _gt_submit_record(pending.get("verdict"), blocked=True)
+    # J6 (Cluster-2b Defect-6): stamp registered TYPED FACT lineage on the DELIVERED
+    # submit-refusal row so the offline attestation join can seat the submit_refusal truth
+    # (the join now requires typed lineage or registered block lineage). Additive host-side
+    # metadata via ``setdefault`` in the ledger writer — the model-facing bytes (``payload``,
+    # sealed via ``content``) are byte-identical. Correct-or-quiet: an absent engine leaves
+    # the row exactly as before.
+    for _lk, _lv in _registered_delivery_extra(
+            "submit_gate", "submit_refusal", "submit").items():
+        extra.setdefault(_lk, _lv)
     _runtime_ledger_record(
         kind="submit_refusal",
         outcome=_ProductSignalOutcome.DELIVERED,
@@ -14400,8 +14764,10 @@ def _commit_precommitted_batch_dose(dose: dict) -> None:
     # W2/B-ATT: persist the producer-owned submit-gate truth for THIS exact delivered
     # refusal (pure gate BLOCK re-run on its own recorded inputs). Audit-only; the join
     # matches on (candidate_id, content_sha256_16) with the ledger row above.
-    _persist_submit_refusal_producer_attestation(
-        payload, extra.get("candidate_id"), pending.get("verdict"))
+    attestation_candidate_id = extra.get("candidate_id")
+    if isinstance(attestation_candidate_id, str) and attestation_candidate_id:
+        _persist_submit_refusal_producer_attestation(
+            payload, attestation_candidate_id, pending.get("verdict"))
     _oracle_delivered_hashes.add(content_hash)
     _gt_submit_bounce_count += 1
     if pending.get("ss_submit_red") is True:
@@ -15438,8 +15804,9 @@ def _restore_batch_memory(snapshot: dict) -> None:
     _HOOK_FIRE_COUNTS.update(snapshot["hook_counts"])
     _search_seen.clear()
     _search_seen.update(snapshot["search_seen"])
-    if hasattr(_RUNTIME_LEDGER, "_entries"):
-        _RUNTIME_LEDGER._entries[:] = snapshot["ledger_entries"]
+    ledger_entries = getattr(_RUNTIME_LEDGER, "_entries", None)
+    if isinstance(ledger_entries, list):
+        ledger_entries[:] = snapshot["ledger_entries"]
 
 
 def _commit_batch_arbitration(state, result, winner, plans) -> object:
@@ -15468,6 +15835,9 @@ def _commit_batch_arbitration(state, result, winner, plans) -> object:
     global _action_count
     saved_iteration = _action_count
     _action_count = int(context.get("producer_iteration", _action_count))
+    binding_token = _delivery_observation_context.set(
+        state.get("opportunity_bindings", {}).get(id(winner))
+    )
     try:
         if plan.disposition == "holdout":
             decision = plan.decision
@@ -15517,6 +15887,7 @@ def _commit_batch_arbitration(state, result, winner, plans) -> object:
                 file_path=getattr(winner, "symbol", "") or "")
         return winner
     finally:
+        _delivery_observation_context.reset(binding_token)
         _action_count = saved_iteration
 
 
@@ -15554,7 +15925,7 @@ def install_observation_batch_commit(agent) -> bool:
     model = getattr(agent, "model", None)
     original = getattr(model, "format_observation_messages", None)
     original_execute = getattr(agent, "execute_actions", None)
-    if (not callable(original) or not callable(original_execute)
+    if (model is None or not callable(original) or not callable(original_execute)
             or getattr(agent, "_gt_batch_commit_installed", False)):
         _discard_tool_observation_batch("batch_install_unavailable")
         _batch_install_failed = True
@@ -15608,6 +15979,8 @@ def install_observation_batch_commit(agent) -> bool:
                                else "multiple_precommitted_submit_doses"),
                     "iteration": globals().get("_action_count", 0)})
             else:
+                binding = _bind_precommitted_batch_dose(state, first)
+                token = _delivery_observation_context.set(binding)
                 try:
                     _commit_precommitted_batch_dose(first)
                 except Exception as exc:  # noqa: BLE001 -- audit commit cannot hide bytes
@@ -15618,6 +15991,8 @@ def install_observation_batch_commit(agent) -> bool:
                         "reason": ("submit_delivery_commit_failed:"
                                    + type(exc).__name__)[:200],
                         "iteration": globals().get("_action_count", 0)})
+                finally:
+                    _delivery_observation_context.reset(token)
             _discard_tool_observation_batch("batch_precommitted_winner", state)
             return rendered
 
@@ -15668,8 +16043,11 @@ def install_observation_batch_commit(agent) -> bool:
 
         if (planned_delivery is not None
                 and planned_delivery.disposition == "deliver"
-                and not _rendered_contains_exact_suffix(
-                    rendered, output_index, planned_delivery.suffix)):
+                and (
+                    output_index is None
+                    or not _rendered_contains_exact_suffix(
+                        rendered, output_index, planned_delivery.suffix)
+                )):
             _discard_tool_observation_batch("batch_formatter_clipped", state)
             return original(message, outputs, *args, **kwargs)
 
@@ -15720,6 +16098,8 @@ def install_observation_batch_commit(agent) -> bool:
             if winner is not planned_winner:
                 raise RuntimeError("batch committed a different winner")
             if winner is not None:
+                if planned_delivery is None or output_index is None:
+                    raise RuntimeError("batch winner has no frozen delivery home")
                 actual = planned_delivery.output.get("output") or ""
                 expected = shadow_outputs[output_index].get("output") or ""
                 if actual != expected:
@@ -15736,6 +16116,12 @@ def install_observation_batch_commit(agent) -> bool:
                 planned_delivery is not None
                 and planned_delivery.disposition == "deliver")
             if preserve_visible:
+                if (
+                    planned_delivery is None
+                    or planned_winner is None
+                    or output_index is None
+                ):
+                    raise RuntimeError("visible batch dose lost its frozen identity")
                 _restore_batch_memory(memory_snapshot)
                 expected = shadow_outputs[output_index].get("output") or ""
                 planned_delivery.output["output"] = expected
@@ -15756,16 +16142,18 @@ def install_observation_batch_commit(agent) -> bool:
                         _batch_rearm_candidate(state, planned_winner)
                     except Exception:  # noqa: BLE001
                         pass
+            failed_suffix = (
+                planned_delivery.suffix
+                if preserve_visible and planned_delivery is not None else ""
+            )
             try:
                 _runtime_ledger_record(
                     kind=("ga." + planned_winner.kind
                           if planned_winner is not None else "global_arbiter"),
                     outcome="provider_failed",
                     reason=("batch_commit_failed:" + type(exc).__name__)[:200],
-                    chars=(len(planned_delivery.suffix)
-                           if preserve_visible else 0),
-                    content=(planned_delivery.suffix
-                             if preserve_visible else ""))
+                    chars=len(failed_suffix),
+                    content=failed_suffix)
             except Exception:  # noqa: BLE001
                 pass
             _clear_tool_observation_batch(state)
@@ -16914,10 +17302,14 @@ def _ss_note_delivery_for_ack(
             "step": _action_count,
             "sha": seal,
             "final_text": shipped,
+            "observation_binding": _current_observation_binding_dict(),
         }
         terminal_identity = _terminal_delivery_identity(delivery_extra)
         if terminal_identity is not None:
             record["fact_class"], record["candidate_id"] = terminal_identity
+            binding = record.get("observation_binding")
+            if isinstance(binding, dict) and binding.get("candidate_id"):
+                record["candidate_id"] = binding["candidate_id"]
         # Exact one-to-one attribution only. Multiple candidate identities for
         # identical bytes are incomplete delivery provenance and cannot suppress.
         if len(identities) == 1:
@@ -16985,7 +17377,8 @@ def _ss_emit_ack_row(rec: dict, acked: bool) -> None:
         "outcome": "delivered", "reason": "ss_ack", "ack": bool(acked),
         "ack_m": _action_count - int(rec.get("step", _action_count)),
         "content_sha256_16": rec.get("sha", ""), "seal_scope": "block",
-        "chars_delivered": 0, "iteration": _action_count})
+        "chars_delivered": 0, "iteration": _action_count,
+        "observation_binding": rec.get("observation_binding")})
     try:
         fact_class = rec.get("fact_class")
         candidate_id = rec.get("candidate_id")
@@ -17020,6 +17413,7 @@ def _ss_emit_ack_row(rec: dict, acked: bool) -> None:
             candidate_id=participation.candidate_id,
             reason=participation.reason,
             related_delivery_iteration=participation.related_delivery_iteration,
+            observation_binding=rec.get("observation_binding"),
         )
     except Exception:  # noqa: BLE001 -- receipt metrics never affect agent behavior
         return
@@ -18032,6 +18426,14 @@ def _augment_output(action, out) -> None:
                                 kind=_ob_kind,
                                 outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
                                 reason=("ss_late" if _ob_late else "ss_step_behind"))
+                            # G-cluster finding (2026-07-17): this review-gate ss_late drop uses
+                            # the LEGACY `_ss_late_drop_suppresses` (symbol-GREEN-tested) path, NOT
+                            # a v2 PROVEN-truth. A `_v2_attribute_proven_truth` call here is INERT
+                            # (its PROVEN gate never fires for a legacy-late-dropped clause), so no
+                            # full-identity attribution writer is wired at this site — closing the
+                            # spec.obligation suppress_late oracle cases would require attributing
+                            # the LEGACY late-drop via the `_v2_partition_fresh_proofs` fresh-
+                            # behavioral-proof path, out of this cluster's verified scope.
                         elif _ob_lane_a:
                             if _ga_on:
                                 _global_pool_add_lane_a(
@@ -18400,7 +18802,8 @@ def _augment_output(action, out) -> None:
         # [gt-patch:loaded] discipline) so a silently-dying gate/producer is
         # diagnosable, while NEVER re-raising (the agent loop must not break).
         try:
-            import sys as _sys, traceback as _tb
+            import sys as _sys
+            import traceback as _tb
             _exc_a = _tb.format_exc()
             print("[GT_META] augment_output_exception=true\n" + _exc_a,
                   file=_sys.stderr, flush=True)

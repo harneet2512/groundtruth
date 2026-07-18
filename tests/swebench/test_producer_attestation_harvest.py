@@ -53,6 +53,10 @@ for _p in (ROOT / "src", ROOT / "scripts" / "swebench"):
 
 import attestation_join as aj  # noqa: E402
 from groundtruth.runtime.attestation_store import persist_attestation  # noqa: E402
+from groundtruth.runtime.feature_lineage import (  # noqa: E402
+    build_lineage,
+    lineage_ledger_extra,
+)
 from groundtruth.runtime.completion_control import (  # noqa: E402
     submit_refusal_candidate_id,
 )
@@ -92,6 +96,10 @@ def _delivered_row(candidate_id: str, seal: str) -> dict:
         "outcome": "delivered",
         "content_sha256_16": seal,
         "candidate_id": candidate_id,
+        # J6: the seam stamps typed FACT lineage on the delivered submit-refusal row.
+        **lineage_ledger_extra(build_lineage(
+            runtime_producer_id="submit_gate", evidence_type="submit_refusal",
+            actual_event="submit")),
     }
 
 

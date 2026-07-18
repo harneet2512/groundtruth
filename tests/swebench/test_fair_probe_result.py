@@ -148,23 +148,27 @@ _PAYLOAD_SYN = "Syntax check on src/foo.py failed.\ndef compute_widget(x, y):"
 # CAUSAL — delivered instance acted; a same-class holdout instance not self-acquired.
 # --------------------------------------------------------------------------- #
 def _causal_fixture(*, holdout_file: str = "src/other.py") -> tuple[dict, list[dict]]:
+    # B1 (Cluster-4): treatment and control must share a PRE-DECISION STATE to pair — the same
+    # class's decision, opened at the SAME edit_result boundary (msg 2), over a byte-identical
+    # observation prefix. So the holdout WITHHELD instance (iteration 1 -> the tool message at
+    # msg 2) sits at the very same edit boundary the treatment was delivered into. The control
+    # window (msgs 3..4, closing at the file_view boundary) inspects a decision but never commits
+    # a signature-delta mutation on the withheld file -> registry receipt False -> not_acted.
     messages = [
         _user("Fix the signature bug."),               # 0 task_start
-        _assistant("grep -rn other src/other.py"),      # 1 is_search -> boundary 2 (BEFORE withhold-1)
-        _tool("no direct help here"),                   # 2 search_result boundary; tool ordinal 1
-        _assistant("cat notes.txt"),                    # 3 passive, names nothing relevant
-        _tool("notes"),                                 # 4 tool ordinal 2
-        _assistant("apply_patch src/foo.py"),           # 5 is_edit -> boundary 6
-        _tool(_PAYLOAD_SIG),                            # 6 edit_result boundary + DELIVERY; ordinal 3
-        _assistant("apply_patch src/foo.py"),           # 7 mutation -> commit 7, action 7
-        _tool("edit applied"),                          # 8 tool ordinal 4
+        _assistant("apply_patch src/foo.py"),           # 1 is_edit -> boundary 2
+        _tool(_PAYLOAD_SIG),                            # 2 edit_result boundary + DELIVERY; ordinal 1; WITHHOLD(iter1)
+        _assistant("cat notes.txt"),                    # 3 inspected control decision (names nothing relevant)
+        _tool("notes"),                                 # 4 file_view boundary; ordinal 2 (closes control window)
+        _assistant("apply_patch src/foo.py"),           # 5 treatment mutation -> commit 5, action 5
+        _tool("edit applied; ack"),                     # 6 ordinal 3 -> ack
     ]
     rows = [
         _delivered_row(
             _PAYLOAD_SIG, evidence_type="signature_mismatch",
             event_type="edit_result", file_path="src/foo.py",
         ),
-        _ack_row(_PAYLOAD_SIG, iteration=4),            # -> ack at message 8 (> delivery 6)
+        _ack_row(_PAYLOAD_SIG, iteration=3),            # -> ack at message 6 (> delivery 2)
         _holdout_row(
             "withheld signature fact for another file",
             fact_class="signature_delta", file_path=holdout_file, iteration=1,
@@ -201,24 +205,28 @@ def test_causal_when_treatment_acted_and_control_not_acted(tmp_path: Path) -> No
 
 
 def test_control_acted_is_not_causal() -> None:
-    # A same-class holdout whose entity (src/bar.py) the agent DOES name inside the withholding
-    # window (a grep) -> the agent self-acquired the fact anyway -> control "acted" -> the probe
-    # is INVALID for CAUSAL (honest: GT was not needed). Uses its own fixture so the withheld
-    # entity is unambiguously named inside the next-boundary window.
+    # B3 (Cluster-4): control "acted" is grounded in the CLASS REGISTRY RECEIPT, not a bare
+    # mention. For signature_delta (a mutation-commit class) the agent must COMMIT the class
+    # decision on the withheld file (a mutation naming src/bar.py) inside the window -> the
+    # receipt evaluates True -> the agent self-acquired the fact anyway -> control "acted" -> the
+    # probe is INVALID for CAUSAL (honest: GT was not needed). The withheld holdout is at the same
+    # edit boundary as the treatment delivery so the two arms share a pre-decision state (pairing
+    # is satisfied; the invalidation comes from the control receipt, not a pairing miss).
     messages = [
         _user("Fix the signature bug."),               # 0 task_start
         _assistant("apply_patch src/foo.py"),           # 1 is_edit -> boundary 2
-        _tool(_PAYLOAD_SIG),                            # 2 edit_result + DELIVERY; ordinal 1 (WITHHOLD)
-        _assistant("grep -rn bar src/bar.py"),          # 3 is_search naming src/bar.py -> boundary 4
-        _tool("found bar"),                             # 4 search_result boundary; ordinal 2
-        _assistant("apply_patch src/foo.py"),           # 5 mutation -> commit
-        _tool("done"),                                  # 6 ordinal 3
+        _tool(_PAYLOAD_SIG),                            # 2 edit_result + DELIVERY; ordinal 1 (WITHHOLD iter1)
+        _assistant("apply_patch src/bar.py"),           # 3 MUTATION naming src/bar.py -> control commits the class receipt
+        _tool("bar edited"),                            # 4 edit_result boundary; ordinal 2
+        _assistant("apply_patch src/foo.py"),           # 5 treatment mutation -> commit/action
+        _tool("done; ack"),                             # 6 ordinal 3 -> ack
     ]
     rows = [
         _delivered_row(
             _PAYLOAD_SIG, evidence_type="signature_mismatch",
             event_type="edit_result", file_path="src/foo.py",
         ),
+        _ack_row(_PAYLOAD_SIG, iteration=3),
         _holdout_row(
             "withheld signature fact for bar",
             fact_class="signature_delta", file_path="src/bar.py", iteration=1,
@@ -240,18 +248,20 @@ def test_control_acted_is_not_causal() -> None:
 # SELF_LOCALIZED — the agent grepped the fact before GT delivered it.
 # --------------------------------------------------------------------------- #
 def test_control_window_closes_at_next_boundary() -> None:
-    # The withheld entity (src/zed.py) is named only AFTER the next observation boundary; the
-    # decision window closes at that boundary, so the control is honestly "not_acted" and the
-    # probe is CAUSAL. (Pins the window end to the next boundary, not the end of the run.)
+    # B3 window-bounding: the withheld entity (src/zed.py) is COMMITTED (a mutation) only AFTER
+    # the next observation boundary; the control receipt is evaluated over the window that closes
+    # at that boundary, so the later commit is EXCLUDED -> the control is honestly "not_acted" and
+    # the probe is CAUSAL. (Pins the window end to the next boundary, not the end of the run.) The
+    # holdout sits at the treatment's edit boundary so the two arms share a pre-decision state.
     messages = [
         _user("Fix the signature bug."),               # 0 task_start
         _assistant("apply_patch src/foo.py"),           # 1 is_edit -> boundary 2
-        _tool(_PAYLOAD_SIG),                            # 2 edit_result + DELIVERY; ordinal 1 (WITHHOLD)
+        _tool(_PAYLOAD_SIG),                            # 2 edit_result + DELIVERY; ordinal 1 (WITHHOLD iter1)
         _assistant("cat notes.txt"),                    # 3 view -> boundary 4 (CLOSES the window)
         _tool("notes"),                                 # 4 file_view boundary; ordinal 2
-        _assistant("grep -rn zed src/zed.py"),          # 5 names src/zed.py AFTER the window
-        _tool("found"),                                 # 6 ordinal 3
-        _assistant("apply_patch src/foo.py"),           # 7 mutation -> commit, action
+        _assistant("apply_patch src/zed.py"),           # 5 mutates src/zed.py AFTER the window
+        _tool("zed edited"),                            # 6 edit_result boundary; ordinal 3
+        _assistant("apply_patch src/foo.py"),           # 7 treatment mutation -> commit, action
         _tool("edit applied; ack"),                     # 8 ordinal 4 -> ack
     ]
     rows = [
@@ -436,8 +446,10 @@ def test_paired_baseline_causal_paired_when_gt_resolved_baseline_not(tmp_path: P
         traj, rows, output_dir=str(tmp_path), task_label="synthetic__syntax",
         gt_resolved=True, baseline_resolved=False,
     )
+    # B5 (Cluster-4): CAUSAL_PAIRED is still REPORTED (enrichment) but no longer SETS the gate —
+    # a bare resolution delta is not a valid causal adjudication. The gate value is None.
     assert join["per_fact_class"]["syntax_result"]["verdict"] == CAUSAL_PAIRED
-    assert fair_probe_bool_by_fact_class(join)["syntax_result"] is True
+    assert fair_probe_bool_by_fact_class(join)["syntax_result"] is None
     paired = [pr for pr in join["probes"] if pr["probe_kind"] == "paired_baseline"]
     assert len(paired) == 1
     assert paired[0]["fact_class"] == "syntax_result"

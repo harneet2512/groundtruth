@@ -144,8 +144,10 @@ def _late_fixture() -> tuple[dict, list[dict]]:
         _user("Fix the signature bug."),                 # 0 task_start
         _assistant("apply_patch src/foo.py"),            # 1 is_edit -> boundary at 2
         _tool("edit applied"),                           # 2 edit_result boundary (opened)
-        _assistant("rm build.tmp"),                      # 3 mutation (not an edit boundary) -> commit
-        _tool("removed"),                                # 4
+        # A (per-class kernel): the MUTATION commit must NAME a delivered entity. A `cp` naming
+        # src/foo.py is a mutation (not an is_edit boundary) that names the delivered file.
+        _assistant("cp src/foo.py src/foo.bak"),         # 3 mutation naming foo.py -> commit
+        _tool("copied"),                                 # 4
         _assistant("echo done"),                         # 5 non-mutating
         _tool(_PAYLOAD_SIG),                             # 6 DELIVERY — LATE (after commit)
     ]
@@ -239,6 +241,29 @@ def test_unmeasured_when_delivery_bytes_absent_from_trajectory() -> None:
     join = adjudicate_deliveries({"messages": messages}, rows)
     assert join["per_fact_class"]["signature_delta"]["verdict"] == UNMEASURED
     assert timing_by_fact_class(join)["signature_delta"] is None
+
+
+def test_duplicate_ledger_claim_of_one_physical_span_names_broken_binding() -> None:
+    messages = [
+        _user("Fix the signature bug."),
+        _assistant("apply_patch src/foo.py"),
+        _tool(_PAYLOAD_SIG),
+        _assistant("apply_patch src/foo.py"),
+    ]
+    first = _delivered_row(
+        _PAYLOAD_SIG,
+        evidence_type="signature_mismatch",
+        event_type="edit_result",
+        file_path="src/foo.py",
+    )
+    first["iteration"] = 1
+    second = dict(first)
+
+    chron = extract_chronologies({"messages": messages}, [first, second])
+
+    assert chron[0].timing_verdict == ON_TIME
+    assert chron[1].timing_verdict == UNMEASURED
+    assert chron[1].unmeasured_reason == "physical_span_unavailable_or_already_claimed"
 
 
 def test_unmeasured_when_evidence_type_unregistered() -> None:

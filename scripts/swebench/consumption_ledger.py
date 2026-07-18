@@ -515,6 +515,7 @@ def _build_v2(
     messages: list[dict],
     *,
     runtime_ledger_path: str | None = None,
+    runtime_ledger_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     n = len(messages)
 
@@ -616,8 +617,15 @@ def _build_v2(
     ledger_rows_joined = 0
     exact_seal_ambiguities: list[dict[str, Any]] = []
     exact_seal_duplicate_windows: list[dict[str, Any]] = []
-    if runtime_ledger_path and os.path.isfile(runtime_ledger_path):
-        rows = _load_delivered_ledger_rows(runtime_ledger_path)
+    has_runtime_ledger = runtime_ledger_rows is not None or bool(
+        runtime_ledger_path and os.path.isfile(runtime_ledger_path)
+    )
+    if has_runtime_ledger:
+        rows = (
+            _delivered_rows_from_values(runtime_ledger_rows or [])
+            if runtime_ledger_rows is not None
+            else _load_delivered_ledger_rows(str(runtime_ledger_path))
+        )
         ledger_rows_delivered = len(rows)
         used: set[int] = set()
         merged_aliases: set[int] = set()
@@ -644,6 +652,7 @@ def _build_v2(
             return os.path.basename(bf) == os.path.basename(rf)
 
         for row_index, row in enumerate(rows):
+            runtime_ledger_index = int(row.get("_runtime_ledger_index", row_index))
             rf = row.get("file_path") or ""
             chars = int(row.get("chars_delivered") or 0)
             it = row.get("iteration")
@@ -651,6 +660,7 @@ def _build_v2(
             aliases: list[int] = []
             method = None
             seal = str(row.get("content_sha256_16") or "")
+            unjoined_reason = "delivery_unjoined"
 
             # SS-LIVE Gate 1: a sealed row joins only by its exact rendered
             # bytes. Locate and consume the matching observation window.
@@ -658,12 +668,16 @@ def _build_v2(
             seal_span: tuple[int, int] | None = None
             seal_payload = ""
             if seal and chars > 0:
+                all_candidates: list[tuple[int, tuple[int, int]]] = []
                 candidates: list[tuple[int, tuple[int, int]]] = []
                 for msg_index, content in enumerate(visible_buffers):
                     for span in _locate_seal_spans(content, chars, seal):
+                        all_candidates.append((msg_index, span))
                         if any(_spans_overlap(span, prior) for prior in claimed_spans[msg_index]):
                             continue
                         candidates.append((msg_index, span))
+                if all_candidates and not candidates:
+                    unjoined_reason = "physical_span_unavailable_or_already_claimed"
 
                 if candidates:
                     # Every candidate window is byte-identical by construction:
@@ -719,6 +733,7 @@ def _build_v2(
                         # inconsistency (the sealed bytes surface only ahead of the
                         # iteration that claims to deliver them). This is not
                         # reconcilable -- fail closed.
+                        unjoined_reason = "physical_span_precedes_delivery_boundary"
                         exact_seal_ambiguities.append({
                             "ledger_row_index": row_index,
                             "content_sha256_16": seal,
@@ -860,6 +875,12 @@ def _build_v2(
                 e["ledger_layer"] = row.get("layer")
                 e["ledger_event_type"] = row.get("event_type")
                 e["ledger_chars"] = chars
+                e["runtime_ledger_index"] = runtime_ledger_index
+                e["candidate_id"] = row.get("candidate_id")
+                e["observation_binding"] = row.get("observation_binding")
+                e["opportunity_exempt_reason"] = row.get(
+                    "opportunity_exempt_reason"
+                )
                 if method == "seal":
                     lineage = _typed_lineage_from_row(row)
                     if lineage is not None:
@@ -892,6 +913,13 @@ def _build_v2(
                     "physical_span_start": None,
                     "physical_span_end": None,
                     "physical_id": None,
+                    "physical_join_reason": unjoined_reason,
+                    "runtime_ledger_index": runtime_ledger_index,
+                    "candidate_id": row.get("candidate_id"),
+                    "observation_binding": row.get("observation_binding"),
+                    "opportunity_exempt_reason": row.get(
+                        "opportunity_exempt_reason"
+                    ),
                 })
         # One canonical entry owns each physical interval. Keeping overlapping
         # legacy aliases would make downstream readers rediscover the exact
@@ -989,7 +1017,7 @@ def _build_v2(
             len(unjoined_visible_tags) == 0
             and not physical_identity_conflicts
             and not exact_seal_ambiguities
-            if runtime_ledger_path and os.path.isfile(runtime_ledger_path)
+            if has_runtime_ledger
             else True
         ),
         # SS-3 defect-4: structural test-identity leaks in the delivered GT bytes.
@@ -1008,8 +1036,143 @@ def _receipt_distribution(visible: list[dict[str, Any]]) -> dict[str, int]:
     return dist
 
 
-def _load_delivered_ledger_rows(path: str) -> list[dict[str, Any]]:
+PHYSICAL_DELIVERY_AUTHORITY_SCHEMA = "gt.physical_delivery_authority.v1"
+PHYSICAL_DELIVERY_BOUND = "PHYSICAL_DELIVERY_BOUND"
+BROKEN_PHYSICAL_BINDING = "BROKEN_PHYSICAL_BINDING"
+
+
+def physical_delivery_authority(ledger: dict[str, Any]) -> dict[str, Any]:
+    """Project the consumption ledger's unique claimed spans by runtime-row identity.
+
+    This is the reusable byte authority for chronology, feature metrics, and SS evidence.
+    It never relocates bytes: the v2 reconciler already claimed each physical interval.
+    Duplicate/conflicting/missing claims remain named broken states rather than becoming
+    a weaker ordinal or seal-only guess.
+    """
+    entries = ledger.get("entries") if isinstance(ledger, dict) else None
+    entries = entries if isinstance(entries, list) else []
+    conflicts = set(ledger.get("physical_identity_conflict_ids") or [])
+    claims: dict[int, list[dict[str, Any]]] = {}
+    ledger_only: dict[int, dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        runtime_index = entry.get("runtime_ledger_index")
+        if type(runtime_index) is not int or runtime_index < 0:
+            continue
+        if entry.get("source") == "ledger_only":
+            ledger_only[runtime_index] = entry
+            continue
+        if (
+            entry.get("source") == "trajectory"
+            and entry.get("joined") is True
+            and entry.get("join_method") == "seal"
+        ):
+            claims.setdefault(runtime_index, []).append(entry)
+
+    deliveries: dict[str, dict[str, Any]] = {}
+    all_indices = sorted(set(claims) | set(ledger_only))
+    for runtime_index in all_indices:
+        row_claims = claims.get(runtime_index, [])
+        if len(row_claims) != 1:
+            source = ledger_only.get(runtime_index, {})
+            deliveries[str(runtime_index)] = {
+                "state": BROKEN_PHYSICAL_BINDING,
+                "reason": str(
+                    source.get("physical_join_reason")
+                    or "physical_span_unavailable_or_already_claimed"
+                ),
+                "runtime_ledger_index": runtime_index,
+                "physical_id": None,
+                "msg_index": None,
+                "span_start": None,
+                "span_end": None,
+                "rendered_text": None,
+                "content_sha256_16": source.get("content_sha256_16"),
+                "chars": source.get("ledger_chars", source.get("chars")),
+                "candidate_id": source.get("candidate_id"),
+                "observation_binding": source.get("observation_binding"),
+                "opportunity_exempt_reason": source.get(
+                    "opportunity_exempt_reason"
+                ),
+            }
+            continue
+        claim = row_claims[0]
+        physical_id = claim.get("physical_id")
+        if not isinstance(physical_id, str) or not physical_id or physical_id in conflicts:
+            deliveries[str(runtime_index)] = {
+                "state": BROKEN_PHYSICAL_BINDING,
+                "reason": "physical_identity_conflict",
+                "runtime_ledger_index": runtime_index,
+                "physical_id": physical_id if isinstance(physical_id, str) else None,
+                "msg_index": claim.get("msg_index"),
+                "span_start": claim.get("span_start"),
+                "span_end": claim.get("span_end"),
+                "rendered_text": claim.get("rendered_text"),
+                "content_sha256_16": claim.get("content_sha256_16"),
+                "chars": claim.get("ledger_chars", claim.get("chars")),
+                "candidate_id": claim.get("candidate_id"),
+                "observation_binding": claim.get("observation_binding"),
+                "opportunity_exempt_reason": claim.get(
+                    "opportunity_exempt_reason"
+                ),
+            }
+            continue
+        deliveries[str(runtime_index)] = {
+            "state": PHYSICAL_DELIVERY_BOUND,
+            "reason": "unique_claimed_span",
+            "runtime_ledger_index": runtime_index,
+            "physical_id": physical_id,
+            "msg_index": claim.get("msg_index"),
+            "span_start": claim.get("span_start"),
+            "span_end": claim.get("span_end"),
+            "rendered_text": claim.get("rendered_text"),
+            "content_sha256_16": claim.get("content_sha256_16"),
+            "chars": claim.get("ledger_chars", claim.get("chars")),
+            "candidate_id": claim.get("candidate_id"),
+            "observation_binding": claim.get("observation_binding"),
+            "opportunity_exempt_reason": claim.get("opportunity_exempt_reason"),
+            "receipt": claim.get("receipt"),
+            "referenced_msg_index": claim.get("referenced_msg_index"),
+            "acted_msg_index": claim.get("acted_msg_index"),
+            "feature_lineage": claim.get("feature_lineage"),
+        }
+    broken = [
+        index for index, record in deliveries.items()
+        if record["state"] == BROKEN_PHYSICAL_BINDING
+    ]
+    return {
+        "schema": PHYSICAL_DELIVERY_AUTHORITY_SCHEMA,
+        "valid": not broken,
+        "broken_runtime_ledger_indices": broken,
+        "deliveries": deliveries,
+    }
+
+
+def _delivered_rows_from_values(
+    values: Iterable[object],
+) -> list[dict[str, Any]]:
+    """Retain delivered rows with their index in the complete parsed ledger."""
     rows: list[dict[str, Any]] = []
+    for runtime_index, value in enumerate(values):
+        if not isinstance(value, dict):
+            continue
+        if value.get("outcome") != "delivered":
+            continue
+        try:
+            chars = int(value.get("chars_delivered") or 0)
+        except (TypeError, ValueError):
+            continue
+        if chars <= 0:
+            continue
+        row = dict(value)
+        row["_runtime_ledger_index"] = runtime_index
+        rows.append(row)
+    return rows
+
+
+def _load_delivered_ledger_rows(path: str) -> list[dict[str, Any]]:
+    parsed: list[object] = []
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -1017,18 +1180,12 @@ def _load_delivered_ledger_rows(path: str) -> list[dict[str, Any]]:
                 if not line:
                     continue
                 try:
-                    row = json.loads(line)
+                    parsed.append(json.loads(line))
                 except ValueError:
                     continue
-                if (
-                    isinstance(row, dict)
-                    and row.get("outcome") == "delivered"
-                    and int(row.get("chars_delivered") or 0) > 0
-                ):
-                    rows.append(row)
     except OSError:
         return []
-    return rows
+    return _delivered_rows_from_values(parsed)
 
 
 # --------------------------------------------------------------------------- #
@@ -1143,6 +1300,7 @@ def build_consumption_ledger(
     *,
     window: int = 3,
     runtime_ledger_path: str | None = None,
+    runtime_ledger_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Delivered -> referenced -> acted receipts from a trajectory.
 
@@ -1152,7 +1310,11 @@ def build_consumption_ledger(
     """
     messages = _as_mini_messages(trajectory)
     if messages is not None:
-        return _build_v2(messages, runtime_ledger_path=runtime_ledger_path)
+        return _build_v2(
+            messages,
+            runtime_ledger_path=runtime_ledger_path,
+            runtime_ledger_rows=runtime_ledger_rows,
+        )
     return _build_v1_legacy(trajectory, window=window)
 
 
