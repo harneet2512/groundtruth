@@ -194,13 +194,15 @@ def test_support_and_control_roles_do_not_borrow_delivery_lineage() -> None:
     mediator = {
         "family": "CAP", "status": "MEASURED",
         "ss_readiness": {
+            # B-TERM writer truth: 3 completeness gates; the causal probe is a
+            # separate enrichment field, never a gate (NO-GO defect 1 re-pin).
             "role": "infra_control", "live_witness": False, "ss_live": False,
             "gates": {
                 "runtime_member_control_receipt": None,
                 "mediated_fact_ids": True,
                 "mediation_correct": None,
-                "mediation_causal_fair_probe": None,
             },
+            "mediation_causal_fair_probe": None,
         },
     }
 
@@ -411,8 +413,9 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
         "role": "infra_control", "live_witness": False, "ss_live": False,
         "gates": {
             "runtime_member_control_receipt": None, "mediated_fact_ids": True,
-            "mediation_correct": None, "mediation_causal_fair_probe": None,
+            "mediation_correct": None,
         },
+        "mediation_causal_fair_probe": None,
     }
     feature_path = task_dir / f"gt_feature_metrics_{task}.json"
     feature_path.write_text(json.dumps({
@@ -458,6 +461,23 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
         "mandatory_performance_metric_count": 58,
         "mandatory_performance": mandatory,
         "mandatory_performance_collection_complete": True,
+        # NO-GO defect 5: a MEASURED run PERF row is adjudicated on the writer's
+        # SS-MEASURE readiness (gt_feature_metrics ~4371); status alone never promotes.
+        "ss_features": {
+            "gold_rank": {
+                "family": "PERF",
+                "ss_readiness": {
+                    "role": "measurement", "live_witness": False, "ss_live": False,
+                    "gates": {
+                        "artifact_valid": True, "metric_structure_valid": True,
+                        "precision_8dp": True, "formula_provenance": True,
+                        "denominator_provenance": True,
+                        "applicability_resolved": True, "task_coverage": True,
+                        "aggregate_coverage": True,
+                    },
+                },
+            },
+        },
         "tasks": 1,
         "task_population": {
             "observed_record_count": 1, "observed_unique_count": 1,
@@ -495,6 +515,66 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
     )
     assert diagnosis._perf_status({"status": "PARTIAL"}) == "FAILED"
     assert diagnosis._perf_status({"status": "RIGHT_CENSORED"}) == "RIGHT_CENSORED"
+    # NO-GO defect 5: a MEASURED claim without (or with an unsound) SS-MEASURE
+    # readiness fails closed instead of passing on self-declared status.
+    assert diagnosis._perf_status({"status": "MEASURED"}) == (
+        "FAILED:measurement:readiness_role"
+    )
+    sound = by_name["gold_rank"]["run_measurement"]
+    unsound_readiness = {
+        "role": "measurement", "live_witness": False, "ss_live": False,
+        "gates": {
+            "artifact_valid": True, "metric_structure_valid": True,
+            "precision_8dp": False, "formula_provenance": True,
+            "denominator_provenance": True, "applicability_resolved": True,
+            "task_coverage": True, "aggregate_coverage": True,
+        },
+    }
+    assert diagnosis._perf_status(
+        {**sound, "ss_readiness": unsound_readiness}, scope="run",
+    ) == "FAILED:measurement:precision_8dp"
+    # aggregate_coverage is a run-population gate: it never bites at task grain.
+    task_grain_readiness = {
+        "role": "measurement", "live_witness": False, "ss_live": False,
+        "gates": {
+            "artifact_valid": True, "metric_structure_valid": True,
+            "precision_8dp": True, "formula_provenance": True,
+            "denominator_provenance": True, "applicability_resolved": True,
+            "task_coverage": True, "aggregate_coverage": False,
+        },
+    }
+    assert diagnosis._perf_status(
+        {"status": "MEASURED", "ss_readiness": task_grain_readiness}
+    ) == "MEASURED"
+    assert diagnosis._perf_status(
+        {"status": "MEASURED", "ss_readiness": task_grain_readiness}, scope="run",
+    ) == "FAILED:measurement:aggregate_coverage"
+    # T2-audit finding 5: every row carries the ONE executable promotion authority —
+    # promoted is False in offline diagnosis, and the declared-vs-implemented schema
+    # delta is surfaced so a typed *_SS_LIVE bucket can never be read as promotion.
+    for row in result["rows"]:
+        promotion = row["promotion"]
+        assert promotion["promoted"] is False
+        assert promotion["authority"] == "ss_proof_manifest.live_proof_dependencies"
+    gateway_promotion = by_name["GT_GATEWAY"]["promotion"]
+    assert gateway_promotion["schema_delta"] == ["mediation_causal_fair_probe"]
+    # After evidence-backed alias reconciliation the ONLY eligibility gap left is the
+    # causal probe (the interim-terminal gap); decision_correct/opportunity_receipt are
+    # enforced through G1 mediation_correct + the defect-4 transaction boundary.
+    eligibility_promotion = by_name["GT_OBLIGATION_FRESHNESS"]["promotion"]
+    assert eligibility_promotion["schema_delta"] == ["eligibility_causal_fair_probe"]
+    # Direct byte-owners reconcile fully: promotable in principle from a live run.
+    assert by_name["GT_EDIT_CHECK"]["promotion"]["schema_delta"] == []
+    # R1 closed by code verification: the FACT runtime-ownership quartet is enforced
+    # inside gates 1+3, so direct FACT rows reconcile fully too.
+    assert by_name["caller_contract"]["promotion"]["schema_delta"] == []
+    # SS-MEASURE reconciles except the paired-delta requirement.
+    assert by_name["gold_rank"]["promotion"]["schema_delta"] == [
+        "matched_delta_when_required"
+    ]
+    assert by_name["cochange_prior"]["promotion"]["implemented_terminal_schema"] == list(
+        diagnosis.TYPED_TERMINAL_GATES["internal_support"]
+    )
     rendered = diagnosis.render_markdown(result)
     assert rendered.count("\n") == 140
     assert '"mean":2.0' in rendered

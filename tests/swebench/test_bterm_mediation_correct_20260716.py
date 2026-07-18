@@ -17,16 +17,33 @@ for path in (ROOT / "src", ROOT / "scripts" / "swebench"):
         sys.path.insert(0, str(path))
 
 import gt_feature_metrics as metrics  # noqa: E402
+from groundtruth.runtime.evidence_envelope import (  # noqa: E402
+    build_observation_binding,
+    observation_binding_to_dict,
+    observation_candidate_id,
+)
 
 
 # --------------------------------------------------------------------------- #
 # builders — exact shapes produced by _control_participation_evidence
 # --------------------------------------------------------------------------- #
 def _rec(feature_id, role, decision, *, seal="a" * 16, chars=12, row_index=0, fact_class="caller_contract"):
+    raw_candidate_id = f"{fact_class}:dedup"
+    candidate_id = observation_candidate_id(raw_candidate_id)
+    binding = observation_binding_to_dict(build_observation_binding(
+        batch_start_iteration=4,
+        parent_policy_sha256="1" * 64,
+        parent_policy_chars=8,
+        action_batch_sha256="2" * 64,
+        candidate_ordinal=0,
+        candidate_kind=f"gateway.{fact_class}",
+        candidate_id=raw_candidate_id,
+    ))
     return {
         "row_index": row_index, "feature_id": feature_id, "role": role,
         "decision": decision, "candidate_sha256_16": seal, "candidate_chars": chars,
-        "candidate_id": f"{fact_class}:dedup", "fact_class": fact_class,
+        "candidate_id": candidate_id, "fact_class": fact_class, "iteration": 4,
+        "observation_binding": binding,
         "temporal_relation": "CONTROL_PRECEDES_DELIVERY",
     }
 
@@ -35,8 +52,47 @@ def _join(rec):
     return {**rec, "delivery_row_index": 99}
 
 
-def _delivered(seal="a" * 16, chars=12):
-    return {"outcome": "delivered", "content_sha256_16": seal, "chars_delivered": chars}
+def _opportunity(fact_class="caller_contract"):
+    """A committed feature.opportunity row for the builders' shared binding
+    (NO-GO defect 4: eligibility grading requires the committed transaction)."""
+    raw_candidate_id = f"{fact_class}:dedup"
+    return {
+        "layer": "feature.opportunity",
+        "candidate_id": observation_candidate_id(raw_candidate_id),
+        "observation_binding": observation_binding_to_dict(build_observation_binding(
+            batch_start_iteration=4,
+            parent_policy_sha256="1" * 64,
+            parent_policy_chars=8,
+            action_batch_sha256="2" * 64,
+            candidate_ordinal=0,
+            candidate_kind=f"gateway.{fact_class}",
+            candidate_id=raw_candidate_id,
+        )),
+    }
+
+
+def _delivered(seal="a" * 16, chars=12, fact_class="caller_contract"):
+    raw_candidate_id = f"{fact_class}:dedup"
+    candidate_id = observation_candidate_id(raw_candidate_id)
+    binding = observation_binding_to_dict(build_observation_binding(
+        batch_start_iteration=4,
+        parent_policy_sha256="1" * 64,
+        parent_policy_chars=8,
+        action_batch_sha256="2" * 64,
+        candidate_ordinal=0,
+        candidate_kind=f"gateway.{fact_class}",
+        candidate_id=raw_candidate_id,
+    ))
+    return {
+        "outcome": "delivered",
+        "iteration": 4,
+        "content_sha256_16": seal,
+        "chars_delivered": chars,
+        "lineage_schema": "gt.feature_lineage.v1",
+        "fact_class": fact_class,
+        "candidate_id": candidate_id,
+        "observation_binding": binding,
+    }
 
 
 def _correctness(rows, records, joins):
@@ -66,14 +122,28 @@ def test_mediator_suppressed_is_correct_iff_bytes_were_not_delivered() -> None:
                         {"GT_CONTRACT_NATIVE": []})["GT_CONTRACT_NATIVE"] is True
 
 
-def test_eligibility_polarity_is_not_machine_derivable_so_it_is_never_graded() -> None:
-    # Correct-or-quiet: a gate's APPLIED may mean "blocked" and its NO_EFFECT means "passed through"
-    # (so the candidate SHOULD be delivered) — polarity is control-specific and not derivable from
-    # the ledger. Grading it by delivery-presence is UNSOUND, so eligibility is always None, never a
-    # guessed True/False (this is the fix for the spurious-False class on novelty/dedup/late-drop).
-    for decision in ("APPLIED", "NO_EFFECT", "SUPPRESSED"):
-        rec = _rec("GT_SS_NOVELTY", "eligibility", decision)
-        assert _correctness([_delivered()], {"GT_SS_NOVELTY": [rec]}, {})["GT_SS_NOVELTY"] is None
+def test_eligibility_polarity_graded_only_through_declared_authority() -> None:
+    # G1 (2026-07-18) supersedes the earlier "never graded" abstention: polarity is now
+    # machine-derivable through the DECLARED authority (_ELIGIBILITY_DECISION_POLARITY),
+    # verified against the runtime's own decision vocabulary. The old test's spirit —
+    # never GUESS polarity from delivery presence — survives as the unknown-combo branch:
+    # any (feature, decision) outside the authority still grades None, never a guess.
+    # Known combos now grade with refereeing semantics:
+    #  - NOVELTY APPLIED (=step_behind, blocks) with the candidate's exact bytes delivered
+    #    anyway → False (the refereeing lie the old abstention could never expose);
+    #  - NOVELTY NO_EFFECT (=novel, permits) with the bytes delivered → confirmed True.
+    blocked = _rec("GT_SS_NOVELTY", "eligibility", "APPLIED")
+    assert _correctness([_opportunity(), _delivered()],
+                        {"GT_SS_NOVELTY": [blocked]}, {})["GT_SS_NOVELTY"] is False
+    permitted = _rec("GT_SS_NOVELTY", "eligibility", "NO_EFFECT")
+    assert _correctness([_opportunity(), _delivered()],
+                        {"GT_SS_NOVELTY": [permitted]}, {})["GT_SS_NOVELTY"] is True
+    # NO-GO defect 4: without the committed opportunity the same block is ungraded.
+    assert _correctness([_delivered()], {"GT_SS_NOVELTY": [blocked]}, {})["GT_SS_NOVELTY"] is None
+    # SUPPRESSED is not in the authority for GT_SS_NOVELTY → correct-or-quiet preserved.
+    unknown = _rec("GT_SS_NOVELTY", "eligibility", "SUPPRESSED")
+    assert _correctness([_opportunity(), _delivered()],
+                        {"GT_SS_NOVELTY": [unknown]}, {})["GT_SS_NOVELTY"] is None
 
 
 def test_mediator_no_effect_that_did_not_join_is_unverifiable_none() -> None:

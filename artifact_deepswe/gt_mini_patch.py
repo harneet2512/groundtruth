@@ -209,7 +209,11 @@ def _control_participation_record(
             binding = _current_observation_binding()
         elif isinstance(binding, dict):
             binding = observation_binding_from_dict(binding)
-        if binding is not None and candidate_id:
+        if binding is not None:
+            if candidate_id:
+                from groundtruth.runtime.evidence_envelope import observation_candidate_id
+                if observation_candidate_id(candidate_id) != binding.candidate_id:
+                    raise ValueError("control candidate_id disagrees with observation binding")
             candidate_id = binding.candidate_id
         record = build_control_participation(
             feature_id=feature_id,
@@ -14503,21 +14507,55 @@ def _begin_observation_batch(
     return state
 
 
+def _prepare_batch_opportunity_bindings(state: dict[str, Any]) -> dict[int, Any]:
+    """Build stable candidate bindings before pure preparation; emit no rows."""
+    try:
+        from groundtruth.runtime.evidence_envelope import build_observation_binding
+    except Exception:  # noqa: BLE001 -- delivery bytes survive audit-engine absence
+        return {}
+    bindings = state.setdefault("opportunity_bindings", {})
+    pool = state.get("pool")
+    if not isinstance(bindings, dict) or not isinstance(pool, list):
+        return {}
+    for ordinal, item in enumerate(pool):
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        candidate, _thunk = item
+        if id(candidate) in bindings:
+            continue
+        candidate_kind = str(getattr(candidate, "kind", "") or "")
+        candidate_id = str(getattr(candidate, "dedup_key", "") or "")
+        if not candidate_kind or not candidate_id:
+            continue
+        try:
+            bindings[id(candidate)] = build_observation_binding(
+                batch_start_iteration=int(state.get("batch_start_iteration") or 0),
+                parent_policy_sha256=str(state.get("parent_policy_sha256") or ""),
+                parent_policy_chars=int(state.get("parent_policy_chars") or 0),
+                action_batch_sha256=str(state.get("action_batch_sha256") or ""),
+                candidate_ordinal=ordinal,
+                candidate_kind=candidate_kind,
+                candidate_id=candidate_id,
+            )
+        except (TypeError, ValueError):
+            continue
+    return bindings
+
+
 def _record_batch_opportunities(
         state: dict[str, Any], plans, planned_winner) -> None:
-    """Bind and optionally persist every formatter-validated candidate opportunity.
+    """Persist every formatter-validated candidate opportunity using its frozen binding.
 
-    Binding is always built because delivery/receipt identity depends on it. Ledger rows
-    remain gated by ``GT_INSEAM_METRICS`` and contain hashes/typed lineage only — never
-    parent prose, actions, payload bytes, or raw candidate kinds.
+    Bindings are built before pure candidate preparation so eligibility controls and the
+    eventual delivery consume the same identity. Rows remain deferred until the formatter
+    succeeds and are gated by ``GT_INSEAM_METRICS``.
     """
     try:
-        from groundtruth.runtime.evidence_envelope import (
-            build_observation_binding, observation_binding_to_dict)
+        from groundtruth.runtime.evidence_envelope import observation_binding_to_dict
     except Exception:  # noqa: BLE001 -- delivery bytes must survive audit-engine absence
         return
     emit = _inseam_metrics_on()
-    bindings = state.setdefault("opportunity_bindings", {})
+    bindings = _prepare_batch_opportunity_bindings(state)
     pool = state.get("pool")
     if not isinstance(bindings, dict) or not isinstance(pool, list):
         return
@@ -14529,19 +14567,9 @@ def _record_batch_opportunities(
         candidate_id = str(getattr(candidate, "dedup_key", "") or "")
         if not candidate_kind or not candidate_id:
             continue
-        try:
-            binding = build_observation_binding(
-                batch_start_iteration=int(state.get("batch_start_iteration") or 0),
-                parent_policy_sha256=str(state.get("parent_policy_sha256") or ""),
-                parent_policy_chars=int(state.get("parent_policy_chars") or 0),
-                action_batch_sha256=str(state.get("action_batch_sha256") or ""),
-                candidate_ordinal=ordinal,
-                candidate_kind=candidate_kind,
-                candidate_id=candidate_id,
-            )
-        except (TypeError, ValueError):
+        binding = bindings.get(id(candidate))
+        if binding is None:
             continue
-        bindings[id(candidate)] = binding
         if not emit:
             continue
         lineage_extra = _feature_lineage_extra(
@@ -14888,12 +14916,29 @@ def _rendered_contains_exact_suffix(rendered, output_index: int, suffix: str) ->
     return False
 
 
+def _batch_candidate_control_identity(candidate) -> "tuple[str, str] | None":
+    """Return registered FACT identity bound to the current policy opportunity."""
+    binding = _current_observation_binding()
+    if binding is None:
+        return None
+    extra = _feature_lineage_extra(getattr(candidate, "lineage", None))
+    extra["candidate_id"] = binding.candidate_id
+    identity = _terminal_delivery_identity(extra)
+    if identity is None or identity[1] != binding.candidate_id:
+        return None
+    return identity
+
+
 def _prepare_batch_delivery(candidate, thunk, spec: dict) -> _BatchDeliveryPlan:
     """Purely finalize exactly what render and commit will share."""
     text = str(spec.get("payload") or "")
     provenance_original = text
     provenance_decision = ""
     plane = getattr(candidate, "plane", "")
+    control_identity = _batch_candidate_control_identity(candidate)
+    control_fact_class, control_candidate_id = (
+        control_identity if control_identity is not None else (None, "")
+    )
     root = _root() if (_ss_provenance_on() or _ss_novelty_on()
                        or _ss_dedup2_on()) else ""
     if plane == _GA_PLANE_LANE_A and _ss_provenance_on():
@@ -14913,10 +14958,16 @@ def _prepare_batch_delivery(candidate, thunk, spec: dict) -> _BatchDeliveryPlan:
         return _BatchDeliveryPlan(
             candidate, thunk, spec["out"], "", bool(spec.get("join")),
             "suppressed", decision)
+    base = spec["out"].get("output") or ""
+    shipped_suffix = (
+        _join_lane_output(base, text)[len(base):]
+        if spec.get("join") else text)
     suppressed, reason = _ss_content_decision(
         candidate.kind, text, root, is_loc=bool(spec.get("is_loc")),
         subject_path=str(spec.get("krel") or ""), event=spec.get("event"),
-        native_text=str(spec["out"].get("output") or ""))
+        native_text=str(spec["out"].get("output") or ""),
+        fact_class=control_fact_class, candidate_id=control_candidate_id,
+        control_candidate_bytes=shipped_suffix)
     if suppressed:
         # Preserve the screened fact host-side so a final step-behind verdict can
         # commit its already-known entity set after formatter success. The plan's
@@ -14953,21 +15004,26 @@ def _prepare_batch_delivery(candidate, thunk, spec: dict) -> _BatchDeliveryPlan:
             "suppressed", decision)
     shadow_key = (decision.get("content_hash") or legacy_hash
                   or str(getattr(candidate, "dedup_key", "") or ""))
-    if _ss_shadow_would_withhold(candidate.kind, shadow_key, text):
-        base = spec["out"].get("output") or ""
-        shipped_suffix = (
-            _join_lane_output(base, text)[len(base):]
-            if spec.get("join") else text)
+    # Passing the JOINED shipped_suffix (not the pre-join text) is behavior-preserving:
+    # assignment is a pure function of (task_id, kind, dedup_key, rate) — text never
+    # enters the hash — and the empty-gate is equivalent because _join_lane_output never
+    # dedups (suffix is empty iff text is empty, pinned by
+    # test_join_suffix_nonempty_for_nonempty_text). The switch only upgrades the CONTROL
+    # RECORD to seal the exact shipped bytes so the grader's seal-join lands.
+    shadow_withheld = (
+        _ss_shadow_would_withhold(
+            candidate.kind, shadow_key, shipped_suffix,
+            fact_class=control_fact_class, candidate_id=control_candidate_id)
+        if control_identity is not None
+        else _ss_shadow_would_withhold(candidate.kind, shadow_key, text)
+    )
+    if shadow_withheld:
         decision.update(
             payload=text, shipped_suffix=shipped_suffix,
             shadow_key=shadow_key, reason="shadow_holdout")
         return _BatchDeliveryPlan(
             candidate, thunk, spec["out"], "", bool(spec.get("join")),
             "holdout", decision)
-    base = spec["out"].get("output") or ""
-    shipped_suffix = (
-        _join_lane_output(base, text)[len(base):]
-        if spec.get("join") else text)
     decision["shipped_suffix"] = shipped_suffix
     return _BatchDeliveryPlan(
         candidate, thunk, spec["out"], shipped_suffix, False,
@@ -15843,6 +15899,10 @@ def _commit_batch_arbitration(state, result, winner, plans) -> object:
             decision = plan.decision
             shadow_key = decision.get("shadow_key", "")
             would_ship = decision["shipped_suffix"]
+            control_identity = _batch_candidate_control_identity(winner)
+            control_fact_class, control_candidate_id = (
+                control_identity if control_identity is not None else (None, "")
+            )
             durable = _runtime_ledger_record(
                 kind=winner.kind, outcome="shadow_holdout",
                 reason="ss_shadow_holdout", chars=0,
@@ -15854,6 +15914,8 @@ def _commit_batch_arbitration(state, result, winner, plans) -> object:
                 "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
                 "APPLIED" if durable else "ERROR",
                 candidate_bytes=would_ship,
+                fact_class=control_fact_class,
+                candidate_id=control_candidate_id,
                 reason="holdout" if durable else "holdout_ledger_write_failed",
             )
             if winner.plane == _GA_PLANE_LANE_A:
@@ -16001,11 +16063,18 @@ def install_observation_batch_commit(agent) -> bool:
             plans = {}
             eligible_pool = []
             suppressed_plans = []
+            bindings = _prepare_batch_opportunity_bindings(state)
             for candidate, thunk in state["pool"]:
                 spec = state["prepared"].get(id(candidate))
                 if not isinstance(spec, dict):
                     raise RuntimeError("batch candidate has no preparation record")
-                plan = _prepare_batch_delivery(candidate, thunk, spec)
+                binding_token = _delivery_observation_context.set(
+                    bindings.get(id(candidate))
+                )
+                try:
+                    plan = _prepare_batch_delivery(candidate, thunk, spec)
+                finally:
+                    _delivery_observation_context.reset(binding_token)
                 plans[id(candidate)] = plan
                 if plan.disposition == "suppressed":
                     suppressed_plans.append(plan)
@@ -16466,7 +16535,9 @@ def _ss_shadow_task_id() -> str:
     return seed + "|" + base
 
 
-def _ss_shadow_would_withhold(kind: str, dedup_key: str, text: str) -> bool:
+def _ss_shadow_would_withhold(
+        kind: str, dedup_key: str, text: str, *,
+        fact_class: "str | None" = None, candidate_id: str = "") -> bool:
     """Pure shadow assignment used by two-phase observation preparation."""
     if not text or not _ss_shadow_on():
         return False
@@ -16479,13 +16550,15 @@ def _ss_shadow_would_withhold(kind: str, dedup_key: str, text: str) -> bool:
         if not withheld:
             _control_participation_record(
                 "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
-                "NO_EFFECT", candidate_bytes=text, reason="deliver",
+                "NO_EFFECT", candidate_bytes=text, fact_class=fact_class,
+                candidate_id=candidate_id, reason="deliver",
             )
         return withheld
     except Exception as exc:  # noqa: BLE001
         _control_participation_record(
             "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
-            "ERROR", candidate_bytes=text,
+            "ERROR", candidate_bytes=text, fact_class=fact_class,
+            candidate_id=candidate_id,
             reason=f"assignment_error:{type(exc).__name__}",
         )
         return False
@@ -16951,13 +17024,20 @@ def _ss_native_contains_claim(kind: str, text: str, native_text: str,
 
 def _ss_content_decision(kind: str, text: str, root: str = "", *,
                          is_loc: bool = False, subject_path: str = "",
-                         event=None, native_text: str = "") -> "tuple[bool, str]":
+                         event=None, native_text: str = "",
+                         fact_class: "str | None" = None,
+                         candidate_id: str = "",
+                         control_candidate_bytes: "str | None" = None
+                         ) -> "tuple[bool, str]":
     """Pure SS-0 suppression decision over a would-be delivery.
 
     Precedence is provenance -> late -> semantic duplicate -> step-behind. A semantic
     repeat must retain that attribution even when its entities were also acquired
     natively. Returns ``(suppress, reason)`` without mutating episode state. Each
     branch is flag-gated -> ``(False, '')`` when all gates are off."""
+    control_bytes = (
+        text if control_candidate_bytes is None else control_candidate_bytes
+    )
     # provenance: suppress WHOLE only when filtering leaves no content (the gateway text
     # is already rendered — a partial bad line stays, correct-or-quiet).
     if _ss_provenance_on():
@@ -16968,7 +17048,8 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
         late = _ss_late_drop_suppresses(kind, text, is_loc=is_loc)
         _control_participation_record(
             "GT_SS_LATE_DROP", "mini_seam.ss_content_decision.late_drop",
-            "APPLIED" if late else "NO_EFFECT", candidate_bytes=text,
+            "APPLIED" if late else "NO_EFFECT", candidate_bytes=control_bytes,
+            fact_class=fact_class, candidate_id=candidate_id,
             reason="late" if late else "on_time",
         )
         if late:
@@ -16977,7 +17058,9 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
         duplicate = _ss_dedup2_suppresses(kind, text, root, is_loc=is_loc)
         _control_participation_record(
             "GT_SS_DEDUP2", "mini_seam.ss_content_decision.semantic_dedup",
-            "APPLIED" if duplicate else "NO_EFFECT", candidate_bytes=text,
+            "APPLIED" if duplicate else "NO_EFFECT",
+            candidate_bytes=control_bytes,
+            fact_class=fact_class, candidate_id=candidate_id,
             reason="semantic_duplicate" if duplicate else "novel_entity_set",
         )
         if duplicate:
@@ -16988,7 +17071,9 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
                 kind, text, root, is_loc=is_loc)
         _control_participation_record(
             "GT_SS_NOVELTY", "mini_seam.ss_content_decision.novelty",
-            "APPLIED" if step_behind else "NO_EFFECT", candidate_bytes=text,
+            "APPLIED" if step_behind else "NO_EFFECT",
+            candidate_bytes=control_bytes,
+            fact_class=fact_class, candidate_id=candidate_id,
             reason="step_behind" if step_behind else "novel_entity",
         )
         if step_behind:

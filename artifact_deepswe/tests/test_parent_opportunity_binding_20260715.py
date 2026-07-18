@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 import gt_mini_patch as g
+from groundtruth.runtime.evidence_envelope import observation_candidate_id
 from groundtruth.runtime.feature_lineage import build_lineage
 
 
@@ -108,7 +109,7 @@ def _wire_lineage_free_candidates(
     monkeypatch.setattr(g, "_ss_novelty_on", lambda: False)
     monkeypatch.setattr(g, "_ss_dedup2_on", lambda: False)
     monkeypatch.setattr(g, "_lane_envelope_on", lambda: False)
-    monkeypatch.setattr(g, "_ss_shadow_would_withhold", lambda *args: False)
+    monkeypatch.setattr(g, "_ss_shadow_would_withhold", lambda *args, **kwargs: False)
 
     def gateway(action, output, command, original_output, *, pool=None):
         candidate = SimpleNamespace(
@@ -321,6 +322,86 @@ def test_registered_typed_lineage_persists_exact_feature_refs(monkeypatch):
     assert rows[0]["attribution_reason"] == "typed_lineage"
 
 
+def test_eligibility_ruling_binds_same_typed_candidate_before_delivery(monkeypatch):
+    rows: list[dict] = []
+    original_content_decision = g._ss_content_decision
+    _wire_lineage_free_candidates(monkeypatch, rows)
+    monkeypatch.setattr(g, "_ss_content_decision", original_content_decision)
+    monkeypatch.setattr(g, "_ss_late_drop_on", lambda: False)
+    monkeypatch.setattr(g, "_ss_dedup2_on", lambda: True)
+    monkeypatch.setattr(g, "_ss_dedup2_suppresses", lambda *args, **kwargs: False)
+    monkeypatch.setattr(g, "_ss_novelty_on", lambda: False)
+
+    lineage = build_lineage(
+        runtime_producer_id="change_surface",
+        evidence_type="new_file_destination",
+        actual_event="post_edit",
+        cap_feature_ids=("GT_CHANGE_SURFACE",),
+    )
+    assert lineage is not None and lineage.producer_registration_match is True
+
+    def gateway(action, output, command, original_output, *, pool=None):
+        candidate = SimpleNamespace(
+            kind="gateway.new_file_destination",
+            plane="gateway",
+            dedup_key="typed-candidate",
+            symbol="src/new.py",
+            lineage=lineage,
+        )
+
+        def thunk():
+            shipped = "\nGT:" + command
+            output["output"] = output["output"] + shipped
+            extra = g._feature_lineage_extra(lineage)
+            extra["candidate_id"] = candidate.dedup_key
+            g._runtime_ledger_record(
+                kind="gateway.new_file_destination",
+                outcome=g._ProductSignalOutcome.DELIVERED,
+                chars=len(shipped),
+                content=shipped,
+                extra=extra,
+            )
+
+        g._append_batch_candidate(
+            pool, candidate, thunk, output, "GT:" + command, join=True,
+        )
+
+    monkeypatch.setattr(g, "_gt_gateway_deliver", gateway)
+    agent = _Agent()
+    assert g.install_observation_batch_commit(agent)
+    rendered = agent.execute_actions({
+        "role": "assistant",
+        "content": "inspect the new-file destination",
+        "extra": {"actions": [{"command": "inspect-build"}]},
+    })
+    assert rendered == [{"role": "tool", "content": "base:inspect-build\nGT:inspect-build"}]
+
+    ruling = next(
+        row for row in rows
+        if row.get("layer") == "control.participation"
+        and row.get("control_ref", {}).get("feature_id") == "GT_SS_DEDUP2"
+    )
+    delivery = next(
+        row for row in rows
+        if row.get("outcome") == "delivered"
+        and row.get("fact_class") == "newfile_precedent"
+    )
+    canonical_candidate_id = observation_candidate_id("typed-candidate")
+    opportunity = next(
+        row for row in rows
+        if row.get("layer") == "feature.opportunity"
+        and row.get("candidate_id") == canonical_candidate_id
+    )
+
+    assert ruling["participation_decision"] == "NO_EFFECT"
+    assert ruling["fact_class"] == "newfile_precedent"
+    assert ruling["candidate_id"] == canonical_candidate_id
+    assert ruling["observation_binding"] == delivery["observation_binding"]
+    assert ruling["observation_binding"] == opportunity["observation_binding"]
+    assert ruling["candidate_sha256_16"] == delivery["content_sha256_16"]
+    assert ruling["candidate_chars"] == delivery["chars_delivered"]
+
+
 def test_typed_lineage_producer_mismatch_fails_closed(monkeypatch):
     lineage = build_lineage(
         runtime_producer_id="wrong_producer",
@@ -393,3 +474,24 @@ def test_policy_observation_id_matches_shared_authority():
         assert g._policy_observation_id(start_iteration, parent_sha, action_sha) == shared(
             start_iteration, parent_sha, action_sha
         )
+
+
+def test_join_suffix_nonempty_for_nonempty_text():
+    """Invariant relied on by the shadow-gate reorder (2026-07-18): _join_lane_output
+    NEVER dedups — it only manages the newline boundary — so the shipped suffix
+    ``_join_lane_output(base, text)[len(base):]`` is non-empty iff ``text`` is non-empty.
+    Therefore passing the JOINED suffix to _ss_shadow_would_withhold has an equivalent
+    empty-gate to the pre-reorder text argument, and assignment outcomes are byte-for-byte
+    unchanged (assignment hashes task/kind/dedup_key only, never text)."""
+    newline = chr(10)
+    bases = ["", "base", "base" + newline, "obs line", "a" + newline + "b" + newline,
+             "x" * 4000]
+    texts = ["GT:hint", newline + "GT:hint", "already" + newline + "present", "x" * 999]
+    for base in bases:
+        for text in texts:
+            joined = g._join_lane_output(base, text)
+            suffix = joined[len(base):]
+            assert suffix != ""
+            assert suffix in (newline + text, text)
+    for base in bases:
+        assert g._join_lane_output(base, "")[len(base):] == ""

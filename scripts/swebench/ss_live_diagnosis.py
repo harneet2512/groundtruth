@@ -22,6 +22,10 @@ from gt_feature_inventory import (
 from feature_opportunity import collect_feature_opportunities
 from consumption_ledger import _typed_lineage_from_row
 from groundtruth.runtime.feature_lineage import FeatureRef, cap_role_for
+from groundtruth.runtime.fact_registry import (
+    FACT_ROLE_INTERNAL_SUPPORT,
+    fact_role_for,
+)
 
 
 DELIVERY_BUCKETS = (
@@ -45,9 +49,27 @@ TYPED_TERMINAL_GATES = {
         "source_contribution_correct", "timing_inherited_from_fact_delivery",
         "source_causal_fair_probe",
     ),
+    # B-TERM (PRODUCT DECISION 1, 2026-07-16): completeness = receipt + mediated_fact_ids +
+    # mediation_correct. ``mediation_causal_fair_probe`` is ENRICHMENT on the writer side
+    # (_infra_control_readiness), deliberately NOT a completeness gate — expecting it here was
+    # the reader/writer schema mismatch that failed every real mediator record (NO-GO defect 1).
     "infra_control": (
         "runtime_member_control_receipt", "mediated_fact_ids",
-        "mediation_correct", "mediation_causal_fair_probe",
+        "mediation_correct",
+    ),
+    # NO-GO defect 6: cochange_prior is INTERNAL SUPPORT, never a model delivery; it is
+    # adjudicated on its own typed terminal, not the delivery gates.
+    "internal_support": (
+        "runtime_support_receipt", "supported_candidate_id",
+        "downstream_decision_join", "support_correct",
+        "support_causal_fair_probe",
+    ),
+    # NO-GO defect 5: PERF rows are adjudicated on the SS-MEASURE terminal (the collector's
+    # _MEASUREMENT_GATE_NAMES), never reduced to their self-declared status alone.
+    "measurement": (
+        "artifact_valid", "metric_structure_valid", "precision_8dp",
+        "formula_provenance", "denominator_provenance",
+        "applicability_resolved", "task_coverage", "aggregate_coverage",
     ),
 }
 
@@ -343,46 +365,54 @@ def classify_bound_delivery_feature(
     )
 
 
-def classify_typed_terminal(record: object, expected_role: str) -> str:
-    """Classify support/control terminals without borrowing delivery gates."""
+def classify_typed_terminal(
+    record: object, expected_role: str, *, label: str | None = None,
+) -> str:
+    """Classify support/control terminals without borrowing delivery gates.
+
+    ``label`` renames the bucket prefix for a role variant that shares the
+    writer's readiness contract (e.g. eligibility controls ride the
+    ``infra_control`` schema but must stay distinguishable in reports).
+    """
+    label = label or expected_role
     if expected_role not in TYPED_TERMINAL_GATES or not isinstance(record, dict):
-        return f"FAILED:{expected_role}:record_contract"
+        return f"FAILED:{label}:record_contract"
     status = record.get("status")
     if status == "UNMEASURED":
         blocker = record.get("blocker")
         detail = blocker if isinstance(blocker, str) and blocker else "record_status"
-        return f"UNMEASURED:{expected_role}:{detail}"
+        return f"UNMEASURED:{label}:{detail}"
     if status != "MEASURED":
-        return f"FAILED:{expected_role}:record_status"
+        return f"FAILED:{label}:record_status"
     if expected_role == "support" and record.get("source") != "acq_provenance":
         return "FAILED:support:source_contract"
 
     readiness = record.get("ss_readiness")
     if not isinstance(readiness, dict) or readiness.get("role") != expected_role:
-        return f"FAILED:{expected_role}:readiness_role"
+        return f"FAILED:{label}:readiness_role"
     gates = readiness.get("gates")
     expected_gates = TYPED_TERMINAL_GATES[expected_role]
     if not isinstance(gates, dict) or tuple(gates) != expected_gates:
-        return f"FAILED:{expected_role}:gate_schema"
+        return f"FAILED:{label}:gate_schema"
     if any(value is not True and value is not False and value is not None
            for value in gates.values()):
-        return f"FAILED:{expected_role}:gate_value"
+        return f"FAILED:{label}:gate_value"
     for gate in expected_gates:
         if gates[gate] is False:
-            return f"FAILED:{expected_role}:{gate}"
+            return f"FAILED:{label}:{gate}"
     for gate in expected_gates:
         if gates[gate] is None:
-            return f"UNMEASURED:{expected_role}:{gate}"
+            return f"UNMEASURED:{label}:{gate}"
 
     live_witness = readiness.get("live_witness")
     ss_live = readiness.get("ss_live")
     if not isinstance(live_witness, bool) or not isinstance(ss_live, bool):
-        return f"FAILED:{expected_role}:terminal_schema"
+        return f"FAILED:{label}:terminal_schema"
     if live_witness and ss_live:
-        return f"{expected_role.upper()}_SS_LIVE"
+        return f"{label.upper()}_SS_LIVE"
     if live_witness or ss_live:
-        return f"FAILED:{expected_role}:terminal_inconsistent"
-    return f"UNMEASURED:{expected_role}:live_witness"
+        return f"FAILED:{label}:terminal_inconsistent"
+    return f"UNMEASURED:{label}:live_witness"
 
 
 def _opportunity_record(record: object) -> dict[str, Any]:
@@ -420,10 +450,16 @@ def classify_cap_control(feature: str, record: object) -> str:
                 "UNMEASURED:eligibility_control:"
                 + str(opportunity.get("reason") or "opportunity_unavailable")
             )
-        # A validated parent-policy anchor proves the candidate opportunity,
-        # not whether the model had already committed to the action.  The
-        # chronological gt-math audit owns that terminal timing verdict.
-        return "UNMEASURED:eligibility_control:chronological_decision_audit_pending"
+        # NO-GO defect 2 (2026-07-18): a BOUND eligibility control is adjudicated on the
+        # G1 typed terminal (receipt + refereed fact ids + declared-effect correctness on
+        # the declared polarity authority), not parked behind a permanent audit-pending
+        # sentinel. Rulings whose (feature, decision) polarity is unregistered, or whose
+        # rows carry no candidate identity (runtime-verified: only dedup2/novelty/shadow/
+        # late_drop seal a candidate today), still surface as named UNMEASURED gates
+        # through the same terminal — never a manufactured pass.
+        return classify_typed_terminal(
+            record, "infra_control", label="eligibility_control",
+        )
     return "FAILED:capability_support:unexpected_control_dispatch"
 
 
@@ -441,13 +477,42 @@ def _task_lifecycle(
     return record if isinstance(record, dict) else {}
 
 
-def _perf_status(value: object) -> str:
+def _perf_status(value: object, *, scope: str = "task") -> str:
+    """Adjudicate one PERF row on the SS-MEASURE terminal (NO-GO defect 5).
+
+    A row's self-declared ``status`` is never sufficient for MEASURED: the
+    collector's measurement readiness (validity, structure, 8dp precision,
+    formula/denominator provenance, applicability, coverage) must hold.
+    ``aggregate_coverage`` is a run-population gate and is adjudicated only at
+    ``scope="run"`` (task-grain rows carry it False by construction). Honest
+    abstentions (NOT_APPLICABLE / RIGHT_CENSORED / UNMEASURED) claim no
+    measurement and pass through unadjudicated.
+    """
     if not isinstance(value, dict):
         return "UNMEASURED"
     status = value.get("status")
-    if status in PERF_BUCKETS[:4]:
+    if status not in PERF_BUCKETS[:4]:
+        return "FAILED"
+    if status != "MEASURED":
         return str(status)
-    return "FAILED"
+    readiness = value.get("ss_readiness")
+    if not isinstance(readiness, dict) or readiness.get("role") != "measurement":
+        return "FAILED:measurement:readiness_role"
+    gates = readiness.get("gates")
+    expected_gates = TYPED_TERMINAL_GATES["measurement"]
+    if not isinstance(gates, dict) or tuple(gates) != expected_gates:
+        return "FAILED:measurement:gate_schema"
+    adjudicated = tuple(
+        gate for gate in expected_gates
+        if scope == "run" or gate != "aggregate_coverage"
+    )
+    for gate in adjudicated:
+        if gates[gate] is False:
+            return f"FAILED:measurement:{gate}"
+    for gate in adjudicated:
+        if gates[gate] is not True:
+            return f"UNMEASURED:measurement:{gate}"
+    return "MEASURED"
 
 
 def _requires_visible_audit(feature: str, family: str) -> bool:
@@ -461,6 +526,127 @@ def _requires_visible_audit(feature: str, family: str) -> bool:
     return family in {"ACQ", "FACT"} or (
         family == "CAP" and cap_role_for(feature) == "byte_owner"
     )
+
+
+_DIRECT_DELIVERY_GATES = (
+    "delivered_byte_proven", "correct_info", "correct_rl_adhered_time",
+    "acknowledged", "leak_zero", "dose_lte_one", "fair_probe",
+)
+
+
+def _implemented_terminal_schema(family: str, feature: str) -> tuple[str, ...]:
+    """The gate vocabulary the executable graders enforce TODAY for this row."""
+    if family == "ACQ":
+        return TYPED_TERMINAL_GATES["support"]
+    if family == "PERF":
+        return TYPED_TERMINAL_GATES["measurement"]
+    if family == "CAP":
+        return (
+            _DIRECT_DELIVERY_GATES
+            if cap_role_for(feature) == "byte_owner"
+            else TYPED_TERMINAL_GATES["infra_control"]
+        )
+    if fact_role_for(feature) == FACT_ROLE_INTERNAL_SUPPORT:
+        return TYPED_TERMINAL_GATES["internal_support"]
+    return _DIRECT_DELIVERY_GATES
+
+
+def _promotion_block(
+    family: str, feature: str, manifest_features: dict[str, Any] | None,
+    manifest_error: str | None,
+) -> dict[str, Any]:
+    """ONE executable promotion authority statement per row (T2-audit finding 5).
+
+    The diagnosis's typed ``*_SS_LIVE`` bucket is an INSTANCE-level terminal verdict on
+    the implemented schema; feature-level promotion is owned by the DECLARED bar
+    (``ss_proof_manifest.live_proof_dependencies``) plus worst-state aggregation over a
+    live one-build population. This offline reader therefore NEVER promotes: it emits
+    ``promoted: false`` with the exact executable delta between the declared bar and the
+    implemented terminal, so no bucket string can be misread as promotion and the split
+    between reader schema and promotion bar is surfaced, not hidden.
+    """
+    if manifest_features is None:
+        return {
+            "authority": "ss_proof_manifest.live_proof_dependencies",
+            "promoted": False,
+            "reason": f"promotion_authority_unavailable:{manifest_error}",
+        }
+    row = manifest_features.get(feature)
+    declared = tuple(
+        (row or {}).get("live_proof_dependencies") or ()
+    ) if isinstance(row, dict) else ()
+    implemented = _implemented_terminal_schema(family, feature)
+    # Evidence-backed NAME reconciliation only — each alias maps a declared dependency to
+    # the implemented gate(s) that PROVABLY enforce it (enforcing site named per entry;
+    # every site was LIPI'd during this session's cluster acceptances). A dependency the
+    # implemented schema does not enforce stays IN the delta — that split is exactly what
+    # this block exists to expose. Deliberately NOT aliased (no enforcing gate exists):
+    # matched_delta_when_required (no paired-delta gate, R2) and both causal-probe
+    # dependencies (enrichment, not gates — the interim-terminal gap, R3).
+    aliases: dict[str, tuple[str, ...]] = {
+        # Gate-4 evaluator IS the assistant-authored receipt ladder level>=2
+        # (receipt_predicates.py, B-cluster).
+        "receipt_ge_2": ("acknowledged",),
+        # CAP byte-proof requires typed ownership lineage (byte_owner_ownership_audit +
+        # _member_delivery_byte_proven); untyped ownership can never satisfy Gate 1.
+        "typed_cap_byte_owner": ("delivered_byte_proven",),
+        # C2 truth join: correct_info is the exact candidate+seal+typed-delivery join.
+        "producer_seal_join": ("correct_info",),
+        # live bit is joined ONLY from run-provenance (detect_live_run, C5) and is
+        # required for every ss_live terminal.
+        "paid_live_trajectory": ("live_witness",),
+        # G1: eligibility declared-effect correctness IS mediation_correct for
+        # eligibility roles, and the defect-4 transaction boundary makes a committed
+        # opportunity a hard precondition of any graded verdict.
+        "eligibility_decision_correct": ("mediation_correct",),
+        "eligibility_opportunity_receipt": ("mediation_correct",),
+        # SS-MEASURE vocabulary: 1:1 name equivalents of _MEASUREMENT_GATE_NAMES
+        # (formula_denominator_valid requires BOTH provenance gates).
+        "live_metric_artifact": ("artifact_valid",),
+        "eight_decimal_precision": ("precision_8dp",),
+        "formula_denominator_valid": ("formula_provenance", "denominator_provenance"),
+        "applicability_classified": ("applicability_resolved",),
+        "task_or_cohort_coverage": ("task_coverage",),
+        "aggregate_complete": ("aggregate_coverage",),
+        # R1 CLOSED BY CODE VERIFICATION (2026-07-18): the FACT runtime-ownership quartet
+        # is enforced INSIDE gates 1+3 — no unregistered/unmatched row can pass them.
+        #   registration: _fact_delivery_byte_proven requires registration_for(evidence_type)
+        #     to resolve and its fact_class/producer to match (gt_feature_metrics ~2968).
+        #   producer: same site requires producer_registration_match is True and
+        #     producer_matches(evidence_type, runtime_producer_id).
+        #   required_event: WRONG_EVENT -> correct_time False, a measured negative
+        #     (chronology_extract ~855; C-cluster adjudicator actual!=required check).
+        #   reactive: the adjudicator's boundary selection ALWAYS consults the registry's
+        #     is_reactive contract — there is no unclassified adjudication path.
+        "runtime_evidence_type_registration": ("delivered_byte_proven",),
+        "runtime_producer_id": ("delivered_byte_proven",),
+        "required_event_match": ("correct_rl_adhered_time",),
+        "reactive_classification": ("correct_rl_adhered_time",),
+    }
+    # live_witness is enforced on every readiness object (ss_live requires it), so it
+    # counts as implemented for alias resolution even though it is a field, not a gate.
+    implemented_set = set(implemented) | {"live_witness"}
+    delta = [
+        dep for dep in declared
+        if dep not in implemented_set
+        and not (
+            dep in aliases
+            and all(target in implemented_set for target in aliases[dep])
+        )
+    ]
+    return {
+        "authority": "ss_proof_manifest.live_proof_dependencies",
+        "promoted": False,
+        "declared_dependencies": list(declared),
+        "implemented_terminal_schema": list(implemented),
+        "schema_delta": delta,
+        "reason": (
+            "declared promotion bar exceeds the implemented terminal schema"
+            if delta else
+            "offline diagnosis never promotes; promotion requires live worst-state "
+            "over the implemented schema on a one-build population"
+        ),
+    }
 
 
 def _run_perf_rows(run_metrics: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1046,6 +1232,18 @@ def diagnose_run(
         task: _task_artifacts(path, metrics)
         for task, (path, metrics) in tasks.items()
     }
+    # T2-audit finding 5: load the declared promotion bar ONCE; a missing/drifted
+    # scoreboard degrades every row to promotion_authority_unavailable (fail-closed),
+    # never to a silent absence of the promotion statement.
+    manifest_features: dict[str, Any] | None
+    manifest_error: str | None
+    try:
+        from ss_proof_manifest import build_ss_proof_manifest
+        manifest_features = build_ss_proof_manifest().get("features") or {}
+        manifest_error = None
+    except Exception as exc:  # noqa: BLE001 -- diagnosis must stay runnable, typed reason kept
+        manifest_features = None
+        manifest_error = f"{type(exc).__name__}: {exc}"
     rows_out: list[dict[str, Any]] = []
     for family, features in inventory.items():
         for feature in features:
@@ -1064,7 +1262,23 @@ def diagnose_run(
                         dict(row) if isinstance(row, dict) else {}
                     )
                 run_measurement = run_perf[feature]
-                run_bucket = _perf_status(run_measurement)
+                # NO-GO defect 5: the run-grain SS-MEASURE readiness lives on the writer's
+                # ss_features run row (gt_feature_metrics ~4371), not on the raw
+                # mandatory_performance row. Join it for adjudication; a MEASURED claim
+                # with no readiness fails closed inside _perf_status.
+                _run_row = (run_metrics.get("ss_features") or {}).get(feature)
+                run_bucket = _perf_status(
+                    {
+                        **run_measurement,
+                        **(
+                            {"ss_readiness": _run_row["ss_readiness"]}
+                            if isinstance(_run_row, dict)
+                            and isinstance(_run_row.get("ss_readiness"), dict)
+                            else {}
+                        ),
+                    },
+                    scope="run",
+                )
             else:
                 for task in task_order:
                     if task in unavailable_tasks:
@@ -1102,6 +1316,17 @@ def diagnose_run(
                             "features", {}
                         ).get(feature, _opportunity_record(feature_row))
                         task_buckets[task] = classify_cap_control(feature, control_row)
+                    elif (
+                        family == "FACT"
+                        and fact_role_for(feature) == FACT_ROLE_INTERNAL_SUPPORT
+                    ):
+                        # NO-GO defect 6: cochange_prior contributes to a localization
+                        # candidate INSIDE the brief — it owns no model delivery, so it is
+                        # adjudicated on its internal-support terminal, never the delivery
+                        # gates classify_bound_delivery_feature enforces.
+                        task_buckets[task] = classify_typed_terminal(
+                            feature_row, "internal_support",
+                        )
                     else:
                         task_opportunity = opportunity.get("features", {}).get(
                             feature, _opportunity_record(feature_row)
@@ -1153,6 +1378,9 @@ def diagnose_run(
                 "task_buckets": task_buckets,
                 "bucket_counts": dict(sorted(Counter(task_buckets.values()).items())),
                 "task_opportunities": task_opportunities,
+                "promotion": _promotion_block(
+                    family, feature, manifest_features, manifest_error,
+                ),
             }
             if family == "PERF":
                 output_row["run_measurement"] = run_measurement

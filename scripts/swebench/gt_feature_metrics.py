@@ -112,10 +112,13 @@ from groundtruth.runtime.control_participation import (  # noqa: E402
 )
 from groundtruth.runtime.evidence_envelope import (  # noqa: E402
     observation_binding_from_dict,
+    observation_binding_to_dict,
+    validate_observation_binding,
 )
 from groundtruth.runtime.fact_registry import (  # noqa: E402
     FACT_ROLE_INTERNAL_SUPPORT,
     fact_role_for,
+    is_registered,
     producer_matches,
     registration_for,
     required_renderer,
@@ -1507,6 +1510,10 @@ def _control_participation_evidence(
             "candidate_id": record.candidate_id,
             "temporal_relation": record.temporal_relation,
             "related_delivery_iteration": record.related_delivery_iteration,
+            "observation_binding": (
+                observation_binding_to_dict(record.observation_binding)
+                if record.observation_binding is not None else None
+            ),
         }
         records[record.feature_id].append(item)
         if (
@@ -1758,6 +1765,7 @@ def _control_participation_evidence(
                 "candidate_id": record.candidate_id,
                 "temporal_relation": record.temporal_relation,
                 "related_delivery_iteration": record.related_delivery_iteration,
+                "observation_binding": None,
             }
             records[record.feature_id].append(item)
             if (
@@ -1807,6 +1815,62 @@ def _control_participation_evidence(
     }
 
 
+# G1 (2026-07-18): the declared polarity authority for eligibility-control decisions.
+# Keyed by (feature_id, participation_decision); values name the refereeing effect on the
+# record's identified candidate. Sourced from the runtime's own decision vocabulary (seam
+# writers), empirically verified against real run ledgers. A combination absent here is
+# deliberately ungraded (correct-or-quiet) — e.g. GT_SS_ELIGIBILITY APPLIED=widened_prefix is
+# an enabling ACTION on the search prefix, not a candidate ruling, and GT_D7_RELATEDNESS rows
+# carry no candidate identity. Extend ONLY with runtime-verified semantics.
+_ELIGIBILITY_DECISION_POLARITY: dict[tuple[str, str], str] = {
+    ("GT_SS_DEDUP2", "APPLIED"): "blocks",       # semantic_duplicate
+    ("GT_SS_DEDUP2", "NO_EFFECT"): "permits",    # novel_entity_set
+    ("GT_SS_NOVELTY", "APPLIED"): "blocks",      # step_behind
+    ("GT_SS_NOVELTY", "NO_EFFECT"): "permits",   # novel_entity
+    ("GT_SS_SHADOW", "APPLIED"): "blocks",       # holdout (bytes withheld from the model)
+    ("GT_SS_SHADOW", "NO_EFFECT"): "permits",    # deliver
+    ("GT_SS_LATE_DROP", "APPLIED"): "blocks",    # late
+    ("GT_SS_LATE_DROP", "NO_EFFECT"): "permits", # on_time
+}
+
+
+def _exact_control_candidate_identity(
+    record: dict[str, Any],
+) -> tuple[Any, str, str, str, int, int] | None:
+    """Return the exact policy-observation candidate identity or fail closed."""
+    candidate_id = record.get("candidate_id")
+    fact_class = record.get("fact_class")
+    seal = record.get("candidate_sha256_16")
+    chars = record.get("candidate_chars")
+    iteration = record.get("iteration")
+    if (
+        not isinstance(candidate_id, str)
+        or not candidate_id
+        or not isinstance(fact_class, str)
+        or not fact_class
+        or not is_registered(fact_class)
+        or not isinstance(seal, str)
+        or not seal
+        or type(chars) is not int
+        or chars <= 0
+        or type(iteration) is not int
+        or iteration < 0
+    ):
+        return None
+    try:
+        binding = observation_binding_from_dict(record.get("observation_binding"))
+    except (TypeError, ValueError):
+        return None
+    if (
+        binding is None
+        or validate_observation_binding(
+            binding, expected_candidate_id=candidate_id,
+        )
+    ):
+        return None
+    return binding, fact_class, candidate_id, seal, chars, iteration
+
+
 def _control_declared_effect_correctness(
     rows: list[dict],
     records: dict[str, list[dict[str, Any]]],
@@ -1832,13 +1896,23 @@ def _control_declared_effect_correctness(
       - MEDIATOR NO_EFFECT that JOINED → ``True`` (the join confirmed the delivered-but-ineffective
         reality the receipt-follows / pre-delivery contract requires); NOT joined → ``None``
         (a "no downstream effect" claim we cannot refute, not necessarily a lie).
-      - ELIGIBILITY controls (novelty/dedup/late-drop/shadow/…): the decision POLARITY is
-        control-specific — a gate's ``NO_EFFECT`` means it PASSED the candidate THROUGH (so the
-        candidate SHOULD be delivered), while ``APPLIED`` may mean it BLOCKED. That polarity is not
-        machine-derivable from the ledger, so delivery-presence cannot soundly grade it → ``None``.
-        (Eligibility controls are structurally incomplete regardless — they never join, so
-        ``mediated_fact_ids`` is ``None`` — hence ``None`` here loses no reachable completeness.)
       - Any record with NO candidate identity (a zero-candidate no-op) → skipped (unverifiable).
+
+    G1 (SS-REFEREE gate-4 ``effect_enforced``, 2026-07-18 — upgrades the P5 "polarity is not
+    machine-derivable" abstention): eligibility polarity IS machine-derivable through the explicit
+    declared authority ``_ELIGIBILITY_DECISION_POLARITY`` keyed by ``(feature_id, decision)`` and
+    aligned with the runtime's own decision vocabulary (verified against real run ledgers:
+    dedup2 APPLIED=semantic_duplicate, novelty APPLIED=step_behind, shadow APPLIED=holdout,
+    late_drop APPLIED=late all BLOCK an identified candidate; their NO_EFFECT forms PERMIT it).
+    Grading, only where the record carries exact candidate identity:
+      - BLOCKS → CORRECT iff the exact suppressed/withheld bytes were NOT delivered
+        (``not _carried``): a blocked candidate whose bytes shipped anyway is the refereeing lie.
+      - PERMITS → confirmed-consistent (``True``) only when the bytes WERE delivered; a permitted
+        candidate that never ships is NOT a lie (the arbiter may out-rank it) → contributes
+        nothing. This asymmetry is the semantic difference from mediator APPLIED (which must
+        join) and is exactly why eligibility must never be relabeled as mediation.
+      - A ``(feature_id, decision)`` absent from the authority stays ungraded (correct-or-quiet
+        preserved for enabling-action rules like widened_prefix whose effect is not a candidate).
 
     Member rollup: ≥1 ``False`` → ``False`` (exposed); else ≥1 ``True`` → ``True``; else ``None``.
     """
@@ -1868,6 +1942,67 @@ def _control_declared_effect_correctness(
             return False
         return (seal, chars) in delivered_seals
 
+    # NO-GO defect 4 (2026-07-18) — the opportunity/control TRANSACTION BOUNDARY. The seam
+    # evaluates eligibility rulings during pure batch preparation, BEFORE the formatter
+    # commits the observation; opportunity rows are persisted only after formatter success.
+    # A ruling whose opportunity was never committed must not be graded: a BLOCKS verdict
+    # would otherwise earn vacuous True credit ("bytes not delivered") when in reality the
+    # whole observation aborted. Grade an eligibility ruling ONLY when its exact validated
+    # observation binding matches a committed feature.opportunity row.
+    committed_opportunity_bindings: list[Any] = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("layer") != "feature.opportunity":
+            continue
+        try:
+            opportunity_binding = observation_binding_from_dict(
+                row.get("observation_binding")
+            )
+        except (TypeError, ValueError):
+            continue
+        if opportunity_binding is None or validate_observation_binding(
+            opportunity_binding
+        ):
+            continue
+        committed_opportunity_bindings.append(opportunity_binding)
+
+    def _opportunity_committed(binding: Any) -> bool:
+        return any(
+            committed == binding for committed in committed_opportunity_bindings
+        )
+
+    def _eligibility_carried(
+        identity: tuple[Any, str, str, str, int, int],
+    ) -> bool:
+        binding, fact_class, candidate_id, seal, chars, control_iteration = identity
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or row.get("outcome") != "delivered"
+                or row.get("lineage_schema") != "gt.feature_lineage.v1"
+                or row.get("fact_class") != fact_class
+                or row.get("candidate_id") != candidate_id
+                or row.get("content_sha256_16") != seal
+                or row.get("chars_delivered") != chars
+                or type(row.get("iteration")) is not int
+                or row["iteration"] < control_iteration
+            ):
+                continue
+            try:
+                delivery_binding = observation_binding_from_dict(
+                    row.get("observation_binding")
+                )
+            except (TypeError, ValueError):
+                continue
+            if (
+                delivery_binding is not None
+                and not validate_observation_binding(
+                    delivery_binding, expected_candidate_id=candidate_id,
+                )
+                and delivery_binding == binding
+            ):
+                return True
+        return False
+
     out: dict[str, bool | None] = {}
     for feature_id, recs in records.items():
         joined_keys = {
@@ -1877,8 +2012,30 @@ def _control_declared_effect_correctness(
         verdicts: list[bool] = []
         for rec in recs:
             decision = rec.get("decision")
-            # eligibility gate polarity is not machine-derivable → never grade it (correct-or-quiet).
-            if rec.get("role") != "mediator" or not _has_identity(rec):
+            if not _has_identity(rec):
+                continue
+            role = rec.get("role")
+            if role == "eligibility":
+                # G1: grade only through the declared polarity authority (correct-or-quiet).
+                polarity = _ELIGIBILITY_DECISION_POLARITY.get(
+                    (str(rec.get("feature_id") or ""), str(decision or ""))
+                )
+                identity = _exact_control_candidate_identity(rec)
+                if identity is None:
+                    continue
+                if not _opportunity_committed(identity[0]):
+                    # NO-GO defect 4: no committed opportunity row for this exact binding —
+                    # the observation may have aborted before commit; a verdict here would
+                    # be vacuous credit. Ungraded (correct-or-quiet), never a pass.
+                    continue
+                carried = _eligibility_carried(identity)
+                if polarity == "blocks":
+                    verdicts.append(not carried)        # blocked candidate shipped → False (lie)
+                elif polarity == "permits" and carried:
+                    verdicts.append(True)               # permitted and shipped → confirmed
+                # permits-but-not-shipped (arbiter may out-rank) and unknown combos → nothing.
+                continue
+            if role != "mediator":
                 continue
             rec_key = (rec.get("row_index"), rec.get("brief_row_index"))
             if decision == "APPLIED":
@@ -2371,9 +2528,20 @@ def _infra_control_readiness(
     eligible_fact_ids = linked("eligible")
     produced_fact_ids = linked("produced")
     delivered_fact_ids = linked("delivered")
-    runtime_linked = sorted({
-        str(join["fact_class"]) for join in joins if join.get("fact_class") in scope
-    })
+    if role == "eligibility":
+        # G1: an eligibility referee never joins a delivery (a permit does not cause one).
+        # Its runtime linkage evidence is the typed record itself: an identified ruling
+        # (candidate seal+chars) naming the fact class it refereed. Rulings without
+        # candidate identity (enabling actions, no-op evaluations) link nothing.
+        runtime_linked = sorted({
+            identity[1] for record in records
+            if (identity := _exact_control_candidate_identity(record)) is not None
+            and identity[1] in scope
+        })
+    else:
+        runtime_linked = sorted({
+            str(join["fact_class"]) for join in joins if join.get("fact_class") in scope
+        })
     control_receipt = bool(joins) if role == "mediator" else bool(records)
     # DECISION 1: the control's declared effect matched the downstream ledger reality. Producer-
     # owned (the ledger is the control's own record), deterministic, and re-verifiable. None when
@@ -2392,8 +2560,13 @@ def _infra_control_readiness(
         "linked_fact_ids": scope,
         "runtime_linked_fact_ids": runtime_linked,
         "runtime_linkage_reason": (
-            "exact typed control candidate joined to downstream FACT delivery"
-            if control_receipt else "exact profile-member control receipt unavailable"
+            (
+                "exact typed eligibility ruling bound to a policy-observation candidate"
+                if role == "eligibility"
+                else "exact typed control candidate joined to downstream FACT delivery"
+            )
+            if control_receipt
+            else "exact profile-member control receipt unavailable"
         ),
         "eligible_fact_ids": eligible_fact_ids,
         "produced_fact_ids": produced_fact_ids,
@@ -2420,6 +2593,13 @@ def _infra_control_readiness(
             "mediation": mediation,
             # Enrichment mirror of the FACT terminal's gate-7 fair_probe: reported, not gating.
             "mediation_causal_fair_probe": mediation_causal_fair_probe,
+            # T2-audit finding 3 (2026-07-18): this terminal is the INTERIM 3-gate schema.
+            # The full SS-REFEREE doctrine (rl_timed_intervention, leak containment,
+            # restraint, protective_value, causal intervention) is the DECLARED promotion
+            # bar (ss_proof_manifest dependencies) and is NOT yet independently gated here.
+            # An INFRA_CONTROL_SS_LIVE instance therefore never implies doctrine-level
+            # promotion; the diagnosis emits the executable missing-dependency delta.
+            "standard": "ss_referee_interim_3gate_v1",
         },
     )
 
