@@ -140,18 +140,39 @@ def canonical_receipt_key(
     )
 
 
-def sealed_receipt_expected(runtime_rows: Iterable[object]) -> bool:
-    """Whether ledger truth requires a durable receipt sidecar.
+# CLASS-2(a): DECLARED per-layer evidence-authority exemptions. Some delivered rows are BOUND
+# and SEALED (chars>0, valid observation_binding, consistent candidate_id) yet carry their
+# consumption proof through a DIFFERENT durable authority than the EvidenceEnvelope receipt
+# sidecar. This is a TYPED contract — each entry names WHERE that layer's proof actually lives —
+# NOT a convenience narrowing to make integrity green: a layer is exempt only because its
+# consumption evidence is provably persisted elsewhere. Any layer NOT listed here still MUST
+# produce an envelope receipt when it delivers bound+sealed bytes.
+_RECEIPT_EXEMPT_LAYERS: dict[str, str] = {
+    # the sealed task-start brief ships as block-lineage receipts, never an EvidenceEnvelope
+    # receipt (gt_agent._substrate_brief writes brief.txt directly; the seam does not seal it).
+    "brief.task": "sealed brief blocks (block-lineage receipts)",
+    # the submit-refusal completion gate persists its consumption proof as a PRODUCER ATTESTATION
+    # (gt_mini_patch._persist_submit_refusal_producer_attestation, W2/B-ATT) re-running the pure
+    # gate BLOCK on its own recorded inputs — it has NO envelope receipt path BY DESIGN, so a
+    # bound+sealed submit_refusal delivered row must NOT demand a missing envelope receipt.
+    "submit_refusal": "producer attestation (W2/B-ATT)",
+}
 
-    Only physical deliveries owned by the envelope receipt path count.  In
-    particular, the sealed task-start brief has no ``EvidenceEnvelope`` receipt and
-    must not create a false missing-sidecar failure.
+
+def sealed_receipt_expected(runtime_rows: Iterable[object]) -> bool:
+    """Whether ledger truth requires a durable EvidenceEnvelope receipt sidecar.
+
+    Only physical deliveries owned by the envelope receipt path count. Layers in
+    :data:`_RECEIPT_EXEMPT_LAYERS` are bound+sealed but prove consumption through a declared
+    alternate authority (the task-start brief via block-lineage receipts; submit_refusal via the
+    producer attestation), so they must not create a false missing-sidecar failure. Every other
+    delivered, bound, sealed, identity-consistent row DOES require an envelope receipt.
     """
 
     for raw in runtime_rows:
         if not isinstance(raw, dict):
             continue
-        if raw.get("layer") == "brief.task" or raw.get("outcome") != "delivered":
+        if raw.get("layer") in _RECEIPT_EXEMPT_LAYERS or raw.get("outcome") != "delivered":
             continue
         try:
             chars = int(raw.get("chars_delivered") or 0)

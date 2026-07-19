@@ -1796,6 +1796,14 @@ def _reduce_brief_to_minimal(text: str) -> str:
         if label in _BRIEF_MINIMAL_DROP_LABELS:
             continue
         if label.startswith("file-entry"):
+            # Ultracode review (2026-07-18): under the RE-SLOT, dropping the calibrated
+            # contention while keeping these ranked "N. path" header lines would ship a
+            # NAKED uncalibrated top-N steer at task_start — worse than both prior forms
+            # and still an unregistered step-0 localization. Under GT_LOC_RESLOT step-0
+            # keeps obligations + orientation-note ONLY; ranked localization arrives at
+            # the registered search boundary. Legacy paths byte-identical.
+            if _loc_reslot_on():
+                continue
             if _keep_contention:
                 continue
             head = b["text"].split("\n", 1)[0]

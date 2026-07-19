@@ -161,7 +161,15 @@ _CLASS_RESOLUTION: dict[str, str] = {
     "l3.contract": "caller_contract",
     "l3b.evidence": "caller_contract",
     "l3.cochange": "cochange_prior",
-    "detect.coherence": "cochange_prior",
+    # detect.coherence is the ss_coherence_v2 collapse steer. The global arbiter projects it
+    # onto the ``causal_chain`` LADDER class (a RANKING axis) alongside the co-change surfaces,
+    # but its FACT identity is NOT cochange — the seam's typed lineage stamps it
+    # ``coherence_collapse`` (gt_mini_patch._LANE_REGISTERED_PRODUCERS), and the registry aliases
+    # ``coherence_collapse`` -> ``recovery`` (fact_registry._EVIDENCE_TYPE_ALIASES). The shadow
+    # cohort join keys on the FACT class the OUTCOME/lineage side records (recovery), so a holdout
+    # draw MUST record ``recovery`` too — recording ``cochange_prior`` here (the ladder grouping)
+    # would file the draw under a cohort the outcome never joins. Mirror the registry, not the ladder.
+    "detect.coherence": "recovery",
     "semantic_drift": "cochange_prior",
     "post_search.localize": "localization",
     "consensus.scope": "localization",

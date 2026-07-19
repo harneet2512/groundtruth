@@ -2887,7 +2887,10 @@ jobs:
               if not isinstance(row, dict)
               or row.get("present_in_tasks") != len(expected)
           )
-          ss_integrity = (integrity.get("ss_128") or {}) if integrity else {}
+          # Ultracode review (2026-07-18): the writer renamed this key ss_128 -> ss_129 at
+          # commit 8ad8e63c6 (gt_feature_metrics ~:4829); reading the dead key made
+          # ss_integrity {} -> publishable False -> GT_EXACT_128_INVALID on EVERY task.
+          ss_integrity = (integrity.get("ss_129") or {}) if integrity else {}
           if (
               not feature
               or feature.get("schema") != "gt.feature_metrics.run.v1"

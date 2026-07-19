@@ -607,6 +607,22 @@ def compute_matched_probes(
         for control in sorted(controls, key=lambda c: c.holdout_row_index):
             # A single opportunity cannot be both DELIVER and HOLDOUT in one realized
             # trajectory.  State/class similarity is stratification, not a matched unit.
+            #
+            # CLASS-5 CONTRACT (verified 2026-07-18 — NOT a bug). ``paired=False`` is load-bearing,
+            # not a stub: a delivered candidate and a distinct withheld candidate are mutually
+            # exclusive randomized units (B1), so ``adjudicate`` receives an UNPAIRED probe and can
+            # never mint a behavioral ``CAUSAL`` here — the ONLY verdict ``_verdict_to_bool`` maps to
+            # fair_probe=True. A behavioral fair_probe=True therefore AWAITS the preregistered
+            # cross-opportunity cohort / exact-state replay arm (the ``paired=True`` counterfactual),
+            # which is deliberately not yet wired. This does NOT leave the safety classes blocked: the
+            # fork-capable classes (``syntax_result`` / ``submit_refusal``) mint their OWN
+            # ``CAUSAL_FORK`` via ``_safety_fork_probes`` — a pure sealed-checkpoint re-derivation that
+            # needs NO holdout row, so it PRODUCES mechanism evidence even at shadow_rate=0 (proven:
+            # test_submit_refusal_fork_is_mechanism_evidence_not_behavior_gate). By B5, that
+            # ``CAUSAL_FORK`` is INTENTIONALLY gate-None (mechanism evidence, never the behavioral
+            # gate — ``_verdict_to_bool``), so we must NOT wire fork verdicts to True. With no holdout
+            # rows (shadow_rate=0) the randomized path is inert and fair_probe stays UNMEASURED — the
+            # correct fail-closed posture.
             paired = False
             probe, artifacts = _build_matched_probe(
                 ec, canon, treatment_outcome, control, treatment_state, paired,

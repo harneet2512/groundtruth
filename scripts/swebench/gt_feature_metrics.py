@@ -90,6 +90,7 @@ from receipt_predicates import (  # noqa: E402  (B-cluster Gate 4 acknowledgment
     acknowledgment_by_fact_class,
 )
 from receipt_sidecar import (  # noqa: E402  (sealed runtime receipt corroboration)
+    _RECEIPT_EXEMPT_LAYERS,  # the DECLARED per-layer receipt-authority exemptions (CLASS-2 a/b)
     canonical_receipt_key,
     join_receipt_evidence,
     load_receipt_sidecar,
@@ -674,16 +675,21 @@ def _receipt_corroborated_acknowledgment(
     for chronology in chronologies:
         fact_class = getattr(chronology, "fact_class", None)
         row_index = getattr(chronology, "ledger_row_index", None)
-        if not isinstance(fact_class, str) or type(row_index) is not int:
+        if type(row_index) is not int or row_index < 0 or row_index >= len(rows):
             continue
-        if row_index < 0 or row_index >= len(rows):
-            continue
-        trajectory_value = acknowledgment_for_row(
-            chronology,
-            messages=messages,
-            ledger_rows=rows,
-            attestations=attestations,
-        )
+        # CLASS-2(b): the receipt IDENTITY join is keyed on the bound+sealed envelope delivery — the
+        # SAME condition as sealed_receipt_expected — NOT on fact_class registration, so the
+        # expectation and the join stay CONSISTENT. An unregistered fact_class means only that there
+        # is no registered acknowledgment predicate to GRADE; it must never turn a real sealed
+        # delivery into a phantom ``receipt_expected_delivery_chronology_missing`` (a row counted
+        # expected but skipped from the join) nor, when the lane path persisted its receipt, an
+        # orphan ``receipt_sidecar_unbound_identity`` (a real receipt whose key was never reconciled).
+        # So EVERY bound+sealed row is reconciled (joined + its key added to expected_keys); only a
+        # REGISTERED class additionally contributes a graded acknowledgment value — a registered
+        # class is byte-identical to before. envelope-owned shares the DECLARED
+        # _RECEIPT_EXEMPT_LAYERS with sealed_receipt_expected so an exempt layer (submit_refusal via
+        # producer attestation, brief.task via block-lineage) is trajectory-only on BOTH sides.
+        registered = isinstance(fact_class, str) and bool(fact_class)
         row = rows[row_index]
         try:
             binding = observation_binding_from_dict(row.get("observation_binding"))
@@ -692,7 +698,7 @@ def _receipt_corroborated_acknowledgment(
         candidate_id = row.get("candidate_id")
         seal = row.get("content_sha256_16")
         envelope_owned = (
-            row.get("layer") != "brief.task"
+            row.get("layer") not in _RECEIPT_EXEMPT_LAYERS
             and binding is not None
             and not validate_observation_binding(binding)
             and isinstance(candidate_id, str)
@@ -700,7 +706,13 @@ def _receipt_corroborated_acknowledgment(
             and isinstance(seal, str)
         )
         if not envelope_owned:
-            values_by_class[fact_class].append(trajectory_value)
+            if registered:
+                values_by_class[fact_class].append(acknowledgment_for_row(
+                    chronology,
+                    messages=messages,
+                    ledger_rows=rows,
+                    attestations=attestations,
+                ))
             continue
 
         envelope_rows_seen += 1
@@ -713,15 +725,27 @@ def _receipt_corroborated_acknowledgment(
                 opportunity_id=binding.opportunity_id,
             )
         except (TypeError, ValueError):
-            values_by_class[fact_class].append(None)
+            if registered:
+                values_by_class[fact_class].append(None)
             join_failures.add("receipt_delivery_identity_invalid")
             continue
+        expected_keys.add(key)
+        if not registered:
+            # sealed delivery with NO registered acknowledgment predicate: identity reconciled
+            # (joined + expected) so it is neither a phantom missing-chronology nor an orphan
+            # unbound-identity — there is simply no registered class to attribute a value to.
+            continue
+        trajectory_value = acknowledgment_for_row(
+            chronology,
+            messages=messages,
+            ledger_rows=rows,
+            attestations=attestations,
+        )
         joined = join_receipt_evidence(
             sidecar,
             key,
             trajectory_corroborated=trajectory_value is True,
         )
-        expected_keys.add(key)
         if trajectory_value is None or not joined.integrity_ok or not joined.matched:
             value: bool | None = None
         elif trajectory_value is False:

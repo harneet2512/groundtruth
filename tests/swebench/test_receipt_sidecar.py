@@ -335,3 +335,104 @@ def test_feature_metrics_rejects_unjoined_expected_delivery_row(
     )
     assert diagnostics["integrity_ok"] is False
     assert diagnostics["missing_expected_ledger_row_indices"] == [1]
+
+
+# --------------------------------------------------------------------------- #
+# CLASS 2 — declared per-layer receipt authority + expectation/join consistency
+# --------------------------------------------------------------------------- #
+def _physical_row(layer: str) -> dict:
+    """A bound + sealed delivered ledger row for ``layer`` (identity-consistent)."""
+    envelope = _receipt_rows()[0]["envelope"]
+    binding = envelope["observation_binding"]
+    return {
+        "layer": layer,
+        "outcome": "delivered",
+        "chars_delivered": 24,
+        "content_sha256_16": envelope["rendered_bytes_hash"][:16],
+        "candidate_id": binding["candidate_id"],
+        "observation_binding": binding,
+    }
+
+
+def test_submit_refusal_layer_is_receipt_exempt_but_lane_still_required() -> None:
+    """CLASS-2(a): a submit_refusal-only task must NOT create a receipt expectation (its proof is
+    the producer attestation), while a lane delivery still MUST. brief.task stays exempt too."""
+    assert not sealed_receipt_expected((_physical_row("submit_refusal"),))
+    assert not sealed_receipt_expected((_physical_row("brief.task"),))
+    assert sealed_receipt_expected((_physical_row("l3.contract"),))
+    # the exemptions are a DECLARED, documented table (typed contract, not a convenience narrowing).
+    from scripts.swebench.receipt_sidecar import _RECEIPT_EXEMPT_LAYERS
+    assert set(_RECEIPT_EXEMPT_LAYERS) == {"brief.task", "submit_refusal"}
+    assert all(reason for reason in _RECEIPT_EXEMPT_LAYERS.values())
+    # MUTATION[drop "submit_refusal" from _RECEIPT_EXEMPT_LAYERS] -> the first assert reddens.
+
+
+def test_unregistered_factclass_delivery_is_reconciled_not_missing_or_orphan(
+    tmp_path: Path,
+) -> None:
+    """CLASS-2(b): a bound+sealed delivery whose fact_class is UNREGISTERED (its chronology is not
+    grade-able) but whose receipt the lane path persisted must be RECONCILED — never a phantom
+    ``receipt_expected_delivery_chronology_missing`` nor an orphan ``receipt_sidecar_unbound_identity``.
+    The expectation (fact-agnostic) and the join must agree; no acknowledgment value is fabricated."""
+    receipt_rows = _receipt_rows()
+    ledger_row = _physical_row("some.unregistered.kind")
+    # the reader resolves this delivery's fact_class to None (unregistered) — the join used to SKIP
+    # it (chronology dropped) while sealed_receipt_expected still counted it expected.
+    chronology = SimpleNamespace(
+        fact_class=None,
+        evidence_type="",
+        ledger_row_index=0,
+        chronology=SimpleNamespace(
+            delivery_index=2, decision_open_index=1,
+            decision_commit_index=3, native_acquisition_index=None,
+        ),
+    )
+    _write(tmp_path / "gt_receipts_task.jsonl", receipt_rows)
+    acknowledged, diagnostics = metrics._receipt_corroborated_acknowledgment(
+        "task",
+        str(tmp_path),
+        [ledger_row],
+        [chronology],
+        {},
+        messages=[],
+        attestations=(),
+    )
+    assert diagnostics["integrity_ok"] is True
+    assert diagnostics["missing_expected_ledger_row_indices"] == []
+    assert diagnostics["unexpected_sidecar_identity_count"] == 0
+    assert "receipt_expected_delivery_chronology_missing" not in diagnostics["join_failure_codes"]
+    assert "receipt_sidecar_unbound_identity" not in diagnostics["join_failure_codes"]
+    # identity reconciled (joined) but NO registered class -> no fabricated acknowledgment value.
+    assert diagnostics["joined_ledger_row_indices"] == [0]
+    assert acknowledged == {}
+    # MUTATION[restore `if not isinstance(fact_class, str): continue` before the join] -> the row is
+    # neither joined nor its receipt reconciled -> BOTH failure codes fire -> integrity_ok False -> RED.
+
+
+def test_registered_factclass_delivery_still_grades_and_joins(tmp_path: Path) -> None:
+    """CLASS-2(b) guard: a REGISTERED class is byte-identical to before — it joins its receipt and
+    grades acknowledgment (the fix only stops UNREGISTERED deliveries from failing the task)."""
+    receipt_rows = _receipt_rows()
+    ledger_row = _physical_row("gateway.def_ref_partition")
+    chronology = SimpleNamespace(
+        fact_class="def_partition",
+        evidence_type="def_ref_partition",
+        ledger_row_index=0,
+        chronology=SimpleNamespace(
+            delivery_index=2, decision_open_index=1,
+            decision_commit_index=3, native_acquisition_index=None,
+        ),
+    )
+    _write(tmp_path / "gt_receipts_task.jsonl", receipt_rows)
+    acknowledged, diagnostics = metrics._receipt_corroborated_acknowledgment(
+        "task",
+        str(tmp_path),
+        [ledger_row],
+        [chronology],
+        {"def_partition": True},
+        messages=[],
+        attestations=(),
+    )
+    assert diagnostics["integrity_ok"] is True
+    assert diagnostics["joined_ledger_row_indices"] == [0]
+    assert acknowledged["def_partition"] is True

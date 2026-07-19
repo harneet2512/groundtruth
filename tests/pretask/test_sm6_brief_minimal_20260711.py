@@ -363,8 +363,11 @@ def test_medium_reslot_drops_localization_header_entirely(monkeypatch):
     assert "<gt-localization" not in red and "</gt-localization" not in red
     assert "confirm the edit target with grep" not in red
     assert "<gt-obligations>" in red and "MUST persist" in red
-    # minimal orientation survives as the file-entry HEADER (which file), not narration.
-    assert "1. src/evidence-first.py (verified_leaf)" in red
+    # Ultracode review (2026-07-18): under reslot the ranked file-entry headers are
+    # dropped too — a naked uncalibrated top-N at task_start is worse than either
+    # prior form. Step-0 = obligations + orientation only; ranked localization rides
+    # the registered search boundary.
+    assert "src/evidence-first.py" not in red
     assert "Callers: one" not in red
 
 
@@ -381,5 +384,17 @@ def test_medium_without_reslot_retains_contention_byte_identical(monkeypatch):
         "</gt-task-brief>",
     ])
     red = v._reduce_brief_to_minimal(full)
-    assert '<gt-localization confidence="medium">' in red
-    assert "confirm the edit target with grep" in red
+    # CLASS-8(b): assert BYTE IDENTITY of the reduced output, not substrings. The reslot-off MEDIUM
+    # path retains the FULL localization contention block VERBATIM (header + candidate line + the
+    # "confirm with grep" hedge) and empties ONLY the redundant task-brief body — so the exact bytes
+    # are ``full`` minus the task-brief restatement line. A stray whitespace, an extra retained line,
+    # or a dropped hedge would slip past a substring check but reddens this exact-string equality.
+    expected = "\n".join([
+        '<gt-localization confidence="medium">',
+        "Candidate edit targets (reason over these — confirm the edit target with grep):",
+        "  1. src/localizer-first.py — guessed_leaf",
+        "</gt-localization>",
+        "<gt-task-brief>",
+        "</gt-task-brief>",
+    ])
+    assert red == expected

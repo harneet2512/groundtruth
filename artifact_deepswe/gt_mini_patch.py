@@ -189,6 +189,7 @@ def _control_participation_record(
     reason: str = "",
     related_delivery_iteration: "int | None" = None,
     observation_binding=None,
+    allow_candidate_mismatch: bool = False,
 ) -> None:
     """Persist one typed CAP-control decision without claiming byte ownership.
 
@@ -196,6 +197,15 @@ def _control_participation_record(
     enabled flags and never writes DeliveryLineage ``feature_ids``.  Candidate
     bytes, when a control gates a render, are represented only by exact length +
     seal; the bytes themselves never enter telemetry.
+
+    ``allow_candidate_mismatch`` (CLASS-6(c)): the STRICT default (False) raises when the
+    passed ``candidate_id`` disagrees with the observation binding, so an UNEXPECTED
+    disagreement fails closed (degrading to the generic ``control_record_error`` failure row).
+    A caller that INTENTIONALLY reports a disagreeing id — the identity-mismatch guards, whose
+    whole purpose is to record that the candidate id did not match — passes True so the NAMED
+    mismatch ``reason`` survives as the row reason (not ``control_record_error:ValueError``); the
+    record's ``candidate_id`` is canonicalized to the binding and the disagreeing input is kept
+    as ``mismatched_candidate_id`` so the audit sees BOTH identities.
     """
     if not _inseam_metrics_on():
         return
@@ -209,11 +219,17 @@ def _control_participation_record(
             binding = _current_observation_binding()
         elif isinstance(binding, dict):
             binding = observation_binding_from_dict(binding)
+        mismatched_candidate_id = ""
         if binding is not None:
             if candidate_id:
                 from groundtruth.runtime.evidence_envelope import observation_candidate_id
                 if observation_candidate_id(candidate_id) != binding.candidate_id:
-                    raise ValueError("control candidate_id disagrees with observation binding")
+                    # CLASS-6(c): strict default fails closed; an intentional mismatch report
+                    # (allow_candidate_mismatch) keeps its NAMED reason and preserves the
+                    # disagreeing input id instead of degrading to control_record_error.
+                    if not allow_candidate_mismatch:
+                        raise ValueError("control candidate_id disagrees with observation binding")
+                    mismatched_candidate_id = candidate_id
             candidate_id = binding.candidate_id
         record = build_control_participation(
             feature_id=feature_id,
@@ -230,7 +246,7 @@ def _control_participation_record(
         payload = participation_to_dict(record)
         participation_decision = payload.pop("decision")
         decision_reason = payload.pop("reason")
-        _ledger_line_direct({
+        row = {
             "layer": "control.participation",
             "event_type": "control_decision",
             "file_path": "",
@@ -244,7 +260,12 @@ def _control_participation_record(
             "participation_decision": participation_decision,
             "decision_reason": decision_reason,
             **payload,
-        })
+        }
+        # CLASS-6(b/c): an intentional mismatch report keeps the binding id as the canonical
+        # candidate_id AND records the disagreeing input id so the audit sees both identities.
+        if mismatched_candidate_id:
+            row["mismatched_candidate_id"] = mismatched_candidate_id
+        _ledger_line_direct(row)
     except Exception as exc:  # noqa: BLE001 -- instrumentation never changes delivery
         # A schema/import failure is not a valid participation decision. Persist a
         # distinct failure row so absence/NO_EFFECT can never be inferred.
@@ -261,7 +282,11 @@ def _control_participation_record(
             observation_binding if isinstance(observation_binding, dict)
             else _current_observation_binding_dict()
         )
-        _ledger_line_direct({
+        _binding_cid = (
+            failure_binding.get("candidate_id")
+            if isinstance(failure_binding, dict) else None
+        )
+        failure_row = {
             "schema": "gt.control_participation.v1",
             "layer": "control.participation",
             "event_type": "control_decision",
@@ -280,11 +305,17 @@ def _control_participation_record(
             "candidate_sha256_16": seal,
             "fact_class": fact_class,
             "candidate_id": (
-                failure_binding.get("candidate_id", candidate_id)
-                if isinstance(failure_binding, dict) else candidate_id
+                _binding_cid if _binding_cid is not None else candidate_id
             ),
             "observation_binding": failure_binding,
-        })
+        }
+        # CLASS-6(b): when the failure is a candidate/binding identity disagreement, the row's
+        # canonical candidate_id (the binding's) would HIDE the disagreeing INPUT id that caused
+        # the failure. Record it explicitly so an audit sees BOTH the binding id and the input
+        # id, not just the binding's. Only added when the input actually differs (the mismatch).
+        if candidate_id and candidate_id != _binding_cid:
+            failure_row["mismatched_candidate_id"] = candidate_id
+        _ledger_line_direct(failure_row)
 
 
 # Native/form controls decide before the global lane arbiter commits a winner.  Keep
@@ -13327,25 +13358,35 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
             dedup_chain=_EPISODE.delivered_dedup,
             observation_binding=_current_observation_binding())
         _gt_gateway_deliveries.append(sealed)
-        # B-14: persist the sealed lane envelope (level-1 delivered) durably.
+        # CLASS-6(a): run the identity-disagreement guard BEFORE any durable persist. A detected
+        # candidate/dedup-key mismatch must poison NOTHING durable — record the typed ERROR control
+        # row (its NAMED reason kept via allow_candidate_mismatch) and return WITHOUT writing a
+        # receipt or producer attestation. Only a CONSISTENT terminal identity (or none to check)
+        # reaches the durable level-1 persist below, so a mismatch can never poison the sidecar.
+        identity = None
+        try:
+            identity = _terminal_delivery_identity(delivery_extra)
+        except Exception:  # noqa: BLE001 -- identity probe cannot change delivery
+            identity = None
+        if identity is not None and identity[1] != (getattr(env, "dedup_key", "") or ""):
+            _control_participation_record(
+                "GT_LANE_ENVELOPE",
+                "mini_seam.lane_envelope.candidate_conversion", "ERROR",
+                candidate_bytes=_shipped,
+                fact_class=identity[0],
+                candidate_id=identity[1],
+                reason="lane_envelope_candidate_identity_mismatch",
+                allow_candidate_mismatch=True)
+            return
+        # B-14: persist the sealed lane envelope (level-1 delivered) durably — identity consistent.
         _persist_receipt(sealed, kind="lane", transition="delivered")
         _persist_lane_producer_attestation(
             kind, target, producer_text if producer_text is not None else text,
             _shipped, getattr(env, "dedup_key", "") or "",
             getattr(sealed, "rendered_bytes_hash", "")[:16])
         try:
-            identity = _terminal_delivery_identity(delivery_extra)
             if identity is not None:
                 fact_class, candidate_id = identity
-                if candidate_id != (getattr(env, "dedup_key", "") or ""):
-                    _control_participation_record(
-                        "GT_LANE_ENVELOPE",
-                        "mini_seam.lane_envelope.candidate_conversion", "ERROR",
-                        candidate_bytes=_shipped,
-                        fact_class=fact_class,
-                        candidate_id=candidate_id,
-                        reason="lane_envelope_candidate_identity_mismatch")
-                    return
                 _control_participation_record(
                     "GT_LANE_ENVELOPE",
                     "mini_seam.lane_envelope.candidate_conversion", "APPLIED",
@@ -15454,8 +15495,20 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
         )
         identity_producer, identity_evidence = _lane_envelope_identity(
             kind, candidate_lineage)
+        # CLASS-3(a): freeze identity over the FINAL delivered payload (single identity from
+        # creation). The commit seals over the GT_SS_PROVENANCE-filtered text
+        # (_commit_prepared_lane -> _seal_lane_delivery ``identity_text``), but this dedup key +
+        # the opportunity binding derived from it froze over the RAW ``text`` -> envelope.dedup_key
+        # (filtered) disagreed with binding.candidate_id (raw) whenever provenance dropped a line,
+        # so the receipt reader rejected the WHOLE sidecar (receipt_candidate_identity_mismatch).
+        # Key over the SAME bytes the delivery seals — identical root + idempotent filter as
+        # _prepare_batch_delivery, which remains the SINGLE owner of the delivery-time filtering +
+        # host-side provenance/l3b records (their semantics unchanged). Byte-identical when the
+        # filter drops nothing or GT_SS_PROVENANCE is off.
+        _identity_text = (
+            _ss_provenance_filter(text, _root()) if _ss_provenance_on() else text)
         key = _ga_unified_dedup_key(
-            identity_producer, identity_evidence, subject_path, "", [text])
+            identity_producer, identity_evidence, subject_path, "", [_identity_text])
         candidate_kkind = (
             "post_search" if kind == "post_search.localize" else kkind)
         cand = _ga_make_candidate(
@@ -15518,9 +15571,19 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
     _steer_lineage = _lane_registered_lineage(kind, event)
     _steer_identity_producer, _steer_identity_evidence = _lane_envelope_identity(
         kind, _steer_lineage)
+    # CLASS-3(b): freeze identity over the FINAL delivered bytes. Under GT_STEER_NATIVE the steer is
+    # transformed at delivery (_deliver_gate_winner -> _steer_native) and the envelope seal keys over
+    # THOSE bytes. Keying the dedup + opportunity binding over the RAW win_text made
+    # envelope.dedup_key (transformed) disagree with binding.candidate_id (raw), so the receipt
+    # reader rejected the whole sidecar (receipt_candidate_identity_mismatch). Prepare the native
+    # bytes HERE and key over them (single identity from creation). _steer_native is idempotent, so
+    # the delivery-time transform no-ops over these already-native bytes (delivered payload ==
+    # sealed bytes == keyed bytes); default-off (GT_STEER_NATIVE) this is byte-identical to win_text.
+    _prepared_steer = (
+        _steer_native(win_text, kind=kind) if _steer_native_on() else win_text)
     key = _ga_unified_dedup_key(
         _steer_identity_producer, _steer_identity_evidence,
-        krel or kf or "", "", [win_text])
+        krel or kf or "", "", [_prepared_steer])
     cand = _ga_make_candidate(_GA_PLANE_STEER, kind, dedup_key=key,
                               target=krel or kf or "", kkind=kkind, seq=len(pool),
                               current_ordinal=_ga_rich_event_ordinal(event),
@@ -15531,8 +15594,6 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
                              event=event, steer_base=steer_base,
                              lineage=_steer_lineage)
         return
-    _prepared_steer = (
-        _steer_native(win_text, kind=kind) if _steer_native_on() else win_text)
     _winner_kind = _last_gate_winner_kind
     _winner_hash = _last_gate_winner_hash
 
@@ -16652,6 +16713,7 @@ def _record_shadow_assignment(
                 "ERROR", candidate_bytes=text, fact_class=canonical,
                 candidate_id=candidate_id,
                 reason="assignment_candidate_identity_mismatch",
+                allow_candidate_mismatch=True,  # CLASS-6(c): keep the NAMED reason, not generic error
             )
             return False
         seal = hashlib.sha256(

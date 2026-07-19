@@ -162,12 +162,24 @@ def test_byte_proof_consumer_rechecks_chronology_identity() -> None:
 def test_registered_block_with_forged_typed_lineage_fails_closed() -> None:
     payload = "OBLIGATIONS:\n- preserve behavior\n"
     trajectory, rows = _fixture(payload, [_block(payload, start=0)])
+    # A REAL block chronology from the VALID rows — the consumer's actual join input (not []).
+    chronologies = extract_block_chronologies(trajectory, rows)
+    assert metrics._block_delivery_byte_proofs(rows, chronologies) == {"obligations"}
+
+    # Forge the block's TYPED LINEAGE to a producer the registry does NOT authorize for
+    # obligations (``spec``), then re-run the CONSUMER with the SAME real chronology. The forged
+    # block therefore flows THROUGH a real chronology; it is the consumer's OWN lineage
+    # re-validation (``validate_block_lineage`` in ``_block_delivery_byte_proofs``) that must
+    # reject it — never merely a vacuous empty-chronology pass.
     forged = deepcopy(rows[0]["block_lineage"][0]["lineage"])
     forged["registered_producer_id"] = "v1r_brief"
     rows[0]["block_lineage"][0]["lineage"] = forged
-
+    assert metrics._block_delivery_byte_proofs(rows, chronologies) == frozenset()
+    # defense in depth: a FRESH extraction over the forged rows also rejects the forgery.
     assert extract_block_chronologies(trajectory, rows) == []
-    assert metrics._block_delivery_byte_proofs(rows, []) == frozenset()
+    # MUTATION[drop the `typed = validate_block_lineage(block)` recheck / its `typed is None` guard
+    # in _block_delivery_byte_proofs] -> the forged block byte-proves "obligations" again against the
+    # valid chronology -> this test goes RED.
 
 
 def test_mutated_block_candidate_identity_cannot_reuse_old_chronology() -> None:
