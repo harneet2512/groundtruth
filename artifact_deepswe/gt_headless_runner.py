@@ -49,9 +49,11 @@ except ImportError:  # injected runner + sibling module inside /opt/gt
 _BRIEF_LEDGER_WRITE_FAILURES = 0
 _COMPOUND_LINEAGE_SCHEMA = "gt.compound_feature_lineage.v1"
 _REGISTERED_BRIEF_BLOCKS = {
-    "localization-header": ("localization", "v1r_brief"),
-    "obligations": ("obligations", "spec"),
-    "expected-behavior": ("obligations", "spec"),
+    # (canonical FACT class, shipped evidence type, runtime producer)
+    "localization-header": (
+        "localization", "brief_localization", "v1r_brief"),
+    "obligations": ("obligations", "obligations", "spec"),
+    "expected-behavior": ("obligations", "obligations", "spec"),
 }
 
 
@@ -126,19 +128,19 @@ def _brief_delivery_extra(e: Mapping[str, str], brief_text: str) -> dict:
                 "opportunity_exempt_reason": "task_start_pre_policy",
             }
             registered = (
-                ("localization", "v1r_brief")
+                ("localization", "brief_localization", "v1r_brief")
                 if label.startswith("file-entry-")
                 else _REGISTERED_BRIEF_BLOCKS.get(label)
             )
             if registered is None:
                 item["lineage_status"] = "UNREGISTERED_BLOCK_LABEL"
             else:
-                expected_fact, producer = registered
+                expected_fact, evidence_type, producer = registered
                 if declared != expected_fact:
                     return {}
                 lineage = build_lineage(
                     runtime_producer_id=producer,
-                    evidence_type=declared, actual_event="task_start")
+                    evidence_type=evidence_type, actual_event="task_start")
                 if lineage is None or not lineage.producer_registration_match:
                     return {}
                 item["lineage_status"] = "REGISTERED"

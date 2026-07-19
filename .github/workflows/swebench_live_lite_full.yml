@@ -843,6 +843,13 @@ jobs:
           # obligations as a plain checklist (no <gt-*> tags). Baseline arm skips this step.
           GT_BRIEF_MINIMAL: '1'
           GT_BRIEF_NATIVE: '1'
+          # R4 (run-#3 pilot, 2026-07-18): the re-slot flag must ALSO be on where the brief
+          # is GENERATED (same smoke-finding class as above) so the minimal reducer retires
+          # the MEDIUM/LOW localization header too — otherwise the step-0 header ships at
+          # task_start and the J3 kernel grades it WRONG_EVENT against the registry's
+          # deliver_by=search_result contract (21/21 live tasks). Localization contention
+          # rides the reactive ranked delivery at the registered boundary instead.
+          GT_LOC_RESLOT: '1'
           # Profile fan-out happens in the later paid-agent step, after V1R brief
           # generation. Activate the existing host-side capability here so the
           # sealed brief_result.json retains per-block acquisition receipts.
@@ -2136,6 +2143,80 @@ jobs:
               fi
             else
               echo "GT_COLLECTION_MISSING:gt_runtime_ledger.jsonl" | tee -a trial_output.log
+            fi
+            # R2: collect the B-14 receipt ladder from the RW surface into both
+            # grader-visible task roots. Absence is legitimate only with no sealed
+            # physical delivery; otherwise emit a structured integrity failure.
+            _GT_RECEIPT_SOURCE="/tmp/gt_out/gt_receipts.jsonl"
+            _GT_RECEIPT_DEST="$TASK_ARTIFACT_ROOT/gt_receipts_${GT_TASK_ID}.jsonl"
+            _GT_RECEIPT_TRIAL_DEST="trial_results/gt_receipts_${GT_TASK_ID}.jsonl"
+            _GT_RECEIPT_MARKER="$TASK_ARTIFACT_ROOT/gt_receipt_integrity_${GT_TASK_ID}.json"
+            _GT_RECEIPT_TRIAL_MARKER="trial_results/gt_receipt_integrity_${GT_TASK_ID}.json"
+            rm -f "$_GT_RECEIPT_MARKER" "$_GT_RECEIPT_TRIAL_MARKER"
+            _GT_SEALED_EXPECTED="$(
+              GT_RECEIPT_LEDGER=/tmp/gt_out/gt_runtime_ledger.jsonl \
+              PYTHONPATH="${GT_WORKSPACE}/src:${GT_WORKSPACE}" python3 - <<'PY'
+          import json
+          import os
+
+          from scripts.swebench.receipt_sidecar import sealed_receipt_expected
+
+          ledger = os.environ["GT_RECEIPT_LEDGER"]
+          rows = []
+          try:
+              with open(ledger, encoding="utf-8") as stream:
+                  for line_number, line in enumerate(stream, start=1):
+                      if not line.strip():
+                          raise ValueError(f"blank_line:{line_number}")
+                      row = json.loads(line)
+                      if not isinstance(row, dict):
+                          raise ValueError(f"non_object:{line_number}")
+                      rows.append(row)
+          except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+              print(f"UNKNOWN:{type(exc).__name__}")
+          else:
+              print("1" if sealed_receipt_expected(rows) else "0")
+          PY
+            )"
+            _gt_receipt_collection_failure() {
+              _GT_RECEIPT_FAILURE_REASON="$1"
+              printf '{"schema":"gt.receipt_collection_integrity.v1","status":"FAIL","reason":"%s"}\n' \
+                "$_GT_RECEIPT_FAILURE_REASON" > "$_GT_RECEIPT_MARKER"
+              cp "$_GT_RECEIPT_MARKER" "$_GT_RECEIPT_TRIAL_MARKER" 2>/dev/null || true
+              echo "GT_COLLECTION_INTEGRITY_FAILURE:${_GT_RECEIPT_FAILURE_REASON}" | tee -a trial_output.log
+            }
+            if [ -s "$_GT_RECEIPT_SOURCE" ]; then
+              if cp "$_GT_RECEIPT_SOURCE" "$_GT_RECEIPT_DEST" \
+                && cp "$_GT_RECEIPT_DEST" "$_GT_RECEIPT_TRIAL_DEST"; then
+                if [[ "$_GT_SEALED_EXPECTED" == UNKNOWN:* ]]; then
+                  _gt_receipt_collection_failure "receipt_expectation_unknown"
+                elif ! GT_RECEIPT_FILE="$_GT_RECEIPT_DEST" \
+                  GT_RECEIPT_EXPECTED="$_GT_SEALED_EXPECTED" \
+                  PYTHONPATH="${GT_WORKSPACE}/src:${GT_WORKSPACE}" python3 - <<'PY'
+          import os
+          from scripts.swebench.receipt_sidecar import load_receipt_sidecar
+
+          sidecar = load_receipt_sidecar(
+              os.environ["GT_RECEIPT_FILE"],
+              sealed_delivery_expected=os.environ["GT_RECEIPT_EXPECTED"] == "1",
+          )
+          raise SystemExit(0 if sidecar.integrity_ok else 1)
+          PY
+                then
+                  _gt_receipt_collection_failure "receipt_sidecar_validation_failed"
+                else
+                  echo "receipt sidecar: harvested and validated" | tee -a trial_output.log
+                fi
+              else
+                rm -f "$_GT_RECEIPT_DEST" "$_GT_RECEIPT_TRIAL_DEST"
+                _gt_receipt_collection_failure "receipt_sidecar_collection_copy_failed"
+              fi
+            elif [ "$_GT_SEALED_EXPECTED" = "1" ]; then
+              _gt_receipt_collection_failure "receipt_sidecar_missing_for_sealed_delivery"
+            elif [[ "$_GT_SEALED_EXPECTED" == UNKNOWN:* ]]; then
+              _gt_receipt_collection_failure "receipt_expectation_unknown"
+            else
+              echo "GT_COLLECTION_NOTE:gt_receipts.jsonl absent with no sealed delivery" | tee -a trial_output.log
             fi
             if [ -s "/tmp/gt_out/gt_runtime_ledger_attestation.json" ]; then
               _GT_ATTEST_DEST="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_attestation_${GT_TASK_ID}.json"

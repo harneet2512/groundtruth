@@ -336,3 +336,50 @@ def test_mutation_2_header_only_reduction_is_load_bearing():
 
     assert "Callers:" in _mutant(_FULL_BRIEF)                                   # mutant leaks
     assert "Callers:" not in v._reduce_brief_to_minimal(_FULL_BRIEF)           # real: dropped
+
+
+def test_medium_reslot_drops_localization_header_entirely(monkeypatch):
+    """R4 (run-#3 pilot, 2026-07-18): under GT_LOC_RESLOT the step-0 brief ships NO
+    localization narration at ANY confidence tier. The registry declares
+    ``localization.deliver_by=search_result`` (T0->T2 re-slot), so a task_start header
+    graded WRONG_EVENT on 21/21 live tasks; the calibrated contention now rides the
+    reactive ranked delivery at the registered boundary. Obligations/scaffold keep."""
+    monkeypatch.setenv("GT_LOC_RESLOT", "1")
+    full = "\n".join([
+        '<gt-localization confidence="medium">',
+        "Candidate edit targets (reason over these — confirm the edit target with grep):",
+        "  1. src/localizer-first.py — guessed_leaf",
+        "  2. src/evidence-first.py — verified_leaf",
+        "</gt-localization>",
+        "<gt-task-brief>",
+        "<gt-obligations>",
+        "- [ ] MUST persist",
+        "</gt-obligations>",
+        "1. src/evidence-first.py (verified_leaf)",
+        "   Callers: one",
+        "</gt-task-brief>",
+    ])
+    red = v._reduce_brief_to_minimal(full)
+    assert "<gt-localization" not in red and "</gt-localization" not in red
+    assert "confirm the edit target with grep" not in red
+    assert "<gt-obligations>" in red and "MUST persist" in red
+    # minimal orientation survives as the file-entry HEADER (which file), not narration.
+    assert "1. src/evidence-first.py (verified_leaf)" in red
+    assert "Callers: one" not in red
+
+
+def test_medium_without_reslot_retains_contention_byte_identical(monkeypatch):
+    """The legacy MEDIUM retention is untouched when the re-slot is off."""
+    monkeypatch.delenv("GT_LOC_RESLOT", raising=False)
+    full = "\n".join([
+        '<gt-localization confidence="medium">',
+        "Candidate edit targets (reason over these — confirm the edit target with grep):",
+        "  1. src/localizer-first.py — guessed_leaf",
+        "</gt-localization>",
+        "<gt-task-brief>",
+        "1. src/localizer-first.py (guessed_leaf)",
+        "</gt-task-brief>",
+    ])
+    red = v._reduce_brief_to_minimal(full)
+    assert '<gt-localization confidence="medium">' in red
+    assert "confirm the edit target with grep" in red

@@ -83,9 +83,17 @@ from chronology_extract import (  # noqa: E402  (SPEC-J3 timing join)
     extract_block_chronologies,
     extract_chronologies,
     timing_by_fact_class,
+    validate_block_lineage,
 )
 from receipt_predicates import (  # noqa: E402  (B-cluster Gate 4 acknowledgment evaluators)
+    acknowledgment_for_row,
     acknowledgment_by_fact_class,
+)
+from receipt_sidecar import (  # noqa: E402  (sealed runtime receipt corroboration)
+    canonical_receipt_key,
+    join_receipt_evidence,
+    load_receipt_sidecar,
+    sealed_receipt_expected,
 )
 from fair_probe_result import (  # noqa: E402  (SPEC-J4 fair-probe result)
     fair_probe_bool_by_fact_class,
@@ -303,7 +311,7 @@ def _member_fair_probe(
 ) -> bool | None:
     """SPEC-J4: a byte-owner member's fair-probe gate = the join over its owned fact class(es).
     True only when every measured owned class is a proven causal result (Cluster-4 B5:
-    CAUSAL/CAUSAL_FORK; CAUSAL_PAIRED is enrichment-only and never sets the gate);
+    behavioral CAUSAL only; mechanism-only CAUSAL_FORK and CAUSAL_PAIRED never set the gate);
     False if any owned class self-localized; None when no owned class is measured (fail-closed)."""
     measured = [
         fair_probe_by_fc.get(fc)
@@ -617,6 +625,175 @@ def _find_named_input(task_dir: str, filename: str, *, locations: int = 3) -> st
             break
         current = parent
     return None
+
+
+def _receipt_corroborated_acknowledgment(
+    task: str,
+    task_dir: str,
+    rows: list[dict],
+    chronologies: list[Any],
+    trajectory_acknowledgment: dict[str, bool | None],
+    *,
+    messages: list[dict],
+    attestations: Iterable[Any] | None,
+) -> tuple[dict[str, bool | None], dict[str, Any]]:
+    """Require sealed sidecar corroboration for envelope-owned delivery rows.
+
+    The sidecar never creates acknowledgment.  A row can pass only when its
+    registry-specific model-authored trajectory predicate is True *and* the exact
+    ``(seal, candidate, observation, opportunity)`` receipt ladder reached
+    ``referenced`` or later.  Compound task-start brief blocks have no envelope
+    receipt path and retain their trajectory-only result.
+    """
+    expected = sealed_receipt_expected(rows)
+    sidecar_path = _find_one(
+        task_dir,
+        f"gt_receipts_{task}.jsonl",
+        "gt_receipts_*.jsonl",
+        "gt_receipts.jsonl",
+    )
+    marker_paths = sorted(
+        glob.glob(os.path.join(task_dir, "gt_receipt_integrity_*.json"))
+    )
+    sidecar = load_receipt_sidecar(
+        sidecar_path or os.path.join(task_dir, f"gt_receipts_{task}.jsonl"),
+        sealed_delivery_expected=expected,
+        collection_integrity_paths=marker_paths,
+    )
+
+    values_by_class: dict[str, list[bool | None]] = defaultdict(list)
+    joins: list[dict[str, Any]] = []
+    join_failures: set[str] = set()
+    envelope_rows_seen = 0
+    expected_row_indices = {
+        index for index, row in enumerate(rows)
+        if sealed_receipt_expected((row,))
+    }
+    joined_row_indices: set[int] = set()
+    expected_keys: set[Any] = set()
+    for chronology in chronologies:
+        fact_class = getattr(chronology, "fact_class", None)
+        row_index = getattr(chronology, "ledger_row_index", None)
+        if not isinstance(fact_class, str) or type(row_index) is not int:
+            continue
+        if row_index < 0 or row_index >= len(rows):
+            continue
+        trajectory_value = acknowledgment_for_row(
+            chronology,
+            messages=messages,
+            ledger_rows=rows,
+            attestations=attestations,
+        )
+        row = rows[row_index]
+        try:
+            binding = observation_binding_from_dict(row.get("observation_binding"))
+        except (TypeError, ValueError):
+            binding = None
+        candidate_id = row.get("candidate_id")
+        seal = row.get("content_sha256_16")
+        envelope_owned = (
+            row.get("layer") != "brief.task"
+            and binding is not None
+            and not validate_observation_binding(binding)
+            and isinstance(candidate_id, str)
+            and bool(candidate_id)
+            and isinstance(seal, str)
+        )
+        if not envelope_owned:
+            values_by_class[fact_class].append(trajectory_value)
+            continue
+
+        envelope_rows_seen += 1
+        joined_row_indices.add(row_index)
+        try:
+            key = canonical_receipt_key(
+                content_sha256_16=seal,
+                candidate_id=candidate_id,
+                observation_id=binding.observation_id,
+                opportunity_id=binding.opportunity_id,
+            )
+        except (TypeError, ValueError):
+            values_by_class[fact_class].append(None)
+            join_failures.add("receipt_delivery_identity_invalid")
+            continue
+        joined = join_receipt_evidence(
+            sidecar,
+            key,
+            trajectory_corroborated=trajectory_value is True,
+        )
+        expected_keys.add(key)
+        if trajectory_value is None or not joined.integrity_ok or not joined.matched:
+            value: bool | None = None
+        elif trajectory_value is False:
+            value = False
+        else:
+            value = joined.acknowledgment_supported
+        values_by_class[fact_class].append(value)
+        join_failures.update(joined.failure_codes)
+        joins.append({
+            "ledger_row_index": row_index,
+            "fact_class": fact_class,
+            "content_sha256_16": key.content_sha256_16,
+            "candidate_id": key.candidate_id,
+            "observation_id": key.observation_id,
+            "opportunity_id": key.opportunity_id,
+            "trajectory_acknowledgment": trajectory_value,
+            "sidecar_transition": joined.sidecar_transition,
+            "matched": joined.matched,
+            "acknowledgment_supported": value,
+            "failure_codes": list(joined.failure_codes),
+        })
+
+    corroborated = dict(trajectory_acknowledgment)
+    for fact_class, values in values_by_class.items():
+        if values and all(value is True for value in values):
+            corroborated[fact_class] = True
+        elif any(value is False for value in values):
+            corroborated[fact_class] = False
+        else:
+            corroborated[fact_class] = None
+    sidecar_failures = [
+        {
+            "code": failure.code,
+            "line_number": failure.line_number,
+            "detail": failure.detail,
+        }
+        for failure in sidecar.failures
+    ]
+    join_failures.update(failure["code"] for failure in sidecar_failures)
+    missing_expected_rows = sorted(expected_row_indices - joined_row_indices)
+    unexpected_sidecar_keys = sorted(
+        {
+            record.key for record in sidecar.records
+            if record.key not in expected_keys
+        }
+    )
+    if missing_expected_rows:
+        join_failures.add("receipt_expected_delivery_chronology_missing")
+    if unexpected_sidecar_keys:
+        join_failures.add("receipt_sidecar_unbound_identity")
+    integrity_ok = (
+        sidecar.integrity_ok
+        and (not expected or sidecar.source_present)
+        and not join_failures
+        and (not expected or envelope_rows_seen > 0)
+    )
+    return corroborated, {
+        "schema": "gt.receipt_corroboration.v1",
+        "sealed_delivery_expected": expected,
+        "sidecar_source": sidecar.source,
+        "sidecar_present": sidecar.source_present,
+        "sidecar_integrity_ok": sidecar.integrity_ok,
+        "envelope_rows_seen": envelope_rows_seen,
+        "expected_ledger_row_indices": sorted(expected_row_indices),
+        "joined_ledger_row_indices": sorted(joined_row_indices),
+        "missing_expected_ledger_row_indices": missing_expected_rows,
+        "unexpected_sidecar_identity_count": len(unexpected_sidecar_keys),
+        "joins": joins,
+        "failures": sidecar_failures,
+        "join_failure_codes": sorted(join_failures),
+        "integrity_ok": integrity_ok,
+    }
 
 
 def _value_honors_8dp(value: Any) -> bool:
@@ -1458,7 +1635,10 @@ def _control_participation_evidence(
             candidate_chars = row.get("candidate_chars")
             candidate_sha256_16 = row.get("candidate_sha256_16")
             candidate_id = row.get("candidate_id")
-            reason = row.get("reason")
+            # Current seam rows reserve the ledger-level reason for row identity and
+            # carry the control's domain reason separately. Historical artifacts put
+            # the domain reason directly in ``reason``.
+            reason = row.get("decision_reason", row.get("reason"))
             if (
                 not isinstance(decision_site, str)
                 or not isinstance(decision, str)
@@ -2290,10 +2470,9 @@ def ss_gate_readiness(
     B-cluster (Gate 4): ``acknowledged`` accepts the registry-specific acknowledgment verdict
     from :mod:`receipt_predicates` (True/False/None). When it is the ``_ACK_UNSET`` sentinel
     (the historical direct callers), the ``acknowledged`` gate falls back to the receipt-ladder
-    value (``receipt_level >= 2``) BYTE-IDENTICALLY. When a definite bool is supplied it REPLACES
-    that value (the registry-specific acknowledgment is the authority); a supplied ``None`` is a
-    caller that measured nothing and also falls back to the receipt ladder (never weaker than the
-    existing signal).
+    value (``receipt_level >= 2``) only for legacy callers that omit the override. Once a
+    registry/sidecar join is supplied, its ``True``/``False``/``None`` result is authoritative;
+    an unmeasured strict join may not be promoted by generic telemetry.
     """
     delivered = _val(lifecycle.get("delivered"))
     truth = _val(lifecycle.get("truth_valid"))
@@ -2318,11 +2497,12 @@ def ss_gate_readiness(
         correct_time = None
 
     receipt_ack = receipt >= 2 if isinstance(receipt, int) else None
-    # B-cluster Gate 4: the registry-specific acknowledgment REPLACES the generic receipt ladder
-    # when the evaluator produced a definite bool; the sentinel / a None result falls back to the
-    # receipt ladder (byte-identical to the historical path; never weaker than the prior signal).
-    if acknowledged is _ACK_UNSET or acknowledged is None:
+    # The generic ladder is a compatibility fallback only when no registry-specific authority
+    # was supplied. A supplied None is explicitly UNMEASURED and must remain so.
+    if acknowledged is _ACK_UNSET:
         acknowledged_gate: bool | None = receipt_ack
+    elif acknowledged is None:
+        acknowledged_gate = None
     else:
         acknowledged_gate = bool(acknowledged)
     gates: dict[str, bool | None] = {
@@ -2797,7 +2977,7 @@ def _acquisition_readiness(
     )
     # SPEC-J4: an ACQ candidate has no fair-probe design of its own — its causal contribution is
     # the causal verdict of the FACT class it supports. INHERIT that verdict ONLY when it is a
-    # concrete bool (Cluster-4 B5: CAUSAL/CAUSAL_FORK -> True, SELF_LOCALIZED -> False;
+    # concrete bool (behavioral CAUSAL -> True, SELF_LOCALIZED -> False;
     # CAUSAL_PAIRED is enrichment-only -> None); an UNMEASURED fact verdict stays None
     # (fail-closed). The inheritance is marked explicitly, never silent.
     supported_fc = record.get("supported_fact_class")
@@ -2946,12 +3126,115 @@ def _member_delivery_byte_proven(
     return False
 
 
+def _block_delivery_byte_proofs(
+    rows: list[dict],
+    block_chronologies: list[Any],
+) -> frozenset[str]:
+    """Fact classes byte-proven through COMPOUND-row blocks — same physical authority.
+
+    RUN-#3 PILOT (2026-07-18, R1): GT ships facts in two physical shapes — a fact alone in
+    its own delivered row, and several facts sharing ONE physical observation (the brief),
+    identified per block in ``block_lineage``. The byte-proof consumer read only top-level
+    row fields, so compound deliveries could never byte-prove any class even when the
+    independent consumption authority seal-joined their bytes (writer truth verified on
+    live artifacts BEFORE this reader changed).
+
+    This path rides the EXISTING block-grain authority (``extract_block_chronologies``):
+    a block qualifies iff its parent row's physical delivery is BOUND and the block's own
+    seal located inside that exact message (both enforced by the extractor), AND the
+    block's OWN lineage satisfies the SAME producer contract the single-fact path enforces
+    (schema, registration resolution, class match, producer match) — never weaker.
+    """
+    lineage_by_key: dict[tuple[int, str], dict[str, Any]] = {}
+    duplicate_keys: set[tuple[int, str]] = set()
+    for row_index, row in enumerate(rows):
+        if (
+            not isinstance(row, dict)
+            or row.get("outcome") != "delivered"
+            or row.get("compound_delivery") is not True
+            or row.get("compound_lineage_schema")
+            != "gt.compound_feature_lineage.v1"
+        ):
+            continue
+        for block in row.get("block_lineage") or []:
+            if isinstance(block, dict) and isinstance(block.get("block_id"), str):
+                key = (row_index, block["block_id"])
+                if key in lineage_by_key:
+                    duplicate_keys.add(key)
+                else:
+                    lineage_by_key[key] = block
+    proofs: set[str] = set()
+    for chron in block_chronologies:
+        block_id = getattr(chron, "block_id", None)
+        row_index = getattr(chron, "ledger_row_index", None)
+        if not isinstance(block_id, str) or not block_id or type(row_index) is not int:
+            continue
+        if getattr(chron, "physical_join_state", None) != "PHYSICAL_DELIVERY_BOUND":
+            continue
+        key = (row_index, block_id)
+        if key in duplicate_keys:
+            continue
+        block = lineage_by_key.get(key)
+        if block is None:
+            continue
+        span = block.get("char_span")
+        block_chars = block.get("chars_delivered")
+        block_seal = block.get("content_sha256_16")
+        block_candidate_id = block.get("candidate_id")
+        declared = block.get("declared_fact_class")
+        typed = validate_block_lineage(
+            block, parent_actual_event=str(rows[row_index].get("event_type") or "")
+        )
+        if (
+            not isinstance(span, list)
+            or len(span) != 2
+            or not all(type(offset) is int for offset in span)
+            or type(block_chars) is not int
+            or block_chars <= 0
+            or block_chars != span[1] - span[0]
+            or not isinstance(block_seal, str)
+            or typed is None
+            or not isinstance(declared, str)
+            or not declared
+            or getattr(chron, "block_lineage_validated", None) is not True
+            or getattr(chron, "block_char_span", None) != tuple(span)
+            or getattr(chron, "block_chars_delivered", None) != block_chars
+            or getattr(chron, "delivery_seal", None) != block_seal
+            or not isinstance(block_candidate_id, str)
+            or not block_candidate_id
+            or getattr(chron, "block_candidate_id", None) != block_candidate_id
+            or getattr(chron, "fact_class", None) != declared
+            or getattr(chron, "evidence_type", None) != typed[0]
+            or not isinstance(getattr(chron, "parent_physical_id", None), str)
+            or not getattr(chron, "parent_physical_id", None)
+            or not isinstance(getattr(chron, "physical_id", None), str)
+            or not getattr(chron, "physical_id", None)
+        ):
+            continue
+        expected_physical_id = (
+            f"{chron.parent_physical_id}:block:{span[0]}:{span[1]}:{block_id}"
+        )
+        if chron.physical_id != expected_physical_id:
+            continue
+        proofs.add(declared)
+    return frozenset(proofs)
+
+
 def _fact_delivery_byte_proven(
     fact_class: str,
     rows: list[dict],
     consumption_ledger: dict[str, Any],
+    *,
+    block_byte_proofs: frozenset[str] = frozenset(),
 ) -> bool:
-    """True only for authoritative typed FACT lineage with an exact seal join."""
+    """True only for authoritative typed FACT lineage with an exact seal join.
+
+    Two physical shapes prove bytes (R1): a single-fact row (top-level typed lineage +
+    row seal join, below) or a compound-row BLOCK (``_block_delivery_byte_proofs`` — the
+    block-grain physical authority + the identical producer contract).
+    """
+    if fact_class in block_byte_proofs:
+        return True
     entries = consumption_ledger.get("entries")
     for row in rows:
         if row.get("outcome") != "delivered":
@@ -3796,20 +4079,40 @@ def collect_task(
     # evaluator and roll up per fact class. Fail-closed: a class with no measured acknowledgment
     # yields None -> the ``acknowledged`` gate then falls back to the receipt ladder (byte-
     # identical to the pre-B path). Uses the SAME chronology/attestation authorities as J3.
+    # R1 (2026-07-18): compute the block-grain chronologies ONCE — they feed BOTH the
+    # Gate-4 acknowledgment join below and the compound-row byte-proof path (gate 1).
+    _block_chronologies = extract_block_chronologies(traj, rows)
+    block_byte_proofs = _block_delivery_byte_proofs(rows, _block_chronologies)
     _ack_chronologies = list(extract_chronologies(traj, rows).values())
-    _ack_chronologies.extend(extract_block_chronologies(traj, rows))
+    _ack_chronologies.extend(_block_chronologies)
     _ack_attestations = load_attestations(task_dir).attestations
-    acknowledgment_by_fc = acknowledgment_by_fact_class(
+    trajectory_acknowledgment_by_fc = acknowledgment_by_fact_class(
         _ack_chronologies,
         messages=(traj.get("messages") if isinstance(traj, dict) else None),
         ledger_rows=rows,
         attestations=_ack_attestations,
     )
+    acknowledgment_by_fc, receipt_corroboration = (
+        _receipt_corroborated_acknowledgment(
+            task,
+            task_dir,
+            rows,
+            _ack_chronologies,
+            trajectory_acknowledgment_by_fc,
+            messages=(
+                traj.get("messages", [])
+                if isinstance(traj, dict) and isinstance(traj.get("messages"), list)
+                else []
+            ),
+            attestations=_ack_attestations,
+        )
+    )
 
     # SPEC-J4: the fair-probe RESULT join. Turn shadow-holdout rows + the chronology into
     # seal-bound MatchedProbe artifacts adjudicated through chronological_adjudication.adjudicate
-    # (the CAUSAL authority), feeding the ``fair_probe`` gate: True for CAUSAL/CAUSAL_FORK
-    # (Cluster-4 B5: CAUSAL_PAIRED is enrichment-only), False for SELF_LOCALIZED, None (absent)
+    # (the CAUSAL authority), feeding the ``fair_probe`` gate: True only for behavioral CAUSAL;
+    # CAUSAL_FORK and CAUSAL_PAIRED are non-behavioral enrichment, False for SELF_LOCALIZED,
+    # None (absent)
     # for UNMEASURED. The paired-baseline path takes the
     # baseline verdict as an INPUT (from the caller); absent -> UNMEASURED. Fail-closed: no
     # holdout + no self-acquire + no baseline input -> every class None -> byte-identical gate.
@@ -3819,6 +4122,7 @@ def collect_task(
     fair_probe_join = join_fair_probes(
         traj, rows,
         output_dir=task_dir, task_label=task,
+        live_witness=_live_witness,
         gt_resolved=_gt_res if isinstance(_gt_res, bool) else None,
         baseline_resolved=_base_res if isinstance(_base_res, bool) else None,
         # Cluster-4 B2/B3: the covering receipt (targeted_covering_failure) needs the
@@ -3943,7 +4247,8 @@ def collect_task(
             fact_readiness[fact_class] = ss_gate_readiness(
                 lifecycle,
                 byte_proven=_fact_delivery_byte_proven(
-                    fact_class, rows, cons_ledger
+                    fact_class, rows, cons_ledger,
+                    block_byte_proofs=block_byte_proofs,
                 ),
                 leak_free=leak_gate,
                 dose_ok=dose_gate,
@@ -3992,6 +4297,12 @@ def collect_task(
     # SPEC-J3: per-fact-class timing verdicts + UNMEASURED reasons feeding the
     # correct_rl_adhered_time gate (the delivery-row chronology join).
     ss_integrity["chronological_timing"] = chronological_timing
+    ss_integrity["receipt_corroboration"] = receipt_corroboration
+    if receipt_corroboration["integrity_ok"] is not True:
+        ss_integrity["required_inputs_complete"] = False
+        missing = set(ss_integrity.get("missing_required_inputs") or [])
+        missing.add("receipt_corroboration_integrity")
+        ss_integrity["missing_required_inputs"] = sorted(missing)
     # SPEC-J4: the fair-probe result join (per-fact-class verdicts + the seal-bound probe audit
     # trail + the sealed sidecar path) feeding the ``fair_probe`` gate.
     ss_integrity["fair_probe"] = fair_probe_join
@@ -4515,7 +4826,7 @@ def aggregate_run(
         "tasks_expected": len(expected),
         "enabled_member_count": len(enabled),
     }
-    integrity["ss_128"] = ss_integrity
+    integrity["ss_129"] = ss_integrity
     return {
         "run_metrics": run_metrics,
         "effects": effects,

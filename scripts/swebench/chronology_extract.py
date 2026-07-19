@@ -44,6 +44,7 @@ from groundtruth.runtime.chronological_adjudication import (
     adjudicate,
 )
 from groundtruth.runtime.fact_registry import EVENTS, registration_for, required_event
+from groundtruth.runtime.feature_lineage import build_lineage, lineage_to_dict
 
 # REUSE the consumption-ledger join machinery (do NOT reinvent a second divergent join).
 from consumption_ledger import (
@@ -90,6 +91,13 @@ class ExtractedChronology:
     # D (block-level chronology): set for a per-BLOCK adjudication carved out of a COMPOUND brief
     # row (one declared_fact_class per block). ``None`` for an ordinary whole-row adjudication.
     block_id: str | None = None
+    block_candidate_id: str | None = None
+    # R1: exact block identity inside the byte-proven parent compound observation. These fields
+    # are populated only after the declared span/length/seal and typed lineage validate.
+    block_char_span: tuple[int, int] | None = None
+    block_chars_delivered: int | None = None
+    parent_physical_id: str | None = None
+    block_lineage_validated: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -601,6 +609,11 @@ def _adjudicate_delivery(
     physical_reason: str | None,
     binding_reason: str | None,
     block_id: str | None,
+    block_candidate_id: str | None,
+    block_char_span: tuple[int, int] | None,
+    block_chars_delivered: int | None,
+    parent_physical_id: str | None,
+    block_lineage_validated: bool,
     messages: list[dict],
     boundaries: dict[str, list[int]],
     ledger_rows: list[dict],
@@ -663,6 +676,11 @@ def _adjudicate_delivery(
         physical_id=physical_id,
         physical_join_state=physical_state,
         block_id=block_id,
+        block_candidate_id=block_candidate_id,
+        block_char_span=block_char_span,
+        block_chars_delivered=block_chars_delivered,
+        parent_physical_id=parent_physical_id,
+        block_lineage_validated=block_lineage_validated,
     )
 
 
@@ -739,6 +757,11 @@ def extract_chronologies(
             physical_reason=physical_reason,
             binding_reason=binding_reason,
             block_id=None,
+            block_candidate_id=None,
+            block_char_span=None,
+            block_chars_delivered=None,
+            parent_physical_id=None,
+            block_lineage_validated=False,
             messages=messages,
             boundaries=boundaries,
             ledger_rows=ledger_rows,
@@ -747,19 +770,142 @@ def extract_chronologies(
     return out
 
 
+_COMPOUND_LINEAGE_SCHEMA = "gt.compound_feature_lineage.v1"
+
+
+def validate_block_lineage(
+    block: dict[str, Any],
+    *,
+    parent_actual_event: str,
+) -> tuple[str, str] | None:
+    """Return the registered evidence type and canonical class for exact typed lineage."""
+    if block.get("lineage_status") != "REGISTERED":
+        return None
+    declared = block.get("declared_fact_class")
+    lineage = block.get("lineage")
+    if not isinstance(declared, str) or not declared or not isinstance(lineage, dict):
+        return None
+    runtime_producer = lineage.get("runtime_producer_id")
+    evidence_type = lineage.get("evidence_type")
+    actual_event = lineage.get("actual_event")
+    features = lineage.get("features")
+    if (
+        not isinstance(runtime_producer, str)
+        or not runtime_producer
+        or not isinstance(evidence_type, str)
+        or not evidence_type
+        or not isinstance(actual_event, str)
+        or actual_event != parent_actual_event
+        or not isinstance(features, list)
+    ):
+        return None
+    cap_feature_ids: list[str] = []
+    for ref in features:
+        if not isinstance(ref, dict):
+            return None
+        category = ref.get("category")
+        feature_id = ref.get("feature_id")
+        if category == "CAP":
+            if not isinstance(feature_id, str) or not feature_id:
+                return None
+            cap_feature_ids.append(feature_id)
+        elif category != "FACT":
+            return None
+    try:
+        rebuilt = build_lineage(
+            runtime_producer_id=runtime_producer,
+            evidence_type=evidence_type,
+            actual_event=actual_event,
+            cap_feature_ids=cap_feature_ids,
+        )
+    except (TypeError, ValueError):
+        return None
+    if (
+        rebuilt is None
+        or rebuilt.producer_registration_match is not True
+        or rebuilt.fact_class != declared
+        or lineage_to_dict(rebuilt) != lineage
+    ):
+        return None
+    return evidence_type, declared
+
+
+def _validated_compound_blocks(
+    row: dict[str, Any],
+    parent_payload: str,
+) -> list[tuple[dict[str, Any], tuple[int, int], str, str]] | None:
+    """Validate the whole compound table before exposing any registered fact block."""
+    if (
+        row.get("compound_delivery") is not True
+        or row.get("compound_lineage_schema") != _COMPOUND_LINEAGE_SCHEMA
+    ):
+        return None
+    blocks = row.get("block_lineage")
+    if not isinstance(blocks, list) or not blocks:
+        return None
+    parent_event = str(row.get("event_type") or "")
+    seen_ids: set[str] = set()
+    last_end = 0
+    validated: list[tuple[dict[str, Any], tuple[int, int], str, str]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            return None
+        block_id = block.get("block_id")
+        candidate_id = block.get("candidate_id")
+        span = block.get("char_span")
+        block_chars = block.get("chars_delivered")
+        block_seal = block.get("content_sha256_16")
+        declared = block.get("declared_fact_class")
+        if (
+            not isinstance(block_id, str)
+            or not block_id
+            or block_id in seen_ids
+            or not isinstance(candidate_id, str)
+            or not candidate_id
+            or not isinstance(span, list)
+            or len(span) != 2
+            or not all(type(offset) is int for offset in span)
+            or span[0] < 0
+            or span[0] >= span[1]
+            or span[1] > len(parent_payload)
+            or span[0] < last_end
+            or type(block_chars) is not int
+            or block_chars <= 0
+            or block_chars != span[1] - span[0]
+            or not _valid_seal(block_seal)
+            or not isinstance(declared, str)
+            or not declared
+        ):
+            return None
+        declared_span = (span[0], span[1])
+        matching_spans = _locate_seal_spans(
+            parent_payload, block_chars, str(block_seal)
+        )
+        if declared_span not in matching_spans:
+            return None
+        seen_ids.add(block_id)
+        last_end = span[1]
+        typed = validate_block_lineage(block, parent_actual_event=parent_event)
+        if typed is None:
+            if block.get("lineage_status") == "REGISTERED":
+                return None
+            continue
+        evidence_type, fact_class = typed
+        validated.append((block, declared_span, evidence_type, fact_class))
+    return validated
+
+
 def extract_block_chronologies(
     trajectory: Any, ledger_rows: list[dict]
 ) -> list[ExtractedChronology]:
-    """D (block-level chronology): adjudicate each fact-bearing BLOCK of a COMPOUND brief row
-    as its OWN declared_fact_class, never collapsing the compound message to one verdict.
+    """Adjudicate each registered block in a physically bound compound brief.
 
-    A compound brief row carries ``block_lineage`` (per-block ``candidate_id`` / ``char_span`` /
-    ``content_sha256_16`` block seal / ``declared_fact_class``). For every block whose
-    declared_fact_class resolves to a registered class, the block's delivery span is located at
-    its BLOCK ``content_sha256_16`` seal against the message the whole-brief physical delivery
-    landed in (never the whole-brief seal), and the block is adjudicated independently. Returns
-    a flat list (each carries ``block_id``); a row with no block_lineage / no bound physical
-    delivery contributes nothing (fail-closed)."""
+    Block identity is conjunctive: unique ``block_id``, exact declared ``char_span`` and
+    ``chars_delivered``, the block seal at that span, the parent physical observation, and an
+    exact current-registry reconstruction of nested typed lineage. The validated lineage's
+    evidence type controls timing; ``declared_fact_class`` remains the canonical FACT class.
+    Any malformed/overlapping compound table fails closed as a whole.
+    """
     messages = _messages(trajectory)
     tool_ordinal_index = _tool_ordinal_to_index(messages)
     consumption = build_consumption_ledger(trajectory, runtime_ledger_rows=ledger_rows)
@@ -782,51 +928,50 @@ def extract_block_chronologies(
         brief_msg_index = physical.get("msg_index")
         if not isinstance(brief_msg_index, int):
             continue
-        # The exact message text the whole-brief delivery landed in — the block seals are
-        # located within THIS buffer (never the whole-brief seal).
-        brief_message = messages[brief_msg_index] if 0 <= brief_msg_index < len(messages) else {}
-        brief_content = brief_message.get("content")
-        brief_content = brief_content if isinstance(brief_content, str) else ""
+        parent_physical_id = physical.get("physical_id")
+        # ``rendered_text`` is the exact parent-row span already claimed by the physical
+        # authority. Block ``char_span`` offsets are relative to this payload, not necessarily
+        # to the larger trajectory message that contains it.
+        brief_content = physical.get("rendered_text")
+        if (
+            not isinstance(parent_physical_id, str)
+            or not parent_physical_id
+            or not isinstance(brief_content, str)
+            or physical.get("content_sha256_16") != row.get("content_sha256_16")
+            or physical.get("chars") != row.get("chars_delivered")
+            or len(brief_content) != row.get("chars_delivered")
+        ):
+            continue
+        validated_blocks = _validated_compound_blocks(row, brief_content)
+        if validated_blocks is None:
+            continue
         file_path = str(row.get("file_path") or "")
 
-        for block in block_lineage:
-            if not isinstance(block, dict):
-                continue
-            declared = block.get("declared_fact_class")
-            block_seal = block.get("content_sha256_16")
-            block_id = block.get("block_id")
-            block_chars = block.get("chars_delivered")
-            if (
-                not isinstance(declared, str)
-                or registration_for(declared) is None
-                or not _valid_seal(block_seal)
-                or not isinstance(block_chars, int)
-                or isinstance(block_chars, bool)
-                or block_chars <= 0
-                or not isinstance(block_id, str)
-                or not block_id
-            ):
-                continue
-            # locate the BLOCK's delivery span at its own seal against the brief message.
-            spans = _locate_seal_spans(brief_content, int(block_chars), str(block_seal))
-            if not spans:
-                continue
-            block_payload = brief_content[spans[0][0]:spans[0][1]]
+        for block, span, evidence_type, fact_class in validated_blocks:
+            block_seal = str(block["content_sha256_16"])
+            block_id = str(block["block_id"])
+            block_chars = int(block["chars_delivered"])
+            block_payload = brief_content[span[0]:span[1]]
             out.append(
                 _adjudicate_delivery(
                     row_index=row_index,
-                    evidence_type=declared,
-                    fact_class=_row_fact_class(declared, {}),
+                    evidence_type=evidence_type,
+                    fact_class=fact_class,
                     actual_event=_normalize_actual_event(str(row.get("event_type") or "")),
                     seal_str=str(block_seal),
                     delivery_index=brief_msg_index,
                     payload=block_payload,
                     file_path=file_path,
                     physical_state=str(PHYSICAL_DELIVERY_BOUND),
-                    physical_id=_physical_block_id(brief_msg_index, spans[0], block_id),
+                    physical_id=_physical_block_id(parent_physical_id, span, block_id),
                     physical_reason=None,
                     binding_reason=None,
                     block_id=block_id,
+                    block_candidate_id=str(block["candidate_id"]),
+                    block_char_span=span,
+                    block_chars_delivered=block_chars,
+                    parent_physical_id=parent_physical_id,
+                    block_lineage_validated=True,
                     messages=messages,
                     boundaries=boundaries,
                     ledger_rows=ledger_rows,
@@ -836,9 +981,11 @@ def extract_block_chronologies(
     return out
 
 
-def _physical_block_id(msg_index: int, span: tuple[int, int], block_id: str) -> str:
+def _physical_block_id(
+    parent_physical_id: str, span: tuple[int, int], block_id: str
+) -> str:
     """Stable per-block physical identity for a compound-brief block adjudication."""
-    return f"m{msg_index}:{span[0]}:{span[1]}:{block_id}"
+    return f"{parent_physical_id}:block:{span[0]}:{span[1]}:{block_id}"
 
 
 def _class_verdict(verdicts: list[str]) -> tuple[str, bool | None]:
@@ -890,6 +1037,12 @@ def adjudicate_deliveries(trajectory: Any, ledger_rows: list[dict]) -> dict[str,
                 "physical_id": ec.physical_id,
                 "physical_join_state": ec.physical_join_state,
                 "block_id": ec.block_id,
+                "block_char_span": (
+                    list(ec.block_char_span) if ec.block_char_span is not None else None
+                ),
+                "block_chars_delivered": ec.block_chars_delivered,
+                "parent_physical_id": ec.parent_physical_id,
+                "block_lineage_validated": ec.block_lineage_validated,
                 "chronology": asdict(ec.chronology),
             }
         )

@@ -421,6 +421,11 @@ REGISTRY: dict[str, FactRegistration] = {r.fact_class: r for r in _REGISTRATIONS
 # type. A dynamic ``missing_role:<role>`` is normalized to its ``missing_role`` base
 # before lookup. Every VALUE must be a real REGISTRY key (enforced in :func:`_self_check`).
 _EVIDENCE_TYPE_ALIASES: dict[str, str] = {
+    # The proactive step-0 orientation is a localization FACT, but it serves the
+    # initial-plan/open-file decision before the agent's first tool action.  Keep
+    # that evidence identity distinct from the reactive ranked-localization
+    # producer, whose honest boundary is search_result.
+    "brief_localization": "localization",
     # Requirement status re-evaluated from fresh edit/test evidence. It is the
     # obligations FACT, but its useful boundary is the current test result rather
     # than the task-start plan boundary (declared below).
@@ -660,6 +665,7 @@ def fact_role_for(fact_class: str) -> str | None:
 # genuinely-correct ``trace_frame`` producer green while still catching a truly wrong-event
 # fact. Keyed by evidence_type (or its ``base:suffix`` base); overrides BOTH earliest+deliver_by.
 _EVIDENCE_TYPE_DELIVER_BY: dict[str, str] = {
+    "brief_localization": EVENT_TASK_START,
     "obligation_unexercised": EVENT_TEST_RESULT,
     "coherence_collapse": EVENT_EDIT_RESULT,
     "trace_frame": EVENT_FAILURE_OBS,
@@ -720,6 +726,7 @@ def registration_for(evidence_type: str) -> "FactRegistration | None":
 # from the canonical class producer.  This is an explicit authority table, not
 # a string/prefix inference: adding a new producer requires registering it here.
 _EVIDENCE_TYPE_PRODUCERS: dict[str, frozenset[str]] = {
+    "brief_localization": frozenset({"v1r_brief"}),
     "obligation_unexercised": frozenset({"spec"}),
     "coherence_collapse": frozenset({"ss_coherence_v2"}),
     "localization": frozenset({"v1r_brief", "ranked_localization"}),

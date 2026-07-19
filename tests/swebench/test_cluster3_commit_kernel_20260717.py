@@ -35,6 +35,10 @@ from chronology_extract import (  # noqa: E402
     extract_chronologies,
     timing_by_fact_class,
 )
+from groundtruth.runtime.feature_lineage import (  # noqa: E402
+    build_lineage,
+    lineage_to_dict,
+)
 
 
 def _seal(text: str) -> str:
@@ -181,6 +185,12 @@ def _compound_brief_fixture() -> tuple[dict, list[dict]]:
             "chars_delivered": len(obl_block),
             "content_sha256_16": _seal(obl_block),
             "declared_fact_class": "obligations",
+            "lineage_status": "REGISTERED",
+            "lineage": lineage_to_dict(build_lineage(
+                runtime_producer_id="spec",
+                evidence_type="obligations",
+                actual_event="task_start",
+            )),
         },
         {
             "block_id": "b-loc",
@@ -190,6 +200,12 @@ def _compound_brief_fixture() -> tuple[dict, list[dict]]:
             "chars_delivered": len(loc_block),
             "content_sha256_16": _seal(loc_block),
             "declared_fact_class": "localization",
+            "lineage_status": "REGISTERED",
+            "lineage": lineage_to_dict(build_lineage(
+                runtime_producer_id="v1r_brief",
+                evidence_type="localization",
+                actual_event="task_start",
+            )),
         },
     ]
     brief_row = {
@@ -201,6 +217,8 @@ def _compound_brief_fixture() -> tuple[dict, list[dict]]:
         "chars_delivered": len(brief_text),
         "iteration": 0,
         "content_sha256_16": _seal(brief_text),
+        "compound_delivery": True,
+        "compound_lineage_schema": "gt.compound_feature_lineage.v1",
         "block_lineage": block_lineage,
     }
     messages = [

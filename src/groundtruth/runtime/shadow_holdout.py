@@ -134,6 +134,7 @@ _CLASS_RESOLUTION: dict[str, str] = {
     # --- canonical fact_registry classes (identity) ---
     "obligations": "obligations",
     "localization": "localization",
+    "brief_localization": "localization",
     "def_partition": "def_partition",
     "caller_contract": "caller_contract",
     "signature_delta": "signature_delta",

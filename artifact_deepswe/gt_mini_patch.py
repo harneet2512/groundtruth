@@ -229,6 +229,7 @@ def _control_participation_record(
         )
         payload = participation_to_dict(record)
         participation_decision = payload.pop("decision")
+        decision_reason = payload.pop("reason")
         _ledger_line_direct({
             "layer": "control.participation",
             "event_type": "control_decision",
@@ -241,6 +242,7 @@ def _control_participation_record(
             "chars_delivered": 0,
             "iteration": payload.pop("iteration"),
             "participation_decision": participation_decision,
+            "decision_reason": decision_reason,
             **payload,
         })
     except Exception as exc:  # noqa: BLE001 -- instrumentation never changes delivery
@@ -9463,16 +9465,18 @@ def _record_cross_plane_final_controls(candidate, final_bytes: str) -> None:
 
 def _record_lane_provenance_control(
         kind: str, original_text: str, final_text: str, target: str,
-        decision: str) -> None:
+        decision: str, *, fact_class: "str | None" = None,
+        candidate_id: str = "") -> None:
     try:
         from groundtruth.runtime.fact_registry import is_registered
         from groundtruth.runtime.global_arbiter import class_of_kind
-        fact_class = class_of_kind(kind)
+        fact_class = fact_class or class_of_kind(kind)
         if not fact_class or not is_registered(fact_class):
             return
-        candidate_id = _lane_final_extra(
-            kind, final_text or original_text, target).get(
-            "candidate_id", "")
+        if not candidate_id:
+            candidate_id = _lane_final_extra(
+                kind, final_text or original_text, target).get(
+                "candidate_id", "")
         if not candidate_id:
             return
         _control_participation_record(
@@ -12568,9 +12572,17 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 extra=_delivery_extra,
             )
             if _provenance_decision:
+                _provenance_identity = _terminal_delivery_identity(
+                    _delivery_extra)
                 _record_lane_provenance_control(
                     kind, _provenance_original, text, subject_path,
-                    _provenance_decision)
+                    _provenance_decision,
+                    fact_class=(
+                        _provenance_identity[0]
+                        if _provenance_identity is not None else None),
+                    candidate_id=(
+                        _provenance_identity[1]
+                        if _provenance_identity is not None else ""))
             # SS (features 2/7): record the delivered entity set + queue the ack watch.
             _ss_record_delivered(
                 kind, text, _ss_root, terminal_text=_shipped_suffix,
@@ -12672,9 +12684,16 @@ def _commit_prepared_lane(
         content=shipped_suffix,
         extra=delivery_extra)
     if decision.get("provenance_decision"):
+        provenance_identity = _terminal_delivery_identity(delivery_extra)
         _record_lane_provenance_control(
             kind, decision.get("provenance_original", text), shipped_suffix,
-            krel or "", decision["provenance_decision"])
+            krel or "", decision["provenance_decision"],
+            fact_class=(
+                provenance_identity[0]
+                if provenance_identity is not None else None),
+            candidate_id=(
+                provenance_identity[1]
+                if provenance_identity is not None else ""))
     _ss_record_delivered(
         kind, text, decision.get("root", ""), terminal_text=shipped_suffix,
         delivery_extra=delivery_extra)
@@ -12883,8 +12902,22 @@ def _gt_deliver_append(
 # touches neither the sealed list nor the model-facing bytes (byte-identical splice).
 # ---------------------------------------------------------------------------
 def _receipts_sidecar_path() -> str:
-    """The durable receipt-ledger path ``$GT_CERT_DIR/gt_receipts.jsonl`` — or ``""``
-    when GT_CERT_DIR is unset (graceful no-op: no cert dir, nothing to persist)."""
+    """The durable receipt-ledger path, on a WRITABLE surface.
+
+    RUN-#3 PILOT DISCOVERY (2026-07-18): in-container GT_CERT_DIR is the READ-ONLY cert
+    mount (/gt_artifacts (ro)), so every receipt append raised OSError and the ladder's
+    consumption evidence was lost (typed attestation_persist_error rows, all tasks).
+    Prefer the run's RW out surface — GT_C_OUT, else the runtime-ledger's directory —
+    and keep GT_CERT_DIR only as the host/dev fallback. ``""`` when nothing is set
+    (graceful no-op)."""
+    out_dir = os.environ.get("GT_C_OUT", "")
+    if out_dir:
+        return os.path.join(out_dir, "gt_receipts.jsonl")
+    ledger = os.environ.get("GT_RUNTIME_LEDGER", "")
+    if ledger:
+        parent = os.path.dirname(ledger)
+        if parent:
+            return os.path.join(parent, "gt_receipts.jsonl")
     cert = os.environ.get("GT_CERT_DIR", "")
     if not cert:
         return ""
@@ -13305,6 +13338,13 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
             if identity is not None:
                 fact_class, candidate_id = identity
                 if candidate_id != (getattr(env, "dedup_key", "") or ""):
+                    _control_participation_record(
+                        "GT_LANE_ENVELOPE",
+                        "mini_seam.lane_envelope.candidate_conversion", "ERROR",
+                        candidate_bytes=_shipped,
+                        fact_class=fact_class,
+                        candidate_id=candidate_id,
+                        reason="lane_envelope_candidate_identity_mismatch")
                     return
                 _control_participation_record(
                     "GT_LANE_ENVELOPE",
@@ -14948,7 +14988,8 @@ def _prepare_batch_delivery(candidate, thunk, spec: dict) -> _BatchDeliveryPlan:
         if plane == _GA_PLANE_LANE_A and _ss_provenance_on() and provenance_original:
             _record_lane_provenance_control(
                 candidate.kind, provenance_original, "", str(spec.get("krel") or ""),
-                "SUPPRESSED")
+                "SUPPRESSED", fact_class=control_fact_class,
+                candidate_id=control_candidate_id)
         decision = {"payload": "", "reason": "empty", "root": root}
         return _BatchDeliveryPlan(
             candidate, thunk, spec["out"], "", bool(spec.get("join")),
@@ -15400,8 +15441,19 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
                     except Exception:  # noqa: BLE001 — rollback is best-effort
                         pass
                 continue
+        # Candidate identity is fixed ONCE, before opportunity binding.  The same
+        # producer/evidence lineage then flows through arbitration, delivery,
+        # controls, and receipts.  Previously the candidate key used the legacy
+        # ``kind/kind`` identity while the commit path independently upgraded
+        # l3.contract to ``contract_map/caller_contract``.  That created two IDs
+        # for one physical candidate; replacing the later ID merely hid the
+        # disagreement.  Resolve the authoritative lineage here instead.
+        candidate_lineage = (
+            item_lineage
+            or _lane_registered_lineage(kind, item_event, text=text)
+        )
         identity_producer, identity_evidence = _lane_envelope_identity(
-            kind, item_lineage)
+            kind, candidate_lineage)
         key = _ga_unified_dedup_key(
             identity_producer, identity_evidence, subject_path, "", [text])
         candidate_kkind = (
@@ -15409,7 +15461,7 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
         cand = _ga_make_candidate(
             _GA_PLANE_LANE_A, kind, dedup_key=key,
             target=subject_path, kkind=candidate_kkind, seq=len(pool),
-            lineage=(item_lineage or _lane_registered_lineage(kind, item_event)))
+            lineage=candidate_lineage)
         if cand is None:
             # engine absent -> deliver inline (degrade to the pre-SM-5 plane behavior,
             # never a silent drop). Consistent with the steer/gateway add-helpers.
@@ -15463,8 +15515,12 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
                 reason=_reason, file_path=krel or kf or "", event=event)
             _rearm_latches({kind}, kkind=kkind, kf=kf, krel=krel)
             return
-    key = _ga_unified_dedup_key(kind, kind, krel or kf or "", "", [win_text])
     _steer_lineage = _lane_registered_lineage(kind, event)
+    _steer_identity_producer, _steer_identity_evidence = _lane_envelope_identity(
+        kind, _steer_lineage)
+    key = _ga_unified_dedup_key(
+        _steer_identity_producer, _steer_identity_evidence,
+        krel or kf or "", "", [win_text])
     cand = _ga_make_candidate(_GA_PLANE_STEER, kind, dedup_key=key,
                               target=krel or kf or "", kkind=kkind, seq=len(pool),
                               current_ordinal=_ga_rich_event_ordinal(event),
@@ -15895,6 +15951,23 @@ def _commit_batch_arbitration(state, result, winner, plans) -> object:
         state.get("opportunity_bindings", {}).get(id(winner))
     )
     try:
+        # Record the randomized cohort assignment only now: the formatter has
+        # succeeded, arbitration selected this exact eligible winner, and no
+        # delivery/holdout outcome has yet been committed. Candidate-level
+        # preparation happens earlier and must never populate the causal cohort.
+        if plan.disposition in {"deliver", "holdout"}:
+            assignment_identity = _batch_candidate_control_identity(winner)
+            assignment_fact_class, assignment_candidate_id = (
+                assignment_identity
+                if assignment_identity is not None else (None, "")
+            )
+            _record_shadow_assignment(
+                winner.kind,
+                str(plan.decision.get("shipped_suffix") or plan.suffix or ""),
+                "HOLDOUT" if plan.disposition == "holdout" else "DELIVER",
+                fact_class=assignment_fact_class,
+                candidate_id=assignment_candidate_id,
+            )
         if plan.disposition == "holdout":
             decision = plan.decision
             shadow_key = decision.get("shadow_key", "")
@@ -16508,9 +16581,10 @@ def _ss_edit_preventive_on() -> bool:  # P10: premature-reactive deferral at the
 
 
 # ── SS-8 SHADOW-HOLDOUT (flag GT_SS_SHADOW, rate GT_SS_SHADOW_RATE) — the E10 causal
-# instrument. Per eligible delivery a deterministic seed decides DELIVER vs HOLDOUT, so ONE
-# benchmark run yields a delivered-vs-withheld contrast per fact class (the affordable causal
-# proof). Default-OFF byte-identical; the rate defaults to "0" (never withhold even when the
+# instrument. Per eligible delivery a deterministic seed decides DELIVER vs HOLDOUT. One
+# trajectory supplies randomized opportunity records, not a same-unit causal proof; effect
+# estimation requires a repeated live cohort clustered by task. Default-OFF byte-identical;
+# the rate defaults to "0" (never withhold even when the
 # flag is on — production-safe). See groundtruth.runtime.shadow_holdout. ──────────────────────
 def _ss_shadow_on() -> bool:       return _ss_enabled("GT_SS_SHADOW")
 
@@ -16533,6 +16607,93 @@ def _ss_shadow_task_id() -> str:
     if base.startswith(_pref):
         base = base[len(_pref):]
     return seed + "|" + base
+
+
+def _record_shadow_assignment(
+        kind: str, text: str, assignment: str, *,
+        fact_class: "str | None" = None, candidate_id: str = "") -> bool:
+    """Persist one pre-outcome randomized opportunity assignment.
+
+    This row is a host-only causal-instrument record, not a delivery or receipt.
+    It is valid only for a participating class, a positive configured holdout
+    rate, and an exact observation opportunity binding.  Safety/unknown classes
+    and rate-zero runs remain outside the randomized cohort.
+    """
+    if not text or not _ss_shadow_on():
+        return False
+    try:
+        import time
+        from groundtruth.runtime.evidence_envelope import observation_candidate_id
+        from groundtruth.runtime.shadow_holdout import (
+            DELIVER, HOLDOUT, canonical_class, is_participating, parse_rate,
+        )
+
+        if assignment not in {DELIVER, HOLDOUT}:
+            return False
+        # Cohort identity must come from registered typed lineage at the selected
+        # candidate, never be inferred after the fact from a lane/kind label.
+        if not fact_class or not candidate_id:
+            return False
+        canonical = canonical_class(fact_class)
+        holdout_rate = parse_rate(_ss_shadow_rate())
+        if (
+            canonical is None
+            or not is_participating(canonical)
+            or holdout_rate <= 0.0
+        ):
+            return False
+        binding = _current_observation_binding()
+        binding_dict = _current_observation_binding_dict()
+        if binding is None or binding_dict is None:
+            return False
+        if candidate_id and observation_candidate_id(candidate_id) != binding.candidate_id:
+            _control_participation_record(
+                "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
+                "ERROR", candidate_bytes=text, fact_class=canonical,
+                candidate_id=candidate_id,
+                reason="assignment_candidate_identity_mismatch",
+            )
+            return False
+        seal = hashlib.sha256(
+            text.encode("utf-8", "surrogatepass")
+        ).hexdigest()[:16]
+        durable = _ledger_line_direct({
+            "schema": "gt.shadow_assignment.v1",
+            "layer": "shadow.assignment",
+            "event_type": "policy_observation",
+            "file_path": "",
+            "outcome": "assigned",
+            "reason": "pre_outcome_randomization",
+            "chars_delivered": 0,
+            "iteration": max(
+                0, int(globals().get("_action_count", 0) or 0)),
+            "timestamp_ms": int(time.time() * 1000),
+            "observation_binding": binding_dict,
+            "fact_class": canonical,
+            "candidate_id": binding.candidate_id,
+            "candidate_sha256_16": seal,
+            "candidate_chars": len(text),
+            "assignment": assignment,
+            # One propensity definition on both arms: P(DELIVER).
+            "assignment_probability": 1.0 - holdout_rate,
+            "holdout_rate": holdout_rate,
+        })
+        if not durable:
+            _control_participation_record(
+                "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
+                "ERROR", candidate_bytes=text, fact_class=canonical,
+                candidate_id=binding.candidate_id,
+                reason="assignment_ledger_write_failed",
+            )
+        return durable
+    except Exception as exc:  # noqa: BLE001 -- telemetry cannot affect assignment/delivery
+        _control_participation_record(
+            "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
+            "ERROR", candidate_bytes=text, fact_class=fact_class,
+            candidate_id=candidate_id,
+            reason=f"assignment_record_error:{type(exc).__name__}",
+        )
+        return False
 
 
 def _ss_shadow_would_withhold(
@@ -16576,7 +16737,10 @@ def _ss_shadow_withheld(kind: str, dedup_key: str, text: str, *,
     (deliver normally) when the flag is off, the rate is 0, the class is a cardinal safety
     class, or the bucket lands on DELIVER. FAIL-OPEN: any fault -> False (never accidentally
     withhold or crash the delivery path)."""
-    if not _ss_shadow_would_withhold(kind, dedup_key, text):
+    withheld = _ss_shadow_would_withhold(kind, dedup_key, text)
+    _record_shadow_assignment(
+        kind, text, "HOLDOUT" if withheld else "DELIVER")
+    if not withheld:
         return False
     try:
         from groundtruth.runtime.shadow_holdout import canonical_class as _sh_canon

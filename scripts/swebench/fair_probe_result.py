@@ -1,28 +1,17 @@
 #!/usr/bin/env python3
-"""SPEC-J4 — the fair-probe RESULT writer: shadow-holdout ledger rows + the J3 chronology
--> seal-bound ``MatchedProbe`` artifacts, adjudicated through the CAUSAL authority.
+"""SPEC-J4 — fair-probe diagnostics and live randomized-opportunity extraction.
 
-THE PROBLEM. Gate 7 (fair causal probe) is ``None`` for every ACQ/FACT row. The authority
-(``groundtruth.runtime.chronological_adjudication.adjudicate``) already exists and is
-fail-closed: it returns CAUSAL only for an ON_TIME delivery with a valid seal-bound
-``MatchedProbe`` (``treatment_seal == delivery_seal``, ``treatment_outcome=="acted"``,
-``control_outcome=="not_acted"``, four sha256-sealed artifacts) plus post-delivery ack+action.
-The shadow-holdout INSTRUMENT already exists (the seam writes ``outcome=="shadow_holdout"``
-rows carrying the withheld render's ``content_sha256_16`` / ``fact_class`` / ``dedup_key`` —
-gt_mini_patch.py ~15556 and ~14917). What did NOT exist is the RESULT computation that turns
-holdout rows + trajectory into ``MatchedProbe`` artifacts, and the grader join. This module is
-that computation. **Instrument presence is NEVER a verdict** — that fabrication was reverted
-(ea0eb16c0); a verdict flows ONLY through ``adjudicate`` (randomized) or an explicit
-re-derivation (the safety fork).
+The shadow instrument assigns each selected eligible candidate to DELIVER or HOLDOUT before its
+outcome. A delivered candidate and a different withheld candidate in one trajectory are distinct
+causal units, even when their fact class and pre-decision prefix match. This module therefore
+keeps same-trajectory comparisons diagnostic, exports exact live opportunity records for a
+task-clustered repeated study, and never promotes instrument presence into causal credit.
 
-CLUSTER-4 STRENGTHENING (Gate-7 fair_probe). Five changes make a CAUSAL claim honest:
+CLUSTER-4 STRENGTHENING (Gate-7 fair_probe). Five changes keep attribution fail-closed:
 
-* B1 — ASSIGNMENT KEYED BY PRE-DECISION STATE. Treatment and control pair ONLY when they share
-  a ``predecision_state_id = sha256(decision_key || open_event || boundary_prefix_hash)`` — the
-  same fact class's decision, opened at the SAME observation boundary, over a BYTE-IDENTICAL
-  observation prefix (before delivery/withholding). Two instances of one class at DIFFERENT
-  decision states no longer pair (the old bare-``fact_class`` join was too loose). The
-  ``MatchedProbe.assignment_unit_id`` IS that pre-decision identity.
+* B1 — ASSIGNMENT KEYED BY OPPORTUNITY. A pre-outcome assignment row carries one immutable
+  observation/opportunity identity and one canonical candidate identity. Distinct candidates
+  never become the same unit merely because their pre-decision bytes or fact class match.
 * B2 — TREATMENT 'acted' = CLUSTER-3-PROVEN PRECOMMIT USE. ``acted`` iff (a) timing ON_TIME,
   (b) the registry receipt predicate evaluates True for the class, and (c) the action fell in
   the precommit window ``delivery_index < action_index <= decision_commit_index``. Post-hoc
@@ -41,7 +30,7 @@ CLUSTER-4 STRENGTHENING (Gate-7 fair_probe). Five changes make a CAUSAL claim ho
   CAUSAL rank.
 * B5 — REJECT THE RESOLVED/UNRESOLVED SHORTCUT. ``CAUSAL_PAIRED`` (a bare resolution delta) no
   longer sets the ``fair_probe`` gate — it is ENRICHMENT only (reported, gate value ``None``).
-  Only a valid adjudication (``CAUSAL`` randomized / ``CAUSAL_FORK``) sets the gate True.
+  A deterministic ``CAUSAL_FORK`` is mechanism evidence and cannot set the behavioral gate.
 
 REUSE, NOT REINVENT (the reader/writer-mismatch discipline). Every join reuses the landed J3
 machinery, the Cluster-3 registry receipt evaluators, and the consumption-ledger entity model
@@ -61,7 +50,7 @@ the grader already trusts:
 PAIRED-BASELINE PATH (safety-excluded classes only). ``syntax_result`` / ``submit_refusal``
 can NEVER have a holdout row by design. Their OPTIONAL paired-baseline verdict (``CAUSAL_PAIRED``)
 rides a caller-supplied resolution delta and, per B5, is ENRICHMENT ONLY (it no longer sets the
-gate). The causal claim for a safety class that DOES set the gate rides the B4 fork instead.
+gate). The B4 safety fork records deterministic mechanism influence only.
 
 PURE · DETERMINISTIC · fail-closed. The only side effect is an OPTIONAL sealed sidecar written
 to the caller-designated output dir; every write is wrapped so a fault never breaks the grader.
@@ -128,8 +117,9 @@ FAIR_PROBE_RESULT_SCHEMA = "gt.fair_probe_result.v1"
 CAUSAL_PAIRED = "CAUSAL_PAIRED"
 
 # B4: the safety-fork verdict — minted by a PURE re-derivation over a sealed checkpoint for a
-# safety-excluded class (which can never be held out). DISTINCT from the randomized CAUSAL rank;
-# it DOES set the gate (a valid adjudication), unlike the bare-resolution CAUSAL_PAIRED.
+# safety-excluded class (which can never be held out).  It proves a deterministic mechanism
+# changed its own decision.  It is NOT agent-behaviour causality and therefore cannot set the
+# behavioural fair-probe gate.
 CAUSAL_FORK = "CAUSAL_FORK"
 
 # verdict precedence for the per-class rollup. A valid adjudication (CAUSAL / CAUSAL_FORK) wins;
@@ -214,6 +204,7 @@ class ControlResult:
     entity_named: bool | None
     receipt: bool | None
     predecision_state_id: str | None
+    opportunity_id: str | None
     outcome: str  # "not_acted" | "acted" | "unresolved"
 
 
@@ -309,6 +300,15 @@ def _holdout_class(row: dict) -> str | None:
             if canon is not None and canon in PARTICIPATING_CLASSES:
                 return canon
     return None
+
+
+def _opportunity_id(row: dict) -> str | None:
+    """The immutable randomized unit, never inferred from class/state similarity."""
+    binding = row.get("observation_binding")
+    value = binding.get("opportunity_id") if isinstance(binding, dict) else None
+    if not isinstance(value, str) or len(value) != 64:
+        return None
+    return value if all(char in "0123456789abcdef" for char in value) else None
 
 
 def _control_receipt(
@@ -416,7 +416,8 @@ def _control_outcome(
         return ControlResult(
             holdout_row_index=row_index, fact_class=fact_class, control_seal=control_seal,
             withhold_index=withhold_index, window_end=None, entity_named=None,
-            receipt=None, predecision_state_id=predecision, outcome="unresolved",
+            receipt=None, predecision_state_id=predecision,
+            opportunity_id=_opportunity_id(row), outcome="unresolved",
         )
 
     # the decision window closes at the NEXT observation boundary after the withholding point.
@@ -440,7 +441,8 @@ def _control_outcome(
         return ControlResult(
             holdout_row_index=row_index, fact_class=fact_class, control_seal=control_seal,
             withhold_index=withhold_index, window_end=window_end, entity_named=entity_named,
-            receipt=None, predecision_state_id=predecision, outcome="unresolved",
+            receipt=None, predecision_state_id=predecision,
+            opportunity_id=_opportunity_id(row), outcome="unresolved",
         )
 
     receipt = _control_receipt(
@@ -463,7 +465,8 @@ def _control_outcome(
     return ControlResult(
         holdout_row_index=row_index, fact_class=fact_class, control_seal=control_seal,
         withhold_index=withhold_index, window_end=window_end, entity_named=entity_named,
-        receipt=receipt, predecision_state_id=predecision, outcome=outcome,
+        receipt=receipt, predecision_state_id=predecision,
+        opportunity_id=_opportunity_id(row), outcome=outcome,
     )
 
 
@@ -474,6 +477,8 @@ def _build_matched_probe(
     control: ControlResult,
     predecision_state_id: str | None,
     paired: bool,
+    *,
+    treatment_opportunity_id: str | None = None,
 ) -> tuple[MatchedProbe | None, dict[str, Any]]:
     """Seal the four canonical artifacts (assignment, treatment, control, outcome) and bind them
     into a ``MatchedProbe`` — but ONLY when the two arms share a pre-decision state (B1). The
@@ -489,6 +494,8 @@ def _build_matched_probe(
         "paired": bool(paired),
         "treatment_predecision_state_id": predecision_state_id,
         "control_predecision_state_id": control.predecision_state_id,
+        "treatment_opportunity_id": treatment_opportunity_id,
+        "control_opportunity_id": control.opportunity_id,
         "treatment_seal": ec.delivery_seal,
         "control_seal": control.control_seal,
         "treatment_row_index": ec.ledger_row_index,
@@ -552,13 +559,14 @@ def compute_matched_probes(
     *,
     attestations: Any = None,
 ) -> list[ProbeResult]:
-    """Build one adjudicated ``ProbeResult`` per (delivered row, same-class holdout row) pair.
+    """Build diagnostic arm comparisons without fabricating a same-unit counterfactual.
 
-    The treatment arm is J3's chronology for the delivered row; the control arm is the withheld
-    instance graded by :func:`_control_outcome`. B1: a probe pairs ONLY when both arms share a
-    pre-decision state (:func:`_predecision_state_id`); a mismatched pair binds NO MatchedProbe
-    (never CAUSAL). The CAUSAL verdict flows ONLY through ``adjudicate`` with the seal-bound
-    ``MatchedProbe``. Deterministic order: by (delivered_row_index, holdout_row_index)."""
+    A delivered and a withheld candidate in one trajectory are mutually exclusive randomized
+    opportunities.  Even at a byte-identical pre-decision prefix they are different candidates,
+    and the delivered candidate can affect the withheld candidate's consequence window.  They
+    therefore cannot be bound into one ``MatchedProbe``.  The rows remain useful diagnostics;
+    causal estimation belongs to a preregistered cross-opportunity cohort or repeated exact-state
+    intervention. Deterministic order: by (delivered_row_index, holdout_row_index)."""
     messages = _messages(trajectory)
     tool_ordinal_index = _tool_ordinal_to_index(messages)
     boundaries = _boundary_indices(messages)
@@ -595,14 +603,22 @@ def compute_matched_probes(
         treatment_state = _predecision_state_id(
             canon, ec.chronology.delivery_index, boundaries, messages
         )
+        treatment_opportunity = _opportunity_id(ledger_rows[ec.ledger_row_index])
         for control in sorted(controls, key=lambda c: c.holdout_row_index):
-            paired = (
+            # A single opportunity cannot be both DELIVER and HOLDOUT in one realized
+            # trajectory.  State/class similarity is stratification, not a matched unit.
+            paired = False
+            probe, artifacts = _build_matched_probe(
+                ec, canon, treatment_outcome, control, treatment_state, paired,
+                treatment_opportunity_id=treatment_opportunity,
+            )
+            artifacts["assignment"]["same_predecision_state"] = bool(
                 treatment_state is not None
                 and control.predecision_state_id is not None
                 and treatment_state == control.predecision_state_id
             )
-            probe, artifacts = _build_matched_probe(
-                ec, canon, treatment_outcome, control, treatment_state, paired
+            artifacts["assignment"]["pairing_rejection"] = (
+                "distinct_mutually_exclusive_opportunities_require_cohort_or_replay"
             )
             verdict = adjudicate(
                 evidence_type=ec.evidence_type,
@@ -921,16 +937,176 @@ def _merge_verdict(current: str | None, incoming: str) -> str:
 
 
 def _verdict_to_bool(verdict: str) -> bool | None:
-    """B5: the fair_probe gate value. True ONLY for a VALID ADJUDICATION — a randomized
-    ``CAUSAL`` or a safety ``CAUSAL_FORK`` (a pure re-derivation). ``SELF_LOCALIZED`` is honestly
-    False (self-acquisition is a non-causal). Everything else — INCLUDING ``CAUSAL_PAIRED`` (a
-    bare resolution delta, now ENRICHMENT ONLY) and ``UNMEASURED`` — is ``None`` (fail-closed:
-    it never sets the gate)."""
-    if verdict in (CAUSAL, CAUSAL_FORK):
+    """The behavioural fair-probe gate.
+
+    Only an agent-behaviour ``CAUSAL`` adjudication can set it. ``CAUSAL_FORK`` proves a
+    deterministic safety mechanism changed its own decision, not that the agent behaved better.
+    ``CAUSAL_PAIRED`` remains outcome enrichment. Both stay unmeasured for this gate.
+    """
+    if verdict == CAUSAL:
         return True
     if verdict == SELF_LOCALIZED:
         return False
     return None
+
+
+def extract_live_opportunity_observations(
+    trajectory: Any,
+    ledger_rows: list[dict],
+    chronologies: dict[int, ExtractedChronology],
+    *,
+    task_label: str,
+    live_witness: bool,
+    attestations: Any = None,
+) -> list[dict[str, Any]]:
+    """Export one intention-to-treat endpoint per durable shadow assignment.
+
+    The assignment and outcome are joined only by the immutable observation opportunity,
+    canonical candidate, canonical fact class, and exact candidate seal.  Ledger row order is
+    the pre-outcome chronology coordinate.  DELIVER uses the registered per-row receipt
+    predicate; HOLDOUT evaluates the same predicate over the control consequence window.
+    Malformed, censored, duplicated, or pre-acquired opportunities remain in the export as
+    unmeasured/contaminated records so a cohort analyzer cannot silently select them away.
+    """
+    messages = _messages(trajectory)
+    tool_ordinal_index = _tool_ordinal_to_index(messages)
+    boundaries = _boundary_indices(messages)
+    assignments = [
+        (index, row)
+        for index, row in enumerate(ledger_rows)
+        if isinstance(row, dict)
+        and row.get("schema") == "gt.shadow_assignment.v1"
+        and row.get("layer") == "shadow.assignment"
+        and row.get("outcome") == "assigned"
+    ]
+    exported: list[dict[str, Any]] = []
+    for assignment_index, assignment_row in assignments:
+        opportunity_id = _opportunity_id(assignment_row)
+        assignment = assignment_row.get("assignment")
+        candidate_id = assignment_row.get("candidate_id")
+        fact_class = canonical_class(str(assignment_row.get("fact_class") or ""))
+        candidate_seal = assignment_row.get("candidate_sha256_16")
+        probability = assignment_row.get("assignment_probability")
+        failures: list[str] = []
+        if opportunity_id is None:
+            failures.append("invalid_opportunity_id")
+        if assignment not in {"DELIVER", "HOLDOUT"}:
+            failures.append("invalid_assignment")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            failures.append("invalid_candidate_id")
+        if fact_class is None:
+            failures.append("invalid_fact_class")
+        if not _valid_seal(candidate_seal):
+            failures.append("invalid_candidate_seal")
+        if (
+            not isinstance(probability, (int, float))
+            or isinstance(probability, bool)
+            or not 0.0 < float(probability) < 1.0
+        ):
+            failures.append("invalid_assignment_probability")
+
+        outcomes: list[tuple[int, dict]] = []
+        if opportunity_id is not None:
+            for outcome_index, row in enumerate(ledger_rows):
+                if outcome_index <= assignment_index or not isinstance(row, dict):
+                    continue
+                if row.get("outcome") not in {"delivered", "shadow_holdout"}:
+                    continue
+                if _opportunity_id(row) != opportunity_id:
+                    continue
+                if row.get("candidate_id") != candidate_id:
+                    continue
+                if _holdout_class(row) != fact_class:
+                    continue
+                if row.get("content_sha256_16") != candidate_seal:
+                    continue
+                outcomes.append((outcome_index, row))
+        expected_outcome = "delivered" if assignment == "DELIVER" else "shadow_holdout"
+        matching = [
+            item for item in outcomes if item[1].get("outcome") == expected_outcome
+        ]
+        opposite = [
+            item for item in outcomes if item[1].get("outcome") != expected_outcome
+        ]
+        if len(matching) != 1:
+            failures.append("outcome_join_not_unique")
+        if opposite:
+            failures.append("opposite_arm_outcome_present")
+
+        outcome_index: int | None = matching[0][0] if len(matching) == 1 else None
+        endpoint: bool | None = None
+        contaminated = bool(opposite)
+        if outcome_index is not None and fact_class is not None:
+            if assignment == "DELIVER":
+                chronology = chronologies.get(outcome_index)
+                if chronology is None:
+                    failures.append("delivery_chronology_missing")
+                else:
+                    endpoint = receipt_predicates.acknowledgment_for_row(
+                        chronology,
+                        messages=messages,
+                        ledger_rows=ledger_rows,
+                        attestations=attestations,
+                    )
+                    native_index = getattr(
+                        getattr(chronology, "chronology", None),
+                        "native_acquisition_index",
+                        None,
+                    )
+                    if native_index is not None:
+                        contaminated = True
+                        failures.append("pre_delivery_reacquisition")
+            else:
+                control = _control_outcome(
+                    matching[0][1],
+                    outcome_index,
+                    fact_class,
+                    messages,
+                    tool_ordinal_index,
+                    boundaries,
+                    ledger_rows,
+                    attestations,
+                )
+                endpoint = control.receipt
+                if control.withhold_index is None:
+                    failures.append("withhold_boundary_missing")
+                else:
+                    file_path = str(matching[0][1].get("file_path") or "")
+                    if _native_acquisition_index(
+                        messages, control.withhold_index, "", file_path
+                    ) is not None:
+                        contaminated = True
+                        failures.append("pre_holdout_reacquisition")
+                if control.outcome == "unresolved":
+                    failures.append("control_consequence_unresolved")
+        if endpoint is None:
+            failures.append("endpoint_unmeasured")
+
+        exported.append({
+            "schema": "gt.live_opportunity_observation.v1",
+            "task_id": task_label,
+            "opportunity_id": opportunity_id or "",
+            "fact_class": fact_class or "",
+            "candidate_id": candidate_id if isinstance(candidate_id, str) else "",
+            "candidate_sha256_16": (
+                candidate_seal if isinstance(candidate_seal, str) else ""
+            ),
+            "assignment": assignment if isinstance(assignment, str) else "",
+            "assignment_probability": (
+                float(probability)
+                if isinstance(probability, (int, float))
+                and not isinstance(probability, bool)
+                else None
+            ),
+            "endpoint": endpoint,
+            "endpoint_name": "registered_receipt",
+            "live_witness": bool(live_witness),
+            "assignment_index": assignment_index,
+            "outcome_index": outcome_index,
+            "contaminated": contaminated,
+            "failures": sorted(set(failures)),
+        })
+    return exported
 
 
 def _write_sidecar(output_dir: str, task_label: str, document: dict[str, Any]) -> str | None:
@@ -953,6 +1129,7 @@ def join_fair_probes(
     chronologies: dict[int, ExtractedChronology] | None = None,
     output_dir: str | None = None,
     task_label: str = "",
+    live_witness: bool = False,
     gt_resolved: bool | None = None,
     baseline_resolved: bool | None = None,
     attestations: Any = None,
@@ -961,12 +1138,12 @@ def join_fair_probes(
     """Adjudicate every fair probe and roll up per canonical fact class.
 
     ``per_fact_class`` carries each class's fair-probe verdict + its bool gate value for
-    ``ss_gate_readiness(fair_probe=...)``: True ONLY when at least one row adjudicates CAUSAL or a
-    safety CAUSAL_FORK is minted; SELF_LOCALIZED (False) when the chronology proves prior
+    ``ss_gate_readiness(fair_probe=...)``: True only for behavioral CAUSAL evidence;
+    a safety CAUSAL_FORK remains mechanism evidence; SELF_LOCALIZED (False) when chronology proves prior
     self-acquisition; CAUSAL_PAIRED (ENRICHMENT ONLY, gate None) on the safety paired-baseline
-    path; else UNMEASURED. ``probes`` is the per-probe audit trail. The randomized causal verdict
-    flows ONLY through ``adjudicate``; the fork verdict is a pure re-derivation over a sealed
-    checkpoint; the paired verdict takes the baseline verdict as an INPUT (never read from disk).
+    path; else UNMEASURED. ``probes`` is the per-probe audit trail and
+    ``opportunity_observations`` is the live-cohort input. Same-trajectory distinct candidates
+    are diagnostic only; the fork verdict is a pure re-derivation over a sealed checkpoint.
     ``attestations`` feed the B2/B3 covering receipt; ``safety_forks`` are caller-supplied sealed
     B4 checkpoints (absent -> the fork path is dormant, fail-closed)."""
     if chronologies is None:
@@ -1029,10 +1206,19 @@ def join_fair_probes(
             ),
         }
 
+    opportunity_observations = extract_live_opportunity_observations(
+        trajectory,
+        ledger_rows,
+        chronologies,
+        task_label=task_label,
+        live_witness=live_witness,
+        attestations=attestations,
+    )
     document: dict[str, Any] = {
         "schema": FAIR_PROBE_RESULT_SCHEMA,
         "per_fact_class": per_fact_class,
         "probes": [p.to_dict() for p in all_probes],
+        "opportunity_observations": opportunity_observations,
     }
     sidecar_path = (
         _write_sidecar(output_dir, task_label, document) if output_dir else None
@@ -1043,8 +1229,8 @@ def join_fair_probes(
 
 def fair_probe_bool_by_fact_class(join: dict[str, Any]) -> dict[str, bool | None]:
     """The ``fact_class -> fair_probe`` gate map the grader threads into ``ss_gate_readiness``:
-    True for a VALID ADJUDICATION (CAUSAL / CAUSAL_FORK), False for SELF_LOCALIZED, None
-    (absent) for UNMEASURED and — per B5 — for the enrichment-only CAUSAL_PAIRED."""
+    True only for behavioral CAUSAL, False for SELF_LOCALIZED, and None for UNMEASURED,
+    mechanism-only CAUSAL_FORK, and enrichment-only CAUSAL_PAIRED."""
     out: dict[str, bool | None] = {}
     for fact_class, info in (join.get("per_fact_class") or {}).items():
         if isinstance(info, dict):
@@ -1059,6 +1245,7 @@ __all__ = [
     "ControlResult",
     "ProbeResult",
     "compute_matched_probes",
+    "extract_live_opportunity_observations",
     "fair_probe_bool_by_fact_class",
     "join_fair_probes",
 ]

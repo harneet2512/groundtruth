@@ -165,9 +165,9 @@ def test_same_class_different_predecision_state_cannot_pair() -> None:
     # MatchedProbe binds, and this probe becomes CAUSAL -> RED.
 
 
-def test_same_class_same_predecision_state_pairs_and_is_causal() -> None:
-    # The positive control for B1: when the withheld control sits at the SAME edit boundary as the
-    # delivery (same decision-open, byte-identical prefix), the arms pair and the probe is CAUSAL.
+def test_same_state_distinct_opportunities_still_do_not_pair() -> None:
+    # A shared prefix is a stratum, not an assignment unit. A delivered candidate and a withheld
+    # candidate in one realized trajectory are distinct, mutually exclusive opportunities.
     messages = [
         _user("Fix the signature bug."),               # 0 task_start
         _assistant("apply_patch src/foo.py"),           # 1 is_edit -> boundary 2
@@ -194,12 +194,10 @@ def test_same_class_same_predecision_state_pairs_and_is_causal() -> None:
     assert len(probes) == 1
     p = probes[0]
     assert p.control_outcome == "not_acted"
-    assert p.matched_probe is not None
-    assert p.artifacts["assignment"]["paired"] is True
-    # the assignment_unit_id IS the shared pre-decision identity (never a bare fact_class).
-    assert p.matched_probe.assignment_unit_id == p.artifacts["assignment"]["treatment_predecision_state_id"]
-    assert p.matched_probe.assignment_unit_id != "signature_delta"
-    assert p.causal_verdict == CAUSAL
+    assert p.matched_probe is None
+    assert p.artifacts["assignment"]["paired"] is False
+    assert p.artifacts["assignment"]["same_predecision_state"] is True
+    assert p.causal_verdict != CAUSAL
 
 
 def test_control_self_acquired_before_withhold_invalidates() -> None:
@@ -234,7 +232,7 @@ def test_control_self_acquired_before_withhold_invalidates() -> None:
     probes = compute_matched_probes(traj, rows, chron)
     assert len(probes) == 1
     p = probes[0]
-    assert p.artifacts["assignment"]["paired"] is True   # arms share the pre-decision state
+    assert p.artifacts["assignment"]["same_predecision_state"] is True
     assert p.control_outcome == "acted"                  # but the control self-acquired earlier
     assert p.causal_verdict != CAUSAL
     # MUTATION[drop `or self_acquired` in _control_outcome] -> the in-window receipt is False so
@@ -345,7 +343,7 @@ def _submit_fork(*, checkpoint: dict | None = None, citation: dict | None = None
     }
 
 
-def test_submit_refusal_fork_mints_causal_fork_and_sets_the_gate() -> None:
+def test_submit_refusal_fork_is_mechanism_evidence_not_behavior_gate() -> None:
     # Treatment: the submit gate BLOCKS on a real covering FAIL. Control: with the GT candidate
     # withheld (covering=None) the gate ALLOWS. The decisions DIFFER -> a CAUSAL_FORK is minted by
     # the PURE gate_verdict re-derivation, and (B5) a valid adjudication SETS the gate True.
@@ -353,7 +351,7 @@ def test_submit_refusal_fork_mints_causal_fork_and_sets_the_gate() -> None:
     entry = join["per_fact_class"]["submit_refusal"]
     assert entry["verdict"] == CAUSAL_FORK
     assert entry["safety_fork_probes"] == 1
-    assert fair_probe_bool_by_fact_class(join)["submit_refusal"] is True
+    assert fair_probe_bool_by_fact_class(join)["submit_refusal"] is None
     fork_probes = [pr for pr in join["probes"] if pr["probe_kind"] == "safety_fork"]
     assert len(fork_probes) == 1
     fp = fork_probes[0]
@@ -441,7 +439,7 @@ def test_syntax_result_fork_mints_via_pure_lane_attestation() -> None:
     join = join_fair_probes({"messages": []}, [], safety_forks=[fork])
     entry = join["per_fact_class"]["syntax_result"]
     assert entry["verdict"] == CAUSAL_FORK
-    assert fair_probe_bool_by_fact_class(join)["syntax_result"] is True
+    assert fair_probe_bool_by_fact_class(join)["syntax_result"] is None
 
 
 # =========================================================================== #

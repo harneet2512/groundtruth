@@ -1,16 +1,12 @@
-"""RED-first tests for fair_probe_result — the SPEC-J4 fair-probe RESULT writer.
+"""RED-first tests for SPEC-J4 diagnostics and live opportunity extraction.
 
-This module turns shadow-holdout ledger rows + the J3 chronology into seal-bound
-``MatchedProbe`` artifacts and adjudicates them through
-``chronological_adjudication.adjudicate`` (the CAUSAL authority). Instrument presence is
-NEVER a verdict (the fabrication reverted in ea0eb16c0): a positive CAUSAL requires an
-ON_TIME delivery that the agent acknowledged AND acted on (treatment="acted") PAIRED with a
-withheld-arm instance of the SAME class the agent did NOT self-acquire (control="not_acted").
+Distinct delivered and withheld candidates in one trajectory are never treated as the same
+counterfactual unit. Instrument presence is never a verdict. Exact-state ``MatchedProbe`` tests
+exercise only the adjudicator contract; repeated live opportunities feed the cohort analyzer.
 
 Fixtures are synthetic (built in-test). Each names the exact contrast it proves:
 
-* CAUSAL          — delivered instance acted (ack+action after delivery), a same-class holdout
-                    instance whose entity the agent never named in the withholding window.
+* diagnostic pair — delivered and withheld instances remain unpaired even when state matches.
 * control-acted   — the withheld instance's entity IS named after withholding -> control
                     "acted" -> the probe is INVALID for CAUSAL (GT was not needed).
 * SELF_LOCALIZED  — the agent grepped the fact BEFORE GT delivered it -> not causal.
@@ -46,6 +42,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 _ROOT = Path(__file__).resolve().parents[2]
 for _p in (str(_ROOT / "src"), str(_ROOT / "scripts" / "swebench")):
@@ -62,11 +59,14 @@ from groundtruth.runtime.chronological_adjudication import (  # noqa: E402
 from chronology_extract import extract_chronologies  # noqa: E402
 from fair_probe_result import (  # noqa: E402
     CAUSAL_PAIRED,
+    ControlResult,
     FAIR_PROBE_RESULT_SCHEMA,
     compute_matched_probes,
+    extract_live_opportunity_observations,
     fair_probe_bool_by_fact_class,
     join_fair_probes,
 )
+import fair_probe_result as fair_probe_module  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -177,7 +177,7 @@ def _causal_fixture(*, holdout_file: str = "src/other.py") -> tuple[dict, list[d
     return {"messages": messages}, rows
 
 
-def test_causal_when_treatment_acted_and_control_not_acted(tmp_path: Path) -> None:
+def test_distinct_same_state_opportunities_do_not_mint_causality(tmp_path: Path) -> None:
     traj, rows = _causal_fixture()
     chron = extract_chronologies(traj, rows)
     probes = compute_matched_probes(traj, rows, chron)
@@ -187,15 +187,17 @@ def test_causal_when_treatment_acted_and_control_not_acted(tmp_path: Path) -> No
     assert p.fact_class == "signature_delta"
     assert p.treatment_outcome == "acted"
     assert p.control_outcome == "not_acted"
-    assert p.causal_verdict == CAUSAL
-    # the verdict flows ONLY through the seal-bound adjudicator.
-    assert p.matched_probe is not None
-    assert p.matched_probe.treatment_seal == _seal(_PAYLOAD_SIG)
+    assert p.causal_verdict != CAUSAL
+    assert p.matched_probe is None
+    assert p.artifacts["assignment"]["same_predecision_state"] is True
+    assert p.artifacts["assignment"]["pairing_rejection"].startswith(
+        "distinct_mutually_exclusive_opportunities"
+    )
 
     join = join_fair_probes(traj, rows, output_dir=str(tmp_path), task_label="synthetic__causal")
     assert join["schema"] == FAIR_PROBE_RESULT_SCHEMA
-    assert join["per_fact_class"]["signature_delta"]["verdict"] == CAUSAL
-    assert fair_probe_bool_by_fact_class(join)["signature_delta"] is True
+    assert join["per_fact_class"]["signature_delta"]["verdict"] == UNMEASURED
+    assert fair_probe_bool_by_fact_class(join)["signature_delta"] is None
     # the sealed sidecar is written with deterministic bytes.
     sidecar = Path(join["sidecar_path"])
     assert sidecar.exists()
@@ -280,7 +282,7 @@ def test_control_window_closes_at_next_boundary() -> None:
     probes = compute_matched_probes(traj, rows, chron)
     assert len(probes) == 1
     assert probes[0].control_outcome == "not_acted"
-    assert probes[0].causal_verdict == CAUSAL
+    assert probes[0].causal_verdict != CAUSAL
 
 
 def test_end_of_trajectory_holdout_window_is_unresolved() -> None:
@@ -472,12 +474,19 @@ def test_paired_baseline_absent_input_is_unmeasured() -> None:
 def test_tampered_treatment_seal_is_not_causal() -> None:
     traj, rows = _causal_fixture()
     chron = extract_chronologies(traj, rows)
-    probes = compute_matched_probes(traj, rows, chron)
-    p = probes[0]
-    mp = p.matched_probe
-    assert mp is not None
-    # Re-adjudicate with the ORIGINAL probe -> CAUSAL (control).
     ec = chron[0]
+    mp = MatchedProbe(
+        probe_id="explicit-repeated-state-probe",
+        assignment_unit_id="frozen-state-1",
+        treatment_seal=ec.delivery_seal,
+        treatment_outcome="acted",
+        control_outcome="not_acted",
+        assignment_sha256="a" * 64,
+        treatment_sha256="b" * 64,
+        control_sha256="c" * 64,
+        outcome_sha256="d" * 64,
+    )
+    # Re-adjudicate with the ORIGINAL probe -> CAUSAL (control).
     good = adjudicate(
         evidence_type=ec.evidence_type, actual_event=ec.actual_event,
         delivery_seal=ec.delivery_seal, chronology=ec.chronology, matched_probe=mp,
@@ -496,3 +505,98 @@ def test_tampered_treatment_seal_is_not_causal() -> None:
         delivery_seal=ec.delivery_seal, chronology=ec.chronology, matched_probe=tampered,
     )
     assert bad.fair_probe_verdict != CAUSAL
+
+
+def test_live_opportunity_export_keeps_both_arms_as_distinct_units(
+    monkeypatch,
+) -> None:
+    deliver_opportunity = "1" * 64
+    holdout_opportunity = "2" * 64
+    deliver_candidate = "3" * 64
+    holdout_candidate = "4" * 64
+    deliver_seal = "a" * 16
+    holdout_seal = "b" * 16
+
+    def assignment(
+        opportunity_id: str, candidate_id: str, seal: str, arm: str,
+    ) -> dict:
+        return {
+            "schema": "gt.shadow_assignment.v1",
+            "layer": "shadow.assignment",
+            "outcome": "assigned",
+            "fact_class": "caller_contract",
+            "candidate_id": candidate_id,
+            "candidate_sha256_16": seal,
+            "assignment": arm,
+            "assignment_probability": 0.5,
+            "observation_binding": {"opportunity_id": opportunity_id},
+        }
+
+    rows = [
+        assignment(
+            deliver_opportunity, deliver_candidate, deliver_seal, "DELIVER"
+        ),
+        {
+            "outcome": "delivered",
+            "fact_class": "caller_contract",
+            "candidate_id": deliver_candidate,
+            "content_sha256_16": deliver_seal,
+            "observation_binding": {"opportunity_id": deliver_opportunity},
+        },
+        assignment(
+            holdout_opportunity, holdout_candidate, holdout_seal, "HOLDOUT"
+        ),
+        {
+            "outcome": "shadow_holdout",
+            "fact_class": "caller_contract",
+            "candidate_id": holdout_candidate,
+            "content_sha256_16": holdout_seal,
+            "file_path": "src/caller.py",
+            "observation_binding": {"opportunity_id": holdout_opportunity},
+        },
+    ]
+    chronology = SimpleNamespace(
+        fact_class="caller_contract",
+        evidence_type="caller_contract",
+        ledger_row_index=1,
+        chronology=SimpleNamespace(
+            delivery_index=1,
+            decision_open_index=0,
+            decision_commit_index=2,
+            native_acquisition_index=None,
+        ),
+    )
+    monkeypatch.setattr(
+        fair_probe_module,
+        "_control_outcome",
+        lambda *args, **kwargs: ControlResult(
+            holdout_row_index=3,
+            fact_class="caller_contract",
+            control_seal=holdout_seal,
+            withhold_index=1,
+            window_end=2,
+            entity_named=False,
+            receipt=False,
+            predecision_state_id="state",
+            opportunity_id=holdout_opportunity,
+            outcome="not_acted",
+        ),
+    )
+    monkeypatch.setattr(
+        fair_probe_module, "_native_acquisition_index", lambda *args, **kwargs: None
+    )
+
+    exported = extract_live_opportunity_observations(
+        {"messages": []},
+        rows,
+        {1: chronology},
+        task_label="task",
+        live_witness=True,
+    )
+    assert [row["assignment"] for row in exported] == ["DELIVER", "HOLDOUT"]
+    assert [row["opportunity_id"] for row in exported] == [
+        deliver_opportunity,
+        holdout_opportunity,
+    ]
+    assert [row["endpoint"] for row in exported] == [True, False]
+    assert all(row["assignment_index"] < row["outcome_index"] for row in exported)

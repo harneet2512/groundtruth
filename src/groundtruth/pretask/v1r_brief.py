@@ -1715,6 +1715,18 @@ def _block_receipts_on() -> bool:
 # uncertainty cannot become a singular assertion. Reactive def_partition/post_search
 # remains the follow-up localization channel after the agent's own search.
 # --------------------------------------------------------------------------- #
+def _loc_reslot_on() -> bool:
+    """GT_LOC_RESLOT — the T0->T2 localization re-slot (registry:
+    ``localization.deliver_by=search_result``). When ON, step-0 ships NO localization
+    narration at any confidence tier (the calibrated contention rides the reactive
+    ranked-localization delivery at the registered search boundary instead). Default
+    OFF -> the MEDIUM/LOW retention branch below is byte-identical legacy behavior."""
+    import os as _os
+    return (_os.environ.get("GT_LOC_RESLOT") or "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    )
+
+
 def _brief_minimal_on() -> bool:
     """GT_BRIEF_MINIMAL master switch — default OFF, byte-identical. When OFF the brief is
     generated exactly as before (the reducer is never invoked). When ON (set only at the
@@ -1761,8 +1773,20 @@ def _reduce_brief_to_minimal(text: str) -> str:
     # uncertainty into a naked top-1 steer.  Keep the already-compact contention
     # block and suppress duplicate file-entry headers.  HIGH remains on the prior
     # minimal path (one orientation header, no localization narration).
+    #
+    # R4 (run-#3 pilot, 2026-07-18): the MEDIUM/LOW retention is RETIRED under the
+    # localization RE-SLOT. Three authorities collided and this branch was the odd one
+    # out: the registry declares localization ``deliver_by=search_result`` (T0->T2
+    # re-slot, user-ratified), the run workflow sets GT_BRIEF_MINIMAL with the stated
+    # intent "retires the step-0 localization narration", yet this branch still shipped
+    # a task_start localization header -- which the J3 timing kernel therefore graded
+    # WRONG_EVENT on 21/21 live tasks (delivery-grain receipt: actual_event=task_start,
+    # decision_open_index=null). Under GT_LOC_RESLOT the calibrated-contention VALUE
+    # moves to the reactive ranked-localization delivery at the registered search
+    # boundary; step-0 keeps obligations + orientation only. With the re-slot off, the
+    # MEDIUM/LOW retention stands unchanged (byte-identical legacy path).
     _loc_tier = _localization_confidence_tier(text)
-    _keep_contention = _loc_tier in {"medium", "low"}
+    _keep_contention = _loc_tier in {"medium", "low"} and not _loc_reslot_on()
     kept: list[str] = []
     for b in blocks:
         label = b["label"]
