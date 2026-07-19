@@ -137,15 +137,66 @@ def _positive(value: object) -> bool:
         return False
 
 
+def _valid_cochange_primary_path(
+    evidence: Mapping[str, Any],
+    components: Mapping[str, Any],
+    candidate_path: str,
+) -> bool:
+    """Validate the PRIMARY localization candidate's own co-change witness.
+
+    Distinct, non-interchangeable shape from the cross-domain ``git_log`` bridge:
+    the delivered candidate names its mined co-change neighbourhood directly (the
+    rendered ``Also changes: …`` list) rather than dated commit rows, because the
+    indexer's ``cochanges`` table yields a ranked file list with no per-commit
+    provenance. The neighbour list must be non-empty, string-typed, sorted and
+    de-duplicated, must exclude the candidate itself, must match
+    ``components.cochange`` exactly, and the witness must carry a matching
+    self-seal. Aggregate scores alone can never admit the row.
+    """
+    count = evidence.get("count")
+    paths = evidence.get("co_change_paths")
+    if (
+        not isinstance(count, int) or isinstance(count, bool) or count < 1
+        or not isinstance(paths, list) or len(paths) != count
+        or any(not isinstance(path, str) or not path for path in paths)
+        or paths != sorted(set(paths))
+        or candidate_path in paths
+        or not _positive(components.get("cochange"))
+        or float(components.get("cochange", 0.0)) != float(count)
+    ):
+        return False
+    unsigned = dict(evidence)
+    identity = unsigned.pop("source_identity_sha256", None)
+    canonical = json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return isinstance(identity, str) and identity == expected
+
+
 def _valid_cochange_evidence(
     proof: Mapping[str, Any], candidate_path: str,
 ) -> bool:
-    """Validate producer-owned cochange rows; aggregate scores are insufficient."""
+    """Validate producer-owned cochange rows; aggregate scores are insufficient.
+
+    Two self-sealed witness shapes are accepted, each proving a different
+    acquisition fact: ``source == "git_log"`` is the cross-domain bridge (dated
+    commits co-changing with the symptom files) validated below; ``source ==
+    "primary_path"`` is the delivered candidate's own mined co-change
+    neighbourhood, validated by ``_valid_cochange_primary_path``. Any other
+    source, or a mismatched candidate/seal, fails closed.
+    """
     evidence = proof.get("cochange_evidence")
     components = proof.get("components")
     components = components if isinstance(components, Mapping) else {}
     if not isinstance(evidence, Mapping):
         return False
+    if (
+        evidence.get("kind") == "cochange_history"
+        and evidence.get("source") == "primary_path"
+        and evidence.get("candidate_path") == candidate_path
+    ):
+        return _valid_cochange_primary_path(evidence, components, candidate_path)
     count = evidence.get("count")
     rows = evidence.get("source_rows")
     if (
@@ -585,10 +636,17 @@ def _source_field_paths(
             if _positive(components.get(name))
         ]
     if feature == "cochange_history":
-        return [
+        fields = [
             f"{base}.components.cochange",
             f"{base}.cochange_evidence",
         ]
+        # The primary-path witness also names the delivered candidate's rendered
+        # co-change neighbour list ("Also changes: …") as a data-lineage pointer.
+        # The cross-domain bridge proof carries no ``co_changes`` field, so it
+        # keeps its exact two-field lineage.
+        if isinstance(proof.get("co_changes"), list) and proof.get("co_changes"):
+            fields.append(f"{base}.co_changes")
+        return fields
     return [f"{base}.acquisition_sources.{feature}"]
 
 

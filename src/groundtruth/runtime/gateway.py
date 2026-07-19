@@ -672,15 +672,38 @@ def _apply_xsession_rankup(
     (the SAME object), so ``augment`` is byte-identical when the feature is off."""
     if not out or not _xsession_rankup_on():
         return out
-    policy = getattr(getattr(state, "episode", None), "xsession_policy", None)
-    if not policy:
-        return out
     try:
         from groundtruth.runtime.xsession_memory import (
             canonical_class as _xm_canonical,
             ladder_boost as _xm_boost,
         )
     except Exception:  # noqa: BLE001 — engine absent in-container: preserve behaviour
+        return out
+    policy = getattr(getattr(state, "episode", None), "xsession_policy", None)
+    if not policy:
+        # DARK-FIX (2026-07-19): an empty cross-session policy (the common single-session
+        # case: no prior run of this repo) is a CORRECT ABSTENTION, not an invisible no-op.
+        # Witness it — emit a NO_EFFECT control.participation receipt for each participating
+        # candidate so the REFEREE-3 terminal can bind an eligible-but-correctly-silent
+        # verdict instead of grading the control DARK/UNMEASURED. Delivery is byte-identical:
+        # the input list is returned UNCHANGED (the SAME object); the receipt is
+        # observability-only and never mutates a candidate.
+        for a in out:
+            if _xm_canonical(a.evidence_type) not in _XSESSION_POLICY_CLASSES:
+                continue
+            try:
+                candidate_bytes, fact_class = _candidate_control_identity(a)
+                _record_control(
+                    state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
+                    "NO_EFFECT", candidate_bytes=candidate_bytes,
+                    fact_class=fact_class, candidate_id=a.dedup_key,
+                    reason="cold_policy",
+                )
+            except Exception as exc:  # noqa: BLE001 — measurement never changes delivery
+                _record_control(
+                    state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
+                    "ERROR", reason=f"identity_error:{type(exc).__name__}",
+                )
         return out
     changed = False
     stamped: list[EvidenceEnvelope] = []
@@ -1781,6 +1804,46 @@ class SearchScopeSelection:
     relations: tuple[SearchScopeRelation, ...] = ()
 
 
+def _record_scope_certification(
+    state: GatewayState, anchor_file: str, selection: SearchScopeSelection,
+) -> None:
+    """Emit the typed GT_SCOPE_NATIVE scope-certification decision (REFEREE-3 terminal).
+
+    GT_SCOPE_NATIVE is the mediator that shapes the ``localization`` FACT class with a
+    certified must-ALSO-touch scope constraint. Its decision was DARK: the mini-seam
+    splice (:func:`gt_mini_patch._splice_search_scope`) records the APPLIED/delivered
+    receipt ONLY when it actually appends a scope block, so the FAR more common
+    correctly-SILENT outcome — the graph certification ran and found NO qualifying
+    cross-file neighbour above the confidence floor — produced no typed
+    ``control.participation`` row at all, leaving the terminal unable to witness that
+    the control ran and correctly withheld.
+
+    This records exactly that NO_EFFECT half, keyed on the GENERAL condition (an empty
+    certified selection), never on any task/repo/anchor. The APPLIED/delivered half
+    stays owned by the delivery-time splice, and the two never compete for one
+    certification: ``selection.relations`` is either empty (silent → here) or non-empty
+    (shaped → splice), never both. A zero-byte NO_EFFECT can never exact-join a delivery
+    and is skipped by the terminal's candidate-identity correctness grader, so it can
+    never manufacture a False mediation verdict — it is honest presence, not a claim.
+
+    Pure instrumentation: emits through :func:`_record_control` (a no-op when the seam
+    wired no recorder), touches no delivered bytes, and is armed only when the
+    GT_SCOPE_NATIVE FORM arm is active (byte-identical when the flag is off)."""
+    if os.environ.get("GT_SCOPE_NATIVE") != "1" or selection.relations:
+        return
+    anchor = _to_repo_rel(anchor_file, state.repo_root) or anchor_file
+    anchor = _norm_fp(anchor)
+    if not anchor or _is_leaky(anchor):
+        return
+    _record_control(
+        state, "GT_SCOPE_NATIVE", "mini_seam.scope.native_render", "NO_EFFECT",
+        candidate_bytes="",
+        fact_class="localization",
+        candidate_id=f"localization:{anchor}",
+        reason="certified_search_scope_no_certified_neighbour",
+    )
+
+
 def _certified_search_scope(
     state: GatewayState, anchor_file: str,
 ) -> SearchScopeSelection:
@@ -1853,7 +1916,12 @@ def _certified_search_scope(
             key=lambda row: (-row.confidence, row.related_file,
                              row.resolution_method, row.edge_id),
         )[:_SEARCH_SCOPE_TOPN])
-        return SearchScopeSelection(revision, selected)
+        selection = SearchScopeSelection(revision, selected)
+        # The certification RAN to completion: record the correctly-silent NO_EFFECT
+        # mediation (empty selection) so GT_SCOPE_NATIVE's terminal has a typed receipt.
+        # A shaped (non-empty) selection is left for the delivery-time splice's APPLIED.
+        _record_scope_certification(state, anchor_file, selection)
+        return selection
     except (sqlite3.Error, TypeError, ValueError):
         return SearchScopeSelection()
     finally:

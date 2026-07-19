@@ -952,6 +952,24 @@ def _merge_verdict(current: str | None, incoming: str) -> str:
     return incoming if _VERDICT_RANK.get(incoming, 0) > _VERDICT_RANK.get(current, 0) else current
 
 
+def _merge_gate(current: bool | None, incoming: bool | None) -> bool | None:
+    """Roll up the fair-probe GATE across every verdict contributing to one fact class.
+
+    Gate precedence is by STRENGTH OF PROOF, NOT by ``_VERDICT_RANK`` (which orders the reported
+    ``verdict`` headline): a proven behavioural ``CAUSAL`` (True) wins; else a proven
+    ``SELF_LOCALIZED`` (False, an honest non-causal) wins; else ``None`` (unmeasured). A
+    mechanism-only / enrichment verdict (``CAUSAL_FORK`` / ``CAUSAL_PAIRED`` — both gate ``None``
+    by B5) therefore can NEVER MASK a co-present derivable ``SELF_LOCALIZED`` / ``CAUSAL`` down to
+    ``None``: it only contributes ``None``, which loses to any concrete bool. This never mints a
+    ``True`` without a ``CAUSAL`` adjudication (no bar weakening) — it only stops a derivable
+    verdict being dropped to ``None`` when a non-gating verdict happens to out-rank it."""
+    if current is True or incoming is True:
+        return True
+    if current is False or incoming is False:
+        return False
+    return None
+
+
 def _verdict_to_bool(verdict: str) -> bool | None:
     """The behavioural fair-probe gate.
 
@@ -1178,13 +1196,23 @@ def join_fair_probes(
     all_probes = randomized + paired + forks
 
     verdict_by_class: dict[str, str] = {}
+    # The fair-probe GATE, rolled up SEPARATELY from the reported ``verdict`` headline: a
+    # non-gating (mechanism-only ``CAUSAL_FORK`` / enrichment ``CAUSAL_PAIRED``) verdict that
+    # out-ranks a co-present derivable ``SELF_LOCALIZED`` / ``CAUSAL`` for the HEADLINE must NOT
+    # drop the gate to ``None`` — the gate is the strongest PROVEN behavioural bool (see
+    # ``_merge_gate``). Fixes the drop-to-None where the join carried a derivable verdict.
+    gate_by_class: dict[str, bool | None] = {}
+
+    def _record(canon: str, verdict: str) -> None:
+        verdict_by_class[canon] = _merge_verdict(verdict_by_class.get(canon), verdict)
+        gate_by_class[canon] = _merge_gate(
+            gate_by_class.get(canon), _verdict_to_bool(verdict)
+        )
 
     # randomized probes carry the adjudicated CAUSAL / SELF_LOCALIZED / UNMEASURED verdict; the
     # paired/fork probes carry their own explicit verdict.
     for probe in all_probes:
-        verdict_by_class[probe.fact_class] = _merge_verdict(
-            verdict_by_class.get(probe.fact_class), probe.causal_verdict
-        )
+        _record(probe.fact_class, probe.causal_verdict)
 
     # every delivered row also contributes its no-probe adjudication (SELF_LOCALIZED /
     # UNMEASURED) so a class with prior self-acquisition and no holdout is graded honestly.
@@ -1194,7 +1222,7 @@ def join_fair_probes(
         if canon is None:
             continue
         if not _valid_seal(ec.delivery_seal):
-            verdict_by_class[canon] = _merge_verdict(verdict_by_class.get(canon), UNMEASURED)
+            _record(canon, UNMEASURED)
             continue
         verdict = adjudicate(
             evidence_type=ec.evidence_type,
@@ -1203,14 +1231,14 @@ def join_fair_probes(
             chronology=ec.chronology,
             matched_probe=None,
         ).fair_probe_verdict
-        verdict_by_class[canon] = _merge_verdict(verdict_by_class.get(canon), verdict)
+        _record(canon, verdict)
 
     per_fact_class: dict[str, Any] = {}
     for fact_class, verdict in sorted(verdict_by_class.items()):
         class_probes = [p for p in all_probes if p.fact_class == fact_class]
         per_fact_class[fact_class] = {
             "verdict": verdict,
-            "fair_probe": _verdict_to_bool(verdict),
+            "fair_probe": gate_by_class.get(fact_class),
             "randomized_probes": sum(1 for p in class_probes if p.probe_kind == "randomized"),
             "paired_baseline_probes": sum(
                 1 for p in class_probes if p.probe_kind == "paired_baseline"

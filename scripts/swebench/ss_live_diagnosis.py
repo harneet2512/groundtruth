@@ -515,6 +515,71 @@ def _perf_status(value: object, *, scope: str = "task") -> str:
     return "MEASURED"
 
 
+def _run_perf_status(
+    run_measurement: object,
+    run_row: object,
+    task_buckets: dict[str, str],
+) -> str:
+    """Adjudicate the run-grain PERF bucket, joining the evidence that IS present.
+
+    The authoritative ``gt_run_metrics.v2`` artifact (``gt_run_metrics.py``) carries
+    the per-metric run DISTRIBUTION — the measured/missing/unmeasured/failed/
+    not_applicable/right_censored task partitions — but it carries NO ``ss_features``
+    and therefore NO run ``ss_readiness``: that readiness object only exists on the
+    ``gt_feature_metrics`` run rollup, which this reader is never handed. Reading the
+    run readiness from ``run_metrics["ss_features"]`` (as the legacy inline join did)
+    is thus structurally guaranteed to miss on real data and collapse every genuinely
+    MEASURED run row to ``FAILED:measurement:readiness_role`` — a measurement-defect
+    for a metric whose per-task values are fully present.
+
+    When an explicit run readiness IS attached (the rollup path, and the crafted
+    fixtures that mirror it), adjudicate it verbatim through ``_perf_status`` so the
+    existing bar is unchanged. Otherwise derive the SS-MEASURE run verdict from the
+    distribution partition plus this reader's OWN per-task adjudication
+    (``task_buckets``, each already gated through ``_perf_status`` at task grain):
+    ``aggregate_coverage`` binds MEASURED only when the distribution is complete over
+    the whole expected population (no missing/unmeasured/failed tasks) AND every
+    contributing task row is a sound, resolved measurement (MEASURED / NOT_APPLICABLE
+    / RIGHT_CENSORED). A MEASURED distribution row alone never promotes — the
+    per-task SS-MEASURE gates (precision, provenance, structure) are enforced only on
+    the task grain, so an unresolved task row fails the run closed with a named gate.
+    """
+    if isinstance(run_row, dict) and isinstance(run_row.get("ss_readiness"), dict):
+        joined = dict(run_measurement) if isinstance(run_measurement, dict) else {}
+        joined["ss_readiness"] = run_row["ss_readiness"]
+        return _perf_status(joined, scope="run")
+    if not isinstance(run_measurement, dict):
+        return "UNMEASURED"
+    status = run_measurement.get("status")
+    if status not in PERF_BUCKETS[:4]:
+        return "FAILED"
+    # Honest abstentions (NOT_APPLICABLE / RIGHT_CENSORED / UNMEASURED — e.g. a run
+    # with a genuinely missing task) claim no measurement and pass through unadjudicated.
+    if status != "MEASURED":
+        return str(status)
+    # status == MEASURED: prove aggregate coverage only from present, complete evidence.
+    partitions = (
+        run_measurement.get("missing_tasks"),
+        run_measurement.get("unmeasured_tasks"),
+        run_measurement.get("failed_tasks"),
+    )
+    if any(not isinstance(part, list) for part in partitions):
+        return "FAILED:measurement:aggregate_coverage"
+    if any(part for part in partitions):
+        return "FAILED:measurement:aggregate_coverage"
+    if not task_buckets:
+        return "UNMEASURED:measurement:aggregate_coverage"
+    resolved = {"MEASURED", "NOT_APPLICABLE", "RIGHT_CENSORED"}
+    unresolved = [bucket for bucket in task_buckets.values() if bucket not in resolved]
+    if unresolved:
+        # A MEASURED run distribution cannot outrank a contributing task row that this
+        # reader could not itself resolve; surface it, never a manufactured pass.
+        if any(bucket.startswith("FAILED") for bucket in unresolved):
+            return "FAILED:measurement:aggregate_coverage"
+        return "UNMEASURED:measurement:aggregate_coverage"
+    return "MEASURED"
+
+
 def _requires_visible_audit(feature: str, family: str) -> bool:
     """Whether this row's terminal contract depends on model-visible bytes.
 
@@ -1262,23 +1327,16 @@ def diagnose_run(
                         dict(row) if isinstance(row, dict) else {}
                     )
                 run_measurement = run_perf[feature]
-                # NO-GO defect 5: the run-grain SS-MEASURE readiness lives on the writer's
-                # ss_features run row (gt_feature_metrics ~4371), not on the raw
-                # mandatory_performance row. Join it for adjudication; a MEASURED claim
-                # with no readiness fails closed inside _perf_status.
+                # The run-grain SS-MEASURE readiness lives on the gt_feature_metrics run
+                # rollup (gt_feature_metrics ~4371) when that rollup is what is passed. The
+                # authoritative gt_run_metrics.v2 artifact carries only the run DISTRIBUTION
+                # (no ss_features), so reading readiness from run_metrics["ss_features"] misses
+                # on real data. _run_perf_status adjudicates an explicit readiness verbatim and
+                # otherwise derives aggregate coverage from the distribution partition joined to
+                # this reader's own per-task PERF adjudication — MEASURED only when the whole
+                # population is covered and every contributing task row is itself sound.
                 _run_row = (run_metrics.get("ss_features") or {}).get(feature)
-                run_bucket = _perf_status(
-                    {
-                        **run_measurement,
-                        **(
-                            {"ss_readiness": _run_row["ss_readiness"]}
-                            if isinstance(_run_row, dict)
-                            and isinstance(_run_row.get("ss_readiness"), dict)
-                            else {}
-                        ),
-                    },
-                    scope="run",
-                )
+                run_bucket = _run_perf_status(run_measurement, _run_row, task_buckets)
             else:
                 for task in task_order:
                     if task in unavailable_tasks:

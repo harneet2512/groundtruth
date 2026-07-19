@@ -235,6 +235,16 @@ def _boundary_indices(
             # when the grader's _parse_timeline edit detection missed it (seam is authority).
             for ev in _SEAM_PHASE_TO_BOUNDARIES.get(str(row.get("event_type") or ""), ()):  # noqa: E501
                 out[ev].append(mi)
+            # b5: a governor recovery steer is the seam's authority that a ``failure_obs``
+            # occurred at its iteration — the governor fires ONLY on stuck/no-progress
+            # detection, a REAL observed failure the grader-side ``_parse_timeline``
+            # (has_build_fail) can MISS (it flags only explicit build-failure text). The
+            # registry pins recovery's boundary to failure_obs (required_event ==
+            # failure_obs), so the row's OWN recorded event opens that boundary at the same
+            # iteration->tool_ordinal message the delivery uses. Registry-driven (any
+            # failure_obs class inherits it — never a class-string key) and additive.
+            if required_event(_row_evidence_type(row)) == "failure_obs":
+                out["failure_obs"].append(mi)
 
     for ev in out:
         out[ev] = sorted(set(out[ev]))

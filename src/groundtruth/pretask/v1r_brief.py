@@ -2881,6 +2881,82 @@ def _cochange_evidence(
     return evidence
 
 
+def _primary_cochange_evidence(
+    *,
+    candidate_path: str,
+    co_change_paths: list[str],
+) -> dict[str, object]:
+    """Self-sealed co-change witness for a PRIMARY localization candidate.
+
+    Distinct from the cross-domain bridge witness (``_cochange_evidence``): the
+    bridge proves a candidate co-changed with the SYMPTOM files across dated
+    commits, whereas this proves the delivered localization candidate carries its
+    own mined co-change neighbourhood — the files rendered on its
+    ``Also changes: …`` line. That neighbourhood comes from the indexer's
+    ``cochanges`` table (or the git-log miner) as a ranked file list with no
+    per-commit rows, so the witness names the neighbours directly and self-seals
+    them with the SAME sha256-over-canonical-JSON scheme the bridge uses. The
+    neighbour list is sorted, de-duplicated and never includes the candidate
+    itself, so a downstream reader can prove the rows were not mutated.
+    """
+    kept = sorted({
+        c for c in co_change_paths
+        if isinstance(c, str) and c and c != candidate_path
+    })
+    evidence: dict[str, object] = {
+        "kind": "cochange_history",
+        "source": "primary_path",
+        "candidate_path": candidate_path,
+        "count": len(kept),
+        "co_change_paths": kept,
+    }
+    canonical = json.dumps(
+        evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    evidence["source_identity_sha256"] = hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    return evidence
+
+
+def _primary_cochange_support(
+    *,
+    candidate_path: str,
+    entry_co_changes: list[str] | None,
+    components: dict[str, float],
+    bridge_evidence: object,
+) -> tuple[object, list[str] | None]:
+    """Stamp co-change SUPPORT onto a delivered localization candidate's proof.
+
+    Returns ``(cochange_evidence, proof_co_changes)``. Keyed only on the general
+    condition — *this delivered candidate carries a real (non-test) co-change
+    neighbour list* — never on a task/repo/candidate id. A cross-domain bridge
+    candidate already owns its self-sealed ``cochange_evidence`` and
+    ``components["cochange"]`` (entered via ``cochange``); it is returned
+    untouched so its proof stays byte-identical. Otherwise, when the neighbour
+    list is non-empty and no cochange component is present yet, mint the
+    primary-path witness and stamp ``components["cochange"]`` in place so the
+    ACQ SOURCE-5 join stops being blind to it. When neither applies, the input
+    evidence (``None`` for an ordinary candidate) is returned unchanged.
+    """
+    if isinstance(bridge_evidence, dict):
+        return bridge_evidence, None
+    # Mirror the rendered "Also changes: …" filter exactly: drop test/demo paths
+    # and the candidate itself, then de-duplicate. Only a NON-EMPTY real
+    # neighbourhood mints a witness (never a hollow count-0 support row).
+    kept = sorted({
+        c for c in (entry_co_changes or [])
+        if isinstance(c, str) and c and c != candidate_path and not _is_test_path(c)
+    })
+    if not kept or float(components.get("cochange", 0.0) or 0.0) > 0.0:
+        return bridge_evidence, None
+    evidence = _primary_cochange_evidence(
+        candidate_path=candidate_path, co_change_paths=kept,
+    )
+    components["cochange"] = float(evidence["count"])
+    return evidence, list(evidence["co_change_paths"])  # type: ignore[arg-type]
+
+
 def _expand_via_test_coimport(
     symptom_files: list[str], graph_db: str, max_expansion: int = 3
 ) -> list[dict]:
@@ -6680,6 +6756,21 @@ def generate_v1r_brief(
         _components = _terminal_acquisition_components(
             _components, _proof_path, body_paths=_terminal_body_paths,
         )
+        # ACQ SOURCE-5 (cochange_history) + INFLUENCE-5 (cochange_prior): the
+        # candidate's mined co-change neighbours (its "Also changes: …" line) are
+        # a first-class SUPPORT signal, but were never stamped onto the emitted
+        # proof — so both features sat dark on every ordinary localization
+        # candidate. Stamp components["cochange"] and a self-sealed primary-path
+        # witness here (bridge candidates keep their own sealed witness untouched).
+        _bridge_cochange_ev = (
+            _r.get("cochange_evidence") if isinstance(_r, dict) else None
+        )
+        _cochange_ev, _cc_for_proof = _primary_cochange_support(
+            candidate_path=_proof_path,
+            entry_co_changes=getattr(_e, "co_changes", None),
+            components=_components,
+            bridge_evidence=_bridge_cochange_ev,
+        )
         _localization_proof.append({
             "candidate_id": _localization_candidate_id(
                 _proof_path),
@@ -6700,9 +6791,7 @@ def generate_v1r_brief(
             "witness_component": float(_components.get("witness", 0.0) or 0.0),
             "entered_via": str(_r.get("entered_via", "") if isinstance(_r, dict) else ""),
             "cochange_evidence": (
-                _r.get("cochange_evidence")
-                if isinstance(_r, dict) and _components.get("cochange", 0.0) > 0.0
-                else None
+                _cochange_ev if _components.get("cochange", 0.0) > 0.0 else None
             ),
             "acquisition_sources": _candidate_acquisition_sources(
                 graph_db,
@@ -6717,6 +6806,10 @@ def generate_v1r_brief(
                 ),
             ),
         })
+        # Data-lineage pointer for the primary-path co-change witness only. Bridge
+        # candidates (``_cc_for_proof is None``) keep their exact prior proof shape.
+        if _cc_for_proof is not None:
+            _localization_proof[-1]["co_changes"] = _cc_for_proof
 
     # --- AUDIT snapshots (READ-ONLY; gated by GT_AUDIT_DIR; no ranking effect) ---
     # Persists the absorption lineage: for each rendered entry, the LIVE (exact-path)

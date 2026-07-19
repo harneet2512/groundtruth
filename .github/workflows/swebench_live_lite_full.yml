@@ -843,6 +843,16 @@ jobs:
           # obligations as a plain checklist (no <gt-*> tags). Baseline arm skips this step.
           GT_BRIEF_MINIMAL: '1'
           GT_BRIEF_NATIVE: '1'
+          # SS-5 (2026-07-19): the acknowledgment-FORM arm layers the requirement-extractor
+          # discipline (imperative-only, kind-stripped) ON TOP of GT_BRIEF_NATIVE at the SAME
+          # brief-GENERATION site — v1r_brief._ss_ack_form_on / _terminal_pretask_mediator_
+          # participation. Like GT_BRIEF_NATIVE/GT_INSEAM_METRICS the agent-only profile fan-out
+          # is too late for this step's V1RBriefResult, so GT_SS_ACK_FORM emitted ZERO
+          # control.participation rows (run 29694879462: 0/35 vs GT_BRIEF_NATIVE 35/35) — DARK.
+          # Set it here (host env for the proof step) AND forward it across the docker boundary
+          # via substrate_proof.sh -e (default :-0, byte-identical for any caller that does not
+          # opt in). Baseline arm skips this step.
+          GT_SS_ACK_FORM: '1'
           # R4 (run-#3 pilot, 2026-07-18): the re-slot flag must ALSO be on where the brief
           # is GENERATED (same smoke-finding class as above) so the minimal reducer retires
           # the MEDIUM/LOW localization header too — otherwise the step-0 header ships at

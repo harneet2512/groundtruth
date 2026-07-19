@@ -1729,11 +1729,18 @@ def _control_participation_evidence(
         ):
             continue
 
-        delivery_indices = (
-            range(index - 1, -1, -1)
-            if record.temporal_relation == RECEIPT_FOLLOWS_DELIVERY
-            else range(index + 1, len(rows))
-        )
+        if record.temporal_relation == RECEIPT_FOLLOWS_DELIVERY:
+            delivery_indices: "list[int]" = list(range(index - 1, -1, -1))
+        else:
+            # CONTROL_PRECEDES_DELIVERY: the seam may FLUSH the sealed delivery row
+            # BEFORE the control row even though the control decision came first
+            # temporally, so search forward (normal) THEN backward (flushed) — the
+            # in-loop identity match still gates which row actually binds, so this
+            # only widens WHERE a real delivery is found, never WHICH one qualifies.
+            delivery_indices = [
+                *range(index + 1, len(rows)),
+                *range(index - 1, -1, -1),
+            ]
         for delivery_index in delivery_indices:
             delivery = rows[delivery_index]
             if delivery.get("outcome") != "delivered":

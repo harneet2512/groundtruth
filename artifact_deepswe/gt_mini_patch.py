@@ -4866,7 +4866,14 @@ def _loc_reslot_payload():
     empty_scope = _ScopeSelection()
     try:
         st = _GatewayState(graph_db=_db_path(), repo_root=_root(),
-                           issue_text=_issue_text(), episode=_EPISODE)  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
+                           issue_text=_issue_text(), episode=_EPISODE,  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
+                           # Thread the SAME typed durable control writer the gateway-augment
+                           # path uses (line ~14234) so _certified_search_scope's scope-
+                           # certification decision (GT_SCOPE_NATIVE) reaches the control.
+                           # participation ledger. None when metrics are off -> exact no-op,
+                           # all delivered bytes preserved.
+                           control_recorder=(
+                               _control_participation_record if _inseam_metrics_on() else None))
         rows = _rlr(st)  # episode-memoized; SHARED with the (live-excluded) Gateway path
         block = _rrl(rows) if rows else ""
         selection = empty_scope
@@ -8568,34 +8575,14 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         _obl_edited = _edited_symbols_for_obligations()  # P1(d): span-augmented
         tracker.update(
             _obl_edited, _oracle_tested_tokens, _action_count)
-        # O-2 (flag GT_OBLIGATION_FRESHNESS, default-off byte-identical): demote a
-        # TESTED obligation whose symbol is edited AFTER its test — the per-turn NEW
-        # edits (cumulative delta) are the freshness signal; the cumulative set alone
-        # would demote on the pre-test edit too. (Residual: a re-edit of an ALREADY-
-        # edited symbol does not enter the delta — that needs a retained per-turn
-        # per-symbol edit signal the seam does not yet keep; documented gap.)
-        if _obligation_freshness_on():
-            global _prev_obl_edited
-            _new_edits = set(_obl_edited) - _prev_obl_edited
-            _freshness_transitions = []
-            _freshness_error = None
-            if _new_edits:
-                try:
-                    _freshness_transitions = tracker.apply_edit_freshness(
-                        _new_edits, _action_count)
-                except Exception as exc:  # noqa: BLE001 — freshness never breaks the path
-                    _freshness_error = exc
-            _control_participation_record(
-                "GT_OBLIGATION_FRESHNESS",
-                "mini_seam.obligation_nudge.freshness_demotion",
-                ("ERROR" if _freshness_error is not None else
-                 "APPLIED" if _freshness_transitions else "NO_EFFECT"),
-                reason=((f"freshness_error:{type(_freshness_error).__name__}"
-                         if _freshness_error is not None else
-                         "tested_obligation_demoted" if _freshness_transitions
-                         else "no_stale_tested_obligation")),
-            )
-            _prev_obl_edited = set(_obl_edited)
+        # O-2 (flag GT_OBLIGATION_FRESHNESS): the freshness-demotion CONTROL RECORD
+        # no longer lives here. It was dark on every V2 run because this legacy block
+        # is only reached when V2 obligations are ABSENT (see _review_obligation_candidate).
+        # It now fires from _emit_obligation_freshness_control(om), called at the TOP of
+        # _review_obligation_candidate BEFORE the V2/legacy dispatch, so the record is
+        # gradeable on both producers. Observability-only: the legacy tracker it drives is
+        # not the V2 delivery path, and this function's own tracker.update() (above) still
+        # sets the statuses this checklist renders. Default-off => no-op, byte-identical.
         _persist_obligation_status(tracker)
         statuses = tracker.statuses_tuple(
             _obl_edited, _oracle_tested_tokens)
@@ -8668,12 +8655,77 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         return None
 
 
+def _emit_obligation_freshness_control(om) -> None:
+    """O-2 (GT_OBLIGATION_FRESHNESS, CAP.eligibility) — emit the freshness-demotion
+    CONTROL RECORD at the review boundary, INDEPENDENT of which producer owns delivery
+    this turn (V2 ``obligation.unexercised`` OR legacy ``spec.obligation``).
+
+    Why this exists as a standalone: the record used to live inside
+    ``_obligation_nudge_block``, which ``_review_obligation_candidate`` SKIPS whenever V2
+    obligations are present — so the feature was 100%-dark on every V2 run. Lifting it here
+    fires it on the GENERAL condition (a legacy obligation tracker exists and this turn
+    carries NEW edits vs the last-seen edit set), never keyed on any task/repo/id.
+
+    The V2 branch never constructs the legacy tracker, so this helper builds/reuses it via
+    ``_get_obligation_tracker(om)`` and keeps it current with ``tracker.update`` — otherwise
+    a genuine stale-edit-after-test could never be sensed on a V2 run. This is
+    observability-only and additive: the legacy tracker is NOT the V2 delivery path, so
+    ``obligation.unexercised`` bytes are untouched. Default-off (flag) => a pure no-op, so
+    flag-off delivery stays byte-identical. Correct-or-quiet: no oracle / no obligations /
+    any fault -> silent."""
+    if not _obligation_freshness_on():
+        return
+    global _prev_obl_edited
+    try:
+        obls = om.load_obligations(_anchors_path())
+        if not obls:
+            return
+        tracker = _get_obligation_tracker(om)
+        _obl_edited = _edited_symbols_for_obligations()  # P1(d): span-augmented
+        # Keep the legacy tracker current even on a V2 run (the V2 branch never updates
+        # it) so apply_edit_freshness can tell a stale post-test edit from a pre-test one.
+        tracker.update(_obl_edited, _oracle_tested_tokens, _action_count)
+        # The per-turn NEW edits (cumulative delta) are the freshness signal; the
+        # cumulative set alone would demote on the pre-test edit too.
+        _new_edits = set(_obl_edited) - _prev_obl_edited
+        _freshness_transitions = []
+        _freshness_error = None
+        if _new_edits:
+            try:
+                _freshness_transitions = tracker.apply_edit_freshness(
+                    _new_edits, _action_count)
+            except Exception as exc:  # noqa: BLE001 — freshness never breaks the path
+                _freshness_error = exc
+        _control_participation_record(
+            "GT_OBLIGATION_FRESHNESS",
+            "mini_seam.obligation_nudge.freshness_demotion",
+            ("ERROR" if _freshness_error is not None else
+             "APPLIED" if _freshness_transitions else "NO_EFFECT"),
+            reason=((f"freshness_error:{type(_freshness_error).__name__}"
+                     if _freshness_error is not None else
+                     "tested_obligation_demoted" if _freshness_transitions
+                     else "no_stale_tested_obligation")),
+        )
+        _prev_obl_edited = set(_obl_edited)
+    except Exception:  # noqa: BLE001 — observability must never break the review path
+        return
+
+
 def _review_obligation_candidate():
     """Select the review-boundary producer and its delivery class.
 
     V2 keeps its honest ``obligation.unexercised`` identity and Lane-A semantics;
     the legacy status checklist remains a ``spec.obligation`` steer.
     """
+    # O-2: fire the GT_OBLIGATION_FRESHNESS control BEFORE the producer dispatch so it is
+    # gradeable on the V2 path too (the legacy _obligation_nudge_block, its old home, is
+    # unreachable when V2 obligations are present). Observability-only; never blocks dispatch.
+    om = _load_gt_oracle()
+    if om is not None:
+        try:
+            _emit_obligation_freshness_control(om)
+        except Exception:  # noqa: BLE001 — observability never blocks the producer
+            pass
     if _load_obligations_v2() is not None:
         return (
             "obligation.unexercised",

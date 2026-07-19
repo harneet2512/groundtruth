@@ -652,6 +652,8 @@ if [ "$HARNESS" = "deepswe" ]; then
       -e GT_SEM_BODY="${GT_SEM_BODY:-1}" \
       -e GT_BRIEF_MINIMAL="${GT_BRIEF_MINIMAL:-1}" \
       -e GT_BRIEF_NATIVE="${GT_BRIEF_NATIVE:-1}" \
+      -e GT_SS_ACK_FORM="${GT_SS_ACK_FORM:-0}" \
+      -e GT_LOC_RESLOT="${GT_LOC_RESLOT:-0}" \
       -e GT_INSEAM_METRICS="${GT_INSEAM_METRICS:-0}" \
       -e GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
       -e GT_CONTENT_LEG="${GT_CONTENT_LEG:-1}" \
@@ -695,6 +697,8 @@ else
       -e GT_SEM_BODY="${GT_SEM_BODY:-1}" \
       -e GT_BRIEF_MINIMAL="${GT_BRIEF_MINIMAL:-1}" \
       -e GT_BRIEF_NATIVE="${GT_BRIEF_NATIVE:-1}" \
+      -e GT_SS_ACK_FORM="${GT_SS_ACK_FORM:-0}" \
+      -e GT_LOC_RESLOT="${GT_LOC_RESLOT:-0}" \
       -e GT_INSEAM_METRICS="${GT_INSEAM_METRICS:-0}" \
       -e GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
       -e GT_CONTENT_LEG="${GT_CONTENT_LEG:-1}" \
