@@ -672,11 +672,20 @@ def _detect_runner(command: list[str]) -> str:
     return command[0] if command else ""
 
 
+# Leak/verdict-robustness (2026-07-19): colorized runner output (tty containers,
+# FORCE_COLOR/PY_COLORS repos) interleaves ANSI CSI sequences into the very tokens the
+# parsers below match as plain text ("1 failed", "FAILED x::y"), silently mis-counting
+# verdicts and mis-attributing failures. De-colorize at THIS single parsing surface so
+# every caller (direct subprocess + executor path) is covered. No-op on colorless input.
+_RE_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
 def _parse_test_output(text: str, command: list[str]) -> dict[str, int]:
     """Best-effort pass/fail extraction from common test runner outputs."""
     counts = {"passed": 0, "failed": 0, "errored": 0}
     if not text:
         return counts
+    text = _RE_ANSI_CSI.sub("", text)
 
     runner = _detect_runner(command)
 
@@ -756,6 +765,7 @@ def _parse_failing_test_names(text: str) -> list[str]:
     of the marker; never treat the progress bracket as a test name.
     """
     names: list[str] = []
+    text = _RE_ANSI_CSI.sub("", text)
     for pattern in (
         r"^(\S+::\S+)\s+FAILED(?:\s|$)",
         r"^FAILED\s+(\S+::\S+?)(?:\s+-|\s*$)",

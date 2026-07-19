@@ -99,3 +99,27 @@ def test_exact_configured_root_normalizes_absolute_container_diagnostic() -> Non
         {"src/parser.py"},
         repo_root="/testbed",
     ) is None
+
+
+def test_colorized_diagnostic_yields_same_identity_as_plain() -> None:
+    """ANSI/CSI-wrapped toolchain output must produce byte-identical identities.
+
+    Colorized pytest/CPython output wraps the path and error tokens in CSI
+    sequences; every anchored recognizer here would otherwise capture the
+    escape bytes into the path (never matching a candidate) or miss the error
+    line outright — silently disabling ack suppression under colorized runners.
+    """
+    plain = "src/parser.py:7: SyntaxError: invalid syntax"
+    colorized = (
+        "\x1b[1m\x1b[31msrc/parser.py\x1b[0m:7: "
+        "\x1b[1mSyntaxError\x1b[0m: invalid syntax"
+    )
+
+    assert implicated_source_path(
+        colorized, {"src/parser.py", "src/other.py"}
+    ) == "src/parser.py"
+
+    plain_identity = build_syntax_failure_identity("src/parser.py", SHA_A, plain)
+    color_identity = build_syntax_failure_identity("src/parser.py", SHA_A, colorized)
+    assert plain_identity is not None
+    assert color_identity == plain_identity

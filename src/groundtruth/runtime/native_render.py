@@ -33,6 +33,14 @@ import re
 from typing import Any
 
 _MAX_BODY = 1400  # Format D is short by design (lost-in-the-middle; ≤1 steer/turn)
+
+# Leak-robustness (2026-07-19): ANSI/VT escape sequences (colorized pytest/cargo output —
+# tty containers, FORCE_COLOR/PY_COLORS repos) prefix the very lines the strip/keep
+# recognizers match as PLAIN text, so a colored banner/summary line evades _RE_SUMMARY /
+# _RE_PYTEST_BANNER, falls into the permissive pass, and can carry a ``::nodeid`` through
+# the belt. Strip ALL CSI sequences BEFORE any recognition. No-op on colorless input —
+# every frozen byte pin is unmoved.
+_RE_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _MAX_KEEP_LINES = 14
 
 # --- identity classification -------------------------------------------------
@@ -227,6 +235,7 @@ def _final_scrub(line: str, test_files: set[str] | None = None) -> str:
     Byte-identity note (SM-1 LIPI close-vector 2): the ``_RE_GT_TAG_ANY`` strip is a NO-OP on the
     frozen ``render_covering_failure_native`` path — anonymized runner tokens never contain
     ``<gt-`` — so the covering byte pins are unmoved (proven, not assumed)."""
+    line = _RE_ANSI.sub("", line)   # belt: a colorized token can never mask an identity
     line = _RE_GT_TAG_ANY.sub("", line)
     line = _RE_CARGO_THREAD.sub("thread", line)
     line = _RE_RUST_TESTPATH.sub("<test>", line)
@@ -263,6 +272,8 @@ def render_covering_failure_native(
         return ""
     tf = {_norm(t) for t in (test_files or [])}
     raw = ((result.get("stdout_tail") or "") + "\n" + (result.get("stderr_tail") or ""))
+    # Leak-robustness: de-colorize BEFORE any recognition (see _RE_ANSI above).
+    raw = _RE_ANSI.sub("", raw)
     kept: list[str] = []
     for line in raw.splitlines():
         s = line.rstrip()
@@ -376,6 +387,7 @@ def deepest_agent_frame(result: dict[str, Any], test_files: list[str] | set[str]
     or None. Used by the attribution gate (was this red caused by the edit)."""
     tf = {_norm(t) for t in (test_files or [])}
     raw = ((result.get("stdout_tail") or "") + "\n" + (result.get("stderr_tail") or ""))
+    raw = _RE_ANSI.sub("", raw)   # colorized frames must still attribute (leak-robustness class)
     found: tuple[str, int] | None = None
     for line in raw.splitlines():
         fm = _RE_FRAME.match(line.rstrip())

@@ -18,6 +18,10 @@ __all__ = [
 ]
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+# Colorized toolchain output must still yield exact identities: every anchored
+# recognizer below is defeated by a leading CSI sequence, so raw diagnostics are
+# de-colorized at the two public ingestion points before any matching.
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _PY_LOCATION_RE = re.compile(
     r'^\s*File\s+["\'](?P<path>[^"\']+)["\'],\s*line\s+(?P<line>\d+)'
     r"(?:,\s*(?:column|col)\s+(?P<column>\d+))?",
@@ -99,6 +103,7 @@ def implicated_source_path(
     diagnostic: str, candidates: set[str], *, repo_root: str = ""
 ) -> str | None:
     """Return the one candidate named by an exact diagnostic location."""
+    diagnostic = _ANSI_CSI_RE.sub("", diagnostic or "")
     normalized_candidates = {
         _repo_path(path, repo_root) for path in candidates or set()
     }
@@ -137,6 +142,7 @@ def build_syntax_failure_identity(
     repo_root: str = "",
 ) -> FailureIdentity | None:
     """Build a complete exact identity, or ``None`` on missing/ambiguous truth."""
+    diagnostic = _ANSI_CSI_RE.sub("", diagnostic or "")
     path = _repo_path(source_path, repo_root)
     digest = (source_state_sha256 or "").strip().lower()
     if not path or not _SHA256_RE.fullmatch(digest):
