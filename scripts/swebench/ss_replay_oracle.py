@@ -283,19 +283,33 @@ def reconstruct_task(task: str, recorded_root: Path) -> ReconstructedTask:
 
     # progressively strip each delivered seal (ledger order) over a mutable buffer.
     stripped = [m.get("content", "") if isinstance(m.get("content"), str) else "" for m in msgs]
+    # D-N: home the it-th delivery on the it-th TOOL message (iteration is 1-indexed:
+    # pair k -> iteration k+1). The old `2*iter+1` hard-coded a 2-message prelude AND
+    # strict assistant/tool alternation, so ANY interstitial message (a reasoning turn
+    # with no command, a format re-prompt) drifted every later home and forced the
+    # O(M) full-scan — which then mis-homed byte-identical deltas onto the first
+    # occurrence. The shape-derived map reduces to 2*iter+1 on the canonical shape and
+    # stays exact across interstitials.
+    tool_msg_indices = [i for i, m in enumerate(msgs) if m.get("role") == "tool"]
     deliveries: list[Delivery] = []
     for r in _seal_rows(rows):
         it = int(r["iteration"]); n = int(r["chars_delivered"]); sha = str(r["content_sha256_16"])
-        # try the calibrated tool-observation index (2*iter+1) first, else full scan.
-        home = 2 * it + 1
+        # calibrated tool-observation index (shape-derived), else full scan.
+        expected = tool_msg_indices[it - 1] if 1 <= it <= len(tool_msg_indices) else 2 * it + 1
+        home = expected
         off = locate_seal(stripped[home], n, sha) if 0 <= home < len(stripped) else None
         if off is None:
+            # D-N: prefer the match NEAREST the expected tool-message index over the
+            # first global occurrence — byte-identical deltas at two iterations would
+            # otherwise mis-home the later delivery onto the earlier message.
             home, off = None, None
+            candidates = []
             for idx, c in enumerate(stripped):
                 o = locate_seal(c, n, sha)
                 if o is not None:
-                    home, off = idx, o
-                    break
+                    candidates.append((idx, o))
+            if candidates:
+                home, off = min(candidates, key=lambda t: abs(t[0] - expected))
         if home is None or off is None:
             # seal bytes not found anywhere — record as a residual/anomaly (never silently drop).
             deliveries.append(Delivery(str(r.get("layer")), str(r.get("event_type")), it, n, sha,
