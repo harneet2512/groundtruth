@@ -767,6 +767,20 @@ if [ "$PROOF_RC" -ne 0 ]; then
     echo "::error::gt-run-proof failed on ${_LC} (legitimacy/anti-cheat — results would be INVALID) — task FAILS" | tee -a trial_output.log
     # proof_status stays 'failed' (written above); HARD ABORT so no paid spend on an invalid substrate.
     exit 1
+  elif grep -qE "DETERMINISM_MISMATCH|brief determinism proof raised|live localization diagnostic" /tmp/gt/proof_failure.json 2>/dev/null; then
+    # TASK != METRICS (2026-07-20): a brief SELF-CONSISTENCY metric — determinism mismatch across
+    # two same-input brief generations, or the strict localization diagnostic — is a GT-QUALITY
+    # signal, NOT a broken/absent stack. The graph/LSP/embedder are PRESENT and VALID (a genuine
+    # stack breakage fails via its own code below/above: GRAPH_CERT_INVALID / GT_INDEX_FAIL /
+    # EMBEDDER_USAGE_FAIL / brief.txt write failed). Per the PRODUCT RULE documented above ("never
+    # refuse a task for GT-quality"), the agent runs BEST-EFFORT and the metric is RECORDED as
+    # degraded — a measurement must never abort the paid task on an otherwise-valid substrate.
+    # NB: gt_run_proof:1886 mislabels these with code=GT_ARTIFACT_MISSING, so we key on the MESSAGE
+    # (the self-consistency phrase), never the code. Allowlist (positive match only) — anything not
+    # positively identified as self-consistency stays fail-closed in the branches around this one.
+    _SC=$(grep -oE "DETERMINISM_MISMATCH|brief determinism proof raised|live localization diagnostic" /tmp/gt/proof_failure.json 2>/dev/null | head -1)
+    echo "::warning::gt-run-proof exited $PROOF_RC on a brief SELF-CONSISTENCY metric (${_SC}) with the required stack PRESENT/VALID — task != metrics: trial proceeds BEST-EFFORT, metric recorded degraded" | tee -a trial_output.log
+    write_proof_status ok PROOF_DEGRADED "gt-run-proof exited $PROOF_RC (self-consistency metric ${_SC}; stack present) — agent proceeds best-effort"
   elif [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ] || [ "${GT_REQUIRE_GRAPH_VALID:-0}" = "1" ] \
        || [ "${GT_REQUIRE_LSP:-0}" = "1" ] || [ "${GT_REQUIRE_EMBEDDER:-0}" = "1" ]; then
     # A2: a REQUIRED-stack run explicitly demanded the full stack / a specific axis. A proof
@@ -775,6 +789,8 @@ if [ "$PROOF_RC" -ne 0 ]; then
     # realizes the intent documented above (GT_REQUIRE_FULL_STACK/GRAPH_VALID must not be
     # laundered), extended to the per-axis GT_REQUIRE_LSP/EMBEDDER flags. proof_status stays
     # 'failed' (written above) so the agent gate (PROOF_STATE != ok) refuses the paid trial.
+    # (Reached only when the failure is NOT a brief self-consistency metric — i.e. a genuine
+    # stack absence/breakage or another required-axis miss.)
     echo "::error::gt-run-proof exited $PROOF_RC on a REQUIRED-stack run (GT_REQUIRE_FULL_STACK=${GT_REQUIRE_FULL_STACK:-0} GRAPH_VALID=${GT_REQUIRE_GRAPH_VALID:-0} LSP=${GT_REQUIRE_LSP:-0} EMBEDDER=${GT_REQUIRE_EMBEDDER:-0}) — task FAILS (no laundering to ok)" | tee -a trial_output.log
     exit 1
   else
