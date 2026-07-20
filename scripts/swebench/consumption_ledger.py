@@ -480,6 +480,13 @@ def _block_entities(
             mm = re.match(r"\s*([A-Za-z_]\w+)", part)
             if mm:
                 symbols.add(mm.group(1))
+    # D-Y: the TAGLESS native delivery forms carry the symbol as the trailing token
+    # of a `path:line:sym` (bare ripgrep) or `path:line: note: sym …` (D-S
+    # compiler-note) row, with NONE of the [CALLERS]/[WITNESS]/def markers above.
+    # Extract the leading identifier so the referenced-rung detector is not DARK on
+    # the native path (run6: referenced=0 for every producer despite delivered>0).
+    for m in re.findall(r"(?m)^[\w./\\+\-]+:\d+:(?:\s*note:\s*)?([A-Za-z_]\w{3,})", block):
+        symbols.add(m)
     symbols = {s for s in symbols if len(s) >= 4 and s.lower() not in _SYMBOL_STOP}
     # A file basename is already covered by ``files``; don't double it as a symbol.
     symbols -= files
