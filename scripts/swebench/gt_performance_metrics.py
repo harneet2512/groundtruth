@@ -1263,6 +1263,14 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
     # returned "failed" (value present + applicable=False). One matcher, no split.
     gold_edited_set = {f for f in edited_set if any(_path_match(f, g) for g in gold_set)}
     gold_viewed_set = {v for v in unique_viewed if any(_path_match(v, g) for g in gold_set)}
+    # SS-PERF (2026-07-19, run 29714439700 llama-factory): RECALL-type numerators count
+    # in GOLD space. Two distinct edited spellings suffix-matching ONE gold file (src/
+    # layouts) previously made recall = 2/1 = 2.0 — an impossible rate the validity gate
+    # correctly refused (metric_structure_valid=false, task not citable). Precision-type
+    # numerators stay in the edited/viewed space (numerator and denominator share the
+    # same spelling universe, so duplicates cancel and the rate stays bounded).
+    gold_files_edited = {
+        g for g in gold_set if any(_path_match(f, g) for f in edited_set)}
 
     n_edited = len(edited_set)
     n_gold = len(gold_set)
@@ -1273,7 +1281,7 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
     localization_precision = d8(n_gold_edited / n_edited) if n_edited else None
     # D3 (2026-07-18): no gold denominator -> UNMEASURED (None), never a fabricated 0.0 that
     # reads as a real "0% recall". Mirrors the sibling `else None` metrics above/below.
-    localization_recall = d8(n_gold_edited / n_gold) if n_gold else None
+    localization_recall = d8(len(gold_files_edited) / n_gold) if n_gold else None
     false_file_rate = d8((n_edited - n_gold_edited) / n_edited) if n_edited else None
     exploration_ratio = d8(n_viewed / n_edited) if n_edited else None
     gold_view_precision = d8(n_gold_viewed / n_viewed) if n_viewed else None
@@ -1331,7 +1339,9 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
         # internals (useful for debugging)
         "_unique_viewed": n_viewed,
         "_unique_edited": n_edited,
-        "_gold_edited_count": n_gold_edited,
+        # SS-PERF: name-faithful gold-space count (gold files edited, bounded by
+        # n_gold) — the applicability/censoring consumers read exactly this meaning.
+        "_gold_edited_count": len(gold_files_edited),
         "_gold_viewed_count": n_gold_viewed,
         "_terminal_step": terminal_step,
         "_l1_top5": top5,
@@ -1564,15 +1574,21 @@ def _compute_scope_completeness(timeline: list[dict], gold_files: list[str]) -> 
 
     gold_edited = {f for f in edited_files if any(_path_match(f, g) for g in gold_set)}
     non_gold_edited = edited_files - gold_edited
+    # SS-PERF (2026-07-19): coverage/discovery count in GOLD space — edited-spelling
+    # duplicates suffix-matching one gold file made scope_coverage 2/1 = 2.0 (validity
+    # gate refusal) and could fake multi_file_discovery from a single gold file.
+    # scope_excess stays in the edited space (spelling-consistent num/denominator).
+    gold_files_edited = {
+        g for g in gold_set if any(_path_match(f, g) for f in edited_files)}
     n_gold = len(gold_set)
     n_edited = len(edited_files)
 
     # D5 (2026-07-18): no gold denominator -> UNMEASURED (None), never a fabricated 0.0.
-    scope_coverage = d8(len(gold_edited) / n_gold) if n_gold else None
+    scope_coverage = d8(len(gold_files_edited) / n_gold) if n_gold else None
     scope_excess = d8(len(non_gold_edited) / n_edited) if n_edited else None
 
     # multi_file_discovery: for multi-file gold tasks, were the 2nd/3rd files found?
-    multi_file_discovery = len(gold_edited) >= 2 if n_gold > 1 else None
+    multi_file_discovery = len(gold_files_edited) >= 2 if n_gold > 1 else None
 
     # scope_gap_files: gold files the agent NEVER opened
     gold_never_opened = []
@@ -1588,7 +1604,8 @@ def _compute_scope_completeness(timeline: list[dict], gold_files: list[str]) -> 
         "multi_file_discovery": multi_file_discovery,
         "scope_gap_files": len(gold_never_opened),
         "_gold_gap_list": gold_never_opened,
-        "_gold_edited_count": len(gold_edited),
+        # SS-PERF: gold-space count (bounded by n_gold), matching the field's name.
+        "_gold_edited_count": len(gold_files_edited),
         "_non_gold_edited_count": len(non_gold_edited),
         "_total_edited_count": n_edited,
     }

@@ -550,6 +550,12 @@ jobs:
       # value to the deterministic seam. Both values are cross-checked in sealed artifacts.
       GT_SS_SHADOW_RATE_REQUESTED: ${{ needs.prepare.outputs.shadow_rate_requested }}
       GT_SS_SHADOW_RATE: ${{ needs.prepare.outputs.shadow_rate_effective }}
+      # SS-5 ACK-FORM (2026-07-20, run 29714439700 m1 witness): gt_agent builds the m1
+      # preamble BEFORE the in-seam profile fan-out runs, so the flag must be in the
+      # AGENT container env explicitly (the :855 brief-gen step env never reaches this
+      # job). Without it the LEGACY tool-framing preamble ships — the exact
+      # discount-training cue SS-5 exists to remove.
+      GT_SS_ACK_FORM: '1'
     defaults:
       run:
         shell: bash
@@ -1522,6 +1528,7 @@ jobs:
             -e GT_RL_PROFILE="${GT_RL_PROFILE:-2}" \
             -e GT_SS_SHADOW_RATE_REQUESTED="${GT_SS_SHADOW_RATE_REQUESTED}" \
             -e GT_SS_SHADOW_RATE="${GT_SS_SHADOW_RATE}" \
+            -e GT_SS_ACK_FORM="${GT_SS_ACK_FORM:-0}" \
             -e GT_ORACLE_EVENTS="/gt_out/gt_oracle_events.jsonl" \
             -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
