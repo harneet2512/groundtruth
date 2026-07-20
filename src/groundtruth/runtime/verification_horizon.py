@@ -96,11 +96,22 @@ def render_verify_emission(
         else "the relevant test suite or narrowest related target"
     )
     if band == "advisory":
-        body = (
-            f"GT: you have edited {edited_summary} but no test output observed "
-            f"so far references these changes. {test_info} {test_verb} them - "
-            f"consider running {test_action}."
-        )
+        if has_covering:
+            # grounded: a graph-linked covering test is known to exist
+            body = (
+                f"GT: you have edited {edited_summary} but no test output observed "
+                f"so far references these changes. {test_info} {test_verb} them - "
+                f"consider running {test_action}."
+            )
+        else:
+            # correct-or-quiet: no covering-test evidence — advise verification
+            # WITHOUT asserting that any relevant test covers the edit (the false
+            # "the relevant tests cover them" for files with no linked tests).
+            body = (
+                f"GT: you have edited {edited_summary} but no test output observed "
+                f"so far references these changes. Consider running {test_action} "
+                f"to exercise them."
+            )
     elif band == "urgent":
         body = (
             f"GT: ~{remaining} of {step_limit} steps remain. Your edits to {edited_summary} "

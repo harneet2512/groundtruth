@@ -6901,7 +6901,7 @@ except ImportError:
         r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
         r"|\b\d+ failing\b|Tests:\s+\d+ failed)")
     _TEST_PASS_RE = re.compile(
-        r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b"
+        r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b|\bPASSED\b"
         r"|^OK\b|^ok\s+\S+\s+[\d.]+s|^PASS$|^PASS\b"
         r"|OK \(\d+ tests?\)|Tests:\s+\d+ passed|\bpassed\b.*\b0 failed\b)",
         re.M)

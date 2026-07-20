@@ -43,7 +43,7 @@ TEST_RUNNER_RE = re.compile(
 # test_evidence_seen. A bare Traceback / "Error:" is NOT proof a test failed.
 # ---------------------------------------------------------------------------
 TEST_PASS_RE = re.compile(
-    r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b"
+    r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b|\bPASSED\b"
     r"|^OK\b|^ok\s+\S+\s+[\d.]+s|^PASS$|^PASS\b|BUILD SUCCESS"
     r"|OK \(\d+ tests?\)|Tests:\s+\d+ passed|\bpassed\b.*\b0 failed\b)",
     re.M)
