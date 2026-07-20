@@ -2059,9 +2059,10 @@ def _write_markdown(deep: dict, md_path: str) -> None:
 {rows([("input tokens", f(eff.get('llm_tokens_in'))), ("  cache-hit", f(eff.get('llm_cache_hit_tokens'))), ("  cache-miss", f(eff.get('llm_cache_miss_tokens'))), ("output tokens", f(eff.get('llm_tokens_out'))), ("total tokens", f(eff.get('llm_tokens_total'))), ("**cost USD**", f"**{f(eff.get('llm_cost_usd'))}**"), ("cost / action USD", f(eff.get('cost_per_action_usd'))), ("cost source", eff.get('cost_source'))])}
 
 ## GT reached the agent (fired AND delivered — from agent observation)
+Delivery total is the **sealed-ledger authority** (native delivery is TAGLESS, so the per-surface counts below are `<gt-*>` tag scans and read 0 for native forms).
 | surface | count |
 |---|---|
-{rows([("brief delivered", f(g.get('brief_delivered'))), ("gt-evidence delivered", f(g.get('evidence_delivered'))), ("graph-map delivered", f(g.get('graph_map_delivered'))), ("nudges delivered", f(g.get('nudge_delivered'))), ("gt_hook understand calls", f(g.get('understand_calls'))), ("gt_hook verify calls", f(g.get('verify_calls'))), ("GT observation chars", f(g.get('gt_observation_chars_total')))])}
+{rows([("**delivered total (sealed ledger)**", f"**{f(g.get('delivered_total_authoritative'))}**"), ("delivery authority", g.get('delivery_authority')), ("brief delivered", f(g.get('brief_delivered'))), ("gt-evidence delivered (tag scan)", f(g.get('evidence_delivered'))), ("graph-map delivered (tag scan)", f(g.get('graph_map_delivered'))), ("nudges delivered (tag scan)", f(g.get('nudge_delivered'))), ("gt_hook understand calls", f(g.get('understand_calls'))), ("gt_hook verify calls", f(g.get('verify_calls'))), ("GT observation chars", f(g.get('gt_observation_chars_total')))])}
 
 ## Stack live (graph / LSP / semantic)
 | metric | value |
