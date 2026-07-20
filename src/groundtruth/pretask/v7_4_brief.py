@@ -1465,10 +1465,19 @@ def run_v74(
         graph_only = graph_expanded - sem_files_pre
         if len(graph_only) > max_graph_expand:
             anchor_set_paths = set(trusted)
+            # DET-CAP (2026-07-19, smoke 29711373486 class C, llama-factory): this
+            # bounded cut was the ONE surviving order-dependent site in the
+            # acquisition — key was reach only, so equal-reach files at the
+            # [:max_graph_expand] boundary were admitted in `set` iteration order
+            # (per-process PYTHONHASHSEED), flipping the candidate set between the
+            # gate subprocess and the in-process witness (k_sem_top 73 vs 72 ->
+            # DETERMINISM_MISMATCH fail-closed, agent never started). Same B5-3
+            # pattern as the three fixes above: path tie-break + sorted iteration.
+            # Byte-identical wherever no tie straddles the cap.
             by_reach = sorted(
-                ((fp, reach_scores[fp].reach_score) for fp in graph_only if fp in reach_scores),
-                key=lambda x: x[1],
-                reverse=True,
+                ((fp, reach_scores[fp].reach_score)
+                 for fp in sorted(graph_only) if fp in reach_scores),
+                key=lambda x: (-x[1], x[0]),
             )
             graph_expanded = sem_files_pre | anchor_set_paths | {fp for fp, _ in by_reach[:max_graph_expand]}
 

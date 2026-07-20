@@ -106,7 +106,12 @@ def test_refusal_single_dose_and_ledger(monkeypatch):
     # 1st submit -> ONE refusal + a blocked ledger row.
     first = g._ss_submit_red_refusal()
     assert first.startswith("pre-commit hook failed:")
-    assert "pytest -q tests/test_widget.py" in first          # the agent's OWN command
+    # W5 (live leak run 29594276655): the echoed command passes _final_scrub, so the
+    # test-file identity is REDACTED to `<test>` on this GT-delivered surface (both live
+    # firings leaked the hidden-test path pre-W5 — native_render.py:449-475). The RED
+    # signal survives; the agent has its own concrete command in its history.
+    assert "pytest -q <test>" in first                        # scrubbed form of the agent's OWN command
+    assert "tests/test_widget.py" not in first                # the raw path must NOT leak
     assert g._ss_submit_red_fired is True
     # 2nd submit -> SILENT (single dose) + an allow ledger row.
     second = g._ss_submit_red_refusal()

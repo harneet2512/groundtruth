@@ -314,7 +314,13 @@ def test_terminal_control_cannot_infer_authority_from_arbiter_class(
             "l3.contract", produced, "src/mod.py", g.Event.POST_EDIT),
     )
 
-    assert rows == []
+    # Typed-lineage expansion (2026-07-16+): l3.contract now RESOLVES in the registry
+    # (fact_class caller_contract stamped on the legacy lane row), so the terminal
+    # control binds with REGISTERED authority — the invariant this test guards is that
+    # authority comes from the registry, never inferred from the arbiter class. Pin it.
+    assert len(rows) == 1
+    assert rows[0]["fact_class"] == "caller_contract"
+    assert rows[0]["control_ref"]["feature_id"] == "GT_CONTRACT_NATIVE"
 
 
 def test_steer_terminal_commit_precedes_delivery_and_collector_joins(

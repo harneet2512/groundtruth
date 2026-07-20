@@ -9164,6 +9164,31 @@ def _gateway_delivery_extra(envelope) -> dict:
     return extra
 
 
+# SS-SUBJ (2026-07-19, smoke 29711373486 defect class B): the TURN'S OBSERVED FILE was
+# bound as the envelope identity target for facts that are not ABOUT that file (Lane-A
+# defaults subject to krel — on a test turn, the test path). The envelope LEAK LAW then
+# correctly refuses the envelope (evidence_envelope validate law (a)) and
+# _seal_lane_delivery silently skips ALL receipt bookkeeping for a delivery that
+# legitimately shipped — a full receipt-ladder blackout (live kills: csvkit/hydra/
+# haystack-8997 obligations + verify.horizon.executed). The LAW IS RIGHT and unchanged;
+# the fix is at identity CREATION: a non-deliverable observed path is not the fact's
+# subject — derive the identity with an empty subject instead. Applied in LOCKSTEP at
+# every site that derives the same key (pool, steer pool, delivery-row extra, seal) so
+# binding.candidate_id == delivery_extra.candidate_id == env.dedup_key always agree.
+# Deliverable subjects pass through byte-identical (every currently-receipted delivery
+# keeps its exact key). Fail-closed: any fault -> "" (the leak-law polarity).
+def _envelope_subject(path: str) -> str:
+    """The envelope-identity subject for a delivery: the path itself when it is a
+    deliverable product path, else '' (never a test/demo/vendored observed file).
+    Uses the leak law's OWN predicate so this can never drift from the gate."""
+    try:
+        from groundtruth.runtime.evidence_envelope import _leaky_path
+        p = path or ""
+        return "" if (not p or _leaky_path(p)) else p
+    except Exception:  # noqa: BLE001 -- identity derivation must never raise
+        return ""
+
+
 def _lane_envelope_identity(kind: str, lineage=None) -> tuple[str, str]:
     """Use producer-selected registered identity, else the legacy lane identity."""
     if lineage is not None and bool(
@@ -9182,7 +9207,8 @@ def _lane_final_extra(kind: str, text: str, target: str, *, lineage=None) -> dic
         from groundtruth.runtime.evidence_envelope import EvidenceEnvelope
         producer, evidence_type = _lane_envelope_identity(kind, lineage)
         env = EvidenceEnvelope.build(
-            producer=producer, fact_id="", target=target or "",
+            producer=producer, fact_id="",
+            target=_envelope_subject(target or ""),  # SS-SUBJ lockstep
             evidence_type=evidence_type, payload=(text,), lineage=lineage)
         return {"candidate_id": env.dedup_key} if env.dedup_key else {}
     except Exception:  # noqa: BLE001
@@ -13007,6 +13033,21 @@ def _receipts_sidecar_path() -> str:
     return os.path.join(cert, "gt_receipts.jsonl")
 
 
+# SS-RCPT (2026-07-19, smoke 29711373486 defect class A): post-pool byte mutation
+# (e.g. the GT_SS_PROVENANCE line filter) makes the sealed envelope's dedup_key
+# (FINAL bytes) differ from the frozen ObservationBinding.candidate_id (PRODUCED
+# bytes) on behavioural lane deliveries — the strict reader then kills the whole
+# sidecar (law (h) candidate_id_mismatch; live kills: sh-744 + arviz-2413 lines
+# 4-5, detect.coherence). The join spine (opportunity/ledger/receipt) is COHERENT
+# on the produced identity, so neither side may be rewritten. Instead the writer
+# STAMPS THE PROOF: the produced-text dedup_key, computed by the SAME envelope
+# builder over producer_text. The reader tolerates the mismatch ONLY when
+# produced_dedup_key == binding.candidate_id (evidence-backed; an unexplained
+# mismatch — e.g. the class3 raw-key steer RED — stays fatal). Keyed dedup->key
+# so the promotion path (`acted` re-persist) inherits the same proof.
+_receipt_produced_keys: dict[str, str] = {}
+
+
 def _persist_receipt(env, *, kind: str, transition: str) -> None:
     """B-14: append ONE sealed envelope / receipt-state transition to the durable
     JSONL sidecar. ``kind`` = the seal site (``lane``/``gateway``); ``transition`` =
@@ -13029,6 +13070,11 @@ def _persist_receipt(env, *, kind: str, transition: str) -> None:
             "action_index": globals().get("_action_count", 0),
             "envelope": _env_to_dict(env),
         }
+        # SS-RCPT: attach the produced-identity proof when this delivery's bytes were
+        # mutated post-pool (map stamped at the seal site; empty for unmutated kinds).
+        _pk = _receipt_produced_keys.get(str(getattr(env, "dedup_key", "") or ""))
+        if _pk:
+            rec["produced_dedup_key"] = _pk
         lineage = getattr(env, "lineage", None)
         if lineage is not None:
             from groundtruth.runtime.feature_lineage import lineage_to_dict
@@ -13379,6 +13425,10 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
     except Exception:  # noqa: BLE001 — engines absent in-container -> no bookkeeping
         return
     try:
+        # SS-SUBJ: the observed-file target is not the fact's subject when leaky —
+        # sanitize ONCE at entry so both envelope builds below stay in lockstep with
+        # the pool key and delivery_extra (class B: leak law voided receipts).
+        target = _envelope_subject(target or "")
         producer, evidence_type = _lane_envelope_identity(kind, lineage)
         env = EvidenceEnvelope.build(
             producer=producer, fact_id="", target=target or "",
@@ -13430,6 +13480,24 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
                 reason="lane_envelope_candidate_identity_mismatch",
                 allow_candidate_mismatch=True)
             return
+        # SS-RCPT: when a post-pool mutation changed the bytes (producer_text differs
+        # from the sealed identity text), compute the PRODUCED-text dedup key with the
+        # SAME builder and stamp it for the receipt writer — the reader's evidence that
+        # binding.candidate_id (pool identity) and env.dedup_key (final bytes) diverge
+        # for exactly this attested mutation and nothing else. Correct-or-quiet.
+        try:
+            _final_identity = identity_text if identity_text is not None else text
+            if producer_text is not None and producer_text != _final_identity:
+                _produced_env = EvidenceEnvelope.build(
+                    producer=producer, fact_id="", target=target or "",
+                    evidence_type=evidence_type, payload=(producer_text,),
+                    lineage=lineage)
+                _produced_key = getattr(_produced_env, "dedup_key", "") or ""
+                _sealed_key = getattr(env, "dedup_key", "") or ""
+                if _produced_key and _sealed_key and _produced_key != _sealed_key:
+                    _receipt_produced_keys[_sealed_key] = _produced_key
+        except Exception:  # noqa: BLE001 -- proof stamping never breaks delivery
+            pass
         # B-14: persist the sealed lane envelope (level-1 delivered) durably — identity consistent.
         _persist_receipt(sealed, kind="lane", transition="delivered")
         _persist_lane_producer_attestation(
@@ -15559,8 +15627,11 @@ def _global_pool_add_lane_a(pool, out, cmd, lane_a, *, krel, event, kkind) -> No
         # filter drops nothing or GT_SS_PROVENANCE is off.
         _identity_text = (
             _ss_provenance_filter(text, _root()) if _ss_provenance_on() else text)
+        # SS-SUBJ: identity subject is the deliverable path or "" — in lockstep with
+        # _lane_final_extra + _seal_lane_delivery (see _envelope_subject).
         key = _ga_unified_dedup_key(
-            identity_producer, identity_evidence, subject_path, "", [_identity_text])
+            identity_producer, identity_evidence, _envelope_subject(subject_path),
+            "", [_identity_text])
         candidate_kkind = (
             "post_search" if kind == "post_search.localize" else kkind)
         cand = _ga_make_candidate(
@@ -15633,9 +15704,10 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
     # sealed bytes == keyed bytes); default-off (GT_STEER_NATIVE) this is byte-identical to win_text.
     _prepared_steer = (
         _steer_native(win_text, kind=kind) if _steer_native_on() else win_text)
+    # SS-SUBJ: identity subject sanitized in lockstep (see _envelope_subject).
     key = _ga_unified_dedup_key(
         _steer_identity_producer, _steer_identity_evidence,
-        krel or kf or "", "", [_prepared_steer])
+        _envelope_subject(krel or kf or ""), "", [_prepared_steer])
     cand = _ga_make_candidate(_GA_PLANE_STEER, kind, dedup_key=key,
                               target=krel or kf or "", kkind=kkind, seq=len(pool),
                               current_ordinal=_ga_rich_event_ordinal(event),
@@ -16483,9 +16555,16 @@ def _deliver_gate_winner(
         delivery_extra = _lane_delivery_extra(
             _last_gate_winner_kind, win_text, krel or kf or "", event,
             lineage=lineage)
+        # SS-LIN (2026-07-19, class D): forward the SAME lineage delivery_extra was
+        # minted with — without it the seal rebuilds the envelope on the fallback
+        # (kind,kind) identity, its dedup_key mechanically differs from
+        # delivery_extra["candidate_id"] on byte-identical text, and the CLASS-6(a)
+        # guard (correctly) fires ERROR + skips the receipt (live: jupyter-ai
+        # detect.loop, dynaconf verify.horizon.executed).
         _seal_lane_delivery(
             _last_gate_winner_kind, win_text, krel or kf or "",
-            base_output=steer_base, delivery_extra=delivery_extra)
+            base_output=steer_base, delivery_extra=delivery_extra,
+            lineage=lineage)
         _record_terminal_lane_controls(
             _last_gate_winner_kind,
             win_text,
@@ -16522,10 +16601,12 @@ def _commit_prepared_steer(out, cmd, kind: str, winner_hash: str, decision: dict
     _record_hook_fire(kind)
     delivery_extra = _lane_delivery_extra(
         kind, text, krel or kf or "", event, lineage=lineage)
+    # SS-LIN (class D): forward lineage in lockstep with delivery_extra (see
+    # _deliver_gate_winner) — the seal must derive the SAME registered identity.
     _seal_lane_delivery(
         kind, decision["shipped_suffix"], krel or kf or "",
         base_output=steer_base, producer_text=text, identity_text=text,
-        delivery_extra=delivery_extra)
+        delivery_extra=delivery_extra, lineage=lineage)
     _record_terminal_lane_controls(
         kind, text, decision["shipped_suffix"], krel or kf or "",
         delivery_extra=delivery_extra)

@@ -216,7 +216,11 @@ def test_resolve_default_token_production_default_and_explicit_off():
 
 def test_resolve_profile_defaults_maps_and_explicit_off():
     d2 = rp.resolve_profile_defaults({})
-    assert set(d2) == set(_P2) and all(v == "1" for v in d2.values())
+    # THE-17 (2026-07-17): resolution fans PROFILE_MEMBERS *plus* the Profile-2
+    # PROFILE_BEHAVIOR_FLAGS (behavior fix-switches deliberately kept OUT of the
+    # member set so the CAP inventory count stays exact — rl_profile.py:303-321).
+    _p2_resolved = set(_P2) | set(rp.PROFILE_BEHAVIOR_FLAGS.get("2", frozenset()))
+    assert set(d2) == _p2_resolved and all(v == "1" for v in d2.values())
     assert rp.resolve_profile_defaults({"GT_RL_PROFILE": "off"}) == {}
     d1 = rp.resolve_profile_defaults({"GT_RL_PROFILE": "1"})
     assert set(d1) == set(_P1) and all(v == "1" for v in d1.values())

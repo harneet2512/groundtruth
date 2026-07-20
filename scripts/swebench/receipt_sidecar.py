@@ -50,7 +50,12 @@ _TRANSITION_RANK = {
 _REQUIRED_FIELDS = frozenset(
     {"schema", "kind", "transition", "action_index", "ts_ms", "envelope"}
 )
-_OPTIONAL_FIELDS = frozenset({"lineage"})
+# SS-RCPT (2026-07-19): ``produced_dedup_key`` is the writer's PROOF that a
+# law-(h) candidate mismatch is exactly a post-pool byte mutation (provenance
+# line filter): the produced-text dedup key, computed by the same envelope
+# builder. Tolerated ONLY when it equals binding.candidate_id — every other
+# mismatch (e.g. a raw-key steer binding) stays fatal.
+_OPTIONAL_FIELDS = frozenset({"lineage", "produced_dedup_key"})
 
 
 @dataclass(frozen=True, order=True)
@@ -365,17 +370,34 @@ def _parse_record(raw: object, line_number: int) -> ReceiptRecord:
         ) from exc
     if envelope_to_dict(envelope) != raw_envelope:
         raise ValueError("receipt_envelope_roundtrip_mismatch")
+    binding = envelope.observation_binding
+    # SS-RCPT: evidence-backed mutation proof — valid ONLY when the record carries the
+    # produced-text dedup key AND it canonicalizes to the binding's candidate identity.
+    produced_key = raw.get("produced_dedup_key")
+    mutation_proven = bool(
+        isinstance(produced_key, str)
+        and produced_key
+        and binding is not None
+        and observation_candidate_id(produced_key) == binding.candidate_id
+    )
     envelope_issues = validate_envelope(envelope)
+    if mutation_proven:
+        envelope_issues = [
+            issue for issue in envelope_issues
+            if issue != "observation_binding:candidate_id_mismatch"
+        ]
     if envelope_issues:
         raise ValueError("receipt_envelope_invalid:" + ",".join(envelope_issues))
     if transition != envelope.receipt_state:
         raise ValueError("receipt_transition_state_mismatch")
     if not envelope.rendered_bytes_hash:
         raise ValueError("receipt_delivery_seal_missing")
-    binding = envelope.observation_binding
     if binding is None:
         raise ValueError("receipt_observation_binding_missing")
-    if observation_candidate_id(envelope.dedup_key) != binding.candidate_id:
+    if (
+        observation_candidate_id(envelope.dedup_key) != binding.candidate_id
+        and not mutation_proven
+    ):
         raise ValueError("receipt_candidate_identity_mismatch")
 
     lineage = _parse_lineage(raw.get("lineage")) if "lineage" in raw else None

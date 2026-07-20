@@ -30,8 +30,12 @@ def test_gateway_final_controls_share_exact_observation_seal(monkeypatch):
         provenance_decision="NO_EFFECT")
 
     controls = {row["control_ref"]["feature_id"]: row for row in rows}
+    # B-GW (2026-07-16): the gateway mediator join records a GT_GATEWAY row with the
+    # COMMITTED-delivery identity (gt_mini_patch._record_gateway_final_controls ->
+    # gateway.record_committed_delivery) so the admission-time row's pre-render seal
+    # mismatch no longer breaks the exact join. It must share the exact seal below.
     assert set(controls) == {
-        "GT_GATEWAY_NATIVE", "GT_GLOBAL_ARBITER", "GT_SS_ARBITER_V2",
+        "GT_GATEWAY", "GT_GATEWAY_NATIVE", "GT_GLOBAL_ARBITER", "GT_SS_ARBITER_V2",
         "GT_SS_PROVENANCE", "GT_INSEAM_METRICS",
     }
     seal = hashlib.sha256(final.encode()).hexdigest()[:16]
@@ -78,8 +82,12 @@ def test_lane_delivery_lineage_is_registered_and_never_inferred_from_arbiter(mon
     legacy = g._lane_delivery_extra(
         "l3.contract", "legacy contract", "src/widget.py", g.Event.POST_VIEW)
     assert legacy["candidate_id"]
-    assert "fact_class" not in legacy
-    assert "lineage_schema" not in legacy
+    # Typed-lineage expansion (2026-07-16+, 234b2c3e6/8ad8e63c6): legacy lane rows now
+    # carry the SAME registered typed lineage as the primary rows — fact_class is stamped
+    # from the registry (never inferred from the arbiter), which is exactly what this
+    # test's name demands. Pin the registered value.
+    assert legacy["fact_class"] == "caller_contract"
+    assert legacy["lineage_schema"]
 
 
 def test_coherence_delivery_retains_owner_without_fabricated_fact_lineage(
@@ -121,7 +129,12 @@ def test_reactive_lane_kinds_carry_only_exact_supported_lineage(monkeypatch):
         "verify.horizon.executed", "covering RED", "src/widget.py",
         g.Event.REVIEW_TRANSITION)
     assert executed["fact_class"] == "covering_red"
-    assert executed["actual_event"] == executed["required_event"] == "test_result"
+    # B-BND (b2, c9ac61d3c): the SEAM's executed covering RED delivers synchronously at
+    # the EDIT boundary, so the registry overrides required_event to edit_result while the
+    # seam still stamps the canonical test_result actual label (reactive: on-time by
+    # construction — fact_registry.py:679-712).
+    assert executed["actual_event"] == "test_result"
+    assert executed["required_event"] == "edit_result"
 
     monkeypatch.setattr(g, "_last_verify_executed_identity", None)
     for unsupported_kind in (
@@ -236,7 +249,10 @@ def test_covering_execution_stamps_concrete_lineage_identity(tmp_path, monkeypat
     lineage = g._lane_registered_lineage(
         "verify.horizon.executed", g.Event.REVIEW_TRANSITION)
     assert lineage.fact_class == "covering_red"
-    assert lineage.actual_event == lineage.required_event == "test_result"
+    # B-BND (b2): required_event overridden to edit_result (see fact_registry.py:690);
+    # the canonical actual label stays test_result and reactive treatment keeps it on-time.
+    assert lineage.actual_event == "test_result"
+    assert lineage.required_event == "edit_result"
 
 
 def test_submit_red_has_authorized_typed_byte_owner():
