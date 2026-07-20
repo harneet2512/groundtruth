@@ -14103,6 +14103,22 @@ def _persist_gateway_producer_attestation(winner, shipped: str, sealed):
     # carry no ProducerInputs sidecar, so build_gateway_attestation cannot bind them).
     if str(getattr(winner, "producer", "") or "") == "change_surface":
         return _persist_change_surface_producer_attestation(winner, shipped, sealed)
+    # D-L (run6 haystack-8997 iter25): a gateway winner whose evidence_type is NOT
+    # one the gateway edit-fact factory can attest (a GT_LOC_RESLOT reactive-
+    # localization `trace_frame`, which carries no gateway ProducerInputs sidecar)
+    # is NO-OPPORTUNITY for gateway attestation, not a persistence FAILURE. Skip it
+    # BEFORE build (which would raise a bare ValueError -> a spurious
+    # measurement_failed row). Its localization proof is the brief-level
+    # source_contribution attestation, not this factory. Keying on the factory's
+    # OWN published supported-set means a SUPPORTED evidence_type with genuinely
+    # broken inputs still raises and still records measurement_failed (unchanged).
+    try:
+        from groundtruth.runtime.gateway_attestation_factory import (
+            _SUPPORTED as _gw_supported)
+        if str(getattr(winner, "evidence_type", "") or "") not in _gw_supported:
+            return None
+    except Exception:  # noqa: BLE001 — factory unavailable -> fall through to existing path
+        pass
     try:
         from groundtruth.runtime.attestation_store import persist_attestation
         from groundtruth.runtime.fact_registry import required_event
