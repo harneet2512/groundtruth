@@ -18430,6 +18430,11 @@ def _augment_output(action, out) -> None:
             # path. Only on a fast-path miss -> no double-fire. Correct-or-quiet:
             # a non-write command changes nothing -> empty -> no fallback edit.
             _v2_write_truth = _ss_coherence_v2_on() or _ss_recovery_v2_on()
+            # D-Q: track whether this post_edit was routed from a VCS RESTORE
+            # transition (git stash/checkout/reset/restore/revert/clean). Edit-
+            # ATTRIBUTED insight nudges (semantic_drift / coherence_collapse) must
+            # never blame "your edit" for a revert the agent ran to probe a baseline.
+            _edit_from_restore = False
             # OFF is a strict compatibility arm: preserve the legacy whole-tree
             # metadata observation on every command.  Only V2 may use the corrected
             # command classifier to avoid content I/O on proven non-write turns.
@@ -18453,6 +18458,10 @@ def _augment_output(action, out) -> None:
                     _chg = []
                 if _chg and (not _git_revert or _v2_write_truth):
                     _kkind, _kf = "post_edit", _chg[0]
+                    # D-Q: True ONLY when a recognized VCS restore slipped through
+                    # to post_edit under V2 (a genuine subprocess write has
+                    # _git_revert=False). Gates the edit-attributed insight nudges.
+                    _edit_from_restore = _git_revert
                     print("[GT_META] subprocess_write_fallback n=%d f=%s"
                           % (len(_chg), _kf), file=sys.stderr, flush=True)
                 elif _chg and _git_revert:
@@ -18975,7 +18984,7 @@ def _augment_output(action, out) -> None:
                     except Exception:  # noqa: BLE001 — one producer must not kill the gate
                         _crash_emit("detect.coherence")
                         _cc = None
-                    if _cc is not None:
+                    if _cc is not None and not _edit_from_restore:
                         cands.append((_cc[0], "detect.coherence", _cc[1], True))
                     # Semantic-drift (2026-06-23): the now-WIRED semantic_check —
                     # a deterministic guard/return-deletion observation -> insight.
@@ -18984,7 +18993,7 @@ def _augment_output(action, out) -> None:
                     except Exception:  # noqa: BLE001 — one producer must not kill the gate
                         _crash_emit("semantic_drift")
                         _sd = None
-                    if _sd is not None:
+                    if _sd is not None and not _edit_from_restore:
                         cands.append((_sd[0], "semantic_drift", _sd[1], True))
                     # Obligation RE-SURFACE via the PROVEN post_edit channel
                     # (2026-06-23): the every-turn test-pass trigger never reached
