@@ -414,6 +414,27 @@ _V2_REQUEST_MODAL_RE = re.compile(
     r"(?:is|are)\s+required|required\s+to)\b",
     re.I,
 )
+# D-I: mutually-exclusive alternative ENUMERATION labels — "Option 1:",
+# "Alternative B:", "Approach 2:", "Variant one". The author is presenting
+# candidate solutions to CHOOSE among, never stacked completion requirements (an
+# issue cannot require Option 1 AND Option 2). Anchored + an explicit enumerator
+# so it never matches a firm requirement that merely contains the word.
+_V2_ALTERNATIVE_LABEL_RE = re.compile(
+    r"^\s*(?:option|alternative|approach|variant|choice|plan)\s*"
+    r"(?:#?\d+|[A-Za-z]|one|two|three|four|first|second|third)\b\s*[:.)\-]",
+    re.I,
+)
+# D-I: option-SPACE introductions — the author deliberating the solution space
+# ("a couple of ways", "several options", "one option is", "the options are").
+# Non-committal discussion, not a requirement. Kept when firm request grammar or
+# an imperative head is present (see the guard in _process_candidate).
+_V2_OPTION_SPACE_INTRO_RE = re.compile(
+    r"\b(?:a\s+couple(?:\s+of)?|several|multiple|two|three|four|\d+|different|various|a\s+few)\s+"
+    r"(?:ways?|options?|approaches?|alternatives?|possibilities)\b"
+    r"|^\s*one\s+(?:option|approach|way|possibility)\s+(?:is|would\s+be|could\s+be)\b"
+    r"|^\s*(?:the\s+)?(?:options?|alternatives?)\s+(?:are|include)\b",
+    re.I,
+)
 _V2_REQUEST_QUESTION_RE = re.compile(
     r"^(?:is\s+it\s+possible\s+to|would\s+it\s+be\s+possible\s+to|"
     r"could\s+(?:you|we)\s+|can\s+(?:you|we)\s+)(.+?)\?\s*$",
@@ -924,6 +945,20 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 decision = request_question.group(1).strip()
             elif decision.rstrip().endswith("?"):
                 continue
+            # D-I: demote mutually-exclusive alternative enumeration ("Option 1:")
+            # unconditionally — an enumerated alternative is never a stacked
+            # requirement, and an option-internal modal scopes that option only.
+            if _V2_ALTERNATIVE_LABEL_RE.match(piece.strip()):
+                continue
+            # D-I: demote solution-space deliberation ("we could handle this a
+            # couple of ways", "one option is …") UNLESS it carries firm request
+            # grammar or an imperative head — those are real requirements that
+            # merely mention options, and dropping them would regress recall.
+            if _V2_OPTION_SPACE_INTRO_RE.search(decision) and not (
+                _V2_REQUEST_MODAL_RE.search(decision)
+                or _V2_IMPERATIVE_RE.match(decision)
+            ):
+                continue
             cls = _v2_classify(decision)
             if cls is None and bullet_fallback is not None:
                 cls = bullet_fallback
@@ -1221,6 +1256,16 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         if lm and len(lm.group(1).split()) <= 6:
             decision = lm.group(2)
         if decision.rstrip().endswith("?"):
+            continue
+        # D-I: same alternative-enumeration / solution-space demotion as the
+        # Stage-A gate — the parity sweep is a second emission path and must not
+        # resurrect option bullets or discussion openers Stage A rejected.
+        if _V2_ALTERNATIVE_LABEL_RE.match(sent.strip()):
+            continue
+        if _V2_OPTION_SPACE_INTRO_RE.search(decision) and not (
+            _V2_REQUEST_MODAL_RE.search(decision)
+            or _V2_IMPERATIVE_RE.match(decision)
+        ):
             continue
         if _V2_ATTESTATION_RE.match(decision) and not (
             _V2_REQUEST_MODAL_RE.search(decision)
