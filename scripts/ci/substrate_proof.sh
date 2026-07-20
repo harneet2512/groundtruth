@@ -767,34 +767,19 @@ if [ "$PROOF_RC" -ne 0 ]; then
     echo "::error::gt-run-proof failed on ${_LC} (legitimacy/anti-cheat — results would be INVALID) — task FAILS" | tee -a trial_output.log
     # proof_status stays 'failed' (written above); HARD ABORT so no paid spend on an invalid substrate.
     exit 1
-  elif grep -qE "DETERMINISM_MISMATCH|brief determinism proof raised|live localization diagnostic|portable brief EMPTY" /tmp/gt/proof_failure.json 2>/dev/null; then
-    # TASK != METRICS (2026-07-20): a brief-QUALITY / SELF-CONSISTENCY metric — determinism
-    # mismatch across two same-input brief generations, the strict localization diagnostic, or an
-    # EMPTY/thin step-0 brief — is a GT-COVERAGE signal, NOT a broken/absent stack. The graph/LSP/
-    # embedder are PRESENT and VALID (a genuine stack breakage fails via its own code below/above:
-    # GRAPH_CERT_INVALID / GT_INDEX_FAIL / EMBEDDER_USAGE_FAIL / brief.txt write failed). Per the
-    # PRODUCT RULE above ("never refuse a task for GT-quality") AND GT's own thesis (the agent
-    # self-localizes; GT only BOOSTS), the agent runs BEST-EFFORT — WITHOUT a step-0 brief if GT
-    # found nothing — exactly as run6 did (33-byte near-empty briefs on these same tasks, agent
-    # ran). An empty brief is coverage, not breakage; killing the paid task on it is over-strict.
-    # NB: gt_run_proof:1886 mislabels ALL of these with code=GT_ARTIFACT_MISSING, so we key on the
-    # MESSAGE (the quality phrase), never the code. Allowlist (positive match only) — a genuine
-    # "brief.txt write failed" IO error does NOT match and stays fail-closed in the branch below.
-    _SC=$(grep -oE "DETERMINISM_MISMATCH|brief determinism proof raised|live localization diagnostic|portable brief EMPTY" /tmp/gt/proof_failure.json 2>/dev/null | head -1)
-    echo "::warning::gt-run-proof exited $PROOF_RC on a brief SELF-CONSISTENCY metric (${_SC}) with the required stack PRESENT/VALID — task != metrics: trial proceeds BEST-EFFORT, metric recorded degraded" | tee -a trial_output.log
-    write_proof_status ok PROOF_DEGRADED "gt-run-proof exited $PROOF_RC (self-consistency metric ${_SC}; stack present) — agent proceeds best-effort"
-  elif [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ] || [ "${GT_REQUIRE_GRAPH_VALID:-0}" = "1" ] \
-       || [ "${GT_REQUIRE_LSP:-0}" = "1" ] || [ "${GT_REQUIRE_EMBEDDER:-0}" = "1" ]; then
-    # A2: a REQUIRED-stack run explicitly demanded the full stack / a specific axis. A proof
-    # rc!=0 then means the substrate is NOT the required stack -> fail-closed, NEVER launder to
-    # ok. This closes the best-effort override the else-branch applied to EVERY rc!=0 and
-    # realizes the intent documented above (GT_REQUIRE_FULL_STACK/GRAPH_VALID must not be
-    # laundered), extended to the per-axis GT_REQUIRE_LSP/EMBEDDER flags. proof_status stays
-    # 'failed' (written above) so the agent gate (PROOF_STATE != ok) refuses the paid trial.
-    # (Reached only when the failure is NOT a brief self-consistency metric — i.e. a genuine
-    # stack absence/breakage or another required-axis miss.)
-    echo "::error::gt-run-proof exited $PROOF_RC on a REQUIRED-stack run (GT_REQUIRE_FULL_STACK=${GT_REQUIRE_FULL_STACK:-0} GRAPH_VALID=${GT_REQUIRE_GRAPH_VALID:-0} LSP=${GT_REQUIRE_LSP:-0} EMBEDDER=${GT_REQUIRE_EMBEDDER:-0}) — task FAILS (no laundering to ok)" | tee -a trial_output.log
-    exit 1
+  # TASK != METRICS — FULL DECOUPLE (2026-07-20, user directive). The substrate proof is a
+  # MEASUREMENT, not a task gate. It has already RUN and RECORDED its full verdict
+  # (proof_failure.json / graph_certificate.json / the gate certs are uploaded as artifacts), so
+  # every GT-quality signal — determinism mismatch, empty/thin brief, degraded graph/LSP/embedder,
+  # full-potential — is COUNTED reliably in the post-run audit WITHOUT gating the paid task. Per
+  # GT's thesis (the agent self-localizes; GT only BOOSTS), the agent ALWAYS runs BEST-EFFORT on a
+  # GT-quality metric (run6 ran these same tasks with 33-byte near-empty briefs). Coupling the
+  # measurement into the paid task wasted spend and hid the signal, and it degenerated into
+  # whack-a-mole per reason (determinism, then brief-empty, then the next). The ONLY hard-aborts
+  # are the two RESULT-VALIDITY classes handled above: legitimacy/anti-cheat (wrong-commit,
+  # eval-leakage, unportable/mislabeled substrate, dead surface) and OOM/no-build (rc=137) — those
+  # make the RESULT invalid, not merely GT-unhelpful. Everything else -> best-effort, verdict
+  # recorded, counted afterwards.
   else
     echo "::warning::gt-run-proof exited $PROOF_RC — trial proceeds BEST-EFFORT with degraded GT (correct-or-quiet; never refuse a task for quality)"
     write_proof_status ok PROOF_DEGRADED "gt-run-proof exited $PROOF_RC but agent trial proceeds best-effort"
