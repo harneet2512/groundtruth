@@ -260,11 +260,33 @@ def _tail(text: str, limit: int = _MAX_BODY) -> str:
     return text if len(text) <= limit else text[-limit:]
 
 
+def _frame_under_repo(path: str, repo_root: str | None) -> bool:
+    """D-K (run6 audit): a covering-RED 'where-to-fix' frame must be a real repo
+    file. A third-party dep frame (pyasn1/codec/ber/encoder.py while fixing
+    privacyidea) is not the agent's source — delivering it as the fix site is
+    false. When repo_root is known, require the frame to resolve to a file under
+    it; unknown repo_root keeps the legacy behavior (backward-compatible).
+    """
+    if not repo_root:
+        return True  # no root available -> cannot gate; legacy behavior
+    p = (path or "").replace("\\", "/")
+    if p.startswith("<"):
+        return False  # pseudo-file (<stdin>, <string>, <frozen ...>)
+    try:
+        if os.path.isabs(p):
+            rr = os.path.realpath(repo_root)
+            return os.path.realpath(p).startswith(rr.rstrip("/") + "/")
+        return os.path.isfile(os.path.join(repo_root, p))
+    except (OSError, ValueError):
+        return False
+
+
 def render_covering_failure_native(
     result: dict[str, Any],
     *,
     edited_symbol: str | None = None,
     test_files: list[str] | set[str] | None = None,
+    repo_root: str | None = None,
 ) -> str:
     """Format D: the anonymized native failure block. Returns "" when nothing
     signal-bearing survives the firewall (correct-or-quiet)."""
@@ -306,6 +328,10 @@ def render_covering_failure_native(
                     msg = _strip_case_tokens(rest).strip()
                     if msg:
                         kept.append(msg)
+                continue
+            # D-K: a third-party dep / pseudo-file frame is NOT the agent's source;
+            # never deliver it as the where-to-fix (correct-or-quiet).
+            if not _frame_under_repo(path, repo_root):
                 continue
             # agent's OWN source frame — the where-to-fix. Reformat, keep.
             fn = ""

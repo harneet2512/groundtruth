@@ -10485,7 +10485,8 @@ def _executed_covering_emission(covering: list[dict],
             return None
         _last_test_outcome_failed = True  # V-3: executed verdict drives the verify axis
         sym = _verified_edited_symbol_for_rendering(edited_syms)
-        block = render_covering_failure_native(cres, edited_symbol=sym, test_files=ran_tf)
+        block = render_covering_failure_native(
+            cres, edited_symbol=sym, test_files=ran_tf, repo_root=_root())  # D-K: gate non-repo frames
         if not block:
             # W14 FIX 1: an attributed RED the native renderer could not surface -> NOTHING
             # produced. Record none_produced; do NOT fabricate the raw verdict (nothing reached
