@@ -1391,6 +1391,29 @@ def main(argv=None) -> int:
     if not _cp_ok:
         return tracker.fail("env_validation", "GT_COMMIT_PARITY_MISMATCH", _cp_detail)
 
+    # EARLY IDENTITY MANIFEST (2026-07-20, gate redesign — gates.md). The Run-identity gate
+    # (R01-R04) validates run_manifest.json's commit_parity + substrate_build_commit — the
+    # IDENTITY binding, which is VALID regardless of GT quality. Historically the manifest was
+    # written only at the END (build_run_manifest, ~line 1919), AFTER the GT-QUALITY gates
+    # (index/graph_cert/embedder/emit_brief); a quality-fail returned before it, so the manifest
+    # was MISSING and the identity gate cascaded to IDENTITY_CONTENT_INVALID (a SYMPTOM, not a
+    # real identity fault). Write the identity binding NOW — right after the legitimacy/commit-
+    # parity checks, before any GT-QUALITY gate — so it SURVIVES a quality-fail. The full manifest
+    # OVERWRITES this on success; on a quality-degraded run this minimal identity manifest persists
+    # so validity is still strictly enforced while GT-quality no longer destroys the binding. NEW
+    # RULE: identity/validity is always recorded (may refuse); GT-quality is recorded, never gates.
+    try:
+        with open(os.path.join(a.out, "run_manifest.json"), "w", encoding="utf-8") as _idf:
+            json.dump({
+                "schema": "gt.run_manifest.v2",
+                "gt_git_commit": _gt_git_commit(),
+                "substrate_build_commit": _env_or_none("GT_SUBSTRATE_BUILD_COMMIT"),
+                "commit_parity": commit_parity_status(),
+                "identity_manifest_early": True,
+            }, _idf, indent=2)
+    except Exception:  # noqa: BLE001 — never let identity-manifest IO abort the proof
+        pass
+
     # Fail-closed dead-surface guard (runtime teeth for dead_path_registry). On the proof/
     # substrate path a retired DEAD_PATHS module must NEVER be loaded — if one is in
     # sys.modules here (before indexing), abort naming the dead module + its live replacement.
