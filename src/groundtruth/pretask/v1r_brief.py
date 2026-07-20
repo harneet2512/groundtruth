@@ -1788,10 +1788,20 @@ def _reduce_brief_to_minimal(text: str) -> str:
     _loc_tier = _localization_confidence_tier(text)
     _keep_contention = _loc_tier in {"medium", "low"} and not _loc_reslot_on()
     kept: list[str] = []
+    # CORRECT-OR-QUIET (2026-07-20, run6 audit D-3): the scaffold (<gt-task-brief>
+    # tags) and blank ``misc`` filler carry no model-facing fact. When every
+    # SUBSTANTIVE block (obligations / orientation-note / localization / file-entry)
+    # is dropped or was never assembled, the reduction previously kept the bare
+    # scaffold and shipped a 33-char hollow ``<gt-task-brief>\n\n</gt-task-brief>``
+    # that got SEALED + counted as a delivery (smolagents/babel/privacyidea/mpl-29721,
+    # block_lineage:[]). Track whether any substantive block survives; if none, return
+    # "" so gt_agent._prepend_brief (`if not brief: return instruction`) ships nothing.
+    _kept_substantive = False
     for b in blocks:
         label = b["label"]
         if label == "localization-header" and _keep_contention:
             kept.append(b["text"])
+            _kept_substantive = True
             continue
         if label in _BRIEF_MINIMAL_DROP_LABELS:
             continue
@@ -1809,8 +1819,11 @@ def _reduce_brief_to_minimal(text: str) -> str:
             head = b["text"].split("\n", 1)[0]
             if head.strip():
                 kept.append(head)  # minimal orientation: the header, not the contract body
+                _kept_substantive = True
             continue
         kept.append(b["text"])
+        if label not in ("scaffold", "misc"):
+            _kept_substantive = True
     # Collapse the blank-line runs the dropped blocks leave behind (the ``misc`` filler that
     # abutted a retired block) to at most one, and strip leading/trailing blanks — a clean
     # minimal brief, never a hollow one. Cosmetic only: no kept fact is touched.
@@ -1821,6 +1834,9 @@ def _reduce_brief_to_minimal(text: str) -> str:
         out_lines.append(ln)
     while out_lines and out_lines[-1].strip() == "":
         out_lines.pop()
+    # Correct-or-quiet: a scaffold-only reduction ships nothing, never a hollow tag.
+    if not _kept_substantive:
+        return ""
     return "\n".join(out_lines)
 
 
