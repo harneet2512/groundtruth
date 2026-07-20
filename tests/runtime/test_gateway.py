@@ -305,6 +305,12 @@ def test_trace_hit_from_test_output(tmp_path):
     """A failing test whose output contains an in-repo traceback -> TRACE_HIT ->
     the deepest in-repo frame is surfaced; test-path frames are dropped."""
     db = _mk_graph(tmp_path, [], [])
+    # D-2 (2026-07-20): an in-repo trace frame must exist under repo_root — a
+    # relative shape alone no longer qualifies (that let third-party dep frames
+    # through). Materialize the repo file this trace claims.
+    (tmp_path / "patroni").mkdir(exist_ok=True)
+    (tmp_path / "patroni" / "watchdog.py").write_text(
+        "def check():\n    raise ValueError('boom')\n", encoding="utf-8")
     out = textwrap.dedent('''\
         Traceback (most recent call last):
           File "tests/test_watch.py", line 5, in test_it

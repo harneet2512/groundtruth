@@ -158,11 +158,17 @@ def _is_in_repo(path: str, repo_root: str) -> bool:
     if rp_norm.startswith(rr_norm + "/") or rp_norm == rr_norm:
         return True
 
-    # Fallback for relative paths that came in as ``patroni/watchdog.py``:
-    # treat them as in-repo if they don't reference a vendored / system
-    # path (common stdlib + per-language third-party markers).
+    # Fallback for relative paths that came in as ``patroni/watchdog.py`` or a
+    # site-packages-stripped ``loguru/_datetime.py``. D-2 (run6 audit, hydra): a
+    # relative shape ALONE is insufficient — a THIRD-PARTY dep frame stripped of its
+    # install prefix (``omegaconf/base.py`` while fixing hydra) is also relative and
+    # bad-marker-free, and was wrongly delivered as "deepest in-repo frame" (0 rows
+    # in graph.db). The true discriminator is EXISTENCE under repo_root: the package
+    # being fixed IS the repo (``loguru/_datetime.py`` exists under a loguru testbed),
+    # a third-party dep is NOT vendored (``omegaconf/`` absent under a hydra testbed).
+    # Fail-closed (correct-or-quiet): drop when it does not resolve to a real repo file.
     if not os.path.isabs(path):
-        return True
+        return os.path.isfile(os.path.join(repo_root, raw_norm))
 
     return False
 
