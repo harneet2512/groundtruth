@@ -5439,6 +5439,38 @@ def _l3b_content_key(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
+# D-O (aiogram-1594): the CALLER FILES GT actually DELIVERED as l3b caller-contract
+# this run. The scope-completeness block flags un-edited in-scope files; its
+# name-match gate dropped a verified graph-caller GT had ALREADY surfaced (the gold
+# caller fsm/scene.py) just because its basename did not token-match the issue
+# focus. A file GT itself delivered as a caller is evidence-backed relevance — this
+# registry lets the block admit it WITHOUT a name match, while a mere ambient
+# _query_scope neighbour GT never delivered stays gated (the reason the earlier
+# "flag all neighbours" attempt was reverted: it violated the intentional
+# correct-or-quiet contract of test_live_scope_completeness_reroute).
+_l3b_delivered_caller_rels: set[str] = set()
+# "name() in path/file.py:88" (render_related_files_native) and "called by -> file"
+# ([WITNESS]) — the two caller-direction render shapes. Requires a real filename.
+_L3B_CALLER_FILE_RE = re.compile(r"(?:\)\s+in|called by\s*->?)\s+([\w./\\-]+\.\w+)")
+
+
+def _note_l3b_delivered_callers(kind: str, text: str) -> None:
+    """Record caller files from a DELIVERED pure-caller l3b payload (D-O). Best-effort;
+    only PURE caller_contract payloads (the build-time verdict) contribute, so a
+    callee/sibling/mixed payload never launders a non-caller file into the set."""
+    try:
+        if kind != "l3b.evidence" or not text:
+            return
+        if _l3b_content_key(text) not in _l3b_pure_caller_hashes:
+            return
+        for _m in _L3B_CALLER_FILE_RE.finditer(text):
+            rel = _norm_rel(_m.group(1))
+            if rel:
+                _l3b_delivered_caller_rels.add(rel)
+    except Exception:  # noqa: BLE001 — observability only, never breaks delivery
+        pass
+
+
 def _l3b_pure_verdict(caller_blocks: int, noncaller_blocks: int, n_lines: int) -> bool:
     """B-LINH H1 (2026-07-16): the FAIL-CLOSED composition verdict for the polymorphic
     l3b.evidence lane. Decided at COMPOSITION time from WHICH builders contributed (the caller
@@ -7789,6 +7821,7 @@ def _reset_oracle_state() -> None:
     _seen.clear()
     _contract_seen.clear()
     _consensus_scope.clear()
+    _l3b_delivered_caller_rels.clear()  # D-O: per-run delivered-caller registry
     _lane_a_rearm_pending.clear()  # SM-5 F (#50): per-attempt Lane-A rollback registry
                                    # (F3 reset law: every producer/latch global clears here;
                                    # empty when GT_GLOBAL_ARBITER is off -> byte-identical)
@@ -11861,7 +11894,7 @@ def _scope_completeness_block() -> str:
         for m in unedited:
             toks = {t.lower() for t in _BLOCK_TOKEN_RE.findall(os.path.basename(m))
                     if len(t) >= 3}
-            if toks & focus:
+            if (toks & focus) or (m in _l3b_delivered_caller_rels):
                 anchored.append(m)
         if not anchored:
             return ""
@@ -12718,6 +12751,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     _PRODUCT_BUDGETER.commit_delivered(_last_budget_pending)
                 except Exception:  # noqa: BLE001
                     pass
+            _note_l3b_delivered_callers(kind, text)  # D-O: record delivered caller files
         except Exception:  # noqa: BLE001 — a Lane A bug is isolated, never
             # blocks the next Lane A block OR Lane B.
             try:
@@ -12818,6 +12852,7 @@ def _commit_prepared_lane(
             _PRODUCT_BUDGETER.commit_delivered(_last_budget_pending)
         except Exception:  # noqa: BLE001
             pass
+    _note_l3b_delivered_callers(kind, text)  # D-O: record delivered caller files
 
 
 _GT_GATEWAY_MAX_DELTA = int(os.environ.get("GT_GATEWAY_MAX_DELTA", "4000") or "4000")
