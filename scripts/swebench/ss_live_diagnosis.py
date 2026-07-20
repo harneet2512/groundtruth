@@ -233,17 +233,19 @@ def classify_delivery_feature(
     ) is not True:
         return "SEALED_DELIVERED_UNGRADED"
 
-    receipts = [
-        int(entry.get("receipt") or 0)
-        for entry in entries
-        if isinstance(entry.get("receipt"), int)
-        and not isinstance(entry.get("receipt"), bool)
-    ]
-    receipt = max(receipts, default=0)
     causal = any(_causal_proven(entry.get("feature_lineage")) for entry in entries)
+    # D-M/D-P (arviz/aiogram/gitingest/loguru): author the acknowledgment terminal
+    # from the CLASS-SPECIFIC receipt grader (readiness gates["acknowledged"]:
+    # True/False/None), NOT the generic consumption-ladder receipt
+    # (delivered->referenced->acted). The ladder over-credited ANY later mutation or
+    # prose naming a delivered entity — no timing, non-reacquisition, or pre-commit
+    # gate — so a row the class grader rejected (post-hoc naming, self-reacquisition,
+    # wrong-event/late) still terminaled ACKNOWLEDGED. Fail-closed on None (a missing
+    # grade never promotes).
+    ack = gates.get("acknowledged")
     if (
         causal
-        and receipt >= 2
+        and ack is True
         and all(gates.get(name) is True for name in (
             "delivered_byte_proven", "correct_info",
             "correct_rl_adhered_time", "acknowledged", "leak_zero",
@@ -251,9 +253,9 @@ def classify_delivery_feature(
         ))
     ):
         return "CAUSAL_P5"
-    if receipt >= 2:
+    if ack is True:
         return "ACKNOWLEDGED"
-    if receipt == 1:
+    if ack is False:
         return "NOVEL_IGNORED"
     return "SEALED_DELIVERED_UNGRADED"
 

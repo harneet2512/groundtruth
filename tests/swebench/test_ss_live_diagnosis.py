@@ -311,8 +311,11 @@ def test_delivery_bucket_precedence_and_missing_lineage_fail_closed() -> None:
         "caller_contract", "FACT", lifecycle, readiness,
         [_suppressed("caller_contract", "ss_step_behind")], []
     ) == "STEP_BEHIND"
+    # D-M/D-P: "delivered but not acknowledged" is authored from the CLASS grader
+    # gate (acknowledged=False), not the generic ladder receipt level.
+    readiness_unack = {"gates": dict(readiness["gates"], acknowledged=False)}
     assert diagnosis.classify_delivery_feature(
-        "caller_contract", "FACT", lifecycle, readiness,
+        "caller_contract", "FACT", lifecycle, readiness_unack,
         [_delivered("caller_contract")], [_entry("caller_contract", 1)],
     ) == "NOVEL_IGNORED"
     assert diagnosis.classify_delivery_feature(
@@ -320,6 +323,41 @@ def test_delivery_bucket_precedence_and_missing_lineage_fail_closed() -> None:
         [_delivered("caller_contract", causal=True)],
         [_entry("caller_contract", 3, causal=True)],
     ) == "CAUSAL_P5"
+
+
+def test_acknowledged_authored_from_grader_not_ladder_receipt() -> None:
+    # D-M/D-P (arviz/aiogram/gitingest/loguru): a generic consumption-ladder ACTED
+    # (receipt=3) must NOT terminal ACKNOWLEDGED when the class-specific receipt
+    # grader (readiness gates["acknowledged"]) rejects it. The ladder over-credited
+    # any later mutation/prose naming a delivered entity with no timing/non-
+    # reacquisition/pre-commit gate.
+    lifecycle = {
+        "eligible": _metric(True), "produced": _metric(True),
+        "delivered": _metric(True), "truth_valid": _metric(True),
+        "authority_valid": _metric(True), "expired_late": _metric(False),
+        "stale": _metric(False), "receipt_level": _metric(3),
+    }
+    base = {"delivered_byte_proven": True, "correct_info": True,
+            "correct_rl_adhered_time": True, "leak_zero": True,
+            "dose_lte_one": True, "fair_probe": True}
+    entries = [_entry("caller_contract", 3)]           # generic ladder = ACTED
+    delivered = [_delivered("caller_contract")]
+
+    # grader False -> NOVEL_IGNORED despite ladder receipt=3 (RED: old code = ACKNOWLEDGED)
+    assert diagnosis.classify_delivery_feature(
+        "caller_contract", "FACT", lifecycle,
+        {"gates": dict(base, acknowledged=False)}, delivered, entries,
+    ) == "NOVEL_IGNORED"
+    # grader None -> fail-closed (a missing grade never promotes)
+    assert diagnosis.classify_delivery_feature(
+        "caller_contract", "FACT", lifecycle,
+        {"gates": dict(base, acknowledged=None)}, delivered, entries,
+    ) == "SEALED_DELIVERED_UNGRADED"
+    # grader True -> ACKNOWLEDGED
+    assert diagnosis.classify_delivery_feature(
+        "caller_contract", "FACT", lifecycle,
+        {"gates": dict(base, acknowledged=True)}, delivered, entries,
+    ) == "ACKNOWLEDGED"
 
 
 def test_not_eligible_and_explicit_production_states() -> None:
