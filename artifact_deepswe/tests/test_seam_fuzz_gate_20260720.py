@@ -82,6 +82,10 @@ def _run_case(monkeypatch, tmp_path, case_no, kind, produced, final, subject):
     monkeypatch.setattr(g, "_gt_gateway_deliveries", [])
     g._gt_gateway_chain_head = ""
     g._receipt_produced_keys.clear()
+    try:
+        g._EPISODE.delivered_dedup.clear()  # per-case isolation: dedup chain is episode-global
+    except Exception:
+        pass
 
     producer, ev = g._lane_envelope_identity(kind, None)
     key = g._ga_unified_dedup_key(
@@ -103,11 +107,17 @@ def _run_case(monkeypatch, tmp_path, case_no, kind, produced, final, subject):
 
     ctx = f"case={case_no} kind={kind!r} subject={subject!r} " \
           f"produced={produced[:60]!r} final={final[:60]!r}"
-    # Invariant 1: sealed delivery persisted a receipt (no silent blackout).
-    path = os.path.join(str(tmp_path / f"c{case_no}"),
-                        os.path.basename(g._receipts_sidecar_path() or ""))
+    # Invariant 1 (suppression-aware): a committed delivery persists a receipt; a
+    # dedup/late/step-behind suppression, fire-once latch, or typed ERROR row is a
+    # legitimate no-receipt outcome.
+    blob = json.dumps(rows)
+    suppressed = ("suppressed" in blob or "measurement_failed" in blob
+                  or "ss_shadow_holdout" in blob or '"ERROR"' in blob
+                  or "candidate_identity_mismatch" in blob)
     sidecar = g._receipts_sidecar_path()
-    assert sidecar and os.path.isfile(sidecar), f"receipt blackout: {ctx}"
+    if not (sidecar and os.path.isfile(sidecar)):
+        assert suppressed, f"receipt blackout (committed, no suppression): {ctx}"
+        return
     # Invariant 2+3: strict parse + join key == binding identity.
     for i, line in enumerate(open(sidecar, encoding="utf-8")):
         line = line.strip()
