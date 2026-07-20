@@ -110,7 +110,10 @@ def test_item1_native_preserved_is_bare_rg_caller_rows():
     caller_rows = {"get_user": [("app/main.py", 7, "get_user(1, 2)"),
                                  ("app/api.py", 9, "get_user(x)")]}
     out = g._graph_contract_native("svc/users.py", _ROWS, {}, caller_rows)
-    assert out == "\napp/main.py:7:get_user(1, 2)\napp/api.py:9:get_user(x)"
+    # D-S: compiler-note FORM (preserved-caller rows, consistent with l3b)
+    assert out == (
+        "\napp/main.py:7: note: get_user(1, 2) - verify your change is consistent here"
+        "\napp/api.py:9: note: get_user(x) - verify your change is consistent here")
     assert "[SIGNATURE]" not in out and "preserve this interface" not in out
     _leak_clean(out)
 
@@ -121,7 +124,7 @@ def test_item1_native_firewalls_test_caller_rows():
     caller_rows = {"get_user": [("app/main.py", 7, "get_user()"),
                                 ("tests/test_users.py", 4, "get_user()")]}
     out = g._graph_contract_native("svc/users.py", _ROWS, {}, caller_rows)
-    assert out == "\napp/main.py:7:get_user()"
+    assert out == "\napp/main.py:7: note: get_user() - verify your change is consistent here"
     _leak_clean(out)
 
 
@@ -175,9 +178,11 @@ def test_item2_witness_and_caller_units_become_rows():
     else caller name); [SIBLINGS] (no path:line) DROP; ``(unverified)`` hint DROP; a test-path
     [WITNESS] frame DROP (firewall)."""
     out = g._evidence_native(_EV_LINES)
-    assert out == ("src/importer.py:39:set_fields(x)\n"
-                   "app/main.py:7:load()\n"
-                   "app/api.py:9:fetch")
+    # D-S: compiler-note FORM (was bare path:line:code rows, which were RL-inert)
+    assert out == (
+        "src/importer.py:39: note: set_fields(x) - verify your change is consistent here\n"
+        "app/main.py:7: note: load() - verify your change is consistent here\n"
+        "app/api.py:9: note: fetch - verify your change is consistent here")
     assert "[WITNESS]" not in out and "[CALLERS]" not in out and "[SIBLINGS]" not in out
     assert "unverified" not in out                       # the floor hint is not a fact row
     assert "foo" not in out and "bar" not in out         # siblings dropped (no line)
@@ -200,7 +205,8 @@ def test_item2_mutation_drop_unverified_skip_leaks_hint(monkeypatch):
         r"(?:(?P<name>[A-Za-z_]\w*)\(\)\s+in\s+)?(?P<path>[\w./\\+\-]+):(?P<line>\d+)"
         r"(?P<unver>NEVERMATCH)?(?:\s*`(?P<code>[^`]*)`)?"))
     leaked = g._evidence_native(["src/hint.py:5 (unverified)"])
-    assert leaked == "src/hint.py:5:src"                 # MUTANT: hint leaked as a row (bites)
+    assert leaked == ("src/hint.py:5: note: src - "               # MUTANT: hint leaked as a row (bites)
+                      "verify your change is consistent here")
 
 
 # =========================================================================== #
@@ -373,12 +379,13 @@ def test_dose_same_row_not_double_delivered(monkeypatch):
     row = g._graph_contract_native("svc/users.py", _ROWS, {},
                                    {"get_user": [("app/main.py", 7, "get_user()")]})
     ev = "\n" + g._evidence_native(["[WITNESS] get_user calls -> app/main.py:7 `get_user()`"])
-    assert row.strip() == ev.strip() == "app/main.py:7:get_user()"   # same single row from both
+    _NOTE = "app/main.py:7: note: get_user() - verify your change is consistent here"
+    assert row.strip() == ev.strip() == _NOTE   # D-S: same single NOTE row from both -> dedup
     out = {"output": "base observation"}
     g._lane_a_deliver(out, "cmd",
                       [("l3.contract", row), ("l3b.evidence", ev)],
                       krel="app/main.py", event=None)
-    assert out["output"].count("app/main.py:7:get_user()") == 1      # delivered ONCE (dose held)
+    assert out["output"].count(_NOTE) == 1      # delivered ONCE (dose held)
 
 
 def test_dose_mutation_break_dedup_double_delivers(monkeypatch):

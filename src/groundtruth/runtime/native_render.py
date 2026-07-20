@@ -803,6 +803,48 @@ def render_def_rows_native(
     return "\n".join(out)
 
 
+def render_note_rows_native(
+    rows: Any,
+    *,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    r"""D-S (the "0-consumption" root): the SAME def_partition / caller rows as
+    ``render_def_rows_native``, but in the COMPILER-``note:`` grammar RL models have
+    seen from every compiler/linter — ``<path>:<line>: note: <sym> — verify your
+    change is consistent here`` — instead of the bare ``<path>:<line>:<sym>`` grep
+    rows, which came back RL-inert (passive grep-shaped content on a native pipe).
+    The ``path:line`` stays LEADING (grep-compatible, entity-present for SS-0, and
+    still parseable as the caller file), and this renderer INHERITS the EXACT
+    identity firewall (``_is_test_path`` drop + ``_final_scrub`` per row) so leak
+    safety is identical to the bare form. Relationship-agnostic wording
+    (correct-or-quiet: it never overclaims "caller"/"signature" for a witness/def
+    row). ``rows`` is an iterable of ``(path, line, sym)``.
+    """
+    tf = {_norm(t) for t in (test_files or [])}
+    out: list[str] = []
+    try:
+        it = list(rows or [])
+    except TypeError:
+        return ""
+    for row in it:
+        try:
+            path, line, sym = row
+        except (TypeError, ValueError):
+            continue
+        n = _norm(_cap(path))
+        s = _cap(sym).strip()
+        ln = _int_or_none(line)
+        if not n or not s or ln is None:
+            continue
+        if _is_test_path(n, tf):
+            continue  # ripgrep would show it, but GT never surfaces a test row
+        row_s = _final_scrub(
+            f"{n}:{ln}: note: {s} - verify your change is consistent here", tf)
+        if row_s.strip():
+            out.append(row_s)
+    return "\n".join(out)
+
+
 def render_ranked_list_native(
     rows: Any,
     *,

@@ -241,13 +241,18 @@ def test_l1b_absolute_path_derives_repo_relative(tmp_path):
 # ---------------------------------------------------------------------------- #
 # V-1: verify advisory verb agrees with subject number (no "tests covers them")
 # ---------------------------------------------------------------------------- #
-def test_v1_plural_subject_plural_verb():
+def test_v1_no_ungrounded_coverage_claim_when_no_covering_test():
+    # D-U (grounding, b3d9491c6): with NO covering test known, the advisory must NOT
+    # assert "the relevant tests cover them" (ungrounded — false for a file with no
+    # linked tests). It advises verification WITHOUT claiming coverage. The V-1
+    # verb-number agreement concern is preserved by the has_covering case below.
     from groundtruth.runtime import verification_horizon as vh
     body = vh.render_verify_emission(
         "advisory", action_count=10, step_limit=100,
         edited_rels={"a/x.py"}, covering_tests=None)
-    assert "the relevant tests cover them" in body
+    assert "cover them" not in body and "covers them" not in body
     assert "tests covers them" not in body       # the live garble is gone
+    assert "to exercise them" in body            # advises verification, asserts no coverage
 
 
 def test_v1_singular_subject_singular_verb():

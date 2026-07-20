@@ -5449,9 +5449,16 @@ def _l3b_content_key(text: str) -> str:
 # "flag all neighbours" attempt was reverted: it violated the intentional
 # correct-or-quiet contract of test_live_scope_completeness_reroute).
 _l3b_delivered_caller_rels: set[str] = set()
-# "name() in path/file.py:88" (render_related_files_native) and "called by -> file"
-# ([WITNESS]) — the two caller-direction render shapes. Requires a real filename.
-_L3B_CALLER_FILE_RE = re.compile(r"(?:\)\s+in|called by\s*->?)\s+([\w./\\-]+\.\w+)")
+# The DELIVERED pure-caller payload's rows carry the caller file as the LEADING
+# path:line — in the production native forms ("path:line:sym" bare, or the D-S
+# "path:line: note: …" compiler-note) AND in the non-native prose fallback
+# ("name() in path/file.py:88" / "called by -> file"). Match all three; a pure
+# caller payload means every such file IS a caller site.
+_L3B_CALLER_FILE_RE = re.compile(
+    r"^\s*([\w./\\-]+\.\w+):\d+"                          # native row: leading path:line
+    r"|(?:\)\s+in|called by\s*->?)\s+([\w./\\-]+\.\w+)",  # prose: ") in file" / "called by file"
+    re.M,
+)
 
 
 def _note_l3b_delivered_callers(kind: str, text: str) -> None:
@@ -5464,7 +5471,7 @@ def _note_l3b_delivered_callers(kind: str, text: str) -> None:
         if _l3b_content_key(text) not in _l3b_pure_caller_hashes:
             return
         for _m in _L3B_CALLER_FILE_RE.finditer(text):
-            rel = _norm_rel(_m.group(1))
+            rel = _norm_rel(_m.group(1) or _m.group(2) or "")
             if rel:
                 _l3b_delivered_caller_rels.add(rel)
     except Exception:  # noqa: BLE001 — observability only, never breaks delivery
@@ -5653,7 +5660,11 @@ def _evidence_native(lines: "list[str]") -> str:
     _final_scrubs every row, so ``contains_test_identity(out) is False`` and no ``<gt-*>`` survives.
     Import-isolated (native_render absent -> "")."""
     try:
-        from groundtruth.runtime.native_render import render_def_rows_native
+        # D-S: compiler-note FORM (the "0-consumption" root — bare grep rows on a
+        # native pipe were RL-inert). render_note_rows_native inherits the EXACT
+        # firewall render_def_rows_native uses (_is_test_path drop + _final_scrub),
+        # keeps path:line leading, and never overclaims the caller relationship.
+        from groundtruth.runtime.native_render import render_note_rows_native
     except Exception:  # noqa: BLE001 — native_render absent -> no native form (correct-or-quiet)
         return ""
     rows: list = []
@@ -5668,7 +5679,7 @@ def _evidence_native(lines: "list[str]") -> str:
             match_text = code or (m.group("name") or "") or subj
             if match_text:
                 rows.append((m.group("path"), m.group("line"), match_text))
-    return render_def_rows_native(rows, test_files=None)
+    return render_note_rows_native(rows, test_files=None)
 
 
 def _evidence(cmd: str) -> str:
@@ -6325,8 +6336,11 @@ def _graph_contract_native(rel: str, rows: list, sig_changes: dict,
     firewall a test path + ``_final_scrub`` every line, so ``contains_test_identity(out) is False``
     and no ``<gt-*>`` survives. Import-isolated (native_render absent -> ""). Budget ≤~400B."""
     try:
+        # D-S: preserved-caller rows in the compiler-note FORM (consistent with the
+        # l3b evidence surface, so the two caller-fact surfaces still content-hash
+        # dedup to ONE delivery, and RL models attend to the note: grammar).
         from groundtruth.runtime.native_render import (
-            render_caller_contract_native, render_def_rows_native)
+            render_caller_contract_native, render_note_rows_native)
     except Exception:  # noqa: BLE001 — native_render absent -> no native form (correct-or-quiet)
         return ""
     diag_lines: list[str] = []
@@ -6350,7 +6364,7 @@ def _graph_contract_native(rel: str, rows: list, sig_changes: dict,
         if t not in _seen_rows:
             _seen_rows.add(t)
             _uniq.append(t)
-    rows_block = render_def_rows_native(_uniq[:5], test_files=None)
+    rows_block = render_note_rows_native(_uniq[:5], test_files=None)
     pieces = [d for d in diag_lines if d]
     if rows_block:
         pieces.append(rows_block)
