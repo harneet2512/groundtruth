@@ -9453,6 +9453,54 @@ def _registered_delivery_extra(
         return {}
 
 
+# A rendered ``callers: …`` line in a post_search def-facts block (both the tagged
+# ``_fmt_def_facts`` and the native ``_fmt_def_facts_native`` forms emit exactly this
+# prefix on its own line) is the physical presence of caller-contract bytes: the block
+# only carries that line when ``_resolve_symbol_defs`` set ``callers_render`` from
+# ``_caller_contract_for_file`` (the contract_map engine, every leak guard inherited).
+_CO_FACT_CALLERS_RE = re.compile(r"(?m)^\s*callers:\s")
+
+
+def _post_search_cofact_extra(kind: str, final_text: str) -> dict:
+    """Caller-contract CO-FACT attribution for the ``def_partition`` physical delivery.
+
+    The pre-edit ``post_search.localize`` block lands at the ``search_result`` boundary
+    on the agent's OWN grep. When it carries a ``callers:`` line, authorized
+    caller-contract bytes are physically in that one delivered observation, but they were
+    only ever TYPED ``def_partition`` — so the canonical caller_contract class (window
+    ``file_view``, PRE-EDIT) could never be credited from this earlier delivery and any
+    caller_contract-typed row that DID fire (post-view/post-edit) graded WRONG_EVENT.
+
+    This returns a NAMESPACED ``co_fact`` sub-dict crediting the caller_contract FACT
+    class on the SAME physical delivery, typed at the ``caller_contract_search`` boundary
+    override (search_result) so the grader adjudicates it ON_TIME without disturbing the
+    canonical file_view row (the caller_break precedent, one boundary earlier). It is
+    keyed on the FINAL delivered bytes, so a caller line dropped by a pre-gate mutation
+    (e.g. GT_SS_PROVENANCE line-filtering) correctly yields NO co-fact — correct-or-quiet.
+
+    Additive audit sidecar ONLY: the delivery seal is over the model ``content``, never
+    ``extra``, so this changes ZERO model-visible bytes. It is INERT until the grader
+    reads ``co_fact`` (Part 3); dose is graded by physical_id (shared with the host
+    ``def_partition`` row), so a co-fact can never add a physical GT dose.
+    """
+    if kind != "post_search.localize" or not final_text:
+        return {}
+    if not _CO_FACT_CALLERS_RE.search(final_text):
+        return {}
+    try:
+        from groundtruth.runtime.feature_lineage import (
+            build_lineage, lineage_ledger_extra)
+        lineage = build_lineage(
+            runtime_producer_id="contract_map",
+            evidence_type="caller_contract_search",
+            actual_event="search_result")
+        if lineage is None or not lineage.producer_registration_match:
+            return {}
+        return {"co_fact": lineage_ledger_extra(lineage)}
+    except Exception:  # noqa: BLE001 -- attribution cannot change delivery
+        return {}
+
+
 def _attach_exact_gateway_byte_owner(envelope, actual_event: str):
     """Attach a typed byte owner only for an exact authorized producer/class pair."""
     if (getattr(envelope, "producer", "") != "ranked_localization"
@@ -12718,6 +12766,15 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     _l3b_comp = "non_pure"
                 _delivery_extra = dict(_delivery_extra or {})
                 _delivery_extra["lineage_composition"] = _l3b_comp
+            # Caller-contract CO-FACT (2026-07-20): when the pre-edit post_search block
+            # physically carries caller-contract bytes (a ``callers:`` line), credit the
+            # caller_contract FACT class on THIS SAME physical delivery (shared physical_id
+            # + seal, dose graded once). Additive ``extra`` only — the seal is over the
+            # model ``content`` above, so this changes ZERO delivered bytes.
+            _co_fact_extra = _post_search_cofact_extra(kind, text)
+            if _co_fact_extra:
+                _delivery_extra = dict(_delivery_extra or {})
+                _delivery_extra.update(_co_fact_extra)
             _seal_lane_delivery(
                 kind, text, subject_path, base_output=_base_out,
                 producer_text=_provenance_original, identity_text=text,
@@ -12831,6 +12888,13 @@ def _commit_prepared_lane(
             "typed" if _l3b_typed
             else "pure_gate_missed"
             if _l3b_content_key(text) in _l3b_pure_caller_hashes else "non_pure")
+    # Caller-contract CO-FACT (2026-07-20, arbiter path — mirror of the main loop): credit
+    # caller_contract on the SAME physical delivery when the pre-edit post_search block
+    # carries a ``callers:`` line. Additive extra; seal is over ``content``; dose once.
+    _co_fact_extra = _post_search_cofact_extra(kind, text)
+    if _co_fact_extra:
+        delivery_extra = dict(delivery_extra or {})
+        delivery_extra.update(_co_fact_extra)
     _seal_lane_delivery(
         kind, shipped_suffix, krel or "", base_output=base_output,
         producer_text=decision.get("provenance_original", text),

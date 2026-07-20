@@ -452,6 +452,19 @@ _EVIDENCE_TYPE_ALIASES: dict[str, str] = {
     # DECISION, override by TIMING). This is the honest §26.4 replacement for the legacy
     # l3.contract/l3b.evidence caller-break that patch_delta (ast-only) cannot produce.
     "caller_break": "caller_contract",
+    # PRE-EDIT mirror of caller_break (2026-07-20): the caller-contract facts that ALREADY
+    # ride the pre-edit ``def_partition`` physical delivery. When a symbol resolves to a
+    # single def file, ``_resolve_symbol_defs`` sets ``callers_render =
+    # _caller_contract_for_file(...)`` (the contract_map engine, every leak guard inherited)
+    # and ``_fmt_def_facts`` renders it as the ``callers: …`` line of the def block delivered
+    # at ``search_result``. Those bytes answer the caller_contract DECISION ("how to modify a
+    # fn") but were only ever TYPED def_partition, so the canonical caller_contract class
+    # (boundary file_view) could never be credited from this pre-edit delivery. Aliasing this
+    # co-fact type to ``caller_contract`` by DECISION and overriding its boundary to
+    # ``search_result`` by TIMING (below) lets the co-fact grade against its OWN honest window
+    # without disturbing the canonical file_view row — exactly the caller_break precedent, one
+    # boundary earlier. INERT until the delivery seam emits it (co_evidence_type, dose-once).
+    "caller_contract_search": "caller_contract",
     # companion-file + new-file/integration facts
     "cochange_partner": "cochange_prior",
     "new_file_destination": "newfile_precedent",
@@ -676,6 +689,15 @@ _EVIDENCE_TYPE_DELIVER_BY: dict[str, str] = {
     # GT_REGISTRY_ENFORCE from EXPIRING a genuinely on-time edit-boundary caller-break while
     # still catching a truly wrong-event fact — exactly the trace_frame precedent above.
     "caller_break": EVENT_EDIT_RESULT,
+    # PRE-EDIT mirror of caller_break (2026-07-20): the ``caller_contract_search`` co-fact
+    # aliases to ``caller_contract`` (canonical deliver_by file_view, PRE-EDIT) but is carried
+    # by the ``def_partition`` physical delivery that fires at ``search_result`` (the agent's
+    # own grep). Its real last-useful boundary is therefore ``search_result`` — the callers
+    # shape the edit from the moment the def partition lands. Overriding it here keeps
+    # enforcement from reporting WRONG_EVENT for a genuinely on-time pre-edit caller contract,
+    # exactly as ``caller_break`` does one boundary later (edit_result). Not reactive: it has a
+    # FIXED boundary, so the non-reactive wrong-event check still guards a truly mistimed fire.
+    "caller_contract_search": EVENT_SEARCH_RESULT,
     # B-BND (b2): the SEAM's executed covering RED. Its canonical ``covering_red`` class
     # declares deliver_by=test_result (a covering verdict riding the agent's OWN test result),
     # but the ``covering_runner`` producer RUNS the covering test ITSELF at EDIT time and

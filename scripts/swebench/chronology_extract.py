@@ -628,18 +628,32 @@ def _adjudicate_delivery(
     boundaries: dict[str, list[int]],
     ledger_rows: list[dict],
     tool_ordinal_index: dict[int, int],
+    native_acq_payload: str | None = None,
 ) -> ExtractedChronology:
     """Build one delivery's six-index chronology and its adjudicated timing verdict.
 
     ``binding_reason`` (E) forces UNMEASURED when the observation-binding assertion failed.
-    ``block_id`` (D) is set for a per-block adjudication of a compound brief."""
+    ``block_id`` (D) is set for a per-block adjudication of a compound brief.
+
+    ``native_acq_payload`` (2026-07-20, co-fact): when a delivery RIDES bytes the agent
+    already triggered (a co-fact riding the agent's own search), self-acquisition must be
+    judged on the NOVEL delivered content, not on the trigger the agent already possessed.
+    When given, the STEP_BEHIND self-acquisition scan uses these bytes' entities INSTEAD of
+    the full payload's (commit/action still use the full payload). Default ``None`` =
+    byte-identical to every existing caller (the whole payload judges self-acquisition)."""
     required = required_event(evidence_type)
     # A: the ONE entity model — decision-commit, native-acquisition, and action all match the
     # SAME delivered-entity patterns.
     pats = _delivery_entity_patterns(payload, file_path)
     decision_open = _decision_open_index(required, delivery_index, boundaries)
     decision_commit = _decision_commit_index(messages, decision_open, evidence_type, pats)
-    native_acq = _native_acquisition_index(messages, delivery_index, payload, file_path)
+    if native_acq_payload is not None:
+        # judge self-acquisition on the NOVEL bytes only (empty file_path so the def-file
+        # fallback can't re-introduce the trigger the agent searched).
+        native_acq = _native_acquisition_index(
+            messages, delivery_index, native_acq_payload, "")
+    else:
+        native_acq = _native_acquisition_index(messages, delivery_index, payload, file_path)
     ack_index = _acknowledgment_index(seal_str, ledger_rows, tool_ordinal_index)
     act_index = _action_index(messages, delivery_index, payload, file_path)
 
@@ -776,6 +790,124 @@ def extract_chronologies(
             boundaries=boundaries,
             ledger_rows=ledger_rows,
             tool_ordinal_index=tool_ordinal_index,
+        )
+    return out
+
+
+def _cofact_callers_text(payload: str) -> str:
+    """The ``callers:`` line(s) of a def-facts block — the NOVEL caller-contract bytes the
+    co-fact delivers. Self-acquisition for the caller_contract co-fact is judged on THESE
+    caller entities, never the def symbol the agent grepped to trigger the delivery."""
+    return "\n".join(
+        ln for ln in (payload or "").splitlines()
+        if ln.lstrip().lower().startswith("callers:")
+    )
+
+
+def extract_cofact_chronologies(
+    trajectory: Any, ledger_rows: list[dict]
+) -> list[ExtractedChronology]:
+    """Co-fact chronologies for the caller_contract bytes that RIDE a pre-edit delivery.
+
+    A ``post_search.localize`` def-facts block delivered at ``search_result`` carries an
+    authorized ``callers:`` line; the seam stamps a ``co_fact`` sidecar (row['co_fact'],
+    from ``gt_mini_patch._post_search_cofact_extra``) crediting the caller_contract FACT
+    class on that SAME physical delivery. This re-adjudicates the caller_contract timing
+    at its ``caller_contract_search`` boundary override (search_result) REUSING the host
+    row's exact physical join — same delivery_index, seal, and physical_id — so the class
+    verdict can grade ON_TIME instead of the WRONG_EVENT its file_view window forces on a
+    separate post-view/edit delivery. Purely ADDITIVE: ``extract_chronologies`` is
+    untouched; these fold into ``adjudicate_deliveries`` alongside the block chronologies.
+    Dose-safe by construction — the co-fact shares the host physical_id, never a new one,
+    so a downstream physical-id dose count is unaffected. Authorized identity ONLY: the
+    sidecar must self-declare fact_class=caller_contract, evidence_type=
+    caller_contract_search, and a registered producer match (no inference from payload,
+    flags, or layer text)."""
+    messages = _messages(trajectory)
+    tool_ordinal_index = _tool_ordinal_to_index(messages)
+    consumption = build_consumption_ledger(
+        trajectory, runtime_ledger_rows=ledger_rows,
+    )
+    physical_authority = physical_delivery_authority(consumption)
+    physical_deliveries = physical_authority.get("deliveries", {})
+    boundaries = _boundary_indices(messages, ledger_rows, tool_ordinal_index)
+
+    out: list[ExtractedChronology] = []
+    for row_index, row in enumerate(ledger_rows):
+        if not isinstance(row, dict):
+            continue
+        if row.get("outcome") != "delivered" or int(row.get("chars_delivered") or 0) <= 0:
+            continue
+        co = row.get("co_fact")
+        if not isinstance(co, dict):
+            continue
+        # AUTHORIZED co-fact identity only — the sidecar declares its own registered
+        # producer/evidence/class; a payload token or flag can never manufacture it.
+        if (
+            co.get("fact_class") != "caller_contract"
+            or co.get("evidence_type") != "caller_contract_search"
+            or co.get("producer_registration_match") is not True
+        ):
+            continue
+
+        actual_event = "search_result"  # the caller_contract_search boundary override
+        seal = row.get("content_sha256_16")
+        seal_str = str(seal) if isinstance(seal, str) else ""
+        file_path = str(row.get("file_path") or "")
+
+        physical = physical_deliveries.get(str(row_index), {})
+        physical_state = (
+            physical.get("state") if isinstance(physical, dict) else None
+        )
+        if physical_state == PHYSICAL_DELIVERY_BOUND:
+            delivery_index = physical.get("msg_index")
+            payload = str(physical.get("rendered_text") or "")
+            physical_reason = None
+        else:
+            delivery_index = None
+            payload = ""
+            physical_reason = (
+                str(physical.get("reason") or "physical_delivery_unjoined")
+                if isinstance(physical, dict)
+                else "physical_delivery_unjoined"
+            )
+        _binding_ok, binding_reason = _binding_delivery_consistent(
+            row, delivery_index, tool_ordinal_index
+        )
+        out.append(
+            _adjudicate_delivery(
+                row_index=row_index,
+                evidence_type="caller_contract_search",
+                fact_class="caller_contract",
+                actual_event=actual_event,
+                seal_str=seal_str,
+                delivery_index=delivery_index,
+                payload=payload,
+                file_path=file_path,
+                physical_state=(
+                    str(physical_state) if physical_state is not None else None
+                ),
+                physical_id=(
+                    str(physical.get("physical_id"))
+                    if isinstance(physical, dict) and physical.get("physical_id")
+                    else None
+                ),
+                physical_reason=physical_reason,
+                binding_reason=binding_reason,
+                block_id=None,
+                block_candidate_id=None,
+                block_char_span=None,
+                block_chars_delivered=None,
+                parent_physical_id=None,
+                block_lineage_validated=False,
+                messages=messages,
+                boundaries=boundaries,
+                ledger_rows=ledger_rows,
+                tool_ordinal_index=tool_ordinal_index,
+                # judge STEP_BEHIND on the NOVEL callers, not the def symbol the agent
+                # searched to trigger this delivery (commit/action keep the full payload).
+                native_acq_payload=_cofact_callers_text(payload),
+            )
         )
     return out
 
@@ -1030,6 +1162,11 @@ def adjudicate_deliveries(trajectory: Any, ledger_rows: list[dict]) -> dict[str,
     # localization brief blocks are graded as their own class — never collapsed into one
     # verdict on the (unregistered) compound brief row.
     block_chronologies = extract_block_chronologies(trajectory, ledger_rows)
+    # Co-fact chronologies (2026-07-20): credit caller_contract on the pre-edit
+    # def_partition physical delivery that carries a ``callers:`` line. Folded in
+    # ALONGSIDE the block chronologies so a class verdict sees the earlier, on-time
+    # caller-contract delivery. Reuses the host row's physical_id (dose-safe).
+    cofact_chronologies = extract_cofact_chronologies(trajectory, ledger_rows)
 
     by_class: dict[str, list[ExtractedChronology]] = {}
     deliveries: list[dict[str, Any]] = []
@@ -1063,6 +1200,8 @@ def adjudicate_deliveries(trajectory: Any, ledger_rows: list[dict]) -> dict[str,
         _record(chronologies[row_index])
     for ec in block_chronologies:
         _record(ec)
+    for ec in cofact_chronologies:
+        _record(ec)
 
     per_fact_class: dict[str, Any] = {}
     for fact_class, rows in sorted(by_class.items()):
@@ -1085,7 +1224,9 @@ def adjudicate_deliveries(trajectory: Any, ledger_rows: list[dict]) -> dict[str,
 
     return {
         "schema": TIMING_JOIN_SCHEMA,
-        "delivered_rows_graded": len(chronologies) + len(block_chronologies),
+        "delivered_rows_graded": (
+            len(chronologies) + len(block_chronologies) + len(cofact_chronologies)
+        ),
         "per_fact_class": per_fact_class,
         "deliveries": deliveries,
     }
@@ -1108,5 +1249,6 @@ __all__ = [
     "adjudicate_deliveries",
     "extract_block_chronologies",
     "extract_chronologies",
+    "extract_cofact_chronologies",
     "timing_by_fact_class",
 ]

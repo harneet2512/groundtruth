@@ -1253,6 +1253,29 @@ def classify_ledger(rows: list[dict]) -> dict[str, dict[str, Any]]:
             fp = r.get("file_path")
             if fp:
                 b["delivered_files"].add(fp)
+            # Caller-contract CO-FACT (2026-07-20): the SAME physical delivery also carries
+            # authorized caller-contract bytes (the seam's ``co_fact`` sidecar, stamped when
+            # the pre-edit def-facts block renders a ``callers:`` line). Credit caller_contract
+            # delivered on this SAME row so its delivered_byte_proven gate reflects the pre-edit
+            # delivery, at its search_result boundary. Dose-safe: this mints NO physical_id
+            # (dose is graded on the shared physical_id via the consumption ledger) — it is a
+            # second FACT credit on ONE physical delivery, never a second dose. Authorized
+            # identity only (self-declared registered producer/evidence/class).
+            co = r.get("co_fact")
+            if (
+                isinstance(co, dict)
+                and co.get("fact_class") == "caller_contract"
+                and co.get("evidence_type") == "caller_contract_search"
+                and co.get("producer_registration_match") is True
+            ):
+                cb = per["caller_contract"]
+                cb["produced"] += 1
+                cb["delivered"] += 1
+                cb["delivered_chars"] += int(r.get("chars_delivered") or 0)
+                cb["delivered_rows"].append(idx)
+                cb["delivered_boundaries"].add("search_result")
+                if fp:
+                    cb["delivered_files"].add(fp)
         elif outcome == "suppressed_hidden_only":
             b["suppressed_hidden"] += 1
             if arb or reason.startswith("global_arbiter:"):
