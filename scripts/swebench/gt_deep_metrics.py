@@ -1837,6 +1837,26 @@ def build(task: str, results_dir: str, log_path: str = "",
                 "per_layer": rl_delivery["per_layer"],
                 "per_event_type": rl_delivery["per_event_type"],
             },
+            # D-V (run6 telegram: evidence_delivered=0 vs ledger delivered_count=11):
+            # native delivery is TAGLESS (native_render rides the model's own channel
+            # — fact_registry.py:130), so the <gt-*> tag-scan fields above structurally
+            # read 0 for every native form. The sealed runtime ledger
+            # (content_sha256_16 byte-join) is the ONLY reliable native-delivery signal
+            # (adding text heuristics would false-positive on ordinary tool output).
+            # Surface the ledger truth as the headline so a delivered run is NEVER
+            # reported as 0-delivered. Falls back to the tagged-scan sum ONLY when no
+            # ledger is present (legacy OH tagged path) — byte-identical there.
+            "delivered_total_authoritative": d8(
+                rl_delivery["delivered_count"] if rl_delivery.get("present")
+                else (traj.get("gt_evidence_delivered", 0)
+                      + traj.get("gt_scope_delivered", 0)
+                      + traj.get("gt_contract_delivered", 0)
+                      + traj.get("gt_cochange_delivered", 0)
+                      + traj.get("gt_verify_delivered", 0)
+                      + traj.get("gt_nudge_delivered", 0))
+            ),
+            "delivery_authority": (
+                "runtime_ledger_seal" if rl_delivery.get("present") else "tag_scan"),
         },
         "behavioral_impact": {
             "total_deliveries": behavioral_impact.get("total_deliveries", 0),
