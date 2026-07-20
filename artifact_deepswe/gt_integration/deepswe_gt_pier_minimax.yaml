@@ -35,29 +35,28 @@ agent:
     1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
     2. Provide one or more bash tool calls to execute
 
-    ## Codebase Intelligence Tool
+    ## Environment diagnostics
 
-    GroundTruth automatically appends evidence to command output inside
-    <gt-evidence> tags when you read or edit source files. This evidence is
-    built from the codebase call graph (any language -- Go, Rust, TS, JS,
-    Python, ...) and includes:
-    - Cross-file callers of the functions in the file you opened, and how they
-      use the result (so you do not break them).
+    This environment surfaces codebase diagnostics inline with your command
+    output: compiler and type-checker errors, covering-test failures, and
+    cross-file references appear alongside the output of the commands you run,
+    as part of that output. Read them as you would any build or test result --
+    they carry cross-file facts you cannot see from a single file. They may
+    include:
+    - Callers of the functions in a file you opened, and how they use the result
+      (so you do not break them).
     - Behavioral contracts: the typed signatures of the functions your edit
       target CALLS (so you call them correctly).
     - Sibling functions at the same scope (the patterns you must match).
+    - Files graph-connected to the one you are viewing, and files that
+      historically change together with the one you edited.
 
-    Read those <gt-evidence> tags. Lines such as [WITNESS] and [CALLEE] are
-    deterministically resolved cross-file facts you cannot get from the file
-    alone; [CALLERS] location hints and scope neighbors may be unverified --
-    those are labeled "(unverified)", so treat them as leads to confirm with
-    grep, not facts. The tags appear automatically; you do not call anything.
-
-    GroundTruth may also append these blocks when relevant:
-    - <gt-contract>: signatures and verified caller counts for functions in a file you edited -- preserve those interfaces.
-    - <gt-scope>: graph-connected files around the file you are viewing -- candidate scope; confirm the edit target with grep.
-    - <gt-cochange>: files that historically changed together with the file you edited -- check whether your fix needs them too.
-    - <gt-nudge>: a one-time course-correction when your trajectory looks stuck.
+    Verified cross-file facts are stated plainly; location hints and scope
+    neighbours are marked unverified -- treat those as leads to confirm with
+    grep, not facts. When a diagnostic shows callers of a function, do not break
+    them; when it shows a behavioral contract (signature/return), preserve it;
+    when it reports a failing check on an edit you just made, resolve it before
+    moving on.
 
     ## Important Boundaries
 
@@ -70,10 +69,9 @@ agent:
     2. Explore the codebase structure: `find . -name "*.go" -o -name "*.ts" -o -name "*.py" | head -30`
     3. Use grep/find to locate relevant files.
     4. Read the relevant source files to understand current behavior. As you
-       read and edit, GroundTruth appends <gt-evidence> tags with the cross-file
-       callers, callee contracts, and sibling patterns -- read them.
-    5. Implement the changes. Cross-check against the callers and contracts in
-       the <gt-evidence> tags.
+       read and edit, cross-file diagnostics (callers, callee contracts, sibling
+       patterns) appear inline with your command output -- read them.
+    5. Implement the changes. Cross-check against those callers and contracts.
     6. Run existing tests to verify: check for test scripts, Makefiles, or standard test commands.
     7. Submit your patch.
 
