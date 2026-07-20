@@ -5574,7 +5574,13 @@ def _evidence_body(kind: str, rel: str, root: str, cmd: str = "") -> str:
     # so lines[:6] keeps only caller blocks and cannot flip purity.
     _l3b_last_pure_caller = _l3b_pure_verdict(
         _caller_blocks, _noncaller_blocks, len(lines))
-    return "\n".join(lines[:6]).strip()
+    # D-7 (run6 audit, cited in 5 batches): the 4 contributor sites can each append the
+    # SAME ``file:line`` row, so a 6-line dose wastes budget on duplicates (e.g. tox it56
+    # triplicated a row; briefcase/checkov/conan repeated lines). Order-preserving dedup
+    # BEFORE the [:6] budget so the model sees 6 DISTINCT facts, not 6 slots. Dedup is
+    # AFTER the fail-closed purity verdict above (which counts per-append contributions),
+    # so it never changes classification — only the rendered bytes.
+    return "\n".join(list(dict.fromkeys(lines))[:6]).strip()
 
 
 def _evidence_native_on() -> bool:

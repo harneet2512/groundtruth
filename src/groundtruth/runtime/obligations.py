@@ -656,7 +656,7 @@ class ObligationTracker:
                 "status": o.status,
                 "status_certainty": o.certainty or certainty_for_status(o.status),
                 "last_turn": o.last_turn,
-                "verbatim": (o.verbatim or "")[:160],
+                "verbatim": _truncate_at_word(o.verbatim or "", 160),
                 "evidence": list(o.evidence[-3:]),
             }
             for o in self.obligations
@@ -797,6 +797,26 @@ def obligation_truth_summary(rows) -> dict:
     }
 
 
+def _truncate_at_word(text: str, limit: int) -> str:
+    """Truncate to <= ``limit`` chars at a WORD boundary, not mid-character.
+
+    D-10 (run6 audit, cited in 5 batches): a hard ``text[:160]`` slice severed
+    requirements mid-word ("unimodal d…", "first g…", "take xy as single
+    parameter…"), cutting exactly the discriminating clause the model needed.
+    Cut at the last whitespace within the budget and mark with a single ellipsis
+    (reserving its char so the result never exceeds ``limit``). No boundary in the
+    last ~25% -> fall back to a hard cut (a single long token). Pure, deterministic.
+    """
+    t = text or ""
+    if len(t) <= limit or limit <= 1:
+        return t[:limit]
+    head = t[: limit - 1]  # reserve one char for the ellipsis
+    cut = head.rsplit(None, 1)[0] if " " in head or "\t" in head or "\n" in head else head
+    if len(cut) < (limit - 1) * 0.75:  # boundary too early -> single long token
+        cut = head
+    return cut.rstrip() + "…"
+
+
 def render_obligation_truth_block(rows, *, max_listed: int = 6, leak_screen=None) -> str:
     """Render only unmet normative truth, distinguishing attempt from proof."""
     truth = tuple(row for row in (rows or ()) if isinstance(row, ObligationTruth))
@@ -807,7 +827,7 @@ def render_obligation_truth_block(rows, *, max_listed: int = 6, leak_screen=None
     for row in unmet:
         if len(lines) >= max_listed:
             break
-        quote = (getattr(row.view, "verbatim", "") or "")[:160]
+        quote = _truncate_at_word(getattr(row.view, "verbatim", "") or "", 160)
         if row.state is ObligationTruthState.EXERCISED_UNPROVEN:
             mark = "[exercised, result unproven]"
         elif row.state is ObligationTruthState.UNVERIFIABLE:
