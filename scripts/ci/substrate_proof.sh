@@ -767,18 +767,20 @@ if [ "$PROOF_RC" -ne 0 ]; then
     echo "::error::gt-run-proof failed on ${_LC} (legitimacy/anti-cheat — results would be INVALID) — task FAILS" | tee -a trial_output.log
     # proof_status stays 'failed' (written above); HARD ABORT so no paid spend on an invalid substrate.
     exit 1
-  elif grep -qE "DETERMINISM_MISMATCH|brief determinism proof raised|live localization diagnostic" /tmp/gt/proof_failure.json 2>/dev/null; then
-    # TASK != METRICS (2026-07-20): a brief SELF-CONSISTENCY metric — determinism mismatch across
-    # two same-input brief generations, or the strict localization diagnostic — is a GT-QUALITY
-    # signal, NOT a broken/absent stack. The graph/LSP/embedder are PRESENT and VALID (a genuine
-    # stack breakage fails via its own code below/above: GRAPH_CERT_INVALID / GT_INDEX_FAIL /
-    # EMBEDDER_USAGE_FAIL / brief.txt write failed). Per the PRODUCT RULE documented above ("never
-    # refuse a task for GT-quality"), the agent runs BEST-EFFORT and the metric is RECORDED as
-    # degraded — a measurement must never abort the paid task on an otherwise-valid substrate.
-    # NB: gt_run_proof:1886 mislabels these with code=GT_ARTIFACT_MISSING, so we key on the MESSAGE
-    # (the self-consistency phrase), never the code. Allowlist (positive match only) — anything not
-    # positively identified as self-consistency stays fail-closed in the branches around this one.
-    _SC=$(grep -oE "DETERMINISM_MISMATCH|brief determinism proof raised|live localization diagnostic" /tmp/gt/proof_failure.json 2>/dev/null | head -1)
+  elif grep -qE "DETERMINISM_MISMATCH|brief determinism proof raised|live localization diagnostic|portable brief EMPTY" /tmp/gt/proof_failure.json 2>/dev/null; then
+    # TASK != METRICS (2026-07-20): a brief-QUALITY / SELF-CONSISTENCY metric — determinism
+    # mismatch across two same-input brief generations, the strict localization diagnostic, or an
+    # EMPTY/thin step-0 brief — is a GT-COVERAGE signal, NOT a broken/absent stack. The graph/LSP/
+    # embedder are PRESENT and VALID (a genuine stack breakage fails via its own code below/above:
+    # GRAPH_CERT_INVALID / GT_INDEX_FAIL / EMBEDDER_USAGE_FAIL / brief.txt write failed). Per the
+    # PRODUCT RULE above ("never refuse a task for GT-quality") AND GT's own thesis (the agent
+    # self-localizes; GT only BOOSTS), the agent runs BEST-EFFORT — WITHOUT a step-0 brief if GT
+    # found nothing — exactly as run6 did (33-byte near-empty briefs on these same tasks, agent
+    # ran). An empty brief is coverage, not breakage; killing the paid task on it is over-strict.
+    # NB: gt_run_proof:1886 mislabels ALL of these with code=GT_ARTIFACT_MISSING, so we key on the
+    # MESSAGE (the quality phrase), never the code. Allowlist (positive match only) — a genuine
+    # "brief.txt write failed" IO error does NOT match and stays fail-closed in the branch below.
+    _SC=$(grep -oE "DETERMINISM_MISMATCH|brief determinism proof raised|live localization diagnostic|portable brief EMPTY" /tmp/gt/proof_failure.json 2>/dev/null | head -1)
     echo "::warning::gt-run-proof exited $PROOF_RC on a brief SELF-CONSISTENCY metric (${_SC}) with the required stack PRESENT/VALID — task != metrics: trial proceeds BEST-EFFORT, metric recorded degraded" | tee -a trial_output.log
     write_proof_status ok PROOF_DEGRADED "gt-run-proof exited $PROOF_RC (self-consistency metric ${_SC}; stack present) — agent proceeds best-effort"
   elif [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ] || [ "${GT_REQUIRE_GRAPH_VALID:-0}" = "1" ] \
