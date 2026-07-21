@@ -848,9 +848,18 @@ def _inject_steps_mount_mode() -> list[InstallStep]:
             ),
         ),
         # Wire the import chain (writes to container-internal site-packages).
+        # _APPEND_TO_MINI only base64-writes the .pth + appends to default.py; it does
+        # NOT import gt_mini_patch, so it is safe to run at BUILD time (the /opt/gt:ro
+        # bind-mount does not exist yet — it materialises at `docker compose up`).
         InstallStep(user="root", run=_APPEND_TO_MINI),
-        # Verify the patch loaded correctly.
-        InstallStep(user="root", run=_SELFTEST_STEP),
+        # NB: NO build-time _SELFTEST_STEP in mount-mode. The selftest imports
+        # gt_mini_patch + groundtruth.runtime.* FROM /opt/gt, which is a RUNTIME
+        # bind-mount absent during `docker build` — running it here always fails
+        # (ModuleNotFoundError -> exit 1 -> build red). The fail-closed proof it
+        # provides is enforced at RUNTIME instead: gt_mini_patch writes the
+        # GT_PROOF_MARKER on load and the run-proof machinery gates on it once the
+        # mount is live. (The b64 path bakes the files INTO the image, so it keeps
+        # its build-time selftest below.)
     ]
     return steps
 
