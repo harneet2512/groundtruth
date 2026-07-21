@@ -1026,11 +1026,18 @@ jobs:
           cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/phase_policy.py   "${HOST_GT_INJECT}/" 2>/dev/null || true
-          # Product packages (groundtruth.{runtime,delivery,pretask}) — the single-source
-          for pkg in runtime delivery pretask; do
+          # Product packages — the single-source. GATE FIX (port of swebench_live_lite_full.yml
+          # L1171-1186): under GT_RL_PROFILE=2 gt_mini_patch imports the SM engines (global_arbiter,
+          # hypothesis_ledger, verification_plan, edit_overlay, xsession_memory, ...) which live in
+          # SUBPACKAGES + the groundtruth.trajectory package. The old `cp .../*.py` staged ONLY the
+          # flat top-level modules of {runtime,delivery,pretask} and NOT trajectory, so pier crashed:
+          # "RuntimeError: gt_mini_patch.py imports groundtruth modules NOT covered by [staged set]".
+          # Use `cp -r .../.` (recursive, subpackages) AND stage trajectory — matches the live-lite
+          # working profile-2 path.
+          for pkg in runtime delivery pretask trajectory; do
             if [ -d "src/groundtruth/${pkg}" ]; then
               mkdir -p "${HOST_GT_INJECT}/groundtruth/${pkg}"
-              cp src/groundtruth/${pkg}/*.py "${HOST_GT_INJECT}/groundtruth/${pkg}/" 2>/dev/null || true
+              cp -r "src/groundtruth/${pkg}/." "${HOST_GT_INJECT}/groundtruth/${pkg}/" 2>/dev/null || true
               touch "${HOST_GT_INJECT}/groundtruth/${pkg}/__init__.py"
             fi
           done
