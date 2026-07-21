@@ -365,6 +365,17 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         #                      function-scope behind `if log_dir is not None`, unreached)
         "xsession_memory.py",
         "project_memory.py",
+        # Profile-2 attestation engines: gt_mini_patch imports these at module scope
+        # under the active RL profile (content-guard + the L6/newfile/recovery/terminal
+        # attestations). They must be allow-listed or the injection import-closure check
+        # (RuntimeError: "imports groundtruth modules NOT covered by the injection
+        # allow-list") aborts pier before the agent runs. All stdlib/fact_registry-closed,
+        # shipped by the recursive runtime staging.
+        "content_guards.py",
+        "l6_revision_attestation.py",
+        "newfile_precedent_attestation.py",
+        "recovery_attestation.py",
+        "terminal_ack.py",
     ),
     # SM-3: trajectory.classifier — hypothesis_ledger's FailureKind/is_env_failure
     # dep. Stdlib-only (enum/os/re/dataclasses), no groundtruth.* import -> closes
