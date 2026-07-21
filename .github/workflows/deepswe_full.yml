@@ -106,6 +106,10 @@ on:
         description: "GT_RL_PROFILE — ONE versioned toggle for the coherent RL-adherence stack (B-16/B-17). 1 = ON activates GT_GATEWAY·GT_GATEWAY_NATIVE·GT_STEER_NATIVE·GT_LANE_ENVELOPE·GT_EDIT_CHECK·GT_VERIFY_EXECUTE·GT_D7_RELATEDNESS·GT_OBLIGATION_FRESHNESS (fanned out in gt_ae_block.sh via rl_profile.py). An EXPLICITLY-set member input still overrides the profile (per-flag control). Harness ABORTS before model spend if a requested member capability is unavailable (fail-closed). '' = OFF (default; byte-identical — no member flag changed). Measurement-only authority stays advisory."
         required: false
         default: ""
+      require_commit_parity:
+        description: "Strict commit-parity gate (github.sha == substrate baked commit). '1' (default) = full-run strict. '0' = allow a CI-ONLY-delta validation to run an EXISTING substrate whose baked commit lags the checkout by pipeline/gate fixes only (the GT product code that runs is the substrate's, not the checkout's) — used to validate a gate fix without a rebake."
+        required: false
+        default: "1"
 
 permissions:
   contents: write   # live-log bridge force-pushes per-task logs to gha-live-logs/<task> branches
@@ -137,7 +141,7 @@ env:
   # Blocker 2: a substrate whose BAKED build-commit != this run's checkout commit ABORTS
   # (stale-bake guard). Makes Blocker 1 self-enforcing: a forgotten rebuild fails closed
   # instead of silently running old localizer/depth code.
-  GT_REQUIRE_COMMIT_PARITY: "1"
+  GT_REQUIRE_COMMIT_PARITY: ${{ github.event.inputs.require_commit_parity || '1' }}
   # H8 DISARMED (best-effort rule): GT_REQUIRE_PARSE_RATE would log.Fatalf the indexer on a low
   # fractional parse rate (main.go:241), THROWING AWAY the partial graph it could produce — that
   # refuses GT help on a hard repo. Under "never refuse / best of effort" we keep whatever partial
@@ -1054,6 +1058,20 @@ jobs:
 
           # BUG#1+#2 FIX (single-source de-drift): source the canonical --ae block so the
           export GT_C_OUT=/gt_out
+          # GATE FIX (port of swebench_live_lite_full.yml #72): emit the capability RECEIPT
+          # from the REAL substrate BEFORE gt_ae_block.sh runs the RL-profile preflight, so
+          # the substrate-property members (GT_CONTENT_LEG / GT_L6_FRESH) are ADMITTED
+          # instead of failing ALL-closed on an empty receipt (which aborted Profile-2 before
+          # the agent ran — GT_RL_PREFLIGHT_ABORT unavailable=GT_CONTENT_LEG,GT_L6_FRESH).
+          # Host-side (DeepSWE sources gt_ae_block.sh on the host): reads the base substrate
+          # graph (GT_HOST_GRAPH_DB=/tmp/gt/graph.db, written by the substrate-proof step) +
+          # the HOST-staged gt-index (/tmp/gt_inject/opt/gt/gt-index). Absent/empty surface =>
+          # empty receipt => those members correctly fail-closed (never self-attested). Skipped
+          # in baseline (control arm stays pure). MUST precede the gt_ae_block.sh source below.
+          if [ "${GT_BASELINE:-0}" != "1" ]; then
+            export GT_CAPABILITY_RECEIPT="$(GT_INDEX_BIN="/tmp/gt_inject/opt/gt/gt-index" GT_HOST_GRAPH_DB="${GT_HOST_GRAPH_DB:-/tmp/gt/graph.db}" PYTHONPATH="/tmp/gt_inject/opt/gt" python3 -m groundtruth.runtime.capability_receipt --emit-json 2>/tmp/gt_receipt_err.txt || echo "{}")"
+            echo "[GT] capability receipt (host): ${GT_CAPABILITY_RECEIPT}"
+          fi
           # shellcheck source=artifact_deepswe/gt_integration/gt_ae_block.sh
           source artifact_deepswe/gt_integration/gt_ae_block.sh
           echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
