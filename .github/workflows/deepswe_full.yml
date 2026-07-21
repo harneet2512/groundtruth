@@ -1095,6 +1095,14 @@ jobs:
             MOUNTS_JSON="[]"
             GT_AE_ARM+=(--ae GT_BASELINE="1")
           else
+            # HOST pier process must see GT_MOUNT_MODE at BUILD-SPEC time: gt_agent.py
+            # _inject_steps() reads os.environ HERE (when it generates the agent-install
+            # Dockerfile), and picks _inject_steps_mount_mode() only if it is "1". The
+            # --ae below reaches the agent CONTAINER runtime — too late to steer which
+            # injection path bakes the image. Without this export the base64 path runs and
+            # inlines graph.db -> a 3.39MB Dockerfile -> BuildKit "message larger than max
+            # (16MB gRPC)" hard-fail (and forces the slow legacy builder on box).
+            export GT_MOUNT_MODE=1
             GT_AE_ARM+=(
               --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db"
               --ae GT_CERT_DIR="${GT_C_ARTIFACTS}"
