@@ -29,7 +29,7 @@ from artifact_resolver import brief_provenance, resolve_trial_artifacts  # noqa:
 from reconcile import reconcile_graph_handoff as reconcile_graph_handoff  # noqa: E402
 from groundtruth.runtime.context_policy import POLICY_VERSION as PHASE_POLICY_VERSION  # noqa: E402
 from groundtruth.runtime.obligations import OBLIGATION_VERSION  # noqa: E402
-from groundtruth.runtime.trajectory_state import Turn, derive_phase, derive_state  # noqa: E402
+from groundtruth.runtime.trajectory_state import Turn, derive_phase, derive_state, is_source_path  # noqa: E402
 from groundtruth.runtime.verification_horizon import HORIZON_VERSION  # noqa: E402
 
 __all__ = ["build_task_truth", "write_task_truth", "reconcile_graph_handoff"]
@@ -361,7 +361,59 @@ def _source_write_truth(path: str | None) -> dict[str, Any] | None:
     }
 
 
-def _trajectory_state_summary(artifacts: dict[str, str | None]) -> dict[str, Any]:
+# ── Edit-truth reconciliation (DEFECT-1) ─────────────────────────────────────────────
+# Shell-command inference (derive_state / command_event) only recognizes a NARROW set of
+# write verbs (apply_patch / python -c / cat> / >>). It MISSES edits applied via ``sed -i``
+# (which it classifies as a VIEW), ``patch`` / ``git apply``, ``tee``, and heredocs — the
+# tell of which is a ``.orig`` backup file. When the run's APPLIED patch demonstrably
+# changed a source file, that file WAS edited regardless of how the shell syntax parsed, so
+# the patch is an edit-truth authority at least as strong as command inference (command
+# inference stays the fallback). These helpers locate the applying step generically — no
+# task/repo-specific keys.
+_EDIT_SHAPE_RE = re.compile(
+    r"(?:^|[;&|]\s*)(?:sed\s+-i|patch(?:\s|$)|git\s+apply|tee(?:\s|$)|apply_patch|dd\s)"
+    r"|>>?\s*[^>\s&|]"            # shell redirect into a file
+    r"|<<-?\s*[\"']?[A-Za-z_]"    # heredoc
+    r"|\.orig\b",                # sed -i.orig / patch backup-file tell
+    re.I,
+)
+
+
+def _looks_like_edit_command(command: str) -> bool:
+    """True when a command has the shape of a file WRITE/patch (broad, generic)."""
+    return bool(_EDIT_SHAPE_RE.search(command or ""))
+
+
+def _first_edit_step_for_paths(turns: list[Turn], target_paths: set[str]) -> int | None:
+    """1-indexed step of the first edit-shaped command that names a target source path.
+
+    Generic: matches a target's normalized path OR its basename as a substring of the
+    command. Returns None when no applying step can be located (honest unknown — never a
+    fabricated step), even when the patch itself proves an edit occurred.
+    """
+    if not target_paths:
+        return None
+    needles: set[str] = set()
+    for path in target_paths:
+        if path:
+            needles.add(path)
+            needles.add(path.rsplit("/", 1)[-1])
+    for index, turn in enumerate(turns, 1):
+        command = turn.command or ""
+        if not _looks_like_edit_command(command):
+            continue
+        norm = command.replace("\\", "/")
+        if any(needle and needle in norm for needle in needles):
+            return index
+    return None
+
+
+def _trajectory_state_summary(
+    artifacts: dict[str, str | None],
+    *,
+    changed_source_paths: set[str] | None = None,
+    has_patch: bool = False,
+) -> dict[str, Any]:
     step_limit_raw = os.environ.get("GT_STEP_LIMIT")
     try:
         step_limit = int(step_limit_raw) if step_limit_raw else None
@@ -385,8 +437,28 @@ def _trajectory_state_summary(artifacts: dict[str, str | None]) -> dict[str, Any
         latest_passing_test_step = None
         coherence_write_count = None
         coherence_edited_files: list[str] = []
-        source_edit_count: int | None = state.source_edit_count
-        edited_files = sorted(state.edited_files)[:20]
+        # Reconcile weak command inference against the APPLIED patch (DEFECT-1): a source
+        # file the diff demonstrably changed WAS edited even when the write was applied via
+        # sed -i / patch / heredoc (missed by shell-command inference). The patch is an
+        # authority at least as strong as inference; inference remains the fallback.
+        inferred_files = set(state.edited_files)
+        patch_source = {
+            norm
+            for p in (changed_source_paths or set())
+            if p
+            for norm in (_normalize_repo_path(p),)
+            if is_source_path(norm)
+        }
+        reconciled_files = set(inferred_files)
+        reconciled_count = state.source_edit_count
+        if has_patch and patch_source:
+            reconciled_files |= patch_source
+            reconciled_count = max(reconciled_count, len(patch_source))
+            if (reconciled_files - inferred_files) or reconciled_count > state.source_edit_count:
+                edit_authority = "applied_patch_reconciled_command_inference"
+        source_edit_count: int | None = reconciled_count
+        edited_files = sorted(reconciled_files)[:20]
+        edited_source_set = {f for f in reconciled_files if is_source_path(f)}
         edit_error = None
     elif write_truth["valid"]:
         edit_authority = "ss.coherence.proof/source_write_proof"
@@ -399,6 +471,7 @@ def _trajectory_state_summary(artifacts: dict[str, str | None]) -> dict[str, Any
         coherence_edited_files = sorted({path for _step, path in coherence_successful})[:20]
         source_edit_count = state.source_edit_count
         edited_files = sorted(state.edited_files)[:20]
+        edited_source_set = {f for f in state.edited_files if is_source_path(f)}
         edit_error = None
     else:
         edit_authority = "invalid_ss.coherence.proof/source_write_proof"
@@ -410,7 +483,12 @@ def _trajectory_state_summary(artifacts: dict[str, str | None]) -> dict[str, Any
         coherence_edited_files = []
         source_edit_count = None
         edited_files = []
+        edited_source_set = set()
         edit_error = write_truth["error"]
+    # First applied source-edit step (DEFECT-1): the localization-efficacy witness
+    # (steps-to-first-correct-edit). One turn-indexed basis across all authorities;
+    # honest None when no applying step can be located.
+    first_source_edit_step = _first_edit_step_for_paths(turns, edited_source_set)
     return {
         "phase_policy_version": PHASE_POLICY_VERSION,
         "turns_observed": len(turns),
@@ -421,6 +499,7 @@ def _trajectory_state_summary(artifacts: dict[str, str | None]) -> dict[str, Any
         "viewed_files": sorted(state.viewed_files)[:20],
         "edited_files": edited_files,
         "source_edit_count": source_edit_count,
+        "first_source_edit_step": first_source_edit_step,
         "edit_truth_authority": edit_authority,
         "edit_truth_valid": edit_valid,
         "edit_truth_error": edit_error,
@@ -854,7 +933,24 @@ def build_task_truth(
             "note": "patch graded by eval_result.json (OH/non-DeepSWE path)",
         }
 
-    trajectory_summary = _trajectory_state_summary(artifacts)
+    # Applied-patch edit-truth authority (DEFECT-1): the diff's changed SOURCE paths + a
+    # non-empty model patch. Reconciles source_edit_count / first_source_edit_step for edits
+    # applied via sed/patch/heredoc that shell-command inference misses.
+    _changed_source_paths = {
+        str(row.get("path"))
+        for row in (patch_hygiene or {}).get("files", [])
+        if isinstance(row, dict)
+        and row.get("class") == "source_fix"
+        and isinstance(row.get("path"), str)
+        and row.get("path")
+    }
+    _has_patch = bool(patch_hygiene) and (patch_hygiene.get("classification")
+                                          not in (None, "missing_model_patch", "deferred_to_eval"))
+    trajectory_summary = _trajectory_state_summary(
+        artifacts,
+        changed_source_paths=_changed_source_paths,
+        has_patch=_has_patch,
+    )
     obligation_summary = _obligation_lifecycle_summary(obligation_status)
     consumption_summary = _consumption_summary(deep)
     horizon_summary = _verification_horizon_summary(deep, verifier_semantics)

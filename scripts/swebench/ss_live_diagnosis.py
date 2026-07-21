@@ -36,6 +36,8 @@ DELIVERY_BUCKETS = (
     "WRONG_INFO",
     "LATE",
     "STEP_BEHIND",
+    "LEAKED",
+    "OVER_DOSED",
     "NOVEL_IGNORED",
     "ACKNOWLEDGED",
     "CAUSAL_P5",
@@ -228,6 +230,17 @@ def classify_delivery_feature(
         or _value(lifecycle.get("expired_late")) is True
     ):
         return "LATE"
+    # Delivery-integrity gates are MEASURED failures: a leak or an over-dose is a
+    # False outcome that must dominate the None (ungraded) SEALED terminal below
+    # (roll_up precedence False > None > True). A delivered fact that leaked or
+    # over-dosed can never be laundered into a pass. Fail-closed on None: an
+    # ungraded leak/dose seals, it never promotes.
+    if gates.get("leak_zero") is False:
+        return "LEAKED"
+    if gates.get("dose_lte_one") is False:
+        return "OVER_DOSED"
+    if gates.get("leak_zero") is not True or gates.get("dose_lte_one") is not True:
+        return "SEALED_DELIVERED_UNGRADED"
     if gates.get("correct_info") is not True or gates.get(
         "correct_rl_adhered_time"
     ) is not True:
@@ -1155,12 +1168,24 @@ def _aggregate_bucket(task_buckets: dict[str, str]) -> str:
     order = (
         "WRONG_INFO", "LATE", "STEP_BEHIND",
         "PRODUCED_NOT_DELIVERED", "DARK_ELIGIBLE_NO_PRODUCER",
+        "LEAKED", "OVER_DOSED",
         "SEALED_DELIVERED_UNGRADED", "NOVEL_IGNORED", "ACKNOWLEDGED",
         "CAUSAL_P5", "NOT_ELIGIBLE",
     )
     failed = sorted(bucket for bucket in counts if bucket.startswith("FAILED:"))
     if failed:
         return failed[0]
+    # Tier-1 MEASURED-failure precedence: a measured delivery failure (a False
+    # outcome) dominates any UNMEASURED:* bucket (None) — roll_up precedence
+    # False > None. Without this an UNMEASURED bucket could win over a real
+    # measured failure, inverting the grader's own roll_up.
+    for bucket in (
+        "WRONG_INFO", "LATE", "STEP_BEHIND",
+        "PRODUCED_NOT_DELIVERED", "DARK_ELIGIBLE_NO_PRODUCER",
+        "LEAKED", "OVER_DOSED",
+    ):
+        if bucket in counts:
+            return bucket
     unmeasured = sorted(bucket for bucket in counts if bucket.startswith("UNMEASURED:"))
     if unmeasured:
         return unmeasured[0]

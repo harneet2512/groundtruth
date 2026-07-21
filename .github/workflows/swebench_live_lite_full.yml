@@ -234,8 +234,12 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.feature_preflight.outcome }}" != "success" ]; then
+            # DEMOTED to WARN (2026-07-20 taxonomy). GT's OWN exact-128 feature-authority inventory
+            # completeness is a GT-QUALITY property, NOT a substrate/arm-validity property, so it must
+            # NOT block the whole paid matrix. The (partial) manifest is already uploaded by the
+            # 'Persist static feature authority manifest' step (if: always()); annotate + PROCEED.
             echo "GT_STATIC_FEATURE_PREFLIGHT_FAILED: exact-128 authority manifest is incomplete" >&2
-            exit 1
+            echo "::warning::GT_STATIC_FEATURE_PREFLIGHT_FAILED — GT-internal inventory completeness is not a validity gate; partial manifest uploaded, proceeding with the paid matrix"
           fi
 
       - name: Workflow lint — catch CI bug classes before the paid matrix
@@ -1133,7 +1137,12 @@ jobs:
           )
           # Baseline arm has no substrate proof (skipped above) — the proof gate
           # only applies to the GT arm. Baseline proceeds straight to the agent.
-          if [ "$INPUT_BASELINE" != "true" ] && [ "$PROOF_STATE" != "ok" ]; then
+          # PROOF_DEGRADED (2026-07-20 taxonomy): the substrate proof body emits a GT-QUALITY degrade
+          # signal (today state=ok/code=PROOF_DEGRADED via substrate_proof.sh; a LITERAL state=PROOF_DEGRADED
+          # is also honored here) on an OTHERWISE-VALID substrate — record-never-block, so it is RUN-ABLE.
+          # Only a state that is NEITHER ok NOR PROOF_DEGRADED (missing/invalid/failed = a genuine
+          # substrate-proof BREAKAGE) refuses the paid agent run.
+          if [ "$INPUT_BASELINE" != "true" ] && [ "$PROOF_STATE" != "ok" ] && [ "$PROOF_STATE" != "PROOF_DEGRADED" ]; then
             echo "GT_RUN_PROOF_FAIL: refusing paid agent run because substrate proof_status state=${PROOF_STATE}" | tee -a trial_output.log
             exit 1
           fi
@@ -1868,49 +1877,76 @@ jobs:
             echo "AGENT_DID_NOT_RUN: 0 agent steps (no trajectory api_calls, no runner finish line)"
             exit 1
           fi
-          # PROFILE-PROOF (GT-on arm only): a GT-on task with no durable gt_profile_activation.json in
-          # the agent-output dir (/tmp/gt_out = $HOST_GT_OUT) has NO proof the RL profile was live
-          # in-container, so it must NEVER be citable as a GT-on result. Absent proof => fail closed
-          # with GT_PROFILE_UNPROVEN + exit 1, the SAME mechanism as AGENT_DID_NOT_RUN above. The
-          # baseline (control) arm activates no profile, so it neither writes nor requires the file
-          # (GT_BASELINE_FLAG=1 skips the check -> control arm stays byte-identical).
-          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ ! -f /tmp/gt_out/gt_profile_activation.json ]; then
-            echo "GT_PROFILE_UNPROVEN: no gt_profile_activation.json in the agent-output dir (RL profile activation unproven; treated as INFRA like AGENT_DID_NOT_RUN)"
-            exit 1
-          fi
-          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ ! -s /tmp/gt_out/gt_profile_receipt.json ]; then
-            echo "GT_PROFILE_UNPROVEN: no gt_profile_receipt.json from the patched agent process (Profile-2 forwarding unproven; task is not citable)"
-            exit 1
-          fi
-          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ ! -s /tmp/gt_out/gt_batch_activation.json ]; then
-            echo "GT_BATCH_UNPROVEN: no gt_batch_activation.json from the agent process (one-dose observation boundary unproven; task is not citable)"
-            exit 1
-          fi
-          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ ! -s /tmp/gt_out/gt_runtime_ledger_attestation.json ]; then
-            echo "GT_LEDGER_ATTESTATION_UNPROVEN: terminal runtime-ledger proof is missing; task is not citable"
-            exit 1
-          fi
+          # PROFILE-PROOF (GT-on arm only) — TAXONOMY SPLIT (2026-07-20 user directive). An ABSENT
+          # activation receipt means the RL profile did not DURABLY prove activation. The agent still
+          # RAN and its reward is real, so an absent receipt is NOT a validity breach and must NOT
+          # exit 1 (that would DISCARD a task that ran). RECORD the task as GT-off / uncitable-as-GT-on
+          # (marker tee'd to trial_output.log — the outcome/task_truth classifiers read that log) and
+          # CONTINUE. Hard-fail is RESERVED for a receipt that is PRESENT but MISLABELS the arm (real
+          # VALIDITY / anti-cheat), enforced just below. The baseline (control) arm activates no profile
+          # (GT_BASELINE_FLAG=1 skips ALL of this -> control arm stays byte-identical).
+          GT_PROFILE_ABSENT=0
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
+            if [ ! -f /tmp/gt_out/gt_profile_activation.json ]; then
+              echo "GT_PROFILE_UNPROVEN_ABSENT: no gt_profile_activation.json in the agent-output dir (RL profile activation unproven) — relabeling task GT-off / uncitable-as-GT-on and RECORDING; reward preserved, NOT a validity failure" | tee -a trial_output.log
+              GT_PROFILE_ABSENT=1
+            fi
+            if [ ! -s /tmp/gt_out/gt_profile_receipt.json ]; then
+              echo "GT_PROFILE_UNPROVEN_ABSENT: no gt_profile_receipt.json from the patched agent process (Profile-2 forwarding unproven) — relabeling task GT-off / uncitable-as-GT-on and RECORDING; reward preserved" | tee -a trial_output.log
+              GT_PROFILE_ABSENT=1
+            fi
+            if [ ! -s /tmp/gt_out/gt_batch_activation.json ]; then
+              echo "GT_BATCH_UNPROVEN_ABSENT: no gt_batch_activation.json from the agent process (one-dose observation boundary unproven) — relabeling task GT-off / uncitable-as-GT-on and RECORDING; reward preserved" | tee -a trial_output.log
+              GT_PROFILE_ABSENT=1
+            fi
+            if [ ! -s /tmp/gt_out/gt_runtime_ledger_attestation.json ]; then
+              echo "GT_LEDGER_ATTESTATION_UNPROVEN_ABSENT: terminal runtime-ledger proof is missing — relabeling task GT-off / uncitable-as-GT-on and RECORDING; reward preserved" | tee -a trial_output.log
+              GT_PROFILE_ABSENT=1
+            fi
+          fi
+          # PRESENT-but-MISLABELS = real anti-cheat / VALIDITY — KEEP the hard-fail. Skipped when a
+          # receipt was ABSENT above (task already relabeled uncitable-as-GT-on; nothing valid to
+          # anti-cheat-check, and the file a check reads may be the very one that is missing).
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ "${GT_PROFILE_ABSENT:-0}" != "1" ]; then
             PYTHONPATH="${{ github.workspace }}" python3 -c 'import sys; from artifact_deepswe.ledger_attestation import validate_attestation; sys.exit(0 if validate_attestation(sys.argv[1], sys.argv[2]) else 1)' /tmp/gt_out/gt_runtime_ledger.jsonl /tmp/gt_out/gt_runtime_ledger_attestation.json || {
               echo "GT_LEDGER_ATTESTATION_UNPROVEN: terminal runtime-ledger proof does not match harvested bytes; task is not citable"
               exit 1
             }
           fi
-          if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ "${GT_PROFILE_ABSENT:-0}" != "1" ]; then
             python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); sys.exit(0 if d.get("schema")=="gt.batch_activation.v1" and d.get("required") is True and d.get("wrapper_attached") is True and d.get("result")=="installed" and d.get("mini_swe_version")=="2.4.5" else 1)' /tmp/gt_out/gt_batch_activation.json || {
               echo "GT_BATCH_UNPROVEN: batch activation receipt is invalid or version-mismatched; task is not citable"
               exit 1
             }
           fi
-          # BRIEF-DELIVERY PROOF (W16 guard, 2026-07-13): the step-0 brief ran DARK on every
-          # mini run before W16 because generation != delivery. Fail closed: on the GT arm,
-          # when a non-empty brief was generated, its head bytes MUST appear in the agent's
-          # first user message (m1) of the trajectory — bytes-in-stream, not artifact-exists.
-          if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ -s /tmp/gt/brief.txt ]; then
+          # BRIEF-DELIVERY PROOF (W16 guard; ARM FIX 2026-07-20). The step-0 brief-delivery/leak check
+          # must ARM only when a REAL non-empty brief was produced — read the AUTHORITATIVE
+          # brief_result.json (schema gt.brief_result.v1 + non-empty brief_text), NOT brief.txt file
+          # size. DISCREPANCY NOTE: brief_result.json does NOT persist a `generated` boolean
+          # (runtime/brief_cache.get_or_generate adds it only to its in-memory return, never to the
+          # file), so schema + non-empty brief_text is the on-disk equivalent of "a real brief was
+          # generated" — the exact signal the completion gate uses. A DEGRADED run that writes an
+          # EMPTY brief.txt (or no real brief) does NOT arm this check and NEVER kills a task. When a
+          # genuine non-empty brief exists, its head bytes MUST appear in the agent's first user
+          # message (m1) — bytes-in-stream; an absent delivery is a real PRODUCT defect (fail closed).
+          if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
             python3 - <<'BRIEFPY'
           import json, sys
-          head = open("/tmp/gt/brief.txt", encoding="utf-8").read().strip().splitlines()
-          probe = next((l.strip() for l in head if len(l.strip()) >= 20), "")
+          try:
+              d = json.load(open("/tmp/gt/brief_result.json", encoding="utf-8"))
+          except Exception:
+              d = None
+          brief_text = d.get("brief_text") if isinstance(d, dict) else None
+          armed = (
+              isinstance(d, dict)
+              and d.get("schema") == "gt.brief_result.v1"
+              and isinstance(brief_text, str)
+              and bool(brief_text.strip())
+          )
+          if not armed:
+              print("GT_BRIEF_CHECK_SKIPPED: no real non-empty brief generated (degraded/empty) - delivery check not armed; task not killed")
+              sys.exit(0)
+          probe = next((l.strip() for l in brief_text.strip().splitlines() if len(l.strip()) >= 20), "")
           t = json.load(open("/tmp/gt_out/mini-swe-agent.trajectory.json", encoding="utf-8"))
           m1 = str(t["messages"][1].get("content", ""))
           if probe and probe not in m1:
@@ -2052,8 +2088,10 @@ jobs:
           if [ -e "/tmp/gt/brief_determinism_mismatch.json" ]; then
             if ! cp "/tmp/gt/brief_determinism_mismatch.json" "trial_results/gt_artifacts/brief_determinism_mismatch.json"; then
               rm -f "trial_results/gt_artifacts/brief_determinism_mismatch.json"
+              # RECORD-ONLY (2026-07-20): match the sibling collection-copy failures (gt_runtime_ledger,
+              # attestation, brief_result) which echo the marker and CONTINUE. A copy failure of this
+              # GT-quality diagnostic must not fail a task that already ran (never fail a run on measurement).
               echo "GT_COLLECTION_COPY_FAIL:brief_determinism_mismatch.json" | tee -a trial_output.log
-              exit 1
             fi
           fi
           cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
@@ -2460,9 +2498,38 @@ jobs:
           fi
           if [ -n "$_MM_MISSING" ]; then
             echo "GT_METRICS_INCOMPLETE:${_MM_MISSING} - a run without its metrics is NOT done (MANDATORY_METRICS.md line 1); this task is not citable" | tee -a trial_output.log
-            exit 1
+            # MEASUREMENT taxonomy (2026-07-20 user directive): incomplete/missing metrics are a GT
+            # SELF-MEASUREMENT gap on a task that ALREADY RAN — NOT a substrate breakage or arm-validity
+            # breach. RECORD an uncitable marker (uncitable=true + the missing reasons) and CONTINUE;
+            # NEVER fail a task that ran. The completeness ASSERTION below is skipped when incomplete
+            # (it would SystemExit on the very files enumerated here); identity/commit-parity/digest/
+            # leak/reward-bridge stay fully enforced pre-agent and on complete tasks.
+            GT_MM_MISSING="$_MM_MISSING" GT_TASK_ARTIFACT_ROOT="$TASK_ARTIFACT_ROOT" python3 - <<'PY' || echo "GT_METRICS_INCOMPLETE_MARKER_WARN"
+          import json, os
+          reasons = [r for r in os.environ.get("GT_MM_MISSING", "").split() if r]
+          document = {
+              "schema": "gt.metrics_incomplete.v1",
+              "task": os.environ.get("GT_TASK_ID", ""),
+              "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+              "uncitable": True,
+              "reasons": reasons,
+          }
+          for dest in (
+              "trial_results/gt_metrics_incomplete.json",
+              os.path.join(os.environ.get("GT_TASK_ARTIFACT_ROOT", ""), "gt_metrics_incomplete.json"),
+          ):
+              parent = os.path.dirname(dest)
+              if not parent:
+                  continue
+              try:
+                  os.makedirs(parent, exist_ok=True)
+                  with open(dest, "w", encoding="utf-8") as stream:
+                      json.dump(document, stream, indent=2)
+              except OSError:
+                  pass
+          PY
           fi
-          if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
+          if [ -z "$_MM_MISSING" ] && [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
             GT_TASK_ROOT="$TASK_ARTIFACT_ROOT" \
               GT_COMPLETION_OUT="trial_results/gt_task_completion.json" \
               PYTHONPATH="${GT_WORKSPACE}" python3 - <<'PY'
@@ -2610,7 +2677,7 @@ jobs:
           os.replace(temporary, out)
           PY
           fi
-          echo "GT_METRICS_COMPLETE: mandatory per-task metric artifacts all present"
+          [ -n "$_MM_MISSING" ] || echo "GT_METRICS_COMPLETE: mandatory per-task metric artifacts all present"
 
       - name: Upload results
         if: always()

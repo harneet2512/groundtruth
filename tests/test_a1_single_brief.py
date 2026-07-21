@@ -110,8 +110,10 @@ def test_gate_persist_then_emit_reuses(tmp_path, monkeypatch):
         calls["n"] += 1
         return _FakeResult("THE GATE BRIEF")
 
-    ok, detail = gp.emit_brief(str(tmp_path), "issue text", "/work", "g.db", generator=gen)
+    # SUCCESS path — 3-tuple return (ok, detail, degraded); a reused real brief is degraded=False.
+    ok, detail, degraded = gp.emit_brief(str(tmp_path), "issue text", "/work", "g.db", generator=gen)
     assert ok, detail
+    assert degraded is False     # NEW: clean success, not a GT-quality degrade
     assert calls["n"] == 1, "emit_brief did not execute an independent witness run"
     assert (tmp_path / "brief.txt").read_text(encoding="utf-8").strip() == "THE GATE BRIEF"
     assert "reused_gate_brief=True" in detail
@@ -145,8 +147,10 @@ def test_gate_persist_identity_mismatch_forces_regeneration(tmp_path, monkeypatc
         calls["n"] += 1
         return _FakeResult(f"FRESH::{issue_text}")
 
-    ok, detail = gp.emit_brief(str(tmp_path), "issue text", "/work", "g.db", generator=gen)
+    # SUCCESS path — 3-tuple return; a regenerated real brief is degraded=False.
+    ok, detail, degraded = gp.emit_brief(str(tmp_path), "issue text", "/work", "g.db", generator=gen)
     assert ok, detail
+    assert degraded is False     # NEW: clean success, not a GT-quality degrade
     assert calls["n"] == 2, "emit_brief did not generate and independently verify the fresh brief"
     assert (tmp_path / "brief.txt").read_text(encoding="utf-8").strip() == "FRESH::issue text"
     assert "reused_gate_brief=False" in detail
@@ -165,14 +169,20 @@ def test_gate_cache_runs_independent_witness_and_fails_closed_on_mismatch(
         calls["n"] += 1
         return _FakeResult("SECOND")
 
-    ok, detail = gp.emit_brief(
+    ok, detail, degraded = gp.emit_brief(
         str(tmp_path), "issue text", "/work", "g.db", generator=gen
     )
 
     assert calls["n"] == 1
     assert ok is False
+    # OLD contract: a DETERMINISM_MISMATCH was FAIL-CLOSED (no brief.txt). NEW contract (emit_brief
+    # 3-tuple): the mismatch is still DETECTED (detail names DETERMINISM_MISMATCH) but it DEGRADES
+    # to a 0-byte brief.txt rather than hard-failing the paid task.
+    assert degraded is True
     assert "DETERMINISM_MISMATCH" in detail
-    assert not (tmp_path / "brief.txt").exists()
+    bp = tmp_path / "brief.txt"
+    # OLD asserted `not bp.exists()`; the degrade path now writes an empty brief.
+    assert bp.exists() and bp.stat().st_size == 0
 
 
 def test_independent_witness_cannot_replace_primary_sidecars(tmp_path, monkeypatch):
@@ -209,11 +219,16 @@ def test_independent_witness_cannot_replace_primary_sidecars(tmp_path, monkeypat
         sidecar.write_bytes(second_bytes)
         return _FakeResult("PRIMARY BRIEF")
 
-    ok, detail = gp.emit_brief(
+    ok, detail, degraded = gp.emit_brief(
         str(tmp_path), "issue text", "/work", "g.db", generator=gen
     )
 
+    # The sidecar identity is VALID here (the primary bytes carry the correct issue_sha256), so this
+    # is the SUCCESS path: ok True, degraded False. The sidecar-identity FAILURE path stays a
+    # non-degrade hard-fail (ok False, degraded False) per the new contract; this test does not trip
+    # it — it proves the valid primary bytes survive an execution-2 that rewrites the source sidecar.
     assert ok, detail
+    assert degraded is False
     assert sidecar.read_bytes() == second_bytes, "test did not create divergent execution-2 bytes"
     assert (tmp_path / "gt_issue_anchors.json").read_bytes() == primary_bytes
 
@@ -227,8 +242,10 @@ def test_emit_brief_generates_and_writes_when_no_cache(tmp_path):
         calls["n"] += 1
         return _FakeResult("FRESH BRIEF")
 
-    ok, detail = gp.emit_brief(str(tmp_path), "issue", "/work", "g.db", generator=gen)
+    # SUCCESS path — 3-tuple return; a generated real brief is degraded=False.
+    ok, detail, degraded = gp.emit_brief(str(tmp_path), "issue", "/work", "g.db", generator=gen)
     assert ok, detail
+    assert degraded is False     # NEW: clean success, not a GT-quality degrade
     assert calls["n"] == 2
     assert (tmp_path / "brief.txt").read_text(encoding="utf-8").strip() == "FRESH BRIEF"
     assert "reused_gate_brief=False" in detail
@@ -244,11 +261,13 @@ def test_emit_brief_accepts_deterministic_non_candidate_brief(tmp_path):
         result.localization_proof = []
         return result
 
-    ok, detail = gp.emit_brief(
+    ok, detail, degraded = gp.emit_brief(
         str(tmp_path), "new-file issue", "/work", "g.db", generator=gen
     )
 
+    # SUCCESS path — 3-tuple return; a deterministic non-candidate brief is degraded=False.
     assert ok, detail
+    assert degraded is False     # NEW: clean success, not a GT-quality degrade
     assert calls["n"] == 2
     assert (tmp_path / "brief.txt").read_text("utf-8") == "CREATE A NEW FILE"
     assert "determinism_matched=True" in detail
@@ -271,22 +290,31 @@ def test_emit_hashes_graph_snapshot_only_at_capture_and_final_validation(
 
     monkeypatch.setattr(brief_cache, "_graph_state_sha256", counted_hash)
 
-    ok, detail = gp.emit_brief(
+    ok, detail, degraded = gp.emit_brief(
         str(tmp_path), "issue", "/work", str(graph),
         generator=lambda **_: _FakeResult("STABLE BRIEF"),
     )
 
+    # SUCCESS path — 3-tuple return; degraded=False.
     assert ok, detail
+    assert degraded is False     # NEW: clean success, not a GT-quality degrade
     assert calls["n"] == 2
 
 
-def test_emit_brief_empty_fails_closed(tmp_path):
-    """An empty brief is still a fail-closed GT_ARTIFACT_MISSING (proof contract)."""
+def test_emit_brief_empty_degrades_to_empty_brief(tmp_path):
+    """RENAMED from test_emit_brief_empty_fails_closed. OLD contract: an empty (whitespace-only)
+    brief was FAIL-CLOSED GT_ARTIFACT_MISSING. NEW contract (emit_brief 3-tuple): an empty brief is
+    a GT-QUALITY issue that DEGRADES — a 0-byte brief.txt is written and degraded=True is returned so
+    the agent self-localizes and the paid task STILL RUNS."""
     gp = _load("gp_a1c", "scripts/swebench/gt_run_proof.py")
 
     def gen(issue_text, repo_root, graph_db, bug_id):
         return _FakeResult("   ")  # whitespace only -> empty after strip
 
-    ok, detail = gp.emit_brief(str(tmp_path), "issue", "/work", "g.db", generator=gen)
+    ok, detail, degraded = gp.emit_brief(str(tmp_path), "issue", "/work", "g.db", generator=gen)
     assert ok is False
+    assert degraded is True                        # NEW: empty brief DEGRADES, not hard-fail
     assert "EMPTY" in detail
+    bp = tmp_path / "brief.txt"
+    # OLD implicitly expected no brief; NEW: a 0-byte brief.txt is written on the degrade path.
+    assert bp.exists() and bp.stat().st_size == 0

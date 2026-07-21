@@ -28,6 +28,21 @@ def _read(p):
         return f.read()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cert_sidecar_source(tmp_path, monkeypatch):
+    # HERMETICITY FIX (root cause of a flaky emit_brief failure): emit_brief's NEW sidecar-identity
+    # validation path (_mirror_cert_sidecars) reads GT_CERT_SIDECAR_SOURCE_DIR, defaulting to /tmp.
+    # A stale /tmp/gt_issue_anchors.json (or gt_obligations_v2.json) from a prior run whose
+    # issue_sha256 does not match the test's issue makes emit_brief hard-fail with a SidecarIdentity
+    # error (ok False, degraded False) instead of exercising the intended path. tests/test_a1_single_
+    # brief.py already isolates this the same way; the portable-substrate emit_brief tests did not.
+    # Point the sidecar source at a clean, empty per-test dir so the mirror is a no-op unless the
+    # test itself stages a sidecar there.
+    source = tmp_path / "cert-sidecar-source"
+    source.mkdir()
+    monkeypatch.setenv("GT_CERT_SIDECAR_SOURCE_DIR", str(source))
+
+
 # ── artifact contract ────────────────────────────────────────────────────────
 
 def test_contract_lists_all_required_artifacts():
@@ -53,6 +68,14 @@ def test_runtime_flags_record_forbid_prebuilt_graph():
 def _brief_obj(text):
     class _B:
         brief_text = text
+        # FIXTURE COMPLETENESS for the NEW emit_brief contract: the determinism proof
+        # (brief_cache.verify_independent_generation -> _canonical_acquisition_payload) requires
+        # localization_proof to be a LIST — a real V1RBriefResult always carries one. The old bare
+        # fake (brief_text only) could never reach the success path once the determinism proof became
+        # part of emit_brief; give it the empty-candidate list a deterministic candidate-less brief
+        # legitimately has. (The empty-brief test still degrades at the empty-text check, before this
+        # ever matters.)
+        localization_proof = []
     return _B()
 
 
@@ -68,26 +91,45 @@ def _brief_obj_with_localization(text, *, sem_count=1, proof=None):
     return _B()
 
 
-def test_emit_brief_empty_is_fail_closed(tmp_path):
-    ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
-                                generator=lambda **kw: _brief_obj(""))
-    assert ok is False
+def test_emit_brief_empty_degrades_to_empty_brief(tmp_path):
+    # RENAMED from test_emit_brief_empty_is_fail_closed. OLD contract: an empty brief was
+    # FAIL-CLOSED (ok False, NO brief.txt) — a GT_ARTIFACT_MISSING that killed the paid task.
+    # NEW contract (emit_brief 3-tuple; gates.md BETTER-GATES §1): an empty brief is a GT-QUALITY
+    # issue that DEGRADES — emit_brief writes a 0-byte brief.txt and returns degraded=True so the
+    # agent self-localizes and the task STILL RUNS.
+    ok, detail, degraded = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
+                                          generator=lambda **kw: _brief_obj(""))
+    assert ok is False          # (unchanged) an empty brief is still not a delivered brief
+    assert degraded is True     # NEW: GT-QUALITY empty brief DEGRADES, it does not hard-fail
     assert "EMPTY" in detail
-    assert not os.path.exists(os.path.join(str(tmp_path), "brief.txt"))
+    # OLD asserted `not os.path.exists(brief.txt)`; NEW: brief.txt EXISTS and is EMPTY (0 bytes) —
+    # the whole point of the fix is that the agent still runs.
+    bp = os.path.join(str(tmp_path), "brief.txt")
+    assert os.path.exists(bp)
+    assert os.path.getsize(bp) == 0
 
 
-def test_emit_brief_exception_is_fail_closed_not_swallowed(tmp_path):
+def test_emit_brief_exception_degrades_not_swallowed(tmp_path):
+    # RENAMED from test_emit_brief_exception_is_fail_closed_not_swallowed. OLD contract: a brief-
+    # generation EXCEPTION was FAIL-CLOSED (hard-fail). NEW contract: it DEGRADES (0-byte brief.txt,
+    # degraded=True) — but is still NOT silently swallowed: `detail` records the exception type +
+    # message (proof it was captured, not eaten).
     def _boom(**kw):
         raise RuntimeError("embedder dead")
-    ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db", generator=_boom)
+    ok, detail, degraded = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db", generator=_boom)
     assert ok is False
-    assert "RuntimeError" in detail and "embedder dead" in detail
+    assert degraded is True      # NEW: an exception DEGRADES rather than hard-failing the paid task
+    assert "RuntimeError" in detail and "embedder dead" in detail   # recorded, not swallowed
+    bp = os.path.join(str(tmp_path), "brief.txt")
+    assert os.path.exists(bp) and os.path.getsize(bp) == 0   # NEW: empty brief written on degrade
 
 
 def test_emit_brief_writes_nonempty_brief(tmp_path):
-    ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
-                                generator=lambda **kw: _brief_obj("EDIT-TARGET: src/x.py"))
+    # SUCCESS path — 3-tuple return: ok True, degraded False, real non-empty brief.txt.
+    ok, detail, degraded = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
+                                          generator=lambda **kw: _brief_obj("EDIT-TARGET: src/x.py"))
     assert ok is True
+    assert degraded is False     # NEW: a real brief is a clean success, never a degrade
     with open(os.path.join(str(tmp_path), "brief.txt"), encoding="utf-8") as f:
         assert f.read() == "EDIT-TARGET: src/x.py"
 
@@ -99,13 +141,17 @@ def test_emit_brief_live_localization_diagnostic_halts_before_delivery(tmp_path,
         sem_count=0,
         proof=[{"path": "src/x.py", "components": {}}],
     )
-    ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
-                                generator=lambda **kw: bad)
+    # The test sets GT_FULL_POTENTIAL=1 (above) -> the strict-diagnostic path is armed.
+    ok, detail, degraded = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
+                                          generator=lambda **kw: bad)
     assert ok is False
-    assert "live localization diagnostic HALT" in detail
+    assert degraded is True      # NEW: under the strict path the HALT now DEGRADES (was hard-fail)
+    assert "live localization diagnostic HALT" in detail    # HALT still DETECTED (detail records it)
     assert "ZERO_EVIDENCE_DELIVERED" in detail
     assert "SEMANTIC_SIGNAL_ZERO" in detail
-    assert not os.path.exists(os.path.join(str(tmp_path), "brief.txt"))
+    # OLD asserted `not os.path.exists(brief.txt)`; the degrade path now writes a 0-byte brief.
+    bp = os.path.join(str(tmp_path), "brief.txt")
+    assert os.path.exists(bp) and os.path.getsize(bp) == 0
     assert os.path.exists(os.path.join(str(tmp_path), "localization_diagnostic.json"))
 
 
@@ -115,9 +161,11 @@ def test_emit_brief_live_localization_diagnostic_allows_supported_brief(tmp_path
         sem_count=1,
         proof=[{"path": "src/x.py", "components": {"sem": 0.42, "lex": 0.2}, "entered_via": "semantic_seed"}],
     )
-    ok, detail = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
-                                generator=lambda **kw: good)
+    # SUCCESS path — a supported brief passes the diagnostic: ok True, degraded False.
+    ok, detail, degraded = grp.emit_brief(str(tmp_path), "fix the bug", "/work", "/g.db",
+                                          generator=lambda **kw: good)
     assert ok is True, detail
+    assert degraded is False     # NEW: supported brief is a clean success, not a degrade
     assert os.path.exists(os.path.join(str(tmp_path), "brief.txt"))
     assert os.path.exists(os.path.join(str(tmp_path), "localization_diagnostic.json"))
 

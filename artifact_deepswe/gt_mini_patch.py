@@ -16784,6 +16784,15 @@ _GA_PLANE_GATEWAY = "gateway"
 # --- per-episode SS ledgers (host-side; reset in _reset_oracle_state) -------
 _ss_acquired_files: "set[str]" = set()      # rels the agent itself viewed/edited/greped
 _ss_acquired_symbols: "set[str]" = set()    # symbols the agent itself greped/edited
+# The entities the CURRENT turn's TRIGGERING search FIRST introduced to the two ledgers
+# above (the delta vs. what was already acquired BEFORE this turn). Reset + repopulated per
+# turn in _ss_observe_turn. A deliver_by=search_result reactive answer (post_search.localize
+# def_partition / is_loc localization) ANSWERS this very search, so these entities must be
+# excluded when THAT answer is judged for step-behind novelty — it is on-time by construction
+# at the search it answers. Prior-turn acquisitions are NOT in this delta, so a genuinely
+# redundant fact stays suppressed. Host-side (paths + the agent's own probe tokens).
+_ss_current_search_new_files: "set[str]" = set()
+_ss_current_search_new_syms: "set[str]" = set()
 _ss_edit_events: "list[tuple[str, int, bool]]" = []   # (exact_rel, step, write_ok)
 _ss_edit_proof_events: "list[tuple[str, int, str, bool]]" = []  # rel, step, cmd, write_ok
 _ss_test_events: "list[tuple[int, bool]]" = []         # (step, passed)
@@ -16822,6 +16831,8 @@ def _ss_reset() -> None:
     global _ss_current_failure_event
     _ss_acquired_files.clear()
     _ss_acquired_symbols.clear()
+    _ss_current_search_new_files.clear()
+    _ss_current_search_new_syms.clear()
     _ss_edit_events.clear()
     _ss_edit_proof_events.clear()
     _ss_test_events.clear()
@@ -17323,9 +17334,22 @@ def _ss_novelty_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool
     syms = _ss_extract_symbols(text)
     if not paths and not syms:
         return False
+    # A deliver_by=search_result reactive answer (post_search.localize def_partition, or an
+    # is_loc localization) is ON-TIME BY CONSTRUCTION at the search it answers: it must NOT be
+    # judged step-behind against the SAME triggering search's own acquisition recorded THIS turn
+    # (_ss_observe_turn runs BEFORE this gate). Exempt ONLY that current triggering search's NEW
+    # entities — prior-turn acquisitions remain in the judged ledger, so a genuinely redundant
+    # fact the agent already held is still suppressed. Non-reactive gated classes (contract /
+    # evidence / obligation) judge against the full ledger, unchanged (empty delta off-search).
+    if (kind == "post_search.localize") or is_loc:
+        acq_files = _ss_acquired_files - _ss_current_search_new_files
+        acq_syms = _ss_acquired_symbols - _ss_current_search_new_syms
+    else:
+        acq_files = _ss_acquired_files
+        acq_syms = _ss_acquired_symbols
     if paths:
-        return all(p in _ss_acquired_files for p in paths)
-    return all(s in _ss_acquired_symbols for s in syms)
+        return all(p in acq_files for p in paths)
+    return all(s in acq_syms for s in syms)
 
 
 def _ss_dedup2_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool = False) -> bool:
@@ -17715,10 +17739,29 @@ def _ss_observe_turn(kkind: "str | None", kf: "str | None", cmd: str,
     line lacks. A greped symbol goes to ``_ss_acquired_symbols``; the file becomes acquired
     only when the agent actually opens/edits it. (This is the semantics the ss_gate S1 survive
     case enforces — mod_b greped-but-not-viewed stays NOVEL.)"""
+    # Per-turn reset of the triggering-search delta (consumed by _ss_novelty_suppresses for
+    # the reactive deliver_by=search_result classes only). Cleared FIRST so a mid-turn fault
+    # can never leave a stale delta for a later turn's gate.
+    _ss_current_search_new_files.clear()
+    _ss_current_search_new_syms.clear()
     try:
         if kkind in ("post_view", "post_edit") and kf:
             _ss_acquired_files.add(_norm_fp(_to_repo_rel(kf, root)))
-        _ss_acquired_files.update(_command_path_targets(cmd or ""))
+        # Capture what THIS turn's TRIGGERING search FIRST names (the delta vs. already-acquired)
+        # BEFORE folding it into the cumulative ledger below, so a deliver_by=search_result
+        # reactive answer is not judged step-behind against the very search it answers. Only a
+        # SEARCH turn contributes bare probe tokens (a `cat X`/`open X` yields none), so a genuine
+        # non-search acquisition mints no exemption; and only files/symbols NOT already acquired
+        # (a prior-turn acquisition stays out of the delta) are exempted.
+        _cmd_files = _command_path_targets(cmd or "")
+        if _search_probe_tokens(cmd or ""):
+            _ss_current_search_new_files.update(
+                f for f in _cmd_files if f and f not in _ss_acquired_files)
+            if _search_pattern(cmd or ""):
+                _ss_current_search_new_syms.update(
+                    s for s in _search_probe_tokens(cmd or "")
+                    if s not in _ss_acquired_symbols)
+        _ss_acquired_files.update(_cmd_files)
         if _search_pattern(cmd or ""):
             _ss_acquired_symbols.update(_search_probe_tokens(cmd or ""))
     except Exception:  # noqa: BLE001 — observation must never break the turn

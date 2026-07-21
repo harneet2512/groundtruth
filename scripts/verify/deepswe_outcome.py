@@ -75,6 +75,25 @@ INFRA_SUBTYPES: tuple[str, ...] = (
     "INFRA_MISSING_ARTIFACT",
 )
 
+#: gt_run_proof PROOF_STAGES split by OWNERSHIP (DEFECT-2). A FAIL at a REAL
+#: substrate/infra stage (env/dep_store/source_copy/index/lsp/graph_cert/gates) is a genuine
+#: INFRA failure. The brief_emit / artifact_contract stages are GT-OUTPUT-QUALITY: an
+#: empty/thin/degraded brief there is a GT-DELIVERY failure (kept in the resolved
+#: denominator), NEVER environmental INFRA. Kept in sync with gt_run_proof.PROOF_STAGES.
+_INFRA_PROOF_STAGES: frozenset[str] = frozenset({
+    "env_validation", "dep_store", "source_copy", "workspace_metadata",
+    "index", "lsp_pass", "graph_cert", "gates",
+})
+_BRIEF_QUALITY_PROOF_STAGES: frozenset[str] = frozenset({"brief_emit", "artifact_contract"})
+
+#: The INFRA tokens a brief-quality outcome masquerades behind: GT_ARTIFACT_MISSING (the
+#: empty/missing-brief marker) and the INFRA_MISSING_ARTIFACT subtype (the missing-trajectory
+#: stub). When the proof record PROVES the failure is brief-quality (real infra stages all
+#: ok), these are stripped and the task classifies GT (a delivery loss, kept in the resolved
+#: denominator), never INFRA. A genuine infra marker/subtype still wins outright.
+_BRIEF_QUALITY_INFRA_TOKENS: frozenset[str] = frozenset({"GT_ARTIFACT_MISSING"})
+_BRIEF_QUALITY_INFRA_SUBTYPES: frozenset[str] = frozenset({"INFRA_MISSING_ARTIFACT"})
+
 INFRA_LOG_MARKERS: tuple[str, ...] = (
     "GT_SUBSTRATE_DIGEST_MISSING",
     "GT_SUBSTRATE_PULL_FAIL",
@@ -134,6 +153,60 @@ def detect_infra_subtype(jobs: str, trial_log: str = "") -> str | None:
             return "INFRA_MISSING_ARTIFACT"
 
     return None
+
+
+def _infra_stages_ok(stages) -> bool:
+    """No real substrate/infra proof stage is recorded as a failure (DEFECT-2)."""
+    for row in stages or []:
+        if (isinstance(row, dict)
+                and row.get("stage") in _INFRA_PROOF_STAGES
+                and row.get("status") == "fail"):
+            return False
+    return True
+
+
+def detect_brief_quality_failure(cert_dir: str | None) -> bool:
+    """True when the proof record PROVES the run's only failure/degrade is a GT
+    BRIEF-QUALITY outcome (empty/thin/degraded brief at brief_emit/artifact_contract) while
+    EVERY real substrate/infra stage passed (DEFECT-2).
+
+    Such a task is a GT-DELIVERY failure, not an environmental INFRA failure — it stays IN
+    the resolved denominator. This keys on the ACTUAL proof stages (proof_failure.json /
+    proof_progress.json that gt-run-proof writes into GT_CERT_DIR), NEVER on GT's own brief
+    outcome inferred from a missing-artifact glob. Fail-closed: no proof record, or ANY real
+    infra stage recorded as failed, returns False (an INFRA classification stands).
+    """
+    if not cert_dir:
+        return False
+    # 1. A HARD proof failure whose failing stage is brief-quality, infra stages all ok.
+    try:
+        with open(os.path.join(cert_dir, "proof_failure.json"), encoding="utf-8") as fh:
+            pf = json.load(fh)
+    except (OSError, ValueError):
+        pf = None
+    if isinstance(pf, dict):
+        stage = pf.get("stage")
+        if stage in _INFRA_PROOF_STAGES:
+            return False  # a genuine infra-stage failure — never reclassify as GT.
+        if stage in _BRIEF_QUALITY_PROOF_STAGES and _infra_stages_ok(pf.get("stages")):
+            return True
+    # 2. No hard failure: a RECORDED brief-quality DEGRADE with infra stages all ok.
+    try:
+        with open(os.path.join(cert_dir, "proof_progress.json"), encoding="utf-8") as fh:
+            pp = json.load(fh)
+    except (OSError, ValueError):
+        pp = None
+    if isinstance(pp, dict):
+        stages = pp.get("stages") or []
+        degraded = any(
+            isinstance(r, dict)
+            and r.get("stage") in _BRIEF_QUALITY_PROOF_STAGES
+            and str(r.get("detail") or "").upper().startswith("DEGRADED")
+            for r in stages
+        )
+        if degraded and _infra_stages_ok(stages):
+            return True
+    return False
 
 
 def find_infra_markers(trial_log: str) -> list[str]:
@@ -332,8 +405,20 @@ def classify_outcome(rec: dict) -> str:
       hook_hash_match: bool|None    cert_fail: bool
       reward: float|None            n_agent_steps: int|None
     """
-    # 1. INFRA — wins outright; the comparison was never clean.
-    if rec.get("infra_markers") or rec.get("eval_no_report") or rec.get("infra_subtype"):
+    # 1. INFRA — wins outright; the comparison was never clean. EXCEPT a GT brief-quality
+    # outcome (empty/thin/degraded brief) that only *looks* like INFRA via the
+    # GT_ARTIFACT_MISSING marker or the INFRA_MISSING_ARTIFACT missing-trajectory stub: when
+    # the proof record proves every real infra stage passed (brief_quality_fail), that is a
+    # GT-DELIVERY failure, not environmental INFRA. Strip ONLY those brief-quality tokens; a
+    # genuine infra marker/subtype (pull/OOM/ENOSPC/env-start/…) still wins outright.
+    brief_quality = bool(rec.get("brief_quality_fail"))
+    infra_markers = rec.get("infra_markers") or []
+    infra_subtype = rec.get("infra_subtype")
+    if brief_quality:
+        infra_markers = [m for m in infra_markers if m not in _BRIEF_QUALITY_INFRA_TOKENS]
+        if infra_subtype in _BRIEF_QUALITY_INFRA_SUBTYPES:
+            infra_subtype = None
+    if infra_markers or rec.get("eval_no_report") or infra_subtype:
         return "INFRA"
 
     # 2. GT — delivery break. Adapter-wire fail, no consumption, hash divergence, cert FAIL.
@@ -354,6 +439,13 @@ def classify_outcome(rec: dict) -> str:
     reward = rec.get("reward")
     if reward is not None and float(reward) >= 1.0:
         return "RESOLVED"
+
+    # 3a. GT — a PROVEN brief-quality failure (empty/thin/degraded brief) that did not
+    # resolve. GT produced no usable evidence; it is a GT loss, KEPT in the resolved
+    # denominator (never dropped as INFRA/UNKNOWN). RESOLVED above still wins when the agent
+    # solved the task despite the degraded brief.
+    if brief_quality:
+        return "GT"
 
     # 3b. GT — agent ran, did not resolve, and the consumption WITNESS IS MISSING
     # (gt_prebuilt_active unknown). Witness-absent = unproven consumption = GT's
@@ -699,17 +791,23 @@ def build_signal_record(
     cert_dir: str | None,
     eval_no_report: bool = False,
     infra_subtype: str | None = None,
+    brief_quality_fail: bool | None = None,
 ) -> dict:
     """Assemble the per-task signal record + classify it.
 
     Reads ONLY signals the extractor already parses: reward, n_agent_steps,
     exit_status, the [GT_META] witness fields (from trial_log), the cert verdicts
-    (from cert_dir), and the §E infra/adapter markers (from trial_log).
+    (from cert_dir), the §E infra/adapter markers (from trial_log), and — for DEFECT-2 —
+    the proof-stage record (from cert_dir) that distinguishes a real infra-stage failure
+    from a GT brief-quality outcome. ``brief_quality_fail`` defaults to auto-detection from
+    the proof record; pass an explicit bool to override (tests).
     """
     infra_markers = find_infra_markers(trial_log)
     adapter_fail = GT_ADAPTER_FAIL_MARKER in trial_log
     meta = _gt_meta_witness(trial_log)
     certs = collect_cert_verdicts(cert_dir)
+    if brief_quality_fail is None:
+        brief_quality_fail = detect_brief_quality_failure(cert_dir)
 
     rec = {
         "instance_id": instance_id,
@@ -725,6 +823,7 @@ def build_signal_record(
         "cert_verdicts": certs,
         "cert_fail": _any_cert_fail(certs),
         "gt_meta_present": bool(meta),
+        "brief_quality_fail": bool(brief_quality_fail),
     }
     # Transparency: was a raw cert_fail reconciled away by the §12 runtime witness?
     rec["cert_fail_reconciled"] = bool(rec["cert_fail"]) and not _unreconciled_cert_fail(rec)
@@ -897,6 +996,7 @@ def main(argv: list[str]) -> int:
     print(f"  signals: reward={rec['reward']} n_agent_steps={rec['n_agent_steps']} "
           f"gt_prebuilt_active={rec['gt_prebuilt_active']} hook_hash_match={rec['hook_hash_match']} "
           f"adapter_fail={rec['adapter_fail']} cert_fail={rec['cert_fail']} "
+          f"brief_quality_fail={rec['brief_quality_fail']} "
           f"infra_markers={rec['infra_markers']} eval_no_report={rec['eval_no_report']}")
     if rec["cert_verdicts"]:
         for name, cv in rec["cert_verdicts"].items():

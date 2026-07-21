@@ -29,6 +29,39 @@ try:
 except ImportError:
     from scripts.swebench.trajectory_usage import extract_trajectory_usage
 
+# Single source of shell edit-truth (same detector gt_deep_metrics uses):
+# gt_localization_efficacy.classify recognizes patch / git-apply / heredoc / sed /
+# redirect edits. stdlib-only, same dir. Superset regex kept as a defensive fallback.
+try:
+    from gt_localization_efficacy import classify as _classify_shell_cmd
+except ImportError:  # packaged import path
+    try:
+        from scripts.swebench.gt_localization_efficacy import classify as _classify_shell_cmd
+    except ImportError:  # detector unavailable — degrade to the local superset regex
+        _classify_shell_cmd = None
+
+_EDIT_FALLBACK_RE = re.compile(
+    r"\bsed\s+-i\b|\bapply_patch\b|\bgit\s+apply\b|(?<![\w])patch\s+[^\n]*<|\btee\b|"
+    r"\bcat\s*>>?\s*[\w./+-]|(?:^|\s)>>?\s*[\w./+-]+\."
+    r"(?:py|go|ts|tsx|js|jsx|mjs|cjs|rs|java|kt|rb|c|cc|cpp|h|hpp|html|vue|svelte)\b",
+    re.I,
+)
+
+
+def _shell_cmd_is_edit(cmd: str) -> bool:
+    """True iff a RAW SHELL command mutates a source file (patch/git-apply/heredoc/sed/
+    redirect), via gt_localization_efficacy.classify with a superset-regex fallback.
+    Structured editor VERBS are decided by the caller's guards, not here — so a
+    `view`/`cat`/`grep` read never counts."""
+    if not cmd or not cmd.strip():
+        return False
+    if _classify_shell_cmd is not None:
+        try:
+            return _classify_shell_cmd(cmd)[0] == "EDIT"
+        except Exception:
+            pass
+    return bool(_EDIT_FALLBACK_RE.search(cmd))
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -447,6 +480,17 @@ def _extract_edited_file(tool_calls_json: str, full_cmd: str) -> str | None:
         m = re.search(r"patch\s+(?:-\S+\s+)*(" + _F + r"\.(?:py|go|ts|js|java|rs|cpp|c|h|rb))", text, re.I)
         if m:
             return _norm_path(m.group(1))
+        # `>`/`>>` redirect to a source file (e.g. `printf ... >> src/x.py`). The `cat >`
+        # form is handled above; this catches the general redirect that _is_edit_command
+        # now recognizes, so the gold-gated efficacy metric can attribute the edited file.
+        # The redirect operator must be at a token boundary so `2>err`/`->x` never match.
+        m = re.search(r"(?:^|\s)>>?\s*(" + _F + r")", text)
+        if m:
+            tgt = m.group(1)
+            if tgt != "/dev/null" and re.search(
+                r"\.(?:py|go|ts|tsx|js|jsx|rs|java|kt|rb|c|cc|cpp|h|hpp)$", tgt, re.I
+            ):
+                return _norm_path(tgt)
     return None
 
 
@@ -460,11 +504,11 @@ def _is_edit_command(tool_calls_json: str, full_cmd: str) -> bool:
             return False
         if verb in _EDIT_VERBS_SET:
             return True
-        # bash command might contain edit patterns
+        # bash command might contain edit patterns — complete detector (adds git apply,
+        # `patch … <`, heredoc, redirects) instead of the old blind token subset.
         bash_cmd = str(args.get("command") or "")
-        if bash_cmd:
-            if re.search(r"sed\s+-i|tee\s+.*<<|cat\s*>|patch\s|apply_patch", bash_cmd, re.I):
-                return True
+        if bash_cmd and _shell_cmd_is_edit(bash_cmd):
+            return True
         return False
 
     # 2. Regex fallback
@@ -482,8 +526,8 @@ def _is_edit_command(tool_calls_json: str, full_cmd: str) -> bool:
     ):
         if re.search(pat, full_cmd, re.I):
             return True
-    # Shell patterns
-    return bool(re.search(r"sed\s+-i|tee\s+.*<<|cat\s*>|patch\s|apply_patch", full_cmd, re.I))
+    # Shell patterns — complete detector (patch/git-apply/heredoc/sed/redirect).
+    return _shell_cmd_is_edit(full_cmd)
 
 
 def _is_test_command(tc_json: str, full_cmd: str) -> bool:

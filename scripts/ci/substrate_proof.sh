@@ -804,16 +804,18 @@ for c in graph.db runtime_context.json lsp_certificate.json graph_certificate.js
     case "$c" in graph.db|brief.txt) _MISSING_CORE=$((_MISSING_CORE + 1)) ;; esac
   fi
 done
-if [ "$_MISSING_CORE" -ne 0 ]; then
-  echo "::error::core substrate artifact(s) missing (graph.db/brief.txt) — no usable substrate; task FAILS" | tee -a trial_output.log
-  write_proof_status failed GT_ARTIFACT_MISSING "${_MISSING_CORE} core artifacts (graph.db/brief.txt) missing"
-  exit 1
-elif [ "$_MISSING" -eq 0 ]; then
+# §E artifacts are ALL GT-quality/measurement outputs (graph.db + brief.txt INCLUDED):
+# GT-quality is RECORDED, never fatal. A missing/empty §E artifact — including the
+# formerly-CORE graph.db/brief.txt (gt_run_proof degrade-and-continue writes an EMPTY
+# brief.txt so downstream has the file) — is PROOF_DEGRADED best-effort, NOT exit 1.
+# Only VALIDITY (host-split/commit-parity/dead-surface) + OOM/IO fail closed, and those
+# are handled UPSTREAM (~721-786), never in §E. §E must never exit 1.
+if [ "$_MISSING" -eq 0 ]; then
   echo "all 8 GT artifacts present under /tmp/gt (= /gt_artifacts)"
   write_proof_status ok PROOF_OK "all 8 GT artifacts present"
 else
-  echo "::warning::${_MISSING} non-core GT artifacts missing — proceeding with degraded GT (best-effort)"
-  write_proof_status ok PROOF_DEGRADED "${_MISSING} non-core artifacts missing but trial proceeds"
+  echo "::warning::${_MISSING} GT artifact(s) missing/empty (${_MISSING_CORE} formerly-core graph.db/brief.txt) — degraded GT, best-effort (GT-quality never blocks a task)"
+  write_proof_status ok PROOF_DEGRADED "${_MISSING} GT artifacts missing/empty (${_MISSING_CORE} formerly-core) but trial proceeds best-effort"
 fi
 
 # ── Cert-env handoff into the agent (§D) — the adapter reads these READ-ONLY ──

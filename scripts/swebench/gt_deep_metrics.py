@@ -24,6 +24,43 @@ import sqlite3
 import subprocess
 import sys
 
+# Single source of shell edit-truth: gt_localization_efficacy.classify is the COMPLETE
+# recognizer (patch / git-apply / heredoc / sed / redirect) the efficacy synthesis
+# prescribes. It is stdlib-only (same dir), so importing it is cheap and dependency-free.
+# A superset regex is kept as a defensive fallback if the module cannot be imported.
+try:
+    from gt_localization_efficacy import classify as _classify_shell_cmd
+except ImportError:  # packaged import path
+    try:
+        from scripts.swebench.gt_localization_efficacy import classify as _classify_shell_cmd
+    except ImportError:  # detector unavailable — degrade to the local superset regex
+        _classify_shell_cmd = None
+
+# Fallback ONLY (classify normally handles this). Superset of the old blind token set:
+# adds `git apply`, `patch … <`, and `>`/`>>` redirects to a source file.
+_EDIT_FALLBACK_RE = re.compile(
+    r"\bsed\s+-i\b|\bapply_patch\b|\bgit\s+apply\b|(?<![\w])patch\s+[^\n]*<|\btee\b|"
+    r"\bcat\s*>>?\s*[\w./+-]|(?:^|\s)>>?\s*[\w./+-]+\."
+    r"(?:py|go|ts|tsx|js|jsx|mjs|cjs|rs|java|kt|rb|c|cc|cpp|h|hpp|html|vue|svelte)\b",
+    re.I,
+)
+
+
+def _shell_cmd_is_edit(cmd: str) -> bool:
+    """True iff a RAW SHELL command mutates a source file. Delegates to the complete
+    detector gt_localization_efficacy.classify (patch/git-apply/heredoc/sed/redirect),
+    with a superset-regex fallback if that module cannot be imported. Structured editor
+    VERBS (str_replace/view/create) are NOT decided here — the caller's verb guards own
+    those; this fires on shell TEXT only, so a `view`/`cat`/`grep` read never counts."""
+    if not cmd or not cmd.strip():
+        return False
+    if _classify_shell_cmd is not None:
+        try:
+            return _classify_shell_cmd(cmd)[0] == "EDIT"
+        except Exception:
+            pass
+    return bool(_EDIT_FALLBACK_RE.search(cmd))
+
 
 def d8(x):
     """Round to 8 decimal places — full precision, never 2-dp. Missing data
@@ -451,6 +488,11 @@ def _is_mutating_editor_command(tool_or_action: str, args_or_text) -> bool:
             return True
         if tool in {"edit", "write", "create"} and path:
             return True
+        # Not a structured editor verb → it is a raw shell command. Route it through the
+        # complete detector so `patch`/`git apply`/heredoc/`sed`/redirect edits count
+        # (the old path returned False here — the geopandas first_edit=None symptom).
+        if _shell_cmd_is_edit(cmd):
+            return True
         return False
     text = str(args_or_text or "").lower()
     if "str_replace_editor" in text or "file_editor" in text:
@@ -472,7 +514,9 @@ def _is_mutating_editor_command(tool_or_action: str, args_or_text) -> bool:
         return False
     if first in _EDIT_VERBS and len(text.split()) > 1:
         return True
-    return any(tok in text for tok in ("sed -i", "apply_patch", "tee ", "cat >"))
+    # Complete shell edit-truth (superset of the old blind {sed -i, apply_patch, tee, cat >}
+    # token set): now also `patch`, `git apply`, heredoc, `sed` variants, and `>`/`>>`.
+    return _shell_cmd_is_edit(text)
 
 
 def _deepseek_price_for(model: str) -> dict:
@@ -1530,6 +1574,19 @@ def build(task: str, results_dir: str, log_path: str = "",
     if (not traj.get("action_count")) and log_text:
         traj["has_patch"] = traj.get("has_patch") or _log_has_patch(log_text)
 
+    # Loud edit-truth marker on the efficacy axis. first_edit_action stays honest-None
+    # when no edit command is locatable (never a fabricated step 0); but if the run
+    # nonetheless produced a patch, say so EXPLICITLY instead of a silent None that reads
+    # as "never edited". The common patch/git-apply/redirect edit is now timed correctly
+    # by the shared detector, so this marker fires only for genuinely in-body edits
+    # (diff/heredoc applied via a file the command line never names).
+    if traj.get("first_edit_action") is not None:
+        traj["first_edit_detection"] = "edit_command"
+    elif traj.get("has_patch"):
+        traj["first_edit_detection"] = "patch_present_but_no_edit_command"
+    else:
+        traj["first_edit_detection"] = "no_edit_no_patch"
+
     # Token accounting is separate from behavioral attribution. Action-type
     # transitions are computed below only after the exact receipt ledger exists.
     token_accounting_source = "gt_run_summary" if per_layer_raw else "none"
@@ -2051,7 +2108,7 @@ def _write_markdown(deep: dict, md_path: str) -> None:
 ## Steps / agent behaviour
 | metric | value |
 |---|---|
-{rows([("agent steps (api_calls)", f(a.get('action_count'))), ("assistant messages", f(a.get('assistant_steps'))), ("source edits", f(a.get('edits'))), ("first edit at step", f(a.get('first_edit_action')))])}
+{rows([("agent steps (api_calls)", f(a.get('action_count'))), ("assistant messages", f(a.get('assistant_steps'))), ("source edits", f(a.get('edits'))), ("first edit at step", f(a.get('first_edit_action'))), ("first edit detection", a.get('first_edit_detection'))])}
 
 ## Tokens & money (DeepSeek-priced, 8-dp)
 | metric | value |

@@ -1565,6 +1565,28 @@ def _ss_ack_form_on() -> bool:
         "", "0", "false", "no", "off")
 
 
+# The ONLY path-bearing orientation note: the matched top-1 candidate line built in the
+# confident-line emitter ("Highest-confidence candidate (graph + issue signals): <path>").
+# It NAMES A FILE, so under GT_LOC_RESLOT it is a task_start which-file steer and is retired
+# from the minimal brief; the fileless steers below name no path and are the legitimate
+# minimal orientation. ONE source for this prefix, reused as the first element below.
+_PATH_BEARING_ORIENTATION_PREFIX = "Highest-confidence candidate"
+
+# The stable line-prefixes of a step-0 orientation NOTE — the path-bearing matched candidate
+# line plus the two FILELESS honest steers ("Note: GT could not anchor …" for a matched brief
+# with no verified edge, "Note: GT found no indexed file …" for the no-match/new-file brief).
+# ONE source of truth so the THREE consumers stay in lock-step: _is_brief_boundary (scan-stop),
+# _segment_brief_blocks (the ``orientation-note`` label), and the token-rail orientation-note
+# drop pass. A new steer prefix added here is recognized by ALL THREE at once — never added in
+# one site but silently missed at the others (the exact split that let the no-match steer fall
+# to ``misc`` → non-substantive → dropped by the minimal reducer).
+_ORIENTATION_NOTE_PREFIXES: tuple[str, ...] = (
+    _PATH_BEARING_ORIENTATION_PREFIX,
+    "Note: GT could not anchor",
+    "Note: GT found no indexed file",
+)
+
+
 def _is_brief_boundary(line: str) -> bool:
     """True if ``line`` starts a structural brief block or a scaffold tag. A scan
     that consumes a 'section until the next blank line' must STOP here so it never
@@ -1583,7 +1605,7 @@ def _is_brief_boundary(line: str) -> bool:
     return any(line.startswith(p) for p in (
         "Expected behavior:", "EDIT-TARGET CONTRACTS", "Other candidates",
         "Related files to inspect", "Likely multi-file scope", "Scope chain",
-        "Highest-confidence candidate", "Note: GT could not anchor",
+        *_ORIENTATION_NOTE_PREFIXES,
     ))
 
 
@@ -1661,7 +1683,7 @@ def _segment_brief_blocks(text: str) -> list[dict]:
                 or ln.startswith("Likely multi-file") or ln.startswith("Scope chain")):
             e = _until_blank(i)
             _add(5, "companion", lines[i:e]); i = e; continue
-        if ln.startswith("Highest-confidence candidate") or ln.startswith("Note: GT could not anchor"):
+        if any(ln.startswith(p) for p in _ORIENTATION_NOTE_PREFIXES):
             _add(6, "orientation-note", [ln]); i += 1; continue
         # blank / unknown line — cheap filler kept with its neighbors.
         _add(5, "misc", [ln]); i += 1; continue
@@ -1820,6 +1842,19 @@ def _reduce_brief_to_minimal(text: str) -> str:
             if head.strip():
                 kept.append(head)  # minimal orientation: the header, not the contract body
                 _kept_substantive = True
+            continue
+        if (label == "orientation-note" and _loc_reslot_on()
+                and b["text"].startswith(_PATH_BEARING_ORIENTATION_PREFIX)):
+            # DELTA 3 (run-#3 pilot, 2026-07-20): under the localization RE-SLOT the minimal
+            # brief ships NO localization narration. The path-bearing matched note
+            # ("Highest-confidence candidate (…): <path>") NAMES a top-1 file, so leaving it
+            # here shipped a task_start which-file steer that defeats the re-slot contract and
+            # silently passed J3 as "orientation". Retire it exactly like the localization-
+            # header and file-entry ranks. The FILELESS orientation notes ("Note: GT found no
+            # indexed file …", "Note: GT could not anchor …") name no path and remain the
+            # legitimate minimal orientation — they fall through to the keep below. Content
+            # discriminator (names-a-path vs fileless), never task/repo-keyed. Legacy path
+            # (re-slot off) is byte-identical: the note is kept as before.
             continue
         kept.append(b["text"])
         if label not in ("scaffold", "misc"):
@@ -2567,8 +2602,7 @@ def _enforce_token_rail(text: str, budget: int) -> tuple[str, list[str]]:
     _passes = [
         ("graph-map", lambda: _drop_tagged("<gt-graph-map>", "</gt-graph-map>")),
         ("orientation-note", lambda: _drop_until_blank(
-            lambda ln: ln.startswith("Highest-confidence candidate")
-            or ln.startswith("Note: GT could not anchor"))),
+            lambda ln: any(ln.startswith(p) for p in _ORIENTATION_NOTE_PREFIXES))),
         ("scope-chain", lambda: _drop_until_blank(
             lambda ln: ln.startswith("Scope chain"))),
         ("related-files", lambda: _drop_until_blank(

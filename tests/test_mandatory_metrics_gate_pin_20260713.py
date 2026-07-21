@@ -239,10 +239,21 @@ def test_gate_checks_all_four_gt_artifacts_and_fails_closed() -> None:
     assert gate.index("gt_task_completion.json") < gate.index("GT_METRICS_COMPLETE")
     idx = gate.index("GT_METRICS_INCOMPLETE")
     window = gate[idx: idx + 400]
-    assert "exit 1" in window, (
-        "GT_METRICS_INCOMPLETE must be followed by `exit 1` (fail-closed, same mechanism as "
-        "GT_PROFILE_UNPROVEN) — an emitted marker with no exit would let a metrics-incomplete task "
-        "pass as citable"
+    # OLD contract asserted `"exit 1" in window` — a metrics-incomplete task was fail-closed
+    # (DISCARDED). NEW contract (2026-07-20 MEASUREMENT taxonomy): incomplete/missing metrics are a
+    # GT SELF-MEASUREMENT gap on a task that ALREADY RAN — not a substrate/arm-validity breach — so
+    # the gate RECORDS a gt.metrics_incomplete.v1 marker (uncitable=true + reasons) and CONTINUES; it
+    # must NOT exit here. The genuine VALIDITY gates (identity/commit-parity/digest/REWARD_BRIDGE)
+    # stay fail-closed elsewhere; only this metrics-incompleteness path degrades to a marker.
+    assert "exit 1" not in window, (
+        "GT_METRICS_INCOMPLETE must NOT be followed by `exit 1` — a task that ran is recorded "
+        "uncitable, never discarded (MEASUREMENT taxonomy)"
+    )
+    assert "gt.metrics_incomplete.v1" in gate, (
+        "the gate must WRITE the gt.metrics_incomplete.v1 marker instead of failing the task closed"
+    )
+    assert "uncitable" in gate, (
+        "the marker must record the metrics-incomplete task uncitable (recorded + continue, not exit)"
     )
 
 

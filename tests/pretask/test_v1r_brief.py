@@ -429,11 +429,13 @@ def test_profile_off_anchor_artifact_is_still_bound_to_exact_issue(
     monkeypatch.setenv("GT_CERT_SIDECAR_SOURCE_DIR", str(cert_dir))
     monkeypatch.setenv("GT_BRIEF_CACHE_DIR", str(out_dir))
 
-    ok, detail = proof.emit_brief(
+    ok, detail, degraded = proof.emit_brief(
         str(out_dir), issue, repo, db, generator=lambda **_kwargs: result
     )
 
+    # SUCCESS path — 3-tuple return; the profile-off producer yields a real brief: degraded=False.
     assert ok, detail
+    assert degraded is False
     mirrored = json.loads(
         (out_dir / "gt_issue_anchors.json").read_text(encoding="utf-8")
     )

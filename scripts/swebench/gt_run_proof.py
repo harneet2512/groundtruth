@@ -1072,14 +1072,38 @@ def _mirror_cert_sidecars(
                 pass
 
 
+def _degrade_empty_brief(out_dir: str, detail: str):
+    """Shared GT-QUALITY degrade path for emit_brief (gates.md BETTER-GATES §1).
+
+    A GT-QUALITY brief issue (empty/thin brief, determinism, localization diagnostic) must
+    DEGRADE, not kill the paid task: the agent self-localizes and runs GT-off-for-this-task.
+    Write a 0-byte brief.txt FIRST so build_run_manifest + the artifact-presence loop + every
+    downstream identity/PROOF_STATE gate has its artifact and the run reaches the agent, then
+    return (ok=False, detail, degraded=True). If the placeholder write ITSELF raises OSError
+    that is a genuine artifact-IO failure (not GT quality) → (False, io_detail, False), and the
+    caller hard-fails with GT_ARTIFACT_MISSING."""
+    try:
+        with open(os.path.join(out_dir, "brief.txt"), "w", encoding="utf-8") as bf:
+            bf.write("")
+    except OSError as e:
+        return False, f"brief.txt write failed (degrade path): {e}", False
+    return False, detail, True
+
+
 def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generator=None):
     """Emit the curated brief to <out>/brief.txt — proof artifact #8 (P0.1-c).
 
     gt-run-proof is PROOF-ONLY (validate_proof_env requires GT_PROOF_MODE=1), and the agent
     consumes /gt_artifacts/brief.txt READ-ONLY: there is NO host fallback (host run_v74 is
-    fail-closed by the container boundary), so an empty or failed brief is a missing proof
-    artifact — never a WARN. Returns (ok, detail); the caller fails closed on ok=False with
-    GT_ARTIFACT_MISSING. ``generator`` is injectable for tests; default = the real
+    fail-closed by the container boundary). A GT-QUALITY brief issue (empty/thin brief,
+    determinism, localization diagnostic) DEGRADES rather than hard-failing the paid task —
+    the agent self-localizes and runs GT-off-for-this-task (gates.md BETTER-GATES §1).
+    Returns (ok, detail, degraded): a GT-QUALITY issue writes an EMPTY brief.txt and returns
+    (False, detail, True) so the caller RECORDS + CONTINUES (build_run_manifest + all
+    downstream identity/artifact-presence/PROOF_STATE gates still run); only VALIDITY (sidecar
+    identity) or genuine artifact IO (brief.txt write) returns (False, detail, False) and the
+    caller fails closed with GT_ARTIFACT_MISSING; success returns (True, detail, False).
+    ``generator`` is injectable for tests; default = the real
     generate_v1r_brief (which also writes the issue anchors mirrored below)."""
     # gate3b persists the authoritative V1RBriefResult. Load it, independently
     # execute the same acquisition once, and attach a repeat witness only when
@@ -1099,10 +1123,12 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
         _reused_gate = not result.get("generated", True)
         bt = (result.get("brief_text") or "").strip()
     except Exception as e:
-        return False, f"brief generation raised (no swallow in proof): {type(e).__name__}: {e}"
+        return _degrade_empty_brief(
+            out_dir, f"brief generation raised (no swallow in proof): {type(e).__name__}: {e}")
     if not bt:
-        return False, ("portable brief EMPTY — proof mode requires a non-empty brief.txt "
-                       "(the agent consumes /gt_artifacts/brief.txt; there is no host fallback)")
+        return _degrade_empty_brief(out_dir, (
+            "portable brief EMPTY — proof mode requires a non-empty brief.txt "
+            "(the agent consumes /gt_artifacts/brief.txt; there is no host fallback)"))
     # The gate/cache acquisition above is the sole delivery authority. Its generator writes
     # support sidecars into the configured source (default /tmp), so capture those exact
     # bytes BEFORE the independent witness executes. Execution 2 proves repeat identity only;
@@ -1114,7 +1140,8 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
             src_dir=os.environ.get("GT_CERT_SIDECAR_SOURCE_DIR", "/tmp"),
         )
     except (SidecarIdentityError, OSError) as e:
-        return False, f"brief sidecar identity validation failed: {e}"
+        # VALIDITY/integrity failure (not GT-quality) → hard-fail, no degrade.
+        return False, f"brief sidecar identity validation failed: {e}", False
     try:
         if generator is None:
             from groundtruth.pretask.v1r_brief import generate_v1r_brief as _generator
@@ -1136,10 +1163,10 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
             expect_identity=_identity_handoff.value,
         )
         if _determinism.get("matched") is not True:
-            return False, (
+            return _degrade_empty_brief(out_dir, (
                 "DETERMINISM_MISMATCH: independent same-input brief acquisition "
                 "produced different canonical identities"
-            )
+            ))
         result = get_or_generate(
             out_dir, issue_text, work, graph, generator=generator,
             identity_handoff=_identity_handoff,
@@ -1147,7 +1174,8 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
         bt = (result.get("brief_text") or "").strip()
         validate_request_identity(_identity_handoff)
     except Exception as e:
-        return False, f"brief determinism proof raised: {type(e).__name__}: {e}"
+        return _degrade_empty_brief(
+            out_dir, f"brief determinism proof raised: {type(e).__name__}: {e}")
     try:
         from groundtruth.runtime.localization_diagnostic import validate_brief_payload
 
@@ -1177,16 +1205,17 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
         with open(os.path.join(out_dir, "localization_diagnostic.json"), "w", encoding="utf-8") as _df:
             json.dump(_diag, _df, indent=2, sort_keys=True)
         if _strict_diag and not _diag.get("ok", False):
-            return False, (
+            return _degrade_empty_brief(out_dir, (
                 "live localization diagnostic HALT before brief delivery: "
                 + ",".join(str(v) for v in _diag.get("violations", []))
-            )
+            ))
     except Exception as e:
         if (
             os.environ.get("GT_LOCALIZATION_DIAGNOSTIC_STRICT", "0") == "1"
             or os.environ.get("GT_FULL_POTENTIAL", "0") == "1"
         ):
-            return False, f"live localization diagnostic raised: {type(e).__name__}: {e}"
+            return _degrade_empty_brief(
+                out_dir, f"live localization diagnostic raised: {type(e).__name__}: {e}")
         try:
             with open(os.path.join(out_dir, "localization_diagnostic_error.txt"), "w", encoding="utf-8") as _ef:
                 _ef.write(f"{type(e).__name__}: {e}")
@@ -1196,13 +1225,14 @@ def emit_brief(out_dir: str, issue_text: str, work: str, graph: str, *, generato
         with open(os.path.join(out_dir, "brief.txt"), "w", encoding="utf-8") as bf:
             bf.write(bt)
     except OSError as e:
-        return False, f"brief.txt write failed: {e}"
+        # Genuine artifact IO failure (not GT-quality) → hard-fail, no degrade.
+        return False, f"brief.txt write failed: {e}", False
     _sha = result.get("brief_sha256", "")
     _reused = _reused_gate
     return True, (
         f"{len(bt)} chars sha256={_sha[:12]} reused_gate_brief={_reused} "
         "determinism_matched=True"
-    )
+    ), False
 
 
 def probe_workspace_metadata(language: str, source_root: str, env: dict[str, str]) -> dict[str, object]:
@@ -1549,6 +1579,7 @@ def main(argv=None) -> int:
     _gt_index_retries = int(os.environ.get("GT_INDEX_RETRIES", "3") or "3")
     _index_ok = False
     _last = ""
+    _rc, _nodes = None, 0  # last-attempt outcome (defined even if retries==0) for the classify below
     for _attempt in range(1, _gt_index_retries + 1):
         _rc = _run([_gt_index_bin(), "-root", work, "-output", graph], base_env)
         _nodes = 0
@@ -1568,14 +1599,36 @@ def main(argv=None) -> int:
         _last = f"attempt {_attempt}/{_gt_index_retries}: rc={_rc} nodes={_nodes}" + (f" ({_last})" if _last else "")
         _tag = "WARN" if _attempt < _gt_index_retries else "FAIL"
         print(f"[gt-index][{_tag}] {_last}", flush=True)
-        for _ext in ("", "-shm", "-wal"):  # wipe partial db so the retry is clean
-            try:
-                os.remove(graph + _ext)
-            except OSError:
-                pass
+        if _attempt < _gt_index_retries:  # wipe partial db BETWEEN retries so the next try is clean;
+            for _ext in ("", "-shm", "-wal"):  # KEEP the final attempt's db so a clean rc==0/0-node
+                try:                            # empty graph survives for the degrade path below
+                    os.remove(graph + _ext)     # (REQUIRED_ARTIFACTS presence + build_run_manifest need it)
+                except OSError:
+                    pass
     if not _index_ok:
-        return tracker.fail("index", "GT_INDEX_FAIL", f"gt-index failed after {_gt_index_retries} attempts: {_last}")
-    tracker.complete("index", graph_db=graph)
+        # INFRA-vs-QUALITY classification (gates.md PHASE-3). A CLEAN EMPTY graph — gt-index ran to
+        # completion (rc==0) but genuinely found nothing to index (0 nodes; _index_ok requires
+        # rc==0 AND nodes>0, so `not _index_ok` with rc==0 means nodes==0) — is GT-QUALITY, not a
+        # substrate break: GT simply has no map for this repo, so the agent self-localizes and runs
+        # GT-off-for-this-task. DEGRADE + CONTINUE (record, never block); the final attempt's
+        # schema-correct empty graph.db was spared the wipe so downstream stages + the presence gate
+        # + the manifest all have it. OOM (rc 137/-9 SIGKILL), disk-full, or ANY other nonzero
+        # gt-index exit is INFRA (retry-class, environmental — says nothing about GT) and STAYS
+        # fail-closed exactly as before.
+        _empty_graph = (_rc == 0 and _nodes == 0)
+        if not _empty_graph:
+            _oom = _rc in (137, -9)
+            return tracker.fail(
+                "index", "GT_INDEX_FAIL",
+                f"gt-index failed after {_gt_index_retries} attempts "
+                f"({'OOM/SIGKILL' if _oom else 'INFRA disk/missing-binary/crash'}, rc={_rc}): {_last}")
+        tracker.complete("index", graph_db=graph, status_detail="degraded",
+                         degraded_reason="GT_INDEX_EMPTY_GRAPH", detail=_last)
+        print(f"[gt-index][DEGRADED] empty graph (rc=0, 0 nodes) after {_gt_index_retries} "
+              f"attempts -> GT-off-for-this-task; continuing to build_run_manifest ({_last})",
+              flush=True)
+    else:
+        tracker.complete("index", graph_db=graph)
     # 2. LSP enrichment — demand-driven + polyglot + un-throttled within the issue scope.
     # gt_gt §3/§7 + CLAUDE.md "demand-driven, not exhaustive": resolve the issue-relevant subgraph
     # for EVERY language present (not just the dominant one), un-capped within that bounded scope —
@@ -1813,6 +1866,16 @@ def main(argv=None) -> int:
     # the flag so a thin/broken graph STOPS the paid agent instead of running blind on a false map.
     _CONTENT_FAIL = {"GRAPH_FAIL_EMPTY", "GRAPH_FAIL_FTS5",
                      "GRAPH_FAIL_BASES_INCOMPLETE", "GRAPH_FAIL_DEPTH_INCOMPLETE"}
+    # Genuine VALIDITY sub-conditions (gates.md PHASE-3 "keep genuine VALIDITY fail-closed"): a cert
+    # proving the AGENT would consume a graph that is NOT the in-container proven graph — built on
+    # the host (host-split, mirrors FINAL_PIPELINE_HOST_SPLIT_FAIL), or a different/absent graph
+    # IDENTITY hash than proven (classify_graph's own comment: a missing/mismatched graph_hash is "a
+    # LEGITIMACY failure ... NOT a quality issue"), or the hook wired to a different graph. These
+    # corrupt result attribution and STAY fail-closed. Every OTHER non-GRAPH_VALID verdict (thin/
+    # broken/undelivered content: EMPTY/FTS5/BASES/DEPTH/STALE_CLOSURE/MISSING_HANDOFF/
+    # HANDOFF_INACTIVE) is GT-QUALITY -> degrade + continue so an index-degraded run does not die here.
+    _GRAPH_VALIDITY_FAIL = {"GRAPH_FAIL_BUILT_ON_HOST",
+                            "GRAPH_FAIL_HASH_MISMATCH", "GRAPH_FAIL_HOOK_MISMATCH"}
     if os.environ.get("GT_REQUIRE_GRAPH_VALID") == "1":
         _gv = "unknown"
         try:
@@ -1830,12 +1893,25 @@ def main(argv=None) -> int:
         #    does not false-fail. A thin/broken graph (DEPTH_INCOMPLETE etc.) fails closed in BOTH modes.
         _real_handoff = bool(os.environ.get("GT_HOST_GRAPH_DB", "").strip())
         _fail = (_gv != "GRAPH_VALID") if _real_handoff else (_gv in _CONTENT_FAIL)
-        if _fail:
+        if _fail and _gv in _GRAPH_VALIDITY_FAIL:
+            # VALIDITY: the agent would consume a wrong/host-built/mismatched-identity graph ->
+            # results would not be attributable to the proven GT -> refuse the paid run.
             return tracker.fail("graph_cert", "GRAPH_CERT_INVALID",
                                 f"graph_certificate verdict={_gv} under GT_REQUIRE_GRAPH_VALID=1 "
-                                f"(real_handoff={_real_handoff}) — refusing the paid agent run on a "
-                                "non-valid graph")
-    tracker.complete("graph_cert", path=cert_graph)
+                                f"(real_handoff={_real_handoff}) — VALIDITY: refusing the paid agent "
+                                "run on a wrong/host-built/mismatched graph")
+        if _fail:
+            # GT-QUALITY thin/broken/undelivered graph -> DEGRADE + CONTINUE (record, never block);
+            # the agent self-localizes and runs GT-off-for-this-task. Reaching build_run_manifest is
+            # what keeps the identity binding + artifact presence intact for the downstream gates.
+            tracker.complete("graph_cert", path=cert_graph, status_detail="degraded",
+                             degraded_reason=str(_gv))
+            print(f"[gt-run-proof] graph_cert DEGRADED (verdict={_gv}, real_handoff={_real_handoff}) "
+                  f"-> GT-off-for-this-task; continuing to build_run_manifest", flush=True)
+        else:
+            tracker.complete("graph_cert", path=cert_graph)
+    else:
+        tracker.complete("graph_cert", path=cert_graph)
 
     # 4. foundational gates (emits foundational_gate_report.json + embedder_certificate.json via run_v74)
     # A1: GT_BRIEF_CACHE_DIR = the proof out dir, so gate3b PERSISTS its generated brief there;
@@ -1849,6 +1925,37 @@ def main(argv=None) -> int:
     # identity + cosine-discrimination probe (proves the forced-ONNX embedder LOADS + produces a
     # finite, discriminating vector). The gate (gate_rc above) proves CONSUMPTION; together =
     # "loaded AND used". Issue-independent, so it always emits.
+    #
+    # GT-QUALITY DEGRADE (gates.md PHASE-3): a degenerate/unloadable embedder must NOT kill the paid
+    # task. It is a GT-quality issue -> SUPPRESS THE SEMANTIC LEG ONLY (FTS5 + graph + brief still
+    # ship) and CONTINUE, recording the real verdict. The sanctioned semantic-OFF lever (v7_4_brief
+    # _get_model docstring: "or unset GT_REQUIRE_EMBEDDER") is to drop GT_REQUIRE_EMBEDDER so the
+    # downstream in-process brief regen zeroes W_SEM (_ZeroEmbeddingModel: "BM25 + graph signals
+    # will drive ranking") or falls to the graceful e5 path instead of RAISING. We also guarantee
+    # embedder_certificate.json EXISTS (degraded stub if the probe never wrote one) so the
+    # REQUIRED_ARTIFACTS presence gate + build_run_manifest do not SUBSTRATE_MISSING_CERTS.
+    _embedder_degraded = False
+    _embedder_degrade_reason = ""
+
+    def _degrade_embedder(reason: str) -> None:
+        nonlocal _embedder_degraded, _embedder_degrade_reason
+        _embedder_degraded = True
+        _embedder_degrade_reason = reason
+        os.environ["GT_REQUIRE_EMBEDDER"] = "0"  # semantic-OFF for the downstream brief (sanctioned)
+        if not os.path.exists(cert_emb):
+            try:
+                with open(cert_emb, "w", encoding="utf-8") as _cf:
+                    json.dump({"schema": "gt.embedder_certificate.degraded.v1",
+                               "verdict": "EMBEDDER_DEGRADED", "ok": False, "degraded": True,
+                               "reason": reason,
+                               "emitted_by": "gt-run-proof GT-QUALITY degrade (semantic leg suppressed)"},
+                              _cf, indent=2)
+            except OSError:
+                pass
+        print("[gt-run-proof] embedder DEGRADED -> semantic leg suppressed (FTS5+graph+brief still "
+              f"ship, GT_REQUIRE_EMBEDDER=0); continuing to build_run_manifest. reason={reason}",
+              flush=True)
+
     if not os.path.exists(cert_emb):
         try:
             os.environ["GT_EMBEDDER_CERT"] = cert_emb
@@ -1856,7 +1963,8 @@ def main(argv=None) -> int:
             import numpy as _np
             from groundtruth.pretask.v7_4_brief import _get_model
             _proof.embedder_identity()  # loads the embedder (raises if not the forced-ONNX one)
-            # Encode errors are NOT swallowed — a degenerate/unloadable embedder is fatal in proof.
+            # A raise here (unloadable/degenerate embedder) is caught below and DEGRADED (GT-QUALITY:
+            # semantic leg suppressed, FTS5+graph+brief still ship), no longer fatal to the paid task.
             vs = _get_model().encode(["database connection pool",
                                       "database connection pool timeout", "the quick brown fox"])
 
@@ -1870,45 +1978,60 @@ def main(argv=None) -> int:
             _proof.write_embedder_certificate(cert)
             print(f"[gt-run-proof] embedder cert emitted via direct probe (disc={disc})", flush=True)
         except Exception as e:
-            return tracker.fail("gates", "EMBEDDER_USAGE_FAIL", str(e))
+            # GT-QUALITY: the forced-ONNX embedder could not load/encode -> degrade, don't fail.
+            _degrade_embedder(f"probe raised (unloadable/degenerate embedder): {type(e).__name__}: {e}")
 
-    # 4c. CLASSIFY the embedder certificate (probe OR gate-written) and FAIL-CLOSED on a bad verdict
-    # — degenerate/no-discrimination, zero model, ST-under-forced-ONNX, model-root divergence,
-    # dropped semantic. Presence alone is not proof on a real-money run.
-    try:
-        _md = os.path.join(GT_HOME, "scripts", "metrics")
-        if _md not in sys.path:
-            sys.path.insert(0, _md)
-        import importlib
-        _ec = importlib.import_module("embedder_certificate")
-        _verdict, _ok = _ec.classify_embedder(_ec.load_embedder_cert(cert_emb),
-                                              proof_mode=True, require_embedder=True)
-        print(f"[gt-run-proof] embedder verdict: {_verdict}", flush=True)
-        if not _ok:
-            return tracker.fail("gates", "EMBEDDER_USAGE_FAIL", str(_verdict))
-    except Exception as e:
-        # P1-5 fix (Fable 2026-07-02): do NOT swallow a classification failure on a required run —
-        # a corrupt/unloadable embedder cert (the 4b presence probe is skipped when the file merely
-        # EXISTS) would otherwise skip the fail-closed 4c verdict and proceed green, contradicting
-        # this step's own "presence alone is not proof" contract. Fail-closed when required.
-        if os.environ.get("GT_REQUIRE_EMBEDDER") == "1":
-            return tracker.fail("gates", "EMBEDDER_USAGE_FAIL", f"classification error: {e}")
-        print(f"WARN: embedder cert classification skipped: {e}", file=sys.stderr)
-    tracker.complete("gates", gate_rc=rc)
+    # 4c. CLASSIFY the embedder certificate (probe OR gate-written). A bad verdict — degenerate/
+    # no-discrimination, zero model, ST-under-forced-ONNX, model-root divergence, dropped semantic —
+    # is GT-QUALITY (embedder degraded), so DEGRADE (suppress the semantic leg, continue), not fail.
+    # Skipped when 4b already degraded (the stub cert would only re-derive the same verdict).
+    if not _embedder_degraded:
+        try:
+            _md = os.path.join(GT_HOME, "scripts", "metrics")
+            if _md not in sys.path:
+                sys.path.insert(0, _md)
+            import importlib
+            _ec = importlib.import_module("embedder_certificate")
+            _verdict, _ok = _ec.classify_embedder(_ec.load_embedder_cert(cert_emb),
+                                                  proof_mode=True, require_embedder=True)
+            print(f"[gt-run-proof] embedder verdict: {_verdict}", flush=True)
+            if not _ok:
+                # GT-QUALITY: embedder present but degenerate/unusable -> degrade, don't fail.
+                _degrade_embedder(f"classify verdict={_verdict}")
+        except Exception as e:
+            # A corrupt/unreadable embedder cert on a REQUIRED run is still GT-QUALITY (the embedder
+            # is degraded/unprovable), not a substrate break -> degrade + suppress semantic, continue.
+            # When not required, keep the original warn-and-continue (semantic already optional).
+            if os.environ.get("GT_REQUIRE_EMBEDDER") == "1":
+                _degrade_embedder(f"classification error: {type(e).__name__}: {e}")
+            else:
+                print(f"WARN: embedder cert classification skipped: {e}", file=sys.stderr)
+    tracker.complete("gates", gate_rc=rc, embedder_degraded=_embedder_degraded,
+                     embedder_degrade_reason=(_embedder_degrade_reason or None))
 
     # 4d. Emit the curated brief IN-CONTAINER (run_v74 is legal here — containerized + proof) so the
     # agent CONSUMES it from /gt_artifacts/brief.txt instead of regenerating on the host (where
     # run_v74 is fail-closed by the boundary assert). generate_v1r_brief writes the issue anchors;
     # mirror them out for the agent's in-container post_view/post_edit consumers.
-    # P0.1-c: brief.txt is REQUIRED (artifact #8). In proof mode an empty/missing brief is
-    # GT_ARTIFACT_MISSING (fail-closed) — the old "agent will host-fallback" WARN was stale:
-    # the host brief path is fail-closed by the container boundary, so a missing brief here
-    # means the agent runs with NO brief at all (the green-zero-run chain).
-    _brief_ok, _brief_detail = emit_brief(a.out, _read_issue(issue_file), work, graph)
-    if not _brief_ok:
+    # P0.1-c + gates.md BETTER-GATES §1: brief.txt is artifact #8, but a GT-QUALITY brief issue
+    # (empty/thin brief, determinism, localization diagnostic) DEGRADES rather than killing the
+    # paid task — the agent self-localizes and runs GT-off-for-this-task. emit_brief writes an
+    # EMPTY brief.txt on that path and returns degraded=True, so build_run_manifest + the
+    # artifact-presence loop + every downstream identity/PROOF_STATE gate has its artifact and
+    # the run reaches the agent. Only VALIDITY (sidecar identity) or genuine artifact IO
+    # (brief.txt write) hard-fails with GT_ARTIFACT_MISSING.
+    _brief_ok, _brief_detail, _brief_degraded = emit_brief(a.out, _read_issue(issue_file), work, graph)
+    if not _brief_ok and not _brief_degraded:
         return tracker.fail("brief_emit", "GT_ARTIFACT_MISSING", f"brief.txt — {_brief_detail}")
-    tracker.complete("brief_emit", detail=_brief_detail)
-    print(f"[gt-run-proof] brief emitted -> /gt_artifacts/brief.txt ({_brief_detail})", flush=True)
+    if _brief_degraded:
+        # RECORD, never block. The tracker has no degraded state, so record via the existing
+        # complete() with a DEGRADED detail string (do not invent new infra), then CONTINUE.
+        tracker.complete("brief_emit", detail=f"DEGRADED: {_brief_detail}")
+        print(f"[gt-run-proof] brief DEGRADED -> empty /gt_artifacts/brief.txt "
+              f"(GT-off-for-this-task; {_brief_detail})", flush=True)
+    else:
+        tracker.complete("brief_emit", detail=_brief_detail)
+        print(f"[gt-run-proof] brief emitted -> /gt_artifacts/brief.txt ({_brief_detail})", flush=True)
 
     # 5. runtime_context.json
     try:
