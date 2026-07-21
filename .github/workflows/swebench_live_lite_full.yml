@@ -2507,7 +2507,7 @@ jobs:
             GT_MM_MISSING="$_MM_MISSING" GT_TASK_ARTIFACT_ROOT="$TASK_ARTIFACT_ROOT" python3 - <<'PY' || echo "GT_METRICS_INCOMPLETE_MARKER_WARN"
           import json, os
           reasons = [r for r in os.environ.get("GT_MM_MISSING", "").split() if r]
-          document = {
+          _mm_marker = {
               "schema": "gt.metrics_incomplete.v1",
               "task": os.environ.get("GT_TASK_ID", ""),
               "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
@@ -2524,7 +2524,7 @@ jobs:
               try:
                   os.makedirs(parent, exist_ok=True)
                   with open(dest, "w", encoding="utf-8") as stream:
-                      json.dump(document, stream, indent=2)
+                      json.dump(_mm_marker, stream, indent=2)
               except OSError:
                   pass
           PY

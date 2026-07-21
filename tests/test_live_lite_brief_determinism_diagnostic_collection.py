@@ -33,7 +33,12 @@ def test_collect_preserves_optional_brief_determinism_diagnostic_fail_closed() -
     assert f'cp "{source}" "{destination}"' in block
     assert f'rm -f "{destination}"' in block
     assert "GT_COLLECTION_COPY_FAIL:brief_determinism_mismatch.json" in block
-    assert "exit 1" in block
+    # 2026-07-20 (delta 12): the COPY of a GT-quality diagnostic sidecar is MEASUREMENT, not a
+    # task gate — a copy failure RECORDS the marker and CONTINUES (matches the record-only sibling
+    # collection failures: gt_runtime_ledger / attestation / brief_result). It must NOT `exit 1`
+    # and discard a task that ran. (The determinism diagnostic stays fail-closed at GENERATION in
+    # gt_run_proof; only this downstream artifact-COPY is decoupled.)
+    assert "exit 1" not in block
 
 
 def test_upload_includes_the_collected_diagnostic_directory_after_collection() -> None:
