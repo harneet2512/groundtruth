@@ -553,8 +553,8 @@ def test_holdout_ledger_hashes_exact_would_ship_suffix(monkeypatch):
 def test_global_arbiter_without_installed_handshake_is_zero_dose(monkeypatch, profile):
     _wire_fake_candidates(monkeypatch)
     monkeypatch.setenv("GT_RL_PROFILE", profile)
-    monkeypatch.setattr(g, "_batch_commit_installed", False)
-    monkeypatch.setattr(g, "_batch_install_failed", False)
+    monkeypatch.setitem(g._GT_PROCESS_STATE, "batch_commit_installed", False)
+    monkeypatch.setitem(g._GT_PROCESS_STATE, "batch_install_failed", False)
     out = _Env().execute({"command": "one"})
     assert out["output"] == "base:one"
 
@@ -796,7 +796,7 @@ def test_submit_refusal_formatter_failure_never_commits_delivery(monkeypatch):
 def test_second_precommitted_refusal_fails_open_instead_of_deadlocking(monkeypatch):
     _wire_fake_candidates(monkeypatch)
     monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
-    monkeypatch.setattr(g, "_batch_install_failed", False)
+    monkeypatch.setitem(g._GT_PROCESS_STATE, "batch_install_failed", False)
     monkeypatch.setattr(g, "_gt_submit_bounce_count", 0, raising=False)
 
     class Submitted(Exception):

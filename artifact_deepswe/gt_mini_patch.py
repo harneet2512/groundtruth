@@ -35,6 +35,7 @@ through it.
 """
 from __future__ import annotations
 
+import builtins as _builtins
 import contextvars
 from dataclasses import dataclass, replace
 import hashlib
@@ -53,9 +54,29 @@ _LEDGER_WRITE_FAILURES = 0
 # The exact candidate-in-policy-observation identity currently being committed. A
 # ContextVar keeps independent agent loops isolated and lets every delivery/control/
 # receipt writer consume the same authority without threading parallel ad-hoc fields.
-_delivery_observation_context: contextvars.ContextVar[Any] = contextvars.ContextVar(
-    "gt_delivery_observation_binding", default=None,
-)
+# The seam can be imported under more than one module name by bootstrap/oracle
+# loaders.  Python module globals would then split the formatter handshake from
+# the environment-execute wrapper even though both live in one interpreter.
+# Keep all observation-transaction authority on ``builtins``: one canonical
+# process object regardless of import alias, without adding a package dependency
+# to the injected single-file seam.
+_GT_PROCESS_STATE_KEY = "_groundtruth_observation_process_state_v1"
+if not hasattr(_builtins, _GT_PROCESS_STATE_KEY):
+    setattr(_builtins, _GT_PROCESS_STATE_KEY, {
+        "delivery_context": contextvars.ContextVar(
+            "gt_delivery_observation_binding", default=None),
+        "batch_context": contextvars.ContextVar(
+            "gt_observation_batch", default=None),
+        "batch_owners": {},
+        "batch_lock": threading.RLock(),
+        "batch_serial": 0,
+        "batch_install_failed": False,
+        "batch_commit_installed": False,
+    })
+_GT_PROCESS_STATE: dict[str, Any] = getattr(
+    _builtins, _GT_PROCESS_STATE_KEY)
+_delivery_observation_context: contextvars.ContextVar[Any] = (
+    _GT_PROCESS_STATE["delivery_context"])
 
 
 def _current_observation_binding() -> Any:
@@ -14693,8 +14714,8 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
         # thunk into the shared pool instead of delivering — the ONE ranked competition
         # decides. pool None (flag off) -> deliver inline (byte-identical).
         _commit_gateway()
-    except Exception:  # noqa: BLE001 — isolated; must never break the agent loop
-        _crash_emit("gateway.augment")
+    except Exception as exc:  # noqa: BLE001 — isolated; must never break the agent loop
+        _crash_emit("gateway.augment", exc)
 
 
 def _rearm_latches(lost, *, kkind, kf, krel) -> None:
@@ -14802,16 +14823,12 @@ def _global_arbiter_on() -> bool:
 
 
 # Context-local ownership keeps independent agent loops from sharing a pool.
-# The process mapping is only an overlap guard: if two contexts overlap, BOTH
-# are marked invalid and therefore zero-dose at their formatter boundaries.
-_batch_context: contextvars.ContextVar[Any] = contextvars.ContextVar(
-    "gt_observation_batch", default=None,
-)
-_batch_owners: dict[int, dict] = {}
-_batch_lock = threading.RLock()
-_observation_batch_serial = 0
-_batch_install_failed = False
-_batch_commit_installed = False
+# These aliases point into the process-canonical object created at module start;
+# duplicate module imports therefore share the same ContextVar, owner map, and
+# lock instead of silently creating two incompatible formatter transactions.
+_batch_context: contextvars.ContextVar[Any] = _GT_PROCESS_STATE["batch_context"]
+_batch_owners: dict[int, dict] = _GT_PROCESS_STATE["batch_owners"]
+_batch_lock = _GT_PROCESS_STATE["batch_lock"]
 
 
 def _batch_diag(stage: str, *, state=None, outcome: str = "observed",
@@ -14830,6 +14847,10 @@ def _batch_diag(stage: str, *, state=None, outcome: str = "observed",
         "layer": "batch_diag", "event_type": stage, "file_path": "",
         "outcome": outcome, "reason": reason, "chars_delivered": 0,
         "iteration": max(0, int(globals().get("_action_count", 0) or 0)),
+        "process_id": os.getpid(),
+        "module_name": __name__,
+        "module_identity": id(sys.modules.get(__name__)),
+        "process_state_identity": id(_GT_PROCESS_STATE),
     }
     if isinstance(state, dict):
         row.update({
@@ -14889,7 +14910,6 @@ def _policy_observation_id(start_iteration: int, parent_sha256: str,
 
 def _begin_observation_batch(
         owner, model, actions, *, parent_message=None) -> dict[str, Any]:
-    global _observation_batch_serial
     identity, keys = _batch_identity(actions)
     parent_content = (
         parent_message.get("content", "")
@@ -14902,9 +14922,9 @@ def _begin_observation_batch(
     action_sha256 = _batch_action_sha256(keys)
     start_iteration = max(0, int(globals().get("_action_count", 0) or 0))
     with _batch_lock:
-        _observation_batch_serial += 1
+        _GT_PROCESS_STATE["batch_serial"] += 1
         state: dict[str, Any] = {
-            "serial": _observation_batch_serial,
+            "serial": _GT_PROCESS_STATE["batch_serial"],
             "owner": id(owner), "model": id(model),
             "identity": identity, "action_keys": keys,
             "batch_start_iteration": start_iteration,
@@ -14928,7 +14948,8 @@ def _begin_observation_batch(
     _batch_diag(
         "begin", state=state,
         reason="policy_observation_started",
-        extra={"batch_commit_installed": bool(_batch_commit_installed)},
+        extra={"batch_commit_installed": bool(
+            _GT_PROCESS_STATE["batch_commit_installed"])},
     )
     return state
 
@@ -16724,22 +16745,21 @@ def _discard_tool_observation_batch(reason: str, state=None) -> None:
 
 def install_observation_batch_commit(agent) -> bool:
     """Atomically install the execute handshake and formatter commit boundary."""
-    global _batch_install_failed, _batch_commit_installed
     if getattr(agent, "_gt_batch_commit_installed", False):
         # The .pth-loaded Pier path installs at DefaultAgent construction time.  The
         # headless runner also calls this public installer explicitly.  A second call
         # is confirmation of the same attachment, not an installation failure that
         # disables batching process-wide.
-        _batch_install_failed = False
-        _batch_commit_installed = True
+        _GT_PROCESS_STATE["batch_install_failed"] = False
+        _GT_PROCESS_STATE["batch_commit_installed"] = True
         return True
     model = getattr(agent, "model", None)
     original = getattr(model, "format_observation_messages", None)
     original_execute = getattr(agent, "execute_actions", None)
     if model is None or not callable(original) or not callable(original_execute):
         _discard_tool_observation_batch("batch_install_unavailable")
-        _batch_install_failed = True
-        _batch_commit_installed = False
+        _GT_PROCESS_STATE["batch_install_failed"] = True
+        _GT_PROCESS_STATE["batch_commit_installed"] = False
         return False
 
 
@@ -17060,8 +17080,8 @@ def install_observation_batch_commit(agent) -> bool:
         model.format_observation_messages = _format_with_gt_batch
         agent.execute_actions = _execute_with_gt_batch
         agent._gt_batch_commit_installed = True
-        _batch_install_failed = False
-        _batch_commit_installed = True
+        _GT_PROCESS_STATE["batch_install_failed"] = False
+        _GT_PROCESS_STATE["batch_commit_installed"] = True
         return True
     except Exception:  # noqa: BLE001
         try:
@@ -17069,8 +17089,8 @@ def install_observation_batch_commit(agent) -> bool:
         except Exception:  # noqa: BLE001
             pass
         _discard_tool_observation_batch("batch_install_failed")
-        _batch_install_failed = True
-        _batch_commit_installed = False
+        _GT_PROCESS_STATE["batch_install_failed"] = True
+        _GT_PROCESS_STATE["batch_commit_installed"] = False
         return False
 
 
@@ -19058,7 +19078,7 @@ def _augment_output(action, out) -> None:
             # per-turn pool instead of delivering inline; a single flush arbitrates <=1
             # global dose. None (flag off) -> every plane delivers inline (byte-identical).
             _ga_on = _global_arbiter_on()
-            if _ga_on and not _batch_commit_installed:
+            if _ga_on and not _GT_PROCESS_STATE["batch_commit_installed"]:
                 # Profile-2 promises one sealed dose at the policy-observation boundary.
                 # Inline delivery here occurs before formatter truncation/serialization,
                 # cannot be byte-joined reliably, and allows one dose per parallel tool
@@ -19081,7 +19101,8 @@ def _augment_output(action, out) -> None:
                         else "global_arbiter_off"),
                 extra={
                     "global_arbiter_on": bool(_ga_on),
-                    "batch_commit_installed": bool(_batch_commit_installed),
+                    "batch_commit_installed": bool(
+                        _GT_PROCESS_STATE["batch_commit_installed"]),
                 },
             )
             if _batch_defer and not _register_batch_execute(
@@ -20434,7 +20455,7 @@ def _wrap_execute(orig):
                     _state = _batch_context.get()
                     if _state is None or not _register_precommitted_batch_dose(
                             _state, action, _blocked):
-                        globals()["_batch_install_failed"] = True
+                        _GT_PROCESS_STATE["batch_install_failed"] = True
                         _blocked.pop("_gt_pending_delivery", None)
                         raise  # no formatter ownership: fail open with original Submitted
                     return _blocked            # BLOCK: swallow Submitted, agent continues
