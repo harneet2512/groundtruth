@@ -936,6 +936,10 @@ jobs:
           GT_GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           GT_GITHUB_SHA: ${{ github.sha }}
           GT_PROOF_HARNESS: deepswe
+          # Brief generation happens inside substrate_proof.sh, before the later
+          # agent-only gt_ae_block fan-out. Bind the requested profile explicitly
+          # at this pretask boundary; substrate_proof uses the canonical resolver.
+          GT_RL_PROFILE: ${{ github.event.inputs.rl_profile || '' }}
         run: |
           # [WARM-CACHE TIME-SAVER] Pull the task image in the BACKGROUND, OVERLAPPING the substrate
           # proof (~15 min indexing — needs no task image). The pull (~10 min) hides fully under the
@@ -960,8 +964,162 @@ jobs:
         # adds a background warm-pull of the task image so its ~10-min extract overlaps the ~15-min
         # proof instead of blocking the trial serially. All ${{ }} values are passed as env vars above.
 
-      - name: Run GT trial
+      - name: Publish and validate paid-run identity (pre-agent, fail-closed)
+        id: gt_run_identity
         if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          GT_ID_TASK: ${{ matrix.task }}
+          GT_ID_WORKFLOW_SHA: ${{ github.sha }}
+          GT_ID_RUN_ID: ${{ github.run_id }}
+          GT_ID_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GT_ID_BASELINE: ${{ inputs.gt_arm == 'baseline' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/gt_out
+          rm -f /tmp/gt_out/gt_run_identity.json
+          GT_ID_CHECKOUT_SHA=$(git rev-parse HEAD)
+          export GT_ID_CHECKOUT_SHA
+          [ "$GT_ID_CHECKOUT_SHA" = "$GT_ID_WORKFLOW_SHA" ] || {
+            echo "::error::RUN_IDENTITY_CHECKOUT_MISMATCH workflow=$GT_ID_WORKFLOW_SHA checkout=$GT_ID_CHECKOUT_SHA"
+            exit 1
+          }
+          [[ "$GT_ID_TASK" =~ ^[A-Za-z0-9._-]+$ ]] || {
+            echo "::error::RUN_IDENTITY_TASK_INVALID:$GT_ID_TASK"; exit 1;
+          }
+          [ -d "deepswe-bench/tasks/$GT_ID_TASK" ] || {
+            echo "::error::RUN_IDENTITY_TASK_ABSENT:$GT_ID_TASK"; exit 1;
+          }
+          [[ "$GT_ID_RUN_ID" =~ ^[0-9]+$ ]] || {
+            echo "::error::RUN_IDENTITY_RUN_ID_INVALID"; exit 1;
+          }
+          [[ "$GT_ID_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || {
+            echo "::error::RUN_IDENTITY_RUN_ATTEMPT_INVALID"; exit 1;
+          }
+
+          GT_ID_EXPECTED_DIGEST="${GT_SUBSTRATE_DIGEST:-}"
+          GT_ID_ACTUAL_DIGEST=""
+          GT_ID_SUBSTRATE_IMAGE_ID=""
+          GT_ID_PROOF_STATE="baseline"
+          GT_ID_PROOF_CODE="BASELINE"
+          if [ "$GT_ID_BASELINE" != "1" ]; then
+            [[ "$GT_ID_EXPECTED_DIGEST" =~ ^.+@sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::RUN_IDENTITY_DIGEST_INVALID"; exit 1;
+            }
+            docker image inspect "$GT_ID_EXPECTED_DIGEST" >/dev/null 2>&1 || {
+              echo "::error::RUN_IDENTITY_PINNED_IMAGE_ABSENT"; exit 1;
+            }
+            GT_ID_ACTUAL_DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$GT_ID_EXPECTED_DIGEST" 2>/dev/null | grep -Fx "$GT_ID_EXPECTED_DIGEST" | head -1 || true)
+            GT_ID_SUBSTRATE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$GT_ID_EXPECTED_DIGEST")
+            [ "$GT_ID_ACTUAL_DIGEST" = "$GT_ID_EXPECTED_DIGEST" ] || {
+              echo "::error::RUN_IDENTITY_DIGEST_MISMATCH"; exit 1;
+            }
+            [[ "$GT_ID_SUBSTRATE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "::error::RUN_IDENTITY_IMAGE_ID_INVALID"; exit 1;
+            }
+            read -r GT_ID_PROOF_STATE GT_ID_PROOF_CODE < <(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          # substrate_proof.sh is the policy owner.  Its status distinguishes
+          # result-invalid failures from quality-only PROOF_DEGRADED trials;
+          # proof_verdict.json is the raw inner diagnostic and may remain fail.
+          path = Path('/tmp/gt/proof_status.json')
+          try:
+              doc = json.loads(path.read_text(encoding='utf-8'))
+              print((doc.get('state') or 'missing'), (doc.get('code') or 'missing'))
+          except Exception:
+              print('invalid invalid')
+          PY
+            )
+            [ "$GT_ID_PROOF_STATE" = "ok" ] || {
+              echo "::error::RUN_IDENTITY_PROOF_INVALID:$GT_ID_PROOF_STATE"; exit 1;
+            }
+          fi
+          export GT_ID_EXPECTED_DIGEST GT_ID_ACTUAL_DIGEST GT_ID_SUBSTRATE_IMAGE_ID GT_ID_PROOF_STATE GT_ID_PROOF_CODE
+
+          python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          task_dir = Path('deepswe-bench/tasks') / os.environ['GT_ID_TASK']
+          task_hash = hashlib.sha256()
+          for path in sorted(p for p in task_dir.rglob('*') if p.is_file()):
+              task_hash.update(path.relative_to(task_dir).as_posix().encode('utf-8'))
+              task_hash.update(b'\0')
+              task_hash.update(path.read_bytes())
+              task_hash.update(b'\0')
+          doc = {
+              'schema': 'gt.run_identity.v1',
+              'task': os.environ['GT_ID_TASK'],
+              'task_definition_sha256': task_hash.hexdigest(),
+              'substrate_digest_expected': os.environ.get('GT_ID_EXPECTED_DIGEST', ''),
+              'substrate_digest_actual': os.environ.get('GT_ID_ACTUAL_DIGEST', ''),
+              'substrate_image_id': os.environ.get('GT_ID_SUBSTRATE_IMAGE_ID', ''),
+              'gt_ref_requested': os.environ['GT_ID_WORKFLOW_SHA'],
+              'gt_ref_prepared_sha': os.environ['GT_ID_WORKFLOW_SHA'],
+              'gt_ref_resolved': os.environ['GT_ID_CHECKOUT_SHA'],
+              'gt_ref_resolved_source': 'git_rev_parse_head',
+              'workflow_dispatch_sha': os.environ['GT_ID_WORKFLOW_SHA'],
+              'workflow_run_id': os.environ['GT_ID_RUN_ID'],
+              'workflow_run_attempt': os.environ['GT_ID_RUN_ATTEMPT'],
+              'proof_status_state': os.environ['GT_ID_PROOF_STATE'],
+              'proof_status_code': os.environ['GT_ID_PROOF_CODE'],
+              'baseline': os.environ['GT_ID_BASELINE'] == '1',
+          }
+          target = Path('/tmp/gt_out/gt_run_identity.json')
+          temporary = target.with_name(target.name + f'.tmp.{os.getpid()}')
+          with temporary.open('w', encoding='utf-8') as stream:
+              json.dump(doc, stream, indent=2)
+              stream.flush()
+              os.fsync(stream.fileno())
+          os.replace(temporary, target)
+          PY
+
+          python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path('/tmp/gt_out/gt_run_identity.json')
+          doc = json.loads(path.read_text(encoding='utf-8'))
+          task_dir = Path('deepswe-bench/tasks') / os.environ['GT_ID_TASK']
+          task_hash = hashlib.sha256()
+          for item in sorted(p for p in task_dir.rglob('*') if p.is_file()):
+              task_hash.update(item.relative_to(task_dir).as_posix().encode('utf-8'))
+              task_hash.update(b'\0')
+              task_hash.update(item.read_bytes())
+              task_hash.update(b'\0')
+          baseline = os.environ['GT_ID_BASELINE'] == '1'
+          checks = {
+              'schema': doc.get('schema') == 'gt.run_identity.v1',
+              'task': doc.get('task') == os.environ['GT_ID_TASK'],
+              'task_definition_sha256': doc.get('task_definition_sha256') == task_hash.hexdigest(),
+              'checkout': doc.get('gt_ref_resolved') == os.environ['GT_ID_CHECKOUT_SHA'],
+              'workflow_sha': doc.get('workflow_dispatch_sha') == os.environ['GT_ID_WORKFLOW_SHA'],
+              'requested_sha': doc.get('gt_ref_requested') == os.environ['GT_ID_WORKFLOW_SHA'],
+              'run_id': doc.get('workflow_run_id') == os.environ['GT_ID_RUN_ID'],
+              'run_attempt': doc.get('workflow_run_attempt') == os.environ['GT_ID_RUN_ATTEMPT'],
+              'baseline': doc.get('baseline') is baseline,
+          }
+          if not baseline:
+              checks.update({
+                  'digest': doc.get('substrate_digest_expected') == os.environ['GT_ID_EXPECTED_DIGEST'] == doc.get('substrate_digest_actual'),
+                  'image_id': bool(re.fullmatch(r'sha256:[0-9a-f]{64}', str(doc.get('substrate_image_id') or ''))),
+                  'proof_status': doc.get('proof_status_state') == 'ok',
+              })
+          failed = sorted(name for name, ok in checks.items() if not ok)
+          if failed:
+              raise SystemExit('RUN_IDENTITY_INVALID:' + ','.join(failed))
+          print('RUN_IDENTITY_VALID:' + json.dumps(doc, sort_keys=True))
+          PY
+          echo "validated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run GT trial
+        if: ${{ !cancelled() && steps.gt_run_identity.outputs.validated == 'true' }}
         continue-on-error: true
         # Cert-env handoff (§D): GT_CERT_DIR / GT_HOST_GRAPH_DB / GT_HOST_SRC_ROOT + the cert
         # paths were written to $GITHUB_ENV by the substrate-proof step and are inherited here;
@@ -1431,6 +1589,9 @@ jobs:
           cp /tmp/gt_out/gt_profile_activation.json trial_results/gt_artifacts/gt_profile_activation.json 2>/dev/null || true
           cp /tmp/gt_out/gt_profile_receipt.json trial_results/gt_artifacts/gt_profile_receipt.json 2>/dev/null || true
           cp /tmp/gt_out/gt_batch_activation.json trial_results/gt_artifacts/gt_batch_activation.json 2>/dev/null || true
+          cp /tmp/gt_out/gt_run_identity.json trial_results/gt_artifacts/gt_run_identity.json 2>/dev/null || true
+          cp /tmp/gt_out/gt_runtime_ledger_attestation.json trial_results/gt_artifacts/gt_runtime_ledger_attestation.json 2>/dev/null || true
+          cp /tmp/gt_out/gt_agent_exit.json trial_results/gt_artifacts/gt_agent_exit.json 2>/dev/null || true
           # BUG#2 FIX: harvest the FULL deep-telemetry trio the gt_ae_block.sh single-source
           # now points at /gt_out (runtime ledger + per-hook fire counts). Without this they
           # were lost with the ephemeral container (gt_mini_patch.py:3515,3569 default /tmp/*).
@@ -1449,18 +1610,42 @@ jobs:
           else
             echo "deep-telemetry: recovered ${_gt_telemetry_recovered}/3 sink(s) from /tmp/gt_out"
           fi
+          # Assemble one task-scoped measurement bundle before invoking any reader.
+          # DeepSWE's canonical trajectory and submitted diff live under jobs/**,
+          # while hook telemetry lives under /tmp/gt_out.  Reading those locations
+          # independently caused false no-patch records and made feature/receipt
+          # aggregation impossible.  The matrix job owns exactly one task; sorted
+          # selection is deterministic and every copied byte remains in the upload.
+          TASK_METRIC_ROOT="/tmp/gt_feature_run/${{ matrix.task }}"
+          mkdir -p "$TASK_METRIC_ROOT/gt_artifacts"
+          _task_traj=$(find trial_results/jobs -type f -name 'mini-swe-agent.trajectory.json' -print 2>/dev/null | sort | head -1 || true)
+          _task_patch=$(find trial_results/jobs -type f \( -name 'model.patch' -o -name 'agent_patch.diff' -o -name 'patch.diff' \) -size +0c -print 2>/dev/null | sort | head -1 || true)
+          [ -n "$_task_traj" ] && cp "$_task_traj" "$TASK_METRIC_ROOT/mini-swe-agent.trajectory.json"
+          [ -n "$_task_patch" ] && cp "$_task_patch" "$TASK_METRIC_ROOT/model.patch"
+          cp "trial_results/gt_runtime_ledger_${{ matrix.task }}.jsonl" "$TASK_METRIC_ROOT/" 2>/dev/null || true
+          cp "trial_results/gt_oracle_events_${{ matrix.task }}.jsonl" "$TASK_METRIC_ROOT/" 2>/dev/null || true
+          cp trial_results/gt_artifacts/* "$TASK_METRIC_ROOT/gt_artifacts/" 2>/dev/null || true
+          cp trial_results/gt_artifacts/brief_result.json "$TASK_METRIC_ROOT/brief_result.json" 2>/dev/null || true
           # Deep 8-dp metrics (constitution mandate: token/cost efficiency + per-layer)
           cp /tmp/gt/gt_run_summary*.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
           cp /tmp/gt/gt_run_summary*.json trial_results/ 2>/dev/null || true
-          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
+          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt_feature_run --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.json trial_results/ 2>/dev/null || true
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.md   trial_results/ 2>/dev/null || true   # human-readable: steps/tokens/money/GT-delivery
+          cp "/tmp/gt_feature_run/gt_consumption_ledger_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
           # Explicit artifact files for performance and behavioral-impact metrics.
           # gt_deep_metrics.py already imports these internally, but producing explicit
           # per-task artifact files makes them independently verifiable without parsing
           # the deep metrics blob.
-          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench python3 scripts/swebench/gt_performance_metrics.py "$(find trial_results -name '*.trajectory.json' | head -1)" /tmp/gt --out trial_results/gt_performance_metrics_${{ matrix.task }}.json 2>&1 | tail -2 || echo PERF_METRICS_WARN
-          PYTHONPATH=${{ github.workspace }}/scripts/swebench python3 scripts/swebench/gt_behavioral_impact.py "$(find trial_results -name '*.trajectory.json' | head -1)" --out trial_results/gt_behavioral_impact_${{ matrix.task }}.json 2>&1 | tail -2 || echo IMPACT_METRICS_WARN
+          PYTHONPATH=${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench python3 scripts/swebench/gt_performance_metrics.py "$TASK_METRIC_ROOT/mini-swe-agent.trajectory.json" /tmp/gt --out trial_results/gt_performance_metrics_${{ matrix.task }}.json 2>&1 | tail -2 || echo PERF_METRICS_WARN
+          PYTHONPATH=${{ github.workspace }}/scripts/swebench python3 scripts/swebench/gt_behavioral_impact.py "$TASK_METRIC_ROOT/mini-swe-agent.trajectory.json" --out trial_results/gt_behavioral_impact_${{ matrix.task }}.json 2>&1 | tail -2 || echo IMPACT_METRICS_WARN
+          # Per-feature receipt/timing records and their fail-closed run aggregates.
+          PYTHONPATH=${{ github.workspace }}:${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics python3 scripts/swebench/gt_feature_metrics.py /tmp/gt_feature_run --profile 2 --run-id "${{ matrix.task }}" --shared-artifacts-dir /tmp/gt_out 2>&1 | tail -3 || echo FEATURE_METRICS_WARN
+          cp "$TASK_METRIC_ROOT/gt_feature_metrics_${{ matrix.task }}.json" trial_results/ 2>/dev/null || true
+          cp "$TASK_METRIC_ROOT/gt_feature_metrics_${{ matrix.task }}.md" trial_results/ 2>/dev/null || true
+          cp "/tmp/gt_feature_run/gt_run_metrics_${{ matrix.task }}.json" trial_results/gt_artifacts/ 2>/dev/null || true
+          cp "/tmp/gt_feature_run/gt_feature_effects_${{ matrix.task }}.json" trial_results/gt_artifacts/ 2>/dev/null || true
+          cp "/tmp/gt_feature_run/gt_metric_integrity_${{ matrix.task }}.json" trial_results/gt_artifacts/ 2>/dev/null || true
           # Run provenance on the DeepSWE path: the REAL provenance manifest is
           # run_manifest.json (emitted by gt-run-proof inside the substrate; copied into
           # trial_results/gt_artifacts/ above — gt_git_commit / substrate_digest /
@@ -1476,6 +1661,26 @@ jobs:
           GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
             GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
             python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
+          # Measurement is mandatory.  Fail this collection step closed if any
+          # task-local receipt or aggregate is missing; Upload uses ``if: always()``
+          # and therefore still preserves every partial artifact for diagnosis.
+          _metrics_missing=""
+          for _required in \
+            "trial_results/gt_deep_metrics_${{ matrix.task }}.json" \
+            "trial_results/gt_performance_metrics_${{ matrix.task }}.json" \
+            "trial_results/gt_behavioral_impact_${{ matrix.task }}.json" \
+            "trial_results/gt_consumption_ledger_${{ matrix.task }}.json" \
+            "trial_results/gt_feature_metrics_${{ matrix.task }}.json" \
+            "trial_results/gt_artifacts/gt_run_metrics_${{ matrix.task }}.json" \
+            "trial_results/gt_artifacts/gt_feature_effects_${{ matrix.task }}.json" \
+            "trial_results/gt_artifacts/gt_metric_integrity_${{ matrix.task }}.json" \
+            "trial_results/gt_artifacts/gt_run_identity.json"; do
+            [ -s "$_required" ] || _metrics_missing="${_metrics_missing} ${_required}"
+          done
+          if [ -n "$_metrics_missing" ]; then
+            echo "::error::METRICS_INCOMPLETE:${_metrics_missing}"
+            exit 1
+          fi
           find trial_results -type f 2>/dev/null | head -40 || true
 
       - name: Upload results

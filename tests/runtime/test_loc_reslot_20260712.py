@@ -268,7 +268,7 @@ def test_trace_frame_localization_alias_unaffected_by_c1():
     and is reactive — C1 (localization base -> search_result) must NOT disturb it."""
     assert fr.required_event("trace_frame") == "failure_obs"
     assert fr.is_reactive("trace_frame") is True
-    assert fr.required_renderer("trace_frame") == "ranked-list"
+    assert fr.required_renderer("trace_frame") == "trace-native"
 
 
 # =========================================================================== #

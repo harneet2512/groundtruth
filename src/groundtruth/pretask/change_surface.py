@@ -101,6 +101,7 @@ _MIN_SIGNALS = 2   # every emitted fact needs >=2 independent evidence signals
 _MIN_ENTITY_LEN = 3
 _MAX_WALK_FILES = 20000    # safety cap on the tree walk
 _MAX_REGISTRY_SCAN = 800   # bound registry content scanning
+_MAX_REGISTRY_SCAN_CHARS = 16 * 1024 * 1024  # aggregate decoded-content budget
 _MAX_FILE_BYTES = 262144   # 256 KiB read cap per file
 _MAX_EVIDENCE_LINES = 6
 
@@ -142,11 +143,33 @@ _SKIP_DIRS: frozenset[str] = frozenset({
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SUBSEP_RE = re.compile(r"[_\-.]+")
+_EXPLICIT_COMPOUND_RE = re.compile(
+    r"`([A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+)`"
+)
+_DECLARATION_WORDS: frozenset[str] = frozenset({
+    "named", "called", "kind", "section", "feature", "rule", "api",
+})
+_CALLABLE_FAMILY_WORDS: frozenset[str] = frozenset({
+    "method", "methods", "function", "functions", "func", "api", "apis",
+})
+_NEGATION_WORDS: frozenset[str] = frozenset({
+    "not", "never", "avoid", "without", "cannot", "neither", "nor",
+})
+
+# Analogy/comparison words introduce EXISTING exemplars; they are grammatical
+# relations, never the requested family member.  They also form a hard governor
+# boundary so an earlier "add/support" verb cannot incorrectly govern a sibling
+# named after "like"/"analogous to".
+_ANALOGY_WORDS: frozenset[str] = frozenset({
+    "like", "unlike", "analogous", "akin", "similar", "similarly", "such",
+    "mirroring", "resembling",
+})
 
 # Tokens that are never admissible new-capability entities (English filler,
 # language keywords, feature verbs). Built once at import.
 _ENTITY_BLOCKLIST: frozenset[str] = (
     _NL_FUNCTION_WORDS | _STOPWORDS | _LANG_KEYWORD_TOKENS | _FEATURE_VERBS
+    | _ANALOGY_WORDS
 )
 
 # English modifiers of QUANTITY / KIND / QUALITY that describe HOW a member
@@ -364,14 +387,23 @@ def _graph_facts(graph_db: str | None) -> tuple[set[str], set[str], set[str]]:
 # sibling-group mining
 # --------------------------------------------------------------------------- #
 def _build_slots(files: list[str]) -> list[_Slot]:
-    """Bucket files that agree on every token position except one -> slots."""
+    """Bucket files that agree after replacing one *member token* -> slots.
+
+    A member may occupy more than one path position.  ``methods/parse/parse.ts``
+    and ``methods/pipe/pipe.ts`` are one convention just as surely as flat
+    ``rule_action.go`` and ``rule_if.go`` are.  Blank every occurrence of the
+    candidate token together; blanking only one position makes the former
+    convention invisible and sends new members to unrelated flat directories.
+    """
     buckets: dict[tuple[str, int, tuple[str | None, ...]], dict[str, str]] = {}
     for rel in files:
         tokens, ext = _tokenize(rel)
         if not tokens:
             continue
-        for i, tok in enumerate(tokens):
-            blanked = tuple(tokens[:i]) + (None,) + tuple(tokens[i + 1:])
+        for tok in dict.fromkeys(tokens):
+            positions = [i for i, value in enumerate(tokens) if value == tok]
+            i = positions[0]
+            blanked = tuple(None if value == tok else value for value in tokens)
             key = (ext, i, blanked)
             member_map = buckets.setdefault(key, {})
             # deterministic: first path wins for a given (slot, member) pair
@@ -543,31 +575,60 @@ def _detect_registry(group: _Group, files: list[str], repo_root: str) -> None:
     """Populate group.registry_file / registry_refs: the file whose CODE lines
     cross-reference the MOST distinct group members (>=2). Test-shaped files
     (incl. ``conftest``) are excluded; docstring/comment/prose mentions never
-    count (F1). Deterministic ranking: most distinct members, then most
-    code-shaped reference lines (density), then lexicographic path — NEVER
-    path length (the tie-break a shorter decoy path could win)."""
+    count (F1). Deterministic ranking: most distinct members, then the FEWEST
+    duplicate reference lines, then lexicographic path. A registry normally
+    names each member once; rewarding repetition lets unrelated corpora or
+    generated data outrank the actual integration point."""
     members = sorted(group.members)
     if len(members) < _MIN_SIBLINGS:
         return
     patterns = {m: _ref_pattern(m) for m in members}
+    sibling_files = {
+        _posix(path) for slot in group.slots for path in slot.members.values()
+    }
     best: tuple[int, int, str] | None = None
     best_refs: dict[str, list[tuple[int, str]]] = {}
     best_file: str | None = None
     scanned = 0
+    scanned_chars = 0
     for rel in files:
         if scanned >= _MAX_REGISTRY_SCAN:
             break
         toks, _ext = _tokenize(rel)
         if set(toks) & _TEST_TOKENS or _is_test_path(rel):
             continue
+        if _posix(rel) in sibling_files:
+            continue  # an implementation sibling is not its own registry
         text = _read_text(repo_root, rel)
         if not text:
             continue
+        # The per-file cap alone permits 800 * 256 KiB (>200 MiB) of content
+        # work on a synchronous observation hook.  Bound the aggregate too.
+        # Reaching the budget is a correct-or-quiet abstention boundary: facts
+        # derived before it remain exact, and unexamined files mint nothing.
+        if scanned_chars + len(text) > _MAX_REGISTRY_SCAN_CHARS:
+            break
+        scanned_chars += len(text)
         scanned += 1
+        # A registry must reference at least two distinct family members.  Use
+        # C-level literal searches to derive a per-file candidate set before
+        # splitting/filtering lines or invoking any exact regex.  This retains
+        # `_ref_pattern` as the authority (substring hits can only add cheap
+        # work, never evidence) and prevents large families from multiplying
+        # Python regex work across every unrelated code line.
+        folded_text = text.lower()
+        file_candidates = [m for m in members if m in folded_text]
+        if len(file_candidates) < _MIN_SIBLINGS:
+            continue
         refs: dict[str, list[tuple[int, str]]] = {}
         for lineno, line in _code_lines(text):
-            for m in members:
-                if patterns[m].search(line):
+            folded_line = line.lower()
+            for m in file_candidates:
+                if m not in folded_line:
+                    continue
+                if patterns[m].search(line) or any(
+                    ident.lower() == m.lower() for ident in _IDENT_RE.findall(line)
+                ):
                     refs.setdefault(m, []).append((lineno, line))
         distinct = len(refs)
         if distinct < _MIN_SIBLINGS:
@@ -575,7 +636,8 @@ def _detect_registry(group: _Group, files: list[str], repo_root: str) -> None:
         n_ref_lines = sum(len(v) for v in refs.values())
         if (
             best is None
-            or (distinct, n_ref_lines) > (best[0], best[1])
+            or distinct > best[0]
+            or (distinct == best[0] and n_ref_lines < best[1])
             or ((distinct, n_ref_lines) == (best[0], best[1]) and rel < best[2])
         ):
             best = (distinct, n_ref_lines, rel)
@@ -606,6 +668,47 @@ def _issue_word_seq(issue_text: str) -> list[str]:
     return [m.group(0).lower() for m in _IDENT_RE.finditer(issue_text or "")]
 
 
+def _clause_negates_feature_addition(words: list[str]) -> bool:
+    """Whether a local issue clause explicitly forbids the proposed addition."""
+    if set(words) & _NEGATION_WORDS:
+        return True
+    # Apostrophes split under ``_IDENT_RE``: don't -> [don, t].
+    return any(
+        words[i] in {"don", "doesn", "shouldn", "mustn", "isn", "aren"}
+        and words[i + 1] == "t"
+        for i in range(len(words) - 1)
+    )
+
+
+def _declared_code_identifier(entity: str, issue_text: str) -> bool:
+    """Whether a code-spelled identifier is introduced as a feature identity.
+
+    Backticks also quote config values, enum literals, and field names.  Those
+    are not independent new-file entities.  A quoted identifier is admissible
+    only when nearby language declares/names it (or a feature-add verb governs
+    it).  Function-call syntax remains an explicit public API declaration.
+    """
+    for match in re.finditer(
+        rf"(?<![A-Za-z0-9_]){re.escape(entity)}\(",
+        issue_text or "",
+        re.IGNORECASE,
+    ):
+        prefix = (issue_text or "")[max(0, match.start() - 128):match.start()]
+        prefix = re.split(r"[.!?;\n]", prefix)[-1]
+        if not _clause_negates_feature_addition(_issue_word_seq(prefix)):
+            return True
+    for match in re.finditer(rf"`{re.escape(entity)}`", issue_text or "", re.IGNORECASE):
+        prefix = (issue_text or "")[max(0, match.start() - 96):match.start()]
+        # Do not let declaration evidence leak across sentence boundaries.
+        prefix = re.split(r"[.!?;\n]", prefix)[-1]
+        words = _issue_word_seq(prefix)[-10:]
+        if (not _clause_negates_feature_addition(words)
+                and (set(words[-4:]) & _DECLARATION_WORDS
+                     or set(words[-3:]) & _FEATURE_VERBS)):
+            return True
+    return False
+
+
 def _entity_candidates(issue_text: str, graph_db: str | None,
                        known_tokens: set[str]) -> list[str]:
     """Issue tokens admissible as a new-capability entity.
@@ -619,6 +722,15 @@ def _entity_candidates(issue_text: str, graph_db: str | None,
     words = _issue_word_seq(issue_text)
     cands: list[str] = []
     seen: set[str] = set()
+    # Preserve explicitly named compound identifiers as ONE candidate.  Splitting
+    # ``action-pinning`` into ``action`` + ``pinning`` loses the fact that it is
+    # a new variant of the existing ``action`` member and can fabricate a nearby
+    # adjective (for example ``lint``) as the destination instead.
+    for match in _EXPLICIT_COMPOUND_RE.finditer(issue_text or ""):
+        compound = match.group(1).lower()
+        if compound not in seen and _declared_code_identifier(compound, issue_text):
+            seen.add(compound)
+            cands.append(compound)
     for w in words:
         if len(w) < _MIN_ENTITY_LEN or w in _ENTITY_BLOCKLIST:
             continue
@@ -639,11 +751,21 @@ def _entity_candidates(issue_text: str, graph_db: str | None,
             pass
     known = known_tokens
     # deterministic order: unresolvable first (strong signal), then existing, lex
+    # Async companions conventionally live beside their sync base rather than
+    # defining another feature-family directory.  When both names are requested,
+    # let the base own destination inference; the companion remains downstream
+    # implementation detail.  An async-only request is retained.
+    cand_set = set(cands)
+    cands = [
+        w for w in cands
+        if not (w.endswith("async") and len(w) > 5 and w[:-5] in cand_set)
+    ]
     cands.sort(key=lambda w: (w in known, w))
     return cands
 
 
-def _entity_links_group(entity: str, word_seq: list[str], group: _Group) -> bool:
+def _entity_links_group(entity: str, word_seq: list[str], group: _Group,
+                        issue_text: str = "") -> bool:
     """The new entity must IMMEDIATELY PRECEDE its category noun — the universal
     adjective-noun construction that names a variant ("azure provider", "sqlite
     adapter", "yaml handler"). This is what separates the real new-capability
@@ -655,13 +777,124 @@ def _entity_links_group(entity: str, word_seq: list[str], group: _Group) -> bool
     not admitted. Correct-or-quiet: a real entity named far from its category
     noun is a tolerated miss, never a false emission.
     """
-    category = {_normalize(t) for t in group.fixed_tokens}
+    category = {
+        _normalize(t) for t in group.fixed_tokens
+        if t not in _ENTITY_BLOCKLIST and t not in _GENERIC_DESCRIPTORS
+    }
     for i, w in enumerate(word_seq):
         if w != entity:
             continue
-        if i + 1 < len(word_seq) and _normalize(word_seq[i + 1]) in category:
+        # A novel word next to a repo-path category is not sufficient: issue text
+        # contains audit/verification instructions such as "trace provider calls"
+        # that are not requests for a new provider.  Require the entity phrase to
+        # be governed by a feature-add verb (allowing an article between them).
+        governor_window = word_seq[max(0, i - 4):i]
+        governed = (
+            any(word in _FEATURE_VERBS for word in governor_window)
+            and not _clause_negates_feature_addition(governor_window)
+            and not (set(governor_window) & _ANALOGY_WORDS)
+        )
+        if (
+            governed
+            and i + 1 < len(word_seq)
+            and _normalize(word_seq[i + 1]) in category
+        ):
             return True
-    return False
+    # Public API names are often introduced as code (``foo(...)`` or a quoted
+    # compound identifier) while the family noun appears elsewhere in the same
+    # request ("available from the public methods surface").  That is stronger
+    # than arbitrary word co-occurrence: require both an explicit code spelling
+    # and an issue-mentioned category derived from this repo group.
+    explicit = _declared_code_identifier(entity, issue_text)
+    structural_category = {
+        _normalize(t) for t in group.fixed_tokens
+        if t not in _GENERIC_DESCRIPTORS
+    }
+    category_named = any(
+        _normalize(w) in structural_category for w in word_seq
+    )
+    return explicit and category_named
+
+
+def _slot_member_repetitions(slot: _Slot) -> int:
+    """How many structural positions the varying member owns in this slot."""
+    best = 0
+    for member, rel in slot.members.items():
+        tokens, _ext = _tokenize(rel)
+        best = max(best, sum(1 for token in tokens if token == member))
+    return best
+
+
+def _group_shape_strength(group: _Group) -> int:
+    """Prefer a coupled directory/file family over a flat lexical distractor."""
+    return max((_slot_member_repetitions(slot) for slot in group.slots), default=0)
+
+
+def _focus_group(group: _Group, entity: str, norm_issue_words: set[str],
+                 issue_text: str) -> _Group:
+    """Select one coherent path family from a transitive member component.
+
+    Connected-component grouping intentionally joins roles that share members,
+    but common names can bridge unrelated families (actions -> methods ->
+    schemas -> codemods).  Destination inference must be owned by one concrete
+    slot prefix, not by that transitive mega-component.  Rank slots using only
+    general evidence: explicit compound extension, callable API shape, issue
+    overlap, repeated member structure, then shortest convention prefix.
+    """
+    is_call = bool(re.search(
+        rf"(?<![A-Za-z0-9_]){re.escape(entity)}\(",
+        issue_text or "", re.IGNORECASE,
+    ))
+
+    def score(slot: _Slot) -> tuple[int, int, int, int, int, int, int]:
+        constants = {_normalize(t) for t in slot.constants}
+        parts = {_normalize(p) for p in _SUBSEP_RE.split(entity) if p}
+        members = {_normalize(m) for m in slot.members}
+        compound_extension = int(bool(parts & members) and len(parts) > 1)
+        callable_family = int(is_call and bool(constants & _CALLABLE_FAMILY_WORDS))
+        overlap = len(constants & norm_issue_words)
+        # Plain adjective+noun requests ("azure provider") must select a slot
+        # whose OWN convention names that category. Explicit API/compound names
+        # instead use their stronger code-shape evidence and shortest prefix.
+        category_ownership = overlap if not (compound_extension or is_call) else 0
+        return (
+            compound_extension,
+            callable_family,
+            int(slot.role == ROLE_IMPLEMENTATION),
+            category_ownership,
+            -len(slot.constants),
+            _slot_member_repetitions(slot),
+            overlap,
+        )
+
+    anchor = sorted(
+        group.slots,
+        key=lambda slot: (tuple(-v for v in score(slot)), slot.constants),
+    )[0]
+    anchor_constants = set(anchor.constants)
+    anchor_members = set(anchor.members)
+    # Role variants add suffix constants such as test/types; keep those, while
+    # excluding unrelated prefixes reached only through transitive member names.
+    focused_slots = [
+        slot for slot in group.slots
+        if anchor_constants <= set(slot.constants)
+        or (
+            len(anchor_members & set(slot.members)) >= _MIN_SIBLINGS
+            and len(anchor_members & set(slot.members)) >=
+            max(len(anchor_members), len(slot.members)) - 1
+        )
+    ]
+    if not focused_slots:
+        focused_slots = [anchor]
+    members = {member for slot in focused_slots for member in slot.members}
+    fixed = {token for slot in focused_slots for token in slot.constants}
+    return _Group(slots=focused_slots, members=members, fixed_tokens=fixed)
+
+
+def _compound_extends_group(entity: str, group: _Group) -> bool:
+    parts = {_normalize(p) for p in _SUBSEP_RE.split(entity) if p}
+    members = {_normalize(m) for m in group.members}
+    return bool(parts & members) and bool(_SUBSEP_RE.search(entity))
 
 
 def _entity_second_signal(entity: str, group: _Group,
@@ -701,7 +934,20 @@ def _issue_span(issue_text: str, entity: str) -> str:
 
 
 def _fill_pattern(template_rel: str, member_token: str, entity: str) -> str:
-    return _ref_pattern(member_token).sub(entity, _posix(template_rel), count=1)
+    template = _posix(template_rel)
+    parts = [p for p in _SUBSEP_RE.split(entity) if p]
+    replacement = entity
+    if len(parts) > 1:
+        # Adopt the repository path's separator convention.  The conceptual API
+        # name may be kebab-case while the source file family is snake_case.
+        if "_" in template:
+            replacement = "_".join(parts)
+        elif "-" in template:
+            replacement = "-".join(parts)
+    # Coupled member slots repeat the token in directory and filename; fill all
+    # occurrences so ``methods/parse/parse.ts`` becomes
+    # ``methods/recursive/recursive.ts`` atomically.
+    return _ref_pattern(member_token).sub(replacement, template)
 
 
 # --------------------------------------------------------------------------- #
@@ -736,23 +982,36 @@ def _pick_template(impl_slots: list[_Slot], registry_file: str | None,
     a conflicting convention -> caller abstains. Template = the richest member
     file in that dir (most graph symbols is unknown here, so: prefer a file that
     is a known impl symbol source, then lexicographic)."""
-    dir_members: dict[str, dict[str, str]] = {}
-    for s in impl_slots:
-        for m, f in s.members.items():
-            if registry_file and _posix(f) == _posix(registry_file):
-                continue
-            dir_members.setdefault(_posix_dir(f), {})[m] = _posix(f)
-    if not dir_members:
+    ranked_slots: list[tuple[tuple[int, int], _Slot, dict[str, str]]] = []
+    for slot in impl_slots:
+        members = {
+            member: _posix(path) for member, path in slot.members.items()
+            if not registry_file or _posix(path) != _posix(registry_file)
+        }
+        if members:
+            ranked_slots.append((
+                (_slot_member_repetitions(slot), len(members)), slot, members,
+            ))
+    if not ranked_slots:
         return None
-    ranked = sorted(dir_members.items(), key=lambda kv: (-len(kv[1]), kv[0]))
-    if len(ranked) >= 2 and len(ranked[0][1]) == len(ranked[1][1]):
-        return None  # conflicting destination directories -> abstain
-    directory, members = ranked[0]
+    ranked_slots.sort(key=lambda row: (-row[0][0], -row[0][1], row[1].constants))
+    top_score, _slot, members = ranked_slots[0]
+    if len(ranked_slots) >= 2 and ranked_slots[1][0] == top_score:
+        first_patterns = {
+            _ref_pattern(m).sub("{member}", f) for m, f in members.items()
+        }
+        other_patterns = {
+            _ref_pattern(m).sub("{member}", f)
+            for m, f in ranked_slots[1][2].items()
+        }
+        if first_patterns != other_patterns:
+            return None  # equally strong, genuinely conflicting conventions
     # richest template: prefer a file the graph confirms defines symbols, then lex
     def tkey(item: tuple[str, str]) -> tuple[int, str]:
         _m, f = item
         return (0 if f in impl_files else 1, f)
     member_token, template_file = sorted(members.items(), key=tkey)[0]
+    directory = _posix_dir(template_file)
     return directory, template_file, member_token
 
 
@@ -798,52 +1057,106 @@ def detect_change_surface(
         return ChangeSurfaceResult(abstained=True, abstain_reason="no_sibling_group")
 
     groups = _build_groups(slots)
-    for g in groups:
-        _detect_registry(g, files, repo_root)
 
     word_seq = _issue_word_seq(issue_text)
     norm_issue_words = {_normalize(w) for w in word_seq}
     entities = _entity_candidates(issue_text, graph_db, known_tokens)
 
-    result = ChangeSurfaceResult()
-    for g in groups:
-        rs = _role_slots(g)
-        tmpl_dirs = sorted({_posix_dir(f) for s in g.slots for f in s.members.values()})
-        result.sibling_groups.append({
-            "members": sorted(g.members),
-            "fixed_tokens": sorted(g.fixed_tokens),
-            "roles": sorted(rs.keys()) + ([ROLE_REGISTRATION] if g.registry_file else []),
-            "directories": tmpl_dirs,
-            "registry_file": g.registry_file,
-        })
+    # A quoted compound name that extends an existing family member is the most
+    # specific issue-side identity for that family.  Do not also mint a nearby
+    # category modifier as a second destination (``lint rule`` must not compete
+    # with explicit ``action-pinning`` extending the existing ``action`` rule).
+    preferred_compounds: dict[int, set[str]] = {}
+    for group in groups:
+        preferred = {
+            entity for entity in entities
+            if _compound_extends_group(entity, group)
+            and _entity_links_group(entity, word_seq, group, issue_text)
+        }
+        if preferred:
+            preferred_compounds[id(group)] = preferred
 
+    result = ChangeSurfaceResult()
+    registry_cache: dict[
+        tuple[int, ...], tuple[str | None, dict[str, list[tuple[int, str]]]]
+    ] = {}
+    derived_registry_groups: dict[tuple[int, ...], _Group] = {}
     emitted_entities: set[str] = set()
     conflict = False
     for entity in entities:
         # which groups does this entity plausibly belong to?
-        matched: list[tuple[int, _Group]] = []
+        matched: list[tuple[tuple[int, int, int, int, int, int], _Group]] = []
         for g in groups:
             if _normalize(entity) in {_normalize(ft) for ft in g.fixed_tokens}:
                 continue  # entity IS the category noun, not a new member
             ov = _group_overlap(g, norm_issue_words)
             if ov == 0:
                 continue  # group category not named in the issue -> irrelevant
-            if not _entity_links_group(entity, word_seq, g):
+            if not _entity_links_group(entity, word_seq, g, issue_text):
                 continue  # entity not adjacent to this group's category
-            matched.append((ov, g))
+            preferred = preferred_compounds.get(id(g))
+            if preferred and entity not in preferred:
+                continue
+            focused = _focus_group(g, entity, norm_issue_words, issue_text)
+            fixed_norm = {_normalize(t) for t in focused.fixed_tokens}
+            callable_family = int(
+                _declared_code_identifier(entity, issue_text)
+                and bool(fixed_norm & _CALLABLE_FAMILY_WORDS)
+            )
+            focused_overlap = len(fixed_norm & norm_issue_words)
+            min_prefix = min((len(s.constants) for s in focused.slots), default=999)
+            rank = (
+                int(_compound_extends_group(entity, focused)),
+                callable_family,
+                -min_prefix,
+                _group_shape_strength(focused),
+                focused_overlap,
+                len(focused.members),
+            )
+            matched.append((rank, focused))
         if not matched:
             continue
 
         # pick the dominant group; a tie on (overlap, member-count) is a conflict
-        matched.sort(key=lambda t: (-t[0], -len(t[1].members), sorted(t[1].fixed_tokens)))
+        matched.sort(key=lambda t: (
+            tuple(-value for value in t[0]), sorted(t[1].fixed_tokens)
+        ))
         if len(matched) >= 2:
-            (o0, g0), (o1, g1) = matched[0], matched[1]
-            if o0 == o1 and len(g0.members) == len(g1.members) and (
+            (rank0, g0), (rank1, g1) = matched[0], matched[1]
+            if rank0 == rank1 and (
                 sorted(g0.fixed_tokens) != sorted(g1.fixed_tokens)
             ):
                 conflict = True
                 continue
         group = matched[0][1]
+
+        # Registry mining is the expensive content phase: it reads up to
+        # ``_MAX_REGISTRY_SCAN`` files and checks their code lines against every
+        # member in a sibling family.  Running it for every tree-derived group
+        # before the issue has selected a family makes cost proportional to all
+        # repository conventions, including hundreds unrelated to the request.
+        # Registration evidence is only consumed by ``_entity_holes`` for the
+        # dominant issue-matched group, so derive it lazily and at most once per
+        # selected group.  This preserves exact evidence for every emitted fact
+        # while keeping unrelated groups correct-and-quiet.
+        # `_focus_group` returns a fresh view for every entity.  Key the cache
+        # by its underlying slot identities so two entities selecting the same
+        # convention reuse one content derivation while genuinely different
+        # focused families remain independent.
+        group_identity = tuple(id(slot) for slot in group.slots)
+        cached_registry = registry_cache.get(group_identity)
+        if cached_registry is None:
+            _detect_registry(group, files, repo_root)
+            registry_cache[group_identity] = (
+                group.registry_file,
+                {member: list(lines) for member, lines in group.registry_refs.items()},
+            )
+        else:
+            group.registry_file = cached_registry[0]
+            group.registry_refs = {
+                member: list(lines) for member, lines in cached_registry[1].items()
+            }
+        derived_registry_groups[group_identity] = group
 
         # F2 two-signal law (REAL, derived — the mutation target): adjacency to
         # the category noun is ONE signal; the entity needs an independent
@@ -867,6 +1180,21 @@ def detect_change_surface(
         if dest is not None:
             result.destinations.append(dest)
             emitted_entities.add(entity)
+
+    # Serialize diagnostics only after lazy registry derivation so an emitted
+    # group's registration mechanism remains visible to the attestation join.
+    # Unmatched groups intentionally carry no registry_file: no issue-grounded
+    # fact consumed (or paid for) that content scan.
+    for g in [*groups, *derived_registry_groups.values()]:
+        rs = _role_slots(g)
+        tmpl_dirs = sorted({_posix_dir(f) for s in g.slots for f in s.members.values()})
+        result.sibling_groups.append({
+            "members": sorted(g.members),
+            "fixed_tokens": sorted(g.fixed_tokens),
+            "roles": sorted(rs.keys()) + ([ROLE_REGISTRATION] if g.registry_file else []),
+            "directories": tmpl_dirs,
+            "registry_file": g.registry_file,
+        })
 
     result.entities = sorted(emitted_entities)
     result.missing_roles.sort(key=lambda m: (m.entity, _ROLE_ORDER.index(m.role)
@@ -946,6 +1274,7 @@ def _entity_holes(entity: str, group: _Group, issue_text: str,
     if has_mechanism:
         entity_registered = any(
             _ref_pattern(entity).search(t)
+            or any(ident.lower() == entity.lower() for ident in _IDENT_RE.findall(t))
             for lines in group.registry_refs.values() for _, t in lines
         )
         if not entity_registered:

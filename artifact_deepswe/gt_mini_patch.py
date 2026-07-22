@@ -506,6 +506,11 @@ if os.path.isdir(_GT_SRC) and _GT_SRC not in sys.path:
 # inferred from an absence-of-fires. `except Exception` (not ImportError) also catches a
 # SyntaxError / import-time crash in a staged module (the G10 pattern, generalized).
 _RUNTIME_AVAILABLE = True
+# Import fallbacks occur while this module is still an unowned candidate: a .pth
+# import may later fail in ``_install`` and be removed from ``sys.modules`` before
+# the backup loader imports a fresh copy.  Keep durable telemetry module-local until
+# that same copy completes installation; stderr remains immediate for diagnosis.
+_PENDING_RUNTIME_IMPORT_FAILURES: list[dict] = []
 
 
 def _runtime_import_failed(_mod: str, _err) -> None:
@@ -517,14 +522,27 @@ def _runtime_import_failed(_mod: str, _err) -> None:
     except Exception:  # noqa: BLE001
         pass
     try:
-        _ledger_line_direct({
+        _PENDING_RUNTIME_IMPORT_FAILURES.append({
             "layer": "runtime", "event_type": "", "file_path": "",
             "outcome": "provider_failed",
             "reason": f"runtime_import_fallback[{_mod}]: {_err}",
             "chars_delivered": 0, "iteration": 0,
         })
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 -- telemetry never breaks import fallback
         pass
+
+
+def _commit_runtime_import_failures() -> None:
+    """Durably publish fallback rows owned by this successfully installed copy.
+
+    Clearing before I/O makes this an at-most-once transaction even if a caller
+    invokes ``_install`` again.  A failed/orphan import never reaches this function,
+    and its module-local pending list disappears with that module instance.
+    """
+    pending = tuple(_PENDING_RUNTIME_IMPORT_FAILURES)
+    _PENDING_RUNTIME_IMPORT_FAILURES.clear()
+    for row in pending:
+        _ledger_line_direct(dict(row))
 
 
 try:
@@ -4594,6 +4612,13 @@ def _class_honest_negative(con, sym: str, idx: int, root: str) -> str:
     # probe and now means the agent may have just created it -> stay silent.
     if any(prev < es < idx for es in _edit_action_steps):
         return ""
+    # Profile-2 has a registered, convention-backed producer for this exact
+    # decision: Gateway change_surface -> newfile_precedent.  Do not spend the
+    # single search-result dose on this unlineaged generic hint when that producer
+    # is available.  The seam hands the already-recorded repeat to the Gateway,
+    # whose existing evidence thresholds still decide correct-or-quiet.
+    if _change_surface_search_handoff_on():
+        return ""
     return "\n".join([
         f'<gt-search-facts symbol="{sym}" surface="absent">',
         (f'"{sym}" not in names, paths, or any indexed body '
@@ -8075,6 +8100,17 @@ def _load_obligations_v2() -> dict | None:
     return data or None
 
 
+def _profile2_owns_obligation_delivery() -> bool:
+    """Whether the resolved production profile exclusively owns this site.
+
+    ``_resolve_production_profile`` canonicalizes the live process environment
+    before the seam runs, so this is the single effective-profile boundary for
+    both obligation routes.  Profile-2 fails closed when its typed artifact is
+    unavailable; explicit legacy/control profiles retain the v1 producers.
+    """
+    return (os.environ.get("GT_RL_PROFILE") or "").strip() == "2"
+
+
 class _V2ClauseView:
     __slots__ = (
         "idx", "clause_id", "verbatim", "subject_symbols", "sym_parts", "region",
@@ -8595,6 +8631,12 @@ def _obligation_resurface_candidate() -> tuple[float, str] | None:
     # a real DELIVERED outcome in _lane_a_deliver (same law as l3.cochange, bug #5).
     if _oblig_resurface_fired or _GT_BASELINE:
         return None
+    # Profile-2 assigns this decision site to the typed obligations-v2 lifecycle. If its
+    # artifact is absent/corrupt, fail closed: falling back to this generic v1 reminder would
+    # emit model bytes with no registered producer lineage and could be misreported as the
+    # obligations FACT. Explicit legacy/control profiles retain the historical bytes below.
+    if _profile2_owns_obligation_delivery():
+        return None
     lines: list[str] = []
     seen: set[str] = set()
     # Primary: the structured obligations[] (the extractor's output, when present).
@@ -8829,6 +8871,12 @@ def _review_obligation_candidate():
     V2 keeps its honest ``obligation.unexercised`` identity and Lane-A semantics;
     the legacy status checklist remains a ``spec.obligation`` steer.
     """
+    obligations_v2 = _load_obligations_v2()
+    # Profile-2 owns this site even if its artifact is missing or corrupt.  Falling
+    # through would relabel the same live process as legacy and emit unregistered
+    # ``spec.obligation`` bytes.  Preserve the typed identity while staying quiet.
+    if obligations_v2 is None and _profile2_owns_obligation_delivery():
+        return "obligation.unexercised", None, True
     # O-2: fire the GT_OBLIGATION_FRESHNESS control BEFORE the producer dispatch so it is
     # gradeable on the V2 path too (the legacy _obligation_nudge_block, its old home, is
     # unreachable when V2 obligations are present). Observability-only; never blocks dispatch.
@@ -8838,7 +8886,7 @@ def _review_obligation_candidate():
             _emit_obligation_freshness_control(om)
         except Exception:  # noqa: BLE001 — observability never blocks the producer
             pass
-    if _load_obligations_v2() is not None:
+    if obligations_v2 is not None:
         return (
             "obligation.unexercised",
             _unexercised_clause_candidate(),
@@ -10662,7 +10710,7 @@ def _executed_covering_emission(covering: list[dict],
                 "verify.horizon.executed", block, failure_identity):
             return None
         try:
-            from groundtruth.runtime.fact_registry import EVENT_TEST_RESULT
+            from groundtruth.runtime.fact_registry import EVENT_EDIT_RESULT
             from groundtruth.runtime.lane_attestation import build_covering_candidate_input
 
             # DEFECT-2 (Cluster-2a): scope the covering attestation's edited_sources to EXACTLY
@@ -10693,13 +10741,13 @@ def _executed_covering_emission(covering: list[dict],
                     current_result=cres,
                     edited_sources=_covering_sources,
                     covering_files=files,
-                    actual_event=EVENT_TEST_RESULT,
+                    actual_event=EVENT_EDIT_RESULT,
                     rendered_block=block,
                 )
         except Exception:  # noqa: BLE001 -- delivery remains; proof stays absent
             _last_covering_candidate_input = None
         _last_verify_executed_identity = (
-            "covering_runner", "covering_red", "test_result")
+            "covering_runner", "covering_red", "edit_result")
         _stage_verification_terminal_controls(
             block, evidence_type="covering_red", verification_plan=False)
         return block
@@ -10707,7 +10755,8 @@ def _executed_covering_emission(covering: list[dict],
         return None
 
 
-def _executed_covering_candidate() -> "tuple[float, str, str, bool] | None":
+def _executed_covering_candidate(
+        *, at_post_edit: bool = True) -> "tuple[float, str, str, bool] | None":
     """SM-10 Item C (2026-07-12): the EXECUTED covering-RED, DECOUPLED from the once-per-task
     risk-advisory latch. The flagship execution-fact — the repo's OWN covering test run in the
     agent's env, delivered as the Format-D native RED (ladder class ``executed_world_fact``,
@@ -10731,6 +10780,15 @@ def _executed_covering_candidate() -> "tuple[float, str, str, bool] | None":
     distinct-edit-generation of a symbol, reusing the existing per-file/total budgets inside
     ``_executed_covering_emission``."""
     global _covering_exec_fired_syms, _last_covering_result
+    # ``covering_red`` is registered at the fixed post-edit observation boundary: the
+    # producer runs a covering test *because of the edit* and its native RED must ride
+    # that edit's result.  A gate/arbiter loss re-arms the candidate, but a following
+    # view/search/test turn is not allowed to re-run it and then claim ``edit_result``
+    # lineage.  It may try again only on a later real edit (which re-arms the symbol
+    # latch above).  The default preserves direct producer-fixture calls; the one live
+    # orchestration site always supplies the physical event explicitly.
+    if not at_post_edit:
+        return None
     if os.environ.get("GT_VERIFY_EXECUTE") != "1" or _GT_BASELINE:
         return None
     if not _oracle_edited_rels:
@@ -10909,7 +10967,7 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
                         block, evidence_type="syntax_result", verification_plan=True)
                 elif res.kind == "unit":
                     _last_verify_executed_identity = (
-                        "covering_runner", "covering_red", "test_result")
+                        "covering_runner", "covering_red", "edit_result")
                     _stage_verification_terminal_controls(
                         block, evidence_type="covering_red", verification_plan=True)
                 return block
@@ -11310,7 +11368,8 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
     return (float(_SEV_RECOVERY), "recovery", text, True)
 
 
-def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
+def _verification_horizon_candidate(
+        *, at_post_edit: bool = True) -> tuple[float, str, str, bool] | None:
     """Produce the Verification Horizon candidate for this turn — delivery-
     engine STAGE 4: bands from the Stage-1 behavioral signals; V from the
     agent's OWN observed edit->test pace; severity a COMPUTED composite
@@ -11356,7 +11415,8 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
         # the SAME symbols this turn — one covering execution per symbol per edit-generation.
         # Guarded by GT_VERIFY_EXECUTE -> the set is untouched when off (byte-identical).
         _rk_syms = _edited_symbols_for_selection()
-        if os.environ.get("GT_VERIFY_EXECUTE") == "1" and not _GT_BASELINE:
+        if (at_post_edit and os.environ.get("GT_VERIFY_EXECUTE") == "1"
+                and not _GT_BASELINE):
             # SM-10 C-1: record that the RISK path is the source of this turn's executed/advisory
             # candidate — a gate LOSS must re-arm BOTH the once-per-task `_horizon_advisory_fired`
             # dose AND the per-symbol latch. The independent producer (below) leaves ``advisory``
@@ -11377,16 +11437,20 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
         # SM-3 VerificationPlan (GT_VERIFICATION_PLAN): the progressive ladder REPLACES the
         # single covering lever here — the plan's unit rung IS the covering run (no double
         # execution). Off -> the exact single-lever path below (byte-identical).
-        if os.environ.get("GT_VERIFICATION_PLAN") == "1":
-            _rk_exec = _verification_plan_emission(_oracle_edited_rels, _rk_syms)
-        else:
-            _rk_exec = _executed_covering_emission(_rk_cov, _oracle_edited_rels, _rk_syms)
+        _rk_exec = None
+        if at_post_edit:
+            if os.environ.get("GT_VERIFICATION_PLAN") == "1":
+                _rk_exec = _verification_plan_emission(_oracle_edited_rels, _rk_syms)
+            else:
+                _rk_exec = _executed_covering_emission(
+                    _rk_cov, _oracle_edited_rels, _rk_syms)
         # W14 FIX 2: burn the CROSS-TURN per-symbol latch only on a COMPLETING covering verdict
         # (green / attributed-fail / no-run -> _last_covering_result None -> latches). A
         # non-completing run (unavailable/timeout/error) must NOT leave the executed channel dark:
         # with the latch un-burned the INDEPENDENT producer re-attempts next turn. Intra-turn
         # double-execution is prevented by the `_covering_exec_pending` record populated above.
-        if os.environ.get("GT_VERIFY_EXECUTE") == "1" and not _GT_BASELINE:
+        if (at_post_edit and os.environ.get("GT_VERIFY_EXECUTE") == "1"
+                and not _GT_BASELINE):
             _rk_cv = _last_covering_result if isinstance(_last_covering_result, dict) else None
             if (_rk_cv.get("verdict") if _rk_cv else None) not in ("unavailable", "timeout", "error"):
                 _covering_exec_fired_syms.update(_rk_syms)
@@ -13750,10 +13814,12 @@ def _gateway_search_excluded(ev) -> bool:
     (gateway consumers reading probe history lose nothing). The ONLY state touch that
     legitimately precedes this guard is the bookkeeping promotion of PAST deliveries'
     receipts (FIX-2, 2026-07-10) — it delivers nothing and records no probe, so the SKIP
-    of the current search event is still TOTAL. It is BY FLAG for ALL
-    search events, independent of whether the lattice actually delivered: the lattice's
-    abstention is itself a correct-or-quiet decision, and deterministic dose accounting
-    beats opportunistic backfill. ``_GT_BASELINE`` is already excluded upstream by
+    of the current search event is still TOTAL. It is BY FLAG for every ordinary
+    search event, independent of whether the lattice actually delivered: the lattice's
+    abstention is itself a correct-or-quiet decision.  The sole exception is a repeat
+    true-absence probe explicitly yielded to the registered, convention-backed
+    ``change_surface`` producer below; that path suppresses the lattice's generic dose
+    and reuses its one physical probe record. ``_GT_BASELINE`` is already excluded upstream by
     ``_gt_gateway_on()``. Kept as a pure module-level predicate so the guard is
     single-sourced (NO-DUP) and mutation-testable; the search kind is read from the
     frozen ``gateway.KIND_SEARCH`` ABI constant (no re-implemented command parsing)."""
@@ -13763,7 +13829,45 @@ def _gateway_search_excluded(ev) -> bool:
         from groundtruth.runtime.gateway import KIND_SEARCH as _ks
     except Exception:  # noqa: BLE001 — gateway absent -> nothing to exclude (fail-open)
         return False
-    return getattr(ev, "kind", "") == _ks
+    if getattr(ev, "kind", "") != _ks:
+        return False
+    # Narrow exception: the post-search lattice has already recorded a repeated
+    # zero-result probe and deliberately yielded its unlineaged generic absence
+    # hint to the registered change_surface producer.  Let only that qualified
+    # search reach Gateway; all other search shapes retain total exclusion.
+    return not _change_surface_repeat_handoff_ready(ev)
+
+
+def _change_surface_search_handoff_on() -> bool:
+    """Whether the registered change_surface producer owns honest-negative repeats.
+
+    This is an ownership handoff, not a relaxed trigger: the real producer still
+    requires a repeated zero probe, no related intervening edit, and a convention-
+    backed ``detect_change_surface`` result.  Missing issue text stays quiet.
+    """
+    if not _POST_SEARCH_ON or not _gt_gateway_on():
+        return False
+    if os.environ.get("GT_CHANGE_SURFACE", "").strip().lower() in (
+            "", "0", "false", "no", "off"):
+        return False
+    return bool(_issue_text())
+
+
+def _change_surface_repeat_handoff_ready(ev) -> bool:
+    """True only for the current lattice-recorded repeat-zero search."""
+    if not _change_surface_search_handoff_on():
+        return False
+    idx = int(globals().get("_action_count", 0) or 0)
+    command = getattr(ev, "command", "") or ""
+    for tok in _search_probe_tokens(command):
+        entry = _search_seen.get(_norm_stem(tok))
+        if not entry:
+            continue
+        pairs = list(zip(entry.get("probe_indices", ()), entry.get("outcomes", ())))
+        if (any(int(i) == idx and outcome == "zero" for i, outcome in pairs)
+                and any(int(i) < idx and outcome == "zero" for i, outcome in pairs)):
+            return True
+    return False
 
 
 def _gateway_edit_bridges_on() -> bool:
@@ -14532,6 +14636,7 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
         # promotion of PAST deliveries above is bookkeeping, not this event's processing),
         # so the SKIP of this search event is TOTAL. The Gateway stays live for this
         # episode's non-search (edit/test) turns.
+        _change_surface_handoff = _change_surface_repeat_handoff_ready(ev)
         if _gateway_search_excluded(ev):  # MUTATION[guard_search_exclusion]: force -> False
             return
         if not getattr(_EPISODE, "episode_id", ""):
@@ -14559,9 +14664,13 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
                 _control_participation_record if _inseam_metrics_on() else None
             ),
             control_queue=_gateway_control_queue)
+        _gateway_raw_envelopes = (
+            _gw_augment(ev, st, search_probe_recorded=True)
+            if _change_surface_handoff else _gw_augment(ev, st)
+        )
         gateway_envelopes = [
             _attach_exact_gateway_byte_owner(envelope, getattr(ev, "kind", "") or "other")
-            for envelope in _gw_augment(ev, st)
+            for envelope in _gateway_raw_envelopes
         ]
         if _gateway_control_queue is not None:
             _register_gateway_control_records(
@@ -16352,7 +16461,10 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
         pool, cand, _thunk, out, _payload, join=True,
         krel=getattr(winner, "target", "") or "",
         is_loc=suppressible, knowledge_authority=_knowledge_authority,
-        prepared_extra={"event": ev_kind})
+        prepared_extra={
+            "event": ev_kind,
+            "krel": getattr(winner, "target", "") or "",
+        })
     return False
 
 
@@ -19587,6 +19699,7 @@ def _augment_output(action, out) -> None:
                 # (drop nonedit_streak requirement — agent may edit up to submit).
                 _budget_now = (_action_count / _GT_STEP_LIMIT) if _GT_STEP_LIMIT else 0.0
                 _v2_obligations_active = _load_obligations_v2() is not None
+                _profile2_obligations_owned = _profile2_owns_obligation_delivery()
                 _legacy_oblig_ready = (
                     _oracle_nonedit_streak >= 3 or _budget_now > 0.90
                 )
@@ -19596,7 +19709,8 @@ def _augment_output(action, out) -> None:
                 )
                 _oblig_gate = bool(_oracle_edited_rels) and (
                     _v2_oblig_ready
-                    if _v2_obligations_active else _legacy_oblig_ready
+                    if _v2_obligations_active else
+                    False if _profile2_obligations_owned else _legacy_oblig_ready
                 )
                 if _oblig_gate:
                     _ob_kind = (
@@ -19798,7 +19912,8 @@ def _augment_output(action, out) -> None:
                         pass
                 # VERIFICATION HORIZON (Stage C H2): budget-aware self-verify candidate
                 try:
-                    _vh = _verification_horizon_candidate()
+                    _vh = _verification_horizon_candidate(
+                        at_post_edit=(_kkind == "post_edit"))
                 except Exception:  # noqa: BLE001 — one producer must not kill the gate
                     _crash_emit("verify.horizon")
                     _vh = None
@@ -19812,7 +19927,8 @@ def _augment_output(action, out) -> None:
                 # <=1-dose arbitration + leak-scrub. Flag GT_VERIFY_EXECUTE off -> None (byte-
                 # identical); the risk path marks the SAME latch first, so no double-execution.
                 try:
-                    _ec = _executed_covering_candidate()
+                    _ec = _executed_covering_candidate(
+                        at_post_edit=(_kkind == "post_edit"))
                 except Exception:  # noqa: BLE001 — one producer must not kill the gate
                     _crash_emit("verify.horizon.executed")
                     _ec = None
@@ -20693,6 +20809,10 @@ def _install() -> None:
     # PROFILE RECEIPT: durable per-process activation record, AFTER the patch loop so
     # patched_classes reflects the real attached set. Fully self-guarded (never raises).
     _write_profile_receipt()
+    # Publish import-fallback diagnostics only after this module copy owns a completed
+    # installation.  A failed .pth candidate never reaches here, so its module-local
+    # fallback rows cannot contaminate the later backup import's ledger.
+    _commit_runtime_import_failures()
 
 
 _install()

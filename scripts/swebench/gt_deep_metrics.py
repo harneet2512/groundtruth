@@ -162,6 +162,31 @@ def _find_log(task: str, results_dir: str, explicit: str = "") -> str | None:
     return None
 
 
+def _find_patch_artifact(task: str, results_dir: str) -> str | None:
+    """Locate a real task-scoped patch emitted beside a mini-swe trajectory.
+
+    DeepSWE stores the submitted diff as ``artifacts/model.patch`` rather than in
+    ``info.submission``.  Treat only non-empty files below ``results_dir`` as
+    evidence, and preserve the same task-identity guard used for trajectories so
+    a shared collection directory can never lend one task another task's patch.
+    """
+    if not results_dir or not os.path.isdir(results_dir):
+        return None
+    hits: list[str] = []
+    for name in ("agent_patch.diff", "model.patch", "patch.diff"):
+        hits.extend(glob.glob(os.path.join(results_dir, "**", name), recursive=True))
+    hits = sorted({path for path in hits if os.path.isfile(path) and os.path.getsize(path) > 0})
+    if not task:
+        return hits[0] if hits else None
+    scoped = [path for path in hits if task in path]
+    if not scoped:
+        for path in hits:
+            match = re.search(r"([^/\\]+?)__[^/\\]+[/\\](?:agent|artifacts)", path)
+            if match and len(match.group(1)) >= 8 and task.startswith(match.group(1)):
+                scoped.append(path)
+    return scoped[0] if scoped else None
+
+
 # OpenHands trajectory/log fingerprints vs DeepSWE (pier + mini-swe-agent).
 _OH_MARKERS = ("openhands:INFO", "run_infer.py", "CodeActAgent", "/output.jsonl", "AgentController")
 _DEEPSWE_MARKERS = (
@@ -1630,6 +1655,10 @@ def build(task: str, results_dir: str, log_path: str = "",
         traj["gt_understand_calls"] = mini["gt_understand_calls"]
         traj["gt_verify_calls"] = mini["gt_verify_calls"]
         traj["gt_observation_chars_total"] = mini["gt_observation_chars_total"]
+    patch_artifact = _find_patch_artifact(task, results_dir)
+    if patch_artifact:
+        traj["has_patch"] = True
+        traj["patch_artifact_path"] = patch_artifact
     # If output.jsonl was absent (e.g. DeepSWE), recover patch/action signal from
     # the log so classification still works.
     if (not traj.get("action_count")) and log_text:
@@ -1766,10 +1795,13 @@ def build(task: str, results_dir: str, log_path: str = "",
             consumption = cl_mod.ledger_from_trajectory_path(
                 mini_traj, runtime_ledger_path=(_rl[0] if _rl else None)
             )
+            # Keep the receipt artifact in the caller's collection root.  The old
+            # trajectory-relative path landed back inside the ephemeral ``jobs``
+            # tree after that tree had already been copied for upload, so the live
+            # artifact omitted the ledger even though it had been computed.
             ledger_path = os.path.join(
-                os.path.dirname(mini_traj), "..", "gt_consumption_ledger.json"
+                results_dir, f"gt_consumption_ledger_{task}.json"
             )
-            ledger_path = os.path.normpath(ledger_path)
             try:
                 with open(ledger_path, "w", encoding="utf-8") as lf:
                     json.dump(consumption, lf, indent=2)
@@ -2033,6 +2065,7 @@ def build(task: str, results_dir: str, log_path: str = "",
             "gt_run_summary": summ_present,
             "output_jsonl": bool(oj and os.path.exists(oj)),
             "miniswe_trajectory": bool(mini.get("found")),
+            "patch_artifact": patch_artifact or None,
             # which trajectory actually populated the agent-side metrics: the OH
             # output.jsonl, the DeepSWE/pier mini-swe-agent trajectory, or neither.
             "trajectory_source": traj.get("trajectory_source", "none"),

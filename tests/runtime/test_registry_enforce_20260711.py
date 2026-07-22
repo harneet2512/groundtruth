@@ -50,7 +50,7 @@ def test_required_event_uses_declared_deliverby_and_trace_override():
 
 def test_required_renderer_binds_class_to_native_form():
     assert fr.required_renderer("def_ref_partition") == "grep-native"
-    assert fr.required_renderer("trace_frame") == "ranked-list"
+    assert fr.required_renderer("trace_frame") == "trace-native"
     assert fr.required_renderer("covering_verdict") == "test-native"
     assert fr.required_renderer("bogus") is None
     # every registered class HAS a renderer (import-time _self_check guarantees it).
@@ -292,6 +292,9 @@ def test_trace_frame_augment_delivers_on_test_under_enforcement(tmp_path, monkey
     monkeypatch.setenv("GT_GATEWAY", "1")
     monkeypatch.setenv("GT_REGISTRY_ENFORCE", "1")
     db = _mk_graph(tmp_path, [])
+    source = tmp_path / "svc" / "watch.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("\n" * 11 + "def run():\n    pass\n", encoding="utf-8")
     out = (
         "Traceback (most recent call last):\n"
         '  File "svc/watch.py", line 12, in run\n'

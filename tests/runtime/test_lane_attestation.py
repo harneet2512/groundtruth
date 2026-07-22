@@ -107,7 +107,7 @@ def _covering_complete():
         current_result=current,
         edited_sources={"src/mod.py": (b"def f():\n    raise TypeError\n", "edit:7")},
         covering_files=["tests/test_mod.py"],
-        actual_event="test_result",
+        actual_event="edit_result",
         rendered_block=block,
     )
     return candidate, block
@@ -130,7 +130,7 @@ def test_covering_factory_binds_result_sources_files_event_and_rendered_candidat
     assert validate(final.attestation) == ()
     assert final.attestation.truth_verdict == PASS
     assert final.attestation.freshness_verdict == PASS
-    assert final.attestation.decision.open_event == "test_result"
+    assert final.attestation.decision.open_event == "edit_result"
     artifacts = final.artifact_mapping()
     assert json.loads(artifacts["current-result.json"])["verdict"] == "fail"
     assert artifacts["producer-candidate.bin"] == block.encode()
@@ -200,7 +200,7 @@ def test_covering_seam_stages_exact_input_only_for_real_candidate(tmp_path, monk
     staged = gmp._last_covering_candidate_input
     assert staged is not None
     assert staged.rendered_sha256_16 == hashlib.sha256(block.encode()).hexdigest()[:16]
-    assert staged.actual_event == "test_result"
+    assert staged.actual_event == "edit_result"
     assert staged.current_result_sha256 == hashlib.sha256(staged.current_result_bytes).hexdigest()
 
 
@@ -267,7 +267,7 @@ def test_covering_factory_rejects_file_or_event_join_mismatch():
     candidate, block = _covering_complete()
     cases = (
         dataclasses.replace(candidate, covering_files=("tests/other.py",)),
-        dataclasses.replace(candidate, actual_event="edit_result"),
+        dataclasses.replace(candidate, actual_event="test_result"),
     )
     for value in cases:
         final = finalize_covering_attestation(

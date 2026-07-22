@@ -455,15 +455,50 @@ def _read_runtime_ledger(path: Path) -> list[dict]:
     return rows
 
 
-def _arm_serial_observation_boundary(g) -> None:
-    """Declare the gate driver's one-action-per-observation ownership.
+class _SerialGateModel:
+    """Minimal formatter exercising the seam's real observation transaction."""
 
-    The live agent needs the formatter-level batch transaction.  Gate fixtures
-    call the seam once for each complete observation, so this serial driver is
-    itself the equivalent commit boundary.
-    """
-    g._batch_install_failed = False
-    g._batch_commit_installed = True
+    def format_observation_messages(self, message, outputs, template_vars=None):
+        return [{"role": "tool", "content": str(row.get("output") or "")}
+                for row in outputs]
+
+
+class _SerialGateAgent:
+    """One-action gate driver attached through the production batch installer."""
+
+    def __init__(self, g) -> None:
+        self.g = g
+        self.model = _SerialGateModel()
+        self.root: Path | None = None
+        self.events: list[Event] = []
+
+    def execute_actions(self, message):
+        actions = (message.get("extra", {}).get("actions", [])
+                   if isinstance(message, dict) else [])
+        if self.root is None or len(actions) != len(self.events):
+            raise GateDriverError("serial gate observation is not configured")
+        for action, event in zip(actions, self.events):
+            if action != event.action:
+                raise GateDriverError("serial gate action/event identity mismatch")
+        outputs = [_drive_event(self.g, self.root, event) for event in self.events]
+        return self.model.format_observation_messages(message, outputs, {})
+
+    def run_event(self, root: Path, event: Event) -> str:
+        self.root = root
+        self.events = [event]
+        try:
+            rendered = self.execute_actions({
+                "content": "",
+                "extra": {"actions": [event.action]},
+            })
+        finally:
+            self.root = None
+            self.events = []
+        if (not isinstance(rendered, list) or len(rendered) != 1
+                or not isinstance(rendered[0], dict)
+                or not isinstance(rendered[0].get("content"), str)):
+            raise GateDriverError("serial gate formatter returned an invalid observation")
+        return rendered[0]["content"]
 
 
 class RealSeamDriver:
@@ -477,8 +512,11 @@ class RealSeamDriver:
         os.environ.pop("GT_BASELINE", None)
         import gt_mini_patch as g  # noqa: E402 — import side effects are the seam install
         from groundtruth.runtime import rl_profile as rp  # noqa: E402
-        _arm_serial_observation_boundary(g)
         self.g = g
+        self._agent = _SerialGateAgent(g)
+        if not g.install_observation_batch_commit(self._agent):
+            raise GateDriverError(
+                "could not attach the real formatter-level observation boundary")
         # The full Profile-2 member map (every member -> "1"), plus the master switches.
         core = dict(rp.resolve_profile({"GT_RL_PROFILE": "2"}))
         core["GT_RL_PROFILE"] = "2"
@@ -568,8 +606,8 @@ class RealSeamDriver:
             obs: list[Obs] = []
             for ev in events:
                 before = ev.output
-                out = _drive_event(g, root, ev)
-                obs.append(Obs(before=before, after=out.get("output") or ""))
+                after = self._agent.run_event(root, ev)
+                obs.append(Obs(before=before, after=after))
 
             # SS-2 (S11): AFTER the stream, exercise the submit boundary N times (while the
             # arm's env is still set) so the ss_submit_red single-dose is observable. The events
@@ -625,8 +663,18 @@ class FakeSeamDriver:
 # comparison / built-detection helpers
 # ══════════════════════════════════════════════════════════════════════════════
 def _norm_ledger(rows: list[dict]) -> list[dict]:
-    """Drop only the volatile wall-clock field so two deterministic runs compare equal."""
-    return [{k: v for k, v in r.items() if k != "timestamp_ms"} for r in rows]
+    """Drop host/instance identity fields so deterministic behavior compares equal.
+
+    The real formatter transaction adds diagnostic ownership metadata.  Its monotonic
+    batch serial and Python/process identities prove isolation inside one process but are
+    intentionally different across otherwise identical gate arms; they are not product
+    behavior and therefore cannot participate in the deterministic seam signature.
+    """
+    volatile = {
+        "timestamp_ms", "batch_serial", "module_identity",
+        "process_id", "process_state_identity",
+    }
+    return [{k: v for k, v in r.items() if k not in volatile} for r in rows]
 
 
 def _signature(res: SeamResult) -> tuple:

@@ -219,7 +219,7 @@ def test_defect2_red_empty_edited_sources_is_unmeasured(tmp_path) -> None:
     starved = build_covering_candidate_input(
         attribution=attribution, current_result=cres,
         edited_sources={},  # the starvation
-        covering_files=["tests/test_api.py"], actual_event="test_result", rendered_block=block,
+        covering_files=["tests/test_api.py"], actual_event="edit_result", rendered_block=block,
     )
     final = finalize_covering_attestation(
         starved, producer_block=block, shipped_suffix=block, target="src/api.py",
@@ -253,7 +253,7 @@ def test_defect2_green_implicated_sources_yield_complete(tmp_path) -> None:
     block = "src/api.py:2: in get_user\nE   TypeError"
     cand = build_covering_candidate_input(
         attribution=attribution, current_result=cres, edited_sources=sources,
-        covering_files=["tests/test_api.py"], actual_event="test_result", rendered_block=block,
+        covering_files=["tests/test_api.py"], actual_event="edit_result", rendered_block=block,
     )
     final = finalize_covering_attestation(
         cand, producer_block=block, shipped_suffix=block, target="src/api.py",

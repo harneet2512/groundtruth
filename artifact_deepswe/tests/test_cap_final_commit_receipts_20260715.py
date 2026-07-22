@@ -124,16 +124,13 @@ def test_reactive_lane_kinds_carry_only_exact_supported_lineage(monkeypatch):
 
     monkeypatch.setattr(
         g, "_last_verify_executed_identity",
-        ("covering_runner", "covering_red", "test_result"))
+        ("covering_runner", "covering_red", "edit_result"))
     executed = g._lane_delivery_extra(
         "verify.horizon.executed", "covering RED", "src/widget.py",
         g.Event.REVIEW_TRANSITION)
     assert executed["fact_class"] == "covering_red"
-    # B-BND (b2, c9ac61d3c): the SEAM's executed covering RED delivers synchronously at
-    # the EDIT boundary, so the registry overrides required_event to edit_result while the
-    # seam still stamps the canonical test_result actual label (reactive: on-time by
-    # construction — fact_registry.py:679-712).
-    assert executed["actual_event"] == "test_result"
+    # The seam delivers synchronously at the edit boundary and names that observation directly.
+    assert executed["actual_event"] == "edit_result"
     assert executed["required_event"] == "edit_result"
 
     monkeypatch.setattr(g, "_last_verify_executed_identity", None)
@@ -245,13 +242,12 @@ def test_covering_execution_stamps_concrete_lineage_identity(tmp_path, monkeypat
         [{"file": "covering.py"}], {"src/widget.py"}, {"widget"})
     assert block == "covering failure"
     assert g._last_verify_executed_identity == (
-        "covering_runner", "covering_red", "test_result")
+        "covering_runner", "covering_red", "edit_result")
     lineage = g._lane_registered_lineage(
         "verify.horizon.executed", g.Event.REVIEW_TRANSITION)
     assert lineage.fact_class == "covering_red"
-    # B-BND (b2): required_event overridden to edit_result (see fact_registry.py:690);
-    # the canonical actual label stays test_result and reactive treatment keeps it on-time.
-    assert lineage.actual_event == "test_result"
+    # The producer-internal test is delivered at the fixed edit observation boundary.
+    assert lineage.actual_event == "edit_result"
     assert lineage.required_event == "edit_result"
 
 

@@ -125,7 +125,7 @@ def test_covering_execute_stages_only_exact_deliverable_red(
         "attributed_covering_red_selected",
     )]
     assert g._last_verify_executed_identity == (
-        "covering_runner", "covering_red", "test_result")
+        "covering_runner", "covering_red", "edit_result")
 
 
 def test_plan_syntax_and_unit_bind_to_their_real_producers(monkeypatch) -> None:
@@ -173,7 +173,7 @@ def test_plan_syntax_and_unit_bind_to_their_real_producers(monkeypatch) -> None:
 
     assert block == "unit failure"
     assert g._last_verify_executed_identity == (
-        "covering_runner", "covering_red", "test_result")
+        "covering_runner", "covering_red", "edit_result")
     assert g._last_covering_candidate_input is None
     assert {item[0] for item in g._terminal_lane_controls[
         g._terminal_lane_control_key("verify.horizon.executed", block)]} == {
@@ -218,6 +218,73 @@ def test_verification_control_flags_off_are_byte_and_stage_neutral(
     assert g._terminal_lane_controls == {}
 
 
+def test_covering_execution_stays_quiet_off_the_physical_post_edit_boundary(
+    monkeypatch,
+) -> None:
+    """A re-armed RED may not claim edit_result lineage on a later tool turn."""
+    _capture(monkeypatch)
+    g._covering_exec_fired_syms.clear()
+    g._covering_exec_pending["syms"].clear()
+    g._covering_exec_pending["advisory"] = False
+    monkeypatch.setattr(g, "_oracle_edited_rels", {"src/widget.py"})
+    monkeypatch.setattr(g, "_edited_symbols_for_selection", lambda: {"widget"})
+    monkeypatch.setattr(g, "_covering_tests_for_symbols", lambda _syms: [
+        {"file": "covering.py"}
+    ])
+    monkeypatch.setattr(
+        g,
+        "_executed_covering_emission",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("covering execution escaped its post-edit boundary")
+        ),
+    )
+
+    assert g._executed_covering_candidate(at_post_edit=False) is None
+    assert g._covering_exec_fired_syms == set()
+    assert g._last_verify_executed_identity is None
+
+
+def test_risk_horizon_does_not_launder_covering_red_on_later_boundary(
+    monkeypatch,
+) -> None:
+    """The risk path may still advise later, but it cannot execute/stamp a RED."""
+    _capture(monkeypatch)
+    g._covering_exec_fired_syms.clear()
+    g._covering_exec_pending["syms"].clear()
+    g._covering_exec_pending["advisory"] = False
+    monkeypatch.setattr(g, "_oracle_edited_rels", {"src/widget.py"})
+    monkeypatch.setattr(g, "_horizon_advisory_fired", False)
+    monkeypatch.setattr(g, "_GT_STEP_LIMIT", 300)
+    monkeypatch.setattr(g, "test_coverage_ratio", lambda *_args: 0.0)
+    monkeypatch.setattr(g, "edit_coverage_ratio", lambda *_args: 0.0)
+    monkeypatch.setattr(g, "_structural_risk_note", lambda: ("risk", True))
+    monkeypatch.setattr(g, "_edited_symbols_for_selection", lambda: {"widget"})
+    monkeypatch.setattr(
+        g, "_covering_tests_for_symbols", lambda _syms: [{"file": "covering.py"}])
+    monkeypatch.setattr(
+        g,
+        "_executed_covering_emission",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("risk covering RED escaped its post-edit boundary")
+        ),
+    )
+    monkeypatch.setattr(
+        g, "_verification_plan_emission",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("risk verification plan escaped its post-edit boundary")
+        ),
+    )
+    monkeypatch.setattr(
+        g, "_render_verify_emission", lambda *_args, **_kwargs: "verify advisory")
+
+    result = g._verification_horizon_candidate(at_post_edit=False)
+
+    assert result is not None and result[1] == "verify.horizon.advisory"
+    assert g._covering_exec_fired_syms == set()
+    assert g._covering_exec_pending == {"syms": set(), "advisory": False}
+    assert g._last_verify_executed_identity is None
+
+
 def test_covering_control_commits_exact_final_suffix_and_collector_join(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -233,7 +300,7 @@ def test_covering_control_commits_exact_final_suffix_and_collector_join(
         {"payload": block, "shipped_suffix": shipped},
         krel="src/widget.py",
         kf="",
-        event=g.Event.TEST_RESULT,
+        event=g.Event.POST_EDIT,
         steer_base="tool observation",
     )
 
@@ -365,7 +432,7 @@ def test_profile_native_transform_retargets_verification_control_to_final_suffix
     monkeypatch.setattr(
         g,
         "_last_verify_executed_identity",
-        ("covering_runner", "covering_red", "test_result"),
+        ("covering_runner", "covering_red", "edit_result"),
     )
     out = {"output": "tool observation"}
     g._commit_prepared_steer(

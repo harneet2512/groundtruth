@@ -390,7 +390,7 @@ def test_lane_envelope_uses_covering_lineage_not_arbiter_class(
     monkeypatch.setenv("GT_LANE_ENVELOPE", "1")
     monkeypatch.setattr(
         g, "_last_verify_executed_identity",
-        ("covering_runner", "covering_red", "test_result"))
+        ("covering_runner", "covering_red", "edit_result"))
     monkeypatch.setattr(g, "_persist_receipt", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         g, "_persist_lane_producer_attestation", lambda *_args, **_kwargs: None)

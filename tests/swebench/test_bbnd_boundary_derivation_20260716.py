@@ -8,7 +8,7 @@ minted. Residuals:
   b1 submit_refusal — a mid-run submit INTERCEPTION opens a ``submit`` boundary (from the
      ``submit_gate`` ledger row), not only the terminal exit.
   b2 covering_red   — the SEAM's executed covering RED is delivered at EDIT time
-     (edit_result boundary + on-time-by-construction reactive), not the canonical test_result.
+     (edit_result boundary), not the canonical test_result.
   b3 syntax_result  — an edit the SEAM's post_edit hook recorded opens an ``edit_result``
      boundary even when the grader's _parse_timeline edit detection missed it.
   b4 recovery       — a pivot decision is COMMITTED by the next agent ACT (any action), not a
@@ -202,8 +202,8 @@ def test_b2_gateway_covering_verdict_keeps_canonical_test_result():
     assert not fr.is_reactive("covering_verdict")
 
 
-def test_b2_covering_red_is_reactive_on_time_by_construction():
-    assert fr.is_reactive("covering_red")
+def test_b2_covering_red_uses_fixed_edit_boundary_not_reactive_exemption():
+    assert not fr.is_reactive("covering_red")
 
 
 def test_b2_decision_open_resolves_from_edit_boundary_only():
@@ -216,30 +216,23 @@ def test_b2_decision_open_resolves_from_edit_boundary_only():
 
 
 def test_b2_adjudicate_measures_the_saved_row_shape():
-    # saved covering_red rows carry actual_event='test_result' (the seam's canonical label)
-    # while delivering at the edit boundary. Reactive skips the non-reactive event check, so a
-    # genuinely on-time covering RED is MEASURED (not UNMEASURED for a vocabulary mismatch).
+    # The covering runner executes internally, but its result is delivered in the post-edit
+    # observation. The saved lineage therefore names that real observation boundary directly.
     ch = Chronology(decision_open_index=5, delivery_index=6, decision_commit_index=7,
                     native_acquisition_index=None, acknowledgment_index=None, action_index=None)
-    verdict = adjudicate(evidence_type="covering_red", actual_event="test_result",
+    verdict = adjudicate(evidence_type="covering_red", actual_event="edit_result",
                          delivery_seal="0" * 16, chronology=ch).timing_verdict
     assert verdict == ON_TIME
 
 
-def test_b2_MUTATION_dropping_reactive_rejects_the_saved_row():
-    # C-cluster split: without reactive, the non-reactive check (actual_event 'test_result' !=
-    # wanted 'edit_result') is a KNOWN-but-wrong event -> WRONG_EVENT (measured False), which is
-    # exactly the mismatch the reactive dual-label (F) is designed to bypass on the real path.
+def test_b2_MUTATION_stamping_internal_test_event_rejects_the_saved_row():
+    # A producer-internal test execution is not the model observation boundary. Reverting the
+    # saved event to test_result must fail closed against covering_red's fixed edit boundary.
     ch = Chronology(decision_open_index=5, delivery_index=6, decision_commit_index=7,
                     native_acquisition_index=None, acknowledgment_index=None, action_index=None)
-    saved = fr._REACTIVE_EVIDENCE_TYPES
-    try:
-        fr._REACTIVE_EVIDENCE_TYPES = frozenset({"trace_frame"})  # drop covering_red
-        verdict = adjudicate(evidence_type="covering_red", actual_event="test_result",
-                             delivery_seal="0" * 16, chronology=ch).timing_verdict
-        assert verdict == WRONG_EVENT
-    finally:
-        fr._REACTIVE_EVIDENCE_TYPES = saved
+    verdict = adjudicate(evidence_type="covering_red", actual_event="test_result",
+                         delivery_seal="0" * 16, chronology=ch).timing_verdict
+    assert verdict == WRONG_EVENT
 
 
 def test_b2_MUTATION_dropping_boundary_override_loses_decision_open():

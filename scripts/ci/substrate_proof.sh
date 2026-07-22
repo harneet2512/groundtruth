@@ -94,6 +94,41 @@ fail_artifact() {
 }
 write_proof_status running PROOF_STARTED "substrate proof step started"
 
+# Profile members that affect acquisition/brief bytes must resolve BEFORE the
+# proof container calls generate_v1r_brief.  The agent-side gt_ae_block runs only
+# after this script returns, which previously let the receipt say Profile-2 while
+# the already-rendered brief used GT_LOC_RESLOT=0.  Reuse the canonical resolver;
+# do not duplicate profile membership here.  resolve_profile preserves explicit,
+# non-empty overrides including "0".  Profile unset/off emits no exports, and the
+# baseline path deliberately skips the transform for byte-identical control bytes.
+_GT_PRETASK_PROFILE_EXPORTS=""
+if [ "${GT_BASELINE:-0}" != "1" ]; then
+  if ! _GT_PRETASK_PROFILE_EXPORTS=$(PYTHONPATH="${GITHUB_WORKSPACE:-$(pwd)}/src:${PYTHONPATH:-}" python3 - <<'PY'
+import os
+import shlex
+import sys
+
+from groundtruth.runtime.rl_profile import profile_members, resolve_profile
+
+token = (os.environ.get("GT_RL_PROFILE") or "").strip()
+resolved = resolve_profile(os.environ)
+if token not in ("", "0") and not profile_members(token):
+    print(f"GT_RL_PROFILE_UNKNOWN:{token}", file=sys.stderr)
+    raise SystemExit(3)
+for key, value in resolved.items():
+    print(f"export {key}={shlex.quote(value)}")
+PY
+  ); then
+    fail_proof GT_RL_PROFILE_PRETASK_ABORT \
+      "canonical profile resolution failed before brief generation"
+  fi
+  if [ -n "$_GT_PRETASK_PROFILE_EXPORTS" ]; then
+    eval "$_GT_PRETASK_PROFILE_EXPORTS"
+    echo "GT_RL_PROFILE_PRETASK_FANOUT: profile=${GT_RL_PROFILE} resolved before gt-run-proof" \
+      | tee -a trial_output.log
+  fi
+fi
+
 # Memory logger: runs in background, writes to trial_output.log every 10s.
 # Survives partial writes on SIGTERM — each line is flushed independently.
 # This is the ONLY way to get memory evidence when the runner OOM-kills.
@@ -645,6 +680,7 @@ if [ "$HARNESS" = "deepswe" ]; then
       -v "/tmp/gt/deps/cargo:/root/.cargo" \
       -v "/tmp/gt/deps/rustup:/root/.rustup" \
       -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
+      -e GT_RL_PROFILE="${GT_RL_PROFILE:-}" \
       -e OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" -e MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}" \
       -e OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" -e NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}" \
       -e GT_HOST_GRAPH_DB=/tmp/gt/graph.db \
@@ -690,6 +726,7 @@ else
       -v "/tmp/gt/deps/cargo:/root/.cargo" \
       -v "/tmp/gt/deps/rustup:/root/.rustup" \
       -e GT_PROOF_MODE=1 -e GT_CONTAINERIZED=1 -e GT_RUNTIME_STRATEGY=unified_substrate \
+      -e GT_RL_PROFILE="${GT_RL_PROFILE:-}" \
       -e OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}" -e MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}" \
       -e OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}" -e NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}" \
       -e GT_HOST_GRAPH_DB=/tmp/gt/graph.db \

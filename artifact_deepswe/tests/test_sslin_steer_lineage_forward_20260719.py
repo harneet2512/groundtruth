@@ -50,7 +50,7 @@ def _executed_lineage(monkeypatch):
     fallback)."""
     monkeypatch.setattr(
         g, "_last_verify_executed_identity",
-        ("covering_runner", "covering_red", "test_result"))
+        ("covering_runner", "covering_red", "edit_result"))
     lin = g._lane_registered_lineage(
         "verify.horizon.executed", g.Event.REVIEW_TRANSITION)
     assert lin is not None and getattr(lin, "producer_registration_match", False)

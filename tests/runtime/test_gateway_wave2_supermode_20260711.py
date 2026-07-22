@@ -147,5 +147,5 @@ def test_signature_mismatch_survives_registry_enforce(monkeypatch):
     out = gw.augment(ev, st)
     assert any(e.evidence_type == "signature_mismatch" for e in out), out
     # registry boundary conformance: the class resolves + has a declared renderer
-    assert fr.required_renderer("signature_mismatch") == "diff-native"
+    assert fr.required_renderer("signature_mismatch") == "compiler-native"
     assert fr.required_event("signature_mismatch") == "edit_result"

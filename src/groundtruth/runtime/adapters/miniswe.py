@@ -65,6 +65,7 @@ from groundtruth.runtime.native_render import (
     render_caller_contract_native,
     render_caller_usage_native,
     render_def_rows_native,
+    render_newfile_precedent_native,
     render_ranked_list_native,
     render_registration_native,
     render_scope_constraint_native,
@@ -248,6 +249,9 @@ def render_envelope(
         nat = _render_native_class(env)
         if nat:
             return nat if nat.endswith("\n") else nat + "\n"
+        base_type = (env.evidence_type or "").split(":", 1)[0]
+        if base_type in _NATIVE_QUIET_ON_ABSTAIN:
+            return ""
     return _render_generic(env, native=native)
 
 
@@ -418,6 +422,18 @@ def _render_scope(env: EvidenceEnvelope) -> str:
     return render_scope_constraint_native(env.target)
 
 
+def _render_newfile_precedent(env: EvidenceEnvelope) -> str:
+    """Render change_surface from structured envelope identity, never its prose payload."""
+    evidence_type = env.evidence_type or ""
+    if evidence_type == "new_file_destination":
+        role = None
+    elif evidence_type.startswith("missing_role:"):
+        role = evidence_type.split(":", 1)[1]
+    else:
+        return ""
+    return render_newfile_precedent_native(env.target, env.fact_id, role=role)
+
+
 # evidence_type (or its ``base:suffix`` base) -> the native-arg-mapping renderer. cochange is
 # INTENTIONALLY absent (it is internal-only — the gateway never delivers a cochange_partner
 # envelope, so it never reaches here; its SM-1 renderer always returns "").
@@ -440,11 +456,10 @@ _NATIVE_CLASS_RENDERERS: dict[str, Callable[[EvidenceEnvelope], str]] = {
     "def_ref_partition": _render_def_rows,
     "signature_mismatch": _render_signature_delta,
     "companion_surface": _render_registration,
-    # newfile_precedent (`new_file_destination` / `missing_role:*`) is deliberately
-    # ABSENT: a ripgrep row for a file that does not exist yet fabricates a world-fact
-    # in the grep grammar, and change_surface envelopes carry no native_args for the
-    # registration renderer. Its native FORM needs a real design (a suggestion is not
-    # a search hit) — until then the tagged/generic form is the honest carrier.
+    # Active list form: an apply-patch Add File header for a proposed destination, or a
+    # compiler note on the existing precedent/integration path for a missing role.
+    "new_file_destination": _render_newfile_precedent,
+    "missing_role": _render_newfile_precedent,
     # T0->T2 re-slot (2026-07-12): the ranked localization ANSWER renders native at D2. A
     # native_args-less envelope maps to "" -> _render_generic (byte-identical); the dispatch
     # is native-only, so the tagged/default path is unchanged. Only the GT_LOC_RESLOT
@@ -453,6 +468,10 @@ _NATIVE_CLASS_RENDERERS: dict[str, Callable[[EvidenceEnvelope], str]] = {
     "body_concept": _render_body_concept,
     "scope": _render_scope,
 }
+
+_NATIVE_QUIET_ON_ABSTAIN: frozenset[str] = frozenset({
+    "new_file_destination", "missing_role",
+})
 
 
 def _render_native_class(env: EvidenceEnvelope) -> str:

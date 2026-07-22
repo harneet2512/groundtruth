@@ -218,6 +218,28 @@ def test_atomic_append_removes_unowned_candidate_on_attachment_fault(monkeypatch
     assert rollbacks == ["once"]
 
 
+def test_gateway_batch_preparation_keeps_subject_path(monkeypatch):
+    """The formatter-stage SS screen and suppression row need the Gateway target."""
+    action = {"command": "grep -rn run ."}
+    out = {"output": "raw", "returncode": 0}
+    state = g._begin_observation_batch(
+        SimpleNamespace(), SimpleNamespace(), [action])
+    winner = SimpleNamespace(
+        evidence_type="def_ref_partition", target="pkg/mod_a.py",
+        dedup_key="gateway-subject", fact_id="run", tier="VERIFIED",
+        confidence=1.0, provenance=(("pkg/mod_a.py", 8),), lineage=None,
+    )
+    try:
+        assert g._register_batch_execute(state, action, out)
+        assert not g._global_pool_add_gateway(
+            state["pool"], winner, True, lambda: None,
+            ev_kind="search", rendered_text="pkg/mod_a.py:8:run", out=out)
+        candidate = state["pool"][0][0]
+        assert state["prepared"][id(candidate)]["krel"] == "pkg/mod_a.py"
+    finally:
+        g._clear_tool_observation_batch(state)
+
+
 def test_postformat_commit_fault_preserves_validated_visible_dose(monkeypatch):
     _wire_fake_candidates(monkeypatch)
     monkeypatch.setattr(

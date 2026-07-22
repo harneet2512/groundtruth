@@ -233,6 +233,58 @@ def test_two_flags_lattice_abstains_gateway_still_excluded(ambiguous, monkeypatc
     assert g._gt_gateway_chain_head == head_before
 
 
+def test_repeated_true_absence_hands_off_once_to_change_surface(tmp_path, monkeypatch):
+    """Profile-2's lattice yields only its qualified repeat-zero to the registered
+    change_surface producer: one physical record per probe, one lineaged delivery."""
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "aws.py").write_text(
+        "class AwsProvider:\n    pass\n", encoding="utf-8")
+    (providers / "gcp.py").write_text(
+        "class GcpProvider:\n    pass\n", encoding="utf-8")
+    (providers / "__init__.py").write_text(
+        "from .aws import AwsProvider\nfrom .gcp import GcpProvider\n"
+        "REGISTRY = {'aws': AwsProvider, 'gcp': GcpProvider}\n",
+        encoding="utf-8",
+    )
+    db = _mk_graph(tmp_path, [
+        {"id": 1, "name": "AwsProvider", "label": "Class",
+         "file_path": "providers/aws.py"},
+        {"id": 2, "name": "GcpProvider", "label": "Class",
+         "file_path": "providers/gcp.py"},
+    ])
+    _wire(tmp_path, monkeypatch, db, post_search=True)
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
+    monkeypatch.delenv("GT_GLOBAL_ARBITER", raising=False)
+    monkeypatch.setattr(
+        g, "_issue_text",
+        lambda: "Add azure provider support analogous to aws and gcp providers.",
+    )
+
+    first = _run("grep -rn azure .", "", rc=1)
+    assert first == ""
+    assert _ledger_outcomes("azure") == ["zero"]
+    assert g._gt_gateway_deliveries == []
+
+    second = _run("grep -rn azure .", "", rc=1)
+    assert _ledger_outcomes("azure") == ["zero", "zero"]
+    assert len(g._gt_gateway_deliveries) == 1
+    sealed = g._gt_gateway_deliveries[0]
+    assert sealed.producer == "change_surface"
+    assert sealed.evidence_type in ("new_file_destination", "missing_role:registration")
+    assert sealed.lineage is not None
+    assert sealed.lineage.runtime_producer_id == "change_surface"
+    assert sealed.lineage.fact_class == "newfile_precedent"
+    assert any(
+        ref.category == "CAP"
+        and ref.feature_id == "GT_CHANGE_SURFACE"
+        and ref.role == "byte_owner"
+        for ref in sealed.lineage.features
+    )
+    assert second and "azure" in second.lower()
+
+
 # --------------------------------------------------------------------------- #
 # PINNED LAW: the Gateway stays LIVE for non-search turns in the SAME episode.
 # --------------------------------------------------------------------------- #
@@ -312,6 +364,9 @@ def test_excluded_search_promotes_prior_receipt_like_gateway_alone(tmp_path, mon
     db = _mk_graph(tmp_path, [
         {"id": 1, "name": "get_user", "file_path": "a/x.py", "start_line": 10},
     ])
+    source = tmp_path / "a" / "x.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("\n" * 9 + "def get_user():\n    pass\n", encoding="utf-8")
     trace_out = ('Traceback (most recent call last):\n'
                  '  File "a/x.py", line 12, in get_user\nE: boom\n')
 
@@ -362,6 +417,9 @@ def test_excluded_search_touches_no_gateway_state_except_receipts(tmp_path, monk
     db = _mk_graph(tmp_path, [
         {"id": 1, "name": "get_user", "file_path": "a/x.py", "start_line": 10},
     ])
+    source = tmp_path / "a" / "x.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("\n" * 9 + "def get_user():\n    pass\n", encoding="utf-8")
     _wire(tmp_path, monkeypatch, db, post_search=True)
     monkeypatch.setenv("GT_GATEWAY", "1")
     # seed a prior trace_frame delivery -> the excluded grep will promote its receipt

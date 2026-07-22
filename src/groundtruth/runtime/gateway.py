@@ -1570,7 +1570,12 @@ def _namefold_hit(con, sym: str, root: str) -> tuple[str, dict] | None:
 # --------------------------------------------------------------------------- #
 # CLASSIFIER
 # --------------------------------------------------------------------------- #
-def classify_outcome(event: ToolEvent, state: GatewayState) -> str:
+def classify_outcome(
+    event: ToolEvent,
+    state: GatewayState,
+    *,
+    search_probe_recorded: bool = False,
+) -> str:
     """The acquisition-outcome classifier. Deterministic; may open graph.db read-only
     to distinguish the zero-classes and the hit-classes. Records search probes into the
     ledger (the ZERO_ABSENT repeat gate depends on probe history)."""
@@ -1585,8 +1590,14 @@ def classify_outcome(event: ToolEvent, state: GatewayState) -> str:
     sym = search_pattern(event.command)
     empty = _grep_result_empty(event.command, event.output or "")
     idx = event.action_index
-    for tok in _search_probe_tokens(event.command):
-        _ledger_record(state, tok, idx, "zero" if empty else "hit")
+    # The live mini seam's post-search lattice and the Gateway share ONE episode
+    # ledger.  A narrowly handed-off repeated-absence search has already been
+    # recorded by that lattice; recording it again would turn one physical probe
+    # into two observations and false-trigger repeat logic.  Direct Gateway users
+    # retain the historical default and record here.
+    if not search_probe_recorded:
+        for tok in _search_probe_tokens(event.command):
+            _ledger_record(state, tok, idx, "zero" if empty else "hit")
 
     if not sym:
         return SATISFIED  # non-bare / regex / path grep -> nothing to complete
@@ -2393,13 +2404,14 @@ def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[Evidence
 # caller-break (l3.contract / l3b.evidence) can retire under an EQUIVALENT gateway delivery.
 # It reads graph.db's CALLS edges (tree-sitter, ALL languages) — so it delivers on a Go /
 # Rust / TS / JS edit, the exact case ``patch_delta.analyze_patch_delta`` cannot (ast-only,
-# _SCAN_EXTS = {.py,.pyi}). PURE text signature-change detection (no ast): the parameter-
-# IDENTITY list of a keyword-headed definition (``def``/``func``/``fn``/``function`` …),
-# extracted the SAME way from BEFORE and AFTER, so the comparison is source-symmetric.
+# _SCAN_EXTS = {.py,.pyi}). Source-symmetric signature detection compares parameter
+# identities from keyword-headed definitions directly; bare TS/JS class methods additionally
+# require a unique graph Method->Class anchor plus a source-proven declaration body.
 # --------------------------------------------------------------------------- #
 # A keyword-headed definition head: an optional def keyword, an optional Go receiver
-# ``(r *T) ``, then ``name(``. Cross-language by the union of def keywords (a TS/JS class
-# METHOD with no keyword is intentionally out of scope -> correct-or-quiet, not a false break).
+# ``(r *T) ``, then ``name(``. Cross-language by the union of def keywords.  Bare TS/JS
+# class methods are handled separately below, where a graph Method->Class anchor makes
+# the source shape provable; this broad regex must never be relaxed to match calls.
 _DEF_HEAD_RE = re.compile(
     r"(?:^|[^.\w])"
     r"(?:def|func|fn|function|fun|proc|sub)\s+"
@@ -2470,6 +2482,130 @@ def _defs_params(content: str) -> dict[str, list[str]]:
         if idents is not None:
             out[name] = idents
     return out
+
+
+_JS_TS_EXTS = frozenset({".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"})
+_CLASS_METHOD_PREFIX_RE = re.compile(
+    r"(?:public\s+|private\s+|protected\s+|static\s+|async\s+|override\s+|"
+    r"declare\s+|abstract\s+|get\s+|set\s+|readonly\s+)*"
+    r"\*?\s*"
+)
+
+
+def _class_method_params_at_line(
+    content: str, line: int, name: str,
+) -> list[str] | None:
+    """Return params for one graph-anchored JS/TS class method declaration.
+
+    The declaration must begin on the graph node's exact source line and have a real
+    method body.  Requiring the post-parameter ``{`` rejects ``obj.name(...)``, bare
+    ``name(...)`` call statements, fields/arrow functions, and overload declarations.
+    Unsupported multiline/type shapes abstain rather than broadening the parser.
+    """
+    if line <= 0 or not name or not content:
+        return None
+    lines = content.splitlines(keepends=True)
+    if line > len(lines):
+        return None
+    start = sum(len(item) for item in lines[:line - 1])
+    source_line = lines[line - 1]
+    indent = len(source_line) - len(source_line.lstrip())
+    head = start + indent
+    prefix = _CLASS_METHOD_PREFIX_RE.match(content, head)
+    if prefix is None:
+        return None
+    cursor = prefix.end()
+    if not content.startswith(name, cursor):
+        return None
+    cursor += len(name)
+    if cursor < len(content) and (content[cursor].isalnum() or content[cursor] in "_$"):
+        return None
+    # Optional TS method marker and a conservative, single-line generic parameter list.
+    if cursor < len(content) and content[cursor] == "?":
+        cursor += 1
+    while cursor < len(content) and content[cursor] in " \t":
+        cursor += 1
+    if cursor < len(content) and content[cursor] == "<":
+        generic_end = content.find(">", cursor + 1)
+        line_end = start + len(source_line)
+        if generic_end < 0 or generic_end >= line_end:
+            return None
+        cursor = generic_end + 1
+        while cursor < len(content) and content[cursor] in " \t":
+            cursor += 1
+    if cursor >= len(content) or content[cursor] != "(":
+        return None
+    params = _balanced_parens(content, cursor)
+    if params is None:
+        return None
+    # Find the matching close again so the declaration suffix can be proven.  A class
+    # method implementation must open a body; a call or overload ending in ';' is quiet.
+    depth = 0
+    close = -1
+    for idx in range(cursor, len(content)):
+        if content[idx] == "(":
+            depth += 1
+        elif content[idx] == ")":
+            depth -= 1
+            if depth == 0:
+                close = idx
+                break
+    if close < 0:
+        return None
+    suffix = content[close + 1:content.find("\n", close + 1)
+                     if "\n" in content[close + 1:] else len(content)]
+    if not re.match(r"\s*(?::\s*[^;={}]+)?\s*\{", suffix):
+        return None
+    return _param_idents(params)
+
+
+def _graph_class_method_params(
+    con: sqlite3.Connection, content: str, rel: str,
+) -> dict[str, list[str]]:
+    """Unique graph-proven JS/TS ``Method`` declarations in ``rel``.
+
+    A same-name overload/redefinition is ambiguous and intentionally omitted.  The
+    graph supplies identity, parent class, language family, and source line; source
+    parsing only confirms the declaration at that exact anchor.
+    """
+    if os.path.splitext(rel.lower())[1] not in _JS_TS_EXTS:
+        return {}
+    try:
+        rows = con.execute(
+            "SELECT n.name,n.start_line FROM nodes n "
+            "JOIN nodes p ON p.id=n.parent_id "
+            "WHERE n.file_path=? AND n.label='Method' AND p.label='Class' "
+            "AND COALESCE(n.is_test,0)=0 AND COALESCE(n.start_line,0)>0 "
+            "ORDER BY n.name,n.start_line,n.id",
+            (rel,),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    grouped: dict[str, list[int]] = {}
+    for name, line in rows:
+        if isinstance(name, str) and name and isinstance(line, int):
+            grouped.setdefault(name, []).append(line)
+    out: dict[str, list[str]] = {}
+    for name, lines in grouped.items():
+        if len(lines) != 1:
+            continue
+        params = _class_method_params_at_line(content, lines[0], name)
+        if params is not None:
+            out[name] = params
+    return out
+
+
+def _definition_param_maps(
+    con: sqlite3.Connection, before: str, after: str, rel: str,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Source-symmetric signature maps with graph-proven bare class methods added."""
+    before_params = _defs_params(before)
+    after_params = _defs_params(after)
+    for name, params in _graph_class_method_params(con, before, rel).items():
+        before_params.setdefault(name, params)
+    for name, params in _graph_class_method_params(con, after, rel).items():
+        after_params.setdefault(name, params)
+    return before_params, after_params
 
 
 def _sig_changed_symbols(before: str, after: str) -> list[str]:
@@ -2648,12 +2784,13 @@ def _source_state_for_file(
 
 def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     """The CROSS-LANGUAGE caller-contract break on a signature-changing edit. For each edited
-    file whose function/method changed its parameter list (pure-text before/after diff), if
+    file whose function/method changed its parameter list (source-symmetric before/after), if
     the changed symbol has >=1 FACT-tier cross-file caller in graph.db, emit a ``caller_break``
     envelope (aliases to the registered ``caller_contract`` class; delivered at ``edit_result``
     per the registry boundary override). Correct-or-quiet: no before/after, no graph, no
     detectable signature change, or no cross-file caller -> []. Works on Go/Rust/TS/JS/Python
-    because it reads the tree-sitter CALLS graph, NOT a Python ast."""
+    because it reads the tree-sitter CALLS graph, NOT a Python ast. Bare TS/JS methods are
+    admitted only with a unique graph class-method anchor and matching declaration source."""
     eba = event.edit_before_after
     if not eba:
         return []
@@ -2664,12 +2801,20 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
     try:
         for cf, ba in sorted(eba.items()):
             before, after = ba if isinstance(ba, tuple) else (None, ba)
-            before_parameters = _defs_params(before or "")
-            after_parameters = _defs_params(after or "")
             rel = _norm_fp(_to_repo_rel(cf, state.repo_root))
             if not rel or _is_leaky(rel):
                 continue
-            for sym in _sig_changed_symbols(before or "", after or ""):
+            before_text, after_text = before or "", after or ""
+            if not before_text or not after_text:
+                continue
+            before_parameters, after_parameters = _definition_param_maps(
+                con, before_text, after_text, rel)
+            changed_symbols = sorted(
+                name for name in after_parameters
+                if name in before_parameters
+                and after_parameters[name] != before_parameters[name]
+            )
+            for sym in changed_symbols:
                 sites = _fact_callers_of_symbol_in_file(con, sym, rel, state.repo_root)
                 if not sites:
                     continue
@@ -2990,7 +3135,12 @@ def delivery_latch_key(kind: str, file: str, graph_revision: str) -> str:
 # --------------------------------------------------------------------------- #
 # ENTRY POINT
 # --------------------------------------------------------------------------- #
-def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+def augment(
+    event: ToolEvent,
+    state: GatewayState,
+    *,
+    search_probe_recorded: bool = False,
+) -> list[EvidenceEnvelope]:
     """Complete one tool observation with deterministic facts. ``[]`` when the master
     flag is off, when the outcome needs nothing, or when every producer abstains."""
     if not _gateway_on():
@@ -3010,7 +3160,8 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
             "blob": "\n".join(parts).lower(),
         })
 
-    outcome = classify_outcome(event, state)
+    outcome = classify_outcome(
+        event, state, search_probe_recorded=search_probe_recorded)
 
     additions: list[EvidenceEnvelope] = []
     edit_bridge_candidates: list[EvidenceEnvelope] = []

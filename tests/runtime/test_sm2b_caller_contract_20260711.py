@@ -44,11 +44,11 @@ def _mk_graph(tmp_path, nodes, edges, name="graph.db"):
         " confidence REAL, metadata TEXT);")
     for n in nodes:
         con.execute(
-            "INSERT INTO nodes(id,label,name,file_path,start_line,end_line,is_test,language)"
-            " VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO nodes(id,label,name,file_path,start_line,end_line,is_test,language,parent_id)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
             (n["id"], n.get("label", "Function"), n["name"], n["file_path"],
              n.get("start_line", 1), n.get("end_line", 5), n.get("is_test", 0),
-             n.get("language", "python")))
+             n.get("language", "python"), n.get("parent_id")))
     for e in edges:
         con.execute(
             "INSERT INTO edges(id,source_id,target_id,type,source_line,resolution_method,"
@@ -82,6 +82,25 @@ def _go_caller_graph(tmp_path):
         {"id": 2, "name": "main", "file_path": "main.go", "language": "go"},
     ], [{"id": 1, "source_id": 2, "target_id": 1, "resolution_method": "import",
          "confidence": 1.0}])
+
+
+def _ts_class_caller_graph(tmp_path, *, overloads=1):
+    nodes = [
+        {"id": 1, "label": "Class", "name": "Client", "file_path": "src/client.ts",
+         "start_line": 1, "end_line": 8, "language": "typescript"},
+        {"id": 10, "name": "useClient", "file_path": "app/main.ts",
+         "language": "typescript"},
+    ]
+    for offset in range(overloads):
+        nodes.append({
+            "id": 2 + offset, "label": "Method", "name": "request",
+            "file_path": "src/client.ts", "start_line": 2 + offset,
+            "end_line": 6, "language": "typescript", "parent_id": 1,
+        })
+    return _mk_graph(tmp_path, nodes, [{
+        "id": 1, "source_id": 10, "target_id": 2,
+        "resolution_method": "import", "confidence": 1.0,
+    }])
 
 
 # =========================================================================== #
@@ -161,6 +180,84 @@ def test_go_signature_change_delivers_caller_break_that_patch_delta_cannot(tmp_p
     # patch_delta (the ONLY prior edit-caller producer) is ast-only -> NOTHING on Go
     assert gw._produce_patch_delta(ev, st) == [], (
         "patch_delta must be silent on a .go edit — that is the gap caller_contract fills")
+
+
+def test_typescript_graph_proven_class_method_signature_change_delivers(tmp_path, monkeypatch):
+    """A unique tree-sitter Method->Class node closes the bare-method blindness."""
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    db = _ts_class_caller_graph(tmp_path)
+    before = "class Client {\n  async request(url: string) {\n    return url;\n  }\n}\n"
+    after = (
+        "class Client {\n  async request(url: string, timeoutMs: number) {\n"
+        "    return url;\n  }\n}\n"
+    )
+    ev = _edit_ev("src/client.ts", before, after)
+    envs = gw._produce_caller_contract(
+        ev, gw.GatewayState(graph_db=db, repo_root=str(tmp_path)))
+    assert len(envs) == 1
+    assert envs[0].fact_id == "request"
+    change = envs[0].producer_inputs.signature_changes[0]
+    assert change.before_parameters == ("url",)
+    assert change.after_parameters == ("url", "timeoutMs")
+    assert envs[0].provenance == (("app/main.ts", 3),)
+
+
+def test_javascript_graph_proven_class_method_signature_change_delivers(tmp_path, monkeypatch):
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    db = _mk_graph(tmp_path, [
+        {"id": 1, "label": "Class", "name": "Client", "file_path": "src/client.js",
+         "start_line": 1, "end_line": 5, "language": "javascript"},
+        {"id": 2, "label": "Method", "name": "request", "file_path": "src/client.js",
+         "start_line": 2, "end_line": 4, "language": "javascript", "parent_id": 1},
+        {"id": 3, "name": "useClient", "file_path": "app/main.js",
+         "language": "javascript"},
+    ], [{
+        "id": 1, "source_id": 3, "target_id": 2,
+        "resolution_method": "import", "confidence": 1.0,
+    }])
+    before = "class Client {\n  request(url) { return url; }\n}\n"
+    after = "class Client {\n  request(url, timeoutMs) { return url; }\n}\n"
+    ev = _edit_ev("src/client.js", before, after)
+    envs = gw._produce_caller_contract(
+        ev, gw.GatewayState(graph_db=db, repo_root=str(tmp_path)))
+    assert len(envs) == 1 and envs[0].fact_id == "request"
+    assert envs[0].provenance == (("app/main.js", 3),)
+
+
+@pytest.mark.parametrize("after_line", [
+    "  this.request(url, timeoutMs);",
+    "  request(url, timeoutMs);",
+    "  const request = (url, timeoutMs) => url;",
+])
+def test_typescript_call_or_field_expression_at_graph_line_is_quiet(
+    tmp_path, monkeypatch, after_line,
+):
+    """A stale Method anchor cannot upgrade calls or arrow fields into definitions."""
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    db = _ts_class_caller_graph(tmp_path)
+    before = "class Client {\n  request(url: string) {\n    return url;\n  }\n}\n"
+    after = f"class Client {{\n{after_line}\n}}\n"
+    ev = _edit_ev("src/client.ts", before, after)
+    assert gw._produce_caller_contract(
+        ev, gw.GatewayState(graph_db=db, repo_root=str(tmp_path))) == []
+
+
+def test_typescript_overload_or_duplicate_method_nodes_are_quiet(tmp_path, monkeypatch):
+    """Same-name graph nodes are ambiguous, even if one source line looks executable."""
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    db = _ts_class_caller_graph(tmp_path, overloads=3)
+    before = (
+        "class Client {\n  request(url: string): string;\n"
+        "  request(url: URL): string;\n  request(url: string | URL) { return ''; }\n}\n"
+    )
+    after = (
+        "class Client {\n  request(url: string, timeoutMs: number): string;\n"
+        "  request(url: URL, timeoutMs: number): string;\n"
+        "  request(url: string | URL, timeoutMs: number) { return ''; }\n}\n"
+    )
+    ev = _edit_ev("src/client.ts", before, after)
+    assert gw._produce_caller_contract(
+        ev, gw.GatewayState(graph_db=db, repo_root=str(tmp_path))) == []
 
 
 def test_m3_ast_only_regression_bites_on_go(tmp_path, monkeypatch):

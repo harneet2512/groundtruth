@@ -124,12 +124,9 @@ def _timing(
         # unobservable — the join could not name what happened — so it stays UNMEASURED
         # (fail-closed, unchanged). This is the ONLY event path that remains UNMEASURED.
         return UNMEASURED, wanted
-    # F (covering dual-label — DO NOT "fix"): the seam stamps ``covering_red`` deliveries with
-    # actual_event='test_result' (the canonical class label) while the registry override routes
-    # required_event('covering_red')='edit_result'; because covering_red ∈ _REACTIVE_EVIDENCE_TYPES,
-    # is_reactive() is True here and the wrong-event check below is deliberately bypassed — the
-    # RED is on-time-by-construction at the edit it targets. This is the intended contract; the
-    # WRONG_EVENT split intentionally does NOT apply to reactive types.
+    # Only genuinely observation-reactive types bypass the fixed-event comparison. The seam's
+    # covering_red names its post-edit observation directly and therefore takes this ordinary
+    # wrong-event path if its lineage ever drifts back to the producer-internal test event.
     if not is_reactive(evidence_type) and actual_event != wanted:
         # C-cluster split: the event is KNOWN (in the vocabulary) but is the WRONG boundary for
         # a NON-reactive class — GT answered the wrong decision. That is a measured timing

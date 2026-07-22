@@ -14,7 +14,7 @@ from typing import Any, Mapping
 
 from .covering_runner import CoveringAttribution
 from .evidence_envelope import EvidenceEnvelope
-from .fact_registry import EVENT_EDIT_RESULT, EVENT_TEST_RESULT, registration_for, required_event
+from .fact_registry import EVENT_EDIT_RESULT, registration_for, required_event
 from .producer_attestation import (
     ATTESTATION_SCHEMA,
     FRESHNESS,
@@ -375,7 +375,7 @@ def finalize_covering_attestation(
             and bool(source.revision)
             for source in candidate.edited_sources
         )
-        and candidate.actual_event == EVENT_TEST_RESULT
+        and candidate.actual_event == EVENT_EDIT_RESULT
         and candidate.rendered_sha256_16 == _sha(rendered_bytes)[:16]
         and candidate.rendered_chars == len(producer_block)
         and candidate.rendered_bytes_length == len(rendered_bytes)

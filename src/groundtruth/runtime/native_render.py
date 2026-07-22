@@ -764,6 +764,68 @@ def render_registration_native(
     return _final_scrub(out, tf)
 
 
+_NEWFILE_ROLE_LABELS: dict[str, str] = {
+    "implementation": "implementation",
+    "config_schema": "config/schema",
+    "registration": "registration",
+}
+_NEWFILE_ENTITY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+
+
+def render_newfile_precedent_native(
+    path: str,
+    entity: str,
+    *,
+    role: str | None = None,
+    test_files: list[str] | set[str] | None = None,
+) -> str:
+    r"""Render one ``newfile_precedent`` change surface in an active native form.
+
+    A destination is an apply-patch ``*** Add File:`` header: it names an action on a proposed
+    path without pretending the absent file was a grep hit. A missing role is a compiler-style
+    ``note:`` on the existing precedent/integration path. The finite role vocabulary comes from
+    ``change_surface``; no producer prose is parsed or repeated.
+
+    Correct-or-quiet: malformed paths/entities, unknown roles, test surfaces, traversal, and
+    identity-bearing fields emit nothing.
+    """
+    raw_path = _cap(path).strip()
+    ent = _cap(entity).strip()
+    if (
+        not raw_path
+        or not ent
+        or "\n" in raw_path
+        or "\r" in raw_path
+        or not _NEWFILE_ENTITY_RE.fullmatch(ent)
+        or prose_leaks_test_identity(ent)
+    ):
+        return ""
+    slash_path = raw_path.replace("\\", "/")
+    if slash_path.startswith("/") or re.match(r"^[A-Za-z]:/", slash_path):
+        return ""
+    if any(part in ("", ".", "..") for part in slash_path.split("/")):
+        return ""
+    normalized = _norm(slash_path)
+    tf = {_norm(item) for item in (test_files or [])}
+    if not normalized or _is_test_path(normalized, tf):
+        return ""
+
+    if role is None:
+        out = f"*** Add File: {normalized}"
+    else:
+        label = _NEWFILE_ROLE_LABELS.get(str(role or ""))
+        if label is None:
+            return ""
+        if role == "registration":
+            out = f"{normalized}: note: add '{ent}' registration here"
+        else:
+            out = f"{normalized}: note: add '{ent}' {label} beside this precedent"
+    rendered = _final_scrub(out, tf)
+    if contains_gt_tag(rendered) or contains_test_identity(rendered, tf):
+        return ""
+    return rendered
+
+
 def render_def_rows_native(
     rows: Any,
     *,

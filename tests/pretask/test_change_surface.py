@@ -26,6 +26,7 @@ from groundtruth.pretask.change_surface import (
     MissingRole,
     detect_change_surface,
 )
+from groundtruth.pretask.change_surface import _Group, _entity_links_group
 
 # ---------------------------------------------------------------------------
 # fixture builders
@@ -380,6 +381,53 @@ def test_unrelated_issue_does_not_emit(tmp_path, monkeypatch):
     assert r.destinations == []
 
 
+def test_instructional_verbs_near_category_do_not_mint_entities(tmp_path, monkeypatch):
+    """Repository-audit prose is not a request to add a new family member."""
+    monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
+    root, db = _python_provider_repo(tmp_path)
+    issue = (
+        "Before editing, audit provider behavior and trace provider calls. "
+        "Verify provider contracts after the repair.\n"
+    )
+
+    r = detect_change_surface(issue, root, db)
+
+    assert r.entities == []
+    assert r.missing_roles == [] and r.destinations == []
+    assert r.abstained is True
+
+
+def test_negated_feature_addition_does_not_mint_destination(tmp_path, monkeypatch):
+    """A forbidden addition is the opposite of a missing change surface."""
+    monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
+    root, db = _python_provider_repo(tmp_path)
+
+    r = detect_change_surface(
+        "Do not add an azure provider; only repair the existing AWS provider.\n",
+        root,
+        db,
+    )
+
+    assert r.entities == []
+    assert r.missing_roles == [] and r.destinations == []
+    assert r.abstained is True
+
+
+def test_connector_after_added_symbol_is_not_a_category(tmp_path, monkeypatch):
+    """A conjunction is prose structure, never a mined feature-family category."""
+    monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
+    root, db = _python_provider_repo(tmp_path)
+
+    r = detect_change_surface("Add telemetry and provider diagnostics.\n", root, db)
+
+    assert r.entities == []
+    assert r.missing_roles == [] and r.destinations == []
+    assert r.abstained is True
+
+    connector_group = _Group(slots=[], fixed_tokens={"and"})
+    assert not _entity_links_group("telemetry", ["add", "telemetry", "and"], connector_group)
+
+
 # ---------------------------------------------------------------------------
 # BOUNCE F2 — a bare English adjective before the category noun must NOT mint
 # an entity. Adjacency alone is ONE signal; the entity needs an independent
@@ -429,6 +477,20 @@ def test_novel_token_azure_still_mints(tmp_path, monkeypatch):
     for mr in r.missing_roles:
         assert "issue_adjacency" in mr.signals, mr.signals
         assert "novel_token" in mr.signals, mr.signals
+
+
+def test_analogy_exemplars_are_not_requested_entities(tmp_path, monkeypatch):
+    """The add/support governor stops at ``like``; aws/gcp are evidence for
+    azure, not additional requested destinations."""
+    monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
+    root = _adjective_repo(tmp_path)
+
+    r = detect_change_surface(
+        "Add azure provider support like aws and gcp providers.\n", root, None
+    )
+
+    assert r.entities == ["azure"], r.entities
+    assert {d.entity for d in r.destinations} == {"azure"}
 
 
 def test_partial_hole_entity_admitted_via_membership(tmp_path, monkeypatch):
@@ -536,3 +598,102 @@ def test_ref_pattern_casing_boundaries():
     for hay in ("awesome sauce", "flaws happen", "AWSOME_CONSTANT = 1"):
         assert not p.search(hay), f"unexpected match in {hay!r}"
     assert not _ref_pattern("cat").search("CATALOG = []")
+
+
+# ---------------------------------------------------------------------------
+# Real repository shapes: compound feature names and repeated directory/file
+# member slots.  These are general convention fixtures, not task-ID fixtures.
+# ---------------------------------------------------------------------------
+
+
+def test_compound_explicit_name_extends_existing_rule_member(tmp_path, monkeypatch):
+    """A named rule variant extends ``rule_action.go``; ``lint`` is the
+    category modifier, not the new member and must never become ``rule_lint.go``.
+    """
+    monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
+    _w(tmp_path, "rule_action.go", "package actionlint\ntype RuleAction struct{}\n")
+    _w(tmp_path, "rule_expression.go", "package actionlint\ntype RuleExpression struct{}\n")
+    _w(tmp_path, "rule_if.go", "package actionlint\ntype RuleIf struct{}\n")
+    _w(
+        tmp_path,
+        "popular_actions.go",
+        "package actionlint\n"
+        "var PopularActions = []string{\n"
+        "  \"action\",\n  \"action\",\n  \"expression\",\n"
+        "  \"expression\",\n  \"if\",\n  \"if\",\n}\n",
+    )
+    _w(
+        tmp_path,
+        "linter.go",
+        "package actionlint\nvar rules = []any{NewRuleAction(), "
+        "NewRuleExpression(), NewRuleIf()}\n",
+    )
+    issue = (
+        "Add a lint rule with error kind `action-pinning` that checks action "
+        "references for version pinning.\n"
+    )
+
+    r = detect_change_surface(issue, str(tmp_path), None)
+
+    paths = {d.suggested_path.replace("\\", "/") for d in r.destinations}
+    assert "rule_action_pinning.go" in paths, r.destinations
+    assert "rule_lint.go" not in paths, r.destinations
+    assert "lint" not in r.entities, r.entities
+    assert _roles_for(r, "action-pinning") == {
+        ROLE_IMPLEMENTATION,
+        ROLE_REGISTRATION,
+    }
+    reg = _mr(r, "action-pinning", ROLE_REGISTRATION)
+    assert reg.registration_file == "linter.go"
+
+
+def test_negated_compound_feature_name_does_not_extend_rule_family(
+    tmp_path, monkeypatch
+):
+    """Quoted code spelling remains quiet when its local clause forbids it."""
+    monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
+    for member in ("action", "expression", "if"):
+        _w(
+            tmp_path,
+            f"rule_{member}.go",
+            f"package rules\ntype Rule{member.title()} struct{{}}\n",
+        )
+
+    r = detect_change_surface(
+        "Do not add a lint rule named `action-pinning`; repair rule_action.go instead.\n",
+        str(tmp_path),
+        None,
+    )
+
+    assert r.entities == []
+    assert r.destinations == [] and r.missing_roles == []
+    assert r.abstained is True
+
+
+def test_repeated_member_directory_and_file_beats_flat_type_distractor(
+    tmp_path, monkeypatch
+):
+    """When repo convention repeats the member in directory + filename, infer
+    that structural family instead of a flat same-word type destination.
+    """
+    monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
+    for member in ("parse", "pipe", "fallback"):
+        _w(tmp_path, f"library/src/methods/{member}/index.ts", "export {};\n")
+        _w(
+            tmp_path,
+            f"library/src/methods/{member}/{member}.ts",
+            f"export function {member}() {{}}\n",
+        )
+    for member in ("config", "issue", "schema"):
+        _w(tmp_path, f"library/src/types/{member}.ts", f"export type {member} = unknown;\n")
+    issue = (
+        "Add first-class recursive schema composition. The public API should "
+        "include recursive(...) and recursiveAsync(...) wrappers, all available "
+        "from the public methods surface.\n"
+    )
+
+    r = detect_change_surface(issue, str(tmp_path), None)
+
+    paths = {d.suggested_path.replace("\\", "/") for d in r.destinations}
+    assert "library/src/methods/recursive/recursive.ts" in paths, r.destinations
+    assert "library/src/types/recursive.ts" not in paths, r.destinations

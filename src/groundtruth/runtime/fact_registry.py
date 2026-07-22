@@ -25,9 +25,9 @@ render GATE is now WIRED (Graph-F2, bounce 2026-07-10): :func:`groundtruth.runti
 augment` drops any addition whose ``evidence_type`` is not :func:`renderable`. Because the
 Gateway emits a FINER vocabulary than the 11 §1 keys, :data:`_EVIDENCE_TYPE_ALIASES` bridges
 each shipped ``evidence_type`` to its canonical class so :func:`renderable` passes every
-legit fact and blocks only a truly-unregistered type. Timing/dose/surface consumption of
-:attr:`FactRegistration.deliver_by` / :attr:`~FactRegistration.max_dose` /
-:attr:`~FactRegistration.surface` remains future work.
+legit fact and blocks only a truly-unregistered type. Producer, timing, surface, and renderer
+authority are resolved together by the executable authority accessors below; the delivery
+kernel owns dose enforcement.
 
 PURE · DETERMINISTIC · LLM-FREE · stdlib-only. No time, no randomness, no I/O.
 
@@ -50,13 +50,16 @@ from dataclasses import dataclass, field
 
 __all__ = [
     "FactRegistration",
+    "EvidenceTypeAuthority",
     "REGISTRY",
     "registration",
     "registration_for",
+    "authority_for",
     "producer_matches",
     "required_event",
     "earliest_event_for",
     "required_renderer",
+    "required_surface",
     "ack_expected",
     "is_reactive",
     "freshness_surfaces",
@@ -123,7 +126,8 @@ EVENTS: frozenset[str] = frozenset(
 
 # Surfaces = the §1 surface column (which delivery channel carries the fact).
 SURFACES: frozenset[str] = frozenset(
-    {"brief", "post_search", "post_view", "post_edit", "post_test", "submit", "steer"}
+    {"brief", "post_search", "post_view", "post_edit", "post_test", "submit", "steer",
+     "reactive"}
 )
 
 # Native renderers = the §1 native_renderer column (the native FORM the fact takes so it
@@ -139,6 +143,9 @@ RENDERERS: frozenset[str] = frozenset(
         "test-native",
         "list",
         "imperative",
+        "trace-native",
+        "linter-native",
+        "change-native",
     }
 )
 
@@ -193,6 +200,24 @@ class FactRegistration:
     # when they retain a downstream-effect predicate. Read by ack-metrics telemetry; the
     # delivery kernel never branches on it, so it cannot alter a single delivered byte.
     ack_expected: bool = True
+
+
+@dataclass(frozen=True)
+class EvidenceTypeAuthority:
+    """Resolved authority for one shipped evidence type.
+
+    A canonical FACT row declares the shared decision/proof contract. A finer evidence type
+    can have a different producer, observation boundary, delivery surface, and native form.
+    Keeping those four values together prevents a timing override from silently retaining an
+    unrelated coarse surface or renderer.
+    """
+
+    fact_class: str
+    producers: tuple[str, ...]
+    earliest_event: str
+    deliver_by: str
+    surface: str
+    native_renderer: str
 
 
 def _reg(
@@ -268,7 +293,7 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         # brief.txt directly), so this data change does not disturb the baked-brief delivery.
         earliest_event=EVENT_SEARCH_RESULT,
         deliver_by=EVENT_SEARCH_RESULT,       # §1 re-slot: task_start -> search_result (D2)
-        surface="brief",
+        surface="post_search",
         native_renderer="ranked-list",
         max_dose="small",                     # §1: small
         freshness_deps=("nodes", "edges", "content_rev"),  # §1: nodes+edges+content_rev
@@ -720,19 +745,11 @@ _EVIDENCE_TYPE_DELIVER_BY: dict[str, str] = {
 # ``trace_frame`` must NOT be pinned to its canonical ``localization`` task_start boundary:
 # it is a reactive failure-observation localizer, not a step-0 brief.
 #
-# B-BND (b2): ``covering_red`` (the SEAM's executed covering RED) is ALSO on-time BY
-# CONSTRUCTION — GT runs the covering test and delivers the verdict SYNCHRONOUSLY into the same
-# post_edit observation, so it can never be LATE relative to the edit it targets. The seam,
-# however, stamps the delivered row's ``actual_event='test_result'`` (the canonical class
-# label) even though it delivers at the edit boundary; without reactive treatment the
-# adjudicator's non-reactive ``actual_event != required_event`` check (edit_result vs
-# test_result) would reject a genuinely on-time covering RED. Marking it reactive is the same
-# on-time-by-construction relaxation as trace_frame and is INERT on both live paths: the GATEWAY
-# reactive branch (gateway.route_delivery) only ever sees ``covering_verdict`` (never
-# ``covering_red``), and the seam's ``_ga_is_preventive`` gate already returns False for the
-# ``executed_world_fact`` ladder class (∉ _GA_PREVENTIVE_CLASSES) — so this cannot suppress or
-# re-time a single live delivery.
-_REACTIVE_EVIDENCE_TYPES: frozenset[str] = frozenset({"trace_frame", "covering_red"})
+# The seam's executed ``covering_red`` is deliberately absent: although GT internally runs a
+# test to produce the fact, the model observes it at the fixed post-edit boundary declared by
+# ``_EVIDENCE_TYPE_DELIVER_BY`` above. Its lineage names that real ``edit_result`` observation,
+# so ordinary wrong-event enforcement applies without an exemption.
+_REACTIVE_EVIDENCE_TYPES: frozenset[str] = frozenset({"trace_frame"})
 
 
 def registration_for(evidence_type: str) -> "FactRegistration | None":
@@ -764,18 +781,61 @@ _EVIDENCE_TYPE_PRODUCERS: dict[str, frozenset[str]] = {
 }
 
 
+# Fine evidence types may share a decision/proof class while riding a different physical
+# observation channel or native grammar. These are declarations of existing delivery, not new
+# eligibility. Missing entries deliberately inherit the canonical FACT registration.
+_EVIDENCE_TYPE_SURFACES: dict[str, str] = {
+    "brief_localization": "brief",
+    "obligation_unexercised": "post_test",
+    "trace_frame": "reactive",
+    "caller_break": "post_edit",
+    "caller_contract_search": "post_search",
+    "covering_red": "post_edit",
+    "covering_verdict": "post_test",
+}
+
+_EVIDENCE_TYPE_RENDERERS: dict[str, str] = {
+    "trace_frame": "trace-native",
+    "signature_mismatch": "compiler-native",
+    "companion_surface": "linter-native",
+    "caller_contract_search": "grep-native",
+    "new_file_destination": "change-native",
+    "missing_role": "change-native",
+}
+
+
+def _fine_value(table: dict[str, str], evidence_type: str) -> str | None:
+    et = (evidence_type or "").strip()
+    return table.get(et) or table.get(_base_fact_class(et))
+
+
+def authority_for(evidence_type: str) -> "EvidenceTypeAuthority | None":
+    """Resolve the exact producer/timing/surface/render authority for a shipped type."""
+    reg = registration_for(evidence_type)
+    if reg is None:
+        return None
+    et = (evidence_type or "").strip()
+    evidence_base = _base_fact_class(et)
+    producers = _EVIDENCE_TYPE_PRODUCERS.get(
+        et, _EVIDENCE_TYPE_PRODUCERS.get(evidence_base, frozenset({reg.producer})))
+    boundary = _fine_value(_EVIDENCE_TYPE_DELIVER_BY, et)
+    return EvidenceTypeAuthority(
+        fact_class=reg.fact_class,
+        producers=tuple(sorted(producers)),
+        earliest_event=boundary or reg.earliest_event,
+        deliver_by=boundary or reg.deliver_by,
+        surface=_fine_value(_EVIDENCE_TYPE_SURFACES, et) or reg.surface,
+        native_renderer=_fine_value(_EVIDENCE_TYPE_RENDERERS, et) or reg.native_renderer,
+    )
+
+
 def producer_matches(evidence_type: str, runtime_producer_id: str) -> bool:
     """Whether a runtime producer is authoritative for this evidence type."""
 
-    reg = registration_for(evidence_type)
-    if reg is None or not runtime_producer_id:
+    authority = authority_for(evidence_type)
+    if authority is None or not runtime_producer_id:
         return False
-    evidence_base = (evidence_type or "").strip().split(":", 1)[0]
-    allowed = _EVIDENCE_TYPE_PRODUCERS.get(
-        evidence_type,
-        _EVIDENCE_TYPE_PRODUCERS.get(evidence_base, frozenset({reg.producer})),
-    )
-    return runtime_producer_id in allowed
+    return runtime_producer_id in authority.producers
 
 
 def required_event(evidence_type: str) -> str | None:
@@ -783,30 +843,16 @@ def required_event(evidence_type: str) -> str | None:
     shipped ``evidence_type``, or ``None`` when unregistered. Honors the per-evidence-type
     boundary override (:data:`_EVIDENCE_TYPE_DELIVER_BY`) so a finer type whose real boundary
     differs from its canonical class reports its OWN boundary."""
-    reg = registration_for(evidence_type)
-    if reg is None:
-        return None
-    et = (evidence_type or "").strip()
-    return (
-        _EVIDENCE_TYPE_DELIVER_BY.get(et)
-        or _EVIDENCE_TYPE_DELIVER_BY.get(_base_fact_class(et))
-        or reg.deliver_by
-    )
+    authority = authority_for(evidence_type)
+    return authority.deliver_by if authority is not None else None
 
 
 def earliest_event_for(evidence_type: str) -> str | None:
     """The EARLIEST boundary a shipped ``evidence_type`` may deliver at (``earliest_event``),
     or ``None`` unregistered. Honors the same per-type override as :func:`required_event`
     (earliest == deliver_by for every §1 class and for the overrides)."""
-    reg = registration_for(evidence_type)
-    if reg is None:
-        return None
-    et = (evidence_type or "").strip()
-    return (
-        _EVIDENCE_TYPE_DELIVER_BY.get(et)
-        or _EVIDENCE_TYPE_DELIVER_BY.get(_base_fact_class(et))
-        or reg.earliest_event
-    )
+    authority = authority_for(evidence_type)
+    return authority.earliest_event if authority is not None else None
 
 
 def is_reactive(evidence_type: str) -> bool:
@@ -823,8 +869,14 @@ def required_renderer(evidence_type: str) -> str | None:
     or ``None`` when it resolves to no registered class. A registered class ALWAYS has a
     renderer (import-time :func:`_self_check` enforces ``native_renderer`` ∈ RENDERERS), so a
     ``None`` here means truly-unregistered — the enforcement drops it correct-or-quiet."""
-    reg = registration_for(evidence_type)
-    return reg.native_renderer if reg is not None else None
+    authority = authority_for(evidence_type)
+    return authority.native_renderer if authority is not None else None
+
+
+def required_surface(evidence_type: str) -> str | None:
+    """The physical delivery channel declared for this exact shipped evidence type."""
+    authority = authority_for(evidence_type)
+    return authority.surface if authority is not None else None
 
 
 def ack_expected(evidence_type: str) -> bool:
@@ -959,6 +1011,26 @@ def _self_check_executable() -> None:
         ):
             raise ValueError(
                 f"fact_registry: producer authority {evidence_type!r} is empty/malformed"
+            )
+    for evidence_type, surface in _EVIDENCE_TYPE_SURFACES.items():
+        if registration_for(evidence_type) is None:
+            raise ValueError(
+                f"fact_registry: surface authority {evidence_type!r} resolves to no class"
+            )
+        if surface not in SURFACES:
+            raise ValueError(
+                f"fact_registry: surface authority {evidence_type!r} -> {surface!r} "
+                "not in SURFACES"
+            )
+    for evidence_type, renderer in _EVIDENCE_TYPE_RENDERERS.items():
+        if registration_for(evidence_type) is None:
+            raise ValueError(
+                f"fact_registry: renderer authority {evidence_type!r} resolves to no class"
+            )
+        if renderer not in RENDERERS:
+            raise ValueError(
+                f"fact_registry: renderer authority {evidence_type!r} -> {renderer!r} "
+                "not in RENDERERS"
             )
     # every per-type freshness key must resolve to a registered class, list only KNOWN DB
     # surfaces, be non-empty, and NOT also be patch-bound.
