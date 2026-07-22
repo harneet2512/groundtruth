@@ -18801,7 +18801,11 @@ def _augment_output(action, out) -> None:
             # global dose. None (flag off) -> every plane delivers inline (byte-identical).
             _ga_on = _global_arbiter_on()
             if _ga_on and not _batch_commit_installed:
-                return
+                # FAIL-OPEN (2026-07-22): single-action scaffolds (mini-swe) never install the
+                # batch-commit formatter -> the arbiter pool would never flush -> silent
+                # 0-delivery of every reactive FACT on every observation. Degrade to inline
+                # per-plane delivery (the _ga_on==False byte-identical path), don't drop.
+                _ga_on = False
             _batch_state = _batch_context.get() if _ga_on else None
             _batch_defer = _batch_state is not None
             if _batch_defer and not _register_batch_execute(
