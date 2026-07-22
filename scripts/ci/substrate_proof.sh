@@ -49,6 +49,9 @@ if [ "$HARNESS" = "deepswe" ]; then
 fi
 
 mkdir -p /tmp/gt
+ISSUE_FILE="${GT_ISSUE_OUT:-${GT_CERT_DIR:-/tmp/gt}/issue.txt}"
+mkdir -p "$(dirname "$ISSUE_FILE")"
+export GT_ISSUE_OUT="$ISSUE_FILE"
 PROOF_STATUS=/tmp/gt/proof_status.json
 write_proof_status() {
   python3 - "$PROOF_STATUS" "$1" "$2" "${3:-}" <<'PY'
@@ -442,7 +445,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 task_dir = sys.argv[1]
-out_path = os.environ.get("GT_ISSUE_OUT", "/tmp/issue.txt")
+out_path = os.environ.get("GT_ISSUE_OUT", "/tmp/gt/issue.txt")
 issue, source = "", ""
 # 1) DeepSWE-native: the sibling instruction.md (pier reads it as Task.instruction).
 inst = os.path.join(task_dir, "instruction.md")
@@ -520,14 +523,18 @@ PYEOF
     fi
     echo "::warning::GT_ISSUE_FAIL_CLOSED=0 — proceeding on synthesized fallback (BLIND GT run)" | tee -a trial_output.log
   fi
-  python3 scripts/swebench/issue_manifest.py /tmp/issue.txt /tmp/gt/issue_manifest.json --source instruction || echo "::warning::issue_manifest.py failed — non-fatal, continuing"
+  python3 scripts/swebench/issue_manifest.py "$ISSUE_FILE" /tmp/gt/issue_manifest.json --source instruction || echo "::warning::issue_manifest.py failed — non-fatal, continuing"
   # P0 (2026-06-23): write the verbatim issue into the substrate (/tmp/gt -> mounted
   # read-only at /gt_artifacts) so the runtime re-surface (gt_mini_patch) can read
   # $GT_CERT_DIR/issue.txt as the requirement fallback when the structured
   # obligations[] array is empty (the common case — the extractor is remove-param-only).
-  cp /tmp/issue.txt /tmp/gt/issue.txt 2>/dev/null \
-    && echo "issue.txt -> substrate ($(wc -c </tmp/gt/issue.txt) chars)" \
-    || echo "::warning::issue.txt copy failed — re-surface fallback unavailable"
+  if [ "$ISSUE_FILE" = "/tmp/gt/issue.txt" ]; then
+    echo "issue.txt -> substrate ($(wc -c </tmp/gt/issue.txt) chars)"
+  else
+    cp "$ISSUE_FILE" /tmp/gt/issue.txt 2>/dev/null \
+      && echo "issue.txt -> substrate ($(wc -c </tmp/gt/issue.txt) chars)" \
+      || echo "::warning::issue.txt copy failed — re-surface fallback unavailable"
+  fi
 else
   # Pro harness: issue text from Pro-OS run_scripts or fallback to in-image paths.
   TASK_ID="${GT_MATRIX_TASK}"
@@ -587,9 +594,9 @@ else
     echo "::warning::Running with synthesized issue text for ${TASK_ID} (no real Pro-OS problem_statement found)"
   fi
 
-  echo "$ISSUE_TEXT" > /tmp/issue.txt
-  [ -s /tmp/issue.txt ] || { echo "::warning::GT_ISSUE_MISSING: issue text empty after all fallbacks — proceeding with synthesized fallback" | tee -a trial_output.log; echo "Fix the issue described in the repository." > /tmp/issue.txt; }
-  python3 scripts/swebench/issue_manifest.py /tmp/issue.txt /tmp/gt/issue_manifest.json --source pro || echo "::warning::issue_manifest.py (pro) failed — non-fatal, continuing"
+  echo "$ISSUE_TEXT" > "$ISSUE_FILE"
+  [ -s "$ISSUE_FILE" ] || { echo "::warning::GT_ISSUE_MISSING: issue text empty after all fallbacks — proceeding with synthesized fallback" | tee -a trial_output.log; echo "Fix the issue described in the repository." > "$ISSUE_FILE"; }
+  python3 scripts/swebench/issue_manifest.py "$ISSUE_FILE" /tmp/gt/issue_manifest.json --source pro || echo "::warning::issue_manifest.py (pro) failed — non-fatal, continuing"
 fi
 
 # ── Per-language LSP readiness budget (efficiency, src-free knob) ────────────
@@ -633,7 +640,7 @@ if [ "$HARNESS" = "deepswe" ]; then
   docker run --rm \
       --memory=14g --memory-swap=34g \
       -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
-      -v "/tmp/issue.txt:/work_issue.txt:ro" \
+      -v "$ISSUE_FILE:/work_issue.txt:ro" \
       -v "/tmp/gt/deps/gomodcache:/tmp/gomodcache" \
       -v "/tmp/gt/deps/cargo:/root/.cargo" \
       -v "/tmp/gt/deps/rustup:/root/.rustup" \
@@ -678,7 +685,7 @@ else
   docker run --rm \
       --memory=14g --memory-swap=34g \
       -v "/tmp/gt/src:/work:ro" -v "/tmp/gt:/gt_artifacts" \
-      -v "/tmp/issue.txt:/work_issue.txt:ro" \
+      -v "$ISSUE_FILE:/work_issue.txt:ro" \
       -v "/tmp/gt/deps/gomodcache:/tmp/gomodcache" \
       -v "/tmp/gt/deps/cargo:/root/.cargo" \
       -v "/tmp/gt/deps/rustup:/root/.rustup" \

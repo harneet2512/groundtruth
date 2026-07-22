@@ -818,10 +818,13 @@ PYEOF
       cp -f "$REPO_ROOT/artifact_deepswe/$_gtf" "$HOST_GT_INJECT/" 2>/dev/null || true
     done
     local _pkg
-    for _pkg in runtime delivery pretask; do
+    # Profile-2 imports nested runtime packages plus groundtruth.trajectory.  Stage
+    # recursively, matching deepswe_full.yml; a flat *.py copy silently amputates
+    # those imports only on the VM surface.
+    for _pkg in runtime delivery pretask trajectory; do
       if [ -d "$REPO_ROOT/src/groundtruth/$_pkg" ]; then
         mkdir -p "$HOST_GT_INJECT/groundtruth/$_pkg"
-        cp -f "$REPO_ROOT/src/groundtruth/$_pkg"/*.py "$HOST_GT_INJECT/groundtruth/$_pkg/" 2>/dev/null || true
+        cp -rf "$REPO_ROOT/src/groundtruth/$_pkg/." "$HOST_GT_INJECT/groundtruth/$_pkg/" 2>/dev/null || true
         touch "$HOST_GT_INJECT/groundtruth/$_pkg/__init__.py"
       fi
     done
@@ -868,6 +871,30 @@ PYEOF
     export GT_C_OUT=/gt_out
     # shellcheck source=../../artifact_deepswe/gt_integration/gt_ae_block.sh
     source "$REPO_ROOT/artifact_deepswe/gt_integration/gt_ae_block.sh"
+    # Host-side fan-out receipt, independent of the agent-process profile and
+    # batch receipts written into the same mounted gt_out directory.
+    GT_PROFILE_ACTIVATION_OUT="$HOST_GT_OUT/gt_profile_activation.json" \
+      PYTHONPATH="$REPO_ROOT/src" python3 - <<'PY'
+import json, os
+from groundtruth.runtime.rl_profile import resolve_profile
+profile = (os.environ.get("GT_RL_PROFILE") or "").strip()
+resolved = resolve_profile(os.environ)
+doc = {
+    "schema": "gt.profile_activation.v1",
+    "profile": profile,
+    "members": sorted(resolved),
+    "member_values": {key: resolved[key] for key in sorted(resolved)},
+}
+receipt = (os.environ.get("GT_CAPABILITY_RECEIPT") or "").strip()
+if receipt.startswith("{"):
+    try:
+        doc["capability_receipt"] = json.loads(receipt)
+    except json.JSONDecodeError:
+        pass
+with open(os.environ["GT_PROFILE_ACTIVATION_OUT"], "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, sort_keys=True, indent=2)
+    fh.write("\n")
+PY
 
     # PARITY (2026-07-08): OFFICIAL containers carry NO GT surfaces — measured firing
     # delta (baseline agent explored /gt_artifacts + /gt_out "for test hints",

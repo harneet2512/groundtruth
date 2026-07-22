@@ -45,6 +45,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 
 
@@ -15484,6 +15485,65 @@ def _rendered_contains_exact_suffix(rendered, output_index: int, suffix: str,
     return current_text.startswith(base_text) and current_text[len(base_text):] == suffix
 
 
+def _append_rendered_text_suffix(rendered, output_index: int, suffix: str) -> bool:
+    """Append one GT dose at the formatter's API-visible text boundary.
+
+    Environment output may be JSON-encoded, truncated, or otherwise transformed by
+    ``format_observation_messages``.  Appending to the raw output before that transform
+    cannot preserve the seam's delivery seal.  This function modifies only the selected
+    formatted message's text/content field after the formatter has completed.
+    """
+    if not suffix or not isinstance(rendered, list):
+        return False
+    if output_index < 0 or output_index >= len(rendered):
+        return False
+    message = rendered[output_index]
+    if not isinstance(message, dict) or "content" not in message:
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        message["content"] = content + suffix
+        return True
+    if isinstance(content, list):
+        message["content"] = list(content) + [{"type": "text", "text": suffix}]
+        return True
+    if isinstance(content, dict) and isinstance(content.get("text"), str):
+        updated = dict(content)
+        updated["text"] = updated["text"] + suffix
+        message["content"] = updated
+        return True
+    return False
+
+
+def _rendered_transport_contains_suffix(rendered, output_index: int, suffix: str) -> bool:
+    """Whether the formatter can carry the complete candidate without clipping.
+
+    DeepSWE 2.2 serializes the tool result as a JSON object, so the candidate is
+    escaped inside ``output`` rather than present literally in message content.
+    Decode only that transport wrapper; arbitrary metadata is never searched.
+    """
+    text = _rendered_text_content(rendered, output_index)
+    if text is None:
+        return False
+    if suffix in text:
+        return True
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            output = item.get("output")
+            if isinstance(output, str) and output.endswith(suffix):
+                return True
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
+
 def _batch_candidate_control_identity(candidate) -> "tuple[str, str] | None":
     """Return registered FACT identity bound to the current policy opportunity."""
     binding = _current_observation_binding()
@@ -16609,15 +16669,23 @@ def _discard_tool_observation_batch(reason: str, state=None) -> None:
 def install_observation_batch_commit(agent) -> bool:
     """Atomically install the execute handshake and formatter commit boundary."""
     global _batch_install_failed, _batch_commit_installed
+    if getattr(agent, "_gt_batch_commit_installed", False):
+        # The .pth-loaded Pier path installs at DefaultAgent construction time.  The
+        # headless runner also calls this public installer explicitly.  A second call
+        # is confirmation of the same attachment, not an installation failure that
+        # disables batching process-wide.
+        _batch_install_failed = False
+        _batch_commit_installed = True
+        return True
     model = getattr(agent, "model", None)
     original = getattr(model, "format_observation_messages", None)
     original_execute = getattr(agent, "execute_actions", None)
-    if (model is None or not callable(original) or not callable(original_execute)
-            or getattr(agent, "_gt_batch_commit_installed", False)):
+    if model is None or not callable(original) or not callable(original_execute):
         _discard_tool_observation_batch("batch_install_unavailable")
         _batch_install_failed = True
         _batch_commit_installed = False
         return False
+
 
     def _format_with_gt_batch(message, outputs, *args, **kwargs):
         state = _batch_context.get()
@@ -16710,7 +16778,6 @@ def install_observation_batch_commit(agent) -> bool:
             _discard_tool_observation_batch("batch_plan_failed", state)
             return original(message, outputs, *args, **kwargs)
         base_outputs = [dict(output) for output in outputs]
-        shadow_outputs = [dict(output) for output in outputs]
         planned_delivery = None
         output_index = None
         if planned_winner is not None:
@@ -16722,42 +16789,55 @@ def install_observation_batch_commit(agent) -> bool:
             except StopIteration:
                 _discard_tool_observation_batch("batch_prepare_output_mismatch", state)
                 return original(message, outputs, *args, **kwargs)
-            previous = shadow_outputs[output_index].get("output") or ""
-            shadow_outputs[output_index]["output"] = (
-                _join_lane_output(previous, planned_delivery.suffix)
-                if planned_delivery.join
-                else previous + planned_delivery.suffix)
-        # Capture the formatter's unaugmented, API-visible bytes before proving
-        # the augmented rendering.  A membership check alone is unsound: if the
-        # same suffix was already present in the tool output, a clipped GT copy
-        # would be falsely credited as delivered.  Keep the baseline separate
-        # from the mutable shadow outputs used for the actual model call.
-        base_rendered = None
+        # First ask the formatter whether the complete candidate survives its own
+        # clipping policy.  This probe is not returned to the model and commits no
+        # producer state.  A clipped candidate stays correct-and-quiet.
+        if planned_delivery is not None and planned_delivery.disposition == "deliver":
+            probe_outputs = [dict(output) for output in outputs]
+            probe_outputs[output_index]["output"] = (
+                (probe_outputs[output_index].get("output") or "")
+                + planned_delivery.suffix)
+            try:
+                probe_rendered = original(message, probe_outputs, *args, **kwargs)
+            except BaseException:
+                _discard_tool_observation_batch("batch_formatter_exception", state)
+                raise
+            if not _rendered_transport_contains_suffix(
+                    probe_rendered, output_index, planned_delivery.suffix):
+                _discard_tool_observation_batch("batch_formatter_clipped", state)
+                return original(message, outputs, *args, **kwargs)
+
+        # Format the native outputs first.  DeepSWE serializes each result as JSON
+        # and may head/tail truncate it; GT must append after that transformation,
+        # otherwise the ledger seals bytes that are escaped or clipped before the
+        # model sees them.
         try:
-            rendered = original(message, shadow_outputs, *args, **kwargs)
+            rendered = original(
+                message, [dict(output) for output in outputs], *args, **kwargs)
         except BaseException:
             # No producer commit has run, so complete rollback means only re-arming
             # candidates whose producers latched while preparing the pool.
             _discard_tool_observation_batch("batch_formatter_exception", state)
             raise
 
-        if (planned_delivery is not None
-                and planned_delivery.disposition == "deliver"):
-            try:
-                base_rendered = original(
-                    message, [dict(output) for output in outputs], *args, **kwargs)
-            except BaseException:
-                _discard_tool_observation_batch("batch_baseline_formatter_exception", state)
-                raise
+        if planned_delivery is not None and planned_delivery.disposition == "deliver":
+            base_text = (_rendered_text_content(rendered, output_index)
+                         if output_index is not None else None)
+            appended = (
+                base_text is not None
+                and output_index is not None
+                and _append_rendered_text_suffix(
+                    rendered, output_index, planned_delivery.suffix)
+            )
+            current_text = (_rendered_text_content(rendered, output_index)
+                            if output_index is not None else None)
+            if (not appended or current_text != base_text + planned_delivery.suffix):
+                _discard_tool_observation_batch("batch_formatter_clipped", state)
+                return original(message, outputs, *args, **kwargs)
 
         if (planned_delivery is not None
                 and planned_delivery.disposition == "deliver"
-                and (
-                    output_index is None
-                    or not _rendered_contains_exact_suffix(
-                        rendered, output_index, planned_delivery.suffix,
-                        base_rendered)
-                )):
+                and output_index is None):
             _discard_tool_observation_batch("batch_formatter_clipped", state)
             return original(message, outputs, *args, **kwargs)
 
@@ -16812,7 +16892,8 @@ def install_observation_batch_commit(agent) -> bool:
                 if planned_delivery is None or output_index is None:
                     raise RuntimeError("batch winner has no frozen delivery home")
                 actual = planned_delivery.output.get("output") or ""
-                expected = shadow_outputs[output_index].get("output") or ""
+                expected = ((base_outputs[output_index].get("output") or "")
+                            + planned_delivery.suffix)
                 if actual != expected:
                     raise RuntimeError("batch commit bytes differ from frozen plan")
         except BaseException as exc:
@@ -16834,7 +16915,8 @@ def install_observation_batch_commit(agent) -> bool:
                 ):
                     raise RuntimeError("visible batch dose lost its frozen identity")
                 _restore_batch_memory(memory_snapshot)
-                expected = shadow_outputs[output_index].get("output") or ""
+                expected = ((base_outputs[output_index].get("output") or "")
+                            + planned_delivery.suffix)
                 planned_delivery.output["output"] = expected
                 decision = planned_delivery.decision
                 if planned_winner.plane == _GA_PLANE_LANE_A:
@@ -16903,6 +16985,96 @@ def install_observation_batch_commit(agent) -> bool:
         _discard_tool_observation_batch("batch_install_failed")
         _batch_install_failed = True
         _batch_commit_installed = False
+        return False
+
+
+def _observation_batch_required() -> bool:
+    """Whether this process promises an observation-level single-dose boundary."""
+    if _GT_BASELINE:
+        return False
+    _on = lambda name: os.environ.get(name, "").strip().lower() not in (
+        "", "0", "false", "no", "off", "none")
+    return (
+        os.environ.get("GT_RL_PROFILE", "").strip().lower() == "2"
+        or _on("GT_GLOBAL_ARBITER")
+        or _on("GT_PROOF_MODE")
+        or _on("GT_REQUIRE_FULL_STACK")
+    )
+
+
+def _write_batch_activation_receipt(agent, *, attached: bool, result: str) -> bool:
+    """Persist proof from the process that owns the actual policy observation."""
+    try:
+        path = os.environ.get("GT_BATCH_ACTIVATION_RECEIPT", "").strip()
+        if not path:
+            anchor = (os.environ.get("GT_RUNTIME_LEDGER")
+                      or os.environ.get("GT_RUN_OUTPUT") or "").strip()
+            path = os.path.join(os.path.dirname(anchor) if anchor else "/tmp",
+                                "gt_batch_activation.json")
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        model = getattr(agent, "model", None)
+        qualified = lambda value: (
+            f"{value.__class__.__module__}.{value.__class__.__qualname__}")
+        try:
+            import minisweagent
+            mini_swe_version = str(
+                getattr(minisweagent, "__version__", "") or "").strip()
+        except Exception:  # noqa: BLE001 -- version is provenance, not attachment
+            mini_swe_version = ""
+        receipt = {
+            "schema": "gt.batch_activation.v1",
+            "required": _observation_batch_required(),
+            "result": result,
+            "wrapper_attached": bool(attached),
+            "agent_class": qualified(agent),
+            "model_class": qualified(model),
+            "mini_swe_version": mini_swe_version,
+            "gt_rl_profile": os.environ.get("GT_RL_PROFILE", ""),
+            "global_arbiter_on": _global_arbiter_on(),
+            "pid": os.getpid(),
+            "timestamp_ms": int(time.time() * 1000),
+        }
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(receipt, fh, sort_keys=True, separators=(",", ":"))
+            fh.write("\n")
+        os.replace(tmp, path)
+        return True
+    except Exception:  # noqa: BLE001 -- caller applies the required/fail-closed rule
+        return False
+
+
+def _install_default_agent_batch_hook() -> bool:
+    """Attach batching in Pier's real inner mini-swe-agent construction path."""
+    try:
+        from minisweagent.agents.default import DefaultAgent
+    except Exception:  # noqa: BLE001 -- not every supported scaffold has mini-swe-agent
+        return False
+    if getattr(DefaultAgent, "_gt_batch_constructor_patched", False):
+        return True
+    original_init = DefaultAgent.__init__
+
+    def _init_with_gt_batch(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        attached = install_observation_batch_commit(self)
+        receipt_written = _write_batch_activation_receipt(
+            self,
+            attached=attached,
+            result="installed" if attached else "install_unavailable",
+        )
+        if _observation_batch_required() and (not attached or not receipt_written):
+            raise RuntimeError(
+                "GT_OBSERVATION_BATCH_UNPROVEN: required formatter boundary did "
+                "not attach before agent execution"
+            )
+
+    try:
+        DefaultAgent.__init__ = _init_with_gt_batch
+        DefaultAgent._gt_batch_constructor_patched = True
+        return True
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -18801,11 +18973,12 @@ def _augment_output(action, out) -> None:
             # global dose. None (flag off) -> every plane delivers inline (byte-identical).
             _ga_on = _global_arbiter_on()
             if _ga_on and not _batch_commit_installed:
-                # FAIL-OPEN (2026-07-22): single-action scaffolds (mini-swe) never install the
-                # batch-commit formatter -> the arbiter pool would never flush -> silent
-                # 0-delivery of every reactive FACT on every observation. Degrade to inline
-                # per-plane delivery (the _ga_on==False byte-identical path), don't drop.
-                _ga_on = False
+                # Profile-2 promises one sealed dose at the policy-observation boundary.
+                # Inline delivery here occurs before formatter truncation/serialization,
+                # cannot be byte-joined reliably, and allows one dose per parallel tool
+                # result.  The constructor hook must attach before paid execution; this
+                # guard keeps any unsupported scaffold correct-and-quiet.
+                return
             _batch_state = _batch_context.get() if _ga_on else None
             _batch_defer = _batch_state is not None
             if _batch_defer and not _register_batch_execute(
@@ -20344,6 +20517,16 @@ def _install() -> None:
             _PATCHED_CLASSES.append(f"{modname}.{clsname}")
         except Exception:  # noqa: BLE001
             pass
+    # Pier starts a nested mini-swe-agent process and never calls gt_headless_runner,
+    # so install the observation handshake at the real DefaultAgent constructor.
+    # The constructor itself fail-closes before the first model call when Profile-2
+    # promises this boundary but attachment or its activation receipt is unavailable.
+    _batch_constructor_ready = _install_default_agent_batch_hook()
+    if _observation_batch_required() and not _batch_constructor_ready:
+        raise RuntimeError(
+            "GT_OBSERVATION_BATCH_CONSTRUCTOR_UNAVAILABLE: required DefaultAgent "
+            "attachment point is unavailable"
+        )
     # PROFILE RECEIPT: durable per-process activation record, AFTER the patch loop so
     # patched_classes reflects the real attached set. Fully self-guarded (never raises).
     _write_profile_receipt()

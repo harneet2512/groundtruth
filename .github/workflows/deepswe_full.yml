@@ -75,9 +75,9 @@ on:
         required: false
         default: ""
       post_search_native:
-        description: "GT_POST_SEARCH_NATIVE — FORMAT A/B B-arm: render post_search def-facts as native ripgrep-style output (no <gt-*> tag) instead of the tagged block. Same content, different format. 0 = OFF (default; tagged, byte-identical). 1 = ON (native)."
+        description: "GT_POST_SEARCH_NATIVE — FORMAT A/B B-arm: render post_search def-facts as native ripgrep-style output (no <gt-*> tag) instead of the tagged block. Same content, different format. '' = unset/profile-controlled. 0 = explicit OFF. 1 = ON."
         required: false
-        default: "0"
+        default: ""
       gateway:
         description: "GT_GATEWAY — W2 single-surface completer: ONE gateway.augment() call per tool observation, arbitrated to <=1 deterministic FACT, appended byte-preserving into the same observation (TITO). '' = unset (default; profile-controllable — GT_RL_PROFILE can activate it; downstream ${:-0} = OFF, byte-identical). '0' = explicit per-flag OFF (overrides the profile). 1 = ON."
         required: false
@@ -141,7 +141,9 @@ env:
   # Blocker 2: a substrate whose BAKED build-commit != this run's checkout commit ABORTS
   # (stale-bake guard). Makes Blocker 1 self-enforcing: a forgotten rebuild fails closed
   # instead of silently running old localizer/depth code.
-  GT_REQUIRE_COMMIT_PARITY: ${{ github.event.inputs.require_commit_parity || '1' }}
+  # Profile-2 is production proof posture: its executable substrate must be built
+  # from this checkout.  The transitional parity bypass is never valid there.
+  GT_REQUIRE_COMMIT_PARITY: ${{ github.event.inputs.rl_profile == '2' && '1' || (github.event.inputs.require_commit_parity || '1') }}
   # H8 DISARMED (best-effort rule): GT_REQUIRE_PARSE_RATE would log.Fatalf the indexer on a low
   # fractional parse rate (main.go:241), THROWING AWAY the partial graph it could produce — that
   # refuses GT help on a hard repo. Under "never refuse / best of effort" we keep whatever partial
@@ -174,7 +176,7 @@ env:
   GT_EDIT_CHECK: ${{ github.event.inputs.edit_check }}
   # FORMAT A/B B-arm (synced agent path; gt_mini_patch reads it). Default 0 = OFF
   # (tagged post_search, byte-identical). Forwarded to the agent container via --ae below.
-  GT_POST_SEARCH_NATIVE: ${{ github.event.inputs.post_search_native || '0' }}
+  GT_POST_SEARCH_NATIVE: ${{ github.event.inputs.post_search_native }}
   # W2 master flag (synced agent path; gt_mini_patch reads it). Default 0 = OFF
   # (byte-identical). Forwarded to the agent container via --ae below.
   # NOTE (CONFIRMED-1): GT_GATEWAY and GT_POST_SEARCH (below) are forwarded
@@ -198,7 +200,9 @@ env:
   GT_NEG_EVIDENCE: ${{ inputs.depth_flags == '1' && '1' || '0' }}
   GT_TYPEFLOW_FIXPOINT: ${{ inputs.depth_flags == '1' && '1' || '0' }}
   GT_FIELD_CANDIDATES: ${{ inputs.depth_flags == '1' && '1' || '0' }}
-  GT_SEM_BODY: ${{ inputs.depth_flags == '1' && '1' || '0' }}
+  # GT_SEM_BODY is a Profile-2 member and is consumed during substrate build,
+  # before the agent-side fan-out.  Profile-2 must therefore activate it here.
+  GT_SEM_BODY: ${{ (inputs.depth_flags == '1' || github.event.inputs.rl_profile == '2') && '1' || '0' }}
   GT_PASSAGE_WIDE: ${{ inputs.depth_flags == '1' && '1' || '0' }}
   GT_DCC: ${{ inputs.depth_flags == '1' && '1' || '0' }}
   # Stratum-B content-BM25 leg — SEPARATE from depth_flags, ON by default (non-regressive:
@@ -209,12 +213,14 @@ env:
   # GT_POST_SEARCH is agent-side (gt_mini_patch) — already forwarded via --ae below; GT_CONSENSUS_LEDGER
   # is brief-side (v1r_brief) — projected into the substrate brief-gen via -e (substrate_proof.sh) AND
   # via --ae for the agent-side L6-fresh brief regen. Both default-off in code; ON only when set here.
-  GT_POST_SEARCH: ${{ inputs.cooperative_flags == '1' && '1' || '0' }}
+  GT_POST_SEARCH: ${{ (inputs.cooperative_flags == '1' || github.event.inputs.rl_profile == '2') && '1' || '0' }}
   GT_CONSENSUS_LEDGER: ${{ inputs.cooperative_flags == '1' && '1' || '0' }}
   # GT_OBLIGATIONS_V2 (2026-07-08 build): brief-side extractor flag — projected
   # into gt-run-proof via substrate_proof.sh -e; runtime T3 is ARTIFACT-WINS
   # (activates on gt_obligations_v2.json presence, no env needed in-container).
-  GT_OBLIGATIONS_V2: ${{ inputs.obligations_v2 == '1' && '1' || '0' }}
+  # Production Profile-2 cannot use the impoverished legacy requirement fallback.
+  # The full extractor runs in substrate proof, so activate it before that boundary.
+  GT_OBLIGATIONS_V2: ${{ (inputs.obligations_v2 == '1' || github.event.inputs.rl_profile == '2') && '1' || '0' }}
   GT_BASELINE: ${{ inputs.gt_arm == 'baseline' && '1' || '0' }}
   # Legitimacy: the per-task graph must be built FRESH from THIS task's repo — never a
   # cross-run / stale / out-of-repo prebuilt graph.db. In substrate-consume mode the graph
@@ -1082,6 +1088,33 @@ jobs:
           # shellcheck source=artifact_deepswe/gt_integration/gt_ae_block.sh
           source artifact_deepswe/gt_integration/gt_ae_block.sh
           echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
+          # Durable host-side proof of the exact profile fan-out that crossed the
+          # Pier boundary.  The agent-process receipt below independently proves
+          # what was actually active after construction.
+          if [ "${GT_BASELINE:-0}" != "1" ]; then
+            PYTHONPATH="${{ github.workspace }}/src" python3 - <<'PY'
+          import json, os
+          from groundtruth.runtime.rl_profile import resolve_profile
+          profile = (os.environ.get("GT_RL_PROFILE") or "").strip()
+          resolved = resolve_profile(os.environ)
+          receipt = (os.environ.get("GT_CAPABILITY_RECEIPT") or "").strip()
+          doc = {
+              "schema": "gt.profile_activation.v1",
+              "profile": profile,
+              "members": sorted(resolved),
+              "member_values": {key: resolved[key] for key in sorted(resolved)},
+          }
+          if receipt.startswith("{"):
+              try:
+                  doc["capability_receipt"] = json.loads(receipt)
+              except json.JSONDecodeError:
+                  pass
+          os.makedirs("/tmp/gt_out", exist_ok=True)
+          with open("/tmp/gt_out/gt_profile_activation.json", "w", encoding="utf-8") as fh:
+              json.dump(doc, fh, sort_keys=True, indent=2)
+              fh.write("\n")
+          PY
+          fi
 
           # L6-FRESH activation: point the in-container reindex at the staged binary and
           GT_AE_ARGS+=(--ae "GT_INDEX_BIN=/opt/gt/gt-index" --ae "GT_L6_FRESH=1")
@@ -1357,7 +1390,7 @@ jobs:
           cp /tmp/gt/lsp_certificate_*.json trial_results/gt_artifacts/ 2>/dev/null || true
           # The EXACT issue text the substrate ran with (§4 audit: what GT was given —
           # mirrors verified_run.yml's issue.txt upload).
-          cp /tmp/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
+          cp /tmp/gt/issue.txt trial_results/gt_artifacts/issue.txt 2>/dev/null || true
           cp /tmp/gt/issue_manifest.json trial_results/gt_artifacts/issue_manifest.json 2>/dev/null || true
           cp /tmp/gt/delivered_instruction.txt trial_results/ 2>/dev/null || true
           cp /tmp/gt/adapter_witness.json trial_results/adapter_witness.json 2>/dev/null || true
@@ -1395,6 +1428,9 @@ jobs:
           # FIX 3 (2026-06-11): harvest the oracle gate's 8-dp suppression telemetry
           # (written in-container to the writable /gt_out mount = host /tmp/gt_out).
           cp /tmp/gt_out/gt_oracle_events.jsonl trial_results/gt_oracle_events_${{ matrix.task }}.jsonl 2>/dev/null || true
+          cp /tmp/gt_out/gt_profile_activation.json trial_results/gt_artifacts/gt_profile_activation.json 2>/dev/null || true
+          cp /tmp/gt_out/gt_profile_receipt.json trial_results/gt_artifacts/gt_profile_receipt.json 2>/dev/null || true
+          cp /tmp/gt_out/gt_batch_activation.json trial_results/gt_artifacts/gt_batch_activation.json 2>/dev/null || true
           # BUG#2 FIX: harvest the FULL deep-telemetry trio the gt_ae_block.sh single-source
           # now points at /gt_out (runtime ledger + per-hook fire counts). Without this they
           # were lost with the ephemeral container (gt_mini_patch.py:3515,3569 default /tmp/*).
