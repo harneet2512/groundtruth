@@ -967,6 +967,74 @@ def _is_test_file(path: str) -> bool:
     return False
 
 
+# The SUBMITTED PATCH is the strongest edit-truth authority (mirrors task_truth.py
+# `_first_edit_step_for_paths` / `_EDIT_SHAPE_RE`): command inference over the tool
+# calls MISSES edits applied via heredoc / `git apply` / multi-file patches and
+# attributes at most ONE file per action.  These two headers together recover every
+# edited file whether the diff carries git extended headers (`diff --git a/… b/…`)
+# or is a plain unified diff (`--- … / +++ …`, from `diff -u` / `patch`).
+_DIFF_GIT_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)", re.M)
+_DIFF_PLUS_RE = re.compile(r"^\+\+\+\s+(\S+)", re.M)
+
+
+def extract_edit_targets(diff_text: str) -> set[str]:
+    """Parse the SET of edited file paths from a unified / git diff.
+
+    Reads BOTH the ``diff --git a/… b/…`` post-image name and the ``+++`` hunk header,
+    strips a leading ``b/``, and skips ``/dev/null`` (a delete's post-image).  Returns
+    normalized, de-duplicated paths.  Never raises — a malformed/empty diff yields an
+    empty set (the caller then falls back to command inference).
+    """
+    targets: set[str] = set()
+    if not diff_text:
+        return targets
+    for m in _DIFF_GIT_RE.finditer(diff_text):
+        b = m.group(2)
+        if b and b != "/dev/null":
+            targets.add(_norm_path(b))
+    for m in _DIFF_PLUS_RE.finditer(diff_text):
+        p = m.group(1)
+        if not p or p == "/dev/null":
+            continue
+        if p.startswith("b/"):
+            p = p[2:]
+        if p and p != "/dev/null":
+            targets.add(_norm_path(p))
+    targets.discard("")
+    targets.discard("/dev/null")
+    return targets
+
+
+# Predeclared, ARM-SYMMETRIC junk filter for the edited-file set.  Gold is source-only
+# (``gold_files_from_dataset`` drops tests), so ``n_edited`` must exclude the same
+# non-source noise on BOTH arms — the rule is fixed here, never keyed on GT on/off,
+# task id, or repo shape.
+_JUNK_EDIT_SUFFIXES = (".orig", ".bak", ".rej", ".swp", ".csv", ".log")
+# YYYYMMDD-HHMMSS_ generated files (e.g. 20260721-153000_report.py).
+_TIMESTAMPED_GEN_RE = re.compile(r"\d{8}-\d{6}_")
+
+
+def _is_junk_edit_path(path: str) -> bool:
+    """Non-source edit artifact that must be dropped from ``n_edited`` SYMMETRICALLY.
+
+    Predeclared, arm-independent rule (no task/repo keying): editor / patch backups
+    (``.orig/.bak/.rej/.swp``), data / log spew (``.csv/.log``), a bare ``console``
+    sink, and timestamped generated files (``YYYYMMDD-HHMMSS_*``).  None of these can
+    ever be gold, so counting them would only inflate the false-file denominator.
+    """
+    p = _norm_path(path).lower()
+    if not p:
+        return True
+    base = p.rsplit("/", 1)[-1]
+    if base == "console":
+        return True
+    if p.endswith(_JUNK_EDIT_SUFFIXES):
+        return True
+    if _TIMESTAMPED_GEN_RE.search(base):
+        return True
+    return False
+
+
 def gold_files_from_dataset(instance_id: str, jsonl_path: str) -> list[str]:
     """TRUE gold SOURCE files for one task, from the SWE-bench dataset jsonl.
 
@@ -1223,7 +1291,7 @@ def _reconcile_authoritative_edits(
 # ---------------------------------------------------------------------------
 
 def _compute_localization(timeline: list[dict], gold_files: list[str],
-                          brief_txt: str) -> dict:
+                          brief_txt: str, submission: str = "") -> dict:
     gold_set = set(_norm_path(g) for g in gold_files if g)
 
     # Build ordered lists
@@ -1275,27 +1343,35 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
                 break
             unique_before_gold_view.add(f)
 
-    # files/steps to first gold edit (same fail-open fix: None until gold edited).
-    files_to_gold_edit = None
-    steps_to_gold_edit = None
-    first_gold_edit_step = None
-    unique_before_gold_edit = set()
-    for ev in timeline:
-        if ev["role"] != "assistant":
-            continue
-        if ev.get("edited_file"):
-            f = ev["edited_file"]
-            if _is_gold(f):
-                if first_gold_edit_step is None:
-                    first_gold_edit_step = ev["step"]
-                    files_to_gold_edit = len(unique_before_gold_edit)
-                    steps_to_gold_edit = ev["step"] - 1
-                break
-            unique_before_gold_edit.add(f)
-
     gold_never_reached = first_gold_view_step is None
 
-    edited_set = set(unique_edited)
+    # --- EDIT-TRUTH AUTHORITY: submitted patch > command inference ------------------
+    # The command-inference edit detector misses edits applied via heredoc / git-apply
+    # / multi-file patches and attributes at most ONE file per action, so it reported
+    # n_edited=0 on tasks that had SUBMITTED a real source diff (nulling false_file_rate
+    # / precision, starving recall / steps_to_gold_edit). When a submission diff is
+    # present it is therefore the AUTHORITY for the edited set; command inference
+    # (unique_edited) is used ONLY as the fallback when there is no patch.
+    cmd_edited_set = set(unique_edited)
+    patch_edit_targets = extract_edit_targets(submission)
+    if patch_edit_targets:
+        raw_edited_set = patch_edit_targets
+        edit_authority = "submission_patch"
+    else:
+        raw_edited_set = cmd_edited_set
+        edit_authority = "command_inference"
+    # Predeclared, ARM-SYMMETRIC source-only filter (identical rule regardless of GT
+    # on/off, task, or repo): gold is source-only (gold_files_from_dataset drops tests),
+    # so the edited denominator drops test files and non-source junk on BOTH arms — else
+    # a test edit or a .orig/.log artifact would inflate false_file_rate. Excluded
+    # counts are reported so the drop is auditable, never silent.
+    excluded_test_edits = {f for f in raw_edited_set if _is_test_file(f)}
+    _after_test = raw_edited_set - excluded_test_edits
+    excluded_junk_edits = {f for f in _after_test if _is_junk_edit_path(f)}
+    edited_set = _after_test - excluded_junk_edits
+    n_excluded_test_edits = len(excluded_test_edits)
+    n_excluded_junk_edits = len(excluded_junk_edits)
+
     # Gold membership MUST use the same suffix-tolerant _path_match as _is_gold
     # (files_to_gold_edit/view above), _compute_edit_quality, scope, and token —
     # NOT an exact set intersection. A runtime post_edit path normalizes to a
@@ -1315,6 +1391,32 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
     # same spelling universe, so duplicates cancel and the rate stays bounded).
     gold_files_edited = {
         g for g in gold_set if any(_path_match(f, g) for f in edited_set)}
+
+    # files/steps to first gold edit (fail-open: None until gold is edited). Gated on
+    # the edit AUTHORITY so it stays consistent with n_edited: a step counts as a gold
+    # edit only when the touched file is one the authority confirms was edited
+    # (gold_files_edited), and a pre-gold "wasted" edit only counts when the authority
+    # confirms that file too (edited_set) — a transient scratch edit the submitted patch
+    # never carried is not a false repo edit. The step number still comes from the
+    # timeline; if the edit action was un-attributable (e.g. a git-apply heredoc) the
+    # step is honestly None even though the patch proves the file set.
+    files_to_gold_edit = None
+    steps_to_gold_edit = None
+    first_gold_edit_step = None
+    unique_before_gold_edit = set()
+    for ev in timeline:
+        if ev["role"] != "assistant":
+            continue
+        if ev.get("edited_file"):
+            f = ev["edited_file"]
+            if any(_path_match(f, g) for g in gold_files_edited):
+                if first_gold_edit_step is None:
+                    first_gold_edit_step = ev["step"]
+                    files_to_gold_edit = len(unique_before_gold_edit)
+                    steps_to_gold_edit = ev["step"] - 1
+                break
+            if any(_path_match(f, e) for e in edited_set):
+                unique_before_gold_edit.add(f)
 
     n_edited = len(edited_set)
     n_gold = len(gold_set)
@@ -1389,6 +1491,12 @@ def _compute_localization(timeline: list[dict], gold_files: list[str],
         "_gold_viewed_count": n_gold_viewed,
         "_terminal_step": terminal_step,
         "_l1_top5": top5,
+        # edit-truth provenance + the arm-symmetric source-only filter's drop counts,
+        # so the n_edited denominator is auditable (never a silent exclusion).
+        "_edit_authority": edit_authority,
+        "_patch_edit_count": len(patch_edit_targets),
+        "_n_excluded_test_edits": n_excluded_test_edits,
+        "_n_excluded_junk_edits": n_excluded_junk_edits,
     }
 
 
@@ -2169,7 +2277,7 @@ def compute_performance_metrics(
         )
 
         # Sections
-        s1 = _compute_localization(timeline, gold_files, brief_txt)
+        s1 = _compute_localization(timeline, gold_files, brief_txt, submission)
         s2 = _compute_edit_quality(timeline, gold_files, submission)
         s3 = _compute_interface_preservation(timeline, consumption_ledger)
         s3.update(verifier_interface_metrics(verifier_truth))

@@ -103,7 +103,15 @@ from chronology_extract import (
 )
 
 # REUSE the grader-side entity model (the SAME one J3 uses for native acquisition / action).
-from consumption_ledger import _emitted_commands, _entity_patterns, _named_in
+# ``_action_kind`` is the SAME command classifier the consumption ledger uses for receipt-3
+# (mutation / verification / else), so the continuous consequence measurement never invents a
+# second divergent notion of what an edit or a test run is.
+from consumption_ledger import (
+    _action_kind,
+    _emitted_commands,
+    _entity_patterns,
+    _named_in,
+)
 
 # REUSE the Cluster-3 registry receipt evaluators (per-class acknowledgment; do NOT re-classify).
 import receipt_predicates
@@ -984,6 +992,46 @@ def _verdict_to_bool(verdict: str) -> bool | None:
     return None
 
 
+def _window_consequences(
+    messages: list[dict], lo: int, hi: int
+) -> dict[str, float]:
+    """Measure REAL-VALUED proximal-efficiency consequences over the message window
+    ``messages[lo:hi]`` — the span from an opportunity boundary to the next decision commit.
+
+    The window is the same message-index space every J3 derivation uses.  Each assistant
+    command-bearing message is one step; its commands are classified with the SAME
+    ``_action_kind`` the consumption ledger uses (mutation / verification / else), so ``edit_cycles``
+    and ``verification_runs`` mean exactly what the receipt grader means, and any other command
+    (grep / cat / read / search) is a ``native_search_view``.  Bounded and empty-safe: an
+    out-of-range or inverted window yields all-zero counts and never raises.  Values are floats
+    so they feed :func:`live_causal_cohort.evaluate_live_cohort` as a continuous endpoint Y."""
+    lo = max(0, lo)
+    hi = min(len(messages), hi)
+    steps = views = edits = verifications = 0
+    for j in range(lo, hi):
+        msg = messages[j]
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        commands = _emitted_commands(msg)
+        if not commands:
+            continue
+        steps += 1
+        for cmd in commands:
+            kind = _action_kind(cmd)
+            if kind == "mutation":
+                edits += 1
+            elif kind == "verification":
+                verifications += 1
+            else:
+                views += 1
+    return {
+        "steps_to_next_decision": float(steps),
+        "native_search_views": float(views),
+        "edit_cycles": float(edits),
+        "verification_runs": float(verifications),
+    }
+
+
 def extract_live_opportunity_observations(
     trajectory: Any,
     ledger_rows: list[dict],
@@ -1005,6 +1053,7 @@ def extract_live_opportunity_observations(
     messages = _messages(trajectory)
     tool_ordinal_index = _tool_ordinal_to_index(messages)
     boundaries = _boundary_indices(messages)
+    flat_boundaries = sorted({i for lst in boundaries.values() for i in lst})
     assignments = [
         (index, row)
         for index, row in enumerate(ledger_rows)
@@ -1070,6 +1119,11 @@ def extract_live_opportunity_observations(
         outcome_index: int | None = matching[0][0] if len(matching) == 1 else None
         endpoint: bool | None = None
         contaminated = bool(opposite)
+        # CONTINUOUS proximal endpoints: measured over the window from the opportunity boundary
+        # to the next decision commit (DELIVER) / the next observation boundary (HOLDOUT). These
+        # are the intention-to-treat efficiency outcomes a cohort projects with
+        # ``project_continuous_endpoint``; the boolean receipt below is unchanged.
+        consequences = _window_consequences(messages, 0, 0)
         if outcome_index is not None and fact_class is not None:
             if assignment == "DELIVER":
                 chronology = chronologies.get(outcome_index)
@@ -1090,6 +1144,24 @@ def extract_live_opportunity_observations(
                     if native_index is not None:
                         contaminated = True
                         failures.append("pre_delivery_reacquisition")
+                    inner = getattr(chronology, "chronology", None)
+                    delivery_index = getattr(inner, "delivery_index", None)
+                    commit_index = getattr(inner, "decision_commit_index", None)
+                    if isinstance(delivery_index, int) and not isinstance(delivery_index, bool):
+                        if (
+                            isinstance(commit_index, int)
+                            and not isinstance(commit_index, bool)
+                            and commit_index > delivery_index
+                        ):
+                            window_hi = commit_index + 1  # window is inclusive of the commit
+                        else:
+                            window_hi = next(
+                                (b for b in flat_boundaries if b > delivery_index),
+                                len(messages),
+                            )
+                        consequences = _window_consequences(
+                            messages, delivery_index + 1, window_hi
+                        )
             else:
                 control = _control_outcome(
                     matching[0][1],
@@ -1111,6 +1183,14 @@ def extract_live_opportunity_observations(
                     ) is not None:
                         contaminated = True
                         failures.append("pre_holdout_reacquisition")
+                    window_hi = (
+                        control.window_end
+                        if isinstance(control.window_end, int)
+                        else len(messages)
+                    )
+                    consequences = _window_consequences(
+                        messages, control.withhold_index + 1, window_hi
+                    )
                 if control.outcome == "unresolved":
                     failures.append("control_consequence_unresolved")
         if endpoint is None:
@@ -1134,6 +1214,7 @@ def extract_live_opportunity_observations(
             ),
             "endpoint": endpoint,
             "endpoint_name": "registered_receipt",
+            "consequences": consequences,
             "live_witness": bool(live_witness),
             "assignment_index": assignment_index,
             "outcome_index": outcome_index,
