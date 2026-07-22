@@ -20627,6 +20627,21 @@ def _install() -> None:
         _resolve_production_profile()
     import importlib
 
+    # Attach the policy-observation owner before mutating any environment class.
+    # A .pth import can run while mini-swe-agent is still initializing; site.py
+    # swallows an import-time raise and removes this module from sys.modules, but
+    # mutations already made to LocalEnvironment survive through their wrapper
+    # closures.  Patching an environment first and then failing the constructor
+    # hook therefore leaves an orphan module instance handling tool results while
+    # the backup import owns the agent/formatter.  Fail before the first mutation
+    # instead, so the later backup import installs both sides from one module.
+    _batch_constructor_ready = _install_default_agent_batch_hook()
+    if _observation_batch_required() and not _batch_constructor_ready:
+        raise RuntimeError(
+            "GT_OBSERVATION_BATCH_CONSTRUCTOR_UNAVAILABLE: required DefaultAgent "
+            "attachment point is unavailable"
+        )
+
     for modname, clsname in _ENV_CLASSES:
         try:
             cls = getattr(importlib.import_module(modname), clsname)
@@ -20641,16 +20656,6 @@ def _install() -> None:
             _PATCHED_CLASSES.append(f"{modname}.{clsname}")
         except Exception:  # noqa: BLE001
             pass
-    # Pier starts a nested mini-swe-agent process and never calls gt_headless_runner,
-    # so install the observation handshake at the real DefaultAgent constructor.
-    # The constructor itself fail-closes before the first model call when Profile-2
-    # promises this boundary but attachment or its activation receipt is unavailable.
-    _batch_constructor_ready = _install_default_agent_batch_hook()
-    if _observation_batch_required() and not _batch_constructor_ready:
-        raise RuntimeError(
-            "GT_OBSERVATION_BATCH_CONSTRUCTOR_UNAVAILABLE: required DefaultAgent "
-            "attachment point is unavailable"
-        )
     # PROFILE RECEIPT: durable per-process activation record, AFTER the patch loop so
     # patched_classes reflects the real attached set. Fully self-guarded (never raises).
     _write_profile_receipt()
