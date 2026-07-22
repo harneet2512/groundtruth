@@ -196,7 +196,7 @@ def test_g1_no_gold_nulls_every_mandatory_gold_dependent_metric() -> None:
     assert res["edit_quality"]["edit_attempts_per_gold"] is None
     assert res["edit_quality"]["first_edit_correctness"] is None
     assert res["token_efficiency"]["tokens_per_gold_edit"] is None
-    assert res["token_efficiency"]["wasted_token_rate"] is None
+    assert res["token_efficiency"]["non_gold_step_rate"] is None
 
 
 # ---------------------------------------------------------- applicability contract

@@ -66,7 +66,7 @@ jobs:
       - name: Confirm the published image's closure runs on glibc 2.31
         run: |
           set -euo pipefail
-          docker run --rm ghcr.io/${{ github.repository_owner }}/gt-substrate:latest bash -lc '
+          docker run --rm "ghcr.io/${{ github.repository_owner }}/gt-substrate@${{ steps.build.outputs.digest }}" bash -lc '
             set -euo pipefail   # STRICT: the closure MUST fail on the first missing dependency (no silent mask)
             gt-index -h >/dev/null 2>&1 && echo "gt-index ok"
             /opt/gt/python/bin/python3 -c "import onnxruntime,numpy,pydantic,tokenizers; print(\"py ok\")"

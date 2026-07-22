@@ -79,6 +79,7 @@ from attestation_join import (  # noqa: E402
     truth_join_to_dict,
 )
 from chronology_extract import (  # noqa: E402  (SPEC-J3 timing join)
+    _class_verdict,
     adjudicate_deliveries,
     extract_block_chronologies,
     extract_chronologies,
@@ -88,6 +89,7 @@ from chronology_extract import (  # noqa: E402  (SPEC-J3 timing join)
 from receipt_predicates import (  # noqa: E402  (B-cluster Gate 4 acknowledgment evaluators)
     acknowledgment_for_row,
     acknowledgment_by_fact_class,
+    roll_up,
 )
 from receipt_sidecar import (  # noqa: E402  (sealed runtime receipt corroboration)
     _RECEIPT_EXEMPT_LAYERS,  # the DECLARED per-layer receipt-authority exemptions (CLASS-2 a/b)
@@ -98,6 +100,7 @@ from receipt_sidecar import (  # noqa: E402  (sealed runtime receipt corroborati
 )
 from fair_probe_result import (  # noqa: E402  (SPEC-J4 fair-probe result)
     fair_probe_bool_by_fact_class,
+    fair_probe_bool_by_delivery_row,
     join_fair_probes,
 )
 from consumption_ledger import (  # noqa: E402  (DEFECT 7/8 per-fire byte authority + leak scanner)
@@ -842,10 +845,10 @@ def _value_honors_8dp(value: Any) -> bool:
 # that basis so a reader never mistakes a proxy for a measured token formula. Any (section, name)
 # not listed keeps the honest task-scope default (``gt_deep_metrics:performance.{section}.{name}``).
 _PERF_PROVENANCE_OVERRIDES: dict[tuple[str, str], dict[str, str]] = {
-    # D2: wasted_token_rate is a STEP proxy, NOT the §9 per-token formula (no per-step token
+    # D2: non_gold_step_rate is a STEP proxy, NOT the §9 per-token formula (no per-step token
     # attribution exists in the trajectory) — say so in formula_provenance so it is never
-    # mislabeled MEASURED-as-token.
-    ("token_efficiency", "wasted_token_rate"): {
+    # mislabeled MEASURED-as-token. (Renamed 2026-07-21 from the misleading wasted_token_rate.)
+    ("token_efficiency", "non_gold_step_rate"): {
         "formula_provenance": "STEP-PROXY non_gold_steps/(gold_steps+non_gold_steps); NOT the "
         "MANDATORY §9 per-token formula (no per-step token attribution in the trajectory)",
         "denominator_provenance": "gt_deep_metrics:performance.token_efficiency._non_idle_step_count "
@@ -885,6 +888,14 @@ def _perf_provenance(section: str, name: str) -> tuple[str, str]:
     return formula, denom
 
 
+def _performance_value_sha256(value: dict[str, Any]) -> str:
+    """Independently seal values recomputed from task-grain feature inputs."""
+    canonical = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _performance_feature_records(
     task: str, task_dir: str,
 ) -> tuple[dict[str, dict[str, Any]], list[str], str | None]:
@@ -905,7 +916,7 @@ def _performance_feature_records(
     identity_ok = identity_payload is not None
     artifact_schema_valid = bool(
         identity_payload is not None
-        and identity_payload.get("schema") == "gt_deep_metrics.v2"
+        and identity_payload.get("schema") in {"gt_deep_metrics.v2", "gt_deep_metrics.v3"}
     )
     precision_decimals = (
         identity_payload.get("precision_decimals")
@@ -923,6 +934,14 @@ def _performance_feature_records(
                 section_payload = performance.get(section) if isinstance(performance, dict) else None
         for name, value_type in metrics:
             if value_type == "run_ratio":
+                performance_payload = (
+                    identity_payload.get("performance")
+                    if identity_payload is not None else None
+                )
+                token_efficiency = (
+                    performance_payload.get("token_efficiency", {})
+                    if isinstance(performance_payload, dict) else {}
+                )
                 records[name] = {
                     "family": "PERF", "status": "NOT_APPLICABLE",
                     "source": "gt_run_metrics", "source_artifact": None,
@@ -935,6 +954,16 @@ def _performance_feature_records(
                     "denominator_provenance": f"mandatory_contract:{value_type}",
                     "coverage_scope": "run",
                     "reason": "run-level ratio; measured only after run aggregation",
+                    "_parity_ratio_input": {
+                        "resolved": (
+                            identity_payload.get("resolved")
+                            if identity_payload is not None else None
+                        ),
+                        "total_cost_usd": (
+                            token_efficiency.get("total_cost_usd")
+                            if isinstance(token_efficiency, dict) else None
+                        ),
+                    },
                 }
                 continue
             present = isinstance(section_payload, dict) and name in section_payload
@@ -985,6 +1014,8 @@ def _performance_feature_records(
                     "not applicable for this task" if status == "NOT_APPLICABLE"
                     else "required metric missing or malformed"
                 ),
+                "_parity_state": state,
+                "_parity_value": _normalized_value,
             }
     return records, sorted(set(missing)), path
 
@@ -992,6 +1023,7 @@ def _performance_feature_records(
 def _run_ratio_feature_record(
     run_id: str,
     artifact_path: str | None,
+    task_rows: list[dict[str, Any]],
     *,
     section: str,
     name: str,
@@ -1017,6 +1049,63 @@ def _run_ratio_feature_record(
     )
     applicability_reason = (
         applicability.get("reason") if isinstance(applicability, dict) else None
+    )
+    task_ids = [row.get("_task") for row in task_rows]
+    ratio_inputs = [row.get("_parity_ratio_input") for row in task_rows]
+    task_inputs_valid = bool(
+        len(task_rows) == expected_tasks
+        and len(task_ids) == expected_tasks
+        and all(isinstance(task, str) and task for task in task_ids)
+        and len(set(task_ids)) == expected_tasks
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("resolved"), bool)
+            and isinstance(item.get("total_cost_usd"), (int, float))
+            and not isinstance(item.get("total_cost_usd"), bool)
+            and math.isfinite(float(item["total_cost_usd"]))
+            and float(item["total_cost_usd"]) >= 0.0
+            for item in ratio_inputs
+        )
+    )
+    local_total_cost = (
+        round(sum(float(item["total_cost_usd"]) for item in ratio_inputs), 8)
+        if task_inputs_valid else None
+    )
+    local_resolved_count = (
+        sum(item["resolved"] is True for item in ratio_inputs)
+        if task_inputs_valid else None
+    )
+    local_status = (
+        "MEASURED" if local_resolved_count
+        else "NOT_APPLICABLE" if task_inputs_valid
+        else None
+    )
+    local_value = (
+        round(local_total_cost / local_resolved_count, 8)
+        if local_total_cost is not None and local_resolved_count else None
+    )
+    local_commitment = {
+        "kind": "run_ratio",
+        "section": section,
+        "metric": name,
+        "value_type": value_type,
+        "task_count": expected_tasks,
+        "resolved_count": local_resolved_count,
+        "total_cost_usd": local_total_cost,
+        "status": local_status,
+        "value": local_value,
+    }
+    cross_process_parity_valid = bool(
+        task_inputs_valid
+        and isinstance(metric, dict)
+        and metric.get("value_sha256") == _performance_value_sha256(local_commitment)
+        and status == local_status
+        and value == local_value
+        and isinstance(payload, dict)
+        and payload.get("resolved") == local_resolved_count
+        and isinstance(payload.get("token_efficiency"), dict)
+        and payload["token_efficiency"].get("total_cost_usd") == local_total_cost
+        and payload["token_efficiency"].get(name) == local_value
     )
     applicability_valid = bool(
         isinstance(applicable, bool)
@@ -1062,6 +1151,7 @@ def _run_ratio_feature_record(
         and isinstance(payload.get("token_efficiency"), dict)
         and payload["token_efficiency"].get(name) == value
         and payload["token_efficiency"].get("cost_collection_complete") is True
+        and cross_process_parity_valid
     )
     return {
         "family": "PERF",
@@ -1083,6 +1173,7 @@ def _run_ratio_feature_record(
         "applicability": applicability if applicability_valid else None,
         "run_aggregate": metric if contract_valid else None,
         "task_coverage_valid": contract_valid,
+        "cross_process_parity_valid": cross_process_parity_valid,
         "aggregate_coverage_valid": contract_valid,
         "reason": None if contract_valid else "run-level metric artifact missing or malformed",
     }
@@ -1153,6 +1244,47 @@ def _run_distribution_feature_record(
             and sorted(event_observed) == task_measured
         )
     )
+    local_value_rows = sorted(
+        ({
+            "task_id": task,
+            "state": row.get("_parity_state"),
+            "value": row.get("_parity_value"),
+        } for row, task in zip(task_rows, task_ids) if isinstance(task, str)),
+        key=lambda item: item["task_id"],
+    )
+    local_commitment = {
+        "kind": "task_distribution",
+        "section": section,
+        "metric": name,
+        "value_type": value_type,
+        "tasks": local_value_rows,
+    }
+    exact_values_valid = bool(
+        task_identity_valid
+        and len(local_value_rows) == expected_tasks
+        and all(
+            row.get("_parity_state") in {
+                "measured", "not_applicable", "right_censored",
+            }
+            for row in task_rows
+        )
+        and isinstance(metric, dict)
+        and metric.get("value_sha256") == _performance_value_sha256(local_commitment)
+    )
+    cross_process_parity_valid = bool(
+        aggregate_partition_valid
+        and task_rows_resolved
+        and exact_values_valid
+        and isinstance(population, dict)
+        and population.get("expected_count") == expected_tasks
+        and population.get("observed_record_count") == expected_tasks
+        and population.get("observed_unique_count") == expected_tasks
+        and population.get("missing_tasks") == []
+        and population.get("duplicate_tasks") == []
+        and population.get("unexpected_tasks") == []
+        and isinstance(payload, dict)
+        and payload.get("mandatory_performance_collection_complete") is True
+    )
     contract_valid = bool(
         isinstance(payload, dict)
         and payload.get("schema") == "gt_run_metrics.v2"
@@ -1178,6 +1310,7 @@ def _run_distribution_feature_record(
         and metric.get("failed_tasks") == []
         and aggregate_partition_valid
         and task_rows_resolved
+        and cross_process_parity_valid
     )
     first = dict(task_rows[0]) if task_rows else {}
     first.pop("_task", None)
@@ -1198,6 +1331,7 @@ def _run_distribution_feature_record(
         "coverage_scope": "run",
         "run_aggregate": metric if contract_valid else None,
         "task_coverage_valid": task_rows_resolved,
+        "cross_process_parity_valid": cross_process_parity_valid,
         "aggregate_coverage_valid": contract_valid,
         "reason": None if contract_valid else "canonical run distribution missing or malformed",
     }
@@ -2165,6 +2299,10 @@ def _control_declared_effect_correctness(
         return bool(seal) and isinstance(chars, int) and not isinstance(chars, bool) and chars > 0
 
     def _carried(rec: dict[str, Any]) -> bool:
+        # Mediator SUPPRESSED lie-check: the exact suppressed candidate bytes (seal + chars)
+        # appearing on ANY delivered row contradicts the suppression. A mediator carries no
+        # committed-opportunity binding of its own, so — unlike the binding-strict eligibility
+        # carried-check — the mediator check is anchored on the delivered bytes alone.
         seal = rec.get("candidate_sha256_16")
         chars = rec.get("candidate_chars")
         if (
@@ -2184,6 +2322,9 @@ def _control_declared_effect_correctness(
     # whole observation aborted. Grade an eligibility ruling ONLY when its exact validated
     # observation binding matches a committed feature.opportunity row.
     committed_opportunity_bindings: list[Any] = []
+    committed_control_opportunities: set[
+        tuple[Any, str, str, str, int]
+    ] = set()
     for row in rows:
         if not isinstance(row, dict) or row.get("layer") != "feature.opportunity":
             continue
@@ -2198,11 +2339,36 @@ def _control_declared_effect_correctness(
         ):
             continue
         committed_opportunity_bindings.append(opportunity_binding)
+        fact_class = row.get("fact_class")
+        candidate_id = row.get("candidate_id")
+        seal = row.get("candidate_sha256_16")
+        chars = row.get("candidate_chars")
+        if (
+            isinstance(fact_class, str) and fact_class
+            and isinstance(candidate_id, str) and candidate_id
+            and isinstance(seal, str) and seal
+            and type(chars) is int and chars > 0
+            and not validate_observation_binding(
+                opportunity_binding, expected_candidate_id=candidate_id)
+        ):
+            committed_control_opportunities.add(
+                (opportunity_binding, fact_class, candidate_id, seal, chars))
 
     def _opportunity_committed(binding: Any) -> bool:
         return any(
             committed == binding for committed in committed_opportunity_bindings
         )
+
+    def _suppression_opportunity_committed(rec: dict[str, Any]) -> bool:
+        # A SUPPRESSED mediator earns a TRUE "honest suppression" verdict only when the exact
+        # withheld candidate had a COMMITTED opportunity (defect-4 transaction boundary): the
+        # observation reached formatter-commit and the exact bytes still never shipped. Without
+        # one, "not delivered" is vacuous (the observation may have aborted) → ungraded (None).
+        # The LIE case (_carried below) needs no opportunity: a delivered row is positive proof.
+        identity = _exact_control_candidate_identity(rec)
+        return identity is not None and (
+            identity[0], identity[1], identity[2], identity[3], identity[4],
+        ) in committed_control_opportunities
 
     def _eligibility_carried(
         identity: tuple[Any, str, str, str, int, int],
@@ -2271,6 +2437,9 @@ def _control_declared_effect_correctness(
                 continue
             if role != "mediator":
                 continue
+            # APPLIED / NO_EFFECT grade on POSITIVE delivery evidence (an exact-identity join),
+            # which can never be vacuous, so they take NO committed-opportunity gate — that is
+            # what let every measfix/control NO_EFFECT and unjoined-APPLIED lie grade at all.
             rec_key = (rec.get("row_index"), rec.get("brief_row_index"))
             if decision == "APPLIED":
                 verdicts.append(rec_key in joined_keys)          # joined → True, else False (lie)
@@ -2279,7 +2448,15 @@ def _control_declared_effect_correctness(
                     verdicts.append(True)                        # delivered-but-ineffective, confirmed
                 # not joined → unverifiable "no effect" claim → contributes nothing (None-leaning)
             elif decision == "SUPPRESSED":
-                verdicts.append(not _carried(rec))               # carried → False (suppression is a lie)
+                # SUPPRESSED is asymmetric: the LIE is provable from positive evidence (the exact
+                # withheld bytes appear on a delivered row → False, no opportunity needed), but the
+                # honest-suppression TRUE rests on ABSENCE, so it needs the committed-opportunity
+                # transaction boundary — otherwise "not delivered" is vacuous (aborted observation).
+                if _carried(rec):
+                    verdicts.append(False)                       # exact bytes shipped → the lie
+                elif _suppression_opportunity_committed(rec):
+                    verdicts.append(True)                        # committed + not shipped → honest
+                # no committed opportunity and not shipped → vacuous absence → None (nothing added)
             # any other decision (ERROR — already filtered upstream) is unverifiable.
         out[feature_id] = (all(verdicts) if verdicts else None)
     return out
@@ -2589,6 +2766,17 @@ _MEASUREMENT_GATE_NAMES = (
     "denominator_provenance",
     "applicability_resolved",
     "task_coverage",
+    # CROSS-PROCESS PARITY (2026-07-21, CODEX_129_BUGLIST PERF blocker): the SS-MEASURE
+    # schema previously omitted any parity terminal, so a per-task value produced in one
+    # process (the container's gt_deep_metrics) could be trusted by the host aggregator
+    # with no independent second-process agreement. This gate binds True only when the
+    # measurement value/partition an INDEPENDENT process recorded (the authoritative
+    # gt_run_metrics.v2 distribution) is byte/value-identical to the reader's own per-task
+    # aggregation. Like aggregate_coverage it is a RUN-scope gate: at task grain there is
+    # only one process view, so it is False-by-construction and is not adjudicated
+    # (_perf_status skips it at scope="task"). Fail-closed: absent parity evidence -> not
+    # True, never a manufactured pass.
+    "cross_process_parity",
     "aggregate_coverage",
 )
 
@@ -2677,9 +2865,17 @@ def _measurement_only_readiness(
     record: dict[str, Any] | None = None,
     *,
     aggregate_coverage: bool = False,
+    cross_process_parity: bool = False,
     live_witness: bool = False,
 ) -> dict[str, Any]:
-    """Typed PERF terminal: measurement validity/coverage, never model delivery."""
+    """Typed PERF terminal: measurement validity/coverage, never model delivery.
+
+    ``cross_process_parity`` (like ``aggregate_coverage``) is a RUN-scope gate: the caller
+    supplies it True only when a second, independent process (gt_run_metrics.v2) recorded a
+    byte/value-identical distribution/value for this metric. Task-grain callers leave it
+    False (there is only one process view to grade) and ``_perf_status`` skips it at
+    ``scope="task"``.
+    """
     row = record or {}
     status = row.get("status")
     applicability_resolved = status in {
@@ -2707,6 +2903,7 @@ def _measurement_only_readiness(
             (applicability_resolved and task_scope)
             or row.get("task_coverage_valid") is True
         ),
+        "cross_process_parity": bool(cross_process_parity),
         "aggregate_coverage": bool(aggregate_coverage),
     }
     return _typed_readiness(
@@ -2945,7 +3142,11 @@ def _internal_fact_support_readiness(
             "runtime_support_receipt": True if runtime_receipt else None,
             "supported_candidate_id": True if candidate_bound else None,
             "downstream_decision_join": True if downstream_join else None,
-            "support_correct": producer_gate("source_contribution_correct"),
+            # INFLUENCE-5: independently-enforced cochange truth witness. Reads the DEDICATED
+            # ``cochange_influence_witness`` (collector-validated self-sealed cochange rows),
+            # never the generic ACQ ``source_contribution_correct`` — the internal-support
+            # terminal must not borrow a non-cochange-specific contribution truth.
+            "support_correct": producer_gate("cochange_influence_witness"),
             "support_causal_fair_probe": inherited_support_fair_probe,
         },
         gate_names=_INTERNAL_SUPPORT_GATE_NAMES,
@@ -3109,75 +3310,96 @@ def _row_has_seal_join(
     return False
 
 
+def _row_authorized_for_member(member: str, row: dict[str, Any]) -> bool:
+    """Whether this delivered row is owned by ``member`` through its exact mechanism."""
+    if cap_role_for(member) != "byte_owner":
+        return False
+    authority = CAP_BYTE_OWNER_MECHANISMS.get(member)
+    if authority is None:
+        return False
+    if row.get("outcome") != "delivered":
+        return False
+    if authority.mechanism == "typed_lineage":
+        refs = row.get("feature_ids")
+        if not isinstance(refs, list) or {
+            "category": "CAP", "feature_id": member, "role": "byte_owner",
+        } not in refs:
+            return False
+        evidence_type = row.get("evidence_type")
+        runtime_producer = row.get("runtime_producer_id")
+        registered_producer = row.get("registered_producer_id")
+        if not isinstance(evidence_type, str) or not evidence_type:
+            return False
+        fact_class = row.get("fact_class")
+        fact_registration = registration_for(evidence_type)
+        evidence_base = evidence_type.split(":", 1)[0]
+        binding_matches = any(
+            binding.producer == runtime_producer
+            and binding.layer == evidence_base
+            and binding.fact_class == fact_class
+            for binding in authority.bindings
+        )
+        return bool(
+            row.get("lineage_schema") == "gt.feature_lineage.v1"
+            and row.get("producer_registration_match") is True
+            and fact_registration is not None
+            and fact_registration.fact_class == fact_class
+            and fact_registration.producer == registered_producer
+            and isinstance(runtime_producer, str)
+            and producer_matches(evidence_type, runtime_producer)
+            and binding_matches
+        )
+    if authority.mechanism == "exact_profile_member":
+        if row.get("profile_member") != member:
+            return False
+        layer = str(row.get("layer") or "")
+        return any(
+            binding.layer == layer
+            and (
+                binding.fact_class is None
+                or layer_to_fact_class(layer) == binding.fact_class
+            )
+            for binding in authority.bindings
+        )
+    return False
+
+
 def _member_delivery_byte_proven(
     member: str,
     rows: list[dict],
     consumption_ledger: dict[str, Any],
 ) -> bool:
     """Prove a byte owner through its one authorized attribution mechanism."""
-    if cap_role_for(member) != "byte_owner":
-        return False
-    authority = CAP_BYTE_OWNER_MECHANISMS.get(member)
-    if authority is None:
-        return False
     entries = consumption_ledger.get("entries")
     for row in rows:
-        if row.get("outcome") != "delivered":
-            continue
-        if authority.mechanism == "typed_lineage":
-            refs = row.get("feature_ids")
-            if not isinstance(refs, list) or {
-                "category": "CAP", "feature_id": member, "role": "byte_owner",
-            } not in refs:
-                continue
-            evidence_type = row.get("evidence_type")
-            runtime_producer = row.get("runtime_producer_id")
-            registered_producer = row.get("registered_producer_id")
-            if not isinstance(evidence_type, str) or not evidence_type:
-                continue
-            fact_class = row.get("fact_class")
-            fact_registration = (
-                registration_for(evidence_type) if isinstance(evidence_type, str) else None
-            )
-            evidence_base = (
-                evidence_type.split(":", 1)[0] if isinstance(evidence_type, str) else ""
-            )
-            binding_matches = any(
-                binding.producer == runtime_producer
-                and binding.layer == evidence_base
-                and binding.fact_class == fact_class
-                for binding in authority.bindings
-            )
-            if (
-                row.get("lineage_schema") != "gt.feature_lineage.v1"
-                or row.get("producer_registration_match") is not True
-                or fact_registration is None
-                or fact_registration.fact_class != fact_class
-                or fact_registration.producer != registered_producer
-                or not isinstance(runtime_producer, str)
-                or not producer_matches(evidence_type, runtime_producer)
-                or not binding_matches
-            ):
-                continue
-        elif authority.mechanism == "exact_profile_member":
-            if row.get("profile_member") != member:
-                continue
-            layer = str(row.get("layer") or "")
-            binding_matches = any(
-                binding.layer == layer
-                and (
-                    binding.fact_class is None
-                    or layer_to_fact_class(layer) == binding.fact_class
-                )
-                for binding in authority.bindings
-            )
-            if not binding_matches:
-                continue
-        else:
+        if not _row_authorized_for_member(member, row):
             continue
         if _row_has_seal_join(row, entries):
             return True
     return False
+
+
+def _member_owned_fire_ids(
+    member: str,
+    rows: list[dict[str, Any]],
+    fires: list[dict[str, Any]],
+) -> set[str]:
+    """Exact bound physical fires owned by one CAP byte owner."""
+    owned: set[str] = set()
+    for fire in fires:
+        row_index = fire.get("runtime_ledger_index")
+        physical_id = fire.get("physical_id")
+        if (
+            type(row_index) is not int
+            or row_index < 0
+            or row_index >= len(rows)
+            or not isinstance(physical_id, str)
+            or not physical_id
+        ):
+            continue
+        if _row_authorized_for_member(member, rows[row_index]):
+            owned.add(physical_id)
+    return owned
 
 
 def _block_delivery_byte_proofs(
@@ -3807,6 +4029,9 @@ def per_fire_gate_grades(
             "dose_lte_one": dose_ok,
             "leak_hits": fire_hits,
             "candidate_id": record.get("candidate_id"),
+            # DEFECT (129-buglist): the physical delivery seal — the third leg of the
+            # per-fire ownership key (candidate_id + candidate_sha256_16 + observation).
+            "candidate_sha256_16": record.get("content_sha256_16"),
         })
     return {
         "schema": PER_FIRE_GATE_SCHEMA,
@@ -3940,6 +4165,108 @@ def byte_owner_ownership_audit(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "valid": not rejections,
         "rejection_count": len(rejections),
         "rejections": rejections,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 129-BUGLIST (FACT delivery 10 + CAP byte-owner 7) — per-FIRE seven-gate ownership.
+# The class terminal assembled the seven SS gates from INDEPENDENT class-level reductions:
+# byte-proof returns on ANY qualifying class row (``_fact_delivery_byte_proven``), while
+# truth/timing/acknowledgment/fair-probe are reduced SEPARATELY by class and only leak/dose
+# were graded per fire. Two physical fires can therefore each supply a DIFFERENT subset of
+# the seven gates so the CLASS UNION passes although NO single fire owns all seven —
+# cross-fire laundering. This builds, per fact class, the seven-gate tuple of EACH physical
+# fire that delivered it (keyed by candidate_id + candidate_sha256_16 + observation) and
+# reports ``owned`` = True ONLY when EVERY fire owns all seven. The classifier
+# (ss_live_diagnosis) then grades the worst fire-local result, never the union.
+# ---------------------------------------------------------------------------
+FEATURE_FIRE_GATE_SCHEMA = "gt.feature_fire_gate.v1"
+
+
+def feature_fire_gate_ownership(
+    fires: list[dict[str, Any]],
+    delivered_classes_by_fire: dict[str, set[str]],
+    time_by_physical_class: dict[tuple[str, str], bool | None],
+    ack_by_physical_class: dict[tuple[str, str], bool | None],
+    correct_info_by_physical_class: dict[tuple[str, str], bool | None],
+    fair_probe_by_physical_class: dict[tuple[str, str], bool | None],
+    fact_classes: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    """Per-fact-class SEVEN-gate ownership over PHYSICAL fires (anti cross-fire laundering).
+
+    For each fact class, build the seven-gate tuple of every physical fire that delivered it.
+    Every gate is joined to the SAME physical fire. Truth/authority and fair-probe values are
+    keyed by ``(host_physical_id, fact_class)`` just like timing/acknowledgment; a class-level
+    result is never copied onto another delivery.
+
+    ``owned`` is True only when EVERY physical fire owns all seven; False when any fire fails
+    or lacks a gate; None when the class has no bound physical fire. This is the documented
+    worst-fire rollup, not an existential "one good witness" check.
+    """
+    fires_by_pid: dict[str, dict[str, Any]] = {}
+    for fire in fires:
+        pid = fire.get("host_physical_id")
+        if isinstance(pid, str) and pid and pid not in fires_by_pid:
+            fires_by_pid[pid] = fire
+    out: dict[str, dict[str, Any]] = {}
+    for fact_class in fact_classes:
+        fire_rows: list[dict[str, Any]] = []
+        for pid in sorted(fires_by_pid):
+            if fact_class not in delivered_classes_by_fire.get(pid, ()):
+                continue
+            fire = fires_by_pid[pid]
+            leak_zero = fire.get("leak_zero")
+            dose_ok = fire.get("dose_lte_one")
+            gates: dict[str, bool | None] = {
+                "delivered_byte_proven": True,
+                "correct_info": correct_info_by_physical_class.get((pid, fact_class)),
+                "correct_rl_adhered_time": time_by_physical_class.get((pid, fact_class)),
+                "acknowledged": ack_by_physical_class.get((pid, fact_class)),
+                "leak_zero": leak_zero if isinstance(leak_zero, bool) else None,
+                "dose_lte_one": dose_ok if isinstance(dose_ok, bool) else None,
+                "fair_probe": fair_probe_by_physical_class.get((pid, fact_class)),
+            }
+            fire_rows.append({
+                "host_physical_id": pid,
+                "candidate_id": fire.get("candidate_id"),
+                "candidate_sha256_16": fire.get("candidate_sha256_16"),
+                "observation": fire.get("observation"),
+                "gates": gates,
+                "owns_all_seven": all(value is True for value in gates.values()),
+            })
+        owned: bool | None
+        if not fire_rows:
+            owned = None
+        else:
+            owned = all(row["owns_all_seven"] for row in fire_rows)
+        out[fact_class] = {
+            "schema": FEATURE_FIRE_GATE_SCHEMA,
+            "fact_class": fact_class,
+            "fire_count": len(fire_rows),
+            "owned": owned,
+            "fires": fire_rows,
+        }
+    return out
+
+
+def restrict_fire_gate_ownership(
+    record: dict[str, Any],
+    physical_ids: set[str],
+    *,
+    feature_id: str,
+) -> dict[str, Any]:
+    """Restrict a FACT-class fire record to the exact fires owned by one CAP member."""
+    fires = [
+        fire for fire in record.get("fires") or ()
+        if isinstance(fire, dict) and fire.get("host_physical_id") in physical_ids
+    ]
+    return {
+        "schema": FEATURE_FIRE_GATE_SCHEMA,
+        "feature_id": feature_id,
+        "fact_class": record.get("fact_class"),
+        "fire_count": len(fires),
+        "owned": all(fire.get("owns_all_seven") is True for fire in fires) if fires else None,
+        "fires": fires,
     }
 
 
@@ -4323,6 +4650,168 @@ def collect_task(
                 acknowledged=acknowledgment_by_fc.get(fact_class),
             )
 
+    # 129-BUGLIST: per-FIRE seven-gate ownership. Build, per delivery fact class, the
+    # seven-gate tuple of EACH physical fire that delivered it (keyed by candidate id + seal
+    # + observation) so the classifier can require EVERY fire to own all seven — closing
+    # the cross-fire laundering the class union permitted (byte from one fire, timing/ack,
+    # truth, or fair probe from another). This is ADDITIVE: class gates stay unchanged.
+    _fire_pids = {
+        fire["physical_id"] for fire in per_fire["fires"]
+        if isinstance(fire.get("physical_id"), str) and fire.get("physical_id")
+    }
+
+    def _host_fire(physical_id: object, parent_physical_id: object) -> str | None:
+        """The bound WHOLE-ROW fire an entry/block is homed to (dose/leak-bearing)."""
+        if isinstance(physical_id, str) and physical_id in _fire_pids:
+            return physical_id
+        if isinstance(parent_physical_id, str) and parent_physical_id in _fire_pids:
+            return parent_physical_id
+        return None
+
+    _delivered_classes_by_fire: dict[str, set[str]] = defaultdict(set)
+    # Whole-row, block, and co-fact chronologies can project the same row/class. That
+    # identity is usable only when all projections resolve to one physical host.
+    _hosts_by_row_class: dict[tuple[int, str], set[str]] = defaultdict(set)
+    _timing_verdicts: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for _delivery in chronological_timing.get("deliveries", []) or []:
+        if not isinstance(_delivery, dict):
+            continue
+        _dfc = _delivery.get("fact_class")
+        if not isinstance(_dfc, str) or not _dfc:
+            continue
+        _host = _host_fire(
+            _delivery.get("physical_id"), _delivery.get("parent_physical_id")
+        )
+        if _host is None:
+            continue
+        _delivered_classes_by_fire[_host].add(_dfc)
+        _row_index = _delivery.get("ledger_row_index")
+        if type(_row_index) is int and _row_index >= 0:
+            _hosts_by_row_class[(_row_index, _dfc)].add(_host)
+        _verdict = _delivery.get("timing_verdict")
+        if isinstance(_verdict, str):
+            _timing_verdicts[(_host, _dfc)].append(_verdict)
+    _host_by_row_class = {
+        key: next(iter(hosts))
+        for key, hosts in _hosts_by_row_class.items()
+        if len(hosts) == 1
+    }
+    _chronological_time_by_physical_class = {
+        key: _class_verdict(verdicts)[1] for key, verdicts in _timing_verdicts.items()
+    }
+
+    # Truth, authority, and freshness remain attached to the exact delivered row from
+    # attestation_join. A class PASS cannot authorize an unattested sibling delivery.
+    _correct_info_results: dict[tuple[str, str], list[bool | None]] = defaultdict(list)
+    _freshness_results: dict[tuple[str, str], list[bool | None]] = defaultdict(list)
+    for _tf_class, _truth_join in (
+        attestation_join_diag.get("joined_fact_classes", {}) or {}
+    ).items():
+        if not isinstance(_tf_class, str) or not isinstance(_truth_join, dict):
+            continue
+        for _row_truth in _truth_join.get("per_delivery") or ():
+            if not isinstance(_row_truth, dict):
+                continue
+            _truth_row_index = _row_truth.get("ledger_row_index")
+            if type(_truth_row_index) is not int or _truth_row_index < 0:
+                continue
+            _truth_host = _host_by_row_class.get((_truth_row_index, _tf_class))
+            if _truth_host is None:
+                continue
+            _truth = _row_truth.get("truth")
+            _authority = _row_truth.get("authority")
+            if _truth is False or _authority is False:
+                _correct_info = False
+            elif _truth is True and _authority is True:
+                _correct_info = True
+            else:
+                _correct_info = None
+            _correct_info_results[(_truth_host, _tf_class)].append(_correct_info)
+            _freshness = _row_truth.get("freshness")
+            _freshness_results[(_truth_host, _tf_class)].append(
+                _freshness if isinstance(_freshness, bool) else None
+            )
+    _correct_info_by_physical_class = {
+        key: roll_up(results) for key, results in _correct_info_results.items()
+    }
+    _freshness_by_physical_class = {
+        key: roll_up(results) for key, results in _freshness_results.items()
+    }
+    # Correct-time requires both chronological placement and source freshness.
+    _time_by_physical_class = {
+        (host, fact_class): roll_up((
+            _chronological_time_by_physical_class.get((host, fact_class)),
+            _freshness_by_physical_class.get((host, fact_class)),
+        ))
+        for host, classes in _delivered_classes_by_fire.items()
+        for fact_class in classes
+    }
+    _ack_results: dict[tuple[str, str], list[bool | None]] = defaultdict(list)
+    for _ec in _ack_chronologies:
+        _afc = getattr(_ec, "fact_class", None)
+        if not isinstance(_afc, str) or not _afc:
+            continue
+        _host = _host_fire(
+            getattr(_ec, "physical_id", None), getattr(_ec, "parent_physical_id", None)
+        )
+        if _host is None:
+            continue
+        _ack_results[(_host, _afc)].append(
+            acknowledgment_for_row(_ec, messages, rows, _ack_attestations)
+        )
+    _ack_by_physical_class = {
+        key: roll_up(results) for key, results in _ack_results.items()
+    }
+    _fair_probe_results: dict[tuple[str, str], list[bool | None]] = defaultdict(list)
+    for (_probe_row_index, _probe_class), _probe_gate in (
+        fair_probe_bool_by_delivery_row(fair_probe_join).items()
+    ):
+        _probe_host = _host_by_row_class.get((_probe_row_index, _probe_class))
+        if _probe_host is not None:
+            _fair_probe_results[(_probe_host, _probe_class)].append(_probe_gate)
+    _fair_probe_by_physical_class = {
+        key: roll_up(results) for key, results in _fair_probe_results.items()
+    }
+    _delivery_fact_classes = [
+        fc for fc in fact_lifecycles
+        if fact_role_for(fc) != FACT_ROLE_INTERNAL_SUPPORT
+    ]
+    fire_gate_ownership_by_fc = feature_fire_gate_ownership(
+        [
+            {
+                "host_physical_id": fire.get("physical_id"),
+                "candidate_id": fire.get("candidate_id"),
+                "candidate_sha256_16": fire.get("candidate_sha256_16"),
+                "observation": fire.get("observation_group"),
+                "leak_zero": fire.get("leak_zero"),
+                "dose_lte_one": fire.get("dose_lte_one"),
+            }
+            for fire in per_fire["fires"]
+        ],
+        _delivered_classes_by_fire,
+        _time_by_physical_class,
+        _ack_by_physical_class,
+        _correct_info_by_physical_class,
+        _fair_probe_by_physical_class,
+        _delivery_fact_classes,
+    )
+    # Attach the fire-local ownership record to every delivery-graded terminal: the 10
+    # delivery FACT classes own their own record; each CAP byte-owner receives only the exact
+    # physical rows authorized by its CAP_BYTE_OWNER_MECHANISMS binding.
+    for fc in _delivery_fact_classes:
+        fact_readiness[fc]["fire_gate_ownership"] = fire_gate_ownership_by_fc[fc]
+    for member, feature in features.items():
+        if cap_role_for(member) != "byte_owner":
+            continue
+        owned_fcs = member_fact_classes(member)
+        if owned_fcs and owned_fcs[0] in fire_gate_ownership_by_fc:
+            _owned_fire_ids = _member_owned_fire_ids(member, rows, per_fire["fires"])
+            feature["ss_readiness"]["fire_gate_ownership"] = restrict_fire_gate_ownership(
+                fire_gate_ownership_by_fc[owned_fcs[0]],
+                _owned_fire_ids,
+                feature_id=member,
+            )
+
     endpoints = behavioural_endpoints(timeline)
     baseline_endpoints = None
     if base_path:
@@ -4387,6 +4876,14 @@ def collect_task(
     ss_integrity["per_fire_gate"] = per_fire
     # DEFECT 9: named CAP byte-owner ownership rejections (unauthorized inheritance).
     ss_integrity["byte_owner_ownership"] = byte_owner_ownership
+    # 129-BUGLIST: per-fact-class fire-local SEVEN-gate ownership rollup (owned True only
+    # when EVERY physical fire owns all seven). A False here is a per-feature terminal
+    # verdict (the classifier downgrades that class to SEALED_DELIVERED_UNGRADED), NOT a
+    # run-integrity input fault, so it never forces required_inputs_complete False.
+    ss_integrity["feature_fire_gate_ownership"] = {
+        fc: {"owned": rec["owned"], "fire_count": rec["fire_count"]}
+        for fc, rec in fire_gate_ownership_by_fc.items()
+    }
     # A leaking or double-dosed fire, or an unauthorized ownership claim, is a
     # fail-closed run-integrity fault (named culprit), consistent with the run-global
     # leak/dose taints already folded into leak_gate/dose_gate above.
@@ -4752,6 +5249,7 @@ def aggregate_run(
                     aggregate_record = _run_ratio_feature_record(
                         run_id,
                         run_metrics_artifact,
+                        task_feature_rows,
                         section=section,
                         name=name,
                         value_type=value_type,
@@ -4769,6 +5267,7 @@ def aggregate_run(
                         expected_tasks=len(expected),
                     )
                     aggregate_coverage = aggregate_record["aggregate_coverage_valid"]
+                cross_process_parity = aggregate_record["cross_process_parity_valid"]
                 if not aggregate_coverage:
                     ss_integrity["perf_aggregate_failures"].append(name)
                     ss_integrity["publishable"] = False
@@ -4776,6 +5275,7 @@ def aggregate_run(
                 ss_run_features[name]["ss_readiness"] = _measurement_only_readiness(
                     aggregate_record,
                     aggregate_coverage=aggregate_coverage,
+                    cross_process_parity=cross_process_parity,
                     live_witness=run_live_witness,
                 )
     for rec in task_records:

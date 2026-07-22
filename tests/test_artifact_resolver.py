@@ -112,6 +112,21 @@ def test_resolver_and_provenance_use_task_root_exact_seal(tmp_path):
     assert provenance["delivery_message_index"] == 1
 
 
+def test_resolver_never_selects_another_task_root_when_instance_is_given(tmp_path):
+    mod = _load()
+    jobs = tmp_path / "jobs"
+    for task, marker in (("aaa__owner", "A"), ("zzz__other", "B")):
+        trial = jobs / "run-1" / task
+        trial.mkdir(parents=True)
+        (trial / "result.json").write_text(json.dumps({"task": marker}), encoding="utf-8")
+        (trial / "task_truth.json").write_text(marker, encoding="utf-8")
+    (jobs.parent / "delivered_instruction.txt").write_text("global", encoding="utf-8")
+    arts = mod.resolve_trial_artifacts(str(jobs), instance_id="aaa__owner")
+    assert arts.trial_dir == str(jobs / "run-1" / "aaa__owner")
+    assert arts.task_truth == str(jobs / "run-1" / "aaa__owner" / "task_truth.json")
+    assert arts.delivered_instruction is None
+
+
 def test_brief_provenance_rejects_ambiguous_exact_seals(tmp_path):
     mod = _load()
     block = "<gt-task-brief>\nranked file\n</gt-task-brief>"

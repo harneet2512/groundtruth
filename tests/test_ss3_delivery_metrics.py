@@ -130,6 +130,8 @@ def test_build_gt_delivery_runtime_ledger_block_present(tmp_path, monkeypatch):
     assert rl["present"] is True
     assert rl["delivered_count"] == 1
     assert rl["delivered_chars"] == len(block)
-    # tagless run → the token total is filled from the sealed ledger chars, not left 0.
-    assert deep["gt_injected_tokens_total"] == float(len(block))
+    # tagless run → the EXACT injected char count is filled from the sealed ledger chars, not
+    # left 0 (D3: labelled honestly as chars, with a distinct chars/4 token estimate).
+    assert deep["gt_injected_chars_exact"] == float(len(block))
+    assert deep["gt_injected_tokens_estimated"] == float(len(block)) / 4.0
     assert deep["gt_injected_tokens_source"] == "runtime_ledger_sealed_chars"

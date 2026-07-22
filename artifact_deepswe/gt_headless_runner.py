@@ -53,7 +53,6 @@ _REGISTERED_BRIEF_BLOCKS = {
     "localization-header": (
         "localization", "brief_localization", "v1r_brief"),
     "obligations": ("obligations", "obligations", "spec"),
-    "expected-behavior": ("obligations", "obligations", "spec"),
 }
 
 
@@ -301,7 +300,9 @@ def _persist_brief_obligations_attestations(e: Mapping[str, str], brief_text: st
         return
     receipt = next(
         (r for r in receipts
-         if isinstance(r, dict) and r.get("fact_class") == "obligations"),
+         if isinstance(r, dict)
+         and r.get("fact_class") == "obligations"
+         and r.get("label") == "obligations"),
         None,
     )
     if receipt is None:
@@ -326,6 +327,8 @@ def _persist_brief_obligations_attestations(e: Mapping[str, str], brief_text: st
         digest != full_hash
         or record.get("candidate_id") != candidate_id
         or record.get("block_content_sha256") != full_hash
+        or ("<gt-obligations>" not in block
+            and "Requirements to satisfy (from the issue):" not in block)
     ):
         return
     try:

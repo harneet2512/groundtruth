@@ -39,3 +39,13 @@ def test_static_feature_preflight_is_persisted_then_enforced_before_matrix() -> 
     assert enforce["if"] == "${{ inputs.baseline != true }}"
     assert "steps.feature_preflight.outcome" in enforce["run"]
     assert "GT_STATIC_FEATURE_PREFLIGHT_FAILED" in enforce["run"]
+
+
+def test_explicit_duplicate_ids_fail_before_matrix_creation() -> None:
+    steps = _steps()
+    names = [step.get("name") for step in steps]
+    matrix = steps[names.index("Build Live Lite task matrix (swebench_live_lite.jsonl-driven)")]
+    run = matrix["run"]
+    assert "duplicate explicit instance ids requested before matrix creation" in run
+    assert "if duplicates:" in run
+    assert run.index("duplicates") < run.index("unknown =")

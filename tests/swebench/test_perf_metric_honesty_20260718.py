@@ -39,18 +39,20 @@ def test_scope_coverage_unmeasured_without_gold() -> None:
     assert scope["scope_coverage"] is None  # D5 (was 0.0)
 
 
-# ── D2: wasted_token_rate step proxy — None on an empty timeline, basis disclosed ─────────────
-def test_wasted_token_rate_unmeasured_on_empty_timeline() -> None:
+# ── D2: non_gold_step_rate step proxy — None on an empty timeline, basis disclosed ────────────
+# (renamed 2026-07-21 from the misleading "wasted_token_rate": it is a STEP ratio, not a token one)
+def test_non_gold_step_rate_unmeasured_on_empty_timeline() -> None:
     tok = pm._compute_token_efficiency(trajectory={}, timeline=[], gold_files=[])
-    assert tok["wasted_token_rate"] is None  # was a fabricated 0.0
-    assert tok["_wasted_token_rate_basis"].startswith("step_proxy")
+    assert tok["non_gold_step_rate"] is None  # was a fabricated 0.0, and never a token "rate"
+    assert "wasted_token_rate" not in tok  # the misleading token name is gone
+    assert tok["_non_gold_step_rate_basis"].startswith("step_proxy")
     assert tok["_gt_token_overhead_basis"] == "chars_over_4_token_estimate"
     assert tok["_non_idle_step_count"] == 0
 
 
 # ── D2/D5: gt_feature_metrics provenance names the proxy/estimate, not the token formula ──────
-def test_wasted_token_rate_formula_provenance_names_the_step_proxy() -> None:
-    formula, denom = fm._perf_provenance("token_efficiency", "wasted_token_rate")
+def test_non_gold_step_rate_formula_provenance_names_the_step_proxy() -> None:
+    formula, denom = fm._perf_provenance("token_efficiency", "non_gold_step_rate")
     assert "STEP-PROXY" in formula and "NOT the" in formula
     assert "MANDATORY_METRICS.md#" not in formula  # must NOT masquerade as the measured formula
     assert "_non_idle_step_count" in denom

@@ -802,10 +802,35 @@ class TaskMirrors:
         self.recorded = recorded_root / task
         self.snapshot = snapshot_root / task
 
+    def _reset_snapshot(self) -> None:
+        """Restore the dedicated replay checkout *before* any mirror is staged.
+
+        A prior oracle can die after applying an edit, leaving the snapshot dirty;
+        teardown is then never reached.  Starting from that state would make the next
+        replay depend on crash residue.  Fail closed if git cannot prove cleanliness.
+        """
+        if _run_quiet(["git", "-C", str(self.snapshot), "checkout", "--", "."]) != 0:
+            raise SeamReplayBlocked(f"{self.task}: snapshot reset checkout failed")
+        if _run_quiet(["git", "-C", str(self.snapshot), "clean", "-fdq"]) != 0:
+            raise SeamReplayBlocked(f"{self.task}: snapshot reset clean failed")
+        import subprocess
+        try:
+            status = subprocess.run(
+                ["git", "-C", str(self.snapshot), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=120,
+            )
+        except Exception as exc:  # noqa: BLE001 - replay must fail closed
+            raise SeamReplayBlocked(f"{self.task}: snapshot status failed: {exc}") from exc
+        if status.returncode != 0 or (status.stdout or "").strip():
+            raise SeamReplayBlocked(
+                f"{self.task}: snapshot remains dirty before replay"
+            )
+
     def setup(self, *, stage_current_v2: bool = False) -> None:
         import shutil
         if not self.snapshot.is_dir():
             raise SeamReplayBlocked(f"{self.task}: no repo snapshot at {self.snapshot}")
+        self._reset_snapshot()
         # /testbed + /tmp/gt_work_src -> the snapshot working tree
         if not _make_junction(_MIRROR_TESTBED, self.snapshot):
             raise SeamReplayBlocked(f"{self.task}: could not junction {_MIRROR_TESTBED} -> {self.snapshot}")
@@ -3005,6 +3030,21 @@ def _manifest_tasks(cases: dict) -> list[str]:
     return sorted(tasks)
 
 
+def _requested_tasks(cases: dict, raw_tasks: str) -> tuple[list[str], list[str]]:
+    """Resolve a targeted task list and report IDs absent from the manifest.
+
+    Targeted replay is a proof diagnostic, so silently dropping a typo can otherwise
+    produce a vacuous green run with zero reconstructed tasks.  Duplicate IDs are
+    harmless and collapse to one selected manifest task; unknown IDs are returned in
+    deterministic order for a caller to fail closed.
+    """
+    requested = {token.strip() for token in (raw_tasks or "").split(",") if token.strip()}
+    manifest = set(_manifest_tasks(cases))
+    unknown = sorted(requested - manifest)
+    selected = sorted(requested & manifest)
+    return selected, unknown
+
+
 def _select_cases(cases: dict, selected_tasks: set[str]) -> dict:
     """Return the manifest slice owned by ``selected_tasks``.
 
@@ -3131,8 +3171,13 @@ def main(argv=None) -> int:
     snapshots_root = Path(args.snapshots_root)
     tasks = _manifest_tasks(cases)
     if args.tasks:
-        keep = {t.strip() for t in args.tasks.split(",") if t.strip()}
-        tasks = [t for t in tasks if t in keep]
+        tasks, unknown_tasks = _requested_tasks(cases, args.tasks)
+        if unknown_tasks:
+            print("ERROR: unknown task ID(s) for targeted replay: "
+                  + ", ".join(unknown_tasks), file=sys.stderr)
+            print("       available task IDs are listed in the cases manifest; "
+                  "no replay was started", file=sys.stderr)
+            return 2
     active_cases = _select_cases(cases, set(tasks)) if args.tasks else cases
     work_dir = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix="ssr2_"))
     work_dir.mkdir(parents=True, exist_ok=True)

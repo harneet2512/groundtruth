@@ -251,7 +251,13 @@ def test_deep_and_standalone_performance_share_canonical_verifier_truth(
         json.dumps({"messages": [], "info": {"model_stats": {}, "submission": ""}}),
         encoding="utf-8",
     )
+    # task_truth.json on disk is the full gt.task_truth.v1 doc (schema + instance_id are
+    # what build_task_truth always emits); the deep reader's identity guard honours it only
+    # when both are present and matched to THIS task, so the fixture must carry them for the
+    # deep path to plumb the SAME canonical verifier_truth the standalone API is handed.
     truth = {
+        "schema": "gt.task_truth.v1",
+        "instance_id": task,
         "verifier_truth": {
             "schema": "gt.verifier_truth.v1",
             "authority": "official_swebench_report.tests_status.PASS_TO_PASS",
@@ -261,7 +267,7 @@ def test_deep_and_standalone_performance_share_canonical_verifier_truth(
             "p2p_failed": 1,
             "caller_breakage_count": None,
             "caller_breakage_unmeasured_reason": "caller_aware_verifier_join_absent",
-        }
+        },
     }
     (tmp_path / "task_truth.json").write_text(json.dumps(truth), encoding="utf-8")
 

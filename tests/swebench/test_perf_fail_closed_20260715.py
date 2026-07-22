@@ -180,7 +180,7 @@ def test_all_perf_aggregate_coverage_requires_canonical_run_artifact() -> None:
 @pytest.mark.parametrize(
     ("section", "metric"),
     [
-        ("edit_quality", "edit_revert_rate"),
+        ("edit_quality", "revert_commands_per_edit"),
         ("localization", "localization_precision"),
         ("localization", "false_file_rate"),
         ("localization", "exploration_ratio"),

@@ -443,6 +443,8 @@ jobs:
           # instance_id + dockerhub_tag presence only (both required fields).
           python3 << 'PYEOF'
           import json, math, os, sys
+          sys.path.insert(0, "scripts/swebench")
+          from task_language import derive_task_language
 
           mode = os.environ.get("INPUT_MODE", "smoke")
           lang = os.environ.get("INPUT_LANGUAGE", "all")
@@ -464,9 +466,11 @@ jobs:
                   for k in ("instance_id",):
                       if not r.get(k):
                           sys.exit(f"FATAL: Live Lite manifest entry missing {k!r}: {r}")
-                  # Derive language from repo name (Live Lite has no repo_language field)
-                  repo = r.get("repo", "")
-                  r["repo_language"] = "python"  # default; Live Lite is mixed but this is for display only
+                  # Live Lite records carry no repo_language; derive from task-owned
+                  # patch metadata and fail closed when no source language is knowable.
+                  r["repo_language"] = derive_task_language(r)
+                  if not r["repo_language"]:
+                      sys.exit(f"FATAL: cannot derive language for {r['instance_id']}")
                   tasks.append(r)
           if not tasks:
               sys.exit("FATAL: swebench_live_lite.jsonl has no tasks")
@@ -474,6 +478,15 @@ jobs:
           by_id = {t["instance_id"]: t for t in tasks}
 
           if explicit:
+              counts = {}
+              for task_id in explicit:
+                  counts[task_id] = counts.get(task_id, 0) + 1
+              duplicates = sorted(task_id for task_id, count in counts.items() if count > 1)
+              if duplicates:
+                  sys.exit(
+                      "FATAL: duplicate explicit instance ids requested before matrix creation: "
+                      f"{duplicates}"
+                  )
               unknown = [t for t in explicit if t not in by_id]
               if unknown:
                   sys.exit(f"FATAL: unknown instance ids (not in the 731-task Live Lite manifest): {unknown}")
@@ -519,7 +532,7 @@ jobs:
           include = [
               {
                   "task": t["instance_id"],
-                  "language": t.get("repo_language", "python"),
+                  "language": t["repo_language"],
               }
               for t in sel
           ]
@@ -2875,11 +2888,13 @@ jobs:
 
             python3 scripts/swebench/ss_live_diagnosis.py /tmp/all \
               --run-metrics "$GT_DIAG_DIR/gt_run_metrics_v2_${GT_RUN_ID}.json" \
+              --feature-run-metrics "$GT_DIAG_DIR/gt_run_metrics_${GT_RUN_ID}.json" \
               --expected-tasks "$GT_DIAG_DIR/expected_tasks.json" \
               --output "$GT_DIAG_DIR/ss_live_diagnosis_${GT_RUN_ID}.json" \
               || GT_SS_DIAGNOSIS_JSON_RC=$?
             python3 scripts/swebench/ss_live_diagnosis.py /tmp/all \
               --run-metrics "$GT_DIAG_DIR/gt_run_metrics_v2_${GT_RUN_ID}.json" \
+              --feature-run-metrics "$GT_DIAG_DIR/gt_run_metrics_${GT_RUN_ID}.json" \
               --expected-tasks "$GT_DIAG_DIR/expected_tasks.json" \
               --format markdown \
               --output "$GT_DIAG_DIR/ss_live_diagnosis_${GT_RUN_ID}.md" \

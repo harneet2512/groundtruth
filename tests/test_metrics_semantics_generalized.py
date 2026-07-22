@@ -214,11 +214,20 @@ def test_runtime_post_edit_paths_enrich_without_erasing_shell_edits(tmp_path: Pa
     )
 
     loc = result["localization"]
-    assert loc["steps_to_gold_edit"] == 1
-    assert loc["files_to_gold_edit"] == 1
-    assert loc["localization_precision"] == 0.5
+    # The runtime post-edit enrichment still does NOT erase the shell edit from the
+    # timeline (that is this test's contract) — proven by edit_path_source and
+    # authoritative_post_edit_count below, which are unchanged.
     assert result["edit_path_source"] == "command_plus_runtime_post_edit"
     assert result["authoritative_post_edit_count"] == 1
+    # Localization RATES now derive from edit-truth authority (the SUBMITTED PATCH),
+    # not command inference: the submitted diff touches ONLY src/gold.py, so the
+    # /tmp/helper.py scratch write (never in the repo diff) is not a repo edit.
+    # -> n_edited=1, precision=1.0, and no non-gold edit precedes the gold edit.
+    assert loc["_edit_authority"] == "submission_patch"
+    assert loc["_unique_edited"] == 1
+    assert loc["steps_to_gold_edit"] == 1        # gold edited at step 2 (2-1)
+    assert loc["files_to_gold_edit"] == 0        # was 1 under command inference
+    assert loc["localization_precision"] == 1.0  # was 0.5 under command inference
 
 
 def test_direct_edit_command_remains_fallback_without_post_edit_rows(tmp_path: Path) -> None:

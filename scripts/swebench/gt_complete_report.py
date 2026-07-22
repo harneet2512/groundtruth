@@ -292,6 +292,10 @@ def build_report(
         level1_status = "LEVEL1_PASS"
 
     cohort_results = _cohorts(records, minimum_detectable_effect)
+    cohort_valid = bool(cohort_results) and all(
+        result.get("status") != "INVALID" and not result.get("failures")
+        for result in cohort_results.values()
+    )
     positive_cohorts = [
         result for result in cohort_results.values()
         if result.get("status") == "POSITIVE_EFFECT"
@@ -395,6 +399,12 @@ def build_report(
             "outcome_validity_proven": False,
             "grader_calibrated": False,
             "evaluation_awareness_checked": False,
+            "cohort_valid": cohort_valid,
+            "cohort_failures": sorted({
+                str(failure)
+                for result in cohort_results.values()
+                for failure in (result.get("failures") or [])
+            }),
         },
         "level_1": {
             "scope": scope,
@@ -449,9 +459,9 @@ def build_report(
             "cohorts": cohort_results,
         },
         "experiment": {
-            "intervention_executed": bool(cohort_results),
-            "randomized": bool(cohort_results),
-            "same_model_policy": bool(powered_cohorts),
+            "intervention_executed": cohort_valid,
+            "randomized": cohort_valid,
+            "same_model_policy": bool(powered_cohorts) and cohort_valid,
             "n_tasks": int(experiment_result.get("n_tasks") or 0),
             "n_treatment": int(experiment_result.get("n_deliver") or 0),
             "n_control": int(experiment_result.get("n_holdout") or 0),
@@ -460,8 +470,11 @@ def build_report(
             "effect_unit": "registered-receipt risk difference",
             "confidence_interval": experiment_result.get("confidence_interval"),
             "replay_fidelity": None,
-            "assignment_probabilities_logged": bool(cohort_results),
-            "held_out_test_set": bool(held_out_test_set),
+            "assignment_probabilities_logged": cohort_valid,
+            "held_out_test_set": bool(held_out_test_set and cohort_valid),
+            "preregistered": bool(
+                claim_contract.get("pre_specified") is True and cohort_valid
+            ),
             "deployment_like_context": bool(deployment_like_context),
         },
         "evidence_items": evidence_items,

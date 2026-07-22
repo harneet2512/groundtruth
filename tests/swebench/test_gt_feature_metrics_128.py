@@ -477,12 +477,16 @@ def test_perf_readiness_is_typed_measurement_not_delivery_gates(tmp_path: Path) 
         "denominator_provenance": True,
         "applicability_resolved": True,
         "task_coverage": True,
+        # Run-scope gates carried False at task grain (single-process view).
+        "cross_process_parity": False,
         "aggregate_coverage": False,
     }
     assert readiness["measurement_complete"] is False
     assert readiness["live_witness"] is False
     assert readiness["ss_live"] is False
-    assert readiness["blockers"] == ["aggregate_coverage", "live_witness"]
+    assert readiness["blockers"] == [
+        "cross_process_parity", "aggregate_coverage", "live_witness",
+    ]
 
 
 def test_perf_readiness_fails_closed_on_schema_precision_or_structure(tmp_path: Path) -> None:
@@ -1438,7 +1442,8 @@ def test_measurement_readiness_ss_live_requires_live_witness_and_all_gates() -> 
         "task_coverage_valid": True,
     }
     live = metrics._measurement_only_readiness(
-        valid_record, aggregate_coverage=True, live_witness=True,
+        valid_record, aggregate_coverage=True, cross_process_parity=True,
+        live_witness=True,
     )
     assert all(v is True for v in live["gates"].values())
     assert live["live_witness"] is True
@@ -1446,7 +1451,8 @@ def test_measurement_readiness_ss_live_requires_live_witness_and_all_gates() -> 
     assert live["blockers"] == []
 
     dark = metrics._measurement_only_readiness(
-        valid_record, aggregate_coverage=True, live_witness=False,
+        valid_record, aggregate_coverage=True, cross_process_parity=True,
+        live_witness=False,
     )
     assert all(v is True for v in dark["gates"].values())
     assert dark["live_witness"] is False

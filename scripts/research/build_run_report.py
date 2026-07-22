@@ -213,12 +213,19 @@ def parse_deep_metrics(task: dict, dm_path: Path) -> None:
     src = dm_path
     direct = {
         "outcome": "outcome", "resolved": "resolved", "has_patch": "has_patch",
-        "gt_injected_tokens": "gt_injected_tokens_total",
     }
     for field, key in direct.items():
         if key in dm and dm[key] is not None and task.get(field) is None:
             task[field] = dm[key]
             prov(task, field, src)
+    # gt_injected_tokens display column: prefer the v3 honest token ESTIMATE, fall back to the
+    # legacy v2 gt_injected_tokens_total key (compatibility reader for older artifacts).
+    if task.get("gt_injected_tokens") is None:
+        for key in ("gt_injected_tokens_estimated", "gt_injected_tokens_total"):
+            if dm.get(key) is not None:
+                task["gt_injected_tokens"] = dm[key]
+                prov(task, "gt_injected_tokens", src)
+                break
     if dm.get("git_commit") and not task["integrity"]["gt_git_commit"]:
         task["integrity"]["gt_git_commit"] = dm["git_commit"]
         prov(task, "integrity.gt_git_commit", src)

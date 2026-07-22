@@ -24,7 +24,10 @@ try:
         layer_to_fact_class,
         member_fact_classes,
     )
-    from scripts.swebench.gt_run_metrics import normalized_right_censor_observation
+    from scripts.swebench.gt_run_metrics import (
+        _LEGACY_METRIC_ALIASES,
+        normalized_right_censor_observation,
+    )
 except ModuleNotFoundError:
     from acq_provenance import ACQ_SOURCE_COMPONENTS  # type: ignore[no-redef]
     from gt_feature_inventory import (  # type: ignore[no-redef]
@@ -36,6 +39,7 @@ except ModuleNotFoundError:
         member_fact_classes,
     )
     from gt_run_metrics import (  # type: ignore[no-redef]
+        _LEGACY_METRIC_ALIASES,
         normalized_right_censor_observation,
     )
 
@@ -120,10 +124,22 @@ def _scoreboard_inventory(path: str | Path) -> dict[str, tuple[str, ...]]:
     return out
 
 
+# A frozen SS_SCOREBOARD.json predates the 2026-07-21 honesty rename of two PERF metrics
+# (edit_revert_rate->revert_commands_per_edit, wasted_token_rate->non_gold_step_rate). The
+# executable inventory now emits the new names; the frozen dataset still carries the legacy ones.
+# Canonicalize the legacy name to its new equivalent before the drift check — the SAME
+# reader-compatibility contract gt_run_metrics.py already honours (value/formula identical; only
+# the specific renamed pair is treated as equivalent, so genuine drift is still caught loudly).
+_PERF_LEGACY_TO_CANONICAL: dict[str, str] = {
+    legacy: new for (_section, new), legacy in _LEGACY_METRIC_ALIASES.items()
+}
+
+
 def _validate_scoreboard(path: str | Path, executable: dict[str, tuple[str, ...]]) -> None:
     scoreboard = _scoreboard_inventory(path)
     for family, names in executable.items():
-        if len(scoreboard[family]) != len(names) or set(scoreboard[family]) != set(names):
+        recorded = {_PERF_LEGACY_TO_CANONICAL.get(name, name) for name in scoreboard[family]}
+        if len(scoreboard[family]) != len(names) or recorded != set(names):
             raise ValueError(f"ss proof manifest: scoreboard {family} name/count drift")
 
 
@@ -292,9 +308,16 @@ def _fact_row(name: str) -> dict[str, Any]:
             "truth_authority": {
                 "internal_support_only": True,
                 "freshness_dependencies": list(registration.freshness_deps),
-                "missing_writer": (
+                # Traceable influence-truth witness is ENFORCED: the collector validates THIS
+                # candidate's self-sealed cochange_evidence (exact rows + tamper-evident seal)
+                # and surfaces a DEDICATED ``cochange_influence_witness`` that the
+                # internal-support ``support_correct`` gate reads directly — never the generic
+                # ACQ ``source_contribution_correct`` contribution field.
+                "traceable_influence_witness": (
+                    "scripts.swebench.acq_provenance.collect_acq_provenance"
+                    "#cochange_influence_witness over "
                     "brief_result.metrics.localization_proof[].cochange_evidence "
-                    "with exact cochange rows and cochange revision"
+                    "(exact self-sealed cochange rows)"
                 ),
             },
             "chronological_boundary_authority": None,
@@ -309,7 +332,11 @@ def _fact_row(name: str) -> dict[str, Any]:
             "offline_proof_dependencies": list(PER_FEATURE_OFFLINE_PROOF_DEPENDENCIES),
             "live_proof_dependencies": list(INTERNAL_FACT_SUPPORT_PROOFS),
             "BLOCKED_BY": [
-                "COCHANGE_INTERNAL_TRUTH_WITNESS_ABSENT",
+                # Truth witness CLOSED: the dedicated ``cochange_influence_witness`` above
+                # independently enforces traceable cochange influence. The cochange-SPECIFIC
+                # causal ablation probe remains a preregistered structural non-provable (R3);
+                # the terminal still inherits the supported FACT class's fair-probe as
+                # enrichment only, so this row stays architecturally blocked on causality.
                 "COCHANGE_INTERNAL_CAUSAL_PROBE_ABSENT",
             ],
         }

@@ -499,8 +499,19 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
         "mandatory_performance_metric_count": 58,
         "mandatory_performance": mandatory,
         "mandatory_performance_collection_complete": True,
-        # NO-GO defect 5: a MEASURED run PERF row is adjudicated on the writer's
-        # SS-MEASURE readiness (gt_feature_metrics ~4371); status alone never promotes.
+        "tasks": 1,
+        "task_population": {
+            "observed_record_count": 1, "observed_unique_count": 1,
+            "missing_tasks": [], "duplicate_tasks": [], "unexpected_tasks": [],
+            "invalid_task_records": [],
+        },
+    }), encoding="utf-8")
+    # The live workflow writes readiness in the independent gt_feature_metrics run
+    # artifact. The canonical v2 distribution intentionally carries no ss_features.
+    feature_run_metrics = tmp_path / "gt_run_metrics_run-1.json"
+    feature_run_metrics.write_text(json.dumps({
+        "schema": "gt.feature_metrics.run.v1", "run_id": "run-1",
+        "n_tasks": 1, "observed_task_count": 1, "expected_task_ids": [task],
         "ss_features": {
             "gold_rank": {
                 "family": "PERF",
@@ -511,20 +522,17 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
                         "precision_8dp": True, "formula_provenance": True,
                         "denominator_provenance": True,
                         "applicability_resolved": True, "task_coverage": True,
+                        "cross_process_parity": True,
                         "aggregate_coverage": True,
                     },
                 },
             },
         },
-        "tasks": 1,
-        "task_population": {
-            "observed_record_count": 1, "observed_unique_count": 1,
-            "missing_tasks": [], "duplicate_tasks": [], "unexpected_tasks": [],
-            "invalid_task_records": [],
-        },
     }), encoding="utf-8")
 
-    result = diagnosis.diagnose_run(tmp_path, run_metrics)
+    result = diagnosis.diagnose_run(
+        tmp_path, run_metrics, feature_run_metrics_path=feature_run_metrics,
+    )
 
     assert result["feature_count"] == 129
     assert result["integrity"]["publishable"] is True
@@ -565,20 +573,24 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
             "artifact_valid": True, "metric_structure_valid": True,
             "precision_8dp": False, "formula_provenance": True,
             "denominator_provenance": True, "applicability_resolved": True,
-            "task_coverage": True, "aggregate_coverage": True,
+            "task_coverage": True, "cross_process_parity": True,
+            "aggregate_coverage": True,
         },
     }
     assert diagnosis._perf_status(
         {**sound, "ss_readiness": unsound_readiness}, scope="run",
     ) == "FAILED:measurement:precision_8dp"
-    # aggregate_coverage is a run-population gate: it never bites at task grain.
+    # aggregate_coverage (and cross_process_parity) are run-population gates: they never
+    # bite at task grain. cross_process_parity True here isolates the aggregate_coverage
+    # behavior so the run-scope first-false remains aggregate_coverage.
     task_grain_readiness = {
         "role": "measurement", "live_witness": False, "ss_live": False,
         "gates": {
             "artifact_valid": True, "metric_structure_valid": True,
             "precision_8dp": True, "formula_provenance": True,
             "denominator_provenance": True, "applicability_resolved": True,
-            "task_coverage": True, "aggregate_coverage": False,
+            "task_coverage": True, "cross_process_parity": True,
+            "aggregate_coverage": False,
         },
     }
     assert diagnosis._perf_status(
@@ -733,7 +745,12 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
     assert incomplete_by_name["caller_contract"]["task_buckets"][task] == (
         "UNMEASURED:no_bound_opportunity"
     )
-    assert incomplete_by_name["gold_rank"]["run_bucket"] == "MEASURED"
+    # Population-completeness doctrine (this fix): once the run declares
+    # mandatory_performance_collection_complete=False, NO run-level PERF metric may certify a
+    # complete-population MEASURED aggregate — the independent run-readiness parity proof is
+    # not certifiable on an incomplete population, so gold_rank honestly abstains here instead
+    # of laundering to MEASURED (the exact laundering this fix closes).
+    assert incomplete_by_name["gold_rank"]["run_bucket"] == "UNMEASURED:measurement:run_readiness"
 
     visible_incomplete = json.loads(feature_path.read_text(encoding="utf-8"))
     visible_incomplete["ss_integrity"]["visible_audit_complete"] = False

@@ -65,3 +65,46 @@ def test_absent_live_records_cannot_be_promoted_by_report_builder() -> None:
     assert report["level_2"]["status"] == "BEHAVIOR_UNMEASURED"
     assert report["verdict"]["final_verdict"] == "GT_OPERATION_UNPROVEN"
     assert len(report["feature_attribution"]) == 129
+
+
+def test_invalid_cohort_cannot_claim_randomization_or_holdout(monkeypatch) -> None:
+    import gt_complete_report as module
+
+    monkeypatch.setattr(module, "_cohorts", lambda *_args: {
+        "syntax_result": {
+            "status": "INVALID",
+            "identification_strength": "NONE",
+            "failures": ["both_arms_required"],
+        }
+    })
+    report = module.build_report(
+        [{"ss_integrity": {"inventory_complete": True, "required_inputs_complete": True,
+                           "live_run_provenance": {"verdict": "LIVE_PAID"}}}],
+        study_id="invalid", scope="run", claim_contract=CLAIM,
+        system_identity=SYSTEM, minimum_detectable_effect=0.2,
+        held_out_test_set=True,
+    )
+    experiment = report["experiment"]
+    assert experiment["randomized"] is False
+    assert experiment["intervention_executed"] is False
+    assert experiment["assignment_probabilities_logged"] is False
+    assert experiment["held_out_test_set"] is False
+    assert experiment["preregistered"] is False
+
+
+def test_unmeasured_cohort_cannot_claim_preregistration(monkeypatch) -> None:
+    import gt_complete_report as module
+
+    monkeypatch.setattr(module, "_cohorts", lambda *_args: {
+        "syntax_result": {
+            "status": "UNMEASURED",
+            "identification_strength": "NONE",
+            "failures": ["preregistered_minimum_detectable_effect_absent"],
+        }
+    })
+    report = module.build_report(
+        [], study_id="unmeasured", scope="product", claim_contract=CLAIM,
+        system_identity=SYSTEM, held_out_test_set=True,
+    )
+    assert report["validity"]["cohort_valid"] is False
+    assert report["experiment"]["preregistered"] is False

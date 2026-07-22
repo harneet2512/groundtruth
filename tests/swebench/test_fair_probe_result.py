@@ -389,6 +389,14 @@ def test_self_localized_when_agent_self_acquired_first() -> None:
     join = join_fair_probes(traj, rows)
     assert join["per_fact_class"]["localization"]["verdict"] == SELF_LOCALIZED
     assert fair_probe_bool_by_fact_class(join)["localization"] is False
+    # The class headline is not sufficient for seven-gate ownership. Preserve the exact
+    # delivered row's result so another localization fire cannot borrow this verdict.
+    assert join["per_delivery"][0] == {
+        "ledger_row_index": 0,
+        "fact_class": "localization",
+        "verdict": SELF_LOCALIZED,
+        "fair_probe": False,
+    }
 
 
 # --------------------------------------------------------------------------- #

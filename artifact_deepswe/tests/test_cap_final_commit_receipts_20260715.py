@@ -299,7 +299,15 @@ def test_lane_provenance_outcomes_are_exact(monkeypatch):
     assert rows[0]["candidate_sha256_16"] == hashlib.sha256(b"clean").hexdigest()[:16]
     assert rows[0]["candidate_id"] == g._lane_final_extra(
         "l3.contract", "clean", "src/widget.py")["candidate_id"]
-    assert rows[1]["candidate_chars"] == 0
+    # SUPPRESSED withholds the candidate, so the record seals the PRE-suppression bytes
+    # (original_text) — never the empty final. Sealing nothing (chars 0) would fail the
+    # referee's _has_identity guard and drop the record, laundering the suppression into
+    # an unverifiable claim; the pre-suppression seal keeps the exact `not _carried`
+    # absence check byte-verifiable (the same contract the SUPPRESSED grader consumes).
+    assert rows[1]["candidate_sha256_16"] == hashlib.sha256(b"original").hexdigest()[:16]
+    assert rows[1]["candidate_chars"] == len("original")
+    assert rows[1]["candidate_id"] == g._lane_final_extra(
+        "l3.contract", "original", "src/widget.py")["candidate_id"]
 
 
 def test_runtime_ledger_accepts_string_and_enum_event_contract(monkeypatch):

@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -172,6 +173,40 @@ def test_load_of_absent_dir_is_empty_not_error(tmp_path: Path) -> None:
     assert load == aj.AttestationLoad()
 
 
+def test_missing_proof_field_is_unmeasured_even_with_valid_store_bytes(tmp_path: Path) -> None:
+    """MUTATION W03-A: dropping semantic field resolution must not admit PASS."""
+    attestation, artifacts = _syntax_attestation(
+        candidate_id="edit:src/core.py:71", delivery_seal="a" * 16
+    )
+    predicate = replace(
+        attestation.truth_predicates[0],
+        proof_refs=(replace(attestation.truth_predicates[0].proof_refs[0], field_path="$.missing"),),
+    )
+    attestation = replace(attestation, truth_predicates=(predicate,))
+    _persist(tmp_path, attestation, artifacts)
+
+    load = aj.load_attestations(str(tmp_path))
+
+    assert load.attestations == ()
+    assert "semantic:" in load.diagnostics[0]
+    assert "field_missing" in load.diagnostics[0]
+
+
+def test_scalar_observation_contradiction_is_not_authority(tmp_path: Path) -> None:
+    """MUTATION W03-B: trusting producer PASS despite a contradictory scalar fails."""
+    attestation, artifacts = _syntax_attestation(
+        candidate_id="edit:src/core.py:72", delivery_seal="b" * 16
+    )
+    predicate = replace(attestation.truth_predicates[0], observation="FAIL")
+    attestation = replace(attestation, truth_predicates=(predicate,))
+    _persist(tmp_path, attestation, artifacts)
+
+    load = aj.load_attestations(str(tmp_path))
+
+    assert load.attestations == ()
+    assert "observation_contradicts_field" in load.diagnostics[0]
+
+
 # --------------------------------------------------------------------------- #
 # join_truth — the four required cases.
 # --------------------------------------------------------------------------- #
@@ -192,6 +227,45 @@ def test_valid_join_yields_truth_true(tmp_path: Path) -> None:
     assert tj.freshness is True
     assert tj.attestation_count == 1
     assert tj.joined_delivery_row_indices == (0,)
+
+
+def test_truth_join_preserves_each_delivery_verdict_without_class_laundering(
+    tmp_path: Path,
+) -> None:
+    """A PASS delivery must not lend truth/authority to a different FAIL delivery."""
+    pass_attestation, pass_artifacts = _syntax_attestation(
+        candidate_id="edit:src/core.py:pass", delivery_seal="1" * 16,
+    )
+    fail_attestation, fail_artifacts = _syntax_attestation(
+        candidate_id="edit:src/core.py:fail", delivery_seal="2" * 16,
+        truth_verdict=FAIL, freshness_verdict=FAIL,
+    )
+    _persist(tmp_path, pass_attestation, pass_artifacts)
+    _persist(tmp_path, fail_attestation, fail_artifacts)
+    rows = [
+        _delivered_row("edit:src/core.py:pass", "1" * 16),
+        _delivered_row("edit:src/core.py:fail", "2" * 16),
+    ]
+
+    joined = aj.join_truth(aj.load_attestations(str(tmp_path)).attestations, rows)[
+        "syntax_result"
+    ]
+
+    # The class aggregate is correctly fail-closed, but the per-delivery authority must
+    # retain WHICH fire passed and WHICH fire failed so downstream grading cannot copy the
+    # class result onto both physical deliveries.
+    assert joined.truth is False
+    assert [item.ledger_row_index for item in joined.per_delivery] == [0, 1]
+    assert joined.per_delivery[0].truth is True
+    assert joined.per_delivery[0].authority is True
+    assert joined.per_delivery[0].freshness is True
+    assert joined.per_delivery[1].truth is False
+    assert joined.per_delivery[1].authority is None
+    assert joined.per_delivery[1].freshness is False
+
+    projected = aj.truth_join_to_dict(joined)
+    assert projected["per_delivery"][0]["ledger_row_index"] == 0
+    assert projected["per_delivery"][1]["truth"] is False
 
 
 def test_fail_predicate_yields_truth_false(tmp_path: Path) -> None:

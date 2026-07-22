@@ -52,13 +52,16 @@ def _join(rec):
     return {**rec, "delivery_row_index": 99}
 
 
-def _opportunity(fact_class="caller_contract"):
+def _opportunity(fact_class="caller_contract", *, seal="a" * 16, chars=12):
     """A committed feature.opportunity row for the builders' shared binding
     (NO-GO defect 4: eligibility grading requires the committed transaction)."""
     raw_candidate_id = f"{fact_class}:dedup"
     return {
         "layer": "feature.opportunity",
         "candidate_id": observation_candidate_id(raw_candidate_id),
+        "fact_class": fact_class,
+        "candidate_sha256_16": seal,
+        "candidate_chars": chars,
         "observation_binding": observation_binding_to_dict(build_observation_binding(
             batch_start_iteration=4,
             parent_policy_sha256="1" * 64,
@@ -105,20 +108,20 @@ def _correctness(rows, records, joins):
 def test_mediator_applied_is_correct_iff_it_exact_joined_a_delivery() -> None:
     rec = _rec("GT_CONTRACT_NATIVE", "mediator", "APPLIED")
     # joined → True
-    assert _correctness([_delivered()], {"GT_CONTRACT_NATIVE": [rec]},
+    assert _correctness([_opportunity(), _delivered()], {"GT_CONTRACT_NATIVE": [rec]},
                         {"GT_CONTRACT_NATIVE": [_join(rec)]})["GT_CONTRACT_NATIVE"] is True
     # BITING MUTATION 1: drop the join (declared APPLIED, nothing delivered/joined) → False, exposed.
-    assert _correctness([_delivered()], {"GT_CONTRACT_NATIVE": [rec]},
+    assert _correctness([_opportunity(), _delivered()], {"GT_CONTRACT_NATIVE": [rec]},
                         {"GT_CONTRACT_NATIVE": []})["GT_CONTRACT_NATIVE"] is False
 
 
 def test_mediator_suppressed_is_correct_iff_bytes_were_not_delivered() -> None:
     rec = _rec("GT_CONTRACT_NATIVE", "mediator", "SUPPRESSED")
     # the suppressed candidate bytes WERE delivered → the suppression is a lie → False.
-    assert _correctness([_delivered()], {"GT_CONTRACT_NATIVE": [rec]},
+    assert _correctness([_opportunity(), _delivered()], {"GT_CONTRACT_NATIVE": [rec]},
                         {"GT_CONTRACT_NATIVE": []})["GT_CONTRACT_NATIVE"] is False
     # BITING MUTATION 2: no delivered row carries the suppressed bytes → honest suppression → True.
-    assert _correctness([_delivered(seal="b" * 16)], {"GT_CONTRACT_NATIVE": [rec]},
+    assert _correctness([_opportunity(), _delivered(seal="b" * 16)], {"GT_CONTRACT_NATIVE": [rec]},
                         {"GT_CONTRACT_NATIVE": []})["GT_CONTRACT_NATIVE"] is True
 
 
@@ -150,7 +153,7 @@ def test_mediator_no_effect_that_did_not_join_is_unverifiable_none() -> None:
     # a NO_EFFECT ("delivered-but-ineffective") claim with no matching delivery is unverifiable, not
     # a lie → contributes None (never a spurious False).
     rec = _rec("GT_CONTRACT_NATIVE", "mediator", "NO_EFFECT")
-    assert _correctness([_delivered(seal="b" * 16)], {"GT_CONTRACT_NATIVE": [rec]},
+    assert _correctness([_opportunity(), _delivered(seal="b" * 16)], {"GT_CONTRACT_NATIVE": [rec]},
                         {"GT_CONTRACT_NATIVE": []})["GT_CONTRACT_NATIVE"] is None
 
 
@@ -163,7 +166,7 @@ def test_zero_candidate_no_effect_is_unverifiable_none_not_a_false() -> None:
 def test_member_aggregation_any_false_makes_the_member_false() -> None:
     good = _rec("GT_CONTRACT_NATIVE", "mediator", "APPLIED", row_index=0)
     bad = _rec("GT_CONTRACT_NATIVE", "mediator", "APPLIED", row_index=1)
-    out = _correctness([_delivered()], {"GT_CONTRACT_NATIVE": [good, bad]},
+    out = _correctness([_opportunity(), _delivered()], {"GT_CONTRACT_NATIVE": [good, bad]},
                        {"GT_CONTRACT_NATIVE": [_join(good)]})  # only ``good`` joined
     assert out["GT_CONTRACT_NATIVE"] is False
 

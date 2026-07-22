@@ -56,7 +56,12 @@ def test_deepswe_trajectory_gt_observations_backfill_token_accounting(tmp_path):
     assert deep["inputs_present"]["gt_run_summary"] is False
     assert deep["gt_delivery"]["gt_observation_chars_total"] > 0
     assert deep["gt_injected_tokens_source"] == "trajectory_proxy"
-    assert deep["gt_injected_tokens_total"] > 0
+    # D3: exact chars (trajectory-observed) and a distinct chars/4 token estimate; never a single
+    # "gt_injected_tokens_total" key that mislabels chars as tokens.
+    assert deep["gt_injected_chars_exact"] == deep["gt_delivery"]["gt_observation_chars_total"]
+    assert deep["gt_injected_tokens_estimated"] == deep["gt_injected_chars_exact"] / 4.0
+    assert "gt_injected_tokens_total" not in deep
+    assert deep["schema"] == "gt_deep_metrics.v3"
     assert deep["efficiency"]["gt_injected_tokens_source"] == "trajectory_proxy"
     assert deep["layers_active"]
     assert deep["per_layer"]

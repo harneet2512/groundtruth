@@ -1354,8 +1354,12 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
         m.m17_available = True
 
         # M14: token injection overhead
-        # Use chars/4 proxy since gt_injected_tokens_total is broken in baseline
-        gt_injected_tokens_raw = float(eff.get("gt_injected_tokens_total", 0.0))
+        # Prefer the v3 honest chars/4 token ESTIMATE; fall back to the legacy v2
+        # gt_injected_tokens_total key (compatibility reader). Use the chars/4 proxy otherwise.
+        gt_injected_tokens_raw = float(
+            eff.get("gt_injected_tokens_estimated",
+                    eff.get("gt_injected_tokens_total", 0.0)) or 0.0
+        )
         if gt_injected_tokens_raw > 0:
             m.m14_gt_injected_tokens_approx = gt_injected_tokens_raw
             m.m14_gt_token_count_source = "deep_metrics"

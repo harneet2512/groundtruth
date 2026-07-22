@@ -16,6 +16,11 @@ _spec.loader.exec_module(dm)
 def test_build_prefers_task_truth_failure_class():
     with tempfile.TemporaryDirectory() as td:
         truth = {
+            # A VALID, identity-matched task_truth IS authoritative (P0-06). The
+            # identity fields are required — a truth without them is stale/foreign
+            # and is ignored (see test_gt_deep_metrics_task_truth_guard).
+            "schema": "gt.task_truth.v1",
+            "instance_id": "task",
             "outcome": {
                 "failure_class": "INFRA",
                 "resolved": False,
