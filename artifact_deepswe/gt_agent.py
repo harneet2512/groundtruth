@@ -1128,6 +1128,38 @@ def _cert_dir() -> str:
     return cert_dir
 
 
+# sha256("") — the seal a SEALED-QUIET (correct-or-quiet / shadow-withheld) brief carries
+# in brief_result.json.brief_sha256 (== sha256(brief_text.strip()) with brief_text empty).
+_EMPTY_BRIEF_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def _sealed_quiet_brief(cert_dir: str) -> bool:
+    """GT-QUALITY vs TASK-COMPLETION decouple — the DeepSWE-adapter port of the Live-Lite
+    completion-cert gate (commit 1f97534e6). An EMPTY substrate brief is a VALID
+    correct-or-quiet / shadow-withheld outcome (a brief-less but complete trajectory), NOT
+    an adapter failure, WHEN the sibling ``brief_result.json`` is a properly SEALED empty
+    brief: schema ``gt.brief_result.v1`` + a metrics dict + an empty ``brief_text`` sealed
+    by the exact empty-string hash (``brief_sha256 == sha256("")``). GT deliberately staying
+    quiet on a task (run #4: 14/37, all margin_uncalibrated) is a complete outcome. A
+    crashed / garbage / missing brief_result (wrong schema, no metrics dict, wrong or absent
+    seal, non-empty text) is NOT sealed-quiet and still fails closed at the call site — no
+    bar weakened, exactly mirroring the Live-Lite gate (schema + metrics + e3b0c442 seal)."""
+    import json  # local import — matches the module's json-as-_json convention
+    try:
+        with open(os.path.join(cert_dir, "brief_result.json"), encoding="utf-8") as fh:
+            br = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(br, dict)
+        and br.get("schema") == "gt.brief_result.v1"
+        and isinstance(br.get("metrics"), dict)
+        and isinstance(br.get("brief_text"), str)
+        and not br["brief_text"].strip()
+        and br.get("brief_sha256") == _EMPTY_BRIEF_SHA256
+    )
+
+
 def _substrate_brief() -> str:
     """SUBSTRATE-CONSUME (handoff §A/§D/§G, hole #3): the pinned substrate emitted the
     CURATED brief IN-CONTAINER to ``$GT_CERT_DIR/brief.txt`` (gt_run_proof.py:380-385)
@@ -1186,12 +1218,26 @@ def _substrate_brief() -> str:
         # otherwise return '' (host may generate). Emptiness is judged on the stripped
         # VIEW so real content is delivered EXACTLY (byte-identical to the artifact).
         if proof or substrate:
+            # GT-QUALITY vs TASK-COMPLETION decouple (port of Live-Lite gate 1f97534e6):
+            # an empty brief that is a SEALED, deliberate correct-or-quiet / shadow-withheld
+            # decision is a VALID brief-less trajectory, NOT an adapter failure. GT staying
+            # quiet on a task (run #4: 14/37 margin_uncalibrated) is a complete outcome;
+            # _prepend_brief leaves the instruction untouched (correct-or-quiet). Only a
+            # crashed / garbage / unsealed empty brief STILL fails closed below — no bar
+            # weakened (schema + metrics + exact empty-string seal fully enforced).
+            if _sealed_quiet_brief(cert_dir):
+                logger.info(
+                    "GT: substrate brief is SEALED-EMPTY (correct-or-quiet / "
+                    "shadow-withheld) — valid brief-less trajectory, decoupled from "
+                    "task completion (brief_delivered=False)")
+                return ""
             _adapter_fail(
                 "BRIEF_EMPTY",
                 f"DEEPSWE_ADAPTER_FAIL: substrate brief at {brief_path!r} is EMPTY in "
-                f"substrate-consume mode (proof_mode={proof} substrate={substrate}). "
-                "Failing closed — a paid proof run must not ship a brief-less trajectory "
-                "(no host fallback).",
+                f"substrate-consume mode (proof_mode={proof} substrate={substrate}) and "
+                "brief_result.json is NOT a sealed correct-or-quiet brief. Failing closed "
+                "— a paid proof run must not ship a brief-less trajectory on an unsealed / "
+                "crashed brief (no host fallback).",
             )
         return ""
     logger.info("GT: consumed substrate brief %s (%d chars, READ-ONLY)",
