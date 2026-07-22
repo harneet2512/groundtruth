@@ -3162,6 +3162,8 @@ jobs:
       # that made SWE-Pro unscoreable). The denominator is pinned to the full
       # dataset so empty/absent tasks count as unresolved, never silently dropped.
       - name: Build predictions.jsonl for the official evaluator
+        if: always()   # must survive a diagnosis/summarize `exit 1` — predictions + the in-run
+                       # submission bundle are independent of the diagnosis and must still be produced
         run: |
           DS=benchmarks/data/swebench_live_lite.jsonl
           if [ "$(wc -l < "$DS" 2>/dev/null || echo 0)" -lt 100 ]; then
@@ -3184,6 +3186,7 @@ jobs:
             | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload predictions for the official evaluator
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: predictions-${{ github.run_id }}
