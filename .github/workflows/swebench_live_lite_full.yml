@@ -3190,3 +3190,38 @@ jobs:
           path: /tmp/predictions/predictions.jsonl
           retention-days: 90
           if-no-files-found: error
+
+      # ── In-run SWE-bench-Live submission bundle (sealed; NEVER assembled post-run) ──
+      # Exact SWE-bench-Live/submission format, verified against the real example
+      # submissions/lite/20250725-openhands-Qwen3-Coder-480B-A35B:
+      #   submissions/lite/{date}-{agent}-{model}/
+      #     preds.json   dict keyed by instance_id
+      #     results.json schema_version=2 (from the run's OWN in-container reward.txt verdicts)
+      #     trajs/<id>.json + README.md
+      # Uses the predictions.jsonl built just above (same {instance_id,model_patch,
+      # model_name_or_path} records). Non-blocking (if: always) so it can never red the paid run.
+      - name: Assemble SWE-bench-Live submission bundle (in-run)
+        if: always()
+        env:
+          GT_MODEL: ${{ inputs.model }}
+        run: |
+          set -uo pipefail
+          if [ ! -s /tmp/predictions/predictions.jsonl ]; then
+            echo "no predictions.jsonl -> skipping submission bundle"; exit 0
+          fi
+          DATE=$(date -u +%Y%m%d)
+          MODEL_SLUG=$(basename "${GT_MODEL:-deepseek/deepseek-v4-flash}")   # deepseek/deepseek-v4-flash -> deepseek-v4-flash
+          python3 scripts/swebench/build_submission_bundle.py \
+            /tmp/predictions/predictions.jsonl /tmp/all /tmp/submission \
+            "$MODEL_SLUG" groundtruth-minisweagent \
+            "${{ github.run_id }}" "$DATE" "${GT_SUBSTRATE_DIGEST:-unset}" \
+            || echo "::warning::submission bundle assembly failed (non-blocking)"
+
+      - name: Upload SWE-bench-Live submission bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: submission-lite-${{ github.run_id }}
+          path: /tmp/submission/
+          retention-days: 90
+          if-no-files-found: warn
