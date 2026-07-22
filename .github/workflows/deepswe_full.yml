@@ -1136,6 +1136,7 @@ jobs:
               --ae GT_POST_SEARCH="${GT_POST_SEARCH:-0}"
               --ae GT_CONSENSUS_LEDGER="${GT_CONSENSUS_LEDGER:-0}"
               --ae GT_MOUNT_MODE="1"
+              --ae GT_ROOT_FILE="/tmp/gt_root.txt"
               # Provenance only: the members above already carry the RL-profile-resolved
               # values (gt_ae_block.sh fan-out exported them before this array was built).
               --ae GT_RL_PROFILE="${GT_RL_PROFILE:-}"

@@ -597,6 +597,36 @@ _BUILD_GRAPH_DB = (
 # Tiny bootstrap snippet appended to mini-swe-agent's default.py so the
 # patch loads whenever the module imports.  Base64'd to dodge shell quoting.
 _BOOTSTRAP_SNIPPET = (
+    # CANONICAL gt_root setup — port of Live-Lite's docker-run bash -c
+    # (swebench_live_lite_full.yml: `cd /testbed||/app||/workspace; echo $(pwd) >
+    # /tmp/gt_root.txt; export GT_ROOT_FILE=/tmp/gt_root.txt`). In mount-mode /opt/gt is a
+    # READ-ONLY bind-mount, so the repo root MUST be written to a writable path. Live-Lite
+    # runs this in its own docker-run entrypoint BEFORE the agent; pier has no such wrapper,
+    # so DeepSWE injects the identical setup here — at agent-module import, in the repo-root
+    # cwd, BEFORE the first observation. That eager timing is what makes _root() resolve AND
+    # seeds the change-detector baseline with the correct root, so L6 + the per-turn
+    # producers (snippet attestation / caller-contracts / witnesses) actually operate.
+    # (GT_ROOT_FILE=/tmp/gt_root.txt is ALSO passed via --ae so gt_mini_patch._ROOT_FILE is
+    # correct at .pth-import time; this write makes the file exist before the first _root().)
+    "\nimport os as _gtro\n"
+    "try:\n"
+    "    _gtroot = ''\n"
+    "    for _gtd in ('/testbed', '/app', '/workspace', '/repo', '/home/user'):\n"
+    "        if _gtro.path.isdir(_gtd + '/.git'):\n"
+    "            _gtroot = _gtd; break\n"
+    "    if not _gtroot:\n"
+    "        _gtc = _gtro.getcwd()\n"
+    "        while _gtc and _gtc != '/':\n"
+    "            if _gtro.path.isdir(_gtc + '/.git'):\n"
+    "                _gtroot = _gtc; break\n"
+    "            _gtc = _gtro.path.dirname(_gtc)\n"
+    "    if _gtroot:\n"
+    "        with open('/tmp/gt_root.txt', 'w') as _gtf:\n"
+    "            _gtf.write(_gtroot)\n"
+    "        _gtro.environ.setdefault('GT_ROOT_FILE', '/tmp/gt_root.txt')\n"
+    "        import sys as _gtsys; print('[GT] repo root: ' + _gtroot, file=_gtsys.stderr, flush=True)\n"
+    "except Exception:\n"
+    "    pass\n"
     "\ntry:\n"
     f'    import sys as _gts; _gts.path.insert(0, "{_GT_DIR}"); import gt_mini_patch  # GroundTruth\n'
     "except Exception:\n"
