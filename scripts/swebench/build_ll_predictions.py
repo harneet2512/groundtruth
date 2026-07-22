@@ -30,8 +30,54 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
+
+# Backup / editor / compiler detritus an agent's tools create as a SIDE EFFECT of
+# editing (sed -i, patch, editors). These are NEVER the agent's fix, but they leak
+# into `git diff HEAD` and then into the model_patch — where a malformed one can make
+# the official `git apply` REJECT the whole (otherwise-correct) patch. Stripping them
+# can ONLY recover a false-negative; it can never fabricate a resolve (FAIL_TO_PASS
+# still needs the real SOURCE change). NOT benchmaxxing: we strip only these unambiguous
+# junk extensions, NEVER test files, test-data, or source content (the evaluator resets
+# test files to gold on its own). Generalized (extension-based), never task-keyed.
+# ONLY unambiguous backup/editor/compiler suffixes. A real `foo.py.bak` ends in `.bak`
+# and is caught here; we deliberately do NOT strip on a source-mid-extension heuristic —
+# that wrongly killed legitimate files like `test_large_graph.py.skip` (a disabled test).
+_JUNK_SUFFIXES = (".bak", ".orig", ".rej", ".swp", ".tmp", ".pyc", ".pyo")
+
+
+def _is_junk_path(path: str) -> bool:
+    return path.rsplit("/", 1)[-1].lower().endswith(_JUNK_SUFFIXES)
+
+
+def _strip_junk_file_sections(patch: str) -> tuple[str, list[str]]:
+    """Drop `diff --git` sections whose target path is backup/compiler junk. Returns
+    (clean_patch, dropped_paths). Source/test content is never touched."""
+    starts = [m.start() for m in re.finditer(r"^diff --git ", patch, re.MULTILINE)]
+    if not starts:
+        return patch, []
+    bounds = starts + [len(patch)]
+    kept, dropped = [], []
+    for i in range(len(starts)):
+        section = patch[bounds[i]:bounds[i + 1]]
+        m = re.match(r"diff --git a/(?:.+?) b/(\S+)", section)
+        target = m.group(1) if m else ""
+        if target and _is_junk_path(target):
+            dropped.append(target)
+        else:
+            kept.append(section)
+    return patch[:starts[0]] + "".join(kept), dropped
+
+
+def _clean(patch: str, task_dir: Path) -> str:
+    clean, dropped = _strip_junk_file_sections(patch.replace("\r\n", "\n"))
+    if dropped:
+        print(f"  ::warning:: {task_dir.name}: stripped {len(dropped)} backup/junk "
+              f"file(s) from patch: {', '.join(dropped[:5])}"
+              + (" ..." if len(dropped) > 5 else ""), file=sys.stderr)
+    return clean
 
 # Import the sibling unwrapper (importable regardless of CWD).
 _UNWRAP_PATH = Path(__file__).resolve().parent / "unwrap_patch.py"
@@ -54,13 +100,13 @@ def _patch_for_task(task_dir: Path) -> tuple[str, str]:
         txt = agent.read_text(encoding="utf-8", errors="replace")
         # bind-mount capture is raw; only normalize CRLF the harness would choke on.
         if _looks_like_diff(txt):
-            return txt.replace("\r\n", "\n"), "bindmount_agent"
+            return _clean(txt, task_dir), "bindmount_agent"
 
     gitdiff = task_dir / "git_diff_head.diff"
     if gitdiff.is_file() and gitdiff.stat().st_size > 0:
         txt = gitdiff.read_text(encoding="utf-8", errors="replace")
         if _looks_like_diff(txt):
-            return txt.replace("\r\n", "\n"), "bindmount_gitdiff"
+            return _clean(txt, task_dir), "bindmount_gitdiff"
 
     log = task_dir / "trial_output.log"
     if log.is_file():
@@ -70,7 +116,7 @@ def _patch_for_task(task_dir: Path) -> tuple[str, str]:
         if raw:
             fixed, _ = _uw.unwrap_patch(raw)
             if _looks_like_diff(fixed):
-                return fixed, "log_unwrapped"
+                return _clean(fixed, task_dir), "log_unwrapped"
 
     return "", "none"
 
