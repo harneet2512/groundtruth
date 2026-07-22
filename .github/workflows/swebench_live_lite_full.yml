@@ -2590,10 +2590,19 @@ jobs:
               raise SystemExit("GT_TASK_COMPLETION_INVALID:trajectory")
           brief_text = brief.get("brief_text") if isinstance(brief, dict) else None
           brief_metrics = brief.get("metrics") if isinstance(brief, dict) else None
+          # GT-QUALITY vs TASK-COMPLETION decouple (user doctrine 2026-07-20): an empty
+          # brief_text is a VALID completion when the brief is a SEALED, deliberate
+          # correct-or-quiet / shadow-withheld decision -- schema + metrics + the exact
+          # empty-string seal (sha256("")=e3b0c442...) all present -- NOT a completion
+          # failure. GT correctly staying quiet on a task (run #4: 14/37, all
+          # margin_uncalibrated) is a complete, valid outcome. A crashed or garbage brief
+          # STILL fails here: schema, metrics-dict, and the exact brief_text seal remain
+          # fully enforced. Whether GT actually delivered a brief is recorded honestly as
+          # `brief_delivered` below, never conflated with task/run validity. This is
+          # count-independent -- identical for the 37-task and 300-task populations.
           if (not isinstance(brief, dict)
                   or brief.get("schema") != "gt.brief_result.v1"
                   or not isinstance(brief_text, str)
-                  or not brief_text.strip()
                   or not isinstance(brief_metrics, dict)
                   or brief.get("brief_sha256") != hashlib.sha256(
                       brief_text.strip().encode("utf-8")
@@ -2675,6 +2684,11 @@ jobs:
               "task": task,
               "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
               "status": "COMPLETE",
+              # GT-quality signal, recorded separately from task/run validity: True when
+              # GT shipped a non-empty pre-task brief, False on a sealed correct-or-quiet
+              # (or shadow-withheld) empty brief. Downstream graders read this; the
+              # completion/population gates never key off it.
+              "brief_delivered": bool(brief_text.strip()),
               "shadow_rate_requested": identity["shadow_rate_requested"],
               "shadow_rate_effective": identity["shadow_rate_effective"],
               "artifact_sha256": {

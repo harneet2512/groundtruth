@@ -13,6 +13,36 @@ _EXTENSION_LANGUAGE = {
 }
 _DIFF_PATH = re.compile(r"^diff --git a/(.+?) b/", re.MULTILINE)
 
+# Test-harness -> language. When a task's patch touches only non-source files (e.g. a
+# Python repo whose fix lives in YAML/config), the recorded test invocation still reveals
+# the repo language. ``log_parser``/``test_cmds`` are task-owned metadata (the exact runner),
+# so a recognized harness is a principled, general signal — NOT a blind Python default.
+_TEST_HARNESS_LANGUAGE = (
+    ("pytest", "python"), ("unittest", "python"), ("nox", "python"), ("tox", "python"),
+    ("go test", "go"), ("gotest", "go"),
+    ("jest", "js"), ("mocha", "js"), ("vitest", "js"),
+    ("cargo", "rust"),
+    ("gradle", "java"), ("maven", "java"), ("mvn ", "java"), ("junit", "java"),
+)
+
+
+def _language_from_test_harness(task: Mapping[str, object]) -> str | None:
+    """Derive language from the task's test invocation when patch paths are language-silent."""
+    fields: list[str] = []
+    parser = task.get("log_parser")
+    if isinstance(parser, str):
+        fields.append(parser.lower())
+    cmds = task.get("test_cmds")
+    if isinstance(cmds, str):
+        fields.append(cmds.lower())
+    elif isinstance(cmds, (list, tuple)):
+        fields.extend(str(command).lower() for command in cmds)
+    blob = " ".join(fields)
+    for token, language in _TEST_HARNESS_LANGUAGE:
+        if token in blob:
+            return language
+    return None
+
 
 def normalize_language(value: object) -> str | None:
     """Normalize an explicitly declared language, rejecting unknown values."""
@@ -28,8 +58,9 @@ def derive_task_language(task: Mapping[str, object]) -> str | None:
     """Return the task's declared language or deterministic dominant patch language.
 
     Live-Lite's release records omit ``repo_language``.  The patch/test patch are
-    task-owned metadata, so derive from their changed source paths; never silently
-    classify an unknown task as Python.
+    task-owned metadata, so derive from their changed source paths; a config-only patch
+    then falls back to the task's own test harness (log_parser/test_cmds), and only a
+    genuinely signalless task returns ``None`` — never a blind Python default.
     """
     for key in ("repo_language", "language"):
         declared = normalize_language(task.get(key))
@@ -47,7 +78,10 @@ def derive_task_language(task: Mapping[str, object]) -> str | None:
                     counts[language] += 1
                     break
     if not counts:
-        return None
+        # Patch touched no recognized source file (e.g. a Python repo whose fix is in
+        # YAML/config). Fall back to the task's own test-harness signal; stay None only
+        # when even that is absent.
+        return _language_from_test_harness(task)
     return sorted(counts, key=lambda language: (-counts[language], language))[0]
 
 
