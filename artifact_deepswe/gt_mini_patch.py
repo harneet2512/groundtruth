@@ -18886,6 +18886,21 @@ def _augment_output(action, out) -> None:
                         # the parser hit hide a real write.
                         _kkind, _kf = "post_edit", _changed_by_key[sorted(_changed_by_key)[0]]
                     else:
+                        # L6 (freshness, not delivery): the classifier identified a source
+                        # edit, but the shared _mtime_baseline was already consumed by an
+                        # upstream pre-snapshot _subprocess_write_targets call, so THIS diff is
+                        # empty and the V2 gate nullifies DELIVERY below (code-state producers
+                        # require byte-proof — that withholding is correct). L6 reindex must
+                        # STILL fire: the edited file's on-disk bytes ARE new, so a single-file
+                        # reindex is correct, and under substrate + GT_L6_FRESH it mutates only
+                        # the writable /tmp work-copy, never the authoritative graph (no proof
+                        # impact). This is the ONLY site that was starving L6 (measured: 17
+                        # detected edits -> 0 _invalidate_on_edit calls). Decoupled from the
+                        # consumed byte-diff; fires exactly once per nullified classified edit.
+                        try:
+                            _invalidate_on_edit(_to_repo_rel(_kf, _attempt_root), _attempt_root)
+                        except Exception:  # noqa: BLE001
+                            pass
                         _ss_record_edit(
                             _to_repo_rel(_kf, _attempt_root), cmd or "", _orig_out,
                             returncode=_returncode, bytes_changed=False)
