@@ -918,6 +918,13 @@ PY
       MOUNTS_JSON="[]"
       BOX_AE_ARM+=(--ae GT_BASELINE="1")
     else
+      # gt_agent.py selects its compact install spec in the HOST Pier process,
+      # before --ae values exist inside the task container.  Forwarding
+      # GT_MOUNT_MODE only through --ae therefore fell back to hundreds of
+      # base64 RUN layers and could exceed BuildKit's 16 MiB gRPC definition
+      # limit.  Arm both sides of the boundary: host build-spec selection here,
+      # and the existing container receipt below.
+      export GT_MOUNT_MODE="1"
       BOX_AE_ARM+=(
         --ae GT_HOST_GRAPH_DB="${GT_C_ARTIFACTS}/graph.db"
         --ae GT_CERT_DIR="${GT_C_ARTIFACTS}"
