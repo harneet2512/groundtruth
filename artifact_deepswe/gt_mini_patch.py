@@ -1323,6 +1323,24 @@ def _subprocess_write_targets(root: str, *, force_paths: "set[str] | None" = Non
                 "chars_delivered": 0, "iteration": globals().get("_action_count", 0)})
         except Exception:  # noqa: BLE001
             pass
+    # L6 FIX (2026-07-22): fire the reindex trigger HERE, at the true detection point, for
+    # each changed SOURCE file. The downstream edit-block (_invalidate_on_edit @ ~18826) is
+    # starved because the shared _mtime_baseline is consumed across this function's multiple
+    # call sites, so the main-hook diff returns empty, the classifier never reaches post_edit,
+    # and the edit-block is skipped (measured via GT_L6_DIAG: 10-17 detected changes -> 0
+    # _invalidate_on_edit calls). This IS the point where a source change is proven, so L6
+    # fires exactly when warranted. Gated by GT_L6_FRESH (the switch that enables L6 on the
+    # writable /tmp work-copy — authoritative graph untouched, no proof/delivery impact);
+    # source-path filtered so scratch/generated writes never reindex; _invalidate_on_edit is
+    # idempotent per file. DELIVERY (code-state producers) is unchanged — this only advances
+    # graph freshness for the next understand/verify.
+    if os.environ.get("GT_L6_FRESH") == "1" and changed:
+        for _l6cp in changed:
+            try:
+                if _is_repo_source_path(_l6cp):
+                    _invalidate_on_edit(_to_repo_rel(_l6cp, root), root)
+            except Exception:  # noqa: BLE001
+                pass
     # DETERMINISM (Fable R7): `now` is built by os.walk (FS-order), so `changed` — and the
     # consumer's changed[0] pick — was OS-order-dependent. Sort for a stable file pick.
     return sorted(set(changed))
@@ -18886,21 +18904,6 @@ def _augment_output(action, out) -> None:
                         # the parser hit hide a real write.
                         _kkind, _kf = "post_edit", _changed_by_key[sorted(_changed_by_key)[0]]
                     else:
-                        # L6 (freshness, not delivery): the classifier identified a source
-                        # edit, but the shared _mtime_baseline was already consumed by an
-                        # upstream pre-snapshot _subprocess_write_targets call, so THIS diff is
-                        # empty and the V2 gate nullifies DELIVERY below (code-state producers
-                        # require byte-proof — that withholding is correct). L6 reindex must
-                        # STILL fire: the edited file's on-disk bytes ARE new, so a single-file
-                        # reindex is correct, and under substrate + GT_L6_FRESH it mutates only
-                        # the writable /tmp work-copy, never the authoritative graph (no proof
-                        # impact). This is the ONLY site that was starving L6 (measured: 17
-                        # detected edits -> 0 _invalidate_on_edit calls). Decoupled from the
-                        # consumed byte-diff; fires exactly once per nullified classified edit.
-                        try:
-                            _invalidate_on_edit(_to_repo_rel(_kf, _attempt_root), _attempt_root)
-                        except Exception:  # noqa: BLE001
-                            pass
                         _ss_record_edit(
                             _to_repo_rel(_kf, _attempt_root), cmd or "", _orig_out,
                             returncode=_returncode, bytes_changed=False)
