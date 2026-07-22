@@ -14814,6 +14814,37 @@ _batch_install_failed = False
 _batch_commit_installed = False
 
 
+def _batch_diag(stage: str, *, state=None, outcome: str = "observed",
+                reason: str = "", extra: "dict | None" = None) -> None:
+    """Durably expose the live observation-batch lifecycle without model bytes.
+
+    Candidate telemetry starts too late to diagnose a completely empty reactive
+    ledger: absence cannot distinguish a missing batch, an action-identity miss,
+    an early producer return, or an empty candidate pool.  Profile-2 proof runs
+    therefore record these four host-only boundaries.  The rows are deliberately
+    inert outside Profile-2 and never participate in rendering or arbitration.
+    """
+    if os.environ.get("GT_RL_PROFILE") != "2":
+        return
+    row = {
+        "layer": "batch_diag", "event_type": stage, "file_path": "",
+        "outcome": outcome, "reason": reason, "chars_delivered": 0,
+        "iteration": max(0, int(globals().get("_action_count", 0) or 0)),
+    }
+    if isinstance(state, dict):
+        row.update({
+            "batch_serial": int(state.get("serial") or 0),
+            "action_count": len(state.get("action_keys") or ()),
+            "observed_count": len(state.get("observed_keys") or ()),
+            "output_count": len(state.get("outputs") or ()),
+            "candidate_count": len(state.get("pool") or ()),
+            "invalid": bool(state.get("invalid")),
+        })
+    if isinstance(extra, dict):
+        row.update(extra)
+    _ledger_line_direct(row)
+
+
 def _batch_action_key(action) -> str:
     try:
         return json.dumps(action, sort_keys=True, separators=(",", ":"), default=str)
@@ -14894,6 +14925,11 @@ def _begin_observation_batch(
                 other["invalid"] = True
         _batch_owners[state["serial"]] = state
         state["token"] = _batch_context.set(state)
+    _batch_diag(
+        "begin", state=state,
+        reason="policy_observation_started",
+        extra={"batch_commit_installed": bool(_batch_commit_installed)},
+    )
     return state
 
 
@@ -15176,14 +15212,34 @@ def _clear_tool_observation_batch(state=None) -> None:
 def _register_batch_execute(state, action, out) -> bool:
     """Incrementally join one execute to the handshake before any producer runs."""
     if state is None or _batch_context.get() is not state:
+        _batch_diag("register", state=state, outcome="unavailable",
+                    reason="context_missing_or_changed")
         return False
     index = len(state["observed_keys"])
     key = _batch_action_key(action)
     if index >= len(state["action_keys"]) or key != state["action_keys"][index]:
+        _batch_diag(
+            "register", state=state, outcome="identity_mismatch",
+            reason="action_key_mismatch",
+            extra={
+                "action_index": index,
+                "actual_key_sha256_16": hashlib.sha256(
+                    key.encode("utf-8", "surrogatepass")).hexdigest()[:16],
+                "expected_key_sha256_16": (
+                    hashlib.sha256(
+                        state["action_keys"][index].encode(
+                            "utf-8", "surrogatepass")
+                    ).hexdigest()[:16]
+                    if index < len(state["action_keys"]) else ""
+                ),
+            },
+        )
         _discard_tool_observation_batch("batch_action_mismatch", state)
         return False
     state["observed_keys"].append(key)
     state["outputs"].append(out)
+    _batch_diag("register", state=state, reason="action_joined",
+                extra={"action_index": index})
     return True
 
 
@@ -16690,6 +16746,8 @@ def install_observation_batch_commit(agent) -> bool:
     def _format_with_gt_batch(message, outputs, *args, **kwargs):
         state = _batch_context.get()
         if state is None:
+            _batch_diag("formatter", outcome="unavailable",
+                        reason="no_active_batch")
             return original(message, outputs, *args, **kwargs)
         actions = (message.get("extra", {}).get("actions", [])
                    if isinstance(message, dict) else [])
@@ -16701,6 +16759,12 @@ def install_observation_batch_commit(agent) -> bool:
             and tuple(state["observed_keys"]) == keys[:len(outputs or [])]
             and len(state["outputs"]) == len(outputs or [])
             and all(a is b for a, b in zip(state["outputs"], outputs or []))
+        )
+        _batch_diag(
+            "formatter", state=state,
+            outcome="valid" if valid else "identity_mismatch",
+            reason="handshake_checked",
+            extra={"formatter_output_count": len(outputs or ())},
         )
         if not valid:
             _discard_tool_observation_batch("batch_identity_mismatch", state)
@@ -16774,7 +16838,24 @@ def install_observation_batch_commit(agent) -> bool:
                 else:
                     eligible_pool.append((candidate, thunk))
             arbitration, planned_winner = _global_pool_plan(eligible_pool)
+            _batch_diag(
+                "arbitration", state=state, outcome="planned",
+                reason="candidate_pool_evaluated",
+                extra={
+                    "eligible_count": len(eligible_pool),
+                    "suppressed_count": len(suppressed_plans),
+                    "winner_present": planned_winner is not None,
+                    "candidate_kinds": [
+                        str(getattr(candidate, "kind", "") or "")
+                        for candidate, _thunk in state["pool"]
+                    ],
+                    "winner_kind": str(
+                        getattr(planned_winner, "kind", "") or ""),
+                },
+            )
         except Exception:  # noqa: BLE001
+            _batch_diag("arbitration", state=state, outcome="provider_failed",
+                        reason="batch_plan_failed")
             _discard_tool_observation_batch("batch_plan_failed", state)
             return original(message, outputs, *args, **kwargs)
         base_outputs = [dict(output) for output in outputs]
@@ -16957,6 +17038,11 @@ def install_observation_batch_commit(agent) -> bool:
                 output.update(before)
             return original(message, outputs, *args, **kwargs)
         _clear_tool_observation_batch(state)
+        _batch_diag(
+            "commit", state=state, outcome="committed",
+            reason="formatter_transaction_complete",
+            extra={"winner_present": planned_winner is not None},
+        )
         return rendered
 
     def _execute_with_gt_batch(message, *args, **kwargs):
@@ -18978,9 +19064,26 @@ def _augment_output(action, out) -> None:
                 # cannot be byte-joined reliably, and allows one dose per parallel tool
                 # result.  The constructor hook must attach before paid execution; this
                 # guard keeps any unsupported scaffold correct-and-quiet.
+                _batch_diag(
+                    "producer_entry", state=_batch_context.get(),
+                    outcome="unavailable",
+                    reason="batch_commit_not_installed",
+                )
                 return
             _batch_state = _batch_context.get() if _ga_on else None
             _batch_defer = _batch_state is not None
+            _batch_diag(
+                "producer_entry", state=_batch_state,
+                outcome="ready" if (_batch_state is not None or not _ga_on)
+                else "unavailable",
+                reason=("batch_context_active" if _batch_state is not None
+                        else "batch_context_missing" if _ga_on
+                        else "global_arbiter_off"),
+                extra={
+                    "global_arbiter_on": bool(_ga_on),
+                    "batch_commit_installed": bool(_batch_commit_installed),
+                },
+            )
             if _batch_defer and not _register_batch_execute(
                     _batch_state, action, out):
                 # A handshake mismatch invalidates the complete observation. Do not
