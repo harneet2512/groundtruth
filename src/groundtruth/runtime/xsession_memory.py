@@ -37,6 +37,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
@@ -255,6 +257,49 @@ def _to_json_obj(store: XSessionStore) -> dict[str, Any]:
     }
 
 
+@contextmanager
+def _store_lock(path: str):
+    """Serialize cross-process writers without leaving a partially-written JSON file."""
+    lock_path = f"{path}.lock"
+    parent = os.path.dirname(lock_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    handle = open(lock_path, "a+b")
+    try:
+        handle.seek(0)
+        if not handle.read(1):
+            handle.seek(0)
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            def unlock() -> None:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except ImportError:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            def unlock() -> None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        try:
+            yield
+        finally:
+            unlock()
+    finally:
+        handle.close()
+
+
+def _merge_snapshot_max(current: XSessionStore, incoming: XSessionStore) -> XSessionStore:
+    """Union monotone snapshots while preserving already-published peer updates."""
+    stats: dict[str, tuple[int, int]] = dict(current.class_stats)
+    for cls, pair in _sanitize_stats(dict(incoming.class_stats)).items():
+        old = stats.get(cls, (0, 0))
+        stats[cls] = (max(old[0], pair[0]), max(old[1], pair[1]))
+    return replace(current, schema_version=SCHEMA_VERSION,
+                   repo_key=current.repo_key or incoming.repo_key, class_stats=stats)
+
+
 def dump(store: XSessionStore, path: str) -> bool:
     """Write ``store`` to ``path`` deterministically (``sort_keys=True``, sorted class
     rows, integer counts, no timestamp) so the same delivery history yields a byte-identical
@@ -266,9 +311,25 @@ def dump(store: XSessionStore, path: str) -> bool:
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        text = json.dumps(_to_json_obj(store), sort_keys=True, separators=(",", ":"))
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(text)
+        with _store_lock(path):
+            # Re-read under the lock: another session may have published a distinct
+            # class since this writer loaded its task-start snapshot.  Monotone max
+            # preserves both snapshots and remains idempotent for repeated flushes.
+            current = load(path, repo_key=store.repo_key)
+            merged = _merge_snapshot_max(current, store)
+            text = json.dumps(_to_json_obj(merged), sort_keys=True, separators=(",", ":"))
+            fd, temporary = tempfile.mkstemp(prefix=".xsession-", dir=parent or None)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(temporary, path)
+            finally:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
         return True
     except (OSError, TypeError, ValueError):
         return False

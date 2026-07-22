@@ -126,6 +126,21 @@ def test_route_registry_want_defers_wrong_event_under_enforcement(monkeypatch):
     assert gw.route_delivery(env, ev, st) == gw.ROUTE_DEFER
 
 
+def test_route_registry_lookup_error_fails_closed_without_self_declared_fallback(monkeypatch):
+    """A registry outage must not promote the envelope's producer self-stamp to authority."""
+    monkeypatch.setenv("GT_REGISTRY_ENFORCE", "1")
+    st = gw.GatewayState()
+    controls = []
+    st.control_recorder = lambda *args, **kwargs: controls.append((args, kwargs))
+    env = _env("def_ref_partition", preferred_event="search")
+    monkeypatch.setattr(gw, "_registry_want_ordinal", lambda _etype: (_ for _ in ()).throw(
+        RuntimeError("registry unavailable")))
+    verdict = gw.route_delivery(env, gw.ToolEvent(kind="search"), st)
+    assert verdict == gw.ROUTE_REGISTRY_ERROR
+    assert any(args[2] == "ERROR" and kwargs.get("reason", "").startswith(
+        "registry_timing_error:") for args, kwargs in controls)
+
+
 def test_route_registry_want_expires_late_event_under_enforcement(monkeypatch):
     st = gw.GatewayState()
     ev = gw.ToolEvent(kind="submit")  # cur = 5

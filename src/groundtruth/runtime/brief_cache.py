@@ -248,6 +248,16 @@ def verify_independent_generation(
             raise ValueError("brief determinism: malformed acquisition sources")
         sources["determinism"] = dict(witness)
     metrics["determinism_witness"] = dict(witness)
+    # The generation-time contribution attestation (v1r_brief._attest_source_contributions)
+    # was sealed BEFORE this repeat witness existed, so ``determinism`` could never be named
+    # in its sealed ``sources`` and the ACQ ``determinism`` row could never be attested.
+    # Atomically REBUILD and RESEAL the attestation now that determinism is present, using the
+    # single producer authority so the seal scheme cannot drift. A no-op when there is no
+    # sealed localization block for a candidate (new-file / no-candidate briefs).
+    block_receipts = metrics.get("block_receipts")
+    if isinstance(block_receipts, list) and block_receipts:
+        from groundtruth.pretask.v1r_brief import _attest_source_contributions
+        _attest_source_contributions(proofs, block_receipts)
     _atomic_write_payload(cache_path(out_dir), current)
     return verdict
 

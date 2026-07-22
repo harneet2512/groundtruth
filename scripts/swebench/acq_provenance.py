@@ -123,6 +123,10 @@ def _empty(blocker: str) -> dict[str, dict[str, Any]]:
             },
             "source_fields": [],
             "source_contribution_correct": None,
+            # INFLUENCE-5 (cochange_prior): a DEDICATED, independently-enforced cochange
+            # influence-truth witness. Distinct from the generic ACQ contribution field so
+            # the internal-support terminal never borrows a non-cochange-specific truth.
+            "cochange_influence_witness": None,
             "timing_inherited_from_fact_delivery": None,
             "source_causal_fair_probe": None,
         }
@@ -787,6 +791,17 @@ def collect_acq_provenance(
                 "source_contribution_correct": (
                     True if feature == "cochange_history"
                     else True if _valid_contribution_attestation(proof, block, feature)
+                    else None
+                ),
+                # INFLUENCE-5 truth witness (cochange_prior). Independently re-derived from
+                # THIS candidate's self-sealed cochange rows (_valid_cochange_evidence), never
+                # inherited from the generic contribution field: the internal-support
+                # ``support_correct`` gate reads THIS, so it can only pass on a traceable,
+                # tamper-evident cochange witness. None for every non-cochange source.
+                "cochange_influence_witness": (
+                    True
+                    if feature == "cochange_history"
+                    and _valid_cochange_evidence(proof, path)
                     else None
                 ),
                 "timing_inherited_from_fact_delivery": None,

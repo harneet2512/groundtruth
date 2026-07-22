@@ -2155,6 +2155,13 @@ def test_oracle_explicitly_toggles_internal_edit_diagnostic_refinement():
     assert "GT_SS_EDIT_DIAG" in sro._SS_FLAGS_ALL
 
 
+def test_requested_tasks_rejects_unknown_ids_with_sorted_diagnostics():
+    cases = {"preserve": [{"task": "known__task", "delivery": "x"}]}
+    selected, unknown = sro._requested_tasks(cases, "known__task, typo__task,known__task")
+    assert selected == ["known__task"]
+    assert unknown == ["typo__task"]
+
+
 def test_replay_child_disables_live_test_execution_and_preserves_arm_override(tmp_path):
     env = sro.child_env(
         tmp_path, "synthetic__task", tmp_path / "ledger.jsonl",

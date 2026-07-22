@@ -1508,6 +1508,54 @@ def _verifier_interface_metrics(truth_data: object) -> dict[str, int | float | N
     return verifier_interface_metrics(truth_data)
 
 
+def _task_truth_identity_ok(truth_data: object, task: str) -> bool:
+    """True only when a task_truth doc is current-schema AND identity-matched to
+    this task.
+
+    A stale or foreign truth — null or mismatched ``instance_id``, e.g. the frozen
+    baseline copies whose ``instance_id`` came through null and whose failure_class
+    is INFRA — must never override the run's own reward/trajectory outcome. Honoring
+    such a doc silently forced every frozen resolve to unresolved (the 83->0 defect).
+    Generic identity check only: no task/repo-specific keys.
+    """
+    if not isinstance(truth_data, dict):
+        return False
+    if truth_data.get("schema") != "gt.task_truth.v1":
+        return False
+    iid = truth_data.get("instance_id")
+    if not isinstance(iid, str) or not iid:
+        return False
+    return iid.strip().removeprefix("ll-full-") == str(task).strip().removeprefix("ll-full-")
+
+
+def _honest_injection(
+    value: float, source: str, traj_chars: object,
+) -> tuple[float | None, float | None]:
+    """Split GT-injection accounting into an EXACT char count and a disclosed chars/4 token
+    ESTIMATE (never one ``gt_injected_tokens_total`` key that mislabels chars as tokens).
+
+    The single accumulator historically carried DIFFERENT units by source — raw chars under the
+    sealed runtime ledger, but a chars/4 token estimate under the run summary — which is exactly
+    why calling it "tokens" was dishonest. Returns ``(chars_exact, tokens_estimated)``:
+
+      - ``runtime_ledger_sealed_chars``: value IS raw chars -> (value, value/4)
+      - ``trajectory_proxy``: value is chars/4 already; the exact observed chars are known
+        -> (traj_chars, value)
+      - ``gt_run_summary``: value is a rendered-token ESTIMATE (chars/4 upstream); the exact char
+        count is NOT recoverable, so do not fabricate one -> (None, value)
+      - ``none`` / no accounting source: no injection measured -> (0.0, 0.0)
+    """
+    v = float(value or 0.0)
+    if source == "runtime_ledger_sealed_chars":
+        return v, v / 4.0
+    if source == "trajectory_proxy":
+        tc = float(traj_chars or 0.0)
+        return (tc if tc > 0 else None), v
+    if source == "gt_run_summary":
+        return None, v
+    return 0.0, 0.0
+
+
 def build(task: str, results_dir: str, log_path: str = "",
           db_path: str = "", pipeline_arg: str = "") -> dict:
     summ = _load_json(f"/tmp/gt_run_summary_{task}.json") or {}
@@ -1544,6 +1592,19 @@ def build(task: str, results_dir: str, log_path: str = "",
             truth_path = hit
             break
     truth_data = _load_json(truth_path) if truth_path and os.path.isfile(truth_path) else None
+    # Identity guard (Codex root-cause #1): honor task_truth ONLY when it is
+    # current-schema AND matched to THIS task. A stale/foreign truth (null or
+    # mismatched instance_id — the frozen-baseline copies) must never override the
+    # run's own outcome, or every frozen resolve collapses to unresolved.
+    task_truth_rejected = None
+    if truth_data is not None and not _task_truth_identity_ok(truth_data, task):
+        task_truth_rejected = {
+            "path": truth_path,
+            "schema": truth_data.get("schema") if isinstance(truth_data, dict) else None,
+            "instance_id": truth_data.get("instance_id") if isinstance(truth_data, dict) else None,
+            "reason": "schema_or_instance_id_not_matched_to_task",
+        }
+        truth_data = None
 
     traj = _from_trajectory(task, results_dir)
     # DeepSWE/pier writes mini-swe-agent.trajectory.json, NOT output.jsonl — read it as
@@ -1630,7 +1691,9 @@ def build(task: str, results_dir: str, log_path: str = "",
         "llm_cache_miss_tokens": d8(mini.get("cache_miss_tokens")),
         "llm_tokens_total": d8(llm_total),
         "llm_cost_usd": d8(cost["llm_cost_usd"]),
-        "gt_injected_tokens_total": d8(inj_tokens_total),
+        # D3 (2026-07-21): the honest chars-exact / token-estimate split is assigned AFTER the
+        # runtime-ledger override finalizes the accounting source (below). Only the source is
+        # set here; never a single "gt_injected_tokens_total" key that mislabels chars as tokens.
         "gt_injected_tokens_source": token_accounting_source,
         "tokens_per_action": d8(llm_total / actions) if actions and llm_total is not None else None,
         "cost_per_action_usd": d8(cost["llm_cost_usd"] / actions) if actions and cost["llm_cost_usd"] is not None else None,
@@ -1782,15 +1845,22 @@ def build(task: str, results_dir: str, log_path: str = "",
         if not inj_tokens_total:
             inj_tokens_total = float(rl_delivery["delivered_chars"])
             token_accounting_source = "runtime_ledger_sealed_chars"
-            efficiency["gt_injected_tokens_total"] = d8(inj_tokens_total)
             efficiency["gt_injected_tokens_source"] = token_accounting_source
             if cost["llm_tokens_in"]:
                 efficiency["gt_injection_overhead_pct"] = d8(
                     100.0 * inj_tokens_total / cost["llm_tokens_in"])
 
+    # D3: now that the accounting source is final, publish the EXACT char count and a disclosed
+    # chars/4 token ESTIMATE as two honestly-named keys (in efficiency AND at the top level).
+    inj_chars_exact, inj_tokens_estimated = _honest_injection(
+        inj_tokens_total, token_accounting_source, traj.get("gt_observation_chars_total")
+    )
+    efficiency["gt_injected_chars_exact"] = d8(inj_chars_exact)
+    efficiency["gt_injected_tokens_estimated"] = d8(inj_tokens_estimated)
+
     deep = {
         "task_id": task,
-        "schema": "gt_deep_metrics.v2",
+        "schema": "gt_deep_metrics.v3",
         "precision_decimals": 8,
         "pipeline": pipeline,
         "branch": _git("rev-parse", "--abbrev-ref", "HEAD") or "unknown",
@@ -1805,6 +1875,7 @@ def build(task: str, results_dir: str, log_path: str = "",
         "failure_class": verdict.get("failure_class", ""),
         "outcome_authority": verdict.get("outcome_authority", ""),
         "task_truth_path": truth_path if truth_data else None,
+        "task_truth_rejected": task_truth_rejected,
         "runtime_control": (truth_data.get("runtime_control") if truth_data else None),
         # --- graph-derived (TASK 2) ---
         "graph_db_path": graph["graph_db_path"],
@@ -1864,7 +1935,9 @@ def build(task: str, results_dir: str, log_path: str = "",
         "layers_active": summ.get("layers_active", []) or fallback_layers,
         "total_layer_events": d8(summ.get("total_layer_events", 0)),
         "total_agent_events": d8(summ.get("total_agent_events", 0)),
-        "gt_injected_tokens_total": d8(inj_tokens_total),
+        # D3: exact chars vs disclosed chars/4 token estimate (never chars mislabeled as tokens).
+        "gt_injected_chars_exact": d8(inj_chars_exact),
+        "gt_injected_tokens_estimated": d8(inj_tokens_estimated),
         "gt_injected_tokens_source": token_accounting_source,
         "efficiency": efficiency,
         # --- GT-reached-agent SHOWCASE (fired AND delivered, from agent observation) ---
@@ -2068,7 +2141,10 @@ def pair(gt: dict, base: dict) -> dict:
         "precision_decimals": 8,
         "action_count_delta": dlt("action_count"),
         "first_edit_delta": dlt("first_edit_action"),
-        "token_delta": d8(d8(gt.get("gt_injected_tokens_total", 0))),  # GT-side injected cost
+        # GT-side injected cost. Prefer the v3 honest token estimate; fall back to the legacy
+        # v2 gt_injected_tokens_total key so old artifacts still read (compatibility reader).
+        "token_delta": d8(d8(gt.get(
+            "gt_injected_tokens_estimated", gt.get("gt_injected_tokens_total", 0)))),
         "resolved_gt": g.get("resolved"),
         "resolved_baseline": b.get("resolved"),
         "flows_delivered": d8(g.get("flows_delivered", 0)),
@@ -2164,14 +2240,20 @@ def main() -> int:
     db_path = _opt("--db")
     pipeline_arg = _opt("--pipeline")
 
-    # TASK 3 — ALWAYS WRITE. Never crash: even total input loss yields a record
-    # carrying outcome/failure_stage/failure_reason + whatever graph/env exists.
+    # TASK 3 — ALWAYS WRITE, but FAIL CLOSED on a genuine collection crash. Even total input loss
+    # yields a diagnostic record carrying outcome/failure_stage/failure_reason + whatever graph/env
+    # exists; but a build() that RAISES is a self-measurement BREAKAGE, so the record is written and
+    # then main() exits NONZERO (below) — an unpublishable, uncitable failure artifact. (A bare task
+    # dir where the agent never started is classified by a SUCCESSFUL build() and still exits 0;
+    # only the except path is fail-closed.)
+    collection_failed = False
     try:
         deep = build(task, results_dir, log_path, db_path, pipeline_arg)
-    except Exception as exc:  # noqa: BLE001 — emitter must never fail the run
+    except Exception as exc:  # noqa: BLE001 — write the diagnostic record, then exit nonzero
+        collection_failed = True
         deep = {
             "task_id": task,
-            "schema": "gt_deep_metrics.v2",
+            "schema": "gt_deep_metrics.v3",
             "precision_decimals": 8,
             "pipeline": pipeline_arg or "unknown",
             "outcome": "infra_failed_agent_not_started",
@@ -2220,6 +2302,15 @@ def main() -> int:
             with open(dpath, "w", encoding="utf-8") as f:
                 json.dump(delta, f, indent=2)
             print(f"[GT_DEEP] wrote {dpath}: action_count_delta={delta['action_count_delta']}")
+    if collection_failed:
+        # The diagnostic failure artifact was written above, but a build() crash is a
+        # self-measurement BREAKAGE — fail closed so the record is unpublishable/uncitable.
+        print(
+            f"[GT_DEEP] COLLECTION FAILED for {task}: {deep.get('failure_reason')} — "
+            f"record written but marked unpublishable (nonzero exit)",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

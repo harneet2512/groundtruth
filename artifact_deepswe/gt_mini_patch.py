@@ -9689,9 +9689,16 @@ def _record_lane_provenance_control(
                 "candidate_id", "")
         if not candidate_id:
             return
+        # SUPPRESSED withholds the candidate entirely, so ``final_text`` is empty and would
+        # seal to nothing — the referee grader drops identity-less records, leaving the
+        # suppression byte-UNVERIFIABLE (the class-level laundering the audit named). Seal the
+        # PRE-suppression candidate (``original_text``) for SUPPRESSED so the referee's exact
+        # ``not _carried`` absence check can confirm those exact bytes never shipped;
+        # APPLIED/NO_EFFECT keep the committed ``final_text`` they actually delivered.
+        seal_bytes = original_text if decision == "SUPPRESSED" else final_text
         _control_participation_record(
             "GT_SS_PROVENANCE", "mini_seam.delivery.provenance_seal", decision,
-            candidate_bytes=final_text, fact_class=fact_class,
+            candidate_bytes=seal_bytes, fact_class=fact_class,
             candidate_id=candidate_id,
             reason=("candidate_sanitized" if decision == "APPLIED" else
                     "candidate_fully_suppressed" if decision == "SUPPRESSED" else
@@ -14473,6 +14480,8 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
                 _EPISODE.episode_id = _root() or "episode"  # host-side chain scope id
             except Exception:  # noqa: BLE001
                 pass
+        _gateway_control_queue = (
+            [] if pool is not None and _batch_context.get() is not None else None)
         st = _GatewayState(
             graph_db=_db_path(), repo_root=_root(),
             # B-4 (2026-07-10): thread the REAL issue text (baked issue.txt) so the
@@ -14489,11 +14498,16 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
             # and avoids even constructing metadata.
             control_recorder=(
                 _control_participation_record if _inseam_metrics_on() else None
-            ))
+            ),
+            control_queue=_gateway_control_queue)
         gateway_envelopes = [
             _attach_exact_gateway_byte_owner(envelope, getattr(ev, "kind", "") or "other")
             for envelope in _gw_augment(ev, st)
         ]
+        if _gateway_control_queue is not None:
+            _register_gateway_control_records(
+                _gateway_control_queue, out, _ad_render,
+                native=(os.environ.get("GT_GATEWAY_NATIVE") == "1"))
         _provenance_decisions = {}
         if _ss_provenance_on():
             _clean_gateway_envelopes = []
@@ -14832,6 +14846,7 @@ def _begin_observation_batch(
                 start_iteration, parent_sha256, action_sha256),
             "pool": [], "contexts": {}, "rollbacks": {}, "prepared": {},
             "opportunity_bindings": {},
+            "gateway_control_records": [],
             "excluded": [], "observed_keys": [], "outputs": [], "invalid": False,
             "precommitted_doses": [],
         }
@@ -14876,7 +14891,107 @@ def _prepare_batch_opportunity_bindings(state: dict[str, Any]) -> dict[int, Any]
             )
         except (TypeError, ValueError):
             continue
+    # Gateway controls can reject a concrete envelope before it reaches the
+    # arbitration pool.  Bind those withheld opportunities in the same committed
+    # policy observation; a matching pooled candidate reuses the pool's binding.
+    controls = state.get("gateway_control_records")
+    if isinstance(controls, list):
+        by_candidate_identity = {
+            (str(getattr(item[0], "dedup_key", "") or ""),
+             str(getattr(item[0], "kind", "") or "")): bindings.get(id(item[0]))
+            for item in pool
+            if isinstance(item, tuple) and len(item) == 2
+        }
+        next_ordinal = len(pool)
+        for record in controls:
+            if not isinstance(record, dict):
+                continue
+            candidate = record.get("candidate")
+            candidate_id = str(record.get("candidate_id") or "")
+            candidate_kind = "gateway." + str(
+                getattr(candidate, "evidence_type", "") or "fact")
+            binding = by_candidate_identity.get((candidate_id, candidate_kind))
+            if binding is None and candidate_id:
+                try:
+                    binding = build_observation_binding(
+                        batch_start_iteration=int(state.get("batch_start_iteration") or 0),
+                        parent_policy_sha256=str(state.get("parent_policy_sha256") or ""),
+                        parent_policy_chars=int(state.get("parent_policy_chars") or 0),
+                        action_batch_sha256=str(state.get("action_batch_sha256") or ""),
+                        candidate_ordinal=next_ordinal,
+                        candidate_kind=candidate_kind,
+                        candidate_id=candidate_id,
+                    )
+                    next_ordinal += 1
+                except (TypeError, ValueError):
+                    binding = None
+            record["observation_binding"] = binding
     return bindings
+
+
+def _register_gateway_control_records(
+        records, output, render_envelope, *, native: bool) -> None:
+    """Stage gateway controls in the active formatter transaction.
+
+    The sealed candidate is the exact boundary-joined adapter rendering that would
+    have occupied this tool result, not the gateway's pre-render envelope JSON.
+    Nothing durable is written here; formatter failure discards the batch state.
+    """
+    state = _batch_context.get()
+    pending = state.get("gateway_control_records") if isinstance(state, dict) else None
+    if not isinstance(records, list) or not isinstance(pending, list):
+        return
+    base = str((output or {}).get("output") or "")
+    for raw in records:
+        if not isinstance(raw, dict):
+            continue
+        candidate = raw.get("candidate")
+        try:
+            delta = _render_gateway_envelope(
+                render_envelope, candidate, native=native)
+            final_bytes = _join_lane_output(base, delta)[len(base):] if delta else ""
+        except Exception:  # noqa: BLE001 -- malformed audit identity stays unmeasured
+            final_bytes = ""
+        record = dict(raw)
+        record["candidate_bytes"] = final_bytes
+        pending.append(record)
+
+
+def _commit_gateway_control_records(state: dict[str, Any], planned_winner) -> None:
+    """Persist candidate-bound gateway decisions after formatter validation."""
+    records = state.get("gateway_control_records")
+    if not isinstance(records, list) or not _inseam_metrics_on():
+        return
+    winner_binding = (
+        state.get("opportunity_bindings", {}).get(id(planned_winner))
+        if planned_winner is not None else None)
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        binding = record.get("observation_binding")
+        decision = str(record.get("decision") or "")
+        candidate_id = str(record.get("candidate_id") or "")
+        reason = str(record.get("reason") or "")
+        # An earlier APPLIED stage that did not win this policy observation had no
+        # final delivery effect.  Preserve the receipt without falsely declaring a
+        # shipped mediator effect that the exact-join grader must reject.
+        if decision == "APPLIED" and binding != winner_binding:
+            decision = "NO_EFFECT"
+            reason = (reason + ":not_selected").strip(":")
+        token = _delivery_observation_context.set(binding)
+        try:
+            _control_participation_record(
+                str(record.get("feature_id") or ""),
+                str(record.get("decision_site") or ""),
+                decision,
+                candidate_bytes=str(record.get("candidate_bytes") or ""),
+                fact_class=(str(record.get("fact_class"))
+                            if record.get("fact_class") is not None else None),
+                candidate_id=candidate_id,
+                reason=reason,
+            )
+        finally:
+            _delivery_observation_context.reset(token)
 
 
 def _record_batch_opportunities(
@@ -14924,7 +15039,7 @@ def _record_batch_opportunities(
                 if lineage_extra else "typed_lineage_absent")
         plan = plans.get(id(candidate))
         binding_dict = observation_binding_to_dict(binding)
-        _ledger_line_direct({
+        row = {
             "layer": "feature.opportunity",
             "event_type": "policy_observation",
             "file_path": "",
@@ -14948,7 +15063,59 @@ def _record_batch_opportunities(
             "feature_refs": feature_refs,
             "attribution_status": attribution_status,
             "attribution_reason": attribution_reason,
+        }
+        for control in state.get("gateway_control_records") or ():
+            if (isinstance(control, dict)
+                    and control.get("observation_binding") == binding):
+                candidate_bytes = str(control.get("candidate_bytes") or "")
+                row["fact_class"] = control.get("fact_class")
+                row["candidate_sha256_16"] = (
+                    hashlib.sha256(candidate_bytes.encode(
+                        "utf-8", "surrogatepass")).hexdigest()[:16]
+                    if candidate_bytes else "")
+                row["candidate_chars"] = len(candidate_bytes)
+                break
+        _ledger_line_direct(row)
+    # A gateway guard can withhold a candidate before it enters ``pool``.  Its
+    # formatter-committed opportunity is still required to referee SUPPRESSED;
+    # deduplicate against pooled opportunities by the binding's opportunity id.
+    pooled_opportunity_ids = {
+        getattr(binding, "opportunity_id", "") for binding in bindings.values()
+        if binding is not None
+    }
+    for control in state.get("gateway_control_records") or ():
+        if not isinstance(control, dict):
+            continue
+        binding = control.get("observation_binding")
+        if binding is None or binding.opportunity_id in pooled_opportunity_ids or not emit:
+            continue
+        candidate_bytes = str(control.get("candidate_bytes") or "")
+        _ledger_line_direct({
+            "layer": "feature.opportunity", "event_type": "policy_observation",
+            "file_path": "", "outcome": "eligible",
+            "reason": "formatter_visible_control_candidate", "chars_delivered": 0,
+            "iteration": binding.batch_start_iteration,
+            "observation_id": binding.observation_id,
+            "opportunity_id": binding.opportunity_id,
+            "parent_policy_sha256": binding.parent_policy_sha256,
+            "parent_policy_chars": binding.parent_policy_chars,
+            "action_batch_sha256": binding.action_batch_sha256,
+            "candidate_ordinal": binding.candidate_ordinal,
+            "candidate_kind_sha256": binding.candidate_kind_sha256,
+            "candidate_dedup_sha256": binding.candidate_dedup_sha256,
+            "candidate_id": binding.candidate_id,
+            "observation_binding": observation_binding_to_dict(binding),
+            "delivery_eligible": False, "selected": False,
+            "fact_class": control.get("fact_class"),
+            "candidate_sha256_16": (
+                hashlib.sha256(candidate_bytes.encode(
+                    "utf-8", "surrogatepass")).hexdigest()[:16]
+                if candidate_bytes else ""),
+            "candidate_chars": len(candidate_bytes),
+            "feature_refs": [], "attribution_status": "BOUND",
+            "attribution_reason": "gateway_control_candidate",
         })
+        pooled_opportunity_ids.add(binding.opportunity_id)
 
 
 def _clear_tool_observation_batch(state=None) -> None:
@@ -15221,7 +15388,39 @@ class _BatchDeliveryPlan:
     decision: dict
 
 
-def _rendered_contains_exact_suffix(rendered, output_index: int, suffix: str) -> bool:
+def _rendered_text_content(rendered, output_index: int) -> str | None:
+    """Return only model-visible text for one formatted tool message.
+
+    The formatter may wrap text in a string, a list of content blocks, or nested
+    ``content`` dictionaries.  Metadata (URLs, raw output, image payloads) is
+    deliberately ignored because it is not model text.
+    """
+    if (not isinstance(rendered, (list, tuple))
+            or output_index < 0 or output_index >= len(rendered)):
+        return None
+    message = rendered[output_index]
+    if not isinstance(message, dict) or "content" not in message:
+        return None
+    parts = []
+    stack = [message.get("content")]
+    while stack:
+        value = stack.pop(0)
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, (list, tuple)):
+            stack[0:0] = list(value)
+        elif isinstance(value, dict):
+            text = value.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+            nested = value.get("content")
+            if isinstance(nested, (str, list, tuple)):
+                stack.insert(0, nested)
+    return "".join(parts)
+
+
+def _rendered_contains_exact_suffix(rendered, output_index: int, suffix: str,
+                                    base_rendered=None) -> bool:
     """Require exact bytes in the corresponding API-visible message content.
 
     ``extra.raw_output`` is trajectory metadata that mini-swe strips before the
@@ -15230,27 +15429,22 @@ def _rendered_contains_exact_suffix(rendered, output_index: int, suffix: str) ->
     """
     if not suffix:
         return True
-    if not isinstance(rendered, (list, tuple)) or output_index >= len(rendered):
+    current_text = _rendered_text_content(rendered, output_index)
+    if current_text is None:
         return False
-    message = rendered[output_index]
-    if not isinstance(message, dict) or "content" not in message:
+    # Legacy callers only have the augmented rendering.  Keep the old
+    # membership check for those callers; the formatter commit path always
+    # supplies ``base_rendered`` and therefore gets the stronger proof below.
+    if base_rendered is None:
+        return suffix in current_text
+    base_text = _rendered_text_content(base_rendered, output_index)
+    if base_text is None or current_text == base_text:
         return False
-    stack = [message.get("content")]
-    while stack:
-        value = stack.pop()
-        if isinstance(value, str):
-            if suffix in value:
-                return True
-        elif isinstance(value, (list, tuple)):
-            stack.extend(value)
-        elif isinstance(value, dict):
-            text = value.get("text")
-            if isinstance(text, str):
-                stack.append(text)
-            nested = value.get("content")
-            if isinstance(nested, (str, list, tuple)):
-                stack.append(nested)
-    return False
+    # Delivery is proven only when the API-visible text is a structural
+    # base->augmented append of exactly the shipped bytes.  This rejects a
+    # pre-existing identical suffix (base == augmented) and rejects clipping or
+    # reordering that merely leaves the suffix somewhere in the message.
+    return current_text.startswith(base_text) and current_text[len(base_text):] == suffix
 
 
 def _batch_candidate_control_identity(candidate) -> "tuple[str, str] | None":
@@ -16496,6 +16690,12 @@ def install_observation_batch_commit(agent) -> bool:
                 _join_lane_output(previous, planned_delivery.suffix)
                 if planned_delivery.join
                 else previous + planned_delivery.suffix)
+        # Capture the formatter's unaugmented, API-visible bytes before proving
+        # the augmented rendering.  A membership check alone is unsound: if the
+        # same suffix was already present in the tool output, a clipped GT copy
+        # would be falsely credited as delivered.  Keep the baseline separate
+        # from the mutable shadow outputs used for the actual model call.
+        base_rendered = None
         try:
             rendered = original(message, shadow_outputs, *args, **kwargs)
         except BaseException:
@@ -16505,11 +16705,21 @@ def install_observation_batch_commit(agent) -> bool:
             raise
 
         if (planned_delivery is not None
+                and planned_delivery.disposition == "deliver"):
+            try:
+                base_rendered = original(
+                    message, [dict(output) for output in outputs], *args, **kwargs)
+            except BaseException:
+                _discard_tool_observation_batch("batch_baseline_formatter_exception", state)
+                raise
+
+        if (planned_delivery is not None
                 and planned_delivery.disposition == "deliver"
                 and (
                     output_index is None
                     or not _rendered_contains_exact_suffix(
-                        rendered, output_index, planned_delivery.suffix)
+                        rendered, output_index, planned_delivery.suffix,
+                        base_rendered)
                 )):
             _discard_tool_observation_batch("batch_formatter_clipped", state)
             return original(message, outputs, *args, **kwargs)
@@ -16526,6 +16736,7 @@ def install_observation_batch_commit(agent) -> bool:
         # has been excluded.  The rows do not participate in rendering or dose.
         try:
             _record_batch_opportunities(state, plans, planned_winner)
+            _commit_gateway_control_records(state, planned_winner)
         except Exception:  # noqa: BLE001 - audit metadata never breaks the agent loop
             pass
 

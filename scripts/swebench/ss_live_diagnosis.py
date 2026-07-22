@@ -68,10 +68,16 @@ TYPED_TERMINAL_GATES = {
     ),
     # NO-GO defect 5: PERF rows are adjudicated on the SS-MEASURE terminal (the collector's
     # _MEASUREMENT_GATE_NAMES), never reduced to their self-declared status alone.
+    # 2026-07-21 (CODEX_129_BUGLIST PERF blocker): ``cross_process_parity`` is the new
+    # SS-MEASURE terminal gate — the measured value/partition must be byte/value-identical
+    # across the two independent processes (container gt_deep_metrics -> host
+    # gt_run_metrics.v2). Like ``aggregate_coverage`` it is a RUN-scope gate and is
+    # adjudicated only at ``scope="run"`` (task grain has a single process view).
     "measurement": (
         "artifact_valid", "metric_structure_valid", "precision_8dp",
         "formula_provenance", "denominator_provenance",
-        "applicability_resolved", "task_coverage", "aggregate_coverage",
+        "applicability_resolved", "task_coverage",
+        "cross_process_parity", "aggregate_coverage",
     ),
 }
 
@@ -166,6 +172,55 @@ def _causal_proven(lineage: object) -> bool:
     )
 
 
+def _worst_fire_terminal(record: object) -> str | None:
+    """Classify the strongest concrete failure across exact physical fires.
+
+    ``None`` means the fire record is absent or fully owned. A present but incomplete
+    record fails closed. Precedence mirrors the class-level delivery classifier so a
+    class aggregate cannot hide a worse individual fire.
+    """
+    if not isinstance(record, dict):
+        return None
+    fires = record.get("fires")
+    if not isinstance(fires, list) or not fires:
+        return None if record.get("owned") is True else "SEALED_DELIVERED_UNGRADED"
+    gate_rows: list[dict[str, Any]] = []
+    for fire in fires:
+        if not isinstance(fire, dict):
+            return "SEALED_DELIVERED_UNGRADED"
+        fire_gates = fire.get("gates")
+        if not isinstance(fire_gates, dict):
+            return "SEALED_DELIVERED_UNGRADED"
+        gate_rows.append(fire_gates)
+    if any(gates.get("correct_info") is False for gates in gate_rows):
+        return "WRONG_INFO"
+    if any(gates.get("correct_rl_adhered_time") is False for gates in gate_rows):
+        return "LATE"
+    if any(gates.get("leak_zero") is False for gates in gate_rows):
+        return "LEAKED"
+    if any(gates.get("dose_lte_one") is False for gates in gate_rows):
+        return "OVER_DOSED"
+    if any(gates.get("acknowledged") is False for gates in gate_rows):
+        return "NOVEL_IGNORED"
+    gate_names = (
+        "delivered_byte_proven",
+        "correct_info",
+        "correct_rl_adhered_time",
+        "acknowledged",
+        "leak_zero",
+        "dose_lte_one",
+        "fair_probe",
+    )
+    if any(
+        any(gates.get(name) is not True for name in gate_names)
+        for gates in gate_rows
+    ):
+        return "SEALED_DELIVERED_UNGRADED"
+    if record.get("owned") is not True:
+        return "SEALED_DELIVERED_UNGRADED"
+    return None
+
+
 def classify_delivery_feature(
     feature: str,
     family: str,
@@ -247,6 +302,21 @@ def classify_delivery_feature(
         return "SEALED_DELIVERED_UNGRADED"
 
     causal = any(_causal_proven(entry.get("feature_lineage")) for entry in entries)
+    # 129-BUGLIST: the class gates above are a class UNION — each gate can be satisfied by a
+    # DIFFERENT physical fire, so the union can pass although NO single fire owns all seven
+    # (cross-fire laundering: byte from one fire, timing/ack from another). The grader now
+    # emits a fire-local seven-gate record (``feature_fire_gate_ownership.owned``); the
+    # classifier grades that WORST-case fire-local ownership before any PASS bucket. When the
+    # record is present (every real one-build FACT/CAP byte-owner terminal), EVERY fire must
+    # own all seven. A concrete failure retains its named terminal; an incomplete record fails
+    # closed. Absence keeps the legacy class-union behavior for direct unit callers (the run
+    # pipeline always attaches the record). This only ADDS a constraint.
+    fire_ownership = readiness.get("fire_gate_ownership")
+    fire_record_present = isinstance(fire_ownership, dict)
+    fire_failure = _worst_fire_terminal(fire_ownership)
+    if fire_record_present and fire_failure is not None:
+        return fire_failure
+    fire_local_ok = not fire_record_present or fire_ownership.get("owned") is True
     # D-M/D-P (arviz/aiogram/gitingest/loguru): author the acknowledgment terminal
     # from the CLASS-SPECIFIC receipt grader (readiness gates["acknowledged"]:
     # True/False/None), NOT the generic consumption-ladder receipt
@@ -259,6 +329,7 @@ def classify_delivery_feature(
     if (
         causal
         and ack is True
+        and fire_local_ok
         and all(gates.get(name) is True for name in (
             "delivered_byte_proven", "correct_info",
             "correct_rl_adhered_time", "acknowledged", "leak_zero",
@@ -266,7 +337,7 @@ def classify_delivery_feature(
         ))
     ):
         return "CAUSAL_P5"
-    if ack is True:
+    if ack is True and fire_local_ok:
         return "ACKNOWLEDGED"
     if ack is False:
         return "NOVEL_IGNORED"
@@ -498,10 +569,11 @@ def _perf_status(value: object, *, scope: str = "task") -> str:
     A row's self-declared ``status`` is never sufficient for MEASURED: the
     collector's measurement readiness (validity, structure, 8dp precision,
     formula/denominator provenance, applicability, coverage) must hold.
-    ``aggregate_coverage`` is a run-population gate and is adjudicated only at
-    ``scope="run"`` (task-grain rows carry it False by construction). Honest
-    abstentions (NOT_APPLICABLE / RIGHT_CENSORED / UNMEASURED) claim no
-    measurement and pass through unadjudicated.
+    ``aggregate_coverage`` and ``cross_process_parity`` are run-scope gates and are
+    adjudicated only at ``scope="run"`` (task-grain rows carry them False by
+    construction: a single-process task view can prove neither run-population coverage
+    nor cross-process value parity). Honest abstentions (NOT_APPLICABLE /
+    RIGHT_CENSORED / UNMEASURED) claim no measurement and pass through unadjudicated.
     """
     if not isinstance(value, dict):
         return "UNMEASURED"
@@ -519,7 +591,7 @@ def _perf_status(value: object, *, scope: str = "task") -> str:
         return "FAILED:measurement:gate_schema"
     adjudicated = tuple(
         gate for gate in expected_gates
-        if scope == "run" or gate != "aggregate_coverage"
+        if scope == "run" or gate not in ("aggregate_coverage", "cross_process_parity")
     )
     for gate in adjudicated:
         if gates[gate] is False:
@@ -535,29 +607,11 @@ def _run_perf_status(
     run_row: object,
     task_buckets: dict[str, str],
 ) -> str:
-    """Adjudicate the run-grain PERF bucket, joining the evidence that IS present.
+    """Join the canonical distribution to independent run-readiness evidence.
 
-    The authoritative ``gt_run_metrics.v2`` artifact (``gt_run_metrics.py``) carries
-    the per-metric run DISTRIBUTION — the measured/missing/unmeasured/failed/
-    not_applicable/right_censored task partitions — but it carries NO ``ss_features``
-    and therefore NO run ``ss_readiness``: that readiness object only exists on the
-    ``gt_feature_metrics`` run rollup, which this reader is never handed. Reading the
-    run readiness from ``run_metrics["ss_features"]`` (as the legacy inline join did)
-    is thus structurally guaranteed to miss on real data and collapse every genuinely
-    MEASURED run row to ``FAILED:measurement:readiness_role`` — a measurement-defect
-    for a metric whose per-task values are fully present.
-
-    When an explicit run readiness IS attached (the rollup path, and the crafted
-    fixtures that mirror it), adjudicate it verbatim through ``_perf_status`` so the
-    existing bar is unchanged. Otherwise derive the SS-MEASURE run verdict from the
-    distribution partition plus this reader's OWN per-task adjudication
-    (``task_buckets``, each already gated through ``_perf_status`` at task grain):
-    ``aggregate_coverage`` binds MEASURED only when the distribution is complete over
-    the whole expected population (no missing/unmeasured/failed tasks) AND every
-    contributing task row is a sound, resolved measurement (MEASURED / NOT_APPLICABLE
-    / RIGHT_CENSORED). A MEASURED distribution row alone never promotes — the
-    per-task SS-MEASURE gates (precision, provenance, structure) are enforced only on
-    the task grain, so an unresolved task row fails the run closed with a named gate.
+    The v2 run artifact owns the distribution. The feature-metrics run artifact owns
+    exact-value parity and aggregate coverage. A MEASURED distribution without that
+    second proof remains UNMEASURED; task status partitions cannot recreate it.
     """
     if isinstance(run_row, dict) and isinstance(run_row.get("ss_readiness"), dict):
         joined = dict(run_measurement) if isinstance(run_measurement, dict) else {}
@@ -572,27 +626,10 @@ def _run_perf_status(
     # with a genuinely missing task) claim no measurement and pass through unadjudicated.
     if status != "MEASURED":
         return str(status)
-    # status == MEASURED: prove aggregate coverage only from present, complete evidence.
-    partitions = (
-        run_measurement.get("missing_tasks"),
-        run_measurement.get("unmeasured_tasks"),
-        run_measurement.get("failed_tasks"),
-    )
-    if any(not isinstance(part, list) for part in partitions):
-        return "FAILED:measurement:aggregate_coverage"
-    if any(part for part in partitions):
-        return "FAILED:measurement:aggregate_coverage"
-    if not task_buckets:
-        return "UNMEASURED:measurement:aggregate_coverage"
-    resolved = {"MEASURED", "NOT_APPLICABLE", "RIGHT_CENSORED"}
-    unresolved = [bucket for bucket in task_buckets.values() if bucket not in resolved]
-    if unresolved:
-        # A MEASURED run distribution cannot outrank a contributing task row that this
-        # reader could not itself resolve; surface it, never a manufactured pass.
-        if any(bucket.startswith("FAILED") for bucket in unresolved):
-            return "FAILED:measurement:aggregate_coverage"
-        return "UNMEASURED:measurement:aggregate_coverage"
-    return "MEASURED"
+    # Exact-value parity and aggregate coverage live only in the independent
+    # gt.feature_metrics.run.v1 readiness artifact.  Distribution partitions cannot
+    # reconstruct those proofs, so their absence is an honest abstention.
+    return "UNMEASURED:measurement:run_readiness"
 
 
 def _requires_visible_audit(feature: str, family: str) -> bool:
@@ -829,7 +866,8 @@ def _validate_deep_metric_tasks(
     for path in sorted(root.rglob("gt_deep_metrics_*.json")):
         record = _load_json(path)
         task = record.get("task_id")
-        if record.get("schema") != "gt_deep_metrics.v2" or not isinstance(task, str) or not task:
+        if record.get("schema") not in {"gt_deep_metrics.v2", "gt_deep_metrics.v3"} \
+                or not isinstance(task, str) or not task:
             raise ValueError(f"deep metrics identity/schema is malformed: {path}")
         observed.append(task)
     counts = Counter(observed)
@@ -1197,6 +1235,7 @@ def diagnose_run(
     run_metrics_path: Path | str,
     *,
     expected_tasks_path: Path | str | None = None,
+    feature_run_metrics_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Build one exact canonical row per feature plus explicit per-task buckets."""
     root = Path(run_dir)
@@ -1249,6 +1288,28 @@ def diagnose_run(
     diagnosis_integrity = _diagnosis_integrity(
         tasks, run_metrics, inventory["CAP"]
     )
+    feature_run_metrics: dict[str, Any] | None = None
+    if feature_run_metrics_path is not None:
+        candidate = _load_json(Path(feature_run_metrics_path))
+        feature_population_valid = bool(
+            candidate.get("schema") == "gt.feature_metrics.run.v1"
+            and candidate.get("run_id") == run_metrics.get("run_id")
+            and candidate.get("n_tasks") == len(task_order)
+            and candidate.get("observed_task_count") == len(task_order)
+            and candidate.get("expected_task_ids") == list(task_order)
+            and isinstance(candidate.get("ss_features"), dict)
+        )
+        if feature_population_valid:
+            feature_run_metrics = candidate
+        else:
+            diagnosis_integrity["run_issues"] = sorted(set([
+                *diagnosis_integrity["run_issues"], "feature_run_metrics_invalid",
+            ]))
+            diagnosis_integrity["publishable"] = False
+    elif isinstance(run_metrics.get("ss_features"), dict):
+        # Compatibility for historical self-contained fixtures.  Live wiring supplies
+        # the independent artifact explicitly and never relies on this branch.
+        feature_run_metrics = run_metrics
     incomplete_input_tasks = sorted(
         task for task, (_path, metrics) in tasks.items()
         if isinstance(metrics.get("ss_integrity"), dict)
@@ -1362,7 +1423,10 @@ def diagnose_run(
                 # otherwise derives aggregate coverage from the distribution partition joined to
                 # this reader's own per-task PERF adjudication — MEASURED only when the whole
                 # population is covered and every contributing task row is itself sound.
-                _run_row = (run_metrics.get("ss_features") or {}).get(feature)
+                _run_row = (
+                    (feature_run_metrics.get("ss_features") or {}).get(feature)
+                    if feature_run_metrics is not None else None
+                )
                 run_bucket = _run_perf_status(run_measurement, _run_row, task_buckets)
             else:
                 for task in task_order:
@@ -1529,6 +1593,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("run_dir")
     parser.add_argument("--run-metrics", required=True)
     parser.add_argument(
+        "--feature-run-metrics",
+        help="gt.feature_metrics.run.v1 readiness/parity artifact",
+    )
+    parser.add_argument(
         "--expected-tasks",
         help="frozen JSON task population; missing records remain explicit UNMEASURED cells",
     )
@@ -1536,10 +1604,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output")
     args = parser.parse_args(argv)
 
-    diagnose_kwargs = (
-        {"expected_tasks_path": args.expected_tasks}
-        if args.expected_tasks is not None else {}
-    )
+    diagnose_kwargs = {}
+    if args.expected_tasks is not None:
+        diagnose_kwargs["expected_tasks_path"] = args.expected_tasks
+    if args.feature_run_metrics is not None:
+        diagnose_kwargs["feature_run_metrics_path"] = args.feature_run_metrics
     result = diagnose_run(args.run_dir, args.run_metrics, **diagnose_kwargs)
     rendered = (
         json.dumps(result, indent=2, sort_keys=False) + "\n"

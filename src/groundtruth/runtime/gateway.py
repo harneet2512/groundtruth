@@ -176,6 +176,7 @@ __all__ = [
     "record_committed_delivery",
     "GATEWAY_COMMITTED_SITE",
     "ROUTE_DELIVER", "ROUTE_DEFER", "ROUTE_EXPIRED_LATE", "ROUTE_STALE",
+    "ROUTE_REGISTRY_ERROR",
     # kinds
     "KIND_SEARCH", "KIND_VIEW", "KIND_EDIT", "KIND_TEST", "KIND_SUBMIT", "KIND_OTHER",
     # outcome states
@@ -280,6 +281,11 @@ class GatewayState:
     # Optional host-side instrumentation sink. The gateway owns these decisions,
     # while the live seam owns durable ledger I/O. None is an exact no-op.
     control_recorder: object | None = None
+    # Formatter-transaction queue supplied by the live seam.  Candidate-bound
+    # decisions are staged here and acquire their final rendered bytes plus an
+    # ObservationBinding only after the provider formatter commits.  ``None``
+    # preserves the direct/legacy recorder path byte-for-byte.
+    control_queue: list[dict[str, object]] | None = None
 
     @property
     def ledger(self) -> dict[str, dict[str, object]]:
@@ -474,8 +480,29 @@ def _record_control(
     fact_class: str | None = None,
     candidate_id: str = "",
     reason: str = "",
+    candidate: EvidenceEnvelope | None = None,
 ) -> None:
-    """Forward one terminal control decision to the seam's typed metadata sink."""
+    """Stage a candidate decision, or forward an unbound legacy decision directly.
+
+    Candidate bytes cannot be truthfully sealed here: the adapter presentation and
+    observation-boundary newline are chosen by the live seam, and the provider may
+    still abort formatting.  When the seam supplies ``control_queue`` we therefore
+    retain the concrete envelope and defer the durable row.  Calls without a concrete
+    candidate remain the historical direct path and are intentionally UNMEASURED by
+    the exact-binding grader.
+    """
+    queue = getattr(state, "control_queue", None)
+    if isinstance(queue, list) and candidate is not None:
+        queue.append({
+            "feature_id": feature_id,
+            "decision_site": decision_site,
+            "decision": decision,
+            "candidate": candidate,
+            "fact_class": fact_class,
+            "candidate_id": candidate_id,
+            "reason": reason,
+        })
+        return
     recorder = getattr(state, "control_recorder", None)
     if not callable(recorder):
         return
@@ -697,7 +724,7 @@ def _apply_xsession_rankup(
                     state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
                     "NO_EFFECT", candidate_bytes=candidate_bytes,
                     fact_class=fact_class, candidate_id=a.dedup_key,
-                    reason="cold_policy",
+                    reason="cold_policy", candidate=a,
                 )
             except Exception as exc:  # noqa: BLE001 — measurement never changes delivery
                 _record_control(
@@ -722,7 +749,7 @@ def _apply_xsession_rankup(
                     state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
                     "APPLIED", candidate_bytes=candidate_bytes,
                     fact_class=fact_class, candidate_id=boosted.dedup_key,
-                    reason=f"ladder_boost:{int(boost)}",
+                    reason=f"ladder_boost:{int(boost)}", candidate=boosted,
                 )
             except Exception as exc:
                 _record_control(
@@ -738,7 +765,7 @@ def _apply_xsession_rankup(
                         state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
                         "NO_EFFECT", candidate_bytes=candidate_bytes,
                         fact_class=fact_class, candidate_id=a.dedup_key,
-                        reason="no_ladder_boost",
+                        reason="no_ladder_boost", candidate=a,
                     )
                 except Exception as exc:
                     _record_control(
@@ -2749,6 +2776,7 @@ ROUTE_DELIVER = "deliver"            # on-time, fresh, right decision point -> s
 ROUTE_DEFER = "defer"                # event < available_at -> too early; re-offer later
 ROUTE_EXPIRED_LATE = "expired_late"  # event > deliver_by -> too late; explicit non-delivery
 ROUTE_STALE = "stale"                # a depended sub-rev changed -> discard/recompute
+ROUTE_REGISTRY_ERROR = "registry_error"  # registry authority unavailable -> fail closed
 
 # The decision-lifecycle order of the coarse observation boundaries. A fact ABOUT an
 # action is useful only AT its own boundary (available_at == deliver_by == preferred_event
@@ -2922,6 +2950,11 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                 "gateway.route_delivery.registry_timing", "ERROR",
                 reason=f"registry_timing_error:{type(exc).__name__}",
             )
+            # Registry metadata is the authority under enforcement. Never fall back to
+            # the producer's self-declared preferred_event when that authority is unavailable:
+            # doing so turns an outage into an apparently valid delivery. Suppress explicitly
+            # and preserve the ERROR control for diagnosis.
+            return ROUTE_REGISTRY_ERROR
     if want is None:
         want = _event_ordinal(env.preferred_event)  # OFF / unregistered -> byte-identical
     if registry_on and not registry_error:
@@ -3055,12 +3088,18 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
         if _ss_arbiter_v2_on() and not _envelope_has_bytes(a):
             try:
                 _cand_bytes, _fc = _candidate_control_identity(a)
+                # This candidate is DROPPED here (``continue``) and never reaches delivery, so
+                # declaring APPLIED was a guaranteed non-join — the referee could only ever mark
+                # it INCORRECT (a permanent ``mediation_correct=False`` blocking the terminal).
+                # The honest ledger truth is a SUPPRESSION: record SUPPRESSED sealing the exact
+                # pre-drop candidate bytes so the ``not _carried`` absence check confirms those
+                # bytes never shipped (an honest, verifiable suppression).
                 _record_control(
                     state, "GT_SS_ARBITER_V2",
-                    "gateway.augment.empty_payload_guard", "APPLIED",
+                    "gateway.augment.empty_payload_guard", "SUPPRESSED",
                     candidate_bytes=_cand_bytes, fact_class=_fc,
                     candidate_id=getattr(a, "dedup_key", "") or "",
-                    reason="empty_payload_dropped",
+                    reason="empty_payload_dropped", candidate=a,
                 )
             except Exception:
                 pass
@@ -3125,6 +3164,7 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
                 state, "GT_GATEWAY", "gateway.augment.candidate_admission", "APPLIED",
                 candidate_bytes=candidate_bytes, fact_class=fact_class,
                 candidate_id=candidate.dedup_key, reason="candidate_admitted",
+                candidate=candidate,
             )
         except Exception as exc:
             _record_control(
@@ -3135,13 +3175,20 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
         try:
             candidate_bytes, fact_class = _candidate_control_identity(candidate)
             admitted = candidate.dedup_key in final_keys
+            # A SUPPRESSED (filtered) bridge candidate must seal its exact pre-suppression
+            # bytes — recording empty bytes made the suppression identity-less, so the referee
+            # dropped the record and the withheld candidate escaped grading entirely. Sealing
+            # the pre-drop bytes lets the ``not _carried`` absence check verify they never
+            # shipped. (The APPLIED arm still stamps pre-render admission bytes — a
+            # decision-precedes-delivery anchor whose exact-committed join is owned separately.)
             _record_control(
                 state, "GT_GATEWAY_EDIT_BRIDGES",
                 "gateway.augment.edit_bridge_candidate",
                 "APPLIED" if admitted else "SUPPRESSED",
-                candidate_bytes=candidate_bytes if admitted else "",
+                candidate_bytes=candidate_bytes,
                 fact_class=fact_class, candidate_id=candidate.dedup_key,
                 reason="candidate_admitted" if admitted else "candidate_filtered",
+                candidate=candidate,
             )
         except Exception as exc:
             _record_control(

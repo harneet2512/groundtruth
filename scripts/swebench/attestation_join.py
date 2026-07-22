@@ -39,8 +39,10 @@ itself UNMEASURED). An UNJOINED attestation contributes NOTHING.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -124,6 +126,18 @@ ATTESTED_FACT_CLASSES: tuple[str, ...] = (
 
 
 @dataclass(frozen=True)
+class DeliveryTruthJoin:
+    """Truth/authority/freshness owned by one exact delivered ledger row."""
+
+    ledger_row_index: int
+    truth: bool | None
+    authority: bool | None
+    freshness: bool | None
+    attestation_count: int
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class TruthJoin:
     """The exactly-joined typed truth for one fact class.
 
@@ -149,6 +163,7 @@ class TruthJoin:
     attestation_count: int
     joined_delivery_row_indices: tuple[int, ...]
     reasons: tuple[str, ...]
+    per_delivery: tuple[DeliveryTruthJoin, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -318,12 +333,114 @@ def _load_and_validate_bundle(entry_path: str) -> tuple[ProducerAttestation | No
         or entry.get("delivery_seal") != attestation.delivery_seal
     ):
         return skip("entry_identity_mismatch")
+    semantic_errors = _semantic_proof_errors(bundle, attestation)
+    if semantic_errors:
+        return skip(f"semantic:{semantic_errors[0]}")
     return attestation, ""
 
 
 def _read_bytes(path: str) -> bytes:
     with open(path, "rb") as handle:
         return handle.read()
+
+
+_BYTES_RANGE = re.compile(r"^bytes\[(\d+):(\d+)\]$")
+
+
+def _bytes_range(field_path: str, raw: bytes) -> tuple[bool, Any] | None:
+    """Resolve the ``bytes[start:end]`` proof form against the immutable artifact bytes.
+
+    Producer factories reference the rendered candidate with ``bytes[0:<rendered_length>]``
+    (see gateway_attestation_factory._predicate) — a byte-range slice, NOT a JSON path.
+    The artifact sha was already verified, so this leg only proves the referenced range
+    exists in those exact bytes. Returns ``None`` when ``field_path`` is not a byte-range
+    form so the caller falls back to the JSON-path resolver.
+    """
+    match = _BYTES_RANGE.match(field_path) if isinstance(field_path, str) else None
+    if match is None:
+        return None
+    start, end = int(match.group(1)), int(match.group(2))
+    if isinstance(raw, (bytes, bytearray)) and 0 <= start <= end <= len(raw):
+        return True, bytes(raw[start:end])
+    return False, None
+
+
+def _json_field(value: Any, field_path: str) -> tuple[bool, Any]:
+    """Resolve the small JSON-path language used by ``ProofRef``."""
+    if field_path == "$":
+        return True, value
+    if not isinstance(field_path, str) or not field_path.startswith("$."):
+        return False, None
+    current = value
+    for component in field_path[2:].split("."):
+        if not component or not isinstance(current, dict) or component not in current:
+            return False, None
+        current = current[component]
+    return True, current
+
+
+def _semantic_proof_errors(bundle: str, attestation: ProducerAttestation) -> tuple[str, ...]:
+    """Re-check proof references against the immutable artifact bytes.
+
+    Byte/sha validation proves persistence integrity only.  This second leg proves
+    that PASS/FAIL predicates point at real fields and rejects an unambiguous scalar
+    contradiction.  Narrative observations remain producer-domain text and are not
+    guessed at (correct-or-quiet).
+    """
+    artifacts: dict[str, Any] = {}
+    raw_artifacts: dict[str, bytes] = {}
+    missing = object()
+    errors: list[str] = []
+    for ref in attestation.source_artifacts:
+        path = os.path.join(bundle, "artifacts", ref.artifact_id)
+        try:
+            raw = _read_bytes(path)
+        except OSError:
+            errors.append(f"artifact_unreadable:{ref.artifact_id}")
+            continue
+        if hashlib.sha256(raw).hexdigest() != ref.sha256:
+            errors.append(f"artifact_sha_mismatch:{ref.artifact_id}")
+            continue
+        raw_artifacts[ref.artifact_id] = raw
+        try:
+            artifacts[ref.artifact_id] = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            artifacts[ref.artifact_id] = raw
+
+    predicates = (*attestation.truth_predicates, *attestation.freshness_predicates)
+    for index, predicate in enumerate(predicates):
+        if predicate.verdict not in (PASS, FAIL):
+            continue
+        for proof_index, proof in enumerate(predicate.proof_refs):
+            source = artifacts.get(proof.artifact.artifact_id, missing)
+            if source is missing:
+                errors.append(f"predicate[{index}].proof[{proof_index}]:artifact_missing")
+                continue
+            # A byte-range proof (rendered candidate) resolves against the raw immutable
+            # bytes; every other proof uses the JSON-path resolver over the parsed artifact.
+            byte_range = _bytes_range(
+                proof.field_path, raw_artifacts[proof.artifact.artifact_id]
+            )
+            found, observed_value = (
+                byte_range if byte_range is not None
+                else _json_field(source, proof.field_path)
+            )
+            if not found:
+                errors.append(
+                    f"predicate[{index}].proof[{proof_index}]:field_missing:{proof.field_path}"
+                )
+                continue
+            if isinstance(observed_value, (str, int, float, bool)):
+                actual = str(observed_value).strip().casefold()
+                claim = predicate.observation.strip().casefold()
+                if claim in {"true", "false", "pass", "fail", actual}:
+                    expected = {"pass": "true", "fail": "false"}.get(claim, claim)
+                    actual = {"pass": "true", "fail": "false"}.get(actual, actual)
+                    if expected != actual:
+                        errors.append(
+                            f"predicate[{index}].proof[{proof_index}]:observation_contradicts_field"
+                        )
+    return tuple(errors)
 
 
 def load_attestations(task_dir: str) -> AttestationLoad:
@@ -526,6 +643,31 @@ def join_truth(
         # the remaining condition is truth==PASS. Never False — a FAIL/UNMEASURED
         # truth leaves authority UNMEASURED (None), not a negative claim.
         authority = True if truth is True else None
+        per_delivery: list[DeliveryTruthJoin] = []
+        for row_index in indices:
+            row_attestations = [
+                attestation
+                for attestation, row_indices in items
+                if row_index in row_indices
+            ]
+            row_truth = _aggregate_bool([
+                attestation.truth_verdict for attestation in row_attestations
+            ])
+            per_delivery.append(DeliveryTruthJoin(
+                ledger_row_index=row_index,
+                truth=row_truth,
+                authority=True if row_truth is True else None,
+                freshness=_aggregate_bool([
+                    attestation.freshness_verdict for attestation in row_attestations
+                ]),
+                attestation_count=len(row_attestations),
+                reasons=tuple(
+                    f"joined candidate={attestation.candidate_id!r} seal="
+                    f"{attestation.delivery_seal} truth={attestation.truth_verdict} "
+                    f"freshness={attestation.freshness_verdict}"
+                    for attestation in row_attestations
+                ),
+            ))
         result[fact_class] = TruthJoin(
             truth=truth,
             authority=authority,
@@ -533,6 +675,7 @@ def join_truth(
             attestation_count=len(items),
             joined_delivery_row_indices=tuple(indices),
             reasons=reasons,
+            per_delivery=tuple(per_delivery),
         )
     # J6: surface a NAMED lineage-rejection reason for a class whose ONLY matching delivered
     # row/block lacked lineage — but never overwrite a real join (a class with one joined and
@@ -567,12 +710,24 @@ def truth_join_to_dict(join: TruthJoin) -> dict[str, Any]:
         "attestation_count": join.attestation_count,
         "joined_delivery_row_indices": list(join.joined_delivery_row_indices),
         "reasons": list(join.reasons),
+        "per_delivery": [
+            {
+                "ledger_row_index": item.ledger_row_index,
+                "truth": item.truth,
+                "authority": item.authority,
+                "freshness": item.freshness,
+                "attestation_count": item.attestation_count,
+                "reasons": list(item.reasons),
+            }
+            for item in join.per_delivery
+        ],
     }
 
 
 __all__ = [
     "ATTESTED_FACT_CLASSES",
     "AttestationLoad",
+    "DeliveryTruthJoin",
     "TruthJoin",
     "join_truth",
     "load_attestations",

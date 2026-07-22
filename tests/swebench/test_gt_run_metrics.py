@@ -91,7 +91,11 @@ def test_empty_run_is_a_collection_failure_not_a_complete_zero_task_run() -> Non
 
     assert result["tasks"] == 0
     assert result["mandatory_performance_collection_complete"] is False
-    assert result["mandatory_performance_collection_failures"] == ["no_task_records"]
+    # Fail-closed population (2026-07-21): with no declared expected population AND no
+    # records, both failures are named — an arbitrary subset can never be complete.
+    assert result["mandatory_performance_collection_failures"] == [
+        "expected_population_unknown", "no_task_records",
+    ]
     assert result["token_efficiency"]["total_cost_usd"] is None
     assert result["token_efficiency"]["cost_collection_complete"] is False
     assert result["mandatory_performance"]["localization"]["gold_rank"][
@@ -273,7 +277,11 @@ def test_cli_returns_nonzero_after_writing_empty_run_failure_artifact(
 
     assert main() == 1
     written = json.loads((tmp_path / "gt_run_metrics_v2_empty.json").read_text())
-    assert written["mandatory_performance_collection_failures"] == ["no_task_records"]
+    # Fail-closed population (2026-07-21): a CLI run with no --expected-tasks-file cannot
+    # be marked collection-complete; the undeclared population is itself a failure.
+    assert written["mandatory_performance_collection_failures"] == [
+        "expected_population_unknown", "no_task_records",
+    ]
 
 
 def test_cli_returns_nonzero_for_present_but_incomplete_task(
@@ -330,8 +338,13 @@ def test_explicit_na_record_is_collection_complete(tmp_path, monkeypatch) -> Non
     baseline = tmp_path / "baseline.json"
     baseline.write_text(json.dumps({"resolved_ids": []}), encoding="utf-8")
     (tmp_path / "gt_deep_metrics_na.json").write_text(json.dumps(row), encoding="utf-8")
+    # Fail-closed population (2026-07-21): completeness now REQUIRES the declared
+    # single-run population; an all-NA record is complete only over its known task set.
+    expected = tmp_path / "expected.json"
+    expected.write_text(json.dumps({"task_ids": ["na"]}), encoding="utf-8")
     monkeypatch.setattr(sys, "argv", [
         "gt_run_metrics.py", str(tmp_path), str(baseline), "--run-id", "na",
+        "--expected-tasks-file", str(expected),
     ])
 
     assert main() == 0
@@ -367,7 +380,7 @@ def test_all_58_mandatory_perf_metrics_are_published() -> None:
         },
         "edit_quality": {
             "edit_attempts_per_gold", "rewrite_count", "compile_failures_after_edit",
-            "edit_revert_rate", "first_edit_correctness", "patch_size", "patch_files",
+            "revert_commands_per_edit", "first_edit_correctness", "patch_size", "patch_files",
         },
         "interface_preservation": {
             "contract_compliance_rate", "signature_changes_warned",
@@ -395,7 +408,7 @@ def test_all_58_mandatory_perf_metrics_are_published() -> None:
         "token_efficiency": {
             "total_steps", "total_tokens_in", "total_tokens_out", "total_cost_usd",
             "cache_hit_rate", "tokens_per_gold_edit", "cost_per_resolved",
-            "gt_token_overhead", "wasted_token_rate",
+            "gt_token_overhead", "non_gold_step_rate",
         },
     }
     assert sections["localization"]["gold_rank"]["mean"] is None

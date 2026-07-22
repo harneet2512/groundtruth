@@ -103,7 +103,15 @@ from chronology_extract import (
 )
 
 # REUSE the grader-side entity model (the SAME one J3 uses for native acquisition / action).
-from consumption_ledger import _emitted_commands, _entity_patterns, _named_in
+# ``_action_kind`` is the SAME command classifier the consumption ledger uses for receipt-3
+# (mutation / verification / else), so the continuous consequence measurement never invents a
+# second divergent notion of what an edit or a test run is.
+from consumption_ledger import (
+    _action_kind,
+    _emitted_commands,
+    _entity_patterns,
+    _named_in,
+)
 
 # REUSE the Cluster-3 registry receipt evaluators (per-class acknowledgment; do NOT re-classify).
 import receipt_predicates
@@ -984,6 +992,46 @@ def _verdict_to_bool(verdict: str) -> bool | None:
     return None
 
 
+def _window_consequences(
+    messages: list[dict], lo: int, hi: int
+) -> dict[str, float]:
+    """Measure REAL-VALUED proximal-efficiency consequences over the message window
+    ``messages[lo:hi]`` — the span from an opportunity boundary to the next decision commit.
+
+    The window is the same message-index space every J3 derivation uses.  Each assistant
+    command-bearing message is one step; its commands are classified with the SAME
+    ``_action_kind`` the consumption ledger uses (mutation / verification / else), so ``edit_cycles``
+    and ``verification_runs`` mean exactly what the receipt grader means, and any other command
+    (grep / cat / read / search) is a ``native_search_view``.  Bounded and empty-safe: an
+    out-of-range or inverted window yields all-zero counts and never raises.  Values are floats
+    so they feed :func:`live_causal_cohort.evaluate_live_cohort` as a continuous endpoint Y."""
+    lo = max(0, lo)
+    hi = min(len(messages), hi)
+    steps = views = edits = verifications = 0
+    for j in range(lo, hi):
+        msg = messages[j]
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        commands = _emitted_commands(msg)
+        if not commands:
+            continue
+        steps += 1
+        for cmd in commands:
+            kind = _action_kind(cmd)
+            if kind == "mutation":
+                edits += 1
+            elif kind == "verification":
+                verifications += 1
+            else:
+                views += 1
+    return {
+        "steps_to_next_decision": float(steps),
+        "native_search_views": float(views),
+        "edit_cycles": float(edits),
+        "verification_runs": float(verifications),
+    }
+
+
 def extract_live_opportunity_observations(
     trajectory: Any,
     ledger_rows: list[dict],
@@ -1005,6 +1053,7 @@ def extract_live_opportunity_observations(
     messages = _messages(trajectory)
     tool_ordinal_index = _tool_ordinal_to_index(messages)
     boundaries = _boundary_indices(messages)
+    flat_boundaries = sorted({i for lst in boundaries.values() for i in lst})
     assignments = [
         (index, row)
         for index, row in enumerate(ledger_rows)
@@ -1070,6 +1119,11 @@ def extract_live_opportunity_observations(
         outcome_index: int | None = matching[0][0] if len(matching) == 1 else None
         endpoint: bool | None = None
         contaminated = bool(opposite)
+        # CONTINUOUS proximal endpoints: measured over the window from the opportunity boundary
+        # to the next decision commit (DELIVER) / the next observation boundary (HOLDOUT). These
+        # are the intention-to-treat efficiency outcomes a cohort projects with
+        # ``project_continuous_endpoint``; the boolean receipt below is unchanged.
+        consequences = _window_consequences(messages, 0, 0)
         if outcome_index is not None and fact_class is not None:
             if assignment == "DELIVER":
                 chronology = chronologies.get(outcome_index)
@@ -1090,6 +1144,24 @@ def extract_live_opportunity_observations(
                     if native_index is not None:
                         contaminated = True
                         failures.append("pre_delivery_reacquisition")
+                    inner = getattr(chronology, "chronology", None)
+                    delivery_index = getattr(inner, "delivery_index", None)
+                    commit_index = getattr(inner, "decision_commit_index", None)
+                    if isinstance(delivery_index, int) and not isinstance(delivery_index, bool):
+                        if (
+                            isinstance(commit_index, int)
+                            and not isinstance(commit_index, bool)
+                            and commit_index > delivery_index
+                        ):
+                            window_hi = commit_index + 1  # window is inclusive of the commit
+                        else:
+                            window_hi = next(
+                                (b for b in flat_boundaries if b > delivery_index),
+                                len(messages),
+                            )
+                        consequences = _window_consequences(
+                            messages, delivery_index + 1, window_hi
+                        )
             else:
                 control = _control_outcome(
                     matching[0][1],
@@ -1111,6 +1183,14 @@ def extract_live_opportunity_observations(
                     ) is not None:
                         contaminated = True
                         failures.append("pre_holdout_reacquisition")
+                    window_hi = (
+                        control.window_end
+                        if isinstance(control.window_end, int)
+                        else len(messages)
+                    )
+                    consequences = _window_consequences(
+                        messages, control.withhold_index + 1, window_hi
+                    )
                 if control.outcome == "unresolved":
                     failures.append("control_consequence_unresolved")
         if endpoint is None:
@@ -1134,6 +1214,7 @@ def extract_live_opportunity_observations(
             ),
             "endpoint": endpoint,
             "endpoint_name": "registered_receipt",
+            "consequences": consequences,
             "live_witness": bool(live_witness),
             "assignment_index": assignment_index,
             "outcome_index": outcome_index,
@@ -1202,6 +1283,8 @@ def join_fair_probes(
     # drop the gate to ``None`` — the gate is the strongest PROVEN behavioural bool (see
     # ``_merge_gate``). Fixes the drop-to-None where the join carried a derivable verdict.
     gate_by_class: dict[str, bool | None] = {}
+    verdict_by_delivery: dict[tuple[int, str], str] = {}
+    gate_by_delivery: dict[tuple[int, str], bool | None] = {}
 
     def _record(canon: str, verdict: str) -> None:
         verdict_by_class[canon] = _merge_verdict(verdict_by_class.get(canon), verdict)
@@ -1209,10 +1292,23 @@ def join_fair_probes(
             gate_by_class.get(canon), _verdict_to_bool(verdict)
         )
 
+    def _record_delivery(row_index: int, canon: str, verdict: str) -> None:
+        key = (row_index, canon)
+        verdict_by_delivery[key] = _merge_verdict(
+            verdict_by_delivery.get(key), verdict
+        )
+        gate_by_delivery[key] = _merge_gate(
+            gate_by_delivery.get(key), _verdict_to_bool(verdict)
+        )
+
     # randomized probes carry the adjudicated CAUSAL / SELF_LOCALIZED / UNMEASURED verdict; the
     # paired/fork probes carry their own explicit verdict.
     for probe in all_probes:
         _record(probe.fact_class, probe.causal_verdict)
+        if type(probe.delivered_row_index) is int and probe.delivered_row_index >= 0:
+            _record_delivery(
+                probe.delivered_row_index, probe.fact_class, probe.causal_verdict
+            )
 
     # every delivered row also contributes its no-probe adjudication (SELF_LOCALIZED /
     # UNMEASURED) so a class with prior self-acquisition and no holdout is graded honestly.
@@ -1232,6 +1328,7 @@ def join_fair_probes(
             matched_probe=None,
         ).fair_probe_verdict
         _record(canon, verdict)
+        _record_delivery(row_index, canon, verdict)
 
     per_fact_class: dict[str, Any] = {}
     for fact_class, verdict in sorted(verdict_by_class.items()):
@@ -1262,6 +1359,15 @@ def join_fair_probes(
         "schema": FAIR_PROBE_RESULT_SCHEMA,
         "per_fact_class": per_fact_class,
         "probes": [p.to_dict() for p in all_probes],
+        "per_delivery": [
+            {
+                "ledger_row_index": row_index,
+                "fact_class": fact_class,
+                "verdict": verdict_by_delivery[(row_index, fact_class)],
+                "fair_probe": gate_by_delivery.get((row_index, fact_class)),
+            }
+            for row_index, fact_class in sorted(verdict_by_delivery)
+        ],
         "opportunity_observations": opportunity_observations,
     }
     sidecar_path = (
@@ -1282,6 +1388,26 @@ def fair_probe_bool_by_fact_class(join: dict[str, Any]) -> dict[str, bool | None
     return out
 
 
+def fair_probe_bool_by_delivery_row(
+    join: dict[str, Any],
+) -> dict[tuple[int, str], bool | None]:
+    """Exact ``(ledger row, FACT class) -> fair_probe`` values; never class-inherited."""
+    out: dict[tuple[int, str], bool | None] = {}
+    for item in join.get("per_delivery") or ():
+        if not isinstance(item, dict):
+            continue
+        row_index = item.get("ledger_row_index")
+        fact_class = item.get("fact_class")
+        value = item.get("fair_probe")
+        if (
+            type(row_index) is int and row_index >= 0
+            and isinstance(fact_class, str) and fact_class
+            and (isinstance(value, bool) or value is None)
+        ):
+            out[(row_index, fact_class)] = value
+    return out
+
+
 __all__ = [
     "CAUSAL_FORK",
     "CAUSAL_PAIRED",
@@ -1291,5 +1417,6 @@ __all__ = [
     "compute_matched_probes",
     "extract_live_opportunity_observations",
     "fair_probe_bool_by_fact_class",
+    "fair_probe_bool_by_delivery_row",
     "join_fair_probes",
 ]

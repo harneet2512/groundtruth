@@ -2301,9 +2301,15 @@ def _build_obligations_record(
     binding a fabricated record."""
     if not isinstance(block_receipts, list) or not (issue_text or "").strip():
         return {}
+    # Only the canonical obligations block is an extraction product.  The
+    # ``expected-behavior`` issue echo deliberately shares the coarse
+    # obligations fact class for ranking, but it is not clause extraction and
+    # must never mint an obligations record or attestation.
     receipt = next(
         (r for r in block_receipts
-         if isinstance(r, dict) and r.get("fact_class") == "obligations"),
+         if isinstance(r, dict)
+         and r.get("fact_class") == "obligations"
+         and r.get("label") == "obligations"),
         None,
     )
     if receipt is None:
@@ -2321,6 +2327,9 @@ def _build_obligations_record(
     ):
         return {}
     block = brief_text[span[0]:span[1]]
+    if ("<gt-obligations>" not in block
+            and _OBLIGATION_NATIVE_HEADER not in block):
+        return {}
     digest = hashlib.sha256(block.encode("utf-8", "surrogatepass")).hexdigest()
     if digest != content_hash:
         return {}
@@ -2454,7 +2463,10 @@ def _terminal_pretask_mediator_participation(
             })
 
     obligation = next(
-        (r for r in block_receipts if r.get("fact_class") == "obligations"), None)
+        (r for r in block_receipts
+         if isinstance(r, dict)
+         and r.get("fact_class") == "obligations"
+         and r.get("label") == "obligations"), None)
     obligation_bytes = _exact_bytes(obligation)
     obligation_id = (
         str(obligation.get("candidate_id")) if obligation

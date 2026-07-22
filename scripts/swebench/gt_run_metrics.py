@@ -11,12 +11,21 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import math
 import os
 import statistics
 from collections import Counter
 from typing import Any, Iterable
+
+
+def _performance_value_sha256(value: dict[str, Any]) -> str:
+    """Seal the exact normalized values used by one run aggregate."""
+    canonical = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # Exact sections 1-9 PERF contract from MANDATORY_METRICS.md.  Values are the
@@ -43,7 +52,9 @@ _MANDATORY_METRICS: dict[str, tuple[tuple[str, str], ...]] = {
         ("edit_attempts_per_gold", "nonnegative_number"),
         ("rewrite_count", "nonnegative_int"),
         ("compile_failures_after_edit", "nonnegative_int"),
-        ("edit_revert_rate", "rate"),
+        # Unbounded per-edit COUNT (revert commands / edits); NOT a [0,1] rate — reverts can
+        # outnumber edits, so `rate` would fail-close a legitimate 5.0.
+        ("revert_commands_per_edit", "nonnegative_number"),
         ("first_edit_correctness", "bool_per_file"),
         ("patch_size", "nonnegative_int"),
         ("patch_files", "nonnegative_int"),
@@ -97,7 +108,9 @@ _MANDATORY_METRICS: dict[str, tuple[tuple[str, str], ...]] = {
         ("tokens_per_gold_edit", "nonnegative_number"),
         ("cost_per_resolved", "run_ratio"),
         ("gt_token_overhead", "rate"),
-        ("wasted_token_rate", "rate"),
+        # Honest name: a STEP ratio (non_gold_steps / non_idle_steps), never a token ratio.
+        # Genuinely bounded [0,1], so it stays `rate`.
+        ("non_gold_step_rate", "rate"),
     ),
 }
 _MANDATORY_METRIC_COUNT = sum(len(metrics) for metrics in _MANDATORY_METRICS.values())
@@ -196,6 +209,16 @@ def _section(row: dict, section: str) -> dict:
 
 _ABSENT = object()
 
+# v2 compatibility (2026-07-21): two PERF metrics were renamed for honesty. Historical
+# gt_deep_metrics.v2 / gt_performance_metrics.v1 records emit the pre-rename key; the value and
+# formula are IDENTICAL, so the reader accepts the legacy key as a fallback for the new name. This
+# is a compatibility READER — the value is still fully contract-checked; nothing is weakened. The
+# legacy key is only consulted when the current name is absent, so fresh records are unaffected.
+_LEGACY_METRIC_ALIASES: dict[tuple[str, str], str] = {
+    ("edit_quality", "revert_commands_per_edit"): "edit_revert_rate",
+    ("token_efficiency", "non_gold_step_rate"): "wasted_token_rate",
+}
+
 _RIGHT_CENSORED_METRICS: dict[tuple[str, str], tuple[str, str]] = {
     ("localization", "files_to_gold_view"): ("first_gold_view", "unique_files"),
     ("localization", "steps_to_gold_view"): ("first_gold_view", "assistant_steps"),
@@ -262,6 +285,11 @@ def _applicability_contract(
         return "invalid", None
     contract = section_contract.get(metric, _ABSENT)
     if contract is _ABSENT:
+        # v2 compatibility: historical records carry the applicability under the legacy metric key.
+        legacy = _LEGACY_METRIC_ALIASES.get((section, metric))
+        if legacy is not None:
+            contract = section_contract.get(legacy, _ABSENT)
+    if contract is _ABSENT:
         return "absent", None
     if not isinstance(contract, dict):
         return "invalid", None
@@ -305,6 +333,12 @@ def _metric_state(
     section_data = _section(row, section)
     present = metric in section_data
     raw = section_data.get(metric) if present else None
+    if not present:
+        # v2 compatibility: read the pre-rename key from historical records (same value/formula).
+        legacy = _LEGACY_METRIC_ALIASES.get((section, metric))
+        if legacy is not None and legacy in section_data:
+            present = True
+            raw = section_data.get(legacy)
     contract_state, contract = _applicability_contract(row, section, metric)
     if contract_state == "invalid":
         return "failed", None, None
@@ -405,7 +439,9 @@ def _deep_metric_record_issues(row: object) -> list[str]:
     if not isinstance(row, dict):
         return ["record:not_object"]
     issues: list[str] = []
-    if row.get("schema") != "gt_deep_metrics.v2":
+    # v3 renamed the injected-token key into honest chars/token-estimate fields; v2 artifacts
+    # remain valid (compatibility reader) — accept both, reject anything else.
+    if row.get("schema") not in {"gt_deep_metrics.v2", "gt_deep_metrics.v3"}:
         issues.append("record:deep_schema")
     if row.get("precision_decimals") != 8:
         issues.append("record:deep_precision")
@@ -441,11 +477,13 @@ def _distribution(
     applicability: dict[str, dict[str, Any]] = {}
     event_observed: list[str] = []
     right_censored: list[str] = []
+    value_rows: list[dict[str, Any]] = []
     for row in records:
         task = _task_name(row)
         state, value, contract = _metric_state(
             row, section, metric, value_type
         )
+        value_rows.append({"task_id": task, "state": state, "value": value})
         if contract is not None:
             applicability[task] = contract
         if state == "measured":
@@ -487,6 +525,13 @@ def _distribution(
         "event_observed_tasks": sorted(event_observed),
         "right_censored_tasks": sorted(right_censored),
         "applicability": dict(sorted(applicability.items())),
+        "value_sha256": _performance_value_sha256({
+            "kind": "task_distribution",
+            "section": section,
+            "metric": metric,
+            "value_type": value_type,
+            "tasks": sorted(value_rows, key=lambda item: item["task_id"]),
+        }),
     }
     if right_censored:
         result.update({
@@ -516,8 +561,15 @@ def _per_tag_distribution(records: list[dict], section: str, metric: str) -> dic
     outer_not_applicable: list[str] = []
     applicability: dict[str, dict[str, Any]] = {}
     all_tags: set[str] = set()
+    value_rows: list[dict[str, Any]] = []
     for row in records:
         task = _task_name(row)
+        state, normalized_value, _contract = _metric_state(
+            row, section, metric, "per_tag_rate_dict"
+        )
+        value_rows.append({
+            "task_id": task, "state": state, "value": normalized_value,
+        })
         raw = _section(row, section).get(metric)
         task_values: dict[str, tuple[int, int, float]] = {}
         present = metric in _section(row, section)
@@ -619,11 +671,19 @@ def _per_tag_distribution(records: list[dict], section: str, metric: str) -> dic
         "right_censored_tasks": [],
         "applicability": dict(sorted(applicability.items())),
         "tags": tags,
+        "value_sha256": _performance_value_sha256({
+            "kind": "task_distribution",
+            "section": section,
+            "metric": metric,
+            "value_type": "per_tag_rate_dict",
+            "tasks": sorted(value_rows, key=lambda item: item["task_id"]),
+        }),
     }
 
 
 def _mandatory_performance(
     records: list[dict],
+    total_cost: float | None,
     cost_per_resolved: float | None,
     missing_cost: list[str],
     resolved_count: int,
@@ -665,6 +725,21 @@ def _mandatory_performance(
                     "missing_tasks": sorted(missing_cost),
                     "applicability": applicability,
                     "semantics": "run total_cost_usd / resolved task count; not a mean of task ratios",
+                    "value_sha256": _performance_value_sha256({
+                        "kind": "run_ratio",
+                        "section": section,
+                        "metric": metric,
+                        "value_type": value_type,
+                        "task_count": len(records),
+                        "resolved_count": resolved_count,
+                        "total_cost_usd": total_cost,
+                        "status": (
+                            "UNMEASURED" if not records or missing_cost
+                            else "MEASURED" if resolved_count
+                            else "NOT_APPLICABLE"
+                        ),
+                        "value": cost_per_resolved,
+                    }),
                 }
             else:
                 aggregate = _distribution(records, section, metric, value_type)
@@ -732,7 +807,7 @@ def aggregate_run_metrics(
     )
 
     mandatory = _mandatory_performance(
-        records, cost_per_resolved, missing_cost, len(resolved_rows)
+        records, total_cost, cost_per_resolved, missing_cost, len(resolved_rows)
     )
     metrics_with_missing = sorted(
         f"{section}.{metric}"
@@ -741,6 +816,14 @@ def aggregate_run_metrics(
         if aggregate["missing_tasks"]
     )
     collection_failures: list[str] = []
+    # FAIL-CLOSED POPULATION (2026-07-21, CODEX_129_BUGLIST PERF blocker): missing-task
+    # detection only runs when an expected population is supplied. Without it, completeness
+    # is UNVERIFIABLE — an arbitrary subset must never be marked collection-complete. The
+    # complete single-run population is REQUIRED: an undeclared population is itself a
+    # collection failure, so ``mandatory_performance_collection_complete`` is False until the
+    # locked task set is declared AND fully, uniquely covered.
+    if expected_list is None:
+        collection_failures.append("expected_population_unknown")
     if missing_tasks:
         collection_failures.append("missing_expected_tasks")
     if duplicate_tasks:

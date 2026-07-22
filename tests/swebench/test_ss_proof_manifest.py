@@ -119,11 +119,12 @@ def test_cochange_fact_row_is_internal_support_not_fabricated_delivery() -> None
     )
     assert row["chronological_boundary_authority"] is None
     assert row["receipt_rule"]["independent_receipt"] is False
-    assert row["BLOCKED_BY"] == [
-        "COCHANGE_INTERNAL_TRUTH_WITNESS_ABSENT",
-        "COCHANGE_INTERNAL_CAUSAL_PROBE_ABSENT",
-    ]
-    assert "cochange_evidence" in row["truth_authority"]["missing_writer"]
+    # The traceable influence-truth witness is now enforced (dedicated
+    # cochange_influence_witness); only the cochange-specific causal probe stays blocked.
+    assert row["BLOCKED_BY"] == ["COCHANGE_INTERNAL_CAUSAL_PROBE_ABSENT"]
+    assert "missing_writer" not in row["truth_authority"]
+    assert "cochange_evidence" in row["truth_authority"]["traceable_influence_witness"]
+    assert "cochange_influence_witness" in row["truth_authority"]["traceable_influence_witness"]
 
 
 def test_cap_terminal_contracts_distinguish_byte_owners_mediators_and_eligibility() -> None:
