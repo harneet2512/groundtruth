@@ -869,6 +869,20 @@ PYEOF
     # (deepswe_full.yml:999) — oracle two-lane route, structural-risk axis defaults,
     # /gt_out telemetry sinks. Single source, zero hand-copied drift.
     export GT_C_OUT=/gt_out
+    # Receipt-gated Profile-2 members are substrate properties, not import checks.
+    # Build the receipt from this task's fresh graph and exact staged index binary
+    # before the profile resolver runs. Without this transfer the VM path falsely
+    # reports CONTENT_LEG/L6_FRESH/SEM_BODY unavailable after proof produced them.
+    if [ "${GT_BASELINE:-0}" != "1" ]; then
+      export GT_CAPABILITY_RECEIPT="$(
+        GT_INDEX_BIN="$HOST_GT_INJECT/gt-index" \
+        GT_HOST_GRAPH_DB="$art_dir/graph.db" \
+        PYTHONPATH="$HOST_GT_INJECT" \
+        python3 -m groundtruth.runtime.capability_receipt --emit-json \
+          2>"$task_dir/capability_receipt.err" || echo "{}"
+      )"
+      echo "[GT] capability receipt (host): ${GT_CAPABILITY_RECEIPT}" | tee -a "$trial_log"
+    fi
     # shellcheck source=../../artifact_deepswe/gt_integration/gt_ae_block.sh
     source "$REPO_ROOT/artifact_deepswe/gt_integration/gt_ae_block.sh"
     # Host-side fan-out receipt, independent of the agent-process profile and
@@ -1175,7 +1189,15 @@ export OUT_DIR BENCH_DIR REPO_ROOT GHCR_OWNER GT_SUBSTRATE_DIGEST GT_GIT_COMMIT 
        GT_DEEPSWE_BENCH_SHA GT_METRICS_DIR STOP_AT_COST
 
 # ── N-parallel sweep (xargs -P; one line per task, classification never aborts) ──
-xargs -a "$TASKS_TSV" -d '\n' -n 1 -P "$PARALLEL" bash -c 'run_task "$0"'
+if [ "$PARALLEL" -eq 1 ]; then
+  # Avoid Bash exported-function/heredoc serialization on the canonical one-task
+  # proof path (it corrupts the imported function around a later `fi`).
+  while IFS= read -r task_line || [ -n "$task_line" ]; do
+    [ -n "$task_line" ] && run_task "$task_line"
+  done < "$TASKS_TSV"
+else
+  xargs -a "$TASKS_TSV" -d '\n' -n 1 -P "$PARALLEL" bash -c 'run_task "$0"'
+fi
 
 # ── aggregate: class tally -> AGENT_SWEEP_REPORT.md; exit mirrors harness health ──
 OUT_DIR="$OUT_DIR" TASKS_TSV="$TASKS_TSV" SWEEP_RUN_ID="$SWEEP_RUN_ID" \
