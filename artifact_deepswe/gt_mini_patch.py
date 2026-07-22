@@ -1131,17 +1131,65 @@ _VIEW_RE = re.compile(
 
 _ROOT_FALLBACK_ACTIVE = False  # A9: True when gt_root.txt is missing/empty ("/" sentinel)
 _ROOT_MISS_REPORTED = False
+_ROOT_RUNTIME_CACHE = None  # live repo root detected in-container when gt_root.txt is absent
+
+
+def _detect_repo_root_runtime() -> str:
+    """RUNTIME repo-root detection — the mount-mode-safe fallback for a missing gt_root.txt.
+
+    In mount-mode /opt/gt is a READ-ONLY bind-mount that SHADOWS any build-time
+    /opt/gt/gt_root.txt (and _inject_steps_mount_mode omits the b64 path's _ROOT_DETECT),
+    so gt_root.txt is absent in-container -> _root() would return the "/" sentinel and every
+    per-turn producer that resolves paths against the root (L6 reindex, _code_at snippets,
+    snippet attestation, caller-contracts, witnesses) silently degrades. Detect the live
+    agent repo the same way _ROOT_DETECT does — the same candidate dirs — at runtime, when
+    the repo actually exists in the container. Stdlib-only, no subprocess."""
+    for _d in ("/testbed", "/home/user", "/workspace", "/app", "/repo"):
+        try:
+            if os.path.isdir(os.path.join(_d, ".git")):
+                return _d
+        except Exception:  # noqa: BLE001
+            pass
+    # cwd + ancestors (covers repos checked out elsewhere)
+    try:
+        _cur = os.getcwd()
+        while _cur and _cur != "/":
+            if os.path.isdir(os.path.join(_cur, ".git")):
+                return _cur
+            _cur = os.path.dirname(_cur)
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
 
 
 def _root() -> str:
-    global _ROOT_FALLBACK_ACTIVE, _ROOT_MISS_REPORTED
+    global _ROOT_FALLBACK_ACTIVE, _ROOT_MISS_REPORTED, _ROOT_RUNTIME_CACHE
     try:
         _r = open(_ROOT_FILE).read().strip()
-        if _r:
+        if _r and _r != "/":
             _ROOT_FALLBACK_ACTIVE = False
             return _r
     except Exception:  # noqa: BLE001
         pass
+    # gt_root.txt absent/empty (mount-mode: the ro /opt/gt mount shadows it). RUNTIME
+    # fallback: detect the live repo root in-container + cache it, so L6 + the per-turn
+    # producers resolve correctly instead of degrading on the "/" sentinel.
+    if _ROOT_RUNTIME_CACHE:
+        _ROOT_FALLBACK_ACTIVE = False
+        return _ROOT_RUNTIME_CACHE
+    _detected = _detect_repo_root_runtime()
+    if _detected:
+        _ROOT_RUNTIME_CACHE = _detected
+        _ROOT_FALLBACK_ACTIVE = False
+        # best-effort persist to a WRITABLE path (never /opt/gt — it is the ro mount) so a
+        # sibling process reuses it without re-scanning.
+        try:
+            _wf = _ROOT_FILE if os.access(os.path.dirname(_ROOT_FILE) or "/", os.W_OK) else "/tmp/gt_root.txt"
+            with open(_wf, "w") as _fh:
+                _fh.write(_detected)
+        except Exception:  # noqa: BLE001
+            pass
+        return _detected
     # A9 (2026-07-05): no gt_root.txt / empty -> the repo root is UNKNOWN, so "/" is a
     # SENTINEL not a real root. _code_at() then reads from the FS root => empty snippets
     # => snippet attestation is STRUCTURALLY impossible. Flag it (so _snippet_attests
