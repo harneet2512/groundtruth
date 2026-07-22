@@ -1313,6 +1313,16 @@ def _subprocess_write_targets(root: str, *, force_paths: "set[str] | None" = Non
     if before.complete and now.complete:
         changed.extend(ap for ap in before.state if ap not in now.state)
     _mtime_baseline = now
+    # L6-DIAG (observability only; gated by GT_L6_DIAG=1, OFF for normal/proof runs so it can
+    # never touch parity): record whether the change-detector saw ANY edited source this
+    # observation, so a dead L6 is traceable to detection-vs-trigger instead of guessing.
+    if os.environ.get("GT_L6_DIAG") == "1":
+        try:
+            _ledger_line_direct({"layer": "l6_diag", "event_type": "changed_targets",
+                "file_path": root, "outcome": str(len(changed)), "reason": "n_changed",
+                "chars_delivered": 0, "iteration": globals().get("_action_count", 0)})
+        except Exception:  # noqa: BLE001
+            pass
     # DETERMINISM (Fable R7): `now` is built by os.walk (FS-order), so `changed` — and the
     # consumer's changed[0] pick — was OS-order-dependent. Sort for a stable file pick.
     return sorted(set(changed))
@@ -6655,6 +6665,15 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
     would fail to match, strictly worse for the proof.) L6 stays ENABLED only on the
     non-substrate (preindex/trial) path where the in-container /tmp/graph.db is ours."""
     global _l6_no_binary_warned, _l6_reindex_failed_warned, _l6_probe_emitted
+    if os.environ.get("GT_L6_DIAG") == "1":
+        try:
+            _ledger_line_direct({"layer": "l6_diag", "event_type": "invalidate_called",
+                "file_path": rel, "outcome": root or "(no-root)",
+                "reason": ("substrate" if _substrate_active() else "trial")
+                + "/l6fresh=" + (os.environ.get("GT_L6_FRESH") or ""),
+                "chars_delivered": 0, "iteration": globals().get("_action_count", 0)})
+        except Exception:  # noqa: BLE001
+            pass
     # GT_SS_PROVENANCE (feature 5): a scratch / generated-artifact / outside-root write
     # must NEVER enter the graph — reindexing tmp/patch_fix.py or htmlcov/*.js pollutes
     # the context graph with agent scratch. So the graph-MUTATING `gt-index -file` reindex
