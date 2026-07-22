@@ -17176,11 +17176,28 @@ def _install_default_agent_batch_hook() -> bool:
                 "not attach before agent execution"
             )
 
+    marker_present = hasattr(DefaultAgent, "_gt_batch_constructor_patched")
+    marker_before = getattr(
+        DefaultAgent, "_gt_batch_constructor_patched", None)
     try:
         DefaultAgent.__init__ = _init_with_gt_batch
         DefaultAgent._gt_batch_constructor_patched = True
         return True
     except Exception:  # noqa: BLE001
+        # Assignment of __init__ and its ownership marker is one transaction. A
+        # partially patched class retains a closure over this module even when
+        # site.py later removes the failed import from sys.modules.
+        try:
+            DefaultAgent.__init__ = original_init
+        except Exception:  # noqa: BLE001 -- caller still fails closed
+            pass
+        try:
+            if marker_present:
+                DefaultAgent._gt_batch_constructor_patched = marker_before
+            elif hasattr(DefaultAgent, "_gt_batch_constructor_patched"):
+                delattr(DefaultAgent, "_gt_batch_constructor_patched")
+        except Exception:  # noqa: BLE001 -- caller still fails closed
+            pass
         return False
 
 
@@ -20623,9 +20640,20 @@ def _install() -> None:
     # (so the receipt records the resolved GT_RL_PROFILE + member_source). Self-guarded (never
     # raises). Auto-applied only outside a shared test interpreter (see _should_auto_invert);
     # the W8 suite drives _resolve_production_profile explicitly + via a fresh subprocess.
-    if _should_auto_invert():
-        _resolve_production_profile()
     import importlib
+
+    auto_invert = _should_auto_invert()
+    batch_required = _observation_batch_required()
+    if auto_invert and not batch_required:
+        # Ask the pure resolver what the production default WOULD be without
+        # mutating os.environ. Unset profile resolves to Profile 2; an explicit
+        # legacy/off token remains non-batched.
+        try:
+            from groundtruth.runtime import rl_profile as _install_rlp
+            batch_required = (
+                _install_rlp.resolve_default_token(os.environ) == "2")
+        except Exception:  # noqa: BLE001 -- absent runtime preserves legacy posture
+            pass
 
     # Attach the policy-observation owner before mutating any environment class.
     # A .pth import can run while mini-swe-agent is still initializing; site.py
@@ -20636,11 +20664,17 @@ def _install() -> None:
     # the backup import owns the agent/formatter.  Fail before the first mutation
     # instead, so the later backup import installs both sides from one module.
     _batch_constructor_ready = _install_default_agent_batch_hook()
-    if _observation_batch_required() and not _batch_constructor_ready:
+    if batch_required and not _batch_constructor_ready:
         raise RuntimeError(
             "GT_OBSERVATION_BATCH_CONSTRUCTOR_UNAVAILABLE: required DefaultAgent "
             "attachment point is unavailable"
         )
+
+    # Profile resolution mutates process-global os.environ. Do it only after the
+    # observation owner is proven, otherwise a .pth failure leaves resolved
+    # defaults behind and the backup import falsely records them as inherited.
+    if auto_invert:
+        _resolve_production_profile()
 
     for modname, clsname in _ENV_CLASSES:
         try:
