@@ -35,9 +35,11 @@ PER-LANGUAGE HONESTY (checked vs unavailable, and WHY):
   .js/.mjs/.cjs  ``node --check`` — Node's own parse-only flag.
   .go            ``gofmt -e`` — parses to AST, reports parse errors, exit != 0.
   .rb            ``ruby -c`` — syntax-only check ("Syntax OK" / exit != 0).
-  .ts/.tsx       UNAVAILABLE — ``node --check`` cannot parse TS; ``tsc --noEmit``
-                 conflates SYNTAX errors with TYPE/module-resolution errors on a
-                 single file, so it cannot give POSITIVE syntax evidence. Quiet.
+  .ts/.tsx       ``esbuild <file> --write=false`` when ``esbuild`` is on PATH —
+                 transform-only (no ``--bundle``), so missing imports are NOT type-
+                 checked and parse errors are positive syntax evidence. Quiet when
+                 the binary is absent. ``tsc --noEmit`` remains forbidden (conflates
+                 SYNTAX with TYPE/module-resolution).
   .jsx           UNAVAILABLE — JSX is not valid JS; ``node --check`` false-positives.
   .rs            UNAVAILABLE — no fast parse-only rustc invocation for a non-lib
                  file; ``--emit=metadata`` needs a crate/type context. Quiet.
@@ -208,11 +210,15 @@ def _build_check_command(ext: str, path: str) -> list[str] | None:
         ]
     if ext in (".js", ".mjs", ".cjs"):
         return ["node", "--check", path]
+    if ext in (".ts", ".tsx"):
+        # Transform-only (no --bundle): parse/syntax errors without import resolution.
+        # Absent esbuild -> caller returns unavailable (correct-or-quiet).
+        return ["esbuild", path, "--write=false"]
     if ext == ".go":
         return ["gofmt", "-e", path]
     if ext == ".rb":
         return ["ruby", "-c", path]
-    # .ts/.tsx/.jsx/.rs/.java/unknown -> unavailable (never guess).
+    # .jsx/.rs/.java/unknown -> unavailable (never guess).
     return None
 
 

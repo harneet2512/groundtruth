@@ -398,6 +398,17 @@ def _source_features(proof: Mapping[str, Any], metrics: Mapping[str, Any]) -> tu
         and _valid_cochange_evidence(proof, path)
     ):
         found.append("cochange_history")
+    # Withheld cochange arm (rate>0 ablation): still admit the ACQ row so the
+    # cochange_prior influence terminal can see the HOLDOUT assignment. No
+    # cochange_influence_witness (evidence omitted by design).
+    ablation = proof.get("cochange_ablation")
+    if (
+        "cochange_history" not in found
+        and isinstance(ablation, Mapping)
+        and ablation.get("withheld") is True
+        and ablation.get("assignment") == "HOLDOUT"
+    ):
+        found.append("cochange_history")
     found.extend(_extended_source_features(proof))
     return tuple(found)
 
@@ -417,6 +428,7 @@ def _validated_blocks(brief: str, raw: object) -> dict[str, dict[str, Any]]:
         candidate_id = receipt.get("candidate_id")
         span = receipt.get("char_span")
         digest = receipt.get("content_hash")
+        delivery_plane = receipt.get("delivery_plane")
         if not isinstance(block_id, str) or not block_id or block_id in blocks:
             raise ValueError("acq provenance: block ids must be non-empty and unique")
         if not isinstance(fact_class, str) or not isinstance(label, str):
@@ -431,11 +443,26 @@ def _validated_blocks(brief: str, raw: object) -> dict[str, dict[str, Any]]:
         ):
             raise ValueError(f"acq provenance: malformed span for {block_id}")
         start, end = span
-        if start < 0 or end <= start or end > len(brief):
-            raise ValueError(f"acq provenance: out-of-range span for {block_id}")
-        rendered = brief[start:end]
-        if not isinstance(digest, str) or digest != _sha256(rendered):
-            raise ValueError(f"acq provenance: block content hash mismatch for {block_id}")
+        # Reactive ranked-localization seals are detached from the step-0 brief
+        # (GT_LOC_RESLOT). They carry explicit rendered_text + content_hash over
+        # the exact committed delivery payload; do not require brief membership.
+        if delivery_plane == "reactive":
+            rendered = receipt.get("rendered_text")
+            if not isinstance(rendered, str) or not rendered:
+                raise ValueError(
+                    f"acq provenance: reactive seal missing rendered_text for {block_id}")
+            if start != 0 or end != len(rendered):
+                raise ValueError(
+                    f"acq provenance: reactive seal span must cover rendered_text for {block_id}")
+            if not isinstance(digest, str) or digest != _sha256(rendered):
+                raise ValueError(
+                    f"acq provenance: reactive block content hash mismatch for {block_id}")
+        else:
+            if start < 0 or end <= start or end > len(brief):
+                raise ValueError(f"acq provenance: out-of-range span for {block_id}")
+            rendered = brief[start:end]
+            if not isinstance(digest, str) or digest != _sha256(rendered):
+                raise ValueError(f"acq provenance: block content hash mismatch for {block_id}")
         blocks[block_id] = {
             "block_id": block_id,
             "rendered_text": rendered,
@@ -445,6 +472,7 @@ def _validated_blocks(brief: str, raw: object) -> dict[str, dict[str, Any]]:
             "fact_class": fact_class,
             "label": label,
             "candidate_id": candidate_id,
+            "delivery_plane": delivery_plane if isinstance(delivery_plane, str) else "brief",
         }
     return blocks
 
@@ -726,10 +754,14 @@ def collect_acq_provenance(
             matches = [
                 candidate_block for candidate_block in blocks.values()
                 if candidate_block["fact_class"] == "localization"
-                and candidate_block["label"] == "localization-header"
                 and isinstance(proof_candidate_id, str)
                 and candidate_block.get("candidate_id") == proof_candidate_id
                 and _path_in_block(path, str(candidate_block["rendered_text"]))
+                and candidate_block["label"] in {
+                    "localization-header",
+                    "reactive-localization",
+                    "acq-localization",
+                }
             ]
             if len(matches) != 1:
                 continue
@@ -802,6 +834,18 @@ def collect_acq_provenance(
                     True
                     if feature == "cochange_history"
                     and _valid_cochange_evidence(proof, path)
+                    else None
+                ),
+                # Cochange-specific causal instrument (GT_COCHANGE_HOLDOUT_RATE>0):
+                # a recorded DELIVER/HOLDOUT assignment makes the fair probe
+                # identifiable; rate-zero / absent assignment stays None.
+                "cochange_causal_fair_probe": (
+                    True
+                    if feature == "cochange_history"
+                    and isinstance(proof.get("cochange_ablation"), Mapping)
+                    and proof["cochange_ablation"].get("assignment") in {
+                        "DELIVER", "HOLDOUT"}
+                    and float(proof["cochange_ablation"].get("rate") or 0) > 0.0
                     else None
                 ),
                 "timing_inherited_from_fact_delivery": None,

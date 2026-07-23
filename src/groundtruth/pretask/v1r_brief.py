@@ -3000,6 +3000,11 @@ def _primary_cochange_support(
     primary-path witness and stamp ``components["cochange"]`` in place so the
     ACQ SOURCE-5 join stops being blind to it. When neither applies, the input
     evidence (``None`` for an ordinary candidate) is returned unchanged.
+
+    Preregistered cochange-holdout (``GT_COCHANGE_HOLDOUT_RATE``): when the
+    deterministic draw is HOLDOUT, omit the witness and leave ``components``
+    unstamped so the influence contribution is withheld while localization can
+    still deliver — the cochange-specific causal ablation instrument.
     """
     if isinstance(bridge_evidence, dict):
         return bridge_evidence, None
@@ -3012,9 +3017,35 @@ def _primary_cochange_support(
     })
     if not kept or float(components.get("cochange", 0.0) or 0.0) > 0.0:
         return bridge_evidence, None
+    try:
+        from groundtruth.runtime.cochange_holdout import (
+            HOLDOUT, assign, configured_rate, task_seed,
+        )
+        rate = configured_rate()
+        assignment = assign(
+            task_id=task_seed(),
+            candidate_id=_localization_candidate_id(candidate_path),
+            rate=rate,
+        )
+    except Exception:
+        assignment = "DELIVER"
+        rate = 0.0
+    if assignment == HOLDOUT:
+        # Withhold influence contribution only; localization proof still emits.
+        # Return a marker (not a valid cochange_evidence) so the caller can stamp
+        # ``cochange_ablation`` without poisoning the influence witness validator.
+        return {
+            "kind": "cochange_ablation",
+            "ablation_assignment": HOLDOUT,
+            "ablation_rate": rate,
+            "withheld": True,
+        }, None
     evidence = _primary_cochange_evidence(
         candidate_path=candidate_path, co_change_paths=kept,
     )
+    if rate > 0.0:
+        evidence["ablation_assignment"] = assignment
+        evidence["ablation_rate"] = rate
     components["cochange"] = float(evidence["count"])
     return evidence, list(evidence["co_change_paths"])  # type: ignore[arg-type]
 
@@ -6757,40 +6788,46 @@ def generate_v1r_brief(
             _before_minimal, brief_text)
 
     # --- L1 signal-provenance counts (observability; no ranking effect) ---
-    # Count over the DELIVERED candidate set (final-byte joined; identical to `.files`).
-    # Align each delivered entry to its top_records dict (carrying run_v74
-    # `components`) by path so semantic/structural/fts5 contributions are read
-    # from the ACTUAL signals computed during localization, not re-derived.
+    # Delivery claim (``.files`` / ``rendered_candidate_count``) stays joined to
+    # FINAL model-visible bytes. Acquisition proof under GT_LOC_RESLOT must NOT
+    # collapse when step-0 strips localization — reactive ranked delivery still
+    # surfaces the ranked population. Keep fail-closed: proofs name real ranked
+    # candidates only (top-N parity with gateway._LOC_RESLOT_TOPN).
     _delivered = _model_visible_localization_entries(brief_text, _loc_files)
+    _ACQ_TOPN = 5
+    _acq_entries = (
+        _delivered if _delivered else list(_loc_files[:_ACQ_TOPN])
+    )
     _rec_by_path: dict[str, dict] = {}
     for _r in top_records:
         _rp = str(_r.get("path", ""))
         if _rp and _rp not in _rec_by_path:
             _rec_by_path[_rp] = _r
-    _aligned_records = [_rec_by_path.get(e.path, {}) for e in _delivered]
+    _aligned_records = [_rec_by_path.get(e.path, {}) for e in _acq_entries]
     if os.environ.get("GT_DEBUG_L1") == "1":
         import sys as _sys_dbg
         _comp = [(str(_r.get("path", ""))[-44:], {k: round(float(v), 3) for k, v in (_r.get("components") or {}).items()})
                  for _r in top_records[:5]]
         _join = [(getattr(e, "path", "")[-44:], "MATCH" if getattr(e, "path", "") in _rec_by_path else "MISS")
-                 for e in _delivered[:8]]
+                 for e in _acq_entries[:8]]
         print(f"[GT_DEBUG_L1] ranked_full_components={_comp}", file=_sys_dbg.stderr, flush=True)
         print(f"[GT_DEBUG_L1] delivered_vs_record_join={_join}", file=_sys_dbg.stderr, flush=True)
-        print(f"[GT_DEBUG_L1] n_top_records={len(top_records)} n_delivered={len(_delivered)} embedder={os.environ.get('GT_FORCE_ONNX_EMBEDDER','?')}", file=_sys_dbg.stderr, flush=True)
+        print(f"[GT_DEBUG_L1] n_top_records={len(top_records)} n_delivered={len(_delivered)} n_acq={len(_acq_entries)} embedder={os.environ.get('GT_FORCE_ONNX_EMBEDDER','?')}", file=_sys_dbg.stderr, flush=True)
     try:
         _ge, _sem_c, _struct_c, _fts5_c = _l1_signal_counts(
-            graph_db, _delivered, _aligned_records
+            graph_db, _acq_entries, _aligned_records
         )
     except Exception:
         _ge = _sem_c = _struct_c = _fts5_c = 0
     _conf_tier = _tier_from_loc_header(_loc_header)
 
-    # --- Embedder-CONSUMPTION metrics over the RENDERED candidates ---
+    # --- Embedder-CONSUMPTION metrics over the ACQUISITION candidate set ---
     # sem_components reads components['sem'] from the SAME per-entry top_records
     # alignment that _l1_signal_counts uses, so semantic_signal_count ==
     # sum(1 for s in sem_components if s > 0) by construction (auditable). The
     # effective W_SEM and the relative sem cap come from run_v74 (the single point
-    # where every zeroing branch converges). rendered_candidate_count == len(files).
+    # where every zeroing branch converges). rendered_candidate_count == len(files)
+    # remains a DELIVERY claim over model-visible bytes.
     _sem_components = [
         float((_r.get("components", {}) if isinstance(_r, dict) else {}).get("sem", 0.0) or 0.0)
         for _r in _aligned_records
@@ -6806,7 +6843,7 @@ def generate_v1r_brief(
         )
     }
     _localization_proof: list[dict[str, object]] = []
-    for _i, (_e, _r) in enumerate(zip(_delivered, _aligned_records), start=1):
+    for _i, (_e, _r) in enumerate(zip(_acq_entries, _aligned_records), start=1):
         _comps_raw = (_r.get("components", {}) if isinstance(_r, dict) else {}) or {}
         _components: dict[str, float] = {}
         for _ck, _cv in _comps_raw.items():
@@ -6833,7 +6870,28 @@ def generate_v1r_brief(
             components=_components,
             bridge_evidence=_bridge_cochange_ev,
         )
-        _localization_proof.append({
+        _ablation_meta = None
+        if (
+            isinstance(_cochange_ev, dict)
+            and _cochange_ev.get("kind") == "cochange_ablation"
+            and _cochange_ev.get("withheld") is True
+        ):
+            _ablation_meta = {
+                "assignment": _cochange_ev.get("ablation_assignment"),
+                "rate": _cochange_ev.get("ablation_rate"),
+                "withheld": True,
+            }
+            _cochange_ev = None
+        elif (
+            isinstance(_cochange_ev, dict)
+            and _cochange_ev.get("ablation_assignment")
+        ):
+            _ablation_meta = {
+                "assignment": _cochange_ev.get("ablation_assignment"),
+                "rate": _cochange_ev.get("ablation_rate"),
+                "withheld": False,
+            }
+        _proof_row: dict[str, object] = {
             "candidate_id": _localization_candidate_id(
                 _proof_path),
             "rank": _i,
@@ -6867,7 +6925,10 @@ def generate_v1r_brief(
                     ),
                 ),
             ),
-        })
+        }
+        if _ablation_meta is not None:
+            _proof_row["cochange_ablation"] = _ablation_meta
+        _localization_proof.append(_proof_row)
         # Data-lineage pointer for the primary-path co-change witness only. Bridge
         # candidates (``_cc_for_proof is None``) keep their exact prior proof shape.
         if _cc_for_proof is not None:

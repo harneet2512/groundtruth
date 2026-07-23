@@ -3827,6 +3827,11 @@ _GREP_HEAD_RE = re.compile(r"(?:^|[|&;]\s*)(?:grep|egrep|fgrep|rg)\b")
 # A bare identifier, >=3 chars so trivial 1-2 char patterns (huge match sets)
 # never fire. No regex metachars, path separators, or dots survive this.
 _BARE_SYMBOL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{2,}$")
+# Hyphen/underscore compounds from issue entities (``action-pinning``) — not regex,
+# not paths. Admit as failed-search probes so change_surface can fire.
+_COMPOUND_IDENT_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9]*([-_][A-Za-z0-9]+)+$"
+)
 # LEAK GUARD (Fable/LIPI F1): a def-site render is the ONE post_search surface
 # not behind the path chokepoint, and the graph's is_test flag misses
 # tests.py/conftest.py/app-tests.py (Django) + JS/TS spec conventions. This
@@ -4163,19 +4168,22 @@ def _search_operand_raw(cmd: str) -> str | None:
 
 def _search_pattern(cmd: str) -> str | None:
     """Extract the search operand from a grep/rg command, ABSTAINING unless it is
-    a single bare symbol. None for a path/glob/regex/multi-token pattern
-    (correct-or-quiet: only answer what is unambiguously a symbol lookup)."""
+    a single bare symbol or hyphen/underscore compound identifier. None for a
+    path/glob/regex/multi-token pattern (correct-or-quiet)."""
     pat = _search_operand_raw(cmd)
     if pat is None:
         return None
-    return pat if _BARE_SYMBOL_RE.match(pat) else None
+    if _BARE_SYMBOL_RE.match(pat) or _COMPOUND_IDENT_RE.match(pat):
+        return pat
+    return None
 
 
 def _search_probe_tokens(cmd: str) -> list[str]:
-    """Bare-symbol tokens in the operand, for LOSSLESS ledger accounting of
-    quoted multi-word (`"foo bar"` -> foo, bar) and simple `foo|bar` alternations
-    (each branch a probe). Never used to RENDER a fact — only so a later single
-    probe of one of these tokens can see a prior failure (HONEST-NEGATIVE)."""
+    """Bare-symbol / compound-ident tokens in the operand, for LOSSLESS ledger
+    accounting of quoted multi-word (`"foo bar"` -> foo, bar) and simple
+    `foo|bar` alternations (each branch a probe). Never used to RENDER a fact —
+    only so a later single probe of one of these tokens can see a prior failure
+    (HONEST-NEGATIVE)."""
     op = _search_operand_raw(cmd)
     if op is None:
         return []
@@ -4187,7 +4195,8 @@ def _search_probe_tokens(cmd: str) -> list[str]:
         # backslashes from each branch end; an internal-backslash token still fails the
         # match (no false token minted).
         p = part.strip().strip("\\")
-        if p and _BARE_SYMBOL_RE.match(p) and p not in out:
+        if (p and (_BARE_SYMBOL_RE.match(p) or _COMPOUND_IDENT_RE.match(p))
+                and p not in out):
             out.append(p)
     return out
 
@@ -4338,11 +4347,27 @@ _HIT_PATH_EXT_RE = re.compile(r"\.\w+$")
 
 
 def _grep_is_final_stage(head: str) -> bool:
-    """True iff grep/rg is the LAST stage of the pipeline (or standalone). A
-    `grep X | head` / `grep X | wc -l` transforms grep's output, so its emptiness
-    is NOT grep's zero-hit signal — we refuse to claim emptiness there."""
-    seg = _GREP_PIPE_SPLIT_RE.split(head)[-1]
-    return bool(_GREP_STAGE_HEAD_RE.match(seg))
+    """True iff grep/rg is the LAST stage of the pipeline (or standalone), OR the
+    only post-grep stages are output truncators (``head``/``tail``/``less``/``more``).
+
+    A ``grep X | wc -l`` / ``grep X | tee`` transforms emptiness and hit-path
+    signals — refuse. Truncators preserve empty-vs-nonempty and the ``file:…``
+    prefixes on surviving lines, so the lattice can still answer (true-myth: most
+    mini-swe greps are ``grep … | head`` / ``| tail``)."""
+    segs = _GREP_PIPE_SPLIT_RE.split(head or "")
+    if not segs:
+        return False
+    if _GREP_STAGE_HEAD_RE.match(segs[-1]):
+        return True
+    grep_idxs = [i for i, seg in enumerate(segs) if _GREP_STAGE_HEAD_RE.match(seg)]
+    if not grep_idxs:
+        return False
+    # Only the first-stage grep + truncate-only suffix is answerable here; a mid-
+    # pipeline grep (``sed | grep`` / ``vitest | grep``) is handled by isolation's
+    # first-stage refuse (or the direct-def non-isolated fallback).
+    if grep_idxs[0] != 0 or len(grep_idxs) != 1:
+        return False
+    return all(_TRUNCATE_STAGE_RE.match(seg) for seg in segs[1:])
 
 
 # shell operators that concatenate INDEPENDENT commands. A single `|` pipe is NOT
@@ -4350,21 +4375,24 @@ def _grep_is_final_stage(head: str) -> bool:
 # purpose: it would false-match the `&` of a `2>&1` redirect and over-refuse a legit
 # `grep X 2>&1` (a pipe-fed grep is already caught by the first-stage check).
 _COMPOUND_SEP_RE = re.compile(r"&&|\|\||;")
+# Truncate-only pipe stages: preserve emptiness + hit-path prefixes (see
+# ``_grep_is_final_stage``). Deliberately excludes ``wc``/``tee``/``sort``/…
+_TRUNCATE_STAGE_RE = re.compile(r"^\s*(?:head|tail|less|more)\b")
 
 
 def _search_command_isolated(cmd: str) -> bool:
     """True iff the command is a SINGLE grep/rg repo search whose output is the
-    WHOLE observation — grep/rg is BOTH the FIRST pipeline stage AND the FINAL one,
-    with NO compound operator (&&/||/;/&) and NO second-line command.
+    WHOLE observation — grep/rg is the FIRST pipeline stage, and either the FINAL
+    stage OR followed only by truncate-only stages (``head``/``tail``/``less``/
+    ``more``), with NO compound operator (&&/||/;/&) and NO second-line command.
 
-    When grep is NOT the entire command its zero/hit signal cannot be isolated from
-    the other command's output (F6/F7, 2026-07-10): `grep X ; pytest` reads the
-    pytest traceback as grep 'hits' (a wrong-outcome ledger record); `pytest | grep
+    When grep is NOT the entire (or truncate-suffixed) command its zero/hit signal
+    cannot be isolated from the other command's output (F6/F7, 2026-07-10):
+    `grep X ; pytest` reads the pytest traceback as grep 'hits'; `pytest | grep
     Err` mints a junk stem off pytest's output; `grep X && pytest` / `grep X | tee`
-    interleave planes. This EXTENDS the `_grep_is_final_stage` refuse-to-claim
-    principle from the pipe boundary to the whole-command boundary: outside this
-    shape the lattice answers NOTHING and records NO probe. Correct-or-quiet. Gates
-    only the out=str production path — the out=None pin channel is untouched."""
+    / `grep X | wc` interleave or transform planes. Truncators alone preserve
+    empty-vs-nonempty and ``file:`` prefixes. Gates only the out=str production
+    path — the out=None pin channel is untouched."""
     raw = cmd or ""
     if "\n" in raw.strip():
         return False  # a second-line command's output pollutes the observation
@@ -4379,7 +4407,7 @@ def _search_command_isolated(cmd: str) -> bool:
     # grep/rg must be the FIRST stage (not pipe-FED: `pytest | grep X`) ...
     if not _GREP_STAGE_HEAD_RE.match(_GREP_PIPE_SPLIT_RE.split(head)[0]):
         return False
-    # ... AND the FINAL stage (not transformed: `grep X | head`).
+    # ... AND the FINAL stage, or truncate-only suffix (``grep X | head``).
     return _grep_is_final_stage(head)
 
 
@@ -4809,13 +4837,31 @@ def _search_localize_decision(
 
     # ---- out=str: the LISTEN LATTICE (production) --------------------------------
     # COMPOUND GATE (F6/F7, 2026-07-10): only a SINGLE isolated grep/rg repo search
-    # whose output IS the whole observation is answerable. A compound (`grep X ;
-    # pytest`), a pipe-fed grep (`pytest | grep Err`), or an output transform (`grep
-    # X | head`) cannot isolate grep's OWN zero/hit signal from the rest of the
-    # observation -> the lattice answers NOTHING and records NO probe (else it mints a
-    # wrong-outcome / junk-stem ledger record that poisons later probe reasoning).
+    # whose output IS the whole observation is answerable for emptiness-driven
+    # lattice classes. A compound (`grep X ; pytest`), a pipe-fed grep (`pytest |
+    # grep Err`), or a plane transform (`grep X | wc`) cannot isolate grep's OWN
+    # zero/hit signal. Truncate-only suffixes (`| head`/`| tail`) ARE answerable
+    # (see ``_grep_is_final_stage``). When the command is non-isolated, still allow
+    # bare-symbol DIRECT-DEF — definition lookup does not depend on emptiness.
     if not _search_command_isolated(cmd):
-        return _post_search_decision()
+        if not sym:
+            return _post_search_decision()
+        db = _db_path()
+        if not db or not os.path.isfile(db):
+            return _post_search_decision()
+        con = _connect_ro(db)
+        if con is None:
+            return _post_search_decision()
+        try:
+            block = _direct_def_block(con, sym, _root(), mark=False)
+        finally:
+            con.close()
+        if not block:
+            return _post_search_decision()
+        stem = _norm_stem(sym)
+        if _ledger_already_answered(stem, block):
+            return _post_search_decision()
+        return _post_search_decision(block, "post_search", "def_partition")
     empty = _grep_result_empty(cmd, out)
     idx = _action_count  # the current action index (incremented before this call)
     # ledger accounting FIRST (lossless multi-token/alternation): record every bare
@@ -7477,6 +7523,13 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
                 kind="detect.coherence",
                 outcome=_ProductSignalOutcome.DELIVERED,
                 reason="ss_coherence", file_path=rel, chars=0)
+            # Mediator participation: the V2 gate DECIDED to fire. Seal the would-be
+            # recovery body so the control terminal is joinable (not identity-less).
+            _control_participation_record(
+                "GT_SS_COHERENCE_V2", "mini_seam.coherence.v2_gate",
+                "APPLIED", candidate_bytes=body,
+                fact_class="recovery", candidate_id=f"coherence:{rel}",
+                reason=f"churn_{churn}_no_passing_test_between")
         except Exception:  # noqa: BLE001 — measurement must never break the producer
             pass
     # B-REC (2026-07-16): capture the IMMUTABLE producer-owned churn snapshot for the
@@ -10897,8 +10950,16 @@ def _executed_covering_candidate(
         return None
     covering = _covering_tests_for_symbols(fresh)
     if not covering:
-        # No covering FILE -> nothing to re-attempt: latch so the symbol is not re-queried
-        # every subsequent turn (a re-edit re-arms via the post_edit `difference_update`).
+        # Host-visible reason: symbols were selected but no FACT-tier covering edge
+        # (det method + conf≥0.7). Distinct from later covering_no_covering (list
+        # non-empty but files missing on disk). Latch so we do not re-query every turn.
+        try:
+            _runtime_ledger_record(
+                kind="verify.horizon.executed",
+                outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason="covering_empty_sub_fact_floor", chars=0)
+        except Exception:  # noqa: BLE001 — host ledger must never break the producer
+            pass
         _covering_exec_fired_syms |= fresh
         return None
     # W14 FIX 2 — reset the per-turn executed-verdict carrier so the latch decision below
@@ -11359,18 +11420,33 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
             typed_falsification = selection[0] == D_HYPOTHESIS_FALSIFIED
         except Exception:  # noqa: BLE001 -- absent typed vocabulary stays quiet
             typed_falsification = False
+    # Thrash-rewrite loops (fail→edit→fail→edit) clear the fail streak on every
+    # successful source write, so count≥2 never lands. Admit hard degenerate-loop
+    # thrash via ``_detect_loop_fired`` without reopening the "0 failed" fingerprint
+    # hole (that path still requires current_failure_key + streak/falsification).
     recovery_v2_eligible = bool(
         recovery_v2
-        and current_failure_key
-        and (_ss_test_fail_counts.get(current_failure_key, 0) >= 2
-             or typed_falsification)
+        and (
+            _detect_loop_fired
+            or (current_failure_key
+                and (_ss_test_fail_counts.get(current_failure_key, 0) >= 2
+                     or typed_falsification))
+        )
     )
     if recovery_v2:
+        if recovery_v2_eligible and _detect_loop_fired and not (
+                current_failure_key
+                and (_ss_test_fail_counts.get(current_failure_key, 0) >= 2
+                     or typed_falsification)):
+            _v2_reason = "degenerate_loop"
+        elif recovery_v2_eligible:
+            _v2_reason = "repeat_or_typed_falsification"
+        else:
+            _v2_reason = "no_current_qualifying_failure"
         _control_participation_record(
             "GT_SS_RECOVERY_V2", "mini_seam.recovery_candidate.v2_gate",
             "APPLIED" if recovery_v2_eligible else "NO_EFFECT",
-            reason=("repeat_or_typed_falsification" if recovery_v2_eligible
-                    else "no_current_qualifying_failure"),
+            reason=_v2_reason,
         )
     if not selection:
         # The canonical counter persists until its failing identity passes or source changes,
@@ -13010,6 +13086,29 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 content=_shipped_suffix,
                 extra=_delivery_extra,
             )
+            # ACQ under GT_LOC_RESLOT: seal ranked localization to brief_result so
+            # contribution_attestation can join reactive delivery bytes (not step-0
+            # brief substrings). Host-side only; never changes shipped bytes.
+            if (
+                kind == "post_search.localize"
+                and getattr(item_identity, "runtime_producer_id", "")
+                == "ranked_localization"
+                and _shipped_suffix
+            ):
+                try:
+                    from groundtruth.runtime.brief_cache import (
+                        seal_reactive_localization_delivery as _seal_acq)
+                    for _base in (
+                        os.environ.get("GT_CERT_DIR", ""),
+                        os.environ.get("GT_ARTIFACTS_DIR", ""),
+                        os.environ.get("GT_C_OUT", ""),
+                        "/tmp/gt",
+                        "/gt_artifacts",
+                    ):
+                        if _base and _seal_acq(_base, _shipped_suffix):
+                            break
+                except Exception:  # noqa: BLE001 -- ACQ seal never changes delivery
+                    pass
             if _provenance_decision:
                 _provenance_identity = _terminal_delivery_identity(
                     _delivery_extra)
@@ -13941,8 +14040,14 @@ def _gateway_search_excluded(ev, *, lattice_produced=None, cmd=None) -> bool:
         return True
     if lattice_produced:
         return True
+    # Inherit the lattice's probe-ledger refusal only for grep/rg compounds that
+    # truly cannot isolate emptiness. ``find``/``fd`` are KIND_SEARCH for gateway
+    # producers but never lattice probes — muting gateway on them starves
+    # change_surface / outcome producers on real exploration (actionlint/valibot).
     if cmd is not None and not _search_command_isolated(cmd):
-        return True
+        head = _strip_leading_cd_prefix((cmd or "").split("\n", 1)[0])
+        if _GREP_STAGE_HEAD_RE.match(_GREP_PIPE_SPLIT_RE.split(head)[0]):
+            return True
     return False
 
 
@@ -16491,12 +16596,21 @@ def _global_pool_add_gateway(pool, winner, native, commit_thunk, *, ev_kind: str
             and bool(getattr(winner, "provenance", ()) or ())
         )
         if not _batch_owned:
+            try:
+                from groundtruth.runtime.global_arbiter import class_of_kind as _cof
+                _gw_fc = _cof(et) if et else None
+            except Exception:  # noqa: BLE001
+                _gw_fc = None
+            _gw_cid = str(getattr(winner, "dedup_key", "") or "")
             _supp, _reason = _ss_screen_delivery(
                 et, _payload, _ss_root, is_loc=suppressible,
                 knowledge_authority=_knowledge_authority,
                 subject_path=getattr(winner, "target", "") or "",
                 event=ev_kind,
                 native_text=str((out or {}).get("output") or ""),
+                fact_class=_gw_fc or None,
+                candidate_id=_gw_cid,
+                control_candidate_bytes=_payload,
             )
             if _supp:
                 _runtime_ledger_record(
@@ -18082,6 +18196,14 @@ def _ss_novelty_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool
     else:
         acq_files = _ss_acquired_files
         acq_syms = _ss_acquired_symbols
+    # Caller-contract facts assert a RELATION (who calls whom / breakage risk).
+    # Opening the cited files does NOT acquire that claim — only an exact claim-line
+    # match in native observation does (see ``_ss_native_contains_claim``). Path /
+    # symbol acquisition alone must not starve DIRECT ``caller_contract`` delivery;
+    # DEDUP2 still kills true entity-set repeats after a real delivery or claim-matched
+    # step-behind.
+    if _ss_dedup_group(kind) == "caller_facts":
+        return False
     if paths:
         return all(p in acq_files for p in paths)
     return all(s in acq_syms for s in syms)
@@ -18297,6 +18419,15 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
     if _ss_provenance_on():
         filt = _ss_provenance_filter(text, root)
         if filt != text and not _ss_payload_has_content(filt):
+            # Parity with late/dedup/novelty: a whole-suppress MUST leave a typed
+            # control.participation receipt (seal PRE-suppression bytes) or the
+            # referee stays identity-less / UNMEASURED.
+            _control_participation_record(
+                "GT_SS_PROVENANCE", "mini_seam.ss_content_decision.provenance",
+                "SUPPRESSED", candidate_bytes=control_bytes,
+                fact_class=fact_class, candidate_id=candidate_id,
+                reason="candidate_fully_suppressed",
+            )
             return True, "ss_provenance"
     if _ss_late_drop_on():
         late = _ss_late_drop_suppresses(kind, text, is_loc=is_loc)
@@ -18335,15 +18466,47 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
     return False, ""
 
 
+def _ss_screen_identity(
+        kind: str, text: str, subject_path: str = "", *,
+        fact_class: "str | None" = None,
+        candidate_id: str = "") -> "tuple[str | None, str]":
+    """Resolve typed control identity for SS screen participation receipts.
+
+    Callers that already know the envelope / lane candidate id pass it through;
+    otherwise derive fact_class from the kind ladder and candidate_id from the
+    lane final-extra join (same authority as provenance control recording).
+    """
+    try:
+        if not fact_class:
+            from groundtruth.runtime.global_arbiter import class_of_kind
+            fact_class = class_of_kind(kind) or None
+        if not candidate_id and text:
+            candidate_id = str(
+                _lane_final_extra(kind, text, subject_path or "").get(
+                    "candidate_id", "") or "")
+    except Exception:  # noqa: BLE001 — identity probe never blocks the screen
+        pass
+    return fact_class, candidate_id or ""
+
+
 def _ss_screen_delivery(kind: str, text: str, root: str = "", *,
                         is_loc: bool = False,
                         knowledge_authority: bool = True,
                         subject_path: str = "", event=None,
-                        native_text: str = "") -> "tuple[bool, str]":
+                        native_text: str = "",
+                        fact_class: "str | None" = None,
+                        candidate_id: str = "",
+                        control_candidate_bytes: "str | None" = None,
+                        ) -> "tuple[bool, str]":
     """Shared Lane/Gateway screen plus the step-behind knowledge commit."""
+    fact_class, candidate_id = _ss_screen_identity(
+        kind, text, subject_path,
+        fact_class=fact_class, candidate_id=candidate_id)
     suppress, reason = _ss_content_decision(
         kind, text, root, is_loc=is_loc,
-        subject_path=subject_path, event=event, native_text=native_text)
+        subject_path=subject_path, event=event, native_text=native_text,
+        fact_class=fact_class, candidate_id=candidate_id,
+        control_candidate_bytes=control_candidate_bytes)
     if suppress and reason == "ss_step_behind":
         # Step-behind proves the model already acquired this correct fact. Remember
         # it so a later byte-distinct subset is attributed as semantic duplication.
@@ -19057,10 +19220,11 @@ def _ss_record_edit(rel: str, cmd: str, orig_out: str, *, returncode=None,
 
 def _ss_test_touches_edit(cmd: str, orig_out: str) -> bool:
     """SS-2 (GT_SS_SUBMIT_RED): True iff an observed test event TOUCHES an edited surface —
-    an edited REL path (or its basename) appears in the agent's OWN command or observed
-    output. A failing test's traceback prints the edited source frame, and a covering run's
-    command usually names the edited file's stem, so this is a robust, leak-safe relatedness
-    signal (it reads only the agent's own strings). Correct-or-quiet: no edits yet -> False (a
+    an edited REL path, basename, stem (sans extension), or a path directory segment
+    appears in the agent's OWN command or observed output. A failing test's traceback
+    prints the edited source frame, and a covering run's command usually names the
+    edited file's stem, so this is a robust, leak-safe relatedness signal (it reads
+    only the agent's own strings). Correct-or-quiet: no edits yet -> False (a
     pre-existing failure on an unedited tree is not the agent's unresolved RED)."""
     rels = _oracle_edited_rels
     if not rels:
@@ -19075,6 +19239,13 @@ def _ss_test_touches_edit(cmd: str, orig_out: str) -> bool:
         b = os.path.basename(r) if r else ""
         if b and len(b) >= 4 and b in hay:
             return True
+        stem, _ext = os.path.splitext(b) if b else ("", "")
+        if stem and len(stem) >= 4 and stem in hay:
+            return True
+        # Directory segment (e.g. ``actionlint`` / ``providers``) when distinctive.
+        for seg in (r or "").replace("\\", "/").split("/"):
+            if seg and len(seg) >= 4 and "." not in seg and seg in hay:
+                return True
     return False
 
 

@@ -362,6 +362,167 @@ def persist_brief(out_dir: str, brief_text: str, result_obj: Any = None,
     return d
 
 
+def ensure_block_receipts(result_path: str, brief_text: str | None = None) -> list[dict]:
+    """Rehydrate ``metrics.block_receipts`` when Profile-2 INSEAM is on but the
+    bake-time brief_result was persisted without them (campaign 1923ccd42 shape:
+    proofs present, receipts ``[]`` → obligations/ACQ G1 dark).
+
+    PURE host-side metadata: recomputes receipts from the sealed brief bytes,
+    re-attests localization contributions, persists atomically. Returns the
+    receipts list (possibly empty). Never mutates model-visible brief text.
+    """
+    if not result_path:
+        return []
+    try:
+        from groundtruth.pretask.v1r_brief import (
+            _attest_source_contributions,
+            _block_receipts_on,
+            _brief_block_receipts,
+            _localization_candidate_id,
+        )
+    except Exception:
+        return []
+    if not _block_receipts_on():
+        return []
+    try:
+        with open(result_path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict) or payload.get("schema") != BRIEF_RESULT_SCHEMA:
+        return []
+    text = brief_text if isinstance(brief_text, str) else payload.get("brief_text")
+    if not isinstance(text, str) or not text:
+        return []
+    if payload.get("brief_sha256") and payload.get("brief_sha256") != brief_sha256(text):
+        # Refuse to stamp receipts onto a mismatched seal.
+        return []
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+        payload["metrics"] = metrics
+    existing = metrics.get("block_receipts")
+    if isinstance(existing, list) and existing:
+        return existing
+    proofs = metrics.get("localization_proof")
+    cand_ids: list[str] = []
+    if isinstance(proofs, list):
+        for proof in proofs:
+            if not isinstance(proof, dict):
+                continue
+            cid = proof.get("candidate_id")
+            if isinstance(cid, str) and cid:
+                cand_ids.append(cid)
+            else:
+                path = proof.get("path")
+                if isinstance(path, str) and path:
+                    cand_ids.append(_localization_candidate_id(path))
+    try:
+        receipts = _brief_block_receipts(
+            text, localization_candidate_ids=cand_ids or None)
+    except Exception:
+        return []
+    metrics["block_receipts"] = receipts
+    if receipts and isinstance(proofs, list) and proofs:
+        try:
+            _attest_source_contributions(proofs, receipts)
+        except Exception:
+            pass
+    try:
+        _atomic_write_payload(result_path, payload)
+    except (OSError, TypeError):
+        pass
+    return receipts
+
+
+_REACTIVE_LOC_ROW_RE = __import__("re").compile(
+    r"^([^:\s][^:]*):(\d+):(\S+)\s*$"
+)
+
+
+def seal_reactive_localization_delivery(
+    out_dir: str,
+    delivered_text: str,
+) -> bool:
+    """Append detached localization seals for a reactive ranked delivery and re-attest.
+
+    Under Profile-2 ``GT_LOC_RESLOT`` the step-0 brief has no localization blocks, so
+    ACQ contribution attestations cannot seal to brief substrings. Persist one
+    ``delivery_plane=reactive`` receipt per ranked ``path:line:sym`` row whose
+    ``rendered_text`` is the EXACT committed multi-row payload (parity with the
+    runtime-ledger seal). Re-run ``_attest_source_contributions`` so each
+    ``localization_proof`` candidate binds to that seal. Pure host-side metadata;
+    model-visible brief bytes are untouched. Correct-or-quiet on any fault.
+    """
+    text = str(delivered_text or "")
+    if not out_dir or not text.strip():
+        return False
+    try:
+        from groundtruth.pretask.v1r_brief import (
+            _attest_source_contributions,
+            _localization_candidate_id,
+        )
+    except Exception:
+        return False
+    p = cache_path(out_dir)
+    try:
+        with open(p, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or payload.get("schema") != BRIEF_RESULT_SCHEMA:
+        return False
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, dict):
+        return False
+    proofs = metrics.get("localization_proof")
+    if not isinstance(proofs, list) or not proofs:
+        return False
+    receipts = metrics.get("block_receipts")
+    if not isinstance(receipts, list):
+        receipts = []
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    # Parse ranked rows from the committed payload (ignore scope-splice trailer lines).
+    paths: list[str] = []
+    for line in text.splitlines():
+        m = _REACTIVE_LOC_ROW_RE.match(line.strip())
+        if m:
+            paths.append(m.group(1).replace("\\", "/"))
+    if not paths:
+        return False
+    # Drop prior reactive seals for these candidate ids so a re-seal is idempotent.
+    keep: list[dict] = []
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            continue
+        if receipt.get("delivery_plane") == "reactive":
+            continue
+        keep.append(receipt)
+    new_seals: list[dict] = []
+    for rank, path in enumerate(paths, start=1):
+        cid = _localization_candidate_id(path)
+        new_seals.append({
+            "block_id": f"acq-localization-{rank}",
+            "fact_class": "localization",
+            "label": "reactive-localization",
+            "candidate_id": cid,
+            "char_span": [0, len(text)],
+            "content_hash": digest,
+            "rendered_text": text,
+            "delivery_plane": "reactive",
+        })
+    metrics["block_receipts"] = keep + new_seals
+    try:
+        _attest_source_contributions(proofs, metrics["block_receipts"])
+    except Exception:
+        return False
+    try:
+        _atomic_write_payload(p, payload)
+    except (OSError, TypeError):
+        return False
+    return True
+
+
 def get_or_generate(out_dir: str, issue_text: str, work: str, graph: str,
                     generator: Any = None,
                     identity_handoff: RequestIdentityHandoff | None = None) -> dict:

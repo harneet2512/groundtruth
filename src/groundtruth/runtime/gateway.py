@@ -828,6 +828,9 @@ def _to_repo_rel(f: str, root: str) -> str:
 # --------------------------------------------------------------------------- #
 _GREP_HEAD_RE = re.compile(r"(?:^|[|&;]\s*)(?:grep|egrep|fgrep|rg)\b")
 _BARE_SYMBOL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{2,}$")
+_COMPOUND_IDENT_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9]*([-_][A-Za-z0-9]+)+$"
+)
 # Flags that CONSUME the next token as a value (so it is never mistaken for the
 # pattern operand). -E / -T are DELIBERATELY absent (valueless in GNU grep).
 _GREP_VALUE_FLAGS = frozenset({
@@ -887,12 +890,15 @@ def _search_operand_raw(cmd: str) -> str | None:
 
 
 def search_pattern(cmd: str) -> str | None:
-    """The grep/rg operand, ABSTAINING unless it is a single bare symbol (>=3 chars,
-    no regex metachars / path separators). Byte-equivalent to gt_mini_patch._search_pattern."""
+    """The grep/rg operand, ABSTAINING unless it is a single bare symbol or
+    hyphen/underscore compound identifier (>=3 chars, no regex/path). Byte-
+    equivalent to gt_mini_patch._search_pattern."""
     pat = _search_operand_raw(cmd)
     if pat is None:
         return None
-    return pat if _BARE_SYMBOL_RE.match(pat) else None
+    if _BARE_SYMBOL_RE.match(pat) or _COMPOUND_IDENT_RE.match(pat):
+        return pat
+    return None
 
 
 def normalize_search(cmd: str) -> SearchQuery | None:
@@ -928,20 +934,21 @@ def normalize_search(cmd: str) -> SearchQuery | None:
         else:
             scope.append(t.strip().strip("'\""))
         i += 1
-    bare = op if _BARE_SYMBOL_RE.match(op) else ""
+    bare = op if (_BARE_SYMBOL_RE.match(op) or _COMPOUND_IDENT_RE.match(op)) else ""
     return SearchQuery(pattern=bare, raw_operand=op, scope=tuple(scope), filters=tuple(filters))
 
 
 def _search_probe_tokens(cmd: str) -> list[str]:
-    """Bare-symbol tokens in the operand (quoted multi-word / `foo|bar` split), for the
-    ledger — never rendered."""
+    """Bare-symbol / compound-ident tokens in the operand (quoted multi-word /
+    `foo|bar` split), for the ledger — never rendered."""
     op = _search_operand_raw(cmd)
     if op is None:
         return []
     out: list[str] = []
     for part in re.split(r"[|\s]+", op):
         p = part.strip().strip("\\")
-        if p and _BARE_SYMBOL_RE.match(p) and p not in out:
+        if (p and (_BARE_SYMBOL_RE.match(p) or _COMPOUND_IDENT_RE.match(p))
+                and p not in out):
             out.append(p)
     return out
 
@@ -1062,12 +1069,22 @@ def classify_command(cmd: str) -> str:
 # --------------------------------------------------------------------------- #
 _GREP_PIPE_SPLIT_RE = re.compile(r"(?<!\|)\|(?!\|)")
 _GREP_STAGE_HEAD_RE = re.compile(r"^\s*(?:grep|egrep|fgrep|rg)\b")
+_TRUNCATE_STAGE_RE = re.compile(r"^\s*(?:head|tail|less|more)\b")
 _HIT_PATH_EXT_RE = re.compile(r"\.\w+$")
 
 
 def _grep_is_final_stage(head: str) -> bool:
-    seg = _GREP_PIPE_SPLIT_RE.split(head)[-1]
-    return bool(_GREP_STAGE_HEAD_RE.match(seg))
+    """True iff grep/rg is last, or followed only by truncate-only stages.
+    Mirrors gt_mini_patch._grep_is_final_stage (emptiness signal preserved)."""
+    segs = _GREP_PIPE_SPLIT_RE.split(head or "")
+    if not segs:
+        return False
+    if _GREP_STAGE_HEAD_RE.match(segs[-1]):
+        return True
+    grep_idxs = [i for i, seg in enumerate(segs) if _GREP_STAGE_HEAD_RE.match(seg)]
+    if not grep_idxs or grep_idxs[0] != 0 or len(grep_idxs) != 1:
+        return False
+    return all(_TRUNCATE_STAGE_RE.match(seg) for seg in segs[1:])
 
 
 def _grep_is_count(seg: str) -> bool:
@@ -2186,32 +2203,40 @@ def _edit_related_to_stem(edit_blob: str, sym: str) -> bool:
 
 
 def _zero_absent_repeat_ok(event: ToolEvent, state: GatewayState) -> bool:
-    """The honest-negative repeat gate: fire only on a REPEAT of an already-failed stem
-    (or fold variant) — never on the first, intentional probe — and stay silent when
-    an intervening edit RELATED to the probed stem occurred (the agent may have just
-    created it). Unrelated edits do not reset the gate (F4)."""
+    """Admit change_surface on the FIRST confirmed absent-search opportunity.
+
+    Registry ``deliver_by=failed_search`` is that first confirmed absence. Later
+    re-greps of the same stem must not mint a second dose (≤1; the answer is
+    issue-fixed). A RELATED create between an earlier zero and now still mutes
+    (F4 — the agent may have just created it). Unrelated edits do not re-arm.
+    """
     for tok in _search_probe_tokens(event.command) or [search_pattern(event.command) or ""]:
         if not tok:
             continue
         e = state.ledger.get(_norm_stem(tok))
         if not e:
             continue
-        prior_zero = [i for i, o in zip(e["probe_indices"], e["outcomes"])
-                      if o == "zero" and i < event.action_index]
-        if not prior_zero:
+        zeros = [i for i, o in zip(e["probe_indices"], e["outcomes"])
+                 if o == "zero" and i <= event.action_index]
+        if not zeros:
             continue
-        prev = max(prior_zero)
-        if any(prev < ee["index"] < event.action_index
-               and _edit_related_to_stem(ee["blob"], tok)
-               for ee in state.edit_events):
-            continue  # a RELATED edit intervened -> the agent may have created it
+        first_zero = min(zeros)
+        if event.action_index != first_zero:
+            continue  # opportunity already consumed on an earlier probe
+        priors = [i for i in zeros if i < event.action_index]
+        if priors:
+            prev = max(priors)
+            if any(prev < ee["index"] < event.action_index
+                   and _edit_related_to_stem(ee["blob"], tok)
+                   for ee in state.edit_events):
+                continue
         return True
     return False
 
 
 def _produce_change_surface(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     if not _zero_absent_repeat_ok(event, state):
-        return []  # protect the intentional first probe
+        return []  # first-absence opportunity absent / already spent / related-create mute
     try:
         res = detect_change_surface(state.issue_text, state.repo_root, state.graph_db)
     except Exception:  # noqa: BLE001

@@ -331,14 +331,10 @@ def _fact_row(name: str) -> dict[str, Any]:
             "causal_fair_probe_requirement": registration.causal_eval,
             "offline_proof_dependencies": list(PER_FEATURE_OFFLINE_PROOF_DEPENDENCIES),
             "live_proof_dependencies": list(INTERNAL_FACT_SUPPORT_PROOFS),
-            "BLOCKED_BY": [
-                # Truth witness CLOSED: the dedicated ``cochange_influence_witness`` above
-                # independently enforces traceable cochange influence. The cochange-SPECIFIC
-                # causal ablation probe remains a preregistered structural non-provable (R3);
-                # the terminal still inherits the supported FACT class's fair-probe as
-                # enrichment only, so this row stays architecturally blocked on causality.
-                "COCHANGE_INTERNAL_CAUSAL_PROBE_ABSENT",
-            ],
+            # Causal instrument LANDING: groundtruth.runtime.cochange_holdout
+            # (GT_COCHANGE_HOLDOUT_RATE / SEED). Rate-zero remains production-safe
+            # (always DELIVER). Promotion still requires a paid cohort with rate>0.
+            "BLOCKED_BY": [],
         }
     return {
         "family": "FACT", "role": "fact_delivery",

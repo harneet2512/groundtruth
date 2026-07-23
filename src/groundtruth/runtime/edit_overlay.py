@@ -41,7 +41,7 @@ own dispatch; it is NEVER guessed clean for a language we cannot soundly parse:
     .go          gofmt -e                 SUPPORTED   (available iff gofmt on PATH)
     .js/.mjs/.cjs node --check             SUPPORTED   (available iff node on PATH)
     .rb          ruby -c                  SUPPORTED   (available iff ruby on PATH)
-    .ts/.tsx     --                       UNAVAILABLE (tsc conflates syntax+type)
+    .ts/.tsx     esbuild --write=false    SUPPORTED iff esbuild on PATH (no --bundle)
     .jsx         --                       UNAVAILABLE (JSX is not valid JS)
     .rs          --                       UNAVAILABLE (no fast parse-only rustc)
     .java        --                       UNAVAILABLE (javac needs classpath)

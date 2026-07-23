@@ -71,6 +71,12 @@ def _brief_delivery_extra(e: Mapping[str, str], brief_text: str) -> dict:
     """
     brief_path = (e.get("GT_BRIEF_FILE") or "/gt_artifacts/brief.txt").strip()
     result_path = os.path.join(os.path.dirname(brief_path), "brief_result.json")
+    # Profile-2 INSEAM: rehydrate bake-time empty block_receipts before lineage.
+    try:
+        from groundtruth.runtime.brief_cache import ensure_block_receipts
+        ensure_block_receipts(result_path, brief_text)
+    except Exception:
+        pass
     try:
         with open(result_path, encoding="utf-8") as fh:
             result = json.load(fh)
@@ -87,9 +93,17 @@ def _brief_delivery_extra(e: Mapping[str, str], brief_text: str) -> dict:
         blocks = []
         seen: set[str] = set()
         last_end = 0
+        # Per-block fail-closed: a malformed / untyped / registration-fail receipt
+        # MUST NOT wipe compound lineage for the whole brief. Otherwise one bad
+        # localization span (common under LOC_RESLOT + mixed receipts) erases a
+        # valid REGISTERED obligations block and G1 cannot byte-prove obligations.
         for receipt in receipts:
             if not isinstance(receipt, dict):
-                return {}
+                continue
+            # Detached reactive ACQ seals are not brief substrings — skip here;
+            # they join via acq_provenance, not task-start compound lineage.
+            if receipt.get("delivery_plane") == "reactive":
+                continue
             block_id = receipt.get("block_id")
             candidate_id = receipt.get("candidate_id")
             span = receipt.get("char_span")
@@ -106,13 +120,15 @@ def _brief_delivery_extra(e: Mapping[str, str], brief_text: str) -> dict:
                 or not isinstance(declared, str) or not declared
                 or not isinstance(label, str) or not label
             ):
-                return {}
+                continue
             if span[0] < last_end:
-                return {}
+                # Non-monotonic span (e.g. overlapping localization subspans) —
+                # drop THIS receipt only; keep already-validated REGISTERED blocks.
+                continue
             block = brief_text[span[0]:span[1]]
             digest = hashlib.sha256(block.encode("utf-8", "surrogatepass")).hexdigest()
             if digest != full_hash:
-                return {}
+                continue
             seen.add(block_id)
             last_end = span[1]
             item = {
@@ -136,15 +152,17 @@ def _brief_delivery_extra(e: Mapping[str, str], brief_text: str) -> dict:
             else:
                 expected_fact, evidence_type, producer = registered
                 if declared != expected_fact:
-                    return {}
+                    continue
                 lineage = build_lineage(
                     runtime_producer_id=producer,
                     evidence_type=evidence_type, actual_event="task_start")
                 if lineage is None or not lineage.producer_registration_match:
-                    return {}
+                    continue
                 item["lineage_status"] = "REGISTERED"
                 item["lineage"] = lineage_to_dict(lineage)
             blocks.append(item)
+        if not blocks:
+            return {}
         return {
             "compound_lineage_schema": _COMPOUND_LINEAGE_SCHEMA,
             "compound_delivery": True,
@@ -356,6 +374,11 @@ def _record_brief_delivery(e: Mapping[str, str], brief_text: str) -> None:
     Host metadata only: this never changes the task string.  Profile-2's
     existing in-seam metrics flag activates the row; absent/failed ledger I/O
     leaves the delivery intact but its ACQ proof honestly unmeasured.
+
+    Also emits one DELIVERED row per REGISTERED brief block (obligations /
+    localization file-entry) sealed to the EXACT block bytes + flat
+    ``lineage_ledger_extra`` columns. Without those rows, G1 / ACK mediation
+    cannot join a block-level candidate seal to the whole-brief compound row.
     """
     if (e.get("GT_INSEAM_METRICS") or "").strip().lower() not in {
         "1", "true", "yes", "on",
@@ -378,13 +401,65 @@ def _record_brief_delivery(e: Mapping[str, str], brief_text: str) -> None:
         "seal_scope": "block",
         "opportunity_exempt_reason": "task_start_pre_policy",
     }
-    row.update(_brief_delivery_extra(e, brief_text))
+    extra = _brief_delivery_extra(e, brief_text)
+    row.update(extra)
+    block_rows: list[dict] = []
+    try:
+        from groundtruth.runtime.feature_lineage import lineage_ledger_extra
+        for block in extra.get("block_lineage") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("lineage_status") != "REGISTERED":
+                continue
+            lineage = block.get("lineage")
+            if not isinstance(lineage, dict):
+                continue
+            # Rebuild a DeliveryLineage-shaped ledger extra from the already-validated
+            # nested lineage dict (same columns the mid-trajectory producers stamp).
+            from groundtruth.runtime.feature_lineage import build_lineage
+            built = build_lineage(
+                runtime_producer_id=str(lineage.get("runtime_producer_id") or ""),
+                evidence_type=str(lineage.get("evidence_type") or ""),
+                actual_event="task_start",
+            )
+            if built is None or not built.producer_registration_match:
+                continue
+            start, end = block.get("char_span") or (None, None)
+            if not (
+                isinstance(start, int) and isinstance(end, int)
+                and 0 <= start < end <= len(brief_text)
+            ):
+                continue
+            block_text = brief_text[start:end]
+            block_row = {
+                "layer": f"brief.block.{block.get('label') or 'unknown'}",
+                "event_type": "task_start",
+                "file_path": "",
+                "outcome": "delivered",
+                "reason": "step0_brief_block",
+                "chars_delivered": len(block_text),
+                "iteration": 0,
+                "content_sha256_16": hashlib.sha256(
+                    block_text.encode("utf-8", "surrogatepass")
+                ).hexdigest()[:16],
+                "seal_scope": "block",
+                "candidate_id": block.get("candidate_id"),
+                "opportunity_exempt_reason": "task_start_pre_policy",
+            }
+            block_row.update(lineage_ledger_extra(built))
+            block_rows.append(block_row)
+    except Exception:  # noqa: BLE001 -- block seals never break the compound row
+        block_rows = []
     try:
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
         with open(path, "a", encoding="utf-8", newline="\n") as fh:
             fh.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+            for block_row in block_rows:
+                fh.write(
+                    json.dumps(block_row, sort_keys=True, separators=(",", ":")) + "\n"
+                )
     except (OSError, TypeError, ValueError) as exc:
         global _BRIEF_LEDGER_WRITE_FAILURES
         _BRIEF_LEDGER_WRITE_FAILURES += 1

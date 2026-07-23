@@ -3125,13 +3125,15 @@ def _internal_fact_support_readiness(
         value = source_record.get(field)
         return value if isinstance(value, bool) else None
 
-    # SPEC-J4: the cochange support has no fair-probe design of its own — its causal verdict is
-    # the adjudicated fair-probe of the FACT class it contributed to (the localization candidate
-    # it was sealed and acknowledged into). INHERIT that bool; UNMEASURED -> None (fail-closed).
-    # Schema-distinct from the producer's own None default: the inheritance is marked explicitly.
+    # SPEC-J4: prefer the cochange-SPECIFIC causal ablation instrument when the
+    # collector recorded a preregistered DELIVER/HOLDOUT assignment (rate>0).
+    # Otherwise inherit the supported FACT class's fair-probe as enrichment only.
     supported_fc = source_record.get("supported_fact_class")
     inherited_support_fair_probe: bool | None = None
-    if fair_probe_by_fc is not None and isinstance(supported_fc, str):
+    ablation_probe = source_record.get("cochange_causal_fair_probe")
+    if isinstance(ablation_probe, bool):
+        inherited_support_fair_probe = ablation_probe
+    elif fair_probe_by_fc is not None and isinstance(supported_fc, str):
         fp_candidate = fair_probe_by_fc.get(supported_fc)
         if isinstance(fp_candidate, bool):
             inherited_support_fair_probe = fp_candidate
@@ -3164,6 +3166,8 @@ def _internal_fact_support_readiness(
             "downstream_delivery_seal": seal,
             "downstream_receipt_level": receipt_level,
             **(
+                {"support_causal_fair_probe_from_cochange_ablation": True}
+                if isinstance(ablation_probe, bool) else
                 {"support_causal_fair_probe_inherited_from_fact": supported_fc}
                 if inherited_support_fair_probe is not None else {}
             ),

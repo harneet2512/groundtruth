@@ -115,6 +115,22 @@ fi
 if [ "${COOPERATIVE_FLAGS:-0}" = "1" ]; then
   export GT_POST_SEARCH=1 GT_CONSENSUS_LEDGER=1
 fi
+# PRODUCTION Profile-2 (2026-07-23): index-time body channels must be ON where
+# gt-run-proof builds graph.db. substrate_proof.sh / GHA already default
+# GT_SEM_BODY=1; the VM path previously used :-0, so sem_body_rows=0 and
+# Profile-2 fail-closed with GT_RL_PREFLIGHT_ABORT unavailable=GT_SEM_BODY
+# before any model spend. Do not weaken the preflight — mine the channels.
+if [ "${GT_RL_PROFILE:-}" = "2" ]; then
+  export GT_SEM_BODY="${GT_SEM_BODY:-1}"
+  export GT_CONTENT_LEG="${GT_CONTENT_LEG:-1}"
+  export GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-1}"
+  export GT_POST_SEARCH="${GT_POST_SEARCH:-1}"
+  export GT_OBLIGATIONS_V2="${GT_OBLIGATIONS_V2:-1}"
+  # Explicit receipts override so bake-time brief_result without seals still
+  # rehydrates under ensure_block_receipts (INSEAM alone was on but empty).
+  export GT_BLOCK_RECEIPTS="${GT_BLOCK_RECEIPTS:-1}"
+  export GT_INSEAM_METRICS="${GT_INSEAM_METRICS:-1}"
+fi
 # PARITY R2 (2026-07-08): 21000s (350 min) == deepswe_full.yml's trial job timeout-minutes.
 # The old 5400 (90 min) bound the box while GHA allowed 350 min — with the uncapped parity
 # config (~268-step avg runs) the box killed runs GHA would finish, making the task
@@ -756,7 +772,7 @@ PYEOF
         -e GT_GIT_COMMIT="$GT_GIT_COMMIT" \
         -e GT_SUBSTRATE_DIGEST="$GT_SUBSTRATE_DIGEST" \
         -e GT_TASK_REPO_COMMIT="$TASK_REPO_COMMIT" \
-        -e GT_SEM_BODY="${GT_SEM_BODY:-0}" \
+        -e GT_SEM_BODY="${GT_SEM_BODY:-1}" \
         -e GT_PASSAGE_WIDE="${GT_PASSAGE_WIDE:-0}" \
         -e GT_NEG_EVIDENCE="${GT_NEG_EVIDENCE:-0}" \
         -e GT_TYPEFLOW_FIXPOINT="${GT_TYPEFLOW_FIXPOINT:-0}" \
@@ -813,6 +829,7 @@ PYEOF
     local HOST_GT_INJECT=/tmp/gt_inject/opt/gt
     mkdir -p "$HOST_GT_INJECT/groundtruth"
     cp -f "$REPO_ROOT/artifact_deepswe/gt_mini_patch.py" "$HOST_GT_INJECT/"
+    cp -f "$REPO_ROOT/artifact_deepswe/gt_headless_runner.py" "$HOST_GT_INJECT/" 2>/dev/null || true
     local _gtf
     for _gtf in gt_hook.py gt_oracle.py gt_oracle_sense.py phase_policy.py; do
       cp -f "$REPO_ROOT/artifact_deepswe/$_gtf" "$HOST_GT_INJECT/" 2>/dev/null || true
@@ -909,6 +926,62 @@ with open(os.environ["GT_PROFILE_ACTIVATION_OUT"], "w", encoding="utf-8") as fh:
     json.dump(doc, fh, sort_keys=True, indent=2)
     fh.write("\n")
 PY
+
+    # Run-identity attestation (GHA parity): diagnosis / mandatory-metrics require
+    # gt_run_identity.json under gt_out (and later gt_artifacts/). Without it the
+    # 3-task UpCloud campaign grades UNMEASURED:run_identity_consensus.
+    if [ "${GT_BASELINE:-0}" != "1" ]; then
+      GT_ID_OUT="$HOST_GT_OUT/gt_run_identity.json" \
+      GT_ID_SUBSTRATE_DIGEST="${GT_SUBSTRATE_DIGEST:-}" \
+      GT_ID_GT_COMMIT="${GT_GIT_COMMIT:-}" \
+      GT_ID_RUN_ID="${SWEEP_RUN_ID:-}" \
+      GT_ID_BASELINE="${GT_BASELINE:-0}" \
+      GT_SS_SHADOW_RATE="${GT_SS_SHADOW_RATE:-0}" \
+      HOST_GT_INJECT="${HOST_GT_INJECT}" \
+      PARALLEL="${PARALLEL}" \
+      PYTHONPATH="$REPO_ROOT/src" python3 - <<'PY'
+import hashlib, json, os, re
+from pathlib import Path
+digest = (os.environ.get("GT_ID_SUBSTRATE_DIGEST") or "").strip()
+commit = (os.environ.get("GT_ID_GT_COMMIT") or "").strip()
+run_id = (os.environ.get("GT_ID_RUN_ID") or "").strip()
+# Prefer full sha when present; allow short hex for VM sweeps.
+commit_ok = bool(re.fullmatch(r"[0-9a-f]{7,64}", commit))
+doc = {
+    "schema": "gt.run_identity.v1",
+    "substrate_digest_expected": digest,
+    "substrate_digest_actual": digest,
+    "substrate_image_id": digest if digest.startswith("sha256:") else "",
+    "gt_ref_requested": commit,
+    "gt_ref_prepared_sha": commit if commit_ok else "",
+    "gt_ref_resolved": commit if commit_ok else "",
+    "gt_ref_resolved_source": "vm_gt_agent_run",
+    "workflow_dispatch_sha": commit if commit_ok else "",
+    "seam_sha256": "",
+    "runner_sha256": "",
+    "workflow_run_id": run_id if re.fullmatch(r"[0-9A-Za-z_.:-]+", run_id or "") else "",
+    "baseline": os.environ.get("GT_ID_BASELINE") == "1",
+    "max_parallel_requested": os.environ.get("PARALLEL") or "",
+    "max_parallel_effective": int(os.environ.get("PARALLEL") or "0") or None,
+    "shadow_rate_requested": os.environ.get("GT_SS_SHADOW_RATE") or "0",
+    "shadow_rate_effective": os.environ.get("GT_SS_SHADOW_RATE") or "0",
+    "surface": "upcloud_vm_agent_run",
+}
+# Best-effort seam/runner digests when sources exist on the host inject mount.
+inject = Path(os.environ.get("HOST_GT_INJECT") or "/opt/gt")
+for key, rel in (("seam_sha256", "gt_mini_patch.py"), ("runner_sha256", "gt_headless_runner.py")):
+    p = inject / rel
+    if p.is_file():
+        doc[key] = hashlib.sha256(p.read_bytes()).hexdigest()
+target = os.environ["GT_ID_OUT"]
+tmp = target + f".tmp.{os.getpid()}"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+os.replace(tmp, target)
+print("[GT] run-identity written:", target)
+PY
+    fi
 
     # PARITY (2026-07-08): OFFICIAL containers carry NO GT surfaces — measured firing
     # delta (baseline agent explored /gt_artifacts + /gt_out "for test hints",
@@ -1052,6 +1125,16 @@ PY
   python3 "$REPO_ROOT/scripts/swebench/gt_deep_metrics.py" "$id" "$task_dir" \
     --db "$art_dir/graph.db" --log "$trial_log" >/dev/null 2>&1 || echo "DEEP_METRICS_WARN: $id" >&2
   cp -f "/tmp/gt_deep_metrics_${id}.json" "/tmp/gt_deep_metrics_${id}.md" "$task_dir/" 2>/dev/null || true
+
+  # Grader layout (ss_live_diagnosis / mandatory metrics): expect
+  # <task>/gt_artifacts/{gt_run_identity,gt_profile_*}.json. VM writes them to
+  # gt_out/; stage a copy so diagnosis is not UNMEASURED on packaging alone.
+  mkdir -p "$task_dir/gt_artifacts"
+  for _ga in gt_run_identity.json gt_profile_activation.json gt_profile_receipt.json; do
+    if [ -f "$task_dir/gt_out/$_ga" ]; then
+      cp -f "$task_dir/gt_out/$_ga" "$task_dir/gt_artifacts/$_ga" 2>/dev/null || true
+    fi
+  done
 
   # ── (g) per-task JSON row (always — failures are classified, never silent) ──
   TASK_ID="$id" TASK_LANG="$lang" IMG="$img" MODEL="$MODEL" \
