@@ -127,6 +127,8 @@ def _empty(blocker: str) -> dict[str, dict[str, Any]]:
             # influence-truth witness. Distinct from the generic ACQ contribution field so
             # the internal-support terminal never borrows a non-cochange-specific truth.
             "cochange_influence_witness": None,
+            # Cochange-specific causal ablation (GT_COCHANGE_HOLDOUT_RATE>0).
+            "cochange_causal_fair_probe": None,
             "timing_inherited_from_fact_delivery": None,
             "source_causal_fair_probe": None,
         }
@@ -171,6 +173,12 @@ def _valid_cochange_primary_path(
         return False
     unsigned = dict(evidence)
     identity = unsigned.pop("source_identity_sha256", None)
+    # Ablation sidecar keys must never participate in the seal (lifted to
+    # proof.cochange_ablation by the producer). Tolerate a stale copy.
+    unsigned.pop("_ablation_assignment", None)
+    unsigned.pop("_ablation_rate", None)
+    unsigned.pop("ablation_assignment", None)
+    unsigned.pop("ablation_rate", None)
     canonical = json.dumps(
         unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     )
@@ -237,6 +245,10 @@ def _valid_cochange_evidence(
         commits.add(commit)
     unsigned = dict(evidence)
     identity = unsigned.pop("source_identity_sha256", None)
+    unsigned.pop("_ablation_assignment", None)
+    unsigned.pop("_ablation_rate", None)
+    unsigned.pop("ablation_assignment", None)
+    unsigned.pop("ablation_rate", None)
     canonical = json.dumps(
         unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     )
@@ -738,35 +750,51 @@ def collect_acq_provenance(
             raise ValueError(f"acq provenance: invalid candidate rank at {proof_index}")
         if not isinstance(path, str) or not path.strip():
             continue
-        block_id = f"file-entry-{rank}"
-        block = blocks.get(block_id)
-        if not (
-            block is not None
-            and block["fact_class"] == "localization"
-            and block["label"] == block_id
-            and _path_in_block(path, str(block["rendered_text"]))
-        ):
-            # Minimal MEDIUM/LOW intentionally has no duplicate file-entry blocks:
-            # every visible candidate is sealed to the shared contention header.
-            # Join only through the producer-issued candidate identity plus exact
-            # path bytes; never infer a candidate from rank or path existence alone.
-            proof_candidate_id = proof.get("candidate_id")
-            matches = [
-                candidate_block for candidate_block in blocks.values()
-                if candidate_block["fact_class"] == "localization"
-                and isinstance(proof_candidate_id, str)
-                and candidate_block.get("candidate_id") == proof_candidate_id
-                and _path_in_block(path, str(candidate_block["rendered_text"]))
-                and candidate_block["label"] in {
-                    "localization-header",
-                    "reactive-localization",
-                    "acq-localization",
-                }
-            ]
-            if len(matches) != 1:
-                continue
-            block = matches[0]
+        proof_candidate_id = proof.get("candidate_id")
+        # Prefer the reactive ranked-localization seal when present (GT_LOC_RESLOT).
+        # Never promote from a step-0 brief file-entry / whole-brief hash when the
+        # runtime ledger sealed the exact reactive payload instead.
+        reactive_matches = [
+            candidate_block for candidate_block in blocks.values()
+            if candidate_block["fact_class"] == "localization"
+            and candidate_block.get("delivery_plane") == "reactive"
+            and isinstance(proof_candidate_id, str)
+            and candidate_block.get("candidate_id") == proof_candidate_id
+            and _path_in_block(path, str(candidate_block["rendered_text"]))
+        ]
+        if len(reactive_matches) == 1:
+            block = reactive_matches[0]
             block_id = str(block["block_id"])
+        else:
+            block_id = f"file-entry-{rank}"
+            block = blocks.get(block_id)
+            if not (
+                block is not None
+                and block["fact_class"] == "localization"
+                and block["label"] == block_id
+                and _path_in_block(path, str(block["rendered_text"]))
+            ):
+                # Minimal MEDIUM/LOW intentionally has no duplicate file-entry blocks:
+                # every visible candidate is sealed to the shared contention header.
+                # Join only through the producer-issued candidate identity plus exact
+                # path bytes; never infer a candidate from rank or path existence alone.
+                matches = [
+                    candidate_block for candidate_block in blocks.values()
+                    if candidate_block["fact_class"] == "localization"
+                    and isinstance(proof_candidate_id, str)
+                    and candidate_block.get("candidate_id") == proof_candidate_id
+                    and _path_in_block(path, str(candidate_block["rendered_text"]))
+                    and candidate_block["label"] in {
+                        "localization-header",
+                        "reactive-localization",
+                        "acq-localization",
+                    }
+                    and candidate_block.get("delivery_plane") != "reactive"
+                ]
+                if len(matches) != 1:
+                    continue
+                block = matches[0]
+                block_id = str(block["block_id"])
         features = _source_features(proof, metrics)
         if not features:
             continue

@@ -3043,9 +3043,15 @@ def _primary_cochange_support(
     evidence = _primary_cochange_evidence(
         candidate_path=candidate_path, co_change_paths=kept,
     )
+    # Ablation metadata MUST stay OFF the sealed witness: the self-seal covers
+    # only the cochange rows. Attach assignment/rate as a sibling marker the
+    # caller lifts onto ``cochange_ablation`` (never into ``cochange_evidence``).
     if rate > 0.0:
-        evidence["ablation_assignment"] = assignment
-        evidence["ablation_rate"] = rate
+        evidence = {
+            **evidence,
+            "_ablation_assignment": assignment,
+            "_ablation_rate": rate,
+        }
     components["cochange"] = float(evidence["count"])
     return evidence, list(evidence["co_change_paths"])  # type: ignore[arg-type]
 
@@ -6882,15 +6888,22 @@ def generate_v1r_brief(
                 "withheld": True,
             }
             _cochange_ev = None
-        elif (
-            isinstance(_cochange_ev, dict)
-            and _cochange_ev.get("ablation_assignment")
+        elif isinstance(_cochange_ev, dict) and (
+            "_ablation_assignment" in _cochange_ev
+            or "ablation_assignment" in _cochange_ev
         ):
-            _ablation_meta = {
-                "assignment": _cochange_ev.get("ablation_assignment"),
-                "rate": _cochange_ev.get("ablation_rate"),
-                "withheld": False,
-            }
+            # Lift ablation off the sealed witness BEFORE it becomes cochange_evidence
+            # (extra keys would break source_identity_sha256 validation).
+            _assign = _cochange_ev.pop(
+                "_ablation_assignment", _cochange_ev.pop("ablation_assignment", None))
+            _arate = _cochange_ev.pop(
+                "_ablation_rate", _cochange_ev.pop("ablation_rate", None))
+            if _assign is not None:
+                _ablation_meta = {
+                    "assignment": _assign,
+                    "rate": _arate,
+                    "withheld": False,
+                }
         _proof_row: dict[str, object] = {
             "candidate_id": _localization_candidate_id(
                 _proof_path),

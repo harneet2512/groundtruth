@@ -490,12 +490,26 @@ def seal_reactive_localization_delivery(
             paths.append(m.group(1).replace("\\", "/"))
     if not paths:
         return False
-    # Drop prior reactive seals for these candidate ids so a re-seal is idempotent.
+    reactive_cids = {
+        _localization_candidate_id(path) for path in paths
+    }
+    # Drop prior reactive seals (idempotent re-seal) AND any brief-plane
+    # localization seal for the same candidate ids. Under GT_LOC_RESLOT the
+    # reactive ranked payload is the FACT delivery; leaving a step-0
+    # file-entry/header seal alongside makes contribution attestation
+    # ambiguous (two digests per candidate_id) and lets the collector join
+    # the wrong plane while the runtime ledger sealed the reactive bytes.
     keep: list[dict] = []
     for receipt in receipts:
         if not isinstance(receipt, dict):
             continue
         if receipt.get("delivery_plane") == "reactive":
+            continue
+        if (
+            receipt.get("fact_class") == "localization"
+            and isinstance(receipt.get("candidate_id"), str)
+            and receipt.get("candidate_id") in reactive_cids
+        ):
             continue
         keep.append(receipt)
     new_seals: list[dict] = []
