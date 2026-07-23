@@ -1148,7 +1148,16 @@ jobs:
           # Live log bridge + dockerd health check
           _LIVE_TASK="${{ matrix.task }}"; _STEPLOG="/tmp/gha_step_${_LIVE_TASK}.log"
           exec > >(tee -a "$_STEPLOG") 2>&1
-          GH_LIVE_TOKEN="${{ secrets.GITHUB_TOKEN }}" bash scripts/ci/live_log_push.sh "$_LIVE_TASK" "$_STEPLOG" "$(pwd)/trial_output.log" 20 >/dev/null 2>&1 &
+          # Feature-live honesty channel (DELIVERED|HOLD|SUPPRESSED|ERROR|NOT_ELIGIBLE).
+          # Host path mirrors the in-container GT_C_OUT mount when pier harvests it;
+          # live_log_push also discovers /tmp/gt_out and beside trial_output.log.
+          export GT_CAMPAIGN_FEATURE_LIVE="${GT_CAMPAIGN_FEATURE_LIVE:-$(pwd)/gt_out/gt_campaign_feature_live.jsonl}"
+          export FEATURE_LIVE_LOG="$GT_CAMPAIGN_FEATURE_LIVE"
+          mkdir -p "$(dirname "$GT_CAMPAIGN_FEATURE_LIVE")" 2>/dev/null || true
+          GH_LIVE_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            GT_CAMPAIGN_FEATURE_LIVE="$GT_CAMPAIGN_FEATURE_LIVE" \
+            FEATURE_LIVE_LOG="$FEATURE_LIVE_LOG" \
+            bash scripts/ci/live_log_push.sh "$_LIVE_TASK" "$_STEPLOG" "$(pwd)/trial_output.log" 20 >/dev/null 2>&1 &
           if ! docker info >/dev/null 2>&1; then
             echo "[DOCKERD-FIX] restarting"; (sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null) && sleep 10 || true
           fi
@@ -1345,6 +1354,7 @@ jobs:
               --ae GT_ESC_GATE_KV="${GT_ESC_GATE_KV:-}"
               --ae GT_ORACLE_EVENTS="${GT_C_OUT}/gt_oracle_events.jsonl"
               --ae GT_RUNTIME_LEDGER="${GT_C_OUT}/gt_runtime_ledger.jsonl"
+              --ae GT_CAMPAIGN_FEATURE_LIVE="${GT_C_OUT}/gt_campaign_feature_live.jsonl"
               --ae GT_HOOK_FIRE_COUNTS="${GT_C_OUT}/gt_hook_fire_counts.json"
             )
           fi

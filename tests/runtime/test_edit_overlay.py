@@ -15,8 +15,9 @@ Laws pinned here:
   - Executor routing: with an injected executor NO subprocess is spawned for reindex;
     commands follow the frozen CLI contract `gt-index -root R -output G.db [-file F]`
     and the frozen (cmd, cwd, timeout) triple.
-  - Capability honesty: ts/rs syntax = unsupported (never guessed clean); a supported
-    language with its tool absent = toolchain_missing, never "ok".
+  - Capability honesty: jsx/rs/java syntax = unsupported (never guessed clean);
+    ts/tsx = supported via esbuild --write=false (toolchain_missing if absent);
+    a supported language with its tool absent = toolchain_missing, never "ok".
   - Determinism: identical inputs => identical OverlayResult.to_dict() (wallclock-free).
   - Flag gate: GT_EDIT_OVERLAY off => apply_edit_transaction touches NOTHING.
 
@@ -594,7 +595,9 @@ def test_capability_matrix_static_honesty():
     assert m[".go"] == "supported"
     assert m[".js"] == "supported"
     assert m[".rb"] == "supported"
-    for ext in (".ts", ".tsx", ".jsx", ".rs", ".java"):
+    assert m[".ts"] == "supported"                            # esbuild --write=false
+    assert m[".tsx"] == "supported"
+    for ext in (".jsx", ".rs", ".java"):
         assert m[ext] == "unsupported", ext                   # NEVER guessed clean
     assert list(m) == sorted(m)                               # deterministic order
 

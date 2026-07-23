@@ -381,6 +381,11 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # this allow-list entry the host import-coverage guard aborts pier before the
         # agent runs (PIER_RUN_FAIL). Stdlib-only at module scope.
         "brief_cache.py",
+        # 2026-07-23: DIRECT LIVE bar + mid-run feature-live log. gt_mini_patch
+        # mirrors durable ledger rows into campaign_feature_live; direct_live is
+        # the sealed-delivery vocabulary (never ON-as-live).
+        "direct_live.py",
+        "campaign_feature_live.py",
     ),
     # SM-3: trajectory.classifier — hypothesis_ledger's FailureKind/is_env_failure
     # dep. Stdlib-only (enum/os/re/dataclasses), no groundtruth.* import -> closes

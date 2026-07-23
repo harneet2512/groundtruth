@@ -107,10 +107,18 @@ def test_cd_prefixed_pattern_still_abstains_on_nonsymbol():
     "cd $(pwd) && grep x",                  # non-single-token path -> not stripped -> && reject
     "cd /testbed & grep x",                 # single-& backgrounding: grep is not the head -> reject
     "pytest | grep Err",                    # pipe-FED grep (not first stage) -> reject
-    "grep x | head",                        # grep transformed by head -> not final -> reject
 ])
 def test_strict_rejects_hold(cmd):
     assert g._search_command_isolated(cmd) is False
+
+
+def test_truncate_pipe_is_isolated():
+    """``grep X | head`` / ``| tail`` preserve emptiness — answerable (true-myth shape)."""
+    assert g._search_command_isolated("grep x | head") is True
+    assert g._search_command_isolated("grep -rn foo . | tail -20") is True
+    assert g._search_command_isolated("cd /testbed && rg bar | head -n 5") is True
+    assert g._search_command_isolated("grep x | wc -l") is False
+    assert g._search_command_isolated("grep x | tee out") is False
 
 
 def test_plain_grep_still_isolated_regression():

@@ -273,8 +273,8 @@ def test_zero_behavior_body_only(tmp_path):
 
 
 def test_zero_absent_repeat_fires_change_surface(tmp_path, monkeypatch):
-    """True absence: name+path+body all miss. SILENT on the first probe; on a
-    REPEAT with no intervening edit -> ZERO_ABSENT -> W-A change_surface (HYPOTHESIS).
+    """True absence: name+path+body all miss. First confirmed absence may fire
+    change_surface (registry deliver_by=failed_search); RELATED create still mutes.
     Honors BOTH GT_GATEWAY and GT_CHANGE_SURFACE."""
     monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
     # a sibling convention: providers/aws.py + providers/gcp.py + a registry
@@ -293,12 +293,9 @@ def test_zero_absent_repeat_fires_change_surface(tmp_path, monkeypatch):
     issue = "Add an azure provider analogous to the existing aws and gcp providers."
     st = _state(tmp_path, db, issue_text=issue)
     ev1 = _ev("search", "grep -rn azure .", "", action_index=3)
-    ev2 = _ev("search", "grep -rn azure .", "", action_index=7)
-    first = augment(ev1, st)     # first probe: silent
-    assert first == []
-    assert classify_outcome(ev2, st) == ZERO_ABSENT
-    second = augment(ev2, st)    # repeat: change_surface may speak
-    assert any(a.tier == "HYPOTHESIS" and a.producer == "change_surface" for a in second)
+    assert classify_outcome(ev1, st) == ZERO_ABSENT
+    first = augment(ev1, st)     # first confirmed absence may speak
+    assert any(a.tier == "HYPOTHESIS" and a.producer == "change_surface" for a in first)
 
 
 def test_trace_hit_from_test_output(tmp_path):
@@ -630,9 +627,8 @@ def test_f2_change_surface_leaky_template_row_dropped(tmp_path, monkeypatch):
     monkeypatch.setattr(gw, "detect_change_surface", lambda *a, **k: fake)
     db = _mk_graph(tmp_path, [], [])
     st = _state(tmp_path, db, issue_text="Add an azure provider")
-    # two zero probes so the honest-negative repeat gate opens
-    augment(_ev("search", "grep -rn azure .", "", action_index=3), st)
-    adds = augment(_ev("search", "grep -rn azure .", "", action_index=7), st)
+    # First confirmed absence opens the registry deliver_by=failed_search gate.
+    adds = augment(_ev("search", "grep -rn azure .", "", action_index=3), st)
     assert adds, "the addition survives (its core is clean)"
     blob = "\n".join(ln for a in adds for ln in a.payload)
     assert "providers/azure.py" in blob
@@ -695,20 +691,25 @@ def _absent_fixture(tmp_path, monkeypatch):
 
 
 def test_f4_unrelated_edit_does_not_mute_zero_absent(tmp_path, monkeypatch):
-    """An intervening edit to an UNRELATED file must NOT reset the honest-negative
-    repeat gate — the azure repeat still fires change_surface."""
+    """First confirmed absence delivers change_surface. An intervening UNRELATED
+    edit must not be treated as related-create mute; the opportunity is already
+    consumed so a later re-grep stays silent (≤1 dose), distinct from F4 related
+    mute on a create of the probed entity."""
     st = _absent_fixture(tmp_path, monkeypatch)
-    augment(_ev("search", "grep -rn azure .", "", action_index=3), st)
+    first = augment(_ev("search", "grep -rn azure .", "", action_index=3), st)
+    assert any(a.producer == "change_surface" for a in first), \
+        "first confirmed absence must open change_surface"
     augment(_ev("edit", "sed -i 's/x/y/' unrelated.py", "",
                 changed_files=("unrelated.py",), action_index=5), st)
     out = augment(_ev("search", "grep -rn azure .", "", action_index=7), st)
-    assert any(a.producer == "change_surface" for a in out), \
-        "unrelated edit must not suppress the honest-negative"
+    assert not any(a.producer == "change_surface" for a in out), \
+        "re-grep after unrelated edit must not mint a second dose"
 
 
 def test_f4_related_edit_creating_entity_mutes_zero_absent(tmp_path, monkeypatch):
     """An intervening edit that plausibly CREATES the probed entity (path/content
-    mentions the stem) keeps the gate silent — the agent may have just added it."""
+    mentions the stem) keeps later probes silent — the agent may have just added
+    it (and the first-absence dose is already spent)."""
     st = _absent_fixture(tmp_path, monkeypatch)
     augment(_ev("search", "grep -rn azure .", "", action_index=3), st)
     augment(_ev("edit", "cat > providers/azure.py <<'EOF'\nclass AzureProvider: pass\nEOF",

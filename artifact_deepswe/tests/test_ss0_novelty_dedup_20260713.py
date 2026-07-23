@@ -50,20 +50,39 @@ def test_novelty_pure_predicate_exempts_nudge_classes():
     for kind in ("recovery", "edit.syntax", "detect.coherence", "l5.failure",
                  "verify.horizon.executed"):
         assert g._ss_novelty_suppresses(kind, "src/foo.py get_user()", "") is False
-    # a factual class whose cited file is acquired -> step-behind
-    assert g._ss_novelty_suppresses("l3.contract", "src/foo.py get_user()", "") is True
+    # caller_facts: viewing the cited file does NOT acquire the caller/contract claim
+    assert g._ss_novelty_suppresses("l3.contract", "src/foo.py get_user()", "") is False
+    # non-caller factual classes still use path acquisition
+    assert g._ss_novelty_suppresses(
+        "post_search.localize", "src/foo.py get_user()", "") is True
 
 
-def test_novelty_suppresses_when_all_entities_acquired(monkeypatch):
+def test_novelty_suppresses_when_claim_already_in_native(monkeypatch):
     _base(monkeypatch)
-    recs = _capture(monkeypatch)
     monkeypatch.setenv("GT_SS_NOVELTY", "1")
     g._ss_acquired_files.add("src/foo.py")
-    block = ("l3.contract", "\n<gt-contract>\nsrc/foo.py: def get_user(uid)\n</gt-contract>")
-    out: dict = {}
-    g._lane_a_deliver(out, "cmd", [block], krel="src/foo.py", event=None)
-    assert (out.get("output") or "") == ""  # SUPPRESSED (the file was already opened)
-    assert any(r.get("reason") == "ss_step_behind" for r in recs)
+    claim = "src/foo.py: def get_user(uid)"
+    suppressed, reason = g._ss_content_decision(
+        "l3.contract", claim, "", native_text=f"Traceback:\n{claim}\nfailed")
+    assert suppressed is True
+    assert reason == "ss_step_behind"
+
+
+def test_novelty_delivers_caller_contract_despite_viewed_files(monkeypatch):
+    """DIRECT caller_contract must not die solely because the agent opened the file."""
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    g._ss_acquired_files.add("src/foo.py")
+    suppressed, reason = g._ss_screen_delivery(
+        "l3.contract",
+        "src/foo.py: def get_user(uid) — called by bar()",
+        "",
+        subject_path="src/foo.py",
+        event="post_edit",
+        native_text="",
+    )
+    assert suppressed is False
+    assert reason == ""
 
 
 def test_novelty_delivers_when_entity_not_acquired(monkeypatch):
@@ -92,7 +111,8 @@ def test_closed_subject_boundary_preserves_mixed_novel_caller_fact(
     assert reason == ""
 
 
-def test_post_view_subject_only_claim_suppresses_when_acquired(monkeypatch):
+def test_post_view_subject_only_claim_delivers_when_only_path_acquired(monkeypatch):
+    """File view alone does not acquire a caller_facts claim (claim-line novelty)."""
     _base(monkeypatch)
     monkeypatch.setenv("GT_SS_NOVELTY", "1")
     g._ss_acquired_files.add("src/subject.py")
@@ -102,8 +122,8 @@ def test_post_view_subject_only_claim_suppresses_when_acquired(monkeypatch):
         subject_path="src/subject.py", event="post_view",
     )
 
-    assert suppressed is True
-    assert reason == "ss_step_behind"
+    assert suppressed is False
+    assert reason == ""
 
 
 def test_open_search_boundary_preserves_mixed_novel_caller_fact(monkeypatch):
@@ -243,14 +263,17 @@ def test_novelty_off_delivers_stepbehind_block(monkeypatch):
     assert "<gt-contract>" in (out.get("output") or "")
 
 
-def test_novelty_pathless_block_uses_symbol_acquisition():
+def test_novelty_pathless_block_caller_facts_not_symbol_acquired():
+    """caller_facts: grepping a symbol does not acquire the caller/contract claim."""
     g._ss_acquired_files.clear()
     g._ss_acquired_symbols.clear()
     g._ss_acquired_symbols.add("frobnicate")
-    # a path-less block naming only an acquired greped symbol -> step-behind
-    assert g._ss_novelty_suppresses("l3b.evidence", "frobnicate() is called here", "") is True
-    # a path-less block naming an UN-greped symbol -> deliver
-    assert g._ss_novelty_suppresses("l3b.evidence", "brandnew() is called here", "") is False
+    assert g._ss_novelty_suppresses("l3b.evidence", "frobnicate() is called here", "") is False
+    # Non-caller factual class still uses symbol acquisition when path-less
+    assert g._ss_novelty_suppresses(
+        "post_search.localize", "frobnicate() is called here", "") is True
+    assert g._ss_novelty_suppresses(
+        "post_search.localize", "brandnew() is called here", "") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -294,20 +317,24 @@ def test_dedup2_group_crosses_classes(monkeypatch):
 
 
 def test_stepbehind_fact_becomes_known_for_later_cross_class_subset(monkeypatch):
-    """A fact already known through native acquisition is a semantic prior even when GT
-    correctly withheld its first rendering as step-behind."""
+    """Exact claim already in native observation seeds known-set; subset later is dup."""
     _base(monkeypatch)
     recs = _capture(monkeypatch)
     monkeypatch.setenv("GT_SS_NOVELTY", "1")
     monkeypatch.setenv("GT_SS_DEDUP2", "1")
     g._ss_acquired_files.add("conans/client/migrations.py")
 
-    first = ("l3b.evidence", "conans/client/migrations.py migrate_settings_file() update_file()")
-    g._lane_a_deliver({}, "cmd", [first], krel="conans/client/migrations.py", event=None)
+    claim = "conans/client/migrations.py migrate_settings_file() update_file()"
+    suppressed, reason = g._ss_screen_delivery(
+        "l3b.evidence", claim, "",
+        subject_path="conans/client/migrations.py", event="post_edit",
+        native_text=f"observed:\n{claim}\n",
+    )
+    assert suppressed is True and reason == "ss_step_behind"
     second = ("l3.contract", "conans/client/migrations.py migrate_settings_file()")
     g._lane_a_deliver({}, "cmd", [second], krel="conans/client/migrations.py", event=None)
 
-    assert [r.get("reason") for r in recs] == ["ss_step_behind", "ss_semantic_dup"]
+    assert any(r.get("reason") == "ss_semantic_dup" for r in recs)
 
 
 def test_known_fact_decision_has_lane_gateway_parity_and_reset(monkeypatch):

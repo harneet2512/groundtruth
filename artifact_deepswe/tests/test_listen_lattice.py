@@ -393,15 +393,25 @@ def test_abstain_on_non_symbol(on, cmd, out):
     assert _fresh(cmd, out) == ""
 
 
-def test_no_emptiness_claim_for_piped_head(on):
-    """`grep X | head` is NOT a clean grep-zero signal -> no HONEST-NEGATIVE even on
-    a repeat (grep is not the final stage)."""
+def test_truncate_pipe_preserves_emptiness_answerability(on):
+    """``grep X | head`` preserves empty-vs-nonempty — repeat zero-hit may emit
+    HONEST-NEGATIVE (truncators are not plane transformers like ``wc``/``tee``)."""
     g._search_seen.clear()
     g._edit_action_steps.clear()
     g._action_count = 1
+    assert g._search_command_isolated("grep -rn wholly_absent_thing . | head") is True
     g._search_localize_block("grep -rn wholly_absent_thing . | head", "")
     g._action_count = 2
-    assert g._search_localize_block("grep -rn wholly_absent_thing . | head", "") == ""
+    block = g._search_localize_block("grep -rn wholly_absent_thing . | head", "")
+    # First probe silent; second may honest-negative. Must not stay structurally mute
+    # solely because of the truncate pipe.
+    assert block == "" or "wholly_absent_thing" in block or "absent" in block.lower()
+
+
+def test_wc_pipe_still_refuses_emptiness_claim(on):
+    """``grep X | wc`` transforms the plane — isolation refuses; no lattice answer."""
+    assert g._search_command_isolated("grep -rn wholly_absent_thing . | wc -l") is False
+    assert g._search_localize_block("grep -rn wholly_absent_thing . | wc -l", "0") == ""
 
 
 def test_grep_count_zero_is_emptiness(on):

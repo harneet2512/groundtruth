@@ -239,8 +239,10 @@ def test_two_flags_lattice_abstains_gateway_now_admitted(ambiguous, monkeypatch)
 
 
 def test_repeated_true_absence_hands_off_once_to_change_surface(tmp_path, monkeypatch):
-    """Profile-2's lattice yields only its qualified repeat-zero to the registered
-    change_surface producer: one physical record per probe, one lineaged delivery."""
+    """Profile-2's lattice yields the registered change_surface producer on the
+    first confirmed absence (registry deliver_by=failed_search): one physical
+    record per probe, one lineaged delivery. Lattice thin honest-negative stays
+    silent on first probe; gateway owns the rich destination dose."""
     providers = tmp_path / "providers"
     providers.mkdir()
     (providers / "aws.py").write_text(
@@ -268,12 +270,7 @@ def test_repeated_true_absence_hands_off_once_to_change_surface(tmp_path, monkey
     )
 
     first = _run("grep -rn azure .", "", rc=1)
-    assert first == ""
     assert _ledger_outcomes("azure") == ["zero"]
-    assert g._gt_gateway_deliveries == []
-
-    second = _run("grep -rn azure .", "", rc=1)
-    assert _ledger_outcomes("azure") == ["zero", "zero"]
     assert len(g._gt_gateway_deliveries) == 1
     sealed = g._gt_gateway_deliveries[0]
     assert sealed.producer == "change_surface"
@@ -287,7 +284,13 @@ def test_repeated_true_absence_hands_off_once_to_change_surface(tmp_path, monkey
         and ref.role == "byte_owner"
         for ref in sealed.lineage.features
     )
-    assert second and "azure" in second.lower()
+    assert first and "azure" in first.lower()
+    assert "appears unimplemented" not in first
+
+    # A second absence probe must not mint a second dose.
+    _run("grep -rn azure .", "", rc=1)
+    assert _ledger_outcomes("azure") == ["zero", "zero"]
+    assert len(g._gt_gateway_deliveries) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -453,12 +456,13 @@ def test_excluded_search_touches_no_gateway_state_except_receipts(tmp_path, monk
 # GREEN PROOF (2026-07-22) — change_surface zero-coverage FIX, end-to-end wiring.
 # --------------------------------------------------------------------------- #
 def test_change_surface_dominance_delivers_blast_radius(zero_name, monkeypatch):
-    """A confident change_surface answer DOMINATES the thin CLASS-4 honest-negative on a
-    REPEATED zero-absent probe -> the lattice abstains -> the conditional exclusion admits the
-    gateway -> _produce_change_surface delivers the new_file_destination blast-radius. The engine
-    is mocked (fixture-sensitive + tested separately); this pins THE WIRING the change added.
-    RED before the change: turn 3 delivered only the thin 'appears unimplemented' note, the
-    gateway stayed excluded, and 0 new_file_destination reached the agent."""
+    """A confident change_surface answer DOMINATES the thin CLASS-4 honest-negative
+    on a confirmed zero-absent probe -> the lattice abstains -> the conditional
+    exclusion admits the gateway -> `_produce_change_surface` delivers the
+    new_file_destination blast-radius on the first confirmed absence (registry
+    deliver_by=failed_search). The engine is mocked (fixture-sensitive + tested
+    separately); this pins THE WIRING. RED before: only the thin note, gateway
+    excluded, 0 new_file_destination."""
     from types import SimpleNamespace
     dest = SimpleNamespace(
         suggested_path="handlers/baz_handler.py", template_file="handlers/foo_handler.py",
@@ -472,9 +476,8 @@ def test_change_surface_dominance_delivers_blast_radius(zero_name, monkeypatch):
     monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
     monkeypatch.setattr(g, "_issue_text", lambda: "Add a baz_handler following the handler pattern.")
 
-    _run("grep -rn BazHandler .", "")        # turn 1: intentional first probe -> silent both planes
-    _run("cat registry.py", "contents")      # turn 2: a non-search VIEW (not an edit)
-    obs = _run("grep -rn BazHandler .", "")   # turn 3: REPEAT zero-absent -> dominance -> gateway
+    # Dominance: lattice abstains the thin note so gateway owns the first absence.
+    obs = _run("grep -rn BazHandler .", "")
 
     assert "baz_handler.py" in obs            # the rich blast-radius delivered
     assert "new file" in obs.lower()

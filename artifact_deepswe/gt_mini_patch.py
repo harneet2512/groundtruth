@@ -128,6 +128,15 @@ def _ledger_line_direct(entry: dict) -> bool:
                 entry["timestamp_ms"] = 0
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
+        # Mid-run GH honesty channel: project sealed DIRECT rows only. Never
+        # credits Profile-ON / evaluated / brief-tag as LIVE.
+        try:
+            from groundtruth.runtime.campaign_feature_live import (
+                mirror_ledger_row_to_feature_live,
+            )
+            mirror_ledger_row_to_feature_live(entry)
+        except Exception:  # noqa: BLE001 — live log must never break the agent
+            pass
         return True
     except Exception:  # noqa: BLE001
         global _LEDGER_WRITE_FAILURES
@@ -4763,10 +4772,17 @@ class _PostSearchDecision:
             return None
         try:
             from groundtruth.runtime.feature_lineage import build_lineage
+            caps = (
+                ("GT_LOC_RESLOT",)
+                if self.runtime_producer_id == "ranked_localization"
+                and self.evidence_type == "localization"
+                else ()
+            )
             lineage = build_lineage(
                 runtime_producer_id=self.runtime_producer_id,
                 evidence_type=self.evidence_type,
                 actual_event=self.actual_event,
+                cap_feature_ids=caps,
             )
             if lineage is None or not lineage.producer_registration_match:
                 return None
@@ -10972,7 +10988,24 @@ def _executed_covering_candidate(
             _runtime_ledger_record(
                 kind="verify.horizon.executed",
                 outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
-                reason="covering_empty_sub_fact_floor", chars=0)
+                reason="covering_empty_sub_fact_floor", chars=0,
+                extra={
+                    "fact_class": "covering_red",
+                    "hold_terminal": True,
+                    "profile_member": "GT_VERIFY_EXECUTE",
+                })
+            try:
+                from groundtruth.runtime.campaign_feature_live import (
+                    append_feature_live)
+                append_feature_live(
+                    feature_id="covering_red",
+                    stage="HOLD",
+                    reason="covering_empty_sub_fact_floor",
+                    role="direct",
+                    iteration=int(globals().get("_action_count", 0) or 0),
+                )
+            except Exception:  # noqa: BLE001
+                pass
         except Exception:  # noqa: BLE001 — host ledger must never break the producer
             pass
         _covering_exec_fired_syms |= fresh
@@ -11190,6 +11223,40 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
     except Exception:  # noqa: BLE001 -- the checker must never break the loop
         return None
     if res.get("verdict") != "syntax_error":
+        # Plan B5: never silent on ok/unavailable — explicit HOLD terminal so
+        # Profile-ON cannot be scored LIVE without sealed syntax_result bytes.
+        _syntax_reason = (
+            "syntax_ok" if res.get("verdict") == "ok"
+            else f"syntax_{res.get('verdict') or 'unavailable'}"
+        )
+        try:
+            _runtime_ledger_record(
+                kind="edit.syntax",
+                outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason=_syntax_reason, chars=0, file_path=rel,
+                extra={
+                    "fact_class": "syntax_result",
+                    "hold_terminal": True,
+                    "profile_member": "GT_EDIT_CHECK",
+                })
+            from groundtruth.runtime.campaign_feature_live import (
+                append_feature_live)
+            append_feature_live(
+                feature_id="syntax_result",
+                stage="HOLD",
+                reason=_syntax_reason,
+                role="direct",
+                iteration=int(globals().get("_action_count", 0) or 0),
+            )
+            append_feature_live(
+                feature_id="GT_EDIT_CHECK",
+                stage="HOLD",
+                reason=_syntax_reason,
+                role="direct",
+                iteration=int(globals().get("_action_count", 0) or 0),
+            )
+        except Exception:  # noqa: BLE001 — HOLD telemetry never breaks the loop
+            pass
         return None
     block = render_syntax_error_native(res)
     if not block:
@@ -11537,12 +11604,27 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
     # >=2x with no intervening edit) RELEASED recovery at this qualifying repeat. Provenance/
     # measurement only — the delivered imperative bytes are unchanged. Emitted ONLY under the
     # flag, so the flag-off ledger is byte-identical.
+    # Host-only release witness (ZERO model bytes). Never claim outcome=delivered
+    # with chars=0 — that was false-live / measurement_failed noise. Real sealed
+    # recovery delivery is the gate-win ledger row with content_sha256_16.
     if recovery_v2:
         try:
-            _runtime_ledger_record(
-                kind="recovery",
-                outcome=_ProductSignalOutcome.DELIVERED,
-                reason="ss_recovery", chars=0)
+            _control_participation_record(
+                "GT_SS_RECOVERY_V2",
+                "mini_seam.recovery_candidate.v2_release",
+                "APPLIED",
+                reason="ss_recovery_released",
+                fact_class="recovery",
+                candidate_id=f"recovery:{selection[0]}",
+            )
+            _control_participation_record(
+                "GT_HYPOTHESIS",
+                "mini_seam.recovery_candidate.hypothesis",
+                "APPLIED",
+                reason="ss_recovery_released",
+                fact_class="recovery",
+                candidate_id=f"recovery:{selection[0]}",
+            )
         except Exception:  # noqa: BLE001 — measurement must never break the producer
             pass
     return (float(_SEV_RECOVERY), "recovery", text, True)
@@ -20777,6 +20859,31 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
             # clean / gate_overridden / gate_crash -> submission proceeds (host record).
             # A CLEAN cert on an allow delivers NOTHING (correct-or-quiet) — the block below
             # is SUBORDINATE to the head block decision, so the cert never turns allow -> block.
+            # Plan B7: explicit NOT_ELIGIBLE / HOLD terminals so clean-submit is never
+            # scored as dark DIRECT (submit_refusal / CERT / SS_SUBMIT_RED).
+            try:
+                from groundtruth.runtime.campaign_feature_live import (
+                    append_feature_live)
+                for _fid in (
+                        "submit_refusal", "GT_SS_SUBMIT_RED", "GT_CERT_DELIVERY"):
+                    append_feature_live(
+                        feature_id=_fid,
+                        stage="NOT_ELIGIBLE",
+                        reason="submit_clean",
+                        role="direct",
+                        iteration=int(globals().get("_action_count", 0) or 0),
+                    )
+                _runtime_ledger_record(
+                    kind="submit.gate",
+                    outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason="submit_clean", chars=0,
+                    extra={
+                        "fact_class": "submit_refusal",
+                        "hold_terminal": True,
+                        "profile_member": "GT_SS_SUBMIT_RED",
+                    })
+            except Exception:  # noqa: BLE001 — HOLD never blocks clean submit
+                pass
             _gt_submit_record(verdict, blocked=False)
             return None
         # BLOCK: render the refusal as a pre-commit / CI failure — native, in-

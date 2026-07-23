@@ -80,13 +80,36 @@ def _brief_delivery_extra(e: Mapping[str, str], brief_text: str) -> dict:
     try:
         with open(result_path, encoding="utf-8") as fh:
             result = json.load(fh)
-        if (
-            result.get("schema") != "gt.brief_result.v1"
-            or result.get("brief_text") != brief_text
-        ):
+        if result.get("schema") != "gt.brief_result.v1":
+            return {}
+        # Prefer seal join over exact string equality: brief.txt vs brief_result
+        # can differ by trailing newline while still being the same sealed brief.
+        sealed = result.get("brief_sha256")
+        brief_ok = result.get("brief_text") == brief_text
+        if not brief_ok and isinstance(sealed, str) and sealed:
+            try:
+                from groundtruth.runtime.brief_cache import brief_sha256 as _bsha
+                brief_ok = sealed == _bsha(brief_text)
+            except Exception:
+                brief_ok = False
+        if not brief_ok:
             return {}
         receipts = (result.get("metrics") or {}).get("block_receipts")
         if not isinstance(receipts, list):
+            return {}
+        if not receipts:
+            # Fail-closed honesty: fact-bearing brief present, receipts still empty.
+            try:
+                from groundtruth.runtime.campaign_feature_live import (
+                    append_feature_live)
+                append_feature_live(
+                    feature_id="obligations",
+                    stage="ERROR",
+                    reason="block_receipts_empty_after_ensure",
+                    role="direct",
+                )
+            except Exception:
+                pass
             return {}
         from groundtruth.runtime.feature_lineage import build_lineage, lineage_to_dict
 

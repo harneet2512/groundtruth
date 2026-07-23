@@ -142,6 +142,22 @@ def test_recovery_candidate_v2_gate(monkeypatch):
     assert rc is not None and rc[1] == "recovery"        # released at repeat-2
 
 
+def test_recovery_v2_admits_degenerate_loop_thrash(monkeypatch):
+    """Thrash-rewrites clear the fail streak; hard degenerate-loop still releases."""
+    monkeypatch.setenv("GT_HYPOTHESIS", "1")
+    monkeypatch.setenv("GT_SS_RECOVERY_V2", "1")
+    imp = g._hypothesis_imperative_map()[hl.D_REQUEST_NEW_HYPOTHESIS]
+    g._gt_hypothesis_recovery = (hl.D_REQUEST_NEW_HYPOTHESIS, imp)
+    g._ss_test_fail_counts.clear()
+    g._ss_current_failure_event = None
+    g._detect_loop_fired = False
+    assert g._recovery_candidate() is None
+    g._detect_loop_fired = True
+    rc = g._recovery_candidate()
+    assert rc is not None and rc[1] == "recovery"
+    g._detect_loop_fired = False
+
+
 def test_recovery_v2_off_falls_to_legacy(monkeypatch):
     """RED anchor: flag OFF -> V2 gate is inert; the legacy (arbiter-scoped) path governs."""
     monkeypatch.setenv("GT_HYPOTHESIS", "1")             # GT_SS_RECOVERY_V2 NOT set

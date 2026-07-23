@@ -627,7 +627,7 @@ def test_nonzero_exit_no_syntax_shape_unavailable(tmp_path):
 # ===========================================================================
 # CORRECT-OR-QUIET — languages we cannot cheaply/soundly check are unavailable
 # ===========================================================================
-@pytest.mark.parametrize("name", ["mod.ts", "comp.tsx", "lib.rs", "App.java", "part.jsx", "readme.xyz", "noext"])
+@pytest.mark.parametrize("name", ["lib.rs", "App.java", "part.jsx", "readme.xyz", "noext"])
 def test_unchecked_language_unavailable(tmp_path, name):
     f = tmp_path / name
     f.write_text("whatever content\n")
@@ -637,6 +637,35 @@ def test_unchecked_language_unavailable(tmp_path, name):
 
     res = check_edit_syntax(str(f), str(tmp_path), executor=_must_not_run)
     assert res["verdict"] == "unavailable", res
+
+
+@pytest.mark.parametrize("name", ["mod.ts", "comp.tsx"])
+def test_ts_dispatches_esbuild_write_false(tmp_path, name):
+    """TS/TSX use transform-only esbuild (no --bundle) — never silent unsupported."""
+    f = tmp_path / name
+    f.write_text("const x: number = 1;\n")
+    seen: list[list[str]] = []
+
+    def _capture(cmd, cwd, timeout):
+        seen.append(list(cmd))
+        return 0, "", ""
+
+    res = check_edit_syntax(str(f), str(tmp_path), executor=_capture)
+    assert res["verdict"] == "ok", res
+    assert seen and seen[0][0] == "esbuild"
+    assert "--write=false" in seen[0]
+    assert "--bundle" not in seen[0]
+
+
+def test_ts_esbuild_parse_error_is_syntax_error(tmp_path):
+    f = tmp_path / "bad.ts"
+    f.write_text("const x = (\n")
+    res = check_edit_syntax(
+        str(f), str(tmp_path),
+        executor=_fake_executor(
+            1, "", "bad.ts:1:12: ERROR: Unexpected end of file\n"),
+    )
+    assert res["verdict"] == "syntax_error", res
 
 
 def test_empty_file_path_unavailable(tmp_path):

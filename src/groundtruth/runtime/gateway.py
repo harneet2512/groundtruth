@@ -3231,6 +3231,16 @@ def augment(
             additions += produced
             if event.edit_before_after:
                 edit_bridge_candidates += produced
+            if not produced and event.edit_before_after:
+                # Plan B6: eligible edit with structured before/after but no bytes
+                # → explicit NO_EFFECT (never silent Profile-ON).
+                try:
+                    _record_control(
+                        state, "GT_PATCH_DELTA",
+                        "gateway.patch_delta.producer", "NO_EFFECT",
+                        reason="predicates_unmatched_or_abstained")
+                except Exception:  # noqa: BLE001
+                    pass
         # SM-2b: the CROSS-LANGUAGE caller-contract break — the graph-based replacement for
         # the legacy l3.contract/l3b.evidence caller-break patch_delta (ast-only) cannot
         # produce on a non-Python edit. Both are caller-break families; arbitration keeps the
@@ -3255,7 +3265,16 @@ def augment(
         additions += _produce_trace(event, state)
     elif outcome == ZERO_ABSENT:
         if _change_surface_producer_on():  # kill-switch; see _change_surface_producer_on docstring
-            additions += _produce_change_surface(event, state)
+            _cs = _produce_change_surface(event, state)
+            additions += _cs
+            if not _cs:
+                try:
+                    _record_control(
+                        state, "GT_CHANGE_SURFACE",
+                        "gateway.change_surface.producer", "NO_EFFECT",
+                        reason="predicates_unmatched_or_abstained")
+                except Exception:  # noqa: BLE001
+                    pass
     elif outcome == ZERO_NAME:
         additions += _produce_name_fold(event, state)
     elif outcome == ZERO_BEHAVIOR:
