@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #12 | 2026-07-23T22:01:12Z | task=valibot-recursive-schema-composition ===
+=== LIVE SNAPSHOT #13 | 2026-07-23T22:01:33Z | task=valibot-recursive-schema-composition ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_valibot-recursive-schema-composition.log:[DOCKERFILE SLIM] deepswe-bench/tasks/valibot-recursive-schema-composition/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh77krxpg096a66tm8s8ztcarn82zzyv (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_valibot-recursive-schema-composition.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -10,15 +10,19 @@
 --- mem trend (last 6) ---
 [RESMON] 22:01:12 mem=1213/15993MB disk_used=92940/147719MB free=54763MB containers=0
 [MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=605MB MemAvailable:=14777MB Cached:=12318MB AnonPages:=371MB Mapped:=327MB Slab:=1338MB 
+[RESMON] 22:01:20 mem=1513/15993MB disk_used=93046/147719MB free=54658MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=237MB MemAvailable:=14480MB Cached:=12388MB AnonPages:=651MB Mapped:=466MB Slab:=1336MB 
+[RESMON] 22:01:28 mem=1770/15993MB disk_used=93615/147719MB free=54089MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=233MB MemAvailable:=14210MB Cached:=12075MB AnonPages:=898MB Mapped:=487MB Slab:=1378MB 
 --- pier tail (last 15, non-RESMON) ---
 --- step tail (last 8) ---
-[SLIM-VERIFY]   CMD ["/bin/bash"]
-[RESMON] 22:01:12 mem=1213/15993MB disk_used=92940/147719MB free=54763MB containers=0
-[RESTOP] 143MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 133MB:provjobd4049902 /tmp/provjobd404990286 | 124MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 114MB:Runner.Listener /home/runner/actions-runner/cached/2.336.0/bin/Runner. | 
-[MEMDIAG] dockerd(2807): VmRSS:=127480kB RssAnon:=75328kB RssFile:=52152kB RssShmem:=0kB VmSwap:=0kB 
-[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=605MB MemAvailable:=14777MB Cached:=12318MB AnonPages:=371MB Mapped:=327MB Slab:=1338MB 
-[gt-shim] installed in-place at: /bin/docker /tmp/docker-cli-cache/docker /usr/bin/docker + PATH(/tmp/gt-shim); real-suffix=.gtreal
-[gt-shim] active; resolved=/tmp/gt-shim/docker
-[ENV-START] attempt 1/3 — pier (bg) + container watcher (window=1800s)
+[RESMON] 22:01:20 mem=1513/15993MB disk_used=93046/147719MB free=54658MB containers=0
+[RESTOP] 251MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 143MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 133MB:provjobd4049902 /tmp/provjobd404990286 | 122MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 
+[MEMDIAG] dockerd(2807): VmRSS:=125060kB RssAnon:=69472kB RssFile:=55588kB RssShmem:=0kB VmSwap:=0kB 
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=237MB MemAvailable:=14480MB Cached:=12388MB AnonPages:=651MB Mapped:=466MB Slab:=1336MB 
+[RESMON] 22:01:28 mem=1770/15993MB disk_used=93615/147719MB free=54089MB containers=0
+[RESTOP] 251MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 199MB:python /root/.local/share/uv/tools/mini-swe-agent/bin/python | 143MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 133MB:provjobd4049902 /tmp/provjobd404990286 | 
+[MEMDIAG] dockerd(2807): VmRSS:=125060kB RssAnon:=69472kB RssFile:=55588kB RssShmem:=0kB VmSwap:=0kB 
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=233MB MemAvailable:=14210MB Cached:=12075MB AnonPages:=898MB Mapped:=487MB Slab:=1378MB 
 --- FEATURE LIVE (DELIVERED|HOLD|SUPPRESSED|ERROR|NOT_ELIGIBLE only) ---
 (no gt_campaign_feature_live.jsonl yet)
