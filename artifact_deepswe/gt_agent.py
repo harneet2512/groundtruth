@@ -407,6 +407,13 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # the diagnostic-delta blast radius). Ships to close patch_delta's import
         # closure. Verified stdlib+shipped-only by the import-closure test.
         "cochange.py",
+        # 2026-07-22: change_surface — the blast-radius engine. gt_mini_patch's
+        # _change_surface_dominates() imports detect_change_surface directly (CLASS-4
+        # dominance re-admission), so it is no longer only-optional-in-gateway: it MUST
+        # ship or the in-container import returns None and change_surface can never fire
+        # live (the import-coverage guard, gt_agent._assert_gt_mini_patch_imports_covered,
+        # fails-closed on it). Stdlib + shipped-only (no new transitive dep).
+        "change_surface.py",
     ),
 }
 
