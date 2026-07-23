@@ -454,6 +454,28 @@ def test_multimodal_nontext_metadata_is_not_model_byte_proof():
     assert not g._rendered_contains_exact_suffix(rendered, 0, "GT_SUFFIX")
 
 
+def test_suffix_proof_rejects_preexisting_identical_suffix():
+    """A clipped augmented copy must not pass on bytes already in the base."""
+    base = [{"role": "tool", "content": "base\nGT_SUFFIX"}]
+    augmented = [{"role": "tool", "content": "base\nGT_SUFFIX"}]
+    assert not g._rendered_contains_exact_suffix(
+        augmented, 0, "\nGT_SUFFIX", base)
+
+
+def test_suffix_proof_requires_structural_base_to_augmented_append():
+    base = [{"role": "tool", "content": "base"}]
+    augmented = [{"role": "tool", "content": "base\nGT_SUFFIX"}]
+    assert g._rendered_contains_exact_suffix(
+        augmented, 0, "\nGT_SUFFIX", base)
+
+
+def test_suffix_proof_rejects_reordered_suffix_even_when_present():
+    base = [{"role": "tool", "content": "base"}]
+    reordered = [{"role": "tool", "content": "\nGT_SUFFIXbase"}]
+    assert not g._rendered_contains_exact_suffix(
+        reordered, 0, "\nGT_SUFFIX", base)
+
+
 def test_partial_commit_exception_reconciles_visible_output_and_memory(monkeypatch):
     _wire_fake_candidates(monkeypatch)
     before_hashes = set(g._oracle_delivered_hashes)

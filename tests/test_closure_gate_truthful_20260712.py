@@ -36,6 +36,12 @@ def test_closure_step_is_strict() -> None:
     assert "set -euo pipefail" in run, "closure inner shell must engage strict mode (fail on first missing dep)"
 
 
+def test_closure_verifies_emitted_immutable_digest_not_latest() -> None:
+    run = _closure_run_block()
+    assert "@${{ steps.build.outputs.digest }}" in run
+    assert ":latest" not in run
+
+
 def test_closure_step_does_not_probe_removed_deps() -> None:
     run = _closure_run_block()
     # ban the PROBE COMMANDS/PATHS (a doc comment may still name the removed deps as context).

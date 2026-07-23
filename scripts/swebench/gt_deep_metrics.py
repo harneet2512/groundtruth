@@ -1508,6 +1508,26 @@ def _verifier_interface_metrics(truth_data: object) -> dict[str, int | float | N
     return verifier_interface_metrics(truth_data)
 
 
+def _task_truth_identity_ok(truth_data: object, task: str) -> bool:
+    """True only when a task_truth doc is current-schema AND identity-matched to
+    this task.
+
+    A stale or foreign truth — null or mismatched ``instance_id``, e.g. the frozen
+    baseline copies whose ``instance_id`` came through null and whose failure_class
+    is INFRA — must never override the run's own reward/trajectory outcome. Honoring
+    such a doc silently forced every frozen resolve to unresolved (the 83->0 defect).
+    Generic identity check only: no task/repo-specific keys.
+    """
+    if not isinstance(truth_data, dict):
+        return False
+    if truth_data.get("schema") != "gt.task_truth.v1":
+        return False
+    iid = truth_data.get("instance_id")
+    if not isinstance(iid, str) or not iid:
+        return False
+    return iid.strip().removeprefix("ll-full-") == str(task).strip().removeprefix("ll-full-")
+
+
 def build(task: str, results_dir: str, log_path: str = "",
           db_path: str = "", pipeline_arg: str = "") -> dict:
     summ = _load_json(f"/tmp/gt_run_summary_{task}.json") or {}
@@ -1544,6 +1564,19 @@ def build(task: str, results_dir: str, log_path: str = "",
             truth_path = hit
             break
     truth_data = _load_json(truth_path) if truth_path and os.path.isfile(truth_path) else None
+    # Identity guard (Codex root-cause #1): honor task_truth ONLY when it is
+    # current-schema AND matched to THIS task. A stale/foreign truth (null or
+    # mismatched instance_id — the frozen-baseline copies) must never override the
+    # run's own outcome, or every frozen resolve collapses to unresolved.
+    task_truth_rejected = None
+    if truth_data is not None and not _task_truth_identity_ok(truth_data, task):
+        task_truth_rejected = {
+            "path": truth_path,
+            "schema": truth_data.get("schema") if isinstance(truth_data, dict) else None,
+            "instance_id": truth_data.get("instance_id") if isinstance(truth_data, dict) else None,
+            "reason": "schema_or_instance_id_not_matched_to_task",
+        }
+        truth_data = None
 
     traj = _from_trajectory(task, results_dir)
     # DeepSWE/pier writes mini-swe-agent.trajectory.json, NOT output.jsonl — read it as
@@ -1805,6 +1838,7 @@ def build(task: str, results_dir: str, log_path: str = "",
         "failure_class": verdict.get("failure_class", ""),
         "outcome_authority": verdict.get("outcome_authority", ""),
         "task_truth_path": truth_path if truth_data else None,
+        "task_truth_rejected": task_truth_rejected,
         "runtime_control": (truth_data.get("runtime_control") if truth_data else None),
         # --- graph-derived (TASK 2) ---
         "graph_db_path": graph["graph_db_path"],

@@ -76,6 +76,31 @@ def test_tagless_native_read_is_referenced_not_acted(tmp_path: Path) -> None:
     assert entry["receipt"] == 2
 
 
+def test_responses_content_arrays_and_function_calls_count_as_assistant_action(
+    tmp_path: Path,
+) -> None:
+    payload = "src/pkg.py:12: preserve parse_config callers"
+    ledger = tmp_path / "gt_runtime_ledger_task.jsonl"
+    _write_ledger(ledger, payload)
+    trajectory = {
+        "messages": [
+            {"role": "tool", "content": [{"type": "output_text", "text": payload}]},
+            {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "I will update pkg.py."}],
+                "output": [{
+                    "type": "function_call", "name": "shell",
+                    "arguments": json.dumps({"command": "sed -i 's/old/new/' src/pkg.py"}),
+                }],
+            },
+        ]
+    }
+    result = build_consumption_ledger(trajectory, runtime_ledger_path=str(ledger))
+    assert result["gt_blocks_referenced"] == 1
+    assert result["gt_blocks_consumed"] == 1
+    assert result["entries"][0]["receipt"] == 3
+
+
 def test_ledger_delivered_without_exact_observation_bytes_stays_dark(tmp_path: Path) -> None:
     payload = "src/pkg.py:12: preserve parse_config callers"
     ledger = tmp_path / "gt_runtime_ledger_task.jsonl"

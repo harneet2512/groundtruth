@@ -630,7 +630,12 @@ def preflight(env: Mapping[str, str], available: Iterable[str]) -> list[str]:
     # reads the raw env token, which is empty on the unset production path — synthesize the
     # effective token so the member-capability loop is never vacuous where the seam inverts.
     _env_eff = dict(env)
-    _env_eff.setdefault("GT_RL_PROFILE", token)
+    # ``setdefault`` is insufficient here: workflow expansion commonly leaves
+    # ``GT_RL_PROFILE`` present as an empty string.  That value is semantically
+    # UNSET, but it would make resolve_profile() return no members and bypass
+    # the production Profile-2 capability check.  Bind the already-resolved
+    # effective token explicitly for both absent and empty inputs.
+    _env_eff["GT_RL_PROFILE"] = token
     resolved = resolve_profile(_env_eff)
     requested_on = {m for m, v in resolved.items() if _is_on(v)}
     missing = sorted(requested_on - available_set)

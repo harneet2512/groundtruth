@@ -176,6 +176,7 @@ __all__ = [
     "record_committed_delivery",
     "GATEWAY_COMMITTED_SITE",
     "ROUTE_DELIVER", "ROUTE_DEFER", "ROUTE_EXPIRED_LATE", "ROUTE_STALE",
+    "ROUTE_REGISTRY_ERROR",
     # kinds
     "KIND_SEARCH", "KIND_VIEW", "KIND_EDIT", "KIND_TEST", "KIND_SUBMIT", "KIND_OTHER",
     # outcome states
@@ -1149,7 +1150,18 @@ def _ledger_entry(state: GatewayState, stem: str) -> dict:
 def _ledger_record(state: GatewayState, sym: str, idx: int, outcome: str) -> None:
     e = _ledger_entry(state, _norm_stem(sym))
     e["probed_forms"].add(sym)
-    e["probe_indices"].append(int(idx))
+    ii = int(idx)
+    # IDEMPOTENCE per (stem, action_index) — 2026-07-22. The probe ledger is ONE shared
+    # object (GatewayState.ledger -> episode.probe_ledger, written by BOTH the post_search
+    # lattice AND the gateway). When a search turn is re-admitted to the gateway (conditional
+    # exclusion), classify_outcome re-records the SAME probe token at the SAME action index the
+    # lattice already recorded — forging a 1-probe stem into a false [zero, zero] "stuck"
+    # (the ZERO_ABSENT repeat gate reads len(outcomes)). One record per probe per action index
+    # is the true invariant of the shared ledger: skip the duplicate append (keeps
+    # probe_indices / outcomes parallel), benchmark-free and mutation-testable.
+    if ii in e["probe_indices"]:
+        return
+    e["probe_indices"].append(ii)
     e["outcomes"].append(outcome)
 
 
@@ -2749,6 +2761,7 @@ ROUTE_DELIVER = "deliver"            # on-time, fresh, right decision point -> s
 ROUTE_DEFER = "defer"                # event < available_at -> too early; re-offer later
 ROUTE_EXPIRED_LATE = "expired_late"  # event > deliver_by -> too late; explicit non-delivery
 ROUTE_STALE = "stale"                # a depended sub-rev changed -> discard/recompute
+ROUTE_REGISTRY_ERROR = "registry_error"  # registry authority unavailable -> fail closed
 
 # The decision-lifecycle order of the coarse observation boundaries. A fact ABOUT an
 # action is useful only AT its own boundary (available_at == deliver_by == preferred_event
@@ -2922,6 +2935,11 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                 "gateway.route_delivery.registry_timing", "ERROR",
                 reason=f"registry_timing_error:{type(exc).__name__}",
             )
+            # Registry metadata is the authority under enforcement. Never fall back to
+            # the producer's self-declared preferred_event when that authority is unavailable:
+            # doing so turns an outage into an apparently valid delivery. Suppress explicitly
+            # and preserve the ERROR control for diagnosis.
+            return ROUTE_REGISTRY_ERROR
     if want is None:
         want = _event_ordinal(env.preferred_event)  # OFF / unregistered -> byte-identical
     if registry_on and not registry_error:

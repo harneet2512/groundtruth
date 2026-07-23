@@ -1131,17 +1131,65 @@ _VIEW_RE = re.compile(
 
 _ROOT_FALLBACK_ACTIVE = False  # A9: True when gt_root.txt is missing/empty ("/" sentinel)
 _ROOT_MISS_REPORTED = False
+_ROOT_RUNTIME_CACHE = None  # live repo root detected in-container when gt_root.txt is absent
+
+
+def _detect_repo_root_runtime() -> str:
+    """RUNTIME repo-root detection — the mount-mode-safe fallback for a missing gt_root.txt.
+
+    In mount-mode /opt/gt is a READ-ONLY bind-mount that SHADOWS any build-time
+    /opt/gt/gt_root.txt (and _inject_steps_mount_mode omits the b64 path's _ROOT_DETECT),
+    so gt_root.txt is absent in-container -> _root() would return the "/" sentinel and every
+    per-turn producer that resolves paths against the root (L6 reindex, _code_at snippets,
+    snippet attestation, caller-contracts, witnesses) silently degrades. Detect the live
+    agent repo the same way _ROOT_DETECT does — the same candidate dirs — at runtime, when
+    the repo actually exists in the container. Stdlib-only, no subprocess."""
+    for _d in ("/testbed", "/home/user", "/workspace", "/app", "/repo"):
+        try:
+            if os.path.isdir(os.path.join(_d, ".git")):
+                return _d
+        except Exception:  # noqa: BLE001
+            pass
+    # cwd + ancestors (covers repos checked out elsewhere)
+    try:
+        _cur = os.getcwd()
+        while _cur and _cur != "/":
+            if os.path.isdir(os.path.join(_cur, ".git")):
+                return _cur
+            _cur = os.path.dirname(_cur)
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
 
 
 def _root() -> str:
-    global _ROOT_FALLBACK_ACTIVE, _ROOT_MISS_REPORTED
+    global _ROOT_FALLBACK_ACTIVE, _ROOT_MISS_REPORTED, _ROOT_RUNTIME_CACHE
     try:
         _r = open(_ROOT_FILE).read().strip()
-        if _r:
+        if _r and _r != "/":
             _ROOT_FALLBACK_ACTIVE = False
             return _r
     except Exception:  # noqa: BLE001
         pass
+    # gt_root.txt absent/empty (mount-mode: the ro /opt/gt mount shadows it). RUNTIME
+    # fallback: detect the live repo root in-container + cache it, so L6 + the per-turn
+    # producers resolve correctly instead of degrading on the "/" sentinel.
+    if _ROOT_RUNTIME_CACHE:
+        _ROOT_FALLBACK_ACTIVE = False
+        return _ROOT_RUNTIME_CACHE
+    _detected = _detect_repo_root_runtime()
+    if _detected:
+        _ROOT_RUNTIME_CACHE = _detected
+        _ROOT_FALLBACK_ACTIVE = False
+        # best-effort persist to a WRITABLE path (never /opt/gt — it is the ro mount) so a
+        # sibling process reuses it without re-scanning.
+        try:
+            _wf = _ROOT_FILE if os.access(os.path.dirname(_ROOT_FILE) or "/", os.W_OK) else "/tmp/gt_root.txt"
+            with open(_wf, "w") as _fh:
+                _fh.write(_detected)
+        except Exception:  # noqa: BLE001
+            pass
+        return _detected
     # A9 (2026-07-05): no gt_root.txt / empty -> the repo root is UNKNOWN, so "/" is a
     # SENTINEL not a real root. _code_at() then reads from the FS root => empty snippets
     # => snippet attestation is STRUCTURALLY impossible. Flag it (so _snippet_attests
@@ -4522,6 +4570,48 @@ def _class_nontarget(con, sym: str, out: str, root: str) -> str:
     return _splice_search_note(block, note)
 
 
+_cs_dominance_memo: tuple | None = None  # (key, bool) — one detect_change_surface per attempt
+
+
+def _change_surface_dominates() -> bool:
+    """CLASS-4 DOMINANCE probe (2026-07-22). True iff the gateway's change_surface engine has a
+    CONFIDENT, non-leaky blast-radius answer for THIS issue — in which case the lattice's thin
+    honest-negative note ("appears unimplemented") is STRICTLY DOMINATED and must abstain, so the
+    conditional gateway exclusion (`_gateway_search_excluded`, lattice_produced=False) admits
+    `_produce_change_surface` to deliver the rich destination / template / registration evidence
+    through the full envelope/leak/seal path. Mirrors the producer's EXACT confidence+leak bar
+    (`gateway._produce_change_surface`: not abstained AND ≥1 non-leaky destination OR missing-role
+    target) so the lattice never abstains the thin-but-real dose only for the gateway to leak-drop
+    the rich one. Memoized per attempt (change_surface walks the repo); the (root, db, issue) key
+    self-invalidates across attempts. Correct-or-quiet: any fault -> False -> the honest negative
+    still delivers (no coverage lost)."""
+    global _cs_dominance_memo
+    if os.environ.get("GT_CHANGE_SURFACE", "1").strip() == "0":
+        return False
+    try:
+        key = (_root(), _db_path(), hash(_issue_text() or ""))
+    except Exception:  # noqa: BLE001
+        return False
+    if _cs_dominance_memo is not None and _cs_dominance_memo[0] == key:
+        return _cs_dominance_memo[1]
+    verdict = False
+    try:
+        from groundtruth.pretask.change_surface import detect_change_surface as _dcs
+        from groundtruth.runtime.gateway import _is_leaky as _leaky
+        res = _dcs(_issue_text(), _root(), _db_path())
+        if not res.abstained:
+            dest_ok = any(not _leaky(d.suggested_path) for d in res.destinations)
+            role_ok = any(
+                not _leaky(m.registration_file
+                           or (m.sibling_files[0] if m.sibling_files else m.entity))
+                for m in res.missing_roles)
+            verdict = bool(dest_ok or role_ok)
+    except Exception:  # noqa: BLE001 — engine/import fault -> keep the honest negative
+        verdict = False
+    _cs_dominance_memo = (key, verdict)
+    return verdict
+
+
 def _class_honest_negative(con, sym: str, idx: int, root: str) -> str:
     """CLASS 4 — HONEST-NEGATIVE. name+path+body all miss. SILENT on the FIRST
     occurrence of the stem (an intentional "does X exist yet?" probe). Emits ONLY
@@ -4543,6 +4633,12 @@ def _class_honest_negative(con, sym: str, idx: int, root: str) -> str:
     # ORDERING predicate over the action stream: any EDIT between the last failed
     # probe and now means the agent may have just created it -> stay silent.
     if any(prev < es < idx for es in _edit_action_steps):
+        return ""
+    if _change_surface_dominates():
+        # CLASS-4 DOMINANCE: the gateway has a confident, non-leaky change_surface answer for
+        # this issue; abstain so the conditional exclusion admits the rich _produce_change_surface
+        # blast-radius (strictly dominates this thin absence note). change_surface abstains ->
+        # this note still delivers (no coverage lost).
         return ""
     return "\n".join([
         f'<gt-search-facts symbol="{sym}" surface="absent">',
@@ -12955,10 +13051,17 @@ def _gt_gateway_on() -> bool:
 # genuinely INTERNAL (a ranking prior with NO native form). A class with no live
 # replacement is KEEP-legacy — it keeps delivering under BOTH flags.
 #
-#   l3.cochange  -> RETIRE (INTERNAL). Co-change has NO external native form (SM-1
-#     native_render.render_cochange_native -> ""); it is a ranking prior, never a
-#     delivered fact — and the Gateway no longer ships it either (gateway.
-#     _produce_patch_delta drops the cochange_partner delivery). Doctrine-correct.
+#   l3.cochange  -> KEEP-legacy (2026-07-22 correction). Co-change has NO Gateway native
+#     form (SM-1 native_render.render_cochange_native -> ""; the Gateway plane ships
+#     nothing for it, gateway.augment returns [] on the cochange-only path). Wave-2
+#     RETIRED it "to internal" anyway — but with no replacement that was a §26.4 DELETION
+#     of a working, data-backed completeness signal (the "edited the primary gold file,
+#     missed its siblings" value prop; _cochange_block, count>=2, test/vendored-excluded,
+#     fire-once). By the rule two paragraphs up ("a class with no live replacement is
+#     KEEP-legacy") cochange must KEEP delivering its Lane-A block — the ranking-prior use
+#     (res.cochange_partners biasing localization) is ADDITIVE to, not a substitute for,
+#     delivering the completeness fact. The Gateway native plane still ships nothing (no
+#     double-delivery); the fact reaches the agent via its original, tested Lane-A path.
 #
 # SM-2b (2026-07-11): l3.contract + l3b.evidence -> RETIRE, but ONLY behind a per-turn
 # REPLACEMENT-DELIVERS tripwire (`replacement_ready`). The blocker the SM-2 LIPI named — no
@@ -12977,9 +13080,10 @@ def _gt_gateway_on() -> bool:
 #     honest §26.4 migration (equivalence-before-retirement), structurally enforced — never
 #     the Wave-1 blanket deletion.
 # consensus.scope is KEEP-legacy (hedged scope-orientation, no registered `scope` class).
-# INTERNAL retirees — a ranking prior with NO model-facing native form (the Gateway delivers
-# NOTHING for them). Retired under GT_GATEWAY unconditionally (there is nothing to replace).
-_GATEWAY_RETIRED_INTERNAL: frozenset = frozenset({"l3.cochange"})
+# INTERNAL retirees — classes retired under GT_GATEWAY with NOTHING to replace them. This set
+# is now EMPTY (2026-07-22): the sole member l3.cochange was un-retired because retiring a class
+# with no replacement is a §26.4 DELETION — cochange is KEEP-legacy (delivers under both flags).
+_GATEWAY_RETIRED_INTERNAL: frozenset = frozenset()
 # REPLACEMENT-GATED retirees — a live cross-language caller-break whose Gateway replacement
 # (the SM-2b graph-based ``caller_contract`` producer, gateway._produce_caller_contract) is
 # now BUILT. Retired under GT_GATEWAY *only on a turn where the replacement PROVABLY DELIVERS*
@@ -13675,7 +13779,7 @@ def _gateway_def_render(env) -> str:
         return ""
 
 
-def _gateway_search_excluded(ev) -> bool:
+def _gateway_search_excluded(ev, *, lattice_produced=None, cmd=None) -> bool:
     """Dose-law MUTUAL EXCLUSION (CONFIRMED-1): the post_search lattice OWNS a search
     turn whenever its flag is on. When this returns True the Gateway must NOT process the
     event — no classify_outcome, no probe-ledger record, no producers, no delivery, no
@@ -13697,7 +13801,25 @@ def _gateway_search_excluded(ev) -> bool:
         from groundtruth.runtime.gateway import KIND_SEARCH as _ks
     except Exception:  # noqa: BLE001 — gateway absent -> nothing to exclude (fail-open)
         return False
-    return getattr(ev, "kind", "") == _ks
+    if getattr(ev, "kind", "") != _ks:
+        return False
+    # CONDITIONAL EXCLUSION (2026-07-22) — the lattice OWNS the ≤1 dose only when it actually
+    # PRODUCED this turn. When it ABSTAINED (lattice_produced is False) the dose slot is FREE,
+    # so the gateway's outcome producers (change_surface / name_fold / wrong_surface / body /
+    # FLOOD-partition) may compete for it and REACH their confidence gate — restoring the
+    # strictly-dominated zero-coverage (a confident producer denied the gate is a bug, not a
+    # correct abstain). EXCEPTION: a non-isolated/compound search, where the lattice
+    # deliberately refuses to record a junk stem (`_search_command_isolated`, F6/F7); the
+    # gateway MUST inherit that refusal or it re-mints the exact probe-ledger poison the
+    # lattice avoided. `lattice_produced is None` -> caller opted out (legacy GT_ORACLE_ROUTE=0
+    # / non-mini call sites) -> HISTORICAL unconditional exclusion (byte-identical).
+    if lattice_produced is None:
+        return True
+    if lattice_produced:
+        return True
+    if cmd is not None and not _search_command_isolated(cmd):
+        return True
+    return False
 
 
 def _gateway_edit_bridges_on() -> bool:
@@ -14348,8 +14470,15 @@ def _gt_gateway_pool_envelope(
         ev_kind=getattr(ev, "kind", ""), rendered_text=delta, out=out)
 
 
-def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
+def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None, lattice_produced=None) -> None:
     """THE ONE CALL: complete THIS observation with one gateway.augment() dose.
+
+    ``lattice_produced`` (2026-07-22): the seam threads whether the post_search lattice
+    actually DELIVERED bytes on THIS turn (``bool(_la_search)``). On a search turn the gateway
+    is admitted (competes for the ONE dose) ONLY when the lattice ABSTAINED — restoring the
+    strictly-dominated zero-coverage of the outcome producers (change_surface etc.). ``None``
+    (default / legacy GT_ORACLE_ROUTE=0 call site, where ``_la_search`` is unbound) preserves
+    the HISTORICAL unconditional search exclusion (byte-identical).
 
     Pipeline (all pure/adapter except the splice): normalize_event -> augment (the
     ONE call, over the shared `_EPISODE`) -> arbitrate (<=1 dose) -> render_native
@@ -14466,7 +14595,8 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None) -> None:
         # promotion of PAST deliveries above is bookkeeping, not this event's processing),
         # so the SKIP of this search event is TOTAL. The Gateway stays live for this
         # episode's non-search (edit/test) turns.
-        if _gateway_search_excluded(ev):  # MUTATION[guard_search_exclusion]: force -> False
+        if _gateway_search_excluded(  # MUTATION[guard_search_exclusion]: force -> False
+                ev, lattice_produced=lattice_produced, cmd=cmd):
             return
         if not getattr(_EPISODE, "episode_id", ""):
             try:
@@ -15221,7 +15351,39 @@ class _BatchDeliveryPlan:
     decision: dict
 
 
-def _rendered_contains_exact_suffix(rendered, output_index: int, suffix: str) -> bool:
+def _rendered_text_content(rendered, output_index: int) -> str | None:
+    """Return only model-visible text for one formatted tool message.
+
+    The formatter may wrap text in a string, a list of content blocks, or nested
+    ``content`` dictionaries.  Metadata (URLs, raw output, image payloads) is
+    deliberately ignored because it is not model text.
+    """
+    if (not isinstance(rendered, (list, tuple))
+            or output_index < 0 or output_index >= len(rendered)):
+        return None
+    message = rendered[output_index]
+    if not isinstance(message, dict) or "content" not in message:
+        return None
+    parts = []
+    stack = [message.get("content")]
+    while stack:
+        value = stack.pop(0)
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, (list, tuple)):
+            stack[0:0] = list(value)
+        elif isinstance(value, dict):
+            text = value.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+            nested = value.get("content")
+            if isinstance(nested, (str, list, tuple)):
+                stack.insert(0, nested)
+    return "".join(parts)
+
+
+def _rendered_contains_exact_suffix(rendered, output_index: int, suffix: str,
+                                    base_rendered=None) -> bool:
     """Require exact bytes in the corresponding API-visible message content.
 
     ``extra.raw_output`` is trajectory metadata that mini-swe strips before the
@@ -15230,27 +15392,22 @@ def _rendered_contains_exact_suffix(rendered, output_index: int, suffix: str) ->
     """
     if not suffix:
         return True
-    if not isinstance(rendered, (list, tuple)) or output_index >= len(rendered):
+    current_text = _rendered_text_content(rendered, output_index)
+    if current_text is None:
         return False
-    message = rendered[output_index]
-    if not isinstance(message, dict) or "content" not in message:
+    # Legacy callers only have the augmented rendering.  Keep the old
+    # membership check for those callers; the formatter commit path always
+    # supplies ``base_rendered`` and therefore gets the stronger proof below.
+    if base_rendered is None:
+        return suffix in current_text
+    base_text = _rendered_text_content(base_rendered, output_index)
+    if base_text is None or current_text == base_text:
         return False
-    stack = [message.get("content")]
-    while stack:
-        value = stack.pop()
-        if isinstance(value, str):
-            if suffix in value:
-                return True
-        elif isinstance(value, (list, tuple)):
-            stack.extend(value)
-        elif isinstance(value, dict):
-            text = value.get("text")
-            if isinstance(text, str):
-                stack.append(text)
-            nested = value.get("content")
-            if isinstance(nested, (str, list, tuple)):
-                stack.append(nested)
-    return False
+    # Delivery is proven only when the API-visible text is a structural
+    # base->augmented append of exactly the shipped bytes.  This rejects a
+    # pre-existing identical suffix (base == augmented) and rejects clipping or
+    # reordering that merely leaves the suffix somewhere in the message.
+    return current_text.startswith(base_text) and current_text[len(base_text):] == suffix
 
 
 def _batch_candidate_control_identity(candidate) -> "tuple[str, str] | None":
@@ -16496,6 +16653,12 @@ def install_observation_batch_commit(agent) -> bool:
                 _join_lane_output(previous, planned_delivery.suffix)
                 if planned_delivery.join
                 else previous + planned_delivery.suffix)
+        # Capture the formatter's unaugmented, API-visible bytes before proving
+        # the augmented rendering.  A membership check alone is unsound: if the
+        # same suffix was already present in the tool output, a clipped GT copy
+        # would be falsely credited as delivered.  Keep the baseline separate
+        # from the mutable shadow outputs used for the actual model call.
+        base_rendered = None
         try:
             rendered = original(message, shadow_outputs, *args, **kwargs)
         except BaseException:
@@ -16505,11 +16668,21 @@ def install_observation_batch_commit(agent) -> bool:
             raise
 
         if (planned_delivery is not None
+                and planned_delivery.disposition == "deliver"):
+            try:
+                base_rendered = original(
+                    message, [dict(output) for output in outputs], *args, **kwargs)
+            except BaseException:
+                _discard_tool_observation_batch("batch_baseline_formatter_exception", state)
+                raise
+
+        if (planned_delivery is not None
                 and planned_delivery.disposition == "deliver"
                 and (
                     output_index is None
                     or not _rendered_contains_exact_suffix(
-                        rendered, output_index, planned_delivery.suffix)
+                        rendered, output_index, planned_delivery.suffix,
+                        base_rendered)
                 )):
             _discard_tool_observation_batch("batch_formatter_clipped", state)
             return original(message, outputs, *args, **kwargs)
@@ -18553,7 +18726,14 @@ def _augment_output(action, out) -> None:
             # global dose. None (flag off) -> every plane delivers inline (byte-identical).
             _ga_on = _global_arbiter_on()
             if _ga_on and not _batch_commit_installed:
-                return
+                # FAIL-OPEN (2026-07-22): single-action scaffolds (mini-swe) never install the
+                # batch-commit formatter (install_observation_batch_commit needs
+                # model.format_observation_messages + agent.execute_actions — a multi-action
+                # batch interface mini-swe lacks). With the arbiter ON and no flush hook, the
+                # per-turn pool would never be committed -> silent 0-delivery of EVERY reactive
+                # FACT on every observation. Degrade to inline per-plane delivery (the
+                # _ga_on==False byte-identical path) instead of dropping the whole observation.
+                _ga_on = False
             _batch_state = _batch_context.get() if _ga_on else None
             _batch_defer = _batch_state is not None
             if _batch_defer and not _register_batch_execute(
@@ -18784,7 +18964,10 @@ def _augment_output(action, out) -> None:
                 if _la_contract and not _lane_a_retired_under_gateway(
                         "l3.contract", replacement_ready=_cc_ready):
                     lane_a.append(("l3.contract", _la_contract))
-                # l3.cochange is retired-to-INTERNAL under the Gateway (no native form).
+                # l3.cochange is KEEP-legacy (2026-07-22): un-retired because the Gateway ships
+                # no cochange replacement, so retiring it was a §26.4 deletion of the multi-file
+                # completeness signal. The predicate now returns False for it (empty INTERNAL set)
+                # -> the noise-guarded Lane-A block delivers under both flags, like consensus.scope.
                 if _la_cochange and not _lane_a_retired_under_gateway("l3.cochange"):
                     lane_a.append(("l3.cochange", _la_cochange))
                 # consensus DELIVERY on EDIT (2026-06-24): when the agent edits a file
@@ -19368,13 +19551,15 @@ def _augment_output(action, out) -> None:
                 # SM-5: the gateway PRODUCES its fact into the same pool (its own <=1
                 # arbiter runs first), then ONE flush runs the global ranked competition
                 # over {Lane-A blocks, steer, gateway fact} and delivers AT MOST ONE dose.
-                _gt_gateway_deliver(action, out, cmd, _orig_out, pool=_ga_pool)
+                _gt_gateway_deliver(action, out, cmd, _orig_out, pool=_ga_pool,
+                                    lattice_produced=bool(_la_search))
                 if not _batch_defer:
                     _global_pool_flush(
                         _ga_pool, kkind=_kkind, kf=_kf, krel=_krel)
                     _discard_terminal_lane_controls({_action_count})
             else:
-                _gt_gateway_deliver(action, out, cmd, _orig_out)
+                _gt_gateway_deliver(action, out, cmd, _orig_out,
+                                    lattice_produced=bool(_la_search))
                 _discard_terminal_lane_controls({_action_count})
             return
 

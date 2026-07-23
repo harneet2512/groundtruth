@@ -387,6 +387,26 @@ def _emitted_commands(msg: dict) -> list[str]:
                 values.append(value)
         return " ".join(values)
 
+    def _structured_call(item: dict) -> str:
+        """Normalize provider-neutral Responses/Anthropic function-call content."""
+        nested_call = item.get("call")
+        nested_name = nested_call.get("name") if isinstance(nested_call, dict) else None
+        action_name = item.get("name") or nested_name
+        args = item.get("arguments")
+        if args is None:
+            args = item.get("input")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                return " ".join(value for value in (action_name, args)
+                                 if isinstance(value, str))
+        if isinstance(args, dict):
+            text = _action_text(args, action_name)
+            if text:
+                return text
+        return str(action_name) if isinstance(action_name, str) else ""
+
     extra = msg.get("extra")
     if isinstance(extra, dict):
         for act in extra.get("actions") or []:
@@ -394,6 +414,23 @@ def _emitted_commands(msg: dict) -> list[str]:
                 text = _action_text(act, act.get("name"))
                 if text:
                     parts.append(text)
+    if not parts:
+        # Responses API and Anthropic-style messages carry calls as content/output
+        # items rather than Chat Completions ``tool_calls``.  Treat their structured
+        # arguments as equivalent model-authored commands.
+        for container in (msg.get("content"), msg.get("output")):
+            if not isinstance(container, list):
+                continue
+            for item in container:
+                if not isinstance(item, dict):
+                    continue
+                item_type = str(item.get("type") or "").lower()
+                if item_type not in {"function_call", "tool_use", "tool_call"}:
+                    continue
+                text = _structured_call(item)
+                if text:
+                    parts.append(text)
+
     if not parts:
         for tc in msg.get("tool_calls") or []:
             if not isinstance(tc, dict):
@@ -438,7 +475,33 @@ def _emitted_commands(msg: dict) -> list[str]:
 def _assistant_prose(msg: dict) -> str:
     """Model-authored natural-language text of an assistant message (level-2 only)."""
     c = msg.get("content")
-    return c if isinstance(c, str) else ""
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        # Responses/Anthropic content arrays contain output_text/text blocks. Exclude
+        # structured function-call arguments from prose so level-2 remains model text.
+        text: list[str] = []
+        for item in c:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                text.append(item["text"])
+        return "\n".join(text)
+    return ""
+
+
+def _visible_content(msg: dict) -> str:
+    """Flatten model-visible text for string or Responses/provider content arrays."""
+    value = msg.get("content")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        chunks: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                chunks.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                chunks.append(item["text"])
+        return "\n".join(chunks)
+    return ""
 
 
 def _block_entities(
@@ -577,8 +640,8 @@ def _build_v2(
         role = m.get("role")
         if role not in ("user", "tool"):
             continue  # assistant = model-authored, system/exit = framing
-        content = m.get("content")
-        if not isinstance(content, str) or "<gt-" not in content:
+        content = _visible_content(m)
+        if "<gt-" not in content:
             continue
         channel = "brief" if role == "user" else "runtime"
         for mm in _BLOCK_RE.finditer(content):
@@ -644,9 +707,9 @@ def _build_v2(
         claimed_spans: list[list[tuple[int, int]]] = []
         for m in messages:
             role, mtype = m.get("role"), m.get("type")
-            content = m.get("content")
+            content = _visible_content(m)
             visible_buffers.append(
-                content if isinstance(content, str) and (
+                content if content and (
                     role in ("user", "tool", "system")
                     or mtype == "function_call_output"
                 ) else ""

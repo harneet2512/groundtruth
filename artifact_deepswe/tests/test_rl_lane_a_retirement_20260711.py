@@ -5,7 +5,9 @@ cross-language caller-contract producer (retiring them would be a §26.4 DELETIO
 that producer (``gateway._produce_caller_contract`` — graph-based, delivers on Go/Rust/TS/JS),
 so the migration can complete HONESTLY:
 
-  * l3.cochange  -> RETIRE (INTERNAL: no native form; the Gateway delivers nothing for it).
+  * l3.cochange  -> KEEP-legacy (2026-07-22 correction): the Gateway ships no cochange
+                    replacement, so retiring it was a §26.4 DELETION of the completeness signal.
+                    Its noise-guarded Lane-A block delivers under both flags (like consensus.scope).
   * l3.contract  -> RETIRE, gated PER-EDIT on the replacement-delivers tripwire.
   * l3b.evidence -> RETIRE, gated PER-EDIT on the replacement-delivers tripwire.
   * consensus.scope -> KEEP-legacy (hedged orientation, no registered ``scope`` class).
@@ -30,10 +32,10 @@ from groundtruth.runtime.native_render import render_cochange_native
 
 _SEAM = Path(__file__).parents[1] / "gt_mini_patch.py"
 
-_INTERNAL = {"l3.cochange"}
+_INTERNAL: set = set()  # 2026-07-22: emptied — l3.cochange un-retired (no replacement -> KEEP-legacy)
 _WITH_REPLACEMENT = {"l3.contract", "l3b.evidence"}
 _RETIRABLE = _INTERNAL | _WITH_REPLACEMENT
-_KEEP_LEGACY = {"consensus.scope_map", "post_search.localize", "concern.consensus"}
+_KEEP_LEGACY = {"consensus.scope_map", "post_search.localize", "concern.consensus", "l3.cochange"}
 
 
 def _append_guards(kinds: set[str]) -> dict[str, str]:
@@ -92,11 +94,15 @@ def test_retired_sets_are_exactly_declared():
     assert g._GATEWAY_RETIRED_LANE_A == frozenset(_RETIRABLE)
 
 
-def test_helper_internal_always_retires_when_gateway_on(monkeypatch):
+def test_helper_cochange_is_keep_legacy_under_gateway(monkeypatch):
+    """2026-07-22: l3.cochange un-retired. The Gateway ships no cochange replacement, so
+    retiring it would be a §26.4 deletion -> it is KEEP-legacy: NEVER retired under the
+    Gateway (delivers its Lane-A completeness block under both flags)."""
     monkeypatch.setenv("GT_GATEWAY", "1")
     monkeypatch.setattr(g, "_GT_BASELINE", False)
-    assert g._lane_a_retired_under_gateway("l3.cochange") is True                 # no replacement needed
-    assert g._lane_a_retired_under_gateway("l3.cochange", replacement_ready=False) is True
+    assert g._lane_a_retired_under_gateway("l3.cochange") is False
+    assert g._lane_a_retired_under_gateway("l3.cochange", replacement_ready=False) is False
+    assert g._lane_a_retired_under_gateway("l3.cochange", replacement_ready=True) is False
 
 
 def test_helper_replacement_gated_needs_ready(monkeypatch):
@@ -314,9 +320,11 @@ def test_m1_silent_producer_keeps_legacy(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# INTERNAL retiree (cochange) — genuinely delivers nothing via the Gateway.
+# cochange — the GATEWAY NATIVE PLANE ships nothing (no double-delivery); the completeness
+# fact reaches the agent via its Lane-A block instead (un-retired 2026-07-22). This pins the
+# no-native-form / no-double-delivery half only.
 # --------------------------------------------------------------------------- #
-def test_internal_cochange_delivers_nothing_via_gateway(monkeypatch):
+def test_cochange_gateway_native_plane_ships_nothing(monkeypatch):
     monkeypatch.setenv("GT_GATEWAY", "1")
     monkeypatch.setattr(gw, "analyze_patch_delta", lambda *a, **k: SimpleNamespace(
         signature_mismatches=[], companion_surfaces=[],

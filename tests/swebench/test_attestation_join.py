@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -170,6 +171,40 @@ def test_load_accepts_a_valid_persisted_bundle(tmp_path: Path) -> None:
 def test_load_of_absent_dir_is_empty_not_error(tmp_path: Path) -> None:
     load = aj.load_attestations(str(tmp_path))
     assert load == aj.AttestationLoad()
+
+
+def test_missing_proof_field_is_unmeasured_even_with_valid_store_bytes(tmp_path: Path) -> None:
+    """MUTATION W03-A: dropping semantic field resolution must not admit PASS."""
+    attestation, artifacts = _syntax_attestation(
+        candidate_id="edit:src/core.py:71", delivery_seal="a" * 16
+    )
+    predicate = replace(
+        attestation.truth_predicates[0],
+        proof_refs=(replace(attestation.truth_predicates[0].proof_refs[0], field_path="$.missing"),),
+    )
+    attestation = replace(attestation, truth_predicates=(predicate,))
+    _persist(tmp_path, attestation, artifacts)
+
+    load = aj.load_attestations(str(tmp_path))
+
+    assert load.attestations == ()
+    assert "semantic:" in load.diagnostics[0]
+    assert "field_missing" in load.diagnostics[0]
+
+
+def test_scalar_observation_contradiction_is_not_authority(tmp_path: Path) -> None:
+    """MUTATION W03-B: trusting producer PASS despite a contradictory scalar fails."""
+    attestation, artifacts = _syntax_attestation(
+        candidate_id="edit:src/core.py:72", delivery_seal="b" * 16
+    )
+    predicate = replace(attestation.truth_predicates[0], observation="FAIL")
+    attestation = replace(attestation, truth_predicates=(predicate,))
+    _persist(tmp_path, attestation, artifacts)
+
+    load = aj.load_attestations(str(tmp_path))
+
+    assert load.attestations == ()
+    assert "observation_contradicts_field" in load.diagnostics[0]
 
 
 # --------------------------------------------------------------------------- #

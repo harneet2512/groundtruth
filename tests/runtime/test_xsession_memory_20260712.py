@@ -136,6 +136,41 @@ def test_dump_is_byte_deterministic(tmp_path):
                    "class_stats": {"caller_contract": [5, 0], "def_partition": [4, 3]}}
 
 
+def test_dump_rereads_under_lock_and_preserves_peer_class_update(tmp_path):
+    """MUTATION W07-A: replacing without reread loses a concurrent class update."""
+    p = str(tmp_path / "s.json")
+    first = xm.XSessionStore(repo_key="k", class_stats={"caller_contract": (1, 1)})
+    second = xm.XSessionStore(repo_key="k", class_stats={"def_partition": (1, 0)})
+    assert xm.dump(first, p)
+    assert xm.dump(second, p)
+    assert dict(xm.load(p).class_stats) == {
+        "caller_contract": (1, 1), "def_partition": (1, 0)
+    }
+
+
+def test_dump_same_snapshot_is_idempotent_after_reread(tmp_path):
+    """MUTATION W07-B: summing the reread snapshot double-counts repeated flushes."""
+    p = str(tmp_path / "s.json")
+    state = xm.XSessionStore(repo_key="k", class_stats={"caller_contract": (1, 1)})
+    assert xm.dump(state, p)
+    before = open(p, "rb").read()
+    assert xm.dump(state, p)
+    assert open(p, "rb").read() == before
+    assert dict(xm.load(p).class_stats) == {"caller_contract": (1, 1)}
+
+
+def test_dump_atomic_replace_failure_keeps_previous_bytes(tmp_path, monkeypatch):
+    """MUTATION W07-B: writing directly to the target can destroy the last good store."""
+    p = str(tmp_path / "s.json")
+    old = xm.XSessionStore(repo_key="k", class_stats={"caller_contract": (1, 0)})
+    new = xm.XSessionStore(repo_key="k", class_stats={"def_partition": (1, 0)})
+    assert xm.dump(old, p)
+    before = open(p, "rb").read()
+    monkeypatch.setattr(xm.os, "replace", lambda *_args: (_ for _ in ()).throw(OSError("boom")))
+    assert xm.dump(new, p) is False
+    assert open(p, "rb").read() == before
+
+
 def test_load_round_trips_and_wrong_schema_is_fresh(tmp_path):
     s = xm.XSessionStore(repo_key="k", class_stats={"caller_contract": (5, 0)})
     p = str(tmp_path / "s.json")

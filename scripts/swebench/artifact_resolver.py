@@ -145,9 +145,15 @@ def resolve_trial_artifacts(
     """Locate per-trial artifacts under jobs_dir."""
     pattern = os.path.join(jobs_dir, "*", "*__*", "result.json")
     trials = sorted(glob.glob(pattern))
-    if instance_id and strict_task_match:
-        needle = f"{instance_id}__"
-        trials = [t for t in trials if needle in os.path.basename(os.path.dirname(t))]
+    if instance_id:
+        # A task-qualified request is authoritative regardless of the legacy strict flag;
+        # selecting the newest sibling otherwise creates cross-task Frankenstein bundles.
+        task_name = os.path.basename(os.path.dirname(os.path.normpath(instance_id)))
+        task_name = task_name or instance_id
+        trials = [
+            t for t in trials
+            if os.path.basename(os.path.dirname(t)) == task_name
+        ]
     trial_dir = os.path.dirname(trials[-1]) if trials else None
     result_json = trials[-1] if trials else None
 
@@ -166,10 +172,11 @@ def resolve_trial_artifacts(
             mini_traj = candidate
 
     deep_metrics = None
-    for pat in (
-        os.path.join(jobs_dir, "**", "gt_deep_metrics_*.json"),
-        "/tmp/gt_deep_metrics_*.json",
-    ):
+    metric_patterns = [os.path.join(trial_dir, "**", "gt_deep_metrics_*.json")] if trial_dir else []
+    if not instance_id:
+        metric_patterns += [os.path.join(jobs_dir, "**", "gt_deep_metrics_*.json"),
+                            "/tmp/gt_deep_metrics_*.json"]
+    for pat in metric_patterns:
         hits = sorted(glob.glob(pat, recursive="**" in pat))
         if hits:
             deep_metrics = hits[-1]
@@ -198,7 +205,8 @@ def resolve_trial_artifacts(
         runtime_ledger = None
     if not runtime_ledger:
         parent = os.path.dirname(jobs_dir)
-        for base in (trial_dir, jobs_dir, parent, "/tmp/gt"):
+        bases = (trial_dir, jobs_dir) if instance_id else (trial_dir, jobs_dir, parent, "/tmp/gt")
+        for base in bases:
             if not base:
                 continue
             for name in ("gt_runtime_ledger.jsonl", f"gt_runtime_ledger_{instance_id}.jsonl"):
@@ -212,9 +220,9 @@ def resolve_trial_artifacts(
     delivered = None
     adapter_witness = None
     brief = None
-    for base in (
-        trial_dir, jobs_dir, os.path.dirname(jobs_dir) if jobs_dir else None, "/tmp/gt",
-    ):
+    bases = ((trial_dir, jobs_dir) if instance_id else
+             (trial_dir, jobs_dir, os.path.dirname(jobs_dir) if jobs_dir else None, "/tmp/gt"))
+    for base in bases:
         if not base:
             continue
         d = os.path.join(base, "delivered_instruction.txt")

@@ -39,6 +39,7 @@ itself UNMEASURED). An UNJOINED attestation contributes NOTHING.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 from collections import defaultdict
@@ -318,12 +319,83 @@ def _load_and_validate_bundle(entry_path: str) -> tuple[ProducerAttestation | No
         or entry.get("delivery_seal") != attestation.delivery_seal
     ):
         return skip("entry_identity_mismatch")
+    semantic_errors = _semantic_proof_errors(bundle, attestation)
+    if semantic_errors:
+        return skip(f"semantic:{semantic_errors[0]}")
     return attestation, ""
 
 
 def _read_bytes(path: str) -> bytes:
     with open(path, "rb") as handle:
         return handle.read()
+
+
+def _json_field(value: Any, field_path: str) -> tuple[bool, Any]:
+    """Resolve the small JSON-path language used by ``ProofRef``."""
+    if field_path == "$":
+        return True, value
+    if not isinstance(field_path, str) or not field_path.startswith("$."):
+        return False, None
+    current = value
+    for component in field_path[2:].split("."):
+        if not component or not isinstance(current, dict) or component not in current:
+            return False, None
+        current = current[component]
+    return True, current
+
+
+def _semantic_proof_errors(bundle: str, attestation: ProducerAttestation) -> tuple[str, ...]:
+    """Re-check proof references against the immutable artifact bytes.
+
+    Byte/sha validation proves persistence integrity only.  This second leg proves
+    that PASS/FAIL predicates point at real fields and rejects an unambiguous scalar
+    contradiction.  Narrative observations remain producer-domain text and are not
+    guessed at (correct-or-quiet).
+    """
+    artifacts: dict[str, Any] = {}
+    missing = object()
+    errors: list[str] = []
+    for ref in attestation.source_artifacts:
+        path = os.path.join(bundle, "artifacts", ref.artifact_id)
+        try:
+            raw = _read_bytes(path)
+        except OSError:
+            errors.append(f"artifact_unreadable:{ref.artifact_id}")
+            continue
+        if hashlib.sha256(raw).hexdigest() != ref.sha256:
+            errors.append(f"artifact_sha_mismatch:{ref.artifact_id}")
+            continue
+        try:
+            artifacts[ref.artifact_id] = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            artifacts[ref.artifact_id] = raw
+
+    predicates = (*attestation.truth_predicates, *attestation.freshness_predicates)
+    for index, predicate in enumerate(predicates):
+        if predicate.verdict not in (PASS, FAIL):
+            continue
+        for proof_index, proof in enumerate(predicate.proof_refs):
+            source = artifacts.get(proof.artifact.artifact_id, missing)
+            if source is missing:
+                errors.append(f"predicate[{index}].proof[{proof_index}]:artifact_missing")
+                continue
+            found, observed_value = _json_field(source, proof.field_path)
+            if not found:
+                errors.append(
+                    f"predicate[{index}].proof[{proof_index}]:field_missing:{proof.field_path}"
+                )
+                continue
+            if isinstance(observed_value, (str, int, float, bool)):
+                actual = str(observed_value).strip().casefold()
+                claim = predicate.observation.strip().casefold()
+                if claim in {"true", "false", "pass", "fail", actual}:
+                    expected = {"pass": "true", "fail": "false"}.get(claim, claim)
+                    actual = {"pass": "true", "fail": "false"}.get(actual, actual)
+                    if expected != actual:
+                        errors.append(
+                            f"predicate[{index}].proof[{proof_index}]:observation_contradicts_field"
+                        )
+    return tuple(errors)
 
 
 def load_attestations(task_dir: str) -> AttestationLoad:
