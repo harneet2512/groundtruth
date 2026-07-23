@@ -49,6 +49,7 @@ def stage_from_ledger_row(row: Mapping[str, Any]) -> str | None:
         # Explicit covering / syntax holds ride suppress with named reasons.
         if reason in {
             "covering_empty_sub_fact_floor",
+            "covering_empty_all_levers",
             "covering_no_covering",
             "syntax_ok",
             "syntax_unavailable",
@@ -122,7 +123,10 @@ def mirror_ledger_row_to_feature_live(row: Mapping[str, Any]) -> None:
     if fid is None:
         # Still log named HOLD reasons for covering even when fact_class absent.
         reason = str(row.get("reason") or "")
-        if reason == "covering_empty_sub_fact_floor":
+        if reason in {
+            "covering_empty_sub_fact_floor",
+            "covering_empty_all_levers",
+        }:
             fid = "covering_red"
         elif reason == "syntax_ok":
             fid = "syntax_result"

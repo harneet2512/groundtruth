@@ -6709,141 +6709,69 @@ def _cochange_block(rel: str) -> str:
 
 # ---------------------------------------------------------------------------
 # COVERING-TEST QUERY (Stage B / Verification Horizon §3 V1 rung)
-# Given a set of edited symbols, find is_test=1 nodes with CALLS edges to those
-# symbols (FACT-filtered: deterministic resolution + conf >= 0.7; name_match
-# never admits, per the P0 stdlib-shadow rule). Returns up to 2 covering tests
-# ranked by confidence desc.
-#
-# Product value: "GT tells you which test to run after your edit" — useful in
-# Cursor, Claude Code, any MCP client — not just SWE-bench. The obligation nudge
-# uses this to say "run test_X in tests/test_Y.py" instead of generic "run a
-# test that exercises sym". The Verification Horizon H1/H2 uses this for
-# targeted test selection.
-#
-# Language dispatch for the run command mirrors _RETRY_TEST_AUTODETECT's
-# manifest-based detection, collapsed to a per-test-file suggestion.
+# Hybrid RTS (2026-07-23): FACT-primary + k=2 closure + test-dir convention admit
+# via ``verification_plan.select_targeted_tests``. FACT floor unchanged
+# (det method + conf >= 0.7; name_match never admits). Convention is an INFO
+# fallback when FACT/closure are empty — same levers the verification-plan
+# planner already used, now shared with the live covering_red / submit path.
+# Returns up to 2 covering test FILES (leak-safe: no test NAMEs) with
+# ``selection_basis`` stamped (fact_covering | closure_k2 | test_dir_convention).
 # ---------------------------------------------------------------------------
 def _covering_tests_for_symbols(symbol_names: set[str]) -> list[dict]:
-    """Query graph.db for test nodes that CALL the given symbols.
+    """Select covering test FILES for edited symbols (Hybrid RTS).
 
-    Returns internal test metadata dicts. These identifiers are for targeting
-    only and must not be rendered verbatim to the agent-visible surface.
-    Correct-or-quiet: no graph, no test nodes, no FACT edges -> empty list."""
+    Routes through ``select_targeted_tests`` so FACT-empty + convention-adjacent
+    tests (``tests/test_<stem>.py``) still admit. Identifiers are for targeting
+    only and must not be rendered verbatim. Correct-or-quiet: no graph / no
+    levers -> empty list (HOLD at the producer, not silent).
+    """
     if not symbol_names:
         return []
     try:
         db = _db_path()
         if not os.path.isfile(db):
             return []
-        con = _connect_ro(db)
-        if con is None:
-            return []
-        has_conf, has_method = _has_columns(con)
-        if not has_method:
-            con.close()
-            return []
-        try:
-            # Find node ids for the edited symbols (by name, non-test)
-            placeholders = ",".join("?" * len(symbol_names))
-            target_q = (
-                f"SELECT id, name, file_path FROM nodes "
-                f"WHERE name IN ({placeholders}) "
-                f"AND COALESCE(is_test, 0) = 0 "
-                f"LIMIT 20"
+        root = _root()
+        from groundtruth.runtime.verification_plan import select_targeted_tests
+        # Cap 2 matches the historical seam dose (top-2 covering files).
+        selected = select_targeted_tests(
+            db, root, sorted({str(s) for s in symbol_names if s}), limit=2)
+        results: list[dict] = []
+        for row in selected or []:
+            fpath = str((row or {}).get("file") or "").replace("\\", "/").lstrip("./")
+            if not fpath:
+                continue
+            try:
+                conf = float((row or {}).get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                conf = 0.0
+            basis = str((row or {}).get("selection_basis") or "") or "fact_covering"
+            results.append({
+                "file": fpath,
+                "confidence": conf,
+                "selection_basis": basis,
+            })
+        # SS-2 (GT_SS_EXEC_TRUTH): drop phantom graph files absent from the tree.
+        if _ss_exec_truth_on() and results:
+            _before_eligibility = len(results)
+            _eligibility_error = None
+            try:
+                from groundtruth.runtime.covering_runner import runner_eligible_files
+                _ok = set(runner_eligible_files([r["file"] for r in results], root))
+                results = [r for r in results if r["file"] in _ok]
+            except Exception as exc:  # noqa: BLE001 — eligibility must never break selection
+                _eligibility_error = exc
+            _control_participation_record(
+                "GT_SS_EXEC_TRUTH",
+                "mini_seam.covering_selection.runner_eligibility",
+                ("ERROR" if _eligibility_error is not None else
+                 "APPLIED" if len(results) < _before_eligibility else "NO_EFFECT"),
+                reason=((f"runner_filter_error:{type(_eligibility_error).__name__}"
+                         if _eligibility_error is not None else
+                        "phantom_removed" if len(results) < _before_eligibility
+                        else "all_candidates_runnable")),
             )
-            target_rows = con.execute(target_q, list(symbol_names)).fetchall()
-            if not target_rows:
-                return []
-            target_ids = [r[0] for r in target_rows]
-
-            # Find test nodes that call these targets with FACT-tier edges
-            det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
-            conf_gate = "AND COALESCE(e.confidence, 0) >= 0.7 " if has_conf else ""
-            tid_placeholders = ",".join("?" * len(target_ids))
-            test_q = (
-                "SELECT DISTINCT nt.name, nt.file_path, "
-                "  MAX(COALESCE(e.confidence, 1.0)) as max_conf "
-                "FROM edges e "
-                "JOIN nodes nt ON nt.id = e.source_id "
-                f"WHERE e.target_id IN ({tid_placeholders}) "
-                "AND e.type = 'CALLS' "
-                "AND COALESCE(nt.is_test, 0) = 1 "
-                f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}') "
-                f"{conf_gate}"
-                "GROUP BY nt.name, nt.file_path "
-                "ORDER BY max_conf DESC, nt.name "
-                "LIMIT 8"
-            )
-            test_rows = con.execute(test_q, target_ids).fetchall()
-            if not test_rows:
-                return []
-
-            # HYBRID rank (design §3, >=3 signals, lexicographic priority):
-            # (1) CALLS-edge confidence PRIMARY — safe-RTS reachability
-            #     (Rothermel & Harrold, TOSEM 1997); then
-            # (2) test-name overlap with the edited symbols; then
-            # (3) path convention (test_<stem> / <stem>_test / __tests__ —
-            #     the classical RTS file heuristic, Ekstazi ISSTA 2015).
-            lower_syms = {s.lower() for s in symbol_names}
-
-            def _hrank(row):
-                tname, tfile, tconf = row
-                low_name = (tname or "").lower()
-                overlap = sum(1 for s in lower_syms if s in low_name)
-                base = os.path.basename(tfile or "").lower()
-                conv = 1 if (base.startswith("test") or base.endswith(
-                    ("_test.py", "_test.go", "_test.rs", ".test.ts",
-                     ".test.js", ".spec.ts", ".spec.js"))
-                    or "__tests__" in (tfile or "").lower()) else 0
-                return (-float(tconf or 0.0), -overlap, -conv, tname or "")
-
-            test_rows = sorted(test_rows, key=_hrank)[:2]
-            # E5 (Fable 2026-07-05): the exact test NAME + run_cmd are computed for internal
-            # RANKING only (the _hrank above); they are STRIPPED here so NO test identifier ever
-            # leaves the query layer. Every consumer/renderer uses existence/count/confidence only
-            # (_render_verify_emission + render_obligation_status_block never emit a name — the
-            # former's own comment says covering is "not rendered"), so this is byte-identical on
-            # the agent-visible surface AND closes the leak vector at the source: a future renderer
-            # literally cannot emit a test name that is no longer in the payload (defense-in-depth).
-            results = []
-            for _tname, tfile, tconf in test_rows:
-                results.append({
-                    # a test-file PATH (not a NAME/assertion), kept only for the count/existence
-                    # signal the renderers consume; never rendered verbatim.
-                    "file": tfile or "",
-                    "confidence": float(tconf),
-                })
-            # SS-2 (GT_SS_EXEC_TRUTH, 2026-07-13, run 29236533134 causal audit): a graph test
-            # NODE whose FILE is absent from the agent's working tree is a PHANTOM. Selecting it
-            # yields a covering CLAIM the runner can NEVER execute — the "a graph-linked covering
-            # test covers them" FALSE ASSURANCE shipped on fonttools-3682/cfn-lint-3749 with no
-            # runnable covering test in the tree. Drop the phantom at the SELECTION surface so the
-            # verify.horizon advisory (feature 2), the executed covering, AND the spec.obligation
-            # covering line all share ONE runner-eligibility definition
-            # (covering_runner.runner_eligible_files == the executed path's os.path.exists gate).
-            # Off -> byte-identical (no disk check; every consumer sees the graph result unchanged).
-            if _ss_exec_truth_on() and results:
-                _before_eligibility = len(results)
-                _eligibility_error = None
-                try:
-                    from groundtruth.runtime.covering_runner import runner_eligible_files
-                    _ok = set(runner_eligible_files([r["file"] for r in results], _root()))
-                    results = [r for r in results if r["file"] in _ok]
-                except Exception as exc:  # noqa: BLE001 — eligibility filter must never break selection
-                    _eligibility_error = exc
-                _control_participation_record(
-                    "GT_SS_EXEC_TRUTH",
-                    "mini_seam.covering_selection.runner_eligibility",
-                    ("ERROR" if _eligibility_error is not None else
-                     "APPLIED" if len(results) < _before_eligibility else "NO_EFFECT"),
-                    reason=((f"runner_filter_error:{type(_eligibility_error).__name__}"
-                             if _eligibility_error is not None else
-                            "phantom_removed" if len(results) < _before_eligibility
-                            else "all_candidates_runnable")),
-                )
-            return results
-        finally:
-            con.close()
+        return results
     except Exception:  # noqa: BLE001 -- correct-or-quiet
         return []
 
@@ -10860,10 +10788,23 @@ def _executed_covering_emission(covering: list[dict],
         if not _covering_attributed:
             # W14 FIX 1: a real RED that the edit did not plausibly cause -> suppressed
             # (correct-or-quiet); record the class so the None return is diagnosable.
+            _basis = ""
+            try:
+                _basis = next(
+                    (str(c.get("selection_basis") or "")
+                     for c in (covering or []) if c.get("file")),
+                    "")
+            except Exception:  # noqa: BLE001
+                _basis = ""
             _runtime_ledger_record(
                 kind="verify.horizon.executed",
                 outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
-                reason="covering_unattributable", chars=0)
+                reason="covering_unattributable", chars=0,
+                extra={
+                    "fact_class": "covering_red",
+                    "hold_terminal": True,
+                    "selection_basis": _basis or None,
+                })
             return None
         _last_test_outcome_failed = True  # V-3: executed verdict drives the verify axis
         sym = _verified_edited_symbol_for_rendering(edited_syms)
@@ -10981,18 +10922,21 @@ def _executed_covering_candidate(
         return None
     covering = _covering_tests_for_symbols(fresh)
     if not covering:
-        # Host-visible reason: symbols were selected but no FACT-tier covering edge
-        # (det method + conf≥0.7). Distinct from later covering_no_covering (list
-        # non-empty but files missing on disk). Latch so we do not re-query every turn.
+        # Host-visible reason: Hybrid RTS returned no candidates (FACT + closure
+        # + convention all empty / phantoms dropped). Distinct from later
+        # covering_no_covering (list non-empty but files missing on disk).
+        # Latch so we do not re-query every turn.
         try:
             _runtime_ledger_record(
                 kind="verify.horizon.executed",
                 outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
-                reason="covering_empty_sub_fact_floor", chars=0,
+                reason="covering_empty_all_levers", chars=0,
                 extra={
                     "fact_class": "covering_red",
                     "hold_terminal": True,
                     "profile_member": "GT_VERIFY_EXECUTE",
+                    # Alias kept for pre-hybrid readers of the live-log map.
+                    "legacy_reason": "covering_empty_sub_fact_floor",
                 })
             try:
                 from groundtruth.runtime.campaign_feature_live import (
@@ -11000,7 +10944,7 @@ def _executed_covering_candidate(
                 append_feature_live(
                     feature_id="covering_red",
                     stage="HOLD",
-                    reason="covering_empty_sub_fact_floor",
+                    reason="covering_empty_all_levers",
                     role="direct",
                     iteration=int(globals().get("_action_count", 0) or 0),
                 )
