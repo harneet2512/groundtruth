@@ -214,7 +214,7 @@ def test_support_and_control_roles_do_not_borrow_delivery_lineage() -> None:
     )
     assert diagnosis.classify_cap_control(
         "GT_OBLIGATION_FRESHNESS", mediator
-    ) == "UNMEASURED:eligibility_control:terminal_contract_unavailable"
+    ) == "UNMEASURED:eligibility_control:runtime_member_control_receipt"
 
     failed = json.loads(json.dumps(support))
     failed["ss_readiness"]["gates"]["source_contribution_correct"] = False
@@ -557,7 +557,7 @@ def test_diagnosis_emits_exact_inventory_and_perf_statuses(tmp_path: Path) -> No
         "UNMEASURED:infra_control:runtime_member_control_receipt"
     )
     assert by_name["GT_OBLIGATION_FRESHNESS"]["task_buckets"][task] == (
-        "UNMEASURED:eligibility_control:terminal_contract_unavailable"
+        "FAILED:eligibility_control:readiness_role"
     )
     assert diagnosis._perf_status({"status": "PARTIAL"}) == "FAILED"
     assert diagnosis._perf_status({"status": "RIGHT_CENSORED"}) == "RIGHT_CENSORED"

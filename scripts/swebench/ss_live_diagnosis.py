@@ -529,20 +529,15 @@ def classify_cap_control(feature: str, record: object) -> str:
         return classify_typed_terminal(record, "infra_control")
     if role == "eligibility":
         opportunity = _opportunity_record(record)
-        if opportunity.get("status") != "BOUND":
-            if opportunity.get("reason") == "no_bound_opportunity":
-                return "UNMEASURED:eligibility_control:terminal_contract_unavailable"
-            return (
-                "UNMEASURED:eligibility_control:"
-                + str(opportunity.get("reason") or "opportunity_unavailable")
-            )
-        # NO-GO defect 2 (2026-07-18): a BOUND eligibility control is adjudicated on the
-        # G1 typed terminal (receipt + refereed fact ids + declared-effect correctness on
-        # the declared polarity authority), not parked behind a permanent audit-pending
-        # sentinel. Rulings whose (feature, decision) polarity is unregistered, or whose
-        # rows carry no candidate identity (runtime-verified: only dedup2/novelty/shadow/
-        # late_drop seal a candidate today), still surface as named UNMEASURED gates
-        # through the same terminal — never a manufactured pass.
+        # Eligibility CAPs are not listed in feature.opportunity feature_refs
+        # (those keys are FACT + byte_owner only). Requiring CAP-keyed BOUND
+        # parked all 14 eligibility rows as terminal_contract_unavailable even
+        # when control.participation + mediation_correct were real. Grade the
+        # infra_control terminal; identityless / unregistered-polarity rows still
+        # surface as named UNMEASURED gates — never a manufactured pass.
+        if opportunity.get("reason") == "opportunity_record_malformed":
+            return "UNMEASURED:eligibility_control:opportunity_record_malformed"
+        # NO-GO defect 2 (2026-07-18): adjudicate on G1 typed terminal.
         return classify_typed_terminal(
             record, "infra_control", label="eligibility_control",
         )
