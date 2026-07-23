@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #59 | 2026-07-23T22:17:43Z | task=valibot-recursive-schema-composition ===
+=== LIVE SNAPSHOT #60 | 2026-07-23T22:18:04Z | task=valibot-recursive-schema-composition ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_valibot-recursive-schema-composition.log:[DOCKERFILE SLIM] deepswe-bench/tasks/valibot-recursive-schema-composition/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh77krxpg096a66tm8s8ztcarn82zzyv (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_valibot-recursive-schema-composition.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -17,23 +17,24 @@
 /tmp/gha_step_valibot-recursive-schema-composition.log:[RESTOP] 508MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 247MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 242MB:mini-swe-agent /root/.local/share/uv/tools/mini-swe-agent/bin/python / | 157MB:npm exec jest l npm exec jest library/src/actions/ltValue/ltValue.test | 
 /tmp/gha_step_valibot-recursive-schema-composition.log:[RESTOP] 540MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 247MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 246MB:mini-swe-agent /root/.local/share/uv/tools/mini-swe-agent/bin/python / | 157MB:npm exec jest l npm exec jest library/src/actions/maxGraphemes/maxGrap | 
 /tmp/gha_step_valibot-recursive-schema-composition.log:[RESTOP] 590MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 247MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 247MB:mini-swe-agent /root/.local/share/uv/tools/mini-swe-agent/bin/python / | 141MB:npm exec jest l npm exec jest library/src/actions/entries/entries.test | 
+/tmp/gha_step_valibot-recursive-schema-composition.log:[RESTOP] 600MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 247MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 247MB:mini-swe-agent /root/.local/share/uv/tools/mini-swe-agent/bin/python / | 157MB:npm exec jest l npm exec jest library/src/actions/ltValue/ltValue.test | 
 --- mem trend (last 6) ---
-[RESMON] 22:17:19 mem=2366/15993MB disk_used=93713/147719MB free=53990MB containers=2
-[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=1884MB MemAvailable:=13632MB Cached:=9936MB AnonPages:=1372MB Mapped:=474MB Slab:=1348MB 
-[RESMON] 22:17:28 mem=2305/15993MB disk_used=93713/147719MB free=53990MB containers=2
-[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=1928MB MemAvailable:=13675MB Cached:=9936MB AnonPages:=1336MB Mapped:=427MB Slab:=1348MB 
-[RESMON] 22:17:36 mem=2830/15993MB disk_used=93713/147719MB free=53990MB containers=2
-[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=1409MB MemAvailable:=13156MB Cached:=9936MB AnonPages:=1898MB Mapped:=474MB Slab:=1349MB 
+[RESMON] 22:17:44 mem=2365/15993MB disk_used=93713/147719MB free=53990MB containers=2
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=1885MB MemAvailable:=13633MB Cached:=9936MB AnonPages:=1345MB Mapped:=435MB Slab:=1348MB 
+[RESMON] 22:17:52 mem=2354/15993MB disk_used=93713/147719MB free=53990MB containers=2
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=1897MB MemAvailable:=13644MB Cached:=9936MB AnonPages:=1372MB Mapped:=474MB Slab:=1348MB 
+[RESMON] 22:18:00 mem=2422/15993MB disk_used=93713/147719MB free=53990MB containers=2
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=1822MB MemAvailable:=13570MB Cached:=9936MB AnonPages:=1445MB Mapped:=474MB Slab:=1348MB 
 --- pier tail (last 15, non-RESMON) ---
 [GT_META] graph_witness host_resolved_graph_db=/tmp/gt/graph.db hook_graph_db=/tmp/gt/graph.db hook_graph_hash=9e86ec1f1503420e85388815bab1d8869b5a9c669ecc45bcc6d9dcbe56a12fc1 _gt_prebuilt_active=True | gt_artifacts=/tmp/gt; graph_db=/tmp/gt/graph.db; graph_hash=9e86ec1f1503420e85388815bab1d8869b5a9c669ecc45bcc6d9dcbe56a12fc1; graph_hash_after_lsp=9e86ec1f1503420e85388815bab1d8869b5a9c669ecc45bcc6d9dcbe56a12fc1; hook_graph_hash_matches_post_lsp=True; lsp_certificate=/tmp/gt/lsp_certificate.json; graph_certificate=/tmp/gt/graph_certificate.json; embedder_certificate=/tmp/gt/embedder_certificate.json; foundational_gate_report=/tmp/gt/foundational_gate_report.json; gt_prebuilt_active=true; runtime_strategy=unified_substrate; l6_fresh=1; substrate_digest=ghcr.io/hbali-stack/gt-substrate@sha256:452089fe4994126c0f8a0ffded62d03570007eac90d48ae6b6f525e4563a593c
 --- step tail (last 8) ---
-[RESMON] 22:17:28 mem=2305/15993MB disk_used=93713/147719MB free=53990MB containers=2
+[RESMON] 22:17:52 mem=2354/15993MB disk_used=93713/147719MB free=53990MB containers=2
 [RESTOP] 600MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 247MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 247MB:mini-swe-agent /root/.local/share/uv/tools/mini-swe-agent/bin/python / | 129MB:provjobd4049902 /tmp/provjobd404990286 | 
 [MEMDIAG] dockerd(2807): VmRSS:=614824kB RssAnon:=558316kB RssFile:=56508kB RssShmem:=0kB VmSwap:=0kB 
-[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=1928MB MemAvailable:=13675MB Cached:=9936MB AnonPages:=1336MB Mapped:=427MB Slab:=1348MB 
-[RESMON] 22:17:36 mem=2830/15993MB disk_used=93713/147719MB free=53990MB containers=2
-[RESTOP] 600MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 571MB:MainThread node /app/library/node_modules/.bin/../typescript/bin/tsc - | 247MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 247MB:mini-swe-agent /root/.local/share/uv/tools/mini-swe-agent/bin/python / | 
-[MEMDIAG] dockerd(2807): VmRSS:=614824kB RssAnon:=558316kB RssFile:=56508kB RssShmem:=0kB VmSwap:=0kB 
-[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=1409MB MemAvailable:=13156MB Cached:=9936MB AnonPages:=1898MB Mapped:=474MB Slab:=1349MB 
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=1897MB MemAvailable:=13644MB Cached:=9936MB AnonPages:=1372MB Mapped:=474MB Slab:=1348MB 
+[RESMON] 22:18:00 mem=2422/15993MB disk_used=93713/147719MB free=53990MB containers=2
+[RESTOP] 600MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 247MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 247MB:mini-swe-agent /root/.local/share/uv/tools/mini-swe-agent/bin/python / | 157MB:npm exec jest l npm exec jest library/src/actions/ltValue/ltValue.test | 
+[MEMDIAG] dockerd(2807): VmRSS:=614828kB RssAnon:=558320kB RssFile:=56508kB RssShmem:=0kB VmSwap:=0kB 
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=1822MB MemAvailable:=13570MB Cached:=9936MB AnonPages:=1445MB Mapped:=474MB Slab:=1348MB 
 --- FEATURE LIVE (DELIVERED|HOLD|SUPPRESSED|ERROR|NOT_ELIGIBLE only) ---
 (no gt_campaign_feature_live.jsonl yet)
