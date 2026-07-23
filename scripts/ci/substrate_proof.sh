@@ -263,6 +263,20 @@ if [ "$SUBSTRATE_LOADED" -eq 0 ]; then
     exit 1
   fi
 fi
+# Early one-build binding: inspect the pulled/loaded image's bake SHA before
+# spending proof/agent work. Strengthens GT_COMMIT_PARITY (does not replace it).
+if [ "${GT_REQUIRE_COMMIT_PARITY:-1}" = "1" ] && [ -n "${GT_GITHUB_SHA:-}" ]; then
+  _BAKE_SHA=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$GT_SUBSTRATE_DIGEST" 2>/dev/null \
+    | sed -n 's/^GT_SUBSTRATE_BUILD_COMMIT=//p' | head -1)
+  if [ -z "$_BAKE_SHA" ]; then
+    _BAKE_SHA=$(docker inspect --format '{{index .Config.Labels "gt.substrate.build_commit"}}' "$GT_SUBSTRATE_DIGEST" 2>/dev/null || true)
+  fi
+  if [ -n "$_BAKE_SHA" ] && [ "$_BAKE_SHA" != "$GT_GITHUB_SHA" ]; then
+    echo "GT_COMMIT_PARITY_MISMATCH: substrate built from ${_BAKE_SHA} but the run claims ${GT_GITHUB_SHA} — a stale substrate cannot run under GT_REQUIRE_COMMIT_PARITY=1; rebuild + repin the substrate at the run commit." | tee -a trial_output.log
+    write_proof_status failed GT_COMMIT_PARITY_MISMATCH "substrate built from ${_BAKE_SHA} but the run claims ${GT_GITHUB_SHA}"
+    exit 1
+  fi
+fi
 rm -f /tmp/gt-substrate.tar.gz 2>/dev/null || true
 
 # Materialize the task repo at its base commit and copy it OUT to a host dir we

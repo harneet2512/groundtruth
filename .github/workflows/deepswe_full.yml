@@ -103,9 +103,9 @@ on:
         required: false
         default: "0"
       rl_profile:
-        description: "GT_RL_PROFILE — ONE versioned toggle for the coherent RL-adherence stack (B-16/B-17). 1 = ON activates GT_GATEWAY·GT_GATEWAY_NATIVE·GT_STEER_NATIVE·GT_LANE_ENVELOPE·GT_EDIT_CHECK·GT_VERIFY_EXECUTE·GT_D7_RELATEDNESS·GT_OBLIGATION_FRESHNESS (fanned out in gt_ae_block.sh via rl_profile.py). An EXPLICITLY-set member input still overrides the profile (per-flag control). Harness ABORTS before model spend if a requested member capability is unavailable (fail-closed). '' = OFF (default; byte-identical — no member flag changed). Measurement-only authority stays advisory."
+        description: "GT_RL_PROFILE — ONE versioned toggle for the coherent RL-adherence stack. PRODUCTION default is 2 (full Profile-2). Explicit '' / 0 remains available for byte-identical kill-switch debugging. An EXPLICITLY-set member input still overrides the profile. Harness ABORTS before model spend if a requested member capability is unavailable (fail-closed)."
         required: false
-        default: ""
+        default: "2"
       require_commit_parity:
         description: "Strict commit-parity gate (github.sha == substrate baked commit). '1' (default) = full-run strict. '0' = allow a CI-ONLY-delta validation to run an EXISTING substrate whose baked commit lags the checkout by pipeline/gate fixes only (the GT product code that runs is the substrate's, not the checkout's) — used to validate a gate fix without a rebake."
         required: false
@@ -1162,11 +1162,13 @@ jobs:
           # Ensure bind source exists.
           mkdir -p "${HOST_ARTIFACTS}"
 
+          # Policy owner is proof_status.json (wrapper taxonomy): quality-only
+          # PROOF_DEGRADED keeps state=ok so spend proceeds; legitimacy failures
+          # stay state=failed. Never prefer raw proof_verdict.json here — that
+          # falsely blocked PROOF_DEGRADED arms after identity already validated.
           PROOF_STATE=$(python3 - <<'PY'
           import json, pathlib
-          p = pathlib.Path("/tmp/gt/proof_verdict.json")
-          if not p.exists():
-              p = pathlib.Path("/tmp/gt/proof_status.json")
+          p = pathlib.Path("/tmp/gt/proof_status.json")
           if not p.exists():
               print("missing")
           else:
@@ -1176,8 +1178,8 @@ jobs:
                   print("invalid")
           PY
           )
-          if [ "${GT_BASELINE:-0}" != "1" ] && [ "$PROOF_STATE" != "ok" ]; then
-            echo "GT_RUN_PROOF_FAIL: refusing paid agent run because substrate proof verdict state=${PROOF_STATE}" | tee -a trial_output.log
+          if [ "${GT_BASELINE:-0}" != "1" ] && [ "$PROOF_STATE" != "ok" ] && [ "$PROOF_STATE" != "PROOF_DEGRADED" ]; then
+            echo "GT_RUN_PROOF_FAIL: refusing paid agent run because substrate proof_status state=${PROOF_STATE}" | tee -a trial_output.log
             exit 1
           fi
 

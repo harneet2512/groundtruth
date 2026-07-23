@@ -92,3 +92,12 @@ def test_run_identity_uses_wrapper_proof_policy_not_raw_inner_verdict() -> None:
     assert "Path('/tmp/gt/proof_verdict.json')" not in run
     assert "'proof_status_state': os.environ['GT_ID_PROOF_STATE']" in run
     assert "'proof_status_code': os.environ['GT_ID_PROOF_CODE']" in run
+
+
+def test_paid_trial_spend_gate_uses_wrapper_proof_status_not_raw_verdict() -> None:
+    """Quality-only PROOF_DEGRADED must not false-block spend after identity passed."""
+    trial = _step_named("Run GT trial")
+    run = trial["run"]
+    assert 'Path("/tmp/gt/proof_status.json")' in run
+    assert 'Path("/tmp/gt/proof_verdict.json")' not in run
+    assert 'PROOF_DEGRADED' in run

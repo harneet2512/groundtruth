@@ -46,7 +46,7 @@ def _wire_fake_candidates(monkeypatch):
     monkeypatch.setattr(g, "_ss_scan_acks", lambda *a, **k: None)
     monkeypatch.setattr(g, "_gt_gateway_caller_contract_ready", lambda *a, **k: False)
 
-    def gateway(action, out, cmd, orig_out, *, pool=None):
+    def gateway(action, out, cmd, orig_out, *, pool=None, lattice_produced=None):
         candidate = SimpleNamespace(kind="fake." + cmd, plane="fact")
         thunk = lambda: out.__setitem__("output", out["output"] + "\nGT:" + cmd)
         if pool is None:
@@ -572,13 +572,17 @@ def test_holdout_ledger_hashes_exact_would_ship_suffix(monkeypatch):
 
 
 @pytest.mark.parametrize("profile", ["", "1", "2", "custom"])
-def test_global_arbiter_without_installed_handshake_is_zero_dose(monkeypatch, profile):
+def test_global_arbiter_without_installed_handshake_failopens_inline(monkeypatch, profile):
+    """Mini-swe lacks the multi-action batch formatter. When GA is on but
+    batch_commit is not installed, degrade to inline plane delivery — never
+    hard-zero the observation (run 29948431988: 80× batch_commit_not_installed).
+    """
     _wire_fake_candidates(monkeypatch)
     monkeypatch.setenv("GT_RL_PROFILE", profile)
     monkeypatch.setitem(g._GT_PROCESS_STATE, "batch_commit_installed", False)
     monkeypatch.setitem(g._GT_PROCESS_STATE, "batch_install_failed", False)
     out = _Env().execute({"command": "one"})
-    assert out["output"] == "base:one"
+    assert out["output"] == "base:one\nGT:one"
 
 
 def test_final_stepbehind_commits_known_fact_only_after_formatter(monkeypatch):

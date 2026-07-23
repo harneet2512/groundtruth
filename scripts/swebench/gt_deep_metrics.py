@@ -166,15 +166,34 @@ def _find_patch_artifact(task: str, results_dir: str) -> str | None:
     """Locate a real task-scoped patch emitted beside a mini-swe trajectory.
 
     DeepSWE stores the submitted diff as ``artifacts/model.patch`` rather than in
-    ``info.submission``.  Treat only non-empty files below ``results_dir`` as
-    evidence, and preserve the same task-identity guard used for trajectories so
-    a shared collection directory can never lend one task another task's patch.
+    ``info.submission``.  Live-lite often writes ``agent_patch.diff`` under the
+    ``/gt_out`` bind (host ``/tmp/gt_out``) while metrics scan ``/tmp/gt/<task>``.
+    Search ``results_dir`` plus common sibling harvest dirs, and preserve the same
+    task-identity guard used for trajectories so a shared collection directory
+    can never lend one task another task's patch.
     """
-    if not results_dir or not os.path.isdir(results_dir):
+    search_roots: list[str] = []
+    if results_dir and os.path.isdir(results_dir):
+        search_roots.append(results_dir)
+        parent = os.path.dirname(os.path.abspath(results_dir))
+        for sibling in ("gt_out", "trial_results", os.path.basename(results_dir)):
+            cand = os.path.join(parent, sibling)
+            if os.path.isdir(cand) and cand not in search_roots:
+                search_roots.append(cand)
+        # Host live-lite bind: metrics results_dir=/tmp/gt but patch may still
+        # live only under /tmp/gt_out until the workflow co-locates it.
+        gt_out = "/tmp/gt_out"
+        if os.path.isdir(gt_out) and gt_out not in search_roots:
+            search_roots.append(gt_out)
+    if not search_roots:
         return None
     hits: list[str] = []
-    for name in ("agent_patch.diff", "model.patch", "patch.diff"):
-        hits.extend(glob.glob(os.path.join(results_dir, "**", name), recursive=True))
+    for root in search_roots:
+        for name in ("agent_patch.diff", "model.patch", "patch.diff"):
+            hits.extend(glob.glob(os.path.join(root, "**", name), recursive=True))
+            direct = os.path.join(root, name)
+            if os.path.isfile(direct):
+                hits.append(direct)
     hits = sorted({path for path in hits if os.path.isfile(path) and os.path.getsize(path) > 0})
     if not task:
         return hits[0] if hits else None
@@ -184,6 +203,13 @@ def _find_patch_artifact(task: str, results_dir: str) -> str | None:
             match = re.search(r"([^/\\]+?)__[^/\\]+[/\\](?:agent|artifacts)", path)
             if match and len(match.group(1)) >= 8 and task.startswith(match.group(1)):
                 scoped.append(path)
+        # Unscoped bind-mount patch next to a task-named trajectory dir: accept
+        # only when results_dir itself is already task-scoped.
+        if not scoped and task and results_dir and task in os.path.abspath(results_dir):
+            scoped = [
+                path for path in hits
+                if os.path.basename(path) in ("agent_patch.diff", "model.patch", "patch.diff")
+            ]
     return scoped[0] if scoped else None
 
 
@@ -641,6 +667,23 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
     out["exit_status"] = str(info.get("exit_status", ""))
     sub = str(info.get("submission") or "")
     out["has_patch"] = bool("diff --git" in sub)
+    # Live-lite / headless paths often leave info.submission empty while a real
+    # agent_patch.diff / model.patch sits beside the trajectory. Detect that
+    # before classifying unresolved_no_patch_agent_ran (CLAUDE.md 2026-07-22).
+    if not out["has_patch"]:
+        patch_path = _find_patch_artifact(task, results_dir)
+        if patch_path is None and tj:
+            tj_dir = os.path.dirname(tj)
+            patch_path = _find_patch_artifact(task, tj_dir)
+        if patch_path is not None:
+            try:
+                with open(patch_path, encoding="utf-8", errors="replace") as fh:
+                    body = fh.read(4096)
+                out["has_patch"] = bool(
+                    body.strip() and ("diff --git" in body or body.lstrip().startswith("---"))
+                )
+            except OSError:
+                out["has_patch"] = os.path.getsize(patch_path) > 0
     model_stats = info.get("model_stats", {}) or {}
     out["action_count"] = int(model_stats.get("api_calls", 0) or 0)
     # mini-swe-agent rolls up the litellm-recorded spend here (instance_cost / cost) —

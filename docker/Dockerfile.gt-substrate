@@ -247,6 +247,8 @@ RUN rm -rf /opt/gt/go/test /opt/gt/go/api /opt/gt/go/misc /opt/gt/go/doc /opt/gt
 # GT_REQUIRE_COMMIT_PARITY) fails closed when it diverges from the run commit (GT_GIT_COMMIT)
 # — a stale substrate can no longer run silently (D/2026-06-13).
 ARG GT_COMMIT_SHA=dev
+# LABEL mirrors ENV so pull-time docker inspect can bind digest↔bake SHA before proof.
+LABEL gt.substrate.build_commit=${GT_COMMIT_SHA}
 ENV GT_SUBSTRATE_BUILD_COMMIT=${GT_COMMIT_SHA} \
     GT_HOME=/opt/gt \
     GT_INDEX_BINARY=/opt/gt/bin/gt-index \

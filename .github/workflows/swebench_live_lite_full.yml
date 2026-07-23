@@ -858,12 +858,15 @@ jobs:
           # preserved). Baseline arm is unaffected: this whole step is skipped when inputs.baseline == true.
           GT_SEM_BODY: '1'
           GT_CONTENT_LEG: '1'
+          # PRODUCTION = PROFILE-ON: fan Profile-2 via substrate_proof.sh resolve_profile
+          # BEFORE brief generation (same class as deepswe pretask fanout pin). Hardcoded
+          # brief-time flags below remain explicit overrides; GT_RL_PROFILE makes any new
+          # PROFILE_MEMBERS["2"] brief-time member land without hand-editing this step.
+          GT_RL_PROFILE: '2'
           # 2-task-smoke finding (run 29233180347): the brief GENERATOR flags must also be ON
-          # where the brief is generated (this step) — the profile fan-out is agent-only, so
-          # without these the brief ships the legacy verbose form with the stale
-          # <gt-localization> candidates. GT_BRIEF_MINIMAL retires the step-0 localization
-          # narration (localization rides the reactive channels); GT_BRIEF_NATIVE renders the
-          # obligations as a plain checklist (no <gt-*> tags). Baseline arm skips this step.
+          # where the brief is generated (this step). GT_BRIEF_MINIMAL retires the step-0
+          # localization narration (localization rides the reactive channels); GT_BRIEF_NATIVE
+          # renders the obligations as a plain checklist (no <gt-*> tags). Baseline arm skips.
           GT_BRIEF_MINIMAL: '1'
           GT_BRIEF_NATIVE: '1'
           # SS-5 (2026-07-19): the acknowledgment-FORM arm layers the requirement-extractor
@@ -2162,6 +2165,13 @@ jobs:
           # subdir /tmp/gt/<task>/ (path now carries the id → reader accepts) + the artifact.
           cp /tmp/gt_out/mini-swe-agent.trajectory.json "$TASK_ARTIFACT_ROOT/mini-swe-agent.trajectory.json" 2>/dev/null || true
           cp /tmp/gt_out/mini-swe-agent.trajectory.json trial_results/ 2>/dev/null || true
+          # Co-locate the real patch under the deep-metrics results_dir (/tmp/gt/<task>)
+          # so has_patch cannot lie as unresolved_no_patch_agent_ran when agent_patch.diff
+          # only lived on /tmp/gt_out (CLAUDE.md 2026-07-22 measurement defect).
+          cp /tmp/gt_out/agent_patch.diff "$TASK_ARTIFACT_ROOT/agent_patch.diff" 2>/dev/null || true
+          cp /tmp/gt_out/agent_patch.diff "$TASK_ARTIFACT_ROOT/model.patch" 2>/dev/null || true
+          cp trial_results/agent_patch.diff "$TASK_ARTIFACT_ROOT/agent_patch.diff" 2>/dev/null || true
+          cp trial_results/agent_patch.diff "$TASK_ARTIFACT_ROOT/model.patch" 2>/dev/null || true
           cp trial_results/report.json "$TASK_ARTIFACT_ROOT/report.json" 2>/dev/null || true
           cp trial_results/reward.txt "$TASK_ARTIFACT_ROOT/reward.txt" 2>/dev/null || true
           cp /tmp/gt_out/gt_oracle_events.jsonl "$TASK_ARTIFACT_ROOT/gt_oracle_events_${GT_TASK_ID}.jsonl" 2>/dev/null || true
