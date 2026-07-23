@@ -4916,24 +4916,50 @@ def _search_localize_decision(
             _outcome = "hit"
         _ledger_record(tok, idx, _outcome)
 
-    if not sym:
-        # T0->T2 localization RE-SLOT (GO-LIVE, GT_LOC_RESLOT default-OFF). This IS the
-        # post_search ABSTAIN branch: a BROAD / behavior / multi-token / regex grep (exactly
-        # stratum-B — where _search_pattern returns None and the cooperative def-partition
-        # delivers 0 doses). Deliver GT's RANKED localization answer HERE as the lattice's OWN
-        # single dose. The isolation gate (_search_command_isolated) + the probe-token ledger
-        # accounting above ALREADY ran; _loc_reslot_block adds NO _ledger_record (single record)
-        # and no _search_pattern-keyed answered-stamp (sym is None -> the D-4 delivery stamp
-        # skips). Off / spent / no-rows / any fault -> "" == today's abstain (byte-identical).
+    # T0->T2 localization RE-SLOT (GO-LIVE, GT_LOC_RESLOT): spend the once-per-episode
+    # ranked-localization dose on the FIRST answerable isolated search — bare-symbol
+    # OR broad. Previously only the ABSTAIN branch (sym is None) called
+    # ``_loc_reslot_payload``, so perpetual bare-symbol greps starved reactive
+    # localization forever (def_partition always won). Empty rows / latch spent /
+    # flag off -> fall through (byte-identical to pre-fix when latch already spent).
+    if _loc_reslot_on() and not _loc_reslot_delivered:
         block, scope_selection = _loc_reslot_payload()
-        relations = tuple(
-            (row.related_file, row.resolution_method, row.confidence, row.edge_id)
-            for row in (getattr(scope_selection, "relations", ()) or ()))
-        return _post_search_decision(
-            block, "ranked_localization", "localization",
-            scope_graph_revision=(getattr(scope_selection, "graph_revision", "")
-                                  if relations else ""),
-            scope_relations=relations)
+        if block and str(block).strip():
+            if _inseam_metrics_on():
+                try:
+                    _control_participation_record(
+                        "GT_POST_SEARCH",
+                        "mini_seam.post_search.lattice_master_enable",
+                        "APPLIED",
+                        candidate_bytes=block,
+                        fact_class="localization",
+                        candidate_id="ranked_localization:first_search",
+                        reason="loc_reslot_first_search",
+                    )
+                    _control_participation_record(
+                        "GT_LOC_RESLOT",
+                        "mini_seam.post_search.loc_reslot",
+                        "APPLIED",
+                        candidate_bytes=block,
+                        fact_class="localization",
+                        candidate_id="ranked_localization:first_search",
+                        reason="ranked_localization_produced",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            relations = tuple(
+                (row.related_file, row.resolution_method, row.confidence, row.edge_id)
+                for row in (getattr(scope_selection, "relations", ()) or ()))
+            return _post_search_decision(
+                block, "ranked_localization", "localization",
+                scope_graph_revision=(getattr(scope_selection, "graph_revision", "")
+                                      if relations else ""),
+                scope_relations=relations)
+
+    if not sym:
+        # Broad / behavior / multi-token / regex grep with loc_reslot already spent
+        # or empty rows -> lattice abstains (no bare-symbol def_partition).
+        return _post_search_decision()
 
     db = _db_path()
     if not db or not os.path.isfile(db):
@@ -4994,6 +5020,19 @@ def _search_localize_decision(
     # so a block Lane-A suppresses (cross-lane / content-hash dedup) never leaves a
     # phantom 'answered' stamp for bytes the agent never saw. The out=None PIN path is
     # unchanged — it keeps its own mark via _direct_def_block(...).
+    if _inseam_metrics_on() and block:
+        try:
+            _control_participation_record(
+                "GT_POST_SEARCH",
+                "mini_seam.post_search.lattice_master_enable",
+                "APPLIED",
+                candidate_bytes=block,
+                fact_class=branch_evidence or "def_partition",
+                candidate_id=(f"{branch_evidence or 'def_partition'}:{stem}"),
+                reason="lattice_produced",
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return _post_search_decision(block, branch_producer, branch_evidence)
 
 
@@ -7487,7 +7526,7 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
             _control_participation_record(
                 "GT_SS_COHERENCE_V2", "mini_seam.coherence.recovery_pivot",
                 "APPLIED", candidate_bytes=body,
-                fact_class="recovery", candidate_id=f"recovery:{rel}",
+                fact_class="recovery",
                 reason=f"churn_{churn}_no_passing_test_between")
         except Exception:  # noqa: BLE001 — measurement must never break the producer
             pass
@@ -11559,7 +11598,6 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
                 "APPLIED",
                 reason="ss_recovery_released",
                 fact_class="recovery",
-                candidate_id=f"recovery:{selection[0]}",
             )
             _control_participation_record(
                 "GT_HYPOTHESIS",
@@ -11567,7 +11605,6 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
                 "APPLIED",
                 reason="ss_recovery_released",
                 fact_class="recovery",
-                candidate_id=f"recovery:{selection[0]}",
             )
         except Exception:  # noqa: BLE001 — measurement must never break the producer
             pass
@@ -18214,40 +18251,37 @@ def _ss_novelty_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool
     already in the acquisition ledger (the agent demonstrably has it). Path-driven:
     a block whose cited files were ALL opened/edited by the agent is step-behind (the
     agent already holds those files' symbols); a path-less block requires every cited
-    symbol greped/edited. ``is_loc`` (a localization-class gateway fact — the def/ref
-    partition) is gated too. Non-factual (nudge) kinds are never gated. Correct-or-quiet:
-    any un-acquired entity -> deliver."""
+    symbol greped/edited. Non-factual (nudge) kinds are never gated. Correct-or-quiet:
+    any un-acquired entity -> deliver.
+
+    Reactive localization answers (``post_search.localize`` / ``is_loc``) and
+    caller-contract facts are NOT path-acq gated: opening a file does not acquire the
+    partition/ranked/relation claim. Redundancy for those classes is
+    ``_ss_native_contains_claim`` + DEDUP2 only.
+    """
     if (kind not in _SS_NOVELTY_GATED
             and kind != "post_search.localize" and not is_loc):
+        return False
+    # Caller-contract + reactive localization: path/symbol acquisition alone never
+    # starves — claim-match + DEDUP2 remain (see ``_ss_content_decision``).
+    if _ss_dedup_group(kind) == "caller_facts":
+        return False
+    if kind == "post_search.localize" or is_loc:
         return False
     paths = _ss_extract_paths(text, root)
     syms = _ss_extract_symbols(text)
     if not paths and not syms:
         return False
-    # A deliver_by=search_result reactive answer (post_search.localize def_partition, or an
-    # is_loc localization) is ON-TIME BY CONSTRUCTION at the search it answers: it must NOT be
-    # judged step-behind against the SAME triggering search's own acquisition recorded THIS turn
-    # (_ss_observe_turn runs BEFORE this gate). Exempt ONLY that current triggering search's NEW
-    # entities — prior-turn acquisitions remain in the judged ledger, so a genuinely redundant
-    # fact the agent already held is still suppressed. Non-reactive gated classes (contract /
-    # evidence / obligation) judge against the full ledger, unchanged (empty delta off-search).
-    if (kind == "post_search.localize") or is_loc:
-        acq_files = _ss_acquired_files - _ss_current_search_new_files
-        acq_syms = _ss_acquired_symbols - _ss_current_search_new_syms
-    else:
-        acq_files = _ss_acquired_files
-        acq_syms = _ss_acquired_symbols
-    # Caller-contract facts assert a RELATION (who calls whom / breakage risk).
-    # Opening the cited files does NOT acquire that claim — only an exact claim-line
-    # match in native observation does (see ``_ss_native_contains_claim``). Path /
-    # symbol acquisition alone must not starve DIRECT ``caller_contract`` delivery;
-    # DEDUP2 still kills true entity-set repeats after a real delivery or claim-matched
-    # step-behind.
-    if _ss_dedup_group(kind) == "caller_facts":
-        return False
+    acq_files = _ss_acquired_files
+    acq_syms = _ss_acquired_symbols
     if paths:
         return all(p in acq_files for p in paths)
     return all(s in acq_syms for s in syms)
+
+
+def _ss_localization_dedup_kind(kind: str, *, is_loc: bool = False) -> bool:
+    """True when ``kind`` / ``is_loc`` participates in the localization DEDUP2 group."""
+    return bool(is_loc or kind == "post_search.localize")
 
 
 def _ss_dedup2_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool = False) -> bool:
@@ -18258,7 +18292,8 @@ def _ss_dedup2_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool 
     fuzzy similarity threshold (a threshold risks suppressing a novel fact and breaks
     correct-or-quiet — the sanctioned fix for a true paraphrase-dup is a canonical-key
     exact match, never a threshold)."""
-    grp = _ss_dedup_group(kind) or ("localization" if is_loc else None)
+    grp = _ss_dedup_group(kind) or (
+        "localization" if _ss_localization_dedup_kind(kind, is_loc=is_loc) else None)
     if grp is None:
         return False
     ents = _ss_entity_set(text, root)
@@ -18279,7 +18314,8 @@ def _ss_remember_known(kind: str, text: str, root: str = "", *, is_loc: bool = F
     """
     if not knowledge_authority or not _ss_dedup2_on() or not text:
         return
-    grp = _ss_dedup_group(kind) or ("localization" if is_loc else None)
+    grp = _ss_dedup_group(kind) or (
+        "localization" if _ss_localization_dedup_kind(kind, is_loc=is_loc) else None)
     if grp is None:
         return
     ents = _ss_entity_set(text, root)
@@ -18416,7 +18452,8 @@ def _ss_native_contains_claim(kind: str, text: str, native_text: str,
     contract relation.  There is no fuzzy threshold; any changed relation stays
     eligible.  Timing/salience classes never close on native repetition.
     """
-    if _ss_dedup_group(kind) is None and not is_loc:
+    if (_ss_dedup_group(kind) is None
+            and not _ss_localization_dedup_kind(kind, is_loc=is_loc)):
         return False
     del root  # exact claim identity is independent of path spelling normalization
 

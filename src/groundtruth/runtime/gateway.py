@@ -1090,6 +1090,40 @@ _GREP_STAGE_HEAD_RE = re.compile(r"^\s*(?:grep|egrep|fgrep|rg)\b")
 _TRUNCATE_STAGE_RE = re.compile(r"^\s*(?:head|tail|less|more)\b")
 _HIT_PATH_EXT_RE = re.compile(r"\.\w+$")
 
+# Leading ``cd <path> &&`` normalizer — parity with gt_mini_patch W13 / SS-4.
+# Without this, ``cd /testbed && grep …`` fails ``_grep_is_final_stage`` (head is
+# ``cd``, not ``grep``), so empty greps never classify ZERO_ABSENT and
+# change_surface / newfile_precedent stay dark on every harness-prefixed search.
+_CD_PREFIX_RE = re.compile(r"^\s*cd\s+[A-Za-z0-9_./~-]+\s*&&\s*")
+_CD_PREFIX_WIDE_RE = re.compile(
+    r"^\s*cd\s+(?:"
+    r'"\$\([^()]*\)"'
+    r"|'\$\([^()]*\)'"
+    r"|\$\([^()]*\)"
+    r"|`[^`]*`"
+    r"|\$[A-Za-z_][A-Za-z0-9_]*"
+    r"|[A-Za-z0-9_./~-]+"
+    r")\s*&&\s*"
+)
+
+
+def _ss_eligibility_on() -> bool:
+    """SS-4 command-substitution cd widening (GT_SS_ELIGIBILITY). Default-OFF."""
+    return os.environ.get("GT_SS_ELIGIBILITY", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _strip_leading_cd_prefix(cmd: str) -> str:
+    """Strip leading pure ``cd <path> &&`` segments (W13; + ``cd $(…)`` under SS-4)."""
+    wide_on = _ss_eligibility_on()
+    rx = _CD_PREFIX_WIDE_RE if wide_on else _CD_PREFIX_RE
+    s = cmd or ""
+    while True:
+        m = rx.match(s)
+        if not m:
+            return s
+        s = s[m.end():]
+
 
 def _grep_is_final_stage(head: str) -> bool:
     """True iff grep/rg is last, or followed only by truncate-only stages.
@@ -1115,7 +1149,14 @@ def _grep_is_count(seg: str) -> bool:
 
 
 def _grep_result_empty(cmd: str, out: str) -> bool:
-    head = (cmd or "").split("\n", 1)[0]
+    """Deterministic zero-hit detection. Covers: exit-1/empty bytes; ``grep -c``
+    printing all-zero counts. ONLY when grep is the final pipeline stage.
+
+    Harness ``cd /testbed && grep …`` (and SS-4 ``cd $(…) && grep …``) must strip
+    before the final-stage check — otherwise emptiness is never detected and
+    ZERO_ABSENT / change_surface never fire on live mini-swe searches.
+    """
+    head = _strip_leading_cd_prefix((cmd or "").split("\n", 1)[0])
     if not _grep_is_final_stage(head):
         return False
     s = (out or "").strip()

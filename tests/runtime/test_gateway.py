@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from groundtruth.runtime import gateway as gw
 from groundtruth.runtime.gateway import (
     CoveringResult,
     GatewayState,
@@ -296,6 +297,41 @@ def test_zero_absent_repeat_fires_change_surface(tmp_path, monkeypatch):
     assert classify_outcome(ev1, st) == ZERO_ABSENT
     first = augment(ev1, st)     # first confirmed absence may speak
     assert any(a.tier == "HYPOTHESIS" and a.producer == "change_surface" for a in first)
+
+
+def test_cd_prefixed_empty_grep_is_zero_absent(tmp_path, monkeypatch):
+    """Harness ``cd /testbed && grep`` empty must classify ZERO_ABSENT (cd-strip)."""
+    monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
+    (tmp_path / "providers").mkdir()
+    (tmp_path / "providers" / "aws.py").write_text("class AwsProvider:\n    pass\n")
+    (tmp_path / "providers" / "gcp.py").write_text("class GcpProvider:\n    pass\n")
+    (tmp_path / "providers" / "__init__.py").write_text(
+        "from .aws import AwsProvider\nfrom .gcp import GcpProvider\n"
+        "REGISTRY = {'aws': AwsProvider, 'gcp': GcpProvider}\n")
+    db = _mk_graph(tmp_path, [
+        {"id": 1, "name": "AwsProvider", "label": "Class",
+         "file_path": "providers/aws.py", "start_line": 1},
+        {"id": 2, "name": "GcpProvider", "label": "Class",
+         "file_path": "providers/gcp.py", "start_line": 1},
+    ], [])
+    issue = "Add an azure provider analogous to the existing aws and gcp providers."
+    st = _state(tmp_path, db, issue_text=issue)
+    # Without cd-strip this returns SATISFIED (emptiness never detected).
+    assert gw._grep_result_empty("cd /testbed && grep -rn azure .", "") is True
+    assert gw._grep_result_empty("cd /testbed && grep -rn azure . | head -20", "") is True
+    ev = _ev("search", "cd /testbed && grep -rn azure .", "", action_index=3)
+    assert classify_outcome(ev, st) == ZERO_ABSENT
+    adds = augment(ev, st)
+    assert any(a.producer == "change_surface" for a in adds)
+
+
+def test_cd_subst_empty_grep_under_ss_eligibility(tmp_path, monkeypatch):
+    """SS-4: ``cd $(cat …) && grep`` emptiness requires GT_SS_ELIGIBILITY."""
+    monkeypatch.delenv("GT_SS_ELIGIBILITY", raising=False)
+    cmd = 'cd $(cat /tmp/gt_root.txt) && grep -rn azure .'
+    assert gw._grep_result_empty(cmd, "") is False
+    monkeypatch.setenv("GT_SS_ELIGIBILITY", "1")
+    assert gw._grep_result_empty(cmd, "") is True
 
 
 def test_trace_hit_from_test_output(tmp_path):

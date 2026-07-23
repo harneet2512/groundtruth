@@ -52,9 +52,24 @@ def test_novelty_pure_predicate_exempts_nudge_classes():
         assert g._ss_novelty_suppresses(kind, "src/foo.py get_user()", "") is False
     # caller_facts: viewing the cited file does NOT acquire the caller/contract claim
     assert g._ss_novelty_suppresses("l3.contract", "src/foo.py get_user()", "") is False
-    # non-caller factual classes still use path acquisition
+    # reactive search-result answers: path acquisition alone must NOT starve
+    # def_partition / ranked localization (claim-match + DEDUP2 remain).
     assert g._ss_novelty_suppresses(
-        "post_search.localize", "src/foo.py get_user()", "") is True
+        "post_search.localize", "src/foo.py get_user()", "") is False
+    assert g._ss_novelty_suppresses(
+        "gateway.def_ref", "src/foo.py get_user()", "", is_loc=True) is False
+
+
+def test_novelty_post_search_claim_match_still_step_behind(monkeypatch):
+    """Claim already in native observation → still ss_step_behind (not path-acq)."""
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_NOVELTY", "1")
+    g._ss_acquired_files.add("src/foo.py")
+    claim = "src/foo.py:1:def get_user"
+    suppressed, reason = g._ss_content_decision(
+        "post_search.localize", claim, "", native_text=f"already saw:\n{claim}\n")
+    assert suppressed is True
+    assert reason == "ss_step_behind"
 
 
 def test_novelty_suppresses_when_claim_already_in_native(monkeypatch):
@@ -239,8 +254,8 @@ def test_native_equivalent_gateway_claim_is_step_behind_at_edit(monkeypatch):
     assert reason == "ss_step_behind"
 
 
-def test_search_preview_is_suppressed_if_same_observation_acquired_target(
-        monkeypatch):
+def test_search_preview_path_acq_alone_does_not_starve(monkeypatch):
+    """Viewing the subject file must not kill reactive localization by path alone."""
     _base(monkeypatch)
     monkeypatch.setenv("GT_SS_NOVELTY", "1")
     g._ss_acquired_files.add("src/subject.py")
@@ -249,8 +264,8 @@ def test_search_preview_is_suppressed_if_same_observation_acquired_target(
         "post_search.localize", "src/subject.py:10:run", "",
         subject_path="src/subject.py", event="post_search")
 
-    assert suppressed is True
-    assert reason == "ss_step_behind"
+    assert suppressed is False
+    assert reason == ""
 
 
 def test_novelty_off_delivers_stepbehind_block(monkeypatch):
@@ -269,9 +284,9 @@ def test_novelty_pathless_block_caller_facts_not_symbol_acquired():
     g._ss_acquired_symbols.clear()
     g._ss_acquired_symbols.add("frobnicate")
     assert g._ss_novelty_suppresses("l3b.evidence", "frobnicate() is called here", "") is False
-    # Non-caller factual class still uses symbol acquisition when path-less
+    # Reactive localization is also not symbol-acq starved (claim-match + DEDUP2 remain).
     assert g._ss_novelty_suppresses(
-        "post_search.localize", "frobnicate() is called here", "") is True
+        "post_search.localize", "frobnicate() is called here", "") is False
     assert g._ss_novelty_suppresses(
         "post_search.localize", "brandnew() is called here", "") is False
 
@@ -338,6 +353,7 @@ def test_stepbehind_fact_becomes_known_for_later_cross_class_subset(monkeypatch)
 
 
 def test_known_fact_decision_has_lane_gateway_parity_and_reset(monkeypatch):
+    """Gateway localization: native claim-match seeds known; subset later is dup."""
     _base(monkeypatch)
     recs = _capture(monkeypatch)
     monkeypatch.setenv("GT_SS_NOVELTY", "1")
@@ -348,14 +364,16 @@ def test_known_fact_decision_has_lane_gateway_parity_and_reset(monkeypatch):
         evidence_type="def_ref_partition", target="src/known.py",
         tier="VERIFIED", confidence=1.0, provenance=(("src/known.py", 1),),
     )
+    claim = "src/known.py run() helper()"
+    out = {"output": f"observed:\n{claim}\n"}
 
     g._global_pool_add_gateway(
         [], winner, True, lambda: commits.append("first"), ev_kind="search",
-        rendered_text="src/known.py run() helper()",
+        rendered_text=claim, out=out,
     )
     g._global_pool_add_gateway(
         [], winner, True, lambda: commits.append("second"), ev_kind="search",
-        rendered_text="src/known.py run()",
+        rendered_text="src/known.py run()", out=out,
     )
 
     assert commits == []
@@ -366,7 +384,7 @@ def test_known_fact_decision_has_lane_gateway_parity_and_reset(monkeypatch):
 
 
 def test_unverified_gateway_stepbehind_never_seeds_semantic_known(monkeypatch):
-    """A path hit proves acquisition, not the truth of a low-authority envelope."""
+    """Claim-match step-behind on INFO tier must not seed DEDUP2 authority."""
     _base(monkeypatch)
     recs = _capture(monkeypatch)
     monkeypatch.setenv("GT_SS_NOVELTY", "1")
@@ -376,14 +394,17 @@ def test_unverified_gateway_stepbehind_never_seeds_semantic_known(monkeypatch):
         evidence_type="def_ref_partition", target="src/known.py",
         tier="INFO", confidence=0.0, provenance=(("src/known.py", 1),),
     )
+    claim = "src/known.py run() helper()"
+    out = {"output": f"observed:\n{claim}\n"}
 
     g._global_pool_add_gateway(
         [], winner, True, lambda: None, ev_kind="search",
-        rendered_text="src/known.py run() helper()",
+        rendered_text=claim, out=out,
     )
+    # Same exact claim again — still step-behind; INFO must not seed known for DEDUP2.
     g._global_pool_add_gateway(
         [], winner, True, lambda: None, ev_kind="search",
-        rendered_text="src/known.py run()",
+        rendered_text=claim, out=out,
     )
 
     assert [r.get("reason") for r in recs] == ["ss_step_behind", "ss_step_behind"]
