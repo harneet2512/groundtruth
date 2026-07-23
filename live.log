@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #2 | 2026-07-23T21:57:42Z | task=valibot-recursive-schema-composition ===
+=== LIVE SNAPSHOT #3 | 2026-07-23T21:58:03Z | task=valibot-recursive-schema-composition ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 --- mem trend (last 6) ---
 --- pier tail (last 15, non-RESMON) ---
@@ -18,11 +18,13 @@
 [MEMLOG 21:57:01] used=2158MB total=15993MB swap_used=0MB
 [MEMLOG 21:57:11] used=2179MB total=15993MB swap_used=0MB
 --- step tail (last 8) ---
-=== DeepSWE GT Trial: valibot-recursive-schema-composition (model deepseek/deepseek-v4-flash) ===
-HOST  GT_CERT_DIR=/tmp/gt  GT_HOST_GRAPH_DB=/tmp/gt/graph.db
 GT_PROOF_MODE=1  GT_CONTAINERIZED=1  GT_SUBSTRATE_DIGEST=ghcr.io/hbali-stack/gt-substrate@sha256:452089fe4994126c0f8a0ffded62d03570007eac90d48ae6b6f525e4563a593c
 GT inject staged: 125 Python files
 go: downloading github.com/smacker/go-tree-sitter v0.0.0-20240625050157-a31a98a7c0f6
 go: downloading github.com/mattn/go-sqlite3 v1.14.22
+# github.com/smacker/go-tree-sitter/lua
+parser.c:254:17: warning: null character(s) preserved in literal
+  254 |   [anon_sym_] = " ",
+      |                 ^
 --- FEATURE LIVE (DELIVERED|HOLD|SUPPRESSED|ERROR|NOT_ELIGIBLE only) ---
 (no gt_campaign_feature_live.jsonl yet)
