@@ -162,6 +162,66 @@ def _find_log(task: str, results_dir: str, explicit: str = "") -> str | None:
     return None
 
 
+# Authoritative submitted-patch filenames. ``model.patch`` is DeepSWE/pier's sealed
+# submission on disk; prefer it over agent_patch.diff / patch.diff when both exist.
+_PATCH_ARTIFACT_NAMES = ("model.patch", "agent_patch.diff", "patch.diff")
+
+
+def _body_looks_like_patch(body: str) -> bool:
+    """True when bytes look like a real unified/git diff (not an empty placeholder)."""
+    if not body or not body.strip():
+        return False
+    head = body.lstrip()
+    return ("diff --git" in body) or head.startswith("---") or head.startswith("diff ")
+
+
+def _prefer_model_patch(paths: list[str]) -> str | None:
+    """Prefer sealed ``model.patch`` over other patch filenames in the same set."""
+    if not paths:
+        return None
+    model = [p for p in paths if os.path.basename(p) == "model.patch"]
+    return model[0] if model else paths[0]
+
+
+def _pier_sibling_patch_paths(dir_path: str) -> list[str]:
+    """Pier trial layout: ``<trial>/{agent,artifacts}/`` — model.patch lives under
+    ``artifacts/``, while the trajectory lives under ``agent/``. When metrics are
+    pointed at either leaf (or the trial root), resolve the sibling without a
+    recursive glob that can miss when results_dir is the agent dir alone.
+    """
+    if not dir_path:
+        return []
+    abs_dir = os.path.abspath(dir_path)
+    if not os.path.isdir(abs_dir):
+        return []
+    candidates: list[str] = []
+    base = os.path.basename(abs_dir)
+    parent = os.path.dirname(abs_dir)
+    arts_dirs: list[str] = []
+    if base == "agent":
+        arts_dirs.append(os.path.join(parent, "artifacts"))
+    elif base == "artifacts":
+        arts_dirs.append(abs_dir)
+    else:
+        arts_dirs.append(os.path.join(abs_dir, "artifacts"))
+        # Also accept .../agent as cwd with sibling artifacts one level up.
+        arts_dirs.append(os.path.join(parent, "artifacts"))
+    for arts in arts_dirs:
+        for name in _PATCH_ARTIFACT_NAMES:
+            path = os.path.join(arts, name)
+            if os.path.isfile(path) and os.path.getsize(path) > 0:
+                candidates.append(path)
+    return candidates
+
+
+def _read_patch_head(path: str, limit: int = 8192) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read(limit)
+    except OSError:
+        return ""
+
+
 def _find_patch_artifact(task: str, results_dir: str) -> str | None:
     """Locate a real task-scoped patch emitted beside a mini-swe trajectory.
 
@@ -171,12 +231,14 @@ def _find_patch_artifact(task: str, results_dir: str) -> str | None:
     Search ``results_dir`` plus common sibling harvest dirs, and preserve the same
     task-identity guard used for trajectories so a shared collection directory
     can never lend one task another task's patch.
+
+    Authority order: non-empty ``model.patch`` bytes > other patch filenames.
     """
     search_roots: list[str] = []
     if results_dir and os.path.isdir(results_dir):
         search_roots.append(results_dir)
         parent = os.path.dirname(os.path.abspath(results_dir))
-        for sibling in ("gt_out", "trial_results", os.path.basename(results_dir)):
+        for sibling in ("artifacts", "gt_out", "trial_results", os.path.basename(results_dir)):
             cand = os.path.join(parent, sibling)
             if os.path.isdir(cand) and cand not in search_roots:
                 search_roots.append(cand)
@@ -188,15 +250,18 @@ def _find_patch_artifact(task: str, results_dir: str) -> str | None:
     if not search_roots:
         return None
     hits: list[str] = []
+    # Pier sibling first — cheap, exact, and the common DeepSWE layout.
+    for root in list(search_roots):
+        hits.extend(_pier_sibling_patch_paths(root))
     for root in search_roots:
-        for name in ("agent_patch.diff", "model.patch", "patch.diff"):
+        for name in _PATCH_ARTIFACT_NAMES:
             hits.extend(glob.glob(os.path.join(root, "**", name), recursive=True))
             direct = os.path.join(root, name)
             if os.path.isfile(direct):
                 hits.append(direct)
     hits = sorted({path for path in hits if os.path.isfile(path) and os.path.getsize(path) > 0})
     if not task:
-        return hits[0] if hits else None
+        return _prefer_model_patch(hits)
     scoped = [path for path in hits if task in path]
     if not scoped:
         for path in hits:
@@ -208,9 +273,9 @@ def _find_patch_artifact(task: str, results_dir: str) -> str | None:
         if not scoped and task and results_dir and task in os.path.abspath(results_dir):
             scoped = [
                 path for path in hits
-                if os.path.basename(path) in ("agent_patch.diff", "model.patch", "patch.diff")
+                if os.path.basename(path) in _PATCH_ARTIFACT_NAMES
             ]
-    return scoped[0] if scoped else None
+    return _prefer_model_patch(scoped)
 
 
 # OpenHands trajectory/log fingerprints vs DeepSWE (pier + mini-swe-agent).
@@ -666,24 +731,35 @@ def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
         out["model"] = str(cfg.get("model_name") or model_cfg or "")
     out["exit_status"] = str(info.get("exit_status", ""))
     sub = str(info.get("submission") or "")
-    out["has_patch"] = bool("diff --git" in sub)
+    out["has_patch"] = bool(_body_looks_like_patch(sub))
+    out["patch_source"] = "info.submission" if out["has_patch"] else ""
     # Live-lite / headless paths often leave info.submission empty while a real
-    # agent_patch.diff / model.patch sits beside the trajectory. Detect that
-    # before classifying unresolved_no_patch_agent_ran (CLAUDE.md 2026-07-22).
+    # agent_patch.diff / model.patch sits beside the trajectory. Authoritative
+    # submitted bytes win before classifying unresolved_no_patch_agent_ran
+    # (CLAUDE.md 2026-07-22 measurement defect).
     if not out["has_patch"]:
         patch_path = _find_patch_artifact(task, results_dir)
         if patch_path is None and tj:
+            # Pier: trajectory under .../agent/, sealed patch under .../artifacts/.
             tj_dir = os.path.dirname(tj)
             patch_path = _find_patch_artifact(task, tj_dir)
+            if patch_path is None:
+                for cand in _pier_sibling_patch_paths(tj_dir):
+                    if _body_looks_like_patch(_read_patch_head(cand)):
+                        patch_path = cand
+                        break
         if patch_path is not None:
-            try:
-                with open(patch_path, encoding="utf-8", errors="replace") as fh:
-                    body = fh.read(4096)
-                out["has_patch"] = bool(
-                    body.strip() and ("diff --git" in body or body.lstrip().startswith("---"))
-                )
-            except OSError:
-                out["has_patch"] = os.path.getsize(patch_path) > 0
+            body = _read_patch_head(patch_path)
+            if _body_looks_like_patch(body):
+                out["has_patch"] = True
+                out["patch_source"] = f"artifact:{os.path.basename(patch_path)}"
+                out["patch_artifact_path"] = patch_path
+            elif os.path.getsize(patch_path) > 0:
+                # Non-empty but not a recognizable diff header — still count as a
+                # submitted patch (some harnesses write raw patch without git headers).
+                out["has_patch"] = True
+                out["patch_source"] = f"artifact_nonzero:{os.path.basename(patch_path)}"
+                out["patch_artifact_path"] = patch_path
     model_stats = info.get("model_stats", {}) or {}
     out["action_count"] = int(model_stats.get("api_calls", 0) or 0)
     # mini-swe-agent rolls up the litellm-recorded spend here (instance_cost / cost) —
@@ -1699,13 +1775,22 @@ def build(task: str, results_dir: str, log_path: str = "",
         traj["gt_verify_calls"] = mini["gt_verify_calls"]
         traj["gt_observation_chars_total"] = mini["gt_observation_chars_total"]
     patch_artifact = _find_patch_artifact(task, results_dir)
+    if not patch_artifact and mini.get("patch_artifact_path"):
+        patch_artifact = mini["patch_artifact_path"]
     if patch_artifact:
-        traj["has_patch"] = True
-        traj["patch_artifact_path"] = patch_artifact
+        body = _read_patch_head(patch_artifact)
+        if _body_looks_like_patch(body) or os.path.getsize(patch_artifact) > 0:
+            traj["has_patch"] = True
+            traj["patch_artifact_path"] = patch_artifact
+            traj["patch_source"] = traj.get("patch_source") or (
+                f"artifact:{os.path.basename(patch_artifact)}"
+            )
     # If output.jsonl was absent (e.g. DeepSWE), recover patch/action signal from
     # the log so classification still works.
     if (not traj.get("action_count")) and log_text:
         traj["has_patch"] = traj.get("has_patch") or _log_has_patch(log_text)
+        if traj.get("has_patch") and not traj.get("patch_source"):
+            traj["patch_source"] = "run_log_git_patch"
 
     # Loud edit-truth marker on the efficacy axis. first_edit_action stays honest-None
     # when no edit command is locatable (never a fabricated step 0); but if the run
@@ -1947,6 +2032,9 @@ def build(task: str, results_dir: str, log_path: str = "",
         "failure_reason": verdict["failure_reason"],
         "resolved": verdict["resolved"],
         "has_patch": verdict["has_patch"],
+        "patch_source": traj.get("patch_source") or (
+            f"artifact:{os.path.basename(patch_artifact)}" if patch_artifact else ""
+        ),
         "failure_class": verdict.get("failure_class", ""),
         "outcome_authority": verdict.get("outcome_authority", ""),
         "task_truth_path": truth_path if truth_data else None,

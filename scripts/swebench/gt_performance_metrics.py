@@ -1092,6 +1092,59 @@ def _parse_patch_stats(submission: str) -> tuple[int, int]:
     return additions + deletions, len(files)
 
 
+def _load_authoritative_submission(
+    trajectory_path: str | None,
+    artifacts_dir: str | None,
+    info_submission: str,
+) -> tuple[str, str]:
+    """Return (patch_bytes, source) preferring sealed ``model.patch`` over empty
+    ``info.submission``.
+
+    DeepSWE/pier often leaves ``info.submission`` empty while writing the real
+    submitted diff to ``<trial>/artifacts/model.patch``. PERF metrics that key
+    off submission (patch_size / patch_files / edit targets / submission_found)
+    must read those bytes or they false-zero against a real patch.
+    """
+    sub = str(info_submission or "")
+    if sub.strip() and ("diff --git" in sub or sub.lstrip().startswith("---")):
+        return sub, "info.submission"
+
+    names = ("model.patch", "agent_patch.diff", "patch.diff")
+    candidates: list[str] = []
+    if trajectory_path:
+        tj_dir = os.path.dirname(os.path.abspath(trajectory_path))
+        parent = os.path.dirname(tj_dir)
+        # Pier: .../agent/traj.json → .../artifacts/model.patch
+        if os.path.basename(tj_dir) == "agent":
+            for name in names:
+                candidates.append(os.path.join(parent, "artifacts", name))
+        for name in names:
+            candidates.append(os.path.join(tj_dir, name))
+            candidates.append(os.path.join(parent, name))
+    if artifacts_dir:
+        for name in names:
+            candidates.append(os.path.join(artifacts_dir, name))
+            candidates.append(os.path.join(artifacts_dir, "artifacts", name))
+
+    seen: set[str] = set()
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if not (os.path.isfile(path) and os.path.getsize(path) > 0):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+        except OSError:
+            continue
+        if body.strip() and (
+            "diff --git" in body or body.lstrip().startswith("---") or body.lstrip().startswith("diff ")
+        ):
+            return body, f"artifact:{os.path.basename(path)}"
+    return sub, "info.submission_empty" if not sub.strip() else "info.submission"
+
+
 # ---------------------------------------------------------------------------
 # Core: parse trajectory into a timeline of events
 # ---------------------------------------------------------------------------
@@ -2225,7 +2278,11 @@ def compute_performance_metrics(
 
         messages = trajectory.get("messages", []) or []
         info = trajectory.get("info", {}) or {}
-        submission = str(info.get("submission") or "")
+        submission, submission_source = _load_authoritative_submission(
+            trajectory_path,
+            artifacts_dir,
+            str(info.get("submission") or ""),
+        )
 
         # Resolve gold files + record PROVENANCE (G1). "true_gold" = caller-provided
         # or a gold_files.txt on disk; "submission_proxy" = derived from the agent's
@@ -2310,7 +2367,8 @@ def compute_performance_metrics(
             "n_messages": len(messages),
             "n_gold_files": len(gold_files),
             "brief_found": bool(brief_txt),
-            "submission_found": bool(submission),
+            "submission_found": bool(submission and submission.strip()),
+            "submission_source": submission_source,
             "terminal_status": str(info.get("exit_status") or ""),
             "consumption_ledger_schema": (
                 consumption_ledger.get("schema")
