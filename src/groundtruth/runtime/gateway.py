@@ -1176,7 +1176,18 @@ def _ledger_entry(state: GatewayState, stem: str) -> dict:
 def _ledger_record(state: GatewayState, sym: str, idx: int, outcome: str) -> None:
     e = _ledger_entry(state, _norm_stem(sym))
     e["probed_forms"].add(sym)
-    e["probe_indices"].append(int(idx))
+    ii = int(idx)
+    # IDEMPOTENCE per (stem, action_index) — 2026-07-22. The probe ledger is ONE shared
+    # object (GatewayState.ledger -> episode.probe_ledger, written by BOTH the post_search
+    # lattice AND the gateway). When a search turn is re-admitted to the gateway (conditional
+    # exclusion), classify_outcome re-records the SAME probe token at the SAME action index the
+    # lattice already recorded — forging a 1-probe stem into a false [zero, zero] "stuck"
+    # (the ZERO_ABSENT repeat gate reads len(outcomes)). One record per probe per action index
+    # is the true invariant of the shared ledger: skip the duplicate append (keeps
+    # probe_indices / outcomes parallel), benchmark-free and mutation-testable.
+    if ii in e["probe_indices"]:
+        return
+    e["probe_indices"].append(ii)
     e["outcomes"].append(outcome)
 
 

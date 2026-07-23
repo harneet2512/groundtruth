@@ -216,21 +216,26 @@ def test_post_search_alone_matches_two_flag_lattice(zero_name, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# PINNED LAW: exclusion is BY FLAG. Even when the lattice ABSTAINS (returns ""),
-# the gateway stays quiet on the search turn -> NEITHER plane delivers.
+# PINNED LAW (2026-07-22, CONDITIONAL EXCLUSION): exclusion keys on whether the
+# lattice PRODUCED, not on the flag alone. When the lattice ABSTAINS (returns "")
+# on an ISOLATED search, the <=1-dose slot is FREE -> the gateway is ADMITTED to
+# compete (restoring the strictly-dominated zero-coverage of its outcome producers).
+# The <=1-dose invariant still holds: exactly ONE plane delivers.
 # --------------------------------------------------------------------------- #
-def test_two_flags_lattice_abstains_gateway_still_excluded(ambiguous, monkeypatch):
-    # force the lattice to abstain (simulate the AMBIGUOUS_HIT-abstain shape) while
-    # POST_SEARCH stays ENABLED — the guard keys on the FLAG, not on lattice output.
+def test_two_flags_lattice_abstains_gateway_now_admitted(ambiguous, monkeypatch):
+    # force the lattice to abstain while POST_SEARCH stays ENABLED. The search is isolated,
+    # so the free dose is now filled by the gateway's def/ref partition for the ambiguous
+    # `run` hit (was byte-identical-EXCLUDED under the old flag-only guard).
     monkeypatch.setattr(g, "_search_localize_block", lambda cmd, out=None: "")
     grep_out = "a/x.py:10: run\nb/y.py:20: run"
     monkeypatch.setenv("GT_GATEWAY", "1")
     head_before = g._gt_gateway_chain_head
     obs = _run("grep -rn run .", grep_out)
-    # NEITHER plane touched the observation: byte-identical to the raw grep.
-    assert obs == grep_out
-    assert g._gt_gateway_deliveries == []
-    assert g._gt_gateway_chain_head == head_before
+    # the gateway was ADMITTED and delivered exactly one dose (the lattice took none).
+    assert obs != grep_out
+    assert "<gt-search-facts" in obs
+    assert len(g._gt_gateway_deliveries) == 1
+    assert g._gt_gateway_chain_head != head_before
 
 
 def test_repeated_true_absence_hands_off_once_to_change_surface(tmp_path, monkeypatch):
@@ -313,13 +318,15 @@ def test_two_flags_edit_turn_still_reaches_gateway(ambiguous, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_m1_guard_removed_double_delivery_bites(zero_name, monkeypatch):
     """m1: guard removed/inverted -> both planes fire the search turn again."""
-    monkeypatch.setattr(g, "_gateway_search_excluded", lambda ev: False)
+    monkeypatch.setattr(g, "_gateway_search_excluded", lambda ev, **kw: False)
     monkeypatch.setenv("GT_GATEWAY", "1")
     obs = _run("grep -rn getUser .", "", rc=1)
     # the honest invariant BITES: the def fact is now double-delivered + double-recorded
     assert obs.count("a/x.py:10") == 2
     assert _ZERO_NAME_BLOCK in obs                    # gateway's block reappears
-    assert _ledger_outcomes("getUser") == ["zero", "zero"]
+    # 2026-07-22: double-DELIVERY still bites (obs.count==2 above), but the SHARED ledger is now
+    # defended by _ledger_record (stem,idx) idempotence -> single record even with the guard gone.
+    assert _ledger_outcomes("getUser") == ["zero"]
     assert len(g._gt_gateway_deliveries) == 1         # gateway sealed again
 
 
@@ -338,7 +345,7 @@ def test_m2_guard_after_classify_double_record_bites(zero_name, monkeypatch):
         real_augment(event, state)   # runs classify_outcome -> writes the probe ledger
         return []                    # ...but delivers nothing
 
-    monkeypatch.setattr(g, "_gateway_search_excluded", lambda ev: False)
+    monkeypatch.setattr(g, "_gateway_search_excluded", lambda ev, **kw: False)
     monkeypatch.setattr(gwmod, "augment", _record_but_no_winner)
     monkeypatch.setenv("GT_GATEWAY", "1")
     obs = _run("grep -rn getUser .", "", rc=1)
@@ -346,8 +353,9 @@ def test_m2_guard_after_classify_double_record_bites(zero_name, monkeypatch):
     # nothing extra was DELIVERED (naive double-delivery check would pass) ...
     assert obs.count("a/x.py:10") == 1
     assert g._gt_gateway_deliveries == []
-    # ... yet the SHARED probe ledger was double-recorded -> the single-record pin BITES.
-    assert _ledger_outcomes("getUser") == ["zero", "zero"]
+    # 2026-07-22: the SHARED probe ledger is now defended by _ledger_record (stem,idx)
+    # idempotence even when the guard sits AFTER classify -> single record (was ["zero","zero"]).
+    assert _ledger_outcomes("getUser") == ["zero"]
 
 
 # --------------------------------------------------------------------------- #
@@ -439,3 +447,36 @@ def test_excluded_search_touches_no_gateway_state_except_receipts(tmp_path, monk
     assert out["output"] == orig_out                              # observation bytes frozen
     # the excluded search sealed NOTHING new (delivery identity unchanged).
     assert after["n_deliveries"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# GREEN PROOF (2026-07-22) — change_surface zero-coverage FIX, end-to-end wiring.
+# --------------------------------------------------------------------------- #
+def test_change_surface_dominance_delivers_blast_radius(zero_name, monkeypatch):
+    """A confident change_surface answer DOMINATES the thin CLASS-4 honest-negative on a
+    REPEATED zero-absent probe -> the lattice abstains -> the conditional exclusion admits the
+    gateway -> _produce_change_surface delivers the new_file_destination blast-radius. The engine
+    is mocked (fixture-sensitive + tested separately); this pins THE WIRING the change added.
+    RED before the change: turn 3 delivered only the thin 'appears unimplemented' note, the
+    gateway stayed excluded, and 0 new_file_destination reached the agent."""
+    from types import SimpleNamespace
+    dest = SimpleNamespace(
+        suggested_path="handlers/baz_handler.py", template_file="handlers/foo_handler.py",
+        registration_file="registry.py", entity="baz_handler",
+        evidence=["sibling group: handlers/foo_handler.py, handlers/bar_handler.py"])
+    fake = SimpleNamespace(abstained=False, destinations=[dest], missing_roles=[])
+    monkeypatch.setattr(gw, "detect_change_surface", lambda *a, **k: fake, raising=False)
+    monkeypatch.setattr("groundtruth.pretask.change_surface.detect_change_surface",
+                        lambda *a, **k: fake, raising=False)
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
+    monkeypatch.setattr(g, "_issue_text", lambda: "Add a baz_handler following the handler pattern.")
+
+    _run("grep -rn BazHandler .", "")        # turn 1: intentional first probe -> silent both planes
+    _run("cat registry.py", "contents")      # turn 2: a non-search VIEW (not an edit)
+    obs = _run("grep -rn BazHandler .", "")   # turn 3: REPEAT zero-absent -> dominance -> gateway
+
+    assert "baz_handler.py" in obs            # the rich blast-radius delivered
+    assert "new file" in obs.lower()
+    assert "appears unimplemented" not in obs  # the thin honest-negative was DOMINATED
+    assert len(g._gt_gateway_deliveries) == 1  # exactly one dose (the gateway's)
