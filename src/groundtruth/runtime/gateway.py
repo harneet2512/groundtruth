@@ -489,7 +489,10 @@ def _record_control(
     still abort formatting.  When the seam supplies ``control_queue`` we therefore
     retain the concrete envelope and defer the durable row.  Calls without a concrete
     candidate remain the historical direct path and are intentionally UNMEASURED by
-    the exact-binding grader.
+    the exact-binding grader — unless the caller already supplied exact identity.
+    When a concrete ``candidate`` is passed on the direct path (no queue), derive
+    post-control envelope identity so eligibility/mediator receipts are not
+    identity-less in unit/recorder-only harnesses.
     """
     queue = getattr(state, "control_queue", None)
     if isinstance(queue, list) and candidate is not None:
@@ -507,6 +510,19 @@ def _record_control(
     if not callable(recorder):
         return
     try:
+        if candidate is not None and (
+            not candidate_bytes or fact_class is None or not candidate_id
+        ):
+            try:
+                derived_bytes, derived_fc = _candidate_control_identity(candidate)
+                if not candidate_bytes:
+                    candidate_bytes = derived_bytes
+                if fact_class is None:
+                    fact_class = derived_fc
+                if not candidate_id:
+                    candidate_id = getattr(candidate, "dedup_key", "") or ""
+            except Exception:
+                pass
         extra = {"candidate_bytes": candidate_bytes, "reason": reason}
         if fact_class is not None:
             extra["fact_class"] = fact_class
@@ -639,6 +655,7 @@ def _apply_xsession_policy(
                 state, "GT_XSESSION_MEMORY",
                 "gateway.xsession_policy.inert_suppression", "ERROR",
                 reason=f"policy_error:{type(exc).__name__}",
+                candidate=a,
             )
             kept.append(a)
             continue
@@ -648,6 +665,7 @@ def _apply_xsession_policy(
                 "gateway.xsession_policy.inert_suppression",
                 "APPLIED" if inert else "NO_EFFECT",
                 reason="inert_class" if inert else "class_not_inert",
+                candidate=a,
             )
         if inert:
             continue  # LEARNED SUPPRESS: delivered here before, never once consumed
@@ -3093,6 +3111,7 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                 "gateway.route_delivery.episode_overlay",
                 "APPLIED" if stale else "NO_EFFECT",
                 reason="stale_base_fact" if stale else "fresh_or_untracked_target",
+                candidate=env,
             )
             if stale:
                 return ROUTE_STALE
@@ -3101,6 +3120,7 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                 state, "GT_EDIT_OVERLAY",
                 "gateway.route_delivery.episode_overlay", "ERROR",
                 reason=f"overlay_error:{type(exc).__name__}",
+                candidate=env,
             )
     cur = _event_ordinal(event.kind)
     want: int | None = None
@@ -3119,6 +3139,7 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                         state, "GT_REGISTRY_ENFORCE",
                         "gateway.route_delivery.registry_timing", "APPLIED",
                         reason="reactive_semantic_event_unproven",
+                        candidate=env,
                     )
                     return ROUTE_DEFER
                 want = cur
@@ -3130,6 +3151,7 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                 state, "GT_REGISTRY_ENFORCE",
                 "gateway.route_delivery.registry_timing", "ERROR",
                 reason=f"registry_timing_error:{type(exc).__name__}",
+                candidate=env,
             )
             # Registry metadata is the authority under enforcement. Never fall back to
             # the producer's self-declared preferred_event when that authority is unavailable:
@@ -3145,6 +3167,7 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
             "APPLIED" if cur != want else "NO_EFFECT",
             reason=("too_early" if cur < want else
                     "too_late" if cur > want else "declared_boundary_match"),
+            candidate=env,
         )
     if cur < want:
         return ROUTE_DEFER
@@ -3310,6 +3333,7 @@ def augment(
                     "APPLIED" if renderer_missing else "NO_EFFECT",
                     reason=("renderer_missing" if renderer_missing
                             else "renderer_available"),
+                    candidate=a,
                 )
             except Exception as exc:
                 # Existing enforcement is fail-closed; preserve that behavior,
@@ -3319,6 +3343,7 @@ def augment(
                     state, "GT_REGISTRY_ENFORCE",
                     "gateway.augment.renderer_enforcement", "ERROR",
                     reason=f"registry_renderer_error:{type(exc).__name__}",
+                    candidate=a,
                 )
             if renderer_missing:
                 continue

@@ -2199,6 +2199,23 @@ _ELIGIBILITY_DECISION_POLARITY: dict[tuple[str, str], str] = {
     ("GT_SS_SHADOW", "NO_EFFECT"): "permits",    # deliver
     ("GT_SS_LATE_DROP", "APPLIED"): "blocks",    # late
     ("GT_SS_LATE_DROP", "NO_EFFECT"): "permits", # on_time
+    # Gateway eligibility referees (exact candidate identity now bound via control_queue).
+    ("GT_EDIT_OVERLAY", "APPLIED"): "blocks",           # stale_base_fact drop
+    ("GT_EDIT_OVERLAY", "NO_EFFECT"): "permits",        # fresh_or_untracked_target
+    ("GT_REGISTRY_ENFORCE", "APPLIED"): "blocks",       # too_early / too_late / renderer_missing
+    ("GT_REGISTRY_ENFORCE", "NO_EFFECT"): "permits",    # declared_boundary_match / renderer_available
+    ("GT_XSESSION_MEMORY", "APPLIED"): "blocks",        # inert_class suppress
+    ("GT_XSESSION_MEMORY", "NO_EFFECT"): "permits",     # class_not_inert
+    ("GT_SS_EXEC_TRUTH", "APPLIED"): "blocks",          # phantom_removed from covering selection
+    ("GT_SS_EXEC_TRUTH", "NO_EFFECT"): "permits",       # all_candidates_runnable
+    ("GT_OBLIGATION_FRESHNESS", "APPLIED"): "blocks",   # tested_obligation_demoted
+    ("GT_OBLIGATION_FRESHNESS", "NO_EFFECT"): "permits",  # no_stale_tested_obligation
+    ("GT_SS_RECOVERY_V2", "APPLIED"): "permits",        # recovery candidate admitted
+    ("GT_SS_RECOVERY_V2", "NO_EFFECT"): "blocks",       # no_current_qualifying_failure
+    ("GT_D7_RELATEDNESS", "APPLIED"): "permits",        # related_action credits consumption
+    ("GT_D7_RELATEDNESS", "SUPPRESSED"): "blocks",      # unrelated_action withholds credit
+    ("GT_POST_SEARCH", "APPLIED"): "permits",           # lattice master enabled producer
+    ("GT_POST_SEARCH", "NO_EFFECT"): "blocks",          # lattice master withheld producer
 }
 
 

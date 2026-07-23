@@ -4829,9 +4829,23 @@ def _search_localize_decision(
         if con is None:
             return _post_search_decision()
         try:
+            block = _direct_def_block(con, sym, _root())
+            if _inseam_metrics_on():
+                try:
+                    _control_participation_record(
+                        "GT_POST_SEARCH",
+                        "mini_seam.post_search.lattice_master_enable",
+                        "APPLIED" if block else "NO_EFFECT",
+                        candidate_bytes=block or "",
+                        fact_class="def_partition" if block else None,
+                        candidate_id=(f"def_partition:{sym}" if block else ""),
+                        reason=("direct_def_produced" if block
+                                else "direct_def_abstained"),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             return _post_search_decision(
-                _direct_def_block(con, sym, _root()),
-                "post_search", "def_partition")
+                block, "post_search", "def_partition")
         finally:
             con.close()
 
@@ -7523,12 +7537,13 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
                 kind="detect.coherence",
                 outcome=_ProductSignalOutcome.DELIVERED,
                 reason="ss_coherence", file_path=rel, chars=0)
-            # Mediator participation: the V2 gate DECIDED to fire. Seal the would-be
+            # Mediator participation at the DECLARED decision site
+            # (control_participation.CONTROL_DECISION_CONTRACTS). Seal the would-be
             # recovery body so the control terminal is joinable (not identity-less).
             _control_participation_record(
-                "GT_SS_COHERENCE_V2", "mini_seam.coherence.v2_gate",
+                "GT_SS_COHERENCE_V2", "mini_seam.coherence.recovery_pivot",
                 "APPLIED", candidate_bytes=body,
-                fact_class="recovery", candidate_id=f"coherence:{rel}",
+                fact_class="recovery", candidate_id=f"recovery:{rel}",
                 reason=f"churn_{churn}_no_passing_test_between")
         except Exception:  # noqa: BLE001 — measurement must never break the producer
             pass

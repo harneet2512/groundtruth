@@ -319,6 +319,15 @@ def _fact_row(name: str) -> dict[str, Any]:
                     "brief_result.metrics.localization_proof[].cochange_evidence "
                     "(exact self-sealed cochange rows)"
                 ),
+                # Causal instrument LANDING: groundtruth.runtime.cochange_holdout
+                # (GT_COCHANGE_HOLDOUT_RATE / SEED). Rate-zero remains production-safe
+                # (always DELIVER). Promotion still requires a paid cohort with rate>0.
+                "causal_ablation_authority": (
+                    "groundtruth.runtime.cochange_holdout.assign over "
+                    "brief_result.metrics.localization_proof[].cochange_ablation "
+                    "(GT_COCHANGE_HOLDOUT_RATE / GT_COCHANGE_HOLDOUT_SEED; "
+                    "support_causal_fair_probe reads cochange_causal_fair_probe)"
+                ),
             },
             "chronological_boundary_authority": None,
             "receipt_rule": {
@@ -331,9 +340,6 @@ def _fact_row(name: str) -> dict[str, Any]:
             "causal_fair_probe_requirement": registration.causal_eval,
             "offline_proof_dependencies": list(PER_FEATURE_OFFLINE_PROOF_DEPENDENCIES),
             "live_proof_dependencies": list(INTERNAL_FACT_SUPPORT_PROOFS),
-            # Causal instrument LANDING: groundtruth.runtime.cochange_holdout
-            # (GT_COCHANGE_HOLDOUT_RATE / SEED). Rate-zero remains production-safe
-            # (always DELIVER). Promotion still requires a paid cohort with rate>0.
             "BLOCKED_BY": [],
         }
     return {

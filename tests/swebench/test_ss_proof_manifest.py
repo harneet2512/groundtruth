@@ -120,11 +120,14 @@ def test_cochange_fact_row_is_internal_support_not_fabricated_delivery() -> None
     assert row["chronological_boundary_authority"] is None
     assert row["receipt_rule"]["independent_receipt"] is False
     # The traceable influence-truth witness is now enforced (dedicated
-    # cochange_influence_witness); only the cochange-specific causal probe stays blocked.
-    assert row["BLOCKED_BY"] == ["COCHANGE_INTERNAL_CAUSAL_PROBE_ABSENT"]
+    # cochange_influence_witness). The cochange-on/holdout ablation hook is
+    # preregistered (groundtruth.runtime.cochange_holdout); rate-zero stays
+    # production-safe and the causal gate is identifiable when rate>0.
+    assert row["BLOCKED_BY"] == []
     assert "missing_writer" not in row["truth_authority"]
     assert "cochange_evidence" in row["truth_authority"]["traceable_influence_witness"]
     assert "cochange_influence_witness" in row["truth_authority"]["traceable_influence_witness"]
+    assert "cochange_holdout" in row["truth_authority"]["causal_ablation_authority"]
 
 
 def test_cap_terminal_contracts_distinguish_byte_owners_mediators_and_eligibility() -> None:

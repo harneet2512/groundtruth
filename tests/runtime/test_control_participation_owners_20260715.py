@@ -71,7 +71,10 @@ def test_registry_timing_owner_records_declared_boundary(monkeypatch) -> None:
 def test_registry_renderer_owner_records_candidate_check(monkeypatch) -> None:
     monkeypatch.setenv("GT_GATEWAY", "1")
     monkeypatch.setenv("GT_REGISTRY_ENFORCE", "1")
-    monkeypatch.setattr(gateway, "classify_outcome", lambda event, state: gateway.AMBIGUOUS_HIT)
+    monkeypatch.setattr(
+        gateway, "classify_outcome",
+        lambda event, state, **_kw: gateway.AMBIGUOUS_HIT,
+    )
     monkeypatch.setattr(gateway, "_produce_def_ref_partition", lambda event, state: [_env()])
     rows: list[dict] = []
     gateway.augment(gateway.ToolEvent(kind="search"), _state(rows))
