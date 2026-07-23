@@ -376,6 +376,11 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         "newfile_precedent_attestation.py",
         "recovery_attestation.py",
         "terminal_ack.py",
+        # 2026-07-23: brief_cache — gt_mini_patch imports ensure_block_receipts /
+        # seal_reactive_localization_delivery at the reactive ACQ seal site. Without
+        # this allow-list entry the host import-coverage guard aborts pier before the
+        # agent runs (PIER_RUN_FAIL). Stdlib-only at module scope.
+        "brief_cache.py",
     ),
     # SM-3: trajectory.classifier — hypothesis_ledger's FailureKind/is_env_failure
     # dep. Stdlib-only (enum/os/re/dataclasses), no groundtruth.* import -> closes
