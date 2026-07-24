@@ -6640,6 +6640,13 @@ def _cochange_block(rel: str) -> str:
 # Language dispatch for the run command mirrors _RETRY_TEST_AUTODETECT's
 # manifest-based detection, collapsed to a per-test-file suggestion.
 # ---------------------------------------------------------------------------
+def _covering_transitive_on() -> bool:
+    """GT_COVERING_TRANSITIVE (default off => byte-identical): allow a bounded 2-hop
+    test->mid->symbol covering search when the 1-hop query finds nothing. See the
+    fallback block in _covering_tests_for_symbols for the measured motivation."""
+    return os.environ.get("GT_COVERING_TRANSITIVE", "0").strip() == "1"
+
+
 def _covering_tests_for_symbols(symbol_names: set[str]) -> list[dict]:
     """Query graph.db for test nodes that CALL the given symbols.
 
@@ -6692,6 +6699,40 @@ def _covering_tests_for_symbols(symbol_names: set[str]) -> list[dict]:
                 "LIMIT 8"
             )
             test_rows = con.execute(test_q, target_ids).fetchall()
+            if not test_rows and _covering_transitive_on():
+                # AUDIT 2026-07-24 — TRANSITIVE COVERING FALLBACK (GT_COVERING_TRANSITIVE, default
+                # off => byte-identical). MEASURED: covering selection was empty on 28/29 tasks
+                # (SS-2 diagnosis) and produced 19 `plan_none` in run 30121930273, so covering_red
+                # could never deliver. ROOT CAUSE: the query above demands a DIRECT test -> symbol
+                # CALLS edge, but a test almost never calls an edited leaf helper directly — it
+                # calls a PUBLIC API that reaches it. Real coverage is TRANSITIVE; a 1-hop query
+                # structurally cannot see it.
+                # Over-selection is SAFE here (unlike an evidence claim): the selected test is then
+                # EXECUTED and only a genuine RED is ever reported — execution is the ground truth,
+                # the graph is only the shortlist. Bounded to 2 hops + LIMIT 8, and BOTH edges keep
+                # the deterministic-resolution + confidence gates, so no fuzzy edge can sneak in.
+                two_hop_q = (
+                    "SELECT DISTINCT nt.name, nt.file_path, "
+                    "  MAX(COALESCE(e2.confidence, 1.0)) as max_conf "
+                    "FROM edges e1 "
+                    "JOIN edges e2 ON e2.target_id = e1.source_id "
+                    "JOIN nodes nm ON nm.id = e1.source_id "
+                    "JOIN nodes nt ON nt.id = e2.source_id "
+                    f"WHERE e1.target_id IN ({tid_placeholders}) "
+                    "AND e1.type = 'CALLS' AND e2.type = 'CALLS' "
+                    "AND COALESCE(nm.is_test, 0) = 0 "      # the middle hop is production code
+                    "AND COALESCE(nt.is_test, 0) = 1 "      # the outer hop is the test
+                    f"AND LOWER(TRIM(e1.resolution_method)) IN ('{det_sql}') "
+                    f"AND LOWER(TRIM(e2.resolution_method)) IN ('{det_sql}') "
+                    + (conf_gate.replace("e.", "e1.") if has_conf else "")
+                    + (conf_gate.replace("e.", "e2.") if has_conf else "")
+                    + "GROUP BY nt.name, nt.file_path "
+                      "ORDER BY max_conf DESC, nt.name LIMIT 8"
+                )
+                try:
+                    test_rows = con.execute(two_hop_q, target_ids).fetchall()
+                except Exception:  # noqa: BLE001 — legacy schema -> stay with the 1-hop result
+                    test_rows = []
             if not test_rows:
                 return []
 
