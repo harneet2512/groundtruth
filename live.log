@@ -1,0 +1,20 @@
+=== LIVE SNAPSHOT #1 | 2026-07-24T20:09:20Z | task=scriggo-method-declarations ===
+--- KEY EVENTS (full logs, non-RESMON) ---
+--- mem trend (last 6) ---
+--- pier tail (last 15, non-RESMON) ---
+[MEMLOG 20:06:52] used=2104MB total=15989MB swap_used=0MB
+[MEMLOG 20:07:02] used=2108MB total=15989MB swap_used=0MB
+[MEMLOG 20:07:12] used=2110MB total=15989MB swap_used=0MB
+[MEMLOG 20:07:22] used=2111MB total=15989MB swap_used=0MB
+[MEMLOG 20:07:32] used=2113MB total=15989MB swap_used=0MB
+[MEMLOG 20:07:42] used=2115MB total=15989MB swap_used=0MB
+[MEMLOG 20:07:52] used=2118MB total=15989MB swap_used=0MB
+[MEMLOG 20:08:02] used=2124MB total=15989MB swap_used=0MB
+[MEMLOG 20:08:12] used=2122MB total=15989MB swap_used=0MB
+[MEMLOG 20:08:22] used=2125MB total=15989MB swap_used=0MB
+[MEMLOG 20:08:32] used=2125MB total=15989MB swap_used=0MB
+[MEMLOG 20:08:42] used=2122MB total=15989MB swap_used=0MB
+[MEMLOG 20:08:52] used=2124MB total=15989MB swap_used=0MB
+[MEMLOG 20:09:02] used=2144MB total=15989MB swap_used=0MB
+[MEMLOG 20:09:12] used=2138MB total=15989MB swap_used=0MB
+--- step tail (last 8) ---
