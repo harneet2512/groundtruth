@@ -324,6 +324,26 @@ def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,
     return result
 
 
+# TypeScript/TSX/JSX PARSE-ONLY probe (audit 2026-07-24). Emits ONE `path:line:col: error TSxxxx:
+# msg` frame (the compiler's own wording — §0 native voice) and exits 1 on a real syntax error;
+# exits 0 silently when clean OR when the bundled `typescript` module cannot be loaded, so an
+# environment without it degrades to `ok`/unavailable rather than a fabricated error.
+_TS_PARSE_SCRIPT = (
+    "let ts;"
+    "try{ts=require('typescript')}catch(e){"
+    "try{ts=require('/opt/gt/node/lib/node_modules/typescript')}catch(e2){process.exit(0)}}"
+    "const fs=require('fs');const p=process.argv[1];"
+    "let src;try{src=fs.readFileSync(p,'utf8')}catch(e){process.exit(0)}"
+    "const sf=ts.createSourceFile(p,src,ts.ScriptTarget.Latest,false);"
+    "const d=(sf.parseDiagnostics||[])[0];"
+    "if(!d){process.exit(0)}"
+    "const lc=sf.getLineAndCharacterOfPosition(d.start||0);"
+    "const m=ts.flattenDiagnosticMessageText(d.messageText,' ');"
+    "console.log(p+':'+(lc.line+1)+':'+(lc.character+1)+': error TS'+d.code+': '+m);"
+    "process.exit(1);"
+)
+
+
 def _build_check_command(ext: str, path: str) -> list[str] | None:
     """Per-language parse-only command, or None when unsupported (correct-or-quiet).
 
@@ -340,6 +360,18 @@ def _build_check_command(ext: str, path: str) -> list[str] | None:
         ]
     if ext in (".js", ".mjs", ".cjs"):
         return ["node", "--check", path]
+    if ext in (".ts", ".tsx", ".jsx"):
+        # AUDIT 2026-07-24 — LANGUAGE-COVERAGE FIX. Measured live (run 30121930273, superjson):
+        # 13 of 17 edit opportunities returned `dependency_unavailable:unsupported_language`
+        # because .ts/.tsx had NO at-edit checker — 76% of edits on a TypeScript task were
+        # unverifiable. `node --check` cannot parse TS. The substrate ALREADY bundles the
+        # `typescript` package (docker/Dockerfile.gt-substrate: npm install -g ... typescript),
+        # so the capability existed and was simply unwired at the edit boundary.
+        # PARSE-ONLY by construction (`parseDiagnostics` from createSourceFile) — the same
+        # honesty contract as the other languages: NO type errors, NO module resolution, so a
+        # missing import or an unresolved type can never be reported as a syntax error.
+        # Correct-or-quiet: if the typescript module is absent the probe exits 0 silently.
+        return ["node", "-e", _TS_PARSE_SCRIPT, path]
     if ext == ".go":
         return ["gofmt", "-e", path]
     if ext == ".rb":
