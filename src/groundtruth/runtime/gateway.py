@@ -2172,8 +2172,44 @@ def _zero_absent_repeat_ok(event: ToolEvent, state: GatewayState) -> bool:
     return False
 
 
-def _produce_change_surface(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
-    if not _zero_absent_repeat_ok(event, state):
+def _cs_edit_trigger_on() -> bool:
+    """GT_CS_EDIT_TRIGGER (default off => byte-identical): give change_surface its OWN edit-path
+    trigger — a file CREATION — instead of leaving it reachable only from the ZERO_ABSENT search
+    outcome behind a repeat-a-failed-search gate.
+
+    MEASURED: newfile_precedent / GT_CHANGE_SURFACE emitted 0 rows across all 4 tasks of run
+    30121930273. Root cause is dispatch, not detection: change_surface is ONLY outcome-dispatched
+    (ZERO_ABSENT), and that path additionally requires the agent to fail the SAME search stem twice
+    (`_zero_absent_repeat_ok`). An agent that searches once, finds nothing, and creates the file
+    never reaches it. Creating a file is the moment `newfile_precedent` (sibling/template/
+    registration) is maximally useful, and it needs no search at all.
+
+    This ADDS a trigger; it displaces nothing. obligations keeps task-start, patch_delta and
+    caller_contract keep the edit path, and the existing ZERO_ABSENT route is unchanged."""
+    return os.environ.get("GT_CS_EDIT_TRIGGER", "0").strip() == "1"
+
+
+def _event_creates_new_file(event: ToolEvent) -> bool:
+    """True iff this edit CREATED a file: some changed path has empty BEFORE content and non-empty
+    AFTER. Structural and language-agnostic (no verb list, no repo/task keying) — an edit that
+    merely modifies an existing file has non-empty before and never qualifies."""
+    mapping = getattr(event, "edit_before_after", None) or {}
+    for _path, pair in mapping.items():
+        try:
+            before, after = pair
+        except Exception:  # noqa: BLE001 — malformed row is not evidence of a creation
+            continue
+        if not (before or "").strip() and (after or "").strip():
+            return True
+    return False
+
+
+def _produce_change_surface(event: ToolEvent, state: GatewayState,
+                            *, require_repeat: bool = True) -> list[EvidenceEnvelope]:
+    # ``require_repeat`` guards ONLY the search-probe ordering predicate, which is meaningless for
+    # an edit event (there is no probe to repeat). The edit-path caller passes False; the
+    # ZERO_ABSENT caller keeps the historical True => byte-identical on that route.
+    if require_repeat and not _zero_absent_repeat_ok(event, state):
         return []  # protect the intentional first probe
     try:
         res = detect_change_surface(state.issue_text, state.repo_root, state.graph_db)
@@ -3014,6 +3050,19 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
         additions += produced
         if event.edit_before_after:
             edit_bridge_candidates += produced
+        # AUDIT 2026-07-24 — change_surface's OWN edit-path trigger (GT_CS_EDIT_TRIGGER, default
+        # off => byte-identical). newfile_precedent / GT_CHANGE_SURFACE were reachable ONLY via the
+        # ZERO_ABSENT search outcome behind a repeat-a-failed-search gate, so they emitted 0 rows
+        # across all 4 tasks of run 30121930273. A file CREATION is the moment sibling/template/
+        # registration evidence is maximally useful and needs no search. ADDITIVE: obligations keeps
+        # task-start, patch_delta/caller_contract keep their edit slots, ZERO_ABSENT is untouched —
+        # this competes for the SAME <=1 dose through the normal arbiter, displacing nothing.
+        if (_change_surface_producer_on() and _cs_edit_trigger_on()
+                and _event_creates_new_file(event)):
+            produced = _produce_change_surface(event, state, require_repeat=False)
+            additions += produced
+            if event.edit_before_after:
+                edit_bridge_candidates += produced
     elif event.kind == KIND_TEST:
         additions += _produce_covering(event, state)
     elif event.kind == KIND_SEARCH and _loc_reslot_on():

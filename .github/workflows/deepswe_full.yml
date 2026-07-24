@@ -197,6 +197,7 @@ env:
   # the 1-hop test->symbol query was empty on 28/29 tasks). Default '0' = byte-identical.
   GT_COVERING_TRANSITIVE: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_CS_TELEMETRY: ${{ github.event.inputs.new_delivery_levers || '0' }}
+  GT_CS_EDIT_TRIGGER: ${{ github.event.inputs.new_delivery_levers || '0' }}
   # E — at-edit syntax validation (synced agent path; gt_mini_patch reads it). RL-profile
   # member: input default is '' (unset), passed RAW — NOT `|| ''` (Brief-F5): the input's
   # own default of '0' is a NON-empty (truthy) string, so `|| ''` forwarded '0' on a UI
