@@ -114,10 +114,6 @@ on:
         description: "GT_MULTIDOSE — >1 dose/observation. SEPARATE from new_delivery_levers because it violates the <=1-dose proof invariant (dose_lte_one). '1' only for a dedicated multidose experiment, never the standard witness. Default '0'."
         required: false
         default: "0"
-      audit_broadenings:
-        description: "2026-07-24 17-feature audit trigger-broadenings (GT_EDIT_CHECK_NAMES undefined-name + GT_SIG_CALLER_FALLBACK caller grep-fallback + GT_SUBMIT_VERIFY unverified-submit). '1' = ON to witness the broadened triggers; '0' = OFF (byte-identical). Needs a substrate REBUILT on this commit (GT_EDIT_CHECK_NAMES is baked in src/edit_check.py)."
-        required: false
-        default: "0"
       require_commit_parity:
         description: "Strict commit-parity gate (github.sha == substrate baked commit). '1' (default) = full-run strict. '0' = allow a CI-ONLY-delta validation to run an EXISTING substrate whose baked commit lags the checkout by pipeline/gate fixes only (the GT product code that runs is the substrate's, not the checkout's) — used to validate a gate fix without a rebake."
         required: false
@@ -190,10 +186,13 @@ env:
   GT_MULTIDOSE: ${{ github.event.inputs.enable_multidose || '0' }}
   GT_CHANGE_SURFACE_COCHANGE: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_REPRO_SYNTH: ${{ github.event.inputs.new_delivery_levers || '0' }}
-  # 2026-07-24 17-feature audit trigger-broadenings (keyed off audit_broadenings; default 0 = byte-identical)
-  GT_EDIT_CHECK_NAMES: ${{ github.event.inputs.audit_broadenings || '0' }}
-  GT_SIG_CALLER_FALLBACK: ${{ github.event.inputs.audit_broadenings || '0' }}
-  GT_SUBMIT_VERIFY: ${{ github.event.inputs.audit_broadenings || '0' }}
+  # 2026-07-24 17-feature audit trigger-broadenings. Keyed off `new_delivery_levers` (NOT a separate
+  # input): GitHub caps workflow_dispatch at 25 inputs and a 26th made every dispatch fail HTTP 422.
+  # Same semantics as the other levers — default '0' = byte-identical OFF. NOTE GT_EDIT_CHECK_NAMES
+  # is BAKED (src/edit_check.py), so it needs a substrate built at/after commit e02fc5e5c.
+  GT_EDIT_CHECK_NAMES: ${{ github.event.inputs.new_delivery_levers || '0' }}
+  GT_SIG_CALLER_FALLBACK: ${{ github.event.inputs.new_delivery_levers || '0' }}
+  GT_SUBMIT_VERIFY: ${{ github.event.inputs.new_delivery_levers || '0' }}
   # E — at-edit syntax validation (synced agent path; gt_mini_patch reads it). RL-profile
   # member: input default is '' (unset), passed RAW — NOT `|| ''` (Brief-F5): the input's
   # own default of '0' is a NON-empty (truthy) string, so `|| ''` forwarded '0' on a UI
