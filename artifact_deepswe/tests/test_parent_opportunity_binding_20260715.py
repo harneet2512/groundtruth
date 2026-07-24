@@ -111,7 +111,7 @@ def _wire_lineage_free_candidates(
     monkeypatch.setattr(g, "_lane_envelope_on", lambda: False)
     monkeypatch.setattr(g, "_ss_shadow_would_withhold", lambda *args, **kwargs: False)
 
-    def gateway(action, output, command, original_output, *, pool=None):
+    def gateway(action, output, command, original_output, *, pool=None, lattice_produced=None):  # lattice_produced: match prod signature (2026-07-22)
         candidate = SimpleNamespace(
             kind="unknown." + command,
             plane="fact",
@@ -340,7 +340,7 @@ def test_eligibility_ruling_binds_same_typed_candidate_before_delivery(monkeypat
     )
     assert lineage is not None and lineage.producer_registration_match is True
 
-    def gateway(action, output, command, original_output, *, pool=None):
+    def gateway(action, output, command, original_output, *, pool=None, lattice_produced=None):  # lattice_produced: match prod signature (2026-07-22)
         candidate = SimpleNamespace(
             kind="gateway.new_file_destination",
             plane="gateway",

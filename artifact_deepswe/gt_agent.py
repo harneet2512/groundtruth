@@ -414,6 +414,12 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # live (the import-coverage guard, gt_agent._assert_gt_mini_patch_imports_covered,
         # fails-closed on it). Stdlib + shipped-only (no new transitive dep).
         "change_surface.py",
+        # 2026-07-23: repro_synth — WS-5 pre-submit reproduction SYNTHESIS. gt_mini_patch's
+        # _repro_synth_submit_refusal() imports run_submit_check directly, so it MUST ship or the
+        # import-coverage guard fails-closed on it. Stdlib-only (re/os/dataclasses/sqlite-free at
+        # this layer); the in-container leg runs behind GT_REPRO_SYNTH (default off => never imported
+        # on the hot path when the flag is unset, but the closure guard still requires it present).
+        "repro_synth.py",
     ),
 }
 

@@ -46,7 +46,7 @@ def _wire_fake_candidates(monkeypatch):
     monkeypatch.setattr(g, "_ss_scan_acks", lambda *a, **k: None)
     monkeypatch.setattr(g, "_gt_gateway_caller_contract_ready", lambda *a, **k: False)
 
-    def gateway(action, out, cmd, orig_out, *, pool=None):
+    def gateway(action, out, cmd, orig_out, *, pool=None, lattice_produced=None):  # lattice_produced: match prod signature (2026-07-22)
         candidate = SimpleNamespace(kind="fake." + cmd, plane="fact")
         thunk = lambda: out.__setitem__("output", out["output"] + "\nGT:" + cmd)
         if pool is None:
@@ -386,7 +386,7 @@ def test_formatter_truncation_falls_back_to_base_observation(monkeypatch):
     _wire_fake_candidates(monkeypatch)
     payload = "G" * 12000
 
-    def gateway(action, out, cmd, orig_out, *, pool=None):
+    def gateway(action, out, cmd, orig_out, *, pool=None, lattice_produced=None):  # lattice_produced: match prod signature (2026-07-22)
         candidate = SimpleNamespace(kind="large", plane="fact", dedup_key="")
         thunk = lambda: out.__setitem__(
             "output", g._join_lane_output(out["output"], payload))
@@ -550,13 +550,20 @@ def test_holdout_ledger_hashes_exact_would_ship_suffix(monkeypatch):
 
 
 @pytest.mark.parametrize("profile", ["", "1", "2", "custom"])
-def test_global_arbiter_without_installed_handshake_is_zero_dose(monkeypatch, profile):
+def test_global_arbiter_without_installed_handshake_falls_open_to_inline(monkeypatch, profile):
+    # CONTRACT UPDATE (2026-07-23): this test formerly asserted ZERO dose when the batch-commit
+    # handshake is not installed. That encoded the pre-2026-07-22 fail-CLOSED behavior. The
+    # deliberate FAIL-OPEN fix (gt_mini_patch _augment_output ~18984: `_ga_on and not
+    # _batch_commit_installed` -> `_ga_on = False`) now degrades to INLINE per-plane delivery for
+    # single-action scaffolds (mini-swe) that never install the batch formatter — otherwise EVERY
+    # reactive FACT would be silently dropped on every observation. So the correct contract is now:
+    # the reactive dose still ships INLINE (the byte-identical `_ga_on==False` path), NOT zero.
     _wire_fake_candidates(monkeypatch)
     monkeypatch.setenv("GT_RL_PROFILE", profile)
     monkeypatch.setattr(g, "_batch_commit_installed", False)
     monkeypatch.setattr(g, "_batch_install_failed", False)
     out = _Env().execute({"command": "one"})
-    assert out["output"] == "base:one"
+    assert out["output"] == "base:one\nGT:one"
 
 
 def test_final_stepbehind_commits_known_fact_only_after_formatter(monkeypatch):
@@ -592,7 +599,7 @@ def test_final_stepbehind_ledger_preserves_subject_and_event(monkeypatch):
         lambda *args, **kwargs: (True, "ss_step_behind"))
     monkeypatch.setattr(g, "_runtime_ledger_record", lambda **row: rows.append(row))
 
-    def gateway(action, out, cmd, orig_out, *, pool=None):
+    def gateway(action, out, cmd, orig_out, *, pool=None, lattice_produced=None):  # lattice_produced: match prod signature (2026-07-22)
         candidate = SimpleNamespace(
             kind="post_search.localize", plane=g._GA_PLANE_LANE_A,
             dedup_key="preview", symbol="", lineage=None)
@@ -650,7 +657,7 @@ def test_submit_refusal_is_sole_dose_first_or_last(monkeypatch, commands):
     _wire_fake_candidates(monkeypatch)
     rolled_back = []
 
-    def gateway(action, out, cmd, orig_out, *, pool=None):
+    def gateway(action, out, cmd, orig_out, *, pool=None, lattice_produced=None):  # lattice_produced: match prod signature (2026-07-22)
         is_submit = cmd == "submit"
         candidate = SimpleNamespace(
             kind="submit_gate" if is_submit else "sibling",

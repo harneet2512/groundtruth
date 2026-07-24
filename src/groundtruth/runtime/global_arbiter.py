@@ -320,11 +320,30 @@ class ArbitrationResult:
     losers: list = field(default_factory=list)  # list[tuple[Candidate, str]]
 
 
+# WS-1 (2026-07-23) class-rotation: demote a candidate whose ladder CLASS already delivered
+# this attempt below every not-yet-delivered class, so the single dose rotates to a starved
+# class (def_partition after localization) instead of the same argmax winner. Large enough to
+# sink any delivered class beneath any fresh one across the whole ladder; the seam passes the
+# accumulated delivered CLASSES only under GT_DOSE_ROTATE, default empty => no decay =>
+# byte-identical to the pre-WS-1 ranking.
+_CLASS_ROTATION_DECAY = 1000
+
+# WS-1a COALITION EXEMPTION (RepoShapley): localization brief + def_ref_partition are ONE
+# coalition inside the shared "localization" class (class_of_kind collapses both to
+# "localization"). Class-keyed rotation would sink def_ref_partition together with the brief
+# the moment the brief delivers — starving the coalition partner instead of unstarving it.
+# def_ref_partition is exempt from its class's rotation sink so it RISES to the next dose after
+# the brief; once it itself delivers, dedup / REASON_REDUNDANT reject its repeat, so no monopoly.
+# Inert unless rotation is ON (dclasses non-empty) AND a def_ref_partition candidate competes.
+_COALITION_EXEMPT_KINDS = frozenset({"def_ref_partition"})
+
+
 def arbitrate(
     candidates: "list[Candidate]",
     *,
     acquired: "frozenset[str] | set[str]" = frozenset(),
     delivered: "frozenset[str] | set[str]" = frozenset(),
+    delivered_classes: "frozenset[str] | set[str]" = frozenset(),
     ss_v2: "bool | None" = None,
 ) -> ArbitrationResult:
     """The ONE ranked competition (SM-5). Returns AT MOST ONE winner + every loser's reason.
@@ -371,6 +390,7 @@ def arbitrate(
     v2 = _ss_v2_on() if ss_v2 is None else bool(ss_v2)
     acq = {_norm_symbol(s) for s in (acquired or ())}
     delivered_set = set(delivered or ())
+    dclasses = set(delivered_classes or ())  # WS-1 class-rotation (empty => byte-identical)
     losers: list = []
     eligible: list[tuple[int, Candidate]] = []
     for c in candidates:
@@ -390,7 +410,15 @@ def arbitrate(
         if v2 and c.redundant_with_delivered and class_of_kind(c.kind) == "localization":
             losers.append((c, REASON_REDUNDANT))
             continue
-        eligible.append((r, c))
+        # WS-1 class-rotation: a candidate whose CLASS already delivered this attempt is sunk
+        # below every fresh class so the dose rotates (empty dclasses => r_eff == r => identical).
+        # WS-1a: a coalition-exempt kind (def_ref_partition) is NOT sunk with its class — the
+        # coalition partner must rise to the next dose after the localization brief delivers.
+        _rotate = (dclasses
+                   and class_of_kind(c.kind) in dclasses
+                   and c.kind not in _COALITION_EXEMPT_KINDS)
+        r_eff = (r - _CLASS_ROTATION_DECAY if _rotate else r)
+        eligible.append((r_eff, c))
     if not eligible:
         return ArbitrationResult(winner=None, repair_support=False, losers=losers)
     eligible.sort(

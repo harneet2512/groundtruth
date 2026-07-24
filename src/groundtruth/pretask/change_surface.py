@@ -360,6 +360,52 @@ def _graph_facts(graph_db: str | None) -> tuple[set[str], set[str], set[str]]:
     return names, impl_files, test_files
 
 
+def _cochange_coupling(
+    graph_db: "str | None",
+    target_rel: str,
+    member_files: "set[str] | frozenset[str]",
+) -> int:
+    """WS-4b (2026-07-23) co-change RANKING input (Zimmermann ICSE'04 logical coupling): the
+    historical coupling strength between a candidate registry file and a change-surface group's
+    members, from the pre-mined ``cochanges`` table (``file_a, file_b, count``). Used ONLY as a
+    TIE-BREAK when the static content-cross-reference ranking ties — DOCTRINE: co-change is an
+    INTERNAL ranking prior, NEVER a delivered fact; the delivered output stays the change_surface
+    registration. Returns the summed pair count over members; 0 on any error / absent table / no
+    coupling (correct-or-quiet)."""
+    if not graph_db or not target_rel or not member_files:
+        return 0
+    try:
+        conn = sqlite3.connect(graph_db)
+    except sqlite3.Error:
+        return 0
+    try:
+        try:
+            tbls = {
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if "cochanges" not in tbls:
+                return 0
+            t = _posix(str(target_rel)).lstrip("./")
+            members = {_posix(str(m)).lstrip("./") for m in member_files if m}
+            members.discard(t)
+            if not members:
+                return 0
+            total = 0
+            for m in sorted(members):
+                for row in conn.execute(
+                    "SELECT count FROM cochanges "
+                    "WHERE (file_a = ? AND file_b = ?) OR (file_a = ? AND file_b = ?)",
+                    (t, m, m, t),
+                ):
+                    total += int(row[0] or 0)
+            return total
+        except sqlite3.Error:
+            return 0
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # sibling-group mining
 # --------------------------------------------------------------------------- #
@@ -539,18 +585,26 @@ def _code_lines(text: str) -> list[tuple[int, str]]:
     return out
 
 
-def _detect_registry(group: _Group, files: list[str], repo_root: str) -> None:
+def _detect_registry(group: _Group, files: list[str], repo_root: str,
+                     graph_db: "str | None" = None) -> None:
     """Populate group.registry_file / registry_refs: the file whose CODE lines
     cross-reference the MOST distinct group members (>=2). Test-shaped files
     (incl. ``conftest``) are excluded; docstring/comment/prose mentions never
     count (F1). Deterministic ranking: most distinct members, then most
-    code-shaped reference lines (density), then lexicographic path — NEVER
-    path length (the tie-break a shorter decoy path could win)."""
+    code-shaped reference lines (density), then — WS-4b, ONLY when the static pair ties and
+    GT_CHANGE_SURFACE_COCHANGE is on — historical co-change coupling to the members (Zimmermann),
+    then lexicographic path — NEVER path length (the tie-break a shorter decoy path could win).
+    ``graph_db`` feeds the co-change tie-break only; flag-off => cc=0 for all => byte-identical."""
     members = sorted(group.members)
     if len(members) < _MIN_SIBLINGS:
         return
     patterns = {m: _ref_pattern(m) for m in members}
-    best: tuple[int, int, str] | None = None
+    # WS-4b co-change tie-break (doctrine: internal ranking prior, never a delivered fact).
+    _cc_on = os.environ.get(
+        "GT_CHANGE_SURFACE_COCHANGE", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+    _member_paths = {f for s in group.slots for f in s.members.values()} if _cc_on else set()
+    best: "tuple[int, int, int, str] | None" = None  # (distinct, n_ref_lines, cc, rel)
     best_refs: dict[str, list[tuple[int, str]]] = {}
     best_file: str | None = None
     scanned = 0
@@ -573,12 +627,15 @@ def _detect_registry(group: _Group, files: list[str], repo_root: str) -> None:
         if distinct < _MIN_SIBLINGS:
             continue
         n_ref_lines = sum(len(v) for v in refs.values())
+        # WS-4b: co-change coupling is a TIE-BREAK only (0 when the flag is off => the tuple
+        # comparison collapses to (distinct, n_ref_lines) + lexicographic == byte-identical).
+        cc = _cochange_coupling(graph_db, rel, _member_paths) if _cc_on else 0
         if (
             best is None
-            or (distinct, n_ref_lines) > (best[0], best[1])
-            or ((distinct, n_ref_lines) == (best[0], best[1]) and rel < best[2])
+            or (distinct, n_ref_lines, cc) > (best[0], best[1], best[2])
+            or ((distinct, n_ref_lines, cc) == (best[0], best[1], best[2]) and rel < best[3])
         ):
-            best = (distinct, n_ref_lines, rel)
+            best = (distinct, n_ref_lines, cc, rel)
             best_refs = refs
             best_file = rel
     if best_file is not None:
@@ -799,7 +856,7 @@ def detect_change_surface(
 
     groups = _build_groups(slots)
     for g in groups:
-        _detect_registry(g, files, repo_root)
+        _detect_registry(g, files, repo_root, graph_db)
 
     word_seq = _issue_word_seq(issue_text)
     norm_issue_words = {_normalize(w) for w in word_seq}

@@ -180,7 +180,19 @@ def _xsession_boost(env: EvidenceEnvelope) -> int:
         return 0
 
 
-def _priority(env: EvidenceEnvelope) -> tuple[int, int, float, str]:
+# WS-1 (2026-07-23) rotation: a fact class that ALREADY delivered earlier in THIS attempt is
+# demoted below every not-yet-delivered class, so the next observation's <=1 dose rotates to a
+# starved class (def_partition after localization) instead of the same argmax winner every turn.
+# Large enough to sink any delivered class beneath any fresh one across the whole rank span
+# (12..60); the seam passes the accumulated delivered evidence_types, default empty => no decay
+# => byte-identical to the pre-WS-1 order.
+_ROTATION_DECAY = 1000
+
+
+def _priority(
+    env: EvidenceEnvelope,
+    recently_delivered: "frozenset[str]" = frozenset(),
+) -> tuple[int, int, float, str]:
     """A TOTAL deterministic order over envelopes (higher = deliver first).
 
     Ranked by evidence-type severity, then tier, then confidence, then the stable
@@ -199,17 +211,64 @@ def _priority(env: EvidenceEnvelope) -> tuple[int, int, float, str]:
     if base is None:  # family prefix (e.g. "missing_role:registry")
         base = _EVIDENCE_TYPE_RANK.get(et.split(":", 1)[0], 10)
     base += _xsession_boost(env)  # SM-9c rank-up (0 when unstamped -> byte-identical)
+    if recently_delivered and (
+            et in recently_delivered or et.split(":", 1)[0] in recently_delivered):
+        base -= _ROTATION_DECAY  # WS-1: already delivered this attempt -> yield the next dose
     return (base, _TIER_RANK.get(env.tier, 1), float(env.confidence), env.dedup_key)
 
 
-def arbitrate(envelopes: "list[EvidenceEnvelope]") -> "EvidenceEnvelope | None":
+def arbitrate(
+    envelopes: "list[EvidenceEnvelope]",
+    recently_delivered: "frozenset[str]" = frozenset(),
+) -> "EvidenceEnvelope | None":
     """The per-turn dose: at most ONE envelope (ABI §2 — <=1 steer/turn). Returns
     the highest-priority envelope, or ``None`` when the list is empty. augment()
     already dedup-suppressed repeats via the per-episode chain, so this only picks
-    the winner among the survivors."""
+    the winner among the survivors. ``recently_delivered`` (WS-1, default empty =>
+    byte-identical) demotes already-delivered classes so the dose rotates."""
     if not envelopes:
         return None
-    return max(envelopes, key=_priority)
+    return max(envelopes, key=lambda e: _priority(e, recently_delivered))
+
+
+def select(
+    envelopes: "list[EvidenceEnvelope]",
+    *,
+    max_doses: int = 1,
+    multidose: bool = False,
+    recently_delivered: "frozenset[str]" = frozenset(),
+) -> "list[EvidenceEnvelope]":
+    """WS-1 (2026-07-23) — the dose SET, superset of :func:`arbitrate`.
+
+    ``multidose=False`` (default) is BYTE-IDENTICAL to ``arbitrate``: returns
+    ``[winner]`` (or ``[]``), i.e. the ABI §2 ``<=1`` dose. This keeps the whole seam
+    byte-identical until the seam explicitly opts in.
+
+    ``multidose=True`` (the seam reads ``GT_MULTIDOSE`` and passes the decision +
+    ``max_doses`` here — this module stays PURE / I-O-free) admits a RANKED, dedup'd
+    SET: envelopes in ``_priority`` order, distinct ``dedup_key``, capped at
+    ``max_doses`` — so several high-priority, non-redundant facts co-deliver at one
+    observation instead of the winner-take-all ``argmax`` starving every runner-up
+    (SGR coverage-max under a budget — El-Yaniv/Wiener 2010, SelectiveNet ICML'19).
+    The per-class calibrated threshold + freshness + marginal-Δ gate is applied by the
+    seam BEFORE this call (it owns those runtime signals); ``select`` only does the
+    deterministic ranked-set-under-cap. ``max_doses<=1`` collapses to the ``<=1`` dose."""
+    if not envelopes:
+        return []
+    if not multidose or max_doses <= 1:
+        w = arbitrate(envelopes, recently_delivered)
+        return [w] if w is not None else []
+    out: "list[EvidenceEnvelope]" = []
+    seen: "set[str]" = set()
+    for env in sorted(
+            envelopes, key=lambda e: _priority(e, recently_delivered), reverse=True):
+        if env.dedup_key in seen:
+            continue
+        out.append(env)
+        seen.add(env.dedup_key)
+        if len(out) >= max_doses:
+            break
+    return out
 
 
 # --------------------------------------------------------------------------- #

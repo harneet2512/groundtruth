@@ -7342,6 +7342,14 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
     if _ss_coherence_v2_on():
         churn = _ss_coherence_churn(rel)
         if churn is None:
+            # WS-3b (2026-07-23): mediator NO_EFFECT — coherence_v2 evaluated but the collapse claim
+            # did not hold (<=2 rewrites or an intervening pass). Writes the previously-DARK
+            # mini_seam.coherence.recovery_pivot mediator site (UNMEASURED -> measured). Records ONLY
+            # under the flag + inseam metrics; host-side telemetry (no model bytes) => byte-identical.
+            _control_participation_record(
+                "GT_SS_COHERENCE_V2", "mini_seam.coherence.recovery_pivot",
+                "NO_EFFECT", fact_class="recovery",
+                reason="insufficient_churn_or_intervening_pass")
             return None
     else:
         churn = _edit_churn.get(rel, 0)
@@ -7353,9 +7361,20 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
     anchored = (not anch) or (stem in anch) or bool(ftoks & anch) \
         or _last_test_outcome_failed
     if not anchored:
+        if _ss_coherence_v2_on():
+            # WS-3b: mediator NO_EFFECT — collapse detected but not anchored to the agent's focus.
+            _control_participation_record(
+                "GT_SS_COHERENCE_V2", "mini_seam.coherence.recovery_pivot",
+                "NO_EFFECT", fact_class="recovery", reason="not_anchored")
         return None
     _coherence_fired_files.add(rel)
     _coherence_last_rel = rel
+    if _ss_coherence_v2_on():
+        # WS-3b: mediator APPLIED — the coherence-collapse detector fired and shapes the recovery/
+        # pivot nudge for this path. Mediator => no byte ownership (candidate_bytes="").
+        _control_participation_record(
+            "GT_SS_COHERENCE_V2", "mini_seam.coherence.recovery_pivot",
+            "APPLIED", fact_class="recovery", reason="coherence_collapse_pivot")
     hint = ""
     try:
         idents = sorted(_coverage_idents(ftoks) & anch) or \
@@ -7882,12 +7901,14 @@ def _reset_oracle_state() -> None:
     global _detect_loop_fired, _detect_loop_epoch_step, _coherence_last_rel
     global _last_test_outcome_failed, _last_test_step, _cycle_edit_start
     global _last_verify_executed_identity
-    global _recovery_repeat_fp
+    global _recovery_repeat_fp, _recovery_loop_fired
     # W6 FIX 1b: the per-turn recovery REPETITION flag (set fresh at the top of every
     # `_gt_hypothesis_classify_turn`, consumed same-turn by `_recovery_stall_active`). Clear it
     # per attempt too (F3 reset law) so a prior attempt's repeat state can never leak into a fresh
     # attempt's first classify (byte-identical in production: fresh process per attempt).
     _recovery_repeat_fp = False
+    # WS-3: clear the GT_RECOVERY_LOOP once-per-attempt stall-union latch (F3 reset law).
+    _recovery_loop_fired = False
     _traj_state_keys.clear()
     _traj_loop_sigs.clear()
     _lr_history.clear()
@@ -11049,6 +11070,13 @@ _HYPOTHESIS_IMPERATIVE_CACHE: "dict[str, str] | None" = None
 # Default 0; only advanced under GT_RECOVERY_ESCALATE, so off -> byte-identical.
 _recovery_deliver_count: int = 0
 
+# WS-3 (2026-07-23) once-per-attempt latch for the GT_RECOVERY_LOOP stall-signal union: a
+# demonstrated degenerate loop makes recovery eligible AT MOST ONCE per attempt, so the union
+# cannot resurrect the W6 FIX 1b over-fire (nudging a still-looping agent every turn). Burned
+# only on an actual delivery. Default False; touched only under GT_RECOVERY_LOOP => flag-off is
+# byte-identical.
+_recovery_loop_fired: bool = False
+
 
 def _hypothesis_imperative_map() -> "dict[str, str]":
     """disposition (recovery-candidate CLASS) -> a SHORT ACTIVE imperative. Built once from
@@ -11242,11 +11270,27 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
             typed_falsification = selection[0] == D_HYPOTHESIS_FALSIFIED
         except Exception:  # noqa: BLE001 -- absent typed vocabulary stays quiet
             typed_falsification = False
+    # WS-3 stall-signal UNION (GT_RECOVERY_LOOP, default off => byte-identical): recovery is
+    # ALSO eligible on an externally-observed degenerate loop (Huang ICLR'24 "LLMs Cannot Self-
+    # Correct" / OpenHands StuckDetector) even with NO repeated failing test — the stall class
+    # the failing-test gate structurally misses. Latched to fire AT MOST ONCE per attempt
+    # (`_recovery_loop_fired`, burned on delivery below) so it cannot resurrect the W6 FIX 1b
+    # over-fire. External loop signal preferred over the agent's introspective self-report (Huang).
+    global _recovery_loop_fired
+    _loop_stall = bool(
+        recovery_v2
+        and os.environ.get("GT_RECOVERY_LOOP") == "1"
+        and _detect_loop_fired
+        and not _recovery_loop_fired
+    )
     recovery_v2_eligible = bool(
         recovery_v2
-        and current_failure_key
-        and (_ss_test_fail_counts.get(current_failure_key, 0) >= 2
-             or typed_falsification)
+        and (
+            (current_failure_key
+             and (_ss_test_fail_counts.get(current_failure_key, 0) >= 2
+                  or typed_falsification))
+            or _loop_stall
+        )
     )
     if recovery_v2:
         _control_participation_record(
@@ -11337,6 +11381,8 @@ def _recovery_candidate() -> "tuple[float, str, str, bool] | None":
                 reason="ss_recovery", chars=0)
         except Exception:  # noqa: BLE001 — measurement must never break the producer
             pass
+    if _loop_stall:
+        _recovery_loop_fired = True  # WS-3: burn the once-per-attempt loop-union latch on delivery
     return (float(_SEV_RECOVERY), "recovery", text, True)
 
 
@@ -14507,11 +14553,11 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None, lattice_produc
         from groundtruth.runtime.gateway import GatewayState as _GatewayState
         from groundtruth.runtime.gateway import augment as _gw_augment
         from groundtruth.runtime.adapters.miniswe import (
-            arbitrate as _ad_arbitrate,
             fits_budget as _ad_fits_budget,
             normalize_event as _ad_normalize,
             render_envelope as _ad_render,
             seal_delivery as _ad_seal,
+            select as _ad_select,
             update_receipts as _ad_update_receipts,
         )
         from groundtruth.runtime.native_render import (
@@ -14649,8 +14695,32 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None, lattice_produc
             gateway_envelopes = _clean_gateway_envelopes
         if pool is None:
             # Preserve the standalone/global-off adapter arbitration exactly.
-            winner = _ad_arbitrate(gateway_envelopes)
-            gateway_envelopes = [] if winner is None else [winner]
+            # WS-1 (2026-07-23): GT_DOSE_ROTATE (default off -> byte-identical) demotes fact
+            # classes ALREADY delivered this attempt so the <=1 dose rotates to a starved class
+            # (def_partition after localization) instead of the same argmax winner every turn.
+            # The delivered set = evidence_types sealed in _gt_gateway_deliveries this episode;
+            # empty (flag off / nothing delivered yet) => arbitrate is byte-identical.
+            _rot = (
+                frozenset((getattr(e, "evidence_type", "") or "") for e in _gt_gateway_deliveries)
+                if os.environ.get("GT_DOSE_ROTATE", "").strip().lower()
+                not in ("", "0", "false", "no", "off")
+                else frozenset())
+            # WS-1b (2026-07-23): route the standalone dose through select() — the documented
+            # dose-SET primitive (superset of arbitrate). GT_MULTIDOSE (default OFF) => multidose
+            # False, max_doses 1 => select returns [winner] or [] => BYTE-IDENTICAL to arbitrate
+            # and the <=1-dose ABI holds. ON => a ranked, dedup'd, budget-capped SET the commit
+            # loop below delivers together (SGR coverage-max; ON deliberately exceeds <=1, so it is
+            # an experimental lever proven by risk-coverage, not by ss_gate S9 which runs it OFF).
+            _md = os.environ.get("GT_MULTIDOSE", "").strip().lower() not in (
+                "", "0", "false", "no", "off")
+            _max_doses = 1
+            if _md:
+                try:
+                    _max_doses = max(1, int(os.environ.get("GT_MULTIDOSE_MAX", "3") or "3"))
+                except ValueError:
+                    _max_doses = 3
+            gateway_envelopes = _ad_select(
+                gateway_envelopes, max_doses=_max_doses, multidose=_md, recently_delivered=_rot)
         if not gateway_envelopes:
             return
         if pool is not None:
@@ -14672,105 +14742,112 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None, lattice_produc
                 if committed_inline:
                     return
             return
-        winner = gateway_envelopes[0]
-        # D-8 (2026-07-10): the Gateway's own render mode is keyed to GT_GATEWAY_NATIVE,
-        # DECOUPLED from GT_POST_SEARCH_NATIVE (the post_search FORMAT arm) — so a FORM
-        # A/B on one surface no longer contaminates the other. Default OFF = tagged
-        # (byte-identical). RL-2 native renderers for the gateway's generic kinds
-        # (name_fold / wrong_surface / trace_frame / body_concept) ride THIS flag; the
-        # shared def-facts renderer keeps its own GT_POST_SEARCH_NATIVE dispatch.
-        native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
-        delta = _render_gateway_envelope(_ad_render, winner, native=native)
-        # leak-law (ABI §5): native must be tag-free; NEVER a test identity anywhere.
-        if (not delta or (native and contains_gt_tag(delta))
-                or contains_test_identity(delta)):
-            # D-10 (2026-07-10): a LEAK-guard drop (native tag / test identity) was
-            # silent — invisible to fired/delivered reconciliation (inverse of D-1). An
-            # empty delta is correct-or-quiet (no record); a NON-empty delta dropped for
-            # safety records SUPPRESSED_HIDDEN_ONLY so the drop is auditable.
-            if delta:
+        def _deliver_one(winner) -> None:
+            # WS-1b (2026-07-23): per-DOSE delivery (render -> leak/budget guard -> seal ->
+            # append -> ledger). Called once per envelope in the dose SET; a leak/budget drop
+            # RETURNS from THIS dose only and the loop proceeds to the next. Byte-identical
+            # when GT_MULTIDOSE is off (the set is exactly [winner]). Chain head / delivered-
+            # dedup / out['output'] all advance per dose, so multiple doses stack correctly.
+            # D-8 (2026-07-10): the Gateway's own render mode is keyed to GT_GATEWAY_NATIVE,
+            # DECOUPLED from GT_POST_SEARCH_NATIVE (the post_search FORMAT arm) — so a FORM
+            # A/B on one surface no longer contaminates the other. Default OFF = tagged
+            # (byte-identical). RL-2 native renderers for the gateway's generic kinds
+            # (name_fold / wrong_surface / trace_frame / body_concept) ride THIS flag; the
+            # shared def-facts renderer keeps its own GT_POST_SEARCH_NATIVE dispatch.
+            native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
+            delta = _render_gateway_envelope(_ad_render, winner, native=native)
+            # leak-law (ABI §5): native must be tag-free; NEVER a test identity anywhere.
+            if (not delta or (native and contains_gt_tag(delta))
+                    or contains_test_identity(delta)):
+                # D-10 (2026-07-10): a LEAK-guard drop (native tag / test identity) was
+                # silent — invisible to fired/delivered reconciliation (inverse of D-1). An
+                # empty delta is correct-or-quiet (no record); a NON-empty delta dropped for
+                # safety records SUPPRESSED_HIDDEN_ONLY so the drop is auditable.
+                if delta:
+                    _runtime_ledger_record(
+                        kind="gateway." + (winner.evidence_type or "fact"),
+                        outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                        reason="leak_guard", file_path=winner.target or "")
+                return
+            # TITO law 8: an over-budget delta is dropped WHOLE (never a partial splice).
+            if not _ad_fits_budget(delta, max_delta_chars=_GT_GATEWAY_MAX_DELTA):
+                # D-10: the budget drop was silent too — record it (parity with the lanes'
+                # SUPPRESSED_BUDGET, which D-7/RL-1 already emit).
                 _runtime_ledger_record(
                     kind="gateway." + (winner.evidence_type or "fact"),
-                    outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
-                    reason="leak_guard", file_path=winner.target or "")
-            return
-        # TITO law 8: an over-budget delta is dropped WHOLE (never a partial splice).
-        if not _ad_fits_budget(delta, max_delta_chars=_GT_GATEWAY_MAX_DELTA):
-            # D-10: the budget drop was silent too — record it (parity with the lanes'
-            # SUPPRESSED_BUDGET, which D-7/RL-1 already emit).
-            _runtime_ledger_record(
-                kind="gateway." + (winner.evidence_type or "fact"),
-                outcome=_ProductSignalOutcome.SUPPRESSED_BUDGET,
-                reason="gateway_budget", file_path=winner.target or "")
-            return
-        # Seam-F6 (L-1a boundary, bounce 2026-07-10): render_envelope's tagged form opens
-        # `<gt-fact` and the native form opens with body text — NEITHER opens with `\n`. A
-        # raw suffix onto an observation NOT ending in `\n` JAMS the delta onto the runner's
-        # last output line (the T4/L-1a class the lane path already guards). Insert exactly
-        # ONE `\n` boundary ONLY when needed — byte-identical when the observation already
-        # ends in `\n` (production command output) or the delta already opens with `\n`.
-        def _commit_gateway() -> None:
-            # THE DELIVERY COMMIT (seal -> append -> ledger). Isolated as a closure so SM-5
-            # can DEFER it (stash into the global pool) or run it inline — byte-identical.
-            global _gt_gateway_chain_head
-            _prev = out.get("output") or ""  # the ACTUAL bytes the delta rides on
-            _shipped = _join_lane_output(_prev, delta)[len(_prev):]  # delta, maybe leading \n
-            rendered = _shipped.encode("utf-8", "surrogatepass")  # F6: seal what ACTUALLY ships
-            # B-33: SEAL BEFORE APPEND. The seal is the delivery commit — it advances the
-            # chain, stamps the winner's dedup key, and records the receipt. Compute it FIRST;
-            # append the model-facing bytes ONLY after it succeeds, so a seal fault leaves ZERO
-            # model bytes. F1: augment() only READS the chain, so an arbitration loser /
-            # leak-guard / law-8 drop was never stamped and stays re-offerable. B-32/Seam-F3:
-            # commit the ACTUAL base observation, boundary length = BYTE-len.
-            _tob = _prev.encode("utf-8", "surrogatepass")
-            sealed, _gt_gateway_chain_head = _ad_seal(
-                winner, episode_id=getattr(_EPISODE, "episode_id", ""),
-                event_id=str(_action_count), parent_hash=_gt_gateway_chain_head,
-                rendered_bytes=rendered, renderer_id=("native" if native else "tagged"),
-                tool_output_bytes=_tob,
-                boundary=(str(len(_tob)) + ":" + (winner.evidence_type or "gw")).encode("utf-8"),
-                dedup_chain=_EPISODE.delivered_dedup,
-                observation_binding=_current_observation_binding())
-            _gt_gateway_deliveries.append(sealed)
-            # B-14: persist the sealed envelope (level-1 delivered) durably.
-            _persist_receipt(sealed, kind="gateway", transition="delivered")
-            _attestation = _persist_gateway_producer_attestation(
-                winner, _shipped, sealed)
-            # SM-9c WRITE: record this fresh delivery (level-1) in the durable per-repo
-            # store so a class delivered on the final turn is captured at least as delivered.
-            _xsession_flush()
-            # BYTE-PRESERVING append (AFTER the seal commit): observation verbatim + the
-            # boundary-joined delta. Still a pure suffix (TITO law 1).
-            _gt_gateway_append(out, _shipped)
-            _caller_controls = _record_gateway_caller_contract_controls(
-                winner, _shipped, native=native, attestation=_attestation)
-            _record_gateway_final_controls(
-                winner, _shipped, native=native, globally_arbitrated=False,
-                provenance_decision=_provenance_decisions.get(
-                    getattr(winner, "dedup_key", "") or "", ""),
-                caller_specific_controls=_caller_controls)
-            try:
-                # DEFECT-5 (run #2): stamp the sealed render channel (native/tagged) onto
-                # the durable ledger row for the offline registry-renderer audit. Host-side
-                # observability only — the model-facing append stays byte-identical. Default
-                # to {} so a None extra can never make `.setdefault` raise into the swallow.
-                _delivery_extra = _gateway_delivery_extra(winner) or {}
-                _delivery_extra.setdefault("renderer_id", "native" if native else "tagged")
-                _runtime_ledger_record(
-                    kind="gateway." + (winner.evidence_type or "fact"),
-                    outcome=_ProductSignalOutcome.DELIVERED,
-                    chars=len(_shipped), file_path=winner.target or "",
-                    content=_shipped,
-                    extra=_delivery_extra)
-                _ss_record_delivered(
-                    winner.evidence_type or "fact", delta,
-                    terminal_text=_shipped, delivery_extra=_delivery_extra)
-            except Exception:  # noqa: BLE001
-                pass
-        # SM-5: under the global arbiter, STASH the produced gateway candidate + its commit
-        # thunk into the shared pool instead of delivering — the ONE ranked competition
-        # decides. pool None (flag off) -> deliver inline (byte-identical).
-        _commit_gateway()
+                    outcome=_ProductSignalOutcome.SUPPRESSED_BUDGET,
+                    reason="gateway_budget", file_path=winner.target or "")
+                return
+            # Seam-F6 (L-1a boundary, bounce 2026-07-10): render_envelope's tagged form opens
+            # `<gt-fact` and the native form opens with body text — NEITHER opens with `\n`. A
+            # raw suffix onto an observation NOT ending in `\n` JAMS the delta onto the runner's
+            # last output line (the T4/L-1a class the lane path already guards). Insert exactly
+            # ONE `\n` boundary ONLY when needed — byte-identical when the observation already
+            # ends in `\n` (production command output) or the delta already opens with `\n`.
+            def _commit_gateway() -> None:
+                # THE DELIVERY COMMIT (seal -> append -> ledger). Isolated as a closure so SM-5
+                # can DEFER it (stash into the global pool) or run it inline — byte-identical.
+                global _gt_gateway_chain_head
+                _prev = out.get("output") or ""  # the ACTUAL bytes the delta rides on
+                _shipped = _join_lane_output(_prev, delta)[len(_prev):]  # delta, maybe leading \n
+                rendered = _shipped.encode("utf-8", "surrogatepass")  # F6: seal what ACTUALLY ships
+                # B-33: SEAL BEFORE APPEND. The seal is the delivery commit — it advances the
+                # chain, stamps the winner's dedup key, and records the receipt. Compute it FIRST;
+                # append the model-facing bytes ONLY after it succeeds, so a seal fault leaves ZERO
+                # model bytes. F1: augment() only READS the chain, so an arbitration loser /
+                # leak-guard / law-8 drop was never stamped and stays re-offerable. B-32/Seam-F3:
+                # commit the ACTUAL base observation, boundary length = BYTE-len.
+                _tob = _prev.encode("utf-8", "surrogatepass")
+                sealed, _gt_gateway_chain_head = _ad_seal(
+                    winner, episode_id=getattr(_EPISODE, "episode_id", ""),
+                    event_id=str(_action_count), parent_hash=_gt_gateway_chain_head,
+                    rendered_bytes=rendered, renderer_id=("native" if native else "tagged"),
+                    tool_output_bytes=_tob,
+                    boundary=(str(len(_tob)) + ":" + (winner.evidence_type or "gw")).encode("utf-8"),
+                    dedup_chain=_EPISODE.delivered_dedup,
+                    observation_binding=_current_observation_binding())
+                _gt_gateway_deliveries.append(sealed)
+                # B-14: persist the sealed envelope (level-1 delivered) durably.
+                _persist_receipt(sealed, kind="gateway", transition="delivered")
+                _attestation = _persist_gateway_producer_attestation(
+                    winner, _shipped, sealed)
+                # SM-9c WRITE: record this fresh delivery (level-1) in the durable per-repo
+                # store so a class delivered on the final turn is captured at least as delivered.
+                _xsession_flush()
+                # BYTE-PRESERVING append (AFTER the seal commit): observation verbatim + the
+                # boundary-joined delta. Still a pure suffix (TITO law 1).
+                _gt_gateway_append(out, _shipped)
+                _caller_controls = _record_gateway_caller_contract_controls(
+                    winner, _shipped, native=native, attestation=_attestation)
+                _record_gateway_final_controls(
+                    winner, _shipped, native=native, globally_arbitrated=False,
+                    provenance_decision=_provenance_decisions.get(
+                        getattr(winner, "dedup_key", "") or "", ""),
+                    caller_specific_controls=_caller_controls)
+                try:
+                    # DEFECT-5 (run #2): stamp the sealed render channel (native/tagged) onto
+                    # the durable ledger row for the offline registry-renderer audit. Host-side
+                    # observability only — the model-facing append stays byte-identical. Default
+                    # to {} so a None extra can never make `.setdefault` raise into the swallow.
+                    _delivery_extra = _gateway_delivery_extra(winner) or {}
+                    _delivery_extra.setdefault("renderer_id", "native" if native else "tagged")
+                    _runtime_ledger_record(
+                        kind="gateway." + (winner.evidence_type or "fact"),
+                        outcome=_ProductSignalOutcome.DELIVERED,
+                        chars=len(_shipped), file_path=winner.target or "",
+                        content=_shipped,
+                        extra=_delivery_extra)
+                    _ss_record_delivered(
+                        winner.evidence_type or "fact", delta,
+                        terminal_text=_shipped, delivery_extra=_delivery_extra)
+                except Exception:  # noqa: BLE001
+                    pass
+            # SM-5: under the global arbiter, STASH the produced gateway candidate + its commit
+            # thunk into the shared pool instead of delivering — the ONE ranked competition
+            # decides. pool None (flag off) -> deliver inline (byte-identical).
+            _commit_gateway()
+        for winner in gateway_envelopes:
+            _deliver_one(winner)
     except Exception:  # noqa: BLE001 — isolated; must never break the agent loop
         _crash_emit("gateway.augment")
 
@@ -16196,7 +16273,7 @@ def _global_pool_flush(pool, *, kkind, kf, krel, candidate_context=None,
         return
     try:
         from groundtruth.runtime.global_arbiter import (
-            PLANE_STEER, REASON_DEDUP, REASON_OUTRANKED, arbitrate)
+            PLANE_STEER, REASON_DEDUP, REASON_OUTRANKED, arbitrate, class_of_kind)
     except Exception:  # noqa: BLE001 — engine absent: nothing to arbitrate (flag off in prod)
         return
     try:
@@ -16212,8 +16289,20 @@ def _global_pool_flush(pool, *, kkind, kf, krel, candidate_context=None,
         except Exception:  # noqa: BLE001 — read-set union must never break the flush
             pass
         cands = [c for c, _t in pool]
+        # WS-1 (2026-07-23): under GT_DOSE_ROTATE, pass the ladder CLASSES already delivered this
+        # episode so a starved class (def_partition after localization) rotates into the single
+        # dose instead of the same argmax winner. Built from the sealed deliveries' evidence_types
+        # -> class_of_kind (empties filtered). Flag off / no deliveries => empty => byte-identical.
+        _dclasses = (
+            frozenset(
+                _cl for _e in _gt_gateway_deliveries
+                if (_cl := class_of_kind(getattr(_e, "evidence_type", "") or "")))
+            if os.environ.get("GT_DOSE_ROTATE", "").strip().lower()
+            not in ("", "0", "false", "no", "off")
+            else frozenset())
         res = arbitrate(cands, acquired=acquired,
-                        delivered=_EPISODE.delivered_dedup)
+                        delivered=_EPISODE.delivered_dedup,
+                        delivered_classes=_dclasses)
         winner = res.winner
         # SM-10 (2026-07-12): CONSUME repair_support at the seam. A PREVENTIVE-class winner
         # delivered AFTER its decision boundary (res.repair_support) missed its prevention
@@ -17364,6 +17453,35 @@ def _ss_extract_paths(text: str, root: str = "") -> "set[str]":
     return out
 
 
+def _ss_freshness_stale(kind: str, text: str, root: str = "", subject_path: str = "",
+                        is_loc: bool = False) -> bool:
+    """WS-2b (2026-07-23) freshness + marginal-Δ hard-pre-gate ("When Retrieval Hurts" ·
+    Repoformer ICML'24): a localization-class fact whose edit TARGET the agent has ALREADY EDITED
+    this episode describes PRE-EDIT indexed state — it is stale AND carries ~zero marginal value at
+    the current decision point (re-pointing the agent at a file it already changed). Suppress it:
+    stale evidence is worse than silence. Localization-class ONLY (rides the agent, §3). Behind
+    GT_L6_FRESH_GATE (default off => byte-identical). Correct-or-quiet: no edited-target match =>
+    deliver (still fresh for that target).
+
+    Normalization: ``_oracle_edited_rels`` stores ``_to_repo_rel`` (NO ``_norm_fp``) while
+    ``_ss_extract_paths`` returns ``_norm_fp(_to_repo_rel(...))`` — so BOTH sides are pushed through
+    ``_norm_fp`` here or the gate would silently never match (a plumbing trap)."""
+    if not _ss_enabled("GT_L6_FRESH_GATE"):
+        return False
+    if not (is_loc or kind == "post_search.localize"):
+        return False
+    if not _oracle_edited_rels:
+        return False
+    edited = {_norm_fp(r) for r in _oracle_edited_rels if r}
+    if not edited:
+        return False
+    sp = _norm_fp(_to_repo_rel(subject_path, root)) if subject_path else ""
+    if sp and sp in edited:
+        return True
+    paths = _ss_extract_paths(text, root)
+    return bool(paths) and paths <= edited  # every cited path already edited -> wholly stale
+
+
 def _ss_extract_symbols(text: str) -> "set[str]":
     """Code symbols cited in a payload — call-shaped (``foo(``) + dotted-qualified
     (``a.b.c``). Prose words (no ``(``, no internal dot) are excluded, so the entity
@@ -17543,6 +17661,24 @@ def _ss_dedup2_suppresses(kind: str, text: str, root: str = "", *, is_loc: bool 
         if ents <= prior:
             return True
     return False
+
+
+def _ss_flare_redeliver(kind: str, *, is_loc: bool = False) -> bool:
+    """WS-2 (2026-07-23) FLARE re-delivery (FLARE EMNLP'23 · Lost-in-the-Middle TACL'24):
+    a localization target that the NOVELTY / DEDUP2 gate would suppress as 'already acquired'
+    is FUNCTIONALLY NOVEL again the moment the agent is in demonstrated difficulty (a
+    degenerate loop has fired this episode) — the fact scrolled out of the effective window
+    or the agent lost the thread. Un-suppress it so the still-relevant target re-competes for
+    the <=1 dose (it does NOT add a dose — S9 <=1 preserved). Localization-class ONLY (rides
+    the agent's own thread, never re-points it — CLAUDE.md §3 complementarity).
+
+    Behind GT_SS_FLARE (default off => byte-identical): a strict no-op unless the flag is set
+    AND a loop was detected (``_detect_loop_fired``) AND this is a localization target."""
+    if not _ss_enabled("GT_SS_FLARE"):
+        return False
+    if not (is_loc or kind == "post_search.localize"):
+        return False
+    return bool(_detect_loop_fired)
 
 
 def _ss_remember_known(kind: str, text: str, root: str = "", *, is_loc: bool = False,
@@ -17730,6 +17866,11 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
     control_bytes = (
         text if control_candidate_bytes is None else control_candidate_bytes
     )
+    # WS-2b freshness/marginal-Δ HARD-PRE-GATE (behind GT_L6_FRESH_GATE, default off =>
+    # byte-identical): a localization fact whose edit target is already edited this episode is
+    # stale + zero-marginal-value -> suppress BEFORE the identity referees ("When Retrieval Hurts").
+    if _ss_freshness_stale(kind, text, root, subject_path=subject_path, is_loc=is_loc):
+        return True, "ss_stale"
     # provenance: suppress WHOLE only when filtering leaves no content (the gateway text
     # is already rendered — a partial bad line stays, correct-or-quiet).
     if _ss_provenance_on():
@@ -17748,6 +17889,8 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
             return True, "ss_late"
     if _ss_dedup2_on():
         duplicate = _ss_dedup2_suppresses(kind, text, root, is_loc=is_loc)
+        if duplicate and _ss_flare_redeliver(kind, is_loc=is_loc):
+            duplicate = False  # WS-2 FLARE: re-deliver a still-relevant target on agent difficulty
         _control_participation_record(
             "GT_SS_DEDUP2", "mini_seam.ss_content_decision.semantic_dedup",
             "APPLIED" if duplicate else "NO_EFFECT",
@@ -17761,6 +17904,8 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
         step_behind = _ss_native_contains_claim(
             kind, text, native_text, root, is_loc=is_loc) or _ss_novelty_suppresses(
                 kind, text, root, is_loc=is_loc)
+        if step_behind and _ss_flare_redeliver(kind, is_loc=is_loc):
+            step_behind = False  # WS-2 FLARE: re-surface still-relevant target on agent difficulty
         _control_participation_record(
             "GT_SS_NOVELTY", "mini_seam.ss_content_decision.novelty",
             "APPLIED" if step_behind else "NO_EFFECT",
@@ -18605,6 +18750,117 @@ def _ss_record_test(cmd: str, orig_out: str, failed: bool, passed: bool) -> None
         pass
 
 
+def _run_repro_candidate(cand, root: str, pre_edit: bool):
+    """WS-5 in-container execution of ONE synthesized repro candidate -> ``(stdout, executed_lines)``.
+    Post-edit runs against the LIVE tree; ``pre_edit`` runs against a NON-DESTRUCTIVE detached git
+    worktree at HEAD, so the live repo is NEVER mutated and the agent's submission can never be lost.
+    The candidate runs under ``coverage.py`` for per-file executed lines (change-coverage). RAISES on
+    any fault so the orchestrator skips the candidate (correct-or-quiet). Behind GT_REPRO_SYNTH via
+    the caller; touches disk/subprocess ONLY on that flag path."""
+    import json as _json
+    import subprocess
+    import sys
+    import tempfile
+    run_root = root
+    wt = None
+    try:
+        if pre_edit:
+            wt = tempfile.mkdtemp(prefix="gt_repro_pre_")
+            r = subprocess.run(
+                ["git", "-C", root, "worktree", "add", "--detach", wt, "HEAD"],
+                capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                raise RuntimeError("worktree add failed")
+            run_root = wt
+        fd, tmp = tempfile.mkstemp(suffix="_gt_repro.py", dir=run_root)
+        os.close(fd)
+        cov = tmp + ".cov"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(cand.source)
+            run = subprocess.run(
+                [sys.executable, "-m", "coverage", "run", "--data-file", cov,
+                 os.path.basename(tmp)],
+                cwd=run_root, capture_output=True, text=True, timeout=60)
+            stdout = (run.stdout or "") + (run.stderr or "")
+            executed: "dict[str, list]" = {}
+            try:
+                j = subprocess.run(
+                    [sys.executable, "-m", "coverage", "json", "--data-file", cov, "-o", "-"],
+                    cwd=run_root, capture_output=True, text=True, timeout=30)
+                data = _json.loads(j.stdout or "{}")
+                for fp, finfo in (data.get("files") or {}).items():
+                    rel = _norm_fp(_to_repo_rel(fp, run_root))
+                    lines = finfo.get("executed_lines") or []
+                    if rel and lines:
+                        executed[rel] = list(lines)
+            except Exception:  # noqa: BLE001 — no coverage -> empty (never a false change-cover)
+                executed = {}
+            return stdout, executed
+        finally:
+            for _p in (tmp, cov):
+                try:
+                    os.remove(_p)
+                except OSError:
+                    pass
+    finally:
+        if wt is not None:
+            try:
+                subprocess.run(
+                    ["git", "-C", root, "worktree", "remove", "--force", wt],
+                    capture_output=True, text=True, timeout=30)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                import shutil
+                shutil.rmtree(wt, ignore_errors=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _repro_synth_submit_refusal(root: str) -> str:
+    """WS-5 (GT_REPRO_SYNTH) SYNTHESIZED covering-RED submit refusal. When the submit head ALLOWS
+    and the agent left NO own observed RED, synthesize a reproduction from the ISSUE, run it pre+post
+    edit, and ONLY on a confirmed change-covering RED that SURVIVES the edit return a leak-safe
+    pre-commit refusal (never quotes a gold/hidden test). "" when flag off / no issue snippet / no
+    surviving RED / any fault (byte-identical off, correct-or-quiet). DISTINCT from
+    :func:`_ss_submit_red_refusal` (the agent's OWN command) — this is the covering_red class fed by
+    the Agentless/Otter-style synthesis leg (:func:`groundtruth.pretask.repro_synth.run_submit_check`)."""
+    if os.environ.get("GT_REPRO_SYNTH", "").strip().lower() in (
+            "", "0", "false", "no", "off"):
+        return ""
+    if _GT_BASELINE:
+        return ""
+    try:
+        from groundtruth.pretask.repro_synth import run_submit_check
+    except Exception:  # noqa: BLE001 — module absent in-container -> quiet
+        return ""
+    issue = _issue_text()
+    if not issue:
+        return ""
+    edited_lines = {
+        _norm_fp(_to_repo_rel(r, root)): sorted(_oracle_edited_lines_by_file.get(r, set()) or ())
+        for r in _oracle_edited_rels
+    }
+    if not any(edited_lines.values()):
+        return ""  # no edited lines recorded -> change-coverage can never hold -> abstain
+    try:
+        verdict = run_submit_check(
+            issue, root, edited_lines,
+            lambda c, pre: _run_repro_candidate(c, root, pre))
+    except Exception:  # noqa: BLE001 — synthesis/exec fault must never brick a submit
+        return ""
+    if verdict is None or not verdict.refuse_submit:
+        return ""
+    try:
+        from groundtruth.runtime.native_render import contains_gt_tag
+        line = ("A reproduction derived from the issue still fails after this change; the edit may "
+                "not resolve the reported behavior. Re-check the failing scenario before submitting.")
+        return "" if contains_gt_tag(line) else line
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _ss_submit_red_refusal(*, record_candidate: bool = True) -> str:
     """SS-2 (GT_SS_SUBMIT_RED): at the submit boundary, consume the agent's OWN unresolved
     observed test RED — the conan-17092 class (the agent observed a gold-relevant test FAIL
@@ -18725,6 +18981,16 @@ def _augment_output(action, out) -> None:
             # per-turn pool instead of delivering inline; a single flush arbitrates <=1
             # global dose. None (flag off) -> every plane delivers inline (byte-identical).
             _ga_on = _global_arbiter_on()
+            if _batch_install_failed:
+                # FAIL-CLOSED (2026-07-23): a batch install that was ATTEMPTED and FAILED
+                # (e.g. model.format_observation_messages missing) is an ERROR state — GT must NOT
+                # fall back to inline per-action delivery (a half-installed / broken formatter could
+                # double-deliver or corrupt the observation). Suppress the WHOLE observation
+                # regardless of _ga_on. This is DISTINCT from a benign NEVER-installed scaffold
+                # (mini-swe: _batch_install_failed is False), which fails OPEN below. Bookkeeping
+                # above (ledger-judge / ack-scan) already ran; only delivery is suppressed. Restores
+                # test_install_failure_fails_closed_instead_of_per_action_fallback.
+                return
             if _ga_on and not _batch_commit_installed:
                 # FAIL-OPEN (2026-07-22): single-action scaffolds (mini-swe) never install the
                 # batch-commit formatter (install_observation_batch_commit needs
@@ -19981,13 +20247,21 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
             # byte-identical to the pre-SS-2 allow path. Additive: only reached on _allow, so it
             # never double-blocks a head that already blocked (covering fail keeps its own path).
             _ss_red = _ss_submit_red_refusal(record_candidate=False)
+            # WS-5 (GT_REPRO_SYNTH): when the agent left NO own observed RED, try the SYNTHESIZED
+            # covering-RED — a reproduction derived from the ISSUE that still fails after the edit.
+            # "" when the flag is off / no snippet / no surviving RED => byte-identical to before.
+            _ss_red_synth = False
+            if not _ss_red:
+                _ss_red = _repro_synth_submit_refusal(_root())
+                _ss_red_synth = bool(_ss_red)
             if _ss_red:
                 try:
                     from groundtruth.runtime.feature_lineage import build_lineage
                     _ss_red_lineage = build_lineage(
                         runtime_producer_id="submit_gate",
                         evidence_type="submit_refusal", actual_event="submit",
-                        cap_feature_ids=("GT_SS_SUBMIT_RED",))
+                        cap_feature_ids=(("GT_REPRO_SYNTH",) if _ss_red_synth
+                                         else ("GT_SS_SUBMIT_RED",)))
                     _ss_red_extra = _feature_lineage_extra(_ss_red_lineage)
                 except Exception:  # noqa: BLE001 -- attribution never changes refusal
                     _ss_red_extra = _registered_delivery_extra(

@@ -30,6 +30,13 @@ def _hermetic_gt_state():
     try:
         import gt_mini_patch as g
         g._handoff_guard_state.clear()
+        # 2026-07-23: the batch-commit install globals are process-scoped and mutated by
+        # install_observation_batch_commit; nothing resets them between tests. The install-failure
+        # FAIL-CLOSED path now gates delivery on `_batch_install_failed`, so a test that triggers an
+        # install failure would leak that state into later tests (pass-in-isolation / fail-in-suite).
+        # Same rationale as above: a FRESH PROCESS per task in production means this can't leak there.
+        g._batch_install_failed = False
+        g._batch_commit_installed = False
     except Exception:  # noqa: BLE001 — best-effort isolation, never break collection
         pass
     yield
