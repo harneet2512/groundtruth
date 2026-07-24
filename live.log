@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #22 | 2026-07-24T20:16:50Z | task=scriggo-method-declarations ===
+=== LIVE SNAPSHOT #23 | 2026-07-24T20:17:11Z | task=scriggo-method-declarations ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_scriggo-method-declarations.log:[DOCKERFILE SLIM] deepswe-bench/tasks/scriggo-method-declarations/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh7adk413brr6nnvzntz1qvb51833me1 (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_scriggo-method-declarations.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -8,17 +8,19 @@
 /tmp/gha_step_scriggo-method-declarations.log:[gt-shim] active; resolved=/tmp/gt-shim/docker
 /tmp/gha_step_scriggo-method-declarations.log:[ENV-START] attempt 1/3 — pier (bg) + container watcher (window=1800s)
 --- mem trend (last 6) ---
-[RESMON] 20:16:40 mem=1156/15989MB disk_used=90266/147719MB free=57438MB containers=0
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=3240MB MemAvailable:=14838MB Cached:=10106MB AnonPages:=345MB Mapped:=324MB Slab:=1104MB 
 [RESMON] 20:16:48 mem=1467/15989MB disk_used=90286/147719MB free=57418MB containers=0
 [MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2866MB MemAvailable:=14518MB Cached:=10155MB AnonPages:=629MB Mapped:=462MB Slab:=1108MB 
+[RESMON] 20:16:56 mem=1747/15989MB disk_used=90897/147719MB free=56806MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=1907MB MemAvailable:=14246MB Cached:=10762MB AnonPages:=787MB Mapped:=483MB Slab:=1174MB 
+[RESMON] 20:17:04 mem=2098/15989MB disk_used=90974/147719MB free=56729MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=1183MB MemAvailable:=13862MB Cached:=10849MB AnonPages:=1222MB Mapped:=460MB Slab:=1456MB 
 --- pier tail (last 15, non-RESMON) ---
 --- step tail (last 8) ---
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=3240MB MemAvailable:=14838MB Cached:=10106MB AnonPages:=345MB Mapped:=324MB Slab:=1104MB 
-[gt-shim] installed in-place at: /bin/docker /tmp/docker-cli-cache/docker /usr/bin/docker + PATH(/tmp/gt-shim); real-suffix=.gtreal
-[gt-shim] active; resolved=/tmp/gt-shim/docker
-[ENV-START] attempt 1/3 — pier (bg) + container watcher (window=1800s)
-[RESMON] 20:16:48 mem=1467/15989MB disk_used=90286/147719MB free=57418MB containers=0
-[RESTOP] 250MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 142MB:Runner.Worker /home/runner/actions-runner/cached/2.335.1/bin/Runner.Wo | 127MB:provjobd3853304 /tmp/provjobd3853304593 | 111MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 
-[MEMDIAG] dockerd(2769): VmRSS:=113748kB RssAnon:=57612kB RssFile:=56136kB RssShmem:=0kB VmSwap:=0kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2866MB MemAvailable:=14518MB Cached:=10155MB AnonPages:=629MB Mapped:=462MB Slab:=1108MB 
+[RESMON] 20:16:56 mem=1747/15989MB disk_used=90897/147719MB free=56806MB containers=0
+[RESTOP] 250MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 142MB:Runner.Worker /home/runner/actions-runner/cached/2.335.1/bin/Runner.Wo | 127MB:provjobd3853304 /tmp/provjobd3853304593 | 111MB:python /root/.local/share/uv/tools/mini-swe-agent/bin/python | 
+[MEMDIAG] dockerd(2769): VmRSS:=113864kB RssAnon:=57636kB RssFile:=56228kB RssShmem:=0kB VmSwap:=0kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=1907MB MemAvailable:=14246MB Cached:=10762MB AnonPages:=787MB Mapped:=483MB Slab:=1174MB 
+[RESMON] 20:17:04 mem=2098/15989MB disk_used=90974/147719MB free=56729MB containers=0
+[RESTOP] 633MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 250MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 142MB:Runner.Worker /home/runner/actions-runner/cached/2.335.1/bin/Runner.Wo | 127MB:provjobd3853304 /tmp/provjobd3853304593 | 
+[MEMDIAG] dockerd(2769): VmRSS:=652564kB RssAnon:=596264kB RssFile:=56300kB RssShmem:=0kB VmSwap:=0kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=1183MB MemAvailable:=13862MB Cached:=10849MB AnonPages:=1222MB Mapped:=460MB Slab:=1456MB 
