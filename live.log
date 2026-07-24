@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #1 | 2026-07-24T20:20:52Z | task=superjson-error-stack-serialization ===
+=== LIVE SNAPSHOT #2 | 2026-07-24T20:21:13Z | task=superjson-error-stack-serialization ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 --- mem trend (last 6) ---
 --- pier tail (last 15, non-RESMON) ---
@@ -18,3 +18,9 @@
 [MEMLOG 20:20:32] used=2183MB total=15989MB swap_used=0MB
 [MEMLOG 20:20:42] used=2199MB total=15989MB swap_used=0MB
 --- step tail (last 8) ---
+=== DeepSWE GT Trial: superjson-error-stack-serialization (model deepseek/deepseek-v4-pro) ===
+HOST  GT_CERT_DIR=/tmp/gt  GT_HOST_GRAPH_DB=/tmp/gt/graph.db
+GT_PROOF_MODE=1  GT_CONTAINERIZED=1  GT_SUBSTRATE_DIGEST=ghcr.io/harneet2512/gt-substrate@sha256:782e5068693a264f5d66f8ecb3e36f8aa06514df35b1d4dc207a9caceaac7bcc
+GT inject staged: 123 Python files
+go: downloading github.com/smacker/go-tree-sitter v0.0.0-20240625050157-a31a98a7c0f6
+go: downloading github.com/mattn/go-sqlite3 v1.14.22
