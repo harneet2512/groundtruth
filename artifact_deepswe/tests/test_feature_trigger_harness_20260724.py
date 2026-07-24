@@ -121,3 +121,19 @@ def test_submit_verify_unverified_advisory(monkeypatch):
     monkeypatch.setattr(g, "_oracle_test_count", 0, raising=False)
     monkeypatch.setattr(g, "_source_edit_count", 0, raising=False)
     assert g._ss_submit_red_refusal(record_candidate=False) == "", "REASON: false block with no edits"
+
+
+# ── name_error verdict must render through the SCRUB (audit fix 2026-07-24) ──
+def test_name_error_renders_through_scrub_not_raw_fallback():
+    from groundtruth.runtime.native_render import render_syntax_error_native
+    # a name_error result renders (non-empty), goes through tag-strip + _final_scrub + bound
+    res = {"verdict": "name_error",
+           "diagnostic": 'File "mod.py", line 3\nNameError: undefined name \'foo\''}
+    block = render_syntax_error_native(res)
+    assert block, "REASON: name_error must render (not '' -> no unsafe raw fallback)"
+    assert "NameError" in block and "foo" in block
+    # any GT tag in a (hostile) diagnostic is stripped by the renderer
+    res2 = {"verdict": "name_error", "diagnostic": "NameError: <gt-leak>x</gt-leak> undefined"}
+    assert "<gt-" not in render_syntax_error_native(res2), "REASON: renderer must strip gt tags"
+    # a non-error verdict still renders '' (correct-or-quiet)
+    assert render_syntax_error_native({"verdict": "ok", "diagnostic": "x"}) == ""

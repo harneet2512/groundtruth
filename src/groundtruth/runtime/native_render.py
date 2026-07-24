@@ -398,7 +398,12 @@ def render_syntax_error_native(result: dict[str, Any]) -> str:
     guard test-path edits, but the renderer itself now runs ``_final_scrub`` per line
     so leak-safety never again rests on a caller contract alone. On the callers'
     real inputs (non-test source diagnostics) the scrub is a byte no-op."""
-    if not result or result.get("verdict") != "syntax_error":
+    # AUDIT 2026-07-24: accept the GT_EDIT_CHECK_NAMES `name_error` verdict (a definite undefined-name
+    # diagnostic from pyflakes — the SAME executed-toolchain-diagnostic class) so it goes through the
+    # SAME tag-strip + per-line _final_scrub + bound as a syntax_error (defense-in-depth leak guard),
+    # instead of a caller-side raw fallback that skips the scrub. Byte-identical off (name_error never
+    # produced unless GT_EDIT_CHECK_NAMES is set).
+    if not result or result.get("verdict") not in ("syntax_error", "name_error"):
         return ""
     diag = _RE_GT_TAG.sub("", (result.get("diagnostic") or "")).strip()
     if not diag:

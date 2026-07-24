@@ -11070,7 +11070,9 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
     # if the syntax renderer doesn't format the name-error shape (already leak-safe: agent's own file).
     if res.get("verdict") not in ("syntax_error", "name_error"):
         return None
-    block = render_syntax_error_native(res) or (res.get("diagnostic") or "")
+    # render_syntax_error_native now scrubs+bounds name_error too (audit 2026-07-24) — no raw fallback,
+    # so the model-facing leak-scrub / tag-strip / bound is never bypassed.
+    block = render_syntax_error_native(res)
     if not block:
         return None
     failure_identity = _ss_build_syntax_failure_identity(rel, res.get("diagnostic") or "")
@@ -18949,7 +18951,7 @@ def _ss_submit_red_refusal(*, record_candidate: bool = True) -> str:
         if (os.environ.get("GT_SUBMIT_VERIFY", "0").strip() == "1"
                 and not _ss_submit_red_fired
                 and _source_edit_count > 0 and _oracle_test_count == 0):
-            line = (f"You edited {_source_edit_count} source file(s) but ran no test this session. "
+            line = (f"You edited {_source_edit_count} file(s) but ran no test this session. "
                     "Run the relevant test(s) to verify your change before submitting.")
             if record_candidate:
                 _ss_submit_red_fired = True
