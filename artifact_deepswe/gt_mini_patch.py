@@ -7342,14 +7342,11 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
     if _ss_coherence_v2_on():
         churn = _ss_coherence_churn(rel)
         if churn is None:
-            # WS-3b (2026-07-23): mediator NO_EFFECT — coherence_v2 evaluated but the collapse claim
-            # did not hold (<=2 rewrites or an intervening pass). Writes the previously-DARK
-            # mini_seam.coherence.recovery_pivot mediator site (UNMEASURED -> measured). Records ONLY
-            # under the flag + inseam metrics; host-side telemetry (no model bytes) => byte-identical.
-            _control_participation_record(
-                "GT_SS_COHERENCE_V2", "mini_seam.coherence.recovery_pivot",
-                "NO_EFFECT", fact_class="recovery",
-                reason="insufficient_churn_or_intervening_pass")
+            # WS-3b emitter REVERTED (2026-07-24): a mediator control_participation record REQUIRES a
+            # non-empty candidate_id + observation binding (control_participation.py:366), but this
+            # collapse-DETECTION point is pre-delivery (binding=null) -> the record threw ValueError
+            # (control_record_error) x22/run, worse than the honest UNMEASURED it replaced. Correct
+            # placement is the detect.coherence DELIVERY point (which has the candidate_id+binding).
             return None
     else:
         churn = _edit_churn.get(rel, 0)
@@ -7361,20 +7358,9 @@ def _coherence_collapse_candidate(rel: str) -> tuple[float, str] | None:
     anchored = (not anch) or (stem in anch) or bool(ftoks & anch) \
         or _last_test_outcome_failed
     if not anchored:
-        if _ss_coherence_v2_on():
-            # WS-3b: mediator NO_EFFECT — collapse detected but not anchored to the agent's focus.
-            _control_participation_record(
-                "GT_SS_COHERENCE_V2", "mini_seam.coherence.recovery_pivot",
-                "NO_EFFECT", fact_class="recovery", reason="not_anchored")
         return None
     _coherence_fired_files.add(rel)
     _coherence_last_rel = rel
-    if _ss_coherence_v2_on():
-        # WS-3b: mediator APPLIED — the coherence-collapse detector fired and shapes the recovery/
-        # pivot nudge for this path. Mediator => no byte ownership (candidate_bytes="").
-        _control_participation_record(
-            "GT_SS_COHERENCE_V2", "mini_seam.coherence.recovery_pivot",
-            "APPLIED", fact_class="recovery", reason="coherence_collapse_pivot")
     hint = ""
     try:
         idents = sorted(_coverage_idents(ftoks) & anch) or \
