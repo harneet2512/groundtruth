@@ -137,3 +137,20 @@ def test_name_error_renders_through_scrub_not_raw_fallback():
     assert "<gt-" not in render_syntax_error_native(res2), "REASON: renderer must strip gt tags"
     # a non-error verdict still renders '' (correct-or-quiet)
     assert render_syntax_error_native({"verdict": "ok", "diagnostic": "x"}) == ""
+
+
+# ── AUDIT 2026-07-24: name-check must NOT depend on the task container having pyflakes ──
+def test_name_check_uses_guaranteed_interpreter(monkeypatch, tmp_path):
+    from groundtruth.runtime import edit_check as ec
+    # GT_PYTHON (substrate interpreter) is preferred when it exists
+    fake = tmp_path / "py3"; fake.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("GT_PYTHON", str(fake))
+    assert ec._name_check_interpreter() == str(fake), "REASON: GT_PYTHON not preferred"
+    cmd = ec._build_name_check_command(".py", "m.py")
+    assert cmd and cmd[0] == str(fake), f"REASON: probe not run under the guaranteed interpreter; {cmd!r}"
+    # a NON-EXISTENT GT_PYTHON must not be used (falls back)
+    monkeypatch.setenv("GT_PYTHON", str(tmp_path / "nope"))
+    assert ec._name_check_interpreter() != str(tmp_path / "nope"), "REASON: used a missing interpreter"
+    # non-python ext -> no probe
+    monkeypatch.delenv("GT_PYTHON", raising=False)
+    assert ec._build_name_check_command(".go", "m.go") is None

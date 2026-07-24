@@ -209,8 +209,25 @@ def _check_py_undefined_names(src: bytes, rel_name: str) -> str:
     try:
         from pyflakes import checker as _pf_checker  # type: ignore
         from pyflakes import messages as _pf_messages  # type: ignore
-    except Exception:  # noqa: BLE001 -- tool absent => quiet
-        return ""
+    except Exception:  # noqa: BLE001 -- not in THIS interpreter; try the mounted substrate's
+        # AUDIT 2026-07-24: the in-process path runs under the harness interpreter (mini-swe-agent),
+        # which need not have pyflakes. GT's substrate python is mounted read-only at /opt/gt and
+        # BUNDLES pyflakes (pure-python => cross-version sys.path import is safe). Without this the
+        # capability was a per-interpreter lottery. Still correct-or-quiet if nothing is found.
+        try:
+            import glob as _glob
+            import sys as _sys
+            _added = False
+            for _sp in _glob.glob("/opt/gt/python/lib/python3*/site-packages"):
+                if _sp not in _sys.path:
+                    _sys.path.append(_sp)
+                    _added = True
+            if not _added:
+                return ""
+            from pyflakes import checker as _pf_checker  # type: ignore
+            from pyflakes import messages as _pf_messages  # type: ignore
+        except Exception:  # noqa: BLE001 -- tool genuinely absent => quiet
+            return ""
     try:
         tree = ast.parse(src, filename=rel_name)
         w = _pf_checker.Checker(tree, filename=rel_name)
@@ -235,10 +252,28 @@ def _check_py_undefined_names(src: bytes, rel_name: str) -> str:
     return ""
 
 
+def _name_check_interpreter() -> str:
+    """The interpreter used for the in-container undefined-name probe.
+
+    AUDIT 2026-07-24 (pre-dispatch): the probe MUST NOT depend on the TASK container happening to
+    have pyflakes — that made the capability a per-task lottery (silently quiet everywhere pyflakes
+    was absent, i.e. the exact "trigger absent" trap). GT's own substrate python is mounted into the
+    task container at /opt/gt (read-only) and BUNDLES pyflakes (docker/Dockerfile.gt-substrate), so
+    prefer it; ``GT_PYTHON`` (exported by the substrate image) overrides; plain ``python`` is the
+    last-resort fallback (still correct-or-quiet: the probe exits 0 when pyflakes is absent)."""
+    cand = (os.environ.get("GT_PYTHON") or "").strip()
+    if cand and os.path.exists(cand):
+        return cand
+    if os.path.exists("/opt/gt/python/bin/python3"):
+        return "/opt/gt/python/bin/python3"
+    return "python"
+
+
 def _build_name_check_command(ext: str, path: str) -> "list[str] | None":
     """Executor (in-container) undefined-name probe via pyflakes, or None if unsupported. Prints ONE
     ``NameError:`` line on a definite undefined name; exits 0 silently when pyflakes is absent or the
-    file is clean (correct-or-quiet)."""
+    file is clean (correct-or-quiet). Runs under ``_name_check_interpreter`` (the mounted substrate
+    python, which bundles pyflakes) so availability does not depend on the task container's env."""
     if ext != ".py":
         return None
     script = (
@@ -255,7 +290,7 @@ def _build_name_check_command(ext: str, path: str) -> "list[str] | None":
         "  except Exception: msg='undefined name'\n"
         "  print('%s:%d: NameError: %s'%(p,getattr(m,'lineno',1),msg)); break\n"
     )
-    return ["python", "-I", "-c", script, path]
+    return [_name_check_interpreter(), "-I", "-c", script, path]
 
 
 def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,

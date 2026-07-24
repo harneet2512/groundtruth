@@ -52,7 +52,7 @@ COPY docker/fetch-python.sh /tmp/fetch-python.sh
 RUN --mount=type=secret,id=github_token bash /tmp/fetch-python.sh   # -> /opt/gt/python
 RUN /opt/gt/python/bin/python3 -m pip install --no-cache-dir --upgrade pip \
     && /opt/gt/python/bin/python3 -m pip install --no-cache-dir \
-       onnxruntime tokenizers numpy pydantic
+       onnxruntime tokenizers numpy pydantic pyflakes
 
 # (3) LSP: bundled Node + the GT-SUPPORTED language-server set, baked OFFLINE so the
 #     resolve pass never needs network in-image. The set is the canonical one in
