@@ -6169,7 +6169,15 @@ def _grep_callers(name: str, root: str, exclude_rel: str) -> "list[str]":
                     return hits[:8]
                 try:
                     with open(ap, "r", encoding="utf-8", errors="ignore") as fh:
-                        if pat.search(fh.read()):
+                        # Match on a CODE line only. Searching whole-file text reported a
+                        # `# target(` comment as a "call site" — a fabricated claim in
+                        # model-facing bytes, which correct-or-quiet forbids. Line-level
+                        # comment prefixes are cheap and cover the languages in ``exts``;
+                        # anything subtler (a call inside a string literal) stays a known,
+                        # bounded false positive whose METHOD is disclosed to the model
+                        # ("found via search"), never presented as a verified caller.
+                        if any(pat.search(ln) for ln in fh
+                               if not ln.lstrip().startswith(("#", "//", "*", "/*"))):
                             hits.append(rel)
                             if len(hits) >= 8:
                                 return hits
