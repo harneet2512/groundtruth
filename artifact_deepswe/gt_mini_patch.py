@@ -4654,6 +4654,23 @@ def _class_honest_negative(con, sym: str, idx: int, root: str) -> str:
     prior_zero = [i for i, o in zip(e["probe_indices"], e["outcomes"])
                   if o == "zero" and i < idx]
     if not prior_zero:
+        # CLOSURE AUDIT 2026-07-24 — THE change_surface BOTTLENECK, made countable.
+        # `_change_surface_dominates()` (and therefore the whole change_surface / newfile_precedent
+        # family) is reachable ONLY past this gate: the agent must fail the SAME search stem TWICE.
+        # An agent that searches once, finds nothing, and creates the file NEVER gets here — which
+        # is why the family emitted 0 rows across all 4 tasks of run 30121930273. Worse, the
+        # b22f655ba telemetry was itself placed BEHIND this gate, so it would have been silently
+        # dead for the same reason. Record the near-miss HERE (the first zero-result probe) so the
+        # denominator "zero-result searches that never became repeats" is finally observable.
+        # Flag-gated (GT_CS_TELEMETRY, default 0 => byte-identical), zero model bytes.
+        if os.environ.get("GT_CS_TELEMETRY", "0").strip() == "1":
+            try:
+                _runtime_ledger_record(
+                    kind="change_surface",
+                    outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason="cs_gate:first_zero_probe_no_repeat", chars=0)
+            except Exception:  # noqa: BLE001 — telemetry never alters the honest negative
+                pass
         return ""  # first occurrence -> stay silent (protect the intentional probe)
     prev = max(prior_zero)
     # ORDERING predicate over the action stream: any EDIT between the last failed
