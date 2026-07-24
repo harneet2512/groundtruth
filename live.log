@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #1 | 2026-07-24T06:55:33Z | task=true-myth-iterable-collection-combinators ===
+=== LIVE SNAPSHOT #2 | 2026-07-24T06:55:54Z | task=true-myth-iterable-collection-combinators ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 --- mem trend (last 6) ---
 --- pier tail (last 15, non-RESMON) ---
@@ -18,3 +18,9 @@
 [MEMLOG 06:55:13] used=2131MB total=15989MB swap_used=0MB
 [MEMLOG 06:55:23] used=2148MB total=15989MB swap_used=0MB
 --- step tail (last 8) ---
+=== DeepSWE GT Trial: true-myth-iterable-collection-combinators (model deepseek/deepseek-v4-pro) ===
+HOST  GT_CERT_DIR=/tmp/gt  GT_HOST_GRAPH_DB=/tmp/gt/graph.db
+GT_PROOF_MODE=1  GT_CONTAINERIZED=1  GT_SUBSTRATE_DIGEST=ghcr.io/harneet2512/gt-substrate@sha256:468080c6802649ff7aa5805a9105e054499e7996da84257cce4593ff5c7bebac
+GT inject staged: 123 Python files
+go: downloading github.com/smacker/go-tree-sitter v0.0.0-20240625050157-a31a98a7c0f6
+go: downloading github.com/mattn/go-sqlite3 v1.14.22
