@@ -1,28 +1,24 @@
-=== LIVE SNAPSHOT #17 | 2026-07-24T20:08:29Z | task=httpx-streaming-json-iteration ===
+=== LIVE SNAPSHOT #18 | 2026-07-24T20:08:50Z | task=httpx-streaming-json-iteration ===
 --- KEY EVENTS (full logs, non-RESMON) ---
+/tmp/gha_step_httpx-streaming-json-iteration.log:[DOCKERFILE SLIM] deepswe-bench/tasks/httpx-streaming-json-iteration/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh73snc7v9x3psk69rg4eqvjgs836v5a (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
+/tmp/gha_step_httpx-streaming-json-iteration.log:[SLIM-VERIFY] rewritten Dockerfile is now:
+/tmp/gha_step_httpx-streaming-json-iteration.log:[SLIM-VERIFY]   FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh73snc7v9x3psk69rg4eqvjgs836v5a
+/tmp/gha_step_httpx-streaming-json-iteration.log:[SLIM-VERIFY]   CMD ["/bin/bash"]
+/tmp/gha_step_httpx-streaming-json-iteration.log:[gt-shim] installed in-place at: /bin/docker /tmp/docker-cli-cache/docker /usr/bin/docker + PATH(/tmp/gt-shim); real-suffix=.gtreal
+/tmp/gha_step_httpx-streaming-json-iteration.log:[gt-shim] active; resolved=/tmp/gt-shim/docker
+/tmp/gha_step_httpx-streaming-json-iteration.log:[ENV-START] attempt 1/3 — pier (bg) + container watcher (window=1800s)
 --- mem trend (last 6) ---
+[RESMON] 20:08:35 mem=1150/15989MB disk_used=90491/147719MB free=57212MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2990MB MemAvailable:=14832MB Cached:=10334MB AnonPages:=330MB Mapped:=325MB Slab:=1126MB 
+[RESMON] 20:08:44 mem=1452/15989MB disk_used=90511/147719MB free=57192MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2630MB MemAvailable:=14524MB Cached:=10382MB AnonPages:=653MB Mapped:=462MB Slab:=1130MB 
 --- pier tail (last 15, non-RESMON) ---
-[MEMLOG 20:00:24] used=1772MB total=15989MB swap_used=0MB
-[MEMLOG 20:00:34] used=1773MB total=15989MB swap_used=0MB
-[MEMLOG 20:00:44] used=1776MB total=15989MB swap_used=0MB
-[MEMLOG 20:00:54] used=1818MB total=15989MB swap_used=0MB
-[MEMLOG 20:01:04] used=1817MB total=15989MB swap_used=0MB
-[MEMLOG 20:01:14] used=2101MB total=15989MB swap_used=0MB
-[MEMLOG 20:01:24] used=2100MB total=15989MB swap_used=0MB
-[MEMLOG 20:01:34] used=2094MB total=15989MB swap_used=0MB
-[MEMLOG 20:01:44] used=2097MB total=15989MB swap_used=0MB
-[MEMLOG 20:01:54] used=2111MB total=15989MB swap_used=0MB
-[MEMLOG 20:02:04] used=2094MB total=15989MB swap_used=0MB
-[MEMLOG 20:02:14] used=2091MB total=15989MB swap_used=0MB
-[MEMLOG 20:02:24] used=2091MB total=15989MB swap_used=0MB
-[MEMLOG 20:02:34] used=2113MB total=15989MB swap_used=0MB
-[MEMLOG 20:02:44] used=2113MB total=15989MB swap_used=0MB
 --- step tail (last 8) ---
-CONTAINER mount: /tmp/gt -> /gt_artifacts (ro); /tmp/gt_out -> /gt_out (rw); /tmp/gt_inject/opt/gt -> /opt/gt (ro)
-mounts-json: [{"type":"bind","source":"/tmp/gt","target":"/gt_artifacts","read_only":true},{"type":"bind","source":"/tmp/gt_out","target":"/gt_out","read_only":false},{"type":"bind","source":"/tmp/gt_inject/opt/gt","target":"/opt/gt","read_only":true}]
-[GT] capability receipt (host): {"brief_minimal":false,"gt_index_bin":"/tmp/gt_inject/opt/gt/gt-index","sem_body_rows":0,"symbol_content_fts_rows":446}
-GT_RL_PROFILE=2 fan-out: export GT_BRIEF_MINIMAL=1 export GT_BRIEF_NATIVE=1 export GT_CERT_DELIVERY=1 export GT_CHANGE_SURFACE=1 export GT_COMPLETION_CERT=1 export GT_CONTENT_LEG=1 export GT_CONTRACT_BILATERAL=1 export GT_CONTRACT_MODE=1 export GT_CONTRACT_NATIVE=1 export GT_D7_RELATEDNESS=1 export GT_EDIT_CHECK=1 export GT_EDIT_OVERLAY=1 export GT_EVIDENCE_NATIVE=1 export GT_GATEWAY=1 export GT_GATEWAY_EDIT_BRIDGES=1 export GT_GATEWAY_NATIVE=1 export GT_GLOBAL_ARBITER=1 export GT_HYPOTHESIS=1 export GT_INSEAM_METRICS=1 export GT_L6_FRESH=1 export GT_LANE_ENVELOPE=1 export GT_LOC_RESLOT=1 export GT_NUDGE_NATIVE=1 export GT_OBLIGATION_FRESHNESS=1 export GT_PATCH_DELTA=1 export GT_POST_SEARCH=0 export GT_POST_SEARCH_NATIVE=0 export GT_REGISTRY_ENFORCE=1 export GT_SCOPE_NATIVE=1 export GT_SEM_BODY=0 export GT_SS_ACK_FORM=1 export GT_SS_ACK_METRICS=1 export GT_SS_ARBITER_V2=1 export GT_SS_COHERENCE_V2=1 export GT_SS_DEDUP2=1 export GT_SS_ELIGIBILITY=1 export GT_SS_EXEC_TRUTH=1 export GT_SS_LATE_DROP=1 export GT_SS_NOVELTY=1 export GT_SS_PROVENANCE=1 export GT_SS_RECOVERY_V2=1 export GT_SS_SHADOW=1 export GT_SS_SUBMIT_RED=1 export GT_STEER_NATIVE=1 export GT_VERIFICATION_PLAN=1 export GT_VERIFY_EXECUTE=1 export GT_XSESSION_MEMORY=1 export GT_XSESSION_RANKUP=1
-GT_AE_ARGS (block): --ae GT_VERIFY_STRUCTURAL_RISK=0 --ae GT_VERIFY_RISK_TRIGGER=0.5 --ae GT_ORACLE_ROUTE=1 --ae GT_GATEWAY_NATIVE=1 --ae GT_STEER_NATIVE=1 --ae GT_LANE_ENVELOPE=1 --ae GT_OBLIGATION_FRESHNESS=1 --ae GT_D7_RELATEDNESS=1 --ae GT_CONTRACT_MODE=1 --ae GT_CONTRACT_BILATERAL=1 --ae GT_GATEWAY_EDIT_BRIDGES=1 --ae GT_GATEWAY=1 --ae GT_EDIT_CHECK=1 --ae GT_VERIFY_EXECUTE=1 --ae GT_POST_SEARCH_NATIVE=0 --ae GT_SCOPE_NATIVE=1 --ae GT_CONTRACT_NATIVE=1 --ae GT_EVIDENCE_NATIVE=1 --ae GT_NUDGE_NATIVE=1 --ae GT_BRIEF_NATIVE=1 --ae GT_INSEAM_METRICS=1 --ae GT_LOC_RESLOT=1 --ae GT_POST_SEARCH=0 --ae GT_COMPLETION_CERT=1 --ae GT_HYPOTHESIS=1 --ae GT_VERIFICATION_PLAN=1 --ae GT_EDIT_OVERLAY=1 --ae GT_CERT_DELIVERY=1 --ae GT_GLOBAL_ARBITER=1 --ae GT_CHANGE_SURFACE=1 --ae GT_PATCH_DELTA=1 --ae GT_XSESSION_MEMORY=1 --ae GT_REGISTRY_ENFORCE=1 --ae GT_XSESSION_RANKUP=1 --ae GT_BRIEF_MINIMAL=1 --ae GT_SEM_BODY=0 --ae GT_CONTENT_LEG=1 --ae GT_L6_FRESH=1 --ae GT_SS_NOVELTY=1 --ae GT_SS_DEDUP2=1 --ae GT_SS_COHERENCE_V2=1 --ae GT_SS_RECOVERY_V2=1 --ae GT_SS_PROVENANCE=1 --ae GT_SS_LATE_DROP=1 --ae GT_SS_ACK_METRICS=1 --ae GT_SS_ARBITER_V2=1 --ae GT_SS_EXEC_TRUTH=1 --ae GT_SS_SUBMIT_RED=1 --ae GT_SS_ACK_FORM=1 --ae GT_SS_ELIGIBILITY=1 --ae GT_SS_SHADOW=1 --ae GT_SS_SHADOW_RATE=0 --ae GT_SS_SHADOW_SEED= --ae GT_DOSE_ROTATE=1 --ae GT_SS_FLARE=1 --ae GT_RECOVERY_LOOP=1 --ae GT_L6_FRESH_GATE=1 --ae GT_MULTIDOSE=0 --ae GT_MULTIDOSE_MAX=3 --ae GT_CHANGE_SURFACE_COCHANGE=1 --ae GT_REPRO_SYNTH=1 --ae GT_SIG_CALLER_FALLBACK=1 --ae GT_SUBMIT_VERIFY=1 --ae GT_EDIT_CHECK_NAMES=1 --ae GT_C_OUT=/gt_out --ae GT_ORACLE_EVENTS=/gt_out/gt_oracle_events.jsonl --ae GT_RUNTIME_LEDGER=/gt_out/gt_runtime_ledger.jsonl --ae GT_HOOK_FIRE_COUNTS=/gt_out/gt_hook_fire_counts.json --ae GT_L6_REVISION_ATTESTATIONS=/gt_out/gt_l6_revision_attestations.jsonl --ae GT_XSESSION_DIR=/gt_out/gt_xsession
-=== Model routed via DeepSeek native: deepseek/deepseek-v4-pro ===
-[MODEL-CFG] deepseek/deepseek-v4-pro is DeepSeek — config untouched (byte-identical)
-[OOMFIX] 24G swap enabled; Swap:          27647           0       27647
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2990MB MemAvailable:=14832MB Cached:=10334MB AnonPages:=330MB Mapped:=325MB Slab:=1126MB 
+[gt-shim] installed in-place at: /bin/docker /tmp/docker-cli-cache/docker /usr/bin/docker + PATH(/tmp/gt-shim); real-suffix=.gtreal
+[gt-shim] active; resolved=/tmp/gt-shim/docker
+[ENV-START] attempt 1/3 — pier (bg) + container watcher (window=1800s)
+[RESMON] 20:08:44 mem=1452/15989MB disk_used=90511/147719MB free=57192MB containers=0
+[RESTOP] 250MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 141MB:Runner.Worker /home/runner/actions-runner/cached/2.335.1/bin/Runner.Wo | 126MB:provjobd1453932 /tmp/provjobd1453932339 | 107MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 
+[MEMDIAG] dockerd(2768): VmRSS:=109892kB RssAnon:=53628kB RssFile:=56264kB RssShmem:=0kB VmSwap:=0kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2630MB MemAvailable:=14524MB Cached:=10382MB AnonPages:=653MB Mapped:=462MB Slab:=1130MB 
