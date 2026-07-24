@@ -18012,12 +18012,33 @@ def _ss_content_decision(kind: str, text: str, root: str = "", *,
         duplicate = _ss_dedup2_suppresses(kind, text, root, is_loc=is_loc)
         if duplicate and _ss_flare_redeliver(kind, is_loc=is_loc):
             duplicate = False  # WS-2 FLARE: re-deliver a still-relevant target on agent difficulty
+        # AUDIT 2026-07-24 — DEDUP DIAGNOSTIC (host-only; ZERO model bytes; the suppression
+        # DECISION above is untouched). Measured: caller_contract 53 produced -> 11 delivered with
+        # 24 killed here (run 30121930273), and the ledger recorded only the verdict, so whether
+        # those 24 were CORRECT was unjudgeable — an earlier "fix" attempt on a synthetic repro was
+        # rightly rejected by test_stepbehind_fact_becomes_known_for_later_cross_class_subset.
+        # Record the INPUTS (own entity count, matched prior's size, and whether it was a strict
+        # subset vs an exact repeat) so the question is settled by evidence, not another guess.
+        _dedup_reason = "semantic_duplicate" if duplicate else "novel_entity_set"
+        if duplicate:
+            try:
+                _ents = _ss_entity_set(text, root)
+                _grp = _ss_dedup_group(kind) or ("localization" if is_loc else "")
+                for _prior in _ss_known_entsets.get(_grp, ()):
+                    _pe = _prior[1] if isinstance(_prior, tuple) else _prior
+                    if _ents <= _pe:
+                        _dedup_reason = (
+                            f"semantic_duplicate:ents={len(_ents)},prior={len(_pe)},"
+                            f"{'exact' if _ents == _pe else 'strict_subset'}")
+                        break
+            except Exception:  # noqa: BLE001 — diagnostics never alter the decision
+                pass
         _control_participation_record(
             "GT_SS_DEDUP2", "mini_seam.ss_content_decision.semantic_dedup",
             "APPLIED" if duplicate else "NO_EFFECT",
             candidate_bytes=control_bytes,
             fact_class=fact_class, candidate_id=candidate_id,
-            reason="semantic_duplicate" if duplicate else "novel_entity_set",
+            reason=_dedup_reason,
         )
         if duplicate:
             return True, "ss_semantic_dup"
