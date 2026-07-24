@@ -1,0 +1,20 @@
+=== LIVE SNAPSHOT #1 | 2026-07-24T20:02:51Z | task=httpx-streaming-json-iteration ===
+--- KEY EVENTS (full logs, non-RESMON) ---
+--- mem trend (last 6) ---
+--- pier tail (last 15, non-RESMON) ---
+[MEMLOG 20:00:24] used=1772MB total=15989MB swap_used=0MB
+[MEMLOG 20:00:34] used=1773MB total=15989MB swap_used=0MB
+[MEMLOG 20:00:44] used=1776MB total=15989MB swap_used=0MB
+[MEMLOG 20:00:54] used=1818MB total=15989MB swap_used=0MB
+[MEMLOG 20:01:04] used=1817MB total=15989MB swap_used=0MB
+[MEMLOG 20:01:14] used=2101MB total=15989MB swap_used=0MB
+[MEMLOG 20:01:24] used=2100MB total=15989MB swap_used=0MB
+[MEMLOG 20:01:34] used=2094MB total=15989MB swap_used=0MB
+[MEMLOG 20:01:44] used=2097MB total=15989MB swap_used=0MB
+[MEMLOG 20:01:54] used=2111MB total=15989MB swap_used=0MB
+[MEMLOG 20:02:04] used=2094MB total=15989MB swap_used=0MB
+[MEMLOG 20:02:14] used=2091MB total=15989MB swap_used=0MB
+[MEMLOG 20:02:24] used=2091MB total=15989MB swap_used=0MB
+[MEMLOG 20:02:34] used=2113MB total=15989MB swap_used=0MB
+[MEMLOG 20:02:44] used=2113MB total=15989MB swap_used=0MB
+--- step tail (last 8) ---
