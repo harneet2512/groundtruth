@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #4 | 2026-07-24T20:03:55Z | task=httpx-streaming-json-iteration ===
+=== LIVE SNAPSHOT #5 | 2026-07-24T20:04:16Z | task=httpx-streaming-json-iteration ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 --- mem trend (last 6) ---
 --- pier tail (last 15, non-RESMON) ---
@@ -18,11 +18,11 @@
 [MEMLOG 20:02:34] used=2113MB total=15989MB swap_used=0MB
 [MEMLOG 20:02:44] used=2113MB total=15989MB swap_used=0MB
 --- step tail (last 8) ---
-GT_PROOF_MODE=1  GT_CONTAINERIZED=1  GT_SUBSTRATE_DIGEST=ghcr.io/harneet2512/gt-substrate@sha256:782e5068693a264f5d66f8ecb3e36f8aa06514df35b1d4dc207a9caceaac7bcc
-GT inject staged: 123 Python files
-go: downloading github.com/smacker/go-tree-sitter v0.0.0-20240625050157-a31a98a7c0f6
-go: downloading github.com/mattn/go-sqlite3 v1.14.22
-# github.com/smacker/go-tree-sitter/lua
-parser.c:254:17: warning: null character(s) preserved in literal
-  254 |   [anon_sym_] = " ",
-      |                 ^
+CONTAINER mount: /tmp/gt -> /gt_artifacts (ro); /tmp/gt_out -> /gt_out (rw); /tmp/gt_inject/opt/gt -> /opt/gt (ro)
+mounts-json: [{"type":"bind","source":"/tmp/gt","target":"/gt_artifacts","read_only":true},{"type":"bind","source":"/tmp/gt_out","target":"/gt_out","read_only":false},{"type":"bind","source":"/tmp/gt_inject/opt/gt","target":"/opt/gt","read_only":true}]
+[GT] capability receipt (host): {"brief_minimal":false,"gt_index_bin":"/tmp/gt_inject/opt/gt/gt-index","sem_body_rows":0,"symbol_content_fts_rows":446}
+GT_RL_PROFILE=2 fan-out: export GT_BRIEF_MINIMAL=1 export GT_BRIEF_NATIVE=1 export GT_CERT_DELIVERY=1 export GT_CHANGE_SURFACE=1 export GT_COMPLETION_CERT=1 export GT_CONTENT_LEG=1 export GT_CONTRACT_BILATERAL=1 export GT_CONTRACT_MODE=1 export GT_CONTRACT_NATIVE=1 export GT_D7_RELATEDNESS=1 export GT_EDIT_CHECK=1 export GT_EDIT_OVERLAY=1 export GT_EVIDENCE_NATIVE=1 export GT_GATEWAY=1 export GT_GATEWAY_EDIT_BRIDGES=1 export GT_GATEWAY_NATIVE=1 export GT_GLOBAL_ARBITER=1 export GT_HYPOTHESIS=1 export GT_INSEAM_METRICS=1 export GT_L6_FRESH=1 export GT_LANE_ENVELOPE=1 export GT_LOC_RESLOT=1 export GT_NUDGE_NATIVE=1 export GT_OBLIGATION_FRESHNESS=1 export GT_PATCH_DELTA=1 export GT_POST_SEARCH=0 export GT_POST_SEARCH_NATIVE=0 export GT_REGISTRY_ENFORCE=1 export GT_SCOPE_NATIVE=1 export GT_SEM_BODY=0 export GT_SS_ACK_FORM=1 export GT_SS_ACK_METRICS=1 export GT_SS_ARBITER_V2=1 export GT_SS_COHERENCE_V2=1 export GT_SS_DEDUP2=1 export GT_SS_ELIGIBILITY=1 export GT_SS_EXEC_TRUTH=1 export GT_SS_LATE_DROP=1 export GT_SS_NOVELTY=1 export GT_SS_PROVENANCE=1 export GT_SS_RECOVERY_V2=1 export GT_SS_SHADOW=1 export GT_SS_SUBMIT_RED=1 export GT_STEER_NATIVE=1 export GT_VERIFICATION_PLAN=1 export GT_VERIFY_EXECUTE=1 export GT_XSESSION_MEMORY=1 export GT_XSESSION_RANKUP=1
+GT_AE_ARGS (block): --ae GT_VERIFY_STRUCTURAL_RISK=0 --ae GT_VERIFY_RISK_TRIGGER=0.5 --ae GT_ORACLE_ROUTE=1 --ae GT_GATEWAY_NATIVE=1 --ae GT_STEER_NATIVE=1 --ae GT_LANE_ENVELOPE=1 --ae GT_OBLIGATION_FRESHNESS=1 --ae GT_D7_RELATEDNESS=1 --ae GT_CONTRACT_MODE=1 --ae GT_CONTRACT_BILATERAL=1 --ae GT_GATEWAY_EDIT_BRIDGES=1 --ae GT_GATEWAY=1 --ae GT_EDIT_CHECK=1 --ae GT_VERIFY_EXECUTE=1 --ae GT_POST_SEARCH_NATIVE=0 --ae GT_SCOPE_NATIVE=1 --ae GT_CONTRACT_NATIVE=1 --ae GT_EVIDENCE_NATIVE=1 --ae GT_NUDGE_NATIVE=1 --ae GT_BRIEF_NATIVE=1 --ae GT_INSEAM_METRICS=1 --ae GT_LOC_RESLOT=1 --ae GT_POST_SEARCH=0 --ae GT_COMPLETION_CERT=1 --ae GT_HYPOTHESIS=1 --ae GT_VERIFICATION_PLAN=1 --ae GT_EDIT_OVERLAY=1 --ae GT_CERT_DELIVERY=1 --ae GT_GLOBAL_ARBITER=1 --ae GT_CHANGE_SURFACE=1 --ae GT_PATCH_DELTA=1 --ae GT_XSESSION_MEMORY=1 --ae GT_REGISTRY_ENFORCE=1 --ae GT_XSESSION_RANKUP=1 --ae GT_BRIEF_MINIMAL=1 --ae GT_SEM_BODY=0 --ae GT_CONTENT_LEG=1 --ae GT_L6_FRESH=1 --ae GT_SS_NOVELTY=1 --ae GT_SS_DEDUP2=1 --ae GT_SS_COHERENCE_V2=1 --ae GT_SS_RECOVERY_V2=1 --ae GT_SS_PROVENANCE=1 --ae GT_SS_LATE_DROP=1 --ae GT_SS_ACK_METRICS=1 --ae GT_SS_ARBITER_V2=1 --ae GT_SS_EXEC_TRUTH=1 --ae GT_SS_SUBMIT_RED=1 --ae GT_SS_ACK_FORM=1 --ae GT_SS_ELIGIBILITY=1 --ae GT_SS_SHADOW=1 --ae GT_SS_SHADOW_RATE=0 --ae GT_SS_SHADOW_SEED= --ae GT_DOSE_ROTATE=1 --ae GT_SS_FLARE=1 --ae GT_RECOVERY_LOOP=1 --ae GT_L6_FRESH_GATE=1 --ae GT_MULTIDOSE=0 --ae GT_MULTIDOSE_MAX=3 --ae GT_CHANGE_SURFACE_COCHANGE=1 --ae GT_REPRO_SYNTH=1 --ae GT_SIG_CALLER_FALLBACK=1 --ae GT_SUBMIT_VERIFY=1 --ae GT_EDIT_CHECK_NAMES=1 --ae GT_C_OUT=/gt_out --ae GT_ORACLE_EVENTS=/gt_out/gt_oracle_events.jsonl --ae GT_RUNTIME_LEDGER=/gt_out/gt_runtime_ledger.jsonl --ae GT_HOOK_FIRE_COUNTS=/gt_out/gt_hook_fire_counts.json --ae GT_L6_REVISION_ATTESTATIONS=/gt_out/gt_l6_revision_attestations.jsonl --ae GT_XSESSION_DIR=/gt_out/gt_xsession
+=== Model routed via DeepSeek native: deepseek/deepseek-v4-pro ===
+[MODEL-CFG] deepseek/deepseek-v4-pro is DeepSeek — config untouched (byte-identical)
+[OOMFIX] 24G swap enabled; Swap:          27647           0       27647
