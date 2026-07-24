@@ -2204,8 +2204,29 @@ def _event_creates_new_file(event: ToolEvent) -> bool:
     return False
 
 
+def _destination_already_exists(suggested_path: str, state: GatewayState) -> bool:
+    """True iff the suggested new-file destination is ALREADY a file on disk.
+
+    ``detect_change_surface`` derives destinations from the issue + the PRE-TASK graph.db, and its
+    only "already present" test is entity MEMBERSHIP in a registry (change_surface.py:952) — not
+    file existence. So it cannot see a file the agent created seconds ago, and would happily say
+    "new file: X" about a path that now exists. On the edit path that is stale-by-construction."""
+    root = getattr(state, "repo_root", None)
+    if not root or not suggested_path:
+        return False
+    # os.path (not pathlib) because ``Path`` is NOT imported in this module — the first cut used it
+    # and the resulting NameError was swallowed by a broad ``except Exception``, silently disabling
+    # this filter entirely. Hence also the NARROW except below: a bare Exception here would hide the
+    # very same class of defect again. Only genuine path faults may return False.
+    try:
+        return os.path.isfile(os.path.join(str(root), suggested_path))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def _produce_change_surface(event: ToolEvent, state: GatewayState,
-                            *, require_repeat: bool = True) -> list[EvidenceEnvelope]:
+                            *, require_repeat: bool = True,
+                            drop_existing_destinations: bool = False) -> list[EvidenceEnvelope]:
     # ``require_repeat`` guards ONLY the search-probe ordering predicate, which is meaningless for
     # an edit event (there is no probe to repeat). The edit-path caller passes False; the
     # ZERO_ABSENT caller keeps the historical True => byte-identical on that route.
@@ -2220,6 +2241,14 @@ def _produce_change_surface(event: ToolEvent, state: GatewayState,
     out: list[EvidenceEnvelope] = []
     for d in res.destinations:
         if _is_leaky(d.suggested_path):
+            continue
+        # CORRECT-OR-QUIET (2026-07-24). The edit-path caller fires right AFTER the agent created a
+        # file, where a "new file: X" line is either redundant (they just made it) or, worse, points
+        # somewhere else and reads as "you created the wrong file" — wrong evidence at the moment of
+        # peak trust. The registration/sibling ``missing_roles`` below are the genuinely useful
+        # post-creation half (what to WIRE UP next) and are deliberately kept. Opt-in, so the
+        # historical ZERO_ABSENT route stays byte-identical.
+        if drop_existing_destinations and _destination_already_exists(d.suggested_path, state):
             continue
         # F2(a): template / registration / evidence rows go through the SAME leak
         # predicate as targets — a leaky row is dropped, the addition survives when
@@ -3059,7 +3088,8 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
         # this competes for the SAME <=1 dose through the normal arbiter, displacing nothing.
         if (_change_surface_producer_on() and _cs_edit_trigger_on()
                 and _event_creates_new_file(event)):
-            produced = _produce_change_surface(event, state, require_repeat=False)
+            produced = _produce_change_surface(event, state, require_repeat=False,
+                                               drop_existing_destinations=True)
             additions += produced
             if event.edit_before_after:
                 edit_bridge_candidates += produced

@@ -313,8 +313,25 @@ def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,
                 _rc, out, _err, status = _execute(
                     cmd, os.path.dirname(abs_path) or ".", 10, executor)
                 out = (out or "").strip()
-                if status == "ok" and "NameError:" in out:
+                # `_execute` returns status "ran" | "timeout" | "spawn_error" (see its docstring) —
+                # NEVER "ok". The first cut compared against "ok", so this branch could not execute
+                # and the ENTIRE subprocess name-check was dead by construction. The in-process leg
+                # (executor is None) was unaffected, which is precisely why local tests passed while
+                # GT_EDIT_CHECK_NAMES came back UNPROVEN from the live run: production injects an
+                # executor, so production only ever took the dead branch.
+                if status == "ran" and "NameError:" in out:
                     diag = out.splitlines()[0].strip()
+                    # L-1b (see check_edit_syntax): a diagnostic names the file REPO-RELATIVE so the
+                    # model never has to guess the path back. The subprocess probe is handed
+                    # ``abs_path`` and echoes it, so it would emit the raw container path
+                    # (`/testbed/pkg/x.py:2: NameError: ...`) — inconsistent with the in-process leg
+                    # and with every other diagnostic GT emits. Rewrite the prefix only.
+                    if diag.startswith(abs_path):
+                        diag = rel_name + diag[len(abs_path):]
+                    else:
+                        alt = abs_path.replace("\\", "/")
+                        if diag.startswith(alt):
+                            diag = rel_name + diag[len(alt):]
     except Exception:  # noqa: BLE001
         return result
     if diag:

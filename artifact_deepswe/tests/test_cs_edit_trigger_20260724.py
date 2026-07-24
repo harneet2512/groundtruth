@@ -94,3 +94,59 @@ def test_e2e_flag_off_is_byte_identical_through_real_augment(monkeypatch):
     """Default-OFF must be provably inert on the very same creating event."""
     seen = _drive(monkeypatch, {"pkg/new_mod.py": ("", "x = 1\n")}, trigger_on=False)
     assert seen == [], f"flag off must not reach the producer (calls={seen})"
+
+
+# ---------------------------------------------------------------------------
+# CORRECT-OR-QUIET: the edit-path trigger fires right AFTER the agent created a
+# file, but detect_change_surface derives destinations from issue_text + the
+# PRE-TASK graph.db and its only "already present" test is entity membership in a
+# registry (change_surface.py:952) — it cannot see a file created seconds ago. So
+# it can emit "new file: X" about a path that now exists: redundant at best, and
+# at worst it names a DIFFERENT path and reads as "you created the wrong file."
+#
+# The first cut of this filter used `Path`, which is NOT imported in gateway, and
+# the NameError was swallowed by a broad `except Exception` — the filter silently
+# returned False always and the fix was DEAD while looking present. These tests
+# assert it is FUNCTIONALLY live, which a name/import check cannot do.
+# ---------------------------------------------------------------------------
+
+def test_existing_destination_is_detected(tmp_path):
+    (tmp_path / "made.py").write_text("x = 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "nested.py").write_text("y = 1\n")
+
+    class _S:
+        repo_root = str(tmp_path)
+
+    assert gw._destination_already_exists("made.py", _S()) is True
+    assert gw._destination_already_exists("sub/nested.py", _S()) is True, \
+        "nested paths must resolve — destinations are repo-relative"
+    assert gw._destination_already_exists("absent.py", _S()) is False
+    assert gw._destination_already_exists("sub", _S()) is False, \
+        "a DIRECTORY is not an existing file destination"
+    assert gw._destination_already_exists("", _S()) is False
+
+
+def test_filter_is_not_silently_dead(tmp_path):
+    """Guards the exact regression above: if the body raises internally it returns
+    False for everything, which is indistinguishable from 'nothing exists'. Prove a
+    real file returns True, so a swallowed NameError can never pass this test."""
+    (tmp_path / "real.py").write_text("x = 1\n")
+
+    class _S:
+        repo_root = str(tmp_path)
+
+    assert gw._destination_already_exists("real.py", _S()) is True, \
+        "filter is dead — a swallowed exception is disabling it"
+
+
+def test_missing_field_or_bad_root_stays_quiet():
+    assert gw._destination_already_exists("x.py", type("_S", (), {"repo_root": None})()) is False
+    assert gw._destination_already_exists("x.py", type("_S", (), {})()) is False
+
+
+def test_zero_absent_route_does_not_drop_destinations():
+    """Byte-identity on the historical search route: the drop is OPT-IN."""
+    import inspect
+    sig = inspect.signature(gw._produce_change_surface)
+    assert sig.parameters["drop_existing_destinations"].default is False
