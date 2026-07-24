@@ -293,6 +293,19 @@ GT_AE_ARGS=(
   #    a seed in-container (read by gt_mini_patch._ss_shadow_task_id); R1 AE-parity fail-closed. ──
   --ae "GT_SS_SHADOW_SEED=${GT_SS_SHADOW_SEED:-}"
 
+  # ── 2026-07-23 WS-1/2/3/4/5 DELIVERY-LEVER flags (gt_mini_patch + src/groundtruth). Each is
+  #    default-OFF byte-identical seam/arbiter/pretask code (NOT a new tag). pier DROPS host env so
+  #    forward here or they stay DARK in-container. Default 0 -> byte-identical when unset; set ON
+  #    (host export before sourcing) for the delivery witness. GT_MULTIDOSE_MAX is a knob (cap). ──
+  --ae "GT_DOSE_ROTATE=${GT_DOSE_ROTATE:-0}"
+  --ae "GT_SS_FLARE=${GT_SS_FLARE:-0}"
+  --ae "GT_RECOVERY_LOOP=${GT_RECOVERY_LOOP:-0}"
+  --ae "GT_L6_FRESH_GATE=${GT_L6_FRESH_GATE:-0}"
+  --ae "GT_MULTIDOSE=${GT_MULTIDOSE:-0}"
+  --ae "GT_MULTIDOSE_MAX=${GT_MULTIDOSE_MAX:-3}"
+  --ae "GT_CHANGE_SURFACE_COCHANGE=${GT_CHANGE_SURFACE_COCHANGE:-0}"
+  --ae "GT_REPRO_SYNTH=${GT_REPRO_SYNTH:-0}"
+
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the
   # container (gap G11). Point them into the writable mount so they survive.

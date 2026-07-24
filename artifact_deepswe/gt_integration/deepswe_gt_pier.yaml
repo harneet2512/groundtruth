@@ -221,4 +221,7 @@ model:
     num_retries: 3
     extra_body:
       thinking:
-        type: disabled
+        # 2026-07-23: THINKING ON for the deepseek-v4-pro delivery witness (DeepSWE-official config
+        # per the surface-parity memo — NO step limit + thinking ON). Was 'disabled' for the
+        # v4-flash byte-parity baseline; re-enable for the pro witness run.
+        type: enabled
