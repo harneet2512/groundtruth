@@ -46,3 +46,51 @@ def test_zero_absent_route_still_requires_the_repeat(monkeypatch):
     sig = inspect.signature(gw._produce_change_surface)
     assert sig.parameters["require_repeat"].default is True, \
         "the ZERO_ABSENT caller must keep the repeat gate (byte-identical on that route)"
+
+
+# ---------------------------------------------------------------------------
+# END-TO-END: the tests above only prove the HELPER works. They do NOT prove
+# `augment()` — the real dispatch entry every live observation goes through —
+# actually REACHES the producer. That distinction is the entire bug this commit
+# fixes (change_surface was reachable in the source yet unreachable in practice),
+# and it is the same trap that made an earlier telemetry fix land dead behind the
+# very gate it was meant to diagnose. So drive the real entry point.
+# ---------------------------------------------------------------------------
+
+def _drive(monkeypatch, mapping, *, trigger_on):
+    """Call the REAL augment() with a real edit event; report whether the
+    change_surface producer was reached. Producer is stubbed so the assertion is
+    about DISPATCH, not about evidence content (which needs a populated graph)."""
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_CHANGE_SURFACE", "1")
+    monkeypatch.setenv("GT_CS_EDIT_TRIGGER", "1" if trigger_on else "0")
+    seen = []
+    monkeypatch.setattr(
+        gw, "_produce_change_surface",
+        lambda ev, st, **kw: seen.append(kw.get("require_repeat", True)) or [],
+    )
+    ev = gw.ToolEvent(kind=gw.KIND_EDIT, command="create", action_index=1,
+                      changed_files=tuple(mapping), edit_before_after=mapping)
+    gw.augment(ev, gw.GatewayState())
+    return seen
+
+
+def test_e2e_creation_reaches_the_producer_through_real_augment(monkeypatch):
+    """A file CREATION must reach change_surface via the real dispatch."""
+    seen = _drive(monkeypatch, {"pkg/new_mod.py": ("", "def f():\n    return 1\n")}, trigger_on=True)
+    assert seen == [False], (
+        "creation did not reach _produce_change_surface through augment() — the producer is "
+        f"defined and called in source but unreachable at runtime (calls={seen})"
+    )
+
+
+def test_e2e_modification_stays_quiet_through_real_augment(monkeypatch):
+    """Correct-or-quiet: a modify-in-place must NOT reach it (no new dose)."""
+    seen = _drive(monkeypatch, {"pkg/old.py": ("def f(): pass\n", "def f(): return 1\n")}, trigger_on=True)
+    assert seen == [], f"modification must not trigger change_surface (calls={seen})"
+
+
+def test_e2e_flag_off_is_byte_identical_through_real_augment(monkeypatch):
+    """Default-OFF must be provably inert on the very same creating event."""
+    seen = _drive(monkeypatch, {"pkg/new_mod.py": ("", "x = 1\n")}, trigger_on=False)
+    assert seen == [], f"flag off must not reach the producer (calls={seen})"
