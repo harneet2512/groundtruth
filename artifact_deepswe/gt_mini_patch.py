@@ -11046,10 +11046,25 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
         return None
     if not rel or _is_post_search_testpath((rel or "").replace("\\", "/")):
         return None
+    # CLOSURE AUDIT 2026-07-24 — TERMINAL-STATE INSTRUMENTATION (zero model bytes; existing kind +
+    # SUPPRESSED_HIDDEN_ONLY outcome, only the `reason` string is new => no ledger-schema risk).
+    # Before this, EVERY non-delivery exit below returned None SILENTLY, so a dark edit-check was
+    # indistinguishable between "no error in the edit" (correct-quiet) and "the checker could not
+    # run at all" (a dependency lottery — the exact defect this audit found). `edit_opportunity` is
+    # the DENOMINATOR: a 0-delivered count is unreadable without it.
+    def _e_term(reason: str) -> None:
+        try:
+            _runtime_ledger_record(kind="edit.syntax",
+                                   outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                                   reason=reason, chars=0, file_path=rel)
+        except Exception:  # noqa: BLE001 — telemetry must never break the loop
+            pass
+    _e_term("edit_opportunity")
     try:
         from groundtruth.runtime.edit_check import check_edit_syntax
         from groundtruth.runtime.native_render import render_syntax_error_native
     except Exception:  # noqa: BLE001 -- engine absent in-container -> E no-ops
+        _e_term("engine_import_unavailable")
         return None
     _syntax_source_before = None
     try:
@@ -11063,20 +11078,32 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
         _ex = _build_edit_check_executor()  # replay may pin only this parse-only boundary
         res = check_edit_syntax(rel, _root(), executor=_ex)
     except Exception:  # noqa: BLE001 -- the checker must never break the loop
+        _e_term("checker_raised")
         return None
     # AUDIT 2026-07-24: accept the GT_EDIT_CHECK_NAMES `name_error` verdict (a definite undefined-name
     # runtime error) alongside `syntax_error` — same executed-world-fact delivery class. Byte-identical
     # when the flag is off (edit_check never returns name_error). Fall back to the raw native diagnostic
     # if the syntax renderer doesn't format the name-error shape (already leak-safe: agent's own file).
     if res.get("verdict") not in ("syntax_error", "name_error"):
+        # THE load-bearing distinction: `unavailable` = the checker could NOT run (missing tool /
+        # unsupported language / ambiguous parse => a DEPENDENCY or COVERAGE gap that must be visible
+        # and fixed), whereas `ok` = the edit really was clean (correct-quiet). Conflating these is
+        # what made the pyflakes lottery invisible. The engine's own `reason` is carried through.
+        _v = str(res.get("verdict") or "unknown")
+        _e_term(("dependency_unavailable:" if _v == "unavailable" else "trigger_false:")
+                + str(res.get("reason") or _v))
         return None
     # render_syntax_error_native now scrubs+bounds name_error too (audit 2026-07-24) — no raw fallback,
     # so the model-facing leak-scrub / tag-strip / bound is never bypassed.
     block = render_syntax_error_native(res)
     if not block:
+        # A TRUE error the renderer could not express (e.g. an unhandled verdict shape) — the class
+        # that produced the name_error scrub-bypass. Must be visible, never a silent drop.
+        _e_term("render_failed:" + str(res.get("verdict") or ""))
         return None
     failure_identity = _ss_build_syntax_failure_identity(rel, res.get("diagnostic") or "")
     if _ss_ack_failure_suppresses("edit.syntax", block, failure_identity):
+        _e_term("suppressed_ack_failure")
         return None
     try:
         from groundtruth.runtime.syntax_observation import build_syntax_observation

@@ -154,3 +154,28 @@ def test_name_check_uses_guaranteed_interpreter(monkeypatch, tmp_path):
     # non-python ext -> no probe
     monkeypatch.delenv("GT_PYTHON", raising=False)
     assert ec._build_name_check_command(".go", "m.go") is None
+
+
+# ── CLOSURE AUDIT: every edit-check exit must leave a CLASSIFIED terminal state ──
+def test_edit_check_terminal_states_are_classified(tmp_path, monkeypatch):
+    rows = []
+    monkeypatch.setattr(g, "_GT_BASELINE", False)
+    monkeypatch.setattr(g, "_root", lambda: str(tmp_path))
+    monkeypatch.setenv("GT_EDIT_CHECK", "1")
+    monkeypatch.setattr(g, "_runtime_ledger_record",
+                        lambda **kw: rows.append((kw.get("kind"), kw.get("reason"))))
+    # a CLEAN file -> opportunity counted + trigger_false (NOT a silent None)
+    (tmp_path / "clean.py").write_text("x = 1\n")
+    assert g._edit_syntax_candidate("clean.py") is None
+    reasons = [r for k, r in rows if k == "edit.syntax"]
+    assert any(r == "edit_opportunity" for r in reasons), \
+        f"REASON: no OPPORTUNITY denominator recorded; {reasons!r}"
+    assert any(str(r).startswith("trigger_false") for r in reasons), \
+        f"REASON: clean edit not classified trigger_false; {reasons!r}"
+    # an UNSUPPORTED language -> dependency/coverage gap must be VISIBLE, not silent
+    rows.clear()
+    (tmp_path / "a.rs").write_text("fn main(){}\n")
+    g._edit_syntax_candidate("a.rs")
+    reasons = [r for k, r in rows if k == "edit.syntax"]
+    assert any(str(r).startswith("dependency_unavailable") for r in reasons), \
+        f"REASON: unsupported/unavailable checker not surfaced as dependency_unavailable; {reasons!r}"
