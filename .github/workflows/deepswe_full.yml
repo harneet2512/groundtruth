@@ -1189,7 +1189,13 @@ jobs:
           set -o pipefail
           # Model routing: if the input model contains "MiniMax" or "tokenrouter",
           INPUT_MODEL="${{ inputs.model }}"
-          if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
+          # 2026-07-24: z-ai/glm-* also routes via TokenRouter (the FREE glm-5.2-free tier is the
+          # feature-WITNESS model: $0, and a weaker model is MORE likely to make the mistakes that
+          # trigger the mistake-gated capabilities — syntax_result / signature_delta / submit_refusal
+          # — which deepseek-v4-pro was too strong to trip). HARD CONSTRAINT: the free tier caps at
+          # 50 requests/min PER KEY (failed attempts count), so a run on it MUST use max_parallel=1;
+          # parallel task workers trip 429 storms within seconds.
+          if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter|z-ai/|glm-"; then
             export TOKENROUTER_API_KEY="${{ secrets.TOKENROUTER_API_KEY }}"
             export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
             export OPENAI_API_BASE="https://api.tokenrouter.com/v1"
