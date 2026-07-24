@@ -1214,6 +1214,12 @@ jobs:
             GT_AE_ARGS+=(--ae "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}")
             echo "=== Model routed via DeepSeek native: $INPUT_MODEL ==="
           fi
+          # 2026-07-24: drop DeepSeek-only request params (extra_body.thinking) for a non-DeepSeek
+          # backend. litellm forwards extra_body RAW, so GLM-on-vLLM can 400 on it — and on the FREE
+          # tier a failed call still burns the 50/min quota, so a systematic 400 would kill the run.
+          # No-op (byte-identical) for DeepSeek; the script itself skips those models.
+          python3 scripts/ci/strip_model_specific_params.py \
+            artifact_deepswe/gt_integration/deepswe_gt_pier.yaml "$INPUT_MODEL" || true
           # [OOM FIX 2026-06-16] RESMON ground truth (run 27650378892, expr): the GT HOST
           if ! swapon --show 2>/dev/null | grep -q /gt_swap; then
             FREE_GB=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
