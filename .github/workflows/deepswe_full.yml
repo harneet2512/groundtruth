@@ -107,7 +107,11 @@ on:
         required: false
         default: ""
       new_delivery_levers:
-        description: "WS-1/2/3/4/5 delivery levers (GT_DOSE_ROTATE+GT_SS_FLARE+GT_RECOVERY_LOOP+GT_L6_FRESH_GATE+GT_MULTIDOSE+GT_CHANGE_SURFACE_COCHANGE+GT_REPRO_SYNTH). '1' = all ON for the delivery witness; '0' = OFF (byte-identical)."
+        description: "WS-1/2/3/4/5 delivery levers (GT_DOSE_ROTATE+GT_SS_FLARE+GT_RECOVERY_LOOP+GT_L6_FRESH_GATE+GT_CHANGE_SURFACE_COCHANGE+GT_REPRO_SYNTH — NOT multidose). '1' = all ON for the delivery witness; '0' = OFF (byte-identical)."
+        required: false
+        default: "0"
+      enable_multidose:
+        description: "GT_MULTIDOSE — >1 dose/observation. SEPARATE from new_delivery_levers because it violates the <=1-dose proof invariant (dose_lte_one). '1' only for a dedicated multidose experiment, never the standard witness. Default '0'."
         required: false
         default: "0"
       require_commit_parity:
@@ -175,7 +179,11 @@ env:
   GT_SS_FLARE: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_RECOVERY_LOOP: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_L6_FRESH_GATE: ${{ github.event.inputs.new_delivery_levers || '0' }}
-  GT_MULTIDOSE: ${{ github.event.inputs.new_delivery_levers || '0' }}
+  # GT_MULTIDOSE is DECOUPLED from new_delivery_levers on purpose: it delivers >1 dose per
+  # observation, which violates the <=1-dose PROOF invariant (ss_proof_manifest dose_lte_one) the
+  # whole proof chain assumes -> it would record a ≤1-dose violation + pollute the witness. Keep it
+  # OFF for the standard delivery witness; its own input arms it only for a dedicated multidose run.
+  GT_MULTIDOSE: ${{ github.event.inputs.enable_multidose || '0' }}
   GT_CHANGE_SURFACE_COCHANGE: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_REPRO_SYNTH: ${{ github.event.inputs.new_delivery_levers || '0' }}
   # E — at-edit syntax validation (synced agent path; gt_mini_patch reads it). RL-profile
