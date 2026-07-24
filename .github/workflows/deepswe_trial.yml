@@ -14,6 +14,10 @@ on:
         description: "LLM model"
         required: true
         default: "deepseek/deepseek-v4-flash"
+      enable_witness_flags:
+        description: "WS-1/2/3 delivery levers on? (GT_DOSE_ROTATE+GT_SS_FLARE+GT_RECOVERY_LOOP) — 'on' for the GT-on arm, 'off' for the byte-identical baseline"
+        required: false
+        default: "off"
 
 env:
   # Defensive UTF-8 (infra): GHA Linux is utf-8 by default, but hard-pin it so a stray
@@ -173,6 +177,16 @@ jobs:
           echo "Task:  ${{ inputs.task_id }}"
           echo "Model: ${{ inputs.model }}"
           echo "GT_GRAPH_DB: ${GT_GRAPH_DB:-<unset -> brief off>}"
+          echo ""
+          # WS-1/2/3 delivery-lever witness (2026-07-23): the GT-on arm exports a FIXED set of 3
+          # flags; the GT-off default leaves them unset -> byte-identical baseline. No arbitrary
+          # injection (the set is hard-coded here, not read from the input). Echoed live to the log.
+          if [ "${{ inputs.enable_witness_flags }}" = "on" ]; then
+            export GT_DOSE_ROTATE=1 GT_SS_FLARE=1 GT_RECOVERY_LOOP=1
+            echo "::notice::WITNESS FLAGS ON — GT_DOSE_ROTATE=1 GT_SS_FLARE=1 GT_RECOVERY_LOOP=1"
+          else
+            echo "::notice::WITNESS FLAGS OFF (byte-identical baseline)"
+          fi
           echo ""
 
           pier run \
