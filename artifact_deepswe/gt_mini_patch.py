@@ -6088,6 +6088,55 @@ def _edit_is_create(action, cmd: str) -> bool:
     return False
 
 
+def _sig_caller_fallback_on() -> bool:
+    """GT_SIG_CALLER_FALLBACK (default off => byte-identical): warn on a signature change whose
+    callers the GRAPH did NOT index, via a bounded repo text-search fallback. Closes the
+    graph-coverage gap the 17-feature audit found (a real caller-breaking change on a leaf /
+    unindexed fn otherwise produces NO breakage warning). Correct-or-quiet: no search hit => silent."""
+    return os.environ.get("GT_SIG_CALLER_FALLBACK", "0").strip() == "1"
+
+
+def _grep_callers(name: str, root: str, exclude_rel: str) -> "list[str]":
+    """Bounded, leak-safe repo text-search for call sites of ``name`` (``name(``) in NON-TEST
+    source files, excluding the edited file. Up to 8 repo-relative caller paths. Correct-or-quiet:
+    any fault / no hit => []. NEVER scans test files (leak-law: a test path in model bytes = leak)."""
+    if not name or not name.isidentifier() or not root:
+        return []
+    try:
+        pat = re.compile(r"(?<![\w.])" + re.escape(name) + r"\s*\(")
+    except Exception:  # noqa: BLE001
+        return []
+    exts = (".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".rb", ".java")
+    hits: "list[str]" = []
+    scanned = 0
+    exnorm = (exclude_rel or "").replace("\\", "/")
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")
+                           and d not in ("node_modules", "vendor", "dist", "build", "__pycache__")]
+            for fn in filenames:
+                if os.path.splitext(fn)[1].lower() not in exts:
+                    continue
+                ap = os.path.join(dirpath, fn)
+                rel = os.path.relpath(ap, root).replace("\\", "/")
+                if rel == exnorm or _is_post_search_testpath(rel):
+                    continue
+                scanned += 1
+                if scanned > 400:  # bound the walk on large repos
+                    return hits[:8]
+                try:
+                    with open(ap, "r", encoding="utf-8", errors="ignore") as fh:
+                        if pat.search(fh.read()):
+                            hits.append(rel)
+                            if len(hits) >= 8:
+                                return hits
+                except Exception:  # noqa: BLE001 — an unreadable file never fabricates a caller
+                    continue
+    except Exception:  # noqa: BLE001 — a walk fault stays correct-or-quiet
+        return hits[:8]
+    return hits[:8]
+
+
 _BILATERAL_PHRASE = {
     "boolean_check": "None/boolean-checked",
     "iterated": "iterated (expects an iterable)",
@@ -6388,6 +6437,18 @@ def _graph_contract_block(rel: str, *, action=None, cmd: str = "") -> str:
                 else:
                     out.append(f"[CALLERS] {name}: {int(ncallers)} verified caller(s) in "
                                f"{int(nfiles)} file(s) — preserve this interface")
+            elif (_mode_on and _sig_caller_fallback_on()
+                    and name in _sig_changes and not _is_create):
+                # AUDIT 2026-07-24 graph-coverage fallback: signature changed but 0 GRAPH-indexed
+                # callers -> bounded repo search for un-indexed call sites (leak-safe, correct-or-quiet).
+                _on, _nn = _sig_changes[name]
+                _fb = _grep_callers(name, _root(), rel)
+                if _fb:
+                    out.append(
+                        f"[CALLERS] {name}: signature changing "
+                        f"({', '.join(_on)} -> {', '.join(_nn)}); "
+                        f"{len(_fb)} call site(s) found via search "
+                        f"({', '.join(_fb[:5])}) — update them (graph did not index these)")
         for p in preserve:
             out.append(p)
         # Seam-F5 (secondary): B-20's bilateral "[CONSUMED] ... preserve these consumption
@@ -11003,9 +11064,13 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
         res = check_edit_syntax(rel, _root(), executor=_ex)
     except Exception:  # noqa: BLE001 -- the checker must never break the loop
         return None
-    if res.get("verdict") != "syntax_error":
+    # AUDIT 2026-07-24: accept the GT_EDIT_CHECK_NAMES `name_error` verdict (a definite undefined-name
+    # runtime error) alongside `syntax_error` — same executed-world-fact delivery class. Byte-identical
+    # when the flag is off (edit_check never returns name_error). Fall back to the raw native diagnostic
+    # if the syntax renderer doesn't format the name-error shape (already leak-safe: agent's own file).
+    if res.get("verdict") not in ("syntax_error", "name_error"):
         return None
-    block = render_syntax_error_native(res)
+    block = render_syntax_error_native(res) or (res.get("diagnostic") or "")
     if not block:
         return None
     failure_identity = _ss_build_syntax_failure_identity(rel, res.get("diagnostic") or "")
@@ -18875,6 +18940,25 @@ def _ss_submit_red_refusal(*, record_candidate: bool = True) -> str:
                 pass
         return ""
     if rec is None:
+        # AUDIT 2026-07-24 verify-before-submit broadening (GT_SUBMIT_VERIFY, default off = byte-identical;
+        # requires GT_SS_SUBMIT_RED on): NO observed RED, but the agent edited source and ran ZERO tests
+        # -> ONE single-dose "unverified submit" advisory (block-once, reuses the SS-2 latch; a 2nd submit
+        # passes silent, never loops to reward 0). Closes the AgentLens lucky-pass class (submitting
+        # without verifying), which the observed-red-only trigger misses. Correct-or-quiet: edited==0 or a
+        # test WAS run -> silent (no false block of a legitimately test-free submit that ran its tests).
+        if (os.environ.get("GT_SUBMIT_VERIFY", "0").strip() == "1"
+                and not _ss_submit_red_fired
+                and _source_edit_count > 0 and _oracle_test_count == 0):
+            line = (f"You edited {_source_edit_count} source file(s) but ran no test this session. "
+                    "Run the relevant test(s) to verify your change before submitting.")
+            if record_candidate:
+                _ss_submit_red_fired = True
+                try:
+                    _runtime_ledger_record(kind="submit_gate", outcome="submit_blocked",
+                                           reason="unverified_submit", chars=len(line))
+                except Exception:  # noqa: BLE001
+                    pass
+            return line
         return ""
     try:
         from groundtruth.runtime.native_render import (

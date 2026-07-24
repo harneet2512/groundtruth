@@ -170,6 +170,7 @@ def check_edit_syntax(
         )
         if normalized:
             result["diagnostic"] = normalized
+    result = _apply_name_check(result, ext, abs_path, rel_name, executor)
     return result
 
 
@@ -190,6 +191,102 @@ def _ss_edit_diag_enabled() -> bool:
         return resolve_default_token(os.environ) == "2"
     except Exception:  # noqa: BLE001 -- a profile-resolution fault preserves legacy bytes
         return False
+
+
+def _edit_check_names_on() -> bool:
+    """GT_EDIT_CHECK_NAMES (default off => byte-identical): after a CLEAN parse, additionally surface
+    DEFINITE undefined-name errors (pyflakes UndefinedName/UndefinedLocal/UndefinedExport — a runtime
+    NameError the agent's edit introduced), NOT noisy style/type diagnostics. Closes the 17-feature
+    audit's edit-check delivery gap: GT parse-only vs Aider's default full linter. Correct-or-quiet:
+    pyflakes absent / no undefined name => the 'ok' verdict is unchanged."""
+    return os.environ.get("GT_EDIT_CHECK_NAMES", "0").strip() == "1"
+
+
+def _check_py_undefined_names(src: bytes, rel_name: str) -> str:
+    """In-process pyflakes pass -> ONE native undefined-name diagnostic line, or ''. ONLY the
+    DEFINITE-error classes (UndefinedName/UndefinedLocal/UndefinedExport); unused-import/style are
+    excluded (correct-or-quiet, high precision). Any fault / tool-absent => ''."""
+    try:
+        from pyflakes import checker as _pf_checker  # type: ignore
+        from pyflakes import messages as _pf_messages  # type: ignore
+    except Exception:  # noqa: BLE001 -- tool absent => quiet
+        return ""
+    try:
+        tree = ast.parse(src, filename=rel_name)
+        w = _pf_checker.Checker(tree, filename=rel_name)
+    except Exception:  # noqa: BLE001 -- a parse fault is the caller's syntax path, not ours
+        return ""
+    _defs = tuple(c for c in (
+        getattr(_pf_messages, "UndefinedName", None),
+        getattr(_pf_messages, "UndefinedLocal", None),
+        getattr(_pf_messages, "UndefinedExport", None),
+    ) if isinstance(c, type))
+    if not _defs:
+        return ""
+    for m in sorted(getattr(w, "messages", []), key=lambda x: getattr(x, "lineno", 0)):
+        if isinstance(m, _defs):
+            try:
+                msg = m.message % m.message_args
+            except Exception:  # noqa: BLE001
+                msg = "undefined name"
+            return _python_diagnostic(
+                rel_name=rel_name, line=int(getattr(m, "lineno", 1) or 1),
+                source="", offset=None, error_type="NameError", message=str(msg))
+    return ""
+
+
+def _build_name_check_command(ext: str, path: str) -> "list[str] | None":
+    """Executor (in-container) undefined-name probe via pyflakes, or None if unsupported. Prints ONE
+    ``NameError:`` line on a definite undefined name; exits 0 silently when pyflakes is absent or the
+    file is clean (correct-or-quiet)."""
+    if ext != ".py":
+        return None
+    script = (
+        "import ast,sys\n"
+        "try:\n from pyflakes import checker,messages\n"
+        "except Exception: sys.exit(0)\n"
+        "p=sys.argv[1]\n"
+        "try:\n t=ast.parse(open(p,'rb').read(),p); w=checker.Checker(t,p)\n"
+        "except Exception: sys.exit(0)\n"
+        "D=tuple(c for c in (getattr(messages,'UndefinedName',None),getattr(messages,'UndefinedLocal',None),getattr(messages,'UndefinedExport',None)) if isinstance(c,type))\n"
+        "for m in sorted(getattr(w,'messages',[]),key=lambda x:getattr(x,'lineno',0)):\n"
+        " if isinstance(m,D):\n"
+        "  try: msg=m.message%m.message_args\n"
+        "  except Exception: msg='undefined name'\n"
+        "  print('%s:%d: NameError: %s'%(p,getattr(m,'lineno',1),msg)); break\n"
+    )
+    return ["python", "-I", "-c", script, path]
+
+
+def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,
+                      executor: "Executor | None") -> dict:
+    """Post-syntax undefined-name refinement (flag-gated). Only upgrades a clean ``ok`` to
+    ``name_error`` on a DEFINITE undefined name. Correct-or-quiet: any fault leaves ``result``."""
+    if not _edit_check_names_on() or result.get("verdict") != "ok" or ext != ".py":
+        return result
+    diag = ""
+    try:
+        if executor is None:
+            try:
+                with open(abs_path, "rb") as fh:
+                    diag = _check_py_undefined_names(fh.read(), rel_name)
+            except OSError:
+                diag = ""
+        else:
+            cmd = _build_name_check_command(ext, abs_path)
+            if cmd is not None:
+                _rc, out, _err, status = _execute(
+                    cmd, os.path.dirname(abs_path) or ".", 10, executor)
+                out = (out or "").strip()
+                if status == "ok" and "NameError:" in out:
+                    diag = out.splitlines()[0].strip()
+    except Exception:  # noqa: BLE001
+        return result
+    if diag:
+        return _verdict("name_error", reason="undefined_name", ext=ext,
+                        checker=list(result.get("checker") or []) + ["pyflakes"],
+                        diagnostic=_bound_text(diag))
+    return result
 
 
 def _build_check_command(ext: str, path: str) -> list[str] | None:
@@ -248,7 +345,9 @@ def _check_py_in_process(abs_path: str, ext: str, rel_name: str | None = None) -
     except (ValueError, RecursionError, MemoryError):
         # Not a grammar syntax error (e.g. null bytes) -> do not overclaim.
         return _verdict("unavailable", reason="parse_ambiguous", ext=ext, checker=["ast.parse"])
-    return _verdict("ok", reason="parsed", ext=ext, checker=["ast.parse"])
+    return _apply_name_check(
+        _verdict("ok", reason="parsed", ext=ext, checker=["ast.parse"]),
+        ext, abs_path, rel_name or os.path.basename(abs_path), None)
 
 
 def _python_diagnostic(

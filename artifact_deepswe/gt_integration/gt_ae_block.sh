@@ -305,6 +305,10 @@ GT_AE_ARGS=(
   --ae "GT_MULTIDOSE_MAX=${GT_MULTIDOSE_MAX:-3}"
   --ae "GT_CHANGE_SURFACE_COCHANGE=${GT_CHANGE_SURFACE_COCHANGE:-0}"
   --ae "GT_REPRO_SYNTH=${GT_REPRO_SYNTH:-0}"
+  # 2026-07-24 17-feature audit trigger-broadenings (all default 0 = byte-identical off):
+  --ae "GT_SIG_CALLER_FALLBACK=${GT_SIG_CALLER_FALLBACK:-0}"
+  --ae "GT_SUBMIT_VERIFY=${GT_SUBMIT_VERIFY:-0}"
+  --ae "GT_EDIT_CHECK_NAMES=${GT_EDIT_CHECK_NAMES:-0}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the
