@@ -321,7 +321,14 @@ def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,
         return _verdict("name_error", reason="undefined_name", ext=ext,
                         checker=list(result.get("checker") or []) + ["pyflakes"],
                         diagnostic=_bound_text(diag))
-    return result
+    # AUDIT 2026-07-24 — OBSERVABILITY: record that the name leg RAN even when it found nothing.
+    # Previously `pyflakes` entered ``checker`` only on an upgrade, so a clean file was
+    # indistinguishable from "the name check never executed" (e.g. the module was missing). That
+    # ambiguity is what made GT_EDIT_CHECK_NAMES unprovable from the live ledger. Verdict/diagnostic
+    # are untouched — this is a provenance annotation only.
+    out = dict(result)
+    out["checker"] = list(result.get("checker") or []) + ["pyflakes:clean"]
+    return out
 
 
 # TypeScript/TSX/JSX PARSE-ONLY probe (audit 2026-07-24). Emits ONE `path:line:col: error TSxxxx:

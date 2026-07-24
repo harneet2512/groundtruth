@@ -11131,8 +11131,13 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
         # and fixed), whereas `ok` = the edit really was clean (correct-quiet). Conflating these is
         # what made the pyflakes lottery invisible. The engine's own `reason` is carried through.
         _v = str(res.get("verdict") or "unknown")
+        # AUDIT 2026-07-24: carry the CHECKER PROVENANCE into the reason so the ledger answers
+        # "which legs actually ran?" — a clean parse alone could not distinguish "the name check
+        # ran and found nothing" from "the name check never executed" (the pyflakes-availability
+        # question that made GT_EDIT_CHECK_NAMES unprovable in run 30121930273).
+        _ck = ",".join(str(c) for c in (res.get("checker") or [])) or "none"
         _e_term(("dependency_unavailable:" if _v == "unavailable" else "trigger_false:")
-                + str(res.get("reason") or _v))
+                + str(res.get("reason") or _v) + "|checkers=" + _ck)
         return None
     # render_syntax_error_native now scrubs+bounds name_error too (audit 2026-07-24) — no raw fallback,
     # so the model-facing leak-scrub / tag-strip / bound is never bypassed.
