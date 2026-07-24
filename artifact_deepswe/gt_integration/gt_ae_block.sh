@@ -310,6 +310,7 @@ GT_AE_ARGS=(
   --ae "GT_SUBMIT_VERIFY=${GT_SUBMIT_VERIFY:-0}"
   --ae "GT_EDIT_CHECK_NAMES=${GT_EDIT_CHECK_NAMES:-0}"
   --ae "GT_COVERING_TRANSITIVE=${GT_COVERING_TRANSITIVE:-0}"
+  --ae "GT_CS_TELEMETRY=${GT_CS_TELEMETRY:-0}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the

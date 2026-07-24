@@ -4595,6 +4595,14 @@ def _change_surface_dominates() -> bool:
     if _cs_dominance_memo is not None and _cs_dominance_memo[0] == key:
         return _cs_dominance_memo[1]
     verdict = False
+    # CLOSURE AUDIT 2026-07-24 — TERMINAL STATE for the change-surface engine (zero model bytes;
+    # plain ledger row on the EXISTING `change_surface` kind + SUPPRESSED_HIDDEN_ONLY outcome, so
+    # there is NO control-participation contract and none of the mediator/candidate_id risk that
+    # produced the COHERENCE ValueError storm). MEASURED: newfile_precedent / GT_CHANGE_SURFACE
+    # emitted ZERO rows across all 4 tasks of run 30121930273 — not even an eligibility row — so
+    # "engine abstained", "engine found only leaky targets", "engine faulted" and "never consulted"
+    # were indistinguishable. This is the same silent-zero class the edit.syntax denominator fixed.
+    _cs_reason = "engine_not_consulted"
     try:
         from groundtruth.pretask.change_surface import detect_change_surface as _dcs
         from groundtruth.runtime.gateway import _is_leaky as _leaky
@@ -4606,8 +4614,26 @@ def _change_surface_dominates() -> bool:
                            or (m.sibling_files[0] if m.sibling_files else m.entity))
                 for m in res.missing_roles)
             verdict = bool(dest_ok or role_ok)
-    except Exception:  # noqa: BLE001 — engine/import fault -> keep the honest negative
+            # separate "nothing found" from "found, but every target was leak-dropped"
+            _cs_reason = ("confident_dominates" if verdict else
+                          ("all_targets_leaky" if (res.destinations or res.missing_roles)
+                           else "no_destination_or_role"))
+        else:
+            _cs_reason = "engine_abstained"
+    except Exception as _cs_exc:  # noqa: BLE001 — engine/import fault -> keep the honest negative
         verdict = False
+        _cs_reason = "engine_fault:" + type(_cs_exc).__name__
+    # Flag-gated (GT_CS_TELEMETRY, default off => BYTE-IDENTICAL, no extra ledger row): this row
+    # lands in the durable GT_RUNTIME_LEDGER delta that ss_gate's scenarios compare, and an
+    # unconditional extra row made the gate flake RED 1-in-5 (pristine HEAD: 0-in-3). A diagnostic
+    # must never destabilize the proof gate — so it is opt-in and rides new_delivery_levers.
+    if os.environ.get("GT_CS_TELEMETRY", "0").strip() == "1":
+        try:
+            _runtime_ledger_record(
+                kind="change_surface", outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason="cs_opportunity:" + _cs_reason, chars=0)
+        except Exception:  # noqa: BLE001 — telemetry never alters the dominance verdict
+            pass
     _cs_dominance_memo = (key, verdict)
     return verdict
 
