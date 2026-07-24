@@ -1188,6 +1188,9 @@ jobs:
           set -o pipefail
           # Model routing: if the input model contains "MiniMax" or "tokenrouter",
           INPUT_MODEL="${{ inputs.model }}"
+          # Default EMPTY => the pier command line stays byte-identical for the DeepSeek/OpenRouter
+          # arms (an unset array would also trip `set -u`); only the TokenRouter arm populates it.
+          PIER_MODEL_CLASS_ARGS=()
           # 2026-07-24: z-ai/glm-* also routes via TokenRouter (the FREE glm-5.2-free tier is the
           # feature-WITNESS model: $0, and a weaker model is MORE likely to make the mistakes that
           # trigger the mistake-gated capabilities — syntax_result / signature_delta / submit_refusal
@@ -1203,7 +1206,16 @@ jobs:
             if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
               INPUT_MODEL="openai/${INPUT_MODEL}"
             fi
-            echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
+            # 2026-07-24 ROOT-CAUSE FIX (run 30118958413 died 4/4 with 0 tokens): pier's
+            # `_model_class_override` maps ANY `openai/` model to "litellm_response", i.e. the OpenAI
+            # RESPONSES API (POST /v1/responses). TokenRouter implements ONLY Chat Completions
+            # (POST /v1/chat/completions), so every call returned
+            #   litellm.NotFoundError: OpenAIException - {"message":"not found: POST /v1/responses"}
+            # and the agent exited non-zero before a single token was spent. pier honors an EXPLICIT
+            # model_class (`if self._model_class != "auto": return self._model_class`), so pin the
+            # chat-completions class for TokenRouter. DeepSeek/OpenRouter arms are untouched.
+            PIER_MODEL_CLASS_ARGS=(--ak model_class=litellm)
+            echo "=== Model routed via TokenRouter: $INPUT_MODEL (model_class=litellm / chat-completions) ==="
           elif echo "$INPUT_MODEL" | grep -qiE "openrouter/|xiaomi/mimo"; then
             export OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}"
             GT_AE_ARGS+=(--ae "OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}")
@@ -1292,6 +1304,7 @@ jobs:
             -y \
             --mounts-json "${MOUNTS_JSON}" \
             "${GT_AE_ARM[@]}" \
+            "${PIER_MODEL_CLASS_ARGS[@]}" \
             --ak version=2.2.8 \
             --ak config_file=artifact_deepswe/gt_integration/deepswe_v1_parity_mimo.yaml \
             > trial_output.log 2>&1 &
