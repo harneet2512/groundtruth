@@ -275,6 +275,17 @@ def boundary_verdict(env: EvidenceEnvelope, observed_event: "str | None") -> str
     et = env.evidence_type or ""
     if et in _WORLD_FACT_EVIDENCE_TYPES:
         return BOUNDARY_MATCH
+    # STEERS ARE PHASE-GOVERNED, NOT REGISTRY-GOVERNED — do not expire them here.
+    # GT_VERIFY_IN_EDIT deliberately admits verify.horizon.* into Phase.EDIT on measured evidence
+    # (121 wrong_phase suppressions; they are PRODUCED post-edit while EVENT_BOUND_PAYLOADS binds
+    # advisory/urgent to REVIEW_TRANSITION and pivot to TEST_RESULT). Judging them against the
+    # event table would mark them `mismatch` at edit_result and DROP exactly what that lever exists
+    # to admit — the two levers would silently cancel out when both are enabled.
+    # Two governance lanes, and expiry belongs to the FACT lane: `context_policy` decides when a
+    # steer may speak, `fact_registry` decides when a fact has expired. Ranking may still use the
+    # event binding as a preference (it only reorders); expiry must not, because it deletes.
+    if et.startswith("verify.horizon."):
+        return BOUNDARY_UNKNOWN
     contracted = None
     try:
         from groundtruth.runtime.fact_registry import required_event

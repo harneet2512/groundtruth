@@ -232,9 +232,26 @@ def test_contracted_elsewhere_is_a_mismatch():
     assert boundary_verdict(_Env("new_file_destination"), "edit_result") == BOUNDARY_MISMATCH
 
 
-def test_steers_resolve_through_the_event_table():
-    assert boundary_verdict(_Env("verify.horizon.pivot"), "test_result") == BOUNDARY_MATCH
-    assert boundary_verdict(_Env("verify.horizon.pivot"), "edit_result") == BOUNDARY_MISMATCH
+def test_steers_are_RANKED_by_the_event_table_but_never_EXPIRED_by_it():
+    """The corrected split (2026-07-25). Steers are PHASE-governed, facts are REGISTRY-governed.
+
+    GT_VERIFY_IN_EDIT deliberately admits verify.horizon.* into Phase.EDIT on measured evidence
+    (121 wrong_phase suppressions; they are PRODUCED post-edit) while EVENT_BOUND_PAYLOADS binds
+    advisory/urgent to REVIEW_TRANSITION and pivot to TEST_RESULT. Expiring them against the event
+    table would DROP at edit_result exactly what that lever exists to admit — the two levers would
+    silently cancel out whenever both were enabled.
+
+    RANKING may still use the event binding, because a preference only reorders. EXPIRY may not,
+    because it deletes."""
+    # ranking: still discriminates
+    assert _boundary_match(_Env("verify.horizon.pivot"), "test_result") == 1
+    assert _boundary_match(_Env("verify.horizon.pivot"), "search_result") == 0
+    # expiry: abstains for every steer, at every boundary
+    for et in ("verify.horizon.pivot", "verify.horizon.advisory", "verify.horizon.urgent"):
+        for obs in ("edit_result", "test_result", "search_result"):
+            assert boundary_verdict(_Env(et), obs) == BOUNDARY_UNKNOWN, (et, obs)
+    # facts are UNAFFECTED — expiry still bites where it should
+    assert boundary_verdict(_Env("new_file_destination"), "edit_result") == BOUNDARY_MISMATCH
 
 
 def test_the_three_verdicts_are_distinct():
