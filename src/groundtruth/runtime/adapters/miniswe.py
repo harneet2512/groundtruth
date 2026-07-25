@@ -189,10 +189,37 @@ def _xsession_boost(env: EvidenceEnvelope) -> int:
 _ROTATION_DECAY = 1000
 
 
+def _boundary_match(env: EvidenceEnvelope, observed_event: "str | None") -> int:
+    """1 iff this fact's REGISTERED delivery boundary is the observation that just occurred.
+
+    GT_BOUNDARY_SPECIFICITY (default off => byte-identical: returns 0 without an observed_event).
+
+    WHY LEXICOGRAPHIC AND NOT AN ADDITIVE BOOST. `_EVIDENCE_TYPE_RANK` gaps are small (60, 50, 48,
+    ... 22, 15) and the covering-RED lead over the next class is only 10. Letting a contracted fact
+    win its OWN boundary would need a boost of 26+ (missing_role 22 vs caller_break 48), which would
+    also let an advisory out-dose an EXECUTED world-fact — the exact thing `_xsession_boost` is
+    capped to prevent. Returning a separate leading tuple element avoids the conflict entirely:
+    matched candidates sort above unmatched ones, and the existing severity order still decides
+    WITHIN the matched set, so covering_verdict keeps its dominance wherever it legitimately matches.
+
+    The policy is NOT invented here. `fact_registry.required_event()` resolves the boundary from the
+    envelope's own `evidence_type`, per a contract written and reviewed independently of any
+    benchmark — which is what keeps this out of hand-tuned/benchmaxx territory. An unregistered or
+    unresolvable type scores 0 (correct-or-quiet): it competes exactly as it does today."""
+    if not observed_event:
+        return 0
+    try:
+        from groundtruth.runtime.fact_registry import required_event
+        return 1 if required_event(env.evidence_type or "") == observed_event else 0
+    except Exception:  # noqa: BLE001 -- unregistered/unresolvable type ranks as today
+        return 0
+
+
 def _priority(
     env: EvidenceEnvelope,
     recently_delivered: "frozenset[str]" = frozenset(),
-) -> tuple[int, int, float, str]:
+    observed_event: "str | None" = None,
+) -> tuple[int, int, int, float, str]:
     """A TOTAL deterministic order over envelopes (higher = deliver first).
 
     Ranked by evidence-type severity, then tier, then confidence, then the stable
@@ -214,21 +241,29 @@ def _priority(
     if recently_delivered and (
             et in recently_delivered or et.split(":", 1)[0] in recently_delivered):
         base -= _ROTATION_DECAY  # WS-1: already delivered this attempt -> yield the next dose
-    return (base, _TIER_RANK.get(env.tier, 1), float(env.confidence), env.dedup_key)
+    return (_boundary_match(env, observed_event), base,
+            _TIER_RANK.get(env.tier, 1), float(env.confidence), env.dedup_key)
 
 
 def arbitrate(
     envelopes: "list[EvidenceEnvelope]",
     recently_delivered: "frozenset[str]" = frozenset(),
+    observed_event: "str | None" = None,
 ) -> "EvidenceEnvelope | None":
     """The per-turn dose: at most ONE envelope (ABI §2 — <=1 steer/turn). Returns
     the highest-priority envelope, or ``None`` when the list is empty. augment()
     already dedup-suppressed repeats via the per-episode chain, so this only picks
     the winner among the survivors. ``recently_delivered`` (WS-1, default empty =>
-    byte-identical) demotes already-delivered classes so the dose rotates."""
+    byte-identical) demotes already-delivered classes so the dose rotates.
+
+    ``observed_event`` (default None => byte-identical) is the fine §1 boundary the current
+    observation carries. When supplied, a fact whose REGISTERED ``deliver_by`` is that boundary
+    sorts above one whose is not — so the dose goes to the fact that answers THIS observation
+    rather than to whichever class sits highest in the static severity table. Severity still
+    orders the matched set, so an executed covering-RED is never out-dosed by an advisory."""
     if not envelopes:
         return None
-    return max(envelopes, key=lambda e: _priority(e, recently_delivered))
+    return max(envelopes, key=lambda e: _priority(e, recently_delivered, observed_event))
 
 
 def select(

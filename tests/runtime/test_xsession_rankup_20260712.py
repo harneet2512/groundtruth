@@ -139,7 +139,13 @@ def test_priority_is_byte_identical_without_native_args():
     e = _env("caller_break")
     assert e.native_args is None
     assert ad._xsession_boost(e) == 0
-    assert ad._priority(e) == (ad._EVIDENCE_TYPE_RANK["caller_break"],
+    # 2026-07-25: _priority gained a LEADING boundary-specificity element (GT #29). It is
+    # constantly 0 without an ``observed_event``, so this test's invariant — an unstamped envelope
+    # ranks exactly as before — is UNCHANGED; only the tuple arity moved. Asserting the full tuple
+    # (rather than slicing it) is deliberate: it keeps this a byte-identity check, so any future
+    # element added to the ordering must be justified here too.
+    assert ad._priority(e) == (0,
+                               ad._EVIDENCE_TYPE_RANK["caller_break"],
                                ad._TIER_RANK[WARNING], 0.5, e.dedup_key)
 
 
