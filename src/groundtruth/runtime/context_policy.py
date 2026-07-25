@@ -6,6 +6,7 @@ allowlist in workflow or harness-specific code.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import FrozenSet
@@ -185,7 +186,27 @@ def phase_allows(
     if k in allowed:
         return True
     if k.startswith("verify.horizon."):
-        return any(x.startswith("verify.horizon.") for x in allowed)
+        if any(x.startswith("verify.horizon.") for x in allowed):
+            return True
+        # GT_VERIFY_IN_EDIT (default off => byte-identical). MEASURED on the run-27792475148
+        # ledgers: verify.* candidates were 103 suppressed_wrong_phase vs 42 delivered (71%
+        # dropped), incl. verify.horizon.urgent 56-suppressed / 12-delivered.
+        #
+        # ROOT CAUSE is circular, not incidental. `trajectory_state.derive_phase` returns VERIFY
+        # only when `nonedit_streak >= 3 or test_count` — i.e. only AFTER the agent has already
+        # run a test (or stalled). An agent that edits and keeps editing stays in EDIT, and
+        # Phase.EDIT contains NO verify.horizon.* kind. So GT's "this edit is unverified" /
+        # executed covering-RED evidence is inadmissible precisely while it is actionable, and
+        # becomes admissible only once the agent has done the very thing it was meant to prompt.
+        # That is also why `verify.horizon.executed` (covering_red) never lands: it is produced
+        # post-edit, in EDIT phase.
+        #
+        # Post-edit is the correct decision boundary for edit-verification evidence. This does NOT
+        # widen the dose: the <=1-dose arbiter still admits one candidate per observation, and each
+        # verify producer keeps its own trigger/latch (once-per-task advisory, per-symbol covering).
+        # Scoped to EDIT only — ORIENT/VIEW have no edit to verify, so they stay closed.
+        if phase is Phase.EDIT and os.environ.get("GT_VERIFY_IN_EDIT", "0").strip() == "1":
+            return True
     return False
 
 
