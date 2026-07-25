@@ -198,6 +198,12 @@ env:
   GT_COVERING_TRANSITIVE: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_CS_TELEMETRY: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_CS_EDIT_TRIGGER: ${{ github.event.inputs.new_delivery_levers || '0' }}
+  # 2026-07-25 phase-admissibility + precision levers (ledger-derived, see gt_ae_block.sh).
+  # GT_COVERING_TRANSITIVE above is RETAINED but MEASURED USELESS: on 24 real graph.db it helps
+  # 0/24 tasks (1-hop already finds a covering test on 19/24; 2-hop finds only 7/24). Keep it OFF.
+  GT_VERIFY_IN_EDIT: ${{ github.event.inputs.new_delivery_levers || '0' }}
+  GT_SCOPE_AT_SEARCH: ${{ github.event.inputs.new_delivery_levers || '0' }}
+  GT_COVERING_SCOPED: ${{ github.event.inputs.new_delivery_levers || '0' }}
   # E — at-edit syntax validation (synced agent path; gt_mini_patch reads it). RL-profile
   # member: input default is '' (unset), passed RAW — NOT `|| ''` (Brief-F5): the input's
   # own default of '0' is a NON-empty (truthy) string, so `|| ''` forwarded '0' on a UI

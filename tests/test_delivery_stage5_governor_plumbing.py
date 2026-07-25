@@ -298,10 +298,41 @@ _REQUIRED_AE_KEYS = [
 
 
 def test_workflow_forwards_every_gt_env_via_ae():
+    """Every required GT env var must be --ae forwarded SOMEWHERE in the dispatch path.
+
+    2026-07-25: the `--ae` block was extracted into gt_integration/gt_ae_block.sh, so reading only
+    the workflow YAML reported GT_ORACLE_ROUTE as unforwarded when it is in fact forwarded at
+    gt_ae_block.sh:101 (default 1, identical to the in-container default => no functional impact).
+    Reading BOTH files restores the invariant's meaning instead of weakening it: the question is
+    whether the var reaches the container, not which file spells it.
+    """
     text = _WF_PATH.read_text(encoding="utf-8")
+    ae_block = _ROOT / "artifact_deepswe" / "gt_integration" / "gt_ae_block.sh"
+    if ae_block.exists():
+        text += "\n" + ae_block.read_text(encoding="utf-8")
     missing = [k for k in _REQUIRED_AE_KEYS
-               if not re.search(rf"--ae {re.escape(k)}=", text)]
+               if not re.search(rf"--ae \"?{re.escape(k)}=", text)]
     assert not missing, (
         "GT env vars set on the host but NOT forwarded into the task "
         f"container via --ae (the Stage-C-killing P0 class): {missing}"
     )
+
+
+# 2026-07-25 phase-admissibility + precision levers. Added to the SAME invariant that twice caught
+# an unforwarded flag this week (a flag read in-container but never set = a silently dead fix).
+_NEW_LEVERS_20260725 = [
+    "GT_VERIFY_IN_EDIT",     # verify.horizon.* admissible in EDIT (121 measured wrong_phase)
+    "GT_SCOPE_AT_SEARCH",    # consensus.scope admissible where it fires (34 suppressed / 7 delivered)
+    "GT_COVERING_SCOPED",    # covering targets scoped to the edited file (238 -> 7 on a real graph)
+]
+
+
+def test_new_levers_are_ae_forwarded_and_input_keyed():
+    """A lever that is read in-container but never set is indistinguishable from a broken feature."""
+    ae_block = _ROOT / "artifact_deepswe" / "gt_integration" / "gt_ae_block.sh"
+    ae_text = ae_block.read_text(encoding="utf-8")
+    wf_text = _WF_PATH.read_text(encoding="utf-8")
+    for key in _NEW_LEVERS_20260725:
+        assert re.search(rf"--ae \"?{re.escape(key)}=", ae_text), f"{key} not --ae forwarded"
+        assert re.search(rf"^\s*{re.escape(key)}:\s*\$\{{\{{", wf_text, re.M), \
+            f"{key} not keyed to a workflow input (it would always be '0')"

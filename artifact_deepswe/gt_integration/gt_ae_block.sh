@@ -312,6 +312,18 @@ GT_AE_ARGS=(
   --ae "GT_COVERING_TRANSITIVE=${GT_COVERING_TRANSITIVE:-0}"
   --ae "GT_CS_TELEMETRY=${GT_CS_TELEMETRY:-0}"
   --ae "GT_CS_EDIT_TRIGGER=${GT_CS_EDIT_TRIGGER:-0}"
+  # 2026-07-25 phase/precision levers (all default 0 = byte-identical off). These were found by
+  # censusing the on-disk runtime ledgers, not by a run:
+  #   GT_VERIFY_IN_EDIT  - verify.horizon.* was admissible ONLY in VERIFY, but derive_phase enters
+  #                        VERIFY only after the agent ALREADY ran a test => "you have not verified
+  #                        this edit" was deliverable only after verifying. 121 measured wrong_phase.
+  #   GT_SCOPE_AT_SEARCH - consensus.scope (def_partition) fires on a SEARCH but was admissible only
+  #                        in VERIFY. 34 suppressed / 7 delivered (83% lost).
+  #   GT_COVERING_SCOPED - covering target lookup matched symbols GLOBALLY by bare name; `__init__`
+  #                        matched 238 nodes on a real graph (LIMIT 20 kept 20 arbitrary ones).
+  --ae "GT_VERIFY_IN_EDIT=${GT_VERIFY_IN_EDIT:-0}"
+  --ae "GT_SCOPE_AT_SEARCH=${GT_SCOPE_AT_SEARCH:-0}"
+  --ae "GT_COVERING_SCOPED=${GT_COVERING_SCOPED:-0}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the
