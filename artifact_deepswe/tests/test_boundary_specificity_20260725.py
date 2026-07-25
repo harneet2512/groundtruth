@@ -239,3 +239,48 @@ def test_steers_resolve_through_the_event_table():
 
 def test_the_three_verdicts_are_distinct():
     assert len({BOUNDARY_MATCH, BOUNDARY_MISMATCH, BOUNDARY_UNKNOWN}) == 3
+
+
+# ---------------------------------------------------------------------------
+# LEVER INTERACTION. Both levers touch selection, so testing them only in
+# isolation is how a silent inversion survives — #29 already produced two.
+#
+# The dangerous shape: expiry DROPS the arbitration winner while a non-expired
+# candidate was available and lost. That would silence a turn that had a valid
+# fact. It cannot happen, because the two are COUPLED at the seam: _obs_boundary
+# is set ONLY under GT_BOUNDARY_SPECIFICITY, and the expiry check requires it —
+# so expiry can never run on an ordering that specificity did not produce, and
+# specificity always sorts matched candidates ABOVE mismatched ones.
+# ---------------------------------------------------------------------------
+
+def test_specificity_prevents_expiry_from_silencing_a_valid_turn():
+    """A matched candidate must never lose to a mismatched one and then be dropped."""
+    envs = [_Env("new_file_destination"), _Env("caller_break")]      # 15 vs 48 statically
+    winner = arbitrate(envs, frozenset(), "failed_search")
+    assert winner.evidence_type == "new_file_destination"            # specificity overrides rank
+    assert boundary_verdict(winner, "failed_search") == BOUNDARY_MATCH, "would be dropped"
+
+
+def test_a_lone_expired_fact_is_dropped_and_that_is_correct():
+    """Silence beats expired evidence. deliver_by is the LAST-useful boundary, so a fact past it
+    no longer answers the observation — delivering it would be noise wearing a contract."""
+    w = arbitrate([_Env("new_file_destination")], frozenset(), "test_result")
+    assert boundary_verdict(w, "test_result") == BOUNDARY_MISMATCH
+
+
+def test_world_fact_survives_both_levers_together():
+    """The most damaging possible interaction: an executed covering-RED silently dropped."""
+    w = arbitrate([_Env("covering_verdict"), _Env("caller_break")], frozenset(), "edit_result")
+    assert w.evidence_type == "covering_verdict"
+    assert boundary_verdict(w, "edit_result") == BOUNDARY_MATCH
+
+
+def test_expiry_is_coupled_to_specificity_at_the_seam():
+    """GT_BOUNDARY_EXPIRE alone must be inert: the seam only computes a boundary under
+    GT_BOUNDARY_SPECIFICITY, and expiry requires one. Enabling expiry by itself must not start
+    dropping facts against an ordering that never considered boundaries."""
+    import os as _os
+    src = open(_os.path.join(_os.path.dirname(__file__), "..", "gt_mini_patch.py"),
+               encoding="utf-8").read()
+    assert 'GT_BOUNDARY_EXPIRE", "0").strip() == "1" and _obs_boundary' in src, \
+        "expiry no longer requires a resolved boundary — it could fire without specificity"
