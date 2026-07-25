@@ -333,3 +333,44 @@ def test_ranking_keeps_the_event_table_that_expiry_gave_up():
     """The asymmetry, asserted: the SAME signal still informs ranking after expiry stopped using it."""
     assert _boundary_match(_Env("verify.horizon.pivot"), "test_result") == 1
     assert _boundary_match(_Env("verify.horizon.pivot"), "search_result") == 0
+
+
+# ---------------------------------------------------------------------------
+# KNOWN LEVER INCOMPATIBILITY (2026-07-25) — documented, NOT hacked around.
+#
+# GT_CS_EDIT_TRIGGER emits new_file_destination / missing_role on an EDIT
+# observation, but both are contracted to `failed_search`, so GT_BOUNDARY_EXPIRE
+# drops them and the trigger is nullified.
+#
+# Unlike the verify.horizon.* and consensus.scope cases, expiry is NOT
+# over-reaching here — these types ARE registry-resolvable and the registry
+# genuinely says `failed_search`. This is the SPEC GAP recorded in gt_gt §15:
+# newfile_precedent's target_decision is "destination/integration", i.e. TWO
+# decisions ("where do I create it" owed PRE-creation, "how do I register it"
+# owed POST-creation) sharing ONE boundary and ONE receipt predicate
+# (created_at_precedent_path, which is only earnable before creation).
+#
+# For new_file_destination the drop is CORRECT and already redundant — the
+# existence-filter suppresses it post-creation anyway. For missing_role the drop
+# loses genuinely useful registration evidence, and the fix is a SPEC AMENDMENT
+# (split missing_role to edit_result with its own receipt predicate), not a
+# carve-out in the expiry gate. Hacking expiry here would hide the gap and make
+# the contract even less trustworthy.
+#
+# Until that amendment: GT_CS_EDIT_TRIGGER and GT_BOUNDARY_EXPIRE are
+# INCOMPATIBLE and must not both be enabled. This test pins that so the
+# interaction is KNOWN rather than discovered in a run.
+# ---------------------------------------------------------------------------
+
+def test_cs_edit_trigger_is_incompatible_with_expiry_until_the_spec_split():
+    assert boundary_verdict(_Env("new_file_destination"), "edit_result") == BOUNDARY_MISMATCH
+    assert boundary_verdict(_Env("missing_role"), "edit_result") == BOUNDARY_MISMATCH
+    # companion_surface is separately contracted to edit_result and SURVIVES — so the change_surface
+    # engine is not wholly silenced on an edit, only its two failed_search-contracted forms.
+    assert boundary_verdict(_Env("companion_surface"), "edit_result") == BOUNDARY_MATCH
+
+
+def test_the_contracted_boundary_still_works_for_both():
+    """The features are not broken — they are contracted elsewhere, and there they deliver."""
+    assert boundary_verdict(_Env("new_file_destination"), "failed_search") == BOUNDARY_MATCH
+    assert boundary_verdict(_Env("missing_role"), "failed_search") == BOUNDARY_MATCH
