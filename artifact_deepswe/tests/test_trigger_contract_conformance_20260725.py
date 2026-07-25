@@ -85,3 +85,42 @@ def test_max_dose_is_per_class_not_globally_one():
         "every class now declares the same max_dose — the per-class contract has been flattened, "
         f"which would make the global one-dose veto correct-by-accident: {doses}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #30 — max_dose is a PER-CLASS EPISODE CEILING ("1" / "small" / "—"), NOT a
+# per-observation multiplier. The two axes are orthogonal: honouring max_dose
+# would not relax the <=1-dose-per-observation invariant at all, and
+# GT_MULTIDOSE was already rejected for breaking exactly that.
+#
+# The ceiling is ALREADY enforced by GT's fire-once machinery (dedup chain +
+# per-class latches). These tests pin the CONTRACT so a future change cannot
+# silently flatten it — they deliberately do NOT add a second enforcement path,
+# because two mechanisms disagreeing about whether a fact has spent its dose is
+# the same class of bug as the inert-contract and phase-circularity findings.
+# ---------------------------------------------------------------------------
+
+_DOSE_VALUES = {"1", "small", "—"}
+
+
+@pytest.mark.parametrize("fact", sorted(_DIRECT_FACTS))
+def test_max_dose_is_a_known_ceiling_value(fact):
+    assert str(registration_for(fact).max_dose) in _DOSE_VALUES, \
+        f"{fact}: unrecognised max_dose — the ceiling vocabulary changed"
+
+
+def test_exactly_one_class_is_unbounded():
+    """obligations is THE unbounded class (the whole plan, not a single dose). A second unbounded
+    class would be a real anti-flooding change and must be argued, not slipped in."""
+    unbounded = [f for f in _DIRECT_FACTS if str(registration_for(f).max_dose) == "—"]
+    assert unbounded == ["obligations"], f"unbounded set changed: {unbounded}"
+
+
+def test_the_overwhelming_majority_are_single_dose():
+    """Anti-flooding floor: if most classes stopped being single-dose, GT's founding invariant
+    would have been eroded a class at a time rather than by an explicit decision."""
+    single = sum(1 for f in _DIRECT_FACTS if str(registration_for(f).max_dose) == "1")
+    assert single >= len(_DIRECT_FACTS) - 2, (
+        f"only {single}/{len(_DIRECT_FACTS)} classes are single-dose — the per-class ceiling has "
+        "been loosened; that is an anti-flooding change requiring an explicit decision"
+    )
