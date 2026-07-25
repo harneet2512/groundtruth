@@ -180,10 +180,20 @@ def select_covering_tests(
             return []
         has_conf = "confidence" in ecols
         sph = ",".join("?" * len(syms))
+        # DETERMINISM (2026-07-25). Two independent sources of run-to-run variance met here:
+        #   1. ``syms`` is a SET, and Python string hashing is randomised PER PROCESS, so
+        #      ``list(syms)`` produced a different IN-list order in every run.
+        #   2. ``LIMIT 20`` with NO ``ORDER BY`` lets SQLite return ANY 20 matching rows.
+        # Together they made covering target selection non-deterministic on identical input, which
+        # is how ss_gate's S11 "determinism (unresolved x2)" check flaked: 6 identical runs yielded
+        # 2 distinct signatures (20 vs 14 ledger rows). A proof gate that cannot reproduce itself
+        # certifies nothing, so this is a correctness bug in the PROOF PATH, not a nicety.
+        # sorted() + a total ORDER BY makes the selected target set a pure function of the input.
         target_rows = con.execute(
             f"SELECT id FROM nodes WHERE name IN ({sph}) "
-            f"AND COALESCE(is_test, 0) = 0 LIMIT 20",
-            list(syms),
+            f"AND COALESCE(is_test, 0) = 0 "
+            f"ORDER BY file_path, name, id LIMIT 20",
+            sorted(syms),
         ).fetchall()
         if not target_rows:
             return []

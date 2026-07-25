@@ -6223,7 +6223,8 @@ def _bilateral_consumption(con, target_id, target_name: str,
             "SELECT DISTINCT e.source_id FROM edges e "
             "JOIN nodes ns ON ns.id = e.source_id "
             "WHERE e.target_id = ? AND e.type='CALLS' AND COALESCE(ns.is_test,0)=0 "
-            f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}') {conf_gate} LIMIT 40",
+            f"AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}') {conf_gate} "
+            f"ORDER BY e.source_id LIMIT 40",
             (target_id,)).fetchall()
     except Exception:  # noqa: BLE001
         return ""
@@ -6234,7 +6235,7 @@ def _bilateral_consumption(con, target_id, target_name: str,
     try:
         prows = con.execute(
             f"SELECT value FROM properties WHERE node_id IN ({ph}) "
-            "AND kind='caller_usage' LIMIT 200", caller_ids).fetchall()
+            "AND kind='caller_usage' ORDER BY node_id, value LIMIT 200", caller_ids).fetchall()
     except Exception:  # noqa: BLE001 — properties table / caller_usage absent
         return ""
     tally: dict[str, int] = {}
@@ -6425,7 +6426,7 @@ def _graph_contract_block(rel: str, *, action=None, cmd: str = "") -> str:
             if rows:
                 pq = ("SELECT kind, value FROM properties WHERE node_id = ? "
                       "AND kind IN ('guard_clause','conditional_return','exception_flow','return_shape') "
-                      "LIMIT 5")
+                      "ORDER BY kind, value LIMIT 5")
                 for kind, val in con.execute(pq, (rows[0][0],)):
                     # bug #4: balanced clip (never a raw byte slice) so a value the
                     # indexer stored mid-expression never renders an unterminated
@@ -6750,18 +6751,20 @@ def _covering_tests_for_symbols(symbol_names: set[str]) -> list[dict]:
                     f"WHERE name IN ({placeholders}) "
                     f"AND COALESCE(is_test, 0) = 0 "
                     f"AND REPLACE(file_path, '\\', '/') IN ({fq}) "
+                    f"ORDER BY file_path, name, id "
                     f"LIMIT 20"
                 )
                 target_rows = con.execute(
-                    target_q, list(symbol_names) + scope_rels).fetchall()
+                    target_q, sorted(symbol_names) + scope_rels).fetchall()
             else:
                 target_q = (
                     f"SELECT id, name, file_path FROM nodes "
                     f"WHERE name IN ({placeholders}) "
                     f"AND COALESCE(is_test, 0) = 0 "
+                    f"ORDER BY file_path, name, id "
                     f"LIMIT 20"
                 )
-                target_rows = con.execute(target_q, list(symbol_names)).fetchall()
+                target_rows = con.execute(target_q, sorted(symbol_names)).fetchall()
             if not target_rows:
                 return []
             target_ids = [r[0] for r in target_rows]
@@ -12486,7 +12489,8 @@ def _dcc_footprint_symbols(con, footprint: set) -> set:
         rows = con.execute(
             f"SELECT DISTINCT name FROM nodes WHERE file_path IN ({qmarks}) "
             f"AND COALESCE(is_test,0)=0 AND name IS NOT NULL "
-            f"AND label IN ('Function','Method','Class') LIMIT 64",
+            f"AND label IN ('Function','Method','Class') "
+            f"ORDER BY file_path, name LIMIT 64",
             tuple(fp)).fetchall()
         for (nm,) in rows:
             if nm and len(nm) >= 3 and not _is_builtin_shadow_name(nm):
