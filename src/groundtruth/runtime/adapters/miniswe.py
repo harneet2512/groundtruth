@@ -286,6 +286,18 @@ def boundary_verdict(env: EvidenceEnvelope, observed_event: "str | None") -> str
     # event binding as a preference (it only reorders); expiry must not, because it deletes.
     if et.startswith("verify.horizon."):
         return BOUNDARY_UNKNOWN
+    # EXPIRY IS A FACT-LANE RULE. If `fact_registry` does not resolve this evidence_type, expiry
+    # ABSTAINS — it must never fall back to the event-binding table the way RANKING does.
+    #
+    # Found by testing GT_SCOPE_AT_SEARCH together with expiry: `consensus.scope` does not resolve
+    # in the fact registry, so the fallback judged it against EVENT_BOUND_PAYLOADS (REVIEW_TRANSITION)
+    # and returned `mismatch` at EVERY boundary — including `search_result`, the boundary its own
+    # fact class (def_partition) is contracted to. Expiry would have deleted def_partition outright,
+    # and its ledger row would read `boundary_expired`, i.e. exactly like the gate working.
+    #
+    # The asymmetry, stated once: RANKING may consult both tables because a preference only
+    # REORDERS; EXPIRY may consult only the registry because it DELETES. A signal good enough to
+    # prefer with is not automatically good enough to erase with.
     contracted = None
     try:
         from groundtruth.runtime.fact_registry import required_event
@@ -294,13 +306,6 @@ def boundary_verdict(env: EvidenceEnvelope, observed_event: "str | None") -> str
         contracted = None
     if contracted:
         return BOUNDARY_MATCH if contracted == observed_event else BOUNDARY_MISMATCH
-    try:
-        from groundtruth.runtime.context_policy import EVENT_BOUND_PAYLOADS
-        bound = [getattr(e, "value", None) for e, ps in EVENT_BOUND_PAYLOADS.items() if et in ps]
-        if bound:
-            return BOUNDARY_MATCH if observed_event in bound else BOUNDARY_MISMATCH
-    except Exception:  # noqa: BLE001
-        pass
     return BOUNDARY_UNKNOWN
 
 

@@ -301,3 +301,35 @@ def test_expiry_is_coupled_to_specificity_at_the_seam():
                encoding="utf-8").read()
     assert 'GT_BOUNDARY_EXPIRE", "0").strip() == "1" and _obs_boundary' in src, \
         "expiry no longer requires a resolved boundary — it could fire without specificity"
+
+
+# ---------------------------------------------------------------------------
+# EXPIRY IS A FACT-LANE RULE (2026-07-25, second contradiction found).
+# `consensus.scope` does NOT resolve in fact_registry, so the old event-table
+# fallback judged it against EVENT_BOUND_PAYLOADS (REVIEW_TRANSITION) and marked
+# it `mismatch` at EVERY boundary — including `search_result`, the boundary its
+# own fact class (def_partition) is contracted to. Expiry would have deleted
+# def_partition outright, and the ledger row would read `boundary_expired` —
+# i.e. exactly like the gate working correctly.
+#
+# THE ASYMMETRY: ranking may consult BOTH tables because a preference only
+# REORDERS; expiry may consult ONLY the registry because it DELETES.
+# ---------------------------------------------------------------------------
+
+def test_expiry_abstains_on_types_the_registry_cannot_resolve():
+    for obs in ("file_view", "search_result", "edit_result", "review_transition"):
+        assert boundary_verdict(_Env("consensus.scope"), obs) == BOUNDARY_UNKNOWN, obs
+
+
+def test_expiry_still_bites_for_registry_resolvable_facts():
+    """The gate must not become universally toothless — that is the failure mode of over-correcting."""
+    assert boundary_verdict(_Env("def_ref_partition"), "search_result") == BOUNDARY_MATCH
+    assert boundary_verdict(_Env("def_ref_partition"), "file_view") == BOUNDARY_MISMATCH
+    assert boundary_verdict(_Env("new_file_destination"), "failed_search") == BOUNDARY_MATCH
+    assert boundary_verdict(_Env("new_file_destination"), "edit_result") == BOUNDARY_MISMATCH
+
+
+def test_ranking_keeps_the_event_table_that_expiry_gave_up():
+    """The asymmetry, asserted: the SAME signal still informs ranking after expiry stopped using it."""
+    assert _boundary_match(_Env("verify.horizon.pivot"), "test_result") == 1
+    assert _boundary_match(_Env("verify.horizon.pivot"), "search_result") == 0
