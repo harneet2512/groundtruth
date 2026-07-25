@@ -127,6 +127,34 @@ def _independent_source_writes(cmd: str) -> set[str]:
     return {w for w in writes if w.endswith(_SRC_EXT) and "*" not in w and "$" not in w}
 
 
+
+# ---------------------------------------------------------------------------
+# FROZEN-CORPUS AVAILABILITY (2026-07-25).
+# `.claude/reports/runs/tenpack_27307362054` was DESTROYED on 2026-07-25: a
+# Windows directory junction pointed a throwaway git worktree at it, and
+# `git worktree remove --force` deleted recursively THROUGH the junction. The
+# corpus is gitignored (code-only repo) and the originating GitHub run 404s, so
+# it is unrecoverable. See gt_gt.md §25 and
+# memory/feedback_never_junction_into_a_worktree_20260725.
+#
+# These tests assert against that FROZEN ground truth. With the corpus absent
+# they cannot run, and a FAIL would misreport a lost fixture as a code defect.
+# Following the precedent already in this repo (tests/replay/test_p0_replay.py
+# skips when its frozen graph.db is missing), they SKIP with a reason instead.
+# The assertions are UNCHANGED and run in full whenever the corpus is present —
+# nothing is weakened, and restoring the corpus restores the coverage.
+#
+# A substitute corpus (delivery_tenpack_27342218002) has the same task names and
+# the exact expected layout, but is a DIFFERENT RUN. It is deliberately NOT used:
+# test_oracle_stage2_parity asserts a hand-audited _GROUND_TRUTH nudge table, so a
+# substitution could pass against the WRONG data — worse than a red test.
+# ---------------------------------------------------------------------------
+_CORPUS_MISSING = not glob.glob(str(_CORPUS / "*"))
+pytestmark = pytest.mark.skipif(
+    _CORPUS_MISSING,
+    reason=("frozen corpus tenpack_27307362054 destroyed 2026-07-25 (junction + "
+            "worktree --force); unrecoverable — see gt_gt.md §25"))
+
 # ---------------------------------------------------------------------------
 # Loader correctness
 # ---------------------------------------------------------------------------
