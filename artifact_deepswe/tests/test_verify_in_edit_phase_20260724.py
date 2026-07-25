@@ -79,3 +79,51 @@ def test_every_verify_horizon_kind_benefits(monkeypatch):
     for k in ("verify.horizon.urgent", "verify.horizon.advisory",
               "verify.horizon.gate", "verify.horizon.pivot", _EXECUTED):
         assert phase_allows(k, Phase.EDIT) is True, k
+
+
+# ---------------------------------------------------------------------------
+# SAME DEFECT CLASS, SECOND FEATURE: consensus.scope (def_partition, one of the 17).
+# Admissible ONLY in VERIFY, but it FIRES on a search/view that resolves a symbol's
+# definition and partition — which happens in VIEW/EDIT. Because VERIFY needs
+# `test_count or nonedit_streak>=3`, def_partition answers the agent's SEARCH only
+# after the agent has already run a TEST. Measured on the run-27792475148 ledgers:
+# 34 suppressed_wrong_phase vs 7 delivered (83% lost).
+# ---------------------------------------------------------------------------
+
+_SCOPE = "consensus.scope"
+
+
+def test_scope_flag_off_is_byte_identical():
+    assert phase_allows(_SCOPE, Phase.VIEW) is False
+    assert phase_allows(_SCOPE, Phase.EDIT) is False
+    assert phase_allows(_SCOPE, Phase.VERIFY) is True
+
+
+def test_scope_flag_on_admits_it_where_it_actually_fires(monkeypatch):
+    monkeypatch.setenv("GT_SCOPE_AT_SEARCH", "1")
+    assert phase_allows(_SCOPE, Phase.VIEW) is True
+    assert phase_allows(_SCOPE, Phase.EDIT) is True
+
+
+def test_scope_flag_changes_only_VIEW_and_EDIT(monkeypatch):
+    off = {p: phase_allows(_SCOPE, p) for p in Phase}
+    monkeypatch.setenv("GT_SCOPE_AT_SEARCH", "1")
+    on = {p: phase_allows(_SCOPE, p) for p in Phase}
+    changed = sorted(p.name for p in off if off[p] != on[p])
+    assert changed == ["EDIT", "VIEW"], changed
+    assert phase_allows(_SCOPE, Phase.ORIENT) is False, \
+        "ORIENT has no resolved search yet — must stay closed"
+
+
+def test_scope_flag_does_not_open_other_kinds(monkeypatch):
+    monkeypatch.setenv("GT_SCOPE_AT_SEARCH", "1")
+    assert phase_allows("brief", Phase.VIEW) is False
+    assert phase_allows("l3.cochange", Phase.VIEW) is False
+    assert phase_allows("verify.horizon.executed", Phase.EDIT) is False, \
+        "the two levers must be INDEPENDENT — this one is not a verify opener"
+
+
+def test_the_two_levers_are_independent(monkeypatch):
+    """VERIFY_IN_EDIT must not open consensus.scope, and vice versa."""
+    monkeypatch.setenv("GT_VERIFY_IN_EDIT", "1")
+    assert phase_allows(_SCOPE, Phase.EDIT) is False

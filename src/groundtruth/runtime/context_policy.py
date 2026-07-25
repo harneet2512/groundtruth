@@ -207,6 +207,15 @@ def phase_allows(
         # Scoped to EDIT only — ORIENT/VIEW have no edit to verify, so they stay closed.
         if phase is Phase.EDIT and os.environ.get("GT_VERIFY_IN_EDIT", "0").strip() == "1":
             return True
+    # GT_SCOPE_AT_SEARCH (default off => byte-identical). Same defect class, different feature.
+    # `consensus.scope` (def_partition — one of the 17 DIRECT) is admissible ONLY in VERIFY, but it
+    # FIRES on a search/view that resolves a symbol's definition and partition, which happens in
+    # VIEW/EDIT. Since VERIFY needs `test_count or nonedit_streak>=3`, def_partition answers the
+    # agent's SEARCH only after the agent has run a TEST. Measured: 34 suppressed_wrong_phase vs 7
+    # delivered (83% lost). Admitting it where it fires is what makes it a search-time answer at all.
+    if (k == "consensus.scope" and phase in (Phase.VIEW, Phase.EDIT)
+            and os.environ.get("GT_SCOPE_AT_SEARCH", "0").strip() == "1"):
+        return True
     return False
 
 
