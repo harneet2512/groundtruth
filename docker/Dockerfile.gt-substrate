@@ -75,6 +75,23 @@ RUN curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-li
     && pyright --version \
     && typescript-language-server --version
 
+# (3a-2) The TypeScript COMPILER MODULE at a DETERMINISTIC, require-able path (2026-07-24).
+#     The at-edit .ts/.tsx/.jsx syntax checker needs `require("typescript")` — a different artifact
+#     from typescript-language-server (a binary), which is all the step above verifies. Measured in
+#     the published image: `/opt/gt/node/lib/node_modules/typescript` EXISTS as a directory yet
+#     `require` of it fails with MODULE_NOT_FOUND, i.e. npm's global layout does not leave a
+#     resolvable entry point there. A repo whose own node_modules lacks typescript (deps not
+#     installed — the common case in an eval container) therefore got NO syntax checking at all,
+#     silently, because the probe is correct-or-quiet and degrades to "ok".
+#     A plain local install gives the ordinary node_modules layout, which `require` always resolves.
+#     The require is part of the RUN, so a substrate whose TS checker cannot load CANNOT be built.
+ARG TS_VERSION=5.9.3
+RUN mkdir -p /opt/gt/tsmod \
+    && cd /opt/gt/tsmod \
+    && /opt/gt/node/bin/npm init -y >/dev/null \
+    && /opt/gt/node/bin/npm install --no-audit --no-fund --loglevel=error typescript@${TS_VERSION} \
+    && /opt/gt/node/bin/node -e "const t=require('/opt/gt/tsmod/node_modules/typescript'); console.log('ts compiler module baked ok, version=' + t.version)"
+
 # (3b) gopls — built with the build-stage Go toolchain, installed into /opt/gt/bin.
 #      A static-ish Go binary; launches with no runtime Go toolchain. (Type-aware
 #      go-to-def across packages may still need the task's resolved module cache —

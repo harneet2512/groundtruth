@@ -389,6 +389,7 @@ def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,
 _TS_PARSE_SCRIPT = (
     "let ts;"
     "const c=[process.env.GT_TS_MODULE,'typescript',"
+    "'/opt/gt/tsmod/node_modules/typescript',"
     "'/opt/gt/node/lib/node_modules/typescript',"
     "'/opt/gt/node/node_modules/typescript',"
     "'/usr/lib/node_modules/typescript','/usr/local/lib/node_modules/typescript'];"
