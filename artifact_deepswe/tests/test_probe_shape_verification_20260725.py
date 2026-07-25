@@ -51,6 +51,14 @@ def changes_a_signature(patch: str) -> list:
     return [n for n in rem if n in add and rem[n] != add[n]]
 
 
+def _all_probe_tasks():
+    """v3 lists five tasks with no section headers — each satisfies ALL shapes."""
+    if not os.path.exists(_PROBE):
+        return []
+    return [l.split("#")[0].strip() for l in open(_PROBE, encoding="utf-8")
+            if l.strip() and not l.strip().startswith("#")]
+
+
 def _section(name):
     if not os.path.exists(_PROBE):
         return []
@@ -69,7 +77,7 @@ def _section(name):
 @pytest.mark.skipif(not os.path.exists(_PROBE), reason="probe set not present (local-only file)")
 def test_every_new_file_task_actually_creates_a_file():
     rows, bad = _rows(), []
-    for t in _section("NEW-FILE"):
+    for t in (_section("NEW-FILE") or _all_probe_tasks()):
         if t not in rows or not creates_a_file(rows[t].get("patch")):
             bad.append(t)
     assert not bad, (
@@ -81,7 +89,7 @@ def test_every_new_file_task_actually_creates_a_file():
 @pytest.mark.skipif(not os.path.exists(_PROBE), reason="probe set not present (local-only file)")
 def test_every_signature_task_actually_changes_a_signature():
     rows, bad = _rows(), []
-    for t in _section("SIGNATURE"):
+    for t in (_section("SIGNATURE") or _all_probe_tasks()):
         if t not in rows or not changes_a_signature(rows[t].get("patch")):
             bad.append(t)
     assert not bad, (
@@ -93,8 +101,9 @@ def test_every_signature_task_actually_changes_a_signature():
 @pytest.mark.skipif(not os.path.exists(_PROBE), reason="probe set not present (local-only file)")
 def test_every_probe_task_resolves_in_the_dataset():
     rows = _rows()
-    missing = [t for t in (_section("NEW-FILE") + _section("SIGNATURE") + _section("VERIFIABLE"))
-               if t not in rows]
+    listed = (_section("NEW-FILE") + _section("SIGNATURE") + _section("VERIFIABLE")
+              or _all_probe_tasks())
+    missing = [t for t in listed if t not in rows]
     assert not missing, f"probe task ids that do not resolve (the run would fail): {missing}"
 
 
