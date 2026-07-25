@@ -251,6 +251,48 @@ def _boundary_match(env: EvidenceEnvelope, observed_event: "str | None") -> int:
     return 0
 
 
+BOUNDARY_MATCH = "match"
+BOUNDARY_MISMATCH = "mismatch"
+BOUNDARY_UNKNOWN = "unknown"
+
+
+def boundary_verdict(env: EvidenceEnvelope, observed_event: "str | None") -> str:
+    """THREE-state boundary judgement for the EXPIRY gate (PURE).
+
+    `_boundary_match` collapses to 0/1 because RANKING only needs "is this the contracted fact".
+    An EXPIRY gate cannot use that: 0 conflates "contracted elsewhere, so this is expired" with
+    "no contract found, so we know nothing". Blocking the second would DELETE evidence on an
+    unknown — the worst failure mode available, and strictly worse than the ranking bugs #29
+    already produced. So UNKNOWN is a distinct verdict and never blocks.
+
+    `match`    — the fact is contracted for this observation (or is an executed world-fact, which
+                 is valid whenever it exists — same exemption `_filter_candidates_by_phase` makes).
+    `mismatch` — a contract EXISTS and names a DIFFERENT boundary. `deliver_by` is documented as
+                 the "LAST-useful boundary; deliver later => expire", so this is expired evidence.
+    `unknown`  — no resolvable contract in either table. Correct-or-quiet: deliver as today."""
+    if not observed_event:
+        return BOUNDARY_UNKNOWN
+    et = env.evidence_type or ""
+    if et in _WORLD_FACT_EVIDENCE_TYPES:
+        return BOUNDARY_MATCH
+    contracted = None
+    try:
+        from groundtruth.runtime.fact_registry import required_event
+        contracted = required_event(et)
+    except Exception:  # noqa: BLE001
+        contracted = None
+    if contracted:
+        return BOUNDARY_MATCH if contracted == observed_event else BOUNDARY_MISMATCH
+    try:
+        from groundtruth.runtime.context_policy import EVENT_BOUND_PAYLOADS
+        bound = [getattr(e, "value", None) for e, ps in EVENT_BOUND_PAYLOADS.items() if et in ps]
+        if bound:
+            return BOUNDARY_MATCH if observed_event in bound else BOUNDARY_MISMATCH
+    except Exception:  # noqa: BLE001
+        pass
+    return BOUNDARY_UNKNOWN
+
+
 def boundary_for_event(event: "ToolEvent | None", *, zero_results: bool = False) -> "str | None":
     """Derive the fine §1 observation boundary from the tool event (PURE, no I/O).
 

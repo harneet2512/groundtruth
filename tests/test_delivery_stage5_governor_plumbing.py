@@ -325,6 +325,7 @@ _NEW_LEVERS_20260725 = [
     "GT_SCOPE_AT_SEARCH",    # consensus.scope admissible where it fires (34 suppressed / 7 delivered)
     "GT_COVERING_SCOPED",    # covering targets scoped to the edited file (238 -> 7 on a real graph)
     "GT_BOUNDARY_SPECIFICITY",  # #29 dose goes to the fact contracted for THIS observation
+    "GT_BOUNDARY_EXPIRE",       # #32 drop a fact delivered past its contracted boundary
 ]
 
 

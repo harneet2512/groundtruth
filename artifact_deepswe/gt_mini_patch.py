@@ -14989,6 +14989,28 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None, lattice_produc
             # (byte-identical). RL-2 native renderers for the gateway's generic kinds
             # (name_fold / wrong_surface / trace_frame / body_concept) ride THIS flag; the
             # shared def-facts renderer keeps its own GT_POST_SEARCH_NATIVE dispatch.
+            # EXPIRY GATE (GT_BOUNDARY_EXPIRE, default off => byte-identical). The registry
+            # documents deliver_by as the "LAST-useful boundary; deliver later => expire", so a
+            # fact delivered outside its contracted boundary is EXPIRED evidence reaching the
+            # model — a correct-or-quiet violation, not merely a ranking preference. #29 RANKS
+            # the contracted fact first but does not BLOCK, so an expired fact still delivers
+            # when it is the only candidate.
+            # THREE-state on purpose: only an explicit MISMATCH drops. "unknown" (no resolvable
+            # contract) must NEVER block — deleting evidence on an unknown is strictly worse than
+            # the ranking bugs #29 already produced. Executed world-facts are exempt inside
+            # boundary_verdict, matching the phase gate's own exemption.
+            if os.environ.get("GT_BOUNDARY_EXPIRE", "0").strip() == "1" and _obs_boundary:
+                try:
+                    from groundtruth.runtime.adapters.miniswe import (
+                        BOUNDARY_MISMATCH as _B_MISMATCH, boundary_verdict as _b_verdict)
+                    if _b_verdict(winner, _obs_boundary) == _B_MISMATCH:
+                        _runtime_ledger_record(
+                            kind=str(getattr(winner, "evidence_type", "") or "gateway"),
+                            outcome=_ProductSignalOutcome.SUPPRESSED_WRONG_PHASE,
+                            reason="boundary_expired:" + str(_obs_boundary), chars=0)
+                        return
+                except Exception:  # noqa: BLE001 -- an unresolvable verdict never blocks
+                    pass
             native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
             delta = _render_gateway_envelope(_ad_render, winner, native=native)
             # leak-law (ABI §5): native must be tag-free; NEVER a test identity anywhere.

@@ -200,3 +200,42 @@ def test_fact_table_still_wins_where_it_resolves():
     """Fact resolution is consulted FIRST; the steer table is a fallback, not an override."""
     assert _boundary_match(_Env("new_file_destination"), "failed_search") == 1
     assert _boundary_match(_Env("new_file_destination"), "test_result") == 0
+
+
+# ---------------------------------------------------------------------------
+# #32 — the EXPIRY gate needs THREE states, not two.
+# `_boundary_match` collapses to 0/1 because RANKING only asks "is this the
+# contracted fact". An expiry gate cannot: 0 conflates "contracted elsewhere =>
+# expired" with "no contract found => we know nothing". Blocking the second
+# would DELETE evidence on an unknown — strictly worse than the ranking bugs
+# #29 already produced, because a ranking bug misorders and an expiry bug erases.
+# ---------------------------------------------------------------------------
+from groundtruth.runtime.adapters.miniswe import (
+    BOUNDARY_MATCH, BOUNDARY_MISMATCH, BOUNDARY_UNKNOWN, boundary_verdict)
+
+
+def test_unknown_never_blocks():
+    """THE safety property. No resolvable contract => deliver as today."""
+    assert boundary_verdict(_Env("totally_unknown_type"), "edit_result") == BOUNDARY_UNKNOWN
+    assert boundary_verdict(_Env("new_file_destination"), None) == BOUNDARY_UNKNOWN
+
+
+def test_world_facts_never_expire():
+    """An executed covering-RED is valid whenever it exists — the same exemption
+    _filter_candidates_by_phase makes. Expiring it would delete the strongest fact GT has."""
+    assert boundary_verdict(_Env("covering_verdict"), "edit_result") == BOUNDARY_MATCH
+    assert boundary_verdict(_Env("covering_verdict"), "search_result") == BOUNDARY_MATCH
+
+
+def test_contracted_elsewhere_is_a_mismatch():
+    assert boundary_verdict(_Env("new_file_destination"), "failed_search") == BOUNDARY_MATCH
+    assert boundary_verdict(_Env("new_file_destination"), "edit_result") == BOUNDARY_MISMATCH
+
+
+def test_steers_resolve_through_the_event_table():
+    assert boundary_verdict(_Env("verify.horizon.pivot"), "test_result") == BOUNDARY_MATCH
+    assert boundary_verdict(_Env("verify.horizon.pivot"), "edit_result") == BOUNDARY_MISMATCH
+
+
+def test_the_three_verdicts_are_distinct():
+    assert len({BOUNDARY_MATCH, BOUNDARY_MISMATCH, BOUNDARY_UNKNOWN}) == 3

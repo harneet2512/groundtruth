@@ -327,6 +327,7 @@ GT_AE_ARGS=(
   # GT_BOUNDARY_SPECIFICITY (#29): the dose goes to the fact CONTRACTED for this observation
   # (fact_registry.required_event) instead of whichever class ranks highest in the static table.
   --ae "GT_BOUNDARY_SPECIFICITY=${GT_BOUNDARY_SPECIFICITY:-0}"
+  --ae "GT_BOUNDARY_EXPIRE=${GT_BOUNDARY_EXPIRE:-0}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the
