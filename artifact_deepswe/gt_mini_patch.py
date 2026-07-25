@@ -6720,13 +6720,36 @@ def _covering_tests_for_symbols(symbol_names: set[str]) -> list[dict]:
         try:
             # Find node ids for the edited symbols (by name, non-test)
             placeholders = ",".join("?" * len(symbol_names))
-            target_q = (
-                f"SELECT id, name, file_path FROM nodes "
-                f"WHERE name IN ({placeholders}) "
-                f"AND COALESCE(is_test, 0) = 0 "
-                f"LIMIT 20"
-            )
-            target_rows = con.execute(target_q, list(symbol_names)).fetchall()
+            # PRECISION (GT_COVERING_SCOPED, default off => byte-identical). The lookup below
+            # matches symbols GLOBALLY by BARE NAME and is not scoped to the file the agent
+            # actually edited. MEASURED on 8 real graph.db: 12% of non-test symbol names occur in
+            # more than one file, and the worst offenders are the most commonly edited ones —
+            # `__init__` appears in 197-371 files, `validate` in 83. So editing `__init__` matches
+            # hundreds of nodes, `LIMIT 20` keeps 20 ARBITRARY ones, and GT then runs covering tests
+            # for symbols in UNRELATED files and attributes the result to this edit. That is wrong
+            # evidence, which is worse than none. Scoping to the edited paths (which the caller
+            # already knows) makes the target set actually mean "what the agent just edited".
+            scope_rels = [r.replace("\\", "/") for r in sorted(_oracle_edited_rels) if r] \
+                if os.environ.get("GT_COVERING_SCOPED", "0").strip() == "1" else []
+            if scope_rels:
+                fq = ",".join("?" * len(scope_rels))
+                target_q = (
+                    f"SELECT id, name, file_path FROM nodes "
+                    f"WHERE name IN ({placeholders}) "
+                    f"AND COALESCE(is_test, 0) = 0 "
+                    f"AND REPLACE(file_path, '\\', '/') IN ({fq}) "
+                    f"LIMIT 20"
+                )
+                target_rows = con.execute(
+                    target_q, list(symbol_names) + scope_rels).fetchall()
+            else:
+                target_q = (
+                    f"SELECT id, name, file_path FROM nodes "
+                    f"WHERE name IN ({placeholders}) "
+                    f"AND COALESCE(is_test, 0) = 0 "
+                    f"LIMIT 20"
+                )
+                target_rows = con.execute(target_q, list(symbol_names)).fetchall()
             if not target_rows:
                 return []
             target_ids = [r[0] for r in target_rows]
