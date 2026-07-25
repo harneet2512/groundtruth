@@ -195,7 +195,14 @@ env:
   GT_SUBMIT_VERIFY: ${{ github.event.inputs.new_delivery_levers || '0' }}
   # 2026-07-24: bounded 2-hop transitive covering selection (covering_red was structurally dark —
   # the 1-hop test->symbol query was empty on 28/29 tasks). Default '0' = byte-identical.
-  GT_COVERING_TRANSITIVE: ${{ github.event.inputs.new_delivery_levers || '0' }}
+  # PINNED OFF. MEASURED USELESS on 24 real graph.db: the 2-hop fallback helps 0/24 tasks and is
+  # strictly WORSE than 1-hop (which already finds a covering test on 19/24; 2-hop finds 7/24,
+  # because it demands BOTH hops deterministic). It only fires when 1-hop returns empty, and on
+  # those 5 tasks it also returns 0. Bundling it would add a selection VARIABLE to the witness for
+  # zero expected benefit — and a null result would then be ambiguous between "the lever does
+  # nothing" and "the lever interfered". Retained in the tree as the record of a refuted
+  # hypothesis (gt_gt §"RETRACTION"), not as a live option.
+  GT_COVERING_TRANSITIVE: '0'
   GT_CS_TELEMETRY: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_CS_EDIT_TRIGGER: ${{ github.event.inputs.new_delivery_levers || '0' }}
   # 2026-07-25 phase-admissibility + precision levers (ledger-derived, see gt_ae_block.sh).
