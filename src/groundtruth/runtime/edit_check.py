@@ -377,10 +377,26 @@ def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,
 # msg` frame (the compiler's own wording — §0 native voice) and exits 1 on a real syntax error;
 # exits 0 silently when clean OR when the bundled `typescript` module cannot be loaded, so an
 # environment without it degrades to `ok`/unavailable rather than a fabricated error.
+#
+# RESOLUTION (fixed 2026-07-24 by the hardened build gate, which failed on exactly this): `node -e`
+# resolves `require` from CWD, so a repo WITHOUT its own node_modules can only reach the substrate's
+# copy by absolute path — and the single hardcoded path used at first
+# (/opt/gt/node/lib/node_modules/typescript) DOES NOT EXIST in the published image. The probe then
+# exited 0 and every such repo silently reported "ok", i.e. the 76%-coverage-hole fix was half dead
+# for precisely the repos that need it most. Rather than guess a path a third time, try the known
+# global layouts in order and let GT_TS_MODULE override. Still correct-or-quiet: if none resolve the
+# probe exits 0 and the verdict degrades to ok/unavailable, never a fabricated syntax error.
 _TS_PARSE_SCRIPT = (
     "let ts;"
-    "try{ts=require('typescript')}catch(e){"
-    "try{ts=require('/opt/gt/node/lib/node_modules/typescript')}catch(e2){process.exit(0)}}"
+    "const c=[process.env.GT_TS_MODULE,'typescript',"
+    "'/opt/gt/node/lib/node_modules/typescript',"
+    "'/opt/gt/node/node_modules/typescript',"
+    "'/usr/lib/node_modules/typescript','/usr/local/lib/node_modules/typescript'];"
+    "for(const m of c){if(!m)continue;try{ts=require(m);break}catch(e){}}"
+    "if(!ts){"
+    "try{ts=require(require.resolve('typescript',"
+    "{paths:['/opt/gt/node/lib/node_modules','/opt/gt/node/node_modules']}))}catch(e){}}"
+    "if(!ts){process.exit(0)}"
     "const fs=require('fs');const p=process.argv[1];"
     "let src;try{src=fs.readFileSync(p,'utf8')}catch(e){process.exit(0)}"
     "const sf=ts.createSourceFile(p,src,ts.ScriptTarget.Latest,false);"
