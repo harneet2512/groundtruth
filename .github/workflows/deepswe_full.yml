@@ -205,7 +205,16 @@ env:
   GT_SCOPE_AT_SEARCH: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_COVERING_SCOPED: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_BOUNDARY_SPECIFICITY: ${{ github.event.inputs.new_delivery_levers || '0' }}
-  GT_BOUNDARY_EXPIRE: ${{ github.event.inputs.new_delivery_levers || '0' }}
+  # GT_BOUNDARY_EXPIRE is DECOUPLED from new_delivery_levers on purpose (same reasoning as
+  # GT_MULTIDOSE above). It is the only lever here that DELETES evidence: it drops a fact delivered
+  # outside its contracted boundary. A lever that deletes must be armed DELIBERATELY, never bundled
+  # with ten additive ones — its failure mode is silent, and a wrong drop writes a
+  # `boundary_expired` ledger row that reads exactly like the gate working correctly.
+  # It is also INCOMPATIBLE with GT_CS_EDIT_TRIGGER until newfile_precedent's
+  # "destination/integration" target_decision is split (gt_gt §15/§30); gt_ae_block.sh aborts
+  # rc=78 if both are set, so bundling them would abort every run using this input.
+  # Arm it by setting the env explicitly for a dedicated expiry experiment.
+  GT_BOUNDARY_EXPIRE: '0'
   # E — at-edit syntax validation (synced agent path; gt_mini_patch reads it). RL-profile
   # member: input default is '' (unset), passed RAW — NOT `|| ''` (Brief-F5): the input's
   # own default of '0' is a NON-empty (truthy) string, so `|| ''` forwarded '0' on a UI
