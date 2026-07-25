@@ -72,6 +72,16 @@ jobs:
             /opt/gt/python/bin/python3 -c "import onnxruntime,numpy,pydantic,tokenizers; print(\"py ok\")"
             pyright --version
             typescript-language-server --version
+            # AT-EDIT CHECKER CLOSURE (2026-07-24). The two runtime checkers below were previously
+            # UNVERIFIED by this gate, so a substrate that could not run them would publish clean and
+            # go silently dark in production — the exact failure mode that made GT_EDIT_CHECK_NAMES
+            # unprovable. Both are now part of the STRICT closure: missing => the image is not published.
+            #   * pyflakes backs edit_check._check_py_undefined_names (name_error verdicts).
+            #   * the TS/TSX/JSX probe requires the typescript MODULE (not the language server) and
+            #     falls back to this EXACT path when the repo has no node_modules of its own, so the
+            #     path is asserted literally rather than via a bare `require(\"typescript\")`.
+            /opt/gt/python/bin/python3 -c "import pyflakes; print(\"pyflakes ok\", pyflakes.__version__)"
+            node -e "require(\"/opt/gt/node/lib/node_modules/typescript\"); console.log(\"typescript module ok\")"
             gopls version
             rust-analyzer --version
             # java/jdtls + e5-small-v2 were REMOVED 2026-06-20 (not in the benchmark/runtime contract) —
