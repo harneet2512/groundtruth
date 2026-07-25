@@ -87,6 +87,21 @@ fi
 
 # Build the canonical `--ae` array. Each entry honors a host-side override but
 # defaults to the architecture-of-record value.
+# ── INCOMPATIBLE LEVER PAIR — fail BEFORE spending, not during ────────────────
+# GT_CS_EDIT_TRIGGER emits new_file_destination / missing_role on an EDIT observation, but both are
+# contracted to `failed_search`, so GT_BOUNDARY_EXPIRE drops them and the trigger is NULLIFIED.
+# Expiry is behaving CORRECTLY here — this is the spec gap in newfile_precedent.target_decision
+# ("destination/integration": two decisions, one boundary, one receipt predicate). Until that is
+# split, the two levers must not both be on.
+#
+# Operationally load-bearing because `new_delivery_levers` turns ALL levers on with ONE input. A run
+# with both would report missing_role as zero-delivery WITH a `boundary_expired` ledger row —
+# reading exactly like the gate working correctly, and costing a full run to not-discover.
+if [ "${GT_CS_EDIT_TRIGGER:-0}" = "1" ] && [ "${GT_BOUNDARY_EXPIRE:-0}" = "1" ]; then
+  echo "gt_ae_block: GT_CS_EDIT_TRIGGER and GT_BOUNDARY_EXPIRE are INCOMPATIBLE (expiry drops the failed_search-contracted facts the edit trigger emits). Enable at most one." >&2
+  return 78 2>/dev/null || exit 78
+fi
+
 GT_AE_ARGS=(
   # ── Verify-axis structural edit-risk (gaps G03/G04) ──────────────────────────
   # The in-container CODE defaults this axis OFF (byte-identical legacy). This block's
