@@ -324,6 +324,9 @@ GT_AE_ARGS=(
   --ae "GT_VERIFY_IN_EDIT=${GT_VERIFY_IN_EDIT:-0}"
   --ae "GT_SCOPE_AT_SEARCH=${GT_SCOPE_AT_SEARCH:-0}"
   --ae "GT_COVERING_SCOPED=${GT_COVERING_SCOPED:-0}"
+  # GT_BOUNDARY_SPECIFICITY (#29): the dose goes to the fact CONTRACTED for this observation
+  # (fact_registry.required_event) instead of whichever class ranks highest in the static table.
+  --ae "GT_BOUNDARY_SPECIFICITY=${GT_BOUNDARY_SPECIFICITY:-0}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the

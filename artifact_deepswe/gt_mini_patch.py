@@ -14935,8 +14935,27 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None, lattice_produc
                     _max_doses = max(1, int(os.environ.get("GT_MULTIDOSE_MAX", "3") or "3"))
                 except ValueError:
                     _max_doses = 3
+            # GT_BOUNDARY_SPECIFICITY (default off => observed_event None => byte-identical).
+            # The dose should go to the fact CONTRACTED for this observation, not to whichever
+            # class sits highest in the static severity table — the latter is itself a
+            # correct_rl_adhered_time violation. The boundary is resolved from the registry via
+            # adapters.miniswe.boundary_for_event; the flag is read HERE because that module is
+            # documented PURE / no-I/O and must stay that way.
+            # `zero_results` is the OBSERVABLE definition of a failed search (the agent's own
+            # search produced no output). It matters: newfile_precedent is contracted to
+            # `failed_search`, NOT `search_result`.
+            _obs_boundary = None
+            if os.environ.get("GT_BOUNDARY_SPECIFICITY", "0").strip() == "1":
+                try:
+                    from groundtruth.runtime.adapters.miniswe import (
+                        boundary_for_event as _ad_boundary)
+                    _obs_boundary = _ad_boundary(
+                        ev, zero_results=not (getattr(ev, "output", "") or "").strip())
+                except Exception:  # noqa: BLE001 -- undeterminable boundary ranks as today
+                    _obs_boundary = None
             gateway_envelopes = _ad_select(
-                gateway_envelopes, max_doses=_max_doses, multidose=_md, recently_delivered=_rot)
+                gateway_envelopes, max_doses=_max_doses, multidose=_md, recently_delivered=_rot,
+                observed_event=_obs_boundary)
         if not gateway_envelopes:
             return
         if pool is not None:
