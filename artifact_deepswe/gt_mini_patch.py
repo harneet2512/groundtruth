@@ -3231,7 +3231,7 @@ def _resolve_frame(con, rel: str, repo_root: str) -> tuple[str, str]:
         ).fetchone():
             return nfp, repo_root  # frames already aligned (single-package repo)
         rows = con.execute(
-            "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? LIMIT 2",
+            "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? ORDER BY file_path LIMIT 2",
             ("%/" + nfp,),
         ).fetchall()
     except Exception:  # noqa: BLE001 -- correct-or-quiet
@@ -6631,7 +6631,7 @@ def _cochange_block(rel: str) -> str:
                 # ('%/lib/lexer/Lexer.js') and require a UNIQUE match (LIMIT 2 -> exactly one),
                 # parity with _resolve_frame; an ambiguous suffix ABSTAINS (no cross-attribution).
                 cand = con.execute(
-                    "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? LIMIT 2",
+                    "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? ORDER BY file_path LIMIT 2",
                     ("%/" + nfp,),
                 ).fetchall()
                 if len(cand) == 1:
