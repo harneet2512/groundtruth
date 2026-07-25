@@ -170,8 +170,33 @@ def check_edit_syntax(
         )
         if normalized:
             result["diagnostic"] = normalized
+    # L-1b for EVERY language. Python has had `_normalize_python_syntax_diagnostic` above; every
+    # other toolchain (gofmt, node --check, the TS probe) is handed ``abs_path`` and echoes it, so
+    # its diagnostic read `/testbed/pkg/x.ts:1:22: ...` — the container path, which the docstring of
+    # this function explicitly forbids in model-facing bytes ("name the file REPO-RELATIVE ... so the
+    # model does not have to guess the path back"). Only the literal path of the file under check is
+    # rewritten, so no other content can be altered; on the Python path the normalizer already
+    # produced ``rel_name`` and this is a byte no-op.
+    if result.get("diagnostic"):
+        result["diagnostic"] = _relativize_diagnostic(
+            str(result["diagnostic"]), abs_path, rel_name)
     result = _apply_name_check(result, ext, abs_path, rel_name, executor)
     return result
+
+
+def _relativize_diagnostic(diag: str, abs_path: str, rel_name: str) -> str:
+    """Replace the checked file's ABSOLUTE path with its repo-relative name (L-1b).
+
+    Language-agnostic and conservative: substitutes only the literal ``abs_path`` (and its
+    forward-slash form, since toolchains normalise separators inconsistently on Windows). Longest
+    form first so a partial overlap cannot corrupt the text."""
+    if not diag or not abs_path or not rel_name:
+        return diag
+    forms = {abs_path, abs_path.replace("\\", "/"), os.path.normpath(abs_path)}
+    for form in sorted((f for f in forms if f), key=len, reverse=True):
+        if form and form != rel_name:
+            diag = diag.replace(form, rel_name)
+    return diag
 
 
 def _ss_edit_diag_enabled() -> bool:
