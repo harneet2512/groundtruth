@@ -191,6 +191,13 @@ def _xsession_boost(env: EvidenceEnvelope) -> int:
 _ROTATION_DECAY = 1000
 
 
+# EXECUTED world-facts: the repo's own toolchain actually RAN and produced this. They are exempt
+# from boundary matching for the same reason `_filter_candidates_by_phase` exempts them from the
+# phase gate — a verified world-fact is valid whenever it exists, not only at one boundary. Kept as
+# an explicit frozenset (not a heuristic) so adding one is a deliberate, reviewable act.
+_WORLD_FACT_EVIDENCE_TYPES = frozenset({"covering_verdict", "syntax_result", "edit_syntax"})
+
+
 def _boundary_match(env: EvidenceEnvelope, observed_event: "str | None") -> int:
     """1 iff this fact's REGISTERED delivery boundary is the observation that just occurred.
 
@@ -210,9 +217,20 @@ def _boundary_match(env: EvidenceEnvelope, observed_event: "str | None") -> int:
     unresolvable type scores 0 (correct-or-quiet): it competes exactly as it does today."""
     if not observed_event:
         return 0
+    et = env.evidence_type or ""
+    # EXECUTED WORLD-FACTS ARE BOUNDARY-EXEMPT. An executed covering-RED is the repo's OWN test
+    # having run and failed on the agent's edit — it is not an advisory owed at a boundary, it is
+    # a fact about the world that is valid whenever it exists. It is PRODUCED post-EDIT (the
+    # producer even steps aside when the agent just ran a test) while its registration names
+    # `test_result`, so a naive boundary match would score it 0 and let a caller/signature advisory
+    # out-dose it on an edit turn — the exact inversion the lexicographic design exists to prevent.
+    # This is not a new carve-out: `_filter_candidates_by_phase` already exempts the SAME class of
+    # fact from the phase gate for the same reason ("a verified WORLD-FACT ... valid in ANY phase").
+    if et in _WORLD_FACT_EVIDENCE_TYPES:
+        return 1
     try:
         from groundtruth.runtime.fact_registry import required_event
-        return 1 if required_event(env.evidence_type or "") == observed_event else 0
+        return 1 if required_event(et) == observed_event else 0
     except Exception:  # noqa: BLE001 -- unregistered/unresolvable type ranks as today
         return 0
 

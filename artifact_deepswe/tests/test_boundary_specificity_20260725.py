@@ -120,3 +120,46 @@ def test_undeterminable_boundary_ranks_as_today():
     """Correct-or-quiet: an unknown boundary must never invent a match."""
     assert boundary_for_event(None) is None
     assert boundary_for_event(ToolEvent(kind="something_else")) is None
+
+
+# ---------------------------------------------------------------------------
+# #28 DRIFT RESOLUTION — executed world-facts are BOUNDARY-EXEMPT.
+#
+# The registry contracts covering_red to `test_result`, but the producer fires
+# post-EDIT (and deliberately steps aside when the agent JUST ran a test). With
+# specificity live, a naive boundary match scores it 0 on an edit turn and lets a
+# caller/signature ADVISORY out-dose the repo's own executed RED — the exact
+# inversion the lexicographic design was chosen to prevent. This was a real
+# regression introduced by #29 and caught by the drift audit.
+#
+# The resolution is NOT a new carve-out: `_filter_candidates_by_phase` already
+# exempts the same class from the phase gate, calling it "a verified WORLD-FACT
+# ... valid in ANY phase". Boundary exemption applies the established rule.
+# ---------------------------------------------------------------------------
+from groundtruth.runtime.adapters.miniswe import _WORLD_FACT_EVIDENCE_TYPES
+
+
+def test_executed_covering_red_is_not_out_dosed_on_an_edit_turn():
+    """THE regression. covering_red is contracted to test_result but produced post-EDIT."""
+    assert required_event("covering_verdict") == "test_result"
+    winner = arbitrate([_Env("covering_verdict"), _Env("caller_break")],
+                       frozenset(), "edit_result")
+    assert winner.evidence_type == "covering_verdict", (
+        "an executed world-fact lost the dose to an advisory because its registered boundary "
+        "is not the observation it is produced on — the inversion #29 must never cause"
+    )
+
+
+def test_world_fact_exemption_is_an_explicit_set_not_a_heuristic():
+    """Adding one must be a deliberate, reviewable act — never inferred from a name."""
+    assert "covering_verdict" in _WORLD_FACT_EVIDENCE_TYPES
+    assert isinstance(_WORLD_FACT_EVIDENCE_TYPES, frozenset)
+    assert "caller_break" not in _WORLD_FACT_EVIDENCE_TYPES, \
+        "an advisory must never be exempted — that would restore the static-table behaviour"
+
+
+def test_exemption_does_not_break_contracted_facts_winning_their_boundary():
+    """The exemption must not swallow the fix it protects: on a failed_search with no world-fact
+    present, newfile_precedent still wins."""
+    assert arbitrate([_Env("new_file_destination"), _Env("caller_break")],
+                     frozenset(), "failed_search").evidence_type == "new_file_destination"
