@@ -334,7 +334,18 @@ def test_new_levers_are_ae_forwarded_and_input_keyed():
     ae_block = _ROOT / "artifact_deepswe" / "gt_integration" / "gt_ae_block.sh"
     ae_text = ae_block.read_text(encoding="utf-8")
     wf_text = _WF_PATH.read_text(encoding="utf-8")
+    # DELIBERATELY DECOUPLED levers: pinned '0' in the workflow, armed only by setting the env for a
+    # dedicated experiment. Same precedent as GT_MULTIDOSE. A lever earns this ONLY if it can damage
+    # the witness — GT_BOUNDARY_EXPIRE is the one lever that DELETES evidence, and it is
+    # incompatible with GT_CS_EDIT_TRIGGER (gt_ae_block aborts rc=78), so bundling both under
+    # new_delivery_levers would abort every run using that input. It must still be --ae FORWARDED,
+    # or it could never be armed at all.
+    _DECOUPLED = {"GT_BOUNDARY_EXPIRE"}
     for key in _NEW_LEVERS_20260725:
         assert re.search(rf"--ae \"?{re.escape(key)}=", ae_text), f"{key} not --ae forwarded"
+        if key in _DECOUPLED:
+            assert re.search(rf"^\s*{re.escape(key)}:\s*'0'", wf_text, re.M), (
+                f"{key} is decoupled, so it must be EXPLICITLY pinned '0' — never silently absent")
+            continue
         assert re.search(rf"^\s*{re.escape(key)}:\s*\$\{{\{{", wf_text, re.M), \
             f"{key} not keyed to a workflow input (it would always be '0')"
