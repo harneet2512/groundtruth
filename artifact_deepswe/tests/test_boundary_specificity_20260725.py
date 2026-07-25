@@ -374,3 +374,50 @@ def test_the_contracted_boundary_still_works_for_both():
     """The features are not broken — they are contracted elsewhere, and there they deliver."""
     assert boundary_verdict(_Env("new_file_destination"), "failed_search") == BOUNDARY_MATCH
     assert boundary_verdict(_Env("missing_role"), "failed_search") == BOUNDARY_MATCH
+
+
+# ---------------------------------------------------------------------------
+# UNOBSERVABLE CONTRACTS (2026-07-25, found by an EXHAUSTIVE sweep rather than by
+# thinking of another pair). `boundary_for_event` derives only five boundaries
+# from a tool event. A fact contracted OUTSIDE that set can never be observed at
+# its own boundary, so every observation reads `mismatch` and expiry deletes it
+# EVERYWHERE. Measured: trace_frame (failure_obs) was dropped at all 7 boundaries;
+# submit_refusal (submit), obligations/brief_localization (task_start) and
+# cochange_prior (first_view_edit) are the same class — four of the 17 DIRECT
+# features silenced by an INCOMPLETENESS in the derivation, not by anything about
+# the fact itself.
+# ---------------------------------------------------------------------------
+from groundtruth.runtime.adapters.miniswe import (
+    _DERIVABLE_BOUNDARIES, _EVIDENCE_TYPE_RANK, boundary_for_event as _bfe)
+
+_ALL_BOUNDARIES = ["task_start", "search_result", "failed_search", "file_view",
+                   "edit_result", "test_result", "submit"]
+
+
+def test_no_evidence_type_is_dropped_at_every_boundary():
+    """THE regression: a type expired everywhere is a feature deleted, not gated."""
+    dead = [et for et in _EVIDENCE_TYPE_RANK
+            if all(boundary_verdict(_Env(et), b) == BOUNDARY_MISMATCH for b in _ALL_BOUNDARIES)]
+    assert not dead, f"expiry would silence these at EVERY boundary: {dead}"
+
+
+def test_unobservable_contracts_abstain_rather_than_expire():
+    assert boundary_verdict(_Env("trace_frame"), "edit_result") == BOUNDARY_UNKNOWN
+    assert boundary_verdict(_Env("trace_frame"), "search_result") == BOUNDARY_UNKNOWN
+
+
+def test_derivable_set_matches_what_boundary_for_event_can_emit():
+    """Keep the constant honest: if the derivation gains a boundary and this set does not, expiry
+    silently stops firing for it; if it loses one, expiry starts deleting a feature."""
+    from groundtruth.runtime.gateway import ToolEvent, KIND_EDIT, KIND_TEST, KIND_VIEW, KIND_SEARCH
+    emitted = {_bfe(ToolEvent(kind=k), zero_results=z)
+               for k in (KIND_EDIT, KIND_TEST, KIND_VIEW, KIND_SEARCH) for z in (False, True)}
+    emitted.discard(None)
+    assert emitted == set(_DERIVABLE_BOUNDARIES), (
+        f"derivation emits {sorted(emitted)} but expiry trusts {sorted(_DERIVABLE_BOUNDARIES)}")
+
+
+def test_expiry_still_bites_within_the_derivable_set():
+    """Guard against over-correction — the gate must not go universally toothless."""
+    assert boundary_verdict(_Env("caller_break"), "edit_result") == BOUNDARY_MATCH
+    assert boundary_verdict(_Env("caller_break"), "search_result") == BOUNDARY_MISMATCH

@@ -251,6 +251,13 @@ def _boundary_match(env: EvidenceEnvelope, observed_event: "str | None") -> int:
     return 0
 
 
+# The ONLY boundaries `boundary_for_event` can derive from a tool event. Expiry may fire only on a
+# contract inside this set: a fact contracted elsewhere can never be OBSERVED at its own boundary, so
+# treating "not equal" as expired would delete it at every observation. Keep in sync with
+# boundary_for_event — a test asserts they agree.
+_DERIVABLE_BOUNDARIES = frozenset({
+    "edit_result", "test_result", "file_view", "search_result", "failed_search"})
+
 BOUNDARY_MATCH = "match"
 BOUNDARY_MISMATCH = "mismatch"
 BOUNDARY_UNKNOWN = "unknown"
@@ -305,7 +312,21 @@ def boundary_verdict(env: EvidenceEnvelope, observed_event: "str | None") -> str
     except Exception:  # noqa: BLE001
         contracted = None
     if contracted:
-        return BOUNDARY_MATCH if contracted == observed_event else BOUNDARY_MISMATCH
+        if contracted == observed_event:
+            return BOUNDARY_MATCH
+        # UNOBSERVABLE CONTRACT => ABSTAIN. `boundary_for_event` can only derive the five kinds a
+        # tool event carries (edit_result / test_result / file_view / search_result /
+        # failed_search). A fact contracted to a boundary OUTSIDE that set — task_start,
+        # failure_obs, submit, first_view_edit — can therefore NEVER be observed at its own
+        # boundary, so every observation would read `mismatch` and expiry would DELETE it
+        # EVERYWHERE. Measured: trace_frame (failure_obs) was dropped at all 7 boundaries;
+        # submit_refusal, obligations/brief_localization (task_start) and cochange_prior
+        # (first_view_edit) are in the same class — four of the 17 DIRECT features, permanently
+        # silenced by an INCOMPLETENESS in the derivation rather than by anything about the fact.
+        # Expiry may only fire on a contract this seam can actually witness.
+        if contracted not in _DERIVABLE_BOUNDARIES:
+            return BOUNDARY_UNKNOWN
+        return BOUNDARY_MISMATCH
     return BOUNDARY_UNKNOWN
 
 
