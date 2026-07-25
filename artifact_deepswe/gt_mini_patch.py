@@ -4991,7 +4991,19 @@ def _loc_reslot_payload():
     Correct-or-quiet: baseline / flag off / latch spent / package absent / no rows / any fault ->
     "" (byte-identical abstain). The latch is SPENT only on a non-empty delivered block."""
     global _loc_reslot_delivered
-    if _GT_BASELINE or _loc_reslot_delivered or not _loc_reslot_on():
+    # FLARE-AWARE LATCH (2026-07-25). WS-2 FLARE (`_ss_flare_redeliver`) exists to un-suppress a
+    # still-relevant localization target the moment the agent is in DEMONSTRATED difficulty (a
+    # degenerate loop fired) — the fact scrolled out of the window or the agent lost the thread.
+    # But FLARE runs at the SS-referee layer, DOWNSTREAM of production, while this producer latch
+    # spends at production. So once the reslot had delivered, this returned "" immediately and
+    # FLARE had nothing to un-suppress: the two mechanisms were designed to cooperate and the
+    # latch silently pre-empted the one that matters most, exactly when the agent is stuck.
+    # Re-production is allowed ONLY under the same conditions FLARE itself requires (GT_SS_FLARE on
+    # AND a loop detected), so it is byte-identical whenever that flag is off. It does NOT add a
+    # dose — the re-produced answer re-competes for the SAME <=1 slot through the normal arbiter.
+    if _GT_BASELINE or not _loc_reslot_on():
+        return "", None
+    if _loc_reslot_delivered and not _ss_flare_redeliver("post_search.localize", is_loc=True):
         return "", None
     try:
         from groundtruth.runtime.gateway import GatewayState as _GatewayState
