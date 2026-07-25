@@ -89,8 +89,12 @@ jobs:
             # failure is classifiable from the LOG rather than by another blind rebuild.
             node -e "try{const t=require(\"/opt/gt/tsmod/node_modules/typescript\");console.log(\"require deterministic path OK version=\"+t.version)}catch(e){console.log(\"require deterministic path FAILED: \"+e.message)}"
             printf "function f(a: number {" > /tmp/probe.ts
-            # stderr TAIL (not head): node echoes the whole eval'd script before the actual error, so
-            # printing the first N chars showed only the script — a diagnostic bug that cost a cycle.
+            # stderr TAIL (not head): node echoes the whole evaluated script before the actual error,
+            # so printing the first N chars showed only the script - a diagnostic bug that cost a
+            # cycle. NOTE: no apostrophes anywhere in this block - it lives inside bash -lc SINGLE
+            # quotes, so one apostrophe closes the string and every later line silently runs on the
+            # HOST instead of in the image (that is exactly how the previous build died: the host has
+            # no /opt/gt/python/bin/python3, giving a bare exit 127).
             /opt/gt/python/bin/python3 -c "import sys,subprocess; sys.path.insert(0,\"/opt/gt/src\"); from groundtruth.runtime.edit_check import _TS_PARSE_SCRIPT as S; r=subprocess.run([\"node\",\"-e\",S,\"/tmp/probe.ts\"],capture_output=True,text=True,cwd=\"/tmp\"); print(\"probe rc=\",r.returncode); print(\"probe out=\",repr(r.stdout)); print(\"probe err_tail=\",repr(r.stderr[-600:]))"
             /opt/gt/python/bin/python3 -c "import sys,os,tempfile; sys.path.insert(0,\"/opt/gt/src\"); from groundtruth.runtime.edit_check import check_edit_syntax; d=tempfile.mkdtemp(); p=os.path.join(d,\"b.ts\"); open(p,\"w\").write(\"function f(a: number {\"); r=check_edit_syntax(p,d); print(\"TS at-edit probe ->\", r); assert r[\"verdict\"]==\"syntax_error\", \"TS at-edit checker is DARK in the published image (typescript module unresolvable from a repo with no node_modules)\""
             gopls version
