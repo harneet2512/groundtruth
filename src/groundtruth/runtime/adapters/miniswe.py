@@ -230,9 +230,25 @@ def _boundary_match(env: EvidenceEnvelope, observed_event: "str | None") -> int:
         return 1
     try:
         from groundtruth.runtime.fact_registry import required_event
-        return 1 if required_event(et) == observed_event else 0
-    except Exception:  # noqa: BLE001 -- unregistered/unresolvable type ranks as today
-        return 0
+        if required_event(et) == observed_event:
+            return 1
+    except Exception:  # noqa: BLE001 -- unregistered/unresolvable type falls through
+        pass
+    # STEERS declare their boundary in a DIFFERENT table. `fact_registry` covers the 11 FACT
+    # classes; the verify.horizon.* steers (GT_HYPOTHESIS owns verify.horizon.pivot) are
+    # event-bound in `context_policy.EVENT_BOUND_PAYLOADS` instead — pivot to TEST_RESULT,
+    # advisory/urgent/gate to REVIEW_TRANSITION, gate also to PRE_SUBMIT. Consulting only the
+    # fact registry scored every steer 0, so a contracted FACT would always out-rank a steer that
+    # was in fact contracted for this very observation. Two contract tables, one question: is this
+    # payload owed HERE? Both are declarative and reviewed; neither is invented here.
+    try:
+        from groundtruth.runtime.context_policy import EVENT_BOUND_PAYLOADS
+        for event, payloads in EVENT_BOUND_PAYLOADS.items():
+            if et in payloads and getattr(event, "value", None) == observed_event:
+                return 1
+    except Exception:  # noqa: BLE001 -- unresolvable binding ranks as today
+        pass
+    return 0
 
 
 def boundary_for_event(event: "ToolEvent | None", *, zero_results: bool = False) -> "str | None":

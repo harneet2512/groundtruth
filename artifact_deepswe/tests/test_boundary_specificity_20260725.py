@@ -163,3 +163,40 @@ def test_exemption_does_not_break_contracted_facts_winning_their_boundary():
     present, newfile_precedent still wins."""
     assert arbitrate([_Env("new_file_destination"), _Env("caller_break")],
                      frozenset(), "failed_search").evidence_type == "new_file_destination"
+
+
+# ---------------------------------------------------------------------------
+# #31 — CAP byte-owners resolve through TWO contract tables.
+#
+# 5 of the 7 CAP byte-owners already resolve via fact_registry through the
+# evidence_type whose bytes they own (GT_EDIT_CHECK->edit_result,
+# GT_PATCH_DELTA->edit_result, GT_SS_SUBMIT_RED->submit,
+# GT_CHANGE_SURFACE->failed_search, GT_LOC_RESLOT->search_result). No new
+# registrations were needed — the ALREADY_BUILT check paid again.
+#
+# The remaining two are STEERS, and steers declare their boundary in
+# context_policy.EVENT_BOUND_PAYLOADS, not fact_registry. Consulting only the
+# fact registry scored every steer 0, so a contracted FACT would always out-rank
+# a steer that WAS contracted for this very observation.
+# ---------------------------------------------------------------------------
+
+def test_steer_matches_its_event_bound_boundary():
+    """GT_HYPOTHESIS owns verify.horizon.pivot, event-bound to TEST_RESULT."""
+    assert _boundary_match(_Env("verify.horizon.pivot"), "test_result") == 1
+
+
+def test_steer_does_not_match_an_unrelated_boundary():
+    """The binding must still DISCRIMINATE — matching everywhere is the static table again."""
+    assert _boundary_match(_Env("verify.horizon.pivot"), "search_result") == 0
+
+
+def test_review_transition_steers_bind_there_not_to_test_result():
+    for et in ("verify.horizon.advisory", "verify.horizon.urgent"):
+        assert _boundary_match(_Env(et), "review_transition") == 1, et
+        assert _boundary_match(_Env(et), "test_result") == 0, et
+
+
+def test_fact_table_still_wins_where_it_resolves():
+    """Fact resolution is consulted FIRST; the steer table is a fallback, not an override."""
+    assert _boundary_match(_Env("new_file_destination"), "failed_search") == 1
+    assert _boundary_match(_Env("new_file_destination"), "test_result") == 0
