@@ -83,3 +83,40 @@ def test_selection_is_a_pure_function_of_its_inputs():
     envs = [_Env("new_file_destination"), _Env("caller_break"), _Env("covering_verdict")]
     winners = {arbitrate(list(envs), frozenset(), "failed_search").evidence_type for _ in range(50)}
     assert len(winners) == 1, f"non-deterministic winner: {winners}"
+
+
+# ---------------------------------------------------------------------------
+# boundary_for_event — deriving the §1 boundary from the observation.
+# The §1 vocabulary is FINER than the event kind, and the difference is
+# load-bearing: newfile_precedent is contracted to `failed_search`, NOT
+# `search_result`. A search that returned hits and one that came back EMPTY are
+# different decision moments, and only the empty one owes a new-file precedent.
+# ---------------------------------------------------------------------------
+from groundtruth.runtime.adapters.miniswe import boundary_for_event
+from groundtruth.runtime.gateway import (
+    KIND_EDIT, KIND_SEARCH, KIND_TEST, KIND_VIEW, ToolEvent)
+
+
+@pytest.mark.parametrize("kind,zero,expected", [
+    (KIND_EDIT, False, "edit_result"),
+    (KIND_TEST, False, "test_result"),
+    (KIND_VIEW, False, "file_view"),
+    (KIND_SEARCH, False, "search_result"),
+    (KIND_SEARCH, True, "failed_search"),
+])
+def test_boundary_derivation(kind, zero, expected):
+    assert boundary_for_event(ToolEvent(kind=kind), zero_results=zero) == expected
+
+
+def test_empty_search_is_a_different_boundary_than_a_hit():
+    """THE distinction newfile_precedent depends on — collapsing these would silently
+    re-break the feature this whole change exists to unblock."""
+    ev = ToolEvent(kind=KIND_SEARCH)
+    assert boundary_for_event(ev, zero_results=True) != boundary_for_event(ev, zero_results=False)
+    assert required_event("new_file_destination") == boundary_for_event(ev, zero_results=True)
+
+
+def test_undeterminable_boundary_ranks_as_today():
+    """Correct-or-quiet: an unknown boundary must never invent a match."""
+    assert boundary_for_event(None) is None
+    assert boundary_for_event(ToolEvent(kind="something_else")) is None

@@ -59,7 +59,9 @@ from groundtruth.runtime.evidence_envelope import (
     VERIFIED,
     WARNING,
 )
-from groundtruth.runtime.gateway import CoveringResult, ToolEvent, classify_command
+from groundtruth.runtime.gateway import (
+    KIND_EDIT, KIND_SEARCH, KIND_TEST, KIND_VIEW,
+    CoveringResult, ToolEvent, classify_command)
 from groundtruth.runtime.native_render import (
     render_body_concept_native,
     render_caller_contract_native,
@@ -215,6 +217,31 @@ def _boundary_match(env: EvidenceEnvelope, observed_event: "str | None") -> int:
         return 0
 
 
+def boundary_for_event(event: "ToolEvent | None", *, zero_results: bool = False) -> "str | None":
+    """Derive the fine §1 observation boundary from the tool event (PURE, no I/O).
+
+    The §1 vocabulary `fact_registry` ranks against is FINER than the event kind alone, and the
+    difference is load-bearing: `newfile_precedent` is contracted to `failed_search`, NOT
+    `search_result`. A search that RETURNED hits and one that came back EMPTY are different
+    decision moments, and only the empty one owes a new-file precedent. So the caller must pass
+    ``zero_results`` — it owns the outcome classification; this module stays pure.
+
+    Returns None when the boundary cannot be determined, which leaves ranking exactly as it is
+    today (correct-or-quiet: an undetermined boundary must never invent a match)."""
+    if event is None:
+        return None
+    kind = getattr(event, "kind", None)
+    if kind == KIND_EDIT:
+        return "edit_result"
+    if kind == KIND_TEST:
+        return "test_result"
+    if kind == KIND_VIEW:
+        return "file_view"
+    if kind == KIND_SEARCH:
+        return "failed_search" if zero_results else "search_result"
+    return None
+
+
 def _priority(
     env: EvidenceEnvelope,
     recently_delivered: "frozenset[str]" = frozenset(),
@@ -272,6 +299,7 @@ def select(
     max_doses: int = 1,
     multidose: bool = False,
     recently_delivered: "frozenset[str]" = frozenset(),
+    observed_event: "str | None" = None,
 ) -> "list[EvidenceEnvelope]":
     """WS-1 (2026-07-23) — the dose SET, superset of :func:`arbitrate`.
 
@@ -291,12 +319,13 @@ def select(
     if not envelopes:
         return []
     if not multidose or max_doses <= 1:
-        w = arbitrate(envelopes, recently_delivered)
+        w = arbitrate(envelopes, recently_delivered, observed_event)
         return [w] if w is not None else []
     out: "list[EvidenceEnvelope]" = []
     seen: "set[str]" = set()
     for env in sorted(
-            envelopes, key=lambda e: _priority(e, recently_delivered), reverse=True):
+            envelopes, key=lambda e: _priority(e, recently_delivered, observed_event),
+            reverse=True):
         if env.dedup_key in seen:
             continue
         out.append(env)
