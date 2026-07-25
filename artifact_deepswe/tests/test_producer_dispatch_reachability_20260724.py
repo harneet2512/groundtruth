@@ -84,3 +84,34 @@ def test_gateway_off_reaches_nothing(reached, monkeypatch):
     monkeypatch.setenv("GT_GATEWAY", "0")
     assert reached(_edit({"pkg/new.py": ("", "x = 1\n")})) == set(), \
         "producers ran with the gateway master flag off"
+
+
+# ---------------------------------------------------------------------------
+# ARBITRATION HEADROOM. Reaching a producer is not enough under the <=1-dose law:
+# the candidate must also WIN. change_surface ranks LOWEST in the miniswe priority
+# table (new_file_destination 15, missing_role 22) against signature_mismatch 50
+# and caller_break 48. So the edit-path trigger only ever delivers if the higher-
+# ranked producers stay QUIET on a creation.
+#
+# They do — a brand-new file has no prior signature to break and no graph-indexed
+# callers — but that is a PROPERTY OF THEIR IMPLEMENTATIONS, not a guarantee. If
+# either ever starts emitting on a pure creation it would silently starve
+# newfile_precedent forever, and the ledger would show "produced, not delivered"
+# rather than anything that looks like a bug. Pin it.
+# ---------------------------------------------------------------------------
+
+def test_pure_creation_leaves_the_dose_slot_free(tmp_path, monkeypatch):
+    for flag in ("GT_GATEWAY", "GT_CHANGE_SURFACE", "GT_PATCH_DELTA", "GT_CS_EDIT_TRIGGER"):
+        monkeypatch.setenv(flag, "1")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "new_mod.py").write_text("def brand_new(a, b):\n    return a + b\n")
+    state = gw.GatewayState(repo_root=str(tmp_path), issue_text="add a new helper module")
+    event = _edit({"pkg/new_mod.py": ("", "def brand_new(a, b):\n    return a + b\n")})
+
+    assert gw._produce_patch_delta(event, state) == [], (
+        "patch_delta emitted on a PURE CREATION — it outranks change_surface 50 vs 15/22 and "
+        "would starve newfile_precedent at exactly the moment it is most useful"
+    )
+    assert gw._produce_caller_contract(event, state) == [], (
+        "caller_contract emitted on a PURE CREATION — it outranks change_surface 48 vs 15/22"
+    )
