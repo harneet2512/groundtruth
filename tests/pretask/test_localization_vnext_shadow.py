@@ -138,6 +138,8 @@ def test_live_brief_text_and_localization_proof_are_byte_identical(tmp_path, mon
 
     repo, db = _fixture(tmp_path)
     issue = "parse_value should call decode"
+    anchors_path = tmp_path / "gt_issue_anchors.json"
+    monkeypatch.setenv("GT_ANCHORS_PATH", str(anchors_path))
     monkeypatch.setattr(module, "_get_model", lambda: module._ZeroEmbeddingModel())
     monkeypatch.setattr(module, "_SEMANTIC_AVAILABLE", False)
     monkeypatch.delenv("GT_LOC_VNEXT_SHADOW", raising=False)
@@ -150,3 +152,4 @@ def test_live_brief_text_and_localization_proof_are_byte_identical(tmp_path, mon
     assert shadow.brief_text.encode("utf-8") == legacy.brief_text.encode("utf-8")
     assert shadow.localization_proof == legacy.localization_proof
     assert [entry.path for entry in shadow.files] == [entry.path for entry in legacy.files]
+    assert anchors_path.is_file()

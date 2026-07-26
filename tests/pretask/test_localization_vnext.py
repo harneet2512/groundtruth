@@ -1111,11 +1111,11 @@ def test_semantic_near_ties_use_stable_path_symbol_order(tmp_path, monkeypatch):
             vectors = []
             for index, text in enumerate(texts):
                 if index == 0:
-                    vectors.append([1.0, self.query_sign * 0.0001])
+                    vectors.append([1.0, self.query_sign * 0.001])
                 elif "symbol: JsonParser.parse" in text:
-                    vectors.append([1.0, 0.0001])
+                    vectors.append([1.0, 0.001])
                 elif "symbol: BaseParser.parse" in text:
-                    vectors.append([1.0, -0.0001])
+                    vectors.append([1.0, -0.001])
                 else:
                     vectors.append([0.0, 1.0])
             return vectors

@@ -1037,7 +1037,7 @@ def _fts_candidate_signals(
 
 
 _SEMANTIC_VECTOR_CACHE_MAX = LocalizationPolicy().max_candidates
-_SEMANTIC_RANK_DECIMALS = 6
+_SEMANTIC_RANK_DECIMALS = 5
 _SEMANTIC_VECTOR_CACHE: weakref.WeakKeyDictionary[
     Any,
     OrderedDict[str, tuple[float, ...]],
