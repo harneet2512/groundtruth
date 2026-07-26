@@ -179,7 +179,9 @@ def test_scoring_uses_measured_legacy_byte_identity_instead_of_stamping_pass():
             "ranked_discovery_files": [],
             "deterministic": True,
             "p95_latency_ms": 1.0,
+            "shadow_total_p95_latency_ms": 9.0,
             "peak_memory_bytes": 1,
+            "shadow_total_peak_memory_bytes": 9,
             "implied_inspection_tokens": 1,
         },
     }
@@ -187,6 +189,8 @@ def test_scoring_uses_measured_legacy_byte_identity_instead_of_stamping_pass():
     scored = score_sealed_case(sealed, {"gold_files": ["src/a.py"]})
 
     assert scored["safety"]["legacy_byte_identity"] is False
+    assert scored["new"]["latency_ms"] == 9.0
+    assert scored["new"]["peak_memory_bytes"] == 9
 
 
 def test_patch_grounded_scoring_records_symbol_region_and_line_precision():
@@ -244,3 +248,49 @@ def test_patch_grounded_scoring_records_symbol_region_and_line_precision():
     assert scored["new"]["region_precision"] == 0.5
     assert scored["new"]["line_recall"] == 1.0
     assert scored["new"]["line_precision"] == 0.4
+
+
+def test_line_scoring_accepts_the_same_suffix_path_match_as_file_scoring():
+    sealed = {
+        "case": {"id": "case", "language": "python", "split": "random"},
+        "legacy": {
+            "candidate_order": [],
+            "witnesses": [],
+            "implied_inspection_tokens": 0,
+            "latency_ms": 1.0,
+            "peak_memory_bytes": 1,
+            "byte_identity": True,
+        },
+        "vnext": {
+            "discoveries": [],
+            "admitted_regions": [
+                {
+                    "file_path": "checkout/src/a.py",
+                    "start_line": 10,
+                    "end_line": 12,
+                }
+            ],
+            "metrics": {"leakage_count": 0},
+        },
+        "comparison": {
+            "new_admitted_files": ["checkout/src/a.py"],
+            "ranked_discovery_files": ["checkout/src/a.py"],
+            "deterministic": True,
+            "p95_latency_ms": 1.0,
+            "peak_memory_bytes": 1,
+            "implied_inspection_tokens": 1,
+        },
+    }
+
+    scored = score_sealed_case(
+        sealed,
+        {
+            "gold_files": ["src/a.py"],
+            "gold_line_ranges": [
+                {"file": "src/a.py", "start": 11, "end": 12},
+            ],
+        },
+    )
+
+    assert scored["new"]["line_recall"] == 1.0
+    assert scored["new"]["line_precision"] == 2 / 3

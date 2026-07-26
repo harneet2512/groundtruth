@@ -655,6 +655,17 @@ def run_sealed_case(
     new_latencies = [
         float(result.metrics.get("latency_ms") or 0.0) for result in results
     ]
+    shadow_total_latencies = [
+        legacy_measurement.latency_ms + latency
+        for latency in new_latencies
+    ]
+    shadow_total_peak_memory = max(
+        [
+            legacy_measurement.peak_memory_bytes,
+            *new_peaks,
+        ],
+        default=legacy_measurement.peak_memory_bytes,
+    )
     ablations = {}
     for component in (
         "behavioral_facets",
@@ -730,6 +741,15 @@ def run_sealed_case(
             "warm_latency_ms": statistics.median(new_latencies[1:]),
             "p95_latency_ms": _percentile(new_latencies, 0.95),
             "peak_memory_bytes": max(new_peaks, default=0),
+            "shadow_total_cold_latency_ms": shadow_total_latencies[0],
+            "shadow_total_warm_latency_ms": statistics.median(
+                shadow_total_latencies[1:]
+            ),
+            "shadow_total_p95_latency_ms": _percentile(
+                shadow_total_latencies,
+                0.95,
+            ),
+            "shadow_total_peak_memory_bytes": shadow_total_peak_memory,
             "memory_measurement_methods": new_memory_methods,
             "ablations": ablations,
             "algorithmic_contribution_evidence": [
@@ -815,8 +835,26 @@ def score_sealed_case(
         for region in new_regions
         for line in range(int(region["start_line"]), int(region["end_line"]) + 1)
     }
+    matched_gold_lines = {
+        (gold_path, line)
+        for gold_path, line in gold_lines
+        if any(
+            candidate_line == line
+            and _matches(candidate_path, {gold_path})
+            for candidate_path, candidate_line in new_lines
+        )
+    }
+    matched_new_lines = {
+        (candidate_path, line)
+        for candidate_path, line in new_lines
+        if any(
+            gold_line == line
+            and _matches(candidate_path, {gold_path})
+            for gold_path, gold_line in gold_lines
+        )
+    }
     new_line_recall = (
-        len(new_lines & gold_lines) / len(gold_lines) if gold_lines else None
+        len(matched_gold_lines) / len(gold_lines) if gold_lines else None
     )
     # Legacy full-file inspection necessarily covers every gold line in any
     # admitted gold file, but not lines in a missed file.
@@ -867,7 +905,7 @@ def score_sealed_case(
         else None
     )
     new_line_precision = (
-        len(new_lines & gold_lines) / len(new_lines)
+        len(matched_new_lines) / len(new_lines)
         if gold_lines and new_lines
         else None
     )
@@ -935,8 +973,14 @@ def score_sealed_case(
             "implied_inspection_tokens": int(
                 sealed["comparison"]["implied_inspection_tokens"]
             ),
-            "latency_ms": float(sealed["comparison"]["p95_latency_ms"]),
-            "peak_memory_bytes": int(sealed["comparison"]["peak_memory_bytes"]),
+            "latency_ms": float(
+                sealed["comparison"].get("shadow_total_p95_latency_ms")
+                or sealed["comparison"]["p95_latency_ms"]
+            ),
+            "peak_memory_bytes": int(
+                sealed["comparison"].get("shadow_total_peak_memory_bytes")
+                or sealed["comparison"]["peak_memory_bytes"]
+            ),
         },
     }
 
