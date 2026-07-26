@@ -21113,6 +21113,13 @@ class CanonicalRuntimeAttachment:
                 EvidenceRole.EXECUTION_REACHABILITY,
                 EvidenceRole.STATE_DEPENDENCY,
                 EvidenceRole.MATERIAL_UNCERTAINTY,
+                # `obligations` fires at task_start, where this is the open decision, but
+                # carries only BEHAVIORAL_CONTRACT -- so the step-0 brief's own obligations
+                # were ineligible for the only decision open when they exist. Useful, never
+                # required: obligations still cannot COMPLETE a target-selection decision.
+                # No in-context producer carries BEHAVIORAL_CONTRACT, so this is inert
+                # unless role-driven eligibility is on.
+                EvidenceRole.BEHAVIORAL_CONTRACT,
             ),
             DecisionContext.SOURCE_UNDERSTANDING: (
                 EvidenceRole.STATE_DEPENDENCY,
@@ -21124,6 +21131,15 @@ class CanonicalRuntimeAttachment:
                 EvidenceRole.STATE_DEPENDENCY,
                 EvidenceRole.VALIDATION,
                 EvidenceRole.MATERIAL_UNCERTAINTY,
+                # The architecture's intended patch coalition is "target implementation +
+                # caller contract + affected state dependency + covering failing test +
+                # material uncertainty". Four of those five roles were listed; the target
+                # itself was not, so localization/def_partition could never join the very
+                # decision they identify the target for. Useful, never required -- a target
+                # alone still cannot COMPLETE a patch decision, which needs the behavioral
+                # contract. No in-context producer carries TARGET_IDENTITY, so this is inert
+                # unless role-driven eligibility is on.
+                EvidenceRole.TARGET_IDENTITY,
             ),
             DecisionContext.PATCH_PROPAGATION: (
                 EvidenceRole.BEHAVIORAL_CONTRACT,
@@ -22166,7 +22182,18 @@ class CanonicalRuntimeAttachment:
             for record in records
             if (
                 commitment_ids
-                and record.decision_context is active.context
+                and (
+                    # Provenance is not eligibility. Under role-driven eligibility a record
+                    # produced for another decision can be released and DELIVERED for this
+                    # one; filtering commitment evidence by provenance made exactly that
+                    # evidence invisible to `commitment_control._qualifying_evidence`, so
+                    # GT could never hold a commitment on account of what it had just shown
+                    # the model. Fifth copy of this comparison found in the pipeline; the
+                    # other four are the temporal gate, the coalition composer, the capsule
+                    # compiler, and the record/contract validators.
+                    self.attempt_runtime.role_driven_coalition
+                    or record.decision_context is active.context
+                )
             )
         )
         certificate_requirements_met = (
@@ -22988,6 +23015,7 @@ def install_canonical_runtime(*, model, agent, env, task):
             AttemptReasoningRuntime,
             RevisionVector,
             RuntimeJournal,
+            role_driven_coalition_enabled,
         )
         from groundtruth.runtime.recovery_assurance import (
             restore_persisted_quarantine,
@@ -23037,6 +23065,10 @@ def install_canonical_runtime(*, model, agent, env, task):
             attempt_id=attempt_seed,
             journal=journal,
             initial_revision=initial_revision,
+            # Resolved HERE, once, at the seam -- the runtime, the temporal gate and the
+            # coalition composer all stay pure so replay reconstructs identical release and
+            # suppression decisions. Default off => byte-identical.
+            role_driven_coalition=role_driven_coalition_enabled(env),
         )
         # A sealed terminal quarantine marker must dominate journal-derived
         # health, exactly once, BEFORE any staging/provider boundary exists --

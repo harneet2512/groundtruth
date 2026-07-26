@@ -343,6 +343,22 @@ GT_AE_ARGS=(
   # (fact_registry.required_event) instead of whichever class ranks highest in the static table.
   --ae "GT_BOUNDARY_SPECIFICITY=${GT_BOUNDARY_SPECIFICITY:-0}"
   --ae "GT_BOUNDARY_EXPIRE=${GT_BOUNDARY_EXPIRE:-0}"
+  # GT_ROLE_DRIVEN_COALITION (2026-07-26): coalition eligibility follows the roles a decision
+  # DECLARES it needs, instead of which producer raised the evidence. Measured on the live
+  # registry: 9 of the 17 features fire at a boundary whose open decision differs from their
+  # declared context, so producer-identity partitioning made oracle eligibility 8/17; role fit
+  # makes it 17/17.
+  #
+  # This is the ONLY lever here that can make the deterministic reasoning runtime ship a capsule
+  # at all -- without it the oracle observes, reduces and produces evidence and then delivers
+  # nothing, which is its state in every run to date. The seam reads this once and hands it to
+  # the runtime; the temporal gate, coalition composer and capsule compiler all receive the same
+  # value, and none of them reads the environment itself (replay must stay deterministic).
+  #
+  # Relaxes NOTHING else: role fit, causal connectivity, freshness, already-visible, supersession,
+  # dedup, the token budget and decision-completeness all still apply. A coalition without a
+  # record carrying the decision's REQUIRED role still refuses to complete.
+  --ae "GT_ROLE_DRIVEN_COALITION=${GT_ROLE_DRIVEN_COALITION:-0}"
 
   # ── Deep 8-dp telemetry sinks (CLAUDE.md mandate) -> host-mounted /gt_out ─────
   # Without these the in-container producers default to /tmp/* and DIE with the

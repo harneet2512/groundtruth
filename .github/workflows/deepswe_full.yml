@@ -110,6 +110,10 @@ on:
         description: "WS-1/2/3/4/5 delivery levers (GT_DOSE_ROTATE+GT_SS_FLARE+GT_RECOVERY_LOOP+GT_L6_FRESH_GATE+GT_CHANGE_SURFACE_COCHANGE+GT_REPRO_SYNTH — NOT multidose). '1' = all ON for the delivery witness; '0' = OFF (byte-identical)."
         required: false
         default: "0"
+      role_driven_coalition:
+        description: "GT_ROLE_DRIVEN_COALITION — coalition eligibility follows the roles a decision DECLARES it needs instead of which producer raised the evidence. DECOUPLED from new_delivery_levers on purpose: it is the only lever that can make the deterministic reasoning runtime ship a capsule AT ALL (without it the oracle observes, reduces and produces evidence, then delivers nothing — its state in every run to date), so bundling it would make a null result ambiguous between 'the oracle delivered nothing' and 'one of eleven bundled levers interfered'. Measured on the live registry: 9 of 17 features fire at a boundary whose open decision differs from their declared context, so partitioning by producer identity gives 8/17 eligibility and role fit gives 17/17. Relaxes nothing else — role fit, causal connectivity, freshness, dedup, token budget and decision-completeness all still apply. '1' = ON (default). '0' = OFF, byte-identical."
+        required: false
+        default: "1"
       enable_multidose:
         description: "GT_MULTIDOSE — >1 dose/observation. SEPARATE from new_delivery_levers because it violates the <=1-dose proof invariant (dose_lte_one). '1' only for a dedicated multidose experiment, never the standard witness. Default '0'."
         required: false
@@ -212,6 +216,13 @@ env:
   GT_SCOPE_AT_SEARCH: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_COVERING_SCOPED: ${{ github.event.inputs.new_delivery_levers || '0' }}
   GT_BOUNDARY_SPECIFICITY: ${{ github.event.inputs.new_delivery_levers || '0' }}
+  # ENABLED (2026-07-26, user directive). Own input, deliberately NOT bundled with
+  # new_delivery_levers — see the input description. This is what lets gt_oracle release a
+  # capsule; every prior run had the deterministic runtime installed, observing and producing
+  # evidence, and shipping nothing. The seam reads it once and hands the same value to the
+  # temporal gate, the coalition composer and the capsule compiler; none of them reads the
+  # environment itself, so replay stays deterministic.
+  GT_ROLE_DRIVEN_COALITION: ${{ github.event.inputs.role_driven_coalition || '1' }}
   # GT_BOUNDARY_EXPIRE is DECOUPLED from new_delivery_levers on purpose (same reasoning as
   # GT_MULTIDOSE above). It is the only lever here that DELETES evidence: it drops a fact delivered
   # outside its contracted boundary. A lever that deletes must be armed DELIBERATELY, never bundled

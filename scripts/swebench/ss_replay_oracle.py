@@ -3164,8 +3164,12 @@ def canonical_replay_enabled(env=None) -> bool:
     }
 
 
-def install_canonical_replay_runtime(g, task: str, env=None):
+def install_canonical_replay_runtime(g, task: str, env=None, recorded_role_driven=None):
     """Install CanonicalRuntimeAttachment for one replay task, or return None.
+
+    ``recorded_role_driven`` is the value the RECORDING was produced with. It is a parameter,
+    never an environment read: ``env`` is usually a copy of ``os.environ``, so deriving the
+    lever from it would let the operator's shell change how a recording replays.
 
     Mirrors the gate's CanonicalSeamDriver: the replay child otherwise drives
     only ``_augment_output`` (:614, :2005), so a green replay speaks to the
@@ -3200,6 +3204,21 @@ def install_canonical_replay_runtime(g, task: str, env=None):
 
     source = dict(os.environ if env is None else (env or {}))
     source.setdefault("GT_ATTEMPT_ID", f"replay:{task}")
+    # Replay must reconstruct the RECORDING's decisions, not the replay process's.
+    #
+    # ``GT_ROLE_DRIVEN_COALITION`` changes which evidence is eligible for a decision, so
+    # inheriting it from the ambient environment makes "same events + same evidence -> same
+    # release/suppression decisions" false: the same recording replays differently depending
+    # on how the operator's shell happens to be configured. The gate/composer/compiler being
+    # PURE does not help -- purity means no hidden reads INSIDE those functions, but the
+    # lever is chosen outside them and is recorded nowhere.
+    #
+    # Every recording that exists predates the lever, so its decisions were produced with it
+    # OFF. Pin it OFF rather than inherit. When attempts start recording the lever, read it
+    # from the recording here and fall back to "0" only when absent.
+    source["GT_ROLE_DRIVEN_COALITION"] = (
+        "0" if recorded_role_driven is None else str(recorded_role_driven).strip()
+    )
     try:
         attachment = installer(
             model=_Model(), agent=_Agent(), env=source,

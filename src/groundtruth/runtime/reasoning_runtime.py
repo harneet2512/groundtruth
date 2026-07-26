@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from dataclasses import asdict, dataclass, replace
@@ -3779,6 +3780,7 @@ class FeatureContract:
         return self.fallback_policy.fallback_substrates
 
 
+
 @dataclass(frozen=True)
 class TemporalRuntimeContext:
     active_decision: ActiveDecision | None
@@ -3863,6 +3865,7 @@ _FACT_DECISION_CONTRACTS: Mapping[
         (EvidenceRole.BLOCKER, EvidenceRole.VALIDATION),
     ),
 }
+
 
 _CAP_FACT_BINDING = {
     "GT_CHANGE_SURFACE": "newfile_precedent",
@@ -4096,6 +4099,25 @@ FEATURE_CONTRACTS: Mapping[str, FeatureContract] = _build_feature_contracts()
 
 def feature_contract_for(feature_id: str) -> FeatureContract | None:
     return FEATURE_CONTRACTS.get(feature_id)
+
+
+
+
+def role_driven_coalition_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """``GT_ROLE_DRIVEN_COALITION`` -- default OFF, so the default is byte-identical.
+
+    When on, coalition eligibility follows the roles a decision declares it needs rather
+    than which producer raised the evidence. Measured motivation: 7 of the 17 features fire
+    at a boundary whose open decision differs from their declared context, and 12 of 25
+    required/useful role slots have no in-context carrier at all.
+
+    Read ONCE by the seam and passed into ``AttemptReasoningRuntime``; never read inside the
+    gate or the composer, which must stay pure for replay.
+    """
+    source = os.environ if env is None else env
+    return str(source.get("GT_ROLE_DRIVEN_COALITION", "0")).strip() == "1"
+
+
 
 
 @dataclass(frozen=True)
@@ -4487,8 +4509,20 @@ def evaluate_feature_contract(
     contract: FeatureContract,
     evidence: EvidenceRecord,
     context: TemporalRuntimeContext,
+    *,
+    role_driven: bool = False,
 ) -> TemporalContractEvaluation:
-    """Evaluate readiness, relevance, release, expiry, and invalidation."""
+    """Evaluate readiness, relevance, release, expiry, and invalidation.
+
+    ``role_driven`` must match the value passed to ``select_evidence_coalition``. This gate
+    runs FIRST in ``AttemptReasoningRuntime``; evidence it rules irrelevant is downgraded to
+    HELD, and the composer then drops it as NOT_READY before any role reasoning. If only the
+    composer honoured the lever, the change would be invisible in production -- see
+    ``tests/runtime/test_role_driven_temporal_gate_20260726.py``.
+
+    A parameter, not an environment read: this must stay pure so replay reconstructs the same
+    release and suppression decisions.
+    """
 
     if evidence.feature_id != contract.feature_id:
         raise ValueError("evidence/feature contract identity mismatch")
@@ -4595,11 +4629,37 @@ def evaluate_feature_contract(
     }
     if evidence.mandatory_reason is MandatoryReason.TASK_OBLIGATION:
         evidence_semantic_nodes.add("obligation:task")
-    relevant = (
-        active.context is contract.decision_context
-        and bool(
-            decision_type_anchors.intersection(evidence.causal_neighborhood)
+    # Compare against the record's OWN stamped context rather than the contract's primary.
+    # Equivalent today (every record carries its contract's primary) but it states the
+    # actual question -- does THIS record answer the open decision -- and stays correct if a
+    # producer ever stamps a boundary-derived context.
+    serves_open_decision = active.context is evidence.decision_context
+    if not serves_open_decision and role_driven:
+        # Provenance did not match, so fall back to what the decision says it NEEDS.
+        # Measured on the live registry: 9 of the 17 features fire at a boundary whose open
+        # decision differs from their declared context, and role fit takes oracle
+        # eligibility from 8/17 to 17/17.
+        serves_open_decision = bool(
+            set(evidence.roles)
+            & (set(active.required_roles) | set(active.useful_roles))
         )
+    # The `decision:` anchor records which decision the evidence was PRODUCED for. The
+    # installed producer (`gateway.py`, which runs at file_view) emits exactly
+    # `decision:{contract.decision_context.value}` -- its own provenance context, never the
+    # open decision's id. So requiring that anchor to name the open decision is the
+    # producer-identity partition again, one layer below the gate, the composer and the
+    # capsule compiler. It is what made a real view-boundary caller_contract record
+    # DECISION_INCOMPLETE while a hand-anchored one compiled.
+    #
+    # Causal connection is NOT waived: `active_semantic_nodes.intersection(...)` below is the
+    # real guard and it still applies -- it strips `decision:` prefixes entirely and matches
+    # on subject/obligation, so unrelated evidence is still rejected.
+    anchored_on_open_decision = bool(
+        decision_type_anchors.intersection(evidence.causal_neighborhood)
+    )
+    relevant = (
+        serves_open_decision
+        and (anchored_on_open_decision or role_driven)
         and bool(active_semantic_nodes.intersection(evidence_semantic_nodes))
     )
     if not relevant:
@@ -5149,8 +5209,16 @@ def compile_observation_capsule(
     renderer: Any = None,
     prior_compilations: Sequence[CapsuleCompilation] = (),
     token_counter: Any = None,
+    role_driven: bool = False,
 ) -> CapsuleCompilation:
-    """Compile one decision-complete coalition without mutating native bytes."""
+    """Compile one decision-complete coalition without mutating native bytes.
+
+    ``role_driven`` must match the value given to the temporal gate and the coalition
+    composer. This is the THIRD place that compared a record's provenance context against
+    the open decision; with only the first two updated, an admitted out-of-context record
+    reached here and the whole capsule failed ``MIXED_DECISION_CONTEXT``. Found by driving
+    the installed path end to end, not by unit tests of the earlier two stages.
+    """
 
     if not enabled:
         return CapsuleCompilation(
@@ -5222,7 +5290,14 @@ def compile_observation_capsule(
             model_call_id=model_call_id,
             failure_code="DECISION_INCOMPLETE",
         )
-    if any(
+    # ONE capsule serves ONE decision -- that invariant is what this guard protects, and it
+    # still holds under role-driven eligibility because every coalition item was selected BY
+    # `select_evidence_coalition` FOR this single active decision. What differs is only
+    # PROVENANCE: an item may have been produced for a different decision and still be the
+    # right thing to say now (a covering RED raised during recovery is exactly what a patch
+    # decision needs). Comparing provenance here would re-impose the producer-identity
+    # partition one stage later and fail the whole capsule.
+    if not role_driven and any(
         item.decision_context is not decision.decision_context
         for item in decision.coalition
     ):
@@ -5544,8 +5619,29 @@ def select_evidence_coalition(
     evidence: Iterable[EvidenceRecord],
     *,
     reasoning_graph: ReasoningGraph | None = None,
+    role_driven: bool = False,
 ) -> OracleDecision:
-    """Select one smallest connected, decision-complete evidence coalition."""
+    """Select one smallest connected, decision-complete evidence coalition.
+
+    ``role_driven`` decides what makes evidence ELIGIBLE for the open decision.
+
+    ``False`` (default, byte-identical): a record must have been produced FOR this decision
+    context, so the pool is partitioned by producer identity.
+
+    ``True``: eligibility follows the roles the decision actually declares it needs, and
+    ``decision_context`` becomes provenance. Measured motivation -- under the partition,
+    12 of 25 required/useful role slots have no reachable carrier and PATCH_CONSTRUCTION
+    can never hold more than ``{caller_contract, obligations}``, so most of what the
+    ``useful_roles`` tables ask for is unreachable.
+
+    This relaxes NOTHING else. Role fit, connectivity, freshness, already-visible,
+    supersession, duplicate-claim dedup, the token budget and -- decisively --
+    decision-completeness all still apply: a coalition without a record carrying the
+    decision's REQUIRED role still does not complete.
+
+    Deliberately a parameter rather than an environment read: this function must stay pure
+    so replay reconstructs identical release/suppression decisions.
+    """
 
     suppressed: dict[str, SuppressionRecord] = {}
     eligible: list[EvidenceRecord] = []
@@ -5570,7 +5666,10 @@ def select_evidence_coalition(
         if item.mandatory_reason is MandatoryReason.TASK_OBLIGATION:
             item_neighborhood.add("obligation:task")
         shared_neighborhood = neighborhood.intersection(item_neighborhood)
-        if item.decision_context is not decision.context:
+        if not role_driven and item.decision_context is not decision.context:
+            # Provenance-only under role-driven eligibility: what the decision NEEDS is
+            # stated by its required/useful roles, checked below, not by which producer
+            # happened to raise the evidence.
             reason = SuppressionReason.OTHER_DECISION
         elif (
             reasoning_graph is not None
@@ -5847,11 +5946,19 @@ class AttemptReasoningRuntime:
         attempt_id: str,
         journal: RuntimeJournal,
         initial_revision: RevisionVector,
+        role_driven_coalition: bool = False,
     ):
         if not attempt_id:
             raise ValueError("attempt_id is required")
         self.attempt_id = attempt_id
         self.journal = journal
+        # Resolved ONCE by the caller (the seam reads the environment) and held as
+        # construction state, so the runtime remains a pure function of its inputs and
+        # replay reconstructs identical release/suppression decisions. Reading the
+        # environment deeper in the pipeline would make replay depend on ambient state.
+        # Both the temporal gate and the coalition composer must receive the SAME value:
+        # if only one honours it, evidence is HELD upstream and the other never sees it.
+        self.role_driven_coalition = bool(role_driven_coalition)
         self._initial_revision = initial_revision
         self.work_state = WorkState.initial(
             attempt_id=attempt_id,
@@ -5991,6 +6098,7 @@ class AttemptReasoningRuntime:
         active = tuple(decisions)[0]
         oracle = self._empty_oracle(active)
         compilation = compile_observation_capsule(
+            role_driven=self.role_driven_coalition,
             native_observation=native_observation,
             decision=oracle,
             observation_id=observation_id,
@@ -6095,6 +6203,7 @@ class AttemptReasoningRuntime:
                         satisfied_predicates=satisfied_predicates,
                         available_substrates=tuple(available_substrates),
                     ),
+                    role_driven=self.role_driven_coalition,
                 )
                 temporal_evaluations[evidence.evidence_id] = evaluation
                 if evaluation.release_allowed:
@@ -6131,6 +6240,7 @@ class AttemptReasoningRuntime:
                         active,
                         scheduled,
                         reasoning_graph=self.reasoning_graph,
+                        role_driven=self.role_driven_coalition,
                     ),
                     temporal_evaluations,
                 )
@@ -6213,6 +6323,7 @@ class AttemptReasoningRuntime:
         self.journal.append_oracle(self.attempt_id, oracle)
 
         compilation = compile_observation_capsule(
+            role_driven=self.role_driven_coalition,
             native_observation=native_observation,
             decision=oracle,
             observation_id=observation_id,
