@@ -519,6 +519,21 @@ def _legacy_inspection_files(
     return []
 
 
+def _shadow_total_latency_samples(
+    legacy_latency_ms: float,
+    shadow_verification_latency_ms: float,
+    vnext_warm_latencies_ms: Sequence[float],
+) -> list[float]:
+    """Keep the measured cold shadow call instead of hiding cache warm-up."""
+    return [
+        float(shadow_verification_latency_ms),
+        *[
+            float(legacy_latency_ms) + float(latency)
+            for latency in vnext_warm_latencies_ms
+        ],
+    ]
+
+
 def run_sealed_case(
     case_input: Mapping[str, Any],
     *,
@@ -655,10 +670,11 @@ def run_sealed_case(
     new_latencies = [
         float(result.metrics.get("latency_ms") or 0.0) for result in results
     ]
-    shadow_total_latencies = [
-        legacy_measurement.latency_ms + latency
-        for latency in new_latencies
-    ]
+    shadow_total_latencies = _shadow_total_latency_samples(
+        legacy_measurement.latency_ms,
+        legacy_measurement.shadow_verification_latency_ms,
+        new_latencies,
+    )
     shadow_total_peak_memory = max(
         [
             legacy_measurement.peak_memory_bytes,
@@ -737,13 +753,23 @@ def run_sealed_case(
             - sum(region.source_tokens for region in new_result.admitted_regions),
             "deterministic_hashes": hashes,
             "deterministic": len(set(hashes)) == 1,
-            "cold_latency_ms": new_latencies[0],
-            "warm_latency_ms": statistics.median(new_latencies[1:]),
+            "cold_latency_ms": max(
+                0.0,
+                legacy_measurement.shadow_verification_latency_ms
+                - legacy_measurement.latency_ms,
+            ),
+            "cold_latency_measurement": (
+                "shadow_total_minus_flag_off_legacy"
+            ),
+            "warm_latency_ms": statistics.median(new_latencies),
             "p95_latency_ms": _percentile(new_latencies, 0.95),
             "peak_memory_bytes": max(new_peaks, default=0),
             "shadow_total_cold_latency_ms": shadow_total_latencies[0],
             "shadow_total_warm_latency_ms": statistics.median(
-                shadow_total_latencies[1:]
+                [
+                    legacy_measurement.latency_ms + latency
+                    for latency in new_latencies
+                ]
             ),
             "shadow_total_p95_latency_ms": _percentile(
                 shadow_total_latencies,

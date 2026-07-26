@@ -15,10 +15,11 @@ import threading
 import time
 import tracemalloc
 import weakref
+from array import array
 from collections import OrderedDict, defaultdict
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence, cast
 
 from groundtruth.pretask.anchors import extract_issue_anchors
 from groundtruth.pretask.spec import extract_spec_v2
@@ -675,6 +676,33 @@ _PASSAGE_FIELD_ORDER = (
     "serialization",
     "test_linkage",
 )
+_STRUCTURED_PASSAGE_CACHE_MAX = 2
+_STRUCTURED_PASSAGE_CACHE_MAX_BYTES = 32 * 1024 * 1024
+_STRUCTURED_PASSAGE_CACHE: OrderedDict[
+    tuple[Any, ...],
+    tuple[dict[str, str], int],
+] = OrderedDict()
+_STRUCTURED_PASSAGE_CACHE_LOCK = threading.Lock()
+
+
+def _graph_file_signature(graph_db: str) -> tuple[tuple[int, int], ...]:
+    """Return a cheap invalidation signature for an immutable indexed graph."""
+    signatures: list[tuple[int, int]] = []
+    for suffix in ("", "-wal"):
+        try:
+            stat = Path(f"{graph_db}{suffix}").stat()
+            signatures.append((int(stat.st_size), int(stat.st_mtime_ns)))
+        except OSError:
+            signatures.append((-1, -1))
+    return tuple(signatures)
+
+
+def _passage_cache_size(passages: dict[str, str]) -> int:
+    """Conservative deterministic storage estimate for bounded LRU admission."""
+    return 256 + sum(
+        128 + 4 * (len(key) + len(value))
+        for key, value in passages.items()
+    )
 
 
 def build_structured_symbol_passages(
@@ -687,10 +715,26 @@ def build_structured_symbol_passages(
     Test linkage is represented only as a count; test identifiers and assertions
     never enter the passage.
     """
+    wanted = {_norm(path) for path in file_paths or ()}
+    try:
+        graph_identity = str(Path(request.graph_db).resolve())
+    except OSError:
+        graph_identity = str(request.graph_db)
+    cache_key = (
+        graph_identity,
+        request.revision_identity,
+        _graph_file_signature(request.graph_db),
+        tuple(sorted(wanted)),
+    )
+    with _STRUCTURED_PASSAGE_CACHE_LOCK:
+        cached_entry = _STRUCTURED_PASSAGE_CACHE.get(cache_key)
+        if cached_entry is not None:
+            _STRUCTURED_PASSAGE_CACHE.move_to_end(cache_key)
+            return dict(cached_entry[0])
+
     con = _open_graph(request.graph_db)
     if con is None:
         return {}
-    wanted = {_norm(path) for path in file_paths or ()}
     try:
         tables = _table_names(con)
         if "nodes" not in tables:
@@ -805,6 +849,23 @@ def build_structured_symbol_passages(
                 f"{str(row['qualified_name'] or row['name'] or '')}"
             )
             passages[key] = passage
+        with _STRUCTURED_PASSAGE_CACHE_LOCK:
+            cached_passages = dict(passages)
+            _STRUCTURED_PASSAGE_CACHE[cache_key] = (
+                cached_passages,
+                _passage_cache_size(cached_passages),
+            )
+            _STRUCTURED_PASSAGE_CACHE.move_to_end(cache_key)
+            while (
+                len(_STRUCTURED_PASSAGE_CACHE)
+                > _STRUCTURED_PASSAGE_CACHE_MAX
+                or sum(
+                    entry[1]
+                    for entry in _STRUCTURED_PASSAGE_CACHE.values()
+                )
+                > _STRUCTURED_PASSAGE_CACHE_MAX_BYTES
+            ):
+                _STRUCTURED_PASSAGE_CACHE.popitem(last=False)
         return passages
     finally:
         con.close()
@@ -1150,12 +1211,17 @@ def _fts_candidate_signals(
     return dict(signals)
 
 
-_SEMANTIC_VECTOR_CACHE_MAX = LocalizationPolicy().max_candidates
+_SEMANTIC_VECTOR_CACHE_MAX = 50_000
+_SEMANTIC_VECTOR_CACHE_MAX_BYTES = 96 * 1024 * 1024
 _SEMANTIC_ENCODE_CHUNK_SIZE = 64
 _SEMANTIC_RANK_DECIMALS = 5
 _SEMANTIC_VECTOR_CACHE: weakref.WeakKeyDictionary[
     Any,
-    OrderedDict[str, tuple[float, ...]],
+    OrderedDict[str, array[float]],
+] = weakref.WeakKeyDictionary()
+_SEMANTIC_VECTOR_CACHE_BYTES: weakref.WeakKeyDictionary[
+    Any,
+    int,
 ] = weakref.WeakKeyDictionary()
 _SEMANTIC_VECTOR_CACHE_LOCK = threading.Lock()
 
@@ -1164,7 +1230,7 @@ def _encode_structured_semantics(
     embedder: Any,
     issue_text: str,
     passages: dict[str, str],
-) -> tuple[tuple[float, ...], dict[str, tuple[float, ...]]]:
+) -> tuple[tuple[float, ...], dict[str, array[float]]]:
     """Encode a singleton issue batch and reuse immutable passage vectors.
 
     Query inference must never share a batch with a variable number of cache
@@ -1191,14 +1257,15 @@ def _encode_structured_semantics(
                 for key, digest in zip(chunk, passage_digests)
             }
         )
-    cached: dict[str, tuple[float, ...]] = {}
-    cache: OrderedDict[str, tuple[float, ...]] | None
+    cached: dict[str, array[float]] = {}
+    cache: OrderedDict[str, array[float]] | None
     try:
         with _SEMANTIC_VECTOR_CACHE_LOCK:
             cache = _SEMANTIC_VECTOR_CACHE.setdefault(
                 embedder,
                 OrderedDict(),
             )
+            _SEMANTIC_VECTOR_CACHE_BYTES.setdefault(embedder, 0)
             for key in passage_keys:
                 cache_key = cache_keys[key]
                 vector = cache.get(cache_key)
@@ -1210,27 +1277,71 @@ def _encode_structured_semantics(
         # hashing. Preserve the uncached encode path for compatibility.
         cache = None
 
-    query_encoded = embedder.encode([issue_text])
+    encode_query = getattr(embedder, "encode_query", None)
+    if callable(encode_query):
+        query_encoded = cast(
+            Callable[[str], Any],
+            encode_query,
+        )(issue_text)
+    else:
+        query_encoded = embedder.encode([issue_text])
     query_vector = tuple(float(value) for value in query_encoded[0])
     encoded_keys: list[str] = []
     for chunk in passage_chunks:
         if all(key in cached for key in chunk):
             continue
-        passage_encoded = embedder.encode(
-            [passages[key] for key in chunk]
-        )
+        passage_texts = [passages[key] for key in chunk]
+        encode_passages = getattr(embedder, "encode_passages", None)
+        if callable(encode_passages):
+            passage_encoded = cast(
+                Callable[[Sequence[str]], Any],
+                encode_passages,
+            )(passage_texts)
+        else:
+            passage_encoded = embedder.encode(passage_texts)
         for key, vector in zip(chunk, passage_encoded):
-            cached[key] = tuple(float(value) for value in vector)
+            dtype = str(getattr(vector, "dtype", "")).lower()
+            cached[key] = array(
+                "f" if dtype == "float32" else "d",
+                (float(value) for value in vector),
+            )
             encoded_keys.append(key)
 
     if cache is not None and encoded_keys:
         with _SEMANTIC_VECTOR_CACHE_LOCK:
+            cache_bytes = int(
+                _SEMANTIC_VECTOR_CACHE_BYTES.get(embedder, 0)
+            )
             for key in encoded_keys:
                 cache_key = cache_keys[key]
+                previous = cache.get(cache_key)
+                if previous is not None:
+                    cache_bytes -= (
+                        len(previous) * previous.itemsize
+                        + len(cache_key)
+                        + 64
+                    )
                 cache[cache_key] = cached[key]
                 cache.move_to_end(cache_key)
-            while len(cache) > _SEMANTIC_VECTOR_CACHE_MAX:
-                cache.popitem(last=False)
+                cache_bytes += (
+                    len(cached[key]) * cached[key].itemsize
+                    + len(cache_key)
+                    + 64
+                )
+            while (
+                len(cache) > _SEMANTIC_VECTOR_CACHE_MAX
+                or cache_bytes > _SEMANTIC_VECTOR_CACHE_MAX_BYTES
+            ):
+                removed_key, removed = cache.popitem(last=False)
+                cache_bytes -= (
+                    len(removed) * removed.itemsize
+                    + len(removed_key)
+                    + 64
+                )
+            _SEMANTIC_VECTOR_CACHE_BYTES[embedder] = max(
+                0,
+                cache_bytes,
+            )
     return query_vector, cached
 
 

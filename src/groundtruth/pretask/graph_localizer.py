@@ -2110,6 +2110,27 @@ class _OnnxEmbedderAdapter:
         ps = self._m.embed_batch(texts[1:], is_query=False) if len(texts) > 1 else []
         return np.asarray([q, *ps], dtype=np.float32)
 
+    def encode_query(self, text):
+        """Encode one issue without relying on positional batch semantics."""
+        import numpy as np
+
+        return np.asarray(
+            [self._m.embed(str(text), is_query=True)],
+            dtype=np.float32,
+        )
+
+    def encode_passages(self, texts):
+        """Encode only code passages; no row may enter query mode."""
+        import numpy as np
+
+        values = list(texts)
+        if not values:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        return np.asarray(
+            self._m.embed_batch(values, is_query=False),
+            dtype=np.float32,
+        )
+
 
 def _get_embedder():
     """Embedder for issue->code SEMANTIC retrieval — the bridge for cases where the

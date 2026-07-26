@@ -1204,6 +1204,206 @@ def test_semantic_passages_use_fixed_chunks_independent_of_cache_history():
     assert first == second
 
 
+def test_asymmetric_embedder_encodes_every_symbol_as_passage():
+    class AsymmetricEmbedder:
+        def __init__(self):
+            self.query_texts = []
+            self.passage_batches = []
+
+        def encode(self, _texts):
+            raise AssertionError("generic positional encode must not be used")
+
+        def encode_query(self, text):
+            self.query_texts.append(text)
+            return [[1.0, 0.0]]
+
+        def encode_passages(self, texts):
+            self.passage_batches.append(list(texts))
+            return [[0.0, 1.0] for _text in texts]
+
+    embedder = AsymmetricEmbedder()
+    passages = {
+        f"src/module_{index:03d}.py::symbol_{index:03d}": (
+            f"symbol: symbol_{index:03d}"
+        )
+        for index in range(130)
+    }
+
+    query, encoded = vnext_engine._encode_structured_semantics(
+        embedder,
+        "behavioral issue",
+        passages,
+    )
+
+    assert query == (1.0, 0.0)
+    assert embedder.query_texts == ["behavioral issue"]
+    assert [len(batch) for batch in embedder.passage_batches] == [64, 64, 2]
+    assert [
+        text
+        for batch in embedder.passage_batches
+        for text in batch
+    ] == [passages[key] for key in sorted(passages)]
+    assert set(encoded) == set(passages)
+
+
+def test_onnx_adapter_exposes_non_positional_query_and_passage_modes():
+    from groundtruth.pretask.graph_localizer import _OnnxEmbedderAdapter
+
+    class FakeModel:
+        dim = 2
+
+        def __init__(self):
+            self.calls = []
+
+        def embed(self, text, *, is_query):
+            self.calls.append(("one", text, is_query))
+            return [1.0, 0.0]
+
+        def embed_batch(self, texts, *, is_query):
+            self.calls.append(("batch", tuple(texts), is_query))
+            return [[0.0, 1.0] for _text in texts]
+
+    model = FakeModel()
+    adapter = _OnnxEmbedderAdapter(model)
+
+    query = adapter.encode_query("issue")
+    passages = adapter.encode_passages(["code one", "code two"])
+
+    assert query.tolist() == [[1.0, 0.0]]
+    assert passages.tolist() == [[0.0, 1.0], [0.0, 1.0]]
+    assert model.calls == [
+        ("one", "issue", True),
+        ("batch", ("code one", "code two"), False),
+    ]
+
+
+def test_semantic_vector_cache_reuses_repository_sized_corpus():
+    class CountingEmbedder:
+        def __init__(self):
+            self.batch_sizes = []
+
+        def encode(self, texts):
+            self.batch_sizes.append(len(texts))
+            return [[float(index), 1.0] for index, _text in enumerate(texts)]
+
+    embedder = CountingEmbedder()
+    passages = {
+        f"src/module_{index:04d}.py::symbol_{index:04d}": (
+            f"symbol: symbol_{index:04d}"
+        )
+        for index in range(600)
+    }
+
+    first = vnext_engine._encode_structured_semantics(
+        embedder,
+        "query",
+        passages,
+    )
+    first_call_count = len(embedder.batch_sizes)
+    second = vnext_engine._encode_structured_semantics(
+        embedder,
+        "query",
+        passages,
+    )
+
+    assert first == second
+    assert embedder.batch_sizes[first_call_count:] == [1]
+
+
+def test_semantic_vector_cache_obeys_byte_budget(monkeypatch):
+    class WideEmbedder:
+        def encode(self, texts):
+            return [
+                [float(index) / 1000.0 for index in range(100)]
+                for _text in texts
+            ]
+
+    embedder = WideEmbedder()
+    monkeypatch.setattr(
+        vnext_engine,
+        "_SEMANTIC_VECTOR_CACHE_MAX_BYTES",
+        2_000,
+    )
+    passages = {
+        f"src/module_{index}.py::symbol_{index}": f"symbol: {index}"
+        for index in range(10)
+    }
+
+    vnext_engine._encode_structured_semantics(
+        embedder,
+        "query",
+        passages,
+    )
+
+    cache = vnext_engine._SEMANTIC_VECTOR_CACHE[embedder]
+    assert cache
+    assert vnext_engine._SEMANTIC_VECTOR_CACHE_BYTES[embedder] <= 2_000
+    assert len(cache) < len(passages)
+
+
+def test_structured_passage_cache_reuses_graph_and_invalidates_on_change(
+    tmp_path,
+    monkeypatch,
+):
+    repo, db = _graph(tmp_path)
+    request = _request(repo, db)
+    with vnext_engine._STRUCTURED_PASSAGE_CACHE_LOCK:
+        vnext_engine._STRUCTURED_PASSAGE_CACHE.clear()
+    original_open_graph = vnext_engine._open_graph
+    open_count = 0
+
+    def counting_open_graph(graph_db):
+        nonlocal open_count
+        open_count += 1
+        return original_open_graph(graph_db)
+
+    monkeypatch.setattr(
+        vnext_engine,
+        "_open_graph",
+        counting_open_graph,
+    )
+
+    first = build_structured_symbol_passages(request)
+    second = build_structured_symbol_passages(request)
+    assert first == second
+    assert open_count == 1
+
+    con = sqlite3.connect(db)
+    con.execute(
+        """
+        INSERT INTO nodes(
+            id,label,name,qualified_name,file_path,start_line,end_line,
+            signature,language,is_test
+        ) VALUES (99,'Function','new_symbol','new_symbol',
+                  'src/parser.py',12,12,'new_symbol()','python',0)
+        """
+    )
+    con.commit()
+    con.close()
+
+    changed = build_structured_symbol_passages(request)
+
+    assert open_count == 2
+    assert "src/parser.py::new_symbol" in changed
+
+
+def test_structured_passage_cache_obeys_byte_budget(tmp_path, monkeypatch):
+    repo, db = _graph(tmp_path)
+    request = _request(repo, db)
+    with vnext_engine._STRUCTURED_PASSAGE_CACHE_LOCK:
+        vnext_engine._STRUCTURED_PASSAGE_CACHE.clear()
+    monkeypatch.setattr(
+        vnext_engine,
+        "_STRUCTURED_PASSAGE_CACHE_MAX_BYTES",
+        1,
+    )
+
+    assert build_structured_symbol_passages(request)
+
+    with vnext_engine._STRUCTURED_PASSAGE_CACHE_LOCK:
+        assert not vnext_engine._STRUCTURED_PASSAGE_CACHE
+
+
 def test_semantic_near_ties_use_stable_path_symbol_order(tmp_path, monkeypatch):
     from groundtruth.pretask import graph_localizer
 

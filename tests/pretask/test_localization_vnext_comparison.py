@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from groundtruth.pretask.localization_vnext.comparison import (
     _legacy_inspection_files,
+    _shadow_total_latency_samples,
     evaluate_winner,
     score_sealed_case,
 )
@@ -156,6 +157,16 @@ def test_legacy_inspection_tokens_use_model_visible_brief_before_reactive_rows()
         {"focus_set": ["src/v74.py"]},
         {"candidate_order": []},
     ) == ["src/v74.py"]
+
+
+def test_shadow_latency_samples_keep_measured_cold_cache_cost():
+    samples = _shadow_total_latency_samples(
+        legacy_latency_ms=10.0,
+        shadow_verification_latency_ms=110.0,
+        vnext_warm_latencies_ms=[2.0, 3.0, 4.0],
+    )
+
+    assert samples == [110.0, 12.0, 13.0, 14.0]
 
 
 def test_scoring_uses_measured_legacy_byte_identity_instead_of_stamping_pass():
