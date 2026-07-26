@@ -333,6 +333,25 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # Pure deterministic E10 assignment kernel consulted by the seam at the
         # delivery chokepoint. Stdlib-only; required for Profile-2 shadow receipts.
         "shadow_holdout.py",
+        # 2026-07-26: the DETERMINISTIC REASONING RUNTIME (gt_oracle). gt_mini_patch's
+        # CanonicalRuntimeAttachment / install_canonical_runtime import all six at MODULE
+        # scope, and gt_headless_runner installs the attachment UNCONDITIONALLY, so without
+        # them the in-container import fails and the divergent inline fallback runs
+        # (Product != agent-time). The coverage guard caught exactly that on run
+        # 30223466896 — the agent never started, which is the guard working as designed.
+        #
+        # Import-closed, verified by module-scope AST closure over src/groundtruth/runtime:
+        # every transitive module-scope dep (covering_runner, episode_state,
+        # evidence_envelope, feature_lineage, hypothesis_ledger, ledger, patterns,
+        # repo_adapters, submit_gate, test_runner) is already shipped above. `telemetry` is
+        # NOT pulled in: its only importers reference it FUNCTION-scope, so the existing
+        # deliberate omission still holds.
+        "reasoning_runtime.py",
+        "canonical_producers.py",
+        "commitment_control.py",
+        "miniswe_provider_boundary.py",
+        "miniswe_commitment_boundary.py",
+        "recovery_assurance.py",
         # SM-3 "Super Mode" engine activation (2026-07-11): four BUILT-but-DARK
         # engines wired into gt_mini_patch behind default-OFF flags. gt_mini_patch
         # imports them at MODULE scope (regex-caught regardless of flag branch), so

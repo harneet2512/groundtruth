@@ -18,8 +18,12 @@ from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import Enum
 from typing import Any, Mapping
 
-from groundtruth.runtime import evidence_envelope as ee
-from groundtruth.runtime import fact_registry
+# Fully-qualified module imports, matching every other shipped runtime module. The
+# `from groundtruth.runtime import X` form records a dependency on the PACKAGE, which is
+# not a shipped module, so the injection import-closure check reports a hole and the
+# in-container import can fail. See tests/test_deepswe_injection_import_coverage.py.
+import groundtruth.runtime.evidence_envelope as ee
+import groundtruth.runtime.fact_registry as fact_registry
 from groundtruth.runtime.covering_runner import CoveringAttribution
 from groundtruth.runtime.feature_lineage import (
     CAP_BYTE_OWNER_MECHANISMS,
