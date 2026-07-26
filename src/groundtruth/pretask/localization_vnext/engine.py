@@ -1037,6 +1037,7 @@ def _fts_candidate_signals(
 
 
 _SEMANTIC_VECTOR_CACHE_MAX = LocalizationPolicy().max_candidates
+_SEMANTIC_ENCODE_CHUNK_SIZE = 64
 _SEMANTIC_RANK_DECIMALS = 5
 _SEMANTIC_VECTOR_CACHE: weakref.WeakKeyDictionary[
     Any,
@@ -1050,8 +1051,32 @@ def _encode_structured_semantics(
     issue_text: str,
     passages: dict[str, str],
 ) -> tuple[tuple[float, ...], dict[str, tuple[float, ...]]]:
-    """Encode the issue every time and reuse immutable passage vectors."""
+    """Encode a singleton issue batch and reuse immutable passage vectors.
+
+    Query inference must never share a batch with a variable number of cache
+    misses.  Frozen ONNX kernels can vary slightly with batch shape; at the
+    candidate rail that last-bit drift can change which evidence unit is kept.
+    """
     passage_keys = sorted(passages)
+    passage_chunks = [
+        passage_keys[index : index + _SEMANTIC_ENCODE_CHUNK_SIZE]
+        for index in range(0, len(passage_keys), _SEMANTIC_ENCODE_CHUNK_SIZE)
+    ]
+    cache_keys: dict[str, str] = {}
+    for chunk in passage_chunks:
+        passage_digests = [
+            hashlib.sha256(passages[key].encode("utf-8")).hexdigest()
+            for key in chunk
+        ]
+        chunk_digest = hashlib.sha256(
+            "\0".join(passage_digests).encode("ascii")
+        ).hexdigest()
+        cache_keys.update(
+            {
+                key: f"{chunk_digest}:{digest}"
+                for key, digest in zip(chunk, passage_digests)
+            }
+        )
     cached: dict[str, tuple[float, ...]] = {}
     cache: OrderedDict[str, tuple[float, ...]] | None
     try:
@@ -1061,37 +1086,35 @@ def _encode_structured_semantics(
                 OrderedDict(),
             )
             for key in passage_keys:
-                digest = hashlib.sha256(
-                    passages[key].encode("utf-8")
-                ).hexdigest()
-                vector = cache.get(digest)
+                cache_key = cache_keys[key]
+                vector = cache.get(cache_key)
                 if vector is not None:
-                    cache.move_to_end(digest)
+                    cache.move_to_end(cache_key)
                     cached[key] = vector
     except TypeError:
         # A custom embedder may not support weak references or identity
         # hashing. Preserve the uncached encode path for compatibility.
         cache = None
 
-    missing = [key for key in passage_keys if key not in cached]
-    encoded = embedder.encode(
-        [
-            issue_text,
-            *(passages[key] for key in missing),
-        ]
-    )
-    query_vector = tuple(float(value) for value in encoded[0])
-    for key, vector in zip(missing, encoded[1:]):
-        cached[key] = tuple(float(value) for value in vector)
+    query_encoded = embedder.encode([issue_text])
+    query_vector = tuple(float(value) for value in query_encoded[0])
+    encoded_keys: list[str] = []
+    for chunk in passage_chunks:
+        if all(key in cached for key in chunk):
+            continue
+        passage_encoded = embedder.encode(
+            [passages[key] for key in chunk]
+        )
+        for key, vector in zip(chunk, passage_encoded):
+            cached[key] = tuple(float(value) for value in vector)
+            encoded_keys.append(key)
 
-    if cache is not None and missing:
+    if cache is not None and encoded_keys:
         with _SEMANTIC_VECTOR_CACHE_LOCK:
-            for key in missing:
-                digest = hashlib.sha256(
-                    passages[key].encode("utf-8")
-                ).hexdigest()
-                cache[digest] = cached[key]
-                cache.move_to_end(digest)
+            for key in encoded_keys:
+                cache_key = cache_keys[key]
+                cache[cache_key] = cached[key]
+                cache.move_to_end(cache_key)
             while len(cache) > _SEMANTIC_VECTOR_CACHE_MAX:
                 cache.popitem(last=False)
     return query_vector, cached
@@ -1131,14 +1154,24 @@ def _node_evidence(
         ).fetchall()
         by_id = {int(row["id"]): row for row in extra_rows}
         rows.extend(by_id[node_id] for node_id in extra_ids if node_id in by_id)
-    passages = (
-        {}
-        if "structured_semantics" in request.policy.disabled_components
-        else build_structured_symbol_passages(
+    passages: dict[str, str] = {}
+    if "structured_semantics" not in request.policy.disabled_components:
+        built_passages = build_structured_symbol_passages(
             request,
             file_paths={_norm(str(row["file_path"] or "")) for row in rows},
         )
-    )
+        candidate_passage_keys = {
+            (
+                f"{_norm(str(row['file_path'] or ''))}::"
+                f"{str(row['qualified_name'] or row['name'] or '')}"
+            )
+            for row in rows
+        }
+        passages = {
+            key: built_passages[key]
+            for key in sorted(candidate_passage_keys)
+            if key in built_passages
+        }
     semantic_rank: dict[str, tuple[int, float]] = {}
     if passages:
         try:

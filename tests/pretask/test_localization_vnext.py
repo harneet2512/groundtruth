@@ -1069,6 +1069,9 @@ def test_structured_semantic_passage_vectors_are_reused_without_changing_output(
 ):
     from groundtruth.pretask import graph_localizer
 
+    repo, db = _graph(tmp_path)
+    request = _request(repo, db)
+
     class CountingEmbedder:
         def __init__(self):
             self.batch_sizes = []
@@ -1077,22 +1080,75 @@ def test_structured_semantic_passage_vectors_are_reused_without_changing_output(
             self.batch_sizes.append(len(texts))
             return [
                 [1.0, 0.0]
-                if index == 0 or "JsonParser.parse" in text
+                if text == request.issue_text or "JsonParser.parse" in text
                 else [0.0, 1.0]
-                for index, text in enumerate(texts)
+                for text in texts
             ]
 
     embedder = CountingEmbedder()
     monkeypatch.setattr(graph_localizer, "_EMBEDDER", embedder)
-    repo, db = _graph(tmp_path)
-    request = _request(repo, db)
+    original_passages = vnext_engine.build_structured_symbol_passages
+
+    def noisy_passages(*args, **kwargs):
+        passages = original_passages(*args, **kwargs)
+        passages.update(
+            {
+                f"vendor/noise_{index}.py::noise_{index}": (
+                    f"symbol: noise_{index}\nrole: unrelated"
+                )
+                for index in range(600)
+            }
+        )
+        return passages
+
+    monkeypatch.setattr(
+        vnext_engine,
+        "build_structured_symbol_passages",
+        noisy_passages,
+    )
     facets = extract_behavior_facets(request)
 
     first = discover_candidates(request, facets)
     second = discover_candidates(request, facets)
 
-    assert embedder.batch_sizes[0] > 1
-    assert embedder.batch_sizes[1] == 1
+    assert embedder.batch_sizes[0] == 1
+    assert 1 < embedder.batch_sizes[1] <= request.policy.max_candidates
+    assert embedder.batch_sizes[2] == 1
+    assert first == second
+
+
+def test_semantic_passages_use_fixed_chunks_independent_of_cache_history():
+    class BatchSensitiveEmbedder:
+        def __init__(self):
+            self.batch_sizes = []
+
+        def encode(self, texts):
+            self.batch_sizes.append(len(texts))
+            return [
+                [float(len(texts)), float(index)]
+                for index, _text in enumerate(texts)
+            ]
+
+    embedder = BatchSensitiveEmbedder()
+    passages = {
+        f"src/module_{index:03d}.py::symbol_{index:03d}": (
+            f"symbol: symbol_{index:03d}"
+        )
+        for index in range(130)
+    }
+
+    first = vnext_engine._encode_structured_semantics(
+        embedder,
+        "query",
+        passages,
+    )
+    second = vnext_engine._encode_structured_semantics(
+        embedder,
+        "query",
+        passages,
+    )
+
+    assert embedder.batch_sizes == [1, 64, 64, 2, 1]
     assert first == second
 
 
@@ -1109,8 +1165,8 @@ def test_semantic_near_ties_use_stable_path_symbol_order(tmp_path, monkeypatch):
 
         def encode(self, texts):
             vectors = []
-            for index, text in enumerate(texts):
-                if index == 0:
+            for text in texts:
+                if text == request.issue_text:
                     vectors.append([1.0, self.query_sign * 0.001])
                 elif "symbol: JsonParser.parse" in text:
                     vectors.append([1.0, 0.001])
