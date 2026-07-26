@@ -196,20 +196,31 @@ def test_seam_commitment_evidence_honours_role_driven_eligibility():
 _REPO = Path(__file__).resolve().parents[2]
 
 
-def test_workflow_declares_and_enables_the_lever():
-    workflow = (_REPO / ".github" / "workflows" / "deepswe_full.yml").read_text(
-        encoding="utf-8"
+def test_workflow_enables_the_lever():
+    parsed = yaml.safe_load(
+        (_REPO / ".github" / "workflows" / "deepswe_full.yml").read_text(encoding="utf-8")
     )
-    parsed = yaml.safe_load(workflow)
+    assert str(parsed["env"]["GT_ROLE_DRIVEN_COALITION"]) == "1", (
+        "the lever is not enabled in the job environment"
+    )
+
+
+def test_workflow_stays_within_githubs_dispatch_input_cap():
+    """GitHub rejects a workflow with more than 25 workflow_dispatch inputs.
+
+    Learned the hard way: adding the lever as a 26th input made the ENTIRE workflow
+    undispatchable with HTTP 422 "failed to parse workflow" -- not just the new input, every
+    run. The lever is therefore a literal env value, not an input. If you need it switchable
+    at dispatch time, you must REMOVE another input first.
+    """
+    parsed = yaml.safe_load(
+        (_REPO / ".github" / "workflows" / "deepswe_full.yml").read_text(encoding="utf-8")
+    )
     dispatch_key = True if True in parsed else "on"
     inputs = parsed[dispatch_key]["workflow_dispatch"]["inputs"]
-
-    assert "role_driven_coalition" in inputs, "no dispatch input for the lever"
-    assert inputs["role_driven_coalition"]["default"] == "1", (
-        "the lever is declared but not enabled"
-    )
-    assert "GT_ROLE_DRIVEN_COALITION" in parsed["env"], (
-        "the input never reaches the job environment"
+    assert len(inputs) <= 25, (
+        f"{len(inputs)} workflow_dispatch inputs; GitHub's hard cap is 25 and exceeding it "
+        "makes the whole workflow undispatchable"
     )
 
 
@@ -223,7 +234,7 @@ def test_lever_is_not_bundled_with_the_other_delivery_levers():
     parsed = yaml.safe_load(
         (_REPO / ".github" / "workflows" / "deepswe_full.yml").read_text(encoding="utf-8")
     )
-    assert "new_delivery_levers" not in parsed["env"]["GT_ROLE_DRIVEN_COALITION"]
+    assert "new_delivery_levers" not in str(parsed["env"]["GT_ROLE_DRIVEN_COALITION"])
 
 
 def test_ae_block_forwards_the_lever_into_the_container():
