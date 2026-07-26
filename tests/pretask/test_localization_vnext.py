@@ -2861,3 +2861,54 @@ def test_semantic_capability_is_execution_backed_not_file_presence(tmp_path, mon
     assert result.capabilities.available["frozen_semantic"] is False, (
         "the run reported a semantic capability that never executed"
     )
+
+
+def test_explicit_provenance_does_not_swamp_the_relevance_signal():
+    """Hard provenance gets its own ranking tier; it must not also flood RRF.
+
+    `fuse_by_evidence_class` adds a FLAT +1.0 for any file with explicit
+    provenance, while an RRF class term is capped at 1/(60+1) = 0.0164. Measured
+    across 27,536 real regions: explicit median fused 1.032787 vs ordinary
+    0.044404 - a 23x gap, worth 61 class-agreements against an achievable max of
+    0.079. That was inert while fused_rank was the LAST key in the marginal; once
+    relevance leads admission it means any file the issue merely mentions wins the
+    slot. Production case held_rust_serde_2950: a whole-file
+    `my-binary/src/main.rs:0-0` span carrying only architectural_boundary took the
+    admission slot from gold sitting at rank 9.
+
+    region_order already ranks explicit_provenance in its own top tier
+    (engine.py region_order slot 0), so the additive bonus is double-counting.
+    """
+    mentioned = EvidenceUnit.create(
+        file_path="my-binary/src/main.rs",
+        symbol="",
+        start_line=0,
+        end_line=0,
+        family=EvidenceFamily.LEXICAL,
+        confidence=0.6,
+        provenance=("issue_path",),
+        roles=("architectural_boundary",),
+        signal_class="path",
+        signal_rank=1,
+        explicit_provenance=True,
+    )
+    # A region four independent retrieval classes agree on - the strongest
+    # relevance evidence this scorer can express.
+    corroborated = EvidenceUnit.create(
+        file_path="serde_derive/src/ser.rs",
+        symbol="serialize_body",
+        start_line=100,
+        end_line=140,
+        family=EvidenceFamily.BODY_BM25,
+        confidence=0.6,
+        provenance=("native_body_bm25",),
+        roles=("expected_behavior", "operation"),
+        signal_class="lexical+semantic+identifier+structural",
+        signal_rank=1,
+    )
+    fused = fuse_by_evidence_class([mentioned, corroborated])
+
+    assert fused["serde_derive/src/ser.rs"] > fused["my-binary/src/main.rs"], (
+        f"a merely-mentioned path outscores four agreeing retrieval classes: "
+        f"{fused}"
+    )

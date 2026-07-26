@@ -2444,7 +2444,6 @@ def discover_candidates(
 def fuse_by_evidence_class(evidence: Iterable[EvidenceUnit], k: int = 60) -> dict[str, float]:
     """RRF once per independent class; correlated signals get one vote per file."""
     best_rank: dict[str, dict[str, int]] = defaultdict(dict)
-    explicit: set[str] = set()
     for unit in evidence:
         fp = _norm(unit.file_path)
         signal_classes = {
@@ -2456,14 +2455,15 @@ def fuse_by_evidence_class(evidence: Iterable[EvidenceUnit], k: int = 60) -> dic
             previous = best_rank[fp].get(signal_class)
             if previous is None or unit.signal_rank < previous:
                 best_rank[fp][signal_class] = unit.signal_rank
-        if unit.explicit_provenance:
-            explicit.add(fp)
     fused: dict[str, float] = {}
     for fp, class_ranks in best_rank.items():
-        score = sum(1.0 / (k + rank) for rank in class_ranks.values())
-        if fp in explicit:
-            score += 1.0
-        fused[fp] = round(score, 12)
+        # RRF measures RETRIEVAL AGREEMENT and nothing else. Hard provenance has
+        # its own top tier in `region_order` and its own qualifier in `_marginal`
+        # (`new_fact`), so an additive bonus here is double-counting. A flat +1.0
+        # was worth 61 class-agreements against an achievable maximum of ~0.079,
+        # which was inert while fused_rank was the last key in the marginal and
+        # became decisive once relevance began leading admission.
+        fused[fp] = round(sum(1.0 / (k + rank) for rank in class_ranks.values()), 12)
     return fused
 
 
