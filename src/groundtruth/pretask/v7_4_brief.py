@@ -1338,7 +1338,7 @@ def _path_prior_scores(all_files: list[str], issue_text: str) -> dict[str, float
     return path_scores
 
 
-def run_v74(
+def _run_v74_legacy(
     issue_text: str,
     repo_root: str,
     graph_db: str,
@@ -2045,3 +2045,60 @@ def run_v74(
         sem_flat_gate_fired=sem_flat_gate_fired,
         sem_dispersion_mad=float(sem_dispersion_mad),
     )
+
+
+def run_v74(
+    issue_text: str,
+    repo_root: str,
+    graph_db: str,
+    *,
+    bug_id: str = "unknown",
+    repo: str = "unknown",
+    gold_files: list[str] | None = None,
+    ablation: Ablation = "C",
+    k_anchor: int = DEFAULT_K_ANCHOR,
+    k_sem_top: int = DEFAULT_K_SEM_TOP,
+    k_lex_top: int = 10,
+    tau_anchor: float = DEFAULT_TAU_ANCHOR,
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    min_confidence: float = 0.5,
+    max_graph_expand: int = DEFAULT_MAX_GRAPH_EXPAND,
+    weights: dict[str, float] | None = None,
+    focus_size: int = DEFAULT_FOCUS_SIZE,
+    commit_scores: dict[str, float] | None = None,
+    semantic_body_paths_out: set[str] | None = None,
+) -> V74BriefResult:
+    """Legacy-compatible v7.4 projection plus isolated vNext shadow recording."""
+    result = _run_v74_legacy(
+        issue_text,
+        repo_root,
+        graph_db,
+        bug_id=bug_id,
+        repo=repo,
+        gold_files=gold_files,
+        ablation=ablation,
+        k_anchor=k_anchor,
+        k_sem_top=k_sem_top,
+        k_lex_top=k_lex_top,
+        tau_anchor=tau_anchor,
+        max_depth=max_depth,
+        min_confidence=min_confidence,
+        max_graph_expand=max_graph_expand,
+        weights=weights,
+        focus_size=focus_size,
+        commit_scores=commit_scores,
+        semantic_body_paths_out=semantic_body_paths_out,
+    )
+    if os.getenv("GT_LOC_VNEXT_SHADOW", "0") == "1":
+        from groundtruth.pretask.localization_vnext.shadow import (
+            record_shadow_projection,
+        )
+
+        record_shadow_projection(
+            issue_text=issue_text,
+            repository_root=repo_root,
+            graph_db=graph_db,
+            legacy_result=result,
+            source_projection="run_v74",
+        )
+    return result

@@ -1,0 +1,177 @@
+name: "Localization vNext shadow comparison (offline, sealed gold)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_substrate_digest:
+        description: "Pinned GT substrate image, including frozen embedder and gt-index"
+        required: true
+        default: ""
+      cases_file:
+        description: "Gold-bearing cases manifest under benchmarks/data (merge job only)"
+        required: false
+        default: "oss_all60_cases.json"
+      repos_file:
+        description: "Pinned repositories manifest under benchmarks/data"
+        required: false
+        default: "oss_all60_repos.json"
+      repeats:
+        description: "Determinism repeats per case (minimum 3 enforced by runner)"
+        required: false
+        default: "3"
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  seal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, go, javascript, typescript, rust]
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Prepare gold-free deterministic shard
+        env:
+          CASES_FILE: ${{ inputs.cases_file }}
+          REPOS_FILE: ${{ inputs.repos_file }}
+          LANGUAGE: ${{ matrix.language }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mkdir -p /tmp/vnext_input /tmp/repos /tmp/vnext_graphs /tmp/vnext_out
+          python scripts/localization_vnext_oss_compare.py prepare \
+            --cases "benchmarks/data/$CASES_FILE" \
+            --repos "benchmarks/data/$REPOS_FILE" \
+            --language "$LANGUAGE" \
+            --shard-index "$SHARD" \
+            --shard-count 4 \
+            --out /tmp/vnext_input/cases.input.json
+          python -c "
+          import json
+          rows=json.load(open('/tmp/vnext_input/cases.input.json'))
+          forbidden={'gold_files','gold_symbols','gold_line_ranges','patch_sha256','fix_commit'}
+          leaked=sorted(forbidden & {key for row in rows for key in row})
+          assert not leaked, f'gold leaked into sealing input: {leaked}'
+          print(f'gold-free shard cases={len(rows)} ids={[row[\"id\"] for row in rows]}')
+          "
+
+      - name: Clone exact pinned repositories for shard
+        env:
+          REPOS_FILE: ${{ inputs.repos_file }}
+        run: |
+          python scripts/localization_vnext_oss_compare.py clone \
+            --input /tmp/vnext_input/cases.input.json \
+            --repos "benchmarks/data/$REPOS_FILE" \
+            --destination /tmp/repos
+
+      - name: Pull pinned substrate
+        env:
+          DIGEST: ${{ inputs.gt_substrate_digest }}
+        run: |
+          [ -n "$DIGEST" ] || { echo "::error::no substrate digest"; exit 1; }
+          echo "${{ secrets.GITHUB_TOKEN }}" |
+            docker login ghcr.io \
+              -u "$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" \
+              --password-stdin
+          docker pull "$DIGEST"
+
+      - name: Seal legacy and vNext outputs without gold
+        env:
+          DIGEST: ${{ inputs.gt_substrate_digest }}
+          REPEATS: ${{ inputs.repeats }}
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/src/groundtruth:/opt/gt/src/groundtruth:ro" \
+            -v "$GITHUB_WORKSPACE/scripts/localization_vnext_oss_compare.py:/runner.py:ro" \
+            -v /tmp/vnext_input/cases.input.json:/cases.input.json:ro \
+            -v /tmp/repos:/repos:ro \
+            -v /tmp/vnext_graphs:/graphs \
+            -v /tmp/vnext_out:/out \
+            -e GT_SRC=/opt/gt/src \
+            -e GT_INDEX_BIN=gt-index \
+            -e GT_REQUIRE_FTS5=1 \
+            -e GT_FORCE_ONNX_EMBEDDER=1 \
+            -e GT_REQUIRE_EMBEDDER=1 \
+            -e GT_REQUIRE_LSP=1 \
+            -e GT_LOC_CASE_TIMEOUT=1200 \
+            -e GT_LOC_INDEX_TIMEOUT=900 \
+            -e OMP_NUM_THREADS=1 \
+            -e MKL_NUM_THREADS=1 \
+            -e OPENBLAS_NUM_THREADS=1 \
+            -e NUMEXPR_NUM_THREADS=1 \
+            -e TF_ENABLE_ONEDNN_OPTS=0 \
+            -e TOKENIZERS_PARALLELISM=false \
+            "$DIGEST" \
+            python /runner.py seal \
+              --input /cases.input.json \
+              --repos-dir /repos \
+              --graphs-dir /graphs \
+              --out /out \
+              --repeats "$REPEATS"
+
+      - name: Upload sealed shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loc-vnext-${{ matrix.language }}-${{ matrix.shard }}
+          path: /tmp/vnext_out/
+          if-no-files-found: error
+          retention-days: 14
+
+  score:
+    needs: seal
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Download every sealed shard
+        uses: actions/download-artifact@v4
+        with:
+          pattern: loc-vnext-*
+          path: /tmp/all_sealed
+
+      - name: Load gold only after sealing and score paired results
+        env:
+          CASES_FILE: ${{ inputs.cases_file }}
+        run: |
+          python scripts/localization_vnext_oss_compare.py score \
+            --cases "benchmarks/data/$CASES_FILE" \
+            --sealed-root /tmp/all_sealed \
+            --out /tmp/comparison
+
+      - name: Upload paired comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: localization-vnext-comparison
+          path: /tmp/comparison/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Safety and completeness gate
+        if: always()
+        run: |
+          python -c "
+          import json, os, sys
+          path='/tmp/comparison/COMPARISON.json'
+          if not os.path.exists(path):
+              print('::error::comparison report missing'); sys.exit(1)
+          report=json.load(open(path))
+          complete=bool(report.get('completeness',{}).get('complete'))
+          verdict=str(report.get('winner',{}).get('verdict','INCONCLUSIVE'))
+          print(f'paired={report.get(\"paired_count\")}/{report.get(\"sealed_count\")} complete={complete} verdict={verdict}')
+          if not complete:
+              print('::error::sealed corpus incomplete or duplicated'); sys.exit(1)
+          if verdict == 'OLD_WINS':
+              print('::error::recall/safety winner gate selected OLD_WINS'); sys.exit(1)
+          "
