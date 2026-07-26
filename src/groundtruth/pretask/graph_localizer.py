@@ -2110,6 +2110,27 @@ class _OnnxEmbedderAdapter:
         ps = self._m.embed_batch(texts[1:], is_query=False) if len(texts) > 1 else []
         return np.asarray([q, *ps], dtype=np.float32)
 
+    def encode_query(self, text):
+        """Encode one issue without relying on positional batch semantics."""
+        import numpy as np
+
+        return np.asarray(
+            [self._m.embed(str(text), is_query=True)],
+            dtype=np.float32,
+        )
+
+    def encode_passages(self, texts):
+        """Encode only code passages; no row may enter query mode."""
+        import numpy as np
+
+        values = list(texts)
+        if not values:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        return np.asarray(
+            self._m.embed_batch(values, is_query=False),
+            dtype=np.float32,
+        )
+
 
 def _get_embedder():
     """Embedder for issue->code SEMANTIC retrieval — the bridge for cases where the
@@ -2647,7 +2668,7 @@ def _semantic_score_by_file(
     return _res
 
 
-def localize(
+def _localize_legacy(
     issue_text: str,
     graph_db: str,
     *,
@@ -4078,3 +4099,40 @@ def localize(
         content_leg_reason=_content_reason,
         semantic_body_paths=_semantic_body_terminal_paths,
     )
+
+
+def localize(
+    issue_text: str,
+    graph_db: str,
+    *,
+    issue_anchors: IssueAnchors | None = None,
+    max_hop: int = 3,
+    top_k: int = 8,
+    repo_root: str = "",
+) -> LocalizerResult:
+    """Compatibility projection with an isolated, fail-open vNext shadow.
+
+    The legacy implementation owns the returned object.  Shadow computation
+    receives that object only after it is complete and cannot mutate it.
+    """
+    result = _localize_legacy(
+        issue_text,
+        graph_db,
+        issue_anchors=issue_anchors,
+        max_hop=max_hop,
+        top_k=top_k,
+        repo_root=repo_root,
+    )
+    if os.getenv("GT_LOC_VNEXT_SHADOW", "0") == "1":
+        from groundtruth.pretask.localization_vnext.shadow import (
+            record_shadow_projection,
+        )
+
+        record_shadow_projection(
+            issue_text=issue_text,
+            repository_root=repo_root,
+            graph_db=graph_db,
+            legacy_result=result,
+            source_projection="localize",
+        )
+    return result
