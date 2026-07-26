@@ -62,6 +62,19 @@ def test_cap_role_authority_partitions_all_profile_members() -> None:
     )
 
 
+def test_legacy_cochange_layer_maps_without_laundering_control_layers() -> None:
+    assert metrics.layer_to_fact_class("l3.cochange") == "cochange_prior"
+    assert metrics.layer_to_fact_class("detect.coherence") is None
+    for layer in (
+        "verify.horizon.advisory",
+        "verify.horizon.urgent",
+        "verify.horizon.gate",
+        "verify.horizon.pivot",
+        "verify.horizon.executed",
+    ):
+        assert metrics.layer_to_fact_class(layer) is None
+
+
 def test_import_crosscheck_rejects_role_table_drift(monkeypatch) -> None:
     monkeypatch.setitem(
         metrics._DIRECT_MEMBER_FACTCLASS, "GT_VERIFY_EXECUTE", "covering_red"

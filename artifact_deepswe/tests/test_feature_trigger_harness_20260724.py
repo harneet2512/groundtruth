@@ -43,6 +43,68 @@ def test_signature_delta_fires_on_param_change(tmp_path, monkeypatch):
     assert old == ["a", "b"] and new == ["x", "y", "z"], f"REASON: wrong delta {old}->{new}"
 
 
+# ── REAL BASH EDIT BRIDGE — heredoc redirect after << must reach Gateway edit facts ──
+def test_gateway_bridge_captures_real_heredoc_file_creation(tmp_path, monkeypatch):
+    """The live agent writes files as ``cat <<'EOF' > path``.  This exact shell
+    shape must survive the mini-seam parser and carry an exact absent->present
+    snapshot into Gateway; helper-level ToolEvent construction does not prove it."""
+    _wire(tmp_path, monkeypatch)
+    monkeypatch.setenv("GT_GATEWAY_EDIT_BRIDGES", "1")
+    action = {
+        "command": (
+            "cat <<'EOF' > pkg/new_mod.py\n"
+            "def brand_new(a, b):\n"
+            "    return a + b\n"
+            "EOF"
+        )
+    }
+    (tmp_path / "pkg").mkdir()
+
+    # This hook runs before env.execute in production and owns the exact pre-image.
+    g._gateway_capture_edit_preimage(action)
+    (tmp_path / "pkg" / "new_mod.py").write_text(
+        "def brand_new(a, b):\n    return a + b\n",
+        encoding="utf-8",
+    )
+
+    assert g._classify_action(action) == ("post_edit", "pkg/new_mod.py")
+    changed, before_after = g._gateway_edit_bridges(action, action["command"])
+    assert changed == ("pkg/new_mod.py",)
+    assert before_after == {
+        "pkg/new_mod.py": (None, "def brand_new(a, b):\n    return a + b\n")
+    }, "REASON: the real heredoc creation did not reach newfile/patch/caller producers"
+
+
+def test_gateway_bridge_captures_real_heredoc_signature_edit(tmp_path, monkeypatch):
+    """Existing-file heredoc writes must carry both exact sides to the two
+    signature consumers: signature_delta/GT_PATCH_DELTA and
+    caller_contract.  A changed_files-only event is insufficient."""
+    _wire(tmp_path, monkeypatch)
+    monkeypatch.setenv("GT_GATEWAY_EDIT_BRIDGES", "1")
+    before = "def calculate(a, b):\n    return a + b\n"
+    after = "def calculate(a, b, c):\n    return a + b + c\n"
+    target = tmp_path / "mod.py"
+    target.write_text(before, encoding="utf-8")
+    action = {
+        "command": (
+            "cat <<'EOF' > mod.py\n"
+            "def calculate(a, b, c):\n"
+            "    return a + b + c\n"
+            "EOF"
+        )
+    }
+
+    g._gateway_capture_edit_preimage(action)
+    target.write_text(after, encoding="utf-8")
+    changed, before_after = g._gateway_edit_bridges(action, action["command"])
+
+    assert changed == ("mod.py",)
+    assert before_after == {"mod.py": (before, after)}, (
+        "REASON: the real heredoc modification did not carry exact sides to "
+        "signature_delta/caller_contract"
+    )
+
+
 # ── submit_refusal / GT_SS_SUBMIT_RED — trigger: submit with an unresolved failing test ──
 def test_submit_refusal_fires_on_unresolved_red(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch)

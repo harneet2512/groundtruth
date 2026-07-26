@@ -135,6 +135,7 @@ def _bindings(*rows: tuple[str, str, str | None]) -> tuple[CAPByteOwnerBinding, 
 CAP_BYTE_OWNER_MECHANISMS: Mapping[str, CAPByteOwnerMechanism] = MappingProxyType({
     "GT_CHANGE_SURFACE": CAPByteOwnerMechanism("typed_lineage", _bindings(
         ("change_surface", "missing_role", "newfile_precedent"),
+        ("change_surface", "missing_role_postcreate", "newfile_precedent"),
         ("change_surface", "new_file_destination", "newfile_precedent"),
     )),
     "GT_PATCH_DELTA": CAPByteOwnerMechanism("typed_lineage", _bindings(
@@ -152,6 +153,7 @@ CAP_BYTE_OWNER_MECHANISMS: Mapping[str, CAPByteOwnerMechanism] = MappingProxyTyp
     )),
     "GT_HYPOTHESIS": CAPByteOwnerMechanism("exact_profile_member", _bindings(
         ("governor", "recovery", "recovery"),
+        ("governor", "verify.horizon.pivot", "recovery"),
     )),
     "GT_CERT_DELIVERY": CAPByteOwnerMechanism("exact_profile_member", _bindings(
         ("submit_gate", "submit_refusal", "submit_refusal"),

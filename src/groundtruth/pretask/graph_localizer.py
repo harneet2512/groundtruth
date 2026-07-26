@@ -2647,7 +2647,7 @@ def _semantic_score_by_file(
     return _res
 
 
-def localize(
+def _localize_legacy(
     issue_text: str,
     graph_db: str,
     *,
@@ -4078,3 +4078,40 @@ def localize(
         content_leg_reason=_content_reason,
         semantic_body_paths=_semantic_body_terminal_paths,
     )
+
+
+def localize(
+    issue_text: str,
+    graph_db: str,
+    *,
+    issue_anchors: IssueAnchors | None = None,
+    max_hop: int = 3,
+    top_k: int = 8,
+    repo_root: str = "",
+) -> LocalizerResult:
+    """Compatibility projection with an isolated, fail-open vNext shadow.
+
+    The legacy implementation owns the returned object.  Shadow computation
+    receives that object only after it is complete and cannot mutate it.
+    """
+    result = _localize_legacy(
+        issue_text,
+        graph_db,
+        issue_anchors=issue_anchors,
+        max_hop=max_hop,
+        top_k=top_k,
+        repo_root=repo_root,
+    )
+    if os.getenv("GT_LOC_VNEXT_SHADOW", "0") == "1":
+        from groundtruth.pretask.localization_vnext.shadow import (
+            record_shadow_projection,
+        )
+
+        record_shadow_projection(
+            issue_text=issue_text,
+            repository_root=repo_root,
+            graph_db=graph_db,
+            legacy_result=result,
+            source_projection="localize",
+        )
+    return result

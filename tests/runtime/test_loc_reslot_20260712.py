@@ -157,6 +157,13 @@ def test_augment_delivers_ranked_localization_native_rows(tmp_path, monkeypatch)
     env = locs[0]
     assert env.producer == "ranked_localization"
     assert env.target == "auth.py" and env.fact_id == "verify_token"
+    assert {
+        (ref.category, ref.feature_id, ref.role)
+        for ref in env.lineage.features
+    } == {
+        ("CAP", "GT_LOC_RESLOT", "byte_owner"),
+        ("FACT", "localization", "fact"),
+    }
     # the TEST candidate (tests/test_auth.py) is firewalled out of provenance.
     assert env.provenance == (("auth.py", 10), ("token.py", 20))
     assert env.native_args and env.native_args["rows"] == [

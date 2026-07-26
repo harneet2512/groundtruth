@@ -452,6 +452,9 @@ _EVIDENCE_TYPE_ALIASES: dict[str, str] = {
     # DECISION, override by TIMING). This is the honest §26.4 replacement for the legacy
     # l3.contract/l3b.evidence caller-break that patch_delta (ast-only) cannot produce.
     "caller_break": "caller_contract",
+    # Structured PRE-EDIT source-view attachment. It uses the exact viewed path
+    # and FACT-tier graph callers, rather than inferring a path from command text.
+    "caller_contract_view": "caller_contract",
     # PRE-EDIT mirror of caller_break (2026-07-20): the caller-contract facts that ALREADY
     # ride the pre-edit ``def_partition`` physical delivery. When a symbol resolves to a
     # single def file, ``_resolve_symbol_defs`` sets ``callers_render =
@@ -469,6 +472,11 @@ _EVIDENCE_TYPE_ALIASES: dict[str, str] = {
     "cochange_partner": "cochange_prior",
     "new_file_destination": "newfile_precedent",
     "missing_role": "newfile_precedent",
+    # The post-creation half of newfile_precedent answers the integration
+    # decision after the file exists.  Keep it distinct from the pre-creation
+    # failed-search ``missing_role:*`` family so each can retain its honest
+    # boundary and receipt semantics.
+    "missing_role_postcreate": "newfile_precedent",
     # executed covering RED
     "covering_verdict": "covering_red",
 }
@@ -689,6 +697,7 @@ _EVIDENCE_TYPE_DELIVER_BY: dict[str, str] = {
     # GT_REGISTRY_ENFORCE from EXPIRING a genuinely on-time edit-boundary caller-break while
     # still catching a truly wrong-event fact — exactly the trace_frame precedent above.
     "caller_break": EVENT_EDIT_RESULT,
+    "caller_contract_view": EVENT_FILE_VIEW,
     # PRE-EDIT mirror of caller_break (2026-07-20): the ``caller_contract_search`` co-fact
     # aliases to ``caller_contract`` (canonical deliver_by file_view, PRE-EDIT) but is carried
     # by the ``def_partition`` physical delivery that fires at ``search_result`` (the agent's
@@ -698,6 +707,10 @@ _EVIDENCE_TYPE_DELIVER_BY: dict[str, str] = {
     # exactly as ``caller_break`` does one boundary later (edit_result). Not reactive: it has a
     # FIXED boundary, so the non-reactive wrong-event check still guards a truly mistimed fire.
     "caller_contract_search": EVENT_SEARCH_RESULT,
+    # Post-creation integration guidance is generated synchronously from the
+    # creating edit.  It is not the pre-creation destination suggestion carried
+    # by ``missing_role:*`` at failed_search.
+    "missing_role_postcreate": EVENT_EDIT_RESULT,
     # B-BND (b2): the SEAM's executed covering RED. Its canonical ``covering_red`` class
     # declares deliver_by=test_result (a covering verdict riding the agent's OWN test result),
     # but the ``covering_runner`` producer RUNS the covering test ITSELF at EDIT time and
@@ -758,6 +771,7 @@ _EVIDENCE_TYPE_PRODUCERS: dict[str, frozenset[str]] = {
     "body_concept": frozenset({"body_concept"}),
     "trace_frame": frozenset({"trace"}),
     "caller_break": frozenset({"caller_contract"}),
+    "caller_contract_view": frozenset({"caller_contract"}),
     # Gateway envelopes use the compact ``covering`` producer id; the native
     # mini-seam execution path is owned by the concrete covering_runner engine.
     "covering_verdict": frozenset({"covering", "covering_runner"}),
@@ -861,9 +875,11 @@ FRESHNESS_SURFACES: dict[str, tuple[str, ...]] = {
     # per-symbol ``properties`` surface (a documented narrowing of caller_contract's canonical
     # deps below), so a properties-only reindex must not stale it.
     "caller_break": ("nodes", "edges"),
+    "caller_contract_view": ("nodes", "edges"),
     "body_concept": ("nodes", "edges", "content_fts"),
     "new_file_destination": ("nodes", "edges", "closure"),
     "missing_role": ("nodes", "edges", "closure"),
+    "missing_role_postcreate": ("nodes", "edges", "closure"),
 }
 
 # PATCH-bound classes: freshness is the working-tree PATCH, not any GRAPH surface (the
@@ -906,6 +922,7 @@ _SURFACE_NARROWINGS: dict[str, frozenset[str]] = {
     # canonical ``caller_contract`` class (contract_map, which DOES render property facts)
     # depends on. Documenting the drop keeps the cross-check honest instead of tripping it.
     "caller_break": frozenset({"properties"}),
+    "caller_contract_view": frozenset({"properties"}),
 }
 
 

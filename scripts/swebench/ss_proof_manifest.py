@@ -21,6 +21,7 @@ try:
         performance_metric_definitions,
     )
     from scripts.swebench.gt_feature_metrics import (
+        _typed_fact_class,
         layer_to_fact_class,
         member_fact_classes,
     )
@@ -32,6 +33,7 @@ except ModuleNotFoundError:
         performance_metric_definitions,
     )
     from gt_feature_metrics import (  # type: ignore[no-redef]
+        _typed_fact_class,
         layer_to_fact_class,
         member_fact_classes,
     )
@@ -649,6 +651,30 @@ def _audit_replay(reference: object, context: Mapping[str, Any]) -> dict[str, An
     }
 
 
+def _mini_swe_visible_output_channels(content: str) -> tuple[str, ...]:
+    """Return model-visible output fields from a mini-swe tool observation.
+
+    mini-swe serializes the environment result as JSON text inside
+    ``message["content"]``.  Ordinary observations use ``output``; elided
+    observations preserve the visible prefix/suffix in ``output_head`` and
+    ``output_tail``.  Decode only these top-level model-text fields.  Trajectory
+    metadata such as ``message.extra.raw_output`` is intentionally unreachable
+    here and can never establish delivery.
+    """
+    try:
+        observation = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return ()
+    if not isinstance(observation, Mapping) or "returncode" not in observation:
+        return ()
+    channels: list[str] = []
+    for field in ("output", "output_head", "output_tail"):
+        value = observation.get(field)
+        if isinstance(value, str):
+            channels.append(value)
+    return tuple(channels)
+
+
 def _visible_messages(trajectory: Mapping[str, Any]) -> list[tuple[int, str]]:
     messages = trajectory.get("messages")
     if not isinstance(messages, list):
@@ -661,7 +687,16 @@ def _visible_messages(trajectory: Mapping[str, Any]) -> list[tuple[int, str]]:
             message.get("role") in {"user", "tool", "system", "exit"}
             or message.get("type") == "function_call_output"
         ):
-            visible.append((index, message["content"]))
+            content = message["content"]
+            visible.append((index, content))
+            if (
+                message.get("role") == "tool"
+                or message.get("type") == "function_call_output"
+            ):
+                visible.extend(
+                    (index, channel)
+                    for channel in _mini_swe_visible_output_channels(content)
+                )
     return visible
 
 
@@ -745,7 +780,10 @@ def _audit_runtime(
             continue
         home, payload = match
         homes[home] = homes.get(home, 0) + 1
-        fact = layer_to_fact_class(str(row.get("layer") or ""))
+        # Typed producer lineage owns FACT identity. Layer names are routing
+        # labels and are only the compatibility fallback for historical rows.
+        fact = _typed_fact_class(row) or layer_to_fact_class(
+            str(row.get("layer") or ""))
         member = row.get("profile_member")
         deliveries.append({
             "ledger_index": index,

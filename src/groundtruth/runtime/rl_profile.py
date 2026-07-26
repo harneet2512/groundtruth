@@ -311,6 +311,7 @@ PROFILE_MEMBERS: dict[str, frozenset[str]] = {
 PROFILE_BEHAVIOR_FLAGS: dict[str, frozenset[str]] = {
     "2": frozenset(
         {
+            "GT_CS_EDIT_TRIGGER",
             "GT_SS_EDIT_PREVENTIVE",  # W2b/P10 — edit-boundary premature-reactive deferral
             "GT_INFRA_NOISE_GUARD",   # W4-1 — infra/teardown-noise exclusion
             "GT_HYP_CONTRA_GUARD",    # W4-2 — no wrong-target steer vs corroborated targets

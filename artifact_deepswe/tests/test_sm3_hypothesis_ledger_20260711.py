@@ -130,6 +130,11 @@ def test_pivot_uses_recovery_imperative_when_selected(monkeypatch, pivot_ready):
     assert block == render_recovery_native(*g._gt_hypothesis_recovery)
     assert block != "GENERIC PIVOT"
     assert not contains_test_identity(block)
+    extra = g._lane_delivery_extra(kind, block, "src/example.py", None)
+    assert extra["profile_member"] == "GT_HYPOTHESIS"
+    assert extra["runtime_producer_id"] == "governor"
+    assert extra["fact_class"] == "recovery"
+    assert extra["actual_event"] == "failure_obs"
 
 
 def test_pivot_generic_when_no_selection_or_flag_off(monkeypatch, pivot_ready):
@@ -138,6 +143,9 @@ def test_pivot_generic_when_no_selection_or_flag_off(monkeypatch, pivot_ready):
     g._gt_hypothesis_recovery = None
     out = g._verification_horizon_candidate()
     assert out is not None and out[2] == "GENERIC PIVOT"
+    assert "profile_member" not in g._lane_delivery_extra(
+        out[1], out[2], "src/example.py", None
+    )
 
     # a selection present but the FLAG OFF -> still generic (byte-identical off path).
     monkeypatch.delenv("GT_HYPOTHESIS", raising=False)

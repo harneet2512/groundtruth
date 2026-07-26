@@ -2606,13 +2606,30 @@ def evaluate_cases(cases: dict, recorded: dict[str, list[Delivery]],
                     False))
         elif expected_outcome == "suppressed":
             expected_reason = str(c.get("expected_reason") or "")
+            identity_fields = (
+                ("expected_clause_id", "clause_id"),
+                ("expected_subject_digest", "subject_digest"),
+                ("expected_artifact_issue_sha256", "artifact_issue_sha256"),
+                ("expected_proof_turn", "proof_turn"),
+            )
             exact = [r for r in at_boundary
                      if not r.get("delivered")
                      and int(r.get("chars") or 0) == expected_chars
                      and "suppressed" in str(r.get("outcome") or "")
-                     and str(r.get("reason") or "") == expected_reason]
+                     and str(r.get("reason") or "") == expected_reason
+                     and all(
+                         str(r.get(row_key) or "") == str(c.get(case_key) or "")
+                         for case_key, row_key in identity_fields
+                         if case_key in c
+                     )]
+            forbidden_delivery_text = str(c.get("forbidden_delivery_text") or "")
+            target_delivered = (
+                [r for r in delivered
+                 if forbidden_delivery_text in str(r.get("payload") or "")]
+                if forbidden_delivery_text else delivered
+            )
             ack_honest = c.get("acknowledgment") == "NOT_APPLICABLE_SUPPRESSED"
-            if exact and not delivered and ack_honest:
+            if exact and not target_delivered and ack_honest:
                 out.append(CaseVerdict(
                     "corrected_boundary", task, label, PASS,
                     f"same-turn suppression at iteration {expected_it} ({expected_reason})", False))
@@ -3129,6 +3146,157 @@ _SS_FLAGS_ALL = ("GT_SS_NOVELTY", "GT_SS_DEDUP2", "GT_SS_COHERENCE_V2",
                  "GT_SS_ACK_METRICS", "GT_SS_ARBITER_V2", "GT_SS_EXEC_TRUTH",
                  "GT_SS_SUBMIT_RED", "GT_SS_ACK_FORM", "GT_SS_ELIGIBILITY",
                  "GT_SS_EDIT_DIAG")
+
+
+
+
+def canonical_replay_enabled(env=None) -> bool:
+    """Whether the replay child should drive the CANONICAL runtime.
+
+    OPT-IN, OFF BY DEFAULT, deliberately.  Switching the default would change
+    the semantics of the legacy replay path that produced the gate x2 + 5-task
+    oracle evidence, silently invalidating it.  Opt-in keeps legacy output
+    byte-comparable and lets both paths run side by side.
+    """
+    source = os.environ if env is None else env
+    return str((source or {}).get("GT_CANONICAL_REPLAY", "") or "").strip() in {
+        "1", "true", "TRUE", "yes", "on",
+    }
+
+
+def install_canonical_replay_runtime(g, task: str, env=None):
+    """Install CanonicalRuntimeAttachment for one replay task, or return None.
+
+    Mirrors the gate's CanonicalSeamDriver: the replay child otherwise drives
+    only ``_augment_output`` (:614, :2005), so a green replay speaks to the
+    legacy seam and not to the deterministic runtime.
+
+    Correct-or-quiet: returns None when disabled, when the seam exposes no
+    installer, or when attachment fails.  A caller that gets None must fall
+    back to the legacy path rather than pretend a canonical run happened.
+    """
+    if not canonical_replay_enabled(env):
+        return None
+    installer = getattr(g, "install_canonical_runtime", None)
+    if not callable(installer):
+        return None
+
+    class _Model:
+        def _prepare_messages_for_api(self, *a, **k):
+            return []
+
+        def _query(self, *a, **k):
+            return {}
+
+        def query(self, *a, **k):
+            return {}
+
+    class _Agent:
+        def add_messages(self, *a, **k):
+            return None
+
+        def execute_actions(self, *a, **k):
+            return None
+
+    source = dict(os.environ if env is None else (env or {}))
+    source.setdefault("GT_ATTEMPT_ID", f"replay:{task}")
+    try:
+        attachment = installer(
+            model=_Model(), agent=_Agent(), env=source,
+            task=f"ss replay canonical attempt: {task}",
+        )
+    except Exception:  # noqa: BLE001 -- replay must never die on attachment
+        return None
+    return attachment if getattr(attachment, "attached", False) else None
+
+
+def canonical_replay_facts(attachment):
+    """What the canonical runtime did during this replay, or None.
+
+    ``None`` (never a zeroed record) keeps "never installed" distinguishable
+    from "installed and did nothing" -- the exact ambiguity that kept 0/17
+    unfalsifiable for months.  Every probe is exception-guarded: a diagnostic
+    must never crash the replay child.
+    """
+    runtime = getattr(attachment, "attempt_runtime", None)
+    if runtime is None:
+        return None
+
+    def _count(method: str) -> int:
+        try:
+            return len(getattr(runtime.journal, method)(runtime.attempt_id))
+        except Exception:  # noqa: BLE001 -- a probe never masks a result
+            return 0
+
+    work = getattr(runtime, "work_state", None)
+    try:
+        sequence = int(getattr(work, "sequence", 0) or 0)
+    except (TypeError, ValueError):
+        sequence = 0
+    return {
+        "attempt_id": str(getattr(runtime, "attempt_id", "")),
+        "committed_events": _count("events"),
+        "evidence_records": _count("evidence_records_for_attempt"),
+        "compilations": _count("compilations_for_attempt"),
+        "sequence": sequence,
+        "phase": str(getattr(work, "phase", "")),
+        "health": str(getattr(getattr(runtime, "failure_state", None), "health", "")),
+    }
+
+
+def drive_replay_pair(g, attachment, action: dict, out: dict) -> None:
+    """Drive ONE replay observation through whichever runtime is installed.
+
+    Canonical when an attachment exists (proposal -> result, the same pair the
+    live seam runs), else the legacy ``_augment_output``.  Exceptions are the
+    caller's to record: replay fidelity fails closed upstream.
+    """
+    if attachment is None:
+        g._augment_output(action, out)
+        return
+    attachment.observe_action_proposal(action)
+    attachment.observe_action_result(action, out)
+
+def classify_diff_comparability(diffs, recorded_layer_counts) -> dict:
+    """Split replay diffs into COMPARABLE vs INCOMPARABLE (novel-lane).
+
+    A diff on a layer the recorded baseline never emitted is not a fidelity
+    failure -- it is incomparable data. Measured 2026-07-26 over 5 held-out
+    repos: 192/293 diffs (65.5%) sat on layers with ZERO recorded rows, because
+    the recording predates the ``control.participation`` and
+    ``ss.coherence.proof`` lanes entirely.
+
+    REPORTING ONLY. This never changes a verdict, a count, or the exit code.
+    Turning it into a FILTER would be benchmaxxing: it would drop the provably
+    incomparable diffs and leave the remainder just as uninterpretable, since a
+    replay against a stale recording cannot distinguish "changed because
+    IMPROVED" from "changed because BROKEN". The fix for that is re-recording
+    the baseline, not tuning the comparator.
+
+    Zero-count is treated as absent: a layer key that exists but never emitted
+    is no more comparable than one that is missing outright.
+    """
+    counts = recorded_layer_counts or {}
+    novel_layers, novel, comparable = set(), 0, 0
+    for diff in diffs or ():
+        layer = str((diff or {}).get("layer") or "")
+        try:
+            recorded = int(counts.get(layer, 0) or 0)
+        except (TypeError, ValueError):
+            recorded = 0
+        if recorded > 0:
+            comparable += 1
+        else:
+            novel += 1
+            novel_layers.add(layer)
+    total = novel + comparable
+    return {
+        "novel_lane": novel,
+        "comparable": comparable,
+        "total": total,
+        "novel_layers": sorted(novel_layers),
+        "artifact_fraction": (novel / total) if total else 0.0,
+    }
 
 
 def main(argv=None) -> int:

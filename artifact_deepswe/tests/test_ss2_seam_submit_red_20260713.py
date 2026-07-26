@@ -78,6 +78,36 @@ def test_record_test_unrelated_fail_does_not_set(monkeypatch):
     assert g._ss_last_failing_test is None  # not touching the edit -> not the agent's RED
 
 
+def test_compiled_rust_test_binary_failure_reaches_submit_red(monkeypatch):
+    """Cargo can execute the compiled test binary directly after discovery.  The
+    command is not spelled ``cargo test``, but its native Rust test protocol is
+    definitive test evidence and must reach the same unresolved-RED latch."""
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
+    monkeypatch.setattr(g, "_oracle_edited_rels", {"core/engine/src/job.rs"})
+    command = (
+        "timeout 30 ./target/debug/deps/boa_engine-abc123 "
+        "tests::job --nocapture"
+    )
+    output = "\n".join((
+        "running 1 test",
+        "thread 'tests::job' panicked at core/engine/src/job.rs:42:5:",
+        "assertion failed: false",
+        "test tests::job ... FAILED",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored",
+    ))
+
+    g._augment_output(
+        {"command": command},
+        {"output": output, "returncode": 101},
+    )
+
+    assert g._ss_last_failing_test is not None, (
+        "REASON: native compiled-test output was discarded before _ss_record_test"
+    )
+    assert g._ss_last_failing_test["cmd"] == command
+
+
 # --------------------------------------------------------------------------- #
 # _ss_submit_red_refusal — single dose, off byte-identical, ledger both times
 # --------------------------------------------------------------------------- #
@@ -162,6 +192,26 @@ def test_gate_blocks_once_then_allows(monkeypatch):
     # 2nd submit -> ALLOW (None -> the caller re-raises Submitted -> submission proceeds).
     allowed = g._gt_gate_submit_exception(object(), {"command": "echo done"}, exc)
     assert allowed is None
+
+
+def test_completion_certificate_observes_submit_red_before_it_records(monkeypatch):
+    _base(monkeypatch)
+    monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
+    monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
+    monkeypatch.setenv("GT_COMPLETION_CERT", "1")
+    _stub_head_allows(monkeypatch)
+    monkeypatch.setattr(
+        g, "_ss_last_failing_test", {"cmd": "pytest -q", "step": 4})
+    recorded = []
+    monkeypatch.setattr(g, "_gt_completion_cert_record", recorded.append)
+
+    blocked = g._gt_gate_submit_exception(object(), {"command": "submit"}, Submitted())
+
+    assert blocked is not None and blocked["returncode"] == 1
+    assert len(recorded) == 1
+    assert recorded[0].decision == "bounce_once"
+    assert recorded[0].head_reason == "ss_submit_red"
+    assert blocked["_gt_pending_delivery"]["verdict"].reason == "ss_submit_red"
 
 
 def test_gate_without_formatter_ownership_does_not_spend_submit_red(monkeypatch):

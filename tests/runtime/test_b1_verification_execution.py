@@ -319,8 +319,31 @@ def test_gate_blocks_hygiene():
     assert v.reason == "hygiene"
 
 
+def test_gate_blocks_observed_submit_failure_in_same_head():
+    v = sg.gate_verdict(
+        submit_block={
+            "blocking": True,
+            "reason": "ss_submit_red",
+            "detail": "an observed test failure remains unresolved",
+        }
+    )
+    assert v.allow is False
+    assert v.reason == "ss_submit_red"
+    assert v.record["block"] == "ss_submit_red"
+
+
 def test_gate_fails_open_after_max_bounces():
     v = sg.gate_verdict(covering={"verdict": "fail"}, bounce_count=1, max_bounces=1)
+    assert v.allow is True
+    assert v.reason == "gate_overridden"
+
+
+def test_observed_submit_failure_fails_open_after_max_bounces():
+    v = sg.gate_verdict(
+        submit_block={"blocking": True, "reason": "ss_submit_red"},
+        bounce_count=1,
+        max_bounces=1,
+    )
     assert v.allow is True
     assert v.reason == "gate_overridden"
 

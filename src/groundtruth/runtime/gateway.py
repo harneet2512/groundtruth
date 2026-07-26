@@ -124,6 +124,7 @@ from groundtruth.runtime.producer_inputs import (
     CallerUsageEvidenceRow,
     DefinitionRow,
     ProducerInputs,
+    RepositoryWitnessRow,
     SignatureChange,
     SourceState,
 )
@@ -164,6 +165,7 @@ __all__ = [
     "EvidenceEnvelope",  # re-export: the ONE payload contract the Gateway emits
     "CoveringResult",
     "GatewayState",
+    "produce_raw",
     "augment",
     "classify_outcome",
     "classify_command",
@@ -227,11 +229,29 @@ class ToolEvent:
     exit_status: int | None = None
     cwd: str = ""
     changed_files: tuple[str, ...] = ()
+    # Exact structured source-view targets supplied by the harness action.
+    # This is the authority for file-view evidence; command text is only a
+    # legacy carrier fallback and must never manufacture a viewed path.
+    viewed_files: tuple[str, ...] = ()
     action_index: int = 0
     # Optional seam bridges — NOT part of the raw observation; injected by the seam
     # when it has them (kept off the 7 core fields so the observation stays pure).
     edit_before_after: "Mapping[str, tuple[str | None, str]] | None" = None
     covering: "CoveringResult | None" = None
+    # Fine semantic truth, distinct from the command carrier. A direct compiled
+    # test binary is commonly carried as ``other`` but semantically observes a
+    # ``test_result``. Conversely, an edit-shaped command that changed no bytes
+    # has an ``edit`` carrier but no ``edit_result``.
+    carrier_kind: str = ""
+    semantic_events: tuple[str, ...] = ()
+    primary_boundary: str = ""
+    test_outcome: str = ""
+    test_protocol: str = ""
+    state_revision: str = ""
+    # True when the environment boundary supplied the semantic set from exact
+    # pre/post state. In that mode an empty set is authoritative (a no-op), not
+    # an invitation to infer an event from command spelling.
+    semantics_authoritative: bool = False
 
 
 @dataclass
@@ -269,6 +289,10 @@ class GatewayState:
     repo_root: str = ""
     issue_text: str = ""
     graph_revision: str = ""
+    # Attempt-scoped canonical revision context.  Legacy gateway operation may
+    # omit it and remains byte-identical; canonical evidence is attached only
+    # when the live AttemptReasoningRuntime supplies the complete vector.
+    canonical_revision: object | None = None
     episode: EpisodeState = field(default_factory=EpisodeState)
     # SM-4 (2026-07-11): the per-run LIGHTWEIGHT episode overlay — ``{norm_file_path:
     # overlay_entry}`` built per structured edit (edit_overlay.build_episode_overlay_entry),
@@ -1271,6 +1295,11 @@ def _revisions_for(state: GatewayState, fact_class: str) -> tuple[str, str]:
     has no sub-revisions (old graph.db) or the class is unmapped — preserving the legacy
     invariant ``valid_until == graph_revision``. An explicit ``state.graph_revision`` override
     wins (used by tests / a caller that pins the revision)."""
+    canonical_graph = str(
+        getattr(state.canonical_revision, "graph", "") or ""
+    )
+    if canonical_graph:
+        return canonical_graph, canonical_graph
     if state.graph_revision:
         return state.graph_revision, state.graph_revision
     post, subs = _read_meta_revisions(state)
@@ -1561,7 +1590,7 @@ def classify_outcome(event: ToolEvent, state: GatewayState) -> str:
     ledger (the ZERO_ABSENT repeat gate depends on probe history)."""
     # 1) An in-repo, non-test stack trace in the output is a strong localizer for ANY
     #    kind (a failing test / error observation). Highest precedence.
-    if _has_repo_trace(event, state):
+    if EVENT_FAILURE_OBS in _observe_semantic_events(event, state):
         return TRACE_HIT
 
     if event.kind != KIND_SEARCH:
@@ -1621,6 +1650,61 @@ def _has_repo_trace(event: ToolEvent, state: GatewayState) -> bool:
     return any(not _is_leaky(_to_repo_rel(f.file, state.repo_root)) for f in frames)
 
 
+_SEMANTIC_BOUNDARY_ORDER = (
+    EVENT_FAILURE_OBS,
+    "test_result",
+    "edit_result",
+    "failed_search",
+    "search_result",
+    "file_view",
+    "submit",
+)
+
+
+def _observe_semantic_events(
+    event: ToolEvent, state: GatewayState
+) -> frozenset[str]:
+    """Complete and cache the event's fine semantic truth exactly once.
+
+    The environment seam may supply an authoritative set from exact pre/post
+    state. Legacy/library callers omit it; for them the carrier retains the old
+    behavior. Repository trace classification needs ``repo_root`` and therefore
+    completes here, at the first consumer that owns the required state.
+    """
+    events = set(event.semantic_events or ())
+    if not event.semantics_authoritative:
+        if event.kind == KIND_EDIT:
+            events.add("edit_result")
+        elif event.kind == KIND_TEST and (
+            event.test_outcome or event.covering is not None
+        ):
+            events.add("test_result")
+        elif event.kind == KIND_VIEW:
+            events.add("file_view")
+        elif event.kind == KIND_SUBMIT:
+            events.add("submit")
+    if event.kind == KIND_SEARCH and not (
+        {"failed_search", "search_result"} & events
+    ):
+        events.add(
+            "failed_search"
+            if _grep_result_empty(event.command, event.output or "")
+            else "search_result"
+        )
+    if event.kind != KIND_SEARCH and EVENT_FAILURE_OBS not in events:
+        if _has_repo_trace(event, state):
+            events.add(EVENT_FAILURE_OBS)
+    ordered = tuple(
+        boundary for boundary in _SEMANTIC_BOUNDARY_ORDER if boundary in events
+    )
+    event.semantic_events = ordered
+    if not event.carrier_kind:
+        event.carrier_kind = event.kind
+    if not event.primary_boundary and ordered:
+        event.primary_boundary = ordered[0]
+    return frozenset(ordered)
+
+
 # --------------------------------------------------------------------------- #
 # PRODUCERS (each correct-or-quiet; each Addition provenance-carrying + hashed).
 # --------------------------------------------------------------------------- #
@@ -1643,11 +1727,37 @@ def _body_line_leaky(line: str) -> bool:
     return False
 
 
-def _event_pref(event: ToolEvent) -> str:
-    """The envelope's preferred_event from the triggering kind (``other`` -> step0)."""
+def _event_actual(event: ToolEvent) -> str:
+    """Return the finest proven semantic event for lineage and registry truth."""
+    if event.primary_boundary:
+        return event.primary_boundary
+    for boundary in _SEMANTIC_BOUNDARY_ORDER:
+        if boundary in (event.semantic_events or ()):
+            return boundary
     k = (event.kind or "").strip().lower()
     return k if k in (KIND_SEARCH, KIND_VIEW, KIND_EDIT, KIND_TEST, KIND_SUBMIT) \
         else EVENT_STEP0
+
+
+def _event_pref(event: ToolEvent) -> str:
+    """Project canonical semantic truth onto the envelope's coarse event ABI.
+
+    ``EvidenceEnvelope.preferred_event`` deliberately uses the stable
+    step0/search/view/edit/test/submit vocabulary. Lineage retains the finer
+    semantic event through :func:`_event_actual`.
+    """
+    actual = _event_actual(event)
+    return {
+        "task_start": EVENT_STEP0,
+        "failed_search": KIND_SEARCH,
+        "search_result": KIND_SEARCH,
+        "file_view": KIND_VIEW,
+        "first_view_edit": KIND_EDIT,
+        "edit_result": KIND_EDIT,
+        "test_result": KIND_TEST,
+        EVENT_FAILURE_OBS: KIND_TEST,
+        "submit": KIND_SUBMIT,
+    }.get(actual, actual)
 
 
 def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: str,
@@ -1657,7 +1767,10 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
             native_args: "dict | None" = None,
             producer_inputs: "ProducerInputs | None" = None,
             cap_feature_ids: "tuple[str, ...]" = (),
-            actual_event: str = "") -> EvidenceEnvelope:
+            actual_event: str = "",
+            canonical_claim: str = "",
+            canonical_consequence: str = "",
+            canonical_subject: str = "") -> EvidenceEnvelope:
     """Build the CANONICAL EvidenceEnvelope for one fact. Leak filtering happens
     HERE, before the build, so the derived dedup key hashes exactly the shipped
     payload+provenance (the F1 content discipline). The symbol rides ``fact_id``.
@@ -1674,12 +1787,72 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
     # on). Keyed by evidence_type, NOT producer, so two classes of one producer stale
     # independently. valid_until == graph_rev on an old graph.db (no sub-revs).
     graph_rev, valid_until = _revisions_for(state, fact_kind)
+    canonical_graph_revision = str(
+        getattr(state.canonical_revision, "graph", "") or ""
+    )
+    if canonical_graph_revision:
+        graph_rev = canonical_graph_revision
+        valid_until = canonical_graph_revision
     lineage = build_lineage(
         runtime_producer_id=producer,
         evidence_type=fact_kind,
-        actual_event=actual_event or event.kind or EVENT_STEP0,
+        actual_event=actual_event or _event_actual(event),
         cap_feature_ids=cap_feature_ids,
     )
+    canonical_semantics = None
+    try:
+        # The producer declares typed decision meaning from its structured
+        # computation identity.  It never asks the canonical converter to parse
+        # rendered body prose.  Without the attempt's complete revision vector
+        # the legacy envelope remains valid for legacy consumers but is
+        # intentionally ineligible for canonical scheduling.
+        from groundtruth.runtime.reasoning_runtime import (
+            Authority,
+            CanonicalEvidenceSemantics,
+            RevisionVector,
+            feature_contract_for,
+        )
+
+        contract = (
+            feature_contract_for(lineage.fact_class)
+            if lineage is not None and lineage.producer_registration_match
+            else None
+        )
+        revision = state.canonical_revision
+        if contract is not None and isinstance(revision, RevisionVector):
+            subject = (
+                canonical_subject
+                or target
+                or symbol
+                or lineage.fact_class
+            ).strip()
+            claim = canonical_claim.strip()
+            consequence = canonical_consequence.strip()
+            if not claim or not consequence:
+                raise ValueError(
+                    "canonical evidence requires producer-owned decision semantics"
+                )
+            canonical_semantics = CanonicalEvidenceSemantics(
+                decision_context=contract.decision_context,
+                roles=contract.roles,
+                claim=claim,
+                actionable_consequence=consequence,
+                causal_neighborhood=(
+                    f"decision:{contract.decision_context.value}",
+                    f"fact:{lineage.fact_class}",
+                    f"subject:{subject}",
+                ),
+                authority=Authority.RESULT_DERIVED,
+                revision=revision,
+                revision_dependencies=contract.revision_dependencies,
+                mandatory_reason=None,
+                failure_prevention=3,
+                causal_value=3,
+                contradiction_resolution=0,
+                anchoring_risk=0,
+            )
+    except (ImportError, TypeError, ValueError):
+        canonical_semantics = None
     envelope = EvidenceEnvelope.build(
         producer=producer,
         fact_id=symbol,
@@ -1698,6 +1871,7 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
         native_args=native_args,
         lineage=lineage,
         producer_inputs=producer_inputs,
+        canonical_semantics=canonical_semantics,
     )
     if producer_inputs is not None:
         envelope = replace(
@@ -1781,7 +1955,16 @@ def _produce_def_ref_partition(event: ToolEvent, state: GatewayState, *, note: s
     return [_mk_add(state, event, fact_kind="def_ref_partition", target=target,
                     body_lines=body, evidence=info["def_sites"], tier=VERIFIED,
                     producer="def_ref_partition", symbol=sym,
-                    producer_inputs=inputs)]
+                    producer_inputs=inputs,
+                    canonical_subject=sym,
+                    canonical_claim=(
+                        f"{sym} resolves to {len(info['def_sites'])} "
+                        "production definition site(s)."
+                    ),
+                    canonical_consequence=(
+                        "Select the definition on the active execution path; "
+                        "do not patch a test, vendored, or unrelated copy."
+                    ))]
 
 
 # --------------------------------------------------------------------------- #
@@ -2038,7 +2221,17 @@ def _produce_ranked_localization(event: ToolEvent, state: GatewayState) -> list[
     return [_mk_add(state, event, fact_kind="localization", target=top_file,
                     body_lines=body, evidence=evidence, tier=HYPOTHESIS,
                     producer="ranked_localization", symbol=top_sym,
-                    native_args={"rows": rows})]
+                    cap_feature_ids=("GT_LOC_RESLOT",),
+                    native_args={"rows": rows},
+                    canonical_subject=top_file,
+                    canonical_claim=(
+                        f"{top_file} is the highest-ranked production target; "
+                        f"{len(rows)} ranked candidate file(s) remain."
+                    ),
+                    canonical_consequence=(
+                        "Inspect the ranked target and its listed symbol before "
+                        "opening a broader repository branch."
+                    ))]
 
 
 def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -2069,7 +2262,16 @@ def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[Eviden
     return [_mk_add(state, event, fact_kind="wrong_surface", target=novel[0][0],
                     body_lines=body, evidence=novel, tier=VERIFIED,
                     producer="wrong_surface", symbol=sym,
-                    producer_inputs=inputs)]
+                    producer_inputs=inputs,
+                    canonical_subject=sym,
+                    canonical_claim=(
+                        f"The observed hits for {sym} exclude its production "
+                        f"definition; {len(novel)} production site(s) are listed."
+                    ),
+                    canonical_consequence=(
+                        "Move target selection to a listed production definition "
+                        "before editing."
+                    ))]
 
 
 def _produce_name_fold(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -2095,7 +2297,15 @@ def _produce_name_fold(event: ToolEvent, state: GatewayState) -> list[EvidenceEn
     return [_mk_add(state, event, fact_kind="name_fold", target=info["def_sites"][0][0],
                     body_lines=body, evidence=info["def_sites"], tier=VERIFIED,
                     producer="name_fold", symbol=sym,
-                    producer_inputs=inputs)]
+                    producer_inputs=inputs,
+                    canonical_subject=sym,
+                    canonical_claim=(
+                        f"{sym} resolves in the repository index as {variant}."
+                    ),
+                    canonical_consequence=(
+                        f"Use the indexed identity {variant} and its production "
+                        "definition sites for the next lookup."
+                    ))]
 
 
 def _produce_body(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -2132,7 +2342,16 @@ def _produce_body(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelop
                     body_lines=body, evidence=evidence, tier=INFO,
                     producer="body_concept", symbol=sym,
                     native_args={"rows": native_rows},
-                    producer_inputs=inputs)]
+                    producer_inputs=inputs,
+                    canonical_subject=sym,
+                    canonical_claim=(
+                        f"{len(rows)} production function body/bodies mention "
+                        f"the behavior concept {sym}."
+                    ),
+                    canonical_consequence=(
+                        "Use the listed concept-bearing functions as localization "
+                        "candidates; identity resolution remains uncertain."
+                    ))]
 
 
 def _edit_related_to_stem(edit_blob: str, sym: str) -> bool:
@@ -2226,7 +2445,8 @@ def _destination_already_exists(suggested_path: str, state: GatewayState) -> boo
 
 def _produce_change_surface(event: ToolEvent, state: GatewayState,
                             *, require_repeat: bool = True,
-                            drop_existing_destinations: bool = False) -> list[EvidenceEnvelope]:
+                            drop_existing_destinations: bool = False,
+                            post_creation: bool = False) -> list[EvidenceEnvelope]:
     # ``require_repeat`` guards ONLY the search-probe ordering predicate, which is meaningless for
     # an edit event (there is no probe to repeat). The edit-path caller passes False; the
     # ZERO_ABSENT caller keeps the historical True => byte-identical on that route.
@@ -2259,20 +2479,100 @@ def _produce_change_surface(event: ToolEvent, state: GatewayState,
         if d.registration_file and not _is_leaky(d.registration_file):
             body.append(f"integrate at: {d.registration_file}")
         body += [ev for ev in d.evidence[:4] if not _body_line_leaky(ev)]
+        repository_witness_rows: list[RepositoryWitnessRow] = []
+        for witness in getattr(d, "repository_witnesses", ()) or ():
+            witness_file = _to_repo_rel(
+                str(getattr(witness, "file", "") or ""), state.repo_root
+            )
+            witness_line = getattr(witness, "line", 0)
+            witness_kind = str(getattr(witness, "kind", "") or "").strip()
+            witness_identity = str(
+                getattr(witness, "identity", "") or ""
+            ).strip()
+            if (
+                not witness_file
+                or _is_leaky(witness_file)
+                or not isinstance(witness_line, int)
+                or isinstance(witness_line, bool)
+                or witness_line <= 0
+                or witness_kind not in {
+                    "template_definition",
+                    "template_lexical_reference",
+                    "registration_reference",
+                }
+                or not witness_identity
+            ):
+                continue
+            source_state = _validated_repository_witness_state(
+                event,
+                state,
+                witness_file,
+                witness_line,
+                witness_identity,
+            )
+            if source_state is None:
+                continue
+            repository_witness_rows.append(RepositoryWitnessRow(
+                file=witness_file,
+                line=witness_line,
+                kind=witness_kind,
+                identity=witness_identity,
+                source_state=source_state,
+            ))
+        producer_inputs = None
+        if repository_witness_rows:
+            graph_revision, _valid_until = _revisions_for(
+                state, "new_file_destination"
+            )
+            producer_inputs = ProducerInputs(
+                schema=PRODUCER_INPUTS_SCHEMA,
+                evidence_type="new_file_destination",
+                candidate_id="",
+                before_state=None,
+                after_state=None,
+                caller_rows=(),
+                graph_revision=graph_revision,
+                repository_witness_rows=tuple(
+                    sorted(set(repository_witness_rows))
+                ),
+            )
         out.append(_mk_add(state, event, fact_kind="new_file_destination", target=d.suggested_path,
                            body_lines=body, evidence=[], tier=HYPOTHESIS,
                            producer="change_surface", symbol=d.entity,
-                           cap_feature_ids=("GT_CHANGE_SURFACE",)))
+                           producer_inputs=producer_inputs,
+                           cap_feature_ids=("GT_CHANGE_SURFACE",),
+                           canonical_subject=d.entity,
+                           canonical_claim=(
+                               f"{d.suggested_path} is the repository-derived "
+                               f"destination for the missing {d.entity} surface."
+                           ),
+                           canonical_consequence=(
+                               "Follow the listed sibling/template and registration "
+                               "precedent when creating the new surface."
+                           )))
     for m in res.missing_roles:
         tgt = m.registration_file or (m.sibling_files[0] if m.sibling_files else m.entity)
         if _is_leaky(tgt):
             continue
         ev_rows = [(m.registration_file, ln) for ln, _ in m.registration_lines] if m.registration_file else []
         body = [ev for ev in m.evidence[:4] if not _body_line_leaky(ev)]
-        env = _mk_add(state, event, fact_kind=f"missing_role:{m.role}", target=tgt,
+        missing_role_kind = (
+            f"missing_role_postcreate:{m.role}"
+            if post_creation else f"missing_role:{m.role}"
+        )
+        env = _mk_add(state, event, fact_kind=missing_role_kind, target=tgt,
                       body_lines=body, evidence=ev_rows,
                       tier=HYPOTHESIS, producer="change_surface", symbol=m.entity,
-                      cap_feature_ids=("GT_CHANGE_SURFACE",))
+                      cap_feature_ids=("GT_CHANGE_SURFACE",),
+                      canonical_subject=m.entity,
+                      canonical_claim=(
+                          f"{m.entity} is missing the repository role {m.role} "
+                          f"at {tgt}."
+                      ),
+                      canonical_consequence=(
+                          "Complete the missing companion or registration role "
+                          "before treating the new-file change as integrated."
+                      ))
         out.append(env)
         # B-NFP: capture the producer-owned registration snapshot (the exact registry bytes,
         # sibling members, and git commit anchor the claim derives from) so the offline
@@ -2320,7 +2620,16 @@ def _produce_trace(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelo
         return [_mk_add(state, event, fact_kind="trace_frame", target=rel,
                         body_lines=[f"deepest in-repo frame: {loc}"],
                         evidence=[(rel, fr.line)], tier=WARNING, producer="trace",
-                        symbol=fr.func or rel, actual_event=EVENT_FAILURE_OBS)]
+                        symbol=fr.func or rel, actual_event=EVENT_FAILURE_OBS,
+                        canonical_subject=fr.func or rel,
+                        canonical_claim=(
+                            f"{loc} is the deepest observed in-repository "
+                            "failure frame."
+                        ),
+                        canonical_consequence=(
+                            "Prioritize this executed frame for failure "
+                            "localization before weaker static candidates."
+                        ))]
     return []
 
 
@@ -2399,7 +2708,18 @@ def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[Evidence
                                "positional_args": sm.positional_args,
                                "new_min_params": sm.new_min_params,
                                "new_max_params": sm.new_max_params,
-                           }))
+                           },
+                           canonical_subject=sm.symbol,
+                           canonical_claim=(
+                               f"{sm.caller_file}:{sm.caller_line} passes "
+                               f"{sm.positional_args} positional argument(s) to "
+                               f"{sm.symbol}, whose edited signature accepts "
+                               f"{sm.new_min_params}-{sm.new_max_params}."
+                           ),
+                           canonical_consequence=(
+                               "Update the impacted caller or restore a compatible "
+                               "signature before validating the patch."
+                           )))
     for cs in res.companion_surfaces:
         if _is_leaky(cs.file):
             continue
@@ -2419,7 +2739,16 @@ def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[Evidence
                                "line": (ev_rows[0][1] if ev_rows else None),
                                "symbol": cs.symbol,
                                "siblings": list(cs.siblings),
-                           }))
+                           },
+                           canonical_subject=cs.symbol,
+                           canonical_claim=(
+                               f"{cs.file} registers sibling surfaces but does "
+                               f"not register {cs.symbol}."
+                           ),
+                           canonical_consequence=(
+                               "Update the companion registration surface so the "
+                               "new or changed symbol participates in integration."
+                           )))
     # cochange is an INTERNAL RANKING SIGNAL ONLY — it has NO model-facing native form
     # (SM-1 ``native_render.render_cochange_native`` returns "" by construction; the
     # doctrine pins co-change as a ranking prior, never a delivered fact). Wave-2
@@ -2696,6 +3025,310 @@ def _source_state_for_file(
     return SourceState(file=rel, sha256=digest, revision="source:" + digest)
 
 
+def _validated_repository_witness_state(
+    event: ToolEvent,
+    state: GatewayState,
+    file_path: str,
+    line: int,
+    identity: str,
+) -> SourceState | None:
+    """Bind one detector witness to exact, currently readable source bytes.
+
+    A graph can retain a stale positive ``start_line`` after an out-of-band
+    repository change.  The detector's path/line is therefore not enough by
+    itself: this boundary checks that the line exists in the current edit
+    overlay/disk bytes and still contains the witnessed sibling/definition
+    identity.  Failure is correct-or-quiet.
+    """
+
+    rel = _norm_fp(_to_repo_rel(file_path, state.repo_root))
+    text: str | None = None
+    raw: bytes | None = None
+    for edited_file, before_after in (event.edit_before_after or {}).items():
+        if _norm_fp(_to_repo_rel(edited_file, state.repo_root)) == rel:
+            _before, text = before_after
+            raw = (text or "").encode("utf-8")
+            break
+    if raw is None:
+        try:
+            with open(os.path.join(state.repo_root, rel), "rb") as source:
+                raw = source.read()
+        except OSError:
+            return None
+        text = raw.decode("utf-8", errors="replace")
+    source_lines = (text or "").splitlines()
+    if (
+        line <= 0
+        or line > len(source_lines)
+        or not identity
+        or identity.lower() not in source_lines[line - 1].lower()
+    ):
+        return None
+    digest = hashlib.sha256(raw).hexdigest()
+    return SourceState(file=rel, sha256=digest, revision="source:" + digest)
+
+
+def _produce_caller_contract_view(
+    event: ToolEvent,
+    state: GatewayState,
+) -> list[EvidenceEnvelope]:
+    """Attach FACT-tier caller contracts to an exact structured source view.
+
+    The viewed path comes only from ``ToolEvent.viewed_files``. The graph must
+    still identify a current production definition at its recorded source line,
+    and every retained caller must have a deterministic CALLS edge plus readable
+    source bytes. Any incomplete or oversized result abstains correct-or-quiet.
+    """
+
+    def confined_repo_file(path: object) -> str:
+        if not isinstance(path, str) or not path or not state.repo_root:
+            return ""
+        rel = _norm_fp(_to_repo_rel(path, state.repo_root))
+        if not rel:
+            return ""
+        try:
+            root = os.path.normcase(
+                os.path.realpath(os.path.abspath(state.repo_root))
+            )
+            candidate = os.path.normcase(
+                os.path.realpath(os.path.abspath(os.path.join(root, rel)))
+            )
+            if os.path.commonpath((root, candidate)) != root:
+                return ""
+        except (OSError, TypeError, ValueError):
+            return ""
+        return rel
+
+    viewed = tuple(
+        dict.fromkeys(
+            rel
+            for path in event.viewed_files
+            if (rel := confined_repo_file(path))
+        )
+    )
+    if not viewed:
+        return []
+    con = _open(state)
+    if con is None:
+        return []
+    out: list[EvidenceEnvelope] = []
+    labels_sql = ",".join("?" * len(_DEF_LABELS))
+    try:
+        try:
+            raw_definitions = con.execute(
+                f"SELECT name,file_path,start_line FROM nodes "
+                f"WHERE COALESCE(is_test,0)=0 AND COALESCE(start_line,0)>0 "
+                f"AND label IN ({labels_sql}) "
+                f"ORDER BY file_path,start_line,name",
+                _DEF_LABELS,
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        for rel in viewed:
+            if not rel or _is_leaky(rel):
+                continue
+            viewed_state = _source_state_for_file(event, state, rel)
+            if viewed_state is None:
+                continue
+            definitions: list[tuple[str, int]] = []
+            for name, file_path, line in raw_definitions:
+                definition_path = confined_repo_file(file_path)
+                if (
+                    definition_path != rel
+                    or not isinstance(name, str)
+                    or not name
+                    or not isinstance(line, int)
+                    or isinstance(line, bool)
+                    or line <= 0
+                ):
+                    continue
+                definitions.append((name, line))
+            contracts: list[tuple[str, list[dict]]] = []
+            for symbol, definition_line in definitions:
+                if _validated_repository_witness_state(
+                    event,
+                    state,
+                    rel,
+                    definition_line,
+                    symbol,
+                ) is None:
+                    continue
+                sites: list[dict] = []
+                for site in _fact_callers_of_symbol_in_file(
+                    con,
+                    symbol,
+                    rel,
+                    state.repo_root,
+                ):
+                    caller_file = confined_repo_file(site.get("file"))
+                    identity = site.get("identity")
+                    line = site.get("line")
+                    confidence = site.get("confidence")
+                    resolution_method = site.get("resolution_method")
+                    edge_id = site.get("edge_id")
+                    definition_id = site.get("definition_id")
+                    if (
+                        not caller_file
+                        or not isinstance(identity, str)
+                        or not identity
+                        or not isinstance(line, int)
+                        or isinstance(line, bool)
+                        or line <= 0
+                        or not isinstance(confidence, (int, float))
+                        or isinstance(confidence, bool)
+                        or not _FACT_CONF_FLOOR <= float(confidence) <= 1.0
+                        or resolution_method not in DETERMINISTIC_RESOLUTION_METHODS
+                        or not isinstance(edge_id, int)
+                        or isinstance(edge_id, bool)
+                        or edge_id <= 0
+                        or not isinstance(definition_id, int)
+                        or isinstance(definition_id, bool)
+                        or definition_id <= 0
+                    ):
+                        continue
+                    source_state = _source_state_for_file(
+                        event,
+                        state,
+                        caller_file,
+                    )
+                    if source_state is None:
+                        continue
+                    sites.append({
+                        **site,
+                        "identity": identity,
+                        "file": caller_file,
+                        "line": line,
+                        "confidence": float(confidence),
+                        "resolution_method": resolution_method,
+                        "edge_id": edge_id,
+                        "definition_id": definition_id,
+                        "source_state": source_state,
+                    })
+                if sites:
+                    contracts.append((symbol, sites))
+            if not contracts:
+                continue
+            all_sites = [
+                (symbol, site)
+                for symbol, sites in contracts
+                for site in sites
+            ]
+            # A source view with a very broad public surface needs a narrower
+            # symbol decision; a truncated caller set would be misleading.
+            if len(all_sites) > 12:
+                continue
+            graph_revision, _valid_until = _revisions_for(
+                state,
+                "caller_contract_view",
+            )
+            usage_rows = tuple(
+                row
+                for symbol, sites in contracts
+                for row in _typed_caller_usage_rows(
+                    con,
+                    sites,
+                    symbol,
+                    graph_revision,
+                )
+            )
+            caller_rows = tuple(
+                CallerEvidenceRow(
+                    identity=str(site["identity"]),
+                    file=str(site["file"]),
+                    line=int(site["line"]),
+                    confidence=float(site["confidence"]),
+                    resolution_method=str(site["resolution_method"]),
+                    source_state=site["source_state"],
+                    edge_id=int(site["edge_id"]),
+                    definition_id=int(site["definition_id"]),
+                )
+                for _symbol, site in all_sites
+            )
+            symbols = tuple(symbol for symbol, _sites in contracts)
+            n_files = len(
+                {str(site["file"]) for _symbol, site in all_sites}
+            )
+            body = [
+                (
+                    f"{symbol}() has {len(sites)} production caller(s) "
+                    f"across {len({str(site['file']) for site in sites})} file(s)"
+                )
+                for symbol, sites in contracts
+            ]
+            producer_inputs = ProducerInputs(
+                schema=PRODUCER_INPUTS_SCHEMA,
+                evidence_type="caller_contract_view",
+                candidate_id="",
+                before_state=None,
+                after_state=viewed_state,
+                caller_rows=caller_rows,
+                graph_revision=graph_revision,
+                caller_usage_rows=usage_rows,
+            )
+            minimum_confidence = min(
+                float(site["confidence"]) for _symbol, site in all_sites
+            )
+            out.append(
+                _mk_add(
+                    state,
+                    event,
+                    fact_kind="caller_contract_view",
+                    target=rel,
+                    body_lines=body,
+                    evidence=[
+                        (str(site["file"]), int(site["line"]))
+                        for _symbol, site in all_sites
+                    ],
+                    tier=(
+                        VERIFIED
+                        if minimum_confidence >= 0.9
+                        else WARNING
+                    ),
+                    producer="caller_contract",
+                    symbol=(
+                        symbols[0]
+                        if len(symbols) == 1
+                        else "viewed_file_contract"
+                    ),
+                    confidence=minimum_confidence,
+                    native_args={
+                        "caller_rows": tuple(
+                            (
+                                str(site["file"]),
+                                int(site["line"]),
+                                str(site["identity"]),
+                            )
+                            for _symbol, site in all_sites
+                        ),
+                        "caller_usage_rows": tuple(
+                            (
+                                row.caller_file,
+                                row.line,
+                                row.callee,
+                                row.usage_kind,
+                            )
+                            for row in usage_rows
+                        ),
+                    },
+                    producer_inputs=producer_inputs,
+                    canonical_subject=rel,
+                    canonical_claim=(
+                        f"{rel} defines {len(symbols)} viewed production "
+                        f"symbol(s) with {len(all_sites)} cross-file production "
+                        f"caller(s) across {n_files} file(s)."
+                    ),
+                    canonical_consequence=(
+                        "Preserve the caller-visible behavior of "
+                        f"{', '.join(symbols)} or update every listed affected "
+                        "caller before applying the edit."
+                    ),
+                )
+            )
+    finally:
+        con.close()
+    return out
+
+
 def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     """The CROSS-LANGUAGE caller-contract break on a signature-changing edit. For each edited
     file whose function/method changed its parameter list (pure-text before/after diff), if
@@ -2789,7 +3422,18 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
                                            for row in caller_usage_rows
                                        ),
                                    },
-                                   producer_inputs=producer_inputs))
+                                   producer_inputs=producer_inputs,
+                                   canonical_subject=sym,
+                                   canonical_claim=(
+                                       f"{sym} changed signature and has "
+                                       f"{n_callers} production caller(s) across "
+                                       f"{n_files} file(s)."
+                                   ),
+                                   canonical_consequence=(
+                                       "Preserve the caller-visible contract or "
+                                       "update every listed affected caller before "
+                                       "continuing validation."
+                                   )))
     finally:
         con.close()
     return out
@@ -2816,7 +3460,16 @@ def _produce_covering(event: ToolEvent, state: GatewayState) -> list[EvidenceEnv
     return [_mk_add(state, event, fact_kind="covering_verdict", target=cov.target,
                     body_lines=rendered.splitlines(), evidence=list(cov.evidence),
                     tier=cov.tier or WARNING, producer="covering",
-                    symbol=cov.verdict or cov.target)]
+                    symbol=cov.verdict or cov.target,
+                    canonical_subject=cov.target,
+                    canonical_claim=(
+                        f"The executed covering validation for {cov.target} "
+                        f"finished with verdict {cov.verdict}."
+                    ),
+                    canonical_consequence=(
+                        "Use this executed verdict as the validation constraint "
+                        "for the current patch decision."
+                    ))]
 
 
 # --------------------------------------------------------------------------- #
@@ -2839,7 +3492,10 @@ _ROUTE_EVENT_ORDER: dict[str, int] = {
 
 
 def _event_ordinal(name: str) -> int:
-    return _ROUTE_EVENT_ORDER.get((name or "").strip().lower(), 0)
+    normalized = (name or "").strip().lower()
+    return _FINE_EVENT_TO_COARSE_ORDINAL.get(
+        normalized, _ROUTE_EVENT_ORDER.get(normalized, 0)
+    )
 
 
 # SM-0: the registry's FINE §1 delivery boundary (fact_registry.EVENTS) -> the COARSE
@@ -2906,7 +3562,8 @@ def _reactive_semantic_event(
     a permitted in-repository stack frame.
     """
     evidence_base = (env.evidence_type or "").split(":", 1)[0]
-    if evidence_base == "trace_frame" and _has_repo_trace(event, state):
+    observed = _observe_semantic_events(event, state)
+    if evidence_base == "trace_frame" and EVENT_FAILURE_OBS in observed:
         return EVENT_FAILURE_OBS
     return None
 
@@ -2971,7 +3628,10 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                 "gateway.route_delivery.episode_overlay", "ERROR",
                 reason=f"overlay_error:{type(exc).__name__}",
             )
-    cur = _event_ordinal(event.kind)
+    observed_semantics = _observe_semantic_events(event, state)
+    primary = event.primary_boundary or ""
+    cur = _FINE_EVENT_TO_COARSE_ORDINAL.get(
+        primary, _event_ordinal(event.kind))
     want: int | None = None
     registry_on = _registry_enforce()
     registry_error = False
@@ -2992,7 +3652,29 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                     return ROUTE_DEFER
                 want = cur
             else:
-                want = _registry_want_ordinal(env.evidence_type)
+                required = _fr_required_event(env.evidence_type)
+                # Always consult the executable registry ordinal even when the
+                # exact semantic event is present. Semantic membership proves
+                # THIS observation; it must not bypass fail-closed detection of
+                # a broken/unavailable registry authority.
+                declared_want = _registry_want_ordinal(env.evidence_type)
+                # Exact semantic membership is stronger than carrier order. One
+                # observation may validly contain both edit_result and
+                # failure_obs; a single coarse ``kind`` cannot represent that.
+                if (
+                    event.semantics_authoritative
+                    and required in _FINE_EVENT_TO_COARSE_ORDINAL
+                    and required not in observed_semantics
+                ):
+                    _record_control(
+                        state, "GT_REGISTRY_ENFORCE",
+                        "gateway.route_delivery.registry_timing", "APPLIED",
+                        reason="semantic_event_unproven",
+                    )
+                    return ROUTE_DEFER
+                want = (
+                    cur if required in observed_semantics else declared_want
+                )
         except Exception as exc:
             registry_error = True
             _record_control(
@@ -3038,18 +3720,26 @@ def delivery_latch_key(kind: str, file: str, graph_revision: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# ENTRY POINT
+# PRODUCTION + LEGACY ENTRY POINT
 # --------------------------------------------------------------------------- #
-def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
-    """Complete one tool observation with deterministic facts. ``[]`` when the master
-    flag is off, when the outcome needs nothing, or when every producer abstains."""
+def _produce_raw_candidates(
+    event: ToolEvent,
+    state: GatewayState,
+) -> tuple[list[EvidenceEnvelope], list[EvidenceEnvelope]]:
+    """Run only the deterministic evidence producers for one event.
+
+    The second list is legacy control-participation metadata for edit bridges.
+    It is intentionally private: canonical callers consume only the complete
+    first list through :func:`produce_raw`.
+    """
     if not _gateway_on():
-        return []
+        return [], []
+    _observe_semantic_events(event, state)
 
     # Record edit events (index + a lowercase blob of command/paths/after-content)
     # for the ZERO_ABSENT ordering predicate — the honest-negative gate mutes only
     # on an edit RELATED to the probed stem (F4).
-    if event.kind == KIND_EDIT:
+    if "edit_result" in event.semantic_events:
         parts = [event.command or ""]
         parts += list(event.changed_files or ())
         if event.edit_before_after:
@@ -3065,7 +3755,9 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     additions: list[EvidenceEnvelope] = []
     edit_bridge_candidates: list[EvidenceEnvelope] = []
     # kind-dispatched producers (independent of the search-outcome lattice)
-    if event.kind == KIND_EDIT:
+    if "file_view" in event.semantic_events:
+        additions += _produce_caller_contract_view(event, state)
+    if "edit_result" in event.semantic_events:
         if _patch_delta_producer_on():  # kill-switch; see _patch_delta_producer_on docstring
             produced = _produce_patch_delta(event, state)
             additions += produced
@@ -3089,13 +3781,17 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
         if (_change_surface_producer_on() and _cs_edit_trigger_on()
                 and _event_creates_new_file(event)):
             produced = _produce_change_surface(event, state, require_repeat=False,
-                                               drop_existing_destinations=True)
+                                               drop_existing_destinations=True,
+                                               post_creation=True)
             additions += produced
             if event.edit_before_after:
                 edit_bridge_candidates += produced
-    elif event.kind == KIND_TEST:
+    elif "test_result" in event.semantic_events:
         additions += _produce_covering(event, state)
-    elif event.kind == KIND_SEARCH and _loc_reslot_on():
+    elif (
+        {"search_result", "failed_search"} & set(event.semantic_events)
+        and _loc_reslot_on()
+    ):
         # T0->T2 re-slot (2026-07-12, GT_LOC_RESLOT, default OFF -> byte-identical): GT's
         # ranked localization ANSWER, delivered reactively at the D2/post-search boundary
         # (issue-keyed, INDEPENDENT of the search-outcome lattice below — fires even on a
@@ -3119,6 +3815,44 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     elif outcome == WRONG_SURFACE:
         additions += _produce_wrong_surface(event, state)
     # EXACT_HIT / SATISFIED -> silence
+    return additions, edit_bridge_candidates
+
+
+def produce_raw(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+    """Produce canonical evidence inputs without making a delivery decision.
+
+    This is the sole Gateway API for the canonical reasoning runtime.  It runs
+    the same feature flags, semantic classification, acquisition ledger, and
+    producer computations as :func:`augment`, but deliberately does *not*:
+
+    * render or append model-facing bytes;
+    * apply legacy registry timing or freshness routing;
+    * validate native-renderer availability;
+    * consult or mutate the delivered-evidence dedup chain;
+    * apply cross-session suppression or winner rank-up; or
+    * record legacy candidate-admission decisions.
+
+    The canonical lifecycle, scheduler, coalition selector, and adherence
+    compiler own those later decisions.  Producer-required acquisition state
+    (for example repeated-search history and localization cache) remains
+    attempt-scoped in ``state.episode`` and is intentionally shared with the
+    legacy producer computations.
+    """
+    additions, _edit_bridge_candidates = _produce_raw_candidates(event, state)
+    return additions
+
+
+def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+    """Complete one legacy tool observation with deterministic facts.
+
+    ``[]`` is returned when the master flag is off, when the outcome needs
+    nothing, or when every producer abstains.  Legacy timing, freshness,
+    validation, deduplication, cross-session policy, and rank-up behavior remain
+    here; canonical callers must use :func:`produce_raw` instead.
+    """
+    additions, edit_bridge_candidates = _produce_raw_candidates(event, state)
+    if not additions:
+        return []
 
     # leak-law (target) + envelope-law validation + need gate (dedup), in
     # deterministic order. The validate() drop is fail-closed BY CONSTRUCTION:

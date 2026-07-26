@@ -120,6 +120,7 @@ from .feature_lineage import DeliveryLineage
 from groundtruth.delivery.path_policy import is_deliverable
 
 __all__ = [
+    "CanonicalRuntimeWitness",
     "EvidenceEnvelope",
     "ObservationBinding",
     "build_observation_binding",
@@ -131,6 +132,7 @@ __all__ = [
     "feature_opportunity_id",
     "content_signature",
     "derive_dedup_key",
+    "runtime_witness_violations",
     "validate",
     "to_dict",
     "from_dict",
@@ -575,6 +577,150 @@ def _leaky_path(path_or_symbol: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Canonical runtime witness sidecar.
+# --------------------------------------------------------------------------- #
+_RUNTIME_WITNESS_EVENT = "canonical_event"
+_RUNTIME_WITNESS_COMPUTATION = "deterministic_computation"
+_RUNTIME_WITNESS_DIAGNOSTIC = "diagnostic_location"
+_RUNTIME_WITNESS_KINDS = frozenset(
+    {
+        _RUNTIME_WITNESS_EVENT,
+        _RUNTIME_WITNESS_COMPUTATION,
+        _RUNTIME_WITNESS_DIAGNOSTIC,
+    }
+)
+
+
+@dataclass(frozen=True)
+class CanonicalRuntimeWitness:
+    """Exact host-only proof for evidence derived from runtime state.
+
+    Runtime results do not necessarily have a truthful source line.  This sidecar
+    binds such evidence to one of three exact authorities instead: a committed
+    canonical event, a deterministic computation, or a diagnostic's exact source
+    location.  It is intentionally absent from evidence identity, rendering, and
+    serialization; those surfaces remain byte-compatible with legacy envelopes.
+    """
+
+    kind: str
+    witness_id: str
+    content_sha256: str
+    source_path: str = ""
+    source_line: int = 0
+    source_column: int = 0
+
+    def __post_init__(self) -> None:
+        violations = runtime_witness_violations(self)
+        if violations:
+            raise ValueError("; ".join(violations))
+
+    @classmethod
+    def canonical_event(
+        cls,
+        *,
+        event_id: str,
+        content_sha256: str,
+    ) -> "CanonicalRuntimeWitness":
+        """Bind evidence to an exact committed canonical-event identity and hash."""
+        return cls(
+            kind=_RUNTIME_WITNESS_EVENT,
+            witness_id=event_id,
+            content_sha256=content_sha256,
+        )
+
+    @classmethod
+    def deterministic_computation(
+        cls,
+        *,
+        computation_id: str,
+        content_sha256: str,
+    ) -> "CanonicalRuntimeWitness":
+        """Bind evidence to the canonical hash of one deterministic computation."""
+        return cls(
+            kind=_RUNTIME_WITNESS_COMPUTATION,
+            witness_id=computation_id,
+            content_sha256=content_sha256,
+        )
+
+    @classmethod
+    def diagnostic_location(
+        cls,
+        *,
+        checker_id: str,
+        diagnostic_sha256: str,
+        source_path: str,
+        source_line: int,
+        source_column: int = 0,
+    ) -> "CanonicalRuntimeWitness":
+        """Bind a diagnostic to its exact deliverable source location and bytes."""
+        return cls(
+            kind=_RUNTIME_WITNESS_DIAGNOSTIC,
+            witness_id=checker_id,
+            content_sha256=diagnostic_sha256,
+            source_path=source_path,
+            source_line=source_line,
+            source_column=source_column,
+        )
+
+
+def runtime_witness_violations(
+    witness: CanonicalRuntimeWitness,
+) -> list[str]:
+    """Return deterministic, fail-closed violations for a runtime witness."""
+    violations: list[str] = []
+    if not isinstance(witness, CanonicalRuntimeWitness):
+        return ["runtime witness must be a CanonicalRuntimeWitness"]
+    if witness.kind not in _RUNTIME_WITNESS_KINDS:
+        violations.append(f"runtime witness kind is unknown: {witness.kind!r}")
+    if not isinstance(witness.witness_id, str) or not witness.witness_id.strip():
+        violations.append("runtime witness id is required")
+    if (
+        not isinstance(witness.content_sha256, str)
+        or not witness.content_sha256
+        or not _is_hash_shaped(witness.content_sha256)
+    ):
+        violations.append(
+            "runtime witness content_sha256 must be exactly 64 lowercase hex"
+        )
+
+    if witness.kind == _RUNTIME_WITNESS_DIAGNOSTIC:
+        path = witness.source_path
+        path_parts = path.split("/") if isinstance(path, str) else ()
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.replace("\\", "/") != path
+            or path.startswith("/")
+            or (len(path) >= 2 and path[1] == ":")
+            or ".." in path_parts
+            or _leaky_path(path)
+        ):
+            violations.append(
+                "runtime diagnostic source path must be relative, normalized, "
+                "and deliverable"
+            )
+        if type(witness.source_line) is not int or witness.source_line < 1:
+            violations.append("runtime diagnostic source line must be positive")
+        if type(witness.source_column) is not int or witness.source_column < 0:
+            violations.append(
+                "runtime diagnostic source column must be non-negative"
+            )
+    elif witness.kind in {
+        _RUNTIME_WITNESS_EVENT,
+        _RUNTIME_WITNESS_COMPUTATION,
+    }:
+        if (
+            witness.source_path
+            or witness.source_line != 0
+            or witness.source_column != 0
+        ):
+            violations.append(
+                "event/computation runtime witness cannot carry source location"
+            )
+    return violations
+
+
+# --------------------------------------------------------------------------- #
 # THE CONTRACT
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
@@ -640,6 +786,21 @@ class EvidenceEnvelope:
     # freshness attestation. They are audit-only and deliberately excluded from
     # identity, serialization, rendering, and the dedup key.
     producer_inputs: "object | None" = field(default=None, compare=False)
+    # Canonical decision semantics are a separate producer-owned sidecar.  They
+    # must never replace ``producer_inputs``: the latter is the re-verifiable
+    # computation input, while this object declares the decision, roles,
+    # consequence, authority, and complete revision binding consumed by the
+    # reasoning runtime.  Like every other sidecar it is identity-neutral and is
+    # deliberately absent from serialization and rendering.
+    canonical_semantics: "object | None" = field(default=None, compare=False)
+    # Exact proof for runtime-derived evidence that has no truthful source-line
+    # provenance.  This sidecar is deliberately identity-, render-, equality-,
+    # hash-, and serialization-neutral.  Its integrity is enforced by build() and
+    # validate(); consumers may turn a validated witness into host-only audit
+    # provenance, but it never enters model-visible bytes.
+    runtime_witnesses: "tuple[CanonicalRuntimeWitness, ...]" = field(
+        default=(), compare=False
+    )
 
     # explicit field order — the source of deterministic (de)serialization order.
     # ClassVar so it is NOT a dataclass field (never in __init__/__eq__/to_dict).
@@ -703,6 +864,8 @@ class EvidenceEnvelope:
         native_args: "dict[str, Any] | None" = None,
         lineage: "DeliveryLineage | None" = None,
         producer_inputs: "object | None" = None,
+        canonical_semantics: "object | None" = None,
+        runtime_witnesses: "tuple[CanonicalRuntimeWitness, ...]" = (),
     ) -> EvidenceEnvelope:
         """Construct an envelope with the dedup key DERIVED (never hand-set) and the
         freshness token defaulted to ``graph_revision`` (a fact is valid until the graph
@@ -722,6 +885,17 @@ class EvidenceEnvelope:
         vu = graph_revision if valid_until is None else valid_until
         norm_payload = tuple(payload)
         norm_prov = tuple((str(f), int(ln)) for f, ln in provenance)
+        norm_runtime_witnesses = tuple(runtime_witnesses)
+        witness_violations = [
+            violation
+            for witness in norm_runtime_witnesses
+            for violation in runtime_witness_violations(witness)
+        ]
+        if witness_violations:
+            raise ValueError(
+                "EvidenceEnvelope.build: invalid canonical runtime witness: "
+                + "; ".join(witness_violations)
+            )
         try:
             sig = content_signature(norm_payload, norm_prov)
         except ValueError as e:
@@ -759,6 +933,8 @@ class EvidenceEnvelope:
             native_args=native_args,
             lineage=lineage,
             producer_inputs=producer_inputs,
+            canonical_semantics=canonical_semantics,
+            runtime_witnesses=norm_runtime_witnesses,
         )
 
 
@@ -795,10 +971,18 @@ def validate(env: EvidenceEnvelope) -> list[str]:
                 f"leak: provenance {f!r}:{ln} is a test/demo/vendored path"
             )
 
+    # Runtime-witness integrity is independent of the evidence tier. A malformed
+    # sidecar cannot rescue otherwise unsupported evidence.
+    for witness in env.runtime_witnesses:
+        violations.extend(runtime_witness_violations(witness))
+
     # (b) TIER HONESTY.
     if env.tier == VERIFIED:
-        if not env.provenance:
-            violations.append("tier: VERIFIED requires nonempty provenance")
+        if not env.provenance and not env.runtime_witnesses:
+            violations.append(
+                "tier: VERIFIED requires nonempty provenance or a canonical "
+                "runtime witness"
+            )
         if env.confidence < _VERIFIED_MIN_CONF:
             violations.append(
                 f"tier: VERIFIED requires confidence >= {_VERIFIED_MIN_CONF}"

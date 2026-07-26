@@ -86,6 +86,23 @@ class DefinitionRow:
 
 
 @dataclass(frozen=True, order=True)
+class RepositoryWitnessRow:
+    """One exact source location retained for a repository-derived claim.
+
+    ``kind`` identifies the deterministic substrate, while ``source_state``
+    binds the path and line to the exact file bytes observed by the producer.
+    The row is render-neutral and makes no stronger claim than that source
+    location.
+    """
+
+    file: str
+    line: int
+    kind: str
+    identity: str
+    source_state: SourceState | None
+
+
+@dataclass(frozen=True, order=True)
 class SignatureChange:
     """Exact semantic signature delta used by a producer decision.
 
@@ -124,6 +141,10 @@ class ProducerInputs:
     # producer resolved (the symbol whose definitions were partitioned).
     definition_rows: tuple[DefinitionRow, ...] = ()
     query_identity: str = ""
+    # Exact repository witnesses retained without changing the legacy envelope
+    # provenance/render/dedup identity.  The canonical converter may consume
+    # these only after validating the row and its source-state binding.
+    repository_witness_rows: tuple[RepositoryWitnessRow, ...] = ()
 
 
 __all__ = [
@@ -132,6 +153,7 @@ __all__ = [
     "CallerUsageEvidenceRow",
     "DefinitionRow",
     "ProducerInputs",
+    "RepositoryWitnessRow",
     "SignatureChange",
     "SourceState",
 ]

@@ -60,7 +60,7 @@ from groundtruth.runtime.evidence_envelope import (
     WARNING,
 )
 from groundtruth.runtime.gateway import (
-    KIND_EDIT, KIND_SEARCH, KIND_TEST, KIND_VIEW,
+    KIND_EDIT, KIND_SEARCH, KIND_SUBMIT, KIND_TEST, KIND_VIEW,
     CoveringResult, ToolEvent, classify_command)
 from groundtruth.runtime.native_render import (
     render_body_concept_native,
@@ -76,6 +76,10 @@ from groundtruth.runtime.native_render import (
 
 __all__ = [
     "normalize_event",
+    "canonicalize_action_proposal",
+    "canonicalize_tool_result",
+    "canonicalize_tool_event",
+    "canonical_test_failure_fingerprint",
     "arbitrate",
     "render_envelope",
     "fits_budget",
@@ -84,6 +88,389 @@ __all__ = [
     "DEF_FACTS_KINDS",
     "DEFAULT_MAX_DELTA_CHARS",
 ]
+
+
+def canonicalize_action_proposal(
+    action,
+    *,
+    event_id: str,
+    attempt_id: str,
+    sequence: int,
+    model_turn_id: str,
+    observation_id: str,
+    revision,
+    previous_event_hash: str,
+):
+    """Commit one structured Mini-SWE action before native execution."""
+    from groundtruth.runtime.reasoning_runtime import (
+        ActionOperation,
+        Authority,
+        CanonicalEvent,
+        CausalRef,
+        CausalRefKind,
+        EventKind,
+        SemanticKind,
+        SemanticOutcome,
+    )
+
+    proposal_kind = {
+        ActionOperation.SEARCH: SemanticKind.SEARCH_REQUESTED,
+        ActionOperation.VIEW_SOURCE: SemanticKind.SOURCE_READ_REQUESTED,
+        ActionOperation.VIEW_SYMBOL: SemanticKind.SOURCE_READ_REQUESTED,
+        ActionOperation.EDIT: SemanticKind.EDIT_PROPOSED,
+        ActionOperation.TEST: SemanticKind.TEST_REQUESTED,
+        ActionOperation.SIGNATURE_CHANGE: SemanticKind.EDIT_PROPOSED,
+        ActionOperation.FILE_CREATE: SemanticKind.EDIT_PROPOSED,
+        ActionOperation.FILE_DELETE: SemanticKind.EDIT_PROPOSED,
+        ActionOperation.FILE_RENAME: SemanticKind.EDIT_PROPOSED,
+        ActionOperation.SUBMIT: SemanticKind.SUBMIT_PROPOSED,
+    }.get(action.operation)
+    outcomes = (
+        (
+            SemanticOutcome(
+                kind=proposal_kind,
+                subject=action.subject,
+                metadata=tuple(
+                    (key, value)
+                    for key, value in (
+                        ("query", action.query),
+                        ("targets", "|".join(action.targets)),
+                    )
+                    if value
+                ),
+                authority=Authority.STRUCTURED,
+                provenance=("canonical_action",),
+            ),
+        )
+        if proposal_kind is not None
+        else ()
+    )
+    parents = (
+        CausalRef(CausalRefKind.ACTION, action.action_id),
+        CausalRef(CausalRefKind.MODEL_CALL, model_turn_id),
+        CausalRef(CausalRefKind.OBSERVATION, observation_id),
+    )
+    return CanonicalEvent(
+        event_id=event_id,
+        attempt_id=attempt_id,
+        sequence=sequence,
+        kind=EventKind.ACTION_PROPOSED,
+        authority=Authority.STRUCTURED,
+        outcomes=outcomes,
+        revision_before=revision,
+        revision_after=revision,
+        previous_event_hash=previous_event_hash,
+        action_id=action.action_id,
+        model_turn_id=model_turn_id,
+        observation_id=observation_id,
+        carrier=action.raw_command,
+        parents=parents,
+        action=action,
+    )
+
+
+def canonicalize_tool_result(
+    carrier_event: ToolEvent,
+    *,
+    proposal,
+    result,
+    event_id: str,
+    sequence: int,
+    observation_id: str,
+    revision_after,
+    previous_event_hash: str,
+):
+    """Commit structured native outcome truth without parsing carrier bytes."""
+    from groundtruth.runtime.reasoning_runtime import (
+        ActionOperation,
+        Authority,
+        CanonicalEvent,
+        CausalRef,
+        CausalRefKind,
+        EventKind,
+        SemanticKind,
+        SemanticOutcome,
+    )
+
+    if proposal.kind is not EventKind.ACTION_PROPOSED or proposal.action is None:
+        raise ValueError("tool result requires a canonical action proposal")
+    if previous_event_hash != proposal.content_hash:
+        raise ValueError("tool result previous hash does not bind its proposal")
+    action = proposal.action
+    status = result.status.lower()
+    provenance = ("canonical_action", "canonical_result")
+
+    def outcome(
+        kind,
+        *,
+        metadata=(),
+        changed=None,
+    ):
+        return SemanticOutcome(
+            kind=kind,
+            subject=action.subject,
+            status=result.status,
+            changed=changed,
+            failure_fingerprint=result.failure_fingerprint,
+            metadata=tuple(metadata),
+            authority=Authority.STRUCTURED,
+            provenance=provenance,
+        )
+
+    outcomes = ()
+    if action.operation is ActionOperation.SEARCH:
+        if status == "failed":
+            kind = SemanticKind.SEARCH_FAILED
+        elif result.hit_count == 0:
+            kind = SemanticKind.SEARCH_EMPTY
+        else:
+            kind = SemanticKind.SEARCH_RESULT
+        metadata = (
+            ("query", action.query),
+            *((("hit_count", str(result.hit_count)),)
+              if result.hit_count is not None else ()),
+            *((("files_hit", "|".join(result.files_hit)),)
+              if result.files_hit else ()),
+        )
+        outcomes = (outcome(kind, metadata=metadata),)
+    elif action.operation is ActionOperation.VIEW_SOURCE:
+        outcomes = (outcome(SemanticKind.SOURCE_VIEWED),)
+    elif action.operation is ActionOperation.VIEW_SYMBOL:
+        outcomes = (outcome(SemanticKind.SYMBOL_VIEWED),)
+    elif action.operation is ActionOperation.EDIT:
+        outcomes = (
+            (
+                outcome(SemanticKind.EDIT_EXECUTED, changed=True),
+                outcome(SemanticKind.DIFF_CREATED, changed=True),
+            )
+            if status == "success" and result.changed is True
+            else (outcome(SemanticKind.EDIT_FAILED, changed=False),)
+        )
+    elif action.operation is ActionOperation.TEST:
+        verdict = {
+            "pass": SemanticKind.TEST_PASS,
+            "success": SemanticKind.TEST_PASS,
+            "fail": SemanticKind.TEST_FAIL,
+            "failed": SemanticKind.TEST_FAIL,
+            "env_fail": SemanticKind.TEST_ENV_FAIL,
+        }.get(status)
+        outcomes = (outcome(SemanticKind.TEST_RESULT),) + (
+            (outcome(verdict),) if verdict is not None else ()
+        )
+    elif action.operation is ActionOperation.COMPILE:
+        outcomes = (outcome(SemanticKind.COMPILE_RESULT),)
+    elif action.operation is ActionOperation.SIGNATURE_CHANGE:
+        outcomes = (
+            outcome(SemanticKind.EDIT_EXECUTED, changed=True),
+            outcome(
+                SemanticKind.SIGNATURE_CHANGED,
+                metadata=(
+                    ("signature_before", result.signature_before),
+                    ("signature_after", result.signature_after),
+                ),
+                changed=True,
+            ),
+        )
+    elif action.operation is ActionOperation.FILE_CREATE:
+        outcomes = (outcome(SemanticKind.FILE_CREATED, changed=True),)
+    elif action.operation is ActionOperation.FILE_DELETE:
+        outcomes = (outcome(SemanticKind.FILE_DELETED, changed=True),)
+    elif action.operation is ActionOperation.FILE_RENAME:
+        outcomes = (outcome(SemanticKind.FILE_RENAMED, changed=True),)
+    elif action.operation is ActionOperation.SUBMIT:
+        outcomes = (
+            outcome(
+                SemanticKind.SUBMIT_ACCEPTED
+                if status == "accepted"
+                else SemanticKind.SUBMIT_BLOCKED
+            ),
+        )
+
+    parents = (
+        CausalRef(CausalRefKind.EVENT, proposal.event_id),
+        CausalRef(CausalRefKind.ACTION, action.action_id),
+        CausalRef(CausalRefKind.MODEL_CALL, proposal.model_turn_id),
+        CausalRef(CausalRefKind.OBSERVATION, observation_id),
+    )
+    return CanonicalEvent(
+        event_id=event_id,
+        attempt_id=proposal.attempt_id,
+        sequence=sequence,
+        kind=EventKind.ACTION_RESULT,
+        authority=Authority.STRUCTURED,
+        outcomes=outcomes,
+        revision_before=proposal.revision_after,
+        revision_after=revision_after,
+        previous_event_hash=previous_event_hash,
+        action_id=action.action_id,
+        model_turn_id=proposal.model_turn_id,
+        observation_id=observation_id,
+        carrier=carrier_event.carrier_kind or carrier_event.kind or "",
+        parents=parents,
+        action=action,
+        result=result,
+    )
+
+
+def canonicalize_tool_event(
+    event: ToolEvent,
+    *,
+    event_id: str,
+    attempt_id: str,
+    sequence: int,
+    action_id: str,
+    model_turn_id: str,
+    observation_id: str,
+    revision_before,
+    revision_after,
+    previous_event_hash: str,
+    parent_event_ids: "tuple[str, ...]" = (),
+):
+    """Translate an already-normalized ToolEvent without reparsing its carrier.
+
+    Outcome authority is assigned per evidence surface: repository byte deltas
+    own mutation claims, while structured result fields own test verdicts.
+    """
+    from groundtruth.runtime.reasoning_runtime import (
+        Authority,
+        CanonicalEvent,
+        CausalRef,
+        CausalRefKind,
+        EventKind,
+        SemanticKind,
+        SemanticOutcome,
+    )
+
+    outcomes: list[SemanticOutcome] = []
+    semantic_events = tuple(event.semantic_events or ())
+    repository_changed = (
+        revision_before.repository_content
+        != revision_after.repository_content
+    )
+    failure_fingerprint = canonical_test_failure_fingerprint(event)
+    for semantic_event in semantic_events:
+        if semantic_event == "edit_result":
+            if not repository_changed:
+                continue
+            for file_path in tuple(event.changed_files or ()):
+                outcomes.extend(
+                    (
+                        SemanticOutcome(
+                            kind=SemanticKind.EDIT_EXECUTED,
+                            subject=file_path,
+                            changed=True,
+                            authority=Authority.REPOSITORY_DELTA,
+                            provenance=("changed_files",),
+                        ),
+                        SemanticOutcome(
+                            kind=SemanticKind.DIFF_CREATED,
+                            subject=file_path,
+                            changed=True,
+                            authority=Authority.REPOSITORY_DELTA,
+                            provenance=("changed_files",),
+                        ),
+                    )
+                )
+        elif semantic_event == "test_result":
+            provenance = ("test_outcome", "test_protocol", "exit_status")
+            outcomes.append(
+                SemanticOutcome(
+                    kind=SemanticKind.TEST_RESULT,
+                    status=event.test_outcome or "",
+                    authority=Authority.RESULT_DERIVED,
+                    provenance=provenance,
+                )
+            )
+            verdict_kind = {
+                "pass": SemanticKind.TEST_PASS,
+                "fail": SemanticKind.TEST_FAIL,
+                "env_fail": SemanticKind.TEST_ENV_FAIL,
+            }.get(event.test_outcome or "")
+            if verdict_kind is not None:
+                outcomes.append(
+                    SemanticOutcome(
+                        kind=verdict_kind,
+                        status=event.test_outcome or "",
+                        failure_fingerprint=failure_fingerprint,
+                        authority=Authority.RESULT_DERIVED,
+                        provenance=provenance,
+                    )
+                )
+        elif semantic_event == "file_view":
+            viewed_files = tuple(event.viewed_files or ())
+            if viewed_files:
+                outcomes.extend(
+                    SemanticOutcome(
+                        kind=SemanticKind.SOURCE_VIEWED,
+                        subject=file_path,
+                        authority=Authority.STRUCTURED,
+                        provenance=("viewed_files",),
+                    )
+                    for file_path in viewed_files
+                )
+            elif not event.semantics_authoritative:
+                outcomes.append(
+                    SemanticOutcome(
+                        kind=SemanticKind.SOURCE_VIEWED,
+                        authority=Authority.RESULT_DERIVED,
+                        provenance=("semantic_events",),
+                    )
+                )
+        elif semantic_event == "search_result":
+            outcomes.append(
+                SemanticOutcome(
+                    kind=SemanticKind.SEARCH_RESULT,
+                    status="success",
+                    authority=Authority.RESULT_DERIVED,
+                    provenance=("semantic_events", "exit_status"),
+                )
+            )
+        elif semantic_event == "failed_search":
+            outcomes.append(
+                SemanticOutcome(
+                    kind=SemanticKind.SEARCH_EMPTY,
+                    status="empty",
+                    authority=Authority.RESULT_DERIVED,
+                    provenance=("semantic_events", "exit_status"),
+                )
+            )
+        elif semantic_event == "submit":
+            outcomes.append(
+                SemanticOutcome(
+                    kind=SemanticKind.SUBMIT_PROPOSED,
+                    authority=Authority.STRUCTURED,
+                    provenance=("semantic_events",),
+                )
+            )
+
+    parents = tuple(
+        CausalRef(CausalRefKind.EVENT, parent_id)
+        for parent_id in parent_event_ids
+    ) + (
+        CausalRef(CausalRefKind.ACTION, action_id),
+        CausalRef(CausalRefKind.MODEL_CALL, model_turn_id),
+        CausalRef(CausalRefKind.OBSERVATION, observation_id),
+    )
+    return CanonicalEvent(
+        event_id=event_id,
+        attempt_id=attempt_id,
+        sequence=sequence,
+        kind=EventKind.OBSERVATION_COMMITTED,
+        authority=(
+            Authority.STRUCTURED
+            if event.semantics_authoritative
+            else Authority.RESULT_DERIVED
+        ),
+        outcomes=tuple(outcomes),
+        revision_before=revision_before,
+        revision_after=revision_after,
+        previous_event_hash=previous_event_hash,
+        action_id=action_id,
+        model_turn_id=model_turn_id,
+        observation_id=observation_id,
+        carrier=event.carrier_kind or event.kind or "",
+        parents=parents,
+    )
 
 # The def-facts kinds ROUTED to the mini's own ``_fmt_def_facts`` /
 # ``_fmt_def_facts_native`` via the injected ``def_facts_renderer`` (never
@@ -102,6 +489,48 @@ DEF_FACTS_KINDS = frozenset({"def_ref_partition", "name_fold", "wrong_surface"})
 DEFAULT_MAX_DELTA_CHARS = 4000
 
 
+def canonical_test_failure_fingerprint(event: ToolEvent) -> str:
+    """Return a stable host-only identity for one observed failing test result.
+
+    ``test_outcome`` is the authority that says the observation is a failure.
+    Output bytes supply only the repeat identity.  Volatile paths, addresses and
+    numbers are removed so an unchanged failure remains comparable across runs.
+    The value is never rendered or treated as a repository fact.
+    """
+    if event.test_outcome not in {"fail", "env_fail"}:
+        return ""
+    markers = (
+        "error",
+        "failed",
+        "failure",
+        "exception",
+        "traceback",
+        "assert",
+        "fatal",
+        "not found",
+        "cannot",
+        "no such",
+        "panic",
+    )
+    significant = tuple(
+        line.strip()
+        for line in (event.output or "").splitlines()
+        if any(marker in line.lower() for marker in markers)
+    )
+    if not significant:
+        return ""
+    signature = "\n".join(significant[-8:])
+    signature = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", signature)
+    signature = re.sub(r"0x[0-9a-fA-F]+|\d+", "", signature)
+    signature = re.sub(r"[\w.]*[/\\][\w./\\-]+", "", signature)
+    signature = " ".join(signature.split())
+    if not signature:
+        return ""
+    return hashlib.sha256(
+        signature.encode("utf-8", "replace")
+    ).hexdigest()[:16]
+
+
 # --------------------------------------------------------------------------- #
 # 1. normalize — raw seam values -> the gateway's ONE interception unit
 # --------------------------------------------------------------------------- #
@@ -113,24 +542,66 @@ def normalize_event(
     *,
     cwd: str = "",
     changed_files: "tuple[str, ...]" = (),
+    viewed_files: "tuple[str, ...]" = (),
     edit_before_after: "Mapping[str, tuple[str | None, str]] | None" = None,
     covering: "CoveringResult | None" = None,
+    semantic_events: "tuple[str, ...] | None" = None,
+    primary_boundary: str = "",
+    test_outcome: str = "",
+    test_protocol: str = "",
+    state_revision: str = "",
 ) -> ToolEvent:
     """Build the gateway :class:`ToolEvent` from the mini's raw per-turn values.
 
     The kind is classified by ``gateway.classify_command`` (the segment-head rule
     proven byte-equivalent to the mini's own parser), so the seam and a direct
     ``augment`` call agree on the event shape."""
+    carrier = classify_command(command or "")
+    observed = tuple(dict.fromkeys(semantic_events or ()))
+    exact_viewed = tuple(dict.fromkeys(viewed_files or ()))
+    if semantic_events is None and exact_viewed:
+        observed = ("file_view",)
+    authoritative = semantic_events is not None or bool(exact_viewed)
+    if not test_outcome:
+        try:
+            from groundtruth.runtime.patterns import classify_test_observation
+            test_outcome, test_protocol = classify_test_observation(
+                command or "", output or "")
+        except Exception:  # noqa: BLE001 -- normalization stays correct-or-quiet
+            test_outcome = test_protocol = ""
+    if not authoritative:
+        if test_outcome:
+            observed = ("test_result",)
+        elif carrier == KIND_EDIT and (changed_files or edit_before_after):
+            observed = ("edit_result",)
+        elif exact_viewed or carrier == KIND_VIEW:
+            observed = ("file_view",)
+        elif carrier == KIND_SUBMIT:
+            observed = ("submit",)
+        elif carrier == KIND_SEARCH:
+            # Outcome-specific search semantics are completed in gateway where
+            # the canonical grep-result parser lives.
+            observed = ()
+    if not primary_boundary and observed:
+        primary_boundary = observed[0]
     return ToolEvent(
-        kind=classify_command(command or ""),
+        kind=carrier,
         command=command or "",
         output=output or "",
         exit_status=(None if returncode is None else int(returncode)),
         cwd=cwd or "",
         changed_files=tuple(changed_files or ()),
+        viewed_files=exact_viewed,
         action_index=int(action_index),
         edit_before_after=edit_before_after,
         covering=covering,
+        carrier_kind=carrier,
+        semantic_events=observed,
+        primary_boundary=primary_boundary,
+        test_outcome=test_outcome,
+        test_protocol=test_protocol,
+        state_revision=state_revision,
+        semantics_authoritative=authoritative,
     )
 
 
@@ -144,6 +615,7 @@ _EVIDENCE_TYPE_RANK: dict[str, int] = {
     "covering_verdict": 60,       # executed world-fact (the repo's own RED)
     "signature_mismatch": 50,     # edit-bound contract break (patch_delta, Python-only)
     "caller_break": 48,           # cross-language caller-contract break (below the narrower
+    "caller_contract_view": 48,   # the same contract, attached before mutation on source view
     #                               signature_mismatch — an arity diagnostic is more specific —
     #                               but above wrong_surface/trace so it wins an edit turn)
     "wrong_surface": 45,          # every hit is a test/vendored copy
@@ -159,6 +631,7 @@ _EVIDENCE_TYPE_RANK: dict[str, int] = {
     "name_fold": 34,              # indexed under a fold variant
     "companion_surface": 30,      # registration/companion gap
     "missing_role": 22,           # change_surface missing role (hypothesis)
+    "missing_role_postcreate": 22,  # same fact, honest post-creation edit boundary
     "body_concept": 20,           # vocabulary-gap function bodies
     "new_file_destination": 15,   # feature-add destination (hypothesis)
     "cochange_partner": 12,       # co-change partner
@@ -343,6 +816,12 @@ def boundary_for_event(event: "ToolEvent | None", *, zero_results: bool = False)
     today (correct-or-quiet: an undetermined boundary must never invent a match)."""
     if event is None:
         return None
+    primary = getattr(event, "primary_boundary", "") or ""
+    if primary:
+        return primary
+    semantic_events = tuple(getattr(event, "semantic_events", ()) or ())
+    if semantic_events:
+        return semantic_events[0]
     kind = getattr(event, "kind", None)
     if kind == KIND_EDIT:
         return "edit_result"
@@ -673,6 +1152,7 @@ def _render_scope(env: EvidenceEnvelope) -> str:
 _NATIVE_CLASS_RENDERERS: dict[str, Callable[[EvidenceEnvelope], str]] = {
     "trace_frame": _render_trace,
     "caller_break": _render_caller_break,
+    "caller_contract_view": _render_caller_break,
     "def_ref_partition": _render_def_rows,
     "signature_mismatch": _render_signature_delta,
     "companion_surface": _render_registration,

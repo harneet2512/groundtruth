@@ -398,38 +398,18 @@ def _record_brief_delivery(e: Mapping[str, str], brief_text: str) -> None:
 
 
 def _resolve_task(e: Mapping[str, str]) -> str:
-    """Resolve the agent task text: the guarded GT_RUN_TASK with the STEP-0 GT BRIEF prepended.
+    """Return only the host's native task bytes.
 
-    THE B-wire (2026-07-13): the pier path prepended the curated step-0 brief onto the agent
-    instruction (gt_agent._prepend_brief, gt_agent.py:1115); the mini HEADLESS path lost that wire —
-    the workflow stages the issue into GT_RUN_TASK and this runner called ``agent.run(task)`` with
-    the issue ALONE, so every mini run to date ran with the step-0 channel DARK (brief.txt generated
-    but never seen by the agent). Restore it here: on the GT arm read the substrate brief (baked by
-    the substrate-proof step to the host artifacts dir, bind-mounted READ-ONLY into the container at
-    ``GT_BRIEF_FILE`` — default ``/gt_artifacts/brief.txt``) and PREPEND it so the model reads it at
-    turn 0 on the observation channel it already consumes.
-
-    Correct-or-quiet: a missing / unreadable / empty brief leaves the task UNCHANGED (a brief-less
-    run is degraded, never broken). BASELINE (control) arm NEVER reads the file, so its task text is
-    byte-identical to a run with no brief on disk — the paired control is preserved exactly.
+    Task-start repository material is evidence input for the canonical
+    runtime. It is never directly prepended or pre-marked delivered here.
     """
     task = (e.get("GT_RUN_TASK") or "").strip() or "Fix the issue in the repository."
     if e.get("GT_BASELINE") == "1":
-        _bc("GT_BASELINE=1 -> brief NOT prepended (pure control arm)")
-        return task
-    brief_path = (e.get("GT_BRIEF_FILE") or "/gt_artifacts/brief.txt").strip()
-    try:
-        with open(brief_path, "rb") as fh:
-            brief_text = fh.read().decode("utf-8")
-    except Exception as exc:  # noqa: BLE001 -- correct-or-quiet: a brief read miss must NOT fail the run
-        _bc(f"no brief file -> task unchanged ({type(exc).__name__} @ {brief_path})")
-        return task
-    if not brief_text.strip():
-        _bc(f"empty brief -> task unchanged (@ {brief_path})")
-        return task
-    _record_brief_delivery(e, brief_text)
-    _bc(f"brief prepended ({len(brief_text)} chars @ {brief_path})")
-    return brief_text + "\n\n" + task
+        _bc("GT_BASELINE=1 -> native task unchanged (pure control arm)")
+    # The task-start brief is canonical evidence input.  Directly prepending it
+    # would bypass evidence lifecycle, coalition composition, exact provider
+    # joining, and terminal-inference delivery proof.
+    return task
 
 
 def _env_on(value: object) -> bool:
@@ -585,18 +565,27 @@ def run(env: dict | None = None) -> int:
     batch_required = _batch_hook_required(e)
     batch_result = "patch_import_unavailable"
     batch_attached = False
+    canonical_attachment = None
     if gt_mini_patch is not None:
         try:
-            installed = bool(gt_mini_patch.install_observation_batch_commit(agent))
+            canonical_attachment = gt_mini_patch.install_canonical_runtime(
+                model=model,
+                agent=agent,
+                env=e,
+                task=task,
+            )
             batch_attached = bool(
-                installed and getattr(agent, "_gt_batch_commit_installed", False)
+                getattr(canonical_attachment, "attached", False)
+                and getattr(canonical_attachment, "attempt_runtime", None) is not None
+                and getattr(canonical_attachment, "provider_boundary", None) is not None
+                and getattr(canonical_attachment, "commitment_boundary", None) is not None
             )
             batch_result = "installed" if batch_attached else "install_unavailable"
             if not batch_attached:
-                _bc("WARN GT batch handshake unavailable")
+                _bc("WARN GT canonical runtime attachment unavailable")
         except Exception as _exc:  # noqa: BLE001 -- report before the paid call
             batch_result = f"install_error:{type(_exc).__name__}"
-            _bc(f"WARN GT batch-commit install failed: {type(_exc).__name__}: {_exc}")
+            _bc(f"WARN GT canonical runtime install failed: {type(_exc).__name__}: {_exc}")
     receipt_written = True
     if e.get("GT_BASELINE") != "1":
         receipt_written = _write_batch_activation_receipt(
@@ -608,7 +597,7 @@ def run(env: dict | None = None) -> int:
         )
     if batch_required and (not batch_attached or not receipt_written):
         _bc(
-            "FATAL: required observation batch hook is unproven; "
+            "FATAL: required canonical runtime attachment is unproven; "
             "refusing paid agent.run()"
         )
         return 2
@@ -626,19 +615,26 @@ def run(env: dict | None = None) -> int:
             return 2
         try:
             seam_failures = int(gt_mini_patch.ledger_write_failures())
-            attestation = ledger_attestation.write_attestation(
-                e.get("GT_RUNTIME_LEDGER") or "/tmp/gt_runtime_ledger.jsonl",
-                write_failures=_BRIEF_LEDGER_WRITE_FAILURES + seam_failures,
-            )
-            _bc(
-                "runtime ledger terminal attestation "
-                f"rows={attestation['row_count']} bytes={attestation['byte_count']} "
-                f"sha256={attestation['sha256']}"
-            )
-            if attestation["write_failures"] != 0:
+            failures = _BRIEF_LEDGER_WRITE_FAILURES + seam_failures
+            # A canonical attachment owns persistence in RuntimeJournal.  A
+            # stale legacy JSONL file at the historical default path is not
+            # part of this attempt and must never determine its outcome.
+            legacy_ledger = e.get("GT_RUNTIME_LEDGER") or "/tmp/gt_runtime_ledger.jsonl"
+            if not batch_attached and os.path.isfile(legacy_ledger):
+                attestation = ledger_attestation.write_attestation(
+                    legacy_ledger,
+                    write_failures=failures,
+                )
+                _bc(
+                    "runtime ledger terminal attestation "
+                    f"rows={attestation['row_count']} bytes={attestation['byte_count']} "
+                    f"sha256={attestation['sha256']}"
+                )
+                failures = int(attestation["write_failures"])
+            if failures != 0:
                 _bc(
                     "FATAL: runtime ledger writer reported "
-                    f"{attestation['write_failures']} failure(s)"
+                    f"{failures} failure(s)"
                 )
                 return 2
         except (AttributeError, OSError, TypeError, ValueError) as exc:

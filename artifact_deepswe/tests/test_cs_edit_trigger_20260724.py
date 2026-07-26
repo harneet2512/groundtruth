@@ -84,6 +84,67 @@ def test_e2e_creation_reaches_the_producer_through_real_augment(monkeypatch):
     )
 
 
+def test_post_creation_missing_role_survives_production_registry(
+    tmp_path, monkeypatch,
+):
+    """A producer call is not a fire.  Under Profile-2 registry enforcement the
+    post-creation integration fact must survive route_delivery and become an
+    admitted model-facing envelope at the edit boundary."""
+    from types import SimpleNamespace
+
+    for flag in (
+        "GT_GATEWAY", "GT_CHANGE_SURFACE", "GT_CS_EDIT_TRIGGER",
+        "GT_REGISTRY_ENFORCE",
+    ):
+        monkeypatch.setenv(flag, "1")
+    monkeypatch.setenv("GT_PATCH_DELTA", "0")
+    missing = SimpleNamespace(
+        role="handler",
+        entity="baz",
+        registration_file="registry.py",
+        sibling_files=(),
+        registration_lines=(),
+        evidence=("registry.py has sibling handlers but no baz entry",),
+    )
+    result = SimpleNamespace(
+        abstained=False,
+        destinations=(),
+        missing_roles=(missing,),
+        sibling_groups=(),
+    )
+    monkeypatch.setattr(gw, "detect_change_surface", lambda *a, **k: result)
+
+    event = gw.ToolEvent(
+        kind=gw.KIND_EDIT,
+        command="cat <<'EOF' > handlers/baz.py",
+        action_index=3,
+        changed_files=("handlers/baz.py",),
+        edit_before_after={"handlers/baz.py": (None, "class Baz:\n    pass\n")},
+    )
+    state = gw.GatewayState(
+        repo_root=str(tmp_path),
+        issue_text="add baz and register it with the sibling handlers",
+    )
+
+    admitted = gw.augment(event, state)
+
+    assert [env.evidence_type for env in admitted] == [
+        "missing_role_postcreate:handler"
+    ], (
+        "post-creation integration evidence was produced but expired by the "
+        "failed_search contract before it could fire"
+    )
+    from groundtruth.runtime import global_arbiter
+    from groundtruth.runtime.adapters import miniswe
+    assert global_arbiter.class_of_kind(admitted[0].evidence_type) == "localization"
+    assert miniswe._priority(admitted[0])[1] == miniswe._EVIDENCE_TYPE_RANK[
+        "missing_role_postcreate"
+    ]
+    rendered = miniswe.render_envelope(admitted[0], native=True)
+    assert rendered and "registry.py" in rendered
+    assert "<gt-" not in rendered
+
+
 def test_e2e_modification_stays_quiet_through_real_augment(monkeypatch):
     """Correct-or-quiet: a modify-in-place must NOT reach it (no new dose)."""
     seen = _drive(monkeypatch, {"pkg/old.py": ("def f(): pass\n", "def f(): return 1\n")}, trigger_on=True)

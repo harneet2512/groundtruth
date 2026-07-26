@@ -152,6 +152,7 @@ _KIND_TO_CLASS: dict[str, str] = {
     "trace_frame": "localization",
     "new_file_destination": "localization",
     "missing_role": "localization",
+    "missing_role_postcreate": "localization",
     # Ranked localization emits the literal fact class. Class names that can enter
     # the pool must resolve like their producer aliases (the same defensive rule
     # used by ``recovery``), or the global arbiter rejects a valid dose as INTERNAL.

@@ -124,6 +124,9 @@ from groundtruth.runtime.evidence_envelope import (  # noqa: E402
     observation_binding_to_dict,
     validate_observation_binding,
 )
+from groundtruth.runtime.runtime_attestation import (  # noqa: E402
+    runtime_attestation_diagnostic,
+)
 from groundtruth.runtime.fact_registry import (  # noqa: E402
     FACT_ROLE_INTERNAL_SUPPORT,
     fact_role_for,
@@ -435,6 +438,7 @@ _LEGACY_LAYER_FACTCLASS: dict[str, str] = {
     "completion_cert": "submit_refusal",
     "submit_gate": "submit_refusal",
     "cochange": "cochange_prior",
+    "l3.cochange": "cochange_prior",
     "nudge": "recovery",
 }
 _INFRA_LAYER_PREFIXES = ("L6", "l6")  # freshness/reindex staging — not a fact class
@@ -4029,6 +4033,30 @@ def _apply_attestation_truth(
     }
 
 
+def _apply_canonical_runtime_attestation(
+    task_dir: str,
+    ss_integrity: dict[str, Any],
+) -> None:
+    """Attach canonical delivery proof without laundering it into consumption.
+
+    Legacy trajectories have no canonical journal and remain byte-for-byte
+    unchanged at this projection.  When a journal is present, its read-only
+    proof metadata is additive.  A corrupt journal taints required-input
+    integrity; a valid provider-terminal delivery remains only delivery proof
+    and never supplies acknowledgment, behavioral influence, or causal credit.
+    """
+
+    diagnostic = runtime_attestation_diagnostic(task_dir)
+    if diagnostic is None:
+        return
+    ss_integrity["canonical_runtime_attestation"] = diagnostic
+    if diagnostic.get("integrity_ok") is not True:
+        ss_integrity["required_inputs_complete"] = False
+        missing = set(ss_integrity.get("missing_required_inputs") or [])
+        missing.add("canonical_runtime_attestation_integrity")
+        ss_integrity["missing_required_inputs"] = sorted(missing)
+
+
 def collect_task(
     task: str,
     task_dir: str,
@@ -4348,6 +4376,7 @@ def collect_task(
     # the terminal live bit, and every named fail-closed reason.
     ss_integrity["live_run_provenance"] = _live.as_dict()
     ss_integrity["attestation_join"] = attestation_join_diag
+    _apply_canonical_runtime_attestation(task_dir, ss_integrity)
     # SPEC-J3: per-fact-class timing verdicts + UNMEASURED reasons feeding the
     # correct_rl_adhered_time gate (the delivery-row chronology join).
     ss_integrity["chronological_timing"] = chronological_timing

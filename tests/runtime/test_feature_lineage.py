@@ -276,3 +276,9 @@ def test_cap_byte_owner_mechanism_authority_is_total_and_exact() -> None:
         "GT_CERT_DELIVERY": "exact_profile_member",
     }
     assert "GT_SS_COHERENCE_V2" not in CAP_BYTE_OWNER_MECHANISMS
+    assert any(
+        binding.producer == "governor"
+        and binding.layer == "verify.horizon.pivot"
+        and binding.fact_class == "recovery"
+        for binding in CAP_BYTE_OWNER_MECHANISMS["GT_HYPOTHESIS"].bindings
+    )

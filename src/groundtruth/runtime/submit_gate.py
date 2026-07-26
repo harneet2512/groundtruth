@@ -33,6 +33,7 @@ def gate_verdict(
     *,
     covering: dict[str, Any] | None = None,
     hygiene: dict[str, Any] | None = None,
+    submit_block: dict[str, Any] | None = None,
     bounce_count: int = 0,
     max_bounces: int = 1,
 ) -> GateVerdict:
@@ -42,12 +43,16 @@ def gate_verdict(
         ``verdict == "fail"`` is a block; ``pass``/``unavailable``/None never block.
     ``hygiene``: a hygiene-predicate result (or None). ``{"blocking": True, ...}``
         blocks; anything else does not. (Wired in B2; None in B1.)
+    ``submit_block``: a positive, already-observed submit-boundary failure
+        (for example an unresolved test RED the agent itself observed). This is
+        the same decision head, not a second post-certificate gate.
     ``bounce_count``: how many times THIS run has already been refused.
     ``max_bounces``: refusals allowed before failing open (default 1).
     """
     cov_verdict = (covering or {}).get("verdict")
     cov_fail = cov_verdict == "fail"
     hyg_block = bool((hygiene or {}).get("blocking"))
+    submit_blocking = bool((submit_block or {}).get("blocking"))
 
     record: dict[str, Any] = {
         "covering_verdict": cov_verdict,
@@ -57,8 +62,11 @@ def gate_verdict(
         "bounce_count": bounce_count,
         "max_bounces": max_bounces,
     }
+    if submit_block is not None:
+        record["submit_blocking"] = submit_blocking
+        record["submit_block_reason"] = (submit_block or {}).get("reason")
 
-    if not cov_fail and not hyg_block:
+    if not cov_fail and not hyg_block and not submit_blocking:
         # No positive evidence to block on (pass / unavailable / not-computed).
         return GateVerdict(allow=True, reason="clean", record=record)
 
@@ -83,11 +91,21 @@ def gate_verdict(
             record=record,
         )
 
-    record["block"] = "hygiene"
+    if hyg_block:
+        record["block"] = "hygiene"
+        return GateVerdict(
+            allow=False,
+            reason="hygiene",
+            detail=str((hygiene or {}).get("detail") or (hygiene or {}).get("reason") or "hygiene check failed"),
+            record=record,
+        )
+
+    reason = str((submit_block or {}).get("reason") or "submit_observed_failure")
+    record["block"] = reason
     return GateVerdict(
         allow=False,
-        reason="hygiene",
-        detail=str((hygiene or {}).get("detail") or (hygiene or {}).get("reason") or "hygiene check failed"),
+        reason=reason,
+        detail=str((submit_block or {}).get("detail") or "an observed failure remains unresolved"),
         record=record,
     )
 
@@ -449,6 +467,7 @@ def build_certificate(
     *,
     covering: dict[str, Any] | None = None,
     hygiene: dict[str, Any] | None = None,
+    submit_block: dict[str, Any] | None = None,
     bounce_count: int = 0,
     max_bounces: int = 1,
     head: GateVerdict | None = None,
@@ -474,6 +493,7 @@ def build_certificate(
                            when present; absent -> build/type NOT_APPLICABLE.
       - ``scope_compliance`` <- the governor's computed value (bool/dict/str).
       - ``hygiene``      <- patch_auditor.diff_hygiene record (feeds the head).
+      - ``submit_block`` <- positive submit-boundary failure (feeds the same head).
       - ``reproduction`` <- an optional reproduction runner result; absent -> N/A.
       - ``obligations``  <- ADVISORY coverage only (T2 law).
 
@@ -487,7 +507,7 @@ def build_certificate(
     if head is None:
         cov_for_head = covering if _is_fresh(covering, submit_revision) else None
         head = safe_gate_verdict(
-            covering=cov_for_head, hygiene=hygiene,
+            covering=cov_for_head, hygiene=hygiene, submit_block=submit_block,
             bounce_count=bounce_count, max_bounces=max_bounces,
         )
 
@@ -586,6 +606,7 @@ def safe_build_certificate(**kwargs: Any) -> CompletionCertificate:
             head = safe_gate_verdict(
                 covering=kwargs.get("covering"),
                 hygiene=kwargs.get("hygiene"),
+                submit_block=kwargs.get("submit_block"),
                 bounce_count=kwargs.get("bounce_count", 0),
                 max_bounces=kwargs.get("max_bounces", 1),
             )

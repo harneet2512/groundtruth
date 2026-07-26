@@ -75,6 +75,7 @@ __all__ = [
     "ROLE_CONFIG",
     "ROLE_REGISTRATION",
     "ROLE_TEST",
+    "RepositoryWitness",
     "MissingRole",
     "NewFileDestination",
     "ChangeSurfaceResult",
@@ -177,6 +178,22 @@ _GENERIC_DESCRIPTORS: frozenset[str] = frozenset({
 # --------------------------------------------------------------------------- #
 # public dataclasses
 # --------------------------------------------------------------------------- #
+@dataclass(frozen=True, order=True)
+class RepositoryWitness:
+    """One exact repository location supporting a destination inference.
+
+    ``kind`` states what the location proves.  The detector currently admits
+    only production implementation definitions, code-shaped lexical template
+    references, and code-shaped registration references; it never manufactures
+    a line number for a path-only sibling.
+    """
+
+    file: str
+    line: int
+    kind: str
+    identity: str
+
+
 @dataclass
 class MissingRole:
     """A change surface the sibling convention expects but the new entity lacks.
@@ -211,6 +228,7 @@ class NewFileDestination:
     issue_span: str = ""
     evidence: list[str] = field(default_factory=list)
     trust_tier: str = TRUST_HYPOTHESIS
+    repository_witnesses: list[RepositoryWitness] = field(default_factory=list)
 
 
 @dataclass
@@ -330,21 +348,38 @@ def _walk_repo(repo_root: str) -> list[str]:
     return sorted(set(out))
 
 
-def _graph_facts(graph_db: str | None) -> tuple[set[str], set[str], set[str]]:
-    """(node_names_lower, impl_files, test_files) from graph.db, empty on error."""
+def _graph_facts(
+    graph_db: str | None,
+) -> tuple[
+    set[str],
+    set[str],
+    set[str],
+    dict[str, tuple[RepositoryWitness, ...]],
+]:
+    """Graph names/files plus exact production definition witnesses.
+
+    Definition witnesses require a positive ``start_line``.  A graph row with
+    no source line can still classify an implementation file, but it cannot
+    support canonical provenance and is deliberately omitted from the witness
+    map.
+    """
     names: set[str] = set()
     impl_files: set[str] = set()
     test_files: set[str] = set()
+    impl_witness_rows: dict[str, list[RepositoryWitness]] = {}
     if not graph_db:
-        return names, impl_files, test_files
+        return names, impl_files, test_files, {}
     try:
         conn = sqlite3.connect(graph_db)
     except sqlite3.Error:
-        return names, impl_files, test_files
+        return names, impl_files, test_files, {}
     try:
         try:
-            for row in conn.execute("SELECT name, file_path, is_test FROM nodes"):
-                nm, fp, is_test = row[0], row[1], row[2]
+            for row in conn.execute(
+                "SELECT name, file_path, start_line, is_test FROM nodes "
+                "ORDER BY file_path, start_line, name"
+            ):
+                nm, fp, start_line, is_test = row[0], row[1], row[2], row[3]
                 if nm:
                     names.add(str(nm).lower())
                 if fp:
@@ -353,11 +388,31 @@ def _graph_facts(graph_db: str | None) -> tuple[set[str], set[str], set[str]]:
                         test_files.add(fpp)
                     else:
                         impl_files.add(fpp)
+                        if (
+                            isinstance(start_line, int)
+                            and not isinstance(start_line, bool)
+                            and start_line > 0
+                            and nm
+                        ):
+                            impl_witness_rows.setdefault(fpp, []).append(
+                                RepositoryWitness(
+                                    file=fpp,
+                                    line=start_line,
+                                    kind="template_definition",
+                                    identity=str(nm),
+                                )
+                            )
         except sqlite3.Error:
-            return set(), set(), set()
+            return set(), set(), set(), {}
     finally:
         conn.close()
-    return names, impl_files, test_files
+    witnesses = {
+        file_path: tuple(sorted(set(rows), key=lambda row: (
+            row.line, row.identity, row.kind
+        )))
+        for file_path, rows in impl_witness_rows.items()
+    }
+    return names, impl_files, test_files, witnesses
 
 
 def _cochange_coupling(
@@ -838,7 +893,12 @@ def detect_change_surface(
     if not files:
         return ChangeSurfaceResult(abstained=True, abstain_reason="no_files")
 
-    graph_names, impl_files, test_files = _graph_facts(graph_db)
+    (
+        graph_names,
+        impl_files,
+        test_files,
+        impl_witness_rows,
+    ) = _graph_facts(graph_db)
     have_graph = bool(graph_db) and (bool(graph_names) or bool(impl_files) or bool(test_files))
 
     # known tokens: every path token + graph node name (lowercased)
@@ -913,8 +973,15 @@ def detect_change_surface(
         if len(ent_signals) < _MIN_SIGNALS:
             continue
 
-        mrs, dest = _entity_holes(entity, group, issue_text, ent_signals,
-                                  impl_files)
+        mrs, dest = _entity_holes(
+            entity,
+            group,
+            issue_text,
+            ent_signals,
+            impl_files,
+            impl_witness_rows,
+            repo_root,
+        )
         if dest is None and _needs_destination_but_conflicted(entity, group, impl_files):
             conflict = True
             continue
@@ -955,6 +1022,8 @@ def _needs_destination_but_conflicted(entity: str, group: _Group,
 
 def _entity_holes(entity: str, group: _Group, issue_text: str,
                   ent_signals: list[str], impl_files: set[str],
+                  impl_witness_rows: dict[str, tuple[RepositoryWitness, ...]],
+                  repo_root: str,
                   ) -> tuple[list[MissingRole], NewFileDestination | None]:
     """Diff the entity against the group's role template -> MissingRoles (+dest).
 
@@ -1043,11 +1112,58 @@ def _entity_holes(entity: str, group: _Group, issue_text: str,
                 ]
                 if group.registry_file:
                     ev.append(f"integrate at registry: {_posix(group.registry_file)}")
+                witnesses: list[RepositoryWitness] = []
+                template_rel = _posix(template_file)
+                template_rows = impl_witness_rows.get(template_rel, ())
+                if template_rows:
+                    # One exact production definition is enough to prove that
+                    # the selected template exists as an implementation
+                    # surface.  Additional definitions in the same file add no
+                    # destination value.
+                    witnesses.append(template_rows[0])
+                else:
+                    # Tree-only repositories have no definition graph.  Retain
+                    # the first code-shaped template line that actually names
+                    # the selected sibling member.  A path by itself never
+                    # becomes a fake ``:1`` citation; if the member is absent
+                    # from source, this substrate stays quiet.
+                    member_pattern = _ref_pattern(member_token)
+                    for line, source_text in _code_lines(
+                        _read_text(repo_root, template_rel)
+                    ):
+                        if member_pattern.search(source_text):
+                            witnesses.append(RepositoryWitness(
+                                file=template_rel,
+                                line=line,
+                                kind="template_lexical_reference",
+                                identity=member_token,
+                            ))
+                            break
+                if group.registry_file:
+                    registry_rel = _posix(group.registry_file)
+                    for member in sorted(group.registry_refs):
+                        rows = group.registry_refs[member]
+                        if not rows:
+                            continue
+                        line, _text = rows[0]
+                        if (
+                            isinstance(line, int)
+                            and not isinstance(line, bool)
+                            and line > 0
+                        ):
+                            witnesses.append(RepositoryWitness(
+                                file=registry_rel,
+                                line=line,
+                                kind="registration_reference",
+                                identity=member,
+                            ))
+                witnesses = sorted(set(witnesses))
                 dest = NewFileDestination(
                     entity=entity, suggested_path=_posix(suggested),
                     directory=directory, template_file=_posix(template_file),
                     registration_file=_posix(group.registry_file) if group.registry_file else None,
                     sibling_files=impl_sibs, issue_span=span, evidence=ev,
+                    repository_witnesses=witnesses,
                     trust_tier=TRUST_HYPOTHESIS,
                 )
 

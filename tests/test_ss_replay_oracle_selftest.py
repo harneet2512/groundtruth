@@ -342,12 +342,19 @@ def test_oracle_conan_historical_invalid_and_corrected_boundaries():
         }, {
             "task": _TASK,
             "label": "same-turn stale obligation after behavioral proof",
-            "layer": "spec.obligation",
-            "passing_test_pair": 16,
-            "expected_iteration": 17,
+            "layer": "obligation.unexercised",
+            "passing_test_pair": 15,
+            "expected_iteration": 16,
             "expected_outcome": "suppressed",
             "expected_reason": "ss_late",
             "expected_chars": 0,
+            "expected_clause_id": "8c8a5079",
+            "expected_subject_digest": "f530f49a477795ba",
+            "expected_artifact_issue_sha256": "f7f9940d48fc5825",
+            "expected_proof_turn": 16,
+            "forbidden_delivery_text": (
+                "However, they would be more useful if they supported inverse matching"
+            ),
             "acknowledgment": "NOT_APPLICABLE_SUPPRESSED",
         }],
     }
@@ -359,8 +366,14 @@ def test_oracle_conan_historical_invalid_and_corrected_boundaries():
         "layer": "consensus.scope", "iteration": 20, "chars_delivered": 367,
         "outcome": "delivered", "content_sha256_16": "7ab99be457a48275", "reason": "",
     }, {
-        "layer": "spec.obligation", "iteration": 17, "chars_delivered": 0,
+        "layer": "obligation.unexercised", "iteration": 16, "chars_delivered": 0,
         "outcome": "suppressed_hidden_only", "reason": "ss_late",
+        "clause_id": "8c8a5079", "subject_digest": "f530f49a477795ba",
+        "artifact_issue_sha256": "f7f9940d48fc5825", "proof_turn": 16,
+    }, {
+        "layer": "obligation.unexercised", "iteration": 16,
+        "chars_delivered": 27, "outcome": "delivered",
+        "content_sha256_16": "b" * 16, "payload": "Another unverified clause.",
     }]}
     fx = sro.FixpointResult(_TASK, True, False, False, 18.0, 30, 24)
     verdicts = sro.evaluate_cases(cases, recorded, replayed, None, fidelity={_TASK: fx})
@@ -380,7 +393,20 @@ def test_oracle_conan_historical_invalid_and_corrected_boundaries():
     assert unattributed[2].verdict == sro.FAIL
     replayed[_TASK][1]["reason"] = "ss_late"
 
-    # MUTATION 3: free-form pseudo-gates cannot make a diagnostic row pass.
+    # MUTATION 3: a same-turn suppression for another clause cannot satisfy the case.
+    replayed[_TASK][1]["clause_id"] = "another-clause"
+    wrong_clause = sro.evaluate_cases(cases, recorded, replayed, None, fidelity={_TASK: fx})
+    assert wrong_clause[2].verdict == sro.FAIL
+    replayed[_TASK][1]["clause_id"] = "8c8a5079"
+
+    # MUTATION 4: delivering the exact target clause alongside its suppression must fail.
+    replayed[_TASK][2]["payload"] = cases["corrected_boundaries"][1]["forbidden_delivery_text"]
+    target_delivered = sro.evaluate_cases(
+        cases, recorded, replayed, None, fidelity={_TASK: fx})
+    assert target_delivered[2].verdict == sro.FAIL
+    replayed[_TASK][2]["payload"] = "Another unverified clause."
+
+    # MUTATION 5: free-form pseudo-gates cannot make a diagnostic row pass.
     cases["historical_invalid"][0]["fails_gates"] = ["whatever_we_claim"]
     invented = sro.evaluate_cases(cases, recorded, replayed, None, fidelity={_TASK: fx})
     assert invented[0].verdict == sro.FAIL
@@ -2041,10 +2067,17 @@ def test_conan_corrected_boundary_manifest_matches_observed_sealed_rows():
     )
 
     obligation = by_label["same-turn stale obligation after behavioral proof"]
-    assert obligation["expected_iteration"] == 17
+    assert obligation["layer"] == "obligation.unexercised"
+    assert obligation["passing_test_pair"] == 15
+    assert obligation["expected_iteration"] == 16
     assert obligation["expected_outcome"] == "suppressed"
     assert obligation["expected_reason"] == "ss_late"
     assert obligation["expected_chars"] == 0
+    assert obligation["expected_clause_id"] == "8c8a5079"
+    assert obligation["expected_subject_digest"] == "f530f49a477795ba"
+    assert obligation["expected_proof_turn"] == 16
+    assert obligation["forbidden_delivery_text"].startswith(
+        "However, they would be more useful")
     assert obligation["acknowledgment"] == "NOT_APPLICABLE_SUPPRESSED"
 
 

@@ -53,6 +53,43 @@ TEST_FAIL_RE = re.compile(
     r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
     r"|\b\d+ failing\b|Tests:\s+\d+ failed)")
 
+# Native test protocols can outlive their launcher command.  Rust is the
+# canonical example: after ``cargo test --no-run`` an agent may execute
+# ``target/{debug,release}/deps/<test-binary>`` directly.  The executable name
+# is intentionally opaque, so command spelling cannot establish that this was
+# a test.  These result-frame markers do: they are emitted by the runner
+# protocol itself and are narrower than generic ``FAILED``/``AssertionError``.
+TEST_PROTOCOL_RE = re.compile(
+    r"(?:^|\n)\s*running\s+\d+\s+tests?\b"
+    r"|(?:^|\n)\s*test result:\s*(?:ok|FAILED)\b",
+    re.I,
+)
+
+
+def classify_test_observation(command: str, output: str) -> tuple[str, str]:
+    """Return ``(outcome, protocol)`` for an observed test result.
+
+    ``outcome`` is ``"pass"`` / ``"fail"`` / ``""``. ``protocol`` records
+    which independently observable surface established that the command was a
+    test: ``"command"`` for a recognized runner invocation or ``"native"`` for
+    a runner-owned result frame (for example a directly executed Rust test
+    binary). A generic non-zero return code or the word ``FAILED`` alone is not
+    a test protocol and stays quiet.
+    """
+    cmd = command or ""
+    out = output or ""
+    if TEST_RUNNER_RE.search(cmd):
+        protocol = "command"
+    elif TEST_PROTOCOL_RE.search(out):
+        protocol = "native"
+    else:
+        return "", ""
+    if TEST_FAIL_RE.search(out):
+        return "fail", protocol
+    if TEST_PASS_RE.search(out):
+        return "pass", protocol
+    return "", protocol
+
 # ---------------------------------------------------------------------------
 # ENV FAILURE — environment/tooling failure (NOT a test failure). Used to
 # suppress governor false-positives: an env error is actionable feedback, not a
@@ -145,6 +182,8 @@ __all__ = [
     "TEST_RUNNER_RE",
     "TEST_PASS_RE",
     "TEST_FAIL_RE",
+    "TEST_PROTOCOL_RE",
+    "classify_test_observation",
     "ENV_FAIL_RE",
     "COMPILE_FAIL_RE",
     "INFRA_NOISE_RE",

@@ -54,17 +54,13 @@ _ISSUE = "The widget crashes when the config key is missing. Fix it."
 
 # ── behavior: the exact value fed to agent.run(task) ────────────────────────────────
 
-def test_gt_arm_prepends_brief_before_issue(tmp_path):
+def test_gt_arm_keeps_native_issue_bytes_for_canonical_attachment(tmp_path):
     brief = tmp_path / "brief.txt"
     brief.write_bytes(_BRIEF.encode("utf-8"))  # LF bytes = real container brief.txt (no CRLF translation)
     env = {"GT_RUN_TASK": _ISSUE, "GT_BRIEF_FILE": str(brief)}  # GT_BASELINE unset -> GT arm
     task = ghr._resolve_task(env)
-    assert task.startswith(_BRIEF), (
-        "the step-0 brief must be prepended BEFORE the issue (the agent reads turn-0 top-down); "
-        f"got task[:80]={task[:80]!r}"
-    )
-    assert _ISSUE in task, "the original issue text must be preserved after the brief"
-    assert task == _BRIEF + "\n\n" + _ISSUE, "brief and issue must be joined by exactly one blank line"
+    assert task == _ISSUE
+    assert _BRIEF not in task
 
 
 def test_gt_arm_records_exact_producer_seal_without_changing_task_bytes(tmp_path):
@@ -80,16 +76,8 @@ def test_gt_arm_records_exact_producer_seal_without_changing_task_bytes(tmp_path
 
     task = ghr._resolve_task(env)
 
-    assert task == _BRIEF + "\n\n" + _ISSUE
-    row = json.loads(ledger.read_text(encoding="utf-8").strip())
-    assert row["layer"] == "brief.task"
-    assert row["event_type"] == "task_start"
-    assert row["outcome"] == "delivered"
-    assert row["chars_delivered"] == len(_BRIEF)
-    assert row["content_sha256_16"] == hashlib.sha256(
-        _BRIEF.encode("utf-8")
-    ).hexdigest()[:16]
-    assert row["seal_scope"] == "block"
+    assert task == _ISSUE
+    assert not ledger.exists(), "local task construction is not delivery"
 
 
 def test_brief_delivery_records_validated_block_lineage_without_whole_fact_alias(tmp_path):
@@ -112,11 +100,10 @@ def test_brief_delivery_records_validated_block_lineage_without_whole_fact_alias
         }]},
     }), encoding="utf-8")
 
-    ghr._resolve_task({
-        "GT_RUN_TASK": _ISSUE, "GT_BRIEF_FILE": str(brief),
-        "GT_INSEAM_METRICS": "1", "GT_RUNTIME_LEDGER": str(ledger),
-    })
-    row = json.loads(ledger.read_text(encoding="utf-8"))
+    row = ghr._brief_delivery_extra(
+        {"GT_BRIEF_FILE": str(brief)},
+        brief_text,
+    )
     assert row["compound_lineage_schema"] == "gt.compound_feature_lineage.v1"
     assert "fact_class" not in row and "lineage_schema" not in row
     assert len(row["block_lineage"]) == 1
@@ -160,7 +147,7 @@ def test_brief_producer_seal_is_default_off(tmp_path):
         "GT_RUNTIME_LEDGER": str(ledger),
     })
 
-    assert task == _BRIEF + "\n\n" + _ISSUE
+    assert task == _ISSUE
     assert not ledger.exists()
 
 
@@ -178,12 +165,10 @@ def test_baseline_arm_task_is_byte_identical(tmp_path):
     assert _BRIEF not in task, "no brief bytes may leak into the baseline task"
 
 
-def test_absent_brief_leaves_task_unchanged(tmp_path, capsys):
+def test_absent_brief_leaves_task_unchanged(tmp_path):
     env = {"GT_RUN_TASK": _ISSUE, "GT_BRIEF_FILE": str(tmp_path / "does_not_exist.txt")}
     task = ghr._resolve_task(env)
     assert task == _ISSUE, "a missing brief file must leave the task unchanged (correct-or-quiet)"
-    err = capsys.readouterr().err
-    assert "task unchanged" in err, "a missing brief must emit a breadcrumb, not fail silently"
 
 
 def test_empty_brief_leaves_task_unchanged(tmp_path):
@@ -246,10 +231,17 @@ def _install_fake_minisweagent(monkeypatch, captured):
     # gt_mini_patch is imported in-process on the GT arm; stub it so run() has no real side effects.
     gmp = types.ModuleType("gt_mini_patch")
     gmp._PATCHED_CLASSES = []
+    gmp.install_canonical_runtime = lambda **kwargs: types.SimpleNamespace(
+        attached=True,
+        attempt_runtime=object(),
+        provider_boundary=object(),
+        commitment_boundary=object(),
+    )
+    gmp.ledger_write_failures = lambda: 0
     monkeypatch.setitem(sys.modules, "gt_mini_patch", gmp)
 
 
-def test_agent_run_receives_the_brief_prepended_task(tmp_path, monkeypatch):
+def test_agent_run_receives_native_task_and_canonical_attachment(tmp_path, monkeypatch):
     captured: dict[str, str] = {}
     _install_fake_minisweagent(monkeypatch, captured)
     brief = tmp_path / "brief.txt"
@@ -264,11 +256,7 @@ def test_agent_run_receives_the_brief_prepended_task(tmp_path, monkeypatch):
     rc = ghr.run(env)
     assert rc == 0, "run() must complete the agent loop"
     assert "task" in captured, "agent.run was never called"
-    assert captured["task"].startswith(_BRIEF), (
-        "the task that actually reached agent.run must start with the brief bytes; "
-        f"got {captured['task'][:80]!r}"
-    )
-    assert _ISSUE in captured["task"], "the issue text must survive into agent.run"
+    assert captured["task"] == _ISSUE
 
 
 def test_agent_run_baseline_receives_issue_only(tmp_path, monkeypatch):

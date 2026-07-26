@@ -36,12 +36,13 @@ through it.
 from __future__ import annotations
 
 import contextvars
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import os
 import sys as _sys
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -1843,7 +1844,11 @@ def _edit_target(cmd: str) -> str | None:
         pt = _patch_apply_target(cmd)
         if pt:
             return pt
-    nohd = cmd.split("<<", 1)[0] if "<<" in cmd else cmd  # shell scans exclude heredoc body
+    # Preserve the executable heredoc declaration line while dropping only the
+    # DATA body.  In the live ``cat <<'EOF' > path`` shape the redirect appears
+    # after ``<<``; splitting at the token discarded the destination and
+    # misclassified a real edit as a view.
+    nohd = _shell_without_heredoc_bodies(cmd)
     # 1. redirect whose TARGET is a source file (broad — incl. /tmp/ staging).
     #    SCRATCH DEFER (2026-06-26): a redirect to /tmp/ is a scratch script, not the
     #    real edit. Defer it as fallback so step 3 can find the actual target inside
@@ -7198,6 +7203,8 @@ try:
         ENV_FAIL_RE as _ENV_FAIL_RE,
         TEST_FAIL_RE as _TEST_FAIL_RE,
         TEST_PASS_RE as _TEST_PASS_RE,
+        TEST_PROTOCOL_RE as _TEST_PROTOCOL_RE,
+        classify_test_observation as _classify_test_observation,
         COMPILE_FAIL_RE as _COMPILE_FAIL_RE,
         is_infra_noise as _is_infra_noise,  # W4 guard 1 (canonical)
     )
@@ -7216,6 +7223,23 @@ except ImportError:
         r"|jest\b|mocha\b|vitest\b|rspec\b|rake\s+test\b|phpunit\b|ctest\b"
         r"|mvn\s+\S*\s*test\b|gradlew?\s+\S*\s*test\b|make\s+(?:check|test)\b"
         r")", re.I)
+    _TEST_PROTOCOL_RE = re.compile(
+        r"(?:^|\n)\s*running\s+\d+\s+tests?\b"
+        r"|(?:^|\n)\s*test result:\s*(?:ok|FAILED)\b",
+        re.I,
+    )
+    def _classify_test_observation(command: str, output: str) -> tuple[str, str]:
+        if _TEST_RUNNER_RE.search(command or ""):
+            protocol = "command"
+        elif _TEST_PROTOCOL_RE.search(output or ""):
+            protocol = "native"
+        else:
+            return "", ""
+        if _TEST_FAIL_RE.search(output or ""):
+            return "fail", protocol
+        if _TEST_PASS_RE.search(output or ""):
+            return "pass", protocol
+        return "", protocol
     _ENV_FAIL_RE = re.compile(
         r"(ModuleNotFoundError|No module named|ImportError"
         r"|ERROR: Could not find a version|No matching distribution found"
@@ -8044,6 +8068,7 @@ def _reset_oracle_state() -> None:
     _action_count = 0
     _mtime_baseline = _SourceSnapshot()
     _mtime_baseline_seeded = False
+    _gateway_edit_preimages.clear()
     _oracle_nonedit_streak = 0
     _oracle_obligation_fired = False
     _oracle_test_count = 0           # bug #4: reset test-evidence on retry
@@ -8077,7 +8102,7 @@ def _reset_oracle_state() -> None:
     # suites reset by hand.
     global _detect_loop_fired, _detect_loop_epoch_step, _coherence_last_rel
     global _last_test_outcome_failed, _last_test_step, _cycle_edit_start
-    global _last_verify_executed_identity
+    global _last_verify_executed_identity, _hypothesis_pivot_content_key
     global _recovery_repeat_fp, _recovery_loop_fired
     # W6 FIX 1b: the per-turn recovery REPETITION flag (set fresh at the top of every
     # `_gt_hypothesis_classify_turn`, consumed same-turn by `_recovery_stall_active`). Clear it
@@ -8105,6 +8130,7 @@ def _reset_oracle_state() -> None:
     # defaults (byte-identical in production: fresh process per attempt).
     _last_test_outcome_failed = False
     _last_verify_executed_identity = None
+    _hypothesis_pivot_content_key = ""
     _last_test_step = None
     _cycle_edit_start = None
     _test_cycle_spans.clear()
@@ -9481,7 +9507,8 @@ def _gateway_profile_member_extra(envelope) -> "dict[str, str] | None":
         member = "GT_PATCH_DELTA"
     elif producer == "change_surface" and (
             evidence_type == "new_file_destination"
-            or evidence_type.startswith("missing_role:")):
+            or evidence_type.startswith("missing_role:")
+            or evidence_type.startswith("missing_role_postcreate:")):
         member = "GT_CHANGE_SURFACE"
     if not member or os.environ.get(member) != "1":
         return None
@@ -9621,6 +9648,15 @@ def _lane_registered_lineage(kind: str, event, *, text: "str | None" = None):
     intrinsic = None
     if kind == "verify.horizon.executed":
         intrinsic = globals().get("_last_verify_executed_identity")
+    elif (
+        kind == "verify.horizon.pivot"
+        and isinstance(text, str)
+        and text
+        and _hypothesis_pivot_content_key == _block_hash(text)
+    ):
+        # The horizon producer explicitly selected recovery bytes for this exact
+        # candidate.  This is producer-staged identity, not payload inference.
+        intrinsic = ("governor", "recovery", "failure_obs")
     binding = (intrinsic[:2] if intrinsic is not None
                else _LANE_REGISTERED_PRODUCERS.get(kind or ""))
     if binding is None:
@@ -9724,6 +9760,32 @@ def _lane_delivery_extra(
     # binding may attach FACT lineage to delivered bytes.
     if lineage is not None:
         extra.update(_feature_lineage_extra(lineage))
+        if (
+            kind == "verify.horizon.pivot"
+            and not _GT_BASELINE
+            and os.environ.get("GT_HYPOTHESIS") == "1"
+            and str(getattr(lineage, "runtime_producer_id", "") or "") == "governor"
+            and str(getattr(lineage, "fact_class", "") or "") == "recovery"
+        ):
+            # Exact-profile CAP ownership for the producer-staged recovery
+            # pivot.  Generic verification pivots have no lineage above and
+            # remain unowned.
+            try:
+                from groundtruth.runtime.feature_lineage import CAP_BYTE_OWNER_MECHANISMS
+                authority = CAP_BYTE_OWNER_MECHANISMS.get("GT_HYPOTHESIS")
+                binding = next(
+                    (
+                        b for b in authority.bindings
+                        if b.producer == "governor"
+                        and b.layer == kind
+                        and b.fact_class == "recovery"
+                    ),
+                    None,
+                ) if authority is not None else None
+                if binding is not None:
+                    extra["profile_member"] = "GT_HYPOTHESIS"
+            except Exception:  # noqa: BLE001 -- attribution never breaks delivery
+                pass
     try:
         if identity is not None and getattr(identity, "text", None) == text:
             extra.update(identity.delivery_extra())
@@ -11272,6 +11334,12 @@ def _edit_syntax_candidate(rel: str) -> "tuple[float, str, str, bool] | None":
 # recipe). Off / no classification -> the generic pivot text, byte-identical.
 # =====================================================================
 _gt_hypothesis_recovery: "tuple[str, str] | None" = None  # (disposition, imperative)|None
+# Exact producer-staged identity for a verification pivot whose GENERIC bytes were
+# replaced by GT_HYPOTHESIS recovery bytes.  The content key is set only by that
+# producer branch and consumed only by the delivery-lineage join; generic pivot
+# payloads can therefore never inherit recovery ownership merely because the flag
+# is enabled or the layer name resembles recovery.
+_hypothesis_pivot_content_key: str = ""
 # W6 FIX 1b (2026-07-12) — the REPETITION half of the recovery STALL GATE. Set once per turn by
 # `_gt_hypothesis_classify_turn` to True iff THIS turn's failure fingerprint had ALREADY been seen
 # on a PRIOR turn (a genuine recurrence), captured BEFORE this turn feeds its fp into the failure
@@ -11611,7 +11679,11 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
     Respects: dose caps (advisory/urgent/pivot once each, gate cap-3, all
     gate-loss re-armed)."""
     global _horizon_advisory_fired, _horizon_urgent_fired, \
-        _horizon_pivot_fired, _horizon_gate_fire_count, _last_covering_result
+        _horizon_pivot_fired, _horizon_gate_fire_count, _last_covering_result, \
+        _hypothesis_pivot_content_key
+
+    # Producer identity is per-candidate, never sticky across turns/calls.
+    _hypothesis_pivot_content_key = ""
 
     if _GT_BASELINE:
         return None
@@ -11770,6 +11842,7 @@ def _verification_horizon_candidate() -> tuple[float, str, str, bool] | None:
                 _gt_hypothesis_recovery[0], _gt_hypothesis_recovery[1])
             if _rec:
                 block = _rec  # steer's pivot chosen FROM the classification
+                _hypothesis_pivot_content_key = _block_hash(_rec)
         except Exception:  # noqa: BLE001 -- recovery framing must never break the pivot
             pass
 
@@ -13386,7 +13459,7 @@ def _lane_a_retired_under_gateway(kind: str, *, replacement_ready: bool = False)
     return False
 
 
-def _gt_gateway_caller_contract_ready(action, cmd) -> bool:
+def _gt_gateway_caller_contract_ready(action, cmd, event=None) -> bool:
     """SM-2b replacement-delivers TRIPWIRE (§26.4 equivalence-before-retirement). True iff the
     Gateway's CROSS-LANGUAGE ``caller_contract`` producer WOULD DELIVER a caller-break for THIS
     edit — the ONLY condition under which the legacy ``l3.contract`` / ``l3b.evidence``
@@ -13412,12 +13485,17 @@ def _gt_gateway_caller_contract_ready(action, cmd) -> bool:
     except Exception:  # noqa: BLE001 — gateway/native_render absent in-container
         return False
     try:
-        _changed, _eba = _gateway_edit_bridges(action, cmd)
-        if not _eba:
-            return False
-        ev = _TE(kind="edit", command=cmd or "", output="",
-                 changed_files=tuple(_changed or ()), action_index=_action_count,
-                 edit_before_after=_eba)
+        if event is None:
+            _changed, _eba = _gateway_edit_bridges(action, cmd)
+            if not _eba:
+                return False
+            ev = _TE(kind="edit", command=cmd or "", output="",
+                     changed_files=tuple(_changed or ()), action_index=_action_count,
+                     edit_before_after=_eba)
+        else:
+            ev = event
+            if not getattr(ev, "edit_before_after", None):
+                return False
         st = _GS(graph_db=_db_path(), repo_root=_root(),
                  issue_text=_issue_text(), episode=_EPISODE,  # pyright: ignore[reportArgumentType]  # conditional-import stub<->real fallback (graceful in-container degradation)
                  episode_overlay=_gt_episode_overlay)
@@ -14095,6 +14173,43 @@ def _gateway_edit_bridges_on() -> bool:
         "", "0", "false", "no", "off")
 
 
+_gateway_edit_preimages: "dict[str, str | None]" = {}
+
+
+def _gateway_capture_edit_preimage(action) -> None:
+    """Capture the exact Gateway before-image at the pre-execute boundary.
+
+    Bash redirects and patch commands do not carry an old side that can be
+    reverse-applied after execution.  The environment wrapper therefore reads
+    the bounded target before the command runs.  ``None`` is positive evidence
+    that the target did not exist (a creation); an absent mapping means the
+    target was unsafe, unreadable, or too large and downstream stays quiet.
+    """
+    _gateway_edit_preimages.clear()
+    if not _gateway_edit_bridges_on():
+        return
+    try:
+        kind, path = _classify_action(action)
+        if kind != "post_edit" or not path:
+            return
+        root = _root()
+        rel = _to_repo_rel(path, root)
+        if not rel:
+            return
+        fp = _ss_confined_repo_source_abs(path, root)
+        if not fp:
+            return
+        if not os.path.exists(fp):
+            _gateway_edit_preimages[rel] = None
+            return
+        if not os.path.isfile(fp) or os.path.getsize(fp) > 1_000_000:
+            return
+        with open(fp, encoding="utf-8", errors="replace") as fh:
+            _gateway_edit_preimages[rel] = fh.read()
+    except Exception:  # noqa: BLE001 -- pre-image capture must never break execute
+        _gateway_edit_preimages.clear()
+
+
 def _gateway_edit_bridges(action, cmd) -> "tuple[tuple[str, ...], dict | None]":
     """B-3 (2026-07-10): reconstruct the Gateway edit BRIDGES from the agent's edit
     action so the previously-UNREACHABLE edit-turn producers can fire.
@@ -14137,6 +14252,8 @@ def _gateway_edit_bridges(action, cmd) -> "tuple[tuple[str, ...], dict | None]":
         after = None
     if after is None:
         return changed, None
+    if rel in _gateway_edit_preimages:
+        return changed, {rel: (_gateway_edit_preimages[rel], after)}
     verb = ""
     old_str = new_str = None
     if isinstance(action, dict):
@@ -14732,7 +14849,9 @@ def _gt_gateway_pool_envelope(
         ev_kind=getattr(ev, "kind", ""), rendered_text=delta, out=out)
 
 
-def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None, lattice_produced=None) -> None:
+def _gt_gateway_deliver(
+        action, out, cmd, orig_out, *, pool=None, lattice_produced=None,
+        normalized_event=None) -> None:
     """THE ONE CALL: complete THIS observation with one gateway.augment() dose.
 
     ``lattice_produced`` (2026-07-22): the seam threads whether the post_search lattice
@@ -14794,9 +14913,10 @@ def _gt_gateway_deliver(action, out, cmd, orig_out, *, pool=None, lattice_produc
         # `_executed_covering_emission` / `_verification_plan_emission` path, so passing a
         # `covering=` fact into the gateway here would DOUBLE-deliver. Covering stays a
         # Lane-B fact; SM-5 decides the plane. Do NOT thread covering into normalize_event.
-        ev = _ad_normalize(cmd or "", orig_out or "", rc, _action_count,
-                           changed_files=_changed_files,
-                           edit_before_after=_edit_before_after)
+        ev = normalized_event or _ad_normalize(
+            cmd or "", orig_out or "", rc, _action_count,
+            changed_files=_changed_files,
+            edit_before_after=_edit_before_after)
         # RECEIPTS (law 7, levels 2-3): promotion is BOOKKEEPING of PAST deliveries — it
         # reads THIS turn's observation text + command and promotes a prior delivery's
         # receipt_state (delivered->referenced->acted). It DELIVERS nothing and records
@@ -16318,7 +16438,7 @@ def _global_pool_add_steer(pool, out, cmd, win_text, *, kkind, kf, krel, event,
                 reason=_reason, file_path=krel or kf or "", event=event)
             _rearm_latches({kind}, kkind=kkind, kf=kf, krel=krel)
             return
-    _steer_lineage = _lane_registered_lineage(kind, event)
+    _steer_lineage = _lane_registered_lineage(kind, event, text=win_text)
     _steer_identity_producer, _steer_identity_evidence = _lane_envelope_identity(
         kind, _steer_lineage)
     # CLASS-3(b): freeze identity over the FINAL delivered bytes. Under GT_STEER_NATIVE the steer is
@@ -19206,7 +19326,7 @@ def _ss_submit_red_refusal(*, record_candidate: bool = True) -> str:
     return line
 
 
-def _augment_output(action, out) -> None:
+def _augment_output_legacy(action, out) -> None:
     """Append GT evidence to a command's output dict."""
     global _marker_sent, _action_count, _source_edit_count, _cycle_edit_start
     if not isinstance(out, dict):
@@ -19320,7 +19440,7 @@ def _augment_output(action, out) -> None:
             # legacy l3.contract / l3b.evidence (equivalence-before-retirement, §26.4). False on
             # a non-edit turn / bridges-off / no sig-change / no cross-file caller / GT_GATEWAY
             # off -> the legacy KEEPS delivering (never a deletion). Deterministic + isolated.
-            _cc_ready = _gt_gateway_caller_contract_ready(action, cmd)
+            _cc_ready = False
             # SUBPROCESS-WRITE CATCH-ALL: _classify/_edit_target is a STRING
             # parser blind to a write done INSIDE a subprocess (`python3 x.py`
             # writing Lexer.js). When the fast path found NO edit target,
@@ -19403,6 +19523,51 @@ def _augment_output(action, out) -> None:
                             _to_repo_rel(_kf, _attempt_root), cmd or "", _orig_out,
                             returncode=_returncode, bytes_changed=False)
                         _kkind, _kf = None, None
+            # ONE normalized observation for every downstream Gateway consumer.
+            # The carrier comes from the shared adapter; semantic events come
+            # from exact pre/post state and the canonical test protocol. This
+            # prevents Lane/Gateway/registry from independently reparsing the
+            # same command into contradictory events.
+            _normalized_event = None
+            _test_outcome, _test_protocol = _classify_test_observation(
+                cmd or "", _orig_out)
+            if _gt_gateway_on():
+                try:
+                    from groundtruth.runtime.adapters.miniswe import (
+                        normalize_event as _normalize_gateway_event)
+                    _exact_changed_rels = tuple(
+                        _to_repo_rel(_changed_by_key[key], _root())
+                        for key in sorted(_changed_by_key)
+                    )
+                    _bridge_changed, _bridge_before_after = _gateway_edit_bridges(
+                        action, cmd)
+                    if _v2_write_truth:
+                        _semantic_events = []
+                        if _kkind == "post_edit" and _exact_changed_rels:
+                            _semantic_events.append("edit_result")
+                        if _test_outcome:
+                            _semantic_events.append("test_result")
+                        if _kkind == "post_view":
+                            _semantic_events.append("file_view")
+                        _semantic_arg = tuple(_semantic_events)
+                    else:
+                        _semantic_arg = None
+                    _normalized_event = _normalize_gateway_event(
+                        cmd or "", _orig_out, _returncode, _action_count,
+                        changed_files=(
+                            _exact_changed_rels
+                            if _v2_write_truth else _bridge_changed),
+                        edit_before_after=_bridge_before_after,
+                        semantic_events=_semantic_arg,
+                        test_outcome=_test_outcome,
+                        test_protocol=_test_protocol,
+                        state_revision=str(_action_count),
+                    )
+                    _cc_ready = _gt_gateway_caller_contract_ready(
+                        action, cmd, event=_normalized_event)
+                except Exception:  # noqa: BLE001 -- canonicalization never breaks the lane
+                    _normalized_event = None
+                    _cc_ready = _gt_gateway_caller_contract_ready(action, cmd)
             if _kkind == "post_edit" and _kf:
                 _source_edit_count += 1
                 _kroot = _root()
@@ -19617,9 +19782,7 @@ def _augment_output(action, out) -> None:
             # mirrors gt_oracle_sense.DerivedState.tested_tokens (tokens of the
             # observed output AND the test command itself).
             _stash_test_probe = False
-            if _TEST_RUNNER_RE.search(cmd or "") and (
-                    _TEST_FAIL_RE.search(_orig_out)
-                    or _TEST_PASS_RE.search(_orig_out)):
+            if _test_outcome:
                 _stash_test_probe = _ss_stash_agent_state_probe(cmd or "")
                 # bug #4(b): record an observed test result so _detect_phase can
                 # reach VERIFY (derive_phase: test_count > 0 -> VERIFY). Mirrors
@@ -20115,14 +20278,16 @@ def _augment_output(action, out) -> None:
                 # arbiter runs first), then ONE flush runs the global ranked competition
                 # over {Lane-A blocks, steer, gateway fact} and delivers AT MOST ONE dose.
                 _gt_gateway_deliver(action, out, cmd, _orig_out, pool=_ga_pool,
-                                    lattice_produced=bool(_la_search))
+                                    lattice_produced=bool(_la_search),
+                                    normalized_event=_normalized_event)
                 if not _batch_defer:
                     _global_pool_flush(
                         _ga_pool, kkind=_kkind, kf=_kf, krel=_krel)
                     _discard_terminal_lane_controls({_action_count})
             else:
                 _gt_gateway_deliver(action, out, cmd, _orig_out,
-                                    lattice_produced=bool(_la_search))
+                                    lattice_produced=bool(_la_search),
+                                    normalized_event=_normalized_event)
                 _discard_terminal_lane_controls({_action_count})
             return
 
@@ -20237,6 +20402,8 @@ def _build_env_executor():
     orig = _GT_LIVE_ORIG_EXECUTE
     if env is None or orig is None:
         return None
+
+
     import inspect as _inspect
     import shlex as _shlex
 
@@ -20498,8 +20665,37 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
                     _attributed = False
             if not _attributed:
                 covering = None
+        # Resolve every positive submit-boundary fact before the one Gate Kernel
+        # decision and before the CompletionCertificate. Previously SS submit-RED
+        # and repro-synth ran after an ALLOW certificate had already been recorded,
+        # producing contradictory head=clean/refusal=blocked telemetry.
+        _submit_block = None
+        _submit_block_text = ""
+        _ss_red_synth = False
+        _head_already_blocking = (
+            (covering is not None and covering.get("verdict") == "fail")
+            or bool((hygiene or {}).get("blocking"))
+        )
+        if not _head_already_blocking:
+            _submit_block_text = _ss_submit_red_refusal(record_candidate=False)
+            _submit_reason = (
+                "unverified_submit"
+                if _submit_block_text and _ss_last_failing_test is None
+                else "ss_submit_red"
+            )
+            if not _submit_block_text:
+                _submit_block_text = _repro_synth_submit_refusal(root)
+                _ss_red_synth = bool(_submit_block_text)
+                if _ss_red_synth:
+                    _submit_reason = "repro_synth_red"
+            if _submit_block_text:
+                _submit_block = {
+                    "blocking": True,
+                    "reason": _submit_reason,
+                    "detail": _submit_block_text,
+                }
         verdict = safe_gate_verdict(
-            covering=covering, hygiene=hygiene,
+            covering=covering, hygiene=hygiene, submit_block=_submit_block,
             bounce_count=_gt_submit_bounce_count, max_bounces=_GT_SUBMIT_MAX_BOUNCES)
         # W5 CompletionCertificate (GT_COMPLETION_CERT, default-OFF byte-identical) — PURE
         # TELEMETRY (SM-3 LIPI F3): wrap the FROZEN Gate-Kernel head with the per-field
@@ -20526,6 +20722,7 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
                 from groundtruth.runtime.submit_gate import safe_build_certificate
                 cert = safe_build_certificate(
                     head=verdict, covering=covering, hygiene=hygiene,
+                    submit_block=_submit_block,
                     bounce_count=_gt_submit_bounce_count,
                     max_bounces=_GT_SUBMIT_MAX_BOUNCES,
                     obligations=None)  # ADVISORY-only; never a block input (T2 law)
@@ -20535,49 +20732,6 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
                 _allow = verdict.allow
                 cert = None
         if _allow:
-            # SS-2 (GT_SS_SUBMIT_RED, 2026-07-13): the graph-covering head ALLOWS (covering
-            # selection was empty / green / unattributed — the 28/29 case where the graph gate
-            # is dark), but did the agent leave its OWN observed test RED unresolved on an edited
-            # surface (the conan-17092 "observed a fail, rationalized it away" class)? Fire ONE
-            # native pre-commit refusal quoting the agent's OWN command; a 2nd submit passes
-            # silent (single dose, ledger rows both times). Off / no unresolved RED -> "" ->
-            # byte-identical to the pre-SS-2 allow path. Additive: only reached on _allow, so it
-            # never double-blocks a head that already blocked (covering fail keeps its own path).
-            _ss_red = _ss_submit_red_refusal(record_candidate=False)
-            # WS-5 (GT_REPRO_SYNTH): when the agent left NO own observed RED, try the SYNTHESIZED
-            # covering-RED — a reproduction derived from the ISSUE that still fails after the edit.
-            # "" when the flag is off / no snippet / no surviving RED => byte-identical to before.
-            _ss_red_synth = False
-            if not _ss_red:
-                _ss_red = _repro_synth_submit_refusal(_root())
-                _ss_red_synth = bool(_ss_red)
-            if _ss_red:
-                try:
-                    from groundtruth.runtime.feature_lineage import build_lineage
-                    _ss_red_lineage = build_lineage(
-                        runtime_producer_id="submit_gate",
-                        evidence_type="submit_refusal", actual_event="submit",
-                        cap_feature_ids=(("GT_REPRO_SYNTH",) if _ss_red_synth
-                                         else ("GT_SS_SUBMIT_RED",)))
-                    _ss_red_extra = _feature_lineage_extra(_ss_red_lineage)
-                except Exception:  # noqa: BLE001 -- attribution never changes refusal
-                    _ss_red_extra = _registered_delivery_extra(
-                        "submit_gate", "submit_refusal", "submit")
-                _ss_red_hash = (
-                    "c:" + hashlib.sha256(_ss_red.encode("utf-8")).hexdigest()[:16]
-                )
-                if _ss_red_hash in _oracle_delivered_hashes:
-                    return None
-                return {
-                    "output": _ss_red,
-                    "returncode": 1,
-                    "_gt_pending_delivery": {
-                        "content_hash": _ss_red_hash,
-                        "verdict": verdict,
-                        "extra": _ss_red_extra,
-                        "ss_submit_red": True,
-                    },
-                }
             # clean / gate_overridden / gate_crash -> submission proceeds (host record).
             # A CLEAN cert on an allow delivers NOTHING (correct-or-quiet) — the block below
             # is SUBORDINATE to the head block decision, so the cert never turns allow -> block.
@@ -20591,7 +20745,14 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
         # appender's bytes, never a second dose (the dedup + bounce below are unchanged).
         rejection = ""
         _cert_rendered = False
-        if _deliver_cert and cert is not None:
+        _submit_block_selected = bool(
+            _submit_block_text
+            and _submit_block is not None
+            and verdict.reason == _submit_block.get("reason")
+        )
+        if _submit_block_selected:
+            rejection = _submit_block_text
+        elif _deliver_cert and cert is not None:
             try:
                 rejection = _completion_cert_block(cert, verdict)
                 _cert_rendered = bool(rejection)
@@ -20609,12 +20770,25 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
         # The environment boundary only prepares the refusal.  The formatter commits
         # delivery, dedup, and bounce state after proving these exact bytes visible.
         # Until then, this is a blocked action result, not a delivered GT fact.
-        pending_extra = (
-                _exact_profile_delivery_extra(
-                    "GT_CERT_DELIVERY", "submit_refusal", rejection, "", "submit")
-                if _cert_rendered and os.environ.get("GT_CERT_DELIVERY") == "1"
-                else _registered_delivery_extra(
-                    "submit_gate", "submit_refusal", "submit"))
+        if _submit_block_selected:
+            try:
+                from groundtruth.runtime.feature_lineage import build_lineage
+                _submit_lineage = build_lineage(
+                    runtime_producer_id="submit_gate",
+                    evidence_type="submit_refusal", actual_event="submit",
+                    cap_feature_ids=(("GT_REPRO_SYNTH",) if _ss_red_synth
+                                     else ("GT_SS_SUBMIT_RED",)))
+                pending_extra = _feature_lineage_extra(_submit_lineage)
+            except Exception:  # noqa: BLE001 -- attribution never changes refusal
+                pending_extra = _registered_delivery_extra(
+                    "submit_gate", "submit_refusal", "submit")
+        else:
+            pending_extra = (
+                    _exact_profile_delivery_extra(
+                        "GT_CERT_DELIVERY", "submit_refusal", rejection, "", "submit")
+                    if _cert_rendered and os.environ.get("GT_CERT_DELIVERY") == "1"
+                    else _registered_delivery_extra(
+                        "submit_gate", "submit_refusal", "submit"))
         return {
             "output": rejection,
             "returncode": 1,
@@ -20622,6 +20796,8 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
                 "content_hash": hc,
                 "verdict": verdict,
                 "extra": pending_extra,
+                "ss_submit_red": (
+                    _submit_block_selected and not _ss_red_synth),
                 "completion_cert_enabled": (
                     os.environ.get("GT_COMPLETION_CERT") == "1"),
                 "certificate_built": cert is not None,
@@ -20632,8 +20808,1690 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
         return None
 
 
+# The headless runner installs exactly one attempt-scoped canonical attachment
+# before ``agent.run``. Keeping the legacy implementation named above allows
+# historical unit fixtures to exercise old byte behavior without leaving a
+# second live route: an attached production attempt never enters it.
+_CANONICAL_RUNTIME_ATTACHMENT = None
+
+
+def _canonical_file_digest(path: str) -> str:
+    """Content identity for an immutable runtime substrate."""
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as stream:
+            while True:
+                block = stream.read(1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+    except OSError:
+        digest.update(b"unavailable")
+        digest.update((path or "").encode("utf-8", "surrogatepass"))
+    return digest.hexdigest()
+
+
+def _canonical_repository_digest(root: str) -> str:
+    """Hash the committed revision plus current repository byte delta.
+
+    The canonical revision must move after an edit.  A branch name or graph
+    mtime is not repository-content truth, so the live attachment hashes the
+    exact Git HEAD/status/diff projection.  Failure is explicit in the digest
+    rather than guessed from an unrelated substrate.
+    """
+    digest = hashlib.sha256()
+    commands = (
+        ["git", "-C", root, "rev-parse", "HEAD"],
+        ["git", "-C", root, "status", "--porcelain=v1", "-z"],
+        ["git", "-C", root, "diff", "--no-ext-diff", "--binary", "--"],
+    )
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=20,
+                check=False,
+            )
+            digest.update(str(result.returncode).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(result.stdout)
+            digest.update(b"\0")
+            digest.update(result.stderr)
+        except (OSError, subprocess.SubprocessError) as exc:
+            digest.update(f"unavailable:{type(exc).__name__}".encode("ascii"))
+    # ``git status`` names untracked files but does not bind their bytes.
+    # Hash their paths and content explicitly so edits to a newly created file
+    # advance the canonical repository revision before it is added to Git.
+    try:
+        untracked = subprocess.run(
+            [
+                "git",
+                "-C",
+                root,
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+        )
+        digest.update(str(untracked.returncode).encode("ascii"))
+        digest.update(b"\0untracked\0")
+        resolved_root = os.path.abspath(root)
+        for raw_path in sorted(
+            path for path in untracked.stdout.split(b"\0") if path
+        ):
+            relative = raw_path.decode("utf-8", "surrogateescape")
+            candidate = os.path.abspath(os.path.join(resolved_root, relative))
+            if os.path.commonpath((resolved_root, candidate)) != resolved_root:
+                digest.update(b"unsafe-path\0")
+                digest.update(raw_path)
+                continue
+            digest.update(raw_path)
+            digest.update(b"\0")
+            digest.update(_canonical_file_digest(candidate).encode("ascii"))
+            digest.update(b"\0")
+    except (OSError, UnicodeError, ValueError, subprocess.SubprocessError) as exc:
+        digest.update(f"untracked-unavailable:{type(exc).__name__}".encode("ascii"))
+    return digest.hexdigest()
+
+
+@dataclass
+class CanonicalRuntimeAttachment:
+    """One attempt-scoped owner joining sensing, reasoning, and provider proof."""
+
+    attached: bool
+    attempt_runtime: Any
+    provider_boundary: Any
+    gateway_state: Any
+    graph_revision: str
+    commitment_boundary: Any = None
+    last_covering_result: Any = None
+    last_covering_attribution: Any = None
+    last_syntax_result: Any = None
+    last_native_test_outcome: str = ""
+    pending_native_actions: dict[int, tuple[Any, str]] = field(
+        default_factory=dict
+    )
+    inflight_action_proposals: dict[int, Any] = field(default_factory=dict)
+
+    def _record_fault(self, exc: BaseException, *, component: str) -> None:
+        """Route live faults through bounded recovery/component isolation."""
+        try:
+            from groundtruth.runtime.reasoning_runtime import (
+                AssuranceStatus,
+                CORE_CORRUPTION_CODES,
+                EventIntegrityError,
+                FaultCode,
+                RuntimeHealthState,
+                StateIntegrityError,
+                RuntimeFault,
+            )
+            from groundtruth.runtime.recovery_assurance import (
+                handle_runtime_fault,
+            )
+
+            message = str(exc).lower()
+            provider_stage = component.rsplit(":", 1)[-1].upper()
+            if isinstance(exc, EventIntegrityError):
+                code = FaultCode.CAUSAL_EVENT_GAP
+            elif isinstance(exc, StateIntegrityError):
+                if "repository revision" in message:
+                    code = FaultCode.REPOSITORY_REVISION_INCONSISTENCY
+                elif "sequence gap" in message or "event sequence" in message:
+                    code = FaultCode.CAUSAL_EVENT_GAP
+                elif "lifecycle" in message:
+                    code = FaultCode.IMPOSSIBLE_LIFECYCLE_TRANSITION
+                else:
+                    code = FaultCode.REDUCER_INVARIANT_VIOLATION
+            elif isinstance(exc, sqlite3.DatabaseError):
+                # Producer/substrate reads can fail without making the canonical
+                # journal transaction uncertain. Canonical write ambiguity is
+                # wrapped by the runtime as StateIntegrityError before it reaches
+                # this boundary; a generic sqlite error must not quarantine GT.
+                code = FaultCode.SUBSTRATE_FAILED
+            elif provider_stage == "OBSERVATION_JOIN":
+                code = FaultCode.OBSERVATION_JOIN_FAILED
+            elif provider_stage in {
+                "PROVIDER_TERMINAL",
+                "RESPONSE_COMMIT",
+            }:
+                code = FaultCode.DELIVERY_WITNESS_FAILED
+            elif component == "scheduler":
+                code = FaultCode.SCHEDULER_FAILED
+            elif component == "coalition_composer":
+                code = FaultCode.COALITION_COMPOSITION_FAILED
+            elif component == "renderer":
+                code = FaultCode.RENDERING_FAILED
+            else:
+                code = FaultCode.EVIDENCE_PRODUCER_FAILED
+            signature = hashlib.sha256(
+                (
+                    f"{component}:{type(exc).__name__}:"
+                    f"{str(exc)}"
+                ).encode("utf-8", "surrogatepass")
+            ).hexdigest()
+            fault = RuntimeFault(
+                code=code,
+                component=component,
+                signature=signature,
+                event_id=(
+                    f"{self.attempt_runtime.attempt_id}:"
+                    f"{self.attempt_runtime.work_state.sequence}"
+                ),
+            )
+            try:
+                handle_runtime_fault(self.attempt_runtime, fault)
+            except Exception:  # noqa: BLE001 -- emergency policy is fail-safe
+                current = getattr(
+                    self.attempt_runtime,
+                    "failure_state",
+                    None,
+                )
+                if current is None:
+                    return
+                if code in CORE_CORRUPTION_CODES:
+                    emergency = replace(
+                        current,
+                        health=RuntimeHealthState.QUARANTINED,
+                        assurance=AssuranceStatus.UNASSURED,
+                        gt_emission_enabled=False,
+                        gt_interruption_enabled=False,
+                        gt_certification_enabled=False,
+                        native_path_enabled=True,
+                        quarantine_reason=code,
+                        failed_event_id=fault.event_id,
+                    )
+                else:
+                    emergency = replace(
+                        current,
+                        health=RuntimeHealthState.DEGRADED,
+                        assurance=AssuranceStatus.DEGRADED,
+                        isolated_components=tuple(
+                            sorted(
+                                set(current.isolated_components)
+                                | {component}
+                            )
+                        ),
+                        gt_certification_enabled=False,
+                        native_path_enabled=True,
+                    )
+                self.attempt_runtime.failure_state = emergency
+        except Exception:  # noqa: BLE001 -- native path remains authoritative
+            pass
+
+    def _component_available(self, component: str) -> bool:
+        """Central health gate for emission and smallest-component isolation."""
+        state = getattr(self.attempt_runtime, "failure_state", None)
+        if state is None:
+            return True
+        return bool(
+            getattr(state, "gt_emission_enabled", False)
+            and component
+            not in getattr(state, "isolated_components", ())
+        )
+
+    @staticmethod
+    def _active_decision(
+        records,
+        work_state,
+        revision,
+        pending_operations=(),
+    ):
+        """Derive one open decision from canonical work state, not producers.
+
+        Evidence is allowed to complete a decision; it is never allowed to
+        choose which decision is open merely because that producer fired.
+        """
+        from groundtruth.runtime.reasoning_runtime import (
+            ActiveDecision,
+            DecisionContext,
+            EvidenceRole,
+            Phase,
+            capsule_budget_for,
+        )
+
+        phase_context = {
+            Phase.ORIENTATION: DecisionContext.SOURCE_TARGET_SELECTION,
+            Phase.DISCOVERY: DecisionContext.SOURCE_TARGET_SELECTION,
+            Phase.LOCALIZATION: DecisionContext.SOURCE_TARGET_SELECTION,
+            Phase.UNDERSTANDING: DecisionContext.SOURCE_UNDERSTANDING,
+            Phase.IMPLEMENTATION: DecisionContext.PATCH_CONSTRUCTION,
+            Phase.VALIDATION: DecisionContext.PATCH_PROPAGATION,
+            Phase.RECOVERY: DecisionContext.FAILURE_RECOVERY,
+            Phase.REVIEW: DecisionContext.COMPLETION,
+            Phase.COMPLETION: DecisionContext.COMPLETION,
+        }
+        pending = tuple(pending_operations)
+        if any(
+            operation.value == "SUBMIT" for operation in pending
+        ):
+            context = DecisionContext.COMPLETION
+        elif any(
+            operation.value == "SIGNATURE_CHANGE" for operation in pending
+        ):
+            context = DecisionContext.PATCH_PROPAGATION
+        elif any(
+            operation.value in {
+                "EDIT",
+                "FILE_CREATE",
+                "FILE_DELETE",
+                "FILE_RENAME",
+            }
+            for operation in pending
+        ):
+            context = DecisionContext.PATCH_CONSTRUCTION
+        else:
+            context = phase_context[work_state.phase]
+        role_requirements = {
+            DecisionContext.SOURCE_TARGET_SELECTION: (
+                EvidenceRole.TARGET_IDENTITY,
+            ),
+            DecisionContext.SOURCE_UNDERSTANDING: (
+                EvidenceRole.BEHAVIORAL_CONTRACT,
+            ),
+            DecisionContext.PATCH_CONSTRUCTION: (
+                EvidenceRole.BEHAVIORAL_CONTRACT,
+            ),
+            DecisionContext.PATCH_PROPAGATION: (
+                EvidenceRole.VALIDATION,
+            ),
+            DecisionContext.FAILURE_RECOVERY: (
+                EvidenceRole.CONTRADICTION,
+            ),
+            DecisionContext.COMPLETION: (
+                EvidenceRole.TERMINAL_ASSURANCE,
+            ),
+        }
+        useful_role_requirements = {
+            DecisionContext.SOURCE_TARGET_SELECTION: (
+                EvidenceRole.EXECUTION_REACHABILITY,
+                EvidenceRole.STATE_DEPENDENCY,
+                EvidenceRole.MATERIAL_UNCERTAINTY,
+            ),
+            DecisionContext.SOURCE_UNDERSTANDING: (
+                EvidenceRole.STATE_DEPENDENCY,
+                EvidenceRole.AFFECTED_CALLER,
+                EvidenceRole.MATERIAL_UNCERTAINTY,
+            ),
+            DecisionContext.PATCH_CONSTRUCTION: (
+                EvidenceRole.AFFECTED_CALLER,
+                EvidenceRole.STATE_DEPENDENCY,
+                EvidenceRole.VALIDATION,
+                EvidenceRole.MATERIAL_UNCERTAINTY,
+            ),
+            DecisionContext.PATCH_PROPAGATION: (
+                EvidenceRole.BEHAVIORAL_CONTRACT,
+                EvidenceRole.AFFECTED_CALLER,
+                EvidenceRole.BLOCKER,
+            ),
+            DecisionContext.FAILURE_RECOVERY: (
+                EvidenceRole.VALIDATION,
+                EvidenceRole.EXECUTION_REACHABILITY,
+                EvidenceRole.MATERIAL_UNCERTAINTY,
+            ),
+            DecisionContext.COMPLETION: (
+                EvidenceRole.BLOCKER,
+                EvidenceRole.VALIDATION,
+                EvidenceRole.BEHAVIORAL_CONTRACT,
+            ),
+        }
+        primary_claims = {
+            DecisionContext.SOURCE_TARGET_SELECTION: (
+                "Select the production source target on the active path."
+            ),
+            DecisionContext.SOURCE_UNDERSTANDING: (
+                "Understand the active source contract before mutation."
+            ),
+            DecisionContext.PATCH_CONSTRUCTION: (
+                "Construct the patch while preserving required behavior."
+            ),
+            DecisionContext.PATCH_PROPAGATION: (
+                "Validate and propagate the consequences of the current edit."
+            ),
+            DecisionContext.FAILURE_RECOVERY: (
+                "Pivot from the contradicted path using verified failure evidence."
+            ),
+            DecisionContext.COMPLETION: (
+                "Close every required validation before completion."
+            ),
+        }
+        # Candidate evidence must never manufacture the active causal
+        # neighborhood.  Only observable work-state focus may anchor the open
+        # decision; unrelated ready facts remain HELD.
+        subjects = tuple(
+            dict.fromkeys(
+                (
+                    *getattr(work_state, "focused_symbols", ()),
+                    *getattr(work_state, "focused_files", ()),
+                )
+            )
+        )
+        window_key = str(
+            getattr(work_state, "decision_window_key", "")
+            or (
+                f"{getattr(work_state.phase, 'value', work_state.phase)}:"
+                f"{revision.repository_content}"
+            )
+        )
+        decision_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "attempt_id": str(
+                        getattr(work_state, "attempt_id", "")
+                    ),
+                    "context": context.value,
+                    "subjects": subjects,
+                    "window": window_key,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        decision_id = f"{context.value}:{decision_digest}"
+        neighborhood = tuple(
+            dict.fromkeys(
+                (
+                    f"decision:{decision_id}",
+                    f"decision:{context.value}",
+                    "obligation:task",
+                    *(f"subject:{subject}" for subject in subjects),
+                )
+            )
+        )
+        return ActiveDecision(
+            decision_id=decision_id,
+            context=context,
+            primary_claim=primary_claims[context],
+            required_roles=role_requirements[context],
+            causal_neighborhood=neighborhood,
+            token_budget=capsule_budget_for(context).hard_max_tokens,
+            current_revision=revision,
+            useful_roles=useful_role_requirements[context],
+        )
+
+    @staticmethod
+    def _available_substrates(records) -> tuple[str, ...]:
+        """Report only substrates evidenced by the computations that ran."""
+        substrate_by_feature = {
+            "caller_contract": ("graph", "lsp"),
+            "covering_red": ("structured_test_result", "graph"),
+            "def_partition": ("graph", "ast"),
+            "localization": ("graph", "fts5"),
+            "newfile_precedent": ("graph", "history"),
+            "obligations": ("issue_text", "obligation_parser"),
+            "recovery": ("canonical_event_history", "test_fingerprint"),
+            "signature_delta": ("graph", "lsp"),
+            "submit_refusal": ("canonical_validation_state", "graph"),
+            "syntax_result": ("parser_result", "compiler_result"),
+        }
+        return tuple(
+            dict.fromkeys(
+                substrate
+                for item in records
+                for substrate in substrate_by_feature.get(
+                    item.feature_id, ()
+                )
+            )
+        )
+
+    def _provider_capsule_pending(self) -> bool:
+        """Return whether this host observation already owns its sole capsule."""
+        return bool(
+            self.provider_boundary is not None
+            and getattr(
+                self.provider_boundary,
+                "has_unconsumed_capsule",
+                False,
+            )
+        )
+
+    @staticmethod
+    def _validation_fingerprint(result) -> str:
+        """Hash stable host-only validation identity without exposing raw output."""
+        if not isinstance(result, dict):
+            return ""
+        identity = {
+            "verdict": str(result.get("verdict") or ""),
+            "reason": str(result.get("reason") or ""),
+            "exit_code": result.get("exit_code"),
+            "files": tuple(
+                sorted(
+                    str(path).replace("\\", "/")
+                    for path in (result.get("ran") or result.get("files") or ())
+                    if path
+                )
+            ),
+            "failures": tuple(
+                sorted(
+                    str(name)
+                    for name in (result.get("failing_test_names") or ())
+                    if name
+                )
+            ),
+        }
+        return hashlib.sha256(
+            json.dumps(
+                identity,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _append_internal_validation_event(
+        self,
+        *,
+        component: str,
+        outcomes,
+    ):
+        """Journal a GT-executed validation result as canonical event truth."""
+        append_event = getattr(self.attempt_runtime, "append_event", None)
+        journal = getattr(self.attempt_runtime, "journal", None)
+        if not callable(append_event) or journal is None:
+            return None
+        from groundtruth.runtime.reasoning_runtime import (
+            Authority,
+            CanonicalEvent,
+            CausalRef,
+            CausalRefKind,
+            EventKind,
+        )
+
+        prior = journal.events(self.attempt_runtime.attempt_id)
+        sequence = self.attempt_runtime.work_state.sequence + 1
+        revision = self.attempt_runtime.work_state.revision
+        event = CanonicalEvent(
+            event_id=(
+                f"{self.attempt_runtime.attempt_id}:internal:"
+                f"{sequence}:{component}"
+            ),
+            attempt_id=self.attempt_runtime.attempt_id,
+            sequence=sequence,
+            kind=EventKind.OBSERVATION_COMMITTED,
+            authority=Authority.RESULT_DERIVED,
+            outcomes=tuple(outcomes),
+            revision_before=revision,
+            revision_after=revision,
+            previous_event_hash=(prior[-1].content_hash if prior else ""),
+            model_turn_id=(prior[-1].model_turn_id if prior else ""),
+            observation_id=(prior[-1].observation_id if prior else ""),
+            carrier="gt_internal_validation",
+            parents=(
+                (
+                    CausalRef(
+                        kind=CausalRefKind.EVENT,
+                        ref_id=prior[-1].event_id,
+                    ),
+                )
+                if prior
+                else ()
+            ),
+        )
+        append_event(event)
+        return event
+
+    def _committed_event_hashes(self):
+        """Return the exact committed-event witness surface for this attempt."""
+        return {
+            event.event_id: event.content_hash
+            for event in self.attempt_runtime.journal.events(
+                self.attempt_runtime.attempt_id
+            )
+        }
+
+    @staticmethod
+    def _canonical_event_witness(event):
+        from groundtruth.runtime.evidence_envelope import (
+            CanonicalRuntimeWitness,
+        )
+
+        return CanonicalRuntimeWitness.canonical_event(
+            event_id=event.event_id,
+            content_sha256=event.content_hash,
+        )
+
+    def _deep_reactive_envelopes(
+        self,
+        *,
+        changed_files,
+        revision,
+    ):
+        """Run canonical typed producers after their structured boundaries."""
+        from groundtruth.runtime.canonical_producers import (
+            ProducerContext,
+            produce_covering_red,
+            produce_recovery,
+            produce_syntax_result,
+        )
+        from groundtruth.runtime.reasoning_runtime import (
+            Authority,
+            SemanticKind,
+            SemanticOutcome,
+        )
+
+        envelopes = []
+        changed = tuple(
+            dict.fromkeys(
+                str(path).replace("\\", "/")
+                for path in changed_files
+                if path
+            )
+        )
+        if changed:
+            # Every repository mutation invalidates prior edit-bound validation.
+            # Only results recomputed against ``revision`` may constrain a later
+            # completion decision.
+            self.last_covering_result = None
+            self.last_covering_attribution = None
+            self.last_syntax_result = None
+            self.last_native_test_outcome = ""
+        syntax_blocked = False
+        for relative in (
+            changed
+            if (
+                _ss_enabled("GT_EDIT_CHECK")
+                and self._component_available("syntax_result")
+            )
+            else ()
+        ):
+            try:
+                from groundtruth.runtime.edit_check import check_edit_syntax
+
+                result = check_edit_syntax(
+                    relative,
+                    _root(),
+                    executor=_build_edit_check_executor(),
+                )
+                self.last_syntax_result = result
+                syntax_event = None
+                if (
+                    isinstance(result, dict)
+                    and result.get("verdict")
+                    in {"ok", "syntax_error", "name_error"}
+                ):
+                    syntax_event = self._append_internal_validation_event(
+                        component="syntax_result",
+                        outcomes=(
+                            SemanticOutcome(
+                                kind=SemanticKind.COMPILE_RESULT,
+                                subject=relative,
+                                status=str(
+                                    result.get("verdict") or "unavailable"
+                                ),
+                                authority=Authority.RESULT_DERIVED,
+                                provenance=("edit_check",),
+                            ),
+                        ),
+                    )
+                envelope = (
+                    produce_syntax_result(
+                        context=ProducerContext(
+                            subject=relative,
+                            provenance=(),
+                            revision=revision,
+                            decision_id="PATCH_PROPAGATION",
+                            causal_neighborhood=(
+                                f"subject:{relative}",
+                                "decision:PATCH_PROPAGATION",
+                            ),
+                            runtime_witnesses=(
+                                self._canonical_event_witness(syntax_event),
+                            ),
+                        ),
+                        result=result,
+                    )
+                    if syntax_event is not None
+                    else None
+                )
+                if envelope is not None:
+                    syntax_blocked = True
+                    envelopes.append(envelope)
+            except Exception as exc:  # noqa: BLE001
+                self._record_fault(exc, component="syntax_result")
+
+        if (
+            changed
+            and not syntax_blocked
+            and _ss_enabled("GT_VERIFY_EXECUTE")
+            and self._component_available("covering_red")
+        ):
+            try:
+                from groundtruth.runtime.covering_runner import (
+                    attribute_covering_red,
+                    run_covering_tests,
+                    select_covering_tests,
+                )
+
+                symbols = set(
+                    self.attempt_runtime.work_state.focused_symbols
+                )
+                selected = select_covering_tests(
+                    _db_path(),
+                    symbols,
+                    repo_root=_root(),
+                )
+                files = tuple(
+                    row["file"]
+                    for row in selected
+                    if isinstance(row, dict) and row.get("file")
+                )
+                if files:
+                    executor = _build_verification_executor()
+                    result = run_covering_tests(
+                        _root(),
+                        list(files),
+                        per_file_timeout=20,
+                        total_budget_seconds=35,
+                        **(
+                            {"executor": executor}
+                            if executor is not None
+                            else {}
+                        ),
+                    )
+                    attribution = attribute_covering_red(
+                        result,
+                        list(changed),
+                        test_files=result.get("ran") or list(files),
+                        repo_root=_root(),
+                        covering_files=list(files),
+                        executor=executor,
+                        per_file_timeout=20,
+                        total_budget_seconds=35,
+                    )
+                    self.last_covering_result = result
+                    self.last_covering_attribution = attribution
+                    verdict = str(result.get("verdict") or "unavailable")
+                    result_kind = {
+                        "fail": SemanticKind.TEST_FAIL,
+                        "pass": SemanticKind.TEST_PASS,
+                    }.get(verdict, SemanticKind.TEST_ENV_FAIL)
+                    specific_outcomes = ()
+                    if (
+                        result_kind is SemanticKind.TEST_PASS
+                        or result_kind is SemanticKind.TEST_ENV_FAIL
+                        or (
+                            result_kind is SemanticKind.TEST_FAIL
+                            and attribution.attributed
+                        )
+                    ):
+                        specific_outcomes = (
+                            SemanticOutcome(
+                                kind=result_kind,
+                                subject=(
+                                    str((result.get("ran") or files)[0])
+                                    .replace("\\", "/")
+                                ),
+                                status=verdict,
+                                failure_fingerprint=(
+                                    self._validation_fingerprint(result)
+                                    if result_kind
+                                    in {
+                                        SemanticKind.TEST_FAIL,
+                                        SemanticKind.TEST_ENV_FAIL,
+                                    }
+                                    else ""
+                                ),
+                                metadata=(
+                                    (
+                                        "attributed",
+                                        (
+                                            "true"
+                                            if attribution.attributed
+                                            else "false"
+                                        ),
+                                    ),
+                                ),
+                                authority=Authority.RESULT_DERIVED,
+                                provenance=("covering_runner",),
+                            ),
+                        )
+                    covering_event = self._append_internal_validation_event(
+                        component="covering_red",
+                        outcomes=(
+                            SemanticOutcome(
+                                kind=SemanticKind.TEST_RESULT,
+                                subject=(
+                                    str((result.get("ran") or files)[0])
+                                    .replace("\\", "/")
+                                ),
+                                status=verdict,
+                                metadata=(
+                                    (
+                                        "attributed",
+                                        (
+                                            "true"
+                                            if attribution.attributed
+                                            else "false"
+                                        ),
+                                    ),
+                                ),
+                                authority=Authority.RESULT_DERIVED,
+                                provenance=("covering_runner",),
+                            ),
+                            *specific_outcomes,
+                        ),
+                    )
+                    for relative in changed:
+                        envelope = produce_covering_red(
+                            context=ProducerContext(
+                                subject=relative,
+                                provenance=(),
+                                revision=revision,
+                                decision_id="FAILURE_RECOVERY",
+                                causal_neighborhood=(
+                                    f"subject:{relative}",
+                                    "decision:FAILURE_RECOVERY",
+                                ),
+                                runtime_witnesses=(
+                                    self._canonical_event_witness(covering_event),
+                                ),
+                            ),
+                            result=result,
+                            attribution=attribution,
+                        )
+                        if envelope is not None:
+                            envelopes.append(envelope)
+                            break
+            except Exception as exc:  # noqa: BLE001
+                self._record_fault(exc, component="covering_red")
+
+        if (
+            _ss_enabled("GT_HYPOTHESIS")
+            and self._component_available("recovery")
+            and "repeated_failure_after_edit"
+            in getattr(
+                self.attempt_runtime.work_state,
+                "transition_rules",
+                (),
+            )
+            and self.attempt_runtime.work_state.phase.value == "RECOVERY"
+            and self.attempt_runtime.work_state.current_failures
+        ):
+            try:
+                from groundtruth.runtime.evidence_envelope import (
+                    ADVISORY,
+                    WARNING,
+                )
+                from groundtruth.runtime.hypothesis_ledger import (
+                    Advisory,
+                    D_HYPOTHESIS_FALSIFIED,
+                    T_EDIT_CONTRADICTED_CONTRACT,
+                )
+
+                relative = (
+                    self.attempt_runtime.work_state.edited_files[-1]
+                    if self.attempt_runtime.work_state.edited_files
+                    else self.attempt_runtime.work_state.focused_files[-1]
+                )
+                advisory = Advisory(
+                    transition=T_EDIT_CONTRADICTED_CONTRACT,
+                    disposition=D_HYPOTHESIS_FALSIFIED,
+                    tier=WARNING,
+                    blocking_eligibility=ADVISORY,
+                    statement=(
+                        "The same observed failure recurred after a repository "
+                        "edit; the current operational path is contradicted."
+                    ),
+                    evidence_ids=tuple(
+                        f"failure:{item}"
+                        for item in (
+                            self.attempt_runtime.work_state.current_failures
+                        )
+                    ),
+                )
+                recovery_event = next(
+                    (
+                        event
+                        for event in reversed(
+                            self.attempt_runtime.journal.events(
+                                self.attempt_runtime.attempt_id
+                            )
+                        )
+                        if any(
+                            outcome.kind
+                            in {
+                                SemanticKind.TEST_FAIL,
+                                SemanticKind.TEST_ENV_FAIL,
+                            }
+                            for outcome in event.outcomes
+                        )
+                    ),
+                    None,
+                )
+                if recovery_event is None:
+                    return tuple(envelopes)
+                envelope = produce_recovery(
+                    context=ProducerContext(
+                        subject=relative,
+                        provenance=(),
+                        revision=revision,
+                        decision_id="FAILURE_RECOVERY",
+                        causal_neighborhood=(
+                            f"subject:{relative}",
+                            "decision:FAILURE_RECOVERY",
+                        ),
+                        runtime_witnesses=(
+                            self._canonical_event_witness(recovery_event),
+                        ),
+                    ),
+                    advisory=advisory,
+                )
+                if envelope is not None:
+                    envelopes.append(envelope)
+            except Exception as exc:  # noqa: BLE001 -- isolate this producer
+                self._record_fault(exc, component="recovery")
+        return tuple(envelopes)
+
+    @staticmethod
+    def _native_action_operation(action):
+        """Classify one host action once for sensing and commitment control."""
+        from groundtruth.runtime.gateway import (
+            KIND_EDIT,
+            KIND_SEARCH,
+            KIND_SUBMIT,
+            KIND_TEST,
+            KIND_VIEW,
+            classify_command,
+        )
+        from groundtruth.runtime.reasoning_runtime import ActionOperation
+
+        explicit = (
+            action.get("operation")
+            if isinstance(action, dict)
+            else None
+        )
+        try:
+            return ActionOperation(str(explicit).upper())
+        except (TypeError, ValueError):
+            pass
+        structured_kind, _structured_path = _classify_action(action)
+        if structured_kind == "post_edit":
+            return ActionOperation.EDIT
+        if structured_kind == "post_view":
+            return ActionOperation.VIEW_SOURCE
+        operation_by_kind = {
+            KIND_SEARCH: ActionOperation.SEARCH,
+            KIND_VIEW: ActionOperation.VIEW_SOURCE,
+            KIND_TEST: ActionOperation.TEST,
+            KIND_EDIT: ActionOperation.EDIT,
+            KIND_SUBMIT: ActionOperation.SUBMIT,
+        }
+        return operation_by_kind.get(
+            classify_command(_effective_cmd(action)),
+            ActionOperation.OTHER,
+        )
+
+    @classmethod
+    def _canonical_native_action(
+        cls,
+        action,
+        *,
+        action_id: str,
+    ):
+        """Lift a host action into the canonical schema without transcript state."""
+        from groundtruth.runtime.reasoning_runtime import CanonicalAction
+
+        operation = cls._native_action_operation(action)
+        command = _effective_cmd(action)
+        _kind, path = _classify_action(action)
+        subject = str(path or "").replace("\\", "/")
+        if not subject and isinstance(action, dict):
+            for key in ("subject", "symbol", "query", "pattern"):
+                value = action.get(key)
+                if isinstance(value, str) and value.strip():
+                    subject = value.strip()
+                    break
+        if not subject:
+            subject = command
+        query = ""
+        if isinstance(action, dict):
+            value = action.get("query", action.get("pattern", ""))
+            if isinstance(value, str):
+                query = value.strip()
+        return CanonicalAction(
+            action_id=action_id,
+            operation=operation,
+            tool_family="shell",
+            tool_name="mini-swe",
+            structured_operation=operation.value.lower(),
+            subject=subject,
+            query=query,
+            targets=((subject,) if path else ()),
+            raw_command=command,
+        )
+
+    def observe_action_proposal(self, action) -> Any:
+        """Commit the exact action that is about to execute, not a whole batch."""
+        from groundtruth.runtime.adapters.miniswe import (
+            canonicalize_action_proposal,
+        )
+
+        key = id(action)
+        if not self._component_available("canonical_observer"):
+            self.pending_native_actions.pop(key, None)
+            self.inflight_action_proposals.pop(key, None)
+            return None
+        pending = self.pending_native_actions.pop(key, None)
+        if pending is None:
+            model_call_id = (
+                f"{self.attempt_runtime.attempt_id}:native-model:"
+                f"{self.attempt_runtime.work_state.sequence + 1}"
+            )
+            action_id = (
+                f"{self.attempt_runtime.attempt_id}:action:"
+                f"{self.attempt_runtime.work_state.sequence + 1}"
+            )
+            canonical_action = self._canonical_native_action(
+                action,
+                action_id=action_id,
+            )
+        else:
+            canonical_action, model_call_id = pending
+        sequence = self.attempt_runtime.work_state.sequence + 1
+        prior = self.attempt_runtime.journal.events(
+            self.attempt_runtime.attempt_id
+        )
+        proposal = canonicalize_action_proposal(
+            canonical_action,
+            event_id=f"{canonical_action.action_id}:proposal",
+            attempt_id=self.attempt_runtime.attempt_id,
+            sequence=sequence,
+            model_turn_id=model_call_id,
+            observation_id=f"{model_call_id}:actions",
+            revision=self.attempt_runtime.work_state.revision,
+            previous_event_hash=(prior[-1].content_hash if prior else ""),
+        )
+        self.attempt_runtime.append_event(proposal)
+        self.inflight_action_proposals[key] = proposal
+        return proposal
+
+    def _commitment_context(self, message):
+        """Build and persist a pre-execution commitment-control context."""
+        from groundtruth.runtime.commitment_control import (
+            BatchPhase,
+            CommitmentControlContext,
+            CommitmentEvidence,
+            CommitmentIntent,
+        )
+        from groundtruth.runtime.reasoning_runtime import (
+            ActionOperation,
+            CommitmentWindowState,
+            EvidenceLifecycle,
+            TemporalPredicate,
+            canonicalize_evidence_envelopes,
+        )
+
+        actions = tuple(
+            (message.get("extra") or {}).get("actions") or ()
+        )
+        response = (message.get("extra") or {}).get("response") or {}
+        provider_response_id = str(
+            response.get("id") if isinstance(response, dict) else ""
+        )
+        proposing_model_call_id = provider_response_id or (
+            f"{self.attempt_runtime.attempt_id}:native-model:"
+            f"{self.attempt_runtime.work_state.sequence + 1}"
+        )
+        intents = []
+        for index, action in enumerate(actions, start=1):
+            action_id = (
+                f"{self.attempt_runtime.attempt_id}:batch:"
+                f"{proposing_model_call_id}:{index}"
+            )
+            canonical_action = self._canonical_native_action(
+                action,
+                action_id=action_id,
+            )
+            operation = canonical_action.operation
+            self.pending_native_actions[id(action)] = (
+                canonical_action,
+                proposing_model_call_id,
+            )
+            intents.append(
+                CommitmentIntent(
+                    action=canonical_action,
+                    sandboxed=True,
+                    terminal=operation is ActionOperation.SUBMIT,
+                    public_contract_change=(
+                        operation is ActionOperation.SIGNATURE_CHANGE
+                    ),
+                    destructive=operation in {
+                        ActionOperation.FILE_DELETE,
+                        ActionOperation.FILE_RENAME,
+                    },
+                )
+            )
+
+        operations = tuple(intent.action.operation for intent in intents)
+        records = tuple(self.attempt_runtime._evidence.values())
+        active = self._active_decision(
+            records,
+            self.attempt_runtime.work_state,
+            self.attempt_runtime.work_state.revision,
+            pending_operations=operations,
+        )
+        submit_refusal_on = (
+            _ss_submit_red_on()
+            and _ss_enabled("GT_VERIFY_EXECUTE")
+            and self._component_available("submit_refusal")
+        )
+        certificate_delivery_on = (
+            _ss_enabled("GT_CERT_DELIVERY")
+            and self._component_available("submit_refusal")
+            and getattr(
+                self.attempt_runtime.failure_state,
+                "gt_certification_enabled",
+                False,
+            )
+        )
+        if (
+            ActionOperation.SUBMIT in operations
+            and (submit_refusal_on or certificate_delivery_on)
+        ):
+            try:
+                from groundtruth.runtime.canonical_producers import (
+                    ProducerContext,
+                    SubmitEvidenceOwner,
+                    produce_submit_refusal,
+                )
+                from groundtruth.runtime.submit_gate import (
+                    safe_build_certificate,
+                    safe_gate_verdict,
+                )
+
+                observed_red = (
+                    {
+                        "blocking": True,
+                        "reason": "submit_observed_failure",
+                        "detail": "an observed test failure remains unresolved",
+                    }
+                    if self.last_native_test_outcome
+                    in {"fail", "failed", "env_fail"}
+                    else None
+                )
+                syntax_hygiene = (
+                    {
+                        "blocking": True,
+                        "reason": "syntax_invalid",
+                        "detail": (
+                            "the current edit has a parser/compiler-confirmed "
+                            "structural error"
+                        ),
+                    }
+                    if (
+                        isinstance(self.last_syntax_result, dict)
+                        and self.last_syntax_result.get("verdict")
+                        in {"syntax_error", "name_error"}
+                    )
+                    else None
+                )
+                verdict = safe_gate_verdict(
+                    covering=(
+                        self.last_covering_result
+                        if isinstance(self.last_covering_result, dict)
+                        else None
+                    ),
+                    hygiene=syntax_hygiene,
+                    submit_block=observed_red,
+                )
+                subject = (
+                    (
+                        self.attempt_runtime.work_state.edited_files[-1]
+                        if self.attempt_runtime.work_state.edited_files
+                        else self.attempt_runtime.work_state.focused_files[-1]
+                    )
+                    if (
+                        self.attempt_runtime.work_state.edited_files
+                        or self.attempt_runtime.work_state.focused_files
+                    )
+                    else ""
+                )
+                if not verdict.allow and subject:
+                    certificate = safe_build_certificate(
+                        head=verdict,
+                        submit_revision=(
+                            self.attempt_runtime.work_state.revision
+                            .repository_content
+                        ),
+                        covering=(
+                            self.last_covering_result
+                            if isinstance(self.last_covering_result, dict)
+                            else None
+                        ),
+                        syntax=(
+                            self.last_syntax_result
+                            if isinstance(self.last_syntax_result, dict)
+                            else None
+                        ),
+                        hygiene=syntax_hygiene,
+                        submit_block=observed_red,
+                    )
+                    from groundtruth.runtime.evidence_envelope import (
+                        CanonicalRuntimeWitness,
+                    )
+
+                    gate_record_json = json.dumps(
+                        verdict.record,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    patch_revision = (
+                        certificate.patch_revision
+                        if certificate is not None
+                        and certificate.patch_revision is not None
+                        else self.attempt_runtime.work_state.revision.repository_content
+                    )
+                    gate_identity = {
+                        "gate_record": gate_record_json,
+                        "patch_revision": patch_revision,
+                        "reason": verdict.reason,
+                    }
+                    gate_witness = CanonicalRuntimeWitness.deterministic_computation(
+                        computation_id="submit_gate:gate_verdict",
+                        content_sha256=hashlib.sha256(
+                            json.dumps(
+                                gate_identity,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        ).hexdigest(),
+                    )
+                    producer_context = ProducerContext(
+                        subject=subject,
+                        provenance=(),
+                        revision=self.attempt_runtime.work_state.revision,
+                        decision_id=active.decision_id,
+                        causal_neighborhood=(
+                            f"subject:{subject}",
+                            f"decision:{active.decision_id}",
+                        ),
+                        runtime_witnesses=(gate_witness,),
+                    )
+                    submit_envelopes = []
+                    if submit_refusal_on:
+                        submit_envelopes.append(
+                            produce_submit_refusal(
+                                context=producer_context,
+                                verdict=verdict,
+                                certificate=certificate,
+                                output_owner=SubmitEvidenceOwner.REFUSAL,
+                            )
+                        )
+                    if certificate_delivery_on:
+                        submit_envelopes.append(
+                            produce_submit_refusal(
+                                context=producer_context,
+                                verdict=verdict,
+                                certificate=certificate,
+                                output_owner=SubmitEvidenceOwner.CERTIFICATE,
+                            )
+                        )
+                    submit_envelopes = [
+                        envelope
+                        for envelope in submit_envelopes
+                        if envelope is not None
+                    ]
+                    if submit_envelopes:
+                        for record in canonicalize_evidence_envelopes(
+                            submit_envelopes,
+                            committed_event_hashes=self._committed_event_hashes(),
+                        ):
+                            self.attempt_runtime.ingest_evidence(record)
+                        records = tuple(
+                            self.attempt_runtime._evidence.values()
+                        )
+                        active = self._active_decision(
+                            records,
+                            self.attempt_runtime.work_state,
+                            self.attempt_runtime.work_state.revision,
+                            pending_operations=operations,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                self._record_fault(exc, component="submit_refusal")
+        epistemic = {
+            ActionOperation.SEARCH,
+            ActionOperation.VIEW_SOURCE,
+            ActionOperation.VIEW_SYMBOL,
+            ActionOperation.TEST,
+            ActionOperation.COMPILE,
+        }
+        prefix_length = 0
+        for operation in operations:
+            if operation not in epistemic:
+                break
+            prefix_length += 1
+        has_commitment = prefix_length < len(operations)
+        mixed_prefix = prefix_length > 0 and has_commitment
+
+        # For a direct commitment, give lifecycle/scheduler/coalition one
+        # chance to stage already-computed evidence before the native action.
+        # Mixed batches execute their epistemic prefix first; its native
+        # observation is the correct scheduling boundary.
+        if (
+            has_commitment
+            and not mixed_prefix
+            and records
+            and not self._provider_capsule_pending()
+        ):
+            plan = self.attempt_runtime.prepare_next_inference(
+                decisions=(active,),
+                satisfied_predicates=frozenset(
+                    {
+                        TemporalPredicate.PRODUCER_COMPUTATION_COMPLETE,
+                        TemporalPredicate.REVISION_DEPENDENCIES_CAPTURED,
+                        TemporalPredicate.ACTIVE_DECISION_CONTEXT_MATCHES,
+                        TemporalPredicate.ACTIVE_DECISION_ID_MATCHES,
+                        TemporalPredicate.REASONING_GRAPH_CONNECTED,
+                        TemporalPredicate.COMMITMENT_WINDOW_OPEN,
+                    }
+                ),
+                commitment_window=CommitmentWindowState.OPEN,
+                available_substrates=self._available_substrates(records),
+                native_observation="",
+                observation_id=f"{proposing_model_call_id}:precommit",
+                source_model_call_id=proposing_model_call_id,
+                model_call_id=(
+                    f"{self.attempt_runtime.attempt_id}:model:"
+                    f"{self.attempt_runtime.work_state.sequence + 1}"
+                ),
+            )
+            if plan.delivery_attempt_id:
+                self.provider_boundary.stage(
+                    plan.compilation,
+                    delivery_attempt_id=plan.delivery_attempt_id,
+                )
+            records = tuple(self.attempt_runtime._evidence.values())
+
+        visibility: dict[str, set[str]] = {}
+        for delivery_attempt_id in (
+            self.attempt_runtime.journal.delivery_attempt_ids_for_attempt(
+                self.attempt_runtime.attempt_id
+            )
+        ):
+            history = self.attempt_runtime.journal.delivery_history(
+                delivery_attempt_id
+            )
+            if not any(
+                item.state.value in {
+                    "DELIVERED",
+                    "RESPONSE_COMMITTED",
+                    "RESPONSE_DISCARDED",
+                }
+                for item in history
+            ):
+                continue
+            latest = history[-1]
+            for evidence_id in latest.evidence_ids:
+                visibility.setdefault(evidence_id, set()).add(
+                    latest.model_call_id
+                )
+                if latest.provider_response_id:
+                    visibility[evidence_id].add(
+                        latest.provider_response_id
+                    )
+
+        commitment_ids = tuple(
+            intent.action.action_id
+            for intent in intents
+            if intent.action.operation not in epistemic
+        )
+        commitment_evidence = tuple(
+            CommitmentEvidence(
+                evidence_id=record.evidence_id,
+                decision_id=active.decision_id,
+                grade=record.grade,
+                lifecycle=record.lifecycle,
+                fresh=record.fresh,
+                superseded=record.superseded,
+                release_allowed=record.lifecycle in {
+                    EvidenceLifecycle.READY,
+                    EvidenceLifecycle.RELEASED,
+                    EvidenceLifecycle.DELIVERED,
+                    EvidenceLifecycle.ACTIVE,
+                },
+                visible_to_model_call_ids=tuple(
+                    sorted(visibility.get(record.evidence_id, ()))
+                ),
+                material_action_ids=commitment_ids,
+            )
+            for record in records
+            if (
+                commitment_ids
+                and record.decision_context is active.context
+            )
+        )
+        certificate_requirements_met = (
+            not self.attempt_runtime.work_state.current_failures
+            and (
+                self.attempt_runtime.work_state.test_count > 0
+                or self.attempt_runtime.work_state.compile_count > 0
+            )
+        )
+        return CommitmentControlContext(
+            intents=tuple(intents),
+            phase=BatchPhase.BEFORE_BATCH,
+            active_decision_id=active.decision_id,
+            proposing_model_call_id=proposing_model_call_id,
+            evidence=commitment_evidence,
+            failure_state=self.attempt_runtime.failure_state,
+            epistemic_prefix_may_change_decision=mixed_prefix,
+            certificate_requirements_met=certificate_requirements_met,
+        )
+
+    def _observe_commitment_plan(self, context, plan, actions) -> None:
+        """Retain proposal identities only for native actions that will execute."""
+        execute_ids = {
+            intent.action.action_id for intent in plan.execute_now
+        }
+        for intent, action in zip(context.intents, actions):
+            if intent.action.action_id not in execute_ids:
+                self.pending_native_actions.pop(id(action), None)
+
+    def _revision(self, sequence: int):
+        from groundtruth.runtime.reasoning_runtime import RevisionVector
+
+        repository = _canonical_repository_digest(_root())
+        graph = _canonical_file_digest(_db_path())
+        lsp = (
+            os.environ.get("GT_LSP_REVISION", "").strip()
+            or hashlib.sha256(
+                f"lsp-unavailable:{repository}".encode("ascii")
+            ).hexdigest()
+        )
+        runtime_evidence = hashlib.sha256(
+            (
+                f"{self.attempt_runtime.attempt_id}:{sequence}:"
+                f"{repository}:{graph}"
+            ).encode("utf-8")
+        ).hexdigest()
+        return RevisionVector(
+            repository_content=repository,
+            graph=graph,
+            lsp=lsp,
+            runtime_evidence=runtime_evidence,
+        )
+
+    def observe_action_result(self, action, out) -> None:
+        """Commit native outcome truth, produce typed evidence, and stage once."""
+        if not isinstance(out, dict):
+            return
+        if not self._component_available("canonical_observer"):
+            key = id(action)
+            self.pending_native_actions.pop(key, None)
+            self.inflight_action_proposals.pop(key, None)
+            return
+        try:
+            from groundtruth.runtime.adapters.miniswe import (
+                canonical_test_failure_fingerprint,
+                canonicalize_tool_result,
+                normalize_event,
+            )
+            from groundtruth.runtime.gateway import (
+                produce_raw as gateway_produce_raw,
+            )
+            from groundtruth.runtime.reasoning_runtime import (
+                ActionOperation,
+                CanonicalResult,
+                CommitmentWindowState,
+                TemporalPredicate,
+                canonicalize_evidence_envelopes,
+            )
+
+            key = id(action)
+            proposal = self.inflight_action_proposals.pop(key, None)
+            if proposal is None:
+                proposal = self.observe_action_proposal(action)
+                self.inflight_action_proposals.pop(key, None)
+            if proposal is None:
+                return
+            sequence = self.attempt_runtime.work_state.sequence + 1
+            after = self._revision(sequence)
+            command = _effective_cmd(action)
+            changed_files, edit_before_after = _gateway_edit_bridges(
+                action, command
+            )
+            result_code = out.get("returncode")
+            # The contracted `file_view` boundary for caller_contract. The
+            # STRUCTURED proposal subject is authoritative -- never the raw
+            # command text, which cannot be trusted for file identity across
+            # harnesses (see the cd-prefix blindings that muted post_search).
+            # Correct-or-quiet: a non-VIEW operation forwards nothing.
+            event = normalize_event(
+                command or "",
+                str(out.get("output") or ""),
+                result_code if type(result_code) is int else None,
+                sequence,
+                changed_files=changed_files,
+                edit_before_after=edit_before_after,
+                state_revision=after.runtime_evidence,
+                viewed_files=(
+                    (proposal.action.subject,)
+                    if proposal.action.operation is ActionOperation.VIEW_SOURCE
+                    and proposal.action.subject
+                    else ()
+                ),
+            )
+            operation = proposal.action.operation
+            if operation is ActionOperation.TEST:
+                status = event.test_outcome or (
+                    "success" if result_code == 0 else "failed"
+                )
+                self.last_native_test_outcome = status
+            elif operation is ActionOperation.SUBMIT:
+                status = "accepted"
+            else:
+                status = (
+                    "success"
+                    if result_code == 0
+                    else "failed"
+                )
+            hit_count = None
+            if operation is ActionOperation.SEARCH:
+                lines = tuple(
+                    line for line in str(out.get("output") or "").splitlines()
+                    if line.strip()
+                )
+                hit_count = 0 if result_code == 1 else len(lines)
+            result = CanonicalResult(
+                status=status,
+                exit_code=(
+                    result_code if type(result_code) is int else None
+                ),
+                changed=(bool(changed_files) if operation in {
+                    ActionOperation.EDIT,
+                    ActionOperation.SIGNATURE_CHANGE,
+                    ActionOperation.FILE_CREATE,
+                    ActionOperation.FILE_DELETE,
+                    ActionOperation.FILE_RENAME,
+                } else None),
+                hit_count=hit_count,
+                changed_files=changed_files,
+                failure_fingerprint=canonical_test_failure_fingerprint(event),
+            )
+            prior = self.attempt_runtime.journal.events(
+                self.attempt_runtime.attempt_id
+            )
+            if not prior or prior[-1].content_hash != proposal.content_hash:
+                raise ValueError(
+                    "native result is not adjacent to its canonical proposal"
+                )
+            canonical = canonicalize_tool_result(
+                event,
+                proposal=proposal,
+                result=result,
+                event_id=f"{proposal.action_id}:result",
+                sequence=sequence,
+                observation_id=(
+                    f"{self.attempt_runtime.attempt_id}:observation:{sequence}"
+                ),
+                revision_after=after,
+                previous_event_hash=proposal.content_hash,
+            )
+            self.attempt_runtime.append_event(canonical)
+            self.gateway_state.canonical_revision = after
+            envelopes = gateway_produce_raw(event, self.gateway_state)
+            envelopes = tuple(envelopes) + self._deep_reactive_envelopes(
+                changed_files=changed_files,
+                revision=after,
+            )
+            records = canonicalize_evidence_envelopes(
+                envelopes,
+                committed_event_hashes=self._committed_event_hashes(),
+            )
+            for record in records:
+                self.attempt_runtime.ingest_evidence(record)
+            all_records = tuple(
+                self.attempt_runtime._evidence.values()
+            )
+            if not all_records:
+                return
+            if self._provider_capsule_pending():
+                return
+
+            active = self._active_decision(
+                all_records,
+                self.attempt_runtime.work_state,
+                after,
+            )
+            satisfied = frozenset(
+                {
+                    TemporalPredicate.PRODUCER_COMPUTATION_COMPLETE,
+                    TemporalPredicate.REVISION_DEPENDENCIES_CAPTURED,
+                    TemporalPredicate.ACTIVE_DECISION_CONTEXT_MATCHES,
+                    TemporalPredicate.ACTIVE_DECISION_ID_MATCHES,
+                    TemporalPredicate.REASONING_GRAPH_CONNECTED,
+                    TemporalPredicate.COMMITMENT_WINDOW_OPEN,
+                }
+            )
+            runtime_sequence = self.attempt_runtime.work_state.sequence
+            plan = self.attempt_runtime.prepare_next_inference(
+                decisions=(active,),
+                satisfied_predicates=satisfied,
+                commitment_window=CommitmentWindowState.OPEN,
+                available_substrates=self._available_substrates(all_records),
+                native_observation=str(out.get("output") or ""),
+                observation_id=canonical.observation_id,
+                source_model_call_id=canonical.model_turn_id,
+                model_call_id=(
+                    f"{self.attempt_runtime.attempt_id}:model:"
+                    f"{runtime_sequence + 1}"
+                ),
+            )
+            if plan.delivery_attempt_id:
+                self.provider_boundary.stage(
+                    plan.compilation,
+                    delivery_attempt_id=plan.delivery_attempt_id,
+                )
+            else:
+                # OBSERVABILITY, NOT BEHAVIOUR. An unstaged plan is often
+                # CORRECT (correct-or-quiet: the coalition was not
+                # decision-complete, so the evidence stays HELD with a
+                # deterministic reason). But a SILENT non-delivery is
+                # indistinguishable downstream from "GT had nothing to say" --
+                # the exact ambiguity that kept 0/17 unfalsifiable. Record the
+                # compilation state + failure code + held count so the quiet
+                # can be EXPLAINED. Zero bytes, never model-facing, and it
+                # changes no delivery decision.
+                try:
+                    _comp = getattr(plan, "compilation", None)
+                    _state = getattr(_comp, "state", "")
+                    _failure = getattr(_comp, "failure_code", "")
+                    _runtime_ledger_record(
+                        kind="canonical_runtime.compilation",
+                        outcome="suppressed_internal_only",
+                        reason=(
+                            f"{getattr(_state, 'name', _state)}:"
+                            f"{getattr(_failure, 'name', _failure)}"
+                        ),
+                        chars=0,
+                        extra={
+                            "held_evidence": len(plan.held_evidence_ids or ()),
+                            "suppressed_decisions": len(
+                                plan.suppressed_decision_ids or ()
+                            ),
+                        },
+                    )
+                except Exception:  # noqa: BLE001 -- telemetry never blocks
+                    pass
+        except Exception as exc:  # noqa: BLE001 -- native result must survive
+            self._record_fault(exc, component="canonical_observer")
+            try:
+                _runtime_ledger_record(
+                    kind="canonical_runtime",
+                    outcome="suppressed_internal_only",
+                    reason=f"observe_failed:{type(exc).__name__}",
+                    chars=0,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    def observe_action_exception(self, action, exc: BaseException) -> None:
+        """Record terminal native action truth without swallowing host control."""
+        self.observe_action_result(
+            action,
+            {
+                "output": str(exc),
+                "returncode": None,
+            },
+        )
+
+
+def _augment_output(action, out) -> None:
+    """Observe one native result without directly mutating model-visible bytes."""
+    attachment = _CANONICAL_RUNTIME_ATTACHMENT
+    if attachment is None:
+        _augment_output_legacy(action, out)
+        return
+    observer = getattr(attachment, "observe_action_result", None)
+    if callable(observer):
+        observer(action, out)
+
+
 def _wrap_execute(orig):
     def execute(self, action, *args, **kwargs):
+        # Canonical live attempts have one environment route.  No legacy
+        # submit gate, lane arbiter, direct output appender, or delivery ledger
+        # may run alongside it.
+        if _CANONICAL_RUNTIME_ATTACHMENT is not None:
+            proposal_observer = getattr(
+                _CANONICAL_RUNTIME_ATTACHMENT,
+                "observe_action_proposal",
+                None,
+            )
+            if callable(proposal_observer):
+                try:
+                    proposal_observer(action)
+                except Exception as exc:  # noqa: BLE001
+                    _CANONICAL_RUNTIME_ATTACHMENT._record_fault(
+                        exc,
+                        component="canonical_action_proposal",
+                    )
+            try:
+                _gateway_capture_edit_preimage(action)
+            except Exception:  # noqa: BLE001 -- sensing cannot alter native work
+                pass
+            try:
+                out = orig(self, action, *args, **kwargs)
+            except BaseException as exc:  # native terminal semantics still own control
+                observer = getattr(
+                    _CANONICAL_RUNTIME_ATTACHMENT,
+                    "observe_action_exception",
+                    None,
+                )
+                if callable(observer):
+                    observer(action, exc)
+                raise
+            _augment_output(action, out)
+            return out
         # FIX 3 / G-2: the GT_VERIFY_EXECUTE branch (a) exposes the live env + its
         # ORIGINAL execute to the B1 covering-runner bridge, and (b) gates the SUBMIT
         # action — env.execute raises `Submitted` for a submit, which we catch here
@@ -20643,6 +22501,11 @@ def _wrap_execute(orig):
         # Seed the source-byte pre-image before the first command. Without this,
         # a task whose first action is an edit has no before-state and a no-op is
         # indistinguishable from a landed write at the post-command seam.
+        if not _GT_BASELINE and _gateway_edit_bridges_on():
+            try:
+                _gateway_capture_edit_preimage(action)
+            except Exception:  # noqa: BLE001 -- observation must never break execute
+                pass
         if not _GT_BASELINE and _ORACLE_ROUTE and (
                 _ss_coherence_v2_on() or _ss_recovery_v2_on()):
             try:
@@ -20821,6 +22684,419 @@ def _write_profile_receipt() -> None:
         pass
     except Exception:  # noqa: BLE001 — belt-and-suspenders: any fault stays silent
         pass
+
+
+def _canonical_brief_records(env, revision):
+    """Convert the sealed task-start artifact into typed canonical evidence.
+
+    The producer's block receipts and localization/obligation proof sidecars
+    provide identity and provenance.  Unknown, stale, unsealed, or unsupported
+    blocks remain quiet; rendered prose is never used to guess a fact class.
+    """
+    try:
+        from groundtruth.runtime.evidence_envelope import (
+            EVENT_STEP0,
+            VERIFIED,
+            WARNING,
+            EvidenceEnvelope,
+        )
+        from groundtruth.runtime.feature_lineage import build_lineage
+        from groundtruth.runtime.reasoning_runtime import (
+            Authority,
+            CanonicalEvidenceSemantics,
+            MandatoryReason,
+            canonicalize_evidence_envelopes,
+            feature_contract_for,
+        )
+
+        brief_path = str(
+            env.get("GT_BRIEF_FILE") or "/gt_artifacts/brief.txt"
+        ).strip()
+        result_path = os.path.join(
+            os.path.dirname(brief_path),
+            "brief_result.json",
+        )
+        with open(result_path, encoding="utf-8") as stream:
+            result = json.load(stream)
+        with open(brief_path, encoding="utf-8") as stream:
+            brief_text = stream.read()
+        if (
+            result.get("schema") != "gt.brief_result.v1"
+            or result.get("brief_text") != brief_text
+        ):
+            return ()
+        metrics = result.get("metrics")
+        receipts = metrics.get("block_receipts") if isinstance(metrics, dict) else None
+        proofs = (
+            metrics.get("localization_proof")
+            if isinstance(metrics, dict)
+            else None
+        )
+        if not isinstance(receipts, list):
+            return ()
+        proof_by_candidate = {
+            str(item.get("candidate_id") or ""): item
+            for item in (proofs if isinstance(proofs, list) else ())
+            if isinstance(item, dict) and item.get("candidate_id")
+        }
+        obligations_record = (
+            metrics.get("obligations_record")
+            if isinstance(metrics, dict)
+            and isinstance(metrics.get("obligations_record"), dict)
+            else {}
+        )
+        envelopes = []
+        for receipt in receipts:
+            if not isinstance(receipt, dict):
+                continue
+            label = str(receipt.get("label") or "")
+            candidate_id = str(receipt.get("candidate_id") or "")
+            span = receipt.get("char_span")
+            seal = str(receipt.get("content_hash") or "")
+            if (
+                not candidate_id
+                or not isinstance(span, list)
+                or len(span) != 2
+                or not all(type(value) is int for value in span)
+                or span[0] < 0
+                or span[0] >= span[1]
+                or span[1] > len(brief_text)
+            ):
+                continue
+            block = brief_text[span[0]:span[1]]
+            if hashlib.sha256(
+                block.encode("utf-8", "surrogatepass")
+            ).hexdigest() != seal:
+                continue
+
+            if label.startswith("file-entry-"):
+                fact_class = "localization"
+                producer = "v1r_brief"
+                evidence_type = "brief_localization"
+                proof = proof_by_candidate.get(candidate_id)
+                if not isinstance(proof, dict):
+                    continue
+                target = str(proof.get("path") or "").strip()
+                if not target:
+                    continue
+                verified = proof.get("witness_verified") is True
+                witness = str(proof.get("witness") or "").strip()
+                claim = f"Ranked source candidate: {target}."
+                if witness:
+                    claim += f" Repository witness: {witness}."
+                consequence = (
+                    f"Inspect {target} before selecting the source target."
+                )
+                provenance = ((target, 1),)
+                tier = VERIFIED if verified else WARNING
+                confidence = 0.95 if verified else 0.7
+                mandatory = None
+            elif label == "obligations":
+                fact_class = "obligations"
+                producer = "spec"
+                evidence_type = "obligations"
+                if (
+                    obligations_record.get("schema")
+                    != "gt.obligations_record.v1"
+                    or obligations_record.get("candidate_id") != candidate_id
+                    or obligations_record.get("block_content_sha256") != seal
+                ):
+                    continue
+                rows = tuple(
+                    line.strip().lstrip("-").strip().lstrip("[ ]").strip()
+                    for line in block.splitlines()
+                    if line.strip()
+                    and not line.strip().startswith("<")
+                    and line.strip()
+                    != "Requirements to satisfy (from the issue):"
+                )
+                if not rows:
+                    continue
+                target = "issue"
+                claim = "Task requirements: " + " | ".join(rows)
+                consequence = "Keep every listed task requirement open until validated."
+                provenance = (("issue", 1),)
+                tier = VERIFIED
+                confidence = 1.0
+                mandatory = MandatoryReason.TASK_OBLIGATION
+            else:
+                continue
+
+            contract = feature_contract_for(fact_class)
+            if contract is None:
+                continue
+            lineage = build_lineage(
+                runtime_producer_id=producer,
+                evidence_type=evidence_type,
+                actual_event="task_start",
+            )
+            if lineage is None or not lineage.producer_registration_match:
+                continue
+            semantics = CanonicalEvidenceSemantics(
+                decision_context=contract.decision_context,
+                roles=contract.roles,
+                claim=claim,
+                actionable_consequence=consequence,
+                causal_neighborhood=(
+                    f"decision:{contract.decision_context.value}",
+                    f"subject:{target}",
+                ),
+                authority=Authority.RESULT_DERIVED,
+                revision=revision,
+                revision_dependencies=contract.revision_dependencies,
+                mandatory_reason=mandatory,
+                failure_prevention=5,
+                causal_value=4,
+                contradiction_resolution=0,
+                anchoring_risk=0 if tier == VERIFIED else 1,
+            )
+            envelopes.append(
+                EvidenceEnvelope.build(
+                    producer=producer,
+                    fact_id=candidate_id,
+                    target=target,
+                    evidence_type=evidence_type,
+                    payload=(claim, consequence),
+                    provenance=provenance,
+                    confidence=confidence,
+                    tier=tier,
+                    graph_revision=revision.graph,
+                    valid_until=revision.graph,
+                    preferred_event=EVENT_STEP0,
+                    estimated_cost_tokens=max(
+                        1, (len(claim) + len(consequence) + 3) // 4
+                    ),
+                    lineage=lineage,
+                    producer_inputs={
+                        "candidate_id": candidate_id,
+                        "block_sha256": seal,
+                    },
+                    canonical_semantics=semantics,
+                )
+            )
+        return canonicalize_evidence_envelopes(envelopes)
+    except (ImportError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return ()
+
+
+def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> None:
+    """Stage one task-start decision capsule; hold other contexts."""
+    if not records:
+        return
+    try:
+        from groundtruth.runtime.reasoning_runtime import (
+            ActiveDecision,
+            CommitmentWindowState,
+            DecisionContext,
+            TemporalPredicate,
+            capsule_budget_for,
+        )
+
+        preferred_context = (
+            DecisionContext.SOURCE_TARGET_SELECTION
+            if any(
+                item.decision_context
+                is DecisionContext.SOURCE_TARGET_SELECTION
+                for item in records
+            )
+            else records[0].decision_context
+        )
+        chosen = tuple(
+            item for item in records
+            if item.decision_context is preferred_context
+        )
+        for record in records:
+            attachment.attempt_runtime.ingest_evidence(record)
+        required_roles = tuple(
+            dict.fromkeys(role for item in chosen for role in item.roles)
+        )
+        active = ActiveDecision(
+            decision_id=preferred_context.value,
+            context=preferred_context,
+            primary_claim=chosen[0].actionable_consequence,
+            required_roles=required_roles,
+            causal_neighborhood=tuple(
+                dict.fromkeys(
+                    node
+                    for item in chosen
+                    for node in item.causal_neighborhood
+                )
+            ),
+            token_budget=capsule_budget_for(
+                preferred_context
+            ).hard_max_tokens,
+            current_revision=attachment.attempt_runtime.work_state.revision,
+        )
+        predicates = frozenset(
+            {
+                TemporalPredicate.PRODUCER_COMPUTATION_COMPLETE,
+                TemporalPredicate.REVISION_DEPENDENCIES_CAPTURED,
+                TemporalPredicate.ACTIVE_DECISION_CONTEXT_MATCHES,
+                TemporalPredicate.ACTIVE_DECISION_ID_MATCHES,
+                TemporalPredicate.REASONING_GRAPH_CONNECTED,
+                TemporalPredicate.COMMITMENT_WINDOW_OPEN,
+            }
+        )
+        plan = attachment.attempt_runtime.prepare_next_inference(
+            decisions=(active,),
+            satisfied_predicates=predicates,
+            commitment_window=CommitmentWindowState.OPEN,
+            available_substrates=("graph", "brief_result"),
+            native_observation=task_text,
+            observation_id=f"{attachment.attempt_runtime.attempt_id}:task",
+            source_model_call_id=f"{attachment.attempt_runtime.attempt_id}:host",
+            model_call_id=f"{attachment.attempt_runtime.attempt_id}:model:1",
+        )
+        if plan.delivery_attempt_id:
+            attachment.provider_boundary.stage(
+                plan.compilation,
+                delivery_attempt_id=plan.delivery_attempt_id,
+            )
+    except Exception as exc:
+        attachment._record_fault(
+            exc,
+            component="task_start_evidence",
+        )
+        return
+
+
+def install_canonical_runtime(*, model, agent, env, task):
+    """Attach the sole live reasoning/delivery runtime for one Mini attempt.
+
+    Construction occurs only after the runner has concrete model and agent
+    instances and before ``agent.run``.  Failure returns an unattached object;
+    Profile-2's runner gate then refuses to spend a provider call.
+    """
+    global _CANONICAL_RUNTIME_ATTACHMENT
+    current = _CANONICAL_RUNTIME_ATTACHMENT
+    if (
+        current is not None
+        and getattr(current, "provider_boundary", None) is not None
+        and getattr(current.provider_boundary, "model", None) is model
+        and getattr(current.provider_boundary, "agent", None) is agent
+    ):
+        return current
+    try:
+        from groundtruth.runtime.gateway import GatewayState
+        from groundtruth.runtime.miniswe_provider_boundary import (
+            MiniSweProviderBoundary,
+        )
+        from groundtruth.runtime.miniswe_commitment_boundary import (
+            MiniSweCommitmentBoundary,
+        )
+        from groundtruth.runtime.reasoning_runtime import (
+            AttemptReasoningRuntime,
+            RevisionVector,
+            RuntimeJournal,
+        )
+        from groundtruth.runtime.recovery_assurance import (
+            restore_persisted_quarantine,
+        )
+
+        task_text = str(task or "")
+        attempt_seed = (
+            str(env.get("GT_ATTEMPT_ID") or "").strip()
+            or str(env.get("GT_INSTANCE_ID") or "").strip()
+            or hashlib.sha256(
+                task_text.encode("utf-8", "surrogatepass")
+            ).hexdigest()[:24]
+        )
+        graph_path = _db_path()
+        graph_revision = _canonical_file_digest(graph_path)
+        repository_revision = _canonical_repository_digest(_root())
+        lsp_revision = (
+            str(env.get("GT_LSP_REVISION") or "").strip()
+            or hashlib.sha256(
+                f"lsp-unavailable:{repository_revision}".encode("ascii")
+            ).hexdigest()
+        )
+        runtime_revision = hashlib.sha256(
+            f"{attempt_seed}:runtime:0".encode("utf-8")
+        ).hexdigest()
+        initial_revision = RevisionVector(
+            repository_content=repository_revision,
+            graph=graph_revision,
+            lsp=lsp_revision,
+            runtime_evidence=runtime_revision,
+        )
+        ledger_anchor = str(
+            env.get("GT_RUNTIME_LEDGER")
+            or env.get("GT_RUN_OUTPUT")
+            or "/tmp/gt_runtime_ledger.jsonl"
+        )
+        journal_path = str(
+            env.get("GT_CANONICAL_JOURNAL")
+            or os.path.join(
+                os.path.dirname(ledger_anchor) or ".",
+                "gt_reasoning_runtime.sqlite3",
+            )
+        )
+        journal = RuntimeJournal(journal_path)
+        journal.open()
+        attempt_runtime = AttemptReasoningRuntime(
+            attempt_id=attempt_seed,
+            journal=journal,
+            initial_revision=initial_revision,
+        )
+        # A sealed terminal quarantine marker must dominate journal-derived
+        # health, exactly once, BEFORE any staging/provider boundary exists --
+        # otherwise a quarantined attempt restarts HEALTHY and resumes
+        # emitting. This lives here rather than in AttemptReasoningRuntime
+        # .__init__ because recovery_assurance imports reasoning_runtime, so a
+        # constructor call would be circular. No marker -> no state change.
+        restore_persisted_quarantine(attempt_runtime)
+        provider_boundary = MiniSweProviderBoundary(
+            model=model,
+            agent=agent,
+            attempt_runtime=attempt_runtime,
+        )
+        gateway_state = GatewayState(
+            graph_db=graph_path,
+            repo_root=_root(),
+            issue_text=task_text,
+            episode=_EPISODE,
+            canonical_revision=initial_revision,
+            episode_overlay=_gt_episode_overlay,
+            control_recorder=(
+                _control_participation_record
+                if _inseam_metrics_on()
+                else None
+            ),
+        )
+        attachment = CanonicalRuntimeAttachment(
+            attached=True,
+            attempt_runtime=attempt_runtime,
+            provider_boundary=provider_boundary,
+            gateway_state=gateway_state,
+            graph_revision=graph_revision,
+        )
+        provider_boundary.fault_handler = (
+            lambda stage, exc: attachment._record_fault(
+                exc,
+                component=f"provider:{stage}",
+            )
+        )
+        attachment.commitment_boundary = MiniSweCommitmentBoundary(
+            agent=agent,
+            context_builder=attachment._commitment_context,
+            plan_observer=attachment._observe_commitment_plan,
+        )
+        _stage_initial_canonical_evidence(
+            attachment,
+            _canonical_brief_records(env, initial_revision),
+            task_text,
+        )
+        _CANONICAL_RUNTIME_ATTACHMENT = attachment
+        return attachment
+    except Exception as exc:  # noqa: BLE001 -- runner enforces fail-closed
+        return CanonicalRuntimeAttachment(
+            attached=False,
+            attempt_runtime=None,
+            provider_boundary=None,
+            gateway_state=None,
+            graph_revision=f"attach_failed:{type(exc).__name__}",
+            commitment_boundary=None,
+        )
 
 
 def _install() -> None:

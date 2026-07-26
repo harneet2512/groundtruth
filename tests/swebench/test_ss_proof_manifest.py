@@ -288,6 +288,95 @@ def test_runtime_joins_exact_bytes_but_ignores_untrusted_truth_timing_flags(
     assert delivery["fair_probe"] is None
 
 
+@pytest.mark.parametrize(
+    "formatted_observation",
+    [
+        {
+            "returncode": 0,
+            "output": (
+                "native command output\n"
+                "syntax result for src/module.py\npreserve the caller contract"
+            ),
+        },
+        {
+            "returncode": 0,
+            "output_head": "native command output head",
+            "output_tail": (
+                "preserved tail\n"
+                "syntax result for src/module.py\npreserve the caller contract"
+            ),
+            "elided_chars": 12000,
+            "warning": "Output too long.",
+        },
+    ],
+    ids=["mini_swe_output", "mini_swe_elided_output_tail"],
+)
+def test_runtime_joins_mini_swe_model_visible_output_channels(
+    tmp_path: Path, formatted_observation: dict,
+) -> None:
+    payload = "syntax result for src/module.py\npreserve the caller contract"
+    binding = {
+        "run_id": BASE_CONTEXT["run_id"], "task_id": BASE_CONTEXT["task_id"],
+        "seam_sha256": BASE_CONTEXT["seam_sha256"],
+    }
+    trajectory = {
+        **binding,
+        "messages": [
+            {"role": "tool", "content": json.dumps(formatted_observation)},
+            {"role": "assistant", "content": "I will repair src/module.py."},
+        ],
+    }
+    row = {
+        **binding, "outcome": "delivered", "chars_delivered": len(payload),
+        "content_sha256_16": hashlib.sha256(payload.encode()).hexdigest()[:16],
+        "layer": "edit.syntax", "file_path": "src/module.py",
+    }
+    ledger = _write_bytes(
+        tmp_path, "ledger.jsonl", (json.dumps(row) + "\n").encode()
+    )
+    trajectory_ref = _write_json(tmp_path, "trajectory.json", trajectory)
+
+    audit = manifest._audit_runtime(ledger, trajectory_ref, _context(tmp_path))
+
+    assert audit["valid"] is True
+    assert len(audit["deliveries"]) == 1
+    assert audit["deliveries"][0]["delivered_byte_proven"] is True
+    assert audit["deliveries"][0]["acknowledged"] is True
+
+
+def test_runtime_never_uses_mini_swe_raw_output_metadata_as_byte_proof(
+    tmp_path: Path,
+) -> None:
+    payload = "syntax result for src/module.py\npreserve the caller contract"
+    binding = {
+        "run_id": BASE_CONTEXT["run_id"], "task_id": BASE_CONTEXT["task_id"],
+        "seam_sha256": BASE_CONTEXT["seam_sha256"],
+    }
+    trajectory = {
+        **binding,
+        "messages": [{
+            "role": "tool",
+            "content": json.dumps({"returncode": 0, "output": "clipped"}),
+            "extra": {"raw_output": f"native command output\n{payload}"},
+        }],
+    }
+    row = {
+        **binding, "outcome": "delivered", "chars_delivered": len(payload),
+        "content_sha256_16": hashlib.sha256(payload.encode()).hexdigest()[:16],
+        "layer": "edit.syntax", "file_path": "src/module.py",
+    }
+    ledger = _write_bytes(
+        tmp_path, "ledger.jsonl", (json.dumps(row) + "\n").encode()
+    )
+    trajectory_ref = _write_json(tmp_path, "trajectory.json", trajectory)
+
+    audit = manifest._audit_runtime(ledger, trajectory_ref, _context(tmp_path))
+
+    assert audit["valid"] is False
+    assert audit["deliveries"] == []
+    assert "ledger_delivery_0_seal_not_in_trajectory" in audit["errors"]
+
+
 def test_runtime_missing_any_run_task_seam_binding_fails(tmp_path: Path) -> None:
     payload = "payload"
     trajectory = {"messages": [{"role": "user", "content": payload}]}

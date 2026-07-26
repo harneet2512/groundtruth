@@ -292,6 +292,9 @@ def test_trace_frame_augment_delivers_on_test_under_enforcement(tmp_path, monkey
     monkeypatch.setenv("GT_GATEWAY", "1")
     monkeypatch.setenv("GT_REGISTRY_ENFORCE", "1")
     db = _mk_graph(tmp_path, [])
+    trace_file = tmp_path / "svc" / "watch.py"
+    trace_file.parent.mkdir(parents=True)
+    trace_file.write_text("def run():\n    raise ValueError('boom')\n", encoding="utf-8")
     out = (
         "Traceback (most recent call last):\n"
         '  File "svc/watch.py", line 12, in run\n'

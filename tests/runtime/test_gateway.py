@@ -31,6 +31,9 @@ from groundtruth.runtime.gateway import (
     classify_outcome,
     normalize_search,
     search_pattern,
+    route_delivery,
+    ROUTE_DEFER,
+    ROUTE_DELIVER,
     # outcome-state constants
     AMBIGUOUS_HIT,
     EXACT_HIT,
@@ -41,8 +44,96 @@ from groundtruth.runtime.gateway import (
     ZERO_BEHAVIOR,
     ZERO_NAME,
 )
+from groundtruth.runtime.adapters.miniswe import normalize_event
+from groundtruth.runtime.evidence_envelope import EvidenceEnvelope
 
 _CORPUS = Path(__file__).resolve().parents[1] / "fixtures" / "gateway_corpus"
+
+
+def _routing_envelope(evidence_type: str) -> EvidenceEnvelope:
+    return EvidenceEnvelope.build(
+        producer="patch_delta",
+        fact_id="subject",
+        target="src/module.py",
+        evidence_type=evidence_type,
+        payload=("preserve the changed interface",),
+        preferred_event="edit",
+    )
+
+
+def test_direct_compiled_test_binary_is_a_test_semantic_not_a_command_guess():
+    event = normalize_event(
+        "timeout 30 ./target/debug/deps/engine-abcd tests::job --nocapture",
+        "running 1 test\ntest tests::job ... FAILED\n"
+        "test result: FAILED. 0 passed; 1 failed",
+        101,
+        4,
+    )
+
+    assert event.kind == "other"
+    assert event.carrier_kind == "other"
+    assert event.semantic_events == ("test_result",)
+    assert event.primary_boundary == "test_result"
+    assert event.test_outcome == "fail"
+    assert event.test_protocol == "native"
+
+
+def test_authoritative_noop_edit_cannot_satisfy_edit_result_registry(monkeypatch):
+    monkeypatch.setenv("GT_REGISTRY_ENFORCE", "1")
+    event = normalize_event(
+        "sed -i 's/x/x/' src/module.py", "", 0, 7,
+        semantic_events=(),
+        changed_files=(),
+        state_revision="7",
+    )
+
+    assert event.kind == "edit"
+    assert event.semantics_authoritative is True
+    assert route_delivery(
+        _routing_envelope("signature_mismatch"), event, GatewayState()
+    ) == ROUTE_DEFER
+
+
+def test_authoritative_edit_result_routes_on_exact_semantic_membership(monkeypatch):
+    monkeypatch.setenv("GT_REGISTRY_ENFORCE", "1")
+    event = normalize_event(
+        "cat <<'EOF' > src/module.py\nchanged\nEOF", "", 0, 8,
+        semantic_events=("edit_result",),
+        changed_files=("src/module.py",),
+        edit_before_after={"src/module.py": ("before", "changed\n")},
+        state_revision="8",
+    )
+
+    assert route_delivery(
+        _routing_envelope("signature_mismatch"), event, GatewayState()
+    ) == ROUTE_DELIVER
+
+
+def test_failure_observation_uses_semantic_boundary_not_other_carrier(tmp_path):
+    target = tmp_path / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def boom():\n    raise RuntimeError('x')\n", encoding="utf-8")
+    event = normalize_event(
+        "python repro.py",
+        (
+            "Traceback (most recent call last):\n"
+            '  File "pkg/mod.py", line 2, in boom\n'
+            "RuntimeError: x\n"
+        ),
+        1,
+        1,
+        semantic_events=(),
+    )
+    state = GatewayState(repo_root=str(tmp_path))
+
+    envelopes = augment(event, state)
+
+    assert event.kind == "other"
+    assert event.primary_boundary == "failure_obs"
+    assert len(envelopes) == 1
+    assert envelopes[0].preferred_event == "test"
+    assert envelopes[0].lineage is not None
+    assert envelopes[0].lineage.actual_event == "failure_obs"
 
 
 # ---------------------------------------------------------------------------

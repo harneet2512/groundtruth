@@ -46,7 +46,10 @@ def _wire_fake_candidates(monkeypatch):
     monkeypatch.setattr(g, "_ss_scan_acks", lambda *a, **k: None)
     monkeypatch.setattr(g, "_gt_gateway_caller_contract_ready", lambda *a, **k: False)
 
-    def gateway(action, out, cmd, orig_out, *, pool=None, lattice_produced=None):  # lattice_produced: match prod signature (2026-07-22)
+    def gateway(
+        action, out, cmd, orig_out, *, pool=None, lattice_produced=None,
+        normalized_event=None,
+    ):
         candidate = SimpleNamespace(kind="fake." + cmd, plane="fact")
         thunk = lambda: out.__setitem__("output", out["output"] + "\nGT:" + cmd)
         if pool is None:
@@ -386,7 +389,10 @@ def test_formatter_truncation_falls_back_to_base_observation(monkeypatch):
     _wire_fake_candidates(monkeypatch)
     payload = "G" * 12000
 
-    def gateway(action, out, cmd, orig_out, *, pool=None, lattice_produced=None):  # lattice_produced: match prod signature (2026-07-22)
+    def gateway(
+        action, out, cmd, orig_out, *, pool=None, lattice_produced=None,
+        normalized_event=None,
+    ):
         candidate = SimpleNamespace(kind="large", plane="fact", dedup_key="")
         thunk = lambda: out.__setitem__(
             "output", g._join_lane_output(out["output"], payload))
@@ -599,7 +605,10 @@ def test_final_stepbehind_ledger_preserves_subject_and_event(monkeypatch):
         lambda *args, **kwargs: (True, "ss_step_behind"))
     monkeypatch.setattr(g, "_runtime_ledger_record", lambda **row: rows.append(row))
 
-    def gateway(action, out, cmd, orig_out, *, pool=None, lattice_produced=None):  # lattice_produced: match prod signature (2026-07-22)
+    def gateway(
+        action, out, cmd, orig_out, *, pool=None, lattice_produced=None,
+        normalized_event=None,
+    ):
         candidate = SimpleNamespace(
             kind="post_search.localize", plane=g._GA_PLANE_LANE_A,
             dedup_key="preview", symbol="", lineage=None)
@@ -657,7 +666,10 @@ def test_submit_refusal_is_sole_dose_first_or_last(monkeypatch, commands):
     _wire_fake_candidates(monkeypatch)
     rolled_back = []
 
-    def gateway(action, out, cmd, orig_out, *, pool=None, lattice_produced=None):  # lattice_produced: match prod signature (2026-07-22)
+    def gateway(
+        action, out, cmd, orig_out, *, pool=None, lattice_produced=None,
+        normalized_event=None,
+    ):
         is_submit = cmd == "submit"
         candidate = SimpleNamespace(
             kind="submit_gate" if is_submit else "sibling",

@@ -80,6 +80,12 @@ def _mk_graph(tmp_path, nodes):
             (n["id"], n.get("label", "Function"), n["name"], n["file_path"],
              n.get("start_line", 1), n.get("end_line", 5), n.get("is_test", 0),
              n.get("language", "python")))
+        # Gateway trace localization is correct-or-quiet against the live repo,
+        # not graph-only: a relative frame must resolve to a real repository
+        # file. Keep this synthetic graph and its filesystem snapshot coherent.
+        source = tmp_path / n["file_path"]
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("def placeholder():\n    pass\n", encoding="utf-8")
     con.commit()
     con.close()
     return db
@@ -325,8 +331,15 @@ def test_excluded_search_promotes_prior_receipt_like_gateway_alone(tmp_path, mon
 
     def arm(post_search):
         _wire(tmp_path, monkeypatch, db, post_search=post_search)
-        _run("python repro.py", trace_out)               # turn 1: trace_frame -> a/x.py
-        assert len(g._gt_gateway_deliveries) == 1
+        seed_obs = _run("python repro.py", trace_out)    # turn 1: trace_frame -> a/x.py
+        assert len(g._gt_gateway_deliveries) == 1, {
+            "observation": seed_obs,
+            "root": g._root(),
+            "trace_file_exists": (tmp_path / "a/x.py").is_file(),
+            "gateway_on": g._gt_gateway_on(),
+            "batch_install_failed": g._batch_install_failed,
+            "batch_commit_installed": g._batch_commit_installed,
+        }
         assert g._gt_gateway_deliveries[0].receipt_state == RECEIPT_DELIVERED
         _run("grep -rn get_user a/x.py", "a/x.py:10:def get_user():")  # turn 2: ACTS on a/x.py
         return [d.receipt_state for d in g._gt_gateway_deliveries]
@@ -374,9 +387,16 @@ def test_excluded_search_touches_no_gateway_state_except_receipts(tmp_path, monk
     monkeypatch.setenv("GT_GATEWAY", "1")
     # seed a prior trace_frame delivery -> the excluded grep will promote its receipt
     # (delivered->acted), which the snapshot must ignore.
-    _run("python repro.py", 'Traceback (most recent call last):\n'
-                            '  File "a/x.py", line 12, in get_user\nE: boom\n')
-    assert len(g._gt_gateway_deliveries) == 1
+    seed_obs = _run("python repro.py", 'Traceback (most recent call last):\n'
+                                     '  File "a/x.py", line 12, in get_user\nE: boom\n')
+    assert len(g._gt_gateway_deliveries) == 1, {
+        "observation": seed_obs,
+        "root": g._root(),
+        "trace_file_exists": (tmp_path / "a/x.py").is_file(),
+        "gateway_on": g._gt_gateway_on(),
+        "batch_install_failed": g._batch_install_failed,
+        "batch_commit_installed": g._batch_commit_installed,
+    }
     # arm the episode-id touch: the CORRECT guard leaves episode_id untouched on an
     # excluded turn; the mutant sets it (diverging the snapshot).
     g._EPISODE.episode_id = ""

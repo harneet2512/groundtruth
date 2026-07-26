@@ -93,6 +93,19 @@ def test_hygiene_block_bounces_once():
     assert cert.head_reason == "hygiene"
 
 
+def test_observed_submit_failure_is_in_certificate_head():
+    cert = build_certificate(
+        submit_block={
+            "blocking": True,
+            "reason": "ss_submit_red",
+            "detail": "an observed test failure remains unresolved",
+        }
+    )
+    assert cert.decision == "bounce_once"
+    assert cert.head_reason == "ss_submit_red"
+    assert cert.head_record["block"] == "ss_submit_red"
+
+
 def test_fail_open_after_max_bounces_is_allow():
     cert = build_certificate(covering={"verdict": "fail"}, bounce_count=1, max_bounces=1)
     assert cert.decision == "allow"                    # gate_overridden -> allow

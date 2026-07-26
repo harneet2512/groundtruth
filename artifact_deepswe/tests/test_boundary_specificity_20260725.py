@@ -336,7 +336,7 @@ def test_ranking_keeps_the_event_table_that_expiry_gave_up():
 
 
 # ---------------------------------------------------------------------------
-# KNOWN LEVER INCOMPATIBILITY (2026-07-25) — documented, NOT hacked around.
+# RESOLVED LEVER INCOMPATIBILITY (2026-07-25) — spec split, not a carve-out.
 #
 # GT_CS_EDIT_TRIGGER emits new_file_destination / missing_role on an EDIT
 # observation, but both are contracted to `failed_search`, so GT_BOUNDARY_EXPIRE
@@ -351,20 +351,22 @@ def test_ranking_keeps_the_event_table_that_expiry_gave_up():
 # (created_at_precedent_path, which is only earnable before creation).
 #
 # For new_file_destination the drop is CORRECT and already redundant — the
-# existence-filter suppresses it post-creation anyway. For missing_role the drop
-# loses genuinely useful registration evidence, and the fix is a SPEC AMENDMENT
-# (split missing_role to edit_result with its own receipt predicate), not a
-# carve-out in the expiry gate. Hacking expiry here would hide the gap and make
-# the contract even less trustworthy.
+# existence-filter suppresses it post-creation anyway. For missing_role the old
+# type remains a failed_search fact; the useful post-creation registration fact
+# now uses ``missing_role_postcreate:*`` at edit_result. No expiry exception was
+# added.
 #
-# Until that amendment: GT_CS_EDIT_TRIGGER and GT_BOUNDARY_EXPIRE are
-# INCOMPATIBLE and must not both be enabled. This test pins that so the
-# interaction is KNOWN rather than discovered in a run.
+# The amendment now ships as a distinct ``missing_role_postcreate:*`` evidence
+# family contracted to edit_result.  The pre-creation ``missing_role:*`` family
+# remains failed_search, so no timing meaning was silently changed.
 # ---------------------------------------------------------------------------
 
-def test_cs_edit_trigger_is_incompatible_with_expiry_until_the_spec_split():
+def test_cs_edit_trigger_uses_distinct_post_creation_boundary_after_spec_split():
     assert boundary_verdict(_Env("new_file_destination"), "edit_result") == BOUNDARY_MISMATCH
     assert boundary_verdict(_Env("missing_role"), "edit_result") == BOUNDARY_MISMATCH
+    assert boundary_verdict(
+        _Env("missing_role_postcreate:registration"), "edit_result"
+    ) == BOUNDARY_MATCH
     # companion_surface is separately contracted to edit_result and SURVIVES — so the change_surface
     # engine is not wholly silenced on an edit, only its two failed_search-contracted forms.
     assert boundary_verdict(_Env("companion_surface"), "edit_result") == BOUNDARY_MATCH

@@ -51,14 +51,19 @@
     {
       "task": "conan-io__conan-17123",
       "label": "same-turn stale obligation after behavioral proof",
-      "layer": "spec.obligation",
-      "passing_test_pair": 16,
-      "expected_iteration": 17,
+      "layer": "obligation.unexercised",
+      "passing_test_pair": 15,
+      "expected_iteration": 16,
       "expected_outcome": "suppressed",
       "expected_reason": "ss_late",
       "expected_chars": 0,
+      "expected_clause_id": "8c8a5079",
+      "expected_subject_digest": "f530f49a477795ba",
+      "expected_artifact_issue_sha256": "f7f9940d48fc5825680d09a25bd979c48f873967bba9cbf0395ba5c697e8b030",
+      "expected_proof_turn": 16,
+      "forbidden_delivery_text": "However, they would be more useful if they supported inverse matching, just like `.gitignore` or `.dockerignore` do",
       "acknowledgment": "NOT_APPLICABLE_SUPPRESSED",
-      "why": "Pair 15 executes the inverse-match code path with concrete negated patterns, observes the expected results, and the assistant accepts them before this boundary. The edited-untested claim must be suppressed; an unrelated green test alone would not be sufficient."
+      "why": "Pair 15 executes the inverse-match code path with concrete negated patterns and observes the expected results. The current V2 obligation owner must attribute suppression of that exact proven clause at the same model observation (iteration 16); an unrelated green test or another clause's suppression cannot satisfy the case."
     }
   ],
   "suppress_step_behind": [

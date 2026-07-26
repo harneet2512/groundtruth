@@ -215,6 +215,35 @@ class Obs:
         return self.after[len(self.before):] if self.after.startswith(self.before) else self.after
 
 
+@dataclass(frozen=True)
+class CanonicalFacts:
+    """What the canonical runtime actually did for one attempt.
+
+    The canonical path delivers through the PROVIDER PAYLOAD, not by mutating
+    the tool observation, so ``Obs.delta`` and the runtime ledger are both
+    blind to it.  Scenarios that want to assert on the deterministic runtime
+    must read these fields instead.  Populated only by a driver that installs
+    the canonical runtime; ``SeamResult.canonical`` is ``None`` otherwise --
+    never a synthesised zero, which would be indistinguishable from a runtime
+    that ran and did nothing.
+    """
+
+    committed_events: int
+    sequence: int
+    phase: str
+    attempt_id: str
+    health: str
+    #: Evidence the producers actually manufactured for this attempt. Read from
+    #: ``evidence_records_for_attempt``, NOT ``evidence_history`` -- the latter
+    #: returns 0 on the same attempt and reading it misdiagnoses the chain as
+    #: "no evidence produced".
+    evidence_records: int = 0
+    #: Capsule compilations. Zero in the hermetic gate is EXPECTED, not a bug:
+    #: compilation is driven by the inference boundary and the gate makes no
+    #: model call. This field is what makes that visible instead of silent.
+    compilations: int = 0
+
+
 @dataclass
 class SeamResult:
     observations: list[Obs] = field(default_factory=list)
@@ -222,11 +251,58 @@ class SeamResult:
     # SS-2 (S11): the pre-submit refusal string returned by each submit attempt made
     # AFTER the event stream (empty when the flag is off / no unresolved RED / dose spent).
     submit_refusals: list[str] = field(default_factory=list)
+    # Provider-boundary ``DeliveryAttempt`` records, populated only by a driver
+    # that installs the canonical runtime. Empty under the legacy driver, which
+    # has no provider boundary at all -- that emptiness is the honest signal.
+    delivery_attempts: list = field(default_factory=list)
+    #: Canonical runtime facts, or None under a driver that never installed it.
+    canonical: "CanonicalFacts | None" = None
 
     # -- views over the durable ledger --------------------------------------
     def delivered_rows(self) -> list[dict]:
+        """LEGACY routing view: the seam recorded that it handed over bytes.
+
+        This is NOT proof the bytes reached the model.  In paid run
+        30169158187 every one of the 80 rows matching this predicate failed
+        ``ss_proof_manifest``'s byte join against the model-visible trajectory
+        (0/80 located by ``_sealed_window``).  Use
+        ``provider_terminal_deliveries`` for a delivery CLAIM; keep this view
+        for legacy regression comparisons only.
+        """
         return [r for r in self.ledger
                 if str(r.get("outcome")) == "delivered" and int(r.get("chars_delivered") or 0) > 0]
+
+    def provider_terminal_deliveries(self) -> list:
+        """Attempts that satisfy the handoff §9 definition of ``DELIVERED``.
+
+        Requires BOTH halves, never either alone:
+          * exact join identity -- a non-empty ``joined_capsule_hash`` and
+            ``provider_payload_hash`` (the capsule that was actually sent); and
+          * a provider-terminal record -- a ``model_call_id`` plus a
+            ``terminal_kind``, i.e. the provider confirmed a valid terminal
+            inference for that same model-call attempt.
+
+        ``COMPILED``/``JOINED``/``DISPATCHED``/``PROVIDER_ACCEPTED`` are all
+        excluded: a local compile or an accepted dispatch is not delivery.
+        ``RESPONSE_COMMITTED`` counts, since it strictly follows ``DELIVERED``.
+        Delivery still does not imply acknowledgment, use, or causality.
+        """
+        delivered = {"DELIVERED", "RESPONSE_COMMITTED"}
+        out = []
+        for attempt in self.delivery_attempts:
+            state = getattr(attempt, "state", None)
+            if getattr(state, "name", None) not in delivered:
+                continue
+            if not str(getattr(attempt, "joined_capsule_hash", "") or ""):
+                continue
+            if not str(getattr(attempt, "provider_payload_hash", "") or ""):
+                continue
+            if not str(getattr(attempt, "model_call_id", "") or ""):
+                continue
+            if getattr(attempt, "terminal_kind", None) is None:
+                continue
+            out.append(attempt)
+        return out
 
     def delivered_rows_any(self) -> list[dict]:
         return [r for r in self.ledger if str(r.get("outcome")) == "delivered"]
@@ -413,6 +489,26 @@ def _materialize_str_replace(root: Path, action: dict) -> Path:
     return target
 
 
+def _prepare_observation(g, root: Path, ev: Event) -> dict:
+    """Preimage capture + repo mutation, in that order, fail closed.
+
+    Shared by every driver: the repository must reach its post-action state
+    before the observation is delivered, regardless of WHICH seam consumes it.
+    """
+    out = {"output": ev.output, "returncode": ev.rc}
+    if _structured_str_replace(ev.action):
+        capture = getattr(g, "_ss_capture_write_preimage", None)
+        if not callable(capture):
+            raise GateDriverError("replay seam lacks preimage capture hook")
+        try:
+            capture(ev.action)
+        except Exception as exc:  # noqa: BLE001
+            raise GateDriverError("preimage capture failed") from exc
+        if ev.rc == 0:
+            _materialize_str_replace(root, ev.action)
+    return out
+
+
 def _drive_event(g, root: Path, ev: Event) -> dict:
     """Drive one event in preimage -> mutation -> observation order, fail closed."""
     out = {"output": ev.output, "returncode": ev.rc}
@@ -467,9 +563,19 @@ def _arm_serial_observation_boundary(g) -> None:
 
 
 class RealSeamDriver:
-    """Drives the REAL ``gt_mini_patch`` seam over the fixture repo. Public entry points only."""
+    """Drives the REAL ``gt_mini_patch`` seam over the fixture repo. Public entry points only.
+
+    HONEST SCOPE: this drives the LEGACY observation path
+    (``_augment_output``).  It is genuine regression evidence for that seam and
+    nothing more -- it never constructs ``CanonicalRuntimeAttachment``, so a
+    green run here says nothing about the deterministic reasoning runtime or
+    about provider-terminal delivery.  See ``installs_canonical_runtime``.
+    """
 
     name = "real"
+    #: Legacy driver -- declares plainly that it does NOT install the canonical
+    #: runtime, so no caller can read "gate green" as "runtime proven".
+    installs_canonical_runtime = False
 
     def __init__(self) -> None:
         # GT-ON, production Super-Mode posture: baseline OFF, Profile-2 members armed so
@@ -494,6 +600,36 @@ class RealSeamDriver:
         spec_path = _FIXTURES / "graph_spec.json"
         self.spec = json.loads(spec_path.read_text(encoding="utf-8"))
         self.repo_src = _FIXTURES / "repo"
+
+    # -- per-observation hooks (overridden by CanonicalSeamDriver) -----------
+    def _before_events(self, g, root: Path) -> None:
+        """Legacy path needs no per-run attachment."""
+        return None
+
+    def _drive(self, g, root: Path, ev: Event) -> dict:
+        """Drive one observation through the LEGACY ``_augment_output`` seam."""
+        return _drive_event(g, root, ev)
+
+    def _delivery_attempts(self) -> list:
+        """The legacy seam has no provider boundary, so there is nothing to
+        report. Empty is the honest answer, not a missing measurement."""
+        return []
+
+    def _canonical_facts(self):
+        """The legacy seam installs no canonical runtime, so there is nothing
+        to report. ``None`` (not a zeroed record) keeps "never ran" distinct
+        from "ran and did nothing"."""
+        return None
+
+    def _teardown(self, g) -> None:
+        """Undo any PROCESS-GLOBAL state this driver installed.
+
+        The legacy driver installs none. Overridden by CanonicalSeamDriver,
+        which sets ``gt_mini_patch._CANONICAL_RUNTIME_ATTACHMENT``; leaving
+        that set leaks an attached runtime into every later gate run in the
+        same interpreter (observed: it broke the hermeticity selftest).
+        """
+        return None
 
     def run(self, events: list[Event], ss_env: dict, submit_attempts: int = 0) -> SeamResult:
         g = self.g
@@ -565,10 +701,15 @@ class RealSeamDriver:
             except Exception as exc:  # noqa: BLE001
                 raise GateDriverError("could not initialize runtime ledger") from exc
 
+            # Subclass hooks. The hermetic env/repo/graph/ledger setup above is
+            # identical for every driver; only HOW one observation is driven
+            # differs (legacy `_augment_output` vs the canonical runtime), so
+            # subclasses override these three rather than copying the setup.
+            self._before_events(g, root)
             obs: list[Obs] = []
             for ev in events:
                 before = ev.output
-                out = _drive_event(g, root, ev)
+                out = self._drive(g, root, ev)
                 obs.append(Obs(before=before, after=out.get("output") or ""))
 
             # SS-2 (S11): AFTER the stream, exercise the submit boundary N times (while the
@@ -585,8 +726,15 @@ class RealSeamDriver:
 
             rows = _read_runtime_ledger(ledger)
             rows = _scrub_paths(rows, tmp)
-            return SeamResult(observations=obs, ledger=rows, submit_refusals=refusals)
+            return SeamResult(
+                observations=obs,
+                ledger=rows,
+                submit_refusals=refusals,
+                delivery_attempts=self._delivery_attempts(),
+                canonical=self._canonical_facts(),
+            )
         finally:
+            self._teardown(g)
             g._db_path = saved_db
             g._root = saved_root
             if saved_ps is not None:
@@ -596,6 +744,319 @@ class RealSeamDriver:
             os.environ.clear()
             os.environ.update(env_snapshot)
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class _GateProviderModel:
+    """Inert model double: enough surface for MiniSweProviderBoundary to wrap.
+
+    It NEVER simulates a provider terminal inference. See
+    ``CanonicalSeamDriver.proves_provider_terminal_delivery``.
+    """
+
+    def _prepare_messages_for_api(self, *args, **kwargs):
+        return []
+
+    def _query(self, *args, **kwargs):
+        return {}
+
+    def query(self, *args, **kwargs):
+        return {}
+
+
+class _GateProviderAgent:
+    """Inert agent double: ``add_messages`` for the provider boundary and
+    ``execute_actions`` for the commitment boundary (which raises without it)."""
+
+    def add_messages(self, *args, **kwargs):
+        return None
+
+    def execute_actions(self, *args, **kwargs):
+        return None
+
+
+class CanonicalSeamDriver(RealSeamDriver):
+    """Drives the CANONICAL deterministic runtime over the same fixture repo.
+
+    Reuses RealSeamDriver's hermetic env/repo/graph/ledger setup verbatim and
+    overrides only how ONE observation is consumed: instead of the legacy
+    ``_augment_output``, each event goes through
+    ``observe_action_proposal`` -> ``observe_action_result`` on a real
+    ``CanonicalRuntimeAttachment``.
+
+    SCOPE, STATED PLAINLY.  This proves the deterministic chain up to and
+    including exact join / DISPATCHED, plus that the delivery state machine
+    refuses illegal transitions.  It does NOT prove DELIVERED: the gate is
+    hermetic, there is no provider, and ``DELIVERED`` is defined as
+    provider-terminal inference over the exact joined payload.  Fabricating
+    that bit from a double would repeat -- one layer up -- the very defect this
+    driver exists to expose, where a self-generated ledger row was read as
+    delivery.  ``provider_terminal_deliveries()`` is therefore expected to be
+    empty here; earning it requires a paid run.
+    """
+
+    name = "canonical"
+    installs_canonical_runtime = True
+    proves_provider_terminal_delivery = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._attachment = None
+
+    def _before_events(self, g, root: Path) -> None:
+        installer = getattr(g, "install_canonical_runtime", None)
+        if not callable(installer):
+            raise GateDriverError("seam exposes no install_canonical_runtime")
+        attachment = installer(
+            model=_GateProviderModel(),
+            agent=_GateProviderAgent(),
+            env=os.environ,
+            task="ss-gate canonical fixture attempt",
+        )
+        if not getattr(attachment, "attached", False):
+            raise GateDriverError(
+                "canonical runtime failed to attach: "
+                f"{getattr(attachment, 'graph_revision', '?')}"
+            )
+        self._attachment = attachment
+
+    def _drive(self, g, root: Path, ev: Event) -> dict:
+        out = _prepare_observation(g, root, ev)
+        attachment = self._attachment
+        if attachment is None:
+            raise GateDriverError("canonical attachment missing for event")
+        try:
+            attachment.observe_action_proposal(ev.action)
+            attachment.observe_action_result(ev.action, out)
+        except Exception as exc:  # noqa: BLE001
+            raise GateDriverError("canonical observation failed") from exc
+        return out
+
+    def _delivery_attempts(self) -> list:
+        boundary = getattr(self._attachment, "provider_boundary", None)
+        return list(getattr(boundary, "records", ()) or ())
+
+    def _canonical_facts(self):
+        runtime = getattr(self._attachment, "attempt_runtime", None)
+        if runtime is None:
+            return None
+        work = getattr(runtime, "work_state", None)
+        try:
+            committed = len(runtime.journal.events(runtime.attempt_id))
+        except Exception:  # noqa: BLE001 -- a probe must never mask a result
+            committed = 0
+        def _count(method):
+            try:
+                return len(getattr(runtime.journal, method)(runtime.attempt_id))
+            except Exception:  # noqa: BLE001 -- a probe must never mask a result
+                return 0
+
+        return CanonicalFacts(
+            evidence_records=_count("evidence_records_for_attempt"),
+            compilations=_count("compilations_for_attempt"),
+            committed_events=committed,
+            sequence=int(getattr(work, "sequence", 0) or 0),
+            phase=str(getattr(work, "phase", "")),
+            attempt_id=str(getattr(runtime, "attempt_id", "")),
+            health=str(getattr(getattr(runtime, "failure_state", None), "health", "")),
+        )
+
+    def _teardown(self, g) -> None:
+        """Clear the attachment global so the next run re-installs cleanly."""
+        self._attachment = None
+        try:
+            g._CANONICAL_RUNTIME_ATTACHMENT = None
+        except Exception:  # noqa: BLE001 -- teardown must never mask a result
+            pass
+
+
+
+def chain_invariant_subchecks(facts, terminal_deliveries: int) -> list:
+    """PURE evaluation of the canonical-chain checks over a facts record.
+
+    Extracted so a test can drive it with VIOLATING facts.  A scenario that
+    only ever meets a healthy runtime cannot show its checks discriminate --
+    weakening any one of them would still yield PASS, which is how a green
+    scenario asserts nothing.  (Measured on the sibling quarantine scenario: a
+    mutation forcing one subcheck to PASS survived a happy-path-only test.)
+
+    It deliberately does NOT check ``compilations > 0``: in a hermetic fixture
+    the coalition is usually not decision-complete, so the capsule correctly
+    does not ship.  Requiring one here would push the decision-completeness bar
+    downward -- the benchmaxxing this gate exists to prevent.
+    """
+    return [
+        ("reducer committed canonical events",
+         "PASS" if int(getattr(facts, "committed_events", 0)) > 0 else "FAIL"),
+        ("producers manufactured evidence",
+         "PASS" if int(getattr(facts, "evidence_records", 0)) > 0 else "FAIL"),
+        ("provider-terminal delivery not fabricated",
+         "PASS" if int(terminal_deliveries) == 0 else "FAIL"),
+    ]
+
+
+def scenario_canonical_chain(driver) -> ScenarioResult:
+    """C1 -- grade the DETERMINISTIC RUNTIME in its own vocabulary.
+
+    Scenarios s1..s11 assert on observation deltas and runtime-ledger rows.
+    The canonical path delivers through the provider payload and never mutates
+    the tool observation, so every one of them reads SKIP:flag-not-built under
+    CanonicalSeamDriver -- measuring a surface that is silent by design.
+
+    This scenario instead grades ``SeamResult.canonical``:
+      * canonical events were committed (the reducer ran);
+      * evidence was produced (the producers ran);
+      * the compilation outcome is REPORTED, never inferred from silence.
+
+    It deliberately does NOT require ``compilations > 0``.  In a hermetic
+    fixture the coalition is usually not decision-complete, so the capsule
+    correctly does not ship (correct-or-quiet) -- demanding a capsule here
+    would pressure the decision-completeness bar downward, which is exactly the
+    benchmaxxing this gate exists to prevent.
+    """
+    sid, name, flag = "C1", "CANONICAL-CHAIN", "GT_GATEWAY"
+    if not getattr(driver, "installs_canonical_runtime", False):
+        return ScenarioResult(
+            sid, name, flag, "SKIP:legacy-driver",
+            "driver installs no canonical runtime; nothing to grade", [])
+    events = [
+        Event(action={"command": "grep -rn alpha ."},
+              output="pkg/mod_a.py:3:def alpha(x):", rc=0),
+        Event(action={"command": "cat pkg/mod_a.py"},
+              output="def alpha(x):\n    return x\n", rc=0),
+    ]
+    result = driver.run(events, {})
+    facts = result.canonical
+    if facts is None:
+        return ScenarioResult(
+            sid, name, flag, "FAIL",
+            "canonical driver reported no CanonicalFacts", [])
+    detail = (
+        f"events={facts.committed_events}; evidence={facts.evidence_records}; "
+        f"compilations={facts.compilations}; phase={facts.phase}; "
+        f"health={facts.health}"
+    )
+    subchecks = chain_invariant_subchecks(
+        facts, len(result.provider_terminal_deliveries()))
+    verdict = "PASS" if all(v == "PASS" for _, v in subchecks) else "FAIL"
+    return ScenarioResult(sid, name, flag, verdict, detail, subchecks)
+
+
+
+def quarantine_invariant_subchecks(state, terminal_deliveries: int) -> list:
+    """PURE evaluation of handoff invariant #17 over a failure state.
+
+    Extracted from the scenario so it can be driven with VIOLATING states in a
+    test.  A scenario that only ever sees a compliant runtime cannot show that
+    its checks discriminate -- weakening any one of them would still yield
+    PASS, which is how a green scenario can assert nothing.
+    """
+    health = getattr(getattr(state, "health", None), "name", "")
+    assurance = getattr(getattr(state, "assurance", None), "name", "")
+    return [
+        ("runtime is QUARANTINED/UNASSURED",
+         "PASS" if health == "QUARANTINED" and assurance == "UNASSURED" else "FAIL"),
+        ("GT emission disabled",
+         "PASS" if not getattr(state, "gt_emission_enabled", True)
+         and not getattr(state, "gt_interruption_enabled", True)
+         and not getattr(state, "gt_certification_enabled", True) else "FAIL"),
+        ("native agent path preserved",
+         "PASS" if getattr(state, "native_path_enabled", False) else "FAIL"),
+        ("no delivery claimed while quarantined",
+         "PASS" if int(terminal_deliveries) == 0 else "FAIL"),
+    ]
+
+
+def scenario_canonical_quarantine(driver) -> ScenarioResult:
+    """C2 -- handoff invariant #17: quarantine never pretends delivery.
+
+    "GT quarantine never mutates native tool output or pretends delivery
+    occurred."  s1..s11 grade SS referees on the LEGACY delivery lane, so a
+    quarantined canonical runtime that kept emitting would pass all of them.
+
+    This drives a real attempt, injects a CORE integrity fault through the
+    runtime's own fault handler (not by mutating state directly), and then
+    requires all four of:
+
+      * health is QUARANTINED and assurance UNASSURED;
+      * GT emission / interruption / certification are all disabled;
+      * the NATIVE agent path stays enabled (quarantine must never take the
+        agent's own tooling down with it);
+      * zero provider-terminal deliveries are reported.
+
+    The last one is the point: a quarantined runtime must not merely stop
+    emitting, it must not CLAIM to have delivered.
+    """
+    sid, name, flag = "C2", "CANONICAL-QUARANTINE", "GT_GATEWAY"
+    if not getattr(driver, "installs_canonical_runtime", False):
+        return ScenarioResult(
+            sid, name, flag, "SKIP:legacy-driver",
+            "driver installs no canonical runtime; nothing to grade", [])
+
+    captured = {}
+
+    class _Quarantining(type(driver)):
+        """Fault the runtime mid-attempt via its own handler, then observe."""
+
+        def _canonical_facts(self):
+            runtime = getattr(self._attachment, "attempt_runtime", None)
+            if runtime is not None:
+                try:
+                    from groundtruth.runtime.reasoning_runtime import (
+                        FaultCode,
+                        RuntimeFault,
+                    )
+                    from groundtruth.runtime.reasoning_runtime import (
+                        StateIntegrityError,
+                    )
+                    from groundtruth.runtime.recovery_assurance import (
+                        handle_runtime_fault,
+                    )
+
+                    # A core fault ALONE does not quarantine: the runtime
+                    # performs one bounded, integrity-checked reconstruction
+                    # and returns RECOVERED/ASSURED -- correct behaviour, and
+                    # measured (health=RECOVERED) before this injection was
+                    # added. Invariant #17 governs the branch where recovery is
+                    # IMPOSSIBLE, so make the snapshot unreadable first.
+                    def _unrecoverable():
+                        raise StateIntegrityError("snapshot unreadable")
+
+                    runtime.recovery_input = _unrecoverable
+                    handle_runtime_fault(runtime, RuntimeFault(
+                        code=FaultCode.STATE_HASH_MISMATCH,
+                        component="canonical_runtime",
+                        signature="ss-gate-c2",
+                        event_id="ev-ss-gate-c2",
+                    ))
+                    captured["state"] = runtime.failure_state
+                except Exception as exc:  # noqa: BLE001
+                    captured["error"] = f"{type(exc).__name__}: {exc}"
+            return super()._canonical_facts()
+
+    probe = _Quarantining()
+    result = probe.run([
+        Event(action={"command": "cat pkg/util.py"},
+              output="def sig_target(a, b):\n    return a\n", rc=0),
+    ], {})
+
+    if "state" not in captured:
+        return ScenarioResult(
+            sid, name, flag, "FAIL",
+            f"could not fault the runtime: {captured.get('error', 'no state')}",
+            [])
+    state = captured["state"]
+    health = getattr(getattr(state, "health", None), "name", "")
+    assurance = getattr(getattr(state, "assurance", None), "name", "")
+    emission = bool(getattr(state, "gt_emission_enabled", True))
+    native = bool(getattr(state, "native_path_enabled", False))
+    terminal = len(result.provider_terminal_deliveries())
+    detail = (
+        f"health={health}; assurance={assurance}; emission={emission}; "
+        f"native={native}; terminal_deliveries={terminal}"
+    )
+    subchecks = quarantine_invariant_subchecks(state, terminal)
+    verdict = "PASS" if all(v == "PASS" for _, v in subchecks) else "FAIL"
+    return ScenarioResult(sid, name, flag, verdict, detail, subchecks)
 
 
 class FakeSeamDriver:
