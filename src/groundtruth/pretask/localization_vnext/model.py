@@ -53,6 +53,7 @@ class ReasonCode(str, Enum):
     PREVIOUSLY_REJECTED = "previously_rejected"
     TOKEN_RAIL = "token_rail"
     CANDIDATE_RAIL = "candidate_rail"
+    TOP_RANKED_ANCHOR = "top_ranked_anchor"
 
 
 @dataclass(frozen=True)

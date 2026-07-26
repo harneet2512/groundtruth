@@ -20,6 +20,10 @@ from .shadow import legacy_discoveries_from_projection
 
 
 _EXPECTED_LANGUAGES = ("python", "go", "javascript", "typescript", "rust")
+# A language below this many scorable cases is REPORTED but does not vote in the
+# per-language regression gate: at n=1 a single discordant pair is the entire
+# signal, and a 41-job-hour verdict decided by one case is not a measurement.
+_LANGUAGE_GATE_MIN_CASES = 3
 _LANGUAGE_ALIASES = {
     "py": "python",
     "golang": "go",
@@ -146,6 +150,33 @@ def _regressed(paired: Mapping[str, Any]) -> bool:
     return float(new_value) + 1e-12 < float(old_value)
 
 
+def _paired_means_at_k(
+    rows: Sequence[Mapping[str, Any]], key: str
+) -> dict[str, Any]:
+    """`_paired_means` for the {"k", "value"} precision-at-k shape.
+
+    Rows whose two sides were scored at DIFFERENT k are dropped rather than
+    averaged: comparing 1/3 to 1/8 is a list-length comparison wearing a
+    precision label.
+    """
+    paired = []
+    for row in rows:
+        old_pk = row["old"].get(key) or {}
+        new_pk = row["new"].get(key) or {}
+        if old_pk.get("value") is None or new_pk.get("value") is None:
+            continue
+        if int(old_pk.get("k", -1)) != int(new_pk.get("k", -2)):
+            continue
+        paired.append((float(old_pk["value"]), float(new_pk["value"])))
+    if not paired:
+        return {"old": None, "new": None, "paired_cases": 0}
+    return {
+        "old": statistics.fmean(o for o, _ in paired),
+        "new": statistics.fmean(n for _, n in paired),
+        "paired_cases": len(paired),
+    }
+
+
 def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Apply the user-pinned recall-first Pareto rule to paired task rows."""
     safety_failures = [
@@ -190,11 +221,20 @@ def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
     # Region-level gold is a SEPARATE capability from retrieval. Its absence
     # makes region metrics UNMEASURED - it does not make retrieval unjudgeable.
-    region_gold_available = bool(region_scorable) and all(
-        count >= 3 for count in language_counts.values()
-    )
-    if not region_gold_available:
-        region_scorable = []
+    #
+    # A language below the floor is DROPPED from region scoring; it does not
+    # black out the languages that ARE above it. Requiring every present
+    # language to clear the floor meant one 1-case language nulled all 3,248
+    # line ranges and 1,355 symbols on a 294-case corpus - discarding the only
+    # capability that corpus exists to measure.
+    region_languages = {
+        language
+        for language, count in language_counts.items()
+        if count >= _LANGUAGE_GATE_MIN_CASES
+    }
+    region_scorable = [
+        row for row in region_scorable if row.get("language") in region_languages
+    ]
 
     # The locked random split is the primary comparison set for aggregate
     # retrieval gates. Held/ext2 rows remain diagnostic and contribute to the
@@ -205,17 +245,36 @@ def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     new_h8 = _mean_bool(random_scorable, "new", "hit_at_8")
     per_language_h8 = {}
     per_language_regression = False
-    for language in _EXPECTED_LANGUAGES:
+    # Read the languages the corpus CONTAINS. Iterating the fixed five-tuple
+    # reported a measured 0.0/0.0 hit@8 for languages with no rows at all -
+    # fabricated numbers a reader cannot distinguish from a real total failure -
+    # and it gave every language equal standing regardless of size, so a
+    # single-case language could decide a whole run's verdict by itself.
+    for language in sorted(present_languages):
         language_rows = [row for row in scorable if row.get("language") == language]
+        if not language_rows:
+            continue
         old_rate = _mean_bool(language_rows, "old", "hit_at_8")
         new_rate = _mean_bool(language_rows, "new", "hit_at_8")
-        per_language_h8[language] = {"old": old_rate, "new": new_rate}
-        if new_rate + 1e-12 < old_rate:
+        per_language_h8[language] = {
+            "old": old_rate,
+            "new": new_rate,
+            "cases": len(language_rows),
+        }
+        # A language too small to carry a paired decision is reported but does
+        # not vote. `_LANGUAGE_GATE_MIN_CASES` cases is the floor at which one
+        # discordant pair stops being the entire signal.
+        if len(language_rows) >= _LANGUAGE_GATE_MIN_CASES and new_rate + 1e-12 < old_rate:
             per_language_regression = True
 
     symbol_recall = _paired_means(region_scorable, "symbol_recall")
     line_recall = _paired_means(region_scorable, "line_recall")
-    file_precision = _paired_means(scorable, "file_precision")
+    # The GATE reads the equal-k precision. The fixed-`[:8]` `file_precision`
+    # stays in the report for continuity but must never gate: legacy's list is
+    # a median of 3 entries long, so `[:8]` scored it at k=3 and vnext at k=8,
+    # and that denominator gap alone flipped run 30221830560 to OLD_WINS.
+    file_precision = _paired_means_at_k(scorable, "file_precision_at_k")
+    file_precision_fixed_8 = _paired_means(scorable, "file_precision")
     symbol_precision = _paired_means(scorable, "symbol_precision")
     region_precision = _paired_means(region_scorable, "region_precision")
 
@@ -268,6 +327,7 @@ def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "symbol_recall": symbol_recall,
         "line_recall": line_recall,
         "file_precision": file_precision,
+        "file_precision_fixed_k8_ungated": file_precision_fixed_8,
         "symbol_precision": symbol_precision,
         "region_precision": region_precision,
         "p95_latency_ratio": latency_ratio,
@@ -970,6 +1030,21 @@ def _rank(files: Sequence[str], gold: set[str]) -> int | None:
     return None
 
 
+def _precision_at_k(
+    paths: Sequence[str], gold: set[str], k: int
+) -> dict[str, Any]:
+    """precision over the first ``k`` paths, with ``k`` reported alongside.
+
+    Both arms MUST be scored at the same ``k``.  Returning the value bare let a
+    caller compare 1/3 against 1/8 and read it as a quality difference.
+    """
+    window = list(paths[:k])
+    if not window:
+        return {"k": int(k), "value": None}
+    matched = sum(1 for path in window if _matches(path, gold))
+    return {"k": int(k), "value": matched / len(window)}
+
+
 def score_sealed_case(
     sealed: Mapping[str, Any], gold: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -988,8 +1063,26 @@ def score_sealed_case(
     # ratio `admitted_file_precision`.  RECALL counts GOLD files covered - the
     # matching-candidate count is not a recall numerator.
     new_hits = {path for path in new_files if _matches(path, gold_files)}
+    # RECALL compares like to like: the RANKED list on both sides.  Scoring
+    # legacy over its full candidate_order and vnext over its ADMITTED set put
+    # two different objects on the two sides of one metric - on run
+    # 30221830560 that reported "file_recall 0.8167 -> 0.5000", a 32-point
+    # collapse that does not exist (ranked-vs-ranked the same run is
+    # 0.8167 -> 0.9333).  A longer list cannot LOWER recall, so a recall drop
+    # beside a hit@k RISE is a population mismatch, never a regression.
     old_gold_hits = _matched_gold(old_files, gold_files)
-    new_gold_hits = _matched_gold(new_files, gold_files)
+    new_gold_hits = _matched_gold(new_ranked_files, gold_files)
+    # The selection loss is real and stays visible under its OWN name: what the
+    # agent RECEIVES.  Legacy delivers what it ranks, so its delivered set is
+    # `old_files`; vnext's is the admitted set.
+    old_admitted_gold_hits = old_gold_hits
+    new_admitted_gold_hits = _matched_gold(new_files, gold_files)
+    # precision@k must divide by the SAME k on both sides or it measures list
+    # LENGTH, not quality.  Legacy returns a median of 3 candidates and vnext
+    # ranks 28.5, so a fixed `[:8]` divided legacy's hits by 3.6 and vnext's by
+    # 7.9 - the artifact that decided OLD_WINS on run 30221830560 while the two
+    # arms sat within 2pp at every k where both lists were populated.
+    equal_k = min(len(old_files), len(new_ranked_files), 8)
 
     gold_symbols = {
         str(symbol) for symbol in gold.get("gold_symbols", ()) if str(symbol)
@@ -1154,6 +1247,10 @@ def score_sealed_case(
             "file_recall": len(old_gold_hits) / len(gold_files)
             if gold_files
             else None,
+            "admitted_file_recall": len(old_admitted_gold_hits) / len(gold_files)
+            if gold_files
+            else None,
+            "file_precision_at_k": _precision_at_k(old_files, gold_files, equal_k),
             "file_precision": (
                 sum(1 for path in old_files[:8] if _matches(path, gold_files))
                 / len(old_files[:8])
@@ -1180,6 +1277,12 @@ def score_sealed_case(
             "file_recall": len(new_gold_hits) / len(gold_files)
             if gold_files
             else None,
+            "admitted_file_recall": len(new_admitted_gold_hits) / len(gold_files)
+            if gold_files
+            else None,
+            "file_precision_at_k": _precision_at_k(
+                new_ranked_files, gold_files, equal_k
+            ),
             "file_precision": (
                 sum(1 for path in new_ranked_files[:8] if _matches(path, gold_files))
                 / len(new_ranked_files[:8])

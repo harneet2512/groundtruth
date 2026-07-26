@@ -587,7 +587,7 @@ def test_prepared_shard_rows_are_enforced_against_input_keys(monkeypatch):
     repos = {"repo-a": {"commit": "a" * 40, "url": "https://example.invalid/a"}}
 
     prepared = compare.prepare_shard(
-        cases, repos, language="python", shard_index=0, shard_count=1
+        cases, repos, language="python", lane_index=0, lane_count=1
     )
     assert len(prepared) == 1  # non-vacuity: the loop body ran
     assert set(prepared[0]) == set(compare._INPUT_KEYS)
@@ -596,13 +596,13 @@ def test_prepared_shard_rows_are_enforced_against_input_keys(monkeypatch):
     monkeypatch.setattr(compare, "_INPUT_KEYS", compare._INPUT_KEYS + ("gold_files",))
     with pytest.raises(ValueError):
         compare.prepare_shard(
-            cases, repos, language="python", shard_index=0, shard_count=1
+            cases, repos, language="python", lane_index=0, lane_count=1
         )
 
     monkeypatch.setattr(compare, "_INPUT_KEYS", ("id", "issue_text"))
     with pytest.raises(ValueError):
         compare.prepare_shard(
-            cases, repos, language="python", shard_index=0, shard_count=1
+            cases, repos, language="python", lane_index=0, lane_count=1
         )
 
 

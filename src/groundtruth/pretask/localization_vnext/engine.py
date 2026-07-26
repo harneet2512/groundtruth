@@ -3147,6 +3147,72 @@ def _coverage_admit(
             "ablation_fixed_top_8",
         )
 
+    # --- best-single-element arm (Khuller, Moss & Naor 1999) -----------------
+    # Budgeted maximum coverage attains its (1-1/e) guarantee from
+    # `max(greedy_solution, best_single_element)`. GT shipped the greedy arm
+    # only, so once a lower-ranked candidate covered the required roles the
+    # loop stopped at `required_roles_covered` and the TOP-RANKED candidate was
+    # deferred REDUNDANT - the engine ranked the right file first and then
+    # declined to deliver it. Measured on run 30221830560 (oss-60): the gold
+    # file was ranked but never delivered on 26/60 cases, and on 10 of those it
+    # was ranked #1 (`ext2_go_gozero_rest_engine`: gold `rest/engine.go` at #1,
+    # admitted `rest/server.go` at #3, stopped). Role coverage is not this
+    # product's objective; the edit target is.
+    #
+    # The anchor is chosen from `candidates`, i.e. AFTER the rejection filters,
+    # so a wrapper, a duplicate, a previously-rejected or out-of-repo unit can
+    # never become one. It is the retrieval ranking's own top element, not a
+    # new signal, and it introduces no threshold or tuned constant.
+    # ISSUE-CONDITIONED. Anchoring on raw retrieval rank alone admitted a
+    # certified-but-unrelated typed fact whenever it happened to out-rank the
+    # query-conditioned candidate - delivering a confident wrong file, which is
+    # worse than delivering nothing. The anchor must already carry a role THIS
+    # issue asked for; the greedy applies the same conditioning through
+    # `new_required`/`new_expected`. In the oss-60 drops the gold file passed
+    # this test easily: its roles were present, merely already COVERED.
+    anchor = min(
+        (
+            unit
+            for unit in candidates
+            if region_cache.get(unit.evidence_id) is not None
+            and (
+                set(unit.issue_roles) & (target_required | expected)
+                or unit.explicit_provenance
+            )
+        ),
+        key=lambda unit: (
+            int(unit.signal_rank),
+            -float(unit.confidence),
+            unit.file_path,
+            unit.start_line,
+            unit.evidence_id,
+        ),
+        default=None,
+    )
+    if anchor is not None:
+        anchor_region = region_cache[anchor.evidence_id]
+        fits = (
+            anchor_region.source_tokens <= request.policy.max_region_tokens
+            and anchor_region.source_tokens <= request.policy.max_source_tokens
+        )
+        if fits:
+            anchor_roles = set(anchor.issue_roles) & (target_required | expected)
+            decisions[anchor.evidence_id] = CandidateDecision(
+                anchor.evidence_id,
+                CandidateAction.ADMIT,
+                (ReasonCode.TOP_RANKED_ANCHOR,),
+                tuple(sorted(anchor_roles)),
+            )
+            admitted_regions.append(anchor_region)
+            admitted_ids.add(anchor.evidence_id)
+            used_tokens += anchor_region.source_tokens
+            covered |= anchor_roles
+            for role in anchor_roles:
+                role_classes[role].add(anchor.signal_class)
+            candidates = [
+                unit for unit in candidates if unit.evidence_id != anchor.evidence_id
+            ]
+
     while candidates:
         ranked: list[tuple[tuple[int, ...], EvidenceUnit]] = []
         for unit in candidates:

@@ -192,31 +192,85 @@ def _infer_split(case_id: str, explicit: str = "") -> str:
     return "unknown"
 
 
+SHARD_BY_LANGUAGE = "language"
+SHARD_BY_CASE = "case"
+_SHARD_BY_MODES = (SHARD_BY_LANGUAGE, SHARD_BY_CASE)
+# Lanes per language when sharding by language. Frozen: this is the divisor that
+# produced the sealed oss-60 partition, so it may never move without reproving the
+# assignment digest in tests/pretask/test_localization_vnext_oss_compare.py.
+LANGUAGE_LANES_PER_LANGUAGE = 4
+MATRIX_LANGUAGES = ("python", "go", "javascript", "typescript", "rust")
+# Lanes when sharding by case. Chosen on measured timing, not taste: run
+# 30196352388 sealed 60 cases in 29,833 job-seconds (497 s/case) with a per-case
+# spread of 7 s..2,341 s (cv 1.04, driven by repository size, not issue length).
+# Bootstrapping that empirical per-case distribution over 294 cases puts
+# P(some lane exceeds the 180 min job timeout) at 68% for 20 lanes and 0.40% for
+# 40 lanes, and 40 is exactly two full waves of the 20-way job concurrency the
+# same run measured.
+CASE_LANES = 40
+
+
+def lane_members(
+    cases: Sequence[Mapping[str, Any]],
+    *,
+    lane_index: int,
+    lane_count: int,
+    language: str = "",
+    shard_by: str = SHARD_BY_LANGUAGE,
+) -> list[Mapping[str, Any]]:
+    """The cases one lane owns. The ONLY definition of the partition.
+
+    ``shard_by=language`` keeps every case in its language's lane group, which is
+    the assignment the sealed oss-60 corpus was produced with. ``shard_by=case``
+    lifts only the language predicate; the round-robin over id-sorted cases is the
+    same statement, so a corpus that is 293 python + 1 typescript spreads over all
+    lanes instead of piling into four of them. Round-robin rather than a hash of
+    the id because it is balanced by construction (lane sizes differ by at most
+    one), and lane balance is exactly what buys the job-timeout margin.
+    """
+    if lane_count <= 0:
+        raise ValueError("lane_count must be positive")
+    if not 0 <= lane_index < lane_count:
+        raise ValueError("lane_index must be within lane_count")
+    if shard_by not in _SHARD_BY_MODES:
+        raise ValueError(f"shard_by must be one of {list(_SHARD_BY_MODES)}")
+    if shard_by == SHARD_BY_LANGUAGE and not language:
+        raise ValueError("shard_by=language requires a language")
+    pool = (
+        cases
+        if shard_by == SHARD_BY_CASE
+        else [
+            case
+            for case in cases
+            if str(case.get("language") or "").lower() == language.lower()
+        ]
+    )
+    selected = sorted(pool, key=lambda case: str(case.get("id") or ""))
+    return [
+        case
+        for index, case in enumerate(selected)
+        if index % lane_count == lane_index
+    ]
+
+
 def prepare_shard(
     cases: Sequence[Mapping[str, Any]],
     repositories: Mapping[str, Mapping[str, Any]],
     *,
-    language: str,
-    shard_index: int,
-    shard_count: int,
+    lane_index: int,
+    lane_count: int,
+    language: str = "",
+    shard_by: str = SHARD_BY_LANGUAGE,
 ) -> list[dict[str, str]]:
-    """Return a deterministic, gold-free shard manifest."""
-    if shard_count <= 0:
-        raise ValueError("shard_count must be positive")
-    if not 0 <= shard_index < shard_count:
-        raise ValueError("shard_index must be within shard_count")
-    selected = sorted(
-        (
-            case
-            for case in cases
-            if str(case.get("language") or "").lower() == language.lower()
-        ),
-        key=lambda case: str(case.get("id") or ""),
-    )
+    """Return a deterministic, gold-free shard manifest for one lane."""
     output: list[dict[str, str]] = []
-    for index, case in enumerate(selected):
-        if index % shard_count != shard_index:
-            continue
+    for case in lane_members(
+        cases,
+        lane_index=lane_index,
+        lane_count=lane_count,
+        language=language,
+        shard_by=shard_by,
+    ):
         case_id = str(case["id"])
         repo_name = str(case["repo"])
         repo = repositories.get(repo_name)
@@ -238,6 +292,74 @@ def prepare_shard(
             )
         )
     return output
+
+
+def plan_lanes(
+    cases: Sequence[Mapping[str, Any]],
+    *,
+    shard_by: str = SHARD_BY_LANGUAGE,
+    lane_count: int | None = None,
+) -> dict[str, Any]:
+    """Resolve the seal matrix for one corpus.
+
+    The workflow matrix is built from this so the cell list and the partition each
+    cell then re-computes come from one function instead of two hand-kept copies.
+    Emits job identity only -- language, lane index, lane count -- and never a case
+    id, so the gold-bearing manifest cannot reach a job through the matrix.
+
+    Empty lanes are dropped: an empty shard would fail the sealed-artifact upload
+    (``if-no-files-found: error``) at the END of a job, and 12 of the 20 language
+    cells are empty on a 293-python corpus.
+    """
+    if shard_by not in _SHARD_BY_MODES:
+        raise ValueError(f"shard_by must be one of {list(_SHARD_BY_MODES)}")
+    by_language = shard_by == SHARD_BY_LANGUAGE
+    resolved = int(
+        lane_count
+        or (LANGUAGE_LANES_PER_LANGUAGE if by_language else CASE_LANES)
+    )
+    if resolved <= 0:
+        raise ValueError("lane_count must be positive")
+    if not by_language:
+        # More lanes than cases would only manufacture empty jobs.
+        resolved = min(resolved, len(cases))
+    if resolved <= 0:
+        raise ValueError("cannot plan lanes for an empty corpus")
+    cells = (
+        [
+            {"language": language, "shard": lane}
+            for language in MATRIX_LANGUAGES
+            for lane in range(resolved)
+        ]
+        if by_language
+        else [{"language": "all", "shard": lane} for lane in range(resolved)]
+    )
+
+    include: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for cell in cells:
+        size = len(
+            lane_members(
+                cases,
+                lane_index=int(cell["shard"]),
+                lane_count=resolved,
+                language=str(cell["language"]),
+                shard_by=shard_by,
+            )
+        )
+        counts[f"{cell['language']}-{cell['shard']}"] = size
+        (include if size else dropped).append(cell)
+    return {
+        "schema": "gt.localization.vnext.lane_plan.v1",
+        "shard_by": shard_by,
+        "lane_count": resolved,
+        "include": include,
+        "lane_sizes": counts,
+        "dropped_empty_lanes": dropped,
+        "case_count": len(cases),
+        "assigned_count": sum(counts.values()),
+    }
 
 
 def validate_sealed_case_ids(
@@ -772,12 +894,51 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    plan = subparsers.add_parser("plan")
+    plan.add_argument("--cases", required=True)
+    plan.add_argument(
+        "--shard-by",
+        choices=_SHARD_BY_MODES,
+        default=SHARD_BY_LANGUAGE,
+    )
+    plan.add_argument(
+        "--lane-count",
+        type=int,
+        default=0,
+        help="0 = the mode default (language: 4 per language, case: 40)",
+    )
+    plan.add_argument("--out", default="")
+
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("--cases", required=True)
     prepare.add_argument("--repos", required=True)
-    prepare.add_argument("--language", required=True)
-    prepare.add_argument("--shard-index", required=True, type=int)
-    prepare.add_argument("--shard-count", required=True, type=int)
+    prepare.add_argument(
+        "--language",
+        default="",
+        help="required by --shard-by language; ignored by --shard-by case",
+    )
+    prepare.add_argument(
+        "--shard-by",
+        choices=_SHARD_BY_MODES,
+        default=SHARD_BY_LANGUAGE,
+    )
+    # --shard-index/--shard-count are the pre-lane spellings. Kept as aliases
+    # because seal and score are separate jobs, so re-preparing one lane of an
+    # already-dispatched run is a real operation.
+    prepare.add_argument(
+        "--lane-index",
+        "--shard-index",
+        dest="lane_index",
+        required=True,
+        type=int,
+    )
+    prepare.add_argument(
+        "--lane-count",
+        "--shard-count",
+        dest="lane_count",
+        required=True,
+        type=int,
+    )
     prepare.add_argument("--out", required=True)
 
     clone = subparsers.add_parser("clone")
@@ -809,13 +970,24 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
+    if args.command == "plan":
+        plan = plan_lanes(
+            _read_json(Path(args.cases)),
+            shard_by=args.shard_by,
+            lane_count=args.lane_count or None,
+        )
+        if args.out:
+            _write_json(Path(args.out), plan)
+        print(json.dumps(plan, sort_keys=True))
+        return 0
     if args.command == "prepare":
         prepared = prepare_shard(
             _read_json(Path(args.cases)),
             _read_json(Path(args.repos)),
             language=args.language,
-            shard_index=args.shard_index,
-            shard_count=args.shard_count,
+            lane_index=args.lane_index,
+            lane_count=args.lane_count,
+            shard_by=args.shard_by,
         )
         _write_json(Path(args.out), prepared)
         print(f"prepared={len(prepared)}")

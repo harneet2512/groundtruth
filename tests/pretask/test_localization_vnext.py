@@ -3292,7 +3292,11 @@ def test_role_classes_is_empty_for_every_uncovered_required_role(
         request,
         facets,
         (
-            _covering_unit("src/target.py", "parse", 1, 4, roles, "lexical", 1),
+            # The rank-1 unit carries ONE role, so a required role remains
+            # UNCOVERED after the top-ranked anchor is admitted and the greedy
+            # still scores it - without this the spy observes nothing and the
+            # assertion below passes vacuously.
+            _covering_unit("src/target.py", "parse", 1, 4, roles[:1], "lexical", 1),
             _covering_unit("src/second.py", "convert", 1, 4, roles, "semantic", 2),
         ),
         census_capabilities(request),
@@ -3756,4 +3760,84 @@ def test_a_query_matched_pool_cut_by_the_candidate_cap_is_still_reported(tmp_pat
     assert len(node_ids) == 1
     assert units.truncated is True, (
         "a query-matched candidate pool cut by max_candidates was not reported"
+    )
+
+
+def test_top_ranked_candidate_is_admitted_even_when_its_roles_are_covered(tmp_path):
+    """The best single element must survive coverage-greedy termination.
+
+    Budgeted maximum coverage (Khuller, Moss & Naor 1999) attains its (1-1/e)
+    guarantee from `max(greedy_solution, best_single_element)`.  GT shipped the
+    greedy arm only, so once a lower-ranked candidate covered the required
+    roles the loop stopped at `required_roles_covered` and the top-ranked
+    candidate was deferred REDUNDANT - the engine ranked the right file first
+    and then declined to deliver it.
+
+    Measured on run 30221830560 (oss-60): the gold file was ranked but dropped
+    on 26/60 cases, and on 10 of those it was ranked #1.  Concretely,
+    `ext2_go_gozero_rest_engine` ranked gold `rest/engine.go` at #1, admitted
+    `rest/server.go` at #3, and stopped.  Role coverage is not the product's
+    objective; the edit target is.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "engine.py").write_text(
+        "def serve(request):\n"
+        "    if request is None:\n"
+        "        raise ParseError(request)\n"
+        "    return dispatch(request)\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "server.py").write_text(
+        "def listen(port):\n"
+        "    if port is None:\n"
+        "        raise ParseError(port)\n"
+        "    return bind(port)\n",
+        encoding="utf-8",
+    )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    facets = extract_behavior_facets(_request(repo, db, issue))
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+
+    # Same roles on both. The rank-1 unit therefore adds NO new role once the
+    # rank-2 unit is admitted - exactly the state that ended the greedy.
+    # ONE signal class at rank 1: RRF gives it 1/61 = 0.0164. (A
+    # "lexical+semantic" unit would split into two class votes and win outright,
+    # which is why the single strongest signal is the case that loses.)
+    top = EvidenceUnit.create(
+        file_path="src/engine.py", symbol="serve", start_line=1, end_line=4,
+        family=EvidenceFamily.LEXICAL, confidence=0.6,
+        provenance=("structured_lexical",), roles=roles,
+        signal_class="lexical", signal_rank=1,
+    )
+    # Two INDEPENDENT class agreements on the lower-ranked file. RRF scores it
+    # 1/63 + 1/64 = 0.0315 against the rank-1 file's single class 1/61 = 0.0164,
+    # so retrieval AGREEMENT outranks the single strongest signal - the real
+    # ordering that puts the rank-1 file second in the greedy.
+    lower_a = EvidenceUnit.create(
+        file_path="src/server.py", symbol="listen", start_line=1, end_line=4,
+        family=EvidenceFamily.GRAPH, confidence=0.9,
+        provenance=("graph_edge",), roles=roles,
+        signal_class="structural", signal_rank=3,
+    )
+    lower_b = EvidenceUnit.create(
+        file_path="src/server.py", symbol="listen", start_line=1, end_line=4,
+        family=EvidenceFamily.LEXICAL, confidence=0.9,
+        provenance=("structured_lexical",), roles=roles,
+        signal_class="lexical", signal_rank=4,
+    )
+    request = _request(repo, db, issue)
+
+    decisions, regions, _coverage, stopping = vnext_engine._coverage_admit(
+        request, facets, (lower_a, lower_b, top), census_capabilities(request)
+    )
+    by_id = {d.evidence_id: d for d in decisions}
+
+    assert by_id[top.evidence_id].action is CandidateAction.ADMIT, (
+        "the rank-1 candidate was dropped once a lower-ranked one covered the "
+        f"roles: {by_id[top.evidence_id].action} "
+        f"{[getattr(r, 'value', r) for r in by_id[top.evidence_id].reason_codes]}"
+    )
+    assert any(region.file_path == "src/engine.py" for region in regions), (
+        f"delivered files: {sorted({r.file_path for r in regions})} "
+        f"stopping_reason={stopping}"
     )

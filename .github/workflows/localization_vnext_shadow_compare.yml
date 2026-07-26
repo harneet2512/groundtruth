@@ -28,26 +28,126 @@ on:
         description: "Determinism repeats per case (minimum 3 enforced by runner)"
         required: false
         default: "3"
+      shard_by:
+        description: "language = 4 lanes per language (the sealed oss-60 partition); case = one flat lane set, for a corpus that is one language"
+        required: false
+        default: "language"
+        type: choice
+        options: ["language", "case"]
+      lane_count:
+        description: "Lanes (per language when shard_by=language). Empty = mode default: 4 per language, or 40 for case mode."
+        required: false
+        default: ""
 
 env:
   GT_LOC_SUBSTRATE: ${{ inputs.gt_substrate_digest || 'ghcr.io/harneet2512/gt-substrate@sha256:4b30af5bdd2d8e6615b05bd6f73559583fac559f0574abf417e5e1f53757db44' }}
   GT_LOC_CASES_FILE: ${{ inputs.cases_file || 'oss_all60_cases.json' }}
   GT_LOC_REPOS_FILE: ${{ inputs.repos_file || 'oss_all60_repos.json' }}
   GT_LOC_REPEATS: ${{ inputs.repeats || '3' }}
+  GT_LOC_SHARD_BY: ${{ inputs.shard_by || 'language' }}
+  GT_LOC_LANE_COUNT: ${{ inputs.lane_count || '' }}
+  # Measured on run 30196352388: 60 cases, 29,833 seal job-seconds. Used ONLY to
+  # refuse a geometry that cannot fit the job timeout, never to score anything.
+  GT_LOC_SECONDS_PER_CASE: "497"
 
 permissions:
   contents: read
   packages: read
 
 jobs:
+  # One planner so the cell list and the partition each cell re-computes come from
+  # the same function. It emits job identity only (language + lane index), never a
+  # case id, so the gold-bearing manifest cannot reach a job through the matrix.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.lanes.outputs.matrix }}
+      lane_count: ${{ steps.lanes.outputs.lane_count }}
+      shard_by: ${{ steps.lanes.outputs.shard_by }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Resolve seal lanes for this corpus
+        id: lanes
+        env:
+          CASES_FILE: ${{ env.GT_LOC_CASES_FILE }}
+          SHARD_BY: ${{ env.GT_LOC_SHARD_BY }}
+          LANE_COUNT: ${{ env.GT_LOC_LANE_COUNT }}
+          SECONDS_PER_CASE: ${{ env.GT_LOC_SECONDS_PER_CASE }}
+          JOB_TIMEOUT_MINUTES: "180"
+        run: |
+          python scripts/localization_vnext_oss_compare.py plan \
+            --cases "benchmarks/data/$CASES_FILE" \
+            --shard-by "$SHARD_BY" \
+            --lane-count "${LANE_COUNT:-0}" \
+            --out /tmp/lane_plan.json > /dev/null
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          plan = json.loads(Path("/tmp/lane_plan.json").read_text(encoding="utf-8"))
+          sizes = plan["lane_sizes"]
+          include = plan["include"]
+          live = {name: n for name, n in sizes.items() if n}
+          if not include:
+              print("::error::lane plan produced no non-empty lane", file=sys.stderr)
+              raise SystemExit(1)
+          if plan["assigned_count"] != plan["case_count"]:
+              print(
+                  "::error::lane plan covers "
+                  f"{plan['assigned_count']} of {plan['case_count']} cases",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          worst = max(live.values())
+          budget = int(os.environ["JOB_TIMEOUT_MINUTES"]) * 60
+          projected = worst * int(os.environ["SECONDS_PER_CASE"])
+          print(
+              f"::notice::lanes={len(include)} shard_by={plan['shard_by']} "
+              f"lane_count={plan['lane_count']} sizes={min(live.values())}-{worst} "
+              f"dropped_empty={len(plan['dropped_empty_lanes'])} "
+              f"projected_worst_lane={projected // 60}min budget={budget // 60}min",
+              file=sys.stderr,
+          )
+          if projected > budget:
+              # Refuse BEFORE spending: 293 python cases in 4 language lanes is a
+              # ~10h lane against a 3h timeout, and the run would die at the end.
+              print(
+                  f"::error::worst lane projects {projected // 60}min against a "
+                  f"{budget // 60}min job timeout -- raise lane_count or use "
+                  "shard_by=case",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          print(
+              "matrix="
+              + json.dumps({"include": include}, separators=(",", ":"))
+          )
+          print("lane_count=" + str(plan["lane_count"]))
+          print("shard_by=" + plan["shard_by"])
+          PY
+
+      - name: Upload lane plan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: localization-vnext-lane-plan
+          path: /tmp/lane_plan.json
+          if-no-files-found: error
+          retention-days: 30
+
   seal:
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       fail-fast: false
-      matrix:
-        language: [python, go, javascript, typescript, rust]
-        shard: [0, 1, 2, 3]
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,6 +159,8 @@ jobs:
           REPOS_FILE: ${{ env.GT_LOC_REPOS_FILE }}
           LANGUAGE: ${{ matrix.language }}
           SHARD: ${{ matrix.shard }}
+          SHARD_BY: ${{ needs.plan.outputs.shard_by }}
+          LANE_COUNT: ${{ needs.plan.outputs.lane_count }}
           SUBSTRATE_DIGEST: ${{ env.GT_LOC_SUBSTRATE }}
           SOURCE_SHA: ${{ github.sha }}
           RUN_REPOSITORY: ${{ github.repository }}
@@ -72,8 +174,9 @@ jobs:
             --cases "benchmarks/data/$CASES_FILE" \
             --repos "benchmarks/data/$REPOS_FILE" \
             --language "$LANGUAGE" \
-            --shard-index "$SHARD" \
-            --shard-count 4 \
+            --shard-by "$SHARD_BY" \
+            --lane-index "$SHARD" \
+            --lane-count "$LANE_COUNT" \
             --out /tmp/vnext_input/cases.input.json
           python - <<'PY'
           import hashlib
@@ -188,8 +291,10 @@ jobs:
           retention-days: 14
 
   score:
-    needs: seal
-    if: always()
+    needs: [plan, seal]
+    # always() so a partial seal still gets scored and reported incomplete; the
+    # plan guard is the one failure that means no lane ever ran, so skip then.
+    if: ${{ always() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

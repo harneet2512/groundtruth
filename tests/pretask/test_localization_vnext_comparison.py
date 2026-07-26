@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from groundtruth.pretask.localization_vnext.comparison import (
     _input_digests,
     _legacy_inspection_files,
@@ -16,6 +18,7 @@ from groundtruth.pretask.localization_vnext.comparison import (
 def _row(
     language: str,
     *,
+    region_scorable: bool = True,
     old_h1: bool = True,
     new_h1: bool = True,
     old_h8: bool = True,
@@ -32,7 +35,7 @@ def _row(
     return {
         "language": language,
         "scorable": True,
-        "region_scorable": True,
+        "region_scorable": region_scorable,
         "safety": {
             "deterministic": True,
             "leakage_count": 0,
@@ -42,6 +45,7 @@ def _row(
             "hit_at_1": old_h1,
             "hit_at_8": old_h8,
             "file_precision": old_precision,
+            "file_precision_at_k": {"k": 8, "value": old_precision},
             "symbol_recall": 1.0,
             "line_recall": 1.0,
             "implied_inspection_tokens": old_tokens,
@@ -52,6 +56,7 @@ def _row(
             "hit_at_1": new_h1,
             "hit_at_8": new_h8,
             "file_precision": new_precision,
+            "file_precision_at_k": {"k": 8, "value": new_precision},
             "symbol_recall": 1.0,
             "line_recall": 1.0,
             "implied_inspection_tokens": new_tokens,
@@ -112,9 +117,11 @@ def test_thin_region_gold_makes_region_metrics_unmeasured_not_the_whole_verdict(
 
     assert verdict["verdict"] != "INCONCLUSIVE"
     assert "random_primary_hit_at_1" in verdict
-    # the region-level metrics are the ones that go unmeasured
-    assert verdict["symbol_recall"]["old"] is None
-    assert verdict["region_precision"]["old"] is None
+    # A language below the floor is DROPPED from region scoring; it does not
+    # black out the languages that ARE above it. Rust is thinned to 2 cases, so
+    # the other four languages (3 each = 12 rows) still carry region metrics.
+    assert verdict["symbol_recall"]["paired_cases"] == 12
+    assert verdict["symbol_recall"]["old"] is not None
 
 
 def test_latency_or_memory_over_125x_makes_old_win():
@@ -746,3 +753,138 @@ def test_winner_gate_still_judges_retrieval_when_region_gold_is_absent():
     # ... and the region metrics must read UNMEASURED, never a measured tie.
     assert verdict["symbol_recall"]["old"] is None
     assert verdict["symbol_recall"]["new"] is None
+
+
+def test_gate_neither_fabricates_absent_languages_nor_lets_one_case_decide():
+    """The per-language gate must read the corpus, not a hardcoded five-tuple.
+
+    Half-fixing this is worse than not fixing it. `_EXPECTED_LANGUAGES` was
+    replaced in the region-availability check but LEFT in the per-language gate,
+    so on a 293-python + 1-typescript corpus: three languages that do not exist
+    report a measured 0.0/0.0 hit@8, and the single typescript case is a full
+    voting member able to decide a 41-job-hour verdict by itself. The >=3
+    region floor also nulls EVERY region metric because one language can never
+    reach 3 - blacking out the 3,248 line ranges and 1,355 symbols that are the
+    only reason that corpus exists.
+    """
+    rows = []
+    for _index in range(30):
+        row = _row("python", region_scorable=True)
+        row["split"] = "random"
+        rows.append(row)
+    lone = _row("typescript", old_h8=True, new_h8=False, region_scorable=True)
+    lone["split"] = "random"
+    rows.append(lone)
+
+    verdict = evaluate_winner(rows)
+
+    assert set(verdict["per_language_hit_at_8"]) == {"python", "typescript"}, (
+        f"absent languages fabricated: {sorted(verdict['per_language_hit_at_8'])}"
+    )
+    # The aggregate hit@8 legitimately moves when a real case regresses; what
+    # must NOT happen is the PER-LANGUAGE gate treating an n=1 language as a
+    # peer of a 30-case one. It is reported, with its size, and does not vote.
+    assert verdict["per_language_hit_at_8"]["typescript"]["cases"] == 1
+    assert verdict["per_language_hit_at_8"]["python"]["cases"] == 30
+
+    # And a language OUTSIDE the fixed five-tuple must still be gated. Iterating
+    # a hardcoded tuple made every Java/Ruby/C# case invisible to the
+    # per-language gate: a whole language could regress on every case and the
+    # gate would never see it, because the gate only ever asked about five names.
+    rows_with_java = rows + [
+        _row("java", old_h8=True, new_h8=False) for _ in range(3)
+    ]
+    java_verdict = evaluate_winner(rows_with_java)
+    assert "java" in java_verdict["per_language_hit_at_8"], (
+        "a language outside the fixed tuple is invisible to the per-language gate: "
+        f"{sorted(java_verdict['per_language_hit_at_8'])}"
+    )
+    assert java_verdict["per_language_hit_at_8"]["java"] == {
+        "old": 1.0,
+        "new": 0.0,
+        "cases": 3,
+    }
+    # python has 30 region-scorable rows; region metrics must be MEASURED
+    assert verdict["symbol_recall"]["paired_cases"] > 0, (
+        "region metrics blacked out because one language could not reach the floor"
+    )
+
+
+
+def _sealed(*, legacy_candidates, vnext_ranked, vnext_admitted):
+    """Minimal sealed record; mirrors test_scoring_uses_measured_legacy_byte_identity."""
+    return {
+        "case": {"id": "case", "language": "python", "split": "random"},
+        "legacy": {
+            "candidate_order": list(legacy_candidates),
+            "witnesses": [],
+            "implied_inspection_tokens": 10,
+            "latency_ms": 1.0,
+            "peak_memory_bytes": 1,
+            "byte_identity": True,
+        },
+        "vnext": {"discoveries": [], "admitted_regions": [], "metrics": {"leakage_count": 0}},
+        "comparison": {
+            "new_admitted_files": list(vnext_admitted),
+            "ranked_discovery_files": list(vnext_ranked),
+            "deterministic": True,
+            "p95_latency_ms": 1.0,
+            "shadow_total_p95_latency_ms": 1.0,
+            "peak_memory_bytes": 1,
+            "shadow_total_peak_memory_bytes": 1,
+            "implied_inspection_tokens": 1,
+        },
+    }
+
+
+def test_file_recall_scores_the_same_object_on_both_sides():
+    """Recall must compare like to like: ranked list vs ranked list.
+
+    The scorer took legacy recall over its FULL candidate list and vnext recall
+    over its ADMITTED (delivered) set - two different objects. On the real
+    oss-60 run (30221830560) that reported "file_recall 0.8167 -> 0.5000", a
+    32-point collapse that does not exist: scored on the ranked list on both
+    sides the same run reads 0.8167 -> 0.9333. A longer list cannot LOWER
+    recall, so a recall drop paired with a hit@k RISE is a population mismatch.
+    """
+    sealed = _sealed(
+        legacy_candidates=["src/other.py", "src/target.py"],
+        vnext_ranked=["src/other.py", "src/target.py"],
+        vnext_admitted=["src/other.py"],          # selection dropped the gold
+    )
+
+    scored = score_sealed_case(sealed, {"gold_files": ["src/target.py"]})
+
+    assert scored["old"]["file_recall"] == 1.0
+    assert scored["new"]["file_recall"] == 1.0, (
+        "vnext recall was scored on the ADMITTED set, not the ranked list: "
+        f"{scored['new']['file_recall']}"
+    )
+    # The selection loss is real and must stay visible - under its OWN name.
+    assert scored["new"]["admitted_file_recall"] == 0.0
+
+
+def test_file_precision_uses_the_same_k_on_both_sides():
+    """precision@k must divide by the same k, or it measures list length.
+
+    Legacy returns a median of 3 candidates and vnext ranks 28.5, so `[:8]`
+    divided legacy's hits by 3.6 and vnext's by 7.9. That artifact - not any
+    quality difference - produced the 0.2589 -> 0.1146 "regression" that
+    decided OLD_WINS on run 30221830560. At equal k the two arms are within
+    2pp at every k where both lists are populated.
+    """
+    sealed = _sealed(
+        legacy_candidates=["src/target.py", "a.py", "b.py"],              # 3 long
+        vnext_ranked=["src/target.py"] + [f"n{i}.py" for i in range(7)],  # 8 long
+        vnext_admitted=["src/target.py"],
+    )
+
+    scored = score_sealed_case(sealed, {"gold_files": ["src/target.py"]})
+
+    old_pk = scored["old"]["file_precision_at_k"]
+    new_pk = scored["new"]["file_precision_at_k"]
+    assert old_pk["k"] == new_pk["k"] == 3, f"k must be the shorter list: {old_pk['k']}"
+    assert old_pk["value"] == pytest.approx(1 / 3)
+    assert new_pk["value"] == pytest.approx(1 / 3), (
+        "the longer list was punished for its length, not its quality"
+    )
