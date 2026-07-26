@@ -59,6 +59,13 @@ jobs:
           REPOS_FILE: ${{ env.GT_LOC_REPOS_FILE }}
           LANGUAGE: ${{ matrix.language }}
           SHARD: ${{ matrix.shard }}
+          SUBSTRATE_DIGEST: ${{ env.GT_LOC_SUBSTRATE }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_REPOSITORY: ${{ github.repository }}
+          RUN_WORKFLOW: ${{ github.workflow_ref }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_JOB: ${{ github.job }}
         run: |
           mkdir -p /tmp/vnext_input /tmp/repos /tmp/vnext_graphs /tmp/vnext_out
           python scripts/localization_vnext_oss_compare.py prepare \
@@ -68,10 +75,45 @@ jobs:
             --shard-index "$SHARD" \
             --shard-count 4 \
             --out /tmp/vnext_input/cases.input.json
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          def digest(path):
+              return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+          cases = f"benchmarks/data/{os.environ['CASES_FILE']}"
+          repos = f"benchmarks/data/{os.environ['REPOS_FILE']}"
+          payload = {
+              "schema": "gt.localization.vnext.github.provenance.v1",
+              "substrate_digest": os.environ["SUBSTRATE_DIGEST"],
+              "source_sha": os.environ["SOURCE_SHA"],
+              "github": {
+                  "repository": os.environ["RUN_REPOSITORY"],
+                  "workflow": os.environ["RUN_WORKFLOW"],
+                  "run_id": os.environ["RUN_ID"],
+                  "run_attempt": os.environ["RUN_ATTEMPT"],
+                  "job": os.environ["RUN_JOB"],
+                  "matrix_language": os.environ["LANGUAGE"],
+                  "matrix_shard": os.environ["SHARD"],
+              },
+              "prepared_input_sha256": digest(
+                  "/tmp/vnext_input/cases.input.json"
+              ),
+              "cases_manifest_sha256": digest(cases),
+              "repositories_manifest_sha256": digest(repos),
+          }
+          Path("/tmp/vnext_input/provenance.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True),
+              encoding="utf-8",
+          )
+          PY
           python -c "
           import json
           rows=json.load(open('/tmp/vnext_input/cases.input.json'))
-          forbidden={'gold_files','gold_symbols','gold_line_ranges','patch_sha256','fix_commit'}
+          forbidden={'gold_files','gold_symbols','gold_line_ranges','patch_sha256','fix_commit','fix_commit_sha256'}
           leaked=sorted(forbidden & {key for row in rows for key in row})
           assert not leaked, f'gold leaked into sealing input: {leaked}'
           print(f'gold-free shard cases={len(rows)} ids={[row[\"id\"] for row in rows]}')
@@ -91,6 +133,10 @@ jobs:
           DIGEST: ${{ env.GT_LOC_SUBSTRATE }}
         run: |
           [ -n "$DIGEST" ] || { echo "::error::no substrate digest"; exit 1; }
+          [[ "$DIGEST" =~ ^ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::substrate must be an exact ghcr.io sha256 digest"
+            exit 1
+          }
           echo "${{ secrets.GITHUB_TOKEN }}" |
             docker login ghcr.io \
               -u "$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" \
@@ -106,6 +152,7 @@ jobs:
             -v "$GITHUB_WORKSPACE/src/groundtruth:/opt/gt/src/groundtruth:ro" \
             -v "$GITHUB_WORKSPACE/scripts/localization_vnext_oss_compare.py:/runner.py:ro" \
             -v /tmp/vnext_input/cases.input.json:/cases.input.json:ro \
+            -v /tmp/vnext_input/provenance.json:/provenance.json:ro \
             -v /tmp/repos:/repos:ro \
             -v /tmp/vnext_graphs:/graphs \
             -v /tmp/vnext_out:/out \
@@ -114,7 +161,6 @@ jobs:
             -e GT_REQUIRE_FTS5=1 \
             -e GT_FORCE_ONNX_EMBEDDER=1 \
             -e GT_REQUIRE_EMBEDDER=1 \
-            -e GT_REQUIRE_LSP=1 \
             -e GT_LOC_CASE_TIMEOUT=1200 \
             -e GT_LOC_INDEX_TIMEOUT=900 \
             -e OMP_NUM_THREADS=1 \
@@ -129,7 +175,8 @@ jobs:
               --repos-dir /repos \
               --graphs-dir /graphs \
               --out /out \
-              --repeats "$REPEATS"
+              --repeats "$REPEATS" \
+              --provenance /provenance.json
 
       - name: Upload sealed shard
         if: always()
@@ -158,11 +205,25 @@ jobs:
       - name: Load gold only after sealing and score paired results
         env:
           CASES_FILE: ${{ env.GT_LOC_CASES_FILE }}
+          REPOS_FILE: ${{ env.GT_LOC_REPOS_FILE }}
+          SUBSTRATE_DIGEST: ${{ env.GT_LOC_SUBSTRATE }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_REPOSITORY: ${{ github.repository }}
+          RUN_WORKFLOW: ${{ github.workflow_ref }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           python scripts/localization_vnext_oss_compare.py score \
             --cases "benchmarks/data/$CASES_FILE" \
+            --repos "benchmarks/data/$REPOS_FILE" \
             --sealed-root /tmp/all_sealed \
-            --out /tmp/comparison
+            --out /tmp/comparison \
+            --expected-substrate-digest "$SUBSTRATE_DIGEST" \
+            --expected-source-sha "$SOURCE_SHA" \
+            --expected-github-repository "$RUN_REPOSITORY" \
+            --expected-github-workflow "$RUN_WORKFLOW" \
+            --expected-run-id "$RUN_ID" \
+            --expected-run-attempt "$RUN_ATTEMPT"
 
       - name: Upload paired comparison
         if: always()
@@ -183,10 +244,13 @@ jobs:
               print('::error::comparison report missing'); sys.exit(1)
           report=json.load(open(path))
           complete=bool(report.get('completeness',{}).get('complete'))
+          joined=bool(report.get('join_validation',{}).get('valid'))
           verdict=str(report.get('winner',{}).get('verdict','INCONCLUSIVE'))
-          print(f'paired={report.get(\"paired_count\")}/{report.get(\"sealed_count\")} complete={complete} verdict={verdict}')
+          print(f'paired={report.get(\"paired_count\")}/{report.get(\"sealed_count\")} complete={complete} joined={joined} verdict={verdict}')
           if not complete:
               print('::error::sealed corpus incomplete or duplicated'); sys.exit(1)
+          if not joined:
+              print('::error::sealed inputs do not match gold/repository pins'); sys.exit(1)
           if verdict == 'OLD_WINS':
               print('::error::recall/safety winner gate selected OLD_WINS'); sys.exit(1)
           "
