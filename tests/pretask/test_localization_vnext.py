@@ -624,6 +624,55 @@ def test_operational_token_rail_returns_explicit_incomplete_coverage(tmp_path):
     assert result.coverage.unresolved
 
 
+def test_source_token_rail_is_not_overwritten_by_later_candidate_exhaustion(
+    tmp_path,
+    monkeypatch,
+):
+    repo, db = _graph(tmp_path)
+    request = replace(
+        _request(repo, db, "parse completes"),
+        policy=LocalizationPolicy(
+            max_candidates=500,
+            max_source_tokens=16_000,
+            max_region_tokens=1,
+        ),
+    )
+    relevant = EvidenceUnit.create(
+        file_path="src/parser.py",
+        symbol="JsonParser.parse",
+        start_line=6,
+        end_line=11,
+        family=EvidenceFamily.IDENTIFIER,
+        confidence=1.0,
+        provenance=("relevant",),
+        roles=("operation",),
+        signal_class="identifier",
+        signal_rank=1,
+    )
+    irrelevant = EvidenceUnit.create(
+        file_path="src/config.py",
+        symbol="load_config",
+        start_line=1,
+        end_line=2,
+        family=EvidenceFamily.LEXICAL,
+        confidence=0.8,
+        provenance=("irrelevant",),
+        roles=(),
+        signal_class="lexical",
+        signal_rank=2,
+    )
+    monkeypatch.setattr(
+        vnext_engine,
+        "discover_candidates",
+        lambda *_args, **_kwargs: [relevant, irrelevant],
+    )
+
+    result = localize_vnext(request)
+
+    assert result.stopping_reason == "source_token_rail"
+    assert set(result.coverage.unresolved) == {"operation", "parsing"}
+
+
 def test_serialized_schema_is_stable_and_eight_decimal(tmp_path):
     repo, db = _graph(tmp_path)
     payload = localize_vnext(_request(repo, db)).to_dict()
@@ -1112,8 +1161,11 @@ def test_structured_semantic_passage_vectors_are_reused_without_changing_output(
     second = discover_candidates(request, facets)
 
     assert embedder.batch_sizes[0] == 1
-    assert 1 < embedder.batch_sizes[1] <= request.policy.max_candidates
-    assert embedder.batch_sizes[2] == 1
+    assert embedder.batch_sizes.count(1) == 2
+    assert all(
+        size == 1 or 1 < size <= vnext_engine._SEMANTIC_ENCODE_CHUNK_SIZE
+        for size in embedder.batch_sizes
+    )
     assert first == second
 
 
@@ -1240,7 +1292,7 @@ def test_irrelevant_property_facts_do_not_consume_the_candidate_rail(tmp_path):
     assert all(set(unit.roles) & issue_roles for unit in property_units)
 
 
-def test_candidate_rail_is_an_explicit_incomplete_coverage_stop(
+def test_exact_candidate_limit_is_not_reported_as_a_truncated_rail(
     tmp_path, monkeypatch
 ):
     repo, db = _graph(tmp_path)
@@ -1283,6 +1335,507 @@ def test_candidate_rail_is_an_explicit_incomplete_coverage_stop(
     result = localize_vnext(request)
 
     assert len(result.discoveries) == request.policy.max_candidates
+    assert result.metrics["candidate_rail_hit"] is False
+    assert result.stopping_reason == "required_roles_covered"
+    assert result.metrics["stopping_reason"] == "required_roles_covered"
+
+
+def test_role_certification_is_not_laundered_across_consolidated_signals(tmp_path):
+    repo, db = _graph(tmp_path)
+    con = sqlite3.connect(db)
+    con.execute("DELETE FROM edges")
+    con.execute("DELETE FROM properties")
+    con.commit()
+    con.close()
+    request = _request(
+        repo,
+        db,
+        "Parsing must preserve state while JsonParser.parse handles malformed input.",
+    )
+    strong_identity = EvidenceUnit.create(
+        file_path="src/parser.py",
+        symbol="JsonParser.parse",
+        start_line=6,
+        end_line=11,
+        family=EvidenceFamily.IDENTIFIER,
+        confidence=1.0,
+        provenance=("exact_identifier",),
+        roles=("operation",),
+        signal_class="identifier",
+        signal_rank=1,
+    )
+    weak_transition = EvidenceUnit.create(
+        file_path="src/parser.py",
+        symbol="JsonParser.parse",
+        start_line=6,
+        end_line=11,
+        family=EvidenceFamily.GRAPH,
+        relation="DATA_FLOW",
+        confidence=0.5,
+        provenance=("name_match",),
+        roles=("transition",),
+        signal_class="structural",
+        signal_rank=1,
+    )
+
+    discoveries = discover_candidates(
+        request,
+        extract_behavior_facets(request),
+        legacy_discoveries=(strong_identity, weak_transition),
+    )
+    target = next(
+        unit
+        for unit in discoveries
+        if unit.file_path == "src/parser.py"
+        and unit.symbol == "JsonParser.parse"
+        and unit.start_line == 6
+        and unit.end_line == 11
+    )
+
+    assert "operation" in target.certified_roles
+    assert "transition" not in target.certified_roles
+    marginal = vnext_engine._marginal(
+        target,
+        covered=set(),
+        required={"operation", "transition"},
+        expected=set(),
+        role_classes={},
+        fused_score=0.0,
+    )
+    assert marginal[0] == 1
+
+
+def test_exact_identifier_does_not_claim_observed_behavior(tmp_path):
+    repo, db = _graph(tmp_path)
+    request = _request(repo, db, "JsonParser.parse returns the wrong value.")
+
+    discoveries = discover_candidates(
+        request,
+        extract_behavior_facets(request),
+    )
+    exact = next(
+        unit
+        for unit in discoveries
+        if unit.file_path == "src/parser.py"
+        and unit.symbol == "JsonParser.parse"
+        and "identifier"
+        in dict(unit.metadata)
+        .get("supporting_signal_classes", "")
+        .split(",")
+    )
+
+    assert "operation" in exact.roles
+    assert "observed_behavior" not in exact.roles
+    assert "observed_behavior" not in exact.certified_roles
+
+
+def test_incremental_evidence_preserves_prior_state_and_only_resolves_proven_roles(
+    tmp_path,
+):
+    repo, db = _graph(tmp_path)
+    runtime = EvidenceUnit.create(
+        file_path="src/parser.py",
+        symbol="JsonParser.parse",
+        start_line=8,
+        end_line=8,
+        family=EvidenceFamily.TRACEBACK,
+        confidence=1.0,
+        provenance=("new_runtime_trace",),
+        roles=("operation",),
+        signal_class="runtime",
+        signal_rank=1,
+        fact_span=True,
+        explicit_provenance=True,
+    )
+    prior = LocalizationState(
+        accepted=("accepted-id",),
+        deferred=("deferred-id",),
+        unresolved_roles=("operation", "state"),
+    )
+    request = LocalizationRequest(
+        issue_text="",
+        repository_root=str(repo),
+        graph_db=str(db),
+        revision_identity="fixture-rev",
+        prior_state=prior,
+        new_evidence=(runtime,),
+    )
+
+    result = localize_vnext(request)
+
+    assert set(result.coverage.required) == {"operation", "state"}
+    assert result.coverage.covered == ("operation",)
+    assert result.coverage.unresolved == ("state",)
+    assert result.delta is not None
+    assert result.delta.newly_resolved_roles == ("operation",)
+    assert result.delta.invalidated_evidence == ()
+    assert "accepted-id" in result.state.accepted
+    assert "deferred-id" in result.state.deferred
+
+
+def test_negative_evidence_uses_stable_candidate_identity_across_signal_changes(
+    tmp_path,
+):
+    repo, db = _graph(tmp_path)
+    issue = "Malformed input should parse without losing state."
+    weak_history = EvidenceUnit.create(
+        file_path="src/config.py",
+        symbol="load_config",
+        start_line=1,
+        end_line=2,
+        family=EvidenceFamily.HISTORY,
+        confidence=0.2,
+        provenance=("old_history_guess",),
+        roles=("state",),
+        signal_class="history",
+        signal_rank=10,
+    )
+    first_request = LocalizationRequest(
+        issue_text=issue,
+        repository_root=str(repo),
+        graph_db=str(db),
+        revision_identity="fixture-rev",
+        new_evidence=(weak_history,),
+    )
+    first = localize_vnext(first_request)
+    assert weak_history.candidate_key
+    assert weak_history.candidate_key in first.state.rejected_candidates
+
+    changed_signal = EvidenceUnit.create(
+        file_path="src/config.py",
+        symbol="load_config",
+        start_line=1,
+        end_line=2,
+        family=EvidenceFamily.LEXICAL,
+        confidence=0.8,
+        provenance=("new_body_match",),
+        roles=("operation", "state"),
+        signal_class="lexical",
+        signal_rank=1,
+        fact_span=True,
+    )
+    assert changed_signal.evidence_id != weak_history.evidence_id
+    assert changed_signal.candidate_key == weak_history.candidate_key
+
+    second = localize_vnext(
+        replace(
+            first_request,
+            prior_state=first.state,
+            new_evidence=(changed_signal,),
+        )
+    )
+    changed_decision = next(
+        decision
+        for decision in second.decisions
+        if decision.evidence_id
+        == next(
+            unit.evidence_id
+            for unit in second.discoveries
+            if unit.candidate_key == changed_signal.candidate_key
+        )
+    )
+    assert changed_decision.action is CandidateAction.REJECT
+    assert ReasonCode.PREVIOUSLY_REJECTED in changed_decision.reason_codes
+
+
+def test_negative_evidence_is_scoped_to_repository_revision(tmp_path):
+    repo, db = _graph(tmp_path)
+    candidate = EvidenceUnit.create(
+        file_path="src/config.py",
+        symbol="load_config",
+        start_line=1,
+        end_line=2,
+        family=EvidenceFamily.LEXICAL,
+        confidence=0.8,
+        provenance=("new_body_match",),
+        roles=("operation",),
+        signal_class="lexical",
+        signal_rank=1,
+    )
+    prior = LocalizationState(
+        revision_identity="old-revision",
+        rejected_candidates=(candidate.candidate_key,),
+    )
+    request = LocalizationRequest(
+        issue_text="load_config returns the wrong value",
+        repository_root=str(repo),
+        graph_db=str(db),
+        revision_identity="new-revision",
+        prior_state=prior,
+        new_evidence=(candidate,),
+    )
+
+    result = localize_vnext(request)
+    decision = next(
+        item
+        for item in result.decisions
+        if item.evidence_id
+        == next(
+            unit.evidence_id
+            for unit in result.discoveries
+            if unit.candidate_key == candidate.candidate_key
+        )
+    )
+
+    assert ReasonCode.PREVIOUSLY_REJECTED not in decision.reason_codes
+    assert result.state.revision_identity == "new-revision"
+    assert candidate.candidate_key not in result.state.rejected_candidates
+
+
+def test_current_disposition_replaces_prior_disposition_for_same_evidence(tmp_path):
+    repo, db = _graph(tmp_path)
+    candidate = EvidenceUnit.create(
+        file_path="src/parser.py",
+        symbol="JsonParser.parse",
+        start_line=6,
+        end_line=11,
+        family=EvidenceFamily.IDENTIFIER,
+        confidence=1.0,
+        provenance=("exact_identifier",),
+        roles=("operation",),
+        signal_class="identifier",
+        signal_rank=1,
+    )
+    prior = LocalizationState(
+        revision_identity="fixture-rev",
+        deferred=(candidate.evidence_id,),
+        deferred_candidates=(candidate.candidate_key,),
+        evidence_candidates=((candidate.evidence_id, candidate.candidate_key),),
+    )
+    request = LocalizationRequest(
+        issue_text="JsonParser.parse returns the wrong value",
+        repository_root=str(repo),
+        graph_db=str(db),
+        revision_identity="fixture-rev",
+        prior_state=prior,
+        new_evidence=(candidate,),
+    )
+
+    result = localize_vnext(request)
+
+    current = next(
+        unit
+        for unit in result.discoveries
+        if unit.candidate_key == candidate.candidate_key
+    )
+    assert current.evidence_id in result.state.accepted
+    assert candidate.evidence_id not in result.state.deferred
+    assert candidate.candidate_key in result.state.accepted_candidates
+    assert candidate.candidate_key not in result.state.deferred_candidates
+
+
+def test_substantive_transition_without_file_is_behavior_described(tmp_path):
+    repo, db = _graph(tmp_path)
+    request = _request(
+        repo,
+        db,
+        "Inherited colors display a blank legend when themes cascade.",
+    )
+
+    facets = extract_behavior_facets(request)
+    result = localize_vnext(request)
+
+    assert facets.transition
+    assert facets.issue_mode == "behavior_described"
+    assert "transition" in result.coverage.required
+    assert result.stopping_reason != "insufficient_issue_evidence"
+
+
+def test_structured_semantics_can_discover_without_lexical_or_fts_seed(
+    tmp_path,
+    monkeypatch,
+):
+    from groundtruth.pretask import graph_localizer
+
+    repo, db = _graph(tmp_path)
+    issue = "Inherited colors display a blank legend when themes cascade."
+
+    class RepositorySemanticEmbedder:
+        def encode(self, texts):
+            return [
+                [1.0, 0.0]
+                if text == issue or "symbol: JsonParser.parse" in text
+                else [0.0, 1.0]
+                for text in texts
+            ]
+
+    monkeypatch.setattr(
+        graph_localizer,
+        "_EMBEDDER",
+        RepositorySemanticEmbedder(),
+    )
+    request = _request(repo, db, issue)
+    result = localize_vnext(request)
+
+    assert any(
+        unit.symbol == "JsonParser.parse"
+        and "semantic"
+        in dict(unit.metadata)
+        .get("supporting_signal_classes", "")
+        .split(",")
+        for unit in result.discoveries
+    )
+
+
+def test_absolute_traceback_resolves_unique_repo_suffix_and_enclosing_symbol(
+    tmp_path,
+):
+    repo, db = _graph(tmp_path)
+    absolute = (
+        "/home/runner/work/project/repository/src/parser.py"
+    )
+    request = _request(
+        repo,
+        db,
+        f'File "{absolute}", line 8, in parse\nParseError: malformed',
+    )
+
+    result = localize_vnext(request)
+    traceback_unit = next(
+        unit
+        for unit in result.discoveries
+        if "traceback" in dict(unit.metadata)
+        .get("supporting_families", "")
+        .split(",")
+    )
+
+    assert traceback_unit.file_path == "src/parser.py"
+    assert traceback_unit.symbol == "JsonParser.parse"
+    assert traceback_unit.start_line == 8
+    assert traceback_unit.end_line == 8
+    assert any(
+        region.file_path == "src/parser.py"
+        and region.start_line <= 8 <= region.end_line
+        for region in result.admitted_regions
+    )
+
+
+def test_existing_host_absolute_traceback_is_canonicalized_to_repo_path(
+    tmp_path,
+):
+    repo, db = _graph(tmp_path)
+    absolute = str(repo / "src" / "parser.py")
+    request = _request(
+        repo,
+        db,
+        f'File "{absolute}", line 8, in parse\nParseError: malformed',
+    )
+
+    result = localize_vnext(request)
+    traceback_unit = next(
+        unit
+        for unit in result.discoveries
+        if "traceback" in dict(unit.metadata)
+        .get("supporting_families", "")
+        .split(",")
+    )
+
+    assert traceback_unit.file_path == "src/parser.py"
+    assert traceback_unit.symbol == "JsonParser.parse"
+
+
+def test_actual_candidate_truncation_has_rail_precedence(tmp_path):
+    repo, db = _graph(tmp_path)
+    request = replace(
+        _request(repo, db),
+        policy=LocalizationPolicy(max_candidates=1, max_source_tokens=16_000),
+    )
+    first = EvidenceUnit.create(
+        file_path="src/parser.py",
+        symbol="JsonParser.parse",
+        start_line=6,
+        end_line=11,
+        family=EvidenceFamily.IDENTIFIER,
+        confidence=1.0,
+        provenance=("first",),
+        roles=("operation",),
+        signal_class="identifier",
+        signal_rank=1,
+    )
+    second = EvidenceUnit.create(
+        file_path="src/config.py",
+        symbol="load_config",
+        start_line=1,
+        end_line=2,
+        family=EvidenceFamily.LEXICAL,
+        confidence=0.8,
+        provenance=("second",),
+        roles=("operation",),
+        signal_class="lexical",
+        signal_rank=2,
+    )
+
+    result = localize_vnext(
+        request,
+        legacy_discoveries=(first, second),
+    )
+
+    assert len(result.discoveries) == 1
     assert result.metrics["candidate_rail_hit"] is True
     assert result.stopping_reason == "candidate_rail"
-    assert result.metrics["stopping_reason"] == "candidate_rail"
+
+
+def test_repository_semantic_pool_truncation_reports_candidate_rail(
+    tmp_path,
+    monkeypatch,
+):
+    from groundtruth.pretask import graph_localizer
+
+    repo, db = _graph(tmp_path)
+
+    class PositiveEmbedder:
+        def encode(self, texts):
+            return [[1.0, 0.0] for _text in texts]
+
+    monkeypatch.setattr(graph_localizer, "_EMBEDDER", PositiveEmbedder())
+    request = replace(
+        _request(
+            repo,
+            db,
+            "Inherited values display incorrectly when state transitions.",
+        ),
+        policy=LocalizationPolicy(
+            max_candidates=1,
+            max_source_tokens=16_000,
+        ),
+    )
+
+    result = localize_vnext(request)
+
+    assert len(result.discoveries) == 1
+    assert result.metrics["candidate_rail_hit"] is True
+    assert result.stopping_reason == "candidate_rail"
+
+
+def test_natural_candidate_exhaustion_reports_required_roles_covered(
+    tmp_path,
+    monkeypatch,
+):
+    repo, db = _graph(tmp_path)
+    request = _request(
+        repo,
+        db,
+        "parse completes",
+    )
+    sole = EvidenceUnit.create(
+        file_path="src/parser.py",
+        symbol="JsonParser.parse",
+        start_line=6,
+        end_line=11,
+        family=EvidenceFamily.IDENTIFIER,
+        confidence=1.0,
+        provenance=("sole_candidate",),
+        roles=("operation", "parsing"),
+        signal_class="identifier",
+        signal_rank=1,
+    )
+    monkeypatch.setattr(
+        vnext_engine,
+        "discover_candidates",
+        lambda *_args, **_kwargs: [sole],
+    )
+
+    result = localize_vnext(request)
+
+    assert result.coverage.unresolved == ()
+    assert result.stopping_reason == "required_roles_covered"

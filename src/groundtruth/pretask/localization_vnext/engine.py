@@ -426,7 +426,16 @@ def extract_behavior_facets(request: LocalizationRequest) -> BehaviorFacet:
         issue_mode = "explicit_path"
     elif explicit_symbol_shape:
         issue_mode = "symbol_anchored"
-    elif operation or observed or expected or mandatory_obligations:
+    elif (
+        operation
+        or observed
+        or expected
+        or state_sentence
+        or transition
+        or invariant
+        or mandatory_obligations
+        or policies != ("generic",)
+    ):
         issue_mode = "behavior_described"
     else:
         issue_mode = "sparse"
@@ -815,7 +824,10 @@ def _roles_for(
     if facets.actor and facets.actor.lower() in sym_lower:
         roles.add("actor")
     if facets.operation and facets.operation.lower() in sym_lower:
-        roles.update(("operation", "observed_behavior"))
+        # A symbol name proves entity/operation identity, not what the code
+        # currently does. Observed behavior requires body, property, graph, or
+        # runtime evidence.
+        roles.add("operation")
     if facets.architectural_boundary and any(
         path.strip().lower() == fp_lower
         for path in facets.architectural_boundary.split(",")
@@ -843,6 +855,8 @@ def _roles_for(
         roles.update(("exception", "expected_behavior", "transition"))
     if relation in {"DATA_FLOW", "PRECEDES", "READS", "WRITES"}:
         roles.add("transition")
+    if relation in {"READS", "WRITES"}:
+        roles.add("state")
     if property_kind in {
         "boundary_condition",
         "guard",
@@ -861,14 +875,102 @@ def _roles_for(
     return tuple(sorted(roles))
 
 
+def _resolve_traceback_location(
+    request: LocalizationRequest,
+    raw_path: str,
+    line: int,
+) -> tuple[str, str]:
+    """Resolve an absolute/frame path only through a unique repository suffix."""
+    normalized = _norm(raw_path)
+    root = Path(request.repository_root)
+    matches: set[str] = set()
+
+    direct = _safe_source_path(root, normalized)
+    if direct is not None:
+        try:
+            matches.add(_norm(str(direct.relative_to(root.resolve()))))
+        except (OSError, ValueError):
+            pass
+
+    con = _open_graph(request.graph_db)
+    graph_files: list[str] = []
+    if con is not None:
+        try:
+            if "nodes" in _table_names(con):
+                graph_files = [
+                    _norm(str(row[0] or ""))
+                    for row in con.execute(
+                        "SELECT DISTINCT file_path FROM nodes ORDER BY file_path"
+                    )
+                    if str(row[0] or "")
+                ]
+        finally:
+            con.close()
+    for graph_path in graph_files:
+        if (
+            normalized == graph_path
+            or normalized.endswith("/" + graph_path)
+        ) and (root / graph_path).is_file():
+            matches.add(graph_path)
+
+    if not matches:
+        parts = tuple(part for part in normalized.split("/") if part)
+        for index in range(len(parts)):
+            suffix = "/".join(parts[index:])
+            if (root / suffix).is_file():
+                matches.add(suffix)
+
+    if not matches:
+        return normalized, ""
+    longest = max(len(path.split("/")) for path in matches)
+    winners = sorted(
+        path for path in matches if len(path.split("/")) == longest
+    )
+    if len(winners) != 1:
+        return normalized, ""
+    resolved = winners[0]
+
+    symbol = ""
+    con = _open_graph(request.graph_db)
+    if con is not None:
+        try:
+            if "nodes" in _table_names(con):
+                row = con.execute(
+                    """
+                    SELECT name,qualified_name
+                    FROM nodes
+                    WHERE file_path=?
+                      AND COALESCE(is_test,0)=0
+                      AND COALESCE(start_line,0) <= ?
+                      AND COALESCE(end_line,0) >= ?
+                    ORDER BY (end_line-start_line) ASC,
+                             start_line DESC,
+                             id ASC
+                    LIMIT 1
+                    """,
+                    (resolved, line, line),
+                ).fetchone()
+                if row is not None:
+                    symbol = str(row["qualified_name"] or row["name"] or "")
+        finally:
+            con.close()
+    return resolved, symbol
+
+
 def _traceback_evidence(request: LocalizationRequest, facets: BehaviorFacet) -> list[EvidenceUnit]:
     out: list[EvidenceUnit] = []
     for rank, match in enumerate(_TRACEBACK_RE.finditer(request.issue_text), start=1):
-        path = _norm(match.group("py") or match.group("generic") or "")
+        raw_path = match.group("py") or match.group("generic") or ""
         line = int(match.group("pyline") or match.group("gline") or 0)
+        path, symbol = _resolve_traceback_location(
+            request,
+            raw_path,
+            line,
+        )
         out.append(
             EvidenceUnit.create(
                 file_path=path,
+                symbol=symbol,
                 start_line=line,
                 end_line=line,
                 family=EvidenceFamily.TRACEBACK,
@@ -940,6 +1042,15 @@ def _explicit_path_evidence(
     return out
 
 
+class _TruncationAwareList(list[Any]):
+    """A list that preserves whether an upstream candidate pool was cut."""
+
+    def __init__(self, values: Iterable[Any], *, total_count: int) -> None:
+        super().__init__(values)
+        self.total_count = max(int(total_count), len(self))
+        self.truncated = self.total_count > len(self)
+
+
 def _candidate_node_rows(
     con: sqlite3.Connection, facets: BehaviorFacet, request: LocalizationRequest
 ) -> list[sqlite3.Row]:
@@ -974,7 +1085,10 @@ def _candidate_node_rows(
         ):
             scored.append(((-exact, -op, -overlap, fp, int(row["id"])), row))
     scored.sort(key=lambda item: item[0])
-    return [row for _, row in scored[: request.policy.max_candidates]]
+    return _TruncationAwareList(
+        [row for _, row in scored[: request.policy.max_candidates]],
+        total_count=len(scored),
+    )
 
 
 def _fts_candidate_signals(
@@ -1126,6 +1240,7 @@ def _node_evidence(
     request: LocalizationRequest,
 ) -> tuple[list[EvidenceUnit], set[int]]:
     surface_rows = _candidate_node_rows(con, facets, request)
+    node_pool_total = int(getattr(surface_rows, "total_count", len(surface_rows)))
     surface_rank = {
         int(row["id"]): rank
         for rank, row in enumerate(surface_rows, start=1)
@@ -1156,22 +1271,10 @@ def _node_evidence(
         rows.extend(by_id[node_id] for node_id in extra_ids if node_id in by_id)
     passages: dict[str, str] = {}
     if "structured_semantics" not in request.policy.disabled_components:
-        built_passages = build_structured_symbol_passages(
-            request,
-            file_paths={_norm(str(row["file_path"] or "")) for row in rows},
-        )
-        candidate_passage_keys = {
-            (
-                f"{_norm(str(row['file_path'] or ''))}::"
-                f"{str(row['qualified_name'] or row['name'] or '')}"
-            )
-            for row in rows
-        }
-        passages = {
-            key: built_passages[key]
-            for key in sorted(candidate_passage_keys)
-            if key in built_passages
-        }
+        # Structured semantics is an independent discovery leg. Restricting
+        # passages to lexical/FTS seeds makes it only a reranker and guarantees
+        # misses on the hardest behavior-described issues.
+        passages = build_structured_symbol_passages(request)
     semantic_rank: dict[str, tuple[int, float]] = {}
     if passages:
         try:
@@ -1221,6 +1324,86 @@ def _node_evidence(
             # actual encode availability is correct-or-quiet. Legacy semantic
             # discoveries, when supplied, remain a separate input class.
             semantic_rank = {}
+    if semantic_rank:
+        all_rows = con.execute(
+            """
+            SELECT id, label, name, qualified_name, file_path, start_line,
+                   end_line, signature, language, parent_id
+            FROM nodes
+            WHERE COALESCE(is_test, 0)=0
+            ORDER BY file_path, COALESCE(start_line, 0), id
+            """
+        ).fetchall()
+        row_by_passage = {
+            (
+                f"{_norm(str(row['file_path'] or ''))}::"
+                f"{str(row['qualified_name'] or row['name'] or '')}"
+            ): row
+            for row in all_rows
+        }
+        semantic_candidate_ids = {
+            int(row_by_passage[key]["id"])
+            for key, (_rank, score) in semantic_rank.items()
+            if score > 0.0 and key in row_by_passage
+        }
+        node_pool_total = len(
+            semantic_candidate_ids
+            | set(surface_rank)
+            | set(fts_signals)
+        )
+        existing_ids = {int(row["id"]) for row in rows}
+        for key, (_rank, score) in sorted(
+            semantic_rank.items(),
+            key=lambda item: (item[1][0], item[0]),
+        ):
+            row = row_by_passage.get(key)
+            if row is None or score <= 0.0 or int(row["id"]) in existing_ids:
+                continue
+            rows.append(row)
+            existing_ids.add(int(row["id"]))
+            if len(existing_ids) >= request.policy.max_candidates * 2:
+                break
+
+        def candidate_rank(row: sqlite3.Row) -> tuple[Any, ...]:
+            node_id = int(row["id"])
+            fp = _norm(str(row["file_path"] or ""))
+            symbol = str(row["qualified_name"] or row["name"] or "")
+            class_ranks: dict[str, int] = {}
+            if node_id in surface_rank:
+                class_ranks["lexical"] = surface_rank[node_id]
+            if node_id in fts_signals:
+                class_ranks["lexical"] = min(
+                    class_ranks.get("lexical", request.policy.max_candidates + 1),
+                    min(
+                        rank
+                        for _family, rank, _score
+                        in fts_signals[node_id]
+                    ),
+                )
+            semantic = semantic_rank.get(f"{fp}::{symbol}")
+            if semantic is not None:
+                class_ranks["semantic"] = semantic[0]
+            exact = any(
+                str(row["name"] or "").lower()
+                == anchor.lower().rsplit(".", 1)[-1]
+                or symbol.lower() == anchor.lower()
+                for anchor in facets.anchor_symbols
+            )
+            fused_score = sum(
+                1.0 / (60 + rank) for rank in class_ranks.values()
+            )
+            return (
+                0 if exact else 1,
+                -len(class_ranks),
+                -round(fused_score, 12),
+                fp,
+                int(row["start_line"] or 0),
+                node_id,
+            )
+
+        rows = sorted(rows, key=candidate_rank)[
+            : request.policy.max_candidates
+        ]
     evidence: list[EvidenceUnit] = []
     node_ids: set[int] = set()
     for row in rows:
@@ -1241,6 +1424,17 @@ def _node_evidence(
             # A body/name match is candidate evidence that this symbol may
             # implement the described behavior. It may cover issue roles for
             # admission, but its 0.6 confidence remains below certification.
+            base_roles.update(
+                role
+                for role in facets.required_roles
+                if role not in {"actor", "architectural_boundary"}
+            )
+        semantic = semantic_rank.get(f"{fp}::{symbol}")
+        if (
+            semantic is not None
+            and semantic[1] > 0.0
+            and facets.issue_mode == "behavior_described"
+        ):
             base_roles.update(
                 role
                 for role in facets.required_roles
@@ -1305,7 +1499,6 @@ def _node_evidence(
                     + (("bm25_score", f"{bm25_score:.8f}"),),
                 )
             )
-        semantic = semantic_rank.get(f"{fp}::{symbol}")
         if semantic is not None and semantic[1] > 0.0:
             semantic_position, semantic_score = semantic
             evidence.append(
@@ -1338,7 +1531,17 @@ def _node_evidence(
                     ),
                 )
             )
-    return evidence, node_ids
+    return (
+        _TruncationAwareList(
+            evidence,
+            total_count=(
+                len(evidence) + 1
+                if node_pool_total > len(node_ids)
+                else len(evidence)
+            ),
+        ),
+        node_ids,
+    )
 
 
 def _edge_evidence(
@@ -1793,6 +1996,7 @@ def _legacy_evidence(
                         confidence=confidence,
                         provenance=provenance,
                         roles=roles,
+                        certified_roles=(),
                         source_tokens=0,
                         signal_class=signal_class,
                         signal_rank=rank,
@@ -1865,6 +2069,7 @@ def _legacy_evidence(
                 confidence=confidence,
                 provenance=tuple(provenance),
                 roles=roles,
+                certified_roles=(),
                 source_tokens=0,
                 signal_class=signal_class,
                 signal_rank=rank,
@@ -1874,6 +2079,20 @@ def _legacy_evidence(
     return out
 
 
+class _DiscoveredCandidates(list[EvidenceUnit]):
+    """Public-list-compatible discovery batch with honest truncation metadata."""
+
+    def __init__(
+        self,
+        values: Iterable[EvidenceUnit],
+        *,
+        total_count: int,
+    ) -> None:
+        super().__init__(values)
+        self.total_count = int(total_count)
+        self.truncated = self.total_count > len(self)
+
+
 def discover_candidates(
     request: LocalizationRequest,
     facets: BehaviorFacet,
@@ -1881,6 +2100,7 @@ def discover_candidates(
     legacy_discoveries: Sequence[Any] | None = None,
 ) -> list[EvidenceUnit]:
     evidence: list[EvidenceUnit] = []
+    discovery_was_truncated = False
     evidence.extend(_explicit_path_evidence(request, facets))
     evidence.extend(_traceback_evidence(request, facets))
     evidence.extend(_legacy_evidence(legacy_discoveries, facets, request.policy))
@@ -1888,6 +2108,9 @@ def discover_candidates(
     if con is not None:
         try:
             nodes, node_ids = _node_evidence(con, facets, request)
+            discovery_was_truncated = bool(
+                getattr(nodes, "truncated", False)
+            )
             evidence.extend(nodes)
             evidence.extend(_edge_evidence(con, facets, node_ids, request))
             evidence.extend(_property_evidence(con, facets, node_ids))
@@ -1966,6 +2189,15 @@ def discover_candidates(
         )
         best = support[0]
         roles = tuple(sorted({role for unit in support for role in unit.roles}))
+        certified_roles = tuple(
+            sorted(
+                {
+                    role
+                    for unit in support
+                    for role in unit.certified_roles
+                }
+            )
+        )
         classes = tuple(sorted({unit.signal_class for unit in support}))
         families = tuple(sorted({unit.family.value for unit in support}))
         relations = tuple(sorted({unit.relation for unit in support if unit.relation}))
@@ -1991,6 +2223,7 @@ def discover_candidates(
                     )
                 ),
                 roles=roles,
+                certified_roles=certified_roles,
                 source_tokens=best.source_tokens,
                 signal_class="+".join(classes),
                 signal_rank=region_rank,
@@ -1999,7 +2232,17 @@ def discover_candidates(
                 metadata=metadata,
             )
         )
-    return consolidated
+    return _DiscoveredCandidates(
+        consolidated,
+        total_count=max(
+            len(ranked_regions),
+            (
+                request.policy.max_candidates + 1
+                if discovery_was_truncated
+                else 0
+            ),
+        ),
+    )
 
 
 def fuse_by_evidence_class(evidence: Iterable[EvidenceUnit], k: int = 60) -> dict[str, float]:
@@ -2292,7 +2535,7 @@ def _marginal(
         if signal_class
     }
     new_required = roles & required - covered
-    certified = len(new_required) if unit.confidence >= 0.9 else 0
+    certified = len(new_required & set(unit.certified_roles))
     independent = sum(
         1
         for role in new_required
@@ -2330,9 +2573,13 @@ def _decision_for_rejection(
     unit: EvidenceUnit,
     *,
     previous_rejected: set[str],
+    previous_rejected_candidates: set[str],
     policy: LocalizationPolicy,
 ) -> CandidateDecision | None:
-    if unit.evidence_id in previous_rejected:
+    if (
+        unit.evidence_id in previous_rejected
+        or unit.candidate_key in previous_rejected_candidates
+    ):
         return CandidateDecision(
             unit.evidence_id, CandidateAction.REJECT, (ReasonCode.PREVIOUSLY_REJECTED,)
         )
@@ -2406,8 +2653,27 @@ def _coverage_admit(
     str,
 ]:
     required = set(facets.required_roles)
+    prior_applies = bool(
+        request.prior_state is not None
+        and (
+            not request.prior_state.revision_identity
+            or request.prior_state.revision_identity
+            == request.revision_identity
+        )
+    )
+    if prior_applies and request.prior_state is not None:
+        required.update(request.prior_state.unresolved_roles)
     expected = set(facets.expected_roles)
-    previous_rejected = set(request.prior_state.rejected if request.prior_state else ())
+    previous_rejected = set(
+        request.prior_state.rejected
+        if prior_applies and request.prior_state
+        else ()
+    )
+    previous_rejected_candidates = set(
+        request.prior_state.rejected_candidates
+        if prior_applies and request.prior_state
+        else ()
+    )
     fused = (
         {}
         if "class_fusion" in request.policy.disabled_components
@@ -2418,7 +2684,10 @@ def _coverage_admit(
     candidates: list[EvidenceUnit] = []
     for unit in evidence:
         rejection = _decision_for_rejection(
-            unit, previous_rejected=previous_rejected, policy=request.policy
+            unit,
+            previous_rejected=previous_rejected,
+            previous_rejected_candidates=previous_rejected_candidates,
+            policy=request.policy,
         )
         if rejection is not None:
             decisions[unit.evidence_id] = rejection
@@ -2430,6 +2699,7 @@ def _coverage_admit(
     admitted_ids: set[str] = set()
     used_tokens = 0
     stopping_reason = "no_positive_marginal"
+    source_token_rail_hit = False
     region_cache = {
         unit.evidence_id: _bounded_region(request, unit) for unit in candidates
     }
@@ -2620,6 +2890,7 @@ def _coverage_admit(
                 (),
                 marginal,
             )
+            source_token_rail_hit = True
             stopping_reason = "source_token_rail"
             continue
         if used_tokens + region.source_tokens > request.policy.max_source_tokens:
@@ -2630,6 +2901,7 @@ def _coverage_admit(
                 (),
                 marginal,
             )
+            source_token_rail_hit = True
             stopping_reason = "source_token_rail"
             break
         reason = (
@@ -2692,7 +2964,11 @@ def _coverage_admit(
     )
     final_covered = {role for region in merged for role in region.roles} & required
     unresolved = required - final_covered - unavailable
-    if stopping_reason == "required_roles_covered" and unresolved:
+    if source_token_rail_hit:
+        stopping_reason = "source_token_rail"
+    elif not unresolved and target_required <= final_covered:
+        stopping_reason = "required_roles_covered"
+    elif stopping_reason == "required_roles_covered" and unresolved:
         stopping_reason = "no_positive_marginal"
     coverage = CoverageState(
         required=tuple(sorted(required)),
@@ -2709,12 +2985,95 @@ def _coverage_admit(
 
 
 def _make_state(
-    decisions: Sequence[CandidateDecision], coverage: CoverageState
+    decisions: Sequence[CandidateDecision],
+    coverage: CoverageState,
+    evidence: Sequence[EvidenceUnit],
+    prior: LocalizationState | None,
+    revision_identity: str,
 ) -> LocalizationState:
+    evidence_by_id = {unit.evidence_id: unit for unit in evidence}
+    accepted = {
+        d.evidence_id
+        for d in decisions
+        if d.action is CandidateAction.ADMIT
+    }
+    rejected = {
+        d.evidence_id
+        for d in decisions
+        if d.action is CandidateAction.REJECT
+    }
+    deferred = {
+        d.evidence_id
+        for d in decisions
+        if d.action is CandidateAction.DEFER
+    }
+    accepted_candidates = {
+        evidence_by_id[d.evidence_id].candidate_key
+        for d in decisions
+        if d.action is CandidateAction.ADMIT
+        and d.evidence_id in evidence_by_id
+    }
+    rejected_candidates = {
+        evidence_by_id[d.evidence_id].candidate_key
+        for d in decisions
+        if d.action is CandidateAction.REJECT
+        and d.evidence_id in evidence_by_id
+    }
+    deferred_candidates = {
+        evidence_by_id[d.evidence_id].candidate_key
+        for d in decisions
+        if d.action is CandidateAction.DEFER
+        and d.evidence_id in evidence_by_id
+    }
+    prior_applies = bool(
+        prior is not None
+        and (
+            not prior.revision_identity
+            or prior.revision_identity == revision_identity
+        )
+    )
+    current_evidence_candidates = {
+        evidence_id: unit.candidate_key
+        for evidence_id, unit in evidence_by_id.items()
+    }
+    evidence_candidates = dict(current_evidence_candidates)
+    if prior_applies and prior is not None:
+        prior_evidence_candidates = dict(prior.evidence_candidates)
+        current_candidate_keys = set(current_evidence_candidates.values())
+
+        def carry_prior_ids(values: tuple[str, ...]) -> set[str]:
+            return {
+                evidence_id
+                for evidence_id in values
+                if prior_evidence_candidates.get(evidence_id)
+                not in current_candidate_keys
+            }
+
+        accepted.update(carry_prior_ids(prior.accepted))
+        rejected.update(carry_prior_ids(prior.rejected))
+        deferred.update(carry_prior_ids(prior.deferred))
+        accepted_candidates.update(
+            set(prior.accepted_candidates) - current_candidate_keys
+        )
+        rejected_candidates.update(
+            set(prior.rejected_candidates) - current_candidate_keys
+        )
+        deferred_candidates.update(
+            set(prior.deferred_candidates) - current_candidate_keys
+        )
+        evidence_candidates.update(
+            {
+                evidence_id: candidate_key
+                for evidence_id, candidate_key
+                in prior_evidence_candidates.items()
+                if candidate_key not in current_candidate_keys
+            }
+        )
     return LocalizationState(
-        accepted=tuple(sorted(d.evidence_id for d in decisions if d.action is CandidateAction.ADMIT)),
-        rejected=tuple(sorted(d.evidence_id for d in decisions if d.action is CandidateAction.REJECT)),
-        deferred=tuple(sorted(d.evidence_id for d in decisions if d.action is CandidateAction.DEFER)),
+        revision_identity=revision_identity,
+        accepted=tuple(sorted(accepted)),
+        rejected=tuple(sorted(rejected)),
+        deferred=tuple(sorted(deferred)),
         unresolved_roles=coverage.unresolved,
         decision_reasons=tuple(
             sorted(
@@ -2725,6 +3084,10 @@ def _make_state(
                 for d in decisions
             )
         ),
+        accepted_candidates=tuple(sorted(accepted_candidates)),
+        rejected_candidates=tuple(sorted(rejected_candidates)),
+        deferred_candidates=tuple(sorted(deferred_candidates)),
+        evidence_candidates=tuple(sorted(evidence_candidates.items())),
     )
 
 
@@ -2740,7 +3103,11 @@ def _make_delta(
         newly_rejected=tuple(sorted(set(current.rejected) - set(prior.rejected))),
         newly_deferred=tuple(sorted(set(current.deferred) - set(prior.deferred))),
         newly_resolved_roles=tuple(
-            sorted(set(prior.unresolved_roles) - set(coverage.unresolved))
+            sorted(
+                set(prior.unresolved_roles)
+                - set(coverage.unresolved)
+                - set(coverage.unavailable)
+            )
         ),
         invalidated_evidence=tuple(
             sorted(
@@ -2903,14 +3270,22 @@ def _localize_vnext_traced(
             request, facets, evidence, capabilities
         )
         admission_done = time.perf_counter()
-    candidate_rail_hit = len(evidence) >= request.policy.max_candidates
+    candidate_rail_hit = bool(
+        getattr(evidence, "truncated", False)
+    )
     if candidate_rail_hit:
         stopping_reason = "candidate_rail"
     if abstain and request.prior_state is not None:
         state = request.prior_state
         delta = LocalizationDelta()
     else:
-        state = _make_state(decisions, coverage)
+        state = _make_state(
+            decisions,
+            coverage,
+            evidence,
+            request.prior_state,
+            request.revision_identity,
+        )
         delta = _make_delta(request.prior_state, state, coverage)
     _current, peak = tracemalloc.get_traced_memory()
     peak = max(0, peak - baseline_memory)

@@ -68,11 +68,16 @@ class LocalizationPolicy:
 
 @dataclass(frozen=True)
 class LocalizationState:
+    revision_identity: str = ""
     accepted: tuple[str, ...] = ()
     rejected: tuple[str, ...] = ()
     deferred: tuple[str, ...] = ()
     unresolved_roles: tuple[str, ...] = ()
     decision_reasons: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    accepted_candidates: tuple[str, ...] = ()
+    rejected_candidates: tuple[str, ...] = ()
+    deferred_candidates: tuple[str, ...] = ()
+    evidence_candidates: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,7 @@ class CapabilityMatrix:
 @dataclass(frozen=True)
 class EvidenceUnit:
     evidence_id: str
+    candidate_key: str
     file_path: str
     symbol: str
     start_line: int
@@ -123,6 +129,7 @@ class EvidenceUnit:
     confidence: float
     provenance: tuple[str, ...]
     roles: tuple[str, ...]
+    certified_roles: tuple[str, ...]
     source_tokens: int
     signal_class: str
     signal_rank: int
@@ -143,6 +150,7 @@ class EvidenceUnit:
         confidence: float = 0.0,
         provenance: tuple[str, ...] = (),
         roles: tuple[str, ...] = (),
+        certified_roles: tuple[str, ...] | None = None,
         source_tokens: int = 0,
         signal_class: str = "lexical",
         signal_rank: int = 1,
@@ -161,8 +169,32 @@ class EvidenceUnit:
             "roles": sorted(set(roles)),
         }
         digest = hashlib.sha256(_canonical_bytes(identity)).hexdigest()[:24]
+        candidate_identity = {
+            "file": fp,
+            "symbol": symbol or "",
+            "span": [int(start_line or 0), int(end_line or 0)],
+        }
+        candidate_digest = hashlib.sha256(
+            _canonical_bytes(candidate_identity)
+        ).hexdigest()[:24]
+        normalized_roles = tuple(sorted(set(str(v) for v in roles if v)))
+        normalized_certified = tuple(
+            sorted(
+                set(
+                    str(v)
+                    for v in (
+                        normalized_roles
+                        if certified_roles is None and float(confidence) >= 0.9
+                        else certified_roles or ()
+                    )
+                    if v
+                )
+                & set(normalized_roles)
+            )
+        )
         return cls(
             evidence_id=f"ev_{digest}",
+            candidate_key=f"cand_{candidate_digest}",
             file_path=fp,
             symbol=symbol or "",
             start_line=max(0, int(start_line or 0)),
@@ -171,7 +203,8 @@ class EvidenceUnit:
             relation=relation or "",
             confidence=round(max(0.0, min(1.0, float(confidence))), 8),
             provenance=tuple(str(v) for v in provenance),
-            roles=tuple(sorted(set(str(v) for v in roles if v))),
+            roles=normalized_roles,
+            certified_roles=normalized_certified,
             source_tokens=max(0, int(source_tokens or 0)),
             signal_class=signal_class or family.value,
             signal_rank=max(1, int(signal_rank or 1)),
