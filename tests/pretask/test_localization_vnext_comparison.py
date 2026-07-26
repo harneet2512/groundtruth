@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from groundtruth.pretask.localization_vnext.comparison import (
     _legacy_inspection_files,
+    _legacy_ranking_priors,
+    _shadow_legacy_candidates,
+    _shadow_only_ranked_files,
     _shadow_total_latency_samples,
     evaluate_winner,
     score_sealed_case,
@@ -159,6 +162,30 @@ def test_legacy_inspection_tokens_use_model_visible_brief_before_reactive_rows()
     ) == ["src/v74.py"]
 
 
+def test_legacy_ranking_priors_preserve_exact_model_visible_file_order():
+    priors = _legacy_ranking_priors([f"src/legacy_{index}.py" for index in range(1, 9)])
+
+    assert [item["path"] for item in priors] == [f"src/legacy_{index}.py" for index in range(1, 9)]
+    assert [item["legacy_rank"] for item in priors] == list(range(1, 9))
+    assert all(item["ranking_prior_only"] is True for item in priors)
+
+
+def test_shadow_seed_prefix_is_exact_model_visible_order_before_other_candidates():
+    v74 = object()
+    reactive = object()
+    seed = _shadow_legacy_candidates(
+        ["src/final_brief_first.py", "src/final_brief_second.py"],
+        [v74],
+        [reactive],
+    )
+
+    assert [item["path"] for item in seed[:2]] == [
+        "src/final_brief_first.py",
+        "src/final_brief_second.py",
+    ]
+    assert seed[2:] == [v74, reactive]
+
+
 def test_shadow_latency_samples_keep_measured_cold_cache_cost():
     samples = _shadow_total_latency_samples(
         legacy_latency_ms=10.0,
@@ -305,3 +332,58 @@ def test_line_scoring_accepts_the_same_suffix_path_match_as_file_scoring():
 
     assert scored["new"]["line_recall"] == 1.0
     assert scored["new"]["line_precision"] == 2 / 3
+
+
+def test_shadow_only_ranked_files_drop_model_visible_prior_rows():
+    class _Unit:
+        def __init__(self, file_path, prior):
+            self.file_path = file_path
+            self.metadata = (("ranking_prior_only", "1"),) if prior else ()
+
+    files = _shadow_only_ranked_files(
+        [
+            _Unit("src/legacy_first.py", True),
+            _Unit("src/shadow_found.py", False),
+            _Unit("src/legacy_second.py", True),
+            _Unit("src/shadow_found.py", False),
+            _Unit("", False),
+        ]
+    )
+
+    assert files == ["src/shadow_found.py"]
+
+
+def test_scoring_reports_the_shadow_only_column_beside_the_floored_column():
+    sealed = {
+        "case": {"id": "case", "language": "python", "split": "random"},
+        "legacy": {
+            "candidate_order": ["src/legacy.py"],
+            "witnesses": [],
+            "implied_inspection_tokens": 10,
+            "latency_ms": 1.0,
+            "peak_memory_bytes": 1,
+            "byte_identity": True,
+        },
+        "vnext": {
+            "discoveries": [],
+            "admitted_regions": [],
+            "metrics": {"leakage_count": 0},
+        },
+        "comparison": {
+            "new_admitted_files": [],
+            "ranked_discovery_files": ["src/legacy.py", "src/gold.py"],
+            "ranked_discovery_files_shadow_only": ["src/gold.py"],
+            "deterministic": True,
+            "p95_latency_ms": 1.0,
+            "peak_memory_bytes": 1,
+            "implied_inspection_tokens": 1,
+        },
+    }
+
+    scored = score_sealed_case(sealed, {"gold_files": ["src/gold.py"]})
+
+    assert scored["new"]["first_gold_rank"] == 2
+    assert scored["new"]["hit_at_1"] is False
+    assert scored["new_shadow_only"]["first_gold_rank"] == 1
+    assert scored["new_shadow_only"]["hit_at_1"] is True
+    assert scored["new_shadow_only"]["hit_at_8"] is True

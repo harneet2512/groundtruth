@@ -519,6 +519,58 @@ def _legacy_inspection_files(
     return []
 
 
+def _legacy_ranking_priors(old_files: Sequence[str]) -> list[dict[str, Any]]:
+    """Carry the exact model-visible legacy file order into shadow ranking.
+
+    These are ranking-only priors, not behavioral facts and not admissible
+    source evidence.
+    """
+    return [
+        {
+            "path": path,
+            "score": 0.5,
+            "components": {"lex": 0.5},
+            "legacy_rank": rank,
+            "ranking_prior_only": True,
+        }
+        for rank, path in enumerate(
+            dict.fromkeys(_norm(path) for path in old_files if _norm(path)),
+            start=1,
+        )
+    ]
+
+
+def _shadow_legacy_candidates(
+    old_files: Sequence[str],
+    v74_candidates: Sequence[Any],
+    reactive_candidates: Sequence[Any],
+) -> list[Any]:
+    """Compose the shadow seed with the model-visible order as its prefix."""
+    return [
+        *_legacy_ranking_priors(old_files),
+        *v74_candidates,
+        *reactive_candidates,
+    ]
+
+
+def _shadow_only_ranked_files(discoveries: Sequence[Any]) -> list[str]:
+    """The shadow engine's own file order, with the legacy floor removed.
+
+    Attribution diagnostic only: the model-visible ranking priors are a
+    recall-first floor, so the floored order cannot show whether the shadow
+    engine's own ordering moved.  Priors still contribute to class fusion, so
+    this is the engine's order without the floor, not a counterfactual run.
+    """
+    return list(
+        dict.fromkeys(
+            discovery.file_path
+            for discovery in discoveries
+            if discovery.file_path
+            and dict(discovery.metadata).get("ranking_prior_only") != "1"
+        )
+    )
+
+
 def _shadow_total_latency_samples(
     legacy_latency_ms: float,
     shadow_verification_latency_ms: float,
@@ -569,7 +621,6 @@ def run_sealed_case(
     v74_candidates = list(
         getattr(legacy_measurement.v74, "ranked_full", ()) or ()
     )
-    legacy_candidates = [*v74_candidates, *reactive_candidates]
     reactive_projection = _reactive_projection(legacy_measurement.localizer)
     v74_projection = _v74_projection(legacy_measurement.v74)
     brief_projection = _brief_projection(legacy_measurement.brief)
@@ -578,6 +629,11 @@ def run_sealed_case(
         reactive_projection,
         v74_projection,
         brief_projection,
+    )
+    legacy_candidates = _shadow_legacy_candidates(
+        old_files,
+        v74_candidates,
+        reactive_candidates,
     )
     legacy_projection = {
         **reactive_projection,
@@ -636,6 +692,9 @@ def run_sealed_case(
             for discovery in new_result.discoveries
             if discovery.file_path
         )
+    )
+    ranked_discovery_files_shadow_only = _shadow_only_ranked_files(
+        new_result.discoveries
     )
     new_files = list(dict.fromkeys(region.file_path for region in new_result.admitted_regions))
     discovery_by_id = {
@@ -742,6 +801,7 @@ def run_sealed_case(
         "vnext": new_result.to_dict(),
         "comparison": {
             "ranked_discovery_files": ranked_discovery_files,
+            "ranked_discovery_files_shadow_only": ranked_discovery_files_shadow_only,
             "new_admitted_files": new_files,
             "first_divergence": _first_divergence(old_files, ranked_discovery_files),
             "region_contributions": contribution,
@@ -810,8 +870,12 @@ def score_sealed_case(
     old_files = list(sealed["legacy"]["candidate_order"])
     new_files = list(sealed["comparison"]["new_admitted_files"])
     new_ranked_files = list(sealed["comparison"].get("ranked_discovery_files") or new_files)
+    shadow_only_files = list(
+        sealed["comparison"].get("ranked_discovery_files_shadow_only") or ()
+    )
     old_rank = _rank(old_files, gold_files)
     new_rank = _rank(new_ranked_files, gold_files)
+    shadow_only_rank = _rank(shadow_only_files, gold_files)
     old_hits = {path for path in old_files if _matches(path, gold_files)}
     new_hits = {path for path in new_files if _matches(path, gold_files)}
 
@@ -1006,6 +1070,21 @@ def score_sealed_case(
             "peak_memory_bytes": int(
                 sealed["comparison"].get("shadow_total_peak_memory_bytes")
                 or sealed["comparison"]["peak_memory_bytes"]
+            ),
+        },
+        # Attribution diagnostic, never the reported comparison column: the
+        # shadow engine's own order with the model-visible legacy floor removed.
+        "new_shadow_only": {
+            "first_gold_rank": shadow_only_rank,
+            "hit_at_1": shadow_only_rank == 1,
+            "hit_at_3": shadow_only_rank is not None and shadow_only_rank <= 3,
+            "hit_at_8": shadow_only_rank is not None and shadow_only_rank <= 8,
+            "ranked_file_count": len(shadow_only_files),
+            "file_precision": (
+                sum(1 for path in shadow_only_files[:8] if _matches(path, gold_files))
+                / len(shadow_only_files[:8])
+                if shadow_only_files[:8]
+                else 0.0
             ),
         },
     }

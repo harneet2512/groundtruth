@@ -663,6 +663,11 @@ def _case_explanation(sealed: Mapping[str, Any]) -> dict[str, Any]:
         "vnext_ranked_files": list(
             comparison.get("ranked_discovery_files") or ()
         ),
+        # Attribution diagnostic: the same order with the model-visible legacy
+        # ranking floor removed, so a shadow ordering change stays readable.
+        "vnext_ranked_files_shadow_only": list(
+            comparison.get("ranked_discovery_files_shadow_only") or ()
+        ),
     }
 
 

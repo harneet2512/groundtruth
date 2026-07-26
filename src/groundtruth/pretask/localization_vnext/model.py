@@ -129,6 +129,7 @@ class EvidenceUnit:
     confidence: float
     provenance: tuple[str, ...]
     roles: tuple[str, ...]
+    issue_roles: tuple[str, ...]
     certified_roles: tuple[str, ...]
     source_tokens: int
     signal_class: str
@@ -150,6 +151,7 @@ class EvidenceUnit:
         confidence: float = 0.0,
         provenance: tuple[str, ...] = (),
         roles: tuple[str, ...] = (),
+        issue_roles: tuple[str, ...] | None = None,
         certified_roles: tuple[str, ...] | None = None,
         source_tokens: int = 0,
         signal_class: str = "lexical",
@@ -159,6 +161,16 @@ class EvidenceUnit:
         metadata: tuple[tuple[str, str], ...] = (),
     ) -> "EvidenceUnit":
         fp = _norm_path(file_path)
+        normalized_roles = tuple(sorted(set(str(v) for v in roles if v)))
+        # Issue eligibility is a subset of what the evidence describes; identity
+        # must read the same normalized value the unit carries, or two
+        # state-identical units would split into two evidence ids.
+        normalized_issue_roles = tuple(
+            sorted(
+                set(str(v) for v in (normalized_roles if issue_roles is None else issue_roles) if v)
+                & set(normalized_roles)
+            )
+        )
         identity = {
             "file": fp,
             "symbol": symbol,
@@ -167,6 +179,7 @@ class EvidenceUnit:
             "relation": relation,
             "provenance": list(provenance),
             "roles": sorted(set(roles)),
+            "issue_roles": list(normalized_issue_roles),
         }
         digest = hashlib.sha256(_canonical_bytes(identity)).hexdigest()[:24]
         candidate_identity = {
@@ -177,7 +190,6 @@ class EvidenceUnit:
         candidate_digest = hashlib.sha256(
             _canonical_bytes(candidate_identity)
         ).hexdigest()[:24]
-        normalized_roles = tuple(sorted(set(str(v) for v in roles if v)))
         normalized_certified = tuple(
             sorted(
                 set(
@@ -204,6 +216,7 @@ class EvidenceUnit:
             confidence=round(max(0.0, min(1.0, float(confidence))), 8),
             provenance=tuple(str(v) for v in provenance),
             roles=normalized_roles,
+            issue_roles=normalized_issue_roles,
             certified_roles=normalized_certified,
             source_tokens=max(0, int(source_tokens or 0)),
             signal_class=signal_class or family.value,

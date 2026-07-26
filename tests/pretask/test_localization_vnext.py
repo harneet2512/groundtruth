@@ -1605,6 +1605,352 @@ def test_role_certification_is_not_laundered_across_consolidated_signals(tmp_pat
     assert marginal[0] == 1
 
 
+def test_unrelated_typed_property_cannot_certify_issue_specific_behavior(tmp_path):
+    repo, db = _graph(tmp_path)
+    request = _request(
+        repo,
+        db,
+        "Malformed payloads should return None instead of raising an exception.",
+    )
+    facets = extract_behavior_facets(request)
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO properties VALUES (2,6,'conditional_return','RETRIES > 0',2,1.0)")
+    con.commit()
+    con.row_factory = sqlite3.Row
+    try:
+        unrelated = vnext_engine._property_evidence(con, facets, {6})
+        conditioned = vnext_engine._property_evidence(con, facets, {6}, {6})
+    finally:
+        con.close()
+
+    assert unrelated
+    assert "expected_behavior" in unrelated[0].roles
+    assert "expected_behavior" in unrelated[0].certified_roles
+    assert "expected_behavior" not in unrelated[0].issue_roles
+    assert "expected_behavior" in conditioned[0].issue_roles
+
+
+def test_query_conditioned_candidate_beats_unrelated_generic_fact_in_admission(
+    tmp_path,
+):
+    repo, db = _graph(tmp_path)
+    request = _request(
+        repo,
+        db,
+        "Malformed payloads should return None instead of raising an exception.",
+    )
+    facets = extract_behavior_facets(request)
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO properties VALUES (2,6,'conditional_return','RETRIES > 0',2,1.0)")
+    con.commit()
+    con.row_factory = sqlite3.Row
+    try:
+        unrelated = vnext_engine._property_evidence(con, facets, {6})[0]
+    finally:
+        con.close()
+    relevant = EvidenceUnit.create(
+        file_path="src/parser.py",
+        symbol="JsonParser.parse",
+        start_line=6,
+        end_line=11,
+        family=EvidenceFamily.SEMANTIC,
+        confidence=0.85,
+        provenance=("query_conditioned_fixture",),
+        roles=tuple(facets.required_roles),
+        certified_roles=(),
+        signal_class="lexical+semantic",
+        signal_rank=1,
+    )
+
+    decisions, regions, _coverage, _stopping = vnext_engine._coverage_admit(
+        request,
+        facets,
+        (unrelated, relevant),
+        census_capabilities(request),
+    )
+    by_id = {decision.evidence_id: decision for decision in decisions}
+
+    assert by_id[relevant.evidence_id].action is CandidateAction.ADMIT
+    assert regions[0].file_path == "src/parser.py"
+    assert by_id[unrelated.evidence_id].action is CandidateAction.DEFER
+    assert ReasonCode.NO_ISSUE_CONTRIBUTION in by_id[unrelated.evidence_id].reason_codes
+
+
+def test_issue_conditioned_support_can_certify_same_region_fact(tmp_path):
+    repo, db = _graph(tmp_path)
+    request = replace(
+        _request(
+            repo,
+            db,
+            "Malformed payloads should return None instead of raising an exception.",
+        ),
+        new_evidence=(
+            EvidenceUnit.create(
+                file_path="src/parser.py",
+                symbol="JsonParser.parse",
+                start_line=6,
+                end_line=11,
+                family=EvidenceFamily.SEMANTIC,
+                confidence=0.85,
+                provenance=("query_conditioned_fixture",),
+                roles=("expected_behavior",),
+                issue_roles=("expected_behavior",),
+                certified_roles=(),
+                signal_class="semantic",
+                signal_rank=1,
+            ),
+            EvidenceUnit.create(
+                file_path="src/parser.py",
+                symbol="JsonParser.parse",
+                start_line=6,
+                end_line=11,
+                family=EvidenceFamily.GRAPH,
+                relation="RAISES",
+                confidence=1.0,
+                provenance=("certified_graph_fixture",),
+                roles=("expected_behavior",),
+                issue_roles=(),
+                signal_class="structural",
+                signal_rank=1,
+            ),
+        ),
+    )
+    target = next(
+        unit
+        for unit in discover_candidates(
+            request,
+            extract_behavior_facets(request),
+        )
+        if unit.file_path == "src/parser.py"
+        and unit.symbol == "JsonParser.parse"
+        and unit.start_line == 6
+        and unit.end_line == 11
+    )
+
+    assert "expected_behavior" in target.issue_roles
+    assert "expected_behavior" in target.certified_roles
+    marginal = vnext_engine._marginal(
+        target,
+        covered=set(),
+        required={"expected_behavior"},
+        expected=set(),
+        role_classes={},
+        fused_score=0.0,
+    )
+    assert marginal[0] == 1
+
+
+def test_incremental_relevant_evidence_resolves_role_after_generic_deferral(
+    tmp_path,
+):
+    repo, db = _graph(tmp_path)
+    issue = "Malformed payloads should return None instead of raising an exception."
+    generic = EvidenceUnit.create(
+        file_path="src/config.py",
+        symbol="load_config",
+        start_line=1,
+        end_line=2,
+        family=EvidenceFamily.PROPERTY,
+        confidence=1.0,
+        provenance=("generic_fact_fixture",),
+        roles=("expected_behavior",),
+        issue_roles=(),
+        signal_class="property",
+        signal_rank=1,
+        fact_span=True,
+    )
+    first_request = replace(
+        _request(repo, db, issue),
+        new_evidence=(generic,),
+    )
+    first = localize_vnext(first_request)
+    relevant = EvidenceUnit.create(
+        file_path="src/parser.py",
+        symbol="JsonParser.parse",
+        start_line=6,
+        end_line=11,
+        family=EvidenceFamily.SEMANTIC,
+        confidence=0.85,
+        provenance=("new_search_evidence",),
+        roles=("expected_behavior",),
+        issue_roles=("expected_behavior",),
+        certified_roles=(),
+        signal_class="lexical+semantic",
+        signal_rank=1,
+    )
+    second = localize_vnext(
+        replace(
+            first_request,
+            prior_state=first.state,
+            new_evidence=(generic, relevant),
+        )
+    )
+    decision = next(item for item in second.decisions if item.evidence_id == relevant.evidence_id)
+
+    assert decision.action is CandidateAction.ADMIT
+    assert "expected_behavior" in second.coverage.covered
+    assert second.delta is not None
+    assert relevant.evidence_id in second.delta.newly_accepted
+
+
+def test_model_visible_legacy_rank_is_floor_against_uncertified_new_signals(
+    tmp_path,
+):
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "legacy.py").write_text(
+        "def candidate(value):\n    return value\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "novel.py").write_text(
+        "def possible(value):\n    return value\n",
+        encoding="utf-8",
+    )
+    request = replace(
+        _request(
+            repo,
+            db,
+            "Malformed payloads should return None instead of raising an exception.",
+        ),
+        new_evidence=(
+            EvidenceUnit.create(
+                file_path="src/novel.py",
+                symbol="possible",
+                start_line=1,
+                end_line=2,
+                family=EvidenceFamily.SEMANTIC,
+                confidence=0.85,
+                provenance=("uncertified_new_signal",),
+                roles=("expected_behavior",),
+                certified_roles=(),
+                signal_class="lexical+semantic+structural",
+                signal_rank=1,
+            ),
+        ),
+    )
+
+    discoveries = discover_candidates(
+        request,
+        extract_behavior_facets(request),
+        legacy_discoveries=(
+            {
+                "path": "src/legacy.py",
+                "symbol": "candidate",
+                "score": 0.8,
+                "components": {"lex": 0.8},
+                "legacy_rank": 1,
+                "ranking_prior_only": True,
+            },
+        ),
+    )
+    order = [unit.file_path for unit in discoveries]
+
+    assert order.index("src/legacy.py") < order.index("src/novel.py")
+
+
+def test_model_visible_legacy_top_eight_survive_support_only_novel_files(tmp_path):
+    repo, db = _graph(tmp_path)
+    legacy_paths = [f"src/legacy_{index}.py" for index in range(1, 9)]
+    for path in legacy_paths:
+        (repo / path).write_text(
+            "def candidate(value):\n    return value\n",
+            encoding="utf-8",
+        )
+    novel = []
+    for index in range(1, 10):
+        path = f"src/novel_{index}.py"
+        (repo / path).write_text(
+            "def possible(value):\n    return value\n",
+            encoding="utf-8",
+        )
+        novel.append(
+            EvidenceUnit.create(
+                file_path=path,
+                symbol="possible",
+                start_line=1,
+                end_line=2,
+                family=EvidenceFamily.SEMANTIC,
+                confidence=0.85,
+                provenance=("support_only_novel",),
+                roles=("expected_behavior",),
+                issue_roles=(),
+                certified_roles=(),
+                signal_class="lexical+semantic+structural",
+                signal_rank=index,
+            )
+        )
+    request = replace(
+        _request(
+            repo,
+            db,
+            "Malformed payloads should return None instead of raising an exception.",
+        ),
+        new_evidence=tuple(novel),
+    )
+    priors = tuple(
+        {
+            "path": path,
+            "score": 0.5,
+            "components": {"lex": 0.5},
+            "legacy_rank": rank,
+            "ranking_prior_only": True,
+        }
+        for rank, path in enumerate(legacy_paths, start=1)
+    )
+
+    discoveries = discover_candidates(
+        request,
+        extract_behavior_facets(request),
+        legacy_discoveries=priors,
+    )
+    ranked_files = list(dict.fromkeys(unit.file_path for unit in discoveries))
+
+    assert ranked_files[:8] == legacy_paths
+
+
+def test_hard_provenance_can_override_model_visible_legacy_rank(tmp_path):
+    repo, db = _graph(tmp_path)
+    request = replace(
+        _request(
+            repo,
+            db,
+            "Malformed payloads should return None instead of raising an exception.",
+        ),
+        new_evidence=(
+            EvidenceUnit.create(
+                file_path="src/parser.py",
+                symbol="JsonParser.parse",
+                start_line=8,
+                end_line=8,
+                family=EvidenceFamily.TRACEBACK,
+                confidence=1.0,
+                provenance=("runtime_trace",),
+                roles=("observed_behavior",),
+                issue_roles=("observed_behavior",),
+                signal_class="runtime",
+                signal_rank=1,
+                fact_span=True,
+                explicit_provenance=True,
+            ),
+        ),
+    )
+    discoveries = discover_candidates(
+        request,
+        extract_behavior_facets(request),
+        legacy_discoveries=(
+            {
+                "path": "src/config.py",
+                "score": 0.5,
+                "components": {"lex": 0.5},
+                "legacy_rank": 1,
+                "ranking_prior_only": True,
+            },
+        ),
+    )
+
+    assert discoveries[0].file_path == "src/parser.py"
+    assert discoveries[0].explicit_provenance is True
+
+
 def test_exact_identifier_does_not_claim_observed_behavior(tmp_path):
     repo, db = _graph(tmp_path)
     request = _request(repo, db, "JsonParser.parse returns the wrong value.")
@@ -2039,3 +2385,93 @@ def test_natural_candidate_exhaustion_reports_required_roles_covered(
 
     assert result.coverage.unresolved == ()
     assert result.stopping_reason == "required_roles_covered"
+
+
+def test_issue_roles_outside_descriptive_roles_do_not_change_identity():
+    """Identity must match the normalized state, or state-identical units split."""
+    narrow = EvidenceUnit.create(
+        file_path="src/parser.py",
+        symbol="JsonParser.parse",
+        start_line=6,
+        end_line=11,
+        family=EvidenceFamily.LEXICAL,
+        confidence=0.6,
+        provenance=("identity_fixture",),
+        roles=("expected_behavior",),
+        issue_roles=("expected_behavior",),
+    )
+    overreaching = EvidenceUnit.create(
+        file_path="src/parser.py",
+        symbol="JsonParser.parse",
+        start_line=6,
+        end_line=11,
+        family=EvidenceFamily.LEXICAL,
+        confidence=0.6,
+        provenance=("identity_fixture",),
+        roles=("expected_behavior",),
+        issue_roles=("expected_behavior", "role_not_described_by_this_evidence"),
+    )
+
+    assert narrow.issue_roles == overreaching.issue_roles
+    assert narrow.evidence_id == overreaching.evidence_id
+
+
+def test_prior_only_region_is_marked_and_real_evidence_region_is_not(tmp_path):
+    """Shadow ranking must stay attributable: mark the legacy-prior-only rows."""
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "legacy_only.py").write_text(
+        "def candidate(value):\n    return value\n",
+        encoding="utf-8",
+    )
+    request = replace(
+        _request(
+            repo,
+            db,
+            "Malformed payloads should return None instead of raising an exception.",
+        ),
+        new_evidence=(
+            # Shares the prior's consolidation key AND sorts behind it, so the
+            # marker cannot be inherited from whichever row sorts first.
+            EvidenceUnit.create(
+                file_path="src/parser.py",
+                symbol="",
+                start_line=0,
+                end_line=0,
+                family=EvidenceFamily.SEMANTIC,
+                confidence=0.5,
+                provenance=("shadow_discovery_fixture",),
+                roles=("expected_behavior",),
+                issue_roles=("expected_behavior",),
+                signal_class="semantic",
+                signal_rank=9,
+            ),
+        ),
+    )
+
+    discoveries = discover_candidates(
+        request,
+        extract_behavior_facets(request),
+        legacy_discoveries=(
+            {
+                "path": "src/legacy_only.py",
+                "score": 0.5,
+                "components": {"lex": 0.5},
+                "legacy_rank": 1,
+                "ranking_prior_only": True,
+            },
+            {
+                "path": "src/parser.py",
+                "score": 0.5,
+                "components": {"lex": 0.5},
+                "legacy_rank": 2,
+                "ranking_prior_only": True,
+            },
+        ),
+    )
+    flags = {
+        unit.file_path: dict(unit.metadata).get("ranking_prior_only")
+        for unit in discoveries
+    }
+
+    assert flags["src/legacy_only.py"] == "1"
+    assert flags["src/parser.py"] is None

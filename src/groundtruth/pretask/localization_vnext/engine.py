@@ -1582,6 +1582,21 @@ def _node_evidence(
                         "exact_identifier" if exact else "structured_lexical",
                     ),
                     roles=roles,
+                    issue_roles=(
+                        tuple(
+                            sorted(
+                                set(
+                                    _roles_for(
+                                        facets,
+                                        symbol=symbol,
+                                        file_path=fp,
+                                    )
+                                )
+                            )
+                        )
+                        if exact
+                        else roles
+                    ),
                     source_tokens=0,
                     signal_class="identifier" if exact else "lexical",
                     signal_rank=surface_rank[node_id],
@@ -1603,6 +1618,7 @@ def _node_evidence(
                         else "native_body_bm25",
                     ),
                     roles=roles,
+                    issue_roles=roles,
                     source_tokens=0,
                     signal_class="lexical",
                     signal_rank=fts_rank,
@@ -1630,6 +1646,7 @@ def _node_evidence(
                         "structured_symbol_passage",
                     ),
                     roles=roles,
+                    issue_roles=roles,
                     source_tokens=0,
                     signal_class="semantic",
                     signal_rank=semantic_position,
@@ -1660,6 +1677,7 @@ def _edge_evidence(
     facets: BehaviorFacet,
     node_ids: set[int],
     request: LocalizationRequest,
+    issue_conditioned_node_ids: set[int] | None = None,
 ) -> list[EvidenceUnit]:
     if not node_ids or "edges" not in _table_names(con):
         return []
@@ -1707,6 +1725,7 @@ def _edge_evidence(
         if not trusted and confidence < 0.5:
             continue
         for side in ("source", "target"):
+            side_node_id = int(row[f"{side}_id"])
             fp = _norm(str(row[f"{side}_file"] or ""))
             symbol = str(row[f"{side}_qname"] or row[f"{side}_name"] or "")
             roles = _roles_for(facets, symbol=symbol, file_path=fp, relation=relation)
@@ -1723,6 +1742,9 @@ def _edge_evidence(
                     confidence=confidence if confidence > 0 else (1.0 if trusted else 0.5),
                     provenance=(relation, method or "schema_without_method"),
                     roles=roles,
+                    issue_roles=(
+                        roles if side_node_id in (issue_conditioned_node_ids or set()) else ()
+                    ),
                     source_tokens=0,
                     signal_class="structural",
                     signal_rank=priority_map.get(relation, len(priority_map)) * 1000 + raw_rank,
@@ -1739,6 +1761,7 @@ def _property_evidence(
     con: sqlite3.Connection,
     facets: BehaviorFacet,
     node_ids: set[int],
+    issue_conditioned_node_ids: set[int] | None = None,
 ) -> list[EvidenceUnit]:
     if not node_ids or "properties" not in _table_names(con):
         return []
@@ -1791,6 +1814,9 @@ def _property_evidence(
                 confidence=confidence,
                 provenance=("properties", kind, str(row["value"] or "")),
                 roles=roles,
+                issue_roles=(
+                    roles if int(row["node_id"]) in (issue_conditioned_node_ids or set()) else ()
+                ),
                 source_tokens=0,
                 signal_class="property",
                 signal_rank=rank,
@@ -2060,8 +2086,14 @@ def _legacy_evidence(
             confidence = max(0.5, min(1.0, score)) if score > 0 else 0.5
             start = int(item.get("start_line") or 0)
             end = int(item.get("end_line") or start)
-            roles = _roles_for(facets, symbol=symbol, file_path=str(fp))
-            if not roles and facets.operation:
+            ranking_prior_only = bool(item.get("ranking_prior_only"))
+            legacy_rank = max(1, int(item.get("legacy_rank") or rank))
+            roles = (
+                ()
+                if ranking_prior_only
+                else _roles_for(facets, symbol=symbol, file_path=str(fp))
+            )
+            if not roles and facets.operation and not ranking_prior_only:
                 roles = ("operation",)
             classes: list[tuple[str, EvidenceFamily, tuple[str, ...]]] = []
             if (
@@ -2107,10 +2139,19 @@ def _legacy_evidence(
                         confidence=confidence,
                         provenance=provenance,
                         roles=roles,
+                        issue_roles=() if ranking_prior_only else roles,
                         certified_roles=(),
                         source_tokens=0,
                         signal_class=signal_class,
                         signal_rank=rank,
+                        metadata=(
+                            (
+                                ("legacy_rank", str(legacy_rank)),
+                                ("ranking_prior_only", "1"),
+                            )
+                            if ranking_prior_only
+                            else ()
+                        ),
                     )
                 )
             continue
@@ -2180,6 +2221,7 @@ def _legacy_evidence(
                 confidence=confidence,
                 provenance=tuple(provenance),
                 roles=roles,
+                issue_roles=roles,
                 certified_roles=(),
                 source_tokens=0,
                 signal_class=signal_class,
@@ -2219,12 +2261,40 @@ def discover_candidates(
     if con is not None:
         try:
             nodes, node_ids = _node_evidence(con, facets, request)
+            issue_conditioned_node_ids = {
+                int(dict(unit.metadata)["node_id"])
+                for unit in nodes
+                if unit.issue_roles
+                and unit.family
+                in {
+                    EvidenceFamily.IDENTIFIER,
+                    EvidenceFamily.LEXICAL,
+                    EvidenceFamily.NODE_FTS,
+                    EvidenceFamily.BODY_BM25,
+                }
+                and dict(unit.metadata).get("node_id", "").isdigit()
+            }
             discovery_was_truncated = bool(
                 getattr(nodes, "truncated", False)
             )
             evidence.extend(nodes)
-            evidence.extend(_edge_evidence(con, facets, node_ids, request))
-            evidence.extend(_property_evidence(con, facets, node_ids))
+            evidence.extend(
+                _edge_evidence(
+                    con,
+                    facets,
+                    node_ids,
+                    request,
+                    issue_conditioned_node_ids,
+                )
+            )
+            evidence.extend(
+                _property_evidence(
+                    con,
+                    facets,
+                    node_ids,
+                    issue_conditioned_node_ids,
+                )
+            )
         finally:
             con.close()
     if "derived_relationships" not in request.policy.disabled_components:
@@ -2264,8 +2334,22 @@ def discover_candidates(
     ) -> tuple[Any, ...]:
         key, support = item
         path, symbol, start, end, fact_span = key
+        legacy_ranks = [
+            int(value)
+            for unit in support
+            for name, value in unit.metadata
+            if name == "legacy_rank" and value.isdigit()
+        ]
+        legacy_rank = min(legacy_ranks) if legacy_ranks else None
+        issue_certified = any(
+            set(unit.certified_roles) & set(unit.issue_roles)
+            for unit in support
+        )
         return (
             0 if any(unit.explicit_provenance for unit in support) else 1,
+            0 if legacy_rank is not None else 1,
+            legacy_rank if legacy_rank is not None else request.policy.max_candidates + 1,
+            0 if issue_certified else 1,
             -fused.get(path, 0.0),
             0 if fact_span else 1,
             min(unit.signal_rank for unit in support),
@@ -2300,6 +2384,9 @@ def discover_candidates(
         )
         best = support[0]
         roles = tuple(sorted({role for unit in support for role in unit.roles}))
+        issue_roles = tuple(
+            sorted({role for unit in support for role in unit.issue_roles})
+        )
         certified_roles = tuple(
             sorted(
                 {
@@ -2312,12 +2399,34 @@ def discover_candidates(
         classes = tuple(sorted({unit.signal_class for unit in support}))
         families = tuple(sorted({unit.family.value for unit in support}))
         relations = tuple(sorted({unit.relation for unit in support if unit.relation}))
-        metadata = tuple(best.metadata) + (
-            ("fused_rrf_score", f"{fused.get(path, 0.0):.12f}"),
-            ("supporting_signal_classes", ",".join(classes)),
-            ("supporting_families", ",".join(families)),
-            ("supporting_relations", ",".join(relations)),
-            ("support_count", str(len(support))),
+        legacy_ranks = [
+            int(value)
+            for unit in support
+            for name, value in unit.metadata
+            if name == "legacy_rank" and value.isdigit()
+        ]
+        # A region carried ONLY by model-visible legacy ranking priors is the
+        # recall-first floor, not a vNext discovery. Mark it deterministically
+        # (never from whichever support row happened to sort first) so shadow
+        # ranking stays attributable to the engine that produced it.
+        prior_only = all(
+            dict(unit.metadata).get("ranking_prior_only") == "1" for unit in support
+        )
+        metadata = (
+            tuple(
+                (name, value)
+                for name, value in best.metadata
+                if name not in {"legacy_rank", "ranking_prior_only"}
+            )
+            + (
+                ("fused_rrf_score", f"{fused.get(path, 0.0):.12f}"),
+                ("supporting_signal_classes", ",".join(classes)),
+                ("supporting_families", ",".join(families)),
+                ("supporting_relations", ",".join(relations)),
+                ("support_count", str(len(support))),
+            )
+            + ((("legacy_rank", str(min(legacy_ranks))),) if legacy_ranks else ())
+            + ((("ranking_prior_only", "1"),) if prior_only else ())
         )
         consolidated.append(
             EvidenceUnit.create(
@@ -2334,6 +2443,7 @@ def discover_candidates(
                     )
                 ),
                 roles=roles,
+                issue_roles=issue_roles,
                 certified_roles=certified_roles,
                 source_tokens=best.source_tokens,
                 signal_class="+".join(classes),
@@ -2410,7 +2520,7 @@ def _bounded_region(
                 symbol=unit.symbol,
                 start_line=0,
                 end_line=0,
-                roles=unit.roles,
+                roles=unit.issue_roles,
                 selection_reason="explicit_new_file_path",
                 line_count=0,
                 char_count=0,
@@ -2434,7 +2544,7 @@ def _bounded_region(
                 1,
                 len(lines),
                 unit.symbol,
-                unit.roles,
+                unit.issue_roles,
                 "source_region_ablation_full_file",
             )
         except OSError:
@@ -2517,7 +2627,7 @@ def _bounded_region(
             start,
             end,
             unit.symbol,
-            unit.roles,
+            unit.issue_roles,
             reason,
         )
     except OSError:
@@ -2639,7 +2749,7 @@ def _marginal(
     role_classes: dict[str, set[str]],
     fused_score: float,
 ) -> tuple[int, int, int, int, int, int, int]:
-    roles = set(unit.roles)
+    roles = set(unit.issue_roles)
     unit_classes = {
         signal_class
         for signal_class in unit.signal_class.split("+")
@@ -2844,7 +2954,7 @@ def _coverage_admit(
             other.evidence_id != unit.evidence_id
             and other.evidence_id not in wrapper_ids
             and region_cache.get(other.evidence_id) is not None
-            and bool(set(other.roles) & set(unit.roles) & (required | expected))
+            and bool(set(other.issue_roles) & set(unit.issue_roles) & (required | expected))
             for other in candidates
         )
     }
@@ -2863,7 +2973,7 @@ def _coverage_admit(
         role
         for unit in candidates
         if region_cache.get(unit.evidence_id) is not None
-        for role in unit.roles
+        for role in unit.issue_roles
     }
     unavailable = _capability_unavailable_roles(
         required,
@@ -2893,7 +3003,7 @@ def _coverage_admit(
                     unit.evidence_id,
                     CandidateAction.ADMIT,
                     (ReasonCode.NEW_PATH_OR_FACT,),
-                    tuple(sorted(set(unit.roles) & (required | expected))),
+                    tuple(sorted(set(unit.issue_roles) & (required | expected))),
                 )
                 admitted_regions.append(region)
                 used_tokens += region.source_tokens
@@ -2955,20 +3065,24 @@ def _coverage_admit(
         )
         marginal, unit = ranked[0]
         candidates.remove(unit)
-        new_roles = (set(unit.roles) & (target_required | expected)) - covered
+        new_roles = (set(unit.issue_roles) & (target_required | expected)) - covered
         positive = any(value > 0 for value in marginal[:4])
         if not positive:
             decisions[unit.evidence_id] = CandidateDecision(
                 unit.evidence_id,
                 CandidateAction.DEFER,
-                (ReasonCode.REDUNDANT if set(unit.roles) & covered else ReasonCode.NO_ISSUE_CONTRIBUTION,),
+                (
+                    ReasonCode.REDUNDANT
+                    if set(unit.issue_roles) & covered
+                    else ReasonCode.NO_ISSUE_CONTRIBUTION,
+                ),
                 (),
                 marginal,
             )
             for remainder in candidates:
                 remainder_reason = (
                     ReasonCode.REDUNDANT
-                    if set(remainder.roles) & covered
+                    if set(remainder.issue_roles) & covered
                     else ReasonCode.NO_ISSUE_CONTRIBUTION
                 )
                 decisions[remainder.evidence_id] = CandidateDecision(
@@ -3031,7 +3145,7 @@ def _coverage_admit(
                     if signal_class
                 }
                 <= role_classes.get(role, set())
-                for role in set(unit.roles) & target_required
+                for role in set(unit.issue_roles) & target_required
             )
             else ReasonCode.NEW_PATH_OR_FACT
         )
@@ -3046,7 +3160,7 @@ def _coverage_admit(
         admitted_regions.append(region)
         used_tokens += region.source_tokens
         covered.update(new_roles)
-        for role in unit.roles:
+        for role in unit.issue_roles:
             role_classes[role].update(
                 signal_class
                 for signal_class in unit.signal_class.split("+")
@@ -3058,7 +3172,11 @@ def _coverage_admit(
             decisions[unit.evidence_id] = CandidateDecision(
                 unit.evidence_id,
                 CandidateAction.DEFER,
-                (ReasonCode.REDUNDANT if set(unit.roles) & covered else ReasonCode.NO_ISSUE_CONTRIBUTION,),
+                (
+                    ReasonCode.REDUNDANT
+                    if set(unit.issue_roles) & covered
+                    else ReasonCode.NO_ISSUE_CONTRIBUTION,
+                ),
             )
     for unit in evidence:
         if unit.evidence_id not in decisions:
