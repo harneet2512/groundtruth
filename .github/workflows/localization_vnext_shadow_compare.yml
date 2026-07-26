@@ -1,6 +1,15 @@
 name: "Localization vNext shadow comparison (offline, sealed gold)"
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/localization_vnext_shadow_compare.yml"
+      - "scripts/compare_localization_vnext.py"
+      - "scripts/localization_vnext_oss_compare.py"
+      - "src/groundtruth/pretask/graph_localizer.py"
+      - "src/groundtruth/pretask/v7_4_brief.py"
+      - "src/groundtruth/pretask/localization_vnext/**"
+      - "tests/pretask/test_localization_vnext*.py"
   workflow_dispatch:
     inputs:
       gt_substrate_digest:
@@ -19,6 +28,12 @@ on:
         description: "Determinism repeats per case (minimum 3 enforced by runner)"
         required: false
         default: "3"
+
+env:
+  GT_LOC_SUBSTRATE: ${{ inputs.gt_substrate_digest || 'ghcr.io/harneet2512/gt-substrate@sha256:4b30af5bdd2d8e6615b05bd6f73559583fac559f0574abf417e5e1f53757db44' }}
+  GT_LOC_CASES_FILE: ${{ inputs.cases_file || 'oss_all60_cases.json' }}
+  GT_LOC_REPOS_FILE: ${{ inputs.repos_file || 'oss_all60_repos.json' }}
+  GT_LOC_REPEATS: ${{ inputs.repeats || '3' }}
 
 permissions:
   contents: read
@@ -40,8 +55,8 @@ jobs:
 
       - name: Prepare gold-free deterministic shard
         env:
-          CASES_FILE: ${{ inputs.cases_file }}
-          REPOS_FILE: ${{ inputs.repos_file }}
+          CASES_FILE: ${{ env.GT_LOC_CASES_FILE }}
+          REPOS_FILE: ${{ env.GT_LOC_REPOS_FILE }}
           LANGUAGE: ${{ matrix.language }}
           SHARD: ${{ matrix.shard }}
         run: |
@@ -64,7 +79,7 @@ jobs:
 
       - name: Clone exact pinned repositories for shard
         env:
-          REPOS_FILE: ${{ inputs.repos_file }}
+          REPOS_FILE: ${{ env.GT_LOC_REPOS_FILE }}
         run: |
           python scripts/localization_vnext_oss_compare.py clone \
             --input /tmp/vnext_input/cases.input.json \
@@ -73,7 +88,7 @@ jobs:
 
       - name: Pull pinned substrate
         env:
-          DIGEST: ${{ inputs.gt_substrate_digest }}
+          DIGEST: ${{ env.GT_LOC_SUBSTRATE }}
         run: |
           [ -n "$DIGEST" ] || { echo "::error::no substrate digest"; exit 1; }
           echo "${{ secrets.GITHUB_TOKEN }}" |
@@ -84,8 +99,8 @@ jobs:
 
       - name: Seal legacy and vNext outputs without gold
         env:
-          DIGEST: ${{ inputs.gt_substrate_digest }}
-          REPEATS: ${{ inputs.repeats }}
+          DIGEST: ${{ env.GT_LOC_SUBSTRATE }}
+          REPEATS: ${{ env.GT_LOC_REPEATS }}
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE/src/groundtruth:/opt/gt/src/groundtruth:ro" \
@@ -142,7 +157,7 @@ jobs:
 
       - name: Load gold only after sealing and score paired results
         env:
-          CASES_FILE: ${{ inputs.cases_file }}
+          CASES_FILE: ${{ env.GT_LOC_CASES_FILE }}
         run: |
           python scripts/localization_vnext_oss_compare.py score \
             --cases "benchmarks/data/$CASES_FILE" \
