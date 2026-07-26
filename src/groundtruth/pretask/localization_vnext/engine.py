@@ -1109,6 +1109,8 @@ def _explicit_path_evidence(
 
 
 class _TruncationAwareList(list[Any]):
+    semantic_executed: bool = False
+
     """A list that preserves whether an upstream candidate pool was cut."""
 
     def __init__(self, values: Iterable[Any], *, total_count: int) -> None:
@@ -1533,24 +1535,19 @@ def _node_evidence(
             for anchor in facets.anchor_symbols
         )
         base_roles = set(_roles_for(facets, symbol=symbol, file_path=fp))
-        if (
-            node_id in fts_signals
-            and facets.issue_mode == "behavior_described"
-        ):
-            # A body/name match is candidate evidence that this symbol may
-            # implement the described behavior. It may cover issue roles for
-            # admission, but its 0.6 confidence remains below certification.
-            base_roles.update(
-                role
-                for role in facets.required_roles
-                if role not in {"actor", "architectural_boundary"}
-            )
+        # A body/name match is candidate evidence that this symbol may implement
+        # the behavior the issue asks about. It may COVER issue roles for
+        # admission; its 0.6 confidence keeps it below certification, which is
+        # what stops it laundering. This is the ONLY source of `expected_behavior`
+        # now that no structural fact grants it, so gating it on
+        # issue_mode == "behavior_described" starved the 27/60 symbol_anchored /
+        # explicit_path / traceback cases of any way to satisfy a role they
+        # require - measured as gold admission 21/52 -> 16/52.
+        query_retrieved = node_id in fts_signals
         semantic = semantic_rank.get(f"{fp}::{symbol}")
-        if (
-            semantic is not None
-            and semantic[1] > 0.0
-            and facets.issue_mode == "behavior_described"
-        ):
+        if semantic is not None and semantic[1] > 0.0:
+            query_retrieved = True
+        if query_retrieved:
             base_roles.update(
                 role
                 for role in facets.required_roles
@@ -1649,17 +1646,19 @@ def _node_evidence(
                     ),
                 )
             )
-    return (
-        _TruncationAwareList(
-            evidence,
-            total_count=(
-                len(evidence) + 1
-                if node_pool_total > len(node_ids)
-                else len(evidence)
-            ),
+    emitted = _TruncationAwareList(
+        evidence,
+        total_count=(
+            len(evidence) + 1
+            if node_pool_total > len(node_ids)
+            else len(evidence)
         ),
-        node_ids,
     )
+    # An execution witness, not a score: did the semantic leg RUN at all? A
+    # capability reported from file presence alone fails open, and a dark leg
+    # then reads as an ordinary retrieval miss.
+    emitted.semantic_executed = bool(semantic_rank)
+    return emitted, node_ids
 
 
 def _edge_evidence(
@@ -2224,6 +2223,9 @@ def _legacy_evidence(
 class _DiscoveredCandidates(list[EvidenceUnit]):
     """Public-list-compatible discovery batch with honest truncation metadata."""
 
+    semantic_executed: bool = False
+
+
     def __init__(
         self,
         values: Iterable[EvidenceUnit],
@@ -2243,6 +2245,7 @@ def discover_candidates(
 ) -> list[EvidenceUnit]:
     evidence: list[EvidenceUnit] = []
     discovery_was_truncated = False
+    semantic_executed = False
     evidence.extend(_explicit_path_evidence(request, facets))
     evidence.extend(_traceback_evidence(request, facets))
     evidence.extend(_legacy_evidence(legacy_discoveries, facets, request.policy))
@@ -2250,6 +2253,7 @@ def discover_candidates(
     if con is not None:
         try:
             nodes, node_ids = _node_evidence(con, facets, request)
+            semantic_executed = bool(getattr(nodes, "semantic_executed", False))
             discovery_was_truncated = bool(
                 getattr(nodes, "truncated", False)
             )
@@ -2422,7 +2426,7 @@ def discover_candidates(
                 metadata=metadata,
             )
         )
-    return _DiscoveredCandidates(
+    batch = _DiscoveredCandidates(
         consolidated,
         total_count=max(
             len(ranked_regions),
@@ -2433,6 +2437,8 @@ def discover_candidates(
             ),
         ),
     )
+    batch.semantic_executed = semantic_executed
+    return batch
 
 
 def fuse_by_evidence_class(evidence: Iterable[EvidenceUnit], k: int = 60) -> dict[str, float]:
@@ -2745,17 +2751,25 @@ def _marginal(
             and bool(new_required or (roles & expected - covered))
         )
     )
-    duplicate_penalty = 0
     token_utility = -max(0, unit.source_tokens)
     fused_rank = int(round(fused_score * 1_000_000))
+    # Novelty is a hard CONSTRAINT; relevance is the OBJECTIVE. Ordering the
+    # coverage bookkeeping ahead of retrieval relevance let a region that merely
+    # carried a required role LABEL take the slot from the region retrieval
+    # ranked first - measured on run 30191986149, where gold sat at rank #1 with
+    # 7x the fused score and was deferred as redundant for a vendored two-line
+    # span. Among candidates that add something new, deliver the most relevant.
+    contributes = int(
+        certified > 0 or independent > 0 or new_expected > 0 or new_fact > 0
+    )
     return (
+        contributes,
+        fused_rank,
         certified,
         independent,
         new_expected,
         new_fact,
-        -duplicate_penalty,
         token_utility,
-        fused_rank,
     )
 
 
@@ -3035,7 +3049,7 @@ def _coverage_admit(
         marginal, unit = ranked[0]
         candidates.remove(unit)
         new_roles = (set(unit.issue_roles) & (target_required | expected)) - covered
-        positive = any(value > 0 for value in marginal[:4])
+        positive = marginal[0] > 0
         if not positive:
             decisions[unit.evidence_id] = CandidateDecision(
                 unit.evidence_id,
@@ -3100,11 +3114,11 @@ def _coverage_admit(
             break
         reason = (
             ReasonCode.NEW_MANDATORY_CERTIFIED
-            if marginal[0] > 0
-            else ReasonCode.NEW_MANDATORY_INDEPENDENT
-            if marginal[1] > 0
-            else ReasonCode.NEW_EXPECTED
             if marginal[2] > 0
+            else ReasonCode.NEW_MANDATORY_INDEPENDENT
+            if marginal[3] > 0
+            else ReasonCode.NEW_EXPECTED
+            if marginal[4] > 0
             else ReasonCode.INDEPENDENT_CONFIRMATION
             if any(
                 role in covered
@@ -3463,6 +3477,20 @@ def _localize_vnext_traced(
         evidence = discover_candidates(
             request, facets, legacy_discoveries=legacy_discoveries
         )
+        if capabilities.available.get("frozen_semantic") and not getattr(
+            evidence, "semantic_executed", False
+        ):
+            # Claimed from file presence, never executed. Downgrade it so the
+            # roles it would have covered are reported UNAVAILABLE (missing
+            # instrumentation) rather than an ordinary retrieval miss.
+            capabilities = replace(
+                capabilities,
+                available={**capabilities.available, "frozen_semantic": False},
+                unavailable={
+                    **capabilities.unavailable,
+                    "frozen_semantic": "declared_but_never_executed",
+                },
+            )
         discovery_done = time.perf_counter()
         decisions, regions, coverage, stopping_reason = _coverage_admit(
             request, facets, evidence, capabilities

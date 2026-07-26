@@ -1603,7 +1603,8 @@ def test_role_certification_is_not_laundered_across_consolidated_signals(tmp_pat
         role_classes={},
         fused_score=0.0,
     )
-    assert marginal[0] == 1
+    # index 2 is `certified` since novelty/relevance lead the tuple
+    assert marginal[2] == 1
 
 
 def test_unrelated_typed_property_cannot_certify_issue_specific_behavior(tmp_path):
@@ -1753,7 +1754,8 @@ def test_certification_is_never_lent_across_units_at_one_region(tmp_path):
         role_classes={},
         fused_score=0.0,
     )
-    assert marginal[0] == 0
+    # index 2 is `certified`: it must be 0, certification was not lent
+    assert marginal[2] == 0
 
 
 def test_incremental_relevant_evidence_resolves_role_after_generic_deferral(
@@ -2706,3 +2708,156 @@ def test_engine_survives_a_graph_with_no_edges_properties_or_fts(tmp_path):
     assert int(result.metrics.get("leakage_count") or 0) == 0
     assert result.stopping_reason
     assert set(result.coverage.covered) <= set(result.coverage.required)
+
+
+def test_query_retrieval_can_cover_expected_behavior_in_every_issue_mode(
+    tmp_path, monkeypatch
+):
+    """`expected_behavior` must be coverable wherever it is required.
+
+    It is a required role in 55/60 corpus cases, and no purely structural fact
+    may grant it. If the only source is gated on issue_mode == behavior_described
+    then the 27/60 symbol_anchored / explicit_path / traceback cases can never
+    satisfy their own required role - the engine starves and stops at the rail
+    with expected_behavior unresolved. Measured: gold admission fell 21/52 ->
+    16/52 when that was the case.
+    """
+    repo, db = _graph(tmp_path)
+    # A retrieval hit on the gold symbol, identical in both modes.
+    monkeypatch.setattr(
+        vnext_engine,
+        "_fts_candidate_signals",
+        lambda con, request: {4: ((EvidenceFamily.BODY_BM25, 1, 9.5),)},
+    )
+
+    covered = {}
+    for mode, issue in (
+        ("symbol_anchored", "JsonParser.parse() should return None for malformed payloads."),
+        ("behavior_described", "Malformed payloads should return None instead of raising an exception."),
+    ):
+        request = _request(repo, db, issue)
+        facets = extract_behavior_facets(request)
+        assert facets.issue_mode == mode
+        assert "expected_behavior" in facets.required_roles
+        con = sqlite3.connect(db)
+        con.row_factory = sqlite3.Row
+        try:
+            units, _ids = vnext_engine._node_evidence(con, facets, request)
+        finally:
+            con.close()
+        covered[mode] = any(
+            "expected_behavior" in unit.issue_roles
+            and unit.confidence < 0.9  # uncertified: it may cover, never certify
+            for unit in units
+        )
+
+    assert covered["behavior_described"], "regression: the described mode lost its cover"
+    assert covered["symbol_anchored"], (
+        "a query-retrieved node cannot cover expected_behavior in symbol_anchored "
+        "mode, so 27/60 corpus cases can never satisfy their own required role"
+    )
+
+
+def test_admission_prefers_the_more_relevant_region_over_a_labelled_one(tmp_path):
+    """Relevance leads; role coverage gates. The MMR shape, not label-first.
+
+    Measured failure this encodes (run 30191986149, ext2_py_geopandas_file_io_driver):
+    the engine RANKED gold #1 and then admitted `versioneer.py:1823-1824` - a
+    vendored build script - because that span carried a certified role LABEL and
+    `fused_rank` sat last in the lexicographic marginal. Coverage then reported
+    unresolved=[] and all 493 remaining candidates, gold included, were deferred
+    as redundant. Selection, not retrieval, is the defect.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "vendored.py").write_text("def _v():\n    raise E()\n", encoding="utf-8")
+    (repo / "src" / "target.py").write_text(
+        "def parse(value):\n    if not value:\n        raise ParseError(value)\n    return value\n",
+        encoding="utf-8",
+    )
+    request = _request(
+        repo,
+        db,
+        "Malformed payloads should return None instead of raising an exception.",
+    )
+    facets = extract_behavior_facets(request)
+    roles = tuple(r for r in facets.required_roles if r not in {"actor"})
+    assert roles, "fixture must require at least one coverable role"
+
+    # A tiny vendored span carrying the role LABEL, certified, but retrieved by
+    # exactly one weak signal class.
+    labelled_noise = EvidenceUnit.create(
+        file_path="vendored.py",
+        symbol="_v",
+        start_line=1,
+        end_line=2,
+        family=EvidenceFamily.GRAPH,
+        relation="RAISES",
+        confidence=1.0,
+        provenance=("RAISES", "typed"),
+        roles=roles,
+        # TWO signal classes: this is what slams the `independent_confirmation`
+        # escape valve shut (it needs len(role_classes[role]) == 1), which is why
+        # gold at rank #1 was deferred as redundant in the real run.
+        signal_class="lexical+structural",
+        signal_rank=90,
+        fact_span=True,
+    )
+    # The region retrieval actually ranks first, across three independent classes.
+    relevant = EvidenceUnit.create(
+        file_path="src/target.py",
+        symbol="parse",
+        start_line=1,
+        end_line=4,
+        family=EvidenceFamily.BODY_BM25,
+        confidence=0.6,
+        provenance=("native_body_bm25",),
+        roles=roles,
+        signal_class="lexical+semantic+identifier",
+        signal_rank=1,
+    )
+
+    decisions, regions, _coverage, _stop = vnext_engine._coverage_admit(
+        request,
+        facets,
+        (labelled_noise, relevant),
+        census_capabilities(request),
+    )
+    by_id = {d.evidence_id: d for d in decisions}
+
+    assert by_id[relevant.evidence_id].action is CandidateAction.ADMIT, (
+        "the region retrieval ranked first was not admitted; a labelled vendored "
+        "span took the slot"
+    )
+    assert [r.file_path for r in regions][:1] == ["src/target.py"]
+
+
+def test_semantic_capability_is_execution_backed_not_file_presence(tmp_path, monkeypatch):
+    """A capability may only be reported available if it actually RAN.
+
+    Production failure this encodes: `census_capabilities` derives
+    `frozen_semantic` from the presence of an .onnx file on disk
+    (engine.py:626-628). Across three sealed runs the embedder encoded ZERO
+    passages on 0/60, 16/60 and 8/60 cases while the artifact still reported
+    frozen_semantic=True - so roles only the semantic leg could cover were
+    reported as an ordinary retrieval miss instead of missing instrumentation,
+    and the legacy control arm moved between runs undetected.
+    """
+    repo, db = _graph(tmp_path)
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "fake.onnx").write_bytes(b"not a real model")
+    monkeypatch.setenv("GT_MODELS_ROOT", str(models))
+    # The census must claim it, on file presence alone.
+    request = _request(repo, db, "Malformed payloads should return None instead of raising.")
+    assert census_capabilities(request).available["frozen_semantic"] is True
+
+    # ... but nothing can load it, so the leg never executes.
+    from groundtruth.pretask import graph_localizer as legacy_localizer
+
+    monkeypatch.setattr(legacy_localizer, "_EMBEDDER", None, raising=False)
+    result = localize_vnext(request)
+
+    assert int(result.metrics.get("structured_semantic_encoded_count") or 0) == 0
+    assert result.capabilities.available["frozen_semantic"] is False, (
+        "the run reported a semantic capability that never executed"
+    )
