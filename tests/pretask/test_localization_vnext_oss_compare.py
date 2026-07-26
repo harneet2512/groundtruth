@@ -4,10 +4,22 @@ import json
 from pathlib import Path
 
 from scripts.localization_vnext_oss_compare import (
+    _repository_root_for_script,
     prepare_shard,
     score_sealed_artifacts,
     validate_sealed_case_ids,
 )
+
+
+def test_root_mounted_runner_uses_working_directory_as_repository_root():
+    assert _repository_root_for_script(
+        Path("/runner.py"),
+        cwd=Path("/opt/gt"),
+    ) == Path("/opt/gt")
+    assert _repository_root_for_script(
+        Path("/workspace/scripts/localization_vnext_oss_compare.py"),
+        cwd=Path("/ignored"),
+    ) == Path("/workspace")
 
 
 def test_prepare_shard_is_stable_and_strips_all_gold_fields():

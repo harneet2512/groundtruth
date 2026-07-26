@@ -21,7 +21,19 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+
+def _repository_root_for_script(
+    script_path: Path,
+    *,
+    cwd: Path | None = None,
+) -> Path:
+    parent = script_path.parent
+    if parent.name == "scripts":
+        return parent.parent
+    return cwd or Path.cwd()
+
+
+REPO_ROOT = _repository_root_for_script(Path(__file__))
 GT_SRC = Path(os.environ.get("GT_SRC", str(REPO_ROOT / "src")))
 sys.path.insert(0, str(GT_SRC))
 
