@@ -114,13 +114,36 @@ def _mean_bool(rows: Sequence[Mapping[str, Any]], side: str, key: str) -> float:
     return statistics.fmean(values) if values else 0.0
 
 
-def _mean_numeric(rows: Sequence[Mapping[str, Any]], side: str, key: str) -> float:
-    values = [
-        float(row[side][key])
+def _paired_means(rows: Sequence[Mapping[str, Any]], key: str) -> dict[str, Any]:
+    """Mean old/new over exactly the rows where BOTH arms measured ``key``.
+
+    Aggregating each arm over its own rows puts two different populations on
+    the two sides of one gate: a row that scores old and not new (or the
+    reverse) moves one mean only, so the gate can read "no regression" while
+    the new arm is worse on every row the two arms actually share.  With no
+    comparable row the metric is UNMEASURED - None, never a measured 0.0.
+    """
+    paired = [
+        row
         for row in rows
-        if row[side].get(key) is not None
+        if row["old"].get(key) is not None and row["new"].get(key) is not None
     ]
-    return statistics.fmean(values) if values else 0.0
+    if not paired:
+        return {"old": None, "new": None, "paired_cases": 0}
+    return {
+        "old": statistics.fmean(float(row["old"][key]) for row in paired),
+        "new": statistics.fmean(float(row["new"][key]) for row in paired),
+        "paired_cases": len(paired),
+    }
+
+
+def _regressed(paired: Mapping[str, Any]) -> bool:
+    """An UNMEASURED metric can neither show a regression nor clear one."""
+    old_value = paired["old"]
+    new_value = paired["new"]
+    if old_value is None or new_value is None:
+        return False
+    return float(new_value) + 1e-12 < float(old_value)
 
 
 def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -151,16 +174,27 @@ def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "verdict": "INCONCLUSIVE",
             "reason": "random_primary_comparison_set_unavailable",
         }
+    # Count the languages the corpus ACTUALLY contains, not a fixed five-tuple.
+    # Keying the gate off `_EXPECTED_LANGUAGES` made it unsatisfiable on any
+    # corpus missing one of them - permanently so on a monolingual corpus - and
+    # it returned before computing a single metric. Verified against the real
+    # completed run 30196352388: 0/60 rows are region_scorable, so this gate
+    # short-circuited and hit@1, hit@8, precision, latency and memory were never
+    # evaluated on ANY run in the corpus's history.
+    present_languages = {
+        str(row.get("language") or "unknown") for row in scorable
+    } or {"unknown"}
     language_counts = {
         language: sum(1 for row in region_scorable if row.get("language") == language)
-        for language in _EXPECTED_LANGUAGES
+        for language in sorted(present_languages)
     }
-    if any(count < 3 for count in language_counts.values()):
-        return {
-            "verdict": "INCONCLUSIVE",
-            "reason": "fewer_than_three_region_scorable_cases",
-            "language_counts": language_counts,
-        }
+    # Region-level gold is a SEPARATE capability from retrieval. Its absence
+    # makes region metrics UNMEASURED - it does not make retrieval unjudgeable.
+    region_gold_available = bool(region_scorable) and all(
+        count >= 3 for count in language_counts.values()
+    )
+    if not region_gold_available:
+        region_scorable = []
 
     # The locked random split is the primary comparison set for aggregate
     # retrieval gates. Held/ext2 rows remain diagnostic and contribute to the
@@ -179,20 +213,11 @@ def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if new_rate + 1e-12 < old_rate:
             per_language_regression = True
 
-    old_symbol = _mean_numeric(region_scorable, "old", "symbol_recall")
-    new_symbol = _mean_numeric(region_scorable, "new", "symbol_recall")
-    old_line = _mean_numeric(region_scorable, "old", "line_recall")
-    new_line = _mean_numeric(region_scorable, "new", "line_recall")
-    old_precision = _mean_numeric(scorable, "old", "file_precision")
-    new_precision = _mean_numeric(scorable, "new", "file_precision")
-    old_symbol_precision = _mean_numeric(scorable, "old", "symbol_precision")
-    new_symbol_precision = _mean_numeric(scorable, "new", "symbol_precision")
-    old_region_precision = _mean_numeric(
-        region_scorable, "old", "region_precision"
-    )
-    new_region_precision = _mean_numeric(
-        region_scorable, "new", "region_precision"
-    )
+    symbol_recall = _paired_means(region_scorable, "symbol_recall")
+    line_recall = _paired_means(region_scorable, "line_recall")
+    file_precision = _paired_means(scorable, "file_precision")
+    symbol_precision = _paired_means(scorable, "symbol_precision")
+    region_precision = _paired_means(region_scorable, "region_precision")
 
     old_latency = _percentile(
         [float(row["old"]["latency_ms"]) for row in scorable], 0.95
@@ -213,11 +238,11 @@ def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         new_h1 + 1e-12 < old_h1
         or new_h8 + 1e-12 < old_h8
         or per_language_regression
-        or new_symbol + 1e-12 < old_symbol
-        or new_line + 1e-12 < old_line
-        or new_precision + 1e-12 < old_precision
-        or new_symbol_precision + 1e-12 < old_symbol_precision
-        or new_region_precision + 1e-12 < old_region_precision
+        or _regressed(symbol_recall)
+        or _regressed(line_recall)
+        or _regressed(file_precision)
+        or _regressed(symbol_precision)
+        or _regressed(region_precision)
         or latency_ratio > 1.25 + 1e-12
         or memory_ratio > 1.25 + 1e-12
     )
@@ -238,17 +263,13 @@ def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "random_primary_hit_at_1": {"old": old_h1, "new": new_h1},
         "random_primary_hit_at_8": {"old": old_h8, "new": new_h8},
         "per_language_hit_at_8": per_language_h8,
-        "symbol_recall": {"old": old_symbol, "new": new_symbol},
-        "line_recall": {"old": old_line, "new": new_line},
-        "file_precision": {"old": old_precision, "new": new_precision},
-        "symbol_precision": {
-            "old": old_symbol_precision,
-            "new": new_symbol_precision,
-        },
-        "region_precision": {
-            "old": old_region_precision,
-            "new": new_region_precision,
-        },
+        # Each paired metric carries the population it was computed on, so a
+        # metric no case could score reads as unmeasured instead of as a tie.
+        "symbol_recall": symbol_recall,
+        "line_recall": line_recall,
+        "file_precision": file_precision,
+        "symbol_precision": symbol_precision,
+        "region_precision": region_precision,
         "p95_latency_ratio": latency_ratio,
         "p95_memory_ratio": memory_ratio,
         "old_median_implied_inspection_tokens": old_token_median,
@@ -553,6 +574,44 @@ def _shadow_legacy_candidates(
     ]
 
 
+def _input_digests(repository_root: str, graph_db: str) -> dict[str, Any]:
+    """Hash every input that can move the result, so drift is visible IN the artifact.
+
+    Two runs on identical DECLARED inputs produced different legacy answers
+    (Hit@1 30 vs 32, legacy file list differing in 9/60 cases) because the frozen
+    embedder silently encoded nothing on 16/60 cases. Nothing in the sealed schema
+    could reveal that; it was found only by diffing two runs. Content digests make
+    the same drift a one-line comparison. Note the graph digest is over CONTENT,
+    not (size, mtime) - a same-size rewrite must change it.
+    """
+    digest = ""
+    size = 0
+    try:
+        raw = Path(graph_db).read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        size = len(raw)
+    except OSError:
+        digest = ""
+    embedder: dict[str, Any] = {"model_root": os.getenv("GT_MODELS_ROOT", ""), "files": []}
+    try:
+        root = Path(embedder["model_root"] or (Path(__file__).resolve().parents[4] / "models"))
+        if root.is_dir():
+            embedder["files"] = sorted(
+                {
+                    f"{path.name}:{path.stat().st_size}"
+                    for path in root.rglob("*.onnx")
+                }
+            )
+    except OSError:
+        pass
+    return {
+        "graph_db_sha256": digest,
+        "graph_db_bytes": size,
+        "repository_root": _norm(str(repository_root)),
+        "embedder": embedder,
+    }
+
+
 def _shadow_only_ranked_files(discoveries: Sequence[Any]) -> list[str]:
     """The shadow engine's own file order, with the legacy floor removed.
 
@@ -798,6 +857,9 @@ def run_sealed_case(
             "split": str(case_input.get("split") or "unknown"),
             "issue_sha256": hashlib.sha256(issue.encode("utf-8")).hexdigest(),
             "revision_identity": revision,
+            # Content digests of every input that can move the result, so
+            # inter-run drift is a one-line comparison instead of a two-run diff.
+            "input_digests": _input_digests(repo, graph),
         },
         "legacy": {
             **legacy_projection,
@@ -867,12 +929,38 @@ def run_sealed_case(
     }
 
 
+def _same_file(candidate: str, gold: str) -> bool:
+    """The one notion of "same file" every scorer in this module uses.
+
+    A candidate may carry a checkout/worktree prefix the gold path does not
+    (``checkout/src/a.py`` for gold ``src/a.py``), so a candidate whose trailing
+    path SEGMENTS are exactly the gold path is the same file.  The reverse
+    direction is not a match: a shallower candidate (``utils.py``) is a
+    DIFFERENT file from a deeper gold path (``src/deep/utils.py``), and the old
+    bidirectional rule credited that wrong file as gold - which on multi-file
+    gold inflates recall, precision and rank alike.
+    """
+    left = _norm(candidate)
+    right = _norm(gold)
+    return left == right or left.endswith("/" + right)
+
+
 def _matches(path: str, gold: set[str]) -> bool:
-    normalized = _norm(path)
-    return normalized in gold or any(
-        normalized.endswith("/" + candidate) or candidate.endswith("/" + normalized)
-        for candidate in gold
-    )
+    return any(_same_file(path, candidate) for candidate in gold)
+
+
+def _matched_gold(files: Sequence[str], gold: Iterable[str]) -> set[str]:
+    """The GOLD paths a candidate list covers - the recall NUMERATOR.
+
+    Recall is |matched gold files| / |gold files|.  Counting matching
+    CANDIDATES instead lets several candidate spellings of one gold file report
+    full recall while most of the gold is missed, and can exceed 1.0.
+    """
+    return {
+        gold_path
+        for gold_path in gold
+        if any(_same_file(path, gold_path) for path in files)
+    }
 
 
 def _rank(files: Sequence[str], gold: set[str]) -> int | None:
@@ -896,8 +984,12 @@ def score_sealed_case(
     old_rank = _rank(old_files, gold_files)
     new_rank = _rank(new_ranked_files, gold_files)
     shadow_only_rank = _rank(shadow_only_files, gold_files)
-    old_hits = {path for path in old_files if _matches(path, gold_files)}
+    # `new_hits` is the candidate-side set, used only by the candidate-side
+    # ratio `admitted_file_precision`.  RECALL counts GOLD files covered - the
+    # matching-candidate count is not a recall numerator.
     new_hits = {path for path in new_files if _matches(path, gold_files)}
+    old_gold_hits = _matched_gold(old_files, gold_files)
+    new_gold_hits = _matched_gold(new_files, gold_files)
 
     gold_symbols = {
         str(symbol) for symbol in gold.get("gold_symbols", ()) if str(symbol)
@@ -918,11 +1010,14 @@ def score_sealed_case(
     new_symbol_recall = (
         len(new_symbols & gold_symbols) / len(gold_symbols) if gold_symbols else None
     )
-    old_symbol_precision = (
-        len(old_symbols & gold_symbols) / len(old_symbols)
-        if gold_symbols and old_symbols
-        else None
-    )
+    # UNSCORABLE, not zero.  `old_symbols` is every identifier-like token
+    # scraped out of witness PROSE ("set_fields calls set_parse [CALLS]",
+    # "defines Foo (issue symbol)"), so the denominator counted words like
+    # "calls", "defines" and "unverified" - a text statistic, not a symbol set.
+    # The legacy model-visible surface exposes no parsed symbols to derive a
+    # comparable denominator from (`run_v74.ranked_full` rows are file-level),
+    # so prose tokens must not be scored against parsed gold symbols at all.
+    old_symbol_precision = None
     new_symbol_precision = (
         len(new_symbols & gold_symbols) / len(new_symbols)
         if gold_symbols and new_symbols
@@ -967,14 +1062,25 @@ def score_sealed_case(
         len(matched_gold_lines) / len(gold_lines) if gold_lines else None
     )
     # Legacy full-file inspection necessarily covers every gold line in any
-    # admitted gold file, but not lines in a missed file.
+    # admitted gold file, but not lines in a missed file.  Line recall and
+    # region recall must decide "the legacy arm delivered this gold file" the
+    # same way: exact string membership said no to `checkout/src/a.py` for gold
+    # `src/a.py` while the region scorer's suffix rule said yes, so one scorer
+    # held two notions of "same file".
+    range_files = {path for path, _start, _end in normalized_ranges}
+    old_covered_range_files = _matched_gold(old_files, range_files)
     old_line_recall = (
-        len({line for line in gold_lines if line[0] in old_hits}) / len(gold_lines)
+        len({line for line in gold_lines if line[0] in old_covered_range_files})
+        / len(gold_lines)
         if gold_lines
         else None
     )
     old_region_recall = (
-        sum(1 for path, _start, _end in normalized_ranges if _matches(path, old_hits))
+        sum(
+            1
+            for path, _start, _end in normalized_ranges
+            if path in old_covered_range_files
+        )
         / len(normalized_ranges)
         if normalized_ranges
         else None
@@ -994,8 +1100,15 @@ def score_sealed_case(
         if normalized_ranges
         else None
     )
+    # Both arms must report the SAME ratio.  The legacy arm delivers whole
+    # files, so each delivered file IS one region spanning its file, and that
+    # region overlaps a gold range exactly when the file holds one.  The old
+    # form counted gold-FILE hits over delivered FILES and put that against the
+    # new arm's gold-RANGE overlaps over delivered REGIONS - two different
+    # ratios on the two sides of one gate.
     old_region_precision = (
-        len(old_hits) / len(old_files)
+        sum(1 for path in old_files if _matches(path, range_files))
+        / len(old_files)
         if normalized_ranges and old_files
         else None
     )
@@ -1038,7 +1151,7 @@ def score_sealed_case(
             "hit_at_1": old_rank == 1,
             "hit_at_3": old_rank is not None and old_rank <= 3,
             "hit_at_8": old_rank is not None and old_rank <= 8,
-            "file_recall": len({_norm(path) for path in old_hits}) / len(gold_files)
+            "file_recall": len(old_gold_hits) / len(gold_files)
             if gold_files
             else None,
             "file_precision": (
@@ -1064,7 +1177,7 @@ def score_sealed_case(
             "hit_at_1": new_rank == 1,
             "hit_at_3": new_rank is not None and new_rank <= 3,
             "hit_at_8": new_rank is not None and new_rank <= 8,
-            "file_recall": len({_norm(path) for path in new_hits}) / len(gold_files)
+            "file_recall": len(new_gold_hits) / len(gold_files)
             if gold_files
             else None,
             "file_precision": (

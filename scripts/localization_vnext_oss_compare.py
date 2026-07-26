@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """GitHub-sharded, gold-sealed OSS comparison for localization vNext.
 
-The ``prepare`` phase strips every gold field before a case manifest can enter
-the sealing container.  ``seal`` indexes pinned repositories and runs legacy
-and vNext localization without a gold-bearing input.  Only the separate
-``score`` phase reads the original manifest and joins gold to already-sealed
-artifacts.
+The ``prepare`` phase emits exactly ``_INPUT_KEYS`` per case and rejects any
+other field, so every gold field -- including one added to the corpus after
+this file was written -- is stripped before a case manifest can enter the
+sealing container.  ``seal`` indexes pinned repositories and runs legacy and
+vNext localization without a gold-bearing input.  Only the separate ``score``
+phase reads the original manifest and joins gold to already-sealed artifacts.
 """
 from __future__ import annotations
 
@@ -43,6 +44,9 @@ from groundtruth.pretask.localization_vnext.comparison import (  # noqa: E402
     score_sealed_case,
 )
 
+# The engine-visible allowlist. An allowlist, not a denylist: a gold field added
+# to the corpus later is excluded by default instead of leaking until someone
+# remembers to name it.
 _INPUT_KEYS = (
     "id",
     "issue_text",
@@ -164,6 +168,18 @@ def _write_json(path: Path, payload: Any) -> None:
     os.replace(temporary, path)
 
 
+def _input_only(row: Mapping[str, Any]) -> dict[str, str]:
+    """Fail closed unless a prepared row carries exactly the allowed keys."""
+    unexpected = sorted(set(row) - set(_INPUT_KEYS))
+    missing = sorted(set(_INPUT_KEYS) - set(row))
+    if unexpected or missing:
+        raise ValueError(
+            "prepared case must carry exactly _INPUT_KEYS "
+            f"(unexpected={unexpected} missing={missing})"
+        )
+    return {key: str(row[key]) for key in _INPUT_KEYS}
+
+
 def _infer_split(case_id: str, explicit: str = "") -> str:
     if explicit:
         return explicit
@@ -207,17 +223,19 @@ def prepare_shard(
         if repo is None:
             raise ValueError(f"repository metadata missing for {repo_name}")
         output.append(
-            {
-                "id": case_id,
-                "issue_text": str(case.get("issue_text") or ""),
-                "repo": repo_name,
-                "revision_identity": str(repo.get("commit") or ""),
-                "language": str(case.get("language") or "unknown").lower(),
-                "split": _infer_split(
-                    case_id,
-                    str(case.get("split") or ""),
-                ),
-            }
+            _input_only(
+                {
+                    "id": case_id,
+                    "issue_text": str(case.get("issue_text") or ""),
+                    "repo": repo_name,
+                    "revision_identity": str(repo.get("commit") or ""),
+                    "language": str(case.get("language") or "unknown").lower(),
+                    "split": _infer_split(
+                        case_id,
+                        str(case.get("split") or ""),
+                    ),
+                }
+            )
         )
     return output
 

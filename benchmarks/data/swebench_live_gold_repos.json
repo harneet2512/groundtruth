@@ -1,0 +1,1178 @@
+{
+  "aiogram__aiogram-1594": {
+    "commit": "51beb4825723c83947377738d9fd449aa2f7d746",
+    "url": "https://github.com/aiogram/aiogram"
+  },
+  "amoffat__sh-744": {
+    "commit": "b658ce261b56c02cb8635416d310ca8f30f4dc90",
+    "url": "https://github.com/amoffat/sh"
+  },
+  "arviz-devs__arviz-2413": {
+    "commit": "0fc11178e3802de9e2e6557ce455cced9a22974f",
+    "url": "https://github.com/arviz-devs/arviz"
+  },
+  "aws-cloudformation__cfn-lint-3749": {
+    "commit": "07652d4a4133e825aeeb09973398575b25713c82",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3764": {
+    "commit": "0d7df0385cfa566a29c2ba73188224fb15d93889",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3768": {
+    "commit": "8e463fb9af11adc21906049c369a023a30e67d1f",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3770": {
+    "commit": "a5672f0746161e808e2ea187f17322433bd0baab",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3789": {
+    "commit": "74847b145d63e7038752db93efd5ef5d4f9bd75e",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3798": {
+    "commit": "d5c3da9efaa4bbd1d24fa768752df3da343b1d33",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3805": {
+    "commit": "88efb088fba2669db30df083285c826ded400cae",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3817": {
+    "commit": "76c134c5a20c443b01fb023c514487e713c784ab",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3821": {
+    "commit": "9d83f3fb144cf8034fb5d1e9de4cc26d89814686",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3854": {
+    "commit": "6d083eb39b802592c5faba5a91c4782f7d831f8c",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3855": {
+    "commit": "58dc21c83ff28a683cbbf5cede11a916a2ff77e6",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3856": {
+    "commit": "19192ef6a075bab14d6af4a73c295711a7db9b0e",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3862": {
+    "commit": "30ecbc1fe4ffe2dd3690071f891352e15419b874",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3866": {
+    "commit": "30ecbc1fe4ffe2dd3690071f891352e15419b874",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3875": {
+    "commit": "8454bc9a7146e2b648090e866d09054589070599",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3890": {
+    "commit": "700563cda182416a6c99af4bcaa96077c2412465",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-3947": {
+    "commit": "5c274fa0c3a5f5e85c7e71a0e53b9ea5b3428bf8",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-4002": {
+    "commit": "e6278b452a0d2b4080068ee61d99d613d5273f37",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-4009": {
+    "commit": "03f148d7e3c80a9354b5ccf30423a321b85979a9",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-4016": {
+    "commit": "651367020b0ad6243677e8c280758208889b74db",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-4023": {
+    "commit": "0bf508f3474e5f4b4a5ace8a1412bc450fb0bae0",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-4032": {
+    "commit": "7351d0cf7087d759dd24b06190cb759ec3381da6",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-4051": {
+    "commit": "1863011580c054a6bffa6b94bd0d876df393da35",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "beancount__beancount-931": {
+    "commit": "a0e6f445fbf0d101602a4b6d886d6320971587b6",
+    "url": "https://github.com/beancount/beancount"
+  },
+  "beetbox__beets-5457": {
+    "commit": "03f1205629ad17f123a190040361babc41c18afc",
+    "url": "https://github.com/beetbox/beets"
+  },
+  "beetbox__beets-5495": {
+    "commit": "fa10dcf11add0afd3b4b22af29f8d504e7ef8a0a",
+    "url": "https://github.com/beetbox/beets"
+  },
+  "beetbox__beets-5682": {
+    "commit": "1cec93e695a09ddcff3dcb69192e72746a079cd4",
+    "url": "https://github.com/beetbox/beets"
+  },
+  "beeware__briefcase-2075": {
+    "commit": "98b3cb01f6865550eb083646d3f9e4e5dfcfda82",
+    "url": "https://github.com/beeware/briefcase"
+  },
+  "beeware__briefcase-2085": {
+    "commit": "4005202304fdef04a5e87de2e8b09c9de506dcae",
+    "url": "https://github.com/beeware/briefcase"
+  },
+  "beeware__briefcase-2088": {
+    "commit": "d7befc67ad35d4aca37e6b36ba62950e71068efb",
+    "url": "https://github.com/beeware/briefcase"
+  },
+  "beeware__briefcase-2214": {
+    "commit": "bfe5f893f4f2bd7e8256fd229cbfefb27c2dddc1",
+    "url": "https://github.com/beeware/briefcase"
+  },
+  "bridgecrewio__checkov-6895": {
+    "commit": "a94c1682b275bbf755342c0164d2ac0c379c0c16",
+    "url": "https://github.com/bridgecrewio/checkov"
+  },
+  "bridgecrewio__checkov-7002": {
+    "commit": "8b0f288ae10065b5f40673d904f2204c5a3ec770",
+    "url": "https://github.com/bridgecrewio/checkov"
+  },
+  "conan-io__conan-17092": {
+    "commit": "f31647f3ef2feaabc91b2875d540ae48d2a4a4c8",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17102": {
+    "commit": "2e3f51782056b6665560f9af6166e30d7c2801ab",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17117": {
+    "commit": "384eb0faf82bfc514b644469ba042da341fefaf7",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17123": {
+    "commit": "1e42a99a1d6225f320a4938fcd7a778a88a8b410",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17129": {
+    "commit": "e25b357d6eab29fcb64ee04340f2d0d479ea09bf",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17132": {
+    "commit": "d8db468afbac9410d0ba5209ac9c4a58224c3864",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17183": {
+    "commit": "dfcb68114157b49eb4bbbf56190a7518237ea2ed",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17266": {
+    "commit": "dba212f7e335b931561d0a71152703226af85d8d",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17292": {
+    "commit": "7ea2b7bcee377f4ae7baccc8126730d25e5fbc83",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17300": {
+    "commit": "7728bc9722a12c758b4cc2f39cf656a0497e5583",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17301": {
+    "commit": "7728bc9722a12c758b4cc2f39cf656a0497e5583",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17302": {
+    "commit": "6c620e8ef8e2222f2e3c2d9cadb90b1527d4045a",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17326": {
+    "commit": "b325a4bb87ffaa994a289826621941e9673db284",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17366": {
+    "commit": "a6bd8fbefb205ebdb67a76729b1d2324eb540271",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17382": {
+    "commit": "aa4920ec0935511b0f3d8f57040b70c00996e0c4",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17408": {
+    "commit": "6765af055555c60f2170352e3f2d809a101d351a",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17514": {
+    "commit": "13d4c3d91bf1ec7c1ebe36cf2b1f6874a319ef25",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17517": {
+    "commit": "003e2cfb746dbc83370758c192edacebd761472b",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17520": {
+    "commit": "13d4c3d91bf1ec7c1ebe36cf2b1f6874a319ef25",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17532": {
+    "commit": "e9e4bb13e821470f28411742f1de179a796bc005",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17538": {
+    "commit": "5aedd8e94beafaf95df5379b5035dca60e3faff7",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17708": {
+    "commit": "85cf3434d5f016b26d9f1b26a02c8c6d8ee8282b",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17725": {
+    "commit": "328b8dcaa5a5d69827a62c1062fdcaec91b3125e",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17781": {
+    "commit": "0017c296b27770cbf8dfbfc6422bb37f13970b62",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17819": {
+    "commit": "c1ff7590f233ba7a2338c705028eae98c7234dde",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17917": {
+    "commit": "3678ee1976d6a33af17462ddd0be2a8921077c8e",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17923": {
+    "commit": "ad8ff14bdd6b80ed9fd1c619b479f8a5c0838bab",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17967": {
+    "commit": "f31a78f057c05c20482965cbdf21a79a9db04c45",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-18028": {
+    "commit": "d8b5ebca42a32be615b938627a0601c2cb59e68f",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-18037": {
+    "commit": "1f112d48a2829dd8f274275bb1a5cc0a11379f62",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "cyclotruc__gitingest-115": {
+    "commit": "96bc3958a3b3409e009c80d7ac89a97c4c9520fa",
+    "url": "https://github.com/cyclotruc/gitingest"
+  },
+  "cyclotruc__gitingest-134": {
+    "commit": "8137ce10649526820efe752ff81eefabbea8ee23",
+    "url": "https://github.com/cyclotruc/gitingest"
+  },
+  "cyclotruc__gitingest-94": {
+    "commit": "2125765025c65fdd2aec89856bdc095dfb0fc826",
+    "url": "https://github.com/cyclotruc/gitingest"
+  },
+  "deepset-ai__haystack-8489": {
+    "commit": "906177329bcc54f6946af361fcd3d0e334e6ce5f",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8525": {
+    "commit": "911f3523ab94472bd9a1f8ecbd2493437058daee",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8609": {
+    "commit": "3da5bac8c4743c59940e857d5d7a0552604d3fa9",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8619": {
+    "commit": "248dccbdd341941b988b622c51c26d1b9af66876",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8725": {
+    "commit": "26b80778f52246214efe72b777d548f85d810198",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8799": {
+    "commit": "503d275ade85e04efed787ec421bdc55a5a77abf",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8879": {
+    "commit": "de3d0a23e816d54717a7542a9a1a1f2eb7a7eaec",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8940": {
+    "commit": "db4f23771abb41e598ad65041c997d72d6268dd9",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8969": {
+    "commit": "830e7497c3a23cfd3354665ec6c77cec0e8105b3",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8973": {
+    "commit": "9da6696a45c0141715cd95030c861c3e9f3f40cf",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8981": {
+    "commit": "c4fafd9b04a6d0988a23ecda626c2473891ef7e5",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8992": {
+    "commit": "c4fafd9b04a6d0988a23ecda626c2473891ef7e5",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8993": {
+    "commit": "c4fafd9b04a6d0988a23ecda626c2473891ef7e5",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8997": {
+    "commit": "c037052581a1caef3287332635ca73bcd3bb07ea",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-9027": {
+    "commit": "4edefe3e56d1656298c3f9a767da2e5292551432",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-9066": {
+    "commit": "db50579bbfdd89aeaf17b73d0dcd50b5ea93f1dc",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "delgan__loguru-1297": {
+    "commit": "e310e2029102b5d63a679a2b64501c045aa86336",
+    "url": "https://github.com/Delgan/loguru"
+  },
+  "delgan__loguru-1306": {
+    "commit": "3cfd03fb6fd2176b90ad14223408f3c4ec803cb6",
+    "url": "https://github.com/Delgan/loguru"
+  },
+  "dynaconf__dynaconf-1225": {
+    "commit": "39acdeef6424bf7e336ff71cf3a04540b92e2fcd",
+    "url": "https://github.com/dynaconf/dynaconf"
+  },
+  "dynaconf__dynaconf-1238": {
+    "commit": "9a834e069fd04cffadbb2d2e3ccc70342a872252",
+    "url": "https://github.com/dynaconf/dynaconf"
+  },
+  "dynaconf__dynaconf-1241": {
+    "commit": "105e6312f8ce3414ba0bebf88ad6e35b3953df38",
+    "url": "https://github.com/dynaconf/dynaconf"
+  },
+  "dynaconf__dynaconf-1249": {
+    "commit": "71ea887ade58f57cbc5b37f311188bfb7cda8ca5",
+    "url": "https://github.com/dynaconf/dynaconf"
+  },
+  "encode__starlette-2812": {
+    "commit": "f13d354e18141cea9041ffad603d98197d880a73",
+    "url": "https://github.com/encode/starlette"
+  },
+  "facebookresearch__hydra-3005": {
+    "commit": "0ede84058e57a40260a93ae4f9abe08a572b23e0",
+    "url": "https://github.com/facebookresearch/hydra"
+  },
+  "falconry__falcon-2366": {
+    "commit": "06fdf2885d70149803dbc47324ae8c951b7e58b3",
+    "url": "https://github.com/falconry/falcon"
+  },
+  "feast-dev__feast-5036": {
+    "commit": "48a4285b3a91bd6e490d6562591de612b96a5e02",
+    "url": "https://github.com/feast-dev/feast"
+  },
+  "flexget__flexget-4244": {
+    "commit": "be3c243f9968122cd23543b22d597352922c6bfa",
+    "url": "https://github.com/Flexget/Flexget"
+  },
+  "flexget__flexget-4306": {
+    "commit": "05c34fe1d7028d6a81e94e4dce99bfc62efd1e91",
+    "url": "https://github.com/Flexget/Flexget"
+  },
+  "fonttools__fonttools-3682": {
+    "commit": "e04dfaab53c54b83096222993b914dc62e483156",
+    "url": "https://github.com/fonttools/fonttools"
+  },
+  "fonttools__fonttools-3726": {
+    "commit": "7ad7cfd0588e6ee67bdfc0f1bc2e43dd4503e44d",
+    "url": "https://github.com/fonttools/fonttools"
+  },
+  "geopandas__geopandas-3471": {
+    "commit": "b96d3e05238c615d87bd9042b057e4b08d030313",
+    "url": "https://github.com/geopandas/geopandas"
+  },
+  "hiyouga__llama-factory-7505": {
+    "commit": "f54733460427cf2b126b8b8737fdd732c0e19d9c",
+    "url": "https://github.com/hiyouga/LLaMA-Factory"
+  },
+  "huggingface__smolagents-285": {
+    "commit": "bd08d6485daad3a8eba8d22ca0c185c6653acf2c",
+    "url": "https://github.com/huggingface/smolagents"
+  },
+  "huggingface__smolagents-405": {
+    "commit": "022947a2a587483ac897f403f52a1e0a50f53667",
+    "url": "https://github.com/huggingface/smolagents"
+  },
+  "huggingface__smolagents-731": {
+    "commit": "84089bcc57adb3ab0937e91ae8ec7f53f2131b25",
+    "url": "https://github.com/huggingface/smolagents"
+  },
+  "huggingface__smolagents-843": {
+    "commit": "bf3686e59347320c95503573979a4fc3ad6be9ab",
+    "url": "https://github.com/huggingface/smolagents"
+  },
+  "icloud-photos-downloader__icloud_photos_downloader-1060": {
+    "commit": "337ea77aefb5c1189681a2971c037caeeec43f51",
+    "url": "https://github.com/icloud-photos-downloader/icloud_photos_downloader"
+  },
+  "instructlab__instructlab-2526": {
+    "commit": "22b88e7d3866ca5410bb2ecfd3081486d0566dc5",
+    "url": "https://github.com/instructlab/instructlab"
+  },
+  "instructlab__instructlab-2540": {
+    "commit": "bcf450d0eb712309fa22fd23073ddfba51d575e8",
+    "url": "https://github.com/instructlab/instructlab"
+  },
+  "instructlab__instructlab-2548": {
+    "commit": "cbd5be02c6694252263fc627a3078db8693a4f38",
+    "url": "https://github.com/instructlab/instructlab"
+  },
+  "instructlab__instructlab-2572": {
+    "commit": "cd72f110dd6bff4a6b85e26637106d8b90746ccd",
+    "url": "https://github.com/instructlab/instructlab"
+  },
+  "instructlab__instructlab-2585": {
+    "commit": "b56e1ae626617a1e5982126302e0e4c2abd7e649",
+    "url": "https://github.com/instructlab/instructlab"
+  },
+  "instructlab__instructlab-2592": {
+    "commit": "11237883edfd33e9c41abdb869b449160bc1dbbf",
+    "url": "https://github.com/instructlab/instructlab"
+  },
+  "instructlab__instructlab-2825": {
+    "commit": "e0a1e8ce2fa10b9730dc9f6b3d4036f4e63947d9",
+    "url": "https://github.com/instructlab/instructlab"
+  },
+  "instructlab__instructlab-2886": {
+    "commit": "2fd5adb8fec09c51cbd607e4e852f2c1d4293348",
+    "url": "https://github.com/instructlab/instructlab"
+  },
+  "instructlab__instructlab-2927": {
+    "commit": "5e7c7b4d53ce320a4de201c31c4fdd153ab207bc",
+    "url": "https://github.com/instructlab/instructlab"
+  },
+  "instructlab__instructlab-3060": {
+    "commit": "ac7cc07f8f6c7ffb8860d9b799c4b85aaacf11ae",
+    "url": "https://github.com/instructlab/instructlab"
+  },
+  "instructlab__instructlab-3118": {
+    "commit": "a060edf190c8820adb8428678fb923f184aa42a4",
+    "url": "https://github.com/instructlab/instructlab"
+  },
+  "ipython__ipython-14695": {
+    "commit": "b8220b5b975e3f4e19d078033aa1e68da28e2c9b",
+    "url": "https://github.com/ipython/ipython"
+  },
+  "ipython__ipython-14798": {
+    "commit": "801c9adb94b213fc5e8cacb0d9920a0ff7727c2e",
+    "url": "https://github.com/ipython/ipython"
+  },
+  "ipython__ipython-14822": {
+    "commit": "a6a4b0a85d70677937f7fd83c23185384d4f7827",
+    "url": "https://github.com/ipython/ipython"
+  },
+  "ipython__ipython-14838": {
+    "commit": "978324813ce6a4a39156c549436b89eb22944038",
+    "url": "https://github.com/ipython/ipython"
+  },
+  "iterative__dvc-10711": {
+    "commit": "31270c14e30901ae5b178f72c67a83efe070768c",
+    "url": "https://github.com/iterative/dvc"
+  },
+  "jazzband__tablib-613": {
+    "commit": "70775bc922602ae535e0b2e525f6926030334ab8",
+    "url": "https://github.com/jazzband/tablib"
+  },
+  "joke2k__faker-2142": {
+    "commit": "6edfdbf6ae90b0153309e3bf066aa3b2d16494a7",
+    "url": "https://github.com/joke2k/faker"
+  },
+  "joke2k__faker-2155": {
+    "commit": "da39d8262b1b4a3d88c3bf934c047deca354b01e",
+    "url": "https://github.com/joke2k/faker"
+  },
+  "joke2k__faker-2162": {
+    "commit": "adae52da073f306f94183aec3b92b4333fead930",
+    "url": "https://github.com/joke2k/faker"
+  },
+  "joke2k__faker-2173": {
+    "commit": "7186962a1607332682dc1dad4e2b0d7c97825b84",
+    "url": "https://github.com/joke2k/faker"
+  },
+  "joke2k__faker-2190": {
+    "commit": "2a1053c5ca995c30d52f60ae575f8bb2ef92b0d2",
+    "url": "https://github.com/joke2k/faker"
+  },
+  "jupyterlab__jupyter-ai-1022": {
+    "commit": "bf52423a81254009e9be6ca1b89a3f4c6e49ed49",
+    "url": "https://github.com/jupyterlab/jupyter-ai"
+  },
+  "jupyterlab__jupyter-ai-1125": {
+    "commit": "922712c2f7136fba9b6e7c077bc8d19053230ec3",
+    "url": "https://github.com/jupyterlab/jupyter-ai"
+  },
+  "jupyterlab__jupyter-ai-1294": {
+    "commit": "0e2c4e41ffdc4c35132840d97135664843c9fe2a",
+    "url": "https://github.com/jupyterlab/jupyter-ai"
+  },
+  "kedro-org__kedro-4387": {
+    "commit": "46259b9f5b89a226d47e2119afb40ad7b4fa5e63",
+    "url": "https://github.com/kedro-org/kedro"
+  },
+  "kedro-org__kedro-4406": {
+    "commit": "a565d6607d1d16933dbb1ea42cfb9de39ef80980",
+    "url": "https://github.com/kedro-org/kedro"
+  },
+  "kedro-org__kedro-4408": {
+    "commit": "1536a2aa652b50fe4447a96dadadec8312698a4c",
+    "url": "https://github.com/kedro-org/kedro"
+  },
+  "kedro-org__kedro-4427": {
+    "commit": "c68072270c5cd888f945d6812b0fffdd823a698c",
+    "url": "https://github.com/kedro-org/kedro"
+  },
+  "kedro-org__kedro-4580": {
+    "commit": "769629fb23c19a7629ee8b1ae97940665d6d57bf",
+    "url": "https://github.com/kedro-org/kedro"
+  },
+  "keras-team__keras-20389": {
+    "commit": "c31fad7b695faad63108c39bd008da9681bd8183",
+    "url": "https://github.com/keras-team/keras"
+  },
+  "keras-team__keras-20396": {
+    "commit": "1cc1eb5856cb05675e242a617dba8c047eb77dbb",
+    "url": "https://github.com/keras-team/keras"
+  },
+  "keras-team__keras-20443": {
+    "commit": "f9ea1a013c29e24001dc6cb7b10d9f740545fe58",
+    "url": "https://github.com/keras-team/keras"
+  },
+  "keras-team__keras-20534": {
+    "commit": "a93828a94f105909f9398c00d2cddf4ac43197ac",
+    "url": "https://github.com/keras-team/keras"
+  },
+  "keras-team__keras-20609": {
+    "commit": "1597013645bfcd31207d31b969193b458ce85626",
+    "url": "https://github.com/keras-team/keras"
+  },
+  "keras-team__keras-20880": {
+    "commit": "465a3d2247f6f4deaa702989688de9caeae5c585",
+    "url": "https://github.com/keras-team/keras"
+  },
+  "keras-team__keras-21072": {
+    "commit": "d865f5f0f2b7862afb96a4bf3dabdd0d464e5da9",
+    "url": "https://github.com/keras-team/keras"
+  },
+  "koxudaxi__datamodel-code-generator-2259": {
+    "commit": "0def44efc13ac98ecef691daf217a31f6c459812",
+    "url": "https://github.com/koxudaxi/datamodel-code-generator"
+  },
+  "koxudaxi__datamodel-code-generator-2327": {
+    "commit": "2edac1defc9ba641a91cd96dd2d06ab5419faf62",
+    "url": "https://github.com/koxudaxi/datamodel-code-generator"
+  },
+  "koxudaxi__datamodel-code-generator-2349": {
+    "commit": "9585ee54932bc135a05a6617d039d4f994daa7a3",
+    "url": "https://github.com/koxudaxi/datamodel-code-generator"
+  },
+  "kozea__weasyprint-2300": {
+    "commit": "ca74c8e81ce48b0f7b838492cab8634b9f1d33b7",
+    "url": "https://github.com/Kozea/WeasyPrint"
+  },
+  "kozea__weasyprint-2303": {
+    "commit": "d0fcb3c49700a43fd04f9030becbb59640f0ebdf",
+    "url": "https://github.com/Kozea/WeasyPrint"
+  },
+  "kozea__weasyprint-2387": {
+    "commit": "9dc5ac4337b09df8c28b6d678485a4894d354970",
+    "url": "https://github.com/Kozea/WeasyPrint"
+  },
+  "kozea__weasyprint-2398": {
+    "commit": "20197135f56dcd886248e671058933c14cdf5f78",
+    "url": "https://github.com/Kozea/WeasyPrint"
+  },
+  "kozea__weasyprint-2405": {
+    "commit": "fb462618190e87b4f0dec0bb677bcdea40b448a7",
+    "url": "https://github.com/Kozea/WeasyPrint"
+  },
+  "kubernetes-client__python-2303": {
+    "commit": "4da83df8f0c0b97554e2f8a130218ca3b1396062",
+    "url": "https://github.com/kubernetes-client/python"
+  },
+  "matplotlib__matplotlib-28933": {
+    "commit": "cf84d9a6410dec07f57916905c9f54bf00d22b2e",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "matplotlib__matplotlib-29007": {
+    "commit": "235bf97906db7bb3dca3fcc646b3895982c95810",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "matplotlib__matplotlib-29249": {
+    "commit": "eec68e40db9e2de2a592cdd6956443b2534bb37f",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "matplotlib__matplotlib-29258": {
+    "commit": "6a84a5d408ee2fff112223e8ead94ef6ebfe9c2d",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "matplotlib__matplotlib-29285": {
+    "commit": "7405482fdf3eba989ceb27e6ea71968e356d0b33",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "matplotlib__matplotlib-29388": {
+    "commit": "ba32c7e8e263675431b49d6eae71e7fa3945d286",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "matplotlib__matplotlib-29431": {
+    "commit": "419b66158881af9da5b9b4d8f84b77f7a9c46105",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "matplotlib__matplotlib-29486": {
+    "commit": "ae2115c1456956fbc7073736b0999bf2d7342b2d",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "matplotlib__matplotlib-29537": {
+    "commit": "29f3a5ca0bd366d5bffebfcfba6181af322041b3",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "matplotlib__matplotlib-29689": {
+    "commit": "0b7a88a967ce8d02284dd4c7e47889ccc0bbcbf0",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "matplotlib__matplotlib-29721": {
+    "commit": "92935966250922b21f688947593da7d1d15b4efc",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "matplotlib__matplotlib-29781": {
+    "commit": "c887ecbc753763ff4232041cc84c9c6a44d20fd4",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "mikedh__trimesh-2354": {
+    "commit": "1493543559f9a56366052b74003cccf06900fe27",
+    "url": "https://github.com/mikedh/trimesh"
+  },
+  "mikedh__trimesh-2363": {
+    "commit": "a7a68157aefdeaa2e58b99980e3f3b6abdae2884",
+    "url": "https://github.com/mikedh/trimesh"
+  },
+  "modelcontextprotocol__python-sdk-167": {
+    "commit": "08042c3307bdd0d4a66b0dd3200f38222f447b1e",
+    "url": "https://github.com/modelcontextprotocol/python-sdk"
+  },
+  "modelcontextprotocol__python-sdk-222": {
+    "commit": "2628e01f4b892b9c59f3bdd2abbad718c121c87a",
+    "url": "https://github.com/modelcontextprotocol/python-sdk"
+  },
+  "pallets__flask-5626": {
+    "commit": "62c56e08c43f5eb174d15dd050591cfba9aed548",
+    "url": "https://github.com/pallets/flask"
+  },
+  "pallets__flask-5637": {
+    "commit": "10bdf61a0f751f3cb000f8f8ac5ac5b4bb535677",
+    "url": "https://github.com/pallets/flask"
+  },
+  "patroni__patroni-3198": {
+    "commit": "e8a8bfe42f8f96747b0d9f432aaed907ebcf1c10",
+    "url": "https://github.com/patroni/patroni"
+  },
+  "pdm-project__pdm-3237": {
+    "commit": "fba5a6a65c37c2b9307c4d6c8ce3aacf7abb7c92",
+    "url": "https://github.com/pdm-project/pdm"
+  },
+  "pdm-project__pdm-3250": {
+    "commit": "5d3779ffe2709fbdb5bff1b4f0d33ef2c8c617d9",
+    "url": "https://github.com/pdm-project/pdm"
+  },
+  "pdm-project__pdm-3255": {
+    "commit": "acb40b0713c30466dcbab73e6b98d1add8e5dd98",
+    "url": "https://github.com/pdm-project/pdm"
+  },
+  "pdm-project__pdm-3314": {
+    "commit": "8573f951eb782596f91148753305c5bf0ade3ae6",
+    "url": "https://github.com/pdm-project/pdm"
+  },
+  "pdm-project__pdm-3374": {
+    "commit": "f37fb16c2459807e0b392dc3306c373e5f68cc4f",
+    "url": "https://github.com/pdm-project/pdm"
+  },
+  "pdm-project__pdm-3419": {
+    "commit": "564d09acbf2c8ef6500a3864f1fa1d38b3c5cdd5",
+    "url": "https://github.com/pdm-project/pdm"
+  },
+  "pdm-project__pdm-3420": {
+    "commit": "ee9427a5d0f8618082592ed0e967e7c60747293c",
+    "url": "https://github.com/pdm-project/pdm"
+  },
+  "privacyidea__privacyidea-4206": {
+    "commit": "80b817e9d563d48a4a29c00e8c361b8b5000a60d",
+    "url": "https://github.com/privacyidea/privacyidea"
+  },
+  "privacyidea__privacyidea-4223": {
+    "commit": "a70bfc26c0ff90f8feb2001fc6cadf53658aba3f",
+    "url": "https://github.com/privacyidea/privacyidea"
+  },
+  "privacyidea__privacyidea-4226": {
+    "commit": "80b817e9d563d48a4a29c00e8c361b8b5000a60d",
+    "url": "https://github.com/privacyidea/privacyidea"
+  },
+  "privacyidea__privacyidea-4233": {
+    "commit": "328e4197df16fbcfe2ac4a779c687a2ff7e1557e",
+    "url": "https://github.com/privacyidea/privacyidea"
+  },
+  "privacyidea__privacyidea-4251": {
+    "commit": "a44f38b40a61c5b91e6de68d20d27ed01d3ccb56",
+    "url": "https://github.com/privacyidea/privacyidea"
+  },
+  "projectmesa__mesa-2394": {
+    "commit": "2dedca4a8fa7d9bd27e0b2942584009443524aee",
+    "url": "https://github.com/projectmesa/mesa"
+  },
+  "projectmesa__mesa-2418": {
+    "commit": "4dc65a32312a3e37168a2f65c419046e4fea341e",
+    "url": "https://github.com/projectmesa/mesa"
+  },
+  "projectmesa__mesa-2523": {
+    "commit": "dbb926408d96258e30f8139aeed7e1ce3ec20167",
+    "url": "https://github.com/projectmesa/mesa"
+  },
+  "projectmesa__mesa-2605": {
+    "commit": "af3e6670efd11b3eef6a47aef68eb644213db056",
+    "url": "https://github.com/projectmesa/mesa"
+  },
+  "projectmesa__mesa-2632": {
+    "commit": "d680bf4719933756a41cced3a4f17620e0be9381",
+    "url": "https://github.com/projectmesa/mesa"
+  },
+  "pvlib__pvlib-python-2249": {
+    "commit": "38eb89e5a9ac3b61ca71834a3e92af7dd51e03f5",
+    "url": "https://github.com/pvlib/pvlib-python"
+  },
+  "pvlib__pvlib-python-2286": {
+    "commit": "6af80da35a7c96059c534ee38be9123bcfc7f50f",
+    "url": "https://github.com/pvlib/pvlib-python"
+  },
+  "pvlib__pvlib-python-2291": {
+    "commit": "afdcdd4acc3fd00420a656b1c106d9a8bb85ad29",
+    "url": "https://github.com/pvlib/pvlib-python"
+  },
+  "pvlib__pvlib-python-2292": {
+    "commit": "4b113ab852b31df67db5f830833111e1159f4a51",
+    "url": "https://github.com/pvlib/pvlib-python"
+  },
+  "pvlib__pvlib-python-2341": {
+    "commit": "afc90f67ddb66508c43cfe474acfaa3ab427eb0a",
+    "url": "https://github.com/pvlib/pvlib-python"
+  },
+  "pvlib__pvlib-python-2393": {
+    "commit": "1eafae0edb78a16b0ed8e531c85ca70498a76a20",
+    "url": "https://github.com/pvlib/pvlib-python"
+  },
+  "pvlib__pvlib-python-2400": {
+    "commit": "171f10ca1c2a73ea41a06e4c6ecf4de1f53523e7",
+    "url": "https://github.com/pvlib/pvlib-python"
+  },
+  "pybamm-team__pybamm-4644": {
+    "commit": "3bf74038405bd9f489395eb3c3ae2cbd4911a1c5",
+    "url": "https://github.com/pybamm-team/PyBaMM"
+  },
+  "pybamm-team__pybamm-4816": {
+    "commit": "f4d45290e9feb0b80e27909275f028ff9b2470ce",
+    "url": "https://github.com/pybamm-team/PyBaMM"
+  },
+  "pybamm-team__pybamm-4865": {
+    "commit": "0d5af5c3f258ccc41715ae8fb9650908a95a06fc",
+    "url": "https://github.com/pybamm-team/PyBaMM"
+  },
+  "pydata__xarray-10076": {
+    "commit": "969d991ef41dd2be55d7d98609a447733fac1bac",
+    "url": "https://github.com/pydata/xarray"
+  },
+  "pydata__xarray-9586": {
+    "commit": "f24cae348e5fb32a5de7d3b383e0adea13131d24",
+    "url": "https://github.com/pydata/xarray"
+  },
+  "pydata__xarray-9636": {
+    "commit": "8f6e45ba63941316b630e4c94ee2063395aa2b63",
+    "url": "https://github.com/pydata/xarray"
+  },
+  "pydata__xarray-9760": {
+    "commit": "5a9ff0beb17090a64bc886bed6265c583ba8e32d",
+    "url": "https://github.com/pydata/xarray"
+  },
+  "pydata__xarray-9765": {
+    "commit": "0f8ff5c2e890d3fe03cfc86e9024024a1f3cfce8",
+    "url": "https://github.com/pydata/xarray"
+  },
+  "pydata__xarray-9974": {
+    "commit": "609412d8544217247ddf2f72f988da1b38ef01bc",
+    "url": "https://github.com/pydata/xarray"
+  },
+  "pylint-dev__pylint-10044": {
+    "commit": "2e0c41f66ee7a9fddbc517a3ca75a2ce0cf2efd1",
+    "url": "https://github.com/pylint-dev/pylint"
+  },
+  "pylint-dev__pylint-10062": {
+    "commit": "15a5ac03c45f6888a5a3b6acc72a72da27495567",
+    "url": "https://github.com/pylint-dev/pylint"
+  },
+  "pylint-dev__pylint-10089": {
+    "commit": "054f23363fd50efedaf54ee7fb0333824b0de41f",
+    "url": "https://github.com/pylint-dev/pylint"
+  },
+  "pylint-dev__pylint-10097": {
+    "commit": "68cb5b320653ad64c68ff48a4bb4ba449a01d3a6",
+    "url": "https://github.com/pylint-dev/pylint"
+  },
+  "pylint-dev__pylint-10240": {
+    "commit": "abb81878fd114f309297b35e1d392bee0d196fbf",
+    "url": "https://github.com/pylint-dev/pylint"
+  },
+  "pypa__twine-1225": {
+    "commit": "aa3a910cdef8e0a3cb4e893f4c371b58015f52e0",
+    "url": "https://github.com/pypa/twine"
+  },
+  "pypsa__pypsa-1091": {
+    "commit": "c36338c171cef52cdce7cd445795ee362435f6ea",
+    "url": "https://github.com/PyPSA/PyPSA"
+  },
+  "pypsa__pypsa-1112": {
+    "commit": "5822ff21dc327ab4404c9557f6f61e4da56fabf8",
+    "url": "https://github.com/PyPSA/PyPSA"
+  },
+  "pypsa__pypsa-1172": {
+    "commit": "7b02177e9bf01dc0c7734cb7af9021c952426d56",
+    "url": "https://github.com/PyPSA/PyPSA"
+  },
+  "pypsa__pypsa-1195": {
+    "commit": "d3e13462d0622d7cc20c383d976bf566b6b8ad76",
+    "url": "https://github.com/PyPSA/PyPSA"
+  },
+  "python-babel__babel-1141": {
+    "commit": "f1c8633a7d765f07b94e0a6097b3f0c7912b955f",
+    "url": "https://github.com/python-babel/babel"
+  },
+  "python-babel__babel-1163": {
+    "commit": "fb8dbba89cfc8d8a54d4c34c60b38fd504c4906e",
+    "url": "https://github.com/python-babel/babel"
+  },
+  "python-babel__babel-1164": {
+    "commit": "6bbdc0e8e91a547c9f89c175d365c9abeeb45fb2",
+    "url": "https://github.com/python-babel/babel"
+  },
+  "python-babel__babel-1179": {
+    "commit": "e9c3ef8d0de3080ca59f7f8dbabf9b52983adc7d",
+    "url": "https://github.com/python-babel/babel"
+  },
+  "python-babel__babel-1194": {
+    "commit": "d9a257ec85ff58b1a706d0a4f05952399cbd755b",
+    "url": "https://github.com/python-babel/babel"
+  },
+  "python-control__python-control-1064": {
+    "commit": "d810d5aac00cf9a4215f601247d08f6f7904bcfe",
+    "url": "https://github.com/python-control/python-control"
+  },
+  "python-control__python-control-1111": {
+    "commit": "ebff1259a45dc7c45409ae439d36d7607afe86ee",
+    "url": "https://github.com/python-control/python-control"
+  },
+  "python-control__python-control-1142": {
+    "commit": "394e1c2c638cc0fe37d584fee6e4799794b3666e",
+    "url": "https://github.com/python-control/python-control"
+  },
+  "python-telegram-bot__python-telegram-bot-4617": {
+    "commit": "f57dd52100aafc4640891493ba43ad527433232f",
+    "url": "https://github.com/python-telegram-bot/python-telegram-bot"
+  },
+  "python-telegram-bot__python-telegram-bot-4626": {
+    "commit": "e4b0f8cb640439ac8d49ee2072a0d8147f7623f2",
+    "url": "https://github.com/python-telegram-bot/python-telegram-bot"
+  },
+  "python-telegram-bot__python-telegram-bot-4673": {
+    "commit": "2d5f4a68bbf4689103db596576f719f6237f3d77",
+    "url": "https://github.com/python-telegram-bot/python-telegram-bot"
+  },
+  "pytorch__torchtune-1806": {
+    "commit": "c5b738681ef0c2541344aff1063e5f85720b3c1f",
+    "url": "https://github.com/pytorch/torchtune"
+  },
+  "pytorch__torchtune-2066": {
+    "commit": "f2bd4bc25b24587aef40f486087412b9da8f1d94",
+    "url": "https://github.com/pytorch/torchtune"
+  },
+  "pytorch__torchtune-2139": {
+    "commit": "f2bd4bc25b24587aef40f486087412b9da8f1d94",
+    "url": "https://github.com/pytorch/torchtune"
+  },
+  "qtile__qtile-5154": {
+    "commit": "fecc37d8b99b8fa20c9e925660fa25c3157c206c",
+    "url": "https://github.com/qtile/qtile"
+  },
+  "reata__sqllineage-661": {
+    "commit": "b5b5e10df55f0d153053f5e6fcb419dac89cd42d",
+    "url": "https://github.com/reata/sqllineage"
+  },
+  "reata__sqllineage-694": {
+    "commit": "e9e3048afae1705a4c3f80e4ca56dcc0c6df998e",
+    "url": "https://github.com/reata/sqllineage"
+  },
+  "reflex-dev__reflex-4087": {
+    "commit": "bec73109d60c08f0e27d407858f8048b2d5c354c",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-4129": {
+    "commit": "5e3cfecdeab4182e4a405e94fb2d78f7b70eb16a",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-4266": {
+    "commit": "98394ceb8ec40ee75c8f434b751316544cb81ec2",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-4347": {
+    "commit": "34c11fdf108395fcacbe2488655969fef5c7958c",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-4371": {
+    "commit": "2b7ef0dccc94540b259d62b02d8e7acb466ed4ed",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-4427": {
+    "commit": "000938414f46aeaff20256e63d84c96612ae014d",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-4510": {
+    "commit": "2520c51aaf4c0a4af965026ae3a3fd5b03930288",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-4563": {
+    "commit": "d8e988105fdff8c452e3cc73f7790db0b0b64c9d",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-4711": {
+    "commit": "8663dbcb974bacc1e03d9f5158f62d7a98e398eb",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-4717": {
+    "commit": "2c3257d4ea1bae113a0b2338e2b7763189287206",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-4720": {
+    "commit": "3cb44431288dd143bed6ba67e9b13afc2cde1aa9",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-5039": {
+    "commit": "c65f3a1d60d9c41ab3e60a0a7d1309b6111b1047",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "run-llama__llama_deploy-330": {
+    "commit": "73ea5949bbb8e99bacd16d1cada2a444861a9cfa",
+    "url": "https://github.com/run-llama/llama_deploy"
+  },
+  "run-llama__llama_deploy-356": {
+    "commit": "5f5e76e2c0ba47e644b11e8e2177ffff606f76af",
+    "url": "https://github.com/run-llama/llama_deploy"
+  },
+  "run-llama__llama_deploy-372": {
+    "commit": "d7066e7457f782d26e9c1f74450d062310c97fe0",
+    "url": "https://github.com/run-llama/llama_deploy"
+  },
+  "run-llama__llama_deploy-384": {
+    "commit": "a8225996abf3e8c4706324fbdde2908e4dd777df",
+    "url": "https://github.com/run-llama/llama_deploy"
+  },
+  "run-llama__llama_deploy-397": {
+    "commit": "4d0945c238e96551a06a7a8382e5792cb95afa2a",
+    "url": "https://github.com/run-llama/llama_deploy"
+  },
+  "run-llama__llama_deploy-399": {
+    "commit": "28d57468c36f224bc6e50dc7922f128498f3b58c",
+    "url": "https://github.com/run-llama/llama_deploy"
+  },
+  "run-llama__llama_deploy-438": {
+    "commit": "59b23d379cfa8378490675021d20bf51dbee652d",
+    "url": "https://github.com/run-llama/llama_deploy"
+  },
+  "run-llama__llama_deploy-458": {
+    "commit": "985690cc60169e3abcdca9a4707bdb7e8ae27cd0",
+    "url": "https://github.com/run-llama/llama_deploy"
+  },
+  "scrapy-plugins__scrapy-splash-324": {
+    "commit": "538f4d1df62f0169c3371c3ac5d46ee190de7906",
+    "url": "https://github.com/scrapy-plugins/scrapy-splash"
+  },
+  "shapely__shapely-2224": {
+    "commit": "5b61787eb708db4990a8eb40bf4c069d04d3aa24",
+    "url": "https://github.com/shapely/shapely"
+  },
+  "shapely__shapely-2226": {
+    "commit": "74eddd6af20566771ae4551a21e389e9ec188e66",
+    "url": "https://github.com/shapely/shapely"
+  },
+  "shapely__shapely-2255": {
+    "commit": "70be08ef1eea9cbd49d787ac0fe3d1fc85a1bf86",
+    "url": "https://github.com/shapely/shapely"
+  },
+  "sissbruecker__linkding-971": {
+    "commit": "fc48b266a8c6005dca7d21ff96f4392ef62c0ccf",
+    "url": "https://github.com/sissbruecker/linkding"
+  },
+  "sissbruecker__linkding-984": {
+    "commit": "c5a300a4357d40d202f92dd08894ea520f2ade3f",
+    "url": "https://github.com/sissbruecker/linkding"
+  },
+  "sissbruecker__linkding-989": {
+    "commit": "78608135d9dd2d14a569253c80c5a959cf32bff7",
+    "url": "https://github.com/sissbruecker/linkding"
+  },
+  "sissbruecker__linkding-995": {
+    "commit": "30f85103cd5efdc8359353e536730809ef020fec",
+    "url": "https://github.com/sissbruecker/linkding"
+  },
+  "sissbruecker__linkding-999": {
+    "commit": "f1acb4f7c969b69a441da0c043fe5bbe6dbc3748",
+    "url": "https://github.com/sissbruecker/linkding"
+  },
+  "sphinx-doc__sphinx-12975": {
+    "commit": "fe06909e32669470c190484cdc202fc46b09879f",
+    "url": "https://github.com/sphinx-doc/sphinx"
+  },
+  "sphinx-doc__sphinx-13127": {
+    "commit": "e17ed74fe027eb84aaf72ce92c4b1bd8ebf8c049",
+    "url": "https://github.com/sphinx-doc/sphinx"
+  },
+  "sphinx-doc__sphinx-13200": {
+    "commit": "5ff3740063c1ac57f17ecd697bcd06cc1de4e75c",
+    "url": "https://github.com/sphinx-doc/sphinx"
+  },
+  "sphinx-doc__sphinx-13253": {
+    "commit": "e18155fa106cf64d7b39dcc6506b60fd82703b10",
+    "url": "https://github.com/sphinx-doc/sphinx"
+  },
+  "sphinx-doc__sphinx-13261": {
+    "commit": "019a6661f4b4ae6bffcfe015387e90d8b0190c8b",
+    "url": "https://github.com/sphinx-doc/sphinx"
+  },
+  "sphinx-doc__sphinx-13318": {
+    "commit": "b11303adb9771346f79f5ca7bab0f3a6f733a6eb",
+    "url": "https://github.com/sphinx-doc/sphinx"
+  },
+  "stanford-crfm__helm-3467": {
+    "commit": "46dacf07fbef04ca21e9b4c66e5d576b10a158b4",
+    "url": "https://github.com/stanford-crfm/helm"
+  },
+  "stanfordnlp__dspy-1609": {
+    "commit": "16ceaba5f7126ca86e5b50b669975c926b9f8f55",
+    "url": "https://github.com/stanfordnlp/dspy"
+  },
+  "stanfordnlp__dspy-1651": {
+    "commit": "9a952fef5fa8399cb82cb726860814e21816f16d",
+    "url": "https://github.com/stanfordnlp/dspy"
+  },
+  "stanfordnlp__dspy-1741": {
+    "commit": "9391c2a9b386cbbbe27d18206790a40c27503348",
+    "url": "https://github.com/stanfordnlp/dspy"
+  },
+  "stanfordnlp__dspy-1801": {
+    "commit": "78b50f12d6df56e54ed3e4b736f16c79345d0aff",
+    "url": "https://github.com/stanfordnlp/dspy"
+  },
+  "streamlink__streamlink-6242": {
+    "commit": "23a98cc5c543fd2456a189d794ff135008e50bf6",
+    "url": "https://github.com/streamlink/streamlink"
+  },
+  "streamlink__streamlink-6328": {
+    "commit": "f3c3546925897243edb4e3ba42210c5262ce74cf",
+    "url": "https://github.com/streamlink/streamlink"
+  },
+  "streamlink__streamlink-6338": {
+    "commit": "fac5d8f740952485ce2c094e2826ed358fbe90fd",
+    "url": "https://github.com/streamlink/streamlink"
+  },
+  "streamlink__streamlink-6361": {
+    "commit": "d532def93ed25a3831aef588627bd855a71af336",
+    "url": "https://github.com/streamlink/streamlink"
+  },
+  "streamlink__streamlink-6381": {
+    "commit": "3d6a5fe55faadd4e3b242c65b2aed2fd76e1b9b9",
+    "url": "https://github.com/streamlink/streamlink"
+  },
+  "streamlink__streamlink-6389": {
+    "commit": "6e2b7af3e0334a944e2dbb8159c553cfaa0cbe05",
+    "url": "https://github.com/streamlink/streamlink"
+  },
+  "streamlink__streamlink-6439": {
+    "commit": "5a3f7c2b018695c9290d92dfc2384ee7a2cb61c3",
+    "url": "https://github.com/streamlink/streamlink"
+  },
+  "sympy__sympy-27462": {
+    "commit": "5f88b01afcd7d429ffb6e549f028b34be6b28ba0",
+    "url": "https://github.com/sympy/sympy"
+  },
+  "theoehrly__fast-f1-699": {
+    "commit": "1482a077ece15e1d5a1a719faeda36d7906a6bb8",
+    "url": "https://github.com/theOehrly/Fast-F1"
+  },
+  "tox-dev__tox-3388": {
+    "commit": "719b3462b58bd5c4fc12d93cb978f824bc7a610b",
+    "url": "https://github.com/tox-dev/tox"
+  },
+  "tox-dev__tox-3409": {
+    "commit": "f919d0d0d512a755f0f85af540ed75f73140a685",
+    "url": "https://github.com/tox-dev/tox"
+  },
+  "urllib3__urllib3-3527": {
+    "commit": "e94224931feddf9e12bb25452bf0d0c21da8a7e0",
+    "url": "https://github.com/urllib3/urllib3"
+  },
+  "wemake-services__wemake-python-styleguide-3114": {
+    "commit": "73efd383c3712153a868a882a8353ef8169aabdc",
+    "url": "https://github.com/wemake-services/wemake-python-styleguide"
+  },
+  "wemake-services__wemake-python-styleguide-3117": {
+    "commit": "e9a03c5c8ebe4f7176ee12f48ad4cc8161f492b6",
+    "url": "https://github.com/wemake-services/wemake-python-styleguide"
+  },
+  "wemake-services__wemake-python-styleguide-3128": {
+    "commit": "ffcce608bbfe07dba658f9951ceeb5da78073472",
+    "url": "https://github.com/wemake-services/wemake-python-styleguide"
+  },
+  "wemake-services__wemake-python-styleguide-3129": {
+    "commit": "cd5bd0b4bdca67c52b0e448931d00986eecc8a3a",
+    "url": "https://github.com/wemake-services/wemake-python-styleguide"
+  },
+  "wemake-services__wemake-python-styleguide-3195": {
+    "commit": "e40fe0229a5550c6eb6668974d40593a9e787f3c",
+    "url": "https://github.com/wemake-services/wemake-python-styleguide"
+  },
+  "wireservice__csvkit-1274": {
+    "commit": "bd6095d39bcd27ec227a8e802ff5329535df9a07",
+    "url": "https://github.com/wireservice/csvkit"
+  },
+  "wireservice__csvkit-1281": {
+    "commit": "d9ee9118884accc3cde5f3fd4dbf055d95446ff8",
+    "url": "https://github.com/wireservice/csvkit"
+  },
+  "yt-dlp__yt-dlp-11425": {
+    "commit": "a6783a3b9905e547f6c1d4df9d7c7999feda8afa",
+    "url": "https://github.com/yt-dlp/yt-dlp"
+  },
+  "yt-dlp__yt-dlp-11880": {
+    "commit": "d298693b1b266d198e8eeecb90ea17c4a031268f",
+    "url": "https://github.com/yt-dlp/yt-dlp"
+  },
+  "yt-dlp__yt-dlp-12684": {
+    "commit": "2ee3a0aff9be2be3bea60640d3d8a0febaf0acb6",
+    "url": "https://github.com/yt-dlp/yt-dlp"
+  },
+  "yt-dlp__yt-dlp-12714": {
+    "commit": "9d5e6de2e7a47226d1f72c713ad45c88ba01db68",
+    "url": "https://github.com/yt-dlp/yt-dlp"
+  }
+}

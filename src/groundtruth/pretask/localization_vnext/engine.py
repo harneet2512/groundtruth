@@ -1110,6 +1110,7 @@ def _explicit_path_evidence(
 
 class _TruncationAwareList(list[Any]):
     semantic_executed: bool = False
+    lexical_executed: frozenset[str] | None = None
 
     """A list that preserves whether an upstream candidate pool was cut."""
 
@@ -1159,6 +1160,26 @@ def _candidate_node_rows(
     )
 
 
+class _FtsSignals(dict[int, list[tuple[EvidenceFamily, int, float]]]):
+    """Lexical signals plus an EXECUTION witness for the legs that produced them.
+
+    ``census_capabilities`` reports ``node_fts``/``body_fts`` from table NAMES,
+    and this retriever is correct-or-quiet: it swallows every failure and yields
+    ``{}``. Without a witness a dark leg is indistinguishable from an ordinary
+    retrieval miss - the same failure ``frozen_semantic`` already carries an
+    execution witness for.
+    """
+
+    def __init__(
+        self,
+        values: dict[int, list[tuple[EvidenceFamily, int, float]]],
+        *,
+        executed: frozenset[str],
+    ) -> None:
+        super().__init__(values)
+        self.executed = executed
+
+
 def _fts_candidate_signals(
     con: sqlite3.Connection,
     request: LocalizationRequest,
@@ -1170,8 +1191,9 @@ def _fts_candidate_signals(
     share one ``lexical`` signal class during reciprocal-rank fusion.
     """
     tables = _table_names(con)
+    executed: set[str] = set()
     if not {"nodes_fts", "symbol_content_fts"} & tables:
-        return {}
+        return _FtsSignals({}, executed=frozenset())
     try:
         from groundtruth.pretask import graph_localizer as legacy_localizer
 
@@ -1191,6 +1213,7 @@ def _fts_candidate_signals(
                     ),
                 )
             )
+            executed.add("node_fts")
         if "symbol_content_fts" in tables:
             ranked.append(
                 (
@@ -1203,10 +1226,13 @@ def _fts_candidate_signals(
                     ),
                 )
             )
+            executed.add("body_fts")
     except Exception:
         # Retrieval is correct-or-quiet. Capability census records table
-        # presence separately from successful query execution.
-        return {}
+        # presence separately from successful query execution - so the witness
+        # goes back EMPTY: nothing reached the pipeline, including a leg that
+        # ran before a later one raised.
+        return _FtsSignals({}, executed=frozenset())
 
     signals: dict[int, list[tuple[EvidenceFamily, int, float]]] = defaultdict(list)
     for family, rows in ranked:
@@ -1215,7 +1241,7 @@ def _fts_candidate_signals(
             start=1,
         ):
             signals[int(node_id)].append((family, rank, float(score)))
-    return dict(signals)
+    return _FtsSignals(dict(signals), executed=frozenset(executed))
 
 
 _SEMANTIC_VECTOR_CACHE_MAX = 50_000
@@ -1358,7 +1384,14 @@ def _node_evidence(
     request: LocalizationRequest,
 ) -> tuple[list[EvidenceUnit], set[int]]:
     surface_rows = _candidate_node_rows(con, facets, request)
-    node_pool_total = int(getattr(surface_rows, "total_count", len(surface_rows)))
+    # Query-MATCHED nodes the candidate cap discarded before they could even be
+    # ranked. This, and the retrieved-but-unslotted FTS nodes below, are the only
+    # REAL truncation of a candidate pool in this function.
+    surface_dropped = max(
+        0,
+        int(getattr(surface_rows, "total_count", len(surface_rows)))
+        - len(surface_rows),
+    )
     surface_rank = {
         int(row["id"]): rank
         for rank, row in enumerate(surface_rows, start=1)
@@ -1459,16 +1492,13 @@ def _node_evidence(
             ): row
             for row in all_rows
         }
-        semantic_candidate_ids = {
-            int(row_by_passage[key]["id"])
-            for key, (_rank, score) in semantic_rank.items()
-            if score > 0.0 and key in row_by_passage
-        }
-        node_pool_total = len(
-            semantic_candidate_ids
-            | set(surface_rank)
-            | set(fts_signals)
-        )
+        # NOT a candidate pool: the frozen embedder scores EVERY symbol in the
+        # repository, and `score > 0.0` is not a discriminating filter, so this
+        # union was |the whole repository| and `truncated` became a function of
+        # repository size rather than of an actual cut - candidate_rail then
+        # fired on 49/60 cases. A dense ranker's tail is an ORDER over the
+        # corpus, not a pool that got truncated, so `node_pool_total` is left to
+        # the query-conditioned legs below.
         existing_ids = {int(row["id"]) for row in rows}
         for key, (_rank, score) in sorted(
             semantic_rank.items(),
@@ -1584,6 +1614,11 @@ def _node_evidence(
                         "exact_identifier" if exact else "structured_lexical",
                     ),
                     roles=roles,
+                    certified_roles=(
+                        tuple(sorted(set(_roles_for(facets, symbol=symbol, file_path=fp))))
+                        if exact
+                        else ()
+                    ),
                     source_tokens=0,
                     signal_class="identifier" if exact else "lexical",
                     signal_rank=surface_rank[node_id],
@@ -1646,6 +1681,13 @@ def _node_evidence(
                     ),
                 )
             )
+    # The candidate pool is what the QUERY-CONDITIONED legs produced: nodes the
+    # surface filter matched (including the ones the cap dropped before ranking)
+    # and nodes the lexical retrievers returned. Truncation is a node in that
+    # pool that did not survive a cap - never the tail of a corpus-wide ranking.
+    node_pool_total = (
+        len(node_ids | set(surface_rank) | set(fts_signals)) + surface_dropped
+    )
     emitted = _TruncationAwareList(
         evidence,
         total_count=(
@@ -1658,6 +1700,9 @@ def _node_evidence(
     # capability reported from file presence alone fails open, and a dark leg
     # then reads as an ordinary retrieval miss.
     emitted.semantic_executed = bool(semantic_rank)
+    # Same treatment for the two lexical legs: `None` means "no witness was
+    # reported", which is never downgraded to unavailable.
+    emitted.lexical_executed = getattr(fts_signals, "executed", None)
     return emitted, node_ids
 
 
@@ -1992,18 +2037,27 @@ def derive_certified_relationships(request: LocalizationRequest) -> list[Evidenc
                 ).fetchall()
                 for handler in handler_rows:
                     tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(handler["value"] or ""))
-                    target_name = tokens[-1] if tokens else ""
-                    if not target_name:
-                        continue
-                    targets = con.execute(
-                        """
-                        SELECT id FROM nodes
-                        WHERE name=? AND label IN ('Class','Enum','Interface','Struct')
-                        ORDER BY id
-                        """,
-                        (target_name,),
-                    ).fetchall()
-                    if len(targets) != 1:
+                    # The exception TYPE, not the binding alias: `except ParseError
+                    # as exc` ends in `exc`, which resolves to no type node, so
+                    # taking the last token left this leg permanently dark. Resolve
+                    # against the graph instead of guessing a position.
+                    target_name = ""
+                    targets: list[Any] = []
+                    for token in tokens:
+                        if token.lower() in {"except", "catch", "catches", "as", "rescue", "err", "error"}:
+                            continue
+                        found = con.execute(
+                            """
+                            SELECT id FROM nodes
+                            WHERE name=? AND label IN ('Class','Enum','Interface','Struct')
+                            ORDER BY id
+                            """,
+                            (token,),
+                        ).fetchall()
+                        if len(found) == 1:
+                            target_name, targets = token, found
+                            break
+                    if not target_name or len(targets) != 1:
                         continue
                     confidence = float(handler["confidence"] or 0.0)
                     if confidence < 0.9:
@@ -2035,7 +2089,7 @@ def derive_certified_relationships(request: LocalizationRequest) -> list[Evidenc
                                             relation="CATCHES",
                                         )
                                     )
-                                    | {"expected_behavior", "exception", "transition"}
+                                    | {"exception", "transition"}
                                 )
                             ),
                             source_tokens=0,
@@ -2224,6 +2278,7 @@ class _DiscoveredCandidates(list[EvidenceUnit]):
     """Public-list-compatible discovery batch with honest truncation metadata."""
 
     semantic_executed: bool = False
+    lexical_executed: frozenset[str] | None = None
 
 
     def __init__(
@@ -2246,6 +2301,7 @@ def discover_candidates(
     evidence: list[EvidenceUnit] = []
     discovery_was_truncated = False
     semantic_executed = False
+    lexical_executed: frozenset[str] | None = None
     evidence.extend(_explicit_path_evidence(request, facets))
     evidence.extend(_traceback_evidence(request, facets))
     evidence.extend(_legacy_evidence(legacy_discoveries, facets, request.policy))
@@ -2254,6 +2310,7 @@ def discover_candidates(
         try:
             nodes, node_ids = _node_evidence(con, facets, request)
             semantic_executed = bool(getattr(nodes, "semantic_executed", False))
+            lexical_executed = getattr(nodes, "lexical_executed", None)
             discovery_was_truncated = bool(
                 getattr(nodes, "truncated", False)
             )
@@ -2438,6 +2495,7 @@ def discover_candidates(
         ),
     )
     batch.semantic_executed = semantic_executed
+    batch.lexical_executed = lexical_executed
     return batch
 
 
@@ -2591,10 +2649,29 @@ def _bounded_region(
     if unit.fact_span:
         start = max(1, start - 2)
         end = min(len(lines), end + 2)
-    max_lines = max(1, request.policy.max_region_tokens * 4 // 20)
-    if end - start + 1 > max_lines:
-        end = start + max_lines - 1
-        reason += "_token_bounded"
+    # Bound on the bytes the RAIL measures, not on a guessed line width. The
+    # rail counts `(len(content)+3)//4` tokens on the real span
+    # (SourceRegion.from_source), while this used to assume 20 chars/line;
+    # measured real source is ~42.4 chars/line (Python) and ~37.8 (Go), so the
+    # engine built regions its own rail then refused. `source_tokens <= T` holds
+    # exactly when the joined content is at most `4 * T` characters.
+    span = lines[start - 1 : end]
+    if span:
+        max_chars = 4 * max(1, request.policy.max_region_tokens)
+        used = 0
+        bounded_end = start
+        for offset, line in enumerate(span):
+            # The first line is always kept: a region is at least one line, and
+            # a single line wider than the budget is a rail decision, not a
+            # bounding decision.
+            addition = len(line) + (1 if offset else 0)
+            if offset and used + addition > max_chars:
+                break
+            used += addition
+            bounded_end = start + offset
+        if bounded_end < end:
+            end = bounded_end
+            reason += "_token_bounded"
     try:
         return SourceRegion.from_source(
             root,
@@ -2716,6 +2793,23 @@ def _looks_like_pass_through(region: SourceRegion | None) -> bool:
     )
 
 
+def _subsumes(outer: SourceRegion | None, inner: SourceRegion | None) -> bool:
+    """True when `outer` demonstrably contains `inner` - evidenced redundancy.
+
+    A shared role LABEL is not evidence that one region makes another redundant;
+    after query broadening every retrieved node carries the issue's full required
+    set, so a label test is true by construction. Span containment in the same
+    file is an actual subsumption witness.
+    """
+    if outer is None or inner is None:
+        return False
+    if _norm(outer.file_path) != _norm(inner.file_path):
+        return False
+    if outer.start_line <= 0 or inner.start_line <= 0:
+        return False
+    return outer.start_line <= inner.start_line and outer.end_line >= inner.end_line
+
+
 def _marginal(
     unit: EvidenceUnit,
     covered: set[str],
@@ -2723,7 +2817,7 @@ def _marginal(
     expected: set[str],
     role_classes: dict[str, set[str]],
     fused_score: float,
-) -> tuple[int, int, int, int, int, int, int]:
+) -> tuple[int, ...]:
     roles = set(unit.issue_roles)
     unit_classes = {
         signal_class
@@ -2732,16 +2826,29 @@ def _marginal(
     }
     new_required = roles & required - covered
     certified = len(new_required & set(unit.certified_roles))
-    independent = sum(
-        1
-        for role in new_required
-        if len(role_classes.get(role, set()) | unit_classes) >= 2
-    )
+    # `role_classes[role]` is EMPTY BY CONSTRUCTION for every role in
+    # `new_required`: a role enters `covered` and `role_classes` in the SAME
+    # admit step, so a role that is still uncovered has never had a class
+    # recorded. The old term therefore read only `unit_classes` and multiplied
+    # the answer by len(new_required) - re-counting role breadth that
+    # `contributes`/`new_expected` already carry, and making
+    # NEW_MANDATORY_INDEPENDENT a claim about ROLES that nothing measured.
+    # The only corroboration observable at this point is the candidate's OWN
+    # independent signal classes, which is a property of the REGION: an
+    # indicator, never a per-role count. It is not redundant with `fused_rank`,
+    # which is FILE-granular and ties across every region in one file.
+    independent = int(bool(new_required) and len(unit_classes) >= 2)
     new_expected = len(roles & expected - covered)
+    # A covered role is independently confirmed when this candidate carries a
+    # signal class the role does not already have. The old `== 1` guard made the
+    # answer depend on how many classes the FIRST admitted region happened to
+    # carry - a role first covered by a two-class region could never be
+    # confirmed again. Require only that the role HAS recorded classes, so the
+    # independence claim rests on something actually observed.
     independent_confirmation = any(
         role in covered
-        and not unit_classes <= role_classes.get(role, set())
-        and len(role_classes.get(role, set())) == 1
+        and bool(role_classes.get(role))
+        and not unit_classes <= role_classes[role]
         for role in roles & required
     )
     new_fact = int(
@@ -2753,18 +2860,39 @@ def _marginal(
     )
     token_utility = -max(0, unit.source_tokens)
     fused_rank = int(round(fused_score * 1_000_000))
-    # Novelty is a hard CONSTRAINT; relevance is the OBJECTIVE. Ordering the
-    # coverage bookkeeping ahead of retrieval relevance let a region that merely
-    # carried a required role LABEL take the slot from the region retrieval
-    # ranked first - measured on run 30191986149, where gold sat at rank #1 with
-    # 7x the fused score and was deferred as redundant for a vendored two-line
-    # span. Among candidates that add something new, deliver the most relevant.
+    # Novelty is a hard CONSTRAINT; relevance is the OBJECTIVE (MMR, Carbonell &
+    # Goldstein 1998, at the lambda->1 limit so no arbitrary lambda is invented).
+    # Ordering coverage bookkeeping ahead of relevance let a region that merely
+    # carried a required role LABEL take the slot from the region retrieval ranked
+    # first - measured on run 30191986149, where gold sat at rank #1 and was
+    # deferred as redundant for a vendored two-line span.
+    #
+    # COVERING A NEW MANDATORY ROLE IS A CONTRIBUTION. Without that term all four
+    # components are structurally 0 for a lexical-only region (certified needs
+    # >=0.9 confidence, independent needs >=2 signal classes, new_expected covers
+    # only exception/test_link/alternate_path, new_fact needs relation|fact_span|
+    # explicit_provenance), so a 0.6-confidence single-class region carrying a
+    # MANDATORY role could never be admitted and was labelled
+    # `no_issue_conditioned_contribution` - a false statement about the candidate.
     contributes = int(
-        certified > 0 or independent > 0 or new_expected > 0 or new_fact > 0
+        len(new_required) > 0
+        or certified > 0
+        or independent > 0
+        or new_expected > 0
+        or new_fact > 0
     )
+    # `fused_rrf_score` is FILE-granular, so every region in one file ties on it.
+    # With nothing below it discriminating, `token_utility` (cost) decided, and
+    # the SMALLEST span won - cost is a budget, never a preference. `signal_rank`
+    # is the engine's own within-file retrieval order, so it is the correct
+    # tiebreak; cost drops to a final tiebreak and the token rails enforce the
+    # budget (Khuller, Moss & Naor 1999: budget is a feasibility constraint on a
+    # greedy that maximises gain, not part of the gain itself).
+    retrieval_rank = -max(1, int(unit.signal_rank))
     return (
         contributes,
         fused_rank,
+        retrieval_rank,
         certified,
         independent,
         new_expected,
@@ -2937,7 +3065,7 @@ def _coverage_admit(
             other.evidence_id != unit.evidence_id
             and other.evidence_id not in wrapper_ids
             and region_cache.get(other.evidence_id) is not None
-            and bool(set(other.issue_roles) & set(unit.issue_roles) & (required | expected))
+            and _subsumes(region_cache.get(other.evidence_id), region_cache.get(unit.evidence_id))
             for other in candidates
         )
     }
@@ -2946,7 +3074,7 @@ def _coverage_admit(
             if unit.evidence_id in redundant_wrappers:
                 decisions[unit.evidence_id] = CandidateDecision(
                     unit.evidence_id,
-                    CandidateAction.REJECT,
+                    CandidateAction.DEFER,
                     (ReasonCode.WRAPPER_OR_PASS_THROUGH,),
                 )
         candidates = [
@@ -3020,7 +3148,7 @@ def _coverage_admit(
         )
 
     while candidates:
-        ranked: list[tuple[tuple[int, int, int, int, int, int, int], EvidenceUnit]] = []
+        ranked: list[tuple[tuple[int, ...], EvidenceUnit]] = []
         for unit in candidates:
             region = region_cache.get(unit.evidence_id)
             region_tokens = region.source_tokens if region else unit.source_tokens
@@ -3091,17 +3219,11 @@ def _coverage_admit(
             )
             continue
         if region.source_tokens > request.policy.max_region_tokens:
-            decisions[unit.evidence_id] = CandidateDecision(
-                unit.evidence_id,
-                CandidateAction.REJECT,
-                (ReasonCode.TOKEN_RAIL,),
-                (),
-                marginal,
-            )
-            source_token_rail_hit = True
-            stopping_reason = "source_token_rail"
-            continue
-        if used_tokens + region.source_tokens > request.policy.max_source_tokens:
+            # DEFER, never REJECT: REJECT writes state.rejected_candidates and
+            # poisons every later turn of the session. A per-region token budget
+            # is a feasibility constraint on THIS turn's policy, not a permanent
+            # property of the candidate - the same conclusion already reached
+            # one branch down for `max_source_tokens`.
             decisions[unit.evidence_id] = CandidateDecision(
                 unit.evidence_id,
                 CandidateAction.DEFER,
@@ -3110,15 +3232,29 @@ def _coverage_admit(
                 marginal,
             )
             source_token_rail_hit = True
-            stopping_reason = "source_token_rail"
-            break
+            continue
+        if used_tokens + region.source_tokens > request.policy.max_source_tokens:
+            # Skip this element and keep going: a candidate that does not fit the
+            # REMAINING budget says nothing about the candidates behind it. Using
+            # it to `break` deleted admissible regions that DO fit and stamped
+            # them NO_ISSUE_CONTRIBUTION with an all-zero marginal - recording
+            # "contributed nothing" for candidates never evaluated.
+            decisions[unit.evidence_id] = CandidateDecision(
+                unit.evidence_id,
+                CandidateAction.DEFER,
+                (ReasonCode.TOKEN_RAIL,),
+                (),
+                marginal,
+            )
+            source_token_rail_hit = True
+            continue
         reason = (
             ReasonCode.NEW_MANDATORY_CERTIFIED
-            if marginal[2] > 0
-            else ReasonCode.NEW_MANDATORY_INDEPENDENT
             if marginal[3] > 0
-            else ReasonCode.NEW_EXPECTED
+            else ReasonCode.NEW_MANDATORY_INDEPENDENT
             if marginal[4] > 0
+            else ReasonCode.NEW_EXPECTED
+            if marginal[5] > 0
             else ReasonCode.INDEPENDENT_CONFIRMATION
             if any(
                 role in covered
@@ -3176,10 +3312,15 @@ def _coverage_admit(
     )
     final_covered = {role for region in merged for role in region.roles} & required
     unresolved = required - final_covered - unavailable
-    if source_token_rail_hit:
-        stopping_reason = "source_token_rail"
-    elif not unresolved and target_required <= final_covered:
+    # A budget overflow SKIPS an element; it never terminates the greedy
+    # (Khuller, Moss & Naor 1999). So a rail that fired mid-run does not explain
+    # a run that finished: completion is checked FIRST and the rail is reported
+    # on its own channel (`metrics["source_token_rail_hit"]`). Only when the
+    # coverage goal was not reached can the budget be what ended selection.
+    if not unresolved and target_required <= final_covered:
         stopping_reason = "required_roles_covered"
+    elif source_token_rail_hit:
+        stopping_reason = "source_token_rail"
     elif stopping_reason == "required_roles_covered" and unresolved:
         stopping_reason = "no_positive_marginal"
     coverage = CoverageState(
@@ -3391,6 +3532,12 @@ def _metrics(
         "unavailable_roles": len(coverage.unavailable),
         "search_iterations": len(decisions),
         "stopping_reason": stopping_reason,
+        # The per-region budget is reported on its own channel so it stays
+        # observable now that it no longer overwrites `stopping_reason`.
+        "source_token_rail_hit": any(
+            ReasonCode.TOKEN_RAIL in decision.reason_codes
+            for decision in decisions
+        ),
         "latency_ms": float(latency_ms),
         "peak_memory_bytes": int(peak_memory),
         "duplicate_signals_removed": duplicate_signals_removed,
@@ -3491,6 +3638,33 @@ def _localize_vnext_traced(
                     "frozen_semantic": "declared_but_never_executed",
                 },
             )
+        # Same treatment for the two LEXICAL legs: the census claims them from
+        # table NAMES while `_fts_candidate_signals` is correct-or-quiet, so a
+        # leg that could not execute (no FTS5 module, missing retriever) read as
+        # an ordinary retrieval miss. `None` means no witness was reported - a
+        # test double or a legacy path - and is never downgraded.
+        lexical_executed = getattr(evidence, "lexical_executed", None)
+        if lexical_executed is not None:
+            dark_legs = [
+                leg
+                for leg in ("node_fts", "body_fts")
+                if capabilities.available.get(leg) and leg not in lexical_executed
+            ]
+            if dark_legs:
+                capabilities = replace(
+                    capabilities,
+                    available={
+                        **capabilities.available,
+                        **{leg: False for leg in dark_legs},
+                    },
+                    unavailable={
+                        **capabilities.unavailable,
+                        **{
+                            leg: "declared_but_never_executed"
+                            for leg in dark_legs
+                        },
+                    },
+                )
         discovery_done = time.perf_counter()
         decisions, regions, coverage, stopping_reason = _coverage_admit(
             request, facets, evidence, capabilities
@@ -3499,7 +3673,12 @@ def _localize_vnext_traced(
     candidate_rail_hit = bool(
         getattr(evidence, "truncated", False)
     )
-    if candidate_rail_hit:
+    # A truncated candidate pool only explains a run that did NOT finish, and
+    # only when nothing more specific ended selection. Overwriting the reason
+    # unconditionally discarded what actually stopped the greedy - a run that
+    # covered every required role reported the same string as one the rail
+    # stopped. The rail keeps its own metric field either way.
+    if candidate_rail_hit and stopping_reason == "no_positive_marginal":
         stopping_reason = "candidate_rail"
     if abstain and request.prior_state is not None:
         state = request.prior_state

@@ -723,26 +723,55 @@ def test_missing_discovery_is_unresolved_not_unavailable_when_capability_exists(
     assert "invariant" not in result.coverage.unavailable
 
 
-def test_redundant_pass_through_wrapper_is_rejected_with_stable_reason(tmp_path):
+def test_redundant_pass_through_wrapper_is_deferred_with_stable_reason(tmp_path):
+    """A subsumed pass-through is DEFERRED, not permanently rejected.
+
+    REJECT writes into state.rejected_candidates and poisons every later turn of
+    the session; a wrapper that adds nothing THIS turn may matter next turn. The
+    redundancy test now also requires evidenced span subsumption - a shared role
+    LABEL is true by construction once query broadening runs, so the old test was
+    satisfied whenever any second candidate existed.
+    """
     repo, db = _graph(tmp_path)
     (repo / "src" / "wrapper.py").write_text(
-        "def parse(value):\n    return JsonParser().parse(value)\n",
+        "class Outer:\n"
+        "    def parse(self, value):\n"
+        "        return JsonParser().parse(value)\n"
+        "\n"
+        "    def check(self, value):\n"
+        "        if not value:\n"
+        "            raise ValueError(value)\n"
+        "        return value\n",
         encoding="utf-8",
     )
     wrapper = EvidenceUnit.create(
         file_path="src/wrapper.py",
-        symbol="parse",
-        start_line=1,
-        end_line=2,
+        symbol="Outer.parse",
+        start_line=2,
+        end_line=3,
         family=EvidenceFamily.GRAPH,
         relation="CALLS",
         confidence=1.0,
         provenance=("fixture",),
         roles=("operation",),
         signal_class="structural",
+        signal_rank=2,
+    )
+    # The enclosing class CONTAINS the wrapper span - an actual subsumption
+    # witness, which is what the filter now requires instead of a shared label.
+    container = EvidenceUnit.create(
+        file_path="src/wrapper.py",
+        symbol="Outer",
+        start_line=1,
+        end_line=8,
+        family=EvidenceFamily.LEXICAL,
+        confidence=0.6,
+        provenance=("structured_lexical",),
+        roles=("operation",),
+        signal_class="lexical",
         signal_rank=1,
     )
-    request = replace(_request(repo, db), new_evidence=(wrapper,))
+    request = replace(_request(repo, db), new_evidence=(wrapper, container))
 
     result = localize_vnext(request)
     decision = next(
@@ -751,7 +780,7 @@ def test_redundant_pass_through_wrapper_is_rejected_with_stable_reason(tmp_path)
         if decision.evidence_id == wrapper.evidence_id
     )
 
-    assert decision.action is CandidateAction.REJECT
+    assert decision.action is CandidateAction.DEFER
     assert ReasonCode.WRAPPER_OR_PASS_THROUGH in decision.reason_codes
 
 
@@ -781,7 +810,16 @@ def test_live_property_kind_vocabulary_maps_to_behavioral_roles(tmp_path):
         for role in unit.roles
     }
 
-    assert {"invariant", "expected_behavior", "transition"} <= roles
+    # Structure proves structure: guard_clause -> invariant, data_flow ->
+    # transition. `expected_behavior` is a claim about the ISSUE and is reachable
+    # only through issue-driven retrieval, never from a typed property.
+    assert {"invariant", "transition"} <= roles
+    assert "expected_behavior" not in {
+        role
+        for unit in discoveries
+        if unit.file_path == "src/parser.py"
+        for role in unit.certified_roles
+    }
 
 
 def test_explicit_new_file_path_is_admitted_as_path_only_evidence(tmp_path):
@@ -1603,8 +1641,8 @@ def test_role_certification_is_not_laundered_across_consolidated_signals(tmp_pat
         role_classes={},
         fused_score=0.0,
     )
-    # index 2 is `certified` since novelty/relevance lead the tuple
-    assert marginal[2] == 1
+    # slot 3 is `certified`: (contributes, fused_rank, retrieval_rank, certified, ...)
+    assert marginal[3] == 1
 
 
 def test_unrelated_typed_property_cannot_certify_issue_specific_behavior(tmp_path):
@@ -1754,8 +1792,8 @@ def test_certification_is_never_lent_across_units_at_one_region(tmp_path):
         role_classes={},
         fused_score=0.0,
     )
-    # index 2 is `certified`: it must be 0, certification was not lent
-    assert marginal[2] == 0
+    # slot 3 is `certified`: it must be 0, certification was not lent
+    assert marginal[3] == 0
 
 
 def test_incremental_relevant_evidence_resolves_role_after_generic_deferral(
@@ -2339,10 +2377,25 @@ def test_actual_candidate_truncation_has_rail_precedence(tmp_path):
     assert result.stopping_reason == "candidate_rail"
 
 
-def test_repository_semantic_pool_truncation_reports_candidate_rail(
+def test_repository_semantic_pool_is_not_reported_as_a_candidate_rail(
     tmp_path,
     monkeypatch,
 ):
+    """A repository-wide semantic RANKING is not a truncated candidate pool.
+
+    This test previously asserted the opposite - that the semantic leg scoring
+    the whole repository reports `candidate_rail`.  That was the defect, not the
+    contract: `node_pool_total` was rebuilt as |every symbol whose cosine
+    exceeded 0.0|, i.e. the entire repository, so `truncated` measured
+    repository SIZE instead of an actual cut and the rail fired on 49/60 cases.
+    `score > 0.0` is not a discriminating filter, so the tail of that ranking is
+    an ORDER, never a pool that was truncated.
+
+    Real truncation still reports the rail - see
+    test_actual_candidate_truncation_has_rail_precedence (region pool) and
+    test_a_query_matched_pool_cut_by_the_candidate_cap_is_still_reported
+    (node pool).
+    """
     from groundtruth.pretask import graph_localizer
 
     repo, db = _graph(tmp_path)
@@ -2367,8 +2420,11 @@ def test_repository_semantic_pool_truncation_reports_candidate_rail(
     result = localize_vnext(request)
 
     assert len(result.discoveries) == 1
-    assert result.metrics["candidate_rail_hit"] is True
-    assert result.stopping_reason == "candidate_rail"
+    assert any(
+        unit.family is EvidenceFamily.SEMANTIC for unit in result.discoveries
+    ), "the semantic leg never ran; the assertion would prove nothing"
+    assert result.metrics["candidate_rail_hit"] is False
+    assert result.stopping_reason != "candidate_rail"
 
 
 def test_natural_candidate_exhaustion_reports_required_roles_covered(
@@ -2911,4 +2967,793 @@ def test_explicit_provenance_does_not_swamp_the_relevance_signal():
     assert fused["serde_derive/src/ser.rs"] > fused["my-binary/src/main.rs"], (
         f"a merely-mentioned path outscores four agreeing retrieval classes: "
         f"{fused}"
+    )
+
+
+def _admit_probe(repo, db, issue, units):
+    request = _request(repo, db, issue)
+    facets = extract_behavior_facets(request)
+    decisions, regions, coverage, stopping = vnext_engine._coverage_admit(
+        request, facets, tuple(units), census_capabilities(request)
+    )
+    return {d.evidence_id: d for d in decisions}, regions, coverage, stopping
+
+
+def test_intra_file_order_follows_retrieval_rank_not_region_size(tmp_path):
+    """Within one file, cost must not decide. Relevance must.
+
+    fused_rrf_score is FILE-granular, so every region in a file ties on the
+    relevance slot. With nothing below it discriminating, `token_utility` (the
+    LAST slot) decides and the SMALLEST span wins - the versioneer pathology one
+    level down. MMR (Carbonell & Goldstein 1998) puts relevance first and treats
+    cost as a budget, never as a preference.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "target.py").write_text(
+        "def parse(value):\n"
+        "    if not value:\n"
+        "        raise ParseError(value)\n"
+        "    return decode(value)\n"
+        "\n"
+        "def helper(v):\n"
+        "    return v\n",
+        encoding="utf-8",
+    )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    facets = extract_behavior_facets(_request(repo, db, issue))
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+
+    ranked_first = EvidenceUnit.create(
+        file_path="src/target.py", symbol="parse", start_line=1, end_line=4,
+        family=EvidenceFamily.BODY_BM25, confidence=0.6,
+        provenance=("native_body_bm25",), roles=roles,
+        signal_class="lexical+semantic", signal_rank=1,
+    )
+    tiny_but_worse = EvidenceUnit.create(
+        file_path="src/target.py", symbol="helper", start_line=6, end_line=9,
+        family=EvidenceFamily.BODY_BM25, confidence=0.6,
+        provenance=("native_body_bm25",), roles=roles,
+        signal_class="lexical+semantic", signal_rank=40,
+    )
+
+    by_id, regions, _cov, _stop = _admit_probe(repo, db, issue, [tiny_but_worse, ranked_first])
+
+    assert by_id[ranked_first.evidence_id].action is CandidateAction.ADMIT, (
+        "the region retrieval ranked FIRST lost its slot to a smaller, worse-ranked "
+        "span in the same file"
+    )
+    assert regions[0].symbol == "parse"
+
+
+def test_a_region_covering_a_mandatory_role_can_be_admitted(tmp_path):
+    """Covering a new required role IS a contribution.
+
+    `contributes` was certified|independent|new_expected|new_fact. For a
+    lexical-only region all four are structurally 0: certified needs >=0.9
+    confidence, independent needs >=2 signal classes, new_expected covers only
+    exception/test_link/alternate_path, new_fact needs relation|fact_span|
+    explicit_provenance. So a 0.6-confidence single-class region carrying a
+    MANDATORY role could never be admitted, and the reason code
+    `no_issue_conditioned_contribution` was false on its face.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "only.py").write_text(
+        "def parse(value):\n    return decode(value)\n", encoding="utf-8"
+    )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    facets = extract_behavior_facets(_request(repo, db, issue))
+    required = tuple(r for r in facets.required_roles if r != "actor")
+    assert required, "fixture must require a coverable role"
+
+    lexical_only = EvidenceUnit.create(
+        file_path="src/only.py", symbol="parse", start_line=1, end_line=4,
+        family=EvidenceFamily.LEXICAL, confidence=0.6,
+        provenance=("structured_lexical",), roles=required,
+        signal_class="lexical", signal_rank=1,
+    )
+
+    by_id, regions, coverage, _stop = _admit_probe(repo, db, issue, [lexical_only])
+
+    assert by_id[lexical_only.evidence_id].action is CandidateAction.ADMIT
+    assert regions and regions[0].file_path == "src/only.py"
+    assert set(required) & set(coverage.covered)
+
+
+def test_an_oversized_candidate_is_skipped_not_used_to_end_selection(tmp_path):
+    """A budget overflow skips the element; it does not terminate the greedy.
+
+    Budgeted maximum coverage (Khuller, Moss & Naor 1999) skips an element that
+    exceeds the remaining budget and continues. `_coverage_admit` used `break`,
+    so one oversized candidate deleted every admissible region behind it - and
+    stamped them NO_ISSUE_CONTRIBUTION with an all-zero marginal, recording
+    "contributed nothing" for candidates that were never evaluated.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "huge.py").write_text("\n".join(f"# pad {i}" * 40 for i in range(400)), encoding="utf-8")
+    # A real body, not a one-line delegation: _looks_like_pass_through would
+    # otherwise REJECT it and the test would prove nothing about the token rail.
+    (repo / "src" / "small.py").write_text(
+        "def parse(value):\n"
+        "    if not value:\n"
+        "        raise ParseError(value)\n"
+        "    return decode(value)\n",
+        encoding="utf-8",
+    )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    facets = extract_behavior_facets(_request(repo, db, issue))
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+
+    oversized = EvidenceUnit.create(
+        file_path="src/huge.py", symbol="", start_line=1, end_line=400,
+        family=EvidenceFamily.LEXICAL, confidence=0.6,
+        provenance=("structured_lexical",), roles=roles,
+        signal_class="lexical+semantic", signal_rank=1,
+    )
+    fits = EvidenceUnit.create(
+        file_path="src/small.py", symbol="parse", start_line=1, end_line=4,
+        family=EvidenceFamily.LEXICAL, confidence=0.6,
+        provenance=("structured_lexical",), roles=roles,
+        signal_class="lexical+semantic", signal_rank=2,
+    )
+    request = replace(
+        _request(repo, db, issue),
+        policy=LocalizationPolicy(max_source_tokens=200, max_region_tokens=100_000),
+    )
+    decisions, regions, _cov, _stop = vnext_engine._coverage_admit(
+        request, facets, (oversized, fits), census_capabilities(request)
+    )
+    by_id = {d.evidence_id: d for d in decisions}
+
+    assert by_id[fits.evidence_id].action is CandidateAction.ADMIT, (
+        "an oversized candidate ended selection and deleted a region that fits"
+    )
+    assert any(r.file_path == "src/small.py" for r in regions)
+
+
+def test_exception_handler_evidence_does_not_grant_issue_expected_behavior(tmp_path):
+    """A catch block proves control flow, not the issue's expected behavior.
+
+    derive_certified_relationships unconditionally ORed
+    {'expected_behavior', 'exception', 'transition'} into the roles of a CATCHES
+    handler at confidence >= 0.9, so EvidenceUnit.create auto-certified all three.
+    `expected_behavior` is required in 55/60 corpus cases, so one unrelated handler
+    could close it certified - the exact laundering the role map was fixed to stop,
+    re-entering through a producer that bypasses _roles_for.
+    """
+    repo, db = _graph(tmp_path)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO properties VALUES (90,4,'exception_handler','except ParseError as exc',8,1.0)"
+    )
+    con.commit()
+    con.close()
+    request = _request(
+        repo, db, "JsonParser.parse should return None instead of raising an exception."
+    )
+
+    units = vnext_engine.derive_certified_relationships(request)
+    handlers = [u for u in units if u.relation == "CATCHES"]
+
+    # Assert the leg FIRED, or every assertion below is vacuous. It was dark:
+    # `tokens[-1]` on "except ParseError as exc" yields the alias `exc`, which
+    # resolves to no type node, so this producer emitted nothing at all.
+    assert handlers, "no CATCHES evidence produced; the assertions would prove nothing"
+    for unit in handlers:
+        assert "expected_behavior" not in unit.roles, (
+            f"a catch handler granted expected_behavior: {unit.file_path} {unit.roles}"
+        )
+        assert "expected_behavior" not in unit.certified_roles
+
+
+def test_exact_identifier_certifies_identity_not_broadened_behaviour(tmp_path, monkeypatch):
+    """An exact name match proves WHICH symbol, never WHAT it does.
+
+    Exact-identifier node evidence is emitted at confidence 1.0, and
+    EvidenceUnit.create auto-certifies every role at >= 0.9. In
+    behavior_described mode the role set has already been broadened to the issue's
+    full required-role set, so an exact name match CERTIFIED every behavioural
+    role the issue asked for - laundering identity into behaviour.
+    """
+    repo, db = _graph(tmp_path)
+    monkeypatch.setattr(
+        vnext_engine,
+        "_fts_candidate_signals",
+        lambda con, request: {4: ((EvidenceFamily.BODY_BM25, 1, 9.5),)},
+    )
+    request = _request(repo, db, "JsonParser.parse returns the wrong value for malformed payloads.")
+    facets = extract_behavior_facets(request)
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    try:
+        units, _ids = vnext_engine._node_evidence(con, facets, request)
+    finally:
+        con.close()
+
+    exact = [u for u in units if u.family is EvidenceFamily.IDENTIFIER]
+    assert exact, "fixture must produce an exact-identifier unit"
+    for unit in exact:
+        structural = set(
+            vnext_engine._roles_for(facets, symbol=unit.symbol, file_path=unit.file_path)
+        )
+        assert set(unit.certified_roles) <= structural, (
+            f"exact identifier certified roles it never proved: "
+            f"{sorted(set(unit.certified_roles) - structural)}"
+        )
+
+
+def test_a_small_real_function_is_not_discarded_for_sharing_a_role_label(tmp_path):
+    """The wrapper filter must need evidence of subsumption, not a shared label.
+
+    `redundant_wrappers` discards a pass-through when ANY other non-wrapper
+    candidate shares one issue role. Query-driven broadening hands every retrieved
+    node the issue's full required-role set, so that condition is true whenever a
+    second retrieved node exists - the redundancy test is satisfied by
+    construction. It also REJECTs, which is permanent and poisons
+    state.rejected_candidates, rather than DEFERring.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "accessor.py").write_text(
+        "def charset(self):\n    return self._charset\n", encoding="utf-8"
+    )
+    (repo / "src" / "elsewhere.py").write_text(
+        "def other(v):\n    if v:\n        raise ValueError(v)\n    return v\n",
+        encoding="utf-8",
+    )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    facets = extract_behavior_facets(_request(repo, db, issue))
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+
+    accessor = EvidenceUnit.create(
+        file_path="src/accessor.py", symbol="charset", start_line=1, end_line=2,
+        family=EvidenceFamily.IDENTIFIER, confidence=1.0, provenance=("nodes", "exact_identifier"),
+        roles=roles, signal_class="identifier", signal_rank=1,
+    )
+    unrelated = EvidenceUnit.create(
+        file_path="src/elsewhere.py", symbol="other", start_line=1, end_line=4,
+        family=EvidenceFamily.LEXICAL, confidence=0.6, provenance=("structured_lexical",),
+        roles=roles, signal_class="lexical", signal_rank=9,
+    )
+    request = _request(repo, db, issue)
+    decisions, _regions, _cov, _stop = vnext_engine._coverage_admit(
+        request, facets, (accessor, unrelated), census_capabilities(request)
+    )
+    by_id = {d.evidence_id: d for d in decisions}
+
+    assert by_id[accessor.evidence_id].action is not CandidateAction.REJECT, (
+        "a small real accessor was permanently REJECTED because an unrelated "
+        "candidate in a different file happened to carry the same role label"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Confirmed-defect repairs (2026-07-26)
+# ---------------------------------------------------------------------------
+
+
+def _covering_unit(file_path, symbol, start, end, roles, signal_class, rank=1):
+    return EvidenceUnit.create(
+        file_path=file_path,
+        symbol=symbol,
+        start_line=start,
+        end_line=end,
+        family=EvidenceFamily.BODY_BM25,
+        confidence=0.6,
+        provenance=("native_body_bm25",),
+        roles=roles,
+        signal_class=signal_class,
+        signal_rank=rank,
+    )
+
+
+def test_role_classes_is_empty_for_every_uncovered_required_role(
+    tmp_path, monkeypatch
+):
+    """Premise proof for the `independent` repair - it is dead by construction.
+
+    A role enters `covered` and `role_classes` in the SAME admit step, so a role
+    that is still in `new_required` (required, not covered) has never had a class
+    recorded.  `role_classes[role]` is therefore ALWAYS empty at that point and
+    the `len(role_classes[role] | unit_classes) >= 2` term can only ever read the
+    candidate's own classes.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "target.py").write_text(
+        "def parse(value):\n"
+        "    if not value:\n"
+        "        raise ParseError(value)\n"
+        "    return decode(value)\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "second.py").write_text(
+        "def convert(value):\n"
+        "    if value is None:\n"
+        "        raise ParseError(value)\n"
+        "    return value\n",
+        encoding="utf-8",
+    )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    facets = extract_behavior_facets(_request(repo, db, issue))
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+    assert roles, "fixture must require a coverable role"
+
+    seen: list[tuple[str, frozenset]] = []
+    real_marginal = vnext_engine._marginal
+
+    def spy(unit, covered, required, expected, role_classes, fused_score):
+        for role in (set(unit.issue_roles) & required) - covered:
+            seen.append((role, frozenset(role_classes.get(role, set()))))
+        return real_marginal(
+            unit, covered, required, expected, role_classes, fused_score
+        )
+
+    monkeypatch.setattr(vnext_engine, "_marginal", spy)
+    request = _request(repo, db, issue)
+    vnext_engine._coverage_admit(
+        request,
+        facets,
+        (
+            _covering_unit("src/target.py", "parse", 1, 4, roles, "lexical", 1),
+            _covering_unit("src/second.py", "convert", 1, 4, roles, "semantic", 2),
+        ),
+        census_capabilities(request),
+    )
+
+    assert seen, "no new-required role was ever scored; the assertion is vacuous"
+    assert all(not classes for _role, classes in seen), (
+        f"role_classes was non-empty for an uncovered required role: {seen}"
+    )
+
+
+def test_independent_is_corroboration_not_a_second_count_of_role_breadth():
+    """`independent` must not scale with how many roles a candidate labels.
+
+    `role_classes[role]` is empty for every role in `new_required` (proved by
+    test_role_classes_is_empty_for_every_uncovered_required_role), so the term
+    collapsed to `len(new_required)` whenever the candidate carried >= 2 signal
+    classes - re-counting the class breadth `fused_rank` already scores and the
+    role breadth `contributes`/`new_expected` already carry, and making
+    NEW_MANDATORY_INDEPENDENT a claim about ROLES that nothing measured.
+    """
+    corroborated = _covering_unit(
+        "src/target.py",
+        "parse",
+        1,
+        4,
+        ("expected_behavior", "operation", "parsing"),
+        "lexical+semantic",
+    )
+    single_class = _covering_unit(
+        "src/target.py",
+        "parse",
+        1,
+        4,
+        ("expected_behavior", "operation", "parsing"),
+        "lexical",
+    )
+    required = {"expected_behavior", "operation", "parsing"}
+    assert len(set(corroborated.issue_roles) & required) == 3, (
+        "fixture must offer more than one new mandatory role or the count "
+        "collapse is unobservable"
+    )
+
+    corroborated_marginal = vnext_engine._marginal(
+        corroborated, set(), required, set(), {}, 0.0
+    )
+    single_marginal = vnext_engine._marginal(
+        single_class, set(), required, set(), {}, 0.0
+    )
+
+    assert corroborated_marginal[4] == 1, (
+        "independent multiplied cross-class corroboration by the number of new "
+        f"roles: {corroborated_marginal[4]}"
+    )
+    assert single_marginal[4] == 0, (
+        "a single-class candidate was reported as independently corroborated"
+    )
+
+
+def test_independent_confirmation_ignores_the_first_regions_class_count():
+    """The escape valve must not hinge on an accident of the first admission.
+
+    `len(role_classes[role]) == 1` meant a covered role whose FIRST admitted
+    region happened to carry two signal classes could never be independently
+    confirmed again, while an otherwise identical role covered by a one-class
+    region could.  Same candidate, same new class, opposite answer.
+    """
+    unit = _covering_unit(
+        "src/target.py", "parse", 1, 4, ("operation",), "semantic"
+    )
+    required = {"operation"}
+    covered = {"operation"}
+
+    one_class = vnext_engine._marginal(
+        unit, covered, required, set(), {"operation": {"lexical"}}, 0.0
+    )
+    two_classes = vnext_engine._marginal(
+        unit, covered, required, set(), {"operation": {"lexical", "structural"}}, 0.0
+    )
+
+    assert one_class[6] == 1, "fixture is vacuous: the one-class case never fired"
+    assert two_classes[6] == one_class[6], (
+        "independent confirmation opened or closed on how many classes the first "
+        f"admitted region carried: {two_classes[6]} vs {one_class[6]}"
+    )
+
+
+def test_bounded_region_respects_the_token_rail_that_judges_it(tmp_path):
+    """The region builder must bound on MEASURED tokens, not guessed lines.
+
+    `_bounded_region` capped at `max_region_tokens * 4 // 20` LINES - a guess of
+    20 chars/line - while the rail that judges the region counts
+    `(len(content)+3)//4` TOKENS on the real bytes.  Measured real source is
+    ~42.4 chars/line (Python) and ~37.8 (Go), so the engine built regions its own
+    rail then refused.
+    """
+    repo, db = _graph(tmp_path)
+    line = "    result = transform(value, option_name, other_option)  # note"
+    assert len(line) > 40, "fixture must use realistic line width"
+    (repo / "src" / "wide.py").write_text(
+        "def transform_all(values):\n" + "\n".join(line for _ in range(200)) + "\n",
+        encoding="utf-8",
+    )
+    request = replace(
+        _request(repo, db),
+        policy=LocalizationPolicy(
+            max_candidates=500, max_source_tokens=16_000, max_region_tokens=200
+        ),
+    )
+    unit = EvidenceUnit.create(
+        file_path="src/wide.py",
+        symbol="transform_all",
+        start_line=1,
+        end_line=201,
+        family=EvidenceFamily.LEXICAL,
+        confidence=0.6,
+        provenance=("structured_lexical",),
+        roles=("operation",),
+        signal_class="lexical",
+        signal_rank=1,
+    )
+
+    region = vnext_engine._bounded_region(request, unit)
+
+    assert region is not None, "no region was built; the assertion is vacuous"
+    assert region.line_count > 1, "fixture collapsed to one line; nothing bounded"
+    assert region.source_tokens <= request.policy.max_region_tokens, (
+        "the region builder produced a region the region rail rejects: "
+        f"{region.source_tokens} tokens > {request.policy.max_region_tokens}"
+    )
+
+
+def test_region_over_the_token_rail_is_deferred_not_permanently_rejected(tmp_path):
+    """A budget is a per-turn feasibility constraint, never a permanent verdict.
+
+    REJECT writes `state.rejected_candidates`, which poisons every later turn of
+    the session.  A region that cannot be shrunk under THIS turn's
+    `max_region_tokens` may fit the next turn's policy, so DEFER is the correct
+    action - the same conclusion already reached for `max_source_tokens`.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "oneline.py").write_text(
+        "def packed(value):\n    return " + " + ".join(["value"] * 400) + "\n",
+        encoding="utf-8",
+    )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    facets = extract_behavior_facets(_request(repo, db, issue))
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+    unbounded = EvidenceUnit.create(
+        file_path="src/oneline.py",
+        symbol="packed",
+        start_line=2,
+        end_line=2,
+        family=EvidenceFamily.LEXICAL,
+        confidence=0.6,
+        provenance=("structured_lexical",),
+        roles=roles,
+        signal_class="lexical",
+        signal_rank=1,
+    )
+    request = replace(
+        _request(repo, db, issue),
+        policy=LocalizationPolicy(
+            max_candidates=500, max_source_tokens=16_000, max_region_tokens=10
+        ),
+    )
+    decisions, _regions, _coverage, _stop = vnext_engine._coverage_admit(
+        request, facets, (unbounded,), census_capabilities(request)
+    )
+    by_id = {d.evidence_id: d for d in decisions}
+    decision = by_id[unbounded.evidence_id]
+
+    assert ReasonCode.TOKEN_RAIL in decision.reason_codes, (
+        f"the region rail never fired; the assertion is vacuous: {decision}"
+    )
+    assert decision.action is CandidateAction.DEFER, (
+        "an over-budget region was permanently REJECTED into "
+        "state.rejected_candidates instead of deferred"
+    )
+
+
+def test_completed_coverage_is_not_relabelled_as_a_source_token_rail(tmp_path):
+    """A skipped element is not a stopping reason.
+
+    `source_token_rail_hit` overwrote `stopping_reason` unconditionally, so a run
+    that stopped because every required role was covered reported the same string
+    as one the budget actually stopped.  The rail must be reported on its own
+    channel.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "huge.py").write_text(
+        "\n".join(f"# pad {i}" * 40 for i in range(400)), encoding="utf-8"
+    )
+    (repo / "src" / "small.py").write_text(
+        "def parse(value):\n"
+        "    if not value:\n"
+        "        raise ParseError(value)\n"
+        "    return decode(value)\n",
+        encoding="utf-8",
+    )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    request = replace(
+        _request(repo, db, issue),
+        policy=LocalizationPolicy(max_source_tokens=200, max_region_tokens=100_000),
+    )
+    facets = extract_behavior_facets(request)
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+    oversized = _covering_unit(
+        "src/huge.py", "", 1, 400, roles, "lexical+semantic", 1
+    )
+    fits = _covering_unit(
+        "src/small.py", "parse", 1, 4, roles, "lexical+semantic", 2
+    )
+    decisions, _regions, coverage, stopping = vnext_engine._coverage_admit(
+        request, facets, (oversized, fits), census_capabilities(request)
+    )
+
+    assert any(
+        ReasonCode.TOKEN_RAIL in decision.reason_codes for decision in decisions
+    ), "no token-rail skip happened; the assertion is vacuous"
+    assert coverage.unresolved == (), (
+        f"fixture did not reach full coverage: {coverage}"
+    )
+    assert stopping == "required_roles_covered", (
+        f"a completed run was relabelled by a skipped element: {stopping}"
+    )
+
+
+def test_completed_coverage_is_not_relabelled_as_a_candidate_rail(
+    tmp_path, monkeypatch
+):
+    """A truncated candidate pool is not what ended a run that finished.
+
+    `candidate_rail_hit` overwrote `stopping_reason` unconditionally, discarding
+    the reason selection actually ended.  The flag already exists in metrics as
+    its own field, so the overwrite was pure information destruction.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "target.py").write_text(
+        "def parse(value):\n"
+        "    if not value:\n"
+        "        raise ParseError(value)\n"
+        "    return decode(value)\n",
+        encoding="utf-8",
+    )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    request = _request(repo, db, issue)
+    facets = extract_behavior_facets(request)
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+    covering = _covering_unit(
+        "src/target.py", "parse", 1, 4, roles, "lexical+semantic", 1
+    )
+    monkeypatch.setattr(
+        vnext_engine,
+        "discover_candidates",
+        lambda *_a, **_k: vnext_engine._DiscoveredCandidates(
+            [covering], total_count=99
+        ),
+    )
+
+    result = localize_vnext(request)
+
+    assert result.metrics["candidate_rail_hit"] is True, (
+        "the rail never fired; the assertion is vacuous"
+    )
+    assert result.coverage.unresolved == (), (
+        f"fixture did not reach full coverage: {result.coverage}"
+    )
+    assert result.stopping_reason == "required_roles_covered", (
+        f"a completed run was relabelled by the candidate rail: "
+        f"{result.stopping_reason}"
+    )
+
+
+def test_source_token_rail_is_reported_on_its_own_metric_channel(tmp_path):
+    """The rail must stay observable once it no longer hijacks stopping_reason."""
+    repo, db = _graph(tmp_path)
+    request = replace(
+        _request(repo, db),
+        policy=LocalizationPolicy(
+            max_candidates=500, max_source_tokens=1, max_region_tokens=1
+        ),
+    )
+
+    result = localize_vnext(request)
+
+    assert result.metrics["source_token_rail_hit"] is True
+    assert result.coverage.unresolved
+
+
+def test_lexical_capability_is_execution_backed_not_table_presence(
+    tmp_path, monkeypatch
+):
+    """A capability may only be reported available if it actually RAN.
+
+    `census_capabilities` derives `node_fts`/`body_fts` from table NAMES, while
+    `_fts_candidate_signals` swallows every exception and returns `{}`.  A dark
+    lexical leg therefore read as an ordinary retrieval miss - exactly the
+    failure `frozen_semantic` already carries an execution witness for.
+    """
+    repo, db = _graph(tmp_path)
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE nodes_fts (node_id INTEGER, name TEXT);
+        CREATE TABLE symbol_content_fts (node_id INTEGER, body TEXT);
+        """
+    )
+    con.commit()
+    con.close()
+    request = _request(repo, db)
+
+    # The census must claim both legs, from table presence alone.
+    claimed = census_capabilities(request)
+    assert claimed.available["node_fts"] is True
+    assert claimed.available["body_fts"] is True
+
+    from groundtruth.pretask import graph_localizer as legacy_localizer
+
+    def _explode(*_args, **_kwargs):
+        raise sqlite3.OperationalError("no such module: fts5")
+
+    monkeypatch.setattr(legacy_localizer, "_fts5_candidates", _explode)
+
+    result = localize_vnext(request)
+
+    assert result.capabilities.available["node_fts"] is False, (
+        "the run reported a lexical capability that never executed"
+    )
+    assert (
+        result.capabilities.unavailable["node_fts"] == "declared_but_never_executed"
+    )
+    assert result.capabilities.available["body_fts"] is False
+    assert (
+        result.capabilities.unavailable["body_fts"] == "declared_but_never_executed"
+    )
+
+
+def test_executed_lexical_legs_stay_available(tmp_path, monkeypatch):
+    """The witness must not downgrade a leg that really ran."""
+    repo, db = _graph(tmp_path)
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE nodes_fts (node_id INTEGER, name TEXT);
+        CREATE TABLE symbol_content_fts (node_id INTEGER, body TEXT);
+        """
+    )
+    con.commit()
+    con.close()
+    request = _request(repo, db)
+
+    from groundtruth.pretask import graph_localizer as legacy_localizer
+
+    monkeypatch.setattr(
+        legacy_localizer,
+        "_fts5_candidates",
+        lambda *_a, **_k: [(4, "parse", "src/parser.py", 9.5)],
+    )
+    monkeypatch.setattr(
+        legacy_localizer,
+        "_content_fts_candidates",
+        lambda *_a, **_k: [(4, "parse", "src/parser.py", 8.5)],
+    )
+
+    result = localize_vnext(request)
+
+    assert result.capabilities.available["node_fts"] is True
+    assert result.capabilities.available["body_fts"] is True
+
+
+def test_semantic_corpus_scan_is_not_reported_as_a_truncated_pool(
+    tmp_path, monkeypatch
+):
+    """Ranking the whole repository is not a truncated candidate pool.
+
+    `node_pool_total` was replaced by |every symbol whose cosine exceeded 0.0|,
+    i.e. the whole repository, so `truncated` became a function of repository
+    size rather than of an actual cut - `candidate_rail` fired on 49/60 cases.
+    A dense ranker scores the entire corpus by construction; its tail is an
+    ORDER, not a pool that was cut.
+    """
+    from groundtruth.pretask import graph_localizer
+
+    repo, db = _graph(tmp_path)
+    con = sqlite3.connect(db)
+    con.executemany(
+        "INSERT INTO nodes (id,label,name,qualified_name,file_path,start_line,"
+        "end_line,signature,return_type,is_exported,is_test,language,parent_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,1,0,'python',NULL)",
+        [
+            (
+                100 + i,
+                "Function",
+                f"zz{i}",
+                f"zz{i}",
+                "src/parser.py",
+                1,
+                2,
+                f"zz{i}()",
+                "",
+            )
+            for i in range(60)
+        ],
+    )
+    con.commit()
+    con.close()
+
+    class PositiveEmbedder:
+        def encode(self, texts):
+            return [[1.0, 0.0] for _text in texts]
+
+    monkeypatch.setattr(graph_localizer, "_EMBEDDER", PositiveEmbedder())
+    request = replace(
+        _request(
+            repo, db, "Inherited values display incorrectly when state transitions."
+        ),
+        policy=LocalizationPolicy(max_candidates=10, max_source_tokens=16_000),
+    )
+    facets = extract_behavior_facets(request)
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    try:
+        units, node_ids = vnext_engine._node_evidence(con, facets, request)
+        surface = vnext_engine._candidate_node_rows(con, facets, request)
+        fts = vnext_engine._fts_candidate_signals(con, request)
+    finally:
+        con.close()
+
+    assert any(unit.family is EvidenceFamily.SEMANTIC for unit in units), (
+        "the semantic leg never ran; the assertion is vacuous"
+    )
+    assert surface.total_count == 0 and not fts, (
+        "fixture must have NO query-matched pool, or the truncation would be real"
+    )
+    assert len(node_ids) < 66, "fixture must actually drop repository symbols"
+    assert units.truncated is False, (
+        "a whole-repository semantic ranking was reported as a truncated pool"
+    )
+
+
+def test_a_query_matched_pool_cut_by_the_candidate_cap_is_still_reported(tmp_path):
+    """The repair must not silence REAL truncation of a query-matched pool."""
+    repo, db = _graph(tmp_path)
+    request = replace(
+        _request(repo, db, "parse the ParseError raised by JsonParser"),
+        policy=LocalizationPolicy(max_candidates=1, max_source_tokens=16_000),
+    )
+    facets = extract_behavior_facets(request)
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    try:
+        surface = vnext_engine._candidate_node_rows(con, facets, request)
+        units, node_ids = vnext_engine._node_evidence(con, facets, request)
+    finally:
+        con.close()
+
+    assert surface.total_count > 1, (
+        "fixture must match more than one node, or nothing was cut"
+    )
+    assert len(node_ids) == 1
+    assert units.truncated is True, (
+        "a query-matched candidate pool cut by max_candidates was not reported"
     )

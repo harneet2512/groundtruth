@@ -233,7 +233,7 @@ class CandidateDecision:
     action: CandidateAction
     reason_codes: tuple[ReasonCode, ...]
     newly_covered_roles: tuple[str, ...] = ()
-    marginal: tuple[int, int, int, int, int, int, int] = (0, 0, 0, 0, 0, 0, 0)
+    marginal: tuple[int, ...] = (0, 0, 0, 0, 0, 0, 0, 0)
 
 
 @dataclass(frozen=True)
