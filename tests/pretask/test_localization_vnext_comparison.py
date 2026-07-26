@@ -384,6 +384,59 @@ def test_scoring_reports_the_shadow_only_column_beside_the_floored_column():
 
     assert scored["new"]["first_gold_rank"] == 2
     assert scored["new"]["hit_at_1"] is False
+    assert scored["new_shadow_only"]["measured"] is True
     assert scored["new_shadow_only"]["first_gold_rank"] == 1
     assert scored["new_shadow_only"]["hit_at_1"] is True
     assert scored["new_shadow_only"]["hit_at_8"] is True
+
+
+def test_shadow_only_column_is_unmeasured_not_zero_on_older_sealed_artifacts():
+    """A pre-column artifact must never score as a measured shadow-only miss."""
+    sealed = {
+        "case": {"id": "case", "language": "python", "split": "random"},
+        "legacy": {
+            "candidate_order": ["src/gold.py"],
+            "witnesses": [],
+            "implied_inspection_tokens": 10,
+            "latency_ms": 1.0,
+            "peak_memory_bytes": 1,
+            "byte_identity": True,
+        },
+        "vnext": {"discoveries": [], "admitted_regions": [], "metrics": {"leakage_count": 0}},
+        "comparison": {
+            "new_admitted_files": [],
+            "ranked_discovery_files": ["src/gold.py"],
+            "deterministic": True,
+            "p95_latency_ms": 1.0,
+            "peak_memory_bytes": 1,
+            "implied_inspection_tokens": 1,
+        },
+    }
+
+    scored = score_sealed_case(sealed, {"gold_files": ["src/gold.py"]})
+
+    assert scored["new"]["hit_at_1"] is True
+    assert scored["new_shadow_only"]["measured"] is False
+    assert scored["new_shadow_only"]["hit_at_1"] is None
+    assert scored["new_shadow_only"]["first_gold_rank"] is None
+    assert scored["new_shadow_only"]["file_precision"] is None
+
+
+def test_shadow_only_order_uses_the_engine_rank_not_the_floored_order():
+    class _Unit:
+        def __init__(self, file_path, prior, shadow_rank):
+            self.file_path = file_path
+            md = [("shadow_rank", str(shadow_rank))]
+            if prior:
+                md.append(("ranking_prior_only", "1"))
+            self.metadata = tuple(md)
+
+    files = _shadow_only_ranked_files(
+        [
+            _Unit("src/legacy_first.py", True, 9),
+            _Unit("src/second_by_engine.py", False, 5),
+            _Unit("src/first_by_engine.py", False, 2),
+        ]
+    )
+
+    assert files == ["src/first_by_engine.py", "src/second_by_engine.py"]

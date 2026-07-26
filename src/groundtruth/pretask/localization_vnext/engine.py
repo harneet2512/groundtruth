@@ -912,8 +912,15 @@ def _roles_for(
         or any(term in sym_lower for term in ("auth", "policy", "permission", "access"))
     ):
         roles.add("authorization")
+    # Structure proves structure. A typed edge or property proves what the code
+    # DOES at that span; it never proves that this is the behavior the issue is
+    # asking about. `expected_behavior` is a claim about the ISSUE, so no purely
+    # structural fact may grant it - otherwise one unrelated certified fact
+    # closes a mandatory role and every relevant region becomes DEFER redundant.
     if relation in {"RAISES", "CATCHES"} or "exception" in property_kind:
-        roles.update(("exception", "expected_behavior", "transition"))
+        # Raising/catching IS control flow, so `transition` is structural truth
+        # and stays. Only the issue-level claim is withheld.
+        roles.update(("exception", "transition"))
     if relation in {"DATA_FLOW", "PRECEDES", "READS", "WRITES"}:
         roles.add("transition")
     if relation in {"READS", "WRITES"}:
@@ -924,11 +931,9 @@ def _roles_for(
         "guard_clause",
         "conditional_return",
     }:
-        roles.update(("invariant", "expected_behavior"))
+        roles.add("invariant")
     if property_kind in {"data_flow", "call_order", "exception_flow"}:
         roles.add("transition")
-    if property_kind in {"return_shape", "exception_type"}:
-        roles.add("expected_behavior")
     if property_kind in {"serialization", "serialization_pair"}:
         roles.add("serialization")
     if property_kind in {"field_read", "side_effect", "state_read", "state_write"}:
@@ -1582,21 +1587,6 @@ def _node_evidence(
                         "exact_identifier" if exact else "structured_lexical",
                     ),
                     roles=roles,
-                    issue_roles=(
-                        tuple(
-                            sorted(
-                                set(
-                                    _roles_for(
-                                        facets,
-                                        symbol=symbol,
-                                        file_path=fp,
-                                    )
-                                )
-                            )
-                        )
-                        if exact
-                        else roles
-                    ),
                     source_tokens=0,
                     signal_class="identifier" if exact else "lexical",
                     signal_rank=surface_rank[node_id],
@@ -1677,7 +1667,6 @@ def _edge_evidence(
     facets: BehaviorFacet,
     node_ids: set[int],
     request: LocalizationRequest,
-    issue_conditioned_node_ids: set[int] | None = None,
 ) -> list[EvidenceUnit]:
     if not node_ids or "edges" not in _table_names(con):
         return []
@@ -1725,7 +1714,6 @@ def _edge_evidence(
         if not trusted and confidence < 0.5:
             continue
         for side in ("source", "target"):
-            side_node_id = int(row[f"{side}_id"])
             fp = _norm(str(row[f"{side}_file"] or ""))
             symbol = str(row[f"{side}_qname"] or row[f"{side}_name"] or "")
             roles = _roles_for(facets, symbol=symbol, file_path=fp, relation=relation)
@@ -1742,9 +1730,6 @@ def _edge_evidence(
                     confidence=confidence if confidence > 0 else (1.0 if trusted else 0.5),
                     provenance=(relation, method or "schema_without_method"),
                     roles=roles,
-                    issue_roles=(
-                        roles if side_node_id in (issue_conditioned_node_ids or set()) else ()
-                    ),
                     source_tokens=0,
                     signal_class="structural",
                     signal_rank=priority_map.get(relation, len(priority_map)) * 1000 + raw_rank,
@@ -1761,7 +1746,6 @@ def _property_evidence(
     con: sqlite3.Connection,
     facets: BehaviorFacet,
     node_ids: set[int],
-    issue_conditioned_node_ids: set[int] | None = None,
 ) -> list[EvidenceUnit]:
     if not node_ids or "properties" not in _table_names(con):
         return []
@@ -1814,9 +1798,6 @@ def _property_evidence(
                 confidence=confidence,
                 provenance=("properties", kind, str(row["value"] or "")),
                 roles=roles,
-                issue_roles=(
-                    roles if int(row["node_id"]) in (issue_conditioned_node_ids or set()) else ()
-                ),
                 source_tokens=0,
                 signal_class="property",
                 signal_rank=rank,
@@ -1869,7 +1850,10 @@ def _history_evidence(
             counts[path] += 1
     role_by_file: dict[str, set[str]] = defaultdict(set)
     for unit in current:
-        role_by_file[_norm(unit.file_path)].update(unit.roles)
+        # Mirror what the underlying evidence is ELIGIBLE for. Rebuilding from
+        # the descriptive `roles` would re-grant, at whole-file granularity,
+        # every role the evidence itself was not eligible to satisfy.
+        role_by_file[_norm(unit.file_path)].update(unit.issue_roles)
     ordered = sorted(counts, key=lambda path: (-counts[path], path))
     return [
         EvidenceUnit.create(
@@ -1878,6 +1862,7 @@ def _history_evidence(
             confidence=0.6,
             provenance=("git_log_name_only", f"touch_count={counts[path]}"),
             roles=tuple(sorted(role_by_file[path])),
+            issue_roles=tuple(sorted(role_by_file[path])),
             source_tokens=0,
             signal_class="history",
             signal_rank=rank,
@@ -2137,7 +2122,11 @@ def _legacy_evidence(
                         end_line=end,
                         family=family,
                         confidence=confidence,
-                        provenance=provenance,
+                        provenance=(
+                            ("legacy_floor", "model_visible_rank")
+                            if ranking_prior_only
+                            else provenance
+                        ),
                         roles=roles,
                         issue_roles=() if ranking_prior_only else roles,
                         certified_roles=(),
@@ -2261,40 +2250,12 @@ def discover_candidates(
     if con is not None:
         try:
             nodes, node_ids = _node_evidence(con, facets, request)
-            issue_conditioned_node_ids = {
-                int(dict(unit.metadata)["node_id"])
-                for unit in nodes
-                if unit.issue_roles
-                and unit.family
-                in {
-                    EvidenceFamily.IDENTIFIER,
-                    EvidenceFamily.LEXICAL,
-                    EvidenceFamily.NODE_FTS,
-                    EvidenceFamily.BODY_BM25,
-                }
-                and dict(unit.metadata).get("node_id", "").isdigit()
-            }
             discovery_was_truncated = bool(
                 getattr(nodes, "truncated", False)
             )
             evidence.extend(nodes)
-            evidence.extend(
-                _edge_evidence(
-                    con,
-                    facets,
-                    node_ids,
-                    request,
-                    issue_conditioned_node_ids,
-                )
-            )
-            evidence.extend(
-                _property_evidence(
-                    con,
-                    facets,
-                    node_ids,
-                    issue_conditioned_node_ids,
-                )
-            )
+            evidence.extend(_edge_evidence(con, facets, node_ids, request))
+            evidence.extend(_property_evidence(con, facets, node_ids))
         finally:
             con.close()
     if "derived_relationships" not in request.policy.disabled_components:
@@ -2361,6 +2322,13 @@ def discover_candidates(
         )
 
     ranked_regions = sorted(by_region.items(), key=region_order)
+    shadow_rank_by_key = {
+        item[0]: rank
+        for rank, item in enumerate(
+            sorted(by_region.items(), key=lambda item: region_order(item)[:1] + region_order(item)[3:]),
+            start=1,
+        )
+    }
 
     # A discovered candidate is a file/symbol/source region, not each correlated
     # signal row and not an entire file. Consolidating at this level prevents
@@ -2392,7 +2360,7 @@ def discover_candidates(
                 {
                     role
                     for unit in support
-                    for role in unit.certified_roles
+                    for role in set(unit.certified_roles) & set(unit.issue_roles)
                 }
             )
         )
@@ -2427,6 +2395,7 @@ def discover_candidates(
             )
             + ((("legacy_rank", str(min(legacy_ranks))),) if legacy_ranks else ())
             + ((("ranking_prior_only", "1"),) if prior_only else ())
+            + (("shadow_rank", str(shadow_rank_by_key[region_key])),)
         )
         consolidated.append(
             EvidenceUnit.create(

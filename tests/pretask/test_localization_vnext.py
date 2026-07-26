@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import subprocess
 import tracemalloc
 from dataclasses import replace
 from pathlib import Path
@@ -1618,16 +1619,16 @@ def test_unrelated_typed_property_cannot_certify_issue_specific_behavior(tmp_pat
     con.commit()
     con.row_factory = sqlite3.Row
     try:
-        unrelated = vnext_engine._property_evidence(con, facets, {6})
-        conditioned = vnext_engine._property_evidence(con, facets, {6}, {6})
+        emitted = vnext_engine._property_evidence(con, facets, {6})
     finally:
         con.close()
 
-    assert unrelated
-    assert "expected_behavior" in unrelated[0].roles
-    assert "expected_behavior" in unrelated[0].certified_roles
-    assert "expected_behavior" not in unrelated[0].issue_roles
-    assert "expected_behavior" in conditioned[0].issue_roles
+    # The issue demands expected_behavior; a conditional_return guard proves an
+    # invariant, which this issue never asked for. The generic fact is therefore
+    # not merely uncertified for the issue - it is not evidence for it at all.
+    assert "expected_behavior" in facets.required_roles
+    assert "invariant" not in facets.required_roles
+    assert emitted == []
 
 
 def test_query_conditioned_candidate_beats_unrelated_generic_fact_in_admission(
@@ -1640,14 +1641,21 @@ def test_query_conditioned_candidate_beats_unrelated_generic_fact_in_admission(
         "Malformed payloads should return None instead of raising an exception.",
     )
     facets = extract_behavior_facets(request)
-    con = sqlite3.connect(db)
-    con.execute("INSERT INTO properties VALUES (2,6,'conditional_return','RETRIES > 0',2,1.0)")
-    con.commit()
-    con.row_factory = sqlite3.Row
-    try:
-        unrelated = vnext_engine._property_evidence(con, facets, {6})[0]
-    finally:
-        con.close()
+    # A certified typed fact on an unrelated symbol, carrying only the structural
+    # role its span actually proves.
+    unrelated = EvidenceUnit.create(
+        file_path="src/config.py",
+        symbol="load_config",
+        start_line=1,
+        end_line=2,
+        family=EvidenceFamily.PROPERTY,
+        confidence=1.0,
+        provenance=("properties", "conditional_return", "RETRIES > 0"),
+        roles=("invariant",),
+        signal_class="property",
+        signal_rank=1,
+        fact_span=True,
+    )
     relevant = EvidenceUnit.create(
         file_path="src/parser.py",
         symbol="JsonParser.parse",
@@ -1676,7 +1684,15 @@ def test_query_conditioned_candidate_beats_unrelated_generic_fact_in_admission(
     assert ReasonCode.NO_ISSUE_CONTRIBUTION in by_id[unrelated.evidence_id].reason_codes
 
 
-def test_issue_conditioned_support_can_certify_same_region_fact(tmp_path):
+def test_certification_is_never_lent_across_units_at_one_region(tmp_path):
+    """Certification is a per-unit fact, not a property of a shared span.
+
+    A certified fact that is NOT eligible for this issue sits at the same
+    consolidation key as an eligible-but-uncertified row. Consolidation unions
+    roles, so the region is eligible - but the certification must not travel,
+    or the wrong region wins a `new_mandatory_certified` admit on evidence that
+    proved nothing about the issue.
+    """
     repo, db = _graph(tmp_path)
     request = replace(
         _request(
@@ -1728,7 +1744,7 @@ def test_issue_conditioned_support_can_certify_same_region_fact(tmp_path):
     )
 
     assert "expected_behavior" in target.issue_roles
-    assert "expected_behavior" in target.certified_roles
+    assert "expected_behavior" not in target.certified_roles
     marginal = vnext_engine._marginal(
         target,
         covered=set(),
@@ -1737,7 +1753,7 @@ def test_issue_conditioned_support_can_certify_same_region_fact(tmp_path):
         role_classes={},
         fused_score=0.0,
     )
-    assert marginal[0] == 1
+    assert marginal[0] == 0
 
 
 def test_incremental_relevant_evidence_resolves_role_after_generic_deferral(
@@ -2475,3 +2491,218 @@ def test_prior_only_region_is_marked_and_real_evidence_region_is_not(tmp_path):
 
     assert flags["src/legacy_only.py"] == "1"
     assert flags["src/parser.py"] is None
+
+
+def test_structural_facts_never_claim_the_issue_expected_behavior():
+    """Structure proves structure. Only the issue can name expected behavior.
+
+    A typed edge or property proves what the code DOES at that span; it does not
+    prove that this is the behavior the issue is asking about. Granting
+    `expected_behavior` from pure structure is what let one unrelated certified
+    fact close a mandatory role and defer the relevant region as redundant.
+    """
+    request = LocalizationRequest(
+        issue_text="Malformed payloads should return None instead of raising an exception.",
+        repository_root=".",
+        graph_db="",
+        revision_identity="r",
+    )
+    facets = extract_behavior_facets(request)
+    assert "expected_behavior" in facets.required_roles
+
+    def roles(**kwargs):
+        return vnext_engine._roles_for(
+            facets,
+            symbol="unrelated_helper",
+            file_path="src/unrelated.py",
+            **kwargs,
+        )
+
+    for kwargs in (
+        {"relation": "RAISES"},
+        {"relation": "CATCHES"},
+        {"property_kind": "guard"},
+        {"property_kind": "boundary_condition"},
+        {"property_kind": "conditional_return"},
+        {"property_kind": "return_shape"},
+        {"property_kind": "exception_type"},
+    ):
+        assert "expected_behavior" not in roles(**kwargs), kwargs
+
+    # The structural roles themselves survive - this narrows a claim, not a signal.
+    # Raising IS control flow, so `transition` is structural truth and must stay;
+    # dropping it would silently cost recall on the 32/60 cases that require it.
+    assert "exception" in roles(relation="RAISES")
+    assert "transition" in roles(relation="RAISES")
+    assert "transition" in roles(relation="CATCHES")
+    assert "exception" in roles(property_kind="exception_type")
+    assert "invariant" in roles(property_kind="guard")
+    assert "state" in roles(relation="READS")
+    assert "transition" in roles(relation="DATA_FLOW")
+
+
+def test_ranking_prior_survives_dedup_against_the_same_paths_legacy_row():
+    """The floor pin must not share an identity with an ordinary v7.4 row.
+
+    `evidence_id` excludes metadata, confidence and signal_rank, so a prior and
+    a v7.4 lexical row for one path were byte-identical: dedup kept the
+    higher-confidence v7.4 row and silently deleted the floor.
+    """
+    request = LocalizationRequest(
+        issue_text="Requests to the resolver builder are dropped when the scheme is unknown.",
+        repository_root=".",
+        graph_db="",
+        revision_identity="r",
+    )
+    facets = extract_behavior_facets(request)
+    units = vnext_engine._legacy_evidence(
+        [
+            {
+                "path": "resolver/resolver.go",
+                "score": 0.5,
+                "components": {"lex": 0.5},
+                "legacy_rank": 1,
+                "ranking_prior_only": True,
+            },
+            {"path": "resolver/resolver.go", "score": 0.8, "components": {"lex": 0.8}},
+        ],
+        facets,
+        LocalizationPolicy(),
+    )
+
+    assert len({unit.evidence_id for unit in units}) == len(units) == 2
+    pinned = [unit for unit in units if dict(unit.metadata).get("ranking_prior_only") == "1"]
+    assert len(pinned) == 1
+    assert dict(pinned[0].metadata)["legacy_rank"] == "1"
+
+
+def test_history_never_regrants_roles_the_source_evidence_was_not_eligible_for(tmp_path):
+    """Co-change is file-granular support; it must not launder ineligible roles."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "thing.py").write_text("x = 1\n", encoding="utf-8")
+    for command in (
+        ["git", "init", "--quiet"],
+        ["git", "config", "user.email", "t@example.com"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "commit", "--quiet", "-m", "seed"],
+    ):
+        if subprocess.run(command, cwd=repo, capture_output=True).returncode:
+            pytest.skip("git unavailable")
+    request = LocalizationRequest(
+        issue_text="Malformed payloads should return None instead of raising an exception.",
+        repository_root=str(repo),
+        graph_db="",
+        revision_identity="r",
+    )
+    source = EvidenceUnit.create(
+        file_path="src/thing.py",
+        symbol="thing",
+        start_line=1,
+        end_line=1,
+        family=EvidenceFamily.GRAPH,
+        relation="RAISES",
+        confidence=1.0,
+        provenance=("certified_but_ineligible",),
+        roles=("expected_behavior", "exception"),
+        issue_roles=("exception",),
+        signal_class="structural",
+        signal_rank=1,
+    )
+
+    produced = vnext_engine._history_evidence(request, (source,))
+
+    # Assert the leg actually fired, or every role assertion below is vacuous.
+    assert produced, "history evidence did not fire; the test would prove nothing"
+    for unit in produced:
+        assert "exception" in unit.roles
+        assert "expected_behavior" not in unit.roles
+        assert "expected_behavior" not in unit.issue_roles
+
+
+@pytest.mark.parametrize(
+    "dropped",
+    [
+        "structured_semantics",
+        "relation_policy",
+        "history",
+        "derived_relationships",
+        "class_fusion",
+        "marginal_coverage",
+        "source_regions",
+        "behavioral_facets",
+    ],
+)
+def test_engine_degrades_honestly_when_a_capability_is_missing(tmp_path, dropped):
+    """Industry-grade generality: no capability may be load-bearing for safety.
+
+    The 60-case corpus has FULL graph capability on every case, so degraded
+    regimes are otherwise unexercised. Dropping any single component must keep
+    the engine deterministic, leak-free and honest about what it could not
+    resolve - never crash, and never claim coverage it did not earn.
+    """
+    repo, db = _graph(tmp_path)
+    issue = "Malformed payloads should return None instead of raising an exception."
+    full = localize_vnext(_request(repo, db, issue))
+    degraded = localize_vnext(
+        replace(
+            _request(repo, db, issue),
+            policy=LocalizationPolicy(disabled_components=frozenset({dropped})),
+        )
+    )
+
+    assert degraded.deterministic_hash == localize_vnext(
+        replace(
+            _request(repo, db, issue),
+            policy=LocalizationPolicy(disabled_components=frozenset({dropped})),
+        )
+    ).deterministic_hash
+    assert int(degraded.metrics.get("leakage_count") or 0) == 0
+    # Coverage must stay internally consistent: nothing may be reported covered
+    # that is not required, and unresolved must be the honest remainder.
+    covered = set(degraded.coverage.covered)
+    required = set(degraded.coverage.required)
+    assert covered <= required
+    assert set(degraded.coverage.unresolved) <= required - covered
+    # Admitted regions must still be real spans in the repository.
+    for region in degraded.admitted_regions:
+        assert region.file_path
+        assert region.end_line >= region.start_line
+    assert degraded.stopping_reason
+    assert full.stopping_reason
+
+
+def test_engine_survives_a_graph_with_no_edges_properties_or_fts(tmp_path):
+    """A thin graph is the common real-world case, not an exotic one."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "thin.py").write_text(
+        "def parse(value):\n    return value\n", encoding="utf-8"
+    )
+    db = tmp_path / "thin.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY, label TEXT, name TEXT, qualified_name TEXT,
+            file_path TEXT, start_line INTEGER, end_line INTEGER, signature TEXT,
+            return_type TEXT, is_exported INTEGER, is_test INTEGER, language TEXT,
+            parent_id INTEGER
+        );
+        """
+    )
+    con.execute(
+        "INSERT INTO nodes VALUES (1,'Function','parse','parse','src/thin.py',1,2,"
+        "'parse(value)','',1,0,'python',NULL)"
+    )
+    con.commit()
+    con.close()
+
+    result = localize_vnext(
+        _request(repo, db, "parse should return None for malformed input.")
+    )
+
+    assert int(result.metrics.get("leakage_count") or 0) == 0
+    assert result.stopping_reason
+    assert set(result.coverage.covered) <= set(result.coverage.required)

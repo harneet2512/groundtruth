@@ -561,12 +561,25 @@ def _shadow_only_ranked_files(discoveries: Sequence[Any]) -> list[str]:
     engine's own ordering moved.  Priors still contribute to class fusion, so
     this is the engine's order without the floor, not a counterfactual run.
     """
+    kept = [
+        discovery
+        for discovery in discoveries
+        if discovery.file_path
+        and dict(discovery.metadata).get("ranking_prior_only") != "1"
+    ]
+
+    def shadow_position(item: tuple[int, Any]) -> tuple[int, int]:
+        index, discovery = item
+        raw = dict(discovery.metadata).get("shadow_rank", "")
+        return (int(raw) if raw.isdigit() else len(kept) + index + 1, index)
+
     return list(
         dict.fromkeys(
             discovery.file_path
-            for discovery in discoveries
-            if discovery.file_path
-            and dict(discovery.metadata).get("ranking_prior_only") != "1"
+            for _position, discovery in sorted(
+                enumerate(kept),
+                key=shadow_position,
+            )
         )
     )
 
@@ -803,7 +816,14 @@ def run_sealed_case(
             "ranked_discovery_files": ranked_discovery_files,
             "ranked_discovery_files_shadow_only": ranked_discovery_files_shadow_only,
             "new_admitted_files": new_files,
-            "first_divergence": _first_divergence(old_files, ranked_discovery_files),
+            "first_divergence": _first_divergence(
+                old_files,
+                ranked_discovery_files_shadow_only or ranked_discovery_files,
+            ),
+            "first_divergence_floored": _first_divergence(
+                old_files,
+                ranked_discovery_files,
+            ),
             "region_contributions": contribution,
             "admitted_decision_trace": admitted_decision_trace,
             "implied_inspection_tokens": sum(
@@ -870,9 +890,9 @@ def score_sealed_case(
     old_files = list(sealed["legacy"]["candidate_order"])
     new_files = list(sealed["comparison"]["new_admitted_files"])
     new_ranked_files = list(sealed["comparison"].get("ranked_discovery_files") or new_files)
-    shadow_only_files = list(
-        sealed["comparison"].get("ranked_discovery_files_shadow_only") or ()
-    )
+    shadow_only_raw = sealed["comparison"].get("ranked_discovery_files_shadow_only")
+    shadow_only_measured = shadow_only_raw is not None
+    shadow_only_files = list(shadow_only_raw or ())
     old_rank = _rank(old_files, gold_files)
     new_rank = _rank(new_ranked_files, gold_files)
     shadow_only_rank = _rank(shadow_only_files, gold_files)
@@ -1074,17 +1094,32 @@ def score_sealed_case(
         },
         # Attribution diagnostic, never the reported comparison column: the
         # shadow engine's own order with the model-visible legacy floor removed.
+        # An artifact sealed before this column existed is UNMEASURED, never a
+        # measured zero - reporting False/0 there fabricates a regression.
         "new_shadow_only": {
-            "first_gold_rank": shadow_only_rank,
-            "hit_at_1": shadow_only_rank == 1,
-            "hit_at_3": shadow_only_rank is not None and shadow_only_rank <= 3,
-            "hit_at_8": shadow_only_rank is not None and shadow_only_rank <= 8,
-            "ranked_file_count": len(shadow_only_files),
+            "measured": shadow_only_measured,
+            "first_gold_rank": shadow_only_rank if shadow_only_measured else None,
+            "hit_at_1": (shadow_only_rank == 1) if shadow_only_measured else None,
+            "hit_at_3": (
+                shadow_only_rank is not None and shadow_only_rank <= 3
+            )
+            if shadow_only_measured
+            else None,
+            "hit_at_8": (
+                shadow_only_rank is not None and shadow_only_rank <= 8
+            )
+            if shadow_only_measured
+            else None,
+            "ranked_file_count": len(shadow_only_files) if shadow_only_measured else None,
             "file_precision": (
-                sum(1 for path in shadow_only_files[:8] if _matches(path, gold_files))
-                / len(shadow_only_files[:8])
-                if shadow_only_files[:8]
-                else 0.0
+                (
+                    sum(1 for path in shadow_only_files[:8] if _matches(path, gold_files))
+                    / len(shadow_only_files[:8])
+                    if shadow_only_files[:8]
+                    else 0.0
+                )
+                if shadow_only_measured
+                else None
             ),
         },
     }
