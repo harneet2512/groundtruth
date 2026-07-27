@@ -9389,6 +9389,54 @@ def _runtime_ledger_flush() -> None:
         pass
 
 
+# ── LEDGER SELF-DESCRIPTION: which FEATURE spoke, and WHEN was it contracted to ──────
+# The delivery row recorded `layer` (the producer) and a free-form `event_type`, but neither
+# the FACT CLASS nor the boundary the registry contracts that fact to. Consequence, measured
+# on run 30225435976: 95 delivered payloads, `fact_class` null on 80 of them, and NO boundary
+# field at all — so "did feature N deliver at its contracted time?" was unanswerable from the
+# artifact. Three different vocabularies (`commitment_boundary`, `surface`, `event_type`) each
+# looked like the boundary and none of them was, which nearly produced a false "0/95 on-time".
+#
+# `fact_registry` is keyed by EVIDENCE TYPE and does not resolve producer LAYER names (only
+# `recovery` happens to collide), so the layer->fact mapping has to be explicit. Values are
+# the producer->feature bindings established by reading each producer (CLAUDE.md §6.1); a
+# test asserts every value is a REGISTERED fact class, so this cannot silently drift.
+_LAYER_TO_FACT_CLASS = {
+    "l3.contract": "caller_contract",
+    "verify.horizon.executed": "covering_red",
+    "consensus.scope_map": "def_partition",
+    "consensus.scope": "def_partition",
+    "gateway.trace_frame": "localization",
+    "change_surface": "newfile_precedent",
+    "spec.obligation": "obligations",
+    "obligation.resurface": "obligations",
+    "detect.coherence": "recovery",
+    "verify.horizon.pivot": "recovery",
+    "recovery": "recovery",
+    "patch_delta": "signature_delta",
+    "submit_gate": "submit_refusal",
+    "edit.syntax": "syntax_result",
+}
+
+
+def _fact_identity_for_layer(layer: str):
+    """(fact_class, contracted_boundary) for a producer layer, or (None, None).
+
+    Correct-or-quiet: an unmapped layer stamps nothing rather than guessing, so a row with no
+    `fact_class` means "not a DIRECT-feature delivery", never "we lost the identity".
+    """
+    fact = _LAYER_TO_FACT_CLASS.get(str(layer or "").strip())
+    if not fact:
+        return None, None
+    try:
+        from groundtruth.runtime import fact_registry as _fr
+
+        reg = _fr.registration_for(fact)
+        return fact, getattr(reg, "deliver_by", None)
+    except Exception:  # noqa: BLE001 -- observability must never break delivery
+        return fact, None
+
+
 def _runtime_ledger_record(
     *,
     kind: str,
@@ -9465,6 +9513,15 @@ def _runtime_ledger_record(
     if extra:
         for _ek, _ev in extra.items():
             _row.setdefault(_ek, _ev)
+    # Stamp WHICH feature spoke and WHEN it was contracted to speak, so the on-time question
+    # is answerable from the row alone. `setdefault` — a caller that already knows its
+    # fact_class (the SS-8 side-car) always wins. Additive: rows for non-DIRECT layers are
+    # byte-identical to before.
+    _fact, _contracted = _fact_identity_for_layer(kind)
+    if _fact:
+        _row.setdefault("fact_class", _fact)
+        if _contracted:
+            _row.setdefault("contracted_boundary", _contracted)
     binding = _current_observation_binding_dict()
     if binding is not None:
         _row["observation_binding"] = binding
