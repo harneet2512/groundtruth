@@ -9415,6 +9415,14 @@ _LAYER_TO_FACT_CLASS = {
     "recovery": "recovery",
     "patch_delta": "signature_delta",
     "submit_gate": "submit_refusal",
+    # `completion_cert` is the OTHER half of the submit boundary. CLAUDE.md §6.1 defines
+    # GT_CERT_DELIVERY as `completion_cert`+`submit_gate`, and the SS-2 submit-RED referee
+    # emits its refusal HERE (outcome=bounce_once, reason=ss_submit_red), not on submit_gate.
+    # Omitting it made submit_refusal / GT_SS_SUBMIT_RED / GT_CERT_DELIVERY read
+    # TRIGGER-ABSENT on a run where the referee demonstrably BOUNCED a submit — measured on
+    # run 30229092179, actionlint task, iteration 136. A missing map entry silently
+    # understates a feature as never-triggered, which is the worst direction to be wrong in.
+    "completion_cert": "submit_refusal",
     "edit.syntax": "syntax_result",
 }
 
@@ -22661,23 +22669,44 @@ def _wrap_agent_run(orig):
 
     def run(self, task: str = "", *args, **kwargs):
         if not _GT_BASELINE and _CANONICAL_RUNTIME_ATTACHMENT is None:
+            attached, reason = False, "install_returned_none"
             try:
-                install_canonical_runtime(
+                got = install_canonical_runtime(
                     model=getattr(self, "model", None),
                     agent=self,
                     env=os.environ,
                     task=task,
                 )
+                attached = bool(getattr(got, "attached", False))
+                if not attached:
+                    # install_canonical_runtime SWALLOWS every exception and returns an
+                    # UNATTACHED object, so an exception handler alone never sees a silent
+                    # failure. Name which collaborator is missing instead of a bare False.
+                    missing = [
+                        part
+                        for part in ("attempt_runtime", "provider_boundary",
+                                     "commitment_boundary")
+                        if getattr(got, part, None) is None
+                    ]
+                    reason = "unattached:" + (",".join(missing) or "unknown")
             except Exception as exc:  # noqa: BLE001 -- sensing must never break the agent
-                try:
-                    _runtime_ledger_record(
-                        kind="canonical_runtime.install",
-                        outcome="suppressed_internal_only",
-                        reason=f"install_failed:{type(exc).__name__}",
-                        chars=0,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
+                reason = f"install_raised:{type(exc).__name__}"
+            # UNCONDITIONAL outcome row — the whole point. A row written ONLY on failure
+            # leaves "no canonical rows" ambiguous between "never attached", "attached and
+            # every plan staged cleanly", and "attached but silently unattached". An
+            # adversarial audit showed the previous exception-only row had no discriminating
+            # power, because the oracle's SUCCESS path writes nothing to this ledger and its
+            # real record is a SQLite journal the workflow does not upload.
+            try:
+                _runtime_ledger_record(
+                    kind="canonical_runtime.install",
+                    outcome="suppressed_internal_only",
+                    reason=("attached" if attached else reason),
+                    chars=0,
+                    extra={"canonical_runtime_attached": attached},
+                )
+            except Exception:  # noqa: BLE001
+                pass
         return orig(self, task, *args, **kwargs)
 
     return run
@@ -22817,6 +22846,23 @@ def _write_profile_receipt() -> None:
             # install, incl a "0" kill-switch). Additive key; schema stays gt.profile_receipt.v1.
             "member_source": dict(_GT_PROFILE_MEMBER_SOURCE),
             "patched_classes": _PATCHED_CLASSES,
+            # ORACLE ACTIVATION — the positive control for "did GT have a TIMING AUTHORITY?"
+            #
+            # `patched_classes` above answers only "can GT see actions and append bytes".
+            # A process can be non-empty there and EMPTY here, which is the state every
+            # pier-driven run was in: 95 delivered payloads, zero canonical rows, every
+            # delivery metric green, and no decision-timing behind any of it.
+            #
+            # Recording it makes "did the oracle attach?" a FACT in the artifact instead of
+            # an inference from the absence of canonical ledger rows — absence which is
+            # ambiguous between "never attached" and "attached but never compiled".
+            # `role_driven_coalition` is recorded too because the runtime can attach and
+            # still release nothing when that lever is off.
+            "patched_agent_classes": _PATCHED_AGENT_CLASSES,
+            "canonical_runtime_attached": bool(_CANONICAL_RUNTIME_ATTACHMENT is not None),
+            "role_driven_coalition": (
+                str(os.environ.get("GT_ROLE_DRIVEN_COALITION", "0")).strip() == "1"
+            ),
             "pid": os.getpid(),
             "timestamp_ms": _ts,
         }

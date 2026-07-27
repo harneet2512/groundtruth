@@ -65,9 +65,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
@@ -355,7 +354,6 @@ def evaluate(root: Path) -> dict[str, Any]:
     )
 
     features = load_feature_universe()
-    by_id = {f.feature_id: f for f in features}
     facts = {f.feature_id: f for f in features if f.kind == "FACT"}
     caps = [f for f in features if f.kind == "CAP"]
     cap_ids = frozenset(feature_lineage.CAP_BYTE_OWNER_IDS)
@@ -719,8 +717,12 @@ def render_json(result: dict[str, Any]) -> str:
             }
             for f in sorted(features, key=lambda r: (r.kind, r.feature_id))
         ],
-        "summary": dict(Counter(f.verdict for f in features)),
+        "summary": {
+            verdict: sum(1 for f in features if f.verdict == verdict)
+            for verdict in (_VERDICT_FIRED, _VERDICT_ABSENT, _VERDICT_FAILURE)
+        },
         "unattributed_delivered_rows": dict(result["unattributed_delivered"]),
+        "unresolved_gate_decisions": dict(result["unresolved_gate"]),
     }
     return json.dumps(payload, indent=2, sort_keys=False)
 

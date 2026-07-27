@@ -335,6 +335,47 @@ def fetch_artifacts(repo: str, arts: list[dict], base: Path, max_mb: int,
 # ---------------------------------------------------------------------------
 # runtime-ledger analysis
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------------------
+# THE VALID ORACLE MEASUREMENT.
+#
+# Counting canonical/capsule LEDGER rows has NO discriminating power: the oracle's SUCCESS
+# path writes nothing to that JSONL, its real record is a RuntimeJournal SQLite the workflow
+# did not upload, and nothing anywhere writes a layer containing "capsule". The same zero is
+# produced by a perfect oracle and by one that never installed.
+#
+# A RELEASED capsule is rendered with the header f"[GroundTruth . {decision_context}]" and
+# injected as a user message, so it lands in the agent trajectory. Legacy GT bytes carry
+# "<gt-" markers in the SAME files, which makes them a POSITIVE CONTROL: if legacy markers
+# are present and capsule headers are absent, the sink is demonstrably live and the oracle
+# demonstrably released nothing. Without that control an absence would be unreadable.
+# ---------------------------------------------------------------------------------------
+def analyze_trajectories(root: Path) -> dict:
+    files = capsules = legacy = 0
+    for path in root.rglob("*trajectory*.json"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        files += 1
+        capsules += text.count("[GroundTruth ")
+        legacy += text.count("<gt-")
+    return {"files": files, "capsule_headers": capsules, "legacy_markers": legacy}
+
+
+def format_trajectory_verdict(t: dict) -> str:
+    if not t["files"]:
+        return "TRAJECTORY: no trajectory files in artifacts -- oracle release NOT MEASURABLE"
+    if t["capsule_headers"]:
+        return (f"TRAJECTORY: {t['capsule_headers']} capsule header(s) across {t['files']} "
+                f"file(s) -- THE ORACLE RELEASED (legacy markers {t['legacy_markers']})")
+    if not t["legacy_markers"]:
+        return (f"TRAJECTORY: 0 capsule headers AND 0 legacy markers across {t['files']} "
+                "file(s) -- NO positive control, absence is UNREADABLE")
+    return (f"TRAJECTORY: 0 capsule headers vs {t['legacy_markers']} legacy marker(s) across "
+            f"{t['files']} file(s) -- sink is LIVE, oracle released NOTHING")
+
+
 def analyze_ledger(path: Path) -> dict:
     """Parse one gt_runtime_ledger*.jsonl into the delivery-evidence summary."""
     rows: list[dict] = []

@@ -108,3 +108,27 @@ def test_the_oracle_hook_actually_attaches_to_the_real_agent_class():
         f"DefaultAgent.run is {default.DefaultAgent.run.__qualname__}, not the oracle wrapper"
     )
     assert "minisweagent.agents.default.DefaultAgent" in seam._PATCHED_AGENT_CLASSES
+
+
+def test_profile_receipt_records_oracle_activation():
+    """The receipt is the POSITIVE CONTROL for "did GT have a timing authority?".
+
+    `patched_classes` alone answers only "can GT append bytes". A process can be non-empty
+    there and EMPTY on the agent hook — the state every pier-driven run was in: 95 delivered
+    payloads, zero canonical rows, every metric green, no decision-timing behind any of it.
+
+    Recording it makes attachment a FACT in the artifact rather than an inference from absent
+    canonical ledger rows, which is ambiguous between "never attached" and "attached but
+    never compiled". `role_driven_coalition` matters too: the runtime can attach and still
+    release nothing when the lever is off.
+    """
+    src = inspect.getsource(seam._write_profile_receipt)
+    assert '"patched_agent_classes": _PATCHED_AGENT_CLASSES' in src
+    assert '"canonical_runtime_attached"' in src
+    assert '"role_driven_coalition"' in src
+
+
+def test_receipt_reports_attachment_as_a_bool_not_a_truthy_object():
+    """A receipt must serialise; an attachment object would break json.dump or leak state."""
+    src = inspect.getsource(seam._write_profile_receipt)
+    assert "bool(_CANONICAL_RUNTIME_ATTACHMENT is not None)" in src

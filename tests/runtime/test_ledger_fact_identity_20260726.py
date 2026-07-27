@@ -82,3 +82,24 @@ def test_all_ten_fact_classes_are_reachable_from_some_layer():
     mapped = set(seam._LAYER_TO_FACT_CLASS.values())
     missing = sorted(set(_FACT_DECISION_CONTRACTS) - mapped)
     assert not missing, f"FACT classes no layer maps to: {missing}"
+
+
+def test_completion_cert_maps_to_submit_refusal():
+    """The SS-2 submit-RED referee emits its refusal on `completion_cert`, not `submit_gate`.
+
+    CLAUDE.md §6.1 defines GT_CERT_DELIVERY as `completion_cert`+`submit_gate`. Omitting
+    `completion_cert` made submit_refusal / GT_SS_SUBMIT_RED / GT_CERT_DELIVERY read
+    TRIGGER-ABSENT on a run where the referee demonstrably BOUNCED a submit (run
+    30229092179, actionlint task, iteration 136: outcome=bounce_once, reason=ss_submit_red).
+
+    A missing map entry understates a feature as never-triggered — the worst direction to be
+    wrong in, because it reads as correct-quiet rather than as a defect.
+    """
+    assert seam._fact_identity_for_layer("completion_cert") == ("submit_refusal", "submit")
+
+
+def test_both_submit_boundary_layers_resolve_to_the_same_fact():
+    """`submit_gate` and `completion_cert` are two producers of one contracted boundary."""
+    gate = seam._fact_identity_for_layer("submit_gate")
+    cert = seam._fact_identity_for_layer("completion_cert")
+    assert gate == cert == ("submit_refusal", "submit")

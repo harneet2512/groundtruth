@@ -1491,6 +1491,18 @@ jobs:
           # were lost with the ephemeral container (gt_mini_patch.py:3515,3569 default /tmp/*).
           # WARN loudly on a zero harvest so a silently-empty mount can't leave the run green.
           _gt_telemetry_recovered=0
+          # The canonical runtime's PRIMARY record is the RuntimeJournal SQLite
+          # (delivery_journal / compilation_journal / oracle_journal) plus the profile
+          # receipt, and NEITHER was harvested. Consequence: the oracle's whole decision
+          # history died with the container, and "0 canonical rows in the JSONL" was being
+          # read as "the oracle released nothing" when the oracle's SUCCESS path writes
+          # nothing to that JSONL at all. Copy both so the question is answerable from
+          # artifacts instead of inferred from an absence.
+          for _g in gt_reasoning_runtime.sqlite3 gt_profile_receipt.json; do
+            if [ -s "/tmp/gt_out/$_g" ]; then
+              cp "/tmp/gt_out/$_g" "trial_results/${_g%.*}_${{ matrix.task }}.${_g##*.}" 2>/dev/null || true
+            fi
+          done
           for _f in gt_runtime_ledger.jsonl gt_hook_fire_counts.json; do
             if [ -s "/tmp/gt_out/$_f" ]; then
               cp "/tmp/gt_out/$_f" "trial_results/${_f%.*}_${{ matrix.task }}.${_f##*.}" 2>/dev/null \
