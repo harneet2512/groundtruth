@@ -9588,7 +9588,12 @@ def _resolved_search_symbols(operation, command: str) -> "tuple[str, ...]":
         try:
             placeholders = ",".join("?" * len(_DEF_LABELS))
             row = con.execute(
+                # MUST match `defined_symbols_for_file` exactly. Omitting the start_line
+                # predicate let a node with NULL/0 start_line validate a search operand
+                # into focus that the VIEW path can never produce -- the two resolvers
+                # disagreed on the day they were written.
                 f"SELECT 1 FROM nodes WHERE name=? AND COALESCE(is_test,0)=0 "
+                f"AND COALESCE(start_line,0)>0 "
                 f"AND label IN ({placeholders}) LIMIT 1",
                 (symbol, *_DEF_LABELS),
             ).fetchone()
@@ -9605,7 +9610,7 @@ def _resolved_search_symbols(operation, command: str) -> "tuple[str, ...]":
 def _publish_active_decision(attachment, active) -> None:
     """Record the open decision on the attachment so ledger rows can stamp it.
 
-    ONE publisher for all four construction sites. Deliberately not re-derived inside
+    ONE publisher for all five construction sites. Deliberately not re-derived inside
     `_current_active_decision` from `work_state.phase`: that would be a SECOND copy of the
     phase->context table which must agree with `_active_decision` by hand, and two formulas
     that must agree by hand is exactly the defect that produced the runtime_evidence churn.
@@ -22651,6 +22656,28 @@ class CanonicalRuntimeAttachment:
             )
             self.attempt_runtime.append_event(canonical)
             self.gateway_state.canonical_revision = after
+            # ROW-TIME STAMP (SEV-1 fix, 2026-07-27). The producer rows written below --
+            # `gateway_produce_raw` and `_deep_reactive_envelopes` (covering_red / syntax /
+            # recovery) -- stamp `gt_audit_active_decision` AT WRITE TIME via
+            # `_current_active_decision`, but this observation's publish used to happen only
+            # AFTER ingestion, so every producer row carried the decision published at the
+            # PREVIOUS boundary. Edit/test boundaries -- where phase transitions concentrate --
+            # were exactly the rows misdated, and a WRONG stamp is worse than an ABSENT one
+            # (absent reads NOT-EVALUABLE; wrong reads as a measurement).
+            #
+            # NOT a second phase->context formula: `_active_decision` derives the open decision
+            # from work_state (already advanced by `append_event` above) and NEVER from the
+            # records ("evidence ... is never allowed to choose which decision is open"), so
+            # this early publish is a pure timing correction using the ONE formula. The
+            # post-ingestion recompute below stays authoritative for `prepare_next_inference`
+            # and re-publishes for rows written after ingestion; it also covers the case where
+            # ingesting this observation's evidence moves the work state.
+            active = self._active_decision(
+                tuple(self.attempt_runtime._evidence.values()),
+                self.attempt_runtime.work_state,
+                after,
+            )
+            _publish_active_decision(self, active)
             envelopes = gateway_produce_raw(event, self.gateway_state)
             envelopes = tuple(envelopes) + self._deep_reactive_envelopes(
                 changed_files=changed_files,

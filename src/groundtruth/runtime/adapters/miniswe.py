@@ -242,8 +242,13 @@ def canonicalize_tool_result(
             # phase = UNDERSTANDING, and a search must not advance the trajectory out of
             # DISCOVERY/LOCALIZATION -- `_active_decision` derives the open decision from the
             # phase, so a false advance would make the oracle reason about the wrong moment.
+            # NOT on SEARCH_FAILED: that command did not run (bad flag, unreadable path),
+            # so its operand is not evidence of what the agent is working on. SEARCH_EMPTY
+            # IS kept -- a search that ran and found nothing is real interest, and those
+            # are precisely the searches GT has most to add to.
             *((("resolved_symbols", "|".join(result.resolved_symbols)),)
-              if result.resolved_symbols else ()),
+              if result.resolved_symbols
+              and kind is not SemanticKind.SEARCH_FAILED else ()),
         )
         outcomes = (outcome(kind, metadata=metadata),)
     elif action.operation is ActionOperation.VIEW_SOURCE:
