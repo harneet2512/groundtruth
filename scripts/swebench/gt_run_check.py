@@ -40,6 +40,7 @@ Artifact zips/extractions are cached under <tmp>/<run_id>/ keyed by artifact id,
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -161,6 +162,50 @@ def _now() -> datetime:
 def _one_line(text: str, cap: int = 240) -> str:
     text = re.sub(r"\s+", " ", str(text or "")).strip()
     return text[: cap - 3] + "..." if len(text) > cap else text
+
+
+def _content_sha16(text: str) -> str:
+    """The seam's seal: sha256 over `surrogatepass`-encoded bytes, first 16 hex chars."""
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def byte_join(sealed_rows: list, messages: list[str]) -> tuple[int, int, bool]:
+    """Return (found, total, control_ok) for delivered payloads vs the model's messages.
+
+    `control_ok` is a POSITIVE CONTROL: a known substring lifted from a real message must be
+    findable by the same search. Without it a 0/N is unreadable -- it could mean the joiner
+    itself is broken, which is exactly how a marker-based check produced a false
+    "nothing was delivered".
+    """
+    control_ok = False
+    for msg in messages:
+        if len(msg) >= 80:
+            probe = msg[20:60]
+            want = _content_sha16(probe)
+            control_ok = any(
+                _content_sha16(m[i:i + len(probe)]) == want
+                for m in messages
+                for i in range(0, max(1, len(m) - len(probe) + 1))
+            )
+            break
+    found = 0
+    for row in sealed_rows:
+        want = str(row.get("content_sha256_16") or "")
+        n = int(row.get("chars_delivered") or 0)
+        if not want or n <= 0:
+            continue
+        hit = False
+        for msg in messages:
+            if len(msg) < n:
+                continue
+            for i in range(0, len(msg) - n + 1):
+                if _content_sha16(msg[i:i + n]) == want:
+                    hit = True
+                    break
+            if hit:
+                break
+        found += hit
+    return found, len(sealed_rows), control_ok
 
 
 def _safe_name(name: str) -> str:
@@ -502,6 +547,18 @@ def analyze_ledger(path: Path) -> dict:
     # the shipped text is actually present in out["output"] after the append) is that
     # contradiction. Report presence FIRST: a landed-count of 0 is unreadable unless the key
     # exists on some row, so absence is stated as NOT-EVALUABLE rather than as a failure.
+    # THE ONLY VALID BYTE-JOIN. Do NOT search a trajectory for `<gt-` / `[GroundTruth`
+    # markers to decide whether GT delivered: `renderer_id="native"` deliveries are FORBIDDEN
+    # by the leak guard from carrying a gt tag, so those markers are absent by construction
+    # and a zero cannot distinguish "nothing delivered" from "delivered in native form". That
+    # mistake produced a four-tick investigation into a non-existent failure and a retracted
+    # "delivery seam is dark on 5/5" claim.
+    #
+    # Join on the seal the seam itself writes instead: every delivered row carries
+    # `chars_delivered` and `content_sha256_16 = sha256(shipped, surrogatepass)[:16]`. Slide a
+    # window of that length over each trajectory message and compare. Exact, and form-agnostic.
+    sealed = [r for r in real if r.get("content_sha256_16") and (r.get("chars_delivered") or 0) > 0]
+
     _landed_present = [r for r in real if "append_landed" in r]
     landed_true = sum(1 for r in _landed_present if r.get("append_landed") is True)
     landed_false = sum(1 for r in _landed_present if r.get("append_landed") is False)
@@ -509,6 +566,7 @@ def analyze_ledger(path: Path) -> dict:
     return {
         "path": str(path), "rows": len(rows), "bad_lines": bad,
         "outcomes": outcomes, "real_delivered": len(real),
+        "sealed_rows": len(sealed), "sealed": sealed,
         "landed_rows": len(_landed_present),
         "landed_true": landed_true, "landed_false": landed_false,
         "empty_delivered": empty_delivered, "layers": layers,
