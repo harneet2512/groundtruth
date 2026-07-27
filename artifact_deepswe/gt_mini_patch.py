@@ -15283,6 +15283,26 @@ def _gt_gateway_deliver(
                     # to {} so a None extra can never make `.setdefault` raise into the swallow.
                     _delivery_extra = _gateway_delivery_extra(winner) or {}
                     _delivery_extra.setdefault("renderer_id", "native" if native else "tagged")
+                    # SELF-VERIFYING BYTE ACCOUNTING. `chars` below is len(_shipped) -- what
+                    # this row INTENDED to append. It is not evidence the bytes reached the
+                    # model. On run 30246661710 the ledger claimed 6 deliveries totalling 686
+                    # chars while the trajectory contained ZERO GT markers across 93k chars,
+                    # and nothing in the row could contradict that: a "delivered" row was
+                    # unfalsifiable from the ledger alone and needed a trajectory join to
+                    # check (the BYTE JOIN = 0 failure of 07-25).
+                    #
+                    # Record the observation length AFTER the append and whether it actually
+                    # grew by the expected amount. `append_landed=False` is then a hard,
+                    # per-row witness that the bytes did not land -- readable without any
+                    # trajectory, and impossible to mistake for a delivery.
+                    try:
+                        _obs_after = len(out.get("output") or "")
+                        _delivery_extra["observation_len_after"] = _obs_after
+                        _delivery_extra["append_landed"] = bool(
+                            _shipped and _shipped in (out.get("output") or "")
+                        )
+                    except Exception:  # noqa: BLE001 -- accounting never blocks delivery
+                        pass
                     _runtime_ledger_record(
                         kind="gateway." + (winner.evidence_type or "fact"),
                         outcome=_ProductSignalOutcome.DELIVERED,
@@ -22516,9 +22536,47 @@ class CanonicalRuntimeAttachment:
                         ),
                         chars=0,
                         extra={
+                            # `held_evidence` counts the evidence the oracle DELIBERATELY
+                            # DEFERRED -- NOT the size of the pool it considered. Reading a 0
+                            # here as "no evidence existed" is wrong and produced a retracted
+                            # classification of run 30246661710: an empty pool (an upstream
+                            # producer bug) and a full pool that still failed
+                            # decision-completeness (an anchor/role bug) are opposite
+                            # diagnoses with opposite fixes, and this field cannot tell them
+                            # apart. The three fields below can.
                             "held_evidence": len(plan.held_evidence_ids or ()),
                             "suppressed_decisions": len(
                                 plan.suppressed_decision_ids or ()
+                            ),
+                            # WHICH required role went unfilled -- the answer to "why was the
+                            # oracle quiet". Without it a DECISION_INCOMPLETE row explains
+                            # nothing, which is the ambiguity that kept 0/17 unfalsifiable.
+                            "unresolved_roles": [
+                                getattr(r, "name", str(r))
+                                for r in (
+                                    getattr(
+                                        getattr(plan, "oracle_decision", None),
+                                        "unresolved_roles",
+                                        (),
+                                    )
+                                    or ()
+                                )
+                            ],
+                            # POOL vs COALITION. evidence_store==0 => nothing was ever
+                            # ingested (producer gap). evidence_store>0 with
+                            # coalition_size==0 => evidence existed and none was eligible.
+                            # coalition_size>0 => it gathered members and still missed a
+                            # required role (anchor starvation).
+                            "evidence_store": len(
+                                getattr(self.attempt_runtime, "_evidence", ()) or ()
+                            ),
+                            "coalition_size": len(
+                                getattr(
+                                    getattr(plan, "oracle_decision", None),
+                                    "coalition",
+                                    (),
+                                )
+                                or ()
                             ),
                         },
                     )
