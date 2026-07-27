@@ -468,9 +468,20 @@ jobs:
                           sys.exit(f"FATAL: Live Lite manifest entry missing {k!r}: {r}")
                   # Live Lite records carry no repo_language; derive from task-owned
                   # patch metadata and fail closed when no source language is knowable.
-                  r["repo_language"] = derive_task_language(r)
-                  if not r["repo_language"]:
-                      sys.exit(f"FATAL: cannot derive language for {r['instance_id']}")
+                  #
+                  # FAIL CLOSED ON WHAT WE RUN, NOT ON WHAT WE READ (2026-07-27). This used to
+                  # sys.exit here, while ingesting the WHOLE manifest and before any selection.
+                  # One underivable row therefore aborted EVERY dispatch, including an explicit
+                  # 5-task one that never referenced it -- measured: exactly 1 of the 300 rows
+                  # (bridgecrewio__checkov-6893) is underivable, so no live-lite run could be
+                  # dispatched at all. Carry the empty language instead and enforce below, once
+                  # `sel` is known.
+                  #
+                  # The bar is UNCHANGED: a task with no knowable language still never runs. An
+                  # explicitly requested one is a hard FATAL (we were asked for it and cannot
+                  # honour it), and a mode-selected one is dropped with a ::warning:: naming it,
+                  # never silently -- a silent drop would read as "covered everything".
+                  r["repo_language"] = derive_task_language(r) or ""
                   tasks.append(r)
           if not tasks:
               sys.exit("FATAL: swebench_live_lite.jsonl has no tasks")
@@ -491,7 +502,25 @@ jobs:
               if unknown:
                   sys.exit(f"FATAL: unknown instance ids (not in the 731-task Live Lite manifest): {unknown}")
               sel = [by_id[t] for t in explicit]
+              # Explicitly requested and unknowable -> FATAL. We were asked to run this exact
+              # task and cannot determine its language, so there is nothing to degrade to.
+              undecidable = [t["instance_id"] for t in sel if not t["repo_language"]]
+              if undecidable:
+                  sys.exit(
+                      "FATAL: cannot derive language for explicitly requested instance ids: "
+                      f"{undecidable}"
+                  )
           else:
+              # Mode-selected: drop the unknowable ones, but NAME them. A silent drop would
+              # make a short matrix look like full coverage.
+              dropped = [t["instance_id"] for t in tasks if not t["repo_language"]]
+              if dropped:
+                  print(
+                      f"::warning::Live Lite: {len(dropped)} task(s) excluded from mode-based "
+                      f"selection because no source language is derivable: {dropped}",
+                      file=sys.stderr,
+                  )
+              tasks = [t for t in tasks if t["repo_language"]]
               sel = [t for t in tasks if lang == "all" or t["repo_language"] == lang]
               if mode != "full":
                   sel = sel[:maxt]
