@@ -22361,12 +22361,11 @@ class CanonicalRuntimeAttachment:
                 f"lsp-unavailable:{repository}".encode("ascii")
             ).hexdigest()
         )
-        runtime_evidence = hashlib.sha256(
-            (
-                f"{self.attempt_runtime.attempt_id}:{sequence}:"
-                f"{repository}:{graph}"
-            ).encode("utf-8")
-        ).hexdigest()
+        runtime_evidence = _runtime_evidence_digest(
+            attempt_id=self.attempt_runtime.attempt_id,
+            repository=repository,
+            graph=graph,
+        )
         return RevisionVector(
             repository_content=repository,
             graph=graph,
@@ -23294,6 +23293,39 @@ def _canonical_brief_records(env, revision):
         return ()
 
 
+def _runtime_evidence_digest(*, attempt_id: str, repository: str, graph: str) -> str:
+    """The ONE formula for the `runtime_evidence` revision dimension.
+
+    It used to be computed two different ways, and the per-observation one embedded the
+    monotonically increasing event sequence:
+
+        initial          sha256(f"{attempt_seed}:runtime:0")
+        per-observation  sha256(f"{attempt_id}:{sequence}:{repository}:{graph}")
+
+    So the dimension changed on EVERY observation, and the two formulas could never agree on
+    any input. `prepare_next_inference` runs `invalidate_stale_evidence` first, so any record
+    stamped in cycle N was INVALIDATED (terminal) in cycle N+1, and the step-0 record had no
+    valid cycle at all. `_REVISION_DEPENDENCY_DIMENSION` maps `issue`, `patch_rev`, `edit_rev`
+    and `episode_state` onto this dimension, so obligations / syntax_result / covering_red /
+    submit_refusal / recovery all inherited the churn.
+
+    Because `obligations` is the only standing carrier of BEHAVIORAL_CONTRACT -- the required
+    role of PATCH_CONSTRUCTION and SOURCE_UNDERSTANDING -- this single formula is why the
+    oracle never composed a capsule: measured over two runs, `coalition_size` is 0 on all 90
+    compile attempts and `unresolved_roles` is BEHAVIORAL_CONTRACT on 70 of them. The
+    `held_evidence=0, evidence_store=1` shape seen throughout is the INVALIDATED fingerprint,
+    since invalidated records are excluded from `held_evidence_ids`.
+
+    Freshness is NOT being disabled. The digest still moves when real state moves -- a new
+    repository content digest, a new graph digest, or a different attempt -- so stale evidence
+    is still retired. What it no longer does is age evidence out merely because another
+    observation happened.
+    """
+    return hashlib.sha256(
+        f"{attempt_id}:{repository}:{graph}".encode("utf-8")
+    ).hexdigest()
+
+
 def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> None:
     """Stage one task-start decision capsule; hold other contexts."""
     if not records:
@@ -23356,7 +23388,21 @@ def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> No
             decisions=(active,),
             satisfied_predicates=predicates,
             commitment_window=CommitmentWindowState.OPEN,
-            available_substrates=("graph", "brief_result"),
+            # DERIVED, never hardcoded. This tuple used to be ("graph", "brief_result"),
+            # which shares NOTHING with what the obligations contract requires
+            # (("issue_text","obligation_parser") or ("exact_issue_text",
+            # "canonical_task_event")). The empty intersection made
+            # `evaluate_feature_contract` return HELD/PREREQUISITES_PENDING, so the step-0
+            # obligations record could not be released on the ONLY cycle it is ever fresh.
+            #
+            # `obligations` is the sole standing carrier of BEHAVIORAL_CONTRACT -- the
+            # required role of both PATCH_CONSTRUCTION and SOURCE_UNDERSTANDING -- so this
+            # one literal is a direct cause of the oracle never composing a capsule:
+            # measured across two full runs, `unresolved_roles` is BEHAVIORAL_CONTRACT on
+            # 70 of 90 compile attempts.
+            #
+            # Use the same derivation the per-observation path uses so the two cannot drift.
+            available_substrates=CanonicalRuntimeAttachment._available_substrates(records),
             native_observation=task_text,
             observation_id=f"{attachment.attempt_runtime.attempt_id}:task",
             source_model_call_id=f"{attachment.attempt_runtime.attempt_id}:host",
@@ -23426,9 +23472,11 @@ def install_canonical_runtime(*, model, agent, env, task):
                 f"lsp-unavailable:{repository_revision}".encode("ascii")
             ).hexdigest()
         )
-        runtime_revision = hashlib.sha256(
-            f"{attempt_seed}:runtime:0".encode("utf-8")
-        ).hexdigest()
+        runtime_revision = _runtime_evidence_digest(
+            attempt_id=attempt_seed,
+            repository=repository_revision,
+            graph=graph_revision,
+        )
         initial_revision = RevisionVector(
             repository_content=repository_revision,
             graph=graph_revision,

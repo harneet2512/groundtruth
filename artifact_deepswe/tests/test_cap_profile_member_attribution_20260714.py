@@ -182,11 +182,27 @@ def test_gateway_commit_threads_exact_envelope_owner(monkeypatch):
     # host-side render channel (DEFECT-5 `renderer_id`) for the offline registry-renderer
     # audit. GT_GATEWAY_NATIVE=0 -> "tagged". This is additive audit metadata and never
     # reaches the model bytes; the owner/candidate identity assertions stay exact.
-    assert delivered[0]["extra"] == {
-        "profile_member": "GT_PATCH_DELTA",
-        "candidate_id": winner.dedup_key,
-        "renderer_id": "tagged",
-    }
+    # UPDATED 2026-07-27. The row now also carries the byte-join accounting
+    # (`append_landed`, `observation_len_after`), added because `chars_delivered` records
+    # what a row INTENDED to append and is not evidence the bytes reached the model.
+    #
+    # Kept STRICT rather than relaxed to a subset: the identity keys are asserted exactly,
+    # AND any additional key must be one of the known host-side observability fields. A bare
+    # subset check would let arbitrary keys leak into a delivery row unnoticed, which is what
+    # the original exact-dict assertion was protecting.
+    _extra = dict(delivered[0]["extra"])
+    _OBSERVABILITY = {"append_landed", "observation_len_after"}
+    assert set(_extra) - _OBSERVABILITY == {
+        "profile_member", "candidate_id", "renderer_id"
+    }, f"unexpected keys on the delivery row: {sorted(set(_extra) - _OBSERVABILITY)}"
+    assert _extra["profile_member"] == "GT_PATCH_DELTA"
+    assert _extra["candidate_id"] == winner.dedup_key
+    assert _extra["renderer_id"] == "tagged"
+    # The accounting must be host-side only and must agree with the bytes actually appended.
+    if "append_landed" in _extra:
+        assert _extra["append_landed"] is True, (
+            "the delivery row claims bytes it did not actually append"
+        )
     assert delivered[0]["content"] in out["output"]
 
 
