@@ -9445,6 +9445,38 @@ def _fact_identity_for_layer(layer: str):
         return fact, None
 
 
+def _current_iteration() -> int:
+    """Where in the trajectory we are, on WHICHEVER path owns the observation loop.
+
+    `_action_count` is incremented ONLY inside `_augment_output_legacy`. When the canonical
+    runtime is attached, `_augment_output` routes to the observer and that counter is never
+    touched -- so every canonical row in a healthy run was stamped `iteration=0` for the
+    entire trajectory, by construction.
+
+    That is not a cosmetic defect. On run 30283834926 hydra-3005 produced 57 compile rows,
+    all stamped 0, and it was reported as "the oracle bursts at step 0 and never cycles".
+    hydra ran ~56 agent steps: 57 compiles is ONE PER OBSERVATION -- the oracle was cycling
+    the whole time. The artifact even looked self-consistent, because in pre-fix runs the
+    observer died and `dark_fallback` handed control to legacy, whose rows DID advance --
+    so canonical rows sat at 0 while legacy rows counted up, which reads exactly like
+    "burst then die".
+
+    The canonical runtime already has a real monotonic counter: `work_state.sequence`,
+    advanced by `append_event` on every observation. Use it when attached. Legacy runs keep
+    `_action_count` byte-identically, and any malformed attachment falls back rather than
+    raising -- telemetry must never break the agent.
+    """
+    attachment = globals().get("_CANONICAL_RUNTIME_ATTACHMENT")
+    if attachment is not None:
+        try:
+            seq = attachment.attempt_runtime.work_state.sequence
+            if isinstance(seq, int):
+                return max(0, seq)
+        except Exception:  # noqa: BLE001 -- never raise out of telemetry
+            pass
+    return max(0, int(globals().get("_action_count", 0) or 0))
+
+
 def _runtime_ledger_record(
     *,
     kind: str,
@@ -9500,7 +9532,7 @@ def _runtime_ledger_record(
         "outcome": getattr(outcome, "value", outcome),
         "reason": reason,
         "chars_delivered": chars,
-        "iteration": _action_count,
+        "iteration": _current_iteration(),
     }
     # DELIVERY SEAL (W2, 2026-07-12): when a delivery site threads the EXACT block bytes it
     # appended to the observation via ``content=``, stamp a truncated sha256 over THOSE bytes
