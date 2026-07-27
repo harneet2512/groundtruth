@@ -9477,6 +9477,150 @@ def _current_iteration() -> int:
     return max(0, int(globals().get("_action_count", 0) or 0))
 
 
+def _current_active_decision() -> str:
+    """WHICH decision was open when this row was written, or "" if none/unknown.
+
+    The missing fact behind link 3 ("did the feature deliver at the contracted time?"). Every
+    evidence record already carries its own `decision_context` from its feature contract; the
+    only thing the artifact lacked was which decision was OPEN at the moment of the row. With
+    both, on-time is a semantic comparison and needs no vocabulary reconciliation at all:
+    same context = ON TIME, an already-passed context = LATE, a not-yet-reached one = EARLY.
+
+    Two earlier approaches were wrong and are worth not repeating. Comparing the ledger's
+    `event_type` to the registry's `commitment_boundary` as STRINGS reports a false 0/N -- on a
+    real 52,609-row ledger those two vocabularies never match on a delivered row, because they
+    are the same moments under two namings. Comparing the attestation's `open_event` to its
+    `required_event` reports a false 100%, because the observed event DEFAULTS to the contracted
+    one when lineage carries none.
+
+    Correct-or-quiet: unknown returns "" and the caller omits the key, so downstream reads
+    NOT-EVALUABLE. A defaulted value is precisely how the attestation path became
+    self-confirming. Never raises -- telemetry must not break the agent loop.
+    """
+    attachment = globals().get("_CANONICAL_RUNTIME_ATTACHMENT")
+    if attachment is None:
+        return ""
+    try:
+        value = getattr(attachment, "_active_decision_context", "")
+        return value if isinstance(value, str) else ""
+    except Exception:  # noqa: BLE001 -- never raise out of telemetry
+        return ""
+
+
+def _viewed_symbols_for_action(operation, subject: str) -> "tuple[str, ...]":
+    """The symbols a VIEW put in play, resolved from `graph.db` -- never from output text.
+
+    This is what finally populates `work_state.focused_symbols`, which is otherwise permanently
+    empty on a shell harness. Two independent mechanisms depend on it: the relevance
+    intersection in `evaluate_feature_contract` (which reduces to `subject:` equality, so every
+    symbol-subject evidence record is HELD forever without it) and `select_covering_tests`
+    (which fail-closes on an empty symbol set, starving covering_red upstream of the gate).
+
+    AUTHORITY. `subject` is the STRUCTURED PROPOSAL subject, not the raw command -- the command
+    "cannot be trusted for file identity across harnesses" (the cd-prefix blindings that muted
+    post_search). The symbols then come from the graph. No rendered output is parsed anywhere in
+    this path, which is what keeps GT deterministic and LLM-free: recovering "which symbol did
+    this show" from `sed -n '100,140p' foo.py` would be semantic reading.
+
+    WHOLE FILE, deliberately. The seam cannot know which LINES were displayed without parsing the
+    command, so every definition in the viewed file enters focus. The over-claim is bounded to
+    files the agent actually opened -- the same granularity `focused_files` already contributes,
+    not a widening beyond it. The alternative (emit nothing when the range is unknown) leaves
+    five fact classes dead permanently. `defined_symbols_for_file` still takes a line window for
+    any operation that can supply one honestly.
+
+    Correct-or-quiet and never raises: a non-view, a missing subject, a missing graph or any
+    fault resolves to (). Silence is honest; a guessed symbol would admit unrelated evidence
+    through the relevance gate, turning a quiet feature into a wrong one.
+    """
+    try:
+        from groundtruth.runtime.reasoning_runtime import ActionOperation as _Op
+
+        if operation is not _Op.VIEW_SOURCE or not subject:
+            return ()
+        from groundtruth.runtime.gateway import defined_symbols_for_file
+
+        return defined_symbols_for_file(_db_path(), subject, repo_root=_root())
+    except Exception:  # noqa: BLE001 -- resolution must never break the agent's turn
+        return ()
+
+
+def _resolved_search_symbols(operation, command: str) -> "tuple[str, ...]":
+    """The search operand, but ONLY when the graph actually defines it.
+
+    Two independent abstentions, so nothing enters focus on a guess:
+
+      1. `search_pattern` returns the operand ONLY if it is a single bare symbol (>=3 chars, no
+         regex metacharacters, no path separators). A regex, a quoted phrase or a log string
+         yields None. This is LITERAL ARGUMENT EXTRACTION from the command the agent wrote --
+         not an inference from rendered output, which GT forbids itself.
+      2. The name is then looked up in `graph.db`. A symbol enters focus only if the graph holds
+         a non-test DEFINITION for it, so a typo or a coincidental word resolves to nothing.
+
+    Why it matters: `_produce_def_ref_partition` uses this same `search_pattern` result as its
+    `canonical_subject`, and the relevance gate is `subject:` equality against focus. Carrying
+    the symbol makes the intersection match ON the `search_result` boundary def_partition is
+    contracted to, instead of only later when the agent happens to open the defining file.
+
+    Never raises; any fault resolves to ().
+    """
+    try:
+        from groundtruth.runtime.reasoning_runtime import ActionOperation as _Op
+
+        if operation is not _Op.SEARCH or not command:
+            return ()
+        from groundtruth.runtime.gateway import defined_symbols_for_file, search_pattern
+
+        symbol = search_pattern(command)
+        if not symbol:
+            return ()
+        # Graph validation: confirm the name is a real definition somewhere in the repository.
+        # `defined_symbols_for_file` is file-scoped, so resolve through the symbol index the
+        # gateway already uses for exactly this question.
+        from groundtruth.runtime.gateway import _connect_ro, _DEF_LABELS
+
+        db = _db_path()
+        if not db or not os.path.isfile(db):
+            return ()
+        con = _connect_ro(db)
+        if con is None:
+            return ()
+        try:
+            placeholders = ",".join("?" * len(_DEF_LABELS))
+            row = con.execute(
+                f"SELECT 1 FROM nodes WHERE name=? AND COALESCE(is_test,0)=0 "
+                f"AND label IN ({placeholders}) LIMIT 1",
+                (symbol, *_DEF_LABELS),
+            ).fetchone()
+        finally:
+            try:
+                con.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return (symbol,) if row else ()
+    except Exception:  # noqa: BLE001 -- resolution must never break the agent's turn
+        return ()
+
+
+def _publish_active_decision(attachment, active) -> None:
+    """Record the open decision on the attachment so ledger rows can stamp it.
+
+    ONE publisher for all four construction sites. Deliberately not re-derived inside
+    `_current_active_decision` from `work_state.phase`: that would be a SECOND copy of the
+    phase->context table which must agree with `_active_decision` by hand, and two formulas
+    that must agree by hand is exactly the defect that produced the runtime_evidence churn.
+
+    Best-effort and silent: this is observability, and a telemetry fault must never break the
+    agent loop. A failure here leaves the key ABSENT, which reads NOT-EVALUABLE downstream --
+    the honest outcome -- rather than stamping a stale or guessed context.
+    """
+    try:
+        context = getattr(getattr(active, "context", None), "name", "")
+        attachment._active_decision_context = context if isinstance(context, str) else ""
+    except Exception:  # noqa: BLE001 -- telemetry must never break delivery
+        pass
+
+
 def _runtime_ledger_record(
     *,
     kind: str,
@@ -9572,6 +9716,15 @@ def _runtime_ledger_record(
         _row.setdefault("gt_audit_fact_class", _fact)
         if _contracted:
             _row.setdefault("gt_audit_contracted_boundary", _contracted)
+    # WHICH decision was open at this moment. Combined with the evidence's own
+    # `decision_context`, this makes the on-time question answerable semantically -- see
+    # `_current_active_decision`. Stamped on EVERY row (not just DIRECT-feature rows) because
+    # the open decision is a property of the OBSERVATION, not of which producer spoke.
+    # Omitted entirely when unknown: an absent key reads NOT-EVALUABLE downstream, whereas a
+    # defaulted one would read as proof.
+    _active_decision = _current_active_decision()
+    if _active_decision:
+        _row.setdefault("gt_audit_active_decision", _active_decision)
     binding = _current_observation_binding_dict()
     if binding is not None:
         _row["observation_binding"] = binding
@@ -22020,6 +22173,7 @@ class CanonicalRuntimeAttachment:
             self.attempt_runtime.work_state.revision,
             pending_operations=operations,
         )
+        _publish_active_decision(self, active)
         submit_refusal_on = (
             _ss_submit_red_on()
             and _ss_enabled("GT_VERIFY_EXECUTE")
@@ -22198,6 +22352,7 @@ class CanonicalRuntimeAttachment:
                             self.attempt_runtime.work_state.revision,
                             pending_operations=operations,
                         )
+                        _publish_active_decision(self, active)
             except Exception as exc:  # noqa: BLE001
                 self._record_fault(exc, component="submit_refusal")
         epistemic = {
@@ -22463,6 +22618,16 @@ class CanonicalRuntimeAttachment:
                 } else None),
                 hit_count=hit_count,
                 changed_files=changed_files,
+                # The symbols this view put in play (graph-resolved, correct-or-quiet). Without
+                # this the field is always () in production and `focused_symbols` stays empty --
+                # the state in which every symbol-subject record is HELD forever and
+                # select_covering_tests is starved.
+                viewed_symbols=_viewed_symbols_for_action(
+                    operation, proposal.action.subject
+                ),
+                # The graph-validated search operand (see `_resolved_search_symbols`). Makes
+                # def_partition's subject intersect focus ON its contracted search boundary.
+                resolved_symbols=_resolved_search_symbols(operation, command),
                 failure_fingerprint=canonical_test_failure_fingerprint(event),
             )
             prior = self.attempt_runtime.journal.events(
@@ -22510,6 +22675,7 @@ class CanonicalRuntimeAttachment:
                 self.attempt_runtime.work_state,
                 after,
             )
+            _publish_active_decision(self, active)
             satisfied = frozenset(
                 {
                     TemporalPredicate.PRODUCER_COMPUTATION_COMPLETE,
@@ -23396,6 +23562,7 @@ def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> No
             ).hard_max_tokens,
             current_revision=attachment.attempt_runtime.work_state.revision,
         )
+        _publish_active_decision(attachment, active)
         predicates = frozenset(
             {
                 TemporalPredicate.PRODUCER_COMPUTATION_COMPLETE,

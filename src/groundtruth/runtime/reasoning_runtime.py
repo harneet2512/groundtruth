@@ -213,6 +213,21 @@ class CanonicalResult:
     hit_count: int | None = None
     files_hit: tuple[str, ...] = ()
     changed_files: tuple[str, ...] = ()
+    # The SYMBOLS the operation actually showed, resolved against repository truth (graph.db) --
+    # never scraped from the rendered output. The mirror of `files_hit`, and the input the
+    # reducer needs to populate `focused_symbols`, which is otherwise permanently empty on a
+    # shell harness: `SYMBOL_VIEWED` is reachable only from `ActionOperation.VIEW_SYMBOL`, and
+    # no shell command can be classified into that operation deterministically without semantic
+    # reading. An empty `focused_symbols` holds every symbol-subject evidence record forever at
+    # the relevance intersection (`evaluate_feature_contract`) and separately starves
+    # `select_covering_tests`, which fail-closes on an empty symbol set.
+    viewed_symbols: tuple[str, ...] = ()
+    # The SEARCH operand, when it is a bare symbol the graph actually defines. A literal command
+    # argument validated against repository truth -- never an inference from rendered output.
+    # `def_partition`'s canonical_subject IS this symbol, so carrying it lets the relevance
+    # intersection match on the `search_result` boundary the fact is contracted to, instead of
+    # only once the agent later opens the defining file.
+    resolved_symbols: tuple[str, ...] = ()
     failure_fingerprint: str = ""
     signature_before: str = ""
     signature_after: str = ""
@@ -220,6 +235,8 @@ class CanonicalResult:
     def __post_init__(self) -> None:
         object.__setattr__(self, "files_hit", tuple(self.files_hit))
         object.__setattr__(self, "changed_files", tuple(self.changed_files))
+        object.__setattr__(self, "viewed_symbols", tuple(self.viewed_symbols))
+        object.__setattr__(self, "resolved_symbols", tuple(self.resolved_symbols))
         if not self.status:
             raise ValueError("canonical result status is required")
         if self.hit_count is not None and self.hit_count < 0:
@@ -364,6 +381,19 @@ class CanonicalEvent:
                     changed_files=tuple(
                         raw["result"].get("changed_files", ())
                     ),
+                    # MUST be listed here. This reconstruction is a HAND-MAINTAINED field list,
+                    # and canonical events are hash-chained over the result's content: a field
+                    # that serializes but does not rehydrate yields a DIFFERENT recomputed hash
+                    # and the chain fails with `EventIntegrityError: event content hash/tamper
+                    # mismatch`. Omitting it did exactly that -- and because
+                    # `observe_action_result` swallows observer faults by design, the symptom
+                    # appeared far away, as "the gateway produced nothing".
+                    viewed_symbols=tuple(
+                        raw["result"].get("viewed_symbols", ())
+                    ),
+                    resolved_symbols=tuple(
+                        raw["result"].get("resolved_symbols", ())
+                    ),
                     failure_fingerprint=raw["result"].get(
                         "failure_fingerprint", ""
                     ),
@@ -495,9 +525,26 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
             SemanticKind.SEARCH_FAILED,
         }:
             search_count += 1
+            # ORDER IS LOAD-BEARING: this guard reads `focused_symbols` as it stood BEFORE
+            # this search. Extending focus first would suppress `search_without_selected_symbol`
+            # on the very search that resolved the symbol, silently changing phase behaviour
+            # that predates this feature.
             if not focused_symbols and phase is Phase.ORIENTATION:
                 phase = Phase.DISCOVERY
                 rules.append("search_without_selected_symbol")
+            # A search whose operand is a bare symbol the GRAPH defines puts that symbol in
+            # play. Carried as metadata rather than as a SYMBOL_VIEWED outcome on purpose:
+            # that kind advances `phase` to UNDERSTANDING, and searching is not understanding
+            # -- `_active_decision` derives the open decision from the phase, so a false
+            # advance would make the oracle reason about the wrong moment. Phase handling above
+            # is deliberately untouched.
+            for _key, _value in outcome.metadata:
+                if _key != "resolved_symbols":
+                    continue
+                for _symbol in str(_value or "").split("|"):
+                    if _symbol:
+                        focused_symbols = _append_unique(focused_symbols, _symbol)
+                        rules.append("search_resolved_symbol")
         elif outcome.kind is SemanticKind.SOURCE_VIEWED:
             viewed_files = _append_unique(viewed_files, outcome.subject)
             focused_files = _append_unique(focused_files, outcome.subject)

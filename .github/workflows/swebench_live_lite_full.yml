@@ -2203,6 +2203,26 @@ jobs:
             echo "deep-telemetry: recovered ${_gt_telemetry_recovered}/3 sink(s) from /tmp/gt_out"
           fi
 
+          # CANONICAL RUNTIME JOURNAL HARVEST (2026-07-27; ported from deepswe_full.yml). The
+          # canonical runtime's PRIMARY record is the RuntimeJournal SQLite (delivery_journal /
+          # compilation_journal / oracle_journal / evidence_journal / canonical_events /
+          # verified_snapshots), written in-container to dirname(GT_RUNTIME_LEDGER)/
+          # gt_reasoning_runtime.sqlite3 = /gt_out = host /tmp/gt_out, and it was NEVER
+          # harvested here. Consequence: the oracle's whole decision history (READY..RESPONSE_
+          # COMMITTED, coalition inputs, compilation failure codes) died with the container,
+          # and "0 canonical rows in the JSONL" was misread as "the oracle released nothing"
+          # when the oracle's success path writes nothing to that JSONL at all.
+          # The reader (runtime_attestation_diagnostic, consumed by gt_feature_metrics) rglobs
+          # the EXACT basename under each graded task_dir and FAILS CLOSED on duplicates — so
+          # land exactly ONE copy per graded root, FILENAME UNCHANGED (the deepswe _<task>
+          # rename is invisible to it): $TASK_ARTIFACT_ROOT (the in-workflow gt_feature_metrics
+          # task_dir) + trial_results/gt_artifacts (uploaded as ll-full-<task> for offline
+          # grading). Fail-soft: the baseline arm writes no journal and must not fail.
+          if [ -s /tmp/gt_out/gt_reasoning_runtime.sqlite3 ]; then
+            cp /tmp/gt_out/gt_reasoning_runtime.sqlite3 "$TASK_ARTIFACT_ROOT/gt_reasoning_runtime.sqlite3" 2>/dev/null || true
+            cp /tmp/gt_out/gt_reasoning_runtime.sqlite3 trial_results/gt_artifacts/gt_reasoning_runtime.sqlite3 2>/dev/null || true
+          fi
+
           # The agent wrote its trajectory to the /gt_out bind-mount = host /tmp/gt_out, but the
           # deep-metrics reader scans /tmp/gt AND task-scopes hits (rejects any path missing the
           # task id — _find_miniswe_trajectory L483, pinned by test). So bridge it into a TASK-NAMED

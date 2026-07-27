@@ -205,10 +205,16 @@ def canonicalize_tool_result(
         *,
         metadata=(),
         changed=None,
+        subject=None,
     ):
+        # `subject` defaults to the action's own subject (the path/target). A symbol-level
+        # outcome must override it: the reducer files SYMBOL_VIEWED into `focused_symbols` by
+        # subject, and the relevance intersection compares `subject:` tokens literally, so a
+        # symbol outcome carrying the FILE path would populate focus with paths and still fail
+        # to intersect symbol-named evidence.
         return SemanticOutcome(
             kind=kind,
-            subject=action.subject,
+            subject=action.subject if subject is None else subject,
             status=result.status,
             changed=changed,
             failure_fingerprint=result.failure_fingerprint,
@@ -231,10 +237,35 @@ def canonicalize_tool_result(
               if result.hit_count is not None else ()),
             *((("files_hit", "|".join(result.files_hit)),)
               if result.files_hit else ()),
+            # The graph-validated operand symbol. Deliberately metadata on SEARCH_RESULT and
+            # NOT a SYMBOL_VIEWED outcome: that kind's reducer branch sets
+            # phase = UNDERSTANDING, and a search must not advance the trajectory out of
+            # DISCOVERY/LOCALIZATION -- `_active_decision` derives the open decision from the
+            # phase, so a false advance would make the oracle reason about the wrong moment.
+            *((("resolved_symbols", "|".join(result.resolved_symbols)),)
+              if result.resolved_symbols else ()),
         )
         outcomes = (outcome(kind, metadata=metadata),)
     elif action.operation is ActionOperation.VIEW_SOURCE:
-        outcomes = (outcome(SemanticKind.SOURCE_VIEWED),)
+        # The file AND the symbols the view actually showed. One action may emit several
+        # outcomes -- EDIT already does exactly this (EDIT_EXECUTED + DIFF_CREATED below).
+        #
+        # `focused_symbols` has no other way to be populated on a shell harness: SYMBOL_VIEWED
+        # is reachable only from ActionOperation.VIEW_SYMBOL, and no shell command can be
+        # classified into that operation deterministically without semantic reading, which GT
+        # forbids itself (LLM-free). So the symbols must arrive as authoritative RESULT data,
+        # resolved against graph.db by the operation, not parsed out of the rendered output.
+        #
+        # Correct-or-quiet: an empty `viewed_symbols` emits nothing extra. A GUESSED symbol
+        # would be worse than none -- it would admit unrelated evidence through the relevance
+        # intersection, which is the precise failure mode correct-or-quiet exists to prevent.
+        outcomes = (
+            outcome(SemanticKind.SOURCE_VIEWED),
+            *(
+                outcome(SemanticKind.SYMBOL_VIEWED, subject=symbol)
+                for symbol in result.viewed_symbols
+            ),
+        )
     elif action.operation is ActionOperation.VIEW_SYMBOL:
         outcomes = (outcome(SemanticKind.SYMBOL_VIEWED),)
     elif action.operation is ActionOperation.EDIT:

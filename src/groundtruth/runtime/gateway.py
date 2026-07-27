@@ -1345,6 +1345,85 @@ def _open(state: GatewayState):
     return _connect_ro(db)
 
 
+def defined_symbols_for_file(
+    db_path: str,
+    rel_path: str,
+    *,
+    start_line: "int | None" = None,
+    end_line: "int | None" = None,
+    repo_root: str = "",
+) -> tuple[str, ...]:
+    """The definitions `graph.db` places in `rel_path`, optionally bounded to a line window.
+
+    The authority behind `CanonicalResult.viewed_symbols`, and therefore behind
+    `work_state.focused_symbols` -- which is otherwise permanently empty on a shell harness,
+    holding every symbol-subject evidence record at the relevance intersection forever and
+    separately starving `select_covering_tests`.
+
+    Deliberately a GRAPH query, not a text parse. Recovering "which symbol did this show" from
+    `sed -n '100,140p' foo.py` is semantic reading, and GT is LLM-free and deterministic by
+    mandate. The file the operation actually read is a fact; what is defined in it is a fact the
+    graph already holds.
+
+    The line window is not cosmetic: a view of lines 100-140 showed what is defined THERE.
+    Returning the whole file would put symbols into focus that the agent never saw, and focus
+    drives an intersection -- inventing relevance is worse than having none, because it turns a
+    silent feature into a wrong one.
+
+    Correct-or-quiet: no db, no schema, no rows, any sqlite error -> (). Read-only via
+    `_connect_ro`; the graph is shared repository truth and a per-attempt path must never write
+    it. Order is stable (start_line, name) so focus is deterministic.
+    """
+    if not db_path or not rel_path or not os.path.isfile(db_path):
+        return ()
+    con = _connect_ro(db_path)
+    if con is None:
+        return ()
+    labels_sql = ",".join("?" * len(_DEF_LABELS))
+    try:
+        rows = con.execute(
+            f"SELECT name,file_path,start_line FROM nodes "
+            f"WHERE COALESCE(is_test,0)=0 AND COALESCE(start_line,0)>0 "
+            f"AND label IN ({labels_sql}) "
+            f"ORDER BY start_line,name",
+            _DEF_LABELS,
+        ).fetchall()
+    except sqlite3.Error:
+        return ()
+    finally:
+        try:
+            con.close()
+        except Exception:  # noqa: BLE001 -- close failure must not raise into the agent loop
+            pass
+    def _rel(path: object) -> str:
+        # Same normalization the gateway's own graph readers use. `repo_root` is optional:
+        # graph rows may store absolute or repo-relative paths, and `_to_repo_rel` is what
+        # reconciles them. Without a root, separator normalization alone is the honest
+        # comparison -- it cannot invent a match that is not there.
+        if not isinstance(path, str) or not path:
+            return ""
+        return _norm_fp(_to_repo_rel(path, repo_root) if repo_root else path)
+
+    wanted = _rel(rel_path)
+    if not wanted:
+        return ()
+    out: list[str] = []
+    for name, file_path, line in rows:
+        if not isinstance(name, str) or not name:
+            continue
+        if not isinstance(line, int) or isinstance(line, bool) or line <= 0:
+            continue
+        if _rel(file_path) != wanted:
+            continue
+        if start_line is not None and line < start_line:
+            continue
+        if end_line is not None and line > end_line:
+            continue
+        if name not in out:
+            out.append(name)
+    return tuple(out)
+
+
 def _resolve_symbol_defs(con, symbol: str, root: str) -> dict | None:
     """def-sites (1-3 non-leaky files) + FACT-tier caller provenance + test-ref COUNT.
     None when the symbol resolves to no deliverable def or spans >3 files (ambiguous)."""
