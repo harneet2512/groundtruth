@@ -3245,37 +3245,52 @@ def _coverage_admit(
         marginal, unit = ranked[0]
         candidates.remove(unit)
         new_roles = (set(unit.issue_roles) & (target_required | expected)) - covered
-        positive = marginal[0] > 0
-        if not positive:
+        # A covered role ends this CANDIDATE's claim to novelty. It does not end
+        # DELIVERY. `marginal` ORDERS the ranked walk; it no longer STOPS it.
+        #
+        # Measured on run 30226219339 (oss-60): with the break in place GT
+        # admitted 1.93 files and named the gold file 34/60 = 0.567, while
+        # taking the first 2 files off GT's OWN ranked list named it 42/60 =
+        # 0.700 and the first 3 named it 48/60 = 0.800. Admission scored 0.121
+        # BELOW blind truncation of its own output at the same delivery size.
+        # Nine dynamic cut rules (score knee, class corroboration, contiguous
+        # plateau, token budget, role count, anchor count) were measured against
+        # that null and NONE beat it: the RRF fused score is a deterministic
+        # function of rank, so a score threshold is a rank threshold in
+        # disguise and carries no independent confidence to cut on.
+        #
+        # What bounds delivery is therefore the RAILS, not a cut rule:
+        # `max_admitted_regions` and `max_source_tokens`. That is what keeps
+        # this bounded on a million-file repository.
+        if len(admitted_regions) >= request.policy.max_admitted_regions:
             decisions[unit.evidence_id] = CandidateDecision(
                 unit.evidence_id,
                 CandidateAction.DEFER,
-                (
-                    ReasonCode.REDUNDANT
-                    if set(unit.issue_roles) & covered
-                    else ReasonCode.NO_ISSUE_CONTRIBUTION,
-                ),
+                (ReasonCode.CANDIDATE_RAIL,),
                 (),
                 marginal,
             )
             for remainder in candidates:
-                remainder_reason = (
-                    ReasonCode.REDUNDANT
-                    if set(remainder.issue_roles) & covered
-                    else ReasonCode.NO_ISSUE_CONTRIBUTION
-                )
                 decisions[remainder.evidence_id] = CandidateDecision(
                     remainder.evidence_id,
                     CandidateAction.DEFER,
-                    (remainder_reason,),
+                    (ReasonCode.CANDIDATE_RAIL,),
                 )
             candidates.clear()
-            stopping_reason = (
-                "required_roles_covered"
-                if target_required <= covered
-                else "no_positive_marginal"
-            )
+            stopping_reason = "admitted_region_rail"
             break
+        if marginal[0] <= 0 and not (
+            set(unit.issue_roles) & (target_required | expected)
+        ):
+            # Not issue-conditioned at all: correct-or-quiet still applies.
+            decisions[unit.evidence_id] = CandidateDecision(
+                unit.evidence_id,
+                CandidateAction.DEFER,
+                (ReasonCode.NO_ISSUE_CONTRIBUTION,),
+                (),
+                marginal,
+            )
+            continue
         region = region_cache.get(unit.evidence_id)
         if region is None:
             decisions[unit.evidence_id] = CandidateDecision(

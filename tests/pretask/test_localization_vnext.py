@@ -3908,3 +3908,64 @@ def test_anchor_follows_the_fused_discovery_order_not_raw_signal_rank(tmp_path):
         f"order: {[getattr(r, 'value', r) for r in by_id[discovery_first.evidence_id].reason_codes]}"
     )
     assert any(region.file_path == "src/engine.py" for region in regions)
+
+
+def test_zero_marginal_candidate_is_skipped_not_used_to_end_admission(tmp_path):
+    """A covered role ends that CANDIDATE, never the whole admission.
+
+    `_coverage_admit` broke out of the greedy the moment the best remaining
+    candidate added no new role, and stamped every candidate behind it DEFER
+    without evaluating any of them. Role coverage is a stopping rule for
+    coverage; it is not a stopping rule for DELIVERY.
+
+    Measured on run 30226219339 (oss-60, 60 cases): GT admits 1.93 files and
+    names the gold file 34/60 = 0.567. Taking the first 2 files off GT's OWN
+    ranked list names it 42/60 = 0.700, and the first 3 name it 48/60 = 0.800.
+    The admission logic scores 0.121 BELOW blind truncation of its own output
+    at the same delivery size - it is destroying value, not adding it. Nine
+    dynamic cut rules (score knee, class corroboration, plateau, token budget,
+    role count) were measured against that null and none beat it, because the
+    RRF fused score is a deterministic function of rank and carries no
+    independent confidence to threshold.
+
+    So admission proceeds down the ranked order and stops on the RAILS -
+    `max_source_tokens` and the admitted-region cap - which is what bounds it
+    on a million-file repository.
+    """
+    repo, db = _graph(tmp_path)
+    for name, fn in (("first", "alpha"), ("second", "beta"), ("third", "gamma")):
+        (repo / "src" / f"{name}.py").write_text(
+            f"def {fn}(value):\n"
+            f"    if not value:\n"
+            f"        raise ParseError(value)\n"
+            f"    return decode(value)\n",
+            encoding="utf-8",
+        )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    facets = extract_behavior_facets(_request(repo, db, issue))
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+
+    # All three carry the SAME roles: after the first is admitted the other two
+    # have zero marginal role contribution and were both deleted by the break.
+    units = tuple(
+        EvidenceUnit.create(
+            file_path=f"src/{name}.py", symbol=fn, start_line=1, end_line=4,
+            family=EvidenceFamily.LEXICAL, confidence=0.6,
+            provenance=("structured_lexical",), roles=roles,
+            signal_class="lexical", signal_rank=rank,
+        )
+        for rank, (name, fn) in enumerate(
+            (("first", "alpha"), ("second", "beta"), ("third", "gamma")), start=1
+        )
+    )
+    request = _request(repo, db, issue)
+
+    decisions, regions, _coverage, _stopping = vnext_engine._coverage_admit(
+        request, facets, units, census_capabilities(request)
+    )
+    delivered = {region.file_path for region in regions}
+
+    assert delivered == {"src/first.py", "src/second.py", "src/third.py"}, (
+        "admission ended on a covered role and dropped ranked candidates that "
+        f"the token budget could afford: delivered {sorted(delivered)}"
+    )
