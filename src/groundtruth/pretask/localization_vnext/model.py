@@ -62,12 +62,18 @@ class LocalizationPolicy:
     certified_floor: float = 0.9
     max_candidates: int = 500
     max_source_tokens: int = 16_000
-    # Hard rail on how many regions may be delivered. Admission walks the
+    # Hard rail on how many DISTINCT FILES may be delivered. Admission walks the
     # ranked order until a RAIL binds, so on a million-file repository this is
     # what bounds it. 8 is the horizon the ablation path already uses
     # (`index < 8`) and the horizon hit@8/precision@8 are scored at - it is not
     # a value fitted to this corpus.
-    max_admitted_regions: int = 8
+    #
+    # FILES, not regions: measured on run 30232420179, 2.64 admitted regions
+    # land in the same file, so an 8-REGION rail delivered only 1.94 distinct
+    # files and moved delivery not at all. Naming a new file costs the agent a
+    # file to open; a second region inside a file it is already reading does
+    # not, and `max_source_tokens` bounds that independently.
+    max_admitted_files: int = 8
     max_region_tokens: int = 2_000
     merge_adjacent_lines: int = 2
     disabled_components: frozenset[str] = frozenset()

@@ -3262,7 +3262,16 @@ def _coverage_admit(
         # What bounds delivery is therefore the RAILS, not a cut rule:
         # `max_admitted_regions` and `max_source_tokens`. That is what keeps
         # this bounded on a million-file repository.
-        if len(admitted_regions) >= request.policy.max_admitted_regions:
+        # Count DISTINCT FILES. A region in a file already admitted is free:
+        # the agent is reading that file anyway, and `max_source_tokens` bounds
+        # the bytes. Counting regions capped delivery at 1.94 files (run
+        # 30232420179) because 2.64 regions share a file.
+        admitted_paths = {region.file_path for region in admitted_regions}
+        unit_region = region_cache.get(unit.evidence_id)
+        unit_is_new_file = (
+            unit_region is not None and unit_region.file_path not in admitted_paths
+        )
+        if unit_is_new_file and len(admitted_paths) >= request.policy.max_admitted_files:
             decisions[unit.evidence_id] = CandidateDecision(
                 unit.evidence_id,
                 CandidateAction.DEFER,

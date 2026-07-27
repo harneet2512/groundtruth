@@ -3969,3 +3969,52 @@ def test_zero_marginal_candidate_is_skipped_not_used_to_end_admission(tmp_path):
         "admission ended on a covered role and dropped ranked candidates that "
         f"the token budget could afford: delivered {sorted(delivered)}"
     )
+
+
+def test_admission_rail_counts_distinct_files_not_regions(tmp_path):
+    """The delivery rail must bound FILES, the unit the agent pays attention in.
+
+    Capping admitted REGIONS looked right and measured wrong. On run
+    30232420179 the rail bound exactly: 288 ADMITs over 36 cases = 8.00 per
+    case. But 2.64 regions land in the SAME file, so 8 regions delivered only
+    1.94 distinct files - the delivery size did not move at all (1.92 -> 1.94)
+    and delivered-gold stayed at 0.556 against a predicted 0.90.
+
+    Naming a NEW file costs the agent a file to open. A second region inside a
+    file it is already reading costs nearly nothing, and is bounded by
+    `max_source_tokens` regardless. So the rail counts distinct files.
+    """
+    repo, db = _graph(tmp_path)
+    names = [f"mod{i}" for i in range(12)]
+    for name in names:
+        (repo / "src" / f"{name}.py").write_text(
+            f"def handle_{name}(value):\n"
+            f"    if not value:\n"
+            f"        raise ParseError(value)\n"
+            f"    return decode(value)\n",
+            encoding="utf-8",
+        )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    facets = extract_behavior_facets(_request(repo, db, issue))
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+    units = tuple(
+        EvidenceUnit.create(
+            file_path=f"src/{name}.py", symbol=f"handle_{name}",
+            start_line=1, end_line=4,
+            family=EvidenceFamily.LEXICAL, confidence=0.6,
+            provenance=("structured_lexical",), roles=roles,
+            signal_class="lexical", signal_rank=rank,
+        )
+        for rank, name in enumerate(names, start=1)
+    )
+    request = _request(repo, db, issue)
+
+    _decisions, regions, _coverage, _stopping = vnext_engine._coverage_admit(
+        request, facets, units, census_capabilities(request)
+    )
+    delivered = {region.file_path for region in regions}
+
+    assert len(delivered) == request.policy.max_admitted_files, (
+        f"rail delivered {len(delivered)} distinct files, expected "
+        f"{request.policy.max_admitted_files}: {sorted(delivered)}"
+    )
