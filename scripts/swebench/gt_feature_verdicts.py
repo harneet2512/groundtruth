@@ -149,6 +149,11 @@ _GATE_DECISION_OUTCOMES = frozenset(
 _VERDICT_FIRED = "FIRED"
 _VERDICT_ABSENT = "TRIGGER-ABSENT"
 _VERDICT_FAILURE = "DELIVERY-FAILURE"
+# TRIGGER-ABSENT used to absorb these two as well, which let a SUPPRESSION and a BLIND
+# SPOT both read as correct quiet. `classify_reason` already distinguished them; only the
+# published verdict did not.
+_VERDICT_ARBITRATED = "ARBITRATED"          # evidence produced, a referee withheld it
+_VERDICT_UNINSTRUMENTED = "NO-INSTRUMENTATION"  # no ledger row at all -> not evaluable
 
 _RUN_CACHE_ROOTS = ("D:/tmp/gt_run_check/{run}", "D:/tmp/gtrun4")
 
@@ -526,13 +531,16 @@ def _decide(fact: FeatureRow, on_time_hits: Counter, boundary_stamped: int) -> N
         # Evidence EXISTED and a referee withheld it.  Explicitly NOT a delivery
         # failure (the referee is doing its job), and not literally "trigger absent"
         # either -- the three-verdict taxonomy has no fourth bucket, so it is
-        # counted as TRIGGER-ABSENT and labelled so no reader is misled.
-        fact.verdict = _VERDICT_ABSENT
+        # published as its OWN verdict: the trigger DID occur and evidence existed, so
+        # calling it trigger-absent asserts something false about the trajectory.
+        fact.verdict = _VERDICT_ARBITRATED
         fact.attribution = "layer/fact_class rows"
         fact.evidence = "ARBITRATED (evidence produced, referee withheld -- NOT a " \
             "delivery failure): " + _top_detail(fact, ("arbitration",))
     else:
-        fact.verdict = _VERDICT_ABSENT
+        # No rows at all is BLINDNESS, not quiet: the trigger may well have occurred and
+        # nothing recorded it either way. Absence of evidence is not evidence of absence.
+        fact.verdict = _VERDICT_ABSENT if classes else _VERDICT_UNINSTRUMENTED
         fact.attribution = "layer/fact_class rows" if classes else "no rows"
         if classes:
             fact.evidence = _top_detail(
@@ -628,8 +636,11 @@ def render_text(result: dict[str, Any]) -> str:
     fired = counts.get(_VERDICT_FIRED, 0)
     absent = counts.get(_VERDICT_ABSENT, 0)
     failed = counts.get(_VERDICT_FAILURE, 0)
+    arbitrated_n = counts.get(_VERDICT_ARBITRATED, 0)
+    blind = counts.get(_VERDICT_UNINSTRUMENTED, 0)
     out.append(
-        f"SUMMARY: {fired} FIRED / {absent} TRIGGER-ABSENT / {failed} DELIVERY-FAILURE"
+        f"SUMMARY: {fired} FIRED / {absent} TRIGGER-ABSENT / {arbitrated_n} ARBITRATED"
+        f" / {blind} NO-INSTRUMENTATION / {failed} DELIVERY-FAILURE"
         f" out of {len(features)}"
     )
     gated_absent = [f.feature_id for f in features
@@ -640,11 +651,10 @@ def render_text(result: dict[str, Any]) -> str:
             f"(correct-quiet, NOT failures): {', '.join(sorted(gated_absent))}"
         )
     arbitrated = [f.feature_id for f in features
-                  if f.verdict == _VERDICT_ABSENT
-                  and f.evidence.startswith("ARBITRATED")]
+                  if f.verdict == _VERDICT_ARBITRATED]
     if arbitrated:
         out.append(
-            f"  {len(arbitrated)} counted TRIGGER-ABSENT are ARBITRATED (evidence "
+            f"  {len(arbitrated)} ARBITRATED (evidence "
             f"produced, referee withheld -- not delivery failures): "
             f"{', '.join(sorted(arbitrated))}"
         )
@@ -726,7 +736,8 @@ def render_json(result: dict[str, Any]) -> str:
         ],
         "summary": {
             verdict: sum(1 for f in features if f.verdict == verdict)
-            for verdict in (_VERDICT_FIRED, _VERDICT_ABSENT, _VERDICT_FAILURE)
+            for verdict in (_VERDICT_FIRED, _VERDICT_ABSENT, _VERDICT_ARBITRATED,
+                            _VERDICT_UNINSTRUMENTED, _VERDICT_FAILURE)
         },
         "unattributed_delivered_rows": dict(result["unattributed_delivered"]),
         "unresolved_gate_decisions": dict(result["unresolved_gate"]),

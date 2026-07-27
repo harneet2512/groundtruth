@@ -662,7 +662,18 @@ def build_caller_contract_control_participation(
         input_bytes = canonical_producer_inputs_bytes(
             envelope,
             delivery_seal=attestation.delivery_seal,
-            actual_event=attestation.decision.required_event,
+            # `open_event`, NOT `required_event`. The bytes were built with the OBSERVED
+            # event, and `DecisionBinding` never persists `actual_event` -- but the sole
+            # production call site builds the attestation with
+            # ``actual_event=X, open_event=X``, so `open_event` IS the observed event and this
+            # reproduces the original bytes exactly.
+            #
+            # Substituting the CONTRACTED event matched only when the delivery happened to be
+            # on time. Off-boundary deliveries hash-mismatched and their participation record
+            # was dropped silently, so a CAP participation record could only ever exist for an
+            # ON-TIME delivery -- every statistic over them was conditioned on the very
+            # property it was meant to measure.
+            actual_event=attestation.decision.open_event,
             open_event=attestation.decision.open_event,
         )
     except Exception:
