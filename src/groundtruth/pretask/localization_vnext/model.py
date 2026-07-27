@@ -74,6 +74,26 @@ class LocalizationPolicy:
     # file to open; a second region inside a file it is already reading does
     # not, and `max_source_tokens` bounds that independently.
     max_admitted_files: int = 8
+    # SCALE-AWARE CEILING. Specifying one file among N costs log2(N) bits, and a
+    # ranked list is how that budget is spent, so the ceiling grows with the
+    # candidate pool and not with a constant. Measured against the user's own
+    # intuition: 100 files -> log2 = 6.6 -> 7; 1,000,000 -> 20. Past that the
+    # attention ceiling binds, because a list longer than that is not read.
+    # `max_admitted_files` remains the hard floor-of-last-resort for callers
+    # that pin it explicitly.
+    scale_aware_ceiling: bool = True
+    attention_ceiling: int = 20
+    # CONFIDENCE GATE. `peak_ratio` = top fused score / runner-up. Of four
+    # candidate confidence signals measured against required depth on run
+    # 30226219339 (Spearman rho), only this one is usable:
+    #   top-vs-runner-up  -0.377 USABLE   background separation (z)  -0.177 weak
+    #   cross-leg agree   -0.036 none     anchor cardinality         -0.033 none
+    # Calibrated on the random split and validated on held+ext2 (val 0.917 >=
+    # fit 0.792, so not overfit): above this ratio the top candidate dominates
+    # and one file is enough. It is worth ~1.4 cases in 60 - real but small; the
+    # scale-aware ceiling is the load-bearing half.
+    peak_ratio_confident: float = 1.3
+    confident_admitted_files: int = 1
     max_region_tokens: int = 2_000
     merge_adjacent_lines: int = 2
     disabled_components: frozenset[str] = frozenset()

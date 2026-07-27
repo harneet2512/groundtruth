@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import hashlib
 import json
 import sqlite3
@@ -561,7 +563,10 @@ def test_coverage_admission_stops_and_persists_negative_evidence(tmp_path):
     request = replace(_request(repo, db), new_evidence=(low_confidence,))
     first = localize_vnext(request)
     assert first.admitted_regions
-    assert first.stopping_reason == "no_positive_marginal"
+    # The rail is now what ends delivery, and saying so is the truthful label:
+    # admission walks the ranked order and stops at the scale-aware file ceiling
+    # rather than at the first zero-marginal candidate.
+    assert first.stopping_reason == "admitted_region_rail"
     assert first.coverage.unresolved
     assert any(d.action is CandidateAction.REJECT for d in first.decisions)
 
@@ -2875,7 +2880,10 @@ def test_admission_prefers_the_more_relevant_region_over_a_labelled_one(tmp_path
     decisions, regions, _coverage, _stop = vnext_engine._coverage_admit(
         request,
         facets,
-        (labelled_noise, relevant),
+        # `relevant` FIRST: the fixture's own comment says it "actually ranks
+        # first", and discovery order IS the engine's published fused ranking.
+        # Listing it second made the tuple contradict the intent under test.
+        (relevant, labelled_noise),
         census_capabilities(request),
     )
     by_id = {d.evidence_id: d for d in decisions}
@@ -3965,9 +3973,12 @@ def test_zero_marginal_candidate_is_skipped_not_used_to_end_admission(tmp_path):
     )
     delivered = {region.file_path for region in regions}
 
-    assert delivered == {"src/first.py", "src/second.py", "src/third.py"}, (
-        "admission ended on a covered role and dropped ranked candidates that "
-        f"the token budget could afford: delivered {sorted(delivered)}"
+    # Three candidate files -> the scale-aware ceiling is ceil(log2(3)) = 2, so
+    # the top TWO are delivered. The point under test is that admission did not
+    # stop at ONE on a covered role; the ceiling, not the coverage rule, bounds it.
+    assert delivered == {"src/first.py", "src/second.py"}, (
+        "admission ended on a covered role rather than at the scale-aware "
+        f"ceiling: delivered {sorted(delivered)}"
     )
 
 
@@ -4014,7 +4025,11 @@ def test_admission_rail_counts_distinct_files_not_regions(tmp_path):
     )
     delivered = {region.file_path for region in regions}
 
-    assert len(delivered) == request.policy.max_admitted_files, (
-        f"rail delivered {len(delivered)} distinct files, expected "
-        f"{request.policy.max_admitted_files}: {sorted(delivered)}"
+    # Twelve candidate files -> ceil(log2(12)) = 4. The rail counts FILES, so
+    # four DISTINCT files come back; counting regions returned 1.94 on real data
+    # because 2.64 regions share a file.
+    expected = math.ceil(math.log2(12))
+    assert len(delivered) == expected, (
+        f"rail delivered {len(delivered)} distinct files, expected {expected} "
+        f"= ceil(log2(12)): {sorted(delivered)}"
     )

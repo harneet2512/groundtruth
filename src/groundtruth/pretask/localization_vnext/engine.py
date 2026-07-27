@@ -3147,6 +3147,37 @@ def _coverage_admit(
             "ablation_fixed_top_8",
         )
 
+    # --- how many FILES may be delivered, for THIS case -----------------------
+    # Two independent quantities, previously conflated into one constant:
+    #   CEILING comes from SCALE     - log2(pool), the bits needed to name one
+    #                                  file among the candidates considered.
+    #   DEPTH   comes from CONFIDENCE - how far the top candidate is ahead of the
+    #                                  runner-up. Pool SIZE does not predict depth
+    #                                  (Spearman +0.065, no signal), which is why
+    #                                  the two must not be the same number.
+    # Computed over the FULL candidate pool, BEFORE the anchor is removed from
+    # `candidates`. Computing it after shrank a 3-file pool to 2, so log2 gave a
+    # ceiling of 1, the already-admitted anchor filled it, and every remaining
+    # candidate - including the rank-1 one - was rail-blocked.
+    pool_paths = {unit.file_path for unit in candidates}
+    if request.policy.scale_aware_ceiling and pool_paths:
+        file_ceiling = min(
+            max(1, math.ceil(math.log2(max(2, len(pool_paths))))),
+            request.policy.attention_ceiling,
+        )
+    else:
+        file_ceiling = request.policy.max_admitted_files
+    ordered_fused = sorted(
+        (fused.get(_norm(path), 0.0) for path in pool_paths), reverse=True
+    )
+    if len(ordered_fused) >= 2 and ordered_fused[1] > 0:
+        peak_ratio = ordered_fused[0] / ordered_fused[1]
+    else:
+        peak_ratio = float("inf")
+    if peak_ratio >= request.policy.peak_ratio_confident:
+        # The top candidate dominates: extra files are noise, not evidence.
+        file_ceiling = min(file_ceiling, request.policy.confident_admitted_files)
+
     # --- best-single-element arm (Khuller, Moss & Naor 1999) -----------------
     # Budgeted maximum coverage attains its (1-1/e) guarantee from
     # `max(greedy_solution, best_single_element)`. GT shipped the greedy arm
@@ -3215,6 +3246,7 @@ def _coverage_admit(
                 unit for unit in candidates if unit.evidence_id != anchor.evidence_id
             ]
 
+
     while candidates:
         ranked: list[tuple[tuple[int, ...], EvidenceUnit]] = []
         for unit in candidates:
@@ -3266,12 +3298,24 @@ def _coverage_admit(
         # the agent is reading that file anyway, and `max_source_tokens` bounds
         # the bytes. Counting regions capped delivery at 1.94 files (run
         # 30232420179) because 2.64 regions share a file.
+        if marginal[0] <= 0 and not (
+            set(unit.issue_roles) & (target_required | expected)
+        ):
+            # Not issue-conditioned at all: correct-or-quiet still applies.
+            decisions[unit.evidence_id] = CandidateDecision(
+                unit.evidence_id,
+                CandidateAction.DEFER,
+                (ReasonCode.NO_ISSUE_CONTRIBUTION,),
+                (),
+                marginal,
+            )
+            continue
         admitted_paths = {region.file_path for region in admitted_regions}
         unit_region = region_cache.get(unit.evidence_id)
         unit_is_new_file = (
             unit_region is not None and unit_region.file_path not in admitted_paths
         )
-        if unit_is_new_file and len(admitted_paths) >= request.policy.max_admitted_files:
+        if unit_is_new_file and len(admitted_paths) >= file_ceiling:
             decisions[unit.evidence_id] = CandidateDecision(
                 unit.evidence_id,
                 CandidateAction.DEFER,
@@ -3288,18 +3332,6 @@ def _coverage_admit(
             candidates.clear()
             stopping_reason = "admitted_region_rail"
             break
-        if marginal[0] <= 0 and not (
-            set(unit.issue_roles) & (target_required | expected)
-        ):
-            # Not issue-conditioned at all: correct-or-quiet still applies.
-            decisions[unit.evidence_id] = CandidateDecision(
-                unit.evidence_id,
-                CandidateAction.DEFER,
-                (ReasonCode.NO_ISSUE_CONTRIBUTION,),
-                (),
-                marginal,
-            )
-            continue
         region = region_cache.get(unit.evidence_id)
         if region is None:
             decisions[unit.evidence_id] = CandidateDecision(
