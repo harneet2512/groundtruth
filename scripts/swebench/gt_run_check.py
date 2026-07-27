@@ -439,6 +439,42 @@ def analyze_ledger(path: Path) -> dict:
         f"{r.get('layer')}:{r.get('outcome')}:{_one_line(str(r.get('reason') or ''), 60)}"
         for r in canonical)
 
+    # WHY A CAPSULE COUNT IS THE WRONG HEADLINE (user directive 2026-07-27).
+    #
+    # select_evidence_coalition selects "one SMALLEST connected, decision-complete evidence
+    # coalition" and HOLDS the rest, at most one dose per observation. Silence is therefore
+    # the CORRECT default, and a high canonical-row count would be a failure, not a win. The
+    # signal is not how often the oracle spoke -- it is WHY it stayed quiet:
+    #
+    #   no compilation attempt at all   -> no decision was open. Correct-quiet.
+    #   DECISION_INCOMPLETE, held > 0   -> THE DEFECT. Evidence existed and no anchor role
+    #                                      could carry it, so nothing could compose
+    #                                      (anchor starvation).
+    #   DECISION_INCOMPLETE, held == 0  -> no evidence at all: an upstream producer gap,
+    #                                      a different bug with a different fix.
+    #   COMPILED more than once for one observation -> failure the other way (dose>1).
+    compilations = [r for r in canonical
+                    if "compilation" in str(r.get("layer") or "").lower()]
+    compile_reasons = Counter(
+        _one_line(str(r.get("reason") or "(none)"), 48) for r in compilations)
+    incomplete_with_evidence = sum(
+        1 for r in compilations
+        if "DECISION_INCOMPLETE" in str(r.get("reason") or "")
+        and int((r.get("extra") or {}).get("held_evidence", 0) or 0) > 0)
+    incomplete_no_evidence = sum(
+        1 for r in compilations
+        if "DECISION_INCOMPLETE" in str(r.get("reason") or "")
+        and int((r.get("extra") or {}).get("held_evidence", 0) or 0) == 0)
+    # dose<=1 is per OBSERVATION, so count observations that saw more than one COMPILED plan.
+    compiled_per_obs = Counter(
+        str((r.get("observation_binding") or {}).get("candidate_id")
+            or r.get("candidate_id") or "(unbound)")
+        for r in compilations
+        if "COMPILED" in str(r.get("reason") or "").upper()
+        or r.get("outcome") == "delivered")
+    dose_violations = sum(1 for k, n in compiled_per_obs.items()
+                          if n > 1 and k != "(unbound)")
+
     leak_delivered = [r for r in real if "leak" in str(r.get("reason") or "").lower()]
     leak_guard_drops = sum(
         1 for r in rows
@@ -457,6 +493,11 @@ def analyze_ledger(path: Path) -> dict:
         "canonical_rows": len(canonical),
         "canonical_delivered": len(canonical_delivered),
         "canon_detail": canon_detail,
+        "compilations": len(compilations),
+        "compile_reasons": compile_reasons,
+        "incomplete_with_evidence": incomplete_with_evidence,
+        "incomplete_no_evidence": incomplete_no_evidence,
+        "dose_violations": dose_violations,
         "leak_delivered": len(leak_delivered),
         "leak_guard_drops": leak_guard_drops,
     }
@@ -771,8 +812,30 @@ def main(argv: list[str]) -> int:
                 print(f"    canonical/capsule: {canon_bit} :: "
                       f"{_fmt_counter(s['canon_detail'], 6)}")
             else:
-                print("    canonical/capsule: 0 rows -- oracle released nothing on "
+                print("    canonical/capsule: 0 rows -- no capsule reached the model on "
                       "this task")
+            # The oracle SELECTS the smallest decision-complete coalition and holds the
+            # rest, so quiet is correct and a big number would be the failure. Report WHY
+            # it was quiet, not how loud it was.
+            if s.get("compilations"):
+                print(f"    compile attempts: {s['compilations']} :: "
+                      f"{_fmt_counter(s['compile_reasons'], 8)}")
+                if s.get("incomplete_with_evidence"):
+                    print(f"      -> DEFECT: {s['incomplete_with_evidence']} "
+                          "DECISION_INCOMPLETE with held_evidence>0 -- evidence existed and "
+                          "NO anchor role could carry it (anchor starvation)")
+                if s.get("incomplete_no_evidence"):
+                    print(f"      -> UPSTREAM: {s['incomplete_no_evidence']} "
+                          "DECISION_INCOMPLETE with held_evidence==0 -- no evidence at all "
+                          "(producer gap, not an oracle gap)")
+                if s.get("dose_violations"):
+                    print(f"      -> DOSE VIOLATION: {s['dose_violations']} observation(s) "
+                          "compiled MORE THAN ONE capsule -- breaks dose<=1")
+                else:
+                    print("      -> dose<=1 held: no observation compiled two capsules")
+            else:
+                print("    compile attempts: 0 -- the oracle never reached a compile "
+                      "decision (no decision open, or the runtime never attached)")
             leak_line = f"    leak: delivered-with-leak-reason={s['leak_delivered']}"
             if s["leak_delivered"]:
                 leak_line += " << FINDING (delivered despite leak marker)"
