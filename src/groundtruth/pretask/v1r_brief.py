@@ -2738,6 +2738,48 @@ def _tier_from_loc_header(loc_header: str) -> str:
     return m.group(1).upper() if m else "low"
 
 
+class _RankedEntry:
+    """A path-only stand-in so acquisition counting needs no DELIVERED entry.
+
+    `_l1_signal_counts` reads only `.path`, `.witness` and `.localizer_confidence` off an entry;
+    a ranked record carries its witness inside `components`, which the counter already handles.
+    """
+
+    __slots__ = ("path", "witness", "localizer_confidence")
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.witness = ""
+        self.localizer_confidence = 0.0
+
+
+def _l1_acquisition_counts(
+    graph_db: str,
+    records: list[dict],
+) -> tuple[int, int, int, int]:
+    """The same four signal counts, over what was ACQUIRED — independent of delivery.
+
+    WHY THIS EXISTS. `_l1_signal_counts` counts over the DELIVERED candidate set, which is
+    correct for a delivery claim but is stored in fields named `fts5_signal_count`,
+    `semantic_signal_count`, `structural_signal_count`, `graph_edge_count`. Those names mean
+    ACQUISITION. Under `GT_BRIEF_MINIMAL` + `GT_LOC_RESLOT` the brief reduction deletes every
+    localization block, so the delivered set is empty BY CONSTRUCTION and all four read 0.
+
+    Measured cost of that conflation (run 30297116212): the counters read 0 while the SAME run's
+    `embedder_certificate.json` reported `semantic_candidate_count: 112` and driving the
+    production localizer against that run's own graph produced 50 candidates. The zero was read
+    as "the acquisition subsystem is dark", written into the architecture state-of-record, and
+    used to redirect a day of work. It was a broken gauge, not a broken subsystem.
+
+    Both facts are wanted. They must not share a name: this answers "what did the legs find",
+    `_l1_signal_counts` answers "what reached the model".
+    """
+    entries = [_RankedEntry(str(r.get("path", ""))) for r in records
+               if isinstance(r, dict) and r.get("path")]
+    aligned = [r for r in records if isinstance(r, dict) and r.get("path")]
+    return _l1_signal_counts(graph_db, entries, aligned)  # type: ignore[arg-type]
+
+
 def _l1_signal_counts(
     graph_db: str,
     entries: list[FileEntry],
