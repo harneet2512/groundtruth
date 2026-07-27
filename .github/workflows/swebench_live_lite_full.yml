@@ -573,6 +573,23 @@ jobs:
       # job). Without it the LEGACY tool-framing preamble ships — the exact
       # discount-training cue SS-5 exists to remove.
       GT_SS_ACK_FORM: '1'
+      # GT_ROLE_DRIVEN_COALITION (2026-07-26) — the ONE lever that lets gt_oracle release.
+      # This path DOES install the deterministic reasoning runtime (gt_headless_runner.py:571,
+      # fail-closed before spend), unlike the pier-driven deepswe_full path. But without this
+      # flag the runtime attaches, observes, reduces, produces evidence — and ships NOTHING,
+      # which is its state in every run to date (measured: 95 delivered payloads, 0
+      # canonical/capsule ledger rows).
+      #
+      # Coalition eligibility follows the roles a decision DECLARES it needs instead of which
+      # producer raised the evidence. Measured on the live registry: 9 of the 17 DIRECT
+      # features fire at a boundary whose open decision differs from their declared context,
+      # so producer-identity partitioning gives 8/17 oracle eligibility and role fit gives
+      # 17/17. Relaxes nothing else — role fit, causal connectivity, freshness, dedup, token
+      # budget and decision-completeness all still apply.
+      #
+      # BOTH this and the `-e` forward in the docker run below are required: this alone never
+      # crosses the container boundary, and the `-e` alone resolves to its :-0 default.
+      GT_ROLE_DRIVEN_COALITION: '1'
     defaults:
       run:
         shell: bash
@@ -1551,6 +1568,7 @@ jobs:
             -e GT_SS_SHADOW_RATE_REQUESTED="${GT_SS_SHADOW_RATE_REQUESTED}" \
             -e GT_SS_SHADOW_RATE="${GT_SS_SHADOW_RATE}" \
             -e GT_SS_ACK_FORM="${GT_SS_ACK_FORM:-0}" \
+            -e GT_ROLE_DRIVEN_COALITION="${GT_ROLE_DRIVEN_COALITION:-0}" \
             -e GT_ORACLE_EVENTS="/gt_out/gt_oracle_events.jsonl" \
             -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \

@@ -245,3 +245,56 @@ def test_ae_block_forwards_the_lever_into_the_container():
     assert '--ae "GT_ROLE_DRIVEN_COALITION=${GT_ROLE_DRIVEN_COALITION:-0}"' in ae_block, (
         "gt_ae_block.sh does not forward the lever into the container"
     )
+
+
+# ---------------------------------------------------------------------------------------
+# LIVE-LITE is the path that can actually run the oracle.
+#
+# It drives the agent via `gt_headless_runner.py`, which calls install_canonical_runtime
+# (:571) and FAIL-CLOSES before spend if the attachment is unproven. deepswe_full drives the
+# agent via pier and never installs the runtime at all.
+#
+# But the runtime attaching is not enough: without GT_ROLE_DRIVEN_COALITION it observes,
+# reduces, produces evidence and ships NOTHING. Both a job-env value AND a `docker run -e`
+# forward are required — the env alone never crosses the container boundary, and the -e alone
+# resolves to its `:-0` default. Either one missing = a silent zero-delivery oracle run.
+# ---------------------------------------------------------------------------------------
+_LIVE_LITE = _REPO / ".github" / "workflows" / "swebench_live_lite_full.yml"
+
+
+def test_live_lite_sets_the_lever_in_the_trial_job_env():
+    parsed = yaml.safe_load(_LIVE_LITE.read_text(encoding="utf-8"))
+    envs = {
+        name: job["env"]
+        for name, job in parsed["jobs"].items()
+        if isinstance(job, dict) and isinstance(job.get("env"), dict)
+    }
+    setters = {n: e["GT_ROLE_DRIVEN_COALITION"] for n, e in envs.items()
+               if "GT_ROLE_DRIVEN_COALITION" in e}
+    assert setters, "no job sets GT_ROLE_DRIVEN_COALITION — the oracle will ship nothing"
+    assert all(str(v) == "1" for v in setters.values()), (
+        f"the lever is declared but not enabled: {setters}"
+    )
+
+
+def test_live_lite_forwards_the_lever_into_the_container():
+    """The job env is host-side; the agent runs in `docker run`. Both are required."""
+    text = _LIVE_LITE.read_text(encoding="utf-8")
+    assert '-e GT_ROLE_DRIVEN_COALITION="${GT_ROLE_DRIVEN_COALITION:-0}"' in text, (
+        "the docker run env list does not forward the lever; the container would fall back "
+        "to the :-0 default and the oracle would release nothing"
+    )
+
+
+def test_live_lite_uses_the_headless_runner_not_pier():
+    """The canonical runtime is installed by gt_headless_runner, nowhere else.
+
+    If this path ever switches to `pier --agent-import-path`, install_canonical_runtime stops
+    being called and the oracle silently disappears — exactly what happened on deepswe_full.
+    """
+    text = _LIVE_LITE.read_text(encoding="utf-8")
+    assert "gt_headless_runner.py" in text
+    runner = (_REPO / "artifact_deepswe" / "gt_headless_runner.py").read_text(encoding="utf-8")
+    assert "install_canonical_runtime(" in runner, (
+        "the headless runner no longer installs the canonical runtime"
+    )
