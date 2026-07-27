@@ -317,7 +317,26 @@ def test_revision_mismatch_is_rejected_instead_of_reducing_stale_truth():
         reduce_event(state, stale_event)
 
 
-def test_repository_mutation_requires_repository_content_revision_change():
+def test_repository_mutation_without_content_change_is_recorded_not_fatal():
+    """UPDATED 2026-07-27. This asserted a `StateIntegrityError`; it now asserts a rule.
+
+    The old contract treated "an edit reported changed=True but repository_content did not
+    advance" as corruption. A reproduction against a real AttemptReasoningRuntime showed
+    that is exactly the raise that kills the canonical observer on the first real
+    observation -- run 30246661710: 45 oracle evaluations at iteration 0, then one
+    `observe_failed:StateIntegrityError`, then `dark_fallback` for the rest of the attempt.
+
+    The premise was wrong. `changed=True` means GT observed a WRITE; `repository_content`
+    digests HEAD + status + diff + untracked bytes, so a write of IDENTICAL bytes advances
+    neither. That happens routinely (`sed -i` matching nothing, rewriting content already
+    present, a retried editor action, a digest command failing to the same sentinel twice),
+    and the reducer cannot distinguish it from a hallucinated mutation because the two
+    produce byte-identical state.
+
+    The signal is preserved as a countable `no_op_mutation` rule; only the death is removed.
+    Genuine integrity invariants (attempt identity, event sequencing) still raise -- see
+    test_noop_mutation_does_not_kill_the_oracle_20260727.py.
+    """
     before = _revision("repo-1")
     graph_only = RevisionVector(
         repository_content="repo-1",
@@ -338,8 +357,13 @@ def test_repository_mutation_requires_repository_content_revision_change():
         ),
     )
 
-    with pytest.raises(StateIntegrityError, match="repository.content"):
-        reduce_event(WorkState.initial(attempt_id="attempt-1", revision=before), event)
+    state = reduce_event(
+        WorkState.initial(attempt_id="attempt-1", revision=before), event
+    )
+    assert "no_op_mutation" in state.transition_rules
+    assert "repository_mutation" in state.transition_rules, (
+        "the mutation itself must still be recorded -- only the fatality is removed"
+    )
 
 
 def test_non_repository_revision_refresh_advances_revision_without_fake_edit():

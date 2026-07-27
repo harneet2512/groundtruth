@@ -110,6 +110,11 @@ def test_the_six_reachable_invariants_still_exist_upstream():
         "attempt identity mismatch",
         "event sequence gap",
         "repository revision mismatch before reduction",
-        "repository content revision did not advance for a mutation outcome",
+        # NOTE: "repository content revision did not advance for a mutation outcome" was
+        # REMOVED on 2026-07-27 -- it was the raise that killed the observer on the first
+        # real observation and is now the countable `no_op_mutation` rule instead. Pinning
+        # a message that no longer exists would make this control fail for the right reason
+        # at the wrong time.
+        "canonical reasoning event sequence gap",
     ):
         assert phrase in src, f"invariant message vanished: {phrase!r}"

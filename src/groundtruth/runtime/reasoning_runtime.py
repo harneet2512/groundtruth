@@ -604,9 +604,28 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
         != event.revision_before.repository_content
     )
     if repository_changed and not repository_content_advanced:
-        raise StateIntegrityError(
-            "repository content revision did not advance for a mutation outcome"
-        )
+        # A NO-OP EDIT. Not corruption, and NOT the mirror of the check below.
+        #
+        # `changed=True` means GT OBSERVED A WRITE (`changed_files` non-empty from the edit
+        # bridge). `repository_content` digests HEAD + status + diff + untracked bytes, so a
+        # write producing IDENTICAL BYTES advances neither -- which is routine: a `sed -i`
+        # whose pattern matches nothing, a rewrite of content already present, an editor
+        # action retried after it already landed, or a digest command that failed and
+        # returned the same `unavailable:` sentinel on both sides.
+        #
+        # This check was kept fatal when H2 relaxed the opposite direction, on the argument
+        # that GT was "contradicting itself". That does not survive the data: the reducer
+        # cannot distinguish a hallucinated mutation from one that wrote identical bytes --
+        # the two produce byte-identical state -- so it cannot justify calling one
+        # corruption. And the penalty is total: `append_event` persists before reducing, the
+        # raise classifies as REDUCER_INVARIANT_VIOLATION (a CORE corruption code), replay
+        # re-reduces the same event, and the attempt is quarantined. Measured on run
+        # 30246661710: 45 oracle evaluations at iteration 0, then ONE of these, then
+        # `dark_fallback` on every iteration after -- the oracle never cycled again.
+        #
+        # Record it and continue. "The agent believes it edited and the repository did not
+        # move" is a real signal worth counting, not one worth dying on.
+        rules.append("no_op_mutation")
     if not repository_changed and repository_content_advanced:
         # NOT the mirror image of the check above, and NOT corruption.
         #

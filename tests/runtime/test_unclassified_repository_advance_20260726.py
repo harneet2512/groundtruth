@@ -5,8 +5,12 @@ WHAT THIS FIXES.  `reduce_event` enforced a symmetric repository-provenance inva
     if repository_changed and not repository_content_advanced:   raise   # (A)
     if not repository_changed and repository_content_advanced:   raise   # (B)
 
-(A) is sound: GT recorded a mutation the repository does not corroborate, so GT's own
-bookkeeping is lying. Keep it, forever.
+(A) WAS believed sound -- "GT recorded a mutation the repository does not corroborate, so
+GT's own bookkeeping is lying". That was WRONG and is superseded (2026-07-27): a write of
+identical bytes advances neither digest, the reducer cannot tell that from a hallucinated
+mutation, and the raise is what killed the canonical observer on the first real observation
+of run 30246661710. It is now the countable `no_op_mutation` rule. See
+test_noop_mutation_does_not_kill_the_oracle_20260727.py.
 
 (B) is not the same statement in reverse. `repository_content` is
 `_canonical_repository_digest`: `git rev-parse HEAD` + `git status --porcelain` + `git diff
@@ -52,7 +56,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
@@ -136,22 +139,41 @@ def test_the_rule_is_absent_when_the_advance_WAS_classified():
     assert "repository_mutation" in state.transition_rules
 
 
-def test_the_OTHER_direction_still_raises_because_that_one_is_gt_lying():
-    """ANTI-WEAKENING, and the reason this file is not just 'delete a check'.
+def test_the_OTHER_direction_is_ALSO_recorded_not_fatal():
+    """SUPERSEDED 2026-07-27 -- and the original assertion here was wrong.
 
-    GT recorded a mutation the repository does not corroborate. That is GT's own bookkeeping
-    contradicting observable truth, and it must still be fatal. If a future edit relaxes
-    this one too, the reducer stops enforcing provenance at all.
+    This test used to require the opposite direction (GT recorded a mutation the repository
+    does not corroborate) to stay FATAL, on the argument that it was "GT's own bookkeeping
+    contradicting observable truth". That argument did not survive a reproduction.
+
+    `changed=True` means GT observed a WRITE, and `repository_content` digests HEAD + status
+    + diff + untracked bytes -- so a write producing IDENTICAL BYTES advances neither. That
+    is routine (a `sed -i` matching nothing, rewriting content already present, a retried
+    editor action, a digest command failing to the same sentinel on both sides). The reducer
+    cannot tell a hallucinated mutation from one that wrote identical bytes -- the two states
+    are byte-identical -- so it cannot call one corruption.
+
+    Driving a real AttemptReasoningRuntime through one edit cycle showed this raise is
+    exactly what killed the canonical observer on run 30246661710: 45 oracle evaluations at
+    iteration 0, then one `observe_failed:StateIntegrityError`, then `dark_fallback` forever.
+
+    Both directions are now RECORDED, with distinct rules, and neither is fatal. The
+    provenance signal is preserved and countable; only the death is removed. See
+    test_noop_mutation_does_not_kill_the_oracle_20260727.py.
     """
-    with pytest.raises(rr.StateIntegrityError, match="did not advance"):
-        _reduce(
-            [
-                rr.SemanticOutcome(
-                    kind=rr.SemanticKind.EDIT_EXECUTED, subject="a.py", changed=True
-                )
-            ],
-            after=BEFORE,
-        )
+    state = _reduce(
+        [
+            rr.SemanticOutcome(
+                kind=rr.SemanticKind.EDIT_EXECUTED, subject="a.py", changed=True
+            )
+        ],
+        after=BEFORE,
+    )
+    assert "no_op_mutation" in state.transition_rules
+    assert "unclassified_repository_advance" not in state.transition_rules, (
+        "the two directions must stay DISTINGUISHABLE -- collapsing them loses which one "
+        "actually happened"
+    )
 
 
 def test_a_quarantine_from_this_cause_would_have_meant_zero_gt_bytes():
