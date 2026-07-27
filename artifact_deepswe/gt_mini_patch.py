@@ -22574,12 +22574,70 @@ _ENV_CLASSES = [
     ("minisweagent.environments.singularity", "SingularityEnvironment"),
 ]
 
+# The AGENT classes. Wrapping the environment's `execute` gives GT the observation hook
+# (that is what `_augment_output` rides), but it never yields a MODEL handle -- and the
+# canonical runtime's delivery mechanism is the PROVIDER boundary, which wraps the model to
+# join one capsule into the exact next inference payload.
+#
+# `install_canonical_runtime` documents its own precondition: "Construction occurs only
+# after the runner has concrete model and agent instances and before ``agent.run``". Only
+# gt_headless_runner satisfied that, so on every harness that constructs the agent itself
+# (pier `--agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent`, i.e. deepswe_full)
+# the attachment stayed None, `_augment_output` took the legacy branch forever, and the
+# oracle released NOTHING. Measured on run 30225435976: 95 delivered payloads, ZERO
+# canonical/capsule ledger rows.
+#
+# `DefaultAgent.run(self, task="", **kwargs)` is exactly that precondition point: `self` is
+# the agent, `self.model` is the model, and the step loop has not started.
+_AGENT_CLASSES = [
+    ("minisweagent.agents.default", "DefaultAgent"),
+    ("minisweagent.agents.interactive", "InteractiveAgent"),
+]
+
+
+def _wrap_agent_run(orig):
+    """Install the canonical runtime once, immediately before the agent's step loop.
+
+    Correct-or-quiet: any failure leaves the attachment unset, `_augment_output` keeps its
+    legacy branch, and the native agent path is untouched. This never raises into the agent.
+    """
+
+    def run(self, task: str = "", *args, **kwargs):
+        if not _GT_BASELINE and _CANONICAL_RUNTIME_ATTACHMENT is None:
+            try:
+                install_canonical_runtime(
+                    model=getattr(self, "model", None),
+                    agent=self,
+                    env=os.environ,
+                    task=task,
+                )
+            except Exception as exc:  # noqa: BLE001 -- sensing must never break the agent
+                try:
+                    _runtime_ledger_record(
+                        kind="canonical_runtime.install",
+                        outcome="suppressed_internal_only",
+                        reason=f"install_failed:{type(exc).__name__}",
+                        chars=0,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        return orig(self, task, *args, **kwargs)
+
+    return run
+
 
 # P0-B (2026-07-05): the classes _install() actually patched THIS process. The proof
 # marker attests HOOK ATTACHMENT, not module load — so it is written iff this list is
 # non-empty. Populated only on the success (or already-patched) path, never in the
 # swallow-all except, so a run where no env class was patchable records patched=0.
 _PATCHED_CLASSES: list[str] = []
+# Agent classes whose `run` carries the ORACLE hook (GT's timing authority). Tracked
+# separately from _PATCHED_CLASSES because they answer different questions: _PATCHED_CLASSES
+# = "can GT see and append bytes at all", _PATCHED_AGENT_CLASSES = "does GT have a TIMING
+# authority for those bytes". A process can be non-empty on the first and EMPTY on the
+# second -- that is precisely the state every pier-driven run was in, delivering with no
+# decision-timing behind it.
+_PATCHED_AGENT_CLASSES: list[str] = []
 
 
 # W8 PRODUCTION-DEFAULT INVERSION (2026-07-13). Per-member provenance of the in-process
@@ -23154,6 +23212,44 @@ def _install() -> None:
             cls.execute = _wrap_execute(cls.execute)
             cls._gt_patched = True
             _PATCHED_CLASSES.append(f"{modname}.{clsname}")
+        except Exception:  # noqa: BLE001
+            pass
+    # ── THE ORACLE HOOK — GT's TIMING AUTHORITY ────────────────────────────────────
+    # READ THIS BEFORE TOUCHING THE LOOP ABOVE.
+    #
+    # The env loop above gives GT its OBSERVATION hook: it can see every action and append
+    # bytes to the result. That is delivery WITHOUT A TIMING MODEL — a producer fires on its
+    # own trigger and a static phase table decides admissibility. That design is why
+    # 137/138 suppressions were `wrong_phase`, and why "you have not verified this edit" was
+    # admissible only AFTER the agent had verified.
+    #
+    # gt_oracle exists to replace that with a TIMING DECISION. It reconstructs the agent's
+    # observable reasoning state, tracks the ONE currently-open decision, holds evidence
+    # while it is not yet relevant, and RELEASES IT BEFORE THAT DECISION IS COMMITTED.
+    # "Which bytes" is the easy half; "before which commitment" is the product.
+    #
+    # It cannot do that from the env hook alone: releasing into the next inference requires
+    # the PROVIDER boundary, which wraps the MODEL. `install_canonical_runtime` states the
+    # precondition itself -- concrete model + agent, before `agent.run`. Only
+    # gt_headless_runner ever satisfied it, so on pier-driven harnesses (deepswe_full) the
+    # attachment stayed None and the oracle released NOTHING while the legacy path shipped
+    # 95 payloads with no timing authority behind them (run 30225435976).
+    #
+    # If this loop is ever removed or silently fails, GT still DELIVERS and still looks
+    # healthy in the ledger -- it just has no timing guarantee. That is the failure mode to
+    # guard: check `canonical_runtime.*` ledger rows exist, not merely that bytes shipped.
+    for modname, clsname in _AGENT_CLASSES:
+        try:
+            cls = getattr(importlib.import_module(modname), clsname)
+        except Exception:  # noqa: BLE001 -- agent class not in this install
+            continue
+        if getattr(cls, "_gt_oracle_patched", False):
+            _PATCHED_AGENT_CLASSES.append(f"{modname}.{clsname}")
+            continue
+        try:
+            cls.run = _wrap_agent_run(cls.run)
+            cls._gt_oracle_patched = True
+            _PATCHED_AGENT_CLASSES.append(f"{modname}.{clsname}")
         except Exception:  # noqa: BLE001
             pass
     # PROFILE RECEIPT: durable per-process activation record, AFTER the patch loop so
