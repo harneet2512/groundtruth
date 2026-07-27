@@ -22355,12 +22355,7 @@ class CanonicalRuntimeAttachment:
 
         repository = _canonical_repository_digest(_root())
         graph = _canonical_file_digest(_db_path())
-        lsp = (
-            os.environ.get("GT_LSP_REVISION", "").strip()
-            or hashlib.sha256(
-                f"lsp-unavailable:{repository}".encode("ascii")
-            ).hexdigest()
-        )
+        lsp = _lsp_revision(repository)
         runtime_evidence = _runtime_evidence_digest(
             attempt_id=self.attempt_runtime.attempt_id,
             repository=repository,
@@ -23326,6 +23321,33 @@ def _runtime_evidence_digest(*, attempt_id: str, repository: str, graph: str) ->
     ).hexdigest()
 
 
+def _lsp_revision(repository: str) -> str:
+    """The ONE formula for the `lsp` revision dimension -- derived, never configured.
+
+    Both call sites used to prefer a `GT_LSP_REVISION` environment variable and fall back to a
+    digest derived from the repository content. That read was a PHANTOM KNOB, and the --ae
+    parity invariant (`test_r1_ae_parity_invariant_failclosed`) caught it correctly:
+
+      * nothing in the workflows, scripts or seam ever SETS `GT_LSP_REVISION`, and it was never
+        --ae-forwarded, so it could not be set inside the container even in principle; and
+      * no feature contract carries `lsp` as a revision dependency (verified against
+        `feature_contract_for` for all ten FACT classes), so the dimension it feeds is stamped
+        but never consulted for freshness.
+
+    The env branch was therefore dead on both ends. Forwarding an always-empty variable would
+    have silenced the guard while keeping the dead configuration surface, which is the outcome
+    the guard exists to prevent -- so the read is removed instead and the derived value, which
+    is what production actually computed, becomes the only path.
+
+    NOT host-local, and deliberately not parked on the pending-forward seam: there is no
+    concurrent owner and no forward coming. If GT ever gains a real LSP revision source, it
+    should arrive as a computed input to this function, not as an environment variable.
+    """
+    return hashlib.sha256(
+        f"lsp-unavailable:{repository}".encode("ascii")
+    ).hexdigest()
+
+
 def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> None:
     """Stage one task-start decision capsule; hold other contexts."""
     if not records:
@@ -23466,12 +23488,7 @@ def install_canonical_runtime(*, model, agent, env, task):
         graph_path = _db_path()
         graph_revision = _canonical_file_digest(graph_path)
         repository_revision = _canonical_repository_digest(_root())
-        lsp_revision = (
-            str(env.get("GT_LSP_REVISION") or "").strip()
-            or hashlib.sha256(
-                f"lsp-unavailable:{repository_revision}".encode("ascii")
-            ).hexdigest()
-        )
+        lsp_revision = _lsp_revision(repository_revision)
         runtime_revision = _runtime_evidence_digest(
             attempt_id=attempt_seed,
             repository=repository_revision,

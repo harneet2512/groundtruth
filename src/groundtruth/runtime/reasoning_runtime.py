@@ -3708,6 +3708,31 @@ _REVISION_DEPENDENCY_DIMENSION = {
     "issue": "runtime_evidence",
 }
 
+# Dependencies on state that CANNOT change during an attempt.
+#
+# `issue` is the problem statement handed to the attempt at task start. It is fixed for the
+# attempt's lifetime, so evidence derived from it does not become false because a file
+# changed -- the requirements the fix must satisfy are the same requirements.
+#
+# Treating it as mutable was fatal exactly where it mattered most. `obligations` is the only
+# standing carrier of BEHAVIORAL_CONTRACT, which is the required role of PATCH_CONSTRUCTION
+# -- the phase the agent enters AFTER editing. Mapped onto `runtime_evidence`, the record was
+# invalidated by the very edit that opened the decision needing it, so on any task where the
+# agent edits (i.e. every real task) the coalition could never complete.
+#
+# This is an exemption from FRESHNESS, not from any other check: role fit, connectivity,
+# supersession, dedup, the token budget and decision-completeness all still apply.
+#
+# Deliberately an explicit set rather than deleting the mapping: `_evidence_revision_is_fresh`
+# returns False for an unmapped dependency (fail-closed), so a deletion would make the record
+# permanently stale -- the opposite of the intent.
+#
+# DO NOT add `patch_rev`, `edit_rev` or `episode_state`. Those are genuinely derived from
+# mutable runtime state and MUST retire when the repository moves; exempting them would let
+# GT serve edit-derived evidence about a file that has since changed -- stale evidence
+# presented as fact, which is worse than silence.
+_IMMUTABLE_REVISION_DEPENDENCIES = frozenset({"issue"})
+
 
 def invalidate_stale_evidence(
     evidence: EvidenceRecord,
@@ -3716,6 +3741,13 @@ def invalidate_stale_evidence(
 ) -> EvidenceRecord:
     changed: list[str] = []
     for dependency in evidence.revision_dependencies:
+        # THIS loop is what actually retires evidence -- `_evidence_revision_is_fresh` is a
+        # separate predicate used elsewhere, so the immutable exemption must be applied in
+        # BOTH or the fix silently does nothing on the live path. (It was applied only to
+        # the predicate first; an offline reproduction caught that the record was still
+        # INVALIDATED while the predicate reported fresh.)
+        if dependency in _IMMUTABLE_REVISION_DEPENDENCIES:
+            continue
         dimension = _REVISION_DEPENDENCY_DIMENSION.get(dependency)
         if dimension is None:
             raise EvidenceLifecycleError(
@@ -5676,6 +5708,11 @@ def _evidence_revision_is_fresh(
     current_revision: RevisionVector,
 ) -> bool:
     for dependency in evidence.revision_dependencies:
+        # Immutable-state dependencies are always satisfied: nothing that can move during an
+        # attempt can falsify them. See `_IMMUTABLE_REVISION_DEPENDENCIES` for why `issue`
+        # qualifies and why the mutable runtime deps deliberately do not.
+        if dependency in _IMMUTABLE_REVISION_DEPENDENCIES:
+            continue
         dimension = _REVISION_DEPENDENCY_DIMENSION.get(dependency)
         if dimension is None:
             return False
