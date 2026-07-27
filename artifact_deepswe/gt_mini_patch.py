@@ -22585,10 +22585,30 @@ class CanonicalRuntimeAttachment:
         except Exception as exc:  # noqa: BLE001 -- native result must survive
             self._record_fault(exc, component="canonical_observer")
             try:
+                # NAME THE INVARIANT, not just the exception class. `reduce_event` and the
+                # reasoning-graph reducer raise StateIntegrityError from ~15 places, and the
+                # six reachable from here are materially different bugs (attempt identity /
+                # event sequence gap / repository revision mismatch / repository content did
+                # not advance / canonical reasoning sequence gap / previous hash mismatch).
+                #
+                # This matters because ONE such error isolates the canonical observer for the
+                # rest of the attempt: on run 30246661710 the oracle evaluated 45 times at
+                # iteration 0, hit exactly one `observe_failed:StateIntegrityError`, and from
+                # iteration 1 onward the ledger is nothing but dark_fallback -- it never
+                # cycled again. With only the class name, the artifact cannot say which
+                # invariant to fix.
+                #
+                # Host-side only (suppressed_internal_only, chars=0, never model-facing).
+                # Capped so a future message that embeds content cannot bloat the ledger or
+                # turn this row into a payload channel.
+                _fault_detail = " ".join(str(exc).split())[:200]
                 _runtime_ledger_record(
                     kind="canonical_runtime",
                     outcome="suppressed_internal_only",
-                    reason=f"observe_failed:{type(exc).__name__}",
+                    reason=(
+                        f"observe_failed:{type(exc).__name__}"
+                        + (f":{_fault_detail}" if _fault_detail else "")
+                    ),
                     chars=0,
                 )
             except Exception:  # noqa: BLE001
