@@ -179,18 +179,35 @@ def _paired_means_at_k(
 
 def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Apply the user-pinned recall-first Pareto rule to paired task rows."""
+    # Byte identity is a property of the CODE, not of the case, so it is
+    # SAMPLED: re-running the whole legacy pipeline per case to re-prove it cost
+    # ~50% of a 2.6-hour run (run 30235628114, legacy 219s vs vnext 10s per
+    # case). Rows where it did not run carry None and ABSTAIN. Rows where it DID
+    # run still gate. A corpus where it never ran anywhere is not cleared - it is
+    # unproven, which is a different failure and gets its own reason.
+    byte_identity = [
+        (row.get("safety") or {}).get("legacy_byte_identity") for row in rows
+    ]
+    verified = [value for value in byte_identity if value is not None]
+    if rows and not verified:
+        return {
+            "verdict": "OLD_WINS",
+            "reason": "byte_identity_never_verified",
+            "sampled_rows": 0,
+        }
     safety_failures = [
         index
         for index, row in enumerate(rows)
         if not bool((row.get("safety") or {}).get("deterministic"))
         or int((row.get("safety") or {}).get("leakage_count") or 0) != 0
-        or not bool((row.get("safety") or {}).get("legacy_byte_identity"))
+        or (row.get("safety") or {}).get("legacy_byte_identity") is False
     ]
     if safety_failures:
         return {
             "verdict": "OLD_WINS",
             "reason": "safety_or_legacy_byte_failure",
             "failed_rows": safety_failures,
+            "byte_identity_sampled": len(verified),
         }
 
     scorable = [row for row in rows if bool(row.get("scorable"))]
@@ -468,6 +485,8 @@ def _legacy_measure(
     issue_text: str,
     repository_root: str,
     graph_db: str,
+    *,
+    verify_byte_identity: bool = True,
 ) -> LegacyMeasurement:
     # Capture the production reactive projection from inside the actual brief
     # generator.  This obtains run_v74, localize, and final candidate selection
@@ -507,40 +526,59 @@ def _legacy_measure(
         else:
             legacy_localizer = captured[0]
 
-        with tempfile.TemporaryDirectory(prefix="gt-loc-vnext-byte-lock-") as sidecars:
-            os.environ["GT_LOC_VNEXT_SHADOW"] = "1"
-            os.environ["GT_LOC_VNEXT_SIDECAR_DIR"] = sidecars
-            shadow_started = time.perf_counter()
-            shadow_brief = brief_module.generate_v1r_brief(
-                issue_text,
-                repository_root,
-                graph_db,
-            )
-            shadow_elapsed = (time.perf_counter() - shadow_started) * 1000.0
+        # The SECOND full legacy pipeline run. It exists only to prove that
+        # enabling shadow mode leaves legacy's bytes untouched - an invariant of
+        # the CODE, identical for every case. Measured on run 30235628114:
+        # legacy is 219s per case against vnext's 10s, so running it twice was
+        # ~50% of a 2.6-hour run to re-prove one property 294 times.
+        if not verify_byte_identity:
+            shadow_brief = None
+            shadow_elapsed = None
+        else:
+            with tempfile.TemporaryDirectory(
+                prefix="gt-loc-vnext-byte-lock-"
+            ) as sidecars:
+                os.environ["GT_LOC_VNEXT_SHADOW"] = "1"
+                os.environ["GT_LOC_VNEXT_SIDECAR_DIR"] = sidecars
+                shadow_started = time.perf_counter()
+                shadow_brief = brief_module.generate_v1r_brief(
+                    issue_text,
+                    repository_root,
+                    graph_db,
+                )
+                shadow_elapsed = (time.perf_counter() - shadow_started) * 1000.0
 
         shadow_localizer = captured[1] if len(captured) > 1 else None
         legacy_v74 = getattr(legacy_brief, "v74_result", None)
         shadow_v74 = getattr(shadow_brief, "v74_result", None)
-        identity = {
-            "brief_text": (
-                str(getattr(legacy_brief, "brief_text", "")).encode("utf-8")
-                == str(getattr(shadow_brief, "brief_text", "")).encode("utf-8")
-            ),
-            "final_candidates": (
-                _brief_projection(legacy_brief) == _brief_projection(shadow_brief)
-            ),
-            "localization_proof": (
-                _primitive(getattr(legacy_brief, "localization_proof", ()) or ())
-                == _primitive(getattr(shadow_brief, "localization_proof", ()) or ())
-            ),
-            "run_v74": (
-                _v74_projection(legacy_v74) == _v74_projection(shadow_v74)
-            ),
-            "reactive_top_five": (
-                _reactive_projection(legacy_localizer)
-                == _reactive_projection(shadow_localizer)
-            ),
-        }
+        if shadow_brief is None:
+            # UNVERIFIED, not broken. Falling through to the comparisons below
+            # with `shadow_brief = None` makes every getattr default to "" and
+            # every check evaluate False, recording a byte-identity BREAK for a
+            # check that never ran - the same lie as recording a pass, pointed
+            # the other way.
+            identity = None
+        else:
+            identity = {
+                "brief_text": (
+                    str(getattr(legacy_brief, "brief_text", "")).encode("utf-8")
+                    == str(getattr(shadow_brief, "brief_text", "")).encode("utf-8")
+                ),
+                "final_candidates": (
+                    _brief_projection(legacy_brief) == _brief_projection(shadow_brief)
+                ),
+                "localization_proof": (
+                    _primitive(getattr(legacy_brief, "localization_proof", ()) or ())
+                    == _primitive(getattr(shadow_brief, "localization_proof", ()) or ())
+                ),
+                "run_v74": (
+                    _v74_projection(legacy_v74) == _v74_projection(shadow_v74)
+                ),
+                "reactive_top_five": (
+                    _reactive_projection(legacy_localizer)
+                    == _reactive_projection(shadow_localizer)
+                ),
+            }
         return LegacyMeasurement(
             localizer=legacy_localizer,
             v74=legacy_v74,
@@ -1235,8 +1273,13 @@ def score_sealed_case(
         "safety": {
             "deterministic": bool(sealed["comparison"]["deterministic"]),
             "leakage_count": int(sealed["vnext"]["metrics"].get("leakage_count", 0)),
-            "legacy_byte_identity": bool(
-                sealed["legacy"].get("byte_identity", False)
+            # None = the check did not RUN. Coercing it to a boolean turned an
+            # unverified case into a recorded pass, which would let a real byte
+            # divergence ship behind a check that never executed.
+            "legacy_byte_identity": (
+                None
+                if sealed["legacy"].get("byte_identity") is None
+                else bool(sealed["legacy"]["byte_identity"])
             ),
         },
         "old": {

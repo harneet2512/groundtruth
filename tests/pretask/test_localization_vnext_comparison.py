@@ -888,3 +888,52 @@ def test_file_precision_uses_the_same_k_on_both_sides():
     assert new_pk["value"] == pytest.approx(1 / 3), (
         "the longer list was punished for its length, not its quality"
     )
+
+
+def test_unverified_byte_identity_is_none_never_a_passing_true():
+    """Skipping the byte-identity check must not manufacture a pass.
+
+    The check re-runs the ENTIRE legacy pipeline a second time to prove that
+    enabling shadow mode does not alter legacy's bytes. Measured on run
+    30235628114: legacy averages 219s per case against vnext's 10s, and running
+    it twice is ~50% of a 2.6-hour run. The invariant is a property of the CODE,
+    not of the case, so it is samplable - but a skipped check must read
+    UNVERIFIED, never True. Recording True would let a real byte divergence ship
+    behind a check that never ran.
+    """
+    sealed = _sealed(
+        legacy_candidates=["src/a.py"],
+        vnext_ranked=["src/a.py"],
+        vnext_admitted=["src/a.py"],
+    )
+    sealed["legacy"]["byte_identity"] = None
+    sealed["legacy"]["byte_identity_checks"] = {}
+
+    scored = score_sealed_case(sealed, {"gold_files": ["src/a.py"]})
+
+    assert scored["safety"]["legacy_byte_identity"] is None, (
+        "an unverified byte-identity check was scored as a boolean verdict"
+    )
+
+
+def test_gate_needs_a_real_byte_identity_sample_and_fails_on_a_verified_break():
+    """UNVERIFIED rows abstain; VERIFIED rows still gate; zero samples is fatal."""
+    rows = _corpus()
+    for row in rows:
+        row["safety"]["legacy_byte_identity"] = None
+
+    verdict = evaluate_winner(rows)
+    assert verdict["verdict"] == "OLD_WINS", (
+        "a corpus where byte identity was never verified must not pass the gate"
+    )
+    assert verdict["reason"] == "byte_identity_never_verified"
+
+    # One verified-good sample is enough for the rest to abstain.
+    rows[0]["safety"]["legacy_byte_identity"] = True
+    assert evaluate_winner(rows)["verdict"] != "OLD_WINS"
+
+    # A verified BREAK still fails, however many rows abstained.
+    rows[1]["safety"]["legacy_byte_identity"] = False
+    broken = evaluate_winner(rows)
+    assert broken["verdict"] == "OLD_WINS"
+    assert broken["reason"] == "safety_or_legacy_byte_failure"

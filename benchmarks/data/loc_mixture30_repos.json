@@ -1,0 +1,122 @@
+{
+  "aws-cloudformation__cfn-lint-4009": {
+    "commit": "03f148d7e3c80a9354b5ccf30423a321b85979a9",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "aws-cloudformation__cfn-lint-4016": {
+    "commit": "651367020b0ad6243677e8c280758208889b74db",
+    "url": "https://github.com/aws-cloudformation/cfn-lint"
+  },
+  "conan-io__conan-17132": {
+    "commit": "d8db468afbac9410d0ba5209ac9c4a58224c3864",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17183": {
+    "commit": "dfcb68114157b49eb4bbbf56190a7518237ea2ed",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "conan-io__conan-17917": {
+    "commit": "3678ee1976d6a33af17462ddd0be2a8921077c8e",
+    "url": "https://github.com/conan-io/conan"
+  },
+  "deepset-ai__haystack-8489": {
+    "commit": "906177329bcc54f6946af361fcd3d0e334e6ce5f",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "deepset-ai__haystack-8799": {
+    "commit": "503d275ade85e04efed787ec421bdc55a5a77abf",
+    "url": "https://github.com/deepset-ai/haystack"
+  },
+  "dynaconf__dynaconf-1238": {
+    "commit": "9a834e069fd04cffadbb2d2e3ccc70342a872252",
+    "url": "https://github.com/dynaconf/dynaconf"
+  },
+  "kedro-org__kedro-4580": {
+    "commit": "769629fb23c19a7629ee8b1ae97940665d6d57bf",
+    "url": "https://github.com/kedro-org/kedro"
+  },
+  "keras-team__keras-20396": {
+    "commit": "1cc1eb5856cb05675e242a617dba8c047eb77dbb",
+    "url": "https://github.com/keras-team/keras"
+  },
+  "keras-team__keras-20880": {
+    "commit": "465a3d2247f6f4deaa702989688de9caeae5c585",
+    "url": "https://github.com/keras-team/keras"
+  },
+  "matplotlib__matplotlib-29431": {
+    "commit": "419b66158881af9da5b9b4d8f84b77f7a9c46105",
+    "url": "https://github.com/matplotlib/matplotlib"
+  },
+  "mikedh__trimesh-2354": {
+    "commit": "1493543559f9a56366052b74003cccf06900fe27",
+    "url": "https://github.com/mikedh/trimesh"
+  },
+  "modelcontextprotocol__python-sdk-222": {
+    "commit": "2628e01f4b892b9c59f3bdd2abbad718c121c87a",
+    "url": "https://github.com/modelcontextprotocol/python-sdk"
+  },
+  "pdm-project__pdm-3250": {
+    "commit": "5d3779ffe2709fbdb5bff1b4f0d33ef2c8c617d9",
+    "url": "https://github.com/pdm-project/pdm"
+  },
+  "privacyidea__privacyidea-4206": {
+    "commit": "80b817e9d563d48a4a29c00e8c361b8b5000a60d",
+    "url": "https://github.com/privacyidea/privacyidea"
+  },
+  "pvlib__pvlib-python-2400": {
+    "commit": "171f10ca1c2a73ea41a06e4c6ecf4de1f53523e7",
+    "url": "https://github.com/pvlib/pvlib-python"
+  },
+  "pybamm-team__pybamm-4865": {
+    "commit": "0d5af5c3f258ccc41715ae8fb9650908a95a06fc",
+    "url": "https://github.com/pybamm-team/PyBaMM"
+  },
+  "pypa__twine-1225": {
+    "commit": "aa3a910cdef8e0a3cb4e893f4c371b58015f52e0",
+    "url": "https://github.com/pypa/twine"
+  },
+  "pypsa__pypsa-1091": {
+    "commit": "c36338c171cef52cdce7cd445795ee362435f6ea",
+    "url": "https://github.com/PyPSA/PyPSA"
+  },
+  "reflex-dev__reflex-4266": {
+    "commit": "98394ceb8ec40ee75c8f434b751316544cb81ec2",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "reflex-dev__reflex-4563": {
+    "commit": "d8e988105fdff8c452e3cc73f7790db0b0b64c9d",
+    "url": "https://github.com/reflex-dev/reflex"
+  },
+  "run-llama__llama_deploy-458": {
+    "commit": "985690cc60169e3abcdca9a4707bdb7e8ae27cd0",
+    "url": "https://github.com/run-llama/llama_deploy"
+  },
+  "shapely__shapely-2226": {
+    "commit": "74eddd6af20566771ae4551a21e389e9ec188e66",
+    "url": "https://github.com/shapely/shapely"
+  },
+  "sissbruecker__linkding-971": {
+    "commit": "fc48b266a8c6005dca7d21ff96f4392ef62c0ccf",
+    "url": "https://github.com/sissbruecker/linkding"
+  },
+  "sissbruecker__linkding-995": {
+    "commit": "30f85103cd5efdc8359353e536730809ef020fec",
+    "url": "https://github.com/sissbruecker/linkding"
+  },
+  "sissbruecker__linkding-999": {
+    "commit": "f1acb4f7c969b69a441da0c043fe5bbe6dbc3748",
+    "url": "https://github.com/sissbruecker/linkding"
+  },
+  "stanford-crfm__helm-3467": {
+    "commit": "46dacf07fbef04ca21e9b4c66e5d576b10a158b4",
+    "url": "https://github.com/stanford-crfm/helm"
+  },
+  "theoehrly__fast-f1-699": {
+    "commit": "1482a077ece15e1d5a1a719faeda36d7906a6bb8",
+    "url": "https://github.com/theOehrly/Fast-F1"
+  },
+  "yt-dlp__yt-dlp-11880": {
+    "commit": "d298693b1b266d198e8eeecb90ea17c4a031268f",
+    "url": "https://github.com/yt-dlp/yt-dlp"
+  }
+}
