@@ -3828,7 +3828,9 @@ def test_top_ranked_candidate_is_admitted_even_when_its_roles_are_covered(tmp_pa
     request = _request(repo, db, issue)
 
     decisions, regions, _coverage, stopping = vnext_engine._coverage_admit(
-        request, facets, (lower_a, lower_b, top), census_capabilities(request)
+        # `top` FIRST: in the real drops the gold file was discovery-#1 and the
+        # greedy still deferred it once a fused-higher file covered the roles.
+        request, facets, (top, lower_a, lower_b), census_capabilities(request)
     )
     by_id = {d.evidence_id: d for d in decisions}
 
@@ -3841,3 +3843,68 @@ def test_top_ranked_candidate_is_admitted_even_when_its_roles_are_covered(tmp_pa
         f"delivered files: {sorted({r.file_path for r in regions})} "
         f"stopping_reason={stopping}"
     )
+
+
+def test_anchor_follows_the_fused_discovery_order_not_raw_signal_rank(tmp_path):
+    """The anchor must be the top of the ranking the engine actually publishes.
+
+    `LocalizationResult.discoveries` IS `tuple(evidence)`, so the incoming
+    evidence order is the fused discovery ranking - the same order that becomes
+    `ranked_discovery_files`. The anchor re-sorted it by `signal_rank`, a raw
+    per-leg retrieval rank that predates fusion, so it anchored on a different
+    file than the one the engine ranked first.
+
+    Measured on run 30226219339: the anchor admitted the discovery-#1 file on
+    49/60 cases, and on 6 of the remaining cases gold WAS discovery-#1 and was
+    still dropped (`ext2_ts_vue_renderer_patch`: discovery #1 `renderer.ts`,
+    admitted `Suspense.ts`). That gap is why the anchor recovered 4 of the 10
+    rank-1 drops instead of all 10.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "engine.py").write_text(
+        "def serve(request):\n"
+        "    if request is None:\n"
+        "        raise ParseError(request)\n"
+        "    return dispatch(request)\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "server.py").write_text(
+        "def listen(port):\n"
+        "    if port is None:\n"
+        "        raise ParseError(port)\n"
+        "    return bind(port)\n",
+        encoding="utf-8",
+    )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    facets = extract_behavior_facets(_request(repo, db, issue))
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+
+    # FIRST in discovery order, but a WORSE raw signal_rank. Fusion promoted it;
+    # anchoring on signal_rank would pick the other one.
+    discovery_first = EvidenceUnit.create(
+        file_path="src/engine.py", symbol="serve", start_line=1, end_line=4,
+        family=EvidenceFamily.LEXICAL, confidence=0.6,
+        provenance=("structured_lexical",), roles=roles,
+        signal_class="lexical", signal_rank=9,
+    )
+    discovery_second = EvidenceUnit.create(
+        file_path="src/server.py", symbol="listen", start_line=1, end_line=4,
+        family=EvidenceFamily.GRAPH, confidence=0.9,
+        provenance=("graph_edge",), roles=roles,
+        signal_class="structural", signal_rank=1,
+    )
+    request = _request(repo, db, issue)
+
+    decisions, regions, _coverage, _stopping = vnext_engine._coverage_admit(
+        request, facets, (discovery_first, discovery_second),
+        census_capabilities(request),
+    )
+    by_id = {d.evidence_id: d for d in decisions}
+
+    assert by_id[discovery_first.evidence_id].reason_codes == (
+        ReasonCode.TOP_RANKED_ANCHOR,
+    ), (
+        "the anchor followed raw signal_rank instead of the published discovery "
+        f"order: {[getattr(r, 'value', r) for r in by_id[discovery_first.evidence_id].reason_codes]}"
+    )
+    assert any(region.file_path == "src/engine.py" for region in regions)

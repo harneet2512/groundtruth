@@ -3170,7 +3170,16 @@ def _coverage_admit(
     # issue asked for; the greedy applies the same conditioning through
     # `new_required`/`new_expected`. In the oss-60 drops the gold file passed
     # this test easily: its roles were present, merely already COVERED.
-    anchor = min(
+    # FIRST IN DISCOVERY ORDER, not lowest `signal_rank`. `candidates` preserves
+    # the incoming `evidence` sequence, and `LocalizationResult.discoveries` IS
+    # `tuple(evidence)` - so evidence order is the fused ranking the engine
+    # publishes as `ranked_discovery_files`. `signal_rank` is a raw per-leg
+    # retrieval rank from BEFORE fusion; anchoring on it picked a different file
+    # than the one the engine itself ranked first. Measured on run 30226219339:
+    # the anchor hit discovery-#1 on 49/60 cases, and on 6 of the rest gold WAS
+    # discovery-#1 and was still dropped - which is why the anchor recovered 4
+    # of 10 rank-1 drops instead of all 10.
+    anchor = next(
         (
             unit
             for unit in candidates
@@ -3180,14 +3189,7 @@ def _coverage_admit(
                 or unit.explicit_provenance
             )
         ),
-        key=lambda unit: (
-            int(unit.signal_rank),
-            -float(unit.confidence),
-            unit.file_path,
-            unit.start_line,
-            unit.evidence_id,
-        ),
-        default=None,
+        None,
     )
     if anchor is not None:
         anchor_region = region_cache[anchor.evidence_id]
