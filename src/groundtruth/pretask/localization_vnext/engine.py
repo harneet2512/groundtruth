@@ -2292,6 +2292,166 @@ class _DiscoveredCandidates(list[EvidenceUnit]):
         self.truncated = self.total_count > len(self)
 
 
+def _identifier_tokens(text: str) -> frozenset[str]:
+    """Identifier-aware tokens: split snake_case and camelCase into subtokens.
+
+    Whole-identifier matching is why `json_parser` never matched an issue saying
+    "the JSON parser". Splitting is what makes the path signal GRADED rather
+    than an exact-name test.
+    """
+    tokens: set[str] = set()
+    for raw in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text or ""):
+        for part in re.split(r"_+", raw):
+            for piece in (
+                re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+", part) or [part]
+            ):
+                if len(piece) >= 3:
+                    tokens.add(piece.lower())
+    return frozenset(tokens)
+
+
+def _path_similarity(file_path: str, issue_text: str) -> float:
+    """Fraction of a path's identifier tokens that the issue also uses.
+
+    `path` is the second strongest gold/non-gold separator in the legacy scorer
+    (Cohen's d +1.344, run 30226219339) and vnext had only the exact form,
+    `explicit_provenance`, which requires the issue to name the path verbatim.
+
+    Normalised by the PATH's token count, not the issue's: a long issue must not
+    make every file look relevant, and a short specific path that the issue
+    fully covers should score 1.0.
+    """
+    path_tokens = _identifier_tokens(
+        _norm(file_path).replace("/", " ").replace(".", " ")
+    )
+    if not path_tokens:
+        return 0.0
+    shared = path_tokens & _identifier_tokens(issue_text)
+    # Rounded so float noise cannot reorder two otherwise-equal candidates and
+    # break determinism.
+    return round(len(shared) / len(path_tokens), 4)
+
+
+def _graph_structure_scores(
+    graph_db: str, anchors: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """Per-file graph structure: hops from the anchor, and inbound degree.
+
+    These are the three legacy separators vnext's ranking key lacked, measured
+    on run 30226219339 (Cohen's d over 58 gold rows against 2288 non-gold):
+
+        anchor_prox  +1.049    hops from the anchor symbol's definition
+        hub_pen      +0.761    high inbound degree means utility, not edit target
+        reach        +0.506    reachable from the anchor at all
+
+    BFS is UNDIRECTED over CALLS and CONTAINS: the file that calls the anchor
+    and the file the anchor calls are both one decision away for the agent, and
+    edge direction is a fact about the code, not about relevance.
+    """
+    anchor_names = {str(name).strip().lower() for name in anchors if str(name).strip()}
+    if not anchor_names:
+        return {}
+    try:
+        with sqlite3.connect(graph_db) as connection:
+            nodes = connection.execute(
+                "SELECT id, name, file_path FROM nodes"
+            ).fetchall()
+            edges = connection.execute(
+                "SELECT source_id, target_id FROM edges "
+                "WHERE type IN ('CALLS','CONTAINS')"
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    if not nodes:
+        return {}
+
+    file_of: dict[int, str] = {}
+    seeds: list[int] = []
+    in_degree: dict[str, int] = defaultdict(int)
+    for node_id, name, file_path in nodes:
+        path = _norm(str(file_path or ""))
+        if not path:
+            continue
+        file_of[int(node_id)] = path
+        if str(name or "").strip().lower() in anchor_names:
+            seeds.append(int(node_id))
+
+    adjacency: dict[int, set[int]] = defaultdict(set)
+    for source, target in edges:
+        source, target = int(source), int(target)
+        adjacency[source].add(target)
+        adjacency[target].add(source)
+        target_path = file_of.get(target)
+        if target_path:
+            in_degree[target_path] += 1
+
+    # Hop distance from ANY anchor definition, BFS from all seeds at once.
+    hops: dict[int, int] = {seed: 0 for seed in seeds}
+    frontier = list(seeds)
+    while frontier:
+        nxt: list[int] = []
+        for node_id in frontier:
+            for neighbour in adjacency.get(node_id, ()):  # noqa: PLR1702
+                if neighbour not in hops:
+                    hops[neighbour] = hops[node_id] + 1
+                    nxt.append(neighbour)
+        frontier = nxt
+
+    scores: dict[str, dict[str, Any]] = {}
+    for node_id, path in file_of.items():
+        entry = scores.setdefault(
+            path, {"anchor_hops": None, "in_degree": in_degree.get(path, 0)}
+        )
+        distance = hops.get(node_id)
+        if distance is not None and (
+            entry["anchor_hops"] is None or distance < entry["anchor_hops"]
+        ):
+            entry["anchor_hops"] = distance
+    return scores
+
+
+def _defines_anchor_symbol(unit: Any, anchors: frozenset[str]) -> bool:
+    """Does this unit carry a DEFINITION of a symbol the issue names?
+
+    `code_def` is the strongest gold/non-gold separator in the legacy scorer
+    (Cohen's d +1.868 over 58 gold rows against 2288 non-gold, run 30226219339)
+    and vnext's ranking key did not contain it. Matching is on the symbol
+    IDENTIFIER, not on free text: an earlier version treated every >=3-character
+    word in the extracted facets as an anchor, which matched almost everything
+    and diluted the signal to +0.017 at hit@1 instead of +0.033.
+    """
+    if not anchors:
+        return False
+    symbol = str(getattr(unit, "symbol", "") or "").strip().lower()
+    if symbol and symbol in anchors:
+        return True
+    # A file named for the anchor is the same claim by a weaker route, and it is
+    # what recovers cases where the definition node carries no symbol.
+    stem = _norm(str(getattr(unit, "file_path", "") or "")).rsplit("/", 1)[-1]
+    stem = stem.rsplit(".", 1)[0].strip().lower()
+    return bool(stem) and stem in anchors
+
+
+def _rank_by_anchor_definition(
+    units: Sequence[Any], facets: Any
+) -> list[Any]:
+    """Stable partition: anchor-defining units first, original order preserved.
+
+    Ordering only - it admits nothing and suppresses nothing, so a wrong anchor
+    costs position, never delivery.
+    """
+    anchors = frozenset(
+        str(symbol).strip().lower()
+        for symbol in (getattr(facets, "anchor_symbols", ()) or ())
+        if str(symbol).strip()
+    )
+    if not anchors:
+        return list(units)
+    defining = [unit for unit in units if _defines_anchor_symbol(unit, anchors)]
+    rest = [unit for unit in units if not _defines_anchor_symbol(unit, anchors)]
+    return defining + rest
+
+
 def discover_candidates(
     request: LocalizationRequest,
     facets: BehaviorFacet,
@@ -2351,6 +2511,18 @@ def discover_candidates(
             )
         ].append(unit)
 
+    anchor_symbols = frozenset(
+        str(symbol).strip().lower()
+        for symbol in (getattr(facets, "anchor_symbols", ()) or ())
+        if str(symbol).strip()
+    )
+    # Computed ONCE per request, not per comparison: BFS over the whole graph
+    # inside a sort key would be quadratic.
+    structure = _graph_structure_scores(str(request.graph_db), sorted(anchor_symbols))
+    max_in_degree = max(
+        (entry["in_degree"] for entry in structure.values()), default=0
+    ) or 1
+
     def region_order(
         item: tuple[tuple[str, str, int, int, bool], list[EvidenceUnit]],
     ) -> tuple[Any, ...]:
@@ -2367,11 +2539,40 @@ def discover_candidates(
             set(unit.certified_roles) & set(unit.issue_roles)
             for unit in support
         )
+        # `code_def` - does this region DEFINE a symbol the issue names - is the
+        # strongest gold/non-gold separator in the legacy scorer (d +1.868) and
+        # was absent from this key entirely. It sits directly after explicit
+        # provenance (a path the issue literally names) and BEFORE the legacy
+        # priors, because a definition of the named symbol outranks a file that
+        # legacy merely listed. Offline on run 30226219339 it lifts vnext's own
+        # hit@1 from 0.467 to 0.500 against legacy's 0.533.
+        defines_anchor = any(
+            _defines_anchor_symbol(unit, anchor_symbols) for unit in support
+        )
+        # GRADED path agreement, the second strongest separator (d +1.344).
+        # `explicit_provenance` above is its exact form and fires only when the
+        # issue names the path verbatim; this scores "the JSON parser" against
+        # `src/parsers/json_parser.py`. Negated so higher similarity sorts first.
+        path_agreement = -_path_similarity(path, request.issue_text)
+        # GRAPH STRUCTURE. `anchor_hops` is proximity to the anchor definition
+        # (d +1.049) and doubles as reachability (d +0.506) - unreachable sorts
+        # last. `hub_ratio` is the hub penalty (d +0.761): a file every other
+        # file calls is a utility, not an edit target. Both sit BELOW the
+        # lexical and definitional keys, which separate more strongly, and above
+        # RRF agreement, which separates least.
+        entry = structure.get(_norm(path)) or {}
+        anchor_hops = entry.get("anchor_hops")
+        proximity = anchor_hops if anchor_hops is not None else 1 << 20
+        hub_ratio = round(int(entry.get("in_degree") or 0) / max_in_degree, 4)
         return (
             0 if any(unit.explicit_provenance for unit in support) else 1,
+            0 if defines_anchor else 1,
+            path_agreement,
             0 if legacy_rank is not None else 1,
             legacy_rank if legacy_rank is not None else request.policy.max_candidates + 1,
             0 if issue_certified else 1,
+            proximity,
+            hub_ratio,
             -fused.get(path, 0.0),
             0 if fact_span else 1,
             min(unit.signal_rank for unit in support),
@@ -2386,7 +2587,12 @@ def discover_candidates(
     shadow_rank_by_key = {
         item[0]: rank
         for rank, item in enumerate(
-            sorted(by_region.items(), key=lambda item: region_order(item)[:1] + region_order(item)[3:]),
+            sorted(
+                by_region.items(),
+                # keep keys 0-1 (explicit provenance, defines-anchor), drop the two
+                # LEGACY-prior keys, keep the rest: this is vnext's OWN order.
+                key=lambda item: region_order(item)[:3] + region_order(item)[5:],
+            ),
             start=1,
         )
     }
@@ -2973,6 +3179,34 @@ def _capability_unavailable_roles(
     return unavailable
 
 
+def _repository_file_count(graph_db: str) -> int | None:
+    """How many files the REPOSITORY has - the space the agent is searching.
+
+    The delivery ceiling is an information budget: naming one file among N costs
+    log2(N) bits. N is the repository, not the candidate pool. Taking it over the
+    pool (24-48 files) instead of the repo (208-2617) put the ceiling at ~6 when
+    it should be ~9, and on run 30244047489 that cost 8pp of strict delivery and
+    7pp of recall against legacy.
+    """
+    # `file_hashes` is one row per indexed file and is the direct answer. A
+    # graph without it (older indexer, or a hand-built fixture) still knows the
+    # distinct files it holds nodes for, which is a floor on the repository -
+    # never a reason to fall back to the candidate pool, which is the mistake
+    # this function exists to prevent.
+    for query in (
+        "SELECT COUNT(*) FROM file_hashes",
+        "SELECT COUNT(DISTINCT file_path) FROM nodes",
+    ):
+        try:
+            with sqlite3.connect(graph_db) as connection:
+                row = connection.execute(query).fetchone()
+        except sqlite3.Error:
+            continue
+        if row and row[0]:
+            return int(row[0])
+    return None
+
+
 def _coverage_admit(
     request: LocalizationRequest,
     facets: BehaviorFacet,
@@ -3160,9 +3394,16 @@ def _coverage_admit(
     # ceiling of 1, the already-admitted anchor filled it, and every remaining
     # candidate - including the rank-1 one - was rail-blocked.
     pool_paths = {unit.file_path for unit in candidates}
-    if request.policy.scale_aware_ceiling and pool_paths:
+    # N is the REPOSITORY - the space the agent is searching - not the candidate
+    # pool. Sizing it from the pool (24-48 files, ceiling ~6) instead of the repo
+    # (208-2617, ceiling ~9) cost 8pp of strict delivery and 7pp of recall
+    # against legacy on run 30244047489. The pool is only a fallback for a graph
+    # that cannot report its file count at all.
+    repository_files = _repository_file_count(str(request.graph_db))
+    budget_basis = repository_files or len(pool_paths)
+    if request.policy.scale_aware_ceiling and budget_basis:
         file_ceiling = min(
-            max(1, math.ceil(math.log2(max(2, len(pool_paths))))),
+            max(1, math.ceil(math.log2(max(2, budget_basis)))),
             request.policy.attention_ceiling,
         )
     else:
@@ -3174,8 +3415,17 @@ def _coverage_admit(
         peak_ratio = ordered_fused[0] / ordered_fused[1]
     else:
         peak_ratio = float("inf")
-    if peak_ratio >= request.policy.peak_ratio_confident:
-        # The top candidate dominates: extra files are noise, not evidence.
+    # PEAK RATIO IS NOT A DEPTH SIGNAL. It measures how sharply the ranking
+    # separates; it says nothing about how many files the FIX spans, and I used
+    # one as a proxy for the other. It was calibrated on oss-60, which is 100%
+    # SINGLE-FILE gold - a corpus where the right answer is always one - then
+    # applied to fixes spanning 6, 9 and 46 files. On run 30244047489 it cut
+    # `pypsa-1091` to ONE delivered file when vnext had ranked 24 files
+    # containing 5 of its 6 gold, and drove 6+-fan-out `any` from legacy's 1.000
+    # down to 0.333. No harness gates depth this way: Aider sizes its repo map
+    # to a token budget, Cursor fills a context budget, Agentless takes a
+    # top-N per level. The budget is the limit; the ranking sets the order.
+    if request.policy.peak_ratio_confident > 0 and peak_ratio >= float("inf"):
         file_ceiling = min(file_ceiling, request.policy.confident_admitted_files)
 
     # --- best-single-element arm (Khuller, Moss & Naor 1999) -----------------

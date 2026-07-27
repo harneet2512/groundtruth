@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 
 import hashlib
 import json
@@ -3953,6 +3952,12 @@ def test_zero_marginal_candidate_is_skipped_not_used_to_end_admission(tmp_path):
     facets = extract_behavior_facets(_request(repo, db, issue))
     roles = tuple(r for r in facets.required_roles if r != "actor")
 
+    # The ceiling is PINNED here. This test is about the STOP rule - that a
+    # covered role ends one candidate and not the whole admission - not about
+    # how the ceiling is derived. The scale-aware ceiling reads the REPOSITORY
+    # file count, and this fixture's hand-built graph knows about two files, so
+    # log2 would legitimately give 1 and mask what is under test.
+
     # All three carry the SAME roles: after the first is admitted the other two
     # have zero marginal role contribution and were both deleted by the break.
     units = tuple(
@@ -3966,7 +3971,10 @@ def test_zero_marginal_candidate_is_skipped_not_used_to_end_admission(tmp_path):
             (("first", "alpha"), ("second", "beta"), ("third", "gamma")), start=1
         )
     )
-    request = _request(repo, db, issue)
+    request = replace(
+        _request(repo, db, issue),
+        policy=LocalizationPolicy(scale_aware_ceiling=False, max_admitted_files=8),
+    )
 
     decisions, regions, _coverage, _stopping = vnext_engine._coverage_admit(
         request, facets, units, census_capabilities(request)
@@ -3976,9 +3984,9 @@ def test_zero_marginal_candidate_is_skipped_not_used_to_end_admission(tmp_path):
     # Three candidate files -> the scale-aware ceiling is ceil(log2(3)) = 2, so
     # the top TWO are delivered. The point under test is that admission did not
     # stop at ONE on a covered role; the ceiling, not the coverage rule, bounds it.
-    assert delivered == {"src/first.py", "src/second.py"}, (
-        "admission ended on a covered role rather than at the scale-aware "
-        f"ceiling: delivered {sorted(delivered)}"
+    assert delivered == {"src/first.py", "src/second.py", "src/third.py"}, (
+        "admission ended on a covered role instead of walking the ranked order "
+        f"to the rail: delivered {sorted(delivered)}"
     )
 
 
@@ -4018,18 +4026,211 @@ def test_admission_rail_counts_distinct_files_not_regions(tmp_path):
         )
         for rank, name in enumerate(names, start=1)
     )
-    request = _request(repo, db, issue)
+    # Ceiling PINNED at 8: this test is about the rail's UNIT (files, not
+    # regions), not about how the ceiling is derived from repository size.
+    request = replace(
+        _request(repo, db, issue),
+        policy=LocalizationPolicy(scale_aware_ceiling=False, max_admitted_files=8),
+    )
 
     _decisions, regions, _coverage, _stopping = vnext_engine._coverage_admit(
         request, facets, units, census_capabilities(request)
     )
     delivered = {region.file_path for region in regions}
 
-    # Twelve candidate files -> ceil(log2(12)) = 4. The rail counts FILES, so
-    # four DISTINCT files come back; counting regions returned 1.94 on real data
-    # because 2.64 regions share a file.
-    expected = math.ceil(math.log2(12))
+    # Twelve candidates, rail of 8 -> eight DISTINCT files. Counting REGIONS
+    # instead returned 1.94 files on real data because 2.64 regions share a file.
+    expected = 8
     assert len(delivered) == expected, (
         f"rail delivered {len(delivered)} distinct files, expected {expected} "
         f"= ceil(log2(12)): {sorted(delivered)}"
+    )
+
+
+def test_delivery_ceiling_scales_with_the_REPOSITORY_not_the_candidate_pool(tmp_path):
+    """log2(N) must be taken over the repository, not the retrieved pool.
+
+    The ceiling is an information budget: naming one file among N costs log2(N)
+    bits, where N is the space the agent is searching - the REPOSITORY. I
+    computed it over the candidate pool instead, which is 24-48 files where the
+    repo is 208-2617, so the ceiling came out at ~6 when it should be ~9.
+
+    Measured on run 30244047489 (mixture-30, 25 cases, 17 multi-file):
+
+        legacy                          ALL 0.400  recall 0.517  4.84 files
+        log2(POOL) + confidence gate    ALL 0.400  recall 0.523  5.96 files
+        log2(REPO), no gate             ALL 0.480  recall 0.595  9.24 files
+
+    77% of the gold vnext failed to deliver was present in its OWN ranked list
+    (33 of 43 files), so this is a selection defect, not a retrieval limit:
+    `pypsa-1091` ranked 24 files containing 5 of 6 gold and delivered ONE file
+    containing none.
+    """
+    _repo, db = _graph(tmp_path)
+
+    count = vnext_engine._repository_file_count(str(db))
+
+    assert count is not None and count > 0, "repository file count unavailable"
+    # `_graph` builds a small fixture repo; the point is that the count comes
+    # from the REPO (file_hashes), not from however many candidates retrieval
+    # happened to return.
+    import sqlite3
+
+    with sqlite3.connect(str(db)) as connection:
+        expected = connection.execute(
+            "SELECT COUNT(DISTINCT file_path) FROM nodes"
+        ).fetchone()[0]
+    assert count == expected, (
+        "the ceiling would have been sized from the candidate pool instead of "
+        "the repository"
+    )
+
+
+def test_ranking_prefers_a_file_that_DEFINES_an_issue_anchor_symbol(tmp_path):
+    """The strongest available discriminator must be in the ranking key.
+
+    `region_order` ranked on explicit provenance, issue-certification, RRF
+    agreement, fact span, signal rank and confidence - retrieval AGREEMENT and
+    nothing structural. Scoring every legacy v7.4 component by how well it
+    separates gold from non-gold on run 30226219339 (58 gold rows against 2288
+    non-gold, Cohen's d):
+
+        code_def     +1.868   <- strongest, and vnext did not use it
+        lex          +1.674      vnext has it via RRF
+        path         +1.344   <- absent
+        anchor_prox  +1.049   <- absent
+        sem          +0.924      vnext has it
+        hub_pen      +0.761   <- absent
+        reach        +0.506   <- absent
+
+    Stripping the legacy priors that vnext is seeded with, its OWN ranking is
+    WORSE than legacy at the head: hit@1 0.467 against 0.533, hit@3 0.700
+    against 0.800. Ordering the anchor-defining file first recovers hit@1 to
+    0.500 offline. Partial, but it is the top separator and it costs nothing.
+    """
+    repo, db = _graph(tmp_path)
+    (repo / "src" / "parser.py").write_text(
+        "def parse(value):\n"
+        "    if not value:\n"
+        "        raise ParseError(value)\n"
+        "    return decode(value)\n",
+        encoding="utf-8",
+    )
+    (repo / "src" / "other.py").write_text(
+        "def unrelated(value):\n"
+        "    if not value:\n"
+        "        raise ParseError(value)\n"
+        "    return decode(value)\n",
+        encoding="utf-8",
+    )
+    issue = "Malformed payloads should return None instead of raising an exception."
+    facets = extract_behavior_facets(_request(repo, db, issue))
+    roles = tuple(r for r in facets.required_roles if r != "actor")
+    facets = replace(facets, anchor_symbols=("parse",))
+
+    # `other` FIRST and better-ranked on every existing key; only the anchor
+    # symbol distinguishes them.
+    other = EvidenceUnit.create(
+        file_path="src/other.py", symbol="unrelated", start_line=1, end_line=4,
+        family=EvidenceFamily.LEXICAL, confidence=0.9,
+        provenance=("structured_lexical",), roles=roles,
+        signal_class="lexical", signal_rank=1,
+    )
+    defines = EvidenceUnit.create(
+        file_path="src/parser.py", symbol="parse", start_line=1, end_line=4,
+        family=EvidenceFamily.LEXICAL, confidence=0.6,
+        provenance=("structured_lexical",), roles=roles,
+        signal_class="lexical", signal_rank=2,
+    )
+
+    ordered = vnext_engine._rank_by_anchor_definition(
+        [other, defines], facets
+    )
+
+    assert [unit.file_path for unit in ordered][0] == "src/parser.py", (
+        "the file DEFINING the issue's anchor symbol did not rank first: "
+        f"{[u.file_path for u in ordered]}"
+    )
+
+
+def test_ranking_uses_graded_path_similarity_not_only_an_exact_path_match():
+    """`path` is the second strongest separator and vnext only had the exact form.
+
+    `explicit_provenance` fires when the issue names a path VERBATIM. The legacy
+    scorer's `path` component is graded (Cohen's d +1.344, second only to
+    `code_def`), so an issue saying "the JSON parser" scored
+    `src/parsers/json_parser.py` without naming it. vnext had no graded form at
+    all.
+
+    Measured offline on run 30226219339, vnext's OWN ranking with legacy priors
+    stripped, hit@1: own 0.467 -> +code_def 0.500 -> +path 0.533 -> both 0.550,
+    against legacy's 0.533. Graded path is what takes it past legacy at the head.
+    """
+    similarity = vnext_engine._path_similarity
+
+    issue = "The JSON parser drops trailing commas when decoding payloads."
+
+    strong = similarity("src/parsers/json_parser.py", issue)
+    weak = similarity("src/util/logging_helpers.py", issue)
+
+    assert strong > weak, f"graded path similarity did not separate: {strong} vs {weak}"
+    assert 0.0 <= weak and strong <= 1.0
+    # Splitting identifiers is what makes it graded: `json_parser` must match
+    # "JSON" and "parser" from the issue without the path being named verbatim.
+    assert strong > 0.0
+    # An unrelated path scores nothing, so the key never invents a preference.
+    assert similarity("vendor/third_party/zlib.c", "unrelated wording here") == 0.0
+
+
+def test_graph_structure_terms_rank_a_caller_of_the_anchor_above_a_hub(tmp_path):
+    """The three remaining legacy separators are pure graph structure.
+
+    Measured on run 30226219339 (58 gold rows against 2288 non-gold, Cohen's d),
+    vnext's ranking key contained none of them:
+
+        anchor_prox  +1.049   hops from the anchor symbol's definition
+        hub_pen      +0.761   a file with 200 inbound CALLS is a utility, not a target
+        reach        +0.506   transitive reachability from the anchor
+
+    `graph.db` already carries everything needed - `edges(source_id, target_id,
+    type)` with CALLS/CONTAINS, and `nodes(name, file_path)` - so this is wiring,
+    not new capability. Aider's personalized PageRank over the call graph is
+    `anchor_prox` and `reach` combined, and GT has PageRank built and unused at
+    `pretask/ppr.py`.
+    """
+    repo, db = _graph(tmp_path)
+    import sqlite3
+
+    with sqlite3.connect(str(db)) as connection:
+        connection.executescript(
+            """
+            DELETE FROM nodes; DELETE FROM edges;
+            INSERT INTO nodes (id, label, name, qualified_name, file_path,
+                               start_line, end_line, language)
+            VALUES (1,'function','parse','m.parse','src/parser.py',1,4,'python'),
+                   (2,'function','caller','m.caller','src/caller.py',1,4,'python'),
+                   (3,'function','log','m.log','src/hub.py',1,4,'python'),
+                   (4,'function','far','m.far','src/far.py',1,4,'python');
+            """
+        )
+        # caller -> parse (1 hop from the anchor). Everything calls the hub.
+        connection.execute(
+            "INSERT INTO edges (source_id,target_id,type) VALUES (2,1,'CALLS')"
+        )
+        for source in (1, 2, 4):
+            connection.execute(
+                "INSERT INTO edges (source_id,target_id,type) VALUES (?,3,'CALLS')",
+                (source,),
+            )
+
+    scores = vnext_engine._graph_structure_scores(str(db), ("parse",))
+
+    assert scores, "no structural scores produced from a populated graph"
+    assert scores["src/caller.py"]["anchor_hops"] == 1, (
+        f"a direct caller of the anchor was not 1 hop: {scores.get('src/caller.py')}"
+    )
+    assert scores["src/far.py"]["anchor_hops"] > 1 or scores["src/far.py"]["anchor_hops"] is None
+    # The hub is called by three files; the anchor's caller by none.
+    assert scores["src/hub.py"]["in_degree"] > scores["src/caller.py"]["in_degree"], (
+        "the hub penalty cannot fire: hub in-degree is not higher"
     )
