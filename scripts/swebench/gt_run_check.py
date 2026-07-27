@@ -457,14 +457,27 @@ def analyze_ledger(path: Path) -> dict:
                     if "compilation" in str(r.get("layer") or "").lower()]
     compile_reasons = Counter(
         _one_line(str(r.get("reason") or "(none)"), 48) for r in compilations)
+    def _held(row: dict) -> int:
+        # `held_evidence` is a TOP-LEVEL row key. Reading it only out of ``extra`` (which is
+        # None on these rows) silently defaulted every row to 0 and reported "upstream
+        # producer gap" for ALL of them -- including the ones that actually held evidence and
+        # were the anchor-starvation defect. A zero with no positive control is unreadable;
+        # this reader now takes the top-level key and falls back to ``extra`` only if a future
+        # writer moves it.
+        v = row.get("held_evidence")
+        if v is None:
+            v = (row.get("extra") or {}).get("held_evidence")
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
     incomplete_with_evidence = sum(
         1 for r in compilations
-        if "DECISION_INCOMPLETE" in str(r.get("reason") or "")
-        and int((r.get("extra") or {}).get("held_evidence", 0) or 0) > 0)
+        if "DECISION_INCOMPLETE" in str(r.get("reason") or "") and _held(r) > 0)
     incomplete_no_evidence = sum(
         1 for r in compilations
-        if "DECISION_INCOMPLETE" in str(r.get("reason") or "")
-        and int((r.get("extra") or {}).get("held_evidence", 0) or 0) == 0)
+        if "DECISION_INCOMPLETE" in str(r.get("reason") or "") and _held(r) == 0)
     # dose<=1 is per OBSERVATION, so count observations that saw more than one COMPILED plan.
     compiled_per_obs = Counter(
         str((r.get("observation_binding") or {}).get("candidate_id")
