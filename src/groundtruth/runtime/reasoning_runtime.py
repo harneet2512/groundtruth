@@ -955,35 +955,66 @@ def reduce_reasoning_signal(
     if index is not None and nodes[index].subject != signal.subject:
         raise StateIntegrityError("hypothesis subject cannot be rebound")
     allowed, target, reason = _HYPOTHESIS_TRANSITIONS[signal.kind]
-    if current not in allowed:
+    # AN ORPHANED OUTCOME IS NOT CORRUPTION.
+    #
+    # The table splits into OPENING transitions, which admit None (EXACT_SEARCH,
+    # FOCUSED_SYMBOL_VIEW, EDIT_PROPOSED), and OUTCOME transitions, which require a
+    # hypothesis to already exist (VALIDATION_SUPPORT, UNCHANGED_FAILURE_AFTER_EDIT,
+    # VERIFIED_COUNTEREVIDENCE, ABANDON_TARGET, SUPERSEDING_HYPOTHESIS). But GT is never
+    # TOLD the agent's hypotheses -- it infers them from observations. When the opening
+    # observation is missed or classified as something else, the outcome arrives orphaned
+    # with `current is None`.
+    #
+    # Measured on run 30276041709, where the fault detail named it in one line:
+    #   observe_failed:StateIntegrityError:illegal hypothesis transition None via
+    #   VALIDATION_SUPPORT
+    # 52 compile attempts, all at iteration 0, then that fault, then dark_fallback forever.
+    # The agent had gone find -> grep -> run a repro script: a validation outcome before GT
+    # had opened anything for that subject. `append_event` persists before reducing, so the
+    # raise classifies REDUCER_INVARIANT_VIOLATION (a CORE corruption code), replay
+    # re-reduces the same event, and the observer is isolated for the whole attempt -- GT
+    # loses its entire timing authority because the agent validated something GT had not yet
+    # formed an opinion about.
+    #
+    # Skip the transition instead. Nothing transitions and NO node is invented, so the
+    # invariant this check protects -- the machine never enters an illegal state -- holds
+    # exactly as before. A mismatch from a REAL state still raises below: that means the
+    # graph itself is inconsistent, which IS corruption.
+    orphaned_outcome = current is None and None not in allowed
+    if not orphaned_outcome and current not in allowed:
         raise StateIntegrityError(
             f"illegal hypothesis transition {current} via {signal.kind.value}"
         )
-    transition = HypothesisTransition(
-        from_state=current,
-        to_state=target,
-        event_id=signal.event_id,
-        reason_code=reason,
-    )
-    if index is None:
-        nodes.append(
-            ReasoningNode(
-                node_id=signal.hypothesis_id,
-                kind=ReasoningNodeKind.OPERATIONAL_HYPOTHESIS,
-                subject=signal.subject,
-                hypothesis_state=target,
-                transitions=(transition,),
+    if not orphaned_outcome:
+        transition = HypothesisTransition(
+            from_state=current,
+            to_state=target,
+            event_id=signal.event_id,
+            reason_code=reason,
+        )
+        if index is None:
+            nodes.append(
+                ReasoningNode(
+                    node_id=signal.hypothesis_id,
+                    kind=ReasoningNodeKind.OPERATIONAL_HYPOTHESIS,
+                    subject=signal.subject,
+                    hypothesis_state=target,
+                    transitions=(transition,),
+                )
             )
-        )
-    else:
-        existing = nodes[index]
-        nodes[index] = replace(
-            existing,
-            hypothesis_state=target,
-            transitions=existing.transitions + (transition,),
-        )
+        else:
+            existing = nodes[index]
+            nodes[index] = replace(
+                existing,
+                hypothesis_state=target,
+                transitions=existing.transitions + (transition,),
+            )
 
-    if signal.kind is OperationalSignalKind.VERIFIED_COUNTEREVIDENCE:
+    if orphaned_outcome:
+        # No hypothesis to relate an edge TO. Recording a CONTRADICTS/SUPERSEDES edge into a
+        # node that was never opened would fabricate the very structure the skip avoids.
+        pass
+    elif signal.kind is OperationalSignalKind.VERIFIED_COUNTEREVIDENCE:
         if not signal.related_node_id:
             raise StateIntegrityError("counterevidence signal lacks related node")
         if all(node.node_id != signal.related_node_id for node in nodes):
