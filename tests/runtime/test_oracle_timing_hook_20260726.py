@@ -38,14 +38,37 @@ import pytest
 from artifact_deepswe import gt_mini_patch as seam
 
 
-def test_agent_classes_are_declared():
-    """The oracle needs an AGENT hook; the env hook alone cannot reach the model."""
-    assert seam._AGENT_CLASSES, "no agent classes declared -- the oracle can never attach"
-    mods = {m for m, _ in seam._AGENT_CLASSES}
-    assert "minisweagent.agents.default" in mods, (
-        "DefaultAgent is the class pier constructs; without it the benchmark path has no "
-        "timing authority"
-    )
+def test_agent_targets_are_found_by_capability_not_only_by_name():
+    """Naming the class is the wrong mechanism and it failed twice.
+
+    The benchmark harness constructs pier.agents.installed.mini_swe_agent.MiniSweAgent;
+    minisweagent.agents.default.DefaultAgent is not even in its MRO. A hardcoded list
+    therefore patched a class the harness never instantiates -- and the earlier version of
+    THIS test asserted on that same hardcoded name, so it passed while proving nothing.
+
+    What actually identifies an agent we can hook is a testable property: it owns the step
+    loop (defines `run`) AND owns a model (`model` in __init__), because the provider
+    boundary rebinds model._query / model.query / agent.add_messages on INSTANCES.
+    """
+    assert seam._AGENT_CLASSES, "no named fallbacks"
+    discovered = seam._discover_agent_classes()
+    assert isinstance(discovered, list)
+    for mod, cls in discovered:
+        obj = getattr(__import__(mod, fromlist=[cls]), cls)
+        assert "run" in obj.__dict__, f"{mod}.{cls} discovered without owning run()"
+        import inspect as _i
+        assert "model" in _i.signature(obj.__init__).parameters
+
+
+def test_discovery_rejects_a_launcher_that_owns_no_model():
+    """pier's MiniSweAgent is a LAUNCHER: it installs mini-swe into the container and the
+    real agent+model live in a separate in-container process. It takes no `model`, so it
+    must NOT be selected -- wrapping it could never give the provider boundary an instance."""
+    pier = pytest.importorskip("pier.agents.installed.mini_swe_agent")
+    import inspect as _i
+
+    assert "model" not in _i.signature(pier.MiniSweAgent.__init__).parameters
+    assert ("pier.agents.installed.mini_swe_agent", "MiniSweAgent") not in         seam._discover_agent_classes()
 
 
 def test_install_wraps_agent_run_not_only_env_execute():
@@ -97,17 +120,23 @@ def test_patched_agent_classes_is_tracked_separately_from_env_classes():
     assert seam._PATCHED_AGENT_CLASSES is not seam._PATCHED_CLASSES
 
 
-def test_the_oracle_hook_actually_attaches_to_the_real_agent_class():
-    """Behavioural proof, not source inspection -- the env hook was 'attached' for months
-    while the oracle was absent, so attachment must be observed on the real class."""
-    default = pytest.importorskip("minisweagent.agents.default")
-    assert getattr(default.DefaultAgent, "_gt_oracle_patched", False), (
-        "gt_mini_patch imported but DefaultAgent.run carries no oracle hook"
-    )
-    assert default.DefaultAgent.run.__qualname__.startswith("_wrap_agent_run"), (
-        f"DefaultAgent.run is {default.DefaultAgent.run.__qualname__}, not the oracle wrapper"
-    )
-    assert "minisweagent.agents.default.DefaultAgent" in seam._PATCHED_AGENT_CLASSES
+def test_every_discovered_agent_class_actually_carries_the_hook():
+    """Behavioural, and NOT anchored to a name I picked.
+
+    Asserts the hook is on EVERY class discovery selected, whatever those are in this
+    install. A local pass here still does not prove the in-container class was patched --
+    that is what `patched_agent_classes` in gt_profile_receipt.json exists to record, and
+    it is the only evidence that settles it for a real run.
+    """
+    if not seam._PATCHED_AGENT_CLASSES:
+        pytest.skip("no agent class importable in this environment")
+    for dotted in seam._PATCHED_AGENT_CLASSES:
+        mod, _, cls = dotted.rpartition(".")
+        obj = getattr(__import__(mod, fromlist=[cls]), cls)
+        assert getattr(obj, "_gt_oracle_patched", False), f"{dotted} lost the hook"
+        assert obj.run.__qualname__.startswith("_wrap_agent_run"), (
+            f"{dotted}.run is {obj.run.__qualname__}, not the oracle wrapper"
+        )
 
 
 def test_profile_receipt_records_oracle_activation():
@@ -132,3 +161,85 @@ def test_receipt_reports_attachment_as_a_bool_not_a_truthy_object():
     """A receipt must serialise; an attachment object would break json.dump or leak state."""
     src = inspect.getsource(seam._write_profile_receipt)
     assert "bool(_CANONICAL_RUNTIME_ATTACHMENT is not None)" in src
+
+
+def test_the_import_time_receipt_value_is_dead_by_construction():
+    """WHY the rewrite below has to exist, stated as a fact about call ordering.
+
+    `_write_profile_receipt()` is the last statement of `_install()`, which runs at module
+    IMPORT. `_CANONICAL_RUNTIME_ATTACHMENT` is only ever assigned inside `agent.run`. So the
+    receipt written at import can only ever record `canonical_runtime_attached: false` --
+    on a healthy run too. Reading that field from an artifact without the rewrite would be a
+    measurement error, not a finding.
+    """
+    install_src = inspect.getsource(seam._install)
+    assert "_write_profile_receipt()" in install_src
+    assert "_CANONICAL_RUNTIME_ATTACHMENT" not in install_src, (
+        "if _install now sets the attachment, this test's premise is stale -- recheck "
+        "whether the import-time receipt is still dead"
+    )
+    assert "_CANONICAL_RUNTIME_ATTACHMENT" in inspect.getsource(seam._wrap_agent_run)
+
+
+def test_receipt_is_rewritten_after_the_install_attempt(monkeypatch):
+    """Behavioural: running the wrapped agent must refresh the receipt.
+
+    Driven through the real wrapper with a stub install, so it fails if the rewrite is
+    deleted, moved before the install, or made conditional on success.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(seam, "_GT_BASELINE", False, raising=False)
+    monkeypatch.setattr(seam, "_CANONICAL_RUNTIME_ATTACHMENT", None, raising=False)
+    monkeypatch.setattr(seam, "_write_profile_receipt", lambda *a, **k: calls.append("receipt"))
+    monkeypatch.setattr(seam, "_runtime_ledger_record", lambda **k: calls.append("ledger"))
+    monkeypatch.setattr(
+        seam, "install_canonical_runtime", lambda **k: calls.append("install") or None
+    )
+
+    class _Agent:
+        model = object()
+
+        def run(self, task="", **kw):
+            calls.append("orig")
+            return {"exit_status": "Submitted"}
+
+    _Agent.run = seam._wrap_agent_run(_Agent.run)
+    _Agent().run(task="t")
+
+    assert calls.index("install") < calls.index("receipt"), (
+        "the receipt is refreshed before the install attempt -- it would record the same "
+        "dead import-time value"
+    )
+    assert calls.index("receipt") < calls.index("orig"), (
+        "the receipt must be refreshed before the step loop; a crashed run would otherwise "
+        "leave only the dead import-time value on disk"
+    )
+
+
+def test_receipt_refresh_is_written_even_when_the_install_fails(monkeypatch):
+    """The failure case is the one worth recording. A receipt refreshed only on success
+    makes `canonical_runtime_attached: false` ambiguous between 'never ran' and 'failed'."""
+    calls: list[str] = []
+    monkeypatch.setattr(seam, "_GT_BASELINE", False, raising=False)
+    monkeypatch.setattr(seam, "_CANONICAL_RUNTIME_ATTACHMENT", None, raising=False)
+    monkeypatch.setattr(seam, "_write_profile_receipt", lambda *a, **k: calls.append("receipt"))
+    monkeypatch.setattr(seam, "_runtime_ledger_record", lambda **k: calls.append("ledger"))
+
+    def _boom(**k):
+        raise RuntimeError("attach exploded")
+
+    monkeypatch.setattr(seam, "install_canonical_runtime", _boom)
+
+    class _Agent:
+        model = object()
+
+        def run(self, task="", **kw):
+            calls.append("orig")
+            return {}
+
+    _Agent.run = seam._wrap_agent_run(_Agent.run)
+    _Agent().run(task="t")
+
+    assert "receipt" in calls, "no receipt refresh on the install-failure path"
+    assert "ledger" in calls, "no install-outcome ledger row on the failure path"
+    assert "orig" in calls, "a failed install must not stop the agent (correct-or-quiet)"

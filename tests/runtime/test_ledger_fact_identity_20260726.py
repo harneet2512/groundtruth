@@ -65,8 +65,8 @@ def test_the_stamp_is_wired_into_the_durable_row():
 
     src = inspect.getsource(seam._runtime_ledger_record)
     assert "_fact_identity_for_layer(kind)" in src
-    assert 'setdefault("fact_class"' in src
-    assert 'setdefault("contracted_boundary"' in src
+    assert 'setdefault("gt_audit_fact_class"' in src
+    assert 'setdefault("gt_audit_contracted_boundary"' in src
 
 
 def test_stamp_never_clobbers_a_caller_supplied_fact_class():
@@ -75,6 +75,12 @@ def test_stamp_never_clobbers_a_caller_supplied_fact_class():
 
     src = inspect.getsource(seam._runtime_ledger_record)
     assert '_row["fact_class"] =' not in src
+    assert 'setdefault("fact_class"' not in src, (
+        "the seam derives an audit identity from the LAYER NAME; writing it to the graded "
+        "`fact_class` key would let attestation_join._row_has_registered_lineage seat a "
+        "truth join on a row that carries no REGISTERED fact identity, inflating the "
+        "promotion-authority numbers to make an audit table easier to build"
+    )
 
 
 def test_all_ten_fact_classes_are_reachable_from_some_layer():

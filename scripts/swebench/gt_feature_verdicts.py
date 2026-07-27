@@ -419,7 +419,14 @@ def evaluate(root: Path) -> dict[str, Any]:
             target.delivered_chars += chars
             target.tasks_fired.add(task_id)
             target.seen_event_types[event_type] += 1
-            contracted = row.get("contracted_boundary")
+            # The GRADED key wins when a row carries a genuinely registered identity;
+            # `gt_audit_*` is the diagnostic namespace the seam derives from the layer
+            # name. They are kept separate on purpose: `fact_class` seats the
+            # attestation truth join that feeds the promotion authority, so deriving it
+            # would inflate a proof number to make this table easier to build.
+            contracted = row.get("contracted_boundary") or row.get(
+                "gt_audit_contracted_boundary"
+            )
             if isinstance(contracted, str) and contracted:
                 boundary_stamped += 1
                 seen = observed_event(row, events)

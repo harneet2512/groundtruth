@@ -608,9 +608,29 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
             "repository content revision did not advance for a mutation outcome"
         )
     if not repository_changed and repository_content_advanced:
-        raise StateIntegrityError(
-            "repository content revision changed without a mutation outcome"
-        )
+        # NOT the mirror image of the check above, and NOT corruption.
+        #
+        # `repository_content` is the live `_canonical_repository_digest`: git HEAD +
+        # `status --porcelain` + `diff --binary` + the CONTENTS of untracked files. It
+        # therefore advances for many benign reasons that have nothing to do with GT's
+        # bookkeeping -- the agent running the test suite and pytest writing a cache,
+        # `pip install -e .` writing egg-info, codegen or a lockfile updater -- and for one
+        # genuine GT blind spot: a source mutation made through a shape GT does not
+        # classify as an edit (`sed -i`, `git apply`, a heredoc redirect).
+        #
+        # Only that last case is interesting, and none of them is GT contradicting itself.
+        # Raising was the most destructive available response: `append_event` persists
+        # before reducing, so the raise surfaces as a REDUCER_INVARIANT_VIOLATION -- a core
+        # corruption code -- replay re-reduces the same event, and the attempt is
+        # quarantined with `gt_emission_enabled=False`. Because `_augment_output` falls back
+        # to the legacy path only when the attachment is None, a quarantined runtime is not
+        # a degradation but TOTAL delivery loss for the rest of the task.
+        #
+        # Record the fact and adopt the advanced revision instead. Nothing is swallowed:
+        # the rule is durable replayable state an audit can count, and `revision` below
+        # takes `revision_after`, so freshness invalidation retires evidence keyed to the
+        # stale revision exactly as it would for a classified mutation.
+        rules.append("unclassified_repository_advance")
     revision = event.revision_after
     decision_boundary_kinds = {
         SemanticKind.EDIT_PROPOSED,

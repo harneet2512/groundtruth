@@ -9522,14 +9522,24 @@ def _runtime_ledger_record(
         for _ek, _ev in extra.items():
             _row.setdefault(_ek, _ev)
     # Stamp WHICH feature spoke and WHEN it was contracted to speak, so the on-time question
-    # is answerable from the row alone. `setdefault` — a caller that already knows its
-    # fact_class (the SS-8 side-car) always wins. Additive: rows for non-DIRECT layers are
-    # byte-identical to before.
+    # is answerable from the row alone.
+    #
+    # DELIBERATELY NOT ``fact_class``. That key is GRADED, not diagnostic:
+    # ``attestation_join._row_has_registered_lineage`` seats a truth join on
+    # ``lineage_schema == LINEAGE_SCHEMA and fact_class`` non-empty, and that join feeds the
+    # promotion authority. Deriving a fact_class from the layer name would let a row that
+    # carries the lineage schema but no REGISTERED fact identity flip from a named lineage
+    # REJECTION into a joinable row — inflating a proof number to make a measurement
+    # convenient. `test_runtime_ledger_record_extra_is_byte_identical_when_absent` states the
+    # same contract from the other side: no side-car key may leak onto a normal row.
+    #
+    # So the audit identity gets its OWN namespace. It answers "which of the 17 spoke, and at
+    # which contracted boundary" for the per-feature verdict table, and no grader reads it.
     _fact, _contracted = _fact_identity_for_layer(kind)
     if _fact:
-        _row.setdefault("fact_class", _fact)
+        _row.setdefault("gt_audit_fact_class", _fact)
         if _contracted:
-            _row.setdefault("contracted_boundary", _contracted)
+            _row.setdefault("gt_audit_contracted_boundary", _contracted)
     binding = _current_observation_binding_dict()
     if binding is not None:
         _row["observation_binding"] = binding
@@ -22537,10 +22547,62 @@ class CanonicalRuntimeAttachment:
         )
 
 
+def _canonical_observer_is_dark(attachment) -> bool:
+    """True when the canonical observer can no longer emit for ANY observation.
+
+    Two ways it goes dark, and they must be distinguished from a merely degraded runtime:
+      * `gt_emission_enabled` False -- the attempt was quarantined;
+      * `canonical_observer` in `isolated_components` -- that one component was isolated.
+
+    Either way `observe_action_result` returns silently with no ledger row, permanently.
+    Isolation of ANY OTHER component is NOT darkness: the observer still emits, so treating
+    it as dark would put a legacy dose on the same observation as a canonical one.
+    """
+    state = getattr(getattr(attachment, "attempt_runtime", None), "failure_state", None)
+    if state is None:
+        return False
+    return not bool(
+        getattr(state, "gt_emission_enabled", False)
+    ) or "canonical_observer" in tuple(getattr(state, "isolated_components", ()) or ())
+
+
 def _augment_output(action, out) -> None:
     """Observe one native result without directly mutating model-visible bytes."""
     attachment = _CANONICAL_RUNTIME_ATTACHMENT
     if attachment is None:
+        _augment_output_legacy(action, out)
+        return
+    # A DEAD TIMING AUTHORITY COSTS GT ITS TIMING, NOT ITS EVIDENCE.
+    #
+    # Routing on identity alone meant that once the runtime existed it owned every remaining
+    # observation -- including after it went dark, when `observe_action_result` returns
+    # silently and writes nothing. A single unexpected exception therefore took a task's GT
+    # delivery to ZERO, invisibly, for the rest of the attempt: strictly worse than the
+    # legacy route it displaced, which shipped 81 payloads on run 30229092179.
+    #
+    # This does not weaken the one-route-per-attempt bar. That invariant forbids two routes
+    # being LIVE together, because two doses on one observation breaks dose<=1. A dark
+    # observer is not live -- it emits nothing for any observation -- so exactly one route
+    # can produce bytes here, and which one is decided before either runs. That is why the
+    # probe keys on `canonical_observer` specifically: a runtime that is merely degraded
+    # elsewhere is still emitting, and falling back for it WOULD double-dose.
+    #
+    # Recorded, never silent: a timing claim must be able to subtract the observations that
+    # shipped through the untimed route instead of counting them as canonical deliveries.
+    try:
+        dark = _canonical_observer_is_dark(attachment)
+    except Exception:  # noqa: BLE001 -- a health probe must never break execute
+        dark = False
+    if dark:
+        try:
+            _runtime_ledger_record(
+                kind="canonical_runtime.dark_fallback",
+                outcome="suppressed_internal_only",
+                reason="canonical_observer_dark:legacy_delivery_resumed",
+                chars=0,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         _augment_output_legacy(action, out)
         return
     observer = getattr(attachment, "observe_action_result", None)
@@ -22660,6 +22722,50 @@ _AGENT_CLASSES = [
 ]
 
 
+def _discover_agent_classes():
+    """Find agent classes by CAPABILITY, not by name.
+
+    Naming a class is the wrong mechanism and it has failed twice. The benchmark harness
+    constructs ``pier.agents.installed.mini_swe_agent.MiniSweAgent`` --
+    ``minisweagent.agents.default.DefaultAgent`` is not even in its MRO -- so a hardcoded
+    list patched a class the harness never instantiates, the oracle stayed absent, and the
+    test asserting on that same hardcoded name passed while proving nothing.
+
+    The provider boundary needs a concrete MODEL and AGENT instance: it rebinds
+    ``model._prepare_messages_for_api`` / ``model._query`` / ``model.query`` and
+    ``agent.add_messages``. So the class we must wrap is whichever one owns the step loop AND
+    carries ``self.model``. That is a property we can TEST, unlike a module path.
+
+    Scans already-imported modules for classes that (a) define ``run`` themselves, and
+    (b) take a ``model`` parameter in ``__init__`` -- the signature of an agent that owns a
+    model. Returns (module, qualname) pairs, deduplicated, in deterministic order.
+    """
+    import inspect as _inspect
+
+    found = []
+    seen = set()
+    for mod_name, module in list(sys.modules.items()):
+        if not mod_name or module is None:
+            continue
+        if not (mod_name.startswith("minisweagent") or mod_name.startswith("pier.agents")):
+            continue
+        for cls_name, obj in list(vars(module).items()):
+            if not _inspect.isclass(obj) or "run" not in obj.__dict__:
+                continue
+            key = (obj.__module__, obj.__qualname__)
+            if key in seen:
+                continue
+            try:
+                params = _inspect.signature(obj.__init__).parameters
+            except (TypeError, ValueError):
+                continue
+            if "model" not in params:
+                continue
+            seen.add(key)
+            found.append((mod_name, cls_name))
+    return sorted(found)
+
+
 def _wrap_agent_run(orig):
     """Install the canonical runtime once, immediately before the agent's step loop.
 
@@ -22705,6 +22811,17 @@ def _wrap_agent_run(orig):
                     chars=0,
                     extra={"canonical_runtime_attached": attached},
                 )
+            except Exception:  # noqa: BLE001
+                pass
+            # RE-WRITE THE RECEIPT. `_write_profile_receipt` runs at the end of `_install()`,
+            # i.e. at module IMPORT — but the attachment is only created HERE, inside
+            # `agent.run`. So the receipt's `canonical_runtime_attached` was
+            # dead-by-construction: `false` on every task, including a perfectly healthy one.
+            # Reading that field as evidence of anything would have been a measurement error
+            # of exactly the kind this seam keeps producing. Rewriting it now makes the
+            # receipt state the truth at the only moment the truth exists.
+            try:
+                _write_profile_receipt()
             except Exception:  # noqa: BLE001
                 pass
         return orig(self, task, *args, **kwargs)
@@ -23317,6 +23434,23 @@ def _install() -> None:
             _PATCHED_CLASSES.append(f"{modname}.{clsname}")
         except Exception:  # noqa: BLE001
             pass
+    # ── PROOF SENTINEL, WRITTEN HERE AND NOT ONLY AT MODULE END ────────────────────
+    # `_write_proof_marker` attests ATTACHMENT: it writes nothing unless `_PATCHED_CLASSES`
+    # is non-empty. That predicate is fully determined the instant the env loop above ends,
+    # so writing it here attests exactly the same fact at exactly the same strength.
+    #
+    # It MUST happen before the oracle loop below. gt_agent.py appends a fail-closed
+    # assertion to the bottom of mini-swe-agent's own `agents/default.py` -- raise
+    # GT_PROOF_MARKER_ABSENT if this marker does not exist -- so that a swallowed `.pth`
+    # load crashes the agent instead of running GT-off and being graded GT-on. When the
+    # oracle loop imports that module to wrap `run`, it detonates that assertion, the
+    # loop's own `except Exception: continue` (written for "class not in this install")
+    # eats it, Python evicts the half-initialised module, and the harness's later import
+    # returns an UNPATCHED class. Result: zero canonical rows while bytes still ship and
+    # every metric reads green -- observed on run 30229092179 (81 delivered, 0 canonical).
+    # The module-end call remains, so a raise in any future top-level code after
+    # `_install()` still leaves the sentinel absent.
+    _write_proof_marker()
     # ── THE ORACLE HOOK — GT's TIMING AUTHORITY ────────────────────────────────────
     # READ THIS BEFORE TOUCHING THE LOOP ABOVE.
     #
@@ -23341,7 +23475,18 @@ def _install() -> None:
     # If this loop is ever removed or silently fails, GT still DELIVERS and still looks
     # healthy in the ledger -- it just has no timing guarantee. That is the failure mode to
     # guard: check `canonical_runtime.*` ledger rows exist, not merely that bytes shipped.
-    for modname, clsname in _AGENT_CLASSES:
+    # Named candidates FIRST (cheap, deterministic), then capability-discovered ones so a
+    # harness whose agent class we cannot name still gets the oracle. Discovery runs over
+    # already-imported modules only; a class imported later is picked up because `_install`
+    # is re-entrant per process and the `_gt_oracle_patched` marker makes it idempotent.
+    _agent_targets = list(_AGENT_CLASSES)
+    try:
+        for _cand in _discover_agent_classes():
+            if _cand not in _agent_targets:
+                _agent_targets.append(_cand)
+    except Exception:  # noqa: BLE001 -- discovery must never break the seam
+        pass
+    for modname, clsname in _agent_targets:
         try:
             cls = getattr(importlib.import_module(modname), clsname)
         except Exception:  # noqa: BLE001 -- agent class not in this install
