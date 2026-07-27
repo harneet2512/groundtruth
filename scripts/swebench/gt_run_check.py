@@ -208,6 +208,25 @@ def byte_join(sealed_rows: list, messages: list[str]) -> tuple[int, int, bool]:
     return found, len(sealed_rows), control_ok
 
 
+def _trajectory_messages(task_dir) -> list[str]:
+    """Message contents from the agent trajectory sitting beside a task's ledger."""
+    out: list[str] = []
+    try:
+        for path in Path(task_dir).glob("*trajectory*.json"):
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:  # noqa: BLE001 -- a checker reports, never crashes
+                continue
+            for msg in doc.get("messages") or []:
+                if isinstance(msg, dict):
+                    out.append(str(msg.get("content") or ""))
+            if out:
+                break
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
 def _safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)
 
@@ -863,9 +882,28 @@ def main(argv: list[str]) -> int:
                       f"false={s['landed_false']} of {s['landed_rows']} stamped rows "
                       f":: {verdict}")
             elif s["real_delivered"]:
-                print("    byte-join: NOT-EVALUABLE -- no delivered row carries "
-                      "`append_landed` (pre-2026-07-27 seam); chars_delivered alone does "
-                      "NOT prove the bytes reached the model")
+                print("    byte-join(append): NOT-EVALUABLE -- no delivered row carries "
+                      "`append_landed` (pre-2026-07-27 seam)")
+            # THE AUTHORITATIVE JOIN: the seam's own seal vs the model's messages. This works
+            # on ANY seam version and on native form, where a marker search is invalid because
+            # the leak guard forbids native deltas from carrying gt tags. `append_landed` only
+            # proves the append hit its own dict; this proves the bytes reached the model.
+            if s.get("sealed_rows"):
+                msgs = _trajectory_messages(Path(s["path"]).parent)
+                if not msgs:
+                    print(f"    byte-join(seal): NOT-EVALUABLE -- {s['sealed_rows']} sealed "
+                          "rows but no trajectory beside this ledger")
+                else:
+                    found, total, ctrl = byte_join(s["sealed"], msgs)
+                    if not ctrl:
+                        print("    byte-join(seal): NOT-EVALUABLE -- positive control FAILED "
+                              "(the joiner could not find a known substring), so a zero here "
+                              "would be unreadable")
+                    else:
+                        tag = ("ALL REACHED THE MODEL" if found == total
+                               else f"{total - found} NOT FOUND << FINDING")
+                        print(f"    byte-join(seal): {found}/{total} delivered payloads "
+                              f"present in the model's messages :: {tag}")
             if s["has_fact_field"]:
                 print(f"    fact_class(delivered): {_fmt_counter(s['fact'])}")
             else:
