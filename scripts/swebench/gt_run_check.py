@@ -495,9 +495,22 @@ def analyze_ledger(path: Path) -> dict:
         and ("leak" in str(r.get("reason") or "").lower()
              or r.get("outcome") == "suppressed_hidden_only"))
 
+    # BYTE-JOIN, per row. `chars_delivered` is what a row INTENDED to append; it is not
+    # evidence the bytes reached the model. Run 30246661710 recorded 6 deliveries totalling
+    # 686 chars while the trajectory held ZERO GT markers across 93k chars, and no field in
+    # the row could contradict it. `append_landed` (written at the delivery site, asserting
+    # the shipped text is actually present in out["output"] after the append) is that
+    # contradiction. Report presence FIRST: a landed-count of 0 is unreadable unless the key
+    # exists on some row, so absence is stated as NOT-EVALUABLE rather than as a failure.
+    _landed_present = [r for r in real if "append_landed" in r]
+    landed_true = sum(1 for r in _landed_present if r.get("append_landed") is True)
+    landed_false = sum(1 for r in _landed_present if r.get("append_landed") is False)
+
     return {
         "path": str(path), "rows": len(rows), "bad_lines": bad,
         "outcomes": outcomes, "real_delivered": len(real),
+        "landed_rows": len(_landed_present),
+        "landed_true": landed_true, "landed_false": landed_false,
         "empty_delivered": empty_delivered, "layers": layers,
         "fact": fact, "boundary": boundary,
         "has_fact_field": has_fact, "has_boundary_field": has_boundary,
@@ -784,6 +797,17 @@ def main(argv: list[str]) -> int:
                      if s["empty_delivered"] else ""))
             print(f"    outcomes: {_fmt_counter(s['outcomes'])}")
             print(f"    layers(delivered): {_fmt_counter(s['layers'])}")
+            # THE BYTE-JOIN LINE. Never infer delivery from chars_delivered alone.
+            if s.get("landed_rows"):
+                verdict = ("ALL LANDED" if s["landed_false"] == 0
+                           else f"{s['landed_false']} DID NOT LAND << FINDING")
+                print(f"    byte-join: append_landed true={s['landed_true']} "
+                      f"false={s['landed_false']} of {s['landed_rows']} stamped rows "
+                      f":: {verdict}")
+            elif s["real_delivered"]:
+                print("    byte-join: NOT-EVALUABLE -- no delivered row carries "
+                      "`append_landed` (pre-2026-07-27 seam); chars_delivered alone does "
+                      "NOT prove the bytes reached the model")
             if s["has_fact_field"]:
                 print(f"    fact_class(delivered): {_fmt_counter(s['fact'])}")
             else:
