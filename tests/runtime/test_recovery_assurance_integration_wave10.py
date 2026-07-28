@@ -116,6 +116,13 @@ def _evidence() -> rr.EvidenceRecord:
         anchoring_risk=0,
         revision_dependencies=contract.revision_dependencies,
         authority=rr.Authority.STRUCTURED,
+        # REQUIRED for release: the temporal gate authorizes a record only on substrates THAT
+        # RECORD observed, so a fixture declaring none is held at PREREQUISITES_PENDING, the
+        # coalition never forms, and `plan.delivery_attempt_id` is EMPTY. Taken from the
+        # contract's preferred substrates, matching what every production producer declares.
+        observed_substrates=tuple(
+            sorted(contract.fallback_policy.preferred_substrates)
+        ),
     )
 
 

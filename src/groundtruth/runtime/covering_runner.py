@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from groundtruth.pretask.curation_map import DETERMINISTIC_RESOLUTION_METHODS
+from groundtruth.runtime.reasoning_runtime import split_repository_symbol_identity
 from groundtruth.runtime.test_runner import execute_test_command
 
 # The injectable execution boundary (shared contract with test_runner, built to —
@@ -142,6 +143,45 @@ def runner_eligible_files(
     return [f for f in (files or []) if _covering_file_on_disk(repo_root, f)]
 
 
+def project_bare_symbol_names(symbol_identities) -> tuple[str, ...]:
+    """Explicitly project qualified identities for name-only compatibility consumers.
+
+    Projection is deterministic and deduplicated, but it is not graph authorization: callers
+    that select definitions must retain the qualified path constraint. Legacy bare strings are
+    preserved so historical WorkState JSON remains readable.
+    """
+    names: set[str] = set()
+    for identity in symbol_identities or ():
+        if not isinstance(identity, str) or not identity:
+            continue
+        qualified = split_repository_symbol_identity(identity)
+        name = qualified[1] if qualified is not None else identity.strip()
+        if name:
+            names.add(name)
+    return tuple(sorted(names))
+
+
+def _normalized_definition_path(file_path: object, repo_root: str | None) -> str:
+    """Normalize graph and identity paths to one comparison form."""
+    if not isinstance(file_path, str) or not file_path.strip():
+        return ""
+    value = file_path.strip()
+    if repo_root and os.path.isabs(value):
+        try:
+            root = os.path.abspath(repo_root)
+            absolute = os.path.abspath(value)
+            if os.path.commonpath((root, absolute)) == root:
+                value = os.path.relpath(absolute, root)
+        except (OSError, ValueError):
+            return ""
+    normalized = posixpath.normpath(value.replace("\\", "/"))
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized in ("", ".", "..") or normalized.startswith("../"):
+        return ""
+    return normalized
+
+
 def select_covering_tests(
     db_path: str,
     symbol_names: set[str] | list[str],
@@ -160,16 +200,22 @@ def select_covering_tests(
     reach a renderer. Shared by the OH (post_edit) and mini (gt_mini_patch) seams
     so there is ONE covering-selection surface (plan §6 invariant ①).
 
+    Qualified inputs resolve graph targets by exact ``(file_path, name)`` identity. A historical
+    bare input remains supported only when all matching production nodes share one definition
+    file; a cross-file collision is ambiguous and yields no target.
+
     ``repo_root`` (SS-2, 2026-07-13): when provided, a selected test whose FILE is
     ABSENT from the working tree is dropped — a runner-eligibility filter at the
     selection surface, so a phantom graph test node never produces a covering claim
-    the runner cannot execute. ``None`` (default) -> no disk check -> BYTE-IDENTICAL
-    to the pre-SS-2 selection (every existing caller unchanged).
+    the runner cannot execute. ``None`` (default) disables only that disk check.
 
     Correct-or-quiet: no db / no schema / no fact edges -> [].
     """
-    syms = {str(s) for s in (symbol_names or ()) if s}
-    if not syms or not db_path or not os.path.isfile(db_path):
+    identities = {
+        str(symbol) for symbol in (symbol_names or ()) if symbol
+    }
+    names = project_bare_symbol_names(identities)
+    if not identities or not names or not db_path or not os.path.isfile(db_path):
         return []
     con = _connect_ro(db_path)
     if con is None:
@@ -179,25 +225,63 @@ def select_covering_tests(
         if "resolution_method" not in ecols:
             return []
         has_conf = "confidence" in ecols
-        sph = ",".join("?" * len(syms))
+        sph = ",".join("?" * len(names))
         # DETERMINISM (2026-07-25). Two independent sources of run-to-run variance met here:
-        #   1. ``syms`` is a SET, and Python string hashing is randomised PER PROCESS, so
-        #      ``list(syms)`` produced a different IN-list order in every run.
+        #   1. Symbol input may be a SET, and Python string hashing is randomised PER PROCESS,
+        #      so unsorted query arguments produced a different IN-list order in every run.
         #   2. ``LIMIT 20`` with NO ``ORDER BY`` lets SQLite return ANY 20 matching rows.
         # Together they made covering target selection non-deterministic on identical input, which
         # is how ss_gate's S11 "determinism (unresolved x2)" check flaked: 6 identical runs yielded
         # 2 distinct signatures (20 vs 14 ledger rows). A proof gate that cannot reproduce itself
         # certifies nothing, so this is a correctness bug in the PROOF PATH, not a nicety.
         # sorted() + a total ORDER BY makes the selected target set a pure function of the input.
-        target_rows = con.execute(
-            f"SELECT id FROM nodes WHERE name IN ({sph}) "
+        candidate_rows = con.execute(
+            f"SELECT id,name,file_path FROM nodes WHERE name IN ({sph}) "
             f"AND COALESCE(is_test, 0) = 0 "
-            f"ORDER BY file_path, name, id LIMIT 20",
-            sorted(syms),
+            f"ORDER BY file_path, name, id",
+            names,
         ).fetchall()
-        if not target_rows:
+        if not candidate_rows:
             return []
-        tids = [r[0] for r in target_rows]
+        by_name: dict[str, list[tuple[int, str]]] = {}
+        for node_id, name, file_path in candidate_rows:
+            normalized_path = _normalized_definition_path(file_path, repo_root)
+            if not normalized_path:
+                continue
+            by_name.setdefault(str(name), []).append(
+                (int(node_id), normalized_path)
+            )
+
+        tids: list[int] = []
+        for identity in sorted(identities):
+            qualified = split_repository_symbol_identity(identity)
+            if qualified is not None:
+                wanted_path, name = qualified
+                wanted_path = _normalized_definition_path(
+                    wanted_path, repo_root
+                )
+                matches = [
+                    node_id
+                    for node_id, file_path in by_name.get(name, ())
+                    if wanted_path and file_path == wanted_path
+                ]
+            else:
+                name = identity.strip()
+                candidates = by_name.get(name, ())
+                homes = {file_path for _node_id, file_path in candidates}
+                # Historical bare focus remains compatible only when it is a real identity:
+                # one definition file. Two homes are ambiguous and therefore quiet.
+                matches = (
+                    [node_id for node_id, _file_path in candidates]
+                    if len(homes) == 1
+                    else []
+                )
+            for node_id in matches:
+                if node_id not in tids:
+                    tids.append(node_id)
+        tids = sorted(tids)[:20]
+        if not tids:
+            return []
         det = "','".join(sorted(_DETERMINISTIC_METHODS))
         # Reference e.confidence ONLY when the column exists — otherwise the SELECT
         # itself throws on a legacy schema and the whole selection silently returns
@@ -216,7 +300,7 @@ def select_covering_tests(
             tids,
         ).fetchall()
         out: list[dict[str, Any]] = []
-        # repo_root None -> the exact legacy path (rows[:limit], no disk check) => byte-identical.
+        # repo_root None -> rows[:limit] with no runner-eligibility disk check.
         # repo_root given -> scan ALL ranked rows, drop any covering FILE not on disk, keep the
         # top `limit` runner-eligible ones (a phantom in the top-N no longer starves a real one).
         source_rows = rows if repo_root else rows[:limit]

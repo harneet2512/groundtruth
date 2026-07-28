@@ -307,6 +307,7 @@ def _build_envelope(
     causal_value: int,
     contradiction_resolution: int,
     anchoring_risk: int,
+    observed_substrates: tuple[str, ...],
     identity: object | None = None,
 ) -> ee.EvidenceEnvelope | None:
     if not _context_has_exact_proof(context):
@@ -348,6 +349,7 @@ def _build_envelope(
         causal_value=causal_value,
         contradiction_resolution=contradiction_resolution,
         anchoring_risk=anchoring_risk,
+        observed_substrates=tuple(sorted(set(observed_substrates))),
     )
     try:
         computation_hash = _sha256_text(
@@ -501,6 +503,7 @@ def produce_covering_red(
         causal_value=9,
         contradiction_resolution=8,
         anchoring_risk=0,
+        observed_substrates=("structured_test_result",),
     )
 
 
@@ -568,6 +571,11 @@ def produce_syntax_result(
         causal_value=10,
         contradiction_resolution=5,
         anchoring_risk=0,
+        observed_substrates=(
+            ("parser_result",)
+            if verdict == "syntax_error"
+            else ("compiler_result",)
+        ),
     )
 
 
@@ -619,6 +627,7 @@ def produce_recovery(
             9 if advisory.disposition == D_HYPOTHESIS_FALSIFIED else 6
         ),
         anchoring_risk=2 if advisory.tier == ee.INFO else 1,
+        observed_substrates=("canonical_event_history",),
     )
 
 
@@ -704,6 +713,7 @@ def produce_submit_refusal(
         causal_value=10,
         contradiction_resolution=7,
         anchoring_risk=0,
+        observed_substrates=("canonical_validation_state",),
         identity={
             "gate_record": computation.gate_record_json,
             "patch_revision": computation.patch_revision,

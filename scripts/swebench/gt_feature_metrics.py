@@ -39,7 +39,7 @@ import re
 import shutil
 import sys
 from collections import Counter, defaultdict
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from artifact_deepswe.ledger_attestation import validate_attestation
 
@@ -126,6 +126,12 @@ from groundtruth.runtime.evidence_envelope import (  # noqa: E402
 )
 from groundtruth.runtime.runtime_attestation import (  # noqa: E402
     runtime_attestation_diagnostic,
+)
+from groundtruth.runtime.reasoning_runtime import (  # noqa: E402
+    # The capsule-hash preimage label. This collector RECOMPUTES the capsule hash to verify
+    # it, so the label must be the writer's -- imported, never a local literal. See
+    # DECISION_CAPSULE_SCHEMA for the four-way hand-sync defect this replaces.
+    DECISION_CAPSULE_SCHEMA as _DECISION_CAPSULE_SCHEMA,
 )
 from groundtruth.runtime.fact_registry import (  # noqa: E402
     FACT_ROLE_INTERNAL_SUPPORT,
@@ -1634,6 +1640,511 @@ def native_renderer_audit_by_fact_class(rows: list[dict]) -> dict[str, bool]:
     return verdict
 
 
+_CANONICAL_ACK_FEATURE = "GT_SS_ACK_METRICS"
+_CANONICAL_DELIVERY_SCHEMA = "gt.canonical_delivery.v1"
+_CANONICAL_ACK_SCHEMA = "gt.canonical_ack_receipt.v1"
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def _canonical_json_text(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _canonical_message_hash(message: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        _canonical_json_text(message).encode("utf-8")
+    ).hexdigest()
+
+
+def _normalized_ack_phrase(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.casefold().split())
+
+
+def _ack_path_anchor(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip().replace("\\", "/")
+    candidate = candidate.split("::", 1)[0]
+    candidate = re.sub(r":\d+(?::\d+)?$", "", candidate)
+    if candidate.startswith("/testbed/"):
+        candidate = candidate[len("/testbed/"):]
+    return candidate if "/" in candidate else ""
+
+
+def _ack_symbol_anchor(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    candidate = value.rsplit("::", 1)[-1].strip()
+    if "/" in candidate or "\\" in candidate:
+        return ""
+    return (
+        candidate
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{2,}", candidate)
+        else ""
+    )
+
+
+def _canonical_ack_linked_action(
+    actions: object,
+    evidence: Mapping[str, Any],
+) -> bool:
+    if not isinstance(actions, (list, tuple)):
+        return False
+    provenance = evidence.get("provenance")
+    subject = evidence.get("subject")
+    if (
+        not isinstance(subject, str)
+        or not isinstance(provenance, list)
+        or not all(isinstance(value, str) for value in provenance)
+    ):
+        return False
+    path_anchors = {
+        anchor
+        for value in (subject, *provenance)
+        if (anchor := _ack_path_anchor(value))
+    }
+    symbol_anchors = {
+        anchor
+        for value in (subject, *provenance)
+        if (anchor := _ack_symbol_anchor(value))
+    }
+    for action in actions:
+        if not isinstance(action, Mapping):
+            continue
+        fragments = [
+            action.get(key)
+            for key in ("command", "path", "file_path", "target", "subject")
+            if isinstance(action.get(key), str)
+        ]
+        action_text = " ".join(fragments).replace("\\", "/")
+        if not action_text:
+            continue
+        if any(
+            re.search(
+                rf"(?<![A-Za-z0-9_./-]){re.escape(path)}"
+                rf"(?![A-Za-z0-9_./-])",
+                action_text,
+            )
+            for path in path_anchors
+        ):
+            return True
+        if any(
+            re.search(rf"(?<!\w){re.escape(symbol)}(?!\w)", action_text)
+            for symbol in symbol_anchors
+        ):
+            return True
+    return False
+
+
+def _validated_canonical_delivery(
+    row: dict[str, Any],
+) -> tuple[str, dict[str, Any], Any]:
+    if (
+        row.get("schema") != _CANONICAL_DELIVERY_SCHEMA
+        or row.get("event_type") != "canonical_provider_delivery"
+        or row.get("layer") != "canonical.provider_delivery"
+        or row.get("outcome") != "delivered"
+        or "fact_class" in row
+    ):
+        raise ValueError("malformed canonical delivery row")
+    delivery_attempt_id = row.get("delivery_attempt_id")
+    capsule_text = row.get("capsule_text")
+    evidence_ids = row.get("evidence_ids")
+    manifest_json = row.get("evidence_manifest_json")
+    provider_payload_json = row.get("bound_provider_payload_json")
+    if (
+        not isinstance(delivery_attempt_id, str)
+        or not delivery_attempt_id
+        or not isinstance(row.get("observation_id"), str)
+        or not row["observation_id"]
+        or not isinstance(row.get("model_call_id"), str)
+        or not row["model_call_id"]
+        or not isinstance(capsule_text, str)
+        or not capsule_text
+        or not isinstance(evidence_ids, list)
+        or not evidence_ids
+        or not all(
+            isinstance(evidence_id, str) and evidence_id
+            for evidence_id in evidence_ids
+        )
+        or len(set(evidence_ids)) != len(evidence_ids)
+        or not isinstance(manifest_json, str)
+        or not manifest_json
+        or not isinstance(provider_payload_json, str)
+        or not provider_payload_json
+        or not _is_sha256(row.get("capsule_hash"))
+        or not _is_sha256(row.get("rendered_content_hash"))
+        or not _is_sha256(row.get("evidence_manifest_hash"))
+        or not _is_sha256(row.get("provider_payload_hash"))
+        or not isinstance(row.get("provider_response_id"), str)
+        or not row["provider_response_id"]
+        or row.get("provider_terminal_kind") not in {
+            "COMPLETED",
+            "INCOMPLETE",
+            "TOOL_USE",
+            "REFUSAL",
+        }
+        or type(row.get("delivery_phase_ordinal")) is not int
+        or row["delivery_phase_ordinal"] <= 0
+    ):
+        raise ValueError("malformed canonical delivery identity")
+    rendered_hash = hashlib.sha256(
+        capsule_text.encode("utf-8")
+    ).hexdigest()
+    if (
+        rendered_hash != row["rendered_content_hash"]
+        or row.get("content_sha256_16") != rendered_hash[:16]
+        or row.get("chars_delivered") != len(capsule_text)
+    ):
+        raise ValueError("canonical capsule text/seal mismatch")
+    manifest = json.loads(manifest_json)
+    if (
+        not isinstance(manifest, dict)
+        or _canonical_json_text(manifest) != manifest_json
+        or hashlib.sha256(
+            manifest_json.encode("utf-8")
+        ).hexdigest() != row["evidence_manifest_hash"]
+    ):
+        raise ValueError("canonical manifest hash mismatch")
+    manifest_evidence = manifest.get("evidence")
+    if (
+        not isinstance(manifest_evidence, list)
+        or [
+            item.get("evidence_id")
+            for item in manifest_evidence
+            if isinstance(item, dict)
+        ] != evidence_ids
+    ):
+        raise ValueError("canonical manifest membership mismatch")
+    for item in manifest_evidence:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("subject"), str)
+            or not isinstance(item.get("claim"), str)
+            or not item["claim"]
+            or not isinstance(item.get("actionable_consequence"), str)
+            or not isinstance(item.get("provenance"), list)
+            or not all(
+                isinstance(value, str) for value in item["provenance"]
+            )
+        ):
+            raise ValueError("malformed canonical manifest member")
+    expected_capsule_hash = hashlib.sha256(
+        _canonical_json_text(
+            {
+                "schema": _DECISION_CAPSULE_SCHEMA,
+                "rendered_content_hash": rendered_hash,
+                "evidence_manifest_hash": row["evidence_manifest_hash"],
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    if row["capsule_hash"] != expected_capsule_hash:
+        raise ValueError("canonical capsule identity mismatch")
+    binding = observation_binding_from_dict(
+        row.get("observation_binding")
+    )
+    if (
+        binding is None
+        or validate_observation_binding(
+            binding,
+            expected_candidate_id=row["capsule_hash"],
+        )
+    ):
+        raise ValueError("canonical delivery binding mismatch")
+
+    capsule_binding = row.get("capsule_binding")
+    if not isinstance(capsule_binding, dict):
+        raise ValueError("canonical capsule binding missing")
+    if (
+        capsule_binding.get("schema") != "gt.capsule_binding.v1"
+        or capsule_binding.get("model_call_id") != row["model_call_id"]
+        or capsule_binding.get("observation_id") != row["observation_id"]
+        or capsule_binding.get("evidence_ids") != evidence_ids
+        or capsule_binding.get("capsule_hash") != row["capsule_hash"]
+        or capsule_binding.get("provider_payload_hash")
+        != row["provider_payload_hash"]
+        or capsule_binding.get("evidence_manifest_hash")
+        != row["evidence_manifest_hash"]
+        or type(capsule_binding.get("message_index")) is not int
+        or capsule_binding["message_index"] < 0
+        or type(capsule_binding.get("content_index")) is not int
+        or capsule_binding["content_index"] < 0
+    ):
+        raise ValueError("canonical capsule binding mismatch")
+    provider_payload = json.loads(provider_payload_json)
+    if (
+        _canonical_json_text(provider_payload) != provider_payload_json
+        or hashlib.sha256(
+            provider_payload_json.encode("utf-8")
+        ).hexdigest() != row["provider_payload_hash"]
+    ):
+        raise ValueError("canonical provider payload hash mismatch")
+    messages = (
+        provider_payload.get("messages")
+        if isinstance(provider_payload, dict) else None
+    )
+    message_index = capsule_binding["message_index"]
+    content_index = capsule_binding["content_index"]
+    if (
+        not isinstance(messages, list)
+        or message_index >= len(messages)
+        or not isinstance(messages[message_index], dict)
+        or not isinstance(messages[message_index].get("content"), list)
+        or content_index >= len(messages[message_index]["content"])
+        or not isinstance(
+            messages[message_index]["content"][content_index], dict
+        )
+        or messages[message_index]["content"][content_index].get("text")
+        != capsule_text
+    ):
+        raise ValueError("canonical capsule location mismatch")
+    return delivery_attempt_id, manifest, binding
+
+
+def _validated_canonical_receipt(
+    row: dict[str, Any],
+) -> tuple[str, Any]:
+    if (
+        row.get("schema") != _CANONICAL_ACK_SCHEMA
+        or row.get("event_type") != "canonical_ack_receipt"
+        or row.get("layer") != "canonical.ack_receipt"
+        or row.get("outcome") != "evaluated"
+        or row.get("chars_delivered") != 0
+        or int(row.get("receipt") or 0) < 3
+        or "fact_class" in row
+    ):
+        raise ValueError("malformed canonical receipt row")
+    delivery_attempt_id = row.get("delivery_attempt_id")
+    if (
+        not isinstance(delivery_attempt_id, str)
+        or not delivery_attempt_id
+        or not _is_sha256(row.get("capsule_hash"))
+        or not _is_sha256(row.get("evidence_manifest_hash"))
+        or not _is_sha256(row.get("response_hash"))
+        or not isinstance(row.get("provider_response_id"), str)
+        or not row["provider_response_id"]
+        or not isinstance(row.get("matched_evidence_id"), str)
+        or not row["matched_evidence_id"]
+        or not isinstance(row.get("evidence_ids"), list)
+        or type(row.get("delivery_phase_ordinal")) is not int
+        or type(row.get("acknowledgment_phase_ordinal")) is not int
+        or row["acknowledgment_phase_ordinal"]
+        <= row["delivery_phase_ordinal"]
+    ):
+        raise ValueError("malformed canonical receipt identity")
+    binding = observation_binding_from_dict(
+        row.get("observation_binding")
+    )
+    if (
+        binding is None
+        or validate_observation_binding(
+            binding,
+            expected_candidate_id=row["capsule_hash"],
+        )
+    ):
+        raise ValueError("canonical receipt binding mismatch")
+    return delivery_attempt_id, binding
+
+
+def _canonical_ack_evidence(
+    rows: list[dict],
+    messages: list[dict],
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[int],
+]:
+    """Join one capsule-level delivery to one exact committed acknowledgment."""
+
+    invalid_rows: list[int] = []
+    deliveries: dict[str, list[tuple[int, dict[str, Any], dict[str, Any], Any]]] = (
+        defaultdict(list)
+    )
+    receipts: dict[str, list[tuple[int, dict[str, Any], Any]]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        delivery_candidate = (
+            row.get("schema") == _CANONICAL_DELIVERY_SCHEMA
+            or row.get("event_type") == "canonical_provider_delivery"
+        )
+        receipt_candidate = (
+            row.get("schema") == _CANONICAL_ACK_SCHEMA
+            or (
+                row.get("event_type") == "canonical_ack_receipt"
+                and row.get("layer") == "canonical.ack_receipt"
+            )
+        )
+        if delivery_candidate:
+            try:
+                delivery_attempt_id, manifest, binding = (
+                    _validated_canonical_delivery(row)
+                )
+            except (KeyError, TypeError, ValueError):
+                invalid_rows.append(index)
+            else:
+                deliveries[delivery_attempt_id].append(
+                    (index, row, manifest, binding)
+                )
+        elif receipt_candidate:
+            try:
+                delivery_attempt_id, binding = (
+                    _validated_canonical_receipt(row)
+                )
+            except (KeyError, TypeError, ValueError):
+                invalid_rows.append(index)
+            else:
+                receipts[delivery_attempt_id].append(
+                    (index, row, binding)
+                )
+
+    records: list[dict[str, Any]] = []
+    joins: list[dict[str, Any]] = []
+    for delivery_attempt_id, receipt_rows in receipts.items():
+        delivery_rows = deliveries.get(delivery_attempt_id, [])
+        if len(delivery_rows) != 1 or len(receipt_rows) != 1:
+            continue
+        delivery_index, delivery, manifest, delivery_binding = delivery_rows[0]
+        receipt_index, receipt, receipt_binding = receipt_rows[0]
+        identity_fields = (
+            "capsule_hash",
+            "evidence_manifest_hash",
+            "evidence_ids",
+            "provider_response_id",
+            "delivery_phase_ordinal",
+        )
+        if (
+            any(
+                receipt.get(field) != delivery.get(field)
+                for field in identity_fields
+            )
+            or receipt_binding != delivery_binding
+        ):
+            continue
+        manifest_evidence = manifest["evidence"]
+        matched_evidence_id = receipt["matched_evidence_id"]
+        if matched_evidence_id not in {
+            item["evidence_id"] for item in manifest_evidence
+        }:
+            continue
+        expected_receipt_key = hashlib.sha256(
+            _canonical_json_text(
+                {
+                    "delivery_attempt_id": delivery_attempt_id,
+                    "capsule_hash": delivery["capsule_hash"],
+                    "evidence_id": matched_evidence_id,
+                    "provider_response_id": receipt[
+                        "provider_response_id"
+                    ],
+                    "response_hash": receipt["response_hash"],
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        if receipt.get("receipt_key") != expected_receipt_key:
+            continue
+        committed_matches: list[tuple[int, Mapping[str, Any]]] = []
+        for message_index, message in enumerate(messages):
+            if (
+                not isinstance(message, Mapping)
+                or message.get("role") != "assistant"
+            ):
+                continue
+            extra = message.get("extra")
+            response = (
+                extra.get("response")
+                if isinstance(extra, Mapping) else None
+            )
+            if (
+                isinstance(response, Mapping)
+                and response.get("id") == receipt["provider_response_id"]
+                and _canonical_message_hash(message)
+                == receipt["response_hash"]
+            ):
+                committed_matches.append((message_index, message))
+        if len(committed_matches) != 1:
+            continue
+        message_index, committed_message = committed_matches[0]
+        normalized_content = _normalized_ack_phrase(
+            committed_message.get("content")
+        )
+        extra = committed_message.get("extra")
+        actions = (
+            extra.get("actions")
+            if isinstance(extra, Mapping) else None
+        )
+        acknowledged = [
+            item
+            for item in manifest_evidence
+            if (
+                _normalized_ack_phrase(item.get("claim"))
+                and _normalized_ack_phrase(item.get("claim"))
+                in normalized_content
+                and _canonical_ack_linked_action(actions, item)
+            )
+        ]
+        if (
+            len(acknowledged) != 1
+            or acknowledged[0]["evidence_id"] != matched_evidence_id
+        ):
+            continue
+        item = {
+            "row_index": receipt_index,
+            "feature_id": _CANONICAL_ACK_FEATURE,
+            "role": "mediator",
+            "decision_site": "provider_response_commit",
+            "decision": "APPLIED",
+            "candidate_chars": delivery["chars_delivered"],
+            "candidate_sha256_16": delivery["content_sha256_16"],
+            "candidate_id": delivery["capsule_hash"],
+            "fact_class": None,
+            "observation_binding": observation_binding_to_dict(
+                delivery_binding
+            ),
+            "delivery_attempt_id": delivery_attempt_id,
+        }
+        records.append(item)
+        joins.append(
+            {
+                **item,
+                "delivery_row_index": delivery_index,
+                "delivery_layer": delivery["layer"],
+                "delivery_phase_ordinal": delivery[
+                    "delivery_phase_ordinal"
+                ],
+                "acknowledgment_phase_ordinal": receipt[
+                    "acknowledgment_phase_ordinal"
+                ],
+                "capsule_hash": delivery["capsule_hash"],
+                "evidence_manifest_hash": delivery[
+                    "evidence_manifest_hash"
+                ],
+                "evidence_ids": list(delivery["evidence_ids"]),
+                "matched_evidence_id": matched_evidence_id,
+                "provider_response_id": receipt["provider_response_id"],
+                "response_hash": receipt["response_hash"],
+                "observation_message_index": message_index,
+                "observation_joined": True,
+                "canonical_delivery_joined": True,
+                "receipt_level": int(receipt["receipt"]),
+                "referenced_message_index": message_index,
+                "acted_message_index": message_index,
+            }
+        )
+    return records, joins, invalid_rows
+
+
 def _control_participation_evidence(
     rows: list[dict], messages: list[dict], consumption_ledger: dict[str, Any],
     brief_payload: dict[str, Any] | None = None,
@@ -1654,6 +2165,14 @@ def _control_participation_evidence(
     observation_join = join_native_delivery(rows, messages)
     entries = consumption_ledger.get("entries")
     entries = entries if isinstance(entries, list) else []
+    canonical_records, canonical_joins, canonical_invalid = (
+        _canonical_ack_evidence(rows, messages)
+    )
+    if canonical_records:
+        records[_CANONICAL_ACK_FEATURE].extend(canonical_records)
+    if canonical_joins:
+        joins[_CANONICAL_ACK_FEATURE].extend(canonical_joins)
+    invalid_rows.extend(canonical_invalid)
 
     for index, row in enumerate(rows):
         if not (

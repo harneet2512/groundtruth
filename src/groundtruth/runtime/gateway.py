@@ -1804,6 +1804,7 @@ def _has_repo_trace(event: ToolEvent, state: GatewayState) -> bool:
 
 _SEMANTIC_BOUNDARY_ORDER = (
     EVENT_FAILURE_OBS,
+    "test_executed_no_tests",
     "test_result",
     "edit_result",
     "failed_search",
@@ -1828,7 +1829,8 @@ def _observe_semantic_events(
         if event.kind == KIND_EDIT:
             events.add("edit_result")
         elif event.kind == KIND_TEST and (
-            event.test_outcome or event.covering is not None
+            event.test_outcome in {"pass", "fail", "env_fail"}
+            or event.covering is not None
         ):
             events.add("test_result")
         elif event.kind == KIND_VIEW:
@@ -1919,10 +1921,11 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
             native_args: "dict | None" = None,
             producer_inputs: "ProducerInputs | None" = None,
             cap_feature_ids: "tuple[str, ...]" = (),
-            actual_event: str = "",
-            canonical_claim: str = "",
-            canonical_consequence: str = "",
-            canonical_subject: str = "") -> EvidenceEnvelope:
+             actual_event: str = "",
+             canonical_claim: str = "",
+             canonical_consequence: str = "",
+             canonical_subject: str = "",
+             observed_substrates: tuple[str, ...] = ()) -> EvidenceEnvelope:
     """Build the CANONICAL EvidenceEnvelope for one fact. Leak filtering happens
     HERE, before the build, so the derived dedup key hashes exactly the shipped
     payload+provenance (the F1 content discipline). The symbol rides ``fact_id``.
@@ -2002,6 +2005,7 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
                 causal_value=3,
                 contradiction_resolution=0,
                 anchoring_risk=0,
+                observed_substrates=tuple(sorted(set(observed_substrates))),
             )
     except (ImportError, TypeError, ValueError):
         canonical_semantics = None
@@ -2108,6 +2112,7 @@ def _produce_def_ref_partition(event: ToolEvent, state: GatewayState, *, note: s
                     body_lines=body, evidence=info["def_sites"], tier=VERIFIED,
                     producer="def_ref_partition", symbol=sym,
                     producer_inputs=inputs,
+                    observed_substrates=("graph",),
                     canonical_subject=sym,
                     canonical_claim=(
                         f"{sym} resolves to {len(info['def_sites'])} "
@@ -2375,6 +2380,7 @@ def _produce_ranked_localization(event: ToolEvent, state: GatewayState) -> list[
                     producer="ranked_localization", symbol=top_sym,
                     cap_feature_ids=("GT_LOC_RESLOT",),
                     native_args={"rows": rows},
+                    observed_substrates=("fts5", "graph"),
                     canonical_subject=top_file,
                     canonical_claim=(
                         f"{top_file} is the highest-ranked production target; "
@@ -2415,6 +2421,7 @@ def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[Eviden
                     body_lines=body, evidence=novel, tier=VERIFIED,
                     producer="wrong_surface", symbol=sym,
                     producer_inputs=inputs,
+                    observed_substrates=("graph",),
                     canonical_subject=sym,
                     canonical_claim=(
                         f"The observed hits for {sym} exclude its production "
@@ -2450,6 +2457,7 @@ def _produce_name_fold(event: ToolEvent, state: GatewayState) -> list[EvidenceEn
                     body_lines=body, evidence=info["def_sites"], tier=VERIFIED,
                     producer="name_fold", symbol=sym,
                     producer_inputs=inputs,
+                    observed_substrates=("graph",),
                     canonical_subject=sym,
                     canonical_claim=(
                         f"{sym} resolves in the repository index as {variant}."
@@ -2495,6 +2503,7 @@ def _produce_body(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelop
                     producer="body_concept", symbol=sym,
                     native_args={"rows": native_rows},
                     producer_inputs=inputs,
+                    observed_substrates=("graph",),
                     canonical_subject=sym,
                     canonical_claim=(
                         f"{len(rows)} production function body/bodies mention "
@@ -2692,6 +2701,7 @@ def _produce_change_surface(event: ToolEvent, state: GatewayState,
                            body_lines=body, evidence=[], tier=HYPOTHESIS,
                            producer="change_surface", symbol=d.entity,
                            producer_inputs=producer_inputs,
+                           observed_substrates=("graph",),
                            cap_feature_ids=("GT_CHANGE_SURFACE",),
                            canonical_subject=d.entity,
                            canonical_claim=(
@@ -2715,6 +2725,7 @@ def _produce_change_surface(event: ToolEvent, state: GatewayState,
         env = _mk_add(state, event, fact_kind=missing_role_kind, target=tgt,
                       body_lines=body, evidence=ev_rows,
                       tier=HYPOTHESIS, producer="change_surface", symbol=m.entity,
+                      observed_substrates=("graph",),
                       cap_feature_ids=("GT_CHANGE_SURFACE",),
                       canonical_subject=m.entity,
                       canonical_claim=(
@@ -2773,6 +2784,7 @@ def _produce_trace(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelo
                         body_lines=[f"deepest in-repo frame: {loc}"],
                         evidence=[(rel, fr.line)], tier=WARNING, producer="trace",
                         symbol=fr.func or rel, actual_event=EVENT_FAILURE_OBS,
+                        observed_substrates=("repository_paths",),
                         canonical_subject=fr.func or rel,
                         canonical_claim=(
                             f"{loc} is the deepest observed in-repository "
@@ -2853,6 +2865,7 @@ def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[Evidence
                             confidence=max(0.0, min(1.0, sm.confidence)),
                             cap_feature_ids=("GT_PATCH_DELTA",),
                             producer_inputs=producer_inputs,
+                            observed_substrates=("graph",),
                             native_args={
                                "caller_file": sm.caller_file,
                                "caller_line": sm.caller_line,
@@ -2886,6 +2899,7 @@ def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[Evidence
                            body_lines=body, evidence=ev_rows,
                            tier=WARNING, producer="patch_delta", symbol=cs.symbol,
                            cap_feature_ids=("GT_PATCH_DELTA",),
+                           observed_substrates=("graph",),
                            native_args={
                                "file": cs.file,
                                "line": (ev_rows[0][1] if ev_rows else None),
@@ -3463,6 +3477,7 @@ def _produce_caller_contract_view(
                         ),
                     },
                     producer_inputs=producer_inputs,
+                    observed_substrates=("graph",),
                     canonical_subject=rel,
                     canonical_claim=(
                         f"{rel} defines {len(symbols)} viewed production "
@@ -3575,6 +3590,7 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
                                        ),
                                    },
                                    producer_inputs=producer_inputs,
+                                   observed_substrates=("graph",),
                                    canonical_subject=sym,
                                    canonical_claim=(
                                        f"{sym} changed signature and has "
@@ -3613,6 +3629,7 @@ def _produce_covering(event: ToolEvent, state: GatewayState) -> list[EvidenceEnv
                     body_lines=rendered.splitlines(), evidence=list(cov.evidence),
                     tier=cov.tier or WARNING, producer="covering",
                     symbol=cov.verdict or cov.target,
+                    observed_substrates=("structured_test_result",),
                     canonical_subject=cov.target,
                     canonical_claim=(
                         f"The executed covering validation for {cov.target} "

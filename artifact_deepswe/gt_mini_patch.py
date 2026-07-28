@@ -39,7 +39,9 @@ import contextvars
 from dataclasses import dataclass, field, replace
 import hashlib
 import json
+import ntpath
 import os
+import posixpath
 import sys as _sys
 import re
 import sqlite3
@@ -3342,6 +3344,66 @@ def _to_repo_rel(f: str, root: str) -> str:
         except (ValueError, TypeError):
             return nf
     return nf
+
+
+def _confined_repo_relative_path(path: str, root: str) -> str:
+    """Return a repository-relative path, or empty when confinement is unknown."""
+    normalized = str(path or "").replace("\\", "/")
+    normalized_root = str(root or "").replace("\\", "/").rstrip("/")
+    relative = ""
+    if not normalized:
+        return ""
+    for container_root in _CONTAINER_ROOTS:
+        # Container aliases are POSIX paths. Case and the trailing segment
+        # boundary are load-bearing on the case-sensitive task filesystem.
+        if normalized.startswith(container_root):
+            relative = normalized[len(container_root):]
+            break
+    else:
+        windows_absolute = bool(
+            re.match(r"^[A-Za-z]:/", normalized)
+            or normalized.startswith("//")
+        )
+        if windows_absolute:
+            if not normalized_root:
+                return ""
+            try:
+                candidate = ntpath.normpath(normalized)
+                confined_root = ntpath.normpath(normalized_root)
+                if ntpath.commonpath(
+                    (ntpath.normcase(confined_root), ntpath.normcase(candidate))
+                ) != ntpath.normcase(confined_root):
+                    return ""
+                relative = ntpath.relpath(candidate, confined_root).replace(
+                    "\\", "/"
+                )
+            except (TypeError, ValueError):
+                return ""
+        elif normalized.startswith("/"):
+            if not normalized_root.startswith("/"):
+                return ""
+            try:
+                candidate = posixpath.normpath(normalized)
+                confined_root = posixpath.normpath(normalized_root)
+                if posixpath.commonpath((confined_root, candidate)) != confined_root:
+                    return ""
+                relative = posixpath.relpath(candidate, confined_root)
+            except (TypeError, ValueError):
+                return ""
+        else:
+            relative = normalized
+    if (
+        not relative
+        or relative.startswith("/")
+        or re.match(r"^[A-Za-z]:", relative)
+    ):
+        return ""
+    parts = tuple(
+        part for part in relative.split("/") if part not in ("", ".")
+    )
+    if not parts or ".." in parts:
+        return ""
+    return "/".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -6928,7 +6990,16 @@ def _test_run_command(test_name: str, test_file: str) -> str:
         return f"pytest {test_file}::{test_name}" if test_file else f"pytest -k {test_name}"
 
 
-def _invalidate_on_edit(rel: str, root: str) -> None:
+@dataclass(frozen=True)
+class _L6RefreshOutcome:
+    """Host-only truth for one existing L6 refresh attempt."""
+
+    fresh: bool
+    reason: str
+    selected_db: str = ""
+
+
+def _invalidate_on_edit(rel: str, root: str) -> _L6RefreshOutcome:
     """L6 (minimal incremental-freshness port): after a source edit, drop the stale
     gt_hook AST cache and best-effort single-file reindex graph.db, so the next
     understand / consensus / verify reads the agent's NEW code rather than base-commit.
@@ -6972,7 +7043,8 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
     _ss_bad_path = bool(_ss_provenance_on() and _ss_provenance_bad_path(rel, root)
                         and _ss_reindex_targets_root(rel, root))
     if _substrate_active() and os.environ.get("GT_L6_FRESH") != "1":
-        return  # substrate graph is authoritative + read-only; never mutate/rebuild it.
+        # The immutable graph is valid only for its base generation, not this edit.
+        return _L6RefreshOutcome(False, "immutable_substrate_graph")
     # GT_L6_FRESH: _db_path() returns the writable work-copy (NOT the mount), so the
     # `-file` reindex below writes the COPY — the authoritative mount stays pristine
     # for the consumption witness. Correct-or-quiet: a missing binary/copy or a failed
@@ -6991,7 +7063,7 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
     # above; the ONLY behavioral change vs the pre-fix early-return is that the cache is now
     # invalidated first. Byte-identical when GT_SS_PROVENANCE is off (_ss_bad_path is False).
     if _ss_bad_path:
-        return
+        return _L6RefreshOutcome(False, "provenance_path_skipped")
     try:
         gt_index = os.environ.get("GT_INDEX_BIN", "/tmp/gt-index")
         db = _db_path()
@@ -7018,7 +7090,7 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
                 and db and db == os.environ.get("GT_HOST_GRAPH_DB")):
             _l6_emit("STAGING_FELLBACK", db=db, file=rel,
                      note="work-copy_absent__refusing_to_reindex_authoritative_mount")
-            return
+            return _L6RefreshOutcome(False, "work_copy_unavailable", db)
         if os.path.isfile(gt_index) and os.path.isfile(db):
             _n_before = _l6_count_nodes(db, rel)
             _argv = (gt_index, f"-root={root}", f"-file={rel}", f"-output={db}")
@@ -7103,6 +7175,21 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
                 stdout=_stdout,
                 stderr=_stderr,
             )
+            if _rc is not None and _rc.returncode == 0:
+                return _L6RefreshOutcome(True, "reindex_ok", db)
+            return _L6RefreshOutcome(
+                False,
+                (
+                    f"reindex_exception:{_exception_type}"
+                    if _exception_type
+                    else (
+                        f"reindex_rc:{_rc.returncode}"
+                        if _rc is not None
+                        else "reindex_failed"
+                    )
+                ),
+                db,
+            )
         elif not os.path.isfile(gt_index):
             # G05 (fail loud, not silent): the reindex binary is absent. On the
             # host-graph-injection path gt_agent ships the graph but NOT the ~49MB
@@ -7122,8 +7209,13 @@ def _invalidate_on_edit(rel: str, root: str) -> None:
                     file=sys.stderr, flush=True,
                 )
             _l6_emit("NO_BINARY", gt_index=gt_index, isfile=False)
+            return _L6RefreshOutcome(False, "reindex_binary_unavailable", db)
+        return _L6RefreshOutcome(False, "graph_db_unavailable", db)
     except Exception as _l6e:  # noqa: BLE001 -- best-effort, never break the loop
         _l6_emit("HOOK_EXC", file=rel, exc=f"{type(_l6e).__name__}:{_l6e}")
+        return _L6RefreshOutcome(
+            False, f"refresh_exception:{type(_l6e).__name__}", ""
+        )
 
 
 def _l5_nudge(cmd: str, out_text: str = "",
@@ -7203,6 +7295,7 @@ try:
         ENV_FAIL_RE as _ENV_FAIL_RE,
         TEST_FAIL_RE as _TEST_FAIL_RE,
         TEST_PASS_RE as _TEST_PASS_RE,
+        TEST_NO_TESTS_RE as _TEST_NO_TESTS_RE,
         TEST_PROTOCOL_RE as _TEST_PROTOCOL_RE,
         classify_test_observation as _classify_test_observation,
         COMPILE_FAIL_RE as _COMPILE_FAIL_RE,
@@ -7228,16 +7321,38 @@ except ImportError:
         r"|(?:^|\n)\s*test result:\s*(?:ok|FAILED)\b",
         re.I,
     )
-    def _classify_test_observation(command: str, output: str) -> tuple[str, str]:
+    _TEST_NO_TESTS_RE = re.compile(
+        r"(\bcollected\s+0\s+items?\b|\bno tests? ran\b|\bran\s+0\s+tests?\b"
+        r"|(?:^|\n)\s*running\s+0\s+tests?\b|\[no test files\]"
+        r"|\b0\s+passing\b|\bTests run:\s*0\b"
+        r"|\bNo tests? (?:were )?(?:found|executed|to run)\b"
+        r"|\bNo test files? (?:were )?found\b|\bTests? are skipped\b"
+        r"|\b0\s+examples?\b|\bTests:\s*0\s+total\b"
+        r"|\bOK\s*\(0 tests?\)|\bTests:\s*0\s+(?:passed,\s*)?0\s+total\b)",
+        re.I,
+    )
+    def _classify_test_observation(
+        command: str,
+        output: str,
+        returncode: int | None = None,
+    ) -> tuple[str, str]:
         if _TEST_RUNNER_RE.search(command or ""):
             protocol = "command"
         elif _TEST_PROTOCOL_RE.search(output or ""):
             protocol = "native"
         else:
             return "", ""
-        if _TEST_FAIL_RE.search(output or ""):
+        failed = _TEST_FAIL_RE.search(output or "")
+        passed = _TEST_PASS_RE.search(output or "")
+        if failed:
             return "fail", protocol
-        if _TEST_PASS_RE.search(output or ""):
+        if _ENV_FAIL_RE.search(output or "") and not (
+            returncode == 0 and passed
+        ):
+            return "env_fail", protocol
+        if _TEST_NO_TESTS_RE.search(output or ""):
+            return "executed_no_tests", protocol
+        if passed and (returncode is None or returncode == 0):
             return "pass", protocol
         return "", protocol
     _ENV_FAIL_RE = re.compile(
@@ -7254,13 +7369,15 @@ except ImportError:
         r"|AttributeError: module '[\w.]+' has no attribute"
         r"|errors? during collection|ERROR collecting|Interrupted: \d+ error)", re.I)
     _TEST_FAIL_RE = re.compile(
-        r"(\bFAILED\b|\bAssertionError\b|\b\d+ failed\b|\bFAIL: "
+        r"(\bFAILED\b|\bAssertionError\b|\b[1-9]\d* failed\b|\bFAIL: "
         r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
-        r"|\b\d+ failing\b|Tests:\s+\d+ failed)")
+        r"|\b[1-9]\d* failing\b|Tests:\s+[1-9]\d* failed"
+        r"|Failures:\s*[1-9]\d*|Errors:\s*[1-9]\d*)")
     _TEST_PASS_RE = re.compile(
-        r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b|\bPASSED\b"
-        r"|^OK\b|^ok\s+\S+\s+[\d.]+s|^PASS$|^PASS\b"
-        r"|OK \(\d+ tests?\)|Tests:\s+\d+ passed|\bpassed\b.*\b0 failed\b)",
+        r"(test result: ok\b|\b[1-9]\d* passed\b|\b[1-9]\d* passing\b|\bPASSED\b"
+        r"|^OK\b|^ok\s+\S+\s+[\d.]+s|^PASS$|^PASS\b|BUILD SUCCESS"
+        r"|OK \([1-9]\d* tests?\)|Tests:\s+[1-9]\d* passed"
+        r"|\b[1-9]\d* passed\b.*\b0 failed\b)",
         re.M)
     _COMPILE_FAIL_RE = re.compile(
         r"(error\[E\d+\]|error: could not compile|\bSyntaxError\b"
@@ -9507,8 +9624,13 @@ def _current_active_decision() -> str:
         return ""
 
 
-def _viewed_symbols_for_action(operation, subject: str) -> "tuple[str, ...]":
-    """The symbols a VIEW put in play, resolved from `graph.db` -- never from output text.
+def _viewed_symbols_for_action(
+    operation,
+    subject: str,
+    *,
+    graph_fresh: bool = True,
+) -> "tuple[str, ...]":
+    """The qualified symbols a VIEW put in play, resolved from graph truth.
 
     This is what finally populates `work_state.focused_symbols`, which is otherwise permanently
     empty on a shell harness. Two independent mechanisms depend on it: the relevance
@@ -9536,17 +9658,37 @@ def _viewed_symbols_for_action(operation, subject: str) -> "tuple[str, ...]":
     try:
         from groundtruth.runtime.reasoning_runtime import ActionOperation as _Op
 
-        if operation is not _Op.VIEW_SOURCE or not subject:
+        if not graph_fresh or operation is not _Op.VIEW_SOURCE or not subject:
             return ()
-        from groundtruth.runtime.gateway import defined_symbols_for_file
+        from groundtruth.runtime.gateway import (
+            _norm_fp,
+            _to_repo_rel,
+            defined_symbols_for_file,
+        )
+        from groundtruth.runtime.reasoning_runtime import repository_symbol_identity
 
-        return defined_symbols_for_file(_db_path(), subject, repo_root=_root())
+        root = _root()
+        file_path = _norm_fp(_to_repo_rel(subject, root))
+        if not file_path:
+            return ()
+        return tuple(
+            identity
+            for symbol in defined_symbols_for_file(
+                _db_path(), subject, repo_root=root
+            )
+            if (identity := repository_symbol_identity(file_path, symbol))
+        )
     except Exception:  # noqa: BLE001 -- resolution must never break the agent's turn
         return ()
 
 
-def _resolved_search_symbols(operation, command: str) -> "tuple[str, ...]":
-    """The search operand, but ONLY when the graph actually defines it.
+def _resolved_search_symbols(
+    operation,
+    command: str,
+    *,
+    graph_fresh: bool = True,
+) -> "tuple[str, ...]":
+    """The qualified search identity, only when the bare operand is unambiguous.
 
     Two independent abstentions, so nothing enters focus on a guess:
 
@@ -9554,63 +9696,48 @@ def _resolved_search_symbols(operation, command: str) -> "tuple[str, ...]":
          regex metacharacters, no path separators). A regex, a quoted phrase or a log string
          yields None. This is LITERAL ARGUMENT EXTRACTION from the command the agent wrote --
          not an inference from rendered output, which GT forbids itself.
-      2. The name is then looked up in `graph.db`. A symbol enters focus only if the graph holds
-         a non-test DEFINITION for it, so a typo or a coincidental word resolves to nothing.
+      2. The name is then looked up in `graph.db`. It enters focus only if the graph holds
+         exactly one production definition FILE for it. A typo, coincidental word, or same-name
+         definition in another file resolves to nothing.
 
-    Why it matters: `_produce_def_ref_partition` uses this same `search_pattern` result as its
-    `canonical_subject`, and the relevance gate is `subject:` equality against focus. Carrying
-    the symbol makes the intersection match ON the `search_result` boundary def_partition is
-    contracted to, instead of only later when the agent happens to open the defining file.
+    Why it matters: focus keeps the qualified identity, while `_focus_unique_bare_symbols`
+    exposes the producer's legacy bare canonical subject only after proving graph-global
+    uniqueness. The relevance intersection can therefore match on the contracted search
+    boundary without admitting a same-named definition from another file.
 
     Never raises; any fault resolves to ().
     """
     try:
         from groundtruth.runtime.reasoning_runtime import ActionOperation as _Op
 
-        if operation is not _Op.SEARCH or not command:
+        if not graph_fresh or operation is not _Op.SEARCH or not command:
             return ()
-        from groundtruth.runtime.gateway import defined_symbols_for_file, search_pattern
+        from groundtruth.runtime.gateway import (
+            definition_files_for_symbol,
+            search_pattern,
+        )
+        from groundtruth.runtime.reasoning_runtime import repository_symbol_identity
 
         symbol = search_pattern(command)
         if not symbol:
             return ()
-        # Graph validation: confirm the name is a real definition somewhere in the repository.
-        # `defined_symbols_for_file` is file-scoped, so resolve through the symbol index the
-        # gateway already uses for exactly this question.
-        from groundtruth.runtime.gateway import _connect_ro, _DEF_LABELS
-
         db = _db_path()
         if not db or not os.path.isfile(db):
             return ()
-        con = _connect_ro(db)
-        if con is None:
+        files = definition_files_for_symbol(
+            db,
+            symbol,
+            repo_root=_root(),
+            max_files=1,
+        )
+        if len(files) != 1:
             return ()
-        try:
-            placeholders = ",".join("?" * len(_DEF_LABELS))
-            row = con.execute(
-                # MUST match `defined_symbols_for_file` exactly. Omitting the start_line
-                # predicate let a node with NULL/0 start_line validate a search operand
-                # into focus that the VIEW path can never produce -- the two resolvers
-                # disagreed on the day they were written.
-                f"SELECT 1 FROM nodes WHERE name=? AND COALESCE(is_test,0)=0 "
-                f"AND COALESCE(start_line,0)>0 "
-                f"AND label IN ({placeholders}) LIMIT 1",
-                (symbol, *_DEF_LABELS),
-            ).fetchone()
-        finally:
-            try:
-                con.close()
-            except Exception:  # noqa: BLE001
-                pass
-        return (symbol,) if row else ()
+        identity = repository_symbol_identity(files[0], symbol)
+        return (identity,) if identity else ()
     except Exception:  # noqa: BLE001 -- resolution must never break the agent's turn
         return ()
 
 
-# C12: a focused symbol resolving to more definition files than this is AMBIGUOUS and
-# contributes nothing. Matches `_resolve_symbol_defs`'s existing 3-file abstention rather
-# than inventing a second threshold that must agree with it by hand.
-_FOCUS_DEF_FILES_PER_SYMBOL = 3
 # Total ceiling across the whole focus set. Focus is APPEND-ONLY (there is no eviction
 # anywhere in `reduce_event`), so without a ceiling this expansion would grow monotonically
 # for the length of a trajectory and drive the intersection toward always-true -- turning a
@@ -9619,7 +9746,7 @@ _FOCUS_DEF_FILES_TOTAL = 24
 
 
 def _focus_definition_files(focused_symbols) -> "tuple[str, ...]":
-    """The graph's definition files for the symbols currently in focus.
+    """The graph-verified definition files for qualified identities in focus.
 
     C12. Lets the relevance gate ask "is this evidence about what the agent is WORKING ON"
     instead of "about a file the agent has ALREADY OPENED". See
@@ -9642,21 +9769,75 @@ def _focus_definition_files(focused_symbols) -> "tuple[str, ...]":
         db = _db_path()
         if not db or not os.path.isfile(db):
             return ()
-        from groundtruth.runtime.gateway import definition_files_for_symbol
+        from groundtruth.runtime.gateway import (
+            defined_symbols_for_file,
+            definition_files_for_symbol,
+        )
+        from groundtruth.runtime.reasoning_runtime import (
+            split_repository_symbol_identity,
+        )
 
         root = _root()
         out: list[str] = []
-        for symbol in symbols:
-            for path in definition_files_for_symbol(
-                db, symbol, repo_root=root,
-                max_files=_FOCUS_DEF_FILES_PER_SYMBOL,
-            ):
+        for identity in symbols:
+            qualified = split_repository_symbol_identity(identity)
+            if qualified is not None:
+                path, symbol = qualified
+                paths = (
+                    (path,)
+                    if symbol in defined_symbols_for_file(
+                        db, path, repo_root=root
+                    )
+                    else ()
+                )
+            else:
+                # Historical WorkState JSON may contain bare symbols. Preserve readability but
+                # never preserve the old widening: a bare value contributes only when unique.
+                paths = definition_files_for_symbol(
+                    db, identity, repo_root=root, max_files=1
+                )
+            for path in paths:
                 if path not in out:
                     out.append(path)
             if len(out) >= _FOCUS_DEF_FILES_TOTAL:
                 return tuple(out[:_FOCUS_DEF_FILES_TOTAL])
         return tuple(out)
     except Exception:  # noqa: BLE001 -- resolution must never break the agent's turn
+        return ()
+
+
+def _focus_unique_bare_symbols(focused_symbols) -> "tuple[str, ...]":
+    """Project focused identities to bare subjects only when graph-global uniqueness holds.
+
+    Some existing evidence producers use a bare canonical subject. Keeping that subject relevant
+    for a globally unique definition is safe; projecting a colliding name would recreate C4.
+    Historical bare WorkState rows receive the same uniqueness check.
+    """
+    try:
+        from groundtruth.runtime.gateway import definition_files_for_symbol
+        from groundtruth.runtime.reasoning_runtime import (
+            split_repository_symbol_identity,
+        )
+
+        db = _db_path()
+        if not db or not os.path.isfile(db):
+            return ()
+        root = _root()
+        out: list[str] = []
+        for identity in focused_symbols or ():
+            if not isinstance(identity, str) or not identity:
+                continue
+            qualified = split_repository_symbol_identity(identity)
+            path, symbol = qualified if qualified is not None else ("", identity)
+            files = definition_files_for_symbol(
+                db, symbol, repo_root=root, max_files=1
+            )
+            if len(files) != 1 or (path and files[0] != path):
+                continue
+            if symbol not in out:
+                out.append(symbol)
+        return tuple(out)
+    except Exception:  # noqa: BLE001 -- relevance plumbing must fail closed
         return ()
 
 
@@ -15743,6 +15924,27 @@ def _batch_action_sha256(keys) -> str:
     return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
 
 
+def _canonical_observation_context(
+        message: dict[str, Any], *, batch_start_iteration: int) -> dict[str, Any]:
+    """Freeze the canonical parent-policy/action-batch identity before execution."""
+    parent_content = message.get("content", "") if isinstance(message, dict) else ""
+    if not isinstance(parent_content, str):
+        parent_content = ""
+    actions = (
+        (message.get("extra") or {}).get("actions") or ()
+        if isinstance(message, dict) else ()
+    )
+    _identity, keys = _batch_identity(actions)
+    return {
+        "batch_start_iteration": max(0, int(batch_start_iteration)),
+        "parent_policy_sha256": hashlib.sha256(
+            parent_content.encode("utf-8", "surrogatepass")
+        ).hexdigest(),
+        "parent_policy_chars": len(parent_content),
+        "action_batch_sha256": _batch_action_sha256(keys),
+    }
+
+
 def _policy_observation_id(start_iteration: int, parent_sha256: str,
                            action_sha256: str) -> str:
     """Unambiguous host-only identity for one parent-policy observation.
@@ -19908,7 +20110,10 @@ def _augment_output_legacy(action, out) -> None:
             # same command into contradictory events.
             _normalized_event = None
             _test_outcome, _test_protocol = _classify_test_observation(
-                cmd or "", _orig_out)
+                cmd or "",
+                _orig_out,
+                _returncode if type(_returncode) is int else None,
+            )
             if _gt_gateway_on():
                 try:
                     from groundtruth.runtime.adapters.miniswe import (
@@ -19923,8 +20128,12 @@ def _augment_output_legacy(action, out) -> None:
                         _semantic_events = []
                         if _kkind == "post_edit" and _exact_changed_rels:
                             _semantic_events.append("edit_result")
-                        if _test_outcome:
+                        if _test_outcome in {"pass", "fail", "env_fail"}:
                             _semantic_events.append("test_result")
+                        elif _test_outcome == "executed_no_tests":
+                            _semantic_events.append(
+                                "test_executed_no_tests"
+                            )
                         if _kkind == "post_view":
                             _semantic_events.append("file_view")
                         _semantic_arg = tuple(_semantic_events)
@@ -20160,7 +20369,7 @@ def _augment_output_legacy(action, out) -> None:
             # mirrors gt_oracle_sense.DerivedState.tested_tokens (tokens of the
             # observed output AND the test command itself).
             _stash_test_probe = False
-            if _test_outcome:
+            if _test_outcome in {"pass", "fail", "env_fail"}:
                 _stash_test_probe = _ss_stash_agent_state_probe(cmd or "")
                 # bug #4(b): record an observed test result so _detect_phase can
                 # reach VERIFY (derive_phase: test_count > 0 -> VERIFY). Mirrors
@@ -21279,6 +21488,380 @@ def _canonical_repository_digest(root: str) -> str:
     return digest.hexdigest()
 
 
+_GRAPH_INDEX_EXTS = frozenset({
+    ".bash", ".c", ".cc", ".cpp", ".cs", ".css", ".cue", ".cxx", ".elm",
+    ".ex", ".exs", ".go", ".gradle", ".groovy", ".h", ".hpp", ".htm",
+    ".html", ".hxx", ".hcl", ".java", ".js", ".jsx", ".cjs", ".kt", ".kts", ".lua",
+    ".md", ".mjs", ".ml", ".mli", ".php", ".proto", ".py", ".pyi",
+    ".rake", ".rb", ".rs", ".sc", ".scala", ".sh", ".sql", ".svelte",
+    ".swift", ".tf", ".toml", ".ts", ".tsx", ".yaml", ".yml",
+})
+_GRAPH_METADATA_BASENAMES = frozenset({
+    "Cargo.toml",
+    "build.gradle",
+    "build.gradle.kts",
+    "go.mod",
+    "go.work",
+    "gradle.properties",
+    "jsconfig.json",
+    "package.json",
+    "pom.xml",
+    "pyproject.toml",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "setup.cfg",
+    "setup.py",
+    "tsconfig.json",
+})
+_GRAPH_ROOT_CONTROL_PATHS = frozenset({".gitignore"})
+
+
+def _graph_input_kind(path: str) -> str:
+    """Classify only files read by gt-index; unrelated artifacts stay graph-quiet."""
+    normalized = str(path or "").replace("\\", "/")
+    basename = posixpath.basename(normalized)
+    extension = posixpath.splitext(basename)[1].lower()
+    # Repository-wide controls and manifests dominate their parseable extension.
+    # A single-file parse cannot rebuild walker membership or re-resolve every
+    # import whose package/module aliases came from one of these files.
+    if (
+        normalized in _GRAPH_ROOT_CONTROL_PATHS
+        or basename in _GRAPH_METADATA_BASENAMES
+    ):
+        return "metadata"
+    if extension in _GRAPH_INDEX_EXTS:
+        return "incremental"
+    return ""
+
+
+def _git_worktree_blob_identity(
+    root: str,
+    relative: str,
+    absolute: str,
+) -> str:
+    """Return the repository's filtered blob identity for current worktree bytes."""
+    try:
+        if os.path.islink(absolute):
+            command = ["git", "-C", root, "hash-object", "--stdin"]
+            payload = os.readlink(absolute).encode("utf-8", "surrogatepass")
+        elif os.path.isfile(absolute):
+            command = [
+                "git",
+                "-C",
+                root,
+                "hash-object",
+                f"--path={relative}",
+                "--",
+                absolute,
+            ]
+            payload = None
+        else:
+            return ""
+        result = subprocess.run(
+            command,
+            input=payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+        )
+        identity = result.stdout.decode("ascii").strip()
+        if result.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{40,64}", identity):
+            return identity.lower()
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        pass
+    return ""
+
+
+def _git_worktree_blob_identities(
+    root: str,
+    relatives,
+) -> "dict[str, str] | None":
+    """Batch worktree blob identities; return None when any path is unproven."""
+    identities: dict[str, str] = {}
+    batch: list[str] = []
+    for relative in tuple(dict.fromkeys(relatives or ())):
+        absolute = os.path.join(root, *relative.split("/"))
+        if os.path.islink(absolute) or "\n" in relative or "\r" in relative:
+            identity = _git_worktree_blob_identity(root, relative, absolute)
+            if not identity:
+                return None
+            identities[relative] = identity
+        else:
+            batch.append(relative)
+    if not batch:
+        return identities
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, "hash-object", "--stdin-paths"],
+            input=("\n".join(batch) + "\n").encode(
+                "utf-8", "surrogateescape"
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+        )
+        rows = result.stdout.decode("ascii").splitlines()
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or len(rows) != len(batch):
+        return None
+    for relative, identity in zip(batch, rows):
+        if not re.fullmatch(r"[0-9a-fA-F]{40,64}", identity):
+            return None
+        identities[relative] = identity.lower()
+    return identities
+
+
+def _git_graph_input_snapshot(root: str) -> _SourceSnapshot:
+    """Capture tracked identities plus exact dirty graph-input state.
+
+    The index blob ids cover clean-to-clean HEAD switches without hashing the
+    checkout. Git status then supplies the bounded dirty/untracked candidates;
+    hashing those paths makes an already-dirty source changing again
+    distinguishable from a report-only write.
+    """
+    state: dict[str, tuple[int, int, str]] = {}
+    if not root or not os.path.isdir(root):
+        return _SourceSnapshot(state, complete=False)
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", root, "ls-files", "-s", "-z"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+        )
+        status_result = subprocess.run(
+            [
+                "git",
+                "-C",
+                root,
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _SourceSnapshot(state, complete=False)
+    if tracked.returncode != 0 or status_result.returncode != 0:
+        return _SourceSnapshot(state, complete=False)
+
+    try:
+        for record in tracked.stdout.split(b"\0"):
+            if not record:
+                continue
+            metadata, raw_path = record.split(b"\t", 1)
+            fields = metadata.split()
+            if len(fields) < 3:
+                return _SourceSnapshot(state, complete=False)
+            decoded = raw_path.decode("utf-8", "surrogateescape")
+            relative = _confined_repo_relative_path(decoded, root)
+            if not relative or not _graph_input_kind(relative):
+                continue
+            state[relative] = (
+                0,
+                0,
+                "blob:" + fields[1].decode("ascii").lower(),
+            )
+    except (UnicodeError, ValueError):
+        return _SourceSnapshot(state, complete=False)
+
+    records = status_result.stdout.split(b"\0")
+    index = 0
+    current_paths: list[str] = []
+    try:
+        while index < len(records):
+            record = records[index]
+            index += 1
+            if not record:
+                continue
+            if len(record) < 4 or record[2:3] != b" ":
+                return _SourceSnapshot(state, complete=False)
+            status = record[:2]
+            raw_paths = [record[3:]]
+            if (b"R" in status or b"C" in status) and index < len(records):
+                if records[index]:
+                    raw_paths.append(records[index])
+                index += 1
+            for raw_path in raw_paths:
+                decoded = raw_path.decode("utf-8", "surrogateescape")
+                relative = _confined_repo_relative_path(decoded, root)
+                if not relative or not _graph_input_kind(relative):
+                    continue
+                absolute = os.path.join(root, *relative.split("/"))
+                if not os.path.lexists(absolute):
+                    state.pop(relative, None)
+                    continue
+                current_paths.append(relative)
+    except (OSError, UnicodeError, ValueError):
+        return _SourceSnapshot(state, complete=False)
+    identities = _git_worktree_blob_identities(root, current_paths)
+    if identities is None:
+        return _SourceSnapshot(state, complete=False)
+    for relative, identity in identities.items():
+        state[relative] = (0, 0, "blob:" + identity)
+    return _SourceSnapshot(state, complete=True)
+
+
+def _graph_input_delta(
+    before: _SourceSnapshot | None,
+    after: _SourceSnapshot,
+) -> "tuple[tuple[str, ...], bool]":
+    """Return exact changed graph-input paths plus whether absence is proven."""
+    if (
+        not isinstance(before, _SourceSnapshot)
+        or not before.complete
+        or not isinstance(after, _SourceSnapshot)
+        or not after.complete
+    ):
+        return (), False
+    paths = tuple(
+        sorted(
+            path
+            for path in set(before.state).union(after.state)
+            if before.state.get(path) != after.state.get(path)
+        )
+    )
+    return paths, True
+
+
+def _degraded_graph_generation(
+    repository_revision: str,
+    selected_graph_revision: str,
+    reasons,
+) -> str:
+    """Bind an explicit non-fresh graph generation to the new repository bytes."""
+    payload = json.dumps(
+        {
+            "repository_revision": repository_revision,
+            "selected_graph_revision": selected_graph_revision,
+            "reasons": sorted(str(reason) for reason in (reasons or ()) if reason),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "degraded:" + hashlib.sha256(
+        payload.encode("utf-8", "surrogatepass")
+    ).hexdigest()
+
+
+def _envelope_observes_graph(envelope) -> bool:
+    semantics = getattr(envelope, "canonical_semantics", None)
+    return "graph" in tuple(
+        getattr(semantics, "observed_substrates", ()) or ()
+    )
+
+
+def _stage_canonical_compilation(
+        provider_boundary, plan, *, observation_context) -> Any:
+    """Stage one capsule while its exact policy-observation join key is current.
+
+    The binding is audit metadata only. Shadow assignment remains exclusively in
+    the legacy batch-arbitration commit path; this wrapper never consults or
+    invokes shadow controls.
+    """
+    binding = None
+    compilation = getattr(plan, "compilation", None)
+    delivery_attempt_id = str(getattr(plan, "delivery_attempt_id", "") or "")
+    if isinstance(observation_context, dict) and compilation is not None:
+        try:
+            from groundtruth.runtime.evidence_envelope import (
+                build_observation_binding,
+            )
+
+            binding = build_observation_binding(
+                batch_start_iteration=int(
+                    observation_context.get("batch_start_iteration") or 0
+                ),
+                parent_policy_sha256=str(
+                    observation_context.get("parent_policy_sha256") or ""
+                ),
+                parent_policy_chars=int(
+                    observation_context.get("parent_policy_chars") or 0
+                ),
+                action_batch_sha256=str(
+                    observation_context.get("action_batch_sha256") or ""
+                ),
+                candidate_ordinal=0,
+                candidate_kind="canonical_runtime.capsule",
+                candidate_id=str(getattr(compilation, "capsule_hash", "") or ""),
+            )
+        except (ImportError, TypeError, ValueError):
+            binding = None
+
+    # D1 -- NEVER hand a canonical boundary a None binding. `stage()` RAISES on
+    # `attempt_runtime is not None and observation_binding is None`, and that raise is caught
+    # by the `canonical_observer` fault handler, which ISOLATES THE OBSERVER FOR THE REST OF
+    # THE ATTEMPT. So a single missing binding -- from a non-dict context, an action never
+    # registered in a batch (synthesized action, the pending-is-None branch, a non-executing
+    # commitment-plan pop), or any construction failure swallowed above -- would take GT's
+    # entire remaining delivery to zero.
+    #
+    # Losing ONE dose is enormously better than losing the attempt. Skip staging, say why,
+    # and stay recoverable: the evidence is untouched and the next observation can deliver it.
+    # This is correct-or-quiet at the right granularity.
+    if binding is None and getattr(provider_boundary, "attempt_runtime", None) is not None:
+        try:
+            _runtime_ledger_record(
+                kind="canonical_runtime.observation_binding",
+                outcome="suppressed_internal_only",
+                reason="binding_unavailable:capsule_not_staged",
+                chars=0,
+                extra={
+                    "delivery_attempt_id": delivery_attempt_id,
+                    "capsule_hash": str(
+                        getattr(compilation, "capsule_hash", "") or ""
+                    ),
+                    # Names WHICH precondition was missing, so this is a diagnosis and not
+                    # merely a breadcrumb.
+                    "observation_context_present": isinstance(observation_context, dict),
+                },
+            )
+        except Exception:  # noqa: BLE001 -- telemetry never blocks the agent's turn
+            pass
+        return None
+
+    token = _delivery_observation_context.set(binding)
+    try:
+        provider_boundary.stage(
+            compilation,
+            delivery_attempt_id=delivery_attempt_id,
+            observation_binding=binding,
+        )
+        if binding is not None:
+            _runtime_ledger_record(
+                kind="canonical_runtime.observation_binding",
+                outcome="suppressed_internal_only",
+                reason="capsule_staged",
+                chars=0,
+                extra={
+                    "delivery_attempt_id": delivery_attempt_id,
+                    "capsule_hash": str(
+                        getattr(compilation, "capsule_hash", "") or ""
+                    ),
+                    "capsule_chars": len(
+                        getattr(compilation, "capsule_text", "") or ""
+                    ),
+                    "canonical_observation_id": str(
+                        getattr(compilation, "observation_id", "") or ""
+                    ),
+                    "canonical_model_call_id": str(
+                        getattr(compilation, "model_call_id", "") or ""
+                    ),
+                },
+            )
+        return binding
+    finally:
+        _delivery_observation_context.reset(token)
+
+
 @dataclass
 class CanonicalRuntimeAttachment:
     """One attempt-scoped owner joining sensing, reasoning, and provider proof."""
@@ -21297,6 +21880,16 @@ class CanonicalRuntimeAttachment:
         default_factory=dict
     )
     inflight_action_proposals: dict[int, Any] = field(default_factory=dict)
+    pending_observation_contexts: dict[int, dict[str, Any]] = field(
+        default_factory=dict
+    )
+    pending_graph_input_snapshots: dict[int, _SourceSnapshot] = field(
+        default_factory=dict
+    )
+    graph_input_snapshot: _SourceSnapshot | None = None
+    unresolved_graph_refreshes: dict[str, str] = field(default_factory=dict)
+    degraded_graph_repository_revision: str = ""
+    degraded_graph_revision: str = ""
 
     def _record_fault(self, exc: BaseException, *, component: str) -> None:
         """Route live faults through bounded recovery/component isolation."""
@@ -21305,6 +21898,7 @@ class CanonicalRuntimeAttachment:
                 AssuranceStatus,
                 CORE_CORRUPTION_CODES,
                 EventIntegrityError,
+                EventSchemaVersionError,
                 FaultCode,
                 RuntimeHealthState,
                 StateIntegrityError,
@@ -21316,7 +21910,18 @@ class CanonicalRuntimeAttachment:
 
             message = str(exc).lower()
             provider_stage = component.rsplit(":", 1)[-1].upper()
-            if isinstance(exc, EventIntegrityError):
+            # C5 -- ORDER IS LOAD-BEARING. EventSchemaVersionError SUBCLASSES
+            # EventIntegrityError, so it must be tested FIRST or it inherits
+            # CAUSAL_EVENT_GAP, which is a CORE_CORRUPTION_CODE and quarantines the attempt.
+            # A journal written before a field was added to CanonicalEvent/CanonicalResult
+            # cannot re-derive its stored digest -- that is an ordinary compat break, not
+            # tampering, and reporting it as corruption sends the reader hunting for an
+            # attack that never happened while GT silently produces nothing. SUBSTRATE_FAILED
+            # is the honest code: this journal is unusable for THIS build, and nothing about
+            # the attempt's own reasoning is in doubt.
+            if isinstance(exc, EventSchemaVersionError):
+                code = FaultCode.SUBSTRATE_FAILED
+            elif isinstance(exc, EventIntegrityError):
                 code = FaultCode.CAUSAL_EVENT_GAP
             elif isinstance(exc, StateIntegrityError):
                 if "repository revision" in message:
@@ -21420,6 +22025,8 @@ class CanonicalRuntimeAttachment:
         work_state,
         revision,
         pending_operations=(),
+        *,
+        graph_fresh: bool = True,
     ):
         """Derive one open decision from canonical work state, not producers.
 
@@ -21558,10 +22165,21 @@ class CanonicalRuntimeAttachment:
         # Candidate evidence must never manufacture the active causal
         # neighborhood.  Only observable work-state focus may anchor the open
         # decision; unrelated ready facts remain HELD.
+        graph_focused_symbols = (
+            tuple(getattr(work_state, "focused_symbols", ()))
+            if graph_fresh
+            else ()
+        )
         subjects = tuple(
             dict.fromkeys(
                 (
-                    *getattr(work_state, "focused_symbols", ()),
+                    *graph_focused_symbols,
+                    # Bare-subject compatibility is an explicit projection and only for a
+                    # graph-globally unique definition. A colliding name never enters the
+                    # causal neighborhood.
+                    *_focus_unique_bare_symbols(
+                        graph_focused_symbols
+                    ),
                     *getattr(work_state, "focused_files", ()),
                     # C12 -- the graph-resolved DEFINITION HOME of each focused symbol.
                     #
@@ -21581,7 +22199,7 @@ class CanonicalRuntimeAttachment:
                     # built on. Evidence connected to nothing in focus still intersects nothing
                     # and is still HELD -- see the no-bar-weakened pin in the C12 test.
                     *_focus_definition_files(
-                        getattr(work_state, "focused_symbols", ())
+                        graph_focused_symbols
                     ),
                 )
             )
@@ -21633,26 +22251,13 @@ class CanonicalRuntimeAttachment:
     @staticmethod
     def _available_substrates(records) -> tuple[str, ...]:
         """Report only substrates evidenced by the computations that ran."""
-        substrate_by_feature = {
-            "caller_contract": ("graph", "lsp"),
-            "covering_red": ("structured_test_result", "graph"),
-            "def_partition": ("graph", "ast"),
-            "localization": ("graph", "fts5"),
-            "newfile_precedent": ("graph", "history"),
-            "obligations": ("issue_text", "obligation_parser"),
-            "recovery": ("canonical_event_history", "test_fingerprint"),
-            "signature_delta": ("graph", "lsp"),
-            "submit_refusal": ("canonical_validation_state", "graph"),
-            "syntax_result": ("parser_result", "compiler_result"),
-        }
         return tuple(
-            dict.fromkeys(
+            sorted({
                 substrate
                 for item in records
-                for substrate in substrate_by_feature.get(
-                    item.feature_id, ()
-                )
-            )
+                for substrate in getattr(item, "observed_substrates", ())
+                if isinstance(substrate, str) and substrate.strip()
+            })
         )
 
     def _provider_capsule_pending(self) -> bool:
@@ -21776,6 +22381,7 @@ class CanonicalRuntimeAttachment:
         *,
         changed_files,
         revision,
+        graph_fresh: bool = True,
     ):
         """Run canonical typed producers after their structured boundaries."""
         from groundtruth.runtime.canonical_producers import (
@@ -21873,6 +22479,7 @@ class CanonicalRuntimeAttachment:
         if (
             changed
             and not syntax_blocked
+            and graph_fresh
             and _ss_enabled("GT_VERIFY_EXECUTE")
             and self._component_available("covering_red")
         ):
@@ -22101,6 +22708,90 @@ class CanonicalRuntimeAttachment:
                     envelopes.append(envelope)
             except Exception as exc:  # noqa: BLE001 -- isolate this producer
                 self._record_fault(exc, component="recovery")
+        no_test_recovery_event_id = getattr(
+            self.attempt_runtime.work_state,
+            "no_test_recovery_event_id",
+            "",
+        )
+        if (
+            _ss_enabled("GT_HYPOTHESIS")
+            and self._component_available("recovery")
+            and no_test_recovery_event_id
+        ):
+            try:
+                from groundtruth.runtime.evidence_envelope import (
+                    ADVISORY,
+                    WARNING,
+                )
+                from groundtruth.runtime.hypothesis_ledger import (
+                    Advisory,
+                    D_REQUEST_NEW_HYPOTHESIS,
+                    T_NO_DISCRIMINATING_EVIDENCE,
+                )
+
+                committed_events = (
+                    self.attempt_runtime.journal.events(
+                        self.attempt_runtime.attempt_id
+                    )
+                )
+                recovery_event = next(
+                    (
+                        event
+                        for event in reversed(committed_events)
+                        if event.event_id == no_test_recovery_event_id
+                    ),
+                    None,
+                )
+                if (
+                    recovery_event is not None
+                    and committed_events[-1].event_id
+                    == no_test_recovery_event_id
+                    and any(
+                        outcome.kind
+                        is SemanticKind.TEST_EXECUTED_NO_TESTS
+                        for outcome in recovery_event.outcomes
+                    )
+                    and self.attempt_runtime.work_state.edited_files
+                ):
+                    relative = (
+                        self.attempt_runtime.work_state.edited_files[-1]
+                    )
+                    advisory = Advisory(
+                        transition=T_NO_DISCRIMINATING_EVIDENCE,
+                        disposition=D_REQUEST_NEW_HYPOTHESIS,
+                        tier=WARNING,
+                        blocking_eligibility=ADVISORY,
+                        statement=(
+                            "Two consecutive test executions after the "
+                            "repository edit ran zero tests; validation remains "
+                            "unobserved."
+                        ),
+                        evidence_ids=(
+                            f"event:{recovery_event.event_id}",
+                        ),
+                    )
+                    envelope = produce_recovery(
+                        context=ProducerContext(
+                            subject=relative,
+                            provenance=(),
+                            revision=revision,
+                            decision_id="FAILURE_RECOVERY",
+                            causal_neighborhood=(
+                                f"subject:{relative}",
+                                "decision:FAILURE_RECOVERY",
+                            ),
+                            runtime_witnesses=(
+                                self._canonical_event_witness(
+                                    recovery_event
+                                ),
+                            ),
+                        ),
+                        advisory=advisory,
+                    )
+                    if envelope is not None:
+                        envelopes.append(envelope)
+            except Exception as exc:  # noqa: BLE001 -- isolate this producer
+                self._record_fault(exc, component="recovery")
         return tuple(envelopes)
 
     @staticmethod
@@ -22154,15 +22845,43 @@ class CanonicalRuntimeAttachment:
 
         operation = cls._native_action_operation(action)
         command = _effective_cmd(action)
-        _kind, path = _classify_action(action)
-        subject = str(path or "").replace("\\", "/")
-        if not subject and isinstance(action, dict):
+        _kind, classified_path = _classify_action(action)
+        path = classified_path
+        confined_view = operation.value == "VIEW_SOURCE"
+        if confined_view and isinstance(action, dict):
+            path = _struct_field(
+                action,
+                (*_STRUCT_PATH_KEYS, "subject"),
+            ) or path
+            if not path:
+                explicit_targets = action.get("targets")
+                if isinstance(explicit_targets, (list, tuple)):
+                    path = next(
+                        (
+                            str(target)
+                            for target in explicit_targets
+                            if isinstance(target, str) and target.strip()
+                        ),
+                        None,
+                    )
+        subject = (
+            _confined_repo_relative_path(str(path), _root())
+            if confined_view and path
+            else ""
+            if confined_view
+            else str(path or "").replace("\\", "/")
+        )
+        if (
+            not subject
+            and not confined_view
+            and isinstance(action, dict)
+        ):
             for key in ("subject", "symbol", "query", "pattern"):
                 value = action.get(key)
                 if isinstance(value, str) and value.strip():
                     subject = value.strip()
                     break
-        if not subject:
+        if not subject and not confined_view:
             subject = command
         query = ""
         if isinstance(action, dict):
@@ -22177,7 +22896,7 @@ class CanonicalRuntimeAttachment:
             structured_operation=operation.value.lower(),
             subject=subject,
             query=query,
-            targets=((subject,) if path else ()),
+            targets=((subject,) if subject and (path or confined_view) else ()),
             raw_command=command,
         )
 
@@ -22191,6 +22910,8 @@ class CanonicalRuntimeAttachment:
         if not self._component_available("canonical_observer"):
             self.pending_native_actions.pop(key, None)
             self.inflight_action_proposals.pop(key, None)
+            self.pending_observation_contexts.pop(key, None)
+            self.pending_graph_input_snapshots.pop(key, None)
             return None
         pending = self.pending_native_actions.pop(key, None)
         if pending is None:
@@ -22224,6 +22945,11 @@ class CanonicalRuntimeAttachment:
         )
         self.attempt_runtime.append_event(proposal)
         self.inflight_action_proposals[key] = proposal
+        self.pending_graph_input_snapshots[key] = (
+            self.graph_input_snapshot
+            if isinstance(self.graph_input_snapshot, _SourceSnapshot)
+            else _SourceSnapshot(complete=False)
+        )
         return proposal
 
     def _commitment_context(self, message):
@@ -22236,7 +22962,6 @@ class CanonicalRuntimeAttachment:
         )
         from groundtruth.runtime.reasoning_runtime import (
             ActionOperation,
-            CommitmentWindowState,
             EvidenceLifecycle,
             TemporalPredicate,
             canonicalize_evidence_envelopes,
@@ -22244,6 +22969,10 @@ class CanonicalRuntimeAttachment:
 
         actions = tuple(
             (message.get("extra") or {}).get("actions") or ()
+        )
+        observation_context = _canonical_observation_context(
+            message,
+            batch_start_iteration=self.attempt_runtime.work_state.sequence,
         )
         response = (message.get("extra") or {}).get("response") or {}
         provider_response_id = str(
@@ -22268,6 +22997,7 @@ class CanonicalRuntimeAttachment:
                 canonical_action,
                 proposing_model_call_id,
             )
+            self.pending_observation_contexts[id(action)] = observation_context
             intents.append(
                 CommitmentIntent(
                     action=canonical_action,
@@ -22290,6 +23020,7 @@ class CanonicalRuntimeAttachment:
             self.attempt_runtime.work_state,
             self.attempt_runtime.work_state.revision,
             pending_operations=operations,
+            graph_fresh=not self.unresolved_graph_refreshes,
         )
         _publish_active_decision(self, active)
         submit_refusal_on = (
@@ -22469,6 +23200,7 @@ class CanonicalRuntimeAttachment:
                             self.attempt_runtime.work_state,
                             self.attempt_runtime.work_state.revision,
                             pending_operations=operations,
+                            graph_fresh=not self.unresolved_graph_refreshes,
                         )
                         _publish_active_decision(self, active)
             except Exception as exc:  # noqa: BLE001
@@ -22507,10 +23239,8 @@ class CanonicalRuntimeAttachment:
                         TemporalPredicate.ACTIVE_DECISION_CONTEXT_MATCHES,
                         TemporalPredicate.ACTIVE_DECISION_ID_MATCHES,
                         TemporalPredicate.REASONING_GRAPH_CONNECTED,
-                        TemporalPredicate.COMMITMENT_WINDOW_OPEN,
                     }
                 ),
-                commitment_window=CommitmentWindowState.OPEN,
                 available_substrates=self._available_substrates(records),
                 native_observation="",
                 observation_id=f"{proposing_model_call_id}:precommit",
@@ -22521,9 +23251,10 @@ class CanonicalRuntimeAttachment:
                 ),
             )
             if plan.delivery_attempt_id:
-                self.provider_boundary.stage(
-                    plan.compilation,
-                    delivery_attempt_id=plan.delivery_attempt_id,
+                _stage_canonical_compilation(
+                    self.provider_boundary,
+                    plan,
+                    observation_context=observation_context,
                 )
             records = tuple(self.attempt_runtime._evidence.values())
 
@@ -22622,12 +23353,28 @@ class CanonicalRuntimeAttachment:
         for intent, action in zip(context.intents, actions):
             if intent.action.action_id not in execute_ids:
                 self.pending_native_actions.pop(id(action), None)
+                self.pending_observation_contexts.pop(id(action), None)
+                self.pending_graph_input_snapshots.pop(id(action), None)
 
-    def _revision(self, sequence: int):
+    def _revision(
+        self,
+        sequence: int,
+        *,
+        repository_override: "str | None" = None,
+        graph_override: "str | None" = None,
+    ):
         from groundtruth.runtime.reasoning_runtime import RevisionVector
 
-        repository = _canonical_repository_digest(_root())
-        graph = _canonical_file_digest(_db_path())
+        repository = (
+            _canonical_repository_digest(_root())
+            if repository_override is None
+            else repository_override
+        )
+        graph = (
+            _canonical_file_digest(_db_path())
+            if graph_override is None
+            else graph_override
+        )
         lsp = _lsp_revision(repository)
         runtime_evidence = _runtime_evidence_digest(
             attempt_id=self.attempt_runtime.attempt_id,
@@ -22643,10 +23390,12 @@ class CanonicalRuntimeAttachment:
 
     def observe_action_result(self, action, out) -> None:
         """Commit native outcome truth, produce typed evidence, and stage once."""
+        key = id(action)
+        observation_context = self.pending_observation_contexts.pop(key, None)
+        graph_input_before = self.pending_graph_input_snapshots.pop(key, None)
         if not isinstance(out, dict):
             return
         if not self._component_available("canonical_observer"):
-            key = id(action)
             self.pending_native_actions.pop(key, None)
             self.inflight_action_proposals.pop(key, None)
             return
@@ -22662,23 +23411,158 @@ class CanonicalRuntimeAttachment:
             from groundtruth.runtime.reasoning_runtime import (
                 ActionOperation,
                 CanonicalResult,
-                CommitmentWindowState,
                 TemporalPredicate,
                 canonicalize_evidence_envelopes,
             )
 
-            key = id(action)
             proposal = self.inflight_action_proposals.pop(key, None)
             if proposal is None:
                 proposal = self.observe_action_proposal(action)
                 self.inflight_action_proposals.pop(key, None)
+                graph_input_before = self.pending_graph_input_snapshots.pop(
+                    key,
+                    graph_input_before,
+                )
             if proposal is None:
                 return
             sequence = self.attempt_runtime.work_state.sequence + 1
-            after = self._revision(sequence)
             command = _effective_cmd(action)
             changed_files, edit_before_after = _gateway_edit_bridges(
                 action, command
+            )
+            operation = proposal.action.operation
+            repository_after = _canonical_repository_digest(_root())
+            repository_changed = (
+                repository_after
+                != self.attempt_runtime.work_state.revision.repository_content
+            )
+            graph_changed_files: tuple[str, ...] = ()
+            if repository_changed:
+                graph_input_after = _git_graph_input_snapshot(_root())
+                self.graph_input_snapshot = graph_input_after
+                graph_changed_files, graph_delta_proven = _graph_input_delta(
+                    graph_input_before,
+                    graph_input_after,
+                )
+                # PER-TURN, NOT STICKY. This key records "the delta could not be PROVEN on
+                # THIS observation" -- a git-snapshot outcome, not a property of the graph.
+                # It was previously only ever SET, never cleared: the sole `pop` below is
+                # keyed by an incremental relative path, so this sentinel (and any metadata
+                # entry) latched `graph_fresh=False` for the REST OF THE ATTEMPT.
+                #
+                # That is a silent, attempt-scoped kill switch, not a degraded mode: with
+                # graph_fresh False, `_open_decision` drops every focused symbol and every
+                # def-home from `subjects`, `_deep_reactive_envelopes` skips covering_red, and
+                # `_envelope_observes_graph` filters out def_partition, caller_contract,
+                # signature_delta, wrong_surface, name_fold, body_concept, change_surface,
+                # patch_delta and ranked_localization -- i.e. essentially the whole catalogue.
+                # One slow `git status` on a large checkout (20s timeout) would end GT's
+                # contribution for the task, and nothing would say so.
+                #
+                # Clearing it before each recomputation makes it what it always claimed to be:
+                # a statement about this turn. A turn that proves its delta repairs it; a turn
+                # that cannot re-sets it. The per-path entries below keep their own lifecycle.
+                self.unresolved_graph_refreshes.pop(
+                    "<unresolved_repository_change>", None
+                )
+                if not graph_delta_proven:
+                    graph_changed_files = tuple(
+                        dict.fromkeys(
+                            relative
+                            for path in changed_files
+                            if (
+                                relative := _confined_repo_relative_path(
+                                    str(path), _root()
+                                )
+                            )
+                            and _graph_input_kind(relative) == "incremental"
+                        )
+                    )
+                    self.unresolved_graph_refreshes[
+                        "<unresolved_repository_change>"
+                    ] = "graph_input_delta_unresolved"
+                metadata_changes = tuple(
+                    path
+                    for path in graph_changed_files
+                    if _graph_input_kind(path) == "metadata"
+                )
+                for relative in metadata_changes:
+                    self.unresolved_graph_refreshes[relative] = (
+                        "graph_metadata_requires_full_reindex"
+                    )
+                for relative in (
+                    path
+                    for path in graph_changed_files
+                    if _graph_input_kind(path) == "incremental"
+                ):
+                    try:
+                        outcome = _invalidate_on_edit(relative, _root())
+                    except Exception as exc:  # noqa: BLE001 -- fail closed on graph facts
+                        outcome = _L6RefreshOutcome(
+                            False,
+                            f"refresh_exception:{type(exc).__name__}",
+                            "",
+                        )
+                    if isinstance(outcome, _L6RefreshOutcome) and outcome.fresh:
+                        # A later verified refresh repairs only this path. Another path's
+                        # failed generation remains unresolved and keeps graph facts quiet.
+                        self.unresolved_graph_refreshes.pop(relative, None)
+                    else:
+                        self.unresolved_graph_refreshes[relative] = (
+                            getattr(outcome, "reason", "")
+                            or "refresh_outcome_unavailable"
+                        )
+            graph_fresh = not self.unresolved_graph_refreshes
+            graph_override = None
+            if not graph_fresh:
+                refresh_reasons = tuple(
+                    f"{path}:{reason}"
+                    for path, reason in sorted(
+                        self.unresolved_graph_refreshes.items()
+                    )
+                )
+                selected_graph_revision = _canonical_file_digest(_db_path())
+                if (
+                    self.degraded_graph_repository_revision == repository_after
+                    and self.degraded_graph_revision
+                ):
+                    graph_override = self.degraded_graph_revision
+                else:
+                    graph_override = _degraded_graph_generation(
+                        repository_after,
+                        selected_graph_revision,
+                        refresh_reasons,
+                    )
+                    self.degraded_graph_repository_revision = repository_after
+                    self.degraded_graph_revision = graph_override
+                if repository_changed:
+                    _runtime_ledger_record(
+                        kind="canonical_runtime.graph_refresh",
+                        outcome="suppressed_internal_only",
+                        reason="graph_generation_degraded:" + "|".join(
+                            refresh_reasons
+                        ),
+                        chars=0,
+                        extra={
+                            "changed_files": list(changed_files),
+                            "graph_changed_files": list(graph_changed_files),
+                            "repository_revision": repository_after,
+                            "selected_graph_revision": selected_graph_revision,
+                            "degraded_graph_revision": graph_override,
+                            "unresolved_graph_refreshes": dict(
+                                sorted(self.unresolved_graph_refreshes.items())
+                            ),
+                        },
+                    )
+            else:
+                self.degraded_graph_repository_revision = ""
+                self.degraded_graph_revision = ""
+            # Refresh owns graph generation. Derive the canonical vector only after every
+            # changed source path has either reindexed successfully or failed explicitly.
+            after = self._revision(
+                sequence,
+                repository_override=repository_after,
+                graph_override=graph_override,
             )
             result_code = out.get("returncode")
             # The contracted `file_view` boundary for caller_contract. The
@@ -22701,11 +23585,8 @@ class CanonicalRuntimeAttachment:
                     else ()
                 ),
             )
-            operation = proposal.action.operation
             if operation is ActionOperation.TEST:
-                status = event.test_outcome or (
-                    "success" if result_code == 0 else "failed"
-                )
+                status = event.test_outcome or "unobserved"
                 self.last_native_test_outcome = status
             elif operation is ActionOperation.SUBMIT:
                 status = "accepted"
@@ -22741,11 +23622,17 @@ class CanonicalRuntimeAttachment:
                 # the state in which every symbol-subject record is HELD forever and
                 # select_covering_tests is starved.
                 viewed_symbols=_viewed_symbols_for_action(
-                    operation, proposal.action.subject
+                    operation,
+                    proposal.action.subject,
+                    graph_fresh=graph_fresh,
                 ),
                 # The graph-validated search operand (see `_resolved_search_symbols`). Makes
                 # def_partition's subject intersect focus ON its contracted search boundary.
-                resolved_symbols=_resolved_search_symbols(operation, command),
+                resolved_symbols=_resolved_search_symbols(
+                    operation,
+                    command,
+                    graph_fresh=graph_fresh,
+                ),
                 failure_fingerprint=canonical_test_failure_fingerprint(event),
             )
             prior = self.attempt_runtime.journal.events(
@@ -22789,12 +23676,19 @@ class CanonicalRuntimeAttachment:
                 tuple(self.attempt_runtime._evidence.values()),
                 self.attempt_runtime.work_state,
                 after,
+                graph_fresh=graph_fresh,
             )
             _publish_active_decision(self, active)
-            envelopes = gateway_produce_raw(event, self.gateway_state)
-            envelopes = tuple(envelopes) + self._deep_reactive_envelopes(
+            envelopes = tuple(gateway_produce_raw(event, self.gateway_state))
+            envelopes = envelopes + self._deep_reactive_envelopes(
                 changed_files=changed_files,
                 revision=after,
+                graph_fresh=graph_fresh,
+            )
+            envelopes = tuple(
+                envelope
+                for envelope in envelopes
+                if graph_fresh or not _envelope_observes_graph(envelope)
             )
             records = canonicalize_evidence_envelopes(
                 envelopes,
@@ -22814,6 +23708,7 @@ class CanonicalRuntimeAttachment:
                 all_records,
                 self.attempt_runtime.work_state,
                 after,
+                graph_fresh=graph_fresh,
             )
             _publish_active_decision(self, active)
             satisfied = frozenset(
@@ -22823,14 +23718,12 @@ class CanonicalRuntimeAttachment:
                     TemporalPredicate.ACTIVE_DECISION_CONTEXT_MATCHES,
                     TemporalPredicate.ACTIVE_DECISION_ID_MATCHES,
                     TemporalPredicate.REASONING_GRAPH_CONNECTED,
-                    TemporalPredicate.COMMITMENT_WINDOW_OPEN,
                 }
             )
             runtime_sequence = self.attempt_runtime.work_state.sequence
             plan = self.attempt_runtime.prepare_next_inference(
                 decisions=(active,),
                 satisfied_predicates=satisfied,
-                commitment_window=CommitmentWindowState.OPEN,
                 available_substrates=self._available_substrates(all_records),
                 native_observation=str(out.get("output") or ""),
                 observation_id=canonical.observation_id,
@@ -22841,9 +23734,10 @@ class CanonicalRuntimeAttachment:
                 ),
             )
             if plan.delivery_attempt_id:
-                self.provider_boundary.stage(
-                    plan.compilation,
-                    delivery_attempt_id=plan.delivery_attempt_id,
+                _stage_canonical_compilation(
+                    self.provider_boundary,
+                    plan,
+                    observation_context=observation_context,
                 )
                 # OBSERVABILITY, NOT BEHAVIOUR -- the SUCCESS mirror of the `else` below.
                 #
@@ -23589,6 +24483,20 @@ def _canonical_brief_records(env, revision):
                 tier = VERIFIED if verified else WARNING
                 confidence = 0.95 if verified else 0.7
                 mandatory = None
+                components = (
+                    proof.get("components")
+                    if isinstance(proof.get("components"), dict)
+                    else {}
+                )
+                observed_substrates = tuple(sorted({
+                    *({"graph"} if verified else set()),
+                    *(
+                        {"fts5"}
+                        if float(components.get("lex", 0.0) or 0.0) > 0.0
+                        else set()
+                    ),
+                    "repository_paths",
+                }))
             elif label == "obligations":
                 fact_class = "obligations"
                 producer = "spec"
@@ -23617,6 +24525,7 @@ def _canonical_brief_records(env, revision):
                 tier = VERIFIED
                 confidence = 1.0
                 mandatory = MandatoryReason.TASK_OBLIGATION
+                observed_substrates = ("issue_text", "obligation_parser")
             else:
                 continue
 
@@ -23647,6 +24556,7 @@ def _canonical_brief_records(env, revision):
                 causal_value=4,
                 contradiction_resolution=0,
                 anchoring_risk=0 if tier == VERIFIED else 1,
+                observed_substrates=observed_substrates,
             )
             envelopes.append(
                 EvidenceEnvelope.build(
@@ -23771,7 +24681,6 @@ def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> No
     try:
         from groundtruth.runtime.reasoning_runtime import (
             ActiveDecision,
-            CommitmentWindowState,
             DecisionContext,
             TemporalPredicate,
             capsule_budget_for,
@@ -23820,13 +24729,11 @@ def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> No
                 TemporalPredicate.ACTIVE_DECISION_CONTEXT_MATCHES,
                 TemporalPredicate.ACTIVE_DECISION_ID_MATCHES,
                 TemporalPredicate.REASONING_GRAPH_CONNECTED,
-                TemporalPredicate.COMMITMENT_WINDOW_OPEN,
             }
         )
         plan = attachment.attempt_runtime.prepare_next_inference(
             decisions=(active,),
             satisfied_predicates=predicates,
-            commitment_window=CommitmentWindowState.OPEN,
             # DERIVED, never hardcoded. This tuple used to be ("graph", "brief_result"),
             # which shares NOTHING with what the obligations contract requires
             # (("issue_text","obligation_parser") or ("exact_issue_text",
@@ -23889,9 +24796,18 @@ def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> No
             ),
         }
         if plan.delivery_attempt_id:
-            attachment.provider_boundary.stage(
-                plan.compilation,
-                delivery_attempt_id=plan.delivery_attempt_id,
+            _stage_canonical_compilation(
+                attachment.provider_boundary,
+                plan,
+                observation_context=_canonical_observation_context(
+                    {
+                        "content": task_text,
+                        "extra": {"actions": []},
+                    },
+                    batch_start_iteration=(
+                        attachment.attempt_runtime.work_state.sequence
+                    ),
+                ),
             )
             try:
                 _runtime_ledger_record(
@@ -24043,6 +24959,7 @@ def install_canonical_runtime(*, model, agent, env, task):
             provider_boundary=provider_boundary,
             gateway_state=gateway_state,
             graph_revision=graph_revision,
+            graph_input_snapshot=_git_graph_input_snapshot(_root()),
         )
         provider_boundary.fault_handler = (
             lambda stage, exc: attachment._record_fault(

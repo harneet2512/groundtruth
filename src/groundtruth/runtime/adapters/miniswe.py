@@ -265,11 +265,18 @@ def canonicalize_tool_result(
         # would be worse than none -- it would admit unrelated evidence through the relevance
         # intersection, which is the precise failure mode correct-or-quiet exists to prevent.
         outcomes = (
-            outcome(SemanticKind.SOURCE_VIEWED),
-            *(
-                outcome(SemanticKind.SYMBOL_VIEWED, subject=symbol)
-                for symbol in result.viewed_symbols
-            ),
+            (
+                outcome(SemanticKind.SOURCE_VIEWED),
+                *(
+                    outcome(
+                        SemanticKind.SYMBOL_VIEWED,
+                        subject=symbol,
+                    )
+                    for symbol in result.viewed_symbols
+                ),
+            )
+            if action.subject
+            else ()
         )
     elif action.operation is ActionOperation.VIEW_SYMBOL:
         outcomes = (outcome(SemanticKind.SYMBOL_VIEWED),)
@@ -283,16 +290,21 @@ def canonicalize_tool_result(
             else (outcome(SemanticKind.EDIT_FAILED, changed=False),)
         )
     elif action.operation is ActionOperation.TEST:
-        verdict = {
-            "pass": SemanticKind.TEST_PASS,
-            "success": SemanticKind.TEST_PASS,
-            "fail": SemanticKind.TEST_FAIL,
-            "failed": SemanticKind.TEST_FAIL,
-            "env_fail": SemanticKind.TEST_ENV_FAIL,
-        }.get(status)
-        outcomes = (outcome(SemanticKind.TEST_RESULT),) + (
-            (outcome(verdict),) if verdict is not None else ()
-        )
+        if status == "executed_no_tests":
+            outcomes = (outcome(SemanticKind.TEST_EXECUTED_NO_TESTS),)
+        elif status == "unobserved":
+            outcomes = ()
+        else:
+            verdict = {
+                "pass": SemanticKind.TEST_PASS,
+                "success": SemanticKind.TEST_PASS,
+                "fail": SemanticKind.TEST_FAIL,
+                "failed": SemanticKind.TEST_FAIL,
+                "env_fail": SemanticKind.TEST_ENV_FAIL,
+            }.get(status)
+            outcomes = (outcome(SemanticKind.TEST_RESULT),) + (
+                (outcome(verdict),) if verdict is not None else ()
+            )
     elif action.operation is ActionOperation.COMPILE:
         outcomes = (outcome(SemanticKind.COMPILE_RESULT),)
     elif action.operation is ActionOperation.SIGNATURE_CHANGE:
@@ -407,7 +419,23 @@ def canonicalize_tool_event(
                         ),
                     )
                 )
+        elif semantic_event == "test_executed_no_tests":
+            if event.test_outcome == "executed_no_tests":
+                outcomes.append(
+                    SemanticOutcome(
+                        kind=SemanticKind.TEST_EXECUTED_NO_TESTS,
+                        status=event.test_outcome,
+                        authority=Authority.RESULT_DERIVED,
+                        provenance=(
+                            "test_outcome",
+                            "test_protocol",
+                            "exit_status",
+                        ),
+                    )
+                )
         elif semantic_event == "test_result":
+            if event.test_outcome in {"executed_no_tests", "unobserved"}:
+                continue
             provenance = ("test_outcome", "test_protocol", "exit_status")
             outcomes.append(
                 SemanticOutcome(
@@ -602,12 +630,14 @@ def normalize_event(
         try:
             from groundtruth.runtime.patterns import classify_test_observation
             test_outcome, test_protocol = classify_test_observation(
-                command or "", output or "")
+                command or "", output or "", returncode)
         except Exception:  # noqa: BLE001 -- normalization stays correct-or-quiet
             test_outcome = test_protocol = ""
     if not authoritative:
-        if test_outcome:
+        if test_outcome in {"pass", "fail", "env_fail"}:
             observed = ("test_result",)
+        elif test_outcome == "executed_no_tests":
+            observed = ("test_executed_no_tests",)
         elif carrier == KIND_EDIT and (changed_files or edit_before_after):
             observed = ("edit_result",)
         elif exact_viewed or carrier == KIND_VIEW:

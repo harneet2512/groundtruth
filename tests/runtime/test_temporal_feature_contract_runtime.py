@@ -71,6 +71,7 @@ def _evidence(**overrides):
         "anchoring_risk": 0,
         "revision_dependencies": ("nodes", "edges", "props_rev"),
         "transition_history": (),
+        "observed_substrates": ("graph", "lsp"),
     }
     values.update(overrides)
     return rr.EvidenceRecord(**values)

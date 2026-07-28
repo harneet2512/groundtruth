@@ -82,6 +82,7 @@ def _record(
         revision_dependencies=contract.revision_dependencies,
         authority=rr.Authority.RESULT_DERIVED,
         owner_feature_ids=owner_feature_ids,
+        observed_substrates=("parser_result",),
     )
 
 

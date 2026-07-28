@@ -107,6 +107,15 @@ def _evidence() -> rr.EvidenceRecord:
         anchoring_risk=0,
         revision_dependencies=contract.revision_dependencies,
         authority=rr.Authority.STRUCTURED,
+        # REQUIRED for release: the temporal gate authorizes a record only on substrates THAT
+        # RECORD observed, so a fixture declaring none is held at PREREQUISITES_PENDING and
+        # nothing compiles -- `plan.delivery_attempt_id` comes back EMPTY, which is why these
+        # ATOMICITY tests failed in three different-looking ways: `KeyError: ''`, "unknown
+        # delivery attempt", and a rollback assertion that DID NOT RAISE because the injected
+        # failure was never reached. One fixture gap, three misleading symptoms.
+        observed_substrates=tuple(
+            sorted(contract.fallback_policy.preferred_substrates)
+        ),
     )
 
 

@@ -30,10 +30,18 @@ _CONSUMPTION_SCHEMA = "gt.consumption_ledger.v2"
 # Single authority for candidate-local ACQ source witnesses. The proof manifest
 # imports this mapping so its authority contract cannot drift from the collector.
 ACQ_SOURCE_COMPONENTS: dict[str, str] = {
-    "graph_validity": "graph_edge_count+witness_verified",
-    "structural_depth": "structural_signal_count+components.reach",
-    "lexical_FTS5": "fts5_signal_count+components.lex",
-    "semantic_embedder": "semantic_signal_count+components.sem",
+    "graph_validity": (
+        "acquired_graph_edge_count+acquisition_proof.witness_verified"
+    ),
+    "structural_depth": (
+        "acquired_structural_signal_count+acquisition_proof.components.reach"
+    ),
+    "lexical_FTS5": (
+        "acquired_fts5_signal_count+acquisition_proof.components.lex"
+    ),
+    "semantic_embedder": (
+        "acquired_semantic_signal_count+acquisition_proof.components.sem"
+    ),
     "body_retrieval": "components.body|components.content",
     "cochange_history": "components.cochange+cochange_evidence",
     "resolution_honesty": "acquisition_sources.resolution_honesty",
@@ -44,6 +52,19 @@ ACQ_SOURCE_COMPONENTS: dict[str, str] = {
     "determinism": "acquisition_sources.determinism",
 }
 
+# These four sources describe what the acquisition legs found. Their
+# candidate-local authority is ``metrics.acquisition_proof`` even when the
+# delivery re-slot removes every step-0 localization block. The remaining
+# eight sources require a delivered candidate and stay on localization_proof.
+ACQUISITION_PROOF_FEATURES = frozenset({
+    "graph_validity",
+    "structural_depth",
+    "lexical_FTS5",
+    "semantic_embedder",
+})
+if not ACQUISITION_PROOF_FEATURES < set(ACQ_SOURCE_COMPONENTS):
+    raise ValueError("acquisition-proof feature inventory drift")
+
 # Executable source of each persisted candidate-local witness.  This is distinct
 # from this module's collector authority and from brief_cache's terminal artifact
 # persistence.  Keep the keys exact with ACQ_SOURCE_COMPONENTS.
@@ -51,20 +72,24 @@ ACQ_PRODUCER_AUTHORITIES: dict[str, tuple[str, ...]] = {
     "graph_validity": (
         "groundtruth.pretask.graph_localizer.localize",
         "groundtruth.pretask.v1r_brief._l1_signal_counts",
+        "groundtruth.pretask.v1r_brief._acquisition_proof_rows",
     ),
     "structural_depth": (
         "groundtruth.pretask.v7_4_brief._score_variant_C",
         "groundtruth.pretask.v1r_brief._l1_signal_counts",
+        "groundtruth.pretask.v1r_brief._acquisition_proof_rows",
     ),
     "lexical_FTS5": (
         "groundtruth.pretask.hybrid.lexical_file_search",
         "groundtruth.pretask.v7_4_brief._score_variant_C",
         "groundtruth.pretask.v1r_brief._l1_signal_counts",
+        "groundtruth.pretask.v1r_brief._acquisition_proof_rows",
     ),
     "semantic_embedder": (
         "groundtruth.pretask.anchor_select.select_anchors",
         "groundtruth.pretask.v7_4_brief._score_variant_C",
         "groundtruth.pretask.v1r_brief._l1_signal_counts",
+        "groundtruth.pretask.v1r_brief._acquisition_proof_rows",
     ),
     "body_retrieval": (
         "groundtruth.pretask.graph_localizer._content_fts_candidates",
@@ -382,6 +407,27 @@ def _source_features(proof: Mapping[str, Any], metrics: Mapping[str, Any]) -> tu
     """
     components = proof.get("components")
     components = components if isinstance(components, Mapping) else {}
+    found = list(_acquisition_source_features(proof, metrics))
+    if _positive(components.get("body")) or _positive(components.get("content")):
+        found.append("body_retrieval")
+    path = proof.get("path")
+    if (
+        _positive(components.get("cochange"))
+        and isinstance(path, str)
+        and _valid_cochange_evidence(proof, path)
+    ):
+        found.append("cochange_history")
+    found.extend(_extended_source_features(proof))
+    return tuple(found)
+
+
+def _acquisition_source_features(
+    proof: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Validate only the four acquisition-scoped candidate witnesses."""
+    components = proof.get("components")
+    components = components if isinstance(components, Mapping) else {}
     found: list[str] = []
     if (
         _acquired(metrics, "graph_edge_count")
@@ -405,16 +451,6 @@ def _source_features(proof: Mapping[str, Any], metrics: Mapping[str, Any]) -> tu
         and _positive(components.get("sem"))
     ):
         found.append("semantic_embedder")
-    if _positive(components.get("body")) or _positive(components.get("content")):
-        found.append("body_retrieval")
-    path = proof.get("path")
-    if (
-        _positive(components.get("cochange"))
-        and isinstance(path, str)
-        and _valid_cochange_evidence(proof, path)
-    ):
-        found.append("cochange_history")
-    found.extend(_extended_source_features(proof))
     return tuple(found)
 
 
@@ -688,6 +724,31 @@ def _source_field_paths(
     return [f"{base}.acquisition_sources.{feature}"]
 
 
+def _acquisition_source_field_paths(
+    feature: str,
+    proof_index: int,
+    metrics: Mapping[str, Any],
+) -> list[str]:
+    """Name acquisition-scoped lineage without implying rendered bytes."""
+    base = f"metrics.acquisition_proof[{proof_index}]"
+    if feature == "graph_validity":
+        return [
+            _counter_field_path(metrics, "graph_edge_count"),
+            f"{base}.witness_verified",
+            f"{base}.witness",
+        ]
+    component_by_feature = {
+        "structural_depth": ("structural_signal_count", "reach"),
+        "lexical_FTS5": ("fts5_signal_count", "lex"),
+        "semantic_embedder": ("semantic_signal_count", "sem"),
+    }
+    counter, component = component_by_feature[feature]
+    return [
+        _counter_field_path(metrics, counter),
+        f"{base}.components.{component}",
+    ]
+
+
 def collect_acq_provenance(
     brief_payload: Mapping[str, Any] | None,
     consumption_ledger: Mapping[str, Any],
@@ -711,6 +772,53 @@ def collect_acq_provenance(
         raise ValueError("acq provenance: claimed brief payload has no metrics object")
 
     rows = _empty("source_witness_absent")
+    acquisition_raw = metrics.get("acquisition_proof")
+    # A non-empty new array is authoritative. Empty remains legacy-compatible:
+    # historical/fake result objects can acquire an empty whitelisted field at a
+    # cache normalization boundary while still carrying valid localization_proof.
+    acquisition_namespace_present = (
+        isinstance(acquisition_raw, list) and bool(acquisition_raw)
+    )
+    acquisition_by_candidate: dict[str, tuple[int, Mapping[str, Any]]] = {}
+    if acquisition_raw is not None and not isinstance(acquisition_raw, list):
+        raise ValueError("acq provenance: acquisition proof must be a list")
+    if isinstance(acquisition_raw, list):
+        seen_acquisition_ids: set[str] = set()
+        for proof_index, proof in enumerate(acquisition_raw):
+            if not isinstance(proof, Mapping):
+                raise ValueError(
+                    f"acq provenance: acquisition proof {proof_index} is not an object"
+                )
+            rank = proof.get("rank")
+            path = proof.get("path")
+            candidate_id = proof.get("candidate_id")
+            if not isinstance(rank, int) or isinstance(rank, bool) or rank < 1:
+                raise ValueError(
+                    f"acq provenance: invalid acquisition rank at {proof_index}"
+                )
+            if not isinstance(path, str) or not path.strip():
+                continue
+            if not isinstance(candidate_id, str) or not candidate_id:
+                raise ValueError(
+                    f"acq provenance: acquisition candidate id missing at {proof_index}"
+                )
+            if candidate_id in seen_acquisition_ids:
+                raise ValueError("acq provenance: duplicate acquisition candidate id")
+            seen_acquisition_ids.add(candidate_id)
+            acquisition_by_candidate[candidate_id] = (proof_index, proof)
+            for feature in _acquisition_source_features(proof, metrics):
+                if rows[feature]["source_artifact"] is not None:
+                    continue
+                rows[feature].update({
+                    "source_artifact": "brief_result.json",
+                    "blocker": "candidate_delivery_absent",
+                    "candidate_id": candidate_id,
+                    "candidate_path": path,
+                    "source_fields": _acquisition_source_field_paths(
+                        feature, proof_index, metrics,
+                    ),
+                })
+
     blocks = _validated_blocks(brief, metrics.get("block_receipts"))
     proofs = metrics.get("localization_proof")
     if not isinstance(proofs, list):
@@ -770,6 +878,25 @@ def collect_acq_provenance(
             block = matches[0]
             block_id = str(block["block_id"])
         features = _source_features(proof, metrics)
+        if acquisition_namespace_present:
+            acquisition_match = acquisition_by_candidate.get(
+                str(proof.get("candidate_id") or "")
+            )
+            features = tuple(
+                feature
+                for feature in features
+                if (
+                    feature not in ACQUISITION_PROOF_FEATURES
+                    or (
+                        acquisition_match is not None
+                        and feature in _acquisition_source_features(
+                            acquisition_match[1], metrics,
+                        )
+                    )
+                )
+            )
+        else:
+            acquisition_match = None
         if not features:
             continue
         delivery = _producer_delivery_home(
@@ -779,7 +906,14 @@ def collect_acq_provenance(
         receipt = _block_receipt(block, path, messages, delivery_home)
         level = receipt["level"]
         for feature in features:
-            source_fields = _source_field_paths(feature, proof_index, proof, metrics)
+            if feature in ACQUISITION_PROOF_FEATURES and acquisition_match is not None:
+                source_fields = _acquisition_source_field_paths(
+                    feature, acquisition_match[0], metrics,
+                )
+            else:
+                source_fields = _source_field_paths(
+                    feature, proof_index, proof, metrics,
+                )
             producer_payload = str(delivery.get("payload", "")) if delivery else ""
             candidate = {
                 "status": "MEASURED" if level is not None and level >= 2 else "UNMEASURED",

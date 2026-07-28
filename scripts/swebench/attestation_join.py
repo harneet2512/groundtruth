@@ -470,9 +470,9 @@ def _index_block_lineage(
 
     The task-start brief is one DELIVERED ledger row with no top-level
     ``(candidate_id, content_sha256_16)`` — its fact-bearing blocks are sealed
-    individually under ``block_lineage`` (``gt_headless_runner._brief_delivery_extra``:
-    each block carries its own ``candidate_id`` and ``content_sha256_16`` over the exact
-    delivered block bytes). Index each REGISTERED block's identity → the compound row
+    individually under ``block_lineage``: each block carries its own ``candidate_id``
+    and ``content_sha256_16`` over the exact delivered block bytes. Index each
+    REGISTERED block's identity → the compound row
     position so a producer attestation sealed to a block (e.g. a ``localization`` or
     ``obligations`` brief block) can join it on the SAME exact identity the native lane
     rows use. An UNREGISTERED block is recorded as a lineage rejection, never indexed.

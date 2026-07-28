@@ -254,6 +254,18 @@ def test_active_task_and_brief_are_not_directly_mutated_or_premarked_delivered(
     assert not ledger.exists(), "joining has not happened, so DELIVERED cannot be recorded"
 
 
+def test_legacy_step0_delivery_owners_are_absent_from_live_runner() -> None:
+    """Dead host-side owners must not masquerade as canonical delivery plumbing."""
+    legacy_names = (
+        "_brief_delivery_extra",
+        "_persist_brief_localization_attestations",
+        "_persist_brief_obligations_attestations",
+        "_record_brief_delivery",
+        "_BRIEF_LEDGER_WRITE_FAILURES",
+    )
+    assert not [name for name in legacy_names if hasattr(runner, name)]
+
+
 def test_legacy_direct_delivery_paths_are_absent_from_live_runner_and_seam() -> None:
     runner_source = _RUNNER.read_text(encoding="utf-8")
     assert "install_observation_batch_commit" not in runner_source

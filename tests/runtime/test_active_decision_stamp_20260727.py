@@ -241,7 +241,7 @@ def test_deep_reactive_rows_are_stamped_with_the_row_time_decision(monkeypatch, 
         captured = {}
         original = attachment._deep_reactive_envelopes
 
-        def probe(*, changed_files, revision):
+        def probe(*, changed_files, revision, graph_fresh=True):
             captured["stamp"] = seam._current_active_decision()
             # Write a REAL row through the production stamping path at the exact moment
             # the deep-reactive producers write theirs.
@@ -251,7 +251,11 @@ def test_deep_reactive_rows_are_stamped_with_the_row_time_decision(monkeypatch, 
                 reason="row-time probe",
                 chars=7,
             )
-            return original(changed_files=changed_files, revision=revision)
+            return original(
+                changed_files=changed_files,
+                revision=revision,
+                graph_fresh=graph_fresh,
+            )
 
         monkeypatch.setattr(attachment, "_deep_reactive_envelopes", probe)
 
@@ -294,16 +298,8 @@ def test_deep_reactive_rows_are_stamped_with_the_row_time_decision(monkeypatch, 
         attachment.attempt_runtime.journal.close()
 
 
-def test_the_seam_still_passes_OPEN_to_the_runtime():
-    """STAGE-1 SCOPE FENCE. This change records a fact; it must not yet alter delivery.
-
-    If this assertion ever fails, someone has begun Stage 2 (enforcing the window) inside a
-    change that was only supposed to observe it. Stage 2 requires the recorded distribution to
-    show DECISION_WINDOW_EXPIRED and READINESS_RULES_SATISFIED actually firing first -- a gate
-    that never bites proves nothing, and a gate that bites WRONGLY suppresses real evidence.
-    """
+def test_the_seam_does_not_impose_one_global_commitment_window():
+    """The scheduler derives OPEN versus HELD for each record/current decision."""
     src = inspect.getsource(seam)
-    assert src.count("commitment_window=CommitmentWindowState.OPEN") == 3, (
-        "the number of hardcoded-OPEN construction sites changed; if this is Stage 2, "
-        "re-derive the enforcement from the recorded data and update this fence deliberately"
-    )
+    assert "commitment_window=CommitmentWindowState.OPEN" not in src
+    assert "TemporalPredicate.COMMITMENT_WINDOW_OPEN" not in src

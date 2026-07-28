@@ -139,6 +139,20 @@ def test_every_stage_receives_the_same_value():
         source.count("evaluate_feature_contract(")
         + source.count("select_evidence_coalition(")
         + source.count("compile_observation_capsule(")
+        # `_evaluate_current_decision_contract` ADDED to the census 2026-07-28. The C11
+        # per-record commitment-window change moved the runtime's temporal-gate call BEHIND
+        # this module-level helper (it evaluates twice, NOT_OPEN then OPEN). `_runtime_source`
+        # is `inspect.getsource(AttemptReasoningRuntime)`, so the helper's own
+        # `evaluate_feature_contract(` calls live OUTSIDE the counted class -- leaving a
+        # forward at the call site with no matching in-class stage token, i.e. 4 forwards
+        # vs 3 stages.
+        #
+        # The invariant is unchanged and still bites: it is an eligibility-sensitive call
+        # site, it must forward the lever, and a NEW stage added without the flag still
+        # fails here. Only the token list had to learn about the indirection. Counting it
+        # is not weakening -- omitting it would UNDER-count stages and could let a future
+        # unforwarded call site hide inside the discrepancy.
+        + source.count("_evaluate_current_decision_contract(")
     )
     assert forwards == stages, (
         f"{stages} eligibility-sensitive call sites but only {forwards} forward the lever"

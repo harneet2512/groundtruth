@@ -91,8 +91,8 @@ def _compound_brief_row(candidate_id: str, seal16: str, *, fact_class: str = "lo
                 "declared_fact_class": fact_class,
                 "label": "localization-header",
                 "lineage_status": "REGISTERED",
-                # J6: the real writer (_brief_delivery_extra) always pairs a REGISTERED
-                # status with the registered lineage dict; a registered block must carry
+                # J6: the serialized contract pairs a REGISTERED status with the
+                # registered lineage dict; a registered block must carry
                 # both (a bare status alone can no longer seat a truth join).
                 "lineage": lineage_to_dict(build_lineage(
                     runtime_producer_id="v1r_brief",

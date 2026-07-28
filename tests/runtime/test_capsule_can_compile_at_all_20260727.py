@@ -87,6 +87,12 @@ def _record(feature_id: str, subject: str) -> rr.EvidenceRecord:
         causal_value=3,
         contradiction_resolution=0,
         anchoring_risk=0,
+        observed_substrates=tuple(
+            sorted(
+                set(contract.fallback_policy.preferred_substrates)
+                or set(contract.fallback_policy.fallback_substrates)
+            )
+        ),
     )
 
 

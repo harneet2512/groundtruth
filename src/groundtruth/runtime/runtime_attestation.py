@@ -24,6 +24,7 @@ from typing import Any, Mapping, Sequence
 
 from groundtruth.runtime.feature_lineage import CAP_BYTE_OWNER_MECHANISMS
 from groundtruth.runtime.reasoning_runtime import (
+    DECISION_CAPSULE_SCHEMA as _DECISION_CAPSULE_SCHEMA,
     EvidenceLifecycle,
     EvidenceTransitionReason,
     _EVIDENCE_REASON_TRANSITIONS,
@@ -577,7 +578,12 @@ def _validate_compilation_rows(
         expected_capsule_hash = _sha256_text(
             _canonical_json(
                 {
-                    "schema": "gt.decision_capsule.v2",
+                    # IMPORTED, not hardcoded (2026-07-28). This reader RECOMPUTES the capsule
+                    # hash to verify it, so a literal here must match the writer's label
+                    # exactly -- and when the writer bumped v2->v3 this copy silently failed
+                    # every verification, reading as a tamper/identity-rewrite rather than as
+                    # a version skew. Four files held this literal; now one owns it.
+                    "schema": _DECISION_CAPSULE_SCHEMA,
                     "rendered_content_hash": rendered_hash,
                     "evidence_manifest_hash": manifest_hash,
                 }

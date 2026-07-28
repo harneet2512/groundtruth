@@ -2,7 +2,7 @@
 
 The task-start brief is *compound* evidence: one delivery whose fact-bearing blocks
 are each sealed at BLOCK level (``content_sha256_16`` per block, computed over the
-exact delivered block bytes in ``gt_headless_runner._brief_delivery_extra``). The
+exact block spans in the sealed producer receipt). The
 localization blocks are registry-routed to the ``v1r_brief`` producer of the
 ``localization`` §1 class, so their per-block lineage already carries a
 ``producer_registration_match``.  What was missing is the *attestation* leg: an

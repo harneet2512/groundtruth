@@ -428,6 +428,11 @@ class V1RBriefResult:
     acquired_semantic_signal_count: int = 0
     acquired_structural_signal_count: int = 0
     acquired_fts5_signal_count: int = 0
+    # Per-ranked-candidate acquisition witnesses, populated before any delivery
+    # reduction. This is deliberately narrower than ``localization_proof``: it
+    # carries only the four acquisition-leg witnesses and makes no rendered-block,
+    # contribution-attestation, or receipt claim.
+    acquisition_proof: list[dict[str, object]] = field(default_factory=list)
     # --- DELIVERY counts, explicitly named. ``None`` == NOT_EVALUABLE ---
     # Same values as the four legacy fields above, under names that cannot be misread.
     # NOT_EVALUABLE (None) — never 0 — when the minimal/re-slot reduction is what emptied
@@ -474,8 +479,8 @@ class V1RBriefResult:
     # obligations block's candidate_id + seal. HOST-SIDE METADATA — never rendered into
     # brief_text (byte-identical whether populated or not). Empty when there is no
     # delivered obligations block or no persisted extraction record (fail-closed: the
-    # obligations attestation then stays honestly UNMEASURED). Consumed by
-    # gt_headless_runner._persist_brief_obligations_attestations.
+    # obligations attestation then stays honestly UNMEASURED). Consumed by the
+    # canonical task-start evidence adapter.
     obligations_record: dict = field(default_factory=dict)
     # B-31 (Brief-F9): which token counter produced ``token_estimate`` /governed the
     # DOSE rail — ``"gte-modernbert-bpe"`` (the baked HF BPE vocabulary) or
@@ -2816,6 +2821,56 @@ def _l1_acquisition_counts(
                if isinstance(r, dict) and r.get("path")]
     aligned = [r for r in records if isinstance(r, dict) and r.get("path")]
     return _l1_signal_counts(graph_db, entries, aligned)  # type: ignore[arg-type]
+
+
+def _acquisition_proof_rows(
+    records: list[dict],
+    *,
+    witness_by_file: dict[str, str],
+    witness_verified_by_file: dict[str, bool],
+) -> list[dict[str, object]]:
+    """Project ranked candidates into acquisition-only proof rows.
+
+    The population is ``records`` (the terminal ranked set), never the rendered
+    candidate set. Only the four C16 acquisition-leg inputs are admitted. In
+    particular this array cannot carry block seals, contribution attestations,
+    co-change evidence, or the extended sources whose proof contract requires a
+    delivered localization candidate.
+    """
+    proof: list[dict[str, object]] = []
+    for rank, record in enumerate(records, start=1):
+        if not isinstance(record, dict):
+            continue
+        path = str(record.get("path", "") or "")
+        if not path:
+            continue
+        normalized = path.replace("\\", "/").lstrip("./").lstrip("/")
+        raw_components = record.get("components")
+        raw_components = raw_components if isinstance(raw_components, dict) else {}
+        components: dict[str, float] = {}
+        for name in ("reach", "lex", "sem"):
+            try:
+                components[name] = float(raw_components.get(name, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                components[name] = 0.0
+        witness = (
+            witness_by_file.get(path)
+            or witness_by_file.get(normalized)
+            or ""
+        )
+        witness_verified = bool(
+            witness_verified_by_file.get(path)
+            or witness_verified_by_file.get(normalized)
+        )
+        proof.append({
+            "candidate_id": _localization_candidate_id(path),
+            "rank": rank,
+            "path": path,
+            "witness": witness,
+            "witness_verified": witness_verified,
+            "components": components,
+        })
+    return proof
 
 
 def _l1_signal_counts(
@@ -6799,6 +6854,13 @@ def generate_v1r_brief(
     # vs the bare localizer's 0.60 = grep parity). The token budget governs how much
     # per-file evidence the agent reads, NOT which files it is told to consider.
     _loc_files = list(entries)
+    # C16: acquisition evidence is projected from the terminal ranked population
+    # before token/minimal/re-slot delivery reduction can remove candidates.
+    _acquisition_proof = _acquisition_proof_rows(
+        top_records,
+        witness_by_file=_witness_by_file,
+        witness_verified_by_file=_witness_verified_by_file,
+    )
     while tok > max_brief_tokens and len(entries) > 1:
         entries = entries[:-1]
         _scores = _scores[: len(entries)]
@@ -7107,6 +7169,7 @@ def generate_v1r_brief(
         acquired_semantic_signal_count=_acq_sem,
         acquired_structural_signal_count=_acq_struct,
         acquired_fts5_signal_count=_acq_fts5,
+        acquisition_proof=_acquisition_proof,
         delivered_graph_edge_count=_d_ge,
         delivered_semantic_signal_count=_d_sem,
         delivered_structural_signal_count=_d_struct,
@@ -7241,6 +7304,7 @@ def generate_v1r_brief(
                 "acquired_semantic_signal_count": _acq_sem,
                 "acquired_structural_signal_count": _acq_struct,
                 "acquired_fts5_signal_count": _acq_fts5,
+                "acquisition_proof": _acquisition_proof,
                 "delivered_graph_edge_count": _NOT_EVALUABLE if _d_ge is None else _d_ge,
                 "delivered_semantic_signal_count": _NOT_EVALUABLE if _d_sem is None else _d_sem,
                 "delivered_structural_signal_count": _NOT_EVALUABLE if _d_struct is None else _d_struct,

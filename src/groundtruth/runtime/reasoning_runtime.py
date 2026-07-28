@@ -23,6 +23,50 @@ class EventIntegrityError(RuntimeError):
     """The append-only causal event stream failed an integrity check."""
 
 
+class EventSchemaVersionError(EventIntegrityError):
+    """A stored event was written under a DIFFERENT canonical hash schema.
+
+    C5. `content_hash` is a derived property recomputed from the live class definition on
+    every access (`_canonical_data` walks `asdict`, with no allowlist and no omit-if-default),
+    so ADDING A FIELD to `CanonicalResult` or `CanonicalEvent` changes the recomputed digest
+    of rows that were ALREADY WRITTEN. `EventStore.events` then compares the recomputed hash
+    to the stored one, they differ, and it raises.
+
+    Before this class existed the failure surfaced as `"event content hash/tamper mismatch"`,
+    which `gt_mini_patch._record_fault` maps to `FaultCode.CAUSAL_EVENT_GAP` -- a member of
+    `CORE_CORRUPTION_CODES` -- so an ordinary schema evolution was reported as TAMPERING and
+    silently isolated the canonical observer for the rest of the attempt. A compat break that
+    presents as an attack is the worst possible diagnosis: it sends the reader hunting for
+    corruption that does not exist while GT quietly produces nothing.
+
+    Subclasses `EventIntegrityError` deliberately, so every existing `except` clause keeps
+    catching it and no caller regresses; only the MESSAGE and the type narrow.
+    """
+
+
+# The schema identity of the canonical hash. BUMP THIS whenever a field is added to, removed
+# from, or renamed on `CanonicalEvent` / `CanonicalResult` / anything they serialize -- that is
+# exactly when previously-written rows stop re-deriving their stored digest. Bumping it turns a
+# silent false tamper accusation into an explicit, self-describing version mismatch.
+CANONICAL_HASH_SCHEMA = "gt.canonical_event.v2"
+
+# THE SINGLE SOURCE OF TRUTH for the capsule-hash preimage label. Exported 2026-07-28 because
+# this literal was hand-duplicated in FOUR places -- `reasoning_runtime` (the writer),
+# `runtime_attestation.py:580` and `gt_feature_metrics.py:1843` (readers that RECOMPUTE the
+# hash to verify it), and a provider-boundary test. Bumping only the writer silently broke
+# every reader: 8 runtime_attestation tests and 3 canonical-ack collector tests went red
+# because they recomputed a v2 digest and compared it to a v3 one.
+#
+# That is the same "two things that must agree by hand" defect the metrics work has been
+# unpicking all week, sitting inside the mechanism whose whole job is to make disagreement
+# detectable. A hash label that four files must keep in sync manually is not a version -- it
+# is four versions that happen to match today.
+#
+# BUMP THIS (here, once) whenever `_evidence_manifest` or the rendered-content hash definition
+# changes. Every consumer must IMPORT it; a new hardcoded copy is a defect.
+DECISION_CAPSULE_SCHEMA = "gt.decision_capsule.v3"
+
+
 class StateIntegrityError(RuntimeError):
     """A canonical projection cannot be trusted or deterministically reduced."""
 
@@ -80,6 +124,7 @@ class SemanticKind(str, Enum):
     TEST_PASS = "TEST_PASS"
     TEST_FAIL = "TEST_FAIL"
     TEST_ENV_FAIL = "TEST_ENV_FAIL"
+    TEST_EXECUTED_NO_TESTS = "TEST_EXECUTED_NO_TESTS"
     COMPILE_RESULT = "COMPILE_RESULT"
     EDIT_PROPOSED = "EDIT_PROPOSED"
     EDIT_EXECUTED = "EDIT_EXECUTED"
@@ -213,20 +258,16 @@ class CanonicalResult:
     hit_count: int | None = None
     files_hit: tuple[str, ...] = ()
     changed_files: tuple[str, ...] = ()
-    # The SYMBOLS the operation actually showed, resolved against repository truth (graph.db) --
-    # never scraped from the rendered output. The mirror of `files_hit`, and the input the
-    # reducer needs to populate `focused_symbols`, which is otherwise permanently empty on a
-    # shell harness: `SYMBOL_VIEWED` is reachable only from `ActionOperation.VIEW_SYMBOL`, and
-    # no shell command can be classified into that operation deterministically without semantic
-    # reading. An empty `focused_symbols` holds every symbol-subject evidence record forever at
-    # the relevance intersection (`evaluate_feature_contract`) and separately starves
-    # `select_covering_tests`, which fail-closes on an empty symbol set.
+    # The repository-qualified SYMBOL identities the operation actually showed, resolved against
+    # repository truth (graph.db) -- never scraped from rendered output. Values use the stable
+    # ``repo/path.py::symbol`` representation so same-named definitions in different files do
+    # not collapse in WorkState. The field shape and empty default remain unchanged for stored
+    # canonical-event compatibility.
     viewed_symbols: tuple[str, ...] = ()
-    # The SEARCH operand, when it is a bare symbol the graph actually defines. A literal command
-    # argument validated against repository truth -- never an inference from rendered output.
-    # `def_partition`'s canonical_subject IS this symbol, so carrying it lets the relevance
-    # intersection match on the `search_result` boundary the fact is contracted to, instead of
-    # only once the agent later opens the defining file.
+    # The repository-qualified identity for a bare SEARCH operand only when the graph resolves
+    # it to exactly one production definition file. A literal command argument validated
+    # against repository truth -- never an inference from rendered output. Ambiguous bare names
+    # abstain rather than widening focus to several unrelated definitions.
     resolved_symbols: tuple[str, ...] = ()
     failure_fingerprint: str = ""
     signature_before: str = ""
@@ -309,7 +350,12 @@ class CanonicalEvent:
             raise ValueError("ACTION_RESULT requires action and result")
 
     def canonical_json(self) -> str:
-        return _canonical_json(self)
+        # Events rehydrated from an older hash schema must retain the exact bytes
+        # that own their historical content hash. The parsed dataclass may contain
+        # newer defaulted fields, but those defaults were not present in the
+        # append-only row and must not silently rewrite its causal identity.
+        stored = getattr(self, "_stored_canonical_json", None)
+        return stored if isinstance(stored, str) else _canonical_json(self)
 
     @property
     def content_hash(self) -> str:
@@ -318,7 +364,7 @@ class CanonicalEvent:
     @classmethod
     def from_json(cls, payload: str) -> "CanonicalEvent":
         raw = json.loads(payload)
-        return cls(
+        event = cls(
             event_id=raw["event_id"],
             attempt_id=raw["attempt_id"],
             sequence=int(raw["sequence"]),
@@ -408,6 +454,11 @@ class CanonicalEvent:
                 else None
             ),
         )
+        # Host-only compatibility state. This is deliberately not a dataclass
+        # field, so it never enters `_canonical_data`, equality, or new-event
+        # serialization. `object.__setattr__` is required by the frozen type.
+        object.__setattr__(event, "_stored_canonical_json", payload)
+        return event
 
 
 @dataclass(frozen=True)
@@ -423,6 +474,8 @@ class WorkState:
     search_count: int = 0
     test_count: int = 0
     compile_count: int = 0
+    consecutive_no_test_results: int = 0
+    no_test_recovery_event_id: str = ""
     current_failures: tuple[str, ...] = ()
     failure_scopes: tuple[tuple[str, str], ...] = ()
     submit_proposed: bool = False
@@ -467,6 +520,12 @@ class WorkState:
             search_count=int(raw.get("search_count", 0)),
             test_count=int(raw.get("test_count", 0)),
             compile_count=int(raw.get("compile_count", 0)),
+            consecutive_no_test_results=int(
+                raw.get("consecutive_no_test_results", 0)
+            ),
+            no_test_recovery_event_id=str(
+                raw.get("no_test_recovery_event_id", "")
+            ),
             current_failures=tuple(raw.get("current_failures", ())),
             failure_scopes=tuple(
                 (str(scope), str(fingerprint))
@@ -484,9 +543,56 @@ def _append_unique(values: tuple[str, ...], value: str) -> tuple[str, ...]:
     return values + (value,)
 
 
+_REPOSITORY_SYMBOL_SEPARATOR = "::"
+
+
+def repository_symbol_identity(file_path: str, symbol: str) -> str:
+    """Return the stable repository-qualified identity for one graph definition.
+
+    This remains a string so canonical event and WorkState JSON shapes do not change. Paths are
+    separator-normalized and leading ``./`` segments are removed; repository-root translation
+    belongs to the graph resolver that owns the path authority.
+    """
+    path = str(file_path or "").strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    name = str(symbol or "").strip()
+    if (
+        not path
+        or not name
+        or _REPOSITORY_SYMBOL_SEPARATOR in path
+        or _REPOSITORY_SYMBOL_SEPARATOR in name
+    ):
+        return ""
+    return f"{path}{_REPOSITORY_SYMBOL_SEPARATOR}{name}"
+
+
+def split_repository_symbol_identity(identity: str) -> tuple[str, str] | None:
+    """Split ``repo/path.py::symbol`` without treating a legacy bare name as qualified."""
+    value = str(identity or "").strip()
+    path, separator, symbol = value.rpartition(_REPOSITORY_SYMBOL_SEPARATOR)
+    if not separator:
+        return None
+    normalized = repository_symbol_identity(path, symbol)
+    if not normalized:
+        return None
+    normalized_path, _separator, normalized_symbol = normalized.rpartition(
+        _REPOSITORY_SYMBOL_SEPARATOR
+    )
+    return normalized_path, normalized_symbol
+
+
 def _validation_scope(subject: str) -> str:
     normalized = str(subject).strip().replace("\\", "/")
     return _sha256(normalized)[:16] if normalized else ""
+
+
+def _normalize_repository_subject(subject: str) -> str:
+    """Normalize a repository-relative subject without resolving parent traversal."""
+    normalized = str(subject or "").strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
@@ -509,6 +615,8 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
     search_count = state.search_count
     test_count = state.test_count
     compile_count = state.compile_count
+    consecutive_no_test_results = state.consecutive_no_test_results
+    no_test_recovery_event_id = state.no_test_recovery_event_id
     current_failures = state.current_failures
     failure_scopes = state.failure_scopes
     submit_proposed = state.submit_proposed
@@ -532,8 +640,9 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
             if not focused_symbols and phase is Phase.ORIENTATION:
                 phase = Phase.DISCOVERY
                 rules.append("search_without_selected_symbol")
-            # A search whose operand is a bare symbol the GRAPH defines puts that symbol in
-            # play. Carried as metadata rather than as a SYMBOL_VIEWED outcome on purpose:
+            # A search whose bare operand resolves to one repository-qualified graph definition
+            # puts that identity in play. Carried as metadata rather than as a SYMBOL_VIEWED
+            # outcome on purpose:
             # that kind advances `phase` to UNDERSTANDING, and searching is not understanding
             # -- `_active_decision` derives the open decision from the phase, so a false
             # advance would make the oracle reason about the wrong moment. Phase handling above
@@ -568,7 +677,22 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
                 focused_files = _append_unique(focused_files, outcome.subject)
                 phase = Phase.IMPLEMENTATION
                 repository_changed = True
+                # The recovery threshold belongs to the current edit epoch.
+                # A zero-test result observed before this mutation cannot count
+                # as one of two executions after it.
+                consecutive_no_test_results = 0
                 rules.append("repository_mutation")
+        elif outcome.kind is SemanticKind.TEST_EXECUTED_NO_TESTS:
+            consecutive_no_test_results += 1
+            phase = Phase.VALIDATION
+            if (
+                consecutive_no_test_results == 2
+                and edited_files
+                and not no_test_recovery_event_id
+            ):
+                no_test_recovery_event_id = event.event_id
+                phase = Phase.RECOVERY
+                rules.append("repeated_no_tests_after_edit")
         elif outcome.kind in {
             SemanticKind.TEST_RESULT,
             SemanticKind.TEST_PASS,
@@ -577,6 +701,12 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
         }:
             saw_test_result = True
             phase = Phase.VALIDATION
+            if outcome.kind in {
+                SemanticKind.TEST_PASS,
+                SemanticKind.TEST_FAIL,
+                SemanticKind.TEST_ENV_FAIL,
+            }:
+                consecutive_no_test_results = 0
             if outcome.kind in {SemanticKind.TEST_FAIL, SemanticKind.TEST_ENV_FAIL}:
                 fingerprint = outcome.failure_fingerprint or outcome.subject
                 scope = _validation_scope(outcome.subject)
@@ -629,6 +759,7 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
                     )
         elif outcome.kind is SemanticKind.COMPILE_RESULT:
             saw_compile_result = True
+            consecutive_no_test_results = 0
             phase = Phase.VALIDATION
         elif outcome.kind is SemanticKind.SUBMIT_PROPOSED:
             submit_proposed = True
@@ -708,6 +839,7 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
         SemanticKind.TEST_PASS,
         SemanticKind.TEST_FAIL,
         SemanticKind.TEST_ENV_FAIL,
+        SemanticKind.TEST_EXECUTED_NO_TESTS,
         SemanticKind.COMPILE_RESULT,
         SemanticKind.SUBMIT_PROPOSED,
         SemanticKind.SUBMIT_BLOCKED,
@@ -729,6 +861,8 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
         search_count=search_count,
         test_count=test_count,
         compile_count=compile_count,
+        consecutive_no_test_results=consecutive_no_test_results,
+        no_test_recovery_event_id=no_test_recovery_event_id,
         current_failures=current_failures,
         failure_scopes=failure_scopes,
         submit_proposed=submit_proposed,
@@ -1262,6 +1396,7 @@ class EventStore:
                 previous_event_hash TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
                 canonical_json TEXT NOT NULL,
+                hash_schema TEXT NOT NULL DEFAULT '',
                 UNIQUE(attempt_id, sequence)
             );
             CREATE TABLE IF NOT EXISTS verified_snapshots (
@@ -1274,6 +1409,28 @@ class EventStore:
             );
             """
         )
+        # C5 -- additive migration for journals created before the hash-schema marker existed.
+        # `CREATE TABLE IF NOT EXISTS` does NOT retrofit a column onto an existing file, so
+        # without this an older journal would keep reporting `hash_schema` as absent rather
+        # than as ''. Same shape as the `RuntimeJournal.open` migration ("additive migration
+        # keeps those append-only records readable without rewriting them").
+        #
+        # ALTER TABLE ADD COLUMN is DDL, not a row UPDATE, so the `canonical_events_no_update`
+        # append-only trigger does not fire and no historical row is rewritten -- the existing
+        # rows simply read ''. An empty marker means "verify the stored bytes as
+        # historical schema"; it is not permission to recompute them with the live
+        # dataclass shape.
+        _event_columns = {
+            str(row[1])
+            for row in self._connection.execute(
+                "PRAGMA table_info(canonical_events)"
+            ).fetchall()
+        }
+        if "hash_schema" not in _event_columns:
+            self._connection.execute(
+                "ALTER TABLE canonical_events "
+                "ADD COLUMN hash_schema TEXT NOT NULL DEFAULT ''"
+            )
         self._connection.commit()
 
     def close(self) -> None:
@@ -1332,7 +1489,7 @@ class EventStore:
             return
         heads: dict[str, tuple[int, str] | None] = {}
         seen_ids: set[str] = set()
-        rows: list[tuple[str, str, int, str, str, str]] = []
+        rows: list[tuple[str, str, int, str, str, str, str]] = []
 
         try:
             self.connection.execute("BEGIN IMMEDIATE")
@@ -1345,6 +1502,15 @@ class EventStore:
                     seen_ids=seen_ids,
                 )
                 seen_ids.add(event.event_id)
+                payload = event.canonical_json()
+                # A rehydrated historical event owns its original serialized
+                # bytes. Never relabel those bytes as the current schema merely
+                # because this process is current.
+                hash_schema = (
+                    CANONICAL_HASH_SCHEMA
+                    if payload == _canonical_json(event)
+                    else ""
+                )
                 rows.append(
                     (
                         event.event_id,
@@ -1352,15 +1518,16 @@ class EventStore:
                         event.sequence,
                         event.previous_event_hash,
                         event.content_hash,
-                        event.canonical_json(),
+                        payload,
+                        hash_schema,
                     )
                 )
             self.connection.executemany(
                 """
                 INSERT INTO canonical_events(
                     event_id, attempt_id, sequence, previous_event_hash,
-                    content_hash, canonical_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    content_hash, canonical_json, hash_schema
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -1369,12 +1536,75 @@ class EventStore:
             self.connection.rollback()
             raise
 
+    @staticmethod
+    def _verified_event_row(
+        row: Sequence[object],
+        *,
+        attempt_id: str,
+    ) -> CanonicalEvent:
+        """Verify one stored row before interpreting its hash schema.
+
+        Raw stored bytes own the append-only integrity claim. Schema labels are
+        interpreted only after that claim passes, otherwise a corrupt payload
+        could hide behind an arbitrary "old schema" marker.
+        """
+        row_event_id = str(row[0])
+        row_sequence = int(row[1])
+        row_parent_hash = str(row[2])
+        row_content_hash = str(row[3])
+        payload = str(row[4])
+        row_hash_schema = str(row[5] or "")
+
+        if _sha256(payload) != row_content_hash:
+            raise EventIntegrityError(
+                f"event content hash/tamper mismatch at sequence {row_sequence}"
+            )
+
+        if row_hash_schema and row_hash_schema != CANONICAL_HASH_SCHEMA:
+            raise EventSchemaVersionError(
+                f"canonical event at sequence {row_sequence} uses unknown hash "
+                f"schema {row_hash_schema!r}; this build reads "
+                f"{CANONICAL_HASH_SCHEMA!r}"
+            )
+
+        try:
+            event = CanonicalEvent.from_json(payload)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise EventIntegrityError(
+                f"corrupt canonical event payload at sequence {row_sequence}"
+            ) from exc
+
+        if (
+            event.event_id != row_event_id
+            or event.attempt_id != attempt_id
+            or event.sequence != row_sequence
+            or event.previous_event_hash != row_parent_hash
+        ):
+            raise EventIntegrityError(
+                f"event identity/tamper mismatch at sequence {row_sequence}"
+            )
+
+        # A row claiming the current schema must reproduce the current canonical
+        # shape exactly. A hash-valid older payload carrying a current marker is
+        # schema drift, not content tampering.
+        if (
+            row_hash_schema == CANONICAL_HASH_SCHEMA
+            and _canonical_json(event) != payload
+        ):
+            raise EventSchemaVersionError(
+                f"canonical event at sequence {row_sequence} claims hash schema "
+                f"{CANONICAL_HASH_SCHEMA!r} but its payload does not round-trip "
+                "through that schema"
+            )
+        return event
+
     def events(self, attempt_id: str, *, after_sequence: int = 0) -> tuple[CanonicalEvent, ...]:
         parent_hash = ""
         if after_sequence:
             parent = self.connection.execute(
                 """
-                SELECT content_hash
+                SELECT event_id, sequence, previous_event_hash, content_hash,
+                       canonical_json, hash_schema
                 FROM canonical_events
                 WHERE attempt_id = ? AND sequence = ?
                 """,
@@ -1384,10 +1614,12 @@ class EventStore:
                 raise EventIntegrityError(
                     "event tail has no committed parent at requested sequence"
                 )
-            parent_hash = str(parent[0])
+            self._verified_event_row(parent, attempt_id=attempt_id)
+            parent_hash = str(parent[3])
         rows = self.connection.execute(
             """
-            SELECT event_id, sequence, previous_event_hash, content_hash, canonical_json
+            SELECT event_id, sequence, previous_event_hash, content_hash, canonical_json,
+                   hash_schema
             FROM canonical_events
             WHERE attempt_id = ? AND sequence > ?
             ORDER BY sequence ASC
@@ -1397,26 +1629,10 @@ class EventStore:
         result: list[CanonicalEvent] = []
         expected_sequence = after_sequence + 1
         for row in rows:
-            row_event_id = str(row[0])
             row_sequence = int(row[1])
             row_parent_hash = str(row[2])
             row_content_hash = str(row[3])
-            try:
-                event = CanonicalEvent.from_json(str(row[4]))
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise EventIntegrityError(
-                    f"corrupt canonical event payload at sequence {row[1]}"
-                ) from exc
-            if (
-                event.event_id != row_event_id
-                or event.attempt_id != attempt_id
-                or event.sequence != row_sequence
-                or event.previous_event_hash != row_parent_hash
-                or event.content_hash != row_content_hash
-            ):
-                raise EventIntegrityError(
-                    f"event content hash/tamper mismatch at sequence {row_sequence}"
-                )
+            event = self._verified_event_row(row, attempt_id=attempt_id)
             if row_sequence != expected_sequence:
                 raise EventIntegrityError(
                     f"event sequence gap at {row_sequence}; expected {expected_sequence}"
@@ -3326,6 +3542,7 @@ class SuppressionReason(str, Enum):
     NOT_READY = "NOT_READY"
     STALE = "STALE"
     ALREADY_VISIBLE = "ALREADY_VISIBLE"
+    ALREADY_ACQUIRED = "ALREADY_ACQUIRED"
     SUPERSEDED = "SUPERSEDED"
     REDUNDANT_ROLE = "REDUNDANT_ROLE"
     BUDGET = "BUDGET"
@@ -3392,6 +3609,15 @@ class EvidenceRecord:
     # CAP byte owners are audit lineage on the canonical FACT computation. They
     # never become separate evidence objects and are never model-facing.
     owner_feature_ids: tuple[str, ...] = ()
+    # Runtime substrates observed by the producer computation. This is not a
+    # declaration of what the feature would prefer; the temporal gate consumes
+    # only this producer-owned execution evidence.
+    observed_substrates: tuple[str, ...] = ()
+    # Operational lineage for a standing task obligation. The root producer
+    # record has an empty source id; a rematerialized decision-window generation
+    # names that immutable root. This never changes model-facing evidence.
+    standing_source_evidence_id: str = ""
+    decision_window_generation: str = ""
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -3402,6 +3628,7 @@ class EvidenceRecord:
             "transition_history",
             "visible_to_decision_ids",
             "owner_feature_ids",
+            "observed_substrates",
         ):
             object.__setattr__(self, field_name, tuple(getattr(self, field_name)))
         if not self.evidence_id or not self.feature_id:
@@ -3413,6 +3640,40 @@ class EvidenceRecord:
         ):
             raise ValueError(
                 "owner_feature_ids must be sorted unique GT_* audit identities"
+            )
+        if (
+            self.observed_substrates
+            != tuple(sorted(set(self.observed_substrates)))
+            or any(not item.strip() for item in self.observed_substrates)
+        ):
+            raise ValueError(
+                "observed_substrates must be sorted unique non-empty identities"
+            )
+        if (
+            self.standing_source_evidence_id == self.evidence_id
+            or (
+                self.standing_source_evidence_id
+                and not self.decision_window_generation
+            )
+            or (
+                self.decision_window_generation
+                and not self.decision_window_generation.startswith("GT-W-")
+            )
+            or (
+                (
+                    self.standing_source_evidence_id
+                    or self.decision_window_generation
+                )
+                and (
+                    self.feature_id != "obligations"
+                    or self.mandatory_reason
+                    is not MandatoryReason.TASK_OBLIGATION
+                )
+            )
+        ):
+            raise ValueError(
+                "standing evidence lineage requires a task obligation, a "
+                "GT-W generation, and a distinct source for rematerialized rows"
             )
         if not self.roles or len(set(self.roles)) != len(self.roles):
             raise ValueError("evidence roles must be non-empty and unique")
@@ -4060,6 +4321,18 @@ def _evidence_generation_projection(
         superseded=False,
         transition_history=(),
         owner_feature_ids=(),
+        # The window marker is runtime-owned scheduling state, not part of the
+        # producer computation identity. The source identity remains part of
+        # the generation: a clone can never merge back into its root.
+        decision_window_generation=(
+            "GT-W-PROJECTION"
+            if (
+                evidence.feature_id == "obligations"
+                and evidence.mandatory_reason
+                is MandatoryReason.TASK_OBLIGATION
+            )
+            else ""
+        ),
     )
 
 
@@ -4067,7 +4340,7 @@ def _merge_same_evidence_generation(
     existing: EvidenceRecord,
     incoming: EvidenceRecord,
 ) -> EvidenceRecord:
-    """Preserve lifecycle while enriching authorized byte-owner audit lineage."""
+    """Preserve lifecycle while enriching authorized runtime-owned lineage."""
 
     if existing.evidence_id != incoming.evidence_id:
         raise StateIntegrityError("cannot merge different evidence identities")
@@ -4080,6 +4353,21 @@ def _merge_same_evidence_generation(
         raise StateIntegrityError(
             "evidence identity reused with different canonical generation"
         )
+    existing_window = existing.decision_window_generation
+    incoming_window = incoming.decision_window_generation
+    if existing_window and incoming_window and existing_window != incoming_window:
+        if existing.lifecycle not in {
+            EvidenceLifecycle.DISCOVERED,
+            EvidenceLifecycle.PENDING,
+            EvidenceLifecycle.READY,
+            EvidenceLifecycle.HELD,
+        }:
+            raise StateIntegrityError(
+                "provider-bound evidence decision generation cannot change"
+            )
+        merged_window = incoming_window
+    else:
+        merged_window = existing_window or incoming_window
     return replace(
         existing,
         owner_feature_ids=tuple(
@@ -4088,6 +4376,71 @@ def _merge_same_evidence_generation(
                 | set(incoming.owner_feature_ids)
             )
         ),
+        decision_window_generation=merged_window,
+    )
+
+
+def decision_window_generation(
+    *,
+    attempt_id: str,
+    decision_context: DecisionContext,
+    decision_window_key: str,
+) -> str:
+    """Return the stable scheduling generation for one open decision window."""
+
+    if not attempt_id:
+        raise ValueError("attempt_id is required")
+    digest = _sha256(
+        json.dumps(
+            {
+                "attempt_id": attempt_id,
+                "context": decision_context.value,
+                "window": decision_window_key or "attempt-start",
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )[:16]
+    return f"GT-W-{digest}"
+
+
+def rematerialize_task_obligation(
+    source: EvidenceRecord,
+    *,
+    generation: str,
+) -> EvidenceRecord:
+    """Mint one fresh operational generation from immutable task evidence.
+
+    The already-released source remains untouched. The clone resets only
+    lifecycle/delivery-visibility projections and receives a deterministic id
+    bound to the source plus the reopened decision window.
+    """
+
+    if (
+        source.feature_id != "obligations"
+        or source.mandatory_reason is not MandatoryReason.TASK_OBLIGATION
+        or source.standing_source_evidence_id
+        or not source.decision_window_generation
+        or source.decision_window_generation == generation
+        or not generation
+    ):
+        raise ValueError(
+            "standing rematerialization requires a root task obligation "
+            "from a different non-empty generation"
+        )
+    digest = _sha256(f"{source.evidence_id}\0{generation}")[:16]
+    return replace(
+        source,
+        evidence_id=f"{source.evidence_id}-w{digest}",
+        lifecycle=EvidenceLifecycle.PENDING,
+        fresh=True,
+        already_visible=False,
+        superseded=False,
+        transition_history=(),
+        visible_to_decision_ids=(),
+        standing_source_evidence_id=source.evidence_id,
+        decision_window_generation=generation,
     )
 
 
@@ -4292,12 +4645,14 @@ class CanonicalEvidenceSemantics:
     causal_value: int
     contradiction_resolution: int
     anchoring_risk: int
+    observed_substrates: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in (
             "roles",
             "causal_neighborhood",
             "revision_dependencies",
+            "observed_substrates",
         ):
             object.__setattr__(self, field_name, tuple(getattr(self, field_name)))
         if not self.roles or len(set(self.roles)) != len(self.roles):
@@ -4308,6 +4663,15 @@ class CanonicalEvidenceSemantics:
             raise ValueError("canonical semantics causal neighborhood is required")
         if not self.revision_dependencies:
             raise ValueError("canonical semantics revision dependencies are required")
+        if (
+            self.observed_substrates
+            != tuple(sorted(set(self.observed_substrates)))
+            or any(not item.strip() for item in self.observed_substrates)
+        ):
+            raise ValueError(
+                "canonical semantics observed_substrates must be sorted unique "
+                "non-empty identities"
+            )
         for field_name in (
             "failure_prevention",
             "causal_value",
@@ -4606,6 +4970,7 @@ def canonical_evidence_from_envelope(
             revision_dependencies=contract.revision_dependencies,
             authority=semantics.authority,
             owner_feature_ids=_authorized_cap_byte_owners(envelope, lineage),
+            observed_substrates=semantics.observed_substrates,
         )
     except (TypeError, ValueError):
         return None
@@ -4616,15 +4981,22 @@ def canonicalize_evidence_envelopes(
     *,
     committed_event_hashes: Mapping[str, str] | None = None,
 ) -> tuple[EvidenceRecord, ...]:
-    """Normalize and merge physical evidence while unioning audit ownership."""
+    """Normalize and merge physical evidence while unioning audit ownership.
+
+    A semantic conflict poisons its physical identity for the entire batch.
+    Later duplicates cannot launder a fail-closed suppression back into output.
+    """
 
     by_id: dict[str, EvidenceRecord] = {}
+    poisoned_ids: set[str] = set()
     for envelope in envelopes:
         record = canonical_evidence_from_envelope(
             envelope,
             committed_event_hashes=committed_event_hashes,
         )
         if record is None:
+            continue
+        if record.evidence_id in poisoned_ids:
             continue
         previous = by_id.get(record.evidence_id)
         if previous is None:
@@ -4633,10 +5005,19 @@ def canonicalize_evidence_envelopes(
         # The dedup key is a physical-content identity. Conflicting canonical
         # semantics under that identity indicate corrupt producer output and
         # are suppressed instead of silently merged.
-        comparable_previous = replace(previous, owner_feature_ids=())
-        comparable_record = replace(record, owner_feature_ids=())
+        comparable_previous = replace(
+            previous,
+            owner_feature_ids=(),
+            observed_substrates=(),
+        )
+        comparable_record = replace(
+            record,
+            owner_feature_ids=(),
+            observed_substrates=(),
+        )
         if comparable_previous != comparable_record:
             by_id.pop(record.evidence_id, None)
+            poisoned_ids.add(record.evidence_id)
             continue
         by_id[record.evidence_id] = replace(
             previous,
@@ -4644,6 +5025,25 @@ def canonicalize_evidence_envelopes(
                 sorted(
                     set(previous.owner_feature_ids)
                     | set(record.owner_feature_ids)
+                )
+            ),
+            # INTERSECTION, deliberately -- and NOT an inconsistency with the
+            # `owner_feature_ids` union directly above. The two fields answer different
+            # questions. Ownership is additive: both features do own this record. SUBSTRATE
+            # ASSURANCE is not: it authorizes RELEASE, so a merged record may only claim the
+            # substrates BOTH observations support. Union would let one envelope's observation
+            # authorize a release the other could not support -- the same cross-lending hole
+            # the per-record gate exists to close.
+            #
+            # I changed this to a union on 2026-07-28 and
+            # `test_duplicate_substrates_use_order_independent_intersection_and_owner_union`
+            # ([empty] / [disjoint] / [partial-overlap]) caught it. Reverted. Recording it so
+            # the "union is obviously right / it is inconsistent with the line above" argument
+            # is not made a third time: the asymmetry is the point.
+            observed_substrates=tuple(
+                sorted(
+                    set(previous.observed_substrates)
+                    & set(record.observed_substrates)
                 )
             ),
         )
@@ -4822,7 +5222,27 @@ def evaluate_feature_contract(
             reason=EvidenceTransitionReason.OTHER_DECISION_CURRENTLY_ACTIVE,
         )
 
-    available = set(context.available_substrates)
+    # PER-RECORD, deliberately. `available_substrates` is an ATTEMPT-WIDE union computed by
+    # `_available_substrates(records)`, so without this intersection one record that observed
+    # `parser_result` LENDS its assurance to a different record that observed nothing. That is
+    # the same defect class as C12's possession gate: attributing one thing's evidence to
+    # another. Pinned by `test_other_record_cannot_lend_parser_assurance_to_target_record`.
+    #
+    # I briefly "fixed" this by treating an empty `observed_substrates` as "unreported, do not
+    # constrain". That was WRONG and their test caught it: it re-opens exactly the cross-record
+    # lending hole, because attempt-wide availability would then authorize a record that
+    # observed nothing. Correct-or-quiet means a record that cannot evidence its own substrate
+    # stays HELD.
+    #
+    # THE REAL RESIDUAL IS ELSEWHERE, and weakening this gate must not be used to paper over
+    # it: `_evidence_record_from_json` reads `raw.get("observed_substrates", ())`, and the
+    # evidence journal has NO schema marker or migration, so every row written before the
+    # field existed rehydrates to `()` and is permanently HELD on replay/resume. That is a
+    # JOURNAL VERSIONING gap and must be fixed there -- the same way `canonical_events` got
+    # `hash_schema` -- not by making this gate permissive.
+    available = set(context.available_substrates).intersection(
+        evidence.observed_substrates
+    )
     preferred_available = bool(
         available.intersection(contract.fallback_policy.preferred_substrates)
     )
@@ -4876,6 +5296,36 @@ def evaluate_feature_contract(
     )
 
 
+def _evaluate_current_decision_contract(
+    contract: FeatureContract,
+    evidence: EvidenceRecord,
+    context: TemporalRuntimeContext,
+    *,
+    role_driven: bool = False,
+) -> TemporalContractEvaluation:
+    """Derive the scheduler window from record relevance, never a global scalar."""
+    relevance = evaluate_feature_contract(
+        contract,
+        evidence,
+        replace(
+            context,
+            commitment_window=CommitmentWindowState.NOT_OPEN,
+        ),
+        role_driven=role_driven,
+    )
+    if not relevance.relevant:
+        return relevance
+    return evaluate_feature_contract(
+        contract,
+        evidence,
+        replace(
+            context,
+            commitment_window=CommitmentWindowState.OPEN,
+        ),
+        role_driven=role_driven,
+    )
+
+
 @dataclass(frozen=True)
 class EvidenceRef:
     evidence_id: str
@@ -4887,6 +5337,7 @@ class EvidenceRef:
     provenance: tuple[str, ...]
     grade: EvidenceGrade
     owner_feature_ids: tuple[str, ...] = ()
+    subject: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "roles", tuple(self.roles))
@@ -4963,6 +5414,13 @@ def _evidence_record_from_json(payload: str) -> EvidenceRecord:
             raw.get("visible_to_decision_ids", ())
         ),
         owner_feature_ids=tuple(raw.get("owner_feature_ids", ())),
+        observed_substrates=tuple(raw.get("observed_substrates", ())),
+        standing_source_evidence_id=str(
+            raw.get("standing_source_evidence_id", "")
+        ),
+        decision_window_generation=str(
+            raw.get("decision_window_generation", "")
+        ),
     )
 
 
@@ -4979,6 +5437,7 @@ def _oracle_decision_from_json(payload: str) -> OracleDecision:
             provenance=tuple(item["provenance"]),
             grade=EvidenceGrade(int(item["grade"])),
             owner_feature_ids=tuple(item.get("owner_feature_ids", ())),
+            subject=str(item.get("subject", "")),
         )
         for item in raw["coalition"]
     )
@@ -5091,6 +5550,7 @@ class CapsuleCompilation:
     decision_id: str = ""
     rendered_content_hash: str = ""
     evidence_manifest_hash: str = ""
+    evidence_manifest_json: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence_ids", tuple(self.evidence_ids))
@@ -5112,6 +5572,21 @@ class CapsuleCompilation:
                 self.evidence_manifest_hash,
                 field_name="evidence_manifest_hash",
             )
+            if self.evidence_manifest_json:
+                try:
+                    manifest = json.loads(self.evidence_manifest_json)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "evidence_manifest_json must be valid JSON"
+                    ) from exc
+                if (
+                    _canonical_json(manifest) != self.evidence_manifest_json
+                    or _sha256(self.evidence_manifest_json)
+                    != self.evidence_manifest_hash
+                ):
+                    raise ValueError(
+                        "evidence manifest JSON/hash identity mismatch"
+                    )
         if self.binding is not None:
             if (
                 self.delivery_attempt is None
@@ -5195,6 +5670,9 @@ def _capsule_compilation_from_json(payload: str) -> CapsuleCompilation:
         ),
         evidence_manifest_hash=str(
             raw.get("evidence_manifest_hash", "")
+        ),
+        evidence_manifest_json=str(
+            raw.get("evidence_manifest_json", "")
         ),
     )
 
@@ -5284,6 +5762,7 @@ def _evidence_manifest(decision: OracleDecision) -> Mapping[str, Any]:
         "evidence": [
             {
                 "evidence_id": item.evidence_id,
+                "subject": item.subject,
                 "roles": [role.value for role in item.roles],
                 "claim": item.claim,
                 "actionable_consequence": item.actionable_consequence,
@@ -5567,7 +6046,23 @@ def compile_observation_capsule(
     evidence_manifest_hash = _sha256(manifest_json)
     capsule_hash = _sha256(
         _canonical_json({
-            "schema": "gt.decision_capsule.v2",
+            # v3 (2026-07-28): BUMPED because `_evidence_manifest` gained a `subject` key,
+            # which changes `evidence_manifest_hash` and therefore this preimage. Leaving the
+            # label at v2 while the preimage moved is exactly the C5 defect one layer up --
+            # an unversioned hash change that makes old and new digests silently
+            # incomparable. `capsule_hash` is not decorative: it flows into
+            # `observation_candidate_id` -> `candidate_dedup_sha256` -> `opportunity_id`, and
+            # `retry_candidates` compares `previous.capsule_hash != capsule_hash` to detect
+            # RETRY_CAPSULE_MISMATCH. A silent preimage change therefore breaks joins AND
+            # manufactures spurious retry mismatches for any capsule compiled before it.
+            #
+            # Model-visible bytes are unaffected: `capsule_text` and its
+            # `rendered_content_hash` are untouched, and `_renderer_manifest_matches` does not
+            # consult `subject`. This is a JOIN-KEY version bump, not a delivery change.
+            #
+            # From the exported constant -- see DECISION_CAPSULE_SCHEMA for why this must never
+            # be a literal again. Readers import it and recompute against the same label.
+            "schema": DECISION_CAPSULE_SCHEMA,
             "rendered_content_hash": rendered_content_hash,
             "evidence_manifest_hash": evidence_manifest_hash,
         })
@@ -5609,6 +6104,7 @@ def compile_observation_capsule(
         decision_id=decision.decision_id,
         rendered_content_hash=rendered_content_hash,
         evidence_manifest_hash=evidence_manifest_hash,
+        evidence_manifest_json=manifest_json,
     )
 
 
@@ -5728,6 +6224,7 @@ def _evidence_ref(record: EvidenceRecord) -> EvidenceRef:
         provenance=record.provenance,
         grade=record.grade,
         owner_feature_ids=record.owner_feature_ids,
+        subject=record.subject,
     )
 
 
@@ -5774,6 +6271,7 @@ def select_evidence_coalition(
     *,
     reasoning_graph: ReasoningGraph | None = None,
     role_driven: bool = False,
+    acquired_subjects: Iterable[str] = (),
 ) -> OracleDecision:
     """Select one smallest connected, decision-complete evidence coalition.
 
@@ -5788,6 +6286,11 @@ def select_evidence_coalition(
     can never hold more than ``{caller_contract, obligations}``, so most of what the
     ``useful_roles`` tables ask for is unreachable.
 
+    ``acquired_subjects`` is native WorkState truth, not provider visibility. It
+    suppresses only target-identity evidence whose normalized repository subject
+    was already viewed or edited; additive contract and validation evidence about
+    the same file remains eligible.
+
     This relaxes NOTHING else. Role fit, connectivity, freshness, already-visible,
     supersession, duplicate-claim dedup, the token budget and -- decisively --
     decision-completeness all still apply: a coalition without a record carrying the
@@ -5799,6 +6302,11 @@ def select_evidence_coalition(
 
     suppressed: dict[str, SuppressionRecord] = {}
     eligible: list[EvidenceRecord] = []
+    acquired = frozenset(
+        normalized
+        for subject in acquired_subjects
+        if (normalized := _normalize_repository_subject(subject))
+    )
     neighborhood = {
         node
         for node in decision.causal_neighborhood
@@ -5855,6 +6363,11 @@ def select_evidence_coalition(
             or decision.decision_id in item.visible_to_decision_ids
         ):
             reason = SuppressionReason.ALREADY_VISIBLE
+        elif (
+            EvidenceRole.TARGET_IDENTITY in item.roles
+            and _normalize_repository_subject(item.subject) in acquired
+        ):
+            reason = SuppressionReason.ALREADY_ACQUIRED
         elif item.superseded:
             reason = SuppressionReason.SUPERSEDED
         elif (
@@ -6273,18 +6786,91 @@ class AttemptReasoningRuntime:
             assurance=self.failure_state.assurance,
         )
 
+    def _refresh_standing_obligation_generations(
+        self,
+        active: ActiveDecision,
+    ) -> None:
+        """Advance standing task evidence without rewinding provider proof."""
+
+        if not self.role_driven_coalition:
+            return
+        generation = decision_window_generation(
+            attempt_id=self.attempt_id,
+            decision_context=active.context,
+            decision_window_key=self.work_state.decision_window_key,
+        )
+        roots = tuple(
+            item
+            for item in sorted(
+                self._evidence.values(), key=lambda row: row.evidence_id
+            )
+            if (
+                item.feature_id == "obligations"
+                and item.mandatory_reason is MandatoryReason.TASK_OBLIGATION
+                and not item.standing_source_evidence_id
+            )
+        )
+        for source in roots:
+            prior_generation = source.decision_window_generation
+            if not prior_generation:
+                # Backward-compatible rows and newly ingested producer records
+                # acquire their first operational window without changing
+                # lifecycle, claim, provenance, or model-facing bytes.
+                self.ingest_evidence(
+                    replace(
+                        source,
+                        decision_window_generation=generation,
+                    )
+                )
+                continue
+            if prior_generation == generation:
+                continue
+            if source.lifecycle in {
+                EvidenceLifecycle.DISCOVERED,
+                EvidenceLifecycle.PENDING,
+                EvidenceLifecycle.READY,
+                EvidenceLifecycle.HELD,
+            }:
+                # No provider-proven dose exists yet. Move the operational
+                # window marker and let the original generation compete.
+                self.ingest_evidence(
+                    replace(
+                        source,
+                        decision_window_generation=generation,
+                    )
+                )
+                continue
+            if (
+                active.context is DecisionContext.PATCH_CONSTRUCTION
+                and source.lifecycle
+                in {
+                    EvidenceLifecycle.RELEASED,
+                    EvidenceLifecycle.DELIVERED,
+                    EvidenceLifecycle.ACTIVE,
+                    EvidenceLifecycle.SATISFIED,
+                }
+            ):
+                rematerialized = rematerialize_task_obligation(
+                    source,
+                    generation=generation,
+                )
+                # Deterministic identity makes this idempotent within a window;
+                # ingest_evidence preserves an already-advanced clone lifecycle.
+                self.ingest_evidence(rematerialized)
+
     def prepare_next_inference(
         self,
         *,
         decisions: Sequence[ActiveDecision],
         satisfied_predicates: frozenset[TemporalPredicate],
-        commitment_window: CommitmentWindowState,
+        commitment_window: CommitmentWindowState | None = None,
         available_substrates: Sequence[str],
         native_observation: str,
         observation_id: str,
         source_model_call_id: str,
         model_call_id: str,
     ) -> InferencePlan:
+        """Prepare one inference; the legacy global window input is intentionally inert."""
         decision_candidates = tuple(decisions)
         if not decision_candidates:
             raise ValueError("at least one active decision candidate is required")
@@ -6296,6 +6882,13 @@ class AttemptReasoningRuntime:
                 source_model_call_id=source_model_call_id,
                 model_call_id=model_call_id,
             )
+
+        # Candidate order is a priority, not a guarantee that candidate zero
+        # can form a complete coalition. Prepare standing evidence for every
+        # candidate before arbitration so a fallback patch decision is not
+        # starved by an incomplete earlier decision.
+        for candidate in decision_candidates:
+            self._refresh_standing_obligation_generations(candidate)
 
         # Readiness is decision-independent. Advance it once, then arbitrate
         # exactly one active decision over that stable evidence snapshot.
@@ -6347,13 +6940,13 @@ class AttemptReasoningRuntime:
                 contract = feature_contract_for(evidence.feature_id)
                 if contract is None:
                     continue
-                evaluation = evaluate_feature_contract(
+                evaluation = _evaluate_current_decision_contract(
                     contract,
                     evidence,
                     TemporalRuntimeContext(
                         active_decision=active,
                         current_revision=self.work_state.revision,
-                        commitment_window=commitment_window,
+                        commitment_window=CommitmentWindowState.NOT_OPEN,
                         satisfied_predicates=satisfied_predicates,
                         available_substrates=tuple(available_substrates),
                     ),
@@ -6395,6 +6988,10 @@ class AttemptReasoningRuntime:
                         scheduled,
                         reasoning_graph=self.reasoning_graph,
                         role_driven=self.role_driven_coalition,
+                        acquired_subjects=(
+                            *self.work_state.viewed_files,
+                            *self.work_state.edited_files,
+                        ),
                     ),
                     temporal_evaluations,
                 )

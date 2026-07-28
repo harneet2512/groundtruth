@@ -112,6 +112,7 @@ def test_covering_red_requires_executed_attributable_structured_failure() -> Non
     assert record.roles == (rr.EvidenceRole.BLOCKER, rr.EvidenceRole.VALIDATION)
     assert record.mandatory_reason is rr.MandatoryReason.BLOCKER
     assert record.revision == REVISION
+    assert record.observed_substrates == ("structured_test_result",)
 
 
 @pytest.mark.parametrize(
@@ -171,6 +172,7 @@ def test_syntax_result_owns_only_gt_edit_check_and_preserves_native_diagnostic()
     assert record.grade is rr.EvidenceGrade.VERIFIED
     assert record.authority is rr.Authority.RESULT_DERIVED
     assert record.revision_dependencies == ("edit_rev",)
+    assert record.observed_substrates == ("parser_result",)
 
     active = rr.ActiveDecision(
         decision_id="decision-7",
@@ -251,6 +253,7 @@ def test_recovery_converts_valid_typed_advisory_without_upgrading_confidence() -
     record = rr.canonical_evidence_from_envelope(envelope)
     assert record is not None
     assert record.feature_id == "recovery"
+    assert record.observed_substrates == ("canonical_event_history",)
     assert record.owner_feature_ids == ("GT_HYPOTHESIS",)
     assert record.grade is rr.EvidenceGrade.WARNING
     assert record.mandatory_reason is None
@@ -315,6 +318,7 @@ def test_submit_refusal_assigns_only_the_physical_output_owner(
     record = rr.canonical_evidence_from_envelope(envelope)
     assert record is not None
     assert record.feature_id == "submit_refusal"
+    assert record.observed_substrates == ("canonical_validation_state",)
     assert record.owner_feature_ids == (expected_owner,)
     assert record.mandatory_reason is rr.MandatoryReason.BLOCKER
     assert record.grade is rr.EvidenceGrade.VERIFIED

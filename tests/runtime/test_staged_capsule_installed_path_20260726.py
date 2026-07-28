@@ -118,6 +118,7 @@ def _caller_contract_record(decision: rr.ActiveDecision) -> rr.EvidenceRecord:
         causal_value=3,
         contradiction_resolution=0,
         anchoring_risk=0,
+        observed_substrates=("graph",),
     )
 
 

@@ -61,6 +61,11 @@ def test_native_action_exception_is_not_falsely_recorded_as_success() -> None:
             rr.FaultCode.CAUSAL_EVENT_GAP,
         ),
         (
+            rr.EventSchemaVersionError("unsupported canonical hash schema"),
+            "canonical_observer",
+            rr.FaultCode.SUBSTRATE_FAILED,
+        ),
+        (
             rr.StateIntegrityError("repository revision mismatch"),
             "canonical_observer",
             rr.FaultCode.REPOSITORY_REVISION_INCONSISTENCY,
@@ -352,6 +357,7 @@ def test_unseen_obligation_causes_fresh_inference_before_native_edit(
         anchoring_risk=0,
         revision_dependencies=contract.revision_dependencies,
         authority=rr.Authority.RESULT_DERIVED,
+        observed_substrates=("issue_text", "obligation_parser"),
     )
     attachment.attempt_runtime.ingest_evidence(obligation)
     event_count_before = len(

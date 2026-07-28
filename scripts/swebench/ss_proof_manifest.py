@@ -15,7 +15,10 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 try:
-    from scripts.swebench.acq_provenance import ACQ_SOURCE_COMPONENTS
+    from scripts.swebench.acq_provenance import (
+        ACQUISITION_PROOF_FEATURES,
+        ACQ_SOURCE_COMPONENTS,
+    )
     from scripts.swebench.gt_feature_inventory import (
         canonical_feature_inventory,
         performance_metric_definitions,
@@ -27,7 +30,10 @@ try:
     )
     from scripts.swebench.gt_run_metrics import normalized_right_censor_observation
 except ModuleNotFoundError:
-    from acq_provenance import ACQ_SOURCE_COMPONENTS  # type: ignore[no-redef]
+    from acq_provenance import (  # type: ignore[no-redef]
+        ACQUISITION_PROOF_FEATURES,
+        ACQ_SOURCE_COMPONENTS,
+    )
     from gt_feature_inventory import (  # type: ignore[no-redef]
         canonical_feature_inventory,
         performance_metric_definitions,
@@ -153,7 +159,11 @@ def _acq_row(name: str) -> dict[str, Any]:
             "independent_delivery_gates": False,
         },
         "eligibility": {
-            "authority": "brief_result.json#metrics.localization_proof",
+            "authority": (
+                "brief_result.json#metrics.acquisition_proof"
+                if name in ACQUISITION_PROOF_FEATURES
+                else "brief_result.json#metrics.localization_proof"
+            ),
             "predicate": component if supported else f"UNREGISTERED:{name}",
         },
         "ownership": {

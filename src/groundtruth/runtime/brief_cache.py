@@ -21,7 +21,7 @@ BRIEF_RESULT_SCHEMA = "gt.brief_result.v1"
 _METRIC_FIELDS = (
     "effective_w_sem", "semantic_signal_count",
     "rendered_candidate_count", "k_sem_top", "sem_components",
-    "localization_proof",
+    "localization_proof", "acquisition_proof",
     # ACQ phase-A: V1R already computes these witnesses. Keep them across the
     # gate->emit boundary so the sealed cache retains acquisition provenance.
     # Sidecar-only: none participates in ``brief_text``.
@@ -68,7 +68,7 @@ def _extract_metrics(obj: Any) -> dict:
         v = _get(k)
         # Some metric payloads may carry dataclass-ish or iterator values; keep only
         # JSON-safe scalars/lists/dicts so proof persistence cannot affect briefing.
-        if k in {"sem_components", "localization_proof"} and v is not None and not isinstance(v, (list, dict, int, float, str, bool)):
+        if k in {"sem_components", "localization_proof", "acquisition_proof"} and v is not None and not isinstance(v, (list, dict, int, float, str, bool)):
             try:
                 v = list(v)
             except TypeError:
@@ -90,6 +90,12 @@ def _canonical_acquisition_payload(payload: Any) -> dict[str, Any]:
     proofs = metrics.get("localization_proof")
     if not isinstance(proofs, list):
         raise ValueError("brief determinism: localization proof is not a list")
+    acquisition_proofs = metrics.get("acquisition_proof")
+    if acquisition_proofs is None:
+        acquisition_proofs = []
+        metrics["acquisition_proof"] = acquisition_proofs
+    elif not isinstance(acquisition_proofs, list):
+        raise ValueError("brief determinism: acquisition proof is not a list")
     metrics.pop("determinism_witness", None)
     for proof in proofs:
         if not isinstance(proof, dict):
@@ -97,6 +103,8 @@ def _canonical_acquisition_payload(payload: Any) -> dict[str, Any]:
         sources = proof.get("acquisition_sources")
         if isinstance(sources, dict):
             sources.pop("determinism", None)
+    if any(not isinstance(proof, dict) for proof in acquisition_proofs):
+        raise ValueError("brief determinism: malformed acquisition proof")
     return {"brief_text": brief_text.strip(), "metrics": metrics}
 
 

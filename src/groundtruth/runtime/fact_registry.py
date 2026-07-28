@@ -866,7 +866,7 @@ FRESHNESS_SURFACES: dict[str, tuple[str, ...]] = {
     "def_ref_partition": ("nodes", "edges"),
     "name_fold": ("nodes", "edges"),
     "wrong_surface": ("nodes", "edges"),
-    "trace_frame": ("nodes", "edges"),
+    # Trace frames come from parser-validated repository paths, not graph.db.
     "signature_mismatch": ("nodes", "edges"),
     "companion_surface": ("nodes", "edges"),
     "cochange_partner": ("nodes", "edges", "cochanges"),
@@ -885,6 +885,30 @@ FRESHNESS_SURFACES: dict[str, tuple[str, ...]] = {
 # PATCH-bound classes: freshness is the working-tree PATCH, not any GRAPH surface (the
 # registry ``freshness_deps`` name is ``patch_rev``). Produced AND delivered on the same
 # event, so a graph change must never falsely stale them -> empty ``valid_until``.
+# NOT a home for merely graph-INDEPENDENT classes. `_self_check_executable` enforces that
+# every member carries a `patch_rev` registry dep ("patch-bound 'X' lacks a patch_rev registry
+# dep"), so membership means "keyed to the patch", not "does not read graph.db".
+#
+# I tried adding `trace_frame` here on 2026-07-28 and the self-check rejected it immediately --
+# correctly. Recording the attempt so it is not retried: `_produce_trace` (`gateway.py:2773`)
+# genuinely opens no database (it is `parse_stack_traces` + `_to_repo_rel`, declaring
+# `observed_substrates=("repository_paths",)`), so the PREMISE behind removing it from
+# `FRESHNESS_SURFACES` is true -- but this is the wrong mechanism to express it, and there is
+# no right one today.
+#
+# Consequence of the current state, stated plainly: an unmapped class falls through
+# `if not surfaces or not subs: return graph_rev, graph_rev`, so `trace_frame` is now staled by
+# the WHOLE-GRAPH composite -- including `properties`/`closure`/`cochanges`, which it never
+# reads. That is MORE conservative than before, i.e. it over-expires rather than serving stale
+# facts, which is the safe direction and matches the docstring's "over-conservative, never
+# stale". It is a precision loss, not a correctness hole.
+#
+# The real residual is the CROSS-CHECK: `registry_graph_surfaces("trace_frame")` still returns
+# ("nodes","edges","content_fts"), so the class claims graph deps it does not have, and the
+# `_SURFACE_NARROWINGS` deletion means `_self_check_executable` no longer covers it -- it
+# passes by EXCLUSION rather than by satisfaction. Fixing that properly needs either a
+# GRAPH_INDEPENDENT_FACTCLASSES mechanism (returning `(graph_rev, "")` with no patch_rev
+# requirement) or corrected canonical deps for the class.
 PATCH_BOUND_FACTCLASSES: frozenset[str] = frozenset({"covering_verdict"})
 
 # The physical DB sub-revision surfaces (``subrev_<surface>``) a freshness token may key on.
@@ -911,12 +935,11 @@ _DEP_TO_DB_SURFACE: dict[str, str | None] = {
     "issue": None,
 }
 
-# Documented NARROWINGS: a finer evidence_type may legitimately DROP a canonical graph dep.
-# ``trace_frame`` resolves ``file:line`` from nodes/edges only — it does no body search, so
-# ``content_fts`` (a dep of its canonical ``localization`` class) is NOT a trace dep. Any
-# UNdocumented drop of a canonical graph dep by an operational surface trips the cross-check.
+# Documented NARROWINGS apply only to graph-backed evidence. Trace frames are
+# parser-derived from validated repository paths and never read graph.db, so
+# they are absent here even though canonical localization revision dependencies
+# remain conservatively broader.
 _SURFACE_NARROWINGS: dict[str, frozenset[str]] = {
-    "trace_frame": frozenset({"content_fts"}),
     # SM-2b: the gateway caller-break derives its "N callers in M files" purely from the CALLS
     # graph (nodes + edges); it never reads the per-symbol ``properties`` surface that its
     # canonical ``caller_contract`` class (contract_map, which DOES render property facts)

@@ -14,7 +14,6 @@ from scripts.swebench.acq_provenance import collect_acq_provenance
 from scripts.swebench.consumption_ledger import build_consumption_ledger
 from scripts.swebench.gt_feature_inventory import ACQ_FEATURES
 from groundtruth.pretask.v1r_brief import _brief_block_receipts, _reduce_brief_to_minimal
-from artifact_deepswe import gt_headless_runner
 
 
 def _sha(text: str) -> str:
@@ -24,16 +23,23 @@ def _sha(text: str) -> str:
 def _runtime_join(tmp_path, brief, trajectory, *, producer_seal):
     if not producer_seal:
         return build_consumption_ledger(trajectory)
-    brief_path = tmp_path / "brief.txt"
+    # Collector tests start after the canonical provider boundary has proved an
+    # exact terminal delivery. Do not route this fixture through the headless
+    # runner: task construction owns native task bytes only and is not a
+    # delivery writer.
     ledger_path = tmp_path / "gt_runtime_ledger_task.jsonl"
-    brief_path.write_text(brief, encoding="utf-8", newline="\n")
-    delivered_task = gt_headless_runner._resolve_task({
-        "GT_RUN_TASK": "Fix the issue.",
-        "GT_BRIEF_FILE": str(brief_path),
-        "GT_INSEAM_METRICS": "1",
-        "GT_RUNTIME_LEDGER": str(ledger_path),
-    })
-    trajectory["messages"][0]["content"] = delivered_task
+    ledger_path.write_text(
+        json.dumps({
+            "layer": "canonical_runtime.capsule",
+            "event_type": "provider_terminal",
+            "file_path": "",
+            "outcome": "delivered",
+            "chars_delivered": len(brief),
+            "content_sha256_16": _sha(brief)[:16],
+            "iteration": 0,
+        }) + "\n",
+        encoding="utf-8",
+    )
     return build_consumption_ledger(
         trajectory, runtime_ledger_path=str(ledger_path)
     )
@@ -170,6 +176,68 @@ def test_real_v2_producer_seal_is_split_into_production_shaped_source_receipts(t
         assert rows[feature]["status"] == "UNMEASURED"
 
 
+def test_acquisition_namespace_joins_matching_delivered_candidate(tmp_path):
+    payload, ledger, trajectory = _artifacts(tmp_path)
+    payload["metrics"]["acquisition_proof"] = [
+        copy.deepcopy(payload["metrics"]["localization_proof"][0])
+    ]
+
+    rows = collect_acq_provenance(payload, ledger, trajectory)
+
+    for feature in (
+        "graph_validity",
+        "structural_depth",
+        "lexical_FTS5",
+        "semantic_embedder",
+    ):
+        assert rows[feature]["status"] == "MEASURED"
+        assert any(
+            field.startswith("metrics.acquisition_proof[0]")
+            for field in rows[feature]["source_fields"]
+        )
+
+
+def test_acquisition_namespace_never_borrows_another_candidates_delivery(tmp_path):
+    payload, ledger, trajectory = _artifacts(tmp_path)
+    acquisition = copy.deepcopy(payload["metrics"]["localization_proof"][0])
+    acquisition.update({
+        "candidate_id": "localization:src/pkg/other.py",
+        "path": "src/pkg/other.py",
+    })
+    payload["metrics"]["acquisition_proof"] = [acquisition]
+
+    rows = collect_acq_provenance(payload, ledger, trajectory)
+
+    for feature in (
+        "graph_validity",
+        "structural_depth",
+        "lexical_FTS5",
+        "semantic_embedder",
+    ):
+        assert rows[feature]["status"] == "UNMEASURED"
+        assert rows[feature]["blocker"] == "candidate_delivery_absent"
+        assert rows[feature]["candidate_id"] == "localization:src/pkg/other.py"
+
+
+def test_missing_acquisition_namespace_preserves_legacy_delivery_join(tmp_path):
+    payload, ledger, trajectory = _artifacts(tmp_path)
+    assert "acquisition_proof" not in payload["metrics"]
+
+    rows = collect_acq_provenance(payload, ledger, trajectory)
+
+    for feature in (
+        "graph_validity",
+        "structural_depth",
+        "lexical_FTS5",
+        "semantic_embedder",
+    ):
+        assert rows[feature]["status"] == "MEASURED"
+        assert any(
+            field.startswith("metrics.localization_proof[0]")
+            for field in rows[feature]["source_fields"]
+        )
+
+
 def test_minimal_contention_candidate_joins_shared_header_bytes(tmp_path):
     """A retained MEDIUM candidate keeps source->block->seal->receipt lineage."""
     payload, _, trajectory = _artifacts(tmp_path)
@@ -276,8 +344,8 @@ def test_exact_block_producer_seal_is_a_valid_gate_one_identity(tmp_path):
     block = payload["brief_text"][start:end]
     ledger_path = tmp_path / "exact_block_runtime_ledger.jsonl"
     ledger_path.write_text(json.dumps({
-        "layer": "brief.localization",
-        "event_type": "brief",
+        "layer": "canonical_runtime.capsule",
+        "event_type": "provider_terminal",
         "file_path": "src/pkg/loader.py",
         "outcome": "delivered",
         "chars_delivered": len(block),

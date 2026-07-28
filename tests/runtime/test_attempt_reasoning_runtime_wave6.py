@@ -133,6 +133,9 @@ def _evidence(
         anchoring_risk=0,
         revision_dependencies=contract.revision_dependencies,
         authority=rr.Authority.STRUCTURED,
+        observed_substrates=tuple(
+            sorted(contract.fallback_policy.preferred_substrates)
+        ),
     )
 
 

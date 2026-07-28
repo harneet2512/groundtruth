@@ -62,7 +62,7 @@ def test_positive_control_a_real_definition_resolves_on_BOTH_paths(graph):
     assert "good_symbol" in defined_symbols_for_file(graph, FILE)
     assert seam._resolved_search_symbols(
         ActionOperation.SEARCH, "grep -rn good_symbol ."
-    ) == ("good_symbol",)
+    ) == (f"{FILE}::good_symbol",)
 
 
 def test_the_view_path_rejects_a_definition_with_no_start_line(graph):

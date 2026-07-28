@@ -317,6 +317,8 @@ PROFILE_BEHAVIOR_FLAGS: dict[str, frozenset[str]] = {
             "GT_HYP_CONTRA_GUARD",    # W4-2 — no wrong-target steer vs corroborated targets
             "GT_RECOVERY_ESCALATE",   # W4-3 — repeat-N recovery escalates, never weaker
             "GT_OBLIG_STEER_GUARD",   # W4-4 — obligation narrowing cannot exclude top-ranked
+            # C9/C10 behavior only; this must never become a CAP inventory row.
+            "GT_ROLE_DRIVEN_COALITION",
         }
     ),
 }

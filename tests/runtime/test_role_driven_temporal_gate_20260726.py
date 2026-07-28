@@ -87,6 +87,9 @@ def _record(feature_id: str, decision: rr.ActiveDecision, subject: str) -> rr.Ev
         causal_value=3,
         contradiction_resolution=0,
         anchoring_risk=0,
+        observed_substrates=tuple(
+            sorted(contract.fallback_policy.preferred_substrates)
+        ),
     )
 
 

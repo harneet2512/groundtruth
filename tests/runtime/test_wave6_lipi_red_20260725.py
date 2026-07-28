@@ -6,12 +6,14 @@ implementation does not yet satisfy.  They contain no production changes.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from groundtruth.runtime import evidence_envelope as ee
+from groundtruth.runtime.evidence_envelope import build_observation_binding
 from groundtruth.runtime import fact_registry
 from groundtruth.runtime import feature_lineage
 from groundtruth.runtime import reasoning_runtime as rr
@@ -96,6 +98,22 @@ def _evidence(
         anchoring_risk=0,
         revision_dependencies=contract.revision_dependencies,
         authority=rr.Authority.RESULT_DERIVED,
+        observed_substrates=tuple(
+            sorted(contract.fallback_policy.preferred_substrates)
+        ),
+    )
+
+
+def _stage_binding(plan):
+    """A real ObservationBinding for a canonical stage() call."""
+    return build_observation_binding(
+        batch_start_iteration=0,
+        parent_policy_sha256=hashlib.sha256(b"parent-policy").hexdigest(),
+        parent_policy_chars=13,
+        action_batch_sha256=hashlib.sha256(b"action-batch").hexdigest(),
+        candidate_ordinal=0,
+        candidate_kind="caller_contract",
+        candidate_id=plan.compilation.capsule_hash,
     )
 
 
@@ -251,7 +269,7 @@ def _deliver(
         rr.CommitmentWindowState.CLOSED,
     ],
 )
-def test_temporal_gate_cannot_release_after_commitment_window(
+def test_scheduler_ignores_legacy_global_commitment_window(
     tmp_path,
     window: rr.CommitmentWindowState,
 ) -> None:
@@ -261,15 +279,11 @@ def test_temporal_gate_cannot_release_after_commitment_window(
 
         plan = _prepare(runtime, commitment_window=window)
 
-        assert plan.oracle_decision.coalition == ()
-        assert plan.oracle_decision.release_allowed is False
-        assert (
-            plan.compilation.state
-            is rr.CapsuleCompilationState.FAILED
-        )
+        assert plan.delivery_attempt_id
+        assert plan.compilation.state is rr.CapsuleCompilationState.COMPILED
         assert (
             runtime.evidence_record("GT-E-caller").lifecycle
-            is rr.EvidenceLifecycle.EXPIRED
+            is rr.EvidenceLifecycle.RELEASED
         )
     finally:
         journal.close()
@@ -599,7 +613,7 @@ def test_fallback_assurance_floor_is_enforced_during_temporal_evaluation() -> No
     assert evaluation.next_lifecycle is rr.EvidenceLifecycle.HELD
 
 
-def test_not_open_window_keeps_evidence_ready_without_releasing_it(
+def test_not_open_legacy_scalar_does_not_suppress_current_evidence(
     tmp_path,
 ) -> None:
     runtime, journal = _runtime(tmp_path)
@@ -611,10 +625,10 @@ def test_not_open_window_keeps_evidence_ready_without_releasing_it(
             commitment_window=rr.CommitmentWindowState.NOT_OPEN,
         )
 
-        assert plan.oracle_decision.coalition == ()
+        assert plan.delivery_attempt_id
         assert (
             runtime.evidence_record("GT-E-caller").lifecycle
-            is rr.EvidenceLifecycle.READY
+            is rr.EvidenceLifecycle.RELEASED
         )
     finally:
         journal.close()
@@ -753,9 +767,14 @@ def test_provider_output_parse_failure_records_response_discarded(
             agent=Agent(),
             attempt_runtime=runtime,
         )
+        # Canonical boundary FAILS CLOSED without an ObservationBinding
+        # (miniswe_provider_boundary.py:302-305) -- the C13 property. Identify the
+        # staged capsule by its hash; the boundary validates with
+        # expected_candidate_id=compilation.capsule_hash.
         boundary.stage(
             plan.compilation,
             delivery_attempt_id=plan.delivery_attempt_id,
+            observation_binding=_stage_binding(plan),
         )
 
         with pytest.raises(ValueError, match="action parsing"):
@@ -814,9 +833,14 @@ def test_provider_boundary_persists_one_canonical_runtime_delivery_history(
             agent=Agent(),
             attempt_runtime=runtime,
         )
+        # Canonical boundary FAILS CLOSED without an ObservationBinding
+        # (miniswe_provider_boundary.py:302-305) -- the C13 property. Identify the
+        # staged capsule by its hash; the boundary validates with
+        # expected_candidate_id=compilation.capsule_hash.
         boundary.stage(
             plan.compilation,
             delivery_attempt_id=plan.delivery_attempt_id,
+            observation_binding=_stage_binding(plan),
         )
         boundary.model._query(
             boundary.model._prepare_messages_for_api(
@@ -875,9 +899,14 @@ def test_trajectory_insertion_failure_is_persisted_as_response_discarded(
             agent=Agent(),
             attempt_runtime=runtime,
         )
+        # Canonical boundary FAILS CLOSED without an ObservationBinding
+        # (miniswe_provider_boundary.py:302-305) -- the C13 property. Identify the
+        # staged capsule by its hash; the boundary validates with
+        # expected_candidate_id=compilation.capsule_hash.
         boundary.stage(
             plan.compilation,
             delivery_attempt_id=plan.delivery_attempt_id,
+            observation_binding=_stage_binding(plan),
         )
         boundary.model._query(
             boundary.model._prepare_messages_for_api(

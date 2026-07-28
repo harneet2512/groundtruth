@@ -120,6 +120,20 @@ def _evidence() -> rr.EvidenceRecord:
         revision_dependencies=contract.revision_dependencies,
         authority=rr.Authority.STRUCTURED,
         owner_feature_ids=(),
+        # REQUIRED for release. The temporal gate authorizes a record only on substrates THAT
+        # RECORD observed (`available_substrates ∩ evidence.observed_substrates`) -- an
+        # attempt-wide union must never lend one record's assurance to another. A record
+        # declaring nothing is held at PREREQUISITES_PENDING, so the coalition never forms,
+        # nothing compiles, and `plan.delivery_attempt_id` comes back EMPTY -- which is how
+        # these seven attestation tests were failing: not on anything they assert, but on a
+        # fixture that no longer looks like a real producer.
+        #
+        # Production producers declare this (all 13 gateway `_mk_add` sites and every
+        # canonical_producers builder), so taking it from the contract's own preferred
+        # substrates is the faithful shape, not a workaround.
+        observed_substrates=tuple(
+            sorted(contract.fallback_policy.preferred_substrates)
+        ),
     )
 
 

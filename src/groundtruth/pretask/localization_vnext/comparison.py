@@ -357,6 +357,9 @@ def _brief_projection(result: Any) -> dict[str, Any]:
     files = list(getattr(result, "files", ()) or ())
     text = str(getattr(result, "brief_text", "") or "")
     proof = _primitive(getattr(result, "localization_proof", ()) or ())
+    acquisition_proof = _primitive(
+        getattr(result, "acquisition_proof", ()) or ()
+    )
     return {
         "candidate_order": [
             _norm(str(getattr(entry, "path", ""))) for entry in files
@@ -365,6 +368,7 @@ def _brief_projection(result: Any) -> dict[str, Any]:
             float(getattr(entry, "score", 0.0) or 0.0) for entry in files
         ],
         "localization_proof": proof,
+        "acquisition_proof": acquisition_proof,
         "brief_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "brief_chars": len(text),
         "brief_tokens": int(getattr(result, "token_estimate", 0) or 0),
@@ -451,6 +455,10 @@ def _legacy_measure(
             "localization_proof": (
                 _primitive(getattr(legacy_brief, "localization_proof", ()) or ())
                 == _primitive(getattr(shadow_brief, "localization_proof", ()) or ())
+            ),
+            "acquisition_proof": (
+                _primitive(getattr(legacy_brief, "acquisition_proof", ()) or ())
+                == _primitive(getattr(shadow_brief, "acquisition_proof", ()) or ())
             ),
             "run_v74": (
                 _v74_projection(legacy_v74) == _v74_projection(shadow_v74)

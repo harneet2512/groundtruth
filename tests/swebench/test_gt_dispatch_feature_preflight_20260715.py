@@ -81,16 +81,24 @@ def test_acq_component_authorities_name_the_actual_construction_chain() -> None:
     assert features["graph_validity"]["producer_authority"] == [
         "groundtruth.pretask.graph_localizer.localize",
         "groundtruth.pretask.v1r_brief._l1_signal_counts",
+        "groundtruth.pretask.v1r_brief._acquisition_proof_rows",
+    ]
+    assert features["structural_depth"]["producer_authority"] == [
+        "groundtruth.pretask.v7_4_brief._score_variant_C",
+        "groundtruth.pretask.v1r_brief._l1_signal_counts",
+        "groundtruth.pretask.v1r_brief._acquisition_proof_rows",
     ]
     assert features["lexical_FTS5"]["producer_authority"] == [
         "groundtruth.pretask.hybrid.lexical_file_search",
         "groundtruth.pretask.v7_4_brief._score_variant_C",
         "groundtruth.pretask.v1r_brief._l1_signal_counts",
+        "groundtruth.pretask.v1r_brief._acquisition_proof_rows",
     ]
     assert features["semantic_embedder"]["producer_authority"] == [
         "groundtruth.pretask.anchor_select.select_anchors",
         "groundtruth.pretask.v7_4_brief._score_variant_C",
         "groundtruth.pretask.v1r_brief._l1_signal_counts",
+        "groundtruth.pretask.v1r_brief._acquisition_proof_rows",
     ]
     assert features["body_retrieval"]["producer_authority"] == [
         "groundtruth.pretask.graph_localizer._content_fts_candidates",

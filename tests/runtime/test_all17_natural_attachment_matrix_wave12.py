@@ -37,6 +37,7 @@ from groundtruth.runtime.canonical_producers import (
     produce_submit_refusal,
 )
 from groundtruth.runtime.covering_runner import CoveringAttribution
+from groundtruth.runtime.evidence_envelope import build_observation_binding
 from groundtruth.runtime.miniswe_provider_boundary import MiniSweProviderBoundary
 from groundtruth.runtime.submit_gate import (
     safe_build_certificate,
@@ -601,9 +602,31 @@ def _release_and_stage(
         agent=_Agent(),
         attempt_runtime=runtime,
     )
+    # A canonical-runtime boundary FAILS CLOSED without an ObservationBinding
+    # (miniswe_provider_boundary.py:302-305). That guard is the C13 property and is correct;
+    # this shared helper predates it, so all 10 parametrised facts died on the guard rather
+    # than on anything the matrix asserts.
+    #
+    # Build a REAL binding with the production constructor, identifying the staged capsule by
+    # its hash -- the boundary validates with `expected_candidate_id=compilation.capsule_hash`,
+    # so an arbitrary id is correctly rejected. Deliberately NOT bypassed by dropping
+    # `attempt_runtime`: that would disarm the canonical path this matrix exists to exercise.
     boundary.stage(
         plan.compilation,
         delivery_attempt_id=plan.delivery_attempt_id,
+        observation_binding=build_observation_binding(
+            batch_start_iteration=0,
+            parent_policy_sha256=hashlib.sha256(
+                f"parent-{record.feature_id}".encode()
+            ).hexdigest(),
+            parent_policy_chars=len(f"parent-{record.feature_id}"),
+            action_batch_sha256=hashlib.sha256(
+                f"batch-{record.feature_id}".encode()
+            ).hexdigest(),
+            candidate_ordinal=0,
+            candidate_kind=record.feature_id,
+            candidate_id=plan.compilation.capsule_hash,
+        ),
     )
     released = runtime.evidence_record(record.evidence_id)
     assert released is not None

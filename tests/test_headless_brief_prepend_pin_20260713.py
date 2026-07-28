@@ -1,34 +1,11 @@
-"""Pin: the headless runner must PREPEND the step-0 GT brief onto the agent task.
+"""Pin the headless runner's native-task side of the canonical runtime cutover.
 
-THE FINDING (verified by a §4 audit + direct probes on both arms, 2026-07-13): the step-0 GT
-brief is generated (gt_artifacts/brief.txt, now minimal+native) but was NEVER injected into the
-agent's task text on the mini HEADLESS pipeline. The workflow stages ISSUE_TEXT -> GT_RUN_TASK ->
-gt_headless_runner.py -> agent.run(task), so the agent saw the issue text ALONE — byte-identical
-across arms. The old pier path prepended the brief (gt_agent._prepend_brief, gt_agent.py:1115);
-the headless path lost the wire, so every mini run to date ran with the step-0 channel DARK.
-
-FIX (runner-side, minimal): gt_headless_runner._resolve_task() reads the substrate brief from
-GT_BRIEF_FILE (default /gt_artifacts/brief.txt — the read-only substrate mount the workflow
-already provides) and PREPENDS it to the task on the GT arm. Correct-or-quiet: a missing /
-unreadable / empty brief leaves the task UNCHANGED. BASELINE arm NEVER reads the file, so its
-task text is byte-identical to a run with no brief on disk (paired control preserved).
-
-Two-sided behavioral pin on the exact value fed to agent.run(task):
-  * GT arm + a readable non-empty brief -> the resolved task STARTS WITH the brief bytes
-    (prepend is BEFORE the issue, never after — the mutation that appends reddens this);
-  * GT_BASELINE=1 -> the resolved task is byte-identical to the guarded issue text (the
-    mutation that drops the baseline guard reddens this);
-  * brief file absent -> task unchanged + a breadcrumb (never a crash — correct-or-quiet).
-
-RED-first: on the pre-fix tree _resolve_task does not exist (AttributeError) and run() passes the
-raw issue to agent.run, so the starts-with pin fails. Mutations (verified): (a) prepend AFTER
-instead of BEFORE reddens test_gt_arm_prepends_brief_before_issue; (b) dropping the baseline guard
-reddens test_baseline_arm_task_is_byte_identical.
+The runner passes the issue to ``agent.run`` byte-for-byte. Repository-derived
+task-start evidence is staged by the canonical runtime and joined at the provider
+boundary; local task construction must neither prepend it nor pre-mark it delivered.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import sys
 import types
 from pathlib import Path
@@ -80,62 +57,6 @@ def test_gt_arm_records_exact_producer_seal_without_changing_task_bytes(tmp_path
     assert not ledger.exists(), "local task construction is not delivery"
 
 
-def test_brief_delivery_records_validated_block_lineage_without_whole_fact_alias(tmp_path):
-    brief_text = "<gt-task-brief>\n<gt-obligations>\n- preserve behavior\n</gt-obligations>\n</gt-task-brief>"
-    brief = tmp_path / "brief.txt"
-    ledger = tmp_path / "gt_runtime_ledger.jsonl"
-    brief.write_text(brief_text, encoding="utf-8", newline="")
-    block = "<gt-obligations>\n- preserve behavior\n</gt-obligations>"
-    start = brief_text.index(block)
-    (tmp_path / "brief_result.json").write_text(json.dumps({
-        "schema": "gt.brief_result.v1",
-        "brief_text": brief_text,
-        "metrics": {"block_receipts": [{
-            "block_id": "obligations",
-            "fact_class": "obligations",
-            "label": "obligations",
-            "candidate_id": "brief:block:obligations",
-            "char_span": [start, start + len(block)],
-            "content_hash": hashlib.sha256(block.encode()).hexdigest(),
-        }]},
-    }), encoding="utf-8")
-
-    row = ghr._brief_delivery_extra(
-        {"GT_BRIEF_FILE": str(brief)},
-        brief_text,
-    )
-    assert row["compound_lineage_schema"] == "gt.compound_feature_lineage.v1"
-    assert "fact_class" not in row and "lineage_schema" not in row
-    assert len(row["block_lineage"]) == 1
-    item = row["block_lineage"][0]
-    assert item["candidate_id"] == "brief:block:obligations"
-    assert item["content_sha256_16"] == hashlib.sha256(block.encode()).hexdigest()[:16]
-    assert item["lineage"]["fact_class"] == "obligations"
-    assert item["lineage"]["runtime_producer_id"] == "spec"
-    assert item["lineage"]["producer_registration_match"] is True
-
-
-def test_brief_delivery_keeps_unregistered_block_label_untyped(tmp_path):
-    brief_text = "<gt-task-brief>\nEDIT-TARGET CONTRACTS\n  keep api\n</gt-task-brief>"
-    brief = tmp_path / "brief.txt"
-    brief.write_text(brief_text, encoding="utf-8", newline="")
-    block = "EDIT-TARGET CONTRACTS\n  keep api"
-    start = brief_text.index(block)
-    (tmp_path / "brief_result.json").write_text(json.dumps({
-        "schema": "gt.brief_result.v1", "brief_text": brief_text,
-        "metrics": {"block_receipts": [{
-            "block_id": "edit-target-contracts", "fact_class": "contract",
-            "label": "edit-target-contracts", "candidate_id": "brief:block:contract",
-            "char_span": [start, start + len(block)],
-            "content_hash": hashlib.sha256(block.encode()).hexdigest(),
-        }]},
-    }), encoding="utf-8")
-    extra = ghr._brief_delivery_extra({"GT_BRIEF_FILE": str(brief)}, brief_text)
-    item = extra["block_lineage"][0]
-    assert item["lineage_status"] == "UNREGISTERED_BLOCK_LABEL"
-    assert "lineage" not in item
-
-
 def test_brief_producer_seal_is_default_off(tmp_path):
     brief = tmp_path / "brief.txt"
     ledger = tmp_path / "gt_runtime_ledger.jsonl"
@@ -179,23 +100,12 @@ def test_empty_brief_leaves_task_unchanged(tmp_path):
     assert task == _ISSUE, "a whitespace-only brief must be treated as empty -> task unchanged"
 
 
-def test_default_brief_path_is_the_substrate_mount():
-    # No GT_BRIEF_FILE set -> the default MUST be the read-only substrate mount path the workflow
-    # provides (/gt_artifacts/brief.txt). With no file there in the test env, correct-or-quiet
-    # leaves the task unchanged; the DEFAULT is asserted from the runner source.
-    src = _RUNNER.read_text(encoding="utf-8")
-    assert '"/gt_artifacts/brief.txt"' in src, (
-        "the runner default brief path must be /gt_artifacts/brief.txt (the read-only substrate mount)"
-    )
-    assert 'GT_BRIEF_FILE' in src, "the runner must read the GT_BRIEF_FILE env override"
-
-
 # ── source-structure: run() feeds _resolve_task's output straight to agent.run ──────
 
 def test_run_wires_resolve_task_into_agent_run():
     src = _RUNNER.read_text(encoding="utf-8")
     assert "task = _resolve_task(e)" in src, (
-        "run() must build the task via _resolve_task(e) so the brief-prepended value reaches agent.run"
+        "run() must build the native task through the guarded resolver"
     )
     assert "agent.run(task)" in src, "run() must pass the resolved task to agent.run"
 

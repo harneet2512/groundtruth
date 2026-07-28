@@ -1,106 +1,144 @@
-"""CHARACTERIZATION of a known defect: the substrate release-gate cannot fail.
-
-This test does NOT assert desired behaviour.  It pins CURRENT behaviour so the
-defect is executable rather than only described in prose, and so that fixing it
-is announced by a failing test rather than discovered by accident.
-
-THE DEFECT (measured 2026-07-26, 10/10 features).
-``reasoning_runtime`` gates evidence RELEASE on substrate availability::
-
-    preferred_available = set(available_substrates) & contract.preferred_substrates
-    if not preferred_available and not fallback_assured:
-        -> HELD, reason = PREREQUISITES_PENDING
-
-The seam supplies ``available_substrates`` from
-``CanonicalRuntimeAttachment._available_substrates(records)``, whose docstring
-claims *"Report only substrates evidenced by the computations that ran"*.  It is
-in fact a STATIC per-feature table, and that table is identical to
-``_FACT_FALLBACK_POLICIES``' preferred tuples.  So the intersection is non-empty
-whenever a record exists: **the gate can never fail**, and
-``PREREQUISITES_PENDING`` is unreachable through this path.  It never checks
-that LSP ran, that a compiler ran, or that a test executed -- it derives the
-answer from the same table it is checked against.
-
-A safety gate that cannot fail is worse than no gate: it reads as prerequisite
-verification in review and in the §9 invariant list while verifying nothing.
-
-WHEN THIS TEST FAILS, THAT IS PROGRESS.  A real fix makes producers report the
-substrates they actually consulted, at which case a feature whose prerequisite
-did not run will report substrates that do NOT cover its contract, and
-``test_substrate_gate_is_currently_tautological`` will go RED.  At that point:
-delete this file, and add a test asserting the gate HOLDS evidence whose
-prerequisites are genuinely absent.
-
-Do NOT "fix" this test by loosening it.  Do NOT treat its passing as healthy.
-"""
+"""Producer-observed substrate proof for the canonical temporal gate."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
-
-import pytest
 
 from artifact_deepswe import gt_mini_patch as seam
 from groundtruth.runtime import reasoning_runtime as rr
 
 
-_FACTS = (
-    "caller_contract",
-    "covering_red",
-    "def_partition",
-    "localization",
-    "newfile_precedent",
-    "obligations",
-    "recovery",
-    "signature_delta",
-    "submit_refusal",
-    "syntax_result",
-)
-
-
-def _declared(feature_id: str) -> tuple[str, ...]:
-    """What the seam reports as 'available' for a single record of this class."""
-    record = SimpleNamespace(feature_id=feature_id)
-    return tuple(seam.CanonicalRuntimeAttachment._available_substrates([record]))
-
-
-def _required(feature_id: str) -> tuple[str, ...]:
-    return tuple(rr._FACT_FALLBACK_POLICIES[feature_id][0])
-
-
-@pytest.mark.parametrize("feature_id", _FACTS)
-def test_substrate_gate_is_currently_tautological(feature_id: str) -> None:
-    """The declared substrates always satisfy the contract's prerequisites.
-
-    RED here means the seam started reporting OBSERVED substrates -- see the
-    module docstring, that is the desired end state, not a regression.
-    """
-    declared = set(_declared(feature_id))
-    required = set(_required(feature_id))
-
-    assert declared, f"{feature_id}: seam reported no substrates at all"
-    assert declared & required, (
-        f"{feature_id}: declared={sorted(declared)} no longer covers "
-        f"required={sorted(required)} -- if substrate reporting became "
-        f"observation-based, DELETE this file per its docstring"
+def _revision() -> rr.RevisionVector:
+    return rr.RevisionVector(
+        repository_content="repo-substrate",
+        graph="graph-substrate",
+        lsp="lsp-substrate",
+        runtime_evidence="runtime-substrate",
     )
 
 
-def test_no_fact_class_is_missing_from_either_table() -> None:
-    """Both tables must stay in lockstep on the FACT roster.
+def _syntax_record() -> rr.EvidenceRecord:
+    contract = rr.feature_contract_for("syntax_result")
+    assert contract is not None
+    return rr.EvidenceRecord(
+        evidence_id="GT-E-substrate",
+        feature_id="syntax_result",
+        decision_context=contract.decision_context,
+        roles=contract.roles,
+        subject="src/session.py",
+        claim="The edited file has a parser-confirmed syntax error.",
+        actionable_consequence="Repair the syntax before continuing.",
+        provenance=("src/session.py:7",),
+        grade=rr.EvidenceGrade.VERIFIED,
+        revision=_revision(),
+        causal_neighborhood=(
+            f"decision:{contract.decision_context.value}",
+            "subject:src/session.py",
+        ),
+        lifecycle=rr.EvidenceLifecycle.READY,
+        fresh=True,
+        already_visible=False,
+        superseded=False,
+        mandatory_reason=rr.MandatoryReason.BLOCKER,
+        token_cost=12,
+        failure_prevention=10,
+        causal_value=10,
+        contradiction_resolution=5,
+        anchoring_risk=0,
+        revision_dependencies=contract.revision_dependencies,
+        authority=rr.Authority.RESULT_DERIVED,
+    )
 
-    If one grows a class the other lacks, the tautology could silently become a
-    partial gate for that class only -- a far more confusing state than either
-    a real gate or a fully fake one.
-    """
-    policy_classes = set(rr._FACT_FALLBACK_POLICIES)
 
-    assert set(_FACTS) <= policy_classes, sorted(set(_FACTS) - policy_classes)
-    for feature_id in _FACTS:
-        assert _declared(feature_id), f"{feature_id} absent from the seam table"
+def _context(
+    record: rr.EvidenceRecord,
+    *,
+    available_substrates: tuple[str, ...],
+) -> rr.TemporalRuntimeContext:
+    contract = rr.feature_contract_for(record.feature_id)
+    assert contract is not None
+    active = rr.ActiveDecision(
+        decision_id="decision-substrate",
+        context=contract.decision_context,
+        primary_claim="Preserve patch validity.",
+        required_roles=contract.roles,
+        causal_neighborhood=(
+            f"decision:{contract.decision_context.value}",
+            "subject:src/session.py",
+        ),
+        token_budget=128,
+        current_revision=record.revision,
+    )
+    return rr.TemporalRuntimeContext(
+        active_decision=active,
+        current_revision=record.revision,
+        commitment_window=rr.CommitmentWindowState.OPEN,
+        satisfied_predicates=frozenset(contract.ready_predicates),
+        available_substrates=available_substrates,
+    )
 
 
-def test_unknown_feature_reports_no_substrates() -> None:
-    """Correct-or-quiet: an unmapped class must not inherit someone else's
-    prerequisites. This is the one genuinely sound behaviour in the table."""
-    assert _declared("not_a_real_feature_class") == ()
+def test_seam_unions_only_substrates_observed_by_records() -> None:
+    records = (
+        SimpleNamespace(
+            feature_id="syntax_result",
+            observed_substrates=("parser_result",),
+        ),
+        SimpleNamespace(
+            feature_id="caller_contract",
+            observed_substrates=("graph", "lsp"),
+        ),
+    )
+
+    assert seam.CanonicalRuntimeAttachment._available_substrates(records) == (
+        "graph",
+        "lsp",
+        "parser_result",
+    )
+
+
+def test_feature_identity_cannot_self_attest_a_substrate() -> None:
+    record = SimpleNamespace(
+        feature_id="syntax_result",
+        observed_substrates=(),
+    )
+
+    assert seam.CanonicalRuntimeAttachment._available_substrates((record,)) == ()
+
+
+def test_missing_observed_substrate_reaches_prerequisites_pending() -> None:
+    record = _syntax_record()
+    contract = rr.feature_contract_for(record.feature_id)
+    assert contract is not None
+
+    evaluation = rr.evaluate_feature_contract(
+        contract,
+        record,
+        _context(record, available_substrates=()),
+    )
+
+    assert evaluation.release_allowed is False
+    assert evaluation.next_lifecycle is rr.EvidenceLifecycle.HELD
+    assert (
+        evaluation.reason
+        is rr.EvidenceTransitionReason.PREREQUISITES_PENDING
+    )
+
+
+def test_observed_parser_result_opens_the_same_gate() -> None:
+    record = replace(
+        _syntax_record(),
+        observed_substrates=("parser_result",),
+    )
+    contract = rr.feature_contract_for(record.feature_id)
+    assert contract is not None
+
+    evaluation = rr.evaluate_feature_contract(
+        contract,
+        record,
+        _context(record, available_substrates=("parser_result",)),
+    )
+
+    assert evaluation.release_allowed is True
+    assert evaluation.reason is rr.EvidenceTransitionReason.DECISION_WINDOW_OPEN

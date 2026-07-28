@@ -37,7 +37,11 @@ from minisweagent.models.litellm_model import (  # noqa: E402
 from groundtruth.runtime.miniswe_provider_boundary import (  # noqa: E402
     MiniSweProviderBoundary,
 )
+from groundtruth.runtime.evidence_envelope import (  # noqa: E402
+    build_observation_binding,
+)
 from groundtruth.runtime.reasoning_runtime import (  # noqa: E402
+    DECISION_CAPSULE_SCHEMA as _DECISION_CAPSULE_SCHEMA,
     CapsuleCompilation,
     CapsuleCompilationState,
     DecisionContext,
@@ -63,7 +67,9 @@ EVIDENCE_MANIFEST_HASH = hashlib.sha256(
 CAPSULE_HASH = hashlib.sha256(
     json.dumps(
         {
-            "schema": "gt.decision_capsule.v2",
+            # Imported label, not a literal: this fixture recomputes the capsule hash, so a
+            # local copy silently diverges from the writer on every version bump.
+            "schema": _DECISION_CAPSULE_SCHEMA,
             "rendered_content_hash": RENDERED_CONTENT_HASH,
             "evidence_manifest_hash": EVIDENCE_MANIFEST_HASH,
         },
@@ -221,6 +227,25 @@ def _agent(model: _FakeLitellmModel) -> DefaultAgent:
         },
     ]
     return agent
+
+
+def _stage_binding(compilation):
+    """A real ObservationBinding for a canonical-runtime stage() call.
+
+    A boundary constructed WITH an attempt_runtime fails closed without one
+    (miniswe_provider_boundary.py:302-305) -- the C13 property. The binding must identify
+    the staged capsule: the boundary validates with
+    expected_candidate_id=compilation.capsule_hash.
+    """
+    return build_observation_binding(
+        batch_start_iteration=0,
+        parent_policy_sha256=hashlib.sha256(b"parent-policy").hexdigest(),
+        parent_policy_chars=13,
+        action_batch_sha256=hashlib.sha256(b"action-batch").hexdigest(),
+        candidate_ordinal=0,
+        candidate_kind="caller_contract",
+        candidate_id=compilation.capsule_hash,
+    )
 
 
 def _compilation(
@@ -1031,6 +1056,7 @@ def test_canonical_bind_journal_failure_is_join_failed_and_native_continues() ->
     boundary.stage(
         compilation,
         delivery_attempt_id="delivery:call-bind-journal",
+        observation_binding=_stage_binding(compilation),
     )
 
     model.query(agent.messages)
@@ -1088,6 +1114,7 @@ def test_dispatch_journal_failure_does_not_escape_or_send_unwitnessed_capsule() 
     boundary.stage(
         compilation,
         delivery_attempt_id="delivery:call-dispatch-journal",
+        observation_binding=_stage_binding(compilation),
     )
 
     model.query(agent.messages)

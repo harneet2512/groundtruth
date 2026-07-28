@@ -43,15 +43,32 @@ TEST_RUNNER_RE = re.compile(
 # test_evidence_seen. A bare Traceback / "Error:" is NOT proof a test failed.
 # ---------------------------------------------------------------------------
 TEST_PASS_RE = re.compile(
-    r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b|\bPASSED\b"
+    r"(test result: ok\b|\b[1-9]\d* passed\b|\b[1-9]\d* passing\b|\bPASSED\b"
     r"|^OK\b|^ok\s+\S+\s+[\d.]+s|^PASS$|^PASS\b|BUILD SUCCESS"
-    r"|OK \(\d+ tests?\)|Tests:\s+\d+ passed|\bpassed\b.*\b0 failed\b)",
+    r"|OK \([1-9]\d* tests?\)|Tests:\s+[1-9]\d* passed"
+    r"|\b[1-9]\d* passed\b.*\b0 failed\b)",
     re.M)
 
 TEST_FAIL_RE = re.compile(
-    r"(\bFAILED\b|\bAssertionError\b|\b\d+ failed\b|\bFAIL: "
+    r"(\bFAILED\b|\bAssertionError\b|\b[1-9]\d* failed\b|\bFAIL: "
     r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
-    r"|\b\d+ failing\b|Tests:\s+\d+ failed)")
+    r"|\b[1-9]\d* failing\b|Tests:\s+[1-9]\d* failed"
+    r"|Failures:\s*[1-9]\d*|Errors:\s*[1-9]\d*)")
+
+# Explicit runner-owned proof that the command executed no tests. This is
+# evaluated after fail but before pass, and only after a test protocol is
+# established: summaries such as "Tests: 0 passed, 0 total" contain a lexical
+# pass marker but are not positive execution evidence.
+TEST_NO_TESTS_RE = re.compile(
+    r"(\bcollected\s+0\s+items?\b|\bno tests? ran\b|\bran\s+0\s+tests?\b"
+    r"|(?:^|\n)\s*running\s+0\s+tests?\b|\[no test files\]"
+    r"|\b0\s+passing\b|\bTests run:\s*0\b"
+    r"|\bNo tests? (?:were )?(?:found|executed|to run)\b"
+    r"|\bNo test files? (?:were )?found\b|\bTests? are skipped\b"
+    r"|\b0\s+examples?\b|\bTests:\s*0\s+total\b"
+    r"|\bOK\s*\(0 tests?\)|\bTests:\s*0\s+(?:passed,\s*)?0\s+total\b)",
+    re.I,
+)
 
 # Native test protocols can outlive their launcher command.  Rust is the
 # canonical example: after ``cargo test --no-run`` an agent may execute
@@ -66,15 +83,19 @@ TEST_PROTOCOL_RE = re.compile(
 )
 
 
-def classify_test_observation(command: str, output: str) -> tuple[str, str]:
+def classify_test_observation(
+    command: str,
+    output: str,
+    returncode: int | None = None,
+) -> tuple[str, str]:
     """Return ``(outcome, protocol)`` for an observed test result.
 
-    ``outcome`` is ``"pass"`` / ``"fail"`` / ``""``. ``protocol`` records
-    which independently observable surface established that the command was a
-    test: ``"command"`` for a recognized runner invocation or ``"native"`` for
-    a runner-owned result frame (for example a directly executed Rust test
-    binary). A generic non-zero return code or the word ``FAILED`` alone is not
-    a test protocol and stays quiet.
+    ``outcome`` is ``"pass"`` / ``"fail"`` / ``"executed_no_tests"`` / ``""``.
+    ``protocol`` records which independently observable surface established
+    that the command was a test: ``"command"`` for a recognized runner
+    invocation or ``"native"`` for a runner-owned result frame (for example a
+    directly executed Rust test binary). A generic non-zero return code or the
+    word ``FAILED`` alone is not a test protocol and stays quiet.
     """
     cmd = command or ""
     out = output or ""
@@ -84,9 +105,18 @@ def classify_test_observation(command: str, output: str) -> tuple[str, str]:
         protocol = "native"
     else:
         return "", ""
-    if TEST_FAIL_RE.search(out):
+    failed = TEST_FAIL_RE.search(out)
+    passed = TEST_PASS_RE.search(out)
+    if failed:
         return "fail", protocol
-    if TEST_PASS_RE.search(out):
+    # Environment truth outranks a lexical zero-test summary. A known-clean
+    # positive result is the sole exception: test bodies may legitimately print
+    # error examples without making the runner fail.
+    if ENV_FAIL_RE.search(out) and not (returncode == 0 and passed):
+        return "env_fail", protocol
+    if TEST_NO_TESTS_RE.search(out):
+        return "executed_no_tests", protocol
+    if passed and (returncode is None or returncode == 0):
         return "pass", protocol
     return "", protocol
 
@@ -182,6 +212,7 @@ __all__ = [
     "TEST_RUNNER_RE",
     "TEST_PASS_RE",
     "TEST_FAIL_RE",
+    "TEST_NO_TESTS_RE",
     "TEST_PROTOCOL_RE",
     "classify_test_observation",
     "ENV_FAIL_RE",

@@ -64,7 +64,7 @@ def graph(tmp_path, monkeypatch):
 def test_a_view_resolves_the_files_symbols(graph):
     """THE FIX. The seam turns 'the agent opened this file' into 'these symbols are in play'."""
     assert seam._viewed_symbols_for_action(ActionOperation.VIEW_SOURCE, VIEWED) == (
-        "refresh_session", "TokenStore",
+        f"{VIEWED}::refresh_session", f"{VIEWED}::TokenStore",
     )
 
 
