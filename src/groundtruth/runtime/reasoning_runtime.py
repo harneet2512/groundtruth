@@ -4931,6 +4931,28 @@ def _revision_bound_evidence_id(
     return f"GT-E-{physical_dedup_key}-g{generation_hash}"
 
 
+def _dedup_key_from_evidence_id(evidence_id: str) -> str:
+    """The inverse of :func:`_revision_bound_evidence_id` -- the physical dedup key, or "".
+
+    It lives HERE, beside the constructor, so the id format is written down exactly once. The
+    dedup key is what every other lane calls a row's ``candidate_id`` (the gateway stamps
+    ``candidate_id=winner.dedup_key``), so recovering it is what lets a capsule delivery be
+    joined on the SAME identity contract as a lane delivery instead of a second, divergent one.
+
+    FAIL-CLOSED. An id this module did not mint yields "" rather than a guess: a wrong candidate
+    id would seat an attestation against bytes that never carried that fact, which is strictly
+    worse than no join. The split is on the LAST ``-g`` because ``_sha256`` is hex and a dedup
+    key is hex, so neither half can contain the separator.
+    """
+    if not isinstance(evidence_id, str) or not evidence_id.startswith("GT-E-"):
+        return ""
+    body = evidence_id[len("GT-E-"):]
+    key, separator, generation = body.rpartition("-g")
+    if not separator or not key or not generation:
+        return ""
+    return key
+
+
 def canonical_evidence_from_envelope(
     envelope: object,
     *,
@@ -5623,9 +5645,20 @@ class CapsuleCompilation:
     rendered_content_hash: str = ""
     evidence_manifest_hash: str = ""
     evidence_manifest_json: str = ""
+    # ``(candidate_id, fact_class)`` per delivered evidence, parallel to ``evidence_ids``.
+    # The canonical delivery row stamps these so an offline reader can join a capsule
+    # delivery on the SAME ``(candidate_id, seal)`` contract as a lane delivery, and can
+    # check the class against the registry from the row's OWN bytes (J6 self-evidence).
+    # Empty on the failure/disabled constructors, which deliver nothing to identify.
+    evidence_lineage: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence_ids", tuple(self.evidence_ids))
+        object.__setattr__(
+            self,
+            "evidence_lineage",
+            tuple((str(key), str(fact)) for key, fact in self.evidence_lineage),
+        )
         if not self.observation_id or not self.model_call_id:
             raise ValueError("capsule compilation observation/model-call identity is required")
         if self.state is CapsuleCompilationState.COMPILED:
@@ -5745,6 +5778,14 @@ def _capsule_compilation_from_json(payload: str) -> CapsuleCompilation:
         ),
         evidence_manifest_json=str(
             raw.get("evidence_manifest_json", "")
+        ),
+        # A dropped identity would be invisible until a REPLAYED capsule silently lost its
+        # join key, so the round-trip carries it like every other field. Malformed entries
+        # are skipped rather than coerced -- a half-read pair is not an identity.
+        evidence_lineage=tuple(
+            (str(pair[0]), str(pair[1]))
+            for pair in raw.get("evidence_lineage", ())
+            if isinstance(pair, (list, tuple)) and len(pair) == 2
         ),
     )
 
@@ -6168,6 +6209,16 @@ def compile_observation_capsule(
         source_model_call_id=source_model_call_id,
         model_call_id=model_call_id,
         evidence_ids=delivery.evidence_ids,
+        # Carry each delivered record's identity FORWARD onto the artifact. `feature_id` is
+        # `lineage.fact_class` for every canonical record (the only two constructors are the
+        # envelope conversion, which sets it from the lineage, and the JSON rehydration).
+        # A record whose id this module did not mint contributes no pair rather than a
+        # guessed one -- correct-or-quiet applied to identity.
+        evidence_lineage=tuple(
+            (_dedup_key_from_evidence_id(item.evidence_id), item.feature_id)
+            for item in decision.coalition
+            if _dedup_key_from_evidence_id(item.evidence_id) and item.feature_id
+        ),
         capsule_text=capsule_text,
         capsule_hash=capsule_hash,
         overall_grade=decision.overall_grade,

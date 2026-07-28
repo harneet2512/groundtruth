@@ -211,4 +211,18 @@ def test_sealed_brief_is_compiled_and_staged_for_first_provider_call(
         attachment.provider_boundary._active.delivery_attempt.state
         is not None
     )
+
+    # C30 half 1 (M1): the staged capsule must carry the IDENTITY of what it delivers, paired
+    # (candidate_id, fact_class) and parallel to evidence_ids. Without the candidate id the
+    # canonical delivery row has no join key and this class can never receive attested truth;
+    # without the fact class the row cannot prove its own attribution to an offline reader.
+    # Asserted STRUCTURALLY (not against a literal dedup key) so it stays true when the brief
+    # fixture changes -- the binding it pins is id-to-key, not one particular hash.
+    active = attachment.provider_boundary._active
+    assert len(active.evidence_lineage) == len(active.evidence_ids) == 1
+    candidate_id, fact_class = active.evidence_lineage[0]
+    assert fact_class == "localization"
+    assert candidate_id and active.evidence_ids[0] == (
+        f"GT-E-{candidate_id}-g" + active.evidence_ids[0].rsplit("-g", 1)[1]
+    )
     attachment.attempt_runtime.journal.close()

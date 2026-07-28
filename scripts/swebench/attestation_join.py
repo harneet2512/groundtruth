@@ -50,7 +50,7 @@ from groundtruth.runtime.attestation_store import (
     STORE_ENTRY_SCHEMA,
     attestation_index_key,
 )
-from groundtruth.runtime.fact_registry import registration_for
+from groundtruth.runtime.fact_registry import FACT_ROLE_DELIVERY, registration_for
 from groundtruth.runtime.feature_lineage import CAP_FEATURE_IDS, LINEAGE_SCHEMA
 from groundtruth.runtime.producer_attestation import (
     FAIL,
@@ -90,10 +90,15 @@ _DELIVERED = "delivered"
 #                      from the producer's own edit-event ledger to reproduce the delivered
 #                      "rewritten N times" claim (truth+authority measured; freshness honest-dark).
 #   localization    <- v1r_brief        (brief_attestation.finalize_localization_attestation) —
-#                      the step-0 brief's registry-routed localization BLOCK, bound to its
-#                      per-block delivery seal (compound row block_lineage). Truth PASS iff the
-#                      producer graph-verified the candidate at BUILD time (witness_verified);
-#                      freshness honest-dark (no runtime graph sub-revision proof).
+#                      the step-0 brief's registry-routed localization evidence. It ships on the
+#                      CAPSULE path, so it joins on the capsule row's own seal via J6 form 4
+#                      (``evidence_lineage``), NOT the retired compound-row ``block_lineage``
+#                      whose producer was deleted. Truth PASS iff the producer graph-verified the
+#                      candidate at BUILD time (witness_verified); freshness honest-dark (no
+#                      runtime graph sub-revision proof). NOTE (2026-07-28): the factory itself
+#                      still has NO production caller, so this class remains UNMEASURED in
+#                      practice until it is called with the capsule seal — the join is ready, the
+#                      producer is not.
 #   newfile_precedent <- change_surface (finalize_newfile_precedent_attestation) — the
 #                      REGISTRATION missing-role precedent, re-derived by re-running
 #                      change_surface's own registration derivation on the producer-captured
@@ -509,6 +514,64 @@ def _index_block_lineage(
             rejections.setdefault(key, _LINEAGE_REJECT_BLOCK)
 
 
+_LINEAGE_REJECT_CANONICAL = "canonical_evidence_lineage_unregistered"
+
+
+def _index_canonical_evidence_lineage(
+    row: dict,
+    position: int,
+    index: dict[tuple[str, str], list[int]],
+    rejections: dict[tuple[str, str], str],
+) -> None:
+    """J6 form 4 — the CAPSULE delivery, indexed under every evidence it carried.
+
+    The capsule path writes ONE row (``gt.canonical_delivery.v1``) with no top-level
+    ``candidate_id``, so before this it was skipped outright and the two classes that ship on
+    the step-0 capsule (``localization``, ``obligations``) could never be joined at all — their
+    ``correct_info`` was structurally ``None``. The eight attested classes were unaffected only
+    because they ship on the lanes, which stamp ``candidate_id`` = the envelope ``dedup_key``.
+
+    Unlike ``block_lineage`` there is no per-entry seal: the capsule is ONE sealed byte string,
+    so every entry joins on the ROW's ``content_sha256_16``.
+
+    SELF-EVIDENCE, and why this is not a loophole. The dedup key is technically recoverable by
+    parsing ``evidence_ids`` offline, which would have needed no runtime change at all. That was
+    rejected: the registration check upstream in ``canonical_evidence_from_envelope`` is real but
+    INVISIBLE to a reader holding only the row, so joining on it would weaken J6 to "trust that
+    someone checked earlier". The runtime carries ``fact_class`` forward instead and this reader
+    verifies it against the registry — strictly stronger than form 1, which only requires a
+    lineage tag plus a non-empty class string.
+    """
+    entries = row.get("evidence_lineage")
+    if not isinstance(entries, list) or not entries:
+        return
+    seal = row.get("content_sha256_16")
+    if not isinstance(seal, str) or not seal:
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        candidate_id = entry.get("candidate_id")
+        fact_class = entry.get("fact_class")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            continue
+        if not isinstance(fact_class, str) or not fact_class:
+            continue
+        key = (candidate_id, seal)
+        registration = registration_for(fact_class)
+        if (
+            registration is not None
+            and registration.fact_class == fact_class
+            and registration.fact_role == FACT_ROLE_DELIVERY
+        ):
+            index[key].append(position)
+        else:
+            # A row does not get to name its own class into existence. Recorded as a NAMED
+            # rejection so a matching attestation surfaces the reason instead of looking
+            # like a plain candidate/seal miss.
+            rejections.setdefault(key, _LINEAGE_REJECT_CANONICAL)
+
+
 def _delivered_row_index(
     ledger_rows: Iterable[Any],
 ) -> tuple[dict[tuple[str, str], list[int]], dict[tuple[str, str], str]]:
@@ -533,6 +596,7 @@ def _delivered_row_index(
         if not isinstance(outcome, str) or outcome.lower() != _DELIVERED:
             continue
         _index_block_lineage(row, position, index, rejections)
+        _index_canonical_evidence_lineage(row, position, index, rejections)
         candidate_id = row.get("candidate_id")
         seal = row.get("content_sha256_16")
         if not isinstance(candidate_id, str) or not candidate_id:

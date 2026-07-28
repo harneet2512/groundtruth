@@ -949,6 +949,16 @@ class MiniSweProviderBoundary:
             "evidence_manifest_json": compilation.evidence_manifest_json,
             "evidence_manifest_hash": compilation.evidence_manifest_hash,
             "evidence_ids": list(compilation.evidence_ids),
+            # The join identity of what this capsule delivered, one entry per evidence.
+            # `content_sha256_16` is NOT repeated here: every entry shares the ROW's seal,
+            # because the capsule is one sealed byte string, not a set of separately sealed
+            # blocks. `fact_class` rides along so an offline reader can check the class
+            # against the registry from the row's own bytes instead of trusting that the
+            # producer validated it upstream (J6 self-evidence).
+            "evidence_lineage": [
+                {"candidate_id": candidate_id, "fact_class": fact_class}
+                for candidate_id, fact_class in compilation.evidence_lineage
+            ],
             "provider_payload_hash": delivery.provider_payload_hash,
             "bound_provider_payload_json": (
                 compilation.bound_provider_payload_json
