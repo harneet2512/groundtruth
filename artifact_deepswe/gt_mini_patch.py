@@ -15323,7 +15323,14 @@ def _persist_change_surface_producer_attestation(winner, shipped: str, sealed):
     any fault returns without touching a single delivered byte."""
     try:
         evidence_type = str(getattr(winner, "evidence_type", "") or "")
-        if not evidence_type.startswith("missing_role:registration"):
+        # #40: BOTH registration forms. The postcreate form is the same fact at an honest
+        # post-creation edit boundary and the producer stashes the SAME snapshot for it
+        # (gateway.py:2745 tests the ROLE, not the kind string), so guarding on the pre-create
+        # prefix alone left its snapshot stashed and never popped.
+        if not (
+            evidence_type.startswith("missing_role:registration")
+            or evidence_type.startswith("missing_role_postcreate:registration")
+        ):
             return None
         from groundtruth.runtime.gateway import pop_newfile_precedent_snapshot
         snapshot = pop_newfile_precedent_snapshot(str(getattr(winner, "dedup_key", "") or ""))
@@ -15339,6 +15346,10 @@ def _persist_change_surface_producer_attestation(winner, shipped: str, sealed):
             delivered_block=shipped,
             candidate_id=str(getattr(winner, "dedup_key", "") or ""),
             delivery_seal=delivery_seal,
+            # The OBSERVED boundary, mirroring the gateway path. Left to the factory default
+            # this would silently claim `failed_search` for a post-creation delivery.
+            actual_event=str(
+                getattr(getattr(winner, "lineage", None), "actual_event", "") or ""),
         )
         persist_attestation(
             final.attestation, final.artifact_mapping(), _attestation_output_root())

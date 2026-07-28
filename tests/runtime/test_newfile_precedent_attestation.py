@@ -327,3 +327,82 @@ def test_build_snapshot_correct_or_quiet_on_missing_file(tmp_path: Path) -> None
         entity="azure", registration_file="reg.py", members=("aws",),  # < 2 members
         repo_root=str(tmp_path),
     ) is None
+
+
+# --------------------------------------------------------------------------- #
+# #40 — the POST-CREATION form. `missing_role_postcreate:registration` is the same fact at an
+# honest post-creation edit boundary (registry: deliver_by=edit_result), and the producer stashes
+# the SAME snapshot for it. But the seam's consumer guard tested
+# `startswith("missing_role:registration")`, which the postcreate string does not satisfy — so its
+# snapshot was stashed and never popped, and the form could never attest.
+#
+# WIDENING THE GUARD ALONE WOULD HAVE BEEN WORSE THAN THE MISS. `validate` never compares
+# `open_event` to `required_event`, the seam never passed `actual_event`, and the factory defaulted
+# it to the hardcoded `failed_search`. So a postcreate claim would have produced a structurally
+# valid PASS attestation asserting the decision opened at a boundary it never touched — the
+# "false 100% ON_TIME" defect this repo already documented (gt_mini_patch.py:9609-9611).
+#
+# And passing the real event alone is not enough either: `truth_complete` compared against the
+# hardcoded constant, so every postcreate claim would have flipped to UNMEASURED — a silent miss
+# traded for a silent unmeasured. The boundary must be DERIVED from the evidence type.
+#
+# BITING MUTATIONS (applied, observed RED, reverted by targeted restore):
+#   M1 — restore the hardcoded `actual_event == _ACTUAL_EVENT`: the postcreate PASS test goes RED
+#        (every postcreate claim reads UNMEASURED).
+#   M2 — restore the hardcoded `open_event` fallback: the open_event test goes RED and the
+#        attestation binds the delivery to a boundary it never occurred at.
+# --------------------------------------------------------------------------- #
+_POSTCREATE_TYPE = "missing_role_postcreate:registration"
+
+
+def test_postcreate_form_passes_at_its_own_boundary() -> None:
+    """M1. Same fact, same snapshot, honest edit_result boundary."""
+    snap = _snapshot()
+    block = _delivered_block(snap)
+
+    final = finalize_newfile_precedent_attestation(
+        snap, evidence_type=_POSTCREATE_TYPE, delivered_block=block,
+        candidate_id=_CID, delivery_seal=_seal(block), actual_event="edit_result",
+    )
+
+    assert validate(final.attestation) == ()
+    assert final.attestation.truth_verdict == PASS
+
+
+def test_postcreate_open_event_is_the_observed_boundary_not_a_default() -> None:
+    """M2. A DecisionBinding that names a boundary the delivery never touched is a lie."""
+    snap = _snapshot()
+    block = _delivered_block(snap)
+
+    final = finalize_newfile_precedent_attestation(
+        snap, evidence_type=_POSTCREATE_TYPE, delivered_block=block,
+        candidate_id=_CID, delivery_seal=_seal(block), actual_event="edit_result",
+    )
+
+    assert final.attestation.decision.open_event == "edit_result"
+    assert final.attestation.decision.required_event == "edit_result"
+
+
+def test_postcreate_at_the_precreate_boundary_is_unmeasured() -> None:
+    """The check is DERIVED, not widened: a postcreate claim at failed_search still fails."""
+    snap = _snapshot()
+    block = _delivered_block(snap)
+
+    final = finalize_newfile_precedent_attestation(
+        snap, evidence_type=_POSTCREATE_TYPE, delivered_block=block,
+        candidate_id=_CID, delivery_seal=_seal(block), actual_event="failed_search",
+    )
+    assert final.attestation.truth_verdict == UNMEASURED
+
+
+def test_precreate_form_is_byte_identical_to_before() -> None:
+    """CALIBRATION + regression: deriving the boundary must not move the pre-create case."""
+    snap = _snapshot()
+    block = _delivered_block(snap)
+
+    final = finalize_newfile_precedent_attestation(
+        snap, evidence_type=_EVIDENCE_TYPE, delivered_block=block,
+        candidate_id=_CID, delivery_seal=_seal(block),
+    )
+    assert final.attestation.truth_verdict == PASS
+    assert final.attestation.decision.open_event == "failed_search"

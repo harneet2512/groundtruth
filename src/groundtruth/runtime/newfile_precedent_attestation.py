@@ -321,13 +321,21 @@ def finalize_newfile_precedent_attestation(
             and header in delivered_block
         )
 
+    # #40: the boundary is DERIVED from the evidence type, not hardcoded. The postcreate form
+    # (`missing_role_postcreate:*`) is the SAME fact at an honest post-creation edit boundary and
+    # the registry gives it its own `deliver_by` (edit_result). Comparing it against the
+    # pre-create constant would read UNMEASURED for every postcreate claim; defaulting its
+    # `open_event` to that constant would assert a boundary the delivery never touched -- the
+    # "false 100% ON_TIME" defect. Pre-create is byte-identical: its derived boundary IS
+    # `failed_search`.
+    _boundary = required_event(evidence_type) or _ACTUAL_EVENT
     truth_complete = bool(
         reproduced
         and isinstance(candidate_id, str)
         and candidate_id
         and isinstance(delivery_seal, str)
         and delivery_seal == _seal16(delivered_block)
-        and actual_event == _ACTUAL_EVENT
+        and actual_event == _boundary
     )
 
     # FRESHNESS is genuinely measured: the snapshot binds the claim to a re-checkable git
@@ -391,7 +399,7 @@ def finalize_newfile_precedent_attestation(
         freshness_predicates=(freshness_predicate,),
         decision=DecisionBinding(
             decision_key=registration.target_decision,
-            open_event=actual_event if actual_event in _EVENTS else _ACTUAL_EVENT,
+            open_event=actual_event if actual_event in _EVENTS else _boundary,
             required_event=required_event(evidence_type) or "",
         ),
     )
