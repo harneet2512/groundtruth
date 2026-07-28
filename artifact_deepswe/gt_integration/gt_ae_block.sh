@@ -376,4 +376,20 @@ GT_AE_ARGS=(
   # codespace path) so the store survives the container without a NEW mount. A host-side
   # GT_XSESSION_DIR override wins. Within-run durable; cross-RUN upload is OWED (option b).
   --ae "GT_XSESSION_DIR=${GT_XSESSION_DIR:-${GT_C_OUT}/gt_xsession}"
+
+  # ── MEASUREMENT ARMS (2026-07-28) — shadow holdout (#30) + L2 counterfactual (#31) ──
+  # pier DROPS the host environment; only --ae crosses. Without these lines an operator can
+  # set GT_SS_SHADOW_RATE on the host, dispatch, see ZERO holdouts, and read that as "no
+  # holdouts happened" when the truth is "the arm never ran" — the same DARK-in-container
+  # class the Profile-2 completeness pin exists to prevent. That pin does not cover these
+  # because they are MEASUREMENT knobs, not capability members, and the R1 parity invariant
+  # scans only gt_mini_patch.py while two of them are read in miniswe_provider_boundary.py.
+  # Both guards were green while all three were dark.
+  #
+  # BYTE-IDENTICAL: each defaults to 0, and in-container an explicit "0" and an absent value
+  # are both OFF. Forwarding does not turn anything on — it only makes the host switch WORK.
+  # These arms withhold evidence or spend extra tokens, so they must never default on.
+  --ae "GT_SS_SHADOW=${GT_SS_SHADOW:-0}"
+  --ae "GT_SS_SHADOW_RATE=${GT_SS_SHADOW_RATE:-0}"
+  --ae "GT_L2_PROBE_RATE=${GT_L2_PROBE_RATE:-0}"
 )
