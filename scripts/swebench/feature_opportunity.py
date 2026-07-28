@@ -383,6 +383,16 @@ DELIVERED_FIRE = "DELIVERED_FIRE"
 BOUND_NO_OP = "BOUND_NO_OP"
 MISSED_FIRE = "MISSED_FIRE"
 BROKEN_BINDING = "BROKEN_BINDING"
+# 2026-07-28: the disposition set must be TOTAL. Before this state existed, an opportunity row
+# that failed validation was `continue`d out of the join and appeared in NEITHER `per_opportunity`
+# NOR the roll-up -- it simply vanished. A vanished row reads downstream exactly like a row that
+# never existed, which is the "silent zero" failure this whole module exists to prevent: an
+# analysis that says "N opportunities, all accounted for" while N is quietly short.
+#
+# `collect_feature_opportunities` already counted malformed rows and poisoned the affected feature
+# to UNMEASURED; the JOIN did not, so the two disagreed about the same corpus. Now every ledger row
+# claiming to be an opportunity leaves exactly one record, and the counts reconcile.
+MALFORMED_OPPORTUNITY = "MALFORMED_OPPORTUNITY"
 
 _BINDING_ROW_FIELDS = (
     "observation_id", "opportunity_id", "parent_policy_sha256",
@@ -438,12 +448,52 @@ def join_opportunity_deliveries(
         opportunity_id = row.get("opportunity_id")
         if not isinstance(opportunity_id, str) or opportunity_id in opportunities_by_id:
             issues.append("duplicate_opportunity_id")
-        if issues:
-            continue
         binding_dict = _binding_dict_from_opportunity(row)
+        if issues:
+            # ACCOUNTED FOR, NOT DROPPED. The row is unusable for the fire join -- its refs or
+            # binding did not validate -- but it still consumed an opportunity, and the census
+            # must say so. Emitting it with its issues named is the difference between "this
+            # opportunity could not be evaluated, here is why" and silence, which downstream
+            # cannot distinguish from "this opportunity never happened".
+            record = {
+                "ledger_row_index": row_index,
+                "observation_id": row.get("observation_id"),
+                "opportunity_id": opportunity_id if isinstance(opportunity_id, str) else None,
+                "candidate_id": row.get("candidate_id"),
+                "parent_message_index": parent_message_index,
+                "delivery_eligible": row.get("delivery_eligible"),
+                "selected": row.get("selected"),
+                "feature_refs": refs,
+                "state": MALFORMED_OPPORTUNITY,
+                "reason": "invalid_bound_opportunity:" + ",".join(sorted(issues)),
+                "physical_id": None,
+                "binding": binding_dict,
+            }
+            opportunity_records.append(record)
+            # Deliberately NOT indexed into `opportunities_by_id`: a malformed row must never
+            # become the originating opportunity for a delivery. A fire that claims it stays
+            # BROKEN_BINDING, which is the honest verdict.
+            continue
         try:
             binding = observation_binding_from_dict(binding_dict)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            # The SECOND silent drop, and it was invisible even to the malformed-row counter in
+            # `collect_feature_opportunities`, because that function never rehydrates the binding.
+            # A row can pass field validation and still fail to construct a binding.
+            opportunity_records.append({
+                "ledger_row_index": row_index,
+                "observation_id": row.get("observation_id"),
+                "opportunity_id": opportunity_id if isinstance(opportunity_id, str) else None,
+                "candidate_id": row.get("candidate_id"),
+                "parent_message_index": parent_message_index,
+                "delivery_eligible": row.get("delivery_eligible"),
+                "selected": row.get("selected"),
+                "feature_refs": refs,
+                "state": MALFORMED_OPPORTUNITY,
+                "reason": f"unconstructible_observation_binding:{type(exc).__name__}",
+                "physical_id": None,
+                "binding": binding_dict,
+            })
             continue
         assert binding is not None
         assert isinstance(opportunity_id, str)
