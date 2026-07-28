@@ -107,8 +107,14 @@ class TestEgoGraph:
         assert "core.py" in rendered
         # Pillar 3: Callers
         assert "Called by:" in rendered
-        assert "test_foo()" in rendered
-        assert "[test]" in rendered
+        # SWAP-INVARIANT (leak class, run15): a test function's NAME is a grader reference, so
+        # test callers are NEVER surfaced -- `ego.py:107-110` filters `is_test` at the source
+        # "so no consumer of render() can leak it". This test asserted the PRE-fix behaviour
+        # (test_foo() and a "[test]" tag in the render) and has been red ever since, which made
+        # the whole `preflight_checks --strict` leg permanently BLOCKED. Asserting the leak-safe
+        # behaviour is both correct and a stronger guarantee than what was here.
+        assert "test_foo" not in rendered
+        assert "[test]" not in rendered
         # Callees
         assert "Calls:" in rendered
         # Parent
@@ -129,11 +135,13 @@ class TestEgoGraph:
         called_pos = rendered.find("Called by:")
         shares_pos = rendered.find("Shares state")
         tests_pos = rendered.find("Tests:")
-        # Contract (sig/PRESERVE) before Callers before Consistency before Tests
+        # Contract (sig/PRESERVE) before Callers before Consistency.
         assert sig_pos < called_pos
         assert preserve_pos < called_pos
         assert called_pos < shares_pos
-        assert shares_pos < tests_pos
+        # The Tests pillar is ABSENT by the same leak invariant -- test assertions carry test
+        # names. `find` returns -1, so the old `shares_pos < tests_pos` could never hold.
+        assert tests_pos == -1
 
     def test_missing_symbol_returns_empty(self, tmp_path):
         db, ids = _create_test_db(tmp_path)
@@ -154,7 +162,8 @@ class TestChangeImpact:
         impact = change_impact(db, "foo", "src/core.py", max_depth=1)
         names = {i["name"] for i in impact}
         assert "other_caller" in names
-        assert "test_foo" in names
+        # Same leak invariant: change_impact must not name a test caller either.
+        assert "test_foo" not in names
 
     def test_transitive_callers(self, tmp_path):
         db, ids = _create_test_db(tmp_path)

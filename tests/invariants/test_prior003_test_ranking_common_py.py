@@ -94,7 +94,20 @@ class TestHelperDeprioritization:
     """PRIOR-003: _common.py must not outrank direct test files."""
 
     def test_direct_test_outranks_common_py_in_production(self):
-        """Call the production _get_test_assertions_from_graph and verify ranking."""
+        """SUPERSEDED BY TEST-BLINDNESS, and re-pointed at the rule that replaced it.
+
+        This asserted a RANKING over test assertions read from graph.db. That reader,
+        ``post_edit._get_test_assertions_from_graph``, is now `return []` BY DESIGN
+        (post_edit.py:1729-1737): "the [TEST] family named the test and read the assertions
+        table (test-derived) -- both are leakage. Disabled so GT is fully test-blind and its
+        output is unchanged if the grading test is swapped. (run12 leaked test_plot_hdi ...)".
+
+        Ranking test files can no longer matter, because no test file is ever surfaced. The
+        original assertion has been unsatisfiable since that change, which is what kept
+        `preflight_checks --strict` permanently BLOCKED. The invariant worth guarding now is
+        the STRONGER one: the reader stays dark even when the graph is full of assertions
+        that would rank well.
+        """
         from groundtruth.hooks.post_edit import _get_test_assertions_from_graph
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -103,17 +116,12 @@ class TestHelperDeprioritization:
 
             results = _get_test_assertions_from_graph(db_path, "beets/importer.py", "set_fields")
 
-            assert len(results) >= 2, f"Expected 2+ test assertions, got {len(results)}"
-
-            # First result must NOT be from _common.py or conftest.py
-            first_file = results[0].get("file_path", "")
-            assert "_common.py" not in first_file, (
-                f"PRIOR-003: _common.py must not be first result. "
-                f"Got: {first_file}"
-            )
-            assert "conftest.py" not in first_file, (
-                f"PRIOR-003: conftest.py must not be first result. "
-                f"Got: {first_file}"
+            # A populated graph is the CALIBRATION: the fixture deliberately contains direct
+            # test assertions AND _common.py helpers, so an empty result here is the leak
+            # filter working, not an empty database.
+            assert results == [], (
+                "GT must stay test-blind: surfacing a test name makes GT's output depend on "
+                "the grading test, which is the swap-invariance this rule protects."
             )
 
     def test_direct_test_has_higher_rank(self):
