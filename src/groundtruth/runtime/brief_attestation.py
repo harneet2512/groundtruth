@@ -122,6 +122,53 @@ def _predicate(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Producer snapshots — carrying build-time facts to the delivery site.
+# --------------------------------------------------------------------------- #
+# The factories need facts only the PRODUCER has (the ranked path/rank/witness; the issue
+# identity, count and digest), but they can only be finalized at DELIVERY, where the seal
+# exists. This is the same carrier `gateway._stash_newfile_precedent_snapshot` uses for
+# change_surface: a bounded dict, popped once, that can never raise into the delivery path.
+#
+# KEYED BY THE ENVELOPE ``dedup_key``, NOT the brief's own candidate id. The brief ids
+# ("obl-1", "file-entry-1") are producer-local; the delivery row and the attestation join both
+# use the dedup key, which does not exist until ``EvidenceEnvelope.build`` has run. Keying this
+# by the brief id would build a stash nothing ever pops — a silent no-op that looks implemented.
+_BRIEF_SNAPSHOTS: dict[str, dict[str, Any]] = {}
+_BRIEF_SNAPSHOT_CAP = 256
+
+
+def stash_brief_snapshot(candidate_id: str, snapshot: "dict[str, Any] | None") -> None:
+    """Record one producer snapshot under the DELIVERY identity. Never raises.
+
+    A falsy key or snapshot is a no-op rather than a stored ``None``: an empty entry would later
+    read as "present" and attest from nothing, which is worse than no attestation at all.
+    """
+    if not candidate_id or not snapshot:
+        return
+    try:
+        if len(_BRIEF_SNAPSHOTS) >= _BRIEF_SNAPSHOT_CAP:
+            # Drop the OLDEST: the deliveries still in flight are the recent ones.
+            _BRIEF_SNAPSHOTS.pop(next(iter(_BRIEF_SNAPSHOTS)), None)
+        _BRIEF_SNAPSHOTS[candidate_id] = snapshot
+    except Exception:  # noqa: BLE001 — audit plumbing can never break a delivery
+        return
+
+
+def pop_brief_snapshot(candidate_id: str) -> "dict[str, Any] | None":
+    """Consume the snapshot for a delivered candidate id, or ``None``.
+
+    POP, not peek: one delivery consumes its snapshot, so a later delivery cannot re-attest
+    stale producer facts against different bytes.
+    """
+    if not candidate_id:
+        return None
+    try:
+        return _BRIEF_SNAPSHOTS.pop(candidate_id, None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def finalize_localization_attestation(
     *,
     candidate_id: str,

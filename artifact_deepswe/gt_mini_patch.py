@@ -24405,6 +24405,7 @@ def _canonical_brief_records(env, revision):
             WARNING,
             EvidenceEnvelope,
         )
+        from groundtruth.runtime.brief_attestation import stash_brief_snapshot
         from groundtruth.runtime.feature_lineage import build_lineage
         from groundtruth.runtime.reasoning_runtime import (
             Authority,
@@ -24468,6 +24469,7 @@ def _canonical_brief_records(env, revision):
                 or span[1] > len(brief_text)
             ):
                 continue
+            snapshot = None
             block = brief_text[span[0]:span[1]]
             if hashlib.sha256(
                 block.encode("utf-8", "surrogatepass")
@@ -24486,6 +24488,14 @@ def _canonical_brief_records(env, revision):
                     continue
                 verified = proof.get("witness_verified") is True
                 witness = str(proof.get("witness") or "").strip()
+                snapshot = {
+                    "fact_class": "localization",
+                    "path": target,
+                    "rank": proof.get("rank"),
+                    "witness": witness,
+                    "witness_verified": verified,
+                    "block_content_sha256": seal,
+                }
                 claim = f"Ranked source candidate: {target}."
                 if witness:
                     claim += f" Repository witness: {witness}."
@@ -24531,6 +24541,14 @@ def _canonical_brief_records(env, revision):
                 )
                 if not rows:
                     continue
+                snapshot = {
+                    "fact_class": "obligations",
+                    "issue_sha256": obligations_record.get("issue_sha256"),
+                    "issue_revision": obligations_record.get("issue_revision"),
+                    "obligation_count": obligations_record.get("obligation_count"),
+                    "obligations_digest": obligations_record.get("obligations_digest"),
+                    "block_content_sha256": seal,
+                }
                 target = "issue"
                 claim = "Task requirements: " + " | ".join(rows)
                 consequence = "Keep every listed task requirement open until validated."
@@ -24571,30 +24589,38 @@ def _canonical_brief_records(env, revision):
                 anchoring_risk=0 if tier == VERIFIED else 1,
                 observed_substrates=observed_substrates,
             )
-            envelopes.append(
-                EvidenceEnvelope.build(
-                    producer=producer,
-                    fact_id=candidate_id,
-                    target=target,
-                    evidence_type=evidence_type,
-                    payload=(claim, consequence),
-                    provenance=provenance,
-                    confidence=confidence,
-                    tier=tier,
-                    graph_revision=revision.graph,
-                    valid_until=revision.graph,
-                    preferred_event=EVENT_STEP0,
-                    estimated_cost_tokens=max(
-                        1, (len(claim) + len(consequence) + 3) // 4
-                    ),
-                    lineage=lineage,
-                    producer_inputs={
-                        "candidate_id": candidate_id,
-                        "block_sha256": seal,
-                    },
-                    canonical_semantics=semantics,
-                )
+            envelope = EvidenceEnvelope.build(
+                producer=producer,
+                fact_id=candidate_id,
+                target=target,
+                evidence_type=evidence_type,
+                payload=(claim, consequence),
+                provenance=provenance,
+                confidence=confidence,
+                tier=tier,
+                graph_revision=revision.graph,
+                valid_until=revision.graph,
+                preferred_event=EVENT_STEP0,
+                estimated_cost_tokens=max(
+                    1, (len(claim) + len(consequence) + 3) // 4
+                ),
+                lineage=lineage,
+                producer_inputs={
+                    "candidate_id": candidate_id,
+                    "block_sha256": seal,
+                },
+                canonical_semantics=semantics,
             )
+            envelopes.append(envelope)
+            # C30: carry the producer's build-time facts to the DELIVERY site, where the
+            # attestation can finally be sealed. Keyed by the envelope `dedup_key` -- the
+            # identity the canonical row and the join both use -- NOT the brief's own
+            # candidate_id, which is producer-local and would key a stash nothing pops.
+            # Pure audit plumbing: it never raises, and nothing here can change a delivered
+            # byte. The payload is built INSIDE each branch, where its inputs are in scope,
+            # so a future branch cannot stash a partial snapshot from another class's
+            # leftover locals (the type checker caught exactly that in my first draft).
+            stash_brief_snapshot(envelope.dedup_key, snapshot)
         return canonicalize_evidence_envelopes(envelopes)
     except (ImportError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return ()
