@@ -127,6 +127,7 @@ def finalize_localization_attestation(
     candidate_id: str,
     delivery_seal: str,
     block_content_sha256: str,
+    delivered_bytes_sha256: str = "",
     path: str,
     rank: int,
     witness: str,
@@ -136,8 +137,15 @@ def finalize_localization_attestation(
     """Bind the producer's build-time graph verification of one ranked candidate to its
     delivered brief-block seal.
 
+    ``delivered_bytes_sha256`` is the digest of the bytes the MODEL RECEIVED, and it is what
+    the seal must match. On the step-0 capsule path those bytes are the re-rendered capsule, NOT
+    the brief block, so the two digests differ; ``block_content_sha256`` remains producer
+    provenance (which block the candidate was rendered into) and is still sealed into the witness
+    record. Omitted, it falls back to the block digest — the pre-capsule truth, where the
+    delivered bytes ARE the block and one value honestly serves both roles.
+
     Returns ``None`` when a SOUND binding cannot be formed (a delivery seal that is not
-    16 lower-hex, an empty candidate id, or a ``block_content_sha256`` whose 16-hex
+    16 lower-hex, an empty candidate id, or a ``delivered_bytes_sha256`` whose 16-hex
     prefix is not the delivery seal) — there is no attestation to persist, and the class
     stays UNMEASURED via the absent join (fail-closed).
 
@@ -151,10 +159,19 @@ def finalize_localization_attestation(
     seal = str(delivery_seal or "")
     full = str(block_content_sha256 or "")
     cid = str(candidate_id or "")
+    # The SEAL follows the bytes the model actually received. Since the step-0 evidence ships
+    # inside a re-rendered CAPSULE, those are no longer the brief block: binding the seal to the
+    # block digest would make the bundle assert a falsehood, and a reader reproducing the
+    # preimage would hash the block, miss, and correctly call it forged. `block_content_sha256`
+    # stays what its name says -- producer provenance, still sealed into the witness record.
+    # Omitted -> fall back to the block digest, which IS the delivered byte string on the
+    # pre-capsule lanes; one value honestly serves both roles there.
+    delivered = str(delivered_bytes_sha256 or "") or full
     if (
         _SEAL_RE.match(seal) is None
         or _FULL_SHA_RE.match(full) is None
-        or full[:16] != seal
+        or _FULL_SHA_RE.match(delivered) is None
+        or delivered[:16] != seal
         or not cid.strip()
     ):
         return None
@@ -236,6 +253,7 @@ def finalize_obligations_attestation(
     candidate_id: str,
     delivery_seal: str,
     block_content_sha256: str,
+    delivered_bytes_sha256: str = "",
     issue_sha256: str,
     issue_revision: str,
     obligation_count: int,
@@ -249,8 +267,13 @@ def finalize_obligations_attestation(
     identity (``issue_sha256`` + ``issue_revision``) the obligations were extracted from, and
     the digest + count of the extracted obligations (persisted in ``brief_result.json``).
 
+    ``delivered_bytes_sha256`` is the digest of the bytes the MODEL RECEIVED and is what the
+    seal must match; on the step-0 capsule path that is the re-rendered capsule, not this block.
+    ``block_content_sha256`` stays producer provenance. Omitted, it falls back to the block digest
+    (the pre-capsule case, where the delivered bytes ARE the block).
+
     Returns ``None`` when a SOUND binding cannot be formed (a delivery seal that is not 16
-    lower-hex; a ``block_content_sha256`` whose 16-hex prefix is not the seal; an empty
+    lower-hex; a ``delivered_bytes_sha256`` whose 16-hex prefix is not the seal; an empty
     candidate id) — the class stays UNMEASURED via the absent join (fail-closed).
 
     TRUTH is PASS only when the binding is sound AND the producer supplied a real obligations
@@ -264,10 +287,19 @@ def finalize_obligations_attestation(
     seal = str(delivery_seal or "")
     full = str(block_content_sha256 or "")
     cid = str(candidate_id or "")
+    # The SEAL follows the bytes the model actually received. Since the step-0 evidence ships
+    # inside a re-rendered CAPSULE, those are no longer the brief block: binding the seal to the
+    # block digest would make the bundle assert a falsehood, and a reader reproducing the
+    # preimage would hash the block, miss, and correctly call it forged. `block_content_sha256`
+    # stays what its name says -- producer provenance, still sealed into the witness record.
+    # Omitted -> fall back to the block digest, which IS the delivered byte string on the
+    # pre-capsule lanes; one value honestly serves both roles there.
+    delivered = str(delivered_bytes_sha256 or "") or full
     if (
         _SEAL_RE.match(seal) is None
         or _FULL_SHA_RE.match(full) is None
-        or full[:16] != seal
+        or _FULL_SHA_RE.match(delivered) is None
+        or delivered[:16] != seal
         or not cid.strip()
     ):
         return None
