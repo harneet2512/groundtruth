@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from types import MethodType
@@ -52,6 +53,128 @@ def _canonical_hash(value: Any) -> str:
         sort_keys=True,
     )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# L2 SAME-STATE COUNTERFACTUAL (#31, 2026-07-28). The cheapest REAL causal signal
+# available without a paired run: after the real call, optionally re-issue the SAME
+# turn with the staged capsule removed and record both arms' actions.
+#
+# Every other GT signal is observational -- GT delivered, the agent did something, and we
+# argue about whether the two are related. Here the state is IDENTICAL (same messages,
+# same kwargs, same provider, same turn) and the ONLY difference is the capsule.
+#
+# IT DOES NOT SIGN ITSELF, deliberately. Deciding whether the GT-arm action was BETTER
+# needs an anchor this layer does not have and must not invent, so the pair is recorded
+# UNSIGNED and the direction is computed offline where a measurement-only anchor exists.
+# An unsigned pair is honest; a direction invented here would be telemetry dressed as
+# evidence. Note an unsigned magnitude also hides HARM, which is exactly why the SIGN
+# must be computed somewhere that can actually establish it.
+# ─────────────────────────────────────────────────────────────────────────────
+_COUNTERFACTUAL_SCHEMA = "gt.counterfactual_pair.v1"
+_ACTION_FENCE_RE = re.compile(r"```(?:bash|sh|shell)?\s*\n(.*?)```", re.DOTALL)
+
+
+def _response_text(response: Any) -> str:
+    """Best-effort assistant text. NEVER raises: a malformed provider object reads ''."""
+    try:
+        choices = getattr(response, "choices", ()) or ()
+        if not choices:
+            return ""
+        first = choices[0]
+        message = getattr(first, "message", None)
+        content = getattr(message, "content", None)
+        if content is None and isinstance(first, Mapping):
+            content = (first.get("message") or {}).get("content")
+        return content if isinstance(content, str) else ""
+    except Exception:  # noqa: BLE001 -- measurement must never break the turn
+        return ""
+
+
+def _first_action(text: str) -> str:
+    """The first fenced command block — a PROXY for the action the agent will take.
+
+    Named a proxy because that is what it is: the boundary cannot run the agent's parser,
+    so this approximates the action rather than reproducing it. No fence => "" (no guess).
+    """
+    match = _ACTION_FENCE_RE.search(text or "")
+    return match.group(1).strip() if match else ""
+
+
+def _l2_probe_rate() -> float:
+    """`GT_L2_PROBE_RATE`, default 0.0 => OFF and byte-identical. Clamped to [0, 1]."""
+    try:
+        rate = float(os.environ.get("GT_L2_PROBE_RATE", "0") or "0")
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, rate))
+
+
+def _l2_probe_selected(key: str, rate: float) -> bool:
+    """DETERMINISTIC sampling on the model-call id — never `random`.
+
+    A random probe would make the same recording replay differently, and SS-10 replay
+    already suffers from stale recordings; a nondeterministic measurement would be
+    indistinguishable from a replay defect.
+    """
+    if rate <= 0.0:
+        return False
+    if rate >= 1.0:
+        return True
+    digest = hashlib.sha256(str(key or "").encode("utf-8")).hexdigest()
+    return (int(digest[:8], 16) / 0xFFFFFFFF) < rate
+
+
+def _maybe_record_counterfactual_pair(
+    boundary: Any,
+    messages: Any,
+    active: Any,
+    response: Any,
+    kwargs: Mapping[str, Any],
+) -> None:
+    """Record one same-state counterfactual pair. Returns None always; never raises.
+
+    The counterfactual response is DISCARDED — it is never returned to the agent and
+    never enters the delivery state machine. It has no capsule bound to it, so a row that
+    could be mistaken for a delivery would be worse than no measurement: the emitted row
+    is deliberately schema'd and layered OUTSIDE the delivery-proof namespace, carries
+    `chars_delivered: 0`, and omits `delivery_attempt_id` / `content_sha256_16` entirely.
+    """
+    try:
+        rate = _l2_probe_rate()
+        model_call_id = str(getattr(active, "model_call_id", "") or "")
+        if not _l2_probe_selected(model_call_id, rate):
+            return None
+        native_messages = boundary._without_staged_capsule(messages, active)
+        control = boundary._original_query(native_messages, **dict(kwargs or {}))
+        treatment_action = _first_action(_response_text(response))
+        control_action = _first_action(_response_text(control))
+        row = {
+            "schema": _COUNTERFACTUAL_SCHEMA,
+            "layer": "measurement.counterfactual_pair",
+            "event_type": "l2_counterfactual_pair",
+            "outcome": "measurement_only",
+            "chars_delivered": 0,
+            "model_call_id": model_call_id,
+            "observation_id": str(getattr(active, "observation_id", "") or ""),
+            "capsule_hash": str(getattr(active, "capsule_hash", "") or ""),
+            "probe_rate": rate,
+            "treatment_action": treatment_action,
+            "control_action": control_action,
+            "treatment_action_sha256_16": hashlib.sha256(
+                treatment_action.encode("utf-8")
+            ).hexdigest()[:16],
+            "control_action_sha256_16": hashlib.sha256(
+                control_action.encode("utf-8")
+            ).hexdigest()[:16],
+            "actions_differ": treatment_action != control_action,
+            # UNSIGNED BY CONSTRUCTION. This layer has no anchor; offline analysis signs it.
+            "signed": False,
+        }
+        append_ledger_line(row, boundary._receipt_sink_path)
+    except Exception:  # noqa: BLE001 -- the agent's turn is not ours to break
+        return None
+    return None
 
 
 def _response_id(response: Any) -> str:
@@ -1067,6 +1190,23 @@ class MiniSweProviderBoundary:
                 or active.delivery_attempt.state is not DeliveryState.DISPATCHED
             ):
                 return response
+            # L2 SAME-STATE COUNTERFACTUAL (#31). Placed HERE because reaching this line
+            # proves a capsule was actually dispatched on this turn, which is exactly the
+            # opportunity a counterfactual is defined against. OFF by default
+            # (GT_L2_PROBE_RATE=0) => no extra provider call and no row, so the dispatch
+            # path stays byte-identical. It cannot raise, and its response is discarded
+            # without ever touching the delivery state machine.
+            # `active` IS the CapsuleCompilation here — the same object the fault path
+            # hands to `_without_staged_capsule` above. Passing `active.compilation`
+            # would raise AttributeError, and this probe's own broad except would have
+            # swallowed it, silently disabling the measurement while looking wired.
+            _maybe_record_counterfactual_pair(
+                boundary,
+                messages,
+                active,
+                response,
+                kwargs,
+            )
             provider_response_id = _response_id(response)
             if not provider_response_id:
                 reason = "MISSING_PROVIDER_RESPONSE_ID"
