@@ -15229,6 +15229,83 @@ def _render_gateway_envelope(render_envelope, envelope, *, native: bool) -> str:
         def_facts_renderer=None if sanitized else _gateway_def_render)
 
 
+def _persist_brief_producer_attestations(compilation) -> None:
+    """C30 half 3d — finalize the step-0 brief attestations at the DELIVERED capsule.
+
+    Registered as the provider boundary's ``delivery_handler``, so it runs at the one moment
+    both halves of the join identity exist: the delivered bytes' seal and the evidence lineage.
+
+    Before this, ``brief_attestation``'s two factories had NO production caller, so
+    ``localization`` and ``obligations`` — the only classes that ship on the capsule path —
+    could never receive joined truth. Their ``correct_info`` was structurally ``None`` and their
+    terminal SEALED_DELIVERED_UNGRADED on every run, however good the run.
+
+    The delivered digest is the CAPSULE's ``rendered_content_hash``, not the brief block's:
+    passing the block digest would make the bundle assert that the two are the same value, and a
+    reader reproducing the preimage would hash the block, miss, and correctly call it forged.
+    The block digest travels separately as producer provenance.
+
+    Pure audit persistence. It cannot change a delivered byte, it never raises into the delivery
+    path, and a swallowed failure still writes its cause (absence must always carry a reason).
+    """
+    candidate_id = ""
+    try:
+        from groundtruth.runtime.attestation_store import persist_attestation
+        from groundtruth.runtime.brief_attestation import (
+            finalize_localization_attestation,
+            finalize_obligations_attestation,
+            pop_brief_snapshot,
+        )
+
+        delivered = str(getattr(compilation, "rendered_content_hash", "") or "")
+        seal = delivered[:16]
+        lineage = getattr(compilation, "evidence_lineage", ()) or ()
+        for candidate_id, fact_class in lineage:
+            snapshot = pop_brief_snapshot(candidate_id)
+            # The lineage names the class; the snapshot carries the producer facts. If they
+            # disagree the pairing is stale, and attesting it would bind (say) a ranked-path
+            # record to a behavioural-contract claim. Correct-or-quiet: skip.
+            if not snapshot or snapshot.get("fact_class") != fact_class:
+                continue
+            block_sha = str(snapshot.get("block_content_sha256") or "")
+            if fact_class == "localization":
+                rank = snapshot.get("rank")
+                final = finalize_localization_attestation(
+                    candidate_id=candidate_id,
+                    delivery_seal=seal,
+                    block_content_sha256=block_sha,
+                    delivered_bytes_sha256=delivered,
+                    path=str(snapshot.get("path") or ""),
+                    rank=rank if isinstance(rank, int) and not isinstance(rank, bool) else 0,
+                    witness=str(snapshot.get("witness") or ""),
+                    witness_verified=snapshot.get("witness_verified") is True,
+                    graph_revision=str(snapshot.get("graph_revision") or ""),
+                )
+            elif fact_class == "obligations":
+                count = snapshot.get("obligation_count")
+                final = finalize_obligations_attestation(
+                    candidate_id=candidate_id,
+                    delivery_seal=seal,
+                    block_content_sha256=block_sha,
+                    delivered_bytes_sha256=delivered,
+                    issue_sha256=str(snapshot.get("issue_sha256") or ""),
+                    issue_revision=str(snapshot.get("issue_revision") or ""),
+                    obligation_count=(
+                        count if isinstance(count, int) and not isinstance(count, bool) else 0
+                    ),
+                    obligations_digest=str(snapshot.get("obligations_digest") or ""),
+                )
+            else:
+                continue
+            if final is None:
+                continue  # no SOUND binding -> the class stays UNMEASURED (fail-closed)
+            persist_attestation(
+                final.attestation, final.artifact_mapping(), _attestation_output_root())
+    except Exception as exc:  # noqa: BLE001 -- audit persistence cannot alter delivered bytes
+        _attestation_persist_failure_row("brief", str(candidate_id or ""), exc)
+        return
+
+
 def _persist_change_surface_producer_attestation(winner, shipped: str, sealed):
     """B-NFP: persist newfile_precedent truth for a delivered change_surface REGISTRATION
     winner, re-deriving the precedent from the producer-owned snapshot captured at production
@@ -25049,6 +25126,12 @@ def install_canonical_runtime(*, model, agent, env, task):
                 component=f"provider:{stage}",
             )
         )
+        # C30: the success-path twin. Finalizes the step-0 brief attestations at the
+        # delivered capsule -- the one moment both halves of the join identity exist.
+        # Registered HERE rather than inside the boundary because the attestation output
+        # root is the seam's, and re-deriving it there would create a second authority for
+        # where audit artifacts land.
+        provider_boundary.delivery_handler = _persist_brief_producer_attestations
         attachment.commitment_boundary = MiniSweCommitmentBoundary(
             agent=agent,
             context_builder=attachment._commitment_context,
