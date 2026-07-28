@@ -10669,6 +10669,19 @@ def _reset_phase_dropped_losers() -> None:
 
 
 def _filter_candidates_by_phase(cands, phase: "Phase | None", event, *, file_path: str = ""):
+    # LEGACY-ONLY ROUTE (C17, 2026-07-28). This gate has ONE call site and it is inside
+    # `_augment_output_legacy`, which `_augment_output` reaches only when there is NO
+    # canonical runtime attachment (:23960) or when the canonical observer has gone DARK
+    # (:23993). It therefore does NOT run on a healthy canonical attempt.
+    #
+    # DO NOT DELETE IT. The fallback route is live and deliberately preserved: a dark
+    # observer must degrade to untimed delivery rather than to silence.
+    #
+    # DO NOT READ ITS COUNTERS AS CANONICAL BEHAVIOUR. PHASE_POLICY's vocabulary drift is a
+    # property of THIS route, and the historical "137/138 wrong_phase suppressions" figure
+    # came from here. Quoting it as evidence about the canonical path is a category error --
+    # that mistake has already been made once and retracted.
+    #
     # A4 (Fable 2026-07-05): a None phase (the trajectory_state stub's derive_phase -> None,
     # or an unresolvable phase) means we CANNOT judge phase-fitness. The policy lookup would
     # then classify EVERY kind as wrong_phase and MASS-SUPPRESS the whole turn — GT goes

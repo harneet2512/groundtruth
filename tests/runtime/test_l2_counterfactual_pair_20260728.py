@@ -166,6 +166,101 @@ def test_pair_row_is_outside_the_delivery_namespace(
     assert row["signed"] is False
 
 
+# --------------------------------------------------------------------------- #
+# BLOCKER 3 — the probe must DECLARE the spend it incurs.
+#
+# LitellmModel accounts cost in the PUBLIC `query` (_query, then _calculate_cost ->
+# GLOBAL_MODEL_STATS.add). This probe calls `_original_query`, which IS the low-level
+# `_query`, so a counterfactual is a real billed completion added to NOTHING. Calling the
+# public `query` instead would "fix" the accounting by inflating the GT arm with measurement
+# overhead — corrupting the very on/off comparison the probe exists to make. The low-level
+# call is RIGHT; only the silent omission was wrong.
+#
+# TOKENS, NOT USD: pricing belongs to the cost note, which knows the model and rate card.
+# --------------------------------------------------------------------------- #
+def test_usage_tokens_extracts_defensively() -> None:
+    obj = SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=11, completion_tokens=7, total_tokens=18
+        )
+    )
+    assert mpb._usage_tokens(obj) == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
+    zero = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    assert mpb._usage_tokens(SimpleNamespace()) == zero
+    assert mpb._usage_tokens(None) == zero
+    # A provider reporting garbage must read 0, never crash and never guess.
+    assert mpb._usage_tokens(
+        SimpleNamespace(usage=SimpleNamespace(prompt_tokens="lots"))
+    ) == zero
+
+
+def test_row_declares_the_probes_own_spend_and_never_agent_cost(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("GT_L2_PROBE_RATE", "1")
+    sink = tmp_path / "receipts.jsonl"
+
+    def fake_query(msgs, **kwargs):
+        # DISTINCT from the treatment's usage below, so a copy/paste bug that records the
+        # wrong response's tokens is caught rather than passing by coincidence.
+        return SimpleNamespace(
+            id="cf-1",
+            status="completed",
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content="```bash\nls\n```"),
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=101, completion_tokens=5, total_tokens=106
+            ),
+        )
+
+    boundary = SimpleNamespace(
+        _receipt_sink_path=str(sink),
+        _original_query=fake_query,
+        _without_staged_capsule=lambda msgs, active: msgs,
+    )
+    active = SimpleNamespace(
+        model_call_id="call-abc",
+        observation_id="obs-1",
+        capsule_hash="c" * 64,
+        capsule_text="CAPSULE",
+    )
+    treatment = SimpleNamespace(
+        id="real-1",
+        status="completed",
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content="```bash\ngrep -rn foo src/\n```"),
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=999, completion_tokens=999, total_tokens=999
+        ),
+    )
+    mpb._maybe_record_counterfactual_pair(
+        boundary, [{"role": "user", "content": "t"}], active, treatment, {}
+    )
+    row = json.loads(sink.read_text(encoding="utf-8").splitlines()[0])
+
+    # The COUNTERFACTUAL's tokens — the spend the probe itself caused — not the treatment's.
+    assert row["measurement_overhead_tokens"] == {
+        "prompt_tokens": 101,
+        "completion_tokens": 5,
+        "total_tokens": 106,
+    }
+    # And nothing an aggregator would fold into the agent's own cost.
+    assert "total_cost_usd" not in row
+    assert "cost" not in row
+
+
 def test_probe_is_actually_wired_into_the_dispatch_path() -> None:
     """STRUCTURAL, and labelled as such: the helper being green proves nothing about it
     running in production. Every other test here drives the helper directly, so without

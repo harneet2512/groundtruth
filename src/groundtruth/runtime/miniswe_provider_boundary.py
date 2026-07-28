@@ -101,6 +101,32 @@ def _first_action(text: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _usage_tokens(response: Any) -> dict[str, int]:
+    """Token usage for ONE response. Never raises; absence or garbage reads 0.
+
+    TOKENS, NOT USD, on purpose. Pricing belongs to the run's cost note, which knows the
+    model and the rate card; computing dollars here would couple this boundary to one
+    provider's calculator and rot silently when rates change. Tokens are provider-agnostic.
+    """
+    out = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, Mapping):
+            usage = response.get("usage")
+        if usage is None:
+            return out
+        for key in out:
+            value = getattr(usage, key, None)
+            if value is None and isinstance(usage, Mapping):
+                value = usage.get(key)
+            # `bool` is an int subclass; a provider sending True must not read as 1 token.
+            if isinstance(value, int) and not isinstance(value, bool):
+                out[key] = value
+    except Exception:  # noqa: BLE001 -- accounting must never break the turn
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    return out
+
+
 def _l2_probe_rate() -> float:
     """`GT_L2_PROBE_RATE`, default 0.0 => OFF and byte-identical. Clamped to [0, 1]."""
     try:
@@ -168,6 +194,17 @@ def _maybe_record_counterfactual_pair(
                 control_action.encode("utf-8")
             ).hexdigest()[:16],
             "actions_differ": treatment_action != control_action,
+            # SPEND THE PROBE ITSELF INCURRED. `_original_query` is the LOW-LEVEL `_query`;
+            # LitellmModel accounts cost in the PUBLIC `query` (`_calculate_cost` ->
+            # `GLOBAL_MODEL_STATS.add`), so this completion is really billed but invisible
+            # to GLOBAL_MODEL_STATS / agent.cost / total_cost_usd. Declaring it here lets a
+            # run's cost note ADD measurement overhead instead of silently omitting it.
+            #
+            # Calling the public `query` instead would "fix" the accounting by adding this
+            # cost to the AGENT's — inflating the GT arm with measurement overhead and
+            # corrupting the very on/off comparison the probe exists to make. The low-level
+            # call is the RIGHT choice; only the silent omission was wrong.
+            "measurement_overhead_tokens": _usage_tokens(control),
             # UNSIGNED BY CONSTRUCTION. This layer has no anchor; offline analysis signs it.
             "signed": False,
         }
