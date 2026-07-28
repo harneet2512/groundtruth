@@ -3700,6 +3700,49 @@ def _member_delivery_byte_proven(
             continue
         if _row_has_seal_join(row, entries):
             return True
+    # CANONICAL ROUTE (#41 hole 1). The capsule delivery row carries neither `feature_ids` nor
+    # `profile_member` -- both are legacy-lane stamps -- so before this every CAP byte owner was
+    # unprovable whenever the canonical runtime was attached, i.e. in the intended production
+    # posture, REGARDLESS of whether its producer fired.
+    #
+    # The row instead carries `evidence_lineage`, one entry per delivered evidence, whose
+    # `cap_owners` are the ALREADY-AUTHORIZED byte-owner ids (`_authorized_cap_byte_owners`:
+    # an explicit byte_owner ref in the lineage AND a mechanism binding for that fact class).
+    # This reader re-checks the claim against the SAME static authority table rather than
+    # trusting the stamp -- the row must prove its own attribution, exactly as the two
+    # mechanisms above do.
+    #
+    # APPLIES TO ALL SEVEN OWNERS, including the `exact_profile_member` ones. I first
+    # restricted this to `typed_lineage` because `build_lineage` REFUSES to mint a CAP ref for
+    # GT_CERT_DELIVERY / GT_EDIT_CHECK / GT_HYPOTHESIS. That is true of the GATEWAY path and
+    # false of the canonical one: `canonical_producers._lineage` (:264-290) adds the byte-owner
+    # FeatureRef directly, gated on the mechanism having a binding for that fact class, so
+    # those three ARE authorized on a canonical record (`canonical_producers.py:569, :623,
+    # :711`). Restricting by mechanism here would have excluded exactly the three owners this
+    # branch exists to rescue.
+    #
+    # NOT `profile_member`: stamping that column on a canonical row cannot work, because the
+    # exact-profile mechanism also requires `binding.layer == row["layer"]` and a canonical
+    # row's layer is the constant "canonical.provider_delivery". Making it match would mean
+    # writing a lane layer the record does not have, or deleting the only structural check
+    # that mechanism has. The producer-authorized owner is the honest witness.
+    if True:
+        for row in rows:
+            if row.get("outcome") != "delivered":
+                continue
+            for entry in row.get("evidence_lineage") or ():
+                if not isinstance(entry, dict):
+                    continue
+                owners = entry.get("cap_owners")
+                if not isinstance(owners, list) or member not in owners:
+                    continue
+                fact_class = entry.get("fact_class")
+                if not any(
+                    binding.fact_class == fact_class for binding in authority.bindings
+                ):
+                    continue
+                if _row_has_seal_join(row, entries):
+                    return True
     return False
 
 

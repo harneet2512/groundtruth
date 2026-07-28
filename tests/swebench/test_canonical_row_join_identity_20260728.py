@@ -133,3 +133,111 @@ def test_a_canonical_row_without_a_seal_is_not_indexed() -> None:
     row.pop("content_sha256_16")
     index, _ = aj._delivered_row_index([row])
     assert index == {}
+
+
+# --------------------------------------------------------------------------- #
+# #41 hole 1 — the grader must be able to prove a CAP byte owner on the CANONICAL route.
+#
+# `_member_delivery_byte_proven` proved a byte owner only via `feature_ids` (typed_lineage) or
+# `profile_member` (exact_profile_member) — both legacy-lane stamps. The capsule row carries
+# neither, so every CAP byte owner was unprovable in the intended production posture.
+#
+# The canonical branch reads `evidence_lineage[].cap_owners` and RE-CHECKS the claim against the
+# same static CAP_BYTE_OWNER_MECHANISMS table. The row proves its own attribution; the stamp is
+# not trusted on its own.
+#
+# BITING MUTATIONS (applied, observed RED, reverted by targeted restore):
+#   M1 — drop the fact_class binding re-check: `test_a_row_cannot_claim_an_owner_for_an_unbound_
+#        fact_class` goes RED, and a row could name any owner it liked.
+#   M2 — drop the seal-join requirement: `test_an_unsealed_canonical_row_proves_nothing` goes RED.
+# --------------------------------------------------------------------------- #
+import gt_feature_metrics as gfm  # noqa: E402
+
+
+def _canonical_cap_row(*, owners=("GT_LOC_RESLOT",), fact_class="localization") -> dict:
+    return {
+        "schema": "gt.canonical_delivery.v1",
+        "outcome": "delivered",
+        "content_sha256_16": _SEAL,
+        "layer": "canonical.provider_delivery",
+        "chars_delivered": 42,
+        "evidence_lineage": [
+            {
+                "candidate_id": "ac032ea694307691",
+                "fact_class": fact_class,
+                "cap_owners": list(owners),
+            }
+        ],
+    }
+
+
+def _ledger(seal: str = _SEAL) -> dict:
+    """The seal join `_row_has_seal_join` actually requires: a trajectory entry joined BY SEAL
+    whose char count and ledger layer both match the row. My first fixture omitted
+    `chars_delivered`/`layer` and the calibration failed -- the fixture was wrong, not the code."""
+    return {
+        "entries": [
+            {
+                "source": "trajectory",
+                "joined": True,
+                "join_method": "seal",
+                "content_sha256_16": seal,
+                "ledger_chars": 42,
+                "ledger_layer": "canonical.provider_delivery",
+            }
+        ]
+    }
+
+
+def test_every_cap_byte_owner_can_be_proven_on_a_canonical_row() -> None:
+    """ALL SEVEN, including the exact_profile_member ones.
+
+    I first restricted the canonical branch to `typed_lineage`, because `build_lineage` refuses
+    to mint a CAP ref for GT_CERT_DELIVERY / GT_EDIT_CHECK / GT_HYPOTHESIS. That is the GATEWAY
+    path. `canonical_producers._lineage` adds the byte-owner ref directly, so those three ARE
+    authorized on a canonical record -- the restriction would have excluded exactly the owners
+    this branch exists to rescue.
+    """
+    from groundtruth.runtime.feature_lineage import CAP_BYTE_OWNER_MECHANISMS
+
+    for member, mechanism in CAP_BYTE_OWNER_MECHANISMS.items():
+        fact_class = mechanism.bindings[0].fact_class
+        row = _canonical_cap_row(owners=(member,), fact_class=fact_class)
+        assert gfm._member_delivery_byte_proven(member, [row], _ledger()) is True, member
+
+
+def test_the_probe_can_prove_a_cap_owner_on_a_canonical_row() -> None:
+    """CALIBRATION. Every 'not proven' assertion below is unreadable without this."""
+    assert gfm._member_delivery_byte_proven(
+        "GT_LOC_RESLOT", [_canonical_cap_row()], _ledger()
+    ) is True
+
+
+def test_a_row_cannot_claim_an_owner_for_an_unbound_fact_class() -> None:
+    """M1. GT_LOC_RESLOT binds to localization; a row naming it on another class proves nothing."""
+    row = _canonical_cap_row(fact_class="obligations")
+    assert gfm._member_delivery_byte_proven("GT_LOC_RESLOT", [row], _ledger()) is False
+
+
+def test_an_owner_not_listed_is_not_proven() -> None:
+    row = _canonical_cap_row(owners=("GT_PATCH_DELTA",))
+    assert gfm._member_delivery_byte_proven("GT_LOC_RESLOT", [row], _ledger()) is False
+
+
+def test_an_unsealed_canonical_row_proves_nothing() -> None:
+    """M2. Byte proof needs the seal join; a row alone is a claim, not evidence."""
+    assert gfm._member_delivery_byte_proven(
+        "GT_LOC_RESLOT", [_canonical_cap_row()], _ledger("f" * 16)
+    ) is False
+
+
+def test_an_undelivered_canonical_row_proves_nothing() -> None:
+    row = _canonical_cap_row()
+    row["outcome"] = "withheld"
+    assert gfm._member_delivery_byte_proven("GT_LOC_RESLOT", [row], _ledger()) is False
+
+
+def test_malformed_lineage_entries_never_prove_and_never_raise() -> None:
+    row = _canonical_cap_row()
+    row["evidence_lineage"] = ["scalar", None, {"cap_owners": "GT_LOC_RESLOT"}, {}]
+    assert gfm._member_delivery_byte_proven("GT_LOC_RESLOT", [row], _ledger()) is False

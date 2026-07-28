@@ -5645,19 +5645,26 @@ class CapsuleCompilation:
     rendered_content_hash: str = ""
     evidence_manifest_hash: str = ""
     evidence_manifest_json: str = ""
-    # ``(candidate_id, fact_class)`` per delivered evidence, parallel to ``evidence_ids``.
+    # ``(candidate_id, fact_class, cap_owner_ids)`` per delivered evidence, parallel to
+    # ``evidence_ids``. The CAP owners are the ALREADY-AUTHORIZED byte-owner ids from the
+    # record (`_authorized_cap_byte_owners`), never an inference from a flag or a layer name;
+    # they let the grader prove a byte owner on the canonical route, which previously had no
+    # `feature_ids`/`profile_member` stamp at all.
     # The canonical delivery row stamps these so an offline reader can join a capsule
     # delivery on the SAME ``(candidate_id, seal)`` contract as a lane delivery, and can
     # check the class against the registry from the row's OWN bytes (J6 self-evidence).
     # Empty on the failure/disabled constructors, which deliver nothing to identify.
-    evidence_lineage: tuple[tuple[str, str], ...] = ()
+    evidence_lineage: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence_ids", tuple(self.evidence_ids))
         object.__setattr__(
             self,
             "evidence_lineage",
-            tuple((str(key), str(fact)) for key, fact in self.evidence_lineage),
+            tuple(
+                (str(key), str(fact), tuple(str(owner) for owner in owners))
+                for key, fact, owners in self.evidence_lineage
+            ),
         )
         if not self.observation_id or not self.model_call_id:
             raise ValueError("capsule compilation observation/model-call identity is required")
@@ -5783,9 +5790,15 @@ def _capsule_compilation_from_json(payload: str) -> CapsuleCompilation:
         # join key, so the round-trip carries it like every other field. Malformed entries
         # are skipped rather than coerced -- a half-read pair is not an identity.
         evidence_lineage=tuple(
-            (str(pair[0]), str(pair[1]))
-            for pair in raw.get("evidence_lineage", ())
-            if isinstance(pair, (list, tuple)) and len(pair) == 2
+            (
+                str(entry[0]),
+                str(entry[1]),
+                tuple(str(owner) for owner in entry[2])
+                if isinstance(entry[2], (list, tuple))
+                else (),
+            )
+            for entry in raw.get("evidence_lineage", ())
+            if isinstance(entry, (list, tuple)) and len(entry) == 3
         ),
     )
 
@@ -6215,7 +6228,11 @@ def compile_observation_capsule(
         # A record whose id this module did not mint contributes no pair rather than a
         # guessed one -- correct-or-quiet applied to identity.
         evidence_lineage=tuple(
-            (_dedup_key_from_evidence_id(item.evidence_id), item.feature_id)
+            (
+                _dedup_key_from_evidence_id(item.evidence_id),
+                item.feature_id,
+                tuple(item.owner_feature_ids),
+            )
             for item in decision.coalition
             if _dedup_key_from_evidence_id(item.evidence_id) and item.feature_id
         ),

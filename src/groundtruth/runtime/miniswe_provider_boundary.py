@@ -964,8 +964,15 @@ class MiniSweProviderBoundary:
             # against the registry from the row's own bytes instead of trusting that the
             # producer validated it upstream (J6 self-evidence).
             "evidence_lineage": [
-                {"candidate_id": candidate_id, "fact_class": fact_class}
-                for candidate_id, fact_class in compilation.evidence_lineage
+                {
+                    "candidate_id": candidate_id,
+                    "fact_class": fact_class,
+                    # The ALREADY-AUTHORIZED CAP byte owners for this evidence. Without them
+                    # the grader has no mechanism to prove a byte owner on the canonical
+                    # route -- this row carries neither `feature_ids` nor `profile_member`.
+                    "cap_owners": list(cap_owners),
+                }
+                for candidate_id, fact_class, cap_owners in compilation.evidence_lineage
             ],
             "provider_payload_hash": delivery.provider_payload_hash,
             "bound_provider_payload_json": (

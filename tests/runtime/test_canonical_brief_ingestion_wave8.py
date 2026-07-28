@@ -220,8 +220,10 @@ def test_sealed_brief_is_compiled_and_staged_for_first_provider_call(
     # fixture changes -- the binding it pins is id-to-key, not one particular hash.
     active = attachment.provider_boundary._active
     assert len(active.evidence_lineage) == len(active.evidence_ids) == 1
-    candidate_id, fact_class = active.evidence_lineage[0]
+    candidate_id, fact_class, cap_owners = active.evidence_lineage[0]
     assert fact_class == "localization"
+    # step-0 brief evidence authorizes no CAP byte owner -- empty, never guessed.
+    assert cap_owners == ()
     assert candidate_id and active.evidence_ids[0] == (
         f"GT-E-{candidate_id}-g" + active.evidence_ids[0].rsplit("-g", 1)[1]
     )

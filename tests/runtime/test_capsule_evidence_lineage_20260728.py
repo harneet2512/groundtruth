@@ -88,7 +88,7 @@ def _compilation(**overrides) -> rr.CapsuleCompilation:
         "source_model_call_id": "call-0",
         "model_call_id": "call-1",
         "evidence_ids": ("GT-E-ac032ea694307691-gdeadbeef",),
-        "evidence_lineage": (("ac032ea694307691", "obligations"),),
+        "evidence_lineage": (("ac032ea694307691", "obligations", ()),),
         "capsule_text": "[GroundTruth] Evidence",
         "rendered_content_hash": "d" * 64,
         "evidence_manifest_hash": "e" * 64,
@@ -105,8 +105,8 @@ def _compilation(**overrides) -> rr.CapsuleCompilation:
 
 def test_lineage_normalizes_to_tuples_of_str() -> None:
     """A list-of-lists (the JSON shape) must not survive as a list on a frozen record."""
-    compilation = _compilation(evidence_lineage=[["ac032ea694307691", "obligations"]])
-    assert compilation.evidence_lineage == (("ac032ea694307691", "obligations"),)
+    compilation = _compilation(evidence_lineage=[["ac032ea694307691", "obligations", []]])
+    assert compilation.evidence_lineage == (("ac032ea694307691", "obligations", ()),)
 
 
 def test_lineage_survives_the_journal_round_trip() -> None:
@@ -125,9 +125,9 @@ def test_malformed_lineage_entries_are_skipped_not_coerced() -> None:
     """A half-read pair is not an identity, and a coerced one would join the wrong bytes."""
     payload = rr._canonical_json(_compilation())
     broken = payload.replace(
-        '[["ac032ea694307691","obligations"]]',
-        '[["ac032ea694307691"],["a","b","c"],"scalar",["ok","localization"]]',
+        '[["ac032ea694307691","obligations",[]]]',
+        '[["ac032ea694307691"],["a","b","c","d"],"scalar",["ok","localization",[]]]',
     )
     assert broken != payload, "mutation did not apply -- the assertion below would be vacuous"
     restored = rr._capsule_compilation_from_json(broken)
-    assert restored.evidence_lineage == (("ok", "localization"),)
+    assert restored.evidence_lineage == (("ok", "localization", ()),)
