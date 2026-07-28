@@ -50,6 +50,21 @@ class EventSchemaVersionError(EventIntegrityError):
 # silent false tamper accusation into an explicit, self-describing version mismatch.
 CANONICAL_HASH_SCHEMA = "gt.canonical_event.v2"
 
+# The schema identity of a PERSISTED EvidenceRecord payload (C28a, 2026-07-28). BUMP THIS
+# whenever a field is added to, removed from, or renamed on `EvidenceRecord`.
+#
+# WHY IT EXISTS. `_evidence_record_from_json` reads optional fields with `raw.get(name, ())`,
+# so a row written BEFORE a field existed rehydrates byte-identically to a row whose field is
+# legitimately empty. For `observed_substrates` that is not cosmetic: the substrate gate holds
+# any record that cannot evidence its own substrate, which is CORRECT for the second case and
+# undiagnosable for the first. Recording which schema wrote each row separates them.
+#
+# WHAT IT DOES NOT DO: it does not "unhold" legacy rows. Substrate evidence that was never
+# recorded cannot be recovered, and holding such a record is correct-or-quiet. The gate stays
+# strict -- weakening it re-opens cross-record substrate lending. This makes the condition
+# DIAGNOSABLE and makes an unknown future schema fail LOUDLY instead of being silently misread.
+EVIDENCE_RECORD_SCHEMA = "gt.evidence_record.v1"
+
 # THE SINGLE SOURCE OF TRUTH for the capsule-hash preimage label. Exported 2026-07-28 because
 # this literal was hand-duplicated in FOUR places -- `reasoning_runtime` (the writer),
 # `runtime_attestation.py:580` and `gt_feature_metrics.py:1843` (readers that RECOMPUTE the
@@ -1807,6 +1822,7 @@ class RuntimeJournal(EventStore):
                 lifecycle TEXT NOT NULL,
                 state_hash TEXT NOT NULL,
                 canonical_json TEXT NOT NULL,
+                record_schema TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(evidence_id, journal_sequence)
             );
             CREATE TABLE IF NOT EXISTS evidence_attempt_journal (
@@ -1816,6 +1832,7 @@ class RuntimeJournal(EventStore):
                 lifecycle TEXT NOT NULL,
                 state_hash TEXT NOT NULL,
                 canonical_json TEXT NOT NULL,
+                record_schema TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(attempt_id, evidence_id, journal_sequence)
             );
             CREATE TABLE IF NOT EXISTS oracle_journal (
@@ -1930,6 +1947,12 @@ class RuntimeJournal(EventStore):
         for table, column in (
             ("delivery_attempts", "attempt_id"),
             ("evidence_journal", "attempt_id"),
+            # C28a: which EVIDENCE_RECORD_SCHEMA wrote each row. Without this an older
+            # journal keeps rehydrating absent optional fields to their defaults with no
+            # way to tell "the field did not exist yet" from "the field was empty".
+            # DEFAULT '' is precisely the legacy marker: empty means pre-schema.
+            ("evidence_journal", "record_schema"),
+            ("evidence_attempt_journal", "record_schema"),
         ):
             columns = {
                 str(row[1])
@@ -1949,10 +1972,10 @@ class RuntimeJournal(EventStore):
             """
             INSERT OR IGNORE INTO evidence_attempt_journal(
                 attempt_id, evidence_id, journal_sequence, lifecycle,
-                state_hash, canonical_json
+                state_hash, canonical_json, record_schema
             )
             SELECT attempt_id, evidence_id, journal_sequence, lifecycle,
-                   state_hash, canonical_json
+                   state_hash, canonical_json, record_schema
             FROM evidence_journal
             WHERE attempt_id <> ''
             """
@@ -2185,7 +2208,8 @@ class RuntimeJournal(EventStore):
                 attempt_id = str(owners[0][0])
         rows = self.connection.execute(
             """
-            SELECT journal_sequence, lifecycle, state_hash, canonical_json
+            SELECT journal_sequence, lifecycle, state_hash, canonical_json,
+                   record_schema
             FROM evidence_attempt_journal
             WHERE attempt_id = ? AND evidence_id = ?
             ORDER BY journal_sequence ASC
@@ -2198,6 +2222,20 @@ class RuntimeJournal(EventStore):
             if int(row[0]) != expected or _sha256(payload) != str(row[2]):
                 raise StateIntegrityError(
                     "evidence journal sequence/hash integrity failure"
+                )
+            # C28a, FAIL-CLOSED on an UNKNOWN schema -- parity with `canonical_events`.
+            # A row stamped by a build we do not know may carry fields this reader would
+            # silently drop, or omit fields this reader would silently default. Empty is
+            # NOT an error: it is the legacy marker for rows written before the column
+            # existed, and they must stay readable so replay of recorded artifacts keeps
+            # working. What empty does NOT mean is "observed nothing" -- that distinction
+            # is the entire point of the column.
+            row_schema = str(row[4] or "")
+            if row_schema and row_schema != EVIDENCE_RECORD_SCHEMA:
+                raise StateIntegrityError(
+                    f"evidence journal row was written under record schema "
+                    f"{row_schema!r}; this build reads "
+                    f"{EVIDENCE_RECORD_SCHEMA!r}"
                 )
             record = _evidence_record_from_json(payload)
             if (
@@ -2303,8 +2341,8 @@ class RuntimeJournal(EventStore):
                 """
                 INSERT INTO evidence_attempt_journal(
                     attempt_id, evidence_id, journal_sequence, lifecycle,
-                    state_hash, canonical_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    state_hash, canonical_json, record_schema
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attempt_id,
@@ -2313,6 +2351,7 @@ class RuntimeJournal(EventStore):
                     evidence.lifecycle.value,
                     _sha256(payload),
                     payload,
+                    EVIDENCE_RECORD_SCHEMA,
                 ),
             )
             self.connection.commit()
@@ -2834,8 +2873,8 @@ class RuntimeJournal(EventStore):
                     """
                     INSERT INTO evidence_attempt_journal(
                         attempt_id, evidence_id, journal_sequence, lifecycle,
-                        state_hash, canonical_json
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        state_hash, canonical_json, record_schema
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         attempt_id,
@@ -2844,6 +2883,7 @@ class RuntimeJournal(EventStore):
                         evidence.lifecycle.value,
                         _sha256(payload),
                         payload,
+                        EVIDENCE_RECORD_SCHEMA,
                     ),
                 )
             self.connection.commit()
