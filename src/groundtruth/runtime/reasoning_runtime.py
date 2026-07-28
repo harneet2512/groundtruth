@@ -2093,6 +2093,12 @@ class RuntimeJournal(EventStore):
             if latest == attempt:
                 return
             terminal_states = {
+                # A withheld capsule is FINISHED -- nothing follows it. It belongs here (the
+                # "already terminal" check) and in NONE of the other predicate sets: it was
+                # never joined to a payload, no provider call carried it, it has no provider
+                # terminal kind, and it must never be retried (a retry would deliver the
+                # evidence the coin said to withhold, silently un-randomising the arm).
+                DeliveryState.WITHHELD_FOR_MEASUREMENT,
                 DeliveryState.JOIN_FAILED,
                 DeliveryState.DELIVERED,
                 DeliveryState.DISPATCH_FAILED,
@@ -2959,6 +2965,12 @@ class DeliveryState(str, Enum):
     CANCELLED = "CANCELLED"
     PARTIAL_OUTPUT = "PARTIAL_OUTPUT"
     RESPONSE_DISCARDED = "RESPONSE_DISCARDED"
+    # A DELIBERATE measurement holdout: the capsule was compiled and then NOT sent, so the
+    # shadow arm's coin can be measured. It is its OWN terminal because neither neighbour
+    # fits -- CANCELLED means THE PROVIDER cancelled, and RESPONSE_DISCARDED is about the
+    # RESPONSE and is reached through record_delivery_failure. Both live in terminal-FAILURE
+    # sets, so reusing either would book a measurement decision as a delivery DEFECT.
+    WITHHELD_FOR_MEASUREMENT = "WITHHELD_FOR_MEASUREMENT"
 
 
 # THE delivery state machine, in ONE place (#30 step 1, 2026-07-28). This exact table was
@@ -2971,8 +2983,15 @@ class DeliveryState(str, Enum):
 # `frozenset` targets on purpose: a shared mutable dict-of-sets is one `.add()` away from
 # widening every validator at once.
 _DELIVERY_TRANSITIONS: "dict[DeliveryState, frozenset[DeliveryState]]" = {
+    # WITHHELD_FOR_MEASUREMENT is reachable ONLY from COMPILED: the holdout is decided after
+    # the capsule exists and BEFORE binding/dispatch. Withholding something already dispatched
+    # would be a lie (the bytes went out); withholding something never compiled is vacuous.
     DeliveryState.COMPILED: frozenset(
-        {DeliveryState.JOINED, DeliveryState.JOIN_FAILED}
+        {
+            DeliveryState.JOINED,
+            DeliveryState.JOIN_FAILED,
+            DeliveryState.WITHHELD_FOR_MEASUREMENT,
+        }
     ),
     DeliveryState.JOINED: frozenset({DeliveryState.DISPATCHED}),
     DeliveryState.DISPATCHED: frozenset(

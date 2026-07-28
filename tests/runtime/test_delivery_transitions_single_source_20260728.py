@@ -27,7 +27,10 @@ from groundtruth.runtime.reasoning_runtime import DeliveryState as DS
 
 
 EXPECTED_CORE = {
-    DS.COMPILED: {DS.JOINED, DS.JOIN_FAILED},
+    # WITHHELD_FOR_MEASUREMENT added DELIBERATELY (#30 step 2). This test FAILED when the edge
+    # landed, which is exactly what it is for: a widening of the state machine cannot happen
+    # without someone editing this line and saying so. Never relax it to a subset check.
+    DS.COMPILED: {DS.JOINED, DS.JOIN_FAILED, DS.WITHHELD_FOR_MEASUREMENT},
     DS.JOINED: {DS.DISPATCHED},
     DS.DISPATCHED: {
         DS.PROVIDER_ACCEPTED,
