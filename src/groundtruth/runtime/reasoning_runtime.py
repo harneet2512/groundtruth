@@ -2113,29 +2113,7 @@ class RuntimeJournal(EventStore):
                 raise StateIntegrityError(
                     "contradictory provider terminal outcome for delivery attempt"
                 )
-            allowed = {
-                DeliveryState.SELECTED: {DeliveryState.COMPILED},
-                DeliveryState.COMPILED: {
-                    DeliveryState.JOINED,
-                    DeliveryState.JOIN_FAILED,
-                },
-                DeliveryState.JOINED: {DeliveryState.DISPATCHED},
-                DeliveryState.DISPATCHED: {
-                    DeliveryState.PROVIDER_ACCEPTED,
-                    DeliveryState.DISPATCH_FAILED,
-                    DeliveryState.PROVIDER_REJECTED,
-                },
-                DeliveryState.PROVIDER_ACCEPTED: {
-                    DeliveryState.DELIVERED,
-                    DeliveryState.INFERENCE_FAILED,
-                    DeliveryState.CANCELLED,
-                    DeliveryState.PARTIAL_OUTPUT,
-                },
-                DeliveryState.DELIVERED: {
-                    DeliveryState.RESPONSE_COMMITTED,
-                    DeliveryState.RESPONSE_DISCARDED,
-                },
-            }
+            allowed = _INITIAL_DELIVERY_TRANSITIONS
             if attempt.state not in allowed.get(latest.state, set()):
                 raise StateIntegrityError(
                     f"delivery journal lifecycle integrity failure: "
@@ -2501,28 +2479,7 @@ class RuntimeJournal(EventStore):
                 raise StateIntegrityError(
                     "compilation journal changed without delivery transition"
                 )
-            allowed = {
-                DeliveryState.COMPILED: {
-                    DeliveryState.JOINED,
-                    DeliveryState.JOIN_FAILED,
-                },
-                DeliveryState.JOINED: {DeliveryState.DISPATCHED},
-                DeliveryState.DISPATCHED: {
-                    DeliveryState.PROVIDER_ACCEPTED,
-                    DeliveryState.DISPATCH_FAILED,
-                    DeliveryState.PROVIDER_REJECTED,
-                },
-                DeliveryState.PROVIDER_ACCEPTED: {
-                    DeliveryState.DELIVERED,
-                    DeliveryState.INFERENCE_FAILED,
-                    DeliveryState.CANCELLED,
-                    DeliveryState.PARTIAL_OUTPUT,
-                },
-                DeliveryState.DELIVERED: {
-                    DeliveryState.RESPONSE_COMMITTED,
-                    DeliveryState.RESPONSE_DISCARDED,
-                },
-            }
+            allowed = _DELIVERY_TRANSITIONS
             if current_delivery.state not in allowed.get(
                 prior_delivery.state, set()
             ):
@@ -2686,28 +2643,7 @@ class RuntimeJournal(EventStore):
                             "atomic evidence changed without compilation transition"
                         )
                 return
-            allowed = {
-                DeliveryState.COMPILED: {
-                    DeliveryState.JOINED,
-                    DeliveryState.JOIN_FAILED,
-                },
-                DeliveryState.JOINED: {DeliveryState.DISPATCHED},
-                DeliveryState.DISPATCHED: {
-                    DeliveryState.PROVIDER_ACCEPTED,
-                    DeliveryState.DISPATCH_FAILED,
-                    DeliveryState.PROVIDER_REJECTED,
-                },
-                DeliveryState.PROVIDER_ACCEPTED: {
-                    DeliveryState.DELIVERED,
-                    DeliveryState.INFERENCE_FAILED,
-                    DeliveryState.CANCELLED,
-                    DeliveryState.PARTIAL_OUTPUT,
-                },
-                DeliveryState.DELIVERED: {
-                    DeliveryState.RESPONSE_COMMITTED,
-                    DeliveryState.RESPONSE_DISCARDED,
-                },
-            }
+            allowed = _DELIVERY_TRANSITIONS
             if delivery.state not in allowed.get(
                 latest_delivery.state, set()
             ):
@@ -3023,6 +2959,50 @@ class DeliveryState(str, Enum):
     CANCELLED = "CANCELLED"
     PARTIAL_OUTPUT = "PARTIAL_OUTPUT"
     RESPONSE_DISCARDED = "RESPONSE_DISCARDED"
+
+
+# THE delivery state machine, in ONE place (#30 step 1, 2026-07-28). This exact table was
+# written out by hand THREE times -- `RuntimeJournal.append_delivery`,
+# `.append_compilation` and `.append_compilation_transition`. Three hand-maintained copies of
+# a state machine is the D4 hazard made worse: a hash label that drifts is mislabelled, but a
+# transition edge that drifts means one validator ACCEPTS what another REJECTS, and the
+# journal becomes internally inconsistent.
+#
+# `frozenset` targets on purpose: a shared mutable dict-of-sets is one `.add()` away from
+# widening every validator at once.
+_DELIVERY_TRANSITIONS: "dict[DeliveryState, frozenset[DeliveryState]]" = {
+    DeliveryState.COMPILED: frozenset(
+        {DeliveryState.JOINED, DeliveryState.JOIN_FAILED}
+    ),
+    DeliveryState.JOINED: frozenset({DeliveryState.DISPATCHED}),
+    DeliveryState.DISPATCHED: frozenset(
+        {
+            DeliveryState.PROVIDER_ACCEPTED,
+            DeliveryState.DISPATCH_FAILED,
+            DeliveryState.PROVIDER_REJECTED,
+        }
+    ),
+    DeliveryState.PROVIDER_ACCEPTED: frozenset(
+        {
+            DeliveryState.DELIVERED,
+            DeliveryState.INFERENCE_FAILED,
+            DeliveryState.CANCELLED,
+            DeliveryState.PARTIAL_OUTPUT,
+        }
+    ),
+    DeliveryState.DELIVERED: frozenset(
+        {DeliveryState.RESPONSE_COMMITTED, DeliveryState.RESPONSE_DISCARDED}
+    ),
+}
+
+# `append_delivery` ALSO accepts the initial edge; the compilation validators deliberately do
+# NOT. COMPOSED rather than shared-and-widened: flattening all three onto one table would
+# silently grant `SELECTED -> COMPILED` to two validators that never permitted it, which is
+# precisely the membership change this extraction must not make.
+_INITIAL_DELIVERY_TRANSITIONS: "dict[DeliveryState, frozenset[DeliveryState]]" = {
+    DeliveryState.SELECTED: frozenset({DeliveryState.COMPILED}),
+    **_DELIVERY_TRANSITIONS,
+}
 
 
 class ProviderTerminalKind(str, Enum):
