@@ -436,9 +436,35 @@ def run_pytest(targets: list[str], timeout: int = 900) -> dict[str, str]:
     return results
 
 
+def _status_for(nodeid: str, results: dict[str, str]) -> str:
+    """The status of one mapped node-id, resolving PARAMETRIZED tests.
+
+    `_pytest_one` keys on the ids pytest PRINTS, and a parametrized test never prints its bare
+    id -- it prints `<bare>[param]` once per case. A mapped bare id therefore looked MISSING and
+    graded its member a FIRING FAILURE while the test was green (GT_SS_SHADOW,
+    test_safety_classes_never_held_out_at_any_rate, 42 cases). The parametrization is what makes
+    that safety claim meaningful across classes and rates, so the lookup adapts to the test
+    rather than the test being weakened to suit the lookup.
+
+    FAIL-CLOSED IS PRESERVED. Only the id SHAPE is recognised, never a weaker verdict: a bare id
+    with no children stays MISSING, and children must ALL be green. The `[` boundary keeps
+    `test_foo` from being satisfied by `test_foobar`.
+    """
+    direct = results.get(nodeid)
+    if direct is not None:
+        return direct
+    prefix = nodeid + "["
+    children = [status for key, status in results.items() if key.startswith(prefix)]
+    if not children:
+        return "MISSING"
+    bad = [status for status in children if status not in _GREEN]
+    return bad[0] if bad else "PASSED"
+
+
 def _judge(nodeids: list[str], results: dict[str, str]) -> tuple[str, str]:
     """PASS iff every mapped node-id ran GREEN; FAIL naming the first non-green (or MISSING)."""
-    bad = [(n, results.get(n, "MISSING")) for n in nodeids if results.get(n) not in _GREEN]
+    bad = [(n, _status_for(n, results)) for n in nodeids
+           if _status_for(n, results) not in _GREEN]
     if bad:
         detail = ", ".join(f"{n.split('::')[-1]}={s}" for n, s in bad[:3])
         return FAIL, detail
