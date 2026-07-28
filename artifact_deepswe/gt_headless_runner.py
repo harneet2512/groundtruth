@@ -509,9 +509,19 @@ def run(env: dict | None = None) -> int:
         _bc("FATAL: GT_RUN_MODEL unset — cannot build the model")
         return 2
     cfg_path = e.get("GT_RUN_CONFIG") or "/opt/gt/agent_config.yaml"
-    # STEP-0 BRIEF (2026-07-13): prepend the substrate brief onto the task on the GT arm (see
-    # _resolve_task) — restores the pier-path prepend the headless pipeline had lost. Baseline
-    # arm returns the guarded issue text byte-identically.
+    # STEP-0 BRIEF — CORRECTED 2026-07-27 (C3). This comment described a PREPEND that no longer
+    # exists: it was removed in 4f525f424 when delivery was re-homed to the canonical runtime in
+    # Wave 15/16, and it contradicted `_resolve_task`'s own docstring 100 lines above. A stale
+    # comment describing a deleted mechanism is worse than none — it sends the next reader
+    # looking for a prepend that cannot be found, which is how the step-0 path got audited as
+    # "dead" more than once.
+    #
+    # WHAT ACTUALLY HAPPENS: `_resolve_task` returns the host's NATIVE task bytes only. The brief
+    # reaches the model as canonical evidence — `install_canonical_runtime` stages a task-start
+    # capsule (`_stage_initial_canonical_evidence`) BEFORE `agent.run`, and
+    # `MiniSweProviderBoundary`'s patched `_prepare_messages_for_api` appends it as a trailing
+    # user message on the first model call. Request path, not observation path: it shares
+    # nothing with the batch-commit interface.
     task = _resolve_task(e)
     out = e.get("GT_RUN_OUTPUT") or "/gt_out/mini-swe-agent.trajectory.json"
     _bc(f"env ok model={model_name} cfg={cfg_path} task_chars={len(task)} out={out}")

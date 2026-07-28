@@ -204,10 +204,21 @@ def test_canonical_facts_expose_where_the_chain_actually_stops() -> None:
         "no evidence produced; the chain would be stopping earlier than the "
         "inference boundary and #44's premise would be wrong"
     )
-    assert facts.compilations == 0, (
-        "the hermetic gate compiled a capsule without an inference boundary; "
-        "either an inference is now being driven (update #44) or something is "
-        "fabricating compilations"
+    # UPDATED 2026-07-27 (C12). The measurement above was real, but the docstring's
+    # EXPLANATION of it was wrong: compilation is not gated on a model call. The gate drives
+    # the inference boundary; what it never does is send bytes to a provider. Compilation
+    # returned 0 because every coalition failed decision-completeness -- the relevance gate
+    # was a POSSESSION test, so evidence naming a file the agent had not opened could never
+    # become relevant, and this fixture's trajectory (`grep -rn alpha .` then `cat pkg/a.py`)
+    # is exactly that shape. With the def-home openness rule the coalition forms and the
+    # capsule compiles, with no model call anywhere. So `== 0` was pinning a symptom.
+    #
+    # It is asserted as >= 1 rather than deleted because 0 would now mean the openness rule
+    # regressed, which is worth catching here on a fixture nobody wrote for that purpose.
+    assert facts.compilations >= 1, (
+        "the canonical chain no longer reaches compilation on a trajectory whose search "
+        "operand resolves to the very file the evidence names; the C12 openness rule has "
+        "regressed and the gate is back to being a possession test"
     )
 
 
@@ -237,12 +248,26 @@ def test_failed_capsule_compilation_is_recorded_not_silent() -> None:
         if "compil" in f"{row.get('layer', '')}{row.get('reason', '')}".lower()
     ]
     assert rows, (
-        "no ledger row explains the failed capsule compilation; a silent "
-        "FAILED is indistinguishable from correct-or-quiet"
+        "no ledger row explains the capsule compilation outcome; a silent "
+        "compilation is indistinguishable from correct-or-quiet"
     )
-    assert any("DECISION_INCOMPLETE" in str(row.get("reason", "")) for row in rows), (
-        f"compilation rows carry no failure_code: {rows[:2]}"
-    )
+    # UPDATED 2026-07-27 (C12), and this is the assertion the docstring above always
+    # described. The original required the reason to contain DECISION_INCOMPLETE -- which
+    # silently assumed compilation would always FAIL. It did, until the C12 openness fix let
+    # a coalition form on this very fixture; the capsule then compiled and the file went red
+    # with ZERO rows, because the seam only ever explained FAILURES.
+    #
+    # That was a real hole, and it was fixed in the SEAM, not here: the success branch of
+    # `MiniSweProviderBoundary.observe_action_result` now writes its own row. The bar is
+    # UNCHANGED -- every compilation outcome must still leave a durable, self-describing
+    # trace. Only the assumption that the outcome is always a failure is gone, exactly as
+    # "must stay green whether the coalition later ships a capsule or keeps declining to"
+    # instructed. The decision-completeness bar itself was never touched.
+    _explained = ("DECISION_INCOMPLETE", "COMPILED", "FAILED", "staged")
+    assert all(
+        any(token in str(row.get("reason", "")) for token in _explained)
+        for row in rows
+    ), f"a compilation row explains nothing about its outcome: {rows[:2]}"
 
 
 def test_legacy_driver_reports_no_canonical_facts() -> None:

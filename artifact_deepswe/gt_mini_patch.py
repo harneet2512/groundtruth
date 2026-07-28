@@ -9607,6 +9607,99 @@ def _resolved_search_symbols(operation, command: str) -> "tuple[str, ...]":
         return ()
 
 
+# C12: a focused symbol resolving to more definition files than this is AMBIGUOUS and
+# contributes nothing. Matches `_resolve_symbol_defs`'s existing 3-file abstention rather
+# than inventing a second threshold that must agree with it by hand.
+_FOCUS_DEF_FILES_PER_SYMBOL = 3
+# Total ceiling across the whole focus set. Focus is APPEND-ONLY (there is no eviction
+# anywhere in `reduce_event`), so without a ceiling this expansion would grow monotonically
+# for the length of a trajectory and drive the intersection toward always-true -- turning a
+# targeted openness rule into the context flood GT exists to prevent.
+_FOCUS_DEF_FILES_TOTAL = 24
+
+
+def _focus_definition_files(focused_symbols) -> "tuple[str, ...]":
+    """The graph's definition files for the symbols currently in focus.
+
+    C12. Lets the relevance gate ask "is this evidence about what the agent is WORKING ON"
+    instead of "about a file the agent has ALREADY OPENED". See
+    `gateway.definition_files_for_symbol` for why that distinction is the whole product, and
+    `tests/runtime/test_relevance_gate_is_a_possession_test_20260727.py` for both states.
+
+    Deliberately reads the graph rather than guessing from names: a path inferred from a symbol
+    would put a file the agent never touched into focus, and focus drives an intersection.
+    Inventing relevance is worse than having none -- it turns a quiet feature into a wrong one.
+
+    Correct-or-quiet and never raises: no graph, no resolution, ambiguity, or any fault yields
+    (), which leaves the gate exactly as strict as it was before this function existed.
+    """
+    try:
+        symbols = tuple(
+            s for s in (focused_symbols or ()) if isinstance(s, str) and s
+        )
+        if not symbols:
+            return ()
+        db = _db_path()
+        if not db or not os.path.isfile(db):
+            return ()
+        from groundtruth.runtime.gateway import definition_files_for_symbol
+
+        root = _root()
+        out: list[str] = []
+        for symbol in symbols:
+            for path in definition_files_for_symbol(
+                db, symbol, repo_root=root,
+                max_files=_FOCUS_DEF_FILES_PER_SYMBOL,
+            ):
+                if path not in out:
+                    out.append(path)
+            if len(out) >= _FOCUS_DEF_FILES_TOTAL:
+                return tuple(out[:_FOCUS_DEF_FILES_TOTAL])
+        return tuple(out)
+    except Exception:  # noqa: BLE001 -- resolution must never break the agent's turn
+        return ()
+
+
+def _evidence_lifecycle_histogram(attempt_runtime) -> "dict[str, int]":
+    """Count the STORED evidence records by lifecycle. C2's missing discriminator.
+
+    `evidence_store` counts the store and `held_evidence` counts a NARROW subset -- only records
+    the runtime transitioned INTO, or found already sitting in, HELD *in persistent storage*
+    (`reasoning_runtime.py:6434-6452`, which requires `current.lifecycle is READY`). Nothing on
+    the row said what actually reached the selector, or in what state.
+
+    That gap is the whole of C2. The observed `evidence_store=1, coalition_size=0,
+    held_evidence=0` fingerprint has exactly two surviving explanations and they are OPPOSITE
+    diagnoses with opposite fixes:
+
+      (a) the record NEVER REACHED READY -- a contract `ready_predicate` is absent from the
+          seam's satisfied set, so `:6321` never promoted it. `:6330` appends it to
+          `ready_records` anyway, so it IS evaluated, then fails the `is READY` clause at
+          `:6436` and is silently absent from `held_ids`; and
+      (b) the stored lifecycle is TERMINAL or consumed (INVALIDATED/EXPIRED/RELEASED/DELIVERED/
+          SATISFIED/SUPERSEDED), which `:6415-6433` transitions WITHOUT appending to `held_ids`.
+
+    A PENDING count > 0 proves (a). A terminal count > 0 proves (b). Both zero with a READY
+    count > 0 means the record was genuinely relevance-HELD, which `held_evidence` already
+    reports. One field, three answers, no run required.
+
+    Deliberately reads the STORE, not `ready_records`: the store is what `held_evidence` and
+    `evidence_store` are already computed from, so the three numbers are commensurable by
+    construction rather than by hand-sync. Never raises; a fault yields {} and the row simply
+    lacks the key, which reads NOT-EVALUABLE rather than as a false zero.
+    """
+    out: "dict[str, int]" = {}
+    try:
+        for record in (getattr(attempt_runtime, "_evidence", {}) or {}).values():
+            name = getattr(getattr(record, "lifecycle", None), "name", None)
+            if not isinstance(name, str) or not name:
+                continue
+            out[name] = out.get(name, 0) + 1
+    except Exception:  # noqa: BLE001 -- telemetry never blocks the agent's turn
+        return {}
+    return out
+
+
 def _publish_active_decision(attachment, active) -> None:
     """Record the open decision on the attachment so ledger rows can stamp it.
 
@@ -21470,6 +21563,26 @@ class CanonicalRuntimeAttachment:
                 (
                     *getattr(work_state, "focused_symbols", ()),
                     *getattr(work_state, "focused_files", ()),
+                    # C12 -- the graph-resolved DEFINITION HOME of each focused symbol.
+                    #
+                    # Without this the gate is a POSSESSION test: `evaluate_feature_contract`
+                    # intersects evidence subjects against focus, and focus holds only what the
+                    # agent already opened. `localization`'s subject is the ranked top FILE, which
+                    # the agent has by definition NOT opened -- naming an unopened file IS the
+                    # feature (CLAUDE.md §3). So the intersection was empty exactly when
+                    # localization had something to say, and non-empty only once the evidence was
+                    # redundant. `_resolved_search_symbols` already fixed this for SYMBOL-subject
+                    # records (def_partition); FILE-subject records were left behind.
+                    #
+                    # This is NOT a relaxation of the bar. The agent searched `parse_url`; the
+                    # graph says `parse_url` is defined in `src/pkg/urls.py`; evidence naming
+                    # `src/pkg/urls.py` is therefore evidence about the work in progress. The
+                    # relation is deterministic graph truth, the same relation the product is
+                    # built on. Evidence connected to nothing in focus still intersects nothing
+                    # and is still HELD -- see the no-bar-weakened pin in the C12 test.
+                    *_focus_definition_files(
+                        getattr(work_state, "focused_symbols", ())
+                    ),
                 )
             )
         )
@@ -22732,6 +22845,83 @@ class CanonicalRuntimeAttachment:
                     plan.compilation,
                     delivery_attempt_id=plan.delivery_attempt_id,
                 )
+                # OBSERVABILITY, NOT BEHAVIOUR -- the SUCCESS mirror of the `else` below.
+                #
+                # Until 2026-07-27 only the FAILED branch wrote a row, so a compilation that
+                # SUCCEEDED left no durable trace and was indistinguishable downstream from a
+                # compilation that never happened. That is the same "a silent outcome is
+                # indistinguishable from correct-or-quiet" defect the else-branch was written to
+                # kill, mirrored onto the success side -- and it stayed invisible for as long as
+                # compilation never succeeded on the hermetic gate. The C12 openness fix made one
+                # succeed, and `test_failed_capsule_compilation_is_recorded_not_silent` went red
+                # with ZERO compilation rows: proof that the explanation surface only ever covered
+                # half the outcome space.
+                #
+                # Same `kind`, so one reader query sees BOTH outcomes and can count them.
+                # `outcome` is deliberately NOT "delivered": zero model-facing bytes are emitted
+                # here (the provider boundary delivers later), and `_runtime_ledger_record`
+                # downgrades a 0-byte "delivered" anyway. Staging is not delivery.
+                try:
+                    _comp_ok = getattr(plan, "compilation", None)
+                    _state_ok = getattr(_comp_ok, "state", "")
+                    _runtime_ledger_record(
+                        kind="canonical_runtime.compilation",
+                        outcome="suppressed_internal_only",
+                        reason=(
+                            f"{getattr(_state_ok, 'name', _state_ok)}:staged"
+                        ),
+                        chars=0,
+                        extra={
+                            "delivery_attempt_id": str(plan.delivery_attempt_id),
+                            "capsule_chars": len(
+                                getattr(_comp_ok, "capsule_text", "") or ""
+                            ),
+                            # The same pool-vs-coalition fields the failure row carries, so the
+                            # two rows are directly comparable and a reader never has to join
+                            # across schemas to ask "what changed between a quiet turn and a
+                            # staged one". `unresolved_roles` is carried even though it is
+                            # normally EMPTY here: that emptiness is the whole difference
+                            # between this row and a DECISION_INCOMPLETE one, and a field that
+                            # is absent on success cannot be differenced against a field that
+                            # is present on failure. A NON-empty value here would mean a
+                            # capsule staged with a required role still unfilled -- worth
+                            # seeing, and invisible if the key were omitted.
+                            "unresolved_roles": [
+                                getattr(r, "name", str(r))
+                                for r in (
+                                    getattr(
+                                        getattr(plan, "oracle_decision", None),
+                                        "unresolved_roles",
+                                        (),
+                                    )
+                                    or ()
+                                )
+                            ],
+                            "held_evidence": len(plan.held_evidence_ids or ()),
+                            "suppressed_decisions": len(
+                                plan.suppressed_decision_ids or ()
+                            ),
+                            "evidence_store": len(
+                                getattr(self.attempt_runtime, "_evidence", ()) or ()
+                            ),
+                            # C2 discriminator: PENDING>0 => never promoted to READY;
+                            # a terminal count>0 => consumed/invalidated. See
+                            # _evidence_lifecycle_histogram.
+                            "evidence_lifecycles": _evidence_lifecycle_histogram(
+                                self.attempt_runtime
+                            ),
+                            "coalition_size": len(
+                                getattr(
+                                    getattr(plan, "oracle_decision", None),
+                                    "coalition",
+                                    (),
+                                )
+                                or ()
+                            ),
+                        },
+                    )
+                except Exception:  # noqa: BLE001 -- telemetry never blocks the agent's turn
+                    pass
             else:
                 # OBSERVABILITY, NOT BEHAVIOUR. An unstaged plan is often
                 # CORRECT (correct-or-quiet: the coalition was not
@@ -22788,6 +22978,12 @@ class CanonicalRuntimeAttachment:
                             # required role (anchor starvation).
                             "evidence_store": len(
                                 getattr(self.attempt_runtime, "_evidence", ()) or ()
+                            ),
+                            # C2 discriminator: PENDING>0 => never promoted to READY;
+                            # a terminal count>0 => consumed/invalidated. See
+                            # _evidence_lifecycle_histogram.
+                            "evidence_lifecycles": _evidence_lifecycle_histogram(
+                                self.attempt_runtime
                             ),
                             "coalition_size": len(
                                 getattr(
@@ -23544,6 +23740,33 @@ def _lsp_revision(repository: str) -> str:
 def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> None:
     """Stage one task-start decision capsule; hold other contexts."""
     if not records:
+        # C3 -- OBSERVABILITY, NOT BEHAVIOUR. Returning here is CORRECT (no typed brief
+        # records, nothing to stage), but it used to be SILENT, and a silent step-0 is
+        # indistinguishable downstream from a step-0 that delivered. That matters more here
+        # than anywhere else: `_canonical_brief_records` returns () for a whole family of
+        # reasons -- brief.txt or brief_result.json unreadable at dirname(GT_BRIEF_FILE), a
+        # schema that is not gt.brief_result.v1, brief_text not byte-equal to the sealed
+        # copy, no receipt whose sha256 re-derives -- and the step-0 brief is BAKED into the
+        # substrate, so a stale or missing bake disarms step-0 with the runner reporting
+        # nothing and the paid run proceeding anyway.
+        #
+        # Zero bytes, never model-facing, changes no delivery decision.
+        # Deliberately NO env read here. The first draft put `GT_BRIEF_FILE` on this row to name
+        # the file that could not be read -- and `test_r1_ae_parity_invariant_failclosed` caught
+        # it immediately: that variable is not --ae forwarded, so in-container it resolves to ""
+        # and the breadcrumb would have pointed at nothing while LOOKING specific. That guard is
+        # exactly right and must not be satisfied with an exemption entry; a phantom knob added
+        # in the name of observability is still a phantom knob. The reason code alone is the
+        # honest signal, and the brief path is already recoverable from the run's own env dump.
+        try:
+            _runtime_ledger_record(
+                kind="canonical_runtime.step0",
+                outcome="suppressed_internal_only",
+                reason="no_brief_records",
+                chars=0,
+            )
+        except Exception:  # noqa: BLE001 -- telemetry never blocks the agent's turn
+            pass
         return
     try:
         from groundtruth.runtime.reasoning_runtime import (
@@ -23624,11 +23847,83 @@ def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> No
             source_model_call_id=f"{attachment.attempt_runtime.attempt_id}:host",
             model_call_id=f"{attachment.attempt_runtime.attempt_id}:model:1",
         )
+        # C3 -- step-0 gets the SAME explanation surface the per-observation path has. Both
+        # branches write a row, so "step-0 delivered" and "step-0 stayed quiet, here is why"
+        # are distinguishable offline without re-running anything. Telemetry only: zero bytes,
+        # never model-facing, no delivery decision changes on either side.
+        _step0_comp = getattr(plan, "compilation", None)
+        _step0_state = getattr(_step0_comp, "state", "")
+        _step0_extra = {
+            "decision_context": preferred_context.value,
+            "records_ingested": len(records),
+            "records_chosen": len(chosen),
+            # The contexts that were ingested but NOT staged. Only ONE context is staged at
+            # step 0, so a brief carrying both localization (SOURCE_TARGET_SELECTION) and
+            # obligations (PATCH_CONSTRUCTION) ships only the former -- naming the held
+            # contexts here is what makes that visible instead of folklore.
+            "held_contexts": sorted(
+                {
+                    getattr(item.decision_context, "value", str(item.decision_context))
+                    for item in records
+                    if item.decision_context is not preferred_context
+                }
+            ),
+            "unresolved_roles": [
+                getattr(r, "name", str(r))
+                for r in (
+                    getattr(
+                        getattr(plan, "oracle_decision", None), "unresolved_roles", ()
+                    )
+                    or ()
+                )
+            ],
+            "held_evidence": len(plan.held_evidence_ids or ()),
+            "evidence_store": len(
+                getattr(attachment.attempt_runtime, "_evidence", ()) or ()
+            ),
+            "evidence_lifecycles": _evidence_lifecycle_histogram(
+                attachment.attempt_runtime
+            ),
+            "coalition_size": len(
+                getattr(getattr(plan, "oracle_decision", None), "coalition", ()) or ()
+            ),
+        }
         if plan.delivery_attempt_id:
             attachment.provider_boundary.stage(
                 plan.compilation,
                 delivery_attempt_id=plan.delivery_attempt_id,
             )
+            try:
+                _runtime_ledger_record(
+                    kind="canonical_runtime.step0",
+                    outcome="suppressed_internal_only",
+                    reason=f"{getattr(_step0_state, 'name', _step0_state)}:staged",
+                    chars=0,
+                    extra={
+                        **_step0_extra,
+                        "delivery_attempt_id": str(plan.delivery_attempt_id),
+                        "capsule_chars": len(
+                            getattr(_step0_comp, "capsule_text", "") or ""
+                        ),
+                    },
+                )
+            except Exception:  # noqa: BLE001 -- telemetry never blocks the agent's turn
+                pass
+        else:
+            try:
+                _step0_failure = getattr(_step0_comp, "failure_code", "")
+                _runtime_ledger_record(
+                    kind="canonical_runtime.step0",
+                    outcome="suppressed_internal_only",
+                    reason=(
+                        f"{getattr(_step0_state, 'name', _step0_state)}:"
+                        f"{getattr(_step0_failure, 'name', _step0_failure)}"
+                    ),
+                    chars=0,
+                    extra=_step0_extra,
+                )
+            except Exception:  # noqa: BLE001 -- telemetry never blocks the agent's turn
+                pass
     except Exception as exc:
         attachment._record_fault(
             exc,

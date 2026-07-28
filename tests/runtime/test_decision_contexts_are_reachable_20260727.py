@@ -106,10 +106,31 @@ def test_behavioral_contract_has_more_than_one_carrier():
     assert set(carriers) >= {"caller_contract", "obligations", "signature_delta"}, carriers
 
 
+# Roles DECLARED in the EvidenceRole enum that no fact class currently carries. This list is
+# the finding, not the excuse: a role a DecisionContext lists as useful but nothing can supply
+# is a permanently unfillable slot. Both are `useful`, never `required`, so neither blocks a
+# decision from completing today -- which is exactly why they went unnoticed. Shrink this list;
+# never grow it without saying why here.
+_KNOWN_CARRIER_LESS_ROLES = frozenset({
+    "MATERIAL_UNCERTAINTY",   # listed useful by 4 contexts; zero producers
+    "HISTORICAL_SUPPORT",     # cochange is an internal ranking prior, never delivered
+})
+
+
 def test_every_role_a_context_needs_has_at_least_one_carrier_somewhere():
-    """A weaker but flag-independent invariant: no required role may be carrier-less across the
-    WHOLE registry. Under role-driven eligibility this is what actually decides whether a
-    decision can complete, so a role with zero carriers is fatal regardless of context wiring."""
+    """No DECLARED role may be carrier-less across the whole registry, except a named few.
+
+    REWRITTEN 2026-07-27 -- THE PREVIOUS VERSION WAS VACUOUS AND COULD NEVER FAIL. It built
+    `carriers` with `setdefault(role, []).append(fact)`, so every key it created was populated
+    by the very append that created it; `[role for role, facts in carriers.items() if not
+    facts]` was therefore ALWAYS `[]`. It asserted a tautology while reading as coverage of a
+    fatal invariant -- and it sat directly above two roles that genuinely have zero carriers,
+    reporting green.
+
+    The repair is to iterate the DECLARED role universe (the `EvidenceRole` enum) rather than
+    the set of roles that happen to appear on a contract. Only then can the difference between
+    the two be observed, which is the entire question.
+    """
     carriers: dict[str, list[str]] = {}
     for fact in sorted(all_fact_classes()):
         contract = rr.feature_contract_for(fact)
@@ -117,6 +138,32 @@ def test_every_role_a_context_needs_has_at_least_one_carrier_somewhere():
             continue
         for role in contract.roles:
             carriers.setdefault(getattr(role, "name", str(role)), []).append(fact)
-    assert carriers, "POSITIVE CONTROL: no roles resolved at all"
-    empty = [role for role, facts in carriers.items() if not facts]
-    assert not empty, f"roles with no carrier: {empty}"
+
+    declared = {role.name for role in rr.EvidenceRole}
+    assert declared, "POSITIVE CONTROL: the EvidenceRole enum resolved empty"
+    assert carriers, "POSITIVE CONTROL: no roles resolved from any contract"
+    # NEGATIVE CONTROL for the rewrite: the two sets must actually DIFFER, or this test has
+    # quietly become the tautology it replaced.
+    assert declared - set(carriers), (
+        "declared roles and carried roles now coincide -- if that is a real fix, delete "
+        "_KNOWN_CARRIER_LESS_ROLES; if not, this test has gone vacuous again"
+    )
+
+    uncarried = declared - set(carriers)
+    assert uncarried == set(_KNOWN_CARRIER_LESS_ROLES), (
+        f"the carrier-less role set moved: now {sorted(uncarried)}, "
+        f"expected {sorted(_KNOWN_CARRIER_LESS_ROLES)}. A NEW carrier-less role is a "
+        f"permanently unfillable slot; a role that GAINED a carrier should be removed "
+        f"from the list."
+    )
+    # And no role a context REQUIRES may ever be in that set -- that would be fatal, not
+    # merely wasteful. Required roles today: TARGET_IDENTITY, BEHAVIORAL_CONTRACT, VALIDATION,
+    # CONTRADICTION, TERMINAL_ASSURANCE.
+    for required in (
+        "TARGET_IDENTITY", "BEHAVIORAL_CONTRACT", "VALIDATION",
+        "CONTRADICTION", "TERMINAL_ASSURANCE",
+    ):
+        assert carriers.get(required), (
+            f"{required} is a REQUIRED role of some DecisionContext and has no carrier; "
+            f"that decision can never complete"
+        )

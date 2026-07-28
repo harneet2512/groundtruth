@@ -163,13 +163,27 @@ def test_role_driven_does_not_bypass_the_possession_test():
 
 @pytest.mark.xfail(
     strict=True,
-    reason="C12 OPEN: evidence naming an UNOPENED file must be releasable, or GT can only "
-    "recommend files the agent has already read. Remove this marker when the gate learns an "
-    "openness rule; do not delete the test.",
+    reason="C12 RESIDUAL, deliberately still xfail after the openness rule landed 2026-07-27. "
+    "The gate DID learn an openness rule -- the graph-resolved def-home of a focused SYMBOL is "
+    "now an active subject, closing the FILE-subject case for localization (proven in "
+    "test_openness_gate_admits_the_unopened_def_home_20260727.py). This case is different and is "
+    "NOT covered: focus holds an opened FILE and no symbol, so there is no inquiry to connect the "
+    "evidence to. In that state nothing distinguishes the 'right' unopened file from "
+    "vendor/unrelated/thing.py two tests below -- admitting one means admitting both, i.e. "
+    "'admit everything'. Kept as a strict xfail rather than deleted because the day someone "
+    "finds a principled connection relation for the no-inquiry state, this must fail loudly.",
 )
 def test_SPEC_evidence_naming_an_unopened_file_must_be_releasable():
-    """THE FIX, as an executable spec. `strict=True` means this fails loudly the moment C12 lands,
-    forcing the marker off rather than letting it rot into a permanent excuse."""
+    """THE ORIGINAL SPEC, retained verbatim. `strict=True` means it fails loudly if the gate ever
+    starts admitting this case, which would signal the connection guard had collapsed.
+
+    WHY THIS IS NOT AN UNFIXED BUG. In production, focus is not symbol-empty at a boundary where
+    localization fires: `_viewed_symbols_for_action` loads the viewed file's definitions on every
+    VIEW, and `_resolved_search_symbols` loads the graph-validated operand on every SEARCH. The
+    symbol-empty state is essentially task_start -- where, under GT_LOC_RESLOT, the step-0 brief
+    ships no localization narration at all. So the residual case is close to unreachable, and
+    'fix' it by relaxing the intersection would trade a real guard for an unreachable gain.
+    """
     decision = _decision_with_focus(OPENED)
     rec = _production_shaped_record("localization", decision, UNOPENED)
     assert _evaluate(rec, decision).relevant is True

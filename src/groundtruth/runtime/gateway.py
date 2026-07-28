@@ -1424,6 +1424,79 @@ def defined_symbols_for_file(
     return tuple(out)
 
 
+def definition_files_for_symbol(
+    db_path: str,
+    symbol: str,
+    *,
+    repo_root: str = "",
+    max_files: int = 3,
+) -> tuple[str, ...]:
+    """The file(s) `graph.db` defines ``symbol`` in — the inverse of `defined_symbols_for_file`.
+
+    C12. The relevance gate is a `subject:` intersection against work-state focus, so evidence is
+    releasable only when its subject is a string already in focus. `_resolved_search_symbols` put
+    the graph-validated search OPERAND into focus, which un-held SYMBOL-subject records
+    (`def_partition`). It did nothing for FILE-subject records: `localization`'s subject is the
+    ranked top FILE, which the agent has by definition NOT opened, because naming an unopened file
+    is the entire feature (CLAUDE.md §3). So the gate stayed empty exactly when localization had
+    something to say.
+
+    This closes that gap WITHOUT relaxing the gate. The agent searched `parse_url`; the graph says
+    `parse_url` is defined in `src/pkg/urls.py`; therefore evidence naming `src/pkg/urls.py` is
+    evidence about what the agent is working on. That is a real, deterministic connection — the
+    same graph relation the product is built on — not a widening of the bar. Evidence unconnected
+    to anything focused still intersects nothing and is still HELD.
+
+    BOUNDED ON PURPOSE. A name resolving to more than ``max_files`` definition sites is AMBIGUOUS
+    and yields () rather than putting several unrelated files into focus: focus drives an
+    intersection, and inventing relevance turns a quiet feature into a wrong one. Same reasoning,
+    and the same 3-file bound, as `_resolve_symbol_defs`.
+
+    The row predicate is character-for-character the one `defined_symbols_for_file` and
+    `_resolved_search_symbols` use (`is_test=0`, `start_line>0`, `label IN _DEF_LABELS`). That is
+    load-bearing: those two resolvers once disagreed on `start_line`, and a focus writer that
+    admits a definition the focus reader cannot see re-creates the same class of ghost.
+
+    Correct-or-quiet, never raises: no db, no schema, no rows, ambiguity, or any sqlite error -> ().
+    Read-only via `_connect_ro` — the graph is shared repository truth. Order is stable.
+    """
+    if not db_path or not symbol or not os.path.isfile(db_path):
+        return ()
+    con = _connect_ro(db_path)
+    if con is None:
+        return ()
+    labels_sql = ",".join("?" * len(_DEF_LABELS))
+    try:
+        rows = con.execute(
+            f"SELECT file_path FROM nodes "
+            f"WHERE name=? AND COALESCE(is_test,0)=0 AND COALESCE(start_line,0)>0 "
+            f"AND label IN ({labels_sql}) "
+            f"ORDER BY file_path,start_line",
+            (symbol, *_DEF_LABELS),
+        ).fetchall()
+    except sqlite3.Error:
+        return ()
+    finally:
+        try:
+            con.close()
+        except Exception:  # noqa: BLE001 -- close failure must not raise into the agent loop
+            pass
+    out: list[str] = []
+    for (file_path,) in rows:
+        if not isinstance(file_path, str) or not file_path:
+            continue
+        rel = _norm_fp(_to_repo_rel(file_path, repo_root) if repo_root else file_path)
+        # A gold-path / test-identity file must never enter focus: focus is compared against
+        # evidence subjects, so admitting one here would hand the gate a leak vector.
+        if not rel or _is_leaky(rel):
+            continue
+        if rel not in out:
+            out.append(rel)
+    if not out or len(out) > max_files:
+        return ()
+    return tuple(out)
+
+
 def _resolve_symbol_defs(con, symbol: str, root: str) -> dict | None:
     """def-sites (1-3 non-leaky files) + FACT-tier caller provenance + test-ref COUNT.
     None when the symbol resolves to no deliverable def or spans >3 files (ambiguous)."""
