@@ -477,6 +477,18 @@ def _index_block_lineage(
     ``obligations`` brief block) can join it on the SAME exact identity the native lane
     rows use. An UNREGISTERED block is recorded as a lineage rejection, never indexed.
     Purely additive: a non-compound row (no ``block_lineage``) is unaffected.
+
+    LEGACY-COMPOUND READER — DORMANT ON THE CANONICAL PATH, AND CORRECTLY SO (C14,
+    2026-07-28). Nothing in production writes ``block_lineage`` any more. Its producer
+    (``gt_headless_runner._brief_block_lineage``) computed ``char_span`` offsets into
+    ``brief_text``, which only exists if the brief is PREPENDED to the task; that prepend
+    was removed in 4f525f424 when delivery moved to the canonical task-start capsule, so
+    the producer had no input left and was deleted. Do NOT "restore the writer" —
+    restoring it means restoring the prepend.
+
+    KEEP THIS READER. SS-10 replay drives RECORDED artifacts from earlier runs, which DO
+    contain compound rows. Zero writers cannot cause a false negative here: with no
+    compound rows the loop below never executes and the join is unchanged.
     """
     blocks = row.get("block_lineage")
     if not isinstance(blocks, list):

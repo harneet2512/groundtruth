@@ -3721,6 +3721,14 @@ def _block_delivery_byte_proofs(
     seal located inside that exact message (both enforced by the extractor), AND the
     block's OWN lineage satisfies the SAME producer contract the single-fact path enforces
     (schema, registration resolution, class match, producer match) — never weaker.
+
+    LEGACY-COMPOUND READER — DORMANT ON THE CANONICAL PATH (C14, 2026-07-28). No
+    production writer emits ``block_lineage``; the prepend-and-seal producer it was built
+    for was deleted with the prepend itself (4f525f424). This function is ADDITIVE ONLY —
+    ``proofs`` starts empty and only ever gains members, so with zero compound rows the
+    loop body never runs and it returns an empty frozenset. It therefore cannot byte-prove
+    LESS than the single-fact path would; it simply adds nothing. Kept because SS-10
+    replay reads RECORDED artifacts that do contain compound rows.
     """
     lineage_by_key: dict[tuple[int, str], dict[str, Any]] = {}
     duplicate_keys: set[tuple[int, str]] = set()

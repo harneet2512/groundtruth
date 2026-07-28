@@ -24647,6 +24647,28 @@ def _lsp_revision(repository: str) -> str:
     ).hexdigest()
 
 
+def _deliver_by_is_task_start(item) -> bool:
+    """True iff this record's REGISTERED delivery window is task_start.
+
+    SINGLE-VOCABULARY ON PURPOSE. Both sides of this comparison come from
+    fact_registry. The seam's ``EVENT_STEP0`` is the string ``"step0"`` while the
+    registry says ``"task_start"`` (gateway.py:1905 holds the translation table between
+    them), so comparing a registration against ``EVENT_STEP0`` would match NOTHING --
+    this helper would silently always return False, step 0 would fall through to
+    ``records[0]``, and the fix would read as applied while doing exactly zero.
+    """
+    try:
+        from groundtruth.runtime.fact_registry import (
+            EVENT_TASK_START,
+            registration_for,
+        )
+
+        reg = registration_for(str(getattr(item, "feature_id", "") or ""))
+    except Exception:  # noqa: BLE001 -- an unregistered class is simply not due here
+        return False
+    return reg is not None and str(getattr(reg, "deliver_by", "")) == EVENT_TASK_START
+
+
 def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> None:
     """Stage one task-start decision capsule; hold other contexts."""
     if not records:
@@ -24681,18 +24703,39 @@ def _stage_initial_canonical_evidence(attachment, records, task_text: str) -> No
     try:
         from groundtruth.runtime.reasoning_runtime import (
             ActiveDecision,
-            DecisionContext,
             TemporalPredicate,
             capsule_budget_for,
         )
 
+        # WINDOW-CLOSING PREFERENCE (C18, 2026-07-28). This hardcoded
+        # SOURCE_TARGET_SELECTION, and it was exactly INVERTED.
+        #
+        # Step 0 is the ONE `task_start` observation an attempt ever has, and the dose
+        # law permits ONE capsule per observation. The registry decides who may be
+        # delivered here, and it is unambiguous:
+        #     obligations    deliver_by=task_start     <- the ONLY class; never recurs
+        #     localization   deliver_by=search_result  <- recurs on every agent search
+        #     def_partition  deliver_by=search_result  <- recurs on every agent search
+        # Preferring SOURCE_TARGET_SELECTION spent the single task_start slot on
+        # evidence holding many later windows and PERMANENTLY discarded the only
+        # evidence whose window was closing. Measured on the live seam before this
+        # change: obligations=HELD, localization=RELEASED -- and obligations is the sole
+        # standing carrier of BEHAVIORAL_CONTRACT, the required role of both
+        # PATCH_CONSTRUCTION and SOURCE_UNDERSTANDING, which is why `unresolved_roles`
+        # is BEHAVIORAL_CONTRACT on 70 of 90 compile attempts (see the comment on
+        # available_substrates below). It also staged localization at an event
+        # localization's own registration does not authorize -- graded WRONG_EVENT on
+        # 21/21 live tasks.
+        #
+        # The rule is derived from the REGISTRY, never from a class name: prefer the
+        # context of the records this event is actually registered to deliver. Any
+        # future fact class inherits it without touching this line. A brief carrying
+        # only one context is unaffected -- `_due_here` is empty and the original
+        # records[0] fallback stands.
+        _due_here = tuple(item for item in records if _deliver_by_is_task_start(item))
         preferred_context = (
-            DecisionContext.SOURCE_TARGET_SELECTION
-            if any(
-                item.decision_context
-                is DecisionContext.SOURCE_TARGET_SELECTION
-                for item in records
-            )
+            _due_here[0].decision_context
+            if _due_here
             else records[0].decision_context
         )
         chosen = tuple(

@@ -920,7 +920,16 @@ def validate_block_lineage(
     *,
     parent_actual_event: str,
 ) -> tuple[str, str] | None:
-    """Return the registered evidence type and canonical class for exact typed lineage."""
+    """Return the registered evidence type and canonical class for exact typed lineage.
+
+    LEGACY-COMPOUND READER — DORMANT ON THE CANONICAL PATH (C14, 2026-07-28). No
+    production writer emits ``block_lineage``; its prepend-and-seal producer was deleted
+    along with the prepend (4f525f424) when delivery moved to the canonical task-start
+    capsule. Reached only from the compound branch, which is guarded by
+    ``if not isinstance(block_lineage, list) or not block_lineage``, so zero writers means
+    zero calls and no false negative. Kept because SS-10 replay reads RECORDED artifacts
+    that do contain compound rows.
+    """
     if block.get("lineage_status") != "REGISTERED":
         return None
     declared = block.get("declared_fact_class")
