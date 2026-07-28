@@ -41,6 +41,7 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
 import yaml
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -278,6 +279,142 @@ def test_gate_validates_mandatory_detail_shape_and_deep_parity() -> None:
         assert required_validation in gate, (
             f"mandatory detail gate lacks validation {required_validation!r}"
         )
+
+
+def _gate_fixture(tmp_path: Path):
+    """The validator plus a KNOWN-GOOD performance payload, extracted so the single-fault
+    sweep below can reuse the exact fixture the shape/parity test already proves passes.
+
+    Factored rather than duplicated on purpose: two hand-maintained copies of this payload
+    would drift, and a stale copy would make the sweep assert against a population that no
+    longer matches `_MANDATORY_METRICS` -- which is the same "two things that must agree by
+    hand" defect the metrics work has been unpicking all week.
+    """
+    gate = _gate_block(_step_run_containing("GT_METRICS_INCOMPLETE"))
+    start = gate.index("import json, sys")
+    validator = textwrap.dedent(gate[start:gate.index("\nPY", start)])
+    from scripts.swebench.gt_run_metrics import _MANDATORY_METRICS
+
+    performance = {"schema": "gt_performance_metrics.v1", "metric_applicability": {}}
+    sample_by_type = {
+        "bool": True,
+        "bool_per_file": {"src/example.py": True},
+        "rate": 0.5,
+        "nonnegative_int": 1,
+        "nonnegative_number": 1.0,
+        "run_ratio": None,
+    }
+    for section, definitions in _MANDATORY_METRICS.items():
+        if section == "behavioral_impact":
+            continue
+        performance[section] = {
+            metric: sample_by_type[value_type] for metric, value_type in definitions
+        }
+    performance["token_efficiency"]["cost_per_resolved_scope"] = "run_aggregate"
+    summary = {
+        "total_deliveries": 0, "total_pivots": 0, "impact_rate": 0.0,
+        "per_tag_impact": {}, "gt_tokens_injected": 0,
+        "gt_tokens_per_pivot": 0, "nudge_compliance_rate": None,
+    }
+
+    def run(deep: dict, perf: dict, impact: dict) -> subprocess.CompletedProcess[str]:
+        paths = []
+        for index, payload in enumerate((deep, perf, impact)):
+            path = tmp_path / f"sf_{index}.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            paths.append(str(path))
+        return subprocess.run(
+            [sys.executable, "-c", validator, *paths],
+            text=True, capture_output=True, check=False,
+            env={
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join((
+                    str(_ROOT / "src"),
+                    str(_ROOT / "scripts" / "swebench"),
+                    str(_ROOT / "scripts" / "metrics"),
+                )),
+            },
+        )
+
+    return run, performance, summary
+
+
+def _gate_read_metrics() -> list[tuple[str, str]]:
+    """Every (section, metric) the PER-TASK gate validates individually.
+
+    `validate_task_performance_record` skips `behavioral_impact` outright
+    (`gt_run_metrics.py:379-381`), so those five are covered by the run-grain CLI gate, not
+    this one. Derived from `_MANDATORY_METRICS` rather than hardcoded, so a metric added to
+    the contract is swept automatically instead of silently escaping the sweep.
+    """
+    from scripts.swebench.gt_run_metrics import _MANDATORY_METRICS
+
+    return [
+        (section, metric)
+        for section, definitions in _MANDATORY_METRICS.items()
+        if section != "behavioral_impact"
+        for metric, _value_type in definitions
+    ]
+
+
+def test_positive_control_the_gate_fixture_passes_before_any_metric_is_removed(
+    tmp_path: Path,
+) -> None:
+    """Run FIRST. Every non-zero exit in the sweep below is unreadable until the unmutated
+    fixture is shown to EXIT ZERO -- otherwise the sweep would be measuring a broken fixture
+    and would pass for entirely the wrong reason."""
+    run, performance, summary = _gate_fixture(tmp_path)
+    deep = {"performance": performance, "behavioral_impact": dict(summary)}
+    impact = {"deliveries": [], "summary": dict(summary)}
+    result = run(deep, performance, impact)
+    assert result.returncode == 0, (
+        f"the known-good fixture does not pass the gate: {result.stderr}"
+    )
+
+
+@pytest.mark.parametrize("section,metric", _gate_read_metrics())
+def test_single_fault_each_metric_is_individually_falsifiable(
+    tmp_path: Path, section: str, metric: str,
+) -> None:
+    """SINGLE-FAULT ISOLATION -- the real C8 defect, and it is not vacuity.
+
+    Every one of these metrics already has BOTH states demonstrable: the bulk fixture
+    `empty_sections` drives all of them to `unmeasured` through the real gate and asserts a
+    non-zero exit. So none of them is vacuous, and "55 of 58 have no positive/negative
+    fixture" was the wrong diagnosis.
+
+    What the bulk fixture CANNOT do is detect ONE metric silently losing its negative state:
+    it flips all 53 simultaneously, so the gate fails for 53 reasons at once and would keep
+    failing even if 52 of the checks had rotted away. Before this sweep, exactly one metric
+    (`gold_rank`) had a named single-fault negative that flipped the gate.
+
+    This deletes exactly ONE metric per case and requires the gate to (a) fail and (b) NAME
+    that metric. Deriving the parameter list from `_MANDATORY_METRICS` means a newly
+    contracted metric joins the sweep automatically rather than escaping it.
+    """
+    run, performance, summary = _gate_fixture(tmp_path)
+    deep = {"performance": performance, "behavioral_impact": dict(summary)}
+    impact = {"deliveries": [], "summary": dict(summary)}
+
+    faulted = json.loads(json.dumps(performance))
+    del faulted[section][metric]
+    result = run({**deep, "performance": faulted}, faulted, impact)
+
+    assert result.returncode != 0, (
+        f"the per-task gate ACCEPTED a record missing {section}.{metric}; that metric is "
+        f"contracted in _MANDATORY_METRICS but nothing enforces it per task"
+    )
+    # Assert the metric is NAMED, not that a particular reason code follows it. The first
+    # draft required `:unmeasured` and the sweep immediately found the counterexample:
+    # `token_efficiency.cost_per_resolved` is rejected as `:run_scope_contract`, because it
+    # is run-scoped and carries a `cost_per_resolved_scope` companion, so removing it breaks
+    # a different rule first. That is the gate behaving CORRECTLY, and over-specifying the
+    # reason string would have turned a working check into a false failure. The invariant
+    # that actually matters is that an operator can tell WHICH instrument went dark.
+    assert f"{section}.{metric}:" in result.stderr, (
+        f"the gate rejected the record but did not NAME {section}.{metric}; an unnamed "
+        f"rejection cannot tell an operator which instrument went dark. stderr={result.stderr}"
+    )
 
 
 def test_mandatory_detail_validator_rejects_shape_and_parity_defects(
