@@ -7316,6 +7316,36 @@ class AttemptReasoningRuntime:
         )
         return terminal
 
+    def record_delivery_withheld(
+        self,
+        delivery_attempt_id: str,
+        *,
+        reason: str,
+    ) -> DeliveryAttempt:
+        """Persist a DELIBERATE measurement holdout on the canonical attempt.
+
+        Same atomic commit path as every other delivery transition, on purpose: a holdout that
+        lived only in memory would vanish on replay/resume, making the arm unmeasurable exactly
+        when someone tried to measure it offline. It is NOT routed through
+        `record_delivery_failure` -- a holdout is terminal but not a failure, and mixing the two
+        would put a measurement decision into failure accounting and the release gate.
+        """
+        compilation = self._compilation_for(delivery_attempt_id)
+        assert compilation.delivery_attempt is not None
+        withheld = globals()["record_delivery_withheld"](
+            compilation.delivery_attempt,
+            reason=reason,
+        )
+        next_compilation = replace(
+            compilation,
+            delivery_attempt=withheld,
+        )
+        self._commit_compilation_transition(
+            delivery_attempt_id,
+            next_compilation,
+        )
+        return withheld
+
     def record_delivery_failure(
         self,
         delivery_attempt_id: str,

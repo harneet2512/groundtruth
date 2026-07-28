@@ -36,9 +36,11 @@ from groundtruth.runtime.reasoning_runtime import (
     bind_capsule_to_final_payload,
     commit_response,
     record_delivery_failure,
+    record_delivery_withheld,
     record_provider_terminal,
     verify_bound_payload_at_dispatch,
 )
+from groundtruth.runtime.shadow_holdout import HOLDOUT as _SHADOW_HOLDOUT
 from groundtruth.runtime.terminal_ack import (
     TerminalAckIdentity,
     build_ack_participation,
@@ -783,6 +785,47 @@ class MiniSweProviderBoundary:
         self._replace_active_attempt(active, persisted)
         return persisted
 
+    def _record_active_withheld(self, *, reason: str) -> DeliveryAttempt | None:
+        """Persist a DELIBERATE holdout on the active compilation, with a local fallback.
+
+        Mirrors `_record_active_failure`'s persist-then-fallback shape but routes through
+        `record_delivery_withheld`, NOT the failure recorder: a holdout is terminal and is not
+        a defect, and letting it travel the failure path would put a measurement decision into
+        failure accounting and the release gate.
+
+        Returns None if there is nothing to withhold, so the caller can fall through to normal
+        delivery rather than silently dropping a capsule it failed to account for.
+        """
+        active = self._active
+        if active is None or active.delivery_attempt is None:
+            return None
+
+        persisted: DeliveryAttempt | None = None
+        if self.attempt_runtime is not None:
+            try:
+                persisted = self.attempt_runtime.record_delivery_withheld(
+                    self._active_delivery_attempt_id,
+                    reason=reason,
+                )
+            except Exception:  # noqa: BLE001 -- fall back to a truthful local record
+                persisted = None
+
+        if persisted is None:
+            try:
+                persisted = record_delivery_withheld(
+                    active.delivery_attempt,
+                    reason=reason,
+                )
+            except Exception:  # noqa: BLE001
+                return None
+            if self.attempt_runtime is not None:
+                self._fallback_records.append(persisted)
+            else:
+                self._record_local(persisted)
+
+        self._replace_active_attempt(active, persisted)
+        return persisted
+
     def _discard_pending(
         self,
         provider_response_id: str,
@@ -1251,6 +1294,34 @@ class MiniSweProviderBoundary:
                 and active.delivery_attempt is not None
                 and active.delivery_attempt.state is DeliveryState.COMPILED
             ):
+                # SHADOW HOLDOUT (#30). Decided HERE -- after the capsule exists, BEFORE it is
+                # bound and dispatched. Binding first and then not sending would claim
+                # DELIVERED for bytes the model never saw, forging the exact proof this chain
+                # exists to establish. OFF unless BOTH GT_SS_SHADOW and a positive
+                # GT_SS_SHADOW_RATE, so the default path is byte-identical.
+                _task_id = str(
+                    getattr(boundary.attempt_runtime, "attempt_id", "") or ""
+                )
+                _verdict = _capsule_holdout_verdict(_task_id, active)
+                # Recorded on BOTH arms: a propensity cannot be estimated from the numerator
+                # alone, so the DELIVER arm must be observable too.
+                _record_shadow_assignment_row(boundary, _task_id, active, _verdict)
+                if _verdict == _SHADOW_HOLDOUT:
+                    _withheld = boundary._record_active_withheld(
+                        reason="shadow_holdout"
+                    )
+                    if _withheld is not None:
+                        native_messages = boundary._without_staged_capsule(
+                            messages,
+                            active,
+                        )
+                        boundary._clear_active()
+                        return boundary._original_query(
+                            native_messages,
+                            **kwargs,
+                        )
+                    # Could not ACCOUNT for the holdout, so do not perform it: an unrecorded
+                    # withholding is evidence lost with no measurement gained.
                 try:
                     exact_payload = boundary._exact_provider_payload(
                         messages,
