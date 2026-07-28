@@ -3234,6 +3234,39 @@ def record_provider_terminal(
     )
 
 
+def record_delivery_withheld(
+    attempt: DeliveryAttempt,
+    *,
+    reason: str,
+) -> DeliveryAttempt:
+    """Record a DELIBERATE measurement holdout: compiled, then not sent.
+
+    Separate from `record_delivery_failure` ON PURPOSE. A holdout is terminal but it is NOT a
+    failure, and that recorder's allow-table is failure-only. The moment a holdout can travel
+    the failure path it starts appearing in failure accounting and the release gate, and a
+    measurement arm becomes indistinguishable from a defect.
+
+    Validated against the SHARED `_DELIVERY_TRANSITIONS` rather than a second hand-written edge
+    list, so the one-source property from #30 step 1 keeps holding: only a COMPILED capsule can
+    be withheld. Once the bytes went out, calling it withheld would be a lie.
+    """
+    withheld_reason = reason.strip()
+    if not withheld_reason:
+        raise ValueError("delivery holdout requires a reason")
+    if DeliveryState.WITHHELD_FOR_MEASUREMENT not in _DELIVERY_TRANSITIONS.get(
+        attempt.state, frozenset()
+    ):
+        raise ValueError(
+            f"invalid delivery holdout {attempt.state.value}->"
+            f"{DeliveryState.WITHHELD_FOR_MEASUREMENT.value}"
+        )
+    return replace(
+        attempt,
+        state=DeliveryState.WITHHELD_FOR_MEASUREMENT,
+        failure_reason=withheld_reason,
+    )
+
+
 def record_delivery_failure(
     attempt: DeliveryAttempt,
     state: DeliveryState,
