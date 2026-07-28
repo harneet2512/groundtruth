@@ -501,11 +501,19 @@ class MiniSweProviderBoundary:
         agent: Any,
         attempt_runtime: AttemptReasoningRuntime | None = None,
         fault_handler: Callable[[str, BaseException], Any] | None = None,
+        delivery_handler: Callable[[CapsuleCompilation], Any] | None = None,
     ):
         self.model = model
         self.agent = agent
         self.attempt_runtime = attempt_runtime
         self.fault_handler = fault_handler
+        # Success-path twin of ``fault_handler``: called with the compilation AFTER its
+        # canonical delivery row is durably written. It exists so the SEAM can finalize
+        # producer attestations at the one moment both halves of the join identity are
+        # known -- the delivered bytes' seal and the evidence lineage -- without this
+        # module re-deriving the attestation output root and becoming a second authority
+        # for where audit artifacts land.
+        self.delivery_handler = delivery_handler
         self._records: list[DeliveryAttempt] = []
         self._fallback_records: list[DeliveryAttempt] = []
         self._delivery_attempt_ids: list[str] = []
@@ -995,6 +1003,14 @@ class MiniSweProviderBoundary:
         except Exception as exc:
             self._notify_fault("CANONICAL_DELIVERY", exc)
             return False
+        # AFTER the row is durable, so a handler can never observe a delivery the join
+        # will not see. A handler fault is reported and swallowed: audit persistence may
+        # not un-deliver bytes the model has already received.
+        if self.delivery_handler is not None:
+            try:
+                self.delivery_handler(compilation)
+            except Exception as exc:  # noqa: BLE001
+                self._notify_fault("DELIVERY_HANDLER", exc)
         return True
 
     def reconcile_provider_response(

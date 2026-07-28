@@ -31,6 +31,9 @@ from groundtruth.runtime.evidence_envelope import (  # noqa: E402
     build_observation_binding,
     observation_binding_to_dict,
 )
+from groundtruth.runtime import (  # noqa: E402
+    miniswe_provider_boundary as _boundary_module,
+)
 from groundtruth.runtime.miniswe_provider_boundary import (  # noqa: E402
     MiniSweProviderBoundary,
 )
@@ -83,6 +86,8 @@ def _write_attempt(
     monkeypatch: pytest.MonkeyPatch,
     *,
     two_evidence: bool = False,
+    delivery_handler=None,
+    fault_handler=None,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -110,6 +115,8 @@ def _write_attempt(
         model=model,
         agent=agent,
         attempt_runtime=runtime,
+        delivery_handler=delivery_handler,
+        fault_handler=fault_handler,
     )
     # The binding must survive staging through provider terminal and response
     # commitment; reconstructing it later from a capsule hash is not proof of
@@ -346,3 +353,88 @@ def test_canonical_ack_trajectory_mutations_fail_closed(
         _assert_rejected(rows, messages)
     finally:
         journal.close()
+
+
+# --------------------------------------------------------------------------- #
+# C30 half 3c — `delivery_handler`, the success-path twin of `fault_handler`.
+#
+# The brief attestations can only be finalized where BOTH halves of the join identity
+# exist: the delivered bytes' seal and the evidence lineage. That moment is the canonical
+# delivery ROW. The seam registers a handler here rather than the boundary persisting
+# attestations itself, because the attestation output root belongs to the seam and
+# re-deriving it in the boundary would create a second authority for where audit
+# artifacts land.
+#
+# These live in THIS file, not the boundary suite, because only this harness supplies an
+# ObservationBinding — and without one no canonical row is written, so the handler
+# correctly never fires. My first attempt asserted against the other harness and read the
+# absence as a broken hook; the row-ordering probe showed a row being written by a
+# different writer entirely, which is what exposed the mistake.
+#
+# BITING MUTATIONS (applied, observed RED, reverted by targeted restore):
+#   M1 — call the handler BEFORE `append_ledger_line`: the ordering test goes RED, and a
+#        handler could attest a delivery the join will never see.
+#   M2 — let a handler exception propagate: the fault-isolation test goes RED. Audit
+#        persistence may not un-deliver bytes the model has already received.
+# --------------------------------------------------------------------------- #
+def test_delivery_handler_fires_once_with_the_delivered_compilation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    seen: list[Any] = []
+    rows, _messages, plan, _journal = _write_attempt(
+        tmp_path, monkeypatch, delivery_handler=seen.append
+    )
+
+    delivery = [r for r in rows if r.get("schema") == "gt.canonical_delivery.v1"]
+    assert len(delivery) == 1, "no canonical row -- the assertion below would be vacuous"
+    assert len(seen) == 1
+    assert seen[0].capsule_hash == plan.compilation.capsule_hash
+    # The handler receives the identity the join needs, not just a hash.
+    assert seen[0].evidence_lineage == plan.compilation.evidence_lineage
+
+
+def test_delivery_handler_never_fires_before_the_row_is_durable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """M1. A handler that ran first could attest a delivery the join will never see."""
+    order: list[str] = []
+    original_append = _boundary_module.append_ledger_line
+
+    def _tracking_append(row, path):
+        if isinstance(row, dict) and row.get("schema") == "gt.canonical_delivery.v1":
+            order.append("row")
+        return original_append(row, path)
+
+    monkeypatch.setattr(_boundary_module, "append_ledger_line", _tracking_append)
+    _write_attempt(tmp_path, monkeypatch, delivery_handler=lambda _c: order.append("handler"))
+
+    assert "row" in order and "handler" in order, order
+    assert order.index("row") < order.index("handler")
+
+
+def test_a_raising_delivery_handler_cannot_undeliver_the_capsule(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """M2. The bytes are already with the model; an audit fault cannot retract them."""
+
+    def _boom(_compilation):
+        raise RuntimeError("attestation persistence blew up")
+
+    faults: list[str] = []
+    rows, messages, _plan, _journal = _write_attempt(
+        tmp_path,
+        monkeypatch,
+        delivery_handler=_boom,
+        fault_handler=lambda stage, _exc: faults.append(stage),
+    )
+
+    delivery = [r for r in rows if r.get("schema") == "gt.canonical_delivery.v1"]
+    assert len(delivery) == 1, "the delivery row must still be written"
+    assert messages, "the agent must still have received its response"
+    # The NAMED stage matters. Asserting only that the row survived passed even with the
+    # try/except deleted -- something upstream swallows it too -- so that version of this
+    # test guarded nothing. What this module owes is a fault reported UNDER ITS OWN NAME.
+    assert "DELIVERY_HANDLER" in faults
