@@ -311,6 +311,14 @@ def test_mandatory_detail_validator_rejects_shape_and_parity_defects(
     summary = {
         "total_deliveries": 0, "total_pivots": 0, "impact_rate": 0.0,
         "per_tag_impact": {}, "gt_tokens_injected": 0,
+        # gt_tokens_per_pivot ADDED 2026-07-27. This "valid" fixture was NOT valid: it
+        # omitted one of the five behavioral_impact mandatory metrics
+        # (gt_run_metrics._MANDATORY_METRICS), and it passed only because the per-task
+        # gate's presence tuple omitted the same key. The fixture and the gate shared a
+        # blind spot, so neither could reveal the other -- a matched pair of omissions
+        # reads exactly like coverage. The gate now requires the key; this fixture is
+        # corrected to actually be the positive case it claims to be.
+        "gt_tokens_per_pivot": 0,
         "nudge_compliance_rate": None,
     }
 

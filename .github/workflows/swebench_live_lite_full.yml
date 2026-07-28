@@ -2540,6 +2540,15 @@ jobs:
                   or any(key not in summary for key in (
                       "total_deliveries", "total_pivots", "impact_rate",
                       "per_tag_impact", "gt_tokens_injected",
+                      # gt_tokens_per_pivot ADDED 2026-07-27. It is one of the five
+                      # behavioral_impact mandatory metrics (gt_run_metrics
+                      # _MANDATORY_METRICS) and was the only one absent from this
+                      # presence tuple, so the per-task gate never required it. The
+                      # behavioral_deep_parity check below does NOT cover the gap: it
+                      # iterates deep_behavioral.items(), so when the key is missing
+                      # from BOTH summary and deep it passes vacuously. Only the run-
+                      # grain CLI gate caught it, and that is after the spend.
+                      "gt_tokens_per_pivot",
                       "nudge_compliance_rate"))):
               print("behavioral_detail_invalid", file=sys.stderr)
               raise SystemExit(1)
