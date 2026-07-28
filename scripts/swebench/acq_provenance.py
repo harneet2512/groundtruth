@@ -353,6 +353,26 @@ def _extended_source_features(proof: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(found)
 
 
+def _acquired(metrics: Mapping[str, Any], name: str) -> bool:
+    """Read an ACQUISITION counter, preferring the unambiguous ``acquired_*`` field.
+
+    C15 (2026-07-27). This module asks an ACQUISITION question — did a leg find anything —
+    but the bare names (``fts5_signal_count`` etc.) hold a DELIVERY count taken over the
+    rendered candidate set. Under ``GT_BRIEF_MINIMAL`` + ``GT_LOC_RESLOT`` the brief
+    reduction empties that set by construction, so every one of these read 0 on run
+    30297116212 while the same run's embedder certificate reported 112 semantic candidates.
+    That zero became the "all acquisition legs are dark" finding and redirected a day of
+    work before it was killed by artifact.
+
+    Prefer the delivery-independent field; fall back to the legacy name so artifacts
+    written before the split still read exactly as they did.
+    """
+    value = metrics.get(f"acquired_{name}")
+    if value is None:
+        value = metrics.get(name)
+    return _positive(value)
+
+
 def _source_features(proof: Mapping[str, Any], metrics: Mapping[str, Any]) -> tuple[str, ...]:
     """ACQ rows directly evidenced by one rendered candidate.
 
@@ -364,24 +384,24 @@ def _source_features(proof: Mapping[str, Any], metrics: Mapping[str, Any]) -> tu
     components = components if isinstance(components, Mapping) else {}
     found: list[str] = []
     if (
-        _positive(metrics.get("graph_edge_count"))
+        _acquired(metrics, "graph_edge_count")
         and proof.get("witness_verified") is True
         and isinstance(proof.get("witness"), str)
         and bool(str(proof.get("witness")).strip())
     ):
         found.append("graph_validity")
     if (
-        _positive(metrics.get("structural_signal_count"))
+        _acquired(metrics, "structural_signal_count")
         and _positive(components.get("reach"))
     ):
         found.append("structural_depth")
     if (
-        _positive(metrics.get("fts5_signal_count"))
+        _acquired(metrics, "fts5_signal_count")
         and _positive(components.get("lex"))
     ):
         found.append("lexical_FTS5")
     if (
-        _positive(metrics.get("semantic_signal_count"))
+        _acquired(metrics, "semantic_signal_count")
         and _positive(components.get("sem"))
     ):
         found.append("semantic_embedder")
@@ -604,10 +624,24 @@ def _valid_contribution_attestation(
     return feature in sources
 
 
+def _counter_field_path(metrics: Mapping[str, Any], name: str) -> str:
+    """Name the counter field ``_acquired`` will actually read for ``name``.
+
+    C15: the lineage pointer must track the preference order, not restate a constant. On a
+    post-split artifact the predicate reads ``acquired_*``; on an artifact written before
+    the split it reads the legacy bare name. Hardcoding either one makes the pointer false
+    for half the corpus — and a lineage pointer that names a field the predicate did not
+    read is worse than no pointer, because it is checkable and wrong.
+    """
+    key = f"acquired_{name}"
+    return f"metrics.{key}" if metrics.get(key) is not None else f"metrics.{name}"
+
+
 def _source_field_paths(
     feature: str,
     proof_index: int,
     proof: Mapping[str, Any],
+    metrics: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Return the exact persisted fields that support one ACQ row.
 
@@ -615,18 +649,22 @@ def _source_field_paths(
     compound source names every field required by its admission predicate.
     """
     base = f"metrics.localization_proof[{proof_index}]"
+    _m: Mapping[str, Any] = metrics if metrics is not None else {}
     if feature == "graph_validity":
         return [
-            "metrics.graph_edge_count",
+            _counter_field_path(_m, "graph_edge_count"),
             f"{base}.witness_verified",
             f"{base}.witness",
         ]
     if feature == "structural_depth":
-        return ["metrics.structural_signal_count", f"{base}.components.reach"]
+        return [_counter_field_path(_m, "structural_signal_count"),
+                f"{base}.components.reach"]
     if feature == "lexical_FTS5":
-        return ["metrics.fts5_signal_count", f"{base}.components.lex"]
+        return [_counter_field_path(_m, "fts5_signal_count"),
+                f"{base}.components.lex"]
     if feature == "semantic_embedder":
-        return ["metrics.semantic_signal_count", f"{base}.components.sem"]
+        return [_counter_field_path(_m, "semantic_signal_count"),
+                f"{base}.components.sem"]
     components = proof.get("components")
     components = components if isinstance(components, Mapping) else {}
     if feature == "body_retrieval":
@@ -741,7 +779,7 @@ def collect_acq_provenance(
         receipt = _block_receipt(block, path, messages, delivery_home)
         level = receipt["level"]
         for feature in features:
-            source_fields = _source_field_paths(feature, proof_index, proof)
+            source_fields = _source_field_paths(feature, proof_index, proof, metrics)
             producer_payload = str(delivery.get("payload", "")) if delivery else ""
             candidate = {
                 "status": "MEASURED" if level is not None and level >= 2 else "UNMEASURED",

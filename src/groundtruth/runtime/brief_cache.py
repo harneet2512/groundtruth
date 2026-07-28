@@ -26,6 +26,14 @@ _METRIC_FIELDS = (
     # gate->emit boundary so the sealed cache retains acquisition provenance.
     # Sidecar-only: none participates in ``brief_text``.
     "graph_edge_count", "structural_signal_count", "fts5_signal_count",
+    # C15 (2026-07-27): the four fields above are DELIVERY counts whose unqualified names
+    # read as ACQUISITION. Carry both families explicitly so a downstream reader never has
+    # to guess which fact it is holding. ``delivered_*`` may be None == NOT_EVALUABLE.
+    "acquired_graph_edge_count", "acquired_semantic_signal_count",
+    "acquired_structural_signal_count", "acquired_fts5_signal_count",
+    "delivered_graph_edge_count", "delivered_semantic_signal_count",
+    "delivered_structural_signal_count", "delivered_fts5_signal_count",
+    "delivered_candidate_count",
     "block_receipts", "control_participation", "tokenizer_used", "budget_suppressed",
     # Cluster-2b: the build-time obligations extraction record (issue source identity +
     # extracted obligations digest/count) bound to the delivered obligations block seal,

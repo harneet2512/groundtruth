@@ -1190,13 +1190,25 @@ def _from_l1_block(summ: dict) -> dict:
                 return d8(v)
         return 0.0
 
-    edge = _num("graph_edge_count", "l1_candidates_with_graph_edge_count",
+    # C15 (2026-07-27): prefer the ``acquired_*`` family. These four report whether a
+    # localization LEG produced signal, which is an ACQUISITION question; the bare names
+    # hold a DELIVERY count over the rendered candidate set, which the GT_BRIEF_MINIMAL +
+    # GT_LOC_RESLOT reduction empties by construction. Reading the bare name under the
+    # re-slot reports "no leg found anything" when the truth is "the step-0 brief rendered
+    # nothing" — the exact misreading that produced the retracted "acquisition is dark"
+    # finding on run 30297116212. Legacy keys stay in the chain so pre-split artifacts read
+    # exactly as before.
+    edge = _num("acquired_graph_edge_count",
+                "graph_edge_count", "l1_candidates_with_graph_edge_count",
                 "l1_candidates_with_call_edge_count")
-    sem = _num("semantic_signal_count", "l1_candidates_with_semantic_count",
+    sem = _num("acquired_semantic_signal_count",
+               "semantic_signal_count", "l1_candidates_with_semantic_count",
                "l1_semantic_signal_count")
-    struct = _num("structural_signal_count", "l1_candidates_with_signature_count",
+    struct = _num("acquired_structural_signal_count",
+                  "structural_signal_count", "l1_candidates_with_signature_count",
                   "l1_structural_signal_count")
-    lex = _num("fts5_signal_count", "lexical_signal_count",
+    lex = _num("acquired_fts5_signal_count",
+               "fts5_signal_count", "lexical_signal_count",
                "l1_candidates_with_bm25_signal_count", "l1_lexical_signal_count")
     tier = l1.get("confidence_tier") or l1.get("l1_confidence_tier")
     if not tier:

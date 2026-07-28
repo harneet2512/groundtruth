@@ -402,11 +402,43 @@ class V1RBriefResult:
     # semantic + FTS5) and not a degraded lexical-only / hollow run. A candidate
     # counts toward a signal iff that signal contributed a NONZERO score to it.
     # Defaults keep every existing caller byte-compatible. (instr 2026-06-04)
-    graph_edge_count: int = 0        # candidates backed by >=1 real graph edge
-    semantic_signal_count: int = 0   # candidates with a nonzero semantic/ONNX score
-    structural_signal_count: int = 0 # candidates with a nonzero structural/graph-reach score
-    fts5_signal_count: int = 0       # candidates scored by / entering via FTS5/BM25 (lexical)
+    # SCOPE (C15, 2026-07-27 — read this before citing any of the four): these four are
+    # DELIVERY claims. They count over the RENDERED candidate set (``.files``), joined to
+    # the final bytes, and they pair with ``rendered_candidate_count`` /``sem_components``
+    # as the numerator/denominator/distribution triple that gate 3b and the absorption
+    # contract read. Their unqualified names invite the ACQUISITION reading; for that
+    # question read ``acquired_*`` below, NEVER these.
+    graph_edge_count: int = 0        # DELIVERED candidates backed by >=1 real graph edge
+    semantic_signal_count: int = 0   # DELIVERED candidates with a nonzero semantic/ONNX score
+    structural_signal_count: int = 0 # DELIVERED candidates with a nonzero structural/graph-reach score
+    fts5_signal_count: int = 0       # DELIVERED candidates scored by / entering via FTS5/BM25
     confidence_tier: str = "low"     # HIGH/MEDIUM/LOW from _localization_header
+    # --- ACQUISITION counts (C15) — what the LEGS FOUND, independent of delivery ---
+    # Counted over the RANKED set (``top_records``), so the brief reduction cannot zero
+    # them. WHY THIS FAMILY EXISTS: under GT_BRIEF_MINIMAL + GT_LOC_RESLOT the reducer
+    # deletes every localization block, so the DELIVERED set is empty BY CONSTRUCTION and
+    # the four fields above all read 0. On run 30297116212 that zero was read as "the
+    # acquisition subsystem is dark" and written into the architecture state-of-record —
+    # while the SAME run's embedder certificate reported 112 semantic candidates and the
+    # production localizer, driven against that run's own graph, produced 50. It was a
+    # broken gauge, not a broken subsystem. Both facts are wanted; they must not share a
+    # name. These answer "what did the legs find"; the four above answer "what reached
+    # the model".
+    acquired_graph_edge_count: int = 0
+    acquired_semantic_signal_count: int = 0
+    acquired_structural_signal_count: int = 0
+    acquired_fts5_signal_count: int = 0
+    # --- DELIVERY counts, explicitly named. ``None`` == NOT_EVALUABLE ---
+    # Same values as the four legacy fields above, under names that cannot be misread.
+    # NOT_EVALUABLE (None) — never 0 — when the minimal/re-slot reduction is what emptied
+    # the delivered set: "0 reached the model via the step-0 brief" is then a statement
+    # about the re-slot, not about delivery quality, and a 0 there is the same lie under a
+    # better name. A genuine 0 (candidates delivered, none carrying the signal) stays 0.
+    delivered_graph_edge_count: int | None = None
+    delivered_semantic_signal_count: int | None = None
+    delivered_structural_signal_count: int | None = None
+    delivered_fts5_signal_count: int | None = None
+    delivered_candidate_count: int | None = None
     # --- Embedder-CONSUMPTION metrics (instr 2026-06-07, FIELD-NAME CONTRACT) ---
     # Let a fail-closed precheck distinguish "embedder PRESENT" from "embedder
     # CONSUMED": a present-but-unconsumed embedder has effective_w_sem > 0 yet
@@ -2751,6 +2783,12 @@ class _RankedEntry:
         self.path = path
         self.witness = ""
         self.localizer_confidence = 0.0
+
+
+# C15 — the wire form of "this question has no answer on this run", for JSON readers that
+# cannot carry ``None``. A reader must never see 0 where the honest answer is "the re-slot
+# removed the population this counter is defined over".
+_NOT_EVALUABLE = "NOT_EVALUABLE"
 
 
 def _l1_acquisition_counts(
@@ -5645,6 +5683,22 @@ def generate_v1r_brief(
             v74_result=v74,
             effective_w_sem=float(getattr(v74, "effective_w_sem", 0.0) or 0.0),
             rendered_candidate_count=0,
+            # C15 — these zeros are HONEST on this path and are set EXPLICITLY so that is
+            # auditable rather than inherited from a default. This branch is reached only
+            # when ``v74.ranked_full`` is empty: the legs ran and ranked nothing, so
+            # acquisition is genuinely 0, and nothing was withheld by the reduction, so
+            # delivery is genuinely 0 rather than NOT_EVALUABLE. ``delivered_*`` must be
+            # stated here because its default is None (NOT_EVALUABLE), which would be the
+            # wrong answer on this path.
+            acquired_graph_edge_count=0,
+            acquired_semantic_signal_count=0,
+            acquired_structural_signal_count=0,
+            acquired_fts5_signal_count=0,
+            delivered_graph_edge_count=0,
+            delivered_semantic_signal_count=0,
+            delivered_structural_signal_count=0,
+            delivered_fts5_signal_count=0,
+            delivered_candidate_count=0,
             k_sem_top=int(getattr(v74, "k_sem_top_effective", 0) or 0),
             sem_components=[],
             budget_suppressed=_nm_suppressed,
@@ -6792,8 +6846,14 @@ def generate_v1r_brief(
     # obligations + minimal 'which file' orientation (localization rides reactive
     # def_partition). BAKED: dormant until the SM-8 rebake sets the flag at generation.
     _control_participation: list[dict] = []
+    # C15 — how many candidates were model-visible BEFORE the reduction ran. Used below to
+    # PROVE (not assume from a flag) that the reduction is what emptied the delivered set,
+    # which is the difference between NOT_EVALUABLE and an honest 0.
+    _delivered_pre_reduction = 0
     if _brief_minimal_on():
         _before_minimal = brief_text
+        _delivered_pre_reduction = len(
+            _model_visible_localization_entries(_before_minimal, _loc_files))
         brief_text = _reduce_brief_to_minimal(brief_text)
         _control_participation = _brief_minimal_participation(
             _before_minimal, brief_text)
@@ -6825,6 +6885,28 @@ def generate_v1r_brief(
         )
     except Exception:
         _ge = _sem_c = _struct_c = _fts5_c = 0
+
+    # C15 — the ACQUISITION fact, over the RANKED set, delivery-independent. This is the
+    # number that answers "did the legs find anything"; the four above answer "what reached
+    # the model". They are computed from the same signals and differ ONLY in population, so
+    # acquired >= delivered always holds and the pair is itself the re-slot's delivery gap.
+    try:
+        _acq_ge, _acq_sem, _acq_struct, _acq_fts5 = _l1_acquisition_counts(
+            graph_db, top_records
+        )
+    except Exception:
+        _acq_ge = _acq_sem = _acq_struct = _acq_fts5 = 0
+
+    # NOT_EVALUABLE iff the reduction is what emptied delivery — candidates WERE visible
+    # before it ran and none are now. Anything else (a genuine empty ranking, or delivered
+    # candidates that simply carry no signal) reports an honest integer.
+    _reduction_emptied_delivery = (not _delivered) and _delivered_pre_reduction > 0
+    if _reduction_emptied_delivery:
+        _d_ge = _d_sem = _d_struct = _d_fts5 = _d_count = None
+    else:
+        _d_ge, _d_sem, _d_struct, _d_fts5 = _ge, _sem_c, _struct_c, _fts5_c
+        _d_count = len(_delivered)
+
     _conf_tier = _tier_from_loc_header(_loc_header)
 
     # --- Embedder-CONSUMPTION metrics over the RENDERED candidates ---
@@ -7021,6 +7103,15 @@ def generate_v1r_brief(
         structural_signal_count=_struct_c,
         fts5_signal_count=_fts5_c,
         confidence_tier=_conf_tier,
+        acquired_graph_edge_count=_acq_ge,
+        acquired_semantic_signal_count=_acq_sem,
+        acquired_structural_signal_count=_acq_struct,
+        acquired_fts5_signal_count=_acq_fts5,
+        delivered_graph_edge_count=_d_ge,
+        delivered_semantic_signal_count=_d_sem,
+        delivered_structural_signal_count=_d_struct,
+        delivered_fts5_signal_count=_d_fts5,
+        delivered_candidate_count=_d_count,
         effective_w_sem=_eff_w_sem,
         rendered_candidate_count=len(_delivered),
         k_sem_top=_k_sem_top,
@@ -7142,6 +7233,19 @@ def generate_v1r_brief(
                 "structural_signal_count": _struct_c,
                 "fts5_signal_count": _fts5_c,
                 "confidence_tier": _conf_tier,
+                # C15: the ACQUISITION fact under a name that cannot be misread as
+                # delivery, plus delivery under a name that cannot be misread as
+                # acquisition. "NOT_EVALUABLE" (never 0) when the re-slot reduction is
+                # what emptied the delivered set.
+                "acquired_graph_edge_count": _acq_ge,
+                "acquired_semantic_signal_count": _acq_sem,
+                "acquired_structural_signal_count": _acq_struct,
+                "acquired_fts5_signal_count": _acq_fts5,
+                "delivered_graph_edge_count": _NOT_EVALUABLE if _d_ge is None else _d_ge,
+                "delivered_semantic_signal_count": _NOT_EVALUABLE if _d_sem is None else _d_sem,
+                "delivered_structural_signal_count": _NOT_EVALUABLE if _d_struct is None else _d_struct,
+                "delivered_fts5_signal_count": _NOT_EVALUABLE if _d_fts5 is None else _d_fts5,
+                "delivered_candidate_count": _NOT_EVALUABLE if _d_count is None else _d_count,
                 # Embedder-CONSUMPTION metrics (same definitions as the
                 # V1RBriefResult fields): effective_w_sem>0 with
                 # semantic_signal_count==0 / all-zero sem_components ==
