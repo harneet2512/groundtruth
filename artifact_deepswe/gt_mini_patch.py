@@ -15120,7 +15120,16 @@ def _ss_rebind_sanitized_producer_inputs(inputs, provenance, dedup_key: str):
         row for row in inputs.caller_rows
         if (str(row.file).replace("\\", "/"), int(row.line)) in surviving
     )
-    if not caller_rows:
+    # C32: fail closed ONLY when the sidecar HAD callers and sanitization removed them all.
+    # A def_partition sidecar carries `caller_rows=()` BY CONSTRUCTION (gateway
+    # `_def_partition_inputs`) -- its evidence is `definition_rows`. The original guard could
+    # not tell "the callers were sanitized away" from "there were never any callers", so it
+    # dropped a sidecar that had lost nothing; the envelope then shipped with
+    # `producer_inputs=None`, `build_gateway_attestation` raised "producer inputs missing",
+    # the persist wrapper swallowed it, and def_partition's `correct_info` could never be True
+    # on any delivery that needed sanitization -- all four of its evidence types.
+    # The guard's PURPOSE is unchanged: never attest a caller the delivery no longer carries.
+    if inputs.caller_rows and not caller_rows:
         return None, "caller_rows"
     survivor_callers = {
         (str(row.identity), str(row.file).replace("\\", "/")) for row in caller_rows
