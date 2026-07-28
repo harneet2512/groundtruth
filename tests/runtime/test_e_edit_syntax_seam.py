@@ -74,6 +74,14 @@ def _repo(tmp_path, monkeypatch):
     """A tmp repo whose _root() the producer reads; baseline off; executor=host."""
     monkeypatch.setattr(gmp, "_root", lambda: str(tmp_path))
     monkeypatch.setattr(gmp, "_GT_BASELINE", False, raising=False)
+    # "executor=host" was the docstring's INTENT but nothing enforced it. `_build_env_executor`
+    # binds these MODULE GLOBALS, so a prior test in the same process that published a live env
+    # left the bridge armed here: the checker ran through that stale env, which returned no valid
+    # exit code, and `edit_check` correctly degraded to unavailable -- so the producer went quiet
+    # and `cand is not None` failed. GT was right; the test was not hermetic.
+    # Found via SM-7, which batches 20 files into one process; bisected to test_b1_mini_seam.
+    monkeypatch.setattr(gmp, "_GT_LIVE_ENV", None, raising=False)
+    monkeypatch.setattr(gmp, "_GT_LIVE_ORIG_EXECUTE", None, raising=False)
     return tmp_path
 
 
