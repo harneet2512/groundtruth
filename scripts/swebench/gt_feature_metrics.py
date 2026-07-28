@@ -4488,9 +4488,12 @@ def _apply_attestation_truth(
     classes from the exactly-joined producer attestations, and return the join
     diagnostics.
 
-    Only the classes in :data:`attestation_join.ATTESTED_FACT_CLASSES`
-    (``syntax_result``/``covering_red``/``caller_contract``/``signature_delta``/
-    ``submit_refusal``/``recovery``) may receive joined truth. Truth is
+    Only the classes in :data:`attestation_join.ATTESTED_FACT_CLASSES` may receive joined
+    truth. That tuple is the ONE authority and is deliberately NOT restated here: this
+    docstring used to enumerate six classes and had gone stale against a tuple of ten
+    (``def_partition``, ``localization``, ``newfile_precedent`` and ``obligations`` had since
+    grown producers). The stale list read as "these four are structurally ungradable on
+    ``correct_info``" — a materially wrong picture of the product's coverage. Truth is
     overridden ONLY when the join produced a bool (a validated attestation joined a
     DELIVERED row on the exact ``(candidate_id, delivery_seal)`` identity). Authority
     (J2b, the second leg of ``correct_info``) is overridden ONLY when the join set it —
