@@ -214,6 +214,129 @@ def _maybe_record_counterfactual_pair(
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CAPSULE-LEVEL SHADOW HOLDOUT (#30 step 3, 2026-07-28). Compile the capsule, then
+# DELIBERATELY do not send it, so the coin's decision becomes measurable.
+#
+# OFF unless BOTH `GT_SS_SHADOW` and a positive `GT_SS_SHADOW_RATE` are set. A knob that
+# withholds evidence from the agent must never act on a default.
+# ─────────────────────────────────────────────────────────────────────────────
+_SHADOW_ASSIGNMENT_SCHEMA = "gt.shadow_assignment.v1"
+
+# The class axis of the capsule draw, held CONSTANT so only capsule identity varies it. Any
+# participating class serves; it is a coordinate, not an assertion about what the capsule
+# carries. Every real member's participation is checked separately and strictly.
+_CAPSULE_DRAW_CLASS = "localization"
+
+
+def _shadow_enabled() -> bool:
+    raw = str(os.environ.get("GT_SS_SHADOW", "") or "").strip().lower()
+    return raw not in {"", "0", "false", "no", "off", "none"}
+
+
+def _capsule_member_classes(compilation: Any) -> tuple[str, ...]:
+    """The fact classes carried by this capsule. Absence reads as empty (=> DELIVER)."""
+    try:
+        members = getattr(compilation, "member_fact_classes", None) or ()
+        return tuple(str(m) for m in members if str(m))
+    except Exception:  # noqa: BLE001 -- a measurement must never break the turn
+        return ()
+
+
+def _capsule_holdout_verdict(task_id: str, compilation: Any) -> str:
+    """DELIVER or HOLDOUT for ONE capsule. Never raises; every fault path DELIVERS.
+
+    SAFETY FIRST. A capsule carries SEVERAL evidence records and withholding it withholds ALL
+    of them, so ONE non-participating member ships the WHOLE capsule. `submit_refusal` and
+    `syntax_result` are safety-excluded: withholding "your patch is broken" would actively harm
+    the agent, which is the opposite of what this arm exists to measure.
+
+    ONE DRAW PER CAPSULE, and that is the load-bearing decision. The obvious composition --
+    HOLDOUT iff `assign()` says HOLDOUT for EVERY member -- is conservative and WRONG: with
+    rate 0.5 and three members, P(all HOLDOUT) is about 0.125, so the arm would RECORD a
+    propensity of 0.5 while actually drawing 0.125, and every weighted estimate built on it
+    would be silently biased. A randomized arm whose recorded propensity does not match its
+    draw is worse than no arm. The capsule is ONE dose, so it gets ONE draw keyed on
+    `capsule_hash`; participation is established for all members first, so the class argument
+    then only gates participation.
+    """
+    try:
+        from groundtruth.runtime.shadow_holdout import (
+            DELIVER,
+            assign,
+            is_participating,
+            parse_rate,
+        )
+
+        if not _shadow_enabled():
+            return DELIVER
+        rate = parse_rate(os.environ.get("GT_SS_SHADOW_RATE", "0"))
+        if rate <= 0.0:
+            return DELIVER
+        classes = _capsule_member_classes(compilation)
+        if not classes or not all(is_participating(c) for c in classes):
+            return DELIVER
+        # FIXED draw coordinate, NOT a claim about content. `assign`'s bucket folds
+        # `fact_class` in, so deriving it from the members (e.g. `sorted(classes)[0]`) makes
+        # the verdict depend on capsule COMPOSITION: the same capsule hash would be held out
+        # or delivered according to which classes happen to ride along, and the recorded
+        # propensity would again be a lie. My first draft did exactly that and
+        # `test_member_count_does_not_shrink_the_holdout_share` caught it.
+        #
+        # The randomization unit is the CAPSULE, so only `dedup_key=capsule_hash` may vary the
+        # draw. Participation of every REAL member is established above; this constant is
+        # merely a participating coordinate that holds the class axis still.
+        return assign(
+            task_id=str(task_id or ""),
+            fact_class=_CAPSULE_DRAW_CLASS,
+            dedup_key=str(getattr(compilation, "capsule_hash", "") or ""),
+            rate=rate,
+        )
+    except Exception:  # noqa: BLE001 -- fail OPEN: never withhold because of a fault
+        from groundtruth.runtime.shadow_holdout import DELIVER
+
+        return DELIVER
+
+
+def _record_shadow_assignment_row(
+    boundary: Any,
+    task_id: str,
+    compilation: Any,
+    arm: str,
+) -> None:
+    """Record the assignment on BOTH arms. Never raises.
+
+    Recording only holdouts makes the propensity uncomputable -- you cannot estimate a
+    probability from the numerator alone. The withheld render is accounted by SEAL
+    (`withheld_capsule_hash`) with ZERO model-facing bytes, so the arm is fully auditable
+    without ever putting the withheld text where a reader could mistake it for a delivery.
+    """
+    try:
+        from groundtruth.runtime.shadow_holdout import parse_rate
+
+        rate = parse_rate(os.environ.get("GT_SS_SHADOW_RATE", "0"))
+        row = {
+            "schema": _SHADOW_ASSIGNMENT_SCHEMA,
+            "layer": "measurement.shadow_assignment",
+            "event_type": "shadow_assignment",
+            "outcome": "measurement_only",
+            "chars_delivered": 0,
+            "arm": str(arm),
+            "propensity": rate,
+            "task_id": str(task_id or ""),
+            "model_call_id": str(getattr(compilation, "model_call_id", "") or ""),
+            "observation_id": str(getattr(compilation, "observation_id", "") or ""),
+            "withheld_capsule_hash": str(
+                getattr(compilation, "capsule_hash", "") or ""
+            ),
+            "member_fact_classes": list(_capsule_member_classes(compilation)),
+        }
+        append_ledger_line(row, boundary._receipt_sink_path)
+    except Exception:  # noqa: BLE001 -- accounting must never break the turn
+        return None
+    return None
+
+
 def _response_id(response: Any) -> str:
     value = getattr(response, "id", "")
     if isinstance(value, str):
