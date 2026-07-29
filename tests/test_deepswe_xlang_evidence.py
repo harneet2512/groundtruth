@@ -56,6 +56,14 @@ def _load_patch_module():
     spec = importlib.util.spec_from_file_location("gt_mini_patch_under_test", _PATCH_PATH)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
+    # REGISTER BEFORE EXEC. `@dataclass` resolves a string annotation by looking the
+    # defining module up with `sys.modules.get(cls.__module__)` (CPython
+    # dataclasses.py:749). Executing an unregistered module makes that return None and
+    # the decorator dies with "'NoneType' object has no attribute '__dict__'" — which is
+    # what took this file to 5 failed / 1 passed, before a single assertion ran. Every
+    # other spec_from_file_location loader in this suite already does this
+    # (tests/test_context_budget.py:22, tests/test_deepswe_injection_import_coverage.py:56).
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 

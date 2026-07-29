@@ -59,14 +59,30 @@ def test_dedup_after_commit(pm):
 
 
 def test_dedup_semantic_id_after_commit(pm):
+    """C-3 (context_budget.py:106-115): the fact id is tag:symbol:hash(REMAINDER), not
+    tag:symbol. This test used to assert that a PARAPHRASE ("invoked from" vs "called by")
+    of the same location collapsed; C-3 deliberately gave that up, because tag+symbol alone
+    made two genuinely DISTINCT facts ("get_user calls -> A" vs "get_user called by -> B")
+    collide and permanently suppressed the second. Never falsely suppressing real evidence
+    beats collapsing a paraphrase, so the assertions below pin the guarantee C-3 actually
+    makes: an identical re-render (modulo whitespace/case) collides, a different fact does
+    not. There is no synonym normalization anywhere in stable_fact_id."""
     pm._DELIVERED_FACTS.clear()
     pm._DELIVERED_FACT_IDS.clear()
     a = "[WITNESS] capture_snapshot called by -> pkg/mod.py:44"
     first = pm._budget_trim(a)
     assert first.strip() == a
     pm._PRODUCT_BUDGETER.commit_delivered([a])
-    b = "[WITNESS] capture_snapshot invoked from -> pkg/mod.py:44"
-    assert pm._budget_trim(b) == "", "same semantic ID should be suppressed"
+
+    # true dedup: the SAME fact re-rendered with different whitespace still collides.
+    respaced = "[WITNESS]  capture_snapshot   called by  ->  pkg/mod.py:44"
+    assert pm._budget_trim(respaced) == "", "an identical re-render must be suppressed"
+
+    # no FALSE suppression: same tag AND same symbol, but a different fact.
+    other_direction = "[WITNESS] capture_snapshot calls -> pkg/other.py:9"
+    assert pm._budget_trim(other_direction).strip() == other_direction, (
+        "a distinct fact sharing tag+symbol must NOT be suppressed (the C-3 collision)"
+    )
 
 
 def test_imperative_survives_over_explanation(pm):

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from groundtruth.runtime.action_translation import translate_to_action
+from groundtruth.runtime.action_translation import ACTION_TEMPLATES, translate_to_action
 from groundtruth.runtime.context_budget import ContextBudgeter
 from groundtruth.runtime.context_policy import Event, Phase, should_emit
 from groundtruth.runtime.obligations import ObligationTracker
@@ -84,16 +84,34 @@ def test_runtime_state_policy_and_verification_are_language_agnostic(language, t
     assert "hidden_exact_name" not in rendered
     assert "relevant repo test target" in rendered
 
+    # Budgeter dedup is language-agnostic. NOTE the propose/commit split (the "D1 fix",
+    # context_budget.py:80-88 + tests/test_context_budget.py:49-58): `trim` is PURE and
+    # deliberately does NOT burn the fact, so a candidate that LOSES its gate cannot
+    # destroy evidence it never delivered. Suppression is earned by `commit_delivered`.
+    # This assertion used to trim twice and expect the second to be empty, which pinned
+    # the pre-D1 semantics; it now exercises both halves of the real contract.
+    # NOTE the fact form: the producer emits "called by ->" (action_translation.py:30-31,
+    # gt_mini_patch.py:6165). This fixture said "call by", which matches no regex in the
+    # product, so the translation assertion below was never exercising a real witness.
+    witness = "[WITNESS] targetedBehavior called by -> src/App:10"
+    payload = f"{witness}\nInspect src/App"
     budget = ContextBudgeter()
-    first = budget.trim("[WITNESS] targetedBehavior call by -> src/App:10\nInspect src/App", 30)
-    second = budget.trim("[WITNESS] targetedBehavior call by -> src/App:10\nInspect src/App", 30)
+    first = budget.trim(payload, 30)
     assert first.text
-    assert second.text == ""
+    uncommitted = budget.trim(payload, 30)
+    assert uncommitted.text, "an UNCOMMITTED fact must not be suppressed (gate-loss safety)"
+    budget.commit_delivered(first.pending_lines)
+    assert budget.trim(payload, 30).text == "", "a COMMITTED fact must be suppressed"
 
-    action = translate_to_action(
-        "[WITNESS] targetedBehavior call by -> src/App:10", Phase.EDIT,
-    )
-    assert "Inspect targetedBehavior at src/App:10" in action
+    # The caller-direction witness translates to the caller_risk action, and the original
+    # fact is KEPT alongside it (action_translation.py:48-53). Expected text is rendered
+    # from the product's own template so a wording change updates both sides at once —
+    # the previous hard-coded "Inspect targetedBehavior at src/App:10" was a wording no
+    # template has produced for some time.
+    action = translate_to_action(witness, Phase.EDIT)
+    assert witness in action, "the original fact must survive translation"
+    assert ACTION_TEMPLATES["caller_risk"].format(
+        callee="targetedBehavior", loc="src/App:10") in action
 
     tracker = ObligationTracker([_ObligationView()])
     tracker.update({"targetedBehavior"}, set(), 2)
