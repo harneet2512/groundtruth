@@ -10432,7 +10432,11 @@ def _runtime_ledger_record(
                 outcome=outcome,
                 reason=reason,
                 chars_delivered=chars,
-                iteration=_action_count,
+                # 2026-07-29: the IN-PROCESS object must carry the same trajectory
+                # position the durable row does (:10452 already uses this). Reading the
+                # raw `_action_count` here froze it whenever the canonical observer
+                # owned the loop — see the docstring at `_current_iteration`.
+                iteration=_current_iteration(),
             )
         )
     except Exception:  # noqa: BLE001
@@ -17134,7 +17138,17 @@ def _attach_batch_candidate(pool, candidate, out, payload: str, *, join: bool,
         "kkind": kkind or "", "kf": kf or "", "krel": krel or "",
         "action_index": index,
         "action_key": state["observed_keys"][index],
-        "producer_iteration": int(_action_count),
+        # MEASURED DEFECT (2026-07-29, run 30390877219): reading the raw `_action_count`
+        # here FROZE this field. `_action_count` advances only inside
+        # `_augment_output_legacy`; once the canonical observer owns the loop it never
+        # moves again. Every delivered row in cfn-lint-3749 stamped 8 and every row in
+        # cfn-lint-3764 stamped 10 — both pinned at the observer's bootstrap failure —
+        # while the sealed bytes actually landed across tool ordinals 5..46. A frozen
+        # ordering field makes on-time/late unfalsifiable from the row alone, and the
+        # consumption ledger had to add a namespace-coherence check (442e751ce) to detect
+        # and route around it. `_current_iteration()` exists for exactly this and is
+        # already the authority at :10452 and :13150.
+        "producer_iteration": int(_current_iteration()),
     }
     prepared = {
         "out": out, "payload": payload or "", "join": bool(join),
@@ -20153,7 +20167,9 @@ def _ss_emit_ack_row(rec: dict, acked: bool) -> None:
                 candidate_id=candidate_id,
                 delivered_iteration=delivered_iteration,
             ),
-            acknowledgment_iteration=_action_count,
+            # Same freeze as `producer_iteration` above: an acknowledgment stamped with a
+            # counter that stopped advancing cannot order an ack against its delivery.
+            acknowledgment_iteration=_current_iteration(),
             acknowledged=bool(acked),
         )
         _control_participation_record(
