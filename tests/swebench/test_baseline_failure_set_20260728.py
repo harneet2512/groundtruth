@@ -34,9 +34,16 @@ def test_the_recorded_suites_and_sizes() -> None:
     # test_p10_premature_reactive_deferral's setup_module whose teardown popped a different
     # variable. Proven both ways: PASSES in isolation, FAILS under GT_GLOBAL_ARBITER=1. The
     # baseline had frozen a cross-module contamination artifact as a known defect.
+    #
+    # tests/pretask went 13 -> 8 on 2026-07-29, and this one IS a fix. The five
+    # test_c1_passage_window_status nodes failed with AttributeError, not an assertion:
+    # `embed.passage_window_status` existed at 439c55e7a and was dropped by the code-only
+    # snapshot 3b3363d37 while its witness test and every helper it calls survived. The
+    # function is restored and all five pass, so keeping them recorded would freeze a
+    # SOURCE DELETION as a known red — the exact stale baseline this module warns about.
     assert {k: len(v) for k, v in bfs.BASELINE.items()} == {
         "tests/runtime": 2, "tests/swebench": 2,
-        "tests/pretask": 13, "artifact_deepswe": 11,
+        "tests/pretask": 8, "artifact_deepswe": 11,
     }
 
 
