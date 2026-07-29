@@ -34,6 +34,14 @@ BITING MUTATIONS (each applied to direction_arrival.py, observed RED, then rever
        name both, and a manufactured ARRIVAL appears.
        ``test_prose_clause_near_miss_is_never_an_arrival`` goes RED. (VERIFIED RED
        2026-07-29 by applying exactly this substitution.)
+  M6 — ``_contract_targets`` falls back to a TEXT heuristic over the delivered render when
+       no producer attestation joined (the rejected candidate: identifiers scraped out of
+       the ``path:line: note: <source excerpt>`` line). On the real cfn-lint-3749 contract
+       bytes that manufactures the target ``convert_dict`` — a symbol GT only ever QUOTED
+       from a source line — and the agent's own commands name it, so an ARRIVAL appears for
+       a direction with no structured basis.
+       ``test_contract_prose_render_never_becomes_a_target`` goes RED. (VERIFIED RED
+       2026-07-29 by applying exactly this substitution.)
 """
 from __future__ import annotations
 
@@ -101,9 +109,18 @@ def _delivered_row(payload: str, *, evidence_type: str, event_type: str,
     }
 
 
-# A localization payload naming the ranked file; a caller-contract payload naming a symbol.
+# A localization payload naming the ranked file.
 _PAYLOAD_LOC = "Ranked edit target: src/foo.py"
-_PAYLOAD_CONTRACT = "callers: compute_widget\ndef compute_widget(x, y):"
+#: verbatim delivered bytes, run 30390877219, ll-full-aws-cloudformation__cfn-lint-3749
+#: ledger row 102 — the REAL caller_contract render. It contains file paths and a QUOTED
+#: source excerpt; the only identifier in it (``convert_dict``) is part of that quote, not a
+#: symbol GT named as the contract subject.
+_PAYLOAD_CONTRACT_REAL = (
+    "\nsrc/cfnlint/template/transforms/_sam.py:155: note: self._template = convert_dict( "
+    "- verify your change is consistent here\n"
+    "src/cfnlint/template/transforms/_sam.py:155: note: self._template = convert_dict( "
+    "- verify your change is consistent here"
+)
 
 
 def _write_task_dir(tmp_path: Path, trajectory: dict, rows: list[dict]) -> Path:
@@ -344,51 +361,6 @@ def test_unregistered_fact_class_is_skipped_with_a_named_reason(tmp_path):
     assert all(s["reason"] for s in report["skipped_rows"]), "every skip must be named"
 
 
-def test_unextractable_target_is_skipped_with_a_named_reason(tmp_path):
-    """A caller_contract direction is a SYMBOL contract. When the delivered bytes name no
-    symbol the direction cannot be formed at that granularity — it is skipped with a named
-    reason, never silently degraded to the row's file_path."""
-    payload = "callers: (none recorded)"
-    messages = [
-        _user("Fix it."),
-        _assistant("cat src/foo.py"),
-        _tool(payload),
-        _assistant("echo done"),
-        _tool("done"),
-    ]
-    rows = [
-        _delivered_row(
-            payload, evidence_type="caller_contract", event_type="file_view",
-            file_path="src/foo.py", iteration=1,
-        )
-    ]
-    report = adjudicate(str(_write_task_dir(tmp_path, {"messages": messages}, rows)))
-    assert report["per_direction"] == []
-    assert report["summary"]["skipped_reasons"].get("no_target_extractable") == 1
-
-
-def test_contract_direction_targets_the_symbol_not_the_file(tmp_path):
-    messages = [
-        _user("Fix it."),
-        _assistant("grep -rn compute src/"),          # step 1
-        _tool(_PAYLOAD_CONTRACT),                     # DELIVERY at step 1
-        _assistant("sed -i 's/x/y/' src/foo.py # compute_widget"),  # step 2 -> arrival
-        _tool("ok"),
-    ]
-    rows = [
-        _delivered_row(
-            _PAYLOAD_CONTRACT, evidence_type="caller_contract",
-            event_type="search_result", file_path="src/foo.py", iteration=1,
-        )
-    ]
-    report = adjudicate(str(_write_task_dir(tmp_path, {"messages": messages}, rows)))
-    row = next(r for r in report["per_direction"] if r["fact_class"] == "caller_contract")
-    assert row["kind"] == KIND_CONTRACT
-    assert row["target"] == "compute_widget"
-    assert row["arrival_evidence"] == "named_in_command"
-    assert row["verdict"] == AHEAD
-
-
 def test_directions_from_ledger_without_a_trajectory_has_no_delivery_step(tmp_path):
     """The pure-module surface: with no trajectory only ledger file subjects are
     recoverable and delivery_step is honestly None — never guessed from ``iteration``."""
@@ -568,3 +540,390 @@ def test_arrival_scan_is_pure_and_trajectory_side(tmp_path):
     scan = arrival_scan(_baseline_trajectory(), directions)
     assert len(scan) == 1
     assert next(iter(scan.values()))["arrival_step"] == 4
+
+
+# --------------------------------------------------------------------------- #
+# CONTRACT shape (caller_contract / signature_delta) — the highest-volume fact class in
+# the FIRING data, and the LARGEST remaining direction-count leak before this section.
+#
+# The delivered render is ``path:line: note: <source excerpt> - verify your change is
+# consistent here``. ``consumption_ledger._block_entities`` reads structured evidence
+# markers, finds none of them there, recovers the FILES and ZERO symbols — so every
+# CONTRACT row was skipped ``no_target_extractable``.
+#
+# The target now comes from the row's own producer attestation: the immutable
+# ``ProducerInputs`` sidecar the contract was BUILT from, joined on the EXACT
+# ``(candidate_id, delivery_seal)`` identity ``attestation_join`` validates. The rendered
+# prose is NEVER parsed for a symbol (mutation M6).
+# --------------------------------------------------------------------------- #
+import dataclasses  # noqa: E402
+
+from groundtruth.runtime.attestation_store import persist_attestation  # noqa: E402
+from groundtruth.runtime.evidence_envelope import EvidenceEnvelope  # noqa: E402
+from groundtruth.runtime.gateway_attestation_factory import (  # noqa: E402
+    build_gateway_attestation,
+)
+from groundtruth.runtime.producer_inputs import (  # noqa: E402
+    PRODUCER_INPUTS_SCHEMA,
+    CallerEvidenceRow,
+    ProducerInputs,
+    SignatureChange,
+    SourceState,
+)
+
+from scripts.swebench.direction_arrival import (  # noqa: E402
+    _producer_inputs_symbols,
+    contract_symbol_index,
+)
+
+
+def _source(file: str, token: str) -> SourceState:
+    return SourceState(file=file, sha256=token * 64, revision="source:" + token * 64)
+
+
+def _caller_break_envelope(caller_identities: tuple) -> EvidenceEnvelope:
+    """A caller_break envelope whose typed sidecar names ``caller_identities`` as the
+    CALLERS of the edited ``get_user``. Same construction the seam ships (see
+    ``artifact_deepswe/tests/test_cluster2a_producer_inputs_20260717.py``)."""
+    env = EvidenceEnvelope.build(
+        producer="caller_contract",
+        fact_id="get_user",
+        target="src/api.py",
+        evidence_type="caller_break",
+        # the SHIPPED prose deliberately names NEITHER caller — only the edited symbol.
+        payload=("get_user() signature changed - callers must update the call sites",),
+        provenance=(("src/caller.py", 12),),
+        confidence=0.95,
+        tier="WARNING",
+        graph_revision="graph-9",
+        preferred_event="edit",
+    )
+    inputs = ProducerInputs(
+        schema=PRODUCER_INPUTS_SCHEMA,
+        evidence_type="caller_break",
+        candidate_id=env.dedup_key,
+        before_state=_source("src/api.py", "a"),
+        after_state=_source("src/api.py", "b"),
+        caller_rows=tuple(
+            CallerEvidenceRow(
+                identity=identity, file="src/caller.py", line=12 + index,
+                confidence=0.95, resolution_method="import",
+                source_state=_source("src/caller.py", "c"),
+                edge_id=11 + index, definition_id=4 + index,
+            )
+            for index, identity in enumerate(caller_identities)
+        ),
+        graph_revision="graph-9",
+        signature_changes=(SignatureChange(
+            symbol="get_user", edited_file="src/api.py",
+            before_parameters=("uid",), after_parameters=("uid", "name"),
+            old_min_params=None, old_max_params=None,
+            new_min_params=None, new_max_params=None, positional_args=None,
+        ),),
+    )
+    return dataclasses.replace(env, producer_inputs=inputs)
+
+
+_SHIPPED_CONTRACT = b"get_user() signature changed - callers must update the call sites\n"
+
+
+def _contract_task_with_attestation(
+    tmp_path: Path, caller_identities: tuple, commands: list
+) -> Path:
+    """A task dir holding a delivered caller_contract row AND the persisted producer
+    attestation it joins to — the real artifact layout, built by the real factory."""
+    env = _caller_break_envelope(caller_identities)
+    seal = hashlib.sha256(_SHIPPED_CONTRACT).hexdigest()[:16]
+    attestation, artifacts = build_gateway_attestation(
+        env, delivery_seal=seal, shipped_bytes=_SHIPPED_CONTRACT,
+        actual_event="edit_result", open_event="edit_result",
+    )
+
+    payload = _SHIPPED_CONTRACT.decode("utf-8")
+    messages = [_user("Fix it."), _assistant("apply_patch src/api.py")]
+    messages.append(_tool(payload))                       # DELIVERY at step 1
+    for command in commands:
+        messages.append(_assistant(command))
+        messages.append(_tool("ok"))
+
+    row = _delivered_row(
+        payload, evidence_type="caller_break", event_type="edit_result",
+        file_path="src/api.py", iteration=1,
+    )
+    row["candidate_id"] = env.dedup_key
+    row["content_sha256_16"] = seal                       # the join identity, both sides
+    task_dir = _write_task_dir(tmp_path, {"messages": messages}, [row])
+    persist_attestation(attestation, artifacts, str(task_dir / "producer_attestations"))
+    return task_dir
+
+
+def test_contract_target_is_the_producer_caller_symbol(tmp_path):
+    """GREEN: the direction's target is the caller identity from the joined attestation's
+    structured inputs — a symbol the delivered PROSE never contains."""
+    task_dir = _contract_task_with_attestation(
+        tmp_path, ("render_template",), ["grep -rn render_template src/"]
+    )
+    report = adjudicate(str(task_dir))
+    rows = [r for r in report["per_direction"] if r["fact_class"] == "caller_contract"]
+    assert len(rows) == 1, report["skipped_rows"]
+    assert rows[0]["kind"] == KIND_CONTRACT
+    assert rows[0]["target"] == "render_template"
+    assert "render_template" not in _SHIPPED_CONTRACT.decode("utf-8"), (
+        "the target must come from the structured sidecar, not from the shipped bytes"
+    )
+    assert rows[0]["delivery_step"] == 1
+    assert rows[0]["arrival_step"] == 2
+    assert rows[0]["arrival_evidence"] == "named_in_command"
+    assert rows[0]["verdict"] == AHEAD
+
+
+def test_contract_target_excludes_the_edited_symbol(tmp_path):
+    """``signature_changes[].symbol`` (and the usage ``callee``) name the symbol the agent
+    was ALREADY editing when GT fired — satisfied at the delivery step by construction. It
+    must never enter the ledger as a guaranteed-BEHIND row that measures nothing."""
+    task_dir = _contract_task_with_attestation(
+        tmp_path, ("render_template",), ["python -c 'get_user(1)'"]
+    )
+    report = adjudicate(str(task_dir))
+    targets = {r["target"] for r in report["per_direction"]}
+    assert targets == {"render_template"}
+    assert "get_user" not in targets
+
+
+def test_contract_short_identity_is_dropped_below_the_floor(tmp_path):
+    """A 2-char graph identity would match almost any command; the same >=3 floor the CLAUSE
+    shape uses applies, and a contract left with nothing above it is an honest named skip."""
+    task_dir = _contract_task_with_attestation(tmp_path, ("id",), ["echo id"])
+    report = adjudicate(str(task_dir))
+    assert report["per_direction"] == []
+    assert report["summary"]["skipped_reasons"] == {"contract_attestation_symbol_less": 1}
+
+
+def test_contract_attestation_without_callers_has_its_own_reason(tmp_path):
+    """A joined attestation whose structured inputs carry ZERO caller identities is GT's own
+    answer — no arrival predicate can exist — and is NOT the same fact as no attestation."""
+    task_dir = _contract_task_with_attestation(tmp_path, (), ["echo hi"])
+    report = adjudicate(str(task_dir))
+    assert report["per_direction"] == []
+    assert report["summary"]["skipped_reasons"] == {"contract_attestation_symbol_less": 1}
+
+
+def test_contract_prose_render_never_becomes_a_target(tmp_path):
+    """CREDIT-FABRICATION GUARD (mutation M6), on the REAL cfn-lint-3749 contract bytes.
+
+    No producer attestation was persisted for that row, so there is NO structured source and
+    the direction cannot be formed. Under a text heuristic over the render, ``convert_dict``
+    — an identifier GT merely QUOTED out of a source line — becomes the target, and the
+    agent's own commands name it, manufacturing an ARRIVAL for a direction with no basis.
+    """
+    messages = [
+        _user("Fix the transform."),
+        _assistant("grep -rn convert_dict src/"),   # step 1
+        _tool(_PAYLOAD_CONTRACT_REAL),              # DELIVERY at step 1
+        _assistant("sed -n '150,160p' src/cfnlint/template/transforms/_sam.py"),
+        _tool("..."),
+        _assistant("python -c 'from cfnlint.decode.utils import convert_dict'"),
+        _tool("ok"),
+    ]
+    rows = [
+        _delivered_row(
+            _PAYLOAD_CONTRACT_REAL, evidence_type="caller_contract",
+            event_type="file_view", file_path="src/cfnlint/decode/utils.py", iteration=1,
+        )
+    ]
+    rows[0]["candidate_id"] = "fc0d5e1c345e9fff"   # the real row's identity
+    report = adjudicate(str(_write_task_dir(tmp_path, {"messages": messages}, rows)))
+    assert report["per_direction"] == [], "a quoted source excerpt is not a contract subject"
+    assert report["summary"]["verdicts"][AHEAD] == 0
+    assert report["summary"]["skipped_reasons"] == {"contract_attestation_absent": 1}
+
+
+def test_contract_row_without_identity_has_its_own_reason(tmp_path):
+    """A delivered row with no ``(candidate_id, content_sha256_16)`` cannot be LOOKED UP at
+    all — an identity defect, distinct from a missing attestation."""
+    payload = "callers: (none recorded)"
+    messages = [
+        _user("Fix it."), _assistant("cat src/foo.py"), _tool(payload),
+        _assistant("echo done"), _tool("done"),
+    ]
+    rows = [
+        _delivered_row(
+            payload, evidence_type="caller_contract", event_type="file_view",
+            file_path="src/foo.py", iteration=1,
+        )
+    ]
+    assert "candidate_id" not in rows[0]     # the seam did not stamp the dedup key
+    report = adjudicate(str(_write_task_dir(tmp_path, {"messages": messages}, rows)))
+    assert report["per_direction"] == []
+    assert report["summary"]["skipped_reasons"] == {"contract_row_identity_missing": 1}
+
+
+def test_contract_inputs_schema_drift_is_its_own_reason():
+    """READER/WRITER DRIFT detector. The byte-level branches of ``contract_symbol_index`` are
+    defence in depth (``load_attestations`` already rejects an unreadable / sha-mismatched
+    artifact bundle-wide), but a producer that changes the INPUTS SCHEMA still validates and
+    still joins — and must surface as drift, never as a symbol-less contract."""
+    good = {
+        "schema": "gt.gateway_attestation_inputs.v1",
+        "producer_inputs_schema": PRODUCER_INPUTS_SCHEMA,
+        "caller_rows": [{"identity": "render_template"}],
+        "caller_usage_rows": [{"caller_identity": "emit_row"}],
+    }
+    assert _producer_inputs_symbols(good) == (["emit_row", "render_template"], None)
+
+    drifted = dict(good, producer_inputs_schema="gt.producer_inputs.v99")
+    assert _producer_inputs_symbols(drifted) == ([], "contract_producer_inputs_unreadable")
+    assert _producer_inputs_symbols({"schema": "something.else"}) == (
+        [], "contract_producer_inputs_unreadable"
+    )
+    assert _producer_inputs_symbols(dict(good, caller_rows="not a list")) == (
+        [], "contract_producer_inputs_unreadable"
+    )
+    assert _producer_inputs_symbols(None) == ([], "contract_producer_inputs_unreadable")
+
+
+def test_contract_symbol_index_is_empty_without_a_task_dir():
+    """Fail-closed: no task dir -> no structured source -> an EMPTY index (every CONTRACT row
+    then reads ``contract_attestation_absent``), never a fallback to the prose."""
+    assert contract_symbol_index(None) == {}
+    assert contract_symbol_index("") == {}
+
+
+# --------------------------------------------------------------------------- #
+# CANONICAL lineage expansion (fix-queue item 2, 2026-07-29).
+#
+# The canonical provider seals ONE capsule compiled from N facts; the delivered
+# ledger row carries them in ``evidence_lineage`` ([{candidate_id, fact_class,
+# cap_owners}]) with NO top-level evidence_type. ``_row_fact_class`` therefore
+# resolved None and EVERY canonical delivery fell into ``unregistered_fact_class``
+# — 12/12 on the fixed smoke, so the efficacy instrument measured ZERO directions
+# from the current substrate. Each REGISTERED lineage class must expand into its
+# own direction attempt against the shared capsule payload.
+# --------------------------------------------------------------------------- #
+def _canonical_row(payload: str, lineage: list[dict]) -> dict:
+    """The exact row shape ``canonical.provider_delivery`` writes (fixed smoke,
+    D:/tmp/smoke2/ll-full-aiogram__aiogram-1594): no evidence_type, facts nested
+    in ``evidence_lineage``."""
+    return {
+        "layer": "canonical.provider_delivery",
+        "event_type": "",
+        "file_path": "",
+        "iteration": None,
+        "outcome": "delivered",
+        "reason": "provider_boundary",
+        "chars_delivered": len(payload),
+        "content_sha256_16": _seal(payload),
+        "evidence_lineage": lineage,
+    }
+
+
+_PAYLOAD_CANONICAL_OBLIGATIONS = (
+    "GT: normative requirement truth from observed execution:\n"
+    '[not exercised] "the loader must call `parse_widget` before rendering"\n'
+    "Exercise each requirement and require successful behavioral proof before submit."
+)
+
+
+def test_canonical_lineage_expands_to_directions(tmp_path):
+    """RED today: the canonical row skips ``unregistered_fact_class`` and the class
+    contributes zero measurable directions. GREEN: the lineage's registered
+    ``obligations`` fact forms a CLAUSE direction from the capsule payload."""
+    messages = [
+        _user("Fix it."),
+        _assistant("grep -rn widget src/"),                   # step 1
+        _tool(_PAYLOAD_CANONICAL_OBLIGATIONS),                # DELIVERY at step 1
+        _assistant("pytest -k parse_widget"),                 # step 2 -> arrival
+        _tool("ok"),
+    ]
+    rows = [_canonical_row(
+        _PAYLOAD_CANONICAL_OBLIGATIONS,
+        [{"candidate_id": "4f48eb2711919289", "fact_class": "obligations",
+          "cap_owners": []}],
+    )]
+    report = adjudicate(str(_write_task_dir(tmp_path, {"messages": messages}, rows)))
+    out = [r for r in report["per_direction"] if r["fact_class"] == "obligations"]
+    assert len(out) == 1, (report["skipped_rows"], report["summary"])
+    assert out[0]["kind"] == KIND_CLAUSE
+    assert out[0]["target"] == "parse_widget"
+    assert out[0]["verdict"] == AHEAD
+    assert report["summary"]["skipped_reasons"].get("unregistered_fact_class") is None
+
+
+def test_canonical_lineage_unregistered_entry_still_skips_with_reason(tmp_path):
+    """A lineage entry whose class is NOT registered contributes nothing and the row
+    keeps the honest named skip — expansion never coerces unknown classes."""
+    payload = "GT: some capsule bytes"
+    messages = [
+        _user("Fix it."), _assistant("grep x src/"), _tool(payload),
+        _assistant("echo hi"), _tool("ok"),
+    ]
+    rows = [_canonical_row(payload, [{"candidate_id": "aa", "fact_class": "not_a_class",
+                                      "cap_owners": []}])]
+    report = adjudicate(str(_write_task_dir(tmp_path, {"messages": messages}, rows)))
+    assert report["per_direction"] == []
+    assert report["summary"]["skipped_reasons"].get("unregistered_fact_class") == 1
+
+
+#: verbatim canonical capsule bytes (fixed smoke 2026-07-29, ll-full-amoffat__sh-744,
+#: canonical.provider_delivery). The claim is built at gt_mini_patch.py L25730:
+#: ``claim = "Task requirements: " + " | ".join(rows)`` and rendered as an Evidence
+#: bullet whose mark is the TIER — not a subject mark. The clause tail is hard-truncated
+#: by the renderer (the trailing ellipsis), so the fragment token must be dropped.
+_PAYLOAD_CANONICAL_CAPSULE = (
+    "[GroundTruth · PATCH CONSTRUCTION]\n\n"
+    "Decision\nKeep every listed task requirement open until validated.\n\n"
+    "Evidence\n"
+    "• [VERIFIED] Task requirements: My preference would be to try and convince you "
+    "that `_return_cmd` should affect await as well as __call__, but if you are "
+    "concerned about the API instability, I'm happy with anything that I can pass i…\n"
+    "  Action: Keep every listed task requirement open until validated.\n"
+    "  Source: issue:1\n"
+)
+
+
+def test_canonical_capsule_obligations_render_is_parsed(tmp_path):
+    """RED today: the canonical capsule's obligations render matches neither legacy
+    clause shape, so all 10 fixed-smoke obligations capsules skip
+    ``clause_rows_unparsed``. GREEN: the ``Task requirements:`` claim parses and the
+    backticked subject forms the direction."""
+    messages = [
+        _user("Fix it."),
+        _assistant("grep -rn cmd sh.py"),                    # step 1
+        _tool(_PAYLOAD_CANONICAL_CAPSULE),                   # DELIVERY at step 1
+        _assistant("python -c 'import sh; sh._return_cmd'"), # step 2 -> arrival
+        _tool("ok"),
+    ]
+    rows = [_canonical_row(
+        _PAYLOAD_CANONICAL_CAPSULE,
+        [{"candidate_id": "8dfc0f4477f75e93", "fact_class": "obligations",
+          "cap_owners": []}],
+    )]
+    report = adjudicate(str(_write_task_dir(tmp_path, {"messages": messages}, rows)))
+    out = [r for r in report["per_direction"] if r["fact_class"] == "obligations"]
+    assert len(out) == 1, (report["skipped_rows"], report["summary"])
+    assert out[0]["target"] == "_return_cmd"
+    assert out[0]["verdict"] == AHEAD
+    assert report["summary"]["skipped_reasons"].get("clause_rows_unparsed") is None
+
+
+def test_canonical_capsule_prose_only_claim_keeps_named_skip(tmp_path):
+    """The cfn-lint canonical capsule: claim 'cfn-lint passes' has no code-shaped
+    subject — the honest skip is ``clause_subject_unverifiable`` (GT's own verdict),
+    never ``clause_rows_unparsed`` (drift) and never a manufactured target."""
+    payload = (
+        "[GroundTruth · PATCH CONSTRUCTION]\n\n"
+        "Decision\nKeep every listed task requirement open until validated.\n\n"
+        "Evidence\n"
+        "• [VERIFIED] Task requirements: cfn-lint passes\n"
+        "  Action: Keep every listed task requirement open until validated.\n"
+        "  Source: issue:1\n"
+    )
+    messages = [
+        _user("Fix it."), _assistant("grep x src/"), _tool(payload),
+        _assistant("cfn-lint --version"), _tool("ok"),
+    ]
+    rows = [_canonical_row(payload, [{"candidate_id": "aa", "fact_class": "obligations",
+                                      "cap_owners": []}])]
+    report = adjudicate(str(_write_task_dir(tmp_path, {"messages": messages}, rows)))
+    assert report["per_direction"] == []
+    assert report["summary"]["skipped_reasons"] == {"clause_subject_unverifiable": 1}

@@ -32,6 +32,11 @@ primitive already exists and is already trusted by the grader:
 * **arrival for a file target** is the grader's own view/edit detection —
   ``_parse_timeline``'s ``viewed_file`` / ``edited_file`` compared with
   :func:`gt_performance_metrics._path_match`. There is no second path matcher here.
+* **a contract/clause target itself** is never read out of the delivered PROSE. A CLAUSE
+  target is the clause's structured ``subject_symbols`` (``pretask.spec._v2_subject_symbols``,
+  their sole producer); a CONTRACT target is the caller identities in the row's own immutable
+  ``ProducerInputs`` sidecar, joined off the persisted producer attestation on the EXACT
+  ``(candidate_id, delivery_seal)`` identity :mod:`attestation_join` already validates.
 * **arrival for a symbol / contract / clause target** is the SAME passive-naming test
   :func:`chronology_extract._native_acquisition_index` uses for its BEHIND half:
   :func:`consumption_ledger._emitted_commands` for the model-authored commands and
@@ -51,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import re
@@ -66,7 +72,6 @@ if _HERE not in sys.path:  # allow `python scripts/swebench/direction_arrival.py
 # REUSE the grader's ONE entity/command model (never a second divergent parser).
 from consumption_ledger import (  # noqa: E402
     PHYSICAL_DELIVERY_BOUND,
-    _block_entities,
     _emitted_commands,
     _entity_patterns,
     _named_in,
@@ -76,6 +81,17 @@ from consumption_ledger import (  # noqa: E402
 
 # REUSE the ledger-row identity resolution already trusted by the timing join.
 from chronology_extract import _row_evidence_type, _row_fact_class  # noqa: E402
+from groundtruth.runtime.fact_registry import registration_for  # noqa: E402
+
+# REUSE the producer-attestation discovery + validation the truth join already runs.
+# ``load_attestations`` re-validates every persisted bundle (canonical bytes, entry sha,
+# index key, artifact sha, semantic proof refs) and skips a bad one with a named reason,
+# so a CONTRACT target read out of a surviving bundle rides exactly the evidence SS-LIVE
+# Gate 1 rides. ``_iter_bundle_entries`` is reused to recover each surviving bundle's
+# DIRECTORY (``load_attestations`` returns the parsed attestations only).
+from attestation_join import _iter_bundle_entries, load_attestations  # noqa: E402
+from groundtruth.runtime.attestation_store import attestation_index_key  # noqa: E402
+from groundtruth.runtime.producer_inputs import PRODUCER_INPUTS_SCHEMA  # noqa: E402
 
 # REUSE the SOLE PRODUCER of an obligation clause's ``subject_symbols``. This is the exact
 # function GT ran to decide, at delivery time, which symbols a deterministic exercise check
@@ -112,6 +128,8 @@ KIND_PIVOT = "pivot"          # "stop looping / change course" -> arrival = next
 #:   caller_contract / signature_delta
 #:       name a SYMBOL whose contract must be preserved. A file-level arrival would be
 #:       too coarse — the direction is satisfied only when the agent acts on the symbol.
+#:       The symbol comes from the PRODUCER's own structured inputs, never from the
+#:       rendered prose (see ``_contract_targets``).
 #:   obligations
 #:       names a CLAUSE the fix must satisfy; its target is the clause's STRUCTURED subject
 #:       symbols — the same ``subject_symbols`` GT itself computed at delivery time (see
@@ -149,6 +167,22 @@ SKIP_NO_TARGET_EXTRACTABLE = "no_target_extractable"
 #:     symbols. An arrival predicate for such a clause cannot exist without inventing one.
 SKIP_CLAUSE_ROWS_UNPARSED = "clause_rows_unparsed"
 SKIP_CLAUSE_SUBJECT_UNVERIFIABLE = "clause_subject_unverifiable"
+#: CONTRACT sub-cases — a caller_contract/signature_delta payload is a RENDER (``path:line:
+#: note: <source excerpt>``), not a symbol table, so "no symbol in the bytes" splits into four
+#: materially different facts that must never collapse into one blind reason:
+#:   * the delivered row carries no ``(candidate_id, content_sha256_16)`` identity at all, so
+#:     no structured source can even be looked up (an identity defect, not an evidence gap);
+#:   * no validated producer attestation exists at that identity — the PRODUCER never persisted
+#:     the structured inputs the contract was built from. That is an upstream capability gap the
+#:     instrument must NAME, never paper over by reading the prose;
+#:   * a bundle exists but its ``producer-inputs-*.json`` artifact is unreadable / sha-mismatched
+#:     / not the expected schema — reader-writer DRIFT, the loudest of the four;
+#:   * the bundle IS readable and carries zero caller identities — GT's own structured answer is
+#:     that this contract names no caller symbol, so no arrival predicate can exist.
+SKIP_CONTRACT_ROW_IDENTITY_MISSING = "contract_row_identity_missing"
+SKIP_CONTRACT_ATTESTATION_ABSENT = "contract_attestation_absent"
+SKIP_CONTRACT_INPUTS_UNREADABLE = "contract_producer_inputs_unreadable"
+SKIP_CONTRACT_SYMBOL_LESS = "contract_attestation_symbol_less"
 SKIP_DELIVERY_UNBOUND = "delivery_bytes_never_bound"
 SKIP_DELIVERY_STEP_UNRESOLVED = "delivery_step_unresolved"
 
@@ -282,6 +316,17 @@ _CLAUSE_ROW_RE = re.compile(r'^[^\S\n]*\[([^\]]*)\]\s*"([^"]*)"', re.MULTILINE)
 #: (``gt_mini_patch._obligation_resurface_candidate``: ``"  - %s" % verbatim``). Same reader
 #: shape ``obligations.rendered_obligation_subject_groups`` falls back to.
 _CLAUSE_BULLET_RE = re.compile(r"^\s*-\s+(.+?)\s*$", re.MULTILINE)
+#: The CANONICAL capsule's obligations claim — the THIRD renderer shape (2026-07-29).
+#: ``gt_mini_patch.py`` L25730 builds ``claim = "Task requirements: " + " | ".join(rows)``
+#: and the capsule renderer ships it as an Evidence bullet ``[<tier>] Task requirements:
+#: <clause> | <clause>``. The bracketed mark is the TIER, never a subject mark, so
+#: subjects always come from ``_v2_subject_symbols`` on each ``" | "``-separated clause.
+#: Before this shape was recognised, all 10 fixed-smoke obligations capsules skipped
+#: ``clause_rows_unparsed``. The renderer hard-truncates the claim tail, so the last
+#: clause may end in an ellipsis — ``_clause_quote_body`` drops the fragment token.
+_CLAUSE_CANONICAL_RE = re.compile(
+    r"\[[A-Z]+\]\s*Task requirements:\s*(.+?)\s*$", re.MULTILINE
+)
 #: ``render_unexercised_block`` prints the clause's OWN credit-eligible symbols INTO the
 #: mark: ``no test/run output has mentioned `a`/`b```. When present these are GT's stored
 #: ``subject_symbols`` verbatim — the strongest possible source, no re-derivation needed.
@@ -317,6 +362,13 @@ def _clause_rows(payload: str) -> list[tuple[str, str]]:
     rows = [(m.group(1), m.group(2)) for m in _CLAUSE_ROW_RE.finditer(payload or "")]
     if rows:
         return rows
+    canonical = _CLAUSE_CANONICAL_RE.search(payload or "")
+    if canonical:
+        return [
+            ("", part.strip())
+            for part in canonical.group(1).split(" | ")
+            if part.strip()
+        ]
     return [("", m.group(1)) for m in _CLAUSE_BULLET_RE.finditer(payload or "")]
 
 
@@ -351,15 +403,162 @@ def _clause_targets(payload: str) -> tuple[list[str], str | None]:
     return sorted(targets), None
 
 
-def _targets_for(kind: str, payload: str, file_path: str) -> tuple[list[str], str | None]:
+# --------------------------------------------------------------------------- #
+# CONTRACT target extraction (caller_contract / signature_delta) — the PRODUCER's own
+# structured inputs, never the rendered prose
+# --------------------------------------------------------------------------- #
+#: ``consumption_ledger._block_entities`` reads STRUCTURED evidence markers (``def ``,
+#: ``class ``, ``[CALLERS]``, a tagged ``path:line:sym``). The contract render GT actually
+#: ships is none of those — run 30390877219, cfn-lint-3749 ledger row 102, verbatim:
+#:
+#:     src/cfnlint/template/transforms/_sam.py:155: note: self._template = convert_dict( -
+#:     verify your change is consistent here
+#:
+#: so ``_block_entities`` recovers the FILES and ZERO symbols and every CONTRACT row was
+#: skipped ``no_target_extractable`` — silently removing the highest-volume fact class in the
+#: firing data from the instrument.
+#:
+#: The symbols are NOT re-derived from that line. A text heuristic over the render (e.g.
+#: "the identifier before ``(``") is REJECTED for the same reason the content-word clause
+#: heuristic was: it would name ``convert_dict`` on nothing more than a source excerpt GT
+#: quoted, and a near-miss that matches an agent command is a MANUFACTURED arrival — the one
+#: error this instrument may not make. The structured answer already exists: the immutable
+#: ``ProducerInputs`` sidecar the contract was BUILT from, persisted as the
+#: ``producer-inputs-*.json`` artifact of the row's producer attestation
+#: (``gateway_attestation_factory._artifact_bundle``), joined to the delivery on the EXACT
+#: ``(candidate_id, delivery_seal)`` identity ``attestation_join`` already uses.
+#:
+#: WHICH FIELD, and why. The sidecar carries ``caller_rows`` (typed FACT-tier graph caller
+#: rows), ``caller_usage_rows`` (source-attributed bilateral usage), ``signature_changes``
+#: (the edited symbol's parameter delta), ``definition_rows``/``query_identity`` (def_partition
+#: only, a different shape). The direction a caller_contract/signature_delta expresses is
+#: "these CALLERS depend on the contract you are changing", so the target set is
+#:
+#:     {caller_rows[].identity} | {caller_usage_rows[].caller_identity}
+#:
+#: ``signature_changes[].symbol`` is deliberately EXCLUDED: it names the symbol the agent was
+#: editing/viewing at the moment GT fired, so it is satisfied at the delivery step BY
+#: CONSTRUCTION. Admitting it would inject a guaranteed-BEHIND row that measures nothing and
+#: dilutes every rate computed over the direction ledger. ``callee`` on a usage row is
+#: excluded for the same reason (it IS the edited symbol).
+#:
+#: Identities are used VERBATIM — no normalisation, no tail-splitting, no shape rewriting.
+#: A graph identity the agent never types simply never matches (an honest NEVER); a rewritten
+#: one could match something the producer never named.
+_CONTRACT_MIN_SYMBOL_LEN = 3
+#: the ArtifactRef ``kind`` the gateway factory stamps on the structured-inputs artifact.
+_PRODUCER_INPUTS_ARTIFACT_KIND = "producer_inputs"
+#: the canonical wrapper schema ``gateway_attestation_factory._input_payload`` writes.
+_GATEWAY_INPUTS_SCHEMA = "gt.gateway_attestation_inputs.v1"
+
+
+def _producer_inputs_symbols(payload: Any) -> tuple[list[str], str | None]:
+    """Caller identities out of ONE decoded ``producer-inputs-*.json``, + a named reason."""
+    if not isinstance(payload, dict):
+        return [], SKIP_CONTRACT_INPUTS_UNREADABLE
+    if payload.get("schema") != _GATEWAY_INPUTS_SCHEMA:
+        return [], SKIP_CONTRACT_INPUTS_UNREADABLE
+    if payload.get("producer_inputs_schema") != PRODUCER_INPUTS_SCHEMA:
+        return [], SKIP_CONTRACT_INPUTS_UNREADABLE
+    caller_rows = payload.get("caller_rows")
+    usage_rows = payload.get("caller_usage_rows")
+    if not isinstance(caller_rows, list) or not isinstance(usage_rows, list):
+        return [], SKIP_CONTRACT_INPUTS_UNREADABLE
+
+    symbols: set[str] = set()
+    for rows, field in ((caller_rows, "identity"), (usage_rows, "caller_identity")):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            identity = row.get(field)
+            if isinstance(identity, str) and len(identity.strip()) >= _CONTRACT_MIN_SYMBOL_LEN:
+                symbols.add(identity.strip())
+    if not symbols:
+        return [], SKIP_CONTRACT_SYMBOL_LESS
+    return sorted(symbols), None
+
+
+def contract_symbol_index(task_dir: str | None) -> dict[tuple[str, str], tuple[list[str], str | None]]:
+    """``(candidate_id, delivery_seal) -> (caller symbols, named reason)`` for every VALIDATED
+    producer-attestation bundle under ``task_dir``.
+
+    Fail-closed at every step: a bundle that does not survive ``load_attestations`` is simply
+    absent from the map (its rows then read ``contract_attestation_absent``, which is the
+    truth — no structured source stands behind them); a surviving bundle whose structured
+    artifact cannot be read, re-hashed, or decoded is present with the DRIFT reason. Pure and
+    read-only; ``None``/missing ``task_dir`` yields an empty map, never a guess.
+    """
+    index: dict[tuple[str, str], tuple[list[str], str | None]] = {}
+    if not isinstance(task_dir, str) or not task_dir:
+        return index
+    bundles = {
+        os.path.basename(os.path.dirname(entry)): os.path.dirname(entry)
+        for entry in _iter_bundle_entries(task_dir)
+    }
+    for attestation in load_attestations(task_dir).attestations:
+        key = (attestation.candidate_id, attestation.delivery_seal)
+        bundle = bundles.get(attestation_index_key(*key))
+        if bundle is None:  # pragma: no cover - the key is derived from the same paths
+            continue
+        ref = next(
+            (
+                r for r in attestation.source_artifacts
+                if r.kind == _PRODUCER_INPUTS_ARTIFACT_KIND
+            ),
+            None,
+        )
+        if ref is None:
+            index[key] = ([], SKIP_CONTRACT_INPUTS_UNREADABLE)
+            continue
+        try:
+            with open(os.path.join(bundle, "artifacts", ref.artifact_id), "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            index[key] = ([], SKIP_CONTRACT_INPUTS_UNREADABLE)
+            continue
+        if hashlib.sha256(raw).hexdigest() != ref.sha256:
+            index[key] = ([], SKIP_CONTRACT_INPUTS_UNREADABLE)
+            continue
+        try:
+            decoded = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            index[key] = ([], SKIP_CONTRACT_INPUTS_UNREADABLE)
+            continue
+        index[key] = _producer_inputs_symbols(decoded)
+    return index
+
+
+def _contract_targets(
+    row: dict, contract_symbols: dict[tuple[str, str], tuple[list[str], str | None]] | None
+) -> tuple[list[str], str | None]:
+    """The caller symbols a CONTRACT direction points at, + a named reason when none can be
+    formed. The ONLY source is the joined producer attestation (see the block comment above)."""
+    candidate_id = row.get("candidate_id")
+    seal = row.get("content_sha256_16")
+    if not (isinstance(candidate_id, str) and candidate_id):
+        return [], SKIP_CONTRACT_ROW_IDENTITY_MISSING
+    if not (isinstance(seal, str) and seal):
+        return [], SKIP_CONTRACT_ROW_IDENTITY_MISSING
+    entry = (contract_symbols or {}).get((candidate_id, seal))
+    if entry is None:
+        return [], SKIP_CONTRACT_ATTESTATION_ABSENT
+    symbols, reason = entry
+    return list(symbols), reason
+
+
+def _targets_for(
+    kind: str,
+    payload: str,
+    row: dict,
+    contract_symbols: dict[tuple[str, str], tuple[list[str], str | None]] | None = None,
+) -> tuple[list[str], str | None]:
     """The concrete target token(s) a direction of this shape names, plus the named reason
     when the direction cannot be formed (``None`` when it can).
 
     FILE shape -> the row's own ``file_path`` (the authoritative delivery subject).
-    CONTRACT shape -> the SYMBOLS in the delivered bytes, extracted with
-    ``consumption_ledger._block_entities`` (the grader's files+symbols extractor); when
-    the bytes name no symbol the direction cannot be formed at symbol granularity and the
-    caller records ``no_target_extractable`` rather than silently degrading to the file.
+    CONTRACT shape -> the CALLER identities in the row's joined producer attestation (see
+    ``_contract_targets``); the delivered bytes are never parsed for a symbol, and every
+    fail-closed sub-case carries its own named reason rather than degrading to the file.
     CLAUSE shape -> the clause's structured SUBJECT symbols (see ``_clause_targets``);
     ``_block_entities`` is deliberately NOT used here — it reads structured evidence/contract
     markers that an obligations block never contains, so it skipped the class wholesale.
@@ -368,15 +567,45 @@ def _targets_for(kind: str, payload: str, file_path: str) -> tuple[list[str], st
     if kind == KIND_PIVOT:
         return ["<pivot>"], None
     if kind == KIND_FILE:
+        file_path = str(row.get("file_path") or "")
         return ([file_path], None) if file_path else ([], SKIP_NO_TARGET_EXTRACTABLE)
     if kind == KIND_CLAUSE:
         return _clause_targets(payload)
-    _files, symbols = _block_entities(payload) if payload else (set(), set())
-    return (sorted(symbols), None) if symbols else ([], SKIP_NO_TARGET_EXTRACTABLE)
+    return _contract_targets(row, contract_symbols)
+
+
+def _lineage_fact_classes(row: dict) -> list[str]:
+    """REGISTERED fact classes nested in a canonical provider delivery.
+
+    The canonical provider seals ONE capsule compiled from N facts; its delivered row
+    carries them in ``evidence_lineage`` ([{candidate_id, fact_class, cap_owners}]) with
+    NO top-level evidence_type, so ``_row_fact_class`` resolves None and — before this
+    expansion — EVERY canonical delivery fell into ``unregistered_fact_class`` (12/12 on
+    the 2026-07-29 fixed smoke: the efficacy instrument measured ZERO directions from the
+    current substrate). Only registry-validated classes are admitted; an unregistered
+    entry contributes nothing, so the honest named skip survives for unknown lineages.
+    Order-preserving dedup keeps the report deterministic."""
+    lineage = row.get("evidence_lineage")
+    out: list[str] = []
+    if isinstance(lineage, list):
+        for entry in lineage:
+            if not isinstance(entry, dict):
+                continue
+            fc = entry.get("fact_class")
+            if (
+                isinstance(fc, str)
+                and fc
+                and fc not in out
+                and registration_for(fc) is not None
+            ):
+                out.append(fc)
+    return out
 
 
 def _build_directions(
-    rows: list[dict], trajectory: Any = None
+    rows: list[dict],
+    trajectory: Any = None,
+    contract_symbols: dict[tuple[str, str], tuple[list[str], str | None]] | None = None,
 ) -> tuple[list[Direction], list[Skip]]:
     """The DIRECTION LEDGER + the named skips, both deterministic."""
     payloads = _physical_payloads(trajectory, rows)
@@ -388,67 +617,83 @@ def _build_directions(
         row = rows[row_index]
         evidence_type = _row_evidence_type(row)
         fact_class = _row_fact_class(evidence_type, row)
-        if fact_class is None:
+        # A row is either a single-fact legacy delivery (top-level identity) or a
+        # canonical capsule carrying N facts in its lineage — expand each registered
+        # lineage class into its OWN direction attempt against the shared payload.
+        fact_classes = [fact_class] if fact_class is not None else _lineage_fact_classes(row)
+        if not fact_classes:
             skips.append(Skip(row_index, SKIP_UNREGISTERED_FACT_CLASS, None, evidence_type))
-            continue
-        kind = _CLASS_TARGET_KIND.get(fact_class)
-        if kind is None:
-            skips.append(
-                Skip(row_index, SKIP_UNMAPPED_TARGET_SHAPE, fact_class, evidence_type)
-            )
             continue
 
         bound = payloads.get(row_index)
         if trajectory is not None and bound is None:
-            skips.append(Skip(row_index, SKIP_DELIVERY_UNBOUND, fact_class, evidence_type))
+            skips.append(
+                Skip(row_index, SKIP_DELIVERY_UNBOUND, fact_classes[0], evidence_type)
+            )
             continue
         msg_index, payload = bound if bound is not None else (None, "")
         delivery_step = steps.get(msg_index) if msg_index is not None else None
         if trajectory is not None and delivery_step is None:
             skips.append(
-                Skip(row_index, SKIP_DELIVERY_STEP_UNRESOLVED, fact_class, evidence_type)
+                Skip(row_index, SKIP_DELIVERY_STEP_UNRESOLVED, fact_classes[0], evidence_type)
             )
             continue
 
-        targets, no_target_reason = _targets_for(
-            kind, payload, str(row.get("file_path") or "")
-        )
-        if not targets:
-            skips.append(
-                Skip(
-                    row_index,
-                    no_target_reason or SKIP_NO_TARGET_EXTRACTABLE,
-                    fact_class,
-                    evidence_type,
+        for fact_class in fact_classes:
+            kind = _CLASS_TARGET_KIND.get(fact_class)
+            if kind is None:
+                skips.append(
+                    Skip(row_index, SKIP_UNMAPPED_TARGET_SHAPE, fact_class, evidence_type)
                 )
-            )
-            continue
-        for target in targets:
-            directions.append(
-                Direction(
-                    direction_id=f"r{row_index}:{kind}:{target}",
-                    fact_class=fact_class,
-                    kind=kind,
-                    target=target,
-                    delivery_step=delivery_step,
-                    delivery_msg_index=msg_index,
-                    ledger_row_index=row_index,
+                continue
+            targets, no_target_reason = _targets_for(kind, payload, row, contract_symbols)
+            if not targets:
+                skips.append(
+                    Skip(
+                        row_index,
+                        no_target_reason or SKIP_NO_TARGET_EXTRACTABLE,
+                        fact_class,
+                        evidence_type,
+                    )
                 )
-            )
-    directions.sort(key=lambda d: (d.ledger_row_index, d.kind, d.target))
+                continue
+            for target in targets:
+                directions.append(
+                    Direction(
+                        # fact_class is part of the identity: two lineage facts on ONE
+                        # capsule may extract the same (kind, target).
+                        direction_id=f"r{row_index}:{fact_class}:{kind}:{target}",
+                        fact_class=fact_class,
+                        kind=kind,
+                        target=target,
+                        delivery_step=delivery_step,
+                        delivery_msg_index=msg_index,
+                        ledger_row_index=row_index,
+                    )
+                )
+    directions.sort(key=lambda d: (d.ledger_row_index, d.fact_class, d.kind, d.target))
     skips.sort(key=lambda s: (s.ledger_row_index, s.reason))
     return directions, skips
 
 
-def directions_from_ledger(rows: list[dict], *, trajectory: Any = None) -> list[Direction]:
+def directions_from_ledger(
+    rows: list[dict],
+    *,
+    trajectory: Any = None,
+    contract_symbols: dict[tuple[str, str], tuple[list[str], str | None]] | None = None,
+) -> list[Direction]:
     """The set D of concrete targets GT delivered on this task.
 
     ``rows`` are the raw runtime-ledger rows. ``trajectory`` is OPTIONAL: supply it (the
     normal case) and every direction's ``delivery_step`` is the AUTHORITATIVE physically
     bound delivery, and CONTRACT/CLAUSE targets are read from the exact delivered bytes.
     Omit it and only the ledger's own ``file_path`` subjects can be recovered, with
-    ``delivery_step = None`` — honest, not guessed from ``iteration``."""
-    return _build_directions(rows, trajectory)[0]
+    ``delivery_step = None`` — honest, not guessed from ``iteration``.
+
+    ``contract_symbols`` is the task's producer-attestation caller index
+    (:func:`contract_symbol_index`); omit it and every CONTRACT row honestly reads
+    ``contract_attestation_absent`` — the prose is never parsed as a fallback."""
+    return _build_directions(rows, trajectory, contract_symbols)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -614,7 +859,9 @@ def adjudicate(
     if ledger_path and not delivered_indices:
         reasons.append(EMPTY_NO_DELIVERED_ROWS)
 
-    directions, skips = _build_directions(rows, trajectory)
+    directions, skips = _build_directions(
+        rows, trajectory, contract_symbol_index(gton_task_dir)
+    )
     if delivered_indices and not directions:
         reasons.append(EMPTY_ALL_ROWS_SKIPPED)
 
@@ -767,6 +1014,7 @@ __all__ = [
     "Skip",
     "adjudicate",
     "arrival_scan",
+    "contract_symbol_index",
     "directions_from_ledger",
 ]
 
