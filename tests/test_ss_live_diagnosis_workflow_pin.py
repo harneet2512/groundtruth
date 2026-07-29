@@ -87,13 +87,41 @@ def test_exact_128_live_diagnosis_uses_canonical_v2_artifact() -> None:
 
 
 def test_manifest_precedes_terminal_failure_and_upload_is_unconditional() -> None:
+    """The manifest is written BEFORE the terminal, and the terminal is TAXONOMY-SPLIT.
+
+    2026-07-29 (CLAUDE.md §2): a GT SELF-MEASUREMENT stage failure (canonical PERF, the exact-129
+    feature build, the completion-receipt population, the diagnosis renders, the trial-population
+    aggregate) marks the bundle NON-PUBLISHABLE and is REPORTED — it must never fail the run and
+    destroy the artifacts the fix depends on. Only a PREPARED-POPULATION contract breach or a
+    manifest-writer crash — neither of which is self-measurement — stays fatal.
+    """
     run = _step("Build canonical PERF and exact-128 diagnosis")["run"]
     manifest = run.index("diagnosis_manifest.json")
-    terminal = run.index("GT_DIAGNOSIS_BUNDLE_FAILED")
-    assert manifest < terminal
+    report = run.index("GT diagnosis bundle NOT publishable")
+    terminal = run.index("GT_DIAGNOSIS_POPULATION_FAILED")
+    assert manifest < report < terminal
     assert "GT_RUN_METRICS_RC" in run[manifest - 4000 : terminal]
     assert "GT_FEATURE_METRICS_RC" in run[manifest - 4000 : terminal]
     assert "exit 1" in run[terminal:]
+
+    # The terminal condition may test ONLY the two non-self-measurement codes.
+    condition = run[run.rindex("if [", 0, terminal) : terminal]
+    assert "GT_MANIFEST_RC" in condition and "GT_EXPECTED_POPULATION_RC" in condition
+    for self_measurement in (
+        "GT_TRIAL_POPULATION_RC",
+        "GT_RUN_METRICS_RC",
+        "GT_FEATURE_POPULATION_RC",
+        "GT_FEATURE_METRICS_RC",
+        "GT_SS_DIAGNOSIS_JSON_RC",
+        "GT_SS_DIAGNOSIS_MD_RC",
+        "DIAGNOSIS_BUNDLE_FAILED",
+    ):
+        assert self_measurement not in condition, (
+            f"{self_measurement} is GT self-measurement — it must be REPORTED, never a run killer"
+        )
+    # The incomplete SET must still be inventoried into the uploaded bundle.
+    assert "uncitable_tasks.json" in run
+    assert "gt_metrics_incomplete.json" in run
 
     upload = _step("Upload GT diagnosis bundle")
     assert upload.get("if") == "${{ always() }}"

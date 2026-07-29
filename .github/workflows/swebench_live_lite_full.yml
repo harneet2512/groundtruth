@@ -1923,6 +1923,21 @@ jobs:
           # gt_blocks read 0 even when GT delivered). The mini-swe-agent NATIVE trajectory is the
           # authoritative record: info.model_stats.api_calls = steps; GT delivery = literal <gt-
           # opens inside the serialized messages. Fallback = the runner's own finish line.
+          # ── UNCITABLE RECORDER (CLAUDE.md §2 MEASUREMENT taxonomy, 2026-07-29 user directive).
+          # A GT SELF-MEASUREMENT / PROOF failure on a task whose agent ALREADY RAN is NOT a
+          # substrate breakage and MUST NOT kill the job — "DO NOT cancel/restart a run for a
+          # NON-SUBSTRATE failure"; job-killing here also DISCARDS the very artifacts needed to
+          # fix the product. This job's conclusion therefore reflects AGENT/INFRA outcomes only.
+          # Every reason recorded here is (a) a LIVE ::warning:: annotation (readable DURING the
+          # run via check-runs/<job_id>/annotations), (b) tee'd into trial_output.log, and (c)
+          # appended to /tmp/gt_uncitable_reasons.txt, which the Collect step MERGES into
+          # _MM_MISSING — so gt_metrics_incomplete.json (uncitable=true + named reasons) and the
+          # withheld gt_task_completion.json keep CITABILITY strictly fail-closed.
+          _gt_uncitable() {
+            printf '%s\n' "$1" >> /tmp/gt_uncitable_reasons.txt
+            echo "::warning title=GT task uncitable::${1}: ${2}"
+            echo "GT_UNCITABLE:${1} ${2}" | tee -a trial_output.log
+          }
           TRAJ=/tmp/gt_out/mini-swe-agent.trajectory.json
           AGENT_STEPS=0; GT_BLOCKS=0
           if [ -s "$TRAJ" ]; then
@@ -1968,19 +1983,20 @@ jobs:
               GT_PROFILE_ABSENT=1
             fi
           fi
-          # PRESENT-but-MISLABELS = real anti-cheat / VALIDITY — KEEP the hard-fail. Skipped when a
-          # receipt was ABSENT above (task already relabeled uncitable-as-GT-on; nothing valid to
-          # anti-cheat-check, and the file a check reads may be the very one that is missing).
+          # PRESENT-but-MISLABELS = an arm-validity / anti-cheat READING of GT's OWN receipts.
+          # TAXONOMY (2026-07-29): it is still SELF-MEASUREMENT on a task that ran, so it RECORDS
+          # uncitable instead of exiting 1 — citability is fully protected (the reason lands in
+          # gt_metrics_incomplete.json, the completion receipt is withheld, and the summarize-job
+          # population/feature gates never admit a task without that receipt), while the trajectory,
+          # patch, reward and ledgers survive for the audit that has to fix the defect.
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ "${GT_PROFILE_ABSENT:-0}" != "1" ]; then
             PYTHONPATH="${{ github.workspace }}" python3 -c 'import sys; from artifact_deepswe.ledger_attestation import validate_attestation; sys.exit(0 if validate_attestation(sys.argv[1], sys.argv[2]) else 1)' /tmp/gt_out/gt_runtime_ledger.jsonl /tmp/gt_out/gt_runtime_ledger_attestation.json || {
-              echo "GT_LEDGER_ATTESTATION_UNPROVEN: terminal runtime-ledger proof does not match harvested bytes; task is not citable"
-              exit 1
+              _gt_uncitable gt_ledger_attestation_unproven "GT_LEDGER_ATTESTATION_UNPROVEN: terminal runtime-ledger proof does not match harvested bytes; task is not citable (METRICS/PROOF, job not failed)"
             }
           fi
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ] && [ "${GT_PROFILE_ABSENT:-0}" != "1" ]; then
             python3 -c 'import json,sys; d=json.load(open(sys.argv[1],encoding="utf-8")); sys.exit(0 if d.get("schema")=="gt.batch_activation.v1" and d.get("required") is True and d.get("wrapper_attached") is True and d.get("result")=="installed" and d.get("mini_swe_version")=="2.4.5" else 1)' /tmp/gt_out/gt_batch_activation.json || {
-              echo "GT_BATCH_UNPROVEN: batch activation receipt is invalid or version-mismatched; task is not citable"
-              exit 1
+              _gt_uncitable gt_batch_unproven "GT_BATCH_UNPROVEN: batch activation receipt is invalid or version-mismatched; task is not citable (METRICS/PROOF, job not failed)"
             }
           fi
           # BRIEF-DELIVERY PROOF (W16 guard; ARM FIX 2026-07-20). The step-0 brief-delivery/leak check
@@ -1992,9 +2008,13 @@ jobs:
           # generated" — the exact signal the completion gate uses. A DEGRADED run that writes an
           # EMPTY brief.txt (or no real brief) does NOT arm this check and NEVER kills a task. When a
           # genuine non-empty brief exists, its head bytes MUST appear in the agent's first user
-          # message (m1) — bytes-in-stream; an absent delivery is a real PRODUCT defect (fail closed).
+          # message (m1) — bytes-in-stream; an absent delivery is a real PRODUCT defect.
+          # 2026-07-29: a PRODUCT defect is fail-closed for CITABILITY, not for the JOB. This was
+          # the exact path that killed 4/5 task jobs on smoke run 30434343516 and destroyed the
+          # evidence needed to diagnose the dark step-0 channel. It now RECORDS uncitable.
           if [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
-            python3 - <<'BRIEFPY'
+            _brief_rc=0
+            python3 - <<'BRIEFPY' || _brief_rc=$?
           import json, sys
           try:
               d = json.load(open("/tmp/gt/brief_result.json", encoding="utf-8"))
@@ -2018,10 +2038,8 @@ jobs:
               sys.exit(1)
           print("GT_BRIEF_DELIVERED: brief bytes verified in m1")
           BRIEFPY
-            _rc=$?
-            if [ "$_rc" != "0" ]; then
-              echo "GT_BRIEF_UNDELIVERED: see check above" | tee -a trial_output.log
-              exit 1
+            if [ "$_brief_rc" != "0" ]; then
+              _gt_uncitable gt_brief_undelivered "GT_BRIEF_UNDELIVERED: generated brief bytes absent from the agent first message (m1); the step-0 channel ran dark — task not citable as GT-on (PRODUCT defect, job not failed)"
             fi
           fi
           echo "agent ran ($AGENT_STEPS steps, $GT_BLOCKS GT blocks delivered)"
@@ -2501,11 +2519,12 @@ jobs:
           # NOT done"). Placed at the END of Collect — NOT in the liveness step — BECAUSE the per-task
           # metric artifacts are PRODUCED in THIS step (gt_deep_metrics + gt_feature_metrics ran above);
           # the liveness step runs earlier (before the evaluator + before Collect) and cannot gate on
-          # files that do not yet exist. Collect is `if: always()` so it still runs on partial failures,
-          # and this `exit 1` fails the job (fail-closed) while the later Upload (`if: always()`) still
-          # captures every collected artifact — the same "run captured but not citable" semantics as the
-          # liveness step's GT_PROFILE_UNPROVEN. Check the UPLOADED copies in trial_results/ (what the
-          # section-4 auditor actually reads), not the /tmp sources.
+          # files that do not yet exist. Collect is `if: always()` so it still runs on partial failures.
+          # This gate NEVER fails the job (§2 MEASUREMENT taxonomy): it RECORDS uncitability in
+          # gt_metrics_incomplete.json + a live ::warning:: annotation and withholds the completion
+          # receipt, while Upload (`if: always()`) captures every collected artifact — "run captured
+          # but not citable". Check the UPLOADED copies in trial_results/ (what the section-4 auditor
+          # actually reads), not the /tmp sources.
           rm -f trial_results/gt_task_completion.json
           _MM_MISSING=""
           # deep-metrics is required on BOTH arms (baseline has no GT artifacts, but always has this).
@@ -2589,43 +2608,23 @@ jobs:
             [ -s "trial_results/gt_artifacts/gt_batch_activation.json" ]      || _MM_MISSING="$_MM_MISSING gt_batch_activation.json"
             [ -s "trial_results/gt_artifacts/gt_run_identity.json" ]          || _MM_MISSING="$_MM_MISSING gt_run_identity.json"
           fi
-          if [ -n "$_MM_MISSING" ]; then
-            echo "GT_METRICS_INCOMPLETE:${_MM_MISSING} - a run without its metrics is NOT done (MANDATORY_METRICS.md line 1); this task is not citable" | tee -a trial_output.log
-            # MEASUREMENT taxonomy (2026-07-20 user directive): incomplete/missing metrics are a GT
-            # SELF-MEASUREMENT gap on a task that ALREADY RAN — NOT a substrate breakage or arm-validity
-            # breach. RECORD an uncitable marker (uncitable=true + the missing reasons) and CONTINUE;
-            # NEVER fail a task that ran. The completeness ASSERTION below is skipped when incomplete
-            # (it would SystemExit on the very files enumerated here); identity/commit-parity/digest/
-            # leak/reward-bridge stay fully enforced pre-agent and on complete tasks.
-            GT_MM_MISSING="$_MM_MISSING" GT_TASK_ARTIFACT_ROOT="$TASK_ARTIFACT_ROOT" python3 - <<'PY' || echo "GT_METRICS_INCOMPLETE_MARKER_WARN"
-          import json, os
-          reasons = [r for r in os.environ.get("GT_MM_MISSING", "").split() if r]
-          _mm_marker = {
-              "schema": "gt.metrics_incomplete.v1",
-              "task": os.environ.get("GT_TASK_ID", ""),
-              "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
-              "uncitable": True,
-              "reasons": reasons,
-          }
-          for dest in (
-              "trial_results/gt_metrics_incomplete.json",
-              os.path.join(os.environ.get("GT_TASK_ARTIFACT_ROOT", ""), "gt_metrics_incomplete.json"),
-          ):
-              parent = os.path.dirname(dest)
-              if not parent:
-                  continue
-              try:
-                  os.makedirs(parent, exist_ok=True)
-                  with open(dest, "w", encoding="utf-8") as stream:
-                      json.dump(_mm_marker, stream, indent=2)
-              except OSError:
-                  pass
-          PY
+          # MERGE the liveness step's recorded uncitable reasons (attestation / batch-activation /
+          # brief-delivery self-measurement failures no longer kill that job — see the "Verify GT
+          # wiring" step's _gt_uncitable recorder). Merging here is what keeps CITABILITY fail-closed
+          # after the job-killing was removed: every recorded reason lands in the marker below and
+          # suppresses the completion receipt the summarize-job population gate requires.
+          if [ -s /tmp/gt_uncitable_reasons.txt ]; then
+            _MM_MISSING="$_MM_MISSING $(tr '\n' ' ' < /tmp/gt_uncitable_reasons.txt)"
           fi
+          # COMPLETION RECEIPT — attempted only when nothing is missing. Its internal SystemExits
+          # (GT_TASK_COMPLETION_MISSING/INVALID:*) are GT self-measurement, so a failure RECORDS the
+          # reason (receipt withheld -> task cannot enter the citable population) instead of failing
+          # the job. Identity/commit-parity/digest/leak/reward-bridge stay fully enforced PRE-agent.
           if [ -z "$_MM_MISSING" ] && [ "${GT_BASELINE_FLAG:-0}" != "1" ]; then
+            _CERT_RC=0
             GT_TASK_ROOT="$TASK_ARTIFACT_ROOT" \
               GT_COMPLETION_OUT="trial_results/gt_task_completion.json" \
-              PYTHONPATH="${GT_WORKSPACE}" python3 - <<'PY'
+              PYTHONPATH="${GT_WORKSPACE}" python3 - <<'PY' || _CERT_RC=$?
           import hashlib
           import json
           import os
@@ -2769,6 +2768,44 @@ jobs:
               os.fsync(stream.fileno())
           os.replace(temporary, out)
           PY
+            if [ "$_CERT_RC" != "0" ]; then
+              rm -f trial_results/gt_task_completion.json
+              _MM_MISSING="$_MM_MISSING gt_task_completion_invalid"
+            fi
+          fi
+          if [ -n "$_MM_MISSING" ]; then
+            echo "GT_METRICS_INCOMPLETE:${_MM_MISSING} - a run without its metrics is NOT done (MANDATORY_METRICS.md line 1); this task is not citable" | tee -a trial_output.log
+            # LIVE-READABLE annotation (§2 LIVE RUN VISIBILITY): the failure REASON, not just the
+            # message, must be classifiable DURING the run via check-runs/<job_id>/annotations.
+            echo "::warning title=GT metrics incomplete (task UNCITABLE, job not failed)::${GT_TASK_ID}:${_MM_MISSING}"
+            # MEASUREMENT taxonomy (2026-07-20 user directive): incomplete/missing metrics are a GT
+            # SELF-MEASUREMENT gap on a task that ALREADY RAN — NOT a substrate breakage or arm-validity
+            # breach. RECORD an uncitable marker (uncitable=true + the missing reasons) and CONTINUE;
+            # NEVER fail a task that ran.
+            GT_MM_MISSING="$_MM_MISSING" GT_TASK_ARTIFACT_ROOT="$TASK_ARTIFACT_ROOT" python3 - <<'PY' || echo "GT_METRICS_INCOMPLETE_MARKER_WARN"
+          import json, os
+          reasons = [r for r in os.environ.get("GT_MM_MISSING", "").split() if r]
+          _mm_marker = {
+              "schema": "gt.metrics_incomplete.v1",
+              "task": os.environ.get("GT_TASK_ID", ""),
+              "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+              "uncitable": True,
+              "reasons": reasons,
+          }
+          for dest in (
+              "trial_results/gt_metrics_incomplete.json",
+              os.path.join(os.environ.get("GT_TASK_ARTIFACT_ROOT", ""), "gt_metrics_incomplete.json"),
+          ):
+              parent = os.path.dirname(dest)
+              if not parent:
+                  continue
+              try:
+                  os.makedirs(parent, exist_ok=True)
+                  with open(dest, "w", encoding="utf-8") as stream:
+                      json.dump(_mm_marker, stream, indent=2)
+              except OSError:
+                  pass
+          PY
           fi
           [ -n "$_MM_MISSING" ] || echo "GT_METRICS_COMPLETE: mandatory per-task metric artifacts all present"
 
@@ -2827,6 +2864,34 @@ jobs:
             echo "GT_TRIAL_POPULATION_INCOMPLETE: aggregate trial result=$GT_TRIAL_RESULT"
             GT_TRIAL_POPULATION_RC=1
           fi
+
+          # REPORT (never fail on) the per-task self-measurement gaps. Task jobs no longer die on
+          # METRICS/PROOF findings (§2 taxonomy) — they emit gt_metrics_incomplete.json with named
+          # reasons. Inventory those markers into the uploaded bundle and into LIVE annotations so
+          # the incomplete SET is readable during the run, then let the integrity manifest below
+          # carry them as non-publishable issues.
+          python3 - <<'PY' || echo "GT_UNCITABLE_INVENTORY_WARN"
+          import glob, json, os
+          from pathlib import Path
+
+          rows = []
+          for path in sorted(glob.glob("/tmp/all/ll-full-*/gt_metrics_incomplete.json")):
+              task = os.path.basename(os.path.dirname(path)).removeprefix("ll-full-")
+              try:
+                  document = json.loads(Path(path).read_text(encoding="utf-8"))
+              except (OSError, ValueError):
+                  document = {"reasons": ["unreadable_marker"]}
+              reasons = document.get("reasons") if isinstance(document, dict) else None
+              rows.append({"task": document.get("task") or task,
+                           "reasons": reasons if isinstance(reasons, list) else []})
+          target = Path(os.environ["GT_DIAG_DIR"]) / "uncitable_tasks.json"
+          target.write_text(json.dumps({"schema": "gt.uncitable_tasks.v1",
+                                        "count": len(rows), "tasks": rows}, indent=2),
+                            encoding="utf-8")
+          for row in rows:
+              print(f"::warning title=GT task UNCITABLE::{row['task']}: {' '.join(row['reasons'])}")
+          print(f"GT_UNCITABLE_TASKS={len(rows)} (recorded in uncitable_tasks.json)")
+          PY
 
           # Bind the diagnosis to the exact prepared population. The matrix is
           # authoritative; downloaded artifacts and embedded task ids are checked
@@ -3168,16 +3233,35 @@ jobs:
               )
           PY
 
-          if [ "$GT_MANIFEST_RC" -ne 0 ] \
-            || [ "$GT_EXPECTED_POPULATION_RC" -ne 0 ] \
-            || [ "$GT_TRIAL_POPULATION_RC" -ne 0 ] \
-            || [ "$GT_RUN_METRICS_RC" -ne 0 ] \
-            || [ "$GT_FEATURE_POPULATION_RC" -ne 0 ] \
-            || [ "$GT_FEATURE_METRICS_RC" -ne 0 ] \
-            || [ "$GT_SS_DIAGNOSIS_JSON_RC" -ne 0 ] \
-            || [ "$GT_SS_DIAGNOSIS_MD_RC" -ne 0 ] \
-            || [ -s "$GT_DIAG_DIR/DIAGNOSIS_BUNDLE_FAILED" ]; then
-            echo "GT_DIAGNOSIS_BUNDLE_FAILED: artifacts preserved in $GT_DIAG_DIR"
+          # ── TERMINAL SPLIT (§2 taxonomy, 2026-07-29 user directive). GT SELF-MEASUREMENT stages
+          # (trial-population incompleteness, canonical PERF, the exact-129 feature build, the
+          # completion-receipt population, both ss_live_diagnosis renders, and every integrity issue
+          # in DIAGNOSIS_BUNDLE_FAILED) are METRICS/PROOF on a VALID substrate: they mark the bundle
+          # NON-PUBLISHABLE — diagnosis_manifest.json `publishable:false` + integrity_issues, the
+          # DIAGNOSIS_BUNDLE_FAILED file, and uncitable_tasks.json, ALL uploaded by the always()
+          # bundle step and ALL read by the promotion authority from ARTIFACTS, never from a job
+          # conclusion (ss_live_diagnosis.py:_promotion_block reads ss_proof_manifest +
+          # gt_feature_metrics rows only; ss_live_diagnosis.main returns 3 on non-publishable and
+          # that rc is recorded as a stage code, not a run killer). They therefore REPORT, never
+          # fail. FATAL is reserved for the two non-self-measurement breaches: an invalid PREPARED
+          # POPULATION contract (the matrix itself), and a manifest-writer crash (the bundle's own
+          # producer failing = the evidence is not written at all).
+          if [ -s "$GT_DIAG_DIR/DIAGNOSIS_BUNDLE_FAILED" ]; then
+            echo "::warning title=GT diagnosis bundle NOT publishable (run UNCITABLE, not failed)::$(tr '\n' ' ' < "$GT_DIAG_DIR/DIAGNOSIS_BUNDLE_FAILED")"
+            {
+              echo "### GT diagnosis bundle: NOT PUBLISHABLE — this run is UNCITABLE"
+              echo
+              echo '```'
+              cat "$GT_DIAG_DIR/DIAGNOSIS_BUNDLE_FAILED"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "GT_DIAGNOSIS_STAGE_CODES: trial=$GT_TRIAL_POPULATION_RC run_metrics=$GT_RUN_METRICS_RC" \
+               "feature_population=$GT_FEATURE_POPULATION_RC feature_metrics=$GT_FEATURE_METRICS_RC" \
+               "diagnosis_json=$GT_SS_DIAGNOSIS_JSON_RC diagnosis_md=$GT_SS_DIAGNOSIS_MD_RC" \
+               "(recorded in diagnosis_manifest.json; artifacts preserved in $GT_DIAG_DIR)"
+          if [ "$GT_MANIFEST_RC" -ne 0 ] || [ "$GT_EXPECTED_POPULATION_RC" -ne 0 ]; then
+            echo "::error::GT_DIAGNOSIS_POPULATION_FAILED: manifest_rc=$GT_MANIFEST_RC expected_population_rc=$GT_EXPECTED_POPULATION_RC (prepared-population contract / bundle writer — NOT self-measurement)"
             exit 1
           fi
 

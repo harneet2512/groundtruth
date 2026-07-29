@@ -236,8 +236,20 @@ def test_gate_checks_all_four_gt_artifacts_and_fails_closed() -> None:
     assert "gt_task_completion.json" in gate
     assert "gt.task_completion.v1" in gate
     assert "os.replace" in gate
-    assert gate.index("if [ -n \"$_MM_MISSING\" ]") < gate.index("gt_task_completion.json")
-    assert gate.index("gt_task_completion.json") < gate.index("GT_METRICS_COMPLETE")
+    # ORDER (2026-07-29, §2 MEASUREMENT taxonomy). The completion RECEIPT is attempted FIRST and
+    # its own self-measurement failure (GT_TASK_COMPLETION_MISSING/INVALID:*) is DEMOTED to the
+    # `gt_task_completion_invalid` reason instead of killing the job; the gt.metrics_incomplete.v1
+    # marker is therefore written LAST, so ONE artifact carries EVERY uncitability reason — the
+    # per-task metric set, the liveness step's recorded reasons, and a failed receipt.
+    assert gate.index("gt_task_completion.json") < gate.index("if [ -n \"$_MM_MISSING\" ]")
+    assert gate.index("if [ -n \"$_MM_MISSING\" ]") < gate.index("GT_METRICS_COMPLETE")
+    assert "gt_task_completion_invalid" in gate, (
+        "a failed completion receipt must be RECORDED as an uncitability reason, never exit the job"
+    )
+    assert "/tmp/gt_uncitable_reasons.txt" in gate, (
+        "the gate must MERGE the liveness step's recorded uncitable reasons so citability stays "
+        "fail-closed after job-killing was removed from the self-measurement checks"
+    )
     idx = gate.index("GT_METRICS_INCOMPLETE")
     window = gate[idx: idx + 400]
     # OLD contract asserted `"exit 1" in window` — a metrics-incomplete task was fail-closed
