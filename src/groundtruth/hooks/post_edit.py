@@ -3046,8 +3046,22 @@ def generate_improved_evidence(
                         # Properties-based contract
                         _contract_block = "\n".join(_props_contract_lines)
                         if len(_contract_block) > 800:
+                            # ISSUE-KEYWORD-AWARE cap (2026-07-29): the blind end-pop
+                            # dropped whichever line happened to sit last — including
+                            # the guard that MATCHES the issue (the `is_locked` line
+                            # the ranking exists to surface). Sacrifice non-matching
+                            # lines first, from the end; a matching line is only
+                            # dropped when nothing else remains to cut.
+                            _cap_terms = _load_issue_terms()
                             while _props_contract_lines and len("\n".join(_props_contract_lines)) > 800:
-                                _props_contract_lines.pop()
+                                _victim = None
+                                if _cap_terms:
+                                    for _ci in range(len(_props_contract_lines) - 1, -1, -1):
+                                        _cl = _props_contract_lines[_ci].lower()
+                                        if not any(_t in _cl for _t in _cap_terms):
+                                            _victim = _ci
+                                            break
+                                _props_contract_lines.pop(len(_props_contract_lines) - 1 if _victim is None else _victim)
                         # C1c: suppress the header entirely when nothing survived
                         # (correct-or-quiet — never a [BEHAVIORAL CONTRACT] with no body).
                         if _props_contract_lines:

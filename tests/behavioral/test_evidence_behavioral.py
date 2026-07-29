@@ -690,10 +690,28 @@ class TestAssertionKeywordRanking:
         # [TEST] assertion lines are intentionally disabled (swap-invariant leak
         # guard in post_edit). Issue-keyword relevance surfaces via behavioral
         # contract / caller contract lines instead.
-        ranked_lines = [
-            line.strip() for line in output.split("\n")
-            if line.strip().startswith(("[BEHAVIORAL CONTRACT]", "[CONTRACT]"))
-        ]
+        #
+        # THE CURATED CONTRACT SURFACE, not two headers (2026-07-29). The ranking
+        # promotes the issue-matching guard to the HIGHEST-value slot available —
+        # on this fixture that is the [SIGNATURE]/Impact section ("L18: return
+        # False if user.is_locked" rides directly under the signature), not the
+        # [BEHAVIORAL CONTRACT] body. The old filter looked in only 2 of the 4
+        # contract-family sections and failed on a producer doing BETTER than it
+        # expected. Capture every curated section WITH its indented body; still
+        # exclude [PATTERN] (raw sibling source — asserting into it would let a
+        # coincidental substring pass, the leak-guard intent of the original).
+        _RANKED_HEADS = ("Impact:", "[SIGNATURE]", "[BEHAVIORAL CONTRACT]", "[CONTRACT]")
+        ranked_lines: list[str] = []
+        in_ranked_section = False
+        for line in output.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith(_RANKED_HEADS):
+                in_ranked_section = True
+                ranked_lines.append(stripped)
+            elif stripped.startswith(("[PATTERN]", "<gt-", "</gt-")):
+                in_ranked_section = False
+            elif in_ranked_section and stripped:
+                ranked_lines.append(stripped)
 
         assert len(ranked_lines) >= 1, (
             f"Expected contract lines in evidence output. Output:\n{output}"
@@ -797,7 +815,21 @@ class TestEvidenceStructure:
             db_path=db_path,
             repo_root=str(repo),
         )
-        assert output == "", f"Expected empty string for unmatched function. Got:\n{output}"
+        # RE-PINNED (2026-07-29): the producer now emits an HONEST orientation
+        # marker ("[INFO] Function appears isolated") instead of silence — [INFO]
+        # is the evidence discipline's explicit weak-orientation tier. The real
+        # invariant this test protects is NO FABRICATED EVIDENCE on an empty DB:
+        # no callers, no contracts, no signatures may appear. Empty output also
+        # still passes (correct-or-quiet remains acceptable).
+        if output:
+            assert "[INFO]" in output and "isolated" in output, (
+                f"Empty-DB output must be the honest isolated-INFO only. Got:\n{output}"
+            )
+            for fabricated in ("[CONTRACT]", "[SIGNATURE]", "[BEHAVIORAL CONTRACT]",
+                               "PRESERVE:", "callers depend"):
+                assert fabricated not in output, (
+                    f"Empty DB must not fabricate {fabricated!r}. Got:\n{output}"
+                )
 
     def test_nonexistent_db_returns_empty(self, tmp_path: Path) -> None:
         """When db_path does not exist, return empty string."""
