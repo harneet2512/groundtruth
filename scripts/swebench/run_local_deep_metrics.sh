@@ -120,4 +120,15 @@ python "$GT/scripts/swebench/ss_live_diagnosis.py" "$POP" \
   --format markdown \
   --output "$MET/ss_live_diagnosis_${RUN_ID}.md"
 
+# [6/6] PAIRED ANALYSIS (2026-07-29): compute_paired_metrics was a complete,
+# publication-grade analyzer (locked union, E1 absolute pp, E3 net tokens,
+# seeded bootstrap, McNemar, Holm) that NOTHING invoked — the audited R2 gap.
+# The GT-off arm defaults to the frozen D:\gt_runs\gtoff_baseline_trajs inside
+# run_paired_analysis.py. Non-fatal (|| true): a paired report is analysis, not
+# a gate; its absence is visible in the DONE listing, never a silent run-kill.
+echo "[6/6] paired GT-on vs frozen GT-off -> $MET"
+python "$GT/scripts/metrics/run_paired_analysis.py" \
+  --on-dir "$POP" \
+  --output-dir "$MET" || echo "WARN: paired analysis failed (see above) — deep metrics remain valid"
+
 echo "DONE -> $MET"
