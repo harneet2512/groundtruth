@@ -30,6 +30,18 @@ def gmp(monkeypatch, tmp_path):
             sys.path.insert(0, p)
     import gt_mini_patch as m  # noqa: PLC0415
     importlib.reload(m) if getattr(m, "_obligations_v2_cache", None) else None
+    # `_GT_BASELINE` is latched at IMPORT time, and tests/test_oracle_stage3_obligations.py /
+    # test_oracle_live_obligation_wiring.py load the oracle modules under GT_BASELINE=1 —
+    # which is the first import of gt_mini_patch in suite order, so the whole module stays
+    # baseline-pinned for the rest of the process. `_unexercised_clause_candidate` returns
+    # None immediately when it is set (gt_mini_patch.py:9303), which silently turned 7 of
+    # these GT-ON assertions into "no candidate" instead of a real verdict. These tests are
+    # about GT-ON behaviour by construction, so the fixture pins the flag rather than
+    # inheriting whatever a neighbour's import happened to latch.
+    monkeypatch.setattr(m, "_GT_BASELINE", False, raising=False)
+    # the plan-load marker is a one-shot latch; a per-test fixture must un-latch it or only
+    # the first test in the process ever sees the row.
+    monkeypatch.setattr(m, "_oblig_plan_marker_emitted", False, raising=False)
     m._obligations_v2_cache = None
     m._unexercised_emitted.clear()
     m._unexercised_late_suppressed.clear()
@@ -72,6 +84,47 @@ def _write_single_clause_artifact(
     (tmp_path / "gt_obligations_v2.json").write_text(
         json.dumps(payload), encoding="utf-8"
     )
+
+
+# The one-shot `obligation.plan` load marker (gt_mini_patch._note_obligation_plan, added
+# 2026-07-29 to make obligations eligibility three-valued) writes an INTERNAL-ONLY row at
+# artifact-LOAD time — zero model bytes, `suppressed_internal_only`, and deliberately in NO
+# layer->fact-class map so it can never be counted as production. Every assertion below is
+# about SUPPRESSION ATTRIBUTION, so it must read the obligation rows, not the raw file: the
+# old `not ledger.exists()` / whole-file equality checks used "the ledger is empty" as a
+# proxy for "nothing was attributed", and that proxy stopped holding the moment a legitimate
+# non-attributing row started being written. `test_plan_marker_is_internal_only_and_byteless`
+# pins the properties that make skipping it correct rather than convenient.
+_PLAN_MARKER_LAYER = "obligation.plan"
+
+
+def _obligation_rows(ledger: Path) -> list[dict]:
+    """Ledger rows EXCLUDING the internal-only plan-load marker. Missing file == no rows."""
+    if not ledger.exists():
+        return []
+    return [
+        row
+        for row in (
+            json.loads(line)
+            for line in ledger.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+        if row.get("layer") != _PLAN_MARKER_LAYER
+    ]
+
+
+def _plan_marker_rows(ledger: Path) -> list[dict]:
+    if not ledger.exists():
+        return []
+    return [
+        row
+        for row in (
+            json.loads(line)
+            for line in ledger.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+        if row.get("layer") == _PLAN_MARKER_LAYER
+    ]
 
 
 _CONAN_CLAUSE = "Support inverse matching with .conanignore"
@@ -157,15 +210,33 @@ def test_t3_fresh_behavioral_proof_filters_only_proven_clause(
     assert got is not None
     assert "TypeError" not in got[1]
     assert "render_predictions" in got[1]
-    rows = [
-        json.loads(line)
-        for line in (tmp / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
+    rows = _obligation_rows(tmp / "ledger.jsonl")
     assert [(row["layer"], row["reason"]) for row in rows] == [
         ("obligation.unexercised", "ss_late")
     ]
     assert rows[0]["artifact_issue_sha256"] == "a" * 64
     assert rows[0]["proof_turn"] == 8
+
+
+def test_plan_marker_is_internal_only_and_byteless(gmp, monkeypatch):
+    """The property that makes `_obligation_rows` skipping the plan marker CORRECT rather
+    than convenient. The marker exists to make obligations eligibility three-valued, so it
+    must fire at LOAD time — but it must own zero model bytes, report itself suppressed,
+    and stay out of `_LAYER_TO_FACT_CLASS` so `classify_ledger` can never count it as
+    production. If any of that ever changes, the skip is hiding a real delivery."""
+    m, tmp = gmp
+    ledger = tmp / "ledger.jsonl"
+    monkeypatch.setenv("GT_RUNTIME_LEDGER", str(ledger))
+    _write_single_clause_artifact(tmp, _CONAN_CLAUSE)
+
+    m._unexercised_clause_candidate()
+
+    markers = _plan_marker_rows(ledger)
+    assert len(markers) == 1, "the load marker is one-shot per task (latched)"
+    assert markers[0]["reason"] == "obligation_plan_loaded"
+    assert markers[0]["outcome"] == "suppressed_internal_only"
+    assert markers[0]["chars_delivered"] == 0
+    assert _PLAN_MARKER_LAYER not in m._LAYER_TO_FACT_CLASS
 
 
 def test_t3_failed_exercise_is_unproven_and_never_manufactures_suppression(
@@ -198,7 +269,7 @@ def test_t3_failed_exercise_is_unproven_and_never_manufactures_suppression(
     candidate = m._unexercised_clause_candidate()
     assert candidate is not None
     assert "[exercised, result unproven]" in candidate[1]
-    assert not ledger.exists()
+    assert _obligation_rows(ledger) == []
 
 
 def test_t3_new_proof_generation_records_new_suppression(gmp, monkeypatch):
@@ -233,7 +304,7 @@ def test_t3_new_proof_generation_records_new_suppression(gmp, monkeypatch):
     record_proof(10)
     assert m._unexercised_clause_candidate() is None
 
-    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    rows = _obligation_rows(ledger)
     assert [row["proof_turn"] for row in rows] == [8, 10]
 
 
@@ -385,7 +456,7 @@ def test_t3_dynamic_probe_cannot_promote_subjectless_clause(
     candidate = m._unexercised_clause_candidate()
     assert candidate is not None
     assert "could not be verified automatically" in candidate[1]
-    assert not ledger.exists()
+    assert _obligation_rows(ledger) == []
 
 
 def test_unexercised_delivery_row_carries_typed_obligation_lineage(gmp):
@@ -429,7 +500,7 @@ def test_t3_unverifiable_clause_requires_strict_checked_dynamic_proof(
     )
 
     assert m._unexercised_clause_candidate() is not None
-    assert not ledger.exists()
+    assert _obligation_rows(ledger) == []
 
 
 def test_t3_true_false_literals_are_not_semantic_relation_terms(gmp):
@@ -518,7 +589,7 @@ def test_t3_dynamic_proof_before_relevant_edit_is_stale(gmp, monkeypatch):
     ))
 
     assert m._unexercised_clause_candidate() is not None
-    assert not ledger.exists()
+    assert _obligation_rows(ledger) == []
 
 
 def test_t3_subjectless_probe_does_not_attribute_resurface_silence(
@@ -536,7 +607,7 @@ def test_t3_subjectless_probe_does_not_attribute_resurface_silence(
 
     m._v2_attribute_resurface_silence()
 
-    assert not ledger.exists()
+    assert _obligation_rows(ledger) == []
 
 
 def test_t3_unverifiable_dynamic_proof_is_inert_when_late_drop_off(
@@ -555,7 +626,7 @@ def test_t3_unverifiable_dynamic_proof_is_inert_when_late_drop_off(
 
     assert got is not None
     assert "could not be verified automatically" in got[1]
-    assert not ledger.exists()
+    assert _obligation_rows(ledger) == []
 
 
 def test_t3_resurface_boundary_attributes_earned_v2_silence(gmp, monkeypatch):
@@ -588,7 +659,7 @@ def test_t3_resurface_boundary_attributes_earned_v2_silence(gmp, monkeypatch):
 
     m._v2_attribute_resurface_silence()
 
-    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    rows = _obligation_rows(ledger)
     assert len(rows) == 1
     assert rows[0]["layer"] == "obligation.resurface"
     assert rows[0]["reason"] == "ss_late"
@@ -614,7 +685,7 @@ def test_t3_resurface_silence_is_byte_and_ledger_inert_when_late_drop_off(
     m._v2_attribute_resurface_silence()
 
     assert observation == {"output": "native bytes"}
-    assert not ledger.exists()
+    assert _obligation_rows(ledger) == []
 
 
 # ── t16: inactive without the artifact — v1 site behavior preserved ──────────
