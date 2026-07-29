@@ -249,7 +249,14 @@ def analyze_trajectory(trajectory: dict, *, consumption_ledger: dict | None = No
     # Aggregate
     total = len(deliveries)
     pivots = sum(1 for d in deliveries if d["pivot"])
-    impact_rate = pivots / total if total > 0 else 0.0
+    # A zero denominator is UNMEASURED, never a measured 0.0: with no delivery
+    # there is no pivot opportunity, so "0% of deliveries pivoted" is a
+    # manufactured verdict. gt_deep_metrics.py:2100-2104 already nulls on the
+    # same predicate and gt_performance_metrics.py:899 marks the metric
+    # not-applicable; emitting 0.0 here made the two sides disagree and tripped
+    # the workflow behavioral_deep_parity check on EVERY zero-delivery task.
+    impact_rate = pivots / total if total > 0 else None
+    impact_rate_reason = None if total > 0 else "zero_denominator_no_gt_deliveries"
 
     # Transition breakdown
     transitions: dict[str, int] = {}
@@ -270,7 +277,15 @@ def analyze_trajectory(trajectory: dict, *, consumption_ledger: dict | None = No
     summary = {
         "total_deliveries": total,
         "total_pivots": pivots,
-        "impact_rate": round(impact_rate, 8),
+        "impact_rate": round(impact_rate, 8) if impact_rate is not None else None,
+        # Named UNMEASURED reason for the artifact readers that have no
+        # applicability contract of their own. The deep record carries the same
+        # fact structurally (metric_applicability.behavioral_impact.impact_rate,
+        # built by gt_performance_metrics.build_metric_applicability), so this
+        # key is deliberately summary-only: the workflow parity check iterates
+        # deep_behavioral.items(), and a key present on both sides would have to
+        # be kept byte-equal by hand for no gain.
+        "impact_rate_reason": impact_rate_reason,
         "impact_rate_semantics": "diagnostic_action_type_transition",
         "causal_status": "UNMEASURED",
         "gt_tokens_injected": gt_chars_injected if consumption_ledger is not None else None,
@@ -328,8 +343,13 @@ def main():
     result = analyze_trajectory(traj, consumption_ledger=receipts)
     s = result["summary"]
 
+    rate = s["impact_rate"]
+    rendered_rate = (
+        f"{rate:.1%}" if rate is not None
+        else f"UNMEASURED:{s.get('impact_rate_reason') or 'zero_denominator'}"
+    )
     print(f"GT Behavioral Impact: {s['total_pivots']}/{s['total_deliveries']} "
-          f"deliveries were followed by an action-type pivot ({s['impact_rate']:.1%})")
+          f"deliveries were followed by an action-type pivot ({rendered_rate})")
     print()
     print("Per-tag breakdown:")
     for tag, v in s["per_tag"].items():
