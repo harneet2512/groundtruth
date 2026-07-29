@@ -604,6 +604,45 @@ def validate_live_evidence(
         entries = []
         errors.append("consumption:entries")
 
+    # A DARK CANONICAL OBSERVER VOIDS THE CANONICAL CLAIM (2026-07-28).
+    #
+    # This validator read only the artifacts a HEALTHY run produces, so a bundle whose
+    # canonical observer had died reported nothing and validated on the strength of the legacy
+    # route's bytes. Run 30390877219 shipped 59/38/12/6 observations that way across four tasks
+    # and nothing in this file could have said so -- it had no reference to the row at all.
+    #
+    # The row is emitted once per fallback observation by the seam's `_augment_output`. Its
+    # `assurance` is READ from `attempt_runtime.failure_state`, so a non-core isolation reports
+    # DEGRADED rather than being flattened to UNASSURED; absence of the key on a pre-flag row
+    # falls back to UNASSURED because a dark observer is definitionally not assured. Anything
+    # other than ASSURED is an error here: the bundle stays in the denominator and loses the
+    # numerator, which is the whole point of failing closed rather than staying quiet.
+    # `None` means "no dark row", NOT the string "UNKNOWN". The seam stamps the literal
+    # "UNKNOWN" as its own fallback when `failure_state.assurance` is unreadable
+    # (`_fs_value("assurance", "UNKNOWN")`), so keying the guard on that string would let a
+    # dark row carrying it validate cleanly -- a fail-OPEN leg inside a fail-closed guard, and
+    # the opposite verdict to `gt_feature_metrics`, which tests `is None`. Same input, one
+    # answer.
+    #
+    # ANY dark row is an error, not "anything other than ASSURED". `ASSURED` is unreachable on
+    # a dark row by construction -- it is set only by `initial()` and by a recovery that
+    # empties `isolated_components` and re-enables emission, both of which imply the observer
+    # is NOT dark -- so an ASSURED-vs-other test would be a branch that never takes its other
+    # leg. The presence of the row is the signal; its value is diagnosis.
+    dark_assurance: str | None = None
+    for row in runtime_ledger_rows or ():
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("layer") != "canonical_runtime.dark_fallback":
+            continue
+        stated = row.get("assurance")
+        dark_assurance = stated if isinstance(stated, str) and stated else "UNASSURED"
+        if isinstance(stated, str) and stated:
+            break
+    canonical_assurance = dark_assurance or "UNKNOWN"
+    if dark_assurance is not None:
+        errors.append(f"canonical:observer_dark:{dark_assurance}")
+
     deliveries = contract.get("deliveries")
     if not isinstance(deliveries, list) or not deliveries:
         deliveries = []
@@ -857,5 +896,9 @@ def validate_live_evidence(
         "valid": not errors,
         "errors": sorted(set(errors)),
         "validated_delivery_ids": validated if not errors else [],
+        # Explicit, never omitted. An absent field lets a downstream reader supply its own
+        # optimistic default; "UNKNOWN" states that no canonical evidence was carried, which is
+        # an absence of proof and never proof of absence.
+        "canonical_assurance": canonical_assurance,
         "proof_scope": "validation_only_no_ss_live_promotion",
     }

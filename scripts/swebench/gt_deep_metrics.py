@@ -202,7 +202,7 @@ def detect_pipeline(task: str, results_dir: str, log_path: str, oj: str | None,
 
 
 def classify_outcome(task: str, log_path: str, traj: dict, summ: dict,
-                     pipeline: str) -> dict:
+                     pipeline: str, results_dir: str = "") -> dict:
     """TASK 1 — return the terminal outcome enum + failure attribution.
 
     Signal precedence (a real start-blocking failure must win over no-patch):
@@ -230,7 +230,22 @@ def classify_outcome(task: str, log_path: str, traj: dict, summ: dict,
         # [GT L1] alone is index-time (pre-agent); require an agent banner.
         agent_started = bool(oh_started or ds_started)
 
-    has_patch = bool(traj.get("has_patch")) or _log_has_patch(text)
+    # PATCH TRUTH — the ARTIFACT wins over every inference.
+    # Precedence: the job's own model.patch file (authoritative, read from disk) >
+    # trajectory has_patch (OH git_patch / mini info.submission) > log scrape.
+    # The old order made "no patch" a conclusion drawn from an EMPTY submission string;
+    # on real runs (wazero 1,211-line patch, info.submission == "") that is a LIE and it
+    # sent the task to `unresolved_no_patch_agent_ran` == "the agent gave up".
+    patch_facts = _model_patch_facts(task, results_dir) if results_dir else {"has_patch": None}
+    if patch_facts.get("has_patch") is not None:
+        has_patch = bool(patch_facts["has_patch"])
+        patch_source = "model_patch_artifact"
+    elif bool(traj.get("has_patch")):
+        has_patch, patch_source = True, "trajectory"
+    elif _log_has_patch(text):
+        has_patch, patch_source = True, "log_git_patch"
+    else:
+        has_patch, patch_source = False, "no_patch_signal_found"
     resolved = traj.get("resolved")
     if resolved is None:
         resolved = _resolved_from_log(text)
@@ -243,7 +258,7 @@ def classify_outcome(task: str, log_path: str, traj: dict, summ: dict,
     if "dataset_missing_agent_not_started" in text:
         return _verdict("dataset_missing_agent_not_started", "dataset", False,
                         _first_match(text, [r".*dataset_missing_agent_not_started.*"])
-                        or "dataset_missing_agent_not_started", resolved, has_patch)
+                        or "dataset_missing_agent_not_started", resolved, has_patch, patch_source, patch_facts)
 
     # 2. preflight failure — only when the agent never started.
     preflight_fail = (
@@ -259,7 +274,7 @@ def classify_outcome(task: str, log_path: str, traj: dict, summ: dict,
             r".*PREFLIGHT.*FAIL.*",
         ]) or "preflight failed")
         return _verdict("preflight_failed_agent_not_started", "preflight", False,
-                        reason, resolved, has_patch)
+                        reason, resolved, has_patch, patch_source, patch_facts)
 
     # 3. infra failure before the agent started (HF 429, FileNotFoundError,
     #    build/index/LSP fatal). Classify the stage from the matched signal.
@@ -278,47 +293,66 @@ def classify_outcome(task: str, log_path: str, traj: dict, summ: dict,
             if m:
                 reason = _line_around(text, m.start()) or m.group(0)
                 return _verdict("infra_failed_agent_not_started", stage, False,
-                                reason, resolved, has_patch)
+                                reason, resolved, has_patch, patch_source, patch_facts)
 
     # 4. timeout / cancelled from explicit job signals.
     if re.search(r"(?i)\b(timed? out|timeout exceeded|MaxIterError|max iterations reached and)\b", text) \
             and not has_patch:
         return _verdict("timeout", "agent", agent_started,
                         _first_match(text, [r"(?i).*(timed? out|timeout|MaxIterError).*"])
-                        or "timeout", resolved, has_patch)
+                        or "timeout", resolved, has_patch, patch_source, patch_facts)
     if re.search(r"(?i)\b(cancelled|canceled|KeyboardInterrupt|SIGTERM|job cancelled)\b", text) \
             and not has_patch and not resolved:
         return _verdict("cancelled", "agent", agent_started,
                         _first_match(text, [r"(?i).*(cancelled|canceled|KeyboardInterrupt|SIGTERM).*"])
-                        or "cancelled", resolved, has_patch)
+                        or "cancelled", resolved, has_patch, patch_source, patch_facts)
 
     # 5. agent-ran terminal states.
     if resolved is True:
         outcome, failure_stage = "resolved", "none"
     elif has_patch:
+        # PATCH PRODUCED, TESTS FAILED — a TASK-class failure, never "the agent gave up".
+        # This MUST stay a distinct enum value from unresolved_no_patch_agent_ran.
         outcome, failure_stage = "unresolved_with_patch", "none"
+        _n = patch_facts.get("model_patch_lines")
+        failure_reason = ("patch produced but hidden tests failed"
+                          + (f" (model.patch {_n} lines)" if _n else ""))
     elif agent_started:
+        # NO PATCH PRODUCED. Only assertable when the model.patch artifact was READ and
+        # was empty; if the artifact is missing entirely, say so — do not silently sell
+        # an absence as "the agent produced nothing".
         outcome, failure_stage = "unresolved_no_patch_agent_ran", "agent"
-        failure_reason = "agent ran but produced no patch"
+        failure_reason = ("agent ran and produced an EMPTY model.patch"
+                          if patch_source == "model_patch_artifact"
+                          else "agent ran; no patch signal found and no model.patch "
+                               "artifact was present to check (patch state UNVERIFIED)")
     else:
         # No agent, no patch, no recognizable infra/preflight signal: record honestly
         # as infra (start blocked) rather than charging GT a no-patch failure.
         outcome, failure_stage = "infra_failed_agent_not_started", "infra"
         failure_reason = "agent never started and no patch; stage unknown"
 
-    return _verdict(outcome, failure_stage, agent_started, failure_reason, resolved, has_patch)
+    return _verdict(outcome, failure_stage, agent_started, failure_reason, resolved, has_patch, patch_source, patch_facts)
 
 
 def _verdict(outcome: str, stage: str, agent_started: bool, reason: str,
-             resolved, has_patch: bool) -> dict:
-    return {
+             resolved, has_patch: bool, patch_source: str = "",
+             patch_facts: dict | None = None) -> dict:
+    v = {
         "outcome": outcome,
         "failure_stage": stage,
         "failure_reason": (reason or "").strip()[:500],
         "agent_started": bool(agent_started),
         "resolved": resolved,
         "has_patch": bool(has_patch),
+        # WHERE has_patch came from. "model_patch_artifact" = read off disk (authoritative);
+        # anything else means the artifact was absent and we fell back to an inference.
+        "patch_source": patch_source or "",
     }
+    for k in ("model_patch_path", "model_patch_bytes", "model_patch_lines",
+              "model_patch_is_diff"):
+        v[k] = (patch_facts or {}).get(k)
+    return v
 
 
 def _first_match(text: str, patterns: list[str]) -> str:
@@ -578,6 +612,80 @@ def _find_miniswe_trajectory(task: str, results_dir: str) -> str | None:
     return None
 
 
+def _find_model_patch(task: str, results_dir: str) -> str | None:
+    """Locate the job's ACTUAL patch artifact — pier writes it to
+    ``<results_dir>/jobs/**/<trial>/artifacts/model.patch``.
+
+    MEASUREMENT DEFECT (CLAUDE.md §6, run 29904040782; re-confirmed 2026-07-29 on
+    /d/gt_runs/29948431988/wazero): the trajectory's ``info.submission`` is EMPTY on a
+    real, submitted run whose model.patch is 1,211 lines. Inferring "no patch" from an
+    empty submission string is inferring a fact from an ABSENCE. The patch file is the
+    artifact; read it.
+
+    Scoping mirrors ``_find_miniswe_trajectory``: never borrow a sibling task's patch."""
+    bases = (
+        results_dir,
+        os.path.join(results_dir, "pier") if results_dir else "",
+        f"/tmp/results_{task}",
+        f"/tmp/gt/{task}",
+    )
+    seen: set[str] = set()
+    for base in bases:
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        hits: list[str] = []
+        for pat in (os.path.join("artifacts", "model.patch"), "model.patch"):
+            hits.extend(glob.glob(os.path.join(base, "**", pat), recursive=True))
+        # DETERMINISM (Fable G16): glob returns OS-order; sort so retries pick stably.
+        hits = sorted(set(hits))
+        if not hits:
+            continue
+        if task:
+            scoped = [h for h in hits if task in h]
+            if not scoped:
+                # pier TRUNCATES the trial dir to <truncated-task>__<hash>/ — match the
+                # stem as a PREFIX of the task id (truncation only shortens).
+                for h in hits:
+                    m = re.search(r"([^/\\]+?)__[^/\\]+[/\\]artifacts", h)
+                    if m and len(m.group(1)) >= 8 and task.startswith(m.group(1)):
+                        scoped.append(h)
+            if scoped:
+                return scoped[0]
+            # results_dir IS the per-task dir: a single unambiguous hit under it is ours.
+            if base in (results_dir, os.path.join(results_dir, "pier")) and len(hits) == 1:
+                return hits[0]
+            continue
+        return hits[0]
+    return None
+
+
+def _model_patch_facts(task: str, results_dir: str) -> dict:
+    """Read the job's model.patch. A patch is PRESENT iff that file is non-empty.
+
+    Returns explicit measurements, never an inference:
+      model_patch_path / model_patch_bytes / model_patch_lines / model_patch_is_diff.
+    ``has_patch`` is None (NOT DETECTED) when no model.patch artifact exists at all —
+    absence of the artifact is not evidence the agent produced nothing."""
+    out = {
+        "model_patch_path": "",
+        "model_patch_bytes": None,
+        "model_patch_lines": None,
+        "model_patch_is_diff": None,
+        "has_patch": None,
+    }
+    p = _find_model_patch(task, results_dir)
+    if not p:
+        return out
+    text = _safe_read_text(p)
+    out["model_patch_path"] = p
+    out["model_patch_bytes"] = len(text)
+    out["model_patch_lines"] = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+    out["model_patch_is_diff"] = "diff --git" in text
+    out["has_patch"] = bool(text.strip())
+    return out
+
+
 def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
     """DeepSWE/pier truth: mini-swe-agent.trajectory.json (output.jsonl never written).
     Extracts agent behaviour, DeepSeek token usage (incl cache hit/miss → real cost),
@@ -786,10 +894,16 @@ def _from_cost_log(log_path: str) -> dict:
     """LLM token/cost efficiency from the run log's [GT_COST] lines:
     `[GT_COST] call=N in=X out=Y cached=Z cost=$W total=$T ...`. Summed across calls."""
     import re
+    # SAME DEFECT CLASS as the model.patch bug: a MISSING cost log used to emit
+    # llm_cost_usd=0.0 / llm_tokens_in=0 — a measured zero indistinguishable from
+    # "never measured" (the module's own d8() G14 law forbids exactly this). Start
+    # NULL; promote to a number only when a [GT_COST] line is actually observed.
+    missing = {"llm_calls": None, "llm_tokens_in": None, "llm_tokens_out": None,
+               "llm_tokens_cached": None, "llm_cost_usd": None}
     out = {"llm_calls": 0, "llm_tokens_in": 0, "llm_tokens_out": 0,
            "llm_tokens_cached": 0, "llm_cost_usd": 0.0}
     if not log_path or not os.path.exists(log_path):
-        return out
+        return dict(missing)
     pat = re.compile(
         r"\[GT_COST\]\s+call=(\d+)\s+in=(\d+)\s+out=(\d+)\s+cached=(\d+)\s+cost=\$([0-9.]+)"
     )
@@ -806,6 +920,11 @@ def _from_cost_log(log_path: str) -> dict:
                 out["llm_cost_usd"] += float(m.group(5))
     except OSError:
         pass
+    # No [GT_COST] line anywhere == the cost was NOT measured on this path (DeepSWE never
+    # emits them). Return NULLs so the trajectory fallback / downstream readers see
+    # "unknown", not a fabricated $0.00 run.
+    if not out["llm_calls"]:
+        return dict(missing)
     return out
 
 
@@ -1619,6 +1738,13 @@ def build(task: str, results_dir: str, log_path: str = "",
     if (not traj.get("action_count")) and log_text:
         traj["has_patch"] = traj.get("has_patch") or _log_has_patch(log_text)
 
+    # The job's model.patch is the ARTIFACT truth and outranks every inference above
+    # (info.submission is empty on real submitted runs). Fold it into traj so the
+    # downstream first_edit_detection marker stops calling a 1,211-line patch "no patch".
+    _patch_facts = _model_patch_facts(task, results_dir)
+    if _patch_facts.get("has_patch") is not None:
+        traj["has_patch"] = bool(_patch_facts["has_patch"])
+
     # Loud edit-truth marker on the efficacy axis. first_edit_action stays honest-None
     # when no edit command is locatable (never a fabricated step 0); but if the run
     # nonetheless produced a patch, say so EXPLICITLY instead of a silent None that reads
@@ -1692,7 +1818,7 @@ def build(task: str, results_dir: str, log_path: str = "",
             traj["resolved"] = False
 
     # --- TASK 1: outcome classification (start-blocking failures win) --------
-    verdict = classify_outcome(task, log_path, traj, summ, pipeline)
+    verdict = classify_outcome(task, log_path, traj, summ, pipeline, results_dir)
     if truth_data and (truth_data.get("outcome") or {}).get("failure_class"):
         verdict["failure_class"] = truth_data["outcome"]["failure_class"]
         verdict["outcome_authority"] = "task_truth.json"
@@ -1847,6 +1973,13 @@ def build(task: str, results_dir: str, log_path: str = "",
         "failure_reason": verdict["failure_reason"],
         "resolved": verdict["resolved"],
         "has_patch": verdict["has_patch"],
+        # Patch PROVENANCE — has_patch is only citable when patch_source ==
+        # "model_patch_artifact" (read off disk). Anything else is an inference.
+        "patch_source": verdict.get("patch_source", ""),
+        "model_patch_path": verdict.get("model_patch_path"),
+        "model_patch_bytes": d8(verdict.get("model_patch_bytes")),
+        "model_patch_lines": d8(verdict.get("model_patch_lines")),
+        "model_patch_is_diff": verdict.get("model_patch_is_diff"),
         "failure_class": verdict.get("failure_class", ""),
         "outcome_authority": verdict.get("outcome_authority", ""),
         "task_truth_path": truth_path if truth_data else None,

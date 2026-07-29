@@ -1,0 +1,15 @@
+{
+ "info": {"config": {"model": {"model_name": "fixture"}}},
+ "messages": [
+  {"role": "system", "content": "You are a helpful assistant."},
+  {"role": "user", "content": "<pr_description>fix get</pr_description>"},
+  {"role": "assistant", "content": "start",
+   "extra": {"actions": [{"command": "ls -la", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "src\n<gt-evidence>\n[VERIFIED] def get -> src/store.py:8\n</gt-evidence>",
+   "extra": {"returncode": 0}},
+  {"role": "assistant", "content": "reading the target helper file",
+   "extra": {"actions": [{"command": "cat target_helper.py", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "code", "extra": {"returncode": 0}}
+ ],
+ "trajectory_format": "mini-swe-agent-1"
+}

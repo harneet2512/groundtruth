@@ -1,0 +1,17 @@
+{
+ "info": {"config": {"model": {"model_name": "fixture"}}},
+ "messages": [
+  {"role": "system", "content": "You are a helpful assistant."},
+  {"role": "user", "content": "fix widget"},
+  {"role": "assistant", "content": "searching for the widget code",
+   "extra": {"actions": [{"command": "grep -rn 'widget' .", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "src/widget.py:12: def compute_widget", "extra": {"returncode": 0}},
+  {"role": "assistant", "content": "searching more",
+   "extra": {"actions": [{"command": "grep -rn 'compute_widget' src", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "src/widget.py:12", "extra": {"returncode": 0}},
+  {"role": "assistant", "content": "now editing",
+   "extra": {"actions": [{"command": "sed -i 's/a/b/' src/widget.py", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "<returncode>0</returncode>", "extra": {"returncode": 0}}
+ ],
+ "trajectory_format": "mini-swe-agent-1"
+}

@@ -58,12 +58,31 @@ def _pool(*kinds):
 # --------------------------------------------------------------------------- #
 # environment discipline: the whole path runs only under the global arbiter.
 # --------------------------------------------------------------------------- #
+_SAVED_ARBITER: "str | None" = None
+
+
 def setup_module(module):  # noqa: D401
+    # RAW os.environ, not monkeypatch, because this is module-scoped setup. That makes
+    # RESTORING it this module's own responsibility -- and until 2026-07-28 the teardown popped
+    # `GT_SS_EDIT_PREVENTIVE` instead, so `GT_GLOBAL_ARBITER=1` LEAKED into every test module
+    # that ran after this one (file order: p10 precedes rl_lane_a_retirement).
+    #
+    # The leak was invisible while the seam force-disabled the arbiter whenever the
+    # batch-commit handshake was absent. Once that guard was narrowed to test the real hazard
+    # (an uncommittable pool) the leaked flag became load-bearing, and three retirement tests
+    # that assert TWO legacy blocks in ONE observation started failing -- correctly, because
+    # the arbiter permits at most one dose per observation.
+    global _SAVED_ARBITER
+    _SAVED_ARBITER = os.environ.get("GT_GLOBAL_ARBITER")
     os.environ["GT_GLOBAL_ARBITER"] = "1"
 
 
 def teardown_module(module):  # noqa: D401
     os.environ.pop("GT_SS_EDIT_PREVENTIVE", None)
+    if _SAVED_ARBITER is None:
+        os.environ.pop("GT_GLOBAL_ARBITER", None)
+    else:
+        os.environ["GT_GLOBAL_ARBITER"] = _SAVED_ARBITER
 
 
 # --------------------------------------------------------------------------- #

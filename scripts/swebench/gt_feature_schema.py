@@ -79,7 +79,15 @@ LIFECYCLE_FIELDS: tuple[str, ...] = (
     # state
     "state_changed", "state_durable",
     # dispositions
-    "redundant", "inert", "accelerated", "enabled_progress", "harmful",
+    # ``inert`` is the CLASS-LEVEL boolean "GT delivered something that did nothing". It is
+    # only answerable when every delivery of the class carries a receipt we could grade, so
+    # it ships with its two counted namespaces (C15 ``acquired_*``/``delivered_*`` shape,
+    # 2026-07-28): ``inert_receipt_joined`` = deliveries whose graded receipt showed no
+    # reference; ``inert_receipt_unjoined`` = deliveries with NO model-visible receipt at all
+    # — holes, NOT inertness. Reading one under the other's name is how "we could not measure
+    # what it did" got reported as "it did nothing".
+    "redundant", "inert", "inert_receipt_joined", "inert_receipt_unjoined",
+    "accelerated", "enabled_progress", "harmful",
     # efficiency (direct-value only; UNMEASURED for infra)
     "steps_saved", "tokens_saved", "cost_delta", "baseline_or_holdout_status",
 )

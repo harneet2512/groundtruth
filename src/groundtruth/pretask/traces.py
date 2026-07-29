@@ -147,16 +147,29 @@ def _is_in_repo(path: str, repo_root: str) -> bool:
         return False
     if any(m in raw_norm for m in bad_markers):
         return False
-    try:
-        rp = os.path.realpath(path)
-        rr = os.path.realpath(repo_root)
-    except (OSError, ValueError):
-        rp, rr = path, repo_root
+    # ABSOLUTE PATHS ONLY.  ``realpath`` resolves a RELATIVE path against the
+    # current working directory, so running from inside the checkout -- which is
+    # what the container does, the agent's CWD is the testbed -- made every
+    # relative frame satisfy the containment test below and short-circuit past
+    # the existence check that follows.  Same input, opposite verdict, decided by
+    # where the process happened to be launched.  That bypassed the D-2 guard
+    # documented under this block precisely in the environment it was written for
+    # (measured 2026-07-28; ``tests/pretask/test_trace_cwd_laundering_20260728.py``).
+    #
+    # A relative path carries no host location of its own, so the only honest
+    # question to ask about it is the one below: does it name a real file under
+    # the root.
+    if os.path.isabs(path):
+        try:
+            rp = os.path.realpath(path)
+            rr = os.path.realpath(repo_root)
+        except (OSError, ValueError):
+            rp, rr = path, repo_root
 
-    rp_norm = rp.replace("\\", "/")
-    rr_norm = rr.replace("\\", "/").rstrip("/")
-    if rp_norm.startswith(rr_norm + "/") or rp_norm == rr_norm:
-        return True
+        rp_norm = rp.replace("\\", "/")
+        rr_norm = rr.replace("\\", "/").rstrip("/")
+        if rp_norm.startswith(rr_norm + "/") or rp_norm == rr_norm:
+            return True
 
     # Fallback for relative paths that came in as ``patroni/watchdog.py`` or a
     # site-packages-stripped ``loguru/_datetime.py``. D-2 (run6 audit, hydra): a

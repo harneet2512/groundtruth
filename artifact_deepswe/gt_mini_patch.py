@@ -35,8 +35,10 @@ through it.
 """
 from __future__ import annotations
 
+import collections as _collections
 import contextvars
 from dataclasses import dataclass, field, replace
+import functools
 import hashlib
 import json
 import ntpath
@@ -62,6 +64,272 @@ _delivery_observation_context: contextvars.ContextVar[Any] = contextvars.Context
 
 def _current_observation_binding() -> Any:
     return _delivery_observation_context.get()
+
+
+def _delivery_scoped_binding(fn):
+    """Bound any observation-binding PUBLISH made during ``fn`` to ``fn`` itself.
+
+    THE DEFECT THIS CLOSES. ``_ensure_observation_binding`` publishes the binding it
+    derives (see its docstring: ``_runtime_ledger_record`` reads the ContextVar directly,
+    so a DELIVERED row carries ``observation_binding`` only if the var is set -- "both
+    halves or neither"). But that publish had NO token and NO reset, unlike every other
+    publisher in this file (``17842``/``17917``, ``18010``/``18022``, ``22253``/``22284``).
+    The published value is CANDIDATE-scoped, while two consumers read the bare var as if
+    it were OBSERVATION-scoped: ``_runtime_ledger_record`` OVERWRITES ``_row["candidate_id"]``
+    with it, and ``_control_participation_record`` raises on disagreement, degrading the
+    row to ``measurement_failed``. So inside a multi-dose observation -- a real state,
+    "6 of 20" on run 30390877219 with the arbiter off -- seal #1's identity was stamped
+    onto later seals and onto control rows belonging to DIFFERENT candidates. Measured
+    2026-07-28: two unrelated ``ss.coherence`` proof rows carried one candidate's
+    ``opportunity_id``.
+
+    WHY THE SCOPE IS "ONE DELIVERY", not "one seal" and not "one observation.
+    Scoping to the seal function is WRONG: the CALLER writes the DELIVERED ledger row
+    AFTER the seal returns and legitimately needs the binding alive for it -- that is the
+    "both halves" contract, and clearing on seal-exit would silently undo Step 3. Scoping
+    to the observation is the leaky status quo. The correct unit is the function that
+    performs ONE delivery: it contains both the ``_seal_lane_delivery``/``_commit_gateway``
+    call AND the ``_runtime_ledger_record`` that follows it (e.g. ``13971`` -> ``13978``,
+    ``14091`` -> ``14102``).
+
+    Implemented by SNAPSHOT-AND-RESTORE rather than by threading tokens through four call
+    sites: ``set(get())`` then ``reset(token)`` restores whatever was published before
+    ``fn`` ran and discards anything ``fn`` published. That needs no reindent of any
+    function body, so it cannot silently change control flow in a 25k-line file, and it is
+    correct across every return path AND on exception.
+
+    NOTE this deliberately does not disturb the explicit ``set(None)`` on the CLASS-6(a)
+    guard return (``_seal_lane_delivery``): that unpublish must still take effect for the
+    caller's DELIVERED row within this same scope, and it does -- the restore happens only
+    when the DELIVERY unit exits, which is after the caller has written that row.
+    """
+    @functools.wraps(fn)
+    def _wrapped(*args, **kwargs):
+        try:
+            token = _delivery_observation_context.set(_delivery_observation_context.get())
+        except Exception:  # noqa: BLE001 -- scoping must never break the agent loop
+            return fn(*args, **kwargs)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            try:
+                _delivery_observation_context.reset(token)
+            except Exception:  # noqa: BLE001
+                pass
+    return _wrapped
+
+
+# The observation-level half of an identity on the LEGACY (single-action) path.
+#
+# `_begin_observation_batch` is installed only by the formatter-level batch interface
+# (`model.format_observation_messages` + `agent.execute_actions`), which mini-swe does not
+# have. So on the ONLY scaffold GT actually runs on, `_batch_context` is always None and every
+# lane/gateway seal sealed `observation_binding=None`. That is the whole of
+# `receipt_observation_binding_missing` -> `integrity_ok:false` -> `envelope_rows_seen:0`.
+#
+# One action IS one policy observation here, so the observation-level triple is well defined
+# without a batch: the iteration, the parent policy text, and the action. It is published once
+# per legacy observation and each seal completes it with its own candidate ordinal/kind/key.
+_legacy_observation_context: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "gt_legacy_observation_identity", default=None,
+)
+
+
+def _begin_legacy_observation(action: Any) -> None:
+    """Publish the observation-level identity for one legacy (non-batch) observation.
+
+    `parent_policy_sha256` is the sha of the parent policy TEXT, which this seam does not
+    receive -- mini-swe hands `execute` an action, not the assistant message that produced it.
+    Hashing the empty string is NOT a placeholder invented here: `_begin_observation_batch`
+    does exactly this whenever `parent_message` is absent or not a dict, so the degenerate
+    parent is an existing, tested convention rather than a new one. With one action per
+    observation, `(iteration, action_sha256)` already discriminates.
+
+    SCOPE LIMIT, VERIFIED BY EXECUTION -- THIS IDENTITY IS PER-TASK, NOT GLOBAL. Because the
+    parent sha is pinned to `sha256(b"")` for every observation of every run, `observation_id`
+    degenerates to `f(iteration, action_bytes)`. Two DIFFERENT tasks whose step-k action is
+    byte-identical -- `ls`, `git diff`, `submit`, a repeated `pytest` invocation -- produce the
+    SAME `observation_id`. Confirmed: `policy_observation_id(3, sha256(b""), sha(ls))` is equal
+    across tasks, and differs once a real parent policy text is supplied. The batch path does
+    not have this property.
+
+    Every consumer today is per-task (its own ledger, its own receipt sidecar), so this is
+    sound as written. It is NOT sound for anything that pools observations across tasks and
+    keys on `observation_id` -- that would silently merge two tasks' observations. If such a
+    reader is ever built, this identity needs a task/episode discriminator first.
+    """
+    try:
+        _identity, keys = _batch_identity((action,))
+        parent_sha256 = hashlib.sha256(b"").hexdigest()
+        _legacy_observation_context.set({
+            "batch_start_iteration": max(0, int(globals().get("_action_count", 0) or 0)),
+            "parent_policy_sha256": parent_sha256,
+            "parent_policy_chars": 0,
+            "action_batch_sha256": _batch_action_sha256(keys),
+            # Distinct per seal within one observation, so two candidates delivered into the
+            # same observation cannot collide on `opportunity_id`.
+            "ordinal": 0,
+        })
+        # An identity must never outlive the observation that minted it.
+        _delivery_observation_context.set(None)
+        # ...and neither may the trigger-census dedup set, or observation 2 would silently
+        # emit nothing because observation 1 already claimed those ids.
+        _emitted_trigger_ids.clear()
+    except Exception:  # noqa: BLE001 -- identity is audit metadata, never model bytes
+        _legacy_observation_context.set(None)
+        _delivery_observation_context.set(None)
+        _emitted_trigger_ids.clear()
+
+
+def _ensure_observation_binding(candidate: Any = None, *, kind: str = "",
+                                candidate_id: str = "") -> Any:
+    """The observation identity for a seal, deriving one when the ContextVar is unset.
+
+    THE CONTEXTVAR IS ONLY EVER SET INSIDE THE BATCH-COMMIT PATH -- `_commit_batch_arbitration`
+    and the precommitted submit dose, both token-bounded. `_augment_output_legacy` never enters
+    a formatter-level batch, so every lane and gateway seal on that path sealed with
+    `observation_binding=None`. Run 30390877219: 4/4 receipts null on every task, which is
+    `receipt_observation_binding_missing` -> `integrity_ok:false` -> `envelope_rows_seen:0`,
+    i.e. the entire receipt corroboration surface, on every task.
+
+    Deriving here rather than threading a parameter fixes the CLASS: a new seal site added
+    later inherits the identity instead of silently sealing null.
+
+    Correct-or-quiet: any failure returns None, so the reader stays fail-closed. The goal is to
+    make the binding PRESENT, never to make its absence tolerable -- `receipt_sidecar` still
+    raises on a null binding and that is deliberate.
+
+    PUBLISHES the derived binding on the delivery ContextVar, which is why this is not a pure
+    getter. Two independent consumers need it and they read it two different ways:
+      * `_persist_receipt` serialises the ENVELOPE, so the receipt inherits the identity from
+        the seal argument -- the ContextVar is irrelevant to it;
+      * `_runtime_ledger_record` reads `_current_observation_binding_dict()` directly, so a
+        DELIVERED ledger row carries `observation_binding` only if the var is set.
+    Binding the receipts alone left `envelope_rows_seen == 0` -- the receipt ladder existed but
+    could not be joined to the ledger, which is the surface `gt_feature_metrics.envelope_owned`
+    actually counts. Both halves or neither.
+
+    A CACHED BINDING IS RETURNED ONLY IF IT IS THIS CANDIDATE'S. The <=1-dose law is a runtime
+    FLAG (`GT_GLOBAL_ARBITER`), not an invariant -- with the arbiter off every plane delivers
+    inline, which is the state that produced "6 of 20 observations were multi-dose" on run
+    30390877219. Returning a cached binding unchecked would hand seal #2 candidate #1's
+    `candidate_id`/`candidate_kind_sha256`, which `receipt_sidecar` rejects as
+    `receipt_candidate_identity_mismatch` -- and one bad line reddens the WHOLE task, because
+    `ReceiptSidecar.integrity_ok` is `not self.failures`. So the identity is checked, and a
+    non-matching cache falls through to a fresh derive with its own ordinal.
+    """
+    existing = _current_observation_binding()
+    if existing is not None:
+        _want = candidate_id or str(getattr(candidate, "dedup_key", "") or "")
+        if not _want:
+            return existing
+        _canon = ""
+        try:
+            from groundtruth.runtime.evidence_envelope import observation_candidate_id
+            _canon = observation_candidate_id(_want)
+        except Exception:  # noqa: BLE001 -- engine absent -> trust the cache as before
+            return existing
+        if getattr(existing, "candidate_id", "") == _canon:
+            return existing
+        # THE DISCARD MUST BE COUNTABLE. Before this identity check existed, a
+        # mismatched binding reaching a seal wrote a bad receipt line and reddened the
+        # WHOLE task (`ReceiptSidecar.integrity_ok is not self.failures`) -- loud, if
+        # blunt. Silently correcting it is the right behaviour, but it removes that
+        # signal: `receipt_candidate_identity_mismatch` is now close to unreachable
+        # from the WRITER side. So record the discard. A rising count means the
+        # <=1-dose law is being violated upstream (multi-dose observations, the state
+        # that produced "6 of 20" on run 30390877219) -- a real condition worth
+        # measuring, not something to fix at the seal.
+        #
+        # DELIBERATELY OUTSIDE the try above, and in its own. Telemetry must never
+        # decide identity: the first draft put this inside, where a raising
+        # `_ledger_line_direct` would have been caught by the `except` and returned the
+        # MISMATCHED binding -- reintroducing exactly the bug this check exists to stop.
+        try:
+            _ledger_line_direct({
+                "layer": "canonical_runtime.binding_cache_discarded",
+                "event_type": str(kind or ""), "file_path": "",
+                "outcome": "discarded",
+                "reason": "observation_binding_candidate_mismatch",
+                "chars_delivered": 0,
+                "iteration": globals().get("_action_count", 0),
+            })
+        except Exception:  # noqa: BLE001 -- telemetry never breaks the agent loop
+            pass
+    # A gateway winner carries its own identity; the lane site passes them explicitly. Derive
+    # rather than require both spellings at every call site.
+    #
+    # A POOL candidate spells its kind `kind`; a gateway winner is an EvidenceEnvelope and
+    # spells it `evidence_type` (the gateway boundary itself reads `_winner.evidence_type`).
+    # Checking only `kind` left both gateway seals deriving an empty kind and returning None,
+    # so lane receipts bound and gateway receipts stayed null -- 2 of 4.
+    if candidate is not None:
+        kind = kind or str(
+            getattr(candidate, "kind", "")
+            or getattr(candidate, "evidence_type", "")
+            or ""
+        )
+        candidate_id = candidate_id or str(getattr(candidate, "dedup_key", "") or "")
+    try:
+        state = _batch_context.get()
+    except Exception:  # noqa: BLE001
+        state = None
+    if not state:
+        # LEGACY PATH -- the one mini-swe actually takes. See `_begin_legacy_observation`.
+        try:
+            legacy = _legacy_observation_context.get()
+        except Exception:  # noqa: BLE001
+            legacy = None
+        if not legacy or not kind or not candidate_id:
+            return None
+        try:
+            from groundtruth.runtime.evidence_envelope import build_observation_binding
+            ordinal = int(legacy.get("ordinal") or 0)
+            legacy["ordinal"] = ordinal + 1
+            _derived = build_observation_binding(
+                batch_start_iteration=int(legacy.get("batch_start_iteration") or 0),
+                parent_policy_sha256=str(legacy.get("parent_policy_sha256") or ""),
+                parent_policy_chars=int(legacy.get("parent_policy_chars") or 0),
+                action_batch_sha256=str(legacy.get("action_batch_sha256") or ""),
+                candidate_ordinal=ordinal,
+                candidate_kind=str(kind),
+                candidate_id=str(candidate_id),
+            )
+            _delivery_observation_context.set(_derived)
+            return _derived
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        # Prefer the FROZEN per-candidate binding the batch already minted. Re-deriving one
+        # would pick a different `candidate_ordinal` than the opportunity row carries, which
+        # `receipt_sidecar` rejects as `receipt_candidate_identity_mismatch`.
+        if candidate is not None:
+            bindings = _prepare_batch_opportunity_bindings(state)
+            bound = bindings.get(id(candidate))
+            if bound is not None:
+                return bound
+    except Exception:  # noqa: BLE001 -- see below: this must NOT re-derive
+        # Falling through would mint `candidate_ordinal=len(pool)`, a DIFFERENT ordinal than
+        # the opportunity row froze -- which is exactly the `receipt_candidate_identity_
+        # mismatch` this branch exists to avoid. Quiet beats a plausible wrong identity.
+        return None
+    try:
+        if not kind or not candidate_id:
+            # Same precondition `_prepare_batch_opportunity_bindings` enforces: an identity
+            # without a kind and a dedup key is not an identity. Quiet beats fabricated.
+            return None
+        from groundtruth.runtime.evidence_envelope import build_observation_binding
+        return build_observation_binding(
+            batch_start_iteration=int(state.get("batch_start_iteration") or 0),
+            parent_policy_sha256=str(state.get("parent_policy_sha256") or ""),
+            parent_policy_chars=int(state.get("parent_policy_chars") or 0),
+            action_batch_sha256=str(state.get("action_batch_sha256") or ""),
+            candidate_ordinal=len(state.get("pool") or ()),
+            candidate_kind=str(kind),
+            candidate_id=str(candidate_id),
+        )
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _current_observation_binding_dict() -> "dict | None":
@@ -167,6 +435,112 @@ def _inseam_eligible(kind: str, file_path: str = "") -> None:
         "layer": kind, "event_type": kind, "file_path": file_path or "",
         "outcome": "eligible", "reason": "producer_boundary", "chars_delivered": 0,
         "iteration": globals().get("_action_count", 0)})
+
+
+#: Trigger ids already recorded this observation. Several actions can share one policy
+#: observation, and the row must not double-count. Cleared per observation by
+#: `_begin_legacy_observation`.
+_emitted_trigger_ids: set[str] = set()
+
+
+def _record_trigger_opportunities(observed_events) -> None:
+    """One host-only row per (observation, evidence_type) whose trigger FIRED.
+
+    THE DENOMINATOR FOR "DARK". Today a producer that was never asked and a producer
+    that is broken are the same silence, so "eleven features are dark" cannot be graded.
+    This records that a trigger's boundary OCCURRED and the producer therefore had an
+    opportunity -- which turns every later "no delivery" into a measured negative instead
+    of an unfalsifiable absence.
+
+    Rows fire ONLY for triggers whose `required_event` is in this observation's semantic
+    events. A trigger whose boundary never occurred is not a missed opportunity; it is
+    correct quiet, and recording it as an opportunity would manufacture the very phantom
+    darkness this exists to remove.
+
+    THE AUTHORITY IS `required_event`, NOT `deliver_by` -- eight registered evidence types
+    disagree, including two of the 17 DIRECT. `declared_deliver_by`/`deliver_by_overridden`
+    ride along so a future reader consulting the wrong field is falsifiable from the row.
+
+    ZERO MODEL BYTES: host-side ledger only, chars=0, and `outcome="evaluated"` is not
+    `"delivered"`, so no delivery view can see it. Gated OFF by default via
+    `_inseam_metrics_on()`; correct-or-quiet on any fault.
+    """
+    if not _inseam_metrics_on():
+        return
+    try:
+        from groundtruth.runtime.trigger_opportunity import (
+            trigger_opportunity_id, triggers_for_event,
+        )
+        # DERIVE FROM THE OBSERVATION CONTEXT, NOT THE DELIVERY BINDING.
+        #
+        # The first version read `_current_observation_binding_dict()`. That is the
+        # DELIVERY binding, published only inside a SEAL -- and this census runs BEFORE
+        # any seal, right after the observation's semantic events complete. So it was
+        # always None here and the early return killed every row: the census emitted
+        # ZERO rows through the real seam while 25 offline tests passed, because those
+        # tests called the function directly with a binding already published. Measured
+        # by running ss_gate with the flag on and grepping the resulting ledgers.
+        #
+        # `_legacy_observation_context` IS set at this point -- `_begin_legacy_observation`
+        # publishes it at the top of the observation -- and it carries the same three
+        # inputs `policy_observation_id` needs.
+        from groundtruth.runtime.evidence_envelope import policy_observation_id
+        legacy = _legacy_observation_context.get() or {}
+        binding = _current_observation_binding_dict() or {}
+        observation_id = str(binding.get("observation_id") or "")
+        if not observation_id and legacy:
+            observation_id = policy_observation_id(
+                int(legacy.get("batch_start_iteration") or 0),
+                str(legacy.get("parent_policy_sha256") or ""),
+                str(legacy.get("action_batch_sha256") or ""),
+            )
+        if not observation_id:
+            return  # no identity -> a row nothing could join is worse than no row
+        for event in sorted({str(e) for e in (observed_events or ()) if e}):
+            for spec in triggers_for_event(event):
+                trigger_id = trigger_opportunity_id(observation_id, spec.evidence_type)
+                if trigger_id in _emitted_trigger_ids:
+                    continue
+                _emitted_trigger_ids.add(trigger_id)
+                _ledger_line_direct({
+                    "layer": "feature.trigger_opportunity",
+                    "event_type": "trigger_evaluation",
+                    "file_path": "",
+                    "outcome": "evaluated",
+                    "reason": "trigger_present",
+                    "chars_delivered": 0,
+                    "iteration": globals().get("_action_count", 0),
+                    "schema": "gt.trigger_opportunity.v1",
+                    # NO TASK DISCRIMINATOR FIELD HERE -- I added one and ss_gate S10
+                    # caught it. `observation_id` is not globally unique on the legacy
+                    # path (`parent_policy_sha256` is pinned to sha256(b""), so it
+                    # degenerates to f(iteration, action_bytes) and two tasks whose
+                    # step-k action is `ls` or `submit` collide), and a DENOMINATOR is
+                    # exactly what someone pools across tasks. So carrying the episode
+                    # seemed right -- but the value available here is
+                    # `_EPISODE.episode_id or _root()`, and `_root()` is a PER-RUN TEMP
+                    # PATH. That made every census row vary between runs:
+                    # S10 BYTE-IDENTITY-OFF reported obs_byte_identical=True but
+                    # ledger_identical=False on all 8 streams. It also writes an absolute
+                    # local path into a durable artifact, which the hygiene rules forbid.
+                    #
+                    # The ledger is already per-task (its own file, its own sidecar), so
+                    # the discriminator belongs to the FILE, not the row. A pooled reader
+                    # must key on (task_dir, observation_id) -- which it has for free --
+                    # rather than on anything embedded here.
+                    "observation_id": observation_id,
+                    "trigger_opportunity_id": trigger_id,
+                    "evidence_type": spec.evidence_type,
+                    "fact_class": spec.fact_class,
+                    "required_event": spec.required_event,
+                    "declared_deliver_by": spec.declared_deliver_by,
+                    "deliver_by_overridden": spec.deliver_by_overridden,
+                    "reactive": spec.reactive,
+                    "observed_semantic_events": sorted(
+                        {str(e) for e in (observed_events or ()) if e}),
+                })
+    except Exception:  # noqa: BLE001 -- instrumentation never breaks the agent loop
+        pass
 
 
 def _inseam_stamp(kind: str, file_path: str, *, tier: str, conf: float) -> None:
@@ -7298,6 +7672,7 @@ try:
         TEST_NO_TESTS_RE as _TEST_NO_TESTS_RE,
         TEST_PROTOCOL_RE as _TEST_PROTOCOL_RE,
         classify_test_observation as _classify_test_observation,
+        classify_validation_observation as _classify_validation_observation,
         COMPILE_FAIL_RE as _COMPILE_FAIL_RE,
         is_infra_noise as _is_infra_noise,  # W4 guard 1 (canonical)
     )
@@ -7331,6 +7706,15 @@ except ImportError:
         r"|\bOK\s*\(0 tests?\)|\bTests:\s*0\s+(?:passed,\s*)?0\s+total\b)",
         re.I,
     )
+    def _classify_validation_observation(command, output, returncode=None, *,
+                                         repo_root=""):
+        """Engines absent in-container -> no broadened vocabulary.
+
+        Returning None makes the call site fall through to the formal-runner
+        result unchanged, so the ImportError path stays byte-identical.
+        """
+        return None
+
     def _classify_test_observation(
         command: str,
         output: str,
@@ -8201,8 +8585,9 @@ def _reset_oracle_state() -> None:
     # GT_OBLIGATIONS_V2 (F3 reset law: every latch clears here)
     _unexercised_emitted.clear()
     _unexercised_late_suppressed.clear()
-    global _obligations_v2_cache
+    global _obligations_v2_cache, _oblig_plan_marker_emitted
     _obligations_v2_cache = None
+    _oblig_plan_marker_emitted = False  # task #35: plan-load marker re-arms per attempt
     _oracle_tested_tokens.clear()
     _oracle_edited_tokens.clear()
     _oracle_edited_tokens_by_file.clear()
@@ -8450,7 +8835,59 @@ def _load_obligations_v2() -> dict | None:
     except Exception:  # noqa: BLE001 — absent artifact = v2 inactive, never an error
         data = {}
     _obligations_v2_cache = data
+    if data:
+        _note_obligation_plan("v2_artifact", data.get("clauses"))
     return data or None
+
+
+_oblig_plan_marker_emitted = False
+
+
+def _note_obligation_plan(source: str, clauses) -> None:
+    """One-shot host-side marker: an obligations PLAN was loaded this task.
+
+    WHY (task #35, 2026-07-29). The grader's obligations eligibility was the tautology
+    `bool(oracle_rows) or True`; the honest replacement is three-valued and reads
+    UNMEASURED, because NO artifact recorded plan-load: `obligation_count` lives only in
+    the obligations ATTESTATION, which is written after a delivery — keying on it
+    collapses eligibility into production. This row is the missing signal: it fires at
+    LOAD time, independent of whether anything is ever delivered, so eligible-but-dark
+    becomes expressible for the obligations class for the first time.
+
+    DESIGN: layer `obligation.plan` is deliberately in NO layer→fact-class map —
+    `classify_ledger` counts every mapped row as `produced`, and this marker must never
+    manufacture production. Zero model bytes; outcome is internal-only; one per task
+    (the latch), whichever source loads first.
+    """
+    global _oblig_plan_marker_emitted
+    if _oblig_plan_marker_emitted or _GT_BASELINE:
+        return
+    try:
+        items = [
+            str((c.get("verbatim_text") if isinstance(c, dict) else c) or "").strip()
+            for c in (clauses or [])
+        ]
+        items = [t for t in items if t]
+        if not items:
+            return
+        _oblig_plan_marker_emitted = True
+        import hashlib as _hl
+        digest = _hl.sha256(
+            "\n".join(sorted(items)).encode("utf-8", "replace")
+        ).hexdigest()[:16]
+        _runtime_ledger_record(
+            kind="obligation.plan",
+            outcome="suppressed_internal_only",
+            reason="obligation_plan_loaded",
+            chars=0,
+            extra={
+                "plan_source": source,
+                "obligation_count": len(items),
+                "obligations_digest": digest,
+            },
+        )
+    except Exception:  # noqa: BLE001 — a marker must never break the loop
+        pass
 
 
 class _V2ClauseView:
@@ -9059,6 +9496,7 @@ def _obligation_nudge_block() -> tuple[float, str] | None:
         return None
     try:
         obls = om.load_obligations(_anchors_path())
+        _note_obligation_plan("v1_spec", obls)
         if not obls:
             return None
         tracker = _get_obligation_tracker(om)
@@ -9168,6 +9606,7 @@ def _emit_obligation_freshness_control(om) -> None:
     global _prev_obl_edited
     try:
         obls = om.load_obligations(_anchors_path())
+        _note_obligation_plan("v1_spec", obls)
         if not obls:
             return
         tracker = _get_obligation_tracker(om)
@@ -9365,6 +9804,7 @@ def _get_obligation_tracker(om):
     path = _anchors_path()
     if _obligation_tracker is None or _obligation_tracker_anchors != path:
         obls = om.load_obligations(path)
+        _note_obligation_plan("v1_spec", obls)
         _obligation_tracker = om.ObligationTracker(obls)
         _obligation_tracker_anchors = path
     return _obligation_tracker
@@ -9412,6 +9852,7 @@ def _maybe_persist_obligation_status() -> None:
         return
     try:
         obls = om.load_obligations(_anchors_path())
+        _note_obligation_plan("v1_spec", obls)
         if not obls:
             return
         tracker = _get_obligation_tracker(om)
@@ -9542,6 +9983,59 @@ _LAYER_TO_FACT_CLASS = {
     "completion_cert": "submit_refusal",
     "edit.syntax": "syntax_result",
 }
+
+
+def _extend_layer_map_from_lane_registry() -> None:
+    """Fold in every lane layer whose fact class the REGISTRY already attests.
+
+    MEASURED GAP. `gt_feature_verdicts` on run 30390877219 reported 30 DELIVERED rows
+    whose layer is absent from the map above -- bytes that reached the model and counted
+    toward NOTHING. 16 of them were `l3b.evidence`. A missing entry silently understates a
+    feature as never-triggered, which is the worst direction to be wrong in (the same
+    argument the `completion_cert` comment above already makes).
+
+    DERIVED, NOT HAND-TYPED, so it cannot drift: `_LANE_REGISTERED_PRODUCERS` maps a lane
+    layer to (producer, evidence_type) -- information the registry cannot supply, because
+    the registry is keyed by evidence type and cannot resolve layer names -- and the
+    registry then supplies the fact class. A layer is folded in ONLY when its evidence type
+    registers AND carries a delivery role.
+
+    ANTI-FABRICATION, the `l3.cochange` rule: that layer is deliberately NOT in
+    `_LANE_REGISTERED_PRODUCERS`, so it cannot be folded in here. `cochange_prior` is an
+    INTERNAL_SUPPORT influence row, never a delivered fact, and mapping it would invent
+    attribution. The role check below is what enforces that for any future row: a
+    non-delivery role is refused even if someone adds a lane entry for it.
+
+    POLYMORPHIC EXCLUSION (2026-07-29, caught by
+    test_unmapped_layer_stamps_nothing_rather_than_guessing): a lane entry proves the
+    layer CAN carry that fact class, not that every row DOES. `l3b.evidence` composes
+    caller-direction contract evidence together with CALLEE contracts, callee [WITNESS]
+    lines and [SIBLINGS] (no registered class at all) -- its own B-LIN REV2 comment says
+    it "must NOT be blanket-stamped", and its caller_contract identity is gated PER
+    PAYLOAD in `_lane_registered_lineage` at composition time. The first version of this
+    fold blanket-mapped it anyway, so every callee/sibling/mixed l3b row would have been
+    stamped caller_contract -- inflating that class's delivery share with rows that can
+    never satisfy its receipt. Per-payload lineage stays the ONLY authority for such
+    layers; the 16 measured l3b.evidence orphans are counted through
+    `lineage_attributed_delivered` in the verdict reader, not through this map.
+    """
+    try:
+        from groundtruth.runtime.fact_registry import registration_for
+    except Exception:  # noqa: BLE001 -- engines absent in-container: leave the map as-is
+        return
+    payload_gated = {"l3b.evidence"}
+    for layer, entry in (_LANE_REGISTERED_PRODUCERS or {}).items():
+        if layer in _LAYER_TO_FACT_CLASS or layer in payload_gated:
+            continue
+        try:
+            evidence_type = entry[1]
+            registration = registration_for(evidence_type)
+            fact_class = getattr(registration, "fact_class", None) if registration else None
+            role = str(getattr(registration, "fact_role", "") or "") if registration else ""
+        except Exception:  # noqa: BLE001
+            continue
+        if fact_class and role == "fact_delivery":
+            _LAYER_TO_FACT_CLASS[layer] = fact_class
 
 
 def _fact_identity_for_layer(layer: str):
@@ -10136,6 +10630,56 @@ _EXACT_PROFILE_ACTUAL_EVENTS: dict[str, str] = {
 }
 
 
+def _verify_exact_profile_actual_events() -> str:
+    """Prove this hand table still AGREES with the registry, or name the drift.
+
+    The table maps a lane/ledger ``kind`` (== ledger ``layer``) to the boundary its
+    delivery is graded against. The registry already owns that answer via
+    ``required_event(evidence_type)`` -- so this is a SECOND truth for something already
+    decided elsewhere, and two truths silently disagreeing is how a delivery gets graded
+    against the wrong boundary.
+
+    All four entries ARE derivable: the layer->evidence_type step comes from
+    ``CAP_BYTE_OWNER_MECHANISMS`` bindings (edit.syntax->syntax_result,
+    recovery->recovery, submit_refusal->submit_refusal) and from
+    ``_LANE_REGISTERED_PRODUCERS`` (detect.coherence->coherence_collapse); the
+    evidence_type->boundary step is ``required_event``.
+
+    NOTE the authority is ``required_event``, NOT ``registration.deliver_by``. For
+    ``coherence_collapse`` those disagree (``deliver_by=failure_obs`` vs
+    ``required_event=edit_result``), and deriving from ``deliver_by`` would silently
+    regress this table. Eight registered evidence types carry such an override.
+
+    Returns "" when consistent, else a description of the disagreement. Deliberately
+    NON-fatal: a drift here must be visible, but it must not stop an agent run.
+    """
+    try:
+        from groundtruth.runtime.fact_registry import required_event
+        from groundtruth.runtime.feature_lineage import CAP_BYTE_OWNER_MECHANISMS
+    except Exception as exc:  # noqa: BLE001 -- engines absent in-container
+        return f"unverifiable:{type(exc).__name__}"
+    layer_to_evidence: dict[str, str] = {}
+    for authority in CAP_BYTE_OWNER_MECHANISMS.values():
+        for binding in getattr(authority, "bindings", ()) or ():
+            layer = getattr(binding, "layer", "") or ""
+            fact_class = getattr(binding, "fact_class", None)
+            if layer and fact_class:
+                layer_to_evidence.setdefault(layer, fact_class)
+    # detect.coherence is a MEDIATOR: it has no FACT row of its own, so its evidence
+    # type comes from the lane producer table rather than a CAP binding.
+    layer_to_evidence.setdefault("detect.coherence", "coherence_collapse")
+    drift: list[str] = []
+    for layer, declared in sorted(_EXACT_PROFILE_ACTUAL_EVENTS.items()):
+        evidence_type = layer_to_evidence.get(layer)
+        if not evidence_type:
+            drift.append(f"{layer}: no evidence_type resolvable")
+            continue
+        derived = required_event(evidence_type)
+        if derived and derived != declared:
+            drift.append(f"{layer}: table={declared} registry={derived}")
+    return "; ".join(drift)
+
+
 # Reviewed producer authority for legacy/reactive lane blocks. This table is the
 # only bridge from a lane ``kind`` to registry lineage: neither payload text,
 # task identity, enabled flags, nor arbiter class may create FACT attribution.
@@ -10168,6 +10712,10 @@ _LANE_REGISTERED_PRODUCERS: dict[str, tuple[str, str]] = {
     "l3.contract": ("contract_map", "caller_contract"),
     "l3b.evidence": ("contract_map", "caller_contract"),
 }
+
+# Fold the lane layers the registry already attests into `_LAYER_TO_FACT_CLASS`. Runs
+# HERE because it needs both tables, and `_LANE_REGISTERED_PRODUCERS` is defined above.
+_extend_layer_map_from_lane_registry()
 
 _LANE_INTRINSIC_ACTUAL_EVENTS: dict[str, str] = {
     # These producers execute/observe their named world event internally; the
@@ -10256,14 +10804,59 @@ def _exact_profile_delivery_extra(
             return extra
         actual_event = _EXACT_PROFILE_ACTUAL_EVENTS.get(kind)
         if not actual_event:
+            # MAKE THE MISS LOUD. This returns a row that still carries
+            # `profile_member` but has NO fact lineage -- a delivery attributed to a
+            # feature yet to no fact, which downstream reads as an unattributed
+            # delivery rather than as a lookup failure. Silence here is the worst
+            # possible shape: the row still looks well-formed.
+            #
+            # This is not hypothetical. GT_HYPOTHESIS binds TWO layers (`recovery` and
+            # `verify.horizon.pivot`) and only `recovery` is in the table; the pivot
+            # layer survives today solely via a second, redundant producer-staged path.
+            # Any refactor routing it through here would lose its lineage silently.
+            try:
+                _ledger_line_direct({
+                    "layer": str(kind or ""),
+                    "event_type": "lineage_lookup",
+                    "file_path": "",
+                    "outcome": "measurement_failed",
+                    "reason": "exact_profile_actual_event_unmapped",
+                    "chars_delivered": 0,
+                    "iteration": globals().get("_action_count", 0),
+                    "profile_member": str(member or ""),
+                })
+            except Exception:  # noqa: BLE001 -- telemetry never breaks the agent loop
+                pass
             return extra
         evidence_type = (
             "coherence_collapse" if kind == "detect.coherence"
             else binding.fact_class)
+        # CLAIM THE CAP OWNER, so the exact-profile owners reach `owner_feature_ids`.
+        #
+        # This built lineage WITHOUT `cap_feature_ids` and stamped the CAP separately as a
+        # `profile_member` column, so GT_CERT_DELIVERY / GT_EDIT_CHECK / GT_HYPOTHESIS were
+        # SILENTLY ABSENT from `lineage.features` -- dark on the canonical plane while live
+        # on the legacy lane. Until the binding authority was fixed, passing them here would
+        # have RAISED (the mechanism filter made their FeatureRef unconstructible); now all
+        # seven owners carry a registry-valid binding, so the claim is admissible.
+        #
+        # GUARDED, not bare. `build_lineage` raises on an id that is not a declared CAP byte
+        # owner, and this whole block is wrapped in a swallowing `except` -- which is
+        # precisely how `GT_REPRO_SYNTH` (passed at the submit site, not a declared owner)
+        # silently degrades to `_registered_delivery_extra` today. An undeclared member here
+        # must lose only its CAP claim, never the whole FACT lineage.
+        _cap_ids: tuple[str, ...] = ()
+        try:
+            from groundtruth.runtime.feature_lineage import CAP_BYTE_OWNER_IDS
+            if member and member in CAP_BYTE_OWNER_IDS:
+                _cap_ids = (str(member),)
+        except Exception:  # noqa: BLE001 -- no authority -> claim nothing, keep the FACT
+            _cap_ids = ()
         lineage = build_lineage(
             runtime_producer_id=binding.producer,
             evidence_type=evidence_type,
             actual_event=actual_event,
+            cap_feature_ids=_cap_ids,
         )
         if lineage is not None and lineage.producer_registration_match:
             extra.update(lineage_ledger_extra(lineage))
@@ -11502,6 +12095,19 @@ def _executed_covering_emission(covering: list[dict],
         failure_identity = _ss_covering_failure_identity(cres, block)
         if _ss_ack_failure_suppresses(
                 "verify.horizon.executed", block, failure_identity):
+            # A REFEREE ATE IT -- record that, rather than returning silently. This is the
+            # second of covering_red's two states that published nothing, and it is the one
+            # most easily mistaken for a broken producer: the block was BUILT and then
+            # dropped as a duplicate of an already-acknowledged failure. Matches the
+            # `suppressed_ack_failure` string `_edit_syntax_candidate` already uses, which
+            # the offline `_DEFECT_PREFIXES` reader already recognises.
+            try:
+                _runtime_ledger_record(
+                    kind="verify.horizon.executed",
+                    outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                    reason="suppressed_ack_failure", chars=0)
+            except Exception:  # noqa: BLE001 -- telemetry never breaks the agent loop
+                pass
             return None
         try:
             from groundtruth.runtime.fact_registry import EVENT_TEST_RESULT
@@ -11592,6 +12198,30 @@ def _executed_covering_candidate() -> "tuple[float, str, str, bool] | None":
         return None
     covering = _covering_tests_for_symbols(fresh)
     if not covering:
+        # COUNT THE CAPABILITY GAP. This is covering_red's single most informative state --
+        # "the agent just edited symbols that NO test in GT's graph covers" -- and it was
+        # the only one of eight terminal states that published nothing at all. Downstream
+        # that is indistinguishable from the producer never having run, so six distinct
+        # engineering states (no test exists / it passed / it timed out / the RED wasn't
+        # ours / the renderer produced nothing / a referee ate it) all read as one
+        # TRIGGER-ABSENT verdict on a feature the grader was already told to expect to be
+        # trigger-absent.
+        #
+        # HOST-SIDE ONLY, and deliberately NOT delivered. A model-facing
+        # NO_EXISTING_COVERING_TEST rung was designed and rejected: it duplicates the
+        # already-delivered `verification_horizon` has_covering=False advisory, it has no
+        # native voice, it would assert a REPOSITORY property from an INDEX property (an
+        # empty selection means GT's graph lacks a FACT-tier test->impl edge, NOT that the
+        # repo lacks a covering test), and at _SEV_NUDGE_VERIFY it would consume the
+        # observation's single dose slot ahead of `l3.contract` on the very edit turn that
+        # contract decides. chars=0 keeps it structurally unable to claim delivery.
+        try:
+            _runtime_ledger_record(
+                kind="verify.horizon.executed",
+                outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                reason="no_covering_test_selected", chars=0)
+        except Exception:  # noqa: BLE001 -- telemetry never breaks the agent loop
+            pass
         # No covering FILE -> nothing to re-attempt: latch so the symbol is not re-queried
         # every subsequent turn (a re-edit re-arms via the post_edit `difference_update`).
         _covering_exec_fired_syms |= fresh
@@ -11743,6 +12373,14 @@ def _verification_plan_emission(edited_rels: "set[str] | list[str]",
                     failure_identity = _ss_covering_failure_identity(cres, block)
                 if _ss_ack_failure_suppresses(
                         "verify.horizon.executed", block, failure_identity):
+                    # Same silent drop on the PLAN path -- instrumented for the same reason.
+                    try:
+                        _runtime_ledger_record(
+                            kind="verify.horizon.executed",
+                            outcome=_ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY,
+                            reason="suppressed_ack_failure", chars=0)
+                    except Exception:  # noqa: BLE001
+                        pass
                     return None
                 if res.kind == "syntax":
                     _last_verify_executed_identity = (
@@ -12500,8 +13138,22 @@ def _oracle_telemetry_write(suppressed, winner) -> None:
                 "actionable": _next_action,
                 "surface": "agent_observation",
             }
+        # JOIN IDENTITY (task #34, 2026-07-29). Without these three fields the row is
+        # unjoinable to ANY other artifact: no task, no turn, no observation — so the
+        # gate-loss reasons (irrelevant / below_floor / outranked / delivered) could
+        # never reach a per-feature verdict, and "dark" stayed indistinguishable from
+        # "produced-and-outranked". ADDITIVE keys only (readers use .get; the harvest
+        # pin tests key presence of the file, not the schema), so the schema id stays.
+        # `kind` remains the GATE-KIND namespace — the join key is (task, iteration),
+        # never a kind-name diff against the LAYER namespace.
+        try:
+            _iter = int(_current_iteration())
+        except Exception:  # noqa: BLE001
+            _iter = -1
         rec = {
             "schema": "gt.oracle_event.v2",
+            "task": os.environ.get("GT_INSTANCE_ID", "") or os.environ.get("GT_MATRIX_TASK", ""),
+            "iteration": _iter,
             "emitted": None if winner is None else {
                 "kind": winner[3],
                 "confidence": float(f"{float(winner[1]):.8f}"),
@@ -13545,6 +14197,7 @@ def _concern_lane_a_append(lane_a: list, kkind: "str | None", kf: "str | None", 
 # function (Lane B) are DIFFERENT content -> both deliver; a byte-identical
 # re-send -> suppressed.
 # ---------------------------------------------------------------------------
+@_delivery_scoped_binding
 def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
     """Deliver the always-on data-plane producers EARLY, before any control-
     plane (Lane B / oracle gate) logic that could raise.
@@ -13828,6 +14481,7 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
 # TITO hash-chain + receipt ledger. The heavy decision logic lives in the pure
 # adapter (groundtruth.runtime.adapters.miniswe); this is the harness splice.
 # ---------------------------------------------------------------------------
+@_delivery_scoped_binding
 def _commit_prepared_lane(
         out, cmd, kind: str, decision: dict, *, krel, event, lineage=None,
         identity=None) -> None:
@@ -14167,12 +14821,32 @@ _receipt_produced_keys: dict[str, str] = {}
 def _persist_receipt(env, *, kind: str, transition: str) -> None:
     """B-14: append ONE sealed envelope / receipt-state transition to the durable
     JSONL sidecar. ``kind`` = the seal site (``lane``/``gateway``); ``transition`` =
-    the receipt_state being recorded (``delivered``/``referenced``/``acted``). No-op
+    the receipt_state being recorded -- the runtime may write ONLY ``delivered``, and the
+    guard below REFUSES ``referenced``/``acted`` (it cannot evaluate them). No-op
     when GT_CERT_DIR is unset; correct-or-quiet on any fault (telemetry never breaks
     delivery). The line is the envelope's own to_dict() so a post-run auditor rebuilds
     it byte-exactly with evidence_envelope.from_dict."""
     path = _receipts_sidecar_path()
     if not path or env is None:
+        return
+    # THE RUNTIME MAY ONLY WRITE THE RUNGS IT CAN ACTUALLY EVALUATE. Everything above
+    # `delivered` is a claim about what the POLICY did after delivery, and this env-facing seam
+    # has neither `policy_text` nor a decision-commit index with which to judge it. The rung
+    # ceiling is declared once on the ladder authority so a future promotion cannot quietly
+    # reappear here; `fair_probe_result._treatment_acted` is the sole authority above it.
+    try:
+        from groundtruth.runtime.evidence_envelope import (
+            RUNTIME_EMITTABLE_RECEIPT_STATES as _EMITTABLE,
+        )
+        if transition not in _EMITTABLE:
+            _runtime_ledger_record(
+                kind="receipt.rung_refused",
+                outcome="suppressed_internal_only",
+                reason="runtime_may_not_emit:" + str(transition),
+                chars=0,
+            )
+            return
+    except ImportError:  # noqa: BLE001 -- engine absent in-container -> no sidecar anyway
         return
     try:
         from groundtruth.runtime.evidence_envelope import to_dict as _env_to_dict
@@ -14574,7 +15248,9 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
             tool_output_bytes=base_output.encode("utf-8", "surrogatepass"),
             boundary=(str(len(base_output)) + ":" + (kind or "lane")).encode("utf-8"),
             dedup_chain=_EPISODE.delivered_dedup,
-            observation_binding=_current_observation_binding())
+            observation_binding=_ensure_observation_binding(
+                kind=kind,
+                candidate_id=(getattr(env, "dedup_key", "") or "")))
         _gt_gateway_deliveries.append(sealed)
         # CLASS-6(a): run the identity-disagreement guard BEFORE any durable persist. A detected
         # candidate/dedup-key mismatch must poison NOTHING durable — record the typed ERROR control
@@ -14595,6 +15271,17 @@ def _seal_lane_delivery(kind: str, text: str, target: str, *, base_output: str =
                 candidate_id=identity[1],
                 reason="lane_envelope_candidate_identity_mismatch",
                 allow_candidate_mismatch=True)
+            # UNPUBLISH. This return deliberately writes NO receipt, but the caller still
+            # writes the DELIVERED ledger row -- and a published binding would make that row
+            # satisfy every clause of `receipt_sidecar.sealed_receipt_expected` (delivered,
+            # chars>0, valid seal, valid binding, matching candidate_id). The offline reader
+            # would then EXPECT a receipt that was intentionally never written and raise
+            # `receipt_expected_delivery_chronology_missing`, and because
+            # `ReceiptSidecar.integrity_ok` is `not self.failures`, one such row reddens the
+            # WHOLE task. This class is live, not hypothetical (jupyter-ai `detect.loop`,
+            # dynaconf `verify.horizon.executed`). Before the binding existed the row was
+            # invisible to that expectation; clearing it restores exactly that.
+            _delivery_observation_context.set(None)
             return
         # SS-RCPT: when a post-pool mutation changed the bytes (producer_text differs
         # from the sealed identity text), compute the PRODUCED-text dedup key with the
@@ -15269,7 +15956,27 @@ def _persist_brief_producer_attestations(compilation) -> None:
         delivered = str(getattr(compilation, "rendered_content_hash", "") or "")
         seal = delivered[:16]
         lineage = getattr(compilation, "evidence_lineage", ()) or ()
-        for candidate_id, fact_class in lineage:
+        # THE LINEAGE ENTRY IS A TRIPLE, not a pair. `CapsuleCompilation.evidence_lineage` is
+        # `(candidate_id, fact_class, cap_owners)`; this loop unpacked two names and raised
+        # `ValueError: too many values to unpack` on the FIRST entry, which the fault path below
+        # swallowed. Run 30390877219 recorded exactly one row per task:
+        #   {"layer": "attestation.persist", "outcome": "measurement_failed",
+        #    "reason": "attestation_persist_error:brief:ValueError"}
+        # so `localization` and `obligations` received ZERO attestations on 5/5 tasks and their
+        # `correct_info` stayed None -- the precise outcome this handler exists to prevent.
+        #
+        # It survived review because the unit test built its own fixture as 2-tuples, so both
+        # halves agreed with each other and neither agreed with production. Positional unpacking
+        # across a module boundary is the same "two things that must match by hand" defect as the
+        # window-marker rule; indexing by name keeps the arity change visible instead of fatal.
+        #
+        # `cap_owners` is deliberately unused here: it is the GRADER's byte-owner proof on the
+        # canonical row, not a producer fact, and inventing a use for it would be laundering.
+        for entry in lineage:
+            if not isinstance(entry, (tuple, list)) or len(entry) < 2:
+                continue
+            candidate_id = str(entry[0] or "")
+            fact_class = str(entry[1] or "")
             snapshot = pop_brief_snapshot(candidate_id)
             # The lineage names the class; the snapshot carries the producer facts. If they
             # disagree the pairing is stale, and attesting it would bind (say) a ranked-path
@@ -15407,6 +16114,7 @@ def _persist_gateway_producer_attestation(winner, shipped: str, sealed):
         return None
 
 
+@_delivery_scoped_binding
 def _gt_gateway_pool_envelope(
         winner, *, pool, out, ev, native: bool,
         render_envelope, fits_budget, seal_delivery,
@@ -15441,6 +16149,7 @@ def _gt_gateway_pool_envelope(
             reason="gateway_budget", file_path=winner.target or "")
         return False
 
+    @_delivery_scoped_binding
     def _commit_gateway(
             _winner=winner, _delta=delta, _native=native) -> None:
         global _gt_gateway_chain_head
@@ -15459,7 +16168,7 @@ def _gt_gateway_pool_envelope(
             boundary=(str(len(_tob)) + ":" +
                       (_winner.evidence_type or "gw")).encode("utf-8"),
             dedup_chain=_EPISODE.delivered_dedup,
-            observation_binding=_current_observation_binding(),
+            observation_binding=_ensure_observation_binding(_winner),
         )
         _gt_gateway_deliveries.append(sealed)
         _persist_receipt(sealed, kind="gateway", transition="delivered")
@@ -15542,7 +16251,6 @@ def _gt_gateway_deliver(
             render_envelope as _ad_render,
             seal_delivery as _ad_seal,
             select as _ad_select,
-            update_receipts as _ad_update_receipts,
         )
         from groundtruth.runtime.native_render import (
             contains_gt_tag, contains_test_identity)
@@ -15577,43 +16285,39 @@ def _gt_gateway_deliver(
         # guard's totality; every NEW dose / probe-record / episode-id / augment state
         # touch still sits AFTER the exclusion return.
         if _gt_gateway_deliveries:
-            try:
-                # Seam-F8(a) (per-flag asymmetry, DELIBERATE): receipt promotion lives on
-                # the GATEWAY turn (this function, gated by _gt_gateway_on()). A config of
-                # GT_LANE_ENVELOPE=1 with GT_GATEWAY=0 therefore leaves lane-sealed receipts
-                # frozen at 'delivered' (level 1). This is ACCEPTABLE and not fixed here:
-                # the official RL profile (rl_profile PROFILE_MEMBERS["1"]) CO-ACTIVATES
-                # GT_GATEWAY with GT_LANE_ENVELOPE, so promotion always runs in production;
-                # off-profile the ladder degrades to the honest delivered-only state (no
-                # promotion signal is fabricated), and receipts are host-side AUDIT metadata
-                # with ZERO model-facing impact. Re-wiring promotion outside the gateway turn
-                # is a larger change than this seam-surgical scope warrants.
-                # B-13: environment output is the NON-promoting source (never REFERENCED).
-                # Pass it as env_output explicitly. Seam-F8(b): policy_text (the agent's own
-                # assistant message) is NOT observable at this env-facing seam, so it is
-                # passed EMPTY — REFERENCED (level 2) is intentionally unreachable here and
-                # is computed offline by the grader; the seam advances delivered->ACTED
-                # (level 3) only, from the agent's next COMMAND. This is by-design, not a gap.
-                # Seam-F8(c): snapshot the OLD list BY POSITION (update_receipts preserves
-                # order + count, returning replace() copies), not a dedup_key-keyed dict —
-                # a dict collapses two deliveries that share a dedup_key and mis-attributes
-                # their promotions. B-14: persist ONLY the deliveries whose state advanced.
-                _prev_deliveries = list(_gt_gateway_deliveries)
-                _gt_gateway_deliveries[:] = _ad_update_receipts(
-                    _gt_gateway_deliveries, policy_text="",
-                    env_output=orig_out or "", next_action_cmd=cmd or "")
-                for _old, _new in zip(_prev_deliveries, _gt_gateway_deliveries):
-                    _ns = getattr(_new, "receipt_state", "")
-                    if getattr(_old, "receipt_state", "") != _ns:
-                        # Seam-F8(d): label the persisted promotion by the sealed envelope's
-                        # OWN renderer_id — a lane-sealed delivery (_seal_lane_delivery sets
-                        # renderer_id='lane') is audited as 'lane', not mislabeled 'gateway'.
-                        _pk = "lane" if getattr(_new, "renderer_id", "") == "lane" else "gateway"
-                        _persist_receipt(_new, kind=_pk, transition=_ns)
-            except Exception:  # noqa: BLE001
-                pass
-            # SM-9c WRITE: fold the promoted receipt ladder (per fact-class delivered/
-            # consumed) into the durable per-repo store. Idempotent from the frozen base.
+            # RECEIPT PROMOTION REMOVED (2026-07-28). The seam now emits `delivered` and
+            # nothing above it. `update_receipts` now has NO production caller anywhere -- not
+            # merely "not from here"; its only remaining references are tests.
+            #
+            # THE FIELD WAS NOT APPROXIMATE, IT WAS CAUSALLY INVERTED FOR HALF THE ROWS. The
+            # old comment here claimed the seam "advances delivered->ACTED (level 3) only,
+            # from the agent's next COMMAND. This is by-design, not a gap." That is false on
+            # the path production actually takes. `update_receipts` sets `acted` by string-
+            # matching the delivered envelope's OWN target path against a command
+            # (`_delivered_entities` adds `("path", env.target)`), and under the deferred
+            # batch flush the promotion runs inside the SAME action index as the seal. Run
+            # 30390877219, every task: `delivered` at ts .737/.755 and `acted` at ts .762 --
+            # 7ms later, all four rows `action_index: 2`, before the bytes had reached a model
+            # call at all. The "action" that earned `acted` was the action that CAUSED the
+            # delivery. Gateway-sealed rows, appended after the loop, were promoted honestly on
+            # a later turn: one field, two meanings, no column to tell them apart.
+            #
+            # AND THE SEAM CANNOT HOLD THE CONCEPT. `policy_text` is passed "" because the
+            # agent's assistant message is not observable here, so `referenced` was structurally
+            # unreachable; `action_index` is the raw global `_action_count`, which
+            # `_commit_batch_arbitration` temporarily rewrites to the producer's iteration, so
+            # the window anchor is corrupt too. The exact definition already exists offline in
+            # `fair_probe_result._treatment_acted`: ON_TIME AND the registry receipt predicate
+            # AND `delivery_index < action_index <= decision_commit_index`. One concept, one
+            # authority -- keeping a second, weaker one at the seam is the duplication defect
+            # this wave exists to remove.
+            #
+            # CONSEQUENCE, STATED NOT DISCOVERED: `_xsession_flush` counts `consumed` as
+            # `receipt_state in CONSUMED_STATES`, so with the ladder frozen at `delivered`
+            # every class now records consumed=0 and the GT_XSESSION_RANKUP prior goes
+            # uniform. That is correct rather than merely tolerable -- the counter was built
+            # on this same fake signal -- but it IS a behaviour change, and a rank-up prior
+            # that no longer varies should be re-derived from the offline authority.
             _xsession_flush()
         # SEAM DOSE-LAW GUARD (CONFIRMED-1, 2026-07-10) — MUTUAL EXCLUSION, post_search
         # WINS on search turns. The post_search lattice and this Gateway are two delivery
@@ -15810,6 +16514,7 @@ def _gt_gateway_deliver(
             # last output line (the T4/L-1a class the lane path already guards). Insert exactly
             # ONE `\n` boundary ONLY when needed — byte-identical when the observation already
             # ends in `\n` (production command output) or the delta already opens with `\n`.
+            @_delivery_scoped_binding
             def _commit_gateway() -> None:
                 # THE DELIVERY COMMIT (seal -> append -> ledger). Isolated as a closure so SM-5
                 # can DEFER it (stash into the global pool) or run it inline — byte-identical.
@@ -15831,7 +16536,7 @@ def _gt_gateway_deliver(
                     tool_output_bytes=_tob,
                     boundary=(str(len(_tob)) + ":" + (winner.evidence_type or "gw")).encode("utf-8"),
                     dedup_chain=_EPISODE.delivered_dedup,
-                    observation_binding=_current_observation_binding())
+                    observation_binding=_ensure_observation_binding(winner))
                 _gt_gateway_deliveries.append(sealed)
                 # B-14: persist the sealed envelope (level-1 delivered) durably.
                 _persist_receipt(sealed, kind="gateway", transition="delivered")
@@ -17987,6 +18692,7 @@ def install_observation_batch_commit(agent) -> bool:
         return False
 
 
+@_delivery_scoped_binding
 def _deliver_gate_winner(
         out, cmd, win_text, *, kkind, kf, krel, event, steer_base,
         lineage=None) -> None:
@@ -18055,6 +18761,7 @@ def _deliver_gate_winner(
 
 
 # plane constants mirrored locally so the hot delivery path needs no import to name them.
+@_delivery_scoped_binding
 def _commit_prepared_steer(out, cmd, kind: str, winner_hash: str, decision: dict,
                            *, krel, kf, event, steer_base, lineage=None) -> None:
     """Commit a frozen eligible steer without re-running shadow/leak/budget gates."""
@@ -18279,6 +18986,7 @@ def _ss_shadow_task_id() -> str:
     return seed + "|" + base
 
 
+@_delivery_scoped_binding
 def _record_shadow_assignment(
         kind: str, text: str, assignment: str, *,
         fact_class: "str | None" = None, candidate_id: str = "") -> bool:
@@ -18312,7 +19020,22 @@ def _record_shadow_assignment(
             or holdout_rate <= 0.0
         ):
             return False
-        binding = _current_observation_binding()
+        # DERIVE, don't wait for a seal to publish (2026-07-28).
+        #
+        # This is a PRE-OUTCOME assignment by construction: it is recorded after arbitration
+        # picks the winner but BEFORE any deliver/holdout outcome is committed, so on the
+        # legacy path no seal has run and `_current_observation_binding()` is still None.
+        # Requiring the published var therefore made GT_SS_SHADOW permanently dark on the only
+        # scaffold GT runs on -- the Step-3 binding fix did NOT reach it, because that fix
+        # publishes AT the seal. That matters specifically: gate-7 causal TRUEs need
+        # shadow-rate > 0, so a dark shadow assignment blocks the causal gate.
+        #
+        # The observation identity does not depend on a seal. It is minted per OBSERVATION by
+        # `_begin_legacy_observation` and completed per candidate, and this call site already
+        # holds the two fields that complete it (`fact_class` -> kind, `candidate_id`), taken
+        # from the SELECTED candidate's typed lineage. Deriving here uses the same single
+        # authority as every seal rather than inventing a parallel one.
+        binding = _ensure_observation_binding(kind=kind, candidate_id=candidate_id)
         binding_dict = _current_observation_binding_dict()
         if binding is None or binding_dict is None:
             return False
@@ -20021,6 +20744,9 @@ def _augment_output_legacy(action, out) -> None:
     global _marker_sent, _action_count, _source_edit_count, _cycle_edit_start
     if not isinstance(out, dict):
         return
+    # Publish this observation's identity BEFORE any producer runs, so every lane/gateway seal
+    # below inherits it. This is the only place on the legacy path where `action` is in scope.
+    _begin_legacy_observation(action)
     try:
         if not _marker_sent:
             # 2026-06-10 (PATH B audit): loader telemetry, NOT agent content —
@@ -20098,14 +20824,41 @@ def _augment_output_legacy(action, out) -> None:
                 # above (ledger-judge / ack-scan) already ran; only delivery is suppressed. Restores
                 # test_install_failure_fails_closed_instead_of_per_action_fallback.
                 return
-            if _ga_on and not _batch_commit_installed:
-                # FAIL-OPEN (2026-07-22): single-action scaffolds (mini-swe) never install the
-                # batch-commit formatter (install_observation_batch_commit needs
+            if (_ga_on and not _batch_commit_installed
+                    and _batch_context.get() is not None):
+                # FAIL-OPEN (2026-07-22, NARROWED 2026-07-28): single-action scaffolds (mini-swe)
+                # never install the batch-commit formatter (install_observation_batch_commit needs
                 # model.format_observation_messages + agent.execute_actions — a multi-action
-                # batch interface mini-swe lacks). With the arbiter ON and no flush hook, the
+                # batch interface mini-swe lacks). With a DEFERRED pool and no flush hook, the
                 # per-turn pool would never be committed -> silent 0-delivery of EVERY reactive
                 # FACT on every observation. Degrade to inline per-plane delivery (the
                 # _ga_on==False byte-identical path) instead of dropping the whole observation.
+                #
+                # WHY THE `_batch_context.get() is not None` CLAUSE. The hazard is an
+                # UNCOMMITTABLE POOL, and `_batch_commit_installed` is only a proxy for it. The
+                # pool is deferred iff a batch state exists (`_batch_defer`, next line); with NO
+                # batch state `_ga_pool` is a fresh list (below) and `_global_pool_flush` runs
+                # INLINE under `if not _batch_defer`. So on a single-action scaffold the pool IS
+                # committed, and the old proxy disabled the arbiter for a condition that could
+                # not arise. Testing the hazard directly preserves the guard's stated purpose
+                # exactly while no longer catching the case it was never meant to catch.
+                #
+                # WHAT IT COST. With the arbiter off there is no ranked competition, so every
+                # plane delivered inline and one observation could carry several GT blocks — the
+                # <=1-dose law had NO enforcement mechanism on the only scaffold GT runs on.
+                # Run 30390877219: 6 of 20 observations were multi-dose (`dose_lte_one` FAILS),
+                # 5 of them the same pair. Arbitrating that pair at the production boundaries
+                # (localization=1, caller_contract=3; `_GA_CLASS_BOUNDARY`) yields exactly ONE
+                # winner and never zero:
+                #   post_view/post_edit  l3b.evidence BEATS consensus.scope_map (outranked)
+                #   any ordinal          obligation.unexercised BEATS l3.cochange (outranked)
+                # Both losers are the lower-value member — and `consensus.scope_map` is the
+                # producer already documented redundant and RETIRED under this very arbiter
+                # (`_scope_map_retired`), while `l3.cochange` is an internal ranking prior.
+                #
+                # `_batch_install_failed` is UNTOUCHED above: an ATTEMPTED-and-failed install
+                # stays fail-CLOSED (suppress the whole observation), which is a different state
+                # from a scaffold that never had the interface.
                 _ga_on = False
             _batch_state = _batch_context.get() if _ga_on else None
             _batch_defer = _batch_state is not None
@@ -20224,6 +20977,38 @@ def _augment_output_legacy(action, out) -> None:
                 _orig_out,
                 _returncode if type(_returncode) is int else None,
             )
+            # BROADEN THE VALIDATION VOCABULARY -- formal test RUNNERS are not the only
+            # way an agent validates. `_classify_test_observation` recognises named
+            # runners (pytest/go test/jest/...) and returns ("","") for everything else,
+            # including the three shapes measured returning ("","") on real trajectories:
+            #   python -c "...api.lint_all(t)"  -> AttributeError + rc 1
+            #   python repro.py                 -> Traceback/AssertionError + rc 1
+            #   go build ./...                  -> undefined: ResolveForEach + rc 1
+            #
+            # That matters far beyond phase detection: the SS block below is gated on
+            # `_test_outcome in {"pass","fail","env_fail"}`, and SS-2's submit-RED latch
+            # (`_ss_last_failing_test`) lives INSIDE that gate. So an agent that
+            # reproduces a bug with `python -c` and never runs a named runner leaves the
+            # latch unset, and `submit_refusal` / GT_SS_SUBMIT_RED cannot fire at all --
+            # the mechanism of the cfn-lint-3764 miss.
+            #
+            # FALLBACK ONLY: the frozen formal-runner classifier still WINS every overlap
+            # (`classify_validation_observation` delegates to it first), and `outcome`
+            # deliberately reuses the same grammar, so no consumer needs a new vocabulary.
+            # Correct-or-quiet: any fault leaves the formal result untouched.
+            if not _test_outcome:
+                try:
+                    _vobs = _classify_validation_observation(
+                        cmd or "",
+                        _orig_out,
+                        _returncode if type(_returncode) is int else None,
+                        repo_root=_root() or "",
+                    )
+                except Exception:  # noqa: BLE001 -- classification never breaks the loop
+                    _vobs = None
+                if _vobs is not None and getattr(_vobs, "outcome", ""):
+                    _test_outcome = _vobs.outcome
+                    _test_protocol = getattr(_vobs, "protocol", "") or _test_protocol
             if _gt_gateway_on():
                 try:
                     from groundtruth.runtime.adapters.miniswe import (
@@ -20265,6 +21050,20 @@ def _augment_output_legacy(action, out) -> None:
                 except Exception:  # noqa: BLE001 -- canonicalization never breaks the lane
                     _normalized_event = None
                     _cc_ready = _gt_gateway_caller_contract_ready(action, cmd)
+                # THE TRIGGER CENSUS. Emitted HERE because this is the first point where
+                # the observation's semantic events are COMPLETE: `_semantic_arg` above
+                # carries only the three the seam derives itself, while
+                # `_observe_semantic_events` adds search_result/failed_search/failure_obs
+                # unconditionally and completes on first consumption -- which
+                # `_gt_gateway_caller_contract_ready` just did. Reading `_semantic_arg`
+                # instead would have silently undercounted six of the nine boundaries.
+                # (The trigger census used to be emitted HERE. It has moved POST-PRODUCE --
+                # see the anchor below the `_gt_gateway_deliver` calls. At this point the
+                # event's semantic tuple is still EMPTY: `_observe_semantic_events` has not
+                # run, and `_semantic_arg` is None whenever `_v2_write_truth` is False.
+                # Probing showed the site reached once per observation with `()`, which is
+                # why the census wrote zero rows through the real seam while its offline
+                # tests passed.)
             if _kkind == "post_edit" and _kf:
                 _source_edit_count += 1
                 _kroot = _root()
@@ -20630,10 +21429,26 @@ def _augment_output_legacy(action, out) -> None:
                 _legacy_oblig_ready = (
                     _oracle_nonedit_streak >= 3 or _budget_now > 0.90
                 )
-                _v2_oblig_ready = (
-                    _event == Event.TEST_RESULT
-                    or _v2_obligation_result_ready()
-                )
+                # CLAUSE-SCOPED ONLY. This was
+                #     _event == Event.TEST_RESULT or _v2_obligation_result_ready()
+                # and the first disjunct nullified the second. `_v2_obligation_result_
+                # ready` is the subject-bound projection whose OWN docstring states "an
+                # unrelated successful command therefore cannot open the obligation
+                # delivery gate" -- but `or`-ing it with "any test result at all" made
+                # that claim false, so ANY green run opened the dose.
+                #
+                # That is the mechanism behind the amoffat__sh-744 msg63 witness, where
+                # GT rendered a still-unexercised clause directly underneath someone
+                # else's "4 passed". Note the earlier diagnosis blamed the obligations
+                # PREDICATE (exact set equality at obligations.py:746); replay falsified
+                # that -- no evidence object was ever built for that clause, so `covers`
+                # never saw a candidate. The defect was always here, in the delivery gate.
+                #
+                # Dropping the disjunct loses nothing: a test result that genuinely
+                # exercises a clause satisfies `_v2_obligation_result_ready()` through
+                # `row.exercise.turn == _action_count`. One that exercises no clause is
+                # exactly the case that must NOT open the dose.
+                _v2_oblig_ready = _v2_obligation_result_ready()
                 _oblig_gate = bool(_oracle_edited_rels) and (
                     _v2_oblig_ready
                     if _v2_obligations_active else _legacy_oblig_ready
@@ -20986,6 +21801,68 @@ def _augment_output_legacy(action, out) -> None:
                                     lattice_produced=bool(_la_search),
                                     normalized_event=_normalized_event)
                 _discard_terminal_lane_controls({_action_count})
+            # TRIGGER CENSUS -- anchored POST-PRODUCE, which is where the semantic events
+            # are actually complete. `_observe_semantic_events` (gateway.py:1976-1984)
+            # writes the finished tuple back onto the event at the end of its first real
+            # consumption, and `_gt_gateway_deliver` is that consumer.
+            #
+            # PROBED BEFORE PLACING, because the previous anchor was guessed three times
+            # and was wrong three times. Measured across the real legacy path:
+            #     sed  -> before ()               after ()
+            #     grep -> before ()               after ('search_result',)
+            #     cat  -> before ('file_view',)   after ('file_view',)
+            # i.e. this anchor strictly DOMINATES the pre-produce one: it gains the
+            # gateway-derived boundaries (search_result / failed_search / failure_obs)
+            # and loses none of the seam-derived ones.
+            # UNION THE SEAM'S OWN EDIT KNOWLEDGE -- and read the numbers below before
+            # touching either line, because the reason recorded here previously was WRONG
+            # and cost four failed attempts.
+            #
+            # INSTRUMENTED THROUGH THE REAL SEAM (2026-07-29): a full `ss_gate.py` run with
+            # a temporary stderr probe at this anchor and inside `_record_trigger_opportunities`,
+            # then removed. GT_INSEAM_METRICS is NOT inherited from the shell here -- the gate
+            # STRIPS the entire ambient GT_* namespace per arm (ss_gate.py `_all_gt_env_keys`)
+            # and re-applies Profile-2, which registers GT_INSEAM_METRICS=1. Measured:
+            #
+            #   147 observations reached this anchor; 0 early-returned before it.
+            #   census ledger rows written, by required_event:
+            #       edit_result 496 | search_result 259 | test_result 68 | file_view 46
+            #       failed_search 0 | submit 0   <- those two boundaries NEVER OCCUR in the
+            #       fixture drive set (every fixture grep hits; no submit command is driven
+            #       through `_augment_output`), i.e. correct-quiet, not darkness.
+            #   62/147 anchors had `_kkind == "post_edit"`. Of those, 51 ALREADY carried
+            #   `edit_result` in `_normalized_event.semantic_events`; 11 did NOT, and the
+            #   union is the only thing that counts those 11.
+            #
+            # SO THE UNION IS LOAD-BEARING, BUT NOT FOR THE REASON PREVIOUSLY WRITTEN HERE.
+            # The old comment blamed the authoritative-mode edge (`_observe_semantic_events`
+            # derives `edit_result` only when `not event.semantics_authoritative`). Refuted:
+            # all 11 load-bearing cases have `_v2_write_truth=False`, i.e. NON-authoritative
+            # events, and in the 13 authoritative (V2) post_edit anchors `_semantic_arg`
+            # supplied `edit_result` every time. The real mechanism is the SUBPROCESS-WRITE
+            # FALLBACK above (`_subprocess_write_targets`): a `cat pkg/mod_a.py` / `pytest`
+            # / `python build.py` turn whose mtime diff proves a source file was written gets
+            # re-classified to post_edit HERE, while the gateway's carrier kind stays
+            # VIEW/TEST -- and `_observe_semantic_events` keys `edit_result` off
+            # `event.kind == KIND_EDIT`, so it never adds it back. Measured shapes of the 11:
+            # 7x sev=('test_result',) and 4x sev=('file_view',), all v2=False.
+            #
+            # WHY THIS LOOKED DARK FOUR TIMES: the census DOES fire; the READER was wrong.
+            # `ss_gate` writes each stream's ledger inside its own `tempfile.mkdtemp` and
+            # `shutil.rmtree`s it in `finally` (ss_gate.py, end of `RealSeamDriver.run`), so
+            # grepping the leftover `D:\tmp\ss_gate_*` dirs samples ONLY runs that died before
+            # cleanup: 0 of the 1714 leftovers present on 2026-07-29 contained a single
+            # `feature.trigger_opportunity` row. To count these rows you must either probe
+            # in-process or neutralise that rmtree -- a leftover-dir grep can never prove
+            # this boundary either way.
+            #
+            # Zero delivered bytes and no producer decision change -- only what the census
+            # counts as an opportunity. Without it the denominator under-counts the LARGEST
+            # trigger group: 8 of the 25 observable triggers are contracted to edit_result.
+            _census_events = set(getattr(_normalized_event, "semantic_events", ()) or ())
+            if _kkind == "post_edit":
+                _census_events.add("edit_result")
+            _record_trigger_opportunities(tuple(_census_events))
             return
 
         # ---- LEGACY PATH (GT_ORACLE_ROUTE=0): unconditional appends ----
@@ -21449,6 +22326,32 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
         )
         if _submit_block_selected:
             rejection = _submit_block_text
+            # NAME THE PRE-EMPTION. GT_CERT_DELIVERY and GT_SS_SUBMIT_RED carry
+            # BYTE-IDENTICAL lineage bindings ('submit_gate','submit_refusal',
+            # 'submit_refusal') and are discriminated ONLY by this if/elif. Because
+            # `_submit_block` is built only when nothing is already blocking,
+            # GT_CERT_DELIVERY can own bytes solely on a covering-fail or
+            # hygiene-blocking submit -- a strictly NARROWER trigger, on the same fact.
+            #
+            # That is a product decision currently expressed as control flow and nowhere
+            # else, so a grader seeing GT_CERT_DELIVERY silent cannot tell "its trigger
+            # was pre-empted by the submit-RED referee" from "it is broken". Record the
+            # pre-emption so the darkness is MEASURED. Host-side only, chars=0.
+            if _deliver_cert and cert is not None:
+                try:
+                    _ledger_line_direct({
+                        "layer": "completion_cert",
+                        "event_type": "trigger_preempted",
+                        "file_path": "",
+                        "outcome": "suppressed_hidden_only",
+                        "reason": "cert_preempted_by_submit_red",
+                        "chars_delivered": 0,
+                        "iteration": globals().get("_action_count", 0),
+                        "profile_member": "GT_CERT_DELIVERY",
+                        "preempted_by": "GT_SS_SUBMIT_RED",
+                    })
+                except Exception:  # noqa: BLE001 -- telemetry never breaks the loop
+                    pass
         elif _deliver_cert and cert is not None:
             try:
                 rejection = _completion_cert_block(cert, verdict)
@@ -21510,6 +22413,15 @@ def _gt_gate_submit_exception(env, action, exc) -> "dict | None":
 # historical unit fixtures to exercise old byte behavior without leaving a
 # second live route: an attached production attempt never enters it.
 _CANONICAL_RUNTIME_ATTACHMENT = None
+# One attempt-terminal proof-mode verdict row, not one per action.
+#
+# NOT RESET ANYWHERE, deliberately and for now correctly: the attachment has no teardown --
+# `_CANONICAL_RUNTIME_ATTACHMENT` is assigned exactly twice (module init and
+# `install_canonical_runtime`, which returns the existing attachment for the same
+# model/agent), so a genuine second attempt is not constructible in one process. If a
+# teardown is ever added, this must be cleared alongside it or the second attempt emits zero
+# verdict rows, which a reader cannot distinguish from a healthy one.
+_canonical_proof_mode_verdict_emitted = False
 
 
 def _canonical_file_digest(path: str) -> str:
@@ -23922,6 +24834,39 @@ class CanonicalRuntimeAttachment:
                                 )
                                 or ()
                             ),
+                            # WHICH suppression emptied the coalition. `evidence_store>0`
+                            # with `coalition_size==0` already says evidence existed and
+                            # none was eligible -- but `select_evidence_coalition` stamps
+                            # one of THIRTEEN SuppressionReasons across SEVEN sites inside
+                            # `select_evidence_coalition`, and they have opposite fixes:
+                            # ALREADY_ACQUIRED means the agent already had the fact (correct
+                            # suppression, look upstream at novelty); NOT_ACTIONABLE_FOR_
+                            # DECISION means the role/anchor map is wrong (look at the
+                            # contract). Run 30390877219 emitted 20 of these rows across the
+                            # five tasks (9/2/2/3/4 -- NOT 9 per task) and none could tell
+                            # those two apart, which is the ambiguity that kept the oracle's
+                            # silence unfalsifiable.
+                            #
+                            # CAVEAT ON THE READ: `prepare_next_inference` BACK-FILLS this
+                            # tuple, stamping OTHER_DECISION on every READY record that missed
+                            # the winning coalition -- an eighth site, OUTSIDE
+                            # `select_evidence_coalition`, whose OTHER_DECISION means something
+                            # different from the one stamped inside it. One name, two meanings:
+                            # do not read a bare OTHER_DECISION count as a provenance mismatch.
+                            # Counter, not a list: the shape is the diagnosis, and a repeated
+                            # reason is a different signal from several distinct ones.
+                            "suppression_reasons": dict(_collections.Counter(
+                                str(getattr(getattr(_s, "reason", None), "name", "")
+                                    or getattr(_s, "reason", "") or "UNNAMED")
+                                for _s in (
+                                    getattr(
+                                        getattr(plan, "oracle_decision", None),
+                                        "suppressed",
+                                        (),
+                                    )
+                                    or ()
+                                )
+                            )),
                         },
                     )
                 except Exception:  # noqa: BLE001 -- telemetry never blocks the agent's turn
@@ -23997,6 +24942,39 @@ class CanonicalRuntimeAttachment:
                                 )
                                 or ()
                             ),
+                            # WHICH suppression emptied the coalition. `evidence_store>0`
+                            # with `coalition_size==0` already says evidence existed and
+                            # none was eligible -- but `select_evidence_coalition` stamps
+                            # one of THIRTEEN SuppressionReasons across SEVEN sites inside
+                            # `select_evidence_coalition`, and they have opposite fixes:
+                            # ALREADY_ACQUIRED means the agent already had the fact (correct
+                            # suppression, look upstream at novelty); NOT_ACTIONABLE_FOR_
+                            # DECISION means the role/anchor map is wrong (look at the
+                            # contract). Run 30390877219 emitted 20 of these rows across the
+                            # five tasks (9/2/2/3/4 -- NOT 9 per task) and none could tell
+                            # those two apart, which is the ambiguity that kept the oracle's
+                            # silence unfalsifiable.
+                            #
+                            # CAVEAT ON THE READ: `prepare_next_inference` BACK-FILLS this
+                            # tuple, stamping OTHER_DECISION on every READY record that missed
+                            # the winning coalition -- an eighth site, OUTSIDE
+                            # `select_evidence_coalition`, whose OTHER_DECISION means something
+                            # different from the one stamped inside it. One name, two meanings:
+                            # do not read a bare OTHER_DECISION count as a provenance mismatch.
+                            # Counter, not a list: the shape is the diagnosis, and a repeated
+                            # reason is a different signal from several distinct ones.
+                            "suppression_reasons": dict(_collections.Counter(
+                                str(getattr(getattr(_s, "reason", None), "name", "")
+                                    or getattr(_s, "reason", "") or "UNNAMED")
+                                for _s in (
+                                    getattr(
+                                        getattr(plan, "oracle_decision", None),
+                                        "suppressed",
+                                        (),
+                                    )
+                                    or ()
+                                )
+                            )),
                         },
                     )
                 except Exception:  # noqa: BLE001 -- telemetry never blocks
@@ -24091,15 +25069,100 @@ def _augment_output(action, out) -> None:
     except Exception:  # noqa: BLE001 -- a health probe must never break execute
         dark = False
     if dark:
+        # PROOF MODE (2026-07-28). Default OFF, and OFF is byte-identical to the pre-flag
+        # behaviour -- same reason string, no `extra`, same legacy call -- which is what lets
+        # this land without disturbing the paid path.
+        #
+        # WHY IT EXISTS. The fallback above is honest about the ROUTE but silent about the
+        # CLAIM. Run 30390877219 shipped 59/38/12/6 observations through the untimed legacy
+        # route across four tasks, and no artifact recorded that the canonical claim was void:
+        # `gt_feature_metrics` and `live_evidence` read only DELIVERED rows, so they reported
+        # nothing -- correct by accident, not by construction. A grader that is right only
+        # because it never looked is not fail-closed.
+        #
+        # In proof mode we return WITHOUT touching `out`. That makes "the native path was
+        # preserved" a byte-level fact rather than an assertion: exactly zero delivery routes
+        # run, so nothing downstream can attribute an observation's bytes to GT.
+        #
+        # `assurance` is READ from the runtime, never hardcoded. `_canonical_observer_is_dark`
+        # consults only `gt_emission_enabled` / `isolated_components`, so a component isolated
+        # by a NON-core fault is dark while the attempt is merely DEGRADED (apply_failure_policy
+        # leaves emission enabled). Stamping a literal "UNASSURED" would mislabel that state and
+        # would pass a single-value test while being wrong -- so the value comes from
+        # attempt_runtime.failure_state and the absent case is "UNKNOWN", never "ASSURED".
+        _proof_mode = os.environ.get("GT_CANONICAL_PROOF_MODE", "") == "1"
+        _fs = getattr(
+            getattr(attachment, "attempt_runtime", None), "failure_state", None
+        )
+
+        def _fs_value(name: str, default: str = "") -> str:
+            raw = getattr(_fs, name, None)
+            if raw is None:
+                return default
+            return str(getattr(raw, "value", getattr(raw, "name", raw)))
+
         try:
             _runtime_ledger_record(
                 kind="canonical_runtime.dark_fallback",
                 outcome="suppressed_internal_only",
-                reason="canonical_observer_dark:legacy_delivery_resumed",
+                reason=(
+                    "canonical_observer_dark:proof_mode_fail_closed"
+                    if _proof_mode
+                    else "canonical_observer_dark:legacy_delivery_resumed"
+                ),
                 chars=0,
+                extra=(
+                    {
+                        "assurance": _fs_value("assurance", "UNKNOWN"),
+                        "proof_mode": True,
+                        "canonical_delivery_claimed": False,
+                        "native_output_preserved": True,
+                        # ONE key for the FaultCode, not two. `quarantine_reason` IS a
+                        # `FaultCode`, so carrying it under both names added a column and no
+                        # information. And it is populated ONLY by `_quarantine`: the isolation
+                        # branch of `apply_failure_policy` -- which is exactly clause 2 of
+                        # `_canonical_observer_is_dark` -- leaves it None and sets DEGRADED, so
+                        # on that path `fault_code` is "" and `failed_event_id` + `health` are
+                        # the fields that actually identify the fault. That is why all three
+                        # are here.
+                        # `quarantine_reason` and `fault_code` are the SAME `FaultCode`; both
+                        # names are carried because both are already read downstream. It is
+                        # populated ONLY by `_quarantine`: the isolation branch of
+                        # `apply_failure_policy` -- which is exactly clause 2 of
+                        # `_canonical_observer_is_dark` -- leaves it None and sets DEGRADED, so
+                        # on that path both are "" and `failed_event_id` + `health` are the
+                        # fields that actually identify the fault. That is why all four are here.
+                        "quarantine_reason": _fs_value("quarantine_reason"),
+                        "fault_code": _fs_value("quarantine_reason"),
+                        "failed_event_id": _fs_value("failed_event_id"),
+                        "health": _fs_value("health"),
+                        "isolated_components": list(
+                            getattr(_fs, "isolated_components", ()) or ()
+                        ),
+                    }
+                    if _proof_mode
+                    else None
+                ),
             )
         except Exception:  # noqa: BLE001
             pass
+        if _proof_mode:
+            # ONE attempt-terminal verdict, so a grader reads a single authoritative row
+            # instead of folding N per-action rows and guessing whether N==0 meant healthy.
+            global _canonical_proof_mode_verdict_emitted
+            if not _canonical_proof_mode_verdict_emitted:
+                _canonical_proof_mode_verdict_emitted = True
+                try:
+                    _runtime_ledger_record(
+                        kind="canonical_runtime.proof_mode_verdict",
+                        outcome="suppressed_internal_only",
+                        reason="FAIL_CLOSED:canonical_observer_dark",
+                        chars=0,
+                        extra={"assurance": _fs_value("assurance", "UNKNOWN")},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            return
         _augment_output_legacy(action, out)
         return
     observer = getattr(attachment, "observe_action_result", None)

@@ -110,7 +110,30 @@ _MISTAKE_GATED_FACTS: dict[str, str] = {
 # The producer ran and there was NOTHING to deliver -> correct-quiet, not a failure.
 _NO_EVIDENCE_REASONS = frozenset(
     {
-        "plan_none_produced",   # verify.horizon: no covering test exists to execute
+        # CORRECTED 2026-07-28.  This string does NOT mean "no covering test exists".
+        # `_verification_plan_emission` (gt_mini_patch.py:11954) reaches its
+        # `plan_none_produced` tail (:12080) only after the progressive plan RAN, and on
+        # the independent producer path it is entered only when
+        # `_covering_tests_for_symbols` already returned a NON-empty selection
+        # (:11880 guard -> :11924 call).  So it conflates: every rung was GREEN, or the
+        # unit rung was RED but UNATTRIBUTED (invariant (2) forbids delivering it), or a
+        # syntax rung was RED but carried no renderable first error, or the only RED rung
+        # was a non-deliverable kind.  "No covering test exists in GT's graph" is a
+        # DIFFERENT string -- `no_covering_test_selected`, immediately below.
+        "plan_none_produced",
+        # The genuine CAPABILITY GAP: the empty-selection branch (:11880-11909).  GT's
+        # graph knows no FACT-tier test->impl edge for the symbols the agent just edited,
+        # so no covering test could even be attempted.  Correct-quiet as a VERDICT (there
+        # was nothing to deliver) but it is the single most informative dark state
+        # covering_red has, which is why it is carried as a sub-detail (see `verdict_detail`).
+        "no_covering_test_selected",
+        # Selection was NON-empty but no selected file exists on disk (:11678-11685).
+        "covering_no_covering",
+        # The covering test EXECUTED and was GREEN (:11721-11728, verdict "pass").
+        "covering_pass",
+        # A real RED the edit did not plausibly cause; the attribution gate withheld it
+        # on purpose (:11755-11762).  Nothing legitimately deliverable.
+        "covering_unattributable",
         "edit_opportunity",     # edit.syntax denominator marker (an edit happened)
         "clean",                # submit/completion gate ran, nothing to refuse
     }
@@ -118,13 +141,28 @@ _NO_EVIDENCE_REASONS = frozenset(
 _NO_EVIDENCE_PREFIXES = ("trigger_false",)  # e.g. trigger_false:clean_exit|checkers=...
 
 # The producer could not run / could not render -> a real defect, candidate failure.
+# `covering_none_produced` (:11767-11775) is the covering twin of `render_failed`: an
+# ATTRIBUTED RED existed and the native renderer could not surface it, i.e. evidence was
+# produced and the bytes never reached the model -- this tool's own definition of a
+# DELIVERY-FAILURE.  It is graded like `render_failed` for exactly that parity.
 _DEFECT_PREFIXES = (
     "engine_import_unavailable",
     "checker_raised",
     "render_failed",
     "provider_failed",
-    "suppressed_ack_failure",
+    "covering_none_produced",
 )
+
+# Referee arbitration keyed on the REASON rather than the outcome.  `suppressed_ack_failure`
+# is emitted (gt_mini_patch.py:11789 / :12062 / :12242) at the exact call site where
+# `_ss_ack_failure_suppresses` returned True -- i.e. the block WAS built and SS-ACK dropped it
+# as a duplicate of an already-acknowledged failure identity.  That referee logs its OWN row
+# with outcome `suppressed_duplicate` / reason `acknowledged_failure_identity`, which this
+# reader already classes `arbitration`; grading the producer-side twin as a DEFECT made the
+# SAME event read as both "a referee did its job" and "the only real failure".  Reason-first,
+# and checked BEFORE `_DEFECT_PREFIXES` so re-adding the prefix there cannot silently
+# resurrect the contradiction.
+_ARBITRATION_REASONS = frozenset({"suppressed_ack_failure"})
 
 # Referee arbitration: evidence EXISTED and a self-governing referee withheld it on
 # purpose (novelty / dedup / dose / step-behind / provenance / gate).  Legitimate --
@@ -168,6 +206,14 @@ class FeatureRow:
     mistake_gated: bool
     gate_note: str
     verdict: str = ""
+    # The dominant REASON behind `verdict`.  Six distinct engineering states publish as one
+    # TRIGGER-ABSENT; this is what makes TRIGGER-ABSENT(no_covering_test_selected) -- GT's
+    # graph knows no covering test, a capability gap -- readable apart from
+    # TRIGGER-ABSENT(covering_pass) -- the test ran and was green.  Deliberately a
+    # SUB-DETAIL and not a new top-level verdict: `verdict` stays inside the existing set so
+    # the summary counters and the split pinned by
+    # tests/swebench/test_verdict_funnel_splits_trigger_absent_20260727.py keep their meaning.
+    verdict_detail: str = ""
     delivered: int = 0
     delivered_chars: int = 0
     tasks_fired: set[str] = field(default_factory=set)
@@ -312,6 +358,8 @@ def classify_reason(row: dict[str, Any]) -> tuple[str, str]:
         return "no_evidence", reason or outcome
     if any(reason.startswith(p) for p in _NO_EVIDENCE_PREFIXES):
         return "no_evidence", head
+    if reason in _ARBITRATION_REASONS or head in _ARBITRATION_REASONS:
+        return "arbitration", reason
     if any(reason.startswith(p) for p in _DEFECT_PREFIXES):
         return "defect", reason
     if outcome in _WRONG_PHASE_OUTCOMES:
@@ -369,6 +417,13 @@ def evaluate(root: Path) -> dict[str, Any]:
     total_rows = 0
     unattributed: Counter = Counter()
     unattributed_delivered: Counter = Counter()
+    #: Delivered rows this reader cannot attribute BY LAYER but which ARE attributed by
+    #: their nested `evidence_lineage`. Reported separately so they stop reading as a bug.
+    lineage_attributed_delivered: Counter = Counter()
+    #: Trigger-census rows per FACT class: the boundary OCCURRED, independent of
+    #: whether any producer then spoke. This is the denominator that separates
+    #: "trigger never happened" from "producer abstained".
+    trigger_opportunities: Counter = Counter()
     unresolved_gate: Counter = Counter()
     cap_direct: dict[str, dict[str, Any]] = {
         cap.feature_id: {"delivered": 0, "tasks": set(), "how": set(),
@@ -407,13 +462,44 @@ def evaluate(root: Path) -> dict[str, Any]:
                 cap_direct[owner]["event_types"][event_type] += 1
                 cap_direct[owner]["how"].update(how)
 
+        # TRIGGER CENSUS: a host-side row (chars=0, outcome="evaluated") stating that a
+        # fact's boundary OCCURRED, emitted independently of whether any producer then
+        # spoke. Counted BEFORE attribution because it is not a delivery and must never
+        # land in the delivered/unattributed accounting.
+        if row.get("layer") == "feature.trigger_opportunity":
+            _census_fact = str(row.get("fact_class") or "").strip()
+            if _census_fact:
+                trigger_opportunities[_census_fact] += 1
+            continue
+
         fact_class, how = attribute_row(row, _LAYER_TO_FACT_CLASS,
                                         _fact_identity_for_layer, delivery_facts)
         if fact_class is None:
             key = f"{row.get('layer')}|{outcome}|{how}"
             unattributed[key] += 1
             if is_delivery:
-                unattributed_delivered[f"{row.get('layer')}|{event_type}"] += 1
+                # DO NOT REPORT A CANONICAL CAPSULE ROW AS UNATTRIBUTED. The canonical
+                # plane writes ONE delivery row per model call whose `layer` is the
+                # constant "canonical.provider_delivery"; its attribution lives in the
+                # NESTED `evidence_lineage` entries, each carrying its own `fact_class`
+                # and `cap_owners`. `gt_feature_metrics` attributes it exactly that way
+                # and documents why the layer cannot be used: matching a lane layer on a
+                # canonical row would mean writing a layer the record does not have.
+                #
+                # Measured on run 30390877219: 10 of the 14 remaining "UNATTRIBUTED
+                # DELIVERIES" were canonical rows that ARE attributed, just by a
+                # mechanism this reader does not consult. Listing them here sends the
+                # next reader chasing a non-bug -- the same class of harm as a zero that
+                # means "not measured" sharing a rendering with "measured, found none".
+                _lineage = row.get("evidence_lineage")
+                _lineage_attributed = isinstance(_lineage, list) and any(
+                    isinstance(e, dict) and e.get("fact_class") for e in _lineage
+                )
+                if _lineage_attributed:
+                    lineage_attributed_delivered[
+                        f"{row.get('layer')}|{event_type}"] += 1
+                else:
+                    unattributed_delivered[f"{row.get('layer')}|{event_type}"] += 1
             if outcome in _GATE_DECISION_OUTCOMES:
                 unresolved_gate[f"{row.get('layer')}|{outcome}"] += 1
             continue
@@ -450,7 +536,7 @@ def evaluate(root: Path) -> dict[str, Any]:
 
     # ---- FACT verdicts -------------------------------------------------------
     for fact in facts.values():
-        _decide(fact, on_time_hits, boundary_stamped)
+        _decide(fact, on_time_hits, boundary_stamped, trigger_opportunities)
 
     # ---- CAP verdicts --------------------------------------------------------
     for cap in caps:
@@ -463,6 +549,7 @@ def evaluate(root: Path) -> dict[str, Any]:
             cap.seen_event_types = Counter(direct["event_types"])
             how = "+".join(sorted(direct["how"])) or "row"
             cap.attribution = f"byte-owner lineage: {how}"
+            cap.verdict_detail = "delivered"
             cap.on_time = bound.on_time
             cap.evidence = ""
             continue
@@ -470,6 +557,7 @@ def evaluate(root: Path) -> dict[str, Any]:
         # inherited cell is marked '^' in the table so a bound-FACT count is never
         # read as proof that THIS capability owned the bytes.
         cap.verdict = bound.verdict
+        cap.verdict_detail = bound.verdict_detail
         cap.inherited = True
         cap.delivered = bound.delivered
         cap.delivered_chars = bound.delivered_chars
@@ -495,15 +583,18 @@ def evaluate(root: Path) -> dict[str, Any]:
         "features": features,
         "unattributed": unattributed,
         "unattributed_delivered": unattributed_delivered,
+        "lineage_attributed_delivered": lineage_attributed_delivered,
         "unresolved_gate": unresolved_gate,
         "boundary_stamped": boundary_stamped,
         "on_time_hits": on_time_hits,
     }
 
 
-def _decide(fact: FeatureRow, on_time_hits: Counter, boundary_stamped: int) -> None:
+def _decide(fact: FeatureRow, on_time_hits: Counter, boundary_stamped: int,
+            trigger_opportunities: Counter | None = None) -> None:
     classes = fact.reason_classes
     if fact.delivered > 0:
+        fact.verdict_detail = "delivered"
         fact.verdict = _VERDICT_FIRED
         fact.attribution = "layer/fact_class rows"
         bits = []
@@ -518,6 +609,7 @@ def _decide(fact: FeatureRow, on_time_hits: Counter, boundary_stamped: int) -> N
         fact.verdict = _VERDICT_FAILURE
         fact.attribution = "layer/fact_class rows"
         fact.evidence = _top_detail(fact, ("wrong_phase", "defect"))
+        fact.verdict_detail = _dominant_reason(fact, ("wrong_phase", "defect"))
     elif ((classes.get("produced") or classes.get("downgraded"))
             and not classes.get("arbitration")):
         fact.verdict = _VERDICT_FAILURE
@@ -527,6 +619,7 @@ def _decide(fact: FeatureRow, on_time_hits: Counter, boundary_stamped: int) -> N
             "no arbitration explaining it: "
             + _top_detail(fact, ("produced", "downgraded"))
         )
+        fact.verdict_detail = _dominant_reason(fact, ("produced", "downgraded"))
     elif classes.get("arbitration"):
         # Evidence EXISTED and a referee withheld it.  Explicitly NOT a delivery
         # failure (the referee is doing its job), and not literally "trigger absent"
@@ -537,6 +630,7 @@ def _decide(fact: FeatureRow, on_time_hits: Counter, boundary_stamped: int) -> N
         fact.attribution = "layer/fact_class rows"
         fact.evidence = "ARBITRATED (evidence produced, referee withheld -- NOT a " \
             "delivery failure): " + _top_detail(fact, ("arbitration",))
+        fact.verdict_detail = _dominant_reason(fact, ("arbitration",))
     else:
         # No rows at all is BLINDNESS, not quiet: the trigger may well have occurred and
         # nothing recorded it either way. Absence of evidence is not evidence of absence.
@@ -546,8 +640,32 @@ def _decide(fact: FeatureRow, on_time_hits: Counter, boundary_stamped: int) -> N
             fact.evidence = _top_detail(
                 fact, ("no_evidence", "telemetry", "downgraded", "other")
             )
+            fact.verdict_detail = _dominant_reason(
+                fact, ("no_evidence", "telemetry", "downgraded", "other")
+            )
         else:
-            fact.evidence = "no ledger row for this feature's producer layer(s)"
+            # SPLIT BLINDNESS FROM A MEASURED ABSTENTION, using the trigger census.
+            #
+            # "No producer row" has TWO causes that a run cannot otherwise tell apart:
+            # the trigger's boundary never occurred (correct-quiet), or it DID occur and
+            # the producer declined. The census (`feature.trigger_opportunity`, host-side,
+            # chars=0) records the boundary independently of any producer, so a census row
+            # for this fact class converts blindness into a MEASURED negative -- which is
+            # the whole reason the denominator exists. Without this the census was
+            # WRITE-ONLY: rows emitted and nothing reading them.
+            _opps = (trigger_opportunities or Counter()).get(fact.bound_fact, 0)
+            if _opps:
+                fact.evidence = (
+                    f"NO producer row, but the trigger boundary OCCURRED {_opps}x "
+                    f"(trigger census) -- the producer had an opportunity and abstained"
+                )
+                fact.verdict_detail = f"abstained_after_{_opps}_opportunities"
+            else:
+                fact.evidence = (
+                    "no ledger row for this feature's producer layer(s), and no trigger "
+                    "census row -- boundary occurrence itself is UNMEASURED"
+                )
+                fact.verdict_detail = "no_rows"
 
     # On-time is scored ONLY from contracted_boundary; anything else is a guess.
     hits = {k[1]: v for k, v in on_time_hits.items() if k[0] == fact.feature_id}
@@ -564,6 +682,26 @@ def _decide(fact: FeatureRow, on_time_hits: Counter, boundary_stamped: int) -> N
         )
 
 
+def _dominant_reason(fact: FeatureRow, classes: tuple[str, ...]) -> str:
+    """The single most common REASON string behind the verdict, class prefix stripped.
+
+    ``reason_detail`` keys are ``"<class>:<reason>"`` and the reason itself may carry its
+    own ``:``/``|`` payload (``trigger_false:parsed|checkers=ast.parse``); only the reason
+    HEAD is published, so the sub-detail is a stable, low-cardinality label.  Ties break on
+    the reason string so the output is deterministic across runs.
+    """
+    tally: Counter = Counter()
+    for detail, count in fact.reason_detail.items():
+        klass, _, reason = detail.partition(":")
+        if klass not in classes:
+            continue
+        head = reason.split(":", 1)[0].split("|", 1)[0].strip()
+        tally[head or klass] += count
+    if not tally:
+        return ""
+    return min(tally.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+
+
 def _top_detail(fact: FeatureRow, classes: tuple[str, ...], limit: int = 3) -> str:
     items = [
         (detail, count)
@@ -575,6 +713,20 @@ def _top_detail(fact: FeatureRow, classes: tuple[str, ...], limit: int = 3) -> s
 
 
 # -------------------------------------------------------------------- render ---
+
+def verdict_cell(f: FeatureRow) -> str:
+    """``VERDICT(dominant_reason)`` -- the verdict plus WHY, as one readable token.
+
+    The verdict itself is untouched: six engineering states still publish the SAME
+    top-level TRIGGER-ABSENT, which is what every counter and every existing consumer
+    reads.  Only the parenthetical is new, and it is what tells the reader that
+    ``TRIGGER-ABSENT(no_covering_test_selected)`` (GT's graph knows no covering test at
+    all) is not ``TRIGGER-ABSENT(covering_pass)`` (a covering test ran and was green).
+    """
+    if not f.verdict_detail or f.verdict_detail == "delivered":
+        return f.verdict
+    return f"{f.verdict}({f.verdict_detail})"
+
 
 def render_text(result: dict[str, Any]) -> str:
     features: list[FeatureRow] = result["features"]
@@ -588,8 +740,8 @@ def render_text(result: dict[str, Any]) -> str:
     out.append("")
 
     header = (
-        f"{'FEATURE':<20} {'KIND':<4} {'CONTRACTED':<14} {'VERDICT':<16} "
-        f"{'DELIV':>6} {'TASK':>5}  {'BOUNDARIES SEEN (ledger event_type)':<46} "
+        f"{'FEATURE':<20} {'KIND':<4} {'CONTRACTED':<14} {'VERDICT(why)':<48} "
+        f"{'DELIV':>6} {'TASK':>5}  {'BOUNDARIES SEEN (ledger event_type)':<34} "
         f"ON-TIME"
     )
     out.append(header)
@@ -598,14 +750,17 @@ def render_text(result: dict[str, Any]) -> str:
         seen = ", ".join(
             f"{k}x{v}" for k, v in sorted(f.seen_event_types.items()) if v
         ) or "-"
-        if len(seen) > 46:
-            seen = seen[:45] + "~"
+        if len(seen) > 34:
+            seen = seen[:33] + "~"
         gate = "*" if f.mistake_gated else " "
         mark = "^" if f.inherited else " "
+        cell = verdict_cell(f)
+        if len(cell) > 48:
+            cell = cell[:47] + "~"
         out.append(
             f"{f.feature_id + gate:<20} {f.kind:<4} {f.contracted_boundary:<14} "
-            f"{f.verdict:<16} {str(f.delivered) + mark:>6} "
-            f"{len(f.tasks_fired):>2}/{len(tasks):<2}  {seen:<46} {f.on_time}"
+            f"{cell:<48} {str(f.delivered) + mark:>6} "
+            f"{len(f.tasks_fired):>2}/{len(tasks):<2}  {seen:<34} {f.on_time}"
         )
     out.append("")
     out.append("* = MISTAKE-GATED: fires only on an agent mistake or a rare task shape.")
@@ -626,7 +781,7 @@ def render_text(result: dict[str, Any]) -> str:
                 ("layer", "byte-owner")):
             continue
         gate = f"  [mistake-gated: {f.gate_note}]" if f.mistake_gated else ""
-        out.append(f"  {f.feature_id} ({f.kind}) -> {f.verdict}")
+        out.append(f"  {f.feature_id} ({f.kind}) -> {verdict_cell(f)}")
         out.append(f"      attribution: {f.attribution}{gate}")
         if f.evidence:
             out.append(f"      evidence   : {f.evidence}")
@@ -643,6 +798,16 @@ def render_text(result: dict[str, Any]) -> str:
         f" / {blind} NO-INSTRUMENTATION / {failed} DELIVERY-FAILURE"
         f" out of {len(features)}"
     )
+    absent_why = Counter(f.verdict_detail or "(unlabelled)" for f in features
+                         if f.verdict == _VERDICT_ABSENT)
+    if len(absent_why) > 1:
+        # One TRIGGER-ABSENT number is exactly how a capability gap
+        # (`no_covering_test_selected` -- GT's graph knows no covering test) hides behind a
+        # green test (`covering_pass`).  Publish the split next to the headline.
+        out.append(
+            "  TRIGGER-ABSENT splits by dominant reason: "
+            + ", ".join(f"{k} x{v}" for k, v in sorted(absent_why.items()))
+        )
     gated_absent = [f.feature_id for f in features
                     if f.verdict == _VERDICT_ABSENT and f.mistake_gated]
     if gated_absent:
@@ -721,6 +886,7 @@ def render_json(result: dict[str, Any]) -> str:
                 "mistake_gated": f.mistake_gated,
                 "mistake_gate": f.gate_note,
                 "verdict": f.verdict,
+                "verdict_detail": f.verdict_detail,
                 "delivered_rows": f.delivered,
                 "delivered_chars": f.delivered_chars,
                 "tasks_fired": sorted(f.tasks_fired),

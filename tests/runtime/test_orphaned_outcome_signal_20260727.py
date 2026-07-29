@@ -145,16 +145,33 @@ def test_a_genuinely_illegal_transition_from_a_REAL_state_still_raises():
     """ANTI-WEAKENING, and the line this fix must not cross.
 
     A transition out of an actual state that the table forbids means the graph is
-    inconsistent -- real corruption, not a missed observation. Open a CANDIDATE, then send
-    VALIDATION_SUPPORT, which requires ACTIVE.
+    inconsistent -- real corruption, not a missed observation.
+
+    RE-POINTED 2026-07-28. This pinned ``CANDIDATE + VALIDATION_SUPPORT`` ("open a CANDIDATE,
+    then send VALIDATION_SUPPORT, which requires ACTIVE"). That cell is no longer corruption
+    and no longer raises: it is the ordinary trajectory *grep a symbol, then a test passes on
+    it*, and it was the last live-reachable cell that quarantined the canonical observer for a
+    whole attempt. VALIDATION_SUPPORT now admits CANDIDATE -- a MONOTONE advance to SUPPORTED
+    that introduces no newly reachable state and drops only an ACTIVE waypoint GT never
+    observed.
+
+    The pin moves to ``SUPPORTED + ABANDON_TARGET``, which this file's own docstring already
+    names as genuine corruption: ABANDON_TARGET admits {ACTIVE, WEAKENED, CONTRADICTED}, so a
+    claim that a SUPPORTED (validated) hypothesis was abandoned is incoherent about progress
+    rather than merely unobserved. The anti-weakening property is unchanged -- only the cell
+    that carries it moved, because the old one stopped being an example of the thing it was
+    pinning.
     """
     graph = rr.reduce_reasoning_signal(
         _graph(), _signal(rr.OperationalSignalKind.EXACT_SEARCH, sequence=1)
     )
+    graph = rr.reduce_reasoning_signal(
+        graph, _signal(rr.OperationalSignalKind.VALIDATION_SUPPORT, sequence=2)
+    )
     with pytest.raises(rr.StateIntegrityError, match="illegal hypothesis transition"):
         rr.reduce_reasoning_signal(
             graph,
-            _signal(rr.OperationalSignalKind.VALIDATION_SUPPORT, sequence=2),
+            _signal(rr.OperationalSignalKind.ABANDON_TARGET, sequence=3),
         )
 
 

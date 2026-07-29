@@ -47,6 +47,10 @@ on:
         description: "Deterministic SS shadow-holdout fraction in [0,1]. Exact request is validated and sealed; default 0 withholds nothing."
         required: true
         default: "0"
+      live_cohort_mde:
+        description: "PREREGISTERED minimum detectable effect for the live-causal cohort estimator (e.g. 0.2). Deliberately no default: unset, every cohort reports UNMEASURED/preregistered_minimum_detectable_effect_absent rather than using a threshold nobody registered. Meaningful only with shadow_rate>0."
+        required: false
+        default: ""
       assets_repo:
         description: "owner/repo hosting the shared GHCR image cache + pipeline-assets-v1 release"
         required: true
@@ -2806,6 +2810,7 @@ jobs:
           GT_EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
           GT_RUN_ID: ${{ github.run_id }}
           GT_TRIAL_RESULT: ${{ needs.trial.result }}
+          GT_LIVE_COHORT_MDE: ${{ github.event.inputs.live_cohort_mde }}
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics
         run: |
           set -euo pipefail
@@ -2973,6 +2978,61 @@ jobs:
               --format markdown \
               --output "$GT_DIAG_DIR/ss_live_diagnosis_${GT_RUN_ID}.md" \
               || GT_SS_DIAGNOSIS_MD_RC=$?
+
+            # R4a (2026-07-29): the live-causal cohort estimator. The whole chain already
+            # existed — collect_task publishes ss_integrity.fair_probe.opportunity_observations
+            # per task, and gt_complete_report feeds them to live_causal_cohort.evaluate_live_cohort
+            # (Horvitz-Thompson, cluster-robust SE, power gate) — but NOTHING invoked it, so the
+            # shadow-holdout rows a shadow_rate>0 run generates were computed into no artifact and
+            # are unrecoverable after the run. This step is the missing caller.
+            #
+            # GT_LIVE_COHORT_MDE is the PREREGISTERED minimum detectable effect. It has NO
+            # default on purpose: unset, gt_complete_report reports every cohort as
+            # UNMEASURED/`preregistered_minimum_detectable_effect_absent` — an honest refusal,
+            # never a number from a threshold nobody registered.
+            python3 - <<'PY' || echo "GT_COMPLETE_REPORT_INPUTS_WARN"
+          import json, pathlib
+          d = pathlib.Path("/tmp/gt-diagnosis")
+          (d / "claim_contract.json").write_text(json.dumps({
+              "primary_claim": "Whether valid GT changes agent behavior",
+              "estimand": "live opportunity effect",
+              "unit": "opportunity",
+              "treatment": "deliver selected GT candidate",
+              "comparator": "withhold selected GT candidate",
+              "assignment": "randomized",
+              "primary_outcome": "registered receipt",
+              "consequence_horizon": "through the next decision boundary",
+              "task_population": "locked held-out coding tasks",
+              "pre_specified": True,
+          }), encoding="utf-8")
+          (d / "system_identity.json").write_text(json.dumps({
+              "model": "deepseek-chat",
+              "provider": "deepseek",
+              "scaffold": "mini-swe-agent",
+              "tools": "fixed tool contract",
+              "gt_profile": "2",
+              "budget": "fixed",
+              "retries": "fixed",
+          }), encoding="utf-8")
+          PY
+            GT_COMPLETE_REPORT_RC=0
+            _MDE_ARGS=""
+            if [ -n "${GT_LIVE_COHORT_MDE:-}" ]; then
+              _MDE_ARGS="--minimum-detectable-effect ${GT_LIVE_COHORT_MDE}"
+            fi
+            # shellcheck disable=SC2086
+            python3 scripts/swebench/gt_complete_report.py \
+              "$GT_DIAG_DIR"/gt_feature_metrics_*.json \
+              --study-id "live-cohort-${GT_RUN_ID}" \
+              --scope run \
+              --claim-contract "$GT_DIAG_DIR/claim_contract.json" \
+              --system-identity "$GT_DIAG_DIR/system_identity.json" \
+              --held-out-test-set \
+              --deployment-like-context \
+              $_MDE_ARGS \
+              --output "$GT_DIAG_DIR/gt_complete_report_${GT_RUN_ID}.json" \
+              || GT_COMPLETE_REPORT_RC=$?
+            echo "GT_COMPLETE_REPORT_RC=$GT_COMPLETE_REPORT_RC"
           else
             GT_FEATURE_METRICS_RC=125
             GT_SS_DIAGNOSIS_JSON_RC=125

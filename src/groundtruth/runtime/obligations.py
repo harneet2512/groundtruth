@@ -743,13 +743,65 @@ def obligation_truth_statuses(
         subjects = _normalize_subjects(eligible_symbols)
         after_turn = int(freshness.get(getattr(view, "idx", -1), -1))
 
+        touched, _confidence = overlap(view, edited)
+        # SUBJECT-SCOPED touch, distinct from ``touched`` above.  ``overlap`` reads
+        # ``view.sym_parts``, which in production is EVERY >=3-char identifier-shaped
+        # token of the clause's English sentence (``must``, ``input``, ``behavior``),
+        # intersected with edit-command tokens accumulated across the whole episode.
+        # As a counterweight that is near-vacuous: a clause reached PROVEN because the
+        # word ``input`` appeared in some edit command.  ``touched`` still feeds the
+        # v1-compatible ``ObligationTruth.edited`` field below, where its loose
+        # sentence-level meaning is the intended one; only the PROVEN gate uses this.
+        subject_touched = bool(subjects & _normalize_subjects(edited))
+
         def covers(item_subjects: frozenset[str]) -> bool:
-            return bool(subjects) and item_subjects == subjects
+            """Credit only evidence that names EVERY subject of this clause.
+
+            Deliberately DIRECTIONAL, and deliberately not set equality: evidence
+            NARROWER than the clause (naming ``parse_item`` for a clause about
+            ``parse_item`` AND ``EmptyValue``) is a partial subject match and still
+            credits nothing.
+
+            WHAT THE WIDENING ACTUALLY BUYS (corrected 2026-07-28 — the original
+            rationale here was wrong).  It does NOT repair a same-clause ``len<3``
+            asymmetry: ``subjects`` is filtered by ``_credit_eligible_symbols`` while
+            the evidence key is not, but the sole producer of ``subject_symbols``
+            (``pretask/spec.py:593-615``) already enforces >=3 on every branch, so the
+            two sets do not diverge in production.  The live channel is
+            CROSS-CLAUSE POOLING: ``gt_mini_patch.py:8677-8709`` builds evidence per
+            clause, appends it all to ONE flat list, and hands that list plus every
+            view to this function.  Under ``==`` a clause could only be credited by
+            evidence keyed to its own subject set.  Under ``<=`` a narrow clause is
+            credited by a broad SIBLING clause's evidence whenever the sibling's test
+            named every symbol the narrow clause is about — which is the ordinary
+            shape of two clauses drawn from one issue paragraph.
+            """
+            return bool(subjects) and subjects <= item_subjects
+
+        def proof_covers(item_subjects: frozenset[str]) -> bool:
+            """Proof-grade credit; widened credit needs a second, independent signal.
+
+            An exactly-matching proof keeps its prior force — no edit precondition,
+            because a clause can legitimately be proven with zero edits
+            (``tests/test_obligations_v2_t3_integration.py:122``).  A WIDER proof —
+            one earned for a sibling clause — may only reach PROVEN when THIS
+            clause's own subject symbols were edited: changed symbols AND validation
+            evidence.  Without that the clause degrades to EXERCISED_UNPROVEN via
+            ``covers`` — visible, honest, and never a silent promotion.
+
+            The counterweight is ``subject_touched``, NOT ``touched``.  ``touched``
+            is sentence-word-level and a real trajectory satisfies it almost always,
+            so gating on it let clause A reach PROVEN on clause B's proof by virtue
+            of the word ``input`` appearing in an edit command.
+            """
+            if not covers(item_subjects):
+                return False
+            return item_subjects == subjects or subject_touched
 
         proof = next(
             (
                 item for item in reversed(proofs)
-                if covers(item.subjects) and item.turn > after_turn
+                if proof_covers(item.subjects) and item.turn > after_turn
             ),
             None,
         )
@@ -760,7 +812,6 @@ def obligation_truth_statuses(
             ),
             None,
         )
-        touched, _confidence = overlap(view, edited)
         if not subjects:
             state = ObligationTruthState.UNVERIFIABLE
         elif proof is not None:

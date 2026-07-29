@@ -47,6 +47,21 @@ _LEGACY_ROOT = "_augment_output_legacy"
 # Every function whose DIRECT call sites all lie inside the legacy body, as of 2026-07-28.
 LEGACY_ONLY = frozenset(
     {
+        # DELIBERATE (2026-07-28). `_begin_legacy_observation` mints the observation-level
+        # identity (iteration + action sha) that lane/gateway seals need in order to bind a
+        # receipt. It is legacy-ONLY by construction and must stay that way: the canonical
+        # route gets its identity from `_begin_observation_batch` via `_batch_context`, and
+        # publishing a second, weaker identity on that path would give one observation two
+        # competing `observation_id`s. Called once, at the top of `_augment_output_legacy`.
+        "_begin_legacy_observation",
+        # DELIBERATE (2026-07-29). The W2A trigger census is anchored post-produce inside
+        # `_augment_output_legacy` — the probe-verified anchor where the semantic event
+        # tuple is COMPLETE (search_result etc. are added by `_observe_semantic_events`,
+        # not by the seam's own `_semantic_arg`). The canonical route has no census
+        # emitter yet; when it grows one it must be a SEPARATE call at the equivalent
+        # completeness point, not a rehoming of this one — the legacy anchor stays valid
+        # for every legacy-delivered observation regardless.
+        "_record_trigger_opportunities",
         "_cochange_block",
         "_coherence_collapse_candidate",
         "_concern_lane_a_append",

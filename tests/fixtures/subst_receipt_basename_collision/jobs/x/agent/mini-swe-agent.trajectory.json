@@ -1,0 +1,15 @@
+{
+ "info": {"config": {"model": {"model_name": "fixture"}}},
+ "messages": [
+  {"role": "system", "content": "You are a helpful assistant."},
+  {"role": "user", "content": "<pr_description>fix util</pr_description>"},
+  {"role": "assistant", "content": "start",
+   "extra": {"actions": [{"command": "ls -la", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "<gt-localization confidence=\"medium\">\nCandidate edit targets (reason over these):\n  1. a/util.py — grep — helper\n  2. b/util.py — grep — helper\n</gt-localization>",
+   "extra": {"returncode": 0}},
+  {"role": "assistant", "content": "editing a util now",
+   "extra": {"actions": [{"command": "cat a/util.py", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "code", "extra": {"returncode": 0}}
+ ],
+ "trajectory_format": "mini-swe-agent-1"
+}

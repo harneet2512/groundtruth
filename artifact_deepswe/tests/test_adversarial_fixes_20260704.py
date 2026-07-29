@@ -444,6 +444,23 @@ def test_r5_v2_artifact_owns_review_transition_obligation_site(monkeypatch, tmp_
     monkeypatch.setattr(g, "_unexercised_clause_candidate", _v2_candidate)
     monkeypatch.setattr(g, "_obligation_nudge_block", _legacy_candidate)
 
+    # TRIGGER, RE-POINTED 2026-07-28 -- the SUBJECT of this test is unchanged.
+    #
+    # This test is about v2 EXCLUDING the legacy tracker at the obligation site. It
+    # never claimed "any test result opens the obligation dose"; it merely relied on
+    # that, because the gate used to be
+    #     `_event == Event.TEST_RESULT or _v2_obligation_result_ready()`
+    # and the bare `pytest -q` below satisfied the first disjunct. That disjunct is
+    # removed: it nullified the clause-scoped predicate beside it, and let GT render a
+    # still-unexercised clause under an unrelated green run (amoffat__sh-744 msg63).
+    #
+    # This fixture mocks `_load_obligations_v2` but builds no real obligation truth, so
+    # `_v2_obligation_result_ready()` is False and nothing would open the gate. Drive the
+    # readiness predicate EXPLICITLY instead, flipped between the two turns -- which also
+    # makes what this test depends on visible rather than incidental.
+    _ready = {"v": False}
+    monkeypatch.setattr(g, "_v2_obligation_result_ready", lambda: _ready["v"])
+
     early = {"output": ""}
     g._augment_output({"command": "sed -i s/a/b/ src/foo.py"}, early)
     assert not (early.get("output") or "")
@@ -451,6 +468,7 @@ def test_r5_v2_artifact_owns_review_transition_obligation_site(monkeypatch, tmp_
 
     monkeypatch.setattr(g, "_oracle_nonedit_streak", 0)
     monkeypatch.setattr(g, "_oracle_edited_rels", {"src/foo.py"})
+    _ready["v"] = True   # this turn's test result DOES exercise a clause
     out = {"output": ""}
     g._augment_output({"command": "pytest -q"}, out)
     delivered = out.get("output") or ""

@@ -1,0 +1,15 @@
+{
+ "info": {"config": {"model": {"model_name": "fixture"}}},
+ "messages": [
+  {"role": "system", "content": "You are a helpful assistant."},
+  {"role": "user", "content": "<pr_description>fix run behaviour</pr_description>"},
+  {"role": "assistant", "content": "let me look around",
+   "extra": {"actions": [{"command": "ls -la", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "./src\n<gt-evidence>\n[VERIFIED] def run -> src/exec.py:5 (2 callers)\n</gt-evidence>",
+   "extra": {"returncode": 0}},
+  {"role": "assistant", "content": "the tests are running now",
+   "extra": {"actions": [{"command": "ls src", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "exec.py other.py", "extra": {"returncode": 0}}
+ ],
+ "trajectory_format": "mini-swe-agent-1"
+}

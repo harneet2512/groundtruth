@@ -317,7 +317,7 @@ def test_m2_guard_after_classify_double_record_bites(zero_name, monkeypatch):
 # BEFORE the exclusion return, so an excluded search turn promotes a prior
 # delivery's receipt EXACTLY as gateway-alone does (no arm-asymmetric receipts).
 # --------------------------------------------------------------------------- #
-def test_excluded_search_promotes_prior_receipt_like_gateway_alone(tmp_path, monkeypatch):
+def test_excluded_search_runs_prior_bookkeeping_like_gateway_alone(tmp_path, monkeypatch):
     """A prior trace_frame delivery whose target the agent then greps promotes
     delivered->acted on the excluded search turn — the SAME promotion gateway-alone
     records. Reverting FIX-2 (promotion after the exclusion return) reddens this: the
@@ -349,8 +349,16 @@ def test_excluded_search_promotes_prior_receipt_like_gateway_alone(tmp_path, mon
     alone = arm(post_search=False)   # turn 2 is NOT excluded (gateway-alone)
     # exclusion still holds for DELIVERY: the excluded search sealed nothing new.
     assert len(both) == 1
-    # ...but the prior trace_frame's receipt promoted to ACTED, matching gateway-alone.
-    assert both[0] == alone[0] == RECEIPT_ACTED, (both, alone)
+    # RE-POINTED 2026-07-28 (Wave 1 Step 5). This asserted both arms reached ACTED.
+    # FIX-2's actual property is ARM SYMMETRY of the pre-exclusion bookkeeping -- that
+    # the bookkeeping block runs BEFORE the `_gateway_search_excluded(...)` return at
+    # gt_mini_patch.py:15860-15862, so a paired GT-on/gateway-alone comparison is not
+    # arm-asymmetric. ACTED was the VEHICLE for observing that, never the property.
+    # Note the two arms still AGREED when this failed (['delivered'] == ['delivered']);
+    # only the rung moved, because the receipt ladder is now capped at `delivered`.
+    # The surviving pre-exclusion bookkeeping is _xsession_flush() at :15848, still
+    # inside `if _gt_gateway_deliveries:` and still ahead of the return.
+    assert both == alone == [RECEIPT_DELIVERED], (both, alone)
 
 
 # --------------------------------------------------------------------------- #

@@ -28,6 +28,7 @@ from groundtruth.runtime.reasoning_runtime import (
     EvidenceLifecycle,
     EvidenceTransitionReason,
     _EVIDENCE_REASON_TRANSITIONS,
+    projected_decision_window,
 )
 
 
@@ -216,6 +217,13 @@ def _evidence_generation_projection(
             "superseded": False,
             "transition_history": [],
             "owner_feature_ids": [],
+            # Imported, never re-derived: this reader and the runtime writer must erase the
+            # runtime-owned window marker by the SAME rule, or a legitimately advanced window
+            # reads here as a rewritten generation. See `projected_decision_window`.
+            "decision_window_generation": projected_decision_window(
+                payload.get("feature_id"),
+                payload.get("mandatory_reason"),
+            ),
         }
     )
     return projected
@@ -638,6 +646,7 @@ def _load_evidence_ownership(
         previous_history: list[object] | None = None
         previous_lifecycle = ""
         previous_owners: list[str] | None = None
+        previous_window = ""
         generation_projection: dict[str, Any] | None = None
         for expected, row in enumerate(rows, start=1):
             if int(row[0]) != expected:
@@ -703,8 +712,41 @@ def _load_evidence_ownership(
                     and previous_owners is not None
                     and set(previous_owners) < set(owners)
                 )
-                if lifecycle_transition and not owner_enrichment:
+                # THE THIRD IN-BAND NO-OP: the decision window OPENING over a record that has
+                # not otherwise moved. `decision_window_generation()` stamps the marker onto a
+                # still-PENDING record, which advances no lifecycle state, appends no history
+                # entry, and enriches no owner -- so it matched neither admitted form and the
+                # reader rejected a correct history. Observed on run 30390877219, 5/5 tasks,
+                # journal seq1->seq2 of the task-start `obligations` capsule:
+                #   seq1 PENDING owners=[] history=[] window=''
+                #   seq2 PENDING owners=[] history=[] window='GT-W-7a6db489b9fec7fd'
+                # while seq3..seq6 were a textbook PENDING->READY->RELEASED->DELIVERED->ACTIVE
+                # chain. This is the same blind spot as `projected_decision_window`, one guard
+                # further down: the window is runtime-owned scheduling state, and neither guard
+                # had a name for it moving on its own.
+                #
+                # STRICTLY ONE DIRECTION. Only unset -> assigned is admitted. A marker changing
+                # to a DIFFERENT marker, or being cleared, stays a rejection: those would be a
+                # record migrating between decision windows, which is exactly the rewriting this
+                # guard exists to catch. Everything else must be byte-identical.
+                window = str(payload.get("decision_window_generation") or "")
+                window_assignment = (
+                    history == previous_history
+                    and payload.get("lifecycle") == previous_lifecycle
+                    and previous_owners is not None
+                    and set(previous_owners) == set(owners)
+                    and previous_window == ""
+                    and window.startswith("GT-W-")
+                )
+                if (
+                    lifecycle_transition
+                    and not owner_enrichment
+                    and not window_assignment
+                ):
                     raise _Reject("EVIDENCE_TRANSITION_HISTORY_INVALID")
+            previous_window = str(
+                payload.get("decision_window_generation") or ""
+            )
             previous_history = history
             previous_lifecycle = str(payload.get("lifecycle", ""))
             previous_owners = owners

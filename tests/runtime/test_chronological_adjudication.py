@@ -8,6 +8,7 @@ import pytest
 from groundtruth.runtime.chronological_adjudication import (
     CAUSAL,
     LATE,
+    EXPIRED,
     ON_TIME,
     SELF_LOCALIZED,
     STEP_BEHIND,
@@ -68,7 +69,12 @@ def test_delivery_after_commit_is_late_even_at_named_registry_event() -> None:
         chronology=_chronology(delivery_index=13, action_index=None),
     )
 
-    assert result.timing_verdict == LATE
+    # RE-POINTED 2026-07-28. `LATE` was SPLIT: `delivered > committed` fused two
+    # opposite outcomes -- late-but-still-correctable vs nothing-left-to-change.
+    # This fixture has NO post-delivery action (action_index=None), which this
+    # test's own comment already identified as the genuine-late shape, so it is
+    # EXPIRED. The property is unchanged; the verdict is finer.
+    assert result.timing_verdict == EXPIRED
     assert result.fair_probe_verdict == UNMEASURED
 
 

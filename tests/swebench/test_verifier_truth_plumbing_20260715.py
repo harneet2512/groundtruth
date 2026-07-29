@@ -251,17 +251,27 @@ def test_deep_and_standalone_performance_share_canonical_verifier_truth(
         json.dumps({"messages": [], "info": {"model_stats": {}, "submission": ""}}),
         encoding="utf-8",
     )
+    # IDENTITY (2026-07-29): the doc MUST carry `schema` + a matching `instance_id`.
+    # gt_deep_metrics.build:1702-1710 nulls any task_truth that fails
+    # `_task_truth_identity_ok` — the deliberate guard against a stale/foreign truth
+    # overriding the run's own outcome (the 83->0 defect). This fixture originally
+    # had neither field, so it was REJECTED, and the test then compared a gated deep
+    # path against an ungated standalone call and read the difference as a plumbing
+    # bug. The negative arm below now pins the guard itself.
+    verifier = {
+        "schema": "gt.verifier_truth.v1",
+        "authority": "official_swebench_report.tests_status.PASS_TO_PASS",
+        "source_present": True,
+        "valid": True,
+        "p2p_total": 4,
+        "p2p_failed": 1,
+        "caller_breakage_count": None,
+        "caller_breakage_unmeasured_reason": "caller_aware_verifier_join_absent",
+    }
     truth = {
-        "verifier_truth": {
-            "schema": "gt.verifier_truth.v1",
-            "authority": "official_swebench_report.tests_status.PASS_TO_PASS",
-            "source_present": True,
-            "valid": True,
-            "p2p_total": 4,
-            "p2p_failed": 1,
-            "caller_breakage_count": None,
-            "caller_breakage_unmeasured_reason": "caller_aware_verifier_join_absent",
-        }
+        "schema": "gt.task_truth.v1",
+        "instance_id": task,
+        "verifier_truth": verifier,
     }
     (tmp_path / "task_truth.json").write_text(json.dumps(truth), encoding="utf-8")
 
@@ -286,6 +296,47 @@ def test_deep_and_standalone_performance_share_canonical_verifier_truth(
         "p2p_regression_rate": 0.25,
         "caller_breakage_count": None,
     }
+
+
+def test_foreign_task_truth_is_rejected_and_the_rejection_is_published(
+    tmp_path: Path,
+) -> None:
+    """The other arm of the identity guard.
+
+    A truth doc belonging to ANOTHER task carries another task's PASS_TO_PASS
+    counts, so its interface metrics are exactly as wrong as its outcome. The
+    guard must null it — and must SAY so in the published artifact, otherwise the
+    authority downgrade is invisible to every downstream reader.
+    """
+    task = "probe"
+    task_root = tmp_path / task
+    task_root.mkdir()
+    (task_root / "mini-swe-agent.trajectory.json").write_text(
+        json.dumps({"messages": [], "info": {"model_stats": {}, "submission": ""}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "task_truth.json").write_text(
+        json.dumps({
+            "schema": "gt.task_truth.v1",
+            "instance_id": "some__other-task-9999",
+            "verifier_truth": {
+                "schema": "gt.verifier_truth.v1",
+                "p2p_total": 4, "p2p_failed": 1,
+                "source_present": True, "valid": True,
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    deep = deep_metrics.build(task, str(tmp_path))
+
+    assert deep["performance"]["interface_preservation"]["p2p_regression_rate"] is None, (
+        "a foreign task_truth must not lend its p2p counts to this task"
+    )
+    rejected = deep["task_truth_rejected"]
+    assert rejected is not None, "the rejection must be published, never silent"
+    assert rejected["instance_id"] == "some__other-task-9999"
+    assert rejected["reason"] == "schema_or_instance_id_not_matched_to_task"
 
 
 def test_standalone_cli_reads_the_explicit_task_truth(

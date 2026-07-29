@@ -1,0 +1,15 @@
+{
+ "info": {"config": {"model": {"model_name": "fixture"}}},
+ "messages": [
+  {"role": "system", "content": "You are a helpful assistant."},
+  {"role": "user", "content": "<pr_description>fix schema validation</pr_description>"},
+  {"role": "assistant", "content": "start",
+   "extra": {"actions": [{"command": "ls -la", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "<gt-obligations>\n- preserve validate_schema contract\n- keep MyClass constructor behavior\n- ensure docs stay accurate\n</gt-obligations>\n<gt-evidence>\n[VERIFIED] def validate_schema -> src/v.py:3\n</gt-evidence>",
+   "extra": {"returncode": 0}},
+  {"role": "assistant", "content": "I will preserve validate_schema and the MyClass constructor; the docs stay accurate.",
+   "extra": {"actions": [{"command": "cat src/v.py", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "code", "extra": {"returncode": 0}}
+ ],
+ "trajectory_format": "mini-swe-agent-1"
+}

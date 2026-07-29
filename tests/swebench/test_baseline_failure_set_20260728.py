@@ -28,9 +28,15 @@ def test_the_recorded_suites_and_sizes() -> None:
     assert set(bfs.BASELINE) == {
         "tests/runtime", "tests/swebench", "tests/pretask", "artifact_deepswe",
     }
+    # artifact_deepswe went 12 -> 11 on 2026-07-28. NOT a fix and NOT a regression: the removed
+    # entry (test_sm10_recovery_timing::test_recovery_candidate_producer) was never a real
+    # failure. It failed only under a leaked `GT_GLOBAL_ARBITER=1`, written raw by
+    # test_p10_premature_reactive_deferral's setup_module whose teardown popped a different
+    # variable. Proven both ways: PASSES in isolation, FAILS under GT_GLOBAL_ARBITER=1. The
+    # baseline had frozen a cross-module contamination artifact as a known defect.
     assert {k: len(v) for k, v in bfs.BASELINE.items()} == {
         "tests/runtime": 2, "tests/swebench": 2,
-        "tests/pretask": 13, "artifact_deepswe": 12,
+        "tests/pretask": 13, "artifact_deepswe": 11,
     }
 
 

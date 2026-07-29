@@ -97,7 +97,7 @@ def test_the_probe_can_produce_a_non_zero(persisted) -> None:
     """CALIBRATION. Every 'nothing was persisted' assertion below is unreadable without it."""
     ba.stash_brief_snapshot(_LOC_KEY, _localization_snapshot())
     seam._persist_brief_producer_attestations(
-        _compilation([(_LOC_KEY, "localization")])
+        _compilation([(_LOC_KEY, "localization", ())])
     )
     assert len(persisted) == 1
 
@@ -106,7 +106,7 @@ def test_the_capsule_digest_is_what_gets_sealed(persisted) -> None:
     """M2. The seal must follow the bytes the model received, not the source block."""
     ba.stash_brief_snapshot(_LOC_KEY, _localization_snapshot())
     seam._persist_brief_producer_attestations(
-        _compilation([(_LOC_KEY, "localization")])
+        _compilation([(_LOC_KEY, "localization", ())])
     )
     attestation = persisted[0][0]
     assert attestation.delivery_seal == _CAPSULE[:16]
@@ -117,7 +117,7 @@ def test_both_brief_classes_are_attested_from_one_capsule(persisted) -> None:
     ba.stash_brief_snapshot(_LOC_KEY, _localization_snapshot())
     ba.stash_brief_snapshot(_OBL_KEY, _obligations_snapshot())
     seam._persist_brief_producer_attestations(
-        _compilation([(_LOC_KEY, "localization"), (_OBL_KEY, "obligations")])
+        _compilation([(_LOC_KEY, "localization", ()), (_OBL_KEY, "obligations", ("GT_LOC_RESLOT",))])
     )
     assert len(persisted) == 2
     assert {call[0].candidate_id for call in persisted} == {_LOC_KEY, _OBL_KEY}
@@ -131,7 +131,7 @@ def test_a_snapshot_of_the_wrong_class_is_never_attested(persisted) -> None:
     """
     ba.stash_brief_snapshot(_OBL_KEY, _localization_snapshot())
     seam._persist_brief_producer_attestations(
-        _compilation([(_OBL_KEY, "obligations")])
+        _compilation([(_OBL_KEY, "obligations", ())])
     )
     assert persisted == []
 
@@ -139,14 +139,14 @@ def test_a_snapshot_of_the_wrong_class_is_never_attested(persisted) -> None:
 def test_an_evidence_with_no_snapshot_is_quiet(persisted) -> None:
     """Most delivered evidence is not brief evidence; absence is normal, not a fault."""
     seam._persist_brief_producer_attestations(
-        _compilation([("deadbeefdeadbeef", "caller_contract")])
+        _compilation([("deadbeefdeadbeef", "caller_contract", ())])
     )
     assert persisted == []
 
 
 def test_a_snapshot_is_consumed_so_a_redelivery_cannot_reattest(persisted) -> None:
     ba.stash_brief_snapshot(_LOC_KEY, _localization_snapshot())
-    compilation = _compilation([(_LOC_KEY, "localization")])
+    compilation = _compilation([(_LOC_KEY, "localization", ())])
     seam._persist_brief_producer_attestations(compilation)
     seam._persist_brief_producer_attestations(compilation)
     assert len(persisted) == 1
@@ -158,7 +158,7 @@ def test_an_unverified_candidate_still_attests_but_never_claims_PASS(persisted) 
         _LOC_KEY, _localization_snapshot(witness_verified=False, witness="")
     )
     seam._persist_brief_producer_attestations(
-        _compilation([(_LOC_KEY, "localization")])
+        _compilation([(_LOC_KEY, "localization", ())])
     )
     assert len(persisted) == 1
     verdicts = {p.verdict for p in persisted[0][0].truth_predicates}
@@ -182,7 +182,7 @@ def test_a_persist_fault_never_raises_into_the_delivery_path(monkeypatch) -> Non
     )
     ba.stash_brief_snapshot(_LOC_KEY, _localization_snapshot())
     seam._persist_brief_producer_attestations(
-        _compilation([(_LOC_KEY, "localization")])
+        _compilation([(_LOC_KEY, "localization", ())])
     )
     assert rows, "a swallowed persist must still record its cause"
 

@@ -35,7 +35,10 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from groundtruth.runtime.chronological_adjudication import (
+    EARLY,
+    EXPIRED,
     LATE,
+    LATE_CORRECTIVE,
     ON_TIME,
     STEP_BEHIND,
     UNMEASURED,
@@ -1148,8 +1151,20 @@ def _class_verdict(verdicts: list[str]) -> tuple[str, bool | None]:
     an unmeasured gap."""
     if verdicts and all(v == ON_TIME for v in verdicts):
         return ON_TIME, True
-    if any(v == LATE for v in verdicts):
-        return LATE, False
+    # THE LATE FAMILY, most-severe first. `LATE` was split (2026-07-28) into EXPIRED
+    # (nothing left to change) and LATE_CORRECTIVE (the agent still re-decided after the
+    # bytes arrived). Testing only `v == LATE` here would have let an EXPIRED row fall
+    # through to UNMEASURED — silently regrading a measured failure as an unmeasured gap,
+    # which is precisely the direction this rollup's own docstring forbids. `LATE` is kept
+    # in the tuple so historical artifacts carrying the flat string still roll up.
+    #
+    # ORDER IS THE CLAIM: EXPIRED outranks LATE_CORRECTIVE because a class containing one
+    # useless-late row is not redeemed by another row that happened to still be actionable.
+    for _verdict in (EXPIRED, LATE, LATE_CORRECTIVE):
+        if any(v == _verdict for v in verdicts):
+            return _verdict, False
+    if any(v == EARLY for v in verdicts):
+        return EARLY, False
     if any(v == WRONG_EVENT for v in verdicts):
         return WRONG_EVENT, False
     if any(v == STEP_BEHIND for v in verdicts):

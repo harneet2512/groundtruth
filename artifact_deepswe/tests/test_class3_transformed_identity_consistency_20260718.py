@@ -137,31 +137,53 @@ def test_native_steer_receipt_parses_consistently(monkeypatch, tmp_path):
     for i, rec in enumerate(records):
         rs._parse_record(rec, i)  # raises on receipt_candidate_identity_mismatch -> the fix's proof
 
-    # MUTATION / RED companion: a binding keyed over the RAW win_text (pre-fix behavior) is REJECTED
-    # by the SAME reader — proving the transformed-bytes keying is load-bearing.
-    lin = g._lane_registered_lineage("recovery", g.Event.TEST_RESULT)
-    prod, ev = g._lane_envelope_identity("recovery", lin)
-    raw_key = g._ga_unified_dedup_key(prod, ev, "src/x.py", "", [_STEER])
-    raw_binding = build_observation_binding(
-        batch_start_iteration=0, parent_policy_sha256="a" * 64, parent_policy_chars=5,
-        action_batch_sha256="b" * 64, candidate_ordinal=1, candidate_kind="recovery",
-        candidate_id=raw_key)
-    import pytest
-    monkeypatch.setattr(g, "_gt_gateway_deliveries", [])
-    g._gt_gateway_chain_head = ""
-    out2 = {"output": "base observation"}
-    pool2: list = []
-    g._last_gate_winner_kind = "recovery"
-    g._last_gate_winner_hash = "h2"
-    g._global_pool_add_steer(
-        pool2, out2, "cmd", _STEER, kkind="post_test", kf="", krel="src/x.py",
-        event=g.Event.TEST_RESULT, steer_base="base observation")
-    token2 = g._delivery_observation_context.set(raw_binding)
-    try:
-        pool2[0][1]()
-    finally:
-        g._delivery_observation_context.reset(token2)
-    records2 = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
-    raw_rec = records2[-1]
-    with pytest.raises(ValueError):
-        rs._parse_record(raw_rec, 99)
+    # RE-POINTED 2026-07-28 (Wave 1 Step 3).
+    #
+    # This companion used to install a binding keyed over the RAW win_text on the
+    # ContextVar and assert the reader rejected the resulting receipt. That mutation is
+    # now STRUCTURALLY UNOBSERVABLE, by design: `_ensure_observation_binding`
+    # (gt_mini_patch.py:163-183) DISCARDS a cached binding whose candidate_id does not
+    # match this candidate and derives a fresh one, and the lane seal keys it off the
+    # envelope's own dedup_key (:14780-14782). So the injected binding never reached the
+    # receipt. Measured, not inferred: a probe of the exact sequence showed the persisted
+    # binding carrying the envelope's key and `_parse_record` returning OK.
+    #
+    # Worse, the old form was ORDER-DEPENDENT: alone it passed, and after any test that
+    # called `_augment_output` it failed -- and when it passed it passed for the WRONG
+    # reason (`receipt_observation_binding_missing`, not the
+    # `receipt_candidate_identity_mismatch` it claimed to prove).
+    #
+    # The reachable surface is the READER, over the persisted RECORD. Mutate the record's
+    # binding identity directly: that is a real corruption class (a receipt written by an
+    # older/other writer) and it has two genuinely reachable outcomes.
+    # The MUTATION COMPANION that used to live here was DELETED 2026-07-28 (Wave 1 Step 3).
+    #
+    # It installed a binding keyed over the RAW win_text on the ContextVar and asserted
+    # the reader rejected the resulting receipt. That mutation is now structurally
+    # unobservable, BY DESIGN: `_ensure_observation_binding` (gt_mini_patch.py:163-183)
+    # discards a cached binding whose candidate_id is not this candidate's and derives a
+    # fresh one, and the lane seal keys it off the envelope's own dedup_key (:14780-14782).
+    # The injected binding never reached the receipt -- measured by probe, not inferred.
+    #
+    # It was also a FALSE GREEN. Run alone it passed; run after any test that called
+    # `_augment_output` it failed. And when it passed, it passed for the WRONG reason --
+    # `receipt_observation_binding_missing`, not the `receipt_candidate_identity_mismatch`
+    # it claimed to prove. Both branches were dead as mutation detectors.
+    #
+    # THE COVERAGE IS NOT LOST, and is strictly better targeted: the pool-level detectors
+    # in THIS file -- `test_steer_candidate_identity_is_over_transformed_bytes` and
+    # `test_lane_a_candidate_identity_is_over_provenance_filtered_bytes` -- still bite the
+    # exact mutation (keying over raw rather than transformed bytes) at the pool key,
+    # which is where the property actually lives. The reader's fail-closed behaviour is
+    # independently pinned by tests/swebench/test_receipt_observation_binding_all_seals_
+    # 20260728.py:301-349.
+    #
+    # NOTE the positive half above is now weaker than it reads: because the seal derives
+    # the binding from `env.dedup_key`, the join
+    # `observation_candidate_id(envelope.dedup_key) == binding.candidate_id` is
+    # TAUTOLOGICAL on any legacy lane seal. It still proves the pipeline persists a
+    # parseable, seal-bearing receipt; it no longer proves the keying choice. A
+    # reader-level mismatch test over a hand-built record is tracked separately -- it
+    # needs a binding that is internally consistent (candidate_dedup_sha256 must agree,
+    # evidence_envelope.py validate) while disagreeing with the envelope, which is more
+    # than a one-field edit.

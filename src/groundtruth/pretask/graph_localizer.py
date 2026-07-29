@@ -1514,7 +1514,25 @@ def _grep_to_seeds(
     # Check rg availability ONCE before the loop. If rg is in PATH, use
     # it for ALL tokens. If not, use Python walk for ALL. Don't switch
     # mid-loop (Bug 4: inconsistent coverage from partial rg failures).
-    _rg_available = shutil.which("rg") is not None
+    #
+    # PINNABLE BACKEND (2026-07-28). `shutil.which("rg")` reads the ambient PATH, so the SAME
+    # commit seeds differently on a host with ripgrep than on one without -- the two backends
+    # do not return identical file sets. That made every before/after comparison through
+    # `ss_gate` un-citable across machines: the gate strips the whole GT_* namespace but has no
+    # control over PATH, so it believed it was hermetic and was not. Same defect class as the
+    # ambient `gt-index` binary, which that harness already closes by pinning `GT_INDEX_BIN` to
+    # a guaranteed-absent path.
+    #
+    # `auto` (the default, and the value when the var is unset) is byte-identical to the
+    # previous behaviour, so production is untouched; a harness that needs reproducibility pins
+    # `python` (or `rg`) explicitly and gets the same seeding on every host.
+    _backend = (os.environ.get("GT_L1_GREP_BACKEND") or "auto").strip().lower()
+    if _backend == "python":
+        _rg_available = False
+    elif _backend == "rg":
+        _rg_available = True
+    else:
+        _rg_available = shutil.which("rg") is not None
     if not _rg_available:
         print(
             "[GT L1] grep-to-seed: rg not in PATH, using Python walk",

@@ -16,6 +16,23 @@ from .fact_registry import EVENTS, is_reactive, registration_for, required_event
 
 ON_TIME = "ON_TIME"
 LATE = "LATE"
+# EARLY / LATE_CORRECTIVE / EXPIRED (2026-07-28) — the two bits the old vocabulary lost.
+#
+# EARLY: the bytes landed BEFORE the decision they answer was open. That used to return
+# UNMEASURED, which is a lie of the same shape as reporting a replay error as "diffs=0" —
+# rendering a precisely-known fact as an absence of knowledge.
+#
+# LATE_CORRECTIVE vs EXPIRED: `delivered > committed` fused two OPPOSITE outcomes. Evidence
+# arriving after a commit the agent then REVISES is corrective and valuable; evidence
+# arriving when nothing remains to change is worthless. One string, two meanings, no
+# discriminating column — the same defect as the `acted` receipt field demoted earlier in
+# this program.
+#
+# LATE is RETAINED, not replaced: historical artifacts carry the flat string and readers
+# must still parse it.
+EARLY = "EARLY"
+LATE_CORRECTIVE = "LATE_CORRECTIVE"
+EXPIRED = "EXPIRED"
 STEP_BEHIND = "STEP_BEHIND"
 WRONG_EVENT = "WRONG_EVENT"
 UNMEASURED = "UNMEASURED"
@@ -142,8 +159,20 @@ def _timing(
     if not all(_index(value) for value in (opened, delivered, committed)):
         return UNMEASURED, wanted
     assert opened is not None and delivered is not None and committed is not None
-    if not opened <= committed or delivered < opened:
+    if not opened <= committed:
+        # The decision closed before it opened: the chronology is internally inconsistent,
+        # so nothing about it is measurable. Fails closed, unchanged.
         return UNMEASURED, wanted
+    if delivered < opened:
+        # MEASURED, not unmeasurable: GT answered a decision that had not opened yet.
+        #
+        # NOTE this branch is currently unreachable from the extractor, and that is a
+        # SEPARATE bug, not a reason to omit the verdict: `_decision_open_index` computes
+        # `max(b for b in opens if b <= delivery_index)`, so `opened <= delivered` holds BY
+        # CONSTRUCTION on real data. Measuring EARLY end-to-end requires the extractor to
+        # ask whether ANY boundary of `earliest_event` exists at-or-before delivery. The
+        # kernel must be able to SAY it before the extractor can find it.
+        return EARLY, wanted
     acquired = chronology.native_acquisition_index
     if acquired is not None:
         if not _index(acquired):
@@ -162,7 +191,20 @@ def _timing(
         if acted <= delivered:
             return UNMEASURED, wanted
     if delivered > committed:
-        return LATE, wanted
+        # SPLIT THE TWO OPPOSITE MEANINGS OF "LATE".
+        #
+        # `acted` is the first post-delivery message that mutates or verifies while naming a
+        # delivered entity (derived strictly AFTER delivery_index). Its presence means the
+        # agent still had a decision left to change when the bytes arrived — the evidence was
+        # late but could still act. Its absence means the decision was already final.
+        #
+        # HONEST LIMIT: this is a PROXY. The precise question is whether the same decision
+        # COMMITS again after delivery, which needs the extractor to recompute
+        # `_decision_commit_index` from `delivery_index`. `action_index` is the closest
+        # quantity the Chronology already carries, and inventing a second clock here would be
+        # worse than using the one that exists. The proxy is stated so a later reader can
+        # tighten it rather than assume it is exact.
+        return (LATE_CORRECTIVE if acted is not None else EXPIRED), wanted
     return ON_TIME, wanted
 
 
@@ -233,8 +275,11 @@ def adjudicate(
 
 __all__ = [
     "CAUSAL",
+    "EARLY",
+    "EXPIRED",
     "FAIR_PROBE_SCHEMA",
     "LATE",
+    "LATE_CORRECTIVE",
     "ON_TIME",
     "SELF_LOCALIZED",
     "STEP_BEHIND",

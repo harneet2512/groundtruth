@@ -195,11 +195,25 @@ def test_reasoning_graph_rejects_event_gaps_and_illegal_lifecycle_jumps() -> Non
     with pytest.raises(rr.StateIntegrityError, match="sequence"):
         rr.reduce_reasoning_signal(graph, _signal(2, kinds.EXACT_SEARCH))
 
+    # RE-POINTED 2026-07-28, identically to the pin in
+    # test_orphaned_outcome_signal_20260727.py.  This asserted that CANDIDATE +
+    # VALIDATION_SUPPORT raises.  That cell is no longer corruption: it is the
+    # ordinary trajectory *grep a symbol, then a test passes on it*, and it was the
+    # last live-reachable cell that quarantined the canonical observer for a whole
+    # attempt.  VALIDATION_SUPPORT now admits CANDIDATE -- a MONOTONE advance to
+    # SUPPORTED that introduces no newly reachable state and drops only an ACTIVE
+    # waypoint GT never observes.
+    #
+    # The lifecycle-jump assertion moves to SUPPORTED + ABANDON_TARGET, which is
+    # incoherent about PROGRESS (ABANDON_TARGET admits {ACTIVE, WEAKENED,
+    # CONTRADICTED}) rather than merely unobserved -- genuine corruption, and the
+    # property this test exists to hold.
     graph = rr.reduce_reasoning_signal(graph, _signal(1, kinds.EXACT_SEARCH))
+    graph = rr.reduce_reasoning_signal(graph, _signal(2, kinds.VALIDATION_SUPPORT))
     with pytest.raises(rr.StateIntegrityError, match="transition"):
         rr.reduce_reasoning_signal(
             graph,
-            _signal(2, kinds.VALIDATION_SUPPORT),
+            _signal(3, kinds.ABANDON_TARGET),
         )
 
 

@@ -88,6 +88,7 @@ import os
 import re
 import shlex
 import sys
+import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol, runtime_checkable
@@ -700,6 +701,55 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
+#: The lock file records a BARE PID, so "is the holder alive?" alone is not an
+#: ownership test -- PIDs are recycled, aggressively so on Windows.  Measured
+#: 2026-07-28: a lock written 19:15:38 by an oracle that was later killed still
+#: named pid 46120, and by 20:39 that pid belonged to an unrelated
+#: `full_suite_sweep.py`.  `ss_gate` duly aborted with "run-lock held by oracle
+#: run 46120" and would have kept aborting forever -- a dead oracle silently
+#: locking out every future gate run, with the operator instructed never to
+#: delete the lock.  So verify the holder IS an oracle, not merely that something
+#: with that number exists.
+_ORACLE_LOCK_MARKER = "ss_replay_oracle"
+
+
+def _pid_cmdline(pid: int) -> "str | None":
+    """Best-effort command line of ``pid``; None when it cannot be established."""
+    try:
+        proc_path = Path(f"/proc/{pid}/cmdline")
+        if proc_path.exists():
+            return proc_path.read_bytes().decode("utf-8", "replace").replace("\x00", " ")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"],
+            capture_output=True, text=True, timeout=25)
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return r.stdout.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _pid_holds_oracle(pid: int) -> bool:
+    """True when ``pid`` is alive AND is genuinely a replay-oracle process.
+
+    FAIL SAFE in both directions that matter: an unobtainable command line is
+    treated as "still an oracle" (never steal a lock on a guess), while a
+    positively-identified NON-oracle releases it (never block forever on a
+    recycled pid).
+    """
+    if not _pid_alive(pid):
+        return False
+    cmd = _pid_cmdline(pid)
+    if cmd is None:
+        return True
+    return _ORACLE_LOCK_MARKER in cmd
+
+
 def acquire_run_lock() -> bool:
     """True when THIS process holds the mirror lock; False when a live sibling does."""
     _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -714,7 +764,7 @@ def acquire_run_lock() -> bool:
                 holder = int(_LOCK_PATH.read_text(encoding="utf-8").strip() or "0")
             except Exception:  # noqa: BLE001
                 holder = 0
-            if holder and _pid_alive(holder) and holder != os.getpid():
+            if holder and _pid_holds_oracle(holder) and holder != os.getpid():
                 sys.stderr.write(
                     f"[ssr] mirror lock held by live pid {holder} ({_LOCK_PATH}) — the "
                     f"container-path mirrors are drive-global; concurrent runs cross-"
@@ -2066,8 +2116,18 @@ def spawn_replay(task: str, recorded_root: Path, snapshot_root: Path, arm_ss_env
         # SS-R3 cwd PARITY: the recorded container ran with cwd=/testbed, and producer-side
         # RELATIVE path checks (os.path.isfile(rel)) resolve against the cwd — a repo cwd
         # left every such check False host-side (the keras/absolute-path dark-head class).
+        # Mirror setup is done; the expensive part starts HERE. Announce the boundary so a
+        # slow run is distinguishable from one wedged in mirror setup -- the child's own output
+        # is captured below and cannot stream.
+        print(f"  [fixpoint]   {task}/{arm}: mirrors ready, child spawned "
+              f"(timeout 1800s)", file=sys.stderr)
+        sys.stderr.flush()
+        _t_child0 = _time.monotonic()
         r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800,
                            cwd=str(_MIRROR_TESTBED))
+        print(f"  [fixpoint]   {task}/{arm}: child exited rc={r.returncode} "
+              f"in {_time.monotonic() - _t_child0:.0f}s", file=sys.stderr)
+        sys.stderr.flush()
         if r.returncode != 0 or not out_json.is_file():
             return {"rows": [], "applied": [],
                     "error": f"child rc={r.returncode}: {(r.stderr or r.stdout)[-400:]}"}
@@ -3370,13 +3430,29 @@ def main(argv=None) -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     # ── LAYER 1: reconstruct every manifest task ─────────────────────────────
+    # The LAST blind window: reconstructing N recorded tasks happens BEFORE the fixpoint
+    # banner, so on a full 30-task run the process sat at zero bytes through the whole setup
+    # phase and was indistinguishable from a wedged start. Announce entry and per-task
+    # progress here too -- the rule is that no phase of this script may be silent, not that
+    # the loop we happened to look at first is instrumented.
+    print(f"  [setup] reconstructing {len(tasks)} recorded task(s) from {recorded_root} ...",
+          file=sys.stderr)
+    sys.stderr.flush()
+    _t_recon0 = _time.monotonic()
     recon: dict[str, ReconstructedTask] = {}
     recon_errors: list[str] = []
-    for t in tasks:
+    for _ri, t in enumerate(tasks, 1):
         try:
             recon[t] = reconstruct_task(t, recorded_root)
         except Exception as exc:  # noqa: BLE001
             recon_errors.append(f"{t}: {type(exc).__name__}: {exc}")
+            print(f"  [setup] ({_ri}/{len(tasks)}) {t}: RECON ERROR "
+                  f"{type(exc).__name__}: {str(exc)[:100]}", file=sys.stderr)
+            sys.stderr.flush()
+    print(f"  [setup] reconstructed {len(recon)}/{len(tasks)} task(s) in "
+          f"{_time.monotonic() - _t_recon0:.0f}s"
+          + (f"; {len(recon_errors)} error(s)" if recon_errors else ""), file=sys.stderr)
+    sys.stderr.flush()
     recorded_deliveries = {t: r.recorded_deliveries for t, r in recon.items()}
     recorded_rows = {t: r.raw_rows for t, r in recon.items()}
     residuals = {t: r.residual_leaks for t, r in recon.items() if r.residual_leaks}
@@ -3394,7 +3470,40 @@ def main(argv=None) -> int:
     kill = {m.strip(): "0" for m in args.kill_members.split(",") if m.strip()}
     ss_on = {**{k: "1" for k in _SS_FLAGS_ALL}, **kill}
     ss_off = {**{k: "0" for k in _SS_FLAGS_ALL}, **kill}   # EXPLICIT zeros: unset would be fan-out-resolved ON
-    for t in sorted(recon):
+    # LIVE VISIBILITY (2026-07-28). The first per-task line below is emitted only AFTER that
+    # task's whole OFF-arm replay, and one replay drives the real seam over an entire recorded
+    # trajectory. So a healthy multi-hour run and a wedged one looked IDENTICAL from outside:
+    # zero bytes, indefinitely. That is a monitoring defect by CLAUDE.md's live-run rule ("a run
+    # whose failure mode cannot be classified live is a defect to fix") and it cost real time --
+    # a working run was killed twice because silence was read as a hang.
+    #
+    # Announce the plan BEFORE the first replay, so the run is classifiable from its first
+    # second: how many tasks, which ones, and that the next line is expected to be slow.
+    # QUANTIFIED, not merely visible: a progress line that cannot answer "how long, and when
+    # does it end" still forces a human to guess, and guessing is what killed two healthy runs.
+    # Wall-clock goes to STDERR ONLY and never enters the report JSON -- the report stays a
+    # deterministic function of (cases, recorded rows, replayed rows), so SM-7 exact-byte replay
+    # and the store's determinism claims are untouched.
+    _tasks = sorted(recon)
+    _t_run0 = _time.monotonic()
+    _durations: list[float] = []
+    print(f"  [fixpoint] START {len(_tasks)} task(s): {', '.join(_tasks)}", file=sys.stderr)
+    print("  [fixpoint] each task = one full OFF-arm seam replay in a CHILD process whose "
+          "output is captured (subprocess.run capture_output=True), so nothing streams from "
+          "inside a task -- the per-task result line is the first signal.", file=sys.stderr)
+    print(f"  [fixpoint] per-child timeout is 1800s, so the worst case for this run is "
+          f"~{len(_tasks) * 1800 // 60} min ({len(_tasks)} x 30 min). A task that exceeds it "
+          f"returns a child-timeout ERROR row rather than hanging.", file=sys.stderr)
+    sys.stderr.flush()
+    for _i, t in enumerate(_tasks, 1):
+        _eta = ""
+        if _durations:
+            _mean = sum(_durations) / len(_durations)
+            _eta = f" | eta ~{_mean * (len(_tasks) - _i + 1):.0f}s"
+        print(f"  [fixpoint] ({_i}/{len(_tasks)}) {t}: replaying OFF arm ... "
+              f"[elapsed {_time.monotonic() - _t_run0:.0f}s{_eta}]", file=sys.stderr)
+        sys.stderr.flush()
+        _t_task0 = _time.monotonic()
         # SS-R3 crash containment: one task's failure (child crash, mirror fault, OOM) is a
         # per-task ERROR entry — the run ALWAYS continues to the report. A partial-silent
         # death that loses the report is the one unacceptable outcome.
@@ -3417,9 +3526,26 @@ def main(argv=None) -> int:
             print(f"  [fixpoint] {t}: ERROR {type(exc).__name__}: {str(exc)[:120]}",
                   file=sys.stderr)
             continue
-        print(f"  [fixpoint] {t}: strict={fx.strict} channel={fx.channel} "
-              f"boundary={fx.boundary_iter:g} rows {fx.n_recorded}->{fx.n_replayed} "
-              f"diffs={len(fx.diffs)}", file=sys.stderr)
+        # NEVER RENDER "NOT MEASURED" AS "NO DIFFERENCES". When `off["error"]` is set,
+        # `diff_ledgers` early-returns at :2286-2288 with replayed=False, boundary=-1.0 and
+        # an EMPTY diffs list -- which this line used to print as `diffs=0`, i.e. exactly
+        # like a clean match. The child even exits rc=0, so the spawn line looks healthy
+        # too. Measured 2026-07-28: 2 of the first 4 tasks of a run were in this state
+        # (amoffat__sh-744 rows 90->86, cfn-lint-3749 rows 30->14) and would have been
+        # reported as passing. A zero that means "not measured" must never share a
+        # rendering with a zero that means "measured, found nothing".
+        if fx.error or not fx.replayed:
+            print(f"  [fixpoint] {t}: NOT COMPARED (replay error) "
+                  f"rows {fx.n_recorded}->{fx.n_replayed} "
+                  f"error={(fx.error or 'replayed=False')[:160]} "
+                  f"[took {_time.monotonic() - _t_task0:.0f}s]", file=sys.stderr)
+        else:
+            print(f"  [fixpoint] {t}: strict={fx.strict} channel={fx.channel} "
+                  f"boundary={fx.boundary_iter:g} rows {fx.n_recorded}->{fx.n_replayed} "
+                  f"diffs={len(fx.diffs)} hidden={fx.n_hidden_diffs} "
+                  f"[took {_time.monotonic() - _t_task0:.0f}s]", file=sys.stderr)
+        _durations.append(_time.monotonic() - _t_task0)
+        sys.stderr.flush()
         # ── STEP 2: ON-arm replay (all SS flags) for the case verdicts ───────
         if fx.replayed:
             try:

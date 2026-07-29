@@ -158,7 +158,18 @@ def _oracle_lock_holder() -> "int | None":
         raise OracleLockStateError(
             f"oracle run-lock contains an invalid PID: {_ORACLE_RUN_LOCK}"
         )
-    if _pid_alive(pid):
+    # A LIVE PID IS NOT AN OWNER. The lock records a bare pid, and pids recycle --
+    # measured 2026-07-28, a lock written at 19:15 by a since-killed oracle named pid
+    # 46120, which by 20:39 was an unrelated full_suite_sweep.py. This function returned
+    # that pid, the gate aborted with "run-lock held by oracle run 46120", and it would
+    # have kept aborting forever while the operator is told never to delete the lock.
+    # Ask whether the holder IS an oracle. Unobtainable identity still counts as held,
+    # so the conservative "never run concurrently" default is unchanged.
+    try:
+        from ss_replay_oracle import _pid_holds_oracle as _holds
+    except Exception:  # noqa: BLE001 -- oracle module unavailable: fall back to liveness
+        _holds = _pid_alive
+    if _holds(pid):
         return pid
     return None
 
@@ -675,6 +686,14 @@ class RealSeamDriver:
             # ~49MB binary is legitimately absent on the host-graph-inject path), independent of
             # host state. Closes the "present gt-index binary -> nondeterminism" poison.
             os.environ["GT_INDEX_BIN"] = str(tmp / "gt-index-hermetic-absent")
+            # PIN the L1 grep-to-seed backend. `graph_localizer` otherwise resolves it with
+            # `shutil.which("rg")`, i.e. from the ambient PATH — so this gate, which strips the
+            # entire GT_* namespace and believes itself hermetic, seeded DIFFERENTLY on a host
+            # with ripgrep than on one without, and the two backends do not return identical
+            # file sets. That silently made cross-machine before/after comparisons through this
+            # gate meaningless. `python` is the guaranteed-present backend (no external binary),
+            # which is the same reasoning as the absent-by-construction GT_INDEX_BIN above.
+            os.environ["GT_L1_GREP_BACKEND"] = "python"
 
             g._db_path = lambda: db
             g._root = lambda: str(root)
@@ -1762,13 +1781,27 @@ def _exit_code(results: list[ScenarioResult]) -> int:
     expected_ids = [f"S{i}" for i in range(12)]
     if [r.sid for r in results] != expected_ids:
         return 1
+    # S8 IS THE ONLY SCENARIO ALLOWED TO SKIP, AND IT IS NOT REQUIRED TO.
+    #
+    # This previously demanded `expected_verdicts = {"S8": SKIP}` and then an exact
+    # `counts == {PASS: 11, SKIP: 1}`. S8 (EMPTY-PAYLOAD) is flag-gated, and it skipped
+    # for as long as that flag was not built. Once it was, S8 began to PASS -- and the
+    # gate reported RED on a STRICTLY BETTER result: 12 PASS / 0 FAIL / 0 SKIP / 0 ERROR
+    # was classified as failure while 11 PASS + 1 SKIP was the only accepted outcome.
+    # Measured 2026-07-28.
+    #
+    # A gate that cannot recognise improvement is not a gate. The property that actually
+    # matters is: every scenario present, nothing FAILED, nothing ERRORed, and no
+    # scenario silently skipped EXCEPT the one whose flag may legitimately be absent.
     if any(r.verdict == SKIP for r in results if r.sid != "S8"):
         return 1
-    expected_verdicts = {"S8": SKIP}
-    if any(r.verdict != expected_verdicts.get(r.sid, PASS) for r in results):
+    if any(r.verdict not in (PASS, SKIP) if r.sid == "S8" else r.verdict != PASS
+           for r in results):
         return 1
     counts = {v: sum(r.verdict == v for r in results) for v in (PASS, FAIL, SKIP, ERROR)}
-    return 0 if counts == {PASS: 11, FAIL: 0, SKIP: 1, ERROR: 0} else 1
+    if counts[FAIL] or counts[ERROR]:
+        return 1
+    return 0 if counts[PASS] + counts[SKIP] == len(expected_ids) else 1
 
 
 def _table(results: list[ScenarioResult]) -> str:
@@ -1864,7 +1897,8 @@ def main(argv=None) -> int:
     sys.stdout.write(
         f"  report {'->' if report_written else 'NOT WRITTEN:'} {out_path}\n")
     sys.stdout.write(f"  EXIT {code} ({'GREEN' if code == 0 else 'RED'})"
-                     " — 0 only for exact S0..S11 / PASS=11 / S8-SKIP=1 / FAIL=ERROR=0\n")
+                     " — 0 only for exact S0..S11 / all PASS (S8 may SKIP when its flag"
+                     " is not built) / FAIL=ERROR=0\n")
     return code
 
 

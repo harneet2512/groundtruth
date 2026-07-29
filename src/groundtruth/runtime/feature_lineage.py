@@ -148,8 +148,30 @@ CAP_BYTE_OWNER_MECHANISMS: Mapping[str, CAPByteOwnerMechanism] = MappingProxyTyp
     "GT_SS_SUBMIT_RED": CAPByteOwnerMechanism("typed_lineage", _bindings(
         ("submit_gate", "submit_refusal", "submit_refusal"),
     )),
+    # TWO bindings, one per PLANE, both naming the SAME registered row.
+    #   ("edit_check", "edit.syntax",    "syntax_result") — the LANE ledger layer. Consumed by
+    #     the lane stamp path (``gt_mini_patch._exact_profile_delivery_extra`` matches
+    #     ``b.layer == kind`` where ``kind`` is the ledger layer) and by the exact-profile
+    #     branches of ``gt_feature_metrics`` (``binding.layer == row["layer"]``).
+    #   ("edit_check", "syntax_result", "syntax_result") — the CANONICAL evidence type. Consumed
+    #     by ``_feature_refs`` below, which matches ``binding.layer`` against
+    #     ``evidence_type.split(":")[0]``.
+    # WHY BOTH (2026-07-28): the ``layer`` field is overloaded BY MECHANISM — typed_lineage rows
+    # spell an evidence_type there (``missing_role``/``signature_mismatch``/``localization``/
+    # ``submit_refusal`` are all registered evidence types), exact_profile rows spell a lane
+    # layer. ``registration_for("edit.syntax")`` is None, so the lane spelling alone could never
+    # authorize a canonical CAP ref and GT_EDIT_CHECK was DARK on the canonical plane while LIVE
+    # on the lane. Adding the canonical spelling INVENTS NOTHING: ``syntax_result`` is §1 FACT row
+    # 5 of 11 and its registered producer is literally ``edit_check``
+    # (fact_registry._REGISTRATIONS), so the registry itself already asserts this exact triple.
+    # This is the l3.cochange test applied and PASSED — l3.cochange was kept out because no
+    # cochange row existed to name; here the row exists and is named verbatim. The lane path
+    # already performs this same layer→evidence-type resolution at runtime
+    # (``gt_mini_patch:10693`` passes ``binding.fact_class`` as the evidence_type), so this is a
+    # correction of the DECLARATION to match the behaviour, not a new claim.
     "GT_EDIT_CHECK": CAPByteOwnerMechanism("exact_profile_member", _bindings(
         ("edit_check", "edit.syntax", "syntax_result"),
+        ("edit_check", "syntax_result", "syntax_result"),
     )),
     "GT_HYPOTHESIS": CAPByteOwnerMechanism("exact_profile_member", _bindings(
         ("governor", "recovery", "recovery"),
@@ -162,17 +184,138 @@ CAP_BYTE_OWNER_MECHANISMS: Mapping[str, CAPByteOwnerMechanism] = MappingProxyTyp
 if set(CAP_BYTE_OWNER_MECHANISMS) != set(CAP_BYTE_OWNER_IDS):
     raise ValueError("CAP byte-owner mechanism table must cover exactly all byte owners")
 
-# Compatibility view used by ``build_lineage``.  It is derived, never separately
-# authored, so typed authorization cannot drift from the eight-row authority.
+def _binding_is_registry_valid(binding: CAPByteOwnerBinding) -> bool:
+    """Whether the fact registry ITSELF already asserts this exact producer/type/FACT triple.
+
+    Authorization is delegated to :mod:`fact_registry` — the same authority
+    :func:`build_lineage` consults for the FACT identity — so no CAP can be granted an
+    identity the registry does not independently attest:
+
+      * ``registration_for(binding.layer)`` must resolve (the ``layer`` must be a REGISTERED
+        evidence type, directly or through the alias/``base:suffix`` table), and
+      * its canonical ``fact_class`` must equal the binding's declared ``fact_class``, and
+      * ``producer_matches`` must accept the binding's producer for that evidence type.
+
+    Anything else — notably a LANE ledger layer such as ``edit.syntax`` or
+    ``verify.horizon.pivot``, which resolve to no registered class — is refused, and the
+    refusal is recorded in :data:`CAP_BYTE_OWNER_BINDING_EXCLUSIONS` rather than being silent.
+    """
+
+    if binding.fact_class is None:
+        return False
+    registration = registration_for(binding.layer)
+    if registration is None or registration.fact_class != binding.fact_class:
+        return False
+    return producer_matches(binding.layer, binding.producer)
+
+
+# Authorization view used by ``build_lineage``.  It is DERIVED from the seven-row authority,
+# never separately authored, so typed authorization cannot drift from it.
+#
+# WAS (until 2026-07-28): filtered on ``authority.mechanism == "typed_lineage"``.  That gate
+# was a PROXY, and it was measuring the wrong thing.  It silently made every
+# ``exact_profile_member`` owner — GT_CERT_DELIVERY, GT_EDIT_CHECK, GT_HYPOTHESIS, exactly
+# three — un-authorizable on the CANONICAL plane while they stayed LIVE on the legacy lane,
+# even though all seven carry a canonical contract requiring
+# ``TemporalPredicate.AUTHORIZED_BYTE_OWNER_LINEAGE_PRESENT``.  Two of those three were
+# collateral damage: GT_CERT_DELIVERY's binding ``('submit_gate','submit_refusal',
+# 'submit_refusal')`` is BYTE-IDENTICAL to GT_SS_SUBMIT_RED's, which the same table
+# authorized; GT_HYPOTHESIS's ``('governor','recovery','recovery')`` is a verbatim §1 row.
+# The mechanism label describes HOW the lane stamps a row, not WHETHER the registry can
+# vouch for the identity — so the filter now asks the registry directly.
 _TYPED_CAP_OWNER_BINDINGS: dict[str, frozenset[tuple[str, str, str]]] = {
     feature_id: frozenset(
         (binding.producer, binding.layer, binding.fact_class)
         for binding in authority.bindings
-        if binding.fact_class is not None
+        if _binding_is_registry_valid(binding)
     )
     for feature_id, authority in CAP_BYTE_OWNER_MECHANISMS.items()
-    if authority.mechanism == "typed_lineage"
 }
+
+# NAMED, COUNTABLE exclusions — never a silent refusal.
+#
+# The mission rule cuts both ways: do not classify a silent feature as healthy, and do not
+# classify a by-design exclusion as breakage.  A ``ValueError`` alone reads as breakage, so
+# every binding the registry declines to vouch for is enumerated here WITH its reason.  A
+# binding appearing here is NOT a defect: the two present entries are LANE ledger layers,
+# which are the correct spelling for the lane stamp path and simply have no meaning on the
+# canonical plane (their owners each carry a sibling canonical binding).
+_EXCLUSION_UNREGISTERED_LAYER = "layer_is_not_a_registered_evidence_type"
+_EXCLUSION_FACT_MISMATCH = "registered_fact_class_differs_from_binding"
+_EXCLUSION_PRODUCER_UNAUTHORIZED = "producer_not_authoritative_for_evidence_type"
+_EXCLUSION_NO_FACT = "binding_declares_no_fact_class"
+
+
+def _exclusion_reason(binding: CAPByteOwnerBinding) -> str | None:
+    if binding.fact_class is None:
+        return _EXCLUSION_NO_FACT
+    registration = registration_for(binding.layer)
+    if registration is None:
+        return _EXCLUSION_UNREGISTERED_LAYER
+    if registration.fact_class != binding.fact_class:
+        return _EXCLUSION_FACT_MISMATCH
+    if not producer_matches(binding.layer, binding.producer):
+        return _EXCLUSION_PRODUCER_UNAUTHORIZED
+    return None
+
+
+CAP_BYTE_OWNER_BINDING_EXCLUSIONS: tuple[tuple[str, CAPByteOwnerBinding, str], ...] = tuple(
+    sorted(
+        (feature_id, binding, reason)
+        for feature_id, authority in CAP_BYTE_OWNER_MECHANISMS.items()
+        for binding in authority.bindings
+        for reason in (_exclusion_reason(binding),)
+        if reason is not None
+    )
+)
+
+# Owners with NO canonical byte-owning path at all.  This is the GT_SS_COHERENCE_V2 shape
+# (chars=0 measurement row → never a ``delivered`` row → the byte-owner bar is structurally
+# unsatisfiable), and such an owner belongs OUT of ``CAP_BYTE_OWNER_IDS`` entirely rather
+# than inside it and permanently dark.  The set is empty today and the import-time check
+# below fails LOUD if a future edit re-darkens an owner without recording it here.
+#
+# VERIFIED 2026-07-28 that GT_CERT_DELIVERY must NOT be given a ``completion_cert`` binding
+# to close its gap: ``gt_mini_patch._gt_completion_cert_record`` records that layer with no
+# ``chars`` argument (default 0), and ``_runtime_ledger_record`` downgrades any
+# ``delivered`` outcome with ``chars<=0`` to ``suppressed_internal_only`` — so a
+# ``completion_cert`` row can never be a delivered row.  Its real model-facing bytes ride
+# ``submit_refusal`` (the ``_completion_cert_block`` rejection returned at the submit
+# boundary), which is exactly the binding it already declares.
+CAP_OWNERS_WITHOUT_CANONICAL_PATH: frozenset[str] = frozenset()
+
+
+def canonical_binding_exclusions() -> tuple[dict, ...]:
+    """Deterministic, JSON-native census of every declined byte-owner binding."""
+
+    return tuple(
+        {
+            "feature_id": feature_id,
+            "producer": binding.producer,
+            "layer": binding.layer,
+            "fact_class": binding.fact_class,
+            "reason": reason,
+            "owner_has_canonical_binding": bool(
+                _TYPED_CAP_OWNER_BINDINGS.get(feature_id)
+            ),
+        }
+        for feature_id, binding, reason in CAP_BYTE_OWNER_BINDING_EXCLUSIONS
+    )
+
+
+_owners_without_canonical_binding = frozenset(
+    feature_id
+    for feature_id in CAP_BYTE_OWNER_IDS
+    if not _TYPED_CAP_OWNER_BINDINGS.get(feature_id)
+)
+if _owners_without_canonical_binding != CAP_OWNERS_WITHOUT_CANONICAL_PATH:
+    raise ValueError(
+        "CAP byte owners with no registry-valid canonical binding "
+        f"{sorted(_owners_without_canonical_binding)} != the declared exemption set "
+        f"{sorted(CAP_OWNERS_WITHOUT_CANONICAL_PATH)} — a byte owner that cannot own "
+        "canonical bytes must be named here with a reason, or reclassified out of "
+        "CAP_BYTE_OWNER_IDS (the GT_SS_COHERENCE_V2 precedent), never left silently dark"
+    )
 
 
 def cap_role_for(feature_id: str) -> str:
@@ -284,9 +427,24 @@ def _feature_refs(
             raise ValueError(f"CAP is not a declared byte owner: {feature_id}")
         binding = (runtime_producer_id, evidence_base, fact_class)
         if binding not in _TYPED_CAP_OWNER_BINDINGS.get(feature_id, frozenset()):
+            declined = next(
+                (
+                    reason
+                    for owner, declared, reason in CAP_BYTE_OWNER_BINDING_EXCLUSIONS
+                    if owner == feature_id
+                    and (declared.producer, declared.layer, declared.fact_class) == binding
+                ),
+                "",
+            )
             raise ValueError(
                 f"CAP byte owner {feature_id} is not authorized for "
                 f"producer/evidence {runtime_producer_id}/{evidence_type}"
+                + (
+                    f" — declared but declined ({declined}); see "
+                    "canonical_binding_exclusions()"
+                    if declined
+                    else " (no such declared binding)"
+                )
             )
         refs.add(FeatureRef("CAP", feature_id, "byte_owner"))
     return tuple(sorted(refs))
@@ -384,6 +542,9 @@ __all__ = [
     "CAPByteOwnerBinding",
     "CAPByteOwnerMechanism",
     "CAP_BYTE_OWNER_MECHANISMS",
+    "CAP_BYTE_OWNER_BINDING_EXCLUSIONS",
+    "CAP_OWNERS_WITHOUT_CANONICAL_PATH",
+    "canonical_binding_exclusions",
     "DeliveryLineage",
     "CAP_BYTE_OWNER_IDS",
     "CAP_ELIGIBILITY_IDS",

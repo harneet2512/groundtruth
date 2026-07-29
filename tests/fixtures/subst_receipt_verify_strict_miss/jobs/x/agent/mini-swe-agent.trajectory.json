@@ -1,0 +1,15 @@
+{
+ "info": {"config": {"model": {"model_name": "fixture"}}},
+ "messages": [
+  {"role": "system", "content": "You are a helpful assistant."},
+  {"role": "user", "content": "<pr_description>fix hdi plot</pr_description>"},
+  {"role": "assistant", "content": "start",
+   "extra": {"actions": [{"command": "ls -la", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "<gt-verify>\nverify your edit: arviz/plots/hdiplot.py\n</gt-verify>",
+   "extra": {"returncode": 0}},
+  {"role": "assistant", "content": "run the plot suite",
+   "extra": {"actions": [{"command": "pytest tests/test_plots_matplotlib.py", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "5 passed in 1.2s\n<returncode>0</returncode>", "extra": {"returncode": 0}}
+ ],
+ "trajectory_format": "mini-swe-agent-1"
+}

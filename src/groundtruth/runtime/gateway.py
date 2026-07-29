@@ -66,13 +66,18 @@ import shlex
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from enum import Enum
 
 from groundtruth.delivery.path_policy import is_deliverable
 from groundtruth.pretask.curation_map import (
     DETERMINISTIC_RESOLUTION_METHODS,
     parse_edge_metadata,
 )
-from groundtruth.runtime.covering_runner import _connect_ro, _edge_columns
+from groundtruth.runtime.covering_runner import (
+    _connect_ro,
+    _covering_file_on_disk,
+    _edge_columns,
+)
 from groundtruth.runtime.episode_state import EpisodeState
 from groundtruth.runtime.evidence_envelope import (
     ADVISORY,
@@ -819,6 +824,116 @@ def _to_repo_rel(f: str, root: str) -> str:
         except (ValueError, TypeError):
             return f
     return f
+
+
+# --------------------------------------------------------------------------- #
+# FRAME ORIGIN — the repository-membership law for a delivered stack frame.
+#
+# 2026-07-28, run 30390877219. ``_produce_trace`` shipped three frames labelled
+# "deepest in-repo frame" that were NOT in the repository:
+#   yaml/constructor.py:427   (a site-packages dependency)
+#   regex/regex.py:254        (a site-packages dependency)
+#   <string>:18               (a ``python -c`` script — not a file at all)
+# ROOT CAUSE (read, not assumed): ``pretask.traces._is_in_repo`` DOES screen for
+# membership, but for a RELATIVE path it computes ``os.path.realpath(path)``, which
+# resolves against the CURRENT PROCESS CWD. In-container the gateway runs with cwd ==
+# repo_root, so EVERY relative frame satisfies ``realpath(path).startswith(repo_root)``
+# and returns True BEFORE the existence fallback runs. ``site-packages/`` was already
+# stripped by ``parse_stack_traces`` normalization, so the bad-marker screen was blind
+# to it too. This classifier re-decides membership AT the delivery site, against
+# ``repo_root`` ONLY — never against the process cwd — and only REPOSITORY ships.
+# --------------------------------------------------------------------------- #
+class FrameOrigin(str, Enum):
+    """Where a parsed stack frame actually lives. Only REPOSITORY is deliverable."""
+
+    REPOSITORY = "REPOSITORY"
+    DEPENDENCY = "DEPENDENCY"
+    GENERATED = "GENERATED"
+    UNRESOLVED = "UNRESOLVED"
+
+
+# Path SEGMENTS (never substrings) that mark third-party/installed code.
+_VENDOR_SEGMENTS: frozenset[str] = frozenset({
+    "site-packages", "dist-packages", "node_modules", "vendor", ".venv", "venv",
+    ".tox", ".cargo", ".gem", ".pub-cache", "bower_components", "third_party",
+})
+# Segments marking machine-emitted / build-output code the agent must not be sent to.
+_GENERATED_SEGMENTS: frozenset[str] = frozenset({"build", "dist"})
+
+
+def classify_frame_origin(path: str, repo_root: str) -> FrameOrigin:
+    """Classify one stack-frame path's ORIGIN relative to ``repo_root``.
+
+    * ``REPOSITORY``  — carries no vendor/generated segment, resolves UNDER
+      ``repo_root``, and EXISTS on disk there (``covering_runner._covering_file_on_disk``
+      — the repo's one on-disk predicate, reused, never re-implemented).
+    * ``DEPENDENCY``  — carries a vendor segment (site-packages, dist-packages,
+      node_modules, vendor/, .venv, ``$GOPATH/pkg/mod``), or is an absolute path
+      that resolves OUTSIDE ``repo_root``.
+    * ``GENERATED``   — a pseudo-file (``<string>``, ``<stdin>``, ``<frozen ...>``) or
+      machine-emitted output (``*_pb2.py``, ``build/``, ``dist/``).
+    * ``UNRESOLVED``  — everything else, including every path that cannot be proven
+      to exist under ``repo_root`` (no ``repo_root`` given => nothing to be a member OF).
+
+    CORRECT-OR-QUIET: the caller delivers ONLY ``REPOSITORY``; any fault classifies
+    ``UNRESOLVED``, so an unclassifiable frame is suppressed rather than mislabelled.
+    """
+    try:
+        raw = (path or "").strip()
+        if not raw:
+            return FrameOrigin.UNRESOLVED
+        norm = raw.replace("\\", "/")
+        # 1. pseudo-files first: they are not paths at all, so no path test applies.
+        if norm.startswith("<") and norm.endswith(">"):
+            return FrameOrigin.GENERATED
+        # COLLAPSE INTERIOR ``..`` BEFORE ANY RULE READS THE PATH. Without this the
+        # escape test below only catches a LEADING ``../``: ``a/../../outside.py`` keeps
+        # its interior ``..``, passes the startswith test, and then ``os.path.join`` in
+        # the existence oracle collapses it for real -- so a file in the repo's PARENT
+        # resolves, exists, and classifies REPOSITORY. Measured, not theorised.
+        norm = os.path.normpath(norm).replace("\\", "/")
+        segments = [s for s in norm.split("/") if s and s != "."]
+        if not segments:
+            return FrameOrigin.UNRESOLVED
+        # 2. vendor segments (installed third-party code).
+        if any(s in _VENDOR_SEGMENTS for s in segments):
+            return FrameOrigin.DEPENDENCY
+        # $GOPATH/pkg/mod — only as a NON-leading pair; a repo's own top-level
+        # ``pkg/mod/...`` is repository source, not the module cache.
+        for i in range(1, len(segments) - 1):
+            if segments[i] == "pkg" and segments[i + 1] == "mod":
+                return FrameOrigin.DEPENDENCY
+        # 3. generated/build output.
+        if segments[-1].endswith("_pb2.py") or segments[-1].endswith("_pb2_grpc.py"):
+            return FrameOrigin.GENERATED
+        if any(s in _GENERATED_SEGMENTS for s in segments):
+            return FrameOrigin.GENERATED
+        # 4. membership. No root => nothing to be a member of (fail closed).
+        if not repo_root:
+            return FrameOrigin.UNRESOLVED
+        if os.path.isabs(norm):
+            rel = _to_repo_rel(norm, repo_root).replace("\\", "/")
+            # Still absolute, or it escaped the root ("../"): it resolves OUTSIDE the
+            # repository — an installed/system file, never an editable repo target.
+            if os.path.isabs(rel) or rel.startswith("../"):
+                return FrameOrigin.DEPENDENCY
+            norm = rel
+        norm = _norm_fp(norm)
+        if not norm:
+            return FrameOrigin.UNRESOLVED
+        if norm.startswith("../"):
+            return FrameOrigin.DEPENDENCY
+        # 5. EXISTENCE under repo_root — resolved against the ROOT, never the cwd.
+        # A stack frame names a FILE. ``_covering_file_on_disk`` is an ``os.path.exists``
+        # probe, which also answers True for a DIRECTORY -- the predecessor screen used
+        # the stricter ``isfile`` (pretask/traces.py:171), so keep that strictness here.
+        if _covering_file_on_disk(repo_root, norm) and os.path.isfile(
+            os.path.join(repo_root, norm)
+        ):
+            return FrameOrigin.REPOSITORY
+        return FrameOrigin.UNRESOLVED
+    except Exception:  # noqa: BLE001 — correct-or-quiet: unclassifiable => suppressed
+        return FrameOrigin.UNRESOLVED
 
 
 # --------------------------------------------------------------------------- #
@@ -1799,7 +1914,17 @@ def _has_repo_trace(event: ToolEvent, state: GatewayState) -> bool:
         frames = parse_stack_traces(event.output or "", state.repo_root or ".")
     except Exception:  # noqa: BLE001
         return False
-    return any(not _is_leaky(_to_repo_rel(f.file, state.repo_root)) for f in frames)
+    # SAME GATE AS DELIVERY (_produce_trace). ``_is_leaky`` alone is a path-shape screen
+    # resolved against the CWD, so an observation whose only frames are an installed
+    # ``yaml/constructor.py`` and ``<string>:18`` still reported a repository trace. This
+    # predicate feeds _observe_semantic_events, i.e. the ROUTING truth -- closing the
+    # delivery path while leaving the signal untouched fixes half the defect.
+    return any(
+        not _is_leaky(_to_repo_rel(f.file, state.repo_root))
+        and classify_frame_origin(_to_repo_rel(f.file, state.repo_root), state.repo_root)
+        is FrameOrigin.REPOSITORY
+        for f in frames
+    )
 
 
 _SEMANTIC_BOUNDARY_ORDER = (
@@ -2771,6 +2896,28 @@ def _capture_registration_snapshot(res, missing_role, state, candidate_id: str) 
 
 
 def _produce_trace(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+    # NAME THE ROOT-RESOLUTION FAILURE. ``_root()`` never returns "" -- its failure
+    # sentinel is ``"/"`` (gt_mini_patch.py, emitted with a GT_ROOT_MISSING marker and a
+    # ``gt_root_missing`` ledger row), which the code there documents as LIVE: "the ro
+    # /opt/gt mount shadows it". Under that sentinel EVERY frame classifies UNRESOLVED --
+    # even ``/testbed/src/app.py``, because ``_to_repo_rel`` strips ``/testbed/`` first
+    # and the existence probe then asks about ``/src/app.py``. So trace_frame goes 100%
+    # dark, and the only trace is a pile of per-frame ``frame_origin:UNRESOLVED`` rows
+    # indistinguishable from ordinary correct-or-quiet suppression.
+    #
+    # Fail closed as before -- with no root there is nothing to be a member OF -- but say
+    # WHY, once, so a reader can tell "GT could not locate the repository" from "no frame
+    # was in-repo". Note ``state.repo_root or "."`` below is dead on the production path
+    # for the same reason: the sentinel is "/", never "".
+    root = (state.repo_root or "").strip()
+    if not root or root.replace("\\", "/") == "/":
+        _record_control(
+            state, "GT_GATEWAY", "gateway.augment.candidate_admission",
+            "SUPPRESSED", fact_class="localization",
+            candidate_id="trace_frame:root_unresolved",
+            reason="repo_root_unresolved_sentinel",
+        )
+        return []
     try:
         frames = parse_stack_traces(event.output or "", state.repo_root or ".")
     except Exception:  # noqa: BLE001
@@ -2778,6 +2925,29 @@ def _produce_trace(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelo
     for fr in frames:  # deepest in-repo first (parse_stack_traces ordering)
         rel = _to_repo_rel(fr.file, state.repo_root)
         if _is_leaky(rel):
+            continue
+        # REPOSITORY-MEMBERSHIP LAW (2026-07-28). ``parse_stack_traces`` USED TO resolve a
+        # relative frame with realpath() — i.e. against the process CWD, which in-container
+        # IS repo_root — so a site-packages dependency or a ``<string>`` pseudo-file reached
+        # this loop and was delivered verbatim as "deepest in-repo frame". That laundering
+        # is now closed at the source (``pretask/traces.py:_is_in_repo`` applies the realpath
+        # containment test to ABSOLUTE paths only; see
+        # ``tests/pretask/test_trace_cwd_laundering_20260728.py``), so most such frames no
+        # longer arrive here at all.
+        #
+        # This gate STAYS, and is not redundant: ``traces.py`` answers only "does this name a
+        # real file under the root", which admits vendored code that physically lives in the
+        # checkout (``.venv/``, ``dist-packages/``, ``.tox/``) and generated output. Re-decide
+        # origin HERE against repo_root; anything but REPOSITORY is suppressed with an
+        # auditable row, so the decision is visible instead of silent.
+        origin = classify_frame_origin(rel, state.repo_root)
+        if origin is not FrameOrigin.REPOSITORY:
+            _record_control(
+                state, "GT_GATEWAY", "gateway.augment.candidate_admission",
+                "SUPPRESSED", fact_class="localization",
+                candidate_id=f"trace_frame:{_norm_fp(rel)}:{fr.line}",
+                reason=f"frame_origin:{origin.value}",
+            )
             continue
         loc = f"{rel}:{fr.line}" + (f" in {fr.func}" if fr.func else "")
         return [_mk_add(state, event, fact_kind="trace_frame", target=rel,

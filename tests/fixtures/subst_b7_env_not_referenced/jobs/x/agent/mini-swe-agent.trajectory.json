@@ -1,0 +1,15 @@
+{
+ "info": {"config": {"model": {"model_name": "fixture"}}},
+ "messages": [
+  {"role": "system", "content": "You are a helpful assistant."},
+  {"role": "user", "content": "<pr_description>fix widget</pr_description>"},
+  {"role": "assistant", "content": "let me look around",
+   "extra": {"actions": [{"command": "ls -la", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "<gt-evidence>\n[VERIFIED] def compute_widget -> src/widget.py:12\n</gt-evidence>",
+   "extra": {"returncode": 0}},
+  {"role": "assistant", "content": "I will inspect the module later",
+   "extra": {"actions": [{"command": "echo checking", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "def compute_widget(): return 1", "extra": {"returncode": 0}}
+ ],
+ "trajectory_format": "mini-swe-agent-1"
+}

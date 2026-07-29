@@ -43,6 +43,61 @@ import numpy as np
 import scipy.stats as stats
 
 # ---------------------------------------------------------------------------
+# Receipt-ladder authority (2026-07-28)
+#
+# CLAUDE.md §2 (PRODUCTION = PROFILE-ON): "Consumption grades on the receipt
+# ladder (delivered->referenced->acted, assistant-authored); 'pivots'/
+# token-overlap are REJECTED."  M05 previously graded consumption by
+# substring-matching GT-cited filenames against the next 3 assistant bash
+# commands -- token overlap, which this law rejects -- and bucketed every
+# non-match into INERT, including blocks that cite NO file at all and are
+# therefore structurally ungradeable by that rule.
+#
+# We now compute the SANCTIONED grades from scripts/swebench/consumption_ledger
+# (gt.consumption_ledger.v2), which reads the SAME mini-swe-agent trajectory
+# artifact plus its sibling gt_runtime_ledger*.jsonl byte seals.  The legacy
+# token-overlap numbers are retained ONLY as an explicitly-named UNSANCTIONED
+# diagnostic with a real UNMEASURED bucket.
+# ---------------------------------------------------------------------------
+
+def _is_measured_number(v: Any) -> bool:
+    """True iff `v` is a real, measured number.
+
+    `_fmt` serialises NaN as JSON ``null``, so downstream readers see None
+    where they expect NaN.  `math.isnan(None)` raises TypeError and aborts the
+    whole report; treating None as 0.0 would silently turn UNMEASURED into a
+    substantive value.  Both are wrong -- an unmeasured cell must be DROPPED.
+    """
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and not math.isnan(v)
+
+
+def _load_consumption_ledger_module():
+    """Load scripts/swebench/consumption_ledger.py by file location.
+
+    Path-independent (the script is run from arbitrary cwd) and read-only:
+    this module owns no code under scripts/swebench/.
+    """
+    import importlib.util
+
+    cl_path = Path(__file__).resolve().parent.parent / "swebench" / "consumption_ledger.py"
+    if not cl_path.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("consumption_ledger_cpm", cl_path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["consumption_ledger_cpm"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as exc:  # noqa: BLE001 -- never let the authority crash the report
+        print(f"[WARN] consumption_ledger unavailable: {exc}", file=sys.stderr)
+        return None
+
+
+_CONSUMPTION_LEDGER = _load_consumption_ledger_module()
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -246,13 +301,28 @@ class TaskMetrics:
     m04_brief_confidence: str = "unknown"
     m04_available: bool = False
 
-    # M05
+    # M05 — SANCTIONED grades (receipt ladder, CLAUDE.md §2)
+    m05_receipt_delivered: float = math.nan
+    m05_receipt_referenced: float = math.nan
+    m05_receipt_acted: float = math.nan
+    m05_consumption_rate_acted: float = math.nan
+    m05_consumption_rate_referenced_not_acted: float = math.nan
+    m05_consumption_rate_delivered_only: float = math.nan
+    m05_receipt_ladder_available: bool = False
+
+    # M05 — UNSANCTIONED token-overlap diagnostic.  Retained for continuity with
+    # historical reports ONLY.  Never cite as a consumption grade (CLAUDE.md §2
+    # rejects token-overlap grading).  `_unmeasured` holds rows the rule could
+    # not grade at all (block cites no file / no assistant command follows);
+    # these are NEVER counted as inert.
     m05_consumption_rate_explicit: float = math.nan
     m05_consumption_rate_behavioral: float = math.nan
-    m05_consumption_rate_inert: float = math.nan
+    m05_consumption_rate_token_overlap_inert_UNSANCTIONED: float = math.nan
+    m05_consumption_rate_unmeasured: float = math.nan
+    m05_unmeasured_deliveries: float = 0.0
     m05_harm_rate: float = math.nan
     m05_deliveries_total: float = 0.0
-    m05_consumption_grade_source: str = "trajectory_automated"
+    m05_consumption_grade_source: str = "unavailable"
     m05_available: bool = False
 
     # M06
@@ -262,6 +332,7 @@ class TaskMetrics:
 
     # M07 — oracle-era only; proxy for baseline
     m07_suppression_precision: float = math.nan
+    m07_suppression_precision_source: str = "unavailable"
     m07_available: bool = False
 
     # M08
@@ -278,11 +349,13 @@ class TaskMetrics:
     m10_regression_rate: float = math.nan
     m10_available: bool = False
 
-    # M11
+    # M11 — rate denominator = HIGH-confidence pins on THIS task. Zero pins means
+    # the rate has no denominator: it stays NaN with a named reason, never 0.0.
     m11_high_confidence_pins: float = 0.0
     m11_wrong_high_confidence_pins: float = 0.0
     m11_inverted_confidence_rate: float = math.nan
     m11_available: bool = False
+    m11_unmeasured_reason: str = ""
 
     # M12
     m12_emission_precision: float = math.nan
@@ -909,6 +982,299 @@ def _flips_mcnemar(flip_count: int, regression_count: int, n_eligible: int) -> D
     return out
 
 
+# ---------------------------------------------------------------------------
+# E2 — THE QUALITY GUARD (§5: "never call faster-but-worse efficient")
+#
+# CLAUDE.md §5 names the law in prose and nothing enforced it: the report emitted
+# net_tokens_* and the M03 step delta as free-standing numbers, so a run that got
+# FASTER while getting WORSE produced a citable-looking efficiency headline. E2 makes
+# the efficiency numbers conditional: they may be REPORTED as a win only when quality
+# did not regress on the SAME paired population.
+#
+# Fail-closed by construction: a quality signal that is MISSING is never treated as
+# "held". Missing -> UNMEASURED with the signal NAMED, and citable_efficiency stays
+# False. The single allowed exception is spelled out in §5 terms: M20 may be absent
+# when the artifact can NAME why (no verifier output in either arm / one arm only) --
+# an arm that claims m20_available but carries no number is NOT nameable and fails
+# closed.
+#
+# Every field is structured (booleans, named signal keys, values) rather than prose so
+# a future gt_compute_check clause can assert on it without parsing English.
+# ---------------------------------------------------------------------------
+
+QGE_WIN = "EFFICIENCY_WIN_QUALITY_HELD"
+QGE_FASTER_BUT_WORSE = "FASTER_BUT_WORSE"
+QGE_NO_GAIN = "NO_EFFICIENCY_GAIN"
+QGE_UNMEASURED = "UNMEASURED"
+
+
+def _qge_efficiency_signal(
+    deltas: List[float],
+    improved_when: str,
+    direction: str,
+) -> Dict[str, Any]:
+    """One REPORT-ONLY efficiency signal, with its improvement decision.
+
+    ``improved_when`` is "positive" (net tokens: off-on, positive = GT saved) or
+    "negative" (M03 steps: oracle-baseline, negative = GT used fewer steps).  The
+    DECISION statistic is the median -- a mean can be dragged positive by one
+    outlier task, and §5 requires the median alongside every mean anyway.
+    """
+    valid = [d for d in deltas if _is_measured_number(d)]
+    if not valid:
+        return {
+            "measured": False,
+            "n": 0,
+            "mean": math.nan,
+            "median": math.nan,
+            "improved": None,
+            "direction": direction,
+            "decision_statistic": "median",
+            "missing_reason": "no_paired_measurement",
+        }
+    med = _safe_median(valid)
+    improved = med > 0 if improved_when == "positive" else med < 0
+    return {
+        "measured": True,
+        "n": len(valid),
+        "mean": _safe_mean(valid),
+        "median": med,
+        "improved": bool(improved),
+        "direction": direction,
+        "decision_statistic": "median",
+        "missing_reason": None,
+    }
+
+
+def _qge_m20_signal(
+    m20_deltas: List[float],
+    n_available_baseline: int,
+    n_available_oracle: int,
+) -> Dict[str, Any]:
+    """M20 (hidden tests passed) -- the PRIMARY code-correctness quality signal.
+
+    Unmeasured is only FORGIVEABLE when the artifact can name why.  "Both arms say
+    m20_available but no paired number exists" is exactly the silent-hole case the
+    guard exists to catch, so it is left un-named and fails closed.
+    """
+    valid = [d for d in m20_deltas if _is_measured_number(d)]
+    if valid:
+        med = _safe_median(valid)
+        return {
+            "measured": True,
+            "n": len(valid),
+            "mean": _safe_mean(valid),
+            "median": med,
+            "regressed": bool(med < 0),
+            "decision_statistic": "median",
+            "direction": "positive_means_more_hidden_tests_passed_with_gt",
+            "missing_reason": None,
+            "unmeasured_with_named_reason": False,
+        }
+    if n_available_baseline == 0 and n_available_oracle == 0:
+        reason: Optional[str] = "no_hidden_test_telemetry_in_either_arm"
+    elif n_available_baseline == 0 or n_available_oracle == 0:
+        reason = "hidden_tests_measured_in_one_arm_only"
+    else:
+        # Both arms flagged m20_available yet no paired delta survived: the artifact
+        # cannot say WHY the primary correctness signal is absent.
+        reason = None
+    return {
+        "measured": False,
+        "n": 0,
+        "mean": math.nan,
+        "median": math.nan,
+        "regressed": None,
+        "decision_statistic": "median",
+        "direction": "positive_means_more_hidden_tests_passed_with_gt",
+        "n_tasks_available_baseline": int(n_available_baseline),
+        "n_tasks_available_oracle": int(n_available_oracle),
+        "missing_reason": reason,
+        "unmeasured_with_named_reason": reason is not None,
+    }
+
+
+def _quality_guarded_efficiency(
+    net_tokens_deltas: List[float],
+    m03_deltas: List[float],
+    absolute_resolution_pp: float,
+    m20_deltas: List[float],
+    m20_available_baseline: int,
+    m20_available_oracle: int,
+    regression_guards: Dict[str, Any],
+) -> Dict[str, Any]:
+    """E2: gate the efficiency headline on quality holding (CLAUDE.md §5)."""
+    net_tokens = _qge_efficiency_signal(
+        net_tokens_deltas, "positive", "positive_means_gt_saved_tokens"
+    )
+    steps = _qge_efficiency_signal(
+        m03_deltas, "negative", "negative_means_gt_used_fewer_steps"
+    )
+
+    pp_measured = _is_measured_number(absolute_resolution_pp)
+    resolved_pp = {
+        "measured": bool(pp_measured),
+        "value": absolute_resolution_pp if pp_measured else math.nan,
+        "regressed": bool(absolute_resolution_pp < 0) if pp_measured else None,
+        "rule": "quality holds only when absolute_resolution_pp >= 0",
+        "missing_reason": None if pp_measured else "no_paired_population",
+    }
+    m20 = _qge_m20_signal(m20_deltas, m20_available_baseline, m20_available_oracle)
+
+    guards_triggered = sorted(
+        k for k, v in regression_guards.items()
+        if k != "any_regression_triggered" and isinstance(v, bool) and v
+    )
+    guards = {
+        # The guard block is structural: it is always computed for the paired
+        # population, so it is always MEASURED (its individual comparisons already
+        # fail closed to False when a rate is NaN on either arm).
+        "measured": True,
+        "any_regression_triggered": bool(
+            regression_guards.get("any_regression_triggered", False)
+        ),
+        "triggered": guards_triggered,
+        "verdicts": {
+            k: v for k, v in sorted(regression_guards.items())
+        },
+        "missing_reason": None,
+    }
+
+    efficiency_signals = {"net_tokens": net_tokens, "steps_m03": steps}
+    quality_signals = {
+        "absolute_resolution_pp": resolved_pp,
+        "m20_hidden_tests": m20,
+        "regression_guards": guards,
+    }
+
+    missing_efficiency = sorted(
+        name for name, sig in efficiency_signals.items() if not sig["measured"]
+    )
+    # A quality signal counts as MISSING unless it is measured, or unmeasured with a
+    # named reason.  Never "held by default".
+    missing_quality: List[str] = []
+    if not resolved_pp["measured"]:
+        missing_quality.append("absolute_resolution_pp")
+    if not m20["measured"] and not m20["unmeasured_with_named_reason"]:
+        missing_quality.append("m20_hidden_tests")
+    if not guards["measured"]:
+        missing_quality.append("regression_guards")
+    missing_quality.sort()
+
+    measured_efficiency = [
+        sig for sig in efficiency_signals.values() if sig["measured"]
+    ]
+    efficiency_improved = (
+        any(bool(sig["improved"]) for sig in measured_efficiency)
+        if measured_efficiency else None
+    )
+
+    quality_regressed_signals = sorted(
+        [
+            name for name, sig in quality_signals.items()
+            if sig.get("regressed") is True
+        ]
+        + (["regression_guards"] if guards["any_regression_triggered"] else [])
+    )
+    quality_regressed = bool(quality_regressed_signals)
+
+    basis_values = {
+        "net_tokens_median": net_tokens["median"],
+        "net_tokens_mean": net_tokens["mean"],
+        "net_tokens_n": net_tokens["n"],
+        "steps_m03_median": steps["median"],
+        "steps_m03_mean": steps["mean"],
+        "steps_m03_n": steps["n"],
+        "absolute_resolution_pp": resolved_pp["value"],
+        "m20_median": m20["median"],
+        "m20_mean": m20["mean"],
+        "m20_n": m20["n"],
+        "m20_missing_reason": m20["missing_reason"],
+        "any_regression_triggered": guards["any_regression_triggered"],
+        "regression_guards_triggered": guards_triggered,
+    }
+
+    if not measured_efficiency:
+        verdict = QGE_UNMEASURED
+        citable = False
+        signals_used = sorted(efficiency_signals)
+        rule = (
+            "no efficiency signal carries a paired measurement: whether GT was faster "
+            "is UNKNOWN, so it is neither a gain nor a win"
+        )
+        missing = sorted(set(missing_efficiency) | set(missing_quality))
+    elif not efficiency_improved:
+        verdict = QGE_NO_GAIN
+        citable = False
+        signals_used = sorted(
+            name for name, sig in efficiency_signals.items() if sig["measured"]
+        )
+        rule = (
+            "neither measured efficiency signal improved (net_tokens median > 0 or "
+            "M03 median < 0): there is no efficiency claim to guard"
+        )
+        missing = sorted(missing_efficiency)
+    elif quality_regressed:
+        verdict = QGE_FASTER_BUT_WORSE
+        citable = False
+        signals_used = sorted(
+            [n for n, s in efficiency_signals.items() if s["measured"]]
+            + quality_regressed_signals
+        )
+        rule = (
+            "efficiency improved while a quality signal REGRESSED on the same paired "
+            "population -- §5 forbids calling this efficient; the efficiency numbers "
+            "are NOT citable"
+        )
+        missing = sorted(missing_quality)
+    elif missing_quality:
+        verdict = QGE_UNMEASURED
+        citable = False
+        signals_used = sorted(
+            [n for n, s in efficiency_signals.items() if s["measured"]]
+            + [n for n, s in quality_signals.items() if s["measured"]]
+        )
+        rule = (
+            "efficiency improved but a quality signal is MISSING with no named reason: "
+            "fail-closed -- missing is UNMEASURED, never 'held'"
+        )
+        missing = missing_quality
+    else:
+        verdict = QGE_WIN
+        citable = True
+        signals_used = sorted(
+            [n for n, s in efficiency_signals.items() if s["measured"]]
+            + list(quality_signals)
+        )
+        rule = (
+            "an efficiency signal improved AND no quality signal regressed AND every "
+            "quality signal is measured or unmeasured-with-a-named-reason"
+        )
+        missing = []
+
+    return {
+        "doctrine": (
+            "CLAUDE.md §5 -- never call faster-but-worse efficient; an efficiency win "
+            "is reportable only when quality held on the SAME paired population"
+        ),
+        "verdict": verdict,
+        "citable_efficiency": bool(citable),
+        "efficiency_improved": efficiency_improved,
+        "quality_held": (
+            None if verdict == QGE_UNMEASURED else bool(not quality_regressed)
+        ),
+        "quality_regressed_signals": quality_regressed_signals,
+        "efficiency_signals": efficiency_signals,
+        "quality_signals": quality_signals,
+        "missing_signals": missing,
+        "basis": {
+            "signals_used": signals_used,
+            "values": basis_values,
+            "rule": rule,
+        },
+    }
+
+
 def _apply_holm(tests: Dict[str, Dict], alpha: float = 0.05) -> None:
     """Holm–Bonferroni step-down FWER control over the per-metric significance
     battery (G9), IN PLACE. Each test independently set ``significant_p05`` from its
@@ -1109,8 +1475,13 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
         m.m13_steps_to_gold_edit_confidence = "HIGH"
         m.m13_available = True
     else:
-        # Fallback: first_edit_action from deep metrics
-        fea = float(agent_dm.get("first_edit_action", 0.0))
+        # Fallback: first_edit_action from deep metrics.  The key can be present
+        # and explicitly null (4/97 real tasks across runs 30390877219 /
+        # run6_29714439700 / 30034619505), which crashed the whole report with
+        # `float(None)` — `.get(k, default)` does NOT apply the default to a
+        # stored None.  A null here means UNMEASURED: leave M13 unavailable.
+        fea_raw = agent_dm.get("first_edit_action")
+        fea = float(fea_raw) if isinstance(fea_raw, (int, float)) else 0.0
         if fea > 0:
             m.m13_steps_to_gold_edit = float(max(0, fea - 1))
             m.m13_steps_to_gold_edit_confidence = "LOW (deep_metrics_fallback)"
@@ -1230,12 +1601,25 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
                     m.m11_wrong_high_confidence_pins = float(wrong)
                     m.m11_inverted_confidence_rate = float(wrong)
                     m.m11_available = True
+                else:
+                    # HIGH claimed but no recognisable pin line: the event is
+                    # unparseable, not absent — name it, never grade it.
+                    m.m11_unmeasured_reason = "high_confidence_pin_unparsed"
             else:
-                # Medium/low: no HIGH pins, inverted rate = 0
+                # Medium/low: ZERO high-confidence pins. The denominator is
+                # EMPTY, so the rate is UNMEASURED (NaN) — writing 0.0 here
+                # manufactured a perfect-calibration verdict from no evidence.
+                # The pin/wrong COUNTS are genuinely measured zeros and feed
+                # the event-weighted aggregate.
                 m.m11_high_confidence_pins = 0.0
                 m.m11_wrong_high_confidence_pins = 0.0
-                m.m11_inverted_confidence_rate = 0.0
-                m.m11_available = True
+                m.m11_unmeasured_reason = "zero_high_confidence_pins"
+        else:
+            m.m11_unmeasured_reason = "no_localization_block"
+    else:
+        m.m11_unmeasured_reason = (
+            "no_brief" if not brief_text else "no_edited_files"
+        )
 
     # ----- M15: confidence calibration -----
     if brief_text and edited_files:
@@ -1276,22 +1660,65 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
     gt_deliveries = _extract_gt_deliveries(messages)
     total_deliveries = len(gt_deliveries)
     m.m05_deliveries_total = float(total_deliveries)
-    m.m05_consumption_grade_source = "trajectory_automated"
+    m.m05_consumption_grade_source = "unavailable"
+
+    # ---- SANCTIONED grade: receipt ladder (delivered -> referenced -> acted).
+    # Computed UNCONDITIONALLY: `_extract_gt_deliveries` only sees legacy <gt-*>
+    # tags, while Profile-2 native deliveries are tag-free and are located by
+    # byte seal.  A run with total_deliveries == 0 can still have sealed
+    # deliveries on the ladder.
+    _ladder = None
+    if _CONSUMPTION_LEDGER is not None and traj_path is not None:
+        try:
+            _ladder = _CONSUMPTION_LEDGER.ledger_from_trajectory_path(str(traj_path))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [WARN] {task_id}: receipt ladder failed: {exc}", file=sys.stderr)
+            _ladder = None
+    if _ladder and _ladder.get("schema") == "gt.consumption_ledger.v2":
+        _dl = float(_ladder.get("gt_blocks_delivered", 0) or 0)
+        _rf = float(_ladder.get("gt_blocks_referenced", 0) or 0)
+        _ac = float(_ladder.get("gt_blocks_consumed", 0) or 0)
+        m.m05_receipt_delivered = _dl
+        m.m05_receipt_referenced = _rf
+        m.m05_receipt_acted = _ac
+        if _dl > 0:
+            m.m05_consumption_rate_acted = _safe_div(_ac, _dl, math.nan)
+            m.m05_consumption_rate_referenced_not_acted = _safe_div(
+                max(0.0, _rf - _ac), _dl, math.nan
+            )
+            m.m05_consumption_rate_delivered_only = _safe_div(
+                max(0.0, _dl - _rf), _dl, math.nan
+            )
+            m.m05_receipt_ladder_available = True
+            m.m05_consumption_grade_source = "receipt_ladder_v2"
+        else:
+            m.m05_consumption_grade_source = "receipt_ladder_v2_no_sealed_deliveries"
+    elif total_deliveries > 0:
+        m.m05_consumption_grade_source = "token_overlap_UNSANCTIONED"
 
     if total_deliveries > 0:
-        # Automated consumption grading (heuristic):
+        # UNSANCTIONED token-overlap diagnostic (see module header).  Buckets:
         # EXPLICIT: GT block cites a file, next 3 agent steps quote/use that exact file+symbol
         # BEHAVIORAL: next 1 agent step reads/writes a GT-cited file
-        # INERT: no match in next 3 steps
+        # UNMEASURED: the rule has nothing to match on (block cites no file path,
+        #             or no assistant command follows) -- NOT evidence of inertness
+        # INERT: the rule COULD have matched (cited files AND following commands
+        #        exist) and did not
         # HARMFUL: agent reads a GT-cited file AND that file is NOT in edited_files
         explicit = 0
         behavioral = 0
         inert = 0
+        unmeasured = 0
         harmful = 0
         for msg_idx, block in gt_deliveries:
             cited_files = _files_cited_in_gt_block(block)
             next_cmds = _get_next_3_assistant_steps(msg_idx, messages)
             next_text = " ".join(next_cmds).lower()
+
+            # A row is GRADEABLE by this rule only if it cites at least one
+            # matchable path AND at least one assistant command follows it.
+            # Without both, a non-match carries ZERO information about consumption.
+            gradeable = bool([cf for cf in cited_files if len(cf) > 4]) and bool(next_cmds)
 
             # EXPLICIT: GT-cited file or symbol appears literally in next assistant text
             explicit_hit = any(
@@ -1324,12 +1751,23 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
                 harmful += 1
             elif behavioral_hit:
                 behavioral += 1
-            else:
+            elif gradeable:
                 inert += 1
+            else:
+                # The rule was not applicable to this row.  Counting it INERT
+                # would manufacture a proven-negative verdict out of missing
+                # evidence (the defect withdrawn from gt_feature_metrics.py).
+                unmeasured += 1
 
         m.m05_consumption_rate_explicit = _safe_div(float(explicit), float(total_deliveries), 0.0)
         m.m05_consumption_rate_behavioral = _safe_div(float(behavioral), float(total_deliveries), 0.0)
-        m.m05_consumption_rate_inert = _safe_div(float(inert), float(total_deliveries), 0.0)
+        m.m05_consumption_rate_token_overlap_inert_UNSANCTIONED = _safe_div(
+            float(inert), float(total_deliveries), 0.0
+        )
+        m.m05_unmeasured_deliveries = float(unmeasured)
+        m.m05_consumption_rate_unmeasured = _safe_div(
+            float(unmeasured), float(total_deliveries), 0.0
+        )
         m.m05_harm_rate = _safe_div(float(harmful), float(total_deliveries), 0.0)
         m.m05_available = True
 
@@ -1409,10 +1847,14 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
                     break
         m.m19_available = True
     else:
-        # No GT deliveries at all
+        # No legacy <gt-*> tagged deliveries at all.  Rates over a zero
+        # denominator; the receipt-ladder fields above still carry the
+        # sanctioned truth if sealed native deliveries exist.
         m.m05_consumption_rate_explicit = 0.0
         m.m05_consumption_rate_behavioral = 0.0
-        m.m05_consumption_rate_inert = 0.0
+        m.m05_consumption_rate_token_overlap_inert_UNSANCTIONED = 0.0
+        m.m05_consumption_rate_unmeasured = 0.0
+        m.m05_unmeasured_deliveries = 0.0
         m.m05_harm_rate = 0.0
         m.m05_available = True
 
@@ -1424,18 +1866,44 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
         m.m12_emission_precision_confidence = "PARTIAL (brief_precision_proxy)"
         m.m12_available = True
 
-    # M07: oracle suppression precision
-    # For baseline (pre-oracle), proxy = fraction of deliveries that SHOULD have been suppressed
-    # (inert + harmful).  For oracle arm, read from telemetry if present.
-    if m.m05_available and total_deliveries > 0:
-        inert_count = m.m05_consumption_rate_inert * total_deliveries
-        harmful_count = m.m05_harm_rate * total_deliveries
-        m.m07_suppression_precision = _safe_div(inert_count + harmful_count, total_deliveries, math.nan)
+    # M07: oracle suppression precision — fraction of deliveries that SHOULD
+    # have been suppressed.  Previously derived from the token-overlap INERT
+    # bucket, which swallowed every ungradeable row: a task whose only delivery
+    # was a file-free obligations block scored 1.00 ("suppress everything").
+    # Now the receipt ladder is the authority; the token-overlap fallback
+    # EXCLUDES unmeasured rows from BOTH numerator and denominator.
+    if m.m05_receipt_ladder_available:
+        # A sealed delivery that never reached receipt 2 (referenced) is the
+        # suppression candidate.  Referenced-or-acted rows are not.
+        m.m07_suppression_precision = m.m05_consumption_rate_delivered_only
+        m.m07_suppression_precision_source = "receipt_ladder_v2"
         m.m07_available = True
+    elif m.m05_available and total_deliveries > 0:
+        unmeasured_count = m.m05_unmeasured_deliveries
+        gradeable_total = float(total_deliveries) - unmeasured_count
+        if gradeable_total > 0:
+            inert_count = m.m05_consumption_rate_token_overlap_inert_UNSANCTIONED * total_deliveries
+            harmful_count = m.m05_harm_rate * total_deliveries
+            m.m07_suppression_precision = _safe_div(
+                inert_count + harmful_count, gradeable_total, math.nan
+            )
+            m.m07_suppression_precision_source = "token_overlap_UNSANCTIONED_gradeable_only"
+            m.m07_available = True
+        else:
+            # Every delivery was ungradeable.  UNMEASURED, not "suppress all".
+            m.m07_suppression_precision = math.nan
+            m.m07_suppression_precision_source = "UNMEASURED_no_gradeable_deliveries"
+            m.m07_available = False
 
     # M08: resolved given consumption
     # Degenerate at 0/N resolved; compute anyway
-    if m.m05_available:
+    if m.m05_receipt_ladder_available:
+        # Sanctioned: consumption == receipt >= 3 (ACTED).
+        m.m08_resolved_given_consumed = _f8(
+            1.0 if (m.m05_receipt_acted > 0 and m.resolved) else 0.0
+        )
+        m.m08_available = True
+    elif m.m05_available:
         consumed = (
             m.m05_consumption_rate_explicit + m.m05_consumption_rate_behavioral
         ) * total_deliveries
@@ -1444,10 +1912,16 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
         )
         m.m08_available = True
 
-    # M10: regression rate — requires comparing verifier outputs across arms; set to 0.0 per task
-    # (filled in at the paired level if verifier outputs are available)
-    m.m10_regression_rate = 0.0
-    m.m10_available = True
+    # M10: regression rate — requires comparing verifier outputs ACROSS ARMS,
+    # which a per-task pass cannot do, and nothing at the paired level ever
+    # fills it in (see `regression_guards["m10_regression_rate_increased"]`,
+    # hardcoded False and labelled "not computable without verifier diff").
+    # It previously reported 0.0 / available=True on every task: a manufactured
+    # "zero regressions" verdict from zero evidence, and every m10_delta was a
+    # guaranteed 0.0.  Same defect class as the M05 INERT bucket, only in GT's
+    # favour.  UNMEASURED until a real cross-arm verifier diff exists.
+    m.m10_regression_rate = math.nan
+    m.m10_available = False
 
     # =========================================================================
     # M20–M26: Code-Quality / Correctness metrics
@@ -1465,9 +1939,18 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
             pass_count, total_count, compile_fail, _ = _parse_verifier_hidden_tests(verifier_text)
             m.m20_hidden_tests_pass = float(pass_count)
             m.m20_hidden_tests_total = float(total_count)
-            m.m20_hidden_test_pass_rate = _safe_div(float(pass_count), float(total_count), 0.0)
             m.m20_compile_fail = compile_fail
-            m.m20_available = True
+            if total_count > 0:
+                m.m20_hidden_test_pass_rate = _safe_div(
+                    float(pass_count), float(total_count), math.nan
+                )
+                m.m20_available = True
+            else:
+                # Verifier stdout exists but no test result line parsed.  A 0.0
+                # pass rate here would be a manufactured "0% of hidden tests
+                # passed" verdict from an unparsed artifact, not a measurement.
+                m.m20_hidden_test_pass_rate = math.nan
+                m.m20_available = False
         except Exception as exc:
             print(f"  [WARN] {task_id}: M20 verifier parse error: {exc}", file=sys.stderr)
 
@@ -1728,8 +2211,28 @@ def compute_paired_report(
     import datetime
     import subprocess
 
-    # Shared tasks
-    shared_ids = sorted(set(baseline_run.keys()) & set(oracle_run.keys()))
+    # ── LOCKED POPULATION, EXPLICIT MISSINGNESS (§5, 2026-07-29) ────────────────
+    # This used to be a bare `set(baseline) & set(oracle)` — a SILENT intersection.
+    # A task present in one arm and absent from the other simply vanished: the report's
+    # n_tasks shrank and nothing said so, which breaks the locked-task-union law in the
+    # one line every downstream number depends on. The union is now the population of
+    # record; pairing still happens only where both arms measured (deltas need both
+    # sides), but every unpaired task is NAMED with the arm it is missing from, so a
+    # shrunken denominator is a visible fact instead of an invisible one.
+    union_ids = sorted(set(baseline_run.keys()) | set(oracle_run.keys()))
+    shared_ids = [t for t in union_ids if t in baseline_run and t in oracle_run]
+    missing_tasks = {
+        tid: {
+            "in_baseline": tid in baseline_run,
+            "in_oracle": tid in oracle_run,
+            "missing_reason": (
+                "absent_from_oracle_run" if tid in baseline_run
+                else "absent_from_baseline_run"
+            ),
+        }
+        for tid in union_ids
+        if tid not in baseline_run or tid not in oracle_run
+    }
     n_tasks = len(shared_ids)
 
     # Try to get git info
@@ -1763,6 +2266,13 @@ def compute_paired_report(
     m23_deltas: List[float] = []
     m25_deltas: List[float] = []
     m26_deltas: List[float] = []
+
+    # E3 (§5 primary endpoint): task net tokens `off − on`, positive = GT saved tokens.
+    # llm_tokens_in on the GT-on arm already INCLUDES injected evidence tokens, so the
+    # plain difference is the whole story — subtracting GT tokens again would be the
+    # §5 double-subtraction error. NaN (not 0) when either arm recorded no token
+    # telemetry: a zero here would manufacture "no savings" out of a missing field.
+    net_tokens_deltas: List[float] = []
 
     # McNemar tables
     m11_mcnemar_b = 0   # baseline high-wrong, oracle not
@@ -1850,6 +2360,18 @@ def compute_paired_report(
             "resolved_delta": _fmt(
                 float(oracle.resolved) - float(base.resolved)),
         }
+        # E3: net tokens off−on. Both arms must have MEASURED token telemetry.
+        base_tok = base.llm_tokens_in + base.llm_tokens_out
+        ora_tok = oracle.llm_tokens_in + oracle.llm_tokens_out
+        if base_tok > 0 and ora_tok > 0:
+            d["net_tokens_off_minus_on"] = _fmt(base_tok - ora_tok)
+            net_tokens_deltas.append(base_tok - ora_tok)
+        else:
+            d["net_tokens_off_minus_on"] = None
+            d["net_tokens_missing_reason"] = (
+                "no_token_telemetry_baseline" if base_tok <= 0
+                else "no_token_telemetry_oracle"
+            )
         delta_records[tid] = d
 
         # Accumulate for statistical tests
@@ -1937,8 +2459,8 @@ def compute_paired_report(
             "bootstrap_ci_hi": _fmt(hi),
             "n_bootstrap_resamples": N_BOOTSTRAP,
             "significant_p05": bool(
-                not math.isnan(wres.get("p_value", math.nan))
-                and wres.get("p_value", 1.0) < 0.05
+                _is_measured_number(wres.get("p_value"))
+                and wres["p_value"] < 0.05
             ),
             **({"note": wres["note"]} if "note" in wres else {}),
             **({"error": wres["error"]} if "error" in wres else {}),
@@ -1970,6 +2492,25 @@ def compute_paired_report(
             {**_mcnemar_test(m25_mcnemar_b, m25_mcnemar_c), "direction": "oracle_higher"}
         ),
         "m26_wilcoxon": _full_wilcoxon(m26_deltas, "m26", "oracle_higher"),
+        # E3 (§5 primary endpoint). The deltas are ALREADY off−on (positive = GT saved
+        # tokens), so the null is net<=0 and the alternative "greater". Passing these
+        # through _full_wilcoxon's oracle_lower/oracle_higher naming would test the
+        # wrong tail or mislabel the direction — hence the explicit build.
+        "net_tokens_wilcoxon": (lambda w, ci: {
+            **{k: (_fmt(v) if isinstance(v, float) else v) for k, v in w.items()},
+            "direction": "net_positive_means_gt_saved_tokens",
+            "mean_delta": _fmt(ci[0]),
+            "bootstrap_ci_lo": _fmt(ci[1]),
+            "bootstrap_ci_hi": _fmt(ci[2]),
+            "median_delta": _fmt(_safe_median(net_tokens_deltas)),
+            "n_bootstrap_resamples": N_BOOTSTRAP,
+            "significant_p05": bool(
+                _is_measured_number(w.get("p_value")) and w["p_value"] < 0.05
+            ),
+        })(
+            _wilcoxon_test(net_tokens_deltas, alternative="greater"),
+            _bootstrap_ci(net_tokens_deltas),
+        ),
     }
 
     # Flip count
@@ -2010,6 +2551,29 @@ def compute_paired_report(
         {tid: oracle_run[tid] for tid in shared_ids},
         "m11_inverted_confidence_rate",
     )
+
+    # M11 event-weighted view: pool pins over the paired population so a task
+    # with 50 confidence events outweighs a task with 1, and zero-event tasks
+    # contribute NOTHING (they carry no denominator). Kept ALONGSIDE the
+    # per-task mean — the two answer different questions (average task vs
+    # average event).
+    def _m11_event_weighted(run: Dict[str, TaskMetrics]) -> Dict[str, Any]:
+        pins = sum(run[tid].m11_high_confidence_pins for tid in shared_ids)
+        wrong = sum(run[tid].m11_wrong_high_confidence_pins for tid in shared_ids)
+        return {
+            "pins": float(pins),
+            "wrong": float(wrong),
+            "rate": (wrong / pins) if pins > 0 else math.nan,
+            "n_tasks_with_events": sum(
+                1 for tid in shared_ids if run[tid].m11_high_confidence_pins > 0
+            ),
+            "n_tasks_zero_event": sum(
+                1 for tid in shared_ids if run[tid].m11_high_confidence_pins == 0
+            ),
+        }
+
+    base_m11_ew = _m11_event_weighted(baseline_run)
+    oracle_m11_ew = _m11_event_weighted(oracle_run)
     base_scaffold = _run_mean(
         {tid: baseline_run[tid] for tid in shared_ids},
         "m16_scaffold_waste_rate",
@@ -2027,6 +2591,10 @@ def compute_paired_report(
         not math.isnan(base_m11) and not math.isnan(oracle_m11)
         and oracle_m11 > base_m11
     )
+    m11_increased_event_weighted = (
+        not math.isnan(base_m11_ew["rate"]) and not math.isnan(oracle_m11_ew["rate"])
+        and oracle_m11_ew["rate"] > base_m11_ew["rate"]
+    )
     scaffold_increased = (
         not math.isnan(base_scaffold) and not math.isnan(oracle_scaffold)
         and oracle_scaffold > base_scaffold
@@ -2038,12 +2606,19 @@ def compute_paired_report(
     regression_guards = {
         "m10_regression_rate_increased": False,  # not computable without verifier diff
         "m11_inverted_confidence_increased": bool(m11_increased),
+        # Event-weighted companion guard: the per-task mean can DROP while the
+        # per-event rate RISES (pin-heavy tasks got worse); either view rising
+        # is a regression signal.
+        "m11_inverted_confidence_increased_event_weighted": bool(
+            m11_increased_event_weighted
+        ),
         "harm_rate_increased": bool(harm_increased),
         "m16_scaffold_waste_increased": bool(scaffold_increased),
         "m22_compile_regressions": int(m22_mcnemar_b),
         "m22_compile_regression_triggered": bool(compile_regression_triggered),
         "any_regression_triggered": bool(
-            m11_increased or harm_increased or scaffold_increased or compile_regression_triggered
+            m11_increased or m11_increased_event_weighted or harm_increased
+            or scaffold_increased or compile_regression_triggered
         ),
     }
 
@@ -2056,6 +2631,7 @@ def compute_paired_report(
     ) -> Dict:
         w = statistical_tests.get(wilcoxon_key, {}) if wilcoxon_key else {}
         m, lo, hi = _bootstrap_ci(deltas)
+        valid = [v for v in deltas if not math.isnan(v)]
         return {
             "baseline_mean": _fmt(_safe_mean(base_vals)),
             "baseline_median": _fmt(_safe_median(base_vals)),
@@ -2068,6 +2644,11 @@ def compute_paired_report(
             "wilcoxon_p": _fmt(w.get("p_value")),
             "significant_p05": bool(w.get("significant_p05", False)),
             "n": len(deltas),
+            # §5: a mean without its sign split hides a bimodal delta. These three
+            # always sum to n over the measured deltas.
+            "n_positive": sum(1 for v in valid if v > 0),
+            "n_negative": sum(1 for v in valid if v < 0),
+            "n_tie": sum(1 for v in valid if v == 0),
         }
 
     def _vals(run: Dict[str, TaskMetrics], attr: str) -> List[float]:
@@ -2113,11 +2694,34 @@ def compute_paired_report(
             m09_deltas,
             "m09_wilcoxon",
         ),
-        "M11": _metric_aggregate(
-            _vals(baseline_run, "m11_inverted_confidence_rate"),
-            _vals(oracle_run, "m11_inverted_confidence_rate"),
-            m11_ic_deltas,
-        ),
+        "M11": {
+            **_metric_aggregate(
+                _vals(baseline_run, "m11_inverted_confidence_rate"),
+                _vals(oracle_run, "m11_inverted_confidence_rate"),
+                m11_ic_deltas,
+            ),
+            # The *_mean fields above are the PER-TASK view: unweighted over
+            # tasks that carry >=1 HIGH pin; zero-event tasks are UNMEASURED
+            # (m11_unmeasured_reason) and excluded, never averaged in as 0.0.
+            "aggregation_note": (
+                "baseline_mean/oracle_mean are the unweighted per_task_mean over "
+                "tasks with >=1 high-confidence pin; zero-event tasks are "
+                "UNMEASURED (see m11_unmeasured_reason). event_weighted pools "
+                "pins across tasks (average event, not average task)."
+            ),
+            "event_weighted": _fmt({
+                "baseline_pins": base_m11_ew["pins"],
+                "baseline_wrong_pins": base_m11_ew["wrong"],
+                "baseline_rate": base_m11_ew["rate"],
+                "oracle_pins": oracle_m11_ew["pins"],
+                "oracle_wrong_pins": oracle_m11_ew["wrong"],
+                "oracle_rate": oracle_m11_ew["rate"],
+                "n_tasks_with_events_baseline": base_m11_ew["n_tasks_with_events"],
+                "n_tasks_with_events_oracle": oracle_m11_ew["n_tasks_with_events"],
+                "n_tasks_zero_event_baseline": base_m11_ew["n_tasks_zero_event"],
+                "n_tasks_zero_event_oracle": oracle_m11_ew["n_tasks_zero_event"],
+            }),
+        },
         "M13": _metric_aggregate(
             _vals(baseline_run, "m13_steps_to_gold_edit"),
             _vals(oracle_run, "m13_steps_to_gold_edit"),
@@ -2156,10 +2760,18 @@ def compute_paired_report(
         "M20_pass_rate": _metric_aggregate(
             _vals(baseline_run, "m20_hidden_test_pass_rate"),
             _vals(oracle_run, "m20_hidden_test_pass_rate"),
+            # PRE-EXISTING CRASH (present on HEAD, reproduced on runs
+            # 30025310582 / 30034619505): the per-task delta dicts are `_fmt`-ed,
+            # so a NaN delta is stored as JSON `null`, and `math.isnan(None)`
+            # raises TypeError and aborts the entire report.  Treat null as
+            # UNMEASURED and drop it, exactly like NaN.
             [
-                d.get("m20_hidden_test_pass_rate_delta", math.nan)
-                for d in [per_task[tid]["delta"] for tid in shared_ids]
-                if not math.isnan(d.get("m20_hidden_test_pass_rate_delta", math.nan))
+                v
+                for v in (
+                    d.get("m20_hidden_test_pass_rate_delta")
+                    for d in (per_task[tid]["delta"] for tid in shared_ids)
+                )
+                if isinstance(v, (int, float)) and not math.isnan(v)
             ],
         ),
         "M21": _metric_aggregate(
@@ -2204,6 +2816,16 @@ def compute_paired_report(
 
     resolved_baseline = sum(1 for t in baseline_run.values() if t.resolved)
     resolved_oracle = sum(1 for t in oracle_run.values() if t.resolved)
+    # E1 (§5 primary endpoint): ABSOLUTE resolution percentage points, computed on the
+    # PAIRED population only. The full-run counts above may sit on different
+    # denominators when either arm has unpaired tasks, so differencing them would be
+    # denominator-blind; the paired counts below cannot be.
+    resolved_baseline_paired = sum(1 for tid in shared_ids if baseline_run[tid].resolved)
+    resolved_oracle_paired = sum(1 for tid in shared_ids if oracle_run[tid].resolved)
+    absolute_resolution_pp = (
+        (resolved_oracle_paired - resolved_baseline_paired) / n_tasks * 100.0
+        if n_tasks else math.nan
+    )
 
     # M20 headline aggregates
     m20_pass_base = _safe_sum([baseline_run[tid].m20_hidden_tests_pass for tid in shared_ids])
@@ -2217,6 +2839,20 @@ def compute_paired_report(
     trajectory_scorecard = compute_trajectory_scorecard(
         baseline_run, oracle_run, shared_ids)
 
+    # E2 (§5 quality guard): the efficiency numbers above are REPORT-ONLY until this
+    # block says quality held on the same paired population.
+    quality_guarded_efficiency = _fmt(_quality_guarded_efficiency(
+        net_tokens_deltas=net_tokens_deltas,
+        m03_deltas=m03_deltas,
+        absolute_resolution_pp=absolute_resolution_pp,
+        m20_deltas=m20_deltas,
+        m20_available_baseline=sum(
+            1 for tid in shared_ids if baseline_run[tid].m20_available),
+        m20_available_oracle=sum(
+            1 for tid in shared_ids if oracle_run[tid].m20_available),
+        regression_guards=regression_guards,
+    ))
+
     report = {
         "schema": "gt_metrics.v2",
         "baseline_run_id": baseline_run_id,
@@ -2226,15 +2862,39 @@ def compute_paired_report(
         "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
         "n_tasks": n_tasks,
         "n_shared_tasks": n_tasks,
+        # The locked population: union first, pairing second, missingness NAMED.
+        "population": {
+            "n_union": len(union_ids),
+            "n_paired": n_tasks,
+            "n_baseline_only": sum(
+                1 for v in missing_tasks.values() if v["in_baseline"]),
+            "n_oracle_only": sum(
+                1 for v in missing_tasks.values() if v["in_oracle"]),
+            "missing_tasks": missing_tasks,
+        },
         "baseline_arm": "frozen_gt_on_pre_oracle",
         "per_task": per_task,
         "aggregate": aggregate,
         "statistical_tests": statistical_tests,
         "regression_guards": regression_guards,
+        "quality_guarded_efficiency": quality_guarded_efficiency,
         "trajectory_scorecard": trajectory_scorecard,
         "headline": {
             "resolved_baseline": resolved_baseline,
             "resolved_oracle": resolved_oracle,
+            # E1: absolute pp BEFORE any relative lift, on the paired population.
+            "resolved_baseline_paired": resolved_baseline_paired,
+            "resolved_oracle_paired": resolved_oracle_paired,
+            "absolute_resolution_pp": _fmt(absolute_resolution_pp),
+            # E3: task net tokens off−on (positive = GT saved tokens).
+            "net_tokens_mean": _fmt(_safe_mean(net_tokens_deltas)),
+            "net_tokens_median": _fmt(_safe_median(net_tokens_deltas)),
+            "net_tokens_n_measured": len(net_tokens_deltas),
+            # E2: the efficiency numbers directly above are only citable when the
+            # quality guard says so.  Carried IN the headline so a reader cannot pick
+            # up net_tokens_* without the verdict that governs it.
+            "quality_guarded_efficiency_verdict": quality_guarded_efficiency["verdict"],
+            "citable_efficiency": quality_guarded_efficiency["citable_efficiency"],
             "flip_count": flip_count,
             "regression_count": regression_count,
             "gt_caused_heuristic_flips": trajectory_scorecard["gt_caused_heuristic_flips"],
@@ -2258,9 +2918,12 @@ def compute_paired_report(
                 sum(1 for d in m20_deltas if d > 0)
             ),
             "m20_tasks_with_delta_gte3": int(
+                # Same pre-existing null-vs-NaN crash as M20_pass_rate above:
+                # `_fmt` stores an unmeasured delta as JSON null.
                 sum(1 for tid in shared_ids
-                    if not math.isnan(per_task[tid]["delta"].get("m20_hidden_tests_pass_delta", math.nan))
-                    and per_task[tid]["delta"].get("m20_hidden_tests_pass_delta", 0) >= 3)
+                    if _is_measured_number(
+                        per_task[tid]["delta"].get("m20_hidden_tests_pass_delta"))
+                    and per_task[tid]["delta"]["m20_hidden_tests_pass_delta"] >= 3)
             ),
             # M13 — speed metric (kept for comparison)
             "m13_delta_mean": _fmt(_safe_mean(m13_deltas)),
@@ -2387,6 +3050,26 @@ def generate_markdown_report(report: Dict) -> str:
     if h.get("any_regression_guard_triggered"):
         harm_str += " **— REGRESSION GUARD TRIGGERED**"
     lines.append(f"- **Harm (M05 harm_rate):** {harm_str}")
+
+    # E2 — the quality guard governs whether the efficiency numbers may be cited.
+    qge = report.get("quality_guarded_efficiency") or {}
+    if qge:
+        eff = qge.get("efficiency_signals", {})
+        nt = eff.get("net_tokens", {})
+        st = eff.get("steps_m03", {})
+        cite = "CITABLE" if qge.get("citable_efficiency") else "**NOT CITABLE**"
+        lines.append(
+            f"- **Quality-guarded efficiency (E2):** {qge.get('verdict', '—')} — "
+            f"efficiency numbers are {cite}; "
+            f"net_tokens median={_md_val(nt.get('median'))}, "
+            f"M03 steps median={_md_val(st.get('median'))}"
+        )
+        missing = qge.get("missing_signals") or []
+        if missing:
+            lines.append(f"  - missing signals: {', '.join(missing)}")
+        regressed = qge.get("quality_regressed_signals") or []
+        if regressed:
+            lines.append(f"  - quality REGRESSED on: {', '.join(regressed)}")
     lines.append(f"")
 
     # Per-task table
@@ -2466,10 +3149,29 @@ def generate_markdown_report(report: Dict) -> str:
         )
     lines.append(f"")
 
-    lines.append(f"### M05 — GT Consumption (automated heuristic)")
+    lines.append(f"### M05 — GT Consumption (receipt ladder: delivered -> referenced -> acted)")
     lines.append(f"")
-    lines.append(f"| Task | Deliveries | Explicit | Behavioral | Inert | Harmful |")
-    lines.append(f"|---|---:|---:|---:|---:|---:|")
+    lines.append(f"| Task | Sealed delivered | Referenced | Acted | Acted rate | Grade source |")
+    lines.append(f"|---|---:|---:|---:|---:|---|")
+    for tid, rec in per_task.items():
+        b = rec.get("baseline", {})
+        lines.append(
+            f"| {tid} "
+            f"| {_md_val(b.get('m05_receipt_delivered'), '.0f')} "
+            f"| {_md_val(b.get('m05_receipt_referenced'), '.0f')} "
+            f"| {_md_val(b.get('m05_receipt_acted'), '.0f')} "
+            f"| {_md_val(b.get('m05_consumption_rate_acted'), '.2f')} "
+            f"| {b.get('m05_consumption_grade_source', '—')} |"
+        )
+    lines.append(f"")
+    lines.append(f"*Consumption == receipt >= 3 (ACTED), assistant-authored, per CLAUDE.md §2. "
+                 f"Token-overlap grading is REJECTED as a consumption grade.*")
+    lines.append(f"")
+
+    lines.append(f"### M05-diag — token-overlap heuristic (UNSANCTIONED, diagnostic only)")
+    lines.append(f"")
+    lines.append(f"| Task | Tagged deliveries | Explicit | Behavioral | Inert (gradeable) | Unmeasured | Harmful |")
+    lines.append(f"|---|---:|---:|---:|---:|---:|---:|")
     for tid, rec in per_task.items():
         b = rec.get("baseline", {})
         lines.append(
@@ -2477,12 +3179,15 @@ def generate_markdown_report(report: Dict) -> str:
             f"| {_md_val(b.get('m05_deliveries_total'), '.0f')} "
             f"| {_md_val(b.get('m05_consumption_rate_explicit'), '.2f')} "
             f"| {_md_val(b.get('m05_consumption_rate_behavioral'), '.2f')} "
-            f"| {_md_val(b.get('m05_consumption_rate_inert'), '.2f')} "
+            f"| {_md_val(b.get('m05_consumption_rate_token_overlap_inert_UNSANCTIONED'), '.2f')} "
+            f"| {_md_val(b.get('m05_consumption_rate_unmeasured'), '.2f')} "
             f"| {_md_val(b.get('m05_harm_rate'), '.2f')} |"
         )
     lines.append(f"")
-    lines.append(f"*Note: consumption grades are automated heuristics (trajectory_automated). "
-                 f"Manual adversarial audit required for verified EXPLICIT/INERT/HARMFUL grading.*")
+    lines.append(f"*UNSANCTIONED: filename substring overlap against the next 3 assistant bash "
+                 f"commands. `Unmeasured` = the rule had nothing to match (block cites no file "
+                 f"path, or no assistant command follows); such rows are NEVER counted inert. "
+                 f"Never cite these columns as a consumption grade.*")
     lines.append(f"")
 
     lines.append(f"### M11 — Inverted Confidence Rate")

@@ -474,32 +474,42 @@ def test_f7_real_test_identity_still_dropped():
 # =========================================================================== #
 # F8 — MED-LOW — receipt-ladder promotion mislabels + dedup_key collapse.
 # =========================================================================== #
-def test_f8_lane_promotion_labeled_lane_not_gateway(monkeypatch, tmp_path):
-    """A lane-sealed envelope promoted this turn must persist with kind='lane', not the
-    mislabel 'gateway'. RED pre-fix: `_persist_receipt(_d, kind='gateway', ...)` is
-    unconditional so lane deliveries are audited as gateway ones."""
+def test_f8_lane_seal_labeled_lane_not_gateway(monkeypatch, tmp_path):
+    """A lane-sealed envelope is audited with kind='lane', never the mislabel 'gateway'.
+
+    RE-POINTED 2026-07-28 (Wave 1 Step 5). F8(d) was a labelling rule on the receipt
+    PROMOTION write (`gt_mini_patch.py:15611` at the old HEAD chose `_pk = "lane" if
+    renderer_id == "lane" else "gateway"`). The promotion block is deleted -- the field
+    it wrote was causally inverted -- so the site F8(d) governed no longer exists, and
+    the old body asserted against an empty list while its second assertion
+    (`("gateway","acted") not in persisted`) passed VACUOUSLY.
+
+    The PROPERTY survives at the `delivered` rung, where two distinct writers exist:
+    `_seal_lane_delivery` -> kind="lane" (:14834) and `_commit_gateway` -> kind="gateway"
+    (:15701, :16068). So this now drives a REAL lane seal instead of hand-seeding
+    `_gt_gateway_deliveries`, which is also what makes it bite: swapping the label at
+    :14834 reddens it, and the old hand-seeded form could not have caught that.
+    """
     persisted = []
-    monkeypatch.setattr(g, "_persist_receipt",
-                        lambda env, *, kind, transition: persisted.append((kind, transition)))
+    monkeypatch.setattr(
+        g, "_persist_receipt",
+        lambda env, *, kind, transition: persisted.append(
+            (kind, transition, getattr(env, "renderer_id", ""))))
     monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_LANE_ENVELOPE", "1")   # _seal_lane_delivery no-ops without it
     monkeypatch.setattr(g, "_root", lambda: str(tmp_path))
     monkeypatch.setattr(g, "_db_path", lambda: str(tmp_path / "absent.db"))
     g._reset_oracle_state()
 
-    # a lane-sealed delivery whose target the NEXT command acts on -> promotion this turn
-    from groundtruth.runtime.evidence_envelope import EvidenceEnvelope
-    env = EvidenceEnvelope.build(producer="l3.contract", fact_id="",
-                                 target="a/x.py", evidence_type="l3.contract",
-                                 payload=("[SIGNATURE] def f(x)",))
-    import dataclasses
-    sealed = dataclasses.replace(env, receipt_state="delivered", renderer_id="lane",
-                                 rendered_bytes_hash="ab" * 32)
-    g._gt_gateway_deliveries[:] = [sealed]
-    out = {"output": "", "returncode": 0}
-    g._augment_output({"command": "sed -i s/a/b/ a/x.py"}, out)  # ACTS on a/x.py
-    lane_promos = [t for k, t in persisted if k == "lane"]
-    assert lane_promos, "a lane-sealed promotion must persist with kind='lane'"
-    assert ("gateway", "acted") not in persisted, "a lane delivery must not be labeled gateway"
+    g._seal_lane_delivery("l3.contract", "[SIGNATURE] def f(x)", "a/x.py")
+
+    assert persisted, "a lane seal must persist a receipt"
+    kinds = {k for k, _t, _r in persisted}
+    assert kinds == {"lane"}, persisted
+    assert all(t == "delivered" for _k, t, _r in persisted), persisted
+    # Secondary witness: the label must agree with the envelope's own renderer_id, so a
+    # hardcoded "lane" string at the seal site cannot fake the discrimination.
+    assert all(r == "lane" for _k, _t, r in persisted), persisted
 
 
 # =========================================================================== #

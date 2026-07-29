@@ -48,6 +48,7 @@ from groundtruth.runtime.evidence_envelope import (
     RECEIPT_CAUSAL,
     RECEIPT_DELIVERED,
     RECEIPT_NONE,
+    RECEIPT_RANK,
     RECEIPT_REFERENCED,
     RECEIPT_RESOLVED_STATE,
     EvidenceEnvelope,
@@ -1351,14 +1352,11 @@ def seal_delivery(
 # --------------------------------------------------------------------------- #
 # 6. receipts — TITO law 7 reward-attribution ladder (levels 1-3 live)
 # --------------------------------------------------------------------------- #
-_RECEIPT_ORDER: dict[str, int] = {
-    RECEIPT_NONE: 0,
-    RECEIPT_DELIVERED: 1,
-    RECEIPT_REFERENCED: 2,
-    RECEIPT_ACTED: 3,
-    RECEIPT_RESOLVED_STATE: 4,
-    RECEIPT_CAUSAL: 5,
-}
+# The ladder's ORDER is declared once, in `evidence_envelope.RECEIPT_RANK` (2026-07-28).
+# This was a frozen literal that agreed with `receipt_sidecar._TRANSITION_RANK` by hand; the
+# alias is safe because all three uses below are read-only (`.get`, `__getitem__`) and
+# `RECEIPT_RANK` is a `MappingProxyType`, so this reader cannot mutate the shared authority.
+_RECEIPT_ORDER: Mapping[str, int] = RECEIPT_RANK
 
 
 def _delivered_entities(env: EvidenceEnvelope) -> "list[tuple[str, str]]":

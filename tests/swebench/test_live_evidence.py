@@ -269,6 +269,10 @@ def test_accepts_exact_paid_live_seven_gate_contract_without_promoting() -> None
         "valid": True,
         "errors": [],
         "validated_delivery_ids": ["delivery-0"],
+        # Added 2026-07-28. A bundle whose ledger carries no `canonical_runtime.dark_fallback`
+        # row carries no canonical evidence either way, and the field is emitted explicitly so
+        # a downstream reader cannot supply its own optimistic default for a missing key.
+        "canonical_assurance": "UNKNOWN",
         "proof_scope": "validation_only_no_ss_live_promotion",
     }
 

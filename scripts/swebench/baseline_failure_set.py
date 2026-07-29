@@ -72,8 +72,14 @@ BASELINE: dict[str, frozenset[str]] = {
         "::test_parallel_candidates_bind_exact_parent_without_persisting_prose",
         "artifact_deepswe/tests/test_producer_dispatch_reachability_20260724.py"
         "::test_each_agent_action_reaches_its_own_producer",
-        "artifact_deepswe/tests/test_sm10_recovery_timing_20260712.py"
-        "::test_recovery_candidate_producer",
+        # REMOVED 2026-07-28 -- this was never a real failure. It failed only because
+        # `test_p10_premature_reactive_deferral_20260717.setup_module` wrote
+        # `os.environ["GT_GLOBAL_ARBITER"] = "1"` raw and its `teardown_module` popped a
+        # DIFFERENT variable, so the flag leaked into every module that ran after it (file order
+        # puts p10 before sm10). Proven: the test PASSES in isolation and FAILS under
+        # `GT_GLOBAL_ARBITER=1`. With the teardown corrected it passes in the full suite, so the
+        # recorded baseline had frozen a cross-module contamination artifact as if it were a
+        # known defect. artifact_deepswe is therefore 11 recorded failures, not 12.
         "artifact_deepswe/tests/test_sm6_gateway_byte_owner_20260711.py"
         "::test_cochange_is_internal_no_native_form",
         "artifact_deepswe/tests/test_sm6_gateway_byte_owner_20260711.py"

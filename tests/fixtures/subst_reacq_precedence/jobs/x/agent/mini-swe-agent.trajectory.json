@@ -1,0 +1,77 @@
+{
+ "info": {
+  "config": {
+   "model": {
+    "model_name": "fixture"
+   }
+  }
+ },
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a helpful assistant."
+  },
+  {
+   "role": "user",
+   "content": "<pr_description>fix the foo behaviour</pr_description>"
+  },
+  {
+   "role": "assistant",
+   "content": "thinking",
+   "extra": {
+    "actions": [
+     {
+      "command": "grep -rn \"foo\" .",
+      "tool_call_id": "c1"
+     }
+    ]
+   }
+  },
+  {
+   "role": "tool",
+   "content": "src/mod.py:10:def foo",
+   "extra": {
+    "returncode": 0
+   }
+  },
+  {
+   "role": "assistant",
+   "content": "thinking",
+   "extra": {
+    "actions": [
+     {
+      "command": "ls src",
+      "tool_call_id": "c1"
+     }
+    ]
+   }
+  },
+  {
+   "role": "tool",
+   "content": "mod.py\n<gt-evidence>\n[VERIFIED] def foo -> src/mod.py:10 (3 callers)\n</gt-evidence>",
+   "extra": {
+    "returncode": 0
+   }
+  },
+  {
+   "role": "assistant",
+   "content": "thinking",
+   "extra": {
+    "actions": [
+     {
+      "command": "cat src/mod.py",
+      "tool_call_id": "c1"
+     }
+    ]
+   }
+  },
+  {
+   "role": "tool",
+   "content": "def foo",
+   "extra": {
+    "returncode": 0
+   }
+  }
+ ],
+ "trajectory_format": "mini-swe-agent-1"
+}

@@ -1,0 +1,15 @@
+{
+ "info": {"config": {"model": {"model_name": "fixture"}}},
+ "messages": [
+  {"role": "system", "content": "You are a helpful assistant."},
+  {"role": "user", "content": "<pr_description>fix foo</pr_description>"},
+  {"role": "assistant", "content": "start",
+   "extra": {"actions": [{"command": "ls -la", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "<gt-evidence>\n[VERIFIED] def foo -> src/mod.py:10\n</gt-evidence>",
+   "extra": {"returncode": 0}},
+  {"role": "assistant", "content": "editing foo in mod",
+   "extra": {"actions": [{"command": "sed -i 's/x/y/' src/mod.py", "tool_call_id": "c1"}]}},
+  {"role": "tool", "content": "<returncode>0</returncode>", "extra": {"returncode": 0}}
+ ],
+ "trajectory_format": "mini-swe-agent-1"
+}

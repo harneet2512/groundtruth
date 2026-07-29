@@ -266,6 +266,14 @@ def _run_sig_change_edit(tmp_path, monkeypatch, *, gateway_on, bridges_on):
     monkeypatch.setattr(g, "_POST_SEARCH_ON", False)
     monkeypatch.setattr(g, "_GT_BASELINE", False)
     monkeypatch.setenv("GT_GATEWAY", "1" if gateway_on else "0")
+    # PIN THE ARBITER OFF (2026-07-28). Every assertion below expects BOTH `<gt-contract` and
+    # `<gt-evidence` in ONE observation -- a two-dose observation, which is precisely what the
+    # global arbiter exists to prevent. These tests are about the LEGACY inline path, so the
+    # arbiter must be pinned, not inherited: this helper already pins GT_GATEWAY,
+    # GT_GATEWAY_EDIT_BRIDGES, _POST_SEARCH_ON and _GT_BASELINE, and the arbiter belongs in that
+    # list for the same reason. Omitting it was harmless only while the seam force-disabled the
+    # arbiter without a batch-commit handshake; it is not harmless now.
+    monkeypatch.delenv("GT_GLOBAL_ARBITER", raising=False)
     if bridges_on:
         monkeypatch.setenv("GT_GATEWAY_EDIT_BRIDGES", "1")
     else:

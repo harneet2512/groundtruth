@@ -112,7 +112,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, ClassVar
 
 from .feature_lineage import DeliveryLineage
@@ -201,6 +203,46 @@ RECEIPT_CAUSAL = "causal"             # counterfactually attributed (paired evid
 _RECEIPT_STATES: frozenset[str] = frozenset(
     {RECEIPT_NONE, RECEIPT_DELIVERED, RECEIPT_REFERENCED, RECEIPT_ACTED,
      RECEIPT_RESOLVED_STATE, RECEIPT_CAUSAL}
+)
+
+# THE LADDER'S ORDER, DECLARED ONCE (2026-07-28).
+#
+# The states above already lived here, but their ORDER did not: it was hand-duplicated as a
+# frozen literal in `adapters/miniswe.py:_RECEIPT_ORDER` and again in
+# `scripts/swebench/receipt_sidecar.py:_TRANSITION_RANK` -- and the sidecar re-spelled the
+# STRINGS too, despite already importing this module. A third copy lives in
+# `scripts/gt_substitution_grader.py` as a 4-element tuple that deliberately drops `causal`,
+# under a name that COLLIDES with miniswe's but has a different type and membership.
+#
+# Two things that must agree by hand is the same defect family that produced
+# `attestation_persist_error:brief:ValueError` (a producer emitting triples, a consumer
+# unpacking pairs, each half agreeing with its own fixture and neither with the other). The
+# copies happen to agree today, which is exactly why the drift would be silent.
+#
+# `MappingProxyType` because the rank map is shared by readers in two packages: a mutable dict
+# would let one reader corrupt the other's ladder at a distance.
+RECEIPT_LADDER: tuple[str, ...] = (
+    RECEIPT_NONE,
+    RECEIPT_DELIVERED,
+    RECEIPT_REFERENCED,
+    RECEIPT_ACTED,
+    RECEIPT_RESOLVED_STATE,
+    RECEIPT_CAUSAL,
+)
+RECEIPT_RANK: Mapping[str, int] = MappingProxyType(
+    {state: rank for rank, state in enumerate(RECEIPT_LADDER)}
+)
+
+# WHICH RUNGS THE RUNTIME MAY WRITE. A property of the ladder, not of any one writer.
+#
+# Everything above `delivered` is a claim about what the POLICY did after delivery, and the
+# env-facing seam cannot evaluate it: it has no `policy_text` (the promotion call site passes
+# `""`, so `referenced` is structurally unreachable) and no `decision_commit_index`. The exact
+# definition is implemented offline in `fair_probe_result._treatment_acted` as
+# `ON_TIME AND registry-receipt-predicate AND delivery_index < action_index <=
+# decision_commit_index`. One concept, one authority.
+RUNTIME_EMITTABLE_RECEIPT_STATES: frozenset[str] = frozenset(
+    {RECEIPT_NONE, RECEIPT_DELIVERED}
 )
 
 # VERIFIED / HYPOTHESIS pivot (parity with the fact-tier conf floor used across GT).

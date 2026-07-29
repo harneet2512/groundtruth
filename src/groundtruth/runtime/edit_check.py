@@ -35,10 +35,13 @@ PER-LANGUAGE HONESTY (checked vs unavailable, and WHY):
   .js/.mjs/.cjs  ``node --check`` — Node's own parse-only flag.
   .go            ``gofmt -e`` — parses to AST, reports parse errors, exit != 0.
   .rb            ``ruby -c`` — syntax-only check ("Syntax OK" / exit != 0).
-  .ts/.tsx       UNAVAILABLE — ``node --check`` cannot parse TS; ``tsc --noEmit``
-                 conflates SYNTAX errors with TYPE/module-resolution errors on a
-                 single file, so it cannot give POSITIVE syntax evidence. Quiet.
-  .jsx           UNAVAILABLE — JSX is not valid JS; ``node --check`` false-positives.
+  .ts/.tsx/.jsx  ``node -e <TS parse probe>`` — PARSE-ONLY via the typescript
+                 package's ``createSourceFile`` ``parseDiagnostics`` (2026-07-24
+                 language-coverage fix; ``node --check`` cannot parse TS/JSX and
+                 ``tsc --noEmit`` would conflate type/module errors). If the
+                 typescript module cannot be resolved the probe exits 0, so the
+                 verdict degrades toward ``ok``/``unavailable`` — never a
+                 fabricated syntax error (see _TS_PARSE_SCRIPT resolution notes).
   .rs            UNAVAILABLE — no fast parse-only rustc invocation for a non-lib
                  file; ``--emit=metadata`` needs a crate/type context. Quiet.
   .java          UNAVAILABLE — ``javac`` needs classpath/type resolution; no cheap

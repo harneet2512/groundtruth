@@ -39,6 +39,7 @@ for _p in (str(_ROOT / "src"), str(_ROOT / "scripts" / "swebench")):
 
 from scripts.swebench.chronology_extract import (  # noqa: E402
     LATE,
+    EXPIRED,
     ON_TIME,
     STEP_BEHIND,
     UNMEASURED,
@@ -168,10 +169,15 @@ def test_late_delivered_after_commit() -> None:
     assert ec.chronology.decision_open_index == 2
     assert ec.chronology.decision_commit_index == 3
     assert ec.chronology.delivery_index == 6
-    assert ec.timing_verdict == LATE
+    # RE-POINTED 2026-07-28. `LATE` was SPLIT: `delivered > committed` fused two
+    # opposite outcomes -- late-but-still-correctable vs nothing-left-to-change.
+    # This fixture has NO post-delivery action (action_index=None), which this
+    # test's own comment already identified as the genuine-late shape, so it is
+    # EXPIRED. The property is unchanged; the verdict is finer.
+    assert ec.timing_verdict == EXPIRED
 
     join = adjudicate_deliveries(traj, rows)
-    assert join["per_fact_class"]["signature_delta"]["verdict"] == LATE
+    assert join["per_fact_class"]["signature_delta"]["verdict"] == EXPIRED
     assert timing_by_fact_class(join)["signature_delta"] is False
 
 
@@ -313,7 +319,7 @@ def test_class_rollup_any_late_makes_class_late() -> None:
     on_join = adjudicate_deliveries(on_traj, on_rows)
     late_join = adjudicate_deliveries(late_traj, late_rows)
     assert on_join["per_fact_class"]["signature_delta"]["verdict"] == ON_TIME
-    assert late_join["per_fact_class"]["signature_delta"]["verdict"] == LATE
+    assert late_join["per_fact_class"]["signature_delta"]["verdict"] == EXPIRED
 
     # A class whose rows are all UNMEASURED stays UNMEASURED -> correct_time None (fail-closed).
     messages = [_user("go"), _assistant("cat x"), _tool("no delivery bytes here")]

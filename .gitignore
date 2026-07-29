@@ -3,6 +3,8 @@ dist/
 *.js.map
 *.d.ts
 !src/**/*.d.ts
+# TS fixture corpora are test INPUT, not build output (2026-07-28)
+!tests/fixtures/**/*.d.ts
 
 # Secrets — never commit
 .env
@@ -25,6 +27,11 @@ coverage/
 benchmarks/results/
 benchmarks/experiments/results/
 benchmarks/verify/results/
+# Per-task run artifacts: a copied snapshot of src/groundtruth, never source of record.
+# 0 files under any groundtruth_bundle/ have ever been tracked. These were previously
+# hidden only as a side effect of the unanchored "Memory/" rule, so an earlier cleanup
+# pass could not see them and left ~6.5k orphaned .py files behind.
+benchmarks/**/groundtruth_bundle/
 
 # IDE
 .vscode/
@@ -109,9 +116,14 @@ bin/gt-index-linux
 # Test temp files
 *.test.ts.tmp.*
 
-# Memory folder (local notes)
-Memory/
-# BUT ship JUST the ONNX semantic loader chain (embed.py + its package __init__s) — it
+# Memory folder (local notes) — ANCHORED to the repo root (2026-07-28).
+# A bare "Memory/" matches at ANY depth and, on case-insensitive filesystems, also
+# matches "memory/" — it was silently swallowing tests/memory/ (129 tests, 14 files)
+# and src/groundtruth/memory/. The leading slash confines it to a root-level data dir.
+/Memory/
+# The 54-file memory subsystem is still excluded — by the explicit
+# "src/groundtruth/memory/*" line below, NOT by the rule above.
+# Ship JUST the ONNX semantic loader chain (embed.py + its package __init__s) — it
 # was silently caught by the case-insensitive "Memory/" rule, so semantic was OFF in the
 # container (the loader never shipped). Idiom: re-include the dir, re-exclude its
 # contents, then re-include ONLY the embedder files (not the 54-file memory subsystem,
@@ -164,6 +176,10 @@ task_ledgers/
 **/docker-compose-egress-proxy.json
 **/mini-swe-agent.trajectory.json
 **/*.trajectory.json
+# ...but hand-authored, secret-free trajectory FIXTURES are test INPUT and must ship
+# (tests/test_grader_receipt_levels.py, tests/test_gt_substitution_grader.py read these).
+# Must stay pinned to tests/fixtures/ — real run tapes share the jobs/*/agent/ shape.
+!tests/fixtures/**/*.trajectory.json
 **/gt_artifacts/
 
 # one-shot scratch + pulled GHA artifacts (may embed secrets) — never commit

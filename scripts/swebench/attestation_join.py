@@ -42,6 +42,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -335,10 +336,46 @@ def _read_bytes(path: str) -> bytes:
         return handle.read()
 
 
+_BYTE_RANGE_RE = re.compile(r"^bytes\[(\d+):(\d+)\]$")
+
+
+def _byte_range(value: Any, field_path: str) -> tuple[bool, Any] | None:
+    """Resolve the ``bytes[start:end]`` dialect against a raw artifact.
+
+    READER/WRITER MISMATCH (2026-07-29): ``gateway_attestation_factory.py:417``
+    emits ``field_path=f"bytes[0:{rendered_length}]"`` on the rendered-candidate
+    proof ref of EVERY complete gateway predicate, but this resolver understood
+    only ``$.a.b`` and returned not-found for anything else. That produced
+    ``predicate[0].proof[2]:field_missing:bytes[0:63]``, which rejects the WHOLE
+    attestation — so every fact class attested through that factory was
+    structurally unable to earn ``truth_valid``/``correct_info``, on real runs as
+    well as in tests. The join was reporting a vocabulary gap as a truth failure.
+
+    Fail-closed on a range the artifact cannot honour: a predicate claiming more
+    bytes than were persisted is a genuine integrity failure, not a dialect gap.
+    Returns ``None`` when the path is not this dialect, so the caller falls
+    through to the JSON-path branch.
+    """
+    match = _BYTE_RANGE_RE.match(field_path) if isinstance(field_path, str) else None
+    if match is None:
+        return None
+    if isinstance(value, str):
+        value = value.encode("utf-8")
+    if not isinstance(value, (bytes, bytearray)):
+        return False, None
+    start, end = int(match.group(1)), int(match.group(2))
+    if start > end or end > len(value):
+        return False, None
+    return True, bytes(value[start:end])
+
+
 def _json_field(value: Any, field_path: str) -> tuple[bool, Any]:
     """Resolve the small JSON-path language used by ``ProofRef``."""
     if field_path == "$":
         return True, value
+    ranged = _byte_range(value, field_path)
+    if ranged is not None:
+        return ranged
     if not isinstance(field_path, str) or not field_path.startswith("$."):
         return False, None
     current = value

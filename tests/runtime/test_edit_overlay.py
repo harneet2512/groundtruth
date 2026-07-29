@@ -279,15 +279,19 @@ def test_differential_unprovable_baseline_never_attributed(tmp_path):
     """BEFORE verdict 'unavailable' (unprovable baseline) -> an after-edit error is
     NOT attributed (correct-or-quiet: we cannot prove the edit introduced it)."""
     root, db = str(tmp_path / "repo"), str(tmp_path / "graph.db")
-    _write(root, "x.ts", "let a = 1;")                  # ts: edit_check unavailable
+    # .rs: edit_check genuinely unsupported (no sound parse-only checker) — .ts is
+    # NO LONGER a valid fixture here: the 2026-07-24 coverage fix gave .ts/.tsx/.jsx
+    # a real parse-only checker, so a .ts baseline is provable wherever the
+    # typescript module resolves (machine-dependent, non-hermetic).
+    _write(root, "x.rs", "let a = 1;")
     ov = EditOverlay(root, db, gt_index_bin="gt-index-definitely-not-installed")
-    ov.snapshot({"x.ts": "let a = ((((;"})
+    ov.snapshot({"x.rs": "let a = ((((;"})
     ov.apply()
     ov.reindex()
     diags = ov.diagnostics_delta()
     assert diags == []                                  # never a guessed verdict
     res = ov.result(diags)
-    assert res.capability_states["syntax"][".ts"] == SYNTAX_UNSUPPORTED
+    assert res.capability_states["syntax"][".rs"] == SYNTAX_UNSUPPORTED
 
 
 # --------------------------------------------------------------------------
@@ -594,7 +598,13 @@ def test_capability_matrix_static_honesty():
     assert m[".go"] == "supported"
     assert m[".js"] == "supported"
     assert m[".rb"] == "supported"
-    for ext in (".ts", ".tsx", ".jsx", ".rs", ".java"):
+    # .ts/.tsx/.jsx became SUPPORTED on 2026-07-24: edit_check gained a PARSE-ONLY
+    # checker (typescript createSourceFile parseDiagnostics — no type/module errors),
+    # so "supported" is the honest claim; the matrix derives from _build_check_command
+    # and cannot drift from the checker's own dispatch.
+    for ext in (".ts", ".tsx", ".jsx"):
+        assert m[ext] == "supported", ext
+    for ext in (".rs", ".java"):
         assert m[ext] == "unsupported", ext                   # NEVER guessed clean
     assert list(m) == sorted(m)                               # deterministic order
 

@@ -756,10 +756,35 @@ def _receipt_corroborated_acknowledgment(
             key,
             trajectory_corroborated=trajectory_value is True,
         )
+        # THE SIDECAR CAN NO LONGER DISPROVE ACKNOWLEDGMENT (2026-07-28).
+        #
+        # `acknowledgment_supported` is `_TRANSITION_RANK[transition] >= rank("referenced")`
+        # (receipt_sidecar), and the runtime is now permitted to write ONLY `delivered`
+        # (`RUNTIME_EMITTABLE_RECEIPT_STATES`) because the seam cannot evaluate any higher
+        # rung -- it has no `policy_text` and no decision-commit index. So `delivered` is no
+        # longer evidence that the model did not acknowledge; it is the only thing the writer
+        # is ALLOWED to say.
+        #
+        # Reading it as disproof here would be actively worse than the bug it replaced. The
+        # observation-binding fix routes rows INTO this join for the first time (`envelope_
+        # owned` requires a non-null binding; run 30390877219 had `envelope_rows_seen: 0`, so
+        # every row took the trajectory-only branch below). Combining the two changes without
+        # this guard would turn a True trajectory predicate into an affirmative False, flip
+        # Gate 4 `acknowledged` to False for every envelope-owned registered class, and
+        # terminal them all NOVEL_IGNORED -- SS-LIVE 0/17 again, but now unfalsifiable in the
+        # opposite direction.
+        #
+        # The sidecar's honest remaining role is IDENTITY CORROBORATION (`integrity_ok` +
+        # `matched`); the acknowledgment verdict belongs to the trajectory predicate, and the
+        # precommit-window authority is `fair_probe_result._treatment_acted`.
         if trajectory_value is None or not joined.integrity_ok or not joined.matched:
             value: bool | None = None
         elif trajectory_value is False:
             value = False
+        elif not joined.acknowledgment_supported and _runtime_ladder_is_capped():
+            # Corroborated identity, and the writer was structurally unable to say more.
+            # Defer to the trajectory rather than manufacture a disproof.
+            value = trajectory_value
         else:
             value = joined.acknowledgment_supported
         values_by_class[fact_class].append(value)
@@ -1239,6 +1264,14 @@ def classify_ledger(rows: list[dict]) -> dict[str, dict[str, Any]]:
     })
     for idx, r in enumerate(rows):
         layer = str(r.get("layer") or "")
+        # task #35: the obligations PLAN-LOAD marker. Its layer is deliberately in NO
+        # layer→fact-class map (every mapped row counts as `produced` below, and a
+        # load-time marker must never manufacture production) — so it is captured HERE,
+        # under a sentinel key, dict-shaped so the `.values()` aggregations read zeros.
+        # Sole consumer: `_fact_class_eligible("obligations")`.
+        if layer == "obligation.plan" and str(r.get("reason") or "") == "obligation_plan_loaded":
+            per["__obligation_plan_loaded__"]["marker"] = True
+            continue
         fc = _typed_fact_class(r) or layer_to_fact_class(layer)
         if fc is None:
             continue
@@ -1515,6 +1548,37 @@ def _consumption_by_fact_class(
         agg["acted"] += int(lvl >= 3)
         agg["max_level"] = max(agg["max_level"], lvl)
     return dict(out), ledger
+
+
+def unjoined_receipts_by_fact_class(ledger: dict) -> dict[str, int]:
+    """Per fact class, the count of HOST-RECORDED deliveries with NO model-visible receipt.
+
+    C15-shape companion to :func:`_consumption_by_fact_class` (2026-07-28). That function
+    rolls up receipts over the rows it could JOIN to the trajectory; this one counts the rows
+    it could NOT — the ``source == "ledger_only"`` entries the consumption ledger mints for a
+    delivered runtime row that never matched an observation block (``receipt: None``,
+    ``joined: False``). Those are UNMEASURED deliveries, not consumed ones and not inert ones.
+
+    WHY THIS IS A SEPARATE NAMESPACE, NOT A SUBTRACTION: ``classify_ledger``'s per-class
+    ``delivered`` and the consumption rollup's ``delivered`` are different populations — the
+    caller-contract co-fact credits a second FACT on ONE physical delivery, and the
+    consumption ledger dedups by ``physical_id``. Differencing those two counts would invent
+    holes. The hole count is read from the evidence that names itself a hole.
+    """
+    out: dict[str, int] = defaultdict(int)
+    for entry in (ledger or {}).get("entries", []) or []:
+        if not isinstance(entry, dict) or entry.get("source") != "ledger_only":
+            continue
+        kind = str(entry.get("kind") or "")
+        fc = _typed_fact_class(entry) or layer_to_fact_class(
+            str(entry.get("ledger_layer") or kind)
+        )
+        if fc is None:
+            fc = _CONSUMPTION_KIND_FACTCLASS.get(kind)
+        if fc is None:
+            continue
+        out[fc] += 1
+    return dict(out)
 
 
 # ---------------------------------------------------------------------------
@@ -2812,16 +2876,87 @@ def _control_declared_effect_correctness(
 # Fact-class lifecycle — the substantive per-class grade.
 # ---------------------------------------------------------------------------
 
+def oracle_gate_losses(oracle_rows: list[dict]) -> dict[str, Any] | None:
+    """Summarise the ≤1/turn gate's loss ledger for this task — the oracle-era denominator.
+
+    WHY (task #34). Under GT_ORACLE_ROUTE the layers are candidate PRODUCERS and the gate
+    emits at most one block per turn, so most features MUST be silent most turns — "dark"
+    is not a defect statement unless it separates *never produced* from *produced and
+    outranked*. The gt.oracle_event.v2 rows carry exactly that split (reasons:
+    delivered / irrelevant / below_floor / outranked), and as of 2026-07-29 the writer
+    stamps `task` + `iteration`, making them attributable.
+
+    NAMESPACE LAW: `kind` is the GATE-KIND namespace. It is surfaced VERBATIM as a
+    diagnostic and is deliberately NOT mapped onto fact classes or the LAYER namespace —
+    two prior headline findings died on exactly that name-diff. Rows without an
+    `iteration` (pre-2026-07-29 artifacts) are counted but their iterations are not
+    fabricated.
+    """
+    if not oracle_rows:
+        return None
+    losses: dict[str, dict[str, Any]] = {}
+    emissions = 0
+    for row in oracle_rows:
+        if not isinstance(row, dict) or row.get("schema") != "gt.oracle_event.v2":
+            continue
+        it = row.get("iteration")
+        if row.get("emitted"):
+            emissions += 1
+        for s in row.get("suppressed") or []:
+            if not isinstance(s, dict):
+                continue
+            kind = str(s.get("kind") or "")
+            reason = str(s.get("reason") or "")
+            if not kind or not reason:
+                continue
+            slot = losses.setdefault(kind, {"total": 0, "by_reason": {}, "iterations": []})
+            slot["total"] += 1
+            slot["by_reason"][reason] = int(slot["by_reason"].get(reason, 0)) + 1
+            if isinstance(it, int) and len(slot["iterations"]) < 50:
+                slot["iterations"].append(it)
+    if not losses and not emissions:
+        return None
+    return {
+        "schema": "gt.oracle_gate_losses.v1",
+        "namespace": "gate_kind",  # NEVER name-diff against layer/fact-class names
+        "emissions": emissions,
+        "losses_by_kind": {k: losses[k] for k in sorted(losses)},
+    }
+
+
 def _fact_class_eligible(fc: str, timeline: list[dict], ledger_by_fc: dict, oracle_rows: list[dict],
-                         has_submission: bool) -> tuple[bool, str]:
-    """Did the run create the condition where this fact class COULD fire?"""
+                         has_submission: bool) -> tuple[bool | None, str]:
+    """Did the run create the condition where this fact class COULD fire?
+
+    Returns True / False / **None**. ``None`` means the offline artifacts carry no
+    signal either way — an honest UNMEASURED, never a default.  The obligations
+    class is the reason the third state exists: this predicate previously read
+    ``bool(oracle_rows) or True``, which is unconditionally True, so obligations was
+    graded eligible on EVERY task and — via the ``eligible and produced == 0`` arm
+    below — earned a manufactured ``correct_abstain`` on every task where the
+    producer said nothing.  It could not be graded dark by construction.
+    """
     steps = [e for e in timeline if e["role"] == "assistant"]
     any_edit = any(e.get("is_edit") for e in steps)
     any_test = any(e.get("is_test") for e in steps)
     any_search = any(e.get("is_search") for e in steps)
     any_view = any(e.get("viewed_file") for e in steps)
     if fc == "obligations":
-        return (bool(oracle_rows) or True, "task carries a spec/obligations plan")
+        # Eligibility here is "an obligations PLAN existed", which is independent of
+        # whether the producer fired.  The seam now emits a one-shot host-side marker at
+        # PLAN-LOAD time (layer ``obligation.plan``, reason ``obligation_plan_loaded`` —
+        # task #35), on a layer deliberately absent from every layer→fact-class map so
+        # it can never count as ``produced``.  Marker present → eligible.  Marker ABSENT
+        # stays UNMEASURED, never False: a pre-marker artifact and a genuinely plan-less
+        # task are indistinguishable from absence, and ``verdict_for`` reads
+        # eligible-False as "correctly silent, never CUT" — collapsing the unknown to
+        # False would manufacture that pass.  (The obligations ATTESTATION cannot serve
+        # here: it is written only after a delivery, so keying on it collapses
+        # eligibility into production.  The oracle telemetry cannot either: its ``kind``
+        # is the GATE-KIND namespace, not the LAYER namespace.)
+        if ledger_by_fc.get("__obligation_plan_loaded__"):
+            return (True, "obligation.plan marker: a plan was loaded this task")
+        return (None, "no obligations-plan-load marker (pre-marker artifact or no plan)")
     if fc == "localization":
         return (any_search or any_view, "a which-file-to-open decision was open")
     if fc == "def_partition":
@@ -2864,6 +2999,7 @@ def fact_class_lifecycle(
     traj_artifact: str,
     native_visible: int = 0,
     native_renderer_valid: bool | None = None,
+    unjoined_receipts: int | None = None,
 ) -> dict[str, Any]:
     """Assemble the universal lifecycle for one fact class from the offline evidence."""
     lc: dict[str, Any] = new_lifecycle("not_applicable_to_this_class")
@@ -2871,8 +3007,14 @@ def fact_class_lifecycle(
     cons = consumption_by_fc.get(fc, {})
 
     eligible, why = _fact_class_eligible(fc, timeline, ledger_by_fc, oracle_rows, has_submission)
-    lc["eligible"] = measured(bool(eligible), source_artifact=traj_artifact)
-    lc["not_eligible"] = measured(not bool(eligible), source_artifact=traj_artifact)
+    if eligible is None:
+        # No signal either way. Emitting False here would swap one manufactured
+        # verdict for its mirror image; the honest report is that we cannot tell.
+        lc["eligible"] = unmeasured(why, source_artifact=traj_artifact)
+        lc["not_eligible"] = unmeasured(why, source_artifact=traj_artifact)
+    else:
+        lc["eligible"] = measured(bool(eligible), source_artifact=traj_artifact)
+        lc["not_eligible"] = measured(not bool(eligible), source_artifact=traj_artifact)
 
     produced = int(b.get("produced", 0))
     delivered = int(b.get("delivered", 0))
@@ -2881,7 +3023,7 @@ def fact_class_lifecycle(
     # correct_abstain: (a) eligible but the producer correctly stayed silent (nothing
     # produced), OR (b) the producer RAN and correctly ALLOWED (a clean submit gate) — it
     # produced no refusal because none was warranted. Both are correct silence, NOT dark.
-    if eligible and produced == 0:
+    if eligible is True and produced == 0:
         lc["correct_abstain"] = measured(True, source_artifact=ledger_artifact)
     elif produced > 0 and delivered == 0 and allowed > 0:
         lc["correct_abstain"] = measured(True, source_artifact=ledger_artifact)
@@ -2909,7 +3051,7 @@ def fact_class_lifecycle(
         lc["stale"] = measured(int(b.get("stale", 0)) > 0, source_artifact=ledger_artifact)
         lc["dose_tokens"] = measured(round(int(b.get("delivered_chars", 0)) / 4.0, 8),
                                      source_artifact=ledger_artifact)
-    elif eligible and produced > 0:
+    elif eligible is True and produced > 0:
         lc["delivered"] = measured(False, source_artifact=ledger_artifact)
 
     # arbitration
@@ -2929,7 +3071,6 @@ def fact_class_lifecycle(
         lc["receipt_level"] = measured(lvl, source_artifact=traj_artifact)
         lc["reacquired"] = measured(lvl < 3 and delivered > 0, source_artifact=traj_artifact)
         lc["redundant"] = measured(False, source_artifact=traj_artifact)
-        lc["inert"] = measured(delivered > 0 and lvl < 2, source_artifact=traj_artifact)
     elif delivered > 0 and native_visible > 0:
         # native (tag-free) delivery CONFIRMED model-visible via the content seal (defect-2
         # seal-join). Level 1 = present in the observation stream; higher levels still need
@@ -2940,6 +3081,81 @@ def fact_class_lifecycle(
         lc["receipt_level"] = unmeasured(
             "native/tag-free delivery: host-attested only; needs seal-join to observation "
             "bytes (in-seam content_sha256_16 not present in this ledger)",
+            source_artifact=ledger_artifact)
+
+    # ── INERT vs UNMEASURED — the C15 namespace split (2026-07-28) ────────────────
+    # THE DEFECT this replaces: ``inert = measured(delivered > 0 and lvl < 2)``. ``delivered``
+    # counts EVERY delivered runtime-ledger row for the class; ``lvl`` is the max receipt over
+    # ONLY the rows that could be JOINED to a model-visible observation. Comparing across
+    # those two namespaces reported a class with 1-of-3 rows joined at level 1 as
+    # ``inert = MEASURED True`` — "GT delivered something that did nothing" — when the truth
+    # for the other 2 was "we could not measure what it did". It was also DISCONTINUOUS: with
+    # ZERO joined rows ``cons`` is empty and the field honestly stayed UNMEASURED, so LESS
+    # evidence produced a MORE confident verdict.
+    #
+    # The split, following ``acquired_*``/``delivered_*`` (commit 8f60643f4):
+    #   inert_receipt_joined   — deliveries with a graded receipt that showed no reference
+    #   inert_receipt_unjoined — deliveries with no model-visible receipt to grade (holes)
+    #   inert                  — the class-level boolean, ASYMMETRIC (see below)
+    # As in C15 the UNMEASURED verdict is decided by EVIDENCE (a counted ``ledger_only``
+    # entry from the consumption ledger), never by reading a flag.
+    #
+    # THE ASYMMETRY, and why it is not a hedge: "this class did NOTHING" is a universal claim
+    # over every delivery, so ONE ungraded delivery defeats it. "this class did SOMETHING" is
+    # existential — ONE joined receipt at level >= 2 FALSIFIES inertness outright, and the
+    # holes are then irrelevant. So a positive reference still yields MEASURED False even with
+    # holes; only the True verdict needs full coverage. Measured on run 30390877219: without
+    # this asymmetry 4 provable ``inert=False`` cells were withdrawn to UNMEASURED for nothing.
+    if delivered > 0:
+        joined_deliveries = int(cons.get("delivered", 0)) if cons else 0
+        joined_referenced = int(cons.get("referenced", 0)) if cons else 0
+        lvl_all = int(cons.get("max_level", 0)) if cons else 0
+        lc["inert_receipt_joined"] = measured(
+            max(0, joined_deliveries - joined_referenced), source_artifact=traj_artifact)
+        if unjoined_receipts is None:
+            # fail-closed: a caller that did not supply receipt-join coverage gets no verdict.
+            # A 0 default here would silently restore the exact false confidence removed above.
+            lc["inert_receipt_unjoined"] = unmeasured(
+                "receipt-join coverage not supplied by the caller",
+                source_artifact=ledger_artifact)
+            holes: int | None = None
+        else:
+            holes = max(0, int(unjoined_receipts))
+            lc["inert_receipt_unjoined"] = measured(holes, source_artifact=ledger_artifact)
+
+        if joined_referenced > 0:
+            # existential falsification — at least one delivery was demonstrably referenced.
+            lc["inert"] = measured(False, source_artifact=traj_artifact)
+        elif holes is None:
+            lc["inert"] = unmeasured(
+                "receipt-join coverage unknown: cannot separate inert from unmeasured",
+                source_artifact=ledger_artifact)
+        elif holes:
+            lc["inert"] = unmeasured(
+                f"{holes} delivered row(s) of this class have no model-visible receipt "
+                f"to grade ({joined_deliveries} joined); inert is not established",
+                source_artifact=ledger_artifact)
+        elif not cons:
+            # zero holes AND zero graded receipts = the class has NO receipt evidence at
+            # all, not a clean sweep of unreferenced deliveries. Reached by the
+            # caller_contract CO-FACT, which credits a second FACT on a physical delivery
+            # that joins under its OWN layer, so this class owns no consumption entry.
+            lc["inert"] = unmeasured(
+                "delivered rows carry no receipt-graded consumption entry for this class "
+                "(co-fact / tag-free credit); inert is not established",
+                source_artifact=ledger_artifact)
+        else:
+            lc["inert"] = measured(lvl_all < 2, source_artifact=traj_artifact)
+    elif cons:
+        # THE VACUOUS FORM of the same cross-namespace bug: the runtime ledger records ZERO
+        # delivered rows for this class while the trajectory carries a graded receipt for it.
+        # ``measured(delivered > 0 and lvl < 2)`` returned a confident MEASURED False here —
+        # a disposition of delivered evidence, asserted where the delivery count says there
+        # is none. 34 such cells on run 29714439700 (all ``obligations``, receipt_level 1).
+        # The sources disagree; the field has no subject. Say so instead of defaulting.
+        lc["inert"] = unmeasured(
+            "runtime ledger records 0 delivered rows for this class while the trajectory "
+            "carries a graded receipt: sources disagree, inert has no subject",
             source_artifact=ledger_artifact)
 
     # state change (the provable predicates)
@@ -2988,6 +3204,24 @@ def fact_class_lifecycle(
 
 def _val(metric: dict | None):
     return metric.get("value") if isinstance(metric, dict) else None
+
+
+def _any3(metrics_iter) -> bool | None:
+    """Three-valued OR over MetricValue dicts: True > UNMEASURED > False.
+
+    Plain ``any()`` reads an UNMEASURED leaf as False, and ``verdict_for`` treats
+    ``eligible is False`` as "correctly silent, never CUT" — so missing evidence
+    silently became a PASS. Here an unknown that could have been True keeps the
+    result unknown, and only an all-False scope reports False.
+    """
+    saw_unknown = False
+    for metric in metrics_iter:
+        value = _val(metric)
+        if value:
+            return True
+        if value is None:
+            saw_unknown = True
+    return None if saw_unknown else False
 
 
 def verdict_for(lifecycle: dict[str, Any], role: str) -> str:
@@ -4050,11 +4284,20 @@ def _infra_member_lifecycle(
         return lc
 
     scope = list(fcs) if fcs else list(fact_lifecycles)
-    elig = any(_val(fact_lifecycles[fc].get("eligible")) for fc in scope)
+    elig = _any3(fact_lifecycles[fc].get("eligible") for fc in scope)
     prod = any(_val(fact_lifecycles[fc].get("produced")) for fc in scope)
-    abstain = any(_val(fact_lifecycles[fc].get("correct_abstain")) for fc in scope)
-    lc["eligible"] = measured(bool(elig), source_artifact=ledger_artifact)
-    lc["not_eligible"] = measured(not elig, source_artifact=ledger_artifact)
+    abstain = _any3(fact_lifecycles[fc].get("correct_abstain") for fc in scope)
+    if elig is None:
+        # At least one scoped class is UNMEASURED and none is a definite True, so
+        # the mediator's own eligibility is unknown. `any()` would have read that
+        # unknown as False, and `verdict_for` treats eligible-False as "correctly
+        # silent, never CUT" — a manufactured PASS from missing evidence.
+        _why = "scoped fact class eligibility is UNMEASURED"
+        lc["eligible"] = unmeasured(_why, source_artifact=ledger_artifact)
+        lc["not_eligible"] = unmeasured(_why, source_artifact=ledger_artifact)
+    else:
+        lc["eligible"] = measured(bool(elig), source_artifact=ledger_artifact)
+        lc["not_eligible"] = measured(not elig, source_artifact=ledger_artifact)
     lc["produced"] = measured(bool(prod), source_artifact=ledger_artifact)
     # a mediator whose class correctly abstained (e.g. cert render on a clean submit) is a
     # correct abstain, NOT dark.
@@ -4606,9 +4849,73 @@ def _apply_attestation_truth(
     }
 
 
+def _runtime_ladder_is_capped() -> bool:
+    """True when the runtime may not write any receipt rung above ``delivered``.
+
+    Derived from the ladder authority, never hardcoded: if the emittable set ever regains a
+    rung above ``delivered``, a ``delivered`` receipt becomes meaningful disproof again and
+    this guard disengages on its own.
+    """
+    try:
+        from groundtruth.runtime.evidence_envelope import (
+            RECEIPT_RANK,
+            RECEIPT_REFERENCED,
+            RUNTIME_EMITTABLE_RECEIPT_STATES,
+        )
+        return not any(
+            RECEIPT_RANK.get(state, 0) >= RECEIPT_RANK[RECEIPT_REFERENCED]
+            for state in RUNTIME_EMITTABLE_RECEIPT_STATES
+        )
+    except Exception:  # noqa: BLE001
+        # HONEST ABOUT THE POLARITY: `return False` does NOT fail closed here. It re-arms the
+        # sidecar as disproof, which is the exact outcome this helper exists to prevent --
+        # reached silently, on an unknown ladder. The correct third answer is UNMEASURED, and
+        # a `bool` return cannot express it.
+        #
+        # Left as-is because the branch is unreachable, not because it is right:
+        # `gt_feature_metrics` imports `receipt_sidecar` at module scope, which imports
+        # `evidence_envelope` at ITS module scope, so an import failure here means this module
+        # never loaded at all. The only live path in is a KeyError from a patched or truncated
+        # ladder. If this helper ever grows a tri-state return, this is the branch to fix.
+        return False
+
+
+def _canonical_dark_fallback_assurance(rows: list[dict[str, Any]]) -> str | None:
+    """The runtime's own assurance verdict when the canonical observer went dark.
+
+    Returns ``None`` when the ledger carries no ``canonical_runtime.dark_fallback`` row,
+    which is the ONLY state in which canonical delivery may be claimed at all.
+
+    Read, never asserted. The row's ``assurance`` is stamped from
+    ``attempt_runtime.failure_state`` at the seam, so a component isolated by a NON-core
+    fault reports DEGRADED rather than being mislabelled UNASSURED. A pre-flag row (proof
+    mode off) carries no ``assurance`` key; a dark observer is definitionally not assured,
+    so that case falls back to UNASSURED rather than to silence.
+
+    WORST-WINS, not first-wins. ``apply_failure_policy`` can isolate a component on a
+    non-core fault -- leaving emission enabled and assurance DEGRADED -- and a later core
+    fault then quarantines to UNASSURED. Rows flow from the first dark observation onward, so
+    returning the FIRST stated value publishes DEGRADED for an attempt that ended UNASSURED:
+    the milder of the two, which is the wrong direction for a fail-closed field. Rank and take
+    the minimum. An unrecognised value sorts worst, so a future member cannot read as mild by
+    being unknown to this function.
+    """
+    order = {"ASSURED": 0, "DEGRADED": 1, "UNASSURED": 2, "BLOCKED": 3}
+    worst: str | None = None
+    for row in rows:
+        if row.get("layer") != "canonical_runtime.dark_fallback":
+            continue
+        stated = row.get("assurance")
+        seen = stated if isinstance(stated, str) and stated else "UNASSURED"
+        if worst is None or order.get(seen, 99) > order.get(worst, 99):
+            worst = seen
+    return worst
+
+
 def _apply_canonical_runtime_attestation(
     task_dir: str,
     ss_integrity: dict[str, Any],
+    rows: list[dict[str, Any]] | None = None,
 ) -> None:
     """Attach canonical delivery proof without laundering it into consumption.
 
@@ -4619,10 +4926,40 @@ def _apply_canonical_runtime_attestation(
     and never supplies acknowledgment, behavioral influence, or causal credit.
     """
 
+    # FAIL CLOSED ON A DARK OBSERVER (2026-07-28). Until now this projection consulted only
+    # the journal, so a task whose canonical observer DIED reported nothing and was scored as
+    # if the canonical route had simply been quiet. Run 30390877219 shipped 59/38/12/6
+    # observations through the untimed legacy route across four tasks and this grader recorded
+    # no trace of it: the safety was accidental (we read only DELIVERED rows), not structural.
+    #
+    # `canonical_delivery_proven` is stamped FIRST and unconditionally, so the key exists even
+    # when no journal is present. Without it `delivered_count == 0` passes VACUOUSLY -- the
+    # whole `canonical_runtime_attestation` block is absent unless a journal file exists, so an
+    # assertion on the numerator alone would be green for a task that never even ran the
+    # canonical route. The task stays in the denominator; only the numerator excludes it.
+    dark_assurance = _canonical_dark_fallback_assurance(rows or [])
+    if dark_assurance is not None:
+        ss_integrity["canonical_delivery_proven"] = False
+        # THE TAINT IS THE POINT. Writing `canonical_delivery_proven: False` into the JSON and
+        # stopping there would be a fail-closed that reaches no gate: `ss_proof_manifest.
+        # _audit_feature_metrics` and `ss_live_diagnosis._validate_task_metrics` consult
+        # `inventory_complete` / `required_inputs_complete` / `publishable` and nothing else, so
+        # a dark-observer task would still pass the manifest audit while carrying a field that
+        # says its canonical claim is void. Routing it through `missing_required_inputs` puts it
+        # on the ONE path the promotion authority already reads.
+        ss_integrity["required_inputs_complete"] = False
+        missing = set(ss_integrity.get("missing_required_inputs") or [])
+        missing.add("canonical_observer_dark")
+        ss_integrity["missing_required_inputs"] = sorted(missing)
     diagnostic = runtime_attestation_diagnostic(task_dir)
     if diagnostic is None:
         return
     ss_integrity["canonical_runtime_attestation"] = diagnostic
+    ss_integrity["canonical_delivery_proven"] = bool(
+        dark_assurance is None
+        and diagnostic.get("integrity_ok") is True
+        and int(diagnostic.get("delivered_count") or 0) > 0
+    )
     if diagnostic.get("integrity_ok") is not True:
         ss_integrity["required_inputs_complete"] = False
         missing = set(ss_integrity.get("missing_required_inputs") or [])
@@ -4701,6 +5038,10 @@ def collect_task(
 
     native_visible = native_visible_by_fact_class(rows, traj.get("messages", []) or [])
     native_renderer = native_renderer_audit_by_fact_class(rows)
+    # receipt-join COVERAGE (C15 split, 2026-07-28): the per-class count of delivered rows
+    # with no model-visible receipt. Without it the ``inert`` verdict cannot tell "did
+    # nothing" from "not measurable" — see fact_class_lifecycle.
+    unjoined_by_fc = unjoined_receipts_by_fact_class(cons_ledger)
     fact_lifecycles: dict[str, dict] = {}
     for fc in fr.all_fact_classes():
         fact_lifecycles[fc] = fact_class_lifecycle(
@@ -4711,6 +5052,7 @@ def collect_task(
             ledger_artifact=ledger_artifact, traj_artifact=traj_artifact,
             native_visible=native_visible.get(fc, 0),
             native_renderer_valid=native_renderer.get(fc),
+            unjoined_receipts=unjoined_by_fc.get(fc, 0),
         )
 
     # SPEC-J2: override lifecycle truth for the four attested fact classes from the
@@ -4949,7 +5291,25 @@ def collect_task(
     # the terminal live bit, and every named fail-closed reason.
     ss_integrity["live_run_provenance"] = _live.as_dict()
     ss_integrity["attestation_join"] = attestation_join_diag
-    _apply_canonical_runtime_attestation(task_dir, ss_integrity)
+    _apply_canonical_runtime_attestation(task_dir, ss_integrity, rows)
+    # Top-level so no reader has to know the ss_integrity layout to learn that a task's
+    # canonical claim is void.
+    #
+    # READ THE POLARITY CAREFULLY -- "UNKNOWN" IS THE GOOD STATE HERE.
+    #   "UNKNOWN"  -> no dark_fallback row: the canonical observer never went dark. Nothing is
+    #                 CLAIMED about delivery either way; that is `canonical_delivery_proven`'s
+    #                 job. This is the healthy value.
+    #   anything   -> the observer went dark and this is the WORST assurance the runtime
+    #     else       reported. The canonical claim is void.
+    # "ASSURED" is unreachable on this field BY CONSTRUCTION: it is set only by `initial()`
+    # and by a recovery that empties `isolated_components` and re-enables emission, and both
+    # imply `_canonical_observer_is_dark` is False, so no dark row can ever carry it. A
+    # downstream contract of the form `assurance == "ASSURED" => success` would therefore
+    # never fire for any task. The correct test is `canonical_assurance == "UNKNOWN"`.
+    #
+    # It is still emitted explicitly rather than omitted: an absent key lets a reader supply
+    # its own optimistic default, and absence of proof must never read as proof of absence.
+    canonical_assurance = _canonical_dark_fallback_assurance(rows) or "UNKNOWN"
     # SPEC-J3: per-fact-class timing verdicts + UNMEASURED reasons feeding the
     # correct_rl_adhered_time gate (the delivery-row chronology join).
     ss_integrity["chronological_timing"] = chronological_timing
@@ -5011,6 +5371,7 @@ def collect_task(
         "profile": profile,
         "task": task,
         "attempt": 1,
+        "canonical_assurance": canonical_assurance,
         "artifacts": {
             "trajectory": traj_artifact,
             "runtime_ledger": ledger_artifact,
@@ -5022,6 +5383,9 @@ def collect_task(
         "ss_feature_inventory_schema": "gt.ss_feature_inventory.v1",
         "ss_features": ss_features,
         "ss_integrity": ss_integrity,
+        # task #34: the gate-loss diagnostic. TOP-LEVEL and OUTSIDE the legacy golden
+        # projection on purpose; None when the task has no oracle telemetry.
+        "oracle_gate_losses": oracle_gate_losses(oracle_rows),
         "atomic_events": [e.to_json() for e in events],
         "behavioural_endpoints": {
             "gt_on": endpoints,

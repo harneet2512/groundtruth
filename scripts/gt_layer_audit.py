@@ -2,12 +2,18 @@
 """gt_layer_audit.py - the DEPTH-FIRST, per-LAYER, live-behavioral-gap audit (gt_trial §4).
 
 ONE language-agnostic audit for ANY of the 5 languages. It reads a run's artifacts GENERICALLY
-(graph.db edge types + resolution methods, the substrate certs, the agent trajectory tags) and
-walks GT layer by layer, STARTING FROM DEPTH (Layer 0), reporting for EACH layer:
+(graph.db edge types + resolution methods, the substrate certs, the agent's BYTE-SEALED delivery
+ledger) and walks GT layer by layer, STARTING FROM DEPTH (Layer 0), reporting for EACH layer:
     INTENDED (what gt_main/gt_gt says it should do)  vs  ACTUAL (what this run did)  -> FIRED? + GAP.
 
-No per-language logic: edge types, resolution methods, cert fields, and `<gt-...>` trajectory tags
-are the SAME contract for py/go/ts/js/rust. The "live behavioral gap" is the delta per layer.
+No per-language logic: edge types, resolution methods, cert fields, and the runtime-ledger layer
+names are the SAME contract for py/go/ts/js/rust. The "live behavioral gap" is the delta per layer.
+
+DELIVERY AUTHORITY (fixed 2026-07-29): per-layer delivery is read from the SEALED runtime ledger
+via scripts/swebench/consumption_ledger, NOT from a `<gt-*>` tag scan. Native Profile-2 deliveries
+are tag-free, so the tag scan reported "DELIVERED=NO" on all six layers of all ten tasks of run
+30390877219 while its ledgers held 74 sealed `outcome=delivered` rows (52 joined into model-visible
+observations). The tag scan survives ONLY as the fallback for a trajectory with no sealed ledger.
 
 Usage:
     python scripts/gt_layer_audit.py --graph <graph.db> --certs <dir> --trajectory <traj.json> \
@@ -305,17 +311,99 @@ def audit_embedder(certs_dir):
             "gap": "none" if (dim == "768" and not is_zero) else f"embedder degraded (dim={dim}, w_sem={wsem}, zeroed={is_zero})"}
 
 
+# The SEALED runtime-ledger `layer` names that carry each audit layer's agent-visible payload.
+# Native Profile-2 deliveries are TAG-FREE (the harness is the socket; `<gt-*>` is the deprecated
+# MCP-era fallback surface), so a `<gt-*>` scan reads 0 on a run whose ledger holds dozens of
+# sealed deliveries. Measured 2026-07-29 on run 30390877219: 74 sealed `outcome=delivered` rows,
+# ZERO `<gt-*>` family tags in the model-visible messages -> the tag scan reported
+# "DELIVERED=NO" on every layer of every task. The sealed rows are the authority.
+_LEDGER_LAYER_TO_AUDIT = {
+    "brief.task": "L1.brief",
+    "brief": "L1.brief",
+    "l3b.evidence": "L3b.evidence",
+    "l3b.contract": "L3.contract",
+    "l3.contract": "L3.contract",
+    "consensus.scope_map": "consensus.scope",
+    "consensus.scope": "consensus.scope",
+    "l3.cochange": "cochange",
+    "cochange": "cochange",
+    "detect.coherence": "oracle.nudge",
+    "detect.loop": "oracle.nudge",
+    "nudge": "oracle.nudge",
+    "oracle.nudge": "oracle.nudge",
+}
+
+
+def _sealed_layer_counts(trajectory_path):
+    """Per-audit-layer counts of BYTE-SEALED deliveries joined into the agent's own
+    observations, via scripts/swebench/consumption_ledger (trajectory + sibling
+    gt_runtime_ledger*.jsonl seals). Returns None when no sealed authority exists for
+    this trajectory, so an old-shape/tagged run falls back to the legacy tag scan
+    byte-identically."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "swebench"))
+        from consumption_ledger import ledger_from_trajectory_path
+        ledger = ledger_from_trajectory_path(trajectory_path)
+    except Exception:
+        return None
+    if not isinstance(ledger, dict) or not ledger.get("runtime_ledger_path"):
+        return None
+    counts = dict.fromkeys(_LAYER_TAGS, 0)
+    other = {}
+    for e in ledger.get("entries") or []:
+        if not isinstance(e, dict):
+            continue
+        # Same visibility discipline as gt_performance_metrics._visible_receipts:
+        # a delivery counts when it is joined by exact seal into a model-visible message.
+        if e.get("source") != "trajectory" or e.get("joined") is not True:
+            continue
+        if int(e.get("receipt") or 0) < 1:
+            continue
+        ll = str(e.get("ledger_layer") or e.get("kind") or "").strip()
+        audit_layer = _LEDGER_LAYER_TO_AUDIT.get(ll)
+        if audit_layer:
+            counts[audit_layer] += 1
+        else:
+            # never silently dropped and never miscredited to one of the six
+            other[ll] = other.get(ll, 0) + 1
+    return {
+        "counts": counts,
+        "other_layers": other,
+        "runtime_ledger_path": ledger.get("runtime_ledger_path"),
+        "ledger_rows_delivered": ledger.get("ledger_rows_delivered"),
+        "ledger_rows_joined": ledger.get("ledger_rows_joined"),
+    }
+
+
 def audit_trajectory(trajectory_path):
-    """Per-turn LAYERS - did each layer's tag FIRE in the agent's observations, and how many times."""
+    """Per-turn LAYERS - did each layer's payload FIRE in the agent's observations, and how
+    many times. AUTHORITY = the byte-sealed consumption ledger when one exists; the legacy
+    `<gt-*>` tag scan only when it does not (tagless native deliveries carry no tags)."""
     if not trajectory_path or not os.path.isfile(trajectory_path):
         return {"loaded": False, "layers": {}}
     raw = open(trajectory_path, encoding="utf-8", errors="replace").read()
+    sealed = _sealed_layer_counts(trajectory_path)
     layers = {}
     for layer, tags in _LAYER_TAGS.items():
-        n = sum(raw.count(t) for t in tags)
+        tag_n = sum(raw.count(t) for t in tags)
+        if sealed is not None:
+            n = sealed["counts"][layer]
+            gap = "none" if n > 0 else (
+                "DELIVERED=NO - no byte-sealed delivery row joined to an agent observation "
+                "for this layer (sealed authority; absence here is a QUIET layer, not proof "
+                "the layer is broken)")
+            source = "runtime_ledger_seal_join"
+        else:
+            n = tag_n
+            gap = "none" if n > 0 else (
+                "DELIVERED=UNKNOWN - no sealed runtime ledger for this trajectory and no "
+                "<gt-*> tag; a tag scan CANNOT prove non-delivery on a native run")
+            source = "legacy_tag_scan"
         layers[layer] = {"fired_count": n, "fired": n > 0,
+                         "legacy_tag_count": tag_n,
+                         "source": source,
                          "intended": _LAYER_INTENT.get(layer, ""),
-                         "gap": "none" if n > 0 else "DELIVERED=NO - tag never appears in the agent trajectory"}
+                         "gap": gap}
     # assistant turn count (trajectory length)
     try:
         obj = json.loads(raw)
@@ -323,7 +411,11 @@ def audit_trajectory(trajectory_path):
         turns = sum(1 for m in msgs if isinstance(m, dict) and m.get("role") == "assistant")
     except Exception:
         turns = raw.count('"role": "assistant"') + raw.count('"role":"assistant"')
-    return {"loaded": True, "assistant_turns": turns, "layers": layers}
+    out = {"loaded": True, "assistant_turns": turns, "layers": layers,
+           "delivery_authority": "runtime_ledger_seal_join" if sealed else "legacy_tag_scan"}
+    if sealed is not None:
+        out["sealed"] = {k: v for k, v in sealed.items() if k != "counts"}
+    return out
 
 
 _LAYER_INTENT = {

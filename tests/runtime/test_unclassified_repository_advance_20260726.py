@@ -176,13 +176,24 @@ def test_the_OTHER_direction_is_ALSO_recorded_not_fatal():
     )
 
 
-def test_a_quarantine_from_this_cause_would_have_meant_zero_gt_bytes():
-    """Documents the blast radius as an executable fact about the routing, so nobody
-    re-introduces the raise thinking it degrades gracefully.
+def test_a_quarantine_from_this_cause_no_longer_zeroes_gt_bytes_and_is_recorded():
+    """Documents the blast radius as an executable fact about the routing.
 
-    `_augment_output` chooses the legacy path ONLY when the attachment is None. A runtime
-    that attaches and is later quarantined is not None, so no fallback exists and delivery
-    goes to zero for the rest of the attempt.
+    HISTORY. This test originally pinned the OPPOSITE invariant: `_augment_output` chose
+    the legacy path ONLY when the attachment was None, so a runtime that attached and was
+    later quarantined had no fallback and delivery went to ZERO for the rest of the
+    attempt (run 30246661710: one `observe_failed:StateIntegrityError`, then darkness).
+    The dark-fallback route then landed deliberately ("a dead timing authority costs GT
+    its timing, not its evidence") — and this test kept passing only because its substring
+    probe looked for the word "quarantin", which the fallback's code happened not to use.
+    The 2026-07-28 proof-mode work named the quarantine in a HOST-SIDE ledger field and
+    the stale premise finally tripped.
+
+    THE CURRENT INVARIANT, pinned structurally rather than by word-absence:
+      1. the legacy route still runs when no runtime ever attached;
+      2. a DARK observer (quarantine included) falls back to the legacy route — recorded
+         via the `dark_fallback` ledger row, never silent;
+      3. in proof mode the same darkness FAILS CLOSED: return, no legacy call, no bytes.
     """
     import inspect
 
@@ -190,9 +201,20 @@ def test_a_quarantine_from_this_cause_would_have_meant_zero_gt_bytes():
 
     src = inspect.getsource(seam._augment_output)
     assert "attachment is None" in src
-    assert "_augment_output_legacy" in src
     body = src[src.index("attachment is None") :]
-    assert "quarantin" not in body.lower(), (
-        "if a quarantine-aware fallback now exists, update this test -- until then the "
-        "cost of a mid-attempt quarantine is TOTAL delivery loss"
+
+    # (1) + (2): exactly TWO legacy call sites — the unattached branch and the dark
+    # fallback. A third would be a new delivery route nobody decided on; one would mean
+    # the fallback silently disappeared and mid-attempt quarantine is total loss again.
+    assert body.count("_augment_output_legacy(action, out)") == 2, (
+        "the number of legacy delivery routes changed — decide deliberately"
+    )
+    # (2): the fallback is recorded, never silent.
+    assert "canonical_observer_dark:legacy_delivery_resumed" in body
+    # (3): proof mode fails closed BEFORE the legacy fallback call.
+    assert "canonical_observer_dark:proof_mode_fail_closed" in body
+    proof_return = body.index("proof_mode_fail_closed")
+    legacy_fallback = body.rindex("_augment_output_legacy(action, out)")
+    assert proof_return < legacy_fallback, (
+        "proof mode must decide before the legacy fallback can run"
     )

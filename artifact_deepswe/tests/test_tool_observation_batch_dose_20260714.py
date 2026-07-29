@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import gt_mini_patch as g
+from groundtruth.runtime import global_arbiter as ga
 
 
 class _Model:
@@ -564,12 +565,60 @@ def test_global_arbiter_without_installed_handshake_falls_open_to_inline(monkeyp
     # single-action scaffolds (mini-swe) that never install the batch formatter — otherwise EVERY
     # reactive FACT would be silently dropped on every observation. So the correct contract is now:
     # the reactive dose still ships INLINE (the byte-identical `_ga_on==False` path), NOT zero.
+    #
+    # FIXTURE CORRECTION (2026-07-28): the contract above is right; the CANDIDATE proving it was
+    # not. `_wire_fake_candidates` pools `SimpleNamespace(kind="fake."+cmd, plane="fact")`, and
+    # `global_arbiter.class_of_kind("fake.one")` is `""` -> the arbiter classifies it `internal`
+    # and returns winner=None. So this test's "the dose vanishes unless we fail open" was measuring
+    # an UNCLASSIFIABLE candidate, not an uncommittable pool: with no batch state `_batch_defer` is
+    # False and `_global_pool_flush` runs inline, so the pool IS committed either way.
+    #
+    # That distinction is the whole of C35. The old proxy guard disabled the arbiter on every
+    # single-action scaffold, which left the <=1-dose law with NO enforcement mechanism in
+    # production: run 30390877219 had 6 of 20 observations carrying two GT blocks. The guard now
+    # tests the hazard directly (`_batch_context.get() is not None`).
+    #
+    # So this test now pools a REAL, classifiable fact. It still asserts the same contract — the
+    # reactive dose ships inline, never zero — but against a candidate the arbiter can rank, which
+    # is the only kind production ever produces.
     _wire_fake_candidates(monkeypatch)
+    # A REAL candidate is subject to the REAL cross-turn dedup, and this test is parametrized:
+    # without a reset the first profile stamps the winner's unified key and content hash into
+    # episode state, and the remaining three parametrizations are suppressed as already-delivered.
+    # That is the dedup working correctly on leaked state, not a delivery failure.
+    g._reset_oracle_state()
+
+    def _real_gateway(action, out, cmd, orig_out, *, pool=None,
+                      lattice_produced=None, normalized_event=None):
+        candidate = ga.Candidate(
+            plane=ga.PLANE_GATEWAY, kind="l3b.evidence",
+            dedup_key=f"dose:{profile}:{cmd}",
+            boundary_ordinal=3, current_ordinal=2)
+        thunk = lambda: out.__setitem__("output", out["output"] + "\nGT:" + cmd)
+        if pool is None:
+            thunk()
+        else:
+            g._append_batch_candidate(pool, candidate, thunk, out, "GT:" + cmd, join=True)
+
+    monkeypatch.setattr(g, "_gt_gateway_deliver", _real_gateway)
     monkeypatch.setenv("GT_RL_PROFILE", profile)
     monkeypatch.setattr(g, "_batch_commit_installed", False)
     monkeypatch.setattr(g, "_batch_install_failed", False)
     out = _Env().execute({"command": "one"})
     assert out["output"] == "base:one\nGT:one"
+
+
+def test_an_unclassifiable_candidate_is_dropped_not_delivered(monkeypatch):
+    """The behaviour the old fixture mistook for an uncommittable pool, pinned on purpose.
+
+    `class_of_kind` returns "" for an unregistered kind, the arbiter rules it `internal`, and
+    winner is None -> zero bytes. That is CORRECT (correct-or-quiet: GT does not ship a fact it
+    cannot rank), and it is not evidence that the arbiter cannot flush without a handshake.
+    """
+    assert ga.class_of_kind("fake.one") == ""
+    result = ga.arbitrate(
+        [ga.Candidate(plane=ga.PLANE_GATEWAY, kind="fake.one", dedup_key="x")])
+    assert result.winner is None
 
 
 def test_final_stepbehind_commits_known_fact_only_after_formatter(monkeypatch):

@@ -1079,8 +1079,28 @@ _HYPOTHESIS_TRANSITIONS: dict[
         HypothesisState.CANDIDATE,
         "EXACT_SEARCH_OPENED_CANDIDATE",
     ),
+    # ACTIVE is a legal FROM (added 2026-07-28). An agent views many symbols in a row --
+    # `SemanticKind.SYMBOL_VIEWED` maps here unconditionally -- so the SECOND view of a task
+    # arrived on an already-ACTIVE hypothesis, raised, and the raise isolated the canonical
+    # observer for the whole attempt. Run 30390877219, 4/4 tasks:
+    #   observe_failed:StateIntegrityError:
+    #     illegal hypothesis transition HypothesisState.ACTIVE via FOCUSED_SYMBOL_VIEW
+    # followed by `canonical_observer_dark:legacy_delivery_resumed` on 59/61, 38/42, 12/18 and
+    # 6/17 remaining observations. One ObservationBinding per task -- the step-0 one, made
+    # before the death -- so the canonical proof chain was dark for ~97% of the run.
+    #
+    # This is the MIRROR of the `orphaned_outcome` case below: that one exists because an
+    # OUTCOME can arrive when GT never opened a hypothesis; this one is an OPENING arriving
+    # when GT already did. Same root -- GT is never told the agent's hypotheses, it infers
+    # them -- with the polarity flipped.
+    #
+    # Widening rather than skipping, because the target state IS ACTIVE: admitting ACTIVE as a
+    # FROM introduces no newly reachable state, so the invariant this table protects is
+    # untouched. It also matches EDIT_PROPOSED directly below, which has always been
+    # idempotent on ACTIVE for exactly the same reason. Subject rebinding is still refused
+    # upstream, so a view of a DIFFERENT subject on the same hypothesis id still raises.
     OperationalSignalKind.FOCUSED_SYMBOL_VIEW: (
-        frozenset({None, HypothesisState.CANDIDATE}),
+        frozenset({None, HypothesisState.CANDIDATE, HypothesisState.ACTIVE}),
         HypothesisState.ACTIVE,
         "FOCUSED_SYMBOL_VIEW_ACTIVATED",
     ),
@@ -1089,8 +1109,22 @@ _HYPOTHESIS_TRANSITIONS: dict[
         HypothesisState.ACTIVE,
         "EDIT_PROPOSED_CONFIRMED_COMMITMENT",
     ),
+    # CANDIDATE is a legal FROM (added 2026-07-28). This was the LAST live-reachable cell that
+    # quarantined the canonical observer: the agent greps a symbol (GT opens CANDIDATE) and a
+    # test then passes on it, with no intervening focused view. Ordinary behaviour; it cost the
+    # whole attempt's proof chain.
+    #
+    # WIDEN rather than skip -- the opposite of the rule for the three OPENING kinds. An opening
+    # is a re-observation and asserts nothing about progress, so skipping it loses nothing. This
+    # is an OUTCOME: a test actually passed, which is observed execution truth, and a no-op
+    # would DISCARD it. Widening keeps it.
+    #
+    # Safe because the move is MONOTONE: CANDIDATE -> SUPPORTED introduces no newly reachable
+    # state (SUPPORTED was already the target from ACTIVE), and the only thing dropped is an
+    # ACTIVE waypoint GT never actually observed. Nothing regresses: unlike widening an opening
+    # -- which would drag a validated hypothesis BACKWARDS to CANDIDATE -- this only advances.
     OperationalSignalKind.VALIDATION_SUPPORT: (
-        frozenset({HypothesisState.ACTIVE}),
+        frozenset({HypothesisState.CANDIDATE, HypothesisState.ACTIVE}),
         HypothesisState.SUPPORTED,
         "VALIDATION_SUPPORTED_HYPOTHESIS",
     ),
@@ -1176,12 +1210,92 @@ def reduce_reasoning_signal(
     # invariant this check protects -- the machine never enters an illegal state -- holds
     # exactly as before. A mismatch from a REAL state still raises below: that means the
     # graph itself is inconsistent, which IS corruption.
+    # A RE-OBSERVATION IS NOT A TRANSITION, AND NOT CORRUPTION EITHER.
+    #
+    # The ACTIVE+FOCUSED_SYMBOL_VIEW widening above fixed ONE cell. It is one of EIGHT where
+    # the signal's target state IS the state the node is already in, and the other seven still
+    # raise. Measured on the live producer surface: `_OUTCOME_SIGNAL_KIND` is the only thing
+    # that constructs an OperationalSignal and it emits 4 of the 8 kinds, so the reachable grid
+    # is 4x4 = 16 cells -- and 8 of those 16 raise today. Two are ordinary agent behaviour:
+    #   CANDIDATE + EXACT_SEARCH        -- grep the same symbol twice
+    #   SUPPORTED + VALIDATION_SUPPORT  -- run a passing test twice
+    # and the whole SUPPORTED row raises, so once a passing test moves a hypothesis to
+    # SUPPORTED, no signal the producer can emit for that subject avoids quarantine. A passing
+    # test makes its own subject radioactive for the rest of the attempt.
+    #
+    # Same root cause as `orphaned_outcome` below and as the run-30390877219 crash: GT is never
+    # TOLD the agent's hypotheses, it INFERS them from observations, so the same observation
+    # legitimately arrives more than once. Widening each cell's allowed-from set one at a time
+    # (what the FOCUSED_SYMBOL_VIEW fix did) also mints a fabricated self-transition per repeat.
+    # No production code reads `.transitions` -- but a transition ledger whose entries are not
+    # transitions is a bad thing to keep, and `transitions` is inside `canonical_json()` and so
+    # inside `graph_hash`.
+    #
+    # NOT a claim that this makes `graph_hash` stable across repeats -- it does not, and an
+    # earlier draft of this comment said otherwise. `sequence`, `last_source_event_sequence`
+    # and `source_event_ids` are ALSO graph fields, and the reducer requires
+    # `signal.sequence == graph.sequence + 1`, so ten repeat observations produce ten distinct
+    # graph hashes both before and after this change. What changes is WHAT the hash encodes,
+    # not how many values it takes.
+    #
+    # So: classify `current == target` as a state-preserving UPDATE. Nothing transitions, no
+    # node is invented, no self-transition is recorded, and the edge block below still runs
+    # because new counterevidence against an already-CONTRADICTED hypothesis is real
+    # information. A mismatch from a state that is genuinely not the target still raises: that
+    # means the graph itself is inconsistent, which IS corruption.
+    #
+    # A RE-OBSERVED OPENING IS NOT CORRUPTION EITHER, AND IT MUST NOT REGRESS THE STATE.
+    #
+    # `state_preserving` closed the six self-target cells. FIVE live-reachable cells still
+    # raised, four of them an OPENING kind arriving at a state further along than the one it
+    # opens (probe, 2026-07-28, over the whole `_OUTCOME_SIGNAL_KIND` 4x4 surface):
+    #   ACTIVE    + EXACT_SEARCH         -- view a symbol, then grep it again
+    #   SUPPORTED + EXACT_SEARCH / FOCUSED_SYMBOL_VIEW / EDIT_PROPOSED
+    #                                    -- a test passed, then search/view/edit that surface
+    # The whole opening half of the SUPPORTED row raised, so ONE passing test made its own
+    # subject radioactive for the rest of the attempt.
+    #
+    # The table models GT's INFERENCE of the agent, not a structural invariant of the graph.
+    # This function is the SOLE writer of `hypothesis_state` (the two `replace`/append sites
+    # below and the SUPERSEDING related node); every graph reaching it was folded from
+    # `ReasoningGraph.initial` over committed events -- `reduce_reasoning_event`,
+    # `replay_reasoning_signals`, `recovery_assurance._RuntimeProjection`. No path deserialises
+    # a node state from bytes. So `current` is always a state this function itself wrote, and an
+    # opening that cannot advance from it means GT's inference lags the agent -- not corruption.
+    #
+    # Restricted to OPENINGS, derived as `None in allowed` (EXACT_SEARCH, FOCUSED_SYMBOL_VIEW,
+    # EDIT_PROPOSED). The five OUTCOME kinds make CLAIMS about hypothesis progress -- validated,
+    # weakened, contradicted, abandoned, superseded -- and their allowed-from sets encode which
+    # claims are coherent; admitting those too would make the raise below unreachable for all 64
+    # cells, i.e. dead code, and 18 outcome cells still raise because of this restriction.
+    #
+    # SKIP, never widen. Widening was right for the FOCUSED_SYMBOL_VIEW fix above because ACTIVE
+    # is its target. It is wrong here: giving EXACT_SEARCH `SUPPORTED` as a legal source would
+    # drive a validated hypothesis BACKWARDS to CANDIDATE, and EDIT_PROPOSED from SUPPORTED back
+    # to ACTIVE, destroying observed execution truth because the agent grepped something twice.
+    # Nothing transitions and no node is invented, so the invariant this check protects holds.
+    #
+    # Openings never reach the edge block below -- only VERIFIED_COUNTEREVIDENCE and
+    # SUPERSEDING_HYPOTHESIS append edges, and neither admits None -- so a skipped opening
+    # cannot fabricate an edge. Subject rebinding is still refused above, so this does NOT
+    # become "any signal may hit any node".
+    #
+    # NOT FIXED HERE: `CANDIDATE + VALIDATION_SUPPORT` (grep a symbol, then a test passes on it)
+    # is live-reachable and still raises. It is an OUTCOME, so this rule does not reach it, and
+    # its repair -- widening VALIDATION_SUPPORT to `{CANDIDATE, ACTIVE}`, a monotone advance to
+    # an already-reachable state -- is blocked by the explicit pin on that exact cell in
+    # tests/runtime/test_orphaned_outcome_signal_20260727.py.
+    state_preserving = current is not None and current == target
     orphaned_outcome = current is None and None not in allowed
-    if not orphaned_outcome and current not in allowed:
+    reobserved_opening = (
+        current is not None and None in allowed and current not in allowed
+    )
+    skip_transition = orphaned_outcome or state_preserving or reobserved_opening
+    if not skip_transition and current not in allowed:
         raise StateIntegrityError(
             f"illegal hypothesis transition {current} via {signal.kind.value}"
         )
-    if not orphaned_outcome:
+    if not skip_transition:
         transition = HypothesisTransition(
             from_state=current,
             to_state=target,
@@ -4198,6 +4312,105 @@ class CommitmentWindowState(str, Enum):
     CLOSED = "CLOSED"
 
 
+# The temporal order of the decision spine. This is an ordering over DecisionContext,
+# which is DEFINED in this module, so it is the natural home for "which decision comes
+# after which" rather than a copy of a rule owned elsewhere. FAILURE_RECOVERY is
+# deliberately absent: it is an off-spine excursion, not a later point in time.
+_DECISION_SPINE: tuple[DecisionContext, ...] = (
+    DecisionContext.SOURCE_TARGET_SELECTION,
+    DecisionContext.SOURCE_UNDERSTANDING,
+    DecisionContext.PATCH_CONSTRUCTION,
+    DecisionContext.PATCH_PROPAGATION,
+    DecisionContext.COMPLETION,
+)
+
+# Which decision is open at each registered fact_registry delivery boundary. This is a
+# PROJECTION of the live chain
+#   boundary -> SemanticKind -> reduce_event -> work-state phase -> _active_decision
+# and it is not allowed to be a convention: it is asserted equal to that live chain, for
+# every boundary in the table, by
+# tests/runtime/test_feature_window_caller_contract_20260728.py.
+_BOUNDARY_DECISION: Mapping[str, DecisionContext] = MappingProxyType(
+    {
+        "task_start": DecisionContext.SOURCE_TARGET_SELECTION,
+        "search_result": DecisionContext.SOURCE_TARGET_SELECTION,
+        "failed_search": DecisionContext.SOURCE_TARGET_SELECTION,
+        "file_view": DecisionContext.SOURCE_UNDERSTANDING,
+        "first_view_edit": DecisionContext.SOURCE_UNDERSTANDING,
+        "edit_result": DecisionContext.PATCH_CONSTRUCTION,
+        "test_result": DecisionContext.PATCH_PROPAGATION,
+        "failure_obs": DecisionContext.PATCH_PROPAGATION,
+        "submit": DecisionContext.COMPLETION,
+    }
+)
+
+
+@dataclass(frozen=True)
+class FeatureWindow:
+    """A feature's THREE-POINT commitment window, in fact_registry EVENT vocabulary.
+
+    Why this exists: the scheduler's release test used to be the literal constant
+    ``CommitmentWindowState.OPEN``, which made ``release_allowed == relevant`` — timing
+    was algebraically eliminated and the commitment window was UNFALSIFIABLE. A contract
+    that carries a window can be asked whether its moment has arrived, has not arrived
+    yet, or has passed.
+
+    * ``earliest_event`` -- before this, the fact is premature (NOT_OPEN).
+    * ``deliver_by`` -- the last boundary at which the fact can still SHAPE the decision.
+    * ``corrective_boundary`` -- the last boundary at which the fact is still useful as a
+      CORRECTION of a decision already taken. After it, the decision is COMMITTED.
+
+    :meth:`resolve` NEVER returns ``CLOSED``. A window that has passed routes to
+    ``COMMITTED``, and the scheduler projects that to a HELD (recoverable) record --
+    never to the terminal, unrecoverable EXPIRED.
+    """
+
+    earliest_event: str
+    deliver_by: str
+    corrective_boundary: str
+
+    def __post_init__(self) -> None:
+        ranks: list[int] = []
+        for field_name in ("earliest_event", "deliver_by", "corrective_boundary"):
+            boundary = getattr(self, field_name)
+            decision = _BOUNDARY_DECISION.get(boundary)
+            if decision is None:
+                raise ValueError(
+                    f"feature window {field_name} is not a known delivery boundary: "
+                    f"{boundary!r}"
+                )
+            ranks.append(_DECISION_SPINE.index(decision))
+        if not ranks[0] <= ranks[1] <= ranks[2]:
+            raise ValueError(
+                "feature window boundaries must be non-decreasing in time: "
+                f"{self.earliest_event} -> {self.deliver_by} -> "
+                f"{self.corrective_boundary}"
+            )
+
+    def resolve(
+        self, observed: DecisionContext | None
+    ) -> CommitmentWindowState:
+        """Where ``observed`` sits relative to this window.
+
+        Fail-OPEN by construction: an absent or off-spine (FAILURE_RECOVERY) decision
+        resolves to OPEN, so an unrecognised runtime position can never withhold a fact.
+        """
+
+        if observed is None:
+            return CommitmentWindowState.OPEN
+        try:
+            now = _DECISION_SPINE.index(observed)
+        except ValueError:
+            return CommitmentWindowState.OPEN
+        if now < _DECISION_SPINE.index(_BOUNDARY_DECISION[self.earliest_event]):
+            return CommitmentWindowState.NOT_OPEN
+        if now <= _DECISION_SPINE.index(
+            _BOUNDARY_DECISION[self.corrective_boundary]
+        ):
+            return CommitmentWindowState.OPEN
+        return CommitmentWindowState.COMMITTED
+
+
 @dataclass(frozen=True)
 class FeatureContract:
     feature_id: str
@@ -4211,6 +4424,13 @@ class FeatureContract:
     revision_dependencies: tuple[str, ...]
     fallback_policy: FeatureFallbackPolicy
     commitment_boundary: str
+    # TRAILING + defaulted on purpose. ``None`` means "this contract declares no window",
+    # and the scheduler then uses the historical unconditional-OPEN release. That None
+    # branch is the BYTE-IDENTITY guarantee for every contract that does not opt in.
+    # No __post_init__ branch is required: this field is neither one of the tuple-coerced
+    # sequence fields nor one of the non-empty-validated ones, and FeatureWindow performs
+    # its own validation in its own __post_init__.
+    window: FeatureWindow | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -4375,6 +4595,46 @@ def _validate_evidence_byte_owners(evidence: EvidenceRecord) -> None:
         )
 
 
+# THE SINGLE SOURCE OF TRUTH for how the decision-window marker projects out of a generation
+# identity. Exported 2026-07-28 because it was a hand-duplicated RULE, not a shared one: the
+# WRITER (`_evidence_generation_projection` below) normalized the field, while the offline
+# READER (`runtime_attestation._evidence_generation_projection`) compared it RAW. The runtime
+# therefore accepted a re-offer whose window had advanced, wrote both journal rows, and the
+# reader then rejected the identical history as EVIDENCE_GENERATION_REWRITTEN.
+#
+# Observed on run 30390877219, all 5/5 tasks, always the same record: the task-start
+# `obligations` capsule (feature_id="obligations", mandatory_reason=TASK_OBLIGATION), whose
+# window advanced from "" to a real GT-W-* marker between journal seq 1 and 2. The reject made
+# `delivered_count` 0 and `integrity_ok` false, which dropped
+# `canonical_runtime_attestation_integrity` from the required inputs and marked EVERY task
+# uncitable. Nothing about the delivery was wrong; the two halves of one rule disagreed.
+#
+# WHY A SENTINEL RATHER THAN "": the marker is runtime-owned scheduling state, but the
+# obligations task-start record must never project-equal a record that legitimately carries no
+# window at all. Two constants keep those distinguishable while erasing the volatile value.
+#
+# Every consumer must IMPORT this; a new hand-written copy of the conditional is a defect.
+def projected_decision_window(
+    feature_id: object,
+    mandatory_reason: object,
+) -> str:
+    """Normalize the runtime-owned window marker for generation comparison.
+
+    `mandatory_reason` is accepted either as the enum (runtime, in-process) or as its
+    serialized `name` (offline, reading `canonical_json` out of the journal), so the one rule
+    serves both halves without either side re-deriving it.
+    """
+
+    reason_name = (
+        mandatory_reason.name
+        if isinstance(mandatory_reason, MandatoryReason)
+        else str(mandatory_reason or "")
+    )
+    if feature_id == "obligations" and reason_name == "TASK_OBLIGATION":
+        return "GT-W-PROJECTION"
+    return ""
+
+
 def _evidence_generation_projection(
     evidence: EvidenceRecord,
 ) -> EvidenceRecord:
@@ -4396,14 +4656,9 @@ def _evidence_generation_projection(
         # The window marker is runtime-owned scheduling state, not part of the
         # producer computation identity. The source identity remains part of
         # the generation: a clone can never merge back into its root.
-        decision_window_generation=(
-            "GT-W-PROJECTION"
-            if (
-                evidence.feature_id == "obligations"
-                and evidence.mandatory_reason
-                is MandatoryReason.TASK_OBLIGATION
-            )
-            else ""
+        decision_window_generation=projected_decision_window(
+            evidence.feature_id,
+            evidence.mandatory_reason,
         ),
     )
 
@@ -4603,6 +4858,29 @@ def _build_feature_contracts() -> Mapping[str, FeatureContract]:
     from groundtruth.runtime import fact_registry
     from groundtruth.runtime import feature_lineage
 
+    # DECLARED WINDOWS. Exactly one contract opts in today; every other contract keeps
+    # ``window=None`` and therefore the historical unconditional-OPEN release, which is
+    # what makes this change byte-identical for the other sixteen DIRECT features.
+    #
+    # ``caller_contract`` is the opt-in because its three-point window ALREADY exists in
+    # the registry, merely shattered across three rows, and because it binds no CAP byte
+    # owner (it is absent from _CAP_FACT_BINDING.values()), so the blast radius is this
+    # one contract row:
+    #   earliest    <- ``caller_contract_search`` boundary override (search_result): the
+    #                  PRE-EDIT mirror, the first moment a caller contract is answerable.
+    #   deliver_by  <- the canonical registration (file_view): the last boundary at which
+    #                  the contract can still SHAPE the edit.
+    #   corrective  <- ``caller_break`` boundary override (edit_result): the same facts one
+    #                  boundary later, as a CORRECTION to an edit already made.
+    # Every value is read from the live registry; none is written down here.
+    feature_windows: dict[str, FeatureWindow] = {
+        "caller_contract": FeatureWindow(
+            earliest_event=fact_registry.earliest_event_for("caller_contract_search"),
+            deliver_by=fact_registry.required_event("caller_contract"),
+            corrective_boundary=fact_registry.required_event("caller_break"),
+        )
+    }
+
     rows: dict[str, FeatureContract] = {}
     delivery_facts = {
         feature_id
@@ -4638,6 +4916,7 @@ def _build_feature_contracts() -> Mapping[str, FeatureContract]:
             revision_dependencies=registration.freshness_deps,
             fallback_policy=_fallback_policy_for(feature_id),
             commitment_boundary=registration.deliver_by,
+            window=feature_windows.get(feature_id),
         )
 
     if set(feature_lineage.CAP_BYTE_OWNER_IDS) != set(_CAP_FACT_BINDING):
@@ -5409,12 +5688,40 @@ def _evaluate_current_decision_contract(
     )
     if not relevance.relevant:
         return relevance
+
+    # Pass 2 decides RELEASE. This used to be the literal CommitmentWindowState.OPEN,
+    # which collapsed the identity to ``release_allowed == relevant`` and made the
+    # commitment window unfalsifiable. A contract that declares a window is now asked
+    # where the OPEN decision actually sits relative to it; a contract that declares
+    # none keeps the exact former constant, and is therefore byte-identical.
+    resolved = (
+        contract.window.resolve(
+            context.active_decision.context
+            if context.active_decision is not None
+            else None
+        )
+        if contract.window is not None
+        else CommitmentWindowState.OPEN
+    )
+
+    # THE HELD GUARANTEE. Only OPEN is passed through as OPEN; NOT_OPEN and COMMITTED are
+    # both projected onto NOT_OPEN. This is deliberate and load-bearing: feeding COMMITTED
+    # (or CLOSED) into evaluate_feature_contract would hit its terminal window branch and
+    # yield expired=True -> the unrecoverable EXPIRED lifecycle. NOT_OPEN instead yields
+    # release_allowed=False with next_lifecycle=READY, which the selector downgrades to
+    # HELD for this decision only while storage stays READY -- so a record withheld under
+    # one decision still RELEASES when its own decision returns. The pure evaluator keeps
+    # its explicit per-record expiry model untouched; this is the scheduler policy.
     return evaluate_feature_contract(
         contract,
         evidence,
         replace(
             context,
-            commitment_window=CommitmentWindowState.OPEN,
+            commitment_window=(
+                CommitmentWindowState.OPEN
+                if resolved is CommitmentWindowState.OPEN
+                else CommitmentWindowState.NOT_OPEN
+            ),
         ),
         role_driven=role_driven,
     )

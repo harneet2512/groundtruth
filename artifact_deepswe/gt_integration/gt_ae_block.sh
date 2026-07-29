@@ -369,6 +369,15 @@ GT_AE_ARGS=(
   --ae "GT_HOOK_FIRE_COUNTS=${GT_HOOK_FIRE_COUNTS:-${GT_C_OUT}/gt_hook_fire_counts.json}"
   --ae "GT_L6_REVISION_ATTESTATIONS=${GT_L6_REVISION_ATTESTATIONS:-${GT_C_OUT}/gt_l6_revision_attestations.jsonl}"
 
+  # ── Canonical proof mode (2026-07-28), DEFAULT OFF ───────────────────────────
+  # When the canonical observer goes dark, "0" resumes legacy delivery exactly as
+  # before (byte-identical); "1" returns without touching the observation and records
+  # UNASSURED, so a run cannot ship untimed legacy bytes while a grader reads it as a
+  # canonical delivery. Forwarded here because a plain host `export` is DROPPED (see the
+  # header of this file) -- without this line the in-container branch is unreachable and
+  # the whole fail-closed path is dead on every real run.
+  --ae "GT_CANONICAL_PROOF_MODE=${GT_CANONICAL_PROOF_MODE:-0}"
+
   # ── SM-9c cross-session store DIR (BUG-2, 2026-07-12) -> host-mounted /gt_out ──
   # The durable per-repo causal-consumption ledger (xsession_memory) needs a WRITABLE
   # dir or the seam no-ops. Same path-valued-writable-env pattern as the sinks above:

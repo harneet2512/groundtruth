@@ -398,7 +398,7 @@ def test_episode_boundary_reseen_through_seam(seam, monkeypatch):
 # --------------------------------------------------------------------------- #
 # receipts (mandate g) levels 1->2->3 recorded through the seam
 # --------------------------------------------------------------------------- #
-def test_receipt_levels_through_seam(seam, monkeypatch):
+def test_receipt_ladder_is_capped_at_delivered_through_seam(seam, monkeypatch):
     grep_out = "a/x.py:10: run\nb/y.py:20: run"
     monkeypatch.setenv("GT_GATEWAY", "1")
     _run_output("grep -rn run .", grep_out)             # level 1 DELIVERED (target a/x.py)
@@ -412,9 +412,27 @@ def test_receipt_levels_through_seam(seam, monkeypatch):
     _run_output("git status", "  modified:   a/x.py")
     assert g._gt_gateway_deliveries[-1].receipt_state == RECEIPT_DELIVERED
 
-    # level 3 ACTED — the next ACTION (a policy-produced command) TARGETS the delivered file
+    # RE-POINTED 2026-07-28 (Wave 1 Step 5). This asserted that a command TARGETING the
+    # delivered file promotes the receipt to ACTED. That assertion was a TAUTOLOGY:
+    # `update_receipts` (adapters/miniswe.py:1483) decides `acted` as
+    # `any(_entity_matches(k, e, cmd) ...)` over an `ents` that always contains
+    # ("path", env.target) -- and env.target IS the file GT delivered evidence ABOUT,
+    # i.e. the file the agent was already working on. It could not fail.
+    #
+    # Worse, the field was causally INVERTED for half its rows: lane-sealed deliveries
+    # were promoted by the very command that CAUSED them (the seal at
+    # gt_mini_patch.py:14578 precedes the promotion loop run against THIS turn's cmd),
+    # while gateway rows were promoted honestly on a later turn. One field, two opposite
+    # meanings, no discriminating column. The promotion block is deleted; the seam's
+    # ladder is now CAPPED at `delivered` and `acted` is defined OFFLINE only, by
+    # fair_probe_result._treatment_acted (delivery_index < action_index <=
+    # decision_commit_index), which is the definition this seam could never express.
+    #
+    # This still bites: reinstating the promotion loop reddens both assertions.
     _run_output("sed -i 's/a/b/' a/x.py", "")
-    assert g._gt_gateway_deliveries[-1].receipt_state == RECEIPT_ACTED
+    assert g._gt_gateway_deliveries[-1].receipt_state == RECEIPT_DELIVERED
+    from groundtruth.runtime.evidence_envelope import RUNTIME_EMITTABLE_RECEIPT_STATES
+    assert RECEIPT_ACTED not in RUNTIME_EMITTABLE_RECEIPT_STATES
 
 
 def test_b33_seal_fault_leaves_zero_bytes(seam, monkeypatch):

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Iterable
 
 from groundtruth.runtime.evidence_envelope import (
+    RECEIPT_RANK,
     EvidenceEnvelope,
     from_dict as envelope_from_dict,
     observation_binding_from_dict,
@@ -40,12 +41,13 @@ COLLECTION_INTEGRITY_SCHEMA = "gt.receipt_collection_integrity.v1"
 COLLECTION_FAILURE_GLOB = "gt_receipt_integrity_*.json"
 
 _KINDS = frozenset({"lane", "gateway"})
+# Derived from the ONE ladder authority (2026-07-28). This was a hand-written literal that
+# re-spelled the receipt-state STRINGS as well as their order, despite this module already
+# importing from `evidence_envelope` a few lines above. Excluding rank 0 (`none`) stays local
+# policy: a sidecar row is by definition a delivery that happened, so "not yet delivered" is
+# not a legal transition here.
 _TRANSITION_RANK = {
-    "delivered": 1,
-    "referenced": 2,
-    "acted": 3,
-    "resolved_state": 4,
-    "causal": 5,
+    state: rank for state, rank in RECEIPT_RANK.items() if rank > 0
 }
 _REQUIRED_FIELDS = frozenset(
     {"schema", "kind", "transition", "action_index", "ts_ms", "envelope"}

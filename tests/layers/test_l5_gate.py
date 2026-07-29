@@ -41,6 +41,18 @@ def _load_gate_module():
     return mod
 
 
+# ``/tools/`` is gitignored (.gitignore:277), so the gate script is present in a
+# developer's working tree but ABSENT from any clean checkout / `git worktree`.
+# Loading it at import time therefore turned a missing optional artifact into a
+# COLLECTION ERROR that aborted the whole `pytest tests` run. Skip the module
+# with an explicit reason instead; where the script exists, all tests still run.
+if not GATE_PATH.is_file():
+    pytest.skip(
+        f"gt_pre_finish_gate.py not present at {GATE_PATH} — /tools/ is gitignored "
+        "(.gitignore:277) and is not part of a clean checkout; L5 gate tests need it.",
+        allow_module_level=True,
+    )
+
 GATE = _load_gate_module()
 
 

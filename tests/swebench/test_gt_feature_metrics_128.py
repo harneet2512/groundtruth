@@ -739,8 +739,33 @@ def test_legacy_projection_excluding_additive_readiness_is_byte_identical(
     # ONLY legacy-projection delta is one NEW member record (GT_POST_SEARCH: role infrastructure,
     # cap_role eligibility, mediates def_partition) added to `features`; every pre-existing
     # member's bytes are unchanged (deterministic additive growth of the enabled member set).
+    # INERT SPLIT (2026-07-28): golden re-baselined for the two additive lifecycle fields
+    # `inert_receipt_joined` / `inert_receipt_unjoined` (the C15-shape namespace split that
+    # stops `inert` reporting an unjoinable receipt as "GT delivered something that did
+    # nothing"). VERIFIED before re-baselining, by flattening both projections to leaves and
+    # differencing them: 590 leaves ADDED (2 fields x 59 lifecycles x 5 MetricValue keys),
+    # 0 REMOVED, 0 CHANGED IN PLACE. Every pre-existing legacy byte is untouched; only the
+    # additive fields move the hash.
+    # OBLIGATIONS TAUTOLOGY (2026-07-29): re-baselined for the removal of
+    # `_fact_class_eligible`'s `bool(oracle_rows) or True` — an expression that is
+    # unconditionally True, so the obligations class was graded ELIGIBLE on every
+    # task and, via `eligible and produced == 0`, earned a manufactured
+    # `correct_abstain` wherever the producer said nothing. It could not be graded
+    # dark by construction. VERIFIED before re-baselining by leaf-differencing the
+    # projection against the tautology restored by monkeypatch: 83 leaves ADDED
+    # (UNMEASURED `reason` strings), 0 REMOVED, 187 CHANGED — and every changed
+    # eligibility leaf moves True -> None (UNMEASURED), never True -> False. That
+    # direction is the point: `verdict_for` reads `eligible is False` as "correctly
+    # silent, never CUT", so collapsing the unknown to False would have swapped one
+    # manufactured verdict for its mirror image across every scoped mediator. The
+    # three-valued `_any3` rollup exists to keep that from happening.
+    # PLAN-LOAD MARKER (task #35, same day): obligations eligibility can now be MEASURED
+    # True when the seam's `obligation.plan` marker row is present. This EMPTY fixture has
+    # no ledger, so eligibility stays UNMEASURED — the only byte delta vs the previous
+    # golden is the UNMEASURED *reason* string (verified by leaf-diff: identical 83/0/187
+    # shape, every changed leaf True→None, no value moved besides the reasons).
     assert hashlib.sha256(encoded).hexdigest() == (
-        "759bbefe4584353fd06b5c12096c606b978cb400b6899efe5032d75965ba36ef"
+        "2a2ac283efc1418431c342cca35520f719f6658bbf085639b1c1f6c2df903a10"
     )
 
 
