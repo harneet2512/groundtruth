@@ -310,3 +310,59 @@ def test_allow_preserves_exact_native_message_object() -> None:
     agent.execute_actions(message)
 
     assert agent.executed == [(action,)]
+
+
+def test_withheld_tool_answer_names_the_hold_reason(monkeypatch) -> None:
+    """H2 / #55-1 (ARCH-E + ARCH-F, 2026-07-29). Run 30478454517 withheld 2,421
+    actions answered only by the bare 'action was not executed' padding; agents
+    universally misread it as a broken shell and thrashed to the step cap (28/37
+    trajectories). Every surveyed industry gate blocks WITH a reason — silent
+    withholding has no shipped precedent. The withheld tool answer must say the
+    action was HELD by GroundTruth (not a failure), name the plan's reason code,
+    and say how to proceed. The briefcase task is the in-corpus positive control:
+    explained withhold -> instant correct action -> resolve."""
+    monkeypatch.delenv("GT_WITHHOLD_REASON", raising=False)
+    agent = ToolCallAgent()
+    intent = _intent("edit", ActionOperation.EDIT)
+    MiniSweCommitmentBoundary(
+        agent=agent,
+        context_builder=lambda _message: _context(
+            (intent,),
+            evidence=(_qualifying(("edit",)),),
+            phase=BatchPhase.AFTER_EPISTEMIC_PREFIX,
+        ),
+    )
+    actions = [{"id": "edit", "tool_call_id": "call-1"}]
+    message = _tool_call_message(agent, actions)
+
+    result = agent.execute_actions(message)
+
+    assert agent.executed == []                      # the gate still holds
+    assert _unanswered_tool_calls(agent) == []       # conversation still valid
+    text = str(result[0].get("content") or "")
+    assert "GroundTruth" in text and "held" in text.lower(), (
+        "the withheld answer must attribute the hold, or the agent misreads "
+        "it as a broken shell"
+    )
+    assert "VERIFIED_UNSEEN_MATERIAL_EVIDENCE" in text
+    assert "re-issue" in text.lower()
+    # the host's own padding marker stays — this is an APPEND, never a rewrite
+    assert result[0]["extra"]["exception_info"] == "action was not executed"
+
+
+def test_withhold_reason_kill_switch_restores_bare_padding(monkeypatch) -> None:
+    monkeypatch.setenv("GT_WITHHOLD_REASON", "0")
+    agent = ToolCallAgent()
+    intent = _intent("edit", ActionOperation.EDIT)
+    MiniSweCommitmentBoundary(
+        agent=agent,
+        context_builder=lambda _message: _context(
+            (intent,),
+            evidence=(_qualifying(("edit",)),),
+            phase=BatchPhase.AFTER_EPISTEMIC_PREFIX,
+        ),
+    )
+    actions = [{"id": "edit", "tool_call_id": "call-1"}]
+    message = _tool_call_message(agent, actions)
+    result = agent.execute_actions(message)
+    assert str(result[0].get("content") or "") == ""
