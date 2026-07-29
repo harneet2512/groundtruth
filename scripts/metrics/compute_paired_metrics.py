@@ -1420,11 +1420,18 @@ def compute_task_metrics(task_id: str, task_dir: Path) -> Optional[TaskMetrics]:
         m.resolved = resolved_truth
     else:
         m.resolved = bool(task_record.get("reward", 0) > 0)
-    m.n_agent_steps = float(
+    # Fail-closed on a null step count (frozen GT-off arm: task_record carries an
+    # explicit "n_agent_steps": null, which .get(..., default) returns AS None — the
+    # default only covers a MISSING key). float(None) crashed the whole arm load;
+    # NaN keeps the task with steps honestly UNMEASURED.
+    _steps = (
         _outcome_block.get("n_agent_steps")
         if truth_data and _outcome_block.get("n_agent_steps") is not None
         else task_record.get("n_agent_steps", model_stats.get("api_calls", 0))
     )
+    if _steps is None:
+        _steps = model_stats.get("api_calls")
+    m.n_agent_steps = float(_steps) if _steps is not None else math.nan
 
     # ----- Efficiency fields from deep metrics -----
     eff = dm.get("efficiency", {})
