@@ -1283,6 +1283,29 @@ def classify_ledger(rows: list[dict]) -> dict[str, dict[str, Any]]:
         b = per[fc]
         outcome = str(r.get("outcome") or "")
         reason = str(r.get("reason") or "")
+        # ── MARKER ROWS ARE NOT PRODUCTION (2026-07-29). The seam writes rows that
+        # annotate or mark, never manufacture a fact; counting them as `produced`
+        # (and the ack rows as `delivered`) inflated every lifecycle verdict:
+        #   * ss_ack annotations ride outcome="delivered" with chars=0 — the WRITER's
+        #     contract (gt_mini_patch._ss_emit_ack_row) says every delivered-payload
+        #     view "requires chars_delivered>0" and excludes them; this reader must too.
+        #   * outcome="eligible" (producer_boundary) marks an OPPORTUNITY, not a fact.
+        #   * outcome="evaluated" is the trigger census — the denominator for dark.
+        #   * allow/clean verdicts mean the gate RAN and correctly produced NOTHING —
+        #     tracked as `allowed` (correct silence), never `produced`.
+        #   * any other outcome="delivered" row with chars<=0 is internal telemetry
+        #     by the same writer contract.
+        if str(r.get("event_type") or "") == "ack" or reason == "ss_ack":
+            continue
+        if outcome in ("eligible", "evaluated"):
+            continue
+        if outcome in ("allow", "submit_clean", "clean", "allow_clean"):
+            # the gate RAN and correctly ALLOWED (e.g. a clean submit) — a CORRECT
+            # ABSTAIN of the refusal fact, NOT a dark/missing delivery.
+            b["allowed"] += 1
+            continue
+        if outcome == "delivered" and int(r.get("chars_delivered") or 0) <= 0:
+            continue
         arb = is_arbiter_candidate(layer)
         b["produced"] += 1
         if arb:
@@ -1334,10 +1357,6 @@ def classify_ledger(rows: list[dict]) -> dict[str, dict[str, Any]]:
                 b["loser_stale"] += 1
         elif outcome == "suppressed_duplicate":
             b["dose_suppressed"] += 1
-        elif outcome in ("allow", "submit_clean", "clean", "allow_clean"):
-            # the gate RAN and correctly ALLOWED (e.g. a clean submit) — a CORRECT ABSTAIN
-            # of the refusal fact, NOT a dark/missing delivery.
-            b["allowed"] += 1
     return per
 
 
@@ -3028,9 +3047,12 @@ def fact_class_lifecycle(
     # correct_abstain: (a) eligible but the producer correctly stayed silent (nothing
     # produced), OR (b) the producer RAN and correctly ALLOWED (a clean submit gate) — it
     # produced no refusal because none was warranted. Both are correct silence, NOT dark.
-    if eligible is True and produced == 0:
+    if eligible is True and produced == 0 and allowed == 0:
         lc["correct_abstain"] = measured(True, source_artifact=ledger_artifact)
-    elif produced > 0 and delivered == 0 and allowed > 0:
+    elif delivered == 0 and allowed > 0:
+        # an allow row alone proves the gate RAN and correctly produced nothing —
+        # `produced` no longer counts allow rows (they are correct silence, not facts),
+        # so this arm keys on `allowed`, not on manufactured production.
         lc["correct_abstain"] = measured(True, source_artifact=ledger_artifact)
     elif produced > 0:
         lc["correct_abstain"] = measured(False, source_artifact=ledger_artifact)

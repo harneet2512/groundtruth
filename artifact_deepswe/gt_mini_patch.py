@@ -8854,10 +8854,11 @@ def _note_obligation_plan(source: str, clauses) -> None:
     LOAD time, independent of whether anything is ever delivered, so eligible-but-dark
     becomes expressible for the obligations class for the first time.
 
-    DESIGN: layer `obligation.plan` is deliberately in NO layer→fact-class map —
-    `classify_ledger` counts every mapped row as `produced`, and this marker must never
-    manufacture production. Zero model bytes; outcome is internal-only; one per task
-    (the latch), whichever source loads first.
+    DESIGN: layer `obligation.plan` is deliberately in NO layer→fact-class map, so this
+    marker can never manufacture production. (Historically `classify_ledger` counted
+    EVERY mapped row as `produced`; since 2026-07-29 it excludes marker outcomes too —
+    the unmapped layer stays as the second, writer-side guarantee.) Zero model bytes;
+    outcome is internal-only; one per task (the latch), whichever source loads first.
     """
     global _oblig_plan_marker_emitted
     if _oblig_plan_marker_emitted or _GT_BASELINE:
