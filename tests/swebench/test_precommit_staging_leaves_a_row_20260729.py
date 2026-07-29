@@ -75,3 +75,20 @@ def test_precommit_row_carries_the_site_discriminator() -> None:
         "the precommit staging row must stamp staging_site=precommit so it is "
         "differencable from the ordinary observation-path success row"
     )
+
+
+def test_commitment_plan_observer_writes_a_durable_row() -> None:
+    """#54 part 1: the commitment boundary's plan observer is the ONLY place the
+    withhold decision is visible host-side; run 30478454517's 2,421 withholds left
+    zero telemetry. The observer must write a commitment_boundary.plan row with the
+    decision + reason_code + deferred count."""
+    source = _SEAM.read_text(encoding="utf-8")
+    anchor = source.find("def _observe_commitment_plan(")
+    assert anchor != -1
+    window = source[anchor: anchor + 4000]
+    assert 'kind="commitment_boundary.plan"' in window, (
+        "the plan observer writes no ledger row — the withhold loop is invisible"
+    )
+    for field in ('"decision"', '"reason_code"', '"deferred_actions"',
+                  '"qualifying_evidence_ids"'):
+        assert field in window, f"plan row missing {field}"

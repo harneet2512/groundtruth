@@ -24462,7 +24462,16 @@ class CanonicalRuntimeAttachment:
         )
 
     def _observe_commitment_plan(self, context, plan, actions) -> None:
-        """Retain proposal identities only for native actions that will execute."""
+        """Retain proposal identities only for native actions that will execute.
+
+        #54 (2026-07-29): ALSO the ONLY durable record of the commitment decision.
+        Run 30478454517 withheld 2,421 actions (median 56% of a task's actions,
+        max 77%; 28 trajectories died at the step cap) and this observer wrote
+        NOTHING — the withhold volume had to be reconstructed from the
+        trajectory's ``action was not executed`` exception strings. One host-side
+        row per plan (zero model bytes) makes the loop measurable: a reader can
+        now count FRESH_INFERENCE re-fires per evidence set directly.
+        """
         execute_ids = {
             intent.action.action_id for intent in plan.execute_now
         }
@@ -24471,6 +24480,31 @@ class CanonicalRuntimeAttachment:
                 self.pending_native_actions.pop(id(action), None)
                 self.pending_observation_contexts.pop(id(action), None)
                 self.pending_graph_input_snapshots.pop(id(action), None)
+        try:
+            _decision = getattr(plan.decision, "name", str(plan.decision))
+            _deferred_n = len(getattr(plan, "deferred", ()) or ())
+            _runtime_ledger_record(
+                kind="commitment_boundary.plan",
+                # a plan that withholds anything is a real intervention; a pure
+                # ALLOW is internal-only either way (chars=0, host-side row).
+                outcome="suppressed_internal_only",
+                reason=f"{_decision}:{getattr(plan, 'reason_code', '')}",
+                chars=0,
+                extra={
+                    "decision": _decision,
+                    "reason_code": str(getattr(plan, "reason_code", "") or ""),
+                    "executed_actions": len(plan.execute_now or ()),
+                    "deferred_actions": _deferred_n,
+                    "qualifying_evidence_ids": list(
+                        getattr(plan, "qualifying_evidence_ids", ()) or ()
+                    ),
+                    "fresh_inference_required": bool(
+                        getattr(plan, "fresh_inference_required", False)
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001 — telemetry never breaks the loop
+            pass
 
     def _revision(
         self,
