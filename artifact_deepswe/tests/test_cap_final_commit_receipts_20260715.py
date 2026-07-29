@@ -75,8 +75,14 @@ def test_lane_delivery_lineage_is_registered_and_never_inferred_from_arbiter(mon
     assert edit["producer_registration_match"] is True
     assert edit["fact_class"] == "syntax_result"
     assert edit["actual_event"] == "edit_result"
+    # W4 (2026-07-29): the CAP byte-owner is now CREDITED on the same delivery. §6.1:
+    # GT_EDIT_CHECK "RUNS the edit-syntax parse and owns the `syntax_result` bytes" —
+    # before W4 the lineage carried only the FACT row, so the byte-owner could never
+    # claim canonical ownership and read permanently dark. Additive: the FACT row is
+    # unchanged; the CAP credit rides the SAME physical delivery (never a second dose).
     assert edit["feature_ids"] == [
-        {"category": "FACT", "feature_id": "syntax_result", "role": "fact"}
+        {"category": "CAP", "feature_id": "GT_EDIT_CHECK", "role": "byte_owner"},
+        {"category": "FACT", "feature_id": "syntax_result", "role": "fact"},
     ]
 
     legacy = g._lane_delivery_extra(
