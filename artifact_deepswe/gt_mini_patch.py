@@ -24295,6 +24295,63 @@ class CanonicalRuntimeAttachment:
                     plan,
                     observation_context=observation_context,
                 )
+                # P1-3 (2026-07-29) — OBSERVABILITY, NOT BEHAVIOUR. This precommit site
+                # was the ONLY staging caller with no durable trace: the ordinary
+                # observation path writes the success-mirror row, step-0 writes
+                # canonical_runtime.step0, and a capsule staged HERE (a direct-commitment
+                # batch, staged before the native action) was indistinguishable from a
+                # compilation that never happened. Same kind as the ordinary site so one
+                # reader query sees every staging outcome; ``staging_site`` is the
+                # discriminator. Zero model-facing bytes — staging is not delivery.
+                try:
+                    _comp_pc = getattr(plan, "compilation", None)
+                    _state_pc = getattr(_comp_pc, "state", "")
+                    _runtime_ledger_record(
+                        kind="canonical_runtime.compilation",
+                        outcome="suppressed_internal_only",
+                        reason=(
+                            f"{getattr(_state_pc, 'name', _state_pc)}:staged"
+                        ),
+                        chars=0,
+                        extra={
+                            "staging_site": "precommit",
+                            "delivery_attempt_id": str(plan.delivery_attempt_id),
+                            "capsule_chars": len(
+                                getattr(_comp_pc, "capsule_text", "") or ""
+                            ),
+                            "unresolved_roles": [
+                                getattr(r, "name", str(r))
+                                for r in (
+                                    getattr(
+                                        getattr(plan, "oracle_decision", None),
+                                        "unresolved_roles",
+                                        (),
+                                    )
+                                    or ()
+                                )
+                            ],
+                            "held_evidence": len(plan.held_evidence_ids or ()),
+                            "suppressed_decisions": len(
+                                plan.suppressed_decision_ids or ()
+                            ),
+                            "evidence_store": len(
+                                getattr(self.attempt_runtime, "_evidence", ()) or ()
+                            ),
+                            "evidence_lifecycles": _evidence_lifecycle_histogram(
+                                self.attempt_runtime
+                            ),
+                            "coalition_size": len(
+                                getattr(
+                                    getattr(plan, "oracle_decision", None),
+                                    "coalition",
+                                    (),
+                                )
+                                or ()
+                            ),
+                        },
+                    )
+                except Exception:  # noqa: BLE001 — telemetry never breaks the loop
+                    pass
             records = tuple(self.attempt_runtime._evidence.values())
 
         visibility: dict[str, set[str]] = {}
