@@ -369,8 +369,28 @@ def _byte_range(value: Any, field_path: str) -> tuple[bool, Any] | None:
     return True, bytes(value[start:end])
 
 
+#: the INDEXED component dialect ``name[i]`` (``gateway_attestation_factory.py:562-568``
+#: emits ``$.caller_rows[0].source_state.revision`` /
+#: ``$.caller_usage_rows[0].source_revision`` on the freshness predicate of EVERY
+#: caller_break / signature_mismatch attestation).
+_INDEXED_COMPONENT_RE = re.compile(r"^([^\[\]]+)\[(\d+)\]$")
+
+
 def _json_field(value: Any, field_path: str) -> tuple[bool, Any]:
-    """Resolve the small JSON-path language used by ``ProofRef``."""
+    """Resolve the small JSON-path language used by ``ProofRef``.
+
+    READER/WRITER MISMATCH (2026-07-29, the second of this shape after ``bytes[0:N]``):
+    the resolver understood only plain ``$.a.b`` components, so the INDEXED components
+    the gateway factory emits for per-row source bindings resolved to
+    ``field_missing:$.caller_rows[0].source_state.revision`` — which rejects the WHOLE
+    attestation. Every caller_break / signature_mismatch bundle carrying at least one
+    caller row was therefore structurally unable to validate, so ``caller_contract`` and
+    ``signature_delta`` could never earn ``truth_valid``/``correct_info`` on a real run,
+    and no reader could recover their structured producer inputs at all.
+
+    Fail-closed on a genuinely absent element: a non-numeric key, an out-of-range index,
+    or an indexed component over a non-list is not found, exactly as before.
+    """
     if field_path == "$":
         return True, value
     ranged = _byte_range(value, field_path)
@@ -380,7 +400,19 @@ def _json_field(value: Any, field_path: str) -> tuple[bool, Any]:
         return False, None
     current = value
     for component in field_path[2:].split("."):
-        if not component or not isinstance(current, dict) or component not in current:
+        if not component:
+            return False, None
+        indexed = _INDEXED_COMPONENT_RE.match(component)
+        if indexed is not None:
+            name, position = indexed.group(1), int(indexed.group(2))
+            if not isinstance(current, dict) or name not in current:
+                return False, None
+            container = current[name]
+            if not isinstance(container, list) or position >= len(container):
+                return False, None
+            current = container[position]
+            continue
+        if not isinstance(current, dict) or component not in current:
             return False, None
         current = current[component]
     return True, current

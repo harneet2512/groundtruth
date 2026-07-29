@@ -123,6 +123,7 @@ from groundtruth.runtime.fact_registry import (
     required_renderer as _fr_required_renderer,
 )
 from groundtruth.runtime.native_render import render_covering_failure_native
+from groundtruth.runtime.producer_audit import ProducerAudit
 from groundtruth.runtime.producer_inputs import (
     PRODUCER_INPUTS_SCHEMA,
     CallerEvidenceRow,
@@ -310,6 +311,12 @@ class GatewayState:
     # Optional host-side instrumentation sink. The gateway owns these decisions,
     # while the live seam owns durable ledger I/O. None is an exact no-op.
     control_recorder: object | None = None
+    # Optional producer-causal instrumentation.  The recorder receives immutable
+    # ``gt.producer_invocation.v1`` dictionaries; the context is published by the
+    # canonical seam immediately before producer execution.  Neither is read by
+    # producer logic, routing, arbitration, rendering, or delivery.
+    producer_recorder: object | None = None
+    producer_audit_context: object = field(default_factory=dict)
 
     @property
     def ledger(self) -> dict[str, dict[str, object]]:
@@ -342,6 +349,37 @@ class GatewayState:
     @edit_events.setter
     def edit_events(self, value: list[dict[str, object]]) -> None:
         self.episode.edit_events = value
+
+
+def _producer_audit(
+    state: GatewayState,
+    event: ToolEvent,
+    *,
+    producer: str,
+    evidence_types: tuple[str, ...],
+    invocation_site: str,
+    subject: str = "",
+) -> ProducerAudit:
+    """Create one optional, behavior-neutral producer invocation trace."""
+
+    return ProducerAudit(
+        recorder=(
+            state.producer_recorder
+            if callable(state.producer_recorder)
+            else None
+        ),
+        producer=producer,
+        evidence_types=evidence_types,
+        invocation_site=invocation_site,
+        event_type=str(
+            event.primary_boundary
+            or (event.semantic_events[0] if event.semantic_events else "")
+        ),
+        subject=subject,
+        action_index=event.action_index,
+        context=state.producer_audit_context,
+        delivered_keys=state.delivered_keys,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2220,33 +2258,57 @@ def _def_partition_inputs(
 
 
 def _produce_def_ref_partition(event: ToolEvent, state: GatewayState, *, note: str = "") -> list[EvidenceEnvelope]:
+    audit = _producer_audit(
+        state,
+        event,
+        producer="def_ref_partition",
+        evidence_types=("def_ref_partition",),
+        invocation_site="gateway.search.def_ref_partition",
+    )
     sym = search_pattern(event.command)
     con = _open(state)
-    if not sym or con is None:
-        return []
+    if not sym:
+        audit.note("search_pattern_missing", category="dependency_failure")
+        return audit.finish([])
+    if con is None:
+        audit.note("graph_unavailable", category="dependency_failure")
+        return audit.finish([])
     try:
         info = _resolve_symbol_defs(con, sym, state.repo_root)
     finally:
         con.close()
     if not info or not info["def_sites"]:
-        return []
+        audit.note(
+            "production_definition_absent",
+            category="correct_quiet",
+            detail={"symbol": sym},
+        )
+        return audit.finish([])
     body = ([note] if note else []) + _def_partition_body(info)
     target = info["def_sites"][0][0]
     inputs = _def_partition_inputs(state, "def_ref_partition", sym, info.get("def_rows") or [])
-    return [_mk_add(state, event, fact_kind="def_ref_partition", target=target,
-                    body_lines=body, evidence=info["def_sites"], tier=VERIFIED,
-                    producer="def_ref_partition", symbol=sym,
-                    producer_inputs=inputs,
-                    observed_substrates=("graph",),
-                    canonical_subject=sym,
-                    canonical_claim=(
-                        f"{sym} resolves to {len(info['def_sites'])} "
-                        "production definition site(s)."
-                    ),
-                    canonical_consequence=(
-                        "Select the definition on the active execution path; "
-                        "do not patch a test, vendored, or unrelated copy."
-                    ))]
+    return audit.finish([_mk_add(
+        state,
+        event,
+        fact_kind="def_ref_partition",
+        target=target,
+        body_lines=body,
+        evidence=info["def_sites"],
+        tier=VERIFIED,
+        producer="def_ref_partition",
+        symbol=sym,
+        producer_inputs=inputs,
+        observed_substrates=("graph",),
+        canonical_subject=sym,
+        canonical_claim=(
+            f"{sym} resolves to {len(info['def_sites'])} "
+            "production definition site(s)."
+        ),
+        canonical_consequence=(
+            "Select the definition on the active execution path; "
+            "do not patch a test, vendored, or unrelated copy."
+        ),
+    )])
 
 
 # --------------------------------------------------------------------------- #
@@ -2429,38 +2491,73 @@ def _pick_candidate_symbol(con, file_path: str, anchors: set[str]) -> "tuple[str
     return (name, int(ln or 0)) if name else None
 
 
-def _compute_ranked_localization_rows(state: GatewayState) -> "list[tuple[str, int, str]]":
+def _compute_ranked_localization_rows(
+    state: GatewayState,
+    audit: ProducerAudit | None = None,
+) -> "list[tuple[str, int, str]]":
     """Run localize() over the episode's graph.db + issue text and resolve the top-N ranked
     candidate FILES to leak-clean ``(repo_rel_path, line, symbol)`` rows. Pure/deterministic
     over a fixed graph (no rebake needed). Correct-or-quiet: no localize / no issue / no graph
     / no candidates / all-leaky -> []."""
-    if _localize is None or not (state.issue_text or "").strip():
+    if _localize is None:
+        if audit is not None:
+            audit.note("localizer_unavailable", category="dependency_failure")
+        return []
+    if not (state.issue_text or "").strip():
+        if audit is not None:
+            audit.note("issue_text_empty", category="dependency_failure")
         return []
     db = state.graph_db
     if not db or not os.path.isfile(db):
+        if audit is not None:
+            audit.note("graph_unavailable", category="dependency_failure")
         return []
     try:
         res = _localize(state.issue_text, db, repo_root=state.repo_root)
-    except Exception:  # noqa: BLE001 — a localizer fault degrades to no delivery
+    except Exception as exc:  # noqa: BLE001
+        if audit is not None:
+            audit.note(
+                "localizer_fault",
+                category="dependency_failure",
+                detail={"fault_type": type(exc).__name__},
+            )
         return []
     cands = list(getattr(res, "candidates", None) or [])
     if not cands:
+        if audit is not None:
+            audit.note("localizer_no_candidates", category="correct_quiet")
         return []
     anchors = {(a or "").lower() for a in (getattr(res, "anchor_symbols", None) or [])}
     con = _open(state)
     if con is None:
+        if audit is not None:
+            audit.note("graph_open_failed", category="dependency_failure")
         return []
     rows: list[tuple[str, int, str]] = []
     try:
         for c in cands[:_LOC_RESLOT_TOPN]:
             raw_fp = getattr(c, "file_path", "") or ""
             if not raw_fp:
+                if audit is not None:
+                    audit.note("candidate_path_empty", category="authority")
                 continue
             rel = _to_repo_rel(raw_fp, state.repo_root)
             if _is_leaky(rel):        # firewall #1 (producer): a test/vendored candidate is
+                if audit is not None:
+                    audit.note(
+                        "candidate_path_leaky",
+                        category="authority",
+                        detail={"path": rel},
+                    )
                 continue              # never a row (the localizer already demotes tests).
             picked = _pick_candidate_symbol(con, raw_fp, anchors)
             if picked is None:
+                if audit is not None:
+                    audit.note(
+                        "candidate_definition_unresolved",
+                        category="dependency_failure",
+                        detail={"path": rel},
+                    )
                 continue
             sym, line = picked
             rows.append((rel, int(line), sym))
@@ -2469,7 +2566,10 @@ def _compute_ranked_localization_rows(state: GatewayState) -> "list[tuple[str, i
     return rows
 
 
-def _ranked_localization_rows(state: GatewayState) -> "list[tuple[str, int, str]]":
+def _ranked_localization_rows(
+    state: GatewayState,
+    audit: ProducerAudit | None = None,
+) -> "list[tuple[str, int, str]]":
     """The episode-MEMOIZED ranked-localization rows: localize() runs ONCE per run (the answer
     is issue-fixed), reused on every subsequent search turn. Stored on ``state.episode`` (a
     non-serialized private attribute); a slotted episode that rejects the setattr just
@@ -2477,8 +2577,13 @@ def _ranked_localization_rows(state: GatewayState) -> "list[tuple[str, int, str]
     ep = state.episode
     cached = getattr(ep, "_gt_ranked_loc_rows", None)
     if cached is not None:
+        if not cached and audit is not None:
+            audit.note(
+                "cached_empty_ranked_rows",
+                category="dependency_failure",
+            )
         return cached
-    rows = _compute_ranked_localization_rows(state)
+    rows = _compute_ranked_localization_rows(state, audit)
     try:
         setattr(ep, "_gt_ranked_loc_rows", rows)
     except Exception:  # noqa: BLE001 — a slotted episode can't cache; recompute is correct
@@ -2494,13 +2599,20 @@ def _produce_ranked_localization(event: ToolEvent, state: GatewayState) -> list[
     the grep-native block DIRECTLY (no prose re-parse). Fire-ONCE-per-episode is handled by the
     delivery dedup chain (the answer is issue-fixed -> stable ``dedup_key`` -> re-offered but
     dropped after the first delivery). Correct-or-quiet: no ranked rows -> []."""
-    rows = _ranked_localization_rows(state)
+    audit = _producer_audit(
+        state,
+        event,
+        producer="ranked_localization",
+        evidence_types=("localization",),
+        invocation_site="gateway.search.ranked_localization",
+    )
+    rows = _ranked_localization_rows(state, audit)
     if not rows:
-        return []
+        return audit.finish([])
     top_file, _top_line, top_sym = rows[0]
     body = [f"{p}:{ln}:{s}" for p, ln, s in rows]      # tag-free grep rows (hedge-free)
     evidence = [(p, ln) for p, ln, _s in rows]
-    return [_mk_add(state, event, fact_kind="localization", target=top_file,
+    return audit.finish([_mk_add(state, event, fact_kind="localization", target=top_file,
                     body_lines=body, evidence=evidence, tier=HYPOTHESIS,
                     producer="ranked_localization", symbol=top_sym,
                     cap_feature_ids=("GT_LOC_RESLOT",),
@@ -2514,24 +2626,40 @@ def _produce_ranked_localization(event: ToolEvent, state: GatewayState) -> list[
                     canonical_consequence=(
                         "Inspect the ranked target and its listed symbol before "
                         "opening a broader repository branch."
-                    ))]
+                    ))])
 
 
 def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+    audit = _producer_audit(
+        state,
+        event,
+        producer="wrong_surface",
+        evidence_types=("wrong_surface",),
+        invocation_site="gateway.search.wrong_surface",
+    )
     sym = search_pattern(event.command)
     con = _open(state)
-    if not sym or con is None:
-        return []
+    if not sym:
+        audit.note("search_pattern_missing", category="dependency_failure")
+        return audit.finish([])
+    if con is None:
+        audit.note("graph_unavailable", category="dependency_failure")
+        return audit.finish([])
     try:
         info = _resolve_symbol_defs(con, sym, state.repo_root)
     finally:
         con.close()
     if not info or not info["def_sites"]:
-        return []
+        audit.note("production_definition_absent", category="correct_quiet")
+        return audit.finish([])
     hit_paths = _grep_hit_paths(event.output or "", state.repo_root)
     novel = [(fp, ln) for fp, ln in info["def_sites"] if _norm_fp(fp) not in hit_paths]
     if not novel:
-        return []
+        audit.note(
+            "no_novel_production_definition",
+            category="correct_quiet",
+        )
+        return audit.finish([])
     body = ['your hits are all test/vendored copies; the definition is here']
     body += [f"def: {fp}:{ln}" for fp, ln in novel[:3]]
     # Only the NOVEL def-sites (not among the agent's grep hits) are the delivered fact,
@@ -2542,7 +2670,7 @@ def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[Eviden
         if (_norm_fp(r[1]), int(r[2])) in novel_norm
     ]
     inputs = _def_partition_inputs(state, "wrong_surface", sym, novel_rows)
-    return [_mk_add(state, event, fact_kind="wrong_surface", target=novel[0][0],
+    return audit.finish([_mk_add(state, event, fact_kind="wrong_surface", target=novel[0][0],
                     body_lines=body, evidence=novel, tier=VERIFIED,
                     producer="wrong_surface", symbol=sym,
                     producer_inputs=inputs,
@@ -2555,20 +2683,32 @@ def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[Eviden
                     canonical_consequence=(
                         "Move target selection to a listed production definition "
                         "before editing."
-                    ))]
+                    ))])
 
 
 def _produce_name_fold(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+    audit = _producer_audit(
+        state,
+        event,
+        producer="name_fold",
+        evidence_types=("name_fold",),
+        invocation_site="gateway.search.name_fold",
+    )
     sym = search_pattern(event.command)
     con = _open(state)
-    if not sym or con is None:
-        return []
+    if not sym:
+        audit.note("search_pattern_missing", category="dependency_failure")
+        return audit.finish([])
+    if con is None:
+        audit.note("graph_unavailable", category="dependency_failure")
+        return audit.finish([])
     try:
         hit = _namefold_hit(con, sym, state.repo_root)
     finally:
         con.close()
     if hit is None:
-        return []
+        audit.note("fold_variant_absent", category="correct_quiet")
+        return audit.finish([])
     variant, info = hit
     if variant == sym:
         note = f'no grep hits for "{sym}", but it IS indexed (check your path/filetype filter)'
@@ -2578,7 +2718,7 @@ def _produce_name_fold(event: ToolEvent, state: GatewayState) -> list[EvidenceEn
     # The fold resolves ``sym`` to the INDEXED name ``variant``; the def rows are keyed on
     # ``variant`` (``_resolve_symbol_defs(con, variant)``), so the query identity is variant.
     inputs = _def_partition_inputs(state, "name_fold", variant, info.get("def_rows") or [])
-    return [_mk_add(state, event, fact_kind="name_fold", target=info["def_sites"][0][0],
+    return audit.finish([_mk_add(state, event, fact_kind="name_fold", target=info["def_sites"][0][0],
                     body_lines=body, evidence=info["def_sites"], tier=VERIFIED,
                     producer="name_fold", symbol=sym,
                     producer_inputs=inputs,
@@ -2590,20 +2730,32 @@ def _produce_name_fold(event: ToolEvent, state: GatewayState) -> list[EvidenceEn
                     canonical_consequence=(
                         f"Use the indexed identity {variant} and its production "
                         "definition sites for the next lookup."
-                    ))]
+                    ))])
 
 
 def _produce_body(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+    audit = _producer_audit(
+        state,
+        event,
+        producer="body_concept",
+        evidence_types=("body_concept",),
+        invocation_site="gateway.search.body_concept",
+    )
     sym = search_pattern(event.command)
     con = _open(state)
-    if not sym or con is None:
-        return []
+    if not sym:
+        audit.note("search_pattern_missing", category="dependency_failure")
+        return audit.finish([])
+    if con is None:
+        audit.note("graph_unavailable", category="dependency_failure")
+        return audit.finish([])
     try:
         rows = _body_rows(con, sym, state.repo_root)
     finally:
         con.close()
     if not rows:
-        return []
+        audit.note("body_concept_absent", category="correct_quiet")
+        return audit.finish([])
     body = [f'{len(rows)} function bodies mention "{sym}" (no name or path match)']
     body += [f"in {label} {name} - {fp}:{ln}" for fp, ln, name, label, _id in rows[:8]]
     evidence = [(fp, ln) for fp, ln, _n, _l, _id in rows[:8]]
@@ -2623,7 +2775,7 @@ def _produce_body(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelop
         if name and node_id > 0
     ]
     inputs = _def_partition_inputs(state, "body_concept", sym, def_rows)
-    return [_mk_add(state, event, fact_kind="body_concept", target=rows[0][0],
+    return audit.finish([_mk_add(state, event, fact_kind="body_concept", target=rows[0][0],
                     body_lines=body, evidence=evidence, tier=INFO,
                     producer="body_concept", symbol=sym,
                     native_args={"rows": native_rows},
@@ -2637,7 +2789,7 @@ def _produce_body(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelop
                     canonical_consequence=(
                         "Use the listed concept-bearing functions as localization "
                         "candidates; identity resolution remains uncertain."
-                    ))]
+                    ))])
 
 
 def _edit_related_to_stem(edit_blob: str, sym: str) -> bool:

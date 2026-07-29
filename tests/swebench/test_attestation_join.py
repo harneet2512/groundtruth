@@ -593,3 +593,94 @@ def test_collect_task_authority_is_join_gated_not_blanket(tmp_path: Path) -> Non
     assert record["ss_integrity"]["attestation_join"]["applied_authority_overrides"] == [
         "syntax_result"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# INDEXED PROOF-PATH DIALECT (2026-07-29) — the second reader/writer mismatch of the
+# ``bytes[0:N]`` shape.
+#
+# ``gateway_attestation_factory.py:562-568`` emits per-row source bindings on the
+# freshness predicate of EVERY caller_break / signature_mismatch attestation:
+#     $.caller_rows[0].source_state.sha256
+#     $.caller_rows[0].source_state.revision
+#     $.caller_usage_rows[0].source_revision
+# ``_json_field`` split only on "." and did dict lookups, so ``caller_rows[0]`` resolved
+# to ``field_missing`` — which rejects the WHOLE bundle. Every caller_break /
+# signature_mismatch attestation carrying at least one caller row was therefore
+# structurally unable to validate: ``caller_contract`` / ``signature_delta`` could never
+# earn truth/authority on a real run, and no reader could reach their structured inputs.
+#
+# MUTATION (verified RED, then restored): drop the indexed branch from ``_json_field``.
+# ``test_caller_break_bundle_with_indexed_proof_paths_validates`` then reports the
+# ``predicate[1].proof[4]:field_missing:$.caller_rows[0].source_state.revision``
+# diagnostic and zero validated attestations.
+# --------------------------------------------------------------------------- #
+def _caller_break_bundle():
+    import dataclasses
+
+    from groundtruth.runtime.evidence_envelope import EvidenceEnvelope
+    from groundtruth.runtime.gateway_attestation_factory import build_gateway_attestation
+    from groundtruth.runtime.producer_inputs import (
+        PRODUCER_INPUTS_SCHEMA,
+        CallerEvidenceRow,
+        ProducerInputs,
+        SignatureChange,
+        SourceState,
+    )
+
+    def source(file: str, token: str) -> SourceState:
+        return SourceState(file=file, sha256=token * 64, revision="source:" + token * 64)
+
+    env = EvidenceEnvelope.build(
+        producer="caller_contract", fact_id="get_user", target="src/api.py",
+        evidence_type="caller_break",
+        payload=("get_user() signature changed - callers must update the call sites",),
+        provenance=(("src/caller.py", 12),), confidence=0.95, tier="WARNING",
+        graph_revision="graph-9", preferred_event="edit",
+    )
+    inputs = ProducerInputs(
+        schema=PRODUCER_INPUTS_SCHEMA, evidence_type="caller_break",
+        candidate_id=env.dedup_key,
+        before_state=source("src/api.py", "a"), after_state=source("src/api.py", "b"),
+        caller_rows=(CallerEvidenceRow(
+            identity="render_template", file="src/caller.py", line=12, confidence=0.95,
+            resolution_method="import", source_state=source("src/caller.py", "c"),
+            edge_id=11, definition_id=4,
+        ),),
+        graph_revision="graph-9",
+        signature_changes=(SignatureChange(
+            symbol="get_user", edited_file="src/api.py",
+            before_parameters=("uid",), after_parameters=("uid", "name"),
+            old_min_params=None, old_max_params=None,
+            new_min_params=None, new_max_params=None, positional_args=None,
+        ),),
+    )
+    shipped = b"get_user() signature changed - callers must update the call sites\n"
+    return build_gateway_attestation(
+        dataclasses.replace(env, producer_inputs=inputs),
+        delivery_seal=hashlib.sha256(shipped).hexdigest()[:16],
+        shipped_bytes=shipped, actual_event="edit_result", open_event="edit_result",
+    )
+
+
+def test_caller_break_bundle_with_indexed_proof_paths_validates(tmp_path: Path) -> None:
+    """A REAL caller_break bundle, built and persisted by the real factory/store, must
+    survive ``load_attestations`` — the indexed proof paths are a dialect, not a defect."""
+    attestation, artifacts = _caller_break_bundle()
+    _persist(tmp_path, attestation, artifacts)
+
+    load = aj.load_attestations(str(tmp_path))
+    assert load.diagnostics == (), load.diagnostics
+    assert len(load.attestations) == 1
+    assert load.attestations[0].evidence_type == "caller_break"
+
+
+def test_indexed_proof_path_resolution_is_fail_closed() -> None:
+    """The dialect resolves a real element and FAILS CLOSED on anything absent —
+    out-of-range, a non-list container, and a missing key are all not-found."""
+    document = {"caller_rows": [{"source_state": {"revision": "r1"}}], "scalar": 3}
+    assert aj._json_field(document, "$.caller_rows[0].source_state.revision") == (True, "r1")
+    assert aj._json_field(document, "$.caller_rows[1].source_state.revision") == (False, None)
+    assert aj._json_field(document, "$.scalar[0]") == (False, None)
+    assert aj._json_field(document, "$.absent[0].x") == (False, None)
+    assert aj._json_field(document, "$.caller_rows[0].missing") == (False, None)
