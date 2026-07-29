@@ -927,3 +927,63 @@ def test_canonical_capsule_prose_only_claim_keeps_named_skip(tmp_path):
     report = adjudicate(str(_write_task_dir(tmp_path, {"messages": messages}, rows)))
     assert report["per_direction"] == []
     assert report["summary"]["skipped_reasons"] == {"clause_subject_unverifiable": 1}
+
+
+# --------------------------------------------------------------------------- #
+# CANONICAL contract identity (plan P1-1, 2026-07-29).
+#
+# A canonical capsule row stamps ``candidate_id: null`` top-level; the identity lives in
+# the lineage entry. Measured on the fixed smoke: the obligations attestation key IS
+# exactly (lineage candidate_id, capsule content_sha256_16) — the convention holds —
+# so the CONTRACT lookup must consult the lineage identity too. Without this, both
+# canonical caller_contract capsules die ``contract_row_identity_missing`` even when a
+# joinable attestation exists.
+# --------------------------------------------------------------------------- #
+def _canonical_contract_task(tmp_path: Path, *, persist: bool,
+                             commands: list[str]) -> Path:
+    env = _caller_break_envelope(("render_template",))
+    payload = _SHIPPED_CONTRACT.decode("utf-8")
+    seal = hashlib.sha256(_SHIPPED_CONTRACT).hexdigest()[:16]
+    messages = [_user("Fix it."), _assistant("apply_patch src/api.py"), _tool(payload)]
+    for command in commands:
+        messages.append(_assistant(command))
+        messages.append(_tool("ok"))
+    row = _canonical_row(payload, [
+        {"candidate_id": env.dedup_key, "fact_class": "caller_contract",
+         "cap_owners": []},
+    ])
+    row["content_sha256_16"] = seal
+    assert row.get("candidate_id") is None  # the canonical shape: identity in lineage only
+    task_dir = _write_task_dir(tmp_path, {"messages": messages}, [row])
+    if persist:
+        attestation, artifacts = build_gateway_attestation(
+            env, delivery_seal=seal, shipped_bytes=_SHIPPED_CONTRACT,
+            actual_event="edit_result", open_event="edit_result",
+        )
+        persist_attestation(attestation, artifacts,
+                            str(task_dir / "producer_attestations"))
+    return task_dir
+
+
+def test_canonical_contract_row_joins_via_lineage_identity(tmp_path):
+    """RED today: candidate_id is null top-level -> contract_row_identity_missing even
+    though the persisted attestation is keyed on the lineage identity. GREEN: the
+    lineage identity joins and the attestation's caller symbol is the target."""
+    task_dir = _canonical_contract_task(
+        tmp_path, persist=True, commands=["grep -rn render_template src/"]
+    )
+    report = adjudicate(str(task_dir))
+    rows = [r for r in report["per_direction"] if r["fact_class"] == "caller_contract"]
+    assert len(rows) == 1, (report["skipped_rows"], report["summary"])
+    assert rows[0]["target"] == "render_template"
+    assert rows[0]["verdict"] == AHEAD
+
+
+def test_canonical_contract_row_without_attestation_reads_absent(tmp_path):
+    """With the lineage identity plumbed, a canonical contract row with NO persisted
+    attestation is ``contract_attestation_absent`` (GT never persisted the producer
+    artifact — the fixed smoke's real state), never ``identity_missing``."""
+    task_dir = _canonical_contract_task(tmp_path, persist=False, commands=["echo hi"])
+    report = adjudicate(str(task_dir))
+    assert report["per_direction"] == []
+    assert report["summary"]["skipped_reasons"] == {"contract_attestation_absent": 1}

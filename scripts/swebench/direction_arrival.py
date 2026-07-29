@@ -528,12 +528,31 @@ def contract_symbol_index(task_dir: str | None) -> dict[tuple[str, str], tuple[l
     return index
 
 
+def _row_contract_candidate_id(row: dict, fact_class: str | None) -> str | None:
+    """The row's contract candidate identity: top-level ``candidate_id`` for a legacy
+    single-fact delivery, else the matching ``evidence_lineage`` entry's for a canonical
+    capsule (which stamps ``candidate_id: null`` top-level — measured on the 2026-07-29
+    fixed smoke, where the persisted obligations attestation key IS exactly
+    ``(lineage candidate_id, capsule content_sha256_16)``, proving the convention)."""
+    candidate_id = row.get("candidate_id")
+    if isinstance(candidate_id, str) and candidate_id:
+        return candidate_id
+    for entry in row.get("evidence_lineage") or []:
+        if isinstance(entry, dict) and entry.get("fact_class") == fact_class:
+            lineage_id = entry.get("candidate_id")
+            if isinstance(lineage_id, str) and lineage_id:
+                return lineage_id
+    return None
+
+
 def _contract_targets(
-    row: dict, contract_symbols: dict[tuple[str, str], tuple[list[str], str | None]] | None
+    row: dict,
+    contract_symbols: dict[tuple[str, str], tuple[list[str], str | None]] | None,
+    fact_class: str | None = None,
 ) -> tuple[list[str], str | None]:
     """The caller symbols a CONTRACT direction points at, + a named reason when none can be
     formed. The ONLY source is the joined producer attestation (see the block comment above)."""
-    candidate_id = row.get("candidate_id")
+    candidate_id = _row_contract_candidate_id(row, fact_class)
     seal = row.get("content_sha256_16")
     if not (isinstance(candidate_id, str) and candidate_id):
         return [], SKIP_CONTRACT_ROW_IDENTITY_MISSING
@@ -551,6 +570,7 @@ def _targets_for(
     payload: str,
     row: dict,
     contract_symbols: dict[tuple[str, str], tuple[list[str], str | None]] | None = None,
+    fact_class: str | None = None,
 ) -> tuple[list[str], str | None]:
     """The concrete target token(s) a direction of this shape names, plus the named reason
     when the direction cannot be formed (``None`` when it can).
@@ -571,7 +591,7 @@ def _targets_for(
         return ([file_path], None) if file_path else ([], SKIP_NO_TARGET_EXTRACTABLE)
     if kind == KIND_CLAUSE:
         return _clause_targets(payload)
-    return _contract_targets(row, contract_symbols)
+    return _contract_targets(row, contract_symbols, fact_class)
 
 
 def _lineage_fact_classes(row: dict) -> list[str]:
@@ -646,7 +666,9 @@ def _build_directions(
                     Skip(row_index, SKIP_UNMAPPED_TARGET_SHAPE, fact_class, evidence_type)
                 )
                 continue
-            targets, no_target_reason = _targets_for(kind, payload, row, contract_symbols)
+            targets, no_target_reason = _targets_for(
+                kind, payload, row, contract_symbols, fact_class
+            )
             if not targets:
                 skips.append(
                     Skip(
