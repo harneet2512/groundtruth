@@ -248,13 +248,24 @@ def _payload_context_anchor(
 
     The payload message immediately preceding the capsule is the last context the
     model held before the call that carried the capsule. Its exact text must
-    occur in this trajectory; the LATEST such message is the boundary, because a
-    payload is built from a monotonically growing message list.
+    occur in this trajectory — but text alone is NOT the boundary: on
+    telegram-bot-4673 (run 30478454517) the withhold marker ``action was not
+    executed`` repeated 97x and ``matches[-1]`` inflated delivery_step from ~22
+    (true — the payload held 56 messages, staged mid-run) to 148, flipping 3 AHEAD
+    directions to false BEHIND (ARCH-C timing audit, 2026-07-29).
+
+    A payload is the EXACT conversation the model held at the carrying call, so
+    the boundary is the candidate whose PRECEDING trajectory messages also equal
+    the payload's preceding messages — the DEEPEST suffix match. Later repeats of
+    the same context text sit on different (later) conversation prefixes and die
+    on depth. Genuine depth ties keep the LATEST candidate: the instrument may
+    never over-credit GT with an earlier delivery than it can prove.
     """
     message_index = delivery["message_index"]
     if message_index <= 0:
         return None, "provider_payload_context_absent"
-    context = delivery["payload_messages"][message_index - 1]
+    payload_messages = delivery["payload_messages"]
+    context = payload_messages[message_index - 1]
     if not isinstance(context, dict):
         return None, "provider_payload_context_malformed"
     text = _visible_content(context)
@@ -269,7 +280,32 @@ def _payload_context_anchor(
     ]
     if not matches:
         return None, "provider_payload_context_unanchored"
-    return matches[-1], None
+
+    def _suffix_depth(candidate: int) -> int:
+        """How many consecutive payload messages (walking backwards from the
+        context) also match the trajectory backwards from ``candidate``."""
+        depth = 0
+        payload_pos = message_index - 1
+        trajectory_pos = candidate
+        while payload_pos >= 0 and trajectory_pos >= 0:
+            payload_msg = payload_messages[payload_pos]
+            trajectory_msg = messages[trajectory_pos]
+            if not (
+                isinstance(payload_msg, dict)
+                and isinstance(trajectory_msg, dict)
+                and payload_msg.get("role") == trajectory_msg.get("role")
+                and _visible_content(payload_msg)
+                == _visible_content(trajectory_msg)
+            ):
+                break
+            depth += 1
+            payload_pos -= 1
+            trajectory_pos -= 1
+        return depth
+
+    best_depth = max(_suffix_depth(index) for index in matches)
+    deepest = [index for index in matches if _suffix_depth(index) == best_depth]
+    return deepest[-1], None
 
 
 def _locate_seal_spans(
