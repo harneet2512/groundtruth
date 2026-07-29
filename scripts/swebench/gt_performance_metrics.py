@@ -2290,9 +2290,34 @@ def compute_performance_metrics(
             trajectory, timeline, gold_files, consumption_ledger
         )
 
+        # E5 (Section 5 primary endpoint, wired 2026-07-29): "steps to durable
+        # correct decision commit". The adjudicator was built + tested but had no
+        # caller, so the endpoint could never appear in a published artifact.
+        # It imports THIS module's _parse_timeline/_path_match, so the two can
+        # never disagree about what an edit is or whether a target is gold.
+        # Fail-closed by construction: no gold -> correct=None everywhere and a
+        # named reason, never a fabricated 0. Never raises into the caller.
+        try:
+            from decision_commit_adjudication import adjudicate_decision_commits
+            s10 = adjudicate_decision_commits(
+                trajectory, gold_files=gold_files or None, gold_source=gold_source,
+            )
+        except Exception as _e5_exc:  # noqa: BLE001 — an endpoint may not break the grader
+            s10 = {
+                "schema": "gt.decision_commit_adjudication.v1",
+                "decisions": [],
+                "summary": {
+                    "steps_to_first_durable_correct_commit": None,
+                    "reason": f"adjudicator_unavailable:{type(_e5_exc).__name__}",
+                    "n_commits": 0, "n_correct": None, "n_durable": 0,
+                    "gold_source": gold_source,
+                },
+            }
+
         out.update({
             "localization": s1,
             "edit_quality": s2,
+            "decision_commit": s10,
             "interface_preservation": s3,
             "scope_completeness": s4,
             "stuck_recovery": s5,
