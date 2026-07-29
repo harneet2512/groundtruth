@@ -749,9 +749,18 @@ def _build_v2(
     assistant_cmd: list[list[str]] = [[] for _ in range(n)]
     tool_ordinal: list[int | None] = [None] * n
     # iteration (== Nth tool observation) -> message index of that observation.
-    # This is the authoritative delivery-boundary anchor for a sealed row: GT
-    # renders a delivery INTO the observation of its own iteration, so the
-    # sealed bytes cannot legitimately surface before that message.
+    # The CANDIDATE delivery-boundary anchor for a sealed row: GT renders a
+    # delivery INTO the observation of its own iteration, so the sealed bytes
+    # cannot legitimately surface before that message.
+    #
+    # It is a candidate, never an authority. A ledger row's `iteration` is the
+    # seam's `_action_count` captured as `producer_iteration` -- a POLICY-ACTION
+    # counter, not a tool-message ordinal, and observed frozen for a whole task
+    # on real runs (run 30390877219: every delivered row in cfn-lint-3749 stamped
+    # 8, in -3764 stamped 10, while the sealed bytes landed across tool ordinals
+    # 5..46). Comparing a frozen action counter against a message index is a
+    # cross-namespace comparison, so the anchor is VALIDATED against the physical
+    # windows below before it is allowed to fail a row closed.
     ordinal_to_msg: dict[int, int] = {}
     ord_counter = 0
     for i, m in enumerate(messages):
@@ -842,6 +851,8 @@ def _build_v2(
     ledger_rows_joined = 0
     exact_seal_ambiguities: list[dict[str, Any]] = []
     exact_seal_duplicate_windows: list[dict[str, Any]] = []
+    boundary_namespace_valid = True
+    boundary_namespace_evidence: dict[str, Any] | None = None
     has_runtime_ledger = runtime_ledger_rows is not None or bool(
         runtime_ledger_path and os.path.isfile(runtime_ledger_path)
     )
@@ -876,6 +887,52 @@ def _build_v2(
                 return False
             return os.path.basename(bf) == os.path.basename(rf)
 
+        # Locate every byte-identical window for every sealed row ONCE. The main
+        # loop reuses this instead of re-scanning, so the pre-pass costs nothing.
+        row_windows: list[list[tuple[int, tuple[int, int]]]] = []
+        for row in rows:
+            row_seal = str(row.get("content_sha256_16") or "")
+            row_chars = int(row.get("chars_delivered") or 0)
+            windows: list[tuple[int, tuple[int, int]]] = []
+            if row_seal and row_chars > 0:
+                for msg_index, content in enumerate(visible_buffers):
+                    for span in _locate_seal_spans(content, row_chars, row_seal):
+                        windows.append((msg_index, span))
+            row_windows.append(windows)
+
+        # VALIDATE the delivery-boundary anchor before enforcing it. If
+        # `iteration` really names one observation, then every delivered row
+        # stamped with the same value must have a byte-proven window in a COMMON
+        # message -- one observation index cannot name several disjoint
+        # observations. An empty intersection is a PROOF (not a heuristic, not a
+        # threshold) that the field carries no ordering for this ledger, so the
+        # boundary is UNKNOWN and the documented earliest-window path applies.
+        # Nothing here relaxes the byte standard: a row whose sealed bytes are
+        # absent from the visible stream still never joins.
+        iteration_homes: dict[int, tuple[set[int], set[int]]] = {}
+        for row, windows in zip(rows, row_windows):
+            it_value = row.get("iteration")
+            if not isinstance(it_value, int) or isinstance(it_value, bool):
+                continue
+            if not windows:
+                continue  # a row with no window testifies about no observation
+            homes = {msg_index for msg_index, _ in windows}
+            prior = iteration_homes.get(it_value)
+            if prior is None:
+                iteration_homes[it_value] = (set(homes), set(homes))
+                continue
+            common, seen = prior
+            common &= homes
+            seen |= homes
+            if not common:
+                boundary_namespace_valid = False
+                boundary_namespace_evidence = {
+                    "iteration": it_value,
+                    "disjoint_home_msg_indices": sorted(seen),
+                    "reason": "no_common_observation_for_shared_iteration",
+                }
+                break
+
         for row_index, row in enumerate(rows):
             runtime_ledger_index = int(row.get("_runtime_ledger_index", row_index))
             rf = row.get("file_path") or ""
@@ -893,14 +950,17 @@ def _build_v2(
             seal_span: tuple[int, int] | None = None
             seal_payload = ""
             if seal and chars > 0:
-                all_candidates: list[tuple[int, tuple[int, int]]] = []
-                candidates: list[tuple[int, tuple[int, int]]] = []
-                for msg_index, content in enumerate(visible_buffers):
-                    for span in _locate_seal_spans(content, chars, seal):
-                        all_candidates.append((msg_index, span))
-                        if any(_spans_overlap(span, prior) for prior in claimed_spans[msg_index]):
-                            continue
-                        candidates.append((msg_index, span))
+                all_candidates: list[tuple[int, tuple[int, int]]] = list(
+                    row_windows[row_index]
+                )
+                candidates: list[tuple[int, tuple[int, int]]] = [
+                    (msg_index, span)
+                    for msg_index, span in all_candidates
+                    if not any(
+                        _spans_overlap(span, prior)
+                        for prior in claimed_spans[msg_index]
+                    )
+                ]
                 if all_candidates and not candidates:
                     unjoined_reason = "physical_span_unavailable_or_already_claimed"
 
@@ -925,7 +985,9 @@ def _build_v2(
                     # earliest window. Candidates are generated in (msg_index,
                     # span) ascending order.
                     boundary_msg = (
-                        ordinal_to_msg.get(it) if isinstance(it, int)
+                        ordinal_to_msg.get(it)
+                        if boundary_namespace_valid
+                        and isinstance(it, int)
                         and not isinstance(it, bool) else None
                     )
                     eligible = (
@@ -1298,6 +1360,13 @@ def _build_v2(
         "physical_identity_conflict_ids": physical_identity_conflicts,
         "exact_seal_ambiguity_count": len(exact_seal_ambiguities),
         "exact_seal_ambiguities": exact_seal_ambiguities,
+        # Whether the ledger's `iteration` field was ordering-bearing enough to
+        # ENFORCE as a delivery boundary. False means the stamp contradicted
+        # itself (rows sharing one iteration whose byte-proven windows have no
+        # common observation) and the boundary was treated as UNKNOWN. Surfaced
+        # so the fallback is auditable and never silent.
+        "delivery_boundary_namespace_valid": boundary_namespace_valid,
+        "delivery_boundary_namespace_evidence": boundary_namespace_evidence,
         # Byte-identical duplicate windows for a single sealed delivery. These
         # are RESOLVED to the earliest home (the delivery site) and are a
         # non-blocking diagnostic -- they never make the visible-byte audit

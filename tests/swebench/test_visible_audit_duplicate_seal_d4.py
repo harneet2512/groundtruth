@@ -9,9 +9,12 @@ byte-identical windows for one sealed row, abandoned the row, and flagged an
 ``exact_seal_ambiguity`` -- which drove ``visible_audit_complete`` to False even
 though ``physical_identity_conflict_count`` was 0 (no leak, no conflict).
 
-The home of a duplicated sealed delivery is resolved from the row's
-AUTHORITATIVE delivery iteration (``iteration`` -> tool_ordinal message index):
-the earliest window at or after that boundary. A byte-identical window BEFORE the
+The home of a duplicated sealed delivery is resolved from the row's delivery
+iteration (``iteration`` -> tool_ordinal message index): the earliest window at or
+after that boundary. (The anchor is enforced only once it survives the
+namespace validation in ``test_delivery_boundary_namespace_20260729.py``; every
+ledger here is single-row or coherent, so the boundary is live in all of them.)
+A byte-identical window BEFORE the
 boundary is the agent independently producing the same repo bytes (a pre-delivery
 collision) and must not anchor the delivery -- anchoring it there would let the
 receipt ladder count pre-delivery actions as GT consumption. If EVERY window is
