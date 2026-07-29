@@ -20,8 +20,14 @@ tool_calls). Outputs per-delivery records + aggregate.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from consumption_ledger import (  # noqa: E402  (#43 physical delivery substrates)
+    MODEL_VISIBLE_SOURCES as _MODEL_VISIBLE_SOURCES,
+)
 
 
 # Action type classifier — what is the agent doing?
@@ -183,7 +189,11 @@ def analyze_trajectory(trajectory: dict, *, consumption_ledger: dict | None = No
         scan_timeline = [e for e in timeline if e.get("role") == "assistant"]
         for receipt in consumption_ledger.get("entries", []):
             level = int(receipt.get("receipt") or 0)
-            if receipt.get("source") != "trajectory" or level < 1:
+            # #43: BOTH physical substrates. The capsule is injected at the
+            # PROVIDER boundary, so its bytes are model-visible and structurally
+            # absent from the trajectory file; a trajectory-only predicate made
+            # total_deliveries=0 BY CONSTRUCTION on real deliveries.
+            if receipt.get("source") not in _MODEL_VISIBLE_SOURCES or level < 1:
                 continue
             if join_required and receipt.get("joined") is not True:
                 continue

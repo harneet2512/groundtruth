@@ -101,10 +101,15 @@ from fair_probe_result import (  # noqa: E402  (SPEC-J4 fair-probe result)
     join_fair_probes,
 )
 from consumption_ledger import (  # noqa: E402  (DEFECT 7/8 per-fire byte authority + leak scanner)
+    MODEL_VISIBLE_SOURCES,
     PHYSICAL_DELIVERY_BOUND,
+    PROVIDER_PAYLOAD_JOIN_METHOD,
     physical_delivery_authority,
     scan_test_identity_leaks,
 )
+
+#: The join methods that PROVE bytes, one per physical record (#43).
+_PHYSICAL_BYTE_JOIN_METHODS = frozenset({"seal", PROVIDER_PAYLOAD_JOIN_METHOD})
 from live_evidence import _LEAK_RE  # noqa: E402  (DEFECT 7 per-fire leak class, reused verbatim)
 from groundtruth.runtime.feature_lineage import (  # noqa: E402
     CAP_BYTE_OWNER_MECHANISMS,
@@ -3853,9 +3858,20 @@ def _row_has_seal_join(
     if not isinstance(chars, int) or isinstance(chars, bool) or chars <= 0:
         return False
     for entry in entries:
-        if not isinstance(entry, dict) or entry.get("source") != "trajectory":
+        # #43: a delivery is byte-joined in EITHER physical record -- the agent's
+        # own message stream (seal span) or the bound provider payload (capsule
+        # coordinates). The provider-boundary capsule is model-visible and never
+        # present in the trajectory file, so a trajectory-only predicate left
+        # every CAP byte owner unprovable in the production posture.
+        if (
+            not isinstance(entry, dict)
+            or entry.get("source") not in MODEL_VISIBLE_SOURCES
+        ):
             continue
-        if entry.get("joined") is not True or entry.get("join_method") != "seal":
+        if (
+            entry.get("joined") is not True
+            or entry.get("join_method") not in _PHYSICAL_BYTE_JOIN_METHODS
+        ):
             continue
         entry_chars = entry.get("ledger_chars", entry.get("chars"))
         if entry.get("content_sha256_16") != seal or entry_chars != chars:

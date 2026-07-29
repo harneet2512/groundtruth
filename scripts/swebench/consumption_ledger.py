@@ -117,6 +117,161 @@ def _content_hash16(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
+# --------------------------------------------------------------------------- #
+# PHYSICAL SUBSTRATE 2 — the bound provider payload (#43)
+#
+# ``miniswe_provider_boundary._install.prepare`` (:1300-1317) appends the capsule
+# to the PREPARED PROVIDER PAYLOAD, never to ``agent.messages``. The trajectory
+# file is therefore an INCOMPLETE record of the model's context: the capsule
+# bytes are model-visible and structurally absent from every trajectory message.
+# A join that searches only trajectory text reports total_deliveries=0 BY
+# CONSTRUCTION on runs where deliveries demonstrably flowed (the BYTE-JOIN 0/80
+# wall).
+#
+# The canonical delivery row carries the second physical record of the same
+# bytes and PROVES ITSELF from its own fields, with no runtime change and no
+# model-visible byte change:
+#   sha256(bound_provider_payload_json)          == provider_payload_hash
+#   payload.messages[mi].content[ci]["text"]     == capsule_text
+#   sha256(capsule_text)                         == rendered_content_hash
+#   rendered_content_hash[:16]                   == content_sha256_16
+#   len(capsule_text)                            == chars_delivered
+# `capsule_binding.provider_payload_hash` must name THIS payload, so the
+# coordinates cannot be borrowed from a different dispatch.
+#
+# A join has TWO sides. The payload alone proves bytes went to a provider; it
+# does not prove they belong to THIS trajectory, and it carries no ordering for
+# the receipt ladder. The trajectory side is anchored by the payload message
+# IMMEDIATELY PRECEDING the capsule: its exact text must occur in this
+# trajectory, and that message is the delivery boundary — every consumption
+# signal is read from the assistant turns after it.
+#
+# Every rejection returns a NAMED reason that rides onto the ledger_only entry
+# and the physical-delivery authority record. An unjoinable delivery stays
+# UNMEASURED. It is never fabricated.
+# --------------------------------------------------------------------------- #
+PROVIDER_PAYLOAD_SOURCE = "provider_payload"
+PROVIDER_PAYLOAD_JOIN_METHOD = "provider_payload"
+TRAJECTORY_SOURCE = "trajectory"
+#: The physical records in which delivered bytes can be PROVEN model-visible.
+#: ``ledger_only`` is deliberately absent: it is the UNMEASURED state.
+MODEL_VISIBLE_SOURCES = frozenset({TRAJECTORY_SOURCE, PROVIDER_PAYLOAD_SOURCE})
+_PHYSICAL_JOIN_METHODS = frozenset({"seal", PROVIDER_PAYLOAD_JOIN_METHOD})
+
+_CANONICAL_DELIVERY_LAYER = "canonical.provider_delivery"
+_CANONICAL_DELIVERY_EVENT = "canonical_provider_delivery"
+
+
+def _sha256_hex(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _provider_payload_delivery(
+    row: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Byte-prove one canonical capsule inside its own recorded provider payload.
+
+    Returns ``(delivery, None)`` when the row proves the capsule sat at its bound
+    coordinates in the exact dispatched payload, else ``(None, reason)``. A
+    ``reason`` of ``None`` means the row is not a provider-boundary delivery at
+    all, which is not a defect and must not overwrite another reason.
+    """
+    if (
+        row.get("layer") != _CANONICAL_DELIVERY_LAYER
+        or row.get("event_type") != _CANONICAL_DELIVERY_EVENT
+    ):
+        return None, None
+    payload_json = row.get("bound_provider_payload_json")
+    if not isinstance(payload_json, str) or not payload_json:
+        return None, "provider_payload_absent"
+    payload_hash = row.get("provider_payload_hash")
+    if (
+        not isinstance(payload_hash, str)
+        or _sha256_hex(payload_json) != payload_hash
+    ):
+        return None, "provider_payload_hash_mismatch"
+    capsule_text = row.get("capsule_text")
+    if not isinstance(capsule_text, str) or not capsule_text:
+        return None, "provider_payload_capsule_text_absent"
+    rendered = _sha256_hex(capsule_text)
+    if (
+        rendered != row.get("rendered_content_hash")
+        or rendered[:16] != row.get("content_sha256_16")
+        or row.get("chars_delivered") != len(capsule_text)
+    ):
+        return None, "provider_payload_capsule_seal_mismatch"
+    binding = row.get("capsule_binding")
+    if (
+        not isinstance(binding, dict)
+        or binding.get("provider_payload_hash") != payload_hash
+    ):
+        return None, "provider_payload_binding_mismatch"
+    message_index = binding.get("message_index")
+    content_index = binding.get("content_index")
+    if (
+        type(message_index) is not int
+        or type(content_index) is not int
+        or message_index < 0
+        or content_index < 0
+    ):
+        return None, "provider_payload_binding_location_invalid"
+    try:
+        payload = json.loads(payload_json)
+    except ValueError:
+        return None, "provider_payload_unparsable"
+    messages = payload.get("messages") if isinstance(payload, dict) else None
+    if not isinstance(messages, list) or message_index >= len(messages):
+        return None, "provider_payload_message_index_out_of_range"
+    message = messages[message_index]
+    content = message.get("content") if isinstance(message, dict) else None
+    if (
+        not isinstance(content, list)
+        or content_index >= len(content)
+        or not isinstance(content[content_index], dict)
+    ):
+        return None, "provider_payload_content_index_out_of_range"
+    if content[content_index].get("text") != capsule_text:
+        return None, "provider_payload_capsule_not_at_bound_location"
+    return {
+        "capsule_text": capsule_text,
+        "content_sha256_16": rendered[:16],
+        "message_index": message_index,
+        "content_index": content_index,
+        "payload_messages": messages,
+    }, None
+
+
+def _payload_context_anchor(
+    delivery: dict[str, Any], messages: list[dict],
+) -> tuple[int | None, str | None]:
+    """Locate this payload's delivery boundary inside THIS trajectory.
+
+    The payload message immediately preceding the capsule is the last context the
+    model held before the call that carried the capsule. Its exact text must
+    occur in this trajectory; the LATEST such message is the boundary, because a
+    payload is built from a monotonically growing message list.
+    """
+    message_index = delivery["message_index"]
+    if message_index <= 0:
+        return None, "provider_payload_context_absent"
+    context = delivery["payload_messages"][message_index - 1]
+    if not isinstance(context, dict):
+        return None, "provider_payload_context_malformed"
+    text = _visible_content(context)
+    if not text:
+        return None, "provider_payload_context_empty"
+    role = context.get("role")
+    matches = [
+        index for index, message in enumerate(messages)
+        if isinstance(message, dict)
+        and message.get("role") == role
+        and _visible_content(message) == text
+    ]
+    if not matches:
+        return None, "provider_payload_context_unanchored"
+    return matches[-1], None
+
+
 def _locate_seal_spans(
     content: str, n_chars: int, sha16: str,
 ) -> list[tuple[int, int]]:
@@ -905,6 +1060,69 @@ def _build_v2(
                     leak_hits.update(scan_test_identity_leaks(seal_payload))
                     method = "seal"
 
+            # PHYSICAL SUBSTRATE 2 (#43). Attempted ONLY after the trajectory
+            # seal join has failed: when the bytes ARE in the agent's own message
+            # stream that record is the stronger one and must own the delivery,
+            # or one physical delivery would produce one entry per substrate.
+            if chosen is None:
+                payload_delivery, payload_reason = _provider_payload_delivery(row)
+                if payload_delivery is None:
+                    if payload_reason is not None:
+                        unjoined_reason = payload_reason
+                else:
+                    anchor, anchor_reason = _payload_context_anchor(
+                        payload_delivery, messages,
+                    )
+                    if anchor is None:
+                        unjoined_reason = anchor_reason or "provider_payload_unanchored"
+                    else:
+                        capsule_text = payload_delivery["capsule_text"]
+                        receipt, ref_idx, act_idx, verif = _receipt_for(
+                            anchor, capsule_text
+                        )
+                        leak_hits.update(scan_test_identity_leaks(capsule_text))
+                        entries.append({
+                            "msg_index": anchor,
+                            "tool_ordinal": tool_ordinal[anchor],
+                            "kind": str(row.get("layer") or "unknown"),
+                            "delivery_channel": "provider_payload",
+                            "file_path": str(rf) or None,
+                            "chars": len(capsule_text),
+                            "rendered_text": capsule_text,
+                            "content_sha256_16": payload_delivery[
+                                "content_sha256_16"
+                            ],
+                            "receipt": receipt,
+                            "referenced_msg_index": ref_idx,
+                            "acted_msg_index": act_idx,
+                            "resolved_state": None,
+                            "verification_followup": verif,
+                            "joined": None,
+                            "ledger_layer": None,
+                            "ledger_event_type": None,
+                            "ledger_chars": None,
+                            "join_method": None,
+                            "source": PROVIDER_PAYLOAD_SOURCE,
+                            "physical_substrate": PROVIDER_PAYLOAD_SOURCE,
+                            "legacy_tag": False,
+                            # Spans address the capsule's own content block in
+                            # the payload, NOT an offset into any trajectory
+                            # message. Reusing trajectory offsets here would let
+                            # a reader slice the wrong buffer.
+                            "span_start": 0,
+                            "span_end": len(capsule_text),
+                            "physical_span_start": 0,
+                            "physical_span_end": len(capsule_text),
+                            "physical_id": (
+                                f"pp{runtime_ledger_index}:"
+                                f"m{payload_delivery['message_index']}:"
+                                f"c{payload_delivery['content_index']}"
+                            ),
+                            "delivery_boundary_msg_index": anchor,
+                        })
+                        chosen = len(entries) - 1
+                        method = PROVIDER_PAYLOAD_JOIN_METHOD
+
             # Backward compatibility only: old runtime ledgers predate seals.
             # They may use the historical file/length/iteration heuristic, but
             # such a join is not SS byte-proof and is labeled accordingly.
@@ -1017,7 +1235,10 @@ def _build_v2(
     ]
 
     # 4) Aggregate.
-    visible = [e for e in entries if e["source"] == "trajectory"]
+    # Both PHYSICAL substrates count as delivered: the agent's own message
+    # stream and the bound provider payload are two records of the same
+    # model-visible bytes. ``ledger_only`` remains excluded -- that is UNMEASURED.
+    visible = [e for e in entries if e["source"] in MODEL_VISIBLE_SOURCES]
     physical_groups: dict[str, list[dict[str, Any]]] = {}
     for index, entry in enumerate(visible):
         identity = str(entry.get("physical_id") or f"entry:{index}")
@@ -1134,9 +1355,9 @@ def physical_delivery_authority(ledger: dict[str, Any]) -> dict[str, Any]:
             ledger_only[runtime_index] = entry
             continue
         if (
-            entry.get("source") == "trajectory"
+            entry.get("source") in MODEL_VISIBLE_SOURCES
             and entry.get("joined") is True
-            and entry.get("join_method") == "seal"
+            and entry.get("join_method") in _PHYSICAL_JOIN_METHODS
         ):
             claims.setdefault(runtime_index, []).append(entry)
 
@@ -1152,6 +1373,7 @@ def physical_delivery_authority(ledger: dict[str, Any]) -> dict[str, Any]:
                     source.get("physical_join_reason")
                     or "physical_span_unavailable_or_already_claimed"
                 ),
+                "physical_substrate": None,
                 "runtime_ledger_index": runtime_index,
                 "physical_id": None,
                 "msg_index": None,
@@ -1173,6 +1395,9 @@ def physical_delivery_authority(ledger: dict[str, Any]) -> dict[str, Any]:
             deliveries[str(runtime_index)] = {
                 "state": BROKEN_PHYSICAL_BINDING,
                 "reason": "physical_identity_conflict",
+                "physical_substrate": claim.get(
+                    "physical_substrate", TRAJECTORY_SOURCE
+                ),
                 "runtime_ledger_index": runtime_index,
                 "physical_id": physical_id if isinstance(physical_id, str) else None,
                 "msg_index": claim.get("msg_index"),
@@ -1191,6 +1416,11 @@ def physical_delivery_authority(ledger: dict[str, Any]) -> dict[str, Any]:
         deliveries[str(runtime_index)] = {
             "state": PHYSICAL_DELIVERY_BOUND,
             "reason": "unique_claimed_span",
+            # WHICH physical record proved these bytes. Never collapse the two:
+            # a trajectory span and a payload coordinate are different evidence.
+            "physical_substrate": claim.get(
+                "physical_substrate", TRAJECTORY_SOURCE
+            ),
             "runtime_ledger_index": runtime_index,
             "physical_id": physical_id,
             "msg_index": claim.get("msg_index"),
