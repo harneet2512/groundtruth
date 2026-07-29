@@ -41,11 +41,11 @@ BASELINE: dict[str, frozenset[str]] = {
         "::test_deep_and_standalone_performance_share_canonical_verifier_truth",
     }),
     "tests/pretask": frozenset({
-        "tests/pretask/test_c1_passage_window_status.py::test_off_is_safe_default_128_32",
-        "tests/pretask/test_c1_passage_window_status.py::test_on_witnesses_wide_256_16",
-        "tests/pretask/test_c1_passage_window_status.py::test_scope_note_names_c2_b2",
-        "tests/pretask/test_c1_passage_window_status.py::test_deterministic",
-        "tests/pretask/test_c1_passage_window_status.py::test_e5_preserved_when_model_given",
+        # REMOVED 2026-07-29 -- the five test_c1_passage_window_status nodes were never a
+        # test defect. `embed.passage_window_status` existed at 439c55e7a and was dropped by
+        # the code-only snapshot 3b3363d37 while its witness test and every helper it calls
+        # survived: a reader/writer split. The function is restored, all five pass, so
+        # recording them here would freeze a source deletion as if it were a known red.
         "tests/pretask/test_localization_vnext_shadow.py"
         "::test_live_brief_text_and_localization_proof_are_byte_identical",
         "tests/pretask/test_traces.py::test_traces_python",

@@ -142,6 +142,43 @@ def _passage_token_window(model: "EmbeddingModel") -> int:
     return _PASSAGE_TOKEN_WINDOW
 
 
+def passage_window_status(model: "EmbeddingModel | None" = None) -> dict:
+    """C1 (GT_PASSAGE_WIDE) AUDIT WITNESS — makes the wide-passage knob auditable as its
+    own channel (gt_math row 40) instead of a blank '—'. Deterministic, reads the flag at
+    call time, runs NO encoder, off-safe (reports the 128 window when the flag is off).
+
+    Returns the per-symbol passage window in force, whether the wide (256) window is
+    ACTIVE, and the batch size the exit-137 guard bounds. When a `model` is given the
+    e5-vs-non-e5 split is honoured (e5 stays 128); without one it reports the default
+    (non-e5 gte/ModernBERT) family the current default embedder uses.
+
+    SCOPE (the C1-vs-C2/B2 distinction the 5-task audit surfaced): this is the passage
+    WIDTH knob only. The broad-body passage *content* (source bodies, docstrings, string
+    literals, calls) is mined at INDEX time by C2 and read by the semantic leg (B2) — those
+    are audited at rows 41/30, and are ON independently of this flag. A blank row 40 was
+    therefore mislabelled: absent this flag the cell is `off` (a stated reason), not
+    unmeasured. `active=True` here is the witness that the wide window actually ran.
+
+    RESTORED 2026-07-29: this function was dropped by the code-only snapshot commit
+    3b3363d37 while its five-test witness (tests/pretask/test_c1_passage_window_status.py)
+    and every helper it calls survived — a reader/writer split, not a retirement."""
+    if model is not None:
+        window = _passage_token_window(model)
+        e5 = _is_e5_model(model)
+    else:
+        window = _PASSAGE_TOKEN_WINDOW_WIDE if _passage_wide() else _PASSAGE_TOKEN_WINDOW
+        e5 = None
+    return {
+        "gt_passage_wide": _passage_wide(),
+        "active": window == _PASSAGE_TOKEN_WINDOW_WIDE,
+        "passage_window": window,
+        "encode_batch": _encode_batch_size(),
+        "is_e5_preserved": e5,
+        "note": "C1 width-knob; broad-body retrieval = C2/B2 (index-time body_terms/"
+                "string_literals, rows 41/30) — independent of this flag",
+    }
+
+
 def _query_token_window(model: "EmbeddingModel") -> int:
     """The truncation window for the ISSUE QUERY — strictly larger than the passage
     window so the file/symbol hints in the issue tail survive tokenization. e5 caps
