@@ -1,0 +1,219 @@
+name: "Test sweep: per-file ISOLATE (both roots)"
+
+# WHY THIS EXISTS
+# ===============
+# `scripts/swebench/full_suite_sweep.py --isolate` runs EVERY test file this repo
+# owns in its OWN pytest process (~1005 processes, measured 2026-07-29 by
+# `full_suite_sweep._all_test_files()`).  Locally that holds the developer's PC for
+# 85+ minutes, and a machine under that load is itself a source of measured
+# flakiness -- timing-sensitive suites fail because the box is busy, not because
+# the code is wrong.  So the isolate sweep belongs on a runner, not on the laptop.
+#
+# The sweep script is the AUTHORITY on coverage.  It owns both roots
+# (`ROOTS = ("tests", "artifact_deepswe/tests")`, full_suite_sweep.py:49) plus the
+# four repo-owned strays in `EXTRA_TESTS` (:118), and `_assert_roots_cover` (:148)
+# hard-fails the run if a collectable test file appears outside them.  This
+# workflow therefore NEVER enumerates test paths of its own -- it invokes the
+# script and reports what the script says.  Re-listing paths here would recreate
+# exactly the drift ("tests/runtime+swebench is 33%") the script exists to kill.
+#
+# DISPATCH ONLY.  This burns ~1.5-3h of runner time per invocation, so it is never
+# wired to push or schedule; the user triggers it deliberately.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pytest_args:
+        description: "Extra args forwarded to EVERY pytest invocation (full_suite_sweep.py positional `pytest_args`). Usually empty."
+        required: false
+        default: ""
+      baseline_run_id:
+        description: "Optional: a PREVIOUS run id of this same workflow. Its saved failing-node-id JSON is downloaded and passed to --baseline, so the summary reports NEW / FIXED / STILL-FAILING by NAME instead of an absolute count. Empty = absolute run, no diff."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  # Required by actions/download-artifact when pulling an artifact from ANOTHER run
+  # (the optional baseline).
+  actions: read
+
+# One sweep at a time.  Two stacked dispatches would double-spend runner minutes
+# on the same tree and the second result would supersede the first anyway, so the
+# newer dispatch wins and the older is cancelled.
+concurrency:
+  group: test-isolate-sweep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  isolate-sweep:
+    runs-on: ubuntu-latest
+    # ~85 min measured locally; a hosted runner is slower per-process and the
+    # per-file isolate mode is dominated by ~1005 interpreter startups.  180 gives
+    # ~2x headroom without letting a hung suite burn the 6h job ceiling.
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          # `.[dev]` carries pytest / pytest-asyncio / pytest-timeout (pyproject.toml
+          # [project.optional-dependencies].dev) and installs groundtruth itself so
+          # `import groundtruth` resolves the same way it does locally.
+          python -m pip install -e ".[dev]"
+          # The only two third-party imports the test tree uses beyond `.[dev]`:
+          # 27 files `import yaml`, 17 `import numpy` (grep over tests/ +
+          # artifact_deepswe/tests/, 2026-07-29).  Missing either turns a real suite
+          # into a collection ERROR, which the sweep would report as a failure by
+          # name -- a lie about the code.
+          python -m pip install pyyaml numpy
+
+      - name: Restore baseline failing-set from a previous sweep run
+        id: baseline
+        if: ${{ inputs.baseline_run_id != '' }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: isolate-sweep-${{ inputs.baseline_run_id }}
+          path: baseline_download
+          run-id: ${{ inputs.baseline_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run the per-file isolate sweep (BOTH roots)
+        id: sweep
+        env:
+          GT_SWEEP_PYTEST_ARGS: ${{ inputs.pytest_args }}
+        run: |
+          mkdir -p sweep_out
+          BASELINE_ARG=""
+          if [ -f baseline_download/isolate_sweep_failing.json ]; then
+            BASELINE_ARG="--baseline baseline_download/isolate_sweep_failing.json"
+            echo "baseline: diffing against run ${{ inputs.baseline_run_id }}"
+          else
+            echo "baseline: none — reporting the ABSOLUTE failing set"
+          fi
+          # Exit codes (full_suite_sweep.main, :321-338):
+          #   0 = clean            1 = failing (or NEW vs baseline)
+          #   2 = ran, but coverage was PARTIAL (a test file lives outside every root)
+          # Never let a non-zero kill the step: the summary + artifacts must still be
+          # produced.  The job's verdict is enforced in the final step.
+          set +e
+          python scripts/swebench/full_suite_sweep.py \
+            --isolate \
+            --save sweep_out/isolate_sweep_failing.json \
+            $BASELINE_ARG \
+            $GT_SWEEP_PYTEST_ARGS 2>&1 | tee sweep_out/isolate_sweep.log
+          RC=${PIPESTATUS[0]}
+          set -e
+          echo "rc=$RC" >> "$GITHUB_OUTPUT"
+          echo "sweep exit code: $RC"
+
+      - name: Compact pass/fail table -> job summary
+        if: ${{ always() }}
+        env:
+          SWEEP_RC: ${{ steps.sweep.outputs.rc }}
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os, pathlib, sys
+
+          sys.path.insert(0, "scripts/swebench")
+          rc = os.environ.get("SWEEP_RC", "")
+          out = pathlib.Path("sweep_out")
+          fail_json = out / "isolate_sweep_failing.json"
+          log = out / "isolate_sweep.log"
+
+          # Total files swept comes from the SCRIPT, never from a re-enumeration here.
+          try:
+              from full_suite_sweep import _all_test_files
+              total_files = len(_all_test_files())
+          except Exception as exc:  # never let reporting mask the sweep result
+              total_files = None
+              print(f"> file census unavailable: {exc}\n")
+
+          failing = []
+          if fail_json.exists():
+              failing = json.loads(fail_json.read_text(encoding="utf-8"))
+
+          by_file = {}
+          for node in failing:
+              by_file.setdefault(node.split("::", 1)[0], []).append(node)
+
+          verdict = {
+              "0": "GREEN — 0 failing node ids",
+              "1": "RED — failing node id(s) present (or NEW vs baseline)",
+              "2": "COVERAGE DEFECT — a collectable test file lives outside every declared root; this run is a PARTIAL verification and is never green",
+          }.get(rc, f"UNKNOWN exit code {rc!r}")
+
+          print("## Per-file isolate sweep\n")
+          print(f"**Verdict:** {verdict}\n")
+          print("| metric | value |")
+          print("| --- | --: |")
+          print(f"| test files swept (both roots + extras) | {total_files if total_files is not None else 'n/a'} |")
+          print(f"| files with >=1 failing node | {len(by_file)} |")
+          if total_files is not None:
+              print(f"| files with 0 failing nodes | {total_files - len(by_file)} |")
+          print(f"| failing node ids | {len(failing)} |")
+          print(f"| sweep exit code | {rc} |")
+          print()
+
+          if by_file:
+              print("### Failing files (by NAME — counts are never the report)\n")
+              print("| file | failing nodes |")
+              print("| --- | --: |")
+              for f in sorted(by_file):
+                  print(f"| `{f}` | {len(by_file[f])} |")
+              print()
+              print("<details><summary>All failing node ids</summary>\n")
+              print("```")
+              for node in sorted(failing):
+                  print(node)
+              print("```")
+              print("\n</details>\n")
+
+          # The NEW / FIXED / STILL-FAILING block only exists when --baseline ran.
+          if log.exists():
+              text = log.read_text(encoding="utf-8", errors="replace").splitlines()
+              start = next((i for i, ln in enumerate(text)
+                            if ln.strip().startswith("NEW (attributable to this diff)")), None)
+              if start is not None:
+                  print("### Baseline diff\n")
+                  print("```")
+                  for ln in text[start:start + 200]:
+                      print(ln)
+                  print("```")
+          PY
+
+      - name: Upload sweep artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          # Named with the run id so a LATER dispatch can pass this run id as
+          # `baseline_run_id` and get a by-NAME diff.
+          name: isolate-sweep-${{ github.run_id }}
+          path: sweep_out/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce the sweep verdict
+        if: ${{ always() }}
+        env:
+          SWEEP_RC: ${{ steps.sweep.outputs.rc }}
+        run: |
+          case "$SWEEP_RC" in
+            0) echo "sweep GREEN" ;;
+            2) echo "::error::SWEEP COVERAGE DEFECT — collectable test files outside every declared root (exit 2). See the log: this run is a PARTIAL verification and must never be cited as green."; exit 1 ;;
+            "") echo "::error::sweep produced no exit code — the run step did not complete"; exit 1 ;;
+            *) echo "::error::sweep RED (exit $SWEEP_RC) — failing node ids are listed by NAME in the job summary and in the isolate-sweep-${{ github.run_id }} artifact."; exit 1 ;;
+          esac
