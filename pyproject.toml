@@ -17,7 +17,11 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
-    "mcp>=1.0.0,<3.0",
+    # mcp 2.0.0 REMOVED `mcp.server.fastmcp`, which src/groundtruth/mcp/server.py
+    # and composite_server.py import at module scope. Every mcp API this repo
+    # touches is 1.x-only (mcp.server.fastmcp.FastMCP, mcp.server.Server,
+    # mcp.types, mcp.ClientSession, mcp.client.stdio) — nothing needs 2.x.
+    "mcp>=1.0.0,<2.0",
     "pydantic>=2.0.0,<3.0",
     "structlog>=24.0.0,<26.0",
 ]
@@ -44,6 +48,14 @@ dev = [
     "ruff>=0.4.0,<1",
     "coverage>=7.0.0,<8",
     "pathspec>=0.12.0,<1",
+    # NOT a core dependency, deliberately: the capsule budgeter degrades to the
+    # char/4 estimate without it and now SAYS SO (UncalibratedCapsuleBudgetWarning
+    # + capsule_token_estimator_kind() == "char4_estimate"). It is here so CI --
+    # which installs `.[dev]` -- enforces the budget with REAL cl100k counts
+    # instead of an estimate. Until 2026-07-29 tiktoken reached this repo only
+    # transitively through the `benchmark` extra (openai/litellm), so any
+    # interpreter holding just the declared deps silently ran uncalibrated.
+    "tiktoken>=0.7.0,<1",
 ]
 benchmark = [
     "openai>=1.0.0,<2",

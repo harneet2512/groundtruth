@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sqlite3
+import warnings
 from dataclasses import asdict, dataclass, replace
 from enum import Enum, IntEnum
 from pathlib import Path
@@ -6259,6 +6260,84 @@ def _failed_compilation(
     )
 
 
+class UncalibratedCapsuleBudgetWarning(RuntimeWarning):
+    """The capsule token budget is being enforced with an ESTIMATE, not real BPE.
+
+    Raised ONCE per process when ``tiktoken`` cannot be loaded. See
+    :func:`capsule_token_estimator_kind` for the machine-readable marker.
+    """
+
+
+# Resolved ONCE per process (was: re-imported + `get_encoding` on EVERY compile).
+# ``None`` until first use; the pair is (encoding_or_None, kind_marker).
+_CAPSULE_ENCODING: Any = None
+_CAPSULE_ESTIMATOR_KIND: str = ""
+
+
+def _resolve_capsule_token_estimator() -> tuple[Any, str]:
+    """Resolve the capsule token counter once, and NAME which one won.
+
+    THE DEGRADATION THIS MAKES LOUD (isolated 2026-07-29 on a clean install of
+    only the declared deps): ``tiktoken`` is NOT a declared dependency of this
+    package -- it arrives transitively via the ``benchmark`` extra (openai /
+    litellm). Without it the old code silently fell back to
+    ``len(capsule_text.encode("utf-8"))``. That byte count is ~4x a real cl100k
+    count on ASCII, so EVERY capsule tripped ``hard_max_tokens`` ->
+    ``CAPSULE_BUDGET_EXCEEDED`` -> no COMPILED delivery -> empty
+    ``delivery_attempt_id`` -> evidence pinned at READY, never RELEASED. GT
+    delivered ZERO bytes and said nothing about it. "Conservative upper bound"
+    was fail-closed in the wrong direction: it does not degrade the budget, it
+    deletes the product.
+
+    The fallback is now the repo's OWN house estimate (``v1r_brief._estimate_tokens``,
+    char/4) rather than a byte count, and the choice is recorded in a marker the
+    same way ``v1r_brief._tokenizer_kind`` records its counter. char/4 is an
+    APPROXIMATION and is documented as such in both places -- it can under- or
+    over-count -- but it is within ~1x of truth instead of ~4x.
+    """
+    global _CAPSULE_ENCODING, _CAPSULE_ESTIMATOR_KIND
+    if _CAPSULE_ESTIMATOR_KIND:
+        return _CAPSULE_ENCODING, _CAPSULE_ESTIMATOR_KIND
+    try:
+        import tiktoken
+
+        _CAPSULE_ENCODING = tiktoken.get_encoding("cl100k_base")
+        _CAPSULE_ESTIMATOR_KIND = "tiktoken_cl100k_base"
+    except Exception as exc:
+        _CAPSULE_ENCODING = None
+        _CAPSULE_ESTIMATOR_KIND = "char4_estimate"
+        # One-shot, named, and machine-readable. Never silent again.
+        warnings.warn(
+            "GT capsule budget is UNCALIBRATED: tiktoken unavailable "
+            f"({type(exc).__name__}: {exc}); falling back to the char/4 estimate. "
+            "Install tiktoken for real cl100k budgeting.",
+            UncalibratedCapsuleBudgetWarning,
+            stacklevel=2,
+        )
+    return _CAPSULE_ENCODING, _CAPSULE_ESTIMATOR_KIND
+
+
+def capsule_token_estimator_kind() -> str:
+    """Marker for WHICH token counter the capsule budget uses in this process.
+
+    ``"tiktoken_cl100k_base"`` (calibrated) or ``"char4_estimate"`` (degraded).
+    Parallel to :func:`groundtruth.pretask.v1r_brief._tokenizer_kind`; read it
+    when auditing whether a run's budget decisions were real counts.
+    """
+    return _resolve_capsule_token_estimator()[1]
+
+
+def _estimate_capsule_tokens(capsule_text: str) -> int:
+    """Real cl100k count when tiktoken is present; else the char/4 ESTIMATE."""
+    encoding, _kind = _resolve_capsule_token_estimator()
+    if encoding is not None:
+        try:
+            return len(encoding.encode(capsule_text, disallowed_special=()))
+        except Exception:
+            pass
+    return len(capsule_text) // 4 + 1
+
+
 def compile_observation_capsule(
     *,
     native_observation: str,
@@ -6451,16 +6530,7 @@ def compile_observation_capsule(
             failure_code="EVIDENCE_MANIFEST_MISMATCH",
         )
     if token_counter is None:
-        try:
-            import tiktoken
-
-            encoding = tiktoken.get_encoding("cl100k_base")
-            rendered_token_estimate = len(
-                encoding.encode(capsule_text, disallowed_special=())
-            )
-        except Exception:
-            # Byte count is a conservative upper bound for byte-level BPEs.
-            rendered_token_estimate = len(capsule_text.encode("utf-8"))
+        rendered_token_estimate = _estimate_capsule_tokens(capsule_text)
     else:
         rendered_token_estimate = int(token_counter(capsule_text))
         if rendered_token_estimate < 0:
