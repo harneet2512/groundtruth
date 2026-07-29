@@ -431,10 +431,16 @@ def _inseam_eligible(kind: str, file_path: str = "") -> None:
     producer's decision boundary (the producer COULD fire this turn). Never model-visible."""
     if not _inseam_metrics_on():
         return
+    # P1-4 (2026-07-29): _current_iteration(), not the raw _action_count — the raw
+    # counter FREEZES at the canonical-observer bootstrap (same defect family as
+    # commit 5ff2ed2a5), so producer rows could never be ordered against their
+    # terminal rows.
+    _iter_fn = globals().get("_current_iteration")
     _ledger_line_direct({
         "layer": kind, "event_type": kind, "file_path": file_path or "",
         "outcome": "eligible", "reason": "producer_boundary", "chars_delivered": 0,
-        "iteration": globals().get("_action_count", 0)})
+        "iteration": (_iter_fn() if callable(_iter_fn)
+                      else globals().get("_action_count", 0))})
 
 
 #: Trigger ids already recorded this observation. Several actions can share one policy
@@ -548,11 +554,14 @@ def _inseam_stamp(kind: str, file_path: str, *, tier: str, conf: float) -> None:
     tier + confidence. ``tier`` / ``conf`` are extra row fields only — zero observation bytes."""
     if not _inseam_metrics_on():
         return
+    # P1-4: _current_iteration(), not the frozen raw counter (see _inseam_eligible).
+    _iter_fn = globals().get("_current_iteration")
     _ledger_line_direct({
         "layer": kind, "event_type": kind, "file_path": file_path or "",
         "outcome": "produced", "reason": "authority_stamp", "chars_delivered": 0,
         "tier": tier, "conf": round(float(conf), 8),
-        "iteration": globals().get("_action_count", 0)})
+        "iteration": (_iter_fn() if callable(_iter_fn)
+                      else globals().get("_action_count", 0))})
 
 
 def _control_participation_record(
@@ -14277,6 +14286,16 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                 else:
                     _provenance_decision = "NO_EFFECT"
             # Shared precedence: late -> semantic duplicate -> step-behind.
+            # P1-4 (2026-07-29): compute the CONTENT identity BEFORE the screen so a
+            # suppressed candidate's terminal row is JOINABLE. Until now the
+            # ss_step_behind / ss_semantic_dup terminal rows carried kind+reason+file
+            # only, and the content sha was computed 12 lines below — after the screen
+            # had already continued — so a producer's candidate and its terminal
+            # outcome could only be joined by near-identical timestamps (the l3.contract
+            # join-identity defect, codex audit P1). Same 16-hex digest as the dedup
+            # key `hc` below.
+            import hashlib as _hl5
+            _cand_sha16 = _hl5.sha256(text.encode("utf-8")).hexdigest()[:16]
             _supp, _reason = _ss_screen_delivery(
                 kind, text, _ss_root, is_loc=False,
                 subject_path=subject_path, event=item_event,
@@ -14287,7 +14306,8 @@ def _lane_a_deliver(out, cmd, lane_a, *, krel, event) -> None:
                     outcome=(_ProductSignalOutcome.SUPPRESSED_DUPLICATE
                              if _reason == "ss_semantic_dup"
                              else _ProductSignalOutcome.SUPPRESSED_HIDDEN_ONLY),
-                    reason=_reason, file_path=subject_path, event=item_event)
+                    reason=_reason, file_path=subject_path, event=item_event,
+                    extra={"content_sha256_16": _cand_sha16})
                 continue
             h = _oracle_content_hash(text)
             # B5 (token bloat, fastapi witness): a Lane-A block is a state-INDEPENDENT
