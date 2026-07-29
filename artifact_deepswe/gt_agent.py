@@ -395,6 +395,14 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         "newfile_precedent_attestation.py",
         "recovery_attestation.py",
         "terminal_ack.py",
+        # 2026-07-29: the oracle-era measurement pair. gt_mini_patch imports both at
+        # MODULE scope, so without them the in-container import aborts and the divergent
+        # inline fallback runs (Product != agent-time) — the coverage guard was already
+        # failing closed on exactly these two names. Import-closed: brief_attestation is
+        # stdlib-only; trigger_opportunity's single module-scope dep is fact_registry,
+        # shipped above.
+        "brief_attestation.py",
+        "trigger_opportunity.py",
     ),
     # SM-3: trajectory.classifier — hypothesis_ledger's FailureKind/is_env_failure
     # dep. Stdlib-only (enum/os/re/dataclasses), no groundtruth.* import -> closes
@@ -439,8 +447,40 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # this layer); the in-container leg runs behind GT_REPRO_SYNTH (default off => never imported
         # on the hot path when the flag is unset, but the closure guard still requires it present).
         "repro_synth.py",
+        # 2026-07-29: change_surface's OWN module-scope deps. change_surface has been
+        # shipped since 2026-07-22, but it does
+        #     from groundtruth.pretask.anchors import ...
+        #     from groundtruth.pretask.stratum import _FEATURE_VERBS
+        # at module scope, and neither shipped — so `import
+        # groundtruth.pretask.change_surface` raised ModuleNotFoundError in-container and
+        # the CLASS-4 dominance re-admission could never fire live. A latent closure hole,
+        # not a new one. Closed transitively: anchors -> groundtruth.confidence (shipped at
+        # the package root below), stratum -> anchors + traces (both here); confidence and
+        # traces are stdlib-only leaves.
+        "anchors.py",
+        "stratum.py",
+        "traces.py",
+    ),
+    # PACKAGE-ROOT modules (subdir ""). `groundtruth/confidence.py` is not inside a
+    # subpackage, and anchors.py imports `is_seed_pollutant` from it unconditionally at
+    # module scope, so the pretask closure cannot be shut without it. The empty key means
+    # "inject directly under /opt/gt/groundtruth/"; `_dotted_module` below is what keeps
+    # that from producing a `groundtruth..confidence` double dot.
+    "": (
+        "confidence.py",
     ),
 }
+
+
+def _dotted_module(subdir: str, filename: str) -> str:
+    """``groundtruth.<subdir>.<module>`` for the shipped-module identity.
+
+    The package-ROOT key ("") must yield ``groundtruth.confidence``, not
+    ``groundtruth..confidence`` — a double dot would silently keep the module out of the
+    allow-list it was just added to, so the coverage guard would keep failing on a module
+    that IS shipped."""
+    parts = ["groundtruth", *(p for p in subdir.replace("/", ".").split(".") if p)]
+    return ".".join([*parts, filename[:-3]])
 
 # Per-package {filename: content}. _load() emits a warning + leaves the value None
 # if a source file is absent (correct-or-quiet: a missing module is skipped at
@@ -456,7 +496,7 @@ _PRODUCT_RUNTIME_FILES = _PRODUCT_PACKAGE_FILES["runtime"]
 # (groundtruth.<subdir>.<module>) — the canonical allow-list the import-coverage
 # guard checks gt_mini_patch.py's module-scope imports against.
 _INJECTED_GT_MODULES: frozenset[str] = frozenset(
-    f"groundtruth.{subdir.replace('/', '.')}.{name[:-3]}"
+    _dotted_module(subdir, name)
     for subdir, names in _PRODUCT_PACKAGE_MODULES.items()
     for name in names
 )
@@ -471,7 +511,9 @@ _INJECTED_GT_PACKAGES: frozenset[str] = frozenset(
     | {
         "groundtruth." + ".".join(parts[:index])
         for subdir in _PRODUCT_PACKAGE_MODULES
-        for parts in (subdir.replace("/", ".").split("."),)
+        # drop empty parts so the package-root key ("") contributes only the already
+        # present "groundtruth" and never a trailing-dot "groundtruth." identity.
+        for parts in ([p for p in subdir.replace("/", ".").split(".") if p],)
         for index in range(1, len(parts) + 1)
     }
 )
@@ -1003,6 +1045,11 @@ def _inject_steps_b64() -> list[InstallStep]:
         f"touch {_GT_DIR}/groundtruth/__init__.py"
     )
     for subdir in _PRODUCT_PACKAGE_FILES:
+        if not subdir:
+            # package-ROOT key: /opt/gt/groundtruth and its __init__.py are already
+            # created above; emitting `mkdir -p .../groundtruth/` + a second
+            # `touch .../groundtruth//__init__.py` would only duplicate them.
+            continue
         mkdir_inits = (
             f"mkdir -p {_GT_DIR}/groundtruth/{subdir} && "
             + mkdir_inits
@@ -1018,7 +1065,10 @@ def _inject_steps_b64() -> list[InstallStep]:
             # the same filename without clobbering each other. Flatten any nested
             # subdir separator (`runtime/adapters` -> `runtime_adapters`) so the temp
             # file lands directly in _GT_DIR (a `/` would target a nonexistent dir).
-            b64name = f"{subdir.replace('/', '_')}__{fname.replace('.py', '.b64')}"
+            b64name = f"{subdir.replace('/', '_') or 'root'}__{fname.replace('.py', '.b64')}"
+            # package-ROOT key ("") lands directly under groundtruth/ — no empty path
+            # component, so the decode target stays a clean single-slash path.
+            pkg_dir = f"{_GT_DIR}/groundtruth/{subdir}".rstrip("/")
             for i, chunk in enumerate(chunks):
                 op = ">" if i == 0 else ">>"
                 steps.append(
@@ -1030,8 +1080,8 @@ def _inject_steps_b64() -> list[InstallStep]:
                     user="root",
                     run=(
                         f"base64 -d {_GT_DIR}/{b64name} > "
-                        f"{_GT_DIR}/groundtruth/{subdir}/{fname} "
-                        f"&& chmod 644 {_GT_DIR}/groundtruth/{subdir}/{fname} "
+                        f"{pkg_dir}/{fname} "
+                        f"&& chmod 644 {pkg_dir}/{fname} "
                         f"&& rm -f {_GT_DIR}/{b64name}"
                     ),
                 )

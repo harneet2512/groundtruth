@@ -261,7 +261,10 @@ def test_shipped_module_set_is_import_closed(agent_mod):
             # P4 (bounce 2026-07-10): a NESTED subdir ("runtime/adapters") must
             # build a DOTTED module name — `/` would corrupt both the dep-anchor
             # (relative-import resolution) and the shipped-set membership check.
-            dotted = f"groundtruth.{subdir.replace('/', '.')}.{name[:-3]}"
+            # Uses the adapter's OWN identity function so the test can never disagree
+            # with the allow-list it is checking against — in particular the
+            # package-ROOT key ("" -> groundtruth.confidence, not groundtruth..confidence).
+            dotted = agent_mod._dotted_module(subdir, name)
             uncovered = _module_scope_gt_deps(dotted, src) - shipped
             if uncovered:
                 holes[dotted] = sorted(uncovered)
