@@ -1278,9 +1278,28 @@ def classify_ledger(rows: list[dict]) -> dict[str, dict[str, Any]]:
             per["__obligation_plan_loaded__"]["marker"] = True
             continue
         fc = _typed_fact_class(r) or layer_to_fact_class(layer)
-        if fc is None:
+        # P1-2 (2026-07-29): a canonical.provider_delivery row carries its facts NESTED
+        # in ``evidence_lineage`` ([{candidate_id, fact_class, cap_owners}]) with no
+        # top-level evidence_type and a layer in no layer→fact map — so all 12
+        # fixed-smoke capsules vanished from per-class lifecycle counts
+        # (_obligations_delivered=0 despite 10 lineages). Each REGISTERED lineage class
+        # is credited against the shared capsule row; unregistered entries credit
+        # nothing (fail-closed). Same expansion direction_arrival landed in 9f634c1db.
+        fact_classes: list[str] = [fc] if fc is not None else []
+        if fc is None and layer == "canonical.provider_delivery":
+            for entry in r.get("evidence_lineage") or []:
+                if not isinstance(entry, dict):
+                    continue
+                lin_fc = entry.get("fact_class")
+                if (
+                    isinstance(lin_fc, str)
+                    and lin_fc
+                    and lin_fc not in fact_classes
+                    and registration_for(lin_fc) is not None
+                ):
+                    fact_classes.append(lin_fc)
+        if not fact_classes:
             continue
-        b = per[fc]
         outcome = str(r.get("outcome") or "")
         reason = str(r.get("reason") or "")
         # ── MARKER ROWS ARE NOT PRODUCTION (2026-07-29). The seam writes rows that
@@ -1302,61 +1321,67 @@ def classify_ledger(rows: list[dict]) -> dict[str, dict[str, Any]]:
         if outcome in ("allow", "submit_clean", "clean", "allow_clean"):
             # the gate RAN and correctly ALLOWED (e.g. a clean submit) — a CORRECT
             # ABSTAIN of the refusal fact, NOT a dark/missing delivery.
-            b["allowed"] += 1
+            for fc in fact_classes:
+                per[fc]["allowed"] += 1
             continue
         if outcome == "delivered" and int(r.get("chars_delivered") or 0) <= 0:
             continue
         arb = is_arbiter_candidate(layer)
-        b["produced"] += 1
-        if arb:
-            b["arbiter_candidates"] += 1
-        if outcome == "delivered":
-            b["delivered"] += 1
-            b["delivered_chars"] += int(r.get("chars_delivered") or 0)
-            b["delivered_rows"].append(idx)
-            b["delivered_boundaries"].add(str(r.get("event_type") or ""))
-            # a DELIVERED fact whose own reason flags stale/late is a real correctness/timing
-            # failure (→ FIX), distinct from a suppressed loser's lateness.
-            if "stale" in reason:
-                b["stale"] += 1
-            if "late" in reason or "expired" in reason:
-                b["expired_late"] += 1
-            fp = r.get("file_path")
-            if fp:
-                b["delivered_files"].add(fp)
-            # Caller-contract CO-FACT (2026-07-20): the SAME physical delivery also carries
-            # authorized caller-contract bytes (the seam's ``co_fact`` sidecar, stamped when
-            # the pre-edit def-facts block renders a ``callers:`` line). Credit caller_contract
-            # delivered on this SAME row so its delivered_byte_proven gate reflects the pre-edit
-            # delivery, at its search_result boundary. Dose-safe: this mints NO physical_id
-            # (dose is graded on the shared physical_id via the consumption ledger) — it is a
-            # second FACT credit on ONE physical delivery, never a second dose. Authorized
-            # identity only (self-declared registered producer/evidence/class).
-            co = r.get("co_fact")
-            if (
-                isinstance(co, dict)
-                and co.get("fact_class") == "caller_contract"
-                and co.get("evidence_type") == "caller_contract_search"
-                and co.get("producer_registration_match") is True
-            ):
-                cb = per["caller_contract"]
-                cb["produced"] += 1
-                cb["delivered"] += 1
-                cb["delivered_chars"] += int(r.get("chars_delivered") or 0)
-                cb["delivered_rows"].append(idx)
-                cb["delivered_boundaries"].add("search_result")
+        for fc in fact_classes:
+            b = per[fc]
+            b["produced"] += 1
+            if arb:
+                b["arbiter_candidates"] += 1
+            if outcome == "delivered":
+                b["delivered"] += 1
+                b["delivered_chars"] += int(r.get("chars_delivered") or 0)
+                b["delivered_rows"].append(idx)
+                b["delivered_boundaries"].add(str(r.get("event_type") or ""))
+                # a DELIVERED fact whose own reason flags stale/late is a real correctness/
+                # timing failure (→ FIX), distinct from a suppressed loser's lateness.
+                if "stale" in reason:
+                    b["stale"] += 1
+                if "late" in reason or "expired" in reason:
+                    b["expired_late"] += 1
+                fp = r.get("file_path")
                 if fp:
-                    cb["delivered_files"].add(fp)
-        elif outcome == "suppressed_hidden_only":
-            b["suppressed_hidden"] += 1
-            if arb or reason.startswith("global_arbiter:"):
-                b["arbiter_lost"] += 1
-            if "late" in reason:
-                b["loser_late"] += 1
-            if "stale" in reason:
-                b["loser_stale"] += 1
-        elif outcome == "suppressed_duplicate":
-            b["dose_suppressed"] += 1
+                    b["delivered_files"].add(fp)
+                # Caller-contract CO-FACT (2026-07-20): the SAME physical delivery also
+                # carries authorized caller-contract bytes (the seam's ``co_fact`` sidecar,
+                # stamped when the pre-edit def-facts block renders a ``callers:`` line).
+                # Credit caller_contract delivered on this SAME row so its
+                # delivered_byte_proven gate reflects the pre-edit delivery, at its
+                # search_result boundary. Dose-safe: this mints NO physical_id (dose is
+                # graded on the shared physical_id via the consumption ledger) — it is a
+                # second FACT credit on ONE physical delivery, never a second dose.
+                # Authorized identity only (self-declared registered producer/evidence/
+                # class). Legacy single-fact rows only — a canonical capsule never stamps
+                # co_fact, and its lineage classes are already expanded above.
+                co = r.get("co_fact")
+                if (
+                    isinstance(co, dict)
+                    and co.get("fact_class") == "caller_contract"
+                    and co.get("evidence_type") == "caller_contract_search"
+                    and co.get("producer_registration_match") is True
+                ):
+                    cb = per["caller_contract"]
+                    cb["produced"] += 1
+                    cb["delivered"] += 1
+                    cb["delivered_chars"] += int(r.get("chars_delivered") or 0)
+                    cb["delivered_rows"].append(idx)
+                    cb["delivered_boundaries"].add("search_result")
+                    if fp:
+                        cb["delivered_files"].add(fp)
+            elif outcome == "suppressed_hidden_only":
+                b["suppressed_hidden"] += 1
+                if arb or reason.startswith("global_arbiter:"):
+                    b["arbiter_lost"] += 1
+                if "late" in reason:
+                    b["loser_late"] += 1
+                if "stale" in reason:
+                    b["loser_stale"] += 1
+            elif outcome == "suppressed_duplicate":
+                b["dose_suppressed"] += 1
     return per
 
 

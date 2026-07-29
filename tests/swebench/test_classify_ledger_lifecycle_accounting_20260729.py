@@ -131,3 +131,40 @@ def test_correct_abstain_survives_on_allow_alone() -> None:
     b = per["submit_refusal"]
     # the arm's new predicate: delivered == 0 and allowed > 0  → correct_abstain
     assert b["delivered"] == 0 and b["allowed"] > 0
+
+
+def test_canonical_capsule_credits_lineage_classes() -> None:
+    """P1-2 (plan): a canonical.provider_delivery row carries its facts in
+    evidence_lineage with NO top-level evidence_type and a layer in no layer->fact map,
+    so all 12 fixed-smoke capsules vanished from per-class lifecycle counts
+    (_obligations_delivered=0 despite 10 lineages). Each REGISTERED lineage class must
+    be credited produced+delivered with the capsule's chars."""
+    per = classify_ledger([
+        {
+            "layer": "canonical.provider_delivery", "event_type": "", "file_path": "",
+            "outcome": "delivered", "reason": "provider_boundary",
+            "chars_delivered": 332, "iteration": None,
+            "content_sha256_16": "5ab69cdeb7882157",
+            "evidence_lineage": [
+                {"candidate_id": "4f48eb2711919289", "fact_class": "obligations",
+                 "cap_owners": []},
+            ],
+        },
+    ])
+    b = per["obligations"]
+    assert b["produced"] == 1
+    assert b["delivered"] == 1
+    assert b["delivered_chars"] == 332
+
+
+def test_canonical_capsule_unregistered_lineage_credits_nothing() -> None:
+    per = classify_ledger([
+        {
+            "layer": "canonical.provider_delivery", "event_type": "", "file_path": "",
+            "outcome": "delivered", "reason": "provider_boundary",
+            "chars_delivered": 100, "iteration": None,
+            "evidence_lineage": [{"candidate_id": "aa", "fact_class": "not_a_class",
+                                  "cap_owners": []}],
+        },
+    ])
+    assert "not_a_class" not in per
