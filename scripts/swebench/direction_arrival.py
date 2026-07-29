@@ -53,6 +53,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import statistics
 import sys
 from dataclasses import asdict, dataclass
@@ -75,6 +76,13 @@ from consumption_ledger import (  # noqa: E402
 
 # REUSE the ledger-row identity resolution already trusted by the timing join.
 from chronology_extract import _row_evidence_type, _row_fact_class  # noqa: E402
+
+# REUSE the SOLE PRODUCER of an obligation clause's ``subject_symbols``. This is the exact
+# function GT ran to decide, at delivery time, which symbols a deterministic exercise check
+# may be RIGHT about (``obligations._credit_eligible_symbols`` reads its output). Running it
+# here on the clause's own delivered verbatim reproduces GT's own structured answer instead
+# of inventing a second, divergent text heuristic.
+from groundtruth.pretask.spec import _v2_subject_symbols  # noqa: E402
 
 DIRECTION_ARRIVAL_SCHEMA = "gt.direction_arrival.v1"
 
@@ -105,7 +113,9 @@ KIND_PIVOT = "pivot"          # "stop looping / change course" -> arrival = next
 #:       name a SYMBOL whose contract must be preserved. A file-level arrival would be
 #:       too coarse — the direction is satisfied only when the agent acts on the symbol.
 #:   obligations
-#:       names a CLAUSE the fix must satisfy; its target is the clause SUBJECT entity.
+#:       names a CLAUSE the fix must satisfy; its target is the clause's STRUCTURED subject
+#:       symbols — the same ``subject_symbols`` GT itself computed at delivery time (see
+#:       ``_clause_targets``). A clause GT declared subject-less stays an honest named skip.
 #:   recovery
 #:       names no entity at all — it is "get off this loop". Arrival = the next agent
 #:       action after the steer (a course change), which is only defined relative to a
@@ -128,6 +138,17 @@ _CLASS_TARGET_KIND: dict[str, str] = {
 SKIP_UNREGISTERED_FACT_CLASS = "unregistered_fact_class"
 SKIP_UNMAPPED_TARGET_SHAPE = "unmapped_target_shape"
 SKIP_NO_TARGET_EXTRACTABLE = "no_target_extractable"
+#: CLAUSE sub-cases — an obligations payload is PROSE, so "no symbol in the bytes" splits
+#: into two materially different facts and must never collapse into one blind reason:
+#:   * the payload is not a recognised obligations render at all (a reader/writer drift
+#:     signal — SOMETHING changed in the producer and the instrument must be told), and
+#:   * the payload IS a recognised clause list, but not one clause carries a code
+#:     identifier. That is not an instrument defect: it is GT's own verdict. The renderer
+#:     stamps ``[could not be verified automatically]`` on exactly the clauses for which
+#:     ``obligation_truth_statuses`` found ``not subjects`` — zero credit-eligible subject
+#:     symbols. An arrival predicate for such a clause cannot exist without inventing one.
+SKIP_CLAUSE_ROWS_UNPARSED = "clause_rows_unparsed"
+SKIP_CLAUSE_SUBJECT_UNVERIFIABLE = "clause_subject_unverifiable"
 SKIP_DELIVERY_UNBOUND = "delivery_bytes_never_bound"
 SKIP_DELIVERY_STEP_UNRESOLVED = "delivery_step_unresolved"
 
@@ -248,22 +269,110 @@ def _physical_payloads(
     return out
 
 
-def _targets_for(kind: str, payload: str, file_path: str) -> list[str]:
-    """The concrete target token(s) a direction of this shape names.
+# --------------------------------------------------------------------------- #
+# CLAUSE target extraction (obligations) — structured, never a prose heuristic
+# --------------------------------------------------------------------------- #
+#: Every obligations renderer in ``groundtruth.runtime.obligations`` emits one clause per
+#: line in the SAME shape: a bracketed status MARK followed by the clause verbatim in double
+#: quotes (``render_obligation_truth_block`` / ``render_unexercised_block`` /
+#: ``render_obligation_status_block``). Line-anchored so surrounding control prose, headers
+#: and footers can never be mistaken for a clause.
+_CLAUSE_ROW_RE = re.compile(r'^[^\S\n]*\[([^\]]*)\]\s*"([^"]*)"', re.MULTILINE)
+#: ``obligation.resurface`` renders the same issue obligations as native bullets instead
+#: (``gt_mini_patch._obligation_resurface_candidate``: ``"  - %s" % verbatim``). Same reader
+#: shape ``obligations.rendered_obligation_subject_groups`` falls back to.
+_CLAUSE_BULLET_RE = re.compile(r"^\s*-\s+(.+?)\s*$", re.MULTILINE)
+#: ``render_unexercised_block`` prints the clause's OWN credit-eligible symbols INTO the
+#: mark: ``no test/run output has mentioned `a`/`b```. When present these are GT's stored
+#: ``subject_symbols`` verbatim — the strongest possible source, no re-derivation needed.
+_CLAUSE_MARK_SYMBOL_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_.]*)`")
+#: the two truncation markers the renderers append (``_truncate_at_word`` -> "…";
+#: ``render_obligation_status_block`` -> a raw ``verbatim[:157] + "..."``).
+_CLAUSE_ELLIPSIS = ("…", "...")
+#: ``obligations._credit_eligible_symbols``' own floor.
+_CLAUSE_MIN_SYMBOL_LEN = 3
+
+
+def _clause_quote_body(quote: str) -> str:
+    """The part of a rendered clause quote whose tokens are certainly WHOLE.
+
+    A rendered quote may be truncated. ``_truncate_at_word`` cuts at a word boundary in the
+    common case but falls back to a hard cut on a single long token, and
+    ``render_obligation_status_block`` hard-cuts unconditionally — so the token adjacent to
+    an ellipsis marker may be a FRAGMENT. A fragment cannot fabricate an arrival (it would
+    simply never match a command), but it can fabricate a *near* one, so it is dropped:
+    strip the marker and discard the trailing token. Cost is at most one symbol, i.e. an
+    honest skip. Never the reverse.
+    """
+    q = (quote or "").strip()
+    for marker in _CLAUSE_ELLIPSIS:
+        if q.endswith(marker):
+            q = q[: -len(marker)].rstrip()
+            return q.rsplit(None, 1)[0] if len(q.split()) > 1 else ""
+    return q
+
+
+def _clause_rows(payload: str) -> list[tuple[str, str]]:
+    """``[(status mark, clause verbatim)]`` for every clause the payload renders."""
+    rows = [(m.group(1), m.group(2)) for m in _CLAUSE_ROW_RE.finditer(payload or "")]
+    if rows:
+        return rows
+    return [("", m.group(1)) for m in _CLAUSE_BULLET_RE.finditer(payload or "")]
+
+
+def _clause_targets(payload: str) -> tuple[list[str], str | None]:
+    """The subject symbols an obligations clause direction points at, + a named reason
+    when none can be formed.
+
+    STRUCTURED, in the product's own two forms, in preference order:
+
+    1. symbols GT already printed into the status mark (its stored ``subject_symbols``);
+    2. otherwise ``pretask.spec._v2_subject_symbols`` on the clause's own verbatim — the
+       SOLE producer of those symbols, so this reproduces GT's answer rather than guessing.
+       It admits only code-shaped names (backticked identifiers, call shapes, dotted names,
+       snake_case, internal-capital, ``*Error``/``*Exception``/``*Warning``); ordinary
+       English is rejected by construction. "cfn-lint passes" -> ``set()``.
+
+    A content-word-overlap heuristic was REJECTED: on that same clause it yields
+    ``{cfn-lint, passes}``, and "passes" matches nearly any command — a manufactured
+    arrival, which is the one error this instrument may not make.
+    """
+    rows = _clause_rows(payload)
+    if not rows:
+        return [], SKIP_CLAUSE_ROWS_UNPARSED
+    targets: set[str] = set()
+    for mark, quote in rows:
+        symbols = set(_CLAUSE_MARK_SYMBOL_RE.findall(mark or ""))
+        if not symbols:
+            symbols = set(_v2_subject_symbols(_clause_quote_body(quote)))
+        targets |= {s for s in symbols if len(s) >= _CLAUSE_MIN_SYMBOL_LEN}
+    if not targets:
+        return [], SKIP_CLAUSE_SUBJECT_UNVERIFIABLE
+    return sorted(targets), None
+
+
+def _targets_for(kind: str, payload: str, file_path: str) -> tuple[list[str], str | None]:
+    """The concrete target token(s) a direction of this shape names, plus the named reason
+    when the direction cannot be formed (``None`` when it can).
 
     FILE shape -> the row's own ``file_path`` (the authoritative delivery subject).
-    CONTRACT / CLAUSE shape -> the SYMBOLS in the delivered bytes, extracted with
+    CONTRACT shape -> the SYMBOLS in the delivered bytes, extracted with
     ``consumption_ledger._block_entities`` (the grader's files+symbols extractor); when
     the bytes name no symbol the direction cannot be formed at symbol granularity and the
     caller records ``no_target_extractable`` rather than silently degrading to the file.
+    CLAUSE shape -> the clause's structured SUBJECT symbols (see ``_clause_targets``);
+    ``_block_entities`` is deliberately NOT used here — it reads structured evidence/contract
+    markers that an obligations block never contains, so it skipped the class wholesale.
     PIVOT shape -> a single sentinel; the target is the course change, not an entity.
     """
     if kind == KIND_PIVOT:
-        return ["<pivot>"]
+        return ["<pivot>"], None
     if kind == KIND_FILE:
-        return [file_path] if file_path else []
+        return ([file_path], None) if file_path else ([], SKIP_NO_TARGET_EXTRACTABLE)
+    if kind == KIND_CLAUSE:
+        return _clause_targets(payload)
     _files, symbols = _block_entities(payload) if payload else (set(), set())
-    return sorted(symbols)
+    return (sorted(symbols), None) if symbols else ([], SKIP_NO_TARGET_EXTRACTABLE)
 
 
 def _build_directions(
@@ -301,10 +410,17 @@ def _build_directions(
             )
             continue
 
-        targets = _targets_for(kind, payload, str(row.get("file_path") or ""))
+        targets, no_target_reason = _targets_for(
+            kind, payload, str(row.get("file_path") or "")
+        )
         if not targets:
             skips.append(
-                Skip(row_index, SKIP_NO_TARGET_EXTRACTABLE, fact_class, evidence_type)
+                Skip(
+                    row_index,
+                    no_target_reason or SKIP_NO_TARGET_EXTRACTABLE,
+                    fact_class,
+                    evidence_type,
+                )
             )
             continue
         for target in targets:

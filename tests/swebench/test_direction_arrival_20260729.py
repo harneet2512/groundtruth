@@ -27,6 +27,13 @@ BITING MUTATIONS (each applied to direction_arrival.py, observed RED, then rever
   M4 — ``_build_directions`` degrades a CONTRACT target to the row's file_path when the
        payload names no symbol: the skip-reason test loses ``no_target_extractable`` and
        ``test_unextractable_target_is_skipped_with_a_named_reason`` goes RED.
+  M5 — ``_clause_targets`` derives targets from CONTENT WORDS (the rejected candidate:
+       ``obligations.obligation_subject_terms(quote)``, i.e. every >=4-char non-stoplist
+       token) instead of the structured ``_v2_subject_symbols``: the prose clause
+       "cfn-lint passes" yields ``{cfn-lint, passes}``, the agent's unrelated commands
+       name both, and a manufactured ARRIVAL appears.
+       ``test_prose_clause_near_miss_is_never_an_arrival`` goes RED. (VERIFIED RED
+       2026-07-29 by applying exactly this substitution.)
 """
 from __future__ import annotations
 
@@ -44,6 +51,7 @@ from scripts.swebench.direction_arrival import (  # noqa: E402
     AHEAD,
     BEHIND,
     DIRECTION_ARRIVAL_SCHEMA,
+    KIND_CLAUSE,
     KIND_CONTRACT,
     KIND_FILE,
     NEVER,
@@ -389,6 +397,167 @@ def test_directions_from_ledger_without_a_trajectory_has_no_delivery_step(tmp_pa
     assert [d.target for d in directions] == ["src/foo.py"]
     assert directions[0].delivery_step is None
     assert directions[0].fact_class == "localization"
+
+
+# --------------------------------------------------------------------------- #
+# CLAUSE shape (obligations) — the highest-volume fact class in the firing data.
+#
+# An obligations clause is PROSE, so ``_block_entities`` (structured evidence/contract
+# markers) finds nothing in it and the whole class was skipped ``no_target_extractable``.
+# The arrival predicate is the clause's STRUCTURED subject symbols, in the product's own
+# two forms; a prose clause with no code identifier keeps an honest, NAMED skip.
+# --------------------------------------------------------------------------- #
+def _obligation_row(payload: str, *, iteration: int, file_path: str = "") -> dict:
+    """The exact ledger shape ``obligation.unexercised`` writes (run 30390877219)."""
+    row = _delivered_row(
+        payload, evidence_type="obligation_unexercised", event_type="test_result",
+        file_path=file_path, iteration=iteration,
+    )
+    row["layer"] = "obligation.unexercised"
+    return row
+
+
+def _obligation_task(tmp_path: Path, payload: str, commands: list[str]) -> Path:
+    messages: list[dict] = [_user("Fix it.")]
+    messages.append(_assistant("grep -rn thing src/"))   # step 1
+    messages.append(_tool(payload))                      # DELIVERY at step 1
+    for command in commands:
+        messages.append(_assistant(command))
+        messages.append(_tool("ok"))
+    return _write_task_dir(
+        tmp_path, {"messages": messages}, [_obligation_row(payload, iteration=1)]
+    )
+
+
+#: verbatim delivered bytes, run 30390877219, ll-full-amoffat__sh-744 ledger row 277.
+_PAYLOAD_CLAUSE_SYMBOL = (
+    "GT: normative requirement truth from observed execution:\n"
+    '[not exercised] "My preference would be to try and convince you that `_return_cmd` '
+    "should affect await as well as __call__, but if you are concerned about the API…\"\n"
+    "Exercise each requirement and require successful behavioral proof before submit."
+)
+#: verbatim delivered bytes, run 30390877219, ll-full-aws-cloudformation__cfn-lint-3749
+#: ledger row 276. GT itself stamped "could not be verified automatically" — the renderer
+#: emits that mark for exactly the clauses whose credit-eligible subject set is EMPTY.
+_PAYLOAD_CLAUSE_PROSE = (
+    "GT: normative requirement truth from observed execution:\n"
+    '[could not be verified automatically] "cfn-lint passes"\n'
+    "Exercise each requirement and require successful behavioral proof before submit."
+)
+#: ``render_unexercised_block`` prints the clause's stored subject symbols INTO the mark.
+_PAYLOAD_CLAUSE_MARK_SYMBOLS = (
+    '\n<gt-nudge reason="unexercised_clauses">\n'
+    "GT: requirements from the issue with NO execution evidence:\n"
+    "[edited, never exercised — no test/run output has mentioned `parse_item`/`decode.load`] "
+    '"the loader must keep line numbers"\n'
+    "Run one targeted test per requirement before submitting.\n"
+    "</gt-nudge>"
+)
+
+
+def test_clause_with_a_structured_subject_symbol_arrives(tmp_path):
+    """The real sh-744 bytes: the clause's backticked subject IS its arrival target, and a
+    model-authored command naming it is the arrival."""
+    task_dir = _obligation_task(
+        tmp_path, _PAYLOAD_CLAUSE_SYMBOL, ["python -c 'import sh; sh._return_cmd'"]
+    )
+    report = adjudicate(str(task_dir))
+    rows = [r for r in report["per_direction"] if r["fact_class"] == "obligations"]
+    assert len(rows) == 1, report["skipped_rows"]
+    assert rows[0]["kind"] == KIND_CLAUSE
+    assert rows[0]["target"] == "_return_cmd"
+    assert rows[0]["delivery_step"] == 1
+    assert rows[0]["arrival_step"] == 2
+    assert rows[0]["arrival_evidence"] == "named_in_command"
+    assert rows[0]["verdict"] == AHEAD
+
+
+def test_clause_subjects_printed_into_the_mark_are_used_verbatim(tmp_path):
+    """When GT already printed the clause's stored ``subject_symbols`` into the status mark,
+    those are the targets — no re-derivation from the prose at all."""
+    task_dir = _obligation_task(
+        tmp_path, _PAYLOAD_CLAUSE_MARK_SYMBOLS, ["pytest -k parse_item"]
+    )
+    report = adjudicate(str(task_dir))
+    targets = sorted(
+        r["target"] for r in report["per_direction"] if r["fact_class"] == "obligations"
+    )
+    assert targets == ["decode.load", "parse_item"], report["skipped_rows"]
+    arrived = {
+        r["target"]: r["arrival_step"]
+        for r in report["per_direction"] if r["fact_class"] == "obligations"
+    }
+    assert arrived["parse_item"] == 2
+    assert arrived["decode.load"] is None, "an unnamed subject must not borrow a sibling's"
+
+
+def test_prose_only_clause_still_skips_with_a_named_reason(tmp_path):
+    """The real cfn-lint-3749 bytes. GT's own renderer declared the clause unverifiable
+    (zero credit-eligible subject symbols); the instrument must repeat that verdict, not
+    invent a target for it."""
+    task_dir = _obligation_task(tmp_path, _PAYLOAD_CLAUSE_PROSE, ["cfn-lint --version"])
+    report = adjudicate(str(task_dir))
+    assert report["per_direction"] == []
+    assert report["summary"]["skipped_reasons"] == {"clause_subject_unverifiable": 1}
+    assert "all_delivered_rows_skipped" in report["summary"]["empty_reasons"]
+
+
+def test_unparsed_obligations_payload_gets_its_own_named_reason(tmp_path):
+    """A payload that is not a recognised obligations render is a reader/writer DRIFT
+    signal and must be distinguishable from an honestly subject-less clause."""
+    task_dir = _obligation_task(tmp_path, "GT: something entirely new", ["echo hi"])
+    report = adjudicate(str(task_dir))
+    assert report["per_direction"] == []
+    assert report["summary"]["skipped_reasons"] == {"clause_rows_unparsed": 1}
+
+
+def test_prose_clause_near_miss_is_never_an_arrival(tmp_path):
+    """CREDIT-FABRICATION GUARD (mutation M5).
+
+    The agent runs commands containing EVERY content word of the prose clause
+    ("cfn-lint", "passes"). Under the rejected content-word-overlap predicate each of those
+    is a target and every one of these commands is an ARRIVAL — GT would be credited for a
+    direction it never expressed at a measurable granularity. Under the structured
+    predicate the clause forms no direction at all, so no arrival can exist.
+    """
+    task_dir = _obligation_task(
+        tmp_path,
+        _PAYLOAD_CLAUSE_PROSE,
+        ["cfn-lint template.yaml", "echo 'everything passes'", "cfn-lint --format json"],
+    )
+    report = adjudicate(str(task_dir))
+    assert report["per_direction"] == [], "prose overlap must never manufacture an arrival"
+    assert report["summary"]["verdicts"][AHEAD] == 0
+    assert report["summary"]["skipped_reasons"] == {"clause_subject_unverifiable": 1}
+
+
+def test_symbol_near_miss_is_never_an_arrival(tmp_path):
+    """A DIFFERENT identifier that merely CONTAINS the target is not an arrival: matching
+    is word-boundary exact (``consumption_ledger._entity_patterns``), so ``_return_cmd_v2``
+    and ``my_return_cmd`` leave the direction censored NEVER."""
+    task_dir = _obligation_task(
+        tmp_path,
+        _PAYLOAD_CLAUSE_SYMBOL,
+        ["grep -rn _return_cmd_v2 sh.py", "python -c 'print(my_return_cmdx)'"],
+    )
+    report = adjudicate(str(task_dir))
+    row = next(r for r in report["per_direction"] if r["fact_class"] == "obligations")
+    assert row["target"] == "_return_cmd"
+    assert row["arrival_step"] is None
+    assert row["verdict"] == NEVER
+
+
+def test_truncated_clause_tail_never_yields_a_fragment_target(tmp_path):
+    """A rendered quote may be hard-truncated, so the token adjacent to the ellipsis can be
+    a FRAGMENT. It is dropped rather than shipped as a target."""
+    from scripts.swebench.direction_arrival import _clause_targets
+
+    whole, reason = _clause_targets('[not exercised] "must call `parse_item` on load"')
+    assert whole == ["parse_item"] and reason is None
+    # the same clause truncated mid-symbol -> the fragment is discarded, honest skip
+    cut, cut_reason = _clause_targets('[not exercised] "must call parse.item_lo..."')
+    assert cut == []
+    assert cut_reason == "clause_subject_unverifiable"
 
 
 def test_arrival_scan_is_pure_and_trajectory_side(tmp_path):
