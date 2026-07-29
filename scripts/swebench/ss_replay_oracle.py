@@ -786,18 +786,34 @@ def release_run_lock() -> None:
 
 
 def _make_junction(link: Path, target: Path) -> bool:
-    """Create a Windows directory junction (no admin needed). Removes a stale link first."""
+    """Create a directory link. Windows: junction via mklink /J (no admin needed).
+    POSIX: a plain directory symlink — same staging semantics, and the reason the
+    whole replay was Linux-dead (Codespace run 2026-07-29: every task "not replayed
+    (FileNotFoundError: 'cmd')" because this helper shelled to cmd.exe unconditionally).
+    Removes a stale link first."""
     import subprocess
     _remove_junction(link)
-    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
-                       capture_output=True, timeout=60)
-    return r.returncode == 0
+    if os.name == "nt":
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                           capture_output=True, timeout=60)
+        return r.returncode == 0
+    try:
+        os.symlink(str(target), str(link), target_is_directory=True)
+        return True
+    except OSError:
+        return False
 
 
 def _remove_junction(link: Path) -> None:
-    """Remove a junction WITHOUT touching its target (rmdir on a junction unlinks only)."""
+    """Remove a junction/symlink WITHOUT touching its target (unlinks the link only)."""
     if link.exists() or link.is_symlink():
-        _run_quiet(["cmd", "/c", "rmdir", str(link)])
+        if os.name == "nt":
+            _run_quiet(["cmd", "/c", "rmdir", str(link)])
+        else:
+            try:
+                link.unlink()
+            except OSError:
+                pass
 
 
 def stage_current_v2_obligations(recorded_artifacts: Path, target_dir: Path) -> Path:
