@@ -241,7 +241,9 @@ def _gateway_records(
     monkeypatch.setattr(
         gateway,
         "_compute_ranked_localization_rows",
-        lambda _state: [("src/api.py", 1, "get_user")],
+        # signature grew an optional ProducerAudit (abstention telemetry);
+        # the memoization wrapper passes it positionally.
+        lambda _state, _audit=None: [("src/api.py", 1, "get_user")],
     )
     state = gateway.GatewayState(
         graph_db=str(db),

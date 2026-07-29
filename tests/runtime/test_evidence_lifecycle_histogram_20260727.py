@@ -105,11 +105,12 @@ def test_correct_or_quiet_on_a_broken_runtime():
     assert seam._evidence_lifecycle_histogram(_Runtime([_Rec(None)])) == {}
 
 
-def test_all_three_row_writers_carry_the_field():
-    """Both compilation branches (success + failure) and the step-0 rows must carry it. A field
-    present on only one branch cannot be differenced across the branch boundary, which is exactly
-    the question C2 asks: what changed between a quiet turn and a staged one."""
+def test_all_four_row_writers_carry_the_field():
+    """Both compilation branches (success + failure), the step-0 rows, AND the P1-3
+    precommit staging row (2026-07-29) must carry it. A field present on only some
+    branches cannot be differenced across the branch boundary, which is exactly the
+    question C2 asks: what changed between a quiet turn and a staged one."""
     src = inspect.getsource(seam)
-    assert src.count('"evidence_lifecycles"') == 3, (
-        f'expected 3 writers, found {src.count(chr(34) + "evidence_lifecycles" + chr(34))}'
+    assert src.count('"evidence_lifecycles"') == 4, (
+        f'expected 4 writers, found {src.count(chr(34) + "evidence_lifecycles" + chr(34))}'
     )

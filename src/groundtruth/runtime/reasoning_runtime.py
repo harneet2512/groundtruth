@@ -7358,7 +7358,20 @@ class AttemptReasoningRuntime:
                 )
                 continue
             if (
-                active.context is DecisionContext.PATCH_CONSTRUCTION
+                # P2-1 (2026-07-29, ARCH-D lever 1): SOURCE_UNDERSTANDING joins
+                # PATCH_CONSTRUCTION. Its REQUIRED role is BEHAVIORAL_CONTRACT and
+                # its only STANDING carrier is this record — with the guard
+                # PATCH_CONSTRUCTION-only, every SOURCE_UNDERSTANDING window after
+                # the task-start dose starved (1,529 of 1,533 unresolved-
+                # BEHAVIORAL_CONTRACT compilation failures on run 30478454517),
+                # which is the head of the commitment-boundary withhold loop.
+                # PATCH_PROPAGATION and the other contexts stay excluded (pinned
+                # by test_non_patch_decision_does_not_rematerialize_delivered_obligation).
+                active.context
+                in {
+                    DecisionContext.PATCH_CONSTRUCTION,
+                    DecisionContext.SOURCE_UNDERSTANDING,
+                }
                 and source.lifecycle
                 in {
                     EvidenceLifecycle.RELEASED,

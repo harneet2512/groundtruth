@@ -24370,7 +24370,7 @@ class CanonicalRuntimeAttachment:
                             ),
                         },
                     )
-                except Exception:  # noqa: BLE001 — telemetry never breaks the loop
+                except Exception:  # noqa: BLE001 -- telemetry never blocks the agent's turn
                     pass
             records = tuple(self.attempt_runtime._evidence.values())
 

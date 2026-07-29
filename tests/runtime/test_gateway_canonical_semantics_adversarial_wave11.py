@@ -155,7 +155,10 @@ def test_ranked_localization_semantics_preserve_rank_and_next_action(
         ("src/auth/session.py", 41, "refresh_session"),
         ("src/auth/token.py", 19, "rotate_token"),
     ]
-    monkeypatch.setattr(gateway, "_ranked_localization_rows", lambda _state: rows)
+    # signature grew an optional ProducerAudit (abstention telemetry)
+    monkeypatch.setattr(
+        gateway, "_ranked_localization_rows", lambda _state, _audit=None: rows
+    )
     state = _state(tmp_path)
     event = _event(
         gateway.KIND_SEARCH,
