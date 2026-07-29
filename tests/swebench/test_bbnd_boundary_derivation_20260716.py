@@ -16,9 +16,21 @@ minted. Residuals:
 
 Run: PYTHONPATH=scripts/swebench:src pytest tests/swebench/test_bbnd_boundary_derivation_20260716.py -q
 """
+import sys
+from pathlib import Path
+
 import pytest
 
-import chronology_extract as ce
+# scripts/swebench is not a package and is not installed; the module is importable only when
+# that directory is on sys.path. The `Run:` line above sets PYTHONPATH, but a bare
+# `pytest <this file>` (or any isolated collection) does not, so the file used to be a
+# collection ERROR whenever it ran alone. Same bootstrap as the working neighbours
+# (tests/swebench/test_gt_feature_metrics_128.py).
+for _p in (Path(__file__).resolve().parents[2] / "scripts" / "swebench",):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+import chronology_extract as ce  # noqa: E402
 from groundtruth.runtime import fact_registry as fr
 from groundtruth.runtime.chronological_adjudication import (
     ON_TIME,

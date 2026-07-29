@@ -9,10 +9,20 @@ untouched (the receipt fields are unchanged).
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
-import fair_probe_result as fair_probe_module
-from fair_probe_result import (
+# scripts/swebench is not a package and is not installed; `fair_probe_result` resolves only
+# when that directory is on sys.path. A bare `pytest <this file>` sets no PYTHONPATH, so the
+# file used to be a collection ERROR whenever it ran alone. Same bootstrap as the working
+# neighbours (tests/swebench/test_gt_feature_metrics_128.py).
+for _p in (Path(__file__).resolve().parents[2] / "scripts" / "swebench",):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+import fair_probe_result as fair_probe_module  # noqa: E402
+from fair_probe_result import (  # noqa: E402
     ControlResult,
     _window_consequences,
     extract_live_opportunity_observations,
