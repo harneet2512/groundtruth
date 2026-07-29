@@ -249,3 +249,60 @@ def test_gateway_audit_is_return_value_inert() -> None:
         gateway._produce_def_ref_partition(event, with_audit)
     )
     assert rows[-1]["outcome"] == "returned_nothing"
+
+
+def test_caller_contract_view_names_its_abstention() -> None:
+    """Lever 2 / T3 (ARCH-B claim 1, ARCH-D): both caller_contract producers were
+    the largest UNWIRED abstention surface — ~1,529 view ticks abstained through
+    uninstrumented branches while the class starved SOURCE_UNDERSTANDING. The
+    view-form must trace entered + a named terminal like every wired producer."""
+    rows: list[dict] = []
+    state = gateway.GatewayState(
+        producer_recorder=rows.append,
+        producer_audit_context=_context(),
+    )
+    event = gateway.ToolEvent(
+        kind=gateway.KIND_VIEW,
+        command="cat src/api.py",
+        output="",
+        action_index=21,
+        semantic_events=("file_view",),
+        primary_boundary="file_view",
+        semantics_authoritative=True,
+        viewed_files=(),
+    )
+    assert gateway._produce_caller_contract_view(event, state) == []
+    assert [row["outcome"] for row in rows] == ["entered", "returned_nothing"]
+    assert rows[-1]["abstention_reasons"] == [
+        {
+            "category": "dependency_failure",
+            "reason": "no_confined_viewed_file",
+            "detail": {},
+        }
+    ]
+
+
+def test_caller_contract_edit_form_names_its_abstention() -> None:
+    rows: list[dict] = []
+    state = gateway.GatewayState(
+        producer_recorder=rows.append,
+        producer_audit_context=_context(),
+    )
+    event = gateway.ToolEvent(
+        kind=gateway.KIND_EDIT,
+        command="sed -i 's/a/b/' src/api.py",
+        output="",
+        action_index=22,
+        semantic_events=("edit_result",),
+        primary_boundary="edit_result",
+        semantics_authoritative=True,
+    )
+    assert gateway._produce_caller_contract(event, state) == []
+    assert [row["outcome"] for row in rows] == ["entered", "returned_nothing"]
+    assert rows[-1]["abstention_reasons"] == [
+        {
+            "category": "dependency_failure",
+            "reason": "no_edited_before_after_pair",
+            "detail": {},
+        }
+    ]

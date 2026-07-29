@@ -3587,6 +3587,17 @@ def _produce_caller_contract_view(
             return ""
         return rel
 
+    # Lever 2 / T3 (2026-07-29): the largest unwired abstention surface — on run
+    # 30478454517 the view-form abstained on ~1,529 view ticks with NO trace while
+    # its class starved SOURCE_UNDERSTANDING (ARCH-B claim 1 branch census;
+    # ARCH-D). Every termination now carries a named reason; behavior-neutral.
+    audit = _producer_audit(
+        state,
+        event,
+        producer="caller_contract",
+        evidence_types=("caller_contract_view",),
+        invocation_site="gateway.view.caller_contract_view",
+    )
     viewed = tuple(
         dict.fromkeys(
             rel
@@ -3595,10 +3606,12 @@ def _produce_caller_contract_view(
         )
     )
     if not viewed:
-        return []
+        audit.note("no_confined_viewed_file", category="dependency_failure")
+        return audit.finish([])
     con = _open(state)
     if con is None:
-        return []
+        audit.note("graph_unavailable", category="dependency_failure")
+        return audit.finish([])
     out: list[EvidenceEnvelope] = []
     labels_sql = ",".join("?" * len(_DEF_LABELS))
     try:
@@ -3611,12 +3624,23 @@ def _produce_caller_contract_view(
                 _DEF_LABELS,
             ).fetchall()
         except sqlite3.Error:
-            return []
+            audit.note("definitions_query_failed", category="dependency_failure")
+            return audit.finish([])
         for rel in viewed:
             if not rel or _is_leaky(rel):
+                audit.note(
+                    "viewed_file_leaky",
+                    category="authority",
+                    detail={"file": rel},
+                )
                 continue
             viewed_state = _source_state_for_file(event, state, rel)
             if viewed_state is None:
+                audit.note(
+                    "viewed_source_state_unavailable",
+                    category="dependency_failure",
+                    detail={"file": rel},
+                )
                 continue
             definitions: list[tuple[str, int]] = []
             for name, file_path, line in raw_definitions:
@@ -3695,6 +3719,11 @@ def _produce_caller_contract_view(
                 if sites:
                     contracts.append((symbol, sites))
             if not contracts:
+                audit.note(
+                    "no_verified_caller_contract",
+                    category="correct_quiet",
+                    detail={"file": rel, "definitions": len(definitions)},
+                )
                 continue
             all_sites = [
                 (symbol, site)
@@ -3704,6 +3733,11 @@ def _produce_caller_contract_view(
             # A source view with a very broad public surface needs a narrower
             # symbol decision; a truncated caller set would be misleading.
             if len(all_sites) > 12:
+                audit.note(
+                    "broad_public_surface",
+                    category="correct_quiet",
+                    detail={"file": rel, "caller_sites": len(all_sites)},
+                )
                 continue
             graph_revision, _valid_until = _revisions_for(
                 state,
@@ -3815,7 +3849,7 @@ def _produce_caller_contract_view(
             )
     finally:
         con.close()
-    return out
+    return audit.finish(out)
 
 
 def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -3826,12 +3860,23 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
     per the registry boundary override). Correct-or-quiet: no before/after, no graph, no
     detectable signature change, or no cross-file caller -> []. Works on Go/Rust/TS/JS/Python
     because it reads the tree-sitter CALLS graph, NOT a Python ast."""
+    # Lever 2 / T3 (2026-07-29): named terminal outcomes, behavior-neutral
+    # (see _produce_caller_contract_view).
+    audit = _producer_audit(
+        state,
+        event,
+        producer="caller_contract",
+        evidence_types=("caller_break",),
+        invocation_site="gateway.edit.caller_contract",
+    )
     eba = event.edit_before_after
     if not eba:
-        return []
+        audit.note("no_edited_before_after_pair", category="dependency_failure")
+        return audit.finish([])
     con = _open(state)
     if con is None:
-        return []
+        audit.note("graph_unavailable", category="dependency_failure")
+        return audit.finish([])
     out: list[EvidenceEnvelope] = []
     try:
         for cf, ba in sorted(eba.items()):
@@ -3840,10 +3885,20 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
             after_parameters = _defs_params(after or "")
             rel = _norm_fp(_to_repo_rel(cf, state.repo_root))
             if not rel or _is_leaky(rel):
+                audit.note(
+                    "edited_file_leaky",
+                    category="authority",
+                    detail={"file": rel},
+                )
                 continue
             for sym in _sig_changed_symbols(before or "", after or ""):
                 sites = _fact_callers_of_symbol_in_file(con, sym, rel, state.repo_root)
                 if not sites:
+                    audit.note(
+                        "no_cross_file_caller",
+                        category="correct_quiet",
+                        detail={"symbol": sym, "file": rel},
+                    )
                     continue
                 n_callers = len(sites)
                 n_files = len({site["file"] for site in sites})
