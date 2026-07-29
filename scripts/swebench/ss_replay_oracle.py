@@ -681,6 +681,61 @@ def _run_quiet(cmd: list[str]) -> int:
         return 1
 
 
+def _mirror_drive(reference: str | None = None) -> str:
+    """The drive prefix the container paths are mirrored under.
+
+    On Windows a rootless POSIX path resolves against the CURRENT DRIVE, so the mirrors
+    live at <drive>:\\testbed etc. and every host-side command must carry that prefix.
+    On POSIX the container paths ARE the real paths, so the prefix is EMPTY — the old
+    unconditional ``or "D:"`` fallback rewrote /testbed to "D:/testbed" on Linux, which
+    is not a path there at all."""
+    if os.name != "nt":
+        return ""
+    anchor = os.path.abspath(reference) if reference else os.getcwd()
+    return os.path.splitdrive(anchor)[0] or "D:"
+
+
+#: Cached probe: does this host grant NON-INTERACTIVE root? The recorded run WAS root in its
+#: container, so its paths (/testbed, /gt_artifacts, /opt/gt) are root-owned locations on a
+#: POSIX host. Relocating them is not an option — the recorded ledger rows embed those exact
+#: strings — so an unprivileged host must stage them via sudo. Absent sudo the helpers fail
+#: exactly as before (blocked, loudly); this only ADDS a capability.
+_SUDO_PROBED = False
+_SUDO_ARGV: list[str] | None = None
+
+
+def _sudo() -> list[str] | None:
+    global _SUDO_PROBED, _SUDO_ARGV
+    if not _SUDO_PROBED:
+        _SUDO_PROBED = True
+        if os.name != "nt" and _run_quiet(["sudo", "-n", "true"]) == 0:
+            _SUDO_ARGV = ["sudo", "-n"]
+    return _SUDO_ARGV
+
+
+def _ensure_mirror_dir(path: Path) -> None:
+    """Make a container-path mirror directory EXIST and be writable by this process.
+
+    /gt_artifacts and /opt/gt sit directly under a root-owned "/" on POSIX; an
+    unprivileged mkdir raises PermissionError. Fall back to sudo mkdir + chown so the
+    rest of the staging (plain copies) needs no privilege at all."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        sudo = _sudo()
+        if sudo is None:
+            raise
+        _run_quiet([*sudo, "mkdir", "-p", str(path)])
+    if not path.is_dir():
+        raise SeamReplayBlocked(f"could not create container-path mirror {path}")
+    if not os.access(path, os.W_OK):
+        sudo = _sudo()
+        if sudo is not None:
+            _run_quiet([*sudo, "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(path)])
+    if not os.access(path, os.W_OK):
+        raise SeamReplayBlocked(f"container-path mirror {path} is not writable by this user")
+
+
 # ── SS-R3: EXCLUSIVE RUN LOCK ─────────────────────────────────────────────────
 # The container-path mirrors (\testbed, \gt_artifacts, \opt\gt, \tmp state) are DRIVE-GLOBAL
 # singletons — two concurrent oracle instances swap junctions under each other's children and
@@ -693,6 +748,16 @@ _LOCK_PATH = Path("/tmp/ssr_replay_oracle.lock")
 
 def _pid_alive(pid: int) -> bool:
     import subprocess
+    if os.name != "nt":
+        # tasklist does not exist on POSIX; signal 0 is the portable liveness probe.
+        # Unknown (EPERM = alive but foreign, or any other error) stays fail-safe: alive.
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except Exception:  # noqa: BLE001
+            return True
     try:
         r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
                            capture_output=True, text=True, timeout=15)
@@ -800,6 +865,13 @@ def _make_junction(link: Path, target: Path) -> bool:
     try:
         os.symlink(str(target), str(link), target_is_directory=True)
         return True
+    except PermissionError:
+        # /testbed hangs off a root-owned "/" — the recorded container path cannot be
+        # relocated, so stage it with sudo when the host grants it (Codespace).
+        sudo = _sudo()
+        if sudo is None:
+            return False
+        return _run_quiet([*sudo, "ln", "-sfn", str(target), str(link)]) == 0
     except OSError:
         return False
 
@@ -812,8 +884,15 @@ def _remove_junction(link: Path) -> None:
         else:
             try:
                 link.unlink()
-            except OSError:
+                return
+            except PermissionError:
                 pass
+            except OSError:
+                return
+            sudo = _sudo()
+            if sudo is not None:
+                # -f, never -r: unlink the LINK, never descend into the snapshot behind it.
+                _run_quiet([*sudo, "rm", "-f", str(link)])
 
 
 def stage_current_v2_obligations(recorded_artifacts: Path, target_dir: Path) -> Path:
@@ -902,10 +981,18 @@ class TaskMirrors:
             raise SeamReplayBlocked(f"{self.task}: could not junction {_MIRROR_TESTBED} -> {self.snapshot}")
         _MIRROR_TMP.mkdir(exist_ok=True)
         _make_junction(_MIRROR_TMP / "gt_work_src", self.snapshot)
-        # /gt_artifacts: graph.db (the pristine mount copy) + the recorded cert artifacts
-        if _MIRROR_ARTIFACTS.exists():
-            shutil.rmtree(_MIRROR_ARTIFACTS, ignore_errors=True)
-        _MIRROR_ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        # /gt_artifacts: graph.db (the pristine mount copy) + the recorded cert artifacts.
+        # The mirror ROOT is kept and its CONTENTS emptied — recreating the root itself needs
+        # write access to "/" (POSIX), which staging deliberately does not require.
+        _ensure_mirror_dir(_MIRROR_ARTIFACTS)
+        for stale in _MIRROR_ARTIFACTS.iterdir():
+            if stale.is_dir() and not stale.is_symlink():
+                shutil.rmtree(stale, ignore_errors=True)
+            else:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
         shutil.copyfile(self.recorded / "graph.db", _MIRROR_ARTIFACTS / "graph.db")
         # FAIL-LOUD copy-integrity guard (the conan-17092 bleed staged ANOTHER task's graph
         # after a lock race): the mirror COPY must be byte-equal to THIS task's RECORDED
@@ -938,13 +1025,21 @@ class TaskMirrors:
                     shutil.copyfile(f, _MIRROR_ARTIFACTS / f.name)
         if stage_current_v2:
             stage_current_v2_obligations(art_src, _MIRROR_ARTIFACTS)
-        # /opt/gt: gt-index binary (both extensionless + .exe for CreateProcess) + root file
-        _MIRROR_OPT_GT.mkdir(parents=True, exist_ok=True)
-        bin_src = _REPO / "gt-index" / "gt-index.exe"
+        # /opt/gt: gt-index binary (both extensionless + .exe for CreateProcess) + root file.
+        # The built binary is gt-index.exe on Windows and gt-index on POSIX — take whichever
+        # this checkout actually has, and fail LOUD (never silently index-less) if neither.
+        _ensure_mirror_dir(_MIRROR_OPT_GT)
+        bin_src = next((c for c in (_REPO / "gt-index" / "gt-index.exe",
+                                    _REPO / "gt-index" / "gt-index") if c.is_file()), None)
+        if bin_src is None:
+            raise SeamReplayBlocked(
+                f"{self.task}: no gt-index binary in {_REPO / 'gt-index'} — build it "
+                f"(CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index ./cmd/gt-index/)")
         for name in ("gt-index", "gt-index.exe"):
             dst = _MIRROR_OPT_GT / name
             if not dst.is_file() or dst.stat().st_size != bin_src.stat().st_size:
                 shutil.copyfile(bin_src, dst)
+                dst.chmod(0o755)
         # /opt/gt/models -> the local embedder models (the recorded run's models_root was
         # /opt/gt/models; the semantic/content legs stall on HF fetch timeouts without it)
         models_src = _REPO / "models"
@@ -952,9 +1047,9 @@ class TaskMirrors:
             _make_junction(_MIRROR_OPT_GT / "models", models_src)
         (_MIRROR_OPT_GT / "gt_root.txt").write_text("/testbed", encoding="utf-8")
         # /tmp/gt_root.txt is what the AGENT's own commands `cat` (cd $(cat /tmp/gt_root.txt));
-        # the edit-applier executes those via Git Bash, which needs the WINDOWS form.
-        drive = os.path.splitdrive(os.getcwd())[0] or "D:"
-        (_MIRROR_TMP / "gt_root.txt").write_text(f"{drive}/testbed", encoding="utf-8")
+        # the edit-applier executes those via Git Bash, which on Windows needs the DRIVE form.
+        # On POSIX the mirror IS /testbed, so the prefix is empty.
+        (_MIRROR_TMP / "gt_root.txt").write_text(f"{_mirror_drive()}/testbed", encoding="utf-8")
         # clean the seam's /tmp state from any prior task
         for name in _TMP_STATE:
             p = _MIRROR_TMP / name
@@ -1178,7 +1273,7 @@ def _strip_lead_cd(cmd: str) -> str:
 def _rewrite_container_paths(cmd: str) -> str:
     """Rewrite /testbed and /tmp to their drive-mirrored Windows forms in the command PREFIX
     only (heredoc bodies are file CONTENT and must stay byte-exact)."""
-    drive = os.path.splitdrive(os.getcwd())[0] or "D:"
+    drive = _mirror_drive()
     head = _head_of(cmd)
     tail = cmd[len(head):]
     head = head.replace("$(cat /tmp/gt_root.txt)", "/testbed")
@@ -1271,7 +1366,7 @@ def _baseline_hash(cwd: str, relative: str) -> str | None:
 def _confined_path(raw: str, cwd: str) -> tuple[str, Path, bool]:
     """Normalize a command target and prove it remains in the repo mirror or mirror /tmp."""
     token = raw.strip().strip("'\"")
-    drive = os.path.splitdrive(os.path.abspath(cwd))[0] or "D:"
+    drive = _mirror_drive(cwd)
     token_path = Path(token)
     explicit_tmp = token.startswith("/tmp/") or (
         token_path.is_absolute()
@@ -1451,7 +1546,7 @@ def _python_source(body: str) -> tuple[str | None, str]:
     """Extract Python source without executing shell interpolation."""
     scratch = _EDIT_SCRATCH_PY.match(body)
     if scratch:
-        drive = os.path.splitdrive(os.getcwd())[0] or "D:"
+        drive = _mirror_drive()
         script = Path(scratch.group(1).replace("/tmp/", f"{drive}/tmp/"))
         try:
             return script.read_text(encoding="utf-8"), "scratch"
@@ -1934,7 +2029,7 @@ def apply_edit_command(cmd: str, cwd: str, mutation_executor=None) -> Materializ
     execution_env["PYTHONUTF8"] = "1"
     try:
         if scratch:
-            drive = os.path.splitdrive(os.getcwd())[0] or "D:"
+            drive = _mirror_drive()
             script = scratch.group(1).replace("/tmp/", f"{drive}/tmp/")
             if not Path(script).is_file():
                 return MaterializationReceipt(True, False, False, "scratch-script-absent")
