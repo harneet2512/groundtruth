@@ -3155,16 +3155,24 @@ def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[Evidence
     if not event.edit_before_after:
         audit.note("no_edit_before_after", category="dependency_failure")
         return audit.finish([])
-    return audit.finish(_produce_patch_delta_inner(event, state))
+    try:
+        findings = _produce_patch_delta_inner(event, state)
+    except Exception as exc:  # noqa: BLE001 - preserve correct-or-quiet behavior
+        audit.fault(exc)
+        return []
+    if not findings:
+        audit.note("no_patch_delta_findings", category="correct_quiet")
+    return audit.finish(findings)
 
 
 def _produce_patch_delta_inner(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     if not event.edit_before_after:
         return []
-    try:
-        res = analyze_patch_delta(dict(event.edit_before_after), state.repo_root, state.graph_db or "")
-    except Exception:  # noqa: BLE001
-        return []
+    res = analyze_patch_delta(
+        dict(event.edit_before_after),
+        state.repo_root,
+        state.graph_db or "",
+    )
     out: list[EvidenceEnvelope] = []
     for sm in res.signature_mismatches:
         if _is_leaky(sm.caller_file):
@@ -3930,7 +3938,14 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
                     detail={"file": rel},
                 )
                 continue
-            for sym in _sig_changed_symbols(before or "", after or ""):
+            changed_symbols = _sig_changed_symbols(before or "", after or "")
+            if not changed_symbols:
+                audit.note(
+                    "no_signature_change",
+                    category="correct_quiet",
+                    detail={"file": rel},
+                )
+            for sym in changed_symbols:
                 sites = _fact_callers_of_symbol_in_file(con, sym, rel, state.repo_root)
                 if not sites:
                     audit.note(
@@ -4020,7 +4035,7 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
                                    )))
     finally:
         con.close()
-    return out
+    return audit.finish(out)
 
 
 def _produce_covering(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:

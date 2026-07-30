@@ -306,3 +306,99 @@ def test_caller_contract_edit_form_names_its_abstention() -> None:
             "detail": {},
         }
     ]
+
+
+def test_caller_contract_edit_normal_empty_path_has_terminal(
+    monkeypatch,
+) -> None:
+    """An edit with usable before/after bytes must close its audit invocation."""
+
+    class _Connection:
+        def close(self) -> None:
+            pass
+
+    rows: list[dict] = []
+    state = gateway.GatewayState(
+        producer_recorder=rows.append,
+        producer_audit_context=_context(),
+    )
+    event = gateway.ToolEvent(
+        kind=gateway.KIND_EDIT,
+        command="apply_patch src/api.py",
+        output="",
+        action_index=23,
+        semantic_events=("edit_result",),
+        primary_boundary="edit_result",
+        semantics_authoritative=True,
+        edit_before_after={"src/api.py": ("def f(a): pass", "def f(a): pass")},
+    )
+    monkeypatch.setattr(gateway, "_open", lambda _state: _Connection())
+
+    assert gateway._produce_caller_contract(event, state) == []
+    assert [row["outcome"] for row in rows] == ["entered", "returned_nothing"]
+    assert rows[-1]["abstention_reasons"] == [
+        {
+            "category": "correct_quiet",
+            "reason": "no_signature_change",
+            "detail": {"file": "src/api.py"},
+        }
+    ]
+
+
+def test_patch_delta_empty_finding_is_named_correct_quiet(monkeypatch) -> None:
+    rows: list[dict] = []
+    state = gateway.GatewayState(
+        producer_recorder=rows.append,
+        producer_audit_context=_context(),
+    )
+    event = gateway.ToolEvent(
+        kind=gateway.KIND_EDIT,
+        command="apply_patch src/api.py",
+        output="",
+        action_index=24,
+        semantic_events=("edit_result",),
+        primary_boundary="edit_result",
+        semantics_authoritative=True,
+        edit_before_after={"src/api.py": ("x = 1", "x = 2")},
+    )
+    monkeypatch.setattr(gateway, "_produce_patch_delta_inner", lambda *_args: [])
+
+    assert gateway._produce_patch_delta(event, state) == []
+    assert [row["outcome"] for row in rows] == ["entered", "returned_nothing"]
+    assert rows[-1]["abstention_reasons"] == [
+        {
+            "category": "correct_quiet",
+            "reason": "no_patch_delta_findings",
+            "detail": {},
+        }
+    ]
+
+
+def test_patch_delta_analyzer_fault_has_terminal_and_stays_quiet(
+    monkeypatch,
+) -> None:
+    rows: list[dict] = []
+    state = gateway.GatewayState(
+        producer_recorder=rows.append,
+        producer_audit_context=_context(),
+    )
+    event = gateway.ToolEvent(
+        kind=gateway.KIND_EDIT,
+        command="apply_patch src/api.py",
+        output="",
+        action_index=25,
+        semantic_events=("edit_result",),
+        primary_boundary="edit_result",
+        semantics_authoritative=True,
+        edit_before_after={"src/api.py": ("x = 1", "x = 2")},
+    )
+
+    def _fail(*_args):
+        raise RuntimeError("private analyzer detail")
+
+    monkeypatch.setattr(gateway, "_produce_patch_delta_inner", _fail)
+
+    assert gateway._produce_patch_delta(event, state) == []
+    assert [row["outcome"] for row in rows] == ["entered", "fault"]
+    assert rows[-1]["fault_type"] == "RuntimeError"
+    assert "private analyzer detail" not in str(rows[-1])
