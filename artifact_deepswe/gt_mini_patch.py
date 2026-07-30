@@ -7382,6 +7382,42 @@ class _L6RefreshOutcome:
     selected_db: str = ""
 
 
+def _l6_full_reindex(root: str) -> _L6RefreshOutcome:
+    """F2 (2026-07-29, smoke 30503578103): recover from an UNPROVEN git delta instead
+    of latching graph_fresh=False for the rest of the attempt.
+
+    When `_graph_input_delta` cannot prove what changed AND the event carries no
+    per-file candidates (bash-mediated edit, no bridge), the sentinel used to stay
+    set with nothing that could ever repair it — and `_envelope_observes_graph`
+    then dropped essentially the whole catalogue (the documented silent kill
+    switch). Honest alternative: rebuild the WORK graph wholesale with the same
+    binary L6 uses, so graph facts are CORRECT rather than quiet-forever.
+    Substrate rule preserved: the authoritative RO graph is never mutated — if the
+    active db IS the host mount (work-copy staging failed), we abstain exactly
+    like `_invalidate_on_edit` does. Correct-or-quiet: any fault returns stale.
+    """
+    try:
+        gt_index = os.environ.get("GT_INDEX_BIN", "/tmp/gt-index")
+        db = _db_path()
+        host_ro = os.environ.get("GT_HOST_GRAPH_DB") or ""
+        if host_ro and db == host_ro:
+            return _L6RefreshOutcome(False, "work_copy_unavailable", db)
+        if not (os.path.isfile(gt_index) and db):
+            return _L6RefreshOutcome(False, "binary_or_db_missing", db)
+        proc = subprocess.run(
+            (gt_index, f"-root={root}", f"-output={db}"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=180,
+            check=False,
+        )
+        if proc.returncode == 0 and os.path.isfile(db):
+            return _L6RefreshOutcome(True, "full_reindex_ok", db)
+        return _L6RefreshOutcome(False, f"full_reindex_rc={proc.returncode}", db)
+    except Exception as exc:  # noqa: BLE001 -- fail closed on graph facts
+        return _L6RefreshOutcome(False, f"full_reindex_exception:{type(exc).__name__}", "")
+
+
 def _invalidate_on_edit(rel: str, root: str) -> _L6RefreshOutcome:
     """L6 (minimal incremental-freshness port): after a source edit, drop the stale
     gt_hook AST cache and best-effort single-file reindex graph.db, so the next
@@ -10401,6 +10437,26 @@ def _publish_active_decision(attachment, active) -> None:
         context = getattr(getattr(active, "context", None), "name", "")
         attachment._active_decision_context = context if isinstance(context, str) else ""
     except Exception:  # noqa: BLE001 -- telemetry must never break delivery
+        pass
+
+
+def _producer_invocation_recorder(row: dict) -> None:
+    """F3: durable sink for gateway ProducerAudit rows (gt.producer_invocation.v1).
+
+    Behavior-neutral by construction (producer_audit.py: no audit field is read by
+    selection/rendering/delivery). One row per producer entry/terminal, so every
+    non-fired feature carries a NAMED reason in the harvested ledger instead of an
+    unexplained absence. Never raises (a telemetry fault must not touch production).
+    """
+    try:
+        _runtime_ledger_record(
+            kind="gateway.producer_invocation",
+            outcome=str(row.get("outcome") or "row"),
+            reason=str(row.get("producer") or "")[:120],
+            chars=0,
+            extra=dict(row),
+        )
+    except Exception:
         pass
 
 
@@ -24631,6 +24687,29 @@ class CanonicalRuntimeAttachment:
                     self.unresolved_graph_refreshes[
                         "<unresolved_repository_change>"
                     ] = "graph_input_delta_unresolved"
+                    # F2 (2026-07-29): an unproven delta with NO per-file candidates
+                    # had no repair path — the sentinel latched and the graph
+                    # catalogue stayed dark for the rest of the attempt. Rebuild the
+                    # work graph wholesale instead; a verified rebuild makes every
+                    # graph fact current, so the sentinel is honestly cleared.
+                    if not graph_changed_files:
+                        _full = _l6_full_reindex(_root())
+                        if _full.fresh:
+                            self.unresolved_graph_refreshes.pop(
+                                "<unresolved_repository_change>", None
+                            )
+                        try:
+                            _runtime_ledger_record(
+                                kind="canonical_runtime.graph_refresh_fallback",
+                                outcome=(
+                                    "REINDEX_FULL_OK" if _full.fresh
+                                    else "REINDEX_FULL_FAILED"
+                                ),
+                                reason=str(_full.reason)[:200],
+                                chars=0,
+                            )
+                        except Exception:
+                            pass
                 metadata_changes = tuple(
                     path
                     for path in graph_changed_files
@@ -24663,6 +24742,30 @@ class CanonicalRuntimeAttachment:
                             or "refresh_outcome_unavailable"
                         )
             graph_fresh = not self.unresolved_graph_refreshes
+            # F1 (2026-07-29): the freshness kill switch was computed, used to drop
+            # the whole graph catalogue, and never persisted ("nothing would say
+            # so"). One durable row per TRANSITION makes it loud: when it went
+            # stale, WHY (per-path reasons), and when it recovered.
+            try:
+                _prev_fresh = getattr(self, "_graph_fresh_prev", None)
+                if _prev_fresh is None or _prev_fresh != graph_fresh:
+                    _runtime_ledger_record(
+                        kind="canonical_runtime.graph_freshness",
+                        outcome="fresh" if graph_fresh else "stale",
+                        reason=(
+                            "; ".join(
+                                f"{p}:{r}"
+                                for p, r in sorted(
+                                    self.unresolved_graph_refreshes.items()
+                                )
+                            )[:400]
+                            or "all_refreshes_resolved"
+                        ),
+                        chars=0,
+                    )
+                self._graph_fresh_prev = graph_fresh
+            except Exception:
+                pass
             graph_override = None
             if not graph_fresh:
                 refresh_reasons = tuple(
@@ -24835,17 +24938,36 @@ class CanonicalRuntimeAttachment:
                 revision=after,
                 graph_fresh=graph_fresh,
             )
+            _n_produced = len(envelopes)
             envelopes = tuple(
                 envelope
                 for envelope in envelopes
                 if graph_fresh or not _envelope_observes_graph(envelope)
             )
+            _n_kept = len(envelopes)
             records = canonicalize_evidence_envelopes(
                 envelopes,
                 committed_event_hashes=self._committed_event_hashes(),
             )
             for record in records:
                 self.attempt_runtime.ingest_evidence(record)
+            # F1b (2026-07-29): the produce->ingest funnel per observation. On smoke
+            # 30503578103 the store never exceeded 4 items and nothing recorded
+            # whether producers abstained or the freshness filter ate their output.
+            # One row per observation answers exactly where the funnel narrows.
+            try:
+                _runtime_ledger_record(
+                    kind="canonical_runtime.produce_funnel",
+                    outcome="observed",
+                    reason=(
+                        f"produced={_n_produced} kept={_n_kept} "
+                        f"ingested={len(records)} graph_fresh={graph_fresh} "
+                        f"store={len(self.attempt_runtime._evidence)}"
+                    ),
+                    chars=0,
+                )
+            except Exception:
+                pass
             all_records = tuple(
                 self.attempt_runtime._evidence.values()
             )
@@ -26322,6 +26444,12 @@ def install_canonical_runtime(*, model, agent, env, task):
                 if _inseam_metrics_on()
                 else None
             ),
+            # F3 (2026-07-29, smoke 30503578103): ProducerAudit rows had NO sink on the
+            # canonical path — `producer_recorder` defaulted to None at every seam
+            # construction site, so all 17-feature non-fires were UNEXPLAINED absences
+            # (0 gt.producer_invocation.v1 rows across 992 ledger rows). Wire the
+            # durable runtime ledger as the recorder; telemetry-only, never model bytes.
+            producer_recorder=_producer_invocation_recorder,
         )
         attachment = CanonicalRuntimeAttachment(
             attached=True,
