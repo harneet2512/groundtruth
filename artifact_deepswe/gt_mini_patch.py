@@ -24843,6 +24843,21 @@ class CanonicalRuntimeAttachment:
                 self.last_native_test_outcome = status
             elif operation is ActionOperation.SUBMIT:
                 status = "accepted"
+                # Measurement (2026-07-29): the canonical path stamps every submit
+                # "accepted" — the submit-refusal gate is not evaluated here, so
+                # submit_refusal / GT_SS_SUBMIT_RED are structurally unreachable on
+                # this route (smoke 30507453355: 150 submit attempts, 103 bounces
+                # on one task, zero refusal evaluations). Record the fact durably;
+                # wiring the gate is a separate behavioral decision.
+                try:
+                    _runtime_ledger_record(
+                        kind="canonical_runtime.submit_boundary",
+                        outcome="gate_not_evaluated",
+                        reason="canonical submit stamps accepted; refusal unreachable",
+                        chars=0,
+                    )
+                except Exception:
+                    pass
             else:
                 status = (
                     "success"
@@ -24962,7 +24977,16 @@ class CanonicalRuntimeAttachment:
                     reason=(
                         f"produced={_n_produced} kept={_n_kept} "
                         f"ingested={len(records)} graph_fresh={graph_fresh} "
-                        f"store={len(self.attempt_runtime._evidence)}"
+                        f"store={len(self.attempt_runtime._evidence)} "
+                        # smoke 30507453355: only 1 of 62 edits reached the edit
+                        # branch and obs count was far below step count — record
+                        # WHICH operation this observation is and whether the
+                        # edit bridges yielded anything, so coverage gaps and
+                        # bridge-empty turns are named, not inferred.
+                        f"op={getattr(operation, 'name', operation)} "
+                        f"changed={len(changed_files or ())} "
+                        f"eba={bool(edit_before_after)} "
+                        f"sem={','.join(event.semantic_events) or '-'}"
                     ),
                     chars=0,
                 )

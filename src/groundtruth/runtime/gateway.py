@@ -3142,6 +3142,23 @@ def _produce_trace(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelo
 
 
 def _produce_patch_delta(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+    """Audited entry (2026-07-29): the edit-turn producers were the largest
+    UNNAMED absence on the live smokes — zero invocation rows, so 'never
+    invoked' vs 'invoked and abstained' was undecidable. Behavior-neutral."""
+    audit = _producer_audit(
+        state,
+        event,
+        producer="patch_delta",
+        evidence_types=("signature_mismatch",),
+        invocation_site="gateway.edit.patch_delta",
+    )
+    if not event.edit_before_after:
+        audit.note("no_edit_before_after", category="dependency_failure")
+        return audit.finish([])
+    return audit.finish(_produce_patch_delta_inner(event, state))
+
+
+def _produce_patch_delta_inner(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     if not event.edit_before_after:
         return []
     try:
@@ -4007,6 +4024,23 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
 
 
 def _produce_covering(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+    """Audited entry (2026-07-29): distinguishes 'covering never threaded'
+    (the dominant live case — 4 red test outputs, zero rows) from an executed
+    abstention. Behavior-neutral; delegates to the original body."""
+    audit = _producer_audit(
+        state,
+        event,
+        producer="covering",
+        evidence_types=("covering_verdict",),
+        invocation_site="gateway.test.covering",
+    )
+    if event.covering is None:
+        audit.note("no_covering_result_threaded", category="dependency_failure")
+        return audit.finish([])
+    return audit.finish(_produce_covering_inner(event, state))
+
+
+def _produce_covering_inner(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     """Wrap an injected covering verdict — the body goes through the EXISTING
     identity firewall (``native_render`` Format D), never raw runner stdout (F2).
     Correct-or-quiet: when nothing signal-bearing survives the firewall, abstain."""
