@@ -68,6 +68,7 @@ from groundtruth.runtime.native_render import (
     render_caller_contract_native,
     render_caller_usage_native,
     render_def_rows_native,
+    render_note_rows_native,
     render_ranked_list_native,
     render_registration_native,
     render_scope_constraint_native,
@@ -1108,6 +1109,42 @@ def _render_caller_break(env: EvidenceEnvelope) -> str:
     )
 
 
+def _render_caller_contract_view(env: EvidenceEnvelope) -> str:
+    """`caller_contract_view` (FACT-tier contracts attached to a pure source VIEW) -> the
+    TRUTHFUL view-contract form. The viewed file was NEVER edited, so the caller_break
+    change-claim ("<file>: error: <sym>() signature changed; ...") is a fabricated post-edit
+    fact here (wrong-info at VERIFIED tier; a multi-symbol view even surfaced the placeholder
+    ``fact_id`` "viewed_file_contract" as the changed symbol). Fixed 2026-07-29 by narrowing
+    the ROUTING - the break renderer stays exclusively on ``caller_break``.
+
+    Composition, all EXISTING primitives fed from what the producer already attaches:
+      * the producer's own payload head ("<sym>() has N production caller(s) across M
+        file(s)" per contract - the who-calls-it statement, leak-filtered at _mk_add);
+      * :func:`render_note_rows_native` over ``native_args['caller_rows']`` - the
+        relationship-agnostic compiler ``note:`` row per caller site, documented as never
+        overclaiming "signature" (correct-or-quiet by design);
+      * the typed :func:`render_caller_usage_native` lines (same loop as the break form).
+    Correct-or-quiet: no signal-bearing caller row -> "" -> _render_generic fallback (which
+    ships the same truthful payload tag-free in native mode)."""
+    args = env.native_args or {}
+    note_rows = render_note_rows_native(args.get("caller_rows") or ())
+    if not note_rows:
+        return ""
+    head = [ln for ln in env.payload if ln]
+    usage_lines: list[str] = []
+    for row in args.get("caller_usage_rows") or ():
+        try:
+            caller_file, caller_line, symbol, usage_kind = row
+        except (TypeError, ValueError):
+            continue
+        rendered = render_caller_usage_native(
+            caller_file, caller_line, symbol, usage_kind,
+        )
+        if rendered and rendered not in usage_lines:
+            usage_lines.append(rendered)
+    return "\n".join(part for part in (*head, note_rows, *usage_lines) if part)
+
+
 def _render_signature_delta(env: EvidenceEnvelope) -> str:
     """`signature_mismatch` (patch_delta arity break) -> the SM-1 mypy/gopls ARITY DIAGNOSTIC.
     The structured arity fields ride ``env.native_args`` (attached by the gateway producer);
@@ -1219,7 +1256,10 @@ def _render_scope(env: EvidenceEnvelope) -> str:
 _NATIVE_CLASS_RENDERERS: dict[str, Callable[[EvidenceEnvelope], str]] = {
     "trace_frame": _render_trace,
     "caller_break": _render_caller_break,
-    "caller_contract_view": _render_caller_break,
+    # 2026-07-29: the VIEW alias renders the truthful pre-edit contract form - routing it
+    # through _render_caller_break shipped a false "signature changed" claim for a file the
+    # agent merely read (see _render_caller_contract_view).
+    "caller_contract_view": _render_caller_contract_view,
     "def_ref_partition": _render_def_rows,
     "signature_mismatch": _render_signature_delta,
     "companion_surface": _render_registration,

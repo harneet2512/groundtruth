@@ -2566,26 +2566,48 @@ def _compute_ranked_localization_rows(
     return rows
 
 
+def _graph_state_token(state: GatewayState) -> "tuple[str, int | None, int | None]":
+    """The ranked-loc cache's graph-identity discriminator: ``(graph_db path,
+    st_mtime_ns, st_size)``; a missing/unreadable file is ``(path, None, None)``.
+    One os.stat per search turn — negligible next to a localize() run."""
+    db = state.graph_db or ""
+    try:
+        stat = os.stat(db)
+    except OSError:
+        return (db, None, None)
+    return (db, stat.st_mtime_ns, stat.st_size)
+
+
 def _ranked_localization_rows(
     state: GatewayState,
     audit: ProducerAudit | None = None,
 ) -> "list[tuple[str, int, str]]":
-    """The episode-MEMOIZED ranked-localization rows: localize() runs ONCE per run (the answer
-    is issue-fixed), reused on every subsequent search turn. Stored on ``state.episode`` (a
-    non-serialized private attribute); a slotted episode that rejects the setattr just
-    recomputes (correct-or-quiet, never a crash)."""
+    """The episode-MEMOIZED ranked-localization rows: localize() runs ONCE per GRAPH STATE
+    (the answer is issue-fixed over a fixed graph), reused on every subsequent search turn.
+    Stored on ``state.episode`` (a non-serialized private attribute) as
+    ``(graph_state_token, rows)``; a slotted episode that rejects the setattr just recomputes
+    (correct-or-quiet, never a crash).
+
+    KEYED, not unconditional (2026-07-29 fix): the unkeyed cache immortalized emptiness — a
+    search before graph.db existed (dormant start, pre-L6-wake) cached ``[]`` for the ENTIRE
+    episode and muted GT_LOC_RESLOT even after the graph was born or re-indexed (live mini
+    run: ``cached_empty_ranked_rows: 38``). The token (:func:`_graph_state_token`) makes a
+    graph birth or re-index a cache MISS while preserving the legitimate memoization — a
+    real 'graph answered: nothing relevant' on an unchanged graph is still served cached."""
     ep = state.episode
+    token = _graph_state_token(state)
     cached = getattr(ep, "_gt_ranked_loc_rows", None)
-    if cached is not None:
-        if not cached and audit is not None:
+    if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == token:
+        rows = cached[1]
+        if not rows and audit is not None:
             audit.note(
                 "cached_empty_ranked_rows",
                 category="dependency_failure",
             )
-        return cached
+        return rows
     rows = _compute_ranked_localization_rows(state, audit)
     try:
-        setattr(ep, "_gt_ranked_loc_rows", rows)
+        setattr(ep, "_gt_ranked_loc_rows", (token, rows))
     except Exception:  # noqa: BLE001 — a slotted episode can't cache; recompute is correct
         pass
     return rows

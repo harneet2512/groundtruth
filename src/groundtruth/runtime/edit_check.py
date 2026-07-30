@@ -39,9 +39,11 @@ PER-LANGUAGE HONESTY (checked vs unavailable, and WHY):
                  package's ``createSourceFile`` ``parseDiagnostics`` (2026-07-24
                  language-coverage fix; ``node --check`` cannot parse TS/JSX and
                  ``tsc --noEmit`` would conflate type/module errors). If the
-                 typescript module cannot be resolved the probe exits 0, so the
-                 verdict degrades toward ``ok``/``unavailable`` — never a
-                 fabricated syntax error (see _TS_PARSE_SCRIPT resolution notes).
+                 typescript module cannot be resolved the probe prints the
+                 ``GT_TS_UNAVAILABLE`` sentinel and exits 3, mapped to verdict
+                 ``unavailable`` — an unexecuted check is never an executed-ok
+                 and never a fabricated syntax error (2026-07-29 tier-honesty
+                 fix; see _TS_PARSE_SCRIPT resolution notes).
   .rs            UNAVAILABLE — no fast parse-only rustc invocation for a non-lib
                  file; ``--emit=metadata`` needs a crate/type context. Quiet.
   .java          UNAVAILABLE — ``javac`` needs classpath/type resolution; no cheap
@@ -71,6 +73,11 @@ from groundtruth.runtime.test_runner import _run_subprocess, classify_environmen
 # The injectable execution boundary — the SAME frozen contract Wave-1 established
 # (test_runner / covering_runner). ``None`` selects the host subprocess path.
 Executor = Callable[[list[str], str, int], "tuple[int | None, str, str]"]
+
+# Positive "checker could not run" declaration (2026-07-29). A probe that cannot
+# load its parser prints this sentinel and exits a distinct code, so an UNEXECUTED
+# check can never be classified as an executed clean parse (see _classify step 0).
+_CHECKER_UNAVAILABLE_SENTINEL = "GT_TS_UNAVAILABLE"
 
 # Diagnostic bound — Format-D-adjacent: short by design (lost-in-the-middle).
 _MAX_DIAG_CHARS = 1200
@@ -378,8 +385,10 @@ def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,
 
 # TypeScript/TSX/JSX PARSE-ONLY probe (audit 2026-07-24). Emits ONE `path:line:col: error TSxxxx:
 # msg` frame (the compiler's own wording — §0 native voice) and exits 1 on a real syntax error;
-# exits 0 silently when clean OR when the bundled `typescript` module cannot be loaded, so an
-# environment without it degrades to `ok`/unavailable rather than a fabricated error.
+# exits 0 silently when clean. When the bundled `typescript` module cannot be loaded it prints
+# the GT_TS_UNAVAILABLE sentinel and exits 3 -> verdict `unavailable` (2026-07-29: the silent
+# exit-0 form let an UNEXECUTED check classify as executed-ok and feed the completion cert's
+# syntax head as a real PASS). Never a fabricated error either way.
 #
 # RESOLUTION (fixed 2026-07-24 by the hardened build gate, which failed on exactly this): `node -e`
 # resolves `require` from CWD, so a repo WITHOUT its own node_modules can only reach the substrate's
@@ -388,7 +397,7 @@ def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,
 # exited 0 and every such repo silently reported "ok", i.e. the 76%-coverage-hole fix was half dead
 # for precisely the repos that need it most. Rather than guess a path a third time, try the known
 # global layouts in order and let GT_TS_MODULE override. Still correct-or-quiet: if none resolve the
-# probe exits 0 and the verdict degrades to ok/unavailable, never a fabricated syntax error.
+# probe declares GT_TS_UNAVAILABLE (exit 3) -> `unavailable`, never a fabricated syntax error.
 _TS_PARSE_SCRIPT = (
     "let ts;"
     "const c=[process.env.GT_TS_MODULE,'typescript',"
@@ -400,7 +409,7 @@ _TS_PARSE_SCRIPT = (
     "if(!ts){"
     "try{ts=require(require.resolve('typescript',"
     "{paths:['/opt/gt/node/lib/node_modules','/opt/gt/node/node_modules']}))}catch(e){}}"
-    "if(!ts){process.exit(0)}"
+    "if(!ts){console.error('GT_TS_UNAVAILABLE');process.exit(3)}"
     "const fs=require('fs');const p=process.argv[1];"
     "let src;try{src=fs.readFileSync(p,'utf8')}catch(e){process.exit(0)}"
     "const sf=ts.createSourceFile(p,src,ts.ScriptTarget.Latest,false);"
@@ -439,7 +448,8 @@ def _build_check_command(ext: str, path: str) -> list[str] | None:
         # PARSE-ONLY by construction (`parseDiagnostics` from createSourceFile) — the same
         # honesty contract as the other languages: NO type errors, NO module resolution, so a
         # missing import or an unresolved type can never be reported as a syntax error.
-        # Correct-or-quiet: if the typescript module is absent the probe exits 0 silently.
+        # Correct-or-quiet: if the typescript module is absent the probe declares
+        # GT_TS_UNAVAILABLE (exit 3) -> verdict `unavailable`, never an executed-ok.
         return ["node", "-e", _TS_PARSE_SCRIPT, path]
     if ext == ".go":
         return ["gofmt", "-e", path]
@@ -655,9 +665,19 @@ def _classify(
     # status == "ran"
     if rc is None:
         return _verdict("unavailable", reason="no_exit_code", ext=ext, checker=cmd)
+    combined = (err or "") + "\n" + (out or "")
+    # (0) A checker that POSITIVELY declares it could not run (the TS probe's
+    #     GT_TS_UNAVAILABLE sentinel + exit 3) is an UNEXECUTED check — verdict
+    #     ``unavailable`` (pass-with-record downstream: _SYNTAX_MAP maps it to
+    #     UNKNOWN, never PASS), NEVER an executed-ok. Checked BEFORE rc == 0 so a
+    #     clamped/laundered exit code cannot re-classify it as a clean parse.
+    #     (2026-07-29 tier-honesty fix: the probe used to exit 0 silently, and
+    #     rc == 0 -> "ok" fed the completion cert's syntax head as a real PASS.)
+    if _CHECKER_UNAVAILABLE_SENTINEL in combined:
+        return _verdict("unavailable", reason="checker_module_unavailable",
+                        ext=ext, checker=cmd)
     if rc == 0:
         return _verdict("ok", reason="clean_exit", ext=ext, checker=cmd)
-    combined = (err or "") + "\n" + (out or "")
     # (1) Environment failure (tool missing / offline / manifest) is NEVER a syntax
     #     error — quiet. Reuses test_runner's canonical classifier (one surface).
     if classify_environment_failure(combined, command=cmd):
