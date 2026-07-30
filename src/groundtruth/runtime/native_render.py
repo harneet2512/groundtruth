@@ -434,6 +434,24 @@ def deepest_agent_frame(result: dict[str, Any], test_files: list[str] | set[str]
     return found
 
 
+def _edit_frame_path_match(frame_path: str, edited_path: str) -> bool:
+    """True iff a (normalized) traceback frame names a (normalized) edited file:
+    exact path equality, or one path ending with ``"/" + other`` — a suffix
+    ANCHORED at a path separator whose shorter side itself carries a directory
+    segment. NEVER bare basename equality: a single-segment path can only match
+    exactly, so a dependency's same-basename file never attributes (W2-R3)."""
+    if not frame_path or not edited_path:
+        return False
+    if frame_path == edited_path:
+        return True
+    shorter, longer = (
+        (frame_path, edited_path)
+        if len(frame_path) <= len(edited_path)
+        else (edited_path, frame_path)
+    )
+    return "/" in shorter and longer.endswith("/" + shorter)
+
+
 def is_edit_attributed(
     result: dict[str, Any],
     edited_files: set[str] | list[str],
@@ -448,7 +466,16 @@ def is_edit_attributed(
     Frames-only by design (pure, no environment reads): a CRASH carries an
     agent-source frame; an ASSERTION failure does not. The value-failure case is
     handled by ``covering_runner.is_red_attributable`` (frames FIRST, green->base->
-    red DIFFERENTIAL second) — the ONE question the seam should ask."""
+    red DIFFERENTIAL second) — the ONE question the seam should ask.
+
+    PATH-ANCHORED, never basename (W2-R3 fix, 2026-07-29): the old basename
+    fallback attributed a RED whose deepest frame was a DEPENDENCY file merely
+    sharing a basename with an edited file (``site-packages/somedep/utils.py``
+    vs the agent's ``src/mypkg/utils.py``) — false edit-blame shipped as
+    Format-D. Attribution now requires an exact normalized-path match or a
+    ``/``-anchored path-suffix match (:func:`_edit_frame_path_match`), which
+    keeps the honest container-absolute-frame case (``/testbed/<edited_rel>``)
+    without the basename collision. Unattributed stays quiet downstream."""
     ef = {_norm(f) for f in (edited_files or [])}
     if not ef:
         return False
@@ -456,7 +483,7 @@ def is_edit_attributed(
     if frame is None:
         return False
     fp = frame[0]
-    return fp in ef or os.path.basename(fp) in {os.path.basename(e) for e in ef}
+    return any(_edit_frame_path_match(fp, e) for e in ef)
 
 
 def render_submit_rejection(reason: str, detail: str = "") -> str:

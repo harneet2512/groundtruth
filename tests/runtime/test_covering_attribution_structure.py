@@ -155,11 +155,16 @@ def test_trace_frame_with_duplicate_edited_basenames_is_not_exactly_attributed()
     )
 
     assert result.attributed is False
-    assert result.method == "trace_frame"
+    # W2-R3: a basename-only frame no longer even ENTERS the trace_frame leg
+    # (is_edit_attributed is False), so the structured method is None — frames
+    # could not decide; only a differential (repo_root + base) could speak.
+    assert result.method is None
     assert result.implicated_edited_paths == ()
-    # The compatibility boolean retains the historical basename fallback. New
-    # producer attestations and verification-plan telemetry use the exact result.
-    assert cr.is_red_attributable(current, {"src/payment.py", "vendor/payment.py"}) is True
+    # W2-R3 (2026-07-29): the historical basename fallback is GONE from the
+    # compatibility boolean too — a bare-basename frame coinciding with pathed
+    # edited files is exactly the false edit-blame the fix removes. Both
+    # surfaces now agree: quiet, never blamed on a basename coincidence.
+    assert cr.is_red_attributable(current, {"src/payment.py", "vendor/payment.py"}) is False
 
 
 def test_single_basename_only_match_is_not_structured_path_proof():
@@ -172,7 +177,9 @@ def test_single_basename_only_match_is_not_structured_path_proof():
 
     assert result.attributed is False
     assert result.implicated_edited_paths == ()
-    assert cr.is_red_attributable(current, {"src/payment.py"}) is True
+    # W2-R3 (2026-07-29): basename-only coincidence no longer satisfies the
+    # compatibility boolean either (see native_render._edit_frame_path_match).
+    assert cr.is_red_attributable(current, {"src/payment.py"}) is False
 
 
 def test_absolute_frame_is_canonicalized_relative_to_repo_root():

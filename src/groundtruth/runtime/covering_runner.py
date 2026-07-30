@@ -905,9 +905,10 @@ def attribute_covering_red(
             if _norm(path) == norm_frame
         )
         return CoveringAttribution(
-            # Basename fallback is inherently ambiguous when multiple edited
-            # paths share that basename. Structured producer truth fails closed;
-            # the compatibility boolean below retains historical behaviour.
+            # W2-R3 (2026-07-29): is_edit_attributed no longer has a basename
+            # fallback — attribution is exact-or-anchored-suffix path match —
+            # so a frame reaching here names a real edited path form.
+            # Structured producer truth still fails closed on ambiguity.
             attributed=len(implicated) == 1,
             method="trace_frame",
             current_verdict=current_verdict,
@@ -959,9 +960,10 @@ def is_red_attributable(
     Cost: the base run happens ONLY on the frame-miss path (crashes short-circuit
     before any subprocess). No ``repo_root``/``covering_files`` => frames-only =>
     quiet on an unattributed assertion. Reads no environment / no globals."""
-    # Preserve the historical boolean contract (including basename fallback)
-    # for existing seam callers. New truth-bearing consumers must use
-    # attribute_covering_red(), which rejects ambiguous basename matches.
+    # Preserve the historical boolean contract for existing seam callers.
+    # W2-R3 (2026-07-29): the frames leg is path-anchored (never bare basename
+    # — see native_render._edit_frame_path_match). New truth-bearing consumers
+    # must use attribute_covering_red().
     from groundtruth.runtime.native_render import is_edit_attributed
 
     if is_edit_attributed(current_result or {}, edited_files, test_files=test_files):
