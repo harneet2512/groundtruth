@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from groundtruth.state import agent_state as agent_state_module
 from groundtruth.trajectory.classifier import (
     VerificationTarget,
     classify_verification_targeting,
@@ -22,6 +23,16 @@ from groundtruth.trajectory.hooks import (
     hook_unsafe_finish,
 )
 from groundtruth.trajectory.state import L5TrajectoryState
+
+
+@pytest.fixture(autouse=True)
+def _isolate_persisted_l5_state(monkeypatch, tmp_path):
+    """Keep fixed fixture instance IDs isolated across pytest invocations."""
+    monkeypatch.setattr(
+        agent_state_module,
+        "_l5_state_path",
+        lambda task_id="": str(tmp_path / f"gt_l5_state_{task_id or 'default'}.json"),
+    )
 
 
 # ── classify_verification_targeting ────────────────────────────────────
@@ -323,7 +334,7 @@ def _make_finish() -> MagicMock:
 
 class TestGovernorUnverifiedPatch:
 
-    def test_edit_then_broad_pass_fires(self, monkeypatch):
+    def test_edit_then_broad_pass_is_recorded_without_legacy_fire(self, monkeypatch):
         monkeypatch.setenv("GT_REBUILD_L5", "1")
         gov = L5Governor(instance_id="test-unverified", max_iter=100)
 
@@ -336,8 +347,11 @@ class TestGovernorUnverifiedPatch:
             _make_cmd("pytest tests/"), _make_obs("5 passed\nexit code: 0\n"),
             action_count=11, max_iter=100,
         )
-        assert result.fired
-        assert result.message and "Unverified Patch" in result.message
+        # The legacy governor emission was removed after a benchmark regression.
+        # Preserve the state signal for the separately gated Goku event path,
+        # but do not inject from after_interaction itself.
+        assert not result.fired
+        assert gov.state.has_unverified_patch()
 
     def test_edit_then_targeted_pass_no_fire(self, monkeypatch):
         monkeypatch.setenv("GT_REBUILD_L5", "1")

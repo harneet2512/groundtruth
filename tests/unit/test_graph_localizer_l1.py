@@ -32,8 +32,6 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
-
 from groundtruth.pretask.graph_localizer import localize
 from groundtruth.pretask.v1r_brief import (
     FileEntry,
@@ -152,10 +150,11 @@ def test_localize_surfaces_importer_as_top_via_witness(tmp_path):
     assert order.index("beets/importer.py") == 0
 
 
-def test_localize_confident_gate_fires_on_verified_witness(tmp_path):
+def test_localize_flat_verified_witness_fails_score_separation(tmp_path):
     _repo, db = _make_beets_db(tmp_path)
     res = localize(_BEETS_ISSUE, db)
-    assert res.confident, f"expected confident, gate_reason={res.gate_reason}"
+    assert not res.confident
+    assert res.gate_reason.startswith("score_separation_fail")
     assert res.confidence > 0.0
 
 

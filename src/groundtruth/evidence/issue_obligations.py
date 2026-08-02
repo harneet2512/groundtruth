@@ -20,6 +20,8 @@ class IssueObligation:
     parameter: str
     confidence: float
     source: str
+    start_byte: int = 0
+    end_byte: int = 0
 
 
 _REMOVE_PARAM_PATTERNS = [
@@ -50,8 +52,15 @@ def extract_issue_obligations(issue_text: str) -> list[IssueObligation]:
                     parameter=param,
                     confidence=confidence,
                     source=m.group(0)[:80],
+                    start_byte=len(issue_text[:m.start()].encode("utf-8", "surrogatepass")),
+                    end_byte=len(issue_text[:m.end()].encode("utf-8", "surrogatepass")),
                 ))
-    return list({o.parameter: o for o in obligations}.values())
+    # Keep the first, highest-priority pattern match for a parameter. Source order
+    # remains stable and the source byte span is never replaced by a later synonym.
+    unique: dict[str, IssueObligation] = {}
+    for obligation in obligations:
+        unique.setdefault(obligation.parameter, obligation)
+    return sorted(unique.values(), key=lambda item: (item.start_byte, item.end_byte, item.parameter))
 
 
 def check_obligations_against_diff(

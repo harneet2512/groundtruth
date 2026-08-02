@@ -14,7 +14,6 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -143,6 +142,15 @@ class TestRearmOnChange:
         # First delivery
         result1 = gmp._oracle_gate_blocks(cands)
         assert result1 == block
+
+        # The gate only stages the winning hash. Dedup is committed by the
+        # caller after the bytes are actually appended, so an interrupted or
+        # suppressed append cannot permanently hide evidence that the model
+        # never received. Simulate that atomic delivery commit here.
+        winner_hash = gmp._last_gate_winner_hash
+        assert winner_hash == gmp._oracle_content_hash(block)
+        assert winner_hash not in gmp._oracle_delivered_hashes
+        gmp._oracle_delivered_hashes.add(winner_hash)
 
         # Same block again (simulating a re-arm with identical content)
         result2 = gmp._oracle_gate_blocks(cands)

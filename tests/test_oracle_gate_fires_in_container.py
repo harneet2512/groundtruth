@@ -88,6 +88,10 @@ def _run_driver(body: str, env_events_name: str = "events.jsonl", *, tmp: Path,
 
         spec = importlib.util.spec_from_file_location("gmp_oracle", {str(GMP)!r})
         m = importlib.util.module_from_spec(spec)
+        # Match normal importlib semantics.  Dataclasses resolve annotations through
+        # sys.modules while the module body executes; executing an unregistered module
+        # is an invalid loader shape and fails as soon as any dataclass is defined.
+        sys.modules[spec.name] = m
         spec.loader.exec_module(m)   # MUST NOT raise
 
         # The stub MUST be the live class (in-container shape) for this to be a

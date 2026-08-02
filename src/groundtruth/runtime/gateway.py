@@ -156,15 +156,11 @@ try:
     from groundtruth.runtime.patch_delta import analyze_patch_delta
 except Exception:  # noqa: BLE001
     analyze_patch_delta = None  # type: ignore[assignment]
-# T0->T2 localization re-slot (2026-07-12): localize() is the OFFLINE source of GT's
-# ranked localization answer, re-homed from the T0 baked brief to the D2/post-search
-# reactive producer (_produce_ranked_localization). Heavy pretask leg -> try-wrapped
-# exactly like detect_change_surface: unavailable -> None -> the producer degrades
-# correct-or-quiet ([]). Kept a real module attribute so tests can monkeypatch it.
-try:
-    from groundtruth.pretask.graph_localizer import localize as _localize
-except Exception:  # noqa: BLE001
-    _localize = None  # type: ignore[assignment]
+# The embedding-backed historical localizer is an isolated comparison control,
+# not a default deterministic producer. Keep the injection seam for comparison
+# fixtures, but never import/register it in the product runtime. Tests and an
+# explicitly constructed control may still replace this module attribute.
+_localize = None
 
 __all__ = [
     "ToolEvent",

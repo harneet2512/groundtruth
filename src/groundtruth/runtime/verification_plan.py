@@ -74,8 +74,8 @@ measured FP classes include a Makefile `test:` target that DEPLOYED):
 
 PER-KIND CAPABILITY (what a rung can and cannot verify):
 
-    syntax        edit_check: py/js/go/rb parse-only checkers; ts/tsx/jsx/rs/java
-                  are UNAVAILABLE (edit_check honesty table). Verdict "ok" requires
+    syntax        edit_check: py/pyi/js/ts/tsx/jsx/go/rb parse-only checkers;
+                  rs/java are UNAVAILABLE (edit_check honesty table). Verdict "ok" requires
                   EVERY checkable target to parse; a mix of ok + unavailable is
                   "partial" (never green).
     unit          targeted covering over FACT edges + k=2 caller closure + test-dir
@@ -118,6 +118,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Sequence
 
@@ -788,7 +789,9 @@ def build_verification_plan(
 
 
 # edit_check languages that yield POSITIVE syntax evidence (its honesty table).
-_SYNTAX_CHECKABLE_EXTS = frozenset({".py", ".js", ".mjs", ".cjs", ".go", ".rb"})
+_SYNTAX_CHECKABLE_EXTS = frozenset(
+    {".py", ".pyi", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".rb"}
+)
 
 
 def _syntax_rung(
@@ -901,12 +904,38 @@ def run_plan(
     toolchain/command is UNKNOWN, or that raises, becomes an ``unavailable`` result
     (correct-or-quiet — never crashes the run, never blocks)."""
     results: list[CheckResult] = []
+    started = time.monotonic()
     for check in plan.checks:
+        elapsed = max(0.0, time.monotonic() - started)
+        remaining_budget = max(
+            0,
+            int(total_budget_seconds - elapsed),
+        )
+        if remaining_budget <= 0:
+            results.append(
+                CheckResult(
+                    kind=check.kind,
+                    selection_basis=check.selection_basis,
+                    executed=False,
+                    verdict="unavailable",
+                    graph_revision=plan.graph_revision,
+                    patch_revision=plan.patch_revision,
+                    covered_entities=check.covered_entities,
+                    covered_obligations=check.covered_obligations,
+                    attribution_requirement=check.attribution_requirement,
+                    attribution_satisfied=False,
+                    detail={"reason": "total_budget_exhausted"},
+                )
+            )
+            continue
         try:
             res = _run_one(
                 check, plan, executor,
                 executor if syntax_executor is None else syntax_executor,
-                repo_root, per_file_timeout, total_budget_seconds)
+                repo_root,
+                min(per_file_timeout, remaining_budget),
+                remaining_budget,
+            )
         except Exception as exc:  # noqa: BLE001 -- a rung must never brick the loop
             res = CheckResult(
                 kind=check.kind, selection_basis=check.selection_basis,
@@ -947,8 +976,27 @@ def _run_one(
             return _mk(False, "unavailable", True, {"reason": check.reason})
         per: list[dict[str, Any]] = []
         n_err = n_ok = 0
-        for f in check.targets:
-            r = check_edit_syntax(f, repo_root, executor=syntax_executor)
+        syntax_started = time.monotonic()
+        for index, f in enumerate(check.targets):
+            remaining = total_budget_seconds - (
+                time.monotonic() - syntax_started
+            )
+            if remaining < 1:
+                per.extend(
+                    {
+                        "file": pending,
+                        "verdict": "unavailable",
+                        "reason": "total_budget_exhausted",
+                    }
+                    for pending in check.targets[index:]
+                )
+                break
+            r = check_edit_syntax(
+                f,
+                repo_root,
+                executor=syntax_executor,
+                timeout=max(1, min(10, int(remaining))),
+            )
             per.append(r)
             if r.get("verdict") == "syntax_error":
                 n_err += 1
@@ -1005,7 +1053,12 @@ def _run_one(
     if check.kind == "integration":
         if check.command is None:
             return _mk(False, "unknown", False, {"reason": check.reason})
-        res = execute_test_command(repo_root, list(check.command), executor=executor)
+        res = execute_test_command(
+            repo_root,
+            list(check.command),
+            timeout_seconds=max(1, min(120, total_budget_seconds)),
+            executor=executor,
+        )
         n_passed = int(res.get("passed") or 0)
         n_failed = int(res.get("failed") or 0)
         n_errored = int(res.get("errored") or 0)
@@ -1030,7 +1083,12 @@ def _run_one(
     # Unhandled kind (type/build/property/e2e via a future command) -> generic run.
     if check.command is None:
         return _mk(False, "unknown", False, {"reason": check.reason or "no command"})
-    res = execute_test_command(repo_root, list(check.command), executor=executor)
+    res = execute_test_command(
+        repo_root,
+        list(check.command),
+        timeout_seconds=max(1, min(120, total_budget_seconds)),
+        executor=executor,
+    )
     # Same positive-evidence law as integration: exit-0 + zero parsed tests is
     # "executed_no_tests", never a pass.
     if res.get("all_passed") and int(res.get("passed") or 0) > 0:

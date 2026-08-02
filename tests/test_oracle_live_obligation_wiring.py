@@ -94,7 +94,7 @@ def _write_anchors(tmp_path: Path, obligations: list[dict]) -> str:
     return str(p)
 
 
-def _reset_live_state(patch_mod, monkeypatch, *, route: bool = True) -> None:
+def _reset_live_state(patch_mod, monkeypatch, tmp_path: Path, *, route: bool = True) -> None:
     """Fresh per-task live state (the per-process state a new mini-swe-agent
     process would start with)."""
     monkeypatch.setattr(patch_mod, "_GT_BASELINE", False, raising=False)
@@ -131,6 +131,12 @@ def _reset_live_state(patch_mod, monkeypatch, *, route: bool = True) -> None:
     monkeypatch.setattr(patch_mod, "_edit_churn", {}, raising=False)
     monkeypatch.setattr(patch_mod, "_gt_oracle_tried", False, raising=False)
     monkeypatch.setattr(patch_mod, "_gt_oracle_mod", None, raising=False)
+    # This suite exercises the legacy anchors path.  Isolate the artifact-wins V2
+    # lookup from /tmp and from any prior case's module cache so a real/stale V2
+    # artifact cannot silently switch the producer under test.
+    monkeypatch.setenv("GT_CERT_DIR", str(tmp_path))
+    monkeypatch.setattr(patch_mod, "_obligations_v2_cache", None, raising=False)
+    monkeypatch.setattr(patch_mod, "_oblig_plan_marker_emitted", False, raising=False)
 
 
 def _drive(patch_mod, cmd: str, obs: str = "") -> str:
@@ -147,7 +153,7 @@ _NONEDIT_CMDS = ["git status", "git diff", "ls -la"]
 # THE red->green: the live path fires the obligation at the review transition.
 # ---------------------------------------------------------------------------
 def test_live_obligation_fires_at_review_transition(patch_mod, tmp_path, monkeypatch):
-    _reset_live_state(patch_mod, monkeypatch)
+    _reset_live_state(patch_mod, monkeypatch, tmp_path)
     monkeypatch.setenv("GT_ANCHORS_PATH", _write_anchors(tmp_path, [_OBL_ASYNC]))
     monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
 
@@ -174,7 +180,7 @@ def test_live_obligation_status_dedup_same_vector_one_fire(patch_mod, tmp_path, 
     A second review transition with an UNCHANGED vector (same edit tokens, no
     new test evidence) must NOT re-fire; the once-per-task latch is gone but
     an identical checklist is never re-sent."""
-    _reset_live_state(patch_mod, monkeypatch)
+    _reset_live_state(patch_mod, monkeypatch, tmp_path)
     monkeypatch.setenv("GT_ANCHORS_PATH", _write_anchors(tmp_path, [_OBL_ASYNC]))
     monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
 
@@ -192,7 +198,7 @@ def test_live_obligation_status_dedup_same_vector_one_fire(patch_mod, tmp_path, 
 def test_live_obligation_tested_stays_quiet(patch_mod, tmp_path, monkeypatch):
     """Correct-or-quiet: when an observed test result mentions the symbol
     (tested? == True), the obligation never fires."""
-    _reset_live_state(patch_mod, monkeypatch)
+    _reset_live_state(patch_mod, monkeypatch, tmp_path)
     monkeypatch.setenv("GT_ANCHORS_PATH", _write_anchors(tmp_path, [_OBL_ASYNC]))
     monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
 
@@ -212,7 +218,7 @@ def test_live_obligation_tested_stays_quiet(patch_mod, tmp_path, monkeypatch):
 def test_live_obligation_untouched_symbol_stays_quiet(patch_mod, tmp_path, monkeypatch):
     """An obligation whose symbols never intersect the edit evidence is not a
     candidate (edited? == False)."""
-    _reset_live_state(patch_mod, monkeypatch)
+    _reset_live_state(patch_mod, monkeypatch, tmp_path)
     obl = dict(_OBL_ASYNC, symbols=["totally_other_api"], verbatim_text="x must y.")
     monkeypatch.setenv("GT_ANCHORS_PATH", _write_anchors(tmp_path, [obl]))
     monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
@@ -225,7 +231,7 @@ def test_live_obligation_untouched_symbol_stays_quiet(patch_mod, tmp_path, monke
 
 def test_kill_switch_legacy_no_obligation(patch_mod, tmp_path, monkeypatch):
     """GT_ORACLE_ROUTE=0 — exact legacy behavior: no obligation fires when off."""
-    _reset_live_state(patch_mod, monkeypatch, route=False)
+    _reset_live_state(patch_mod, monkeypatch, tmp_path, route=False)
     monkeypatch.setenv("GT_ANCHORS_PATH", _write_anchors(tmp_path, [_OBL_ASYNC]))
 
     outputs = [_drive(patch_mod, _EDIT_CMD)]
@@ -239,7 +245,7 @@ def test_kill_switch_legacy_no_obligation(patch_mod, tmp_path, monkeypatch):
 
 def test_baseline_arm_no_obligation(patch_mod, tmp_path, monkeypatch):
     """GT_BASELINE: the control arm gets zero GT content, obligations included."""
-    _reset_live_state(patch_mod, monkeypatch)
+    _reset_live_state(patch_mod, monkeypatch, tmp_path)
     monkeypatch.setattr(patch_mod, "_GT_BASELINE", True, raising=False)
     monkeypatch.setenv("GT_ANCHORS_PATH", _write_anchors(tmp_path, [_OBL_ASYNC]))
     outputs = [_drive(patch_mod, _EDIT_CMD)]
@@ -298,7 +304,7 @@ def test_corpus_boa_live_obligation_fire(patch_mod, sense_mod, tmp_path, monkeyp
 
     anchors = tmp_path / "gt_issue_anchors.json"
     anchors.write_text(json.dumps({"obligations": obls}), encoding="utf-8")
-    _reset_live_state(patch_mod, monkeypatch)
+    _reset_live_state(patch_mod, monkeypatch, tmp_path)
     monkeypatch.setenv("GT_ANCHORS_PATH", str(anchors))
     monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
 

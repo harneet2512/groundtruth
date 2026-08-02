@@ -64,7 +64,7 @@ def _docker_block(run: str) -> str:
     marker = "bash -c "
     i = run.index(marker) + len(marker)  # index of the opening quote
     assert run[i] == _APOS, "the docker invocation must open with a single-quoted bash -c argument"
-    tail = run.index("2>&1 | tee trial_output.log", i)
+    tail = run.index("2>&1 | tee -a trial_output.log", i)
     close = run.rindex(_APOS, i, tail)
     return run[i:close + 1]
 
@@ -212,13 +212,13 @@ def test_liveness_step_fails_closed_on_missing_profile_proof() -> None:
     )
 
 
-def test_liveness_profile_gate_exits_nonzero_like_agent_did_not_run() -> None:
+def test_liveness_profile_gate_preserves_runs_but_revokes_citability() -> None:
     # OLD contract: the FIRST GT_PROFILE_UNPROVEN was followed by `exit 1` -- ANY absent activation
     # proof hard-failed (DISCARDED) the task. NEW contract (2026-07-20 TAXONOMY SPLIT): an ABSENT
     # receipt means the agent RAN but activation was not DURABLY proven -> RECORD (relabel GT-off /
     # uncitable-as-GT-on, tee'd to the log) + set GT_PROFILE_ABSENT=1 + CONTINUE; never discard a
-    # task that ran. Hard-fail (exit 1) is RESERVED for a receipt that is PRESENT but MISLABELS the
-    # arm (real anti-cheat / VALIDITY), which is NOT weakened below.
+    # task that ran. A PRESENT-but-invalid receipt is likewise preserved for diagnosis, but the
+    # workflow must route it through _gt_uncitable so it can never enter the citable population.
     run = _step_run_containing("GT_PROFILE_UNPROVEN")
     idx = run.index("GT_PROFILE_UNPROVEN")            # first match = GT_PROFILE_UNPROVEN_ABSENT
     absent_window = run[idx: idx + 400]
@@ -233,16 +233,19 @@ def test_liveness_profile_gate_exits_nonzero_like_agent_did_not_run() -> None:
     assert "tee -a trial_output.log" in absent_window, (
         "the absent relabel marker must be tee'd to the trial log so the outcome classifiers read it"
     )
-    # KEEP the anti-cheat hard-fail (do NOT weaken it): a receipt PRESENT but MISLABELLING the arm
-    # still exits 1, guarded to run only when a receipt is PRESENT (GT_PROFILE_ABSENT != 1).
+    # A receipt PRESENT but MISLABELLING the arm is guarded to run only when a receipt is PRESENT
+    # (GT_PROFILE_ABSENT != 1), then records an explicit uncitable reason without destroying the
+    # trajectory/patch/reward needed to diagnose the validity defect.
     assert '[ "${GT_PROFILE_ABSENT:-0}" != "1" ]' in run, (
         "the present-but-mislabel anti-cheat path must be guarded to run only when a receipt is PRESENT"
     )
     mislabel = run.index("GT_BATCH_UNPROVEN: batch activation receipt is invalid")
-    assert "exit 1" in run[mislabel: mislabel + 200], (
-        "a PRESENT-but-mislabelled batch activation receipt is a validity/anti-cheat breach that MUST "
-        "still exit 1 -- the anti-cheat gate is not weakened"
+    mislabel_window = run[mislabel - 80: mislabel + 240]
+    assert "_gt_uncitable gt_batch_unproven" in mislabel_window, (
+        "a PRESENT-but-mislabelled batch activation receipt must revoke citability with a durable "
+        "reason while preserving the executed run for diagnosis"
     )
+    assert "exit 1" not in mislabel_window
 
 
 # ── 3. THE TRAP: the single-quoted docker bash -c block must stay quote-balanced ──────────────

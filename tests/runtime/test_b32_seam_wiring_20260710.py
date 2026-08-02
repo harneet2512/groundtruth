@@ -7,14 +7,14 @@ RED before the wiring: base_output is not a parameter (TypeError). After: thread
 into seal_delivery(tool_output_bytes=...). Mutation: not passing tool_output_bytes ->
 identical heads -> this test bites.
 """
-import os
+from pathlib import Path
 import sys
 
 import pytest
 
-_REPO = r"D:\Groundtruth"
-sys.path.insert(0, os.path.join(_REPO, "artifact_deepswe"))
-sys.path.insert(0, os.path.join(_REPO, "src"))
+_REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO / "artifact_deepswe"))
+sys.path.insert(0, str(_REPO / "src"))
 
 import gt_mini_patch as g  # noqa: E402
 

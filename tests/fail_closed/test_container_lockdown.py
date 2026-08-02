@@ -41,13 +41,16 @@ def test_boundary_raises_on_host_in_proof(monkeypatch):
 
 
 def test_boundary_raises_with_flag_but_host_cgroup(monkeypatch):
-    # GT_CONTAINERIZED set but cgroup/.dockerenv say host (the test runner) -> still fail.
-    from groundtruth.runtime.context import assert_container_boundary
+    # Model a host deterministically. The test suite itself may run inside a
+    # Codespace/container, so relying on its real /.dockerenv makes this branch
+    # environment-dependent.
+    from groundtruth.runtime import context
     from groundtruth.runtime.proof import GTProofModeError
     monkeypatch.setenv("GT_PROOF_MODE", "1")
     monkeypatch.setenv("GT_CONTAINERIZED", "1")
+    monkeypatch.setattr(context, "_in_container", lambda: False)
     with pytest.raises(GTProofModeError):
-        assert_container_boundary("foundational_gates")
+        context.assert_container_boundary("foundational_gates")
 
 
 def test_foundational_gates_main_fails_on_host_in_proof(monkeypatch):

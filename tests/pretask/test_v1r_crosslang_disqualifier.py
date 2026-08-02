@@ -430,12 +430,25 @@ def test_host_legacy_schema_without_language_is_permissive(tmp_path):
     db = tmp_path / "graph.db"
     repo = tmp_path / "src"
     _write_repo_files(repo)
-    _create_graph_db(db, _NODES, _EDGES, with_language=False)
+    (repo / _JS_WIDGET).parent.mkdir(parents=True, exist_ok=True)
+    (repo / _JS_WIDGET).write_text(
+        "function widget_render() {\n  plan.execute();\n}\n", encoding="utf-8"
+    )
+    nodes = _NODES + [
+        {"label": "Function", "name": "widget_render", "key": "widget_render",
+         "file_path": _JS_WIDGET, "signature": "function widget_render()",
+         "start_line": 1, "end_line": 3, "language": "javascript"},
+    ]
+    edges = _EDGES + [
+        ("widget_render", "execute", "CALLS", 2, "type_flow", 0.95),
+    ]
+    _create_graph_db(db, nodes, edges, with_language=False)
     # No language column -> cannot judge -> every deterministic edge still a fact.
     line = _caller_contract_for_file(str(db), _RS_SOURCE, str(repo), ["execute"])
     assert "run_loop() in " + _RS_CALLER in line, f"legacy fact lost: {line}"
-    assert "deltablue" in line, (
-        "legacy schema must stay permissive (cannot judge language): " + line)
+    assert "widget_render() in " + _JS_WIDGET in line, (
+        "legacy schema must stay language-permissive for clean paths: " + line)
+    assert "deltablue" not in line, "demo/benchmark path filtering remains independent"
     wits = _resolved_witnesses_for_file(str(db), _RS_SOURCE, str(repo), max_each=4)
     assert any(w["file_path"] == _RS_CALLER for w in wits), f"legacy witness lost: {wits}"
     out = edit_target_callee_contracts(str(db), _RS_SOURCE, ["load_module"])

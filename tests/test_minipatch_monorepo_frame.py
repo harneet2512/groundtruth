@@ -74,8 +74,12 @@ def test_a6_monorepo_frame(tmp_path):
     r = _run(tmp_path)
     # scope: the neighbor ark/type/y.ts must be found from the sub-dir view (was [])
     assert "y.ts" in r["SCOPE_MONO"], f"monorepo scope dark: {r['SCOPE_MONO']}"
-    # contract: parse()'s signature must surface for the sub-dir-viewed file (was '')
-    assert "parse" in r["CONTRACT_MONO"] and "SIGNATURE" in r["CONTRACT_MONO"], \
+    # contract: the fresh production-like subprocess auto-resolves Profile 2, whose
+    # GT_CONTRACT_NATIVE form is a source-anchored caller note rather than the legacy
+    # [SIGNATURE] tag.  The cross-package y.ts anchor proves the contract query resolved
+    # the sub-dir view into the graph's monorepo frame (the pre-fix result was '').
+    assert ("ark/type/y.ts:2: note:" in r["CONTRACT_MONO"]
+            and "verify your change is consistent here" in r["CONTRACT_MONO"]), \
         f"monorepo contract dark: {r['CONTRACT_MONO']}"
     # held-out: single-package exact-frame file unchanged
     assert "util.py" in r["SCOPE_SINGLE"], f"single-package regressed: {r['SCOPE_SINGLE']}"

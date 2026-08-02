@@ -43,6 +43,11 @@ agent:
     as part of that output. Read them as you would any build or test result --
     they carry cross-file facts you cannot see from a single file. They may
     include:
+    - `<gt-contract>`: a typed contract; trust it only at the exact provenance
+      and freshness stated in the diagnostic.
+    - `<gt-scope>`: an (unverified) scope neighbour offered as a lead to inspect.
+    - `<gt-cochange>`: an (unverified) historical co-change hint, never a required edit.
+    - `<gt-nudge>`: an (unverified) procedural hint, never a replacement for reasoning.
     - Callers of the functions in a file you opened, and how they use the result
       (so you do not break them).
     - Behavioral contracts: the typed signatures of the functions your edit

@@ -1,4 +1,4 @@
-"""Architecture contract tests — GT_ARCHITECTURE_CONTRACT.md enforcement.
+"""Architecture contract tests — shipped contract and runtime invariant enforcement.
 
 These tests enforce structural invariants. They are not unit tests of
 specific functions. They verify that the system as wired satisfies the
@@ -8,8 +8,10 @@ contract. Failures here block vNext from being called complete.
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -25,7 +27,6 @@ from groundtruth.schema.finding import (
     format_findings,
 )
 from groundtruth.schema.novelty import NoveltyFilter
-from groundtruth.utils.result import Ok
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -214,8 +215,6 @@ class TestProhibitedOutput:
 
     def test_no_cross_tool_pointers_in_findings(self) -> None:
         """Finding messages must not contain 'Call groundtruth_X' pointers."""
-        f = _make_finding(message="Call groundtruth_impact before editing")
-        line = f.to_text_line()
         # The contract says no cross-tool pointers. This test documents
         # that the Finding schema doesn't prevent them — the pruning
         # layer must enforce this at the handler level.
@@ -286,27 +285,30 @@ class TestFindingRequiredFields:
 
 
 class TestBenchmarkValidityGates:
+    @staticmethod
+    def _benchmark_policy() -> dict:
+        contract_path = Path(__file__).with_name("architecture_contract.json")
+        with contract_path.open(encoding="utf-8") as contract_file:
+            contract = json.load(contract_file)
+        assert contract["schema"] == "groundtruth.architecture_contract.v1"
+        return contract["benchmark_policy"]
+
     def test_benchmark_arms_documented(self) -> None:
         """Contract file must define required benchmark arms."""
-        contract_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "GT_ARCHITECTURE_CONTRACT.md",
-        )
-        with open(os.path.abspath(contract_path)) as f:
-            text = f.read()
-
-        assert "format-repaired baseline" in text
-        assert "shell-only" in text
-        assert "Do not compare against raw broken Qwen" in text
+        policy = self._benchmark_policy()
+        assert policy["required_arms"] == ["format-repaired baseline", "shell-only"]
+        assert {row["subject"] for row in policy["prohibited_comparisons"]} == {
+            "raw broken Qwen"
+        }
 
     def test_no_raw_qwen_comparison(self) -> None:
         """Verify the contract prohibits raw-Qwen comparison."""
-        contract_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "GT_ARCHITECTURE_CONTRACT.md",
-        )
-        with open(os.path.abspath(contract_path)) as f:
-            text = f.read()
-
-        assert "scaffold-broken" in text
+        policy = self._benchmark_policy()
+        prohibited = {
+            row["subject"]: row["reason"]
+            for row in policy["prohibited_comparisons"]
+        }
+        assert prohibited["raw broken Qwen"] == "scaffold-broken"
 
 
 # ── §6 — No AI layer in Finding pipeline ────────────────────────────────

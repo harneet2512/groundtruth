@@ -40,7 +40,7 @@ def _task_truth_module():
 def test_summarize_exposes_repo_python_modules() -> None:
     env = _step("summarize", "Build canonical PERF and exact-128 diagnosis").get("env") or {}
     assert env.get("PYTHONPATH") == (
-        "${{ github.workspace }}/src:"
+        "${{ github.workspace }}:${{ github.workspace }}/src:"
         "${{ github.workspace }}/scripts/swebench:"
         "${{ github.workspace }}/scripts/metrics"
     )

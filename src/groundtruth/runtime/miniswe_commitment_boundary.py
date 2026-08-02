@@ -187,8 +187,6 @@ class MiniSweCommitmentBoundary:
             context = boundary.context_builder(message)
             plan = decide_commitment_control(context)
             boundary._plans.append(plan)
-            if boundary.plan_observer is not None:
-                boundary.plan_observer(context, plan, actions)
             if plan.decision is CommitmentDecision.FRESH_INFERENCE:
                 execute_now: tuple[Any, ...] = ()
             elif plan.decision is CommitmentDecision.PAUSE:
@@ -201,6 +199,8 @@ class MiniSweCommitmentBoundary:
                     for intent in plan.execute_now
                 )
             else:
+                if boundary.plan_observer is not None:
+                    boundary.plan_observer(context, plan, actions)
                 return boundary._original_execute_actions(message)
 
             executed_ids = {id(action) for action in execute_now}
@@ -208,6 +208,8 @@ class MiniSweCommitmentBoundary:
                 action for action in actions if id(action) not in executed_ids
             )
             if not deferred:
+                if boundary.plan_observer is not None:
+                    boundary.plan_observer(context, plan, actions)
                 return boundary._original_execute_actions(
                     boundary._message_with_actions(message, execute_now)
                 )
@@ -226,6 +228,11 @@ class MiniSweCommitmentBoundary:
                     # withholding it would strand its tool call and end the run
                     # at the next completion.  Preserve the native batch.
                     return boundary._original_execute_actions(message)
+            # Observe only an intervention that can actually be represented to
+            # the host.  In particular, do not consume a one-shot interruption
+            # when provider protocol forced the native fallback above.
+            if boundary.plan_observer is not None:
+                boundary.plan_observer(context, plan, actions)
             results: list[dict[str, Any]] = []
             if execute_now:
                 results.extend(

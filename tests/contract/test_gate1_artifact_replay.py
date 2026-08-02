@@ -423,6 +423,13 @@ class TestReplay5ACK:
 class TestHarnessIntegration:
     """Prove the harness code paths are wired correctly."""
 
+    @pytest.fixture(autouse=True)
+    def _require_minisweagent(self):
+        pytest.importorskip(
+            "minisweagent",
+            reason="optional Mini-SWE benchmark package is not installed in core CI",
+        )
+
     def test_is_git_review_command(self):
         from benchmarks.swebench.run_mini_gt_hooked import _is_git_review_command
         assert _is_git_review_command("git diff")

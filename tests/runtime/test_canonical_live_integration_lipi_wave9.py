@@ -335,7 +335,7 @@ def test_unseen_obligation_causes_fresh_inference_before_native_edit(
         feature_id="obligations",
         decision_context=contract.decision_context,
         roles=contract.roles,
-        subject="issue",
+        subject="x.py",
         claim="Preserve the returned Session.",
         actionable_consequence="Keep the return contract during the edit.",
         provenance=("issue:1",),
@@ -343,7 +343,7 @@ def test_unseen_obligation_causes_fresh_inference_before_native_edit(
         revision=revision,
         causal_neighborhood=(
             "decision:PATCH_CONSTRUCTION",
-            "subject:issue",
+            "subject:x.py",
         ),
         lifecycle=rr.EvidenceLifecycle.PENDING,
         fresh=True,
@@ -371,9 +371,10 @@ def test_unseen_obligation_causes_fresh_inference_before_native_edit(
             "extra": {
                 "response": {"id": "provider-call-edit"},
                 "actions": [
-                    {
-                        "operation": "EDIT",
-                        "command": "python -c \"from pathlib import Path; "
+                        {
+                            "operation": "EDIT",
+                            "subject": "x.py",
+                            "command": "python -c \"from pathlib import Path; "
                         "Path('x.py').write_text('x')\""
                     }
                 ],

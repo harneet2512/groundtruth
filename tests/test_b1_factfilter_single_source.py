@@ -101,6 +101,7 @@ def test_proof_mode_import_failure_degrades_gracefully():
         sys.modules["groundtruth.delivery.path_policy"] = None
         spec = importlib.util.spec_from_file_location("gmp_fc", r"{GMP}")
         m = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = m
         spec.loader.exec_module(m)   # MUST NOT raise
         assert m._DELIVERY_POLICY_AVAILABLE is False
         # FUNCTIONAL fallback (not permissive stubs) — per-turn delivery unchanged:
@@ -126,6 +127,7 @@ def test_non_proof_import_failure_degrades_not_aborts():
         sys.modules["groundtruth.delivery.path_policy"] = None
         spec = importlib.util.spec_from_file_location("gmp_dev", r"{GMP}")
         m = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = m
         spec.loader.exec_module(m)  # must NOT raise
         assert m._DELIVERY_POLICY_AVAILABLE is False
         print("DEGRADED_OK")

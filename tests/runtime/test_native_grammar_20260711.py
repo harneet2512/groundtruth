@@ -21,12 +21,13 @@ reverted). Windows: run with ``PYTHONIOENCODING=utf-8``.
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 import re
 import sys
 import time
 
-sys.path.insert(0, os.path.join(r"D:\Groundtruth", "src"))
+_REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO / "src"))
 
 from groundtruth.runtime import native_render as nr  # noqa: E402
 from groundtruth.runtime.native_render import (  # noqa: E402

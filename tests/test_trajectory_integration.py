@@ -17,13 +17,24 @@ from groundtruth.trajectory.governor import L5Governor
 
 
 @pytest.fixture(autouse=True)
-def _clean_state_files() -> None:
-    """Remove stale L5 state files from /tmp before each test."""
-    for f in glob.glob("/tmp/gt_l5_state_test-*.json"):
-        try:
-            os.remove(f)
-        except OSError:
-            pass
+def _clean_state_files():
+    """Isolate every test-owned L5 sidecar before and after each test."""
+    patterns = (
+        "/tmp/gt_l5_state_test-*.json",
+        "/tmp/gt_l5_state_cfn-lint-3862-*.json",
+    )
+
+    def remove_test_state() -> None:
+        for pattern in patterns:
+            for f in glob.glob(pattern):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+    remove_test_state()
+    yield
+    remove_test_state()
 
 
 def _make_cmd_action(command: str) -> MagicMock:

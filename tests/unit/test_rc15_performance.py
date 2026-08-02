@@ -25,13 +25,12 @@ import json
 import os
 import sqlite3
 import sys
-import threading
-import time
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+RC15_FIXTURES = REPO_ROOT / "tests" / "fixtures" / "rc15_performance"
 
 
 def _load_module(mod_name: str, file_path: Path):
@@ -50,7 +49,7 @@ def _load_module(mod_name: str, file_path: Path):
 def gt_edit_state():
     return _load_module(
         "rc15_gt_edit_state",
-        REPO_ROOT / "tools" / "sweagent" / "gt_edit" / "lib" / "gt_edit_state.py",
+        RC15_FIXTURES / "gt_edit_state.py",
     )
 
 
@@ -64,7 +63,7 @@ def test_resolve_graph_db_no_build_does_not_invoke_gt_index(
     """
     called: list[str] = []
 
-    def fake_run(*args, **kwargs):  # noqa: ANN001
+    def fake_run(*args, **kwargs):
         called.append("subprocess.run")
         raise RuntimeError("build path must not fire from state command")
 
@@ -338,7 +337,7 @@ def test_compute_kernel_gates_streams_jsonl(verify_report, tmp_path, monkeypatch
 
     def guarded_read_text(self, *args, **kwargs):
         s = str(self)
-        if s.endswith("gt_output.jsonl") or s.endswith("gt_runtime_telemetry.jsonl"):
+        if s.endswith(("gt_output.jsonl", "gt_runtime_telemetry.jsonl")):
             tripwire.append(s)
             raise AssertionError(
                 f"verify_report read_text fallback path used for {s} — "
@@ -414,7 +413,7 @@ def test_files_with_symbol_is_deterministic(tmp_path, monkeypatch):
     monkeypatch.setenv("GT_GRAPH_DB", str(db_path))
     nav = _load_module(
         "rc15_gt_navigate",
-        REPO_ROOT / "tools" / "sweagent" / "gt_navigate" / "lib" / "gt_navigate.py",
+        RC15_FIXTURES / "gt_navigate.py",
     )
 
     conn = sqlite3.connect(db_path)

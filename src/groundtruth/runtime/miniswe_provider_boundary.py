@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from types import MethodType
 from typing import Any, Callable, Mapping
 
@@ -44,6 +44,11 @@ from groundtruth.runtime.shadow_holdout import HOLDOUT as _SHADOW_HOLDOUT
 from groundtruth.runtime.terminal_ack import (
     TerminalAckIdentity,
     build_ack_participation,
+)
+from groundtruth.runtime.terminal_evidence import (
+    ClosedBlockerRegistry,
+    SubmitSuppressionReceipt,
+    compile_submit_suppression,
 )
 
 
@@ -524,6 +529,7 @@ class MiniSweProviderBoundary:
         self._pending_commits: dict[str, _PendingCommit] = {}
         self._ack_receipt_keys: set[str] = set()
         self._ack_receipts: list[dict[str, Any]] = []
+        self._submit_suppression_receipts: list[SubmitSuppressionReceipt] = []
         self._provider_phase_ordinal = 0
         self._receipt_sink_path = resolve_sink_path()
         self._original_prepare = model._prepare_messages_for_api
@@ -552,6 +558,52 @@ class MiniSweProviderBoundary:
     @property
     def acknowledgment_receipts(self) -> tuple[dict[str, Any], ...]:
         return tuple(dict(row) for row in self._ack_receipts)
+
+    @property
+    def submit_suppression_receipts(self) -> tuple[SubmitSuppressionReceipt, ...]:
+        return tuple(self._submit_suppression_receipts)
+
+    def authorize_submit_suppression(
+        self,
+        *,
+        registry: ClosedBlockerRegistry,
+        current_revision: str,
+        current_invalidation_keys: Mapping[str, str],
+        action_bytes: bytes,
+        provider_payload_bytes: bytes,
+    ) -> SubmitSuppressionReceipt | None:
+        """Authorize a pre-provider submit suppression and persist zero delivery.
+
+        Returning a receipt means the caller must not dispatch the selected submit
+        action. Returning ``None`` is fail-open and preserves the native path. The
+        recorded payload hash is over the exact provider payload with the action
+        absent; ``chars_delivered`` is mechanically fixed at zero.
+        """
+
+        try:
+            receipt = compile_submit_suppression(
+                registry=registry,
+                current_revision=current_revision,
+                current_invalidation_keys=current_invalidation_keys,
+                action_bytes=action_bytes,
+                provider_payload_bytes=provider_payload_bytes,
+            )
+        except Exception:  # noqa: BLE001 -- suppression must fail open
+            return None
+        if receipt is None:
+            return None
+        row = {
+            "layer": "provider.submit_suppression",
+            "event_type": "submit_suppression",
+            "outcome": "suppressed",
+            **asdict(receipt),
+        }
+        try:
+            append_ledger_line(row, self._receipt_sink_path)
+        except Exception:  # noqa: BLE001 -- no durable zero-delivery proof => native submit
+            return None
+        self._submit_suppression_receipts.append(receipt)
+        return receipt
 
     @property
     def has_unconsumed_capsule(self) -> bool:

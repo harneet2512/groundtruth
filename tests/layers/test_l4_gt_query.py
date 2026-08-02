@@ -33,6 +33,10 @@ import pytest
 # ── Locate the script under test ─────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GT_QUERY_PY = REPO_ROOT / "tools" / "sweagent" / "gt_query" / "lib" / "gt_query.py"
+pytestmark = pytest.mark.skipif(
+    not GT_QUERY_PY.is_file(),
+    reason="local-only SWE-agent tool bundle is absent from code-only checkout",
+)
 
 
 # ── Synthetic graph.db builder ───────────────────────────────────────────────

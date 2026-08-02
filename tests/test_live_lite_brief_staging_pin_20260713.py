@@ -6,10 +6,11 @@ container at /gt_artifacts (the ${HOST_ARTIFACTS}:${GT_C_ARTIFACTS}:ro mount) â€
 forwarded its path to gt_headless_runner.py, so the runner never read it and the agent saw the
 issue text alone (step-0 channel dark on every mini run).
 
-FIX (minimal, no new mount): the brief is ALREADY visible at /gt_artifacts/brief.txt via the
-existing ro mount, exactly like graph.db is forwarded as GT_HOST_GRAPH_DB=${GT_C_ARTIFACTS}/
-graph.db. So the trial `docker run` forwards GT_BRIEF_FILE=${GT_C_ARTIFACTS}/brief.txt on the
-`-e` list; the runner reads it (default /gt_artifacts/brief.txt) and prepends it on the GT arm.
+CURRENT CONTRACT (no new mount): the brief is already visible at
+/gt_artifacts/brief.txt. The workflow forwards that path as GT_BRIEF_FILE; the
+runner passes the environment into install_canonical_runtime, and the canonical
+runtime stages the sealed brief as evidence. The runner never prepends it to the
+task, because that would bypass lifecycle and provider-bound delivery receipts.
 
 These are DETERMINISTIC staging pins (read the workflow + the runner, assert the in-container
 path the workflow forwards on GT_BRIEF_FILE equals the mount target /gt_artifacts + /brief.txt).
@@ -80,11 +81,14 @@ def test_forwarded_brief_path_equals_mount_target_plus_basename():
     )
 
 
-def test_runner_reads_forwarded_env_key():
-    """Close the loop: the runner must actually read GT_BRIEF_FILE (the var the workflow forwards)
-    and default to the mount path. Reads the runner source directly."""
-    src = _RUNNER.read_text(encoding="utf-8")
-    assert "GT_BRIEF_FILE" in src, "runner no longer reads GT_BRIEF_FILE"
-    assert '"/gt_artifacts/brief.txt"' in src, "runner default brief path is not the /gt_artifacts mount"
-    # the reader must be gated so the baseline arm never consumes the brief (byte-identical control)
-    assert "GT_BASELINE" in src, "runner must gate the brief prepend on the baseline arm"
+def test_runner_delegates_forwarded_brief_to_canonical_runtime():
+    """Close the loop without reintroducing the retired task-prepend path."""
+    runner = _RUNNER.read_text(encoding="utf-8")
+    patch = (_ROOT / "artifact_deepswe" / "gt_mini_patch.py").read_text(
+        encoding="utf-8"
+    )
+    assert "install_canonical_runtime(" in runner
+    assert "env=e" in runner
+    assert 'env.get("GT_BRIEF_FILE") or "/gt_artifacts/brief.txt"' in patch
+    assert "never directly prepended" in runner
+    assert "GT_BASELINE" in runner

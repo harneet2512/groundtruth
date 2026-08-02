@@ -26,26 +26,14 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import sys
 
-# Pin the CO-LOCATED worktree `src` (src-layout) ahead of any external editable install so
-# this test verifies the code IN ITS OWN TREE — not whatever `groundtruth` happens to be
-# pip-installed elsewhere (the documented editable-install pytest gotcha). conftest.py
-# pre-imports `groundtruth`, binding the package __path__ to the installed copy before this
-# module loads, so we also evict those cached modules and re-import from the worktree src.
-_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
-if _SRC not in sys.path:
-    sys.path.insert(0, _SRC)
-if getattr(sys.modules.get("groundtruth"), "__file__", "").replace("\\", "/").find(
-    _SRC.replace("\\", "/")
-) != 0:
-    for _m in [k for k in list(sys.modules) if k == "groundtruth" or k.startswith("groundtruth.")]:
-        del sys.modules[_m]
+# tests/conftest.py pins the co-located src tree before importing GroundTruth. Do not evict
+# groundtruth modules here: pytest imports test modules during collection, so eviction leaves
+# already-collected tests holding stale module objects whose monkeypatches target dead globals.
+import pytest
 
-import pytest  # noqa: E402
-
-from groundtruth.lsp.client import LSPClient  # noqa: E402
-from groundtruth.utils.result import Ok  # noqa: E402
+from groundtruth.lsp.client import LSPClient
+from groundtruth.utils.result import Ok
 
 # Load foundational_gates.py the same way tests/fail_closed/test_lsp_liveness.py does
 # (it lives under scripts/metrics, not an importable package).

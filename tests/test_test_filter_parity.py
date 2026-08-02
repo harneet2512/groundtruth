@@ -67,6 +67,9 @@ def _load_twin_predicate():
     spec = importlib.util.spec_from_file_location("gt_mini_patch", path)
     assert spec is not None and spec.loader is not None, path
     module = importlib.util.module_from_spec(spec)
+    # Match normal importlib semantics so dataclass annotation resolution can
+    # find the module while its body is executing.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module._is_test_or_demo_path  # type: ignore[attr-defined]
 

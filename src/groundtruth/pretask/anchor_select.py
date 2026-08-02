@@ -166,6 +166,24 @@ _EMBED_CACHE: dict[str, tuple[list[str], dict[str, np.ndarray]]] = {}
 _SYMVEC_CACHE = _PASSAGE_VEC_CACHE
 
 
+def _shared_passage_cache():
+    """Return the current shared cache, repairing aliases after module reloads.
+
+    Some long-lived/test processes reload ``memory.enrich.embed`` to re-read
+    configuration flags. Reloading reconstructs its bounded LRU; a static alias
+    here would then write to an orphaned cache while the localizer reads the new
+    one, doubling every encode. Production normally imports once, so this is a
+    no-op there.
+    """
+    from groundtruth.memory.enrich import embed as _embed_module
+
+    global _SYMVEC_CACHE
+    current = _embed_module._PASSAGE_VEC_CACHE
+    if _SYMVEC_CACHE is not current:
+        _SYMVEC_CACHE = current
+    return current
+
+
 def _model_identity(model: object) -> tuple[str, int]:
     """Best-effort (model_name, dim) for the passage cache key. Delegates to the
     single shared implementation (embed.model_identity) so both semantic halves
@@ -450,12 +468,13 @@ def _get_file_embeddings(
     # path-keyed score map are unchanged (generalized, no gold labels, no benchmark
     # logic).
     _budget_order = _budget_priority_order(file_paths, file_passages, issue_text)
+    shared_cache = _shared_passage_cache()
     for fp in _budget_order:
         for passage in file_passages[fp]:
             h = passage_hash(passage, model_name, dim, _SUMMARY_VERSION)
             if h in vec_by_hash or h in seen_miss:
                 continue
-            cached = _SYMVEC_CACHE.get(h)
+            cached = shared_cache.get(h)
             if cached is not None:
                 vec_by_hash[h] = np.asarray(cached, dtype=np.float32)
             elif len(miss_passages) < _budget:
@@ -470,7 +489,7 @@ def _get_file_embeddings(
         for h, vec in zip(miss_hashes, new_embs):
             v = np.asarray(vec, dtype=np.float32)
             vec_by_hash[h] = v
-            _SYMVEC_CACHE[h] = v
+            shared_cache[h] = v
     if _n_skipped > 0:
         # Correct-or-quiet: ONE line, stderr only (never agent-visible stdout).
         print(

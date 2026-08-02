@@ -259,6 +259,110 @@ def test_submit_gate_covering_red_bounces(monkeypatch):
     assert gmp._gt_submit_bounce_count == 1
 
 
+def _certified_suppression_attachment(boundary, revision: str):
+    from groundtruth.runtime.terminal_evidence import (
+        ClosedBlockerRegistry,
+        EvidenceStatus,
+    )
+
+    blocker_id = "presubmit-syntax:" + "b" * 64
+    registry = ClosedBlockerRegistry(enforce=True)
+    registry.register(
+        blocker_id=blocker_id,
+        producer="presubmit_verification",
+        witness="parser-confirmed syntax failure",
+        scope="all_syntax_checkable_edited_files",
+        creating_revision=revision,
+        current_revision=revision,
+        invalidation_rule="repository_revision_changed",
+        invalidation_key="b" * 64,
+        status=EvidenceStatus.EXACT,
+        scope_closed=True,
+    )
+    return type(
+        "Attachment",
+        (),
+        {
+            "provider_boundary": boundary,
+            "pending_submit_suppression_registry": registry,
+            "pending_submit_suppression_revision": revision,
+            "pending_submit_suppression_keys": {blocker_id: "b" * 64},
+        },
+    )()
+
+
+def test_submit_suppression_enforce_requires_provider_zero_delivery_receipt(monkeypatch):
+    """Explicit enforce blocks only after the provider boundary durably receipts zero bytes."""
+    _submit_env(monkeypatch, {"blocking": False, "reason": ""}, _COVERING_RED)
+    monkeypatch.setenv("GT_SUBMIT_SUPPRESSION_ENFORCE", "1")
+    calls = []
+
+    class Boundary:
+        def authorize_submit_suppression(self, **kwargs):
+            calls.append(kwargs)
+            return object()
+
+    revision = "a" * 64
+    monkeypatch.setattr(gmp, "_canonical_repository_digest", lambda _root: revision)
+    monkeypatch.setattr(
+        gmp,
+        "_CANONICAL_RUNTIME_ATTACHMENT",
+        _certified_suppression_attachment(Boundary(), revision),
+    )
+    result = gmp._gt_gate_submit_exception(
+        object(), {"command": "submit"}, _Submitted()
+    )
+    _assert_native_refusal(result)
+    assert len(calls) == 1
+    assert calls[0]["provider_payload_bytes"] == b""
+
+
+def test_submit_suppression_enforce_fails_open_without_receipt(monkeypatch):
+    _submit_env(monkeypatch, {"blocking": False, "reason": ""}, _COVERING_RED)
+    monkeypatch.setenv("GT_SUBMIT_SUPPRESSION_ENFORCE", "1")
+
+    class Boundary:
+        def authorize_submit_suppression(self, **_kwargs):
+            return None
+
+    revision = "a" * 64
+    monkeypatch.setattr(gmp, "_canonical_repository_digest", lambda _root: revision)
+    monkeypatch.setattr(
+        gmp,
+        "_CANONICAL_RUNTIME_ATTACHMENT",
+        _certified_suppression_attachment(Boundary(), revision),
+    )
+    assert gmp._gt_gate_submit_exception(
+        object(), {"command": "submit"}, _Submitted()
+    ) is None
+
+
+def test_submit_suppression_never_self_certifies_legacy_refusal(monkeypatch):
+    _submit_env(monkeypatch, {"blocking": False, "reason": ""}, _COVERING_RED)
+    monkeypatch.setenv("GT_SUBMIT_SUPPRESSION_ENFORCE", "1")
+
+    class Boundary:
+        def authorize_submit_suppression(self, **_kwargs):
+            raise AssertionError("uncertified legacy refusal reached provider boundary")
+
+    monkeypatch.setattr(
+        gmp,
+        "_CANONICAL_RUNTIME_ATTACHMENT",
+        type("Attachment", (), {"provider_boundary": Boundary()})(),
+    )
+    assert gmp._gt_gate_submit_exception(
+        object(), {"command": "submit"}, _Submitted()
+    ) is None
+
+
+def test_submit_suppression_zero_kill_switch_allows_native_submit(monkeypatch):
+    _submit_env(monkeypatch, {"blocking": False, "reason": ""}, _COVERING_RED)
+    monkeypatch.setenv("GT_SUBMIT_SUPPRESSION_ENFORCE", "0")
+    assert gmp._gt_gate_submit_exception(
+        object(), {"command": "submit"}, _Submitted()
+    ) is None
+
+
 def test_submit_gate_without_formatter_ownership_fails_open(monkeypatch):
     """A refusal cannot block or count when no formatter batch can own its bytes."""
     _submit_env(monkeypatch, _BINARY_HYGIENE, None)

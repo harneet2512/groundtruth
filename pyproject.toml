@@ -40,6 +40,24 @@ Issues = "https://github.com/harneet2512/groundtruth/issues"
 ai = ["anthropic>=0.30.0,<1"]
 gitignore = ["pathspec>=0.12.0,<1"]
 dev = [
+    # Imported directly by the fail-closed determinism/identity test corpus.
+    # CI installs only this extra, so omitting numpy breaks collection before
+    # any GroundTruth test executes.
+    "numpy>=1.26.0,<3",
+    # Paired-metric tests import scipy.stats during collection.
+    "scipy>=1.11.0,<2",
+    # Workflow contract tests parse YAML directly rather than through a core
+    # dependency, so keep the test dependency explicit.
+    "PyYAML>=6.0.0,<7",
+    "tree-sitter-language-pack>=1.13.0,<2",
+    # Contract tests import the benchmark harness; pin the same Mini-SWE
+    # version used by the Phase II integration rather than relying on a
+    # workstation-global installation.
+    "mini-swe-agent==2.3.0",
+    # Embedder contract tests patch these runtimes but still import their real
+    # public APIs as a guard against integration drift.
+    "onnxruntime>=1.18.0,<2",
+    "tokenizers>=0.19.0,<1",
     "pytest>=8.0.0,<9",
     "pytest-asyncio>=0.23.0,<1",
     "pytest-timeout>=2.3.0,<3",

@@ -57,7 +57,7 @@ def _context(intents, *, evidence=(), phase=BatchPhase.BEFORE_BATCH):
     )
 
 
-def test_pause_executes_only_original_epistemic_prefix() -> None:
+def test_mixed_batch_preserves_the_complete_native_batch() -> None:
     agent = Agent()
     intents = (
         _intent("search", ActionOperation.SEARCH),
@@ -83,9 +83,13 @@ def test_pause_executes_only_original_epistemic_prefix() -> None:
     result = agent.execute_actions(message)
 
     assert agent.executed == [
-        ({"id": "search"}, {"id": "read"}),
+        ({"id": "search"}, {"id": "read"}, {"id": "edit"}),
     ]
-    assert result == [{"output": "search"}, {"output": "read"}]
+    assert result == [
+        {"output": "search"},
+        {"output": "read"},
+        {"output": "edit"},
+    ]
     assert [item["id"] for item in message["extra"]["actions"]] == [
         "search",
         "read",
@@ -242,7 +246,7 @@ def test_fresh_inference_answers_every_deferred_tool_call() -> None:
     assert result[0]["extra"]["exception_info"] == "action was not executed"
 
 
-def test_pause_answers_the_deferred_tail_tool_calls() -> None:
+def test_mixed_tool_call_batch_executes_without_synthetic_hold() -> None:
     agent = ToolCallAgent()
     intents = (
         _intent("search", ActionOperation.SEARCH),
@@ -260,11 +264,16 @@ def test_pause_answers_the_deferred_tail_tool_calls() -> None:
 
     agent.execute_actions(message)
 
-    assert agent.executed == [({"id": "search", "tool_call_id": "call-1"},)]
+    assert agent.executed == [
+        (
+            {"id": "search", "tool_call_id": "call-1"},
+            {"id": "edit", "tool_call_id": "call-2"},
+        )
+    ]
     assert _unanswered_tool_calls(agent) == []
     answers = [item for item in agent.messages if item.get("role") == "tool"]
     assert [item["tool_call_id"] for item in answers] == ["call-1", "call-2"]
-    assert answers[1]["extra"]["exception_info"] == "action was not executed"
+    assert answers[1]["content"] == "ran:call-2"
 
 
 def test_unanswerable_host_executes_natively_instead_of_stranding_tool_calls(

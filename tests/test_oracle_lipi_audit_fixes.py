@@ -133,7 +133,7 @@ def test_outranked_cochange_rearms_and_delivers_later(patch_mod, monkeypatch, tm
     cochange = ('<gt-cochange file="m.py">\npkg/snapshots.py changes with this '
                 "file\n</gt-cochange>")
 
-    def fake_contract(rel):
+    def fake_contract(rel, *, action=None, cmd=""):
         # mimic the real producer's production-time latch
         if rel in patch_mod._contract_seen:
             return ""

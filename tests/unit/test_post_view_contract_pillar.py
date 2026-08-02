@@ -20,6 +20,16 @@ from groundtruth.hooks.post_view import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_legacy_issue_anchors(monkeypatch):
+    """Keep unit contracts independent of the process-global /tmp sidecar."""
+    monkeypatch.setitem(
+        _contract_pillar.__globals__,
+        "_load_issue_anchors",
+        lambda: {"symbols": [], "paths": [], "test_names": []},
+    )
+
+
 def _make_db(*, with_callers: bool = False, categorical: bool = True) -> str:
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)

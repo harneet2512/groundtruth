@@ -171,6 +171,19 @@ class TestDegradedFailClosedUnderRequireLsp:
             );
             """
         )
+        conn.execute(
+            "INSERT INTO nodes VALUES "
+            "(1,'Function','caller','caller','main.go',2,4,'func caller()','',0,0,'go',NULL)"
+        )
+        conn.execute(
+            "INSERT INTO nodes VALUES "
+            "(2,'Function','missing_target','missing_target','ghost.go',1,1,"
+            "'func missing_target()','',0,0,'go',NULL)"
+        )
+        conn.execute(
+            "INSERT INTO edges VALUES "
+            "(1,1,2,'CALLS',3,'main.go','name_match',0.3,NULL)"
+        )
         conn.commit()
         conn.close()
         return db
@@ -183,6 +196,10 @@ class TestDegradedFailClosedUnderRequireLsp:
         db = self._make_graph_db(tmp_path)
         repo = tmp_path / "repo"
         repo.mkdir()
+        (repo / "main.go").write_text(
+            "package main\nfunc caller() { missing_target() }\n",
+            encoding="utf-8",
+        )
         cmd = [
             sys.executable, "-c",
             (

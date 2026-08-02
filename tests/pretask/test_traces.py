@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 from groundtruth.pretask.traces import parse_stack_traces
 
@@ -16,9 +16,17 @@ OSError: [Errno 9] Bad file descriptor
 '''
 
 
+def _touch(repo: Path, *relative_paths: str) -> None:
+    for relative in relative_paths:
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# trace target\n", encoding="utf-8")
+
+
 def test_traces_python(tmp_path) -> None:
     """Python traceback frames are extracted with line + func."""
     repo = tmp_path  # any prefix works since paths are relative
+    _touch(repo, "patroni/postmaster.py", "patroni/watchdog.py")
     frames = parse_stack_traces(PYTHON_TRACE, str(repo))
     # Both frames are in-repo (relative paths, no stdlib markers).
     assert len(frames) == 2
@@ -38,6 +46,7 @@ def test_traces_in_repo_filter(tmp_path) -> None:
         '  File "myrepo/handlers.py", line 12, in handler\n'
         '    raise ValueError\n'
     )
+    _touch(tmp_path, "myrepo/handlers.py")
     frames = parse_stack_traces(text, str(tmp_path))
     files = [fr.file for fr in frames]
     assert any("handlers.py" in f for f in files)
@@ -51,6 +60,7 @@ def test_traces_javascript(tmp_path) -> None:
         "    at Foo.bar (src/foo.ts:42:15)\n"
         "    at processTicksAndRejections (node:internal/process/task_queues:96:5)\n"
     )
+    _touch(tmp_path, "src/foo.ts")
     frames = parse_stack_traces(text, str(tmp_path))
     files = [fr.file for fr in frames]
     # The internal frame is filtered by the in-repo check (absolute-ish
@@ -66,6 +76,7 @@ def test_traces_javascript_order_and_vendor_filter(tmp_path) -> None:
         "    at processTicksAndRejections (node:internal/process/task_queues:96:5)\n"
         "    at lodashMap (node_modules/lodash/map.js:10:1)\n"
     )
+    _touch(tmp_path, "src/App.tsx")
     frames = parse_stack_traces(text, str(tmp_path))
     assert [(fr.file, fr.func) for fr in frames] == [
         ("src/App.tsx", "handleClick")

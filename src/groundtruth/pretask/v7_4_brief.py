@@ -1296,8 +1296,6 @@ def _path_prior_scores(all_files: list[str], issue_text: str) -> dict[str, float
         score = 0.0
         for iw in _issue_words:
             idf = _idf.get(iw, 0.0)
-            if idf <= 0.0:
-                continue
             if iw == basename:
                 tier = 1.0
             elif iw in basename or basename in iw:
@@ -1306,6 +1304,19 @@ def _path_prior_scores(all_files: list[str], issue_text: str) -> dict[str, float
                 tier = 0.5
             else:
                 tier = 0.0
+            # A plural/superstring issue term can match a basename even when
+            # that exact issue term appears in no path (``parsers`` ->
+            # ``parser.py``). In that one reciprocal case, derive specificity
+            # from the matched basename instead. Do not fold reciprocal matches
+            # into the issue-term df: doing so dilutes exact directory matches
+            # such as ``netloc`` based on unrelated short basenames.
+            if tier > 0.0 and idf <= 0.0 and basename in iw:
+                base_df = sum(
+                    1 for candidate in all_files
+                    if basename in _norm_paths[candidate]
+                )
+                if base_df > 0:
+                    idf = _math_path.log2(_N_files / base_df) / _logN
             if tier > 0.0:
                 score = max(score, tier * idf)
         # Negated-word demotion: if a NEGATED issue word matches the basename,

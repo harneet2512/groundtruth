@@ -1,6 +1,8 @@
 """Tests for Track A preprocessor."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from groundtruth.pretask.query_preprocessor import preprocess
 from groundtruth.pretask.v2_types import QueryObject
 
@@ -16,7 +18,16 @@ def test_empty_string_returns_empty_query_object() -> None:
     assert q.code_blocks == []
 
 
-def test_simple_python_stack_trace() -> None:
+def _materialize_trace_paths(tmp_path: Path, monkeypatch, *paths: str) -> None:
+    for relative in paths:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# trace target\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+
+def test_simple_python_stack_trace(tmp_path: Path, monkeypatch) -> None:
+    _materialize_trace_paths(tmp_path, monkeypatch, "src/foo.py")
     text = 'Traceback:\n  File "src/foo.py", line 42, in bar\n    do_thing()'
     q = preprocess(text)
     assert "src/foo.py" in q.file_hints
@@ -85,7 +96,8 @@ def test_stopword_filter_drops_common_words() -> None:
     assert bad_hits == []
 
 
-def test_real_swebench_issue_spotcheck() -> None:
+def test_real_swebench_issue_spotcheck(tmp_path: Path, monkeypatch) -> None:
+    _materialize_trace_paths(tmp_path, monkeypatch, "astropy/units/quantity.py")
     text = (
         "Title: Wrong unit conversion in astropy.units.Quantity\n\n"
         "When calling `Quantity.to('m')` on a value with unit `cm`,\n"
@@ -104,7 +116,8 @@ def test_real_swebench_issue_spotcheck() -> None:
     assert "Quantity" in bt or any(t.token == "Quantity" for t in q.high_signal_tokens)
 
 
-def test_token_dedup_keeps_max_weight() -> None:
+def test_token_dedup_keeps_max_weight(tmp_path: Path, monkeypatch) -> None:
+    _materialize_trace_paths(tmp_path, monkeypatch, "x.py")
     text = (
         'File "x.py", line 1, in handler\n'
         "  do()\n"
@@ -125,7 +138,8 @@ def test_raw_text_preserved() -> None:
     assert q.raw_text == text
 
 
-def test_lists_are_deduplicated() -> None:
+def test_lists_are_deduplicated(tmp_path: Path, monkeypatch) -> None:
+    _materialize_trace_paths(tmp_path, monkeypatch, "src/a.py")
     text = (
         'File "src/a.py", line 1, in foo\n'
         '  call()\n'

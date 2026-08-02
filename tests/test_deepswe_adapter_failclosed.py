@@ -27,6 +27,7 @@ import importlib.util
 import os
 import sqlite3
 import sys
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,10 @@ def _load(name: str, path: Path):
 
 @pytest.fixture
 def agent_mod():
-    return _load("gt_agent_failclosed_uut", _AGENT_PATH)
+    module = _load("gt_agent_failclosed_uut", _AGENT_PATH)
+    if module.InstallStep is None:
+        module.InstallStep = namedtuple("InstallStep", "user run")
+    return module
 
 
 @pytest.fixture

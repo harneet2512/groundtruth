@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,7 +18,7 @@ def _agent_module():
     return module
 
 
-def test_control_participation_schema_is_shipped_to_task_container() -> None:
+def test_control_participation_schema_is_shipped_to_task_container(monkeypatch) -> None:
     agent = _agent_module()
     assert "control_participation.py" in agent._PRODUCT_PACKAGE_MODULES["runtime"]
     assert agent._PRODUCT_PACKAGE_FILES["runtime"]["control_participation.py"]
@@ -30,6 +30,13 @@ def test_control_participation_schema_is_shipped_to_task_container() -> None:
     assert "groundtruth.runtime.shadow_holdout" in agent._INJECTED_GT_MODULES
     assert "groundtruth.runtime.rl_profile" in agent._INJECTED_GT_MODULES
     assert "groundtruth.runtime" in agent._INJECTED_GT_PACKAGES
+    if agent.InstallStep is None:
+        @dataclass
+        class _InstallStep:
+            user: str
+            run: str
+
+        monkeypatch.setattr(agent, "InstallStep", _InstallStep)
     runs = "\n".join(step.run for step in agent._inject_steps_b64())
     assert "> /opt/gt/groundtruth/runtime/control_participation.py" in runs
     assert "> /opt/gt/groundtruth/runtime/rl_profile.py" in runs

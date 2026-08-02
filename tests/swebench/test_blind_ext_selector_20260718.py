@@ -11,6 +11,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 for _p in (ROOT / "scripts" / "swebench",):
     if str(_p) not in sys.path:
@@ -21,6 +23,11 @@ import blind_ext_selector as sel  # noqa: E402
 DATASET = ROOT / "benchmarks" / "data" / "swebench_live_lite.jsonl"
 LOCKED30 = ROOT / ".claude" / "reports" / "mixture_bag_30_20260712.txt"
 FROZEN = ROOT / "benchmarks" / "data" / "blind_ext_selection_vfinal_20260718.json"
+
+pytestmark = pytest.mark.skipif(
+    not LOCKED30.is_file(),
+    reason="local-only locked-30 replay fixture is not present in a clean checkout",
+)
 
 
 def _bytes():
@@ -46,21 +53,18 @@ def test_reproduces_frozen_seven_bit_for_bit() -> None:
 
 def test_refuses_on_dataset_hash_mismatch() -> None:
     ds, lk = _bytes()
-    import pytest
     with pytest.raises(sel.SelectorRefusal, match="dataset sha256 mismatch"):
         sel.select(ds + b"\n{}", lk)  # one extra byte -> different sha256
 
 
 def test_refuses_on_locked30_hash_mismatch() -> None:
     ds, lk = _bytes()
-    import pytest
     with pytest.raises(sel.SelectorRefusal, match="locked-30 sha256 mismatch"):
         sel.select(ds, lk + b"# drift\n")
 
 
 def test_refuses_unknown_version() -> None:
     ds, lk = _bytes()
-    import pytest
     with pytest.raises(sel.SelectorRefusal, match="unknown selector version"):
         sel.select(ds, lk, version="some-other-version")
 

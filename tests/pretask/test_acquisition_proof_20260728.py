@@ -92,13 +92,21 @@ def test_real_reslot_keeps_acquisition_proof_and_delivery_proof_empty(
         for proof in result.acquisition_proof
         for feature in acq_provenance._acquisition_source_features(proof, vars(result))
     }
-    # This fixture intentionally contains only name_match edges, so graph_validity
-    # remains correct-quiet rather than laundering an unresolved edge as verified.
-    assert evidenced == {
-        "structural_depth",
-        "lexical_FTS5",
-        "semantic_embedder",
-    }
+    # Structural and lexical acquisition are fixture-invariant. Semantic
+    # acquisition depends on whether the clean runner has the configured model,
+    # while graph validity depends on whether current graph enrichment produced
+    # a positively verified witness. The projection must reflect those recorded
+    # measurements exactly instead of assuming workstation assets.
+    assert {"structural_depth", "lexical_FTS5"}.issubset(evidenced)
+    assert evidenced.issubset(set(CORE_ACQUISITION_FEATURES))
+    assert ("semantic_embedder" in evidenced) is bool(
+        result.acquired_semantic_signal_count
+    )
+    has_verified_graph_witness = bool(result.acquired_graph_edge_count) and any(
+        proof.get("witness_verified") is True and str(proof.get("witness") or "").strip()
+        for proof in result.acquisition_proof
+    )
+    assert ("graph_validity" in evidenced) is has_verified_graph_witness
     assert all(
         "contribution_attestation" not in proof
         and "cochange_evidence" not in proof

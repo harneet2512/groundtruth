@@ -113,9 +113,12 @@ def _complete_deep_metrics(task: str) -> dict:
 
 def test_canonical_inventory_is_dynamic_exact_128() -> None:
     families = inventory.canonical_feature_inventory()
-    scoreboard = json.loads(
-        (ROOT / ".claude" / "reports" / "SS_SCOREBOARD.json").read_text(encoding="utf-8")
-    )["feature_inventory"]
+    scoreboard_path = ROOT / ".claude" / "reports" / "SS_SCOREBOARD.json"
+    scoreboard = (
+        json.loads(scoreboard_path.read_text(encoding="utf-8"))["feature_inventory"]
+        if scoreboard_path.is_file()
+        else None
+    )
 
     assert {family: len(names) for family, names in families.items()} == {
         "ACQ": 12,
@@ -125,7 +128,10 @@ def test_canonical_inventory_is_dynamic_exact_128() -> None:
     }
     assert families["CAP"] == tuple(sorted(rl_profile.PROFILE_MEMBERS["2"]))
     assert families["FACT"] == tuple(fact_registry.all_fact_classes())
-    assert families["ACQ"] == tuple(scoreboard["ACQ"])
+    if scoreboard is not None:
+        # The scoreboard is a local generated report and is intentionally ignored.
+        # Check parity when present without making a clean checkout depend on it.
+        assert families["ACQ"] == tuple(scoreboard["ACQ"])
     assert families["PERF"] == tuple(
         name
         for definitions in inventory.performance_metric_definitions().values()

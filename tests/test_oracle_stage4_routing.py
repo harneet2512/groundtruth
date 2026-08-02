@@ -315,7 +315,10 @@ def test_live_gate_function_relevance_dedup_budget(patch_mod, tmp_path, monkeypa
     assert patch_mod._oracle_gate_blocks([(1, "l3b.evidence", w_junk, False)]) == ""
     # anchored witness passes.
     assert patch_mod._oracle_gate_blocks([(1, "l3b.evidence", w_anch, False)]) == w_anch
-    # dedup: same content again -> suppressed.
+    # The gate stages the winner hash but intentionally does not stamp it until
+    # the caller has appended the bytes.  Simulate that atomic append commit,
+    # then prove the same content is deduplicated.
+    patch_mod._oracle_delivered_hashes.add(patch_mod._last_gate_winner_hash)
     assert patch_mod._oracle_gate_blocks([(1, "l3b.evidence", w_anch, False)]) == ""
     # budget: contract (sev 3, edit-bound) outranks a fresh witness.
     w2 = _mk_witness("capture_snapshot", "other/f.py")

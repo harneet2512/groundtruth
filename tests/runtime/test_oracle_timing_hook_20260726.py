@@ -32,8 +32,8 @@ them by asserting on the env hook -- that is the exact substitution that hid thi
 from __future__ import annotations
 
 import inspect
-
-import pytest
+import sys
+import types
 
 from artifact_deepswe import gt_mini_patch as seam
 
@@ -60,15 +60,28 @@ def test_agent_targets_are_found_by_capability_not_only_by_name():
         assert "model" in _i.signature(obj.__init__).parameters
 
 
-def test_discovery_rejects_a_launcher_that_owns_no_model():
+def test_discovery_rejects_a_launcher_that_owns_no_model(monkeypatch):
     """pier's MiniSweAgent is a LAUNCHER: it installs mini-swe into the container and the
     real agent+model live in a separate in-container process. It takes no `model`, so it
     must NOT be selected -- wrapping it could never give the provider boundary an instance."""
-    pier = pytest.importorskip("pier.agents.installed.mini_swe_agent")
     import inspect as _i
 
+    module_name = "pier.agents.installed.mini_swe_agent"
+    pier = types.ModuleType(module_name)
+
+    class MiniSweAgent:
+        def __init__(self, logs_dir=None):
+            self.logs_dir = logs_dir
+
+        def run(self, task=""):
+            return task
+
+    MiniSweAgent.__module__ = module_name
+    pier.MiniSweAgent = MiniSweAgent
+    monkeypatch.setitem(sys.modules, module_name, pier)
+
     assert "model" not in _i.signature(pier.MiniSweAgent.__init__).parameters
-    assert ("pier.agents.installed.mini_swe_agent", "MiniSweAgent") not in         seam._discover_agent_classes()
+    assert (module_name, "MiniSweAgent") not in seam._discover_agent_classes()
 
 
 def test_install_wraps_agent_run_not_only_env_execute():
@@ -120,7 +133,7 @@ def test_patched_agent_classes_is_tracked_separately_from_env_classes():
     assert seam._PATCHED_AGENT_CLASSES is not seam._PATCHED_CLASSES
 
 
-def test_every_discovered_agent_class_actually_carries_the_hook():
+def test_every_discovered_agent_class_actually_carries_the_hook(monkeypatch):
     """Behavioural, and NOT anchored to a name I picked.
 
     Asserts the hook is on EVERY class discovery selected, whatever those are in this
@@ -128,15 +141,38 @@ def test_every_discovered_agent_class_actually_carries_the_hook():
     that is what `patched_agent_classes` in gt_profile_receipt.json exists to record, and
     it is the only evidence that settles it for a real run.
     """
-    if not seam._PATCHED_AGENT_CLASSES:
-        pytest.skip("no agent class importable in this environment")
-    for dotted in seam._PATCHED_AGENT_CLASSES:
-        mod, _, cls = dotted.rpartition(".")
-        obj = getattr(__import__(mod, fromlist=[cls]), cls)
-        assert getattr(obj, "_gt_oracle_patched", False), f"{dotted} lost the hook"
-        assert obj.run.__qualname__.startswith("_wrap_agent_run"), (
-            f"{dotted}.run is {obj.run.__qualname__}, not the oracle wrapper"
-        )
+    module_name = "minisweagent.contract_stub"
+    module = types.ModuleType(module_name)
+
+    class ContractAgent:
+        def __init__(self, model):
+            self.model = model
+
+        def run(self, task=""):
+            return task
+
+    ContractAgent.__module__ = module_name
+    module.ContractAgent = ContractAgent
+    monkeypatch.setitem(sys.modules, module_name, module)
+    monkeypatch.setattr(seam, "_AGENT_CLASSES", [])
+    monkeypatch.setattr(seam, "_ENV_CLASSES", [])
+    monkeypatch.setattr(
+        seam,
+        "_discover_agent_classes",
+        lambda: [(module_name, "ContractAgent")],
+    )
+    monkeypatch.setattr(seam, "_should_auto_invert", lambda: False)
+    monkeypatch.setattr(seam, "_write_proof_marker", lambda: None)
+    monkeypatch.setattr(seam, "_write_profile_receipt", lambda: None)
+    prior_patched = list(seam._PATCHED_AGENT_CLASSES)
+    seam._PATCHED_AGENT_CLASSES.clear()
+    try:
+        seam._install()
+        assert seam._PATCHED_AGENT_CLASSES == [f"{module_name}.ContractAgent"]
+        assert ContractAgent._gt_oracle_patched is True
+        assert ContractAgent.run.__qualname__.startswith("_wrap_agent_run")
+    finally:
+        seam._PATCHED_AGENT_CLASSES[:] = prior_patched
 
 
 def test_profile_receipt_records_oracle_activation():

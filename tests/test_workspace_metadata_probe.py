@@ -1,4 +1,5 @@
 """Workspace metadata readiness belongs to the substrate runtime, not workflow heuristics."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -6,7 +7,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 _PROOF = ROOT / "scripts" / "swebench" / "gt_run_proof.py"
@@ -19,15 +19,16 @@ _SPEC.loader.exec_module(_MOD)
 
 def test_go_workspace_metadata_probe_success(monkeypatch, tmp_path):
     def _run(cmd, cwd=None, env=None, capture_output=None, text=None, timeout=None):
-        # d8fe8b37: probe uses `go list -e` + a probe-only env override (-mod=mod + live
-        # GOPROXY) so an incomplete offline cache can still resolve the transitive set.
+        # Sealed proof runs use the mounted module cache and must not reach the network.
+        # Network resolution is an explicit GT_PROOF_ALLOW_NETWORK=1 operator opt-in.
         assert cmd == ["go", "list", "-e", "./..."]
         assert cwd == str(tmp_path)
         assert env is not None and env.get("GOFLAGS") == "-mod=mod"
-        assert env.get("GOPROXY") == "https://proxy.golang.org,direct"
+        assert env.get("GOPROXY") == "off"
         return subprocess.CompletedProcess(cmd, 0, stdout="repo/pkg\nrepo/pkg/sub\n", stderr="")
 
     monkeypatch.setattr(_MOD.subprocess, "run", _run)
+    monkeypatch.delenv("GT_PROOF_ALLOW_NETWORK", raising=False)
     result = _MOD.probe_workspace_metadata("go", str(tmp_path), os.environ.copy())
     assert result["status"] == "ok"
     assert result["package_count"] == 2
@@ -35,7 +36,9 @@ def test_go_workspace_metadata_probe_success(monkeypatch, tmp_path):
 
 def test_go_workspace_metadata_probe_failure(monkeypatch, tmp_path):
     def _run(cmd, cwd=None, env=None, capture_output=None, text=None, timeout=None):
-        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no required module provides package")
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="no required module provides package"
+        )
 
     monkeypatch.setattr(_MOD.subprocess, "run", _run)
     result = _MOD.probe_workspace_metadata("go", str(tmp_path), os.environ.copy())

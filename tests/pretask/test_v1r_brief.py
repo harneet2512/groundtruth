@@ -577,10 +577,12 @@ def graph_db(tmp_path: Path) -> str:
             (3, 'Function', 'test_login', 'tests/test_auth.py', 1),
             (4, 'Function', 'test_verify', 'tests/test_auth.py', 1),
             (5, 'Function', 'require_auth', 'src/auth/middleware.py', 0);
-        INSERT INTO edges (source_id, target_id, type, confidence) VALUES
-            (3, 1, 'CALLS', 1.0),
-            (4, 2, 'CALLS', 1.0),
-            (5, 2, 'CALLS', 1.0);
+        INSERT INTO edges (
+            source_id, target_id, type, confidence, resolution_method
+        ) VALUES
+            (3, 1, 'CALLS', 1.0, 'same_file'),
+            (4, 2, 'CALLS', 1.0, 'same_file'),
+            (5, 2, 'CALLS', 1.0, 'same_file');
     """)
     conn.close()
     return db_path

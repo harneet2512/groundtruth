@@ -17,10 +17,11 @@ Not covered by ``test_b1_verification_execution.py`` — that pin exercises the 
 """
 from __future__ import annotations
 
-import os
+from pathlib import Path
 import sys
 
-sys.path.insert(0, os.path.join(r"D:\Groundtruth", "src"))
+_REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO / "src"))
 
 from groundtruth.runtime.native_render import (  # noqa: E402
     render_covering_failure_native,

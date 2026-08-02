@@ -58,6 +58,8 @@ def runner_mod():
 
 @pytest.fixture(scope="module")
 def state_mod():
+    if not GT_EDIT_STATE.is_file():
+        pytest.skip("local-only SWE-agent gt_edit bundle is not present in a clean checkout")
     return _load_module("rc13_state_under_test", GT_EDIT_STATE)
 
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import sys
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
@@ -60,7 +61,10 @@ def _load(path: Path, name_prefix: str):
 
 @pytest.fixture
 def agent_mod():
-    return _load(_AGENT_PATH, "gt_agent_injcov")
+    module = _load(_AGENT_PATH, "gt_agent_injcov")
+    if module.InstallStep is None:
+        module.InstallStep = namedtuple("InstallStep", "user run")
+    return module
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +79,7 @@ def test_real_patch_imports_are_all_covered(agent_mod):
     assert "groundtruth.delivery.path_policy" in required
     assert "groundtruth.delivery.name_policy" in required
     assert "groundtruth.pretask.curation_map" in required
+    assert "groundtruth.runtime.terminal_evidence" in required
 
     uncovered = required - set(agent_mod._INJECTED_GT_MODULES)
     assert uncovered == set(), (
@@ -83,6 +88,8 @@ def test_real_patch_imports_are_all_covered(agent_mod):
         "in-container (the /static//assets/ drift). Add them to "
         "_PRODUCT_PACKAGE_MODULES."
     )
+    assert "groundtruth.runtime.terminal_evidence" in agent_mod._INJECTED_GT_MODULES
+    assert "groundtruth.evidence.issue_obligations" in agent_mod._INJECTED_GT_MODULES
     # And the explicit assertion API does not raise.
     agent_mod._assert_gt_mini_patch_imports_covered()
 

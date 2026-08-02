@@ -30,7 +30,7 @@ THE LAW — correct-or-quiet + positive evidence (accuracy invariant: a false
   non-zero exit with no positive parse evidence. Never a guessed verdict.
 
 PER-LANGUAGE HONESTY (checked vs unavailable, and WHY):
-  .py            IN-PROCESS ``ast.parse`` (executor=None) / ``python -c ast.parse``
+  .py/.pyi       IN-PROCESS ``ast.parse`` (executor=None) / ``python -c ast.parse``
                  (via executor). Pure parse, no bytecode cache.
   .js/.mjs/.cjs  ``node --check`` — Node's own parse-only flag.
   .go            ``gofmt -e`` — parses to AST, reports parse errors, exit != 0.
@@ -63,6 +63,7 @@ import os
 import posixpath
 import re
 import subprocess
+import tempfile
 import traceback
 from typing import Any, Callable
 
@@ -154,7 +155,7 @@ def check_edit_syntax(
     # Python fast path: parse IN-PROCESS (no spawn, no bytecode cache) when no
     # executor is injected. With an executor, use the subprocess ast.parse form so
     # the check runs inside the task's own interpreter/container.
-    if ext == ".py" and executor is None:
+    if ext in (".py", ".pyi") and executor is None:
         return _check_py_in_process(abs_path, ext, rel_name)
 
     cmd = _build_check_command(ext, abs_path)
@@ -170,7 +171,7 @@ def check_edit_syntax(
     # source-only diagnostic in production. Exact replay fidelity still depends
     # on executing under the recorded interpreter/toolchain.
     if (
-        ext == ".py"
+        ext in (".py", ".pyi")
         and result.get("verdict") == "syntax_error"
         and _ss_edit_diag_enabled()
     ):
@@ -192,6 +193,73 @@ def check_edit_syntax(
             str(result["diagnostic"]), abs_path, rel_name)
     result = _apply_name_check(result, ext, abs_path, rel_name, executor)
     return result
+
+
+def check_edit_syntax_bytes(
+    file_path: str,
+    source_bytes: bytes,
+    repo_root: str,
+    *,
+    executor: Executor | None = None,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """Check one immutable captured postimage and return path-stable evidence.
+
+    The ordinary path API reopens the worktree. Observation compilation already
+    owns exact postimage bytes, so reopening would permit the hash and checker to
+    observe different revisions. A private temporary file gives every local
+    parser the captured bytes while all temporary identities are scrubbed from
+    the returned diagnostic and checker command. The executor contract cannot
+    transfer bytes into a remote container, so that mode fails quiet instead of
+    claiming it parsed bytes the executor could not observe.
+    """
+
+    if not isinstance(source_bytes, bytes):
+        raise TypeError("source_bytes must be bytes")
+    normalized = (file_path or "").replace("\\", "/")
+    extension = os.path.splitext(normalized)[1].lower()
+    if not normalized or not extension:
+        return _verdict("unavailable", reason="no_file_path", ext=extension)
+    if executor is not None:
+        return _verdict(
+            "unavailable",
+            reason="captured_bytes_executor_unsupported",
+            ext=extension,
+        )
+    with tempfile.TemporaryDirectory(prefix="gt-syntax-capture-") as directory:
+        captured_path = os.path.join(directory, "captured" + extension)
+        with open(captured_path, "wb") as handle:
+            handle.write(source_bytes)
+        result = check_edit_syntax(
+            captured_path,
+            repo_root,
+            executor=executor,
+            timeout=timeout,
+        )
+        aliases = {
+            captured_path,
+            captured_path.replace("\\", "/"),
+            os.path.basename(captured_path),
+        }
+        if repo_root:
+            try:
+                aliases.add(
+                    os.path.relpath(captured_path, repo_root).replace("\\", "/")
+                )
+            except ValueError:
+                pass
+        sanitized = dict(result)
+        diagnostic = str(sanitized.get("diagnostic") or "")
+        for alias in sorted((item for item in aliases if item), key=len, reverse=True):
+            diagnostic = diagnostic.replace(alias, normalized)
+        sanitized["diagnostic"] = diagnostic
+        checker = sanitized.get("checker")
+        if isinstance(checker, list):
+            sanitized["checker"] = [
+                normalized if str(item) in aliases else str(item)
+                for item in checker
+            ]
+        return sanitized
 
 
 def _relativize_diagnostic(diag: str, abs_path: str, rel_name: str) -> str:
@@ -429,7 +497,7 @@ def _build_check_command(ext: str, path: str) -> list[str] | None:
     invocations that yield POSITIVE syntax evidence WITHOUT conflating type/module
     errors are listed; everything else is intentionally None (see the honesty table
     in the module docstring)."""
-    if ext == ".py":
+    if ext in (".py", ".pyi"):
         # ast.parse only — no bytecode cache written (unlike py_compile). Encoding-safe.
         return [
             "python", "-I", "-c",

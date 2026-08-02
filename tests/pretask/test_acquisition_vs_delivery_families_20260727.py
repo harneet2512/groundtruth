@@ -45,6 +45,7 @@ _DEL = ("delivered_graph_edge_count", "delivered_semantic_signal_count",
         "delivered_structural_signal_count", "delivered_fts5_signal_count")
 _LEGACY = ("graph_edge_count", "semantic_signal_count",
            "structural_signal_count", "fts5_signal_count")
+_REAL_RUN_V74 = vb.run_v74
 
 
 @pytest.fixture
@@ -64,7 +65,23 @@ def _brief(graph_db: str, repo: str, monkeypatch, *, reslot: bool):
     if reslot:
         monkeypatch.setenv("GT_BRIEF_MINIMAL", "1")
         monkeypatch.setenv("GT_LOC_RESLOT", "1")
-    return vb.generate_v1r_brief(ISSUE, repo, graph_db, bug_id="c15", repo="patroni")
+    def deterministic_semantic_leg(*args, **kwargs):
+        result = _REAL_RUN_V74(*args, **kwargs)
+        for record in result.ranked_full:
+            if not isinstance(record, dict) or not record.get("path"):
+                continue
+            components = dict(record.get("components") or {})
+            components["sem"] = max(float(components.get("sem", 0.0) or 0.0), 0.5)
+            record["components"] = components
+        return result
+
+    # The optional embedding model is not part of clean CI. Stub only its scored
+    # contribution at the production run_v74 boundary; ranking, rendering,
+    # acquisition counting, delivery reduction, and metric serialization remain real.
+    monkeypatch.setattr(vb, "run_v74", deterministic_semantic_leg)
+    return vb.generate_v1r_brief(
+        ISSUE, repo, graph_db, bug_id="c15", repo="patroni"
+    )
 
 
 def _vals(result, names) -> list:

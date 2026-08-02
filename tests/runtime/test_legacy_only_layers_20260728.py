@@ -61,7 +61,6 @@ LEGACY_ONLY = frozenset(
         # emitter yet; when it grows one it must be a SEPARATE call at the equivalent
         # completeness point, not a rehoming of this one — the legacy anchor stays valid
         # for every legacy-delivered observation regardless.
-        "_record_trigger_opportunities",
         "_cochange_block",
         "_coherence_collapse_candidate",
         "_concern_lane_a_append",

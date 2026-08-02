@@ -7,6 +7,7 @@ witness holds).
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -25,7 +26,11 @@ _SRC = os.path.abspath(os.path.join(_SCRIPTS, "..", "..", "src"))
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from artifact_resolver import brief_provenance, resolve_trial_artifacts  # noqa: E402
+from artifact_resolver import (  # noqa: E402
+    TrialArtifacts,
+    brief_provenance,
+    resolve_trial_artifacts,
+)
 from reconcile import reconcile_graph_handoff as reconcile_graph_handoff  # noqa: E402
 from groundtruth.runtime.context_policy import POLICY_VERSION as PHASE_POLICY_VERSION  # noqa: E402
 from groundtruth.runtime.obligations import OBLIGATION_VERSION  # noqa: E402
@@ -724,8 +729,6 @@ def _augment_artifacts_root(jobs_dir: str, artifacts: dict[str, str | None]) -> 
     full-run trajectory (+ patch + reward) is right there. When the resolver missed the mini
     trajectory, look for it at the task root and fill it in so trajectory_integrity /
     trajectory_state / patch_hygiene read the REAL run instead of an all-null stub."""
-    if artifacts.get("mini_trajectory"):
-        return artifacts
     roots: list[str] = []
     for r in (jobs_dir, os.path.dirname(os.path.abspath(jobs_dir)), os.getcwd()):
         if r and r not in roots:
@@ -737,6 +740,29 @@ def _augment_artifacts_root(jobs_dir: str, artifacts: dict[str, str | None]) -> 
             if not artifacts.get("trial_dir"):
                 artifacts["trial_dir"] = root
             break
+    if not artifacts.get("deep_metrics"):
+        # The mini workflow writes final deep metrics directly into the explicit
+        # task root. Never search sibling task roots: accept the instance-bound
+        # name when present, otherwise a unique task-root candidate only.
+        task_root = os.path.abspath(jobs_dir)
+        instance_id = (
+            os.environ.get("GT_INSTANCE_ID")
+            or os.environ.get("GT_MATRIX_TASK")
+            or ""
+        )
+        preferred = (
+            os.path.join(task_root, f"gt_deep_metrics_{instance_id}.json")
+            if instance_id
+            else ""
+        )
+        if preferred and os.path.isfile(preferred):
+            artifacts["deep_metrics"] = preferred
+        else:
+            candidates = sorted(
+                glob.glob(os.path.join(task_root, "gt_deep_metrics_*.json"))
+            )
+            if len(candidates) == 1:
+                artifacts["deep_metrics"] = candidates[0]
     return artifacts
 
 
@@ -903,9 +929,14 @@ def build_task_truth(
     deep = _load_json(artifacts.get("deep_metrics") or "") or {}
     traj_int = _trajectory_integrity(artifacts)
     reconciled = reconcile_graph_handoff(signal)
-    arts = resolve_trial_artifacts(
-        jobs_dir, instance_id=iid, strict_task_match=bool(iid)
-    )
+    # Preserve the single artifact selection made at function entry. Re-resolving
+    # with the normalized result identity can reject a valid pier directory whose
+    # basename carries an attempt suffix (for example task__abc), silently dropping
+    # its runtime ledger and producing a cross-surface partial truth record.
+    arts = TrialArtifacts(**{
+        field: artifacts.get(field)
+        for field in TrialArtifacts.__dataclass_fields__
+    })
     brief_prov = brief_provenance(arts)
     retry_n = int(os.environ.get("GT_RETRY_ON_VERIFIER_FAIL") or "0")
     verifier_semantics = {

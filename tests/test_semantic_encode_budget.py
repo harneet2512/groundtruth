@@ -27,18 +27,40 @@ embedder (no ONNX, no network, no SWE-bench tasks, no gold labels).
 
 from __future__ import annotations
 
+import importlib
 import sqlite3
 import time
 
 import numpy as np
 import pytest
 
-from groundtruth.memory.enrich import embed as embed_mod
 from groundtruth.pretask import anchor_select
 from groundtruth.pretask import graph_localizer as gl
 from groundtruth.pretask.anchors import IssueAnchors
 
 _DIM = 64
+
+
+@pytest.fixture(autouse=True)
+def _bind_live_semantic_modules():
+    """Patch the module objects that production functions actually use.
+
+    Some isolation tests deliberately replace package modules in ``sys.modules``.
+    Pytest collects this file before executing those tests, so its original aliases
+    can otherwise point at dead module dictionaries by the time these tests run.
+    """
+    global gl, anchor_select
+    current_gl = importlib.import_module("groundtruth.pretask.graph_localizer")
+    prior_embedder = getattr(current_gl, "_EMBEDDER", None)
+    prior_embedder_tried = getattr(current_gl, "_EMBEDDER_TRIED", False)
+    gl = importlib.reload(
+        current_gl
+    )
+    assert gl._semantic_score_by_file.__globals__ is gl.__dict__
+    anchor_select = importlib.import_module("groundtruth.pretask.anchor_select")
+    yield
+    gl._EMBEDDER = prior_embedder
+    gl._EMBEDDER_TRIED = prior_embedder_tried
 
 
 def _unit(v: np.ndarray) -> np.ndarray:
@@ -84,10 +106,12 @@ class CountingEmbedder:
 def _clear_caches() -> None:
     """Isolate every per-passage / per-graph cache between tests."""
     anchor_select._EMBED_CACHE.clear()
-    anchor_select._SYMVEC_CACHE.clear()
+    embed_mod = importlib.import_module("groundtruth.memory.enrich.embed")
     shared = getattr(embed_mod, "_PASSAGE_VEC_CACHE", None)
     if shared is not None:
         shared.clear()
+    # Repair anchor_select's alias if another test reloaded the embed module.
+    anchor_select._shared_passage_cache().clear()
 
 
 _SCHEMA = """
@@ -266,7 +290,8 @@ def test_cross_half_cache_reuse_anchor_select_primes_localizer(tmp_path, monkeyp
 def test_shared_cache_is_one_object_and_bounded():
     """anchor_select._SYMVEC_CACHE and embed._PASSAGE_VEC_CACHE are the SAME
     store (no third cache variant), and the LRU evicts past maxsize."""
-    assert anchor_select._SYMVEC_CACHE is embed_mod._PASSAGE_VEC_CACHE
+    embed_mod = importlib.import_module("groundtruth.memory.enrich.embed")
+    assert anchor_select._shared_passage_cache() is embed_mod._PASSAGE_VEC_CACHE
     c = embed_mod._PassageVecCache(maxsize=3)
     for i in range(5):
         c[f"h{i}"] = np.zeros(2, dtype=np.float32)

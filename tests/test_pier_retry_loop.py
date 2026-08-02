@@ -34,7 +34,10 @@ context-only delivery cannot buy.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import sys
+import types
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -42,11 +45,93 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
-from pier.environments.base import ExecResult  # noqa: E402
 
-import artifact_deepswe.gt_agent as gt_agent  # noqa: E402
-from artifact_deepswe.gt_agent import GTMiniSweAgent  # noqa: E402
-from pier.agents.installed.mini_swe_agent import MiniSweAgent  # noqa: E402
+@dataclass
+class ExecResult:
+    stdout: str
+    stderr: str
+    return_code: int
+
+
+@dataclass
+class _InstallStep:
+    user: str
+    run: str
+
+
+@dataclass
+class _AgentInstallSpec:
+    steps: list[_InstallStep] = field(default_factory=list)
+
+
+class MiniSweAgent:
+    """Test-local Pier launcher contract used by the retry-loop component tests."""
+
+    def __init__(self, logs_dir=None, **_kwargs):
+        self.logs_dir = logs_dir
+
+    async def run(self, instruction, environment, context):
+        return None
+
+    def install_spec(self):
+        return _AgentInstallSpec()
+
+
+def _load_agent_with_local_pier_contract():
+    """Load the adapter against the narrow Pier API it actually consumes.
+
+    The evaluation-only Pier wheel is intentionally absent from clean CI. These
+    tests exercise GroundTruth's retry semantics, not Pier implementation code,
+    so a deterministic contract stub is stronger than skipping the whole module.
+    """
+    module_values: dict[str, types.ModuleType] = {}
+    for name in (
+        "pier",
+        "pier.agents",
+        "pier.agents.installed",
+        "pier.agents.installed.mini_swe_agent",
+        "pier.environments",
+        "pier.environments.base",
+        "pier.models",
+        "pier.models.agent",
+        "pier.models.agent.context",
+        "pier.models.agent.install",
+        "pier.models.trial",
+        "pier.models.trial.paths",
+    ):
+        module = types.ModuleType(name)
+        module.__path__ = []  # type: ignore[attr-defined]
+        module_values[name] = module
+    module_values["pier.agents.installed.mini_swe_agent"].MiniSweAgent = MiniSweAgent
+    module_values["pier.environments.base"].BaseEnvironment = object
+    module_values["pier.environments.base"].ExecResult = ExecResult
+    module_values["pier.models.agent.context"].AgentContext = object
+    module_values["pier.models.agent.install"].AgentInstallSpec = _AgentInstallSpec
+    module_values["pier.models.agent.install"].InstallStep = _InstallStep
+    module_values["pier.models.trial.paths"].EnvironmentPaths = types.SimpleNamespace(
+        agent_dir="/logs"
+    )
+
+    previous = {name: sys.modules.get(name) for name in module_values}
+    sys.modules.update(module_values)
+    try:
+        path = _ROOT / "artifact_deepswe" / "gt_agent.py"
+        spec = importlib.util.spec_from_file_location("gt_agent_pier_retry_contract", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        for name, prior in previous.items():
+            if prior is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prior
+
+
+gt_agent = _load_agent_with_local_pier_contract()
+GTMiniSweAgent = gt_agent.GTMiniSweAgent
 
 
 class FakeEnv:
@@ -223,7 +308,7 @@ def test_feedback_tail_is_bounded(agent, record_runs, monkeypatch):
     huge = "x" * 50_000 + "\nFAILED test_tail"
     env = FakeEnv([_fail(huge)])
     _go(agent, env)
-    fb = record_runs[1]
+    fb = next(run for run in record_runs if "<test-feedback" in run)
     assert "…(truncated)…" in fb
     assert "FAILED test_tail" in fb  # the TAIL survives (most recent output)
     assert len(fb) < 10_000 + len(record_runs[0])

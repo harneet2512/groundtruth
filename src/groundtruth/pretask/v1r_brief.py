@@ -2784,10 +2784,16 @@ class _RankedEntry:
 
     __slots__ = ("path", "witness", "localizer_confidence")
 
-    def __init__(self, path: str) -> None:
+    def __init__(
+        self,
+        path: str,
+        *,
+        witness: str = "",
+        localizer_confidence: float = 0.0,
+    ) -> None:
         self.path = path
-        self.witness = ""
-        self.localizer_confidence = 0.0
+        self.witness = witness
+        self.localizer_confidence = localizer_confidence
 
 
 # C15 — the wire form of "this question has no answer on this run", for JSON readers that
@@ -2799,6 +2805,9 @@ _NOT_EVALUABLE = "NOT_EVALUABLE"
 def _l1_acquisition_counts(
     graph_db: str,
     records: list[dict],
+    *,
+    witness_by_file: dict[str, str] | None = None,
+    localizer_confidence_by_file: dict[str, float] | None = None,
 ) -> tuple[int, int, int, int]:
     """The same four signal counts, over what was ACQUIRED — independent of delivery.
 
@@ -2817,8 +2826,29 @@ def _l1_acquisition_counts(
     Both facts are wanted. They must not share a name: this answers "what did the legs find",
     `_l1_signal_counts` answers "what reached the model".
     """
-    entries = [_RankedEntry(str(r.get("path", ""))) for r in records
-               if isinstance(r, dict) and r.get("path")]
+    witness_by_file = witness_by_file or {}
+    localizer_confidence_by_file = localizer_confidence_by_file or {}
+    entries = []
+    for record in records:
+        if not isinstance(record, dict) or not record.get("path"):
+            continue
+        path = str(record.get("path", ""))
+        normalized = path.replace("\\", "/").lstrip("./").lstrip("/")
+        entries.append(
+            _RankedEntry(
+                path,
+                witness=(
+                    witness_by_file.get(path)
+                    or witness_by_file.get(normalized)
+                    or ""
+                ),
+                localizer_confidence=float(
+                    localizer_confidence_by_file.get(path)
+                    or localizer_confidence_by_file.get(normalized)
+                    or 0.0
+                ),
+            )
+        )
     aligned = [r for r in records if isinstance(r, dict) and r.get("path")]
     return _l1_signal_counts(graph_db, entries, aligned)  # type: ignore[arg-type]
 
@@ -5594,6 +5624,7 @@ def _apply_evidence_rrf(
         _rrf = _rrf_evidence_scores([rec for _, rec, _ in _supported])
         _supported.sort(
             key=lambda item: (
+                -int(bool(item[1].get("witness_verified", False))),
                 -_rrf.get(id(item[1]), 0.0),
                 -_class_count(item[1]),
                 -item[2],
@@ -6954,7 +6985,10 @@ def generate_v1r_brief(
     # acquired >= delivered always holds and the pair is itself the re-slot's delivery gap.
     try:
         _acq_ge, _acq_sem, _acq_struct, _acq_fts5 = _l1_acquisition_counts(
-            graph_db, top_records
+            graph_db,
+            top_records,
+            witness_by_file=_witness_by_file,
+            localizer_confidence_by_file=_loc_conf_by_file,
         )
     except Exception:
         _acq_ge = _acq_sem = _acq_struct = _acq_fts5 = 0

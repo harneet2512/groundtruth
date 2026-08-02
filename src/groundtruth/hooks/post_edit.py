@@ -197,7 +197,7 @@ def _categorical_edge_filter_clause(*, alias: str = "e") -> str:
     )
 
 
-def _legacy_confidence_filter_clause(*, alias: str = "e", min_conf: float = 0.6) -> str:
+def _legacy_confidence_filter_clause(*, alias: str = "e", min_conf: float = 0.7) -> str:
     """Backward-compatible numeric confidence filter.
 
     Used as a fallback when graph.db doesn't have the post-merge categorical
@@ -207,7 +207,7 @@ def _legacy_confidence_filter_clause(*, alias: str = "e", min_conf: float = 0.6)
     return f"COALESCE({alias}.confidence, 0.5) >= {min_conf}"
 
 
-def _edge_filter_for_db(db_path: str, *, alias: str = "e", min_conf: float = 0.6) -> str:
+def _edge_filter_for_db(db_path: str, *, alias: str = "e", min_conf: float = 0.7) -> str:
     """Pick the right filter clause based on what the graph.db supports.
 
     Returns the categorical clause when trust_tier + candidate_count columns
@@ -980,7 +980,7 @@ def _get_callers_from_graph(
     db_path: str, file_path: str, function_name: str, repo_root: str,
     seen_files: list[str], limit: int = 5
 ) -> list[dict[str, str]]:
-    """Query graph.db for cross-file callers with confidence >= 0.5.
+    """Query graph.db for cross-file callers with confidence >= 0.7.
 
     Returns list of dicts: {file, line, caller_name, code}
     Filters out callers from files the agent has already visited.

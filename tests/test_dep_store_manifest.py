@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -166,3 +167,21 @@ def test_write_manifest_roundtrip():
             loaded = json.load(fh)
         assert loaded["schema"] == "gt.dep_store_manifest.v1"
         assert validate_manifest(loaded) == []
+
+
+def test_substrate_never_transplants_baked_rust_src() -> None:
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "scripts" / "ci" / "substrate_proof.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "BAKED_RUST_SRC" not in script
+    assert "Never transplant rust-src" in script
+
+
+def test_proof_fails_closed_when_dependency_manifest_is_absent() -> None:
+    root = Path(__file__).resolve().parents[1]
+    proof = (root / "scripts" / "swebench" / "gt_run_proof.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'tracker.complete("dep_store", manifest="absent")' not in proof
+    assert '"DEP_STORE_MANIFEST_MISSING"' in proof

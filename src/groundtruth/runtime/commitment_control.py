@@ -12,6 +12,8 @@ native terminal action may proceed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from enum import Enum
 
@@ -124,6 +126,10 @@ class CommitmentEvidence:
     release_allowed: bool
     visible_to_model_call_ids: tuple[str, ...]
     material_action_ids: tuple[str, ...]
+    # A commitment may be deferred only when these exact bytes are already
+    # staged at the provider boundary for the next inference.  Eligibility in
+    # the evidence store alone is not a delivery guarantee.
+    staged_for_next_inference: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -148,7 +154,12 @@ class CommitmentEvidence:
             self.visible_to_model_call_ids
         ):
             raise ValueError("visible_to_model_call_ids must be unique")
-        for field_name in ("fresh", "superseded", "release_allowed"):
+        for field_name in (
+            "fresh",
+            "superseded",
+            "release_allowed",
+            "staged_for_next_inference",
+        ):
             if type(getattr(self, field_name)) is not bool:
                 raise TypeError(f"{field_name} must be bool")
 
@@ -163,10 +174,17 @@ class CommitmentControlContext:
     failure_state: FailurePolicyState
     epistemic_prefix_may_change_decision: bool
     certificate_requirements_met: bool
+    repository_revision: str = ""
+    consumed_interruption_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "intents", tuple(self.intents))
         object.__setattr__(self, "evidence", tuple(self.evidence))
+        object.__setattr__(
+            self,
+            "consumed_interruption_keys",
+            tuple(self.consumed_interruption_keys),
+        )
         if not self.intents:
             raise ValueError("intents must be non-empty")
         action_ids = tuple(intent.action.action_id for intent in self.intents)
@@ -194,6 +212,10 @@ class CommitmentControlContext:
             )
         if type(self.certificate_requirements_met) is not bool:
             raise TypeError("certificate_requirements_met must be bool")
+        if len(set(self.consumed_interruption_keys)) != len(
+            self.consumed_interruption_keys
+        ):
+            raise ValueError("consumed_interruption_keys must be unique")
 
 
 @dataclass(frozen=True)
@@ -207,6 +229,7 @@ class CommitmentControlPlan:
     gt_certificate_allowed: bool
     native_path_preserved: bool
     reason_code: str
+    interruption_key: str = ""
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -318,6 +341,7 @@ def _qualifying_evidence(
                 and evidence.fresh
                 and not evidence.superseded
                 and evidence.release_allowed
+                and evidence.staged_for_next_inference
                 and evidence.lifecycle
                 in _EVIDENCE_LIFECYCLES_ELIGIBLE_FOR_INTERVENTION
                 and context.proposing_model_call_id
@@ -343,6 +367,7 @@ def _plan(
     fresh_inference_required: bool = False,
     gt_certificate_allowed: bool = False,
     reason_code: str,
+    interruption_key: str = "",
 ) -> CommitmentControlPlan:
     return CommitmentControlPlan(
         decision=decision,
@@ -354,7 +379,39 @@ def _plan(
         gt_certificate_allowed=gt_certificate_allowed,
         native_path_preserved=True,
         reason_code=reason_code,
+        interruption_key=interruption_key,
     )
+
+
+def _interruption_key(
+    context: CommitmentControlContext,
+    qualifying: tuple[CommitmentEvidence, ...],
+) -> str:
+    """Identify one logical intervention independently of host action ids."""
+
+    commitments = tuple(
+        {
+            "operation": intent.action.operation.value,
+            "structured_operation": intent.action.structured_operation,
+            "subject": intent.action.subject,
+            "targets": list(intent.action.targets),
+        }
+        for intent in context.intents
+        if classify_action(intent) is not ActionAssuranceClass.EPISTEMIC
+    )
+    identity = {
+        "decision_id": context.active_decision_id,
+        "repository_revision": context.repository_revision,
+        "commitments": commitments,
+        "evidence_ids": [item.evidence_id for item in qualifying],
+    }
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def decide_commitment_control(
@@ -365,9 +422,10 @@ def decide_commitment_control(
     The decision order is deliberate:
 
     1. An unavailable or quarantined GT never interrupts the native path.
-    2. A mixed batch is split only at its existing epistemic prefix and only
-       when the caller has established that prefix can change the decision.
-    3. Only scheduler-approved, verified, fresh, unseen, and action-material
+    2. Epistemic actions are never withheld merely because a later commitment
+       exists in the same native batch.
+    3. Only scheduler-approved, verified, fresh, unseen, staged, and
+       action-material
        evidence can require a fresh inference.  Existing evidence can
        intervene before a single commitment; a mixed batch is re-evaluated
        after its epistemic prefix.
@@ -395,24 +453,20 @@ def decide_commitment_control(
             reason_code="GT_UNAVAILABLE_NATIVE_PATH",
         )
 
-    prefix = _epistemic_prefix(intents)
-    has_deferred_commitment = len(prefix) < len(intents)
-    if (
-        context.phase is BatchPhase.BEFORE_BATCH
-        and prefix
-        and has_deferred_commitment
-        and context.epistemic_prefix_may_change_decision
-    ):
-        return _plan(
-            decision=CommitmentDecision.PAUSE,
-            execute_now=prefix,
-            deferred=intents[len(prefix) :],
-            epistemic_prefix=prefix,
-            reason_code="EPISTEMIC_PREFIX_FIRST",
-        )
-
     qualifying = _qualifying_evidence(context)
     if qualifying:
+        interruption_key = _interruption_key(context, qualifying)
+        if interruption_key in context.consumed_interruption_keys:
+            return _plan(
+                decision=CommitmentDecision.ALLOW,
+                execute_now=intents,
+                gt_certificate_allowed=(
+                    context.failure_state.gt_certification_enabled
+                    and context.certificate_requirements_met
+                ),
+                reason_code="INTERRUPTION_ALREADY_CONSUMED",
+                interruption_key=interruption_key,
+            )
         return _plan(
             decision=CommitmentDecision.FRESH_INFERENCE,
             execute_now=(),
@@ -422,6 +476,7 @@ def decide_commitment_control(
             ),
             fresh_inference_required=True,
             reason_code="VERIFIED_UNSEEN_MATERIAL_EVIDENCE",
+            interruption_key=interruption_key,
         )
 
     certificate_allowed = (

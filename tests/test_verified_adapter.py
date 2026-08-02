@@ -34,12 +34,13 @@ import pytest
 import yaml
 
 _ROOT = Path(__file__).resolve().parents[1]
-_ADAPTER_PATH = _ROOT / "artifact_verified" / "gt_verified_agent.py"
-_CONFIG_PATH = _ROOT / "artifact_verified" / "verified_gt.yaml"
+_VERIFIED_FIXTURES = _ROOT / "tests" / "fixtures" / "verified_adapter"
+_ADAPTER_PATH = _VERIFIED_FIXTURES / "gt_verified_agent.py"
+_CONFIG_PATH = _VERIFIED_FIXTURES / "verified_gt.yaml"
 _PATCH_PATH = _ROOT / "artifact_deepswe" / "gt_mini_patch.py"
 _MANIFEST_PATH = _ROOT / "scripts" / "vm" / "build_verified_manifest.py"
 _WORKFLOW = _ROOT / ".github" / "workflows" / "verified_run.yml"
-_DEEP_METRICS_PATH = _ROOT / "artifact_verified" / "verified_deep_metrics.py"
+_DEEP_METRICS_PATH = _VERIFIED_FIXTURES / "verified_deep_metrics.py"
 
 
 def _load(name: str, path: Path):
@@ -332,7 +333,7 @@ def _evidence_for_view(gmp, file_token: str) -> str:
     text appended to the observation."""
     class FakeEnv:
         def execute(self, action, *a, **k):
-            return {"output": f"1\tdef funcA(x):", "returncode": 0, "exception_info": ""}
+            return {"output": "1\tdef funcA(x):", "returncode": 0, "exception_info": ""}
 
     FakeEnv.execute = gmp._wrap_execute(FakeEnv.execute)
     out = FakeEnv().execute({"command": f"cat {file_token}"})

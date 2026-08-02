@@ -1153,12 +1153,15 @@ def test_unquoted_heredoc_operator_still_terminates_shell_head():
     assert sro._head_of(command) == "cat > /tmp/patch.py "
 
 
-def test_container_path_after_quoted_left_shift_is_still_rewritten():
+def test_container_path_after_quoted_left_shift_is_still_rewritten(monkeypatch):
     command = '''python3 -c "value = 1 << 2; print('/testbed/output.py')"'''
-    drive = Path.cwd().drive or "D:"
+    # Production correctly uses no prefix on POSIX and a drive prefix on Windows.
+    # Inject a Windows mirror prefix so this test proves that _head_of does not
+    # mistake the quoted left shift for a heredoc boundary on either host OS.
+    monkeypatch.setattr(sro, "_mirror_drive", lambda reference=None: "D:")
 
     assert sro._rewrite_container_paths(command) == (
-        f'''python3 -c "value = 1 << 2; print('{drive}/testbed/output.py')"'''
+        '''python3 -c "value = 1 << 2; print('D:/testbed/output.py')"'''
     )
 
 

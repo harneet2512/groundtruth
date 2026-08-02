@@ -123,7 +123,7 @@ def test_classification_uses_structured_assurance_facts() -> None:
     )
 
 
-def test_mixed_batch_executes_only_epistemic_prefix_when_it_may_change_decision() -> None:
+def test_mixed_batch_is_never_generically_paused_for_an_epistemic_prefix() -> None:
     search = _intent("search-1", ActionOperation.SEARCH)
     read = _intent("read-1", ActionOperation.VIEW_SOURCE)
     edit = _intent("edit-1", ActionOperation.EDIT, sandboxed=True)
@@ -135,11 +135,11 @@ def test_mixed_batch_executes_only_epistemic_prefix_when_it_may_change_decision(
         )
     )
 
-    assert plan.decision is CommitmentDecision.PAUSE
-    assert plan.execute_now == (search, read)
-    assert plan.deferred == (edit,)
-    assert plan.epistemic_prefix == (search, read)
-    assert plan.reason_code == "EPISTEMIC_PREFIX_FIRST"
+    assert plan.decision is CommitmentDecision.ALLOW
+    assert plan.execute_now == (search, read, edit)
+    assert plan.deferred == ()
+    assert plan.epistemic_prefix == ()
+    assert plan.reason_code == "NORMAL_POLICY_ALLOW"
     assert plan.native_path_preserved is True
 
 

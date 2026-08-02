@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -73,7 +74,20 @@ func main() {
 	file := flag.String("file", "", "Incremental mode: re-index only this single file (relative to -root) into an existing -output graph.db")
 	closureEnabled := flag.Bool("closure", true, "C7: compute the transitive-closure sidecar over VERIFIED CALLS edges (default on)")
 	rebuildClosure := flag.Bool("rebuild-closure", false, "Recompute the closure sidecar on an existing -output graph.db over its CURRENT edges. Run AFTER the LSP resolve pass so the closure reflects LSP-promoted/re-pointed/deleted edges (it is built once at index time and goes stale otherwise). Clears the old closure first.")
+	languageManifest := flag.Bool("language-manifest", false, "Print the canonical registered-language manifest as compact JSON and exit without indexing")
 	flag.Parse()
+
+	if *languageManifest {
+		manifest, err := specs.CanonicalLanguageManifestJSON()
+		if err != nil {
+			log.Fatalf("language-manifest: %v", err)
+		}
+		if !json.Valid(manifest) {
+			log.Fatal("language-manifest: internal encoder returned invalid JSON")
+		}
+		_, _ = os.Stdout.Write(append(manifest, '\n'))
+		return
+	}
 
 	if *workers <= 0 {
 		*workers = runtime.NumCPU()

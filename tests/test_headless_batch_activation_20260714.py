@@ -55,12 +55,17 @@ def _install_fake_runtime(
     patch = types.ModuleType("gt_mini_patch")
     patch._PATCHED_CLASSES = ["minisweagent.environments.local.LocalEnvironment"]
 
-    def install(target):
-        if install_result:
-            target._gt_batch_commit_installed = True
-        return install_result
+    def install_canonical_runtime(*, model, agent, env, task):
+        if not install_result:
+            return None
+        return types.SimpleNamespace(
+            attached=True,
+            attempt_runtime=object(),
+            provider_boundary=object(),
+            commitment_boundary=object(),
+        )
 
-    patch.install_observation_batch_commit = install
+    patch.install_canonical_runtime = install_canonical_runtime
     patch.ledger_write_failures = lambda: write_failures
     monkeypatch.setitem(sys.modules, "gt_mini_patch", patch)
 
@@ -105,12 +110,9 @@ def test_profile2_install_success_is_receipted_before_agent_run(tmp_path, monkey
     assert receipt["wrapper_attached"] is True
     assert receipt["result"] == "installed"
     assert receipt["mini_swe_version"] == "2.4.5"
-    attestation = json.loads(
-        (tmp_path / "gt_runtime_ledger_attestation_task.json").read_text(encoding="utf-8")
-    )
-    assert attestation["schema"] == "gt.runtime_ledger_attestation.v1"
-    assert attestation["row_count"] == 1
-    assert attestation["write_failures"] == 0
+    # A proved canonical attachment owns RuntimeJournal persistence. The
+    # historical JSONL written by this fixture is deliberately not attested.
+    assert not (tmp_path / "gt_runtime_ledger_attestation_task.json").exists()
 
 
 def test_profile2_ledger_write_failure_is_terminal_and_attested(tmp_path, monkeypatch):
@@ -120,10 +122,7 @@ def test_profile2_ledger_write_failure_is_terminal_and_attested(tmp_path, monkey
     )
 
     assert runner.run(_env(tmp_path)) == 2
-    attestation = json.loads(
-        (tmp_path / "gt_runtime_ledger_attestation_task.json").read_text(encoding="utf-8")
-    )
-    assert attestation["write_failures"] == 1
+    assert not (tmp_path / "gt_runtime_ledger_attestation_task.json").exists()
 
 
 def test_workflow_pins_and_requires_batch_receipt():
@@ -137,4 +136,4 @@ def test_workflow_pins_and_requires_batch_receipt():
     assert "GT_BATCH_UNPROVEN" in workflow
     assert "trial_results/gt_artifacts/gt_batch_activation.json" in workflow
     assert "GT_LEDGER_ATTESTATION_UNPROVEN" in workflow
-    assert "gt_runtime_ledger_attestation_${{ matrix.task }}.json" in workflow
+    assert "gt_runtime_ledger_attestation_${GT_TASK_ID}.json" in workflow

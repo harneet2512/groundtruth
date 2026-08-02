@@ -31,7 +31,7 @@ def _mandatory_perf_names() -> list[str]:
     return names
 
 
-def test_scoreboard_inventory_is_exact_executable_128_universe() -> None:
+def test_scoreboard_inventory_is_exact_executable_129_universe() -> None:
     scoreboard = json.loads(
         (ROOT / ".claude/reports/SS_SCOREBOARD.json").read_text(encoding="utf-8")
     )
@@ -39,11 +39,11 @@ def test_scoreboard_inventory_is_exact_executable_128_universe() -> None:
 
     assert {family: len(inventory[family]) for family in ("ACQ", "CAP", "FACT", "PERF")} == {
         "ACQ": 12,
-        "CAP": 47,
+        "CAP": 48,
         "FACT": 11,
         "PERF": 58,
     }
-    assert inventory["count"] == 128
+    assert inventory["count"] == 129
     assert set(inventory["CAP"]) == set(PROFILE_MEMBERS["2"])
     assert inventory["FACT"] == list(all_fact_classes())
     assert inventory["PERF"] == _mandatory_perf_names()
@@ -51,7 +51,7 @@ def test_scoreboard_inventory_is_exact_executable_128_universe() -> None:
     contract_rows = scoreboard["contract_bearing"]
     assert Counter(row["family"] for row in contract_rows) == {
         "ACQ": 12,
-        "CAP": 47,
+        "CAP": 48,
         "FACT": 11,
         "PERF": 58,
     }

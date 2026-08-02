@@ -1,0 +1,15 @@
+{
+  "schema": "groundtruth.architecture_contract.v1",
+  "benchmark_policy": {
+    "required_arms": [
+      "format-repaired baseline",
+      "shell-only"
+    ],
+    "prohibited_comparisons": [
+      {
+        "subject": "raw broken Qwen",
+        "reason": "scaffold-broken"
+      }
+    ]
+  }
+}

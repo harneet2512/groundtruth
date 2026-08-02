@@ -13,18 +13,15 @@ import os
 import sqlite3
 import tempfile
 
-import pytest
-
 from groundtruth.hooks.post_edit import (
-    _categorical_edge_filter_clause,
-    _legacy_confidence_filter_clause,
-    _edge_filter_for_db,
-    g7_filter_isolated,
     _STRONG_RESOLUTION_METHODS,
     _STRONG_TRUST_TIERS,
     _SUPPRESSED_TRUST_TIER,
+    _categorical_edge_filter_clause,
+    _edge_filter_for_db,
+    _legacy_confidence_filter_clause,
+    g7_filter_isolated,
 )
-
 
 # ---------------------------------------------------------------------------
 # G7 isolation gate (Contract pillar always-fire)
@@ -204,7 +201,7 @@ def test_edge_filter_falls_back_to_numeric_on_legacy_schema():
         clause = _edge_filter_for_db(path)
         # Should be the legacy version
         assert "confidence" in clause
-        assert "0.6" in clause
+        assert "0.7" in clause
         assert "trust_tier" not in clause
     finally:
         os.unlink(path)
@@ -213,7 +210,7 @@ def test_edge_filter_falls_back_to_numeric_on_legacy_schema():
 def test_edge_filter_falls_back_on_missing_db():
     clause = _edge_filter_for_db("/nonexistent/path.db")
     assert "confidence" in clause
-    assert "0.6" in clause
+    assert "0.7" in clause
 
 
 def test_categorical_clause_runs_in_sqlite():

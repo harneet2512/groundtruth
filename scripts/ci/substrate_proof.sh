@@ -85,7 +85,7 @@ fail_proof() {
 }
 fail_artifact() {
   _detail="$*"
-  echo "::warning::GT_ARTIFACT_MISSING: ${_detail} — proceeding (non-fatal)" | tee -a trial_output.log
+  echo "GT_ARTIFACT_MISSING: ${_detail} — proceeding (non-fatal)" | tee -a trial_output.log
   # Record but do NOT block. The agent can still run with degraded GT
   # (missing cert = some layers suppress, which is correct-or-quiet).
 }
@@ -373,28 +373,9 @@ if [ "$HARNESS" = "deepswe" ]; then
         || echo "rust-src backfill failed (non-fatal)"
     fi
   fi
-  # FIX-C (2026-06-13): if the task image had NO rust-src anywhere (the copied rustup
-  # AND its sysroot both lack it), fall back to the BAKED substrate's /opt/gt/rustup —
-  # which always ships rust-src (Dockerfile.gt-substrate). Without this, the :ro-removed
-  # but rust-src-less copied rustup still shadows the baked one and rust-analyzer can't
-  # warm. Bounded + non-fatal: FIX-A already keeps the task alive on a cold RA; this only
-  # upgrades graph quality. Uses the same docker-cp-from-image pattern proven above.
-  if [ "${GT_MATRIX_LANGUAGE}" = "rust" ] && [ -n "$ACTIVE_RUST_TOOLCHAIN" ] \
-     && [ ! -d "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" ] \
-     && [ -n "${GT_SUBSTRATE_DIGEST:-}" ]; then
-    BAKED_RUST_SRC="$(docker run --rm --entrypoint sh "$GT_SUBSTRATE_DIGEST" -lc \
-      'ls -d /opt/gt/rustup/toolchains/*/lib/rustlib/src/rust/library 2>/dev/null | head -1' | tr -d '\r' || true)"
-    if [ -n "$BAKED_RUST_SRC" ]; then
-      cid="$(docker create "$GT_SUBSTRATE_DIGEST" 2>/dev/null || true)"
-      if [ -n "$cid" ]; then
-        mkdir -p "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library"
-        docker cp "$cid:${BAKED_RUST_SRC}/." "/tmp/gt/deps/rustup/toolchains/$ACTIVE_RUST_TOOLCHAIN/lib/rustlib/src/rust/library" 2>/dev/null \
-          && echo "FIX-C: backfilled rust-src from BAKED substrate ($BAKED_RUST_SRC)" \
-          || echo "FIX-C: baked rust-src backfill failed (non-fatal; FIX-A keeps the task alive)"
-        docker rm -f "$cid" >/dev/null 2>&1 || true
-      fi
-    fi
-  fi
+  # Never transplant rust-src from the substrate's arbitrary toolchain into
+  # the task toolchain path. Missing task-owned rust-src remains missing and
+  # the dependency manifest rejects it instead of recording false provenance.
   python3 scripts/swebench/dep_store_manifest.py \
     --out /tmp/gt/dep_store_manifest.json \
     --language "${GT_MATRIX_LANGUAGE}" \

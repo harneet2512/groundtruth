@@ -1481,7 +1481,13 @@ def main(argv=None) -> int:
         except Exception as e:
             return tracker.fail("dep_store", "DEP_STORE_MANIFEST_READ_FAIL", str(e))
     else:
-        tracker.complete("dep_store", manifest="absent")
+        return tracker.fail(
+            "dep_store",
+            "DEP_STORE_MANIFEST_MISSING",
+            "dependency-store manifest is required for proof execution",
+            language=proof_language,
+            manifest=dep_manifest,
+        )
 
     # Separation of concerns (anti-cheat): GT is the HELPER, never the evaluator. It must never see
     # the evaluator's hidden tests or gold. Fail-closed if any eval artifact leaked in via env/file.

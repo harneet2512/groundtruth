@@ -403,6 +403,18 @@ _PRODUCT_PACKAGE_MODULES: dict[str, tuple[str, ...]] = {
         # shipped above.
         "brief_attestation.py",
         "trigger_opportunity.py",
+        # Phase II terminal/provider seams import these at module scope from both
+        # gt_mini_patch and gateway. They must travel with the task-container
+        # runtime or the fail-closed import guard correctly rejects the bundle.
+        "presubmit_verification.py",
+        "producer_audit.py",
+        "terminal_evidence.py",
+    ),
+    # terminal_evidence binds task obligations through this parser at runtime.
+    # Ship the exact product module so the task container never falls back or
+    # silently loses the episode-local terminal-evidence session.
+    "evidence": (
+        "issue_obligations.py",
     ),
     # SM-3: trajectory.classifier — hypothesis_ledger's FailureKind/is_env_failure
     # dep. Stdlib-only (enum/os/re/dataclasses), no groundtruth.* import -> closes

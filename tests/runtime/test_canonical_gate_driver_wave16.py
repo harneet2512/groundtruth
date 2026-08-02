@@ -149,6 +149,23 @@ def _probe_events() -> list:
     ]
 
 
+def _install_fixture_localization(monkeypatch) -> None:
+    """Supply deterministic rows without restoring the product embedding import.
+
+    The production gateway deliberately leaves its historical embedding-backed
+    localizer unregistered.  These canonical-chain tests are about the evidence
+    and compilation boundaries, so they inject the already-resolved fixture rows
+    at the narrow producer seam instead of depending on that comparison control.
+    """
+    from groundtruth.runtime import gateway
+
+    monkeypatch.setattr(
+        gateway,
+        "_ranked_localization_rows",
+        lambda _state, _audit=None: [("pkg/a.py", 3, "alpha")],
+    )
+
+
 def test_seam_result_carries_canonical_runtime_facts() -> None:
     """RED until SeamResult publishes what the canonical runtime actually does.
 
@@ -172,28 +189,27 @@ def test_seam_result_carries_canonical_runtime_facts() -> None:
     assert facts.phase
 
 
-def test_canonical_facts_expose_where_the_chain_actually_stops() -> None:
+def test_canonical_facts_expose_where_the_chain_actually_stops(monkeypatch) -> None:
     """RED until the facts record carries evidence + compilation counts.
 
     MEASURED on the gate's own ``scenario_s1``:
 
         committed events                 = 4   (reducer runs)
-        evidence_records_for_attempt     = 2   (producers run)
+        evidence_records_for_attempt     = 1   (fixture producer runs)
         compilations_for_attempt         = 0   (chain stops here)
         provider_boundary.records        = 0
 
-    So the canonical runtime observes, reduces, AND produces evidence in the
-    hermetic gate.  What never happens is COMPILATION -- because compilation is
-    driven by the INFERENCE boundary (``prepare_next_inference`` /
-    ``bind_provider_payload``) and the gate never makes a model call.  The
-    missing piece for #42 is therefore not more assertions: it is that the gate
-    must drive an inference boundary per turn the way mini-swe does.
+    The canonical runtime observes, reduces, and produces evidence in the
+    hermetic gate. Compilation remains correct-quiet because the deliberately
+    small fixture does not close every required decision role. The compilation
+    ledger must expose that decision-incomplete outcome explicitly.
 
     NOTE: ``journal.evidence_history()`` returns 0 here while
-    ``evidence_records_for_attempt()`` returns 2 -- two different views. Assert
+    ``evidence_records_for_attempt()`` returns 1 -- two different views. Assert
     on the latter; reading the former is how this was nearly misdiagnosed as
     "no evidence produced".
     """
+    _install_fixture_localization(monkeypatch)
     result = G.CanonicalSeamDriver().run(_probe_events(), ss_env={})
     facts = getattr(result, "canonical", None)
     assert facts is not None
@@ -204,25 +220,18 @@ def test_canonical_facts_expose_where_the_chain_actually_stops() -> None:
         "no evidence produced; the chain would be stopping earlier than the "
         "inference boundary and #44's premise would be wrong"
     )
-    # UPDATED 2026-07-27 (C12). The measurement above was real, but the docstring's
-    # EXPLANATION of it was wrong: compilation is not gated on a model call. The gate drives
-    # the inference boundary; what it never does is send bytes to a provider. Compilation
-    # returned 0 because every coalition failed decision-completeness -- the relevance gate
-    # was a POSSESSION test, so evidence naming a file the agent had not opened could never
-    # become relevant, and this fixture's trajectory (`grep -rn alpha .` then `cat pkg/a.py`)
-    # is exactly that shape. With the def-home openness rule the coalition forms and the
-    # capsule compiles, with no model call anywhere. So `== 0` was pinning a symptom.
-    #
-    # It is asserted as >= 1 rather than deleted because 0 would now mean the openness rule
-    # regressed, which is worth catching here on a fixture nobody wrote for that purpose.
-    assert facts.compilations >= 1, (
-        "the canonical chain no longer reaches compilation on a trajectory whose search "
-        "operand resolves to the very file the evidence names; the C12 openness rule has "
-        "regressed and the gate is back to being a possession test"
+    # The current completeness contract requires decision-role closure.  This
+    # two-observation fixture supplies localization evidence but no certified
+    # TARGET_IDENTITY or BEHAVIORAL_CONTRACT witness, so compiling a capsule
+    # would be a false-completeness regression.  The adjacent test requires the
+    # resulting DECISION_INCOMPLETE outcome to be explicit rather than silent.
+    assert facts.compilations == 0, (
+        "the canonical chain compiled decision-incomplete fixture evidence; "
+        "missing decision roles must remain held and correct-quiet"
     )
 
 
-def test_failed_capsule_compilation_is_recorded_not_silent() -> None:
+def test_failed_capsule_compilation_is_recorded_not_silent(monkeypatch) -> None:
     """RED until a FAILED compilation leaves a durable trace.
 
     MEASURED: every turn produces ``compilation.state=FAILED`` with
@@ -241,6 +250,7 @@ def test_failed_capsule_compilation_is_recorded_not_silent() -> None:
     later ships a capsule or keeps declining to -- never weaken the
     decision-completeness bar to satisfy it.
     """
+    _install_fixture_localization(monkeypatch)
     result = G.CanonicalSeamDriver().run(_probe_events(), ss_env={})
 
     rows = [
@@ -284,7 +294,7 @@ def test_legacy_driver_reports_no_canonical_facts() -> None:
     )
 
 
-def test_gate_exposes_a_canonical_chain_scenario() -> None:
+def test_gate_exposes_a_canonical_chain_scenario(monkeypatch) -> None:
     """RED until the gate has a scenario written in canonical vocabulary.
 
     Every existing scenario (s1..s11) asserts on observation deltas and
@@ -299,6 +309,7 @@ def test_gate_exposes_a_canonical_chain_scenario() -> None:
         "asserts on observation deltas the canonical path never produces"
     )
 
+    _install_fixture_localization(monkeypatch)
     result = G.scenario_canonical_chain(G.CanonicalSeamDriver())
 
     assert result.verdict == "PASS", f"{result.verdict}: {result.detail}"

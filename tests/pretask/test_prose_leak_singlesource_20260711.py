@@ -14,13 +14,14 @@ lockstep. A mutation to any canonical leg (e.g. dropping the ``(?i:)`` on the sn
 """
 from __future__ import annotations
 
-import os
+from pathlib import Path
 import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(r"D:\Groundtruth", "src"))
-sys.path.insert(0, os.path.join(r"D:\Groundtruth", "artifact_deepswe"))
+_REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO / "src"))
+sys.path.insert(0, str(_REPO / "artifact_deepswe"))
 
 from groundtruth.runtime import native_render as _nr  # noqa: E402
 from groundtruth.pretask.v1r_brief import _obligation_is_leaky  # noqa: E402

@@ -52,8 +52,8 @@ def test_lsp_ready_budget_owned_by_proof_runtime():
     sys.modules["gt_run_proof_budget_uut"] = mod
     spec.loader.exec_module(mod)
 
-    assert mod.lsp_ready_budget_seconds("go", {}) == 30
-    assert mod.lsp_ready_budget_seconds("rust", {}) == 45
-    assert mod.lsp_ready_budget_seconds("typescript", {}) == 20
+    assert mod.lsp_ready_budget_seconds("go", {}) == 60
+    assert mod.lsp_ready_budget_seconds("rust", {}) == 180
+    assert mod.lsp_ready_budget_seconds("typescript", {}) == 150
     assert mod.lsp_ready_budget_seconds("python", {}) == 20
     assert mod.lsp_ready_budget_seconds("go", {"GT_LSP_READY_BUDGET_S_OVERRIDE": "99"}) == 99

@@ -185,6 +185,8 @@ def _reset(patch_mod, monkeypatch):
         ("_oracle_review_fired", False), ("_oracle_last_losers", set()),
         ("_oracle_obligation_fired", False), ("_oblig_status_emitted", set()),
         ("_oblig_status_last_hash", None), ("_oracle_edited_tokens", set()),
+        ("_obligations_v2_cache", {}), ("_unexercised_emitted", set()),
+        ("_unexercised_late_suppressed", set()),
         ("_oracle_tested_tokens", set()), ("_oracle_edited_tokens_by_file", {}),
         ("_edit_churn", {}), ("_gt_oracle_tried", False), ("_gt_oracle_mod", None),
         ("_horizon_advisory_fired", False), ("_horizon_gate_fire_count", 0),

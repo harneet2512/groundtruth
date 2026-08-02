@@ -821,15 +821,17 @@ def test_real_seam_hermetic_under_leaked_gt_baseline():
 #    gate is a reader only: it never creates, steals, or deletes the oracle lock.
 # --------------------------------------------------------------------------- #
 def test_oracle_lock_holder_distinguishes_live_from_stale(tmp_path, monkeypatch):
+    import ss_replay_oracle as oracle
+
     lock = tmp_path / "ssr_replay_oracle.lock"
     lock.write_text("4242", encoding="utf-8")
     monkeypatch.setattr(G, "_ORACLE_RUN_LOCK", lock)
 
-    monkeypatch.setattr(G, "_pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(oracle, "_pid_holds_oracle", lambda pid: pid == 4242)
     assert G._oracle_lock_holder() == 4242
     assert lock.read_text(encoding="utf-8") == "4242"  # reader never mutates ownership
 
-    monkeypatch.setattr(G, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(oracle, "_pid_holds_oracle", lambda _pid: False)
     assert G._oracle_lock_holder() is None
     assert lock.is_file(), "the gate must never delete the oracle-owned lock"
 
@@ -888,10 +890,14 @@ def test_main_aborts_before_driver_when_lock_state_is_invalid(tmp_path, monkeypa
 
 
 def test_main_aborts_before_driver_when_live_oracle_holds_lock(tmp_path, monkeypatch, capsys):
+    import ss_replay_oracle as oracle
+
     lock = tmp_path / "ssr_replay_oracle.lock"
     lock.write_text("5151", encoding="utf-8")
     monkeypatch.setattr(G, "_ORACLE_RUN_LOCK", lock)
-    monkeypatch.setattr(G, "_pid_alive", lambda pid: pid == 5151)
+    # A live PID is not sufficient proof of ownership because PIDs are reused.
+    # Exercise the oracle-identity authority consulted by _oracle_lock_holder.
+    monkeypatch.setattr(oracle, "_pid_holds_oracle", lambda pid: pid == 5151)
 
     def _must_not_construct():
         raise AssertionError("gate constructed RealSeamDriver while oracle lock was live")

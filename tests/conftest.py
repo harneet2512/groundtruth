@@ -4,18 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from groundtruth.index.store import SymbolStore
+# Always test the co-located src-layout package.  Without this, an unrelated
+# editable install can be imported during collection and a later test has to
+# evict every cached groundtruth module to recover the worktree package.
+_SRC = str(Path(__file__).resolve().parents[1] / "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+from groundtruth.index.store import SymbolStore  # noqa: E402
 
 
 def make_lsp_message(body: dict[str, Any]) -> bytes:
     """Frame a JSON-RPC body as an LSP wire-format message."""
     content = json.dumps(body).encode("utf-8")
-    header = f"Content-Length: {len(content)}\r\n\r\n".encode("utf-8")
+    header = f"Content-Length: {len(content)}\r\n\r\n".encode()
     return header + content
 
 

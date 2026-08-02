@@ -248,7 +248,14 @@ class TestCoverageRatios:
     def test_edit_coverage_no_obligations_dormant(self, sense_mod):
         assert sense_mod.edit_coverage_ratio(set(), {"foo"}) is None
 
-    def test_edit_coverage_fraction(self, sense_mod):
+    def test_edit_coverage_fraction(self, sense_mod, monkeypatch):
+        # The live primitive may consult episode globals when called with its
+        # legacy two-argument form. Isolate this formula test from state left by
+        # earlier live-patch tests in the same interpreter.
+        if sense_mod._gmp is not None:
+            monkeypatch.setattr(sense_mod._gmp, "_oracle_edit_content_tokens", set())
+            monkeypatch.setattr(sense_mod._gmp, "_oracle_edited_rels", set())
+            monkeypatch.setattr(sense_mod._gmp, "_oracle_edited_lines_by_file", {})
         r = sense_mod.edit_coverage_ratio(
             {"capture_snapshot", "max_snapshots"}, {"capture_snapshot", "noise"})
         assert r == 0.5

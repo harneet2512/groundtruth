@@ -650,6 +650,50 @@ def test_run_plan_routes_syntax_through_dedicated_executor(tmp_path, direct_grap
     assert parse_calls and parse_calls[0][0][:3] == ["python", "-I", "-c"]
 
 
+def test_syntax_surface_matches_edit_check_support() -> None:
+    assert {".pyi", ".ts", ".tsx", ".jsx"}.issubset(vp._SYNTAX_CHECKABLE_EXTS)
+
+
+def test_syntax_rung_stops_at_total_budget(monkeypatch) -> None:
+    check = Check(
+        kind="syntax",
+        command=None,
+        selection_basis="edit_check",
+        covered_entities=("edited",),
+        covered_obligations=(),
+        expected_cost="low",
+        confidence="high",
+        attribution_requirement="none",
+        targets=("a.py", "b.py", "c.py"),
+        reason="",
+    )
+    plan = VerificationPlan(
+        patch_revision="P1",
+        graph_revision="G1",
+        changed_entities=("edited",),
+        obligations=(),
+        checks=(check,),
+        edited_files=("a.py", "b.py", "c.py"),
+    )
+    clock = iter((0.0, 0.0, 0.0, 0.0, 20.0))
+    monkeypatch.setattr(vp.time, "monotonic", lambda: next(clock))
+    calls: list[str] = []
+
+    def syntax(file_path, *_args, **_kwargs):
+        calls.append(file_path)
+        return {"file": file_path, "verdict": "ok"}
+
+    monkeypatch.setattr(vp, "check_edit_syntax", syntax)
+    result = run_plan(plan, repo_root=".", total_budget_seconds=5)[0]
+
+    assert calls == ["a.py"]
+    assert result.verdict == "partial"
+    assert [row["reason"] for row in result.detail["per_file"][1:]] == [
+        "total_budget_exhausted",
+        "total_budget_exhausted",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # MUTATION HARNESSES (embedded, monkeypatched — prove the tests bite)
 # ---------------------------------------------------------------------------
