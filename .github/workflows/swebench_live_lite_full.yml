@@ -421,8 +421,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           DS=benchmarks/data/swebench_live_lite.jsonl
-          gh release download pipeline-assets-v1 -p swebench_live_lite.jsonl -D benchmarks/data/ --clobber \
-            || echo "WARN: release download failed — falling back to checkout"
+          # Download into a temporary path.  gh may create/truncate the target
+          # before returning nonzero; never let a failed release fetch destroy
+          # the checked-in source-of-truth fallback.
+          TMP_DS=$(mktemp)
+          if gh release download pipeline-assets-v1 -p swebench_live_lite.jsonl -O "$TMP_DS"; then
+            mv "$TMP_DS" "$DS"
+          else
+            rm -f "$TMP_DS"
+            echo "WARN: release download failed — falling back to checkout"
+          fi
           head -c 80 "$DS"
 
       - id: gen
