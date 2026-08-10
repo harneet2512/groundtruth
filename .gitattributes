@@ -2,3 +2,7 @@ models/**/*.onnx filter=lfs diff=lfs merge=lfs -text
 models/**/*.json -text
 models/**/tokenizer.json -text
 benchmarks/data/*.jsonl filter=lfs diff=lfs merge=lfs -text
+# The Live Lite manifest is consumed directly by CI when no release asset is
+# available; keep it as a normal tracked JSONL fallback rather than an LFS
+# pointer that GitHub Actions cannot parse without an LFS fetch.
+benchmarks/data/swebench_live_lite.jsonl -filter -diff -merge text
