@@ -151,21 +151,21 @@ jobs:
         with:
           ref: ${{ inputs.gt_ref || 'gt-trial' }}
 
-      - name: Paid-run identity precheck (GT-on, max-parallel 20 only)
+      - name: Run identity precheck
         shell: bash
         env:
           GT_INPUT_BASELINE: ${{ inputs.baseline }}
           GT_INPUT_MAX_PARALLEL: ${{ inputs.max_parallel }}
         run: |
-          if [ "$GT_INPUT_BASELINE" = "true" ]; then
-            echo "GT_PAID_IDENTITY_PRECHECK_FAILED: baseline dispatches are prohibited" >&2
-            exit 1
-          fi
-          if [ "$GT_INPUT_MAX_PARALLEL" != "20" ]; then
+          if [ "$GT_INPUT_BASELINE" != "true" ] && [ "$GT_INPUT_MAX_PARALLEL" != "20" ]; then
             echo "GT_PAID_IDENTITY_PRECHECK_FAILED: max_parallel must be exactly 20" >&2
             exit 1
           fi
-          echo "GT_PAID_IDENTITY_PRECHECK_OK: arm=GT-on max_parallel=20"
+          if [ "$GT_INPUT_BASELINE" = "true" ]; then
+            echo "GT_BASELINE_IDENTITY_PRECHECK_OK: arm=GT-off"
+          else
+            echo "GT_PAID_IDENTITY_PRECHECK_OK: arm=GT-on max_parallel=20"
+          fi
 
       - name: Resolve requested GT ref once
         id: resolve_gt
