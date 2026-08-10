@@ -674,12 +674,12 @@ jobs:
           echo "=== INFRA PREFLIGHT (fail-fast) ==="
           INPUT_MODEL="${{ inputs.model }}"
           # Model-aware API key check: only require the key for the provider we're using
-          if echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
-            [ "${#DEEPSEEK_API_KEY}" -gt 10 ] || { echo "::error::DEEPSEEK_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
-            echo "  DEEPSEEK_API_KEY present (${#DEEPSEEK_API_KEY} chars)"
-          elif echo "$INPUT_MODEL" | grep -qiE "openrouter"; then
+          if echo "$INPUT_MODEL" | grep -qiE "^openrouter/"; then
             [ "${#OPENROUTER_API_KEY}" -gt 10 ] || { echo "::error::OPENROUTER_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
             echo "  OPENROUTER_API_KEY present (${#OPENROUTER_API_KEY} chars)"
+          elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
+            [ "${#DEEPSEEK_API_KEY}" -gt 10 ] || { echo "::error::DEEPSEEK_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
+            echo "  DEEPSEEK_API_KEY present (${#DEEPSEEK_API_KEY} chars)"
           elif echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
             [ "${#TOKENROUTER_API_KEY}" -gt 10 ] || { echo "::error::TOKENROUTER_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
             echo "  TOKENROUTER_API_KEY present (${#TOKENROUTER_API_KEY} chars)"
@@ -1414,14 +1414,14 @@ jobs:
               INPUT_MODEL="openai/${INPUT_MODEL}"
             fi
             echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
+          elif echo "$INPUT_MODEL" | grep -qiE "^openrouter/"; then
+            export OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
+            GT_AE_ARGS+=(--ae "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}")
+            echo "=== Model routed via OpenRouter: $INPUT_MODEL ==="
           elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
             export DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY"
             GT_AE_ARGS+=(--ae "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}")
             echo "=== Model routed via DeepSeek native: $INPUT_MODEL ==="
-          elif echo "$INPUT_MODEL" | grep -qiE "openrouter/"; then
-            export OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
-            GT_AE_ARGS+=(--ae "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}")
-            echo "=== Model routed via OpenRouter: $INPUT_MODEL ==="
           fi
 
           # Live Lite image: sweb.eval.x86_64.{repo}_1776_{rest}:latest
@@ -1568,10 +1568,10 @@ jobs:
 
           # Model-specific env vars for inside the container
           MODEL_ENV=""
-          if echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
-            MODEL_ENV="-e DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY"
-          elif echo "$INPUT_MODEL" | grep -qiE "openrouter/"; then
+          if echo "$INPUT_MODEL" | grep -qiE "^openrouter/"; then
             MODEL_ENV="-e OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
+          elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
+            MODEL_ENV="-e DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY"
           fi
 
           # Run the agent directly in the pre-pulled GHCR task image
