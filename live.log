@@ -1,0 +1,18 @@
+=== LIVE SNAPSHOT #1 | 2026-08-24T16:12:52Z | task=awilix-async-container-initialization ===
+--- KEY EVENTS (full logs, non-RESMON) ---
+--- mem trend (last 6) ---
+--- pier tail (last 15, non-RESMON) ---
+[MEMLOG 16:10:42] used=1279MB total=15988MB swap_used=0MB
+[MEMLOG 16:10:52] used=1301MB total=15988MB swap_used=0MB
+[MEMLOG 16:11:02] used=1314MB total=15988MB swap_used=0MB
+[MEMLOG 16:11:12] used=1425MB total=15988MB swap_used=0MB
+[MEMLOG 16:11:22] used=1353MB total=15988MB swap_used=0MB
+[MEMLOG 16:11:32] used=1356MB total=15988MB swap_used=0MB
+[MEMLOG 16:11:42] used=1371MB total=15988MB swap_used=0MB
+[MEMLOG 16:11:52] used=1390MB total=15988MB swap_used=0MB
+[MEMLOG 16:12:02] used=1486MB total=15988MB swap_used=0MB
+[MEMLOG 16:12:12] used=1709MB total=15988MB swap_used=0MB
+[MEMLOG 16:12:22] used=1658MB total=15988MB swap_used=0MB
+[MEMLOG 16:12:32] used=1591MB total=15988MB swap_used=0MB
+[MEMLOG 16:12:42] used=1950MB total=15988MB swap_used=0MB
+--- step tail (last 8) ---
