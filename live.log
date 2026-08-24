@@ -1,0 +1,19 @@
+=== LIVE SNAPSHOT #1 | 2026-08-24T16:12:50Z | task=aiomonitor-task-snapshots-diff ===
+--- KEY EVENTS (full logs, non-RESMON) ---
+--- mem trend (last 6) ---
+--- pier tail (last 15, non-RESMON) ---
+[MEMLOG 16:10:30] used=1558MB total=15993MB swap_used=0MB
+[MEMLOG 16:10:40] used=1511MB total=15993MB swap_used=0MB
+[MEMLOG 16:10:50] used=1378MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:00] used=1307MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:10] used=1335MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:20] used=1317MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:30] used=1312MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:40] used=1652MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:50] used=1786MB total=15993MB swap_used=0MB
+[MEMLOG 16:12:00] used=1555MB total=15993MB swap_used=0MB
+[MEMLOG 16:12:10] used=1903MB total=15993MB swap_used=0MB
+[MEMLOG 16:12:20] used=1818MB total=15993MB swap_used=0MB
+[MEMLOG 16:12:30] used=1795MB total=15993MB swap_used=0MB
+[MEMLOG 16:12:40] used=1827MB total=15993MB swap_used=0MB
+--- step tail (last 8) ---
