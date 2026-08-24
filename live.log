@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #139 | 2026-08-24T17:02:44Z | task=anko-default-function-arguments ===
+=== LIVE SNAPSHOT #140 | 2026-08-24T17:03:05Z | task=anko-default-function-arguments ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_anko-default-function-arguments.log:[DOCKERFILE SLIM] deepswe-bench/tasks/anko-default-function-arguments/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh7fj3hc92zehtc8azrm32xzb182w9dr-v1.1 (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_anko-default-function-arguments.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -9,24 +9,34 @@
 /tmp/gha_step_anko-default-function-arguments.log:[ENV-START] attempt 1/3 — pier (bg) + container watcher (window=1800s)
 /tmp/gha_step_anko-default-function-arguments.log:[ENV-START] eval container UP on attempt 1 (~370s) — agent running, awaiting completion
 --- mem trend (last 6) ---
-[RESMON] 17:02:27 mem=2220/15989MB disk_used=93297/147719MB free=54406MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=10156MB MemAvailable:=13792MB Cached:=2573MB AnonPages:=945MB Mapped:=365MB Slab:=1004MB 
-[RESMON] 17:02:35 mem=2298/15989MB disk_used=93382/147719MB free=54322MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=9951MB MemAvailable:=13690MB Cached:=2675MB AnonPages:=1040MB Mapped:=418MB Slab:=1005MB 
 [RESMON] 17:02:43 mem=2316/15989MB disk_used=93465/147719MB free=54239MB containers=1
 [MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=9856MB MemAvailable:=13679MB Cached:=2758MB AnonPages:=1034MB Mapped:=416MB Slab:=1006MB 
+[RESMON] 17:02:51 mem=2311/15989MB disk_used=93516/147719MB free=54188MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=9802MB MemAvailable:=13676MB Cached:=2808MB AnonPages:=1010MB Mapped:=498MB Slab:=1006MB 
+[RESMON] 17:02:59 mem=2198/15989MB disk_used=93416/147719MB free=54287MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=10015MB MemAvailable:=13792MB Cached:=2709MB AnonPages:=961MB Mapped:=388MB Slab:=1006MB 
 --- pier tail (last 15, non-RESMON) ---
-Overriding CPU count to 2 alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
-Overriding memory to 9000 MB alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
-[GT_META] graph_witness host_resolved_graph_db=/tmp/gt/graph.db hook_graph_db=/tmp/gt/graph.db hook_graph_hash=5a6489313d3ac5e03abbcf9eb65f90398f4bc7a74cbfc0d30f9d2bcb9d650251 _gt_prebuilt_active=True | gt_artifacts=/tmp/gt; graph_db=/tmp/gt/graph.db; graph_hash=5a6489313d3ac5e03abbcf9eb65f90398f4bc7a74cbfc0d30f9d2bcb9d650251; graph_hash_after_lsp=5a6489313d3ac5e03abbcf9eb65f90398f4bc7a74cbfc0d30f9d2bcb9d650251; hook_graph_hash_matches_post_lsp=True; lsp_certificate=/tmp/gt/lsp_certificate.json; graph_certificate=/tmp/gt/graph_certificate.json; embedder_certificate=/tmp/gt/embedder_certificate.json; foundational_gate_report=/tmp/gt/foundational_gate_report.json; gt_prebuilt_active=true; runtime_strategy=unified_substrate; l6_fresh=0; substrate_digest=ghcr.io/harneet2512/gt-substrate@sha256:9abba1c8c32bd196f4c5aec26cf3f23788948ad0fd532a6edfb85eb747fe45a9
-[GT_RETRY] attempt=1/3 status=pass rc=0
-Successfully converted trajectory to ATIF format: jobs/2026-08-24__16-16-15/anko-default-function-arguments__Uz9j6X6/agent/trajectory.json
+│ 1      │     1 │
+│ 2      │     1 │
+│ 2      │     1 │
+│ 119    │     1 │
+│ 119    │     1 │
+│ 1.0    │     1 │
+│ 1.0    │     1 │
+│ 1.0    │     1 │
+└────────┴───────┘
+
+Job Info
+Total runtime: 46m 50s
+Results written to jobs/2026-08-24__16-16-15/result.json
+Inspect results by running `pier view jobs`
+
 --- step tail (last 8) ---
-[RESMON] 17:02:35 mem=2298/15989MB disk_used=93382/147719MB free=54322MB containers=1
-[RESTOP] 490MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 223MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 131MB:provjobd2618205 /tmp/provjobd2618205871 | 124MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
-[MEMDIAG] dockerd(2707): VmRSS:=502392kB RssAnon:=445000kB RssFile:=57392kB RssShmem:=0kB VmSwap:=17916kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=9951MB MemAvailable:=13690MB Cached:=2675MB AnonPages:=1040MB Mapped:=418MB Slab:=1005MB 
-[RESMON] 17:02:43 mem=2316/15989MB disk_used=93465/147719MB free=54239MB containers=1
-[RESTOP] 491MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 223MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 131MB:provjobd2618205 /tmp/provjobd2618205871 | 124MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
-[MEMDIAG] dockerd(2707): VmRSS:=503336kB RssAnon:=445944kB RssFile:=57392kB RssShmem:=0kB VmSwap:=17916kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=9856MB MemAvailable:=13679MB Cached:=2758MB AnonPages:=1034MB Mapped:=416MB Slab:=1006MB 
+[RESMON] 17:02:51 mem=2311/15989MB disk_used=93516/147719MB free=54188MB containers=1
+[RESTOP] 491MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 223MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 132MB:link /usr/local/go/pkg/tool/linux_amd64/link -o /tmp/go-build290032624 | 131MB:provjobd2618205 /tmp/provjobd2618205871 | 
+[MEMDIAG] dockerd(2707): VmRSS:=503616kB RssAnon:=446224kB RssFile:=57392kB RssShmem:=0kB VmSwap:=17916kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=9802MB MemAvailable:=13676MB Cached:=2808MB AnonPages:=1010MB Mapped:=498MB Slab:=1006MB 
+[RESMON] 17:02:59 mem=2198/15989MB disk_used=93416/147719MB free=54287MB containers=1
+[RESTOP] 495MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 223MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 131MB:provjobd2618205 /tmp/provjobd2618205871 | 124MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
+[MEMDIAG] dockerd(2707): VmRSS:=507584kB RssAnon:=450192kB RssFile:=57392kB RssShmem:=0kB VmSwap:=17908kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=10015MB MemAvailable:=13792MB Cached:=2709MB AnonPages:=961MB Mapped:=388MB Slab:=1006MB 
