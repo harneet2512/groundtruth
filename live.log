@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #322 | 2026-08-24T18:19:25Z | task=arcane-drift-detection-baselines ===
+=== LIVE SNAPSHOT #323 | 2026-08-24T18:19:49Z | task=arcane-drift-detection-baselines ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_arcane-drift-detection-baselines.log:[DOCKERFILE SLIM] deepswe-bench/tasks/arcane-drift-detection-baselines/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh70nj38qyatmsmj1d5zh57j25820vrx-v1.1 (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_arcane-drift-detection-baselines.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -28,22 +28,22 @@
 /tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START] attempt 3/3 — pier (bg) + container watcher (window=1800s)
 /tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START] eval container UP on attempt 3 (~1260s) — agent running, awaiting completion
 --- mem trend (last 6) ---
-[RESMON] 18:19:04 mem=2644/15989MB disk_used=101651/147719MB free=46052MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=8177MB MemAvailable:=13326MB Cached:=3698MB AnonPages:=1668MB Mapped:=460MB Slab:=1498MB 
-[RESMON] 18:19:12 mem=3143/15989MB disk_used=101696/147719MB free=46007MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=7641MB MemAvailable:=12836MB Cached:=3743MB AnonPages:=2157MB Mapped:=453MB Slab:=1498MB 
-[RESMON] 18:19:20 mem=3104/15989MB disk_used=102067/147719MB free=45637MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=7537MB MemAvailable:=12993MB Cached:=4004MB AnonPages:=1873MB Mapped:=1120MB Slab:=1499MB 
+[RESMON] 18:19:28 mem=2464/15989MB disk_used=101712/147719MB free=45992MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=8309MB MemAvailable:=13519MB Cached:=3758MB AnonPages:=1449MB Mapped:=417MB Slab:=1498MB 
+[RESMON] 18:19:36 mem=2455/15989MB disk_used=101712/147719MB free=45992MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=8334MB MemAvailable:=13544MB Cached:=3759MB AnonPages:=1442MB Mapped:=409MB Slab:=1498MB 
+[RESMON] 18:19:44 mem=2445/15989MB disk_used=101712/147719MB free=45992MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=8339MB MemAvailable:=13549MB Cached:=3759MB AnonPages:=1441MB Mapped:=409MB Slab:=1498MB 
 --- pier tail (last 15, non-RESMON) ---
 Overriding CPU count to 2 alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 Overriding memory to 9000 MB alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 [GT_META] graph_witness host_resolved_graph_db=/tmp/gt/graph.db hook_graph_db=/tmp/gt/graph.db hook_graph_hash=1284953af5413ae5d6116fa812ccac3257545135946b0d6afb717eb79e0d6c50 _gt_prebuilt_active=True | gt_artifacts=/tmp/gt; graph_db=/tmp/gt/graph.db; graph_hash=1284953af5413ae5d6116fa812ccac3257545135946b0d6afb717eb79e0d6c50; graph_hash_after_lsp=1284953af5413ae5d6116fa812ccac3257545135946b0d6afb717eb79e0d6c50; hook_graph_hash_matches_post_lsp=True; lsp_certificate=/tmp/gt/lsp_certificate.json; graph_certificate=/tmp/gt/graph_certificate.json; embedder_certificate=/tmp/gt/embedder_certificate.json; foundational_gate_report=/tmp/gt/foundational_gate_report.json; gt_prebuilt_active=true; runtime_strategy=unified_substrate; l6_fresh=0; substrate_digest=ghcr.io/harneet2512/gt-substrate@sha256:9abba1c8c32bd196f4c5aec26cf3f23788948ad0fd532a6edfb85eb747fe45a9
 --- step tail (last 8) ---
-[RESMON] 18:19:12 mem=3143/15989MB disk_used=101696/147719MB free=46007MB containers=1
-[RESTOP] 905MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 673MB:compile /root/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.0.linux-am | 225MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 142MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
-[MEMDIAG] dockerd(2770): VmRSS:=927244kB RssAnon:=868584kB RssFile:=58660kB RssShmem:=0kB VmSwap:=35860kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=7641MB MemAvailable:=12836MB Cached:=3743MB AnonPages:=2157MB Mapped:=453MB Slab:=1498MB 
-[RESMON] 18:19:20 mem=3104/15989MB disk_used=102067/147719MB free=45637MB containers=1
-[RESTOP] 1054MB:link /root/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.0.linux-amd64 | 905MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 225MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 142MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
-[MEMDIAG] dockerd(2770): VmRSS:=927248kB RssAnon:=868588kB RssFile:=58660kB RssShmem:=0kB VmSwap:=35856kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=7537MB MemAvailable:=12993MB Cached:=4004MB AnonPages:=1873MB Mapped:=1120MB Slab:=1499MB 
+[RESMON] 18:19:36 mem=2455/15989MB disk_used=101712/147719MB free=45992MB containers=1
+[RESTOP] 906MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 225MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 142MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 130MB:provjobd6577771 /tmp/provjobd657777177 | 
+[MEMDIAG] dockerd(2770): VmRSS:=928440kB RssAnon:=869780kB RssFile:=58660kB RssShmem:=0kB VmSwap:=35856kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=8334MB MemAvailable:=13544MB Cached:=3759MB AnonPages:=1442MB Mapped:=409MB Slab:=1498MB 
+[RESMON] 18:19:44 mem=2445/15989MB disk_used=101712/147719MB free=45992MB containers=1
+[RESTOP] 906MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 225MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 142MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 130MB:provjobd6577771 /tmp/provjobd657777177 | 
+[MEMDIAG] dockerd(2770): VmRSS:=928440kB RssAnon:=869780kB RssFile:=58660kB RssShmem:=0kB VmSwap:=35856kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=8339MB MemAvailable:=13549MB Cached:=3759MB AnonPages:=1441MB Mapped:=409MB Slab:=1498MB 
