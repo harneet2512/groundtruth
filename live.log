@@ -1,25 +1,26 @@
-=== LIVE SNAPSHOT #12 | 2026-08-24T16:17:00Z | task=bandit-incremental-cache-control ===
+=== LIVE SNAPSHOT #13 | 2026-08-24T16:17:21Z | task=bandit-incremental-cache-control ===
 --- KEY EVENTS (full logs, non-RESMON) ---
+/tmp/gha_step_bandit-incremental-cache-control.log:[DOCKERFILE SLIM] deepswe-bench/tasks/bandit-incremental-cache-control/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh7drfg2vkvdvfh9xx0nfd5pz9821xr7-v1.1 (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
+/tmp/gha_step_bandit-incremental-cache-control.log:[SLIM-VERIFY] rewritten Dockerfile is now:
+/tmp/gha_step_bandit-incremental-cache-control.log:[SLIM-VERIFY]   FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh7drfg2vkvdvfh9xx0nfd5pz9821xr7-v1.1
+/tmp/gha_step_bandit-incremental-cache-control.log:[SLIM-VERIFY]   CMD ["/bin/bash"]
+/tmp/gha_step_bandit-incremental-cache-control.log:[gt-shim] installed in-place at: /bin/docker /tmp/docker-cli-cache/docker /usr/bin/docker + PATH(/tmp/gt-shim); real-suffix=.gtreal
+/tmp/gha_step_bandit-incremental-cache-control.log:[gt-shim] active; resolved=/tmp/gt-shim/docker
+/tmp/gha_step_bandit-incremental-cache-control.log:[ENV-START] attempt 1/3 — pier (bg) + container watcher (window=1800s)
 --- mem trend (last 6) ---
+[RESMON] 16:17:10 mem=1152/15989MB disk_used=92223/147719MB free=55481MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2246MB MemAvailable:=14852MB Cached:=11027MB AnonPages:=323MB Mapped:=326MB Slab:=1148MB 
+[RESMON] 16:17:19 mem=1467/15989MB disk_used=92244/147719MB free=55459MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=1869MB MemAvailable:=14518MB Cached:=11066MB AnonPages:=630MB Mapped:=459MB Slab:=1151MB 
 --- pier tail (last 15, non-RESMON) ---
-[MEMLOG 16:10:58] used=1278MB total=15989MB swap_used=0MB
-[MEMLOG 16:11:08] used=1331MB total=15989MB swap_used=0MB
-[MEMLOG 16:11:18] used=1298MB total=15989MB swap_used=0MB
-[MEMLOG 16:11:28] used=1250MB total=15989MB swap_used=0MB
-[MEMLOG 16:11:38] used=1282MB total=15989MB swap_used=0MB
-[MEMLOG 16:11:48] used=1330MB total=15989MB swap_used=0MB
-[MEMLOG 16:11:58] used=1311MB total=15989MB swap_used=0MB
-[MEMLOG 16:12:08] used=1509MB total=15989MB swap_used=0MB
-[MEMLOG 16:12:18] used=1601MB total=15989MB swap_used=0MB
-[MEMLOG 16:12:28] used=1991MB total=15989MB swap_used=0MB
-[MEMLOG 16:12:38] used=1847MB total=15989MB swap_used=0MB
-[MEMLOG 16:12:48] used=1796MB total=15989MB swap_used=0MB
+Overriding CPU count to 2 alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
+Overriding memory to 9000 MB alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 --- step tail (last 8) ---
-/usr/bin/ld: /tmp/go-link-464109814/000140.o: in function `unixDlOpen':
-/home/runner/go/pkg/mod/github.com/mattn/go-sqlite3@v1.14.22/sqlite3-binding.c:44707:(.text+0x88ed): warning: Using 'dlopen' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
-L6 gt-index built static/musl+FTS5: /tmp/gt_inject/opt/gt/gt-index: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, BuildID[sha1]=468849bd7f19dc1160b80b95d51f7eca9e006ed7, for GNU/Linux 3.2.0, stripped
-CONTAINER mount: /tmp/gt -> /gt_artifacts (ro); /tmp/gt_out -> /gt_out (rw); /tmp/gt_inject/opt/gt -> /opt/gt (ro)
-mounts-json: [{"type":"bind","source":"/tmp/gt","target":"/gt_artifacts","read_only":true},{"type":"bind","source":"/tmp/gt_out","target":"/gt_out","read_only":false},{"type":"bind","source":"/tmp/gt_inject/opt/gt","target":"/opt/gt","read_only":true}]
-GT_AE_ARGS (block): --ae GT_VERIFY_STRUCTURAL_RISK=0 --ae GT_VERIFY_RISK_TRIGGER=0.5 --ae GT_ORACLE_ROUTE=1 --ae GT_ORACLE_EVENTS=/gt_out/gt_oracle_events.jsonl --ae GT_RUNTIME_LEDGER=/gt_out/gt_runtime_ledger.jsonl --ae GT_HOOK_FIRE_COUNTS=/gt_out/gt_hook_fire_counts.json
-=== Model routed via OpenRouter: openrouter/stealth/ox-alpha ===
-[OOMFIX] 24G swap enabled; Swap:          27647           0       27647
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2246MB MemAvailable:=14852MB Cached:=11027MB AnonPages:=323MB Mapped:=326MB Slab:=1148MB 
+[gt-shim] installed in-place at: /bin/docker /tmp/docker-cli-cache/docker /usr/bin/docker + PATH(/tmp/gt-shim); real-suffix=.gtreal
+[gt-shim] active; resolved=/tmp/gt-shim/docker
+[ENV-START] attempt 1/3 — pier (bg) + container watcher (window=1800s)
+[RESMON] 16:17:19 mem=1467/15989MB disk_used=92244/147719MB free=55459MB containers=0
+[RESTOP] 223MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 139MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 134MB:provjobd1314970 /tmp/provjobd1314970956 | 124MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 
+[MEMDIAG] dockerd(2761): VmRSS:=127832kB RssAnon:=71844kB RssFile:=55988kB RssShmem:=0kB VmSwap:=0kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=1869MB MemAvailable:=14518MB Cached:=11066MB AnonPages:=630MB Mapped:=459MB Slab:=1151MB 
