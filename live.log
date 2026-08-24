@@ -1,0 +1,20 @@
+=== LIVE SNAPSHOT #1 | 2026-08-24T16:13:58Z | task=dasel-html-document-format ===
+--- KEY EVENTS (full logs, non-RESMON) ---
+--- mem trend (last 6) ---
+--- pier tail (last 15, non-RESMON) ---
+[MEMLOG 16:11:31] used=1311MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:41] used=1669MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:51] used=1763MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:01] used=1574MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:11] used=1294MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:21] used=1204MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:31] used=1198MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:41] used=1199MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:51] used=1199MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:01] used=1743MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:11] used=1746MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:21] used=1747MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:31] used=1749MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:41] used=1751MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:51] used=1796MB total=15989MB swap_used=0MB
+--- step tail (last 8) ---
