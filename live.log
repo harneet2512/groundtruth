@@ -1,0 +1,17 @@
+=== LIVE SNAPSHOT #1 | 2026-08-24T16:12:46Z | task=bandit-structured-nosec-directives ===
+--- KEY EVENTS (full logs, non-RESMON) ---
+--- mem trend (last 6) ---
+--- pier tail (last 15, non-RESMON) ---
+[MEMLOG 16:10:46] used=1442MB total=15989MB swap_used=0MB
+[MEMLOG 16:10:56] used=1474MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:06] used=1341MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:16] used=1252MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:26] used=1315MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:36] used=1312MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:46] used=1297MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:56] used=1560MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:06] used=1661MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:16] used=2045MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:26] used=1854MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:36] used=1833MB total=15989MB swap_used=0MB
+--- step tail (last 8) ---
