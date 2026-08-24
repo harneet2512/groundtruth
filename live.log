@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #150 | 2026-08-24T17:07:24Z | task=awilix-async-container-initialization ===
+=== LIVE SNAPSHOT #151 | 2026-08-24T17:07:48Z | task=awilix-async-container-initialization ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_awilix-async-container-initialization.log:[DOCKERFILE SLIM] deepswe-bench/tasks/awilix-async-container-initialization/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh70bg8gy4xks4eyh1s71ecmk9822p9c-v1.1 (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_awilix-async-container-initialization.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -9,23 +9,23 @@
 /tmp/gha_step_awilix-async-container-initialization.log:[ENV-START] attempt 1/3 — pier (bg) + container watcher (window=1800s)
 /tmp/gha_step_awilix-async-container-initialization.log:[ENV-START] eval container UP on attempt 1 (~520s) — agent running, awaiting completion
 --- mem trend (last 6) ---
-[RESMON] 17:07:07 mem=2149/15988MB disk_used=93253/147719MB free=54450MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15988MB MemFree:=10333MB MemAvailable:=13840MB Cached:=2086MB AnonPages:=1245MB Mapped:=402MB Slab:=1100MB 
-[RESMON] 17:07:15 mem=2149/15988MB disk_used=93253/147719MB free=54450MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15988MB MemFree:=10327MB MemAvailable:=13833MB Cached:=2086MB AnonPages:=1249MB Mapped:=402MB Slab:=1100MB 
-[RESMON] 17:07:23 mem=2155/15988MB disk_used=93254/147719MB free=54450MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15988MB MemFree:=10328MB MemAvailable:=13835MB Cached:=2086MB AnonPages:=1247MB Mapped:=402MB Slab:=1100MB 
+[RESMON] 17:07:31 mem=2288/15988MB disk_used=93254/147719MB free=54450MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15988MB MemFree:=10199MB MemAvailable:=13705MB Cached:=2086MB AnonPages:=1247MB Mapped:=402MB Slab:=1100MB 
+[RESMON] 17:07:39 mem=2226/15988MB disk_used=93254/147719MB free=54450MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15988MB MemFree:=10252MB MemAvailable:=13759MB Cached:=2086MB AnonPages:=1247MB Mapped:=402MB Slab:=1100MB 
+[RESMON] 17:07:47 mem=2188/15988MB disk_used=93254/147719MB free=54450MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15988MB MemFree:=10305MB MemAvailable:=13812MB Cached:=2086MB AnonPages:=1247MB Mapped:=402MB Slab:=1100MB 
 --- pier tail (last 15, non-RESMON) ---
 Overriding CPU count to 2 alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 Overriding memory to 9000 MB alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 [GT_META] graph_witness host_resolved_graph_db=/tmp/gt/graph.db hook_graph_db=/tmp/gt/graph.db hook_graph_hash=0a15395406850e8b4f7c75a1a09c566fd42f8981c0a87ba0d903cea0c67ae1c2 _gt_prebuilt_active=True | gt_artifacts=/tmp/gt; graph_db=/tmp/gt/graph.db; graph_hash=0a15395406850e8b4f7c75a1a09c566fd42f8981c0a87ba0d903cea0c67ae1c2; graph_hash_after_lsp=0a15395406850e8b4f7c75a1a09c566fd42f8981c0a87ba0d903cea0c67ae1c2; hook_graph_hash_matches_post_lsp=True; lsp_certificate=/tmp/gt/lsp_certificate.json; graph_certificate=/tmp/gt/graph_certificate.json; embedder_certificate=/tmp/gt/embedder_certificate.json; foundational_gate_report=/tmp/gt/foundational_gate_report.json; gt_prebuilt_active=true; runtime_strategy=unified_substrate; l6_fresh=0; substrate_digest=ghcr.io/harneet2512/gt-substrate@sha256:9abba1c8c32bd196f4c5aec26cf3f23788948ad0fd532a6edfb85eb747fe45a9
 [GT_RETRY] attempt=1/3 status=fail rc=2
 --- step tail (last 8) ---
-[RESMON] 17:07:15 mem=2149/15988MB disk_used=93253/147719MB free=54450MB containers=1
-[RESTOP] 662MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 200MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 128MB:provjobd7764842 /tmp/provjobd776484257 | 
-[MEMDIAG] dockerd(2660): VmRSS:=678764kB RssAnon:=622816kB RssFile:=55948kB RssShmem:=0kB VmSwap:=19608kB 
-[MEMDIAG] meminfo: MemTotal:=15988MB MemFree:=10327MB MemAvailable:=13833MB Cached:=2086MB AnonPages:=1249MB Mapped:=402MB Slab:=1100MB 
-[RESMON] 17:07:23 mem=2155/15988MB disk_used=93254/147719MB free=54450MB containers=1
-[RESTOP] 662MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 200MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 128MB:provjobd7764842 /tmp/provjobd776484257 | 
-[MEMDIAG] dockerd(2660): VmRSS:=678780kB RssAnon:=622832kB RssFile:=55948kB RssShmem:=0kB VmSwap:=19608kB 
-[MEMDIAG] meminfo: MemTotal:=15988MB MemFree:=10328MB MemAvailable:=13835MB Cached:=2086MB AnonPages:=1247MB Mapped:=402MB Slab:=1100MB 
+[RESMON] 17:07:39 mem=2226/15988MB disk_used=93254/147719MB free=54450MB containers=1
+[RESTOP] 663MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 200MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 128MB:provjobd7764842 /tmp/provjobd776484257 | 
+[MEMDIAG] dockerd(2660): VmRSS:=679228kB RssAnon:=623280kB RssFile:=55948kB RssShmem:=0kB VmSwap:=19608kB 
+[MEMDIAG] meminfo: MemTotal:=15988MB MemFree:=10252MB MemAvailable:=13759MB Cached:=2086MB AnonPages:=1247MB Mapped:=402MB Slab:=1100MB 
+[RESMON] 17:07:47 mem=2188/15988MB disk_used=93254/147719MB free=54450MB containers=1
+[RESTOP] 663MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 200MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 128MB:provjobd7764842 /tmp/provjobd776484257 | 
+[MEMDIAG] dockerd(2660): VmRSS:=679236kB RssAnon:=623288kB RssFile:=55948kB RssShmem:=0kB VmSwap:=19608kB 
+[MEMDIAG] meminfo: MemTotal:=15988MB MemFree:=10305MB MemAvailable:=13812MB Cached:=2086MB AnonPages:=1247MB Mapped:=402MB Slab:=1100MB 
