@@ -1,0 +1,16 @@
+=== LIVE SNAPSHOT #1 | 2026-08-24T16:12:29Z | task=anko-default-function-arguments ===
+--- KEY EVENTS (full logs, non-RESMON) ---
+--- mem trend (last 6) ---
+--- pier tail (last 15, non-RESMON) ---
+[MEMLOG 16:10:39] used=1460MB total=15989MB swap_used=0MB
+[MEMLOG 16:10:49] used=1351MB total=15989MB swap_used=0MB
+[MEMLOG 16:10:59] used=1239MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:09] used=1211MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:19] used=1281MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:29] used=1332MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:39] used=1349MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:49] used=1435MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:59] used=2017MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:09] used=1863MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:19] used=1775MB total=15989MB swap_used=0MB
+--- step tail (last 8) ---
