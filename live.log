@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #218 | 2026-08-24T17:43:01Z | task=boa-hierarchical-evaluation-cancellation ===
+=== LIVE SNAPSHOT #219 | 2026-08-24T17:43:23Z | task=boa-hierarchical-evaluation-cancellation ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_boa-hierarchical-evaluation-cancellation.log:[DOCKERFILE SLIM] deepswe-bench/tasks/boa-hierarchical-evaluation-cancellation/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh71kat2v58yys3pnyybkgycax832vj2-v1.1 (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_boa-hierarchical-evaluation-cancellation.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -20,22 +20,22 @@
 /tmp/gha_step_boa-hierarchical-evaluation-cancellation.log:[RESTOP] 769MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 223MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 134MB:cargo /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/car | 121MB:provjobd1692700 /tmp/provjobd1692700188 | 
 /tmp/gha_step_boa-hierarchical-evaluation-cancellation.log:[RESTOP] 772MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 278MB:rustc /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/rus | 223MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 134MB:cargo /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/car | 
 --- mem trend (last 6) ---
-[RESMON] 17:42:43 mem=2373/15989MB disk_used=111354/147719MB free=36350MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2583MB MemAvailable:=13623MB Cached:=9430MB AnonPages:=1300MB Mapped:=372MB Slab:=1264MB 
-[RESMON] 17:42:51 mem=3000/15989MB disk_used=111309/147719MB free=36395MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=1986MB MemAvailable:=12982MB Cached:=9385MB AnonPages:=1908MB Mapped:=594MB Slab:=1264MB 
 [RESMON] 17:42:59 mem=2364/15989MB disk_used=111353/147719MB free=36350MB containers=1
 [MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2584MB MemAvailable:=13624MB Cached:=9429MB AnonPages:=1302MB Mapped:=372MB Slab:=1264MB 
+[RESMON] 17:43:07 mem=2444/15989MB disk_used=111306/147719MB free=36397MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2554MB MemAvailable:=13547MB Cached:=9382MB AnonPages:=1302MB Mapped:=372MB Slab:=1264MB 
+[RESMON] 17:43:15 mem=2990/15989MB disk_used=111378/147719MB free=36326MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=1931MB MemAvailable:=12996MB Cached:=9454MB AnonPages:=1897MB Mapped:=589MB Slab:=1265MB 
 --- pier tail (last 15, non-RESMON) ---
 Overriding CPU count to 2 alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 Overriding memory to 9000 MB alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 [GT_META] graph_witness host_resolved_graph_db=/tmp/gt/graph.db hook_graph_db=/tmp/gt/graph.db hook_graph_hash=b806026d135058429e7321e28b17fc2cb2e48b88bbc99b390bfe06b25319a2ab _gt_prebuilt_active=True | gt_artifacts=/tmp/gt; graph_db=/tmp/gt/graph.db; graph_hash=b806026d135058429e7321e28b17fc2cb2e48b88bbc99b390bfe06b25319a2ab; graph_hash_after_lsp=b806026d135058429e7321e28b17fc2cb2e48b88bbc99b390bfe06b25319a2ab; hook_graph_hash_matches_post_lsp=True; lsp_certificate=/tmp/gt/lsp_certificate.json; graph_certificate=/tmp/gt/graph_certificate.json; embedder_certificate=/tmp/gt/embedder_certificate.json; foundational_gate_report=/tmp/gt/foundational_gate_report.json; gt_prebuilt_active=true; runtime_strategy=unified_substrate; l6_fresh=0; substrate_digest=ghcr.io/harneet2512/gt-substrate@sha256:9abba1c8c32bd196f4c5aec26cf3f23788948ad0fd532a6edfb85eb747fe45a9
 --- step tail (last 8) ---
-[RESMON] 17:42:51 mem=3000/15989MB disk_used=111309/147719MB free=36395MB containers=1
-[RESTOP] 776MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 755MB:clippy-driver /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu | 223MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 121MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
-[MEMDIAG] dockerd(2701): VmRSS:=795060kB RssAnon:=741804kB RssFile:=53256kB RssShmem:=0kB VmSwap:=20672kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=1986MB MemAvailable:=12982MB Cached:=9385MB AnonPages:=1908MB Mapped:=594MB Slab:=1264MB 
-[RESMON] 17:42:59 mem=2364/15989MB disk_used=111353/147719MB free=36350MB containers=1
+[RESMON] 17:43:07 mem=2444/15989MB disk_used=111306/147719MB free=36397MB containers=1
 [RESTOP] 776MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 223MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 121MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 121MB:provjobd1692700 /tmp/provjobd1692700188 | 
-[MEMDIAG] dockerd(2701): VmRSS:=795080kB RssAnon:=741824kB RssFile:=53256kB RssShmem:=0kB VmSwap:=20672kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2584MB MemAvailable:=13624MB Cached:=9429MB AnonPages:=1302MB Mapped:=372MB Slab:=1264MB 
+[MEMDIAG] dockerd(2701): VmRSS:=795084kB RssAnon:=741828kB RssFile:=53256kB RssShmem:=0kB VmSwap:=20672kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2554MB MemAvailable:=13547MB Cached:=9382MB AnonPages:=1302MB Mapped:=372MB Slab:=1264MB 
+[RESMON] 17:43:15 mem=2990/15989MB disk_used=111378/147719MB free=36326MB containers=1
+[RESTOP] 771MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 748MB:clippy-driver /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu | 223MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 121MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
+[MEMDIAG] dockerd(2701): VmRSS:=786064kB RssAnon:=732808kB RssFile:=53256kB RssShmem:=0kB VmSwap:=20672kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=1931MB MemAvailable:=12996MB Cached:=9454MB AnonPages:=1897MB Mapped:=589MB Slab:=1265MB 
