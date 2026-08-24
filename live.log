@@ -1,0 +1,19 @@
+=== LIVE SNAPSHOT #1 | 2026-08-24T16:12:58Z | task=abs-stepped-slices ===
+--- KEY EVENTS (full logs, non-RESMON) ---
+--- mem trend (last 6) ---
+--- pier tail (last 15, non-RESMON) ---
+[MEMLOG 16:10:38] used=1423MB total=15989MB swap_used=0MB
+[MEMLOG 16:10:48] used=1373MB total=15989MB swap_used=0MB
+[MEMLOG 16:10:58] used=1391MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:08] used=1340MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:18] used=1391MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:28] used=1432MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:38] used=1401MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:48] used=1705MB total=15989MB swap_used=0MB
+[MEMLOG 16:11:58] used=1932MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:08] used=1906MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:18] used=1779MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:28] used=1777MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:38] used=1780MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:48] used=1815MB total=15989MB swap_used=0MB
+--- step tail (last 8) ---
