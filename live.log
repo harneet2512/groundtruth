@@ -1,0 +1,20 @@
+=== LIVE SNAPSHOT #1 | 2026-08-24T16:15:16Z | task=adaptix-name-mapping-aliases ===
+--- KEY EVENTS (full logs, non-RESMON) ---
+--- mem trend (last 6) ---
+--- pier tail (last 15, non-RESMON) ---
+[MEMLOG 16:12:46] used=1783MB total=15989MB swap_used=0MB
+[MEMLOG 16:12:56] used=1785MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:06] used=1792MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:16] used=1793MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:26] used=1797MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:36] used=1795MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:46] used=1800MB total=15989MB swap_used=0MB
+[MEMLOG 16:13:56] used=1795MB total=15989MB swap_used=0MB
+[MEMLOG 16:14:06] used=1799MB total=15989MB swap_used=0MB
+[MEMLOG 16:14:16] used=1799MB total=15989MB swap_used=0MB
+[MEMLOG 16:14:26] used=1801MB total=15989MB swap_used=0MB
+[MEMLOG 16:14:36] used=1808MB total=15989MB swap_used=0MB
+[MEMLOG 16:14:46] used=1815MB total=15989MB swap_used=0MB
+[MEMLOG 16:14:56] used=1804MB total=15989MB swap_used=0MB
+[MEMLOG 16:15:06] used=1807MB total=15989MB swap_used=0MB
+--- step tail (last 8) ---
