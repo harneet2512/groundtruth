@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #4 | 2026-08-24T16:13:35Z | task=anko-default-function-arguments ===
+=== LIVE SNAPSHOT #5 | 2026-08-24T16:13:57Z | task=anko-default-function-arguments ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 --- mem trend (last 6) ---
 --- pier tail (last 15, non-RESMON) ---
@@ -14,11 +14,11 @@
 [MEMLOG 16:12:09] used=1863MB total=15989MB swap_used=0MB
 [MEMLOG 16:12:19] used=1775MB total=15989MB swap_used=0MB
 --- step tail (last 8) ---
-GT_PROOF_MODE=1  GT_CONTAINERIZED=1  GT_SUBSTRATE_DIGEST=ghcr.io/harneet2512/gt-substrate@sha256:9abba1c8c32bd196f4c5aec26cf3f23788948ad0fd532a6edfb85eb747fe45a9
-GT inject staged: 71 Python files
-go: downloading github.com/smacker/go-tree-sitter v0.0.0-20240625050157-a31a98a7c0f6
-go: downloading github.com/mattn/go-sqlite3 v1.14.22
-# github.com/smacker/go-tree-sitter/lua
-parser.c:254:17: warning: null character(s) preserved in literal
-  254 |   [anon_sym_] = " ",
-      |                 ^
+/usr/bin/ld: /tmp/go-link-668891907/000140.o: in function `unixDlOpen':
+/home/runner/go/pkg/mod/github.com/mattn/go-sqlite3@v1.14.22/sqlite3-binding.c:44707:(.text+0x88ed): warning: Using 'dlopen' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+L6 gt-index built static/musl+FTS5: /tmp/gt_inject/opt/gt/gt-index: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, BuildID[sha1]=468849bd7f19dc1160b80b95d51f7eca9e006ed7, for GNU/Linux 3.2.0, stripped
+CONTAINER mount: /tmp/gt -> /gt_artifacts (ro); /tmp/gt_out -> /gt_out (rw); /tmp/gt_inject/opt/gt -> /opt/gt (ro)
+mounts-json: [{"type":"bind","source":"/tmp/gt","target":"/gt_artifacts","read_only":true},{"type":"bind","source":"/tmp/gt_out","target":"/gt_out","read_only":false},{"type":"bind","source":"/tmp/gt_inject/opt/gt","target":"/opt/gt","read_only":true}]
+GT_AE_ARGS (block): --ae GT_VERIFY_STRUCTURAL_RISK=0 --ae GT_VERIFY_RISK_TRIGGER=0.5 --ae GT_ORACLE_ROUTE=1 --ae GT_ORACLE_EVENTS=/gt_out/gt_oracle_events.jsonl --ae GT_RUNTIME_LEDGER=/gt_out/gt_runtime_ledger.jsonl --ae GT_HOOK_FIRE_COUNTS=/gt_out/gt_hook_fire_counts.json
+=== Model routed via OpenRouter: openrouter/stealth/ox-alpha ===
+[OOMFIX] 24G swap enabled; Swap:          27647           0       27647
