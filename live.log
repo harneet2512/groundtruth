@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #177 | 2026-08-24T17:20:41Z | task=arktype-json-schema-refs-dependencies ===
+=== LIVE SNAPSHOT #178 | 2026-08-24T17:21:03Z | task=arktype-json-schema-refs-dependencies ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_arktype-json-schema-refs-dependencies.log:[DOCKERFILE SLIM] deepswe-bench/tasks/arktype-json-schema-refs-dependencies/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh771gpr8crkjsnt9pj81bafgs8229em-v1.1 (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_arktype-json-schema-refs-dependencies.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -17,21 +17,21 @@
 /tmp/gha_step_arktype-json-schema-refs-dependencies.log:[ENV-START-DIAG] pier output tail:
 /tmp/gha_step_arktype-json-schema-refs-dependencies.log:[ENV-START] attempt 2/3 — pier (bg) + container watcher (window=1800s)
 --- mem trend (last 6) ---
-[RESMON] 17:20:03 mem=11500/15989MB disk_used=95318/147719MB free=52386MB containers=0
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=712MB MemAvailable:=4473MB Cached:=1522MB AnonPages:=9802MB Mapped:=421MB Slab:=2596MB 
 [RESMON] 17:20:24 mem=11557/15989MB disk_used=95318/147719MB free=52386MB containers=0
 [MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=670MB MemAvailable:=4432MB Cached:=1521MB AnonPages:=9757MB Mapped:=421MB Slab:=2595MB 
 [RESMON] 17:20:32 mem=11457/15989MB disk_used=95318/147719MB free=52386MB containers=0
 [MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=770MB MemAvailable:=4531MB Cached:=1522MB AnonPages:=9726MB Mapped:=421MB Slab:=2595MB 
+[RESMON] 17:20:40 mem=11488/15989MB disk_used=95318/147719MB free=52386MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=770MB MemAvailable:=4527MB Cached:=1521MB AnonPages:=9743MB Mapped:=421MB Slab:=2595MB 
 --- pier tail (last 15, non-RESMON) ---
 Overriding CPU count to 2 alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 Overriding memory to 9000 MB alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 --- step tail (last 8) ---
-[RESMON] 17:20:24 mem=11557/15989MB disk_used=95318/147719MB free=52386MB containers=0
-[RESTOP] 9254MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 140MB:provjobd2443710 /tmp/provjobd2443710330 | 132MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
-[MEMDIAG] dockerd(2815): VmRSS:=9476588kB RssAnon:=9423824kB RssFile:=52764kB RssShmem:=0kB VmSwap:=16792044kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=670MB MemAvailable:=4432MB Cached:=1521MB AnonPages:=9757MB Mapped:=421MB Slab:=2595MB 
 [RESMON] 17:20:32 mem=11457/15989MB disk_used=95318/147719MB free=52386MB containers=0
 [RESTOP] 9223MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 140MB:provjobd2443710 /tmp/provjobd2443710330 | 132MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
 [MEMDIAG] dockerd(2815): VmRSS:=9445188kB RssAnon:=9392380kB RssFile:=52808kB RssShmem:=0kB VmSwap:=16845004kB 
 [MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=770MB MemAvailable:=4531MB Cached:=1522MB AnonPages:=9726MB Mapped:=421MB Slab:=2595MB 
+[RESMON] 17:20:40 mem=11488/15989MB disk_used=95318/147719MB free=52386MB containers=0
+[RESTOP] 9241MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 140MB:provjobd2443710 /tmp/provjobd2443710330 | 132MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
+[MEMDIAG] dockerd(2815): VmRSS:=9463572kB RssAnon:=9410756kB RssFile:=52816kB RssShmem:=0kB VmSwap:=16877980kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=770MB MemAvailable:=4527MB Cached:=1521MB AnonPages:=9743MB Mapped:=421MB Slab:=2595MB 
