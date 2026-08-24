@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #36 | 2026-08-24T16:25:33Z | task=bandit-interprocedural-taint-checks ===
+=== LIVE SNAPSHOT #37 | 2026-08-24T16:25:54Z | task=bandit-interprocedural-taint-checks ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_bandit-interprocedural-taint-checks.log:[DOCKERFILE SLIM] deepswe-bench/tasks/bandit-interprocedural-taint-checks/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh77yap0nc4zwm5bysc954xbr182tptg-v1.1 (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_bandit-interprocedural-taint-checks.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -7,22 +7,24 @@
 /tmp/gha_step_bandit-interprocedural-taint-checks.log:[gt-shim] installed in-place at: /bin/docker /tmp/docker-cli-cache/docker /usr/bin/docker + PATH(/tmp/gt-shim); real-suffix=.gtreal
 /tmp/gha_step_bandit-interprocedural-taint-checks.log:[gt-shim] active; resolved=/tmp/gt-shim/docker
 /tmp/gha_step_bandit-interprocedural-taint-checks.log:[ENV-START] attempt 1/3 — pier (bg) + container watcher (window=1800s)
+/tmp/gha_step_bandit-interprocedural-taint-checks.log:[ENV-START] eval container UP on attempt 1 (~430s) — agent running, awaiting completion
 --- mem trend (last 6) ---
-[RESMON] 16:25:14 mem=11650/15993MB disk_used=92876/147719MB free=54828MB containers=0
-[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=411MB MemAvailable:=4340MB Cached:=1495MB AnonPages:=9940MB Mapped:=401MB Slab:=2686MB 
-[RESMON] 16:25:22 mem=11662/15993MB disk_used=92876/147719MB free=54828MB containers=0
-[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=464MB MemAvailable:=4561MB Cached:=1445MB AnonPages:=9128MB Mapped:=401MB Slab:=2621MB 
 [RESMON] 16:25:31 mem=10827/15993MB disk_used=92876/147719MB free=54828MB containers=0
 [MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=2086MB MemAvailable:=5152MB Cached:=1492MB AnonPages:=8499MB Mapped:=401MB Slab:=1723MB 
+[RESMON] 16:25:39 mem=9807/15993MB disk_used=92877/147719MB free=54827MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=3183MB MemAvailable:=6186MB Cached:=1949MB AnonPages:=7516MB Mapped:=400MB Slab:=1098MB 
+[RESMON] 16:25:47 mem=9675/15993MB disk_used=92891/147719MB free=54812MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=3310MB MemAvailable:=6326MB Cached:=2024MB AnonPages:=7178MB Mapped:=387MB Slab:=1009MB 
 --- pier tail (last 15, non-RESMON) ---
 Overriding CPU count to 2 alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 Overriding memory to 9000 MB alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
+[GT_META] graph_witness host_resolved_graph_db=/tmp/gt/graph.db hook_graph_db=/tmp/gt/graph.db hook_graph_hash=c3c46a4ce3cfb7bc0dccf42ed394b22fb3cb0acd91deb262f5a5180116df1a7a _gt_prebuilt_active=True | gt_artifacts=/tmp/gt; graph_db=/tmp/gt/graph.db; graph_hash=c3c46a4ce3cfb7bc0dccf42ed394b22fb3cb0acd91deb262f5a5180116df1a7a; graph_hash_after_lsp=c3c46a4ce3cfb7bc0dccf42ed394b22fb3cb0acd91deb262f5a5180116df1a7a; hook_graph_hash_matches_post_lsp=True; lsp_certificate=/tmp/gt/lsp_certificate.json; graph_certificate=/tmp/gt/graph_certificate.json; embedder_certificate=/tmp/gt/embedder_certificate.json; foundational_gate_report=/tmp/gt/foundational_gate_report.json; gt_prebuilt_active=true; runtime_strategy=unified_substrate; l6_fresh=0; substrate_digest=ghcr.io/harneet2512/gt-substrate@sha256:9abba1c8c32bd196f4c5aec26cf3f23788948ad0fd532a6edfb85eb747fe45a9
 --- step tail (last 8) ---
-[RESMON] 16:25:22 mem=11662/15993MB disk_used=92876/147719MB free=54828MB containers=0
-[RESTOP] 8666MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 218MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 121MB:provjobd1828878 /tmp/provjobd1828878121 | 115MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
-[MEMDIAG] dockerd(2735): VmRSS:=8875544kB RssAnon:=8821132kB RssFile:=54412kB RssShmem:=0kB VmSwap:=4095924kB 
-[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=464MB MemAvailable:=4561MB Cached:=1445MB AnonPages:=9128MB Mapped:=401MB Slab:=2621MB 
-[RESMON] 16:25:31 mem=10827/15993MB disk_used=92876/147719MB free=54828MB containers=0
-[RESTOP] 8036MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 218MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 121MB:provjobd1828878 /tmp/provjobd1828878121 | 116MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
-[MEMDIAG] dockerd(2735): VmRSS:=8230492kB RssAnon:=8176080kB RssFile:=54412kB RssShmem:=0kB VmSwap:=3357212kB 
-[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=2086MB MemAvailable:=5152MB Cached:=1492MB AnonPages:=8499MB Mapped:=401MB Slab:=1723MB 
+[RESTOP] 7055MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 217MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 121MB:provjobd1828878 /tmp/provjobd1828878121 | 116MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
+[MEMDIAG] dockerd(2735): VmRSS:=7224744kB RssAnon:=7170332kB RssFile:=54412kB RssShmem:=0kB VmSwap:=2767008kB 
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=3183MB MemAvailable:=6186MB Cached:=1949MB AnonPages:=7516MB Mapped:=400MB Slab:=1098MB 
+[RESMON] 16:25:47 mem=9675/15993MB disk_used=92891/147719MB free=54812MB containers=1
+[RESTOP] 6679MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 121MB:provjobd1828878 /tmp/provjobd1828878121 | 116MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 
+[MEMDIAG] dockerd(2735): VmRSS:=6840200kB RssAnon:=6784116kB RssFile:=56084kB RssShmem:=0kB VmSwap:=2439484kB 
+[MEMDIAG] meminfo: MemTotal:=15993MB MemFree:=3310MB MemAvailable:=6326MB Cached:=2024MB AnonPages:=7178MB Mapped:=387MB Slab:=1009MB 
+[ENV-START] eval container UP on attempt 1 (~430s) — agent running, awaiting completion
