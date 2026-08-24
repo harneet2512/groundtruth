@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #303 | 2026-08-24T18:13:55Z | task=boa-hierarchical-evaluation-cancellation ===
+=== LIVE SNAPSHOT #304 | 2026-08-24T18:14:18Z | task=boa-hierarchical-evaluation-cancellation ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_boa-hierarchical-evaluation-cancellation.log:[DOCKERFILE SLIM] deepswe-bench/tasks/boa-hierarchical-evaluation-cancellation/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh71kat2v58yys3pnyybkgycax832vj2-v1.1 (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_boa-hierarchical-evaluation-cancellation.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -36,23 +36,23 @@
 /tmp/gha_step_boa-hierarchical-evaluation-cancellation.log:[RESTOP] 801MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 240MB:rustc /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/rus | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 130MB:cargo /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/car | 
 /tmp/gha_step_boa-hierarchical-evaluation-cancellation.log:[RESTOP] 803MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 202MB:rustc /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/rus | 130MB:cargo /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/car | 
 --- mem trend (last 6) ---
-[RESMON] 18:13:35 mem=3942/15989MB disk_used=127449/147719MB free=20255MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2697MB MemAvailable:=12053MB Cached:=8415MB AnonPages:=2700MB Mapped:=657MB Slab:=1209MB 
-[RESMON] 18:13:43 mem=3977/15989MB disk_used=128268/147719MB free=19435MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2601MB MemAvailable:=12003MB Cached:=8449MB AnonPages:=2746MB Mapped:=948MB Slab:=1222MB 
-[RESMON] 18:13:51 mem=3998/15989MB disk_used=129067/147719MB free=18636MB containers=1
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2577MB MemAvailable:=12004MB Cached:=8466MB AnonPages:=2806MB Mapped:=1038MB Slab:=1229MB 
+[RESMON] 18:13:59 mem=4054/15989MB disk_used=130104/147719MB free=17599MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2524MB MemAvailable:=11988MB Cached:=8507MB AnonPages:=2436MB Mapped:=462MB Slab:=1226MB 
+[RESMON] 18:14:07 mem=2997/15989MB disk_used=130989/147719MB free=16715MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2619MB MemAvailable:=12992MB Cached:=9397MB AnonPages:=1634MB Mapped:=628MB Slab:=1246MB 
+[RESMON] 18:14:16 mem=2971/15989MB disk_used=132111/147719MB free=15593MB containers=1
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2392MB MemAvailable:=13018MB Cached:=9640MB AnonPages:=1551MB Mapped:=557MB Slab:=1256MB 
 --- pier tail (last 15, non-RESMON) ---
 Overriding CPU count to 2 alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 Overriding memory to 9000 MB alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 [GT_META] graph_witness host_resolved_graph_db=/tmp/gt/graph.db hook_graph_db=/tmp/gt/graph.db hook_graph_hash=b806026d135058429e7321e28b17fc2cb2e48b88bbc99b390bfe06b25319a2ab _gt_prebuilt_active=True | gt_artifacts=/tmp/gt; graph_db=/tmp/gt/graph.db; graph_hash=b806026d135058429e7321e28b17fc2cb2e48b88bbc99b390bfe06b25319a2ab; graph_hash_after_lsp=b806026d135058429e7321e28b17fc2cb2e48b88bbc99b390bfe06b25319a2ab; hook_graph_hash_matches_post_lsp=True; lsp_certificate=/tmp/gt/lsp_certificate.json; graph_certificate=/tmp/gt/graph_certificate.json; embedder_certificate=/tmp/gt/embedder_certificate.json; foundational_gate_report=/tmp/gt/foundational_gate_report.json; gt_prebuilt_active=true; runtime_strategy=unified_substrate; l6_fresh=0; substrate_digest=ghcr.io/harneet2512/gt-substrate@sha256:9abba1c8c32bd196f4c5aec26cf3f23788948ad0fd532a6edfb85eb747fe45a9
 [GT_RETRY] attempt=1/3 status=fail rc=101
 --- step tail (last 8) ---
-[RESMON] 18:13:43 mem=3977/15989MB disk_used=128268/147719MB free=19435MB containers=1
-[RESTOP] 1436MB:rustc /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/rus | 809MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 441MB:rust-lld /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/ | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 
-[MEMDIAG] dockerd(2701): VmRSS:=829040kB RssAnon:=775736kB RssFile:=53304kB RssShmem:=0kB VmSwap:=20668kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2601MB MemAvailable:=12003MB Cached:=8449MB AnonPages:=2746MB Mapped:=948MB Slab:=1222MB 
-[RESMON] 18:13:51 mem=3998/15989MB disk_used=129067/147719MB free=18636MB containers=1
-[RESTOP] 1439MB:rustc /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/rus | 806MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 564MB:rust-lld /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/lib/ | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 
-[MEMDIAG] dockerd(2701): VmRSS:=826248kB RssAnon:=772944kB RssFile:=53304kB RssShmem:=0kB VmSwap:=20668kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2577MB MemAvailable:=12004MB Cached:=8466MB AnonPages:=2806MB Mapped:=1038MB Slab:=1229MB 
+[RESMON] 18:14:07 mem=2997/15989MB disk_used=130989/147719MB free=16715MB containers=1
+[RESTOP] 807MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 396MB:rustc /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/rus | 368MB:rustc /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/rus | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 
+[MEMDIAG] dockerd(2701): VmRSS:=826888kB RssAnon:=773584kB RssFile:=53304kB RssShmem:=0kB VmSwap:=20668kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2619MB MemAvailable:=12992MB Cached:=9397MB AnonPages:=1634MB Mapped:=628MB Slab:=1246MB 
+[RESMON] 18:14:16 mem=2971/15989MB disk_used=132111/147719MB free=15593MB containers=1
+[RESTOP] 807MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 295MB:rustc /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/rus | 287MB:rustc /root/.rustup/toolchains/1.92.0-x86_64-unknown-linux-gnu/bin/rus | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 
+[MEMDIAG] dockerd(2701): VmRSS:=826888kB RssAnon:=773584kB RssFile:=53304kB RssShmem:=0kB VmSwap:=20668kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=2392MB MemAvailable:=13018MB Cached:=9640MB AnonPages:=1551MB Mapped:=557MB Slab:=1256MB 
