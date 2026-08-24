@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #96 | 2026-08-24T16:57:19Z | task=arcane-drift-detection-baselines ===
+=== LIVE SNAPSHOT #97 | 2026-08-24T16:57:41Z | task=arcane-drift-detection-baselines ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_arcane-drift-detection-baselines.log:[DOCKERFILE SLIM] deepswe-bench/tasks/arcane-drift-detection-baselines/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh70nj38qyatmsmj1d5zh57j25820vrx-v1.1 (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_arcane-drift-detection-baselines.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -7,22 +7,29 @@
 /tmp/gha_step_arcane-drift-detection-baselines.log:[gt-shim] installed in-place at: /bin/docker /tmp/docker-cli-cache/docker /usr/bin/docker + PATH(/tmp/gt-shim); real-suffix=.gtreal
 /tmp/gha_step_arcane-drift-detection-baselines.log:[gt-shim] active; resolved=/tmp/gt-shim/docker
 /tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START] attempt 1/3 — pier (bg) + container watcher (window=1800s)
+/tmp/gha_step_arcane-drift-detection-baselines.log:::warning::[ENV-START] NO container in 1800s on attempt 1 — hung deploy; capturing docker state
+/tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START-DIAG] docker ps -a:
+/tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START-DIAG] dockerd journal:
+/tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START-DIAG] kernel/OOM (dmesg):
+/tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START-DIAG] stuck procs:
+/tmp/gha_step_arcane-drift-detection-baselines.log:  28210 67712 docker-buildx   /usr/libexec/docker/cli-plugins/docker-buildx bake --file - --progress rawjson --metadata-file /tmp/compose-build-metadataFile-947921062.json --allow fs.read=/home/runner/work/groundtruth/groundtruth/jobs/2026-08-24__16-26-30/arcane-drift-detection-baselines__C7RXP4D/agent-build-context
+/tmp/gha_step_arcane-drift-detection-baselines.log:  13054 53408 docker-buildx   /usr/libexec/docker/cli-plugins/docker-buildx bake --file - --progress rawjson --metadata-file /tmp/compose-build-metadataFile-958981239.json --allow fs.read=/home/runner/work/groundtruth/groundtruth/jobs/2026-08-24__16-26-30/arcane-drift-detection-baselines__C7RXP4D/agent-build-context
+/tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START-DIAG] pier output tail:
+/tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START] attempt 2/3 — pier (bg) + container watcher (window=1800s)
 --- mem trend (last 6) ---
-[RESMON] 16:56:58 mem=11614/15989MB disk_used=100149/147719MB free=47555MB containers=0
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=580MB MemAvailable:=4362MB Cached:=1327MB AnonPages:=10375MB Mapped:=420MB Slab:=2640MB 
-[RESMON] 16:57:07 mem=11576/15989MB disk_used=100149/147719MB free=47555MB containers=0
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=630MB MemAvailable:=4396MB Cached:=1323MB AnonPages:=10353MB Mapped:=411MB Slab:=2640MB 
 [RESMON] 16:57:15 mem=11622/15989MB disk_used=100149/147719MB free=47555MB containers=0
 [MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=601MB MemAvailable:=4371MB Cached:=1323MB AnonPages:=10328MB Mapped:=411MB Slab:=2640MB 
+[RESMON] 16:57:24 mem=11605/15989MB disk_used=100149/147719MB free=47555MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=614MB MemAvailable:=4387MB Cached:=1324MB AnonPages:=10304MB Mapped:=411MB Slab:=2640MB 
+[RESMON] 16:57:33 mem=11589/15989MB disk_used=100149/147719MB free=47555MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=626MB MemAvailable:=4403MB Cached:=1325MB AnonPages:=10315MB Mapped:=413MB Slab:=2640MB 
 --- pier tail (last 15, non-RESMON) ---
+--- step tail (last 8) ---
+[ENV-START-DIAG] pier output tail:
 Overriding CPU count to 2 alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 Overriding memory to 9000 MB alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
---- step tail (last 8) ---
-[RESMON] 16:57:07 mem=11576/15989MB disk_used=100149/147719MB free=47555MB containers=0
-[RESTOP] 9831MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 139MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 128MB:provjobd6577771 /tmp/provjobd657777177 | 
-[MEMDIAG] dockerd(2770): VmRSS:=10068716kB RssAnon:=10018736kB RssFile:=49980kB RssShmem:=0kB VmSwap:=10109724kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=630MB MemAvailable:=4396MB Cached:=1323MB AnonPages:=10353MB Mapped:=411MB Slab:=2640MB 
-[RESMON] 16:57:15 mem=11622/15989MB disk_used=100149/147719MB free=47555MB containers=0
-[RESTOP] 9807MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 139MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 128MB:provjobd6577771 /tmp/provjobd657777177 | 
-[MEMDIAG] dockerd(2770): VmRSS:=10043292kB RssAnon:=9993312kB RssFile:=49980kB RssShmem:=0kB VmSwap:=10159984kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=601MB MemAvailable:=4371MB Cached:=1323MB AnonPages:=10328MB Mapped:=411MB Slab:=2640MB 
+[RESMON] 16:57:33 mem=11589/15989MB disk_used=100149/147719MB free=47555MB containers=0
+[RESTOP] 9767MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 221MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 139MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 128MB:provjobd6577771 /tmp/provjobd657777177 | 
+[MEMDIAG] dockerd(2770): VmRSS:=10002416kB RssAnon:=9952348kB RssFile:=50068kB RssShmem:=0kB VmSwap:=10267552kB 
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=626MB MemAvailable:=4403MB Cached:=1325MB AnonPages:=10315MB Mapped:=413MB Slab:=2640MB 
+[ENV-START] attempt 2/3 — pier (bg) + container watcher (window=1800s)
