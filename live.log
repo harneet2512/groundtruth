@@ -1,0 +1,17 @@
+=== LIVE SNAPSHOT #1 | 2026-08-24T16:13:13Z | task=csstree-shorthand-expansion-compression ===
+--- KEY EVENTS (full logs, non-RESMON) ---
+--- mem trend (last 6) ---
+--- pier tail (last 15, non-RESMON) ---
+[MEMLOG 16:11:15] used=1259MB total=15988MB swap_used=0MB
+[MEMLOG 16:11:25] used=1411MB total=15988MB swap_used=0MB
+[MEMLOG 16:11:35] used=1312MB total=15988MB swap_used=0MB
+[MEMLOG 16:11:45] used=1478MB total=15988MB swap_used=0MB
+[MEMLOG 16:11:55] used=1371MB total=15988MB swap_used=0MB
+[MEMLOG 16:12:05] used=1377MB total=15988MB swap_used=0MB
+[MEMLOG 16:12:15] used=1625MB total=15988MB swap_used=0MB
+[MEMLOG 16:12:25] used=2174MB total=15988MB swap_used=0MB
+[MEMLOG 16:12:35] used=2052MB total=15988MB swap_used=0MB
+[MEMLOG 16:12:45] used=1876MB total=15988MB swap_used=0MB
+[MEMLOG 16:12:56] used=1813MB total=15988MB swap_used=0MB
+[MEMLOG 16:13:06] used=1845MB total=15988MB swap_used=0MB
+--- step tail (last 8) ---
