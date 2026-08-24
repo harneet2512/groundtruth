@@ -1,0 +1,17 @@
+=== LIVE SNAPSHOT #1 | 2026-08-24T16:12:47Z | task=bandit-interprocedural-taint-checks ===
+--- KEY EVENTS (full logs, non-RESMON) ---
+--- mem trend (last 6) ---
+--- pier tail (last 15, non-RESMON) ---
+[MEMLOG 16:10:47] used=1507MB total=15993MB swap_used=0MB
+[MEMLOG 16:10:57] used=1398MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:07] used=1328MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:17] used=1293MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:27] used=1316MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:37] used=1377MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:47] used=1375MB total=15993MB swap_used=0MB
+[MEMLOG 16:11:57] used=1740MB total=15993MB swap_used=0MB
+[MEMLOG 16:12:07] used=1620MB total=15993MB swap_used=0MB
+[MEMLOG 16:12:17] used=2032MB total=15993MB swap_used=0MB
+[MEMLOG 16:12:27] used=1821MB total=15993MB swap_used=0MB
+[MEMLOG 16:12:37] used=1770MB total=15993MB swap_used=0MB
+--- step tail (last 8) ---
