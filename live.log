@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #183 | 2026-08-24T17:28:56Z | task=arcane-drift-detection-baselines ===
+=== LIVE SNAPSHOT #184 | 2026-08-24T17:29:18Z | task=arcane-drift-detection-baselines ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 /tmp/gha_step_arcane-drift-detection-baselines.log:[DOCKERFILE SLIM] deepswe-bench/tasks/arcane-drift-detection-baselines/environment/Dockerfile -> FROM public.ecr.aws/d3j8x8q7/swe-bench-202605:kh70nj38qyatmsmj1d5zh57j25820vrx-v1.1 (use pre-built local image; skip the from-scratch env rebuild that OOM-hung env-start 900s)
 /tmp/gha_step_arcane-drift-detection-baselines.log:[SLIM-VERIFY] rewritten Dockerfile is now:
@@ -16,22 +16,32 @@
 /tmp/gha_step_arcane-drift-detection-baselines.log:  13054 53408 docker-buildx   /usr/libexec/docker/cli-plugins/docker-buildx bake --file - --progress rawjson --metadata-file /tmp/compose-build-metadataFile-958981239.json --allow fs.read=/home/runner/work/groundtruth/groundtruth/jobs/2026-08-24__16-26-30/arcane-drift-detection-baselines__C7RXP4D/agent-build-context
 /tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START-DIAG] pier output tail:
 /tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START] attempt 2/3 — pier (bg) + container watcher (window=1800s)
+/tmp/gha_step_arcane-drift-detection-baselines.log:::warning::[ENV-START] NO container in 1800s on attempt 2 — hung deploy; capturing docker state
+/tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START-DIAG] docker ps -a:
+/tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START-DIAG] dockerd journal:
+/tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START-DIAG] kernel/OOM (dmesg):
+/tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START-DIAG] stuck procs:
+/tmp/gha_step_arcane-drift-detection-baselines.log:  40226 55804 docker-buildx   /usr/libexec/docker/cli-plugins/docker-buildx bake --file - --progress rawjson --metadata-file /tmp/compose-build-metadataFile-1251768855.json --allow fs.read=/home/runner/work/groundtruth/groundtruth/jobs/2026-08-24__16-57-44/arcane-drift-detection-baselines__FzXUWGp/agent-build-context
+/tmp/gha_step_arcane-drift-detection-baselines.log:  13054 55284 docker-buildx   /usr/libexec/docker/cli-plugins/docker-buildx bake --file - --progress rawjson --metadata-file /tmp/compose-build-metadataFile-958981239.json --allow fs.read=/home/runner/work/groundtruth/groundtruth/jobs/2026-08-24__16-26-30/arcane-drift-detection-baselines__C7RXP4D/agent-build-context
+/tmp/gha_step_arcane-drift-detection-baselines.log:  29072 52204 docker-buildx   /usr/libexec/docker/cli-plugins/docker-buildx bake --file - --progress rawjson --metadata-file /tmp/compose-build-metadataFile-964610871.json --allow fs.read=/home/runner/work/groundtruth/groundtruth/jobs/2026-08-24__16-57-44/arcane-drift-detection-baselines__FzXUWGp/agent-build-context
+/tmp/gha_step_arcane-drift-detection-baselines.log:[ENV-START-DIAG] pier output tail:
 --- mem trend (last 6) ---
-[RESMON] 17:28:31 mem=11546/15989MB disk_used=100154/147719MB free=47549MB containers=0
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=718MB MemAvailable:=4443MB Cached:=1326MB AnonPages:=9688MB Mapped:=415MB Slab:=2691MB 
-[RESMON] 17:28:40 mem=11481/15989MB disk_used=100154/147719MB free=47549MB containers=0
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=767MB MemAvailable:=4507MB Cached:=1326MB AnonPages:=9689MB Mapped:=415MB Slab:=2706MB 
-[RESMON] 17:28:48 mem=11382/15989MB disk_used=100154/147719MB free=47549MB containers=0
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=851MB MemAvailable:=4604MB Cached:=1326MB AnonPages:=9639MB Mapped:=415MB Slab:=2720MB 
+[RESMON] 17:28:56 mem=11368/15989MB disk_used=100154/147719MB free=47549MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=841MB MemAvailable:=4615MB Cached:=1325MB AnonPages:=9550MB Mapped:=421MB Slab:=2742MB 
+[RESMON] 17:29:04 mem=11338/15989MB disk_used=100154/147719MB free=47549MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=845MB MemAvailable:=4646MB Cached:=1325MB AnonPages:=9470MB Mapped:=415MB Slab:=2771MB 
+[RESMON] 17:29:12 mem=11386/15989MB disk_used=100154/147719MB free=47549MB containers=0
+[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=786MB MemAvailable:=4595MB Cached:=1326MB AnonPages:=9471MB Mapped:=416MB Slab:=2779MB 
 --- pier tail (last 15, non-RESMON) ---
 Overriding CPU count to 2 alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
 Overriding memory to 9000 MB alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
+Failed to download artifact '/logs/artifacts/model.patch' (best-effort)
 --- step tail (last 8) ---
-[RESMON] 17:28:40 mem=11481/15989MB disk_used=100154/147719MB free=47549MB containers=0
-[RESTOP] 9154MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 220MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 141MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 128MB:provjobd6577771 /tmp/provjobd657777177 | 
-[MEMDIAG] dockerd(2770): VmRSS:=9374892kB RssAnon:=9324916kB RssFile:=49976kB RssShmem:=0kB VmSwap:=16179316kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=767MB MemAvailable:=4507MB Cached:=1326MB AnonPages:=9689MB Mapped:=415MB Slab:=2706MB 
-[RESMON] 17:28:48 mem=11382/15989MB disk_used=100154/147719MB free=47549MB containers=0
-[RESTOP] 9104MB:dockerd /usr/bin/dockerd -H fd:// --containerd=/run/containerd/contain | 220MB:pier /tmp/gt-harness-venv/bin/python /tmp/gt-harness-venv/bin/pier run | 141MB:Runner.Worker /home/runner/actions-runner/cached/2.336.0/bin/Runner.Wo | 128MB:provjobd6577771 /tmp/provjobd657777177 | 
-[MEMDIAG] dockerd(2770): VmRSS:=9321924kB RssAnon:=9271948kB RssFile:=49976kB RssShmem:=0kB VmSwap:=16254672kB 
-[MEMDIAG] meminfo: MemTotal:=15989MB MemFree:=851MB MemAvailable:=4604MB Cached:=1326MB AnonPages:=9639MB Mapped:=415MB Slab:=2720MB 
+  13054 55284 docker-buildx   /usr/libexec/docker/cli-plugins/docker-buildx bake --file - --progress rawjson --metadata-file /tmp/compose-build-metadataFile-958981239.json --allow fs.read=/home/runner/work/groundtruth/groundtruth/jobs/2026-08-24__16-26-30/arcane-drift-detection-baselines__C7RXP4D/agent-build-context
+  29072 52204 docker-buildx   /usr/libexec/docker/cli-plugins/docker-buildx bake --file - --progress rawjson --metadata-file /tmp/compose-build-metadataFile-964610871.json --allow fs.read=/home/runner/work/groundtruth/groundtruth/jobs/2026-08-24__16-57-44/arcane-drift-detection-baselines__FzXUWGp/agent-build-context
+  40204 49976 docker-compose  /usr/libexec/docker/cli-plugins/docker-compose compose --project-name arcane-drift-detection-baselines__fzxuwgp --project-directory /home/runner/work/groundtruth/groundtruth/deepswe-bench/tasks/arcane-drift-detection-baselines/environment -f /tmp/gt-harness-venv/lib/python3.12/site-packages/pier/environments/docker/docker-compose-base.yaml -f /tmp/gt-harness-venv/lib/python3.12/site-packages/pier/environments/docker/docker-compose-build.yaml -f /home/runner/work/groundtruth/groundtruth/jobs/2026-08-24__16-57-44/arcane-drift-detection-baselines__FzXUWGp/docker-compose-mounts.json build
+  29043 47900 docker-compose  /usr/libexec/docker/cli-plugins/docker-compose compose --project-name arcane-drift-detection-baselines__fzxuwgp --project-directory /home/runner/work/groundtruth/groundtruth/deepswe-bench/tasks/arcane-drift-detection-baselines/environment -f /tmp/gt-harness-venv/lib/python3.12/site-packages/pier/environments/docker/docker-compose-base.yaml -f /tmp/gt-harness-venv/lib/python3.12/site-packages/pier/environments/docker/docker-compose-build.yaml -f /home/runner/work/groundtruth/groundtruth/jobs/2026-08-24__16-57-44/arcane-drift-detection-baselines__FzXUWGp/docker-compose-mounts.json build
+   1296 36664 python3         /usr/bin/python3 -u bin/WALinuxAgent-2.15.2.1-py3.12.egg -run-exthandlers
+[ENV-START-DIAG] pier output tail:
+Overriding CPU count to 2 alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
+Overriding memory to 9000 MB alters the task from its intended configuration. This could disqualify you from leaderboard submissions for some benchmarks.
