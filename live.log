@@ -1,4 +1,4 @@
-=== LIVE SNAPSHOT #2 | 2026-08-24T16:14:11Z | task=anko-typed-variable-bindings ===
+=== LIVE SNAPSHOT #3 | 2026-08-24T16:14:33Z | task=anko-typed-variable-bindings ===
 --- KEY EVENTS (full logs, non-RESMON) ---
 --- mem trend (last 6) ---
 --- pier tail (last 15, non-RESMON) ---
@@ -18,9 +18,11 @@
 [MEMLOG 16:13:34] used=1805MB total=15989MB swap_used=0MB
 [MEMLOG 16:13:44] used=1127MB total=15989MB swap_used=0MB
 --- step tail (last 8) ---
-=== DeepSWE GT Trial: anko-typed-variable-bindings (model openrouter/stealth/ox-alpha) ===
-HOST  GT_CERT_DIR=/tmp/gt  GT_HOST_GRAPH_DB=/tmp/gt/graph.db
 GT_PROOF_MODE=1  GT_CONTAINERIZED=1  GT_SUBSTRATE_DIGEST=ghcr.io/harneet2512/gt-substrate@sha256:9abba1c8c32bd196f4c5aec26cf3f23788948ad0fd532a6edfb85eb747fe45a9
 GT inject staged: 71 Python files
 go: downloading github.com/smacker/go-tree-sitter v0.0.0-20240625050157-a31a98a7c0f6
 go: downloading github.com/mattn/go-sqlite3 v1.14.22
+# github.com/smacker/go-tree-sitter/lua
+parser.c:254:17: warning: null character(s) preserved in literal
+  254 |   [anon_sym_] = " ",
+      |                 ^
