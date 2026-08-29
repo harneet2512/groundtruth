@@ -2122,9 +2122,11 @@ func Resolve(
 						}
 						sort.Slice(classIDs194, func(a, b int) bool { return classIDs194[a] < classIDs194[b] })
 						var bestTarget194 int64
+						var candidates194 []int64
 						for _, classID := range classIDs194 {
 							if methods, ok := methodsByClass[classID]; ok {
 								if targetID, ok := methods[methodName194]; ok && targetID != callerID {
+									candidates194 = append(candidates194, targetID)
 									cm := nodeMeta[0][classID]
 									if cm.File == call.File {
 										bestTarget194 = targetID
@@ -2148,7 +2150,7 @@ func Resolve(
 									Method:           "impl_method",
 									Confidence:       conf194,
 									CandidateCount:   numClasses,
-									CandidateNodeIDs: []int64{bestTarget194},
+									CandidateNodeIDs: append([]int64(nil), candidates194...),
 									TrustTier:        tierFor(conf194),
 									EvidenceType:     "single_implementor",
 								})
