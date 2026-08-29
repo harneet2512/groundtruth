@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+branch=$(git symbolic-ref --quiet --short HEAD || true)
+if [ -z "$branch" ]; then
+  printf '%s\n' 'gnx auto-push: detached HEAD; refusing to guess a destination branch.' >&2
+  exit 1
+fi
+
+remote=${GNX_PUSH_REMOTE:-origin}
+common=$(git rev-parse --git-common-dir)
+log="$common/gnx-autopush.failures.log"
+sha=$(git rev-parse HEAD)
+
+if git push --porcelain -u "$remote" "HEAD:refs/heads/$branch"; then
+  printf 'gnx auto-push: %s %s -> %s/%s\n' "$sha" "$branch" "$remote" "$branch"
+else
+  code=$?
+  {
+    printf 'timestamp=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'repo=%s\n' "$(git rev-parse --show-toplevel)"
+    printf 'branch=%s\n' "$branch"
+    printf 'sha=%s\n' "$sha"
+    printf 'remote=%s\n' "$remote"
+    printf 'exit=%s\n\n' "$code"
+  } >> "$log"
+  printf 'gnx auto-push FAILED; blocker appended to %s\n' "$log" >&2
+  exit "$code"
+fi
