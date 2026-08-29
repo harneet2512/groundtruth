@@ -4,6 +4,7 @@ package resolver
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -384,15 +385,80 @@ func BuildNodeMeta(allNodes []store.Node, nodeDBIDs []int64) map[int64]NodeMeta 
 
 // ResolvedCall is a call reference that has been resolved to a target node.
 type ResolvedCall struct {
-	SourceNodeID   int64
-	TargetNodeID   int64
-	SourceLine     int
-	SourceFile     string
-	Method         string  // "same_file", "import", "verified_unique", "type_flow", "name_match"
-	Confidence     float64 // 0.0–1.0
-	CandidateCount int     // number of resolution candidates (1=unambiguous)
-	TrustTier      string  // CERTIFIED, CANDIDATE, SPECULATIVE
-	EvidenceType   string  // ast_call, ast_import, name_match
+	CallsiteOrdinal  int
+	SourceNodeID     int64
+	TargetNodeID     int64
+	SourceLine       int
+	SourceFile       string
+	Method           string  // "same_file", "import", "verified_unique", "type_flow", "name_match"
+	Confidence       float64 // 0.0–1.0
+	CandidateCount   int     // number of resolution candidates (1=unambiguous)
+	TrustTier        string  // CERTIFIED, CANDIDATE, SPECULATIVE
+	EvidenceType     string  // ast_call, ast_import, name_match
+	CandidateNodeIDs []int64 // complete resolver-owned viable identities
+}
+
+type DispatchState string
+
+const (
+	DispatchZero               DispatchState = "zero"
+	DispatchUnique             DispatchState = "unique"
+	DispatchAmbiguous          DispatchState = "ambiguous"
+	DispatchDynamic            DispatchState = "dynamic"
+	DispatchExternalUnresolved DispatchState = "external_unresolved"
+	DispatchParserIncomplete   DispatchState = "parser_incomplete"
+)
+
+type ResolutionCallsite struct {
+	CallsiteOrdinal      int
+	SourceNodeID         int64
+	SourceLine           int
+	SourceFile           string
+	Callee               string
+	CalleeQualified      string
+	DispatchState        DispatchState
+	CandidateNodeIDs     []int64
+	SelectedTargetNodeID *int64
+	Mechanism            string
+	ReceiverType         string
+	ReceiverOrigin       string
+	ParserComplete       bool
+	VerificationStatus   string
+}
+
+func (c ResolutionCallsite) Validate() error {
+	seen := make(map[int64]struct{}, len(c.CandidateNodeIDs))
+	for _, id := range c.CandidateNodeIDs {
+		if id == 0 {
+			return fmt.Errorf("candidate target ID must be nonzero")
+		}
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("candidate targets must be unique")
+		}
+		seen[id] = struct{}{}
+	}
+	if c.SelectedTargetNodeID != nil {
+		if _, ok := seen[*c.SelectedTargetNodeID]; !ok {
+			return fmt.Errorf("selected target must be a retained candidate")
+		}
+	}
+	switch c.DispatchState {
+	case DispatchUnique:
+		if len(c.CandidateNodeIDs) != 1 || c.SelectedTargetNodeID == nil {
+			return fmt.Errorf("unique callsite requires one selected candidate")
+		}
+	case DispatchAmbiguous:
+		if len(c.CandidateNodeIDs) < 2 || c.SelectedTargetNodeID != nil {
+			return fmt.Errorf("ambiguous callsite requires multiple candidates and no selection")
+		}
+	case DispatchZero, DispatchDynamic, DispatchExternalUnresolved, DispatchParserIncomplete:
+		if len(c.CandidateNodeIDs) != 0 || c.SelectedTargetNodeID != nil {
+			return fmt.Errorf("unresolved callsite cannot retain target authority")
+		}
+	default:
+		return fmt.Errorf("unknown dispatch state %q", c.DispatchState)
+	}
+	return nil
 }
 
 // edgeKey is used for deduplication.
@@ -1451,15 +1517,16 @@ func Resolve(
 				if !seen[key] {
 					seen[key] = true
 					resolved = append(resolved, ResolvedCall{
-						SourceNodeID:   callerID,
-						TargetNodeID:   targetID,
-						SourceLine:     call.Line,
-						SourceFile:     call.File,
-						Method:         "same_file",
-						Confidence:     1.0,
-						CandidateCount: 1,
-						TrustTier:      tierFor(1.0),
-						EvidenceType:   "ast_call",
+						SourceNodeID:     callerID,
+						TargetNodeID:     targetID,
+						SourceLine:       call.Line,
+						SourceFile:       call.File,
+						Method:           "same_file",
+						Confidence:       1.0,
+						CandidateCount:   1,
+						CandidateNodeIDs: []int64{targetID},
+						TrustTier:        tierFor(1.0),
+						EvidenceType:     "ast_call",
 					})
 				}
 				continue
@@ -1481,15 +1548,16 @@ func Resolve(
 						// 0.6 = CANDIDATE: locality is strong, but WHICH same-named
 						// local definition is the target is not certain → not CERTIFIED.
 						resolved = append(resolved, ResolvedCall{
-							SourceNodeID:   callerID,
-							TargetNodeID:   best,
-							SourceLine:     call.Line,
-							SourceFile:     call.File,
-							Method:         "same_file",
-							Confidence:     0.6,
-							CandidateCount: len(targetIDs),
-							TrustTier:      tierFor(0.6),
-							EvidenceType:   "same_file_ambiguous",
+							SourceNodeID:     callerID,
+							TargetNodeID:     best,
+							SourceLine:       call.Line,
+							SourceFile:       call.File,
+							Method:           "same_file",
+							Confidence:       0.6,
+							CandidateCount:   len(targetIDs),
+							CandidateNodeIDs: append([]int64(nil), targetIDs...),
+							TrustTier:        tierFor(0.6),
+							EvidenceType:     "same_file_ambiguous",
 						})
 					}
 					continue
@@ -1573,15 +1641,16 @@ func Resolve(
 				if !seen[key] {
 					seen[key] = true
 					resolved = append(resolved, ResolvedCall{
-						SourceNodeID:   callerID,
-						TargetNodeID:   bestTarget,
-						SourceLine:     call.Line,
-						SourceFile:     call.File,
-						Method:         "import",
-						Confidence:     conf,
-						CandidateCount: len(importCandidates),
-						TrustTier:      tierFor(conf),
-						EvidenceType:   evidence,
+						SourceNodeID:     callerID,
+						TargetNodeID:     bestTarget,
+						SourceLine:       call.Line,
+						SourceFile:       call.File,
+						Method:           "import",
+						Confidence:       conf,
+						CandidateCount:   len(importCandidates),
+						CandidateNodeIDs: append([]int64(nil), importCandidates...),
+						TrustTier:        tierFor(conf),
+						EvidenceType:     evidence,
 					})
 				}
 				continue
@@ -1620,15 +1689,16 @@ func Resolve(
 							if !seen[key] {
 								seen[key] = true
 								resolved = append(resolved, ResolvedCall{
-									SourceNodeID:   callerID,
-									TargetNodeID:   targetID,
-									SourceLine:     call.Line,
-									SourceFile:     call.File,
-									Method:         method,
-									Confidence:     conf,
-									CandidateCount: 1,
-									TrustTier:      tierFor(conf),
-									EvidenceType:   evidence,
+									SourceNodeID:     callerID,
+									TargetNodeID:     targetID,
+									SourceLine:       call.Line,
+									SourceFile:       call.File,
+									Method:           method,
+									Confidence:       conf,
+									CandidateCount:   1,
+									CandidateNodeIDs: []int64{targetID},
+									TrustTier:        tierFor(conf),
+									EvidenceType:     evidence,
 								})
 							}
 							continue
@@ -1699,15 +1769,16 @@ func Resolve(
 							// (conf 0.2, sub-SPECULATIVE) so tierFor agrees and Strategy 2 does
 							// not re-CERTIFY this single candidate at name_match conf 0.9.
 							resolved = append(resolved, ResolvedCall{
-								SourceNodeID:   callerID,
-								TargetNodeID:   targetID,
-								SourceLine:     call.Line,
-								SourceFile:     call.File,
-								Method:         "name_match",
-								Confidence:     0.2,
-								CandidateCount: 1,
-								TrustTier:      tierFor(0.2),
-								EvidenceType:   "name_match_verified_unique_no_provenance",
+								SourceNodeID:     callerID,
+								TargetNodeID:     targetID,
+								SourceLine:       call.Line,
+								SourceFile:       call.File,
+								Method:           "name_match",
+								Confidence:       0.2,
+								CandidateCount:   1,
+								CandidateNodeIDs: []int64{targetID},
+								TrustTier:        tierFor(0.2),
+								EvidenceType:     "name_match_verified_unique_no_provenance",
 							})
 						}
 						continue
@@ -1715,15 +1786,16 @@ func Resolve(
 					if !seen[key] {
 						seen[key] = true
 						resolved = append(resolved, ResolvedCall{
-							SourceNodeID:   callerID,
-							TargetNodeID:   targetID,
-							SourceLine:     call.Line,
-							SourceFile:     call.File,
-							Method:         "verified_unique",
-							Confidence:     0.95,
-							CandidateCount: 1,
-							TrustTier:      tierFor(0.95),
-							EvidenceType:   "name_unique",
+							SourceNodeID:     callerID,
+							TargetNodeID:     targetID,
+							SourceLine:       call.Line,
+							SourceFile:       call.File,
+							Method:           "verified_unique",
+							Confidence:       0.95,
+							CandidateCount:   1,
+							CandidateNodeIDs: []int64{targetID},
+							TrustTier:        tierFor(0.95),
+							EvidenceType:     "name_unique",
 						})
 					}
 					continue
@@ -1767,15 +1839,16 @@ func Resolve(
 													if !seen[key] {
 														seen[key] = true
 														resolved = append(resolved, ResolvedCall{
-															SourceNodeID:   callerID,
-															TargetNodeID:   targetID,
-															SourceLine:     call.Line,
-															SourceFile:     call.File,
-															Method:         "import_type",
-															Confidence:     0.95,
-															CandidateCount: 1,
-															TrustTier:      tierFor(0.95),
-															EvidenceType:   "import_scoped_type",
+															SourceNodeID:     callerID,
+															TargetNodeID:     targetID,
+															SourceLine:       call.Line,
+															SourceFile:       call.File,
+															Method:           "import_type",
+															Confidence:       0.95,
+															CandidateCount:   1,
+															CandidateNodeIDs: []int64{targetID},
+															TrustTier:        tierFor(0.95),
+															EvidenceType:     "import_scoped_type",
 														})
 													}
 													goto nextCall
@@ -1901,15 +1974,16 @@ func Resolve(
 											if !seen[key] {
 												seen[key] = true
 												resolved = append(resolved, ResolvedCall{
-													SourceNodeID:   callerID,
-													TargetNodeID:   targetID,
-													SourceLine:     call.Line,
-													SourceFile:     call.File,
-													Method:         "type_flow",
-													Confidence:     0.9,
-													CandidateCount: 1,
-													TrustTier:      tierFor(0.9),
-													EvidenceType:   "field_type",
+													SourceNodeID:     callerID,
+													TargetNodeID:     targetID,
+													SourceLine:       call.Line,
+													SourceFile:       call.File,
+													Method:           "type_flow",
+													Confidence:       0.9,
+													CandidateCount:   1,
+													CandidateNodeIDs: []int64{targetID},
+													TrustTier:        tierFor(0.9),
+													EvidenceType:     "field_type",
 												})
 											}
 											goto nextCall
@@ -1961,15 +2035,16 @@ func Resolve(
 											if !seen[key] {
 												seen[key] = true
 												resolved = append(resolved, ResolvedCall{
-													SourceNodeID:   callerID,
-													TargetNodeID:   targetID,
-													SourceLine:     call.Line,
-													SourceFile:     call.File,
-													Method:         "type_flow",
-													Confidence:     0.9,
-													CandidateCount: 1,
-													TrustTier:      tierFor(0.9),
-													EvidenceType:   "param_type",
+													SourceNodeID:     callerID,
+													TargetNodeID:     targetID,
+													SourceLine:       call.Line,
+													SourceFile:       call.File,
+													Method:           "type_flow",
+													Confidence:       0.9,
+													CandidateCount:   1,
+													CandidateNodeIDs: []int64{targetID},
+													TrustTier:        tierFor(0.9),
+													EvidenceType:     "param_type",
 												})
 											}
 											goto nextCall
@@ -2066,15 +2141,16 @@ func Resolve(
 							if !seen[key] {
 								seen[key] = true
 								resolved = append(resolved, ResolvedCall{
-									SourceNodeID:   callerID,
-									TargetNodeID:   bestTarget194,
-									SourceLine:     call.Line,
-									SourceFile:     call.File,
-									Method:         "impl_method",
-									Confidence:     conf194,
-									CandidateCount: numClasses,
-									TrustTier:      tierFor(conf194),
-									EvidenceType:   "single_implementor",
+									SourceNodeID:     callerID,
+									TargetNodeID:     bestTarget194,
+									SourceLine:       call.Line,
+									SourceFile:       call.File,
+									Method:           "impl_method",
+									Confidence:       conf194,
+									CandidateCount:   numClasses,
+									CandidateNodeIDs: []int64{bestTarget194},
+									TrustTier:        tierFor(conf194),
+									EvidenceType:     "single_implementor",
 								})
 							}
 							resolved194 = true
@@ -2112,15 +2188,16 @@ func Resolve(
 									if !seen[key] {
 										seen[key] = true
 										resolved = append(resolved, ResolvedCall{
-											SourceNodeID:   callerID,
-											TargetNodeID:   targetID,
-											SourceLine:     call.Line,
-											SourceFile:     call.File,
-											Method:         "type_flow",
-											Confidence:     0.9,
-											CandidateCount: 1,
-											TrustTier:      tierFor(0.9),
-											EvidenceType:   "type_qualified",
+											SourceNodeID:     callerID,
+											TargetNodeID:     targetID,
+											SourceLine:       call.Line,
+											SourceFile:       call.File,
+											Method:           "type_flow",
+											Confidence:       0.9,
+											CandidateCount:   1,
+											CandidateNodeIDs: []int64{targetID},
+											TrustTier:        tierFor(0.9),
+											EvidenceType:     "type_qualified",
 										})
 									}
 									goto nextCall
@@ -2207,15 +2284,16 @@ func Resolve(
 											if !seen[key] {
 												seen[key] = true
 												resolved = append(resolved, ResolvedCall{
-													SourceNodeID:   callerID,
-													TargetNodeID:   targetID,
-													SourceLine:     call.Line,
-													SourceFile:     call.File,
-													Method:         "type_flow",
-													Confidence:     0.9,
-													CandidateCount: 1,
-													TrustTier:      tierFor(0.9),
-													EvidenceType:   "assignment_tracked",
+													SourceNodeID:     callerID,
+													TargetNodeID:     targetID,
+													SourceLine:       call.Line,
+													SourceFile:       call.File,
+													Method:           "type_flow",
+													Confidence:       0.9,
+													CandidateCount:   1,
+													CandidateNodeIDs: []int64{targetID},
+													TrustTier:        tierFor(0.9),
+													EvidenceType:     "assignment_tracked",
 												})
 											}
 											goto nextCall
@@ -2276,15 +2354,16 @@ func Resolve(
 											if !seen[key] {
 												seen[key] = true
 												resolved = append(resolved, ResolvedCall{
-													SourceNodeID:   callerID,
-													TargetNodeID:   targetID,
-													SourceLine:     call.Line,
-													SourceFile:     call.File,
-													Method:         "return_type",
-													Confidence:     0.85,
-													CandidateCount: 1,
-													TrustTier:      tierFor(0.85),
-													EvidenceType:   "return_type_flow",
+													SourceNodeID:     callerID,
+													TargetNodeID:     targetID,
+													SourceLine:       call.Line,
+													SourceFile:       call.File,
+													Method:           "return_type",
+													Confidence:       0.85,
+													CandidateCount:   1,
+													CandidateNodeIDs: []int64{targetID},
+													TrustTier:        tierFor(0.85),
+													EvidenceType:     "return_type_flow",
 												})
 											}
 											goto nextCall
@@ -2320,15 +2399,16 @@ func Resolve(
 						if !seen[key] {
 							seen[key] = true
 							resolved = append(resolved, ResolvedCall{
-								SourceNodeID:   callerID,
-								TargetNodeID:   targetID,
-								SourceLine:     call.Line,
-								SourceFile:     call.File,
-								Method:         "unique_method",
-								Confidence:     0.6,
-								CandidateCount: 1,
-								TrustTier:      tierFor(0.6),
-								EvidenceType:   "unique_method_class",
+								SourceNodeID:     callerID,
+								TargetNodeID:     targetID,
+								SourceLine:       call.Line,
+								SourceFile:       call.File,
+								Method:           "unique_method",
+								Confidence:       0.6,
+								CandidateCount:   1,
+								CandidateNodeIDs: []int64{targetID},
+								TrustTier:        tierFor(0.6),
+								EvidenceType:     "unique_method_class",
 							})
 						}
 						continue
@@ -2367,15 +2447,16 @@ func Resolve(
 						// agrees with the demote (a sub-0.5 conf, not the 0.9 single-
 						// candidate name_match score that tierFor would re-CERTIFY).
 						resolved = append(resolved, ResolvedCall{
-							SourceNodeID:   callerID,
-							TargetNodeID:   targetID,
-							SourceLine:     call.Line,
-							SourceFile:     call.File,
-							Method:         "name_match",
-							Confidence:     0.2,
-							CandidateCount: 1,
-							TrustTier:      tierFor(0.2),
-							EvidenceType:   "name_match_qualified_unresolved",
+							SourceNodeID:     callerID,
+							TargetNodeID:     targetID,
+							SourceLine:       call.Line,
+							SourceFile:       call.File,
+							Method:           "name_match",
+							Confidence:       0.2,
+							CandidateCount:   1,
+							CandidateNodeIDs: []int64{targetID},
+							TrustTier:        tierFor(0.2),
+							EvidenceType:     "name_match_qualified_unresolved",
 						})
 					}
 					continue
@@ -2421,15 +2502,16 @@ func Resolve(
 				if !seen[key] {
 					seen[key] = true
 					resolved = append(resolved, ResolvedCall{
-						SourceNodeID:   callerID,
-						TargetNodeID:   bestTarget,
-						SourceLine:     call.Line,
-						SourceFile:     call.File,
-						Method:         "name_match",
-						Confidence:     conf,
-						CandidateCount: candidateCount,
-						TrustTier:      tierFor(conf),
-						EvidenceType:   evidence,
+						SourceNodeID:     callerID,
+						TargetNodeID:     bestTarget,
+						SourceLine:       call.Line,
+						SourceFile:       call.File,
+						Method:           "name_match",
+						Confidence:       conf,
+						CandidateCount:   candidateCount,
+						CandidateNodeIDs: append([]int64(nil), candidates...),
+						TrustTier:        tierFor(conf),
+						EvidenceType:     evidence,
 					})
 				}
 			}
@@ -2438,6 +2520,60 @@ func Resolve(
 	}
 
 	return resolved
+}
+
+// ResolveWithProvenance records resolver-owned candidate identities for every callsite.
+func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64, fileNodeIDs map[string]map[string][]int64, callerNodeIDs []int64, allImports []parser.ImportRef, fileMap map[string][]string, nodeMeta ...map[int64]NodeMeta) ([]ResolvedCall, []ResolutionCallsite) {
+	resolved := Resolve(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, nodeMeta...)
+	// Resolve is the sole producer boundary for viable identities. Build a keyed
+	// trace from its resolver-owned outputs; do not reconstruct candidates from
+	// name indexes after selection.
+	type traceKey struct {
+		source int64
+		line   int
+		file   string
+	}
+	traces := make(map[traceKey][]ResolvedCall)
+	for _, rc := range resolved {
+		key := traceKey{source: rc.SourceNodeID, line: rc.SourceLine, file: rc.SourceFile}
+		traces[key] = append(traces[key], rc)
+	}
+	callsites := make([]ResolutionCallsite, len(allCalls))
+	for i, call := range allCalls {
+		var sourceID int64
+		if i < len(callerNodeIDs) {
+			sourceID = callerNodeIDs[i]
+		}
+		trace := ResolutionCallsite{CallsiteOrdinal: i, SourceNodeID: sourceID, SourceLine: call.Line, SourceFile: call.File, Callee: call.CalleeName, CalleeQualified: call.CalleeQualified, DispatchState: DispatchZero, ParserComplete: !call.ParserIncomplete, VerificationStatus: "unverified"}
+		if call.ParserIncomplete {
+			trace.DispatchState = DispatchParserIncomplete
+			callsites[i] = trace
+			continue
+		}
+		key := traceKey{source: sourceID, line: call.Line, file: call.File}
+		if entries := traces[key]; len(entries) > 0 {
+			rc := entries[0]
+			traces[key] = entries[1:]
+			trace.CandidateNodeIDs = append([]int64(nil), rc.CandidateNodeIDs...)
+			trace.Mechanism, trace.VerificationStatus = rc.Method, "legacy_edge"
+			switch len(trace.CandidateNodeIDs) {
+			case 0:
+				trace.DispatchState = DispatchZero
+			case 1:
+				selected := trace.CandidateNodeIDs[0]
+				trace.SelectedTargetNodeID = &selected
+				trace.DispatchState = DispatchUnique
+			default:
+				trace.DispatchState = DispatchAmbiguous
+			}
+		} else if call.CalleeQualified != "" && call.CalleeQualified != call.CalleeName {
+			trace.DispatchState, trace.Mechanism = DispatchExternalUnresolved, "external"
+		} else {
+			trace.Mechanism = "unknown_legacy"
+		}
+		callsites[i] = trace
+	}
+	return resolved, callsites
 }
 
 // buildImportIndex creates: callerFile → importedName → []targetFiles

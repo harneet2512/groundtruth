@@ -57,6 +57,48 @@ type Edge struct {
 	VerificationStatus string // unverified, verified, rejected
 }
 
+// ResolutionCandidate preserves one resolver-produced viable target. The
+// legacy edges table remains backward-readable, while this additive surface
+// prevents ambiguity from collapsing into a scalar count.
+type ResolutionCandidate struct {
+	CallsiteID         string
+	TargetID           int64
+	TargetStableID     string
+	TargetNativeID     string
+	Ordinal            int
+	Mechanism          string
+	DeclaredScope      string
+	ReceiverType       string
+	ReceiverOrigin     string
+	ReceiverShape      string
+	ReceiverChain      string
+	ImportChain        string
+	DynamicDispatch    bool
+	ExportStatus       string
+	ParserComplete     *bool
+	VerificationStatus string
+	Selected           bool
+}
+
+type ResolutionCallsite struct {
+	CallsiteID             string
+	CallsiteOrdinal        int
+	RepositoryRevision     string
+	SourceStableID         string
+	SourceNativeID         string
+	SourceID               int64
+	SourceLine             int
+	SourceFile             string
+	Callee                 string
+	Language               string
+	DispatchState          string
+	CandidateCount         int
+	SelectedTargetStableID *string
+	SelectedTargetNativeID *string
+	Mechanism              string
+	VerificationStatus     string
+}
+
 // Closure is one row of the transitive-reachability sidecar (C7 / RF-4).
 // SourceID transitively reaches TargetID in Depth hops; MinConfidence is the
 // weakest edge confidence along that path (the path is built over VERIFIED
@@ -176,6 +218,62 @@ func createSchema(db *sql.DB) error {
 		evidence_type TEXT,
 		verification_status TEXT DEFAULT 'unverified'
 	);
+
+	CREATE TABLE IF NOT EXISTS resolution_symbols (
+		stable_id TEXT PRIMARY KEY,
+		native_id TEXT NOT NULL UNIQUE,
+		native_kind TEXT NOT NULL,
+		normalized_kind TEXT NOT NULL,
+		language TEXT NOT NULL,
+		path TEXT NOT NULL,
+		qualified_name TEXT NOT NULL,
+		start_line INTEGER NOT NULL,
+		end_line INTEGER NOT NULL,
+		export_status TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS resolution_callsites (
+		callsite_id TEXT PRIMARY KEY,
+		callsite_ordinal INTEGER NOT NULL UNIQUE,
+		repository_revision TEXT NOT NULL,
+		source_stable_id TEXT NOT NULL REFERENCES resolution_symbols(stable_id),
+		source_native_id TEXT NOT NULL,
+		source_id INTEGER,
+		source_line INTEGER,
+		source_file TEXT NOT NULL,
+		callee TEXT NOT NULL,
+		language TEXT NOT NULL,
+		dispatch_state TEXT NOT NULL,
+		candidate_count INTEGER NOT NULL DEFAULT 0,
+		selected_target_stable_id TEXT,
+		selected_target_native_id TEXT,
+		mechanism TEXT NOT NULL,
+		verification_status TEXT NOT NULL DEFAULT 'unverified'
+	);
+
+	CREATE TABLE IF NOT EXISTS resolution_candidates (
+		callsite_id TEXT NOT NULL REFERENCES resolution_callsites(callsite_id) ON DELETE CASCADE,
+		target_id INTEGER NOT NULL REFERENCES nodes(id),
+		target_stable_id TEXT NOT NULL REFERENCES resolution_symbols(stable_id),
+		target_native_id TEXT NOT NULL,
+		ordinal INTEGER NOT NULL,
+		mechanism TEXT NOT NULL,
+		declared_scope TEXT NOT NULL DEFAULT '',
+		receiver_type TEXT NOT NULL DEFAULT '',
+		receiver_origin TEXT NOT NULL DEFAULT '',
+		receiver_shape TEXT NOT NULL DEFAULT '',
+		receiver_chain TEXT NOT NULL DEFAULT '[]',
+		import_chain TEXT NOT NULL DEFAULT '[]',
+		dynamic_dispatch BOOLEAN NOT NULL DEFAULT 0,
+		export_status TEXT NOT NULL DEFAULT 'unknown',
+		parser_complete BOOLEAN,
+		verification_status TEXT NOT NULL,
+		selected BOOLEAN NOT NULL DEFAULT 0,
+		PRIMARY KEY(callsite_id, ordinal),
+		UNIQUE(callsite_id, target_stable_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_resolution_callsites_source ON resolution_callsites(source_id);
+	CREATE INDEX IF NOT EXISTS idx_resolution_candidates_target ON resolution_candidates(target_id);
 
 	CREATE TABLE IF NOT EXISTS file_hashes (
 		file_path TEXT PRIMARY KEY,
@@ -368,9 +466,9 @@ func (d *DB) InsertEdge(e *Edge) error {
 
 // InsertFileHash records a file's content hash for incremental reindexing.
 //
-// RC-17 (F-004): the ``indexed_at`` column is wall-clock by default, which
-// makes ``graph.db`` non-byte-deterministic across two builds. When
-// ``GT_INDEX_FIXED_TS`` is set in the environment we use that literal
+// RC-17 (F-004): the “indexed_at“ column is wall-clock by default, which
+// makes “graph.db“ non-byte-deterministic across two builds. When
+// “GT_INDEX_FIXED_TS“ is set in the environment we use that literal
 // value instead — enables the deterministic-build CI test (build twice,
 // assert byte equality on every column except whatever the test
 // explicitly excludes). Format expectation: RFC3339 UTC (caller's
@@ -473,6 +571,81 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("insert edge %d: %w", i, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) BatchInsertResolutionSymbols(symbols []*ResolutionSymbol) error {
+	if len(symbols) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_symbols
+		(stable_id,native_id,native_kind,normalized_kind,language,path,qualified_name,start_line,end_line,export_status)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for _, s := range symbols {
+		if _, err := stmt.Exec(s.StableID, s.NativeID, s.NativeKind, s.NormalizedKind, s.Language, s.Path, s.QualifiedName, s.StartLine, s.EndLine, s.ExportStatus); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) BatchInsertResolutionCallsites(callsites []*ResolutionCallsite) error {
+	if len(callsites) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_callsites
+		(callsite_id,callsite_ordinal,repository_revision,source_stable_id,source_native_id,source_id,source_line,source_file,callee,language,dispatch_state,candidate_count,selected_target_stable_id,selected_target_native_id,mechanism,verification_status)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for _, c := range callsites {
+		if _, err := stmt.Exec(c.CallsiteID, c.CallsiteOrdinal, c.RepositoryRevision, c.SourceStableID, c.SourceNativeID, c.SourceID, c.SourceLine, c.SourceFile, c.Callee, c.Language, c.DispatchState, c.CandidateCount, c.SelectedTargetStableID, c.SelectedTargetNativeID, c.Mechanism, c.VerificationStatus); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) BatchInsertResolutionCandidates(candidates []*ResolutionCandidate) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_candidates
+		(callsite_id,target_id,target_stable_id,target_native_id,ordinal,mechanism,declared_scope,receiver_type,receiver_origin,receiver_shape,receiver_chain,import_chain,dynamic_dispatch,export_status,parser_complete,verification_status,selected)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for _, c := range candidates {
+		if _, err := stmt.Exec(c.CallsiteID, c.TargetID, c.TargetStableID, c.TargetNativeID, c.Ordinal, c.Mechanism, c.DeclaredScope, c.ReceiverType, c.ReceiverOrigin, c.ReceiverShape, c.ReceiverChain, c.ImportChain, c.DynamicDispatch, c.ExportStatus, c.ParserComplete, c.VerificationStatus, c.Selected); err != nil {
+			tx.Rollback()
+			return err
 		}
 	}
 	return tx.Commit()

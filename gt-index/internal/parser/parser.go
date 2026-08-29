@@ -71,11 +71,12 @@ type AssertionRef struct {
 
 // CallRef is a raw (unresolved) call reference.
 type CallRef struct {
-	CallerNodeIdx   int    // index into ParseResult.Nodes
-	CalleeName      string // the function/method name being called (last component)
-	CalleeQualified string // full qualified name if available (e.g. "obj.method")
-	Line            int
-	File            string
+	CallerNodeIdx    int    // index into ParseResult.Nodes
+	CalleeName       string // the function/method name being called (last component)
+	CalleeQualified  string // full qualified name if available (e.g. "obj.method")
+	Line             int
+	File             string
+	ParserIncomplete bool
 }
 
 // AssignmentRef records a variable assignment where the RHS is a constructor call.
@@ -488,6 +489,24 @@ func linkRustImplMethods(result *ParseResult) {
 	}
 }
 
+func extractDeclaratorIdentifier(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
+	for _, field := range []string{"declarator", "name"} {
+		if child := node.ChildByFieldName(field); child != nil {
+			if id := extractDeclaratorIdentifier(child, src); id != "" {
+				return id
+			}
+		}
+	}
+	switch node.Type() {
+	case "identifier", "field_identifier", "type_identifier":
+		return node.Content(src)
+	}
+	return ""
+}
+
 func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, result *ParseResult, parentNodeIdx int) {
 	spec := sf.Spec
 	nodeType := node.Type()
@@ -495,6 +514,13 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 	// Check for function definition
 	if spec.IsFunctionNode(nodeType) {
 		name := extractFieldText(node, spec.NameField, src)
+		if (sf.Language == "c" || sf.Language == "cpp") && name != "" {
+			if declarator := node.ChildByFieldName(spec.NameField); declarator != nil {
+				if id := extractDeclaratorIdentifier(declarator, src); id != "" {
+					name = id
+				}
+			}
+		}
 		if name == "" {
 			name = extractFirstIdentifier(node, src)
 		}
@@ -1170,6 +1196,7 @@ func isLiteralReceiver(t string) bool {
 //     chain head (the call's function's receiver) to the ultimate base.
 //   - parenthesized: `("a").join()` — the receiver is a `parenthesized_expression`
 //     wrapping the literal; we unwrap it.
+//
 // When the chain's ultimate base is a literal, the whole call is a stdlib/builtin
 // call (str/list/dict/…), never an internal call-graph edge. Conservative: any
 // unrecognized shape returns false (keeps the edge — correct-or-quiet, never drops

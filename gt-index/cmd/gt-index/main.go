@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,15 @@ var (
 	goToolchain  = "unknown"
 )
 
+func repoCommit(root string) string {
+	cmd := exec.Command("git", "-C", root, "rev-parse", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // FINAL_ARCH_V2 schema contract.
 // Bump when edges/nodes columns change; Python readers gate on >= this.
 const schemaVersion = "v15.2-trust-tier"
@@ -61,6 +71,28 @@ type fileParseResult struct {
 	fileIdx int
 	result  *parser.ParseResult
 	err     error
+}
+
+func collectParseResults(files []walker.SourceFile, resultCh <-chan fileParseResult) ([]*parser.ParseResult, int, []string) {
+	results := make([]*parser.ParseResult, len(files))
+	parseFailures := 0
+	var failSample []string
+	for pr := range resultCh {
+		if pr.err == nil && pr.result != nil {
+			results[pr.fileIdx] = pr.result
+			continue
+		}
+		parseFailures++
+		if len(failSample) >= 10 || pr.fileIdx < 0 || pr.fileIdx >= len(files) {
+			continue
+		}
+		if pr.err != nil {
+			failSample = append(failSample, fmt.Sprintf("%s: %v", files[pr.fileIdx].Path, pr.err))
+		} else {
+			failSample = append(failSample, fmt.Sprintf("%s: parser returned no result", files[pr.fileIdx].Path))
+		}
+	}
+	return results, parseFailures, failSample
 }
 
 func main() {
@@ -197,15 +229,34 @@ func main() {
 		close(resultCh)
 	}()
 
-	// Collect results
-	for pr := range resultCh {
-		if pr.err == nil && pr.result != nil {
-			results[pr.fileIdx] = pr.result
-		}
-	}
+	// Collect results and preserve parser failures in project_meta.
+	results, parseFailures, failSample := collectParseResults(files, resultCh)
 
 	parseElapsed := time.Since(parseStart)
-	fmt.Fprintf(os.Stderr, "  Parsed in %s\n", parseElapsed.Round(time.Millisecond))
+	parsedOK := len(files) - parseFailures
+	failRate := 0.0
+	if len(files) > 0 {
+		failRate = float64(parseFailures) / float64(len(files))
+	}
+	fmt.Fprintf(os.Stderr, "  Parsed %d/%d files in %s (%d parse failures, %.1f%%)\n", parsedOK, len(files), parseElapsed.Round(time.Millisecond), parseFailures, failRate*100)
+	if parseFailures > 0 {
+		fmt.Fprintf(os.Stderr, "  [WARN] parse failures (first %d):\n", len(failSample))
+		for _, sample := range failSample {
+			fmt.Fprintf(os.Stderr, "    - %s\n", sample)
+		}
+	}
+	if len(files) > 0 && parsedOK == 0 {
+		log.Fatalf("INDEX FAILED: 0/%d files parsed — graph would be empty (sample: %v)", len(files), failSample)
+	}
+	if requiredRate := os.Getenv("GT_REQUIRE_PARSE_RATE"); requiredRate != "" {
+		var minimumRate float64
+		if _, err := fmt.Sscanf(requiredRate, "%f", &minimumRate); err != nil {
+			log.Fatalf("GT_REQUIRE_PARSE_RATE=%q is not a valid number: %v", requiredRate, err)
+		}
+		if minimumRate > 0 && len(files) >= 20 && (1.0-failRate) < minimumRate {
+			log.Fatalf("GT_REQUIRE_PARSE_RATE=%.2f but only %.1f%% of %d files parsed — index too thin, failing closed (sample: %v)", minimumRate, (1.0-failRate)*100, len(files), failSample)
+		}
+	}
 
 	// Collect all nodes for batch insert
 	var allNodePtrs []*store.Node
@@ -443,7 +494,7 @@ func main() {
 	// once in the caller (main.go) before Resolve sees the imports.
 	resolver.ExpandRustCrateImports(allImports, filePaths, fileLangs, *root)
 
-	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
+	resolved, callsites := resolver.ResolveWithProvenance(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
 
 	resolveElapsed := time.Since(resolveStart)
 
@@ -479,6 +530,60 @@ func main() {
 	if err := db.BatchInsertEdges(edgePtrs); err != nil {
 		log.Fatalf("batch insert edges: %v", err)
 	}
+	// Additive producer-owned resolution contract. The legacy edges above remain
+	// readable; these rows preserve stable identities and ambiguity explicitly.
+	repositoryRevision := repoCommit(*root)
+	if repositoryRevision == "" {
+		repositoryRevision = "unversioned"
+	}
+	resolutionSymbols := make([]*store.ResolutionSymbol, 0, len(allNodePtrs))
+	symbolByID := make(map[int64]store.ResolutionSymbol, len(allNodePtrs))
+	for i, node := range allNodePtrs {
+		if i >= len(nodeDBIDs) {
+			continue
+		}
+		s := store.BuildResolutionSymbol(strconv.FormatInt(nodeDBIDs[i], 10), *node)
+		resolutionSymbols = append(resolutionSymbols, &s)
+		symbolByID[nodeDBIDs[i]] = s
+	}
+	if err := db.BatchInsertResolutionSymbols(resolutionSymbols); err != nil {
+		log.Fatalf("insert resolution symbols: %v", err)
+	}
+	callsiteRows := make([]*store.ResolutionCallsite, 0, len(callsites))
+	candidateRows := make([]*store.ResolutionCandidate, 0)
+	for _, c := range callsites {
+		source, ok := symbolByID[c.SourceNodeID]
+		if !ok {
+			continue
+		}
+		callsiteID := store.StableResolutionCallsiteID(repositoryRevision, source.StableID, c.SourceFile, c.SourceLine, c.SourceLine, c.Callee)
+		var selectedStable, selectedNative *string
+		if c.SelectedTargetNodeID != nil {
+			if target, exists := symbolByID[*c.SelectedTargetNodeID]; exists {
+				stable, native := target.StableID, target.NativeID
+				selectedStable, selectedNative = &stable, &native
+			}
+		}
+		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: string(c.DispatchState), CandidateCount: len(c.CandidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus})
+		for ordinal, targetID := range c.CandidateNodeIDs {
+			target, exists := symbolByID[targetID]
+			if !exists {
+				continue
+			}
+			complete := c.ParserComplete
+			candidateRows = append(candidateRows, &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: c.Mechanism, DeclaredScope: source.QualifiedName, ReceiverType: c.ReceiverType, ReceiverOrigin: c.ReceiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: "[]", ImportChain: "[]", DynamicDispatch: c.DispatchState == resolver.DispatchDynamic, ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: c.SelectedTargetNodeID != nil && *c.SelectedTargetNodeID == targetID})
+		}
+	}
+	if err := db.BatchInsertResolutionCallsites(callsiteRows); err != nil {
+		log.Fatalf("insert resolution callsites: %v", err)
+	}
+	if err := db.BatchInsertResolutionCandidates(candidateRows); err != nil {
+		log.Fatalf("insert resolution candidates: %v", err)
+	}
+	db.SetMeta("resolution_schema_version", "1")
+	db.SetMeta("resolution_producer_contract", store.ResolutionProducerContract)
+	db.SetMeta("resolution_repository_revision", repositoryRevision)
+	db.SetMeta("resolution_complete", "1")
 	// Containment edges: parent_id → CONTAINS for class-structure queries
 	// Use parentFixups since allNodePtrs had ParentID zeroed before batch insert.
 	var containsPtrs []*store.Edge
@@ -696,6 +801,7 @@ func main() {
 	// clock dependent and breaks byte-equality across two builds of the
 	// same commit. Diagnostic value only; emitted to stderr below instead.
 	db.SetMeta("file_count", fmt.Sprintf("%d", len(files)))
+	db.SetMeta("parse_failures", fmt.Sprintf("%d", parseFailures))
 	db.SetMeta("node_count", fmt.Sprintf("%d", len(allNodePtrs)))
 	db.SetMeta("edge_count", fmt.Sprintf("%d", len(resolved)))
 	db.SetMeta("import_count", fmt.Sprintf("%d", len(allImports)))
@@ -901,6 +1007,22 @@ func runIncremental(root, relpath, dbPath string) error {
 			tx.Rollback()
 		}
 	}()
+
+	// Resolution provenance is revision-bound. A single-file edit changes node
+	// identities and call candidates, so retain no old complete sidecar beside
+	// the new graph. Full indexing will repopulate it; until then consumers must
+	// fail closed on the explicit incomplete marker.
+	for _, table := range []string{"resolution_candidates", "resolution_callsites", "resolution_symbols"} {
+		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
+			return fmt.Errorf("invalidate %s: %w", table, err)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`); err != nil {
+		return fmt.Errorf("invalidate resolution metadata: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('resolution_repository_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`); err != nil {
+		return fmt.Errorf("bind stale resolution revision: %w", err)
+	}
 
 	// Step 4.5 — snapshot incoming cross-file edges BEFORE delete. These get
 	// stripped by the upcoming target_id-based DELETE; without this snapshot
