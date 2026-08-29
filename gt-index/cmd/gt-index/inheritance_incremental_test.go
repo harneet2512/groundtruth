@@ -118,6 +118,33 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 	if method == "name_match" {
 		t.Fatalf("after -file reindex self.save() demoted to name_match (inheritanceMap was nil on the incremental path — the G09 regression)")
 	}
+	assertGraphResolutionIncomplete(t, dbPath)
+}
+
+func assertGraphResolutionIncomplete(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var complete, revision string
+	if err := db.QueryRow("SELECT value FROM project_meta WHERE key='graph_resolution_complete'").Scan(&complete); err != nil {
+		t.Fatalf("graph completion metadata after incremental: %v", err)
+	}
+	if err := db.QueryRow("SELECT value FROM project_meta WHERE key='graph_resolution_revision'").Scan(&revision); err != nil {
+		t.Fatalf("graph revision metadata after incremental: %v", err)
+	}
+	if complete != "0" || revision != "stale" {
+		t.Fatalf("incremental graph authority was not fail-closed: complete=%q revision=%q", complete, revision)
+	}
+	var attached int
+	if err := db.QueryRow("SELECT count(*) FROM edges WHERE type='HAS_CALLSITE'").Scan(&attached); err != nil {
+		t.Fatal(err)
+	}
+	if attached == 0 {
+		t.Fatal("incremental update removed all primary graph callsite attachments")
+	}
 }
 
 // inheritedSaveEdgeMethod returns the resolution_method of the CALLS edge from a

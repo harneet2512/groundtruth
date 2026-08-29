@@ -386,6 +386,8 @@ func BuildNodeMeta(allNodes []store.Node, nodeDBIDs []int64) map[int64]NodeMeta 
 // ResolvedCall is a call reference that has been resolved to a target node.
 type ResolvedCall struct {
 	CallsiteOrdinal  int
+	Callee           string
+	CalleeQualified  string
 	SourceNodeID     int64
 	TargetNodeID     int64
 	SourceLine       int
@@ -1498,6 +1500,11 @@ func Resolve(
 	seen := make(map[edgeKey]bool) // deduplication
 
 	for i, call := range allCalls {
+		// Deduplication is scoped to one parser callsite. A global endpoint key
+		// silently drops repeated calls to the same target, which makes provenance
+		// impossible to recover after resolution. Legacy edge consumers still see
+		// one edge per source call; graph-native attachment preserves the ordinal.
+		seen = make(map[edgeKey]bool)
 		callerID := callerNodeIDs[i]
 		if callerID == 0 {
 			continue
@@ -2527,18 +2534,25 @@ func Resolve(
 // ResolveWithProvenance records resolver-owned candidate identities for every callsite.
 func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64, fileNodeIDs map[string]map[string][]int64, callerNodeIDs []int64, allImports []parser.ImportRef, fileMap map[string][]string, nodeMeta ...map[int64]NodeMeta) ([]ResolvedCall, []ResolutionCallsite) {
 	resolved := Resolve(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, nodeMeta...)
-	// Resolve is the sole producer boundary for viable identities. Build a keyed
-	// trace from its resolver-owned outputs; do not reconstruct candidates from
-	// name indexes after selection.
-	type traceKey struct {
-		source int64
-		line   int
-		file   string
-	}
-	traces := make(map[traceKey][]ResolvedCall)
-	for _, rc := range resolved {
-		key := traceKey{source: rc.SourceNodeID, line: rc.SourceLine, file: rc.SourceFile}
-		traces[key] = append(traces[key], rc)
+	// Resolve processes calls in parser order and scopes endpoint deduplication to
+	// the current callsite. Stamp the parser ordinal on each emitted row while that
+	// ordering is still intact; no name-index lookup or post-dedupe reconstruction is
+	// involved. Skipped/unresolved calls simply consume no resolved row.
+	row := 0
+	for i := range allCalls {
+		if i >= len(callerNodeIDs) || callerNodeIDs[i] == 0 || allCalls[i].ParserIncomplete {
+			continue
+		}
+		if row >= len(resolved) {
+			break
+		}
+		if resolved[row].SourceNodeID != callerNodeIDs[i] || resolved[row].SourceLine != allCalls[i].Line || resolved[row].SourceFile != allCalls[i].File {
+			continue
+		}
+		resolved[row].CallsiteOrdinal = i
+		resolved[row].Callee = allCalls[i].CalleeName
+		resolved[row].CalleeQualified = allCalls[i].CalleeQualified
+		row++
 	}
 	callsites := make([]ResolutionCallsite, len(allCalls))
 	for i, call := range allCalls {
@@ -2552,10 +2566,17 @@ func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64
 			callsites[i] = trace
 			continue
 		}
-		key := traceKey{source: sourceID, line: call.Line, file: call.File}
-		if entries := traces[key]; len(entries) > 0 {
-			rc := entries[0]
-			traces[key] = entries[1:]
+		// Resolve emits the resolver-owned row with the parser ordinal before
+		// endpoint deduplication. Indexing by ordinal prevents same-line calls and
+		// resolved/unresolved pairs from being mis-associated.
+		var rc *ResolvedCall
+		for j := range resolved {
+			if resolved[j].CallsiteOrdinal == i {
+				rc = &resolved[j]
+				break
+			}
+		}
+		if rc != nil {
 			trace.CandidateNodeIDs = append([]int64(nil), rc.CandidateNodeIDs...)
 			trace.Mechanism, trace.VerificationStatus = rc.Method, "legacy_edge"
 			switch len(trace.CandidateNodeIDs) {

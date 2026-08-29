@@ -551,12 +551,21 @@ func main() {
 	}
 	callsiteRows := make([]*store.ResolutionCallsite, 0, len(callsites))
 	candidateRows := make([]*store.ResolutionCandidate, 0)
+	graphRows := make([]store.AttachedResolution, 0, len(callsites))
+	nodeByID := make(map[int64]*store.Node, len(allNodes))
+	for i := range allNodes {
+		if i < len(nodeDBIDs) {
+			n := allNodes[i]
+			n.ID = nodeDBIDs[i]
+			nodeByID[nodeDBIDs[i]] = &n
+		}
+	}
 	for _, c := range callsites {
 		source, ok := symbolByID[c.SourceNodeID]
 		if !ok {
 			continue
 		}
-		callsiteID := store.StableResolutionCallsiteID(repositoryRevision, source.StableID, c.SourceFile, c.SourceLine, c.SourceLine, c.Callee)
+		callsiteID := store.StableResolutionCallsiteIDWithOrdinal(repositoryRevision, source.StableID, c.SourceFile, c.SourceLine, c.SourceLine, c.CallsiteOrdinal, c.Callee)
 		var selectedStable, selectedNative *string
 		if c.SelectedTargetNodeID != nil {
 			if target, exists := symbolByID[*c.SelectedTargetNodeID]; exists {
@@ -565,13 +574,23 @@ func main() {
 			}
 		}
 		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: string(c.DispatchState), CandidateCount: len(c.CandidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus})
+		graphCandidates := make([]*store.ResolutionCandidate, 0, len(c.CandidateNodeIDs))
 		for ordinal, targetID := range c.CandidateNodeIDs {
 			target, exists := symbolByID[targetID]
 			if !exists {
 				continue
 			}
 			complete := c.ParserComplete
-			candidateRows = append(candidateRows, &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: c.Mechanism, DeclaredScope: source.QualifiedName, ReceiverType: c.ReceiverType, ReceiverOrigin: c.ReceiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: "[]", ImportChain: "[]", DynamicDispatch: c.DispatchState == resolver.DispatchDynamic, ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: c.SelectedTargetNodeID != nil && *c.SelectedTargetNodeID == targetID})
+			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: c.Mechanism, DeclaredScope: source.QualifiedName, ReceiverType: c.ReceiverType, ReceiverOrigin: c.ReceiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: "[]", ImportChain: "[]", DynamicDispatch: c.DispatchState == resolver.DispatchDynamic, ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: c.SelectedTargetNodeID != nil && *c.SelectedTargetNodeID == targetID}
+			candidateRows = append(candidateRows, candidate)
+			graphCandidates = append(graphCandidates, candidate)
+		}
+		if len(graphCandidates) != len(c.CandidateNodeIDs) {
+			log.Fatalf("callsite %s candidate conservation failed: retained=%d expected=%d", callsiteID, len(graphCandidates), len(c.CandidateNodeIDs))
+		}
+		if sourceNode := nodeByID[c.SourceNodeID]; sourceNode != nil {
+			graphCallsite := &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: string(c.DispatchState), CandidateCount: len(graphCandidates), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus}
+			graphRows = append(graphRows, store.AttachedResolution{Callsite: graphCallsite, Source: sourceNode, Candidates: graphCandidates})
 		}
 	}
 	if err := db.BatchInsertResolutionCallsites(callsiteRows); err != nil {
@@ -579,6 +598,9 @@ func main() {
 	}
 	if err := db.BatchInsertResolutionCandidates(candidateRows); err != nil {
 		log.Fatalf("insert resolution candidates: %v", err)
+	}
+	if err := db.AttachResolutionGraph(repositoryRevision, graphRows); err != nil {
+		log.Fatalf("attach graph-native resolution evidence: %v", err)
 	}
 	db.SetMeta("resolution_schema_version", "1")
 	db.SetMeta("resolution_producer_contract", store.ResolutionProducerContract)
@@ -1023,6 +1045,12 @@ func runIncremental(root, relpath, dbPath string) error {
 	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('resolution_repository_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`); err != nil {
 		return fmt.Errorf("bind stale resolution revision: %w", err)
 	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`); err != nil {
+		return fmt.Errorf("invalidate graph resolution metadata: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`); err != nil {
+		return fmt.Errorf("bind stale graph resolution revision: %w", err)
+	}
 
 	// Step 4.5 — snapshot incoming cross-file edges BEFORE delete. These get
 	// stripped by the upcoming target_id-based DELETE; without this snapshot
@@ -1181,7 +1209,7 @@ func runIncremental(root, relpath, dbPath string) error {
 		resolver.SetReturnShapeIndex(resolver.BuildReturnShapeIndex(pr.Properties, newDBIDs, classNames))
 	}
 
-	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)
+	resolved, callsites := resolver.ResolveWithProvenance(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
 		edgePtrs[i] = &store.Edge{
@@ -1200,6 +1228,65 @@ func runIncremental(root, relpath, dbPath string) error {
 	}
 	if err := store.BatchInsertEdgesTx(tx, edgePtrs); err != nil {
 		return fmt.Errorf("insert new edges: %w", err)
+	}
+	// Attach the same resolver output to the primary graph in this transaction.
+	// The graph-native facts are authoritative; resolution_* rows are retained only
+	// as a compatibility projection for older readers.
+	incrRevision := repoCommit(root)
+	if incrRevision == "" {
+		incrRevision = "unversioned"
+	}
+	graphRows := make([]store.AttachedResolution, 0, len(callsites))
+	nodeByID := make(map[int64]*store.Node, len(filteredNodes))
+	symbolByID := make(map[int64]store.ResolutionSymbol, len(filteredNodes))
+	for i := range filteredNodes {
+		n := filteredNodes[i]
+		if i >= len(filteredIDs) {
+			continue
+		}
+		n.ID = filteredIDs[i]
+		nodeByID[n.ID] = &n
+		s := store.BuildResolutionSymbol(strconv.FormatInt(n.ID, 10), n)
+		symbolByID[n.ID] = s
+	}
+	for _, c := range callsites {
+		source, ok := symbolByID[c.SourceNodeID]
+		if !ok {
+			continue
+		}
+		callsiteID := store.StableResolutionCallsiteIDWithOrdinal(incrRevision, source.StableID, c.SourceFile, c.SourceLine, c.SourceLine, c.CallsiteOrdinal, c.Callee)
+		var selectedStable, selectedNative *string
+		if c.SelectedTargetNodeID != nil {
+			if target, exists := symbolByID[*c.SelectedTargetNodeID]; exists {
+				stable, native := target.StableID, target.NativeID
+				selectedStable, selectedNative = &stable, &native
+			}
+		}
+		candidates := make([]*store.ResolutionCandidate, 0, len(c.CandidateNodeIDs))
+		for ordinal, targetID := range c.CandidateNodeIDs {
+			target, exists := symbolByID[targetID]
+			if !exists {
+				return fmt.Errorf("callsite %s candidate target %d missing from graph", callsiteID, targetID)
+			}
+			complete := c.ParserComplete
+			candidates = append(candidates, &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: c.Mechanism, DeclaredScope: source.QualifiedName, ReceiverShape: c.CalleeQualified, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: c.SelectedTargetNodeID != nil && *c.SelectedTargetNodeID == targetID, ExportStatus: target.ExportStatus})
+		}
+		graphCallsite := &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: incrRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: string(c.DispatchState), CandidateCount: len(candidates), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus}
+		if sourceNode := nodeByID[c.SourceNodeID]; sourceNode != nil {
+			graphRows = append(graphRows, store.AttachedResolution{Callsite: graphCallsite, Source: sourceNode, Candidates: candidates})
+		}
+	}
+	if err := store.AttachResolutionGraphTx(tx, incrRevision, graphRows); err != nil {
+		return fmt.Errorf("attach incremental graph resolution: %w", err)
+	}
+	// This transaction only re-resolves the edited file. Other callsites may
+	// depend on symbols whose identity changed, so do not publish a partially
+	// refreshed graph as complete. A subsequent full build restores authority.
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`); err != nil {
+		return fmt.Errorf("mark incremental graph resolution incomplete: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`); err != nil {
+		return fmt.Errorf("mark incremental graph resolution stale: %w", err)
 	}
 
 	// IMPORTS edges for the reparsed file. Stale IMPORTS edges (source_file=relSlash)

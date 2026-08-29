@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/harneet2512/groundtruth/gt-index/internal/store"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -88,5 +89,37 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	}
 	if mismatch != 0 {
 		t.Fatalf("callsite candidate counts disagree with retained rows: %d", mismatch)
+	}
+	var graphComplete, graphRevision string
+	if err := db.QueryRow("SELECT value FROM project_meta WHERE key='graph_resolution_complete'").Scan(&graphComplete); err != nil {
+		t.Fatalf("graph_resolution_complete metadata: %v", err)
+	}
+	if graphComplete != "1" {
+		t.Fatalf("graph_resolution_complete = %q, want 1", graphComplete)
+	}
+	if err := db.QueryRow("SELECT value FROM project_meta WHERE key='graph_resolution_revision'").Scan(&graphRevision); err != nil {
+		t.Fatalf("graph_resolution_revision metadata: %v", err)
+	}
+	if graphRevision == "" {
+		t.Fatal("graph_resolution_revision is empty")
+	}
+	var attached int
+	if err := db.QueryRow(`SELECT count(*) FROM edges WHERE type='HAS_CALLSITE'`).Scan(&attached); err != nil {
+		t.Fatal(err)
+	}
+	if attached == 0 {
+		t.Fatal("primary graph has no attached callsite relationships")
+	}
+	graph, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer graph.Close()
+	evidence, err := graph.QueryAttachedCandidates("target")
+	if err != nil {
+		t.Fatalf("production graph query: %v", err)
+	}
+	if len(evidence) == 0 || evidence[0].Revision != graphRevision {
+		t.Fatalf("production graph query returned no revision-bound evidence: %+v", evidence)
 	}
 }

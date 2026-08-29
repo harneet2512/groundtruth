@@ -96,7 +96,7 @@ These are **graph questions**, not similarity questions. GroundTruth answers the
 
 **Indexer:** Go binary using tree-sitter for AST extraction across 30 languages. Three-stage resolution pipeline: same-file (exact), import-verified (traced through import statements), name-match (fallback with confidence scoring). Every edge gets a confidence score from 0.0 to 1.0. Parallel parsing scales linearly with cores.
 
-**Graph database:** SQLite with nodes (functions, classes, methods) and edges (call relationships). Includes indexes for sub-15ms query time even on 100K+ node graphs. The confidence column ensures agents only receive high-fidelity evidence.
+**Graph database:** SQLite with nodes (functions, classes, methods, and source callsites) and edges (call relationships plus graph-native `HAS_CALLSITE`/`CANDIDATE` evidence). Each callsite retains every resolver-produced viable target, dense ordinals, revision binding, and conservative ambiguity; selected `CALLS` edges remain backward-readable. Queries read the primary graph directly and fail closed while an incremental refresh is stale. Includes indexes for sub-15ms query time even on 100K+ node graphs. The confidence column ensures agents only receive high-fidelity evidence.
 
 **Evidence delivery:** 7 evidence families (import paths, caller usage patterns, sibling conventions, test assertions, blast radius, type contracts, git precedent) ranked and filtered by confidence. Output is structured `<gt-evidence>` blocks with `[VERIFIED]`/`[WARNING]` tiers so agents can weigh the information appropriately.
 

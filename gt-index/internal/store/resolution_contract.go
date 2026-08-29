@@ -26,6 +26,13 @@ func StableResolutionCallsiteID(repositoryRevision, sourceStableID, path string,
 	return stableResolutionDigest("gt.callsite.identity.v1", repositoryRevision, sourceStableID, path, startLine, endLine, callee)
 }
 
+// StableResolutionCallsiteIDWithOrdinal disambiguates multiple parser callsites
+// sharing a source line and callee while retaining the legacy identity helper for
+// older consumers.
+func StableResolutionCallsiteIDWithOrdinal(repositoryRevision, sourceStableID, path string, startLine, endLine, ordinal int, callee string) string {
+	return stableResolutionDigest("gt.callsite.identity.v1", repositoryRevision, sourceStableID, path, startLine, endLine, ordinal, callee)
+}
+
 type ResolutionSymbol struct {
 	StableID       string
 	NativeID       string

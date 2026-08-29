@@ -43,3 +43,27 @@ func TestResolutionCallsiteValidationRejectsForeignSelection(t *testing.T) {
 		t.Fatal("expected foreign selection rejection")
 	}
 }
+
+func TestResolveWithProvenancePreservesRepeatedAndUnresolvedOrdinals(t *testing.T) {
+	calls := []parser.CallRef{
+		{CalleeName: "target", File: "main.py", Line: 7},
+		{CalleeName: "target", File: "main.py", Line: 7},
+		{CalleeName: "missing", File: "main.py", Line: 7},
+	}
+	legacy, traces := ResolveWithProvenance(calls,
+		map[string][]int64{"target": {2}},
+		map[string]map[string][]int64{"main.py": {"target": {2}}},
+		[]int64{1, 1, 1}, nil, nil)
+	if len(legacy) != 2 || len(traces) != len(calls) {
+		t.Fatalf("legacy=%d traces=%d", len(legacy), len(traces))
+	}
+	if traces[0].CallsiteOrdinal != 0 || traces[1].CallsiteOrdinal != 1 {
+		t.Fatalf("repeated call ordinals lost: %+v %+v", traces[0], traces[1])
+	}
+	if traces[0].DispatchState != DispatchUnique || traces[1].DispatchState != DispatchUnique {
+		t.Fatalf("repeated calls not independently resolved: %+v %+v", traces[0], traces[1])
+	}
+	if traces[2].CallsiteOrdinal != 2 || traces[2].DispatchState != DispatchZero {
+		t.Fatalf("unresolved same-line call misbound: %+v", traces[2])
+	}
+}

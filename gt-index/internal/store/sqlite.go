@@ -3,6 +3,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -97,6 +98,34 @@ type ResolutionCallsite struct {
 	SelectedTargetNativeID *string
 	Mechanism              string
 	VerificationStatus     string
+}
+
+// AttachedResolution is the graph-native representation of a resolver callsite.
+// The Callsite node and its HAS_CALLSITE/CANDIDATE edges live in the primary
+// nodes/edges graph; the resolution_* tables are only a compatibility projection
+// for older consumers and are never the authority for graph queries.
+type AttachedResolution struct {
+	Callsite   *ResolutionCallsite
+	Source     *Node
+	Candidates []*ResolutionCandidate
+}
+
+// AttachedCandidate is returned by the normal graph query path. It intentionally
+// reads nodes/edges rather than the compatibility sidecar so callers cannot forget
+// to consume the attached evidence.
+type AttachedCandidate struct {
+	CallsiteID       string
+	SourceID         int64
+	CallsiteNodeID   int64
+	TargetID         int64
+	SourceFile       string
+	SourceLine       int
+	Callee           string
+	DispatchState    string
+	CandidateOrdinal int
+	Selected         bool
+	Mechanism        string
+	Revision         string
 }
 
 // Closure is one row of the transitive-reachability sidecar (C7 / RF-4).
@@ -649,6 +678,169 @@ func (d *DB) BatchInsertResolutionCandidates(candidates []*ResolutionCandidate) 
 		}
 	}
 	return tx.Commit()
+}
+
+// AttachResolutionGraphTx publishes resolver evidence as first-class graph
+// objects. Each callsite is a Callsite node linked from its source symbol by a
+// HAS_CALLSITE edge; each viable target is linked from that node by a CANDIDATE
+// edge. The complete set is written in the caller's transaction so a graph
+// reader observes either all attached evidence or none of it.
+func AttachResolutionGraphTx(tx *sql.Tx, revision string, rows []AttachedResolution) error {
+	if tx == nil {
+		return fmt.Errorf("nil graph transaction")
+	}
+	for _, row := range rows {
+		if row.Callsite == nil || row.Source == nil {
+			return fmt.Errorf("graph resolution row missing callsite or source")
+		}
+		c := row.Callsite
+		if c.CandidateCount != len(row.Candidates) {
+			return fmt.Errorf("callsite %s candidate count %d != retained rows %d", c.CallsiteID, c.CandidateCount, len(row.Candidates))
+		}
+		seenOrd := make(map[int]struct{}, len(row.Candidates))
+		selected := 0
+		selectedTarget := ""
+		for _, candidate := range row.Candidates {
+			if candidate == nil || candidate.TargetID <= 0 {
+				return fmt.Errorf("callsite %s has invalid candidate", c.CallsiteID)
+			}
+			if _, ok := seenOrd[candidate.Ordinal]; ok || candidate.Ordinal != len(seenOrd) {
+				return fmt.Errorf("callsite %s candidate ordinals are not dense", c.CallsiteID)
+			}
+			seenOrd[candidate.Ordinal] = struct{}{}
+			if candidate.Selected {
+				selected++
+				selectedTarget = candidate.TargetStableID
+			}
+		}
+		if c.DispatchState == "ambiguous" && selected != 0 {
+			return fmt.Errorf("ambiguous callsite %s has selected candidate", c.CallsiteID)
+		}
+		if c.SelectedTargetStableID != nil {
+			if selected != 1 || selectedTarget != *c.SelectedTargetStableID {
+				return fmt.Errorf("callsite %s selected target is not exactly one retained candidate", c.CallsiteID)
+			}
+		} else if selected != 0 {
+			return fmt.Errorf("callsite %s has selected row without selected target", c.CallsiteID)
+		}
+
+		callsiteMeta, _ := json.Marshal(map[string]any{
+			"callsite_id": c.CallsiteID, "dispatch_state": c.DispatchState,
+			"mechanism": c.Mechanism, "repository_revision": revision,
+			"verification_status": c.VerificationStatus,
+		})
+		res, err := tx.Exec(`INSERT INTO nodes
+			(label,name,qualified_name,file_path,start_line,end_line,signature,language)
+			VALUES ('Callsite',?,?,?,?,?,?,?)`,
+			c.Callee, c.CallsiteID, c.SourceFile, c.SourceLine, c.SourceLine,
+			string(callsiteMeta), c.Language)
+		if err != nil {
+			return fmt.Errorf("insert callsite node %s: %w", c.CallsiteID, err)
+		}
+		callsiteNodeID, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("callsite node id %s: %w", c.CallsiteID, err)
+		}
+		linkMeta, _ := json.Marshal(map[string]any{
+			"callsite_id": c.CallsiteID, "repository_revision": revision,
+			"dispatch_state": c.DispatchState,
+		})
+		if _, err := tx.Exec(`INSERT INTO edges
+			(source_id,target_id,type,source_line,source_file,resolution_method,confidence,metadata,trust_tier,candidate_count,evidence_type,verification_status)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			c.SourceID, callsiteNodeID, "HAS_CALLSITE", c.SourceLine, c.SourceFile,
+			"graph_native", 1.0, string(linkMeta), "CERTIFIED", c.CandidateCount,
+			"resolver_callsite", c.VerificationStatus); err != nil {
+			return fmt.Errorf("link callsite %s: %w", c.CallsiteID, err)
+		}
+		for _, candidate := range row.Candidates {
+			candidateMeta, _ := json.Marshal(map[string]any{
+				"callsite_id": c.CallsiteID, "candidate_ordinal": candidate.Ordinal,
+				"target_stable_id": candidate.TargetStableID, "target_native_id": candidate.TargetNativeID,
+				"selected": candidate.Selected, "mechanism": candidate.Mechanism,
+				"declared_scope": candidate.DeclaredScope, "receiver_type": candidate.ReceiverType,
+				"receiver_origin": candidate.ReceiverOrigin, "receiver_shape": candidate.ReceiverShape,
+				"receiver_chain": candidate.ReceiverChain, "import_chain": candidate.ImportChain,
+				"dynamic_dispatch": candidate.DynamicDispatch, "export_status": candidate.ExportStatus,
+				"parser_complete": candidate.ParserComplete, "repository_revision": revision,
+			})
+			if _, err := tx.Exec(`INSERT INTO edges
+				(source_id,target_id,type,source_line,source_file,resolution_method,confidence,metadata,trust_tier,candidate_count,evidence_type,verification_status)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+				callsiteNodeID, candidate.TargetID, "CANDIDATE", c.SourceLine, c.SourceFile,
+				candidate.Mechanism, 1.0, string(candidateMeta),
+				"CANDIDATE", c.CandidateCount, "resolver_candidate", candidate.VerificationStatus); err != nil {
+				return fmt.Errorf("insert candidate edge %s/%d: %w", c.CallsiteID, candidate.Ordinal, err)
+			}
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_schema_version','1') ON CONFLICT(key) DO UPDATE SET value='1'`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_revision',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, revision); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_complete','1') ON CONFLICT(key) DO UPDATE SET value='1'`); err != nil {
+		return err
+	}
+	return nil
+}
+
+// AttachResolutionGraph is the full-index wrapper for the transactional graph
+// attachment API.
+func (d *DB) AttachResolutionGraph(revision string, rows []AttachedResolution) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin graph resolution tx: %w", err)
+	}
+	if err := AttachResolutionGraphTx(tx, revision, rows); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit graph resolution tx: %w", err)
+	}
+	return nil
+}
+
+// QueryAttachedCandidates is the normal producer graph query for resolver
+// evidence. It reads only primary nodes/edges, so graph consumers automatically
+// observe retained candidates without joining the compatibility sidecar.
+func (d *DB) QueryAttachedCandidates(callee string) ([]AttachedCandidate, error) {
+	var complete string
+	if err := d.db.QueryRow(`SELECT COALESCE(value,'') FROM project_meta WHERE key='graph_resolution_complete'`).Scan(&complete); err != nil {
+		return nil, fmt.Errorf("graph-native resolution unavailable: %w", err)
+	}
+	if complete != "1" {
+		return nil, fmt.Errorf("graph-native resolution is incomplete (state=%q)", complete)
+	}
+	rows, err := d.db.Query(`SELECT hc.source_id, c.id, ce.target_id,
+		c.qualified_name, c.file_path, c.start_line, c.name,
+		COALESCE(json_extract(c.signature,'$.dispatch_state'),''),
+		COALESCE(json_extract(ce.metadata,'$.candidate_ordinal'),0),
+		COALESCE(json_extract(ce.metadata,'$.selected'),0),
+		COALESCE(ce.resolution_method,''),
+		COALESCE(json_extract(ce.metadata,'$.repository_revision'),'')
+		FROM nodes c
+		JOIN edges hc ON hc.target_id=c.id AND hc.type='HAS_CALLSITE'
+		JOIN edges ce ON ce.source_id=c.id AND ce.type='CANDIDATE'
+		WHERE c.label='Callsite' AND c.name=?
+		ORDER BY c.id, ce.id`, callee)
+	if err != nil {
+		return nil, fmt.Errorf("query attached candidates: %w", err)
+	}
+	defer rows.Close()
+	var out []AttachedCandidate
+	for rows.Next() {
+		var c AttachedCandidate
+		if err := rows.Scan(&c.SourceID, &c.CallsiteNodeID, &c.TargetID, &c.CallsiteID,
+			&c.SourceFile, &c.SourceLine, &c.Callee, &c.DispatchState,
+			&c.CandidateOrdinal, &c.Selected, &c.Mechanism, &c.Revision); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // GetAllEdges returns every edge whose confidence is >= minConf, in stable id
