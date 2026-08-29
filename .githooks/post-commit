@@ -11,8 +11,10 @@ remote=${GNX_PUSH_REMOTE:-origin}
 common=$(git rev-parse --git-common-dir)
 log="$common/gnx-autopush.failures.log"
 sha=$(git rev-parse HEAD)
+stderr_log="$common/gnx-autopush.$$.stderr"
 
-if git push --porcelain -u "$remote" "HEAD:refs/heads/$branch"; then
+if git push --porcelain -u "$remote" "HEAD:refs/heads/$branch" 2>"$stderr_log"; then
+  rm -f "$stderr_log"
   printf 'gnx auto-push: %s %s -> %s/%s\n' "$sha" "$branch" "$remote" "$branch"
 else
   code=$?
@@ -22,8 +24,13 @@ else
     printf 'branch=%s\n' "$branch"
     printf 'sha=%s\n' "$sha"
     printf 'remote=%s\n' "$remote"
+    printf 'command=git push --porcelain -u %s HEAD:refs/heads/%s\n' "$remote" "$branch"
     printf 'exit=%s\n\n' "$code"
+    printf 'stderr<<EOF\n'
+    cat "$stderr_log"
+    printf 'EOF\n\n'
   } >> "$log"
+  rm -f "$stderr_log"
   printf 'gnx auto-push FAILED; blocker appended to %s\n' "$log" >&2
   exit "$code"
 fi
