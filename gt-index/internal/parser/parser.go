@@ -111,6 +111,10 @@ type CallRef struct {
 	CalleeQualified string // full qualified name if available (e.g. "obj.method")
 	Line            int
 	File            string
+	// ParserIncomplete is set when a caller can identify the callsite but the
+	// surrounding parser result is incomplete. The resolver must retain the
+	// callsite as non-authoritative rather than silently dropping it.
+	ParserIncomplete bool
 }
 
 // AssignmentRef records a variable assignment where the RHS is a constructor call.
@@ -562,6 +566,19 @@ func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) strin
 	spec := sf.Spec
 	nodeType := node.Type()
 	name := extractFieldText(node, spec.NameField, src)
+	// C and C++ expose the function's `declarator` field as a complete
+	// function_declarator (for example, `target(int value)`), not as the
+	// identifier itself.  Keep symbol identity stable by walking the
+	// declarator's name-bearing fields instead of leaking parameter text into
+	// the node name.  This is deliberately scoped to these grammars so the
+	// generic NameField contract remains unchanged for other languages.
+	if (sf.Language == "c" || sf.Language == "cpp") && name != "" {
+		if declarator := node.ChildByFieldName(spec.NameField); declarator != nil {
+			if identifier := extractDeclaratorIdentifier(declarator, src); identifier != "" {
+				name = identifier
+			}
+		}
+	}
 	if name == "" {
 		name = extractFirstIdentifier(node, src)
 	}
@@ -581,6 +598,28 @@ func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) strin
 		name = assignedFunctionExpressionName(node, sf, src)
 	}
 	return name
+}
+
+// extractDeclaratorIdentifier returns the identifier represented by a C/C++
+// declarator.  Declarators are nested for pointers, qualified methods, and
+// function pointers; following semantic fields first avoids accidentally
+// selecting a parameter identifier during the fallback walk.
+func extractDeclaratorIdentifier(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
+	for _, field := range []string{"declarator", "name"} {
+		if child := node.ChildByFieldName(field); child != nil {
+			if identifier := extractDeclaratorIdentifier(child, src); identifier != "" {
+				return identifier
+			}
+		}
+	}
+	switch node.Type() {
+	case "identifier", "field_identifier", "type_identifier":
+		return node.Content(src)
+	}
+	return ""
 }
 
 // _testAnnotationNodeTypes: cross-language attribute/annotation/decorator node types that
@@ -1755,6 +1794,7 @@ func isLiteralReceiver(t string) bool {
 //     chain head (the call's function's receiver) to the ultimate base.
 //   - parenthesized: `("a").join()` — the receiver is a `parenthesized_expression`
 //     wrapping the literal; we unwrap it.
+//
 // When the chain's ultimate base is a literal, the whole call is a stdlib/builtin
 // call (str/list/dict/…), never an internal call-graph edge. Conservative: any
 // unrecognized shape returns false (keeps the edge — correct-or-quiet, never drops

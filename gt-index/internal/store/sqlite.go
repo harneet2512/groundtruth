@@ -61,6 +61,66 @@ type Edge struct {
 	VerificationStatus string // unverified, verified, rejected
 }
 
+// ResolutionCandidate is one viable target identity retained for a CALLS
+// resolution. The selected edge remains in edges; this sidecar preserves all
+// alternatives and their provenance for ambiguity-aware consumers.
+type ResolutionCandidate struct {
+	CallsiteID         string
+	TargetID           int64
+	TargetStableID     string
+	TargetNativeID     string
+	Ordinal            int
+	Mechanism          string
+	DeclaredScope      string
+	ReceiverType       string
+	ReceiverOrigin     string
+	ReceiverShape      string
+	ReceiverChain      string
+	ImportChain        string
+	DynamicDispatch    bool
+	ExportStatus       string
+	ParserComplete     *bool
+	VerificationStatus string
+	Selected           bool
+	// Legacy native projections retained for the additive SQLite sidecar writer.
+	SourceID         int64
+	SourceLine       int
+	SourceFile       string
+	ResolutionMethod string
+	CandidateRank    int
+	CandidateCount   int
+	Confidence       float64
+	EvidenceType     string
+}
+
+// ResolutionCallsite is the lossless call-level dispatch record. Unlike an
+// edge, selected_target_id is nullable for ambiguous and unresolved calls.
+type ResolutionCallsite struct {
+	CallsiteID                   string
+	CallsiteOrdinal              int
+	RepositoryRevision           string
+	SourceStableID               string
+	SourceNativeID               string
+	SourceID                     int64
+	SourceLine                   int
+	SourceFile                   string
+	Callee                       string
+	Language                     string
+	DispatchState                string
+	CandidateCount               int
+	SelectedTargetStableID       *string
+	SelectedTargetNativeID       *string
+	Mechanism                    string
+	VerificationStatus           string
+	LegacyReportedCandidateCount *int
+	LegacySelectedNativeTargetID string
+	// Legacy projections used by the v1 sidecar writer; the contract fields
+	// above remain authoritative for HAR-6 consumers.
+	CalleeQualified  string
+	SelectedTargetID *int64
+	ParserComplete   bool
+}
+
 // Closure is one row of the transitive-reachability sidecar (C7 / RF-4).
 // SourceID transitively reaches TargetID in Depth hops; MinConfidence is the
 // weakest edge confidence along that path (the path is built over VERIFIED
@@ -247,6 +307,69 @@ func createSchema(db *sql.DB) error {
 		-- source repo here and the target's provenance in metadata. NULL on single-root.
 		repo_id INTEGER REFERENCES repos(id)
 	);
+
+	-- Versioned additive sidecar: one row for every viable resolver candidate.
+	-- edges.target_id remains the backward-readable selected edge; consumers that
+	-- understand this table can distinguish unique, ambiguous, and unresolved
+	-- identity without inferring from a lossy count.
+	CREATE TABLE IF NOT EXISTS resolution_candidates (
+		callsite_id TEXT NOT NULL REFERENCES resolution_callsites(callsite_id) ON DELETE CASCADE,
+		target_id INTEGER NOT NULL REFERENCES nodes(id),
+		target_stable_id TEXT NOT NULL REFERENCES resolution_symbols(stable_id),
+		target_native_id TEXT NOT NULL,
+		ordinal INTEGER NOT NULL,
+		mechanism TEXT NOT NULL,
+		declared_scope TEXT NOT NULL DEFAULT '',
+		receiver_type TEXT NOT NULL DEFAULT '',
+		receiver_origin TEXT NOT NULL DEFAULT '',
+		receiver_shape TEXT NOT NULL DEFAULT '',
+		receiver_chain TEXT NOT NULL DEFAULT '[]',
+		import_chain TEXT NOT NULL DEFAULT '[]',
+		dynamic_dispatch BOOLEAN NOT NULL DEFAULT 0,
+		export_status TEXT NOT NULL DEFAULT 'unknown',
+		parser_complete BOOLEAN,
+		verification_status TEXT NOT NULL,
+		selected BOOLEAN NOT NULL DEFAULT 0,
+		PRIMARY KEY(callsite_id, ordinal),
+		UNIQUE(callsite_id, target_stable_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_resolution_candidates_callsite ON resolution_candidates(callsite_id);
+	CREATE INDEX IF NOT EXISTS idx_resolution_candidates_target ON resolution_candidates(target_id);
+
+	CREATE TABLE IF NOT EXISTS resolution_symbols (
+		stable_id TEXT PRIMARY KEY,
+		native_id TEXT NOT NULL UNIQUE,
+		native_kind TEXT NOT NULL,
+		normalized_kind TEXT NOT NULL,
+		language TEXT NOT NULL,
+		path TEXT NOT NULL,
+		qualified_name TEXT NOT NULL,
+		start_line INTEGER NOT NULL,
+		end_line INTEGER NOT NULL,
+		export_status TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS resolution_callsites (
+		callsite_id TEXT PRIMARY KEY,
+		callsite_ordinal INTEGER NOT NULL UNIQUE,
+		repository_revision TEXT NOT NULL,
+		source_stable_id TEXT NOT NULL REFERENCES resolution_symbols(stable_id),
+		source_native_id TEXT NOT NULL,
+		source_id INTEGER,
+		source_line INTEGER,
+		source_file TEXT NOT NULL,
+		callee TEXT NOT NULL,
+		language TEXT NOT NULL,
+		dispatch_state TEXT NOT NULL,
+		candidate_count INTEGER NOT NULL DEFAULT 0,
+		selected_target_stable_id TEXT,
+		selected_target_native_id TEXT,
+		mechanism TEXT NOT NULL,
+		verification_status TEXT NOT NULL DEFAULT 'unverified',
+		legacy_reported_candidate_count INTEGER,
+		legacy_selected_native_target_id TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX IF NOT EXISTS idx_resolution_callsites_source ON resolution_callsites(source_id);
 
 	-- SM-9a MULTI-REPO: one row per indexed repository root. id is the partition key
 	-- stamped onto nodes/edges/properties/assertions/closure/content_passages.repo_id.
@@ -728,6 +851,104 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("insert edge %d: %w", i, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// BatchInsertResolutionCandidates persists the complete viable candidate set
+// for each resolved call. Inputs are sorted by source/location/rank by the
+// caller, so repeated builds produce deterministic row order.
+func (d *DB) BatchInsertResolutionCandidates(candidates []*ResolutionCandidate) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin resolution candidates tx: %w", err)
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_candidates
+		(callsite_id,target_id,target_stable_id,target_native_id,ordinal,mechanism,
+		 declared_scope,receiver_type,receiver_origin,receiver_shape,receiver_chain,
+		 import_chain,dynamic_dispatch,export_status,parser_complete,
+		 verification_status,selected)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("prepare resolution candidates: %w", err)
+	}
+	defer stmt.Close()
+	for i, c := range candidates {
+		if _, err := stmt.Exec(c.CallsiteID, c.TargetID, c.TargetStableID,
+			c.TargetNativeID, c.Ordinal, c.Mechanism, c.DeclaredScope,
+			c.ReceiverType, c.ReceiverOrigin, c.ReceiverShape, c.ReceiverChain,
+			c.ImportChain, c.DynamicDispatch, c.ExportStatus, c.ParserComplete,
+			c.VerificationStatus, c.Selected); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert resolution candidate %d: %w", i, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// BatchInsertResolutionCallsites writes one durable dispatch record per parsed
+// callsite, including calls for which no edge was emitted.
+func (d *DB) BatchInsertResolutionCallsites(callsites []*ResolutionCallsite) error {
+	if len(callsites) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin resolution callsites tx: %w", err)
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_callsites
+		(callsite_id,callsite_ordinal,repository_revision,source_stable_id,
+		 source_native_id,source_id,source_line,source_file,callee,language,
+		 dispatch_state,candidate_count,selected_target_stable_id,
+		 selected_target_native_id,mechanism,verification_status,
+		 legacy_reported_candidate_count,legacy_selected_native_target_id)
+		 VALUES (?,?,?,?,?,NULLIF(?,0),?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("prepare resolution callsites: %w", err)
+	}
+	defer stmt.Close()
+	for i, c := range callsites {
+		if _, err := stmt.Exec(c.CallsiteID, c.CallsiteOrdinal, c.RepositoryRevision,
+			c.SourceStableID, c.SourceNativeID, c.SourceID, c.SourceLine,
+			c.SourceFile, c.Callee, c.Language, c.DispatchState, c.CandidateCount,
+			c.SelectedTargetStableID, c.SelectedTargetNativeID, c.Mechanism,
+			c.VerificationStatus, c.LegacyReportedCandidateCount,
+			c.LegacySelectedNativeTargetID); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert resolution callsite %d: %w", i, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) BatchInsertResolutionSymbols(symbols []*ResolutionSymbol) error {
+	if len(symbols) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin resolution symbols tx: %w", err)
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_symbols
+		(stable_id,native_id,native_kind,normalized_kind,language,path,
+		 qualified_name,start_line,end_line,export_status) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("prepare resolution symbols: %w", err)
+	}
+	defer stmt.Close()
+	for i, symbol := range symbols {
+		if _, err := stmt.Exec(symbol.StableID, symbol.NativeID, symbol.NativeKind,
+			symbol.NormalizedKind, symbol.Language, symbol.Path, symbol.QualifiedName,
+			symbol.StartLine, symbol.EndLine, symbol.ExportStatus); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert resolution symbol %d: %w", i, err)
 		}
 	}
 	return tx.Commit()

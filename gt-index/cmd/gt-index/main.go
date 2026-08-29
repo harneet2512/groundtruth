@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -62,6 +63,76 @@ type fileParseResult struct {
 	fileIdx int
 	result  *parser.ParseResult
 	err     error
+}
+
+func collectParseResults(
+	files []walker.SourceFile,
+	resultCh <-chan fileParseResult,
+) ([]*parser.ParseResult, int, []string) {
+	results := make([]*parser.ParseResult, len(files))
+	parseFailures := 0
+	var failSample []string
+	for pr := range resultCh {
+		if pr.err == nil && pr.result != nil {
+			results[pr.fileIdx] = pr.result
+			continue
+		}
+
+		parseFailures++
+		if len(failSample) >= 10 || pr.fileIdx < 0 || pr.fileIdx >= len(files) {
+			continue
+		}
+		if pr.err != nil {
+			failSample = append(
+				failSample,
+				fmt.Sprintf("%s: %v", files[pr.fileIdx].Path, pr.err),
+			)
+		} else {
+			failSample = append(
+				failSample,
+				fmt.Sprintf("%s: parser returned no result", files[pr.fileIdx].Path),
+			)
+		}
+	}
+	return results, parseFailures, failSample
+}
+
+func normalizeResolutionMechanism(method string) string {
+	switch method {
+	case "same_file", "inherited":
+		return "same_file"
+	case "import":
+		return "import_exact"
+	case "verified_unique":
+		return "qualified_exact"
+	case "import_type", "type_flow", "return_type", "impl_method", "unique_method":
+		return "receiver_type"
+	case "field_based":
+		return "field_based"
+	case "dynamic", "external", "parser_incomplete", "name_match":
+		return method
+	default:
+		return "unknown_legacy"
+	}
+}
+
+func resolutionReceiverShape(qualified string) string {
+	if qualified == "" {
+		return "unqualified"
+	}
+	return "qualified"
+}
+
+func resolutionImportChain(method, qualified, callee string) string {
+	if method != "import" {
+		return "[]"
+	}
+	value := qualified
+	if value == "" {
+		value = callee
+	}
+	encoded, _ := json.Marshal([]string{value})
+	return string(encoded)
 }
 
 func main() {
@@ -201,7 +272,6 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Pass 2: parsing %d files (%d workers)...\n", len(files), *workers)
 
 	// Parse files in parallel
-	results := make([]*parser.ParseResult, len(files))
 	resultCh := make(chan fileParseResult, len(files))
 
 	var wg sync.WaitGroup
@@ -239,18 +309,7 @@ func main() {
 	// silently ship a thin graph. SAY the problem, LOG it, IDENTIFY the files. A failure
 	// here used to be dropped on the floor — a repo where N% of files failed to parse
 	// produced a thin graph with zero warning. Now it is surfaced + fail-closed.)
-	parseFailures := 0
-	var failSample []string
-	for pr := range resultCh {
-		if pr.err == nil && pr.result != nil {
-			results[pr.fileIdx] = pr.result
-		} else if pr.err != nil {
-			parseFailures++
-			if len(failSample) < 10 && pr.fileIdx >= 0 && pr.fileIdx < len(files) {
-				failSample = append(failSample, fmt.Sprintf("%s: %v", files[pr.fileIdx].Path, pr.err))
-			}
-		}
-	}
+	results, parseFailures, failSample := collectParseResults(files, resultCh)
 
 	parseElapsed := time.Since(parseStart)
 	parsedOK := len(files) - parseFailures
@@ -563,7 +622,7 @@ func main() {
 	// once in the caller (main.go) before Resolve sees the imports.
 	resolver.ExpandRustCrateImports(allImports, filePaths, fileLangs, *root)
 
-	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
+	resolved, callsites := resolver.ResolveWithProvenance(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
 
 	resolveElapsed := time.Since(resolveStart)
 
@@ -600,6 +659,84 @@ func main() {
 	if err := db.BatchInsertEdges(edgePtrs); err != nil {
 		log.Fatalf("batch insert edges: %v", err)
 	}
+	repositoryRevision := repoCommit(*root)
+	if repositoryRevision == "" {
+		repositoryRevision = "unversioned"
+	}
+	resolutionSymbols := make([]*store.ResolutionSymbol, 0, len(allNodePtrs))
+	resolutionSymbolByNativeID := make(map[int64]store.ResolutionSymbol, len(allNodePtrs))
+	for i, node := range allNodePtrs {
+		if i >= len(nodeDBIDs) {
+			continue
+		}
+		symbol := store.BuildResolutionSymbol(strconv.FormatInt(nodeDBIDs[i], 10), *node)
+		resolutionSymbols = append(resolutionSymbols, &symbol)
+		resolutionSymbolByNativeID[nodeDBIDs[i]] = symbol
+	}
+	if err := db.BatchInsertResolutionSymbols(resolutionSymbols); err != nil {
+		log.Fatalf("insert resolution symbols: %v", err)
+	}
+	callsiteRows := make([]*store.ResolutionCallsite, 0, len(callsites))
+	candidateRows := make([]*store.ResolutionCandidate, 0)
+	for _, c := range callsites {
+		source, ok := resolutionSymbolByNativeID[c.SourceNodeID]
+		if !ok {
+			log.Fatalf("resolution callsite %d has unknown source node %d", c.CallsiteOrdinal, c.SourceNodeID)
+		}
+		callsiteID := store.StableResolutionCallsiteID(
+			repositoryRevision, source.StableID, c.SourceFile,
+			c.SourceLine, c.SourceLine, c.Callee,
+		)
+		var selectedStableID, selectedNativeID *string
+		if c.SelectedTargetNodeID != nil {
+			target, exists := resolutionSymbolByNativeID[*c.SelectedTargetNodeID]
+			if !exists {
+				log.Fatalf("resolution callsite %s selected unknown target %d", callsiteID, *c.SelectedTargetNodeID)
+			}
+			stable, native := target.StableID, target.NativeID
+			selectedStableID, selectedNativeID = &stable, &native
+		}
+		mechanism := normalizeResolutionMechanism(c.Mechanism)
+		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{
+			CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal,
+			RepositoryRevision: repositoryRevision, SourceStableID: source.StableID,
+			SourceNativeID: source.NativeID, SourceID: c.SourceNodeID,
+			SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee,
+			Language: source.Language, DispatchState: string(c.DispatchState),
+			CandidateCount:         len(c.CandidateNodeIDs),
+			SelectedTargetStableID: selectedStableID, SelectedTargetNativeID: selectedNativeID,
+			Mechanism: mechanism, VerificationStatus: c.VerificationStatus,
+		})
+		for ordinal, targetID := range c.CandidateNodeIDs {
+			target, exists := resolutionSymbolByNativeID[targetID]
+			if !exists {
+				log.Fatalf("resolution callsite %s has unknown candidate %d", callsiteID, targetID)
+			}
+			parserComplete := c.ParserComplete
+			selected := c.SelectedTargetNodeID != nil && *c.SelectedTargetNodeID == targetID
+			candidateRows = append(candidateRows, &store.ResolutionCandidate{
+				CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID,
+				TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: mechanism,
+				DeclaredScope: source.QualifiedName, ReceiverType: c.ReceiverType,
+				ReceiverOrigin: c.ReceiverOrigin, ReceiverShape: resolutionReceiverShape(c.CalleeQualified),
+				ReceiverChain: "[]", ImportChain: resolutionImportChain(c.Mechanism, c.CalleeQualified, c.Callee),
+				DynamicDispatch: c.DynamicDispatch, ExportStatus: target.ExportStatus,
+				ParserComplete: &parserComplete, VerificationStatus: c.VerificationStatus,
+				Selected: selected,
+			})
+		}
+	}
+	if err := db.BatchInsertResolutionCallsites(callsiteRows); err != nil {
+		log.Fatalf("insert resolution callsites: %v", err)
+	}
+	if err := db.BatchInsertResolutionCandidates(candidateRows); err != nil {
+		log.Fatalf("batch insert resolution candidates: %v", err)
+	}
+	db.SetMeta("resolution_schema_version", "1")
+	db.SetMeta("resolution_producer_contract", store.ResolutionProducerContract)
+	db.SetMeta("resolution_producer_source_revision", commitSHA)
+	db.SetMeta("resolution_repository_revision", repositoryRevision)
+	db.SetMeta("resolution_complete", "1")
 	// Containment edges: parent_id → CONTAINS for class-structure queries
 	// Use parentFixups since allNodePtrs had ParentID zeroed before batch insert.
 	// DETERMINISM (B0): iterate parentFixups in SORTED node-index order. A Go `range`
@@ -841,6 +978,7 @@ func main() {
 	// clock dependent and breaks byte-equality across two builds of the
 	// same commit. Diagnostic value only; emitted to stderr below instead.
 	db.SetMeta("file_count", fmt.Sprintf("%d", len(files)))
+	db.SetMeta("parse_failures", fmt.Sprintf("%d", parseFailures))
 	db.SetMeta("node_count", fmt.Sprintf("%d", len(allNodePtrs)))
 	db.SetMeta("edge_count", fmt.Sprintf("%d", len(resolved)))
 	db.SetMeta("import_count", fmt.Sprintf("%d", len(allImports)))

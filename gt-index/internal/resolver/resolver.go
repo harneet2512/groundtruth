@@ -423,6 +423,100 @@ type ResolvedCall struct {
 	// `;`-separated key=value convention the promote pass uses for `dataflow=`. Purely
 	// additive: zero-value "" leaves the edge's metadata byte-identical to before.
 	ReceiverType string
+	// CandidateNodeIDs retains the complete viable identity set considered by
+	// the resolver for this call. TargetNodeID is only the selected edge; these
+	// IDs preserve ambiguity for downstream consumers instead of collapsing it
+	// into candidate_count alone.
+	CandidateNodeIDs []int64
+}
+
+// DispatchState is the producer-owned resolution outcome for one parsed
+// callsite. These values intentionally match the HAR-6 consumer contract.
+type DispatchState string
+
+const (
+	DispatchZero               DispatchState = "zero"
+	DispatchUnique             DispatchState = "unique"
+	DispatchAmbiguous          DispatchState = "ambiguous"
+	DispatchDynamic            DispatchState = "dynamic"
+	DispatchExternalUnresolved DispatchState = "external_unresolved"
+	DispatchParserIncomplete   DispatchState = "parser_incomplete"
+)
+
+// ResolutionCallsite retains resolver-time candidate identities before the
+// legacy selected-edge deduplication step can discard callsite information.
+type ResolutionCallsite struct {
+	CallsiteOrdinal      int
+	SourceNodeID         int64
+	SourceLine           int
+	SourceFile           string
+	Callee               string
+	CalleeQualified      string
+	DispatchState        DispatchState
+	CandidateNodeIDs     []int64
+	SelectedTargetNodeID *int64
+	Mechanism            string
+	DeclaredScope        string
+	ReceiverType         string
+	ReceiverOrigin       string
+	ReceiverShape        string
+	ReceiverChain        []string
+	ImportChain          []string
+	DynamicDispatch      bool
+	ParserComplete       bool
+	VerificationStatus   string
+}
+
+// Validate enforces candidate conservation and selection membership at the
+// producer boundary, before any row reaches SQLite.
+func (c ResolutionCallsite) Validate() error {
+	seen := make(map[int64]struct{}, len(c.CandidateNodeIDs))
+	for _, id := range c.CandidateNodeIDs {
+		if id == 0 {
+			return fmt.Errorf("candidate target ID must be nonzero")
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("candidate targets must be unique")
+		}
+		seen[id] = struct{}{}
+	}
+	if c.SelectedTargetNodeID != nil {
+		if _, exists := seen[*c.SelectedTargetNodeID]; !exists {
+			return fmt.Errorf("selected target must be a retained candidate")
+		}
+	}
+	switch c.DispatchState {
+	case DispatchUnique:
+		if len(c.CandidateNodeIDs) != 1 || c.SelectedTargetNodeID == nil {
+			return fmt.Errorf("unique callsite requires one selected candidate")
+		}
+	case DispatchAmbiguous:
+		if len(c.CandidateNodeIDs) < 2 || c.SelectedTargetNodeID != nil {
+			return fmt.Errorf("ambiguous callsite requires multiple candidates and no selection")
+		}
+	case DispatchZero, DispatchDynamic, DispatchExternalUnresolved, DispatchParserIncomplete:
+		if len(c.CandidateNodeIDs) != 0 || c.SelectedTargetNodeID != nil {
+			return fmt.Errorf("unresolved callsite cannot retain target authority")
+		}
+	default:
+		return fmt.Errorf("unknown dispatch state %q", c.DispatchState)
+	}
+	return nil
+}
+
+func candidateIDs(ids []int64, callerID int64) []int64 {
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id != 0 && id != callerID {
+			seen[id] = struct{}{}
+		}
+	}
+	out := make([]int64, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // edgeKey is used for deduplication.
@@ -496,6 +590,7 @@ var _identityWrappers = map[string]bool{
 //   - a CUSTOM generic (`Queue[Task]`, `MyBox<T>`) → the HEAD is the receiver class (`Queue`), never
 //     the type argument;
 //   - a union with ≥2 non-None arms → ambiguous receiver → ABSTAIN.
+//
 // Language-uniform: handles `[...]` (Python), `<...>` (Rust/TS/Java), Go `[]T`/`map[...]`, `*`/`&`,
 // and `|` unions via the two data tables above. Non-receiver callers keep stripTypeWrapper.
 func receiverTypeName(t string) (name string, abstain bool) {
@@ -1863,6 +1958,34 @@ func Resolve(
 	fileMap map[string][]string, // module path → list of file paths
 	nodeMeta ...map[int64]NodeMeta, // optional: nodeID → metadata for self.method resolution
 ) []ResolvedCall {
+	resolved, _ := resolve(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, false, nodeMeta)
+	return resolved
+}
+
+// ResolveWithProvenance preserves the legacy selected-edge result while also
+// returning exactly one conservative record for every input callsite.
+func ResolveWithProvenance(
+	allCalls []parser.CallRef,
+	nodeIDs map[string][]int64,
+	fileNodeIDs map[string]map[string][]int64,
+	callerNodeIDs []int64,
+	allImports []parser.ImportRef,
+	fileMap map[string][]string,
+	nodeMeta ...map[int64]NodeMeta,
+) ([]ResolvedCall, []ResolutionCallsite) {
+	return resolve(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, true, nodeMeta)
+}
+
+func resolve(
+	allCalls []parser.CallRef,
+	nodeIDs map[string][]int64,
+	fileNodeIDs map[string]map[string][]int64,
+	callerNodeIDs []int64,
+	allImports []parser.ImportRef,
+	fileMap map[string][]string,
+	withProvenance bool,
+	nodeMeta []map[int64]NodeMeta,
+) ([]ResolvedCall, []ResolutionCallsite) {
 	// Build import index: file → imported name → list of candidate target files
 	importIndex := buildImportIndex(allImports, fileMap)
 	nameAliasIndex := buildNameAliasIndex(nodeIDs)
@@ -2322,6 +2445,23 @@ func Resolve(
 	}
 
 	var resolved []ResolvedCall
+	var callsites []ResolutionCallsite
+	if withProvenance {
+		callsites = make([]ResolutionCallsite, len(allCalls))
+		for i, call := range allCalls {
+			sourceID := int64(0)
+			if i < len(callerNodeIDs) {
+				sourceID = callerNodeIDs[i]
+			}
+			callsites[i] = ResolutionCallsite{
+				CallsiteOrdinal: i, SourceNodeID: sourceID, SourceLine: call.Line,
+				SourceFile: call.File, Callee: call.CalleeName,
+				CalleeQualified: call.CalleeQualified, DispatchState: DispatchZero,
+				ParserComplete: !call.ParserIncomplete, VerificationStatus: "unverified",
+			}
+		}
+	}
+	currentCallIndex := -1
 	// KEEP-BEST-CONFIDENCE dedup (replaces the old first-wins `seen` bool guard).
 	// edgeSlot maps a (caller,target,"CALLS") key to its index in `resolved`. putEdge
 	// records rc iff the pair is NEW or rc has STRICTLY higher confidence than the edge
@@ -2333,6 +2473,34 @@ func Resolve(
 	// through putEdge, so there is exactly one (best) edge per (caller,target) pair.
 	edgeSlot := make(map[edgeKey]int)
 	putEdge := func(rc ResolvedCall) {
+		rc.CandidateNodeIDs = candidateIDs(rc.CandidateNodeIDs, rc.SourceNodeID)
+		if len(rc.CandidateNodeIDs) == 0 && rc.CandidateCount <= 1 {
+			rc.CandidateNodeIDs = []int64{rc.TargetNodeID}
+		}
+		if withProvenance && currentCallIndex >= 0 {
+			trace := &callsites[currentCallIndex]
+			trace.CandidateNodeIDs = append([]int64(nil), rc.CandidateNodeIDs...)
+			trace.Mechanism = rc.Method
+			trace.ReceiverType = rc.ReceiverType
+			trace.ReceiverOrigin = rc.EvidenceType
+			trace.ParserComplete = true
+			if len(trace.CandidateNodeIDs) > 1 {
+				trace.DispatchState = DispatchAmbiguous
+				trace.SelectedTargetNodeID = nil
+				trace.VerificationStatus = "unverified"
+			} else if len(trace.CandidateNodeIDs) == 1 {
+				selected := rc.TargetNodeID
+				trace.DispatchState = DispatchUnique
+				trace.SelectedTargetNodeID = &selected
+				if rc.TrustTier == "CERTIFIED" {
+					trace.VerificationStatus = "verified"
+				}
+			} else {
+				trace.DispatchState = DispatchParserIncomplete
+				trace.SelectedTargetNodeID = nil
+				trace.ParserComplete = false
+			}
+		}
 		key := edgeKey{rc.SourceNodeID, rc.TargetNodeID, "CALLS"}
 		if i, ok := edgeSlot[key]; ok {
 			if rc.Confidence > resolved[i].Confidence {
@@ -2345,6 +2513,7 @@ func Resolve(
 	}
 
 	for i, call := range allCalls {
+		currentCallIndex = i
 		callerID := callerNodeIDs[i]
 		if callerID == 0 {
 			continue
@@ -2394,15 +2563,16 @@ func Resolve(
 					// 0.6 = CANDIDATE: locality is strong, but WHICH same-named
 					// local definition is the target is not certain → not CERTIFIED.
 					putEdge(ResolvedCall{
-						SourceNodeID:   callerID,
-						TargetNodeID:   best,
-						SourceLine:     call.Line,
-						SourceFile:     call.File,
-						Method:         "same_file",
-						Confidence:     0.6,
-						CandidateCount: len(targetIDs),
-						TrustTier:      tierFor(0.6),
-						EvidenceType:   "same_file_ambiguous",
+						SourceNodeID:     callerID,
+						TargetNodeID:     best,
+						SourceLine:       call.Line,
+						SourceFile:       call.File,
+						Method:           "same_file",
+						Confidence:       0.6,
+						CandidateCount:   len(targetIDs),
+						CandidateNodeIDs: targetIDs,
+						TrustTier:        tierFor(0.6),
+						EvidenceType:     "same_file_ambiguous",
 					})
 					continue
 				}
@@ -2523,15 +2693,16 @@ func Resolve(
 					evidence = "ast_import_ambiguous"
 				}
 				putEdge(ResolvedCall{
-					SourceNodeID:   callerID,
-					TargetNodeID:   bestTarget,
-					SourceLine:     call.Line,
-					SourceFile:     call.File,
-					Method:         "import",
-					Confidence:     conf,
-					CandidateCount: len(importCandidates),
-					TrustTier:      tierFor(conf),
-					EvidenceType:   evidence,
+					SourceNodeID:     callerID,
+					TargetNodeID:     bestTarget,
+					SourceLine:       call.Line,
+					SourceFile:       call.File,
+					Method:           "import",
+					Confidence:       conf,
+					CandidateCount:   len(importCandidates),
+					CandidateNodeIDs: importCandidates,
+					TrustTier:        tierFor(conf),
+					EvidenceType:     evidence,
 				})
 				continue
 			}
@@ -2717,15 +2888,16 @@ func Resolve(
 							continue
 						}
 						putEdge(ResolvedCall{
-							SourceNodeID:   callerID,
-							TargetNodeID:   tid,
-							SourceLine:     call.Line,
-							SourceFile:     call.File,
-							Method:         "name_match",
-							Confidence:     0.2,
-							CandidateCount: nonSelf,
-							TrustTier:      tierFor(0.2),
-							EvidenceType:   "name_match_import_shadow_unverified",
+							SourceNodeID:     callerID,
+							TargetNodeID:     tid,
+							SourceLine:       call.Line,
+							SourceFile:       call.File,
+							Method:           "name_match",
+							Confidence:       0.2,
+							CandidateCount:   nonSelf,
+							CandidateNodeIDs: cands,
+							TrustTier:        tierFor(0.2),
+							EvidenceType:     "name_match_import_shadow_unverified",
 						})
 						minted = true
 					}
@@ -3132,9 +3304,11 @@ func Resolve(
 						}
 						sort.Slice(classIDs194, func(a, b int) bool { return classIDs194[a] < classIDs194[b] })
 						var bestTarget194 int64
+						var candidateTargets194 []int64
 						for _, classID := range classIDs194 {
 							if methods, ok := methodsByClass[classID]; ok {
 								if targetID, ok := methods[methodName194]; ok && targetID != callerID {
+									candidateTargets194 = append(candidateTargets194, targetID)
 									cm := nodeMeta[0][classID]
 									if cm.File == call.File {
 										bestTarget194 = targetID
@@ -3148,15 +3322,16 @@ func Resolve(
 						}
 						if bestTarget194 != 0 {
 							putEdge(ResolvedCall{
-								SourceNodeID:   callerID,
-								TargetNodeID:   bestTarget194,
-								SourceLine:     call.Line,
-								SourceFile:     call.File,
-								Method:         "impl_method",
-								Confidence:     conf194,
-								CandidateCount: numClasses,
-								TrustTier:      tierFor(conf194),
-								EvidenceType:   "single_implementor",
+								SourceNodeID:     callerID,
+								TargetNodeID:     bestTarget194,
+								SourceLine:       call.Line,
+								SourceFile:       call.File,
+								Method:           "impl_method",
+								Confidence:       conf194,
+								CandidateCount:   len(candidateTargets194),
+								CandidateNodeIDs: candidateTargets194,
+								TrustTier:        tierFor(conf194),
+								EvidenceType:     "single_implementor",
 							})
 							resolved194 = true
 						}
@@ -3686,15 +3861,16 @@ func Resolve(
 						}
 						for _, tid := range set {
 							putEdge(ResolvedCall{
-								SourceNodeID:   callerID,
-								TargetNodeID:   tid,
-								SourceLine:     call.Line,
-								SourceFile:     call.File,
-								Method:         "field_based",
-								Confidence:     conf,
-								CandidateCount: len(set),
-								TrustTier:      tierFor(conf),
-								EvidenceType:   evidence,
+								SourceNodeID:     callerID,
+								TargetNodeID:     tid,
+								SourceLine:       call.Line,
+								SourceFile:       call.File,
+								Method:           "field_based",
+								Confidence:       conf,
+								CandidateCount:   len(set),
+								CandidateNodeIDs: set,
+								TrustTier:        tierFor(conf),
+								EvidenceType:     evidence,
 							})
 						}
 						continue
@@ -3751,15 +3927,16 @@ func Resolve(
 					// demand-driven LSP pass can still upgrade it.
 					conf := 0.2
 					putEdge(ResolvedCall{
-						SourceNodeID:   callerID,
-						TargetNodeID:   best,
-						SourceLine:     call.Line,
-						SourceFile:     call.File,
-						Method:         "name_match",
-						Confidence:     conf,
-						CandidateCount: len(candidates),
-						TrustTier:      tierFor(conf),
-						EvidenceType:   "name_match_qualified_unresolved",
+						SourceNodeID:     callerID,
+						TargetNodeID:     best,
+						SourceLine:       call.Line,
+						SourceFile:       call.File,
+						Method:           "name_match",
+						Confidence:       conf,
+						CandidateCount:   len(candidates),
+						CandidateNodeIDs: candidates,
+						TrustTier:        tierFor(conf),
+						EvidenceType:     "name_match_qualified_unresolved",
 					})
 					continue
 				}
@@ -3801,22 +3978,69 @@ func Resolve(
 				}
 				conf := computeConfidence(matchMethod, candidateCount)
 				putEdge(ResolvedCall{
-					SourceNodeID:   callerID,
-					TargetNodeID:   bestTarget,
-					SourceLine:     call.Line,
-					SourceFile:     call.File,
-					Method:         "name_match",
-					Confidence:     conf,
-					CandidateCount: candidateCount,
-					TrustTier:      tierFor(conf),
-					EvidenceType:   evidence,
+					SourceNodeID:     callerID,
+					TargetNodeID:     bestTarget,
+					SourceLine:       call.Line,
+					SourceFile:       call.File,
+					Method:           "name_match",
+					Confidence:       conf,
+					CandidateCount:   candidateCount,
+					CandidateNodeIDs: candidates,
+					TrustTier:        tierFor(conf),
+					EvidenceType:     evidence,
 				})
 			}
 		}
 	nextCall:
 	}
 
-	return resolved
+	if withProvenance {
+		externalQualifiers := make(map[string]map[string]bool)
+		for _, imp := range allImports {
+			if !moduleProvablyExternal(imp.ModulePath, fileMap, buildProjectPathSegments(fileMap)) {
+				continue
+			}
+			if externalQualifiers[imp.File] == nil {
+				externalQualifiers[imp.File] = make(map[string]bool)
+			}
+			externalQualifiers[imp.File][imp.ImportedName] = true
+		}
+		for i, call := range allCalls {
+			trace := &callsites[i]
+			if call.ParserIncomplete {
+				trace.DispatchState = DispatchParserIncomplete
+				trace.ParserComplete = false
+				trace.CandidateNodeIDs = nil
+				trace.SelectedTargetNodeID = nil
+				continue
+			}
+			if len(trace.CandidateNodeIDs) != 0 {
+				if err := trace.Validate(); err != nil {
+					trace.DispatchState = DispatchParserIncomplete
+					trace.ParserComplete = false
+					trace.CandidateNodeIDs = nil
+					trace.SelectedTargetNodeID = nil
+				}
+				continue
+			}
+			qualifier := ""
+			if dot := strings.IndexAny(call.CalleeQualified, ".:"); dot > 0 {
+				qualifier = call.CalleeQualified[:dot]
+			}
+			if qualifier != "" && externalQualifiers[call.File][qualifier] {
+				trace.DispatchState = DispatchExternalUnresolved
+				trace.Mechanism = "external"
+			} else if call.CalleeQualified != "" && call.CalleeQualified != call.CalleeName {
+				trace.DispatchState = DispatchDynamic
+				trace.Mechanism = "dynamic"
+				trace.DynamicDispatch = true
+			} else {
+				trace.DispatchState = DispatchZero
+			}
+		}
+	}
+
+	return resolved, callsites
 }
 
 // moduleProvablyExternal reports whether a module path is PROVABLY external — i.e. no
