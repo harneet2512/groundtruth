@@ -329,10 +329,10 @@ func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *
 		result, err := tx.Exec(`INSERT INTO nodes
 			(label,name,qualified_name,file_path,language,stable_id,node_type,schema_version,source_revision,producer_build_id,
 			 callsite_id,target_symbol_id,pass_kind,pass_version,step_ordinal,operation,input_fact_ids,declared_type_id,scope_id,import_id,boundary_id)
-			VALUES ('DerivationFact',?,?,?,?,?,'derivation_fact',2,?,?,?,?,?,'1',0,'include','[]',?,?,?,?)`,
+			VALUES ('DerivationFact',?,?,?,?,?,'derivation_fact',2,?,?,?,?,?,'1',0,'include',?,?,?,?,?)`,
 			candidate.PassKind, candidate.FactID, c.SourceFile, "resolution", candidate.FactID,
 			identity.RepositoryRevision, identity.BuildID, v2.CallsiteID, fact.TargetStableID, candidate.PassKind,
-			declaredTypeID, scopeID, importID, identity.RepositoryRevision)
+			mustJSON(append(append([]string{}, fact.FlowSourceStableIDs...), fact.FlowEdgeStableIDs...)), declaredTypeID, scopeID, importID, identity.RepositoryRevision)
 		if err != nil {
 			return fmt.Errorf("insert derivation fact: %w", err)
 		}
@@ -501,20 +501,33 @@ func (d *DB) loadResolutionV2Evidence(candidates []AttachedCandidate) error {
 			candidates[i].CompletenessStates[fact.PassKind] = fact.Status
 		}
 		rows, err := d.db.Query(`SELECT stable_id,pass_kind,pass_version,step_ordinal,operation,
-			COALESCE(declared_type_id,''),COALESCE(receiver_value_id,''),COALESCE(scope_id,''),COALESCE(import_id,''),COALESCE(boundary_id,'')
+			COALESCE(input_fact_ids,'[]'),COALESCE(declared_type_id,''),COALESCE(receiver_value_id,''),COALESCE(scope_id,''),COALESCE(import_id,''),COALESCE(boundary_id,'')
 			FROM nodes WHERE node_type='derivation_fact' AND callsite_id=? AND target_symbol_id=?
 			ORDER BY pass_kind,step_ordinal,stable_id`, callsiteID, candidates[i].TargetStableID)
 		if err != nil {
 			return fmt.Errorf("load derivation facts: %w", err)
 		}
 		for rows.Next() {
-			var id, passKind, passVersion, operation, declaredTypeID, receiverValueID, scopeID, importID, boundaryID string
+			var id, passKind, passVersion, operation, inputFactIDsJSON, declaredTypeID, receiverValueID, scopeID, importID, boundaryID string
 			var ordinal int
-			if err := rows.Scan(&id, &passKind, &passVersion, &ordinal, &operation, &declaredTypeID, &receiverValueID, &scopeID, &importID, &boundaryID); err != nil {
+			if err := rows.Scan(&id, &passKind, &passVersion, &ordinal, &operation, &inputFactIDsJSON, &declaredTypeID, &receiverValueID, &scopeID, &importID, &boundaryID); err != nil {
 				rows.Close()
 				return err
 			}
-			payload := mustJSON(map[string]any{"boundary_id": boundaryID, "declared_type_id": declaredTypeID, "import_id": importID, "operation": operation, "pass_kind": passKind, "pass_version": passVersion, "receiver_value_id": receiverValueID, "scope_id": scopeID})
+			var inputFactIDs []string
+			if err := json.Unmarshal([]byte(inputFactIDsJSON), &inputFactIDs); err != nil {
+				rows.Close()
+				return fmt.Errorf("decode derivation input facts for %s: %w", id, err)
+			}
+			for _, inputFactID := range inputFactIDs {
+				switch {
+				case len(inputFactID) > len("vta_source_") && inputFactID[:len("vta_source_")] == "vta_source_":
+					candidates[i].FlowSourceStableIDs = appendUniqueString(candidates[i].FlowSourceStableIDs, inputFactID)
+				case len(inputFactID) > len("vta_edge_") && inputFactID[:len("vta_edge_")] == "vta_edge_":
+					candidates[i].FlowEdgeStableIDs = appendUniqueString(candidates[i].FlowEdgeStableIDs, inputFactID)
+				}
+			}
+			payload := mustJSON(map[string]any{"boundary_id": boundaryID, "declared_type_id": declaredTypeID, "import_id": importID, "input_fact_ids": inputFactIDs, "operation": operation, "pass_kind": passKind, "pass_version": passVersion, "receiver_value_id": receiverValueID, "scope_id": scopeID})
 			candidates[i].ProvenanceSteps = append(candidates[i].ProvenanceSteps, ResolutionDerivationStep{StepID: id, Kind: passKind, Value: payload})
 			candidates[i].FactIDsRead = append(candidates[i].FactIDsRead, id)
 		}
@@ -523,4 +536,13 @@ func (d *DB) loadResolutionV2Evidence(candidates []AttachedCandidate) error {
 		}
 	}
 	return nil
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
