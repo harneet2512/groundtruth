@@ -35,11 +35,24 @@ run_hook() {
   remote_sha=$2
   output=$3
   local_sha=$(git -C "$repo" rev-parse HEAD)
+  before_tree=$(git -C "$repo" write-tree)
+  before_status=$(git -C "$repo" status --porcelain=v1 -uno)
+  set +e
   (
     cd "$repo"
     printf 'refs/heads/topic %s refs/heads/topic %s\n' "$local_sha" "$remote_sha" |
       GT_FIXTURE_FIRST_TRACE=1 "$HOOK" origin unused
   ) >"$output" 2>&1
+  hook_status=$?
+  set -e
+  after_head=$(git -C "$repo" rev-parse HEAD)
+  after_tree=$(git -C "$repo" write-tree)
+  after_status=$(git -C "$repo" status --porcelain=v1 -uno)
+  if [ "$after_head" != "$local_sha" ] || [ "$after_tree" != "$before_tree" ] || [ "$after_status" != "$before_status" ]; then
+    printf '%s\n' 'fixture-first pre-push: source repository mutated during RED execution' >>"$output"
+    return 99
+  fi
+  return "$hook_status"
 }
 
 expect_pass() {
@@ -155,5 +168,7 @@ expect_fail indeterminate_new_branch "$repo" "$ZERO" 'cannot determine protected
 
 "$ROOT/.githooks/tests/test-forged-red-evidence.sh"
 "$ROOT/.githooks/tests/test-protected-root-range.sh"
+"$ROOT/.githooks/tests/test-red-output-mismatch.sh"
+"$ROOT/.githooks/tests/test-red-symlink-escape.sh"
 
 printf '%s\n' 'PASS: fixture-first pre-push negative, positive, unrelated, malformed, new-branch, and updated-branch cases'

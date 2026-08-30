@@ -6,7 +6,13 @@ remote_url=${2:-}
 zero=0000000000000000000000000000000000000000
 trace=${GT_FIXTURE_FIRST_TRACE:-0}
 stdin_file=$(mktemp)
-cleanup() { rm -f "$stdin_file"; }
+temp_dirs=
+cleanup() {
+  rm -f "$stdin_file"
+  for dir in $temp_dirs; do
+    case "$dir" in /tmp/*) rm -rf -- "$dir" ;; esac
+  done
+}
 trap cleanup EXIT HUP INT TERM
 cat >"$stdin_file"
 
@@ -33,11 +39,17 @@ is_protected_path() {
 
 commit_has_protected_change() {
   commit=$1
-  git diff-tree --no-commit-id --name-only -r "$commit" | while IFS= read -r path; do
+  git diff-tree --root --no-commit-id --name-only -r "$commit" | while IFS= read -r path; do
     if is_protected_path "$path"; then
       printf '%s\n' "$path"
     fi
   done | grep . >/dev/null
+}
+
+history_has_protected_change() {
+  root=$1
+  local_sha=$2
+  commit_has_protected_change "$root" || range_has_protected_change "$root" "$local_sha"
 }
 
 range_has_protected_change() {
@@ -89,6 +101,90 @@ receipt_value() {
   sed -n "s/^${key}=//p" "$file"
 }
 
+safe_fixture_path() {
+  case "$1" in
+    .githooks/tests/*.sh) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  case "/$1/" in */../*|*/./*|*\\*|*//* ) return 1 ;; esac
+}
+
+safe_output_path() {
+  case "$1" in
+    .githooks/red-artifacts/*.out) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  case "/$1/" in */../*|*/./*|*\\*|*//* ) return 1 ;; esac
+}
+
+regular_blob_at() {
+  commit=$1
+  path=$2
+  mode=$(git ls-tree "$commit" -- "$path" | awk 'NR == 1 {print $1}')
+  [ "$mode" = 100644 ] || [ "$mode" = 100755 ]
+}
+
+execute_fixture() {
+  fixture_commit=$1
+  fixture_path=$2
+  expected_exit=$3
+  output_path=$4
+  expected_hash=$5
+  local_git_env=$(git rev-parse --local-env-vars)
+
+  checkout_root=$(mktemp -d)
+  temp_dirs="$temp_dirs $checkout_root"
+  repo_root=$(git rev-parse --show-toplevel)
+  mkdir "$checkout_root/repo" "$checkout_root/disabled-hooks"
+  if ! (for name in $local_git_env; do unset "$name"; done; git -C "$checkout_root/repo" init -q); then
+    say_trace "red_fixture_rejected=checkout_init_failed"
+    return 1
+  fi
+  (for name in $local_git_env; do unset "$name"; done; git -C "$checkout_root/repo" config core.hooksPath "$checkout_root/disabled-hooks")
+  (for name in $local_git_env; do unset "$name"; done; git -C "$checkout_root/repo" config core.autocrlf false)
+  if ! (for name in $local_git_env; do unset "$name"; done; GIT_LFS_SKIP_SMUDGE=1 git -C "$checkout_root/repo" fetch -q --no-tags "$repo_root" "$fixture_commit"); then
+    say_trace "red_fixture_rejected=checkout_fetch_failed"
+    return 1
+  fi
+  if ! (for name in $local_git_env; do unset "$name"; done; GIT_LFS_SKIP_SMUDGE=1 git -C "$checkout_root/repo" checkout -q --detach FETCH_HEAD); then
+    say_trace "red_fixture_rejected=checkout_materialization_failed"
+    return 1
+  fi
+  [ -f "$checkout_root/repo/$fixture_path" ] || {
+    say_trace "red_fixture_rejected=fixture_not_regular"
+    return 1
+  }
+  [ -f "$checkout_root/repo/$output_path" ] || {
+    say_trace "red_fixture_rejected=output_not_regular"
+    return 1
+  }
+
+  actual_output="$checkout_root/actual.out"
+  set +e
+  (
+    for name in $local_git_env; do unset "$name"; done
+    cd "$checkout_root/repo"
+    sh "./$fixture_path"
+  ) >"$actual_output" 2>&1
+  actual_exit=$?
+  set -e
+  if [ "$actual_exit" -eq 0 ] || [ "$actual_exit" -ne "$expected_exit" ]; then
+    say_trace "red_fixture_rejected=exit_mismatch expected=$expected_exit actual=$actual_exit"
+    return 1
+  fi
+  actual_hash=$(sha256sum "$actual_output" | awk '{print $1}')
+  if [ "$actual_hash" != "$expected_hash" ]; then
+    say_trace "red_fixture_rejected=output_hash_mismatch expected=$expected_hash actual=$actual_hash"
+    return 1
+  fi
+  if ! cmp -s "$actual_output" "$checkout_root/repo/$output_path"; then
+    say_trace "red_fixture_rejected=output_bytes_mismatch"
+    return 1
+  fi
+}
+
 validate_red_receipt() {
   fixture_commit=$1
   protected_commit=$2
@@ -126,16 +222,25 @@ validate_red_receipt() {
     esac
     printf '%s\n' "$fixture_sha256" | grep -Eq '^[0-9a-f]{64}$' || continue
     printf '%s\n' "$output_sha256" | grep -Eq '^[0-9a-f]{64}$' || continue
+    safe_fixture_path "$fixture_path" || continue
+    safe_output_path "$output_path" || continue
+    case "$command_value" in
+      "$fixture_path"|"C:\\Program Files\\Git\\bin\\sh.exe $fixture_path") ;;
+      *) continue ;;
+    esac
     changed=$(git diff-tree --no-commit-id --name-only -r "$fixture_commit")
     printf '%s\n' "$changed" | grep -Fx "$fixture_path" >/dev/null || continue
     printf '%s\n' "$changed" | grep -Fx "$output_path" >/dev/null || continue
     git cat-file -e "$fixture_commit:$fixture_path" 2>/dev/null || continue
     git cat-file -e "$fixture_commit:$output_path" 2>/dev/null || continue
+    regular_blob_at "$fixture_commit" "$fixture_path" || continue
+    regular_blob_at "$fixture_commit" "$output_path" || continue
     actual_fixture_hash=$(git show "$fixture_commit:$fixture_path" | sha256sum | awk '{print $1}')
     actual_hash=$(git show "$fixture_commit:$output_path" | sha256sum | awk '{print $1}')
     [ "$actual_fixture_hash" = "$fixture_sha256" ] || continue
     [ "$actual_hash" = "$output_sha256" ] || continue
     [ -n "$(git show "$fixture_commit:$output_path")" ] || continue
+    execute_fixture "$fixture_commit" "$fixture_path" "$exit_code" "$output_path" "$output_sha256" || continue
     say_trace "red_fixture=$fixture_commit protected_commit=$protected_commit receipt=$receipt"
     return 0
   done
@@ -172,7 +277,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     source=nearest_remote_ancestor
     if [ -z "$base" ]; then
       root=$(git rev-list --max-parents=0 "$local_sha" | sort | head -n 1)
-      if range_has_protected_change "$root" "$local_sha"; then
+      if history_has_protected_change "$root" "$local_sha"; then
         printf 'fixture-first pre-push: cannot determine protected new-branch range for %s\n' "$local_ref" >&2
         exit 1
       fi
@@ -182,7 +287,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   fi
   if ! git merge-base --is-ancestor "$base" "$local_sha"; then
     root=$(git rev-list --max-parents=0 "$local_sha" | sort | head -n 1)
-    if range_has_protected_change "$root" "$local_sha"; then
+    if history_has_protected_change "$root" "$local_sha"; then
       printf 'fixture-first pre-push: indeterminate protected range for %s\n' "$local_ref" >&2
       exit 1
     fi

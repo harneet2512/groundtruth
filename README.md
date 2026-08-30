@@ -297,7 +297,10 @@ Protected provenance and observability changes are checked by the versioned
 `.githooks/pre-push` hook. Changes to the resolver, canonical resolution-v2
 store, graph/build completion writers, or the hook itself require an
 immediately preceding dedicated `test(red):` commit containing a
-`gt.fixture-red.v1` receipt and the hashed failing output. Documentation,
+`gt.fixture-red.v1` receipt and the hashed failing output. Before accepting
+that receipt, the hook checks out the immutable fixture commit in isolation,
+runs only its confined repository-relative script path, and verifies the real
+nonzero exit and exact output bytes. Documentation,
 tests, and unrelated production paths are not gated. New branches select the
 nearest remote ancestor deterministically; updated branches use the remote
 SHA supplied by Git. The hook preserves the repository's Git LFS pre-push
