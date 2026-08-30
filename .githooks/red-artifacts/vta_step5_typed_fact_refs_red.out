@@ -1,8 +1,14 @@
 VTA RED boundary: typed flow fact references are persisted and bound
-TIMESTAMP [WARN] FTS5 not available (non-fatal): no such module: fts5
---- FAIL: TestVTACandidateProvenancePersistsReferentialTypedFacts (DURATIONs)
-    vta_candidate_provenance_red_test.go:130: typed VTA fact vta_source_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa was not persisted: sql: no rows in result set
-TIMESTAMP [WARN] FTS5 not available (non-fatal): no such module: fts5
-FAIL
-FAIL	github.com/harneet2512/groundtruth/gt-index/internal/store	DURATIONs
+# github.com/harneet2512/groundtruth/gt-index/internal/store [github.com/harneet2512/groundtruth/gt-index/internal/store.test]
+internal/store/vta_candidate_provenance_red_test.go:62:5: unknown field FlowSourceFacts in struct literal of type ResolutionCandidate
+internal/store/vta_candidate_provenance_red_test.go:62:28: undefined: ResolutionFlowFact
+internal/store/vta_candidate_provenance_red_test.go:63:5: unknown field FlowEdgeFacts in struct literal of type ResolutionCandidate
+internal/store/vta_candidate_provenance_red_test.go:63:28: undefined: ResolutionFlowFact
+internal/store/vta_candidate_provenance_red_test.go:67:5: unknown field FlowSourceFacts in struct literal of type ResolutionCandidate
+internal/store/vta_candidate_provenance_red_test.go:67:28: undefined: ResolutionFlowFact
+internal/store/vta_candidate_provenance_red_test.go:68:5: unknown field FlowEdgeFacts in struct literal of type ResolutionCandidate
+internal/store/vta_candidate_provenance_red_test.go:68:28: undefined: ResolutionFlowFact
+internal/store/vta_candidate_provenance_red_test.go:124: undefined: ResolutionFlowFact
+internal/store/vta_candidate_provenance_red_test.go:124: unknown field FlowSourceFacts in struct literal of type ResolutionCandidate
+internal/store/vta_candidate_provenance_red_test.go:124: too many errors
 FAIL
