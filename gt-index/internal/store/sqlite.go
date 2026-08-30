@@ -245,6 +245,9 @@ type ResolutionPassCoverage struct {
 	ReachableStableIDs      []string `json:"reachable_stable_ids,omitempty"`
 	RootStableIDs           []string `json:"root_stable_ids,omitempty"`
 	RootPolicy              string   `json:"root_policy,omitempty"`
+	RootPolicyVersion       string   `json:"root_policy_version,omitempty"`
+	RootCompleteness        string   `json:"root_completeness,omitempty"`
+	RootBoundary            string   `json:"root_boundary,omitempty"`
 }
 
 type ResolutionDerivationStep struct {
@@ -591,6 +594,9 @@ func createSchema(db *sql.DB) error {
 		reachable_stable_ids TEXT,
 		root_stable_ids TEXT,
 		root_policy TEXT,
+		root_policy_version TEXT,
+		root_completeness TEXT,
+		root_boundary TEXT,
 		policy_name TEXT,
 		semantic_version TEXT,
 		policy_json TEXT,
@@ -840,6 +846,7 @@ func createSchema(db *sql.DB) error {
 		{"reachable_stable_ids", "TEXT"},
 		{"root_stable_ids", "TEXT"},
 		{"root_policy", "TEXT"},
+		{"root_policy_version", "TEXT"}, {"root_completeness", "TEXT"}, {"root_boundary", "TEXT"},
 		{"semantic_version", "TEXT"}, {"policy_json", "TEXT"}, {"policy_hash", "TEXT"},
 		{"created_at", "TEXT"}, {"created_by", "TEXT"}, {"fact_schema_min", "INTEGER"},
 		{"fact_schema_max", "INTEGER"}, {"explanation_template_version", "TEXT"},

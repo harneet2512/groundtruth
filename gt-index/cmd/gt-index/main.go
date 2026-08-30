@@ -728,7 +728,7 @@ func main() {
 			}
 			passCoverage = append(passCoverage,
 				store.ResolutionPassCoverage{PassKind: "cha", Version: "1", Status: chaStatus, Reason: chaReason, CandidateStableIDs: stableIDs(hierarchy.CHACandidateNodeIDs)},
-				store.ResolutionPassCoverage{PassKind: "rta", Version: "1", Status: rtaStatus, Reason: rtaReason, CandidateStableIDs: stableIDs(hierarchy.RTACandidateNodeIDs), AllocationTypeStableIDs: stableIDs(hierarchy.RTAAllocationTypeIDs), ReachableStableIDs: stableIDs(hierarchy.ReachableNodeIDs), RootStableIDs: stableIDs(hierarchy.RootNodeIDs), RootPolicy: hierarchy.RootPolicy},
+				store.ResolutionPassCoverage{PassKind: "rta", Version: "1", Status: rtaStatus, Reason: rtaReason, CandidateStableIDs: stableIDs(hierarchy.RTACandidateNodeIDs), AllocationTypeStableIDs: stableIDs(hierarchy.RTAAllocationTypeIDs), ReachableStableIDs: stableIDs(hierarchy.ReachableNodeIDs), RootStableIDs: stableIDs(hierarchy.RootNodeIDs), RootPolicy: hierarchy.RootPolicy, RootPolicyVersion: hierarchy.RootPolicyVersion, RootCompleteness: hierarchy.RootCompleteness, RootBoundary: hierarchy.RootBoundary},
 			)
 		}
 		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: publishedDispatchState, CandidateCount: len(candidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus, PassCoverage: passCoverage})
