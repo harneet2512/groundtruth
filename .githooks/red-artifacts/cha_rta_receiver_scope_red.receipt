@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=7e30752404124cdb823bb55ed43780028eae42d9
+fixture_path=.githooks/tests/cha_rta_receiver_scope_red.sh
+fixture_sha256=58aab45e3e34a7aee84cc79765642d513f08321baa6ab97bf7c0c212073297e5
+command=.githooks/tests/cha_rta_receiver_scope_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/cha_rta_receiver_scope_red.out
+output_sha256=b2b3dd4e9d8b10664d0d392ae4e1c0b2eab3973b6dcbf600f7e77a15abc45773
