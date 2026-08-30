@@ -19,13 +19,27 @@ type VTAResult struct {
 	FlowTypeNodeIDs      []int64
 	FlowSourceStableIDs  []string
 	FlowEdgeStableIDs    []string
+	FlowProofs           []VTAFlowProof
 	SelectedTargetNodeID *int64
 	Completeness         string
 	AbstentionReason     string
 }
 
+// VTAFlowProof preserves the source and propagation-edge evidence for one
+// concrete candidate. It is intentionally separate from the callsite-wide
+// union so consumers can audit why each target remained viable.
+type VTAFlowProof struct {
+	CandidateNodeID int64
+	SourceStableIDs []string
+	EdgeStableIDs   []string
+}
+
 type vtaValueEvidence struct {
-	Types   map[string]struct{}
+	Types  map[string]struct{}
+	ByType map[string]*vtaTypeEvidence
+}
+
+type vtaTypeEvidence struct {
 	Sources map[string]struct{}
 	Edges   map[string]struct{}
 }
@@ -103,7 +117,7 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		}
 		evidence := valueTypes[key]
 		if evidence == nil {
-			evidence = &vtaValueEvidence{Types: make(map[string]struct{}), Sources: make(map[string]struct{}), Edges: make(map[string]struct{})}
+			evidence = &vtaValueEvidence{Types: make(map[string]struct{}), ByType: make(map[string]*vtaTypeEvidence)}
 			valueTypes[key] = evidence
 		}
 		changed := false
@@ -116,20 +130,37 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 				evidence.Types[name] = struct{}{}
 				changed = true
 			}
+			typeEvidence := evidence.ByType[name]
+			if typeEvidence == nil {
+				typeEvidence = &vtaTypeEvidence{Sources: make(map[string]struct{}), Edges: make(map[string]struct{})}
+				evidence.ByType[name] = typeEvidence
+			}
 		}
 		for _, source := range sources {
 			if source != "" {
-				if _, exists := evidence.Sources[source]; !exists {
-					evidence.Sources[source] = struct{}{}
-					changed = true
+				for _, name := range names {
+					name = normalizedTypeName(name)
+					if name == "" {
+						continue
+					}
+					if _, exists := evidence.ByType[name].Sources[source]; !exists {
+						evidence.ByType[name].Sources[source] = struct{}{}
+						changed = true
+					}
 				}
 			}
 		}
 		for _, edge := range edges {
 			if edge != "" {
-				if _, exists := evidence.Edges[edge]; !exists {
-					evidence.Edges[edge] = struct{}{}
-					changed = true
+				for _, name := range names {
+					name = normalizedTypeName(name)
+					if name == "" {
+						continue
+					}
+					if _, exists := evidence.ByType[name].Edges[edge]; !exists {
+						evidence.ByType[name].Edges[edge] = struct{}{}
+						changed = true
+					}
 				}
 			}
 		}
@@ -152,7 +183,7 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		if !field {
 			key.Object = ""
 		}
-		fallback := &vtaValueEvidence{Types: make(map[string]struct{}), Sources: make(map[string]struct{}), Edges: make(map[string]struct{})}
+		fallback := &vtaValueEvidence{Types: make(map[string]struct{}), ByType: make(map[string]*vtaTypeEvidence)}
 		for assignment, evidence := range valueTypes {
 			if assignment.Name != key.Name || assignment.Line > call.Line {
 				continue
@@ -170,13 +201,22 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 				}
 			}
 			for typ := range evidence.Types {
+				typeEvidence := evidence.ByType[typ]
+				if typeEvidence == nil {
+					continue
+				}
 				fallback.Types[typ] = struct{}{}
-			}
-			for source := range evidence.Sources {
-				fallback.Sources[source] = struct{}{}
-			}
-			for edge := range evidence.Edges {
-				fallback.Edges[edge] = struct{}{}
+				fallbackTypeEvidence := fallback.ByType[typ]
+				if fallbackTypeEvidence == nil {
+					fallbackTypeEvidence = &vtaTypeEvidence{Sources: make(map[string]struct{}), Edges: make(map[string]struct{})}
+					fallback.ByType[typ] = fallbackTypeEvidence
+				}
+				for source := range typeEvidence.Sources {
+					fallbackTypeEvidence.Sources[source] = struct{}{}
+				}
+				for edge := range typeEvidence.Edges {
+					fallbackTypeEvidence.Edges[edge] = struct{}{}
+				}
 			}
 		}
 		return fallback
@@ -203,10 +243,14 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 						continue
 					}
 					evidence := callValue(call, argument)
-					edges := sortedStringSet(evidence.Edges)
-					edges = append(edges, vtaCallEdgeStableID(call, argument, index, parameter))
 					for typ := range evidence.Types {
-						if addValue(vtaValueKey{File: parameter.File, Scope: parameter.Scope, Object: parameter.ObjectScope, Name: parameter.VarName, Line: parameter.Line}, []string{typ}, sortedStringSet(evidence.Sources), edges) {
+						typeEvidence := evidence.ByType[typ]
+						if typeEvidence == nil {
+							continue
+						}
+						edges := sortedStringSet(typeEvidence.Edges)
+						edges = append(edges, vtaCallEdgeStableID(call, argument, index, parameter))
+						if addValue(vtaValueKey{File: parameter.File, Scope: parameter.Scope, Object: parameter.ObjectScope, Name: parameter.VarName, Line: parameter.Line}, []string{typ}, sortedStringSet(typeEvidence.Sources), edges) {
 							changed = true
 						}
 					}
@@ -229,19 +273,49 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		if len(flowEvidence.Types) == 0 {
 			continue
 		}
-		results[ordinal].FlowSourceStableIDs = sortedStringSet(flowEvidence.Sources)
-		results[ordinal].FlowEdgeStableIDs = sortedStringSet(flowEvidence.Edges)
+		sourceUnion := make(map[string]struct{})
+		edgeUnion := make(map[string]struct{})
+		for _, typeEvidence := range flowEvidence.ByType {
+			for source := range typeEvidence.Sources {
+				sourceUnion[source] = struct{}{}
+			}
+			for edge := range typeEvidence.Edges {
+				edgeUnion[edge] = struct{}{}
+			}
+		}
+		results[ordinal].FlowSourceStableIDs = sortedStringSet(sourceUnion)
+		results[ordinal].FlowEdgeStableIDs = sortedStringSet(edgeUnion)
 		flowTypeIDs := make(map[int64]struct{})
+		proofByTypeID := make(map[int64]*VTAFlowProof)
 		for name := range flowEvidence.Types {
+			typeEvidence := flowEvidence.ByType[name]
 			for _, typeID := range typeIDsByName[normalizedTypeName(name)] {
+				concreteTypeIDs := make([]int64, 0, 1)
 				if _, isInterface := interfaceIDs[typeID]; isInterface {
 					for concreteID := range concreteIDs {
 						if implementsBase(implements, concreteID, typeID) {
 							flowTypeIDs[concreteID] = struct{}{}
+							concreteTypeIDs = append(concreteTypeIDs, concreteID)
 						}
 					}
 				} else {
 					flowTypeIDs[typeID] = struct{}{}
+					concreteTypeIDs = append(concreteTypeIDs, typeID)
+				}
+				for _, concreteID := range concreteTypeIDs {
+					proof := proofByTypeID[concreteID]
+					if proof == nil {
+						proof = &VTAFlowProof{CandidateNodeID: concreteID}
+						proofByTypeID[concreteID] = proof
+					}
+					if typeEvidence != nil {
+						for source := range typeEvidence.Sources {
+							proof.SourceStableIDs = appendUniqueString(proof.SourceStableIDs, source)
+						}
+						for edge := range typeEvidence.Edges {
+							proof.EdgeStableIDs = appendUniqueString(proof.EdgeStableIDs, edge)
+						}
+					}
 				}
 			}
 		}
@@ -256,6 +330,9 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		for _, methodID := range methodsByName[call.CalleeName] {
 			if _, ok := flowTypeIDs[meta[methodID].ParentID]; ok {
 				results[ordinal].CandidateNodeIDs = append(results[ordinal].CandidateNodeIDs, methodID)
+				if proof := proofByTypeID[meta[methodID].ParentID]; proof != nil {
+					results[ordinal].FlowProofs = append(results[ordinal].FlowProofs, VTAFlowProof{CandidateNodeID: methodID, SourceStableIDs: sortedStringSet(stringSet(proof.SourceStableIDs)), EdgeStableIDs: sortedStringSet(stringSet(proof.EdgeStableIDs))})
+				}
 			}
 		}
 		if len(results[ordinal].CandidateNodeIDs) > 1 {
@@ -286,6 +363,23 @@ func sortedStringSet(values map[string]struct{}) []string {
 		result = append(result, value)
 	}
 	sort.Strings(result)
+	return result
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func stringSet(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		result[value] = struct{}{}
+	}
 	return result
 }
 

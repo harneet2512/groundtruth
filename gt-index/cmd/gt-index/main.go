@@ -834,12 +834,22 @@ func main() {
 			var flowSourceStableIDs, flowEdgeStableIDs []string
 			var flowSourceFacts, flowEdgeFacts []store.ResolutionFlowFact
 			if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok {
-				for _, sourceID := range vta.FlowSourceStableIDs {
+				var proof *resolver.VTAFlowProof
+				for index := range vta.FlowProofs {
+					if vta.FlowProofs[index].CandidateNodeID == targetID {
+						proof = &vta.FlowProofs[index]
+						break
+					}
+				}
+				if proof == nil {
+					proof = &resolver.VTAFlowProof{}
+				}
+				for _, sourceID := range proof.SourceStableIDs {
 					stableID := candidateVTAFactID("vta_source_", sourceID, callsiteID, target.StableID)
 					flowSourceStableIDs = append(flowSourceStableIDs, stableID)
 					flowSourceFacts = append(flowSourceFacts, store.ResolutionFlowFact{StableID: stableID, Kind: "source", CallsiteID: callsiteID, TargetStableID: target.StableID, Payload: "source=" + sourceID})
 				}
-				for _, edgeID := range vta.FlowEdgeStableIDs {
+				for _, edgeID := range proof.EdgeStableIDs {
 					stableID := candidateVTAFactID("vta_edge_", edgeID, callsiteID, target.StableID)
 					flowEdgeStableIDs = append(flowEdgeStableIDs, stableID)
 					flowEdgeFacts = append(flowEdgeFacts, store.ResolutionFlowFact{StableID: stableID, Kind: "edge", CallsiteID: callsiteID, TargetStableID: target.StableID, Payload: "edge=" + edgeID})
