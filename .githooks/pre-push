@@ -119,7 +119,14 @@ safe_output_path() {
   case "/$1/" in */../*|*/./*|*\\*|*//* ) return 1 ;; esac
 }
 
-regular_blob_at() {
+executable_fixture_blob_at() {
+  commit=$1
+  path=$2
+  mode=$(git ls-tree "$commit" -- "$path" | awk 'NR == 1 {print $1}')
+  [ "$mode" = 100755 ]
+}
+
+regular_output_blob_at() {
   commit=$1
   path=$2
   mode=$(git ls-tree "$commit" -- "$path" | awk 'NR == 1 {print $1}')
@@ -233,8 +240,8 @@ validate_red_receipt() {
     printf '%s\n' "$changed" | grep -Fx "$output_path" >/dev/null || continue
     git cat-file -e "$fixture_commit:$fixture_path" 2>/dev/null || continue
     git cat-file -e "$fixture_commit:$output_path" 2>/dev/null || continue
-    regular_blob_at "$fixture_commit" "$fixture_path" || continue
-    regular_blob_at "$fixture_commit" "$output_path" || continue
+    executable_fixture_blob_at "$fixture_commit" "$fixture_path" || continue
+    regular_output_blob_at "$fixture_commit" "$output_path" || continue
     actual_fixture_hash=$(git show "$fixture_commit:$fixture_path" | sha256sum | awk '{print $1}')
     actual_hash=$(git show "$fixture_commit:$output_path" | sha256sum | awk '{print $1}')
     [ "$actual_fixture_hash" = "$fixture_sha256" ] || continue

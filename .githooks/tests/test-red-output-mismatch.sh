@@ -12,6 +12,7 @@ mkdir -p "$repo/gt-index/internal/resolver"; printf '%s\n' 'package resolver' > 
 git -C "$repo" add .; git -C "$repo" commit -qm base; base=$(git -C "$repo" rev-parse HEAD); git -C "$repo" update-ref refs/remotes/origin/main "$base"
 mkdir -p "$repo/.githooks/tests" "$repo/.githooks/red-artifacts"
 printf '%s\n' '#!/bin/sh' 'printf "%s\n" "actual failure" >&2' 'exit 1' > "$repo/.githooks/tests/mismatch.sh"
+chmod +x "$repo/.githooks/tests/mismatch.sh"
 printf '%s\n' 'invented failure' > "$repo/.githooks/red-artifacts/mismatch.out"
 fh=$(sha256sum "$repo/.githooks/tests/mismatch.sh"|awk '{print $1}'); oh=$(sha256sum "$repo/.githooks/red-artifacts/mismatch.out"|awk '{print $1}')
 cat > "$repo/.githooks/red-artifacts/mismatch.receipt" <<EOF
@@ -24,7 +25,9 @@ exit_code=1
 output_path=.githooks/red-artifacts/mismatch.out
 output_sha256=$oh
 EOF
-git -C "$repo" add .githooks; git -C "$repo" commit -qm 'test(red): mismatched output evidence'
+git -C "$repo" add .githooks
+git -C "$repo" update-index --chmod=+x .githooks/tests/mismatch.sh
+git -C "$repo" commit -qm 'test(red): mismatched output evidence'
 printf '%s\n' 'package resolver // protected' > "$repo/gt-index/internal/resolver/resolver.go"; git -C "$repo" add .; git -C "$repo" commit -qm protected
 head=$(git -C "$repo" rev-parse HEAD); set +e
 output=$(cd "$repo" && printf 'refs/heads/topic %s refs/heads/topic %s\n' "$head" "$ZERO" | GT_FIXTURE_FIRST_TRACE=1 "$HOOK" origin unused 2>&1); status=$?; set -e

@@ -114,6 +114,7 @@ repo=$(new_repo malformed_receipt)
 base=$(git -C "$repo" rev-parse HEAD)
 mkdir -p "$repo/.githooks/tests" "$repo/.githooks/red-artifacts"
 printf '%s\n' '#!/bin/sh' 'exit 1' > "$repo/.githooks/tests/protected_change_red.sh"
+chmod +x "$repo/.githooks/tests/protected_change_red.sh"
 printf '%s\n' 'expected protected failure' > "$repo/.githooks/red-artifacts/protected.out"
 cat > "$repo/.githooks/red-artifacts/protected.receipt" <<EOF
 format=gt.fixture-red.v1
@@ -125,6 +126,7 @@ output_path=.githooks/red-artifacts/protected.out
 output_sha256=malformed
 EOF
 git -C "$repo" add .githooks
+git -C "$repo" update-index --chmod=+x .githooks/tests/protected_change_red.sh
 git -C "$repo" commit -qm 'test(red): malformed receipt'
 printf '%s\n' 'package resolver // protected implementation' > "$repo/gt-index/internal/resolver/resolver.go"
 git -C "$repo" add .
@@ -135,6 +137,7 @@ repo=$(new_repo legitimate_sequence)
 base=$(git -C "$repo" rev-parse HEAD)
 mkdir -p "$repo/.githooks/tests" "$repo/.githooks/red-artifacts"
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "expected protected failure" >&2' 'exit 1' > "$repo/.githooks/tests/protected_change_red.sh"
+chmod +x "$repo/.githooks/tests/protected_change_red.sh"
 printf '%s\n' 'expected protected failure' > "$repo/.githooks/red-artifacts/protected.out"
 output_hash=$(sha256sum "$repo/.githooks/red-artifacts/protected.out" | awk '{print $1}')
 fixture_hash=$(sha256sum "$repo/.githooks/tests/protected_change_red.sh" | awk '{print $1}')
@@ -149,6 +152,7 @@ output_path=.githooks/red-artifacts/protected.out
 output_sha256=$output_hash
 EOF
 git -C "$repo" add .githooks
+git -C "$repo" update-index --chmod=+x .githooks/tests/protected_change_red.sh
 git -C "$repo" commit -qm 'test(red): capture protected failure'
 fixture_sha=$(git -C "$repo" rev-parse HEAD)
 printf '%s\n' 'package resolver // protected implementation' > "$repo/gt-index/internal/resolver/resolver.go"

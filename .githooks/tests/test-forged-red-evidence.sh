@@ -25,6 +25,7 @@ git -C "$repo" update-ref refs/remotes/origin/main "$base"
 
 mkdir -p "$repo/.githooks/tests" "$repo/.githooks/red-artifacts"
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$repo/.githooks/tests/forged.sh"
+chmod +x "$repo/.githooks/tests/forged.sh"
 printf '%s\n' 'invented failure' > "$repo/.githooks/red-artifacts/forged.out"
 fixture_hash=$(sha256sum "$repo/.githooks/tests/forged.sh" | awk '{print $1}')
 output_hash=$(sha256sum "$repo/.githooks/red-artifacts/forged.out" | awk '{print $1}')
@@ -39,6 +40,7 @@ output_path=.githooks/red-artifacts/forged.out
 output_sha256=$output_hash
 EOF
 git -C "$repo" add .githooks
+git -C "$repo" update-index --chmod=+x .githooks/tests/forged.sh
 git -C "$repo" commit -qm 'test(red): forged failure evidence'
 printf '%s\n' 'package resolver // protected change' > \
   "$repo/gt-index/internal/resolver/resolver.go"
