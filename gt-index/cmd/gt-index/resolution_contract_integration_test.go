@@ -348,6 +348,69 @@ func Invoke(runner Runner) {
 	}
 }
 
+func TestRealCLIPreservesPerCandidateVTAProofs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the gt-index binary; skipped under -short")
+	}
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := `package sample
+
+type Runner interface { Run(int) error }
+type ImplA struct{}
+func (ImplA) Run(int) error { return nil }
+type ImplB struct{}
+func (ImplB) Run(int) error { return nil }
+
+func Invoke(flag bool) {
+	var runner Runner
+	if flag { runner = ImplA{} } else { runner = ImplB{} }
+	runner.Run(1)
+}
+`
+	if err := os.WriteFile(filepath.Join(repo, "sample.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(tmp, "gt-index")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	build := exec.Command("go", "build", "-tags", "sqlite_fts5", "-ldflags", testBuildLDFlags, "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=1")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build gt-index: %v\n%s", err, out)
+	}
+	dbPath := filepath.Join(tmp, "graph.db")
+	index := exec.Command(bin, "-root", repo, "-output", dbPath, "-workers", "2")
+	index.Env = append(os.Environ(), "GT_HIERARCHY_CLOSED=1")
+	if out, err := index.CombinedOutput(); err != nil {
+		t.Fatalf("two-candidate index: %v\n%s", err, out)
+	}
+	graph, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer graph.Close()
+	evidence, err := graph.QueryAttachedCandidates("Run")
+	if err != nil {
+		t.Fatalf("two-candidate graph query: %v", err)
+	}
+	if len(evidence) != 2 || evidence[0].TargetStableID == evidence[1].TargetStableID {
+		t.Fatalf("two VTA candidates were not retained: %+v", evidence)
+	}
+	if len(evidence[0].FlowSourceFacts) != 1 || len(evidence[1].FlowSourceFacts) != 1 || evidence[0].FlowSourceFacts[0].StableID == evidence[1].FlowSourceFacts[0].StableID {
+		t.Fatalf("candidate proof sources were not separated: %+v", evidence)
+	}
+	for _, candidate := range evidence {
+		if candidate.FlowSourceFacts[0].TargetStableID != candidate.TargetStableID || candidate.FlowSourceFacts[0].CallsiteID == "" {
+			t.Fatalf("candidate proof was not bound to its target/callsite: %+v", candidate)
+		}
+	}
+}
+
 func TestRealCLIRecordsRecoverableParserFailures(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the gt-index binary; skipped under -short")
