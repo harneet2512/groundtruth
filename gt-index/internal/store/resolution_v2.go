@@ -194,7 +194,8 @@ func prepareResolutionV2(identity GraphCompletionIdentity, c *ResolutionCallsite
 		status := "partial"
 		var known *int
 		covered := 0
-		if evidenceSet == "closed" && (pass.Status == "completed_match" || pass.Status == "completed_no_match") {
+		passClosed := evidenceSet == "closed" || pass.PassKind != "vta"
+		if passClosed && (pass.Status == "completed_match" || pass.Status == "completed_no_match") {
 			status = "closed"
 			one := 1
 			known, covered = &one, 1

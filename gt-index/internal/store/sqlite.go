@@ -286,7 +286,7 @@ func resolutionDerivation(mechanism, dispatchState string, candidateCount int) (
 	case "import_type", "type_flow", "return_type":
 		return "declared_type", "closed", "", nil
 	case "vta":
-		return "variable_type_flow", "closed", "", nil
+		return "variable_type_flow", "open", "candidate_only_flow_evidence", nil
 	case "impl_method":
 		if candidateCount == 1 {
 			return "single_implementation", "closed", "", nil
