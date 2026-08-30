@@ -56,8 +56,8 @@ func TestAttachResolutionGraphPersistsPerCandidateVTAFacts(t *testing.T) {
 		Source:   &Node{ID: sourceID, Label: "Function", Name: "caller", QualifiedName: "caller", FilePath: "main.go", Language: "go"},
 		Callsite: &ResolutionCallsite{CallsiteID: "vta-facts", SourceID: sourceID, SourceFile: "main.go", SourceLine: 8, Callee: "Run", DispatchState: "ambiguous", DispatchForm: "interface", CandidateCount: 2, Mechanism: "vta", PassCoverage: []ResolutionPassCoverage{{PassKind: "vta", Status: "partial", Reason: "candidate_only_flow_evidence"}}},
 		Candidates: []*ResolutionCandidate{
-			{TargetID: targetA, TargetStableID: "a", TargetNativeID: "a", Ordinal: 0, Mechanism: "vta", FlowSourceStableIDs: []string{"vta_source_a"}, FlowEdgeStableIDs: []string{"vta_edge_a"}},
-			{TargetID: targetB, TargetStableID: "b", TargetNativeID: "b", Ordinal: 1, Mechanism: "vta", FlowSourceStableIDs: []string{"vta_source_b"}, FlowEdgeStableIDs: []string{"vta_edge_b"}},
+			{TargetID: targetA, TargetStableID: "a", TargetNativeID: "a", Ordinal: 0, Mechanism: "vta", FlowSourceStableIDs: []string{"vta_source_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, FlowEdgeStableIDs: []string{"vta_edge_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},
+			{TargetID: targetB, TargetStableID: "b", TargetNativeID: "b", Ordinal: 1, Mechanism: "vta", FlowSourceStableIDs: []string{"vta_source_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}, FlowEdgeStableIDs: []string{"vta_edge_ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}},
 		},
 	}
 	if err := db.AttachResolutionGraph(testGraphIdentity("rev"), []AttachedResolution{row}); err != nil {
@@ -67,7 +67,7 @@ func TestAttachResolutionGraphPersistsPerCandidateVTAFacts(t *testing.T) {
 	if err := db.db.QueryRow(`SELECT input_fact_ids FROM nodes WHERE node_type='derivation_fact' AND target_symbol_id='a'`).Scan(&inputFactIDs); err != nil {
 		t.Fatal(err)
 	}
-	if inputFactIDs != `["vta_source_a","vta_edge_a"]` {
+	if inputFactIDs != `["vta_source_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","vta_edge_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]` {
 		t.Fatalf("input facts=%s, want candidate-bound source and edge IDs", inputFactIDs)
 	}
 	evidence, err := db.QueryAttachedCandidates("Run")
@@ -122,8 +122,8 @@ func TestVTACandidateProvenancePersistsReferentialTypedFacts(t *testing.T) {
 		id       string
 		typeName string
 	}{
-		{id: "vta_source_real", typeName: "vta_flow_source_fact"},
-		{id: "vta_edge_real", typeName: "vta_flow_edge_fact"},
+		{id: "vta_source_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", typeName: "vta_flow_source_fact"},
+		{id: "vta_edge_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", typeName: "vta_flow_edge_fact"},
 	} {
 		var nodeType, callsiteID string
 		if err := db.db.QueryRow(`SELECT node_type, COALESCE(callsite_id,'') FROM nodes WHERE stable_id=?`, fact.id).Scan(&nodeType, &callsiteID); err != nil {
@@ -152,7 +152,7 @@ func TestVTACandidateProvenanceRejectsUnknownPrefixedFact(t *testing.T) {
 	row := AttachedResolution{
 		Source:     &Node{ID: sourceID, Label: "Function", Name: "caller", QualifiedName: "caller", FilePath: "main.go", Language: "go"},
 		Callsite:   &ResolutionCallsite{CallsiteID: "vta-fact-unknown", SourceID: sourceID, SourceFile: "main.go", SourceLine: 8, Callee: "Run", DispatchState: "unique", DispatchForm: "interface", CandidateCount: 1, Mechanism: "vta"},
-		Candidates: []*ResolutionCandidate{{TargetID: targetID, TargetStableID: "a", TargetNativeID: "a", Ordinal: 0, Mechanism: "vta", FlowSourceStableIDs: []string{"vta_source_fabricated"}}},
+		Candidates: []*ResolutionCandidate{{TargetID: targetID, TargetStableID: "a", TargetNativeID: "a", Ordinal: 0, Mechanism: "vta", FlowSourceStableIDs: []string{"vta_source_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}}},
 	}
 	if err := db.AttachResolutionGraph(testGraphIdentity("unknown"), []AttachedResolution{row}); err == nil {
 		t.Fatal("unknown but prefix-shaped VTA fact was accepted")

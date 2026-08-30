@@ -1,7 +1,7 @@
 VTA RED boundary: typed flow fact references are persisted and bound
 TIMESTAMP [WARN] FTS5 not available (non-fatal): no such module: fts5
 --- FAIL: TestVTACandidateProvenancePersistsReferentialTypedFacts (DURATIONs)
-    vta_candidate_provenance_red_test.go:130: typed VTA fact vta_source_real was not persisted: sql: no rows in result set
+    vta_candidate_provenance_red_test.go:130: typed VTA fact vta_source_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa was not persisted: sql: no rows in result set
 TIMESTAMP [WARN] FTS5 not available (non-fatal): no such module: fts5
 FAIL
 FAIL	github.com/harneet2512/groundtruth/gt-index/internal/store	DURATIONs
