@@ -832,11 +832,20 @@ func main() {
 				receiverOrigin = "vta_flow_stable_ids=" + strings.Join(flowStableIDs, ",")
 			}
 			var flowSourceStableIDs, flowEdgeStableIDs []string
+			var flowSourceFacts, flowEdgeFacts []store.ResolutionFlowFact
 			if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok {
-				flowSourceStableIDs = append(flowSourceStableIDs, vta.FlowSourceStableIDs...)
-				flowEdgeStableIDs = append(flowEdgeStableIDs, vta.FlowEdgeStableIDs...)
+				for _, sourceID := range vta.FlowSourceStableIDs {
+					stableID := candidateVTAFactID("vta_source_", sourceID, callsiteID, target.StableID)
+					flowSourceStableIDs = append(flowSourceStableIDs, stableID)
+					flowSourceFacts = append(flowSourceFacts, store.ResolutionFlowFact{StableID: stableID, Kind: "source", CallsiteID: callsiteID, TargetStableID: target.StableID, Payload: "source=" + sourceID})
+				}
+				for _, edgeID := range vta.FlowEdgeStableIDs {
+					stableID := candidateVTAFactID("vta_edge_", edgeID, callsiteID, target.StableID)
+					flowEdgeStableIDs = append(flowEdgeStableIDs, stableID)
+					flowEdgeFacts = append(flowEdgeFacts, store.ResolutionFlowFact{StableID: stableID, Kind: "edge", CallsiteID: callsiteID, TargetStableID: target.StableID, Payload: "edge=" + edgeID})
+				}
 			}
-			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: publishedMechanism, DeclaredScope: target.QualifiedName, ReceiverType: receiverType, ReceiverOrigin: receiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), FlowSourceStableIDs: flowSourceStableIDs, FlowEdgeStableIDs: flowEdgeStableIDs, DynamicDispatch: publishedDispatchState == string(resolver.DispatchDynamic), ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: selectedNodeID != nil && *selectedNodeID == targetID}
+			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: publishedMechanism, DeclaredScope: target.QualifiedName, ReceiverType: receiverType, ReceiverOrigin: receiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), FlowSourceStableIDs: flowSourceStableIDs, FlowEdgeStableIDs: flowEdgeStableIDs, FlowSourceFacts: flowSourceFacts, FlowEdgeFacts: flowEdgeFacts, DynamicDispatch: publishedDispatchState == string(resolver.DispatchDynamic), ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: selectedNodeID != nil && *selectedNodeID == targetID}
 			candidateRows = append(candidateRows, candidate)
 			graphCandidates = append(graphCandidates, candidate)
 		}
@@ -1249,6 +1258,11 @@ func main() {
 		importResolved, sameFileResolved, nameMatchResolved,
 		elapsed.Milliseconds(), *workers)
 	fmt.Println()
+}
+
+func candidateVTAFactID(prefix, sourceID, callsiteID, targetStableID string) string {
+	sum := sha256.Sum256([]byte(prefix + "\x00" + sourceID + "\x00" + callsiteID + "\x00" + targetStableID))
+	return prefix + hex.EncodeToString(sum[:])
 }
 
 // runIncremental performs a file-keyed delete-and-replace reindex of a

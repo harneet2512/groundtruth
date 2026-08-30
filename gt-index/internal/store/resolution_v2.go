@@ -57,6 +57,76 @@ type resolutionV2Publication struct {
 	Completeness      []resolutionV2Fact
 }
 
+func persistVTAFlowFactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *ResolutionCallsite, candidate *ResolutionCandidate) error {
+	if len(candidate.FlowSourceStableIDs) == 0 && len(candidate.FlowEdgeStableIDs) == 0 {
+		return nil
+	}
+	sources := make(map[string]ResolutionFlowFact, len(candidate.FlowSourceFacts))
+	for _, fact := range candidate.FlowSourceFacts {
+		if fact.Kind != "source" || fact.CallsiteID != c.CallsiteID || fact.TargetStableID != candidate.TargetStableID {
+			return fmt.Errorf("candidate %s has invalid VTA source fact binding %q", candidate.TargetStableID, fact.StableID)
+		}
+		sources[fact.StableID] = fact
+	}
+	edges := make(map[string]ResolutionFlowFact, len(candidate.FlowEdgeFacts))
+	for _, fact := range candidate.FlowEdgeFacts {
+		if fact.Kind != "edge" || fact.CallsiteID != c.CallsiteID || fact.TargetStableID != candidate.TargetStableID {
+			return fmt.Errorf("candidate %s has invalid VTA edge fact binding %q", candidate.TargetStableID, fact.StableID)
+		}
+		edges[fact.StableID] = fact
+	}
+	for _, id := range candidate.FlowSourceStableIDs {
+		fact, ok := sources[id]
+		if !ok {
+			return fmt.Errorf("candidate %s references missing VTA source fact %q", candidate.TargetStableID, id)
+		}
+		if err := persistOneVTAFlowFactTx(tx, identity, c, candidate, fact, "vta_flow_source_fact"); err != nil {
+			return err
+		}
+	}
+	for _, id := range candidate.FlowEdgeStableIDs {
+		fact, ok := edges[id]
+		if !ok {
+			return fmt.Errorf("candidate %s references missing VTA edge fact %q", candidate.TargetStableID, id)
+		}
+		if err := persistOneVTAFlowFactTx(tx, identity, c, candidate, fact, "vta_flow_edge_fact"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func persistOneVTAFlowFactTx(tx *sql.Tx, identity GraphCompletionIdentity, c *ResolutionCallsite, candidate *ResolutionCandidate, fact ResolutionFlowFact, nodeType string) error {
+	prefix := "vta_source_"
+	if fact.Kind == "edge" {
+		prefix = "vta_edge_"
+	}
+	if err := validateVTAFactID(fact.StableID, prefix); err != nil {
+		return err
+	}
+	var existingType, existingCallsite, existingTarget, existingPayload string
+	err := tx.QueryRow(`SELECT COALESCE(node_type,''), COALESCE(callsite_id,''), COALESCE(target_symbol_id,''), COALESCE(signature,'') FROM nodes WHERE stable_id=?`, fact.StableID).Scan(&existingType, &existingCallsite, &existingTarget, &existingPayload)
+	if err == nil {
+		if existingType != nodeType || existingCallsite != c.CallsiteID || existingTarget != candidate.TargetStableID || existingPayload != fact.Payload {
+			return fmt.Errorf("VTA fact %q is bound to conflicting graph data", fact.StableID)
+		}
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("lookup VTA fact %q: %w", fact.StableID, err)
+	}
+	_, err = tx.Exec(`INSERT INTO nodes
+		(label,name,qualified_name,file_path,signature,language,stable_id,node_type,schema_version,source_revision,producer_build_id,
+		 callsite_id,target_symbol_id,pass_kind,pass_version,step_ordinal,operation,boundary_id)
+		VALUES (?,?,?,?,?,?,?, ?,2,?,?,?,?, 'vta','1',0,'seed',?)`,
+		nodeType, fact.StableID, fact.StableID, c.SourceFile, fact.Payload, c.Language, fact.StableID, nodeType,
+		identity.RepositoryRevision, identity.BuildID, c.CallsiteID, candidate.TargetStableID, identity.RepositoryRevision)
+	if err != nil {
+		return fmt.Errorf("persist VTA fact %q: %w", fact.StableID, err)
+	}
+	return nil
+}
+
 func v2PassKind(mechanism string) string {
 	switch mechanism {
 	case "same_file":
@@ -314,6 +384,9 @@ func insertResolutionPolicyV2Tx(tx *sql.Tx, policy CandidateQueryPolicy, identit
 func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *ResolutionCallsite, callsiteNodeID int64, v2 resolutionV2Publication) error {
 	for _, candidate := range v2.Candidates {
 		fact := candidate.Candidate
+		if err := persistVTAFlowFactsTx(tx, identity, c, fact); err != nil {
+			return fmt.Errorf("persist VTA flow facts for %s/%d: %w", c.CallsiteID, fact.Ordinal, err)
+		}
 		declaredTypeID := ""
 		if fact.ReceiverType != "" {
 			declaredTypeID = canonicalResolutionID("type", fact.ReceiverType)
@@ -523,8 +596,28 @@ func (d *DB) loadResolutionV2Evidence(candidates []AttachedCandidate) error {
 				switch {
 				case len(inputFactID) > len("vta_source_") && inputFactID[:len("vta_source_")] == "vta_source_":
 					candidates[i].FlowSourceStableIDs = appendUniqueString(candidates[i].FlowSourceStableIDs, inputFactID)
+					var nodeType, factCallsite, factTarget, payload string
+					if err := d.db.QueryRow(`SELECT COALESCE(node_type,''), COALESCE(callsite_id,''), COALESCE(target_symbol_id,''), COALESCE(signature,'') FROM nodes WHERE stable_id=?`, inputFactID).Scan(&nodeType, &factCallsite, &factTarget, &payload); err != nil {
+						rows.Close()
+						return fmt.Errorf("load VTA source fact %s: %w", inputFactID, err)
+					}
+					if nodeType != "vta_flow_source_fact" || factTarget != candidates[i].TargetStableID {
+						rows.Close()
+						return fmt.Errorf("VTA source fact %s is not bound to candidate %s (node type=%q node_callsite=%q candidate_callsite=%q target=%q)", inputFactID, candidates[i].TargetStableID, nodeType, factCallsite, candidates[i].CallsiteID, factTarget)
+					}
+					candidates[i].FlowSourceFacts = append(candidates[i].FlowSourceFacts, ResolutionFlowFact{StableID: inputFactID, Kind: "source", CallsiteID: factCallsite, TargetStableID: factTarget, Payload: payload})
 				case len(inputFactID) > len("vta_edge_") && inputFactID[:len("vta_edge_")] == "vta_edge_":
 					candidates[i].FlowEdgeStableIDs = appendUniqueString(candidates[i].FlowEdgeStableIDs, inputFactID)
+					var nodeType, factCallsite, factTarget, payload string
+					if err := d.db.QueryRow(`SELECT COALESCE(node_type,''), COALESCE(callsite_id,''), COALESCE(target_symbol_id,''), COALESCE(signature,'') FROM nodes WHERE stable_id=?`, inputFactID).Scan(&nodeType, &factCallsite, &factTarget, &payload); err != nil {
+						rows.Close()
+						return fmt.Errorf("load VTA edge fact %s: %w", inputFactID, err)
+					}
+					if nodeType != "vta_flow_edge_fact" || factTarget != candidates[i].TargetStableID {
+						rows.Close()
+						return fmt.Errorf("VTA edge fact %s is not bound to candidate %s", inputFactID, candidates[i].TargetStableID)
+					}
+					candidates[i].FlowEdgeFacts = append(candidates[i].FlowEdgeFacts, ResolutionFlowFact{StableID: inputFactID, Kind: "edge", CallsiteID: factCallsite, TargetStableID: factTarget, Payload: payload})
 				}
 			}
 			payload := mustJSON(map[string]any{"boundary_id": boundaryID, "declared_type_id": declaredTypeID, "import_id": importID, "input_fact_ids": inputFactIDs, "operation": operation, "pass_kind": passKind, "pass_version": passVersion, "receiver_value_id": receiverValueID, "scope_id": scopeID})

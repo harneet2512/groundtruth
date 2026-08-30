@@ -81,11 +81,24 @@ type ResolutionCandidate struct {
 	ImportChain         string
 	FlowSourceStableIDs []string
 	FlowEdgeStableIDs   []string
+	FlowSourceFacts     []ResolutionFlowFact
+	FlowEdgeFacts       []ResolutionFlowFact
 	DynamicDispatch     bool
 	ExportStatus        string
 	ParserComplete      *bool
 	VerificationStatus  string
 	Selected            bool
+}
+
+// ResolutionFlowFact is a typed, candidate-bound VTA source or propagation
+// fact. StableID is the immutable identity referenced by a derivation fact;
+// the remaining fields make the reference auditable at the graph boundary.
+type ResolutionFlowFact struct {
+	StableID       string
+	Kind           string
+	CallsiteID     string
+	TargetStableID string
+	Payload        string
 }
 
 type ResolutionCallsite struct {
@@ -161,6 +174,8 @@ type AttachedCandidate struct {
 	ImportChain         string
 	FlowSourceStableIDs []string
 	FlowEdgeStableIDs   []string
+	FlowSourceFacts     []ResolutionFlowFact
+	FlowEdgeFacts       []ResolutionFlowFact
 	ExportStatus        string
 	ParserComplete      *bool
 	PolicyID            string
@@ -341,6 +356,7 @@ func candidateProvenance(base []ResolutionDerivationStep, candidate *ResolutionC
 		{"receiver_shape", candidate.ReceiverShape}, {"declared_scope", candidate.DeclaredScope},
 		{"receiver_chain", candidate.ReceiverChain}, {"import_chain", candidate.ImportChain},
 		{"flow_source_stable_ids", mustJSON(candidate.FlowSourceStableIDs)}, {"flow_edge_stable_ids", mustJSON(candidate.FlowEdgeStableIDs)},
+		{"flow_source_facts", mustJSON(candidate.FlowSourceFacts)}, {"flow_edge_facts", mustJSON(candidate.FlowEdgeFacts)},
 		{"target_stable_id", candidate.TargetStableID}, {"verification_outcome", candidate.VerificationStatus},
 	}
 	for _, fact := range facts {
@@ -373,11 +389,23 @@ func validateCandidateDerivation(kind string, candidate *ResolutionCandidate) er
 		if len(candidate.FlowSourceStableIDs) == 0 && len(candidate.FlowEdgeStableIDs) == 0 {
 			return fmt.Errorf("variable_type_flow requires typed source or propagation facts")
 		}
-		for _, id := range append(append([]string{}, candidate.FlowSourceStableIDs...), candidate.FlowEdgeStableIDs...) {
-			if id == "" || (!strings.HasPrefix(id, "vta_source_") && !strings.HasPrefix(id, "vta_edge_")) {
-				return fmt.Errorf("variable_type_flow contains unbound fact ID %q", id)
+		for _, id := range candidate.FlowSourceStableIDs {
+			if err := validateVTAFactID(id, "vta_source_"); err != nil {
+				return err
 			}
 		}
+		for _, id := range candidate.FlowEdgeStableIDs {
+			if err := validateVTAFactID(id, "vta_edge_"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateVTAFactID(id, prefix string) error {
+	if !strings.HasPrefix(id, prefix) || len(id) <= len(prefix) {
+		return fmt.Errorf("variable_type_flow contains unbound fact ID %q", id)
 	}
 	return nil
 }
@@ -1338,6 +1366,7 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 				"receiver_origin": candidate.ReceiverOrigin, "receiver_shape": candidate.ReceiverShape,
 				"receiver_chain": candidate.ReceiverChain, "import_chain": candidate.ImportChain,
 				"flow_source_stable_ids": candidate.FlowSourceStableIDs, "flow_edge_stable_ids": candidate.FlowEdgeStableIDs,
+				"flow_source_facts": candidate.FlowSourceFacts, "flow_edge_facts": candidate.FlowEdgeFacts,
 				"dynamic_dispatch": candidate.DynamicDispatch, "export_status": candidate.ExportStatus,
 				"parser_complete": candidate.ParserComplete, "repository_revision": revision,
 				"verification_status": candidate.VerificationStatus,
