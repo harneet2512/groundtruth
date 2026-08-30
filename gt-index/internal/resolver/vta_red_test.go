@@ -30,8 +30,11 @@ func TestVTAVariableFlowRetainsAlternativesAndAbstainsAmbiguity(t *testing.T) {
 		8:  {Label: "Method", Name: "Run", ParentID: 4, File: "a.go"},
 		9:  {Label: "Method", Name: "Run", ParentID: 5, File: "b.go"},
 		10: {Label: "Method", Name: "Run", ParentID: 7, File: "u.go"},
+		11: {Label: "Interface", Name: "Client", File: "client.go"},
+		12: {Label: "Struct", Name: "ClientImpl", File: "client_impl.go"},
+		13: {Label: "Method", Name: "Run", ParentID: 12, File: "client_impl.go"},
 	}
-	implements := map[int64][]int64{4: {3}, 5: {3}, 7: {6}}
+	implements := map[int64][]int64{4: {3}, 5: {3}, 7: {6}, 12: {11}}
 
 	t.Run("same_scope_assignment_is_ambiguous", func(t *testing.T) {
 		results := AnalyzeVTA(
@@ -54,10 +57,10 @@ func TestVTAVariableFlowRetainsAlternativesAndAbstainsAmbiguity(t *testing.T) {
 
 	t.Run("return_type_flow_is_retained", func(t *testing.T) {
 		results := AnalyzeVTA(
-			[]parser.CallRef{{
-				CalleeName: "Run", CalleeQualified: "runner.Run", File: "main.go", Line: 20,
-				DispatchForm: "interface",
-			}},
+			[]parser.CallRef{
+				{CalleeName: "makeRunner", CalleeQualified: "makeRunner", File: "main.go", Line: 7, DispatchForm: "static"},
+				{CalleeName: "Run", CalleeQualified: "runner.Run", File: "main.go", Line: 20, DispatchForm: "interface"},
+			},
 			meta,
 			implements,
 			[]parser.AssignmentRef{{
@@ -65,8 +68,23 @@ func TestVTAVariableFlowRetainsAlternativesAndAbstainsAmbiguity(t *testing.T) {
 				ViaReturn: true,
 			}},
 		)
-		assertVTAField(t, results, 0, "CandidateNodeIDs", "[8 9]")
-		assertVTANilField(t, results, 0, "SelectedTargetNodeID")
+		assertVTAField(t, results, 1, "CandidateNodeIDs", "[8 9]")
+		assertVTANilField(t, results, 1, "SelectedTargetNodeID")
+	})
+
+	t.Run("cross_method_field_flow_is_retained", func(t *testing.T) {
+		results := AnalyzeVTA(
+			[]parser.CallRef{{
+				CalleeName: "Run", CalleeQualified: "self.client.Run", File: "service.go", Line: 30,
+				DispatchForm: "interface",
+			}},
+			meta,
+			implements,
+			[]parser.AssignmentRef{{
+				VarName: "self.client", TypeName: "Client", Scope: "__init__", File: "service.go", Line: 5,
+			}},
+		)
+		assertVTAField(t, results, 0, "CandidateNodeIDs", "[13]")
 	})
 }
 
