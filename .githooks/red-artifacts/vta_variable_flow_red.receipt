@@ -8,6 +8,6 @@ runner_sha256=d064848f6fdb5447fbf7a10a85d4e5234fee4c2aec4a5f15082ec3cec1823ffd
 command=go test ./internal/resolver -run '^TestVTAVariableFlowRetainsAlternativesAndAbstainsAmbiguity$' -count=1
 exit_code=1
 output_path=.githooks/red-artifacts/vta_variable_flow_red.out
-output_sha256=d488148b76993e73f9c38f0b506f46b0375893776cd6da92f10c1968b9e46094
+output_sha256=6e08cc4f910a8b0ae76f0c3da24fa146f804c76f348490ac24832e4d77dbcfa8
 expected_failure=undefined: AnalyzeVTA
 boundary=variable/return/field type-flow candidates remain source-bound, conservative, ambiguity-aware, and distinct from unreachable or same-name implementations

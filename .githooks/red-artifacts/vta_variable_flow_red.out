@@ -1,5 +1,5 @@
 # github.com/harneet2512/groundtruth/gt-index/internal/resolver [github.com/harneet2512/groundtruth/gt-index/internal/resolver.test]
-internal\resolver\vta_red_test.go:37:14: undefined: AnalyzeVTA
+internal\resolver\vta_red_test.go:40:14: undefined: AnalyzeVTA
 internal\resolver\vta_red_test.go:59:14: undefined: AnalyzeVTA
 internal\resolver\vta_red_test.go:76:14: undefined: AnalyzeVTA
 FAIL	github.com/harneet2512/groundtruth/gt-index/internal/resolver [build failed]
