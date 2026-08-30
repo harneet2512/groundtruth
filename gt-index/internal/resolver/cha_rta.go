@@ -22,9 +22,16 @@ type CHAThenRTAResult struct {
 	RTAAllocationTypeIDs []int64
 	ReachableNodeIDs     []int64
 	RootNodeIDs          []int64
+	RootPolicy           string
 	RTAAbstentionReason  string
 	CHACompleteness      string
 }
+
+const (
+	rootPolicyExplicit    = "explicit"
+	rootPolicyEntryPoints = "producer_entrypoints:main,__main__"
+	rootPolicyUnknown     = "unknown"
+)
 
 // AnalyzeCHAThenRTA performs a deterministic, producer-owned CHA→RTA pass.
 // The implements map is child type ID → implemented base/interface IDs. When
@@ -50,7 +57,7 @@ func AnalyzeCHAThenRTAWithReceiverTypes(calls []parser.CallRef, meta map[int64]N
 // so an allocation discovered in a newly reachable body can cause a second
 // iteration without importing allocations from unreachable code.
 func AnalyzeCHAThenRTAWithReachability(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, receiverTypes map[int]string, callerNodeIDs []int64, candidateNodeIDs [][]int64, hierarchyClosed bool) []CHAThenRTAResult {
-	return AnalyzeCHAThenRTAWithReachabilityAndRoots(calls, meta, implements, assignments, receiverTypes, callerNodeIDs, candidateNodeIDs, EntryPointNodeIDs(meta), hierarchyClosed)
+	return analyzeCHAThenRTAWithReachabilityAndRoots(calls, meta, implements, assignments, receiverTypes, callerNodeIDs, candidateNodeIDs, EntryPointNodeIDs(meta), rootPolicyEntryPoints, hierarchyClosed)
 }
 
 // AnalyzeCHAThenRTAWithReachabilityAndRoots is the producer entry point when
@@ -58,6 +65,10 @@ func AnalyzeCHAThenRTAWithReachability(calls []parser.CallRef, meta map[int64]No
 // inferred from call-graph indegree; an empty root set yields typed partial
 // RTA evidence with reason roots_unknown.
 func AnalyzeCHAThenRTAWithReachabilityAndRoots(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, receiverTypes map[int]string, callerNodeIDs []int64, candidateNodeIDs [][]int64, rootNodeIDs []int64, hierarchyClosed bool) []CHAThenRTAResult {
+	return analyzeCHAThenRTAWithReachabilityAndRoots(calls, meta, implements, assignments, receiverTypes, callerNodeIDs, candidateNodeIDs, rootNodeIDs, rootPolicyExplicit, hierarchyClosed)
+}
+
+func analyzeCHAThenRTAWithReachabilityAndRoots(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, receiverTypes map[int]string, callerNodeIDs []int64, candidateNodeIDs [][]int64, rootNodeIDs []int64, rootPolicy string, hierarchyClosed bool) []CHAThenRTAResult {
 	results := analyzeCHAThenRTA(calls, meta, implements, assignments, receiverTypes, hierarchyClosed)
 	// The ordinary analyzer is intentionally useful as a small fixture API and
 	// therefore reports lexical allocation evidence immediately. Production RTA
@@ -70,6 +81,10 @@ func AnalyzeCHAThenRTAWithReachabilityAndRoots(calls []parser.CallRef, meta map[
 		results[i].RTAAllocationTypeIDs = nil
 	}
 	reachable, instantiated := reachableInstantiationFixedPoint(calls, meta, assignments, results, callerNodeIDs, candidateNodeIDs, rootNodeIDs)
+	validRoots := validRootSet(rootNodeIDs, meta)
+	if len(validRoots) == 0 {
+		rootPolicy = rootPolicyUnknown
+	}
 	for i := range results {
 		if i >= len(calls) {
 			break
@@ -78,7 +93,8 @@ func AnalyzeCHAThenRTAWithReachabilityAndRoots(calls []parser.CallRef, meta map[
 			continue
 		}
 		results[i].ReachableNodeIDs = sortedIDs(reachable)
-		results[i].RootNodeIDs = sortedIDs(validRootSet(rootNodeIDs, meta))
+		results[i].RootNodeIDs = sortedIDs(validRoots)
+		results[i].RootPolicy = rootPolicy
 		results[i].RTAAllocationTypeIDs = filterInstantiatedCandidateTypes(results[i].CHACandidateNodeIDs, meta, instantiated)
 		results[i].RTACandidateNodeIDs = make([]int64, 0, len(results[i].CHACandidateNodeIDs))
 		for _, methodID := range results[i].CHACandidateNodeIDs {

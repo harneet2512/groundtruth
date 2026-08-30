@@ -576,8 +576,7 @@ func main() {
 			resolverCandidates[callsite.CallsiteOrdinal] = append([]int64(nil), callsite.CandidateNodeIDs...)
 		}
 	}
-	rootNodeIDs := resolver.EntryPointNodeIDs(nodeMeta)
-	hierarchyResults := resolver.AnalyzeCHAThenRTAWithReachabilityAndRoots(allCalls, nodeMeta, inhMap, allAssignments, receiverTypes, callerDBIDs, resolverCandidates, rootNodeIDs, hierarchyClosed)
+	hierarchyResults := resolver.AnalyzeCHAThenRTAWithReachability(allCalls, nodeMeta, inhMap, allAssignments, receiverTypes, callerDBIDs, resolverCandidates, hierarchyClosed)
 	hierarchyByOrdinal := make(map[int]resolver.CHAThenRTAResult, len(hierarchyResults))
 	for _, result := range hierarchyResults {
 		hierarchyByOrdinal[result.CallsiteOrdinal] = result
@@ -729,7 +728,7 @@ func main() {
 			}
 			passCoverage = append(passCoverage,
 				store.ResolutionPassCoverage{PassKind: "cha", Version: "1", Status: chaStatus, Reason: chaReason, CandidateStableIDs: stableIDs(hierarchy.CHACandidateNodeIDs)},
-				store.ResolutionPassCoverage{PassKind: "rta", Version: "1", Status: rtaStatus, Reason: rtaReason, CandidateStableIDs: stableIDs(hierarchy.RTACandidateNodeIDs), AllocationTypeStableIDs: stableIDs(hierarchy.RTAAllocationTypeIDs), ReachableStableIDs: stableIDs(hierarchy.ReachableNodeIDs), RootStableIDs: stableIDs(hierarchy.RootNodeIDs)},
+				store.ResolutionPassCoverage{PassKind: "rta", Version: "1", Status: rtaStatus, Reason: rtaReason, CandidateStableIDs: stableIDs(hierarchy.RTACandidateNodeIDs), AllocationTypeStableIDs: stableIDs(hierarchy.RTAAllocationTypeIDs), ReachableStableIDs: stableIDs(hierarchy.ReachableNodeIDs), RootStableIDs: stableIDs(hierarchy.RootNodeIDs), RootPolicy: hierarchy.RootPolicy},
 			)
 		}
 		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: publishedDispatchState, CandidateCount: len(candidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus, PassCoverage: passCoverage})
