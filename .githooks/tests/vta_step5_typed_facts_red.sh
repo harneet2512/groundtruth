@@ -2,6 +2,7 @@
 set -eu
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root/gt-index"
+echo "VTA RED boundary: typed flow facts (rebound)"
 echo "VTA RED boundary: typed flow facts"
 output_file=$(mktemp)
 set +e
