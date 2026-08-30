@@ -84,14 +84,18 @@ type CallRef struct {
 	Line             int
 	File             string
 	ParserIncomplete bool
-	DynamicDispatch  bool // computed/callable expression; no stable declared callee identity
-	ASTPath          string
-	ByteStart        uint64
-	ByteEnd          uint64
-	ColumnStart      uint32
-	ArgumentArity    *uint16
-	ArgumentNames    []string // source-visible variable arguments, in call order
-	DispatchForm     string
+	// FlowAnalysisComplete is an explicit upstream proof that the value and
+	// viable-call constraint graph is complete for this call. Parser success
+	// alone never sets it.
+	FlowAnalysisComplete bool
+	DynamicDispatch      bool // computed/callable expression; no stable declared callee identity
+	ASTPath              string
+	ByteStart            uint64
+	ByteEnd              uint64
+	ColumnStart          uint32
+	ArgumentArity        *uint16
+	ArgumentNames        []string // source-visible variable arguments, in call order
+	DispatchForm         string
 }
 
 // AssignmentRef records a variable assignment where the RHS is a constructor call.
