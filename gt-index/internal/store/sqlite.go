@@ -67,23 +67,25 @@ type Edge struct {
 // legacy edges table remains backward-readable, while this additive surface
 // prevents ambiguity from collapsing into a scalar count.
 type ResolutionCandidate struct {
-	CallsiteID         string
-	TargetID           int64
-	TargetStableID     string
-	TargetNativeID     string
-	Ordinal            int
-	Mechanism          string
-	DeclaredScope      string
-	ReceiverType       string
-	ReceiverOrigin     string
-	ReceiverShape      string
-	ReceiverChain      string
-	ImportChain        string
-	DynamicDispatch    bool
-	ExportStatus       string
-	ParserComplete     *bool
-	VerificationStatus string
-	Selected           bool
+	CallsiteID          string
+	TargetID            int64
+	TargetStableID      string
+	TargetNativeID      string
+	Ordinal             int
+	Mechanism           string
+	DeclaredScope       string
+	ReceiverType        string
+	ReceiverOrigin      string
+	ReceiverShape       string
+	ReceiverChain       string
+	ImportChain         string
+	FlowSourceStableIDs []string
+	FlowEdgeStableIDs   []string
+	DynamicDispatch     bool
+	ExportStatus        string
+	ParserComplete      *bool
+	VerificationStatus  string
+	Selected            bool
 }
 
 type ResolutionCallsite struct {
@@ -157,6 +159,8 @@ type AttachedCandidate struct {
 	ReceiverShape       string
 	ReceiverChain       string
 	ImportChain         string
+	FlowSourceStableIDs []string
+	FlowEdgeStableIDs   []string
 	ExportStatus        string
 	ParserComplete      *bool
 	PolicyID            string
@@ -336,10 +340,11 @@ func candidateProvenance(base []ResolutionDerivationStep, candidate *ResolutionC
 		{"receiver_type", candidate.ReceiverType}, {"receiver_origin", candidate.ReceiverOrigin},
 		{"receiver_shape", candidate.ReceiverShape}, {"declared_scope", candidate.DeclaredScope},
 		{"receiver_chain", candidate.ReceiverChain}, {"import_chain", candidate.ImportChain},
+		{"flow_source_stable_ids", mustJSON(candidate.FlowSourceStableIDs)}, {"flow_edge_stable_ids", mustJSON(candidate.FlowEdgeStableIDs)},
 		{"target_stable_id", candidate.TargetStableID}, {"verification_outcome", candidate.VerificationStatus},
 	}
 	for _, fact := range facts {
-		if fact.value == "" || fact.value == "[]" {
+		if fact.value == "" || fact.value == "[]" || fact.value == "null" {
 			continue
 		}
 		steps = append(steps, ResolutionDerivationStep{StepID: fmt.Sprintf("%02d:%s", len(steps)+1, fact.kind), Kind: fact.kind, Value: fact.value})
@@ -363,6 +368,15 @@ func validateCandidateDerivation(kind string, candidate *ResolutionCandidate) er
 	case "single_implementation", "interface_implementors":
 		if candidate.DeclaredScope == "" {
 			return fmt.Errorf("%s requires implementation scope", kind)
+		}
+	case "variable_type_flow":
+		if len(candidate.FlowSourceStableIDs) == 0 && len(candidate.FlowEdgeStableIDs) == 0 {
+			return fmt.Errorf("variable_type_flow requires typed source or propagation facts")
+		}
+		for _, id := range append(append([]string{}, candidate.FlowSourceStableIDs...), candidate.FlowEdgeStableIDs...) {
+			if id == "" || (!strings.HasPrefix(id, "vta_source_") && !strings.HasPrefix(id, "vta_edge_")) {
+				return fmt.Errorf("variable_type_flow contains unbound fact ID %q", id)
+			}
 		}
 	}
 	return nil
@@ -1323,6 +1337,7 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 				"declared_scope": candidate.DeclaredScope, "receiver_type": candidate.ReceiverType,
 				"receiver_origin": candidate.ReceiverOrigin, "receiver_shape": candidate.ReceiverShape,
 				"receiver_chain": candidate.ReceiverChain, "import_chain": candidate.ImportChain,
+				"flow_source_stable_ids": candidate.FlowSourceStableIDs, "flow_edge_stable_ids": candidate.FlowEdgeStableIDs,
 				"dynamic_dispatch": candidate.DynamicDispatch, "export_status": candidate.ExportStatus,
 				"parser_complete": candidate.ParserComplete, "repository_revision": revision,
 				"verification_status": candidate.VerificationStatus,

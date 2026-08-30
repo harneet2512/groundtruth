@@ -1,7 +1,10 @@
 package resolver
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
@@ -14,9 +17,17 @@ type VTAResult struct {
 	CallsiteOrdinal      int
 	CandidateNodeIDs     []int64
 	FlowTypeNodeIDs      []int64
+	FlowSourceStableIDs  []string
+	FlowEdgeStableIDs    []string
 	SelectedTargetNodeID *int64
 	Completeness         string
 	AbstentionReason     string
+}
+
+type vtaValueEvidence struct {
+	Types   map[string]struct{}
+	Sources map[string]struct{}
+	Edges   map[string]struct{}
 }
 
 type vtaValueKey struct {
@@ -85,15 +96,15 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		return uniqueStrings(out)
 	}
 
-	valueTypes := make(map[vtaValueKey]map[string]struct{})
-	addValue := func(key vtaValueKey, names []string) bool {
+	valueTypes := make(map[vtaValueKey]*vtaValueEvidence)
+	addValue := func(key vtaValueKey, names, sources, edges []string) bool {
 		if key.Name == "" || len(names) == 0 {
 			return false
 		}
-		set := valueTypes[key]
-		if set == nil {
-			set = make(map[string]struct{})
-			valueTypes[key] = set
+		evidence := valueTypes[key]
+		if evidence == nil {
+			evidence = &vtaValueEvidence{Types: make(map[string]struct{}), Sources: make(map[string]struct{}), Edges: make(map[string]struct{})}
+			valueTypes[key] = evidence
 		}
 		changed := false
 		for _, name := range names {
@@ -101,9 +112,25 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 			if name == "" {
 				continue
 			}
-			if _, exists := set[name]; !exists {
-				set[name] = struct{}{}
+			if _, exists := evidence.Types[name]; !exists {
+				evidence.Types[name] = struct{}{}
 				changed = true
+			}
+		}
+		for _, source := range sources {
+			if source != "" {
+				if _, exists := evidence.Sources[source]; !exists {
+					evidence.Sources[source] = struct{}{}
+					changed = true
+				}
+			}
+		}
+		for _, edge := range edges {
+			if edge != "" {
+				if _, exists := evidence.Edges[edge]; !exists {
+					evidence.Edges[edge] = struct{}{}
+					changed = true
+				}
 			}
 		}
 		return changed
@@ -115,18 +142,18 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		return resolveReturn(assignment.TypeName, make(map[string]struct{}))
 	}
 	for _, assignment := range assignments {
-		addValue(vtaValueKey{File: assignment.File, Scope: assignment.Scope, Object: assignment.ObjectScope, Name: assignment.VarName, Line: assignment.Line}, assignmentNames(assignment))
+		addValue(vtaValueKey{File: assignment.File, Scope: assignment.Scope, Object: assignment.ObjectScope, Name: assignment.VarName, Line: assignment.Line}, assignmentNames(assignment), []string{vtaAssignmentStableID(assignment)}, nil)
 	}
 
-	callValue := func(call parser.CallRef, name string) map[string]struct{} {
+	callValue := func(call parser.CallRef, name string) *vtaValueEvidence {
 		object := callerObjectScope(call.CallerScope)
 		field := strings.HasPrefix(name, "self.") || strings.HasPrefix(name, "this.")
 		key := vtaValueKey{File: call.File, Scope: call.CallerScope, Object: object, Name: name}
 		if !field {
 			key.Object = ""
 		}
-		fallback := make(map[string]struct{})
-		for assignment, set := range valueTypes {
+		fallback := &vtaValueEvidence{Types: make(map[string]struct{}), Sources: make(map[string]struct{}), Edges: make(map[string]struct{})}
+		for assignment, evidence := range valueTypes {
 			if assignment.Name != key.Name || assignment.Line > call.Line {
 				continue
 			}
@@ -142,8 +169,14 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 					continue
 				}
 			}
-			for typ := range set {
-				fallback[typ] = struct{}{}
+			for typ := range evidence.Types {
+				fallback.Types[typ] = struct{}{}
+			}
+			for source := range evidence.Sources {
+				fallback.Sources[source] = struct{}{}
+			}
+			for edge := range evidence.Edges {
+				fallback.Edges[edge] = struct{}{}
 			}
 		}
 		return fallback
@@ -169,8 +202,11 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 					if !parameterMatches(parameter, call, index) {
 						continue
 					}
-					for typ := range callValue(call, argument) {
-						if addValue(vtaValueKey{File: parameter.File, Scope: parameter.Scope, Object: parameter.ObjectScope, Name: parameter.VarName, Line: parameter.Line}, []string{typ}) {
+					evidence := callValue(call, argument)
+					edges := sortedStringSet(evidence.Edges)
+					edges = append(edges, vtaCallEdgeStableID(call, argument, index, parameter))
+					for typ := range evidence.Types {
+						if addValue(vtaValueKey{File: parameter.File, Scope: parameter.Scope, Object: parameter.ObjectScope, Name: parameter.VarName, Line: parameter.Line}, []string{typ}, sortedStringSet(evidence.Sources), edges) {
 							changed = true
 						}
 					}
@@ -189,12 +225,14 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		if qualifier == "" {
 			continue
 		}
-		flowNames := callValue(call, qualifier)
-		if len(flowNames) == 0 {
+		flowEvidence := callValue(call, qualifier)
+		if len(flowEvidence.Types) == 0 {
 			continue
 		}
+		results[ordinal].FlowSourceStableIDs = sortedStringSet(flowEvidence.Sources)
+		results[ordinal].FlowEdgeStableIDs = sortedStringSet(flowEvidence.Edges)
 		flowTypeIDs := make(map[int64]struct{})
-		for name := range flowNames {
+		for name := range flowEvidence.Types {
 			for _, typeID := range typeIDsByName[normalizedTypeName(name)] {
 				if _, isInterface := interfaceIDs[typeID]; isInterface {
 					for concreteID := range concreteIDs {
@@ -224,6 +262,28 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		}
 	}
 	return results
+}
+
+func vtaAssignmentStableID(assignment parser.AssignmentRef) string {
+	return vtaStableFactID("source", assignment.File, assignment.Scope, assignment.ObjectScope, assignment.VarName, assignment.TypeName, assignment.TypeQualified, strconv.Itoa(assignment.Line), strconv.FormatBool(assignment.ViaReturn))
+}
+
+func vtaCallEdgeStableID(call parser.CallRef, argument string, index int, parameter parser.AssignmentRef) string {
+	return vtaStableFactID("edge", call.File, call.CallerScope, call.CalleeScope, call.CalleeName, argument, strconv.Itoa(index), parameter.File, parameter.Scope, parameter.VarName, strconv.Itoa(parameter.Line))
+}
+
+func vtaStableFactID(kind string, fields ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(append([]string{kind}, fields...), "\x00")))
+	return "vta_" + kind + "_" + hex.EncodeToString(sum[:])
+}
+
+func sortedStringSet(values map[string]struct{}) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func callerObjectScope(scope string) string {
