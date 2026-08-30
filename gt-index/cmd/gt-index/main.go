@@ -562,6 +562,17 @@ func main() {
 	resolver.ExpandRustCrateImports(allImports, filePaths, fileLangs, *root)
 
 	resolved, callsites := resolver.ResolveWithProvenance(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
+	// CHA→RTA is an additive, score-free hierarchy pass. The default boundary
+	// is open; callers may explicitly provide a closed repository boundary with
+	// GT_HIERARCHY_CLOSED=1. In either case its coverage is published alongside
+	// the existing resolver evidence, so an open hierarchy cannot be accepted
+	// as a closed target set by downstream queries.
+	hierarchyClosed := os.Getenv("GT_HIERARCHY_CLOSED") == "1"
+	hierarchyResults := resolver.AnalyzeCHAThenRTA(allCalls, nodeMeta, inhMap, allAssignments, hierarchyClosed)
+	hierarchyByOrdinal := make(map[int]resolver.CHAThenRTAResult, len(hierarchyResults))
+	for _, result := range hierarchyResults {
+		hierarchyByOrdinal[result.CallsiteOrdinal] = result
+	}
 
 	resolveElapsed := time.Since(resolveStart)
 
@@ -662,6 +673,32 @@ func main() {
 		passCoverage := make([]store.ResolutionPassCoverage, 0, len(c.PassExecutions))
 		for _, pass := range c.PassExecutions {
 			passCoverage = append(passCoverage, store.ResolutionPassCoverage{PassKind: pass.PassKind, Version: "1", Status: pass.Status, Reason: pass.Reason})
+		}
+		if hierarchy, ok := hierarchyByOrdinal[c.CallsiteOrdinal]; ok && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") {
+			chaStatus := "partial"
+			chaReason := "hierarchy_open"
+			if hierarchy.CHACompleteness == "closed" {
+				chaReason = ""
+				if len(hierarchy.CHACandidateNodeIDs) == 0 {
+					chaStatus = "completed_no_match"
+				} else {
+					chaStatus = "completed_match"
+				}
+			}
+			rtaStatus := "partial"
+			rtaReason := hierarchy.RTAAbstentionReason
+			if hierarchy.RTACompleteness == "closed" {
+				rtaReason = ""
+				if len(hierarchy.RTACandidateNodeIDs) == 0 {
+					rtaStatus = "completed_no_match"
+				} else {
+					rtaStatus = "completed_match"
+				}
+			}
+			passCoverage = append(passCoverage,
+				store.ResolutionPassCoverage{PassKind: "cha", Version: "1", Status: chaStatus, Reason: chaReason},
+				store.ResolutionPassCoverage{PassKind: "rta", Version: "1", Status: rtaStatus, Reason: rtaReason},
+			)
 		}
 		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: string(c.DispatchState), CandidateCount: len(c.CandidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus, PassCoverage: passCoverage})
 		graphCandidates := make([]*store.ResolutionCandidate, 0, len(c.CandidateNodeIDs))

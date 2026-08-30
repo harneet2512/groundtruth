@@ -225,6 +225,66 @@ func TestAttachResolutionGraphPersistsTypedFactsWithoutCandidateConfidence(t *te
 	}
 }
 
+func TestAttachResolutionGraphPersistsCHAThenRTACompleteness(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	sourceID, err := db.InsertNode(&Node{Label: "Function", Name: "caller", QualifiedName: "caller", FilePath: "main.go", Language: "go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetA, err := db.InsertNode(&Node{Label: "Method", Name: "Run", QualifiedName: "a.Run", FilePath: "a.go", Language: "go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetB, err := db.InsertNode(&Node{Label: "Method", Name: "Run", QualifiedName: "b.Run", FilePath: "b.go", Language: "go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := AttachedResolution{
+		Source: &Node{ID: sourceID, Label: "Function", Name: "caller", QualifiedName: "caller", FilePath: "main.go", Language: "go"},
+		Callsite: &ResolutionCallsite{
+			CallsiteID: "cha-rta", SourceID: sourceID, SourceFile: "main.go", SourceLine: 8, Callee: "Run",
+			DispatchState: "ambiguous", DispatchForm: "interface", CandidateCount: 2, Mechanism: "impl_method",
+			PassCoverage: []ResolutionPassCoverage{
+				{PassKind: "cha", Version: "1", Status: "completed_match"},
+				{PassKind: "rta", Version: "1", Status: "partial", Reason: "hierarchy_open"},
+			},
+		},
+		Candidates: []*ResolutionCandidate{
+			{TargetID: targetA, TargetStableID: "a", TargetNativeID: "a", Ordinal: 0, Mechanism: "impl_method", DeclaredScope: "Runner", VerificationStatus: "candidate"},
+			{TargetID: targetB, TargetStableID: "b", TargetNativeID: "b", Ordinal: 1, Mechanism: "impl_method", DeclaredScope: "Runner", VerificationStatus: "candidate"},
+		},
+	}
+	if err := db.AttachResolutionGraph(testGraphIdentity("rev"), []AttachedResolution{row}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.db.Query(`SELECT pass_kind,fact_status,reason_code FROM nodes WHERE node_type='completeness_fact' AND pass_kind IN ('cha','rta') ORDER BY pass_kind`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := make(map[string][2]string)
+	for rows.Next() {
+		var pass, status, reason string
+		if err := rows.Scan(&pass, &status, &reason); err != nil {
+			t.Fatal(err)
+		}
+		got[pass] = [2]string{status, reason}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if got["cha"] != [2]string{"closed", ""} {
+		t.Fatalf("CHA completeness=%v, want closed", got["cha"])
+	}
+	if got["rta"] != [2]string{"partial", "hierarchy_open"} {
+		t.Fatalf("RTA completeness=%v, want partial/hierarchy_open", got["rta"])
+	}
+}
+
 func TestQueryPolicyChangesSelectionWithoutMutatingGraphFacts(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "graph.db"))
 	if err != nil {

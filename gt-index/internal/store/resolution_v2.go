@@ -269,6 +269,8 @@ func completenessStatusRank(status string) int {
 
 func mapCoveragePassV2(pass string) string {
 	switch pass {
+	case "direct_binding", "cha", "rta", "vta", "points_to_field_insensitive", "points_to_field_sensitive", "on_the_fly_refinement", "framework_route", "di_binding", "reflection_model", "higher_order_flow", "ffi_contract", "generated_mapping":
+		return pass
 	case "lexical_binding":
 		return "direct_binding"
 	case "import_binding":
