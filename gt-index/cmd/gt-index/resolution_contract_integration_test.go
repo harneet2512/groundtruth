@@ -320,6 +320,16 @@ func Invoke(runner Runner) {
 	if cha.Status != "closed" || len(cha.CandidateStableIDs) != 1 || cha.CandidateStableIDs[0] != evidence[0].TargetStableID {
 		t.Fatalf("normal query lost actual CHA candidate identity: candidate=%+v cha=%+v", evidence[0], cha)
 	}
+	var vta store.ResolutionPassCoverage
+	for _, pass := range evidence[0].PassCoverage {
+		if pass.PassKind == "vta" {
+			vta = pass
+		}
+	}
+	if evidence[0].Mechanism != "vta" || vta.Status != "closed" ||
+		len(vta.CandidateStableIDs) != 1 || vta.CandidateStableIDs[0] != evidence[0].TargetStableID {
+		t.Fatalf("normal query lost VTA candidate evidence: candidate=%+v vta=%+v", evidence[0], vta)
+	}
 	raw, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		t.Fatal(err)

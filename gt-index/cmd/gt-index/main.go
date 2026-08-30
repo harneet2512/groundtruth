@@ -581,6 +581,11 @@ func main() {
 	for _, result := range hierarchyResults {
 		hierarchyByOrdinal[result.CallsiteOrdinal] = result
 	}
+	vtaResults := resolver.AnalyzeVTA(allCalls, nodeMeta, inhMap, allAssignments)
+	vtaByOrdinal := make(map[int]resolver.VTAResult, len(vtaResults))
+	for _, result := range vtaResults {
+		vtaByOrdinal[result.CallsiteOrdinal] = result
+	}
 
 	resolveElapsed := time.Since(resolveStart)
 
@@ -674,15 +679,30 @@ func main() {
 		candidateNodeIDs := append([]int64(nil), c.CandidateNodeIDs...)
 		selectedNodeID := c.SelectedTargetNodeID
 		publishedDispatchState := string(c.DispatchState)
-		if hierarchy, ok := hierarchyByOrdinal[c.CallsiteOrdinal]; ok && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") && (len(hierarchy.CHACandidateNodeIDs) > 0 || (hierarchy.ReceiverScoped && hierarchy.CHACompleteness == "closed")) {
-			candidateNodeIDs = append([]int64(nil), hierarchy.CHACandidateNodeIDs...)
+		publishedMechanism := c.Mechanism
+		vtaUsed := false
+		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && len(vta.CandidateNodeIDs) > 0 && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") {
+			candidateNodeIDs = append([]int64(nil), vta.CandidateNodeIDs...)
 			selectedNodeID = nil
-			if len(candidateNodeIDs) == 0 {
-				publishedDispatchState = string(resolver.DispatchZero)
-			} else if len(candidateNodeIDs) > 1 {
+			publishedMechanism = "vta"
+			vtaUsed = true
+			if len(candidateNodeIDs) > 1 {
 				publishedDispatchState = string(resolver.DispatchAmbiguous)
 			} else {
 				publishedDispatchState = string(resolver.DispatchCandidateOnly)
+			}
+		}
+		if !vtaUsed {
+			if hierarchy, ok := hierarchyByOrdinal[c.CallsiteOrdinal]; ok && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") && (len(hierarchy.CHACandidateNodeIDs) > 0 || (hierarchy.ReceiverScoped && hierarchy.CHACompleteness == "closed")) {
+				candidateNodeIDs = append([]int64(nil), hierarchy.CHACandidateNodeIDs...)
+				selectedNodeID = nil
+				if len(candidateNodeIDs) == 0 {
+					publishedDispatchState = string(resolver.DispatchZero)
+				} else if len(candidateNodeIDs) > 1 {
+					publishedDispatchState = string(resolver.DispatchAmbiguous)
+				} else {
+					publishedDispatchState = string(resolver.DispatchCandidateOnly)
+				}
 			}
 		}
 		var selectedStable, selectedNative *string
@@ -695,6 +715,22 @@ func main() {
 		passCoverage := make([]store.ResolutionPassCoverage, 0, len(c.PassExecutions))
 		for _, pass := range c.PassExecutions {
 			passCoverage = append(passCoverage, store.ResolutionPassCoverage{PassKind: pass.PassKind, Version: "1", Status: pass.Status, Reason: pass.Reason})
+		}
+		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vtaUsed {
+			vtaStatus := "completed_match"
+			if len(vta.CandidateNodeIDs) == 0 {
+				vtaStatus = "completed_no_match"
+			}
+			vtaStableIDs := make([]string, 0, len(vta.CandidateNodeIDs))
+			for _, id := range vta.CandidateNodeIDs {
+				if symbol, exists := symbolByID[id]; exists {
+					vtaStableIDs = append(vtaStableIDs, symbol.StableID)
+				}
+			}
+			passCoverage = append(passCoverage, store.ResolutionPassCoverage{
+				PassKind: "vta", Version: "1", Status: vtaStatus,
+				Reason: vta.AbstentionReason, CandidateStableIDs: vtaStableIDs,
+			})
 		}
 		if hierarchy, ok := hierarchyByOrdinal[c.CallsiteOrdinal]; ok && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") {
 			chaStatus := "partial"
@@ -731,7 +767,7 @@ func main() {
 				store.ResolutionPassCoverage{PassKind: "rta", Version: "1", Status: rtaStatus, Reason: rtaReason, CandidateStableIDs: stableIDs(hierarchy.RTACandidateNodeIDs), AllocationTypeStableIDs: stableIDs(hierarchy.RTAAllocationTypeIDs), ReachableStableIDs: stableIDs(hierarchy.ReachableNodeIDs), RootStableIDs: stableIDs(hierarchy.RootNodeIDs), RootPolicy: hierarchy.RootPolicy, RootPolicyVersion: hierarchy.RootPolicyVersion, RootCompleteness: hierarchy.RootCompleteness, RootBoundary: hierarchy.RootBoundary},
 			)
 		}
-		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: publishedDispatchState, CandidateCount: len(candidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus, PassCoverage: passCoverage})
+		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: publishedDispatchState, CandidateCount: len(candidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: publishedMechanism, VerificationStatus: c.VerificationStatus, PassCoverage: passCoverage})
 		graphCandidates := make([]*store.ResolutionCandidate, 0, len(candidateNodeIDs))
 		for ordinal, targetID := range candidateNodeIDs {
 			target, exists := symbolByID[targetID]
@@ -741,7 +777,7 @@ func main() {
 			complete := c.ParserComplete
 			receiverChain, _ := json.Marshal(qualifiedCallChain(c.CalleeQualified))
 			importChain, _ := json.Marshal(c.CandidateImportChains[targetID])
-			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: c.Mechanism, DeclaredScope: target.QualifiedName, ReceiverType: c.ReceiverType, ReceiverOrigin: c.ReceiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), DynamicDispatch: publishedDispatchState == string(resolver.DispatchDynamic), ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: selectedNodeID != nil && *selectedNodeID == targetID}
+			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: publishedMechanism, DeclaredScope: target.QualifiedName, ReceiverType: c.ReceiverType, ReceiverOrigin: c.ReceiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), DynamicDispatch: publishedDispatchState == string(resolver.DispatchDynamic), ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: selectedNodeID != nil && *selectedNodeID == targetID}
 			candidateRows = append(candidateRows, candidate)
 			graphCandidates = append(graphCandidates, candidate)
 		}
@@ -760,7 +796,7 @@ func main() {
 				SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language,
 				DispatchState: publishedDispatchState, CandidateCount: len(graphCandidates),
 				SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative,
-				Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus,
+				Mechanism: publishedMechanism, VerificationStatus: c.VerificationStatus,
 				RepoID: repositoryID, FileNodeID: fileNodeIDByPath[c.SourceFile], FileIdentity: fileIdentityByPath[c.SourceFile], CallerSymbolID: source.StableID,
 				ASTPath: c.ASTPath, ByteStart: c.ByteStart, ByteEnd: c.ByteEnd, ColumnStart: c.ColumnStart,
 				DispatchForm: c.DispatchForm, ArgumentArity: c.ArgumentArity, ParseState: parseState,

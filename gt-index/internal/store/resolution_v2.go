@@ -64,6 +64,8 @@ func v2PassKind(mechanism string) string {
 		return "import_binding"
 	case "inherited", "type_flow":
 		return "scope_binding"
+	case "vta":
+		return "vta"
 	case "return_type":
 		return "return_shape"
 	case "verified_unique", "name_match":
