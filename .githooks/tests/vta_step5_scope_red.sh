@@ -2,6 +2,7 @@
 set -eu
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root/gt-index"
+echo "VTA RED boundary: caller-scope identity"
 output_file=$(mktemp)
 set +e
 go test ./internal/resolver -run '^TestVTASameFileScopeBoundary$' -count=1 >"$output_file" 2>&1

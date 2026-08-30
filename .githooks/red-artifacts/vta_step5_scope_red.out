@@ -1,4 +1,5 @@
+VTA RED boundary: caller-scope identity
 # github.com/harneet2512/groundtruth/gt-index/internal/resolver [github.com/harneet2512/groundtruth/gt-index/internal/resolver.test]
 internal/resolver/vta_scope_red_test.go:19:21: unknown field CallerScope in struct literal of type parser.CallRef
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/resolver [build failed]
 FAIL
-FAIL	github.com/harneet2512/groundtruth/gt-index/internal/resolver	build failed
