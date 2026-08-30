@@ -79,6 +79,7 @@ type CallRef struct {
 	CallerNodeIdx    int    // index into ParseResult.Nodes
 	CallerScope      string // qualified enclosing function/method scope
 	CalleeName       string // the function/method name being called (last component)
+	CalleeScope      string // exact statically known callee scope, when available
 	CalleeQualified  string // full qualified name if available (e.g. "obj.method")
 	Line             int
 	File             string
@@ -1035,9 +1036,15 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 				dispatchForm = "virtual"
 			}
 			result.Calls = append(result.Calls, CallRef{
-				CallerNodeIdx:   callerIdx,
-				CallerScope:     callerScope,
-				CalleeName:      simple,
+				CallerNodeIdx: callerIdx,
+				CallerScope:   callerScope,
+				CalleeName:    simple,
+				CalleeScope: func() string {
+					if dispatchForm == "static" {
+						return qualified
+					}
+					return ""
+				}(),
 				CalleeQualified: qualified,
 				Line:            int(node.StartPoint().Row) + 1,
 				File:            sf.Path,

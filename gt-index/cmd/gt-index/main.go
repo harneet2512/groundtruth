@@ -695,13 +695,15 @@ func main() {
 		publishedMechanism := c.Mechanism
 		vtaUsed := false
 		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") {
-			// VTA is candidate-only. Preserve CHA/RTA identities when flow is
-			// incomplete, while adding every flow-supported identity to the
-			// primary graph. A flow result with no viable method must not erase
-			// conservative hierarchy candidates.
-			if hierarchy, hierarchyOK := hierarchyByOrdinal[c.CallsiteOrdinal]; hierarchyOK {
-				candidateNodeIDs = mergeIDs(vta.CandidateNodeIDs, hierarchy.CHACandidateNodeIDs)
+			if vta.Completeness == "partial" {
+				// Incomplete flow must not erase conservative hierarchy evidence.
+				if hierarchy, hierarchyOK := hierarchyByOrdinal[c.CallsiteOrdinal]; hierarchyOK {
+					candidateNodeIDs = mergeIDs(vta.CandidateNodeIDs, hierarchy.CHACandidateNodeIDs)
+				} else {
+					candidateNodeIDs = append([]int64(nil), vta.CandidateNodeIDs...)
+				}
 			} else {
+				// A closed flow fact is the narrower source-bound candidate set.
 				candidateNodeIDs = append([]int64(nil), vta.CandidateNodeIDs...)
 			}
 			selectedNodeID = nil
@@ -740,9 +742,15 @@ func main() {
 			passCoverage = append(passCoverage, store.ResolutionPassCoverage{PassKind: pass.PassKind, Version: "1", Status: pass.Status, Reason: pass.Reason})
 		}
 		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" {
-			vtaStatus := "partial"
+			vtaStatus := "completed_match"
+			if vta.Completeness == "partial" {
+				vtaStatus = "partial"
+			}
 			if len(vta.CandidateNodeIDs) == 0 {
-				vtaStatus = "partial_no_match"
+				vtaStatus = "completed_no_match"
+				if vta.Completeness == "partial" {
+					vtaStatus = "partial_no_match"
+				}
 			}
 			vtaStableIDs := make([]string, 0, len(vta.CandidateNodeIDs))
 			for _, id := range vta.CandidateNodeIDs {
@@ -762,7 +770,7 @@ func main() {
 			}
 			passCoverage = append(passCoverage, store.ResolutionPassCoverage{
 				PassKind: "vta", Version: "1", Status: vtaStatus,
-				Reason: flowReason, CandidateStableIDs: vtaStableIDs,
+				Reason: flowReason, CandidateStableIDs: vtaStableIDs, FlowTypeStableIDs: flowStableIDs,
 			})
 		}
 		if hierarchy, ok := hierarchyByOrdinal[c.CallsiteOrdinal]; ok && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") {
