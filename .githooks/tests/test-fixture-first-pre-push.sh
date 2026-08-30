@@ -170,5 +170,6 @@ expect_fail indeterminate_new_branch "$repo" "$ZERO" 'cannot determine protected
 "$ROOT/.githooks/tests/test-protected-root-range.sh"
 "$ROOT/.githooks/tests/test-red-output-mismatch.sh"
 "$ROOT/.githooks/tests/test-red-symlink-escape.sh"
+"$ROOT/.githooks/tests/test-red-nonexecutable-fixture.sh"
 
 printf '%s\n' 'PASS: fixture-first pre-push negative, positive, unrelated, malformed, new-branch, and updated-branch cases'

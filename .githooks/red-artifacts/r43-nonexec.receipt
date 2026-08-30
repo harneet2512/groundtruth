@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=3c43119cee251ca210454a48ffa59bd05cb81b41
+fixture_path=.githooks/tests/test-red-nonexecutable-fixture.sh
+fixture_sha256=2b1ac17bbb7f49228625f7ad9e03515793fac4729b318cad274f923e217ba5f2
+command=.githooks/tests/test-red-nonexecutable-fixture.sh
+exit_code=1
+output_path=.githooks/red-artifacts/r43-nonexec.out
+output_sha256=31eab3b7fab6937c3f7de3a9f32462095a0307d5fe72f60496c2331530a1c90b
