@@ -569,10 +569,12 @@ func main() {
 	// as a closed target set by downstream queries.
 	hierarchyClosed := os.Getenv("GT_HIERARCHY_CLOSED") == "1"
 	receiverTypes := make(map[int]string, len(callsites))
+	resolverCandidates := make([][]int64, len(callsites))
 	for _, callsite := range callsites {
 		receiverTypes[callsite.CallsiteOrdinal] = callsite.ReceiverType
+		resolverCandidates[callsite.CallsiteOrdinal] = append([]int64(nil), callsite.CandidateNodeIDs...)
 	}
-	hierarchyResults := resolver.AnalyzeCHAThenRTAWithReceiverTypes(allCalls, nodeMeta, inhMap, allAssignments, receiverTypes, hierarchyClosed)
+	hierarchyResults := resolver.AnalyzeCHAThenRTAWithReachability(allCalls, nodeMeta, inhMap, allAssignments, receiverTypes, callerDBIDs, resolverCandidates, hierarchyClosed)
 	hierarchyByOrdinal := make(map[int]resolver.CHAThenRTAResult, len(hierarchyResults))
 	for _, result := range hierarchyResults {
 		hierarchyByOrdinal[result.CallsiteOrdinal] = result
@@ -724,7 +726,7 @@ func main() {
 			}
 			passCoverage = append(passCoverage,
 				store.ResolutionPassCoverage{PassKind: "cha", Version: "1", Status: chaStatus, Reason: chaReason, CandidateStableIDs: stableIDs(hierarchy.CHACandidateNodeIDs)},
-				store.ResolutionPassCoverage{PassKind: "rta", Version: "1", Status: rtaStatus, Reason: rtaReason, CandidateStableIDs: stableIDs(hierarchy.RTACandidateNodeIDs), AllocationTypeStableIDs: stableIDs(hierarchy.RTAAllocationTypeIDs)},
+				store.ResolutionPassCoverage{PassKind: "rta", Version: "1", Status: rtaStatus, Reason: rtaReason, CandidateStableIDs: stableIDs(hierarchy.RTACandidateNodeIDs), AllocationTypeStableIDs: stableIDs(hierarchy.RTAAllocationTypeIDs), ReachableStableIDs: stableIDs(hierarchy.ReachableNodeIDs)},
 			)
 		}
 		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: publishedDispatchState, CandidateCount: len(candidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus, PassCoverage: passCoverage})

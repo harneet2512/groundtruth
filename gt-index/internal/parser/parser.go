@@ -857,11 +857,57 @@ func goTypeDeclarationIsInterface(typeDecl *sitter.Node) bool {
 	return visit(typeDecl)
 }
 
-var goInterfaceMethodRE = regexp.MustCompile(`\b([A-Za-z_]\w*)\s*\([^)]*\)`)
+var goInterfaceMethodRE = regexp.MustCompile(`(?m)\b([A-Za-z_]\w*)\s*\([^{}\n]*\)(?:[ \t]+[^{}\n;]+)?`)
 
 func extractGoInterfaceMethods(typeDecl *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, parentID int) {
 	content := typeDecl.Content(src)
 	seen := make(map[string]struct{})
+	var interfaceType *sitter.Node
+	var findInterface func(*sitter.Node)
+	findInterface = func(node *sitter.Node) {
+		if node == nil || interfaceType != nil {
+			return
+		}
+		if node.Type() == "interface_type" {
+			interfaceType = node
+			return
+		}
+		for i := 0; i < int(node.ChildCount()); i++ {
+			findInterface(node.Child(i))
+		}
+	}
+	findInterface(typeDecl)
+	if interfaceType != nil {
+		var visitMethods func(*sitter.Node)
+		visitMethods = func(node *sitter.Node) {
+			if node == nil {
+				return
+			}
+			if node.Type() == "method_elem" {
+				nameNode := node.ChildByFieldName("name")
+				if nameNode != nil {
+					name := nameNode.Content(src)
+					if _, exists := seen[name]; !exists {
+						seen[name] = struct{}{}
+						line := int(node.StartPoint().Row) + 1
+						result.Nodes = append(result.Nodes, store.Node{
+							Label: "Method", Name: name, QualifiedName: result.Nodes[parentID-1].Name + "." + name,
+							FilePath: sf.Path, StartLine: line, EndLine: int(node.EndPoint().Row) + 1,
+							Signature: strings.TrimSpace(node.Content(src)), ParentID: int64(parentID),
+							IsExported: sf.Spec.IsExported != nil && sf.Spec.IsExported(name), Language: sf.Language,
+						})
+					}
+				}
+			}
+			for i := 0; i < int(node.ChildCount()); i++ {
+				visitMethods(node.Child(i))
+			}
+		}
+		visitMethods(interfaceType)
+	}
+	if len(seen) > 0 {
+		return
+	}
 	for _, match := range goInterfaceMethodRE.FindAllStringSubmatchIndex(content, -1) {
 		name := content[match[2]:match[3]]
 		if _, exists := seen[name]; exists {

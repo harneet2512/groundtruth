@@ -265,14 +265,14 @@ func TestRealCLIUsesDeclaredGoInterfaceBoundaryForCHA(t *testing.T) {
 	}
 	src := `package sample
 
-type Runner interface { Run(int) }
+type Runner interface { Run(int) error }
 type Unrelated interface { Other() }
 
 type ImplA struct{}
-func (ImplA) Run(int) {}
+func (ImplA) Run(int) error { return nil }
 
 type ImplUnrelated struct{}
-func (ImplUnrelated) Run() {}
+func (ImplUnrelated) Run(int) string { return "wrong" }
 
 func Invoke(runner Runner) {
 	runner.Run(1)

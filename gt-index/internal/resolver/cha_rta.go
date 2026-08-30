@@ -20,6 +20,7 @@ type CHAThenRTAResult struct {
 	RTACandidateNodeIDs  []int64
 	RTACompleteness      string
 	RTAAllocationTypeIDs []int64
+	ReachableNodeIDs     []int64
 	RTAAbstentionReason  string
 	CHACompleteness      string
 }
@@ -38,6 +39,45 @@ func AnalyzeCHAThenRTA(calls []parser.CallRef, meta map[int64]NodeMeta, implemen
 // small public fixture API useful for direct producer tests.
 func AnalyzeCHAThenRTAWithReceiverTypes(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, receiverTypes map[int]string, hierarchyClosed bool) []CHAThenRTAResult {
 	return analyzeCHAThenRTA(calls, meta, implements, assignments, receiverTypes, hierarchyClosed)
+}
+
+// AnalyzeCHAThenRTAWithReachability is the production entry point. It runs
+// the hierarchy pass, then computes the monotone reachable/instantiated fixed
+// point used by RTA. callerNodeIDs and candidateNodeIDs are parallel to calls;
+// the latter are the already-resolved direct-call identities from the normal
+// resolver path. A virtual call expands only through its current RTA targets,
+// so an allocation discovered in a newly reachable body can cause a second
+// iteration without importing allocations from unreachable code.
+func AnalyzeCHAThenRTAWithReachability(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, receiverTypes map[int]string, callerNodeIDs []int64, candidateNodeIDs [][]int64, hierarchyClosed bool) []CHAThenRTAResult {
+	results := analyzeCHAThenRTA(calls, meta, implements, assignments, receiverTypes, hierarchyClosed)
+	// The ordinary analyzer is intentionally useful as a small fixture API and
+	// therefore reports lexical allocation evidence immediately. Production RTA
+	// must not use that evidence until the owning body is proven reachable.
+	for i := range results {
+		if i >= len(calls) || (calls[i].DispatchForm != "interface" && calls[i].DispatchForm != "virtual") {
+			continue
+		}
+		results[i].RTACandidateNodeIDs = nil
+		results[i].RTAAllocationTypeIDs = nil
+	}
+	reachable, instantiated := reachableInstantiationFixedPoint(calls, meta, assignments, results, callerNodeIDs, candidateNodeIDs)
+	for i := range results {
+		if i >= len(calls) {
+			break
+		}
+		if calls[i].DispatchForm != "interface" && calls[i].DispatchForm != "virtual" {
+			continue
+		}
+		results[i].ReachableNodeIDs = sortedIDs(reachable)
+		results[i].RTAAllocationTypeIDs = filterInstantiatedCandidateTypes(results[i].CHACandidateNodeIDs, meta, instantiated)
+		results[i].RTACandidateNodeIDs = make([]int64, 0, len(results[i].CHACandidateNodeIDs))
+		for _, methodID := range results[i].CHACandidateNodeIDs {
+			if _, ok := instantiated[meta[methodID].ParentID]; ok {
+				results[i].RTACandidateNodeIDs = append(results[i].RTACandidateNodeIDs, methodID)
+			}
+		}
+	}
+	return results
 }
 
 func analyzeCHAThenRTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, receiverTypes map[int]string, hierarchyClosed bool) []CHAThenRTAResult {
@@ -208,11 +248,10 @@ func methodShape(name, signature string) string {
 		return ""
 	}
 	shape := strings.TrimSpace(signature[start:])
-	close := strings.IndexByte(shape, ')')
-	if close < 0 {
+	if !strings.Contains(shape, "(") || !strings.Contains(shape, ")") {
 		return ""
 	}
-	return strings.TrimSpace(shape[:close+1])
+	return strings.Join(strings.Fields(shape), " ")
 }
 
 func allocationTypesForCall(call parser.CallRef, assignments []parser.AssignmentRef, typeIDsByName map[string][]int64, candidateTypes map[int64]struct{}) []int64 {
@@ -227,7 +266,7 @@ func allocationTypesForCall(call parser.CallRef, assignments []parser.Assignment
 	}
 	seen := make(map[int64]struct{})
 	for _, assignment := range assignments {
-		if assignment.VarName != qualifier || assignment.File != call.File || assignment.Line > call.Line {
+		if assignment.VarName != qualifier || assignment.Line > call.Line {
 			continue
 		}
 		for _, typeID := range typeIDsByName[normalizedTypeName(assignment.TypeName)] {
@@ -323,4 +362,162 @@ func callReceiverQualifier(call parser.CallRef) string {
 		return qualified[:dot]
 	}
 	return ""
+}
+
+func reachableInstantiationFixedPoint(calls []parser.CallRef, meta map[int64]NodeMeta, assignments []parser.AssignmentRef, results []CHAThenRTAResult, callerNodeIDs []int64, candidateNodeIDs [][]int64) (map[int64]struct{}, map[int64]struct{}) {
+	callsByCaller := make(map[int64][]int)
+	for ordinal, callerID := range callerNodeIDs {
+		if callerID != 0 && ordinal < len(calls) {
+			callsByCaller[callerID] = append(callsByCaller[callerID], ordinal)
+		}
+	}
+
+	knownTargets := make(map[int64]struct{})
+	for _, targets := range candidateNodeIDs {
+		for _, targetID := range targets {
+			knownTargets[targetID] = struct{}{}
+		}
+	}
+	for _, result := range results {
+		for _, targetID := range result.CHACandidateNodeIDs {
+			knownTargets[targetID] = struct{}{}
+		}
+	}
+	reachable := make(map[int64]struct{})
+	for _, callerID := range callerNodeIDs {
+		if callerID == 0 {
+			continue
+		}
+		if _, isTarget := knownTargets[callerID]; !isTarget {
+			reachable[callerID] = struct{}{}
+		}
+	}
+	// A closed cycle has no graph-theoretic root. Retaining the caller set is
+	// the conservative fallback; it cannot introduce an allocation by itself.
+	if len(reachable) == 0 {
+		for _, callerID := range callerNodeIDs {
+			if callerID != 0 {
+				reachable[callerID] = struct{}{}
+			}
+		}
+	}
+	instantiated := make(map[int64]struct{})
+	for {
+		changed := false
+		for callerID := range reachable {
+			for _, ordinal := range callsByCaller[callerID] {
+				call := calls[ordinal]
+				var targets []int64
+				if call.DispatchForm == "interface" || call.DispatchForm == "virtual" {
+					targets = results[ordinal].RTACandidateNodeIDs
+				} else if ordinal < len(candidateNodeIDs) && len(candidateNodeIDs[ordinal]) > 0 {
+					targets = candidateNodeIDs[ordinal]
+				} else {
+					// Direct-call reachability is driven by the already-resolved
+					// candidate identities. A global name fallback would make an
+					// unrelated same-named function reachable.
+					targets = nil
+				}
+				for _, targetID := range targets {
+					if _, ok := meta[targetID]; !ok {
+						continue
+					}
+					if _, ok := reachable[targetID]; !ok {
+						reachable[targetID] = struct{}{}
+						changed = true
+					}
+				}
+			}
+		}
+		for nodeID := range reachable {
+			node, ok := meta[nodeID]
+			if !ok {
+				continue
+			}
+			for _, assignment := range assignments {
+				if assignment.ViaReturn || assignment.Scope != node.Name || !sameSourceFile(assignment.File, node.File) {
+					continue
+				}
+				for typeID, typeNode := range meta {
+					if !isConcreteHierarchyType(typeNode.Label) || (normalizedTypeName(typeNode.Name) != normalizedTypeName(assignment.TypeName) && normalizedTypeName(typeNode.Name) != normalizedTypeName(assignment.TypeQualified)) {
+						continue
+					}
+					if _, ok := instantiated[typeID]; !ok {
+						instantiated[typeID] = struct{}{}
+						changed = true
+					}
+				}
+			}
+		}
+		for ordinal := range calls {
+			if calls[ordinal].DispatchForm != "interface" && calls[ordinal].DispatchForm != "virtual" {
+				continue
+			}
+			for _, methodID := range results[ordinal].CHACandidateNodeIDs {
+				if _, ok := instantiated[meta[methodID].ParentID]; ok {
+					if _, reachableAlready := reachable[methodID]; !reachableAlready {
+						reachable[methodID] = struct{}{}
+						changed = true
+					}
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+		for ordinal := range results {
+			if calls[ordinal].DispatchForm != "interface" && calls[ordinal].DispatchForm != "virtual" {
+				continue
+			}
+			results[ordinal].RTACandidateNodeIDs = filterReachableMethods(results[ordinal].CHACandidateNodeIDs, meta, instantiated)
+		}
+	}
+	return reachable, instantiated
+}
+
+func filterReachableMethods(methodIDs []int64, meta map[int64]NodeMeta, instantiated map[int64]struct{}) []int64 {
+	result := make([]int64, 0, len(methodIDs))
+	for _, methodID := range methodIDs {
+		method, exists := meta[methodID]
+		if exists {
+			if _, ok := instantiated[method.ParentID]; ok {
+				result = append(result, methodID)
+			}
+		}
+	}
+	return result
+}
+
+func filterInstantiatedCandidateTypes(methodIDs []int64, meta map[int64]NodeMeta, instantiated map[int64]struct{}) []int64 {
+	seen := make(map[int64]struct{})
+	for _, methodID := range methodIDs {
+		method, exists := meta[methodID]
+		if !exists {
+			continue
+		}
+		parentID := method.ParentID
+		if _, ok := instantiated[parentID]; ok {
+			seen[parentID] = struct{}{}
+		}
+	}
+	return sortedIDs(seen)
+}
+
+func sortedIDs(ids map[int64]struct{}) []int64 {
+	result := make([]int64, 0, len(ids))
+	for id := range ids {
+		result = append(result, id)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
+func sameSourceFile(left, right string) bool {
+	left = strings.ReplaceAll(left, "\\", "/")
+	right = strings.ReplaceAll(right, "\\", "/")
+	return left == right || strings.HasSuffix(left, "/"+right) || strings.HasSuffix(right, "/"+left)
+}
+
+func isConcreteHierarchyType(label string) bool {
+	return label == "Class" || label == "Struct" || label == "Type" || label == "Trait"
 }

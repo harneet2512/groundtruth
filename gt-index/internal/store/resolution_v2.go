@@ -26,6 +26,7 @@ type resolutionV2Fact struct {
 	Reason                  string
 	CandidateStableIDs      []string
 	AllocationTypeStableIDs []string
+	ReachableStableIDs      []string
 }
 
 type resolutionV2Publication struct {
@@ -196,7 +197,7 @@ func prepareResolutionV2(identity GraphCompletionIdentity, c *ResolutionCallsite
 			status = "not_run"
 		}
 		factID := canonicalResolutionID(callsiteID, mappedPass, pass.Version, "repository", identity.RepositoryRevision)
-		fact := resolutionV2Fact{ID: factID, PassKind: mappedPass, Status: status, BoundaryKind: "repository", BoundaryID: identity.RepositoryRevision, Covered: covered, Known: known, Reason: pass.Reason, CandidateStableIDs: append([]string(nil), pass.CandidateStableIDs...), AllocationTypeStableIDs: append([]string(nil), pass.AllocationTypeStableIDs...)}
+		fact := resolutionV2Fact{ID: factID, PassKind: mappedPass, Status: status, BoundaryKind: "repository", BoundaryID: identity.RepositoryRevision, Covered: covered, Known: known, Reason: pass.Reason, CandidateStableIDs: append([]string(nil), pass.CandidateStableIDs...), AllocationTypeStableIDs: append([]string(nil), pass.AllocationTypeStableIDs...), ReachableStableIDs: append([]string(nil), pass.ReachableStableIDs...)}
 		if index, exists := completenessIndex[factID]; exists {
 			if completenessStatusRank(fact.Status) > completenessStatusRank(completeness[index].Status) {
 				completeness[index] = fact
@@ -375,10 +376,10 @@ func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *
 		}
 		result, err := tx.Exec(`INSERT INTO nodes
 			(label,name,qualified_name,file_path,language,stable_id,node_type,schema_version,source_revision,producer_build_id,
-			 callsite_id,pass_kind,pass_version,boundary_kind,boundary_id,fact_status,covered_units,known_units,reason_code,candidate_stable_ids,allocation_type_stable_ids)
-			VALUES ('CompletenessFact',?,?,?,?,?,'completeness_fact',2,?,?,?,?,'1',?,?,?,?,?,?,?,?)`,
+			 callsite_id,pass_kind,pass_version,boundary_kind,boundary_id,fact_status,covered_units,known_units,reason_code,candidate_stable_ids,allocation_type_stable_ids,reachable_stable_ids)
+			VALUES ('CompletenessFact',?,?,?,?,?,'completeness_fact',2,?,?,?,?,'1',?,?,?,?,?,?,?,?,?)`,
 			fact.PassKind, fact.ID, c.SourceFile, "resolution", fact.ID, identity.RepositoryRevision, identity.BuildID,
-			v2.CallsiteID, fact.PassKind, fact.BoundaryKind, fact.BoundaryID, fact.Status, fact.Covered, known, fact.Reason, mustJSON(fact.CandidateStableIDs), mustJSON(fact.AllocationTypeStableIDs))
+			v2.CallsiteID, fact.PassKind, fact.BoundaryKind, fact.BoundaryID, fact.Status, fact.Covered, known, fact.Reason, mustJSON(fact.CandidateStableIDs), mustJSON(fact.AllocationTypeStableIDs), mustJSON(fact.ReachableStableIDs))
 		if err != nil {
 			return fmt.Errorf("insert completeness fact: %w", err)
 		}
@@ -444,15 +445,15 @@ func (d *DB) loadResolutionV2Evidence(candidates []AttachedCandidate) error {
 		callsiteID := candidates[i].CallsiteID
 		coverage, ok := coverageByCallsite[callsiteID]
 		if !ok {
-			rows, err := d.db.Query(`SELECT stable_id,pass_kind,pass_version,fact_status,COALESCE(reason_code,''),COALESCE(candidate_stable_ids,'[]'),COALESCE(allocation_type_stable_ids,'[]') FROM nodes
+			rows, err := d.db.Query(`SELECT stable_id,pass_kind,pass_version,fact_status,COALESCE(reason_code,''),COALESCE(candidate_stable_ids,'[]'),COALESCE(allocation_type_stable_ids,'[]'),COALESCE(reachable_stable_ids,'[]') FROM nodes
 				WHERE node_type='completeness_fact' AND callsite_id=? ORDER BY pass_kind,stable_id`, callsiteID)
 			if err != nil {
 				return fmt.Errorf("load completeness facts: %w", err)
 			}
 			for rows.Next() {
 				var fact ResolutionPassCoverage
-				var candidateIDsJSON, allocationTypeIDsJSON string
-				if err := rows.Scan(&fact.FactID, &fact.PassKind, &fact.Version, &fact.Status, &fact.Reason, &candidateIDsJSON, &allocationTypeIDsJSON); err != nil {
+				var candidateIDsJSON, allocationTypeIDsJSON, reachableIDsJSON string
+				if err := rows.Scan(&fact.FactID, &fact.PassKind, &fact.Version, &fact.Status, &fact.Reason, &candidateIDsJSON, &allocationTypeIDsJSON, &reachableIDsJSON); err != nil {
 					rows.Close()
 					return err
 				}
@@ -463,6 +464,10 @@ func (d *DB) loadResolutionV2Evidence(candidates []AttachedCandidate) error {
 				if err := json.Unmarshal([]byte(allocationTypeIDsJSON), &fact.AllocationTypeStableIDs); err != nil {
 					rows.Close()
 					return fmt.Errorf("decode allocation type stable IDs for %s: %w", fact.FactID, err)
+				}
+				if err := json.Unmarshal([]byte(reachableIDsJSON), &fact.ReachableStableIDs); err != nil {
+					rows.Close()
+					return fmt.Errorf("decode reachable stable IDs for %s: %w", fact.FactID, err)
 				}
 				coverage = append(coverage, fact)
 			}
