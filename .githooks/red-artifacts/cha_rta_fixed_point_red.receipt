@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=7b3aa67c83af9bafb1202245880046ed14859c7e
+fixture_path=.githooks/tests/cha_rta_fixed_point_red.sh
+fixture_sha256=b2fdb907e0cbc5ea2158b1337597121c622b4046c2a834d30b7365ab124995a1
+command=.githooks/tests/cha_rta_fixed_point_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/cha_rta_fixed_point_red.out
+output_sha256=48d3136f5ded486b184c3860080ed8ea2a51ee0fcdf6af001f9c60c2970d1a91
