@@ -102,6 +102,9 @@ func TestCHAThenRTAReachabilityDoesNotInventRootsOrExpandDeadCalls(t *testing.T)
 	if got := results[1].RootNodeIDs; !equalInt64s(got, []int64{1}) {
 		t.Fatalf("root policy=%v, want [1]", got)
 	}
+	if results[1].RootPolicy != "producer_entrypoints:main,__main__" {
+		t.Fatalf("root policy source=%q, want producer_entrypoints:main,__main__", results[1].RootPolicy)
+	}
 
 	unknown := AnalyzeCHAThenRTAWithReachabilityAndRoots(
 		calls[1:2], meta, map[int64][]int64{4: {3}, 5: {3}}, nil,
@@ -109,6 +112,9 @@ func TestCHAThenRTAReachabilityDoesNotInventRootsOrExpandDeadCalls(t *testing.T)
 	)
 	if unknown[0].RTACompleteness != "partial" || unknown[0].RTAAbstentionReason != "roots_unknown" {
 		t.Fatalf("unknown-root state=%+v, want partial/roots_unknown", unknown[0])
+	}
+	if unknown[0].RootPolicy != "unknown" {
+		t.Fatalf("unknown-root policy=%q, want unknown", unknown[0].RootPolicy)
 	}
 }
 

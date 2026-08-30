@@ -250,7 +250,7 @@ func TestAttachResolutionGraphPersistsCHAThenRTACompleteness(t *testing.T) {
 			DispatchState: "ambiguous", DispatchForm: "interface", CandidateCount: 2, Mechanism: "impl_method",
 			PassCoverage: []ResolutionPassCoverage{
 				{PassKind: "cha", Version: "1", Status: "completed_match", CandidateStableIDs: []string{"a", "b"}},
-				{PassKind: "rta", Version: "1", Status: "partial", Reason: "hierarchy_open", CandidateStableIDs: []string{"a"}, AllocationTypeStableIDs: []string{"type-a"}, ReachableStableIDs: []string{"caller", "a"}, RootStableIDs: []string{"caller"}},
+				{PassKind: "rta", Version: "1", Status: "partial", Reason: "hierarchy_open", CandidateStableIDs: []string{"a"}, AllocationTypeStableIDs: []string{"type-a"}, ReachableStableIDs: []string{"caller", "a"}, RootStableIDs: []string{"caller"}, RootPolicy: "explicit"},
 			},
 		},
 		Candidates: []*ResolutionCandidate{
@@ -261,26 +261,26 @@ func TestAttachResolutionGraphPersistsCHAThenRTACompleteness(t *testing.T) {
 	if err := db.AttachResolutionGraph(testGraphIdentity("rev"), []AttachedResolution{row}); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := db.db.Query(`SELECT pass_kind,fact_status,reason_code,reachable_stable_ids,root_stable_ids FROM nodes WHERE node_type='completeness_fact' AND pass_kind IN ('cha','rta') ORDER BY pass_kind`)
+	rows, err := db.db.Query(`SELECT pass_kind,fact_status,reason_code,reachable_stable_ids,root_stable_ids,root_policy FROM nodes WHERE node_type='completeness_fact' AND pass_kind IN ('cha','rta') ORDER BY pass_kind`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
-	got := make(map[string][4]string)
+	got := make(map[string][5]string)
 	for rows.Next() {
-		var pass, status, reason, reachable, roots string
-		if err := rows.Scan(&pass, &status, &reason, &reachable, &roots); err != nil {
+		var pass, status, reason, reachable, roots, policy string
+		if err := rows.Scan(&pass, &status, &reason, &reachable, &roots, &policy); err != nil {
 			t.Fatal(err)
 		}
-		got[pass] = [4]string{status, reason, reachable, roots}
+		got[pass] = [5]string{status, reason, reachable, roots, policy}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if got["cha"] != [4]string{"closed", "", "null", "null"} {
+	if got["cha"] != [5]string{"closed", "", "null", "null", ""} {
 		t.Fatalf("CHA completeness=%v, want closed", got["cha"])
 	}
-	if got["rta"] != [4]string{"partial", "hierarchy_open", `["caller","a"]`, `["caller"]`} {
+	if got["rta"] != [5]string{"partial", "hierarchy_open", `["caller","a"]`, `["caller"]`, "explicit"} {
 		t.Fatalf("RTA completeness=%v, want partial/hierarchy_open", got["rta"])
 	}
 	evidence, err := db.QueryAttachedCandidates("Run")
@@ -294,7 +294,7 @@ func TestAttachResolutionGraphPersistsCHAThenRTACompleteness(t *testing.T) {
 	for _, pass := range evidence[0].PassCoverage {
 		coverage[pass.PassKind] = pass
 	}
-	if !strings.EqualFold(strings.Join(coverage["cha"].CandidateStableIDs, ","), "a,b") || !strings.EqualFold(strings.Join(coverage["rta"].CandidateStableIDs, ","), "a") || !strings.EqualFold(strings.Join(coverage["rta"].AllocationTypeStableIDs, ","), "type-a") || !strings.EqualFold(strings.Join(coverage["rta"].ReachableStableIDs, ","), "caller,a") || !strings.EqualFold(strings.Join(coverage["rta"].RootStableIDs, ","), "caller") {
+	if !strings.EqualFold(strings.Join(coverage["cha"].CandidateStableIDs, ","), "a,b") || !strings.EqualFold(strings.Join(coverage["rta"].CandidateStableIDs, ","), "a") || !strings.EqualFold(strings.Join(coverage["rta"].AllocationTypeStableIDs, ","), "type-a") || !strings.EqualFold(strings.Join(coverage["rta"].ReachableStableIDs, ","), "caller,a") || !strings.EqualFold(strings.Join(coverage["rta"].RootStableIDs, ","), "caller") || coverage["rta"].RootPolicy != "explicit" {
 		t.Fatalf("normal query hierarchy candidate evidence=%+v", coverage)
 	}
 }

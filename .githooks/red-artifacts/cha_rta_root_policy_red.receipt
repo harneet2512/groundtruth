@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=3e6bfd34359f0c932cca85d6b4c6f7ddfe265afe
+fixture_path=.githooks/tests/cha_rta_root_policy_red.sh
+fixture_sha256=2783db48cd36219c24eb431a630af353af4b032e2640c32f31d25dbb31ae08d3
+command=.githooks/tests/cha_rta_root_policy_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/cha_rta_root_policy_red.out
+output_sha256=3f6c26fa59a8bc649a1dd6a9dd804d5f20cd32d9aa4b8f7c4489b07dd4dc66e7
