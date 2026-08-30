@@ -1,0 +1,15 @@
+format=gt.fixture-red.v1
+unit=HAR-42-step-5-VTA-scope-repair
+base_sha=85bb689da66d646bbc1f6fff21fed9f21ab331d3
+fixture_path=.githooks/tests/vta_step5_scope_red.sh
+fixture_sha256=589bdd5efea893d06e4b941777eb9dd7248821f483e6d4faa4822319a1bc42f5
+test_fixture_path=gt-index/internal/resolver/vta_scope_red_test.go
+test_fixture_sha256=3b70dad96f5a3e94a1750861712d490b42ebfd88173cdf0ad5eaa89399193e15
+runner_path=.githooks/tests/vta_step5_scope_red.sh
+runner_sha256=589bdd5efea893d06e4b941777eb9dd7248821f483e6d4faa4822319a1bc42f5
+command=.githooks/tests/vta_step5_scope_red.sh
+go_test_command=go test ./internal/resolver -run '^TestVTASameFileScopeBoundary$' -count=1
+exit_code=1
+output_path=.githooks/red-artifacts/vta_step5_scope_red.out
+output_sha256=55eeadbb6f0b3026123636c5da9bc83630be6567ed7b9a05d5ba9cc6cb03c500
+expected_failure=unknown field CallerScope in struct literal of type parser.CallRef
