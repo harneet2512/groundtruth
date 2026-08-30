@@ -86,6 +86,23 @@ func TestVTAVariableFlowRetainsAlternativesAndAbstainsAmbiguity(t *testing.T) {
 		)
 		assertVTAField(t, results, 0, "CandidateNodeIDs", "[13]")
 	})
+
+	t.Run("same_name_is_file_scoped", func(t *testing.T) {
+		results := AnalyzeVTA(
+			[]parser.CallRef{
+				{CalleeName: "Run", CalleeQualified: "runner.Run", File: "main.go", Line: 20, DispatchForm: "interface"},
+				{CalleeName: "Run", CalleeQualified: "runner.Run", File: "other.go", Line: 20, DispatchForm: "interface"},
+			},
+			meta,
+			implements,
+			[]parser.AssignmentRef{
+				{VarName: "runner", TypeName: "ImplA", Scope: "main", File: "main.go", Line: 8},
+				{VarName: "runner", TypeName: "ImplB", Scope: "serve", File: "other.go", Line: 8},
+			},
+		)
+		assertVTAField(t, results, 0, "CandidateNodeIDs", "[8]")
+		assertVTAField(t, results, 1, "CandidateNodeIDs", "[9]")
+	})
 }
 
 func assertVTAField(t *testing.T, results any, index int, field, want string) {
