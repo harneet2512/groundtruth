@@ -193,6 +193,22 @@ func TestResolveWithProvenanceDeduplicatesEquivalentImportCandidates(t *testing.
 	if len(traces) != 1 || len(traces[0].CandidateNodeIDs) != 1 || traces[0].CandidateNodeIDs[0] != 2 {
 		t.Fatalf("duplicate import identities were not coalesced: %+v", traces)
 	}
+	statuses := make(map[string]ResolutionPassExecution, len(traces[0].PassExecutions))
+	for _, pass := range traces[0].PassExecutions {
+		statuses[pass.PassKind] = pass
+	}
+	if got := statuses["lexical_binding"]; got.Status != "completed_no_match" || got.Reason != "" {
+		t.Fatalf("lexical miss before import winner was not emitted by control flow: %+v", got)
+	}
+	if got := statuses["import_binding"]; got.Status != "completed_match" || got.Reason != "" {
+		t.Fatalf("import winner was not emitted by control flow: %+v", got)
+	}
+	for _, passKind := range []string{"declared_type", "implementation_set", "return_type", "global_name"} {
+		got := statuses[passKind]
+		if got.Status != "not_run" || got.Reason == "" {
+			t.Fatalf("post-import pass %s fabricated execution: %+v", passKind, got)
+		}
+	}
 	if err := traces[0].Validate(); err != nil {
 		t.Fatal(err)
 	}

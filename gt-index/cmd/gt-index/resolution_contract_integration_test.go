@@ -208,6 +208,31 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 			t.Fatalf("unexecuted pass %s fabricated completion: %+v", passKind, got)
 		}
 	}
+	if err := db.QueryRow(`SELECT hc.pass_coverage FROM nodes c
+		JOIN edges hc ON hc.target_id=c.id AND hc.type='HAS_CALLSITE'
+		WHERE c.node_type='callsite' AND c.name='target' LIMIT 1`).Scan(&coverageJSON); err != nil {
+		t.Fatalf("import-call pass coverage: %v", err)
+	}
+	coverage = nil
+	if err := json.Unmarshal([]byte(coverageJSON), &coverage); err != nil {
+		t.Fatalf("decode import-call pass coverage: %v", err)
+	}
+	statuses = make(map[string]store.ResolutionPassCoverage, len(coverage))
+	for _, pass := range coverage {
+		statuses[pass.PassKind] = pass
+	}
+	if got := statuses["lexical_binding"]; got.Status != "completed_no_match" || got.Reason != "" {
+		t.Fatalf("attempted lexical miss before import winner was not witnessed: %+v", got)
+	}
+	if got := statuses["import_binding"]; got.Status != "completed_match" || got.Reason != "" {
+		t.Fatalf("import winner execution was not witnessed: %+v", got)
+	}
+	for _, passKind := range []string{"declared_type", "implementation_set", "return_type", "global_name"} {
+		got := statuses[passKind]
+		if got.Status != "not_run" || got.Reason == "" {
+			t.Fatalf("post-import pass %s fabricated execution: %+v", passKind, got)
+		}
+	}
 	graph, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)

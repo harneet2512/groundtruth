@@ -471,10 +471,8 @@ type ResolutionCallsite struct {
 	PassExecutions        []ResolutionPassExecution
 }
 
-// ResolutionPassExecution records only work evidenced by the resolver's
-// terminal path. Passes after a successful binding are explicitly not run;
-// they are never inferred to have completed merely because the callsite was
-// resolved.
+// ResolutionPassExecution records a pass outcome emitted by the resolver
+// control flow. It is not reconstructed from the final resolution mechanism.
 type ResolutionPassExecution struct {
 	PassKind string
 	Status   string
@@ -486,18 +484,13 @@ var resolutionPassOrder = []string{
 	"return_type", "global_name", "dynamic_framework",
 }
 
-func resolutionPassExecutions(call parser.CallRef, rc *ResolvedCall) []ResolutionPassExecution {
-	winner := map[string]string{
-		"same_file": "lexical_binding", "import": "import_binding",
-		"inherited": "declared_type", "import_type": "declared_type", "type_flow": "declared_type",
-		"impl_method": "implementation_set", "return_type": "return_type",
-		"verified_unique": "global_name", "name_match": "global_name",
-	}
-	winnerPass := ""
-	if rc != nil {
-		winnerPass = winner[rc.Method]
-	}
-	coverage := make([]ResolutionPassExecution, 0, len(resolutionPassOrder))
+type resolutionPassTracker struct {
+	active  string
+	entries map[string]ResolutionPassExecution
+}
+
+func newResolutionPassTracker(call parser.CallRef) *resolutionPassTracker {
+	tracker := &resolutionPassTracker{entries: make(map[string]ResolutionPassExecution, len(resolutionPassOrder))}
 	for _, pass := range resolutionPassOrder {
 		entry := ResolutionPassExecution{PassKind: pass, Status: "not_run", Reason: "no_execution_event"}
 		switch {
@@ -505,14 +498,40 @@ func resolutionPassExecutions(call parser.CallRef, rc *ResolvedCall) []Resolutio
 			entry.Status, entry.Reason = "unavailable", "static_target_not_proven"
 		case pass == "dynamic_framework":
 			entry.Status, entry.Reason = "not_applicable", "no_dynamic_framework_construct"
-		case winnerPass != "" && pass == winnerPass:
-			entry.Status, entry.Reason = "completed_match", ""
 		case call.ParserIncomplete:
-			entry.Status, entry.Reason = "not_run", "parser_incomplete"
+			entry.Reason = "parser_incomplete"
 		case call.DynamicDispatch:
-			entry.Status, entry.Reason = "not_run", "dynamic_dispatch_abstention"
+			entry.Reason = "dynamic_dispatch_abstention"
 		}
-		coverage = append(coverage, entry)
+		tracker.entries[pass] = entry
+	}
+	return tracker
+}
+
+func (t *resolutionPassTracker) begin(pass string) {
+	t.active = pass
+	entry := t.entries[pass]
+	if entry.Status == "not_run" {
+		entry.Status = "completed_no_match"
+		entry.Reason = ""
+		t.entries[pass] = entry
+	}
+}
+
+func (t *resolutionPassTracker) match() {
+	if t.active == "" {
+		return
+	}
+	entry := t.entries[t.active]
+	entry.Status = "completed_match"
+	entry.Reason = ""
+	t.entries[t.active] = entry
+}
+
+func (t *resolutionPassTracker) snapshot() []ResolutionPassExecution {
+	coverage := make([]ResolutionPassExecution, 0, len(resolutionPassOrder))
+	for _, pass := range resolutionPassOrder {
+		coverage = append(coverage, t.entries[pass])
 	}
 	return coverage
 }
@@ -1477,7 +1496,7 @@ func Resolve(
 	fileMap map[string][]string,
 	nodeMeta ...map[int64]NodeMeta,
 ) []ResolvedCall {
-	resolved := resolveInternal(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, true, nodeMeta...)
+	resolved, _ := resolveInternal(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, true, nodeMeta...)
 	return resolved
 }
 
@@ -1494,7 +1513,7 @@ func resolveInternal(
 	fileMap map[string][]string, // module path → list of file paths
 	dedupeAcrossCallsites bool,
 	nodeMeta ...map[int64]NodeMeta, // optional: nodeID → metadata for self.method resolution
-) []ResolvedCall {
+) ([]ResolvedCall, [][]ResolutionPassExecution) {
 	// Build import index: file → imported name → list of candidate target files
 	importIndex := buildImportIndex(allImports, fileMap)
 	nameAliasIndex := buildNameAliasIndex(nodeIDs)
@@ -1615,13 +1634,19 @@ func resolveInternal(
 	}
 
 	var resolved []ResolvedCall
+	executionTraces := make([][]ResolutionPassExecution, len(allCalls))
 	seen := make(map[edgeKey]bool) // deduplication
 	currentCallsite := -1
+	var currentPasses *resolutionPassTracker
 	emit := func(rc ResolvedCall) {
+		if currentPasses != nil {
+			currentPasses.match()
+		}
 		if currentCallsite >= 0 && currentCallsite < len(allCalls) {
 			rc.CallsiteOrdinal = currentCallsite
 			rc.Callee = allCalls[currentCallsite].CalleeName
 			rc.CalleeQualified = allCalls[currentCallsite].CalleeQualified
+			executionTraces[currentCallsite] = currentPasses.snapshot()
 		}
 		rc.CandidateNodeIDs = uniqueIDs(rc.CandidateNodeIDs)
 		rc.CandidateCount = len(rc.CandidateNodeIDs)
@@ -1630,10 +1655,12 @@ func resolveInternal(
 
 	for i, call := range allCalls {
 		currentCallsite = i
+		currentPasses = newResolutionPassTracker(call)
 		if !dedupeAcrossCallsites {
 			seen = make(map[edgeKey]bool)
 		}
 		if call.DynamicDispatch || call.ParserIncomplete {
+			executionTraces[i] = currentPasses.snapshot()
 			continue
 		}
 		callerID := callerNodeIDs[i]
@@ -1648,6 +1675,7 @@ func resolveInternal(
 		evidence := "name_match"
 
 		// Strategy 1: Same-file exact name match (only when unambiguous)
+		currentPasses.begin("lexical_binding")
 		if fileNodes, ok := fileNodeIDs[call.File]; ok {
 			if targetIDs, ok := fileNodes[calleeName]; ok && len(targetIDs) == 1 && targetIDs[0] != callerID {
 				targetID := targetIDs[0]
@@ -1705,6 +1733,7 @@ func resolveInternal(
 
 		// Strategy 1.5: Import-verified cross-file resolution
 		// H6 fix: collect all matching imported targets, pick best (prefer same dir)
+		currentPasses.begin("import_binding")
 		if fileImports, ok := importIndex[call.File]; ok {
 			var importCandidates []int64
 
@@ -1800,6 +1829,7 @@ func resolveInternal(
 		// Handles: self.method() (Python/Rust), this.method() (JS/TS/Java),
 		//          Self::method() (Rust associated fn — Self is the impl's type)
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
+			currentPasses.begin("declared_type")
 			// Try "." separator first (self.method, this.method), then "::" (Self::method)
 			dotIdx175 := strings.LastIndex(call.CalleeQualified, ".")
 			sep175 := 1
@@ -1875,6 +1905,7 @@ func resolveInternal(
 		// (`command.run()` with `command: Command`) of its type_flow resolution. The
 		// qualified-unresolved demote now runs as the true last chance after 1.98.
 		if !qualifiedUnresolved {
+			currentPasses.begin("global_name")
 			if targets, ok := nodeIDs[calleeName]; ok {
 				var candidates []int64
 				for _, tid := range targets {
@@ -1950,6 +1981,7 @@ func resolveInternal(
 		// Fixes ambiguity when multiple classes share a name (e.g., "Client" in 5 files).
 		// Supports both "." (Python/JS/TS/Go) and "::" (Rust) qualified separators.
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
+			currentPasses.begin("declared_type")
 			dotIdx := strings.LastIndex(call.CalleeQualified, ".")
 			sep := "."
 			if dotIdx <= 0 {
@@ -2053,6 +2085,7 @@ func resolveInternal(
 		// (for Go) the signature-derived receiver name in NodeMeta.
 		if fieldTypeIndex != nil && len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil &&
 			call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+			currentPasses.begin("declared_type")
 			// Shape gate: require a receiver prefix + a SINGLE field segment, i.e.
 			// "<recv>.<field>.<method>" — strip the receiver prefix, then confirm the
 			// remaining qualifier (the field) has no further dots. The receiver is the
@@ -2156,6 +2189,7 @@ func resolveInternal(
 		// method; otherwise fall through to the next strategy.
 		if paramTypeIndex != nil && len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil &&
 			call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+			currentPasses.begin("declared_type")
 			if paramTypes, ok := paramTypeIndex[callerID]; ok && len(paramTypes) > 0 {
 				dotIdx194a := strings.LastIndex(call.CalleeQualified, ".")
 				sep194a := 1
@@ -2220,6 +2254,7 @@ func resolveInternal(
 		// would re-launder dict/str calls the builtin drop exists to remove.
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && !builtinQualified &&
 			call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+			currentPasses.begin("implementation_set")
 			resolved194 := false
 			methodName194 := calleeName
 			dotIdx194 := strings.LastIndex(call.CalleeQualified, ".")
@@ -2329,6 +2364,7 @@ func resolveInternal(
 		// Strategy 1.95 (T2): Type-flow resolution for qualified calls
 		// Supports both "." and "::" separators (Rust: Router::new, Python: obj.method)
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && call.CalleeQualified != "" {
+			currentPasses.begin("declared_type")
 			dotIdx195 := strings.LastIndex(call.CalleeQualified, ".")
 			sep195 := 1
 			if dotIdx195 <= 0 {
@@ -2379,6 +2415,7 @@ func resolveInternal(
 		// Scope-aware (caller function name) + self-field-preferring + return-type
 		// chaining (x = factory(); x.method() bridges through factory's return type).
 		if assignmentIndex != nil && len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
+			currentPasses.begin("declared_type")
 			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
 				qualifier := call.CalleeQualified[:dotIdx]
 				methodName := call.CalleeQualified[dotIdx+1:]
@@ -2477,6 +2514,7 @@ func resolveInternal(
 		// Strategy 1.97: Return-type bridging
 		// get_user().save() → look up get_user's return type → resolve save on that type.
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
+			currentPasses.begin("return_type")
 			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
 				qualifier := call.CalleeQualified[:dotIdx]
 				methodName := call.CalleeQualified[dotIdx+1:]
@@ -2561,6 +2599,7 @@ func resolveInternal(
 		// reserved for the rungs that PROVE the receiver (1.75 self, 1.93/1.94a
 		// import/declared-type, 1.95/1.96 type_flow, 1.97 return_type).
 		if !builtinQualified && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+			currentPasses.begin("global_name")
 			if classID, ok := uniqueMethodClass[calleeName]; ok {
 				if methods, ok := methodsByClass[classID]; ok {
 					if targetID, ok := methods[calleeName]; ok && targetID != callerID {
@@ -2633,6 +2672,7 @@ func resolveInternal(
 			}
 		}
 
+		currentPasses.begin("global_name")
 		// Strategy 2: Cross-file name match (fallback). Exact spelling matches use
 		// the raw name index; if none exists, the alias index bridges common naming
 		// style variation (getUser/get_user/GetUser) at lower confidence.
@@ -2686,9 +2726,12 @@ func resolveInternal(
 			}
 		}
 	nextCall:
+		if len(executionTraces[i]) == 0 {
+			executionTraces[i] = currentPasses.snapshot()
+		}
 	}
 
-	return resolved
+	return resolved, executionTraces
 }
 
 func uniqueIDs(ids []int64) []int64 {
@@ -2712,7 +2755,7 @@ func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64
 	// Resolve every callsite with only per-callsite deduplication. This keeps the
 	// resolver's pre-dedupe result available for provenance, including repeated
 	// calls that the legacy graph intentionally collapses to one endpoint edge.
-	perCallsite := resolveInternal(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, false, nodeMeta...)
+	perCallsite, executionTraces := resolveInternal(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, false, nodeMeta...)
 	resolved := dedupeResolvedCalls(perCallsite)
 	var provenanceMeta map[int64]NodeMeta
 	if len(nodeMeta) > 0 {
@@ -2724,19 +2767,17 @@ func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64
 		if i < len(callerNodeIDs) {
 			sourceID = callerNodeIDs[i]
 		}
-		trace := ResolutionCallsite{CallsiteOrdinal: i, SourceNodeID: sourceID, SourceLine: call.Line, SourceFile: call.File, Callee: call.CalleeName, CalleeQualified: call.CalleeQualified, DispatchState: DispatchZero, ParserComplete: !call.ParserIncomplete, VerificationStatus: "unverified", ImportChain: callImportEvidence(call, allImports), CandidateImportChains: make(map[int64][]string), ASTPath: call.ASTPath, ByteStart: call.ByteStart, ByteEnd: call.ByteEnd, ColumnStart: call.ColumnStart, ArgumentArity: call.ArgumentArity, DispatchForm: call.DispatchForm}
+		trace := ResolutionCallsite{CallsiteOrdinal: i, SourceNodeID: sourceID, SourceLine: call.Line, SourceFile: call.File, Callee: call.CalleeName, CalleeQualified: call.CalleeQualified, DispatchState: DispatchZero, ParserComplete: !call.ParserIncomplete, VerificationStatus: "unverified", ImportChain: callImportEvidence(call, allImports), CandidateImportChains: make(map[int64][]string), ASTPath: call.ASTPath, ByteStart: call.ByteStart, ByteEnd: call.ByteEnd, ColumnStart: call.ColumnStart, ArgumentArity: call.ArgumentArity, DispatchForm: call.DispatchForm, PassExecutions: append([]ResolutionPassExecution(nil), executionTraces[i]...)}
 		if call.CalleeQualified != "" && call.CalleeQualified != call.CalleeName {
 			trace.ReceiverOrigin = "call_syntax"
 		}
 		if call.ParserIncomplete {
-			trace.PassExecutions = resolutionPassExecutions(call, nil)
 			trace.DispatchState = DispatchParserIncomplete
 			trace.VerificationStatus = "abstained_parser_incomplete"
 			callsites[i] = trace
 			continue
 		}
 		if call.DynamicDispatch {
-			trace.PassExecutions = resolutionPassExecutions(call, nil)
 			trace.DispatchState, trace.Mechanism = DispatchDynamic, "dynamic"
 			trace.VerificationStatus = "abstained_dynamic"
 			callsites[i] = trace
@@ -2752,7 +2793,6 @@ func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64
 			}
 		}
 		if rc != nil {
-			trace.PassExecutions = resolutionPassExecutions(call, rc)
 			trace.CandidateNodeIDs = append([]int64(nil), rc.CandidateNodeIDs...)
 			trace.Mechanism, trace.EvidenceType = rc.Method, rc.EvidenceType
 			trace.ReceiverType, trace.ReceiverOrigin = rc.ReceiverType, rc.ReceiverOrigin
@@ -2784,7 +2824,7 @@ func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64
 			trace.Mechanism = "unknown_legacy"
 		}
 		if trace.PassExecutions == nil {
-			trace.PassExecutions = resolutionPassExecutions(call, nil)
+			trace.PassExecutions = newResolutionPassTracker(call).snapshot()
 		}
 		callsites[i] = trace
 	}
