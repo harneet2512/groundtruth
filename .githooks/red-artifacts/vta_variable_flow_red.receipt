@@ -2,12 +2,12 @@ format=gt.fixture-red.v1
 unit=HAR-42-step-5-VTA-variable-flow
 base_sha=5db415d71a111474bb54e6f6675f696fefa3ae9c
 fixture_path=.githooks/tests/vta_variable_flow_red.sh
-fixture_sha256=d064848f6fdb5447fbf7a10a85d4e5234fee4c2aec4a5f15082ec3cec1823ffd
+fixture_sha256=25bcf5ce49d0c4ae85f7d09ab90b745755b34836b6106936f28854f59417f02f
 runner_path=.githooks/tests/vta_variable_flow_red.sh
-runner_sha256=d064848f6fdb5447fbf7a10a85d4e5234fee4c2aec4a5f15082ec3cec1823ffd
+runner_sha256=25bcf5ce49d0c4ae85f7d09ab90b745755b34836b6106936f28854f59417f02f
 command=go test ./internal/resolver -run '^TestVTAVariableFlowRetainsAlternativesAndAbstainsAmbiguity$' -count=1
 exit_code=1
 output_path=.githooks/red-artifacts/vta_variable_flow_red.out
-output_sha256=6e08cc4f910a8b0ae76f0c3da24fa146f804c76f348490ac24832e4d77dbcfa8
+output_sha256=020271bfd551b3264dee5f433db164a3176c825ad1f0786bdc4f59a5d633e8bf
 expected_failure=undefined: AnalyzeVTA
 boundary=variable/return/field type-flow candidates remain source-bound, conservative, ambiguity-aware, and distinct from unreachable or same-name implementations
