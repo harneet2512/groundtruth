@@ -1,0 +1,6 @@
+VTA RED boundary: parser completeness does not prove closed analysis
+--- FAIL: TestVTANormalFlowRequiresClosedAnalysisBoundary (DURATIONs)
+    vta_closed_boundary_red_test.go:22: parser-complete flow without an explicit closed analysis boundary=[{CallsiteOrdinal:0 CandidateNodeIDs:[3] FlowTypeNodeIDs:[2] FlowSourceStableIDs:[vta_source_fbb1b9d75cbb290232c7ab71286c752cf758cd4b3aaec8d6e6135342a841e7b4] FlowEdgeStableIDs:[] SelectedTargetNodeID:<nil> Completeness:closed AbstentionReason:}], want partial
+FAIL
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/resolver	DURATIONs
+FAIL

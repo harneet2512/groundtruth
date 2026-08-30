@@ -1,0 +1,15 @@
+format=gt.fixture-red.v1
+unit=HAR-42-step-5-VTA-closed-analysis-boundary
+base_sha=36a08aad5e750ba54334c3ede9fbbfb072aa35cb
+fixture_path=.githooks/tests/vta_step5_closed_boundary_red.sh
+fixture_sha256=6adaf4129696f0246c32eb69d2834d3c0e8616f7c54cebe8439ce08e91798b12
+test_fixture_path=gt-index/internal/resolver/vta_closed_boundary_red_test.go
+test_fixture_sha256=8a9eedfbf8ea559be5aacf9411eb6040cd63a42dee6f725aa5f77eac98eeadc5
+runner_path=.githooks/tests/vta_step5_closed_boundary_red.sh
+runner_sha256=6adaf4129696f0246c32eb69d2834d3c0e8616f7c54cebe8439ce08e91798b12
+command=.githooks/tests/vta_step5_closed_boundary_red.sh
+go_test_command=go test ./internal/resolver -run '^TestVTANormalFlowRequiresClosedAnalysisBoundary$' -count=1
+exit_code=1
+output_path=.githooks/red-artifacts/vta_step5_closed_boundary_red.out
+output_sha256=c334b58548d3cbec6a645884969eef4043f5cff355006dba0448a4b397cd364b
+expected_failure=parser-complete flow was reported closed without an explicit closed analysis boundary
