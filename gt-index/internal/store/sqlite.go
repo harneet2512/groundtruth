@@ -243,6 +243,7 @@ type ResolutionPassCoverage struct {
 	CandidateStableIDs      []string `json:"candidate_stable_ids,omitempty"`
 	AllocationTypeStableIDs []string `json:"allocation_type_stable_ids,omitempty"`
 	ReachableStableIDs      []string `json:"reachable_stable_ids,omitempty"`
+	RootStableIDs           []string `json:"root_stable_ids,omitempty"`
 }
 
 type ResolutionDerivationStep struct {
@@ -587,6 +588,7 @@ func createSchema(db *sql.DB) error {
 		candidate_stable_ids TEXT,
 		allocation_type_stable_ids TEXT,
 		reachable_stable_ids TEXT,
+		root_stable_ids TEXT,
 		policy_name TEXT,
 		semantic_version TEXT,
 		policy_json TEXT,
@@ -834,6 +836,7 @@ func createSchema(db *sql.DB) error {
 		{"reason_code", "TEXT"}, {"blocking_pass_kinds", "TEXT"}, {"policy_name", "TEXT"},
 		{"candidate_stable_ids", "TEXT"}, {"allocation_type_stable_ids", "TEXT"},
 		{"reachable_stable_ids", "TEXT"},
+		{"root_stable_ids", "TEXT"},
 		{"semantic_version", "TEXT"}, {"policy_json", "TEXT"}, {"policy_hash", "TEXT"},
 		{"created_at", "TEXT"}, {"created_by", "TEXT"}, {"fact_schema_min", "INTEGER"},
 		{"fact_schema_max", "INTEGER"}, {"explanation_template_version", "TEXT"},

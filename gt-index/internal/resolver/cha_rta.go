@@ -21,6 +21,7 @@ type CHAThenRTAResult struct {
 	RTACompleteness      string
 	RTAAllocationTypeIDs []int64
 	ReachableNodeIDs     []int64
+	RootNodeIDs          []int64
 	RTAAbstentionReason  string
 	CHACompleteness      string
 }
@@ -49,6 +50,14 @@ func AnalyzeCHAThenRTAWithReceiverTypes(calls []parser.CallRef, meta map[int64]N
 // so an allocation discovered in a newly reachable body can cause a second
 // iteration without importing allocations from unreachable code.
 func AnalyzeCHAThenRTAWithReachability(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, receiverTypes map[int]string, callerNodeIDs []int64, candidateNodeIDs [][]int64, hierarchyClosed bool) []CHAThenRTAResult {
+	return AnalyzeCHAThenRTAWithReachabilityAndRoots(calls, meta, implements, assignments, receiverTypes, callerNodeIDs, candidateNodeIDs, EntryPointNodeIDs(meta), hierarchyClosed)
+}
+
+// AnalyzeCHAThenRTAWithReachabilityAndRoots is the producer entry point when
+// an upstream indexer has explicit entry evidence. Unknown roots are not
+// inferred from call-graph indegree; an empty root set yields typed partial
+// RTA evidence with reason roots_unknown.
+func AnalyzeCHAThenRTAWithReachabilityAndRoots(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, receiverTypes map[int]string, callerNodeIDs []int64, candidateNodeIDs [][]int64, rootNodeIDs []int64, hierarchyClosed bool) []CHAThenRTAResult {
 	results := analyzeCHAThenRTA(calls, meta, implements, assignments, receiverTypes, hierarchyClosed)
 	// The ordinary analyzer is intentionally useful as a small fixture API and
 	// therefore reports lexical allocation evidence immediately. Production RTA
@@ -60,7 +69,7 @@ func AnalyzeCHAThenRTAWithReachability(calls []parser.CallRef, meta map[int64]No
 		results[i].RTACandidateNodeIDs = nil
 		results[i].RTAAllocationTypeIDs = nil
 	}
-	reachable, instantiated := reachableInstantiationFixedPoint(calls, meta, assignments, results, callerNodeIDs, candidateNodeIDs)
+	reachable, instantiated := reachableInstantiationFixedPoint(calls, meta, assignments, results, callerNodeIDs, candidateNodeIDs, rootNodeIDs)
 	for i := range results {
 		if i >= len(calls) {
 			break
@@ -69,6 +78,7 @@ func AnalyzeCHAThenRTAWithReachability(calls []parser.CallRef, meta map[int64]No
 			continue
 		}
 		results[i].ReachableNodeIDs = sortedIDs(reachable)
+		results[i].RootNodeIDs = sortedIDs(validRootSet(rootNodeIDs, meta))
 		results[i].RTAAllocationTypeIDs = filterInstantiatedCandidateTypes(results[i].CHACandidateNodeIDs, meta, instantiated)
 		results[i].RTACandidateNodeIDs = make([]int64, 0, len(results[i].CHACandidateNodeIDs))
 		for _, methodID := range results[i].CHACandidateNodeIDs {
@@ -76,8 +86,35 @@ func AnalyzeCHAThenRTAWithReachability(calls []parser.CallRef, meta map[int64]No
 				results[i].RTACandidateNodeIDs = append(results[i].RTACandidateNodeIDs, methodID)
 			}
 		}
+		if len(results[i].RootNodeIDs) == 0 {
+			results[i].RTACompleteness = "partial"
+			results[i].RTAAbstentionReason = "roots_unknown"
+		}
 	}
 	return results
+}
+
+// EntryPointNodeIDs returns only explicit conventional entry symbols emitted
+// by the producer. It deliberately does not use graph indegree: disconnected
+// helpers and dead functions are not roots merely because they call something.
+func EntryPointNodeIDs(meta map[int64]NodeMeta) []int64 {
+	roots := make(map[int64]struct{})
+	for id, node := range meta {
+		if (node.Label == "Function" && node.Name == "main") || (node.Label == "Function" && node.Name == "__main__") {
+			roots[id] = struct{}{}
+		}
+	}
+	return sortedIDs(roots)
+}
+
+func validRootSet(rootNodeIDs []int64, meta map[int64]NodeMeta) map[int64]struct{} {
+	valid := make(map[int64]struct{})
+	for _, rootID := range rootNodeIDs {
+		if _, ok := meta[rootID]; ok {
+			valid[rootID] = struct{}{}
+		}
+	}
+	return valid
 }
 
 func analyzeCHAThenRTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, receiverTypes map[int]string, hierarchyClosed bool) []CHAThenRTAResult {
@@ -364,7 +401,7 @@ func callReceiverQualifier(call parser.CallRef) string {
 	return ""
 }
 
-func reachableInstantiationFixedPoint(calls []parser.CallRef, meta map[int64]NodeMeta, assignments []parser.AssignmentRef, results []CHAThenRTAResult, callerNodeIDs []int64, candidateNodeIDs [][]int64) (map[int64]struct{}, map[int64]struct{}) {
+func reachableInstantiationFixedPoint(calls []parser.CallRef, meta map[int64]NodeMeta, assignments []parser.AssignmentRef, results []CHAThenRTAResult, callerNodeIDs []int64, candidateNodeIDs [][]int64, rootNodeIDs []int64) (map[int64]struct{}, map[int64]struct{}) {
 	callsByCaller := make(map[int64][]int)
 	for ordinal, callerID := range callerNodeIDs {
 		if callerID != 0 && ordinal < len(calls) {
@@ -372,34 +409,9 @@ func reachableInstantiationFixedPoint(calls []parser.CallRef, meta map[int64]Nod
 		}
 	}
 
-	knownTargets := make(map[int64]struct{})
-	for _, targets := range candidateNodeIDs {
-		for _, targetID := range targets {
-			knownTargets[targetID] = struct{}{}
-		}
-	}
-	for _, result := range results {
-		for _, targetID := range result.CHACandidateNodeIDs {
-			knownTargets[targetID] = struct{}{}
-		}
-	}
 	reachable := make(map[int64]struct{})
-	for _, callerID := range callerNodeIDs {
-		if callerID == 0 {
-			continue
-		}
-		if _, isTarget := knownTargets[callerID]; !isTarget {
-			reachable[callerID] = struct{}{}
-		}
-	}
-	// A closed cycle has no graph-theoretic root. Retaining the caller set is
-	// the conservative fallback; it cannot introduce an allocation by itself.
-	if len(reachable) == 0 {
-		for _, callerID := range callerNodeIDs {
-			if callerID != 0 {
-				reachable[callerID] = struct{}{}
-			}
-		}
+	for rootID := range validRootSet(rootNodeIDs, meta) {
+		reachable[rootID] = struct{}{}
 	}
 	instantiated := make(map[int64]struct{})
 	for {
@@ -451,6 +463,12 @@ func reachableInstantiationFixedPoint(calls []parser.CallRef, meta map[int64]Nod
 		}
 		for ordinal := range calls {
 			if calls[ordinal].DispatchForm != "interface" && calls[ordinal].DispatchForm != "virtual" {
+				continue
+			}
+			if ordinal >= len(callerNodeIDs) {
+				continue
+			}
+			if _, callerReachable := reachable[callerNodeIDs[ordinal]]; !callerReachable {
 				continue
 			}
 			for _, methodID := range results[ordinal].CHACandidateNodeIDs {

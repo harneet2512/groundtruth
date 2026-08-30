@@ -112,6 +112,54 @@ func TestCHAThenRTAReachabilityDoesNotInventRootsOrExpandDeadCalls(t *testing.T)
 	}
 }
 
+func TestCHAThenRTAReachabilityHonorsMultipleRootsAndDisconnectedCycles(t *testing.T) {
+	calls := []parser.CallRef{
+		{CalleeName: "helperA", CalleeQualified: "helperA", DispatchForm: "static"},
+		{CalleeName: "helperB", CalleeQualified: "helperB", DispatchForm: "static"},
+		{CalleeName: "Run", CalleeQualified: "runner.Run", DispatchForm: "interface"},
+		{CalleeName: "cycleB", CalleeQualified: "cycleB", DispatchForm: "static"},
+		{CalleeName: "cycleA", CalleeQualified: "cycleA", DispatchForm: "static"},
+	}
+	meta := map[int64]NodeMeta{
+		1:  {Label: "Function", Name: "main", File: "main.go"},
+		2:  {Label: "Function", Name: "__main__", File: "alt.go"},
+		3:  {Label: "Interface", Name: "Runner", File: "runner.go"},
+		4:  {Label: "Struct", Name: "ImplA", File: "a.go"},
+		5:  {Label: "Struct", Name: "ImplB", File: "b.go"},
+		7:  {Label: "Function", Name: "helperA", File: "helper.go"},
+		8:  {Label: "Function", Name: "helperB", File: "helper2.go"},
+		20: {Label: "Function", Name: "cycleA", File: "cycle.go"},
+		21: {Label: "Function", Name: "cycleB", File: "cycle.go"},
+		10: {Label: "Method", Name: "Run", ParentID: 4, File: "a.go"},
+		11: {Label: "Method", Name: "Run", ParentID: 5, File: "b.go"},
+	}
+	results := AnalyzeCHAThenRTAWithReachability(
+		calls, meta, map[int64][]int64{4: {3}, 5: {3}}, []parser.AssignmentRef{
+			{VarName: "runner", TypeName: "ImplA", Scope: "helperA", File: "helper.go"},
+			{VarName: "runner", TypeName: "ImplB", Scope: "cycleA", File: "cycle.go"},
+		},
+		map[int]string{2: "Runner"},
+		[]int64{1, 2, 7, 20, 21},
+		[][]int64{{7}, {8}, nil, {21}, {20}},
+		true,
+	)
+	if got := EntryPointNodeIDs(meta); !equalInt64s(got, []int64{1, 2}) {
+		t.Fatalf("entry roots=%v, want [1 2]", got)
+	}
+	if got := results[2].RTACandidateNodeIDs; !equalInt64s(got, []int64{10}) {
+		t.Fatalf("reachable-root RTA=%v, want [10]", got)
+	}
+	if got := results[2].ReachableNodeIDs; !equalInt64s(got, []int64{1, 2, 7, 8, 10}) {
+		t.Fatalf("reachable nodes=%v, want [1 2 7 8 10]", got)
+	}
+	if got := results[2].RootNodeIDs; !equalInt64s(got, []int64{1, 2}) {
+		t.Fatalf("retained roots=%v, want [1 2]", got)
+	}
+	if got := results[2].RTAAllocationTypeIDs; !equalInt64s(got, []int64{4}) {
+		t.Fatalf("disconnected-cycle allocation leaked=%v, want [4]", got)
+	}
+}
+
 func TestCHAThenRTAUsesCompleteMethodSignatures(t *testing.T) {
 	calls := []parser.CallRef{{CalleeName: "Run", CalleeQualified: "runner.Run", DispatchForm: "interface"}}
 	meta := map[int64]NodeMeta{
