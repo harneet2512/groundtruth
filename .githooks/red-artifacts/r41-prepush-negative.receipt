@@ -1,0 +1,9 @@
+format=gt.fixture-red.v1
+base_sha=4967e0080cef47f614b1761a3152b784c0355a30
+fixture_path=.githooks/tests/test-fixture-first-pre-push.sh
+fixture_sha256=d632e2bdb29eba25add5632371dcc8f1132dc03ff6f885c64e0e3ce99d961fb1
+command=C:\Program Files\Git\bin\sh.exe .githooks/tests/test-fixture-first-pre-push.sh
+exit_code=1
+output_path=.githooks/red-artifacts/r41-prepush-negative.out
+output_sha256=e6f3cf24d4d86b29f13edbe016146d07305b7d27e337268d24755504f9d3e802
+observed_failure=fixture-first pre-push hook is missing, so protected implementation history is not enforced

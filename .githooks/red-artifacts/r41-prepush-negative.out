@@ -1,0 +1,1 @@
+RED: fixture-first pre-push hook is missing; a protected implementation can be pushed without a preceding failing-fixture receipt.
