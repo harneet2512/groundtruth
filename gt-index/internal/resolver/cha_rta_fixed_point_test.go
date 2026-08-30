@@ -67,6 +67,51 @@ func TestCHAThenRTAReachabilityIgnoresUnreachableAllocation(t *testing.T) {
 	}
 }
 
+func TestCHAThenRTAReachabilityDoesNotInventRootsOrExpandDeadCalls(t *testing.T) {
+	calls := []parser.CallRef{
+		{CalleeName: "helper", CalleeQualified: "helper", File: "main.go", Line: 4, DispatchForm: "static"},
+		{CalleeName: "Run", CalleeQualified: "runner.Run", File: "helper.go", Line: 12, DispatchForm: "interface"},
+		{CalleeName: "Run", CalleeQualified: "runner.Run", File: "dead.go", Line: 12, DispatchForm: "interface"},
+	}
+	meta := map[int64]NodeMeta{
+		1:  {Label: "Function", Name: "main", File: "main.go"},
+		3:  {Label: "Interface", Name: "Runner", File: "runner.go"},
+		4:  {Label: "Struct", Name: "ImplA", File: "a.go"},
+		5:  {Label: "Struct", Name: "ImplB", File: "b.go"},
+		6:  {Label: "Function", Name: "dead", File: "dead.go"},
+		7:  {Label: "Function", Name: "helper", File: "helper.go"},
+		10: {Label: "Method", Name: "Run", ParentID: 4, File: "a.go"},
+		11: {Label: "Method", Name: "Run", ParentID: 5, File: "b.go"},
+	}
+	results := AnalyzeCHAThenRTAWithReachability(
+		calls, meta, map[int64][]int64{4: {3}, 5: {3}}, []parser.AssignmentRef{
+			{VarName: "runner", TypeName: "ImplA", Scope: "helper", File: "helper.go", Line: 8},
+			{VarName: "other", TypeName: "ImplB", Scope: "dead", File: "dead.go", Line: 8},
+		},
+		nil, []int64{1, 7, 6}, [][]int64{{7}, nil, nil}, true,
+	)
+	if got := results[1].RTACandidateNodeIDs; !equalInt64s(got, []int64{10}) {
+		t.Fatalf("dead caller changed reachable RTA=%v, want [10]", got)
+	}
+	if got := results[1].RTAAllocationTypeIDs; !equalInt64s(got, []int64{4}) {
+		t.Fatalf("dead allocation leaked into RTA=%v, want [4]", got)
+	}
+	if got := results[1].ReachableNodeIDs; !equalInt64s(got, []int64{1, 7, 10}) {
+		t.Fatalf("invented/dead roots reachable=%v, want [1 7 10]", got)
+	}
+	if got := results[1].RootNodeIDs; !equalInt64s(got, []int64{1}) {
+		t.Fatalf("root policy=%v, want [1]", got)
+	}
+
+	unknown := AnalyzeCHAThenRTAWithReachabilityAndRoots(
+		calls[1:2], meta, map[int64][]int64{4: {3}, 5: {3}}, nil,
+		nil, []int64{6}, nil, nil, true,
+	)
+	if unknown[0].RTACompleteness != "partial" || unknown[0].RTAAbstentionReason != "roots_unknown" {
+		t.Fatalf("unknown-root state=%+v, want partial/roots_unknown", unknown[0])
+	}
+}
+
 func TestCHAThenRTAUsesCompleteMethodSignatures(t *testing.T) {
 	calls := []parser.CallRef{{CalleeName: "Run", CalleeQualified: "runner.Run", DispatchForm: "interface"}}
 	meta := map[int64]NodeMeta{
