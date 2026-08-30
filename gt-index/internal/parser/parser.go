@@ -25,6 +25,10 @@ type ParseResult struct {
 	Assignments []AssignmentRef // PyCG Rule 1: x = ClassName() type tracking
 	ModDecls    []ModDecl       // Rust mod declarations (mod foo;)
 	ReExports   []ReExportRef   // Re-export declarations (barrel files, pub use, __init__.py)
+	// ParserIncomplete is true when tree-sitter returned a recoverable tree that
+	// contains ERROR/MISSING nodes. Partial facts remain inspectable, but callers
+	// must not treat resolution derived from this file as authoritative.
+	ParserIncomplete bool
 }
 
 // ModDecl is a Rust module declaration (mod foo;) extracted from the AST.
@@ -77,6 +81,13 @@ type CallRef struct {
 	Line             int
 	File             string
 	ParserIncomplete bool
+	DynamicDispatch  bool // computed/callable expression; no stable declared callee identity
+	ASTPath          string
+	ByteStart        uint64
+	ByteEnd          uint64
+	ColumnStart      uint32
+	ArgumentArity    *uint16
+	DispatchForm     string
 }
 
 // AssignmentRef records a variable assignment where the RHS is a constructor call.
@@ -121,9 +132,15 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 
 	result := &ParseResult{}
 	root := tree.RootNode()
+	result.ParserIncomplete = root == nil || root.HasError()
 
 	// Walk the AST to extract definitions and calls
 	walkNode(root, sf, src, isTest, result, 0)
+	if result.ParserIncomplete {
+		for i := range result.Calls {
+			result.Calls[i].ParserIncomplete = true
+		}
+	}
 
 	// Go: link receiver methods (func (r *T) M()) to their struct T. Go methods
 	// are not lexically nested in the type, so walkNode labels them "Function"
@@ -811,10 +828,10 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 }
 
 func extractCalls(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int) {
-	extractCallsWithParent(node, sf, src, result, callerIdx, "")
+	extractCallsWithParent(node, sf, src, result, callerIdx, "", "0")
 }
 
-func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int, parentType string) {
+func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int, parentType, astPath string) {
 	spec := sf.Spec
 	nodeType := node.Type()
 
@@ -886,12 +903,31 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 				}
 			}
 
+			var argumentArity *uint16
+			if arguments := node.ChildByFieldName("arguments"); arguments != nil {
+				arity := uint16(arguments.NamedChildCount())
+				argumentArity = &arity
+			}
+			dynamic := callTargetIsDynamic(node)
+			dispatchForm := "static"
+			if dynamic {
+				dispatchForm = "dynamic_name"
+			} else if qualified != "" && qualified != simple {
+				dispatchForm = "virtual"
+			}
 			result.Calls = append(result.Calls, CallRef{
 				CallerNodeIdx:   callerIdx,
 				CalleeName:      simple,
 				CalleeQualified: qualified,
 				Line:            int(node.StartPoint().Row) + 1,
 				File:            sf.Path,
+				DynamicDispatch: dynamic,
+				ASTPath:         astPath,
+				ByteStart:       uint64(node.StartByte()),
+				ByteEnd:         uint64(node.EndByte()),
+				ColumnStart:     uint32(node.StartPoint().Column),
+				ArgumentArity:   argumentArity,
+				DispatchForm:    dispatchForm,
 			})
 
 			// Classify caller usage context from parent node type
@@ -923,7 +959,7 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 	}
 
 	for i := 0; i < int(node.ChildCount()); i++ {
-		extractCallsWithParent(node.Child(i), sf, src, result, callerIdx, nodeType)
+		extractCallsWithParent(node.Child(i), sf, src, result, callerIdx, nodeType, fmt.Sprintf("%s/%d", astPath, i))
 	}
 }
 
@@ -1172,6 +1208,31 @@ func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
 	return content, content
 }
 
+func callTargetIsDynamic(callNode *sitter.Node) bool {
+	if callNode == nil || callNode.ChildCount() == 0 {
+		return true
+	}
+	target := callNode.ChildByFieldName("function")
+	if target == nil {
+		target = callNode.Child(0)
+	}
+	if target == nil {
+		return true
+	}
+	// Only classify syntax that is intrinsically a runtime value lookup or an
+	// anonymous callable. Unknown grammar node kinds remain static/unknown so a
+	// newly supported language cannot silently lose otherwise resolvable calls.
+	// Generic/template calls use index_expression in Go/C++ grammars and are not
+	// included here.
+	switch target.Type() {
+	case "subscript", "subscript_expression", "computed_member_expression",
+		"lambda", "lambda_expression", "function_expression", "arrow_function":
+		return true
+	default:
+		return false
+	}
+}
+
 // isLiteralReceiver reports whether a tree-sitter node type is a literal value
 // (string / list / dict / set / number / bool / etc.) across Python, JS/TS, Go, Rust.
 // A method call whose receiver is a literal is a stdlib/builtin call, never an
@@ -1372,14 +1433,17 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 	if nodeType == "import_from_statement" {
 		// Get module name from "module_name" field or first dotted_name child
 		modulePath := ""
+		var moduleStart, moduleEnd uint32
 		if mn := node.ChildByFieldName("module_name"); mn != nil {
 			modulePath = mn.Content(src)
+			moduleStart, moduleEnd = mn.StartByte(), mn.EndByte()
 		} else {
 			// Fallback: find dotted_name child
 			for i := 0; i < int(node.ChildCount()); i++ {
 				c := node.Child(i)
 				if c.Type() == "dotted_name" {
 					modulePath = c.Content(src)
+					moduleStart, moduleEnd = c.StartByte(), c.EndByte()
 					break
 				}
 			}
@@ -1401,7 +1465,7 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 				// After "import" keyword — this is an imported name
 				name := child.Content(src)
 				// Skip if this is the module path (before "import" keyword)
-				if name != modulePath && modulePath != "" {
+				if !(child.StartByte() == moduleStart && child.EndByte() == moduleEnd) && modulePath != "" {
 					importedName := lastDotComponent(name)
 					result.Imports = append(result.Imports, ImportRef{
 						ImportedName: importedName,

@@ -91,6 +91,9 @@ func TestResolve_FieldType_DeclaredFieldDisambiguatesAmbiguousMethod(t *testing.
 	if r.TargetNodeID != 4 {
 		t.Errorf("target = %d, want 4 (HttpClient.get) — NOT 6 (CacheClient.get); the field type proves the receiver", r.TargetNodeID)
 	}
+	if r.ReceiverType != "HttpClient" || r.ReceiverOrigin != "field_annotation" {
+		t.Errorf("receiver evidence = %q/%q, want HttpClient/field_annotation", r.ReceiverType, r.ReceiverOrigin)
+	}
 }
 
 // (b) field type UNKNOWN / not in index → NO field_type edge (falls through to

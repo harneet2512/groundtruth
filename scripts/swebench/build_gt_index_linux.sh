@@ -60,20 +60,26 @@ fi
 COMMIT_SHA="$(cd "$REPO_DIR" && git rev-parse HEAD 2>/dev/null || echo unknown)"
 BUILD_TIME_UTC="$(date -u +%FT%TZ)"
 GO_TOOLCHAIN_ENV="${GT_INDEX_GO_TOOLCHAIN:-}"
+BUILD_TAGS="sqlite_fts5"
+# Hash every checked-in compiler input, including C/C++ headers. Relative paths
+# are part of the digest so renames are identity changes while checkout location
+# is not. The toolchain and build tags are bound separately below.
+SOURCE_FINGERPRINT="$(cd "$SRC_DIR" && find . -type f \( -name '*.go' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.s' -o -name 'go.mod' -o -name 'go.sum' \) -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
 
-LDFLAGS="-X main.commitSHA=${COMMIT_SHA} -X main.buildTimeUTC=${BUILD_TIME_UTC}"
+LDFLAGS="-X main.commitSHA=${COMMIT_SHA} -X main.buildTimeUTC=${BUILD_TIME_UTC} -X main.sourceFingerprint=${SOURCE_FINGERPRINT} -X main.compiledBuildTags=${BUILD_TAGS}"
 
 echo "=== build_gt_index_linux: mode=$mode out=$OUT_BIN ==="
 echo "    commit=${COMMIT_SHA}"
 echo "    built_at=${BUILD_TIME_UTC}"
 echo "    go_image=${GO_IMAGE}"
+echo "    source_fingerprint=${SOURCE_FINGERPRINT}"
 
 case "$mode" in
   native)
     cd "$SRC_DIR"
     GO_TOOLCHAIN_NATIVE="${GO_TOOLCHAIN_ENV:-$(go version | awk '{print $3}')}"
     GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build \
-      -tags sqlite_fts5 \
+      -tags "${BUILD_TAGS}" \
       -trimpath \
       -mod=readonly \
       -ldflags "${LDFLAGS} -X main.goToolchain=${GO_TOOLCHAIN_NATIVE}" \
@@ -88,7 +94,7 @@ case "$mode" in
                apt-get update -qq && apt-get install -qq -y gcc libc6-dev >/dev/null && \
                GO_TC=\$(go version | awk '{print \$3}') && \
                GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build \
-                 -tags sqlite_fts5 \
+                 -tags ${BUILD_TAGS} \
                  -trimpath \
                  -mod=readonly \
                  -ldflags \"${LDFLAGS} -X main.goToolchain=\${GO_TC}\" \

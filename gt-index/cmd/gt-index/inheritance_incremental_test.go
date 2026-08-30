@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/harneet2512/groundtruth/gt-index/internal/store"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -70,7 +71,7 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		bin += ".exe"
 	}
-	build := exec.Command("go", "build", "-tags", "sqlite_fts5", "-o", bin, ".")
+	build := exec.Command("go", "build", "-tags", "sqlite_fts5", "-ldflags", testBuildLDFlags, "-o", bin, ".")
 	build.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build gt-index: %v\n%s", err, out)
@@ -119,6 +120,54 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 		t.Fatalf("after -file reindex self.save() demoted to name_match (inheritanceMap was nil on the incremental path — the G09 regression)")
 	}
 	assertGraphResolutionIncomplete(t, dbPath)
+
+	// The incremental transaction must not leave old sidecar authority beside the
+	// changed graph. The legacy CALLS edge above remains available, while the new
+	// graph-native authority is explicitly incomplete and hidden from the generic
+	// edge query until a full rebuild restores a single revision.
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, table := range []string{"resolution_symbols", "resolution_callsites", "resolution_candidates"} {
+		var count int
+		if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
+			t.Fatalf("%s after incremental: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("stale %s rows survived incremental invalidation: %d", table, count)
+		}
+	}
+	for query, label := range map[string]string{
+		`SELECT count(*) FROM edges WHERE type IN ('HAS_CALLSITE','CANDIDATE')`: "attached resolution edges",
+		`SELECT count(*) FROM nodes WHERE label='Callsite'`:                     "attached callsite nodes",
+	} {
+		var count int
+		if err := db.QueryRow(query).Scan(&count); err != nil {
+			t.Fatalf("count %s after incremental: %v", label, err)
+		}
+		if count != 0 {
+			t.Fatalf("stale %s survived incremental invalidation: %d", label, count)
+		}
+	}
+	graph, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer graph.Close()
+	if _, err := graph.QueryAttachedCandidates("save"); err == nil {
+		t.Fatal("incomplete incremental graph exposed attached candidate authority")
+	}
+	visible, err := graph.GetAllEdges(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, edge := range visible {
+		if edge.Type == "HAS_CALLSITE" || edge.Type == "CANDIDATE" {
+			t.Fatalf("generic graph query exposed incomplete attached edge: %+v", edge)
+		}
+	}
 }
 
 func assertGraphResolutionIncomplete(t *testing.T, dbPath string) {
@@ -142,8 +191,8 @@ func assertGraphResolutionIncomplete(t *testing.T, dbPath string) {
 	if err := db.QueryRow("SELECT count(*) FROM edges WHERE type='HAS_CALLSITE'").Scan(&attached); err != nil {
 		t.Fatal(err)
 	}
-	if attached == 0 {
-		t.Fatal("incremental update removed all primary graph callsite attachments")
+	if attached != 0 {
+		t.Fatalf("incremental update retained stale primary graph callsite attachments: %d", attached)
 	}
 }
 

@@ -12,9 +12,9 @@
 //   - Step 6: nodes deleted by file_path = ?.
 //   - The orphan-edge invariant (edges referencing missing nodes) MUST hold
 //     after this operation. Verified by:
-//       SELECT COUNT(*) FROM edges
-//        WHERE source_id NOT IN (SELECT id FROM nodes)
-//           OR target_id NOT IN (SELECT id FROM nodes);
+//     SELECT COUNT(*) FROM edges
+//     WHERE source_id NOT IN (SELECT id FROM nodes)
+//     OR target_id NOT IN (SELECT id FROM nodes);
 package store
 
 import (
@@ -535,6 +535,63 @@ func BatchInsertEdgesTx(tx *sql.Tx, edges []*Edge) error {
 			e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus,
 		); err != nil {
 			return fmt.Errorf("insert edge %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func BatchInsertResolutionSymbolsTx(tx *sql.Tx, symbols []*ResolutionSymbol) error {
+	if len(symbols) == 0 {
+		return nil
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_symbols
+		(stable_id,native_id,native_kind,normalized_kind,language,path,qualified_name,start_line,end_line,export_status)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return fmt.Errorf("prepare resolution symbols: %w", err)
+	}
+	defer stmt.Close()
+	for _, s := range symbols {
+		if _, err := stmt.Exec(s.StableID, s.NativeID, s.NativeKind, s.NormalizedKind, s.Language, s.Path, s.QualifiedName, s.StartLine, s.EndLine, s.ExportStatus); err != nil {
+			return fmt.Errorf("insert resolution symbol: %w", err)
+		}
+	}
+	return nil
+}
+
+func BatchInsertResolutionCallsitesTx(tx *sql.Tx, callsites []*ResolutionCallsite) error {
+	if len(callsites) == 0 {
+		return nil
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_callsites
+		(callsite_id,callsite_ordinal,repository_revision,source_stable_id,source_native_id,source_id,source_line,source_file,callee,language,dispatch_state,candidate_count,selected_target_stable_id,selected_target_native_id,mechanism,verification_status)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return fmt.Errorf("prepare resolution callsites: %w", err)
+	}
+	defer stmt.Close()
+	for _, c := range callsites {
+		if _, err := stmt.Exec(c.CallsiteID, c.CallsiteOrdinal, c.RepositoryRevision, c.SourceStableID, c.SourceNativeID, c.SourceID, c.SourceLine, c.SourceFile, c.Callee, c.Language, c.DispatchState, c.CandidateCount, c.SelectedTargetStableID, c.SelectedTargetNativeID, c.Mechanism, c.VerificationStatus); err != nil {
+			return fmt.Errorf("insert resolution callsite: %w", err)
+		}
+	}
+	return nil
+}
+
+func BatchInsertResolutionCandidatesTx(tx *sql.Tx, candidates []*ResolutionCandidate) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_candidates
+		(callsite_id,target_id,target_stable_id,target_native_id,ordinal,mechanism,declared_scope,receiver_type,receiver_origin,receiver_shape,receiver_chain,import_chain,dynamic_dispatch,export_status,parser_complete,verification_status,selected)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return fmt.Errorf("prepare resolution candidates: %w", err)
+	}
+	defer stmt.Close()
+	for _, c := range candidates {
+		if _, err := stmt.Exec(c.CallsiteID, c.TargetID, c.TargetStableID, c.TargetNativeID, c.Ordinal, c.Mechanism, c.DeclaredScope, c.ReceiverType, c.ReceiverOrigin, c.ReceiverShape, c.ReceiverChain, c.ImportChain, c.DynamicDispatch, c.ExportStatus, c.ParserComplete, c.VerificationStatus, c.Selected); err != nil {
+			return fmt.Errorf("insert resolution candidate: %w", err)
 		}
 	}
 	return nil

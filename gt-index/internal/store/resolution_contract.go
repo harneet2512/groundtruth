@@ -7,6 +7,7 @@ import (
 )
 
 const ResolutionProducerContract = "gt-index.callsites.v1"
+const CallResolutionContractV2 = "gt-index.call-resolution.v2"
 
 func stableResolutionDigest(schema string, values ...any) string {
 	payload := append([]any{schema}, values...)

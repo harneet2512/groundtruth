@@ -398,6 +398,8 @@ type ResolvedCall struct {
 	TrustTier        string  // CERTIFIED, CANDIDATE, SPECULATIVE
 	EvidenceType     string  // ast_call, ast_import, name_match
 	CandidateNodeIDs []int64 // complete resolver-owned viable identities
+	ReceiverType     string  // source-supported receiver type when a strategy proves it
+	ReceiverOrigin   string  // import, field_annotation, param_annotation, assignment, return_type, or call_syntax
 }
 
 type DispatchState string
@@ -406,29 +408,72 @@ const (
 	DispatchZero               DispatchState = "zero"
 	DispatchUnique             DispatchState = "unique"
 	DispatchAmbiguous          DispatchState = "ambiguous"
+	DispatchCandidateOnly      DispatchState = "candidate_only"
 	DispatchDynamic            DispatchState = "dynamic"
 	DispatchExternalUnresolved DispatchState = "external_unresolved"
 	DispatchParserIncomplete   DispatchState = "parser_incomplete"
 )
 
+const ResolutionAuthoritySchema = "gt-index.resolution-authority.v1"
+
+var receiverOriginVocabulary = map[string]struct{}{
+	"": {}, "import": {}, "field_annotation": {}, "param_annotation": {},
+	"assignment": {}, "return_type": {}, "call_syntax": {}, "type_qualifier": {},
+}
+
+// sourceSupportedResolution is deliberately independent of Confidence.  It is
+// the closed producer policy for evidence that can authorize a unique target.
+// Heuristic/name-uniqueness mechanisms remain useful ranking candidates, but
+// can never become source-supported merely by crossing a numeric threshold.
+func sourceSupportedResolution(rc ResolvedCall) bool {
+	allowed := map[string]map[string]struct{}{
+		"same_file":   {"ast_call": {}, "inheritance_chain": {}},
+		"inherited":   {"inheritance_chain": {}},
+		"import":      {"ast_import": {}},
+		"import_type": {"import_scoped_type": {}},
+		"type_flow": {
+			"field_type": {}, "param_type": {}, "type_qualified": {}, "assignment_tracked": {},
+		},
+		"return_type": {"return_type_flow": {}},
+	}
+	evidence, ok := allowed[rc.Method]
+	if !ok {
+		return false
+	}
+	_, ok = evidence[rc.EvidenceType]
+	return ok && len(rc.CandidateNodeIDs) == 1
+}
+
 type ResolutionCallsite struct {
-	CallsiteOrdinal      int
-	SourceNodeID         int64
-	SourceLine           int
-	SourceFile           string
-	Callee               string
-	CalleeQualified      string
-	DispatchState        DispatchState
-	CandidateNodeIDs     []int64
-	SelectedTargetNodeID *int64
-	Mechanism            string
-	ReceiverType         string
-	ReceiverOrigin       string
-	ParserComplete       bool
-	VerificationStatus   string
+	CallsiteOrdinal       int
+	SourceNodeID          int64
+	SourceLine            int
+	SourceFile            string
+	Callee                string
+	CalleeQualified       string
+	DispatchState         DispatchState
+	CandidateNodeIDs      []int64
+	SelectedTargetNodeID  *int64
+	Mechanism             string
+	ReceiverType          string
+	ReceiverOrigin        string
+	ParserComplete        bool
+	VerificationStatus    string
+	EvidenceType          string
+	ImportChain           []string
+	CandidateImportChains map[int64][]string
+	ASTPath               string
+	ByteStart             uint64
+	ByteEnd               uint64
+	ColumnStart           uint32
+	ArgumentArity         *uint16
+	DispatchForm          string
 }
 
 func (c ResolutionCallsite) Validate() error {
+	if _, ok := receiverOriginVocabulary[c.ReceiverOrigin]; !ok {
+		return fmt.Errorf("receiver origin %q is not in %s", c.ReceiverOrigin, ResolutionAuthoritySchema)
+	}
 	seen := make(map[int64]struct{}, len(c.CandidateNodeIDs))
 	for _, id := range c.CandidateNodeIDs {
 		if id == 0 {
@@ -453,7 +498,15 @@ func (c ResolutionCallsite) Validate() error {
 		if len(c.CandidateNodeIDs) < 2 || c.SelectedTargetNodeID != nil {
 			return fmt.Errorf("ambiguous callsite requires multiple candidates and no selection")
 		}
-	case DispatchZero, DispatchDynamic, DispatchExternalUnresolved, DispatchParserIncomplete:
+	case DispatchCandidateOnly:
+		if len(c.CandidateNodeIDs) < 1 || c.SelectedTargetNodeID != nil {
+			return fmt.Errorf("candidate-only callsite requires retained candidates and no selection")
+		}
+	case DispatchDynamic:
+		if len(c.CandidateNodeIDs) != 0 || c.SelectedTargetNodeID != nil {
+			return fmt.Errorf("dynamic callsite must explicitly abstain with zero candidates")
+		}
+	case DispatchZero, DispatchExternalUnresolved, DispatchParserIncomplete:
 		if len(c.CandidateNodeIDs) != 0 || c.SelectedTargetNodeID != nil {
 			return fmt.Errorf("unresolved callsite cannot retain target authority")
 		}
@@ -1370,11 +1423,29 @@ func BuildAssignmentIndex(assignments []parser.AssignmentRef) map[string]*Assign
 
 func Resolve(
 	allCalls []parser.CallRef,
+	nodeIDs map[string][]int64,
+	fileNodeIDs map[string]map[string][]int64,
+	callerNodeIDs []int64,
+	allImports []parser.ImportRef,
+	fileMap map[string][]string,
+	nodeMeta ...map[int64]NodeMeta,
+) []ResolvedCall {
+	resolved := resolveInternal(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, true, nodeMeta...)
+	return resolved
+}
+
+// resolveInternal resolves every parser callsite. When dedupeAcrossCallsites is
+// true it preserves the legacy graph's endpoint deduplication. When false it
+// emits one resolver result per callsite so provenance is captured before the
+// legacy edge projection is deduplicated by ResolveWithProvenance.
+func resolveInternal(
+	allCalls []parser.CallRef,
 	nodeIDs map[string][]int64, // name → list of node IDs
 	fileNodeIDs map[string]map[string][]int64, // file → name → list of node IDs
 	callerNodeIDs []int64, // parallel to allCalls
 	allImports []parser.ImportRef, // all parsed import statements
 	fileMap map[string][]string, // module path → list of file paths
+	dedupeAcrossCallsites bool,
 	nodeMeta ...map[int64]NodeMeta, // optional: nodeID → metadata for self.method resolution
 ) []ResolvedCall {
 	// Build import index: file → imported name → list of candidate target files
@@ -1498,13 +1569,26 @@ func Resolve(
 
 	var resolved []ResolvedCall
 	seen := make(map[edgeKey]bool) // deduplication
+	currentCallsite := -1
+	emit := func(rc ResolvedCall) {
+		if currentCallsite >= 0 && currentCallsite < len(allCalls) {
+			rc.CallsiteOrdinal = currentCallsite
+			rc.Callee = allCalls[currentCallsite].CalleeName
+			rc.CalleeQualified = allCalls[currentCallsite].CalleeQualified
+		}
+		rc.CandidateNodeIDs = uniqueIDs(rc.CandidateNodeIDs)
+		rc.CandidateCount = len(rc.CandidateNodeIDs)
+		resolved = append(resolved, rc)
+	}
 
 	for i, call := range allCalls {
-		// Deduplication is scoped to one parser callsite. A global endpoint key
-		// silently drops repeated calls to the same target, which makes provenance
-		// impossible to recover after resolution. Legacy edge consumers still see
-		// one edge per source call; graph-native attachment preserves the ordinal.
-		seen = make(map[edgeKey]bool)
+		currentCallsite = i
+		if !dedupeAcrossCallsites {
+			seen = make(map[edgeKey]bool)
+		}
+		if call.DynamicDispatch || call.ParserIncomplete {
+			continue
+		}
 		callerID := callerNodeIDs[i]
 		if callerID == 0 {
 			continue
@@ -1523,7 +1607,7 @@ func Resolve(
 				key := edgeKey{callerID, targetID, "CALLS"}
 				if !seen[key] {
 					seen[key] = true
-					resolved = append(resolved, ResolvedCall{
+					emit(ResolvedCall{
 						SourceNodeID:     callerID,
 						TargetNodeID:     targetID,
 						SourceLine:       call.Line,
@@ -1554,7 +1638,7 @@ func Resolve(
 						seen[key] = true
 						// 0.6 = CANDIDATE: locality is strong, but WHICH same-named
 						// local definition is the target is not certain → not CERTIFIED.
-						resolved = append(resolved, ResolvedCall{
+						emit(ResolvedCall{
 							SourceNodeID:     callerID,
 							TargetNodeID:     best,
 							SourceLine:       call.Line,
@@ -1631,6 +1715,7 @@ func Resolve(
 				}
 			}
 
+			importCandidates = uniqueIDs(importCandidates)
 			if len(importCandidates) > 0 {
 				// #40: implement the promised same-dir tie-break (prefer a target in the
 				// caller's directory; else lexicographically-smallest path) so the pick is
@@ -1647,7 +1732,7 @@ func Resolve(
 				key := edgeKey{callerID, bestTarget, "CALLS"}
 				if !seen[key] {
 					seen[key] = true
-					resolved = append(resolved, ResolvedCall{
+					emit(ResolvedCall{
 						SourceNodeID:     callerID,
 						TargetNodeID:     bestTarget,
 						SourceLine:       call.Line,
@@ -1680,6 +1765,7 @@ func Resolve(
 				if qualifier == "self" || qualifier == "this" || qualifier == "Self" {
 					callerMeta, hasMeta := nodeMeta[0][callerID]
 					if hasMeta && callerMeta.ParentID != 0 {
+						receiverType := nodeMeta[0][callerMeta.ParentID].Name
 						memberName := call.CalleeQualified[dotIdx175+sep175:]
 						if targetID, found := lookupMethodWithInheritance(callerMeta.ParentID, memberName); found && targetID != callerID {
 							// Determine if same-class or inherited
@@ -1695,7 +1781,7 @@ func Resolve(
 							key := edgeKey{callerID, targetID, "CALLS"}
 							if !seen[key] {
 								seen[key] = true
-								resolved = append(resolved, ResolvedCall{
+								emit(ResolvedCall{
 									SourceNodeID:     callerID,
 									TargetNodeID:     targetID,
 									SourceLine:       call.Line,
@@ -1706,6 +1792,8 @@ func Resolve(
 									CandidateNodeIDs: []int64{targetID},
 									TrustTier:        tierFor(conf),
 									EvidenceType:     evidence,
+									ReceiverType:     receiverType,
+									ReceiverOrigin:   "call_syntax",
 								})
 							}
 							continue
@@ -1775,7 +1863,7 @@ func Resolve(
 							// Demote shape mirrors the qualified-unresolved last-chance demote
 							// (conf 0.2, sub-SPECULATIVE) so tierFor agrees and Strategy 2 does
 							// not re-CERTIFY this single candidate at name_match conf 0.9.
-							resolved = append(resolved, ResolvedCall{
+							emit(ResolvedCall{
 								SourceNodeID:     callerID,
 								TargetNodeID:     targetID,
 								SourceLine:       call.Line,
@@ -1792,7 +1880,7 @@ func Resolve(
 					}
 					if !seen[key] {
 						seen[key] = true
-						resolved = append(resolved, ResolvedCall{
+						emit(ResolvedCall{
 							SourceNodeID:     callerID,
 							TargetNodeID:     targetID,
 							SourceLine:       call.Line,
@@ -1845,7 +1933,7 @@ func Resolve(
 													key := edgeKey{callerID, targetID, "CALLS"}
 													if !seen[key] {
 														seen[key] = true
-														resolved = append(resolved, ResolvedCall{
+														emit(ResolvedCall{
 															SourceNodeID:     callerID,
 															TargetNodeID:     targetID,
 															SourceLine:       call.Line,
@@ -1856,6 +1944,8 @@ func Resolve(
 															CandidateNodeIDs: []int64{targetID},
 															TrustTier:        tierFor(0.95),
 															EvidenceType:     "import_scoped_type",
+															ReceiverType:     qualifier,
+															ReceiverOrigin:   "import",
 														})
 													}
 													goto nextCall
@@ -1980,7 +2070,7 @@ func Resolve(
 											key := edgeKey{callerID, targetID, "CALLS"}
 											if !seen[key] {
 												seen[key] = true
-												resolved = append(resolved, ResolvedCall{
+												emit(ResolvedCall{
 													SourceNodeID:     callerID,
 													TargetNodeID:     targetID,
 													SourceLine:       call.Line,
@@ -1991,6 +2081,8 @@ func Resolve(
 													CandidateNodeIDs: []int64{targetID},
 													TrustTier:        tierFor(0.9),
 													EvidenceType:     "field_type",
+													ReceiverType:     className2b,
+													ReceiverOrigin:   "field_annotation",
 												})
 											}
 											goto nextCall
@@ -2041,7 +2133,7 @@ func Resolve(
 											key := edgeKey{callerID, targetID, "CALLS"}
 											if !seen[key] {
 												seen[key] = true
-												resolved = append(resolved, ResolvedCall{
+												emit(ResolvedCall{
 													SourceNodeID:     callerID,
 													TargetNodeID:     targetID,
 													SourceLine:       call.Line,
@@ -2052,6 +2144,8 @@ func Resolve(
 													CandidateNodeIDs: []int64{targetID},
 													TrustTier:        tierFor(0.9),
 													EvidenceType:     "param_type",
+													ReceiverType:     className194a,
+													ReceiverOrigin:   "param_annotation",
 												})
 											}
 											goto nextCall
@@ -2128,35 +2222,48 @@ func Resolve(
 							classIDs194 = append(classIDs194, classID)
 						}
 						sort.Slice(classIDs194, func(a, b int) bool { return classIDs194[a] < classIDs194[b] })
+						// Keep a deterministic preferred endpoint only for the backward-
+						// compatible legacy CALLS projection. The attached callsite trace
+						// below derives ambiguity from the complete candidate set and will
+						// deliberately publish no unique selection when that set has more
+						// than one viable implementor.
 						var bestTarget194 int64
+						var sameFileTarget194 int64
+						var fallbackTarget194 int64
 						var candidates194 []int64
 						for _, classID := range classIDs194 {
 							if methods, ok := methodsByClass[classID]; ok {
 								if targetID, ok := methods[methodName194]; ok && targetID != callerID {
 									candidates194 = append(candidates194, targetID)
 									cm := nodeMeta[0][classID]
-									if cm.File == call.File {
-										bestTarget194 = targetID
-										break // same-file is best
+									if cm.File == call.File && sameFileTarget194 == 0 {
+										sameFileTarget194 = targetID
 									}
-									if bestTarget194 == 0 {
-										bestTarget194 = targetID
+									if fallbackTarget194 == 0 {
+										fallbackTarget194 = targetID
 									}
 								}
 							}
+						}
+						bestTarget194 = sameFileTarget194
+						if bestTarget194 == 0 {
+							bestTarget194 = fallbackTarget194
 						}
 						if bestTarget194 != 0 {
 							key := edgeKey{callerID, bestTarget194, "CALLS"}
 							if !seen[key] {
 								seen[key] = true
-								resolved = append(resolved, ResolvedCall{
-									SourceNodeID:     callerID,
-									TargetNodeID:     bestTarget194,
-									SourceLine:       call.Line,
-									SourceFile:       call.File,
-									Method:           "impl_method",
-									Confidence:       conf194,
-									CandidateCount:   numClasses,
+								emit(ResolvedCall{
+									SourceNodeID: callerID,
+									TargetNodeID: bestTarget194,
+									SourceLine:   call.Line,
+									SourceFile:   call.File,
+									Method:       "impl_method",
+									Confidence:   conf194,
+									// CandidateNodeIDs is the authority for attached
+									// provenance; TargetNodeID is retained only for the
+									// legacy endpoint-deduplicated CALLS edge.
+									CandidateCount:   len(candidates194),
 									CandidateNodeIDs: append([]int64(nil), candidates194...),
 									TrustTier:        tierFor(conf194),
 									EvidenceType:     "single_implementor",
@@ -2196,7 +2303,7 @@ func Resolve(
 									key := edgeKey{callerID, targetID, "CALLS"}
 									if !seen[key] {
 										seen[key] = true
-										resolved = append(resolved, ResolvedCall{
+										emit(ResolvedCall{
 											SourceNodeID:     callerID,
 											TargetNodeID:     targetID,
 											SourceLine:       call.Line,
@@ -2207,6 +2314,8 @@ func Resolve(
 											CandidateNodeIDs: []int64{targetID},
 											TrustTier:        tierFor(0.9),
 											EvidenceType:     "type_qualified",
+											ReceiverType:     qualifier,
+											ReceiverOrigin:   "type_qualifier",
 										})
 									}
 									goto nextCall
@@ -2292,7 +2401,7 @@ func Resolve(
 											key := edgeKey{callerID, targetID, "CALLS"}
 											if !seen[key] {
 												seen[key] = true
-												resolved = append(resolved, ResolvedCall{
+												emit(ResolvedCall{
 													SourceNodeID:     callerID,
 													TargetNodeID:     targetID,
 													SourceLine:       call.Line,
@@ -2303,6 +2412,8 @@ func Resolve(
 													CandidateNodeIDs: []int64{targetID},
 													TrustTier:        tierFor(0.9),
 													EvidenceType:     "assignment_tracked",
+													ReceiverType:     className,
+													ReceiverOrigin:   "assignment",
 												})
 											}
 											goto nextCall
@@ -2362,7 +2473,7 @@ func Resolve(
 											key := edgeKey{callerID, targetID, "CALLS"}
 											if !seen[key] {
 												seen[key] = true
-												resolved = append(resolved, ResolvedCall{
+												emit(ResolvedCall{
 													SourceNodeID:     callerID,
 													TargetNodeID:     targetID,
 													SourceLine:       call.Line,
@@ -2373,6 +2484,8 @@ func Resolve(
 													CandidateNodeIDs: []int64{targetID},
 													TrustTier:        tierFor(0.85),
 													EvidenceType:     "return_type_flow",
+													ReceiverType:     retType,
+													ReceiverOrigin:   "return_type",
 												})
 											}
 											goto nextCall
@@ -2407,7 +2520,7 @@ func Resolve(
 						key := edgeKey{callerID, targetID, "CALLS"}
 						if !seen[key] {
 							seen[key] = true
-							resolved = append(resolved, ResolvedCall{
+							emit(ResolvedCall{
 								SourceNodeID:     callerID,
 								TargetNodeID:     targetID,
 								SourceLine:       call.Line,
@@ -2455,7 +2568,7 @@ func Resolve(
 						// Confidence must sit below the SPECULATIVE threshold so tierFor
 						// agrees with the demote (a sub-0.5 conf, not the 0.9 single-
 						// candidate name_match score that tierFor would re-CERTIFY).
-						resolved = append(resolved, ResolvedCall{
+						emit(ResolvedCall{
 							SourceNodeID:     callerID,
 							TargetNodeID:     targetID,
 							SourceLine:       call.Line,
@@ -2510,7 +2623,7 @@ func Resolve(
 				key := edgeKey{callerID, bestTarget, "CALLS"}
 				if !seen[key] {
 					seen[key] = true
-					resolved = append(resolved, ResolvedCall{
+					emit(ResolvedCall{
 						SourceNodeID:     callerID,
 						TargetNodeID:     bestTarget,
 						SourceLine:       call.Line,
@@ -2531,28 +2644,32 @@ func Resolve(
 	return resolved
 }
 
+func uniqueIDs(ids []int64) []int64 {
+	seen := make(map[int64]struct{}, len(ids))
+	unique := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	return unique
+}
+
 // ResolveWithProvenance records resolver-owned candidate identities for every callsite.
 func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64, fileNodeIDs map[string]map[string][]int64, callerNodeIDs []int64, allImports []parser.ImportRef, fileMap map[string][]string, nodeMeta ...map[int64]NodeMeta) ([]ResolvedCall, []ResolutionCallsite) {
-	resolved := Resolve(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, nodeMeta...)
-	// Resolve processes calls in parser order and scopes endpoint deduplication to
-	// the current callsite. Stamp the parser ordinal on each emitted row while that
-	// ordering is still intact; no name-index lookup or post-dedupe reconstruction is
-	// involved. Skipped/unresolved calls simply consume no resolved row.
-	row := 0
-	for i := range allCalls {
-		if i >= len(callerNodeIDs) || callerNodeIDs[i] == 0 || allCalls[i].ParserIncomplete {
-			continue
-		}
-		if row >= len(resolved) {
-			break
-		}
-		if resolved[row].SourceNodeID != callerNodeIDs[i] || resolved[row].SourceLine != allCalls[i].Line || resolved[row].SourceFile != allCalls[i].File {
-			continue
-		}
-		resolved[row].CallsiteOrdinal = i
-		resolved[row].Callee = allCalls[i].CalleeName
-		resolved[row].CalleeQualified = allCalls[i].CalleeQualified
-		row++
+	// Resolve every callsite with only per-callsite deduplication. This keeps the
+	// resolver's pre-dedupe result available for provenance, including repeated
+	// calls that the legacy graph intentionally collapses to one endpoint edge.
+	perCallsite := resolveInternal(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, false, nodeMeta...)
+	resolved := dedupeResolvedCalls(perCallsite)
+	var provenanceMeta map[int64]NodeMeta
+	if len(nodeMeta) > 0 {
+		provenanceMeta = nodeMeta[0]
 	}
 	callsites := make([]ResolutionCallsite, len(allCalls))
 	for i, call := range allCalls {
@@ -2560,32 +2677,54 @@ func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64
 		if i < len(callerNodeIDs) {
 			sourceID = callerNodeIDs[i]
 		}
-		trace := ResolutionCallsite{CallsiteOrdinal: i, SourceNodeID: sourceID, SourceLine: call.Line, SourceFile: call.File, Callee: call.CalleeName, CalleeQualified: call.CalleeQualified, DispatchState: DispatchZero, ParserComplete: !call.ParserIncomplete, VerificationStatus: "unverified"}
+		trace := ResolutionCallsite{CallsiteOrdinal: i, SourceNodeID: sourceID, SourceLine: call.Line, SourceFile: call.File, Callee: call.CalleeName, CalleeQualified: call.CalleeQualified, DispatchState: DispatchZero, ParserComplete: !call.ParserIncomplete, VerificationStatus: "unverified", ImportChain: callImportEvidence(call, allImports), CandidateImportChains: make(map[int64][]string), ASTPath: call.ASTPath, ByteStart: call.ByteStart, ByteEnd: call.ByteEnd, ColumnStart: call.ColumnStart, ArgumentArity: call.ArgumentArity, DispatchForm: call.DispatchForm}
+		if call.CalleeQualified != "" && call.CalleeQualified != call.CalleeName {
+			trace.ReceiverOrigin = "call_syntax"
+		}
 		if call.ParserIncomplete {
 			trace.DispatchState = DispatchParserIncomplete
+			trace.VerificationStatus = "abstained_parser_incomplete"
 			callsites[i] = trace
 			continue
 		}
-		// Resolve emits the resolver-owned row with the parser ordinal before
-		// endpoint deduplication. Indexing by ordinal prevents same-line calls and
-		// resolved/unresolved pairs from being mis-associated.
+		if call.DynamicDispatch {
+			trace.DispatchState, trace.Mechanism = DispatchDynamic, "dynamic"
+			trace.VerificationStatus = "abstained_dynamic"
+			callsites[i] = trace
+			continue
+		}
+		// The internal resolver stamped the parser ordinal at emission time, before
+		// the separate legacy endpoint dedupe above. No source/line/name join is used.
 		var rc *ResolvedCall
-		for j := range resolved {
-			if resolved[j].CallsiteOrdinal == i {
-				rc = &resolved[j]
+		for j := range perCallsite {
+			if perCallsite[j].CallsiteOrdinal == i {
+				rc = &perCallsite[j]
 				break
 			}
 		}
 		if rc != nil {
 			trace.CandidateNodeIDs = append([]int64(nil), rc.CandidateNodeIDs...)
-			trace.Mechanism, trace.VerificationStatus = rc.Method, "legacy_edge"
+			trace.Mechanism, trace.EvidenceType = rc.Method, rc.EvidenceType
+			trace.ReceiverType, trace.ReceiverOrigin = rc.ReceiverType, rc.ReceiverOrigin
+			if sourceSupportedResolution(*rc) {
+				trace.VerificationStatus = "source_supported"
+			} else {
+				trace.VerificationStatus = "candidate_only"
+			}
+			for _, targetID := range trace.CandidateNodeIDs {
+				trace.CandidateImportChains[targetID] = candidateImportEvidence(call, targetID, allImports, fileMap, provenanceMeta)
+			}
 			switch len(trace.CandidateNodeIDs) {
 			case 0:
 				trace.DispatchState = DispatchZero
 			case 1:
-				selected := trace.CandidateNodeIDs[0]
-				trace.SelectedTargetNodeID = &selected
-				trace.DispatchState = DispatchUnique
+				if sourceSupportedResolution(*rc) {
+					selected := trace.CandidateNodeIDs[0]
+					trace.SelectedTargetNodeID = &selected
+					trace.DispatchState = DispatchUnique
+				} else {
+					trace.DispatchState = DispatchCandidateOnly
+				}
 			default:
 				trace.DispatchState = DispatchAmbiguous
 			}
@@ -2597,6 +2736,80 @@ func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64
 		callsites[i] = trace
 	}
 	return resolved, callsites
+}
+
+func candidateImportEvidence(call parser.CallRef, targetID int64, imports []parser.ImportRef, fileMap map[string][]string, meta map[int64]NodeMeta) []string {
+	target, ok := meta[targetID]
+	if !ok || target.File == "" {
+		return []string{}
+	}
+	qualifier := ""
+	if idx := strings.IndexAny(call.CalleeQualified, ".:"); idx > 0 {
+		qualifier = call.CalleeQualified[:idx]
+	}
+	evidence := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, imp := range imports {
+		if imp.File != call.File || (imp.ImportedName != call.CalleeName && imp.ImportedName != qualifier && imp.ImportedName != "*") {
+			continue
+		}
+		effectivePath := imp.ModulePath
+		if strings.HasPrefix(effectivePath, "./") || strings.HasPrefix(effectivePath, "../") {
+			effectivePath = filepath.ToSlash(filepath.Clean(filepath.Join(filepath.Dir(call.File), effectivePath)))
+		}
+		matched := false
+		for _, candidateFile := range resolveModulePath(effectivePath, fileMap) {
+			if filepath.ToSlash(candidateFile) == filepath.ToSlash(target.File) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		item := imp.ModulePath + ":" + imp.ImportedName
+		if _, exists := seen[item]; exists {
+			continue
+		}
+		seen[item] = struct{}{}
+		evidence = append(evidence, item)
+	}
+	return evidence
+}
+
+func callImportEvidence(call parser.CallRef, imports []parser.ImportRef) []string {
+	qualifier := ""
+	if idx := strings.IndexAny(call.CalleeQualified, ".:"); idx > 0 {
+		qualifier = call.CalleeQualified[:idx]
+	}
+	evidence := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, imp := range imports {
+		if imp.File != call.File || (imp.ImportedName != call.CalleeName && imp.ImportedName != qualifier && imp.ImportedName != "*") {
+			continue
+		}
+		item := imp.ModulePath + ":" + imp.ImportedName
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		evidence = append(evidence, item)
+	}
+	return evidence
+}
+
+func dedupeResolvedCalls(calls []ResolvedCall) []ResolvedCall {
+	seen := make(map[edgeKey]bool, len(calls))
+	resolved := make([]ResolvedCall, 0, len(calls))
+	for _, call := range calls {
+		key := edgeKey{call.SourceNodeID, call.TargetNodeID, "CALLS"}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		resolved = append(resolved, call)
+	}
+	return resolved
 }
 
 // buildImportIndex creates: callerFile → importedName → []targetFiles

@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -48,9 +49,11 @@ import (
 // TODO(RC-17-build): rebuild on Linux host with the build script — this
 // Windows worktree cannot regenerate bin/gt-index-linux.
 var (
-	commitSHA    = "unknown"
-	buildTimeUTC = "unknown"
-	goToolchain  = "unknown"
+	commitSHA         = "unknown"
+	buildTimeUTC      = "unknown"
+	goToolchain       = "unknown"
+	sourceFingerprint = "unknown"
+	compiledBuildTags = "unknown"
 )
 
 func repoCommit(root string) string {
@@ -60,6 +63,42 @@ func repoCommit(root string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func repositoryIdentity(root string) string {
+	out, err := exec.Command("git", "-C", root, "config", "--get", "remote.origin.url").Output()
+	identity := strings.TrimSpace(string(out))
+	if err != nil || identity == "" {
+		identity = filepath.Base(filepath.Clean(root))
+	}
+	identity = strings.ToLower(strings.TrimSuffix(strings.ReplaceAll(identity, "\\", "/"), ".git"))
+	sum := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(sum[:])
+}
+
+func qualifiedCallChain(qualified string) []string {
+	if qualified == "" {
+		return []string{}
+	}
+	parts := strings.FieldsFunc(qualified, func(r rune) bool { return r == '.' || r == ':' })
+	if len(parts) <= 1 {
+		return []string{}
+	}
+	return parts[:len(parts)-1]
+}
+
+func setRequiredMetadata(db *store.DB, values map[string]string) error {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := db.SetMeta(key, values[key]); err != nil {
+			return fmt.Errorf("set required metadata %s: %w", key, err)
+		}
+	}
+	return nil
 }
 
 // FINAL_ARCH_V2 schema contract.
@@ -78,16 +117,23 @@ func collectParseResults(files []walker.SourceFile, resultCh <-chan fileParseRes
 	parseFailures := 0
 	var failSample []string
 	for pr := range resultCh {
-		if pr.err == nil && pr.result != nil {
+		if pr.err == nil && pr.result != nil && !pr.result.ParserIncomplete {
 			results[pr.fileIdx] = pr.result
 			continue
 		}
 		parseFailures++
+		if pr.err == nil && pr.result != nil {
+			// Keep recoverable partial AST facts, but account for the damaged
+			// source and let ParserIncomplete suppress target authority.
+			results[pr.fileIdx] = pr.result
+		}
 		if len(failSample) >= 10 || pr.fileIdx < 0 || pr.fileIdx >= len(files) {
 			continue
 		}
 		if pr.err != nil {
 			failSample = append(failSample, fmt.Sprintf("%s: %v", files[pr.fileIdx].Path, pr.err))
+		} else if pr.result != nil && pr.result.ParserIncomplete {
+			failSample = append(failSample, fmt.Sprintf("%s: parser-incomplete syntax tree", files[pr.fileIdx].Path))
 		} else {
 			failSample = append(failSample, fmt.Sprintf("%s: parser returned no result", files[pr.fileIdx].Path))
 		}
@@ -103,7 +149,14 @@ func main() {
 	file := flag.String("file", "", "Incremental mode: re-index only this single file (relative to -root) into an existing -output graph.db")
 	closureEnabled := flag.Bool("closure", true, "C7: compute the transitive-closure sidecar over VERIFIED CALLS edges (default on)")
 	rebuildClosure := flag.Bool("rebuild-closure", false, "Recompute the closure sidecar on an existing -output graph.db over its CURRENT edges. Run AFTER the LSP resolve pass so the closure reflects LSP-promoted/re-pointed/deleted edges (it is built once at index time and goes stale otherwise). Clears the old closure first.")
+	buildInfo := flag.Bool("build-info", false, "Print the gt-index.build.v1 binary identity JSON and exit")
 	flag.Parse()
+	if *buildInfo {
+		if err := writeBuildInfo(os.Stdout); err != nil {
+			log.Fatalf("build-info: %v", err)
+		}
+		return
+	}
 
 	if *workers <= 0 {
 		*workers = runtime.NumCPU()
@@ -156,13 +209,27 @@ func main() {
 
 	start := time.Now()
 
-	// Remove old DB if it exists
-	os.Remove(*output)
+	// Full builds are assembled beside the requested output and published only
+	// after every pass, integrity check, and WAL checkpoint succeeds. The previous
+	// complete graph therefore remains authoritative if parsing, indexing, or
+	// finalization terminates early.
+	requestedOutput := *output
+	stagedOutput, err := createStagedOutput(requestedOutput)
+	if err != nil {
+		log.Fatalf("create staged output: %v", err)
+	}
+	published := false
+	defer func() {
+		if !published {
+			cleanupStagedOutput(stagedOutput)
+		}
+	}()
+	*output = stagedOutput
 
 	// Open database
-	db, err := store.Open(*output)
+	db, err := store.Open(stagedOutput)
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		abortStagedBuild(nil, stagedOutput, "open db: %v", err)
 	}
 	defer db.Close()
 
@@ -170,7 +237,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Pass 1: discovering files in %s...\n", *root)
 	files, err := walker.Walk(*root, *maxFiles)
 	if err != nil {
-		log.Fatalf("walk: %v", err)
+		abortStagedBuild(db, stagedOutput, "walk: %v", err)
 	}
 	fmt.Fprintf(os.Stderr, "  Found %d source files\n", len(files))
 
@@ -246,15 +313,15 @@ func main() {
 		}
 	}
 	if len(files) > 0 && parsedOK == 0 {
-		log.Fatalf("INDEX FAILED: 0/%d files parsed — graph would be empty (sample: %v)", len(files), failSample)
+		abortStagedBuild(db, stagedOutput, "INDEX FAILED: 0/%d files parsed — graph would be empty (sample: %v)", len(files), failSample)
 	}
 	if requiredRate := os.Getenv("GT_REQUIRE_PARSE_RATE"); requiredRate != "" {
 		var minimumRate float64
 		if _, err := fmt.Sscanf(requiredRate, "%f", &minimumRate); err != nil {
-			log.Fatalf("GT_REQUIRE_PARSE_RATE=%q is not a valid number: %v", requiredRate, err)
+			abortStagedBuild(db, stagedOutput, "GT_REQUIRE_PARSE_RATE=%q is not a valid number: %v", requiredRate, err)
 		}
 		if minimumRate > 0 && len(files) >= 20 && (1.0-failRate) < minimumRate {
-			log.Fatalf("GT_REQUIRE_PARSE_RATE=%.2f but only %.1f%% of %d files parsed — index too thin, failing closed (sample: %v)", minimumRate, (1.0-failRate)*100, len(files), failSample)
+			abortStagedBuild(db, stagedOutput, "GT_REQUIRE_PARSE_RATE=%.2f but only %.1f%% of %d files parsed — index too thin, failing closed (sample: %v)", minimumRate, (1.0-failRate)*100, len(files), failSample)
 		}
 	}
 
@@ -324,7 +391,7 @@ func main() {
 	insertStart := time.Now()
 	nodeDBIDs, err := db.BatchInsertNodes(allNodePtrs)
 	if err != nil {
-		log.Fatalf("batch insert nodes: %v", err)
+		abortStagedBuild(db, stagedOutput, "batch insert nodes: %v", err)
 	}
 
 	// Fix up parent IDs: map global index → DB ID
@@ -351,7 +418,7 @@ func main() {
 	// was built without `-tags sqlite_fts5` (FTS5 compiled out → nodes_fts absent).
 	if os.Getenv("GT_REQUIRE_FTS5") == "1" {
 		if n := db.FTS5RowCount(); n <= 0 {
-			log.Fatalf("GT_REQUIRE_FTS5=1 but nodes_fts has %d rows — FTS5 is not compiled in. "+
+			abortStagedBuild(db, stagedOutput, "GT_REQUIRE_FTS5=1 but nodes_fts has %d rows — FTS5 is not compiled in. "+
 				"Rebuild gt-index with `-tags sqlite_fts5`. Aborting to avoid a degraded paid run.", n)
 		} else {
 			fmt.Fprintf(os.Stderr, "[GT preflight] FTS5 OK: nodes_fts populated (%d rows)\n", n)
@@ -509,7 +576,10 @@ func main() {
 	}
 	fmt.Fprintln(os.Stderr)
 
-	// Batch insert all edges in one transaction
+	// Begin one publication transaction for legacy selected edges, attached
+	// graph-native facts, compatibility rows, and completion metadata. Nodes were
+	// inserted in the preceding structural phase; this transaction prevents any
+	// resolution reader from observing only part of the resolution publication.
 	edgeStart := time.Now()
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
@@ -527,8 +597,13 @@ func main() {
 			VerificationStatus: "unverified",
 		}
 	}
-	if err := db.BatchInsertEdges(edgePtrs); err != nil {
-		log.Fatalf("batch insert edges: %v", err)
+	publishTx, err := db.BeginTx()
+	if err != nil {
+		abortStagedBuild(db, stagedOutput, "begin resolution publication transaction: %v", err)
+	}
+	if err := store.BatchInsertEdgesTx(publishTx, edgePtrs); err != nil {
+		_ = publishTx.Rollback()
+		abortStagedBuild(db, stagedOutput, "batch insert edges: %v", err)
 	}
 	// Additive producer-owned resolution contract. The legacy edges above remain
 	// readable; these rows preserve stable identities and ambiguity explicitly.
@@ -536,6 +611,7 @@ func main() {
 	if repositoryRevision == "" {
 		repositoryRevision = "unversioned"
 	}
+	repositoryID := repositoryIdentity(*root)
 	resolutionSymbols := make([]*store.ResolutionSymbol, 0, len(allNodePtrs))
 	symbolByID := make(map[int64]store.ResolutionSymbol, len(allNodePtrs))
 	for i, node := range allNodePtrs {
@@ -546,24 +622,34 @@ func main() {
 		resolutionSymbols = append(resolutionSymbols, &s)
 		symbolByID[nodeDBIDs[i]] = s
 	}
-	if err := db.BatchInsertResolutionSymbols(resolutionSymbols); err != nil {
-		log.Fatalf("insert resolution symbols: %v", err)
+	if err := store.BatchInsertResolutionSymbolsTx(publishTx, resolutionSymbols); err != nil {
+		_ = publishTx.Rollback()
+		abortStagedBuild(db, stagedOutput, "insert resolution symbols: %v", err)
 	}
 	callsiteRows := make([]*store.ResolutionCallsite, 0, len(callsites))
 	candidateRows := make([]*store.ResolutionCandidate, 0)
 	graphRows := make([]store.AttachedResolution, 0, len(callsites))
 	nodeByID := make(map[int64]*store.Node, len(allNodes))
+	fileNodeIDByPath := make(map[string]int64)
+	fileIdentityByPath := make(map[string]string)
 	for i := range allNodes {
 		if i < len(nodeDBIDs) {
 			n := allNodes[i]
 			n.ID = nodeDBIDs[i]
 			nodeByID[nodeDBIDs[i]] = &n
+			if n.Label == "Module" && n.FilePath != "" {
+				fileNodeIDByPath[n.FilePath] = n.ID
+				if symbol, ok := symbolByID[n.ID]; ok {
+					fileIdentityByPath[n.FilePath] = symbol.StableID
+				}
+			}
 		}
 	}
 	for _, c := range callsites {
 		source, ok := symbolByID[c.SourceNodeID]
 		if !ok {
-			continue
+			_ = publishTx.Rollback()
+			abortStagedBuild(db, stagedOutput, "callsite ordinal %d source node %d missing from graph", c.CallsiteOrdinal, c.SourceNodeID)
 		}
 		callsiteID := store.StableResolutionCallsiteIDWithOrdinal(repositoryRevision, source.StableID, c.SourceFile, c.SourceLine, c.SourceLine, c.CallsiteOrdinal, c.Callee)
 		var selectedStable, selectedNative *string
@@ -581,31 +667,81 @@ func main() {
 				continue
 			}
 			complete := c.ParserComplete
-			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: c.Mechanism, DeclaredScope: source.QualifiedName, ReceiverType: c.ReceiverType, ReceiverOrigin: c.ReceiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: "[]", ImportChain: "[]", DynamicDispatch: c.DispatchState == resolver.DispatchDynamic, ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: c.SelectedTargetNodeID != nil && *c.SelectedTargetNodeID == targetID}
+			receiverChain, _ := json.Marshal(qualifiedCallChain(c.CalleeQualified))
+			importChain, _ := json.Marshal(c.CandidateImportChains[targetID])
+			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: c.Mechanism, DeclaredScope: target.QualifiedName, ReceiverType: c.ReceiverType, ReceiverOrigin: c.ReceiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), DynamicDispatch: c.DispatchState == resolver.DispatchDynamic, ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: c.SelectedTargetNodeID != nil && *c.SelectedTargetNodeID == targetID}
 			candidateRows = append(candidateRows, candidate)
 			graphCandidates = append(graphCandidates, candidate)
 		}
 		if len(graphCandidates) != len(c.CandidateNodeIDs) {
-			log.Fatalf("callsite %s candidate conservation failed: retained=%d expected=%d", callsiteID, len(graphCandidates), len(c.CandidateNodeIDs))
+			_ = publishTx.Rollback()
+			abortStagedBuild(db, stagedOutput, "callsite %s candidate conservation failed: retained=%d expected=%d", callsiteID, len(graphCandidates), len(c.CandidateNodeIDs))
 		}
 		if sourceNode := nodeByID[c.SourceNodeID]; sourceNode != nil {
-			graphCallsite := &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: string(c.DispatchState), CandidateCount: len(graphCandidates), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus}
+			parseState := "complete"
+			if !c.ParserComplete {
+				parseState = "recovered"
+			}
+			graphCallsite := &store.ResolutionCallsite{
+				CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision,
+				SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID,
+				SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language,
+				DispatchState: string(c.DispatchState), CandidateCount: len(graphCandidates),
+				SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative,
+				Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus,
+				RepoID: repositoryID, FileNodeID: fileNodeIDByPath[c.SourceFile], FileIdentity: fileIdentityByPath[c.SourceFile], CallerSymbolID: source.StableID,
+				ASTPath: c.ASTPath, ByteStart: c.ByteStart, ByteEnd: c.ByteEnd, ColumnStart: c.ColumnStart,
+				DispatchForm: c.DispatchForm, ArgumentArity: c.ArgumentArity, ParseState: parseState,
+			}
 			graphRows = append(graphRows, store.AttachedResolution{Callsite: graphCallsite, Source: sourceNode, Candidates: graphCandidates})
 		}
 	}
-	if err := db.BatchInsertResolutionCallsites(callsiteRows); err != nil {
-		log.Fatalf("insert resolution callsites: %v", err)
+	if err := store.BatchInsertResolutionCallsitesTx(publishTx, callsiteRows); err != nil {
+		_ = publishTx.Rollback()
+		abortStagedBuild(db, stagedOutput, "insert resolution callsites: %v", err)
 	}
-	if err := db.BatchInsertResolutionCandidates(candidateRows); err != nil {
-		log.Fatalf("insert resolution candidates: %v", err)
+	if err := store.BatchInsertResolutionCandidatesTx(publishTx, candidateRows); err != nil {
+		_ = publishTx.Rollback()
+		abortStagedBuild(db, stagedOutput, "insert resolution candidates: %v", err)
 	}
-	if err := db.AttachResolutionGraph(repositoryRevision, graphRows); err != nil {
-		log.Fatalf("attach graph-native resolution evidence: %v", err)
+	producerIdentity, err := currentBuildIdentity()
+	if err != nil {
+		_ = publishTx.Rollback()
+		abortStagedBuild(db, stagedOutput, "compute producer build identity: %v", err)
 	}
-	db.SetMeta("resolution_schema_version", "1")
-	db.SetMeta("resolution_producer_contract", store.ResolutionProducerContract)
-	db.SetMeta("resolution_repository_revision", repositoryRevision)
-	db.SetMeta("resolution_complete", "1")
+	graphIdentity := store.GraphCompletionIdentity{
+		Schema: store.GraphCompletionSchema, RepositoryRevision: repositoryRevision,
+		BuildInfoSchema: producerIdentity.Schema, BuildID: producerIdentity.BuildID,
+		GitCommit: producerIdentity.GitCommit, BuildTimeUTC: producerIdentity.BuildTimeUTC,
+		SourceFingerprint: producerIdentity.SourceFingerprint, ExecutableSHA256: producerIdentity.ExecutableSHA256,
+		GoToolchain: producerIdentity.GoToolchain, BuildTags: producerIdentity.BuildTags,
+		GraphSchemaVersion: producerIdentity.SchemaVersion, ResolutionContract: store.CallResolutionContractV2,
+		ResolutionAuthoritySchema: resolver.ResolutionAuthoritySchema,
+		Complete:                  producerIdentity.Complete,
+	}
+	if err := store.AttachResolutionGraphTx(publishTx, graphIdentity, graphRows); err != nil {
+		_ = publishTx.Rollback()
+		abortStagedBuild(db, stagedOutput, "attach graph-native resolution evidence: %v", err)
+	}
+	if err := store.BindGraphCompletionTx(publishTx, graphIdentity); err != nil {
+		_ = publishTx.Rollback()
+		abortStagedBuild(db, stagedOutput, "bind graph completion to producer identity: %v", err)
+	}
+	metadata := map[string]string{
+		"resolution_schema_version":      "2",
+		"resolution_producer_contract":   store.CallResolutionContractV2,
+		"resolution_repository_revision": repositoryRevision,
+		"resolution_complete":            "1",
+	}
+	for key, value := range metadata {
+		if _, err := publishTx.Exec(`INSERT INTO project_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value); err != nil {
+			_ = publishTx.Rollback()
+			abortStagedBuild(db, stagedOutput, "set resolution metadata %s: %v", key, err)
+		}
+	}
+	if err := publishTx.Commit(); err != nil {
+		abortStagedBuild(db, stagedOutput, "commit resolution publication transaction: %v", err)
+	}
 	// Containment edges: parent_id → CONTAINS for class-structure queries
 	// Use parentFixups since allNodePtrs had ParentID zeroed before batch insert.
 	var containsPtrs []*store.Edge
@@ -818,42 +954,45 @@ func main() {
 	// ── Pass 5: EXTRAS — store metadata ─────────────────────────────────
 	fmt.Fprintf(os.Stderr, "Pass 5: storing metadata...\n")
 	elapsed := time.Since(start)
-	db.SetMeta("root", *root)
+	requiredMetadata := map[string]string{"root": *root}
 	// RC-17 (F-004): build_time_ms removed from project_meta — it's wall-
 	// clock dependent and breaks byte-equality across two builds of the
 	// same commit. Diagnostic value only; emitted to stderr below instead.
-	db.SetMeta("file_count", fmt.Sprintf("%d", len(files)))
-	db.SetMeta("parse_failures", fmt.Sprintf("%d", parseFailures))
-	db.SetMeta("node_count", fmt.Sprintf("%d", len(allNodePtrs)))
-	db.SetMeta("edge_count", fmt.Sprintf("%d", len(resolved)))
-	db.SetMeta("import_count", fmt.Sprintf("%d", len(allImports)))
-	db.SetMeta("property_count", fmt.Sprintf("%d", len(propPtrs)))
-	db.SetMeta("assertion_count", fmt.Sprintf("%d", len(assertPtrs)))
-	db.SetMeta("indexer_version", "v16-multilang")
+	requiredMetadata["file_count"] = fmt.Sprintf("%d", len(files))
+	requiredMetadata["parse_failures"] = fmt.Sprintf("%d", parseFailures)
+	requiredMetadata["node_count"] = fmt.Sprintf("%d", len(allNodePtrs))
+	requiredMetadata["edge_count"] = fmt.Sprintf("%d", len(resolved))
+	requiredMetadata["import_count"] = fmt.Sprintf("%d", len(allImports))
+	requiredMetadata["property_count"] = fmt.Sprintf("%d", len(propPtrs))
+	requiredMetadata["assertion_count"] = fmt.Sprintf("%d", len(assertPtrs))
+	requiredMetadata["indexer_version"] = "v16-multilang"
 	// FINAL_ARCH_V2 Track-A (B-1/B-5): schema_version is a contract between
 	// the Go writer and Python readers. Readers MUST fail fast if this row
 	// is missing (= old binary) or older than the version the reader expects.
 	// Bump on every breaking edges/nodes schema change.
-	db.SetMeta("schema_version", schemaVersion)
+	requiredMetadata["schema_version"] = schemaVersion
 	// RC-17 (F-003): forensics-grade provenance. commitSHA / buildTimeUTC
 	// / goToolchain are injected by the build script via -ldflags. With
 	// "unknown" defaults, callers can still distinguish a stamped binary
 	// from a bare `go build`.
-	db.SetMeta("git_commit", commitSHA)
-	db.SetMeta("build_time_utc", buildTimeUTC)
-	db.SetMeta("go_toolchain", goToolchain)
-	db.SetMeta("workers", fmt.Sprintf("%d", *workers))
+	requiredMetadata["git_commit"] = commitSHA
+	requiredMetadata["build_time_utc"] = buildTimeUTC
+	requiredMetadata["go_toolchain"] = goToolchain
+	requiredMetadata["workers"] = fmt.Sprintf("%d", *workers)
 
 	// RC-04: per-repo MIN_CONFIDENCE — write the median (P50) of resolved edge
 	// confidences so downstream readers can stop hardcoding 0.7. Writing to
 	// project_meta (existing table, no schema change). Readers fall back to
 	// 0.5 (brief-layer parity) when this key is missing.
-	db.SetMeta("min_confidence", fmt.Sprintf("%.4f", computeMedianConfidence(resolved)))
+	requiredMetadata["min_confidence"] = fmt.Sprintf("%.4f", computeMedianConfidence(resolved))
 
 	// C7 (RF-4): closure row count. Diagnostic + lets readers detect a
 	// closure-bearing db without a table probe. 0 means closure disabled or
 	// no verified edges to close over — readers fall back to live BFS.
-	db.SetMeta("closure_count", fmt.Sprintf("%d", closureCount))
+	requiredMetadata["closure_count"] = fmt.Sprintf("%d", closureCount)
+	if err := setRequiredMetadata(db, requiredMetadata); err != nil {
+		abortStagedBuild(db, stagedOutput, "%v", err)
+	}
 
 	// ── Pass 5b: FILE HASHES — populate file_hashes for incremental reindex ──
 	fmt.Fprintf(os.Stderr, "Pass 5b: recording file hashes for %d files...\n", len(files))
@@ -881,7 +1020,7 @@ func main() {
 
 	// Post-insert FK validation (non-fatal)
 	if err := db.ValidateForeignKeys(); err != nil {
-		log.Fatalf("foreign-key validation failed: %v", err)
+		abortStagedBuild(db, stagedOutput, "foreign-key validation failed: %v", err)
 	}
 
 	// Fold the WAL into graph.db so the file is SELF-CONTAINED before the process
@@ -894,16 +1033,33 @@ func main() {
 	// index → `nodes_fts` COUNT looks full (external-content reads `nodes`) but a
 	// real MATCH returns 0 / "database disk image is malformed". The incremental
 	// path already checkpoints (RC-04); the full-index path must too.
-	db.CheckpointWAL()
+	if err := db.CheckpointWALRequired(); err != nil {
+		abortStagedBuild(db, stagedOutput, "checkpoint staged graph: %v", err)
+	}
+
+	// Capture summary values while the staged database is still open, then close
+	// every SQLite handle before the platform-specific atomic replacement.
+	nodeCount := db.NodeCount()
+	edgeCount := db.EdgeCount()
+	propertyCount := db.PropertyCount()
+	assertionCount := db.AssertionCount()
+	if err := db.Close(); err != nil {
+		abortStagedBuild(nil, stagedOutput, "close staged graph: %v", err)
+	}
+	if err := publishStagedOutput(stagedOutput, requestedOutput); err != nil {
+		abortStagedBuild(nil, stagedOutput, "publish staged graph: %v", err)
+	}
+	published = true
+	*output = requestedOutput
 
 	// Summary
 	fmt.Fprintf(os.Stderr, "\nDone in %s\n", elapsed.Round(time.Millisecond))
 	fmt.Fprintf(os.Stderr, "  Files:      %d\n", len(files))
-	fmt.Fprintf(os.Stderr, "  Nodes:      %d\n", db.NodeCount())
-	fmt.Fprintf(os.Stderr, "  Edges:      %d\n", db.EdgeCount())
+	fmt.Fprintf(os.Stderr, "  Nodes:      %d\n", nodeCount)
+	fmt.Fprintf(os.Stderr, "  Edges:      %d\n", edgeCount)
 	fmt.Fprintf(os.Stderr, "  Imports:    %d\n", len(allImports))
-	fmt.Fprintf(os.Stderr, "  Properties: %d\n", db.PropertyCount())
-	fmt.Fprintf(os.Stderr, "  Assertions: %d\n", db.AssertionCount())
+	fmt.Fprintf(os.Stderr, "  Properties: %d\n", propertyCount)
+	fmt.Fprintf(os.Stderr, "  Assertions: %d\n", assertionCount)
 	fmt.Fprintf(os.Stderr, "  Workers:    %d\n", *workers)
 	// RC-17 (F-004): build_time_ms is diagnostic-only now (stderr, not DB).
 	fmt.Fprintf(os.Stderr, "  BuildTime:  %d ms (diagnostic; not in project_meta)\n",
@@ -920,8 +1076,8 @@ func main() {
 	sameFileResolved := methodCounts["same_file"]
 	nameMatchResolved := methodCounts["name_match"]
 	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"imports":%d,"properties":%d,"assertions":%d,"edges_import":%d,"edges_same_file":%d,"edges_name_match":%d,"time_ms":%d,"workers":%d}`,
-		len(files), db.NodeCount(), db.EdgeCount(), len(allImports),
-		db.PropertyCount(), db.AssertionCount(),
+		len(files), nodeCount, edgeCount, len(allImports),
+		propertyCount, assertionCount,
 		importResolved, sameFileResolved, nameMatchResolved,
 		elapsed.Milliseconds(), *workers)
 	fmt.Println()
@@ -1050,6 +1206,17 @@ func runIncremental(root, relpath, dbPath string) error {
 	}
 	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`); err != nil {
 		return fmt.Errorf("bind stale graph resolution revision: %w", err)
+	}
+	// A single-file refresh cannot prove repository-wide candidate parity because
+	// callers in other files may depend on the changed identities. Remove the
+	// entire attached resolution overlay in this same transaction. Metadata-only
+	// invalidation is insufficient: direct SQL and generic graph readers do not
+	// necessarily consult project_meta before traversing nodes and edges.
+	if _, err := tx.Exec(`DELETE FROM edges WHERE type IN ('HAS_CALLSITE','CANDIDATE','CANDIDATE_TARGET','HAS_DERIVATION_FACT','HAS_COMPLETENESS_FACT','HAS_UNRESOLVED_FACT') OR (type='CALLS' AND callsite_stable_id IS NOT NULL)`); err != nil {
+		return fmt.Errorf("remove stale attached resolution edges: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM nodes WHERE node_type IN ('callsite','derivation_fact','completeness_fact','unresolved_fact') OR label='Callsite'`); err != nil {
+		return fmt.Errorf("remove stale attached resolution nodes: %w", err)
 	}
 
 	// Step 4.5 — snapshot incoming cross-file edges BEFORE delete. These get
@@ -1209,7 +1376,7 @@ func runIncremental(root, relpath, dbPath string) error {
 		resolver.SetReturnShapeIndex(resolver.BuildReturnShapeIndex(pr.Properties, newDBIDs, classNames))
 	}
 
-	resolved, callsites := resolver.ResolveWithProvenance(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)
+	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
 		edgePtrs[i] = &store.Edge{
@@ -1229,59 +1396,9 @@ func runIncremental(root, relpath, dbPath string) error {
 	if err := store.BatchInsertEdgesTx(tx, edgePtrs); err != nil {
 		return fmt.Errorf("insert new edges: %w", err)
 	}
-	// Attach the same resolver output to the primary graph in this transaction.
-	// The graph-native facts are authoritative; resolution_* rows are retained only
-	// as a compatibility projection for older readers.
-	incrRevision := repoCommit(root)
-	if incrRevision == "" {
-		incrRevision = "unversioned"
-	}
-	graphRows := make([]store.AttachedResolution, 0, len(callsites))
-	nodeByID := make(map[int64]*store.Node, len(filteredNodes))
-	symbolByID := make(map[int64]store.ResolutionSymbol, len(filteredNodes))
-	for i := range filteredNodes {
-		n := filteredNodes[i]
-		if i >= len(filteredIDs) {
-			continue
-		}
-		n.ID = filteredIDs[i]
-		nodeByID[n.ID] = &n
-		s := store.BuildResolutionSymbol(strconv.FormatInt(n.ID, 10), n)
-		symbolByID[n.ID] = s
-	}
-	for _, c := range callsites {
-		source, ok := symbolByID[c.SourceNodeID]
-		if !ok {
-			continue
-		}
-		callsiteID := store.StableResolutionCallsiteIDWithOrdinal(incrRevision, source.StableID, c.SourceFile, c.SourceLine, c.SourceLine, c.CallsiteOrdinal, c.Callee)
-		var selectedStable, selectedNative *string
-		if c.SelectedTargetNodeID != nil {
-			if target, exists := symbolByID[*c.SelectedTargetNodeID]; exists {
-				stable, native := target.StableID, target.NativeID
-				selectedStable, selectedNative = &stable, &native
-			}
-		}
-		candidates := make([]*store.ResolutionCandidate, 0, len(c.CandidateNodeIDs))
-		for ordinal, targetID := range c.CandidateNodeIDs {
-			target, exists := symbolByID[targetID]
-			if !exists {
-				return fmt.Errorf("callsite %s candidate target %d missing from graph", callsiteID, targetID)
-			}
-			complete := c.ParserComplete
-			candidates = append(candidates, &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: c.Mechanism, DeclaredScope: source.QualifiedName, ReceiverShape: c.CalleeQualified, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: c.SelectedTargetNodeID != nil && *c.SelectedTargetNodeID == targetID, ExportStatus: target.ExportStatus})
-		}
-		graphCallsite := &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: incrRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: string(c.DispatchState), CandidateCount: len(candidates), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus}
-		if sourceNode := nodeByID[c.SourceNodeID]; sourceNode != nil {
-			graphRows = append(graphRows, store.AttachedResolution{Callsite: graphCallsite, Source: sourceNode, Candidates: candidates})
-		}
-	}
-	if err := store.AttachResolutionGraphTx(tx, incrRevision, graphRows); err != nil {
-		return fmt.Errorf("attach incremental graph resolution: %w", err)
-	}
 	// This transaction only re-resolves the edited file. Other callsites may
-	// depend on symbols whose identity changed, so do not publish a partially
-	// refreshed graph as complete. A subsequent full build restores authority.
+	// depend on symbols whose identity changed, so the attached overlay remains
+	// absent until a subsequent full build restores repository-wide authority.
 	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`); err != nil {
 		return fmt.Errorf("mark incremental graph resolution incomplete: %w", err)
 	}
@@ -1422,11 +1539,12 @@ func runIncremental(root, relpath, dbPath string) error {
 	// Without it, the Python router_v2 reader raises SchemaMismatch and L3b
 	// evidence is dead on every turn. INSERT OR REPLACE is idempotent so this
 	// is safe on DBs that already have the row.
-	db.SetMeta("schema_version", schemaVersion)
-	db.SetMeta("indexer_version", "v16-multilang")
-	db.SetMeta("git_commit", commitSHA)
-	db.SetMeta("build_time_utc", buildTimeUTC)
-	db.SetMeta("go_toolchain", goToolchain)
+	if err := setRequiredMetadata(db, map[string]string{
+		"schema_version": schemaVersion, "indexer_version": "v16-multilang",
+		"git_commit": commitSHA, "build_time_utc": buildTimeUTC, "go_toolchain": goToolchain,
+	}); err != nil {
+		return err
+	}
 
 	// Refresh FTS5 index after incremental node changes so BM25 queries
 	// stay current. Same call as the full-index path (idempotent).

@@ -61,6 +61,9 @@ func TestResolve_Reorder_TypedReceiverResolvesTypeFlowNotDemoted(t *testing.T) {
 	if r.Confidence != 0.9 {
 		t.Errorf("confidence = %.2f, want 0.9 (declared-type receiver)", r.Confidence)
 	}
+	if r.ReceiverType != "Command" || r.ReceiverOrigin != "param_annotation" {
+		t.Errorf("receiver evidence = %q/%q, want Command/param_annotation", r.ReceiverType, r.ReceiverOrigin)
+	}
 }
 
 // #B5: a builtin-NAMED method on a RECEIVER-PROVEN internal class must resolve.

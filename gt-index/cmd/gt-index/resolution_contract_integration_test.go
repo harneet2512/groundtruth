@@ -25,14 +25,20 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	if err := os.MkdirAll(repo, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, "caller.py"), []byte("def target(value):\n    return value + 1\n\ndef caller(value):\n    return target(value)\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, "mod.py"), []byte("def target(value):\n    return value + 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "caller.py"), []byte("from mod import target\n\ndef caller(value):\n    return target(value)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "dynamic.js"), []byte("function choose(name) { return handlers[name](); }\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(tmp, "gt-index")
 	if runtime.GOOS == "windows" {
 		bin += ".exe"
 	}
-	build := exec.Command("go", "build", "-tags", "sqlite_fts5", "-o", bin, ".")
+	build := exec.Command("go", "build", "-tags", "sqlite_fts5", "-ldflags", testBuildLDFlags, "-o", bin, ".")
 	build.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build gt-index: %v\n%s", err, out)
@@ -90,7 +96,23 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	if mismatch != 0 {
 		t.Fatalf("callsite candidate counts disagree with retained rows: %d", mismatch)
 	}
-	var graphComplete, graphRevision string
+	var dynamicCount, dynamicCandidates, dynamicSelected int
+	if err := db.QueryRow(`SELECT count(*),coalesce(sum(candidate_count),0),count(selected_target_stable_id)
+		FROM resolution_callsites WHERE dispatch_state='dynamic'`).Scan(&dynamicCount, &dynamicCandidates, &dynamicSelected); err != nil {
+		t.Fatal(err)
+	}
+	if dynamicCount == 0 || dynamicCandidates != 0 || dynamicSelected != 0 {
+		t.Fatalf("production dynamic policy violated: callsites=%d candidates=%d selected=%d", dynamicCount, dynamicCandidates, dynamicSelected)
+	}
+	var declaredScope, importChain, verification string
+	if err := db.QueryRow(`SELECT declared_scope,import_chain,verification_status
+		FROM resolution_candidates ORDER BY callsite_id,ordinal LIMIT 1`).Scan(&declaredScope, &importChain, &verification); err != nil {
+		t.Fatal(err)
+	}
+	if declaredScope == "" || importChain == "" || importChain == "[]" || verification != "source_supported" {
+		t.Fatalf("candidate evidence is not source-bound: scope=%q import_chain=%q verification=%q", declaredScope, importChain, verification)
+	}
+	var graphComplete, graphRevision, graphResolutionSchema string
 	if err := db.QueryRow("SELECT value FROM project_meta WHERE key='graph_resolution_complete'").Scan(&graphComplete); err != nil {
 		t.Fatalf("graph_resolution_complete metadata: %v", err)
 	}
@@ -102,6 +124,42 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	}
 	if graphRevision == "" {
 		t.Fatal("graph_resolution_revision is empty")
+	}
+	if err := db.QueryRow("SELECT value FROM project_meta WHERE key='graph_resolution_schema_version'").Scan(&graphResolutionSchema); err != nil {
+		t.Fatalf("graph_resolution_schema_version metadata: %v", err)
+	}
+	if graphResolutionSchema != "2" {
+		t.Fatalf("graph_resolution_schema_version = %q, want 2", graphResolutionSchema)
+	}
+	var callsitesV2, candidatesV2, derivationsV2, completenessV2, policiesV2 int
+	if err := db.QueryRow(`SELECT
+		(SELECT count(*) FROM nodes WHERE node_type='callsite' AND schema_version=2),
+		(SELECT count(*) FROM edges WHERE type='CANDIDATE_TARGET' AND schema_version=2 AND confidence IS NULL),
+		(SELECT count(*) FROM nodes WHERE node_type='derivation_fact' AND schema_version=2),
+		(SELECT count(*) FROM nodes WHERE node_type='completeness_fact' AND schema_version=2),
+		(SELECT count(*) FROM nodes WHERE node_type='query_policy_version' AND schema_version=2)`).Scan(&callsitesV2, &candidatesV2, &derivationsV2, &completenessV2, &policiesV2); err != nil {
+		t.Fatalf("canonical v2 graph counts: %v", err)
+	}
+	if callsitesV2 == 0 || candidatesV2 == 0 || derivationsV2 != candidatesV2 || completenessV2 == 0 || policiesV2 != 2 {
+		t.Fatalf("canonical v2 graph incomplete: callsites=%d candidates=%d derivations=%d completeness=%d policies=%d", callsitesV2, candidatesV2, derivationsV2, completenessV2, policiesV2)
+	}
+	var conservationMismatch int
+	if err := db.QueryRow(`SELECT count(*) FROM nodes c WHERE c.node_type='callsite'
+		AND c.candidate_count_v2 != (SELECT count(*) FROM edges e WHERE e.type='CANDIDATE_TARGET' AND e.callsite_stable_id=c.stable_id AND e.viability='viable')`).Scan(&conservationMismatch); err != nil {
+		t.Fatalf("canonical v2 candidate conservation: %v", err)
+	}
+	if conservationMismatch != 0 {
+		t.Fatalf("canonical v2 candidate conservation mismatches=%d", conservationMismatch)
+	}
+	for _, key := range []string{
+		"graph_completion_schema", "graph_completion_receipt", "graph_completion_receipt_sha256",
+		"graph_producer_build_id", "graph_producer_source_fingerprint", "graph_producer_executable_sha256",
+		"graph_producer_git_commit", "graph_producer_build_time_utc", "graph_producer_go_toolchain", "graph_producer_build_tags",
+	} {
+		var value string
+		if err := db.QueryRow("SELECT value FROM project_meta WHERE key=?", key).Scan(&value); err != nil || value == "" || value == "unknown" {
+			t.Fatalf("graph/build binding %s missing or incomplete: value=%q err=%v", key, value, err)
+		}
 	}
 	var attached int
 	if err := db.QueryRow(`SELECT count(*) FROM edges WHERE type='HAS_CALLSITE'`).Scan(&attached); err != nil {
@@ -121,5 +179,61 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	}
 	if len(evidence) == 0 || evidence[0].Revision != graphRevision {
 		t.Fatalf("production graph query returned no revision-bound evidence: %+v", evidence)
+	}
+	dynamicEvidence, err := graph.QueryAttachedCandidates("handlers[name]")
+	if err != nil {
+		t.Fatalf("production zero-candidate query: %v", err)
+	}
+	if len(dynamicEvidence) != 1 || dynamicEvidence[0].HasCandidate || dynamicEvidence[0].DispatchState != "unsupported" || dynamicEvidence[0].TargetAuthority != "unsupported" || dynamicEvidence[0].AbstentionReason != "unsupported_dispatch" {
+		t.Fatalf("production query hid or misrepresented dynamic abstention: %+v", dynamicEvidence)
+	}
+}
+
+func TestRealCLIRecordsRecoverableParserFailures(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the gt-index binary; skipped under -short")
+	}
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "broken.js"), []byte("function run() { target(); }\n@\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "clean.js"), []byte("function target() { return 1; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(tmp, "gt-index")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	build := exec.Command("go", "build", "-tags", "sqlite_fts5", "-ldflags", testBuildLDFlags, "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=1")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build gt-index: %v\n%s", err, out)
+	}
+	dbPath := filepath.Join(tmp, "graph.db")
+	if out, err := exec.Command(bin, "-root", repo, "-output", dbPath).CombinedOutput(); err != nil {
+		t.Fatalf("index malformed fixture: %v\n%s", err, out)
+	}
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var failures string
+	if err := db.QueryRow("SELECT value FROM project_meta WHERE key='parse_failures'").Scan(&failures); err != nil {
+		t.Fatal(err)
+	}
+	if failures != "1" {
+		t.Fatalf("parse_failures=%q, want 1", failures)
+	}
+	var incomplete int
+	if err := db.QueryRow("SELECT count(*) FROM resolution_callsites WHERE dispatch_state='parser_incomplete'").Scan(&incomplete); err != nil {
+		t.Fatal(err)
+	}
+	if incomplete == 0 {
+		t.Fatal("partial AST callsite was not retained as parser_incomplete")
 	}
 }
