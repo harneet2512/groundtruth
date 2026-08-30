@@ -1,0 +1,15 @@
+format=gt.fixture-red.v1
+unit=HAR-42-step-5-VTA-typed-provenance
+base_sha=76149a4f4e8e1ed0dae1d5cf4f9b5d80fdfc864b
+fixture_path=.githooks/tests/vta_step5_typed_provenance_red.sh
+fixture_sha256=08fc9ade95d087c0ca09b2de7cf430e389749befa4594353b09cb0b86caf7f52
+test_fixture_path=gt-index/internal/store/vta_candidate_provenance_red_test.go
+test_fixture_sha256=79bdcced3f2b29347b079de1ef9ce80d098f46f2c7326571da4f2e8d977cd20b
+runner_path=.githooks/tests/vta_step5_typed_provenance_red.sh
+runner_sha256=08fc9ade95d087c0ca09b2de7cf430e389749befa4594353b09cb0b86caf7f52
+command=.githooks/tests/vta_step5_typed_provenance_red.sh
+go_test_command=go test ./internal/store -run '^TestVTACandidateProvenanceCarriesSourceAndEdgeFacts$' -count=1
+exit_code=1
+output_path=.githooks/red-artifacts/vta_step5_typed_provenance_red.out
+output_sha256=449513481e29da7ecc1faca44abd4aae9cd5653a9343f42288681df9198638ba
+expected_failure=unknown field FlowSourceStableIDs and FlowEdgeStableIDs in struct literal of type ResolutionCandidate
