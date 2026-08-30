@@ -568,7 +568,11 @@ func main() {
 	// the existing resolver evidence, so an open hierarchy cannot be accepted
 	// as a closed target set by downstream queries.
 	hierarchyClosed := os.Getenv("GT_HIERARCHY_CLOSED") == "1"
-	hierarchyResults := resolver.AnalyzeCHAThenRTA(allCalls, nodeMeta, inhMap, allAssignments, hierarchyClosed)
+	receiverTypes := make(map[int]string, len(callsites))
+	for _, callsite := range callsites {
+		receiverTypes[callsite.CallsiteOrdinal] = callsite.ReceiverType
+	}
+	hierarchyResults := resolver.AnalyzeCHAThenRTAWithReceiverTypes(allCalls, nodeMeta, inhMap, allAssignments, receiverTypes, hierarchyClosed)
 	hierarchyByOrdinal := make(map[int]resolver.CHAThenRTAResult, len(hierarchyResults))
 	for _, result := range hierarchyResults {
 		hierarchyByOrdinal[result.CallsiteOrdinal] = result
@@ -663,9 +667,23 @@ func main() {
 			abortStagedBuild(db, stagedOutput, "callsite ordinal %d source node %d missing from graph", c.CallsiteOrdinal, c.SourceNodeID)
 		}
 		callsiteID := store.StableResolutionCallsiteIDWithOrdinal(repositoryRevision, source.StableID, c.SourceFile, c.SourceLine, c.SourceLine, c.CallsiteOrdinal, c.Callee)
+		candidateNodeIDs := append([]int64(nil), c.CandidateNodeIDs...)
+		selectedNodeID := c.SelectedTargetNodeID
+		publishedDispatchState := string(c.DispatchState)
+		if hierarchy, ok := hierarchyByOrdinal[c.CallsiteOrdinal]; ok && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") && (len(hierarchy.CHACandidateNodeIDs) > 0 || (hierarchy.ReceiverScoped && hierarchy.CHACompleteness == "closed")) {
+			candidateNodeIDs = append([]int64(nil), hierarchy.CHACandidateNodeIDs...)
+			selectedNodeID = nil
+			if len(candidateNodeIDs) == 0 {
+				publishedDispatchState = string(resolver.DispatchZero)
+			} else if len(candidateNodeIDs) > 1 {
+				publishedDispatchState = string(resolver.DispatchAmbiguous)
+			} else {
+				publishedDispatchState = string(resolver.DispatchCandidateOnly)
+			}
+		}
 		var selectedStable, selectedNative *string
-		if c.SelectedTargetNodeID != nil {
-			if target, exists := symbolByID[*c.SelectedTargetNodeID]; exists {
+		if selectedNodeID != nil {
+			if target, exists := symbolByID[*selectedNodeID]; exists {
 				stable, native := target.StableID, target.NativeID
 				selectedStable, selectedNative = &stable, &native
 			}
@@ -695,14 +713,23 @@ func main() {
 					rtaStatus = "completed_match"
 				}
 			}
+			stableIDs := func(ids []int64) []string {
+				out := make([]string, 0, len(ids))
+				for _, id := range ids {
+					if symbol, exists := symbolByID[id]; exists {
+						out = append(out, symbol.StableID)
+					}
+				}
+				return out
+			}
 			passCoverage = append(passCoverage,
-				store.ResolutionPassCoverage{PassKind: "cha", Version: "1", Status: chaStatus, Reason: chaReason},
-				store.ResolutionPassCoverage{PassKind: "rta", Version: "1", Status: rtaStatus, Reason: rtaReason},
+				store.ResolutionPassCoverage{PassKind: "cha", Version: "1", Status: chaStatus, Reason: chaReason, CandidateStableIDs: stableIDs(hierarchy.CHACandidateNodeIDs)},
+				store.ResolutionPassCoverage{PassKind: "rta", Version: "1", Status: rtaStatus, Reason: rtaReason, CandidateStableIDs: stableIDs(hierarchy.RTACandidateNodeIDs), AllocationTypeStableIDs: stableIDs(hierarchy.RTAAllocationTypeIDs)},
 			)
 		}
-		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: string(c.DispatchState), CandidateCount: len(c.CandidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus, PassCoverage: passCoverage})
-		graphCandidates := make([]*store.ResolutionCandidate, 0, len(c.CandidateNodeIDs))
-		for ordinal, targetID := range c.CandidateNodeIDs {
+		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: publishedDispatchState, CandidateCount: len(candidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus, PassCoverage: passCoverage})
+		graphCandidates := make([]*store.ResolutionCandidate, 0, len(candidateNodeIDs))
+		for ordinal, targetID := range candidateNodeIDs {
 			target, exists := symbolByID[targetID]
 			if !exists {
 				continue
@@ -710,13 +737,13 @@ func main() {
 			complete := c.ParserComplete
 			receiverChain, _ := json.Marshal(qualifiedCallChain(c.CalleeQualified))
 			importChain, _ := json.Marshal(c.CandidateImportChains[targetID])
-			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: c.Mechanism, DeclaredScope: target.QualifiedName, ReceiverType: c.ReceiverType, ReceiverOrigin: c.ReceiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), DynamicDispatch: c.DispatchState == resolver.DispatchDynamic, ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: c.SelectedTargetNodeID != nil && *c.SelectedTargetNodeID == targetID}
+			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: c.Mechanism, DeclaredScope: target.QualifiedName, ReceiverType: c.ReceiverType, ReceiverOrigin: c.ReceiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), DynamicDispatch: publishedDispatchState == string(resolver.DispatchDynamic), ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: selectedNodeID != nil && *selectedNodeID == targetID}
 			candidateRows = append(candidateRows, candidate)
 			graphCandidates = append(graphCandidates, candidate)
 		}
-		if len(graphCandidates) != len(c.CandidateNodeIDs) {
+		if len(graphCandidates) != len(candidateNodeIDs) {
 			_ = publishTx.Rollback()
-			abortStagedBuild(db, stagedOutput, "callsite %s candidate conservation failed: retained=%d expected=%d", callsiteID, len(graphCandidates), len(c.CandidateNodeIDs))
+			abortStagedBuild(db, stagedOutput, "callsite %s candidate conservation failed: retained=%d expected=%d", callsiteID, len(graphCandidates), len(candidateNodeIDs))
 		}
 		if sourceNode := nodeByID[c.SourceNodeID]; sourceNode != nil {
 			parseState := "complete"
@@ -727,7 +754,7 @@ func main() {
 				CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision,
 				SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID,
 				SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language,
-				DispatchState: string(c.DispatchState), CandidateCount: len(graphCandidates),
+				DispatchState: publishedDispatchState, CandidateCount: len(graphCandidates),
 				SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative,
 				Mechanism: c.Mechanism, VerificationStatus: c.VerificationStatus,
 				RepoID: repositoryID, FileNodeID: fileNodeIDByPath[c.SourceFile], FileIdentity: fileIdentityByPath[c.SourceFile], CallerSymbolID: source.StableID,

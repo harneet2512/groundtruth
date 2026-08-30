@@ -249,8 +249,8 @@ func TestAttachResolutionGraphPersistsCHAThenRTACompleteness(t *testing.T) {
 			CallsiteID: "cha-rta", SourceID: sourceID, SourceFile: "main.go", SourceLine: 8, Callee: "Run",
 			DispatchState: "ambiguous", DispatchForm: "interface", CandidateCount: 2, Mechanism: "impl_method",
 			PassCoverage: []ResolutionPassCoverage{
-				{PassKind: "cha", Version: "1", Status: "completed_match"},
-				{PassKind: "rta", Version: "1", Status: "partial", Reason: "hierarchy_open"},
+				{PassKind: "cha", Version: "1", Status: "completed_match", CandidateStableIDs: []string{"a", "b"}},
+				{PassKind: "rta", Version: "1", Status: "partial", Reason: "hierarchy_open", CandidateStableIDs: []string{"a"}, AllocationTypeStableIDs: []string{"type-a"}},
 			},
 		},
 		Candidates: []*ResolutionCandidate{
@@ -282,6 +282,20 @@ func TestAttachResolutionGraphPersistsCHAThenRTACompleteness(t *testing.T) {
 	}
 	if got["rta"] != [2]string{"partial", "hierarchy_open"} {
 		t.Fatalf("RTA completeness=%v, want partial/hierarchy_open", got["rta"])
+	}
+	evidence, err := db.QueryAttachedCandidates("Run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence) != 2 || len(evidence[0].PassCoverage) == 0 {
+		t.Fatalf("normal query did not expose hierarchy evidence: %+v", evidence)
+	}
+	coverage := make(map[string]ResolutionPassCoverage)
+	for _, pass := range evidence[0].PassCoverage {
+		coverage[pass.PassKind] = pass
+	}
+	if !strings.EqualFold(strings.Join(coverage["cha"].CandidateStableIDs, ","), "a,b") || !strings.EqualFold(strings.Join(coverage["rta"].CandidateStableIDs, ","), "a") || !strings.EqualFold(strings.Join(coverage["rta"].AllocationTypeStableIDs, ","), "type-a") {
+		t.Fatalf("normal query hierarchy candidate evidence=%+v", coverage)
 	}
 }
 

@@ -72,3 +72,38 @@ func equalInt64s(got, want []int64) bool {
 	}
 	return true
 }
+
+func TestCHAThenRTAUsesDeclaredReceiverBoundaryAndTransitiveImplementors(t *testing.T) {
+	calls := []parser.CallRef{{CalleeName: "Run", CalleeQualified: "runner.Run", File: "main.go", Line: 20, DispatchForm: "interface"}}
+	meta := map[int64]NodeMeta{
+		2:  {Label: "Interface", Name: "Runner", File: "runner.go"},
+		3:  {Label: "Interface", Name: "Unrelated", File: "unrelated.go"},
+		4:  {Label: "Struct", Name: "ImplA", File: "a.go"},
+		5:  {Label: "Struct", Name: "ImplUnrelated", File: "u.go"},
+		11: {Label: "Method", Name: "Run", ParentID: 4, File: "a.go"},
+		12: {Label: "Method", Name: "Run", ParentID: 5, File: "u.go"},
+		20: {Label: "Struct", Name: "Base", File: "base.go"},
+		21: {Label: "Struct", Name: "Derived", File: "derived.go"},
+		22: {Label: "Method", Name: "Run", ParentID: 21, File: "derived.go"},
+	}
+	implements := map[int64][]int64{4: {2}, 5: {3}, 21: {20}, 20: {2}}
+	assignments := []parser.AssignmentRef{{VarName: "runner", TypeName: "Runner", Scope: "main", File: "main.go", Line: 6}}
+	result := AnalyzeCHAThenRTA(calls, meta, implements, assignments, true)
+	if got := result[0].CHACandidateNodeIDs; !equalInt64s(got, []int64{11, 22}) {
+		t.Fatalf("declared Runner CHA=%v, want Runner methods [11 22]", got)
+	}
+	if got := result[0].RTACandidateNodeIDs; len(got) != 0 {
+		t.Fatalf("unallocated Runner RTA=%v, want empty", got)
+	}
+
+	transitiveMeta := map[int64]NodeMeta{
+		2:  {Label: "Interface", Name: "Runner"},
+		20: {Label: "Struct", Name: "Base"},
+		21: {Label: "Struct", Name: "Derived"},
+		22: {Label: "Method", Name: "Run", ParentID: 21},
+	}
+	transitive := AnalyzeCHAThenRTA(calls, transitiveMeta, map[int64][]int64{20: {2}, 21: {20}}, assignments, true)
+	if got := transitive[0].CHACandidateNodeIDs; !equalInt64s(got, []int64{22}) {
+		t.Fatalf("transitive CHA=%v, want [22]", got)
+	}
+}

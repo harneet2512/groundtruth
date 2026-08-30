@@ -235,11 +235,13 @@ func (p CandidateQueryPolicy) SelectionRuleID() string {
 }
 
 type ResolutionPassCoverage struct {
-	FactID   string `json:"fact_id,omitempty"`
-	PassKind string `json:"pass_kind"`
-	Version  string `json:"version"`
-	Status   string `json:"status"`
-	Reason   string `json:"reason,omitempty"`
+	FactID                  string   `json:"fact_id,omitempty"`
+	PassKind                string   `json:"pass_kind"`
+	Version                 string   `json:"version"`
+	Status                  string   `json:"status"`
+	Reason                  string   `json:"reason,omitempty"`
+	CandidateStableIDs      []string `json:"candidate_stable_ids,omitempty"`
+	AllocationTypeStableIDs []string `json:"allocation_type_stable_ids,omitempty"`
 }
 
 type ResolutionDerivationStep struct {
@@ -581,6 +583,8 @@ func createSchema(db *sql.DB) error {
 		known_units INTEGER,
 		reason_code TEXT,
 		blocking_pass_kinds TEXT,
+		candidate_stable_ids TEXT,
+		allocation_type_stable_ids TEXT,
 		policy_name TEXT,
 		semantic_version TEXT,
 		policy_json TEXT,
@@ -826,6 +830,7 @@ func createSchema(db *sql.DB) error {
 		{"boundary_kind", "TEXT"}, {"boundary_id", "TEXT"},
 		{"fact_status", "TEXT"}, {"covered_units", "INTEGER"}, {"known_units", "INTEGER"},
 		{"reason_code", "TEXT"}, {"blocking_pass_kinds", "TEXT"}, {"policy_name", "TEXT"},
+		{"candidate_stable_ids", "TEXT"}, {"allocation_type_stable_ids", "TEXT"},
 		{"semantic_version", "TEXT"}, {"policy_json", "TEXT"}, {"policy_hash", "TEXT"},
 		{"created_at", "TEXT"}, {"created_by", "TEXT"}, {"fact_schema_min", "INTEGER"},
 		{"fact_schema_max", "INTEGER"}, {"explanation_template_version", "TEXT"},

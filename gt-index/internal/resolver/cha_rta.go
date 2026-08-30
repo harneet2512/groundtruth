@@ -15,6 +15,7 @@ import (
 // result rather than implicit caller state.
 type CHAThenRTAResult struct {
 	CallsiteOrdinal      int
+	ReceiverScoped       bool
 	CHACandidateNodeIDs  []int64
 	RTACandidateNodeIDs  []int64
 	RTACompleteness      string
@@ -28,6 +29,18 @@ type CHAThenRTAResult struct {
 // a language has no explicit relationship facts, structural method-set
 // inference supplies the same conservative candidate boundary for interfaces.
 func AnalyzeCHAThenRTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, hierarchyClosed bool) []CHAThenRTAResult {
+	return analyzeCHAThenRTA(calls, meta, implements, assignments, nil, hierarchyClosed)
+}
+
+// AnalyzeCHAThenRTAWithReceiverTypes is the production entry point. The
+// receiverTypes map is keyed by callsite ordinal and comes from the existing
+// resolver's declared receiver evidence; the assignment fallback keeps the
+// small public fixture API useful for direct producer tests.
+func AnalyzeCHAThenRTAWithReceiverTypes(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, receiverTypes map[int]string, hierarchyClosed bool) []CHAThenRTAResult {
+	return analyzeCHAThenRTA(calls, meta, implements, assignments, receiverTypes, hierarchyClosed)
+}
+
+func analyzeCHAThenRTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, receiverTypes map[int]string, hierarchyClosed bool) []CHAThenRTAResult {
 	if implements == nil {
 		implements = make(map[int64][]int64)
 	}
@@ -36,6 +49,7 @@ func AnalyzeCHAThenRTA(calls []parser.CallRef, meta map[int64]NodeMeta, implemen
 	interfaceIDs := make(map[int64]struct{})
 	concreteIDs := make(map[int64]struct{})
 	methodNamesByType := make(map[int64]map[string]struct{})
+	methodShapesByType := make(map[int64]map[string]struct{})
 	for id, node := range meta {
 		if isHierarchyType(node.Label) {
 			typeIDsByName[normalizedTypeName(node.Name)] = append(typeIDsByName[normalizedTypeName(node.Name)], id)
@@ -51,6 +65,12 @@ func AnalyzeCHAThenRTA(calls []parser.CallRef, meta map[int64]NodeMeta, implemen
 				methodNamesByType[node.ParentID] = make(map[string]struct{})
 			}
 			methodNamesByType[node.ParentID][node.Name] = struct{}{}
+			if shape := methodShape(node.Name, node.Signature); shape != "" {
+				if methodShapesByType[node.ParentID] == nil {
+					methodShapesByType[node.ParentID] = make(map[string]struct{})
+				}
+				methodShapesByType[node.ParentID][shape] = struct{}{}
+			}
 		}
 	}
 	for name := range methodsByName {
@@ -68,7 +88,7 @@ func AnalyzeCHAThenRTA(calls []parser.CallRef, meta map[int64]NodeMeta, implemen
 		}
 		for interfaceID := range interfaceIDs {
 			want := methodNamesByType[interfaceID]
-			if len(want) == 0 || hasAllMethods(methodNamesByType[concreteID], want) {
+			if len(want) == 0 || (hasAllMethods(methodNamesByType[concreteID], want) && hasAllMethodShapes(methodShapesByType[concreteID], methodShapesByType[interfaceID])) {
 				implements[concreteID] = append(implements[concreteID], interfaceID)
 			}
 		}
@@ -83,12 +103,18 @@ func AnalyzeCHAThenRTA(calls []parser.CallRef, meta map[int64]NodeMeta, implemen
 			continue
 		}
 
-		candidateTypes := make(map[int64]struct{})
-		for concreteID := range concreteIDs {
-			if len(implements[concreteID]) == 0 {
-				continue
+		receiverType := receiverTypeForCall(call, ordinal, receiverTypes, assignments, typeIDsByName, meta)
+		candidateTypes := concreteTypesForCall(receiverType, typeIDsByName, concreteIDs, interfaceIDs, implements)
+		result.ReceiverScoped = receiverType != "" && len(typeIDsByName[receiverType]) > 0
+		if len(candidateTypes) == 0 && receiverType == "" {
+			// An untyped virtual call has no receiver boundary to apply. Retain
+			// the conservative set of explicitly related concrete types rather
+			// than inventing a receiver type from a same-named method.
+			for concreteID := range concreteIDs {
+				if len(implements[concreteID]) > 0 {
+					candidateTypes[concreteID] = struct{}{}
+				}
 			}
-			candidateTypes[concreteID] = struct{}{}
 		}
 		for _, methodID := range methodsByName[call.CalleeName] {
 			method := meta[methodID]
@@ -158,6 +184,37 @@ func hasAllMethods(have map[string]struct{}, want map[string]struct{}) bool {
 	return true
 }
 
+func hasAllMethodShapes(have map[string]struct{}, want map[string]struct{}) bool {
+	if len(want) == 0 {
+		return true
+	}
+	if len(have) == 0 {
+		return false
+	}
+	for shape := range want {
+		if _, ok := have[shape]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func methodShape(name, signature string) string {
+	if strings.TrimSpace(signature) == "" {
+		return ""
+	}
+	start := strings.Index(signature, name)
+	if start < 0 {
+		return ""
+	}
+	shape := strings.TrimSpace(signature[start:])
+	close := strings.IndexByte(shape, ')')
+	if close < 0 {
+		return ""
+	}
+	return strings.TrimSpace(shape[:close+1])
+}
+
 func allocationTypesForCall(call parser.CallRef, assignments []parser.AssignmentRef, typeIDsByName map[string][]int64, candidateTypes map[int64]struct{}) []int64 {
 	qualifier := call.CalleeQualified
 	if dot := strings.LastIndex(qualifier, "."); dot >= 0 {
@@ -190,4 +247,80 @@ func allocationTypesForCall(call parser.CallRef, assignments []parser.Assignment
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
 	return result
+}
+
+func receiverTypeForCall(call parser.CallRef, ordinal int, receiverTypes map[int]string, assignments []parser.AssignmentRef, typeIDsByName map[string][]int64, meta map[int64]NodeMeta) string {
+	if receiverTypes != nil && strings.TrimSpace(receiverTypes[ordinal]) != "" {
+		return normalizedTypeName(receiverTypes[ordinal])
+	}
+	qualifier := callReceiverQualifier(call)
+	if qualifier == "" {
+		return ""
+	}
+	bestLine := -1
+	bestType := ""
+	for _, assignment := range assignments {
+		if assignment.VarName != qualifier || assignment.File != call.File || assignment.Line > call.Line || assignment.ViaReturn {
+			continue
+		}
+		for _, typeName := range []string{assignment.TypeName, assignment.TypeQualified} {
+			for _, typeID := range typeIDsByName[normalizedTypeName(typeName)] {
+				if meta[typeID].Label == "Interface" && assignment.Line >= bestLine {
+					bestLine = assignment.Line
+					bestType = normalizedTypeName(typeName)
+				}
+			}
+		}
+	}
+	return bestType
+}
+
+func concreteTypesForCall(receiverType string, typeIDsByName map[string][]int64, concreteIDs, interfaceIDs map[int64]struct{}, implements map[int64][]int64) map[int64]struct{} {
+	result := make(map[int64]struct{})
+	if receiverType == "" {
+		return result
+	}
+	for _, receiverID := range typeIDsByName[receiverType] {
+		if _, ok := interfaceIDs[receiverID]; !ok {
+			if _, ok := concreteIDs[receiverID]; ok {
+				result[receiverID] = struct{}{}
+			}
+			continue
+		}
+		for concreteID := range concreteIDs {
+			if implementsTransitively(concreteID, receiverID, implements) {
+				result[concreteID] = struct{}{}
+			}
+		}
+	}
+	return result
+}
+
+func implementsTransitively(childID, targetID int64, implements map[int64][]int64) bool {
+	seen := make(map[int64]struct{})
+	var visit func(int64) bool
+	visit = func(current int64) bool {
+		if current == targetID {
+			return true
+		}
+		if _, ok := seen[current]; ok {
+			return false
+		}
+		seen[current] = struct{}{}
+		for _, parentID := range implements[current] {
+			if visit(parentID) {
+				return true
+			}
+		}
+		return false
+	}
+	return visit(childID)
+}
+
+func callReceiverQualifier(call parser.CallRef) string {
+	qualified := call.CalleeQualified
+	if dot := strings.LastIndex(qualified, "."); dot >= 0 {
+		return qualified[:dot]
+	}
+	return ""
 }

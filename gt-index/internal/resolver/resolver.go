@@ -374,6 +374,7 @@ func BuildNodeMeta(allNodes []store.Node, nodeDBIDs []int64) map[int64]NodeMeta 
 				File:         n.FilePath,
 				ParentID:     n.ParentID,
 				Name:         n.Name,
+				Signature:    n.Signature,
 				ReturnType:   n.ReturnType,
 				ReceiverName: recvName,
 				StartLine:    n.StartLine,
@@ -952,6 +953,7 @@ type NodeMeta struct {
 	File       string
 	ParentID   int64
 	Name       string
+	Signature  string
 	ReturnType string
 	// ReceiverName is the Go method's receiver VARIABLE name (`func (r *T) M()` → "r"),
 	// derived structurally from the signature. Empty for non-Go nodes, plain functions,

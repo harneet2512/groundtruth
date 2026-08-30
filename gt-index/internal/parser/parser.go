@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -648,8 +649,12 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			if parentNodeIdx > 0 && parentNodeIdx-1 < len(result.Nodes) {
 				classQualName = result.Nodes[parentNodeIdx-1].Name + "." + name
 			}
+			label := "Class"
+			if sf.Language == "go" && goTypeDeclarationIsInterface(node) {
+				label = "Interface"
+			}
 			n := store.Node{
-				Label:         "Class",
+				Label:         label,
 				Name:          name,
 				QualifiedName: classQualName,
 				FilePath:      sf.Path,
@@ -661,6 +666,9 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			}
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
+			if label == "Interface" && sf.Language == "go" {
+				extractGoInterfaceMethods(node, sf, src, result, idx+1)
+			}
 
 			// Extract class decorators (above the class definition)
 			extractClassDecorators(node, src, result, idx)
@@ -827,6 +835,48 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 	}
 }
 
+func goTypeDeclarationIsInterface(typeDecl *sitter.Node) bool {
+	if typeDecl == nil {
+		return false
+	}
+	var visit func(*sitter.Node) bool
+	visit = func(node *sitter.Node) bool {
+		if node == nil {
+			return false
+		}
+		if node.Type() == "interface_type" {
+			return true
+		}
+		for i := 0; i < int(node.ChildCount()); i++ {
+			if visit(node.Child(i)) {
+				return true
+			}
+		}
+		return false
+	}
+	return visit(typeDecl)
+}
+
+var goInterfaceMethodRE = regexp.MustCompile(`\b([A-Za-z_]\w*)\s*\([^)]*\)`)
+
+func extractGoInterfaceMethods(typeDecl *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, parentID int) {
+	content := typeDecl.Content(src)
+	seen := make(map[string]struct{})
+	for _, match := range goInterfaceMethodRE.FindAllStringSubmatchIndex(content, -1) {
+		name := content[match[2]:match[3]]
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		line := int(typeDecl.StartPoint().Row) + strings.Count(content[:match[0]], "\n") + 1
+		result.Nodes = append(result.Nodes, store.Node{
+			Label: "Method", Name: name, QualifiedName: result.Nodes[parentID-1].Name + "." + name,
+			FilePath: sf.Path, StartLine: line, EndLine: line, Signature: content[match[0]:match[1]],
+			ParentID: int64(parentID), IsExported: sf.Spec.IsExported != nil && sf.Spec.IsExported(name), Language: sf.Language,
+		})
+	}
+}
+
 func extractCalls(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int) {
 	extractCallsWithParent(node, sf, src, result, callerIdx, "", "0")
 }
@@ -968,6 +1018,9 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 // Looks for assignment nodes where right side is a call to a capitalized name.
 func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName string) {
 	nodeType := node.Type()
+	if sf.Language == "go" && node.Parent() != nil && (node.Parent().Type() == "function_declaration" || node.Parent().Type() == "method_declaration") {
+		extractGoTypedAssignments(node, sf, src, result, scopeName)
+	}
 
 	// Python: assignment, augmented_assignment
 	// JS/TS: variable_declarator, assignment_expression
@@ -1101,6 +1154,86 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 	for i := 0; i < int(node.ChildCount()); i++ {
 		extractAssignments(node.Child(i), sf, src, result, scopeName)
 	}
+}
+
+var goTypedBindingRE = regexp.MustCompile(`\b([A-Za-z_]\w*)\s+(\*?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\b`)
+var goTypedVarRE = regexp.MustCompile(`^\s*var\s+([A-Za-z_]\w*)\s+(\*?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\b`)
+
+// extractGoTypedAssignments records the declared interface/type boundary for
+// Go selectors such as `runner.Run()`. Tree-sitter's Go grammar represents a
+// typed var declaration as a var_declaration/var_spec subtree rather than an
+// assignment with a `type` field, so the generic assignment walker cannot see
+// it. This is deliberately limited to the current function body (and its
+// signature) to avoid turning package-level names into receiver evidence.
+func extractGoTypedAssignments(bodyNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName string) {
+	parent := bodyNode.Parent()
+	if parent == nil {
+		return
+	}
+	appendBinding := func(name, typeName string, line int) {
+		name = strings.TrimSpace(name)
+		typeName = normalizedGoTypeName(typeName)
+		if name == "" || typeName == "" {
+			return
+		}
+		result.Assignments = append(result.Assignments, AssignmentRef{
+			VarName: name, TypeName: typeName, TypeQualified: typeName,
+			Scope: scopeName, File: sf.Path, Line: line,
+		})
+	}
+
+	// Function and method parameters, including a Go method receiver, are in
+	// the declaration header immediately before the body node.
+	headerStart, headerEnd := parent.StartByte(), bodyNode.StartByte()
+	if headerStart <= headerEnd && int(headerEnd) <= len(src) {
+		header := string(src[headerStart:headerEnd])
+		for _, match := range goTypedBindingRE.FindAllStringSubmatchIndex(header, -1) {
+			name := header[match[2]:match[3]]
+			typeName := header[match[4]:match[5]]
+			appendBinding(name, typeName, int(parent.StartPoint().Row)+1)
+		}
+	}
+
+	// Local declarations. Handle both the common one-line form and grouped
+	// `var (...)` declarations, while keeping declaration order for same-name
+	// shadowing and later receiver lookup.
+	lines := strings.Split(bodyNode.Content(src), "\n")
+	grouped := false
+	for offset, lineText := range lines {
+		line := strings.TrimSpace(strings.SplitN(lineText, "//", 2)[0])
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "var (") {
+			grouped = true
+			continue
+		}
+		if grouped && line == ")" {
+			grouped = false
+			continue
+		}
+		if match := goTypedVarRE.FindStringSubmatch(line); len(match) == 3 {
+			appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1)
+			continue
+		}
+		if grouped {
+			if match := goTypedBindingRE.FindStringSubmatch(line); len(match) == 3 {
+				appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1)
+			}
+		}
+	}
+}
+
+func normalizedGoTypeName(typeName string) string {
+	typeName = strings.TrimSpace(typeName)
+	typeName = strings.TrimPrefix(typeName, "*")
+	if dot := strings.LastIndex(typeName, "."); dot >= 0 {
+		typeName = typeName[dot+1:]
+	}
+	if bracket := strings.IndexByte(typeName, '['); bracket >= 0 {
+		typeName = typeName[:bracket]
+	}
+	return strings.TrimSpace(typeName)
 }
 
 // classifyCallContext determines how a call's return value is used based on the parent AST node.

@@ -254,6 +254,86 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	}
 }
 
+func TestRealCLIUsesDeclaredGoInterfaceBoundaryForCHA(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the gt-index binary; skipped under -short")
+	}
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := `package sample
+
+type Runner interface { Run(int) }
+type Unrelated interface { Other() }
+
+type ImplA struct{}
+func (ImplA) Run(int) {}
+
+type ImplUnrelated struct{}
+func (ImplUnrelated) Run() {}
+
+func Invoke(runner Runner) {
+	runner.Run(1)
+}
+`
+	if err := os.WriteFile(filepath.Join(repo, "sample.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(tmp, "gt-index")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	build := exec.Command("go", "build", "-tags", "sqlite_fts5", "-ldflags", testBuildLDFlags, "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=1")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build gt-index: %v\n%s", err, out)
+	}
+	dbPath := filepath.Join(tmp, "graph.db")
+	index := exec.Command(bin, "-root", repo, "-output", dbPath, "-workers", "2")
+	index.Env = append(os.Environ(), "GT_HIERARCHY_CLOSED=1")
+	if out, err := index.CombinedOutput(); err != nil {
+		t.Fatalf("full Go hierarchy index: %v\n%s", err, out)
+	}
+	graph, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer graph.Close()
+	evidence, err := graph.QueryAttachedCandidates("Run")
+	if err != nil {
+		t.Fatalf("Go hierarchy query: %v", err)
+	}
+	if len(evidence) != 1 {
+		t.Fatalf("Go interface callsites=%d, want 1: %+v", len(evidence), evidence)
+	}
+	if evidence[0].CandidateCount != 1 || len(evidence[0].PassCoverage) == 0 {
+		t.Fatalf("declared Runner boundary was not retained: %+v", evidence[0])
+	}
+	var cha store.ResolutionPassCoverage
+	for _, pass := range evidence[0].PassCoverage {
+		if pass.PassKind == "cha" {
+			cha = pass
+		}
+	}
+	if cha.Status != "closed" || len(cha.CandidateStableIDs) != 1 || cha.CandidateStableIDs[0] != evidence[0].TargetStableID {
+		t.Fatalf("normal query lost actual CHA candidate identity: candidate=%+v cha=%+v", evidence[0], cha)
+	}
+	raw, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var qualified string
+	if err := raw.QueryRow(`SELECT qualified_name FROM resolution_symbols WHERE stable_id=?`, evidence[0].TargetStableID).Scan(&qualified); err != nil {
+		t.Fatalf("lookup retained CHA target: %v", err)
+	}
+	if qualified != "ImplA.Run" {
+		t.Fatalf("declared Runner selected wrong concrete method %q", qualified)
+	}
+}
+
 func TestRealCLIRecordsRecoverableParserFailures(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the gt-index binary; skipped under -short")
