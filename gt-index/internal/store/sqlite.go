@@ -114,6 +114,7 @@ type ResolutionCallsite struct {
 	DispatchForm           string
 	ArgumentArity          *uint16
 	ParseState             string
+	PassCoverage           []ResolutionPassCoverage
 }
 
 // AttachedResolution is the graph-native representation of a resolver callsite.
@@ -288,33 +289,32 @@ func resolutionDerivation(mechanism, dispatchState string, candidateCount int) (
 	}
 }
 
-func resolutionCoverage(mechanism, dispatchState string) ([]ResolutionPassCoverage, []ResolutionDerivationStep) {
-	passes := []string{"lexical_binding", "import_binding", "declared_type", "implementation_set", "return_type", "global_name", "dynamic_framework"}
-	winner := map[string]string{
-		"same_file": "lexical_binding", "inherited": "declared_type", "import": "import_binding",
-		"import_type": "declared_type", "type_flow": "declared_type", "return_type": "return_type",
-		"impl_method": "implementation_set", "verified_unique": "global_name", "name_match": "global_name",
-	}[mechanism]
-	coverage := make([]ResolutionPassCoverage, 0, len(passes))
-	for _, pass := range passes {
-		entry := ResolutionPassCoverage{PassKind: pass, Version: "1", Status: "completed_no_match"}
-		if pass == winner {
-			entry.Status = "completed_match"
-		}
-		if pass == "dynamic_framework" {
-			entry.Status = "not_applicable"
-			entry.Reason = "no_dynamic_framework_construct"
-			if dispatchState == "dynamic" {
-				entry.Status = "unavailable"
-				entry.Reason = "static_target_not_proven"
+func resolutionCoverage(c *ResolutionCallsite) ([]ResolutionPassCoverage, []ResolutionDerivationStep) {
+	coverage := append([]ResolutionPassCoverage(nil), c.PassCoverage...)
+	if len(coverage) == 0 {
+		// Compatibility callers construct rows without invoking the resolver.
+		// Absence of a trace is not evidence that any static pass ran.
+		for _, pass := range []string{"lexical_binding", "import_binding", "declared_type", "implementation_set", "return_type", "global_name", "dynamic_framework"} {
+			entry := ResolutionPassCoverage{PassKind: pass, Version: "1", Status: "not_run", Reason: "execution_trace_unavailable"}
+			if pass == "dynamic_framework" && c.DispatchState == "dynamic" {
+				entry.Status, entry.Reason = "unavailable", "static_target_not_proven"
 			}
+			coverage = append(coverage, entry)
 		}
-		coverage = append(coverage, entry)
+	}
+	winner := ""
+	for i := range coverage {
+		if coverage[i].Version == "" {
+			coverage[i].Version = "1"
+		}
+		if coverage[i].Status == "completed_match" {
+			winner = coverage[i].PassKind
+		}
 	}
 	steps := []ResolutionDerivationStep{
-		{StepID: "01:callsite", Kind: "callsite_fact", Value: dispatchState},
+		{StepID: "01:callsite", Kind: "callsite_fact", Value: c.DispatchState},
 		{StepID: "02:pass", Kind: "resolution_pass", Value: winner},
-		{StepID: "03:outcome", Kind: "candidate_set", Value: mechanism},
+		{StepID: "03:outcome", Kind: "candidate_set", Value: c.Mechanism},
 	}
 	return coverage, steps
 }
@@ -845,6 +845,26 @@ func createSchema(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_edges_candidate_policy ON edges(type, derivation_kind, evidence_set, candidate_count, target_id)`); err != nil {
 		return fmt.Errorf("create candidate policy index: %w", err)
 	}
+	// Old v2 producers could publish a second generic CALLS row for the same
+	// source/target endpoint. Coalesce those rows and install the invariant in
+	// one transaction so a failed migration leaves the prior database intact.
+	migration, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin CALLS uniqueness migration: %w", err)
+	}
+	if _, err := migration.Exec(`DELETE FROM edges WHERE type='CALLS' AND id NOT IN
+		(SELECT MIN(id) FROM edges WHERE type='CALLS' GROUP BY source_id,target_id,type)`); err != nil {
+		_ = migration.Rollback()
+		return fmt.Errorf("coalesce duplicate CALLS endpoints: %w", err)
+	}
+	if _, err := migration.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_unique_endpoint
+		ON edges(source_id,target_id,type) WHERE type='CALLS'`); err != nil {
+		_ = migration.Rollback()
+		return fmt.Errorf("create CALLS endpoint invariant: %w", err)
+	}
+	if err := migration.Commit(); err != nil {
+		return fmt.Errorf("commit CALLS uniqueness migration: %w", err)
+	}
 	indexStatements := []string{
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_stable_id ON nodes(stable_id) WHERE stable_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_callsite_location_v2 ON nodes(repo_id,source_revision,file_node_id,byte_start) WHERE node_type='callsite'`,
@@ -1202,7 +1222,7 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 		if err != nil {
 			return fmt.Errorf("callsite %s: %w", c.CallsiteID, err)
 		}
-		coverage, steps := resolutionCoverage(c.Mechanism, c.DispatchState)
+		coverage, steps := resolutionCoverage(c)
 		passKind, passStatus := derivationKind, "completed"
 		for _, pass := range coverage {
 			if pass.Status == "completed_match" || (c.DispatchState == "dynamic" && pass.PassKind == "dynamic_framework") {

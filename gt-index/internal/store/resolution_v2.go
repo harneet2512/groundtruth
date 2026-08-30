@@ -23,6 +23,7 @@ type resolutionV2Fact struct {
 	BoundaryID   string
 	Covered      int
 	Known        *int
+	Reason       string
 }
 
 type resolutionV2Publication struct {
@@ -171,10 +172,10 @@ func prepareResolutionV2(identity GraphCompletionIdentity, c *ResolutionCallsite
 		v2Candidates = append(v2Candidates, resolutionV2Candidate{Candidate: &copyCandidate, EdgeID: stableCandidateV2ID(callsiteID, candidate.TargetStableID), FactID: factID, PassKind: passKind})
 		factIDs = append(factIDs, factID)
 	}
-	coverage, _ := resolutionCoverage(c.Mechanism, c.DispatchState)
+	coverage, _ := resolutionCoverage(c)
 	completeness := make([]resolutionV2Fact, 0, len(coverage))
 	completenessIDs := make([]string, 0, len(coverage))
-	seenCompleteness := make(map[string]struct{})
+	completenessIndex := make(map[string]int)
 	for _, pass := range coverage {
 		mappedPass := v2PassKind(c.Mechanism)
 		if pass.PassKind != "" && pass.PassKind != "dynamic_framework" {
@@ -183,19 +184,25 @@ func prepareResolutionV2(identity GraphCompletionIdentity, c *ResolutionCallsite
 		status := "partial"
 		var known *int
 		covered := 0
-		if evidenceSet == "closed" && (pass.Status == "completed_match" || pass.Status == "completed_no_match" || pass.Status == "not_applicable") {
+		if evidenceSet == "closed" && (pass.Status == "completed_match" || pass.Status == "completed_no_match") {
 			status = "closed"
 			one := 1
 			known, covered = &one, 1
 		} else if pass.Status == "unavailable" {
 			status = "unsupported"
+		} else if pass.Status == "not_run" || pass.Status == "not_applicable" {
+			status = "not_run"
 		}
 		factID := canonicalResolutionID(callsiteID, mappedPass, pass.Version, "repository", identity.RepositoryRevision)
-		if _, exists := seenCompleteness[factID]; exists {
+		fact := resolutionV2Fact{ID: factID, PassKind: mappedPass, Status: status, BoundaryKind: "repository", BoundaryID: identity.RepositoryRevision, Covered: covered, Known: known, Reason: pass.Reason}
+		if index, exists := completenessIndex[factID]; exists {
+			if completenessStatusRank(fact.Status) > completenessStatusRank(completeness[index].Status) {
+				completeness[index] = fact
+			}
 			continue
 		}
-		seenCompleteness[factID] = struct{}{}
-		completeness = append(completeness, resolutionV2Fact{ID: factID, PassKind: mappedPass, Status: status, BoundaryKind: "repository", BoundaryID: identity.RepositoryRevision, Covered: covered, Known: known})
+		completenessIndex[factID] = len(completeness)
+		completeness = append(completeness, fact)
 		completenessIDs = append(completenessIDs, factID)
 	}
 	state, selectedTargetID, selectionRuleID := v2CandidateState(c, len(v2Candidates), passKind, evidenceSet, dispatchForm)
@@ -243,6 +250,21 @@ func prepareResolutionV2(identity GraphCompletionIdentity, c *ResolutionCallsite
 		UnresolvedID: unresolvedID, UnresolvedReason: unresolvedReason, Candidates: v2Candidates, Completeness: completeness,
 		EvidenceSet: evidenceSet, BlockingPassKinds: blockingPassKinds,
 	}, nil
+}
+
+func completenessStatusRank(status string) int {
+	switch status {
+	case "closed":
+		return 4
+	case "unsupported":
+		return 3
+	case "partial":
+		return 2
+	case "not_run":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func mapCoveragePassV2(pass string) string {
@@ -332,14 +354,14 @@ func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *
 		if selected == nil {
 			return fmt.Errorf("selected v2 target is not a viable candidate")
 		}
-		callsID := canonicalResolutionID(v2.CallsiteID, "CALLS", v2.SelectedTargetID, v2.SelectionRuleID)
+		selectionID := canonicalResolutionID(v2.CallsiteID, "SELECTED_TARGET", v2.SelectedTargetID, v2.SelectionRuleID)
 		if _, err := tx.Exec(`INSERT INTO edges
 			(source_id,target_id,type,source_line,source_file,resolution_method,confidence,trust_tier,candidate_count,evidence_type,verification_status,
 			 stable_id,schema_version,callsite_stable_id,target_symbol_id,selection_rule_id,analysis_boundary,producer_build_id,producer_source_fingerprint)
-			VALUES (?,?, 'CALLS',?,?,?,NULL,'CERTIFIED',1,'call_resolution_v2','source_supported',?,2,?,?,?,?,?,?)`,
-			c.SourceID, selected.TargetID, c.SourceLine, c.SourceFile, selected.Mechanism, callsID, v2.CallsiteID,
+			VALUES (?,?, 'SELECTED_TARGET',?,?,?,NULL,'CERTIFIED',1,'call_resolution_v2','source_supported',?,2,?,?,?,?,?,?)`,
+			callsiteNodeID, selected.TargetID, c.SourceLine, c.SourceFile, selected.Mechanism, selectionID, v2.CallsiteID,
 			v2.SelectedTargetID, v2.SelectionRuleID, identity.RepositoryRevision, identity.BuildID, identity.SourceFingerprint); err != nil {
-			return fmt.Errorf("insert selected v2 CALLS edge: %w", err)
+			return fmt.Errorf("insert selected v2 target edge: %w", err)
 		}
 	}
 	for _, fact := range v2.Completeness {
@@ -349,10 +371,10 @@ func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *
 		}
 		result, err := tx.Exec(`INSERT INTO nodes
 			(label,name,qualified_name,file_path,language,stable_id,node_type,schema_version,source_revision,producer_build_id,
-			 callsite_id,pass_kind,pass_version,boundary_kind,boundary_id,fact_status,covered_units,known_units)
-			VALUES ('CompletenessFact',?,?,?,?,?,'completeness_fact',2,?,?,?,?,'1',?,?,?,?,?)`,
+			 callsite_id,pass_kind,pass_version,boundary_kind,boundary_id,fact_status,covered_units,known_units,reason_code)
+			VALUES ('CompletenessFact',?,?,?,?,?,'completeness_fact',2,?,?,?,?,'1',?,?,?,?,?,?)`,
 			fact.PassKind, fact.ID, c.SourceFile, "resolution", fact.ID, identity.RepositoryRevision, identity.BuildID,
-			v2.CallsiteID, fact.PassKind, fact.BoundaryKind, fact.BoundaryID, fact.Status, fact.Covered, known)
+			v2.CallsiteID, fact.PassKind, fact.BoundaryKind, fact.BoundaryID, fact.Status, fact.Covered, known, fact.Reason)
 		if err != nil {
 			return fmt.Errorf("insert completeness fact: %w", err)
 		}
@@ -418,14 +440,14 @@ func (d *DB) loadResolutionV2Evidence(candidates []AttachedCandidate) error {
 		callsiteID := candidates[i].CallsiteID
 		coverage, ok := coverageByCallsite[callsiteID]
 		if !ok {
-			rows, err := d.db.Query(`SELECT stable_id,pass_kind,pass_version,fact_status FROM nodes
+			rows, err := d.db.Query(`SELECT stable_id,pass_kind,pass_version,fact_status,COALESCE(reason_code,'') FROM nodes
 				WHERE node_type='completeness_fact' AND callsite_id=? ORDER BY pass_kind,stable_id`, callsiteID)
 			if err != nil {
 				return fmt.Errorf("load completeness facts: %w", err)
 			}
 			for rows.Next() {
 				var fact ResolutionPassCoverage
-				if err := rows.Scan(&fact.FactID, &fact.PassKind, &fact.Version, &fact.Status); err != nil {
+				if err := rows.Scan(&fact.FactID, &fact.PassKind, &fact.Version, &fact.Status, &fact.Reason); err != nil {
 					rows.Close()
 					return err
 				}

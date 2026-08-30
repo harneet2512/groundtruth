@@ -55,6 +55,32 @@ func TestV2CandidateOrdinalsStableAcrossOneHundredShuffles(t *testing.T) {
 	}
 }
 
+func TestV2CompletenessKeepsExecutedWinnerWhenLegacyPassesShareCanonicalKind(t *testing.T) {
+	callsite := &ResolutionCallsite{
+		CallsiteOrdinal: 1, SourceID: 1, SourceLine: 4, SourceFile: "main.py", Callee: "run",
+		DispatchState: "unique", CandidateCount: 1, Mechanism: "impl_method", RepoID: "repo",
+		FileNodeID: 9, CallerSymbolID: "caller", ASTPath: "0/1", ByteStart: 10, ByteEnd: 20,
+		DispatchForm: "interface", ParseState: "complete",
+		PassCoverage: []ResolutionPassCoverage{
+			{PassKind: "declared_type", Version: "1", Status: "not_run", Reason: "no_execution_event"},
+			{PassKind: "implementation_set", Version: "1", Status: "completed_match"},
+		},
+	}
+	publication, err := prepareResolutionV2(testGraphIdentity("rev"), callsite, []*ResolutionCandidate{{TargetID: 2, TargetStableID: "target", TargetNativeID: "2", Mechanism: "impl_method"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fact := range publication.Completeness {
+		if fact.PassKind == "scope_binding" {
+			if fact.Status != "closed" || fact.Known == nil || fact.Covered != 1 {
+				t.Fatalf("executed implementation-set winner lost behind not-run declared-type alias: %+v", fact)
+			}
+			return
+		}
+	}
+	t.Fatal("canonical scope_binding completeness fact missing")
+}
+
 func TestResolutionStableIdentityIsDeterministic(t *testing.T) {
 	n := Node{Language: "python", FilePath: "src/a.py", QualifiedName: "a.run", Label: "Function", StartLine: 2, EndLine: 4}
 	a := StableResolutionSymbolID(n)
@@ -209,8 +235,12 @@ func TestQueryPolicyChangesSelectionWithoutMutatingGraphFacts(t *testing.T) {
 	targetID, _ := db.InsertNode(&Node{Label: "Function", Name: "target", QualifiedName: "target", FilePath: "main.py", Language: "python"})
 	selected := "target"
 	row := AttachedResolution{
-		Source:     &Node{ID: sourceID, Label: "Function", Name: "caller", FilePath: "main.py", Language: "python"},
-		Callsite:   &ResolutionCallsite{CallsiteID: "unique", SourceID: sourceID, SourceFile: "main.py", Callee: "target", DispatchState: "unique", CandidateCount: 1, Mechanism: "same_file", VerificationStatus: "source_supported", SelectedTargetStableID: &selected},
+		Source: &Node{ID: sourceID, Label: "Function", Name: "caller", FilePath: "main.py", Language: "python"},
+		Callsite: &ResolutionCallsite{CallsiteID: "unique", SourceID: sourceID, SourceFile: "main.py", Callee: "target", DispatchState: "unique", CandidateCount: 1, Mechanism: "same_file", VerificationStatus: "source_supported", SelectedTargetStableID: &selected,
+			PassCoverage: []ResolutionPassCoverage{
+				{PassKind: "lexical_binding", Version: "1", Status: "completed_match"},
+				{PassKind: "import_binding", Version: "1", Status: "not_run", Reason: "not_reached_after_resolution"},
+			}},
 		Candidates: []*ResolutionCandidate{{TargetID: targetID, TargetStableID: "target", TargetNativeID: "target", Ordinal: 0, Mechanism: "same_file", VerificationStatus: "source_supported", Selected: true}},
 	}
 	if err := db.AttachResolutionGraph(testGraphIdentity("rev"), []AttachedResolution{row}); err != nil {
@@ -311,6 +341,62 @@ func TestCanonicalV2QueriesUseRequiredIndexes(t *testing.T) {
 		if !strings.Contains(strings.Join(details, " "), tc.index) {
 			t.Fatalf("query did not use %s: %v", tc.index, details)
 		}
+	}
+}
+
+func TestCallsEndpointUniquenessCoalescesMigrationAndRejectsDuplicate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "graph.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID, err := db.InsertNode(&Node{Label: "Function", Name: "caller", FilePath: "main.py", Language: "python"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, err := db.InsertNode(&Node{Label: "Function", Name: "target", FilePath: "main.py", Language: "python"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.Exec(`DROP INDEX IF EXISTS idx_calls_unique_endpoint`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := db.db.Exec(`INSERT INTO edges(source_id,target_id,type,source_file) VALUES(?,?,'CALLS','main.py')`, sourceID, targetID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.db.QueryRow(`SELECT count(*) FROM edges WHERE source_id=? AND target_id=? AND type='CALLS'`, sourceID, targetID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("CALLS migration retained %d duplicate endpoint rows, want 1", count)
+	}
+	tx, err := db.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO edges(source_id,target_id,type,source_file) VALUES(?,?,'CALLS','main.py')`, sourceID, targetID); err == nil {
+		_ = tx.Rollback()
+		t.Fatal("CALLS endpoint uniqueness accepted a duplicate")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.db.QueryRow(`SELECT count(*) FROM edges WHERE source_id=? AND target_id=? AND type='CALLS'`, sourceID, targetID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("rejected duplicate partially changed CALLS rows: %d", count)
 	}
 }
 

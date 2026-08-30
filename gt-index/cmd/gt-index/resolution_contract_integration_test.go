@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,7 +29,7 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "mod.py"), []byte("def target(value):\n    return value + 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, "caller.py"), []byte("from mod import target\n\ndef caller(value):\n    return target(value)\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, "caller.py"), []byte("from mod import target\n\ndef local_target(value):\n    return value\n\ndef caller(value):\n    local_target(value)\n    return target(value)\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(repo, "dynamic.js"), []byte("function choose(name) { return handlers[name](); }\n"), 0o644); err != nil {
@@ -106,7 +107,7 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	}
 	var declaredScope, importChain, verification string
 	if err := db.QueryRow(`SELECT declared_scope,import_chain,verification_status
-		FROM resolution_candidates ORDER BY callsite_id,ordinal LIMIT 1`).Scan(&declaredScope, &importChain, &verification); err != nil {
+		FROM resolution_candidates WHERE import_chain != '[]' ORDER BY callsite_id,ordinal LIMIT 1`).Scan(&declaredScope, &importChain, &verification); err != nil {
 		t.Fatal(err)
 	}
 	if declaredScope == "" || importChain == "" || importChain == "[]" || verification != "source_supported" {
@@ -167,6 +168,45 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	}
 	if attached == 0 {
 		t.Fatal("primary graph has no attached callsite relationships")
+	}
+	var duplicateCalls int
+	if err := db.QueryRow(`SELECT count(*) FROM (
+		SELECT source_id,target_id,type FROM edges WHERE type='CALLS'
+		GROUP BY source_id,target_id,type HAVING count(*) > 1)`).Scan(&duplicateCalls); err != nil {
+		t.Fatal(err)
+	}
+	if duplicateCalls != 0 {
+		t.Fatalf("selected callsites published duplicate generic CALLS endpoints: %d", duplicateCalls)
+	}
+	var selectedBindings int
+	if err := db.QueryRow(`SELECT count(*) FROM edges WHERE type='SELECTED_TARGET' AND schema_version=2`).Scan(&selectedBindings); err != nil {
+		t.Fatal(err)
+	}
+	if selectedBindings == 0 {
+		t.Fatal("canonical v2 selection is not bound by SELECTED_TARGET")
+	}
+	var coverageJSON string
+	if err := db.QueryRow(`SELECT hc.pass_coverage FROM nodes c
+		JOIN edges hc ON hc.target_id=c.id AND hc.type='HAS_CALLSITE'
+		WHERE c.node_type='callsite' AND c.name='local_target' LIMIT 1`).Scan(&coverageJSON); err != nil {
+		t.Fatalf("direct-call pass coverage: %v", err)
+	}
+	var coverage []store.ResolutionPassCoverage
+	if err := json.Unmarshal([]byte(coverageJSON), &coverage); err != nil {
+		t.Fatalf("decode direct-call pass coverage: %v", err)
+	}
+	statuses := make(map[string]store.ResolutionPassCoverage, len(coverage))
+	for _, pass := range coverage {
+		statuses[pass.PassKind] = pass
+	}
+	if got := statuses["lexical_binding"]; got.Status != "completed_match" {
+		t.Fatalf("direct binding execution status=%+v, want completed_match", got)
+	}
+	for _, passKind := range []string{"import_binding", "declared_type", "implementation_set", "return_type", "global_name"} {
+		got := statuses[passKind]
+		if got.Status != "not_run" || got.Reason == "" {
+			t.Fatalf("unexecuted pass %s fabricated completion: %+v", passKind, got)
+		}
 	}
 	graph, err := store.Open(dbPath)
 	if err != nil {

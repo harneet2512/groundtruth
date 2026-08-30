@@ -232,7 +232,9 @@ func TestIsVerifiedEdge(t *testing.T) {
 
 // TestClosure_ParallelEdgeUsesBestConfidence is the BITING test for the closure dedup
 // bug (closure.go: bestEdgeConf was computed but the adjacency conf was frozen at the
-// FIRST-SCANNED edge). Node 1 reaches node 2 via TWO parallel CALLS edges: the
+// FIRST-SCANNED edge). The generic closure engine is exercised with a synthetic
+// relation because the production schema now forbids parallel CALLS endpoints.
+// Node 1 reaches node 2 via TWO parallel TEST_CALLS edges: the
 // first-inserted (id-ASC, scanned first) is the WEAKER one (inherited 0.85); a second,
 // STRONGER edge (same_file 1.0) is inserted after. Node 2 -> node 3 is 1.0. The
 // weakest-link min_confidence of the 2-hop path 1->3 must reflect the STRONGER 1->2
@@ -263,17 +265,17 @@ func TestClosure_ParallelEdgeUsesBestConfidence(t *testing.T) {
 
 	edges := []*store.Edge{
 		// WEAKER 1->2 inserted FIRST (lower id, scanned first by the adjacency build).
-		{SourceID: 1, TargetID: 2, Type: "CALLS", ResolutionMethod: "inherited", Confidence: 0.85, TrustTier: "CERTIFIED"},
+		{SourceID: 1, TargetID: 2, Type: "TEST_CALLS", ResolutionMethod: "inherited", Confidence: 0.85, TrustTier: "CERTIFIED"},
 		// STRONGER 1->2 inserted SECOND — both are admitted (verified method, conf>=0.7).
-		{SourceID: 1, TargetID: 2, Type: "CALLS", ResolutionMethod: "same_file", Confidence: 1.0, TrustTier: "CERTIFIED"},
+		{SourceID: 1, TargetID: 2, Type: "TEST_CALLS", ResolutionMethod: "same_file", Confidence: 1.0, TrustTier: "CERTIFIED"},
 		// 2->3 at full confidence; the 2-hop weakest link is therefore the 1->2 edge.
-		{SourceID: 2, TargetID: 3, Type: "CALLS", ResolutionMethod: "same_file", Confidence: 1.0, TrustTier: "CERTIFIED"},
+		{SourceID: 2, TargetID: 3, Type: "TEST_CALLS", ResolutionMethod: "same_file", Confidence: 1.0, TrustTier: "CERTIFIED"},
 	}
 	if err := db.BatchInsertEdges(edges); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := ComputeTransitiveClosure(db, "CALLS", 3, 0.0); err != nil {
+	if _, err := ComputeTransitiveClosure(db, "TEST_CALLS", 3, 0.0); err != nil {
 		t.Fatal(err)
 	}
 

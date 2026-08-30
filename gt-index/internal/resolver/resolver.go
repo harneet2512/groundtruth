@@ -468,6 +468,53 @@ type ResolutionCallsite struct {
 	ColumnStart           uint32
 	ArgumentArity         *uint16
 	DispatchForm          string
+	PassExecutions        []ResolutionPassExecution
+}
+
+// ResolutionPassExecution records only work evidenced by the resolver's
+// terminal path. Passes after a successful binding are explicitly not run;
+// they are never inferred to have completed merely because the callsite was
+// resolved.
+type ResolutionPassExecution struct {
+	PassKind string
+	Status   string
+	Reason   string
+}
+
+var resolutionPassOrder = []string{
+	"lexical_binding", "import_binding", "declared_type", "implementation_set",
+	"return_type", "global_name", "dynamic_framework",
+}
+
+func resolutionPassExecutions(call parser.CallRef, rc *ResolvedCall) []ResolutionPassExecution {
+	winner := map[string]string{
+		"same_file": "lexical_binding", "import": "import_binding",
+		"inherited": "declared_type", "import_type": "declared_type", "type_flow": "declared_type",
+		"impl_method": "implementation_set", "return_type": "return_type",
+		"verified_unique": "global_name", "name_match": "global_name",
+	}
+	winnerPass := ""
+	if rc != nil {
+		winnerPass = winner[rc.Method]
+	}
+	coverage := make([]ResolutionPassExecution, 0, len(resolutionPassOrder))
+	for _, pass := range resolutionPassOrder {
+		entry := ResolutionPassExecution{PassKind: pass, Status: "not_run", Reason: "no_execution_event"}
+		switch {
+		case pass == "dynamic_framework" && call.DynamicDispatch:
+			entry.Status, entry.Reason = "unavailable", "static_target_not_proven"
+		case pass == "dynamic_framework":
+			entry.Status, entry.Reason = "not_applicable", "no_dynamic_framework_construct"
+		case winnerPass != "" && pass == winnerPass:
+			entry.Status, entry.Reason = "completed_match", ""
+		case call.ParserIncomplete:
+			entry.Status, entry.Reason = "not_run", "parser_incomplete"
+		case call.DynamicDispatch:
+			entry.Status, entry.Reason = "not_run", "dynamic_dispatch_abstention"
+		}
+		coverage = append(coverage, entry)
+	}
+	return coverage
 }
 
 func (c ResolutionCallsite) Validate() error {
@@ -2682,12 +2729,14 @@ func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64
 			trace.ReceiverOrigin = "call_syntax"
 		}
 		if call.ParserIncomplete {
+			trace.PassExecutions = resolutionPassExecutions(call, nil)
 			trace.DispatchState = DispatchParserIncomplete
 			trace.VerificationStatus = "abstained_parser_incomplete"
 			callsites[i] = trace
 			continue
 		}
 		if call.DynamicDispatch {
+			trace.PassExecutions = resolutionPassExecutions(call, nil)
 			trace.DispatchState, trace.Mechanism = DispatchDynamic, "dynamic"
 			trace.VerificationStatus = "abstained_dynamic"
 			callsites[i] = trace
@@ -2703,6 +2752,7 @@ func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64
 			}
 		}
 		if rc != nil {
+			trace.PassExecutions = resolutionPassExecutions(call, rc)
 			trace.CandidateNodeIDs = append([]int64(nil), rc.CandidateNodeIDs...)
 			trace.Mechanism, trace.EvidenceType = rc.Method, rc.EvidenceType
 			trace.ReceiverType, trace.ReceiverOrigin = rc.ReceiverType, rc.ReceiverOrigin
@@ -2732,6 +2782,9 @@ func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64
 			trace.DispatchState, trace.Mechanism = DispatchExternalUnresolved, "external"
 		} else {
 			trace.Mechanism = "unknown_legacy"
+		}
+		if trace.PassExecutions == nil {
+			trace.PassExecutions = resolutionPassExecutions(call, nil)
 		}
 		callsites[i] = trace
 	}

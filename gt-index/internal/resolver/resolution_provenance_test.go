@@ -43,6 +43,19 @@ func TestResolveWithProvenanceSelectsClosedSourceEvidence(t *testing.T) {
 	if len(traces) != 1 || traces[0].DispatchState != DispatchUnique || traces[0].SelectedTargetNodeID == nil || traces[0].VerificationStatus != "source_supported" {
 		t.Fatalf("source-supported same-file resolution was not selected: %+v", traces)
 	}
+	statuses := make(map[string]ResolutionPassExecution, len(traces[0].PassExecutions))
+	for _, pass := range traces[0].PassExecutions {
+		statuses[pass.PassKind] = pass
+	}
+	if got := statuses["lexical_binding"]; got.Status != "completed_match" {
+		t.Fatalf("winning execution event lost: %+v", got)
+	}
+	for _, passKind := range []string{"import_binding", "declared_type", "implementation_set", "return_type", "global_name"} {
+		got := statuses[passKind]
+		if got.Status != "not_run" || got.Reason == "" {
+			t.Fatalf("unobserved pass %s fabricated completion: %+v", passKind, got)
+		}
+	}
 }
 
 func TestResolutionCallsiteValidationRejectsForeignSelection(t *testing.T) {
