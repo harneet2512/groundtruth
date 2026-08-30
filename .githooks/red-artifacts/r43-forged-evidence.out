@@ -1,0 +1,4 @@
+range_base=4e9d4715ab1bb79f343c39bd7c6347f8ccccd9ce range_source=nearest_remote_ancestor local_ref=refs/heads/topic
+red_fixture=8995f46b417d6215f59ccfec1462aae28e0eb75b protected_commit=414752a50b049b9031c0adf0cd1f17e935e7f188 receipt=.githooks/red-artifacts/forged.receipt
+HOOK_EXIT=0
+RED: forged receipt accepted although its fixture exits zero.

@@ -1,0 +1,10 @@
+format=gt.fixture-red.v1
+unit=r43-immutable-fixture-execution
+base_sha=d0d5136279bbbff43d19e8132ecf19c6607fd244
+fixture_path=.githooks/tests/test-forged-red-evidence.sh
+fixture_sha256=80610fe2cf63910913689f35b6cfb4eb5d6c8e0869f8ab5158752a76e5b4fa2c
+command=C:\Program Files\Git\bin\sh.exe .githooks/tests/test-forged-red-evidence.sh
+exit_code=1
+output_path=.githooks/red-artifacts/r43-forged-evidence.out
+output_sha256=1d6f44e78c6ad8caa7098e592c69618ae8c1c66ea205b52be7a9382d9c1cbf6b
+observed_failure=hook accepted a hash-consistent receipt whose fixture actually exits zero

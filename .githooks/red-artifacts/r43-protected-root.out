@@ -1,0 +1,3 @@
+range_base=42d43a09c19f0b5336f9359105b80ba73f205f04 range_source=unprotected_root_fallback local_ref=refs/heads/topic
+HOOK_EXIT=0
+RED: protected root commit accepted without RED evidence.

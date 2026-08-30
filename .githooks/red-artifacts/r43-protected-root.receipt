@@ -1,0 +1,10 @@
+format=gt.fixture-red.v1
+unit=r43-root-inclusive-fallback
+base_sha=d0d5136279bbbff43d19e8132ecf19c6607fd244
+fixture_path=.githooks/tests/test-protected-root-range.sh
+fixture_sha256=9c6230ab9275e8f81b9339fc5c52c365eee6d87ec4f260923e0bb3f0746f75e9
+command=C:\Program Files\Git\bin\sh.exe .githooks/tests/test-protected-root-range.sh
+exit_code=1
+output_path=.githooks/red-artifacts/r43-protected-root.out
+output_sha256=0136414e303061f4772725337ad20ef22535b75dedff853712116a18c34d316a
+observed_failure=hook excluded the protected root commit from its fallback range
