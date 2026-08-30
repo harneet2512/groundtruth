@@ -1,0 +1,201 @@
+#!/bin/sh
+set -eu
+
+remote_name=${1:-origin}
+remote_url=${2:-}
+zero=0000000000000000000000000000000000000000
+trace=${GT_FIXTURE_FIRST_TRACE:-0}
+stdin_file=$(mktemp)
+cleanup() { rm -f "$stdin_file"; }
+trap cleanup EXIT HUP INT TERM
+cat >"$stdin_file"
+
+say_trace() {
+  if [ "$trace" = 1 ]; then
+    printf '%s\n' "$*"
+  fi
+}
+
+is_protected_path() {
+  path=$1
+  case "$path" in
+    *_test.go|README.md|docs/*|.githooks/tests/*|.githooks/red-artifacts/*)
+      return 1
+      ;;
+    .githooks/pre-push|gt-index/internal/resolver/*.go|gt-index/internal/store/incremental.go|gt-index/internal/store/resolution_contract.go|gt-index/internal/store/resolution_v2.go|gt-index/internal/store/sqlite.go|gt-index/cmd/gt-index/build_info.go|gt-index/cmd/gt-index/main.go|gt-index/cmd/gt-index/publication.go|gt-index/cmd/gt-index/publication_*.go)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+commit_has_protected_change() {
+  commit=$1
+  git diff-tree --no-commit-id --name-only -r "$commit" | while IFS= read -r path; do
+    if is_protected_path "$path"; then
+      printf '%s\n' "$path"
+    fi
+  done | grep . >/dev/null
+}
+
+range_has_protected_change() {
+  base=$1
+  local_sha=$2
+  for commit in $(git rev-list --reverse "$base..$local_sha"); do
+    if commit_has_protected_change "$commit"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+nearest_remote_ancestor() {
+  local_sha=$1
+  candidates=$(mktemp)
+  for ref in $(git for-each-ref --format='%(refname)' "refs/remotes/$remote_name"); do
+    case "$ref" in
+      "refs/remotes/$remote_name/HEAD") continue ;;
+    esac
+    sha=$(git rev-parse "$ref^{commit}" 2>/dev/null || true)
+    if [ -n "$sha" ] && git merge-base --is-ancestor "$sha" "$local_sha"; then
+      distance=$(git rev-list --count "$sha..$local_sha")
+      printf '%012d\t%s\t%s\n' "$distance" "$ref" "$sha" >>"$candidates"
+    fi
+  done
+  if [ -s "$candidates" ]; then
+    sort -k1,1n -k2,2 "$candidates" | head -n 1 | awk -F '\t' '{print $3}'
+  fi
+  rm -f "$candidates"
+}
+
+fixture_files_are_dedicated() {
+  fixture_commit=$1
+  found=0
+  for path in $(git diff-tree --no-commit-id --name-only -r "$fixture_commit"); do
+    found=1
+    case "$path" in
+      *_test.go|.githooks/tests/*|.githooks/red-artifacts/*) ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$found" -eq 1 ]
+}
+
+receipt_value() {
+  key=$1
+  file=$2
+  sed -n "s/^${key}=//p" "$file"
+}
+
+validate_red_receipt() {
+  fixture_commit=$1
+  protected_commit=$2
+  fixture_parent=$(git rev-parse "$fixture_commit^")
+  subject=$(git log -1 --format=%s "$fixture_commit")
+  case "$subject" in
+    test\(red\):*) ;;
+    *) return 1 ;;
+  esac
+  fixture_files_are_dedicated "$fixture_commit" || return 1
+
+  receipts=$(git diff-tree --no-commit-id --name-only -r "$fixture_commit" | grep '^.githooks/red-artifacts/.*\.receipt$' || true)
+  [ -n "$receipts" ] || return 1
+  for receipt in $receipts; do
+    receipt_file=$(mktemp)
+    if ! git show "$fixture_commit:$receipt" >"$receipt_file" 2>/dev/null; then
+      rm -f "$receipt_file"
+      continue
+    fi
+    format=$(receipt_value format "$receipt_file")
+    base_sha=$(receipt_value base_sha "$receipt_file")
+    fixture_path=$(receipt_value fixture_path "$receipt_file")
+    fixture_sha256=$(receipt_value fixture_sha256 "$receipt_file")
+    command_value=$(receipt_value command "$receipt_file")
+    exit_code=$(receipt_value exit_code "$receipt_file")
+    output_path=$(receipt_value output_path "$receipt_file")
+    output_sha256=$(receipt_value output_sha256 "$receipt_file")
+    rm -f "$receipt_file"
+
+    [ "$format" = gt.fixture-red.v1 ] || continue
+    [ "$base_sha" = "$fixture_parent" ] || continue
+    [ -n "$fixture_path" ] && [ -n "$command_value" ] && [ -n "$output_path" ] || continue
+    case "$exit_code" in
+      ''|*[!0-9]*|0) continue ;;
+    esac
+    printf '%s\n' "$fixture_sha256" | grep -Eq '^[0-9a-f]{64}$' || continue
+    printf '%s\n' "$output_sha256" | grep -Eq '^[0-9a-f]{64}$' || continue
+    changed=$(git diff-tree --no-commit-id --name-only -r "$fixture_commit")
+    printf '%s\n' "$changed" | grep -Fx "$fixture_path" >/dev/null || continue
+    printf '%s\n' "$changed" | grep -Fx "$output_path" >/dev/null || continue
+    git cat-file -e "$fixture_commit:$fixture_path" 2>/dev/null || continue
+    git cat-file -e "$fixture_commit:$output_path" 2>/dev/null || continue
+    actual_fixture_hash=$(git show "$fixture_commit:$fixture_path" | sha256sum | awk '{print $1}')
+    actual_hash=$(git show "$fixture_commit:$output_path" | sha256sum | awk '{print $1}')
+    [ "$actual_fixture_hash" = "$fixture_sha256" ] || continue
+    [ "$actual_hash" = "$output_sha256" ] || continue
+    [ -n "$(git show "$fixture_commit:$output_path")" ] || continue
+    say_trace "red_fixture=$fixture_commit protected_commit=$protected_commit receipt=$receipt"
+    return 0
+  done
+  return 1
+}
+
+check_range() {
+  base=$1
+  local_sha=$2
+  for commit in $(git rev-list --reverse "$base..$local_sha"); do
+    if ! commit_has_protected_change "$commit"; then
+      continue
+    fi
+    fixture_commit=$(git rev-parse "$commit^")
+    if ! validate_red_receipt "$fixture_commit" "$commit"; then
+      if git log -1 --format=%s "$fixture_commit" | grep '^test(red):' >/dev/null 2>&1; then
+        printf 'fixture-first pre-push: malformed RED receipt before protected commit %s\n' "$commit" >&2
+      else
+        printf 'fixture-first pre-push: missing preceding dedicated RED fixture commit before protected commit %s\n' "$commit" >&2
+      fi
+      return 1
+    fi
+  done
+}
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "${local_ref:-}" ] || continue
+  [ "$local_sha" != "$zero" ] || continue
+  if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    base=$remote_sha
+    source=remote_sha
+  else
+    base=$(nearest_remote_ancestor "$local_sha")
+    source=nearest_remote_ancestor
+    if [ -z "$base" ]; then
+      root=$(git rev-list --max-parents=0 "$local_sha" | sort | head -n 1)
+      if range_has_protected_change "$root" "$local_sha"; then
+        printf 'fixture-first pre-push: cannot determine protected new-branch range for %s\n' "$local_ref" >&2
+        exit 1
+      fi
+      say_trace "range_base=$root range_source=unprotected_root_fallback local_ref=$local_ref"
+      continue
+    fi
+  fi
+  if ! git merge-base --is-ancestor "$base" "$local_sha"; then
+    root=$(git rev-list --max-parents=0 "$local_sha" | sort | head -n 1)
+    if range_has_protected_change "$root" "$local_sha"; then
+      printf 'fixture-first pre-push: indeterminate protected range for %s\n' "$local_ref" >&2
+      exit 1
+    fi
+    continue
+  fi
+  say_trace "range_base=$base range_source=$source local_ref=$local_ref"
+  check_range "$base" "$local_sha"
+done <"$stdin_file"
+
+if [ "$trace" != 1 ]; then
+  command -v git-lfs >/dev/null 2>&1 || {
+    printf '%s\n' "fixture-first pre-push: git-lfs is required for the preserved LFS pre-push behavior" >&2
+    exit 2
+  }
+  git lfs pre-push "$remote_name" "$remote_url" <"$stdin_file"
+fi

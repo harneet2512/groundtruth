@@ -293,6 +293,16 @@ cd gt-index && CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/
 CGO_ENABLED=1 go test ./...
 ```
 
+Protected provenance and observability changes are checked by the versioned
+`.githooks/pre-push` hook. Changes to the resolver, canonical resolution-v2
+store, graph/build completion writers, or the hook itself require an
+immediately preceding dedicated `test(red):` commit containing a
+`gt.fixture-red.v1` receipt and the hashed failing output. Documentation,
+tests, and unrelated production paths are not gated. New branches select the
+nearest remote ancestor deterministically; updated branches use the remote
+SHA supplied by Git. The hook preserves the repository's Git LFS pre-push
+check after fixture-first validation.
+
 **Test fixtures:** Cross-language sample projects (Python, TypeScript, Go, Java, Rust) under `tests/fixtures/`.
 
 ---

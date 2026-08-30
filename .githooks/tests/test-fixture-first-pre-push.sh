@@ -19,6 +19,7 @@ new_repo() {
   git init -q "$repo"
   git -C "$repo" config user.name fixture-test
   git -C "$repo" config user.email fixture-test@example.invalid
+  git -C "$repo" config core.autocrlf false
   mkdir -p "$repo/gt-index/internal/resolver" "$repo/gt-index/internal/parser"
   printf '%s\n' 'package resolver' > "$repo/gt-index/internal/resolver/resolver.go"
   printf '%s\n' 'package parser' > "$repo/gt-index/internal/parser/parser.go"
@@ -123,10 +124,12 @@ mkdir -p "$repo/.githooks/tests" "$repo/.githooks/red-artifacts"
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "expected protected failure" >&2' 'exit 1' > "$repo/.githooks/tests/protected_change_red.sh"
 printf '%s\n' 'expected protected failure' > "$repo/.githooks/red-artifacts/protected.out"
 output_hash=$(sha256sum "$repo/.githooks/red-artifacts/protected.out" | awk '{print $1}')
+fixture_hash=$(sha256sum "$repo/.githooks/tests/protected_change_red.sh" | awk '{print $1}')
 cat > "$repo/.githooks/red-artifacts/protected.receipt" <<EOF
 format=gt.fixture-red.v1
 base_sha=$base
 fixture_path=.githooks/tests/protected_change_red.sh
+fixture_sha256=$fixture_hash
 command=.githooks/tests/protected_change_red.sh
 exit_code=1
 output_path=.githooks/red-artifacts/protected.out
