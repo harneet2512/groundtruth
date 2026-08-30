@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=39facc20d73454056c8dac7f3a19294006f678c2
+fixture_path=.githooks/tests/cha_rta_root_completeness_red.sh
+fixture_sha256=9e159445eb9fa74fd79f69306eb33f6c8c310569d32560ece9bcaef3a058438f
+command=.githooks/tests/cha_rta_root_completeness_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/cha_rta_root_completeness_red.out
+output_sha256=e8ba5ccc4d6657723ed51760c89d78bce63acddfa7f686fc1fae7a4e8219c208

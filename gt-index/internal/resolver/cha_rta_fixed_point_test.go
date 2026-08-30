@@ -166,6 +166,32 @@ func TestCHAThenRTAReachabilityHonorsMultipleRootsAndDisconnectedCycles(t *testi
 	}
 }
 
+func TestCHAThenRTADoesNotClaimClosedWithUnprovenExportedRoot(t *testing.T) {
+	calls := []parser.CallRef{
+		{CalleeName: "Serve", CalleeQualified: "Serve", DispatchForm: "static"},
+		{CalleeName: "Run", CalleeQualified: "runner.Run", DispatchForm: "interface"},
+	}
+	meta := map[int64]NodeMeta{
+		1:  {Label: "Function", Name: "main", File: "main.go"},
+		3:  {Label: "Interface", Name: "Runner", File: "runner.go"},
+		4:  {Label: "Struct", Name: "ImplA", File: "a.go"},
+		10: {Label: "Function", Name: "Serve", File: "api.go"},
+		20: {Label: "Method", Name: "Run", ParentID: 4, File: "a.go"},
+	}
+	results := AnalyzeCHAThenRTAWithReachability(
+		calls, meta, map[int64][]int64{4: {3}}, []parser.AssignmentRef{
+			{VarName: "runner", TypeName: "ImplA", Scope: "Serve", File: "api.go"},
+		},
+		map[int]string{1: "Runner"}, []int64{1, 10}, [][]int64{{10}, nil}, true,
+	)
+	if results[1].RTACompleteness != "partial" || results[1].RTAAbstentionReason != "roots_incomplete" {
+		t.Fatalf("unproven root boundary=%+v, want partial/roots_incomplete", results[1])
+	}
+	if results[1].RootPolicy != "producer_entrypoints:main,__main__" || results[1].RootPolicyVersion != "1" || results[1].RootCompleteness != "partial" || results[1].RootBoundary != "repository_build" {
+		t.Fatalf("root provenance=%+v, want versioned partial repository_build policy", results[1])
+	}
+}
+
 func TestCHAThenRTAUsesCompleteMethodSignatures(t *testing.T) {
 	calls := []parser.CallRef{{CalleeName: "Run", CalleeQualified: "runner.Run", DispatchForm: "interface"}}
 	meta := map[int64]NodeMeta{
