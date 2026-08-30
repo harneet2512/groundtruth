@@ -1,0 +1,6 @@
+VTA RED boundary: candidate-only evidence is not closed
+--- FAIL: TestVTAVariableFlowIsOpenEvidence (DURATIONs)
+    vta_evidence_red_test.go:11: VTA evidence="closed" reason="", want open with an explicit reason
+FAIL
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/store	DURATIONs
+FAIL

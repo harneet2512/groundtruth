@@ -1,0 +1,15 @@
+format=gt.fixture-red.v1
+unit=HAR-42-step-5-VTA-evidence-boundary
+base_sha=e22f20e62210c6017c8cf0c9d8948d239ca224e9
+fixture_path=.githooks/tests/vta_step5_evidence_red.sh
+fixture_sha256=60c0f2affa4e247fff09e43088a1af4969b92ec4a9b63a252ec0bf2d610f45d7
+test_fixture_path=gt-index/internal/store/vta_evidence_red_test.go
+test_fixture_sha256=857064a5a376a876324365ee030af6ab157e34634b268199496ba5bdacd5d93f
+runner_path=.githooks/tests/vta_step5_evidence_red.sh
+runner_sha256=60c0f2affa4e247fff09e43088a1af4969b92ec4a9b63a252ec0bf2d610f45d7
+command=.githooks/tests/vta_step5_evidence_red.sh
+go_test_command=go test ./internal/store -run '^TestVTAVariableFlowIsOpenEvidence$' -count=1
+exit_code=1
+output_path=.githooks/red-artifacts/vta_step5_evidence_red.out
+output_sha256=7ced1b8320d9c25ddd96992d07cbc52b6ea016e2cd33414d02539886ecf85022
+expected_failure=VTA evidence="closed" reason="", want open with an explicit reason
