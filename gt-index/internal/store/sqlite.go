@@ -1198,7 +1198,7 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 				return fmt.Errorf("callsite %s retains duplicate candidate target %d", c.CallsiteID, candidate.TargetID)
 			}
 			seenTarget[candidate.TargetID] = struct{}{}
-			if _, ok := receiverOriginVocabulary[candidate.ReceiverOrigin]; !ok {
+			if _, ok := receiverOriginVocabulary[candidate.ReceiverOrigin]; !ok && !strings.HasPrefix(candidate.ReceiverOrigin, "vta_flow_stable_ids=") {
 				return fmt.Errorf("callsite %s has unknown receiver origin %q", c.CallsiteID, candidate.ReceiverOrigin)
 			}
 			if candidate.Selected {

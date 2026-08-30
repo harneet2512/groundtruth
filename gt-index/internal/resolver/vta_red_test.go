@@ -8,16 +8,16 @@ import (
 	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
 )
 
-// RED boundary for HAR-42 step 5 (VTA). The accepted CHA/RTA contract does
-// not yet expose a variable-type analysis entry point. The future entry point
-// is expected to be:
+// Permanent contract fixtures for HAR-42 step 5 (VTA). The entry point is:
 //
 //	AnalyzeVTA(calls, meta, implements, assignments) []VTAResult
 //
 // VTA must propagate variable/return/field type facts into the candidate set,
 // keep unrelated same-named methods out, retain every viable alternative, and
 // leave selection empty when flow evidence is ambiguous. Reflection keeps this
-// boundary independent of the concrete result type while the API is RED.
+// boundary independent of the concrete result type while checking candidate
+// conservation, nullable selection, scope isolation, return flow, and
+// argument-to-formal propagation.
 func TestVTAVariableFlowRetainsAlternativesAndAbstainsAmbiguity(t *testing.T) {
 	meta := map[int64]NodeMeta{
 		1:  {Label: "Function", Name: "main", File: "main.go"},
@@ -102,6 +102,35 @@ func TestVTAVariableFlowRetainsAlternativesAndAbstainsAmbiguity(t *testing.T) {
 		)
 		assertVTAField(t, results, 0, "CandidateNodeIDs", "[8]")
 		assertVTAField(t, results, 1, "CandidateNodeIDs", "[9]")
+	})
+
+	t.Run("same_file_scopes_are_isolated", func(t *testing.T) {
+		results := AnalyzeVTA(
+			[]parser.CallRef{{CallerScope: "first", CalleeName: "Run", CalleeQualified: "runner.Run", File: "same.go", Line: 30, DispatchForm: "interface"}},
+			meta,
+			implements,
+			[]parser.AssignmentRef{
+				{VarName: "runner", TypeName: "ImplA", Scope: "first", File: "same.go", Line: 5},
+				{VarName: "runner", TypeName: "ImplB", Scope: "second", File: "same.go", Line: 6},
+			},
+		)
+		assertVTAField(t, results, 0, "CandidateNodeIDs", "[8]")
+	})
+
+	t.Run("argument_flow_reaches_formal_at_fixed_point", func(t *testing.T) {
+		results := AnalyzeVTA(
+			[]parser.CallRef{
+				{CallerScope: "main", CalleeName: "helper", CalleeQualified: "helper", File: "main.go", Line: 12, DispatchForm: "static", ArgumentNames: []string{"runner"}},
+				{CallerScope: "helper", CalleeName: "Run", CalleeQualified: "r.Run", File: "helper.go", Line: 20, DispatchForm: "interface"},
+			},
+			meta,
+			implements,
+			[]parser.AssignmentRef{
+				{VarName: "runner", TypeName: "ImplA", Scope: "main", File: "main.go", Line: 5},
+				{VarName: "r", Scope: "helper", File: "helper.go", Line: 2, IsParameter: true, ParameterIndex: 0},
+			},
+		)
+		assertVTAField(t, results, 1, "CandidateNodeIDs", "[8]")
 	})
 }
 

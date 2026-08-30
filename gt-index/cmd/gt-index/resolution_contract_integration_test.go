@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
@@ -326,9 +327,12 @@ func Invoke(runner Runner) {
 			vta = pass
 		}
 	}
-	if evidence[0].Mechanism != "vta" || vta.Status != "closed" ||
+	if evidence[0].Mechanism != "vta" || vta.Status != "partial" ||
 		len(vta.CandidateStableIDs) != 1 || vta.CandidateStableIDs[0] != evidence[0].TargetStableID {
 		t.Fatalf("normal query lost VTA candidate evidence: candidate=%+v vta=%+v", evidence[0], vta)
+	}
+	if !strings.HasPrefix(evidence[0].ReceiverOrigin, "vta_flow_stable_ids=") || !strings.Contains(vta.Reason, "flow_type_stable_ids=") {
+		t.Fatalf("normal query lost VTA flow provenance: candidate=%+v vta=%+v", evidence[0], vta)
 	}
 	raw, err := sql.Open("sqlite3", dbPath)
 	if err != nil {

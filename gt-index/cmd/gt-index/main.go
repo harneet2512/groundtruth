@@ -586,6 +586,19 @@ func main() {
 	for _, result := range vtaResults {
 		vtaByOrdinal[result.CallsiteOrdinal] = result
 	}
+	mergeIDs := func(left, right []int64) []int64 {
+		seen := make(map[int64]struct{}, len(left)+len(right))
+		out := make([]int64, 0, len(left)+len(right))
+		for _, id := range append(append([]int64(nil), left...), right...) {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+		return out
+	}
 
 	resolveElapsed := time.Since(resolveStart)
 
@@ -681,11 +694,21 @@ func main() {
 		publishedDispatchState := string(c.DispatchState)
 		publishedMechanism := c.Mechanism
 		vtaUsed := false
-		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && len(vta.CandidateNodeIDs) > 0 && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") {
-			candidateNodeIDs = append([]int64(nil), vta.CandidateNodeIDs...)
+		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") {
+			// VTA is candidate-only. Preserve CHA/RTA identities when flow is
+			// incomplete, while adding every flow-supported identity to the
+			// primary graph. A flow result with no viable method must not erase
+			// conservative hierarchy candidates.
+			if hierarchy, hierarchyOK := hierarchyByOrdinal[c.CallsiteOrdinal]; hierarchyOK {
+				candidateNodeIDs = mergeIDs(vta.CandidateNodeIDs, hierarchy.CHACandidateNodeIDs)
+			} else {
+				candidateNodeIDs = append([]int64(nil), vta.CandidateNodeIDs...)
+			}
 			selectedNodeID = nil
-			publishedMechanism = "vta"
-			vtaUsed = true
+			if len(vta.CandidateNodeIDs) > 0 {
+				publishedMechanism = "vta"
+				vtaUsed = true
+			}
 			if len(candidateNodeIDs) > 1 {
 				publishedDispatchState = string(resolver.DispatchAmbiguous)
 			} else {
@@ -716,10 +739,10 @@ func main() {
 		for _, pass := range c.PassExecutions {
 			passCoverage = append(passCoverage, store.ResolutionPassCoverage{PassKind: pass.PassKind, Version: "1", Status: pass.Status, Reason: pass.Reason})
 		}
-		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vtaUsed {
-			vtaStatus := "completed_match"
+		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" {
+			vtaStatus := "partial"
 			if len(vta.CandidateNodeIDs) == 0 {
-				vtaStatus = "completed_no_match"
+				vtaStatus = "partial_no_match"
 			}
 			vtaStableIDs := make([]string, 0, len(vta.CandidateNodeIDs))
 			for _, id := range vta.CandidateNodeIDs {
@@ -727,9 +750,19 @@ func main() {
 					vtaStableIDs = append(vtaStableIDs, symbol.StableID)
 				}
 			}
+			flowStableIDs := make([]string, 0, len(vta.FlowTypeNodeIDs))
+			for _, id := range vta.FlowTypeNodeIDs {
+				if symbol, exists := symbolByID[id]; exists {
+					flowStableIDs = append(flowStableIDs, symbol.StableID)
+				}
+			}
+			flowReason := vta.AbstentionReason
+			if len(flowStableIDs) > 0 {
+				flowReason = "flow_type_stable_ids=" + strings.Join(flowStableIDs, ",") + "; " + flowReason
+			}
 			passCoverage = append(passCoverage, store.ResolutionPassCoverage{
 				PassKind: "vta", Version: "1", Status: vtaStatus,
-				Reason: vta.AbstentionReason, CandidateStableIDs: vtaStableIDs,
+				Reason: flowReason, CandidateStableIDs: vtaStableIDs,
 			})
 		}
 		if hierarchy, ok := hierarchyByOrdinal[c.CallsiteOrdinal]; ok && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") {
@@ -777,7 +810,20 @@ func main() {
 			complete := c.ParserComplete
 			receiverChain, _ := json.Marshal(qualifiedCallChain(c.CalleeQualified))
 			importChain, _ := json.Marshal(c.CandidateImportChains[targetID])
-			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: publishedMechanism, DeclaredScope: target.QualifiedName, ReceiverType: c.ReceiverType, ReceiverOrigin: c.ReceiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), DynamicDispatch: publishedDispatchState == string(resolver.DispatchDynamic), ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: selectedNodeID != nil && *selectedNodeID == targetID}
+			receiverType, receiverOrigin := c.ReceiverType, c.ReceiverOrigin
+			if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" && len(vta.FlowTypeNodeIDs) > 0 {
+				flowStableIDs := make([]string, 0, len(vta.FlowTypeNodeIDs))
+				flowNames := make([]string, 0, len(vta.FlowTypeNodeIDs))
+				for _, flowID := range vta.FlowTypeNodeIDs {
+					if symbol, exists := symbolByID[flowID]; exists {
+						flowStableIDs = append(flowStableIDs, symbol.StableID)
+						flowNames = append(flowNames, symbol.QualifiedName)
+					}
+				}
+				receiverType = strings.Join(flowNames, ",")
+				receiverOrigin = "vta_flow_stable_ids=" + strings.Join(flowStableIDs, ",")
+			}
+			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: publishedMechanism, DeclaredScope: target.QualifiedName, ReceiverType: receiverType, ReceiverOrigin: receiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), DynamicDispatch: publishedDispatchState == string(resolver.DispatchDynamic), ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: selectedNodeID != nil && *selectedNodeID == targetID}
 			candidateRows = append(candidateRows, candidate)
 			graphCandidates = append(graphCandidates, candidate)
 		}

@@ -77,6 +77,7 @@ type AssertionRef struct {
 // CallRef is a raw (unresolved) call reference.
 type CallRef struct {
 	CallerNodeIdx    int    // index into ParseResult.Nodes
+	CallerScope      string // qualified enclosing function/method scope
 	CalleeName       string // the function/method name being called (last component)
 	CalleeQualified  string // full qualified name if available (e.g. "obj.method")
 	Line             int
@@ -88,6 +89,7 @@ type CallRef struct {
 	ByteEnd          uint64
 	ColumnStart      uint32
 	ArgumentArity    *uint16
+	ArgumentNames    []string // source-visible variable arguments, in call order
 	DispatchForm     string
 }
 
@@ -95,12 +97,15 @@ type CallRef struct {
 // PyCG Rule 1: x = ClassName() → x has type ClassName.
 // Used by resolver Strategy 1.96 for x.method() resolution.
 type AssignmentRef struct {
-	VarName       string // LHS variable name ("x", "self.client")
-	TypeName      string // RHS class name (constructor) OR callee name (when ViaReturn)
-	TypeQualified string // full qualified RHS if available ("requests.Session")
-	Scope         string // enclosing function name (empty = module level)
-	File          string
-	Line          int
+	VarName        string // LHS variable name ("x", "self.client")
+	TypeName       string // RHS class name (constructor) OR callee name (when ViaReturn)
+	TypeQualified  string // full qualified RHS if available ("requests.Session")
+	Scope          string // enclosing function name (empty = module level)
+	ObjectScope    string // enclosing class/object for self/this fields
+	File           string
+	Line           int
+	IsParameter    bool
+	ParameterIndex int
 	// ViaReturn marks x = factory() (non-constructor call): TypeName holds the CALLEE
 	// name, and the resolver bridges through that callee's declared return type
 	// (PyCG Rule 4 / JARVIS return-type chaining) rather than treating it as a class.
@@ -587,9 +592,15 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			// Extract calls from this function's body
 			bodyNode := node.ChildByFieldName(spec.BodyField)
 			if bodyNode != nil {
-				extractCalls(bodyNode, sf, src, result, idx)
+				scopeName := name
+				objectScope := ""
+				if parentNodeIdx > 0 && parentNodeIdx-1 < len(result.Nodes) {
+					objectScope = result.Nodes[parentNodeIdx-1].QualifiedName
+					scopeName = objectScope + "." + name
+				}
+				extractCalls(bodyNode, sf, src, result, idx, scopeName)
 				// PyCG Rule 1: extract x = ClassName() assignments for type tracking
-				extractAssignments(bodyNode, sf, src, result, name)
+				extractAssignments(bodyNode, sf, src, result, scopeName, objectScope)
 			}
 
 			// Extract properties (guard clauses, exception types, return shape)
@@ -801,12 +812,12 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 							// Extract calls from the callback body
 							bodyNode := arg.ChildByFieldName("body")
 							if bodyNode != nil {
-								extractCalls(bodyNode, sf, src, result, idx)
-								extractAssignments(bodyNode, sf, src, result, n.Name)
+								extractCalls(bodyNode, sf, src, result, idx, n.Name)
+								extractAssignments(bodyNode, sf, src, result, n.Name, "")
 								findAssertions(bodyNode, sf, src, result, idx, 0)
 							} else {
 								// Arrow function with expression body: () => expr
-								extractCalls(arg, sf, src, result, idx)
+								extractCalls(arg, sf, src, result, idx, n.Name)
 								findAssertions(arg, sf, src, result, idx, 0)
 							}
 						}
@@ -923,11 +934,11 @@ func extractGoInterfaceMethods(typeDecl *sitter.Node, sf walker.SourceFile, src 
 	}
 }
 
-func extractCalls(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int) {
-	extractCallsWithParent(node, sf, src, result, callerIdx, "", "0")
+func extractCalls(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int, callerScope string) {
+	extractCallsWithParent(node, sf, src, result, callerIdx, callerScope, "", "0")
 }
 
-func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int, parentType, astPath string) {
+func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int, callerScope, parentType, astPath string) {
 	spec := sf.Spec
 	nodeType := node.Type()
 
@@ -1004,6 +1015,18 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 				arity := uint16(arguments.NamedChildCount())
 				argumentArity = &arity
 			}
+			argumentNames := []string(nil)
+			if arguments := node.ChildByFieldName("arguments"); arguments != nil {
+				for i := 0; i < int(arguments.NamedChildCount()); i++ {
+					arg := arguments.NamedChild(i)
+					if arg == nil {
+						continue
+					}
+					if arg.Type() == "identifier" || arg.Type() == "field_identifier" || arg.Type() == "type_identifier" {
+						argumentNames = append(argumentNames, strings.TrimSpace(arg.Content(src)))
+					}
+				}
+			}
 			dynamic := callTargetIsDynamic(node)
 			dispatchForm := "static"
 			if dynamic {
@@ -1013,6 +1036,7 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 			}
 			result.Calls = append(result.Calls, CallRef{
 				CallerNodeIdx:   callerIdx,
+				CallerScope:     callerScope,
 				CalleeName:      simple,
 				CalleeQualified: qualified,
 				Line:            int(node.StartPoint().Row) + 1,
@@ -1023,6 +1047,7 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 				ByteEnd:         uint64(node.EndByte()),
 				ColumnStart:     uint32(node.StartPoint().Column),
 				ArgumentArity:   argumentArity,
+				ArgumentNames:   argumentNames,
 				DispatchForm:    dispatchForm,
 			})
 
@@ -1055,17 +1080,17 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 	}
 
 	for i := 0; i < int(node.ChildCount()); i++ {
-		extractCallsWithParent(node.Child(i), sf, src, result, callerIdx, nodeType, fmt.Sprintf("%s/%d", astPath, i))
+		extractCallsWithParent(node.Child(i), sf, src, result, callerIdx, callerScope, nodeType, fmt.Sprintf("%s/%d", astPath, i))
 	}
 }
 
 // extractAssignments finds variable assignments where the RHS is a constructor call.
 // PyCG Rule 1: x = ClassName() → varTypes[x] = ClassName
 // Looks for assignment nodes where right side is a call to a capitalized name.
-func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName string) {
+func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName, objectScope string) {
 	nodeType := node.Type()
 	if sf.Language == "go" && node.Parent() != nil && (node.Parent().Type() == "function_declaration" || node.Parent().Type() == "method_declaration") {
-		extractGoTypedAssignments(node, sf, src, result, scopeName)
+		extractGoTypedAssignments(node, sf, src, result, scopeName, objectScope)
 	}
 
 	// Python: assignment, augmented_assignment
@@ -1137,6 +1162,7 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 							TypeName:      typeName,
 							TypeQualified: qualified,
 							Scope:         scopeName,
+							ObjectScope:   objectScope,
 							File:          sf.Path,
 							Line:          int(node.StartPoint().Row) + 1,
 						})
@@ -1158,6 +1184,7 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 								TypeName:      simple,
 								TypeQualified: qualified,
 								Scope:         scopeName,
+								ObjectScope:   objectScope,
 								File:          sf.Path,
 								Line:          int(node.StartPoint().Row) + 1,
 								ViaReturn:     true,
@@ -1188,6 +1215,7 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 						TypeName:      typeName,
 						TypeQualified: typeName,
 						Scope:         scopeName,
+						ObjectScope:   objectScope,
 						File:          sf.Path,
 						Line:          int(node.StartPoint().Row) + 1,
 					})
@@ -1198,7 +1226,7 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 
 	// Recurse
 	for i := 0; i < int(node.ChildCount()); i++ {
-		extractAssignments(node.Child(i), sf, src, result, scopeName)
+		extractAssignments(node.Child(i), sf, src, result, scopeName, objectScope)
 	}
 }
 
@@ -1211,12 +1239,12 @@ var goTypedVarRE = regexp.MustCompile(`^\s*var\s+([A-Za-z_]\w*)\s+(\*?[A-Za-z_]\
 // assignment with a `type` field, so the generic assignment walker cannot see
 // it. This is deliberately limited to the current function body (and its
 // signature) to avoid turning package-level names into receiver evidence.
-func extractGoTypedAssignments(bodyNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName string) {
+func extractGoTypedAssignments(bodyNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName, objectScope string) {
 	parent := bodyNode.Parent()
 	if parent == nil {
 		return
 	}
-	appendBinding := func(name, typeName string, line int) {
+	appendBinding := func(name, typeName string, line int, isParameter bool, parameterIndex int) {
 		name = strings.TrimSpace(name)
 		typeName = normalizedGoTypeName(typeName)
 		if name == "" || typeName == "" {
@@ -1225,18 +1253,28 @@ func extractGoTypedAssignments(bodyNode *sitter.Node, sf walker.SourceFile, src 
 		result.Assignments = append(result.Assignments, AssignmentRef{
 			VarName: name, TypeName: typeName, TypeQualified: typeName,
 			Scope: scopeName, File: sf.Path, Line: line,
+			ObjectScope: objectScope, IsParameter: isParameter, ParameterIndex: parameterIndex,
 		})
 	}
 
-	// Function and method parameters, including a Go method receiver, are in
-	// the declaration header immediately before the body node.
+	// Function and method parameters are in the final parenthesized list before
+	// the body. Restricting the regex to that list avoids recording `func` and
+	// the function name as fake bindings, and preserves formal argument order.
 	headerStart, headerEnd := parent.StartByte(), bodyNode.StartByte()
 	if headerStart <= headerEnd && int(headerEnd) <= len(src) {
 		header := string(src[headerStart:headerEnd])
-		for _, match := range goTypedBindingRE.FindAllStringSubmatchIndex(header, -1) {
-			name := header[match[2]:match[3]]
-			typeName := header[match[4]:match[5]]
-			appendBinding(name, typeName, int(parent.StartPoint().Row)+1)
+		params := header
+		if open := strings.LastIndex(params, "("); open >= 0 {
+			if close := strings.LastIndex(params, ")"); close > open {
+				params = params[open+1 : close]
+			}
+		}
+		parameterIndex := 0
+		for _, match := range goTypedBindingRE.FindAllStringSubmatchIndex(params, -1) {
+			name := params[match[2]:match[3]]
+			typeName := params[match[4]:match[5]]
+			appendBinding(name, typeName, int(parent.StartPoint().Row)+1, true, parameterIndex)
+			parameterIndex++
 		}
 	}
 
@@ -1259,12 +1297,12 @@ func extractGoTypedAssignments(bodyNode *sitter.Node, sf walker.SourceFile, src 
 			continue
 		}
 		if match := goTypedVarRE.FindStringSubmatch(line); len(match) == 3 {
-			appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1)
+			appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1, false, -1)
 			continue
 		}
 		if grouped {
 			if match := goTypedBindingRE.FindStringSubmatch(line); len(match) == 3 {
-				appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1)
+				appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1, false, -1)
 			}
 		}
 	}

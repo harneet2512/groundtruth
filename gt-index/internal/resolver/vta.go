@@ -19,12 +19,19 @@ type VTAResult struct {
 	AbstentionReason     string
 }
 
-// AnalyzeVTA propagates source-visible variable, return, and object-field
-// types into candidate identities. Local variables are confined to the call's
-// source file and preceding assignments; self/this fields are object-scoped
-// so a write in one method can inform a read in another. Candidate evidence is
-// deliberately nullable-selection: VTA never turns alternatives into a
-// verified single target.
+type vtaValueKey struct {
+	File   string
+	Scope  string
+	Object string
+	Name   string
+	Line   int
+}
+
+// AnalyzeVTA builds a finite, flow-insensitive value-constraint graph and
+// reaches a monotone fixed point over it. Assignments seed value facts;
+// argument edges copy facts into callee parameters. Return annotations are
+// resolved transitively, so a factory returning another factory is still
+// useful without pretending that a unique target was verified.
 func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef) []VTAResult {
 	typeIDsByName := make(map[string][]int64)
 	concreteIDs := make(map[int64]struct{})
@@ -51,6 +58,118 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		sort.Slice(methodsByName[name], func(i, j int) bool { return methodsByName[name][i] < methodsByName[name][j] })
 	}
 
+	returnTypes := make(map[string][]string)
+	for _, node := range meta {
+		if (node.Label == "Function" || node.Label == "Method") && node.ReturnType != "" {
+			returnTypes[normalizedTypeName(node.Name)] = append(returnTypes[normalizedTypeName(node.Name)], normalizedTypeName(node.ReturnType))
+		}
+	}
+	var resolveReturn func(string, map[string]struct{}) []string
+	resolveReturn = func(name string, seen map[string]struct{}) []string {
+		name = normalizedTypeName(name)
+		if name == "" {
+			return nil
+		}
+		if _, ok := seen[name]; ok {
+			return nil
+		}
+		seen[name] = struct{}{}
+		out := make([]string, 0)
+		for _, returned := range returnTypes[name] {
+			if len(typeIDsByName[returned]) > 0 {
+				out = append(out, returned)
+			} else {
+				out = append(out, resolveReturn(returned, seen)...)
+			}
+		}
+		return uniqueStrings(out)
+	}
+
+	valueTypes := make(map[vtaValueKey]map[string]struct{})
+	addValue := func(key vtaValueKey, names []string) bool {
+		if key.Name == "" || len(names) == 0 {
+			return false
+		}
+		set := valueTypes[key]
+		if set == nil {
+			set = make(map[string]struct{})
+			valueTypes[key] = set
+		}
+		changed := false
+		for _, name := range names {
+			name = normalizedTypeName(name)
+			if name == "" {
+				continue
+			}
+			if _, exists := set[name]; !exists {
+				set[name] = struct{}{}
+				changed = true
+			}
+		}
+		return changed
+	}
+	assignmentNames := func(assignment parser.AssignmentRef) []string {
+		if !assignment.ViaReturn {
+			return []string{assignment.TypeName, assignment.TypeQualified}
+		}
+		return resolveReturn(assignment.TypeName, make(map[string]struct{}))
+	}
+	for _, assignment := range assignments {
+		addValue(vtaValueKey{File: assignment.File, Scope: assignment.Scope, Object: assignment.ObjectScope, Name: assignment.VarName, Line: assignment.Line}, assignmentNames(assignment))
+	}
+
+	callValue := func(call parser.CallRef, name string) map[string]struct{} {
+		object := callerObjectScope(call.CallerScope)
+		field := strings.HasPrefix(name, "self.") || strings.HasPrefix(name, "this.")
+		key := vtaValueKey{File: call.File, Scope: call.CallerScope, Object: object, Name: name}
+		if !field {
+			key.Object = ""
+		}
+		fallback := make(map[string]struct{})
+		for assignment, set := range valueTypes {
+			if assignment.Name != key.Name || assignment.File != key.File || assignment.Line > call.Line {
+				continue
+			}
+			if !field && call.CallerScope != "" && assignment.Scope != key.Scope {
+				continue
+			}
+			if field && key.Object != "" && assignment.Object != "" && assignment.Object != key.Object {
+				continue
+			}
+			for typ := range set {
+				fallback[typ] = struct{}{}
+			}
+		}
+		return fallback
+	}
+	parameterMatches := func(assignment parser.AssignmentRef, call parser.CallRef, index int) bool {
+		if !assignment.IsParameter || assignment.ParameterIndex != index {
+			return false
+		}
+		callee := normalizedTypeName(call.CalleeName)
+		scope := normalizedTypeName(assignment.Scope)
+		return scope == callee || strings.HasSuffix(scope, "."+callee)
+	}
+	// Monotone worklist: every iteration only adds a value fact, so finite
+	// type/name facts guarantee termination even for cyclic calls.
+	for changed := true; changed; {
+		changed = false
+		for _, call := range calls {
+			for index, argument := range call.ArgumentNames {
+				for _, parameter := range assignments {
+					if !parameterMatches(parameter, call, index) {
+						continue
+					}
+					for typ := range callValue(call, argument) {
+						if addValue(vtaValueKey{File: parameter.File, Scope: parameter.Scope, Object: parameter.ObjectScope, Name: parameter.VarName, Line: parameter.Line}, []string{typ}) {
+							changed = true
+						}
+					}
+				}
+			}
+		}
+	}
+
 	results := make([]VTAResult, len(calls))
 	for ordinal, call := range calls {
 		results[ordinal] = VTAResult{CallsiteOrdinal: ordinal, Completeness: "not_run"}
@@ -61,44 +180,62 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		if qualifier == "" {
 			continue
 		}
-		fieldScoped := strings.HasPrefix(qualifier, "self.") || strings.HasPrefix(qualifier, "this.")
-		typeIDs := make(map[int64]struct{})
-		for _, assignment := range assignments {
-			if assignment.VarName != qualifier || assignment.Line > call.Line {
-				continue
-			}
-			if !fieldScoped && assignment.File != call.File {
-				continue
-			}
-			for _, typeName := range assignmentTypeNames(assignment, meta) {
-				for _, typeID := range typeIDsByName[normalizedTypeName(typeName)] {
-					if _, isInterface := interfaceIDs[typeID]; isInterface {
-						for concreteID := range concreteIDs {
-							if implementsBase(implements, concreteID, typeID) {
-								typeIDs[concreteID] = struct{}{}
-							}
+		flowNames := callValue(call, qualifier)
+		if len(flowNames) == 0 {
+			continue
+		}
+		flowTypeIDs := make(map[int64]struct{})
+		for name := range flowNames {
+			for _, typeID := range typeIDsByName[normalizedTypeName(name)] {
+				if _, isInterface := interfaceIDs[typeID]; isInterface {
+					for concreteID := range concreteIDs {
+						if implementsBase(implements, concreteID, typeID) {
+							flowTypeIDs[concreteID] = struct{}{}
 						}
-						continue
 					}
-					typeIDs[typeID] = struct{}{}
+				} else {
+					flowTypeIDs[typeID] = struct{}{}
 				}
 			}
 		}
-		if len(typeIDs) == 0 {
-			continue
-		}
 		results[ordinal].Completeness = "candidate_only"
-		results[ordinal].FlowTypeNodeIDs = sortedIDs(typeIDs)
+		results[ordinal].FlowTypeNodeIDs = sortedIDs(flowTypeIDs)
 		for _, methodID := range methodsByName[call.CalleeName] {
-			if _, ok := typeIDs[meta[methodID].ParentID]; ok {
+			if _, ok := flowTypeIDs[meta[methodID].ParentID]; ok {
 				results[ordinal].CandidateNodeIDs = append(results[ordinal].CandidateNodeIDs, methodID)
 			}
 		}
 		if len(results[ordinal].CandidateNodeIDs) > 1 {
 			results[ordinal].AbstentionReason = "ambiguous_viable_set"
+		} else if len(results[ordinal].CandidateNodeIDs) == 0 {
+			results[ordinal].AbstentionReason = "flow_type_without_viable_target"
 		}
 	}
 	return results
+}
+
+func callerObjectScope(scope string) string {
+	if dot := strings.LastIndex(scope, "."); dot > 0 {
+		return scope[:dot]
+	}
+	return ""
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = normalizedTypeName(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; !ok {
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func callQualifier(qualified string) string {
@@ -107,21 +244,6 @@ func callQualifier(qualified string) string {
 		return ""
 	}
 	return strings.TrimSpace(qualified[:dot])
-}
-
-func assignmentTypeNames(assignment parser.AssignmentRef, meta map[int64]NodeMeta) []string {
-	if !assignment.ViaReturn {
-		return []string{assignment.TypeName, assignment.TypeQualified}
-	}
-	names := make([]string, 0, 2)
-	for _, node := range meta {
-		if (node.Label == "Function" || node.Label == "Method") &&
-			normalizedTypeName(node.Name) == normalizedTypeName(assignment.TypeName) &&
-			node.ReturnType != "" {
-			names = append(names, node.ReturnType)
-		}
-	}
-	return names
 }
 
 func implementsBase(implements map[int64][]int64, concreteID, baseID int64) bool {
