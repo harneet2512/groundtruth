@@ -127,14 +127,20 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		}
 		fallback := make(map[string]struct{})
 		for assignment, set := range valueTypes {
-			if assignment.Name != key.Name || assignment.File != key.File || assignment.Line > call.Line {
+			if assignment.Name != key.Name || assignment.Line > call.Line {
 				continue
 			}
-			if !field && call.CallerScope != "" && assignment.Scope != key.Scope {
+			if !field && (assignment.File != key.File || (call.CallerScope != "" && assignment.Scope != key.Scope)) {
 				continue
 			}
-			if field && key.Object != "" && assignment.Object != "" && assignment.Object != key.Object {
-				continue
+			if field {
+				if key.Object != "" && assignment.Object != "" {
+					if assignment.Object != key.Object {
+						continue
+					}
+				} else if assignment.File != key.File {
+					continue
+				}
 			}
 			for typ := range set {
 				fallback[typ] = struct{}{}
@@ -148,6 +154,9 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		}
 		callee := normalizedTypeName(call.CalleeName)
 		scope := normalizedTypeName(assignment.Scope)
+		if call.CalleeScope != "" {
+			return scope == normalizedTypeName(call.CalleeScope)
+		}
 		return scope == callee || strings.HasSuffix(scope, "."+callee)
 	}
 	// Monotone worklist: every iteration only adds a value fact, so finite
@@ -198,7 +207,10 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 				}
 			}
 		}
-		results[ordinal].Completeness = "candidate_only"
+		results[ordinal].Completeness = "closed"
+		if call.ParserIncomplete {
+			results[ordinal].Completeness = "partial"
+		}
 		results[ordinal].FlowTypeNodeIDs = sortedIDs(flowTypeIDs)
 		for _, methodID := range methodsByName[call.CalleeName] {
 			if _, ok := flowTypeIDs[meta[methodID].ParentID]; ok {

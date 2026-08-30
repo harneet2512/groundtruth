@@ -241,6 +241,7 @@ type ResolutionPassCoverage struct {
 	Status                  string   `json:"status"`
 	Reason                  string   `json:"reason,omitempty"`
 	CandidateStableIDs      []string `json:"candidate_stable_ids,omitempty"`
+	FlowTypeStableIDs       []string `json:"flow_type_stable_ids,omitempty"`
 	AllocationTypeStableIDs []string `json:"allocation_type_stable_ids,omitempty"`
 	ReachableStableIDs      []string `json:"reachable_stable_ids,omitempty"`
 	RootStableIDs           []string `json:"root_stable_ids,omitempty"`
@@ -592,6 +593,7 @@ func createSchema(db *sql.DB) error {
 		reason_code TEXT,
 		blocking_pass_kinds TEXT,
 		candidate_stable_ids TEXT,
+		flow_type_stable_ids TEXT,
 		allocation_type_stable_ids TEXT,
 		reachable_stable_ids TEXT,
 		root_stable_ids TEXT,
@@ -844,7 +846,7 @@ func createSchema(db *sql.DB) error {
 		{"boundary_kind", "TEXT"}, {"boundary_id", "TEXT"},
 		{"fact_status", "TEXT"}, {"covered_units", "INTEGER"}, {"known_units", "INTEGER"},
 		{"reason_code", "TEXT"}, {"blocking_pass_kinds", "TEXT"}, {"policy_name", "TEXT"},
-		{"candidate_stable_ids", "TEXT"}, {"allocation_type_stable_ids", "TEXT"},
+		{"candidate_stable_ids", "TEXT"}, {"flow_type_stable_ids", "TEXT"}, {"allocation_type_stable_ids", "TEXT"},
 		{"reachable_stable_ids", "TEXT"},
 		{"root_stable_ids", "TEXT"},
 		{"root_policy", "TEXT"},

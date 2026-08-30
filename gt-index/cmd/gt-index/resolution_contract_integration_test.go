@@ -327,7 +327,7 @@ func Invoke(runner Runner) {
 			vta = pass
 		}
 	}
-	if evidence[0].Mechanism != "vta" || vta.Status != "partial" ||
+	if evidence[0].Mechanism != "vta" || vta.Status != "closed" ||
 		len(vta.CandidateStableIDs) != 1 || vta.CandidateStableIDs[0] != evidence[0].TargetStableID {
 		t.Fatalf("normal query lost VTA candidate evidence: candidate=%+v vta=%+v", evidence[0], vta)
 	}

@@ -132,6 +132,33 @@ func TestVTAVariableFlowRetainsAlternativesAndAbstainsAmbiguity(t *testing.T) {
 		)
 		assertVTAField(t, results, 1, "CandidateNodeIDs", "[8]")
 	})
+
+	t.Run("field_flow_is_object_scoped_across_files", func(t *testing.T) {
+		results := AnalyzeVTA(
+			[]parser.CallRef{{CallerScope: "Service.run", CalleeName: "Run", CalleeQualified: "self.client.Run", File: "run.go", Line: 30, DispatchForm: "interface"}},
+			meta,
+			implements,
+			[]parser.AssignmentRef{{VarName: "self.client", TypeName: "Client", Scope: "Service.init", ObjectScope: "Service", File: "init.go", Line: 5}},
+		)
+		assertVTAField(t, results, 0, "CandidateNodeIDs", "[13]")
+	})
+
+	t.Run("argument_edges_use_exact_callee_scope", func(t *testing.T) {
+		results := AnalyzeVTA(
+			[]parser.CallRef{
+				{CallerScope: "main", CalleeScope: "pkg.helper", CalleeName: "helper", CalleeQualified: "pkg.helper", File: "main.go", Line: 12, DispatchForm: "static", ArgumentNames: []string{"runner"}},
+				{CallerScope: "pkg.helper", CalleeName: "Run", CalleeQualified: "r.Run", File: "pkg.go", Line: 20, DispatchForm: "interface"},
+			},
+			meta,
+			implements,
+			[]parser.AssignmentRef{
+				{VarName: "runner", TypeName: "ImplA", Scope: "main", File: "main.go", Line: 5},
+				{VarName: "r", Scope: "pkg.helper", File: "pkg.go", Line: 2, IsParameter: true, ParameterIndex: 0},
+				{VarName: "r", TypeName: "ImplB", Scope: "other.helper", File: "other.go", Line: 2, IsParameter: true, ParameterIndex: 0},
+			},
+		)
+		assertVTAField(t, results, 1, "CandidateNodeIDs", "[8]")
+	})
 }
 
 func assertVTAField(t *testing.T, results any, index int, field, want string) {
