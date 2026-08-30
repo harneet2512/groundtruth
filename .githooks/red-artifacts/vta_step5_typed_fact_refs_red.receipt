@@ -1,0 +1,15 @@
+format=gt.fixture-red.v1
+unit=HAR-42-step-5-VTA-typed-fact-references
+base_sha=0b46855422eec7c729d2608b40851ab05f529301
+fixture_path=.githooks/tests/vta_step5_typed_fact_refs_red.sh
+fixture_sha256=5fe4f647130ad21f062f6e89fa585a6fed21da91a94e2d1531eebf0cb10378df
+test_fixture_path=gt-index/internal/store/vta_candidate_provenance_red_test.go
+test_fixture_sha256=337fbc3a6d4b3ad1592dc94ab803f10454661f0806ad12a0722e2275857ece57
+runner_path=.githooks/tests/vta_step5_typed_fact_refs_red.sh
+runner_sha256=5fe4f647130ad21f062f6e89fa585a6fed21da91a94e2d1531eebf0cb10378df
+command=.githooks/tests/vta_step5_typed_fact_refs_red.sh
+go_test_command=go test ./internal/store -run '^(TestVTACandidateProvenancePersistsReferentialTypedFacts|TestVTACandidateProvenanceRejectsUnknownPrefixedFact)$' -count=1
+exit_code=1
+output_path=.githooks/red-artifacts/vta_step5_typed_fact_refs_red.out
+output_sha256=7633f1ad06d3c5966c312f1e6ae1a63e53616222fa739f1289294a9ed64dc472
+expected_failure=typed VTA source fact vta_source_real is not persisted; prefix-shaped unknown fact remains accepted by the attachment path

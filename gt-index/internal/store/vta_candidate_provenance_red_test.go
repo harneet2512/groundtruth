@@ -91,3 +91,70 @@ func TestVTACandidateFactsRejectUnboundIDs(t *testing.T) {
 		t.Fatal("unbound VTA fact ID was accepted")
 	}
 }
+
+func TestVTACandidateProvenancePersistsReferentialTypedFacts(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	sourceID, err := db.InsertNode(&Node{Label: "Function", Name: "caller", QualifiedName: "caller", FilePath: "main.go", Language: "go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, err := db.InsertNode(&Node{Label: "Method", Name: "Run", QualifiedName: "ImplA.Run", FilePath: "a.go", Language: "go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTargetID, err := db.InsertNode(&Node{Label: "Method", Name: "Run", QualifiedName: "ImplB.Run", FilePath: "b.go", Language: "go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := AttachedResolution{
+		Source:     &Node{ID: sourceID, Label: "Function", Name: "caller", QualifiedName: "caller", FilePath: "main.go", Language: "go"},
+		Callsite:   &ResolutionCallsite{CallsiteID: "vta-fact-refs", SourceID: sourceID, SourceFile: "main.go", SourceLine: 8, Callee: "Run", DispatchState: "ambiguous", DispatchForm: "interface", CandidateCount: 2, Mechanism: "vta", PassCoverage: []ResolutionPassCoverage{{PassKind: "vta", Status: "partial", Reason: "candidate_only_flow_evidence"}}},
+		Candidates: []*ResolutionCandidate{{TargetID: targetID, TargetStableID: "a", TargetNativeID: "a", Ordinal: 0, Mechanism: "vta", FlowSourceStableIDs: []string{"vta_source_real"}, FlowEdgeStableIDs: []string{"vta_edge_real"}}, {TargetID: otherTargetID, TargetStableID: "b", TargetNativeID: "b", Ordinal: 1, Mechanism: "vta", FlowSourceStableIDs: []string{"vta_source_other"}, FlowEdgeStableIDs: []string{"vta_edge_other"}}},
+	}
+	if err := db.AttachResolutionGraph(testGraphIdentity("refs"), []AttachedResolution{row}); err != nil {
+		t.Fatal(err)
+	}
+	for _, fact := range []struct {
+		id       string
+		typeName string
+	}{
+		{id: "vta_source_real", typeName: "vta_flow_source_fact"},
+		{id: "vta_edge_real", typeName: "vta_flow_edge_fact"},
+	} {
+		var nodeType, callsiteID string
+		if err := db.db.QueryRow(`SELECT node_type, COALESCE(callsite_id,'') FROM nodes WHERE stable_id=?`, fact.id).Scan(&nodeType, &callsiteID); err != nil {
+			t.Fatalf("typed VTA fact %s was not persisted: %v", fact.id, err)
+		}
+		if nodeType != fact.typeName || callsiteID != row.Callsite.CallsiteID {
+			t.Fatalf("typed VTA fact %s=(type %q, callsite %q), want (%q, %q)", fact.id, nodeType, callsiteID, fact.typeName, row.Callsite.CallsiteID)
+		}
+	}
+}
+
+func TestVTACandidateProvenanceRejectsUnknownPrefixedFact(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	sourceID, err := db.InsertNode(&Node{Label: "Function", Name: "caller", QualifiedName: "caller", FilePath: "main.go", Language: "go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, err := db.InsertNode(&Node{Label: "Method", Name: "Run", QualifiedName: "ImplA.Run", FilePath: "a.go", Language: "go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := AttachedResolution{
+		Source:     &Node{ID: sourceID, Label: "Function", Name: "caller", QualifiedName: "caller", FilePath: "main.go", Language: "go"},
+		Callsite:   &ResolutionCallsite{CallsiteID: "vta-fact-unknown", SourceID: sourceID, SourceFile: "main.go", SourceLine: 8, Callee: "Run", DispatchState: "unique", DispatchForm: "interface", CandidateCount: 1, Mechanism: "vta"},
+		Candidates: []*ResolutionCandidate{{TargetID: targetID, TargetStableID: "a", TargetNativeID: "a", Ordinal: 0, Mechanism: "vta", FlowSourceStableIDs: []string{"vta_source_fabricated"}}},
+	}
+	if err := db.AttachResolutionGraph(testGraphIdentity("unknown"), []AttachedResolution{row}); err == nil {
+		t.Fatal("unknown but prefix-shaped VTA fact was accepted")
+	}
+}
