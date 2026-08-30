@@ -1,0 +1,6 @@
+VTA RED boundary: candidate-specific source proof paths
+# github.com/harneet2512/groundtruth/gt-index/internal/resolver [github.com/harneet2512/groundtruth/gt-index/internal/resolver.test]
+internal/resolver/vta_candidate_proof_red_test.go:29:27: undefined: VTAFlowProof
+internal/resolver/vta_candidate_proof_red_test.go:29:56: results[0].FlowProofs undefined (type VTAResult has no field or method FlowProofs)
+internal/resolver/vta_candidate_proof_red_test.go:30:35: results[0].FlowProofs undefined (type VTAResult has no field or method FlowProofs)
+FAIL

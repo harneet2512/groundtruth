@@ -1,0 +1,15 @@
+format=gt.fixture-red.v1
+unit=HAR-42-step-5-VTA-candidate-specific-proof
+base_sha=7674304191f9f53bee9a3e0ce42033da7973e665
+fixture_path=.githooks/tests/vta_step5_candidate_proof_red.sh
+fixture_sha256=99fe24379c6a0ad92f61be8ee71faf21fdb81086446a994a8b559e6807827234
+test_fixture_path=gt-index/internal/resolver/vta_candidate_proof_red_test.go
+test_fixture_sha256=2f862f21dbc3ff18b05ca36fb7b19559f463c21f7719d58d2c86e2c0b50c5656
+runner_path=.githooks/tests/vta_step5_candidate_proof_red.sh
+runner_sha256=99fe24379c6a0ad92f61be8ee71faf21fdb81086446a994a8b559e6807827234
+command=.githooks/tests/vta_step5_candidate_proof_red.sh
+go_test_command=go test ./internal/resolver -run '^TestVTAPreservesCandidateSpecificProofPaths$' -count=1
+exit_code=1
+output_path=.githooks/red-artifacts/vta_step5_candidate_proof_red.out
+output_sha256=a85db14044742dd004f35fb3e75399872be86330c5b58ab1ad65361b0e1ff6b9
+expected_failure=VTAResult lacks per-candidate FlowProofs and VTAFlowProof
