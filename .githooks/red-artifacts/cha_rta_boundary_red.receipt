@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=0f09e993574bbeffe04bcb18401574b15c310bd9
+fixture_path=.githooks/tests/cha_rta_boundary_red.sh
+fixture_sha256=9db5ed7c789d5eb9f614ced9e3c31283710992b97abd7e124e21cc5233ff507f
+command=.githooks/tests/cha_rta_boundary_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/cha_rta_boundary_red.out
+output_sha256=4e5a94d86ff35d088c69a038023fd47665174c7417fcde5795e97b91a27fb00b
