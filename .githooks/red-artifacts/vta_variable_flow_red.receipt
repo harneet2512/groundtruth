@@ -1,8 +1,8 @@
 format=gt.fixture-red.v1
 unit=HAR-42-step-5-VTA-variable-flow
-base_sha=3409500fe1aa5e5d7c1d8bfb71806bbfc1d820d2
-fixture_path=gt-index/internal/resolver/vta_red_test.go
-fixture_sha256=161ce4fafb2625091693e13b1c10e19cc2f1fc2521c0dfa2c0fce9d5280b2fe6
+base_sha=5db415d71a111474bb54e6f6675f696fefa3ae9c
+fixture_path=.githooks/tests/vta_variable_flow_red.sh
+fixture_sha256=d064848f6fdb5447fbf7a10a85d4e5234fee4c2aec4a5f15082ec3cec1823ffd
 runner_path=.githooks/tests/vta_variable_flow_red.sh
 runner_sha256=d064848f6fdb5447fbf7a10a85d4e5234fee4c2aec4a5f15082ec3cec1823ffd
 command=go test ./internal/resolver -run '^TestVTAVariableFlowRetainsAlternativesAndAbstainsAmbiguity$' -count=1
