@@ -21,4 +21,9 @@ func TestVTANormalFlowRequiresClosedAnalysisBoundary(t *testing.T) {
 	if len(results) != 1 || results[0].Completeness != "partial" {
 		t.Fatalf("parser-complete flow without an explicit closed analysis boundary=%+v, want partial", results)
 	}
+	closedCall := parser.CallRef{CallerScope: "main", CalleeName: "Run", CalleeQualified: "runner.Run", File: "main.go", Line: 10, DispatchForm: "interface", FlowAnalysisComplete: true}
+	closed := AnalyzeVTA([]parser.CallRef{closedCall}, meta, map[int64][]int64{2: {1}}, []parser.AssignmentRef{{VarName: "runner", TypeName: "ImplA", Scope: "main", File: "main.go", Line: 5}})
+	if len(closed) != 1 || closed[0].Completeness != "closed" {
+		t.Fatalf("explicitly complete flow boundary=%+v, want closed", closed)
+	}
 }

@@ -245,7 +245,10 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 				}
 			}
 		}
-		results[ordinal].Completeness = "closed"
+		results[ordinal].Completeness = "partial"
+		if call.FlowAnalysisComplete && !call.ParserIncomplete {
+			results[ordinal].Completeness = "closed"
+		}
 		if call.ParserIncomplete {
 			results[ordinal].Completeness = "partial"
 		}
