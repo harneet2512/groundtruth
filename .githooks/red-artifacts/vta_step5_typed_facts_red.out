@@ -1,0 +1,7 @@
+VTA RED boundary: typed flow facts
+# github.com/harneet2512/groundtruth/gt-index/internal/store [github.com/harneet2512/groundtruth/gt-index/internal/store.test]
+internal/store/vta_typed_fact_red_test.go:6:50: unknown field FlowTypeStableIDs in struct literal of type ResolutionPassCoverage
+internal/store/vta_typed_fact_red_test.go:7:14: pass.FlowTypeStableIDs undefined (type ResolutionPassCoverage has no field or method FlowTypeStableIDs)
+FAIL
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/store [build failed]
+FAIL
