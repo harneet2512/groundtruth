@@ -809,6 +809,15 @@ func main() {
 			)
 		}
 		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: publishedDispatchState, CandidateCount: len(candidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: publishedMechanism, VerificationStatus: c.VerificationStatus, PassCoverage: passCoverage})
+		var vtaProofs map[int64]resolver.VTAFlowProof
+		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" {
+			var err error
+			vtaProofs, err = candidateVTAProofs(vta)
+			if err != nil {
+				_ = publishTx.Rollback()
+				abortStagedBuild(db, stagedOutput, "callsite %s VTA proof conservation failed: %v", callsiteID, err)
+			}
+		}
 		graphCandidates := make([]*store.ResolutionCandidate, 0, len(candidateNodeIDs))
 		for ordinal, targetID := range candidateNodeIDs {
 			target, exists := symbolByID[targetID]
@@ -833,13 +842,14 @@ func main() {
 			}
 			var flowSourceStableIDs, flowEdgeStableIDs []string
 			var flowSourceFacts, flowEdgeFacts []store.ResolutionFlowFact
-			if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok {
-				for _, sourceID := range vta.FlowSourceStableIDs {
+			if _, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok {
+				proof := vtaProofs[targetID]
+				for _, sourceID := range proof.SourceStableIDs {
 					stableID := candidateVTAFactID("vta_source_", sourceID, callsiteID, target.StableID)
 					flowSourceStableIDs = append(flowSourceStableIDs, stableID)
 					flowSourceFacts = append(flowSourceFacts, store.ResolutionFlowFact{StableID: stableID, Kind: "source", CallsiteID: callsiteID, TargetStableID: target.StableID, Payload: "source=" + sourceID})
 				}
-				for _, edgeID := range vta.FlowEdgeStableIDs {
+				for _, edgeID := range proof.EdgeStableIDs {
 					stableID := candidateVTAFactID("vta_edge_", edgeID, callsiteID, target.StableID)
 					flowEdgeStableIDs = append(flowEdgeStableIDs, stableID)
 					flowEdgeFacts = append(flowEdgeFacts, store.ResolutionFlowFact{StableID: stableID, Kind: "edge", CallsiteID: callsiteID, TargetStableID: target.StableID, Payload: "edge=" + edgeID})
@@ -1258,6 +1268,37 @@ func main() {
 		importResolved, sameFileResolved, nameMatchResolved,
 		elapsed.Milliseconds(), *workers)
 	fmt.Println()
+}
+
+// candidateVTAProofs validates the producer's target-keyed provenance before
+// any candidate rows are published. Aggregate callsite evidence is retained
+// for diagnostics but is never copied into each candidate.
+func candidateVTAProofs(vta resolver.VTAResult) (map[int64]resolver.VTAFlowProof, error) {
+	proofs := make(map[int64]resolver.VTAFlowProof, len(vta.FlowProofs))
+	candidates := make(map[int64]struct{}, len(vta.CandidateNodeIDs))
+	for _, id := range vta.CandidateNodeIDs {
+		if _, duplicate := candidates[id]; duplicate {
+			return nil, fmt.Errorf("duplicate candidate %d", id)
+		}
+		candidates[id] = struct{}{}
+	}
+	for _, proof := range vta.FlowProofs {
+		if _, duplicate := proofs[proof.CandidateNodeID]; duplicate {
+			return nil, fmt.Errorf("duplicate proof for candidate %d", proof.CandidateNodeID)
+		}
+		if _, expected := candidates[proof.CandidateNodeID]; !expected {
+			return nil, fmt.Errorf("proof for non-retained candidate %d", proof.CandidateNodeID)
+		}
+		if len(proof.SourceStableIDs) == 0 && len(proof.EdgeStableIDs) == 0 &&
+			(len(vta.FlowSourceStableIDs) > 0 || len(vta.FlowEdgeStableIDs) > 0) {
+			return nil, fmt.Errorf("empty proof for candidate %d", proof.CandidateNodeID)
+		}
+		proofs[proof.CandidateNodeID] = proof
+	}
+	if len(proofs) != len(candidates) {
+		return nil, fmt.Errorf("proof count %d does not equal candidate count %d", len(proofs), len(candidates))
+	}
+	return proofs, nil
 }
 
 func candidateVTAFactID(prefix, sourceID, callsiteID, targetStableID string) string {

@@ -270,13 +270,25 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		}
 		for _, methodID := range results[ordinal].CandidateNodeIDs {
 			parent := meta[methodID].ParentID
-			parentName := normalizedTypeName(meta[parent].Name)
 			proof := VTAFlowProof{CandidateNodeID: methodID}
 			for assignment, evidence := range valueTypes {
 				if assignment.Name != qualifier || assignment.File != call.File || assignment.Scope != call.CallerScope || assignment.Line > call.Line {
 					continue
 				}
-				if _, ok := evidence.Types[parentName]; !ok {
+				supported := false
+				for evidenceType := range evidence.Types {
+					for _, typeID := range typeIDsByName[normalizedTypeName(evidenceType)] {
+						_, isInterface := interfaceIDs[typeID]
+						if typeID == parent || (isInterface && implementsBase(implements, parent, typeID)) {
+							supported = true
+							break
+						}
+					}
+					if supported {
+						break
+					}
+				}
+				if !supported {
 					continue
 				}
 				proof.SourceStableIDs = append(proof.SourceStableIDs, sortedStringSet(evidence.Sources)...)
