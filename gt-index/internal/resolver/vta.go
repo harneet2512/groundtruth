@@ -170,6 +170,11 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 			key.Object = ""
 		}
 		fallback := &vtaValueEvidence{Types: make(map[string]struct{}), Sources: make(map[string]struct{}), Edges: make(map[string]struct{})}
+		type fieldHit struct {
+			object   string
+			evidence *vtaValueEvidence
+		}
+		var fieldHits []fieldHit
 		for assignment, evidence := range valueTypes {
 			if assignment.Name != key.Name {
 				continue
@@ -178,21 +183,46 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 				if assignment.Line > call.Line || assignment.File != key.File || (call.CallerScope != "" && assignment.Scope != key.Scope) {
 					continue
 				}
-			} else if assignment.File == key.File && assignment.Line > call.Line {
-				// Field cells are intentionally field-insensitive at this stage:
-				// declarations from another object/file still contribute to the
-				// representative cell.  Preserve source-order filtering only when
-				// both facts belong to the same file.
+				for typ := range evidence.Types {
+					fallback.Types[typ] = struct{}{}
+				}
+				for source := range evidence.Sources {
+					fallback.Sources[source] = struct{}{}
+				}
+				for edge := range evidence.Edges {
+					fallback.Edges[edge] = struct{}{}
+				}
 				continue
 			}
-			for typ := range evidence.Types {
-				fallback.Types[typ] = struct{}{}
+			if assignment.File == key.File && assignment.Line > call.Line {
+				continue
 			}
-			for source := range evidence.Sources {
-				fallback.Sources[source] = struct{}{}
+			fieldHits = append(fieldHits, fieldHit{object: assignment.Object, evidence: evidence})
+		}
+		if field {
+			scoped := make([]*vtaValueEvidence, 0, len(fieldHits))
+			if key.Object != "" {
+				for _, hit := range fieldHits {
+					if hit.object == key.Object {
+						scoped = append(scoped, hit.evidence)
+					}
+				}
 			}
-			for edge := range evidence.Edges {
-				fallback.Edges[edge] = struct{}{}
+			if len(scoped) == 0 {
+				for _, hit := range fieldHits {
+					scoped = append(scoped, hit.evidence)
+				}
+			}
+			for _, evidence := range scoped {
+				for typ := range evidence.Types {
+					fallback.Types[typ] = struct{}{}
+				}
+				for source := range evidence.Sources {
+					fallback.Sources[source] = struct{}{}
+				}
+				for edge := range evidence.Edges {
+					fallback.Edges[edge] = struct{}{}
+				}
 			}
 		}
 		return fallback
