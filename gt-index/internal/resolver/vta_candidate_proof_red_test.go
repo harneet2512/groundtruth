@@ -133,3 +133,31 @@ func containsVTAString(values []string, wanted string) bool {
 	}
 	return false
 }
+
+// TestVTAFieldInsensitivePointsToUnifiesNamedFields is the order-2.6 RED
+// witness. Foundational VTA uses one representative cell for a field name;
+// before the field-insensitive producer stage, AnalyzeVTA incorrectly keeps
+// object-scoped field facts separate and produces no candidates here.
+func TestVTAFieldInsensitivePointsToUnifiesNamedFields(t *testing.T) {
+	meta := map[int64]NodeMeta{
+		1: {Label: "Interface", Name: "Client", File: "client.go"},
+		2: {Label: "Struct", Name: "ImplA", File: "a.go"},
+		3: {Label: "Struct", Name: "ImplB", File: "b.go"},
+		4: {Label: "Method", Name: "Run", ParentID: 2, File: "a.go"},
+		5: {Label: "Method", Name: "Run", ParentID: 3, File: "b.go"},
+	}
+	call := parser.CallRef{
+		CallerScope: "Service.run", CalleeName: "Run", CalleeQualified: "self.client.Run",
+		File: "run.go", Line: 30, DispatchForm: "interface",
+	}
+	results := AnalyzeVTA(
+		[]parser.CallRef{call},
+		meta,
+		map[int64][]int64{2: {1}, 3: {1}},
+		[]parser.AssignmentRef{
+			{VarName: "self.client", TypeName: "ImplA", Scope: "ServiceA.init", ObjectScope: "ServiceA", File: "a_init.go", Line: 5},
+			{VarName: "self.client", TypeName: "ImplB", Scope: "ServiceB.init", ObjectScope: "ServiceB", File: "b_init.go", Line: 5},
+		},
+	)
+	assertVTAField(t, results, 0, "CandidateNodeIDs", "[4 5]")
+}
