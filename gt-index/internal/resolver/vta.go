@@ -22,6 +22,16 @@ type VTAResult struct {
 	SelectedTargetNodeID *int64
 	Completeness         string
 	AbstentionReason     string
+	// FlowProofs preserves the evidence path for each retained candidate.  A
+	// candidate's proof is never inferred from the aggregate callsite set.
+	FlowProofs []VTAFlowProof
+}
+
+// VTAFlowProof is candidate-keyed provenance for one VTA target.
+type VTAFlowProof struct {
+	CandidateNodeID int64
+	SourceStableIDs []string
+	EdgeStableIDs   []string
 }
 
 type vtaValueEvidence struct {
@@ -258,6 +268,24 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 				results[ordinal].CandidateNodeIDs = append(results[ordinal].CandidateNodeIDs, methodID)
 			}
 		}
+		for _, methodID := range results[ordinal].CandidateNodeIDs {
+			parent := meta[methodID].ParentID
+			parentName := normalizedTypeName(meta[parent].Name)
+			proof := VTAFlowProof{CandidateNodeID: methodID}
+			for assignment, evidence := range valueTypes {
+				if assignment.Name != qualifier || assignment.File != call.File || assignment.Scope != call.CallerScope || assignment.Line > call.Line {
+					continue
+				}
+				if _, ok := evidence.Types[parentName]; !ok {
+					continue
+				}
+				proof.SourceStableIDs = append(proof.SourceStableIDs, sortedStringSet(evidence.Sources)...)
+				proof.EdgeStableIDs = append(proof.EdgeStableIDs, sortedStringSet(evidence.Edges)...)
+			}
+			proof.SourceStableIDs = dedupeSorted(proof.SourceStableIDs)
+			proof.EdgeStableIDs = dedupeSorted(proof.EdgeStableIDs)
+			results[ordinal].FlowProofs = append(results[ordinal].FlowProofs, proof)
+		}
 		if len(results[ordinal].CandidateNodeIDs) > 1 {
 			results[ordinal].AbstentionReason = "ambiguous_viable_set"
 		} else if len(results[ordinal].CandidateNodeIDs) == 0 {
@@ -287,6 +315,20 @@ func sortedStringSet(values map[string]struct{}) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func dedupeSorted(values []string) []string {
+	sort.Strings(values)
+	if len(values) < 2 {
+		return values
+	}
+	out := values[:1]
+	for _, value := range values[1:] {
+		if value != out[len(out)-1] {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func callerObjectScope(scope string) string {
