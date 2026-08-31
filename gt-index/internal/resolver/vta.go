@@ -171,20 +171,19 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		}
 		fallback := &vtaValueEvidence{Types: make(map[string]struct{}), Sources: make(map[string]struct{}), Edges: make(map[string]struct{})}
 		for assignment, evidence := range valueTypes {
-			if assignment.Name != key.Name || assignment.Line > call.Line {
+			if assignment.Name != key.Name {
 				continue
 			}
-			if !field && (assignment.File != key.File || (call.CallerScope != "" && assignment.Scope != key.Scope)) {
-				continue
-			}
-			if field {
-				if key.Object != "" && assignment.Object != "" {
-					if assignment.Object != key.Object {
-						continue
-					}
-				} else if assignment.File != key.File {
+			if !field {
+				if assignment.Line > call.Line || assignment.File != key.File || (call.CallerScope != "" && assignment.Scope != key.Scope) {
 					continue
 				}
+			} else if assignment.File == key.File && assignment.Line > call.Line {
+				// Field cells are intentionally field-insensitive at this stage:
+				// declarations from another object/file still contribute to the
+				// representative cell.  Preserve source-order filtering only when
+				// both facts belong to the same file.
+				continue
 			}
 			for typ := range evidence.Types {
 				fallback.Types[typ] = struct{}{}
@@ -382,7 +381,14 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 			parent := meta[methodID].ParentID
 			proof := VTAFlowProof{CandidateNodeID: methodID}
 			for assignment, evidence := range valueTypes {
-				if assignment.Name != qualifier || assignment.File != call.File || assignment.Scope != call.CallerScope || assignment.Line > call.Line {
+				if assignment.Name != qualifier {
+					continue
+				}
+				field := strings.HasPrefix(qualifier, "self.") || strings.HasPrefix(qualifier, "this.")
+				if !field && (assignment.File != call.File || assignment.Scope != call.CallerScope || assignment.Line > call.Line) {
+					continue
+				}
+				if field && assignment.File == call.File && assignment.Line > call.Line {
 					continue
 				}
 				supported := false
