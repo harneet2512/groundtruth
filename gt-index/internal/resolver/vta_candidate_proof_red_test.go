@@ -88,6 +88,43 @@ func TestVTAInterproceduralProofEdgesAreTargetKeyed(t *testing.T) {
 	}
 }
 
+// TestVTAReturnToResultAndBodyConvergenceAreCandidateBound is the order-2.5
+// RED witness.  Return-type inference already makes the candidate visible, but
+// before this stage the persisted proof cannot show how a factory result became
+// the receiver, nor that the closed flow fixed point covered the candidate body.
+func TestVTAReturnToResultAndBodyConvergenceAreCandidateBound(t *testing.T) {
+	meta := map[int64]NodeMeta{
+		1: {Label: "Interface", Name: "Runner"},
+		2: {Label: "Struct", Name: "ImplA"},
+		3: {Label: "Function", Name: "newRunner", ReturnType: "Runner"},
+		4: {Label: "Method", Name: "Run", ParentID: 2, File: "a.go", ReceiverName: "rA"},
+	}
+	call := parser.CallRef{
+		CallerScope: "main", CalleeName: "Run", CalleeQualified: "runner.Run",
+		File: "main.go", Line: 20, DispatchForm: "interface", FlowAnalysisComplete: true,
+	}
+	resultAssignment := parser.AssignmentRef{
+		VarName: "runner", TypeName: "newRunner", Scope: "main", File: "main.go", Line: 8, ViaReturn: true,
+	}
+	results := AnalyzeVTA([]parser.CallRef{call}, meta, map[int64][]int64{2: {1}}, []parser.AssignmentRef{resultAssignment})
+	if len(results) != 1 || !reflect.DeepEqual(results[0].CandidateNodeIDs, []int64{4}) {
+		t.Fatalf("return-derived candidate set=%+v, want candidate 4", results)
+	}
+	if len(results[0].FlowProofs) != 1 {
+		t.Fatalf("return-derived proof set=%+v, want one proof", results[0].FlowProofs)
+	}
+	proof := results[0].FlowProofs[0]
+	returnEdge := vtaStableFactID("edge", "return_to_result", resultAssignment.File, resultAssignment.Scope,
+		resultAssignment.VarName, resultAssignment.TypeName, "8", "4")
+	if !containsVTAString(proof.EdgeStableIDs, returnEdge) {
+		t.Fatalf("candidate proof lacks return-to-result edge %q: %+v", returnEdge, proof.EdgeStableIDs)
+	}
+	bodyEdge := vtaStableFactID("edge", "body_convergence", call.File, call.CallerScope, "20", "Run", "4")
+	if !containsVTAString(proof.EdgeStableIDs, bodyEdge) {
+		t.Fatalf("closed candidate proof lacks body-convergence edge %q: %+v", bodyEdge, proof.EdgeStableIDs)
+	}
+}
+
 func containsVTAString(values []string, wanted string) bool {
 	for _, value := range values {
 		if value == wanted {
