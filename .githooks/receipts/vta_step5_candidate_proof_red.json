@@ -1,0 +1,43 @@
+{
+  "schema": "gt.red_evidence.vta_candidate_proof_red.v1",
+  "unit": "HAR-60",
+  "base_sha": "7674304191f9f53bee9a3e0ce42033da7973e665",
+  "candidate_overlay_sha": "9e89322e09c330cc94eca663f7f87b32760c5583",
+  "capture_sha": "a3dcfc141a6c66fe864b35ad641d4820286dbb12",
+  "test_fixture_path": "gt-index/internal/resolver/vta_candidate_proof_red_test.go",
+  "test_fixture_sha256": "2f862f21dbc3ff18b05ca36fb7b19559f463c21f7719d58d2c86e2c0b50c5656",
+  "runner_path": ".githooks/tests/vta_step5_candidate_proof_red.sh",
+  "runner_sha256": "99fe24379c6a0ad92f61be8ee71faf21fdb81086446a994a8b559e6807827234",
+  "command": "go test ./internal/resolver -run '^TestVTAPreservesCandidateSpecificProofPaths$' -count=1",
+  "exit_code": 1,
+  "diagnostics": [
+    "./internal/resolver/vta_candidate_proof_red_test.go:29:27: undefined: VTAFlowProof",
+    "./internal/resolver/vta_candidate_proof_red_test.go:29:56: results[0].FlowProofs undefined (type VTAResult has no field or method FlowProofs)",
+    "./internal/resolver/vta_candidate_proof_red_test.go:30:35: results[0].FlowProofs undefined (type VTAResult has no field or method FlowProofs)"
+  ],
+  "diagnostics_sha256": "ff3f469322f41c13d2dfccb917460c668affada30c5fb06cc5addf121d065d5b",
+  "output_path": ".githooks/red-artifacts/vta_step5_candidate_proof_red.out",
+  "output_sha256": "a85db14044742dd004f35fb3e75399872be86330c5b58ab1ad65361b0e1ff6b9",
+  "historical_receipt_path": ".githooks/red-artifacts/vta_step5_candidate_proof_red.receipt",
+  "historical_receipt_sha256": "7232164cb8602ae0790bc977d00a69b7c8bfe8b38c5ef34a16a24928b34096c7",
+  "historical_raw_output_sha256": "a85db14044742dd004f35fb3e75399872be86330c5b58ab1ad65361b0e1ff6b9",
+  "callsite": {
+    "file": "main.go",
+    "line": 20,
+    "caller_scope": "main",
+    "callee": "runner.Run",
+    "dispatch": "interface"
+  },
+  "candidate_targets": [
+    {"node_id": 4, "name": "ImplA.Run", "assignment": "runner = ImplA at main.go:8"},
+    {"node_id": 5, "name": "ImplB.Run", "assignment": "runner = ImplB at main.go:9"}
+  ],
+  "missing_proof_contract": "VTAResult has no per-candidate FlowProofs; VTAFlowProof is undefined",
+  "environment": {
+    "policy": "prepared-go-red-environment.v1",
+    "goproxy": "off",
+    "cgo_enabled": "1",
+    "go": "go1.26.6 linux/amd64",
+    "python": "3.12.8"
+  }
+}
