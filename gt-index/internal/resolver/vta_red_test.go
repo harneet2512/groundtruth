@@ -161,6 +161,38 @@ func TestVTAVariableFlowRetainsAlternativesAndAbstainsAmbiguity(t *testing.T) {
 	})
 }
 
+func TestVTAOnTheFlyBudgetExhaustionIsTypedAndDeterministic(t *testing.T) {
+	meta := map[int64]NodeMeta{
+		1: {Label: "Interface", Name: "Runner", File: "runner.go"},
+		2: {Label: "Struct", Name: "ImplA", File: "a.go"},
+		3: {Label: "Method", Name: "Run", ParentID: 2, File: "a.go"},
+	}
+	implements := map[int64][]int64{2: {1}}
+	assignments := []parser.AssignmentRef{
+		{VarName: "producer", TypeName: "ImplA", Scope: "main", File: "main.go", Line: 2},
+		{VarName: "runner", IsParameter: true, ParameterIndex: 0, Scope: "helper", File: "helper.go", Line: 8},
+	}
+	calls := []parser.CallRef{
+		// This call is ordered before the producer-to-formal edge below. A
+		// bounded on-the-fly pass therefore needs a second deterministic round
+		// to observe the newly available receiver fact.
+		{CallerScope: "helper", CalleeName: "Run", CalleeQualified: "runner.Run", File: "helper.go", Line: 12, DispatchForm: "interface", FlowAnalysisComplete: true},
+		{CallerScope: "main", CalleeName: "helper", CalleeQualified: "helper", File: "main.go", Line: 4, DispatchForm: "static", ArgumentNames: []string{"producer"}, FlowAnalysisComplete: true},
+	}
+	limited := AnalyzeVTAWithBudget(calls, meta, implements, assignments, 1)
+	if len(limited) != 2 || limited[0].Completeness != "partial" || limited[0].AbstentionReason != "budget_exhausted" {
+		t.Fatalf("bounded VTA=%+v, want typed budget_exhausted abstention", limited)
+	}
+	full := AnalyzeVTAWithBudget(calls, meta, implements, assignments, 0)
+	if full[0].Completeness != "closed" || full[0].AbstentionReason != "" || !equalInt64s(full[0].CandidateNodeIDs, []int64{3}) {
+		t.Fatalf("unbounded VTA=%+v, want closed candidate [3]", full[0])
+	}
+	limitedAgain := AnalyzeVTAWithBudget(calls, meta, implements, assignments, 1)
+	if !reflect.DeepEqual(limited, limitedAgain) {
+		t.Fatalf("bounded VTA is not deterministic: first=%+v second=%+v", limited, limitedAgain)
+	}
+}
+
 func assertVTAField(t *testing.T, results any, index int, field, want string) {
 	t.Helper()
 	value := vtaResultField(t, results, index, field)
