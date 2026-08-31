@@ -22,10 +22,25 @@ type VTAResult struct {
 	SelectedTargetNodeID *int64
 	Completeness         string
 	AbstentionReason     string
+	// Iterations and IterationBudget make the fixed-point boundary explicit.
+	// A positive budget that is exhausted is an incomplete analysis, never a
+	// successful closed result.
+	Iterations      int
+	IterationBudget int
+	BudgetExhausted bool
 	// FlowProofs preserves the evidence path for each retained candidate.  A
 	// candidate's proof is never inferred from the aggregate callsite set.
 	FlowProofs []VTAFlowProof
 }
+
+// VTAAbstentionReason is the closed vocabulary for an analysis that cannot
+// claim a complete result. Keep budget exhaustion distinct from parser or
+// target ambiguity so consumers can report the actual boundary.
+type VTAAbstentionReason string
+
+const (
+	VTAAbstentionReasonBudgetExhausted VTAAbstentionReason = "budget_exhausted"
+)
 
 // VTAFlowProof is candidate-keyed provenance for one VTA target.
 type VTAFlowProof struct {
@@ -55,7 +70,20 @@ type vtaValueKey struct {
 // argument edges copy facts into callee parameters. Return annotations are
 // resolved transitively, so a factory returning another factory is still
 // useful without pretending that a unique target was verified.
+// AnalyzeVTA uses the unbounded deterministic fixed point retained by the
+// historical API. Production callers that need an execution rail should use
+// AnalyzeVTAWithBudget and pass an explicit positive round limit.
 func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef) []VTAResult {
+	return AnalyzeVTAWithBudget(calls, meta, implements, assignments, 0)
+}
+
+// AnalyzeVTAWithBudget runs the same monotone on-the-fly propagation as
+// AnalyzeVTA, but bounds complete worklist rounds. A zero budget means no
+// bound. If the limit is reached while new facts remain, every affected
+// virtual/interface result is marked partial with the typed
+// budget_exhausted reason. Candidate identities remain conservative evidence;
+// callers must not treat them as a closed analysis.
+func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[int64][]int64, assignments []parser.AssignmentRef, maxIterations int) []VTAResult {
 	typeIDsByName := make(map[string][]int64)
 	concreteIDs := make(map[int64]struct{})
 	interfaceIDs := make(map[int64]struct{})
@@ -317,7 +345,14 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 	// type/name facts guarantee termination even for cyclic calls. In addition
 	// to ordinary argument/formal flow, each viable target receives a distinct
 	// receiver-to-this edge and target-keyed argument-to-formal edges.
+	iterations := 0
+	budgetExhausted := false
 	for changed := true; changed; {
+		if maxIterations > 0 && iterations >= maxIterations {
+			budgetExhausted = true
+			break
+		}
+		iterations++
 		changed = false
 		for ordinal, call := range calls {
 			for index, argument := range call.ArgumentNames {
@@ -380,7 +415,7 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 
 	results := make([]VTAResult, len(calls))
 	for ordinal, call := range calls {
-		results[ordinal] = VTAResult{CallsiteOrdinal: ordinal, Completeness: "not_run"}
+		results[ordinal] = VTAResult{CallsiteOrdinal: ordinal, Completeness: "not_run", Iterations: iterations, IterationBudget: maxIterations, BudgetExhausted: budgetExhausted}
 		if call.DispatchForm != "interface" && call.DispatchForm != "virtual" {
 			continue
 		}
@@ -390,6 +425,10 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		}
 		flowEvidence := callValue(call, qualifier)
 		if len(flowEvidence.Types) == 0 {
+			if budgetExhausted {
+				results[ordinal].Completeness = "partial"
+				results[ordinal].AbstentionReason = string(VTAAbstentionReasonBudgetExhausted)
+			}
 			continue
 		}
 		results[ordinal].FlowSourceStableIDs = sortedStringSet(flowEvidence.Sources)
@@ -472,6 +511,10 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 			results[ordinal].AbstentionReason = "ambiguous_viable_set"
 		} else if len(results[ordinal].CandidateNodeIDs) == 0 {
 			results[ordinal].AbstentionReason = "flow_type_without_viable_target"
+		}
+		if budgetExhausted {
+			results[ordinal].Completeness = "partial"
+			results[ordinal].AbstentionReason = string(VTAAbstentionReasonBudgetExhausted)
 		}
 	}
 	return results
