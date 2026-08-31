@@ -33,4 +33,3 @@ func TestVTAAdaptersAbstainTypedAndCanonicalizeEvidence(t *testing.T) {
 		})
 	}
 }
-
