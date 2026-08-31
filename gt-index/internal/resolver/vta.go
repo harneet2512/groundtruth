@@ -107,6 +107,11 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 	}
 
 	valueTypes := make(map[vtaValueKey]*vtaValueEvidence)
+	// candidateEvidence is deliberately keyed by call ordinal and method ID. It
+	// records the interprocedural edges that carried a value into a particular
+	// candidate, rather than laundering one callsite-wide edge set into every
+	// target's proof.
+	candidateEvidence := make(map[int]map[int64]*vtaValueEvidence)
 	addValue := func(key vtaValueKey, names, sources, edges []string) bool {
 		if key.Name == "" || len(names) == 0 {
 			return false
@@ -202,11 +207,88 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		}
 		return scope == callee || strings.HasSuffix(scope, "."+callee)
 	}
+	methodScope := func(methodID int64) string {
+		method := meta[methodID]
+		if method.ParentID != 0 && meta[method.ParentID].Name != "" {
+			return meta[method.ParentID].Name + "." + method.Name
+		}
+		return method.Name
+	}
+	methodReceiver := func(methodID int64) string {
+		if name := strings.TrimSpace(meta[methodID].ReceiverName); name != "" {
+			return name
+		}
+		// Python/JS methods expose the receiver through self/this in the parsed
+		// selector even though the generic NodeMeta has no named receiver field.
+		return "self"
+	}
+	mergeEvidence := func(dst *vtaValueEvidence, src *vtaValueEvidence, edges ...string) {
+		if dst == nil {
+			return
+		}
+		if src != nil {
+			for typ := range src.Types {
+				dst.Types[typ] = struct{}{}
+			}
+			for source := range src.Sources {
+				dst.Sources[source] = struct{}{}
+			}
+			for edge := range src.Edges {
+				dst.Edges[edge] = struct{}{}
+			}
+		}
+		for _, edge := range edges {
+			if edge != "" {
+				dst.Edges[edge] = struct{}{}
+			}
+		}
+	}
+	addCandidateEvidence := func(ordinal int, methodID int64, source *vtaValueEvidence, edges ...string) {
+		byTarget := candidateEvidence[ordinal]
+		if byTarget == nil {
+			byTarget = make(map[int64]*vtaValueEvidence)
+			candidateEvidence[ordinal] = byTarget
+		}
+		dst := byTarget[methodID]
+		if dst == nil {
+			dst = &vtaValueEvidence{Types: make(map[string]struct{}), Sources: make(map[string]struct{}), Edges: make(map[string]struct{})}
+			byTarget[methodID] = dst
+		}
+		mergeEvidence(dst, source, edges...)
+	}
+	flowCandidates := func(call parser.CallRef, evidence *vtaValueEvidence) []int64 {
+		if evidence == nil || len(evidence.Types) == 0 {
+			return nil
+		}
+		flowTypeIDs := make(map[int64]struct{})
+		for name := range evidence.Types {
+			for _, typeID := range typeIDsByName[normalizedTypeName(name)] {
+				if _, isInterface := interfaceIDs[typeID]; isInterface {
+					for concreteID := range concreteIDs {
+						if implementsBase(implements, concreteID, typeID) {
+							flowTypeIDs[concreteID] = struct{}{}
+						}
+					}
+				} else {
+					flowTypeIDs[typeID] = struct{}{}
+				}
+			}
+		}
+		out := make([]int64, 0)
+		for _, methodID := range methodsByName[call.CalleeName] {
+			if _, ok := flowTypeIDs[meta[methodID].ParentID]; ok {
+				out = append(out, methodID)
+			}
+		}
+		return out
+	}
 	// Monotone worklist: every iteration only adds a value fact, so finite
-	// type/name facts guarantee termination even for cyclic calls.
+	// type/name facts guarantee termination even for cyclic calls. In addition
+	// to ordinary argument/formal flow, each viable target receives a distinct
+	// receiver-to-this edge and target-keyed argument-to-formal edges.
 	for changed := true; changed; {
 		changed = false
-		for _, call := range calls {
+		for ordinal, call := range calls {
 			for index, argument := range call.ArgumentNames {
 				for _, parameter := range assignments {
 					if !parameterMatches(parameter, call, index) {
@@ -219,6 +301,46 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 						if addValue(vtaValueKey{File: parameter.File, Scope: parameter.Scope, Object: parameter.ObjectScope, Name: parameter.VarName, Line: parameter.Line}, []string{typ}, sortedStringSet(evidence.Sources), edges) {
 							changed = true
 						}
+					}
+				}
+			}
+			if (call.DispatchForm == "interface" || call.DispatchForm == "virtual") && callQualifier(call.CalleeQualified) != "" {
+				receiver := callQualifier(call.CalleeQualified)
+				receiverEvidence := callValue(call, receiver)
+				for _, methodID := range flowCandidates(call, receiverEvidence) {
+					method := meta[methodID]
+					thisName := methodReceiver(methodID)
+					object := ""
+					if method.ParentID != 0 {
+						object = meta[method.ParentID].Name
+					}
+					thisKey := vtaValueKey{File: method.File, Scope: methodScope(methodID), Object: object, Name: thisName, Line: method.StartLine}
+					if addValue(thisKey, sortedStringSet(receiverEvidence.Types), sortedStringSet(receiverEvidence.Sources), append(sortedStringSet(receiverEvidence.Edges), vtaReceiverToThisStableID(call, receiver, methodID, thisName))) {
+						changed = true
+					}
+					// The source set is filtered again at result construction by the
+					// candidate's parent type. Keep only this target's edge here;
+					// copying receiverEvidence would reintroduce a callsite-wide source
+					// union into every candidate proof.
+					addCandidateEvidence(ordinal, methodID, nil, vtaReceiverToThisStableID(call, receiver, methodID, thisName))
+					for index, argument := range call.ArgumentNames {
+						argumentEvidence := callValue(call, argument)
+						if len(argumentEvidence.Types) == 0 {
+							continue
+						}
+						var formal *parser.AssignmentRef
+						for i := range assignments {
+							candidate := &assignments[i]
+							if candidate.IsParameter && candidate.ParameterIndex == index && strings.TrimSpace(candidate.Scope) == strings.TrimSpace(methodScope(methodID)) {
+								formal = candidate
+								break
+							}
+						}
+						edge := vtaArgumentToFormalStableID(call, argument, index, methodID, formal)
+						if formal != nil && addValue(vtaValueKey{File: formal.File, Scope: formal.Scope, Object: formal.ObjectScope, Name: formal.VarName, Line: formal.Line}, sortedStringSet(argumentEvidence.Types), sortedStringSet(argumentEvidence.Sources), append(sortedStringSet(argumentEvidence.Edges), edge)) {
+							changed = true
+						}
+						addCandidateEvidence(ordinal, methodID, nil, edge)
 					}
 				}
 			}
@@ -242,18 +364,8 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 		results[ordinal].FlowSourceStableIDs = sortedStringSet(flowEvidence.Sources)
 		results[ordinal].FlowEdgeStableIDs = sortedStringSet(flowEvidence.Edges)
 		flowTypeIDs := make(map[int64]struct{})
-		for name := range flowEvidence.Types {
-			for _, typeID := range typeIDsByName[normalizedTypeName(name)] {
-				if _, isInterface := interfaceIDs[typeID]; isInterface {
-					for concreteID := range concreteIDs {
-						if implementsBase(implements, concreteID, typeID) {
-							flowTypeIDs[concreteID] = struct{}{}
-						}
-					}
-				} else {
-					flowTypeIDs[typeID] = struct{}{}
-				}
-			}
+		for _, methodID := range flowCandidates(call, flowEvidence) {
+			flowTypeIDs[meta[methodID].ParentID] = struct{}{}
 		}
 		results[ordinal].Completeness = "partial"
 		if call.FlowAnalysisComplete && !call.ParserIncomplete {
@@ -263,11 +375,7 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 			results[ordinal].Completeness = "partial"
 		}
 		results[ordinal].FlowTypeNodeIDs = sortedIDs(flowTypeIDs)
-		for _, methodID := range methodsByName[call.CalleeName] {
-			if _, ok := flowTypeIDs[meta[methodID].ParentID]; ok {
-				results[ordinal].CandidateNodeIDs = append(results[ordinal].CandidateNodeIDs, methodID)
-			}
-		}
+		results[ordinal].CandidateNodeIDs = flowCandidates(call, flowEvidence)
 		for _, methodID := range results[ordinal].CandidateNodeIDs {
 			parent := meta[methodID].ParentID
 			proof := VTAFlowProof{CandidateNodeID: methodID}
@@ -294,6 +402,13 @@ func AnalyzeVTA(calls []parser.CallRef, meta map[int64]NodeMeta, implements map[
 				proof.SourceStableIDs = append(proof.SourceStableIDs, sortedStringSet(evidence.Sources)...)
 				proof.EdgeStableIDs = append(proof.EdgeStableIDs, sortedStringSet(evidence.Edges)...)
 			}
+			if byTarget := candidateEvidence[ordinal]; byTarget != nil {
+				if targetEvidence := byTarget[methodID]; targetEvidence != nil {
+					proof.SourceStableIDs = append(proof.SourceStableIDs, sortedStringSet(targetEvidence.Sources)...)
+					proof.EdgeStableIDs = append(proof.EdgeStableIDs, sortedStringSet(targetEvidence.Edges)...)
+				}
+			}
+			proof.EdgeStableIDs = append(proof.EdgeStableIDs, vtaReceiverToThisStableID(call, qualifier, methodID, methodReceiver(methodID)))
 			proof.SourceStableIDs = dedupeSorted(proof.SourceStableIDs)
 			proof.EdgeStableIDs = dedupeSorted(proof.EdgeStableIDs)
 			results[ordinal].FlowProofs = append(results[ordinal].FlowProofs, proof)
@@ -313,6 +428,26 @@ func vtaAssignmentStableID(assignment parser.AssignmentRef) string {
 
 func vtaCallEdgeStableID(call parser.CallRef, argument string, index int, parameter parser.AssignmentRef) string {
 	return vtaStableFactID("edge", call.File, call.CallerScope, call.CalleeScope, call.CalleeName, argument, strconv.Itoa(index), parameter.File, parameter.Scope, parameter.VarName, strconv.Itoa(parameter.Line))
+}
+
+// vtaReceiverToThisStableID identifies the candidate-specific receiver edge.
+// The method ID is part of the identity: two viable implementations at one
+// callsite must never share a receiver proof merely because their type names
+// are equal or their callsite evidence is the same.
+func vtaReceiverToThisStableID(call parser.CallRef, receiver string, methodID int64, receiverName string) string {
+	return vtaStableFactID("edge", "receiver_to_this", call.File, call.CallerScope, strconv.Itoa(call.Line), receiver, strconv.FormatInt(methodID, 10), receiverName)
+}
+
+// vtaArgumentToFormalStableID identifies a candidate-specific argument edge.
+// A missing parsed formal is represented by empty fields; the edge remains
+// deterministic while the caller can keep the candidate conservative until a
+// later parser-completeness unit supplies the formal binding.
+func vtaArgumentToFormalStableID(call parser.CallRef, argument string, index int, methodID int64, formal *parser.AssignmentRef) string {
+	fields := []string{"argument_to_formal", call.File, call.CallerScope, strconv.Itoa(call.Line), argument, strconv.Itoa(index), strconv.FormatInt(methodID, 10)}
+	if formal != nil {
+		fields = append(fields, formal.File, formal.Scope, formal.VarName, strconv.Itoa(formal.Line))
+	}
+	return vtaStableFactID("edge", fields...)
 }
 
 func vtaStableFactID(kind string, fields ...string) string {
