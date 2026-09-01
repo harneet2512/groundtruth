@@ -170,3 +170,40 @@ func TestClientPatternMatching(t *testing.T) {
 		})
 	}
 }
+
+func TestFrameworkManifestIsClosedToCoordinatorFive(t *testing.T) {
+	want := []string{"Python", "TypeScript", "JavaScript", "Go", "Java"}
+	if len(FrameworkManifest) != len(want) {
+		t.Fatalf("manifest has %d languages, want %d", len(FrameworkManifest), len(want))
+	}
+	for i, language := range want {
+		if FrameworkManifest[i].Language != language {
+			t.Errorf("manifest[%d] language=%q, want %q", i, FrameworkManifest[i].Language, language)
+		}
+		if len(FrameworkManifest[i].Mechanisms) == 0 || FrameworkManifest[i].Framework == "" {
+			t.Errorf("manifest[%d] missing framework mechanisms", i)
+		}
+	}
+}
+
+func TestExtractFrameworkRoutesCarriesMechanismIdentity(t *testing.T) {
+	tests := []struct {
+		name, line, language, framework, mechanism, path, method string
+	}{
+		{"spring", `@GetMapping("/api/users")`, "Java", "Spring", "request_mapping", "/api/users", ""},
+		{"gin", `r.GET("/api/users", handler)`, "Go", "gin/echo", "route_registration", "/api/users", "GET"},
+		{"next", `export async function GET(request)`, "TypeScript", "Next.js", "app_router_handler", "/", "GET"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			routes := ExtractFrameworkRoutes(test.line)
+			if len(routes) != 1 {
+				t.Fatalf("got %d routes, want 1", len(routes))
+			}
+			got := routes[0]
+			if got.Language != test.language || got.Framework != test.framework || got.Mechanism != test.mechanism || got.Path != test.path || got.Method != test.method {
+				t.Fatalf("route=%+v, want language=%q framework=%q mechanism=%q path=%q method=%q", got, test.language, test.framework, test.mechanism, test.path, test.method)
+			}
+		})
+	}
+}
