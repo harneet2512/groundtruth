@@ -42,7 +42,7 @@ func currentBuildIdentity() (buildIdentity, error) {
 	if toolchain == "" || toolchain == "unknown" {
 		toolchain = runtime.Version()
 	}
-	capabilities := []string{"atomic_graph_publication", "call_resolution_v2", "incremental_stale_suppression", "parse_failure_accounting", "retained_call_candidates", "versioned_query_policy"}
+	capabilities := []string{"atomic_graph_publication", "call_resolution_v2", "framework_surface_resolution_v1", "incremental_stale_suppression", "parse_failure_accounting", "retained_call_candidates", "versioned_query_policy"}
 	sort.Strings(capabilities)
 	identityMaterial := strings.Join([]string{commitSHA, buildTimeUTC, sourceFingerprint, toolchain, compiledBuildTags, schemaVersion, strings.Join(capabilities, ",")}, "\x00")
 	buildSum := sha256.Sum256([]byte(identityMaterial))
