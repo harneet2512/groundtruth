@@ -150,7 +150,22 @@ func main() {
 	closureEnabled := flag.Bool("closure", true, "C7: compute the transitive-closure sidecar over VERIFIED CALLS edges (default on)")
 	rebuildClosure := flag.Bool("rebuild-closure", false, "Recompute the closure sidecar on an existing -output graph.db over its CURRENT edges. Run AFTER the LSP resolve pass so the closure reflects LSP-promoted/re-pointed/deleted edges (it is built once at index time and goes stale otherwise). Clears the old closure first.")
 	buildInfo := flag.Bool("build-info", false, "Print the gt-index.build.v1 binary identity JSON and exit")
+	frameworkValidation := flag.Bool("framework-validation", false, "Print the HAR-70 framework overlay validation report and exit")
 	flag.Parse()
+	if *frameworkValidation {
+		payload := struct {
+			Schema string                            `json:"schema"`
+			Rows   []resolver.FrameworkValidationRow `json:"rows"`
+			Digest string                            `json:"validation_digest_sha256"`
+		}{Schema: "gt.framework_resolution_validation.v1", Rows: resolver.FrameworkValidationReport()}
+		payload.Digest = resolver.FrameworkValidationDigest(payload.Rows)
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(payload); err != nil {
+			log.Fatalf("framework-validation: %v", err)
+		}
+		return
+	}
 	if *buildInfo {
 		if err := writeBuildInfo(os.Stdout); err != nil {
 			log.Fatalf("build-info: %v", err)

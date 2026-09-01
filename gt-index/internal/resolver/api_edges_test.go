@@ -207,3 +207,55 @@ func TestExtractFrameworkRoutesCarriesMechanismIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestHAR70FrameworkOverlayCoversEveryManifestLanguageAndMechanism(t *testing.T) {
+	tests := []struct {
+		name, line, language, framework, mechanism string
+	}{
+		{"python-django", `urlpatterns = [path("/api/users", view)]`, "Python", "Django", "route_registration"},
+		{"python-depends", `def handler(db = Depends(get_db)):`, "Python", "FastAPI/Flask/Django", "Depends"},
+		{"typescript-nest", `@Get("/api/users")`, "TypeScript", "NestJS", "route_registration"},
+		{"javascript-express", `app.get("/api/users", handler)`, "JavaScript", "Express", "route_registration"},
+		{"javascript-react", `function UserCard({ onSelect, children }) {}`, "JavaScript", "React", "component_props"},
+		{"go-wire", `wire.Build(NewServer, NewStore)`, "Go", "wire", "wire_di"},
+		{"java-component", `@Service class UserService {}`, "Java", "Spring", "component_scan"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			facts := ExtractFrameworkFacts(test.line)
+			found := false
+			for _, fact := range facts {
+				if fact.Language == test.language && fact.Framework == test.framework && fact.Mechanism == test.mechanism {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("facts=%+v, want %s/%s/%s", facts, test.language, test.framework, test.mechanism)
+			}
+		})
+	}
+}
+
+func TestHAR70FrameworkValidationReportHasPerLanguageIncreases(t *testing.T) {
+	rows := FrameworkValidationReport()
+	if len(rows) != 5 {
+		t.Fatalf("got %d validation rows, want five manifest languages", len(rows))
+	}
+	seen := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if seen[row.Language] {
+			t.Fatalf("duplicate validation row for %s", row.Language)
+		}
+		seen[row.Language] = true
+		if row.CertifiedPairsAfter <= row.CertifiedPairsBefore {
+			t.Fatalf("%s has no certified-pair increase: %+v", row.Language, row)
+		}
+		if row.REDWitness == "" || len(row.ObservedFactMechanisms) == 0 {
+			t.Fatalf("%s missing RED witness or observed mechanisms: %+v", row.Language, row)
+		}
+	}
+	if got := FrameworkValidationDigest(rows); got == "" || len(got) != 64 {
+		t.Fatalf("invalid validation digest %q", got)
+	}
+}
