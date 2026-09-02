@@ -148,6 +148,17 @@ func selectedTargetForDispatch(dispatchState string, selected *int64) *int64 {
 	return selected
 }
 
+func candidateDispatchStateForCount(count int) string {
+	switch count {
+	case 0:
+		return string(resolver.DispatchZero)
+	case 1:
+		return string(resolver.DispatchCandidateOnly)
+	default:
+		return string(resolver.DispatchAmbiguous)
+	}
+}
+
 func main() {
 	root := flag.String("root", ".", "Project root directory")
 	output := flag.String("output", "graph.db", "Output SQLite database path")
@@ -733,11 +744,7 @@ func main() {
 				publishedMechanism = "vta"
 				vtaUsed = true
 			}
-			if len(candidateNodeIDs) > 1 {
-				publishedDispatchState = string(resolver.DispatchAmbiguous)
-			} else {
-				publishedDispatchState = string(resolver.DispatchCandidateOnly)
-			}
+			publishedDispatchState = candidateDispatchStateForCount(len(candidateNodeIDs))
 		}
 		if !vtaUsed {
 			if hierarchy, ok := hierarchyByOrdinal[c.CallsiteOrdinal]; ok && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") && (len(hierarchy.CHACandidateNodeIDs) > 0 || (hierarchy.ReceiverScoped && hierarchy.CHACompleteness == "closed")) {
