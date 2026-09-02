@@ -22,3 +22,19 @@ func TestSelectedTargetAuthorityRequiresUniqueDispatch(t *testing.T) {
 		t.Fatalf("unique dispatch lost selected target: %v", got)
 	}
 }
+
+func TestCandidateDispatchStatePreservesZeroCandidateAbstention(t *testing.T) {
+	cases := []struct {
+		count int
+		want  resolver.DispatchState
+	}{
+		{count: 0, want: resolver.DispatchZero},
+		{count: 1, want: resolver.DispatchCandidateOnly},
+		{count: 2, want: resolver.DispatchAmbiguous},
+	}
+	for _, tc := range cases {
+		if got := candidateDispatchStateForCount(tc.count); got != string(tc.want) {
+			t.Fatalf("candidate count %d: dispatch=%q want %q", tc.count, got, tc.want)
+		}
+	}
+}
