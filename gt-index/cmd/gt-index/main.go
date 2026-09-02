@@ -141,6 +141,13 @@ func collectParseResults(files []walker.SourceFile, resultCh <-chan fileParseRes
 	return results, parseFailures, failSample
 }
 
+func selectedTargetForDispatch(dispatchState string, selected *int64) *int64 {
+	if dispatchState != string(resolver.DispatchUnique) {
+		return nil
+	}
+	return selected
+}
+
 func main() {
 	root := flag.String("root", ".", "Project root directory")
 	output := flag.String("output", "graph.db", "Output SQLite database path")
@@ -745,6 +752,13 @@ func main() {
 				}
 			}
 		}
+		// Only a unique dispatch may carry selected-target authority. Some
+		// conservative resolver paths retain a best-effort target while correctly
+		// classifying the callsite as candidate_only. Publishing that internal hint
+		// as Selected contradicts the resolution-v2 contract and used to abort the
+		// entire atomic graph publication. Drop the hint at the producer boundary;
+		// all candidates remain conserved and visible as unselected evidence.
+		selectedNodeID = selectedTargetForDispatch(publishedDispatchState, selectedNodeID)
 		var selectedStable, selectedNative *string
 		if selectedNodeID != nil {
 			if target, exists := symbolByID[*selectedNodeID]; exists {
