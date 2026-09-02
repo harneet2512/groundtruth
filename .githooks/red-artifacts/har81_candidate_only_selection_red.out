@@ -1,0 +1,5 @@
+# github.com/harneet2512/groundtruth/gt-index/cmd/gt-index [github.com/harneet2512/groundtruth/gt-index/cmd/gt-index.test]
+cmd\gt-index\dispatch_selection_test.go:17:13: undefined: selectedTargetForDispatch
+cmd\gt-index\dispatch_selection_test.go:21:12: undefined: selectedTargetForDispatch
+FAIL	github.com/harneet2512/groundtruth/gt-index/cmd/gt-index [build failed]
+FAIL
