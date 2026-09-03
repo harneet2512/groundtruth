@@ -1,0 +1,47 @@
+# Rebuild the vendored Linux gt-index producer.
+#
+# The harness pins a committed binary (vendor/gt-index-linux-amd64) together
+# with its build identity, and the binary refuses to publish a graph unless
+# that identity is complete -- so it cannot be built with plain `go build`.
+# This runs the repo's own build script in docker mode, against the
+# digest-pinned golang:1.22.5-bookworm image, which is what stamps
+# commitSHA/buildTimeUTC/sourceFingerprint/goToolchain into the binary.
+name: Build producer (linux amd64)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build gt-index (docker, pinned toolchain)
+        env:
+          GT_INDEX_BUILD_MODE: docker
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          bash scripts/swebench/build_gt_index_linux.sh
+          ls -la bin/gt-index-linux
+          file bin/gt-index-linux
+
+      - name: Emit build identity
+        run: |
+          set -euo pipefail
+          chmod +x bin/gt-index-linux
+          ./bin/gt-index-linux -build-info > bin/gt-index-linux.build-info.json
+          cat bin/gt-index-linux.build-info.json
+          echo "sha256: $(sha256sum bin/gt-index-linux | awk '{print $1}')"
+          echo "build_info_sha256: $(sha256sum bin/gt-index-linux.build-info.json | awk '{print $1}')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gt-index-linux-amd64
+          path: |
+            bin/gt-index-linux
+            bin/gt-index-linux.build-info.json
+          retention-days: 7
