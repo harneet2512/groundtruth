@@ -10,6 +10,11 @@ name: Build producer (linux amd64)
 
 on:
   workflow_dispatch:
+  # workflow_dispatch only resolves against the default branch, so the branch
+  # carrying the producer fix also triggers on push.
+  push:
+    branches:
+      - har81/cha-mechanism
 
 jobs:
   build:
