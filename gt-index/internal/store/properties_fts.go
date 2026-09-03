@@ -162,21 +162,30 @@ func (d *DB) PopulatePropertiesFTS5() error {
 	return populatePropertiesFTS5(d.db)
 }
 
-// PropertiesFTS5RowCount returns the number of rows the index covers, or -1
-// when the virtual table is absent because the binary was built without the
-// `sqlite_fts5` tag.
+// PropertiesFTS5RowCount returns the number of documents the inverted index
+// actually holds, or -1 when the virtual table is absent because the binary
+// was built without the `sqlite_fts5` tag.
 //
-// The distinction matters to the GT_REQUIRE_FTS5 gate. -1 means the capability
-// is missing and the run must abort. A count that is merely lower than
-// `properties` means the index is real but desynced — also a failure, and one
-// only a comparison can see, which is why the gate compares rather than just
-// checking for a non-zero count.
+// It reads `properties_fts_docsize`, the shadow table FTS5 keeps with one row
+// per indexed document, and NOT `SELECT COUNT(*) FROM properties_fts`. That
+// distinction is the whole point of this function. On an external-content
+// table a query with no MATCH is answered from the *content* table, so
+// `COUNT(*) FROM properties_fts` returns `COUNT(*) FROM properties` whether
+// the index holds every document or none of them. Measured on SQLite 3.42:
+// three property rows and an index that had never been built still counted 3,
+// while MATCH returned nothing. The same trap is already documented against
+// `nodes_fts` in main.go — "COUNT looks full, a real MATCH returns 0" — and a
+// coverage gate built on that count would assert nothing at all.
+//
+// -1 means the capability is missing and a GT_REQUIRE_FTS5 run must abort. A
+// count below `PropertyCount()` means the index exists but does not cover the
+// facts, which is the failure that looks healthy from the outside.
 func (d *DB) PropertiesFTS5RowCount() int {
 	if !propertiesFTSExists(d.db) {
 		return -1
 	}
 	var n int
-	if err := d.db.QueryRow(`SELECT COUNT(*) FROM properties_fts`).Scan(&n); err != nil {
+	if err := d.db.QueryRow(`SELECT COUNT(*) FROM properties_fts_docsize`).Scan(&n); err != nil {
 		return -1
 	}
 	return n

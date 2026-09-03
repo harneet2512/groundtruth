@@ -113,15 +113,58 @@ func TestPropertiesFTSIsExternalContentOverProperties(t *testing.T) {
 // TestPropertiesFTSCoversEveryPropertyRow: the acceptance number. An index
 // that covers a subset is worse than no index, because the ranking it
 // produces looks complete and is not.
+//
+// Coverage is read from `properties_fts_docsize`, one row per indexed
+// document. `SELECT COUNT(*) FROM properties_fts` is NOT a coverage measure:
+// on an external-content table a query with no MATCH is answered from the
+// content table, so it returns `COUNT(*) FROM properties` even when the index
+// is empty. TestPropertiesFTSCountMeasuresTheIndexNotTheContentTable pins
+// that trap directly.
 func TestPropertiesFTSCoversEveryPropertyRow(t *testing.T) {
 	db := propertyFixture(t)
 	properties := scalarInt(t, db.db, `SELECT COUNT(*) FROM properties`)
 	if properties != 3 {
 		t.Fatalf("fixture wrote %d properties, want 3", properties)
 	}
-	indexed := scalarInt(t, db.db, `SELECT COUNT(*) FROM properties_fts`)
+	indexed := scalarInt(t, db.db, `SELECT COUNT(*) FROM properties_fts_docsize`)
 	if indexed != properties {
-		t.Fatalf("properties_fts has %d rows, properties has %d -- the index does not cover the table", indexed, properties)
+		t.Fatalf("properties_fts indexes %d documents, properties has %d rows -- the index does not cover the table", indexed, properties)
+	}
+	if n := db.PropertiesFTS5RowCount(); n != properties {
+		t.Fatalf("PropertiesFTS5RowCount reported %d, index holds %d", n, properties)
+	}
+}
+
+// TestPropertiesFTSCountMeasuresTheIndexNotTheContentTable: the gate that
+// GT_REQUIRE_FTS5 leans on has to be able to fail. Emptying the inverted
+// index must move PropertiesFTS5RowCount to zero even though the content
+// table is untouched -- if it reported the content count instead, the
+// publication-boundary comparison against PropertyCount() would be an
+// identity and would pass on a graph whose index matches nothing.
+func TestPropertiesFTSCountMeasuresTheIndexNotTheContentTable(t *testing.T) {
+	db := propertyFixture(t)
+	if n := db.PropertiesFTS5RowCount(); n != 3 {
+		t.Fatalf("PropertiesFTS5RowCount = %d before emptying, want 3", n)
+	}
+	if _, err := db.db.Exec(`INSERT INTO properties_fts(properties_fts) VALUES('delete-all')`); err != nil {
+		t.Fatal(err)
+	}
+	if n := db.PropertiesFTS5RowCount(); n != 0 {
+		t.Fatalf("PropertiesFTS5RowCount = %d on an emptied index, want 0 -- it is reading the content table", n)
+	}
+	if n := scalarInt(t, db.db, `SELECT COUNT(*) FROM properties_fts`); n != 3 {
+		t.Fatalf("COUNT(*) FROM properties_fts = %d; the premise of this test is that it still reads 3 from the content table", n)
+	}
+	if n := scalarInt(t, db.db,
+		`SELECT COUNT(*) FROM properties_fts WHERE properties_fts MATCH '"validates"'`); n != 0 {
+		t.Fatalf("emptied index still matches %d rows", n)
+	}
+	// And the repair path puts it back, which is what rebuild-closure relies on.
+	if err := db.PopulatePropertiesFTS5(); err != nil {
+		t.Fatal(err)
+	}
+	if n := db.PropertiesFTS5RowCount(); n != 3 {
+		t.Fatalf("PropertiesFTS5RowCount = %d after repopulation, want 3", n)
 	}
 }
 
