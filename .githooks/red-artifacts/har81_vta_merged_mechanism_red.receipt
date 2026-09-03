@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=f927c87ff2d3eee0c626b4a8013e9e25b12a1895
+fixture_path=.githooks/tests/har81_vta_merged_mechanism_red.sh
+fixture_sha256=6a9d3dcd90d04776500136761e75994a161fa0190e3cfe8960156e011df87072
+command=.githooks/tests/har81_vta_merged_mechanism_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/har81_vta_merged_mechanism_red.out
+output_sha256=17336af637342e0339707cea98ea1203bfc4f999b62a68874103ef9b161c3a5c

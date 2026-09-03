@@ -1,0 +1,4 @@
+# github.com/harneet2512/groundtruth/gt-index/cmd/gt-index [github.com/harneet2512/groundtruth/gt-index/cmd/gt-index.test]
+cmd\gt-index\vta_merged_mechanism_test.go:27:13: undefined: vtaCallsiteMechanism
+FAIL	github.com/harneet2512/groundtruth/gt-index/cmd/gt-index [build failed]
+FAIL
