@@ -92,7 +92,15 @@ case "$mode" in
       -o "$OUT_BIN" ./cmd/gt-index/
     ;;
   docker)
+    # The bind-mounted checkout is owned by the invoking user while the
+    # container runs as root, so git refuses it as dubious ownership and
+    # `go build` fails its VCS stamping with "error obtaining VCS status".
+    # Trust the mount rather than passing -buildvcs=false: that stamping is
+    # part of the binary identity this script exists to produce.
     docker run --rm \
+      -e GIT_CONFIG_COUNT=1 \
+      -e GIT_CONFIG_KEY_0=safe.directory \
+      -e GIT_CONFIG_VALUE_0=/workspace \
       -v "$REPO_DIR":/workspace \
       -w /workspace/gt-index \
       "$GO_IMAGE" \
