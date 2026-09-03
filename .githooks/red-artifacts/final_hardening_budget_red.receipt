@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=16597e6cf85d05dc8251bc67088819634ce138d2
+fixture_path=.githooks/tests/final_hardening_budget_red.sh
+fixture_sha256=beb1eb792572a8c8a47829d68dcbee15cf5982b538ef6a59b3253843b3dcd623
+command=.githooks/tests/final_hardening_budget_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/final_hardening_budget_red.out
+output_sha256=eff3da2e285d68ebf79dd2072981be4ab281f893d3fdfc1828deba65cb264cbd

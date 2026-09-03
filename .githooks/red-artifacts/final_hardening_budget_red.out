@@ -1,0 +1,17 @@
+# github.com/harneet2512/groundtruth/gt-index/internal/store [github.com/harneet2512/groundtruth/gt-index/internal/store.test]
+internal\store\budget_abstention_test.go:33:49: unknown field AbstentionReason in struct literal of type ResolutionCallsite
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/store [build failed]
+# github.com/harneet2512/groundtruth/gt-index/cmd/gt-index [github.com/harneet2512/groundtruth/gt-index/cmd/gt-index.test]
+cmd\gt-index\budget_test.go:17:19: undefined: resolveIndexBudgets
+cmd\gt-index\budget_test.go:24:31: undefined: defaultVTAIterationBudget
+cmd\gt-index\budget_test.go:24:82: undefined: defaultFlowFactBudget
+cmd\gt-index\budget_test.go:25:84: undefined: defaultVTAIterationBudget
+cmd\gt-index\budget_test.go:25:111: undefined: defaultFlowFactBudget
+cmd\gt-index\budget_test.go:34:19: undefined: resolveIndexBudgets
+cmd\gt-index\budget_test.go:35:3: undefined: vtaIterationBudgetEnv
+cmd\gt-index\budget_test.go:35:31: undefined: flowFactBudgetEnv
+cmd\gt-index\budget_test.go:44:14: undefined: resolveIndexBudgets
+cmd\gt-index\budget_test.go:45:3: undefined: vtaIterationBudgetEnv
+cmd\gt-index\budget_test.go:45:3: too many errors
+FAIL	github.com/harneet2512/groundtruth/gt-index/cmd/gt-index [build failed]
+FAIL
