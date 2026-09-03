@@ -1,0 +1,18 @@
+--- FAIL: TestDerivedLayersArePublishedByTheRealCLI (ELAPSED)
+    derived_layers_wiring_test.go:168: project_meta[derived_layers_state]: sql: no rows in result set
+    derived_layers_wiring_test.go:168: project_meta[derived_cochange_state]: sql: no rows in result set
+    derived_layers_wiring_test.go:168: project_meta[derived_cochange_pairs]: sql: no rows in result set
+    derived_layers_wiring_test.go:168: project_meta[derived_community_state]: sql: no rows in result set
+    derived_layers_wiring_test.go:168: project_meta[derived_community_count]: sql: no rows in result set
+    derived_layers_wiring_test.go:168: project_meta[derived_community_cohesion]: sql: no rows in result set
+    derived_layers_wiring_test.go:168: project_meta[derived_process_state]: sql: no rows in result set
+    derived_layers_wiring_test.go:168: project_meta[derived_process_count]: sql: no rows in result set
+    derived_layers_wiring_test.go:168: project_meta[derived_process_assertions_scanned]: sql: no rows in result set
+    derived_layers_wiring_test.go:192: communities: no such table: communities
+    derived_layers_wiring_test.go:197: community_members: no such table: community_members
+    derived_layers_wiring_test.go:205: processes: no such table: processes
+    derived_layers_wiring_test.go:210: process_steps: no such table: process_steps
+    derived_layers_wiring_test.go:216: unwitnessed processes: no such table: processes
+FAIL
+FAIL	github.com/harneet2512/groundtruth/gt-index/cmd/gt-index	ELAPSED
+FAIL

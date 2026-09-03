@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=43514ced18281369c792fe5e4908658e4c6c4162
+fixture_path=.githooks/tests/derived_layers_wiring_red.sh
+fixture_sha256=28d727ce47b83d02f823692fd48e42e4577d4b049fc875046cdc91409a3b9112
+command=.githooks/tests/derived_layers_wiring_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/derived_layers_wiring_red.out
+output_sha256=db65654cba926775ec4dd24ebf334b89ea38398065f29e339edfb552bfd3dc17
