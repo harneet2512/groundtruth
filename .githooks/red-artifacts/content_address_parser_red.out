@@ -1,0 +1,14 @@
+# github.com/harneet2512/groundtruth/gt-index/internal/parser [github.com/harneet2512/groundtruth/gt-index/internal/parser.test]
+internal\parser\content_address_test.go:69:8: n.FileHash undefined (type store.Node has no field or method FileHash)
+internal\parser\content_address_test.go:70:94: n.FileHash undefined (type store.Node has no field or method FileHash)
+internal\parser\content_address_test.go:72:8: n.ByteEnd undefined (type store.Node has no field or method ByteEnd)
+internal\parser\content_address_test.go:72:21: n.ByteStart undefined (type store.Node has no field or method ByteStart)
+internal\parser\content_address_test.go:73:76: n.ByteStart undefined (type store.Node has no field or method ByteStart)
+internal\parser\content_address_test.go:73:89: n.ByteEnd undefined (type store.Node has no field or method ByteEnd)
+internal\parser\content_address_test.go:75:12: n.ByteEnd undefined (type store.Node has no field or method ByteEnd)
+internal\parser\content_address_test.go:76:87: n.ByteEnd undefined (type store.Node has no field or method ByteEnd)
+internal\parser\content_address_test.go:97:22: fetch.ByteStart undefined (type store.Node has no field or method ByteStart)
+internal\parser\content_address_test.go:97:38: fetch.ByteEnd undefined (type store.Node has no field or method ByteEnd)
+internal\parser\content_address_test.go:97:38: too many errors
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/parser [build failed]
+FAIL

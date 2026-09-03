@@ -1,0 +1,9 @@
+# github.com/harneet2512/groundtruth/gt-index/internal/store [github.com/harneet2512/groundtruth/gt-index/internal/store.test]
+internal\store\content_address_test.go:66:3: unknown field FileHash in struct literal of type Node
+internal\store\content_address_test.go:66:23: unknown field ByteStart in struct literal of type Node
+internal\store\content_address_test.go:66:38: unknown field ByteEnd in struct literal of type Node
+internal\store\content_address_test.go:107:3: unknown field FileHash in struct literal of type Node
+internal\store\content_address_test.go:107:23: unknown field ByteStart in struct literal of type Node
+internal\store\content_address_test.go:107:38: unknown field ByteEnd in struct literal of type Node
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/store [build failed]
+FAIL

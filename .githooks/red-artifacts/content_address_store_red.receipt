@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=43514ced18281369c792fe5e4908658e4c6c4162
+fixture_path=.githooks/tests/content_address_store_red.sh
+fixture_sha256=f7db09c1a20242065235fbde14f32cc6bdb52aefe3e515bfa2463ab47fce0c50
+command=.githooks/tests/content_address_store_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/content_address_store_red.out
+output_sha256=eeba78032d983ac16775eda809d107a53e5305969f838bc71b2549bfe4c7b5f3
