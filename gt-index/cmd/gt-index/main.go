@@ -12,6 +12,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1264,6 +1265,28 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  Computed %d closure rows in %s\n", closureCount, closureElapsed.Round(time.Millisecond))
 	}
 
+	// ── Pass 4g: DERIVED LAYERS — co-change, communities, processes ─────
+	// Runs after the resolution graph is attached and the assertions are
+	// inserted, because communities cluster certified CALLS edges and processes
+	// are witnessed by assertions. Every outcome, including every failure, is a
+	// named state in project_meta: an analysis sidecar must degrade the receipt,
+	// never the graph. GT_REQUIRE_DERIVED=1 turns any non-ok state into a build
+	// failure for an operator who needs the layers rather than merely wants them.
+	// See derived.go.
+	derivedOptions, derivedOptionsErr := resolveDerivedOptions(os.LookupEnv)
+	if derivedOptionsErr != nil {
+		abortStagedBuild(db, stagedOutput, "%v", derivedOptionsErr)
+	}
+	fmt.Fprintf(os.Stderr, "Pass 4g: deriving co-change, communities and processes...\n")
+	derived := runDerivedLayers(context.Background(), db, stagedOutput, *root, derivedOptions)
+	fmt.Fprintf(os.Stderr, "  %s\n", derived.Summary())
+	if err := setRequiredMetadata(db, derived.Metadata); err != nil {
+		abortStagedBuild(db, stagedOutput, "%v", err)
+	}
+	if err := derived.Err(derivedOptions); err != nil {
+		abortStagedBuild(db, stagedOutput, "%v", err)
+	}
+
 	// ── Pass 5: EXTRAS — store metadata ─────────────────────────────────
 	fmt.Fprintf(os.Stderr, "Pass 5: storing metadata...\n")
 	elapsed := time.Since(start)
@@ -1326,10 +1349,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  WARNING: %d file hash errors\n", hashErrors)
 	}
 
-	// ── Pass 5c: CO-CHANGE MINING — git log analysis for file co-occurrence ──
-	fmt.Fprintf(os.Stderr, "Pass 5c: mining co-change from git history...\n")
-	cochangeCount := mineCochanges(db, *root)
-	fmt.Fprintf(os.Stderr, "  Stored %d co-change pairs\n", cochangeCount)
+	// Pass 5c (co-change mining) is gone: internal/cochange now owns the
+	// cochanges table and writes it in Pass 4g. Two writers with different
+	// support thresholds would have fought over the same primary key, and only
+	// the second would have survived.
 
 	// Post-insert FK validation (non-fatal)
 	if err := db.ValidateForeignKeys(); err != nil {
@@ -2511,63 +2534,6 @@ func matchesTwinPair(nameA, nameB string) (bool, string) {
 		}
 	}
 	return false, ""
-}
-
-// mineCochanges analyzes the last 500 git commits to find files that are
-// frequently changed together. Pairs with >= 3 co-occurrences are stored
-// in the cochanges table. Returns the number of pairs stored.
-// Silently returns 0 if git is unavailable or the repo has no history.
-func mineCochanges(db *store.DB, root string) int {
-	// Two fixes vs the original: (1) "tformat:%x1e" is a VALID pretty-format —
-	// bare "--format=COMMIT" is not a builtin format name, git rejects it
-	// (exit 128), so this silently returned 0 on EVERY repo since b4761cc6
-	// (2026-05-25). (2) the per-commit delimiter is now the ASCII record-
-	// separator byte 0x1E, which cannot appear in a file path; the old literal
-	// "COMMIT" delimiter corrupted co-change pairs whenever a tracked path
-	// contained the substring "COMMIT".
-	cmd := exec.Command("git", "log", "--name-only", "--format=tformat:%x1e", "-n", "500")
-	cmd.Dir = root
-	out, err := cmd.Output()
-	if err != nil {
-		return 0 // git unavailable, not a repo, or shallow clone with no history
-	}
-
-	cooccurrence := make(map[[2]string]int)
-	commits := strings.Split(string(out), "\x1e")
-	for _, commit := range commits {
-		files := []string{}
-		for _, line := range strings.Split(strings.TrimSpace(commit), "\n") {
-			f := strings.TrimSpace(line)
-			if f != "" {
-				files = append(files, f)
-			}
-		}
-		if len(files) > 50 {
-			continue // skip mega-commits
-		}
-		for i := 0; i < len(files); i++ {
-			for j := i + 1; j < len(files); j++ {
-				a, b := files[i], files[j]
-				if a > b {
-					a, b = b, a // canonical order
-				}
-				cooccurrence[[2]string{a, b}]++
-			}
-		}
-	}
-
-	// Filter: min 3 co-occurrences
-	filtered := make(map[[2]string]int)
-	for pair, count := range cooccurrence {
-		if count >= 3 {
-			filtered[pair] = count
-		}
-	}
-
-	if err := db.BatchInsertCochanges(filtered); err != nil {
-		log.Printf("WARNING: co-change insert: %v", err)
-	}
-	return len(filtered)
 }
 
 var pyClassInhRe = regexp.MustCompile(`^\s*class\s+(\w+)\s*\(([^)]+)\)\s*:`)
