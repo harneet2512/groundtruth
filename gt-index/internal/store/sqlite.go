@@ -312,7 +312,11 @@ func resolutionDerivation(mechanism, dispatchState string, candidateCount int) (
 			return "single_implementation", "closed", "", nil
 		}
 		return "interface_implementors", "closed", "", nil
-	case "verified_unique", "name_match", "unknown_legacy", "external", "":
+	// unique_method is name-uniqueness, not receiver-proof: the resolver runs it
+	// under the global_name pass, caps it at CANDIDATE (0.6), and its emit site
+	// states outright that treating it as a type-derived fact is wrong. It belongs
+	// with the other name-derived mechanisms, never with single_implementation.
+	case "verified_unique", "name_match", "unique_method", "unknown_legacy", "external", "":
 		return "global_name", "partial", "", nil
 	default:
 		return "", "", "", fmt.Errorf("unknown resolution derivation mechanism %q", mechanism)
@@ -369,8 +373,31 @@ func candidateProvenance(base []ResolutionDerivationStep, candidate *ResolutionC
 }
 
 func validateCandidateDerivation(kind string, candidate *ResolutionCandidate) error {
-	if candidate.TargetStableID == "" || candidate.TargetNativeID == "" || candidate.Mechanism == "" {
-		return fmt.Errorf("candidate derivation requires stable target identities and mechanism")
+	// Name the field that is actually missing. This aborts the entire atomic
+	// graph publication, so "one of these three is empty" forces whoever reads
+	// it to reproduce the whole index to learn which -- and the index is the
+	// expensive part. The distinction is also diagnostic: an absent mechanism
+	// means a derivation path published candidates without claiming how it
+	// derived them, while absent identities mean the symbol table is at fault.
+	// An empty mechanism is legal and already accounted for. resolutionDerivation
+	// maps it, alongside verified_unique/name_match/unknown_legacy/external, onto
+	// the global_name derivation at "partial" completeness -- and it has already
+	// done so by the time this runs, since `kind` is its output. Rejecting the
+	// same value here contradicted that mapping and aborted the whole atomic graph
+	// publication for a state the producer defines as supported.
+	//
+	// The target identities are a different matter: nothing downstream can derive
+	// a candidate it cannot name, so those stay required.
+	var missing []string
+	if candidate.TargetStableID == "" {
+		missing = append(missing, "target_stable_id")
+	}
+	if candidate.TargetNativeID == "" {
+		missing = append(missing, "target_native_id")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("candidate derivation requires stable target identities; missing %s (target_id=%d, derivation_kind=%s)",
+			strings.Join(missing, ", "), candidate.TargetID, kind)
 	}
 	switch kind {
 	case "declared_type":
