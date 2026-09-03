@@ -1,0 +1,26 @@
+# github.com/harneet2512/groundtruth/gt-index/internal/resolver [github.com/harneet2512/groundtruth/gt-index/internal/resolver.test]
+internal/resolver/mro_red_test.go:36:9: undefined: LinearizeMRO
+internal/resolver/mro_red_test.go:37:19: undefined: MROStatusLinearized
+internal/resolver/mro_red_test.go:37:54: undefined: MROKindC3
+internal/resolver/mro_red_test.go:49:9: undefined: LinearizeMRO
+internal/resolver/mro_red_test.go:50:19: undefined: MROStatusInconsistent
+internal/resolver/mro_red_test.go:51:46: undefined: MROStatusInconsistent
+internal/resolver/mro_red_test.go:60:12: undefined: LinearizeMRO
+internal/resolver/mro_red_test.go:60:61: undefined: MROStatusCycle
+internal/resolver/mro_red_test.go:61:49: undefined: MROStatusCycle
+internal/resolver/mro_red_test.go:63:12: undefined: LinearizeMRO
+internal/resolver/mro_red_test.go:63:12: too many errors
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/resolver [build failed]
+FAIL
+# github.com/harneet2512/groundtruth/gt-index/internal/store [github.com/harneet2512/groundtruth/gt-index/internal/store.test]
+internal/store/resolution_projection_red_test.go:14:27: undefined: ResolutionPassOrder
+internal/store/resolution_projection_red_test.go:15:19: undefined: ResolutionStepOrdinal
+internal/store/resolution_projection_red_test.go:22:18: undefined: ResolutionStepOrdinal
+internal/store/resolution_projection_red_test.go:23:23: undefined: ResolutionStepUnmapped
+internal/store/resolution_projection_red_test.go:57:11: undefined: ResolutionReason
+internal/store/resolution_projection_red_test.go:65:5: undefined: ResolutionReason
+internal/store/resolution_projection_red_test.go:119:20: db.ProjectResolutionEdgeReasons undefined (type *DB has no field or method ProjectResolutionEdgeReasons)
+internal/store/resolution_projection_red_test.go:135:17: undefined: ResolutionStepOrdinal
+internal/store/resolution_projection_red_test.go:143:18: db.ProjectResolutionEdgeReasons undefined (type *DB has no field or method ProjectResolutionEdgeReasons)
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/store [build failed]
+FAIL

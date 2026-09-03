@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=f2572dc17e7dcf0a005282e6b53133eed1f03c30
+fixture_path=.githooks/tests/fh10_resolution_projections_red.sh
+fixture_sha256=21b934ff819624c9901dd4fb514caa9a27283014a28ae6596ff1980af454e59e
+command=.githooks/tests/fh10_resolution_projections_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/fh10_resolution_projections_red.out
+output_sha256=46d6b29dbaf49194304c0d7b9ee5e47bad45e0c659f4fed0ecf0e58519081086
