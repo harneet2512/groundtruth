@@ -96,8 +96,13 @@ type CallRef struct {
 	ByteEnd              uint64
 	ColumnStart          uint32
 	ArgumentArity        *uint16
-	ArgumentNames        []string // source-visible variable arguments, in call order
-	DispatchForm         string
+	// ArgumentSpread reports that at least one argument is a splat/spread
+	// (`...xs`, `*args`, `**kw`). ArgumentArity counts argument NODES, so a
+	// spread makes it an unusable lower bound on the real argument count.
+	// Anything that reasons about arity must abstain when this is set.
+	ArgumentSpread bool
+	ArgumentNames  []string // source-visible variable arguments, in call order
+	DispatchForm   string
 }
 
 // AssignmentRef records a variable assignment where the RHS is a constructor call.
@@ -1056,9 +1061,25 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 			}
 
 			var argumentArity *uint16
+			argumentSpread := false
 			if arguments := node.ChildByFieldName("arguments"); arguments != nil {
 				arity := uint16(arguments.NamedChildCount())
 				argumentArity = &arity
+				for i := 0; i < int(arguments.NamedChildCount()); i++ {
+					arg := arguments.NamedChild(i)
+					if arg == nil {
+						continue
+					}
+					// One spelling covers every grammar that has the construct:
+					// `...xs` in JS/TS/Java/Go, `*args`/`**kw` in Python and Ruby,
+					// `...$xs` in PHP. The leading token is what makes the node a
+					// splat, so a prefix test needs no per-grammar node names.
+					text := strings.TrimSpace(arg.Content(src))
+					if strings.HasPrefix(text, "...") || strings.HasPrefix(text, "*") {
+						argumentSpread = true
+						break
+					}
+				}
 			}
 			argumentNames := []string(nil)
 			if arguments := node.ChildByFieldName("arguments"); arguments != nil {
@@ -1098,6 +1119,7 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 				ByteEnd:         uint64(node.EndByte()),
 				ColumnStart:     uint32(node.StartPoint().Column),
 				ArgumentArity:   argumentArity,
+				ArgumentSpread:  argumentSpread,
 				ArgumentNames:   argumentNames,
 				DispatchForm:    dispatchForm,
 			})

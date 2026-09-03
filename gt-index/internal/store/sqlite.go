@@ -349,7 +349,7 @@ func resolutionCoverage(c *ResolutionCallsite) ([]ResolutionPassCoverage, []Reso
 	if len(coverage) == 0 {
 		// Compatibility callers construct rows without invoking the resolver.
 		// Absence of a trace is not evidence that any static pass ran.
-		for _, pass := range []string{"lexical_binding", "import_binding", "declared_type", "implementation_set", "return_type", "global_name", "dynamic_framework"} {
+		for _, pass := range ResolutionPassOrder {
 			entry := ResolutionPassCoverage{PassKind: pass, Version: "1", Status: "not_run", Reason: "execution_trace_unavailable"}
 			if pass == "dynamic_framework" && c.DispatchState == "dynamic" {
 				entry.Status, entry.Reason = "unavailable", "static_target_not_proven"
@@ -748,7 +748,9 @@ func createSchema(db *sql.DB) error {
 		viability TEXT,
 		derivation_fact_ids TEXT,
 		exclusion_fact_ids TEXT,
-		selection_rule_id TEXT
+		selection_rule_id TEXT,
+		resolution_reason TEXT,
+		resolution_step INTEGER
 	);
 
 	CREATE TABLE IF NOT EXISTS resolution_symbols (
@@ -908,6 +910,10 @@ func createSchema(db *sql.DB) error {
 		{"stable_id", "TEXT"}, {"schema_version", "INTEGER"}, {"callsite_stable_id", "TEXT"},
 		{"target_symbol_id", "TEXT"}, {"ordinal", "INTEGER"}, {"viability", "TEXT"},
 		{"derivation_fact_ids", "TEXT"}, {"exclusion_fact_ids", "TEXT"}, {"selection_rule_id", "TEXT"},
+		// Rendered projections of the derivation columns above. Additive and
+		// nullable: an existing graph opens, and a row with no projection reads
+		// as "not projected", never as a reason of "".
+		{"resolution_reason", "TEXT"}, {"resolution_step", "INTEGER"},
 	}
 	for _, column := range typedColumns {
 		var count int

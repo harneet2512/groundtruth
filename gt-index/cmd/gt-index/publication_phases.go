@@ -457,6 +457,21 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 		_ = publishTx.Rollback()
 		abortStagedBuild(db, stagedOutput, "attach graph-native resolution evidence: %v", err)
 	}
+	// Render `reason` and `step` from the derivation columns the attachment just
+	// wrote. Running it here, over the published rows, is what makes it a
+	// projection: it can consult nothing the graph does not already hold, so the
+	// justification cannot drift from what produced the edge. It sits inside the
+	// analysis phase, so a projection failure costs the analysis, not the index.
+	projection, err := store.ProjectResolutionEdgeReasonsTx(publishTx)
+	if err != nil {
+		_ = publishTx.Rollback()
+		abortStagedBuild(db, stagedOutput, "project resolution edge reasons: %v", err)
+	}
+	fmt.Fprintf(os.Stderr, "  Resolution projections: %d callsite edges, %d candidate edges from %d distinct derivations (%d unmapped step)\n",
+		projection.CallsiteEdges, projection.CandidateEdges, projection.DistinctFacts, projection.UnmappedStepRows)
+	fmt.Fprintf(os.Stderr, "  Overload narrowing: %d/%d callsites narrowed, %d candidates excluded; MRO reordered %d\n",
+		resolver.LastCheapWins.CallsitesNarrowed, resolver.LastCheapWins.CallsitesConsidered,
+		resolver.LastCheapWins.CandidatesExcluded, resolver.LastCheapWins.CallsitesReordered)
 	if err := store.BindGraphCompletionTx(publishTx, graphIdentity); err != nil {
 		_ = publishTx.Rollback()
 		abortStagedBuild(db, stagedOutput, "bind graph completion to producer identity: %v", err)

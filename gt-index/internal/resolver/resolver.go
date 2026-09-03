@@ -401,6 +401,11 @@ type ResolvedCall struct {
 	CandidateNodeIDs []int64 // complete resolver-owned viable identities
 	ReceiverType     string  // source-supported receiver type when a strategy proves it
 	ReceiverOrigin   string  // import, field_annotation, param_annotation, assignment, return_type, or call_syntax
+	// ArityNarrowedFrom is the candidate count before overload narrowing removed
+	// arity-incompatible candidates; zero when narrowing did not fire. It exists
+	// so narrowing cannot promote: sourceSupportedResolution reads it and refuses
+	// to call a set source-supported merely because a filter shrank it to one.
+	ArityNarrowedFrom int
 }
 
 type DispatchState string
@@ -427,6 +432,14 @@ var receiverOriginVocabulary = map[string]struct{}{
 // Heuristic/name-uniqueness mechanisms remain useful ranking candidates, but
 // can never become source-supported merely by crossing a numeric threshold.
 func sourceSupportedResolution(rc ResolvedCall) bool {
+	// Overload narrowing removes candidates the argument count cannot reach. It
+	// is a filter over a set some mechanism already produced, never new evidence
+	// about a receiver -- so a callsite that carried several candidates before
+	// narrowing stays candidate-only after it, however few remain. Without this
+	// the len==1 test below would turn a filter into a promotion.
+	if rc.ArityNarrowedFrom > 1 {
+		return false
+	}
 	allowed := map[string]map[string]struct{}{
 		"same_file":   {"ast_call": {}, "inheritance_chain": {}},
 		"inherited":   {"inheritance_chain": {}},
@@ -480,10 +493,10 @@ type ResolutionPassExecution struct {
 	Reason   string
 }
 
-var resolutionPassOrder = []string{
-	"lexical_binding", "import_binding", "declared_type", "implementation_set",
-	"return_type", "global_name", "dynamic_framework",
-}
+// resolutionPassOrder is the store's published pass order, not a second copy of
+// it. The `step` projection is an ordinal into this same slice, so a step can
+// never disagree with the order the resolver actually ran.
+var resolutionPassOrder = store.ResolutionPassOrder
 
 type resolutionPassTracker struct {
 	active  string
@@ -2758,11 +2771,17 @@ func ResolveWithProvenance(allCalls []parser.CallRef, nodeIDs map[string][]int64
 	// resolver's pre-dedupe result available for provenance, including repeated
 	// calls that the legacy graph intentionally collapses to one endpoint edge.
 	perCallsite, executionTraces := resolveInternal(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, false, nodeMeta...)
-	resolved := dedupeResolvedCalls(perCallsite)
 	var provenanceMeta map[int64]NodeMeta
 	if len(nodeMeta) > 0 {
 		provenanceMeta = nodeMeta[0]
 	}
+	// Narrow by argument arity and order inherited sets by the class
+	// linearisation BEFORE the legacy endpoint dedupe, so the collapsed CALLS
+	// view and the graph-native candidate evidence agree on which candidates
+	// survived. Both passes record their outcome in the execution trace, so a
+	// callsite they declined to touch says so instead of staying silent.
+	LastCheapWins = applyCheapResolutionWins(allCalls, perCallsite, executionTraces, provenanceMeta)
+	resolved := dedupeResolvedCalls(perCallsite)
 	callsites := make([]ResolutionCallsite, len(allCalls))
 	for i, call := range allCalls {
 		var sourceID int64
