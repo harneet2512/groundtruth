@@ -1,0 +1,7 @@
+# github.com/harneet2512/groundtruth/gt-index/cmd/gt-index [github.com/harneet2512/groundtruth/gt-index/cmd/gt-index.test]
+cmd\gt-index\candidate_stable_identity_test.go:36:9: undefined: dedupeCandidatesByStableIdentity
+cmd\gt-index\candidate_stable_identity_test.go:52:9: undefined: dedupeCandidatesByStableIdentity
+cmd\gt-index\candidate_stable_identity_test.go:65:9: undefined: dedupeCandidatesByStableIdentity
+cmd\gt-index\candidate_stable_identity_test.go:77:9: undefined: dedupeCandidatesByStableIdentity
+FAIL	github.com/harneet2512/groundtruth/gt-index/cmd/gt-index [build failed]
+FAIL
