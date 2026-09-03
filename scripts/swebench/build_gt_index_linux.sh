@@ -36,7 +36,13 @@ OUT_BIN="$OUT_DIR/gt-index-linux"
 # TODO(RC-17-build): bump this digest as part of the toolchain-update SOP;
 # verify the new digest matches the upstream go release notes before
 # committing.
-DEFAULT_GO_IMAGE="golang:1.22.5-bookworm@sha256:30bd2d5cc0ab74b88de9067884ec6bf87c0b88f0d5fcb7bbb35a3a7fdda71cdc"
+# 2026-09-03: the previous digest (sha256:30bd2d5c...) no longer resolves --
+# "manifest unknown" from Docker Hub, which rotates the digests behind a patch
+# tag. Re-pinned to the digest 1.22.5-bookworm resolves to today. The distro is
+# deliberate, not incidental: the produced binary is glibc-linked and has to run
+# inside the task containers, so building it on a newer base would raise its
+# glibc floor.
+DEFAULT_GO_IMAGE="golang:1.22.5-bookworm@sha256:af9b40f2b1851be993763b85288f8434af87b5678af04355b1e33ff530b5765f"
 GO_IMAGE="${GT_INDEX_GO_IMAGE:-$DEFAULT_GO_IMAGE}"
 
 mkdir -p "$OUT_DIR"
