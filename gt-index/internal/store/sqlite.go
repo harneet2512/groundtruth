@@ -1017,6 +1017,10 @@ func createSchema(db *sql.DB) error {
 	if ftsErr != nil {
 		log.Printf("[WARN] FTS5 not available (non-fatal): %v", ftsErr)
 	}
+	// Companion index over `properties`. nodes_fts answers "what is this
+	// called"; properties_fts answers "what does this do", which is the only
+	// surface a behavioural query can land on. See properties_fts.go.
+	createPropertiesFTS5(db)
 	return nil
 }
 
@@ -1797,7 +1801,14 @@ func (d *DB) InsertProperty(p *Property) error {
 		`INSERT INTO properties (node_id, kind, value, line, confidence) VALUES (?, ?, ?, ?, ?)`,
 		p.NodeID, p.Kind, p.Value, p.Line, p.Confidence,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Keep properties_fts covering the row that was just written. This is a
+	// whole-index rebuild for one row, which is only acceptable because this
+	// entry point has no bulk callers — every production write path goes
+	// through BatchInsertProperties or BatchInsertPropertiesTx.
+	return d.PopulatePropertiesFTS5()
 }
 
 // InsertAssertion inserts an assertion from a test function.
@@ -1836,6 +1847,12 @@ func (d *DB) BatchInsertProperties(props []*Property) error {
 			tx.Rollback()
 			return fmt.Errorf("insert property %d: %w", i, err)
 		}
+	}
+	// Same transaction that writes the rows maintains the index over them, so
+	// a published graph can never carry facts properties_fts has not heard of.
+	if err := PopulatePropertiesFTS5Tx(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("index properties: %w", err)
 	}
 	return tx.Commit()
 }

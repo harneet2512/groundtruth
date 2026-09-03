@@ -602,20 +602,27 @@ func BatchInsertResolutionCandidatesTx(tx *sql.Tx, candidates []*ResolutionCandi
 
 // BatchInsertPropertiesTx inserts properties inside the given tx.
 func BatchInsertPropertiesTx(tx *sql.Tx, props []*Property) error {
-	if len(props) == 0 {
-		return nil
-	}
-	stmt, err := tx.Prepare(
-		`INSERT INTO properties (node_id, kind, value, line, confidence) VALUES (?, ?, ?, ?, ?)`,
-	)
-	if err != nil {
-		return fmt.Errorf("prepare insert properties: %w", err)
-	}
-	defer stmt.Close()
-	for i, p := range props {
-		if _, err := stmt.Exec(p.NodeID, p.Kind, p.Value, p.Line, p.Confidence); err != nil {
-			return fmt.Errorf("insert property %d: %w", i, err)
+	if len(props) > 0 {
+		stmt, err := tx.Prepare(
+			`INSERT INTO properties (node_id, kind, value, line, confidence) VALUES (?, ?, ?, ?, ?)`,
+		)
+		if err != nil {
+			return fmt.Errorf("prepare insert properties: %w", err)
 		}
+		defer stmt.Close()
+		for i, p := range props {
+			if _, err := stmt.Exec(p.NodeID, p.Kind, p.Value, p.Line, p.Confidence); err != nil {
+				return fmt.Errorf("insert property %d: %w", i, err)
+			}
+		}
+	}
+	// Maintained in the caller's transaction, and unconditionally — an empty
+	// batch is a reindexed file that lost all its facts, and its rows have
+	// already been DELETEd above by DeleteFileEdgesAndNodesTx. Skipping it
+	// there is exactly how an external-content index outlives the content it
+	// points at. See internal/store/properties_fts.go.
+	if err := PopulatePropertiesFTS5Tx(tx); err != nil {
+		return fmt.Errorf("index properties: %w", err)
 	}
 	return nil
 }

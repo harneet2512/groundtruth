@@ -308,6 +308,9 @@ func main() {
 		if err := db.PopulateFTS5(); err != nil {
 			log.Printf("[WARN] rebuild-closure: FTS5 re-population failed: %v", err)
 		}
+		if err := db.PopulatePropertiesFTS5(); err != nil {
+			log.Printf("[WARN] rebuild-closure: properties FTS5 re-population failed: %v", err)
+		}
 		db.CheckpointWAL()
 		return
 	}
@@ -527,6 +530,16 @@ func main() {
 				"Rebuild gt-index with `-tags sqlite_fts5`. Aborting to avoid a degraded paid run.", n)
 		} else {
 			fmt.Fprintf(os.Stderr, "[GT preflight] FTS5 OK: nodes_fts populated (%d rows)\n", n)
+		}
+		// Same gate, second index. properties_fts is empty at this point —
+		// properties are written two passes later — so the only thing that can
+		// be asserted here is that the CREATE VIRTUAL TABLE was accepted at
+		// schema time. -1 means it was not, i.e. FTS5 is compiled out and
+		// property_rank would silently fall back to a whole-table LIKE scan.
+		// Row coverage is asserted at the publication boundary instead.
+		if n := db.PropertiesFTS5RowCount(); n < 0 {
+			abortStagedBuild(db, stagedOutput, "GT_REQUIRE_FTS5=1 but properties_fts does not exist — FTS5 is not compiled in. "+
+				"Rebuild gt-index with `-tags sqlite_fts5`. Aborting to avoid a degraded paid run.")
 		}
 	}
 
@@ -1106,6 +1119,21 @@ func main() {
 	// Post-insert FK validation (non-fatal)
 	if err := db.ValidateForeignKeys(); err != nil {
 		abortStagedBuild(db, stagedOutput, "foreign-key validation failed: %v", err)
+	}
+
+	// properties_fts coverage at the publication boundary. Every batch writer
+	// maintains the index in its own transaction, so this is an assertion, not
+	// a repair — but it is the only place that can compare the index against
+	// the finished table, and a desynced index is the failure mode that looks
+	// healthy (COUNT reads plausible, MATCH returns nothing). Under
+	// GT_REQUIRE_FTS5 a mismatch aborts rather than publishes.
+	if indexed, facts := db.PropertiesFTS5RowCount(), db.PropertyCount(); indexed != facts {
+		if os.Getenv("GT_REQUIRE_FTS5") == "1" {
+			abortStagedBuild(db, stagedOutput,
+				"GT_REQUIRE_FTS5=1 but properties_fts covers %d of %d property rows — refusing to publish a desynced index.",
+				indexed, facts)
+		}
+		log.Printf("[WARN] properties_fts covers %d of %d property rows; property_rank will under-recall", indexed, facts)
 	}
 
 	// Fold the WAL into graph.db so the file is SELF-CONTAINED before the process
