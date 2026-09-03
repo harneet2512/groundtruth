@@ -1,0 +1,9 @@
+--- FAIL: TestCoreOnlyGraphIsReportedAsAnalysisAbsentNotAsAMissingRow (ELAPSED)
+    core_only_reader_test.go:44: reader did not name the analysis state: graph-native resolution unavailable: sql: no rows in result set
+--- FAIL: TestCoreOnlyGraphNamesAnalysisNotRunSeparatelyFromFailure (ELAPSED)
+    core_only_reader_test.go:61: reader did not distinguish an unrun analysis: graph-native resolution unavailable: sql: no rows in result set
+--- FAIL: TestRejectedCandidateLeavesCoreGraphReadableAndNamed (ELAPSED)
+    core_only_reader_test.go:147: reader did not name the analysis state after a rejected candidate: graph-native resolution unavailable: sql: no rows in result set
+FAIL
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/store	ELAPSED
+FAIL

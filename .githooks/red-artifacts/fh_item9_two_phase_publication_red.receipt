@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=24d156530b5940a564357d9fe591f9e7d2eee9c4
+fixture_path=.githooks/tests/fh_item9_two_phase_publication_red.sh
+fixture_sha256=87e05216c4349f538633ea7fc63cd1c4dc7ef40ea8f9fbbfbda60815fe6157eb
+command=.githooks/tests/fh_item9_two_phase_publication_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/fh_item9_two_phase_publication_red.out
+output_sha256=4f373f2ab40e32c0eb81a7c72fcaf5088d4a17b40e34808b4247c0eec5a0ba8f
