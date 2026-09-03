@@ -37,6 +37,17 @@ type Node struct {
 	IsTest        bool
 	Language      string
 	ParentID      int64
+	// FileHash, ByteStart and ByteEnd are the symbol's content address: the
+	// sha256 of the file bytes this symbol was extracted from, and the
+	// tree-sitter byte range of its declaration within them. Storing the
+	// address rather than a copy of the source keeps the store from growing by
+	// the size of the repository, and turns staleness into a hash mismatch a
+	// reader can name instead of stale bytes nobody notices. An empty FileHash
+	// means UNADDRESSED and is stored as NULL -- 0 is a legal byte offset, so a
+	// zero address would be indistinguishable from a symbol at the top of a file.
+	FileHash  string
+	ByteStart uint64
+	ByteEnd   uint64
 }
 
 func nullableParentID(parentID int64) any {
@@ -44,6 +55,16 @@ func nullableParentID(parentID int64) any {
 		return nil
 	}
 	return parentID
+}
+
+// contentAddress returns the three address bind values for a node, all NULL
+// when the node carries no address. They are returned together because a
+// partial address is unverifiable and must never reach the database.
+func contentAddress(n *Node) (any, any, any) {
+	if n.FileHash == "" {
+		return nil, nil, nil
+	}
+	return n.FileHash, int64(n.ByteStart), int64(n.ByteEnd)
 }
 
 // Edge represents a relationship between nodes.
@@ -627,6 +648,7 @@ func createSchema(db *sql.DB) error {
 		ast_path TEXT,
 		byte_start INTEGER,
 		byte_end INTEGER,
+		file_hash TEXT,
 		line_start INTEGER,
 		column_start INTEGER,
 		dispatch_form TEXT,
@@ -902,7 +924,8 @@ func createSchema(db *sql.DB) error {
 		{"stable_id", "TEXT"}, {"node_type", "TEXT"}, {"schema_version", "INTEGER"},
 		{"repo_id", "TEXT"}, {"source_revision", "TEXT"}, {"producer_build_id", "TEXT"},
 		{"file_node_id", "INTEGER"}, {"caller_symbol_id", "TEXT"}, {"ast_path", "TEXT"},
-		{"byte_start", "INTEGER"}, {"byte_end", "INTEGER"}, {"line_start", "INTEGER"},
+		{"byte_start", "INTEGER"}, {"byte_end", "INTEGER"}, {"file_hash", "TEXT"},
+		{"line_start", "INTEGER"},
 		{"column_start", "INTEGER"}, {"dispatch_form", "TEXT"}, {"callee_lexeme", "TEXT"},
 		{"declared_receiver_type_id", "TEXT"}, {"receiver_value_id", "TEXT"}, {"argument_arity", "INTEGER"},
 		{"parse_state", "TEXT"}, {"candidate_state", "TEXT"}, {"selected_target_id", "TEXT"},
@@ -1124,8 +1147,9 @@ func (d *DB) BatchInsertNodes(nodes []*Node) ([]int64, error) {
 	}
 	stmt, err := tx.Prepare(
 		`INSERT INTO nodes (label, name, qualified_name, file_path, start_line, end_line,
-		 signature, return_type, is_exported, is_test, language, parent_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 signature, return_type, is_exported, is_test, language, parent_id,
+		 file_hash, byte_start, byte_end)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -1135,9 +1159,11 @@ func (d *DB) BatchInsertNodes(nodes []*Node) ([]int64, error) {
 
 	ids := make([]int64, len(nodes))
 	for i, n := range nodes {
+		fileHash, byteStart, byteEnd := contentAddress(n)
 		res, err := stmt.Exec(
 			n.Label, n.Name, n.QualifiedName, n.FilePath, n.StartLine, n.EndLine,
 			n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language, nullableParentID(n.ParentID),
+			fileHash, byteStart, byteEnd,
 		)
 		if err != nil {
 			tx.Rollback()

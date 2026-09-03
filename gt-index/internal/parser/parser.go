@@ -3,6 +3,8 @@ package parser
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"regexp"
@@ -183,7 +185,32 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 	// so the graph isn't polluted with content-free anchors.
 	maybeAddFileAnchorNode(sf, src, result)
 
+	stampContentAddress(src, result)
+
 	return result, nil
+}
+
+// stampContentAddress completes every node's content address with the sha256 of
+// the exact bytes this parse saw. The byte range is set at each extraction site
+// -- it comes off the tree-sitter node, so every grammar has it -- while the
+// hash is file-wide and so is applied once here rather than recomputed per
+// symbol. It is the same digest Pass 5b writes to file_hashes for this file,
+// because both hash the file's bytes, so a reader can verify a symbol against
+// either surface.
+//
+// A node whose byte range was never set stays UNADDRESSED: stamping a hash onto
+// a symbol nobody can locate would claim a verifiability the address cannot
+// deliver.
+func stampContentAddress(src []byte, result *ParseResult) {
+	sum := sha256.Sum256(src)
+	digest := hex.EncodeToString(sum[:])
+	for i := range result.Nodes {
+		n := &result.Nodes[i]
+		if n.ByteEnd <= n.ByteStart {
+			continue
+		}
+		n.FileHash = digest
+	}
 }
 
 // maybeAddFileAnchorNode appends a synthetic File node when a file yields zero
@@ -249,6 +276,8 @@ func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResul
 		EndLine:       endLine,
 		Language:      sf.Language,
 		IsExported:    true,
+		ByteStart:     0,
+		ByteEnd:       uint64(len(src)),
 	})
 }
 
@@ -583,6 +612,8 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				IsExported:    spec.IsExported != nil && spec.IsExported(name),
 				IsTest:        isTest,
 				Language:      sf.Language,
+				ByteStart:     uint64(node.StartByte()),
+				ByteEnd:       uint64(node.EndByte()),
 			}
 
 			// Check if this is a method (inside a class)
@@ -679,6 +710,8 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				IsExported:    spec.IsExported != nil && spec.IsExported(name),
 				IsTest:        isTest,
 				Language:      sf.Language,
+				ByteStart:     uint64(node.StartByte()),
+				ByteEnd:       uint64(node.EndByte()),
 			}
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
@@ -810,6 +843,8 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 								EndLine:       int(arg.EndPoint().Row) + 1,
 								IsTest:        true,
 								Language:      sf.Language,
+								ByteStart:     uint64(arg.StartByte()),
+								ByteEnd:       uint64(arg.EndByte()),
 							}
 							idx := len(result.Nodes)
 							result.Nodes = append(result.Nodes, n)
@@ -911,6 +946,7 @@ func extractGoInterfaceMethods(typeDecl *sitter.Node, sf walker.SourceFile, src 
 							FilePath: sf.Path, StartLine: line, EndLine: int(node.EndPoint().Row) + 1,
 							Signature: strings.TrimSpace(node.Content(src)), ParentID: int64(parentID),
 							IsExported: sf.Spec.IsExported != nil && sf.Spec.IsExported(name), Language: sf.Language,
+							ByteStart: uint64(node.StartByte()), ByteEnd: uint64(node.EndByte()),
 						})
 					}
 				}
@@ -935,6 +971,10 @@ func extractGoInterfaceMethods(typeDecl *sitter.Node, sf walker.SourceFile, src 
 			Label: "Method", Name: name, QualifiedName: result.Nodes[parentID-1].Name + "." + name,
 			FilePath: sf.Path, StartLine: line, EndLine: line, Signature: content[match[0]:match[1]],
 			ParentID: int64(parentID), IsExported: sf.Spec.IsExported != nil && sf.Spec.IsExported(name), Language: sf.Language,
+			// match indexes typeDecl's own text, so the offsets rebase onto the
+			// file by the declaration's start byte.
+			ByteStart: uint64(typeDecl.StartByte()) + uint64(match[0]),
+			ByteEnd:   uint64(typeDecl.StartByte()) + uint64(match[1]),
 		})
 	}
 }

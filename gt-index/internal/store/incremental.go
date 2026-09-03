@@ -487,8 +487,9 @@ func BatchInsertNodesTx(tx *sql.Tx, nodes []*Node) ([]int64, error) {
 	}
 	stmt, err := tx.Prepare(
 		`INSERT INTO nodes (label, name, qualified_name, file_path, start_line, end_line,
-		 signature, return_type, is_exported, is_test, language, parent_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 signature, return_type, is_exported, is_test, language, parent_id,
+		 file_hash, byte_start, byte_end)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("prepare insert nodes: %w", err)
@@ -497,9 +498,11 @@ func BatchInsertNodesTx(tx *sql.Tx, nodes []*Node) ([]int64, error) {
 
 	ids := make([]int64, len(nodes))
 	for i, n := range nodes {
+		fileHash, byteStart, byteEnd := contentAddress(n)
 		res, err := stmt.Exec(
 			n.Label, n.Name, n.QualifiedName, n.FilePath, n.StartLine, n.EndLine,
 			n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language, nullableParentID(n.ParentID),
+			fileHash, byteStart, byteEnd,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("insert node %d: %w", i, err)
