@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=72e7e7974cafe5194d2e1b272a15b8858ccd1e66
+fixture_path=.githooks/tests/item4_properties_fts_red.sh
+fixture_sha256=91f64908516364aca7f2142e18d0e6d60983dc43da26fa490f005e5a7afca573
+command=.githooks/tests/item4_properties_fts_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/item4_properties_fts_red.out
+output_sha256=8e876c984077e9be8386afee4e4523c156d86598b99b409b8b058ed61a113c47

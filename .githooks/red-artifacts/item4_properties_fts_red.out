@@ -1,0 +1,17 @@
+--- FAIL: TestPropertiesFTSTableIsCreatedWithTheSchema (ELAPSED)
+    properties_fts_test.go:82: properties_fts not created by createSchema (found 0); property_rank stays a full scan
+--- FAIL: TestPropertiesFTSIsExternalContentOverProperties (ELAPSED)
+    properties_fts_test.go:103: properties_fts has no DDL to inspect: sql: no rows in result set
+--- FAIL: TestPropertiesFTSCoversEveryPropertyRow (ELAPSED)
+    properties_fts_test.go:122: query "SELECT COUNT(*) FROM properties_fts": no such table: properties_fts
+--- FAIL: TestPropertiesFTSMatchReachesTheOwningSymbol (ELAPSED)
+    properties_fts_test.go:143: MATCH over properties_fts failed: no such table: properties_fts
+--- FAIL: TestPropertiesFTSFiltersByKindColumn (ELAPSED)
+    properties_fts_test.go:189: query "SELECT COUNT(*) FROM properties_fts WHERE properties_fts MATCH '{value} : \"returns\"'": no such table: properties_fts
+--- FAIL: TestPropertiesFTSSurvivesTheIncrementalDeleteReinsert (ELAPSED)
+    properties_fts_test.go:230: query "SELECT COUNT(*) FROM properties_fts": no such table: properties_fts
+--- FAIL: TestPropertiesFTSGrowsByExactlyTheRowsWritten (ELAPSED)
+    properties_fts_test.go:253: query "SELECT COUNT(*) FROM properties_fts": no such table: properties_fts
+FAIL
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/store	ELAPSED
+FAIL
