@@ -159,6 +159,31 @@ func candidateDispatchStateForCount(count int) string {
 	}
 }
 
+// vtaCallsiteMechanism reports the mechanism a flow-influenced callsite may
+// claim over its published candidate set.
+//
+// "vta" publishes the variable_type_flow derivation, and the store holds every
+// candidate of such a callsite to carrying flow proof. That is only true while
+// the published set IS the flow set. The partial branch merges conservative
+// hierarchy candidates in so incomplete flow does not erase them, and those
+// have no flow proof -- claiming "vta" over them asserts evidence that does not
+// exist, which the store rejects. Publication is atomic, so that rejection
+// discards the whole graph rather than one edge.
+//
+// A merged set is the conservative implementor set, which is what impl_method
+// names. The hierarchy evidence is conserved either way; only the claim about
+// how it was derived changes. An empty flow set claims nothing and leaves the
+// resolver its own attribution.
+func vtaCallsiteMechanism(vtaCandidates, publishedCandidates []int64) string {
+	if len(vtaCandidates) == 0 {
+		return ""
+	}
+	if len(publishedCandidates) > len(vtaCandidates) {
+		return "impl_method"
+	}
+	return "vta"
+}
+
 func main() {
 	root := flag.String("root", ".", "Project root directory")
 	output := flag.String("output", "graph.db", "Output SQLite database path")
@@ -740,8 +765,8 @@ func main() {
 				candidateNodeIDs = append([]int64(nil), vta.CandidateNodeIDs...)
 			}
 			selectedNodeID = nil
-			if len(vta.CandidateNodeIDs) > 0 {
-				publishedMechanism = "vta"
+			if mechanism := vtaCallsiteMechanism(vta.CandidateNodeIDs, candidateNodeIDs); mechanism != "" {
+				publishedMechanism = mechanism
 				vtaUsed = true
 			}
 			publishedDispatchState = candidateDispatchStateForCount(len(candidateNodeIDs))
