@@ -101,6 +101,8 @@ case "$mode" in
       -e GIT_CONFIG_COUNT=1 \
       -e GIT_CONFIG_KEY_0=safe.directory \
       -e GIT_CONFIG_VALUE_0=/workspace \
+      -e HOST_UID="$(id -u)" \
+      -e HOST_GID="$(id -g)" \
       -v "$REPO_DIR":/workspace \
       -w /workspace/gt-index \
       "$GO_IMAGE" \
@@ -112,7 +114,8 @@ case "$mode" in
                  -trimpath \
                  -mod=readonly \
                  -ldflags \"${LDFLAGS} -X main.goToolchain=\${GO_TC}\" \
-                 -o /workspace/bin/gt-index-linux ./cmd/gt-index/"
+                 -o /workspace/bin/gt-index-linux ./cmd/gt-index/ && \
+               chown \"\${HOST_UID}:\${HOST_GID}\" /workspace/bin/gt-index-linux"
     ;;
   *)
     echo "FATAL: unknown mode $mode" >&2
