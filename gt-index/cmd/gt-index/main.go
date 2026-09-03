@@ -174,6 +174,53 @@ func candidateDispatchStateForCount(count int) string {
 // names. The hierarchy evidence is conserved either way; only the claim about
 // how it was derived changes. An empty flow set claims nothing and leaves the
 // resolver its own attribution.
+// dedupeCandidatesByStableIdentity collapses candidates whose targets share a
+// stable id, keeping the original order.
+//
+// A candidate is identified by its target's stable id, so one callsite cannot
+// carry the same target twice. Distinct nodes can nonetheless share a stable
+// id -- aiomonitor resolves seven distinct nodes named "set" to one -- and
+// publishing each separately produced duplicate CANDIDATE_TARGET edge ids,
+// whose stable id is (callsite, target stable id) with no ordinal. That is a
+// UNIQUE violation, and publication is atomic, so it discarded the whole graph.
+//
+// It also mattered before the crash: candidate_count decides candidate_only
+// versus ambiguous dispatch, so repeats pushed single-target callsites into
+// ambiguous.
+//
+// The selected node is preferred as its identity's representative -- dropping
+// it would leave the callsite with nothing marked selected. Nodes missing from
+// the symbol table are passed through untouched: the publication loop already
+// skips them, and removing them here would break the candidate-conservation
+// check, which compares these two lengths.
+func dedupeCandidatesByStableIdentity(ids []int64, selected *int64, stableID func(int64) (string, bool)) []int64 {
+	representative := make(map[string]int64, len(ids))
+	if selected != nil {
+		if key, ok := stableID(*selected); ok {
+			representative[key] = *selected
+		}
+	}
+	kept := make([]int64, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		key, ok := stableID(id)
+		if !ok {
+			kept = append(kept, id)
+			continue
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if chosen, ok := representative[key]; ok {
+			kept = append(kept, chosen)
+			continue
+		}
+		kept = append(kept, id)
+	}
+	return kept
+}
+
 func vtaCallsiteMechanism(vtaCandidates, publishedCandidates []int64) string {
 	if len(vtaCandidates) == 0 {
 		return ""
@@ -784,6 +831,24 @@ func main() {
 				}
 			}
 		}
+		// Collapse candidates that denote the same symbol identity before anything
+		// downstream counts them: the published candidate edge ids are keyed on the
+		// target stable id, and candidate_count feeds the dispatch state.
+		candidateNodeIDs = dedupeCandidatesByStableIdentity(candidateNodeIDs, selectedNodeID, func(id int64) (string, bool) {
+			symbol, ok := symbolByID[id]
+			if !ok {
+				return "", false
+			}
+			return symbol.StableID, true
+		})
+		// Only restate a dispatch state that was itself derived from the candidate
+		// count. dynamic, parser_incomplete and external_unresolved say something
+		// the count cannot, and must survive the collapse untouched.
+		switch publishedDispatchState {
+		case string(resolver.DispatchZero), string(resolver.DispatchCandidateOnly), string(resolver.DispatchAmbiguous):
+			publishedDispatchState = candidateDispatchStateForCount(len(candidateNodeIDs))
+		}
+
 		// Only a unique dispatch may carry selected-target authority. Some
 		// conservative resolver paths retain a best-effort target while correctly
 		// classifying the callsite as candidate_only. Publishing that internal hint
