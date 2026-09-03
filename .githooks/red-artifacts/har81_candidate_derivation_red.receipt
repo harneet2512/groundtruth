@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=0aadb1b9111f70f3c6b8874e1b8eff927397d22b
+fixture_path=.githooks/tests/har81_candidate_derivation_red.sh
+fixture_sha256=c20e4dbfc4d6b3ff6b222ba26ae5986a75ab6b42ecf476fdfd100465e63537bb
+command=.githooks/tests/har81_candidate_derivation_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/har81_candidate_derivation_red.out
+output_sha256=2581f64300f7d901b0033a04769d61f5ed3046ce496bc6ed8db73a3449342603

@@ -1,0 +1,15 @@
+--- FAIL: TestEmptyMechanismIsAcceptedBecauseDerivationMapsIt (ELAPSED)
+    candidate_derivation_mechanism_test.go:32: validation rejected a candidate its own derivation mapping accepts: candidate derivation requires stable target identities and mechanism
+--- FAIL: TestMissingTargetIdentitiesAreRejectedAndNamed (ELAPSED)
+    candidate_derivation_mechanism_test.go:55: target_stable_id: error did not name the missing field: candidate derivation requires stable target identities and mechanism
+    candidate_derivation_mechanism_test.go:55: target_native_id: error did not name the missing field: candidate derivation requires stable target identities and mechanism
+--- FAIL: TestBothMissingIdentitiesAreReportedTogether (ELAPSED)
+    candidate_derivation_mechanism_test.go:67: error did not name target_stable_id: candidate derivation requires stable target identities and mechanism
+    candidate_derivation_mechanism_test.go:67: error did not name target_native_id: candidate derivation requires stable target identities and mechanism
+--- FAIL: TestEveryCallsiteMechanismIsMapped (ELAPSED)
+    candidate_derivation_mechanism_test.go:90: mechanism "unique_method" is unmapped -- this aborts the whole graph: unknown resolution derivation mechanism "unique_method"
+--- FAIL: TestUniqueMethodIsNameDerivedNotTypeDerived (ELAPSED)
+    candidate_derivation_mechanism_test.go:106: unique_method unmapped: unknown resolution derivation mechanism "unique_method"
+FAIL
+FAIL	github.com/harneet2512/groundtruth/gt-index/internal/store	ELAPSED
+FAIL
