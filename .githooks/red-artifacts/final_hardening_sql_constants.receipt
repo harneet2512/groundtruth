@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=32f54bb49fd025a10535a75ed77b132f0cd202f6
+fixture_path=.githooks/tests/final_hardening_sql_constants.sh
+fixture_sha256=d960734ccc1bacd0c417a9e2911b2733e08970c60b7004689ea71c882c9a6874
+command=.githooks/tests/final_hardening_sql_constants.sh
+exit_code=1
+output_path=.githooks/red-artifacts/final_hardening_sql_constants.out
+output_sha256=8c93d57193ed1af39342c4a0b6b98cd0c06448d4da08d4dc31cf202b81d45e55
