@@ -43,6 +43,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+pier = pytest.importorskip("pier", reason="pier is not installed in this environment")
 from pier.environments.base import ExecResult  # noqa: E402
 
 import artifact_deepswe.gt_agent as gt_agent  # noqa: E402
