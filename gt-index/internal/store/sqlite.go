@@ -920,22 +920,37 @@ func createSchema(db *sql.DB) error {
 	// Existing graphs may predate typed call-candidate facts. Incremental opens
 	// must add the nullable columns before they can fail closed and invalidate the
 	// old resolution overlay. Full builds create the columns above directly.
-	typedColumns := []struct{ name, definition string }{
-		{"derivation_contract", "TEXT"}, {"derivation_kind", "TEXT"}, {"evidence_set", "TEXT"},
-		{"analysis_boundary", "TEXT"}, {"pass_kind", "TEXT"}, {"pass_version", "TEXT"},
-		{"pass_status", "TEXT"}, {"abstention_reason", "TEXT"}, {"sibling_count", "INTEGER"},
-		{"producer_build_id", "TEXT"}, {"producer_source_fingerprint", "TEXT"},
-		{"pass_coverage", "TEXT"}, {"provenance_steps", "TEXT"},
-		{"declared_scope", "TEXT"}, {"receiver_type", "TEXT"}, {"receiver_origin", "TEXT"},
-		{"receiver_shape", "TEXT"}, {"receiver_chain", "TEXT"}, {"import_chain", "TEXT"},
-		{"export_status", "TEXT"}, {"parser_complete", "BOOLEAN"},
-		{"stable_id", "TEXT"}, {"schema_version", "INTEGER"}, {"callsite_stable_id", "TEXT"},
-		{"target_symbol_id", "TEXT"}, {"ordinal", "INTEGER"}, {"viability", "TEXT"},
-		{"derivation_fact_ids", "TEXT"}, {"exclusion_fact_ids", "TEXT"}, {"selection_rule_id", "TEXT"},
-		// Rendered projections of the derivation columns above. Additive and
-		// nullable: an existing graph opens, and a row with no projection reads
-		// as "not projected", never as a reason of "".
-		{"resolution_reason", "TEXT"}, {"resolution_step", "INTEGER"},
+	typedColumns := []struct{ name, addSQL string }{
+		{"derivation_contract", `ALTER TABLE edges ADD COLUMN derivation_contract TEXT`},
+		{"derivation_kind", `ALTER TABLE edges ADD COLUMN derivation_kind TEXT`},
+		{"evidence_set", `ALTER TABLE edges ADD COLUMN evidence_set TEXT`},
+		{"analysis_boundary", `ALTER TABLE edges ADD COLUMN analysis_boundary TEXT`},
+		{"pass_kind", `ALTER TABLE edges ADD COLUMN pass_kind TEXT`},
+		{"pass_version", `ALTER TABLE edges ADD COLUMN pass_version TEXT`},
+		{"pass_status", `ALTER TABLE edges ADD COLUMN pass_status TEXT`},
+		{"abstention_reason", `ALTER TABLE edges ADD COLUMN abstention_reason TEXT`},
+		{"sibling_count", `ALTER TABLE edges ADD COLUMN sibling_count INTEGER`},
+		{"producer_build_id", `ALTER TABLE edges ADD COLUMN producer_build_id TEXT`},
+		{"producer_source_fingerprint", `ALTER TABLE edges ADD COLUMN producer_source_fingerprint TEXT`},
+		{"pass_coverage", `ALTER TABLE edges ADD COLUMN pass_coverage TEXT`},
+		{"provenance_steps", `ALTER TABLE edges ADD COLUMN provenance_steps TEXT`},
+		{"declared_scope", `ALTER TABLE edges ADD COLUMN declared_scope TEXT`},
+		{"receiver_type", `ALTER TABLE edges ADD COLUMN receiver_type TEXT`},
+		{"receiver_origin", `ALTER TABLE edges ADD COLUMN receiver_origin TEXT`},
+		{"receiver_shape", `ALTER TABLE edges ADD COLUMN receiver_shape TEXT`},
+		{"receiver_chain", `ALTER TABLE edges ADD COLUMN receiver_chain TEXT`},
+		{"import_chain", `ALTER TABLE edges ADD COLUMN import_chain TEXT`},
+		{"export_status", `ALTER TABLE edges ADD COLUMN export_status TEXT`},
+		{"parser_complete", `ALTER TABLE edges ADD COLUMN parser_complete BOOLEAN`},
+		{"stable_id", `ALTER TABLE edges ADD COLUMN stable_id TEXT`},
+		{"schema_version", `ALTER TABLE edges ADD COLUMN schema_version INTEGER`},
+		{"callsite_stable_id", `ALTER TABLE edges ADD COLUMN callsite_stable_id TEXT`},
+		{"target_symbol_id", `ALTER TABLE edges ADD COLUMN target_symbol_id TEXT`},
+		{"ordinal", `ALTER TABLE edges ADD COLUMN ordinal INTEGER`},
+		{"viability", `ALTER TABLE edges ADD COLUMN viability TEXT`},
+		{"derivation_fact_ids", `ALTER TABLE edges ADD COLUMN derivation_fact_ids TEXT`},
+		{"exclusion_fact_ids", `ALTER TABLE edges ADD COLUMN exclusion_fact_ids TEXT`},
+		{"selection_rule_id", `ALTER TABLE edges ADD COLUMN selection_rule_id TEXT`},
 	}
 	for _, column := range typedColumns {
 		var count int
@@ -943,16 +958,33 @@ func createSchema(db *sql.DB) error {
 			return fmt.Errorf("inspect edges.%s: %w", column.name, err)
 		}
 		if count == 0 {
-			if _, err := db.Exec(`ALTER TABLE edges ADD COLUMN ` + column.name + ` ` + column.definition); err != nil {
+			if _, err := db.Exec(column.addSQL); err != nil {
 				return fmt.Errorf("add edges.%s: %w", column.name, err)
 			}
 		}
 	}
-	cochangeColumns := []struct{ name, definition string }{
-		{"commits_a", "INTEGER NOT NULL DEFAULT 0"},
-		{"commits_b", "INTEGER NOT NULL DEFAULT 0"},
-		{"confidence_a_to_b", "REAL NOT NULL DEFAULT 0.0"},
-		{"confidence_b_to_a", "REAL NOT NULL DEFAULT 0.0"},
+	// Rendered projections are nullable: an existing graph opens, and a row
+	// with no projection reads as "not projected", never as a reason of "".
+	resolutionColumns := []struct{ name, addSQL string }{
+		{"resolution_reason", `ALTER TABLE edges ADD COLUMN resolution_reason TEXT`},
+		{"resolution_step", `ALTER TABLE edges ADD COLUMN resolution_step INTEGER`},
+	}
+	for _, column := range resolutionColumns {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('edges') WHERE name=?`, column.name).Scan(&count); err != nil {
+			return fmt.Errorf("inspect edges.%s: %w", column.name, err)
+		}
+		if count == 0 {
+			if _, err := db.Exec(column.addSQL); err != nil {
+				return fmt.Errorf("add edges.%s: %w", column.name, err)
+			}
+		}
+	}
+	cochangeColumns := []struct{ name, addSQL string }{
+		{"commits_a", `ALTER TABLE cochanges ADD COLUMN commits_a INTEGER`},
+		{"commits_b", `ALTER TABLE cochanges ADD COLUMN commits_b INTEGER`},
+		{"confidence_a_to_b", `ALTER TABLE cochanges ADD COLUMN confidence_a_to_b REAL`},
+		{"confidence_b_to_a", `ALTER TABLE cochanges ADD COLUMN confidence_b_to_a REAL`},
 	}
 	for _, column := range cochangeColumns {
 		var count int
@@ -960,7 +992,7 @@ func createSchema(db *sql.DB) error {
 			return fmt.Errorf("inspect cochanges.%s: %w", column.name, err)
 		}
 		if count == 0 {
-			if _, err := db.Exec(`ALTER TABLE cochanges ADD COLUMN ` + column.name + ` ` + column.definition); err != nil {
+			if _, err := db.Exec(column.addSQL); err != nil {
 				return fmt.Errorf("add cochanges.%s: %w", column.name, err)
 			}
 		}

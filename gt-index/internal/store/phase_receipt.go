@@ -187,28 +187,31 @@ func InvalidateAnalysisForIncrementalTx(
 	if tx == nil || receiptPayload == "" || receiptSHA256 == "" || reason == "" {
 		return fmt.Errorf("incremental analysis invalidation is incomplete")
 	}
-	for _, table := range []string{
-		"resolution_candidates",
-		"resolution_callsites",
-		"resolution_symbols",
-		"closure",
-		"community_members",
-		"communities",
-		"process_steps",
-		"processes",
-		"cochanges",
+	for _, table := range []struct {
+		name      string
+		deleteSQL string
+	}{
+		{"resolution_candidates", `DELETE FROM resolution_candidates`},
+		{"resolution_callsites", `DELETE FROM resolution_callsites`},
+		{"resolution_symbols", `DELETE FROM resolution_symbols`},
+		{"closure", `DELETE FROM closure`},
+		{"community_members", `DELETE FROM community_members`},
+		{"communities", `DELETE FROM communities`},
+		{"process_steps", `DELETE FROM process_steps`},
+		{"processes", `DELETE FROM processes`},
+		{"cochanges", `DELETE FROM cochanges`},
 	} {
 		var exists int
 		if err := tx.QueryRow(
-			`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table,
+			`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table.name,
 		).Scan(&exists); err != nil {
-			return fmt.Errorf("inspect stale analysis table %s: %w", table, err)
+			return fmt.Errorf("inspect stale analysis table %s: %w", table.name, err)
 		}
 		if exists == 0 {
 			continue
 		}
-		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
-			return fmt.Errorf("clear stale analysis table %s: %w", table, err)
+		if _, err := tx.Exec(table.deleteSQL); err != nil {
+			return fmt.Errorf("clear stale analysis table %s: %w", table.name, err)
 		}
 	}
 	metadata := map[string]string{
