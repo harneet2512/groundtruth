@@ -42,6 +42,7 @@ Exit:
   Always exit 0 on success path (the agent reads stdout). Exit 1 only on
   hard internal errors so SWE-agent surfaces the failure.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -73,9 +74,7 @@ def _resolve_min_confidence(conn: sqlite3.Connection) -> float:
     (brief-layer parity) when missing. Clamped to (0, 0.9] to prevent a
     degenerate index from over-filtering legitimate name_match edges."""
     try:
-        row = conn.execute(
-            "SELECT value FROM project_meta WHERE key = 'min_confidence'"
-        ).fetchone()
+        row = conn.execute("SELECT value FROM project_meta WHERE key = 'min_confidence'").fetchone()
         if row and row[0] is not None:
             try:
                 v = float(row[0])
@@ -98,6 +97,7 @@ def _conf_for(conn: sqlite3.Connection) -> float:
         cached = _resolve_min_confidence(conn)
         _CONF_CACHE[key] = cached
     return cached
+
 
 # ── Language dispatch (RC-06) ────────────────────────────────────────────────
 # Per-language structural support. Each entry maps a file extension to:
@@ -142,9 +142,8 @@ def _lang_for(path: str) -> dict[str, object] | None:
 def _log_skip(check: str, path: str, reason: str) -> None:
     """Emit a 'skip with rationale' line so the operator can see L5
     disengaged on a given file. Visible in gt_layers.log via stderr."""
-    sys.stderr.write(
-        f"<gt-pre-finish-gate> SKIP {check} on {path}: {reason}\n"
-    )
+    sys.stderr.write(f"<gt-pre-finish-gate> SKIP {check} on {path}: {reason}\n")
+
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 def _instance_log_dir() -> Path | None:
@@ -249,8 +248,12 @@ def _write_verdict(verdict: dict) -> None:
 def _run(cmd: list[str], cwd: str | None = None) -> tuple[int, str]:
     try:
         proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True,
-            errors="backslashreplace", timeout=30,
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            errors="backslashreplace",
+            timeout=30,
         )
         return proc.returncode, proc.stdout
     except (OSError, subprocess.SubprocessError) as e:
@@ -365,12 +368,12 @@ PY_IMPORT_RE = re.compile(
 # Anti-benchmaxxing: each language's prefix is the canonical import keyword;
 # nothing here is repo-specific.
 _IMPORT_PREFIXES_BY_LANG: dict[str, tuple[str, ...]] = {
-    "python":     ("import ", "from "),
-    "go":         ("import ",),                       # `import "x"` and `import (`
+    "python": ("import ", "from "),
+    "go": ("import ",),  # `import "x"` and `import (`
     "javascript": ("import ", "const ", "require("),  # ES + CJS
     "typescript": ("import ",),
-    "java":       ("import ",),
-    "rust":       ("use ", "extern crate "),
+    "java": ("import ",),
+    "rust": ("use ", "extern crate "),
 }
 
 # RC-06: per-language import-target parser. Each returns a list of
@@ -435,13 +438,17 @@ def _parse_import_targets(import_line: str) -> list[tuple[str, str]]:
                 out.append((module, n))
         return out
     if m.group(3):  # import X[, Y]
-        return [(n.strip().split(" as ")[0], n.strip().split(" as ")[0])
-                for n in m.group(3).split(",") if n.strip()]
+        return [
+            (n.strip().split(" as ")[0], n.strip().split(" as ")[0])
+            for n in m.group(3).split(",")
+            if n.strip()
+        ]
     return []
 
 
 def _parse_import_targets_for_lang(
-    import_line: str, lang: str,
+    import_line: str,
+    lang: str,
 ) -> list[tuple[str, str]]:
     """Per-language (module, name) extractor.
 
@@ -531,15 +538,17 @@ def _looks_local(name: str, db_files: set[str]) -> bool:
 def _node_exists(conn: sqlite3.Connection, name: str) -> bool:
     """True if any node has this name (or qualified_name suffix)."""
     cur = conn.execute(
-        "SELECT 1 FROM nodes WHERE name = ? OR qualified_name = ? "
-        "OR qualified_name LIKE ? LIMIT 1",
+        "SELECT 1 FROM nodes WHERE name = ? OR qualified_name = ? OR qualified_name LIKE ? LIMIT 1",
         (name, name, f"%.{name}"),
     )
     return cur.fetchone() is not None
 
 
 def check_hallucinated_imports(
-    conn: sqlite3.Connection, repo: str, edited: list[str], db_files: set[str],
+    conn: sqlite3.Connection,
+    repo: str,
+    edited: list[str],
+    db_files: set[str],
 ) -> list[dict]:
     """RC-06 language-agnostic. Iterates per-language using LANG_BY_EXT.
 
@@ -560,7 +569,8 @@ def check_hallucinated_imports(
             continue
         if not rec["structural"]:
             _log_skip(
-                "HALLUCINATED-IMPORT", f,
+                "HALLUCINATED-IMPORT",
+                f,
                 f"no per-language import parser for {rec['name']} (yet)",
             )
             continue
@@ -577,12 +587,14 @@ def check_hallucinated_imports(
                 # a graph node?
                 short = name.split(".")[-1]
                 if not _node_exists(conn, short):
-                    flags.append({
-                        "file": f,
-                        "import_line": line.strip(),
-                        "unresolved": name,
-                        "module": module,
-                    })
+                    flags.append(
+                        {
+                            "file": f,
+                            "import_line": line.strip(),
+                            "unresolved": name,
+                            "module": module,
+                        }
+                    )
     return flags
 
 
@@ -592,7 +604,8 @@ CLASS_RE = re.compile(r"^\s*class\s+(\w+)\s*[\(:]", re.MULTILINE)
 
 
 def _symbol_bodies(
-    text: str, patterns: tuple[re.Pattern[str], ...],
+    text: str,
+    patterns: tuple[re.Pattern[str], ...],
 ) -> dict[str, str]:
     """RC-09: Return ``{symbol_name: body_text}`` where each body is the
     declaration line through (but not including) the next declaration's
@@ -668,8 +681,7 @@ def _is_test_file(path: str) -> bool:
     base = base_orig.lower()
     # Path-segment markers (lower-cased — directories are case-insensitive
     # for our purposes; Java's src/test/java is matched via /test/).
-    if ("/test/" in p or "/tests/" in p
-            or "/__tests__/" in p or "/spec/" in p or "/specs/" in p):
+    if "/test/" in p or "/tests/" in p or "/__tests__/" in p or "/spec/" in p or "/specs/" in p:
         return True
     # Python.
     if base.startswith("test_") or base.endswith("_test.py"):
@@ -677,8 +689,18 @@ def _is_test_file(path: str) -> bool:
     if base == "conftest.py":
         return True
     # JS/TS.
-    if base.endswith((".test.js", ".test.ts", ".spec.js", ".spec.ts",
-                      ".test.jsx", ".test.tsx", ".spec.jsx", ".spec.tsx")):
+    if base.endswith(
+        (
+            ".test.js",
+            ".test.ts",
+            ".spec.js",
+            ".spec.ts",
+            ".test.jsx",
+            ".test.tsx",
+            ".spec.jsx",
+            ".spec.tsx",
+        )
+    ):
         return True
     # Go.
     if base.endswith("_test.go"):
@@ -748,7 +770,9 @@ _SYMBOL_RES_BY_LANG: dict[str, tuple[re.Pattern[str], ...]] = {
             r"\s*(?:[\w<>\[\],\s]+\s+)?(\w+)\s*\([^)]*\)\s*(?:throws[^{]+)?\{",
             re.MULTILINE,
         ),
-        re.compile(r"^\s*(?:public|private|protected|abstract|final|\s)*class\s+(\w+)", re.MULTILINE),
+        re.compile(
+            r"^\s*(?:public|private|protected|abstract|final|\s)*class\s+(\w+)", re.MULTILINE
+        ),
         re.compile(r"^\s*(?:public|private|protected|\s)*interface\s+(\w+)", re.MULTILINE),
     ),
     # Rust: `fn name(`, `pub fn name(`, `struct Name`, `impl X for Name`.
@@ -787,7 +811,9 @@ def _changed_symbols_for_lang(before: str, after: str, lang: str) -> set[str]:
 
 
 def check_caller_blind_edit(
-    conn: sqlite3.Connection, repo: str, edited: list[str],
+    conn: sqlite3.Connection,
+    repo: str,
+    edited: list[str],
 ) -> list[dict]:
     """RC-06 language-agnostic. Per-language declaration regexes + graph.db
     callers (which are language-agnostic by construction).
@@ -816,7 +842,8 @@ def check_caller_blind_edit(
             continue
         if not rec["structural"]:
             _log_skip(
-                "CALLER-BLIND-EDIT", f,
+                "CALLER-BLIND-EDIT",
+                f,
                 f"no per-language symbol regex for {rec['name']} (yet)",
             )
             continue
@@ -826,11 +853,13 @@ def check_caller_blind_edit(
         for sym in _changed_symbols_for_lang(before, after, lang):
             n = _caller_count(conn, sym)
             if n >= 3:
-                flags.append({
-                    "file": f,
-                    "symbol": sym,
-                    "callers": n,
-                })
+                flags.append(
+                    {
+                        "file": f,
+                        "symbol": sym,
+                        "callers": n,
+                    }
+                )
     return flags
 
 
@@ -944,7 +973,9 @@ def _file_blast_radius(conn: sqlite3.Connection, file_path: str) -> int:
 
 
 def check_blast_radius_no_test(
-    conn: sqlite3.Connection, repo: str, edited: list[str],
+    conn: sqlite3.Connection,
+    repo: str,
+    edited: list[str],
 ) -> list[dict]:
     """Flag edits to high-blast-radius files when no test file is in the diff.
 
@@ -970,7 +1001,8 @@ def check_blast_radius_no_test(
         #   .java file with 50+ callers                             -> flag
         if _lang_for(f) is None:
             _log_skip(
-                "BLAST-RADIUS-NO-TEST", f,
+                "BLAST-RADIUS-NO-TEST",
+                f,
                 "unknown extension; not classified as source",
             )
             continue
@@ -980,11 +1012,13 @@ def check_blast_radius_no_test(
         norm = f.replace("\\", "/")
         n = _file_blast_radius(conn, norm)
         if n >= threshold:
-            flags.append({
-                "file": f,
-                "callers": n,
-                "threshold": threshold,
-            })
+            flags.append(
+                {
+                    "file": f,
+                    "callers": n,
+                    "threshold": threshold,
+                }
+            )
     return flags
 
 
@@ -1045,7 +1079,8 @@ def check_contract_break(repo: str, edited: list[str]) -> list[dict]:
             continue
         if not rec["structural"]:
             _log_skip(
-                "CONTRACT-BREAK", f,
+                "CONTRACT-BREAK",
+                f,
                 f"no per-language signature regex for {rec['name']} (yet)",
             )
             continue
@@ -1068,33 +1103,33 @@ def check_contract_break(repo: str, edited: list[str]) -> list[dict]:
         }
         for name, (params, ret) in after_sigs.items():
             if name in before_sigs and before_sigs[name] != (params, ret):
-                flags.append({
-                    "file": f,
-                    "symbol": name,
-                    "before": f"({before_sigs[name][0]}) -> {before_sigs[name][1]}",
-                    "after": f"({params}) -> {ret}",
-                })
+                flags.append(
+                    {
+                        "file": f,
+                        "symbol": name,
+                        "before": f"({before_sigs[name][0]}) -> {before_sigs[name][1]}",
+                        "after": f"({params}) -> {ret}",
+                    }
+                )
         # Class-base/inheritance change detection — Python only (other
         # languages use distinct syntax: Java `extends`, Rust `impl X for Y`,
         # Go has no inheritance). Conservative: skip non-Python here.
         if lang == "python":
             before_classes = {
-                m.group(1): m.group(2).strip()
-                for m in CLASS_BASE_RE.finditer(before)
+                m.group(1): m.group(2).strip() for m in CLASS_BASE_RE.finditer(before)
             }
-            after_classes = {
-                m.group(1): m.group(2).strip()
-                for m in CLASS_BASE_RE.finditer(after)
-            }
+            after_classes = {m.group(1): m.group(2).strip() for m in CLASS_BASE_RE.finditer(after)}
             for name, bases in after_classes.items():
                 if name in before_classes and before_classes[name] != bases:
-                    flags.append({
-                        "file": f,
-                        "symbol": name,
-                        "kind": "class_bases",
-                        "before": before_classes[name],
-                        "after": bases,
-                    })
+                    flags.append(
+                        {
+                            "file": f,
+                            "symbol": name,
+                            "kind": "class_bases",
+                            "before": before_classes[name],
+                            "after": bases,
+                        }
+                    )
     return flags
 
 
@@ -1116,12 +1151,10 @@ def check_contract_break(repo: str, edited: list[str]) -> list[dict]:
 #   ``test_*.py`` IS the canonical test layout — default-blocking
 #   test_-prefixed files would block legitimate work in those repos.
 SCRATCH_PATTERNS_DEFAULT: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("scratch_prefix",
-     re.compile(r"^(reproduce|repro_|tmp_|issue_example|scratch_|temp_)")),
+    ("scratch_prefix", re.compile(r"^(reproduce|repro_|tmp_|issue_example|scratch_|temp_)")),
 )
 SCRATCH_PATTERNS_OPT_IN: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("agent_fingerprint",
-     re.compile(r"^(test_|debug_|comprehensive_test|test\d+)")),
+    ("agent_fingerprint", re.compile(r"^(test_|debug_|comprehensive_test|test\d+)")),
 )
 SCRATCH_SUBSTRINGS_OPT_IN: tuple[str, ...] = ("test_case", "_debug")
 
@@ -1237,11 +1270,13 @@ def check_scratch_files(repo: str) -> list[dict]:
                     break
         if matched_pattern is None:
             continue
-        flags.append({
-            "file": path,
-            "reason": "scratch_pattern_match",
-            "pattern": matched_pattern,
-        })
+        flags.append(
+            {
+                "file": path,
+                "reason": "scratch_pattern_match",
+                "pattern": matched_pattern,
+            }
+        )
     return flags
 
 
@@ -1273,23 +1308,23 @@ def emit_submission(repo: str, scratch_strip: list[dict] | None = None) -> None:
     # tests + fix and the SWE-bench evaluator marked the task unresolved.
     # Now: stash the worktree before reverse-apply (recoverable on failure)
     # and abort with a clear error if reverse-apply or unstash fails.
-    test_patch = Path("/root/test.patch")
+    test_patch = Path(os.environ.get("GT_L5_TEST_PATCH_PATH", "/root/test.patch"))
     if test_patch.is_file() and test_patch.stat().st_size > 0:
         rc_apply, out_apply = _run(
-            ["git", "apply", "-R", "/root/test.patch"], cwd=repo,
+            ["git", "apply", "-R", str(test_patch)],
+            cwd=repo,
         )
         if rc_apply != 0:
             # Recover: try to stash the test_patch out of the way so the
             # worktree is at least usable for the next attempt. Best-effort;
             # we still abort the submission either way.
             _run(
-                ["git", "stash", "push", "-u", "-m",
-                 "gt-rc09-test-patch-reverse-apply-failed"],
+                ["git", "stash", "push", "-u", "-m", "gt-rc09-test-patch-reverse-apply-failed"],
                 cwd=repo,
             )
             sys.stderr.write(
                 "<gt-pre-finish-gate>\n"
-                "ABORT: reverse-apply of /root/test.patch failed "
+                f"ABORT: reverse-apply of {test_patch} failed "
                 f"(rc={rc_apply}). Refusing to emit a contaminated diff.\n"
                 f"  git apply -R output: {out_apply.strip()[:400]}\n"
                 "  Worktree changes have been stashed for recovery; "
@@ -1306,7 +1341,7 @@ def emit_submission(repo: str, scratch_strip: list[dict] | None = None) -> None:
         _strip_scratch_from_emit(repo, scratch_strip)
     rc, patch = _run(["git", "diff", "--cached"], cwd=repo)
     try:
-        Path("/root/model.patch").write_text(patch)
+        Path(os.environ.get("GT_L5_MODEL_PATCH_PATH", "/root/model.patch")).write_text(patch)
     except OSError:
         # Best-effort: if the path isn't writable (e.g. host-side test of
         # this gate), still emit the stdout markers so the agent sees the
@@ -1324,15 +1359,25 @@ def _format_flag_lines(verdict: dict) -> list[str]:
     """Per-flag detail lines shared by BLOCKED / NO-PROGRESS / SOFT-ESCAPE."""
     lines: list[str] = []
     for f in verdict["checks"]["hallucinated_imports"][:5]:
-        lines.append(f"  [HALLUCINATED-IMPORT] {f['file']}: {f['import_line']} (no graph node for '{f['unresolved']}')")
+        lines.append(
+            f"  [HALLUCINATED-IMPORT] {f['file']}: {f['import_line']} (no graph node for '{f['unresolved']}')"
+        )
     for f in verdict["checks"]["caller_blind_edits"][:5]:
-        lines.append(f"  [CALLER-BLIND-EDIT] {f['file']}::{f['symbol']} has {f['callers']} callers — no test edited")
+        lines.append(
+            f"  [CALLER-BLIND-EDIT] {f['file']}::{f['symbol']} has {f['callers']} callers — no test edited"
+        )
     for f in verdict["checks"]["blast_radius_no_test"][:5]:
-        lines.append(f"  [BLAST-RADIUS-NO-TEST] {f['file']} has {f['callers']} verified callers across all symbols (threshold {f['threshold']}) — no test edited; integration callers may regress")
+        lines.append(
+            f"  [BLAST-RADIUS-NO-TEST] {f['file']} has {f['callers']} verified callers across all symbols (threshold {f['threshold']}) — no test edited; integration callers may regress"
+        )
     for f in verdict["checks"]["contract_breaks"][:5]:
-        lines.append(f"  [CONTRACT-BREAK] {f['file']}::{f['symbol']} {f.get('before','')} -> {f.get('after','')}")
+        lines.append(
+            f"  [CONTRACT-BREAK] {f['file']}::{f['symbol']} {f.get('before', '')} -> {f.get('after', '')}"
+        )
     for f in verdict["checks"]["scratch_files"][:5]:
-        lines.append(f"  [SCRATCH-FILE] {f['file']} matches pattern '{f['pattern']}' — looks like a reproduction script, not a real fix. Remove with: git rm {f['file']}")
+        lines.append(
+            f"  [SCRATCH-FILE] {f['file']} matches pattern '{f['pattern']}' — looks like a reproduction script, not a real fix. Remove with: git rm {f['file']}"
+        )
     return lines
 
 
@@ -1411,8 +1456,7 @@ def _format_soft_escape(verdict: dict) -> str:
     lines.extend(_format_flag_lines(verdict))
     if verdict.get("scratch_stripped"):
         lines.append(
-            f"  Scratch files stripped from emitted patch: "
-            f"{', '.join(verdict['scratch_stripped'])}"
+            f"  Scratch files stripped from emitted patch: {', '.join(verdict['scratch_stripped'])}"
         )
     lines.append("</gt-pre-finish-gate>")
     return "\n".join(lines)
@@ -1430,7 +1474,9 @@ def main(argv: list[str]) -> int:
     # positional ``True`` as a defensive fallback in case someone
     # rolls back the config without re-rolling the lib.
     parser.add_argument(
-        "force_pos", nargs="?", default=None,
+        "force_pos",
+        nargs="?",
+        default=None,
         help=argparse.SUPPRESS,
     )
     args, _ = parser.parse_known_args(argv[1:])
@@ -1477,13 +1523,15 @@ def main(argv: list[str]) -> int:
         verdict["result"] = "force"
         verdict["submit_blocked"] = False
         _write_verdict(verdict)
-        _append_history({
-            "ts": verdict["ts"],
-            "attempt": verdict["attempt"],
-            "result": "force",
-            "diff_hash": None,
-            "force": True,
-        })
+        _append_history(
+            {
+                "ts": verdict["ts"],
+                "attempt": verdict["attempt"],
+                "result": "force",
+                "diff_hash": None,
+                "force": True,
+            }
+        )
         emit_submission(repo)
         return 0
 
@@ -1493,12 +1541,14 @@ def main(argv: list[str]) -> int:
     if not edited:
         # Nothing to gate — let it through (matches default submit behaviour).
         _write_verdict(verdict)
-        _append_history({
-            "ts": verdict["ts"],
-            "attempt": verdict["attempt"],
-            "result": "pass_empty",
-            "diff_hash": None,
-        })
+        _append_history(
+            {
+                "ts": verdict["ts"],
+                "attempt": verdict["attempt"],
+                "result": "pass_empty",
+                "diff_hash": None,
+            }
+        )
         emit_submission(repo)
         return 0
 
@@ -1512,12 +1562,14 @@ def main(argv: list[str]) -> int:
     if not db_path or not Path(db_path).exists():
         verdict["result"] = "no_graph_db"
         _write_verdict(verdict)
-        _append_history({
-            "ts": verdict["ts"],
-            "attempt": verdict["attempt"],
-            "result": "no_graph_db",
-            "diff_hash": verdict["diff_hash"],
-        })
+        _append_history(
+            {
+                "ts": verdict["ts"],
+                "attempt": verdict["attempt"],
+                "result": "no_graph_db",
+                "diff_hash": verdict["diff_hash"],
+            }
+        )
         emit_submission(repo)
         return 0
 
@@ -1532,23 +1584,27 @@ def main(argv: list[str]) -> int:
         if ic is None or ic[0] != "ok":
             verdict["result"] = f"db_corrupt: {ic[0] if ic else 'unknown'}"
             _write_verdict(verdict)
-            _append_history({
-                "ts": verdict["ts"],
-                "attempt": verdict["attempt"],
-                "result": "db_corrupt",
-                "diff_hash": verdict["diff_hash"],
-            })
+            _append_history(
+                {
+                    "ts": verdict["ts"],
+                    "attempt": verdict["attempt"],
+                    "result": "db_corrupt",
+                    "diff_hash": verdict["diff_hash"],
+                }
+            )
             emit_submission(repo)
             return 0
     except sqlite3.Error as e:
         verdict["result"] = f"db_open_error: {e}"
         _write_verdict(verdict)
-        _append_history({
-            "ts": verdict["ts"],
-            "attempt": verdict["attempt"],
-            "result": "db_open_error",
-            "diff_hash": verdict["diff_hash"],
-        })
+        _append_history(
+            {
+                "ts": verdict["ts"],
+                "attempt": verdict["attempt"],
+                "result": "db_open_error",
+                "diff_hash": verdict["diff_hash"],
+            }
+        )
         emit_submission(repo)
         return 0
     conn.row_factory = sqlite3.Row
@@ -1564,13 +1620,20 @@ def main(argv: list[str]) -> int:
             pass
 
         verdict["checks"]["hallucinated_imports"] = check_hallucinated_imports(
-            conn, repo, edited, db_files,
+            conn,
+            repo,
+            edited,
+            db_files,
         )
         verdict["checks"]["caller_blind_edits"] = check_caller_blind_edit(
-            conn, repo, edited,
+            conn,
+            repo,
+            edited,
         )
         verdict["checks"]["blast_radius_no_test"] = check_blast_radius_no_test(
-            conn, repo, edited,
+            conn,
+            repo,
+            edited,
         )
         verdict["checks"]["contract_breaks"] = check_contract_break(repo, edited)
         verdict["checks"]["scratch_files"] = check_scratch_files(repo)
@@ -1593,10 +1656,7 @@ def main(argv: list[str]) -> int:
         # blocks return BLOCKED-NO-PROGRESS WITHOUT incrementing the
         # counter. The 3-block ceiling only counts attempts that
         # actually changed the worktree.
-        no_progress = (
-            prior_hash is not None
-            and verdict["diff_hash"] == prior_hash
-        )
+        no_progress = prior_hash is not None and verdict["diff_hash"] == prior_hash
         verdict["no_progress"] = no_progress
 
         if no_progress:
@@ -1609,14 +1669,16 @@ def main(argv: list[str]) -> int:
             verdict["result"] = "blocked_no_progress"
             verdict["attempt"] = _read_attempts() + 1  # unchanged
             _write_verdict(verdict)
-            _append_history({
-                "ts": verdict["ts"],
-                "attempt": verdict["attempt"],
-                "result": "blocked_no_progress",
-                "diff_hash": verdict["diff_hash"],
-                "prior_diff_hash": prior_hash,
-                "flagged": True,
-            })
+            _append_history(
+                {
+                    "ts": verdict["ts"],
+                    "attempt": verdict["attempt"],
+                    "result": "blocked_no_progress",
+                    "diff_hash": verdict["diff_hash"],
+                    "prior_diff_hash": prior_hash,
+                    "flagged": True,
+                }
+            )
             print(_format_no_progress(verdict))
             return 0
 
@@ -1634,17 +1696,17 @@ def main(argv: list[str]) -> int:
             scratch_strip: list[dict] | None = None
             if verdict["checks"]["scratch_files"]:
                 scratch_strip = verdict["checks"]["scratch_files"]
-                verdict["scratch_stripped"] = [
-                    f["file"] for f in scratch_strip
-                ]
+                verdict["scratch_stripped"] = [f["file"] for f in scratch_strip]
             _write_verdict(verdict)
-            _append_history({
-                "ts": verdict["ts"],
-                "attempt": verdict["attempt"],
-                "result": "warn_soft_escape",
-                "diff_hash": verdict["diff_hash"],
-                "flagged": True,
-            })
+            _append_history(
+                {
+                    "ts": verdict["ts"],
+                    "attempt": verdict["attempt"],
+                    "result": "warn_soft_escape",
+                    "diff_hash": verdict["diff_hash"],
+                    "flagged": True,
+                }
+            )
             sys.stderr.write(_format_soft_escape(verdict) + "\n")
             emit_submission(repo, scratch_strip=scratch_strip)
             return 0
@@ -1653,13 +1715,15 @@ def main(argv: list[str]) -> int:
             verdict["result"] = "blocked"
             _write_attempts(verdict["attempt"])
             _write_verdict(verdict)
-            _append_history({
-                "ts": verdict["ts"],
-                "attempt": verdict["attempt"],
-                "result": "blocked",
-                "diff_hash": verdict["diff_hash"],
-                "flagged": True,
-            })
+            _append_history(
+                {
+                    "ts": verdict["ts"],
+                    "attempt": verdict["attempt"],
+                    "result": "blocked",
+                    "diff_hash": verdict["diff_hash"],
+                    "flagged": True,
+                }
+            )
             print(_format_warning(verdict))
             # exit 0 — agent reads stdout; no submission markers emitted
             return 0
@@ -1668,13 +1732,15 @@ def main(argv: list[str]) -> int:
         _write_attempts(0)
         verdict["result"] = "pass"
         _write_verdict(verdict)
-        _append_history({
-            "ts": verdict["ts"],
-            "attempt": verdict["attempt"],
-            "result": "pass",
-            "diff_hash": verdict["diff_hash"],
-            "flagged": False,
-        })
+        _append_history(
+            {
+                "ts": verdict["ts"],
+                "attempt": verdict["attempt"],
+                "result": "pass",
+                "diff_hash": verdict["diff_hash"],
+                "flagged": False,
+            }
+        )
         emit_submission(repo)
         return 0
 

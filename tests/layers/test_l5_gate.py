@@ -219,12 +219,14 @@ def _read_verdict(log_dir: Path) -> dict:
 
 
 # ── Per-test fixture: fresh repo + graph.db ──────────────────────────────────
-_ROOT_WRITABLE = os.access("/root", os.W_OK) if os.path.isdir("/root") else True
-
-pytestmark = pytest.mark.skipif(
-    not _ROOT_WRITABLE,
-    reason="production gate hardcodes /root/test.patch; CI runners cannot write /root",
-)
+@pytest.fixture(autouse=True)
+def _redirect_patch_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the gate's patch paths at tmp_path via the env vars added in the
+    production fix (GT_L5_TEST_PATCH_PATH, GT_L5_MODEL_PATCH_PATH)."""
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("GT_L5_TEST_PATCH_PATH", str(patch_dir / "test.patch"))
+    monkeypatch.setenv("GT_L5_MODEL_PATCH_PATH", str(patch_dir / "model.patch"))
 
 
 @pytest.fixture
@@ -582,26 +584,14 @@ def test_rc09_emit_submission_aborts_on_corrupted_test_patch(
     ``emit_submission`` must abort with a clear stderr message rather than
     silently shipping a contaminated diff."""
     repo, _log_dir, _db = repo_fixture
-    # Stage a fake "/root/test.patch" by redirecting Path("/root/test.patch")
-    # to a fixture file in the repo. We patch GATE.Path so emit_submission's
-    # is_file()/stat()/read pass while git apply -R obviously fails on a
-    # nonsense patch body.
-    fake_patch = repo / "_fake_test.patch"
+    # Stage a fake test.patch — the production code reads from
+    # GT_L5_TEST_PATCH_PATH (defaulting to /root/test.patch). The autouse
+    # fixture already redirected it to tmp_path/patches/; we write a
+    # nonsense patch there so is_file()/stat() pass while git apply -R
+    # obviously fails on the nonsense body.
+    patch_dir = Path(os.environ["GT_L5_TEST_PATCH_PATH"]).parent
+    fake_patch = Path(os.environ["GT_L5_TEST_PATCH_PATH"])
     fake_patch.write_text("not a real diff\n", encoding="utf-8")
-
-    real_path = GATE.Path
-
-    class _Reroute(type(real_path)):
-        pass  # unused — we route via a wrapper instead.
-
-    def _path_proxy(arg):
-        if isinstance(arg, str) and arg == "/root/test.patch":
-            return fake_patch
-        if isinstance(arg, str) and arg == "/root/model.patch":
-            return repo / "_fake_model.patch"
-        return real_path(arg)
-
-    monkeypatch.setattr(GATE, "Path", _path_proxy)
     GATE.emit_submission(str(repo))
     out = capsys.readouterr()
     assert GATE.SUBMISSION_MARKER not in out.out, (
