@@ -878,6 +878,18 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 							}
 							idx := len(result.Nodes)
 							result.Nodes = append(result.Nodes, n)
+							// Symbol taxonomy: this node is MINTED by GT, not
+							// declared by the grammar -- an `it(...)` callback
+							// turned into a named test case. Its kind is `test`,
+							// which is why the mapping declares it as a
+							// SynthesizedKind rather than a node type.
+							if tax := specs.TaxonomyFor(sf.Language); tax != nil && len(tax.SynthesizedKinds) > 0 {
+								result.Properties = append(result.Properties, PropertyRef{
+									NodeIdx: len(result.Nodes) - 1, Kind: PropSymbolKind,
+									Value: specs.KindTest, Line: int(arg.StartPoint().Row) + 1,
+									Confidence: 1.0,
+								})
+							}
 
 							// Extract calls from the callback body
 							bodyNode := arg.ChildByFieldName("body")

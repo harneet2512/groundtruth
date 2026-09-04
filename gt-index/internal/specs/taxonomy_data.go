@@ -31,6 +31,7 @@ func init() {
 			},
 		},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct,
 				KindFunction, KindConstructor, KindAccessor, KindClass,
@@ -54,6 +55,7 @@ func init() {
 			"create_function": KindFunction,
 		},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct,
 				KindMethod, KindConstructor, KindAccessor, KindClass,
@@ -77,6 +79,7 @@ func init() {
 		Lang:       "css",
 		ByNodeType: map[string]string{"rule_set": KindRule},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noCodeKinds(),
 			absent(ReasonNotCode, KindTable, KindMessage, KindService, KindResource),
 			map[string]string{
@@ -90,6 +93,7 @@ func init() {
 		Lang:       "html",
 		ByNodeType: map[string]string{"element": KindElement},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noCodeKinds(),
 			absent(ReasonNotCode, KindTable, KindMessage, KindService, KindResource),
 			map[string]string{
@@ -103,6 +107,7 @@ func init() {
 		Lang:       "markdown",
 		ByNodeType: map[string]string{"section": KindSection},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noCodeKinds(),
 			absent(ReasonNotCode, KindMessage, KindService, KindResource),
 			map[string]string{
@@ -117,6 +122,7 @@ func init() {
 		Lang:       "toml",
 		ByNodeType: map[string]string{"table": KindResource},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noCodeKinds(),
 			noMarkupKinds(),
 			absent(ReasonNotCode, KindMessage, KindService),
@@ -130,6 +136,7 @@ func init() {
 		Lang:       "yaml",
 		ByNodeType: map[string]string{"block_mapping": KindResource},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noCodeKinds(),
 			noMarkupKinds(),
 			absent(ReasonNotCode, KindTable, KindMessage, KindService),
@@ -140,6 +147,7 @@ func init() {
 		Lang:       "hcl",
 		ByNodeType: map[string]string{"block": KindResource},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noCodeKinds(),
 			noMarkupKinds(),
 			absent(ReasonNotCode, KindTable, KindMessage, KindService),
@@ -153,6 +161,7 @@ func init() {
 		// values, not declarations of a named symbol GT indexes.
 		ByNodeType: nil,
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noCodeKinds(),
 			noMarkupKinds(),
 			absent(ReasonNotCode, KindTable, KindMessage, KindService),

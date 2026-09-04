@@ -50,6 +50,7 @@ const (
 	KindElement     = "element"
 	KindSection     = "section"
 	KindResource    = "resource"
+	KindTest        = "test"
 )
 
 // AllSymbolKinds is the closed vocabulary. Every language mapping must place
@@ -62,7 +63,7 @@ var AllSymbolKinds = []string{
 	KindNamespace, KindModule, KindMacro, KindConstant,
 	KindAnnotation, KindDecorator, KindField, KindFile,
 	KindTable, KindMessage, KindService, KindRule, KindElement, KindSection,
-	KindResource,
+	KindResource, KindTest,
 }
 
 // IsSymbolKind reports whether kind is in the closed vocabulary.
@@ -235,6 +236,13 @@ type Taxonomy struct {
 	// overrides a supertype method (`override`, `@Override`).
 	OverrideMarkers []string
 
+	// SynthesizedKinds are kinds GT's parser MINTS a node for without the
+	// grammar declaring one. The JS/TS `it("name", () => {...})` form is the
+	// only case: the parser turns the callback into a named test-case node, so
+	// the kind is a fact about GT's walk, not about the grammar. Naming it
+	// separately keeps that distinction visible in the matrix.
+	SynthesizedKinds []string
+
 	// AsProperty records kinds GT already stores as a typed property row,
 	// keyed kind -> property row kind.
 	AsProperty map[string]string
@@ -371,6 +379,7 @@ const (
 	ReasonNoDecorator   = "the grammar has no decorator or annotation syntax"
 	ReasonNoAccessor    = "the grammar has no accessor declaration distinct from a function"
 	ReasonNoConstructor = "the grammar has no constructor declaration distinct from a function"
+	ReasonNoSynthTest   = "GT synthesizes no test-case node for this language; a test is an ordinary declaration and GT records it with the is_test column"
 )
 
 // UniversalKinds are satisfied by GT's node model for every language and are

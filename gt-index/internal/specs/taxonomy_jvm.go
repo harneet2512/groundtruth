@@ -44,6 +44,7 @@ func init() {
 			KindField:     "class_field",
 		},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct, KindTrait, KindImpl, KindUnion, KindMacro),
@@ -82,6 +83,7 @@ func init() {
 			KindField:     "class_field",
 		},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct, KindTrait, KindImpl, KindStruct, KindUnion, KindMacro),
@@ -134,6 +136,7 @@ func init() {
 			KindField:     "class_field",
 		},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct, KindImpl, KindStruct, KindUnion, KindMacro, KindTrait),
@@ -171,6 +174,7 @@ func init() {
 			KindField: "class_field",
 		},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct, KindImpl, KindStruct, KindUnion, KindMacro, KindAnnotation, KindDecorator),

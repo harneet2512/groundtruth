@@ -48,6 +48,7 @@ func init() {
 			KindField:     "class_field",
 		},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct, KindImpl, KindStruct, KindUnion, KindMacro, KindRecord, KindAnnotation),
@@ -76,6 +77,7 @@ func init() {
 			KindField: "class_field",
 		},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct,
@@ -104,6 +106,7 @@ func init() {
 			"function":           KindFunction,
 		},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct,
@@ -124,6 +127,7 @@ func init() {
 			"function_definition": KindFunction,
 		},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct,
@@ -155,6 +159,7 @@ func init() {
 		Implements:      nil,
 		OverrideMarkers: nil,
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct,

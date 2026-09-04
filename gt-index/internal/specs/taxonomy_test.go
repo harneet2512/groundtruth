@@ -70,6 +70,9 @@ func kindStates(tx *Taxonomy) (present, asProperty, absentKinds map[string]bool)
 	if len(tx.ConstructorNames) > 0 {
 		present[KindConstructor] = true
 	}
+	for _, k := range tx.SynthesizedKinds {
+		present[k] = true
+	}
 	for _, k := range UniversalKinds {
 		present[k] = true
 	}

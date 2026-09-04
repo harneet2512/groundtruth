@@ -63,6 +63,9 @@ func presentCounts(tx *specs.Taxonomy) map[string]int {
 	if len(tx.ConstructorNames) > 0 {
 		out[specs.KindConstructor]++
 	}
+	for _, k := range tx.SynthesizedKinds {
+		out[k]++
+	}
 	for _, k := range specs.UniversalKinds {
 		out[k]++
 	}

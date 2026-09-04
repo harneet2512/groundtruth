@@ -25,6 +25,7 @@ func init() {
 		Implements:      nil,
 		OverrideMarkers: nil,
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct,
@@ -63,6 +64,7 @@ func init() {
 		Implements:      nil,
 		OverrideMarkers: nil,
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct,

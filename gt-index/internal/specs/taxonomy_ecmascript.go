@@ -31,6 +31,8 @@ func init() {
 		},
 		ConstructorNames: []string{"constructor"},
 		OverrideMarkers:  nil, // `override` is a TypeScript keyword, not a JS one
+		// GT's parser mints a node per `it(...)` / `test(...)` block.
+		SynthesizedKinds: []string{KindTest},
 		AsProperty: map[string]string{
 			KindDecorator: "class_decorator",
 			KindField:     "class_field",
@@ -87,6 +89,8 @@ func init() {
 			{NodeType: "class", ChildType: "implements_clause"},
 		},
 		OverrideMarkers: []string{"override"},
+		// GT's parser mints a node per `it(...)` / `test(...)` block.
+		SynthesizedKinds: []string{KindTest},
 		AsProperty: map[string]string{
 			KindDecorator: "class_decorator",
 			KindField:     "class_field",
@@ -118,6 +122,7 @@ func init() {
 		Lang:       "svelte",
 		ByNodeType: nil,
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noCodeKinds(),
 			absent(ReasonNotCode, KindTable, KindMessage, KindService, KindResource),
 			map[string]string{

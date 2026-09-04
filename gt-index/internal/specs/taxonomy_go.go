@@ -33,6 +33,7 @@ func init() {
 			KindField: "class_field",
 		},
 		Absent: mergeReasons(
+			absent(ReasonNoSynthTest, KindTest),
 			noDataKinds(),
 			noMarkupKinds(),
 			absent(ReasonNoConstruct,
