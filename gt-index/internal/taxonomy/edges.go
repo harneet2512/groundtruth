@@ -186,10 +186,10 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 		switch p.Kind {
 		case parser.PropImplementsType:
 			name, mechanism := splitFactValue(p.Value)
-			if name == "" || !isTaxonomyMechanism(specs.EdgeImplements, mechanism) {
+			if name == "" || !isTaxonomyMechanism(specs.EdgeDeclaredImplements, mechanism) {
 				continue
 			}
-			b.emit(specs.EdgeImplements, mechanism, id, types[name], node.FilePath, p.Line)
+			b.emit(specs.EdgeDeclaredImplements, mechanism, id, types[name], node.FilePath, p.Line)
 
 		case parser.PropOverrideMarker:
 			// The marker states that this declaration overrides a supertype

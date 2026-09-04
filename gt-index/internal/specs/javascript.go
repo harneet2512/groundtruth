@@ -16,9 +16,9 @@ func init() {
 		// indexer dropped every class assigned to an export/const, losing its
 		// inheritance edge (koa Application extends Emitter -> 0 EXTENDS). The
 		// parser skips anonymous (name=="") expressions, so this is safe.
-		ClassNodes:    []string{"class_declaration", "class"},
-		CallNodes:     []string{"call_expression", "jsx_self_closing_element", "jsx_opening_element"},
-		ImportNodes:   []string{"import_statement"},
+		ClassNodes:  []string{"class_declaration", "class"},
+		CallNodes:   []string{"call_expression", "jsx_self_closing_element", "jsx_opening_element"},
+		ImportNodes: []string{"import_statement"},
 
 		TestFuncPattern: `^(test|it|describe)\b`,
 		AssertionPatterns: []string{

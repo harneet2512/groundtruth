@@ -80,9 +80,9 @@ func TestUniqueNameIsCandidateAmbiguousIsSpeculative(t *testing.T) {
 	props := []parser.PropertyRef{
 		{NodeIdx: 0, Kind: parser.PropImplementsType, Value: "Shape|" + specs.MechImplementsClause, Line: 1},
 	}
-	rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeImplements)
+	rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeDeclaredImplements)
 	if len(rows) != 1 {
-		t.Fatalf("unique name: %d IMPLEMENTS rows, want 1", len(rows))
+		t.Fatalf("unique name: %d DECLARED_IMPLEMENTS rows, want 1", len(rows))
 	}
 	if rows[0].TrustTier != specs.TierCandidate || rows[0].CandidateCount != 1 {
 		t.Errorf("unique name: tier=%s count=%d, want CANDIDATE/1", rows[0].TrustTier, rows[0].CandidateCount)
@@ -90,9 +90,9 @@ func TestUniqueNameIsCandidateAmbiguousIsSpeculative(t *testing.T) {
 
 	// Two declarations carry the name. gnx's schema would force a pick here.
 	nodes = append(nodes, node("Interface", "Shape", "vendor/b.ts"))
-	rows = edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeImplements)
+	rows = edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeDeclaredImplements)
 	if len(rows) != 2 {
-		t.Fatalf("ambiguous name: %d IMPLEMENTS rows, want 2 (both retained)", len(rows))
+		t.Fatalf("ambiguous name: %d DECLARED_IMPLEMENTS rows, want 2 (both retained)", len(rows))
 	}
 	for _, e := range rows {
 		if e.TrustTier != specs.TierSpeculative {
@@ -116,7 +116,7 @@ func TestOverSizedCandidateSetKeepsTheTrueCount(t *testing.T) {
 	props := []parser.PropertyRef{
 		{NodeIdx: 0, Kind: parser.PropImplementsType, Value: "Shape|" + specs.MechImplementsClause, Line: 1},
 	}
-	rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeImplements)
+	rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeDeclaredImplements)
 	if len(rows) != specs.MaxTaxonomyCandidates {
 		t.Fatalf("retained %d rows, want the cap %d", len(rows), specs.MaxTaxonomyCandidates)
 	}
@@ -200,20 +200,29 @@ func TestDecoratesPointsFromTheDecorator(t *testing.T) {
 }
 
 // TestNoTaxonomyEdgeReusesAPreExistingKind is the additivity guard for delta
-// row 9: the derived kinds must not collide with a kind the resolver already
-// writes, or a total this item promised not to move would move.
+// row 9. The list below was MEASURED on 2026-09-03 by enumerating every
+// upper-case string literal in internal/resolver, internal/store, internal/
+// closure, internal/process, internal/community, internal/cochange and
+// cmd/gt-index. IMPLEMENTS is on it: relationships.go already writes that kind
+// from a line-based regex at confidence 1.0, which is exactly why the
+// tree-sitter reading is published as DECLARED_IMPLEMENTS beside it rather
+// than merged into it.
 func TestNoTaxonomyEdgeReusesAPreExistingKind(t *testing.T) {
 	preExisting := map[string]bool{
-		"CALLS": true, "IMPORTS": true, "CONTAINS": true, "EXTENDS": true,
-		"COMPOSES": true, "RE_EXPORTS": true, "READS": true, "WRITES": true,
-		"DATA_FLOW": true, "PRECEDES": true, "RAISES": true, "CO_SERIALIZES": true,
-		"CANDIDATE": true, "CANDIDATE_TARGET": true, "SELECTED_TARGET": true,
-		"HAS_CALLSITE": true, "HAS_DERIVATION_FACT": true,
-		"HAS_COMPLETENESS_FACT": true, "HAS_UNRESOLVED_FACT": true,
+		"API_CALL": true, "CALLS": true, "CANDIDATE": true,
+		"CANDIDATE_TARGET": true, "COMPOSES": true, "CONTAINS": true,
+		"CO_SERIALIZES": true, "DATA_FLOW": true, "EXTENDS": true,
+		"HANDLES_ROUTE": true, "HAS_CALLSITE": true,
+		"HAS_COMPLETENESS_FACT": true, "HAS_DERIVATION_FACT": true,
+		"HAS_UNRESOLVED_FACT": true, "IMPLEMENTS": true, "IMPORTS": true,
+		"PRECEDES": true, "RAISES": true, "READS": true, "RE_EXPORTS": true,
+		"SELECTED_TARGET": true, "TEST_CALLS": true, "WRITES": true,
 	}
 	for _, kind := range specs.AllTaxonomyEdgeKinds {
 		if preExisting[kind] {
-			t.Errorf("taxonomy edge kind %q collides with a kind the resolver already writes", kind)
+			t.Errorf("taxonomy edge kind %q collides with a kind GT already writes; "+
+				"reusing it would move a pre-existing total and merge two mechanisms "+
+				"of different strength under one name", kind)
 		}
 	}
 }

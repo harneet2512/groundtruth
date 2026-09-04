@@ -81,18 +81,28 @@ func IsSymbolKind(kind string) bool {
 // meaning or volume. Each is emitted only where the grammar states the fact
 // syntactically, and each carries the mechanism below plus a trust tier that
 // the mechanism grants — never CERTIFIED.
+//
+// DECLARED_IMPLEMENTS is deliberately NOT spelled IMPLEMENTS. MEASURED
+// (2026-09-03): internal/resolver/relationships.go already writes an
+// IMPLEMENTS edge for JS/TS, Java/Kotlin and Rust, derived by a LINE-BASED
+// REGEX over the source text and written with confidence 1.0. Reusing the kind
+// would move a pre-existing total and would silently merge two mechanisms of
+// very different strength under one name. Delta row 9's actual instruction is
+// the opposite: "two analyses that disagree stay representable". So the
+// tree-sitter reading is published as its own kind, beside the regex one, with
+// the mechanism and tier that let a reader tell them apart.
 const (
-	EdgeImplements   = "IMPLEMENTS"
-	EdgeOverrides    = "OVERRIDES"
-	EdgeDecorates    = "DECORATES"
-	EdgeReturnsType  = "RETURNS_TYPE"
-	EdgeParamType    = "PARAM_TYPE"
-	EdgeInstantiates = "INSTANTIATES"
+	EdgeDeclaredImplements = "DECLARED_IMPLEMENTS"
+	EdgeOverrides          = "OVERRIDES"
+	EdgeDecorates          = "DECORATES"
+	EdgeReturnsType        = "RETURNS_TYPE"
+	EdgeParamType          = "PARAM_TYPE"
+	EdgeInstantiates       = "INSTANTIATES"
 )
 
 // AllTaxonomyEdgeKinds is the closed set of edge kinds this item introduces.
 var AllTaxonomyEdgeKinds = []string{
-	EdgeImplements, EdgeOverrides, EdgeDecorates,
+	EdgeDeclaredImplements, EdgeOverrides, EdgeDecorates,
 	EdgeReturnsType, EdgeParamType, EdgeInstantiates,
 }
 
@@ -111,12 +121,12 @@ const (
 // TaxonomyEdgeMechanisms maps each taxonomy edge kind to the mechanisms that
 // may produce it. A row with any other mechanism is a bug, not a weaker fact.
 var TaxonomyEdgeMechanisms = map[string][]string{
-	EdgeImplements:   {MechImplementsClause, MechImplTrait},
-	EdgeOverrides:    {MechOverrideMarker},
-	EdgeDecorates:    {MechDecoratorApplied},
-	EdgeReturnsType:  {MechReturnAnnotation},
-	EdgeParamType:    {MechParamAnnotation},
-	EdgeInstantiates: {MechConstructorCall},
+	EdgeDeclaredImplements: {MechImplementsClause, MechImplTrait},
+	EdgeOverrides:          {MechOverrideMarker},
+	EdgeDecorates:          {MechDecoratorApplied},
+	EdgeReturnsType:        {MechReturnAnnotation},
+	EdgeParamType:          {MechParamAnnotation},
+	EdgeInstantiates:       {MechConstructorCall},
 }
 
 // Trust tiers a taxonomy edge may carry. A syntactic mechanism proves that the
