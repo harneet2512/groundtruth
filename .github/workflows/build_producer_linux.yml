@@ -34,6 +34,7 @@ jobs:
           bash scripts/swebench/build_gt_index_linux.sh
           ls -la bin/gt-index-linux
           file bin/gt-index-linux
+          file bin/gt-index-linux | grep -F 'statically linked'
 
       - name: Emit build identity
         run: |

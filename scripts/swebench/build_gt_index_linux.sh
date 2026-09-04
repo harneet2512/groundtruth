@@ -84,11 +84,11 @@ case "$mode" in
   native)
     cd "$SRC_DIR"
     GO_TOOLCHAIN_NATIVE="${GO_TOOLCHAIN_ENV:-$(go version | awk '{print $3}')}"
-    GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build \
-      -tags "${BUILD_TAGS}" \
+    CC="${CC:-musl-gcc}" GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build \
+      -tags "netgo,osusergo,${BUILD_TAGS}" \
       -trimpath \
       -mod=readonly \
-      -ldflags "${LDFLAGS} -X main.goToolchain=${GO_TOOLCHAIN_NATIVE}" \
+      -ldflags "${LDFLAGS} -X main.goToolchain=${GO_TOOLCHAIN_NATIVE} -linkmode external -extldflags -static" \
       -o "$OUT_BIN" ./cmd/gt-index/
     ;;
   docker)
@@ -107,13 +107,13 @@ case "$mode" in
       -w /workspace/gt-index \
       "$GO_IMAGE" \
       bash -c "set -euo pipefail; \
-               apt-get update -qq && apt-get install -qq -y gcc libc6-dev >/dev/null && \
+               apt-get update -qq && apt-get install -qq -y musl-tools >/dev/null && \
                GO_TC=\$(go version | awk '{print \$3}') && \
-               GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build \
-                 -tags ${BUILD_TAGS} \
+               CC=musl-gcc GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build \
+                 -tags netgo,osusergo,${BUILD_TAGS} \
                  -trimpath \
                  -mod=readonly \
-                 -ldflags \"${LDFLAGS} -X main.goToolchain=\${GO_TC}\" \
+                 -ldflags \"${LDFLAGS} -X main.goToolchain=\${GO_TC} -linkmode external -extldflags -static\" \
                  -o /workspace/bin/gt-index-linux ./cmd/gt-index/ && \
                chown \"\${HOST_UID}:\${HOST_GID}\" /workspace/bin/gt-index-linux"
     ;;
