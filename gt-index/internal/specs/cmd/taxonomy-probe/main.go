@@ -108,7 +108,12 @@ func printMatrix(langs []string) {
 		}
 		fmt.Fprintf(w, "| %s | %s |\n", lang, strings.Join(cells, " | "))
 	}
-	fmt.Fprintf(w, "\n%d languages, %d kinds. N = present via N node types, P = already a typed property row, . = absent with a recorded reason (-reasons).\n",
+	fmt.Fprintf(w, "\n%d languages, %d kinds. "+
+		"N = annotated on a node GT already emits, via N node types (or synthesized by the parser); "+
+		"D = declared: the grammar has it and the mapping names the node type, but GT emits no node "+
+		"because parser.EmitTaxonomyDeclarations is off; "+
+		"P = already a typed property row; "+
+		". = absent, with a recorded reason (-reasons).\n",
 		len(langs), len(specs.AllSymbolKinds))
 }
 
