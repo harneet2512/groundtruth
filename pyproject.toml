@@ -45,6 +45,7 @@ dev = [
     "coverage>=7.0.0,<8",
     "pathspec>=0.12.0,<1",
     "pyyaml>=6.0.0,<7",
+    "mcp>=1.0.0,<2",
 ]
 benchmark = [
     "openai>=1.0.0,<2",
@@ -75,6 +76,11 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
+# Explicit rule set — CI and local must agree. Without this, ruff's default
+# rule set varies by version, and the CI runner (ruff 0.4–0.x) enables
+# different rules than a local 0.15+. The three families below are what the
+# mechanical pass at 327f70235 cleaned, and what the repo can pass today.
+select = ["E", "F", "W"]
 # Judgment-call classes deferred to a reviewed pass (REV-280).
 # Mechanical classes (F401, F541, E401, E713) were fixed at 327f70235.
 # These remain and are tracked — do NOT add blanket ignores beyond this list.

@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
-      - run: pytest tests/ -x -v --ignore=tests/integration/test_real_lsp.py --ignore=tests/integration/test_depth_parity.py --ignore=tests/integration/test_cross_language.py --ignore=tests/test_graphstore_contract.py --timeout=60 --cov=src/groundtruth --cov-report=term-missing
+      - run: pytest tests/ -x -v --ignore=tests/integration/test_real_lsp.py --ignore=tests/integration/test_depth_parity.py --ignore=tests/test_graphstore_contract.py --timeout=60 --cov=src/groundtruth --cov-report=term-missing
 
   go-build:
     runs-on: ubuntu-latest
