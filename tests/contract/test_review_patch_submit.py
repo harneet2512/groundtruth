@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
+pytest.importorskip("minisweagent", reason="minisweagent is not installed")
+
 
 # ── Harness source analysis ─────────────────────────────────────────────
 
