@@ -19,6 +19,8 @@ import time
 
 import pytest
 
+pytest.importorskip("minisweagent", reason="minisweagent is not installed")
+
 from groundtruth.index.graph import ImportGraph
 from groundtruth.index.store import SymbolStore
 from groundtruth.schema.finding import FindingKind, format_findings

@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("pandas", reason="pandas is not installed")
+
 # --------------------------------------------------------------------------- #
 # Repo layout + import-by-path helpers
 # --------------------------------------------------------------------------- #

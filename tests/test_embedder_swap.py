@@ -34,6 +34,8 @@ import math
 import numpy as np
 import pytest
 
+pytest.importorskip("tokenizers", reason="tokenizers is not installed")
+
 import groundtruth.memory.enrich.embed as embmod
 from groundtruth.memory.enrich.embed import (
     DEFAULT_EMBED_DIM,

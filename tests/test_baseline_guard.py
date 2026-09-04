@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("scipy", reason="scipy is not installed")
+
 
 def _load():
     path = os.path.join(

@@ -34,6 +34,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytest.importorskip("tokenizers", reason="tokenizers is not installed")
+
 
 @pytest.fixture(autouse=True)
 def _clear_shared_embed_caches():

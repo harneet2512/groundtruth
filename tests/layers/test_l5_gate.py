@@ -232,12 +232,16 @@ def _redirect_root_patches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     _root_redirect = tmp_path / "fake_root"
     _root_redirect.mkdir(exist_ok=True)
 
-    def _patched_path(arg, *a, **kw):
-        if isinstance(arg, str) and arg.startswith("/root/"):
-            return _real_path(str(_root_redirect / arg[len("/root/") :]), *a, **kw)
-        return _real_path(arg, *a, **kw)
+    class _RedirectingPath(_real_path):
+        """A Path subclass that redirects /root/ to a tmp_path subdirectory."""
 
-    monkeypatch.setattr(GATE, "Path", _patched_path)
+        def __new__(cls, *args, **kwargs):
+            if args and isinstance(args[0], str) and args[0].startswith("/root/"):
+                redirected = str(_root_redirect / args[0][len("/root/") :])
+                return _real_path.__new__(cls, redirected, *args[1:], **kwargs)
+            return _real_path.__new__(cls, *args, **kwargs)
+
+    monkeypatch.setattr(GATE, "Path", _RedirectingPath)
 
 
 @pytest.fixture
