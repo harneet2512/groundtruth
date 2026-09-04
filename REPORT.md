@@ -6,7 +6,11 @@ Closes delta rows 8 and 9 of `instinct_work/03-gt-gnx-pipeline.md`.
 - **Base:** `43514ced1` — 10 code commits plus this report, not pushed
 - **Harness worktree** `D:/gt-fh-item11-engine`: **untouched.** No consumer edit was
   trivial enough to make safely under test; the allow-lists to extend are listed in
-  §6 with file and line so the orchestrator can do it deliberately.
+  §6 with file and line so the orchestrator can do it deliberately. §6 was
+  rewritten after review — the first version surveyed the wrong checkout and
+  wrongly reported that `gt_engine/retrieval.py` and `SYMBOL_LABELS` do not
+  exist. They do, and `SYMBOL_LABELS` is the most consequential gate in the
+  list.
 
 Everything numeric below was measured on this machine on 2026-09-03/04. Nothing
 is estimated. Where a thing was not measured it says so.
@@ -327,49 +331,93 @@ in `internal/resolver`, `internal/store`, `internal/closure`, `internal/process`
 
 ## 6. Consumer allow-lists the orchestrator must extend
 
-The harness worktree `D:/gt-fh-item11-engine` was **not** edited: no consumer
-change here is a one-line frozenset addition covered by an existing test, and
-guessing at the raw-edge-type to relation-name projection would be exactly the
-kind of unverified edit this stream is meant to avoid. These are the gates a new
-label or edge kind has to pass, with the exact literal.
+The harness worktree `D:/gt-fh-item11-engine` (base `7b8d8183`) was **not**
+edited. This section was **corrected after review**: the first version surveyed
+`D:/gt-harness`, which is a different checkout on `linear/har-81-diagnostics`
+and does NOT contain item 4's engine half. Everything below was re-read in
+`D:/gt-fh-item11-engine` itself. The two trees genuinely differ -- files cited
+in the first version (`relational_context.py`, `thin_compiler.py`,
+`decision_sufficiency.py`, `scripts/swebench/oh_gt_full_wrapper.py`) do not
+exist in the engine worktree at all, and the two that do exist there
+(`graph_context.py`, `hybrid_retrieval.py`) carry different content. The earlier
+claim that "there is no `gt_engine/retrieval.py` and no `SYMBOL_LABELS`" was
+false and is withdrawn.
 
-**Node-label allow-lists.** New labels (Enum, EnumMember, TypeAlias, Namespace,
-Trait, Record, Union, Macro, Constant, Annotation, Module, Constructor) are
-invisible to these. Only matters once `EmitTaxonomyDeclarations` is turned on.
+### 6.1 `gt_engine/retrieval.py` — `SYMBOL_LABELS`
 
-| file | lines | literal |
-|---|---|---|
-| `scripts/swebench/oh_gt_full_wrapper.py` | 1695, 6633, 6639, 6652, 6665 | `label IN ('Function','Method','Class')` |
-| `scripts/swebench/oh_gt_full_wrapper.py` | 1724, 1734, 1744, 4721, 5713, 6071 | `label IN ('Function','Method')` |
+```python
+# gt_engine/retrieval.py:106
+SYMBOL_LABELS: tuple[str, ...] = ("Class", "File", "Function", "Method")
+```
 
-`gt_engine/graph_context.py` is **not** on this list and needs no change: it uses
-a deny-list (`LOWER(label) <> 'file'`, lines 251-270), so any new label flows
-through. It does gate edges at `e.confidence >= 0.7` (line 463), which admits
-CANDIDATE taxonomy edges (0.9) and excludes SPECULATIVE ones (<= 0.5) - sensible
-as-is, and worth knowing rather than discovering.
+It is the **default `labels=` argument of all three rankers** —
+`lexical_rank` (line 464), `dense_rank` (line 733), `hybrid_rank` (line 928) —
+and it reaches SQL as `AND n.label IN (...)` at line 498 (the `nodes_fts` BM25
+join) and line 693 (the dense pool).
 
-**Relation-name vocabularies.** A DECLARED_IMPLEMENTS, DECORATES, RETURNS_TYPE
-or PARAM_TYPE edge is dropped by these until named:
+**Consequence:** a symbol carrying a new label is **unreachable by retrieval**.
+Not down-ranked — absent. It cannot be returned lexically, it is never admitted
+to the dense pool, and therefore it cannot appear in the fused hybrid ranking
+either. Extending this tuple is the single change that makes new labels
+deliverable. It is the most important entry in this section and its omission
+from the first version made §6 incomplete exactly where a reader would rely on
+it.
 
-| file | line | constant | already contains |
-|---|---|---|---|
-| `gt_engine/relational_context.py` | 54 | `_ACCEPTED_RELATIONS` | calls, asserted_by, imports, implements, inherits, overrides, references |
-| `gt_engine/thin_compiler.py` | 21 | `PROVIDER_MATERIAL_RELATIONS` | calls, called_by, test_assertion, verified_closure, task_requirement |
-| `gt_engine/thin_compiler.py` | 31 | `NON_MATERIAL_PROVIDER_RELATIONS` | imports, implements, inherits, overrides, references (+ inverses) |
-| `gt_engine/hybrid_retrieval.py` | 1764 / 1774 | `_DIRECT_DECISION_RELATIONS` / `_CHANGE_IMPACT_RELATIONS` | calls, asserted_by, tested_by (+ inverses) |
-| `gt_engine/decision_sufficiency.py` | 33 | `_DECISION_RELEVANT_STRUCTURAL_RELATIONS` | calls, asserted_by (+ inverses) |
+This gate binds only once `parser.EmitTaxonomyDeclarations` is on (§5); with the
+gate off, every symbol still carries one of the four labels, so retrieval is
+unaffected by this item as shipped.
 
-**One that must NOT be extended:** `gt_engine/persistent_execution_state.py:45`
-`_CERTIFIED_RELATIONS`. It already lists `implements` and `overrides`, and it
-gates what may be presented as CERTIFIED. No taxonomy edge is ever certified, so
-adding `declared_implements` there would grant exactly the promotion this item
-forbids. `_certified_relation()` (line 71) already refuses anything outside the
-set, so leaving it alone is the correct default.
+### 6.2 `gt_engine/contract.py` — `CODE_SYMBOL_LABELS`
 
-There is no `gt_engine/retrieval.py` and no `SYMBOL_LABELS` constant anywhere in
-the harness; the table above is what those names actually correspond to.
+```python
+# gt_engine/contract.py:85
+CODE_SYMBOL_LABELS: tuple[str, ...] = ("Function", "Class", "Method", "File")
+```
 
----
+Expanded into `_LABEL_PLACEHOLDERS` (line 139) and applied as `label IN (...)`
+in four statements — `_SELECT_SYMBOLS_WITH_MINTED` (151),
+`_SELECT_SYMBOLS_NODES_ONLY` (158), `_COUNT_SYMBOLS_BY_LABEL` (168) and
+`_COUNT_FACTS` (176) — and passed at call sites 437, 460, 496 and 500.
+
+**Consequence:** a new label never enters the engine's symbol set at all, and is
+excluded from the symbol and fact counts `coverage()` reports. Note the second
+half specifically: `_COUNT_SYMBOLS_BY_LABEL` and `_COUNT_FACTS` are what produce
+the code-symbols-versus-fact-rows figure that row 8's 2.2% baseline is measured
+against, so this tuple and that acceptance criterion are the same tuple. Its own
+comment already says why `File` is in it — "excluding it would quietly flatter
+the denominator that `coverage()` reports" — and the same argument applies to
+every label added later.
+
+### 6.3 Not a gate, but a behaviour change worth knowing
+
+`property_rank` (`retrieval.py:542`) takes `kinds: Sequence[str] | None = None`
+and applies `AND p.kind IN (...)` only when it is passed (line 601), so the
+3,511 new `symbol_kind` rows need **no** allow-list change to flow through.
+They do change what that ranker sees: matching is substring `LIKE` over
+`properties.value` (line 596) and scoring is distinct-query-term coverage, so a
+query containing the word *function*, *test*, *class*, *interface*, *method*,
+*accessor*, *constructor* or *file* now matches every symbol of that kind. On
+arktype that is 1,654 symbols for "test" alone. Whether that is signal or noise
+depends on the query; it is stated here because it is a real change to a live
+ranker that no allow-list would have flagged.
+
+`gt_engine/graph_context.py` in this tree references `label` nowhere at all, so
+no label gate applies. Its edge gate is
+`e.confidence>=0.7 AND COALESCE(n.is_test,0)=0` (line 474), which admits
+CANDIDATE taxonomy edges (confidence 0.9) and excludes SPECULATIVE ones
+(<= 0.5) — sensible as-is, and worth knowing rather than discovering. Nothing in
+this tree allow-lists edge `type`; the only literal edge-type predicate is
+`gt_engine/runtime_observation.py:492`, `WHERE e.type='CALLS'`, which is a
+CALLS-specific query rather than a vocabulary to extend.
+
+### 6.4 One that must NOT be extended
+
+`gt_engine/persistent_execution_state.py` `_CERTIFIED_RELATIONS` already lists
+`implements` and `overrides`, and it gates what may be presented as CERTIFIED.
+**No taxonomy edge is ever certified**, so adding `declared_implements` there
+would grant exactly the promotion this item forbids. `_certified_relation()`
+already refuses anything outside the set, so leaving it alone is the correct
+default, not an oversight.
 
 ## 7. Commits
 
