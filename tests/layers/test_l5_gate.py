@@ -219,6 +219,27 @@ def _read_verdict(log_dir: Path) -> dict:
 
 
 # ── Per-test fixture: fresh repo + graph.db ──────────────────────────────────
+@pytest.fixture(autouse=True)
+def _redirect_root_patches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect the gate's hardcoded /root/*.patch paths to tmp_path.
+
+    The production gate writes ``/root/model.patch`` and reads
+    ``/root/test.patch`` — both fail with PermissionError on CI runners
+    that cannot write /root/. This fixture patches ``Path`` in the gate
+    module so every ``Path("/root/...")`` resolves under tmp_path instead.
+    """
+    _real_path = GATE.Path
+    _root_redirect = tmp_path / "fake_root"
+    _root_redirect.mkdir(exist_ok=True)
+
+    def _patched_path(arg, *a, **kw):
+        if isinstance(arg, str) and arg.startswith("/root/"):
+            return _real_path(str(_root_redirect / arg[len("/root/") :]), *a, **kw)
+        return _real_path(arg, *a, **kw)
+
+    monkeypatch.setattr(GATE, "Path", _patched_path)
+
+
 @pytest.fixture
 def repo_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     """Returns (repo, log_dir, db_path), all freshly populated."""
