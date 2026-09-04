@@ -34,6 +34,7 @@ import (
 	"github.com/harneet2512/groundtruth/gt-index/internal/resolver"
 	"github.com/harneet2512/groundtruth/gt-index/internal/specs"
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
+	"github.com/harneet2512/groundtruth/gt-index/internal/taxonomy"
 	"github.com/harneet2512/groundtruth/gt-index/internal/walker"
 	// Note: specs is imported above (named); its init() functions register all language specs.
 )
@@ -815,8 +816,25 @@ func main() {
 		}
 	}
 
+	// Symbol taxonomy edges (item 11, delta row 9): DECLARED_IMPLEMENTS,
+	// OVERRIDES, DECORATES, RETURNS_TYPE and PARAM_TYPE, derived in
+	// internal/taxonomy from facts the parser already recorded syntactically.
+	// Strictly additive -- none of these kinds is written anywhere else in the
+	// producer, so no pre-existing edge total can move. Every row carries the
+	// mechanism that produced it and a tier that mechanism earns; CERTIFIED is
+	// unreachable there by construction. The derivation is a pure function over
+	// the nodes, their assigned ids and the property rows, which is what keeps
+	// this call site short.
+	taxonomyPtrs := taxonomy.DeriveEdges(allNodePtrs, nodeDBIDs, allProps)
+	if len(taxonomyPtrs) > 0 {
+		if err := db.BatchInsertEdges(taxonomyPtrs); err != nil {
+			log.Printf("WARNING: taxonomy edges: %v", err)
+		}
+	}
+
 	edgeElapsed := time.Since(edgeStart)
 	fmt.Fprintf(os.Stderr, "  Inserted %d CALLS + %d CONTAINS edges in %s\n", len(edgePtrs), len(containsPtrs), edgeElapsed.Round(time.Millisecond))
+	fmt.Fprintf(os.Stderr, "  Inserted %d symbol-taxonomy edges\n", len(taxonomyPtrs))
 
 	// ── Pass 4: PROPERTIES + ASSERTIONS ─────────────────────────────────
 	propStart := time.Now()

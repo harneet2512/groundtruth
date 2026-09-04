@@ -230,6 +230,9 @@ func TestNoTaxonomyEdgeReusesAPreExistingKind(t *testing.T) {
 func TestTypeReferenceNameRefusesWhatItCannotRead(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"Circle", "Circle"},
+		{": Circle", "Circle"},  // tree-sitter-typescript return_type
+		{"-> Circle", "Circle"}, // python / rust return_type
+		{"(int, error)", ""},    // a Go tuple result names no single type
 		{"*Point", "Point"},
 		{"foo::Bar<T>", "Bar"},
 		{"a.b.C", "C"},

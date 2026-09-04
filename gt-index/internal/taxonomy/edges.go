@@ -315,7 +315,12 @@ func paramTypeName(value string) string {
 // pass does not claim.
 func typeReferenceName(raw string) string {
 	name := strings.TrimSpace(raw)
-	name = strings.TrimLeft(name, "*&")
+	// Grammars hand back the annotation, not the bare type: tree-sitter-
+	// typescript's return_type field is ": Circle", Python's and Rust's are
+	// "-> Circle", and pointer and reference sigils lead in C, C++ and Go.
+	// Strip the annotation syntax; anything left that is not identifier-shaped
+	// is refused below rather than guessed at.
+	name = strings.TrimLeft(name, " 	:->*&")
 	if i := strings.IndexAny(name, "<([{|&,"); i > 0 {
 		name = name[:i]
 	}
