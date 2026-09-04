@@ -159,6 +159,12 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 	types := buildIndex(nodes, ids, typeLabels)
 	callables := buildIndex(nodes, ids, callableLabels)
 	methods := buildIndex(nodes, ids, methodLabels)
+	nodesByID := make(map[int64]*store.Node, min(len(nodes), len(ids)))
+	for i, id := range ids {
+		if id > 0 && i < len(nodes) && nodes[i] != nil {
+			nodesByID[id] = nodes[i]
+		}
+	}
 	b := newBuilder()
 
 	idOf := func(nodeIdx int) int64 {
@@ -227,14 +233,14 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 			}
 
 		case propFieldRead:
-			if target := owningTypeID(node, nodes, ids); target > 0 {
+			if target := owningTypeID(node, nodesByID); target > 0 {
 				b.emit(specs.EdgeAccesses, specs.MechFieldRead, id,
 					[]int64{target}, node.FilePath, p.Line)
 			}
 
 		case propSideEffect:
 			if strings.HasPrefix(strings.TrimSpace(p.Value), "mutates:") && strings.Contains(p.Value, ".") {
-				if target := owningTypeID(node, nodes, ids); target > 0 {
+				if target := owningTypeID(node, nodesByID); target > 0 {
 					b.emit(specs.EdgeAccesses, specs.MechFieldWrite, id,
 						[]int64{target}, node.FilePath, p.Line)
 				}
@@ -279,22 +285,15 @@ func isConstructorDeclaration(node *store.Node) bool {
 		node.Name == "constructor" || strings.HasPrefix(node.Name, "New")
 }
 
-func owningTypeID(node *store.Node, nodes []*store.Node, ids []int64) int64 {
+func owningTypeID(node *store.Node, nodesByID map[int64]*store.Node) int64 {
 	if node == nil || (node.Label != "Method" && node.Label != "Constructor") {
 		return 0
 	}
 	// main resolves parser ordinals to database IDs before taxonomy derivation.
-	// Locate the parallel node by that explicit identity; ParentID is not a
-	// slice offset at this boundary.
-	for i, id := range ids {
-		if id != node.ParentID || i >= len(nodes) {
-			continue
-		}
-		parent := nodes[i]
-		if parent != nil && typeLabels[parent.Label] {
-			return id
-		}
-		return 0
+	// ParentID is an explicit identity, not a slice offset at this boundary.
+	parent := nodesByID[node.ParentID]
+	if parent != nil && typeLabels[parent.Label] {
+		return node.ParentID
 	}
 	return 0
 }

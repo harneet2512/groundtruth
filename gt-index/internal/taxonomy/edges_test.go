@@ -229,6 +229,17 @@ func TestRequiredNamedEdgesUseSyntacticEvidenceAndNeverCertify(t *testing.T) {
 	}
 }
 
+func TestOwningTypeIDUsesPrecomputedDatabaseIdentity(t *testing.T) {
+	service := node("Class", "Service", "svc.py")
+	method := node("Method", "run", "svc.py")
+	method.ParentID = 41
+
+	got := owningTypeID(method, map[int64]*store.Node{41: service})
+	if got != 41 {
+		t.Fatalf("owningTypeID() = %d, want sparse database ID 41", got)
+	}
+}
+
 // TestNoTaxonomyEdgeReusesAPreExistingKind is the additivity guard for delta
 // row 9. The list below was MEASURED on 2026-09-03 by enumerating every
 // upper-case string literal in internal/resolver, internal/store, internal/
