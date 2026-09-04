@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=5dc180a5ec93d335e081def29c35ac0cff4bba1e
+fixture_path=.githooks/tests/final_hardening_incremental.sh
+fixture_sha256=352b4179c6dac0b2e7fcb72641cc9f358d0ad713e9780efd6e014786802cba10
+command=.githooks/tests/final_hardening_incremental.sh
+exit_code=1
+output_path=.githooks/red-artifacts/final_hardening_incremental.out
+output_sha256=e601102ddd27e1c9f9c186f79a0b926334ed95e690cec7f89ee700584db011de
