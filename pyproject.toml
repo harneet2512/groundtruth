@@ -85,6 +85,7 @@ select = ["E", "F", "W"]
 # Mechanical classes (F401, F541, E401, E713) were fixed at 327f70235.
 # These remain and are tracked — do NOT add blanket ignores beyond this list.
 ignore = [
+    "E501",  # line-too-long (395 instances; ruff format handles line length)
     "E402",  # module-import-not-at-top-of-file (14 instances, deliberate conditional imports)
     "E701",  # multiple-statements-on-one-line-colon (9, one-liner branches)
     "E702",  # multiple-statements-on-one-line-semicolon (27, compact test assertions)
