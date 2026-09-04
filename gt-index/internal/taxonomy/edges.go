@@ -283,15 +283,20 @@ func owningTypeID(node *store.Node, nodes []*store.Node, ids []int64) int64 {
 	if node == nil || (node.Label != "Method" && node.Label != "Constructor") {
 		return 0
 	}
-	parentIdx := int(node.ParentID)
-	if parentIdx < 0 || parentIdx >= len(nodes) || parentIdx >= len(ids) {
+	// main resolves parser ordinals to database IDs before taxonomy derivation.
+	// Locate the parallel node by that explicit identity; ParentID is not a
+	// slice offset at this boundary.
+	for i, id := range ids {
+		if id != node.ParentID || i >= len(nodes) {
+			continue
+		}
+		parent := nodes[i]
+		if parent != nil && typeLabels[parent.Label] {
+			return id
+		}
 		return 0
 	}
-	parent := nodes[parentIdx]
-	if parent == nil || !typeLabels[parent.Label] {
-		return 0
-	}
-	return ids[parentIdx]
+	return 0
 }
 
 // splitFactValue splits a `name|mechanism` fact value.

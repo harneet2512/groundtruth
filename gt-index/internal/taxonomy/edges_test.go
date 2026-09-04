@@ -207,8 +207,10 @@ func TestRequiredNamedEdgesUseSyntacticEvidenceAndNeverCertify(t *testing.T) {
 		node("Method", "run", "svc.py"),
 		node("Method", "run", "base.py"),
 	}
-	nodes[2].ParentID = 1
-	nodes[3].ParentID = 1
+	// Production main has translated the parser parent ordinal to Service's
+	// database ID (idsFor assigns Service ID 2) before DeriveEdges runs.
+	nodes[2].ParentID = 2
+	nodes[3].ParentID = 2
 	props := []parser.PropertyRef{
 		{NodeIdx: 2, Kind: propParam, Value: "dep:Dependency [required]", Line: 3},
 		{NodeIdx: 3, Kind: propFieldRead, Value: "reads: self.value", Line: 7},

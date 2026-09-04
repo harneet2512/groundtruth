@@ -66,7 +66,7 @@ fi
 COMMIT_SHA="$(cd "$REPO_DIR" && git rev-parse HEAD 2>/dev/null || echo unknown)"
 BUILD_TIME_UTC="$(date -u +%FT%TZ)"
 GO_TOOLCHAIN_ENV="${GT_INDEX_GO_TOOLCHAIN:-}"
-BUILD_TAGS="sqlite_fts5"
+BUILD_TAGS="netgo,osusergo,sqlite_fts5"
 # Hash every checked-in compiler input, including C/C++ headers. Relative paths
 # are part of the digest so renames are identity changes while checkout location
 # is not. The toolchain and build tags are bound separately below.
@@ -85,7 +85,7 @@ case "$mode" in
     cd "$SRC_DIR"
     GO_TOOLCHAIN_NATIVE="${GO_TOOLCHAIN_ENV:-$(go version | awk '{print $3}')}"
     CC="${CC:-musl-gcc}" GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build \
-      -tags "netgo,osusergo,${BUILD_TAGS}" \
+      -tags "${BUILD_TAGS}" \
       -trimpath \
       -mod=readonly \
       -ldflags "${LDFLAGS} -X main.goToolchain=${GO_TOOLCHAIN_NATIVE} -linkmode external -extldflags -static" \
@@ -110,7 +110,7 @@ case "$mode" in
                apt-get update -qq && apt-get install -qq -y musl-tools >/dev/null && \
                GO_TC=\$(go version | awk '{print \$3}') && \
                CC=musl-gcc GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build \
-                 -tags netgo,osusergo,${BUILD_TAGS} \
+                 -tags ${BUILD_TAGS} \
                  -trimpath \
                  -mod=readonly \
                  -ldflags \"${LDFLAGS} -X main.goToolchain=\${GO_TC} -linkmode external -extldflags -static\" \
