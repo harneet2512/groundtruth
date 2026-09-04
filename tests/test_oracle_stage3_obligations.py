@@ -122,9 +122,8 @@ def test_obligation_fires_on_edited_but_untested(sense_mod, oracle_mod):
     turns = _python_fixture(sense_mod, test_obs="..\n2 passed in 0.10s")
     decisions = oracle_mod.replay(turns, obligations=[_OBL_ASYNC])
     fired = [d for d in decisions if d.emission is not None]
-    assert len(fired) == 1, f"expected exactly one fire, got {
-        [(d.turn_index, d.emission.reason_string) for d in fired]
-    }"
+    detail = [(d.turn_index, d.emission.reason_string) for d in fired]
+    assert len(fired) == 1, f"expected exactly one fire, got {detail}"
     em = fired[0].emission
     assert em.reason_string == "test_evidence_gap"
     assert em.layer == "spec"
