@@ -965,6 +965,13 @@ class TestAssertionKeywordRanking:
     'locked' should appear before tests that don't.
     """
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Aspirational: issue-keyword ranking not implemented in contract "
+            "generator - REV-286; owner ruling 2026-09-04: xfail and move on"
+        ),
+    )
     def test_issue_keyword_ranks_matching_test_first(self, synthetic_env: dict) -> None:
         """Assertion mentioning 'locked' appears first when issue terms include 'locked'."""
         _write_issue_terms(["locked"])
