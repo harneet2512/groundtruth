@@ -33,7 +33,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip('pier', reason='pier is not installed')
+pytest.importorskip("pier", reason="pier is not installed")
 import yaml
 
 _ROOT = Path(__file__).resolve().parents[1]

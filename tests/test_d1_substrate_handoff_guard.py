@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip('pier', reason='pier is not installed')
+pytest.importorskip("pier", reason="pier is not installed")
 
 ROOT = Path(__file__).resolve().parents[1]
 GA = ROOT / "artifact_deepswe" / "gt_agent.py"

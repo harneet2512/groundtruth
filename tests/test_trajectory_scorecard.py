@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip('scipy', reason='scipy is not installed')
+pytest.importorskip("scipy", reason="scipy is not installed")
 
 _ROOT = Path(__file__).resolve().parents[1]
 _METRICS_PATH = _ROOT / "scripts" / "metrics" / "compute_paired_metrics.py"
