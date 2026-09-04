@@ -272,6 +272,7 @@ func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResul
 		base = sf.Path
 	}
 	endLine := strings.Count(text, "\n") + 1
+	idx := len(result.Nodes)
 	result.Nodes = append(result.Nodes, store.Node{
 		Label:         "File",
 		Name:          base,
@@ -283,6 +284,12 @@ func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResul
 		IsExported:    true,
 		ByteStart:     0,
 		ByteEnd:       uint64(len(src)),
+	})
+	// Symbol taxonomy: the file kind, so every symbol node carries exactly one
+	// symbol_kind row regardless of which path emitted it.
+	result.Properties = append(result.Properties, PropertyRef{
+		NodeIdx: idx, Kind: PropSymbolKind, Value: specs.KindFile,
+		Line: 1, Confidence: 1.0,
 	})
 }
 
@@ -573,6 +580,13 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 	spec := sf.Spec
 	nodeType := node.Type()
 
+	// Symbol taxonomy (item 11): declarations the parser has no entry for --
+	// a TypeScript enum, a Rust mod, a C++ namespace -- become NEW nodes with
+	// NEW labels. Emission does not redirect the walk: parentNodeIdx is passed
+	// on unchanged below, so nothing nested inside one of these is relabelled
+	// and no pre-existing label total can move. See internal/parser/taxonomy.go.
+	emitTaxonomyDeclaration(node, sf, src, result, isTest)
+
 	// Check for function definition
 	if spec.IsFunctionNode(nodeType) {
 		name := extractFieldText(node, spec.NameField, src)
@@ -629,6 +643,10 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
+
+			// Symbol taxonomy: say WHAT this callable is (function, method,
+			// constructor, accessor) without touching its label.
+			annotateSymbolKind(node, sf, src, result, idx)
 
 			// Extract calls from this function's body
 			bodyNode := node.ChildByFieldName(spec.BodyField)
@@ -720,6 +738,13 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			}
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
+
+			// Symbol taxonomy: separate struct / interface / enum / trait /
+			// impl / type_alias, all of which land under this one label today,
+			// and emit the declaration's members. The label is not touched.
+			annotateSymbolKind(node, sf, src, result, idx)
+			emitTaxonomyMembers(node, sf, src, result, isTest, idx+1)
+
 			if label == "Interface" && sf.Language == "go" {
 				extractGoInterfaceMethods(node, sf, src, result, idx+1)
 			}
