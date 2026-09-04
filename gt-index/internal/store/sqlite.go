@@ -1481,6 +1481,13 @@ func (d *DB) queryAttachedCandidates(callee, callsiteID string, policy Candidate
 	}
 	var complete, revision string
 	if err := d.db.QueryRow(`SELECT COALESCE(value,'') FROM project_meta WHERE key='graph_resolution_complete'`).Scan(&complete); err != nil {
+		// A two-phase publication can commit the core graph and roll the
+		// analysis back, so this row's absence is a state the producer publishes
+		// on purpose, not a fault. Report it by name off analysis_state instead
+		// of surfacing the storage miss, which reads as a corrupt graph.
+		if absent := analysisAbsenceError(d.db, err); absent != nil {
+			return nil, absent
+		}
 		return nil, fmt.Errorf("graph-native resolution unavailable: %w", err)
 	}
 	if complete != "1" {
@@ -1502,7 +1509,13 @@ func (d *DB) queryAttachedCandidates(callee, callsiteID string, policy Candidate
 		return nil, fmt.Errorf("graph completion receipt unavailable: %w", err)
 	}
 	sum := sha256.Sum256([]byte(receipt))
-	if receipt == "" || receiptSHA != hex.EncodeToString(sum[:]) {
+	if receipt == "" {
+		// An empty receipt beside a resolution-complete claim is the same
+		// core-only graph seen from the other side: name the analysis state
+		// rather than accusing the graph of a hash mismatch it never had.
+		return nil, analysisAbsenceError(d.db, sql.ErrNoRows)
+	}
+	if receiptSHA != hex.EncodeToString(sum[:]) {
 		return nil, fmt.Errorf("graph completion receipt hash mismatch")
 	}
 	var identity GraphCompletionIdentity

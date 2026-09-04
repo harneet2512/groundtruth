@@ -25,7 +25,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -740,14 +739,10 @@ func main() {
 			VerificationStatus: "unverified",
 		}
 	}
-	publishTx, err := db.BeginTx()
-	if err != nil {
-		abortStagedBuild(db, stagedOutput, "begin resolution publication transaction: %v", err)
-	}
-	if err := store.BatchInsertEdgesTx(publishTx, edgePtrs); err != nil {
-		_ = publishTx.Rollback()
-		abortStagedBuild(db, stagedOutput, "batch insert edges: %v", err)
-	}
+	// Phase 1 (core): the files and symbols are already durable, and the
+	// structural CALLS edges commit here on their own. Everything below this
+	// point is analysis, and no analysis failure may cost this layer.
+	publishCorePhase(db, stagedOutput, edgePtrs)
 	// Additive producer-owned resolution contract. The legacy edges above remain
 	// readable; these rows preserve stable identities and ambiguity explicitly.
 	repositoryRevision := repoCommit(*root)
@@ -755,307 +750,25 @@ func main() {
 		repositoryRevision = "unversioned"
 	}
 	repositoryID := repositoryIdentity(*root)
-	resolutionSymbols := make([]*store.ResolutionSymbol, 0, len(allNodePtrs))
-	symbolByID := make(map[int64]store.ResolutionSymbol, len(allNodePtrs))
-	for i, node := range allNodePtrs {
-		if i >= len(nodeDBIDs) {
-			continue
-		}
-		s := store.BuildResolutionSymbol(strconv.FormatInt(nodeDBIDs[i], 10), *node)
-		resolutionSymbols = append(resolutionSymbols, &s)
-		symbolByID[nodeDBIDs[i]] = s
-	}
-	if err := store.BatchInsertResolutionSymbolsTx(publishTx, resolutionSymbols); err != nil {
-		_ = publishTx.Rollback()
-		abortStagedBuild(db, stagedOutput, "insert resolution symbols: %v", err)
-	}
-	callsiteRows := make([]*store.ResolutionCallsite, 0, len(callsites))
-	candidateRows := make([]*store.ResolutionCandidate, 0)
-	graphRows := make([]store.AttachedResolution, 0, len(callsites))
-	nodeByID := make(map[int64]*store.Node, len(allNodes))
-	fileNodeIDByPath := make(map[string]int64)
-	fileIdentityByPath := make(map[string]string)
-	for i := range allNodes {
-		if i < len(nodeDBIDs) {
-			n := allNodes[i]
-			n.ID = nodeDBIDs[i]
-			nodeByID[nodeDBIDs[i]] = &n
-			if n.Label == "Module" && n.FilePath != "" {
-				fileNodeIDByPath[n.FilePath] = n.ID
-				if symbol, ok := symbolByID[n.ID]; ok {
-					fileIdentityByPath[n.FilePath] = symbol.StableID
-				}
-			}
-		}
-	}
-	for _, c := range callsites {
-		source, ok := symbolByID[c.SourceNodeID]
-		if !ok {
-			_ = publishTx.Rollback()
-			abortStagedBuild(db, stagedOutput, "callsite ordinal %d source node %d missing from graph", c.CallsiteOrdinal, c.SourceNodeID)
-		}
-		callsiteID := store.StableResolutionCallsiteIDWithOrdinal(repositoryRevision, source.StableID, c.SourceFile, c.SourceLine, c.SourceLine, c.CallsiteOrdinal, c.Callee)
-		candidateNodeIDs := append([]int64(nil), c.CandidateNodeIDs...)
-		selectedNodeID := c.SelectedTargetNodeID
-		publishedDispatchState := string(c.DispatchState)
-		publishedMechanism := c.Mechanism
-		vtaUsed := false
-		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") {
-			if vta.Completeness == "partial" {
-				// Incomplete flow must not erase conservative hierarchy evidence.
-				if hierarchy, hierarchyOK := hierarchyByOrdinal[c.CallsiteOrdinal]; hierarchyOK {
-					candidateNodeIDs = mergeIDs(vta.CandidateNodeIDs, hierarchy.CHACandidateNodeIDs)
-				} else {
-					candidateNodeIDs = append([]int64(nil), vta.CandidateNodeIDs...)
-				}
-			} else {
-				// A closed flow fact is the narrower source-bound candidate set.
-				candidateNodeIDs = append([]int64(nil), vta.CandidateNodeIDs...)
-			}
-			selectedNodeID = nil
-			if mechanism := vtaCallsiteMechanism(vta.CandidateNodeIDs, candidateNodeIDs); mechanism != "" {
-				publishedMechanism = mechanism
-				vtaUsed = true
-			}
-			publishedDispatchState = candidateDispatchStateForCount(len(candidateNodeIDs))
-		}
-		if !vtaUsed {
-			if hierarchy, ok := hierarchyByOrdinal[c.CallsiteOrdinal]; ok && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") && (len(hierarchy.CHACandidateNodeIDs) > 0 || (hierarchy.ReceiverScoped && hierarchy.CHACompleteness == "closed")) {
-				candidateNodeIDs = append([]int64(nil), hierarchy.CHACandidateNodeIDs...)
-				selectedNodeID = nil
-				if len(candidateNodeIDs) == 0 {
-					publishedDispatchState = string(resolver.DispatchZero)
-				} else if len(candidateNodeIDs) > 1 {
-					publishedDispatchState = string(resolver.DispatchAmbiguous)
-				} else {
-					publishedDispatchState = string(resolver.DispatchCandidateOnly)
-				}
-			}
-		}
-		// Collapse candidates that denote the same symbol identity before anything
-		// downstream counts them: the published candidate edge ids are keyed on the
-		// target stable id, and candidate_count feeds the dispatch state.
-		candidateNodeIDs = dedupeCandidatesByStableIdentity(candidateNodeIDs, selectedNodeID, func(id int64) (string, bool) {
-			symbol, ok := symbolByID[id]
-			if !ok {
-				return "", false
-			}
-			return symbol.StableID, true
-		})
-		// Only restate a dispatch state that was itself derived from the candidate
-		// count. dynamic, parser_incomplete and external_unresolved say something
-		// the count cannot, and must survive the collapse untouched.
-		switch publishedDispatchState {
-		case string(resolver.DispatchZero), string(resolver.DispatchCandidateOnly), string(resolver.DispatchAmbiguous):
-			publishedDispatchState = candidateDispatchStateForCount(len(candidateNodeIDs))
-		}
-
-		// Only a unique dispatch may carry selected-target authority. Some
-		// conservative resolver paths retain a best-effort target while correctly
-		// classifying the callsite as candidate_only. Publishing that internal hint
-		// as Selected contradicts the resolution-v2 contract and used to abort the
-		// entire atomic graph publication. Drop the hint at the producer boundary;
-		// all candidates remain conserved and visible as unselected evidence.
-		selectedNodeID = selectedTargetForDispatch(publishedDispatchState, selectedNodeID)
-		var selectedStable, selectedNative *string
-		if selectedNodeID != nil {
-			if target, exists := symbolByID[*selectedNodeID]; exists {
-				stable, native := target.StableID, target.NativeID
-				selectedStable, selectedNative = &stable, &native
-			}
-		}
-		passCoverage := make([]store.ResolutionPassCoverage, 0, len(c.PassExecutions))
-		for _, pass := range c.PassExecutions {
-			passCoverage = append(passCoverage, store.ResolutionPassCoverage{PassKind: pass.PassKind, Version: "1", Status: pass.Status, Reason: pass.Reason})
-		}
-		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" {
-			vtaStatus := "completed_match"
-			if vta.Completeness == "partial" {
-				vtaStatus = "partial"
-			}
-			if len(vta.CandidateNodeIDs) == 0 {
-				vtaStatus = "completed_no_match"
-				if vta.Completeness == "partial" {
-					vtaStatus = "partial_no_match"
-				}
-			}
-			vtaStableIDs := make([]string, 0, len(vta.CandidateNodeIDs))
-			for _, id := range vta.CandidateNodeIDs {
-				if symbol, exists := symbolByID[id]; exists {
-					vtaStableIDs = append(vtaStableIDs, symbol.StableID)
-				}
-			}
-			flowStableIDs := make([]string, 0, len(vta.FlowTypeNodeIDs))
-			for _, id := range vta.FlowTypeNodeIDs {
-				if symbol, exists := symbolByID[id]; exists {
-					flowStableIDs = append(flowStableIDs, symbol.StableID)
-				}
-			}
-			flowReason := vta.AbstentionReason
-			if len(flowStableIDs) > 0 {
-				flowReason = "flow_type_stable_ids=" + strings.Join(flowStableIDs, ",") + "; " + flowReason
-			}
-			passCoverage = append(passCoverage, store.ResolutionPassCoverage{
-				PassKind: "vta", Version: "1", Status: vtaStatus,
-				Reason: flowReason, CandidateStableIDs: vtaStableIDs, FlowTypeStableIDs: flowStableIDs,
-			})
-		}
-		if hierarchy, ok := hierarchyByOrdinal[c.CallsiteOrdinal]; ok && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") {
-			chaStatus := "partial"
-			chaReason := "hierarchy_open"
-			if hierarchy.CHACompleteness == "closed" {
-				chaReason = ""
-				if len(hierarchy.CHACandidateNodeIDs) == 0 {
-					chaStatus = "completed_no_match"
-				} else {
-					chaStatus = "completed_match"
-				}
-			}
-			rtaStatus := "partial"
-			rtaReason := hierarchy.RTAAbstentionReason
-			if hierarchy.RTACompleteness == "closed" {
-				rtaReason = ""
-				if len(hierarchy.RTACandidateNodeIDs) == 0 {
-					rtaStatus = "completed_no_match"
-				} else {
-					rtaStatus = "completed_match"
-				}
-			}
-			stableIDs := func(ids []int64) []string {
-				out := make([]string, 0, len(ids))
-				for _, id := range ids {
-					if symbol, exists := symbolByID[id]; exists {
-						out = append(out, symbol.StableID)
-					}
-				}
-				return out
-			}
-			passCoverage = append(passCoverage,
-				store.ResolutionPassCoverage{PassKind: "cha", Version: "1", Status: chaStatus, Reason: chaReason, CandidateStableIDs: stableIDs(hierarchy.CHACandidateNodeIDs)},
-				store.ResolutionPassCoverage{PassKind: "rta", Version: "1", Status: rtaStatus, Reason: rtaReason, CandidateStableIDs: stableIDs(hierarchy.RTACandidateNodeIDs), AllocationTypeStableIDs: stableIDs(hierarchy.RTAAllocationTypeIDs), ReachableStableIDs: stableIDs(hierarchy.ReachableNodeIDs), RootStableIDs: stableIDs(hierarchy.RootNodeIDs), RootPolicy: hierarchy.RootPolicy, RootPolicyVersion: hierarchy.RootPolicyVersion, RootCompleteness: hierarchy.RootCompleteness, RootBoundary: hierarchy.RootBoundary},
-			)
-		}
-		callsiteRows = append(callsiteRows, &store.ResolutionCallsite{CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision, SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID, SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language, DispatchState: publishedDispatchState, CandidateCount: len(candidateNodeIDs), SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative, Mechanism: publishedMechanism, VerificationStatus: c.VerificationStatus, PassCoverage: passCoverage})
-		var vtaProofs map[int64]resolver.VTAFlowProof
-		if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" {
-			var err error
-			vtaProofs, err = candidateVTAProofs(vta)
-			if err != nil {
-				_ = publishTx.Rollback()
-				abortStagedBuild(db, stagedOutput, "callsite %s VTA proof conservation failed: %v", callsiteID, err)
-			}
-		}
-		graphCandidates := make([]*store.ResolutionCandidate, 0, len(candidateNodeIDs))
-		for ordinal, targetID := range candidateNodeIDs {
-			target, exists := symbolByID[targetID]
-			if !exists {
-				continue
-			}
-			complete := c.ParserComplete
-			receiverChain, _ := json.Marshal(qualifiedCallChain(c.CalleeQualified))
-			importChain, _ := json.Marshal(c.CandidateImportChains[targetID])
-			receiverType, receiverOrigin := c.ReceiverType, c.ReceiverOrigin
-			if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" && len(vta.FlowTypeNodeIDs) > 0 {
-				flowStableIDs := make([]string, 0, len(vta.FlowTypeNodeIDs))
-				flowNames := make([]string, 0, len(vta.FlowTypeNodeIDs))
-				for _, flowID := range vta.FlowTypeNodeIDs {
-					if symbol, exists := symbolByID[flowID]; exists {
-						flowStableIDs = append(flowStableIDs, symbol.StableID)
-						flowNames = append(flowNames, symbol.QualifiedName)
-					}
-				}
-				receiverType = strings.Join(flowNames, ",")
-				receiverOrigin = "vta_flow_stable_ids=" + strings.Join(flowStableIDs, ",")
-			}
-			var flowSourceStableIDs, flowEdgeStableIDs []string
-			var flowSourceFacts, flowEdgeFacts []store.ResolutionFlowFact
-			if _, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok {
-				proof := vtaProofs[targetID]
-				for _, sourceID := range proof.SourceStableIDs {
-					stableID := candidateVTAFactID("vta_source_", sourceID, callsiteID, target.StableID)
-					flowSourceStableIDs = append(flowSourceStableIDs, stableID)
-					flowSourceFacts = append(flowSourceFacts, store.ResolutionFlowFact{StableID: stableID, Kind: "source", CallsiteID: callsiteID, TargetStableID: target.StableID, Payload: "source=" + sourceID})
-				}
-				for _, edgeID := range proof.EdgeStableIDs {
-					stableID := candidateVTAFactID("vta_edge_", edgeID, callsiteID, target.StableID)
-					flowEdgeStableIDs = append(flowEdgeStableIDs, stableID)
-					flowEdgeFacts = append(flowEdgeFacts, store.ResolutionFlowFact{StableID: stableID, Kind: "edge", CallsiteID: callsiteID, TargetStableID: target.StableID, Payload: "edge=" + edgeID})
-				}
-			}
-			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: publishedMechanism, DeclaredScope: target.QualifiedName, ReceiverType: receiverType, ReceiverOrigin: receiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), FlowSourceStableIDs: flowSourceStableIDs, FlowEdgeStableIDs: flowEdgeStableIDs, FlowSourceFacts: flowSourceFacts, FlowEdgeFacts: flowEdgeFacts, DynamicDispatch: publishedDispatchState == string(resolver.DispatchDynamic), ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: selectedNodeID != nil && *selectedNodeID == targetID}
-			candidateRows = append(candidateRows, candidate)
-			graphCandidates = append(graphCandidates, candidate)
-		}
-		if len(graphCandidates) != len(candidateNodeIDs) {
-			_ = publishTx.Rollback()
-			abortStagedBuild(db, stagedOutput, "callsite %s candidate conservation failed: retained=%d expected=%d", callsiteID, len(graphCandidates), len(candidateNodeIDs))
-		}
-		if sourceNode := nodeByID[c.SourceNodeID]; sourceNode != nil {
-			parseState := "complete"
-			if !c.ParserComplete {
-				parseState = "recovered"
-			}
-			graphCallsite := &store.ResolutionCallsite{
-				CallsiteID: callsiteID, CallsiteOrdinal: c.CallsiteOrdinal, RepositoryRevision: repositoryRevision,
-				SourceStableID: source.StableID, SourceNativeID: source.NativeID, SourceID: c.SourceNodeID,
-				SourceLine: c.SourceLine, SourceFile: c.SourceFile, Callee: c.Callee, Language: source.Language,
-				DispatchState: publishedDispatchState, CandidateCount: len(graphCandidates),
-				SelectedTargetStableID: selectedStable, SelectedTargetNativeID: selectedNative,
-				Mechanism: publishedMechanism, VerificationStatus: c.VerificationStatus,
-				RepoID: repositoryID, FileNodeID: fileNodeIDByPath[c.SourceFile], FileIdentity: fileIdentityByPath[c.SourceFile], CallerSymbolID: source.StableID,
-				ASTPath: c.ASTPath, ByteStart: c.ByteStart, ByteEnd: c.ByteEnd, ColumnStart: c.ColumnStart,
-				DispatchForm: c.DispatchForm, ArgumentArity: c.ArgumentArity, ParseState: parseState,
-				PassCoverage: passCoverage,
-			}
-			graphRows = append(graphRows, store.AttachedResolution{Callsite: graphCallsite, Source: sourceNode, Candidates: graphCandidates})
-		}
-	}
-	if err := store.BatchInsertResolutionCallsitesTx(publishTx, callsiteRows); err != nil {
-		_ = publishTx.Rollback()
-		abortStagedBuild(db, stagedOutput, "insert resolution callsites: %v", err)
-	}
-	if err := store.BatchInsertResolutionCandidatesTx(publishTx, candidateRows); err != nil {
-		_ = publishTx.Rollback()
-		abortStagedBuild(db, stagedOutput, "insert resolution candidates: %v", err)
-	}
+	// One producer identity binds both receipts, so it is computed once and
+	// before either phase is attested. Failing to compute it is a core failure:
+	// an unattestable build has nothing to publish.
 	producerIdentity, err := currentBuildIdentity()
 	if err != nil {
-		_ = publishTx.Rollback()
 		abortStagedBuild(db, stagedOutput, "compute producer build identity: %v", err)
 	}
-	graphIdentity := store.GraphCompletionIdentity{
-		Schema: store.GraphCompletionSchema, RepositoryRevision: repositoryRevision,
-		BuildInfoSchema: producerIdentity.Schema, BuildID: producerIdentity.BuildID,
-		GitCommit: producerIdentity.GitCommit, BuildTimeUTC: producerIdentity.BuildTimeUTC,
-		SourceFingerprint: producerIdentity.SourceFingerprint, ExecutableSHA256: producerIdentity.ExecutableSHA256,
-		GoToolchain: producerIdentity.GoToolchain, BuildTags: producerIdentity.BuildTags,
-		GraphSchemaVersion: producerIdentity.SchemaVersion, ResolutionContract: store.CallResolutionContractV2,
-		ResolutionAuthoritySchema: resolver.ResolutionAuthoritySchema,
-		Complete:                  producerIdentity.Complete,
-	}
-	if err := store.AttachResolutionGraphTx(publishTx, graphIdentity, graphRows); err != nil {
-		_ = publishTx.Rollback()
-		abortStagedBuild(db, stagedOutput, "attach graph-native resolution evidence: %v", err)
-	}
-	if err := store.BindGraphCompletionTx(publishTx, graphIdentity); err != nil {
-		_ = publishTx.Rollback()
-		abortStagedBuild(db, stagedOutput, "bind graph completion to producer identity: %v", err)
-	}
-	metadata := map[string]string{
-		"resolution_schema_version":      "2",
-		"resolution_producer_contract":   store.CallResolutionContractV2,
-		"resolution_repository_revision": repositoryRevision,
-		"resolution_complete":            "1",
-	}
-	for key, value := range metadata {
-		if _, err := publishTx.Exec(`INSERT INTO project_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value); err != nil {
-			_ = publishTx.Rollback()
-			abortStagedBuild(db, stagedOutput, "set resolution metadata %s: %v", key, err)
-		}
-	}
-	if err := publishTx.Commit(); err != nil {
-		abortStagedBuild(db, stagedOutput, "commit resolution publication transaction: %v", err)
-	}
+	// Phase 2 (analysis): the resolution graph in its own transaction. A failure
+	// rolls the whole analysis back and returns a named state; the core graph
+	// stays on disk and the receipts below say which layer this graph is.
+	analysis := publishAnalysisPhase(analysisPhaseInput{
+		db: db, stagedOutput: stagedOutput,
+		allNodePtrs: allNodePtrs, allNodes: allNodes, nodeDBIDs: nodeDBIDs,
+		callsites:          callsites,
+		hierarchyByOrdinal: hierarchyByOrdinal, vtaByOrdinal: vtaByOrdinal,
+		mergeIDs:           mergeIDs,
+		repositoryRevision: repositoryRevision, repositoryID: repositoryID,
+		producerIdentity: producerIdentity,
+	})
 	// Containment edges: parent_id → CONTAINS for class-structure queries
 	// Use parentFixups since allNodePtrs had ParentID zeroed before batch insert.
 	var containsPtrs []*store.Edge
@@ -1302,6 +1015,42 @@ func main() {
 	requiredMetadata["property_count"] = fmt.Sprintf("%d", len(propPtrs))
 	requiredMetadata["assertion_count"] = fmt.Sprintf("%d", len(assertPtrs))
 	requiredMetadata["indexer_version"] = "v16-multilang"
+	// The two phase receipts. They are project_meta rows rather than fields on
+	// GraphCompletionIdentity, whose every field its own verifier requires: a
+	// core-only graph could not carry one, and adding an optional field would
+	// change a reader-visible contract. analysis_state is what a reader keys on;
+	// the receipts carry the counts that separate "analysis ran and found
+	// nothing" from "analysis did not run". closure_row_count is reported on the
+	// analysis receipt but computed over the core CALLS graph, so it survives an
+	// analysis failure.
+	corePayload, coreSHA, err := store.CorePhaseReceipt{
+		Schema: store.CorePhaseReceiptSchema, State: store.CorePhaseCommitted,
+		RepositoryRevision: repositoryRevision, BuildID: producerIdentity.BuildID,
+		SourceFingerprint: producerIdentity.SourceFingerprint,
+		ExecutableSHA256:  producerIdentity.ExecutableSHA256,
+		FileCount:         len(files), SymbolCount: len(allNodePtrs),
+		StructuralEdgeCount: len(edgePtrs) + len(containsPtrs),
+	}.Seal()
+	if err != nil {
+		abortStagedBuild(db, stagedOutput, "seal core phase receipt: %v", err)
+	}
+	analysisPayload, analysisSHA, err := store.AnalysisPhaseReceipt{
+		Schema: store.AnalysisPhaseReceiptSchema, State: analysis.State,
+		RepositoryRevision: repositoryRevision, BuildID: producerIdentity.BuildID,
+		FailureReason: analysis.Reason, RolledBack: analysis.RolledBack,
+		CallsiteCount: analysis.CallsiteCount, CandidateCount: analysis.CandidateCount,
+		ClosureRowCount: closureCount,
+	}.Seal()
+	if err != nil {
+		abortStagedBuild(db, stagedOutput, "seal analysis phase receipt: %v", err)
+	}
+	requiredMetadata[store.CorePhaseStateKey] = store.CorePhaseCommitted
+	requiredMetadata[store.CorePhaseReceiptKey] = corePayload
+	requiredMetadata[store.CorePhaseReceiptSHA256Key] = coreSHA
+	requiredMetadata[store.AnalysisStateKey] = analysis.State
+	requiredMetadata[store.AnalysisFailureReasonKey] = analysis.Reason
+	requiredMetadata[store.AnalysisPhaseReceiptKey] = analysisPayload
+	requiredMetadata[store.AnalysisPhaseReceiptSHA256Key] = analysisSHA
 	// FINAL_ARCH_V2 Track-A (B-1/B-5): schema_version is a contract between
 	// the Go writer and Python readers. Readers MUST fail fast if this row
 	// is missing (= old binary) or older than the version the reader expects.
@@ -1417,6 +1166,20 @@ func main() {
 		importResolved, sameFileResolved, nameMatchResolved,
 		elapsed.Milliseconds(), *workers)
 	fmt.Println()
+
+	// Fail-closed stays fail-closed: an operator who requires the analysis layer
+	// still gets a non-zero exit. What changed is that the core graph is on disk
+	// with its receipt to diagnose from, instead of the whole index being thrown
+	// away over one rejected candidate or one analysis that ran out of budget.
+	if analysis.State != store.AnalysisStateComplete {
+		fmt.Fprintf(os.Stderr, "  WARNING: analysis phase %s — this graph is core-only (analysis_state=%s): %s\n",
+			analysis.State, analysis.State, analysis.Reason)
+		if os.Getenv("GT_REQUIRE_ANALYSIS") == "1" {
+			fmt.Fprintf(os.Stderr, "GT_REQUIRE_ANALYSIS=1 but the analysis phase %s: %s\n",
+				analysis.State, analysis.Reason)
+			os.Exit(1)
+		}
+	}
 }
 
 // candidateVTAProofs validates the producer's target-keyed provenance before

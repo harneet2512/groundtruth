@@ -38,7 +38,16 @@ func cleanupStagedOutput(staged string) {
 	}
 }
 
+// abortStagedBuild discards the staged build and exits. Inside phase 2 of a
+// two-phase publication the abort is scoped to the analysis layer instead: the
+// core graph is already committed, the analysis transaction has already been
+// rolled back by the call site, and publishAnalysisPhase is the single point
+// that turns this into a named analysis failure. Raising it as a panic is what
+// lets the phase-2 body keep its own abort call sites unchanged.
 func abortStagedBuild(db *store.DB, staged, format string, args ...any) {
+	if analysisPhaseActive {
+		panic(analysisPhaseAbort{reason: fmt.Sprintf(format, args...)})
+	}
 	if db != nil {
 		_ = db.Close()
 	}
