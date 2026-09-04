@@ -15,6 +15,7 @@ on:
   push:
     branches:
       - har81/cha-mechanism
+      - "final_hardening/**"
 
 jobs:
   build:
