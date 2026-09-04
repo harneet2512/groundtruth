@@ -12,8 +12,8 @@ package parser
 //
 //  2. New declaration nodes, with NEW labels, for declarations the parser
 //     emitted nothing for at all — a TypeScript enum, a Rust `mod`, a C++
-//     namespace. These are added, never converted, so again no pre-existing
-//     total moves.
+//     namespace. These are added, never converted. They are GATED OFF: see
+//     EmitTaxonomyDeclarations for the measurement that turned them off.
 //
 // Plus the syntactic facts the edge kinds are derived from later, recorded as
 // ordinary property rows with the mechanism in the row itself:
@@ -252,6 +252,39 @@ func annotateSyntacticRelations(
 	}
 }
 
+// EmitTaxonomyDeclarations gates the second output: NEW nodes for declarations
+// the parser has no entry for. It is OFF, and the reason is measured, not
+// cautious.
+//
+// MEASURED on arktype at 04355e8b (458 files), full index before and after:
+// emitting TypeScript Enum / EnumMember / TypeAlias / Namespace nodes added
+// 1,565 real symbols and moved eleven pre-existing totals, because the new
+// names enter the resolver's name index and compete for call targets. The
+// CALLS edges did not just grow, they MOVED:
+//
+//	target label   before   after
+//	Method          3,188   2,266
+//	Class             328      17
+//	Function        2,417   2,380
+//	Namespace           0   1,053
+//	TypeAlias           0     460
+//
+// 1,513 calls that had resolved to a callable now resolve to a namespace or a
+// type alias, neither of which is callable. The headline "+243 calls resolved"
+// hides 922 method targets lost. A resolver rung reached through the import
+// index does not filter by label, so a merged TypeScript `namespace X` shadows
+// the `class X` it merges with.
+//
+// Fixing that means isolating taxonomy declarations from the pre-existing name
+// resolution, which is a change inside internal/resolver -- a protected path
+// and a different item. Until then the kind annotation below, which moves
+// nothing, carries the taxonomy, and the declaration mappings stay as data:
+// they drive the language x kind matrix and this emitter, both of which are
+// tested, so turning the gate on is one line plus that resolver work.
+// It is a var rather than a const so the gated emitter stays under test: see
+// TestGatedDeclarationEmitterStillWorks. Production code never assigns it.
+var EmitTaxonomyDeclarations = false
+
 // emitTaxonomyDeclaration emits a node for a declaration the parser has no
 // entry for, plus its members. It returns true when it emitted something.
 //
@@ -260,7 +293,7 @@ func annotateSyntacticRelations(
 // pre-existing label total moves.
 func emitTaxonomyDeclaration(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, isTest bool) bool {
 	tax := specs.TaxonomyFor(sf.Language)
-	if tax == nil || node == nil || len(tax.Decls) == 0 {
+	if !EmitTaxonomyDeclarations || tax == nil || node == nil || len(tax.Decls) == 0 {
 		return false
 	}
 	decl, ok := tax.Decls[node.Type()]
@@ -303,7 +336,7 @@ func emitTaxonomyMembers(
 	result *ParseResult, isTest bool, parentNodeIdx int,
 ) {
 	tax := specs.TaxonomyFor(sf.Language)
-	if tax == nil || node == nil || len(tax.MemberDecls) == 0 {
+	if !EmitTaxonomyDeclarations || tax == nil || node == nil || len(tax.MemberDecls) == 0 {
 		return
 	}
 	member, ok := tax.MemberDecls[node.Type()]

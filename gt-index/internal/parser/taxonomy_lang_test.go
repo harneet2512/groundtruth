@@ -96,17 +96,19 @@ export class Circle implements Shape {
 }
 export function build(): Circle { return new Circle(1) }
 `)
+	// Enum, EnumMember, TypeAlias and Namespace are mapped and emitted by
+	// emitTaxonomyDeclaration, which EmitTaxonomyDeclarations gates off; the
+	// gated emitter is exercised directly in TestGatedDeclarationEmitterWorks.
 	assertKinds(t, result,
-		specs.KindInterface, specs.KindEnum, specs.KindEnumMember,
-		specs.KindTypeAlias, specs.KindNamespace, specs.KindClass,
+		specs.KindInterface, specs.KindClass,
 		specs.KindConstructor, specs.KindAccessor, specs.KindMethod,
 		specs.KindFunction,
 	)
 
 	labels := labelCounts(result)
 	for _, label := range []string{"Enum", "EnumMember", "TypeAlias", "Namespace"} {
-		if labels[label] == 0 {
-			t.Errorf("expected at least one %s node, labels=%v", label, labels)
+		if labels[label] != 0 {
+			t.Errorf("%s node emitted while EmitTaxonomyDeclarations is off; labels=%v", label, labels)
 		}
 	}
 
@@ -153,10 +155,12 @@ impl Handle for Router { fn go(&self) {} }
 pub union Raw { a: u32, b: f32 }
 macro_rules! shout { () => {} }
 `)
+	// Module, TypeAlias, Constant, Union and Macro come from the gated
+	// declaration emitter; struct, enum, trait and impl are separated from the
+	// single Class label they all shared, which needs no new node.
 	assertKinds(t, result,
-		specs.KindModule, specs.KindTypeAlias, specs.KindConstant,
 		specs.KindStruct, specs.KindEnum, specs.KindTrait, specs.KindImpl,
-		specs.KindUnion, specs.KindMacro, specs.KindFunction,
+		specs.KindFunction,
 	)
 	// `impl Handle for Router` states conformance in a named field.
 	if got := propValues(result, PropImplementsType); len(got) != 1 ||
@@ -177,8 +181,7 @@ class Circle implements Shape {
 }
 `)
 	assertKinds(t, result,
-		specs.KindInterface, specs.KindEnum, specs.KindEnumMember,
-		specs.KindRecord, specs.KindAnnotation, specs.KindClass,
+		specs.KindInterface, specs.KindEnum, specs.KindClass,
 		specs.KindConstructor, specs.KindMethod,
 	)
 	if got := propValues(result, PropImplementsType); len(got) != 1 ||
@@ -230,9 +233,7 @@ class Circle { public: double area() const { return 1.0; } };
 double area() { return 1.0; }
 `)
 	assertKinds(t, result,
-		specs.KindNamespace, specs.KindEnum, specs.KindEnumMember,
-		specs.KindUnion, specs.KindTypeAlias, specs.KindStruct,
-		specs.KindClass, specs.KindFunction,
+		specs.KindStruct, specs.KindClass, specs.KindFunction,
 	)
 }
 
@@ -251,8 +252,7 @@ namespace Geo {
 }
 `)
 	assertKinds(t, result,
-		specs.KindNamespace, specs.KindInterface, specs.KindEnum,
-		specs.KindEnumMember, specs.KindRecord, specs.KindStruct,
+		specs.KindInterface, specs.KindStruct,
 		specs.KindClass, specs.KindConstructor, specs.KindMethod,
 	)
 	// base_list does not say which entry is an interface, so C# claims none.
@@ -277,8 +277,7 @@ class Circle implements Shape {
 function build() { return new Circle(); }
 `)
 	assertKinds(t, result,
-		specs.KindNamespace, specs.KindInterface, specs.KindTrait,
-		specs.KindEnum, specs.KindEnumMember, specs.KindClass,
+		specs.KindInterface, specs.KindClass,
 		specs.KindConstructor, specs.KindMethod, specs.KindFunction,
 	)
 	if got := propValues(result, PropImplementsType); len(got) != 1 ||
@@ -303,7 +302,7 @@ func build() -> Circle { return Circle() }
 	got := symbolKinds(result)
 	joined := strings.Join(got, ",")
 	for _, want := range []string{specs.KindStruct, specs.KindEnum, specs.KindImpl,
-		specs.KindProtocol, specs.KindClass, specs.KindTypeAlias} {
+		specs.KindProtocol, specs.KindClass} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("swift kinds %v missing %q", got, want)
 		}
@@ -394,9 +393,13 @@ export function build(): Circle { return new Circle() }
 	if labels["Function"] != 1 {
 		t.Errorf("Function = %d, want 1; labels=%v", labels["Function"], labels)
 	}
-	for _, added := range []string{"Enum", "EnumMember", "TypeAlias"} {
-		if labels[added] == 0 {
-			t.Errorf("expected new label %s to be present; labels=%v", added, labels)
+	// With EmitTaxonomyDeclarations off there is no new label at all: the only
+	// labels in the graph are the ones the parser produced before item 11.
+	for label := range labels {
+		switch label {
+		case "Class", "Method", "Function", "File":
+		default:
+			t.Errorf("unexpected label %q while EmitTaxonomyDeclarations is off; labels=%v", label, labels)
 		}
 	}
 }
@@ -416,5 +419,55 @@ func TestLanguagesWithNoReachableDeclarationsStayEmpty(t *testing.T) {
 			t.Errorf("%s: expected 0 symbol nodes (the spec's node types are absent from the grammar), got %d",
 				c.name, len(result.Nodes))
 		}
+	}
+}
+
+// TestGatedDeclarationEmitterStillWorks exercises the emission path that
+// EmitTaxonomyDeclarations turns off, so the mappings that drive it are not
+// untested data. Turning the gate on is one line plus the resolver isolation
+// described on EmitTaxonomyDeclarations; this test says what happens then.
+func TestGatedDeclarationEmitterStillWorks(t *testing.T) {
+	EmitTaxonomyDeclarations = true
+	defer func() { EmitTaxonomyDeclarations = false }()
+
+	result := parseTaxonomyFixture(t, "a.ts", `
+export enum Color { Red = "red", Green = "green" }
+export type Alias = Color;
+export namespace Geo { export const k = 1; }
+`)
+	labels := labelCounts(result)
+	for _, want := range []struct {
+		label string
+		n     int
+	}{{"Enum", 1}, {"EnumMember", 2}, {"TypeAlias", 1}, {"Namespace", 1}} {
+		if labels[want.label] != want.n {
+			t.Errorf("%s = %d, want %d; labels=%v", want.label, labels[want.label], want.n, labels)
+		}
+	}
+	assertKinds(t, result, specs.KindEnum, specs.KindEnumMember,
+		specs.KindTypeAlias, specs.KindNamespace)
+
+	rust := parseTaxonomyFixture(t, "a.rs", `
+pub mod routing;
+pub type Alias = u32;
+pub const MAX: u32 = 3;
+pub union Raw { a: u32, b: f32 }
+macro_rules! shout { () => {} }
+`)
+	got := strings.Join(symbolKinds(rust), ",")
+	for _, want := range []string{specs.KindModule, specs.KindTypeAlias,
+		specs.KindConstant, specs.KindUnion, specs.KindMacro} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rust kinds %s missing %q", got, want)
+		}
+	}
+}
+
+// TestDeclarationEmissionIsOffByDefault states the shipped default in one
+// place, so flipping it is a visible change to a test rather than a silent
+// change in graph size and call resolution.
+func TestDeclarationEmissionIsOffByDefault(t *testing.T) {
+	if EmitTaxonomyDeclarations {
+		t.Error("EmitTaxonomyDeclarations is on; see its doc comment for the measured reason it is off")
 	}
 }

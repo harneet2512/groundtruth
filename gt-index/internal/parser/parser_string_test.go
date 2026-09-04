@@ -4,10 +4,10 @@ import "testing"
 
 func TestClassifyAssertion(t *testing.T) {
 	tests := []struct {
-		name        string
-		qualified   string
-		simple      string
-		wantKind    string
+		name         string
+		qualified    string
+		simple       string
+		wantKind     string
 		wantIsAssert bool
 	}{
 		// Python unittest
