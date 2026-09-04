@@ -34,6 +34,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip('pier', reason='pier is not installed')
+
 _ROOT = Path(__file__).resolve().parents[1]
 _WF_DIR = _ROOT / ".github" / "workflows"
 _FULL_WF = _WF_DIR / "deepswe_full.yml"
