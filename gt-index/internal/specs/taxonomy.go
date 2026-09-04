@@ -99,12 +99,16 @@ const (
 	EdgeReturnsType        = "RETURNS_TYPE"
 	EdgeParamType          = "PARAM_TYPE"
 	EdgeInstantiates       = "INSTANTIATES"
+	EdgeAccesses           = "ACCESSES"
+	EdgeInjects            = "INJECTS"
+	EdgeMethodOverrides    = "METHOD_OVERRIDES"
 )
 
 // AllTaxonomyEdgeKinds is the closed set of edge kinds this item introduces.
 var AllTaxonomyEdgeKinds = []string{
 	EdgeDeclaredImplements, EdgeOverrides, EdgeDecorates,
 	EdgeReturnsType, EdgeParamType, EdgeInstantiates,
+	EdgeAccesses, EdgeInjects, EdgeMethodOverrides,
 }
 
 // Mechanisms. The mechanism names the syntax that produced the edge, so a
@@ -117,6 +121,9 @@ const (
 	MechReturnAnnotation = "syntactic_return_annotation"
 	MechParamAnnotation  = "syntactic_param_annotation"
 	MechConstructorCall  = "syntactic_constructor_call"
+	MechFieldRead        = "syntactic_field_read"
+	MechFieldWrite       = "syntactic_field_write"
+	MechConstructorParam = "syntactic_constructor_parameter"
 )
 
 // TaxonomyEdgeMechanisms maps each taxonomy edge kind to the mechanisms that
@@ -128,6 +135,9 @@ var TaxonomyEdgeMechanisms = map[string][]string{
 	EdgeReturnsType:        {MechReturnAnnotation},
 	EdgeParamType:          {MechParamAnnotation},
 	EdgeInstantiates:       {MechConstructorCall},
+	EdgeAccesses:           {MechFieldRead, MechFieldWrite},
+	EdgeInjects:            {MechConstructorParam},
+	EdgeMethodOverrides:    {MechOverrideMarker},
 }
 
 // Trust tiers a taxonomy edge may carry. A syntactic mechanism proves that the

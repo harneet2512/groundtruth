@@ -199,6 +199,34 @@ func TestDecoratesPointsFromTheDecorator(t *testing.T) {
 	}
 }
 
+func TestRequiredNamedEdgesUseSyntacticEvidenceAndNeverCertify(t *testing.T) {
+	nodes := []*store.Node{
+		node("Class", "Dependency", "dep.py"),
+		node("Class", "Service", "svc.py"),
+		node("Method", "__init__", "svc.py"),
+		node("Method", "run", "svc.py"),
+		node("Method", "run", "base.py"),
+	}
+	nodes[2].ParentID = 1
+	nodes[3].ParentID = 1
+	props := []parser.PropertyRef{
+		{NodeIdx: 2, Kind: propParam, Value: "dep:Dependency [required]", Line: 3},
+		{NodeIdx: 3, Kind: propFieldRead, Value: "reads: self.value", Line: 7},
+		{NodeIdx: 3, Kind: parser.PropOverrideMarker, Value: specs.MechOverrideMarker, Line: 6},
+	}
+	rows := DeriveEdges(nodes, idsFor(len(nodes)), props)
+
+	for _, kind := range []string{specs.EdgeAccesses, specs.EdgeInjects, specs.EdgeMethodOverrides} {
+		got := edgesByKind(rows, kind)
+		if len(got) != 1 {
+			t.Fatalf("%s rows=%d, want 1", kind, len(got))
+		}
+		if got[0].TrustTier == "CERTIFIED" || got[0].ResolutionMethod == "" {
+			t.Fatalf("%s has invalid tier/mechanism: %+v", kind, got[0])
+		}
+	}
+}
+
 // TestNoTaxonomyEdgeReusesAPreExistingKind is the additivity guard for delta
 // row 9. The list below was MEASURED on 2026-09-03 by enumerating every
 // upper-case string literal in internal/resolver, internal/store, internal/

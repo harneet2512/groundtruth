@@ -198,6 +198,8 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 			// that is.
 			b.emit(specs.EdgeOverrides, specs.MechOverrideMarker, id,
 				withoutSelf(methods[node.Name], id), node.FilePath, p.Line)
+			b.emit(specs.EdgeMethodOverrides, specs.MechOverrideMarker, id,
+				withoutSelf(methods[node.Name], id), node.FilePath, p.Line)
 
 		case propClassDecorator:
 			// `@dataclass` / `@pytest.fixture(scope="module")` -> `dataclass`.
@@ -219,6 +221,24 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 			}
 			b.emit(specs.EdgeParamType, specs.MechParamAnnotation, id,
 				types[name], node.FilePath, p.Line)
+			if isConstructorDeclaration(node) {
+				b.emit(specs.EdgeInjects, specs.MechConstructorParam, id,
+					types[name], node.FilePath, p.Line)
+			}
+
+		case propFieldRead:
+			if target := owningTypeID(node, nodes, ids); target > 0 {
+				b.emit(specs.EdgeAccesses, specs.MechFieldRead, id,
+					[]int64{target}, node.FilePath, p.Line)
+			}
+
+		case propSideEffect:
+			if strings.HasPrefix(strings.TrimSpace(p.Value), "mutates:") && strings.Contains(p.Value, ".") {
+				if target := owningTypeID(node, nodes, ids); target > 0 {
+					b.emit(specs.EdgeAccesses, specs.MechFieldWrite, id,
+						[]int64{target}, node.FilePath, p.Line)
+				}
+			}
 		}
 	}
 
@@ -247,7 +267,32 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 const (
 	propClassDecorator = "class_decorator"
 	propParam          = "param"
+	propFieldRead      = "field_read"
+	propSideEffect     = "side_effect"
 )
+
+func isConstructorDeclaration(node *store.Node) bool {
+	if node == nil {
+		return false
+	}
+	return node.Label == "Constructor" || node.Name == "__init__" ||
+		node.Name == "constructor" || strings.HasPrefix(node.Name, "New")
+}
+
+func owningTypeID(node *store.Node, nodes []*store.Node, ids []int64) int64 {
+	if node == nil || (node.Label != "Method" && node.Label != "Constructor") {
+		return 0
+	}
+	parentIdx := int(node.ParentID)
+	if parentIdx < 0 || parentIdx >= len(nodes) || parentIdx >= len(ids) {
+		return 0
+	}
+	parent := nodes[parentIdx]
+	if parent == nil || !typeLabels[parent.Label] {
+		return 0
+	}
+	return ids[parentIdx]
+}
 
 // splitFactValue splits a `name|mechanism` fact value.
 func splitFactValue(value string) (name, mechanism string) {
