@@ -74,6 +74,20 @@ packages = ["src/groundtruth"]
 target-version = "py311"
 line-length = 100
 
+[tool.ruff.lint]
+# Judgment-call classes deferred to a reviewed pass (REV-280).
+# Mechanical classes (F401, F541, E401, E713) were fixed at 327f70235.
+# These remain and are tracked — do NOT add blanket ignores beyond this list.
+ignore = [
+    "E402",  # module-import-not-at-top-of-file (14 instances, deliberate conditional imports)
+    "E701",  # multiple-statements-on-one-line-colon (9, one-liner branches)
+    "E702",  # multiple-statements-on-one-line-semicolon (27, compact test assertions)
+    "E731",  # lambda-assignment (3, callbacks)
+    "E741",  # ambiguous-variable-name (35, single-letter math/loop vars)
+    "E742",  # ambiguous-class-name (2)
+    "F841",  # unused-variable (18, assigned-for-side-effect or debugging)
+]
+
 [tool.mypy]
 strict = true
 python_version = "3.11"

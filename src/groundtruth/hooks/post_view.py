@@ -779,7 +779,7 @@ def graph_navigation(
     _iteration_band = "early_0_25"
     if rebuild_l3b:
         try:
-            from groundtruth.telemetry.constants import (
+            from groundtruth.telemetry.constants import (  # noqa: F401
                 L3B_EDGE_LIMITS,
                 BAND_EARLY,
                 BAND_MID,
