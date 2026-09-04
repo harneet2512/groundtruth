@@ -1,0 +1,8 @@
+--- FAIL: TestTaxonomyEdgesReachTheGraph (ELAPSED)
+    taxonomy_edges_test.go:109: no DECLARED_IMPLEMENTS edge reached the graph; internal/taxonomy.DeriveEdges is not wired into publication
+    taxonomy_edges_test.go:109: no OVERRIDES edge reached the graph; internal/taxonomy.DeriveEdges is not wired into publication
+    taxonomy_edges_test.go:109: no RETURNS_TYPE edge reached the graph; internal/taxonomy.DeriveEdges is not wired into publication
+    taxonomy_edges_test.go:172: no taxonomy edge rows to inspect
+FAIL
+FAIL	github.com/harneet2512/groundtruth/gt-index/cmd/gt-index	ELAPSED
+FAIL
