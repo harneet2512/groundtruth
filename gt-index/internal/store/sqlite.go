@@ -151,6 +151,12 @@ type ResolutionCallsite struct {
 	ArgumentArity          *uint16
 	ParseState             string
 	PassCoverage           []ResolutionPassCoverage
+	// AbstentionReason lets the producer publish a boundary the derivation
+	// mapping cannot infer from mechanism and dispatch state alone -- an
+	// analysis that was stopped by a budget rather than by the shape of the
+	// code. It overrides the derived reason and must come from the closed
+	// callsiteAbstentionVocabulary.
+	AbstentionReason string
 }
 
 // AttachedResolution is the graph-native representation of a resolver callsite.
@@ -463,6 +469,18 @@ var receiverOriginVocabulary = map[string]struct{}{
 	"assignment": {}, "return_type": {}, "call_syntax": {}, "type_qualifier": {},
 }
 
+// callsiteAbstentionVocabulary is the closed set of reasons a callsite may
+// publish for not claiming a target. Every entry is already produced by
+// resolutionDerivation or by resolver.VTAAbstentionReason; a producer-supplied
+// reason outside it is rejected, because a reason nobody can enumerate cannot
+// be queried and a typo would publish a graph that reads as degraded for a
+// boundary that does not exist.
+var callsiteAbstentionVocabulary = map[string]struct{}{
+	"budget_exhausted": {}, "candidate_only_flow_evidence": {},
+	"dynamic_target_not_statically_proven": {}, "parser_incomplete": {},
+	"zero": {}, "external_unresolved": {},
+}
+
 type GraphCompletionIdentity struct {
 	Schema                    string `json:"schema"`
 	RepositoryRevision        string `json:"repository_revision"`
@@ -565,7 +583,7 @@ type Assertion struct {
 // Commit, while still avoiding the per-transaction fsync of FULL. OFF was
 // silently corrupting the WAL when the indexer was killed mid-write.
 func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000&_cache_size=-524288")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -1267,6 +1285,11 @@ func (d *DB) BatchInsertResolutionCandidates(candidates []*ResolutionCandidate) 
 // HAS_CALLSITE edge; each viable target is linked from that node by a CANDIDATE
 // edge. The complete set is written in the caller's transaction so a graph
 // reader observes either all attached evidence or none of it.
+// attachProgressInterval is how often the publication reports progress. Small
+// enough to catch a stall inside a long repository, large enough that an
+// ordinary repository prints nothing at all.
+const attachProgressInterval = 2000
+
 func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows []AttachedResolution) error {
 	if tx == nil {
 		return fmt.Errorf("nil graph transaction")
@@ -1280,8 +1303,28 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 	if err := insertResolutionPolicyV2Tx(tx, InspectAllCandidatePolicy, identity); err != nil {
 		return fmt.Errorf("insert inspection query policy: %w", err)
 	}
+	// Every insert below runs once per callsite, per candidate or per
+	// completeness fact. Preparing them once turns a per-statement parse into a
+	// per-transaction one; the SQL text and bound arguments are unchanged.
+	stmts, err := prepareResolutionStmts(tx)
+	if err != nil {
+		return err
+	}
+	defer stmts.Close()
 	revision := identity.RepositoryRevision
-	for _, row := range rows {
+	// Publication is one atomic transaction with no output until it commits, so
+	// a repository that takes an hour and one that is stuck look identical from
+	// outside. Report progress against a known denominator: a linear rate says
+	// "slow, and here is the wall clock"; a rate that collapses says "stuck,
+	// and here is the callsite it stopped on". Silent on anything smaller than
+	// one interval, which is every repository that already publishes quickly.
+	attachStart := time.Now()
+	for index, row := range rows {
+		if index > 0 && index%attachProgressInterval == 0 {
+			elapsed := time.Since(attachStart)
+			fmt.Fprintf(os.Stderr, "  attach: %d/%d callsites in %s (%.0f/s)\n",
+				index, len(rows), elapsed.Round(time.Second), float64(index)/elapsed.Seconds())
+		}
 		if row.Callsite == nil || row.Source == nil {
 			return fmt.Errorf("graph resolution row missing callsite or source")
 		}
@@ -1352,6 +1395,17 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 		if err != nil {
 			return fmt.Errorf("callsite %s: %w", c.CallsiteID, err)
 		}
+		// A boundary the producer observed and the derivation mapping cannot
+		// see -- a budget that stopped the analysis -- overrides the derived
+		// reason. It reaches both surfaces a reader consults: the
+		// HAS_CALLSITE edge column below and the Callsite node's signature
+		// JSON assembled from this same variable.
+		if c.AbstentionReason != "" {
+			if _, known := callsiteAbstentionVocabulary[c.AbstentionReason]; !known {
+				return fmt.Errorf("callsite %s has unknown abstention reason %q", c.CallsiteID, c.AbstentionReason)
+			}
+			abstentionReason = c.AbstentionReason
+		}
 		coverage, steps := resolutionCoverage(c)
 		passKind, passStatus := derivationKind, "completed"
 		for _, pass := range coverage {
@@ -1378,12 +1432,7 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 			"derivation_contract":  ResolutionDerivationContract,
 			"structural_authority": "source_syntax", "target_authority": c.VerificationStatus,
 		})
-		res, err := tx.Exec(`INSERT INTO nodes
-			(label,name,qualified_name,file_path,start_line,end_line,signature,language,
-			 stable_id,node_type,schema_version,repo_id,source_revision,producer_build_id,file_node_id,caller_symbol_id,
-			 ast_path,byte_start,byte_end,line_start,column_start,dispatch_form,callee_lexeme,argument_arity,parse_state,
-			 candidate_state,selected_target_id,candidate_count_v2,derivation_set_id,completeness_set_id)
-			VALUES ('Callsite',?,?,?,?,?,?,?,?, 'callsite',2,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		res, err := stmts.callsiteNode.Exec(
 			c.Callee, v2.CallsiteID, c.SourceFile, c.SourceLine, c.SourceLine, string(callsiteMeta), c.Language,
 			v2.CallsiteID, v2.RepoID, identity.RepositoryRevision, identity.BuildID, v2.FileNodeID, c.CallerSymbolID,
 			v2.ASTPath, v2.ByteStart, v2.ByteEnd, c.SourceLine, c.ColumnStart, v2.DispatchForm, c.Callee, c.ArgumentArity,
@@ -1395,7 +1444,7 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 		if err != nil {
 			return fmt.Errorf("callsite node id %s: %w", c.CallsiteID, err)
 		}
-		if err := insertResolutionV2FactsTx(tx, identity, c, callsiteNodeID, v2); err != nil {
+		if err := insertResolutionV2FactsTx(stmts, identity, c, callsiteNodeID, v2); err != nil {
 			return err
 		}
 		linkMeta, _ := json.Marshal(map[string]any{
@@ -1403,11 +1452,7 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 			"dispatch_state": c.DispatchState, "structural_authority": "source_syntax",
 			"target_authority": c.VerificationStatus,
 		})
-		if _, err := tx.Exec(`INSERT INTO edges
-			(source_id,target_id,type,source_line,source_file,resolution_method,confidence,metadata,trust_tier,candidate_count,evidence_type,verification_status,stable_id,schema_version,callsite_stable_id,
-			 derivation_contract,derivation_kind,evidence_set,analysis_boundary,pass_kind,pass_version,pass_status,abstention_reason,sibling_count,
-			 producer_build_id,producer_source_fingerprint,pass_coverage,provenance_steps)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := stmts.hasCallsiteEdge.Exec(
 			c.SourceID, callsiteNodeID, "HAS_CALLSITE", c.SourceLine, c.SourceFile,
 			"graph_native", nil, string(linkMeta), "STRUCTURAL", c.CandidateCount,
 			"resolver_callsite", "structural_only", canonicalResolutionID(c.CallerSymbolID, "HAS_CALLSITE", v2.CallsiteID), CallResolutionSchemaVersion, v2.CallsiteID,
@@ -1442,17 +1487,22 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 			// Candidate viability is a typed, set-valued derivation fact. NULL is
 			// deliberate: zero would still persist an uncalibrated probability-like
 			// scalar and invite generic confidence consumers to interpret policy as truth.
-			if _, err := tx.Exec(`INSERT INTO edges
-				(source_id,target_id,type,source_line,source_file,resolution_method,confidence,metadata,trust_tier,candidate_count,evidence_type,verification_status,
-				 derivation_contract,derivation_kind,evidence_set,analysis_boundary,pass_kind,pass_version,pass_status,abstention_reason,sibling_count,
-				 producer_build_id,producer_source_fingerprint,pass_coverage,provenance_steps,
-				 declared_scope,receiver_type,receiver_origin,receiver_shape,receiver_chain,import_chain,export_status,parser_complete)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			//
+			// pass_coverage is a CALLSITE fact, not a candidate fact. It used to be
+			// copied verbatim onto every candidate edge, so a callsite with 106
+			// candidates stored the same blob 106 times. On a 250-file boa sample
+			// that is 713 MB of the publication's 845 MB of candidate-edge JSON --
+			// the reason an atomic publication of the whole repository never
+			// terminated. Nothing reads it here: queryAttachedCandidates selects the
+			// literal '[]' for this column and loadResolutionV2Evidence rebuilds
+			// coverage from the CompletenessFact nodes. The authoritative copy stays
+			// on the HAS_CALLSITE edge above, one row per callsite.
+			if _, err := stmts.candidateEdge.Exec(
 				callsiteNodeID, candidate.TargetID, "CANDIDATE", c.SourceLine, c.SourceFile,
 				candidate.Mechanism, nil, string(candidateMeta),
 				"CANDIDATE", c.CandidateCount, "resolver_candidate", candidate.VerificationStatus,
 				ResolutionDerivationContract, derivationKind, evidenceSet, revision, passKind, "1", passStatus, "", c.CandidateCount,
-				identity.BuildID, identity.SourceFingerprint, string(coverageJSON), string(candidateStepsJSON),
+				identity.BuildID, identity.SourceFingerprint, emptyCoverageProjection, string(candidateStepsJSON),
 				candidate.DeclaredScope, candidate.ReceiverType, candidate.ReceiverOrigin, candidate.ReceiverShape,
 				candidate.ReceiverChain, candidate.ImportChain, candidate.ExportStatus, candidate.ParserComplete); err != nil {
 				return fmt.Errorf("insert candidate edge %s/%d: %w", c.CallsiteID, candidate.Ordinal, err)

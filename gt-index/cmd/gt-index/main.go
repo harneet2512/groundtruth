@@ -687,6 +687,14 @@ func main() {
 	// the existing resolver evidence, so an open hierarchy cannot be accepted
 	// as a closed target set by downstream queries.
 	hierarchyClosed := os.Getenv("GT_HIERARCHY_CLOSED") == "1"
+	// Publication is one atomic transaction, so an analysis that does not
+	// terminate costs the entire graph rather than one callsite. The budgets
+	// are the execution rail; exceeding one publishes a typed abstention, not
+	// silence. A malformed setting fails closed here, before any work.
+	budgets, budgetErr := resolveIndexBudgets(os.LookupEnv)
+	if budgetErr != nil {
+		abortStagedBuild(db, stagedOutput, "%v", budgetErr)
+	}
 	receiverTypes := make(map[int]string, len(callsites))
 	resolverCandidates := make([][]int64, len(allCalls))
 	for _, callsite := range callsites {
@@ -700,11 +708,26 @@ func main() {
 	for _, result := range hierarchyResults {
 		hierarchyByOrdinal[result.CallsiteOrdinal] = result
 	}
-	vtaResults := resolver.AnalyzeVTA(allCalls, nodeMeta, inhMap, allAssignments)
+	vtaResults := resolver.AnalyzeVTAWithBudget(allCalls, nodeMeta, inhMap, allAssignments, budgets.VTAIterations)
 	vtaByOrdinal := make(map[int]resolver.VTAResult, len(vtaResults))
+	vtaIterations, vtaBudgetExhausted := 0, false
 	for _, result := range vtaResults {
 		vtaByOrdinal[result.CallsiteOrdinal] = result
+		if result.Iterations > vtaIterations {
+			vtaIterations = result.Iterations
+		}
+		if result.BudgetExhausted {
+			vtaBudgetExhausted = true
+		}
 	}
+	fmt.Fprintf(os.Stderr, "  VTA fixed point: %d rounds (budget %d, exhausted=%t); flow-fact budget %d\n",
+		vtaIterations, budgets.VTAIterations, vtaBudgetExhausted, budgets.FlowFacts)
+	// What the publication is about to cost, reported before the transaction
+	// opens rather than inferred from a graph that may never be published. The
+	// fan-out distribution is what a budget has to be set from; the RTA set
+	// sizes are repository-scoped facts that the coverage payload materialises
+	// once per callsite, so they multiply by the callsite count.
+	reportPublicationFanout(os.Stderr, vtaResults, hierarchyResults, budgets.FlowFacts)
 	mergeIDs := func(left, right []int64) []int64 {
 		seen := make(map[int64]struct{}, len(left)+len(right))
 		out := make([]int64, 0, len(left)+len(right))
@@ -737,6 +760,8 @@ func main() {
 	// inserted in the preceding structural phase; this transaction prevents any
 	// resolution reader from observing only part of the resolution publication.
 	edgeStart := time.Now()
+	budgetAbstainedCallsites, flowFactsWithheld := 0, 0
+	coverageBudgetedCallsites, coverageSetsWithheld := 0, 0
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
 		edgePtrs[i] = &store.Edge{
@@ -1106,6 +1131,20 @@ func main() {
 	// closure-bearing db without a table probe. 0 means closure disabled or
 	// no verified edges to close over — readers fall back to live BFS.
 	requiredMetadata["closure_count"] = fmt.Sprintf("%d", closureCount)
+
+	// The budget in force is sealed into the receipt so a degraded graph is
+	// provably degraded: a reader can tell a bounded publication from a
+	// complete one without re-running the producer. 0 means the budget was
+	// disabled and the counts are the unbudgeted ones.
+	requiredMetadata["vta_iteration_budget"] = fmt.Sprintf("%d", budgets.VTAIterations)
+	requiredMetadata["flow_fact_budget"] = fmt.Sprintf("%d", budgets.FlowFacts)
+	requiredMetadata["vta_iterations"] = fmt.Sprintf("%d", vtaIterations)
+	requiredMetadata["vta_budget_exhausted"] = fmt.Sprintf("%t", vtaBudgetExhausted)
+	requiredMetadata["budget_abstained_callsites"] = fmt.Sprintf("%d", budgetAbstainedCallsites)
+	requiredMetadata["budget_withheld_flow_facts"] = fmt.Sprintf("%d", flowFactsWithheld)
+	requiredMetadata["coverage_set_budget"] = fmt.Sprintf("%d", budgets.CoverageSets)
+	requiredMetadata["budget_coverage_set_callsites"] = fmt.Sprintf("%d", coverageBudgetedCallsites)
+	requiredMetadata["budget_withheld_coverage_ids"] = fmt.Sprintf("%d", coverageSetsWithheld)
 	if err := setRequiredMetadata(db, requiredMetadata); err != nil {
 		abortStagedBuild(db, stagedOutput, "%v", err)
 	}

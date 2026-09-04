@@ -19,10 +19,16 @@ func TestIndexBudgetsResolveFromEnvironment(t *testing.T) {
 		t.Fatalf("unset environment is not a configuration error: %v", err)
 	}
 	if defaults.VTAIterations <= 0 || defaults.FlowFacts <= 0 {
-		t.Fatalf("unset budgets must take a positive built-in default, got %+v", defaults)
+		t.Fatalf("unset analysis budgets must take a positive built-in default, got %+v", defaults)
 	}
-	if defaults.VTAIterations != defaultVTAIterationBudget || defaults.FlowFacts != defaultFlowFactBudget {
-		t.Fatalf("unset budgets %+v do not equal the declared defaults %d/%d", defaults, defaultVTAIterationBudget, defaultFlowFactBudget)
+	// The coverage-set rail ships disabled: it changes published evidence and
+	// no completed run yet justifies a positive value. That is a contract, not
+	// an oversight, so it is pinned.
+	if defaults.CoverageSets != 0 {
+		t.Fatalf("the coverage-set budget must ship disabled, got %d", defaults.CoverageSets)
+	}
+	if defaults.VTAIterations != defaultVTAIterationBudget || defaults.FlowFacts != defaultFlowFactBudget || defaults.CoverageSets != defaultCoverageSetBudget {
+		t.Fatalf("unset budgets %+v do not equal the declared defaults %d/%d/%d", defaults, defaultVTAIterationBudget, defaultFlowFactBudget, defaultCoverageSetBudget)
 	}
 
 	fixed := func(values map[string]string) func(string) (string, bool) {
@@ -32,28 +38,29 @@ func TestIndexBudgetsResolveFromEnvironment(t *testing.T) {
 		}
 	}
 	disabled, err := resolveIndexBudgets(fixed(map[string]string{
-		vtaIterationBudgetEnv: "0", flowFactBudgetEnv: "0",
+		vtaIterationBudgetEnv: "0", flowFactBudgetEnv: "0", coverageSetBudgetEnv: "0",
 	}))
 	if err != nil {
 		t.Fatalf("explicit 0 is not a configuration error: %v", err)
 	}
-	if disabled.VTAIterations != 0 || disabled.FlowFacts != 0 {
+	if disabled.VTAIterations != 0 || disabled.FlowFacts != 0 || disabled.CoverageSets != 0 {
 		t.Fatalf("explicit 0 must disable the budget, got %+v", disabled)
 	}
 
 	set, err := resolveIndexBudgets(fixed(map[string]string{
-		vtaIterationBudgetEnv: "12", flowFactBudgetEnv: "34",
+		vtaIterationBudgetEnv: "12", flowFactBudgetEnv: "34", coverageSetBudgetEnv: "56",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if set.VTAIterations != 12 || set.FlowFacts != 34 {
+	if set.VTAIterations != 12 || set.FlowFacts != 34 || set.CoverageSets != 56 {
 		t.Fatalf("explicit budgets were not honoured: %+v", set)
 	}
 
 	for name, value := range map[string]string{
 		vtaIterationBudgetEnv: "not-a-number",
 		flowFactBudgetEnv:     "-1",
+		coverageSetBudgetEnv:  "1.5",
 	} {
 		if _, err := resolveIndexBudgets(fixed(map[string]string{name: value})); err == nil {
 			t.Fatalf("%s=%q was accepted as a budget", name, value)
@@ -96,5 +103,19 @@ func TestFlowFactBudgetIsDisabledAtZeroAndInclusiveAboveIt(t *testing.T) {
 	}
 	if !flowFactBudgetExceeded(4, 5) {
 		t.Fatal("a budget of 4 accepted 5 flow facts")
+	}
+	// The coverage-set budget bounds a repository-scoped stable-ID set that is
+	// materialised once per callsite, and follows the same disabled-at-zero,
+	// inclusive-above-zero contract.
+	for _, size := range []int{0, 1, 1 << 20} {
+		if coverageSetBudgetExceeded(0, size) {
+			t.Fatalf("a disabled coverage-set budget rejected a set of %d IDs", size)
+		}
+	}
+	if coverageSetBudgetExceeded(64, 64) {
+		t.Fatal("a coverage-set budget of 64 rejected exactly 64 IDs")
+	}
+	if !coverageSetBudgetExceeded(64, 65) {
+		t.Fatal("a coverage-set budget of 64 accepted 65 IDs")
 	}
 }

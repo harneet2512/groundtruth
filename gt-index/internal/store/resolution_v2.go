@@ -57,7 +57,7 @@ type resolutionV2Publication struct {
 	Completeness      []resolutionV2Fact
 }
 
-func persistVTAFlowFactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *ResolutionCallsite, candidate *ResolutionCandidate) error {
+func persistVTAFlowFactsTx(stmts *resolutionStmts, identity GraphCompletionIdentity, c *ResolutionCallsite, candidate *ResolutionCandidate) error {
 	if len(candidate.FlowSourceStableIDs) == 0 && len(candidate.FlowEdgeStableIDs) == 0 {
 		return nil
 	}
@@ -80,7 +80,7 @@ func persistVTAFlowFactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *Reso
 		if !ok {
 			return fmt.Errorf("candidate %s references missing VTA source fact %q", candidate.TargetStableID, id)
 		}
-		if err := persistOneVTAFlowFactTx(tx, identity, c, candidate, fact, "vta_flow_source_fact"); err != nil {
+		if err := persistOneVTAFlowFactTx(stmts, identity, c, candidate, fact, "vta_flow_source_fact"); err != nil {
 			return err
 		}
 	}
@@ -89,14 +89,14 @@ func persistVTAFlowFactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *Reso
 		if !ok {
 			return fmt.Errorf("candidate %s references missing VTA edge fact %q", candidate.TargetStableID, id)
 		}
-		if err := persistOneVTAFlowFactTx(tx, identity, c, candidate, fact, "vta_flow_edge_fact"); err != nil {
+		if err := persistOneVTAFlowFactTx(stmts, identity, c, candidate, fact, "vta_flow_edge_fact"); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func persistOneVTAFlowFactTx(tx *sql.Tx, identity GraphCompletionIdentity, c *ResolutionCallsite, candidate *ResolutionCandidate, fact ResolutionFlowFact, nodeType string) error {
+func persistOneVTAFlowFactTx(stmts *resolutionStmts, identity GraphCompletionIdentity, c *ResolutionCallsite, candidate *ResolutionCandidate, fact ResolutionFlowFact, nodeType string) error {
 	prefix := "vta_source_"
 	if fact.Kind == "edge" {
 		prefix = "vta_edge_"
@@ -104,10 +104,23 @@ func persistOneVTAFlowFactTx(tx *sql.Tx, identity GraphCompletionIdentity, c *Re
 	if err := validateVTAFactID(fact.StableID, prefix); err != nil {
 		return err
 	}
-	var existingType, existingCallsite, existingTarget, existingPayload string
-	err := tx.QueryRow(`SELECT COALESCE(node_type,''), COALESCE(callsite_id,''), COALESCE(target_symbol_id,''), COALESCE(signature,'') FROM nodes WHERE stable_id=?`, fact.StableID).Scan(&existingType, &existingCallsite, &existingTarget, &existingPayload)
+	want := vtaFactBinding{NodeType: nodeType, CallsiteID: c.CallsiteID, TargetID: candidate.TargetStableID, Payload: fact.Payload}
+	// The existence check is hoisted out of the per-candidate loop: a fact this
+	// transaction already published costs a map lookup rather than a SELECT.
+	// The cached tuple is the same one the SELECT read back, so a conflicting
+	// rebinding is still rejected -- the cache narrows the cost of the check,
+	// never its meaning.
+	if existing, cached := stmts.vtaFacts[fact.StableID]; cached {
+		if existing != want {
+			return fmt.Errorf("VTA fact %q is bound to conflicting graph data", fact.StableID)
+		}
+		return nil
+	}
+	var existing vtaFactBinding
+	err := stmts.vtaFactLookup.QueryRow(fact.StableID).Scan(&existing.NodeType, &existing.CallsiteID, &existing.TargetID, &existing.Payload)
 	if err == nil {
-		if existingType != nodeType || existingCallsite != c.CallsiteID || existingTarget != candidate.TargetStableID || existingPayload != fact.Payload {
+		stmts.vtaFacts[fact.StableID] = existing
+		if existing != want {
 			return fmt.Errorf("VTA fact %q is bound to conflicting graph data", fact.StableID)
 		}
 		return nil
@@ -115,15 +128,13 @@ func persistOneVTAFlowFactTx(tx *sql.Tx, identity GraphCompletionIdentity, c *Re
 	if err != sql.ErrNoRows {
 		return fmt.Errorf("lookup VTA fact %q: %w", fact.StableID, err)
 	}
-	_, err = tx.Exec(`INSERT INTO nodes
-		(label,name,qualified_name,file_path,signature,language,stable_id,node_type,schema_version,source_revision,producer_build_id,
-		 callsite_id,target_symbol_id,pass_kind,pass_version,step_ordinal,operation,boundary_id)
-		VALUES (?,?,?,?,?,?,?, ?,2,?,?,?,?, 'vta','1',0,'seed',?)`,
+	_, err = stmts.vtaFactInsert.Exec(
 		nodeType, fact.StableID, fact.StableID, c.SourceFile, fact.Payload, c.Language, fact.StableID, nodeType,
 		identity.RepositoryRevision, identity.BuildID, c.CallsiteID, candidate.TargetStableID, identity.RepositoryRevision)
 	if err != nil {
 		return fmt.Errorf("persist VTA fact %q: %w", fact.StableID, err)
 	}
+	stmts.vtaFacts[fact.StableID] = want
 	return nil
 }
 
@@ -385,10 +396,10 @@ func insertResolutionPolicyV2Tx(tx *sql.Tx, policy CandidateQueryPolicy, identit
 	return err
 }
 
-func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *ResolutionCallsite, callsiteNodeID int64, v2 resolutionV2Publication) error {
+func insertResolutionV2FactsTx(stmts *resolutionStmts, identity GraphCompletionIdentity, c *ResolutionCallsite, callsiteNodeID int64, v2 resolutionV2Publication) error {
 	for _, candidate := range v2.Candidates {
 		fact := candidate.Candidate
-		if err := persistVTAFlowFactsTx(tx, identity, c, fact); err != nil {
+		if err := persistVTAFlowFactsTx(stmts, identity, c, fact); err != nil {
 			return fmt.Errorf("persist VTA flow facts for %s/%d: %w", c.CallsiteID, fact.Ordinal, err)
 		}
 		declaredTypeID := ""
@@ -403,10 +414,7 @@ func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *
 		if fact.ImportChain != "" && fact.ImportChain != "[]" {
 			importID = canonicalResolutionID("import", fact.ImportChain)
 		}
-		result, err := tx.Exec(`INSERT INTO nodes
-			(label,name,qualified_name,file_path,language,stable_id,node_type,schema_version,source_revision,producer_build_id,
-			 callsite_id,target_symbol_id,pass_kind,pass_version,step_ordinal,operation,input_fact_ids,declared_type_id,scope_id,import_id,boundary_id)
-			VALUES ('DerivationFact',?,?,?,?,?,'derivation_fact',2,?,?,?,?,?,'1',0,'include',?,?,?,?,?)`,
+		result, err := stmts.derivationFact.Exec(
 			candidate.PassKind, candidate.FactID, c.SourceFile, "resolution", candidate.FactID,
 			identity.RepositoryRevision, identity.BuildID, v2.CallsiteID, fact.TargetStableID, candidate.PassKind,
 			mustJSON(append(append([]string{}, fact.FlowSourceStableIDs...), fact.FlowEdgeStableIDs...)), declaredTypeID, scopeID, importID, identity.RepositoryRevision)
@@ -417,15 +425,10 @@ func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *
 		if err != nil {
 			return err
 		}
-		if err := insertResolutionFactLinkTx(tx, callsiteNodeID, factNodeID, "HAS_DERIVATION_FACT", v2.CallsiteID, candidate.FactID); err != nil {
+		if err := insertResolutionFactLinkTx(stmts, callsiteNodeID, factNodeID, "HAS_DERIVATION_FACT", v2.CallsiteID, candidate.FactID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO edges
-			(source_id,target_id,type,source_file,resolution_method,confidence,trust_tier,candidate_count,evidence_type,verification_status,
-			 stable_id,schema_version,callsite_stable_id,target_symbol_id,ordinal,viability,derivation_fact_ids,exclusion_fact_ids,
-			 derivation_contract,derivation_kind,evidence_set,analysis_boundary,pass_kind,pass_version,pass_status,sibling_count,producer_build_id,producer_source_fingerprint,
-			 declared_scope,receiver_type,receiver_origin,receiver_shape,receiver_chain,import_chain,export_status,parser_complete)
-			VALUES (?,?, 'CANDIDATE_TARGET',?,?,NULL,'CANDIDATE',?,'resolver_candidate',?,?,?,?,? ,?,'viable',?,'[]',?,?,?,?,?,'1','completed',?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := stmts.candidateTargetEdge.Exec(
 			callsiteNodeID, fact.TargetID, c.SourceFile, fact.Mechanism, len(v2.Candidates), fact.VerificationStatus,
 			candidate.EdgeID, CallResolutionSchemaVersion, v2.CallsiteID, fact.TargetStableID, fact.Ordinal,
 			mustJSON([]string{candidate.FactID}), ResolutionDerivationContract, candidate.PassKind, v2.EvidenceSet, identity.RepositoryRevision,
@@ -447,10 +450,7 @@ func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *
 			return fmt.Errorf("selected v2 target is not a viable candidate")
 		}
 		selectionID := canonicalResolutionID(v2.CallsiteID, "SELECTED_TARGET", v2.SelectedTargetID, v2.SelectionRuleID)
-		if _, err := tx.Exec(`INSERT INTO edges
-			(source_id,target_id,type,source_line,source_file,resolution_method,confidence,trust_tier,candidate_count,evidence_type,verification_status,
-			 stable_id,schema_version,callsite_stable_id,target_symbol_id,selection_rule_id,analysis_boundary,producer_build_id,producer_source_fingerprint)
-			VALUES (?,?, 'SELECTED_TARGET',?,?,?,NULL,'CERTIFIED',1,'call_resolution_v2','source_supported',?,2,?,?,?,?,?,?)`,
+		if _, err := stmts.selectedTargetEdge.Exec(
 			callsiteNodeID, selected.TargetID, c.SourceLine, c.SourceFile, selected.Mechanism, selectionID, v2.CallsiteID,
 			v2.SelectedTargetID, v2.SelectionRuleID, identity.RepositoryRevision, identity.BuildID, identity.SourceFingerprint); err != nil {
 			return fmt.Errorf("insert selected v2 target edge: %w", err)
@@ -461,10 +461,7 @@ func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *
 		if fact.Known != nil {
 			known = *fact.Known
 		}
-		result, err := tx.Exec(`INSERT INTO nodes
-			(label,name,qualified_name,file_path,language,stable_id,node_type,schema_version,source_revision,producer_build_id,
-			 callsite_id,pass_kind,pass_version,boundary_kind,boundary_id,fact_status,covered_units,known_units,reason_code,candidate_stable_ids,flow_type_stable_ids,allocation_type_stable_ids,reachable_stable_ids,root_stable_ids,root_policy,root_policy_version,root_completeness,root_boundary)
-			VALUES ('CompletenessFact',?,?,?,?,?,'completeness_fact',2,?,?,?,?,'1',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		result, err := stmts.completenessFact.Exec(
 			fact.PassKind, fact.ID, c.SourceFile, "resolution", fact.ID, identity.RepositoryRevision, identity.BuildID,
 			v2.CallsiteID, fact.PassKind, fact.BoundaryKind, fact.BoundaryID, fact.Status, fact.Covered, known, fact.Reason, mustJSON(fact.CandidateStableIDs), mustJSON(fact.FlowTypeStableIDs), mustJSON(fact.AllocationTypeStableIDs), mustJSON(fact.ReachableStableIDs), mustJSON(fact.RootStableIDs), fact.RootPolicy, fact.RootPolicyVersion, fact.RootCompleteness, fact.RootBoundary)
 		if err != nil {
@@ -474,15 +471,12 @@ func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *
 		if err != nil {
 			return err
 		}
-		if err := insertResolutionFactLinkTx(tx, callsiteNodeID, factNodeID, "HAS_COMPLETENESS_FACT", v2.CallsiteID, fact.ID); err != nil {
+		if err := insertResolutionFactLinkTx(stmts, callsiteNodeID, factNodeID, "HAS_COMPLETENESS_FACT", v2.CallsiteID, fact.ID); err != nil {
 			return err
 		}
 	}
 	if v2.UnresolvedID != "" {
-		result, err := tx.Exec(`INSERT INTO nodes
-			(label,name,qualified_name,file_path,language,stable_id,node_type,schema_version,source_revision,producer_build_id,
-			 callsite_id,reason_code,candidate_count_v2,blocking_pass_kinds)
-			VALUES ('UnresolvedFact',?,?,?,?,?,'unresolved_fact',2,?,?,?,?,?,?)`,
+		result, err := stmts.unresolvedFact.Exec(
 			v2.UnresolvedReason, v2.UnresolvedID, c.SourceFile, "resolution", v2.UnresolvedID,
 			identity.RepositoryRevision, identity.BuildID, v2.CallsiteID, v2.UnresolvedReason, len(v2.Candidates), mustJSON(v2.BlockingPassKinds))
 		if err != nil {
@@ -492,19 +486,16 @@ func insertResolutionV2FactsTx(tx *sql.Tx, identity GraphCompletionIdentity, c *
 		if err != nil {
 			return err
 		}
-		if err := insertResolutionFactLinkTx(tx, callsiteNodeID, factNodeID, "HAS_UNRESOLVED_FACT", v2.CallsiteID, v2.UnresolvedID); err != nil {
+		if err := insertResolutionFactLinkTx(stmts, callsiteNodeID, factNodeID, "HAS_UNRESOLVED_FACT", v2.CallsiteID, v2.UnresolvedID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func insertResolutionFactLinkTx(tx *sql.Tx, callsiteNodeID, factNodeID int64, edgeType, callsiteID, factID string) error {
+func insertResolutionFactLinkTx(stmts *resolutionStmts, callsiteNodeID, factNodeID int64, edgeType, callsiteID, factID string) error {
 	edgeID := canonicalResolutionID(callsiteID, edgeType, factID)
-	_, err := tx.Exec(`INSERT INTO edges
-		(source_id,target_id,type,source_line,source_file,confidence,trust_tier,evidence_type,verification_status,stable_id,schema_version,callsite_stable_id)
-		VALUES (?,?,?,0,'',NULL,'STRUCTURAL','resolution_fact','structural_only',?,2,?)`,
-		callsiteNodeID, factNodeID, edgeType, edgeID, callsiteID)
+	_, err := stmts.factLink.Exec(callsiteNodeID, factNodeID, edgeType, edgeID, callsiteID)
 	if err != nil {
 		return fmt.Errorf("insert %s link: %w", edgeType, err)
 	}
