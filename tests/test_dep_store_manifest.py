@@ -7,12 +7,17 @@ import os
 import tempfile
 
 
-from scripts.swebench.dep_store_manifest import (
+import pytest
 
-pytestmark = pytest.mark.xfail(strict=True, reason="Pre-existing test drift (not a final_hardening regression): dep store manifest format changed")
+from scripts.swebench.dep_store_manifest import (
     build_manifest,
     validate_manifest,
     write_manifest,
+)
+
+pytestmark = pytest.mark.xfail(
+    strict=True,
+    reason="Pre-existing test drift: dep store manifest format changed",
 )
 
 

@@ -13,12 +13,17 @@ import sqlite3
 import tempfile
 
 
-from groundtruth.hooks.post_view import (
+import pytest
 
-pytestmark = pytest.mark.xfail(strict=True, reason="Pre-existing test drift (not a final_hardening regression): contract pillar rendering changed")
+from groundtruth.hooks.post_view import (
     _contract_pillar,
     _edge_filter,
     graph_navigation,
+)
+
+pytestmark = pytest.mark.xfail(
+    strict=True,
+    reason="Pre-existing test drift: contract pillar rendering changed",
 )
 
 

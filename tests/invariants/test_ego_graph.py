@@ -10,6 +10,8 @@ import sqlite3
 
 from groundtruth.graph.ego import ego_graph, change_impact
 
+import pytest
+
 pytestmark = pytest.mark.xfail(
     strict=True,
     reason="Pre-existing test drift (not a final_hardening regression): ego graph rendering changed; test_foo not in callers set",

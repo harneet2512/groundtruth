@@ -13,7 +13,7 @@ import os
 import sqlite3
 import tempfile
 
-
+import pytest
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))

@@ -13,6 +13,8 @@ import os
 import sqlite3
 import textwrap
 
+import pytest
+
 
 # ---------- helpers ----------
 
