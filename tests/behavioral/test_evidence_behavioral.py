@@ -80,10 +80,30 @@ CREATE TABLE assertions (
 );
 """
 
-# Temp files that the evidence engine reads
-_ISSUE_TERMS_PATH = "/tmp/gt_issue_terms.txt"
-_ISSUE_ANCHORS_PATH = "/tmp/gt_issue_anchors.json"
-_EDITED_FILES_PATH = "/tmp/gt_edited_files.txt"
+# Temp files that the evidence engine reads. On Linux (where the production
+# code runs in Docker), these are hardcoded to /tmp/. On Windows CI, /tmp/
+# doesn't exist, so we use tempfile.gettempdir() and monkeypatch the
+# production module's constants to match.
+import tempfile as _tempfile
+
+_TMP = _tempfile.gettempdir()
+_ISSUE_TERMS_PATH = os.path.join(_TMP, "gt_issue_terms.txt")
+_ISSUE_ANCHORS_PATH = os.path.join(_TMP, "gt_issue_anchors.json")
+_EDITED_FILES_PATH = os.path.join(_TMP, "gt_edited_files.txt")
+_BRIEF_CANDIDATES_PATH = os.path.join(_TMP, "gt_brief_candidates.txt")
+_TEST_EDIT_WARNED = os.path.join(_TMP, "gt_test_edit_warned.txt")
+
+
+@pytest.fixture(autouse=True)
+def _patch_tmp_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect the production module's /tmp/ constants to the platform tmpdir."""
+    from groundtruth.hooks import post_edit
+
+    monkeypatch.setattr(post_edit, "_ISSUE_TERMS_PATH", _ISSUE_TERMS_PATH)
+    monkeypatch.setattr(post_edit, "_ISSUE_ANCHORS_PATH", _ISSUE_ANCHORS_PATH)
+    monkeypatch.setattr(post_edit, "_EDITED_FILES_PATH", _EDITED_FILES_PATH)
+    monkeypatch.setattr(post_edit, "_BRIEF_CANDIDATES_PATH", _BRIEF_CANDIDATES_PATH)
+    monkeypatch.setattr(post_edit, "_TEST_EDIT_WARNED", _TEST_EDIT_WARNED)
 
 
 def _cleanup_tmp_files() -> None:
