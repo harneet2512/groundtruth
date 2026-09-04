@@ -26,7 +26,7 @@ import asyncio
 import os
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -70,11 +70,16 @@ class EdgeVerificationCache:
         else:
             self._stats["rejected"] += 1
 
-    def put_fallback(self, source_file: str, target_symbol: str, original_confidence: float) -> None:
+    def put_fallback(
+        self, source_file: str, target_symbol: str, original_confidence: float
+    ) -> None:
         key = (source_file, target_symbol)
         self._cache[key] = VerifiedEdge(
-            source_file=source_file, target_file="", target_symbol=target_symbol,
-            verified=original_confidence >= 0.9, confidence=original_confidence,
+            source_file=source_file,
+            target_file="",
+            target_symbol=target_symbol,
+            verified=original_confidence >= 0.9,
+            confidence=original_confidence,
             method="fallback_no_lsp",
         )
         self._stats["fallback"] += 1
@@ -111,12 +116,26 @@ class LazyEdgeVerifier:
         """Most common LSP-supported source extension in the workspace (bounded walk).
         Used to warm the RIGHT language server at init."""
         from groundtruth.lsp.config import LSP_SERVERS
+
         counts: dict[str, int] = {}
         seen = 0
         try:
             for _root, dirs, files in os.walk(self._workspace):
-                dirs[:] = [d for d in dirs if not d.startswith(".")
-                           and d not in ("node_modules", "vendor", "venv", "__pycache__", "target", "dist", "build")]
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if not d.startswith(".")
+                    and d
+                    not in (
+                        "node_modules",
+                        "vendor",
+                        "venv",
+                        "__pycache__",
+                        "target",
+                        "dist",
+                        "build",
+                    )
+                ]
                 for fn in files:
                     ext = os.path.splitext(fn)[1].lower()
                     if ext in LSP_SERVERS:
@@ -143,6 +162,7 @@ class LazyEdgeVerifier:
         Used by the wrapper init gate (GT_REQUIRE_LSP) and the preflight probe."""
         try:
             from groundtruth.lsp.manager import LSPManager
+
             self._lsp_manager = LSPManager(self._workspace)
             self._start_time_ms = int(time.time() * 1000)
             if not warm:
@@ -151,6 +171,7 @@ class LazyEdgeVerifier:
                 return True
             # REAL warm: launch + handshake the dominant language server.
             from groundtruth.utils.result import Err
+
             ext = self._dominant_ext()
             if not ext:
                 self._available = False
@@ -158,8 +179,13 @@ class LazyEdgeVerifier:
                 return False
             res = await asyncio.wait_for(self._lsp_manager.ensure_server(ext), timeout=90.0)
             self._available = not isinstance(res, Err)
-            logger.info("edge_verifier_started", workspace=self._workspace, warm=True,
-                        ext=ext, available=self._available)
+            logger.info(
+                "edge_verifier_started",
+                workspace=self._workspace,
+                warm=True,
+                ext=ext,
+                available=self._available,
+            )
             return self._available
         except Exception as e:
             logger.warning("edge_verifier_start_failed", error=str(e))
@@ -178,6 +204,7 @@ class LazyEdgeVerifier:
         if not self._graph_db or not os.path.exists(self._graph_db):
             return None
         from groundtruth.lsp.config import LSP_SERVERS
+
         try:
             c = sqlite3.connect(self._graph_db)
             rows = c.execute(
@@ -197,8 +224,12 @@ class LazyEdgeVerifier:
         for tfile, tsym, tline, cfile in rows:
             if os.path.splitext(tfile)[1].lower() in LSP_SERVERS:
                 return await self.verify_caller(
-                    tfile, tsym, int(tline), cfile,
-                    original_confidence=1.0, timeout=timeout,
+                    tfile,
+                    tsym,
+                    int(tline),
+                    cfile,
+                    original_confidence=1.0,
+                    timeout=timeout,
                 )
         return None
 
@@ -231,6 +262,7 @@ class LazyEdgeVerifier:
         # Determine file extension for LSP server selection
         ext = os.path.splitext(target_file)[1].lower()
         from groundtruth.lsp.config import LSP_SERVERS
+
         if ext not in LSP_SERVERS:
             self._cache.put_fallback(caller_file, target_symbol, original_confidence)
             return self._cache.get(caller_file, target_symbol)  # type: ignore
@@ -240,6 +272,7 @@ class LazyEdgeVerifier:
         try:
             client_result = await self._lsp_manager.ensure_server(ext)
             from groundtruth.utils.result import Err
+
             if isinstance(client_result, Err):
                 self._cache.put_fallback(caller_file, target_symbol, original_confidence)
                 return self._cache.get(caller_file, target_symbol)  # type: ignore
@@ -252,13 +285,16 @@ class LazyEdgeVerifier:
             if os.path.exists(target_full):
                 text = open(target_full, encoding="utf-8", errors="replace").read()
                 from groundtruth.lsp.config import get_language_id
+
                 lang_result = get_language_id(ext)
                 lang_id = lang_result.value if not isinstance(lang_result, Err) else "python"
                 await client.did_open(target_uri, lang_id, 1, text)
 
             # Query references for the target symbol at its definition line
             refs_result = await client.references(
-                target_uri, target_line - 1, 0,  # LSP is 0-indexed
+                target_uri,
+                target_line - 1,
+                0,  # LSP is 0-indexed
                 include_declaration=False,
                 timeout=timeout,
             )
@@ -273,10 +309,7 @@ class LazyEdgeVerifier:
 
             # Check if caller_file appears in references
             caller_norm = caller_file.replace("\\", "/")
-            verified = any(
-                caller_norm in (ref.uri or "").replace("\\", "/")
-                for ref in refs
-            )
+            verified = any(caller_norm in (ref.uri or "").replace("\\", "/") for ref in refs)
 
             edge = VerifiedEdge(
                 source_file=caller_file,
@@ -328,31 +361,59 @@ def verify_edge_sync(
         loop = asyncio.get_event_loop()
         if loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(
                     asyncio.run,
-                    _verify_one(verifier, target_file, target_symbol, target_line, caller_file, original_confidence, timeout),
+                    _verify_one(
+                        verifier,
+                        target_file,
+                        target_symbol,
+                        target_line,
+                        caller_file,
+                        original_confidence,
+                        timeout,
+                    ),
                 )
                 return future.result(timeout=timeout + 2)
         else:
             return loop.run_until_complete(
-                _verify_one(verifier, target_file, target_symbol, target_line, caller_file, original_confidence, timeout),
+                _verify_one(
+                    verifier,
+                    target_file,
+                    target_symbol,
+                    target_line,
+                    caller_file,
+                    original_confidence,
+                    timeout,
+                ),
             )
     except Exception:
         return VerifiedEdge(
-            source_file=caller_file, target_file=target_file, target_symbol=target_symbol,
-            verified=original_confidence >= 0.9, confidence=original_confidence,
+            source_file=caller_file,
+            target_file=target_file,
+            target_symbol=target_symbol,
+            verified=original_confidence >= 0.9,
+            confidence=original_confidence,
             method="sync_fallback",
         )
 
 
 async def _verify_one(
     verifier: LazyEdgeVerifier,
-    target_file: str, target_symbol: str, target_line: int,
-    caller_file: str, original_confidence: float, timeout: float,
+    target_file: str,
+    target_symbol: str,
+    target_line: int,
+    caller_file: str,
+    original_confidence: float,
+    timeout: float,
 ) -> VerifiedEdge:
     await verifier.start()
     return await verifier.verify_caller(
-        target_file, target_symbol, target_line, caller_file,
-        original_confidence=original_confidence, timeout=timeout,
+        target_file,
+        target_symbol,
+        target_line,
+        caller_file,
+        original_confidence=original_confidence,
+        timeout=timeout,
     )

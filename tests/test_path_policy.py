@@ -1,4 +1,5 @@
 """CP009 — centralized path_policy tests."""
+
 from groundtruth.delivery.path_policy import is_delivery_excluded, is_generated, is_vendored_path
 
 

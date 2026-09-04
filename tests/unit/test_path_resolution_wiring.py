@@ -105,6 +105,7 @@ def trap_db():
 # graph_store._match_file_path
 # ---------------------------------------------------------------------------
 
+
 def test_match_file_path_does_not_return_suffix_trap(trap_db):
     """'foo.py' must NEVER resolve to 'pkg/barfoo.py'.
 
@@ -131,9 +132,7 @@ def test_match_file_path_ambiguous_basename_returns_none(trap_db):
     store = GraphStore(trap_db)
     assert store.initialize().is_ok()
     matched = store._match_file_path("dup.py")
-    assert matched is None, (
-        f"ambiguous basename 'dup.py' must resolve to None, got {matched!r}"
-    )
+    assert matched is None, f"ambiguous basename 'dup.py' must resolve to None, got {matched!r}"
 
 
 def test_match_file_path_unique_basename_resolves(trap_db):
@@ -158,9 +157,7 @@ def test_match_file_path_total_no_match_returns_none(trap_db):
     store = GraphStore(trap_db)
     assert store.initialize().is_ok()
     matched = store._match_file_path("nonexistent/totally_absent.py")
-    assert matched is None, (
-        f"no-match must return None, got the echoed input {matched!r}"
-    )
+    assert matched is None, f"no-match must return None, got the echoed input {matched!r}"
 
 
 def test_match_file_path_boundary_unique_basename_resolves(trap_db):
@@ -178,6 +175,7 @@ def test_match_file_path_boundary_unique_basename_resolves(trap_db):
 # ---------------------------------------------------------------------------
 # graph_store.get_symbols_in_file — routed through resolution
 # ---------------------------------------------------------------------------
+
 
 def test_get_symbols_in_file_resolves_basename(trap_db):
     """get_symbols_in_file must find symbols for a unique basename via resolution.
@@ -205,6 +203,7 @@ def test_get_symbols_in_file_no_match_is_empty(trap_db):
 # ---------------------------------------------------------------------------
 # Hook inline resolvers (post_edit / post_view) — must return None on no-match
 # ---------------------------------------------------------------------------
+
 
 def test_post_edit_resolver_returns_none_on_no_match(trap_db):
     """post_edit._resolve_file_path must return None on a total no-match.

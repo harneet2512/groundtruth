@@ -39,6 +39,7 @@ import pytest
 # import, and _push_graph_db_to_container imports UploadRequest lazily.
 # ---------------------------------------------------------------------------
 
+
 def _install_stubs() -> None:
     if "sweagent.run.hooks.abstract" not in sys.modules:
         sw = types.ModuleType("sweagent")
@@ -61,8 +62,9 @@ def _install_stubs() -> None:
         sx_a = types.ModuleType("swerex.runtime.abstract")
 
         class UploadRequest:  # captures source_path/target_path
-            def __init__(self, source_path: str | None = None,
-                         target_path: str | None = None) -> None:
+            def __init__(
+                self, source_path: str | None = None, target_path: str | None = None
+            ) -> None:
                 self.source_path = source_path
                 self.target_path = target_path
 
@@ -89,6 +91,7 @@ import gt_track4_pre_run as hook_mod  # noqa: E402
 # ---------------------------------------------------------------------------
 # Mock env + helpers
 # ---------------------------------------------------------------------------
+
 
 class _MockRuntime:
     """Captures upload() calls. Awaitable to satisfy asyncio.run wrapping."""
@@ -173,6 +176,7 @@ class _Result:
 # Tests — _push_graph_db_to_container
 # ---------------------------------------------------------------------------
 
+
 def test_graph_db_push_calls_upload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """on_instance_start → _push_graph_db_to_container → runtime.upload(UploadRequest)."""
     if hook_mod.GTTrack4PreRunHook is None:
@@ -188,8 +192,7 @@ def test_graph_db_push_calls_upload(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     env = MockEnv()
     ps = _ProblemStatement(ident="repo__pkg-1")
-    h = hook_mod.GTTrack4PreRunHook(graph_db_path=str(fake_db),
-                                    output_dir=tmp_path / "logs")
+    h = hook_mod.GTTrack4PreRunHook(graph_db_path=str(fake_db), output_dir=tmp_path / "logs")
     h.on_instance_start(index=0, env=env, problem_statement=ps)
 
     calls = env.deployment.runtime.upload_calls
@@ -202,9 +205,7 @@ def test_graph_db_push_calls_upload(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 def test_push_skipped_when_host_path_missing(tmp_path: Path) -> None:
     """Helper returns False (no raise) when host graph.db doesn't exist."""
     env = MockEnv()
-    ok = hook_mod._push_graph_db_to_container(
-        env, str(tmp_path / "no_such.db"), "instX"
-    )
+    ok = hook_mod._push_graph_db_to_container(env, str(tmp_path / "no_such.db"), "instX")
     assert ok is False
     assert env.deployment.runtime.upload_calls == []
 
@@ -213,12 +214,15 @@ def test_push_skipped_when_host_path_missing(tmp_path: Path) -> None:
 # Tests — _pull_gt_artifacts
 # ---------------------------------------------------------------------------
 
+
 def _gate_payload(result: str = "pass") -> str:
-    return json.dumps({
-        "result": result,
-        "promotions": 1,
-        "warnings": [],
-    })
+    return json.dumps(
+        {
+            "result": result,
+            "promotions": 1,
+            "warnings": [],
+        }
+    )
 
 
 def test_pull_all_4_artifacts(tmp_path: Path) -> None:
@@ -244,8 +248,9 @@ def test_pull_all_4_artifacts(tmp_path: Path) -> None:
     log_dir = tmp_path / "logs" / "instA"
     summary = hook_mod._pull_gt_artifacts(env, log_dir, "instA")
 
-    assert (log_dir / "gt_pre_finish_gate.json").read_text(encoding="utf-8") == \
-        files[f"{hook_mod._CONTAINER_ARTIFACT_DIR}/gt_pre_finish_gate.json"]
+    assert (log_dir / "gt_pre_finish_gate.json").read_text(encoding="utf-8") == files[
+        f"{hook_mod._CONTAINER_ARTIFACT_DIR}/gt_pre_finish_gate.json"
+    ]
     assert (log_dir / "gt_reindex.jsonl").read_text(encoding="utf-8").startswith('{"path"')
     assert (log_dir / "gt_query_calls.jsonl").exists()
     assert (log_dir / "gt_evidence" / "edit_001.json").exists()
@@ -353,12 +358,13 @@ def test_evidence_dir_listing(tmp_path: Path) -> None:
 # the canonical L4 count.
 # ---------------------------------------------------------------------------
 
+
 def test_l4_count_from_canonical_artifact(tmp_path: Path) -> None:
     """gt_query_calls.jsonl with N non-empty lines → returns N."""
     (tmp_path / "gt_query_calls.jsonl").write_text(
         '{"symbol": "foo", "returned_lines": 5, "ts": 1.0}\n'
         '{"symbol": "bar", "returned_lines": 8, "ts": 2.0}\n'
-        '\n'  # blank line — must be ignored
+        "\n"  # blank line — must be ignored
         '{"symbol": "baz", "returned_lines": 0, "ts": 3.0}\n'
     )
     assert hook_mod._count_gt_query_calls(tmp_path) == 3
@@ -391,15 +397,14 @@ def test_l4_count_no_false_positive_on_path_lines(tmp_path: Path) -> None:
     # Even if a stray PATH-style line accidentally appeared in the file,
     # only valid JSON-like lines populated by gt_query._emit_telemetry
     # should be present. Either way: blank-stripping handles whitespace.
-    (tmp_path / "gt_query_calls.jsonl").write_text(
-        '{"symbol":"x","returned_lines":3,"ts":1.0}\n'
-    )
+    (tmp_path / "gt_query_calls.jsonl").write_text('{"symbol":"x","returned_lines":3,"ts":1.0}\n')
     assert hook_mod._count_gt_query_calls(tmp_path) == 1
 
 
 # ---------------------------------------------------------------------------
 # Tests — _append_completion_log
 # ---------------------------------------------------------------------------
+
 
 def test_completion_log_format(tmp_path: Path) -> None:
     """Single line with task=, L3_edits=, L4_queries=, L5_gate=, L6_reindex= fields."""
@@ -431,6 +436,7 @@ def test_completion_log_defaults_when_summary_empty(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Tests — on_instance_completed (autosubmit, drain)
 # ---------------------------------------------------------------------------
+
 
 def _make_hook(tmp_path: Path) -> Any:
     if hook_mod.GTTrack4PreRunHook is None:
@@ -468,7 +474,8 @@ def test_autosubmit_with_real_verdict(tmp_path: Path) -> None:
         "log_dir": log_dir,
         "cache": {
             "summary": {
-                "edit_count": 1, "reindex_count": 0,
+                "edit_count": 1,
+                "reindex_count": 0,
                 "gate_verdict": "warn_soft_escape",
             }
         },
@@ -494,14 +501,16 @@ def test_pending_drain_when_id_missing(tmp_path: Path) -> None:
     log_dir = tmp_path / "logs" / "lonely"
     log_dir.mkdir(parents=True, exist_ok=True)
     # Synth canonical L4 artifact (one invocation).
-    (log_dir / "gt_query_calls.jsonl").write_text(
-        '{"symbol":"foo","returned_lines":5,"ts":1.0}\n'
-    )
+    (log_dir / "gt_query_calls.jsonl").write_text('{"symbol":"foo","returned_lines":5,"ts":1.0}\n')
     h._pending["lonely"] = {
         "log_dir": log_dir,
         "cache": {
-            "summary": {"edit_count": 2, "query_count": 1,
-                        "reindex_count": 1, "gate_verdict": "pass"},
+            "summary": {
+                "edit_count": 2,
+                "query_count": 1,
+                "reindex_count": 1,
+                "gate_verdict": "pass",
+            },
         },
     }
 
@@ -536,8 +545,12 @@ def test_resolution_never_corrupts_pending_when_multi_pending(tmp_path: Path) ->
         h._pending[iid] = {
             "log_dir": d,
             "cache": {
-                "summary": {"edit_count": 0, "query_count": 0,
-                            "reindex_count": 0, "gate_verdict": "pass"},
+                "summary": {
+                    "edit_count": 0,
+                    "query_count": 0,
+                    "reindex_count": 0,
+                    "gate_verdict": "pass",
+                },
             },
         }
 
@@ -646,8 +659,7 @@ def test_close_wrap_writes_layers_log_with_correct_instance_id(tmp_path: Path) -
     files = {
         "/root/gt_artifacts/gt_pre_finish_gate.json": '{"result":"pass"}',
         "/root/gt_artifacts/gt_reindex.jsonl": "{}\n{}\n",
-        "/root/gt_artifacts/gt_query_calls.jsonl":
-            '{"symbol":"foo","returned_lines":1,"ts":1.0}\n',
+        "/root/gt_artifacts/gt_query_calls.jsonl": '{"symbol":"foo","returned_lines":1,"ts":1.0}\n',
         "/root/gt_artifacts/gt_evidence/edit_001.json": edit_payload,
     }
     env = MockEnv(files=files, listing_output="edit_001.json")
@@ -656,16 +668,14 @@ def test_close_wrap_writes_layers_log_with_correct_instance_id(tmp_path: Path) -
     hook_mod._wrap_env_close_with_artifact_pull(env, log_dir, "task_x", cache)
     env.close()  # triggers the wrap — runs pull, writes layers log
 
-    assert cache.get("completion_logged") is True, (
-        "close-wrap should set completion_logged"
-    )
+    assert cache.get("completion_logged") is True, "close-wrap should set completion_logged"
     assert env.close_calls == 1, "original close should run exactly once"
     log_text = (log_dir / "gt_layers.log").read_text(encoding="utf-8")
     assert "task=task_x" in log_text
-    assert "L3_edits=1" in log_text       # one edit_*.json
-    assert "L4_queries=1" in log_text     # one canonical jsonl line
-    assert "L5_gate=pass" in log_text     # from gt_pre_finish_gate.json
-    assert "L6_reindex=2" in log_text     # 2 lines in gt_reindex.jsonl
+    assert "L3_edits=1" in log_text  # one edit_*.json
+    assert "L4_queries=1" in log_text  # one canonical jsonl line
+    assert "L5_gate=pass" in log_text  # from gt_pre_finish_gate.json
+    assert "L6_reindex=2" in log_text  # 2 lines in gt_reindex.jsonl
 
 
 def test_completion_skips_when_close_wrap_already_logged(tmp_path: Path) -> None:
@@ -683,8 +693,12 @@ def test_completion_skips_when_close_wrap_already_logged(tmp_path: Path) -> None
     h._pending["already"] = {
         "log_dir": log_dir,
         "cache": {
-            "summary": {"edit_count": 7, "query_count": 2,
-                        "reindex_count": 7, "gate_verdict": "pass"},
+            "summary": {
+                "edit_count": 7,
+                "query_count": 2,
+                "reindex_count": 7,
+                "gate_verdict": "pass",
+            },
             "completion_logged": True,
         },
     }
@@ -694,9 +708,7 @@ def test_completion_skips_when_close_wrap_already_logged(tmp_path: Path) -> None
 
     log_text = (log_dir / "gt_layers.log").read_text(encoding="utf-8")
     # Exactly ONE line — no double write from on_instance_completed.
-    assert log_text.count("task=already") == 1, (
-        f"expected 1 line, got: {log_text!r}"
-    )
+    assert log_text.count("task=already") == 1, f"expected 1 line, got: {log_text!r}"
     # And the pending entry was cleaned up.
     assert "already" not in h._pending
 
@@ -704,6 +716,7 @@ def test_completion_skips_when_close_wrap_already_logged(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 # RC-03 — per-thread state isolation under concurrency
 # ---------------------------------------------------------------------------
+
 
 def test_rc03_per_thread_resolution_under_concurrency(tmp_path: Path) -> None:
     """RC-03: each worker thread's on_instance_completed resolves to the
@@ -742,8 +755,12 @@ def test_rc03_per_thread_resolution_under_concurrency(tmp_path: Path) -> None:
             h._pending[iid] = {
                 "log_dir": log_dir,
                 "cache": {
-                    "summary": {"edit_count": 1, "query_count": 0,
-                                "reindex_count": 1, "gate_verdict": "pass"},
+                    "summary": {
+                        "edit_count": 1,
+                        "query_count": 0,
+                        "reindex_count": 1,
+                        "gate_verdict": "pass",
+                    },
                 },
                 "thread_id": tid,
             }
@@ -776,9 +793,7 @@ def test_rc03_per_thread_resolution_under_concurrency(tmp_path: Path) -> None:
         for j in range(N):
             if j == i:
                 continue
-            assert f"task=task_{j}" not in body, (
-                f"{iid} log polluted with task_{j}: {body!r}"
-            )
+            assert f"task=task_{j}" not in body, f"{iid} log polluted with task_{j}: {body!r}"
     # Pending should be drained.
     assert h._pending == {}
     assert h._thread_pending == {}
@@ -833,9 +848,8 @@ def test_atexit_flush_registered_by_close_wrap(tmp_path: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     files = {
         "/root/gt_artifacts/gt_pre_finish_gate.json": '{"result":"pass"}',
-        "/root/gt_artifacts/gt_query_calls.jsonl":
-            '{"symbol":"foo","returned_lines":2,"ts":1.0}\n'
-            '{"symbol":"bar","returned_lines":3,"ts":2.0}\n',
+        "/root/gt_artifacts/gt_query_calls.jsonl": '{"symbol":"foo","returned_lines":2,"ts":1.0}\n'
+        '{"symbol":"bar","returned_lines":3,"ts":2.0}\n',
     }
     env = MockEnv(files=files, listing_output="")
     cache: dict[str, Any] = {}
@@ -857,10 +871,9 @@ def test_atexit_flush_pulls_artifacts_when_close_wrap_skipped(tmp_path: Path) ->
     log_dir.mkdir(parents=True, exist_ok=True)
     files = {
         "/root/gt_artifacts/gt_pre_finish_gate.json": '{"result":"pass"}',
-        "/root/gt_artifacts/gt_query_calls.jsonl":
-            '{"symbol":"foo","returned_lines":1,"ts":1.0}\n'
-            '{"symbol":"bar","returned_lines":2,"ts":2.0}\n'
-            '{"symbol":"baz","returned_lines":3,"ts":3.0}\n',
+        "/root/gt_artifacts/gt_query_calls.jsonl": '{"symbol":"foo","returned_lines":1,"ts":1.0}\n'
+        '{"symbol":"bar","returned_lines":2,"ts":2.0}\n'
+        '{"symbol":"baz","returned_lines":3,"ts":3.0}\n',
         "/root/gt_artifacts/gt_reindex.jsonl": "{}\n{}\n",
         "/root/gt_artifacts/gt_evidence/edit_001.json": '{"x":1}',
     }
@@ -914,6 +927,7 @@ def test_atexit_flush_survives_dead_env(tmp_path: Path) -> None:
     container destroyed. Flush must NOT raise; it must still write a
     best-effort line so verify_report sees a named cohort."""
     import gc
+
     log_dir = tmp_path / "logs" / "dead"
     log_dir.mkdir(parents=True, exist_ok=True)
     env = MockEnv(files={}, listing_output="")
@@ -1016,8 +1030,7 @@ def test_on_instance_completed_pulls_via_atexit_for_autosubmit(tmp_path: Path) -
 
     files = {
         "/root/gt_artifacts/gt_pre_finish_gate.json": '{"result":"pass"}',
-        "/root/gt_artifacts/gt_query_calls.jsonl":
-            '{"symbol":"foo","returned_lines":1,"ts":1.0}\n',
+        "/root/gt_artifacts/gt_query_calls.jsonl": '{"symbol":"foo","returned_lines":1,"ts":1.0}\n',
     }
     env = MockEnv(files=files, listing_output="")
     cache: dict[str, Any] = {}

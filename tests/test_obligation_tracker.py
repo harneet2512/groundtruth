@@ -1,4 +1,5 @@
 """CP011 — ObligationTracker lifecycle tests."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -73,9 +74,7 @@ def test_statuses_tuple_matches_obligation_statuses(om):
     tracker.update(edited, tested, turn=3)
     via_tracker = tracker.statuses_tuple(edited, tested)
     via_fn = om.obligation_statuses(om._obligation_views(_OBLS), edited, tested)
-    assert [s for _v, s, _t, _c in via_tracker] == [
-        s for _v, s, _t, _c in via_fn
-    ]
+    assert [s for _v, s, _t, _c in via_tracker] == [s for _v, s, _t, _c in via_fn]
 
 
 def test_tracker_supports_explicit_contradiction(om):

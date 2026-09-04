@@ -4,18 +4,26 @@ Strips hidden diagnostic prefixes, enforces character caps,
 and validates that only allowed markers reach the agent.
 Shared between OH adapter and MCP product face.
 """
+
 from __future__ import annotations
 
 import re
 
 _HIDDEN_PREFIXES = (
-    "[GT_META]", "[GT_STATUS]", "[GT_CONFIG]", "[GT_TRACE]",
-    "[GT_DELIVERY]", "[GT_COST]", "[GT_PAYLOAD]", "[GT_LLM_CONFIG]",
+    "[GT_META]",
+    "[GT_STATUS]",
+    "[GT_CONFIG]",
+    "[GT_TRACE]",
+    "[GT_DELIVERY]",
+    "[GT_COST]",
+    "[GT_PAYLOAD]",
+    "[GT_LLM_CONFIG]",
     "[gt-patch:loaded]",
     # Brief-runner diagnostics — were stripped only by a local filter in the
     # wrapper brief path; centralized here so every strip site shares one
     # authority and they cannot re-leak through a path that doesn't know them.
-    "[GT_RANK_DIAG]", "[GT_BRIEF_DIAG]",
+    "[GT_RANK_DIAG]",
+    "[GT_BRIEF_DIAG]",
 )
 
 # A trailing binary/word operator means the clause was cut mid-expression.
@@ -132,7 +140,7 @@ def sanitize(text: str, *, max_chars: int = 2000) -> str:
     lines = [ln for ln in text.splitlines() if not is_hidden_line(ln)]
     cleaned = "\n".join(lines).strip()
     if len(cleaned) > max_chars:
-        cleaned = cleaned[:max_chars - 3] + "..."
+        cleaned = cleaned[: max_chars - 3] + "..."
     return cleaned
 
 
@@ -155,13 +163,53 @@ def has_leak(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 # statement keywords across common languages that can never be an exception NAME
-_STMT_KEYWORDS = frozenset({
-    "raise", "return", "throw", "throws", "yield", "if", "else", "elif", "for",
-    "while", "try", "except", "catch", "finally", "with", "def", "fn", "func",
-    "class", "struct", "import", "from", "pass", "break", "continue", "and",
-    "or", "not", "in", "is", "lambda", "async", "await", "del", "global",
-    "nonlocal", "assert", "match", "case", "new", "panic", "defer", "go",
-})
+_STMT_KEYWORDS = frozenset(
+    {
+        "raise",
+        "return",
+        "throw",
+        "throws",
+        "yield",
+        "if",
+        "else",
+        "elif",
+        "for",
+        "while",
+        "try",
+        "except",
+        "catch",
+        "finally",
+        "with",
+        "def",
+        "fn",
+        "func",
+        "class",
+        "struct",
+        "import",
+        "from",
+        "pass",
+        "break",
+        "continue",
+        "and",
+        "or",
+        "not",
+        "in",
+        "is",
+        "lambda",
+        "async",
+        "await",
+        "del",
+        "global",
+        "nonlocal",
+        "assert",
+        "match",
+        "case",
+        "new",
+        "panic",
+        "defer",
+        "go",
+    }
+)
 # a single exception name: dotted identifier starting with a letter/underscore
 _EXC_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 # a `[MARKER` opener cut before its closing `]`, left at the end of a clip
@@ -234,11 +282,11 @@ def _clean_contract_line(line: str):
             continue
         low = seg.lower()
         if low == "raises" or low.startswith("raises "):
-            spec = seg[len("raises"):].strip()  # Gap-1: bare `raises` -> spec="" -> drop
+            spec = seg[len("raises") :].strip()  # Gap-1: bare `raises` -> spec="" -> drop
             if spec and valid_exception_spec(spec):
                 kept.append(seg)
         elif low == "returns" or low.startswith("returns "):
-            shape = seg[len("returns"):].strip()  # Gap-1: bare `returns` -> drop
+            shape = seg[len("returns") :].strip()  # Gap-1: bare `returns` -> drop
             if shape and valid_return_shape(shape):
                 kept.append(seg)
         else:

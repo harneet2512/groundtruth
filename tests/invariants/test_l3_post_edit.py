@@ -6,13 +6,12 @@ Invariant 6: Dunder methods excluded from [PATTERN] sibling evidence.
 
 Violations = D5, D2, D2 in failure taxonomy.
 """
+
 from __future__ import annotations
 
 import os
 import sqlite3
 import tempfile
-
-import pytest
 
 
 def create_graph_with_tests(db_path: str) -> None:
@@ -77,8 +76,7 @@ def create_graph_with_tests(db_path: str) -> None:
     conn.close()
 
 
-def rank_test_assertions(db_path: str, target_node_id: int,
-                          issue_text: str = "") -> list[dict]:
+def rank_test_assertions(db_path: str, target_node_id: int, issue_text: str = "") -> list[dict]:
     """Rank test assertions for a target function.
 
     Implements Invariant 4: direct tests outrank helpers.
@@ -100,13 +98,15 @@ def rank_test_assertions(db_path: str, target_node_id: int,
     results = []
     for r in rows:
         is_helper = any(p in r["file_path"] for p in HELPER_PATTERNS)
-        results.append({
-            "file": r["file_path"],
-            "name": r["name"],
-            "expression": r["expression"],
-            "is_helper": is_helper,
-            "score": 0 if is_helper else 10,  # helpers ranked lower
-        })
+        results.append(
+            {
+                "file": r["file_path"],
+                "name": r["name"],
+                "expression": r["expression"],
+                "is_helper": is_helper,
+                "score": 0 if is_helper else 10,  # helpers ranked lower
+            }
+        )
 
     results.sort(key=lambda x: x["score"], reverse=True)
     return results
@@ -154,7 +154,8 @@ class TestInvariant5CompletenessScope:
 
         assert edited_attrs is not None
         relevant = [
-            m for m in class_methods
+            m
+            for m in class_methods
             if m["name"] != edited_function and m["shared_attrs"] & edited_attrs
         ]
 
@@ -163,7 +164,8 @@ class TestInvariant5CompletenessScope:
 
         # chosen_info shares nothing with set_fields — should NOT appear
         irrelevant = [
-            m for m in class_methods
+            m
+            for m in class_methods
             if m["name"] != edited_function and not (m["shared_attrs"] & edited_attrs)
         ]
         assert any(m["name"] == "chosen_info" for m in irrelevant), (

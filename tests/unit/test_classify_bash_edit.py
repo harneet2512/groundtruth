@@ -4,6 +4,7 @@ Closes the coverage gap where agents editing via bash (sed -i, heredoc,
 tee, redirection) got no L6 reindex / L3 post-edit. Also confirms L4a
 auto-query is retired (L3b subsumes it).
 """
+
 import sys
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import oh_gt_full_wrapper as w  # noqa: E402
 class CmdRunAction:
     """Minimal stand-in for an OH CmdRunAction (name matters: _action_class
     reads type(action).__name__)."""
+
     def __init__(self, command: str):
         self.command = command
 
@@ -23,6 +25,7 @@ def _cmd(command: str):
 
 
 # ---- _parse_bash_edit_command ----
+
 
 def test_sed_inplace_detected():
     assert w._parse_bash_edit_command("sed -i 's/foo/bar/' src/app.py") == "src/app.py"
@@ -55,6 +58,7 @@ def test_plain_cat_not_detected():
 
 # ---- classify_tool_event ordering ----
 
+
 def test_sed_inplace_classifies_as_post_edit():
     ev = w.classify_tool_event(_cmd("sed -i 's/a/b/' src/app.py"))
     assert ev.kind == "post_edit"
@@ -78,6 +82,7 @@ def test_bash_edit_to_test_file_skipped():
 
 
 # ---- L4a retirement ----
+
 
 def test_l4a_auto_query_disabled():
     assert w._L4A_AUTO_QUERY_ENABLED is False

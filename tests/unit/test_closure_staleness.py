@@ -147,8 +147,7 @@ def _make_db(
             (build_time_utc,),
         )
     conn.executemany(
-        "INSERT INTO file_hashes (file_path, content_hash, language, indexed_at) "
-        "VALUES (?,?,?,?)",
+        "INSERT INTO file_hashes (file_path, content_hash, language, indexed_at) VALUES (?,?,?,?)",
         [(fp, "deadbeef", "python", ts) for fp, ts in file_hashes],
     )
     conn.commit()
@@ -191,9 +190,7 @@ class TestClosureFreshIsTrusted:
         assert sources is not None, "fresh closure must be trusted (non-None)"
         assert sources == {2, 3}
 
-    def test_fresh_closure_without_build_marker_still_trusted(
-        self, tmp_path: Path
-    ) -> None:
+    def test_fresh_closure_without_build_marker_still_trusted(self, tmp_path: Path) -> None:
         """A binary built without ldflags stamping has no build_time_utc; the
         timestamp signal is inert but signals 1+2 still positively prove
         freshness, so the closure is trusted. (Guards against an over-eager
@@ -271,17 +268,13 @@ class TestClosureStaleReturnsNone:
             file_hashes=_FRESH_HASHES,
         )
         conn = sqlite3.connect(db)
-        conn.execute(
-            "INSERT INTO project_meta (key, value) VALUES ('closure_count', 'NaN')"
-        )
+        conn.execute("INSERT INTO project_meta (key, value) VALUES ('closure_count', 'NaN')")
         conn.commit()
         conn.close()
         graph = ImportGraph(_open(db))
         assert graph._closure_sources_for_symbol(1) is None
 
-    def test_file_indexed_after_closure_build_returns_none(
-        self, tmp_path: Path
-    ) -> None:
+    def test_file_indexed_after_closure_build_returns_none(self, tmp_path: Path) -> None:
         """A file hashed strictly AFTER the closure build (an incremental
         reindex bumps that file's indexed_at) ⇒ the closure no longer reflects
         that file ⇒ stale ⇒ None. Here the count marker still matches the live

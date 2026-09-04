@@ -55,6 +55,7 @@ def _ensure_rust_toolchain_on_path(server_command: list[str] | str) -> None:
             logger.info("rust toolchain located off-PATH; prepended %s for rust-analyzer", d)
             return
 
+
 _TRACE_TRUNCATE_BYTES = 10 * 1024  # 10KB
 _TRACE_MAX_FILES = 3
 
@@ -123,9 +124,7 @@ class LSPClient:
             # the server's die-reason AND can deadlock a chatty server once the OS
             # pipe buffer fills. See _drain_stderr.
             if self._process.stderr is not None:
-                self._stderr_task = asyncio.create_task(
-                    self._drain_stderr(self._process.stderr)
-                )
+                self._stderr_task = asyncio.create_task(self._drain_stderr(self._process.stderr))
             self._started = True
             return Ok(None)
         except (OSError, FileNotFoundError) as exc:

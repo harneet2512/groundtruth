@@ -14,6 +14,7 @@ consumers — they are NOT re-homed here, to avoid creating a second source.
 Import everything delivery-policy from this one package so a change reaches the
 proof-time brief AND agent-time delivery from a single edit (the B1 invariant).
 """
+
 from groundtruth.delivery.name_policy import (
     BUILTIN_CALLABLE_NAMES,
     STDLIB_MODULES,

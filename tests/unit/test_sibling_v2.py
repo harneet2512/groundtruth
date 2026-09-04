@@ -6,13 +6,13 @@ structured output format, and feature flag OFF behavior.
 
 from __future__ import annotations
 
-import os
 import sqlite3
 
 import pytest
 
 
 # -- Helpers --
+
 
 def _create_graph_db(path: str) -> sqlite3.Connection:
     """Create graph.db at the given path with Go indexer schema."""
@@ -150,6 +150,7 @@ class TestDunderFiltering:
 
     def test_no_dunders_in_results(self, db_with_class) -> None:
         from groundtruth.evidence.sibling_v2 import select_siblings_v2
+
         db_path, fpath = db_with_class
 
         results = select_siblings_v2(db_path, fpath, "process_item", "")
@@ -161,6 +162,7 @@ class TestDunderFiltering:
 
     def test_trivial_methods_filtered(self, db_with_class) -> None:
         from groundtruth.evidence.sibling_v2 import select_siblings_v2
+
         db_path, fpath = db_with_class
 
         results = select_siblings_v2(db_path, fpath, "process_item", "")
@@ -210,6 +212,7 @@ class TestRankingBySharedSymbols:
 
     def test_process_batch_ranked_high_for_process_item(self, db_with_class) -> None:
         from groundtruth.evidence.sibling_v2 import select_siblings_v2
+
         db_path, fpath = db_with_class
 
         results = select_siblings_v2(db_path, fpath, "process_item", "")
@@ -219,6 +222,7 @@ class TestRankingBySharedSymbols:
 
     def test_shared_symbols_populated(self, db_with_class) -> None:
         from groundtruth.evidence.sibling_v2 import select_siblings_v2
+
         db_path, fpath = db_with_class
 
         results = select_siblings_v2(db_path, fpath, "process_item", "")
@@ -269,6 +273,7 @@ class TestTop2Limit:
 
     def test_max_two_results(self, db_with_class) -> None:
         from groundtruth.evidence.sibling_v2 import select_siblings_v2
+
         db_path, fpath = db_with_class
 
         results = select_siblings_v2(db_path, fpath, "process_item", "")
@@ -284,6 +289,7 @@ class TestStructuredOutput:
 
     def test_format_sibling_table(self) -> None:
         from groundtruth.evidence.sibling_v2 import format_sibling_table
+
         siblings = [
             {"name": "process_item", "shared_symbols": ["queue", "result"], "return_type": "list"},
             {"name": "validate_item", "shared_symbols": ["item"], "return_type": "bool"},
@@ -298,6 +304,7 @@ class TestStructuredOutput:
 
     def test_format_empty_returns_empty(self) -> None:
         from groundtruth.evidence.sibling_v2 import format_sibling_table
+
         table = format_sibling_table([])
         assert table == ""
 
@@ -308,6 +315,7 @@ class TestSiblingV2FeatureFlag:
     def test_select_disabled_returns_empty(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         monkeypatch.setenv("GT_SIBLING_SELECTOR_V2_ENABLED", "0")
         from groundtruth.evidence.sibling_v2 import select_siblings_v2
+
         db_path = str(tmp_path / "graph.db")
         _create_graph_db(db_path).close()
         result = select_siblings_v2(db_path, "test.py", "func", "")
@@ -316,6 +324,7 @@ class TestSiblingV2FeatureFlag:
     def test_format_disabled_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GT_SIBLING_SELECTOR_V2_ENABLED", "0")
         from groundtruth.evidence.sibling_v2 import format_sibling_table
+
         siblings = [{"name": "x", "shared_symbols": [], "return_type": "str"}]
         result = format_sibling_table(siblings)
         assert result == ""
@@ -323,6 +332,7 @@ class TestSiblingV2FeatureFlag:
     def test_default_is_disabled(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         monkeypatch.delenv("GT_SIBLING_SELECTOR_V2_ENABLED", raising=False)
         from groundtruth.evidence.sibling_v2 import select_siblings_v2
+
         db_path = str(tmp_path / "graph.db")
         _create_graph_db(db_path).close()
         result = select_siblings_v2(db_path, "test.py", "func", "")

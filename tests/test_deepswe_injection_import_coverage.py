@@ -30,6 +30,7 @@ re-introduce the drift. These tests pin that guard, behavior-first:
 
 Deterministic: no Go toolchain, no network, no Docker, no task IDs.
 """
+
 from __future__ import annotations
 
 import importlib.util

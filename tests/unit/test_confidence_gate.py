@@ -115,7 +115,9 @@ class TestConfidenceGate:
         assert isinstance(all_result, Ok)
         assert isinstance(gated_result, Ok)
         assert len(all_result.value) >= len(gated_result.value)
-        assert "src/utils.py" not in gated_result.value or len(gated_result.value) <= len(all_result.value)
+        assert "src/utils.py" not in gated_result.value or len(gated_result.value) <= len(
+            all_result.value
+        )
 
     def test_dead_code_with_confidence_gate(self, graph_db: GraphStore) -> None:
         all_dead = graph_db.get_dead_code()

@@ -13,6 +13,7 @@ events file cannot go there), (b) forwards GT_ORACLE_EVENTS via the verified
 copies the events file into trial_results/ (which the existing Upload step
 ships wholesale). Plus a yaml-parse lint of the whole workflow.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -34,10 +35,11 @@ def test_workflow_yaml_parses():
 
 def test_oracle_events_env_forwarded_into_container():
     t = _text()
-    assert '--ae GT_ORACLE_EVENTS=' in t, (
+    assert "--ae GT_ORACLE_EVENTS=" in t, (
         "GT_ORACLE_EVENTS is not forwarded into the task container — the "
         "oracle's suppression telemetry stays at the in-container default "
-        "and is never harvested")
+        "and is never harvested"
+    )
 
 
 def test_oracle_events_written_to_writable_mount():
@@ -47,7 +49,8 @@ def test_oracle_events_written_to_writable_mount():
     # MOUNTS_JSON quotes are shell-escaped (\") inside the run block.
     assert '"read_only":false' in t.replace(" ", "").replace("\\", ""), (
         "no writable bind mount in MOUNTS_JSON — the container cannot "
-        "persist the oracle events file to the host")
+        "persist the oracle events file to the host"
+    )
 
 
 def test_collect_step_harvests_oracle_events():
@@ -55,6 +58,5 @@ def test_collect_step_harvests_oracle_events():
     assert "gt_oracle_events" in t and "trial_results" in t
     # the Collect step must copy the harvested events file into trial_results/
     assert any(
-        ("gt_oracle_events" in line and "trial_results" in line)
-        for line in t.splitlines()
+        ("gt_oracle_events" in line and "trial_results" in line) for line in t.splitlines()
     ), "Collect step does not copy gt_oracle_events*.jsonl into trial_results/"

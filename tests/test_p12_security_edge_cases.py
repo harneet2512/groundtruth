@@ -13,7 +13,6 @@ Edge cases tested:
 """
 
 import sys
-from typing import Optional
 
 
 # ── P12 Implementation (from BUILD_RESEARCH_P6_P14.md spec, Approach A) ──
@@ -69,9 +68,7 @@ SECURITY_KEYWORDS: dict[str, str] = {
 }
 
 
-def tag_security_sensitivity(
-    func_name: str, signature: str = "", body_text: str = ""
-) -> list[str]:
+def tag_security_sensitivity(func_name: str, signature: str = "", body_text: str = "") -> list[str]:
     """
     Implements the spec from BUILD_RESEARCH_P6_P14.md:
 
@@ -130,25 +127,17 @@ def test_authenticate_user_query_multi_match_dedup():
     """
     tags = tag_security_sensitivity("authenticate_user_query")
 
-    assert "authentication" in tags, (
-        f"Expected 'authentication' from 'auth' substring, got: {tags}"
-    )
-    assert "sql" in tags, (
-        f"Expected 'sql' from 'query' substring, got: {tags}"
-    )
+    assert "authentication" in tags, f"Expected 'authentication' from 'auth' substring, got: {tags}"
+    assert "sql" in tags, f"Expected 'sql' from 'query' substring, got: {tags}"
 
     # Verify dedup: no category appears more than once
-    assert len(tags) == len(set(tags)), (
-        f"Categories should be deduplicated, got duplicates: {tags}"
-    )
+    assert len(tags) == len(set(tags)), f"Categories should be deduplicated, got duplicates: {tags}"
 
     # Specifically: 'authentication' appears exactly once despite 'auth' matching
     assert tags.count("authentication") == 1, (
         f"'authentication' should appear exactly once, got {tags.count('authentication')}"
     )
-    assert tags.count("sql") == 1, (
-        f"'sql' should appear exactly once, got {tags.count('sql')}"
-    )
+    assert tags.count("sql") == 1, f"'sql' should appear exactly once, got {tags.count('sql')}"
 
     print("  PASS: test_authenticate_user_query_multi_match_dedup")
 
@@ -209,7 +198,7 @@ def test_edge_keyword_overlap():
     """Verify that 'execute_query_auth' hits three different categories but each only once."""
     tags = tag_security_sensitivity("execute_query_auth")
     assert "authentication" in tags  # from 'auth'
-    assert "sql" in tags             # from 'query' and/or 'execute'
+    assert "sql" in tags  # from 'query' and/or 'execute'
     # 'exec' is in 'execute' -> should match 'code_execution'
     # BUT wait: 'exec' IS a substring of 'execute'. So 'code_execution' should also match.
     assert "code_execution" in tags, (
@@ -231,9 +220,7 @@ def test_signature_also_checked():
     """The spec checks combined = nameLower + ' ' + sigLower.
     So security keywords in signature params should also trigger tags."""
     tags = tag_security_sensitivity("process", signature="def process(password: str)")
-    assert "credential" in tags, (
-        f"Expected 'credential' from 'password' in signature, got: {tags}"
-    )
+    assert "credential" in tags, f"Expected 'credential' from 'password' in signature, got: {tags}"
     print("  PASS: test_signature_also_checked")
 
 

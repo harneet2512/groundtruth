@@ -1,4 +1,5 @@
 """Piece 3 — ledger-driven suppression + consumed boost."""
+
 from __future__ import annotations
 
 import importlib.util

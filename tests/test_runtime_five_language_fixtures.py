@@ -1,4 +1,5 @@
 """Five-language deterministic product receipts for runtime control behavior."""
+
 from __future__ import annotations
 
 import pytest
@@ -22,7 +23,9 @@ LANGUAGE_FIXTURES = [
         "python",
         [
             Turn(command="sed -n '1,80p' src/app.py"),
-            Turn(command="python -c \"open('src/app.py','w').write('def targetedBehavior(): pass')\""),
+            Turn(
+                command="python -c \"open('src/app.py','w').write('def targetedBehavior(): pass')\""
+            ),
             Turn(command="pytest tests/test_app.py", observation="1 passed"),
         ],
         "src/app.py",
@@ -31,7 +34,9 @@ LANGUAGE_FIXTURES = [
         "go",
         [
             Turn(command="sed -n '1,80p' pkg/app.go"),
-            Turn(command="python -c \"open('pkg/app.go','w').write('func targetedBehavior() {}')\""),
+            Turn(
+                command="python -c \"open('pkg/app.go','w').write('func targetedBehavior() {}')\""
+            ),
             Turn(command="go test ./...", observation="ok example/pkg 0.01s"),
         ],
         "pkg/app.go",
@@ -49,7 +54,9 @@ LANGUAGE_FIXTURES = [
         "typescript",
         [
             Turn(command="sed -n '1,80p' src/app.ts"),
-            Turn(command="python -c \"open('src/app.ts','w').write('export function targetedBehavior() {}')\""),
+            Turn(
+                command="python -c \"open('src/app.ts','w').write('export function targetedBehavior() {}')\""
+            ),
             Turn(command="npm test", observation="1 passed"),
         ],
         "src/app.ts",
@@ -58,7 +65,9 @@ LANGUAGE_FIXTURES = [
         "java",
         [
             Turn(command="sed -n '1,80p' src/main/java/App.java"),
-            Turn(command="python -c \"open('src/main/java/App.java','w').write('class App { void targetedBehavior() {} }')\""),
+            Turn(
+                command="python -c \"open('src/main/java/App.java','w').write('class App { void targetedBehavior() {} }')\""
+            ),
             Turn(command="mvn test", observation="BUILD SUCCESS"),
         ],
         "src/main/java/App.java",
@@ -76,10 +85,16 @@ def test_runtime_state_policy_and_verification_are_language_agnostic(language, t
     assert derive_phase(state) == Phase.VERIFY
 
     assert should_emit("l3b.evidence", Phase.VIEW, event=Event.POST_VIEW, event_bound=True).allowed
-    assert should_emit("spec.obligation", Phase.VERIFY, event=Event.REVIEW_TRANSITION, event_bound=True).allowed
+    assert should_emit(
+        "spec.obligation", Phase.VERIFY, event=Event.REVIEW_TRANSITION, event_bound=True
+    ).allowed
 
     rendered = render_verify_emission(
-        "urgent", 70, 100, {edited_file}, [f"tests/{language}/hidden_exact_name"],
+        "urgent",
+        70,
+        100,
+        {edited_file},
+        [f"tests/{language}/hidden_exact_name"],
     )
     assert "hidden_exact_name" not in rendered
     assert "relevant repo test target" in rendered
@@ -91,7 +106,8 @@ def test_runtime_state_policy_and_verification_are_language_agnostic(language, t
     assert second.text == ""
 
     action = translate_to_action(
-        "[WITNESS] targetedBehavior call by -> src/App:10", Phase.EDIT,
+        "[WITNESS] targetedBehavior call by -> src/App:10",
+        Phase.EDIT,
     )
     assert "Inspect targetedBehavior at src/App:10" in action
 

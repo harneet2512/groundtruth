@@ -13,6 +13,7 @@ Covers the six resolve.py / lsp client bugs:
 
 (Bug5/Bug6 live in the LSP client and are covered in tests/unit/test_lsp_client.py.)
 """
+
 from __future__ import annotations
 
 import os
@@ -30,7 +31,9 @@ class TestReadyBudgetBySlowServer:
         # jdtls is the slowest indexer; the 20s default quits before its workspace
         # import finishes -> 0 conversions every run. It MUST get an extended budget.
         budget = R._READY_BUDGET_S_BY_SERVER.get("jdtls")
-        assert budget is not None, "jdtls missing from _READY_BUDGET_S_BY_SERVER -> falls to 20s default"
+        assert budget is not None, (
+            "jdtls missing from _READY_BUDGET_S_BY_SERVER -> falls to 20s default"
+        )
         assert budget >= 120.0, f"jdtls budget {budget}s too short for an Eclipse workspace import"
 
     def test_rust_analyzer_budget_unchanged(self):
@@ -72,7 +75,7 @@ class TestCallSiteColumnFinder:
         assert ok is True
         assert col != naive
         # the resolved column must sit on a call-shaped occurrence: `get(`
-        assert line[col:].startswith("get("), f"col {col} -> {line[col:col+6]!r}"
+        assert line[col:].startswith("get("), f"col {col} -> {line[col : col + 6]!r}"
 
     def test_plain_function_call_resolves_to_its_paren(self):
         line = "result = compute(a, b)\n"
@@ -184,7 +187,8 @@ class TestDegradedFailClosedUnderRequireLsp:
         repo = tmp_path / "repo"
         repo.mkdir()
         cmd = [
-            sys.executable, "-c",
+            sys.executable,
+            "-c",
             (
                 "import sys; from groundtruth.resolve import resolve_main; "
                 "sys.argv = ['gt-resolve','resolve','--db', %r, '--root', %r, "

@@ -22,11 +22,10 @@ token must skip THAT token (continue), not silently abort all remaining tokens
 
 All inputs are synthetic and generalized — no benchmark task IDs, no gold files.
 """
+
 from __future__ import annotations
 
-import os
 import sqlite3
-from pathlib import Path
 
 import pytest
 
@@ -55,8 +54,12 @@ def _edge_witness(*, verified: bool, hop: int = 1) -> Witness:
 
 def _cand(wits: list[Witness]) -> Candidate:
     return Candidate(
-        file_path="app/a.py", score=1.0, witnesses=wits,
-        lex_hits=0, degree=0, confidence=0.6,
+        file_path="app/a.py",
+        score=1.0,
+        witnesses=wits,
+        lex_hits=0,
+        degree=0,
+        confidence=0.6,
     )
 
 
@@ -81,9 +84,17 @@ def test_render_witness_multihop_unverified_tagged():
 
 def test_render_witness_calls_anchor_direction():
     """calls_anchor: candidate(src) CALLS anchor(dst). Render `src calls dst`."""
-    w = Witness(file_path="a.py", anchor="set_parse", edge_type="CALLS",
-                direction="calls_anchor", verified=True, confidence=1.0, hop=1,
-                src_symbol="set_fields", dst_symbol="set_parse")
+    w = Witness(
+        file_path="a.py",
+        anchor="set_parse",
+        edge_type="CALLS",
+        direction="calls_anchor",
+        verified=True,
+        confidence=1.0,
+        hop=1,
+        src_symbol="set_fields",
+        dst_symbol="set_parse",
+    )
     out = _cand([w]).render_witness()
     assert "set_fields calls set_parse" in out
 
@@ -93,9 +104,17 @@ def test_render_witness_called_by_anchor_not_inverted():
     dst the CALLEE (candidate). The prior `{src} called by {dst}` inverted it —
     `main called by BeginRepl` though main CALLS BeginRepl. Render must read the callee
     called by the caller: `BeginRepl called by main`."""
-    w = Witness(file_path="main.go", anchor="main", edge_type="CALLS",
-                direction="called_by_anchor", verified=True, confidence=1.0, hop=1,
-                src_symbol="main", dst_symbol="BeginRepl")  # main (caller) CALLS BeginRepl
+    w = Witness(
+        file_path="main.go",
+        anchor="main",
+        edge_type="CALLS",
+        direction="called_by_anchor",
+        verified=True,
+        confidence=1.0,
+        hop=1,
+        src_symbol="main",
+        dst_symbol="BeginRepl",
+    )  # main (caller) CALLS BeginRepl
     out = _cand([w]).render_witness()
     assert "BeginRepl called by main" in out
     assert "main called by BeginRepl" not in out
@@ -155,9 +174,7 @@ def test_grep_seed_never_mints_defines_issue_symbol(tmp_path, _no_semantic):
     db = str(tmp_path / "graph.db")
     _mk_graph(db, [("set_fields", "app/importer.py"), ("run_stage", "app/pipeline.py")])
     (tmp_path / "app").mkdir()
-    (tmp_path / "app" / "importer.py").write_text(
-        "def set_fields():\n    pass\n", encoding="utf-8"
-    )
+    (tmp_path / "app" / "importer.py").write_text("def set_fields():\n    pass\n", encoding="utf-8")
     (tmp_path / "app" / "pipeline.py").write_text(
         "def run_stage():\n    zorbafrobnicate()\n", encoding="utf-8"
     )
@@ -178,9 +195,7 @@ def test_grep_seed_never_mints_defines_issue_symbol(tmp_path, _no_semantic):
 
     # Grep-only seed: never a DEFINES issue-symbol fact, never verified.
     pipe = by_file["app/pipeline.py"]
-    assert not pipe.has_verified_witness, (
-        "grep seed laundered into a verified witness"
-    )
+    assert not pipe.has_verified_witness, "grep seed laundered into a verified witness"
     w = pipe.render_witness()
     assert "defines" not in w, f"fabricated DEFINES witness rendered: {w!r}"
     assert w.startswith(("grep match", "path match", "fts5 match", "seed match")), w
@@ -200,9 +215,7 @@ def test_path_seed_witness_is_seed_typed(tmp_path, _no_semantic):
     db = str(tmp_path / "graph.db")
     _mk_graph(db, [("flex_layout", "layout/flex.py")])
     (tmp_path / "layout").mkdir()
-    (tmp_path / "layout" / "flex.py").write_text(
-        "def flex_layout():\n    pass\n", encoding="utf-8"
-    )
+    (tmp_path / "layout" / "flex.py").write_text("def flex_layout():\n    pass\n", encoding="utf-8")
 
     res = localize(
         "the flex container overflows badly",

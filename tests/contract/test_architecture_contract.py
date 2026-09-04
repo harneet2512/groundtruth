@@ -25,7 +25,6 @@ from groundtruth.schema.finding import (
     format_findings,
 )
 from groundtruth.schema.novelty import NoveltyFilter
-from groundtruth.utils.result import Ok
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -37,18 +36,32 @@ def store() -> SymbolStore:
     s.initialize()
     now = int(time.time())
     s.insert_symbol(
-        name="process", kind="function", language="python",
-        file_path="src/core.py", line_number=10, end_line=30,
-        is_exported=True, signature="(data: dict) -> dict",
-        params="data: dict", return_type="dict",
-        documentation=None, last_indexed_at=now,
+        name="process",
+        kind="function",
+        language="python",
+        file_path="src/core.py",
+        line_number=10,
+        end_line=30,
+        is_exported=True,
+        signature="(data: dict) -> dict",
+        params="data: dict",
+        return_type="dict",
+        documentation=None,
+        last_indexed_at=now,
     )
     s.insert_symbol(
-        name="validate", kind="function", language="python",
-        file_path="src/validators.py", line_number=5, end_line=15,
-        is_exported=True, signature="(payload: dict) -> bool",
-        params="payload: dict", return_type="bool",
-        documentation=None, last_indexed_at=now,
+        name="validate",
+        kind="function",
+        language="python",
+        file_path="src/validators.py",
+        line_number=5,
+        end_line=15,
+        is_exported=True,
+        signature="(payload: dict) -> bool",
+        params="payload: dict",
+        return_type="bool",
+        documentation=None,
+        last_indexed_at=now,
     )
     return s
 
@@ -85,7 +98,11 @@ class TestReviewPatchAgentCanRespond:
         """review_patch must fire inside _hooked_execute where the agent
         can act on the output before submission is captured."""
         harness_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "benchmarks", "swebench",
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "benchmarks",
+            "swebench",
             "run_mini_gt_hooked.py",
         )
         with open(os.path.abspath(harness_path)) as f:
@@ -116,7 +133,11 @@ class TestReviewPatchAgentCanRespond:
     def test_post_run_labeled_telemetry(self) -> None:
         """Any post-run review_patch call must be labeled as telemetry."""
         harness_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "benchmarks", "swebench",
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "benchmarks",
+            "swebench",
             "run_mini_gt_hooked.py",
         )
         with open(os.path.abspath(harness_path)) as f:
@@ -141,7 +162,11 @@ class TestNoSurfaceCompleteWithoutAgentResponse:
         """task_map output must be prepended to the task prompt or
         otherwise available before the agent's first action."""
         harness_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "benchmarks", "swebench",
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "benchmarks",
+            "swebench",
             "run_mini_gt_hooked.py",
         )
         with open(os.path.abspath(harness_path)) as f:
@@ -167,7 +192,11 @@ class TestNoSurfaceCompleteWithoutAgentResponse:
     def test_event_brief_in_hooked_execute(self) -> None:
         """event_brief must fire inside _hooked_execute so the agent sees it."""
         harness_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "benchmarks", "swebench",
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "benchmarks",
+            "swebench",
             "run_mini_gt_hooked.py",
         )
         with open(os.path.abspath(harness_path)) as f:
@@ -289,7 +318,10 @@ class TestBenchmarkValidityGates:
     def test_benchmark_arms_documented(self) -> None:
         """Contract file must define required benchmark arms."""
         contract_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "GT_ARCHITECTURE_CONTRACT.md",
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "GT_ARCHITECTURE_CONTRACT.md",
         )
         with open(os.path.abspath(contract_path)) as f:
             text = f.read()
@@ -301,7 +333,10 @@ class TestBenchmarkValidityGates:
     def test_no_raw_qwen_comparison(self) -> None:
         """Verify the contract prohibits raw-Qwen comparison."""
         contract_path = os.path.join(
-            os.path.dirname(__file__), "..", "..", "GT_ARCHITECTURE_CONTRACT.md",
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "GT_ARCHITECTURE_CONTRACT.md",
         )
         with open(os.path.abspath(contract_path)) as f:
             text = f.read()

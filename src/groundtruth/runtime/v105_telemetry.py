@@ -18,6 +18,7 @@ Layers:
 All writers are best-effort (never raise) — a logging failure must never
 break the run.
 """
+
 from __future__ import annotations
 
 import json

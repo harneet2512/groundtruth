@@ -1,4 +1,5 @@
 """Layout composer. Builds a window from primitive widgets."""
+
 from __future__ import annotations
 
 from widgets import make_button, make_panel, make_label

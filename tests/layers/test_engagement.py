@@ -6,6 +6,7 @@ task data is used).  Tests focus on the contract — tokenizer/stopword filter,
 edit-completion rule, division-by-zero, malformed inputs, monotonic window
 behaviour — not on per-task patterns.
 """
+
 from __future__ import annotations
 
 import json

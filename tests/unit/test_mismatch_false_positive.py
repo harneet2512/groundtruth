@@ -104,6 +104,7 @@ def _build_db(
 # (a) THE LOGURU CASE, GENERALIZED — stdlib name still present → NO mismatch
 # ---------------------------------------------------------------------------
 
+
 def test_stdlib_name_still_present_emits_no_mismatch(tmp_path: Path) -> None:
     """A ``-`` diff line drops a stdlib member (``timezone``) but the post-edit
     file STILL imports/uses it; the test references it only for the test's own
@@ -192,9 +193,7 @@ def test_module_level_stdlib_name_excluded(tmp_path: Path) -> None:
     test_rel = "tests/test_runner.py"
 
     (repo / "pkg").mkdir()
-    (repo / "pkg" / "runner.py").write_text(
-        "def run():\n    return 1\n", encoding="utf-8"
-    )
+    (repo / "pkg" / "runner.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     (repo / "tests").mkdir()
     (repo / "tests" / "test_runner.py").write_text(
         f"import {stdlib_name}\n"
@@ -241,6 +240,7 @@ def test_module_level_stdlib_name_excluded(tmp_path: Path) -> None:
 # (b) NEGATIVE CONTROL — a GENUINELY removed param a test asserts → MISMATCH
 # ---------------------------------------------------------------------------
 
+
 def test_genuinely_removed_param_still_fires_mismatch(tmp_path: Path) -> None:
     """No over-suppression: a parameter the agent truly removed (gone from the
     post-edit file entirely) that a test still passes/asserts on the edited
@@ -252,8 +252,7 @@ def test_genuinely_removed_param_still_fires_mismatch(tmp_path: Path) -> None:
     # Post-edit file: 'old_url' is GONE — it does not appear anywhere.
     (repo / "app").mkdir()
     (repo / "app" / "config.py").write_text(
-        "def set_url(new_url):\n"
-        "    return new_url\n",
+        "def set_url(new_url):\n    return new_url\n",
         encoding="utf-8",
     )
 

@@ -11,12 +11,11 @@ Red-before-green: each test was written to fail before the fix.
 import json
 import os
 import sqlite3
-import tempfile
 import textwrap
 
-import pytest
 
 # ---------- helpers ----------
+
 
 def _make_graph_db(nodes, edges, tmp_path):
     """Create a minimal graph.db with given nodes and edges."""
@@ -37,16 +36,31 @@ def _make_graph_db(nodes, edges, tmp_path):
         conn.execute(
             "INSERT INTO nodes (id, label, name, file_path, signature, return_type, is_test, start_line, end_line) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (n["id"], n.get("label", "Function"), n["name"], n["file_path"],
-             n.get("signature", ""), n.get("return_type", ""),
-             n.get("is_test", 0), n.get("start_line", 1), n.get("end_line", 10)),
+            (
+                n["id"],
+                n.get("label", "Function"),
+                n["name"],
+                n["file_path"],
+                n.get("signature", ""),
+                n.get("return_type", ""),
+                n.get("is_test", 0),
+                n.get("start_line", 1),
+                n.get("end_line", 10),
+            ),
         )
     for e in edges:
         conn.execute(
             "INSERT INTO edges (source_id, target_id, type, source_line, source_file, resolution_method, confidence) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (e["src"], e["tgt"], e.get("type", "CALLS"), e.get("line", 1),
-             e.get("source_file", ""), e.get("method", "same_file"), e.get("conf", 1.0)),
+            (
+                e["src"],
+                e["tgt"],
+                e.get("type", "CALLS"),
+                e.get("line", 1),
+                e.get("source_file", ""),
+                e.get("method", "same_file"),
+                e.get("conf", 1.0),
+            ),
         )
     conn.commit()
     conn.close()
@@ -72,6 +86,7 @@ def _make_source_file(path, content):
 # test call sites instead of mock.assert_called_with expectations
 # ============================================================
 
+
 class TestPatchF_MockAssertionExtraction:
     """Briefcase-2085 TTD: mock behavioral assertions must be extracted."""
 
@@ -84,7 +99,12 @@ class TestPatchF_MockAssertionExtraction:
         db_path = _make_graph_db(
             nodes=[
                 {"id": 1, "name": "update_cookiecutter_cache", "file_path": "src/commands/base.py"},
-                {"id": 2, "name": "test_existing_repo_template", "file_path": "tests/test_base.py", "is_test": 1},
+                {
+                    "id": 2,
+                    "name": "test_existing_repo_template",
+                    "file_path": "tests/test_base.py",
+                    "is_test": 1,
+                },
             ],
             edges=[
                 {"src": 2, "tgt": 1, "conf": 1.0, "method": "import"},
@@ -92,7 +112,9 @@ class TestPatchF_MockAssertionExtraction:
             tmp_path=tmp_path,
         )
 
-        _make_test_file(os.path.join(repo_root, "tests/test_base.py"), textwrap.dedent("""\
+        _make_test_file(
+            os.path.join(repo_root, "tests/test_base.py"),
+            textwrap.dedent("""\
             def test_existing_repo_template(mock_remote):
                 cached = base_command.update_cookiecutter_cache(
                     template="https://example.com/template.git",
@@ -101,7 +123,8 @@ class TestPatchF_MockAssertionExtraction:
                 mock_remote.set_url.assert_called_once_with(new_url="https://example.com/template.git")
                 mock_remote.fetch.assert_called_once_with()
                 assert cached == "/path/to/cached"
-        """))
+        """),
+        )
 
         # Write issue terms file so second-pass matching finds mock assertions
         terms_path = os.path.join(str(tmp_path), "gt_issue_terms.txt")
@@ -111,7 +134,10 @@ class TestPatchF_MockAssertionExtraction:
         pe._ISSUE_TERMS_PATH = terms_path
         try:
             assertions = _get_test_assertions_from_file(
-                db_path, "src/commands/base.py", "update_cookiecutter_cache", repo_root,
+                db_path,
+                "src/commands/base.py",
+                "update_cookiecutter_cache",
+                repo_root,
             )
         finally:
             pe._ISSUE_TERMS_PATH = old_terms_path
@@ -134,17 +160,25 @@ class TestPatchF_MockAssertionExtraction:
         db_path = _make_graph_db(
             nodes=[
                 {"id": 1, "name": "handle_error", "file_path": "src/handler.py"},
-                {"id": 2, "name": "test_no_retry", "file_path": "tests/test_handler.py", "is_test": 1},
+                {
+                    "id": 2,
+                    "name": "test_no_retry",
+                    "file_path": "tests/test_handler.py",
+                    "is_test": 1,
+                },
             ],
             edges=[{"src": 2, "tgt": 1, "conf": 1.0, "method": "import"}],
             tmp_path=tmp_path,
         )
 
-        _make_test_file(os.path.join(repo_root, "tests/test_handler.py"), textwrap.dedent("""\
+        _make_test_file(
+            os.path.join(repo_root, "tests/test_handler.py"),
+            textwrap.dedent("""\
             def test_no_retry(mock_client):
                 handle_error(ValueError("bad"))
                 mock_client.retry.assert_not_called()
-        """))
+        """),
+        )
 
         terms_path = os.path.join(str(tmp_path), "gt_issue_terms.txt")
         with open(terms_path, "w") as f:
@@ -153,7 +187,10 @@ class TestPatchF_MockAssertionExtraction:
         pe._ISSUE_TERMS_PATH = terms_path
         try:
             assertions = _get_test_assertions_from_file(
-                db_path, "src/handler.py", "handle_error", repo_root,
+                db_path,
+                "src/handler.py",
+                "handle_error",
+                repo_root,
             )
         finally:
             pe._ISSUE_TERMS_PATH = old_path
@@ -176,15 +213,21 @@ class TestPatchF_MockAssertionExtraction:
             tmp_path=tmp_path,
         )
 
-        _make_test_file(os.path.join(repo_root, "tests/test_math.py"), textwrap.dedent("""\
+        _make_test_file(
+            os.path.join(repo_root, "tests/test_math.py"),
+            textwrap.dedent("""\
             def test_compute():
                 result = compute(3, 4)
                 assert result == 7
                 self.assertEqual(compute(0, 0), 0)
-        """))
+        """),
+        )
 
         assertions = _get_test_assertions_from_file(
-            db_path, "src/math.py", "compute", repo_root,
+            db_path,
+            "src/math.py",
+            "compute",
+            repo_root,
         )
         assert len(assertions) >= 1, f"Plain assertions must still be extracted. Got: {assertions}"
 
@@ -193,6 +236,7 @@ class TestPatchF_MockAssertionExtraction:
 # BUG 2: G7 silence gate — isolated functions must produce zero output
 # From: G7 research + beancount replay
 # ============================================================
+
 
 class TestPatchC_SilenceGate:
     """G7 silence: 0 callers + 0 siblings + 0 peers = zero agent output."""
@@ -209,8 +253,14 @@ class TestPatchC_SilenceGate:
         repo_root = str(tmp_path)
         db_path = _make_graph_db(
             nodes=[
-                {"id": 1, "name": "main", "file_path": "src/entry.py",
-                 "signature": "def main()", "start_line": 1, "end_line": 5},
+                {
+                    "id": 1,
+                    "name": "main",
+                    "file_path": "src/entry.py",
+                    "signature": "def main()",
+                    "start_line": 1,
+                    "end_line": 5,
+                },
             ],
             edges=[],
             tmp_path=tmp_path,
@@ -236,15 +286,22 @@ class TestPatchC_SilenceGate:
         repo_root = str(tmp_path)
         db_path = _make_graph_db(
             nodes=[
-                {"id": 1, "name": "__init__", "file_path": "src/ctx.py",
-                 "signature": "def __init__(self, app: Flask) -> None",
-                 "start_line": 1, "end_line": 10},
+                {
+                    "id": 1,
+                    "name": "__init__",
+                    "file_path": "src/ctx.py",
+                    "signature": "def __init__(self, app: Flask) -> None",
+                    "start_line": 1,
+                    "end_line": 10,
+                },
             ],
             edges=[],
             tmp_path=tmp_path,
         )
-        _make_source_file(os.path.join(repo_root, "src/ctx.py"),
-                          "class RequestContext:\n    def __init__(self, app: Flask) -> None:\n        pass\n")
+        _make_source_file(
+            os.path.join(repo_root, "src/ctx.py"),
+            "class RequestContext:\n    def __init__(self, app: Flask) -> None:\n        pass\n",
+        )
 
         output = generate_improved_evidence(
             file_path="src/ctx.py",
@@ -263,21 +320,43 @@ class TestPatchC_SilenceGate:
         repo_root = str(tmp_path)
         db_path = _make_graph_db(
             nodes=[
-                {"id": 1, "name": "validate", "file_path": "src/auth.py",
-                 "signature": "def validate(token: str) -> bool", "start_line": 1, "end_line": 10},
-                {"id": 2, "name": "login", "file_path": "src/views.py",
-                 "signature": "def login(request) -> Response", "start_line": 1, "end_line": 20},
+                {
+                    "id": 1,
+                    "name": "validate",
+                    "file_path": "src/auth.py",
+                    "signature": "def validate(token: str) -> bool",
+                    "start_line": 1,
+                    "end_line": 10,
+                },
+                {
+                    "id": 2,
+                    "name": "login",
+                    "file_path": "src/views.py",
+                    "signature": "def login(request) -> Response",
+                    "start_line": 1,
+                    "end_line": 20,
+                },
             ],
             edges=[
-                {"src": 2, "tgt": 1, "conf": 1.0, "method": "import", "line": 5,
-                 "source_file": "src/views.py"},
+                {
+                    "src": 2,
+                    "tgt": 1,
+                    "conf": 1.0,
+                    "method": "import",
+                    "line": 5,
+                    "source_file": "src/views.py",
+                },
             ],
             tmp_path=tmp_path,
         )
-        _make_source_file(os.path.join(repo_root, "src/auth.py"),
-                          "def validate(token: str) -> bool:\n    return True\n")
-        _make_source_file(os.path.join(repo_root, "src/views.py"),
-                          "from auth import validate\ndef login(request):\n    if validate(request.token):\n        pass\n")
+        _make_source_file(
+            os.path.join(repo_root, "src/auth.py"),
+            "def validate(token: str) -> bool:\n    return True\n",
+        )
+        _make_source_file(
+            os.path.join(repo_root, "src/views.py"),
+            "from auth import validate\ndef login(request):\n    if validate(request.token):\n        pass\n",
+        )
 
         output = generate_improved_evidence(
             file_path="src/auth.py",
@@ -286,13 +365,16 @@ class TestPatchC_SilenceGate:
             repo_root=repo_root,
         )
         assert output != "", "Function with callers must produce evidence"
-        assert "def validate" in output or "[CONTRACT]" in output or "[SIGNATURE]" in output, f"Must include signature or caller evidence. Got: {output[:200]}"
+        assert "def validate" in output or "[CONTRACT]" in output or "[SIGNATURE]" in output, (
+            f"Must include signature or caller evidence. Got: {output[:200]}"
+        )
 
 
 # ============================================================
 # BUG 3: Confidence filtering — low-confidence edges excluded
 # From: Patch A, G3 research (29x noise from name_match)
 # ============================================================
+
 
 class TestPatchA_ConfidenceFilter:
     """Low-confidence edges must be excluded from all queries."""
@@ -308,21 +390,39 @@ class TestPatchA_ConfidenceFilter:
                 {"id": 3, "name": "noisy_caller", "file_path": "src/noise.py"},
             ],
             edges=[
-                {"src": 2, "tgt": 1, "conf": 1.0, "method": "import", "line": 10,
-                 "source_file": "src/real.py"},
-                {"src": 3, "tgt": 1, "conf": 0.3, "method": "name_match", "line": 5,
-                 "source_file": "src/noise.py"},
+                {
+                    "src": 2,
+                    "tgt": 1,
+                    "conf": 1.0,
+                    "method": "import",
+                    "line": 10,
+                    "source_file": "src/real.py",
+                },
+                {
+                    "src": 3,
+                    "tgt": 1,
+                    "conf": 0.3,
+                    "method": "name_match",
+                    "line": 5,
+                    "source_file": "src/noise.py",
+                },
             ],
             tmp_path=tmp_path,
         )
 
         callers = _get_callers_from_graph(
-            db_path, "src/target.py", "target_func", str(tmp_path),
-            seen_files=[], limit=10,
+            db_path,
+            "src/target.py",
+            "target_func",
+            str(tmp_path),
+            seen_files=[],
+            limit=10,
         )
 
         caller_files = [c["file"] for c in callers]
-        assert any("real" in f for f in caller_files), f"High-confidence caller must appear. Got: {caller_files}"
+        assert any("real" in f for f in caller_files), (
+            f"High-confidence caller must appear. Got: {caller_files}"
+        )
         assert not any("noise" in f for f in caller_files), (
             f"Low-confidence (0.3) caller must be EXCLUDED. Got: {caller_files}"
         )
@@ -337,15 +437,25 @@ class TestPatchA_ConfidenceFilter:
                 {"id": 2, "name": "verified_caller", "file_path": "src/verified.py"},
             ],
             edges=[
-                {"src": 2, "tgt": 1, "conf": 0.9, "method": "name_match", "line": 10,
-                 "source_file": "src/verified.py"},
+                {
+                    "src": 2,
+                    "tgt": 1,
+                    "conf": 0.9,
+                    "method": "name_match",
+                    "line": 10,
+                    "source_file": "src/verified.py",
+                },
             ],
             tmp_path=tmp_path,
         )
 
         callers = _get_callers_from_graph(
-            db_path, "src/target.py", "target_func", str(tmp_path),
-            seen_files=[], limit=10,
+            db_path,
+            "src/target.py",
+            "target_func",
+            str(tmp_path),
+            seen_files=[],
+            limit=10,
         )
         assert len(callers) >= 1, "Confidence 0.9 caller must be included"
 
@@ -354,6 +464,7 @@ class TestPatchA_ConfidenceFilter:
 # BUG 4: Big-repo neighbor cap — limit=3 when nodes > 5000
 # From: Patch B, G3 research (29x explosion)
 # ============================================================
+
 
 class TestPatchB_NeighborCap:
     """Big repos (>5000 nodes) must cap L3b neighbor count."""
@@ -400,7 +511,9 @@ class TestPatchB_NeighborCap:
 
         # With 6000 nodes, the cap fires (limit=min(limit,3)).
         # Callers fetched = limit*4 = 12 max, but after filtering/ranking, at most 3 shown.
-        caller_lines = [l for l in out_lines if "file_" in l and "caller" in l.lower() or "(src/file_" in l]
+        caller_lines = [
+            l for l in out_lines if "file_" in l and "caller" in l.lower() or "(src/file_" in l
+        ]
         assert isinstance(out_lines, list)
 
     def test_small_repo_no_cap(self, tmp_path):
@@ -422,6 +535,7 @@ class TestPatchB_NeighborCap:
 # From: Patch E — anchors proven ACTIVE on all 5 tasks
 # ============================================================
 
+
 class TestPatchE_AnchorRanking:
     """Issue anchors must be loaded and used to rank callers."""
 
@@ -431,10 +545,14 @@ class TestPatchE_AnchorRanking:
 
         anchor_path = os.path.join(str(tmp_path), "gt_issue_anchors.json")
         with open(anchor_path, "w") as f:
-            json.dump({"symbols": ["set_url", "remote"], "paths": ["commands/base.py"], "test_names": []}, f)
+            json.dump(
+                {"symbols": ["set_url", "remote"], "paths": ["commands/base.py"], "test_names": []},
+                f,
+            )
 
         # Monkey-patch the path for testing
         import groundtruth.hooks.post_edit as pe
+
         old_path = pe._ISSUE_ANCHORS_PATH
         pe._ISSUE_ANCHORS_PATH = anchor_path
         try:
@@ -448,6 +566,7 @@ class TestPatchE_AnchorRanking:
         """Missing anchor file → empty dict, no crash."""
         from groundtruth.hooks.post_edit import _load_issue_anchors
         import groundtruth.hooks.post_edit as pe
+
         old_path = pe._ISSUE_ANCHORS_PATH
         pe._ISSUE_ANCHORS_PATH = "/nonexistent/path.json"
         try:
@@ -463,12 +582,14 @@ class TestPatchE_AnchorRanking:
 # From: Patch D
 # ============================================================
 
+
 class TestPatchD_Dedup:
     """Normalized dedup: same file+evidence → suppress. Different files → deliver."""
 
     def test_same_evidence_same_file_deduped(self):
         """Identical normalized evidence for same file → second call suppressed."""
         import hashlib
+
         body1 = "[SIGNATURE] def foo(x: int) -> bool\n[PATTERN] sibling bar()"
         body2 = "[PATTERN] sibling bar()\n[SIGNATURE] def foo(x: int) -> bool"
         # After normalization (sort + strip)
@@ -481,6 +602,7 @@ class TestPatchD_Dedup:
     def test_different_evidence_not_deduped(self):  # noqa: E301
         """Different evidence for same file → different hashes."""
         import hashlib
+
         body1 = "[SIGNATURE] def foo(x: int) -> bool"
         body2 = "[SIGNATURE] def bar(y: str) -> None"
         norm1 = "\n".join(sorted(ln.strip() for ln in body1.splitlines() if ln.strip()))
@@ -494,6 +616,7 @@ class TestPatchD_Dedup:
 # BUG 7: GT_STATUS pollution — status lines must go to stderr
 # From: Senior verifier Bug 1 — sh-744/pylint had GT_STATUS in agent obs
 # ============================================================
+
 
 class TestBug1_GTStatusPollution:
     """GT_STATUS lines must go to stderr, not stdout."""
@@ -523,6 +646,7 @@ class TestBug1_GTStatusPollution:
 # From: Senior verifier Bug 4 + Patch A audit
 # ============================================================
 
+
 class TestBug4_CallerConfidenceAt07:
     """Main caller query must use >= 0.7, not >= 0.5."""
 
@@ -537,17 +661,33 @@ class TestBug4_CallerConfidenceAt07:
                 {"id": 3, "name": "strong_caller", "file_path": "src/strong.py"},
             ],
             edges=[
-                {"src": 2, "tgt": 1, "conf": 0.6, "method": "name_match", "line": 10,
-                 "source_file": "src/moderate.py"},
-                {"src": 3, "tgt": 1, "conf": 0.9, "method": "import", "line": 5,
-                 "source_file": "src/strong.py"},
+                {
+                    "src": 2,
+                    "tgt": 1,
+                    "conf": 0.6,
+                    "method": "name_match",
+                    "line": 10,
+                    "source_file": "src/moderate.py",
+                },
+                {
+                    "src": 3,
+                    "tgt": 1,
+                    "conf": 0.9,
+                    "method": "import",
+                    "line": 5,
+                    "source_file": "src/strong.py",
+                },
             ],
             tmp_path=tmp_path,
         )
 
         callers = _get_callers_from_graph(
-            db_path, "src/target.py", "target", str(tmp_path),
-            seen_files=[], limit=10,
+            db_path,
+            "src/target.py",
+            "target",
+            str(tmp_path),
+            seen_files=[],
+            limit=10,
         )
 
         caller_files = [c["file"] for c in callers]

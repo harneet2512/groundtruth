@@ -32,7 +32,10 @@ def parse_js(code: str):
 
 def walk_tree(node, depth=0):
     """Debug: print tree structure."""
-    print("  " * depth + f"{node.type} [{node.start_point[0]}:{node.start_point[1]}-{node.end_point[0]}:{node.end_point[1]}]")
+    print(
+        "  " * depth
+        + f"{node.type} [{node.start_point[0]}:{node.start_point[1]}-{node.end_point[0]}:{node.end_point[1]}]"
+    )
     for child in node.children:
         walk_tree(child, depth + 1)
 
@@ -49,12 +52,13 @@ def find_nodes_by_type(node, target_type):
 
 def get_node_text(node, src_bytes):
     """Get the text of a node."""
-    return src_bytes[node.start_byte:node.end_byte].decode("utf-8")
+    return src_bytes[node.start_byte : node.end_byte].decode("utf-8")
 
 
 # =============================================================================
 # P0: SIDE EFFECTS EDGE CASES
 # =============================================================================
+
 
 def test_p0_augmented_assignment():
     """
@@ -159,7 +163,7 @@ def test_p0_chained_attribute():
 
         # The object is NOT "self" directly -- it's another attribute access
         if obj.type == "attribute":
-            print(f"  WARNING: Object is chained (attribute), not direct 'self' identifier!")
+            print("  WARNING: Object is chained (attribute), not direct 'self' identifier!")
             # To find root object, we need to walk down
             root_obj = obj
             depth = 0
@@ -173,7 +177,9 @@ def test_p0_chained_attribute():
     print("  VERDICT: For `self.a.b = c`, the LEFT is attribute(object=attribute(object=self))")
     print("  The Go code should ONLY report direct self.X assignments, NOT chained ones.")
     print("  Implementation must check: left.type=='attribute' AND left.object.type=='identifier'")
-    print("  AND left.object.text=='self'. Chained access (left.object.type=='attribute') should be SKIPPED.")
+    print(
+        "  AND left.object.text=='self'. Chained access (left.object.type=='attribute') should be SKIPPED."
+    )
     print("  PASS\n")
     return True
 
@@ -253,7 +259,7 @@ def test_p0_super_call():
 
             # super() is a call expression, not an identifier
             assert obj.type == "call", f"Expected 'call' type for super(), got '{obj.type}'"
-            print(f"  super() is a CALL node, not an identifier -> correctly excluded")
+            print("  super() is a CALL node, not an identifier -> correctly excluded")
 
     print()
     print("  VERDICT: `super().value = val` has object as 'call' node (not 'identifier').")
@@ -310,6 +316,7 @@ def test_p0_property_setter():
 # P5: STRATEGY 1.5 EDGE CASES
 # =============================================================================
 
+
 def test_p5_wildcard_import():
     """
     Edge Case 6: `from module import *` -> ImportedName="*"
@@ -343,10 +350,14 @@ def test_p5_wildcard_import():
     print()
     print("  VERDICT: Wildcard imports produce 'wildcard_import' nodes with text '*'.")
     print("  The existing buildImportIndex (resolver.go:258-269) handles '*' correctly.")
-    print("  For Strategy 1.5 in resolveAssertionTarget, code should iterate fileImportNames[testFile]")
+    print(
+        "  For Strategy 1.5 in resolveAssertionTarget, code should iterate fileImportNames[testFile]"
+    )
     print("  and skip entries where ImportedName=='*' when doing specific name matching.")
     print("  The CURRENT resolver already puts '*' into the import index and uses it as a fallback")
-    print("  (line 258: 'Check wildcard imports'), so no crash occurs. It just won't match specific names.")
+    print(
+        "  (line 258: 'Check wildcard imports'), so no crash occurs. It just won't match specific names."
+    )
     print("  PASS\n")
     return True
 
@@ -405,9 +416,7 @@ def test_p5_import_name_not_in_nodes():
     print("=" * 70)
 
     # Simulate the data structures
-    fileImportNames = {
-        "tests/test_auth.py": ["validate_token", "nonexistent_helper"]
-    }
+    fileImportNames = {"tests/test_auth.py": ["validate_token", "nonexistent_helper"]}
     nameToNodeIDs = {
         "validate_token": [42],  # exists
         # "nonexistent_helper" is NOT in nameToNodeIDs
@@ -419,7 +428,8 @@ def test_p5_import_name_not_in_nodes():
 
     # Extract called functions from assertion
     import re
-    call_pattern = re.compile(r'(\w+)\s*\(')
+
+    call_pattern = re.compile(r"(\w+)\s*\(")
     candidates = call_pattern.findall(assertion_expr)
     skip = {"assert", "assertEqual", "len", "str", "int"}
     candidates = [c for c in candidates if c not in skip]
@@ -453,6 +463,7 @@ def test_p5_import_name_not_in_nodes():
 # =============================================================================
 # P6: GUARD CONSEQUENCES EDGE CASES
 # =============================================================================
+
 
 def test_p6_multi_statement_body():
     """
@@ -556,7 +567,7 @@ def test_p6_no_raise_return_in_body():
                     break
 
         cond_text = get_node_text(cond, src) if cond else "?"
-        print(f"  If #{i+1}: condition='{cond_text}'")
+        print(f"  If #{i + 1}: condition='{cond_text}'")
 
         # Look for raise/return/throw
         raises = find_nodes_by_type(consequence, "raise_statement")
@@ -566,8 +577,10 @@ def test_p6_no_raise_return_in_body():
         print(f"  Has raise/return: {has_consequence}")
 
         if not has_consequence:
-            print(f"  -> This should NOT be classified as a guard clause at all by extractGuardFromStmt")
-            print(f"     (or consequence text should be empty string)")
+            print(
+                "  -> This should NOT be classified as a guard clause at all by extractGuardFromStmt"
+            )
+            print("     (or consequence text should be empty string)")
 
     print()
     print("  VERDICT: The CURRENT extractGuardFromStmt (parser.go:1082) uses string Contains")
@@ -623,7 +636,9 @@ def test_p6_consequence_truncation():
 
     print()
     print("  VERDICT: The raise text is 100+ chars. Truncation to 60 chars works correctly.")
-    print("  Go implementation: `if len(consequenceText) > 60 { consequenceText = consequenceText[:60] }`")
+    print(
+        "  Go implementation: `if len(consequenceText) > 60 { consequenceText = consequenceText[:60] }`"
+    )
     print("  NOTE: Truncating UTF-8 by byte position could split a multi-byte char.")
     print("  For ASCII-dominated code this is fine. For safety, use rune-aware truncation.")
     print("  PASS\n")
@@ -633,6 +648,7 @@ def test_p6_consequence_truncation():
 # =============================================================================
 # ASSERTIONS QUERY EDGE CASES
 # =============================================================================
+
 
 def test_assertions_table_missing():
     """
@@ -665,9 +681,7 @@ def test_assertions_table_missing():
     """)
 
     # Check if assertions table exists
-    cursor = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='assertions'"
-    )
+    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='assertions'")
     has_assertions = cursor.fetchone() is not None
     print(f"  Has assertions table: {has_assertions}")
     assert not has_assertions, "Should NOT have assertions table"
@@ -693,9 +707,7 @@ def test_assertions_table_missing():
         )
     """)
 
-    cursor = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='assertions'"
-    )
+    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='assertions'")
     has_assertions = cursor.fetchone() is not None
     assert has_assertions, "Should now have assertions table"
     print(f"  After schema creation: has assertions = {has_assertions}")
@@ -750,36 +762,28 @@ def test_assertions_target_node_id_zero():
     conn.commit()
 
     # Query with target_node_id > 0 (only resolved)
-    cursor = conn.execute(
-        "SELECT * FROM assertions WHERE target_node_id > 0"
-    )
+    cursor = conn.execute("SELECT * FROM assertions WHERE target_node_id > 0")
     resolved = cursor.fetchall()
-    print(f"  Total assertions: 3")
+    print("  Total assertions: 3")
     print(f"  Resolved (target_node_id > 0): {len(resolved)}")
     assert len(resolved) == 1, f"Expected 1 resolved, got {len(resolved)}"
     print(f"  Resolved assertion: {resolved[0]}")
 
     # Query with target_node_id = 0 (unresolved)
-    cursor = conn.execute(
-        "SELECT * FROM assertions WHERE target_node_id = 0"
-    )
+    cursor = conn.execute("SELECT * FROM assertions WHERE target_node_id = 0")
     unresolved = cursor.fetchall()
     print(f"  Unresolved (target_node_id = 0): {len(unresolved)}")
     assert len(unresolved) == 2, f"Expected 2 unresolved, got {len(unresolved)}"
 
     # Query for a specific symbol (simulating get_assertions_for_symbol)
     symbol_id = 5
-    cursor = conn.execute(
-        "SELECT * FROM assertions WHERE target_node_id = ?", (symbol_id,)
-    )
+    cursor = conn.execute("SELECT * FROM assertions WHERE target_node_id = ?", (symbol_id,))
     for_symbol = cursor.fetchall()
     print(f"  Assertions for symbol_id={symbol_id}: {len(for_symbol)}")
     assert len(for_symbol) == 1
 
     # Query for symbol_id = 0 (would incorrectly return all unresolved!)
-    cursor = conn.execute(
-        "SELECT * FROM assertions WHERE target_node_id = ?", (0,)
-    )
+    cursor = conn.execute("SELECT * FROM assertions WHERE target_node_id = ?", (0,))
     for_zero = cursor.fetchall()
     print(f"  Assertions for symbol_id=0 (BUG if queried!): {len(for_zero)}")
     assert len(for_zero) == 2, "Querying target_node_id=0 returns ALL unresolved!"
@@ -787,7 +791,9 @@ def test_assertions_target_node_id_zero():
     conn.close()
 
     print()
-    print("  VERDICT: The `AND target_node_id > 0` filter correctly excludes unresolved assertions.")
+    print(
+        "  VERDICT: The `AND target_node_id > 0` filter correctly excludes unresolved assertions."
+    )
     print("  CRITICAL BUG RISK: If get_assertions_for_symbol(0) is ever called, it returns ALL")
     print("  unresolved assertions (every assertion with target_node_id=0)!")
     print("  FIX: The function MUST validate symbol_id > 0 before querying, or use")
@@ -799,6 +805,7 @@ def test_assertions_target_node_id_zero():
 # =============================================================================
 # BONUS: JS/TS this-based side effects
 # =============================================================================
+
 
 def test_p0_js_this_assignment():
     """
@@ -844,7 +851,9 @@ def test_p0_js_this_assignment():
                     print(f"    -> SIDE EFFECT: this.{prop_text}")
 
     print()
-    print("  VERDICT: JS uses 'member_expression' not 'attribute', and 'this' is a special node type.")
+    print(
+        "  VERDICT: JS uses 'member_expression' not 'attribute', and 'this' is a special node type."
+    )
     print("  For JS/TS, the Go code must check:")
     print("    - node type: 'assignment_expression' OR 'augmented_assignment_expression'")
     print("    - left type: 'member_expression'")
@@ -856,6 +865,7 @@ def test_p0_js_this_assignment():
 # =============================================================================
 # MAIN
 # =============================================================================
+
 
 def main():
     print("\n" + "=" * 70)
@@ -887,6 +897,7 @@ def main():
         except Exception as e:
             print(f"  EXCEPTION: {e}")
             import traceback
+
             traceback.print_exc()
             results.append((name, f"EXCEPTION: {e}"))
 

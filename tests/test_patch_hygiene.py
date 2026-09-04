@@ -1,4 +1,5 @@
 """CP010 — patch hygiene classification tests."""
+
 import importlib.util
 import os
 

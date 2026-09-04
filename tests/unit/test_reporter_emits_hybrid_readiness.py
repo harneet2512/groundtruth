@@ -15,6 +15,7 @@ runs the real reporter script as a subprocess, and inspects the JSON file
 the reporter writes. It cannot be made green by editing the test; the
 reporter must produce real output.
 """
+
 from __future__ import annotations
 
 import json
@@ -22,7 +23,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORTER = REPO_ROOT / "benchmarks" / "swebench" / "vm_bundle" / "gt_canary_report.py"
@@ -36,25 +36,32 @@ def _write_task_dir(outdir: Path, instance_id: str, events: list[dict], arm: str
             f.write(json.dumps(ev) + "\n")
     # Minimal per-task summary — reporter consumes identity_ok from here
     (task_dir / "gt_per_task_summary.json").write_text(
-        json.dumps({
-            "run_id": "r-test",
-            "arm": arm,
-            "instance_id": instance_id,
-            "identity_ok": True,
-            "cycle": 10,
-            "within_call_budget": True,
-        })
+        json.dumps(
+            {
+                "run_id": "r-test",
+                "arm": arm,
+                "instance_id": instance_id,
+                "identity_ok": True,
+                "cycle": 10,
+                "within_call_budget": True,
+            }
+        )
     )
     return task_dir
 
 
 def _run_reporter(outdir: Path, arm: str) -> dict:
     cmd = [
-        sys.executable, str(REPORTER),
-        "--outdir", str(outdir),
-        "--arm", arm,
-        "--run-id", "r-test",
-        "--max-steps", "150",
+        sys.executable,
+        str(REPORTER),
+        "--outdir",
+        str(outdir),
+        "--arm",
+        arm,
+        "--run-id",
+        "r-test",
+        "--max-steps",
+        "150",
     ]
     if arm == "gt-lsp-hybrid":
         cmd.append("--hybrid")
@@ -86,8 +93,7 @@ class TestReporterEmitsHybridReadiness:
         # If the reporter stops emitting any of them, the gate silently goes
         # dormant. Assert each one by name with its expected value.
         assert summary.get("lsp_enabled") is True, (
-            "lsp_enabled missing — gate will be dormant. Summary: "
-            f"{list(summary.keys())}"
+            f"lsp_enabled missing — gate will be dormant. Summary: {list(summary.keys())}"
         )
         assert summary.get("lsp_ready") is True, (
             "lsp_ready must be True on a successful promotion with no failures"
@@ -144,10 +150,18 @@ class TestReporterEmitsHybridReadiness:
         task_dir = tmp_path / "astropy__astropy-12907"
         task_dir.mkdir()
         (task_dir / "gt_hook_telemetry.jsonl").write_text("")
-        (task_dir / "gt_per_task_summary.json").write_text(json.dumps({
-            "run_id": "r", "arm": "gt-lsp-hybrid", "instance_id": "astropy__astropy-12907",
-            "identity_ok": True, "cycle": 1, "within_call_budget": True,
-        }))
+        (task_dir / "gt_per_task_summary.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "r",
+                    "arm": "gt-lsp-hybrid",
+                    "instance_id": "astropy__astropy-12907",
+                    "identity_ok": True,
+                    "cycle": 1,
+                    "within_call_budget": True,
+                }
+            )
+        )
         summary = _run_reporter(tmp_path, "gt-lsp-hybrid")
         assert summary.get("lsp_enabled") is False
         assert summary.get("lsp_ready") is False

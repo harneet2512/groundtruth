@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import importlib
 import math
-import os
 
 import numpy as np
 import pytest
@@ -50,6 +49,7 @@ from groundtruth.memory.enrich.embed import (
 # ---------------------------------------------------------------------------
 # (1) Single-sourced identity + per-model prefix/pooling (no ONNX needed)
 # ---------------------------------------------------------------------------
+
 
 def test_default_is_code_tuned_and_open():
     assert DEFAULT_EMBED_MODEL == "Alibaba-NLP/gte-modernbert-base"
@@ -101,6 +101,7 @@ def test_e5_model_is_prefixed_mean():
 # ---------------------------------------------------------------------------
 # (2) ONNX-input introspection is CONDITIONAL (load-bearing) — no real ONNX
 # ---------------------------------------------------------------------------
+
 
 class _FakeInput:
     def __init__(self, name: str) -> None:
@@ -185,6 +186,7 @@ def test_pooling_differs_by_model():
 # (3) Dim-agnostic scoring at 768
 # ---------------------------------------------------------------------------
 
+
 def test_aggregate_symbol_cosines_dim_agnostic():
     """The MaxSim aggregation operates on COSINES (scalars), so it is independent of dim.
     Build cosines from real 768-dim unit vectors to prove the contract at the new dim."""
@@ -236,6 +238,7 @@ def test_total_score_consumes_scalar_sem_component():
 # (4) Memory vec store stays pinned to e5/384 (NOT migrated)
 # ---------------------------------------------------------------------------
 
+
 def test_memory_config_pinned_to_e5(monkeypatch):
     """MemoryConfig defaults to e5/384 and is independent of GT_EMBED_MODEL_NAME — the
     sqlite-vec store does not flip with the localization embedder.
@@ -268,6 +271,7 @@ def test_memory_embed_helpers_default_to_e5():
     import inspect
 
     from groundtruth.memory.enrich import embed as e
+
     for fn in (e.embed_query, e.embed_passage, e.embed_batch):
         sig = inspect.signature(fn)
         assert sig.parameters["model_name"].default == "intfloat/e5-small-v2"
@@ -486,6 +490,7 @@ def test_st_still_available_when_require_off(monkeypatch):
 # ---------------------------------------------------------------------------
 # LIVE model-load validation — RUN-WHEN-PRESENT (skips if model not baked)
 # ---------------------------------------------------------------------------
+
 
 def _model_baked(model_name: str) -> bool:
     try:

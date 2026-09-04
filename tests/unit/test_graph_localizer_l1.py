@@ -28,11 +28,11 @@ GREEN (post-fix): the localizer surfaces importer.py as the TOP candidate via
 
 No AI anywhere — pure sqlite + regex.
 """
+
 from __future__ import annotations
 
 import sqlite3
 
-import pytest
 
 from groundtruth.pretask.graph_localizer import localize
 from groundtruth.pretask.v1r_brief import (
@@ -67,8 +67,7 @@ def _make_beets_db(tmp_path):
         encoding="utf-8",
     )
     (repo / "beets" / "dbcore" / "db.py").write_text(
-        "def set_parse(self, key, string):\n"
-        "    return _parse(string)\n",
+        "def set_parse(self, key, string):\n    return _parse(string)\n",
         encoding="utf-8",
     )
     # Hard negatives: lexically mention parse/field/values but no edge to anchors.
@@ -79,9 +78,7 @@ def _make_beets_db(tmp_path):
         encoding="utf-8",
     )
     (repo / "beets" / "library.py").write_text(
-        "def store(self, fields):\n"
-        "    # library stores parsed field values\n"
-        "    return fields\n",
+        "def store(self, fields):\n    # library stores parsed field values\n    return fields\n",
         encoding="utf-8",
     )
 
@@ -107,14 +104,26 @@ def _make_beets_db(tmp_path):
         "INSERT INTO nodes (id,label,name,file_path,start_line,end_line,signature,"
         "is_test,language) VALUES (?,?,?,?,?,?,?,0,'python')",
         [
-            (1, "Method", "set_fields", "beets/importer.py", 1, 3,
-             "def set_fields(self, fields):"),
-            (2, "Method", "set_parse", "beets/dbcore/db.py", 1, 2,
-             "def set_parse(self, key, string):"),
-            (3, "Function", "parse_stage", "beets/util/pipeline.py", 1, 3,
-             "def parse_stage(values):"),
-            (4, "Method", "store", "beets/library.py", 1, 3,
-             "def store(self, fields):"),
+            (1, "Method", "set_fields", "beets/importer.py", 1, 3, "def set_fields(self, fields):"),
+            (
+                2,
+                "Method",
+                "set_parse",
+                "beets/dbcore/db.py",
+                1,
+                2,
+                "def set_parse(self, key, string):",
+            ),
+            (
+                3,
+                "Function",
+                "parse_stage",
+                "beets/util/pipeline.py",
+                1,
+                3,
+                "def parse_stage(values):",
+            ),
+            (4, "Method", "store", "beets/library.py", 1, 3, "def store(self, fields):"),
         ],
     )
     # The ONE structural witness: set_fields CALLS set_parse, deterministic edge.
@@ -131,6 +140,7 @@ def _make_beets_db(tmp_path):
 # ===========================================================================
 # 1. localize() — ANCHOR -> TRAVERSE -> RERANK -> GATE (unit on the core)
 # ===========================================================================
+
 
 def test_localize_surfaces_importer_as_top_via_witness(tmp_path):
     """GREEN: importer.py is the top candidate via its set_fields->set_parse
@@ -174,21 +184,29 @@ def test_localize_no_anchor_returns_empty_nonconfident(tmp_path):
 # 2. render_brief() PLUMBING — the rendered string is the deliverable
 # ===========================================================================
 
+
 def test_render_witnessed_top_shows_importer_with_witness_and_confident_line():
     """GREEN plumbing: rendered brief surfaces importer.py with its witness AND
     the confident line fires (because the witness is verified)."""
     importer = FileEntry(
-        path="beets/importer.py", score=0.6, functions=["set_fields"],
+        path="beets/importer.py",
+        score=0.6,
+        functions=["set_fields"],
         function_names=["set_fields"],
         witness="set_fields calls set_parse [CALLS]",
-        witness_verified=True, localizer_confidence=1.0,
+        witness_verified=True,
+        localizer_confidence=1.0,
     )
     pipeline = FileEntry(
-        path="beets/util/pipeline.py", score=0.9, functions=["parse_stage"],
+        path="beets/util/pipeline.py",
+        score=0.9,
+        functions=["parse_stage"],
         function_names=["parse_stage"],
     )
     out = render_brief(
-        [importer, pipeline], scores=[0.6, 0.9], issue_text=_BEETS_ISSUE,
+        [importer, pipeline],
+        scores=[0.6, 0.9],
+        issue_text=_BEETS_ISSUE,
     )
     # importer.py is ranked #1 in the rendered list.
     assert "1. beets/importer.py" in out, out
@@ -215,17 +233,23 @@ def test_render_witnessless_lexical_only_never_gets_confident_line():
     # set_fields is in the issue text AND a contract is present -> OLD tier was
     # [VERIFIED]; score gap 0.9 vs 0.3 is > 0.3 -> OLD high_confidence True.
     pipeline = FileEntry(
-        path="beets/util/pipeline.py", score=0.9, functions=["set_fields"],
+        path="beets/util/pipeline.py",
+        score=0.9,
+        functions=["set_fields"],
         function_names=["set_fields"],
         contract="beets/other.py:55",  # present -> issue_match+contract => [VERIFIED]
         # NO witness / witness_verified=False (this is the whole point).
     )
     library = FileEntry(
-        path="beets/library.py", score=0.3, functions=["store"],
+        path="beets/library.py",
+        score=0.3,
+        functions=["store"],
         function_names=["store"],
     )
     out = render_brief(
-        [pipeline, library], scores=[0.9, 0.3], issue_text=_BEETS_ISSUE,
+        [pipeline, library],
+        scores=[0.9, 0.3],
+        issue_text=_BEETS_ISSUE,
         graph_db="",  # no graph -> cannot prove a name_match-only weakness
     )
     assert "Highest-confidence candidate" not in out, (
@@ -238,15 +262,21 @@ def test_render_no_verified_witness_emits_grep_fallback():
     """When no candidate carries a verified witness and none is [VERIFIED], the
     honest grep fallback is present."""
     pipeline = FileEntry(
-        path="beets/util/pipeline.py", score=0.9, functions=["parse_stage"],
+        path="beets/util/pipeline.py",
+        score=0.9,
+        functions=["parse_stage"],
         function_names=["parse_stage"],
     )
     library = FileEntry(
-        path="beets/library.py", score=0.85, functions=["store"],
+        path="beets/library.py",
+        score=0.85,
+        functions=["store"],
         function_names=["store"],
     )
     out = render_brief(
-        [pipeline, library], scores=[0.9, 0.85], issue_text=_BEETS_ISSUE,
+        [pipeline, library],
+        scores=[0.9, 0.85],
+        issue_text=_BEETS_ISSUE,
         graph_db="",
     )
     assert "could not anchor" in out.lower() and "grep" in out.lower(), out
@@ -255,9 +285,12 @@ def test_render_no_verified_witness_emits_grep_fallback():
 def test_tier_verified_witness_is_verified_tier():
     """A verified graph-traversal witness earns [VERIFIED] on its own."""
     e = FileEntry(
-        path="beets/importer.py", score=0.6, functions=["set_fields"],
+        path="beets/importer.py",
+        score=0.6,
+        functions=["set_fields"],
         function_names=["set_fields"],
-        witness="set_fields calls set_parse [CALLS]", witness_verified=True,
+        witness="set_fields calls set_parse [CALLS]",
+        witness_verified=True,
     )
     assert _entry_confidence_tier(e, _BEETS_ISSUE) == "[VERIFIED]"
 
@@ -265,8 +298,12 @@ def test_tier_verified_witness_is_verified_tier():
 def test_tier_unverified_witness_is_warning_not_verified():
     """A name_match witness is real-but-weak -> [WARNING], never [VERIFIED]."""
     e = FileEntry(
-        path="beets/x.py", score=0.6, functions=["foo"], function_names=["foo"],
-        witness="foo calls bar [CALLS (unverified)]", witness_verified=False,
+        path="beets/x.py",
+        score=0.6,
+        functions=["foo"],
+        function_names=["foo"],
+        witness="foo calls bar [CALLS (unverified)]",
+        witness_verified=False,
     )
     assert _entry_confidence_tier(e, "unrelated issue text") == "[WARNING]"
 
@@ -274,6 +311,7 @@ def test_tier_unverified_witness_is_warning_not_verified():
 # ===========================================================================
 # 3. generate_v1r_brief() END-TO-END — plumbing through the live brief path
 # ===========================================================================
+
 
 def test_generate_v1r_brief_surfaces_importer_top_with_witness(tmp_path):
     """End-to-end through the LIVE brief path: the rendered <gt-task-brief>
@@ -289,9 +327,7 @@ def test_generate_v1r_brief_surfaces_importer_top_with_witness(tmp_path):
         "importer.py absent from rendered brief (the beets-5495 failure):\n" + brief
     )
     # Witness delivered in the rendered string.
-    assert "set_parse" in brief, (
-        "set_fields->set_parse witness not delivered in brief:\n" + brief
-    )
+    assert "set_parse" in brief, "set_fields->set_parse witness not delivered in brief:\n" + brief
     # importer.py ranks ahead of the lexical hard negatives in the rendered list.
     paths_in_order = [e.path for e in result.files]
     assert "beets/importer.py" in paths_in_order
@@ -299,8 +335,7 @@ def test_generate_v1r_brief_surfaces_importer_top_with_witness(tmp_path):
     for hn in ("beets/util/pipeline.py", "beets/library.py"):
         if hn in paths_in_order:
             assert imp_idx < paths_in_order.index(hn), (
-                f"{hn} (witness-less) ranked above importer.py (witnessed): "
-                f"{paths_in_order}"
+                f"{hn} (witness-less) ranked above importer.py (witnessed): {paths_in_order}"
             )
 
 
@@ -309,7 +344,9 @@ def test_generate_v1r_brief_no_anchor_suppresses_confident_line(tmp_path):
     fallback present (or at minimum no confident directive)."""
     repo, db = _make_beets_db(tmp_path)
     result = generate_v1r_brief(
-        "the program produces unexpected output occasionally", repo, db,
+        "the program produces unexpected output occasionally",
+        repo,
+        db,
         bug_id="no-anchor-synth",
     )
     brief = result.brief_text
@@ -328,6 +365,7 @@ def test_generate_v1r_brief_no_anchor_suppresses_confident_line(tmp_path):
 #    SUPPRESSED-tier name_match edge surfaced junk.py as an (unverified) candidate.
 #    GREEN (post-fix): such edges are dropped at admission; junk.py never appears.
 # ===========================================================================
+
 
 def _make_db_with_noise_edge(tmp_path, *, conf, method, tier, with_tier_col):
     """beets db (importer.py verified-witnessed) PLUS a junk.py reachable ONLY by a
@@ -370,7 +408,11 @@ def test_admission_drops_low_confidence_name_match(tmp_path):
     admission -> junk.py never becomes an (unverified) candidate. importer.py (the
     verified witness) is unaffected."""
     _repo, db = _make_db_with_noise_edge(
-        tmp_path, conf=0.2, method="name_match", tier=None, with_tier_col=False,
+        tmp_path,
+        conf=0.2,
+        method="name_match",
+        tier=None,
+        with_tier_col=False,
     )
     res = localize(_BEETS_ISSUE, db)
     paths = [c.file_path for c in res.candidates]
@@ -383,7 +425,11 @@ def test_admission_hard_excludes_suppressed_trust_tier(tmp_path):
     ABOVE the floor (0.9) -> the tier hard-exclude is independent of the conf gate.
     junk.py must not surface; importer.py still does."""
     _repo, db = _make_db_with_noise_edge(
-        tmp_path, conf=0.9, method="name_match", tier="SUPPRESSED", with_tier_col=True,
+        tmp_path,
+        conf=0.9,
+        method="name_match",
+        tier="SUPPRESSED",
+        with_tier_col=True,
     )
     res = localize(_BEETS_ISSUE, db)
     paths = [c.file_path for c in res.candidates]
@@ -397,7 +443,11 @@ def test_admission_keeps_midconf_name_match_above_floor(tmp_path):
     junk.py surfaces (just never as the confident top). Proves the filter drops
     only BELOW the floor, not all name_match."""
     _repo, db = _make_db_with_noise_edge(
-        tmp_path, conf=0.6, method="name_match", tier=None, with_tier_col=False,
+        tmp_path,
+        conf=0.6,
+        method="name_match",
+        tier=None,
+        with_tier_col=False,
     )
     res = localize(_BEETS_ISSUE, db)
     paths = [c.file_path for c in res.candidates]
@@ -410,19 +460,36 @@ def test_render_witness_prefers_meaningful_over_generic():
     '__init__ called by _setup_logging' (both hop-0 verified, tie on strength)
     and hid the real 'set_fields calls set_parse'."""
     from groundtruth.pretask.graph_localizer import Candidate, Witness
+
     generic = Witness(
-        file_path="beets/importer.py", anchor="x", edge_type="CALLS",
-        direction="called_by_anchor", verified=True, confidence=1.0, hop=0,
-        src_symbol="__init__", dst_symbol="_setup_logging",
+        file_path="beets/importer.py",
+        anchor="x",
+        edge_type="CALLS",
+        direction="called_by_anchor",
+        verified=True,
+        confidence=1.0,
+        hop=0,
+        src_symbol="__init__",
+        dst_symbol="_setup_logging",
     )
     meaningful = Witness(
-        file_path="beets/importer.py", anchor="set_fields", edge_type="CALLS",
-        direction="calls_anchor", verified=True, confidence=1.0, hop=0,
-        src_symbol="set_fields", dst_symbol="set_parse",
+        file_path="beets/importer.py",
+        anchor="set_fields",
+        edge_type="CALLS",
+        direction="calls_anchor",
+        verified=True,
+        confidence=1.0,
+        hop=0,
+        src_symbol="set_fields",
+        dst_symbol="set_parse",
     )
     c = Candidate(
-        file_path="beets/importer.py", score=1.0, witnesses=[generic, meaningful],
-        lex_hits=3, degree=5, confidence=1.0,
+        file_path="beets/importer.py",
+        score=1.0,
+        witnesses=[generic, meaningful],
+        lex_hits=3,
+        degree=5,
+        confidence=1.0,
     )
     out = c.render_witness()
     assert "set_fields" in out and "set_parse" in out, out

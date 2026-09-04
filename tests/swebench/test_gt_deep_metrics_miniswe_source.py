@@ -11,11 +11,11 @@ SAME keys, that the JSON/`.md` are self-describing about which source was used, 
 mutation-proof — that stubbing the fallback back to the OH-only behaviour makes the
 assertions go RED (zeros). The OpenHands path must remain byte-equivalent.
 """
+
 from __future__ import annotations
 
 import importlib.util
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -32,9 +32,7 @@ REAL_SUPERJSON_TRAJ = Path(
     r"2026-06-17__08-15-47/superjson-error-stack-serializat__7t9KqdK/agent/"
     r"mini-swe-agent.trajectory.json"
 )
-REAL_SUPERJSON_ROOT = Path(
-    r"C:/Users/Lenovo/.claude-personal/jobs/fbdb1439/tmp/wit2/superjson"
-)
+REAL_SUPERJSON_ROOT = Path(r"C:/Users/Lenovo/.claude-personal/jobs/fbdb1439/tmp/wit2/superjson")
 
 
 def _load_metrics_module():
@@ -45,8 +43,9 @@ def _load_metrics_module():
     return mod
 
 
-def _write_miniswe_trajectory(tmp_path: Path, task: str, *, n_steps: int = 59,
-                              edit_at: int = 29) -> Path:
+def _write_miniswe_trajectory(
+    tmp_path: Path, task: str, *, n_steps: int = 59, edit_at: int = 29
+) -> Path:
     """Build a minimal but structurally-faithful mini-swe-agent.trajectory.json:
     system + user(brief) + n_steps × (assistant, tool), reproducing the real shape
     (info.model_stats.api_calls, config.model.model_name, GT tags in the user/brief
@@ -58,7 +57,7 @@ def _write_miniswe_trajectory(tmp_path: Path, task: str, *, n_steps: int = 59,
         "<gt-task-brief>\n<gt-graph-map>\nsrc/a.ts :: f calls g\n</gt-graph-map>\n"
         "<gt-evidence>\ncontract: f(x) -> Y\n</gt-evidence>\n"
         "<gt-evidence>\ncaller: h in src/b.ts\n</gt-evidence>\n"
-        "<gt-nudge reason=\"verify\">check the edit</gt-nudge>\n"
+        '<gt-nudge reason="verify">check the edit</gt-nudge>\n'
         "</gt-task-brief>\n</pr_description>\n"
     )
     messages = [
@@ -70,15 +69,24 @@ def _write_miniswe_trajectory(tmp_path: Path, task: str, *, n_steps: int = 59,
             cmd = "str_replace src/a.ts old new"
         else:
             cmd = f"cat src/file_{step}.ts"
-        messages.append({
-            "role": "assistant",
-            "content": f"thought {step}",
-            "tool_calls": [{"function": {"arguments": json.dumps({"command": cmd})}}],
-            "extra": {"response": {"usage": {
-                "prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100,
-                "prompt_cache_hit_tokens": 800, "prompt_cache_miss_tokens": 200,
-            }}},
-        })
+        messages.append(
+            {
+                "role": "assistant",
+                "content": f"thought {step}",
+                "tool_calls": [{"function": {"arguments": json.dumps({"command": cmd})}}],
+                "extra": {
+                    "response": {
+                        "usage": {
+                            "prompt_tokens": 1000,
+                            "completion_tokens": 100,
+                            "total_tokens": 1100,
+                            "prompt_cache_hit_tokens": 800,
+                            "prompt_cache_miss_tokens": 200,
+                        }
+                    }
+                },
+            }
+        )
         messages.append({"role": "tool", "content": f"observation {step}"})
     messages.append({"role": "exit", "content": "done"})
     traj = {
@@ -104,8 +112,11 @@ def _write_output_jsonl(tmp_path: Path, task: str) -> Path:
     obj = {
         "history": [
             {"action": "run", "args": {"command": "ls"}, "content": ""},
-            {"action": "edit", "args": {"command": "str_replace x y"},
-             "content": "<gt-evidence>caller info</gt-evidence>"},
+            {
+                "action": "edit",
+                "args": {"command": "str_replace x y"},
+                "content": "<gt-evidence>caller info</gt-evidence>",
+            },
         ],
         "test_result": {"git_patch": "diff --git a/x b/x\n"},
         "resolved": True,
@@ -126,7 +137,7 @@ def test_miniswe_fallback_populates_agent_metrics(tmp_path):
     # _from_trajectory must now be self-sufficient off the OH path.
     traj = mod._from_trajectory(task, str(tmp_path))
     assert traj["trajectory_source"] == "miniswe_trajectory"
-    assert traj["action_count"] == 59          # ~= result.json n_agent_steps=59
+    assert traj["action_count"] == 59  # ~= result.json n_agent_steps=59
     assert traj["gt_brief_delivered"] > 0
     assert traj["gt_observation_chars_total"] > 0
     assert traj["first_edit_action"] == 29
@@ -155,11 +166,18 @@ def test_mutation_old_oh_only_behaviour_goes_red(tmp_path, monkeypatch):
     def _old_from_trajectory(task_, results_dir_):
         oj = mod._find_output_jsonl(task_, results_dir_)
         out = {
-            "output_jsonl": oj or "", "trajectory_source": "none",
-            "action_count": 0, "edits": 0, "first_edit_action": 0,
-            "flows_delivered": 0, "contracts_delivered": 0, "consensus_delivered": 0,
-            "test_delivered": 0, "gt_observation_chars_total": 0,
-            "resolved": None, "has_patch": False,
+            "output_jsonl": oj or "",
+            "trajectory_source": "none",
+            "action_count": 0,
+            "edits": 0,
+            "first_edit_action": 0,
+            "flows_delivered": 0,
+            "contracts_delivered": 0,
+            "consensus_delivered": 0,
+            "test_delivered": 0,
+            "gt_observation_chars_total": 0,
+            "resolved": None,
+            "has_patch": False,
         }
         return out  # no output.jsonl -> all zeros, exactly the proven bug
 
@@ -182,7 +200,7 @@ def test_openhands_output_jsonl_path_unchanged(tmp_path):
 
     traj = mod._from_trajectory(task, str(tmp_path / "results"))
     assert traj["trajectory_source"] == "output_jsonl"
-    assert traj["action_count"] == 2          # two history actions
+    assert traj["action_count"] == 2  # two history actions
     assert traj["edits"] == 1
     assert traj["first_edit_action"] == 2
     assert traj["has_patch"] is True
@@ -205,7 +223,7 @@ def test_real_superjson_trajectory_grounded():
     task = "superjson-error-stack-serializat"
     traj = mod._from_trajectory(task, str(REAL_SUPERJSON_ROOT))
     assert traj["trajectory_source"] == "miniswe_trajectory"
-    assert traj["action_count"] == 59           # matches result.json n_agent_steps=59
+    assert traj["action_count"] == 59  # matches result.json n_agent_steps=59
     assert traj["gt_brief_delivered"] >= 1
     assert traj["gt_observation_chars_total"] > 0
     assert traj["has_patch"] is True

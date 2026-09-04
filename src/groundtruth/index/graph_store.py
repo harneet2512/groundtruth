@@ -180,7 +180,9 @@ class GraphStore(SymbolStore):
         """Check if edges table has a confidence column (v14+ schema)."""
         if not hasattr(self, "_confidence_col_exists"):
             try:
-                cols = {r[1] for r in self.connection.execute("PRAGMA table_info(edges)").fetchall()}
+                cols = {
+                    r[1] for r in self.connection.execute("PRAGMA table_info(edges)").fetchall()
+                }
                 self._confidence_col_exists = "confidence" in cols
             except sqlite3.Error:
                 self._confidence_col_exists = False
@@ -239,9 +241,7 @@ class GraphStore(SymbolStore):
             matched = self._match_file_path(file_path)
             if matched is None:
                 return Ok([])
-            cursor = self.connection.execute(
-                "SELECT * FROM nodes WHERE file_path = ?", (matched,)
-            )
+            cursor = self.connection.execute("SELECT * FROM nodes WHERE file_path = ?", (matched,))
             return Ok(
                 [_node_row_to_symbol(row, self._usage_for(row["id"])) for row in cursor.fetchall()]
             )
@@ -691,13 +691,21 @@ class GraphStore(SymbolStore):
                 (test_node_id,),
             )
             return [
-                {"kind": row[0], "expression": row[1], "expected": row[2], "line": row[3], "target_node_id": row[4]}
+                {
+                    "kind": row[0],
+                    "expression": row[1],
+                    "expected": row[2],
+                    "line": row[3],
+                    "target_node_id": row[4],
+                }
                 for row in cursor.fetchall()
             ]
         except sqlite3.OperationalError:
             return []
 
-    def get_assertions_for_target(self, target_name: str, target_node_id: int | None = None) -> list[dict[str, Any]]:
+    def get_assertions_for_target(
+        self, target_name: str, target_node_id: int | None = None
+    ) -> list[dict[str, Any]]:
         """Get assertions that test a specific function.
 
         When target_node_id is provided, queries by the resolved foreign key for
@@ -1037,9 +1045,7 @@ class GraphStore(SymbolStore):
             args.append("".join(current).strip())
         return [a for a in args if a]
 
-    def map_args_to_params(
-        self, caller_code: str, callee_id: int
-    ) -> list[dict[str, Any]] | None:
+    def map_args_to_params(self, caller_code: str, callee_id: int) -> list[dict[str, Any]] | None:
         """Map positional arguments in caller code to callee parameters.
 
         Prefers structured params from the properties table (P2) when available,
@@ -1070,13 +1076,15 @@ class GraphStore(SymbolStore):
         if params:
             mapping: list[dict[str, Any]] = []
             for i, (arg, param) in enumerate(zip(args, params)):
-                mapping.append({
-                    "position": i,
-                    "arg": arg,
-                    "param_name": param["name"],
-                    "param_type": param.get("type"),
-                    "required": param.get("required", True),
-                })
+                mapping.append(
+                    {
+                        "position": i,
+                        "arg": arg,
+                        "param_name": param["name"],
+                        "param_type": param.get("type"),
+                        "required": param.get("required", True),
+                    }
+                )
             return mapping if mapping else None
 
         # Fallback: parse callee signature string
@@ -1132,13 +1140,15 @@ class GraphStore(SymbolStore):
 
         mapping: list[dict[str, Any]] = []
         for i, (arg, param) in enumerate(zip(args, params)):
-            mapping.append({
-                "position": i,
-                "arg": arg,
-                "param_name": param,
-                "param_type": None,
-                "required": True,
-            })
+            mapping.append(
+                {
+                    "position": i,
+                    "arg": arg,
+                    "param_name": param,
+                    "param_type": None,
+                    "required": True,
+                }
+            )
         return mapping if mapping else None
 
     # --- Write operations are no-ops for the bridge ---
@@ -1178,8 +1188,10 @@ class GraphStore(SymbolStore):
             funcs = self.connection.execute(
                 "SELECT name FROM nodes WHERE label IN ('Function','Method') AND is_test = 0 LIMIT 500"
             ).fetchall()
-            snake = sum(1 for f in funcs if '_' in f["name"] and f["name"].islower())
-            camel = sum(1 for f in funcs if not '_' in f["name"] and any(c.isupper() for c in f["name"][1:]))
+            snake = sum(1 for f in funcs if "_" in f["name"] and f["name"].islower())
+            camel = sum(
+                1 for f in funcs if "_" not in f["name"] and any(c.isupper() for c in f["name"][1:])
+            )
             total = len(funcs)
             if total > 0:
                 result["naming"] = "snake_case" if snake > camel else "camelCase"
@@ -1212,7 +1224,7 @@ class GraphStore(SymbolStore):
                 "UNION "
                 "SELECT file_a, count FROM cochanges WHERE file_b = ? AND count >= ? "
                 "ORDER BY count DESC LIMIT 10",
-                (file_path, min_count, file_path, min_count)
+                (file_path, min_count, file_path, min_count),
             )
             return [(row[0], row[1]) for row in cursor.fetchall()]
         except Exception:

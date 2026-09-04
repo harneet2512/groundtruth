@@ -1,4 +1,5 @@
 """P2-06 baseline rerun guard."""
+
 from __future__ import annotations
 
 import importlib.util

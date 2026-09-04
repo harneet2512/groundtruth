@@ -3,6 +3,7 @@
 Every GT signal must end in exactly one terminal state.
 No silent drops — if a signal is not delivered, there must be a logged reason.
 """
+
 from __future__ import annotations
 
 import json
@@ -60,21 +61,39 @@ class Ledger:
     def record(self, entry: LedgerEntry) -> None:
         self._entries.append(entry)
 
-    def delivered(self, layer: str, event_type: str, file_path: str,
-                  chars: int, iteration: int = 0) -> None:
-        self.record(LedgerEntry(
-            layer=layer, event_type=event_type, file_path=file_path,
-            outcome=SignalOutcome.DELIVERED, chars_delivered=chars,
-            iteration=iteration,
-        ))
+    def delivered(
+        self, layer: str, event_type: str, file_path: str, chars: int, iteration: int = 0
+    ) -> None:
+        self.record(
+            LedgerEntry(
+                layer=layer,
+                event_type=event_type,
+                file_path=file_path,
+                outcome=SignalOutcome.DELIVERED,
+                chars_delivered=chars,
+                iteration=iteration,
+            )
+        )
 
-    def suppressed(self, layer: str, event_type: str, file_path: str,
-                   outcome: SignalOutcome, reason: str = "",
-                   iteration: int = 0) -> None:
-        self.record(LedgerEntry(
-            layer=layer, event_type=event_type, file_path=file_path,
-            outcome=outcome, reason=reason, iteration=iteration,
-        ))
+    def suppressed(
+        self,
+        layer: str,
+        event_type: str,
+        file_path: str,
+        outcome: SignalOutcome,
+        reason: str = "",
+        iteration: int = 0,
+    ) -> None:
+        self.record(
+            LedgerEntry(
+                layer=layer,
+                event_type=event_type,
+                file_path=file_path,
+                outcome=outcome,
+                reason=reason,
+                iteration=iteration,
+            )
+        )
 
     @property
     def entries(self) -> list[LedgerEntry]:

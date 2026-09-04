@@ -5,6 +5,7 @@ A property mined below confidence 0.5 is not a contract FACT and must not be del
 permissive (gt_gt behavior, I5). 'boundary_condition' has no value-validator, so it
 isolates the confidence gate cleanly.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -32,7 +33,7 @@ def test_low_confidence_property_is_dropped():
     conn.executemany(
         "INSERT INTO properties (node_id,kind,value,confidence,line) VALUES (?,?,?,?,?)",
         [
-            (1, "boundary_condition", "x > 0", 0.8, 1),   # >= floor -> kept
+            (1, "boundary_condition", "x > 0", 0.8, 1),  # >= floor -> kept
             (1, "boundary_condition", "y < 10", 0.3, 2),  # < floor  -> dropped
         ],
     )

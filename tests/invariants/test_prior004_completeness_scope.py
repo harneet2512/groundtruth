@@ -3,12 +3,12 @@
 Tests that obligation_check.find_obligations() only reports methods sharing
 state with the EDITED function, not arbitrary class-wide pairs.
 """
+
 from __future__ import annotations
 
 import os
 import tempfile
 
-import pytest
 
 from groundtruth.hooks.obligation_check import find_obligations
 
@@ -56,7 +56,8 @@ class TestCompletnessScopedToEditedFunction:
                 f.write(SAMPLE_CLASS)
 
             results = find_obligations(
-                "importer.py", tmpdir,
+                "importer.py",
+                tmpdir,
                 edited_functions={"set_fields"},
             )
 
@@ -82,7 +83,8 @@ class TestCompletnessScopedToEditedFunction:
                 f.write(SAMPLE_CLASS)
 
             results = find_obligations(
-                "importer.py", tmpdir,
+                "importer.py",
+                tmpdir,
                 edited_functions=set(),  # empty set = extraction failed
             )
 
@@ -116,15 +118,13 @@ class TestCompletnessScopedToEditedFunction:
                 f.write(SAMPLE_CLASS)
 
             results = find_obligations(
-                "importer.py", tmpdir,
+                "importer.py",
+                tmpdir,
                 edited_functions={"set_fields"},
             )
 
             # The chosen_info/set_choice pair must NOT appear when editing set_fields
-            noise_pairs = [
-                r for r in results
-                if "chosen_info" in r and "set_choice" in r
-            ]
+            noise_pairs = [r for r in results if "chosen_info" in r and "set_choice" in r]
             assert len(noise_pairs) == 0, (
                 f"PRIOR-004: chosen_info/set_choice pair is class-wide noise, "
                 f"not related to set_fields. Got: {noise_pairs}"

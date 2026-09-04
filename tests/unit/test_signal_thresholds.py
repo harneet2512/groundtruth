@@ -1,4 +1,5 @@
 """Tests for signal threshold constants — values and logging."""
+
 from groundtruth.config.signal_thresholds import (
     SCOPE_MIN_CALLER_FILES,
     SCOPE_MIN_EDGE_CONFIDENCE,
@@ -8,7 +9,6 @@ from groundtruth.config.signal_thresholds import (
     SIGNATURE_MEDIUM_CONFIDENCE_METHODS,
     VERIFY_MIN_EDGE_CONFIDENCE,
     VERIFY_LABEL_HIGH_METHODS,
-    VERIFY_LABEL_MEDIUM_METHODS,
     COCHANGE_HIGH_THRESHOLD,
     COCHANGE_MEDIUM_THRESHOLD,
     COCHANGE_WINDOW_COMMITS,

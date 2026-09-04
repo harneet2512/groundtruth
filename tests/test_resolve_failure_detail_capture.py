@@ -9,6 +9,7 @@ the cert. Fix: ``_note_failure_detail`` (first-detail-wins, bounded, never
 raises) called at the per-edge lsp_error site and at the all-empty
 project-not-ready epilogue.
 """
+
 from __future__ import annotations
 
 from groundtruth.resolve import _note_failure_detail
@@ -18,8 +19,7 @@ def test_first_detail_wins():
     stats: dict = {"failure_detail": ""}
     _note_failure_detail(stats, "definition: no package metadata for file x.go")
     _note_failure_detail(stats, "definition: a later, different error")
-    assert stats["failure_detail"] == (
-        "definition: no package metadata for file x.go")
+    assert stats["failure_detail"] == ("definition: no package metadata for file x.go")
 
 
 def test_never_overwrites_existing_detail():

@@ -1,4 +1,5 @@
 """P0-02 — proof_progress.json / proof_failure.json contract."""
+
 from __future__ import annotations
 
 import importlib.util

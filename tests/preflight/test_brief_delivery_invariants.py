@@ -20,6 +20,7 @@ NOTE: invariant 3's full form (no [GT_*] in the real agent instruction) is the
 job of the runtime verifier (scripts/verify/check_brief_delivery.py) on a real
 output.jsonl; here we only assert _brief_max_tokens introduces no pollution.
 """
+
 from __future__ import annotations
 
 import ast
@@ -27,7 +28,6 @@ import re
 import textwrap
 from pathlib import Path
 
-import pytest
 
 # The wrap block now routes the brief through the Safe Renderer (C1); the
 # extracted block references it, so it must be in the exec namespace.
@@ -38,17 +38,19 @@ WRAPPER = Path(__file__).resolve().parents[2] / "scripts" / "swebench" / "oh_gt_
 # A structured v1r brief: <gt-graph-map> is a sibling block AFTER </gt-task-brief>,
 # and its BODY lines contain file paths (so the old reorder pulls them to the front
 # and leaves the tag lines adjacent -> empty map). Small enough to be < any budget.
-STRUCTURED_BRIEF = "\n".join([
-    "<gt-task-brief>",
-    "1. app/core.py (def run(self, documents):)",
-    "   Contract: raises ValueError, TypeError | preserve not documents | returns value",
-    "</gt-task-brief>",
-    "<gt-graph-map>",
-    "app/core.py :: run",
-    "  calls: helper (app/util.py), validate (app/util.py)",
-    "  called by: main (app/main.py)",
-    "</gt-graph-map>",
-])
+STRUCTURED_BRIEF = "\n".join(
+    [
+        "<gt-task-brief>",
+        "1. app/core.py (def run(self, documents):)",
+        "   Contract: raises ValueError, TypeError | preserve not documents | returns value",
+        "</gt-task-brief>",
+        "<gt-graph-map>",
+        "app/core.py :: run",
+        "  calls: helper (app/util.py), validate (app/util.py)",
+        "  called by: main (app/main.py)",
+        "</gt-graph-map>",
+    ]
+)
 
 
 def _read_source() -> str:
@@ -75,7 +77,7 @@ def _load_wrap_block() -> str:
     marker = "_wrapped = _core_sanitize_block(brief.strip())"
     start = next((i for i, ln in enumerate(src) if ln.strip() == marker), None)
     assert start is not None, f"wrap block marker `{marker}` not found"
-    block = "\n".join(src[start:start + 6])
+    block = "\n".join(src[start : start + 6])
     return textwrap.dedent(block)
 
 
@@ -105,6 +107,7 @@ def _old_brief_max_tokens(text: str, max_tokens: int = 2000) -> str:
 
 # ---------- _brief_max_tokens structure preservation ----------
 
+
 def test_brief_max_tokens_preserves_graph_map_body():
     fn = _load_func("_brief_max_tokens")
     out = fn(STRUCTURED_BRIEF, max_tokens=2000)  # 8000-char budget; brief is ~250c
@@ -119,7 +122,9 @@ def test_brief_max_tokens_does_not_reorder():
     fn = _load_func("_brief_max_tokens")
     out = fn(STRUCTURED_BRIEF, max_tokens=2000)
     # under budget -> identical content, original order
-    assert out.strip() == STRUCTURED_BRIEF.strip(), "in-order cap must not change a sub-budget brief"
+    assert out.strip() == STRUCTURED_BRIEF.strip(), (
+        "in-order cap must not change a sub-budget brief"
+    )
 
 
 def test_brief_max_tokens_introduces_no_pollution():
@@ -130,6 +135,7 @@ def test_brief_max_tokens_introduces_no_pollution():
 
 
 # ---------- red-before-green negative control ----------
+
 
 def test_negative_control_old_reorder_empties_map():
     """Proves the invariant catches the ORIGINAL bug class.
@@ -147,11 +153,20 @@ def test_negative_control_old_reorder_empties_map():
 
 # ---------- single-wrap invariant (real wrap block) ----------
 
+
 def test_wrap_does_not_double_wrap_already_wrapped_brief():
     block = _load_wrap_block()
-    brief = _load_func("_brief_max_tokens")(STRUCTURED_BRIEF, max_tokens=2000)  # starts with <gt-task-brief>
-    ns = {"brief": brief, "content": "<uploaded_files>\nrepo\n</uploaded_files>\nissue text",
-          "tools_hint": "", "_demo": "", "_core_sanitize_block": _core_sanitize_block, "re": re}
+    brief = _load_func("_brief_max_tokens")(
+        STRUCTURED_BRIEF, max_tokens=2000
+    )  # starts with <gt-task-brief>
+    ns = {
+        "brief": brief,
+        "content": "<uploaded_files>\nrepo\n</uploaded_files>\nissue text",
+        "tools_hint": "",
+        "_demo": "",
+        "_core_sanitize_block": _core_sanitize_block,
+        "re": re,
+    }
     exec(block, ns)
     final = ns["content"]
     assert final.count("<gt-task-brief>") == 1, "exactly one <gt-task-brief> open tag"
@@ -161,8 +176,14 @@ def test_wrap_does_not_double_wrap_already_wrapped_brief():
 
 def test_wrap_still_wraps_an_unwrapped_brief():
     block = _load_wrap_block()
-    ns = {"brief": "plain brief with no tags", "content": "issue", "tools_hint": "", "_demo": "",
-          "_core_sanitize_block": _core_sanitize_block, "re": re}
+    ns = {
+        "brief": "plain brief with no tags",
+        "content": "issue",
+        "tools_hint": "",
+        "_demo": "",
+        "_core_sanitize_block": _core_sanitize_block,
+        "re": re,
+    }
     exec(block, ns)
     final = ns["content"]
     assert final.count("<gt-task-brief>") == 1
@@ -172,15 +193,16 @@ def test_wrap_still_wraps_an_unwrapped_brief():
 def test_source_has_no_unconditional_double_wrap():
     """Regression lock: the old unconditional double-wrap line must be gone."""
     src = _read_source()
-    assert 'content = f"<gt-task-brief>\\n{brief}\\n</gt-task-brief>' not in src, \
+    assert 'content = f"<gt-task-brief>\\n{brief}\\n</gt-task-brief>' not in src, (
         "the unconditional double-wrap must not return"
+    )
     # BUG 3 (e86151d6 -> regex upgrade): the guard was upgraded from startswith()
     # to presence, then to a word-boundary REGEX `re.search(r"<gt-task-brief\b")`
     # so attributed tags (`<gt-task-brief lang=...>`) are also recognized as an
     # existing wrapper (no nesting). Lock the regex-based guard.
-    assert ('"<gt-task-brief>" in _wrapped' in src
-            or r'<gt-task-brief\b' in src), \
+    assert '"<gt-task-brief>" in _wrapped' in src or r"<gt-task-brief\b" in src, (
         "the conditional single-wrap guard (presence- or regex-based) must be present"
+    )
 
 
 def test_source_has_no_reorder():
@@ -198,6 +220,7 @@ def test_post_edit_route_reexport_feature_present():
     """Anti-clobber lock (B5): the route/re-export relationship gap-fill in
     post_edit must not be silently reverted by an env/config commit again."""
     import pathlib
+
     src = pathlib.Path("src/groundtruth/hooks/post_edit.py").read_text(encoding="utf-8")
     assert "_get_route_reexport_flags" in src, "post_edit route/re-export feature was reverted"
     assert src.count("_get_route_reexport_flags") >= 2, "helper defined but never called"

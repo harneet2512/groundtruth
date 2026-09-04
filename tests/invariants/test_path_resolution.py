@@ -5,13 +5,12 @@ Either use a single universal resolver or prove suffix match safety.
 
 Violation = B1/B2/B6 in failure taxonomy.
 """
+
 from __future__ import annotations
 
 import os
 import sqlite3
 import tempfile
-
-import pytest
 
 
 def create_graph_with_paths(db_path: str) -> None:
@@ -42,8 +41,12 @@ def create_graph_with_paths(db_path: str) -> None:
 
 
 _WORKSPACE_PREFIXES = (
-    "workspace/", "testbed/", "repo/", "src/",
-    "home/user/", "tmp/",
+    "workspace/",
+    "testbed/",
+    "repo/",
+    "src/",
+    "home/user/",
+    "tmp/",
 )
 
 
@@ -60,7 +63,7 @@ def resolve_path_suffix(conn: sqlite3.Connection, query_path: str) -> str | None
         changed = False
         for prefix in _WORKSPACE_PREFIXES:
             if norm.startswith(prefix):
-                norm = norm[len(prefix):]
+                norm = norm[len(prefix) :]
                 changed = True
                 break
 

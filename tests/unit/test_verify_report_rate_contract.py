@@ -25,6 +25,7 @@ Tests 1-3 and 5 are synthetic-fixture behavior tests. Test 4 replays the
 actual failed archive saved under benchmarks/swebench/fast_diag/ — the only
 test that proves the failure mode is closed end-to-end.
 """
+
 from __future__ import annotations
 
 import json
@@ -67,14 +68,17 @@ def test_delivery_rate_nonzero_when_steer_and_ack_present(tmp_path: Path) -> Non
     present but no pre-computed delivery_rate key. Before the fix, compute()
     returns delivery_rate=0.0 (FAIL). After the fix, it must derive the rate
     from the raw totals and return a positive value."""
-    _write_summary(tmp_path, {
-        "task_count": 10,
-        "ack_armed_total": 29,
-        "steer_delivered_total": 29,
-        "ack_engagement_total": 28,
-        "material_edit_total": 29,
-        # Deliberately NO delivery_rate / engagement_rate pre-computed.
-    })
+    _write_summary(
+        tmp_path,
+        {
+            "task_count": 10,
+            "ack_armed_total": 29,
+            "steer_delivered_total": 29,
+            "ack_engagement_total": 28,
+            "material_edit_total": 29,
+            # Deliberately NO delivery_rate / engagement_rate pre-computed.
+        },
+    )
     metrics = _compute(tmp_path)
     dr = metrics["raw"]["delivery_rate"]
     assert dr is not None and dr > 0.0, (
@@ -90,13 +94,17 @@ def test_delivery_rate_nonzero_when_steer_and_ack_present(tmp_path: Path) -> Non
 def test_engagement_rate_nonzero_when_engagement_and_steer_present(tmp_path: Path) -> None:
     """lsp-shaped summary from smoke v5. ack_engagement < steer is the normal
     case; engagement_rate must still be positive, not silently 0.0."""
-    _write_summary(tmp_path, {
-        "task_count": 10,
-        "ack_armed_total": 24,
-        "steer_delivered_total": 24,
-        "ack_engagement_total": 20,
-        "material_edit_total": 24,
-    }, arm="gt-lsp-hybrid")
+    _write_summary(
+        tmp_path,
+        {
+            "task_count": 10,
+            "ack_armed_total": 24,
+            "steer_delivered_total": 24,
+            "ack_engagement_total": 20,
+            "material_edit_total": 24,
+        },
+        arm="gt-lsp-hybrid",
+    )
     metrics = _compute(tmp_path)
     er = metrics["raw"]["engagement_rate"]
     assert er is not None and er > 0.0, (
@@ -104,7 +112,7 @@ def test_engagement_rate_nonzero_when_engagement_and_steer_present(tmp_path: Pat
     )
     # Sanity: 20/24 = 0.8333
     assert abs(er - (20.0 / 24.0)) < 1e-6, (
-        f"engagement_rate formula mismatch: expected {20/24}, got {er}"
+        f"engagement_rate formula mismatch: expected {20 / 24}, got {er}"
     )
 
 
@@ -116,28 +124,33 @@ def test_missing_ack_armed_produces_schema_invalid_not_zero(tmp_path: Path) -> N
     undefined. verify_report must NOT report 0.0 — that would trip the gate
     for the wrong reason and hide the real schema problem. Accept either a
     None rate, a NaN, or an explicit 'schema_invalid' marker in the output."""
-    _write_summary(tmp_path, {
-        "task_count": 10,
-        "steer_delivered_total": 29,
-        "ack_engagement_total": 28,
-        "material_edit_total": 29,
-        # ack_armed_total deliberately omitted — denominator gone.
-    })
+    _write_summary(
+        tmp_path,
+        {
+            "task_count": 10,
+            "steer_delivered_total": 29,
+            "ack_engagement_total": 28,
+            "material_edit_total": 29,
+            # ack_armed_total deliberately omitted — denominator gone.
+        },
+    )
     metrics = _compute(tmp_path)
     dr = metrics["raw"]["delivery_rate"]
     status = metrics["raw"].get("delivery_rate_status")
-    assert dr is None or status == "schema_invalid" or (
-        isinstance(dr, float) and dr != dr  # NaN check
-    ), (
-        f"Missing denominator must not produce a silent 0.0. Got dr={dr!r}, "
-        f"status={status!r}"
-    )
+    assert (
+        dr is None
+        or status == "schema_invalid"
+        or (
+            isinstance(dr, float) and dr != dr  # NaN check
+        )
+    ), f"Missing denominator must not produce a silent 0.0. Got dr={dr!r}, status={status!r}"
 
 
 # ──────────────────────────────────────────────────────────────────────────
 # Test 4: replay the actual failed smoke v5 archive
 # ──────────────────────────────────────────────────────────────────────────
 FAILED_ARCHIVE = REPO_ROOT / "benchmarks" / "swebench" / "fast_diag" / "smoke_v5_failed_2026-04-24"
+
 
 @pytest.mark.parametrize("arm_dir", ["nolsp", "lsp"])
 def test_failed_smoke_v5_archive_now_passes_rate_gates(arm_dir: str) -> None:
@@ -173,24 +186,26 @@ def test_verify_report_append_cli_emits_rate_gates(tmp_path: Path) -> None:
     include delivery_rate and engagement_rate rows. A future 'simplification'
     that drops rate gates (or the shared helper misbehaving) fails this test.
     Exercises the real CLI entry point, not an internal helper."""
-    _write_summary(tmp_path, {
-        "task_count": 10,
-        "ack_armed_total": 10,
-        "steer_delivered_total": 9,
-        "ack_engagement_total": 8,
-        "material_edit_total": 10,
-    })
+    _write_summary(
+        tmp_path,
+        {
+            "task_count": 10,
+            "ack_armed_total": 10,
+            "steer_delivered_total": 9,
+            "ack_engagement_total": 8,
+            "material_edit_total": 10,
+        },
+    )
     # Isolate: do NOT mutate a real verify_results.md. Point the writer at
     # a throwaway file via the --out flag if supported, else just confirm the
     # stdout table contains both rate labels.
     proc = subprocess.run(
         [sys.executable, str(VERIFY_REPORT), "append", "--run-dir", str(tmp_path)],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     stdout = proc.stdout + proc.stderr
-    assert "delivery_rate" in stdout, (
-        "verify_report append must show delivery_rate row in output"
-    )
+    assert "delivery_rate" in stdout, "verify_report append must show delivery_rate row in output"
     assert "engagement_rate" in stdout, (
         "verify_report append must show engagement_rate row in output"
     )

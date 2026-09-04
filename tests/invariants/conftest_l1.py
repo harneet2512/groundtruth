@@ -4,28 +4,92 @@ These functions extract issue-symbol-matched files and score edit-target
 candidates from a graph.db, implementing the invariant that issue-named
 functions must outrank high-caller hubs.
 """
+
 import re
 import sqlite3
 from pathlib import Path
 
 
 _COMMON_FN_PARTS = {
-    "get", "set", "add", "remove", "update", "create",
-    "delete", "find", "make", "check", "is", "has",
-    "do", "run", "to", "from", "on", "in", "of", "by",
+    "get",
+    "set",
+    "add",
+    "remove",
+    "update",
+    "create",
+    "delete",
+    "find",
+    "make",
+    "check",
+    "is",
+    "has",
+    "do",
+    "run",
+    "to",
+    "from",
+    "on",
+    "in",
+    "of",
+    "by",
 }
 
 _STOP_WORDS = {
-    "that", "this", "with", "from", "have", "been",
-    "when", "then", "should", "would", "could",
-    "file", "line", "code", "test", "error", "issue",
-    "none", "true", "false", "self", "class",
-    "return", "function", "method", "import", "raise",
-    "except", "print", "string", "object", "value",
-    "result", "data", "list", "dict", "type", "name",
-    "path", "args", "kwargs", "super", "init", "call",
-    "make", "using", "does", "work", "need", "want",
-    "like", "also", "just", "some", "only", "more",
+    "that",
+    "this",
+    "with",
+    "from",
+    "have",
+    "been",
+    "when",
+    "then",
+    "should",
+    "would",
+    "could",
+    "file",
+    "line",
+    "code",
+    "test",
+    "error",
+    "issue",
+    "none",
+    "true",
+    "false",
+    "self",
+    "class",
+    "return",
+    "function",
+    "method",
+    "import",
+    "raise",
+    "except",
+    "print",
+    "string",
+    "object",
+    "value",
+    "result",
+    "data",
+    "list",
+    "dict",
+    "type",
+    "name",
+    "path",
+    "args",
+    "kwargs",
+    "super",
+    "init",
+    "call",
+    "make",
+    "using",
+    "does",
+    "work",
+    "need",
+    "want",
+    "like",
+    "also",
+    "just",
+    "some",
+    "only",
+    "more",
 }
 
 
@@ -88,7 +152,13 @@ def create_graph_db(db_path: Path, nodes: list, edges: list) -> None:
             conn.execute(
                 "INSERT INTO edges (source_id, target_id, type, confidence, resolution_method) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (src_id, tgt_id, edge_type, confidence, "import" if confidence >= 0.9 else "name_match"),
+                (
+                    src_id,
+                    tgt_id,
+                    edge_type,
+                    confidence,
+                    "import" if confidence >= 0.9 else "name_match",
+                ),
             )
 
     conn.commit()
@@ -106,9 +176,7 @@ def extract_issue_symbol_files(graph_db: str, issue_text: str) -> list[str]:
 
     conn = sqlite3.connect(graph_db)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT name, file_path FROM nodes WHERE is_test = 0"
-    ).fetchall()
+    rows = conn.execute("SELECT name, file_path FROM nodes WHERE is_test = 0").fetchall()
     conn.close()
 
     matched: dict[str, list[str]] = {}
@@ -131,7 +199,8 @@ def score_edit_target_candidates(graph_db: str, issue_text: str) -> list[dict]:
     This implements L1-INV-2: issue-relevant functions outrank high-caller hubs.
     """
     issue_kws = {
-        w.lower() for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text)
+        w.lower()
+        for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text)
         if len(w) > 3 and w.lower() not in _STOP_WORDS
     }
 
@@ -166,15 +235,17 @@ def score_edit_target_candidates(graph_db: str, issue_text: str) -> list[dict]:
         ).fetchone()[0]
         score += min(caller_count, 5)
 
-        candidates.append({
-            "func": func["name"],
-            "file": func["file_path"],
-            "sig": func["signature"] or "",
-            "callers": caller_count,
-            "score": score,
-            "direct": direct,
-            "kw_overlap": kw_overlap,
-        })
+        candidates.append(
+            {
+                "func": func["name"],
+                "file": func["file_path"],
+                "sig": func["signature"] or "",
+                "callers": caller_count,
+                "score": score,
+                "direct": direct,
+                "kw_overlap": kw_overlap,
+            }
+        )
 
     conn.close()
     candidates.sort(key=lambda c: c["score"], reverse=True)

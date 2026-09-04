@@ -13,15 +13,17 @@ from __future__ import annotations
 
 import os
 
-import pytest
-
 
 # ── Harness source analysis ─────────────────────────────────────────────
 
 
 def _read_harness() -> str:
     harness_path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "benchmarks", "swebench",
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "benchmarks",
+        "swebench",
         "run_mini_gt_hooked.py",
     )
     with open(os.path.abspath(harness_path)) as f:
@@ -71,9 +73,7 @@ class TestReviewPatchInHookedExecute:
         """submit command triggers review_patch."""
         source = _read_harness()
         body = _extract_function_body(source, "_hooked_execute")
-        assert "_is_submit_command" in body, (
-            "_hooked_execute must check for submit commands"
-        )
+        assert "_is_submit_command" in body, "_hooked_execute must check for submit commands"
 
     def test_review_output_appended_to_result(self) -> None:
         """review_patch output is appended to command result so agent sees it."""
@@ -95,17 +95,18 @@ class TestReviewPatchStateTracking:
         """review_patch must re-fire when new edits occur after a review."""
         source = _read_harness()
         body = _extract_function_body(source, "_hooked_execute")
-        assert "edit_cycle" in body, (
-            "review_patch must track edit_cycle to detect new edits"
-        )
+        assert "edit_cycle" in body, "review_patch must track edit_cycle to detect new edits"
 
     def test_no_repeat_without_new_edits(self) -> None:
         """review_patch must not fire twice for the same edit cycle."""
         source = _read_harness()
         body = _extract_function_body(source, "_hooked_execute")
-        assert "state[\"fired\"]" in body or 'state["fired"]' in body or "not state" in body or "state.get(\"fired\")" in body, (
-            "review_patch must check fired flag before re-firing"
-        )
+        assert (
+            'state["fired"]' in body
+            or 'state["fired"]' in body
+            or "not state" in body
+            or 'state.get("fired")' in body
+        ), "review_patch must check fired flag before re-firing"
 
 
 class TestCleanDiffAllowsSubmit:
@@ -115,9 +116,7 @@ class TestCleanDiffAllowsSubmit:
         """_run_review_patch returns empty string when no findings."""
         source = _read_harness()
         body = _extract_function_body(source, "_run_review_patch")
-        assert 'return ""' in body, (
-            "review_patch must return empty string when no findings"
-        )
+        assert 'return ""' in body, "review_patch must return empty string when no findings"
 
     def test_no_output_appended_when_clean(self) -> None:
         """When review_output is empty, result is not modified."""
@@ -149,9 +148,7 @@ class TestNoveltyInReviewPatch:
     def test_review_uses_novelty_filter(self) -> None:
         source = _read_harness()
         body = _extract_function_body(source, "_run_review_patch")
-        assert "_filter_novel_findings" in body, (
-            "review_patch must use host-side novelty filtering"
-        )
+        assert "_filter_novel_findings" in body, "review_patch must use host-side novelty filtering"
 
 
 class TestReviewPatchMetadata:
@@ -170,9 +167,7 @@ class TestReviewPatchMetadata:
 
     def test_review_state_cleanup(self) -> None:
         source = _read_harness()
-        assert "_review_state.pop" in source, (
-            "review_state must be cleaned up per container"
-        )
+        assert "_review_state.pop" in source, "review_state must be cleaned up per container"
 
 
 class TestGitReviewDetection:
@@ -180,6 +175,7 @@ class TestGitReviewDetection:
 
     def test_git_diff_is_review(self) -> None:
         from benchmarks.swebench.run_mini_gt_hooked import _is_git_review_command
+
         assert _is_git_review_command("git diff")
         assert _is_git_review_command("git diff --stat")
         assert _is_git_review_command("git status")
@@ -189,6 +185,7 @@ class TestGitReviewDetection:
 
     def test_submit_detection(self) -> None:
         from benchmarks.swebench.run_mini_gt_hooked import _is_submit_command
+
         assert _is_submit_command("submit")
         assert _is_submit_command("submit_patch")
         assert _is_submit_command("exit")

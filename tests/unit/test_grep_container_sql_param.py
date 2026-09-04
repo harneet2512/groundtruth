@@ -18,6 +18,7 @@ symbol values flow as BOUND PARAMETERS, never interpolated into the SQL string.
           (no interpolated path value), and executing it with the bound params against
           a real sqlite returns the correct cross-file caller and never injects.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -31,8 +32,10 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts" / "swebench"))
 sys.modules.setdefault(
     "litellm",
     SimpleNamespace(
-        model_cost={}, success_callback=[],
-        completion=lambda *a, **k: None, acompletion=None,
+        model_cost={},
+        success_callback=[],
+        completion=lambda *a, **k: None,
+        acompletion=None,
         completion_cost=lambda *a, **k: 0.0,
     ),
 )
@@ -64,11 +67,11 @@ def _build_quote_db(path: str) -> None:
         """
     )
     nodes = [
-        ("Function", "do_thing", _QUOTE_PATH),                # id 1  (real target, quote path)
-        ("Function", "do_thing", "other/unrelated.py"),       # id 2  (homonym, other file)
-        ("Function", "cross_caller", "pkg/caller.py"),        # id 3  (cross-file caller of id 1)
-        ("Function", "same_caller", _QUOTE_PATH),             # id 4  (same-file caller of id 1)
-        ("Function", "homonym_caller", "other/x.py"),         # id 5  (caller of id 2)
+        ("Function", "do_thing", _QUOTE_PATH),  # id 1  (real target, quote path)
+        ("Function", "do_thing", "other/unrelated.py"),  # id 2  (homonym, other file)
+        ("Function", "cross_caller", "pkg/caller.py"),  # id 3  (cross-file caller of id 1)
+        ("Function", "same_caller", _QUOTE_PATH),  # id 4  (same-file caller of id 1)
+        ("Function", "homonym_caller", "other/x.py"),  # id 5  (caller of id 2)
     ]
     for label, name, fp in nodes:
         conn.execute(
@@ -78,9 +81,9 @@ def _build_quote_db(path: str) -> None:
             (label, name, name, fp),
         )
     edges = [
-        (3, 1, 5, "pkg/caller.py", "import", 1.0),    # cross-file caller of the quote-path target
-        (4, 1, 7, _QUOTE_PATH, "same_file", 1.0),     # same-file caller (must be excluded)
-        (5, 2, 9, "other/x.py", "import", 1.0),       # caller of the homonym (must NOT surface)
+        (3, 1, 5, "pkg/caller.py", "import", 1.0),  # cross-file caller of the quote-path target
+        (4, 1, 7, _QUOTE_PATH, "same_file", 1.0),  # same-file caller (must be excluded)
+        (5, 2, 9, "other/x.py", "import", 1.0),  # caller of the homonym (must NOT surface)
     ]
     for src, tgt, line, sfile, rm, conf in edges:
         conn.execute(
@@ -128,7 +131,10 @@ def test_builder_uses_placeholders_no_interpolated_path():
     """GREEN: the symbol and scope values must NOT appear interpolated in the SQL — they
     flow as bound parameters (``?``)."""
     sql, params = ohgt._build_grep_intercept_query(
-        "do_thing", file_scope=_QUOTE_PATH, min_conf=0.6, limit=5,
+        "do_thing",
+        file_scope=_QUOTE_PATH,
+        min_conf=0.6,
+        limit=5,
     )
     # The raw path value must never be baked into the SQL string.
     assert _QUOTE_PATH not in sql, f"scope value interpolated into SQL: {sql!r}"
@@ -148,7 +154,10 @@ def test_builder_query_executes_correctly_with_quote_path():
     db = str(Path(__import__("tempfile").mkdtemp()) / "g.db")
     _build_quote_db(db)
     sql, params = ohgt._build_grep_intercept_query(
-        "do_thing", file_scope=_QUOTE_PATH, min_conf=0.6, limit=5,
+        "do_thing",
+        file_scope=_QUOTE_PATH,
+        min_conf=0.6,
+        limit=5,
     )
     conn = sqlite3.connect(db)
     rows = conn.execute(sql, params).fetchall()
@@ -162,7 +171,10 @@ def test_builder_query_executes_correctly_with_quote_path():
 def test_builder_unscoped_has_three_params():
     """GREEN: a repo-wide (no file_scope) build omits the scope predicate -> 3 params."""
     sql, params = ohgt._build_grep_intercept_query(
-        "do_thing", file_scope=None, min_conf=0.6, limit=5,
+        "do_thing",
+        file_scope=None,
+        min_conf=0.6,
+        limit=5,
     )
     assert "do_thing" not in sql and "file_path LIKE" not in sql
     assert sql.count("?") == len(params) == 3, (

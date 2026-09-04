@@ -5,6 +5,7 @@ the agent build shared understanding (early full -> mid drop-visited -> late
 edit-focus). These assertions FAIL on a no-op narrow(), so they prove real
 narrowing, not a pass-through. The structured log line is the agent-loop proof.
 """
+
 from groundtruth.router.curation import CurationTracker, band_for
 
 CANDS = {f"src/f{i}.py" for i in range(10)}  # 10-file curation area
@@ -33,8 +34,12 @@ def test_curation_shrinks_monotonically_across_bands():
     s_mid = t.narrow(7, visited={"src/f5.py", "src/f6.py", "src/f7.py", "src/f8.py"}, edited=set())
     assert len(s_mid) == 6, "mid band drops visited-and-left (relevance feedback)"
     # LATE (action 12): agent edited f0 (neighbors f1,f2) -> keep only edit-connected.
-    s_late = t.narrow(12, visited={"src/f5.py", "src/f6.py", "src/f7.py", "src/f8.py"}, edited={"src/f0.py"})
-    assert s_late == {"src/f0.py", "src/f1.py", "src/f2.py"}, "late band converges on edit + neighbors"
+    s_late = t.narrow(
+        12, visited={"src/f5.py", "src/f6.py", "src/f7.py", "src/f8.py"}, edited={"src/f0.py"}
+    )
+    assert s_late == {"src/f0.py", "src/f1.py", "src/f2.py"}, (
+        "late band converges on edit + neighbors"
+    )
     # The monumental invariant: monotonic shrink, strictly smaller by late.
     assert len(s_early) >= len(s_mid) >= len(s_late)
     assert len(s_late) < len(s_early)
@@ -78,7 +83,14 @@ def test_log_line_is_structured_and_parseable():
     t.narrow(7, visited={"src/f5.py", "src/f6.py"}, edited=set())
     line = t.log_line(7)
     assert line.startswith("[GT_CURATION]")
-    for tok in ("action=7", "band=mid", "size=8", "initial=10", "dropped=2", "reason=mid_drop_visited"):
+    for tok in (
+        "action=7",
+        "band=mid",
+        "size=8",
+        "initial=10",
+        "dropped=2",
+        "reason=mid_drop_visited",
+    ):
         assert tok in line, f"missing {tok} in {line!r}"
 
 

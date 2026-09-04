@@ -19,6 +19,7 @@ top-severity, un-misdirectable context the oracle re-positions at the decision
 point (the arrow: correct context -> correct code).  Metric moved: extraction
 precision (marker-bearing) on held-out issues, and yield (>=1 obligation rate).
 """
+
 from __future__ import annotations
 
 import json
@@ -67,10 +68,7 @@ def test_async_requirement_kept_verbatim():
 
 
 def test_returns_and_raises_behavior_obligations():
-    issue = (
-        "get_user must return Optional[User].\n"
-        "When the id is missing it should raise KeyError."
-    )
+    issue = "get_user must return Optional[User].\nWhen the id is missing it should raise KeyError."
     spec = extract_spec(issue)
     kinds = {o.kind for o in spec.obligations}
     assert "behavior" in kinds or "error" in kinds
@@ -148,8 +146,7 @@ def test_heldout_precision_marker_bearing():
                 continue
             total += 1
             has_marker = bool(
-                _MODAL_RE.search(o.verbatim_text)
-                or _BEHAVIOR_VERB_RE.search(o.verbatim_text)
+                _MODAL_RE.search(o.verbatim_text) or _BEHAVIOR_VERB_RE.search(o.verbatim_text)
             )
             has_qual = any(
                 _qualifier_keywords(mm.group(2))

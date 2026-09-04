@@ -19,6 +19,7 @@ Research: CodeR (arXiv 2406.01304), TDFlow (arXiv 2510.23761),
 "Verify Before You Fix" (arXiv 2604.10800) — verification before submission;
 SWE-PRM (NeurIPS 2025) — verifiable-not-prescriptive feedback.
 """
+
 from __future__ import annotations
 
 import os
@@ -27,7 +28,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "swebench"))
 import oh_gt_full_wrapper as w  # noqa: E402

@@ -1,4 +1,5 @@
 """Tests for scripts.eval_lite.acc_at_k."""
+
 from __future__ import annotations
 
 from scripts.eval_lite.acc_at_k import (

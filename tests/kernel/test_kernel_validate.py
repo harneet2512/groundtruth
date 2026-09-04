@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from groundtruth.control import kernel
 from groundtruth.control.types import Diff
@@ -53,10 +52,12 @@ def test_no_callers_no_orphans(mock_graph_factory):
         diff_text="diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@\n-def foo(x):\n+def foo(x, y):\n",
         files_changed=[Path("src/a.py")],
     )
-    graph = mock_graph_factory({
-        "graph_db_sha": "x",
-        "callers_of": {"src.a.foo": []},
-    })
+    graph = mock_graph_factory(
+        {
+            "graph_db_sha": "x",
+            "callers_of": {"src.a.foo": []},
+        }
+    )
     result = kernel.validate_against_graph(diff, graph)
     # Signature changed but no callers -- broken_signatures may still fire
     # but orphaned_callers must be empty.
@@ -70,13 +71,15 @@ def test_circular_calls_terminates(mock_graph_factory):
         diff_text="diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@\n-def a():\n+def a(x):\n",
         files_changed=[Path("src/a.py")],
     )
-    graph = mock_graph_factory({
-        "graph_db_sha": "x",
-        "callers_of": {
-            "src.a.a": [{"qualified_name": "src.b.b", "file_path": "src/b.py", "line": 1}],
-            "src.b.b": [{"qualified_name": "src.a.a", "file_path": "src/a.py", "line": 1}],
-        },
-    })
+    graph = mock_graph_factory(
+        {
+            "graph_db_sha": "x",
+            "callers_of": {
+                "src.a.a": [{"qualified_name": "src.b.b", "file_path": "src/b.py", "line": 1}],
+                "src.b.b": [{"qualified_name": "src.a.a", "file_path": "src/a.py", "line": 1}],
+            },
+        }
+    )
     # Must complete in bounded time.
     result = kernel.validate_against_graph(diff, graph)
     assert result is not None

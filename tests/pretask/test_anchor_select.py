@@ -15,6 +15,7 @@ Covers the two LIPI squash items owned by this file:
 Builds a synthetic graph.db matching the real schema (nodes/edges) and uses a
 deterministic stub embedder so no model download / ONNX runtime is required.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -50,8 +51,7 @@ def _make_db(path: str, *, gold_path: str) -> None:
         """
     )
     conn.executemany(
-        "INSERT INTO nodes (id,label,name,file_path,start_line,is_test) "
-        "VALUES (?,?,?,?,?,0)",
+        "INSERT INTO nodes (id,label,name,file_path,start_line,is_test) VALUES (?,?,?,?,?,0)",
         [
             # symbol name `serialize_payload` whose normalized parts all appear in
             # the issue text below -> _symbol_anchors matches this file.
@@ -128,9 +128,7 @@ def test_windows_path_merges_across_signals(repo, monkeypatch):
     # Issue text whose tokens contain the symbol parts {serialize, payload}.
     issue = "serialize_payload drops fields when the payload is serialized"
 
-    anchors, _seed, _all = select_anchors(
-        issue, repo_root, db, _StubModel(), tau_anchor=0.30
-    )
+    anchors, _seed, _all = select_anchors(issue, repo_root, db, _StubModel(), tau_anchor=0.30)
 
     core_records = [a for a in anchors if a.path == "pkg/core.py"]
     backslash_records = [a for a in anchors if a.path == "pkg\\core.py"]
@@ -154,9 +152,7 @@ def test_seed_and_component_maps_are_canonical(repo, monkeypatch):
         "lexical_file_search",
         lambda *a, **k: [],
     )
-    _anchors, seed, all_scores = select_anchors(
-        "serialize_payload", repo_root, db, _StubModel()
-    )
+    _anchors, seed, all_scores = select_anchors("serialize_payload", repo_root, db, _StubModel())
     assert all("\\" not in k for k in seed), list(seed)
     assert all("\\" not in k for k in all_scores), list(all_scores)
     # The gold file is keyed canonically in both maps.
@@ -199,8 +195,9 @@ class _CountingModel:
         self.max_batch = 0
         self.total = 0
 
-    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False,
-               batch_size=128, **kw):  # noqa: D401
+    def encode(
+        self, texts, normalize_embeddings=True, show_progress_bar=False, batch_size=128, **kw
+    ):  # noqa: D401
         t = list(texts)
         self.max_batch = max(self.max_batch, len(t))
         self.total += len(t)
@@ -234,8 +231,7 @@ def _make_big_db(path: str, *, n_files: int, syms_per_file: int) -> None:
             nid += 1
             rows.append((nid, "Function", f"func_{fi:04d}_{si:03d}", fp, 1 + si))
     conn.executemany(
-        "INSERT INTO nodes (id,label,name,file_path,start_line,is_test) "
-        "VALUES (?,?,?,?,?,0)",
+        "INSERT INTO nodes (id,label,name,file_path,start_line,is_test) VALUES (?,?,?,?,?,0)",
         rows,
     )
     conn.commit()
@@ -283,7 +279,7 @@ def test_warm_cache_scores_every_file_despite_budget(tmp_path, monkeypatch, _cle
     """Cache hits are FREE: once the passage vectors are warm, a SECOND call encodes
     ZERO fresh passages even with a tiny budget, so the cap never starves a warm repo.
     Proves the cap bounds *fresh encodes*, not scoring coverage."""
-    n_files, syms = 30, 4              # 120 passages, all unique
+    n_files, syms = 30, 4  # 120 passages, all unique
     db = str(tmp_path / "graph.db")
     _make_big_db(db, n_files=n_files, syms_per_file=syms)
 

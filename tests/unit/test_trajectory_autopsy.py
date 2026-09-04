@@ -15,6 +15,7 @@ Artifacts:
 Expected behaviors derived from artifacts (not from implementation):
   See tests/fixtures/trajectory/EXPECTED_BEHAVIOR.md
 """
+
 from __future__ import annotations
 
 import json
@@ -65,7 +66,7 @@ except ImportError:
 CLASSIFIER_EXISTS = classify_trace is not None
 requires_classifier = pytest.mark.skipif(
     not CLASSIFIER_EXISTS,
-    reason="trajectory_classifier not implemented yet — test is RED (expected)"
+    reason="trajectory_classifier not implemented yet — test is RED (expected)",
 )
 
 
@@ -105,8 +106,7 @@ def test_lsp_13453_steer_targets_gold_file():
     gold_files = _load_gold_files()
     result = classify_trace(events, gold_files=gold_files)
     assert result["steer_targets_gold_file"] is True, (
-        f"GT steered to html.py which IS the gold file. "
-        f"steer_targets_gold_file must be True."
+        "GT steered to html.py which IS the gold file. steer_targets_gold_file must be True."
     )
 
 
@@ -126,8 +126,8 @@ def test_lsp_13453_low_information_confirmation():
     events = _load_events("lsp_13453")
     result = classify_trace(events)
     assert result["low_information_confirmation"] is True, (
-        f"Agent was editing html.py at cycle 14 when steer for html.py "
-        f"arrived at cycle 14. This is a confirmation, not a discovery."
+        "Agent was editing html.py at cycle 14 when steer for html.py "
+        "arrived at cycle 14. This is a confirmation, not a discovery."
     )
 
 
@@ -167,8 +167,8 @@ def test_lsp_13453_not_agent_noncompliance():
     events = _load_events("lsp_13453")
     result = classify_trace(events)
     assert result["agent_noncompliance"] is False, (
-        f"Agent edited the steered file. Cannot be noncompliance. "
-        f"The fix being wrong is a different failure class."
+        "Agent edited the steered file. Cannot be noncompliance. "
+        "The fix being wrong is a different failure class."
     )
 
 
@@ -230,18 +230,15 @@ def test_negative_control_edit_different_file():
     synthetic_events = [
         {"event": "checkpoint_startup", "cycle": 1},
         {"event": "material_edit", "cycle": 5, "files": ["src/file_B.py"]},
-        {"event": "steer_delivered", "cycle": 5, "file": "src/file_A.py",
-         "channel": "micro"},
+        {"event": "steer_delivered", "cycle": 5, "file": "src/file_A.py", "channel": "micro"},
         {"event": "ack_not_observed", "cycle": 9, "file": "src/file_A.py"},
     ]
     result = classify_trace(synthetic_events)
     assert result["behavioral_alignment"] == 0, (
-        "Agent edited file_B after steer for file_A. "
-        "behavioral_alignment must be 0."
+        "Agent edited file_B after steer for file_A. behavioral_alignment must be 0."
     )
     assert result["possible_noncompliance"] is True, (
-        "Steer was specific (file_A), agent went to file_B. "
-        "possible_noncompliance must be true."
+        "Steer was specific (file_A), agent went to file_B. possible_noncompliance must be true."
     )
 
 
@@ -259,8 +256,7 @@ def test_negative_control_pre_steer_edit_not_alignment():
     synthetic_events = [
         {"event": "checkpoint_startup", "cycle": 1},
         {"event": "material_edit", "cycle": 5, "files": ["src/file_X.py"]},
-        {"event": "steer_delivered", "cycle": 10, "file": "src/file_X.py",
-         "channel": "micro"},
+        {"event": "steer_delivered", "cycle": 10, "file": "src/file_X.py", "channel": "micro"},
         {"event": "ack_not_observed", "cycle": 14, "file": "src/file_X.py"},
     ]
     result = classify_trace(synthetic_events)
@@ -286,10 +282,13 @@ def test_backslash_path_still_matches_forward_slash():
     """
     synthetic_events = [
         {"event": "checkpoint_startup", "cycle": 1},
-        {"event": "steer_delivered", "cycle": 5,
-         "file": "src\\utils\\helper.py", "channel": "micro"},
-        {"event": "material_edit", "cycle": 6,
-         "files": ["src/utils/helper.py"]},
+        {
+            "event": "steer_delivered",
+            "cycle": 5,
+            "file": "src\\utils\\helper.py",
+            "channel": "micro",
+        },
+        {"event": "material_edit", "cycle": 6, "files": ["src/utils/helper.py"]},
     ]
     result = classify_trace(synthetic_events)
     assert result["behavioral_alignment"] == 1, (

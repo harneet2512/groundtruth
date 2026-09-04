@@ -6,12 +6,10 @@ the routing + whitelist + evidence-assembly contract here.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
 from groundtruth.control import kernel
 from groundtruth.control.types import (
-    BriefResult,
     Capabilities,
     PullKind,
     PullQuery,
@@ -33,10 +31,17 @@ def _rs() -> RunState:
 
 def _trace_payload() -> dict:
     return {
-        "symbol": {"name": "User.has_perm", "file": "django/contrib/auth/models.py", "node_id": 4421},
+        "symbol": {
+            "name": "User.has_perm",
+            "file": "django/contrib/auth/models.py",
+            "node_id": 4421,
+        },
         "callers": [
             {"qualified_name": "django.views.auth.login_required", "node_id": 9001},
-            {"qualified_name": "django.contrib.admin.options.has_change_permission", "node_id": 9002},
+            {
+                "qualified_name": "django.contrib.admin.options.has_change_permission",
+                "node_id": 9002,
+            },
         ],
         "callees": [],
         "reasoning_guidance": "INTERNAL: do not surface this string",
@@ -85,6 +90,7 @@ def test_boundary_telemetry_record_id_present() -> None:
 # adversarial -- the leakage cases
 def test_adversarial_reasoning_guidance_dropped() -> None:
     """`reasoning_guidance` is internal narrative -- must not cross Boundary 1."""
+
     async def fake_handle_trace(**_kwargs):
         return _trace_payload()
 
@@ -95,6 +101,7 @@ def test_adversarial_reasoning_guidance_dropped() -> None:
 
 def test_adversarial_intervention_id_dropped() -> None:
     """`intervention_id` is tracker-internal -- must not cross Boundary 1."""
+
     async def fake_handle_trace(**_kwargs):
         return _trace_payload()
 
@@ -110,6 +117,7 @@ def test_adversarial_unknown_kind_does_not_crash() -> None:
     with patch("groundtruth.mcp.tools.handle_validate", side_effect=AttributeError):
         # Patch getattr behaviour by making the handler attribute absent.
         import groundtruth.mcp.tools as mcp_tools
+
         original = getattr(mcp_tools, "handle_validate", None)
         try:
             del mcp_tools.handle_validate  # type: ignore[attr-defined]

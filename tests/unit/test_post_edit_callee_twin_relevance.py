@@ -21,11 +21,11 @@ Red-before-green: each test below was run against the UNFIXED code and observed
 to FAIL, then against the FIXED code and observed to PASS. See the structured
 report for captured red/green output.
 """
+
 from __future__ import annotations
 
 import os
 import sqlite3
-import tempfile
 
 import pytest
 
@@ -211,7 +211,9 @@ class TestTask49CalleeSignatures:
 class TestTask50Twin:
     def test_twin_query_finds_same_file_sibling(self, beets_db):
         twins = pe._find_same_name_twins(
-            beets_db, node_id=1, func_name="set_fields",
+            beets_db,
+            node_id=1,
+            func_name="set_fields",
             file_path="beets/importer.py",
         )
         lines = {ln for _, ln in twins}
@@ -220,7 +222,9 @@ class TestTask50Twin:
     def test_twin_query_excludes_homonym_in_other_file(self, beets_db):
         """zero.py set_fields is a coincidental homonym, NOT a twin."""
         twins = pe._find_same_name_twins(
-            beets_db, node_id=1, func_name="set_fields",
+            beets_db,
+            node_id=1,
+            func_name="set_fields",
             file_path="beets/importer.py",
         )
         # zero.py is line 88 in a different file — must not appear.

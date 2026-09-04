@@ -1,4 +1,5 @@
 """P1-11 — structured adapter error scan from result.json."""
+
 from __future__ import annotations
 
 import json

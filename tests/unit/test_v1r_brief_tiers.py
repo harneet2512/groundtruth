@@ -7,6 +7,7 @@ Verifies that:
 - Honest fallback note appears when all entries are [INFO]
 - Directive ending only fires on [VERIFIED] top entry
 """
+
 from groundtruth.pretask.v1r_brief import (
     FileEntry,
     _entry_confidence_tier,
@@ -56,6 +57,7 @@ def test_warning_when_localizer_confidence_only():
         localizer_confidence=0.2,
     )
     assert _entry_confidence_tier(entry, "issue") == "[WARNING]"
+
 
 def test_warning_when_issue_match_no_contract():
     """Issue-text symbol match but no caller contract → [WARNING]."""
@@ -276,11 +278,11 @@ def test_anchor_prox_keeps_subject_gold_out_of_info_drop():
         score=0.935,
         functions=["__init__", "draw", "set_data"],
         function_names=["__init__", "draw", "set_data"],  # gold set_xy1/set_xy2 absent
-        contract="",                                       # no contract
-        witness="",                                        # witness-less
+        contract="",  # no contract
+        witness="",  # witness-less
         witness_verified=False,
         localizer_confidence=0.0,
-        anchor_prox=1.0,                                   # v74 matched it to issue anchors
+        anchor_prox=1.0,  # v74 matched it to issue anchors
     )
     # issue names the true subject (set_xy1) but NOT any rendered function_name,
     # and the stem "lines" is not in the issue → issue_match=False, path_match=False.

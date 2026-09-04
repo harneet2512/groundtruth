@@ -20,6 +20,7 @@ Strategy:
   * Submit-gate test extracts the PRESUBMIT shell body from gt_tool_install.sh
     and rebinds paths, then invokes bash on it.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -30,7 +31,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import textwrap
 from pathlib import Path
 
@@ -52,6 +52,7 @@ def _extract_heredoc(marker: str) -> str:
 
 
 # ── Wrapper fixture ────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def wrapper_env(tmp_path: Path):
@@ -97,12 +98,15 @@ def wrapper_env(tmp_path: Path):
     )
     wrap.write_text(src, encoding="utf-8")
 
-    real.write_text(textwrap.dedent("""\
+    real.write_text(
+        textwrap.dedent("""\
         #!/usr/bin/env python3
         import sys
         print("REAL_OK:" + " ".join(sys.argv[1:]))
         sys.exit(0)
-    """), encoding="utf-8")
+    """),
+        encoding="utf-8",
+    )
     os.chmod(real, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
     testbed = td / "testbed"
@@ -118,7 +122,10 @@ def wrapper_env(tmp_path: Path):
         env.pop("PROBLEM_STATEMENT", None)
         return subprocess.run(
             [sys.executable, str(wrap), *args],
-            env=env, capture_output=True, text=True, timeout=30,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
 
     def load_events():
@@ -141,6 +148,7 @@ def wrapper_env(tmp_path: Path):
 
 
 # ── Wrapper tests ──────────────────────────────────────────────────────────
+
 
 def test_orient_first_call_allowed(wrapper_env):
     proc = wrapper_env["run"]("orient")
@@ -177,10 +185,9 @@ def test_lookup_third_call_blocked(wrapper_env):
     assert proc.returncode == 0
     assert "BUDGET_EXHAUSTED: gt_lookup" in proc.stdout
     events = wrapper_env["events"]()
-    assert any(
-        e.get("event") == "budget_denied" and e.get("tool") == "lookup"
-        for e in events
-    ), events
+    assert any(e.get("event") == "budget_denied" and e.get("tool") == "lookup" for e in events), (
+        events
+    )
 
 
 def test_pass_through_no_longer_bypasses(wrapper_env):
@@ -207,11 +214,13 @@ def test_pass_through_no_longer_bypasses(wrapper_env):
 
 # ── Ack fixture ────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def hook_mod(tmp_path: Path):
     """Load swe_agent_state_gt.py with path constants patched to tmpdir."""
     spec = importlib.util.spec_from_file_location(
-        "swe_agent_state_gt_test", HOOK_PY,
+        "swe_agent_state_gt_test",
+        HOOK_PY,
     )
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
@@ -237,22 +246,36 @@ def hook_mod(tmp_path: Path):
 
 def _arm_typed(mod, cycle, ack_id, symbol="foo"):
     """Arm the ack window with a v13 typed ack_id payload."""
-    mod.GT_ACK_STATE.write_text(json.dumps({
-        "cycle": cycle, "channel": "micro", "tier": "likely",
-        "intervention_id": "test-abc",
-        "ack_id": ack_id,
-        "expected_next_action": {"kind": "gt_check", "target": "x.py", "text": "gt_check x.py"},
-        "expected_next_action_kind": "gt_check",
-        "expected_next_action_target": "x.py",
-        "expected_next_action_text": "gt_check x.py",
-        "confidence_tier": "likely",
-        "hint_shape": "micro",
-        "hint_fingerprint": None,
-        "file": "x.py", "file_key": ["x.py", "x.py"], "symbol": symbol,
-        "pre_emit_action": "", "pre_emit_changed": [],
-        "pre_emit_file_refs": [], "pre_emit_symbol_refs": [],
-        "expires_at_cycle": cycle + mod.NEXT_WINDOW_SIZE,
-    }))
+    mod.GT_ACK_STATE.write_text(
+        json.dumps(
+            {
+                "cycle": cycle,
+                "channel": "micro",
+                "tier": "likely",
+                "intervention_id": "test-abc",
+                "ack_id": ack_id,
+                "expected_next_action": {
+                    "kind": "gt_check",
+                    "target": "x.py",
+                    "text": "gt_check x.py",
+                },
+                "expected_next_action_kind": "gt_check",
+                "expected_next_action_target": "x.py",
+                "expected_next_action_text": "gt_check x.py",
+                "confidence_tier": "likely",
+                "hint_shape": "micro",
+                "hint_fingerprint": None,
+                "file": "x.py",
+                "file_key": ["x.py", "x.py"],
+                "symbol": symbol,
+                "pre_emit_action": "",
+                "pre_emit_changed": [],
+                "pre_emit_file_refs": [],
+                "pre_emit_symbol_refs": [],
+                "expires_at_cycle": cycle + mod.NEXT_WINDOW_SIZE,
+            }
+        )
+    )
 
 
 def _append_ack_call(mod, ack_id, note=""):
@@ -261,16 +284,26 @@ def _append_ack_call(mod, ack_id, note=""):
 
 
 def _arm_symbol(mod, cycle, symbol):
-    mod.GT_ACK_STATE.write_text(json.dumps({
-        "cycle": cycle, "channel": "orient", "tier": 0.9,
-        "intervention_id": "test-abc",
-        "expected_next_action": f"gt_lookup {symbol}",
-        "confidence_tier": 0.9,
-        "file": "", "file_key": ["", ""], "symbol": symbol,
-        "pre_emit_action": "", "pre_emit_changed": [],
-        "pre_emit_file_refs": [], "pre_emit_symbol_refs": [],
-        "expires_at_cycle": cycle + mod.NEXT_WINDOW_SIZE,
-    }))
+    mod.GT_ACK_STATE.write_text(
+        json.dumps(
+            {
+                "cycle": cycle,
+                "channel": "orient",
+                "tier": 0.9,
+                "intervention_id": "test-abc",
+                "expected_next_action": f"gt_lookup {symbol}",
+                "confidence_tier": 0.9,
+                "file": "",
+                "file_key": ["", ""],
+                "symbol": symbol,
+                "pre_emit_action": "",
+                "pre_emit_changed": [],
+                "pre_emit_file_refs": [],
+                "pre_emit_symbol_refs": [],
+                "expires_at_cycle": cycle + mod.NEXT_WINDOW_SIZE,
+            }
+        )
+    )
 
 
 def _events_of(mod, name):
@@ -347,9 +380,7 @@ def test_typed_ack_watermark_is_drained(hook_mod):
     # Second invocation should not reprocess the same stale line.
     hook_mod._check_ack(cycle=7, action="", changed_files=[])
     stale_events = _events_of(hook_mod, "ack_stale_id")
-    assert len(stale_events) == 1, (
-        "watermark should prevent reprocessing the same gt_ack line"
-    )
+    assert len(stale_events) == 1, "watermark should prevent reprocessing the same gt_ack line"
 
 
 # ── v13e tool_signature_read tests ────────────────────────────────────────
@@ -388,20 +419,34 @@ def test_tool_signature_read_rejects_read_on_other_file(hook_mod):
 
 def test_should_verify_is_presubmit_or_loop_only(hook_mod):
     assert hook_mod.should_verify({}, presubmit=True) is True
-    assert hook_mod.should_verify({"edit_count": 3, "file_edit_counts": {}}, presubmit=False) is False
-    assert hook_mod.should_verify({"edit_count": 1, "file_edit_counts": {"foo.py": 3}}, presubmit=False) is False
+    assert (
+        hook_mod.should_verify({"edit_count": 3, "file_edit_counts": {}}, presubmit=False) is False
+    )
+    assert (
+        hook_mod.should_verify(
+            {"edit_count": 1, "file_edit_counts": {"foo.py": 3}}, presubmit=False
+        )
+        is False
+    )
 
 
 def test_confidence_policy_gates_info_hooks():
     from benchmarks.swebench import gt_intel as m
 
     assert m.classify_confidence_policy(0.55, unique=True, fresh=True, is_test=False)[0] == "silent"
-    assert m.classify_confidence_policy(0.70, unique=True, fresh=True, is_test=False)[0] == "advisory"
-    assert m.classify_confidence_policy(0.85, unique=True, fresh=True, is_test=False)[0] == "blocking"
-    assert m.classify_confidence_policy(0.85, unique=False, fresh=True, is_test=False)[0] == "silent"
+    assert (
+        m.classify_confidence_policy(0.70, unique=True, fresh=True, is_test=False)[0] == "advisory"
+    )
+    assert (
+        m.classify_confidence_policy(0.85, unique=True, fresh=True, is_test=False)[0] == "blocking"
+    )
+    assert (
+        m.classify_confidence_policy(0.85, unique=False, fresh=True, is_test=False)[0] == "silent"
+    )
 
 
 # ── Submit-gate test ──────────────────────────────────────────────────────
+
 
 def _find_working_bash() -> str | None:
     """Return the path of a bash that actually executes.
@@ -431,7 +476,9 @@ def _find_working_bash() -> str | None:
         try:
             r = subprocess.run(
                 [path, "-c", "echo x"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if r.returncode == 0 and "x" in r.stdout:
                 return path
@@ -446,8 +493,7 @@ def _bash_available() -> bool:
     return _find_working_bash() is not None and shutil.which("git") is not None
 
 
-@pytest.mark.skipif(not _bash_available(),
-                    reason="bash + git required for submit-gate test")
+@pytest.mark.skipif(not _bash_available(), reason="bash + git required for submit-gate test")
 def test_submit_gate_blocks_then_escapes(tmp_path: Path):
     body = _extract_heredoc("PRESUBMIT")
 
@@ -493,8 +539,8 @@ def test_submit_gate_blocks_then_escapes(tmp_path: Path):
         submit_real.as_posix(),
     )
     body = re.sub(
-        r'(?ms)\n\s*if command -v gt_wait_index >/dev/null 2>&1; then\n\s*gt_wait_index 30 >/dev/null 2>&1 \|\| true\n\s*fi\n',
-        '\n',
+        r"(?ms)\n\s*if command -v gt_wait_index >/dev/null 2>&1; then\n\s*gt_wait_index 30 >/dev/null 2>&1 \|\| true\n\s*fi\n",
+        "\n",
         body,
     )
 
@@ -507,7 +553,10 @@ def test_submit_gate_blocks_then_escapes(tmp_path: Path):
 
     def run():
         return subprocess.run(
-            [bash_bin, str(wrap)], capture_output=True, text=True, timeout=15,
+            [bash_bin, str(wrap)],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
 
     p1 = run()
@@ -538,32 +587,44 @@ def test_canary_report_prefers_budget_state_over_trajectory(tmp_path: Path):
     task_dir = outdir / "astropy__astropy-12907"
     task_dir.mkdir(parents=True)
 
-    task_dir.joinpath("gt_per_task_summary.json").write_text(json.dumps({
-        "run_id": "run-test",
-        "arm": "arm-test",
-        "cycle": 5,
-        "identity_ok": True,
-        "within_call_budget": True,
-    }))
-    task_dir.joinpath("gt_budget.state.json").write_text(json.dumps({
-        "scope": "run-test__astropy__astropy-12907__arm-test",
-        "orient": {"count": 1, "limit": 1, "exhausted": True},
-        "lookup": {"count": 2, "limit": 2, "exhausted": True},
-        "impact": {"count": 2, "limit": 2, "exhausted": True},
-        "check": {"count": 3, "limit": 3, "exhausted": True},
-        "orient_exhausted": True,
-    }))
-    task_dir.joinpath("fake.traj.json").write_text(json.dumps({
-        "history": [
-            {"action": "gt_orient"},
-            {"action": "gt_orient"},
-            {"action": "gt_lookup foo"},
-            {"action": "gt_lookup bar"},
-            {"action": "gt_lookup baz"},
-            {"action": "gt_impact foo"},
-            {"action": "gt_check src.py"},
-        ]
-    }))
+    task_dir.joinpath("gt_per_task_summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-test",
+                "arm": "arm-test",
+                "cycle": 5,
+                "identity_ok": True,
+                "within_call_budget": True,
+            }
+        )
+    )
+    task_dir.joinpath("gt_budget.state.json").write_text(
+        json.dumps(
+            {
+                "scope": "run-test__astropy__astropy-12907__arm-test",
+                "orient": {"count": 1, "limit": 1, "exhausted": True},
+                "lookup": {"count": 2, "limit": 2, "exhausted": True},
+                "impact": {"count": 2, "limit": 2, "exhausted": True},
+                "check": {"count": 3, "limit": 3, "exhausted": True},
+                "orient_exhausted": True,
+            }
+        )
+    )
+    task_dir.joinpath("fake.traj.json").write_text(
+        json.dumps(
+            {
+                "history": [
+                    {"action": "gt_orient"},
+                    {"action": "gt_orient"},
+                    {"action": "gt_lookup foo"},
+                    {"action": "gt_lookup bar"},
+                    {"action": "gt_lookup baz"},
+                    {"action": "gt_impact foo"},
+                    {"action": "gt_check src.py"},
+                ]
+            }
+        )
+    )
 
     row = report.build_row(outdir, task_dir, "arm-test", "run-test", 150, False)
     assert row["gt_orient_count"] == 1
@@ -584,38 +645,53 @@ def test_canary_report_marks_startup_timeout_without_losing_bootstrap_state(tmp_
     task_dir = outdir / "astropy__astropy-12907"
     task_dir.mkdir(parents=True)
 
-    task_dir.joinpath("gt_per_task_summary.json").write_text(json.dumps({
-        "run_id": "run-test",
-        "arm": "arm-test",
-        "cycle": 0,
-        "identity_ok": True,
-        "within_call_budget": True,
-    }))
+    task_dir.joinpath("gt_per_task_summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-test",
+                "arm": "arm-test",
+                "cycle": 0,
+                "identity_ok": True,
+                "within_call_budget": True,
+            }
+        )
+    )
     task_dir.joinpath("gt_identity.env").write_text(
         "GT_ARM=arm-test\nGT_RUN_ID=run-test\nGT_INSTANCE_ID=astropy__astropy-12907\n"
     )
-    task_dir.joinpath("gt_budget.state.json").write_text(json.dumps({
-        "scope": "run-test__astropy__astropy-12907__arm-test",
-        "orient": {"count": 0, "limit": 1, "exhausted": False},
-        "lookup": {"count": 0, "limit": 2, "exhausted": False},
-        "impact": {"count": 0, "limit": 2, "exhausted": False},
-        "check": {"count": 0, "limit": 3, "exhausted": False},
-        "orient_exhausted": False,
-        "initialized": True,
-        "source": "bootstrap",
-    }))
-    task_dir.joinpath("gt_startup_trace.jsonl").write_text("\n".join([
-        json.dumps({"event": "startup_enter", "identity_file_exists": True}),
-        json.dumps({"event": "identity_written", "identity_present": True}),
-        json.dumps({"event": "budget_written", "budget_state_present": True}),
-        json.dumps({"event": "telemetry_ready", "telemetry_ready": True}),
-        json.dumps({
-            "event": "state_anthropic_timeout",
-            "startup_failed": True,
-            "startup_failure_reason": "state_anthropic_timeout",
-            "reason": "state_anthropic_timeout",
-        }),
-    ]) + "\n")
+    task_dir.joinpath("gt_budget.state.json").write_text(
+        json.dumps(
+            {
+                "scope": "run-test__astropy__astropy-12907__arm-test",
+                "orient": {"count": 0, "limit": 1, "exhausted": False},
+                "lookup": {"count": 0, "limit": 2, "exhausted": False},
+                "impact": {"count": 0, "limit": 2, "exhausted": False},
+                "check": {"count": 0, "limit": 3, "exhausted": False},
+                "orient_exhausted": False,
+                "initialized": True,
+                "source": "bootstrap",
+            }
+        )
+    )
+    task_dir.joinpath("gt_startup_trace.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"event": "startup_enter", "identity_file_exists": True}),
+                json.dumps({"event": "identity_written", "identity_present": True}),
+                json.dumps({"event": "budget_written", "budget_state_present": True}),
+                json.dumps({"event": "telemetry_ready", "telemetry_ready": True}),
+                json.dumps(
+                    {
+                        "event": "state_anthropic_timeout",
+                        "startup_failed": True,
+                        "startup_failure_reason": "state_anthropic_timeout",
+                        "reason": "state_anthropic_timeout",
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
 
     row = report.build_row(outdir, task_dir, "arm-test", "run-test", 150, False)
     assert row["identity_present"] == 1
@@ -630,8 +706,10 @@ def test_canary_report_marks_startup_timeout_without_losing_bootstrap_state(tmp_
 def test_material_edit_concrete_action_is_verify_edit(hook_mod):
     """material_edit channel must produce a concrete gt_check spec."""
     spec = hook_mod._concrete_expected_next_action(
-        channel="material_edit", tier="edit",
-        focus_file="a/b/foo.py", focus_symbol="",
+        channel="material_edit",
+        tier="edit",
+        focus_file="a/b/foo.py",
+        focus_symbol="",
     )
     assert spec is not None
     assert spec.get("kind") == "gt_check"
@@ -641,8 +719,10 @@ def test_material_edit_concrete_action_is_verify_edit(hook_mod):
 
 def test_material_edit_concrete_action_none_without_file(hook_mod):
     spec = hook_mod._concrete_expected_next_action(
-        channel="material_edit", tier="edit",
-        focus_file="", focus_symbol="",
+        channel="material_edit",
+        tier="edit",
+        focus_file="",
+        focus_symbol="",
     )
     assert spec is None
 
@@ -651,9 +731,13 @@ def test_arm_ack_material_edit_emits_armed_and_steer_armed(hook_mod):
     """_arm_ack on channel=material_edit writes GT_ACK_STATE, emits ack_armed
     and steer_armed with has_payload=False."""
     ack_id = hook_mod._arm_ack(
-        cycle=10, channel="material_edit", tier="edit",
-        focus_file="pkg/mod.py", focus_symbol="",
-        pre_action="str_replace_editor ...", pre_changed=["pkg/mod.py"],
+        cycle=10,
+        channel="material_edit",
+        tier="edit",
+        focus_file="pkg/mod.py",
+        focus_symbol="",
+        pre_action="str_replace_editor ...",
+        pre_changed=["pkg/mod.py"],
         hint_shape="material_edit",
     )
     assert ack_id, "material_edit arming should produce an ack_id"
@@ -673,27 +757,38 @@ def test_material_edit_dedup_same_cycle_same_file_same_channel(hook_mod):
     should skip and emit ack_arm_dedup with kept=existing. Channel-aware
     dedup: only dedup when prior channel is also material_edit."""
     # Pre-seed an existing material_edit arm at cycle 10, file foo.py.
-    hook_mod.GT_ACK_STATE.write_text(json.dumps({
-        "cycle": 10, "channel": "material_edit", "tier": "edit",
-        "ack_id": "priorack1", "file": "foo.py",
-        "expected_next_action_text": "gt_check foo.py",
-        "expires_at_cycle": 12,
-    }))
+    hook_mod.GT_ACK_STATE.write_text(
+        json.dumps(
+            {
+                "cycle": 10,
+                "channel": "material_edit",
+                "tier": "edit",
+                "ack_id": "priorack1",
+                "file": "foo.py",
+                "expected_next_action_text": "gt_check foo.py",
+                "expires_at_cycle": 12,
+            }
+        )
+    )
     existing = json.loads(hook_mod.GT_ACK_STATE.read_text())
     me_file, me_cycle = "foo.py", 10
-    ex_chan = (existing.get("channel", "") or "")
+    ex_chan = existing.get("channel", "") or ""
     should_arm = not (
         int(existing.get("cycle", -1)) == me_cycle
         and (existing.get("file") or "") == me_file
         and ex_chan == "material_edit"
     )
     assert should_arm is False
-    hook_mod.log_event("ack_arm_dedup", kept="existing",
-                       reason="same_cycle_same_file_same_channel",
-                       prior_channel=existing.get("channel"),
-                       prior_file=existing.get("file"),
-                       attempted_channel="material_edit",
-                       attempted_file=me_file, cycle=me_cycle)
+    hook_mod.log_event(
+        "ack_arm_dedup",
+        kept="existing",
+        reason="same_cycle_same_file_same_channel",
+        prior_channel=existing.get("channel"),
+        prior_file=existing.get("file"),
+        attempted_channel="material_edit",
+        attempted_file=me_file,
+        cycle=me_cycle,
+    )
     dedup = _events_of(hook_mod, "ack_arm_dedup")
     assert dedup and dedup[-1].get("kept") == "existing"
     assert dedup[-1].get("reason") == "same_cycle_same_file_same_channel"
@@ -702,22 +797,33 @@ def test_material_edit_dedup_same_cycle_same_file_same_channel(hook_mod):
 def test_material_edit_dedup_same_cycle_different_file(hook_mod):
     """Same-cycle different-file: dedup event fires with reason differing;
     existing higher-precision window is preserved."""
-    hook_mod.GT_ACK_STATE.write_text(json.dumps({
-        "cycle": 10, "channel": "micro", "tier": "likely",
-        "ack_id": "priorack2", "file": "other.py",
-        "expected_next_action_text": "gt_check other.py",
-        "expires_at_cycle": 12,
-    }))
+    hook_mod.GT_ACK_STATE.write_text(
+        json.dumps(
+            {
+                "cycle": 10,
+                "channel": "micro",
+                "tier": "likely",
+                "ack_id": "priorack2",
+                "file": "other.py",
+                "expected_next_action_text": "gt_check other.py",
+                "expires_at_cycle": 12,
+            }
+        )
+    )
     existing = json.loads(hook_mod.GT_ACK_STATE.read_text())
     me_file, me_cycle = "foo.py", 10
     assert int(existing.get("cycle", -1)) == me_cycle
     assert existing.get("file") != me_file
-    hook_mod.log_event("ack_arm_dedup", kept="existing",
-                       reason="same_cycle_different_file",
-                       prior_channel=existing.get("channel"),
-                       prior_file=existing.get("file"),
-                       attempted_channel="material_edit",
-                       attempted_file=me_file, cycle=me_cycle)
+    hook_mod.log_event(
+        "ack_arm_dedup",
+        kept="existing",
+        reason="same_cycle_different_file",
+        prior_channel=existing.get("channel"),
+        prior_file=existing.get("file"),
+        attempted_channel="material_edit",
+        attempted_file=me_file,
+        cycle=me_cycle,
+    )
     dedup = _events_of(hook_mod, "ack_arm_dedup")
     assert dedup and dedup[-1].get("kept") == "existing"
     assert dedup[-1].get("reason") == "same_cycle_different_file"
@@ -730,9 +836,7 @@ def test_ack_engagement_emitted_alongside_tool_signature_read(hook_mod):
     """Step 4: ack_engagement must emit alongside ack_followed at
     tool_signature_read resolution."""
     _arm_typed(hook_mod, cycle=5, ack_id="feed1234")
-    hook_mod._check_ack(cycle=6,
-                       action="sed -n 10,20p /testbed/x.py",
-                       changed_files=[])
+    hook_mod._check_ack(cycle=6, action="sed -n 10,20p /testbed/x.py", changed_files=[])
     engagement = _events_of(hook_mod, "ack_engagement")
     assert engagement, "ack_engagement should emit at tool_signature_read"
     last = engagement[-1]
@@ -785,39 +889,40 @@ def _patch_hook_for_replay(mod, tmp_path: Path, monkeypatch):
 
     # Step counter — hook reads /tmp/gt_step_count; redirect.
     orig_step_path = mod.Path
+
     def _step_path_shim(p):
         if str(p) == "/tmp/gt_step_count":
             return step_file
         return orig_step_path(p)
+
     monkeypatch.setattr(mod, "Path", _step_path_shim)
 
     # Stub functions that touch git / network / docker.
-    monkeypatch.setattr(mod, "detect_material_edits",
-                        lambda: mod._REPLAY_CHANGED[:])
-    monkeypatch.setattr(mod, "detect_material_edits_peek",
-                        lambda: mod._REPLAY_CHANGED[:])
+    monkeypatch.setattr(mod, "detect_material_edits", lambda: mod._REPLAY_CHANGED[:])
+    monkeypatch.setattr(mod, "detect_material_edits_peek", lambda: mod._REPLAY_CHANGED[:])
     monkeypatch.setattr(mod, "generate_pre_edit_briefing_safe", lambda: "")
     monkeypatch.setattr(mod, "build_micro_update_safe", lambda c: None)
     monkeypatch.setattr(mod, "_drain_budget_events", lambda: None)
     monkeypatch.setattr(mod, "_is_presubmit", lambda s: False)
-    monkeypatch.setattr(mod, "_emit_per_task_summary",
-                        lambda reason=None: None)
+    monkeypatch.setattr(mod, "_emit_per_task_summary", lambda reason=None: None)
     monkeypatch.setattr(mod, "_budget_remaining", lambda: {"remaining": 99})
     monkeypatch.setattr(mod, "_task_scope", lambda: "replay")
-    monkeypatch.setattr(mod, "should_verify",
-                        lambda ms, presubmit=False: False)
+    monkeypatch.setattr(mod, "should_verify", lambda ms, presubmit=False: False)
     monkeypatch.setattr(mod, "increment_tool_count", lambda *a, **kw: None)
     # load/save micro-state: small stubs backed by a dict on the module.
-    _micro = {"edit_count": 0, "file_edit_counts": {},
-              "verify_used": 0, "micro_used": 0}
+    _micro = {"edit_count": 0, "file_edit_counts": {}, "verify_used": 0, "micro_used": 0}
     monkeypatch.setattr(mod, "load_micro_state", lambda: dict(_micro))
+
     def _save_ms(ms):
         _micro.update(ms)
+
     monkeypatch.setattr(mod, "save_micro_state", _save_ms)
 
 
 def test_main_replay_arms_on_material_edit_and_delivers(
-    hook_mod, tmp_path: Path, monkeypatch,
+    hook_mod,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """Step 6a: run main() twice with GT_ARM_ON_MATERIAL_EDIT=1 and verify
     material_edit + ack_armed(channel=material_edit) + ack_armed_on_edit +
@@ -833,22 +938,21 @@ def test_main_replay_arms_on_material_edit_and_delivers(
     armed1 = _events_of(hook_mod, "ack_armed")
     on_edit1 = _events_of(hook_mod, "ack_armed_on_edit")
     steer_armed1 = _events_of(hook_mod, "steer_armed")
-    delivered_or_dropped = (
-        _events_of(hook_mod, "steer_delivered")
-        + _events_of(hook_mod, "steer_dropped")
+    delivered_or_dropped = _events_of(hook_mod, "steer_delivered") + _events_of(
+        hook_mod, "steer_dropped"
     )
 
     assert ev1, "material_edit must fire on first cycle with changes"
     assert armed1 and armed1[-1].get("channel") == "material_edit"
     assert on_edit1, "ack_armed_on_edit must emit when flag is on"
     assert steer_armed1 and steer_armed1[-1].get("has_payload") is False
-    assert delivered_or_dropped, (
-        "cycle must emit steer_delivered or steer_dropped for armed window"
-    )
+    assert delivered_or_dropped, "cycle must emit steer_delivered or steer_dropped for armed window"
 
 
 def test_main_replay_dedups_same_cycle_same_file(
-    hook_mod, tmp_path: Path, monkeypatch,
+    hook_mod,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """Arm already exists at current cycle on same file — main() must
     emit ack_arm_dedup(same_cycle_same_file) rather than re-arming."""
@@ -861,12 +965,19 @@ def test_main_replay_dedups_same_cycle_same_file(
     # same file. Channel-aware dedup: only a prior material_edit blocks
     # re-arming on the same cycle/file.
     (tmp_path / "step_count").write_text("0")  # main() will increment to 1
-    hook_mod.GT_ACK_STATE.write_text(json.dumps({
-        "cycle": 1, "channel": "material_edit", "tier": "edit",
-        "ack_id": "priorXXXX", "file": "pkg/mod.py",
-        "expected_next_action_text": "gt_check pkg/mod.py",
-        "expires_at_cycle": 3,
-    }))
+    hook_mod.GT_ACK_STATE.write_text(
+        json.dumps(
+            {
+                "cycle": 1,
+                "channel": "material_edit",
+                "tier": "edit",
+                "ack_id": "priorXXXX",
+                "file": "pkg/mod.py",
+                "expected_next_action_text": "gt_check pkg/mod.py",
+                "expires_at_cycle": 3,
+            }
+        )
+    )
     hook_mod.main()
     dedup = _events_of(hook_mod, "ack_arm_dedup")
     assert dedup, "same-cycle same-file same-channel must emit ack_arm_dedup"
@@ -878,7 +989,9 @@ def test_main_replay_dedups_same_cycle_same_file(
 
 
 def test_material_edit_arms_after_prior_micro_same_cycle_same_file(
-    hook_mod, tmp_path: Path, monkeypatch,
+    hook_mod,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """Test A (LSP-hybrid regression): existing arm at same cycle + same file
     with channel="micro" must NOT block material_edit from arming. After the
@@ -893,12 +1006,19 @@ def test_material_edit_arms_after_prior_micro_same_cycle_same_file(
     # This simulates the LSP-hybrid path where micro arms first on the edited
     # file; channel-aware dedup must let material_edit still arm afterward.
     (tmp_path / "step_count").write_text("0")  # main() will increment to 1
-    hook_mod.GT_ACK_STATE.write_text(json.dumps({
-        "cycle": 1, "channel": "micro", "tier": "likely",
-        "ack_id": "priormcro", "file": "pkg/mod.py",
-        "expected_next_action_text": "gt_check pkg/mod.py",
-        "expires_at_cycle": 3,
-    }))
+    hook_mod.GT_ACK_STATE.write_text(
+        json.dumps(
+            {
+                "cycle": 1,
+                "channel": "micro",
+                "tier": "likely",
+                "ack_id": "priormcro",
+                "file": "pkg/mod.py",
+                "expected_next_action_text": "gt_check pkg/mod.py",
+                "expires_at_cycle": 3,
+            }
+        )
+    )
 
     hook_mod.main()
 
@@ -917,13 +1037,13 @@ def test_material_edit_arms_after_prior_micro_same_cycle_same_file(
 
     # No dedup event should have fired (prior channel was micro, not material_edit).
     dedup = _events_of(hook_mod, "ack_arm_dedup")
-    assert not dedup, (
-        f"prior micro must not dedup material_edit; got {dedup}"
-    )
+    assert not dedup, f"prior micro must not dedup material_edit; got {dedup}"
 
 
 def test_material_edit_dedups_against_prior_material_edit_same_cycle_same_file(
-    hook_mod, tmp_path: Path, monkeypatch,
+    hook_mod,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """Test B (LSP-hybrid regression): existing arm at same cycle + same file
     with channel="material_edit" must still dedup against itself (idempotency
@@ -937,12 +1057,19 @@ def test_material_edit_dedups_against_prior_material_edit_same_cycle_same_file(
     # Pre-seed step to 1 and an active material_edit arm at cycle=1.
     (tmp_path / "step_count").write_text("0")  # main() will increment to 1
     prior_ack_id = "priorme01"
-    hook_mod.GT_ACK_STATE.write_text(json.dumps({
-        "cycle": 1, "channel": "material_edit", "tier": "edit",
-        "ack_id": prior_ack_id, "file": "pkg/mod.py",
-        "expected_next_action_text": "gt_check pkg/mod.py",
-        "expires_at_cycle": 3,
-    }))
+    hook_mod.GT_ACK_STATE.write_text(
+        json.dumps(
+            {
+                "cycle": 1,
+                "channel": "material_edit",
+                "tier": "edit",
+                "ack_id": prior_ack_id,
+                "file": "pkg/mod.py",
+                "expected_next_action_text": "gt_check pkg/mod.py",
+                "expires_at_cycle": 3,
+            }
+        )
+    )
 
     hook_mod.main()
 
@@ -963,7 +1090,9 @@ def test_material_edit_dedups_against_prior_material_edit_same_cycle_same_file(
 
 
 def test_main_replay_trace_hash_seed_gated(
-    hook_mod, tmp_path: Path, monkeypatch,
+    hook_mod,
+    tmp_path: Path,
+    monkeypatch,
 ):
     """GT_TRACE_HASH_SEED=1 produces hash_trace_detect events; off → silent."""
     monkeypatch.setenv("GT_ARM_ON_MATERIAL_EDIT", "1")
@@ -976,10 +1105,7 @@ def test_main_replay_trace_hash_seed_gated(
     # ie. no trace events appear when the flag is off.
     monkeypatch.delenv("GT_TRACE_HASH_SEED", raising=False)
     hook_mod.main()
-    traces_off = (
-        _events_of(hook_mod, "hash_trace_detect")
-        + _events_of(hook_mod, "hash_trace_git_empty")
+    traces_off = _events_of(hook_mod, "hash_trace_detect") + _events_of(
+        hook_mod, "hash_trace_git_empty"
     )
-    assert not traces_off, (
-        "hash_trace_* events must be silent without GT_TRACE_HASH_SEED=1"
-    )
+    assert not traces_off, "hash_trace_* events must be silent without GT_TRACE_HASH_SEED=1"

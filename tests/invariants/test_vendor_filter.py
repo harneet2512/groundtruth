@@ -5,6 +5,7 @@ Patterns: /static/, /vendor/, /node_modules/, /dist/, .min., /assets/
 
 Violation = D2 in failure taxonomy. ENGINEERING_INVARIANT.
 """
+
 from __future__ import annotations
 
 import os
@@ -12,7 +13,6 @@ import sqlite3
 import sys
 import tempfile
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 from groundtruth.hooks.post_view import _is_vendor_path
@@ -92,13 +92,17 @@ class TestVendorFilterInGraphNavigation:
                 "INSERT INTO nodes VALUES (2, 'Function', 'each', NULL, "
                 "'static/jquery.js', 100, 200, NULL, NULL, 1, 0, 'javascript', NULL)"
             )
-            conn.execute("INSERT INTO edges VALUES (1, 2, 1, 'CALLS', 105, NULL, 'name_match', 0.9, NULL, NULL, NULL, NULL, NULL)")
+            conn.execute(
+                "INSERT INTO edges VALUES (1, 2, 1, 'CALLS', 105, NULL, 'name_match', 0.9, NULL, NULL, NULL, NULL, NULL)"
+            )
             # Legit caller
             conn.execute(
                 "INSERT INTO nodes VALUES (3, 'Function', 'caller', NULL, "
                 "'src/utils.py', 50, 60, NULL, NULL, 1, 0, 'python', NULL)"
             )
-            conn.execute("INSERT INTO edges VALUES (2, 3, 1, 'CALLS', 55, NULL, 'import', 1.0, NULL, NULL, NULL, NULL, NULL)")
+            conn.execute(
+                "INSERT INTO edges VALUES (2, 3, 1, 'CALLS', 55, NULL, 'import', 1.0, NULL, NULL, NULL, NULL, NULL)"
+            )
             conn.commit()
             conn.close()
 

@@ -16,6 +16,7 @@ invariant). It mirrors ``resolver.go`` ``builtinMethodNames`` /
 adds the shadowable bare-call builtins the T2 drop cannot see (it fires on
 QUALIFIED calls only). Stdlib-only, language-agnostic, no benchmark shape.
 """
+
 from __future__ import annotations
 
 import re
@@ -26,39 +27,152 @@ import re
 # resolves verified_unique when one project symbol shadows the name). Static
 # set by design (consistent with the resolver's T2 list; no invented
 # distribution threshold).
-BUILTIN_CALLABLE_NAMES: frozenset[str] = frozenset({
-    # resolver.go builtinMethodNames (str/dict/list/set methods)
-    "join", "split", "splitlines", "strip", "lstrip", "rstrip", "lower",
-    "upper", "title", "startswith", "endswith", "encode", "decode", "format",
-    "replace", "find", "rfind",
-    "get", "keys", "values", "items", "setdefault", "update", "popitem",
-    "append", "extend", "pop", "insert", "remove", "index", "count", "sort",
-    "reverse", "add", "discard", "clear", "copy",
-    # resolver.go strongBuiltinMethodNames extras
-    "rsplit", "zfill", "casefold", "loads", "dumps",
-    # shadowable Python builtins (the isinstance/len launder class) + os.path
-    "isinstance", "issubclass", "len", "print", "open", "type", "super",
-    "getattr", "setattr", "hasattr", "delattr", "repr", "str", "int", "float",
-    "bool", "list", "dict", "set", "tuple", "iter", "next", "range", "zip",
-    "map", "filter", "sorted", "reversed", "enumerate", "sum", "min", "max",
-    "abs", "round", "all", "any", "id", "hash", "vars", "dir", "callable",
-    "exists",
-    # JS/TS/Go/Rust ultra-common builtin method names
-    "push", "shift", "unshift", "slice", "splice", "concat", "indexof",
-    "foreach", "tostring", "write", "read", "close", "new", "make", "clone",
-    "unwrap", "expect",
-})
+BUILTIN_CALLABLE_NAMES: frozenset[str] = frozenset(
+    {
+        # resolver.go builtinMethodNames (str/dict/list/set methods)
+        "join",
+        "split",
+        "splitlines",
+        "strip",
+        "lstrip",
+        "rstrip",
+        "lower",
+        "upper",
+        "title",
+        "startswith",
+        "endswith",
+        "encode",
+        "decode",
+        "format",
+        "replace",
+        "find",
+        "rfind",
+        "get",
+        "keys",
+        "values",
+        "items",
+        "setdefault",
+        "update",
+        "popitem",
+        "append",
+        "extend",
+        "pop",
+        "insert",
+        "remove",
+        "index",
+        "count",
+        "sort",
+        "reverse",
+        "add",
+        "discard",
+        "clear",
+        "copy",
+        # resolver.go strongBuiltinMethodNames extras
+        "rsplit",
+        "zfill",
+        "casefold",
+        "loads",
+        "dumps",
+        # shadowable Python builtins (the isinstance/len launder class) + os.path
+        "isinstance",
+        "issubclass",
+        "len",
+        "print",
+        "open",
+        "type",
+        "super",
+        "getattr",
+        "setattr",
+        "hasattr",
+        "delattr",
+        "repr",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "iter",
+        "next",
+        "range",
+        "zip",
+        "map",
+        "filter",
+        "sorted",
+        "reversed",
+        "enumerate",
+        "sum",
+        "min",
+        "max",
+        "abs",
+        "round",
+        "all",
+        "any",
+        "id",
+        "hash",
+        "vars",
+        "dir",
+        "callable",
+        "exists",
+        # JS/TS/Go/Rust ultra-common builtin method names
+        "push",
+        "shift",
+        "unshift",
+        "slice",
+        "splice",
+        "concat",
+        "indexof",
+        "foreach",
+        "tostring",
+        "write",
+        "read",
+        "close",
+        "new",
+        "make",
+        "clone",
+        "unwrap",
+        "expect",
+    }
+)
 
 # Stdlib/builtin module names whose attribute calls (os.walk, json.loads, ...)
 # get name-matched to a same-named PROJECT function by the indexer. A project
 # file with a function named walk/join/split/load collides with stdlib on EVERY
 # repo — this is general, not benchmark-shaped.
-STDLIB_MODULES: frozenset[str] = frozenset({
-    "os", "sys", "re", "io", "json", "math", "time", "copy", "glob", "uuid",
-    "shutil", "random", "typing", "logging", "pathlib", "datetime", "string",
-    "decimal", "inspect", "warnings", "argparse", "textwrap", "itertools",
-    "functools", "operator", "collections", "subprocess", "contextlib",
-})
+STDLIB_MODULES: frozenset[str] = frozenset(
+    {
+        "os",
+        "sys",
+        "re",
+        "io",
+        "json",
+        "math",
+        "time",
+        "copy",
+        "glob",
+        "uuid",
+        "shutil",
+        "random",
+        "typing",
+        "logging",
+        "pathlib",
+        "datetime",
+        "string",
+        "decimal",
+        "inspect",
+        "warnings",
+        "argparse",
+        "textwrap",
+        "itertools",
+        "functools",
+        "operator",
+        "collections",
+        "subprocess",
+        "contextlib",
+    }
+)
 
 _STDLIB_SHADOW_RE = re.compile(r"([A-Za-z_][\w.]*)\.([A-Za-z_]\w*)\s*\(")
 

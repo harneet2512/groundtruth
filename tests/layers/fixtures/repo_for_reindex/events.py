@@ -1,4 +1,5 @@
 """Event dispatcher. Routes events through the store."""
+
 from __future__ import annotations
 
 from store import Store, make_default_store

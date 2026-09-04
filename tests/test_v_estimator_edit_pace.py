@@ -14,6 +14,7 @@ exist; a single edit (no pace yet) keeps the default.
 Red->green: an agent who edits but never tests -> V from edit-to-edit pace,
 not the static 25.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -61,15 +62,15 @@ def _drive(gmp, cmd, obs=""):
 
 def test_never_test_agent_gets_edit_pace_v(gmp):
     """Edits at actions 2, 12, 22 (pace 10), zero test runs -> V = 10."""
-    _drive(gmp, "cat src/a.py", "content")               # action 1
-    _drive(gmp, "sed -i 's/a/b/' src/a.py")               # action 2  EDIT
+    _drive(gmp, "cat src/a.py", "content")  # action 1
+    _drive(gmp, "sed -i 's/a/b/' src/a.py")  # action 2  EDIT
     for i in range(9):
         _drive(gmp, f"grep -n thing src/f{i}.py", "hit")  # 3..11
-    _drive(gmp, "sed -i 's/b/c/' src/a.py")               # action 12 EDIT
+    _drive(gmp, "sed -i 's/b/c/' src/a.py")  # action 12 EDIT
     for i in range(9):
-        _drive(gmp, f"cat src/g{i}.py", "content")        # 13..21
-    _drive(gmp, "sed -i 's/c/d/' src/b.py")               # action 22 EDIT
-    assert gmp._test_cycle_spans == []                    # truly never tested
+        _drive(gmp, f"cat src/g{i}.py", "content")  # 13..21
+    _drive(gmp, "sed -i 's/c/d/' src/b.py")  # action 22 EDIT
+    assert gmp._test_cycle_spans == []  # truly never tested
     v = gmp._estimate_v()
     assert v == 10, f"never-test V must come from edit pace, got {v}"
 

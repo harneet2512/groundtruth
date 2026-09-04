@@ -20,6 +20,7 @@ The synthetic graph uses generic identifiers (``alpha``, ``beta``, ``utils``,
 etc.) — no Live-Lite-specific symbol names — so the suite is anti-benchmaxxing
 by construction.
 """
+
 from __future__ import annotations
 
 import os
@@ -94,34 +95,201 @@ CREATE TABLE edges (
 NODE_ROWS = [
     # id, label, name, qualified_name, file_path, start_line, end_line,
     # signature, return_type, is_exported, is_test, language, parent_id
-    (1, "Function", "hub_function", "pkg.alpha.hub_function",
-     "pkg/alpha.py", 10, 30,
-     "def hub_function(x: int, y: int) -> int", "int",
-     1, 0, "python", None),
-    (2, "Function", "alpha_helper", "pkg.alpha.alpha_helper",
-     "pkg/alpha.py", 32, 40, None, None, 0, 0, "python", None),
-    (3, "Function", "overloaded_name", "pkg.alpha.overloaded_name",
-     "pkg/alpha.py", 42, 50, None, None, 1, 0, "python", None),
-    (4, "Function", "beta_caller_a", "pkg.beta.beta_caller_a",
-     "pkg/beta.py", 5, 15, None, None, 1, 0, "python", None),
-    (5, "Function", "beta_caller_b", "pkg.beta.beta_caller_b",
-     "pkg/beta.py", 17, 27, None, None, 1, 0, "python", None),
-    (6, "Function", "beta_caller_c", "pkg.beta.beta_caller_c",
-     "pkg/beta.py", 29, 39, None, None, 1, 0, "python", None),
-    (7, "Function", "overloaded_name", "pkg.beta.overloaded_name",
-     "pkg/beta.py", 41, 50, None, None, 1, 0, "python", None),
-    (8, "Function", "gamma_user", "pkg.gamma.gamma_user",
-     "pkg/gamma.py", 5, 15, None, None, 1, 0, "python", None),
-    (9, "Function", "low_conf_target", "pkg.gamma.low_conf_target",
-     "pkg/gamma.py", 17, 25, None, None, 1, 0, "python", None),
-    (10, "Function", "lonely_island", "pkg.orphan.lonely_island",
-     "pkg/orphan.py", 5, 12, None, None, 1, 0, "python", None),
-    (11, "Function", "orphan_neighbor", "pkg.orphan.orphan_neighbor",
-     "pkg/orphan.py", 14, 20, None, None, 1, 0, "python", None),
-    (12, "Function", "orphan_helper", "pkg.orphan.orphan_helper",
-     "pkg/orphan.py", 22, 30, None, None, 1, 0, "python", None),
-    (13, "Function", "test_hub_function", "tests.test_alpha.test_hub_function",
-     "tests/test_alpha.py", 5, 18, None, None, 0, 1, "python", None),
+    (
+        1,
+        "Function",
+        "hub_function",
+        "pkg.alpha.hub_function",
+        "pkg/alpha.py",
+        10,
+        30,
+        "def hub_function(x: int, y: int) -> int",
+        "int",
+        1,
+        0,
+        "python",
+        None,
+    ),
+    (
+        2,
+        "Function",
+        "alpha_helper",
+        "pkg.alpha.alpha_helper",
+        "pkg/alpha.py",
+        32,
+        40,
+        None,
+        None,
+        0,
+        0,
+        "python",
+        None,
+    ),
+    (
+        3,
+        "Function",
+        "overloaded_name",
+        "pkg.alpha.overloaded_name",
+        "pkg/alpha.py",
+        42,
+        50,
+        None,
+        None,
+        1,
+        0,
+        "python",
+        None,
+    ),
+    (
+        4,
+        "Function",
+        "beta_caller_a",
+        "pkg.beta.beta_caller_a",
+        "pkg/beta.py",
+        5,
+        15,
+        None,
+        None,
+        1,
+        0,
+        "python",
+        None,
+    ),
+    (
+        5,
+        "Function",
+        "beta_caller_b",
+        "pkg.beta.beta_caller_b",
+        "pkg/beta.py",
+        17,
+        27,
+        None,
+        None,
+        1,
+        0,
+        "python",
+        None,
+    ),
+    (
+        6,
+        "Function",
+        "beta_caller_c",
+        "pkg.beta.beta_caller_c",
+        "pkg/beta.py",
+        29,
+        39,
+        None,
+        None,
+        1,
+        0,
+        "python",
+        None,
+    ),
+    (
+        7,
+        "Function",
+        "overloaded_name",
+        "pkg.beta.overloaded_name",
+        "pkg/beta.py",
+        41,
+        50,
+        None,
+        None,
+        1,
+        0,
+        "python",
+        None,
+    ),
+    (
+        8,
+        "Function",
+        "gamma_user",
+        "pkg.gamma.gamma_user",
+        "pkg/gamma.py",
+        5,
+        15,
+        None,
+        None,
+        1,
+        0,
+        "python",
+        None,
+    ),
+    (
+        9,
+        "Function",
+        "low_conf_target",
+        "pkg.gamma.low_conf_target",
+        "pkg/gamma.py",
+        17,
+        25,
+        None,
+        None,
+        1,
+        0,
+        "python",
+        None,
+    ),
+    (
+        10,
+        "Function",
+        "lonely_island",
+        "pkg.orphan.lonely_island",
+        "pkg/orphan.py",
+        5,
+        12,
+        None,
+        None,
+        1,
+        0,
+        "python",
+        None,
+    ),
+    (
+        11,
+        "Function",
+        "orphan_neighbor",
+        "pkg.orphan.orphan_neighbor",
+        "pkg/orphan.py",
+        14,
+        20,
+        None,
+        None,
+        1,
+        0,
+        "python",
+        None,
+    ),
+    (
+        12,
+        "Function",
+        "orphan_helper",
+        "pkg.orphan.orphan_helper",
+        "pkg/orphan.py",
+        22,
+        30,
+        None,
+        None,
+        1,
+        0,
+        "python",
+        None,
+    ),
+    (
+        13,
+        "Function",
+        "test_hub_function",
+        "tests.test_alpha.test_hub_function",
+        "tests/test_alpha.py",
+        5,
+        18,
+        None,
+        None,
+        0,
+        1,
+        "python",
+        None,
+    ),
 ]
 
 # Edge rows.
@@ -138,16 +306,13 @@ EDGE_ROWS = [
     (1, 2, "CALLS", 22, "pkg/alpha.py", "same_file", 1.0, None),
     # IMPORTS edge for hub_function (so [HALLUCINATED-IMPORT] line fires)
     (4, 1, "IMPORTS", 1, "pkg/beta.py", "import", 1.0, "from pkg.alpha import hub_function"),
-
     # low_conf_target: a single name_match caller (gamma_user). Confidence 0.9
     # so it survives the 0.7 admissibility floor but is tagged [POSSIBLE].
     (8, 9, "CALLS", 11, "pkg/gamma.py", "name_match", 0.9, None),
-
     # overloaded_name (id 3, alpha.py): one verified import caller from beta
     (4, 3, "CALLS", 9, "pkg/beta.py", "import", 1.0, None),
     # overloaded_name (id 7, beta.py): one name_match caller
     (8, 7, "CALLS", 12, "pkg/gamma.py", "name_match", 0.9, None),
-
     # A heavily-connected node to stress the 30-line cap: alpha_helper has
     # many same_file callers. We add 12 same-file CALLS edges from
     # synthetic anonymous callers… but the resolver only walks `nodes` — so
@@ -200,21 +365,35 @@ def graph_db_heavy(tmp_path) -> Path:
     for i in range(30):
         nid = base_id + i
         extra_nodes.append(
-            (nid, "Function", f"heavy_caller_{i}",
-             f"pkg.heavy.heavy_caller_{i}",
-             f"pkg/heavy_{i % 3}.py", 10 + i, 20 + i,
-             None, None, 1, 0, "python", None)
+            (
+                nid,
+                "Function",
+                f"heavy_caller_{i}",
+                f"pkg.heavy.heavy_caller_{i}",
+                f"pkg/heavy_{i % 3}.py",
+                10 + i,
+                20 + i,
+                None,
+                None,
+                1,
+                0,
+                "python",
+                None,
+            )
         )
-        extra_edges.append(
-            (nid, 1, "CALLS", 11 + i, f"pkg/heavy_{i % 3}.py", "import", 1.0, None)
-        )
+        extra_edges.append((nid, 1, "CALLS", 11 + i, f"pkg/heavy_{i % 3}.py", "import", 1.0, None))
     _build_db(db, extra_nodes=extra_nodes, extra_edges=extra_edges)
     return db
 
 
 # ── Subprocess driver ────────────────────────────────────────────────────────
-def _run(symbol: str, db: Path | None, *, env_overrides: dict | None = None,
-         extra_env_unset: tuple[str, ...] = ()) -> subprocess.CompletedProcess:
+def _run(
+    symbol: str,
+    db: Path | None,
+    *,
+    env_overrides: dict | None = None,
+    extra_env_unset: tuple[str, ...] = (),
+) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     if db is not None:
         env["GT_GRAPH_DB"] = str(db)

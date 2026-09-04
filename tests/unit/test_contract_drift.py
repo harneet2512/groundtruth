@@ -13,6 +13,7 @@ with a FRESH id and assert drift is still detected.
 Zero test contact: drift reads only nodes/edges/properties (is_test=0 callers);
 never the assertions table, never test names.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -71,7 +72,7 @@ def _add_func(
         (name, file_path, f"def {name}(self, key)", return_type),
     )
     nid = int(cur.lastrowid)
-    for sh in ([return_shape] if return_shape else []):
+    for sh in [return_shape] if return_shape else []:
         conn.execute(
             "INSERT INTO properties (node_id, kind, value, line) VALUES (?, 'return_shape', ?, 12)",
             (nid, sh),
@@ -187,8 +188,11 @@ def test_drift_function_removed(tmp_path):
     pre = snapshot_contract(db, _FILE, [_FUNC])
     # Agent renamed/removed the function: delete the node, no reinsert.
     conn = sqlite3.connect(db)
-    conn.execute("DELETE FROM properties WHERE node_id IN "
-                 "(SELECT id FROM nodes WHERE file_path = ? AND name = ?)", (_FILE, _FUNC))
+    conn.execute(
+        "DELETE FROM properties WHERE node_id IN "
+        "(SELECT id FROM nodes WHERE file_path = ? AND name = ?)",
+        (_FILE, _FUNC),
+    )
     conn.execute("DELETE FROM nodes WHERE file_path = ? AND name = ?", (_FILE, _FUNC))
     conn.commit()
     conn.close()

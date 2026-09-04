@@ -36,6 +36,7 @@ violate GroundTruth's LLM-free, deterministic-only core contract.
 
 Everything here is pure sqlite + regex over graph.db. No model, no network.
 """
+
 from __future__ import annotations
 
 import os
@@ -76,8 +77,16 @@ from groundtruth.confidence import dynamic_cutoff, is_seed_pollutant
 # quiet (it only SUPPRESSES a known-spurious unverified edge), not poison.
 _STDLIB_ATTRS: frozenset[str] = frozenset(
     {
-        "walk", "loads", "dumps", "utcnow", "getlogger", "basicconfig",
-        "deepcopy", "namedtuple", "defaultdict", "fromtimestamp",
+        "walk",
+        "loads",
+        "dumps",
+        "utcnow",
+        "getlogger",
+        "basicconfig",
+        "deepcopy",
+        "namedtuple",
+        "defaultdict",
+        "fromtimestamp",
     }
 )
 
@@ -145,9 +154,9 @@ W_SUBJECT = 0.15
 # carries no structural depth. Must score BELOW edge witnesses so the graph
 # actually adds ranking value over grep (LIPI diagnosis: when both scored 1.0,
 # the localizer degenerated to expensive BM25 — 23% hit@1).
-_WITNESS_VERIFIED = 1.0     # verified EDGE witness (CALLS/IMPORTS)
-_WITNESS_DEFINES = 0.55     # DEFINES witness — above name_match but below edges
-_WITNESS_NAMEMATCH = 0.45   # unverified name_match edge
+_WITNESS_VERIFIED = 1.0  # verified EDGE witness (CALLS/IMPORTS)
+_WITNESS_DEFINES = 0.55  # DEFINES witness — above name_match but below edges
+_WITNESS_NAMEMATCH = 0.45  # unverified name_match edge
 # Hop decay is applied inline in Witness.strength() as 1/(1+hop).
 #
 # DEFINES vs verified-EDGE strength inversion guard (#57). A DEFINES witness is
@@ -196,8 +205,15 @@ _MIN_ANCHOR_LEN = 3
 # counts to the unfiltered query. It becomes load-bearing only once promoted edges
 # exist.
 _PROMOTED_EDGE_TYPES: tuple[str, ...] = (
-    "DATA_FLOW", "READS", "WRITES", "RAISES", "CO_SERIALIZES", "PRECEDES",
+    "DATA_FLOW",
+    "READS",
+    "WRITES",
+    "RAISES",
+    "CO_SERIALIZES",
+    "PRECEDES",
 )
+
+
 # SQL predicate (alias-parameterized) that EXCLUDES promoted relationship edges and
 # any promoted-provenance edge from a degree count. `{a}` is the edge-table alias.
 def _degree_edge_filter(a: str) -> str:
@@ -268,9 +284,17 @@ from groundtruth.delivery.path_policy import is_generated as _is_generated
 # files (score -= penalty, not hard drop) keeps them in the candidate list for
 # reference while preventing them from ranking #1.
 _TEST_PATTERNS: tuple[str, ...] = (
-    "test_", "_test.", ".test.", ".spec.", "_spec.",
-    "/tests/", "/test/", "/__tests__/",
-    "testing/", "testutil", "test_helper",
+    "test_",
+    "_test.",
+    ".test.",
+    ".spec.",
+    "_spec.",
+    "/tests/",
+    "/test/",
+    "/__tests__/",
+    "testing/",
+    "testutil",
+    "test_helper",
 )
 
 
@@ -310,6 +334,7 @@ def _fts5_candidates(
     # rebuild the plan forbids. Raises in proof mode; no-op (returns) otherwise so
     # the dev/CI fallback below is byte-identical.
     from groundtruth.runtime import proof as _proof
+
     if _proof.is_proof_mode():
         _proof.assert_fts5_native(conn, where="L1 retrieval")
 
@@ -321,9 +346,7 @@ def _fts5_candidates(
     try:
         tables = {
             r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         if "nodes_fts" not in tables:
             _db_path = conn.execute("PRAGMA database_list").fetchone()[2]
@@ -331,7 +354,10 @@ def _fts5_candidates(
                 print("[GT L1] FTS5: no database path available, skipping", file=sys.stderr)
                 return []
             try:
-                print("[GT L1] FTS5: nodes_fts missing, attempting Python-side creation", file=sys.stderr)
+                print(
+                    "[GT L1] FTS5: nodes_fts missing, attempting Python-side creation",
+                    file=sys.stderr,
+                )
                 # Intentional WRITE to graph.db: create FTS5 virtual table as a
                 # Python-side fallback when nodes_fts doesn't exist. This mutates
                 # the DB during what is otherwise a read-only query path. The
@@ -364,8 +390,8 @@ def _fts5_candidates(
     for t in sorted(issue_tokens, key=lambda x: (-len(x), x)):
         # FTS5 special chars: *, ^, ", (, ), :, +, -, NOT, AND, OR, NEAR
         # Wrap each token in double quotes to treat as literal phrase.
-        cleaned = t.replace('"', '')
-        if len(cleaned) >= 3 and all(c.isalnum() or c == '_' for c in cleaned):
+        cleaned = t.replace('"', "")
+        if len(cleaned) >= 3 and all(c.isalnum() or c == "_" for c in cleaned):
             safe_tokens.append(f'"{cleaned}"')
         if len(safe_tokens) >= 20:
             break
@@ -461,7 +487,7 @@ def _path_decay_scores(
 
     # Pre-fetch seed file paths.
     for i in range(0, len(seed_node_ids), 400):
-        chunk = seed_node_ids[i:i + 400]
+        chunk = seed_node_ids[i : i + 400]
         ph = ",".join("?" for _ in chunk)
         try:
             rows = conn.execute(
@@ -482,7 +508,7 @@ def _path_decay_scores(
         cost, nid, hops = heapq.heappop(pq)
 
         # Skip if we already found a cheaper path to this node.
-        if cost > best_cost.get(nid, float('inf')):
+        if cost > best_cost.get(nid, float("inf")):
             continue
 
         if hops >= max_hop:
@@ -492,8 +518,7 @@ def _path_decay_scores(
         # same provenance columns the witness BFS reads (name / method / tier) so
         # the shared _edge_admitted predicate (#54) sees identical inputs — no
         # SQL-level conf_where; admission happens once, in Python, for both walks.
-        for match_col, join_col in [("e.source_id", "e.target_id"),
-                                     ("e.target_id", "e.source_id")]:
+        for match_col, join_col in [("e.source_id", "e.target_id"), ("e.target_id", "e.source_id")]:
             try:
                 rows = conn.execute(
                     f"""SELECT {join_col} AS nbr_id, n.file_path, {conf_sel},
@@ -536,7 +561,7 @@ def _path_decay_scores(
                 edge_cost = 1.0 / conf_f
                 new_cost = cost + edge_cost
 
-                if new_cost < best_cost.get(nbr_id, float('inf')):
+                if new_cost < best_cost.get(nbr_id, float("inf")):
                     best_cost[nbr_id] = new_cost
                     node_file[nbr_id] = nbr_file
                     heapq.heappush(pq, (new_cost, nbr_id, hops + 1))
@@ -550,7 +575,7 @@ def _path_decay_scores(
                 file_cost[fp] = cost
 
     # Convert cost to decay score: S(f) = beta^cost.
-    return {fp: beta ** cost for fp, cost in file_cost.items()}
+    return {fp: beta**cost for fp, cost in file_cost.items()}
 
 
 @dataclass(frozen=True)
@@ -624,8 +649,9 @@ class Candidate:
         if not self.witnesses:
             return ""
         edge_wits = [
-            w for w in self.witnesses if w.direction != "defines_anchor"
-            and w.src_symbol != w.dst_symbol
+            w
+            for w in self.witnesses
+            if w.direction != "defines_anchor" and w.src_symbol != w.dst_symbol
         ]
         if edge_wits:
             # Prefer a MEANINGFUL edge (neither endpoint a generic constructor/
@@ -654,12 +680,10 @@ class Candidate:
             tag = "" if w.verified else " (unverified)"
             if w.hop >= 2:
                 far = w.src_symbol if w.direction == "calls_anchor" else w.dst_symbol
-                return (
-                    f"{w.anchor} -> ... -> {far} "
-                    f"[{w.edge_type}, {w.hop}-hop]{tag}"
-                )
+                return f"{w.anchor} -> ... -> {far} [{w.edge_type}, {w.hop}-hop]{tag}"
             body = (
-                f"{w.src_symbol} calls {w.dst_symbol}" if _calls_anchor
+                f"{w.src_symbol} calls {w.dst_symbol}"
+                if _calls_anchor
                 else f"{w.dst_symbol} called by {w.src_symbol}"
             )
             return f"{body} [{w.edge_type}]{tag}"
@@ -682,9 +706,9 @@ class Candidate:
 class LocalizerResult:
     candidates: list[Candidate]
     anchor_symbols: list[str]
-    confidence: float            # best candidate confidence (0 when no anchor hit)
-    confident: bool              # passes the per-task data-derived gate
-    gate_reason: str             # why confident / not (telemetry)
+    confidence: float  # best candidate confidence (0 when no anchor hit)
+    confident: bool  # passes the per-task data-derived gate
+    gate_reason: str  # why confident / not (telemetry)
     scope_chains: list[ScopeChain] = field(default_factory=list)
     graph_stats: dict = field(default_factory=dict)
     # WIDE-scope edit-set telemetry (Task-2 slice 1, additive). n_components = the
@@ -749,14 +773,12 @@ def _struct_witness_tier(c: "Candidate") -> int:
     if not c.has_verified_witness:
         return 3 if c.witnesses else 4
     has_close = any(
-        w.verified and w.direction != "defines_anchor" and w.hop <= 1
-        for w in c.witnesses
+        w.verified and w.direction != "defines_anchor" and w.hop <= 1 for w in c.witnesses
     )
     if has_close:
         return 0
     has_distant_structural = any(
-        w.verified and w.direction != "defines_anchor" and w.hop >= 2
-        for w in c.witnesses
+        w.verified and w.direction != "defines_anchor" and w.hop >= 2 for w in c.witnesses
     )
     return 1 if has_distant_structural else 2
 
@@ -827,9 +849,7 @@ def _lex_hit(term: str, symset: set[str]) -> bool:
     return False
 
 
-def _seed_node_rows(
-    conn: sqlite3.Connection, anchors: set[str]
-) -> list[tuple[int, str, str]]:
+def _seed_node_rows(conn: sqlite3.Connection, anchors: set[str]) -> list[tuple[int, str, str]]:
     """(node_id, name, file_path) for every Function/Method/Class node whose name
     is an issue anchor. These are the BFS seeds (KGCompass entity seeding)."""
     if not anchors:
@@ -967,7 +987,13 @@ def _path_to_seeds(
                 continue
             for r in rows:
                 fp = _normalize(str(r[2])) if r and r[2] else ""
-                if r and r[0] is not None and fp and int(r[0]) not in seen_ids and fp not in seen_files:
+                if (
+                    r
+                    and r[0] is not None
+                    and fp
+                    and int(r[0]) not in seen_ids
+                    and fp not in seen_files
+                ):
                     seen_ids.add(int(r[0]))
                     seen_files.add(fp)
                     out.append((int(r[0]), str(r[1]), fp))
@@ -976,8 +1002,7 @@ def _path_to_seeds(
 
     if out:
         print(
-            f"[GT L1] path-to-seed: {len(out)} nodes seeded from "
-            f"{len(path_tokens)} path tokens",
+            f"[GT L1] path-to-seed: {len(out)} nodes seeded from {len(path_tokens)} path tokens",
             file=sys.stderr,
         )
 
@@ -990,10 +1015,7 @@ def _path_match_token(fp: str, issue_tokens: set[str]) -> str:
     leading ``{token}.``). Longest hit wins; ``""`` when nothing re-derives.
     Display-only (the seed-typed witness line); never affects ranking."""
     fpl = "/" + (fp or "").lower()
-    hits = [
-        t for t in issue_tokens
-        if len(t) >= 4 and (f"/{t}." in fpl or f"/{t}/" in fpl)
-    ]
+    hits = [t for t in issue_tokens if len(t) >= 4 and (f"/{t}." in fpl or f"/{t}/" in fpl)]
     return max(hits, key=len) if hits else ""
 
 
@@ -1040,15 +1062,48 @@ def _grep_to_seeds(
     _prio_low = {t.lower() for t in _prio}
 
     # Pick distinctive tokens (skip very short or very common words)
-    tokens = _prio + [t for t in sorted(
-        (t for t in issue_tokens if len(t) >= 4 and t not in {
-            "that", "this", "with", "from", "have", "been", "will",
-            "when", "what", "which", "were", "they", "their", "does",
-            "should", "would", "could", "about", "some", "other",
-            "into", "more", "than", "each", "also", "after", "before",
-        }),
-        key=lambda t: (-len(t), t),
-    )[:10] if t.lower() not in _prio_low]
+    tokens = _prio + [
+        t
+        for t in sorted(
+            (
+                t
+                for t in issue_tokens
+                if len(t) >= 4
+                and t
+                not in {
+                    "that",
+                    "this",
+                    "with",
+                    "from",
+                    "have",
+                    "been",
+                    "will",
+                    "when",
+                    "what",
+                    "which",
+                    "were",
+                    "they",
+                    "their",
+                    "does",
+                    "should",
+                    "would",
+                    "could",
+                    "about",
+                    "some",
+                    "other",
+                    "into",
+                    "more",
+                    "than",
+                    "each",
+                    "also",
+                    "after",
+                    "before",
+                }
+            ),
+            key=lambda t: (-len(t), t),
+        )[:10]
+        if t.lower() not in _prio_low
+    ]
 
     if not tokens:
         return []
@@ -1075,7 +1130,11 @@ def _grep_to_seeds(
             try:
                 result = subprocess.run(
                     ["rg", "-n", "--no-heading", "-l", "-i", token, repo_root],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=5,
                 )
                 if result.returncode == 0:
                     for line in result.stdout.strip().splitlines():
@@ -1099,8 +1158,17 @@ def _grep_to_seeds(
     else:
         # Python fallback: walk once, check all tokens per file
         _source_exts = (
-            ".py", ".go", ".rs", ".ts", ".js", ".java", ".rb",
-            ".c", ".cpp", ".h", ".cs",
+            ".py",
+            ".go",
+            ".rs",
+            ".ts",
+            ".js",
+            ".java",
+            ".rb",
+            ".c",
+            ".cpp",
+            ".h",
+            ".cs",
         )
         try:
             for dirpath, _, filenames in os.walk(repo_root):
@@ -1171,7 +1239,9 @@ def _grep_to_seeds(
 
 
 def _role_discount_for_function(
-    conn: sqlite3.Connection, file_path: str, func_name: str,
+    conn: sqlite3.Connection,
+    file_path: str,
+    func_name: str,
 ) -> float:
     """Research-backed role discount for a SPECIFIC function (not file-level).
 
@@ -1242,8 +1312,6 @@ def _file_degrees(conn: sqlite3.Connection, files: set[str]) -> dict[str, int]:
     return deg
 
 
-
-
 def _is_verified(method: str) -> bool:
     return (method or "").strip().lower() in _DETERMINISTIC_METHODS
 
@@ -1280,20 +1348,30 @@ def _graph_stats(conn: sqlite3.Connection, has_conf: bool) -> dict:
     heavy queries, then adds the confidence percentiles that _repo_stats
     doesn't compute. One source of truth for "is this graph dense/sparse."
     """
-    stats: dict = {"node_count": 0, "edge_count": 0, "avg_degree": 0.0,
-                   "conf_p50": 1.0, "conf_p90": 1.0, "high_conf_frac": 1.0}
+    stats: dict = {
+        "node_count": 0,
+        "edge_count": 0,
+        "avg_degree": 0.0,
+        "conf_p50": 1.0,
+        "conf_p90": 1.0,
+        "high_conf_frac": 1.0,
+    }
     try:
         # Reuse the cached _repo_stats for node/edge/degree data
         from groundtruth.confidence import _repo_stats
+
         rs = _repo_stats(conn)
         stats["node_count"] = rs.n_files * 5  # approximate: ~5 functions/file
         # Get actual counts only if _repo_stats didn't cover them
-        stats["node_count"] = conn.execute(
-            "SELECT COUNT(*) FROM nodes WHERE is_test = 0"
-        ).fetchone()[0] or 0
-        stats["edge_count"] = conn.execute(
-            "SELECT COUNT(*) FROM edges WHERE type IN ('CALLS','IMPORTS')"
-        ).fetchone()[0] or 0
+        stats["node_count"] = (
+            conn.execute("SELECT COUNT(*) FROM nodes WHERE is_test = 0").fetchone()[0] or 0
+        )
+        stats["edge_count"] = (
+            conn.execute("SELECT COUNT(*) FROM edges WHERE type IN ('CALLS','IMPORTS')").fetchone()[
+                0
+            ]
+            or 0
+        )
         if stats["node_count"] > 0:
             stats["avg_degree"] = stats["edge_count"] / stats["node_count"]
         if has_conf and stats["edge_count"] > 0:
@@ -1392,6 +1470,7 @@ class ScopeChain:
     Addresses the 32% INCOMPLETE_SCOPE failures: agent finds 1 file but the fix
     needs 2-8 connected files.
     """
+
     files: list[str]
     edges: list[tuple[str, str, str, str]]
     confidence: float
@@ -1417,12 +1496,18 @@ class ScopeChain:
 # (measured: 0 across scanned graphs), so widening the SELECT adds zero rows and the
 # union-find over CALLS/IMPORTS reproduces today's connected components.
 _SCOPE_EDGE_TYPES: tuple[str, ...] = (
-    "CALLS", "IMPORTS",
-) + _PROMOTED_EDGE_TYPES + ("USES",)
+    (
+        "CALLS",
+        "IMPORTS",
+    )
+    + _PROMOTED_EDGE_TYPES
+    + ("USES",)
+)
 
 
-def _scope_edge_trust(verified: bool, method: str | None, conf_f: float,
-                      trust_tier: str | None = None) -> str | None:
+def _scope_edge_trust(
+    verified: bool, method: str | None, conf_f: float, trust_tier: str | None = None
+) -> str | None:
     """Trust tier of a candidate scope edge, or None to DROP it.
 
     CERTIFIED   — deterministic resolution_method (a fact: import/same_file/type_flow/
@@ -1512,6 +1597,7 @@ def _build_scope_chains(
             """,
             _params,
         ).fetchall()
+
     try:
         rows = _scope_rows("COALESCE(e.trust_tier, 'SPECULATIVE')")
     except sqlite3.OperationalError:
@@ -1596,27 +1682,27 @@ def _build_scope_chains(
             # that no edge_tiers consumer was closing; NOT byte-identical to the prior
             # builder ON PURPOSE — the prior bare render WAS the laundering.)
             _tag = (
-                " (CANDIDATE)" if tier == "CANDIDATE"
-                else " (unverified)" if tier == "SPECULATIVE"
+                " (CANDIDATE)"
+                if tier == "CANDIDATE"
+                else " (unverified)"
+                if tier == "SPECULATIVE"
                 else ""
             )
-            desc_parts.append(
-                f"{os.path.basename(src)} → {os.path.basename(dst)} ({sym}){_tag}"
-            )
+            desc_parts.append(f"{os.path.basename(src)} → {os.path.basename(dst)} ({sym}){_tag}")
         # Preserve seed-first ordering: keep top_files order within the component.
         ordered = [f for f in top_files if _find(f) == root]
-        chains.append(ScopeChain(
-            files=ordered,
-            edges=chain_edges,
-            confidence=chain_conf,
-            description="; ".join(desc_parts),
-            edge_tiers=tuple(edge_tiers),
-        ))
+        chains.append(
+            ScopeChain(
+                files=ordered,
+                edges=chain_edges,
+                confidence=chain_conf,
+                description="; ".join(desc_parts),
+                edge_tiers=tuple(edge_tiers),
+            )
+        )
 
     chains.sort(key=lambda c: (-len(c.files), -c.confidence, c.files[0] if c.files else ""))
     return chains[:max_chains]
-
-
 
 
 _EMBEDDER = None
@@ -1633,6 +1719,7 @@ class _OnnxEmbedderAdapter:
 
     def __init__(self, model):
         from groundtruth.memory.enrich.embed import DEFAULT_EMBED_DIM
+
         self._m = model
         # Width of the zero-fallback vectors when encode() is called with no texts.
         # Read the model's true dim (CHANGE 2: 768 for gte-modernbert, 384 for e5).
@@ -1640,6 +1727,7 @@ class _OnnxEmbedderAdapter:
 
     def encode(self, texts, normalize_embeddings=True, show_progress_bar=False):
         import numpy as np
+
         texts = list(texts)
         if not texts:
             return np.zeros((0, self.dim), dtype=np.float32)
@@ -1683,10 +1771,14 @@ def _get_embedder():
     if not _force_onnx and not _require_embedder:
         try:
             from sentence_transformers import SentenceTransformer
+
             # CODE-AWARE embedder (CodeSearchNet query->code; LIPI on sqllineage-557:
             # a general sentence model ranks generic files above the specific code gold).
             _EMBEDDER = SentenceTransformer(
-                os.environ.get("GT_EMBED_MODEL", "flax-sentence-embeddings/st-codesearch-distilroberta-base"))
+                os.environ.get(
+                    "GT_EMBED_MODEL", "flax-sentence-embeddings/st-codesearch-distilroberta-base"
+                )
+            )
             return _EMBEDDER
         except Exception as e:
             _st_err = e
@@ -1700,9 +1792,10 @@ def _get_embedder():
         _default_embed_model,
         get_embedding_model,
     )
+
     try:
         _m = get_embedding_model()  # code-tuned default (GT_EMBED_MODEL_NAME/DIM)
-        _m._ensure_loaded()         # raises if onnxruntime / model files absent
+        _m._ensure_loaded()  # raises if onnxruntime / model files absent
         _EMBEDDER = _OnnxEmbedderAdapter(_m)
         return _EMBEDDER
     except Exception as e:
@@ -1774,8 +1867,11 @@ def _sem_pool_files(top_k: int) -> int:
 
 
 def _semantic_score_by_file(
-    issue_text: str, graph_db: str, files: "Iterable[str]",
-    *, symbol_scores_out: "dict[str, list[tuple[str, float]]] | None" = None,
+    issue_text: str,
+    graph_db: str,
+    files: "Iterable[str]",
+    *,
+    symbol_scores_out: "dict[str, list[tuple[str, float]]] | None" = None,
 ) -> dict[str, float]:
     """Semantic similarity between the issue and each candidate file's CODE CONTENT.
 
@@ -1822,6 +1918,7 @@ def _semantic_score_by_file(
         read_agg_params,
         symbol_passage,
     )
+
     # Stage 3: prove localize uses the SAME embedder identity as run_v74/v1r (model-root
     # divergence -> raise in proof mode). Wires the never-called assert_same_embedder_identity.
     _proof.assert_same_embedder_identity(graph_db, "localize")
@@ -1848,7 +1945,8 @@ def _semantic_score_by_file(
             try:
                 for nid, val in conn.execute(
                     "SELECT p.node_id, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
-                    "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"):
+                    "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"
+                ):
                     if nid is None:
                         continue
                     lst = node_body.setdefault(int(nid), [])
@@ -1857,7 +1955,8 @@ def _semantic_score_by_file(
             except sqlite3.Error:
                 pass  # properties table absent -> name+signature passages only
             for nid, fp, nm, sig in conn.execute(
-                "SELECT id, file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test=0"):
+                "SELECT id, file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test=0"
+            ):
                 k = _normalize(fp)
                 if k not in want or len(file_passages.get(k, [])) >= 80:
                     continue
@@ -1877,10 +1976,14 @@ def _semantic_score_by_file(
     file_passages = {k: v for k, v in file_passages.items() if v}
     if not file_passages:
         if _proof_on:
-            _proof.require(False, "semantic_docs_present",
-                           f"{len(want)} candidates but 0 symbol passages assembled from graph.db")
+            _proof.require(
+                False,
+                "semantic_docs_present",
+                f"{len(want)} candidates but 0 symbol passages assembled from graph.db",
+            )
         return {}
     import numpy as np
+
     # PRIORITY ORDER = the caller's iteration order (the call site passes the
     # pre-semantic candidate ranking). The encode budget truncates from the BACK,
     # so the lowest-priority candidates lose their semantic scores first.
@@ -1940,6 +2043,7 @@ def _semantic_score_by_file(
     if n_skipped > 0:
         # Correct-or-quiet: ONE line, stderr only (never agent-visible stdout).
         import sys as _sys
+
         print(
             f"[GT_SEM] passage budget hit ({len(to_encode)}/{len(seen_hashes)} encoded; "
             f"{n_hits} cached; {n_skipped} unique passages skipped)",
@@ -1979,8 +2083,11 @@ def _semantic_score_by_file(
             )
     if _proof_on and _res:
         _nz = sum(1 for v in _res.values() if v and v > 0)
-        _proof.require(_nz > 0, "semantic_ranks_nonzero",
-                       f"all {len(_res)} semantic ranks zero/flat for {len(want)} candidates")
+        _proof.require(
+            _nz > 0,
+            "semantic_ranks_nonzero",
+            f"all {len(_res)} semantic ranks zero/flat for {len(want)} candidates",
+        )
     return _res
 
 
@@ -2087,9 +2194,7 @@ def localize(
                     if ps[0] not in existing_ids:
                         seeds.append(ps)
                         existing_ids.add(ps[0])
-                        _seed_provenance[ps[0]] = (
-                            "PATH_SEED", _path_match_token(ps[2], terms)
-                        )
+                        _seed_provenance[ps[0]] = ("PATH_SEED", _path_match_token(ps[2], terms))
         except Exception as _path_err:
             print(
                 f"[GT L1] path-to-seed: FAILED: {_path_err}",
@@ -2115,6 +2220,7 @@ def localize(
         _anchor_coverage = len(_covered_terms) / _n_terms
         # Diversity score: tanh normalizes so 5+ files → ~1.0, 1 file → ~0.2
         import math
+
         _diversity_score = math.tanh(_seed_diversity / 3.0)
         # Confidence score: fraction of seeds with a verified edge backing
         _verified_seed_files = set()
@@ -2164,9 +2270,13 @@ def localize(
                 # name-match/FTS5 node to seed; the literal-token grep over
                 # source is their ONLY entry into the candidate set.
                 grep_seeds = _grep_to_seeds(
-                    terms, repo_root, conn, max_seeds=_grep_limit,
-                    priority_tokens=set(getattr(
-                        issue_anchors, "unresolved_code_symbols", None) or set()),
+                    terms,
+                    repo_root,
+                    conn,
+                    max_seeds=_grep_limit,
+                    priority_tokens=set(
+                        getattr(issue_anchors, "unresolved_code_symbols", None) or set()
+                    ),
                 )
                 if grep_seeds:
                     existing_ids = {s[0] for s in seeds}
@@ -2183,8 +2293,11 @@ def localize(
                 _gtoks = [t.lower() for t in terms if len(t) >= 4]
                 for _fp in grep_recalled:
                     try:
-                        _txt = open(os.path.join(repo_root, _fp), encoding="utf-8",
-                                    errors="ignore").read(500_000).lower()
+                        _txt = (
+                            open(os.path.join(repo_root, _fp), encoding="utf-8", errors="ignore")
+                            .read(500_000)
+                            .lower()
+                        )
                         _hit_toks = [t for t in _gtoks if t in _txt]
                         grep_score_by_file[_fp] = len(_hit_toks)
                         if _hit_toks:
@@ -2274,10 +2387,15 @@ def localize(
                     _tok = _grep_token_by_file.get(fp, "")
                 witnesses_by_file.setdefault(fp, []).append(
                     Witness(
-                        file_path=fp, anchor=name, edge_type=_kind,
-                        direction="defines_anchor", verified=False,
-                        confidence=0.35, hop=0,
-                        src_symbol=_tok or name, dst_symbol=name,
+                        file_path=fp,
+                        anchor=name,
+                        edge_type=_kind,
+                        direction="defines_anchor",
+                        verified=False,
+                        confidence=0.35,
+                        hop=0,
+                        src_symbol=_tok or name,
+                        dst_symbol=name,
                     )
                 )
                 continue
@@ -2302,10 +2420,15 @@ def localize(
             _def_verified = not is_seed_pollutant(name, conn)
             witnesses_by_file.setdefault(fp, []).append(
                 Witness(
-                    file_path=fp, anchor=name, edge_type="DEFINES",
-                    direction="defines_anchor", verified=_def_verified,
+                    file_path=fp,
+                    anchor=name,
+                    edge_type="DEFINES",
+                    direction="defines_anchor",
+                    verified=_def_verified,
                     confidence=1.0 if _def_verified else 0.45,
-                    hop=0, src_symbol=name, dst_symbol=name,
+                    hop=0,
+                    src_symbol=name,
+                    dst_symbol=name,
                 )
             )
 
@@ -2407,8 +2530,7 @@ def localize(
                 conn.close()
             except sqlite3.Error:
                 pass
-            return LocalizerResult([], list(anchors), 0.0, False, "no_witness",
-                                   graph_stats=_stats)
+            return LocalizerResult([], list(anchors), 0.0, False, "no_witness", graph_stats=_stats)
 
         # ---- PATH DECAY SCORING (KGCompass-style) ----
         # Dijkstra-style BFS from ALL seed nodes. Edge weight = 1/confidence,
@@ -2418,9 +2540,14 @@ def localize(
         _path_decay_by_file: dict[str, float] = {}
         try:
             _path_decay_by_file = _path_decay_scores(
-                conn, seed_ids, has_conf,
-                max_hop=_dyn_hop, beta=0.85, min_edge_conf=_dyn_conf,
-                has_method=has_method, has_trust_tier=has_trust_tier,
+                conn,
+                seed_ids,
+                has_conf,
+                max_hop=_dyn_hop,
+                beta=0.85,
+                min_edge_conf=_dyn_conf,
+                has_method=has_method,
+                has_trust_tier=has_trust_tier,
             )
         except Exception:
             pass
@@ -2437,9 +2564,7 @@ def localize(
             if defines_wits:
                 # Use the strongest DEFINES witness's anchor (the function name)
                 best_def = max(defines_wits, key=lambda w: w.strength())
-                _role_discounts[fp] = _role_discount_for_function(
-                    conn, fp, best_def.anchor
-                )
+                _role_discounts[fp] = _role_discount_for_function(conn, fp, best_def.anchor)
         # Downgrade DEFINES witnesses for Herbold-trivial functions
         # (SLOC<=4, fan_out=0). A trivial function matching an issue keyword
         # by name is NOT a verified structural fact — it's a lexical coincidence.
@@ -2451,13 +2576,19 @@ def localize(
                 new_wits = []
                 for w in witnesses_by_file.get(fp, []):
                     if w.direction == "defines_anchor" and w.verified:
-                        new_wits.append(Witness(
-                            file_path=w.file_path, anchor=w.anchor,
-                            edge_type=w.edge_type, direction=w.direction,
-                            verified=False, confidence=0.45,
-                            hop=w.hop, src_symbol=w.src_symbol,
-                            dst_symbol=w.dst_symbol,
-                        ))
+                        new_wits.append(
+                            Witness(
+                                file_path=w.file_path,
+                                anchor=w.anchor,
+                                edge_type=w.edge_type,
+                                direction=w.direction,
+                                verified=False,
+                                confidence=0.45,
+                                hop=w.hop,
+                                src_symbol=w.src_symbol,
+                                dst_symbol=w.dst_symbol,
+                            )
+                        )
                     else:
                         new_wits.append(w)
                 witnesses_by_file[fp] = new_wits
@@ -2499,7 +2630,6 @@ def localize(
     _decay_vals = [v for v in _path_decay_by_file.values() if v > 0]
     _decay_max = max(_decay_vals) if _decay_vals else 1.0
 
-
     # TEST-TOOLING demote (vendored assertion/debug libs imported only by tests, e.g.
     # internal/testify, internal/spew — escape the vendor/ markers, lexically match an
     # issue's error/panic vocabulary, and out-rank the real gold; NEVER a feature edit
@@ -2507,8 +2637,10 @@ def localize(
     # test-file demote magnitude (no new weight/threshold). Computed ONCE.
     try:
         from groundtruth.delivery.path_policy import (
-            test_tooling_roots as _tt_roots_fn, is_test_tooling as _is_tt,
+            test_tooling_roots as _tt_roots_fn,
+            is_test_tooling as _is_tt,
         )
+
         _tt_roots = _tt_roots_fn(graph_db) if graph_db else frozenset()
     except Exception:
         _tt_roots = frozenset()
@@ -2552,7 +2684,9 @@ def localize(
         score = _raw_score / _weight_sum if _weight_sum > 0 else _raw_score
         if _is_generated(fp):
             score -= 0.5
-        _tt_on = os.environ.get("GT_TEST_TOOLING_DEMOTE", "1") != "0"  # default ON; "0"=A/B baseline
+        _tt_on = (
+            os.environ.get("GT_TEST_TOOLING_DEMOTE", "1") != "0"
+        )  # default ON; "0"=A/B baseline
         if _is_test_file(fp) or (_tt_on and _is_tt(fp, _tt_roots)):
             score -= 0.4
         candidates.append(
@@ -2601,8 +2735,7 @@ def localize(
         if _normalize(c.file_path) in grep_recalled:
             return 0
         if INJECTION_PLACEMENT == "interleave_short_deterministic" and any(
-            w.verified and w.direction != "defines_anchor" and w.hop <= 1
-            for w in c.witnesses
+            w.verified and w.direction != "defines_anchor" and w.hop <= 1 for w in c.witnesses
         ):
             return 0
         return 1
@@ -2617,9 +2750,7 @@ def localize(
     def _depth_authority(c: Candidate) -> int:
         if not _have_floor or _normalize(c.file_path) in grep_recalled:
             return 0
-        has_edge_reach = any(
-            w.verified and w.direction != "defines_anchor" for w in c.witnesses
-        )
+        has_edge_reach = any(w.verified and w.direction != "defines_anchor" for w in c.witnesses)
         return 0 if has_edge_reach else 1
 
     # ---- WITHIN-FLOOR RANK FUSION (fixes the go-cli regression) ----
@@ -2645,9 +2776,14 @@ def localize(
     # `-score` ordering, so this is a strict refinement of the prior key.
     _struct_order = sorted(
         candidates,
-        key=lambda c: (_witness_tier(c),
-                       _cand_subject_pos.get(c.file_path, 10**9),
-                       -c.score, -c.confidence, -c.lex_hits, c.file_path),
+        key=lambda c: (
+            _witness_tier(c),
+            _cand_subject_pos.get(c.file_path, 10**9),
+            -c.score,
+            -c.confidence,
+            -c.lex_hits,
+            c.file_path,
+        ),
     )
     _struct_rank = {id(c): i for i, c in enumerate(_struct_order)}
     _grecalled = sorted(
@@ -2656,6 +2792,7 @@ def localize(
     )
     _grep_rank = {id(c): i for i, c in enumerate(_grecalled)}
     _BIG = 10**6
+
     # WITHIN-FLOOR ORDER = GREP SPINE + SPECIFIC-EVIDENCE PROMOTION.
     # Held-out lesson (flow-traced on sqllineage/privacyidea): structural reranking by
     # witness VOLUME is net-harmful vs grep — hub files with 100s of generic witnesses
@@ -2691,28 +2828,33 @@ def localize(
     # given up: a candidate BELOW the pool cutoff can no longer be promoted into
     # the window by semantic rank alone (bounded beats killed).
     def _rrf2(c: Candidate) -> float:
-        return (1.0 / (60 + _grep_rank.get(id(c), _BIG))
-                + 1.0 / (60 + _struct_rank.get(id(c), _BIG)))
+        return 1.0 / (60 + _grep_rank.get(id(c), _BIG)) + 1.0 / (60 + _struct_rank.get(id(c), _BIG))
 
     _sem_pool = sorted(
         candidates,
         key=lambda c: (_grep_floor(c), _depth_authority(c), -_rrf2(c), c.file_path),
-    )[:_sem_pool_files(top_k)]
+    )[: _sem_pool_files(top_k)]
     # R1: capture the per-symbol semantic scores (previously discarded) so the
     # symbol-naming stage can rank within-file leaves by the same signal. The float
     # return is unchanged; _symbol_semrank stays {} when the embedder is off.
     _symbol_semrank: dict[str, list[tuple[str, float]]] = {}
     _sem = _semantic_score_by_file(
-        issue_text, graph_db, [c.file_path for c in _sem_pool],
+        issue_text,
+        graph_db,
+        [c.file_path for c in _sem_pool],
         symbol_scores_out=_symbol_semrank,
     )
     # Rank ONLY scored candidates: a file with no semantic score (outside the pool,
     # over the encode budget, or no embeddable symbols) must fall to rank _BIG
     # (≈0 RRF mass) — never inherit a small list-position rank from a 0.0 default.
-    _sem_order = sorted(
-        (c for c in candidates if _normalize(c.file_path) in _sem),
-        key=lambda c: -_sem.get(_normalize(c.file_path), 0.0),
-    ) if _sem else []
+    _sem_order = (
+        sorted(
+            (c for c in candidates if _normalize(c.file_path) in _sem),
+            key=lambda c: -_sem.get(_normalize(c.file_path), 0.0),
+        )
+        if _sem
+        else []
+    )
     _sem_rank = {id(c): i for i, c in enumerate(_sem_order)}
 
     # ---- MULTI-SIGNAL AGREEMENT COUNT (the grep-floor build) ----
@@ -2758,9 +2900,9 @@ def localize(
     # common case); load-bearing only on exact ties (grep-floor-only / no-embedder).
     candidates.sort(
         key=lambda c: (
-            _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY)
-            _depth_authority(c),     # Phase 3: string-world non-recalled sinks
-            -_rrf3(c),               # lexical + structural + SEMANTIC rank fusion
+            _grep_floor(c),  # Phase 2: grep recall floor (PRIMARY)
+            _depth_authority(c),  # Phase 3: string-world non-recalled sinks
+            -_rrf3(c),  # lexical + structural + SEMANTIC rank fusion
             *_final_relevance_key(c, _cand_subject_pos),  # relevance before the path string
         )
     )
@@ -2769,6 +2911,7 @@ def localize(
     # buries a known-gold candidate. Off unless GT_LOCALIZE_DEBUG is set.
     if os.environ.get("GT_LOCALIZE_DEBUG"):
         import sys as _sys
+
         for _i, _c in enumerate(candidates[:25], start=1):
             _sys.stderr.write(
                 f"[L1DBG] #{_i:2} {os.path.basename(_c.file_path):28} "
@@ -2798,9 +2941,7 @@ def localize(
     _n_components = 0
     if candidates:
         _chained_files = {_normalize(f) for ch in _chains for f in ch.files}
-        _singletons = sum(
-            1 for c in candidates if _normalize(c.file_path) not in _chained_files
-        )
+        _singletons = sum(1 for c in candidates if _normalize(c.file_path) not in _chained_files)
         _n_components = len(_chains) + _singletons
 
     # ---- CONFIDENCE GATE (data-derived, per-task) ----
@@ -2823,9 +2964,15 @@ def localize(
     best = candidates[0]
     if not best.has_verified_witness:
         return LocalizerResult(
-            candidates, list(anchors), best.confidence, False, "top_unverified",
-            scope_chains=_chains, graph_stats=_stats,
-            agreement_by_file=_agreement_by_file, n_components=_n_components,
+            candidates,
+            list(anchors),
+            best.confidence,
+            False,
+            "top_unverified",
+            scope_chains=_chains,
+            graph_stats=_stats,
+            agreement_by_file=_agreement_by_file,
+            n_components=_n_components,
             symbol_semrank_by_file=_symbol_semrank,
         )
 
@@ -2874,10 +3021,7 @@ def localize(
         # High ratio = the localizer found names, not call/import edges.
         _top5 = candidates[:5]
         _total_wit = sum(len(c.witnesses) for c in _top5)
-        _defines_wit = sum(
-            1 for c in _top5 for w in c.witnesses
-            if w.direction == "defines_anchor"
-        )
+        _defines_wit = sum(1 for c in _top5 for w in c.witnesses if w.direction == "defines_anchor")
         _def_ratio = _defines_wit / _total_wit if _total_wit > 0 else 0.0
         if _def_ratio > 0.5:
             _sep_flags += 1
@@ -2897,14 +3041,21 @@ def localize(
             confident = False
             gate_reason = f"score_separation_fail({'+'.join(_sep_parts)})"
             import sys
+
             print(
                 f"[GT L1] score-separation downgrade: {gate_reason}",
                 file=sys.stderr,
             )
 
     return LocalizerResult(
-        candidates, list(anchors), best.confidence, confident, gate_reason,
-        scope_chains=_chains, graph_stats=_stats,
-        agreement_by_file=_agreement_by_file, n_components=_n_components,
+        candidates,
+        list(anchors),
+        best.confidence,
+        confident,
+        gate_reason,
+        scope_chains=_chains,
+        graph_stats=_stats,
+        agreement_by_file=_agreement_by_file,
+        n_components=_n_components,
         symbol_semrank_by_file=_symbol_semrank,
     )

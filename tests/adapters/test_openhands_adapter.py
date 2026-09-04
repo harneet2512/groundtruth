@@ -50,7 +50,9 @@ class _StubClient:
         return self._result("mcp_tool", name)
 
     def register_confirmation_policy(self, message: str, tool_filter: str) -> dict[str, Any]:
-        self.calls.append(("register_confirmation_policy", {"message": message, "filter": tool_filter}))
+        self.calls.append(
+            ("register_confirmation_policy", {"message": message, "filter": tool_filter})
+        )
         return self._result("confirmation", message)
 
     def push_visible_message(self, text: str) -> dict[str, Any]:
@@ -111,6 +113,7 @@ def test_init_raises_when_oh_sdk_missing() -> None:
 
 def test_init_raises_when_oh_sdk_too_old() -> None:
     """B4: OH SDK older than MIN_OH_SDK_VERSION -> AdapterIncompatibleError."""
+
     def fake_version(name: str) -> str:
         if name in ("openhands-sdk", "openhands"):
             return "0.0.1"

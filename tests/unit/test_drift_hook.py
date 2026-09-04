@@ -5,6 +5,7 @@ binary (run_incremental_index is monkeypatched): build a working graph.db (post-
 edit state) + a frozen <working>.orig (session-start state) and assert drift_advisory
 diffs them, stays quiet without a baseline, and skips test files (zero test contact).
 """
+
 from __future__ import annotations
 
 import os
@@ -32,8 +33,14 @@ CREATE TABLE properties (
 """
 
 
-def _mkdb(path: str, *, file_path: str = "lib.py", name: str = "get_user",
-          return_shape: str = "", raises: tuple[str, ...] = ()) -> None:
+def _mkdb(
+    path: str,
+    *,
+    file_path: str = "lib.py",
+    name: str = "get_user",
+    return_shape: str = "",
+    raises: tuple[str, ...] = (),
+) -> None:
     conn = sqlite3.connect(path)
     conn.executescript(_SCHEMA)
     cur = conn.execute(
@@ -43,18 +50,23 @@ def _mkdb(path: str, *, file_path: str = "lib.py", name: str = "get_user",
     )
     nid = int(cur.lastrowid)
     if return_shape:
-        conn.execute("INSERT INTO properties (node_id, kind, value, line) "
-                     "VALUES (?, 'return_shape', ?, 2)", (nid, return_shape))
+        conn.execute(
+            "INSERT INTO properties (node_id, kind, value, line) VALUES (?, 'return_shape', ?, 2)",
+            (nid, return_shape),
+        )
     for exc in raises:
-        conn.execute("INSERT INTO properties (node_id, kind, value, line) "
-                     "VALUES (?, 'exception_type', ?, 3)", (nid, exc))
+        conn.execute(
+            "INSERT INTO properties (node_id, kind, value, line) "
+            "VALUES (?, 'exception_type', ?, 3)",
+            (nid, exc),
+        )
     conn.commit()
     conn.close()
 
 
 def test_drift_advisory_diffs_vs_frozen_original(tmp_path, monkeypatch):
     working = str(tmp_path / "graph.db")
-    _mkdb(working, return_shape="none")                       # post-edit: return None
+    _mkdb(working, return_shape="none")  # post-edit: return None
     _mkdb(working + ".orig", return_shape="list", raises=("KeyError",))  # frozen original
     monkeypatch.setattr(dh, "run_incremental_index", lambda *a, **k: True)
     out = dh.drift_advisory(str(tmp_path), working, ["lib.py"])
@@ -94,8 +106,10 @@ def _mk_twofunc_db(path, *, a_shape, b_shape):
             "VALUES ('Function', ?, 'm.py', ?, ?, 0, 'python')",
             (name, lo, hi),
         )
-        conn.execute("INSERT INTO properties (node_id, kind, value, line) "
-                     "VALUES (?, 'return_shape', ?, ?)", (int(cur.lastrowid), shape, lo + 1))
+        conn.execute(
+            "INSERT INTO properties (node_id, kind, value, line) VALUES (?, 'return_shape', ?, ?)",
+            (int(cur.lastrowid), shape, lo + 1),
+        )
     conn.commit()
     conn.close()
 

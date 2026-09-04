@@ -17,12 +17,12 @@ This test asserts the two load-bearing properties from the seam spec:
 
 Pure sqlite + regex. No AI, no task symbols, no per-case weight tuning.
 """
+
 from __future__ import annotations
 
 import sqlite3
 
 from groundtruth.pretask.graph_localizer import LocalizerResult, _normalize as _gl_norm
-from groundtruth.pretask import v1r_brief
 from groundtruth.pretask.v1r_brief import _semantic_leaf_names, _fts5_symbol_rank
 
 
@@ -66,11 +66,20 @@ def _make_hub_vs_leaf_db(tmp_path, *, with_fts: bool):
         "is_test,language) VALUES (?,?,?,?,?,?,?,0,'python')",
         [
             (1, "Method", "run", _GOLD_FILE, 1, 50, "def run(self):"),
-            (2, "Method", "normalize_field_value", _GOLD_FILE, 60, 80,
-             "def normalize_field_value(self, field, value):"),
+            (
+                2,
+                "Method",
+                "normalize_field_value",
+                _GOLD_FILE,
+                60,
+                80,
+                "def normalize_field_value(self, field, value):",
+            ),
             # caller nodes (sources of edges into the hub) in other files
-            *[(100 + i, "Function", f"caller_{i}", f"pkg/mod_{i}.py", 1, 2,
-               f"def caller_{i}():") for i in range(40)],
+            *[
+                (100 + i, "Function", f"caller_{i}", f"pkg/mod_{i}.py", 1, 2, f"def caller_{i}():")
+                for i in range(40)
+            ],
         ],
     )
     # 40 CALLS edges into `run` (id=1) -> `run` is the per-task in-degree HUB.
@@ -98,14 +107,19 @@ def _make_hub_vs_leaf_db(tmp_path, *, with_fts: bool):
 
 def _loc_with_sem(symrank: dict[str, list[tuple[str, float]]]) -> LocalizerResult:
     return LocalizerResult(
-        candidates=[], anchor_symbols=[], confidence=0.0, confident=False,
-        gate_reason="test", symbol_semrank_by_file=symrank,
+        candidates=[],
+        anchor_symbols=[],
+        confidence=0.0,
+        confident=False,
+        gate_reason="test",
+        symbol_semrank_by_file=symrank,
     )
 
 
 # --------------------------------------------------------------------------
 # PROPERTY 1: non-hub leaf the content signal favors OUTRANKS the in-degree hub
 # --------------------------------------------------------------------------
+
 
 def test_lexical_half_ranks_behavior_leaf_over_hub(tmp_path):
     """FTS5 half alone (no embedder): the issue tokens hit normalize_field_value,
@@ -124,9 +138,11 @@ def test_bridge_names_nonhub_leaf_above_hub(tmp_path):
     the 40-caller hub (symbol-level hub demotion)."""
     db = _make_hub_vs_leaf_db(tmp_path, with_fts=True)
     # semantic half: the issue<->leaf cosine is high, the issue<->hub cosine is low.
-    loc = _loc_with_sem({
-        _gl_norm(_GOLD_FILE): [("normalize_field_value", 0.71), ("run", 0.12)],
-    })
+    loc = _loc_with_sem(
+        {
+            _gl_norm(_GOLD_FILE): [("normalize_field_value", 0.71), ("run", 0.12)],
+        }
+    )
     names = _semantic_leaf_names(loc, db, _GOLD_FILE, _ISSUE, limit=3)
     assert names, "bridge returned nothing despite both signals present"
     assert names[0] == "normalize_field_value", names
@@ -138,9 +154,11 @@ def test_semantic_half_alone_orders_leaves(tmp_path):
     """Embedder ON, FTS table ABSENT: the semantic per-symbol map alone drives the
     order (the issue->code bridge for token-mismatched golds)."""
     db = _make_hub_vs_leaf_db(tmp_path, with_fts=False)
-    loc = _loc_with_sem({
-        _gl_norm(_GOLD_FILE): [("normalize_field_value", 0.66), ("run", 0.20)],
-    })
+    loc = _loc_with_sem(
+        {
+            _gl_norm(_GOLD_FILE): [("normalize_field_value", 0.66), ("run", 0.20)],
+        }
+    )
     names = _semantic_leaf_names(loc, db, _GOLD_FILE, _ISSUE, limit=3)
     assert names and names[0] == "normalize_field_value", names
 
@@ -148,6 +166,7 @@ def test_semantic_half_alone_orders_leaves(tmp_path):
 # --------------------------------------------------------------------------
 # PROPERTY 2: NO content signal -> [] (byte-identical empty tail, no-op)
 # --------------------------------------------------------------------------
+
 
 def test_no_signal_is_byte_identical_empty(tmp_path):
     """Embedder OFF (empty semantic map) AND no FTS match: the bridge contributes

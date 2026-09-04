@@ -19,6 +19,7 @@ Covers:
 All deterministic, stdlib + pytest + the installed minisweagent. No task IDs in
 product logic — instance ids appear only as opaque naming-convention fixtures.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -68,9 +69,7 @@ def adapter(monkeypatch):
 def _make_graph(db_path: Path, repo_root: Path) -> None:
     repo_root.mkdir(parents=True, exist_ok=True)
     (repo_root / "a.py").write_text("def funcA(x):\n    return x + 1\n", encoding="utf-8")
-    (repo_root / "b.py").write_text(
-        "from a import funcA\n\ny = funcA(41)\n", encoding="utf-8"
-    )
+    (repo_root / "b.py").write_text("from a import funcA\n\ny = funcA(41)\n", encoding="utf-8")
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         "CREATE TABLE nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, name TEXT, "
@@ -330,9 +329,10 @@ def test_verified_config_parses_with_deepseek_locked_sampling():
 def _evidence_for_view(gmp, file_token: str) -> str:
     """Run the wrapped execute() on a `cat <file_token>` view and return the GT
     text appended to the observation."""
+
     class FakeEnv:
         def execute(self, action, *a, **k):
-            return {"output": f"1\tdef funcA(x):", "returncode": 0, "exception_info": ""}
+            return {"output": "1\tdef funcA(x):", "returncode": 0, "exception_info": ""}
 
     FakeEnv.execute = gmp._wrap_execute(FakeEnv.execute)
     out = FakeEnv().execute({"command": f"cat {file_token}"})
@@ -382,14 +382,17 @@ def test_abs_testbed_view_resolves_same_pillar_as_relative(monkeypatch, tmp_path
     gmp._consensus_fired = False
     gmp._oracle_delivered_hashes.clear()
     abs_out = _evidence_for_view(gmp, "/testbed/a.py")
-    assert "<gt-evidence" in abs_out, "abs /testbed path produced NO evidence (relpath bug not fixed)"
+    assert "<gt-evidence" in abs_out, (
+        "abs /testbed path produced NO evidence (relpath bug not fixed)"
+    )
     assert "[WITNESS]" in abs_out
     # same repo-relative key on the tag
     assert 'file="a.py"' in abs_out
 
 
 def test_oracle_view_evidence_not_irrelevant_without_anchors(
-    monkeypatch, tmp_path,
+    monkeypatch,
+    tmp_path,
 ):
     """Oracle route ON + empty issue anchors: post_view still delivers l3b.evidence
     (event-bound relevance waiver — B11 / CP004)."""
@@ -437,16 +440,42 @@ def test_verified_deep_metrics_emits_8dp_record(tmp_path):
         },
         "messages": [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "<gt-task-brief>look at astropy/x.py</gt-task-brief>\ntask"},
-            {"role": "assistant", "content": "thought",
-             "extra": {"actions": [{"command": "cat astropy/x.py"}],
-                       "response": {"usage": {"prompt_tokens": 1000, "completion_tokens": 200,
-                                              "total_tokens": 1200},
-                                    "_hidden_params": {"response_cost": 0.0}}}},
-            {"role": "tool", "content": "1\tcode\n<gt-evidence kind=\"post_view\" file=\"astropy/x.py\">\n[WITNESS] f called by -> y.py:3\n</gt-evidence>"},
-            {"role": "assistant", "content": "edit now",
-             "extra": {"actions": [{"command": "sed -i 's/a/b/' astropy/x.py"}]}},
-            {"role": "exit", "content": "done", "extra": {"exit_status": "Submitted", "submission": "diff --git a/astropy/x.py b/x"}},
+            {
+                "role": "user",
+                "content": "<gt-task-brief>look at astropy/x.py</gt-task-brief>\ntask",
+            },
+            {
+                "role": "assistant",
+                "content": "thought",
+                "extra": {
+                    "actions": [{"command": "cat astropy/x.py"}],
+                    "response": {
+                        "usage": {
+                            "prompt_tokens": 1000,
+                            "completion_tokens": 200,
+                            "total_tokens": 1200,
+                        },
+                        "_hidden_params": {"response_cost": 0.0},
+                    },
+                },
+            },
+            {
+                "role": "tool",
+                "content": '1\tcode\n<gt-evidence kind="post_view" file="astropy/x.py">\n[WITNESS] f called by -> y.py:3\n</gt-evidence>',
+            },
+            {
+                "role": "assistant",
+                "content": "edit now",
+                "extra": {"actions": [{"command": "sed -i 's/a/b/' astropy/x.py"}]},
+            },
+            {
+                "role": "exit",
+                "content": "done",
+                "extra": {
+                    "exit_status": "Submitted",
+                    "submission": "diff --git a/astropy/x.py b/x",
+                },
+            },
         ],
         "trajectory_format": "mini-swe-agent-1.1",
     }
@@ -454,14 +483,24 @@ def test_verified_deep_metrics_emits_8dp_record(tmp_path):
     (task_dir / iid / f"{iid}.traj.json").write_text(json.dumps(traj), encoding="utf-8")
     # 2) the official-eval outcome (v2, graded RESOLVED)
     (task_dir / "results").mkdir()
-    (task_dir / "results" / "outcome.json").write_text(json.dumps({
-        "schema": "gt.verified_outcome.v2", "instance_id": iid,
-        "resolved": True, "classification": "RESOLVED",
-        "eval_no_report": False, "had_predictions": True,
-    }), encoding="utf-8")
+    (task_dir / "results" / "outcome.json").write_text(
+        json.dumps(
+            {
+                "schema": "gt.verified_outcome.v2",
+                "instance_id": iid,
+                "resolved": True,
+                "classification": "RESOLVED",
+                "eval_no_report": False,
+                "had_predictions": True,
+            }
+        ),
+        encoding="utf-8",
+    )
     # 3) substrate brief (gt_sent_tokens source)
     (task_dir / "gt_artifacts").mkdir()
-    (task_dir / "gt_artifacts" / "brief.txt").write_text("<gt-task-brief>x</gt-task-brief>" * 10, encoding="utf-8")
+    (task_dir / "gt_artifacts" / "brief.txt").write_text(
+        "<gt-task-brief>x</gt-task-brief>" * 10, encoding="utf-8"
+    )
 
     out_path = task_dir / f"gt_deep_metrics_{iid}.json"
     rc = dm.main([iid, str(task_dir), "--out", str(out_path)])
@@ -497,22 +536,40 @@ def test_verified_deep_metrics_infra_excluded_from_denominator(tmp_path):
     dm = _load("verified_deep_metrics_infra_uut", _DEEP_METRICS_PATH)
     iid = "django__django-11099"
     (tmp_path / iid).mkdir()
-    (tmp_path / iid / f"{iid}.traj.json").write_text(json.dumps({
-        "instance_id": iid,
-        "info": {"model_stats": {"api_calls": 5, "instance_cost": 0.0},
-                 "config": {"model": {"model_name": "deepseek/deepseek-v4-flash"},
-                            "agent": {"step_limit": 250}},
-                 "exit_status": "Submitted",
-                 "submission": "diff --git a/x b/x", "gt_baseline": False,
-                 "gt_wall_seconds": 1.0},
-        "messages": [{"role": "assistant", "content": "x", "extra": {"actions": []}}],
-    }), encoding="utf-8")
+    (tmp_path / iid / f"{iid}.traj.json").write_text(
+        json.dumps(
+            {
+                "instance_id": iid,
+                "info": {
+                    "model_stats": {"api_calls": 5, "instance_cost": 0.0},
+                    "config": {
+                        "model": {"model_name": "deepseek/deepseek-v4-flash"},
+                        "agent": {"step_limit": 250},
+                    },
+                    "exit_status": "Submitted",
+                    "submission": "diff --git a/x b/x",
+                    "gt_baseline": False,
+                    "gt_wall_seconds": 1.0,
+                },
+                "messages": [{"role": "assistant", "content": "x", "extra": {"actions": []}}],
+            }
+        ),
+        encoding="utf-8",
+    )
     (tmp_path / "results").mkdir()
-    (tmp_path / "results" / "outcome.json").write_text(json.dumps({
-        "schema": "gt.verified_outcome.v2", "instance_id": iid,
-        "resolved": None, "classification": "INFRA",
-        "eval_no_report": True, "had_predictions": True,
-    }), encoding="utf-8")
+    (tmp_path / "results" / "outcome.json").write_text(
+        json.dumps(
+            {
+                "schema": "gt.verified_outcome.v2",
+                "instance_id": iid,
+                "resolved": None,
+                "classification": "INFRA",
+                "eval_no_report": True,
+                "had_predictions": True,
+            }
+        ),
+        encoding="utf-8",
+    )
     out_path = tmp_path / f"gt_deep_metrics_{iid}.json"
     assert dm.main([iid, str(tmp_path), "--out", str(out_path)]) == 0
     rec = json.loads(out_path.read_text(encoding="utf-8"))

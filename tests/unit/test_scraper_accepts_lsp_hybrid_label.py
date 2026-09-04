@@ -8,12 +8,11 @@ silently losing telemetry for the entire lsp arm of the smoke. A test that
 re-implemented the match logic in Python would have missed the regression.
 This test exercises the actual bash filter.
 """
+
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -73,7 +72,9 @@ def _arm_filter_match(outdir: str, cid_arm: str) -> bool:
     '''
     result = subprocess.run(
         [BASH, "-c", script],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return result.stdout.strip() == "1"
 
@@ -99,19 +100,21 @@ class TestScraperArmFilter:
         )
 
     @requires_bash
-    @pytest.mark.parametrize("outdir,cid_arm,expect", [
-        ("/tmp/gt_single_lsp", "gt-lsp-hybrid", True),
-        ("/tmp/gt_single_lsp", "gt-hybrid", True),
-        ("/tmp/gt_single_lsp", "gt-nolsp", False),
-        ("/tmp/gt_single_nolsp", "gt-nolsp", True),
-        ("/tmp/gt_single_nolsp", "gt-lsp-hybrid", False),
-        ("/tmp/gt_single_nolsp", "gt-hybrid", False),
-        ("/tmp/gt_single_lsp/shard_0", "gt-lsp-hybrid", True),  # sharded outdir
-        ("/tmp/gt_single_nolsp/shard_3", "gt-nolsp", True),
-    ])
+    @pytest.mark.parametrize(
+        "outdir,cid_arm,expect",
+        [
+            ("/tmp/gt_single_lsp", "gt-lsp-hybrid", True),
+            ("/tmp/gt_single_lsp", "gt-hybrid", True),
+            ("/tmp/gt_single_lsp", "gt-nolsp", False),
+            ("/tmp/gt_single_nolsp", "gt-nolsp", True),
+            ("/tmp/gt_single_nolsp", "gt-lsp-hybrid", False),
+            ("/tmp/gt_single_nolsp", "gt-hybrid", False),
+            ("/tmp/gt_single_lsp/shard_0", "gt-lsp-hybrid", True),  # sharded outdir
+            ("/tmp/gt_single_nolsp/shard_3", "gt-nolsp", True),
+        ],
+    )
     def test_arm_filter_decides_by_outdir_pattern(self, outdir, cid_arm, expect):
         got = _arm_filter_match(outdir, cid_arm)
         assert got is expect, (
-            f"outdir={outdir!r} cid_arm={cid_arm!r}: expected accept={expect}, "
-            f"got accept={got}"
+            f"outdir={outdir!r} cid_arm={cid_arm!r}: expected accept={expect}, got accept={got}"
         )

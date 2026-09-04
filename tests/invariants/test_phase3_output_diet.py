@@ -6,6 +6,7 @@ Research backing:
 - R2 (Rule 3): Phase-appropriate evidence (Agentless, SE-agent lifecycle)
 - R2 (Rule 2): First-view only / no duplication (Lost in the Middle)
 """
+
 import pytest
 
 
@@ -35,11 +36,26 @@ class TestL6ReviewFirst:
 class TestRaisesCatchesGating:
     """Rule 5: RAISES/CATCHES only when issue has error-handling keywords."""
 
-    _ERROR_KEYWORDS = frozenset({
-        "error", "exception", "raise", "raises", "catch", "catches",
-        "handle", "handler", "traceback", "crash", "fail", "failure",
-        "throw", "thrown", "except", "unexpected",
-    })
+    _ERROR_KEYWORDS = frozenset(
+        {
+            "error",
+            "exception",
+            "raise",
+            "raises",
+            "catch",
+            "catches",
+            "handle",
+            "handler",
+            "traceback",
+            "crash",
+            "fail",
+            "failure",
+            "throw",
+            "thrown",
+            "except",
+            "unexpected",
+        }
+    )
 
     def _issue_has_error_keywords(self, issue_terms):
         return bool(set(issue_terms) & self._ERROR_KEYWORDS)
@@ -66,6 +82,7 @@ class TestCalleeSuppression:
     def test_graph_navigation_has_no_callee_emission(self):
         """graph_navigation() in post_view.py should not emit 'Calls into:' during exploration."""
         import importlib
+
         spec = importlib.util.find_spec("groundtruth.hooks.post_view")
         if spec is None:
             pytest.skip("post_view not importable")
@@ -77,12 +94,13 @@ class TestCalleeSuppression:
         gn_end = content.find("\ndef ", gn_start + 1) if gn_start >= 0 else len(content)
         gn_body = content[gn_start:gn_end] if gn_start >= 0 else ""
         active_callee_lines = [
-            line.strip() for line in gn_body.split("\n")
-            if "Calls into:" in line
-            and "out.append" in line
-            and not line.strip().startswith("#")
+            line.strip()
+            for line in gn_body.split("\n")
+            if "Calls into:" in line and "out.append" in line and not line.strip().startswith("#")
         ]
-        assert len(active_callee_lines) == 0, f"Active callee emission in graph_navigation: {active_callee_lines}"
+        assert len(active_callee_lines) == 0, (
+            f"Active callee emission in graph_navigation: {active_callee_lines}"
+        )
 
 
 class TestL4aL3bDedup:
@@ -90,14 +108,16 @@ class TestL4aL3bDedup:
 
     def test_l3b_key_blocks_l4a(self):
         import types
+
         config = types.SimpleNamespace()
         config.evidence_sent = {"l3b_file:src/auth.py": True}
-        key = f"l3b_file:src/auth.py"
+        key = "l3b_file:src/auth.py"
         assert key in config.evidence_sent
 
     def test_no_l3b_key_allows_l4a(self):
         import types
+
         config = types.SimpleNamespace()
         config.evidence_sent = {}
-        key = f"l3b_file:src/auth.py"
+        key = "l3b_file:src/auth.py"
         assert key not in config.evidence_sent

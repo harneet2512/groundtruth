@@ -30,6 +30,7 @@ LEG 2: the consumed-class payload (boa's no_test_evidence) is preserved on the
 frozen corpus; the new fire is the highest-severity `issue_verbatim` class the
 flip levers need (correct context AT the moment the agent decides it is done).
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -102,8 +103,7 @@ def _python_fixture(sense_mod, *, test_obs: str, edit_cmd: str | None = None):
     """edit issue symbol -> test run (with results) -> 3 non-edit actions ->
     REVIEW transition at the 3rd."""
     edit = edit_cmd or (
-        "sed -i 's/def capture_snapshot/async def capture_snapshot/' "
-        "aiomonitor/monitor.py"
+        "sed -i 's/def capture_snapshot/async def capture_snapshot/' aiomonitor/monitor.py"
     )
     return [
         _turn(sense_mod, "cat aiomonitor/monitor.py", "def capture_snapshot(self): ..."),
@@ -122,8 +122,9 @@ def test_obligation_fires_on_edited_but_untested(sense_mod, oracle_mod):
     turns = _python_fixture(sense_mod, test_obs="..\n2 passed in 0.10s")
     decisions = oracle_mod.replay(turns, obligations=[_OBL_ASYNC])
     fired = [d for d in decisions if d.emission is not None]
-    assert len(fired) == 1, f"expected exactly one fire, got {[
-        (d.turn_index, d.emission.reason_string) for d in fired]}"
+    assert len(fired) == 1, f"expected exactly one fire, got {
+        [(d.turn_index, d.emission.reason_string) for d in fired]
+    }"
     em = fired[0].emission
     assert em.reason_string == "test_evidence_gap"
     assert em.layer == "spec"
@@ -157,8 +158,9 @@ def test_obligation_silent_when_not_edited(sense_mod, oracle_mod):
     assert all(d.emission is None for d in decisions)
     # telemetry still records the candidate as no_trigger (silence telemetry).
     last = decisions[-1].telemetry
-    assert any(t.candidate_id == "spec.obligation.0"
-               and t.suppressed_reason == "no_trigger" for t in last)
+    assert any(
+        t.candidate_id == "spec.obligation.0" and t.suppressed_reason == "no_trigger" for t in last
+    )
 
 
 def test_obligation_fires_once_not_every_review_turn(sense_mod, oracle_mod):
@@ -187,11 +189,17 @@ def test_rust_shape_fires_same_predicate(sense_mod, oracle_mod):
     }
     turns = [
         _turn(sense_mod, "cat core/engine/src/job.rs", "struct EvaluationHandle;"),
-        _turn(sense_mod,
-              "sed -i 's/struct EvaluationHandle;/struct EvaluationHandle { x: u8 }/' "
-              "core/engine/src/job.rs", ""),
-        _turn(sense_mod, "timeout 120 cargo test --lib other_module",
-              "test result: ok. 3 passed; 0 failed"),
+        _turn(
+            sense_mod,
+            "sed -i 's/struct EvaluationHandle;/struct EvaluationHandle { x: u8 }/' "
+            "core/engine/src/job.rs",
+            "",
+        ),
+        _turn(
+            sense_mod,
+            "timeout 120 cargo test --lib other_module",
+            "test result: ok. 3 passed; 0 failed",
+        ),
         _turn(sense_mod, "ls core/engine/src", "job.rs"),
         _turn(sense_mod, "git diff --stat", "1 file changed"),
     ]
@@ -237,35 +245,35 @@ def test_drift_uncertified_never_emits(sense_mod, oracle_mod):
     turns = [
         _turn(sense_mod, "cat aiomonitor/monitor.py", "def capture_snapshot(self): ..."),
         # touches the symbol, no 'async' anywhere in the edit evidence:
-        _turn(sense_mod,
-              "sed -i 's/def capture_snapshot(self)/def capture_snapshot(self, name)/' "
-              "aiomonitor/monitor.py", ""),
+        _turn(
+            sense_mod,
+            "sed -i 's/def capture_snapshot(self)/def capture_snapshot(self, name)/' "
+            "aiomonitor/monitor.py",
+            "",
+        ),
     ]
     decisions = oracle_mod.replay(turns, obligations=[_OBL_ASYNC])
     drift_records = [
-        t for d in decisions for t in d.telemetry
-        if t.candidate_id.startswith("spec.drift.")
+        t for d in decisions for t in d.telemetry if t.candidate_id.startswith("spec.drift.")
     ]
     assert drift_records, "drift candidate was not produced/telemetry-recorded"
     assert all(t.suppressed_reason == "drift_uncertified" for t in drift_records)
-    assert all(
-        d.emission is None or "drift" not in d.emission.reason_string
-        for d in decisions
-    )
+    assert all(d.emission is None or "drift" not in d.emission.reason_string for d in decisions)
 
 
 def test_drift_not_produced_when_form_satisfied(sense_mod, oracle_mod):
     """The edit carries the 'async' surface form -> no surface contradiction ->
     no drift candidate at the edit turn (correct-or-quiet)."""
     turns = [
-        _turn(sense_mod,
-              "sed -i 's/def capture_snapshot/async def capture_snapshot/' "
-              "aiomonitor/monitor.py", ""),
+        _turn(
+            sense_mod,
+            "sed -i 's/def capture_snapshot/async def capture_snapshot/' aiomonitor/monitor.py",
+            "",
+        ),
     ]
     decisions = oracle_mod.replay(turns, obligations=[_OBL_ASYNC])
     drift_records = [
-        t for d in decisions for t in d.telemetry
-        if t.candidate_id.startswith("spec.drift.")
+        t for d in decisions for t in d.telemetry if t.candidate_id.startswith("spec.drift.")
     ]
     assert drift_records == []
 
@@ -278,8 +286,7 @@ def test_pure_decide_matches_replay_with_obligations(sense_mod, oracle_mod):
     turns = _python_fixture(sense_mod, test_obs="..\n2 passed in 0.10s")
     streamed = oracle_mod.replay(turns, obligations=[_OBL_ASYNC, _OBL_RETURNS])
     for k in range(len(turns)):
-        pure = oracle_mod.oracle_decide(turns, k,
-                                        obligations=[_OBL_ASYNC, _OBL_RETURNS])
+        pure = oracle_mod.oracle_decide(turns, k, obligations=[_OBL_ASYNC, _OBL_RETURNS])
         s = streamed[k]
         assert (pure.emission is None) == (s.emission is None)
         if pure.emission is not None:
@@ -291,10 +298,8 @@ def test_replay_deterministic_with_obligations(sense_mod, oracle_mod):
     turns = _python_fixture(sense_mod, test_obs="..\n2 passed in 0.10s")
     a = oracle_mod.replay(turns, obligations=[_OBL_ASYNC])
     b = oracle_mod.replay(turns, obligations=[_OBL_ASYNC])
-    sa = [(d.turn_index, None if d.emission is None else d.emission.payload_text)
-          for d in a]
-    sb = [(d.turn_index, None if d.emission is None else d.emission.payload_text)
-          for d in b]
+    sa = [(d.turn_index, None if d.emission is None else d.emission.payload_text) for d in a]
+    sb = [(d.turn_index, None if d.emission is None else d.emission.payload_text) for d in b]
     assert sa == sb
 
 
@@ -304,6 +309,7 @@ def test_replay_deterministic_with_obligations(sense_mod, oracle_mod):
 # ---------------------------------------------------------------------------
 def _trajs() -> list[str]:
     import glob
+
     return sorted(glob.glob(_TRAJ_GLOB))
 
 

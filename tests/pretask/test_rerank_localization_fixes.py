@@ -18,6 +18,7 @@ Every test is keyed to issue STRUCTURE (backtick/dotted symbols,
 exact-anchor-defines-file, flat dispersion) on synthetic fixtures — no task
 IDs, no gold labels, no benchmark names, no real-repo symbols.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -151,8 +152,7 @@ def class_anchor_repo(tmp_path: Path) -> str:
         "def format_output(rows):\n    return rows\n"
     )
     (tmp_path / "core" / "repr.py").write_text(
-        "# decimal repr output formats decimal output\n"
-        "def decimal_repr(x):\n    return x\n"
+        "# decimal repr output formats decimal output\ndef decimal_repr(x):\n    return x\n"
     )
     for n in ("one", "two", "three", "four"):
         (tmp_path / "a" / f"{n}.py").write_text("def spread_sym():\n    pass\n")
@@ -305,10 +305,7 @@ def test_generate_v1r_brief_renders_titled_class_file(
         bug_id="unit-fix2",
         repo="unit",
     )
-    norm = [
-        str(getattr(f, "path", f)).replace("\\", "/").lstrip("./")
-        for f in result.files
-    ]
+    norm = [str(getattr(f, "path", f)).replace("\\", "/").lstrip("./") for f in result.files]
     assert any(f.endswith("io/grid.py") for f in norm), (
         f"titled-class defining file absent from the rendered brief: {norm}"
     )

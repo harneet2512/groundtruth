@@ -9,6 +9,7 @@ Covers the five assigned items:
 
 In-memory sqlite graphs modeled on tests/unit/test_post_view_contract_pillar.py.
 """
+
 from __future__ import annotations
 
 import os
@@ -103,8 +104,9 @@ def test_item34_flow_not_stapled_to_homonym_overload(monkeypatch):
     `value -> self._buf` must appear (node-id join), proving node 1's lower-p.line
     flow was NOT stapled onto both. The pre-fix name lookup attached node 1's flow
     to both, dropping node 2's flow entirely (deduped to one wrong line)."""
-    monkeypatch.setattr(pv, "_load_issue_anchors",
-                        lambda: {"symbols": [], "paths": [], "test_names": []})
+    monkeypatch.setattr(
+        pv, "_load_issue_anchors", lambda: {"symbols": [], "paths": [], "test_names": []}
+    )
     monkeypatch.setattr(pv, "_load_issue_terms", lambda *a, **k: set())
     path = _make_homonym_flow_db()
     try:
@@ -126,8 +128,9 @@ def test_item34_flow_not_stapled_to_homonym_overload(monkeypatch):
 
 def test_item34_single_function_flow_still_rides(monkeypatch):
     """Sanity: the node-id path still delivers a flow for a single function."""
-    monkeypatch.setattr(pv, "_load_issue_anchors",
-                        lambda: {"symbols": [], "paths": [], "test_names": []})
+    monkeypatch.setattr(
+        pv, "_load_issue_anchors", lambda: {"symbols": [], "paths": [], "test_names": []}
+    )
     monkeypatch.setattr(pv, "_load_issue_terms", lambda *a, **k: set())
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
@@ -202,6 +205,7 @@ def test_item32_hub_scale_query_uses_ef_in_source():
     shared `_ef` variable, not a hardcoded confidence literal. (Guards against a
     regression that re-hardcodes a third edge population.)"""
     import inspect
+
     src = inspect.getsource(pv.graph_navigation)
     # the hub-scale all_degrees query is now an f-string interpolating {_ef}
     assert "GROUP BY n.file_path ORDER BY 1" in src
@@ -231,13 +235,23 @@ def _make_test_targets_db(tmpdir: str) -> str:
         "target_id INTEGER, type TEXT, source_line INTEGER DEFAULT 0, confidence REAL DEFAULT 0.0)"
     )
     # test source node
-    conn.execute("INSERT INTO nodes (id,label,name,file_path,is_test) VALUES (1,'Function','test_it','tests/test_x.py',1)")
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path,is_test) VALUES (1,'Function','test_it','tests/test_x.py',1)"
+    )
     # project targets (non-test)
-    conn.execute("INSERT INTO nodes (id,label,name,file_path,is_test) VALUES (2,'Function','join','src/util.py',0)")
-    conn.execute("INSERT INTO nodes (id,label,name,file_path,is_test) VALUES (3,'Function','parse','src/util.py',0)")
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path,is_test) VALUES (2,'Function','join','src/util.py',0)"
+    )
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path,is_test) VALUES (3,'Function','parse','src/util.py',0)"
+    )
     # edge to `join` originates at line 2 (the os.path.join shadow); to `parse` at line 3 (real)
-    conn.execute("INSERT INTO edges (source_id,target_id,type,source_line,confidence) VALUES (1,2,'CALLS',2,1.0)")
-    conn.execute("INSERT INTO edges (source_id,target_id,type,source_line,confidence) VALUES (1,3,'CALLS',3,1.0)")
+    conn.execute(
+        "INSERT INTO edges (source_id,target_id,type,source_line,confidence) VALUES (1,2,'CALLS',2,1.0)"
+    )
+    conn.execute(
+        "INSERT INTO edges (source_id,target_id,type,source_line,confidence) VALUES (1,3,'CALLS',3,1.0)"
+    )
     conn.commit()
     conn.close()
     # write the test source so line 2 is a stdlib shadow, line 3 is a real call
@@ -245,9 +259,9 @@ def _make_test_targets_db(tmpdir: str) -> str:
     os.makedirs(test_dir, exist_ok=True)
     with open(os.path.join(test_dir, "test_x.py"), "w", encoding="utf-8") as fh:
         fh.write(
-            "def test_it():\n"            # line 1
-            "    p = os.path.join(a, b)\n" # line 2  -> SHADOW of project join
-            "    return parse(data)\n"     # line 3  -> REAL call to project parse
+            "def test_it():\n"  # line 1
+            "    p = os.path.join(a, b)\n"  # line 2  -> SHADOW of project join
+            "    return parse(data)\n"  # line 3  -> REAL call to project parse
         )
     return db
 
@@ -323,8 +337,11 @@ def test_item9_anchor_front_loads_issue_function(tmp_path, monkeypatch):
     """With `set_fields` as the issue anchor, the spec must describe set_fields —
     NOT the file-top progress_write (the old position-bias bug)."""
     db = _make_spec_db(str(tmp_path))
-    monkeypatch.setattr(pv, "_load_issue_anchors",
-                        lambda: {"symbols": ["set_fields"], "paths": [], "test_names": []})
+    monkeypatch.setattr(
+        pv,
+        "_load_issue_anchors",
+        lambda: {"symbols": ["set_fields"], "paths": [], "test_names": []},
+    )
     monkeypatch.setattr(pv, "_load_issue_terms", lambda *a, **k: set())
     out = _file_function_spec(db, "src/importer.py", str(tmp_path))
     assert out.startswith("Spec: set_fields"), out
@@ -335,8 +352,11 @@ def test_item9_suppresses_when_signal_matches_nothing(tmp_path, monkeypatch):
     """A relevance signal exists (anchor) but NO function in the file matches it ->
     suppress, do not emit the file-top progress_write spec (correct-or-quiet)."""
     db = _make_spec_db(str(tmp_path))
-    monkeypatch.setattr(pv, "_load_issue_anchors",
-                        lambda: {"symbols": ["totally_unrelated_symbol"], "paths": [], "test_names": []})
+    monkeypatch.setattr(
+        pv,
+        "_load_issue_anchors",
+        lambda: {"symbols": ["totally_unrelated_symbol"], "paths": [], "test_names": []},
+    )
     monkeypatch.setattr(pv, "_load_issue_terms", lambda *a, **k: set())
     out = _file_function_spec(db, "src/importer.py", str(tmp_path))
     assert out == "", out
@@ -346,8 +366,9 @@ def test_item9_blind_task_keeps_definition_order_spec(tmp_path, monkeypatch):
     """No anchors AND no issue terms -> always-fire definition-order behavior is
     preserved (the file-top function's spec is emitted, as before)."""
     db = _make_spec_db(str(tmp_path))
-    monkeypatch.setattr(pv, "_load_issue_anchors",
-                        lambda: {"symbols": [], "paths": [], "test_names": []})
+    monkeypatch.setattr(
+        pv, "_load_issue_anchors", lambda: {"symbols": [], "paths": [], "test_names": []}
+    )
     monkeypatch.setattr(pv, "_load_issue_terms", lambda *a, **k: set())
     out = _file_function_spec(db, "src/importer.py", str(tmp_path))
     assert out.startswith("Spec: progress_write"), out

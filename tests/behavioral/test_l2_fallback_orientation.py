@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.behavioral.utils import iter_task_dirs, load_trajectory
+from tests.behavioral.utils import iter_task_dirs
 
 
 @pytest.mark.behavioral
@@ -27,8 +27,14 @@ def test_l2_fallback_orientation(trajectory_dir):
                     if l2_status:
                         break
         brief_path = td / "gt_brief.txt"
-        brief_txt = brief_path.read_text(encoding="utf-8", errors="replace") if brief_path.exists() else ""
-        l2_fired = l2_status.startswith("fired") or "<gt-task-brief>" in brief_txt or "STRUCTURAL RETRIEVAL" in brief_txt
+        brief_txt = (
+            brief_path.read_text(encoding="utf-8", errors="replace") if brief_path.exists() else ""
+        )
+        l2_fired = (
+            l2_status.startswith("fired")
+            or "<gt-task-brief>" in brief_txt
+            or "STRUCTURAL RETRIEVAL" in brief_txt
+        )
         if l2_fired:
             eligible.append((td, brief_txt))
     if not eligible:

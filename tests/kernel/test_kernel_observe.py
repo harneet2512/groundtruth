@@ -65,7 +65,13 @@ def _audit_return(**overrides) -> dict:
         "expected_side_files_missing": [],
         "warnings": [],
         "recommendation": "on_plan",
-        "test_execution": {"executed": False, "passed": 0, "failed": 0, "errored": 0, "all_passed": False},
+        "test_execution": {
+            "executed": False,
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "all_passed": False,
+        },
     }
     base.update(overrides)
     return base

@@ -81,16 +81,13 @@ def parse_replay_report(path: str | Path) -> ReplayMetrics:
         per_task=list(data.get("tasks", [])),
     )
     rm.distinct_files_before_gold = [
-        int(t.get("distinct_files_viewed_before_gold", 0))
-        for t in rm.per_task
+        int(t.get("distinct_files_viewed_before_gold", 0)) for t in rm.per_task
     ]
     if rm.distinct_files_before_gold:
         rm.distinct_files_before_gold_median = float(
             statistics.median(rm.distinct_files_before_gold)
         )
-        rm.distinct_files_before_gold_mean = float(
-            statistics.mean(rm.distinct_files_before_gold)
-        )
+        rm.distinct_files_before_gold_mean = float(statistics.mean(rm.distinct_files_before_gold))
     return rm
 
 
@@ -104,7 +101,10 @@ def summarize_provider_request_log(per_task: list[dict[str, Any]]) -> dict[str, 
             kind = entry.get("kind", "")
             if kind in by_kind:
                 by_kind[kind] += 1
-                if not entry.get("items", entry.get("callers", 0) + entry.get("callees", 0) + entry.get("importers", 0)):
+                if not entry.get(
+                    "items",
+                    entry.get("callers", 0) + entry.get("callees", 0) + entry.get("importers", 0),
+                ):
                     empty_by_kind[kind] += 1
                 if entry.get("file"):
                     files_by_kind[kind].add(entry["file"])

@@ -1,4 +1,5 @@
 """Tests for scripts/swebench/reconcile.py."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -7,9 +8,7 @@ import sys
 
 
 def _load():
-    path = os.path.join(
-        os.path.dirname(__file__), "..", "scripts", "swebench", "reconcile.py"
-    )
+    path = os.path.join(os.path.dirname(__file__), "..", "scripts", "swebench", "reconcile.py")
     spec = importlib.util.spec_from_file_location("reconcile", path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["reconcile"] = mod

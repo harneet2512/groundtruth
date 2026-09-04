@@ -1,8 +1,6 @@
 """Tests for _deliver_or_trace delivery invariant."""
+
 import sys
-import io
-import pytest
-from unittest.mock import MagicMock
 from pathlib import Path
 
 # Add wrapper to path
@@ -14,6 +12,7 @@ from groundtruth.config.evidence_markers import has_gt_evidence
 
 class MockConfig:
     """Minimal GTRuntimeConfig mock for delivery tests."""
+
     def __init__(self):
         self.action_count = 10
         self._last_gt_action = 0
@@ -21,6 +20,7 @@ class MockConfig:
 
 class MockObs:
     """Mock observation object."""
+
     def __init__(self, content="original obs"):
         self.content = content
 

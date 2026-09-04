@@ -3,6 +3,7 @@ must NEVER emit a malformed guard value, even when the indexer stored a
 mid-expression-truncated value (old binary build). Proves the _read_props
 clip_balanced repair reaches the rendered Contract line.
 """
+
 from __future__ import annotations
 
 import re

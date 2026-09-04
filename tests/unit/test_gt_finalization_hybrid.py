@@ -12,21 +12,25 @@ def _write_run_artifacts(run_dir: Path, summary: dict) -> None:
     (run_dir / "gt_arm_summary.json").write_text(json.dumps(summary), encoding="utf-8")
     with (run_dir / "gt_report.csv").open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow([
-            "run_id",
-            "arm",
-            "instance_id",
-            "cycle",
-            "material_edit_count",
-            "ack_armed_count",
-            "steer_delivered_count",
-            "ack_engagement_count",
-        ])
+        writer.writerow(
+            [
+                "run_id",
+                "arm",
+                "instance_id",
+                "cycle",
+                "material_edit_count",
+                "ack_armed_count",
+                "steer_delivered_count",
+                "ack_engagement_count",
+            ]
+        )
         writer.writerow(["run-1", "gt-lsp-hybrid", "task-1", 1, 1, 1, 1, 1])
 
 
 class TestHybridReadiness:
-    def test_hybrid_run_is_not_ready_when_lsp_is_enabled_but_not_ready(self, tmp_path: Path) -> None:
+    def test_hybrid_run_is_not_ready_when_lsp_is_enabled_but_not_ready(
+        self, tmp_path: Path
+    ) -> None:
         run_dir = tmp_path / "hybrid_not_ready"
         _write_run_artifacts(
             run_dir,

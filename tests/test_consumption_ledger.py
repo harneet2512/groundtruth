@@ -1,8 +1,11 @@
 """CP007 — consumption ledger tests."""
+
 import importlib.util
 import os
 
-_CL_PATH = os.path.join(os.path.dirname(__file__), "..", "scripts", "swebench", "consumption_ledger.py")
+_CL_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "scripts", "swebench", "consumption_ledger.py"
+)
 _spec = importlib.util.spec_from_file_location("consumption_ledger_t", _CL_PATH)
 cl = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cl)

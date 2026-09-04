@@ -1,4 +1,5 @@
 """Tests for src/groundtruth/index/path_resolver.py — DOC_OF_HONOR §1.1."""
+
 import os
 import sqlite3
 import tempfile
@@ -62,29 +63,35 @@ def test_windows_separator(graph_db):
 
 
 def test_workspace_prefix_stripped(graph_db):
-    assert resolve_to_stored_path(
-        "/workspace/myrepo/src/groundtruth/foo.py",
-        graph_db,
-        workspace_root="/workspace/myrepo",
-    ) == "src/groundtruth/foo.py"
+    assert (
+        resolve_to_stored_path(
+            "/workspace/myrepo/src/groundtruth/foo.py",
+            graph_db,
+            workspace_root="/workspace/myrepo",
+        )
+        == "src/groundtruth/foo.py"
+    )
 
 
 def test_container_workspace_prefix(graph_db):
-    assert resolve_to_stored_path(
-        "workspace/src/groundtruth/foo.py", graph_db
-    ) == "src/groundtruth/foo.py"
+    assert (
+        resolve_to_stored_path("workspace/src/groundtruth/foo.py", graph_db)
+        == "src/groundtruth/foo.py"
+    )
 
 
 def test_container_testbed_prefix(graph_db):
-    assert resolve_to_stored_path(
-        "testbed/src/groundtruth/foo.py", graph_db
-    ) == "src/groundtruth/foo.py"
+    assert (
+        resolve_to_stored_path("testbed/src/groundtruth/foo.py", graph_db)
+        == "src/groundtruth/foo.py"
+    )
 
 
 def test_instance_id_prefix(graph_db):
-    assert resolve_to_stored_path(
-        "kozea__weasyprint-2300/src/groundtruth/foo.py", graph_db
-    ) == "src/groundtruth/foo.py"
+    assert (
+        resolve_to_stored_path("kozea__weasyprint-2300/src/groundtruth/foo.py", graph_db)
+        == "src/groundtruth/foo.py"
+    )
 
 
 def test_basename_unique_resolves(graph_db):

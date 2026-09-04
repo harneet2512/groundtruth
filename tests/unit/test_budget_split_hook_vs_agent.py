@@ -17,14 +17,12 @@ from the hook module. They MUST fail on the current implementation (which
 has a single shared counter) and pass only after the budget split is
 implemented.
 """
+
 from __future__ import annotations
 
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -42,6 +40,7 @@ def _isolate_budget_files(tmp_path):
     """Redirect hook's file-based counters to tmp_path so tests don't
     interfere with each other or with the real /tmp/ files."""
     import swe_agent_state_gt as hook
+
     orig_counts = hook.GT_TOOL_COUNTS
     orig_internal = hook.GT_TOOL_COUNTS_INTERNAL
     hook.GT_TOOL_COUNTS = tmp_path / "gt_tool_counts.json"
@@ -84,9 +83,7 @@ def test_artifact_proves_budget_exhausted_on_first_agent_orient():
         if "BUDGET_EXHAUSTED" in content and "gt_orient" in content:
             budget_exhausted_in_response = True
 
-    assert agent_called_orient, (
-        "Frozen trajectory must show agent calling gt_orient"
-    )
+    assert agent_called_orient, "Frozen trajectory must show agent calling gt_orient"
     assert budget_exhausted_in_response, (
         "Frozen trajectory must show BUDGET_EXHAUSTED for gt_orient. "
         "If this assertion fails, the artifact no longer reproduces the bug."

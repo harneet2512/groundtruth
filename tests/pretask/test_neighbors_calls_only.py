@@ -5,6 +5,7 @@ Found by the per-layer LIPI (wx2eywcer): _issue_relevant_neighbors + the 1-hop e
 JOINed edges untyped, so the depth landing silently broadened call-neighbors to promoted
 edges. _static_callees (the no-issue-terms sibling) was already CALLS-typed.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -47,5 +48,5 @@ def _graph(tmp_path):
 def test_issue_relevant_neighbors_are_calls_only(tmp_path):
     db = _graph(tmp_path)
     out = _issue_relevant_neighbors(db, "a.py", str(tmp_path), {"anything"})
-    assert "b.py" in out          # CALLS neighbor present
-    assert "c.py" not in out      # promoted CO_SERIALIZES neighbor excluded
+    assert "b.py" in out  # CALLS neighbor present
+    assert "c.py" not in out  # promoted CO_SERIALIZES neighbor excluded

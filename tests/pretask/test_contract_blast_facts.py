@@ -14,6 +14,7 @@ Two contracts under test:
      (contract_map has no rank path at all — `_rrf3` lives in graph_localizer/
      curation_map, `_total_score` in v7_4_brief; this proves the boundary holds.)
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -51,10 +52,66 @@ _SCHEMA = """
 # node 4:  peek       (reader)      -- READS  _count   (conf 0.4 -> BELOW floor, NOT counted)
 _NODES = [
     (10, "Class", "Counter", "", "counter.py", 1, 40, "class Counter:", "", 0, 0, "python", None),
-    (1, "Method", "increment", "", "counter.py", 5, 9, "def increment(self):", "", 0, 0, "python", 10),
-    (2, "Method", "value", "", "counter.py", 11, 13, "def value(self) -> int:", "int", 0, 0, "python", 10),
-    (3, "Method", "total", "", "counter.py", 15, 17, "def total(self) -> int:", "int", 0, 0, "python", 10),
-    (4, "Method", "peek", "", "counter.py", 19, 21, "def peek(self) -> int:", "int", 0, 0, "python", 10),
+    (
+        1,
+        "Method",
+        "increment",
+        "",
+        "counter.py",
+        5,
+        9,
+        "def increment(self):",
+        "",
+        0,
+        0,
+        "python",
+        10,
+    ),
+    (
+        2,
+        "Method",
+        "value",
+        "",
+        "counter.py",
+        11,
+        13,
+        "def value(self) -> int:",
+        "int",
+        0,
+        0,
+        "python",
+        10,
+    ),
+    (
+        3,
+        "Method",
+        "total",
+        "",
+        "counter.py",
+        15,
+        17,
+        "def total(self) -> int:",
+        "int",
+        0,
+        0,
+        "python",
+        10,
+    ),
+    (
+        4,
+        "Method",
+        "peek",
+        "",
+        "counter.py",
+        19,
+        21,
+        "def peek(self) -> int:",
+        "int",
+        0,
+        0,
+        "python",
+        10,
+    ),
 ]
 # WRITES: increment(1) -> Counter(10), field=_count, verified
 # READS:  value(2)/total(3)/peek(4) -> Counter(10), field=_count
@@ -108,7 +165,9 @@ def test_blast_fact_singular_reader(tmp_path):
     db = str(tmp_path / "g.db")
     conn = sqlite3.connect(db)
     conn.executescript(_SCHEMA)
-    conn.executemany("INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", _NODES[:3])  # class+increment+value
+    conn.executemany(
+        "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", _NODES[:3]
+    )  # class+increment+value
     conn.execute(
         "INSERT INTO properties (node_id,kind,value,line,confidence) VALUES (1,'guard_clause','raise: x',6,1.0)"
     )
@@ -139,7 +198,9 @@ def test_blast_fact_excludes_edit_target_self_as_reader(tmp_path):
     db = str(tmp_path / "selfread.db")
     conn = sqlite3.connect(db)
     conn.executescript(_SCHEMA)
-    conn.executemany("INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", _NODES[:2])  # class + increment only
+    conn.executemany(
+        "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", _NODES[:2]
+    )  # class + increment only
     conn.execute(
         "INSERT INTO properties (node_id,kind,value,line,confidence) VALUES (1,'guard_clause','raise: x',6,1.0)"
     )
@@ -173,10 +234,66 @@ def test_blast_fact_reader_count_is_field_exact(tmp_path):
     conn = sqlite3.connect(db)
     conn.executescript(_SCHEMA)
     nodes = [
-        (10, "Class", "Counter", "", "counter.py", 1, 40, "class Counter:", "", 0, 0, "python", None),
-        (1, "Method", "increment", "", "counter.py", 5, 9, "def increment(self):", "", 0, 0, "python", 10),
-        (2, "Method", "value", "", "counter.py", 11, 13, "def value(self) -> int:", "int", 0, 0, "python", 10),
-        (5, "Method", "name", "", "counter.py", 15, 17, "def name(self) -> str:", "str", 0, 0, "python", 10),
+        (
+            10,
+            "Class",
+            "Counter",
+            "",
+            "counter.py",
+            1,
+            40,
+            "class Counter:",
+            "",
+            0,
+            0,
+            "python",
+            None,
+        ),
+        (
+            1,
+            "Method",
+            "increment",
+            "",
+            "counter.py",
+            5,
+            9,
+            "def increment(self):",
+            "",
+            0,
+            0,
+            "python",
+            10,
+        ),
+        (
+            2,
+            "Method",
+            "value",
+            "",
+            "counter.py",
+            11,
+            13,
+            "def value(self) -> int:",
+            "int",
+            0,
+            0,
+            "python",
+            10,
+        ),
+        (
+            5,
+            "Method",
+            "name",
+            "",
+            "counter.py",
+            15,
+            17,
+            "def name(self) -> str:",
+            "str",
+            0,
+            0,
+            "python",
+            10,
+        ),
     ]
     conn.executemany("INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", nodes)
     conn.execute(
@@ -186,9 +303,16 @@ def test_blast_fact_reader_count_is_field_exact(tmp_path):
         "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence,metadata) "
         "VALUES (?,?,?,?,?,?)",
         [
-            (1, 10, "WRITES", "promote_write", 0.9, "_count"),     # increment writes _count
+            (1, 10, "WRITES", "promote_write", 0.9, "_count"),  # increment writes _count
             (2, 10, "READS", "promote_field_read", 0.9, "_count"),  # value reads _count  -> COUNTED
-            (5, 10, "READS", "promote_field_read", 0.9, "_label"),  # name reads a DIFFERENT field -> NOT counted
+            (
+                5,
+                10,
+                "READS",
+                "promote_field_read",
+                0.9,
+                "_label",
+            ),  # name reads a DIFFERENT field -> NOT counted
         ],
     )
     conn.commit()

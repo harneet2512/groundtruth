@@ -1,4 +1,5 @@
 """Application entry point. Glues layout, store, and events together."""
+
 from __future__ import annotations
 
 from layout import build_window

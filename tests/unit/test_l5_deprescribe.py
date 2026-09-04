@@ -24,9 +24,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
-import tempfile
 
-import pytest
 
 from groundtruth.trajectory import hooks
 from groundtruth.trajectory.governor import L5Governor
@@ -37,9 +35,22 @@ from groundtruth.state.agent_state import L5TrajectoryState, IterationBand
 # Imperative verbs that mark a prescriptive command. A diagnostic statement of
 # fact never opens a line with one of these.
 _BANNED_LEADING_VERBS = {
-    "run", "edit", "make", "verify", "focus", "inspect",
-    "revise", "change", "fix", "stop", "repair", "start",
-    "do", "use", "read", "open",
+    "run",
+    "edit",
+    "make",
+    "verify",
+    "focus",
+    "inspect",
+    "revise",
+    "change",
+    "fix",
+    "stop",
+    "repair",
+    "start",
+    "do",
+    "use",
+    "read",
+    "open",
 }
 
 _FIRST_WORD = re.compile(r"[A-Za-z']+")
@@ -101,6 +112,7 @@ def _state(**overrides) -> L5TrajectoryState:
 # hooks.py — every builder, in both bands where wording branches on band.
 # --------------------------------------------------------------------------- #
 
+
 def test_hook_no_durable_source_progress_finalization():
     st = _state(band=IterationBand.FINALIZATION, current_iter=95)
     msg = hooks.hook_no_durable_source_progress(st, "reproduce_bug.py")
@@ -118,7 +130,9 @@ def test_hook_no_durable_source_progress_normal():
 def test_hook_premature_commitment():
     st = _state()
     msg = hooks.hook_premature_commitment(
-        st, "src/widget.py", confirming_edges_opened=0,
+        st,
+        "src/widget.py",
+        confirming_edges_opened=0,
         l3_contract_line="returns Optional[Widget]",
     )
     _assert_diagnostic(msg, "premature_commitment")
@@ -128,7 +142,9 @@ def test_hook_premature_commitment():
 def test_hook_patch_hypothesis():
     st = _state()
     msg = hooks.hook_patch_hypothesis(
-        st, "src/widget.py", l3_contract_line="returns Optional[Widget]",
+        st,
+        "src/widget.py",
+        l3_contract_line="returns Optional[Widget]",
     )
     _assert_diagnostic(msg, "patch_hypothesis")
     _assert_has_header(msg, "patch_hypothesis")
@@ -140,7 +156,9 @@ def test_hook_hypothesis_falsified():
         has_source_edit_before_last_failure=True,
     )
     msg = hooks.hook_hypothesis_falsified(
-        st, _failure(), l3_contract_line="returns Optional[Widget]",
+        st,
+        _failure(),
+        l3_contract_line="returns Optional[Widget]",
     )
     _assert_diagnostic(msg, "hypothesis_falsified")
     _assert_has_header(msg, "hypothesis_falsified")
@@ -165,7 +183,9 @@ def test_hook_same_failure_persisted():
         repeated_failure_count=2,
     )
     msg = hooks.hook_same_failure_persisted(
-        st, _failure(), l3_repair_line="guard the None branch",
+        st,
+        _failure(),
+        l3_repair_line="guard the None branch",
     )
     _assert_diagnostic(msg, "same_failure_persisted")
     _assert_has_header(msg, "same_failure_persisted")
@@ -197,7 +217,8 @@ def test_hook_unverified_patch():
         broad_pass_after_edit_count=1,
     )
     msg = hooks.hook_unverified_patch(
-        st, test_file_suggestions=["tests/test_widget.py"],
+        st,
+        test_file_suggestions=["tests/test_widget.py"],
     )
     _assert_diagnostic(msg, "unverified_patch")
     _assert_has_header(msg, "unverified_patch")
@@ -260,7 +281,10 @@ def test_governor_no_source_edits_advisory(tmp_path):
     # ensure no leftover disk state interferes
     gov.state.edited_source_files = []
     decision = gov.after_interaction(
-        _Action(), obs=None, action_count=30, max_iter=100,
+        _Action(),
+        obs=None,
+        action_count=30,
+        max_iter=100,
         brief_candidates={"src/a.py", "src/b.py"},
     )
     assert decision.fired, "scaffold trap should fire at 30 actions / 0 edits"
@@ -306,8 +330,7 @@ def _build_graph_db(path: str) -> None:
         "VALUES (2,'Function','use_widget','src/consumer.py',0,'python')"
     )
     conn.execute(
-        "INSERT INTO edges(id,source_id,target_id,type,confidence) "
-        "VALUES (1,2,1,'CALLS',0.9)"
+        "INSERT INTO edges(id,source_id,target_id,type,confidence) VALUES (1,2,1,'CALLS',0.9)"
     )
     conn.commit()
     conn.close()
@@ -339,6 +362,7 @@ def test_governor_scope_check_advisory(tmp_path, monkeypatch):
 # diagnostic content is left untouched.
 # --------------------------------------------------------------------------- #
 
+
 def test_already_diagnostic_goku_hooks_unchanged():
     st = _state(
         band=IterationBand.LATE_REPAIR,
@@ -349,8 +373,16 @@ def test_already_diagnostic_goku_hooks_unchanged():
     )
     for builder, args, label in [
         (hooks.hook_structural_witness_ignored, (st, "src/consumer.py"), "goku:witness_ignored"),
-        (hooks.hook_patch_collapsed_or_lost, (_state(patch_collapsed=True, band=IterationBand.LATE_REPAIR, current_iter=85),), "goku:patch_collapsed"),
-        (hooks.hook_no_durable_progress_goku, (_state(band=IterationBand.FINALIZATION, current_iter=95, edited_source_files=[]),), "goku:no_durable_progress"),
+        (
+            hooks.hook_patch_collapsed_or_lost,
+            (_state(patch_collapsed=True, band=IterationBand.LATE_REPAIR, current_iter=85),),
+            "goku:patch_collapsed",
+        ),
+        (
+            hooks.hook_no_durable_progress_goku,
+            (_state(band=IterationBand.FINALIZATION, current_iter=95, edited_source_files=[]),),
+            "goku:no_durable_progress",
+        ),
     ]:
         msg = builder(*args)
         _assert_diagnostic(msg, label)

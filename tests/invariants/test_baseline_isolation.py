@@ -5,25 +5,41 @@ Baseline arm is the control group.
 
 Violation = C6 in failure taxonomy.
 """
+
 from __future__ import annotations
 
 import os
 import sys
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 from gt_verify_topology import verify_topology
 
 
 GT_EVIDENCE_MARKERS = [
-    "<gt-task-brief>", "<gt-edit-target>", "<gt-orientation>",
-    "[GT_AUTO]", "[SIGNATURE]", "[BEHAVIORAL CONTRACT]",
-    "PRESERVE:", "[CALLERS]", "Called by:", "Calls into:",
-    "[TEST]", "[COMPLETENESS]", "[PATTERN]", "[PEER]",
-    "[SIMILAR]", "[OVERRIDE]", "[MISMATCH]", "[REVIEW]",
-    "<gt-advisory", "<gt-scope", "[GT L5:",
-    "[GT] Callers of", "SEMANTIC WARNING:",
+    "<gt-task-brief>",
+    "<gt-edit-target>",
+    "<gt-orientation>",
+    "[GT_AUTO]",
+    "[SIGNATURE]",
+    "[BEHAVIORAL CONTRACT]",
+    "PRESERVE:",
+    "[CALLERS]",
+    "Called by:",
+    "Calls into:",
+    "[TEST]",
+    "[COMPLETENESS]",
+    "[PATTERN]",
+    "[PEER]",
+    "[SIMILAR]",
+    "[OVERRIDE]",
+    "[MISMATCH]",
+    "[REVIEW]",
+    "<gt-advisory",
+    "<gt-scope",
+    "[GT L5:",
+    "[GT] Callers of",
+    "SEMANTIC WARNING:",
     "[GT KEY CONTRACTS]",
 ]
 
@@ -77,9 +93,7 @@ class TestBaselineIsolation:
 
     def test_all_gt_markers_defined(self):
         """Verify we have a comprehensive marker list for baseline checking."""
-        assert len(GT_EVIDENCE_MARKERS) >= 20, (
-            "Marker list should cover all GT evidence types"
-        )
+        assert len(GT_EVIDENCE_MARKERS) >= 20, "Marker list should cover all GT evidence types"
         # Key markers must be present
         assert "<gt-task-brief>" in GT_EVIDENCE_MARKERS
         assert "[SIGNATURE]" in GT_EVIDENCE_MARKERS

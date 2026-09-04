@@ -116,11 +116,13 @@ def classify_environment_failure(
     strings. Returns None when output looks like an ordinary test failure.
     """
     hay = "\n".join(
-        part for part in (
+        part
+        for part in (
             " ".join(command or []),
             spawn_error or "",
             text or "",
-        ) if part
+        )
+        if part
     ).lower()
     if not hay:
         return None
@@ -353,9 +355,7 @@ def _parse_test_output(text: str, command: list[str]) -> dict[str, int]:
 
     # cargo: "test result: ok. X passed; Y failed; ..."
     if runner == "cargo":
-        match = re.search(
-            r"test result:.*?(\d+)\s+passed;\s*(\d+)\s+failed", text
-        )
+        match = re.search(r"test result:.*?(\d+)\s+passed;\s*(\d+)\s+failed", text)
         if match:
             counts["passed"] = max(counts["passed"], int(match.group(1)))
             counts["failed"] = max(counts["failed"], int(match.group(2)))

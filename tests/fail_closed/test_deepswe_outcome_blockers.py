@@ -20,6 +20,7 @@ explicit SWE-bench instance_id (which legitimately contains `__`) stays verbatim
 
 No task-specific logic in the fixes -- the fixtures only PROVE the generalized rules.
 """
+
 import copy
 import importlib.util
 import json
@@ -59,6 +60,7 @@ def _real_outcome_rec(task: str) -> dict:
 # BLOCKER 1 -- SS12 witness reconciliation of GRAPH_FAIL_MISSING_HANDOFF
 # ===========================================================================
 
+
 @pytest.mark.parametrize("task", TASKS)
 def test_known_false_fail_with_witness_is_not_gt(task):
     """REAL artifact: cert GRAPH_FAIL_MISSING_HANDOFF + witness true/true must NOT be GT.
@@ -69,8 +71,7 @@ def test_known_false_fail_with_witness_is_not_gt(task):
     missed), exactly what the GT/AGENT attribution needs to be citable.
     """
     rec = _real_outcome_rec(task)
-    assert rec["cert_verdicts"]["graph_certificate.json"]["verdict"] == \
-        "GRAPH_FAIL_MISSING_HANDOFF"
+    assert rec["cert_verdicts"]["graph_certificate.json"]["verdict"] == "GRAPH_FAIL_MISSING_HANDOFF"
     assert rec["gt_prebuilt_active"] is True
     assert rec["hook_hash_match"] is True
     assert rec["cert_fail"] is True  # the raw signal stays honest
@@ -100,7 +101,9 @@ def test_other_cert_fail_with_witness_still_gt():
     rec = _real_outcome_rec(TASKS[0])
     rec["cert_verdicts"] = {
         "embedder_certificate.json": {
-            "verdict": "EMBEDDER_FAIL_ZERO_MODEL", "pass": False, "is_fail": True,
+            "verdict": "EMBEDDER_FAIL_ZERO_MODEL",
+            "pass": False,
+            "is_fail": True,
         }
     }
     rec["cert_fail"] = True
@@ -111,7 +114,9 @@ def test_mixed_cert_fails_with_witness_still_gt():
     """A reconcilable verdict + a genuine one together: the genuine fail wins -> GT."""
     rec = _real_outcome_rec(TASKS[0])
     rec["cert_verdicts"]["lsp_certificate.json"] = {
-        "verdict": "LSP_FAIL_NO_SERVER", "pass": False, "is_fail": True,
+        "verdict": "LSP_FAIL_NO_SERVER",
+        "pass": False,
+        "is_fail": True,
     }
     assert do.classify_outcome(rec) == "GT"
 
@@ -121,8 +126,13 @@ def test_cert_fail_without_verdict_detail_stays_gt():
     reconcilable one -> fail-closed GT (preserves the synthetic-record contract the
     existing test_classify_gt_cert_fail asserts)."""
     rec = {
-        "infra_markers": [], "adapter_fail": False, "gt_prebuilt_active": True,
-        "hook_hash_match": True, "cert_fail": True, "reward": 0.0, "n_agent_steps": 8,
+        "infra_markers": [],
+        "adapter_fail": False,
+        "gt_prebuilt_active": True,
+        "hook_hash_match": True,
+        "cert_fail": True,
+        "reward": 0.0,
+        "n_agent_steps": 8,
     }
     assert do.classify_outcome(rec) == "GT"
 
@@ -137,6 +147,7 @@ def test_reconciled_false_fail_with_reward_is_resolved():
 # ===========================================================================
 # BLOCKER 2 -- instance_id pairing key from the pier per-trial result shape
 # ===========================================================================
+
 
 def _real_result(task: str) -> tuple[dict, str]:
     with open(os.path.join(FIXTURE_ROOT, task, "result.json"), encoding="utf-8") as fh:
@@ -170,15 +181,18 @@ def test_instance_id_explicit_swebench_id_kept_verbatim():
 def test_instance_id_task_id_path_fallback():
     """Without task_name, task_id.path ('.../tasks/<slug>') yields the slug."""
     d = {"task_id": {"path": "deepswe-bench/tasks/boa-hierarchical-evaluation-cancellation"}}
-    assert (do.extract_instance_id(d, {}, trial_dir=None)
-            == "boa-hierarchical-evaluation-cancellation")
+    assert (
+        do.extract_instance_id(d, {}, trial_dir=None) == "boa-hierarchical-evaluation-cancellation"
+    )
 
 
 def test_instance_id_trial_dir_last_resort_strips_attempt_hash():
     """Last resort: the trial dir name '<slug>__<hash>' — strip ONLY the trailing
     attempt hash. (It ranks last because pier truncates the slug in the dir name.)"""
-    assert (do.extract_instance_id({}, {}, trial_dir="jobs/2026-06-10__16-29-15/mytask__AbC123")
-            == "mytask")
+    assert (
+        do.extract_instance_id({}, {}, trial_dir="jobs/2026-06-10__16-29-15/mytask__AbC123")
+        == "mytask"
+    )
     d = {"trial_name": "sometask__ZPXAd5C"}
     assert do.extract_instance_id(d, {}, trial_dir=None) == "sometask"
 
@@ -195,12 +209,19 @@ def test_build_signal_record_marks_reconciliation(tmp_path):
     cert_dir = tmp_path / "gt"
     cert_dir.mkdir()
     (cert_dir / "graph_certificate.json").write_text(
-        '{"verdict": "GRAPH_FAIL_MISSING_HANDOFF", "pass": null}', encoding="utf-8")
-    log = ("[GT_META] graph_witness ... | gt_prebuilt_active=true; "
-           "hook_graph_hash_matches_post_lsp=True; substrate_digest=sha256:deadbeef\n")
+        '{"verdict": "GRAPH_FAIL_MISSING_HANDOFF", "pass": null}', encoding="utf-8"
+    )
+    log = (
+        "[GT_META] graph_witness ... | gt_prebuilt_active=true; "
+        "hook_graph_hash_matches_post_lsp=True; substrate_digest=sha256:deadbeef\n"
+    )
     rec = do.build_signal_record(
-        instance_id="some-task", reward=0.0, n_agent_steps=42, exit_status="Submitted",
-        trial_log=log, cert_dir=str(cert_dir),
+        instance_id="some-task",
+        reward=0.0,
+        n_agent_steps=42,
+        exit_status="Submitted",
+        trial_log=log,
+        cert_dir=str(cert_dir),
     )
     assert rec["cert_fail"] is True
     assert rec["cert_fail_reconciled"] is True

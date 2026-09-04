@@ -21,6 +21,7 @@ These tests assert the closed-form of the 5-phase-audit holes:
 All deterministic, stdlib + a tiny sqlite graph fixture. No Go toolchain, no network,
 no task IDs / gold / per-task logic.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -76,13 +77,20 @@ def _make_graph(db_path: Path) -> str:
         "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INT, target_id INT, "
         "type TEXT, source_line INT, source_file TEXT, resolution_method TEXT, confidence REAL, metadata TEXT)"
     )
-    conn.execute("INSERT INTO nodes (label,name,file_path,language) VALUES ('Function','A','a.py','python')")
-    conn.execute("INSERT INTO nodes (label,name,file_path,language) VALUES ('Function','B','b.py','python')")
-    conn.execute("INSERT INTO edges (source_id,target_id,type,source_line,resolution_method,confidence) "
-                 "VALUES (1,2,'CALLS',4,'import',1.0)")
+    conn.execute(
+        "INSERT INTO nodes (label,name,file_path,language) VALUES ('Function','A','a.py','python')"
+    )
+    conn.execute(
+        "INSERT INTO nodes (label,name,file_path,language) VALUES ('Function','B','b.py','python')"
+    )
+    conn.execute(
+        "INSERT INTO edges (source_id,target_id,type,source_line,resolution_method,confidence) "
+        "VALUES (1,2,'CALLS',4,'import',1.0)"
+    )
     conn.commit()
     conn.close()
     from groundtruth.runtime import proof as _proof
+
     return _proof.graph_edges_hash(str(db_path))
 
 
@@ -123,7 +131,8 @@ def test_hole2_witness_raises_on_hash_mismatch_in_proof(agent_mod, monkeypatch, 
     cert_dir = tmp_path
     # Force a MISMATCH: write an lsp cert whose post-LSP hash is deliberately wrong.
     (cert_dir / "lsp_certificate.json").write_text(
-        '{"graph_hash_after_lsp": "deadbeef_not_the_real_hash"}', encoding="utf-8")
+        '{"graph_hash_after_lsp": "deadbeef_not_the_real_hash"}', encoding="utf-8"
+    )
     monkeypatch.setenv("GT_PROOF_MODE", "1")
     monkeypatch.setenv("GT_PORTABLE_SUBSTRATE", "1")
     monkeypatch.setenv("GT_HOST_GRAPH_DB", str(db))
@@ -141,7 +150,8 @@ def test_hole2_witness_does_not_raise_on_match_in_proof(agent_mod, monkeypatch, 
     real_hash = _make_graph(db)
     cert_dir = tmp_path
     (cert_dir / "lsp_certificate.json").write_text(
-        '{"graph_hash_after_lsp": "%s"}' % real_hash, encoding="utf-8")
+        '{"graph_hash_after_lsp": "%s"}' % real_hash, encoding="utf-8"
+    )
     monkeypatch.setenv("GT_PROOF_MODE", "1")
     monkeypatch.setenv("GT_PORTABLE_SUBSTRATE", "1")
     monkeypatch.setenv("GT_HOST_GRAPH_DB", str(db))
@@ -151,7 +161,8 @@ def test_hole2_witness_does_not_raise_on_match_in_proof(agent_mod, monkeypatch, 
 
 
 def test_hole2_witness_raises_on_mismatch_substrate_off_proof(
-        agent_mod, monkeypatch, tmp_path, capsys):
+    agent_mod, monkeypatch, tmp_path, capsys
+):
     """CONSISTENT raise scope (delivery-surface fix #7): the witness raises under
     (proof OR substrate) — matching ``_substrate_brief`` and the DeepSweAdapterError
     contract ("under proof/substrate mode"). With the substrate handoff present
@@ -163,7 +174,8 @@ def test_hole2_witness_raises_on_mismatch_substrate_off_proof(
     _make_graph(db)
     cert_dir = tmp_path
     (cert_dir / "lsp_certificate.json").write_text(
-        '{"graph_hash_after_lsp": "deadbeef_wrong"}', encoding="utf-8")
+        '{"graph_hash_after_lsp": "deadbeef_wrong"}', encoding="utf-8"
+    )
     # NO GT_PROOF_MODE. Substrate handoff present.
     monkeypatch.setenv("GT_HOST_GRAPH_DB", str(db))
     monkeypatch.setenv("GT_CERT_DIR", str(cert_dir))
@@ -222,7 +234,7 @@ def test_hole3_brief_no_host_fallback_even_with_host_graph(agent_mod, monkeypatc
     _make_graph(db)
     monkeypatch.setenv("GT_PROOF_MODE", "1")
     monkeypatch.setenv("GT_PORTABLE_SUBSTRATE", "1")
-    monkeypatch.setenv("GT_CERT_DIR", str(tmp_path))   # no brief.txt
+    monkeypatch.setenv("GT_CERT_DIR", str(tmp_path))  # no brief.txt
     monkeypatch.setenv("GT_GRAPH_DB", str(db))
     monkeypatch.setenv("GT_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("GT_HOST_GRAPH_DB", str(db))
@@ -265,8 +277,9 @@ def test_hole6_l6_reindex_off_in_substrate_mode(patch_mod, monkeypatch, tmp_path
     cache.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(patch_mod, "_GT_INDEX_CACHE", str(cache))
     called = {"reindex": False}
-    monkeypatch.setattr(patch_mod.subprocess, "run",
-                        lambda *a, **k: called.__setitem__("reindex", True))
+    monkeypatch.setattr(
+        patch_mod.subprocess, "run", lambda *a, **k: called.__setitem__("reindex", True)
+    )
     patch_mod._invalidate_on_edit("a.py", str(tmp_path))
     assert cache.exists(), "L6 deleted the cache in substrate mode (must be a no-op)"
     assert called["reindex"] is False, "L6 ran a reindex subprocess in substrate mode"
@@ -294,6 +307,7 @@ def test_hole5_workflow_injects_gt_env_into_container():
 
 def test_hole5_workflow_is_valid_yaml():
     import yaml
+
     doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
     assert "jobs" in doc and "trial" in doc["jobs"]
     yaml.safe_load(_PIER_CFG.read_text(encoding="utf-8"))  # pier config still parses

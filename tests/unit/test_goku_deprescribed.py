@@ -90,9 +90,7 @@ def _all_goku_messages() -> dict[str, str]:
     m = hooks.hook_weak_verification_after_edit(_state_weak_verification_after_edit())
     msgs["weak_verification_after_edit"] = m or ""
 
-    m = hooks.hook_finish_without_structural_witness(
-        _state_finish_without_structural_witness()
-    )
+    m = hooks.hook_finish_without_structural_witness(_state_finish_without_structural_witness())
     msgs["finish_without_structural_witness"] = m or ""
 
     m = hooks.hook_patch_collapsed_or_lost(_state_patch_collapsed_or_lost())

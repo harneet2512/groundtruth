@@ -68,7 +68,9 @@ class FakeRuntime:
         if "groundtruth.hooks" in command:
             return Observation("[GT_STATUS] success [GT_CHANGE] modified something")
         if "command -v gt_query" in command:
-            return Observation("/tmp/gt_tools/gt_query\n/tmp/gt_tools/gt_search\n/tmp/gt_tools/gt_navigate\n/tmp/gt_tools/gt_validate")
+            return Observation(
+                "/tmp/gt_tools/gt_query\n/tmp/gt_tools/gt_search\n/tmp/gt_tools/gt_navigate\n/tmp/gt_tools/gt_validate"
+            )
         if "python3 /tmp/gt_brief_runner.py" in command:
             # Need a longer brief to avoid [GT_BRIEF_FAILED] length check (100 chars)
             # And it must contain a file path like 'src/service.py' for prefetch to find a candidate
@@ -133,9 +135,9 @@ def test_classifies_hook_events_and_negative_controls():
     assert ohgt.classify_tool_event(FileEditAction("/workspace/src/app.py")) == ohgt.HookEvent(
         "post_edit", "src/app.py"
     )
-    assert ohgt.classify_tool_event(CmdRunAction("str_replace_editor view src/app.py")) == ohgt.HookEvent(
-        "post_view", "src/app.py"
-    )
+    assert ohgt.classify_tool_event(
+        CmdRunAction("str_replace_editor view src/app.py")
+    ) == ohgt.HookEvent("post_view", "src/app.py")
     assert ohgt.classify_tool_event(
         CmdRunAction("str_replace_editor str_replace src/app.py")
     ) == ohgt.HookEvent("post_edit", "src/app.py")
@@ -147,7 +149,9 @@ def test_classifies_hook_events_and_negative_controls():
         "post_edit", "tests/test_app.py"
     )
     assert (
-        ohgt.classify_tool_event(CmdRunAction("str_replace_editor str_replace tests/test_app.py")).reason
+        ohgt.classify_tool_event(
+            CmdRunAction("str_replace_editor str_replace tests/test_app.py")
+        ).reason
         == "test_path"
     )
     assert ohgt.classify_tool_event(FileReadAction("README.md")).reason == "non_source_ext"
@@ -191,7 +195,9 @@ def test_post_edit_reindexes_before_hook_and_is_non_recursive():
 
     assert isinstance(runtime.actions[0], FileEditAction)
     reindex_i = next(i for i, command in enumerate(commands) if "gt-index-linux" in command)
-    hook_i = next(i for i, command in enumerate(commands) if "groundtruth.hooks.post_edit" in command)
+    hook_i = next(
+        i for i, command in enumerate(commands) if "groundtruth.hooks.post_edit" in command
+    )
     assert reindex_i < hook_i
     assert commands[reindex_i] == (
         "/tmp/gt-index-linux -root=/workspace -file=src/app.py "
@@ -226,10 +232,7 @@ def test_non_source_reads_skip_but_test_edits_now_fire_post_edit():
     runtime.run_action(FileEditAction("tests/test_app.py"))
 
     # The non-source read fires no GT hook sub-command.
-    assert all(
-        "groundtruth.hooks" not in getattr(action, "command", "")
-        for action in read_actions
-    )
+    assert all("groundtruth.hooks" not in getattr(action, "command", "") for action in read_actions)
     # The test-file edit now runs reindex + the post_edit hook.
     commands = [getattr(action, "command", "") for action in runtime.actions]
     assert any("groundtruth.hooks.post_edit" in c for c in commands)
@@ -348,11 +351,19 @@ def test_install_graph_builds_from_task_repo_and_installs_hook(tmp_path, monkeyp
 
     ohgt.install_graph_and_hook(runtime, config)
     commands = [getattr(action, "command", "") for action in runtime.actions]
-    for c in commands: print(f"DEBUG_CMD: {c}")
+    for c in commands:
+        print(f"DEBUG_CMD: {c}")
 
-    assert any("base64 -d /tmp/gt_src.tar.gz.b64 > /tmp/gt_src.tar.gz" in command for command in commands)
-    assert any("/tmp/gt-index-linux -root='/workspace' -output='/tmp/gt_index.db' 2>&1" in command for command in commands)
-    assert any("command -v gt_query gt_search gt_navigate gt_validate" in command for command in commands)
+    assert any(
+        "base64 -d /tmp/gt_src.tar.gz.b64 > /tmp/gt_src.tar.gz" in command for command in commands
+    )
+    assert any(
+        "/tmp/gt-index-linux -root='/workspace' -output='/tmp/gt_index.db' 2>&1" in command
+        for command in commands
+    )
+    assert any(
+        "command -v gt_query gt_search gt_navigate gt_validate" in command for command in commands
+    )
 
 
 def test_l1_l2_brief_is_delivered_in_first_user_turn():
@@ -442,6 +453,7 @@ def test_task_metrics_written_without_telemetry():
     # cross-worker clobbering, instead of the module-global GT_TASK_METRICS file.
     # The record contract (task_id / phase / behavior_class) is unchanged.
     import json as _json
+
     config = _make_config()
     config._meta_instance_id = "gt_metrics_path_test"
     config.telemetry = None
@@ -498,8 +510,7 @@ class MismatchOnlyRuntime(FakeRuntime):
         command = getattr(action, "command", "")
         if "groundtruth.hooks.post_edit" in command:
             return Observation(
-                "[MISMATCH] You removed `get_user` but "
-                "tests/test_users.py:42 still calls it"
+                "[MISMATCH] You removed `get_user` but tests/test_users.py:42 still calls it"
             )
         if "gt-index" in command:
             return Observation("INDEX_OK")
@@ -515,9 +526,7 @@ class FormatOnlyRuntime(FakeRuntime):
         self.actions.append(action)
         command = getattr(action, "command", "")
         if "groundtruth.hooks.post_edit" in command:
-            return Observation(
-                '[FORMAT] Callers access keys: "name", "email", "id"'
-            )
+            return Observation('[FORMAT] Callers access keys: "name", "email", "id"')
         if "gt-index" in command:
             return Observation("INDEX_OK")
         if "stat -c %Y" in command:

@@ -22,6 +22,7 @@ Mandatory properties:
 RED before Stage 4: verify_horizon_band took token sets (binary gap), V came
 from test->test spans, severity was a class constant.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -40,16 +41,20 @@ _PATCH_PATH = _ROOT / "artifact_deepswe" / "gt_mini_patch.py"
 # severity, so it PINS the historical reference thresholds via the env
 # calibration channel — the scenarios stay threshold-independent.
 _REF_ESC = {
-    "GT_ESC_ADV_TCOV": "0.5", "GT_ESC_ADV_B": "0.4",
-    "GT_ESC_URG_TCOV": "0.3", "GT_ESC_URG_B": "0.7",
-    "GT_ESC_GATE_TCOV": "0.5", "GT_ESC_GATE_KV": "2.0",
+    "GT_ESC_ADV_TCOV": "0.5",
+    "GT_ESC_ADV_B": "0.4",
+    "GT_ESC_URG_TCOV": "0.3",
+    "GT_ESC_URG_B": "0.7",
+    "GT_ESC_GATE_TCOV": "0.5",
+    "GT_ESC_GATE_KV": "2.0",
 }
 
 
 def _load_patch(step_limit: str = "300", vcc: str = "25"):
-    prev = {k: os.environ.get(k) for k in
-            ["GT_BASELINE", "GT_STEP_LIMIT", "GT_VERIFICATION_CYCLE_COST"]
-            + list(_REF_ESC)}
+    prev = {
+        k: os.environ.get(k)
+        for k in ["GT_BASELINE", "GT_STEP_LIMIT", "GT_VERIFICATION_CYCLE_COST"] + list(_REF_ESC)
+    }
     os.environ["GT_BASELINE"] = "1"
     os.environ["GT_STEP_LIMIT"] = step_limit
     os.environ["GT_VERIFICATION_CYCLE_COST"] = vcc
@@ -77,30 +82,56 @@ def gmp():
 
 def _reset(gmp, monkeypatch):
     for name, val in [
-        ("_GT_BASELINE", False), ("_ORACLE_ROUTE", True), ("_marker_sent", True),
-        ("_action_count", 0), ("_source_edit_count", 0), ("_cmd_history", []),
-        ("_l5_fired", False), ("_l5_failure_fired", False),
-        ("_l5_notest_fired", False), ("_test_fail_history", []),
-        ("_blind_test_runs", 0), ("_test_evidence_seen", False),
-        ("_seen", set()), ("_contract_seen", set()),
-        ("_consensus_fired", False), ("_consensus_scope", set()),
-        ("_offscope_views", 0), ("_cochange_fired", False),
-        ("_oracle_focus_cache", None), ("_oracle_delivered_hashes", set()),
-        ("_oracle_edited_rels", set()), ("_oracle_nonedit_streak", 0),
-        ("_oracle_review_fired", False), ("_oracle_last_losers", set()),
-        ("_oracle_obligation_fired", False), ("_oblig_status_emitted", set()),
-        ("_oblig_status_last_hash", None), ("_oracle_edited_tokens", set()),
-        ("_oracle_tested_tokens", set()), ("_oracle_edited_tokens_by_file", {}),
-        ("_edit_churn", {}), ("_gt_oracle_tried", False), ("_gt_oracle_mod", None),
-        ("_horizon_advisory_fired", False), ("_horizon_gate_fire_count", 0),
-        ("_horizon_urgent_fired", False), ("_horizon_pivot_fired", False),
-        ("_last_test_outcome_failed", False), ("_cycle_edit_start", None),
-        ("_test_cycle_spans", []), ("_edit_action_steps", []),
+        ("_GT_BASELINE", False),
+        ("_ORACLE_ROUTE", True),
+        ("_marker_sent", True),
+        ("_action_count", 0),
+        ("_source_edit_count", 0),
+        ("_cmd_history", []),
+        ("_l5_fired", False),
+        ("_l5_failure_fired", False),
+        ("_l5_notest_fired", False),
+        ("_test_fail_history", []),
+        ("_blind_test_runs", 0),
+        ("_test_evidence_seen", False),
+        ("_seen", set()),
+        ("_contract_seen", set()),
+        ("_consensus_fired", False),
+        ("_consensus_scope", set()),
+        ("_offscope_views", 0),
+        ("_cochange_fired", False),
+        ("_oracle_focus_cache", None),
+        ("_oracle_delivered_hashes", set()),
+        ("_oracle_edited_rels", set()),
+        ("_oracle_nonedit_streak", 0),
+        ("_oracle_review_fired", False),
+        ("_oracle_last_losers", set()),
+        ("_oracle_obligation_fired", False),
+        ("_oblig_status_emitted", set()),
+        ("_oblig_status_last_hash", None),
+        ("_oracle_edited_tokens", set()),
+        ("_oracle_tested_tokens", set()),
+        ("_oracle_edited_tokens_by_file", {}),
+        ("_edit_churn", {}),
+        ("_gt_oracle_tried", False),
+        ("_gt_oracle_mod", None),
+        ("_horizon_advisory_fired", False),
+        ("_horizon_gate_fire_count", 0),
+        ("_horizon_urgent_fired", False),
+        ("_horizon_pivot_fired", False),
+        ("_last_test_outcome_failed", False),
+        ("_cycle_edit_start", None),
+        ("_test_cycle_spans", []),
+        ("_edit_action_steps", []),
         ("_last_test_step", None),
-        ("_traj_state_keys", []), ("_traj_loop_sigs", []),
-        ("_lr_history", []), ("_nsr_history", []),
-        ("_detect_loop_fired", False), ("_coherence_fired_files", set()),
-        ("_coherence_last_rel", None), ("_oblig_syms_cache", None),
+        ("_traj_state_keys", []),
+        ("_traj_loop_sigs", []),
+        ("_lr_history", []),
+        ("_nsr_history", []),
+        ("_detect_loop_fired", False),
+        ("_coherence_fired_files", set()),
+        ("_coherence_last_rel", None),
+        ("_oblig_syms_cache", None),
     ]:
         monkeypatch.setattr(gmp, name, val, raising=False)
 
@@ -120,11 +151,11 @@ class TestVFromEditTestSpans:
         closes at the next observed result."""
         _reset(gmp, monkeypatch)
         monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
-        _drive(gmp, "cat src/a.py", "content")            # action 1
-        _drive(gmp, "sed -i 's/a/b/' src/a.py")            # action 2 (cycle opens)
-        _drive(gmp, "git diff", "diff")                    # action 3
-        _drive(gmp, "sed -i 's/b/c/' src/a.py")            # action 4 (same cycle)
-        _drive(gmp, "pytest -q", "1 passed")               # action 5 (closes)
+        _drive(gmp, "cat src/a.py", "content")  # action 1
+        _drive(gmp, "sed -i 's/a/b/' src/a.py")  # action 2 (cycle opens)
+        _drive(gmp, "git diff", "diff")  # action 3
+        _drive(gmp, "sed -i 's/b/c/' src/a.py")  # action 4 (same cycle)
+        _drive(gmp, "pytest -q", "1 passed")  # action 5 (closes)
         assert gmp._test_cycle_spans == [3]  # 5 - 2 (edit at 2, result at 5)
 
     def test_no_spans_uses_default(self, gmp, monkeypatch):
@@ -146,10 +177,10 @@ class TestLiveEscalation:
         monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
         monkeypatch.setattr(gmp, "_action_count", 160, raising=False)
         monkeypatch.setattr(gmp, "_oracle_edited_rels", {"src/x.py"}, raising=False)
-        monkeypatch.setattr(gmp, "_oracle_edited_tokens",
-                            {"unverified_func"}, raising=False)
-        monkeypatch.setattr(gmp, "_oracle_edited_tokens_by_file",
-                            {"src/x.py": {"unverified_func"}}, raising=False)
+        monkeypatch.setattr(gmp, "_oracle_edited_tokens", {"unverified_func"}, raising=False)
+        monkeypatch.setattr(
+            gmp, "_oracle_edited_tokens_by_file", {"src/x.py": {"unverified_func"}}, raising=False
+        )
         got = gmp._verification_horizon_candidate()
         assert got is not None
         sev, kind, block, _eb = got
@@ -165,10 +196,12 @@ class TestLiveEscalation:
         monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
         monkeypatch.setattr(gmp, "_action_count", 160, raising=False)
         monkeypatch.setattr(gmp, "_oracle_edited_rels", {"src/x.py"}, raising=False)
-        monkeypatch.setattr(gmp, "_oracle_edited_tokens_by_file",
-                            {"src/x.py": {"covered_func"}}, raising=False)
-        monkeypatch.setattr(gmp, "_oracle_tested_tokens",
-                            {"test_covered_func", "passed"}, raising=False)
+        monkeypatch.setattr(
+            gmp, "_oracle_edited_tokens_by_file", {"src/x.py": {"covered_func"}}, raising=False
+        )
+        monkeypatch.setattr(
+            gmp, "_oracle_tested_tokens", {"test_covered_func", "passed"}, raising=False
+        )
         assert gmp._verification_horizon_candidate() is None
 
     def test_partial_coverage_half_files(self, gmp, monkeypatch, tmp_path):
@@ -177,13 +210,14 @@ class TestLiveEscalation:
         _reset(gmp, monkeypatch)
         monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
         monkeypatch.setattr(gmp, "_action_count", 160, raising=False)
-        monkeypatch.setattr(gmp, "_oracle_edited_rels",
-                            {"src/x.py", "src/y.py"}, raising=False)
-        monkeypatch.setattr(gmp, "_oracle_edited_tokens_by_file",
-                            {"src/x.py": {"covered_func"},
-                             "src/y.py": {"naked_func"}}, raising=False)
-        monkeypatch.setattr(gmp, "_oracle_tested_tokens",
-                            {"test_covered_func"}, raising=False)
+        monkeypatch.setattr(gmp, "_oracle_edited_rels", {"src/x.py", "src/y.py"}, raising=False)
+        monkeypatch.setattr(
+            gmp,
+            "_oracle_edited_tokens_by_file",
+            {"src/x.py": {"covered_func"}, "src/y.py": {"naked_func"}},
+            raising=False,
+        )
+        monkeypatch.setattr(gmp, "_oracle_tested_tokens", {"test_covered_func"}, raising=False)
         assert gmp._verification_horizon_candidate() is None
 
     def test_gate_keyed_to_observed_pace(self, gmp, monkeypatch, tmp_path):
@@ -194,8 +228,9 @@ class TestLiveEscalation:
         monkeypatch.setattr(gmp, "_test_cycle_spans", [8, 8, 8], raising=False)
         monkeypatch.setattr(gmp, "_action_count", 270, raising=False)
         monkeypatch.setattr(gmp, "_oracle_edited_rels", {"src/x.py"}, raising=False)
-        monkeypatch.setattr(gmp, "_oracle_edited_tokens_by_file",
-                            {"src/x.py": {"naked_func"}}, raising=False)
+        monkeypatch.setattr(
+            gmp, "_oracle_edited_tokens_by_file", {"src/x.py": {"naked_func"}}, raising=False
+        )
         # R=30 > 2*8=16 -> NOT gate; B=0.9>0.7, tc=0 -> urgent
         got = gmp._verification_horizon_candidate()
         assert got is not None and got[1] == "verify.horizon.urgent"
@@ -214,8 +249,9 @@ class TestLiveEscalation:
         monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
         monkeypatch.setattr(gmp, "_action_count", 220, raising=False)
         monkeypatch.setattr(gmp, "_oracle_edited_rels", {"src/x.py"}, raising=False)
-        monkeypatch.setattr(gmp, "_oracle_edited_tokens_by_file",
-                            {"src/x.py": {"naked_func"}}, raising=False)
+        monkeypatch.setattr(
+            gmp, "_oracle_edited_tokens_by_file", {"src/x.py": {"naked_func"}}, raising=False
+        )
         got = gmp._verification_horizon_candidate()
         assert got is not None and got[1] == "verify.horizon.urgent"
         for nxt in (221, 222, 223):  # band holds, R counts down — no re-fire
@@ -227,8 +263,9 @@ class TestLiveEscalation:
         monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
         monkeypatch.setattr(gmp, "_action_count", 220, raising=False)
         monkeypatch.setattr(gmp, "_oracle_edited_rels", {"src/x.py"}, raising=False)
-        monkeypatch.setattr(gmp, "_oracle_edited_tokens_by_file",
-                            {"src/x.py": {"naked_func"}}, raising=False)
+        monkeypatch.setattr(
+            gmp, "_oracle_edited_tokens_by_file", {"src/x.py": {"naked_func"}}, raising=False
+        )
         monkeypatch.setattr(gmp, "_last_test_outcome_failed", True, raising=False)
         got = gmp._verification_horizon_candidate()
         assert got is not None and got[1] == "verify.horizon.pivot"
@@ -239,19 +276,28 @@ class TestLiveEscalation:
         """unmet_ratio enters the composite: with obligations present and
         unedited, severity is strictly higher."""
         import json
+
         _reset(gmp, monkeypatch)
         monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
         anchors = tmp_path / "gt_issue_anchors.json"
-        anchors.write_text(json.dumps({"obligations": [
-            {"verbatim_text": "x must hold", "symbols": ["edited_sym"]},
-            {"verbatim_text": "y must hold", "symbols": ["never_edited_sym"]},
-        ]}), encoding="utf-8")
+        anchors.write_text(
+            json.dumps(
+                {
+                    "obligations": [
+                        {"verbatim_text": "x must hold", "symbols": ["edited_sym"]},
+                        {"verbatim_text": "y must hold", "symbols": ["never_edited_sym"]},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
         monkeypatch.setenv("GT_ANCHORS_PATH", str(anchors))
         monkeypatch.setattr(gmp, "_action_count", 220, raising=False)
         monkeypatch.setattr(gmp, "_oracle_edited_rels", {"src/x.py"}, raising=False)
         monkeypatch.setattr(gmp, "_oracle_edited_tokens", {"edited_sym"}, raising=False)
-        monkeypatch.setattr(gmp, "_oracle_edited_tokens_by_file",
-                            {"src/x.py": {"edited_sym"}}, raising=False)
+        monkeypatch.setattr(
+            gmp, "_oracle_edited_tokens_by_file", {"src/x.py": {"edited_sym"}}, raising=False
+        )
         got = gmp._verification_horizon_candidate()
         assert got is not None
         sev, kind, _b, _e = got

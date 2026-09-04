@@ -23,6 +23,7 @@ only ranking it confidently names a WRONG file. ORACLE: when the top file has
 ONLY name_match backing, the ``Highest-confidence candidate`` line must be
 ABSENT. With genuine verified backing it may appear (negative control).
 """
+
 from __future__ import annotations
 
 import os
@@ -158,9 +159,7 @@ def test_edit_target_callee_contracts_name_match_suppressed():
     with tempfile.TemporaryDirectory() as tmp:
         db = _make_beets_db(tmp, callee_resolution="name_match", callee_conf=0.9)
         callees = edit_target_callee_contracts(db, "beets/importer.py", ["set_fields"])
-        assert callees == [], (
-            f"name_match callee was laundered as a contract fact: {callees}"
-        )
+        assert callees == [], f"name_match callee was laundered as a contract fact: {callees}"
 
 
 def test_brief_renders_edit_target_contracts_block():
@@ -182,9 +181,7 @@ def test_brief_renders_edit_target_contracts_block():
         )
         runner_up = FileEntry(path="beets/library.py", score=0.4)
         brief = render_brief([top, runner_up], scores=[0.9, 0.4], graph_db=db)
-        assert "EDIT-TARGET CONTRACTS" in brief, (
-            f"EDIT-TARGET CONTRACTS block missing:\n{brief}"
-        )
+        assert "EDIT-TARGET CONTRACTS" in brief, f"EDIT-TARGET CONTRACTS block missing:\n{brief}"
         assert "set_parse(self, key, string: str)" in brief, (
             f"deciding callee signature not delivered to agent:\n{brief}"
         )

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from tests.behavioral.utils import collect_file_mentions, find_brief_text, first_actions, iter_task_dirs, load_trajectory, steps
+from tests.behavioral.utils import (
+    collect_file_mentions,
+    find_brief_text,
+    first_actions,
+    iter_task_dirs,
+    load_trajectory,
+    steps,
+)
 
 
 @pytest.mark.behavioral
@@ -24,12 +31,22 @@ def test_l1_navigation_impact(trajectory_dir, baselines):
         # gt_intel.format_gt_output (`<gt-evidence>`) and the L2 fallback
         # (`<gt-task-brief>`). If a marker is renamed there, update here too.
         SUBSTANTIVE_MARKERS = (
-            "<gt-task-brief>", "<gt-evidence>",
-            "FIX HERE", "[VERIFIED]", "[LIKELY]", "[POSSIBLE]",
-            "CALLERS:", "TEST:", "ENTRY POINT:",
-            "CALLER-BLIND-EDIT", "HALLUCINATED-IMPORT",
-            "PATTERN-DIVERGENCE", "UNVERIFIED-EDIT",
-            "BLAST-RADIUS", "CONTRACT-BREAK", "STYLE-DIVERGENCE",
+            "<gt-task-brief>",
+            "<gt-evidence>",
+            "FIX HERE",
+            "[VERIFIED]",
+            "[LIKELY]",
+            "[POSSIBLE]",
+            "CALLERS:",
+            "TEST:",
+            "ENTRY POINT:",
+            "CALLER-BLIND-EDIT",
+            "HALLUCINATED-IMPORT",
+            "PATTERN-DIVERGENCE",
+            "UNVERIFIED-EDIT",
+            "BLAST-RADIUS",
+            "CONTRACT-BREAK",
+            "STYLE-DIVERGENCE",
             "STRUCTURAL RETRIEVAL",
         )
         assert any(m in brief for m in SUBSTANTIVE_MARKERS), (

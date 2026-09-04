@@ -23,6 +23,7 @@ The graph + files are synthetic (built in tmp_path). A deterministic FakeModel
 (seeded RNG embeddings) stands in for sentence-transformers so the test does not
 depend on a model download and the ranking is reproducible.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -97,17 +98,20 @@ def frame_repo(tmp_path: Path) -> tuple[str, str]:
 
     # Gold: the file the traceback names. Keep keyword density LOW so it cannot
     # win on BM25/keyword alone — the frame signal must be what lifts it.
-    (repo / "app" / "importer.py").write_text(textwrap.dedent(
-        """
+    (repo / "app" / "importer.py").write_text(
+        textwrap.dedent(
+            """
         def read_item(record):
             # process a single record
             value = record.get("value")
             return value + 1
         """
-    ))
+        )
+    )
     # Decoy: same keyword family, HIGH keyword density, but never in the trace.
-    (repo / "app" / "importer_utils.py").write_text(textwrap.dedent(
-        """
+    (repo / "app" / "importer_utils.py").write_text(
+        textwrap.dedent(
+            """
         # import import import helpers for importing imports during import
         def import_helper(import_arg):
             # importer importer importer import import import
@@ -115,22 +119,81 @@ def frame_repo(tmp_path: Path) -> tuple[str, str]:
         def another_import_thing(import_x):
             return import_x
         """
-    ))
-    (repo / "app" / "unrelated.py").write_text(textwrap.dedent(
-        """
+        )
+    )
+    (repo / "app" / "unrelated.py").write_text(
+        textwrap.dedent(
+            """
         def do_other_stuff(x):
             return x * 2
         """
-    ))
+        )
+    )
 
     db = tmp_path / "graph.db"
     conn = sqlite3.connect(str(db))
     conn.executescript(_SCHEMA)
     nodes = [
-        (1, "Function", "read_item",          None, "app/importer.py",       2, 5, None, None, 1, 0, "python", None),
-        (2, "Function", "import_helper",       None, "app/importer_utils.py", 2, 4, None, None, 1, 0, "python", None),
-        (3, "Function", "another_import_thing",None, "app/importer_utils.py", 5, 6, None, None, 1, 0, "python", None),
-        (4, "Function", "do_other_stuff",      None, "app/unrelated.py",      2, 3, None, None, 1, 0, "python", None),
+        (
+            1,
+            "Function",
+            "read_item",
+            None,
+            "app/importer.py",
+            2,
+            5,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            2,
+            "Function",
+            "import_helper",
+            None,
+            "app/importer_utils.py",
+            2,
+            4,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            3,
+            "Function",
+            "another_import_thing",
+            None,
+            "app/importer_utils.py",
+            5,
+            6,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            4,
+            "Function",
+            "do_other_stuff",
+            None,
+            "app/unrelated.py",
+            2,
+            3,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
     ]
     conn.executemany(
         "INSERT INTO nodes (id, label, name, qualified_name, file_path, "
@@ -152,6 +215,7 @@ def frame_repo(tmp_path: Path) -> tuple[str, str]:
 def _patch_model(monkeypatch):
     """Force run_v74 to use the deterministic FakeModel and mark sem available."""
     import groundtruth.pretask.v7_4_brief as mod
+
     monkeypatch.setattr(mod, "_get_model", lambda: _FakeModel())
     monkeypatch.setattr(mod, "_SEMANTIC_AVAILABLE", True)
 
@@ -211,7 +275,8 @@ def test_traceback_frame_outranks_keyword_competitor(frame_repo, monkeypatch):
     # The gold must actually carry a nonzero frame component (proves the signal
     # fired, not that it won by chance on another component).
     gold_comp = next(
-        r["components"] for r in result.ranked_full
+        r["components"]
+        for r in result.ranked_full
         if r["path"].replace("\\", "/").lstrip("./").lstrip("/") == "app/importer.py"
     )
     assert gold_comp.get("frame", 0.0) > 0.0
@@ -264,7 +329,7 @@ def test_no_traceback_ranking_identical_to_prechange(frame_repo, monkeypatch):
         ablation="C",
     )
 
-    with_frame = run_v74(**kwargs)              # default W_FRAME=0.60
+    with_frame = run_v74(**kwargs)  # default W_FRAME=0.60
     without_frame = run_v74(weights={"W_FRAME": 0.0}, **kwargs)  # pre-change
 
     seq_with = [(r["rank"], r["path"], r["score"]) for r in with_frame.ranked_full]

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from tests.behavioral.utils import first_actions, iter_task_dirs, list_evidence_texts, load_trajectory, overlap_ratio, steps
+from tests.behavioral.utils import (
+    first_actions,
+    iter_task_dirs,
+    list_evidence_texts,
+    load_trajectory,
+    overlap_ratio,
+    steps,
+)
 
 
 @pytest.mark.behavioral

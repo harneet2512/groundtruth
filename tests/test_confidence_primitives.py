@@ -17,6 +17,7 @@ They also regression-lock the data-derived behavior that REPLACES the hardcoded
 symbol blocklists (``symbol_specificity``) and fixed weights (``rrf_fuse``).
 Runnable under pytest OR as a plain script (``python tests/test_confidence_primitives.py``).
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -58,8 +59,7 @@ def _mk_graph(defs: list[tuple[str, str, str]], edges: list[tuple[str, str]]):
         ids.setdefault(name, i)
     for src, dst in edges:
         conn.execute(
-            "INSERT INTO edges(source_id,target_id,type,confidence)"
-            " VALUES(?,?, 'CALLS', 1.0)",
+            "INSERT INTO edges(source_id,target_id,type,confidence) VALUES(?,?, 'CALLS', 1.0)",
             (ids.get(src, 0), ids.get(dst, 0)),
         )
     conn.commit()
@@ -90,23 +90,31 @@ def test_is_seed_pollutant_homonym_not_hub():
     targets = [(f"target_fn_{i}", "Function", f"t{i}.py") for i in range(1, 23)]  # 22
     homonym = [("New", "Function", f"pkg{i}.py") for i in range(6)]  # 6 files define New
     two_file = [("shared_helper", "Function", f"m{i}.py") for i in range(2)]  # 2 files
-    defs = callers + targets + homonym + two_file + [
-        ("String", "Class", "s.py"),            # uniquely defined, but a 50-caller HUB
-        ("rare_unique_fn", "Function", "r.py"),
-        ("__init__", "Method", "i.py"),
-    ]
+    defs = (
+        callers
+        + targets
+        + homonym
+        + two_file
+        + [
+            ("String", "Class", "s.py"),  # uniquely defined, but a 50-caller HUB
+            ("rare_unique_fn", "Function", "r.py"),
+            ("__init__", "Method", "i.py"),
+        ]
+    )
     edges: list[tuple[str, str]] = []
-    for i in range(1, 23):                        # target_fn_i called by i distinct callers
+    for i in range(1, 23):  # target_fn_i called by i distinct callers
         for j in range(i):
             edges.append((f"caller_{j}", f"target_fn_{i}"))
-    edges += [("caller_0", "String")] * 50        # String = clear hub (indeg 50) but unique def
+    edges += [("caller_0", "String")] * 50  # String = clear hub (indeg 50) but unique def
     conn = _mk_graph(defs, edges)
-    assert is_seed_pollutant("New", conn) is True                 # homonym (6 files > Aider floor 5)
-    assert is_seed_pollutant("shared_helper", conn) is False      # 2 files <= floor -> KEPT (set_fields bug)
-    assert is_seed_pollutant("String", conn) is False             # unique-def HUB -> KEPT (finding #1)
-    assert is_seed_pollutant("rare_unique_fn", conn) is False     # precise seed
-    assert is_seed_pollutant("__init__", conn) is True            # dunder
-    assert is_seed_pollutant("NotInGraph", conn) is True          # not defined here
+    assert is_seed_pollutant("New", conn) is True  # homonym (6 files > Aider floor 5)
+    assert (
+        is_seed_pollutant("shared_helper", conn) is False
+    )  # 2 files <= floor -> KEPT (set_fields bug)
+    assert is_seed_pollutant("String", conn) is False  # unique-def HUB -> KEPT (finding #1)
+    assert is_seed_pollutant("rare_unique_fn", conn) is False  # precise seed
+    assert is_seed_pollutant("__init__", conn) is True  # dunder
+    assert is_seed_pollutant("NotInGraph", conn) is True  # not defined here
 
 
 def test_specificity_hub_collapses_below_rare_no_blocklist():
@@ -137,7 +145,7 @@ def test_dynamic_cutoff_even_n_mad_is_true_median():
 
 def test_dynamic_cutoff_degenerate_guards():
     assert dynamic_cutoff([]).tiers == []
-    assert dynamic_cutoff([5.0]).tiers == ["mid"]          # single -> cannot estimate spread
+    assert dynamic_cutoff([5.0]).tiers == ["mid"]  # single -> cannot estimate spread
     assert dynamic_cutoff([3.0, 3.0, 3.0]).tiers == ["mid", "mid", "mid"]  # flat -> all mid
 
 
@@ -182,11 +190,11 @@ def test_claim_confidence_abstain_delegates_to_dynamic_cutoff():
     diverges from dynamic_cutoff on flat/degenerate pools. GREEN after: abstain
     is exactly dynamic_cutoff(pool+[score]).low — one median+MAD authority."""
     for pool, score in [
-        ([0.1, 0.2, 0.3, 0.9], 0.95),   # clear top
-        ([0.1, 0.2, 0.3, 0.9], 0.05),   # clear bottom
-        ([3.0, 3.0, 3.0], 3.0),         # flat pool — the divergence case
-        ([3.0, 3.0, 3.0], 2.0),         # below a flat pool
-        ([0.1, 0.5, 0.9], 0.5),         # at the median
+        ([0.1, 0.2, 0.3, 0.9], 0.95),  # clear top
+        ([0.1, 0.2, 0.3, 0.9], 0.05),  # clear bottom
+        ([3.0, 3.0, 3.0], 3.0),  # flat pool — the divergence case
+        ([3.0, 3.0, 3.0], 2.0),  # below a flat pool
+        ([0.1, 0.5, 0.9], 0.5),  # at the median
     ]:
         _, abstain = claim_confidence(score, pool)
         expected = dynamic_cutoff(list(pool) + [score]).tiers[-1] == "low"
@@ -209,8 +217,8 @@ def test_phase_unknown_horizon_not_silently_100():
     """RED before fix: max_iter=0 fell back to `or 100`, so progress=5/100=0.05
     (a silent, wrong normalization). GREEN after: unknown horizon is explicit."""
     ph = phase_and_budget(5, 0)
-    assert ph.progress == -1.0, ph.progress      # explicit unknown marker, not 0.05
-    assert ph.near_budget is False               # never force-submit on unknown horizon
+    assert ph.progress == -1.0, ph.progress  # explicit unknown marker, not 0.05
+    assert ph.near_budget is False  # never force-submit on unknown horizon
 
 
 # --------------------------------------------------------------------------- #

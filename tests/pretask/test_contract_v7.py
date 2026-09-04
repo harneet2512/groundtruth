@@ -59,7 +59,9 @@ def test_detect_test_layout_counts_common_directories(tmp_path: Path) -> None:
     (tmp_path / "tests" / "unit").mkdir(parents=True)
     (tmp_path / "tests" / "unit" / "test_a.py").write_text("def test_a(): pass\n", encoding="utf-8")
     (tmp_path / "pkg" / "__tests__").mkdir(parents=True)
-    (tmp_path / "pkg" / "__tests__" / "a.test.ts").write_text("expect(a).toBe(1)\n", encoding="utf-8")
+    (tmp_path / "pkg" / "__tests__" / "a.test.ts").write_text(
+        "expect(a).toBe(1)\n", encoding="utf-8"
+    )
 
     layout = detect_test_layout(str(tmp_path))
     assert "tests" in layout

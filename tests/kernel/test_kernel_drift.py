@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from groundtruth.control import kernel
 from groundtruth.control.types import (
@@ -42,7 +41,9 @@ def _rs(focus: list[str], cluster: list[str], history: list[EditEvent]) -> RunSt
             plan_path=None,
         ),
         edit_history=history,
-        capabilities=Capabilities(block=True, visible=True, audit=True, mid_task_pull=True, replan_inject=True),
+        capabilities=Capabilities(
+            block=True, visible=True, audit=True, mid_task_pull=True, replan_inject=True
+        ),
     )
 
 
@@ -62,7 +63,10 @@ def test_cluster_drift_after_three(fixture_loader):
     input_data, expected = fixture_loader("cluster_drift_after_three")
     rs = RunState.model_validate(input_data["run_state"])
     signals = kernel.detect_drift(rs)
-    assert signals.edits_outside_cluster_count >= expected["expected_return"]["edits_outside_cluster_count_min"]
+    assert (
+        signals.edits_outside_cluster_count
+        >= expected["expected_return"]["edits_outside_cluster_count_min"]
+    )
 
 
 # Layer 2: Boundary -- empty history yields zeroed signals.

@@ -118,6 +118,7 @@ def test_empty_components_fail():
 
 if __name__ == "__main__":
     import sys
+
     failures = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

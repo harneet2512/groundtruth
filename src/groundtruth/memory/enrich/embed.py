@@ -118,8 +118,12 @@ class EmbeddingModel:
         self.dim = dim
         _is_e5 = model_name in _E5_FAMILY
         # Prefix: e5 needs query:/passage:; everything else is symmetric (no prefix).
-        self.prefix_query = prefix_query if prefix_query is not None else ("query: " if _is_e5 else "")
-        self.prefix_passage = prefix_passage if prefix_passage is not None else ("passage: " if _is_e5 else "")
+        self.prefix_query = (
+            prefix_query if prefix_query is not None else ("query: " if _is_e5 else "")
+        )
+        self.prefix_passage = (
+            prefix_passage if prefix_passage is not None else ("passage: " if _is_e5 else "")
+        )
         # Pooling: e5 = mean (over attention mask); ModernBERT/gte/jina-code = CLS ([:,0]).
         self.pooling = pooling if pooling is not None else ("mean" if _is_e5 else "cls")
         self._session: "ort.InferenceSession | None" = None
@@ -157,14 +161,18 @@ class EmbeddingModel:
             onnx_path = self._resolve_onnx_path()
             tok_path = self.model_dir / "tokenizer.json"
             if not onnx_path.exists():
-                raise FileNotFoundError(f"ONNX model not found at {onnx_path}. Run: python scripts/setup_models.py")
+                raise FileNotFoundError(
+                    f"ONNX model not found at {onnx_path}. Run: python scripts/setup_models.py"
+                )
 
             tokenizer = Tok.from_file(str(tok_path))
             tokenizer.enable_padding(length=128)
             tokenizer.enable_truncation(max_length=128)
 
             self._tokenizer = tokenizer
-            self._session = ort_mod.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+            self._session = ort_mod.InferenceSession(
+                str(onnx_path), providers=["CPUExecutionProvider"]
+            )
             # Introspect the declared inputs ONCE. ModernBERT's ONNX declares only
             # input_ids + attention_mask (no token_type_ids); e5's declares all three.
             # Feeding an input the graph does not declare raises in onnxruntime, so we
@@ -181,10 +189,12 @@ class EmbeddingModel:
                 _true_dim = _out_shape[-1] if _out_shape else None
                 if isinstance(_true_dim, int) and _true_dim > 0 and _true_dim != self.dim:
                     import warnings as _warnings
+
                     _warnings.warn(
                         f"embedder dim mismatch for {self.model_name}: declared "
                         f"{self.dim}, ONNX output width {_true_dim}; using {_true_dim}",
-                        RuntimeWarning, stacklevel=2,
+                        RuntimeWarning,
+                        stacklevel=2,
                     )
                     self.dim = int(_true_dim)
             except Exception:
@@ -212,7 +222,7 @@ class EmbeddingModel:
         out: list[list[float]] = []
         B = max(1, int(os.environ.get("GT_EMBED_ENCODE_BATCH", "32")))
         for i in range(0, len(texts), B):
-            out.extend(self._embed_chunk(texts[i:i + B], is_query=is_query))
+            out.extend(self._embed_chunk(texts[i : i + B], is_query=is_query))
         return out
 
     def _embed_chunk(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
@@ -271,9 +281,7 @@ class EmbeddingModel:
 
     def embed_batch(self, texts: list[str], is_query: bool = False) -> list[list[float]]:
         prefix = self.prefix_query if is_query else self.prefix_passage
-        return self._embed_prefixed(
-            [f"{prefix}{text}" for text in texts], is_query=is_query
-        )
+        return self._embed_prefixed([f"{prefix}{text}" for text in texts], is_query=is_query)
 
 
 _models: dict[tuple[str, int], EmbeddingModel] = {}
@@ -311,11 +319,15 @@ def embed_query(text: str, model_name: str = "intfloat/e5-small-v2", dim: int = 
     return get_embedding_model(model_name, dim).embed(text, is_query=True)
 
 
-def embed_passage(text: str, model_name: str = "intfloat/e5-small-v2", dim: int = 384) -> list[float]:
+def embed_passage(
+    text: str, model_name: str = "intfloat/e5-small-v2", dim: int = 384
+) -> list[float]:
     return get_embedding_model(model_name, dim).embed(text, is_query=False)
 
 
-def embed_batch(passages: list[str], model_name: str = "intfloat/e5-small-v2", dim: int = 384) -> list[list[float]]:
+def embed_batch(
+    passages: list[str], model_name: str = "intfloat/e5-small-v2", dim: int = 384
+) -> list[list[float]]:
     return get_embedding_model(model_name, dim).embed_batch(passages, is_query=False)
 
 

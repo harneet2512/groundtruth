@@ -24,8 +24,7 @@ MIN_EDGE_CONFIDENCE = 0.5
 # from the WHOLE stdlib (sys.stdlib_module_names) + every builtin, so it
 # generalizes across the language and never hardcodes specific names.
 _STDLIB_AND_BUILTINS: frozenset[str] = frozenset(
-    set(getattr(sys, "stdlib_module_names", frozenset()))
-    | set(dir(builtins))
+    set(getattr(sys, "stdlib_module_names", frozenset())) | set(dir(builtins))
 )
 
 
@@ -56,10 +55,7 @@ def detect_stale_references(
     # was already honored) rather than fabricate a stronger claim.
     post_edit_content = _read_post_edit_content(file_path, repo_root)
     if post_edit_content is not None:
-        removed_ids = [
-            rid for rid in removed_ids
-            if not _name_present(rid, post_edit_content)
-        ]
+        removed_ids = [rid for rid in removed_ids if not _name_present(rid, post_edit_content)]
         if not removed_ids:
             return []
 
@@ -198,9 +194,7 @@ def _find_test_references(
     return results
 
 
-def _qualifying_test_line(
-    lines: list[str], rid: str, func_name: str
-) -> int | None:
+def _qualifying_test_line(lines: list[str], rid: str, func_name: str) -> int | None:
     """Return the 1-based line number where ``rid`` references the edited
     ``func_name`` (a genuine stale assertion/call on the changed symbol), or
     None when no such line exists.
@@ -214,9 +208,7 @@ def _qualifying_test_line(
     rid_re = re.compile(r"\b" + re.escape(rid) + r"\b")
     func_re = re.compile(r"\b" + re.escape(func_name) + r"\b") if func_name else None
     rid_lines = [i for i, ln in enumerate(lines) if rid_re.search(ln)]
-    func_lines = (
-        {i for i, ln in enumerate(lines) if func_re.search(ln)} if func_re else set()
-    )
+    func_lines = {i for i, ln in enumerate(lines) if func_re.search(ln)} if func_re else set()
     for i in rid_lines:
         line = lines[i]
         # same-line reference to the edited symbol while passing the removed id
@@ -224,9 +216,7 @@ def _qualifying_test_line(
             return i + 1
         # an assertion/mock on the removed id, near a use of the edited symbol
         low = line.lower()
-        if ("assert" in low or "mock" in low) and any(
-            abs(i - j) <= _WINDOW for j in func_lines
-        ):
+        if ("assert" in low or "mock" in low) and any(abs(i - j) <= _WINDOW for j in func_lines):
             return i + 1
     return None
 
@@ -278,18 +268,86 @@ def _find_caller_references(
     return results
 
 
-_COMMON_KEYWORDS = frozenset({
-    "def", "class", "return", "import", "from", "self", "None", "True",
-    "False", "not", "and", "for", "while", "with", "try", "except",
-    "raise", "pass", "break", "continue", "yield", "lambda", "elif",
-    "else", "finally", "assert", "del", "global", "nonlocal", "async",
-    "await", "print", "len", "str", "int", "float", "bool", "list",
-    "dict", "set", "tuple", "type", "isinstance", "super", "range",
-    "open", "close", "read", "write", "append", "extend", "update",
-    # Common method names that cause false positives when matched
-    # across files (e.g., entry.get() flagging conftest.py's dict.get())
-    "get", "pop", "keys", "values", "items", "format", "join",
-    "split", "strip", "lower", "upper", "replace", "copy",
-    "startswith", "endswith", "encode", "decode", "sort", "reverse",
-    "insert", "remove", "count", "index", "find", "clear",
-})
+_COMMON_KEYWORDS = frozenset(
+    {
+        "def",
+        "class",
+        "return",
+        "import",
+        "from",
+        "self",
+        "None",
+        "True",
+        "False",
+        "not",
+        "and",
+        "for",
+        "while",
+        "with",
+        "try",
+        "except",
+        "raise",
+        "pass",
+        "break",
+        "continue",
+        "yield",
+        "lambda",
+        "elif",
+        "else",
+        "finally",
+        "assert",
+        "del",
+        "global",
+        "nonlocal",
+        "async",
+        "await",
+        "print",
+        "len",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "type",
+        "isinstance",
+        "super",
+        "range",
+        "open",
+        "close",
+        "read",
+        "write",
+        "append",
+        "extend",
+        "update",
+        # Common method names that cause false positives when matched
+        # across files (e.g., entry.get() flagging conftest.py's dict.get())
+        "get",
+        "pop",
+        "keys",
+        "values",
+        "items",
+        "format",
+        "join",
+        "split",
+        "strip",
+        "lower",
+        "upper",
+        "replace",
+        "copy",
+        "startswith",
+        "endswith",
+        "encode",
+        "decode",
+        "sort",
+        "reverse",
+        "insert",
+        "remove",
+        "count",
+        "index",
+        "find",
+        "clear",
+    }
+)

@@ -1,10 +1,10 @@
 """Tests for v2.2 graph-aware QueryObject augmentation."""
+
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
 
-import pytest
 
 from groundtruth.pretask.query_augment import augment_query_with_graph
 from groundtruth.pretask.v2_types import HighSignalToken, QueryObject

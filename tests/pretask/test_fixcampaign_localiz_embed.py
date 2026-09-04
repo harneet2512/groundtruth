@@ -25,10 +25,10 @@ Bug map (worst-first):
      key (a query-prefixed vector never collides with a passage entry).
  10  EmbeddingModel.dim re-derived from the ONNX output width after load.
 """
+
 from __future__ import annotations
 
 import sqlite3
-import textwrap
 from pathlib import Path
 
 import numpy as np
@@ -40,18 +40,22 @@ def _clear_shared_embed_caches():
     """Clear BOTH semantic caches before AND after each test so a real-model load in
     this file never poisons the shared bounded-LRU passage-vector cache that
     test_semantic_encode_budget asserts on (cross-module pollution)."""
+
     def _clear():
         try:
             from groundtruth.pretask import anchor_select as _as
+
             _as._EMBED_CACHE.clear()
             _as._SYMVEC_CACHE.clear()
         except Exception:
             pass
         try:
             from groundtruth.memory.enrich import embed as _e
+
             _e._PASSAGE_VEC_CACHE.clear()
         except Exception:
             pass
+
     _clear()
     yield
     _clear()
@@ -60,6 +64,7 @@ def _clear_shared_embed_caches():
 # ===========================================================================
 # Bug 1 — candidate-set path-key mismatch fragments the gold
 # ===========================================================================
+
 
 def _winpath_db_and_repo(tmp_path: Path):
     """A graph whose DB paths use BACKSLASHES + a ./-prefix (the Windows-indexed
@@ -108,7 +113,9 @@ def test_candidate_set_has_no_path_separator_duplicates(tmp_path, monkeypatch):
     repo, db = _winpath_db_and_repo(tmp_path)
     res = run_v74(
         issue_text="parse_amount fails to normalize_amount the parsed line value",
-        repo_root=repo, graph_db=db, ablation="C",
+        repo_root=repo,
+        graph_db=db,
+        ablation="C",
     )
     paths = [r["path"] for r in res.ranked_full]
     norm = [_norm_path(p) for p in paths]
@@ -128,7 +135,9 @@ def test_callee_carries_both_lex_and_reach_in_one_row(tmp_path, monkeypatch):
     repo, db = _winpath_db_and_repo(tmp_path)
     res = run_v74(
         issue_text="parse_amount fails to normalize_amount the parsed line value",
-        repo_root=repo, graph_db=db, ablation="C",
+        repo_root=repo,
+        graph_db=db,
+        ablation="C",
     )
     rows = {_norm_path(r["path"]): r["components"] for r in res.ranked_full}
     beta = rows.get("pkg/mod/beta.py")
@@ -205,9 +214,7 @@ def test_subject_defining_file_outranks_callee_under_equal_witness(tmp_path):
     res = localize(issue, _subject_callee_db(tmp_path))
     order = [c.file_path for c in res.candidates]
     assert order, "no candidates on the witnessed db"
-    assert order[0] == "a_app/caller.py", (
-        f"subject-defining file did not win the cap slot: {order}"
-    )
+    assert order[0] == "a_app/caller.py", f"subject-defining file did not win the cap slot: {order}"
 
 
 def test_exact_tie_falls_to_relevance_key_not_path(tmp_path):
@@ -215,13 +222,22 @@ def test_exact_tie_falls_to_relevance_key_not_path(tmp_path):
     position must order by subject position, NOT by the alphabetical path
     string (path is the last resort)."""
     from groundtruth.pretask.graph_localizer import (
-        Candidate, Witness, _final_relevance_key,
+        Candidate,
+        Witness,
+        _final_relevance_key,
     )
 
     # Identical confidence + lex_hits; differ only in subject position.
     w = Witness(
-        file_path="z.py", anchor="a", edge_type="CALLS", direction="calls_anchor",
-        verified=True, confidence=1.0, hop=0, src_symbol="a", dst_symbol="b",
+        file_path="z.py",
+        anchor="a",
+        edge_type="CALLS",
+        direction="calls_anchor",
+        verified=True,
+        confidence=1.0,
+        hop=0,
+        src_symbol="a",
+        dst_symbol="b",
     )
     early = Candidate("z_subject.py", 0.5, [w], lex_hits=2, degree=0, confidence=0.5)
     late = Candidate("a_other.py", 0.5, [w], lex_hits=2, degree=0, confidence=0.5)
@@ -237,6 +253,7 @@ def test_exact_tie_falls_to_relevance_key_not_path(tmp_path):
 # ===========================================================================
 # Bug 3 — is_generated must not fire on a handwritten file in a generated/ dir
 # ===========================================================================
+
 
 def test_is_generated_ignores_bare_generated_dir():
     """A handwritten source file living under a ``generated/`` directory is NOT
@@ -306,6 +323,7 @@ def test_generated_demote_not_applied_to_handwritten_generated_dir(tmp_path):
 # Bug 4 — witness_tier: verified DISTANT structural (hop>=2) ABOVE name-equality DEFINES
 # ===========================================================================
 
+
 def test_witness_tier_distant_structural_above_bare_defines():
     """A file whose only witness is a verified hop-2 CALLS edge (a real, if
     distant, structural fact) must sort STRICTLY ABOVE a file whose only witness
@@ -313,18 +331,26 @@ def test_witness_tier_distant_structural_above_bare_defines():
     symbol). RED (pre-fix): both collapse to tier 1 — the DEFINES ties the real
     distant edge."""
     from groundtruth.pretask.graph_localizer import (
-        Candidate, Witness, _struct_witness_tier,
+        Candidate,
+        Witness,
+        _struct_witness_tier,
     )
 
     distant = Candidate(
-        "distant.py", 0.5,
+        "distant.py",
+        0.5,
         [Witness("distant.py", "a", "CALLS", "calls_anchor", True, 1.0, 2, "x", "a")],
-        lex_hits=1, degree=0, confidence=0.5,
+        lex_hits=1,
+        degree=0,
+        confidence=0.5,
     )
     defines = Candidate(
-        "defines.py", 0.5,
+        "defines.py",
+        0.5,
         [Witness("defines.py", "b", "DEFINES", "defines_anchor", True, 1.0, 0, "b", "b")],
-        lex_hits=1, degree=0, confidence=0.5,
+        lex_hits=1,
+        degree=0,
+        confidence=0.5,
     )
     assert _struct_witness_tier(distant) < _struct_witness_tier(defines), (
         "verified distant structural edge did not out-tier a bare name-equality DEFINES"
@@ -335,23 +361,34 @@ def test_witness_tier_close_structural_still_top():
     """No regression: a verified hop-0/1 CALLS edge is still the top tier (above
     both distant-structural and DEFINES)."""
     from groundtruth.pretask.graph_localizer import (
-        Candidate, Witness, _struct_witness_tier,
+        Candidate,
+        Witness,
+        _struct_witness_tier,
     )
 
     close = Candidate(
-        "close.py", 0.5,
+        "close.py",
+        0.5,
         [Witness("close.py", "a", "CALLS", "calls_anchor", True, 1.0, 0, "x", "a")],
-        lex_hits=1, degree=0, confidence=0.5,
+        lex_hits=1,
+        degree=0,
+        confidence=0.5,
     )
     distant = Candidate(
-        "distant.py", 0.5,
+        "distant.py",
+        0.5,
         [Witness("distant.py", "a", "CALLS", "calls_anchor", True, 1.0, 2, "x", "a")],
-        lex_hits=1, degree=0, confidence=0.5,
+        lex_hits=1,
+        degree=0,
+        confidence=0.5,
     )
     defines = Candidate(
-        "defines.py", 0.5,
+        "defines.py",
+        0.5,
         [Witness("defines.py", "b", "DEFINES", "defines_anchor", True, 1.0, 0, "b", "b")],
-        lex_hits=1, degree=0, confidence=0.5,
+        lex_hits=1,
+        degree=0,
+        confidence=0.5,
     )
     assert _struct_witness_tier(close) < _struct_witness_tier(distant)
     assert _struct_witness_tier(distant) < _struct_witness_tier(defines)
@@ -360,6 +397,7 @@ def test_witness_tier_close_structural_still_top():
 # ===========================================================================
 # Bug 5 — name_match (0.6) + NULL-confidence edges survive the floor
 # ===========================================================================
+
 
 def test_hub_penalty_counts_name_match_hub_at_floor(tmp_path):
     """A 0.6 name_match hub (in-degree above HUB_SCALE-relevant) must accrue a
@@ -388,9 +426,7 @@ def test_hub_penalty_counts_name_match_hub_at_floor(tmp_path):
     conn.commit()
     conn.close()
     pens = compute_hub_penalties(str(db))
-    assert pens.get("hub.py", 0.0) > 0.0, (
-        "0.6 name_match hub escaped the penalty (floor still 0.7)"
-    )
+    assert pens.get("hub.py", 0.0) > 0.0, "0.6 name_match hub escaped the penalty (floor still 0.7)"
 
 
 def test_reach_admits_name_match_edges_at_floor(tmp_path):
@@ -402,8 +438,7 @@ def test_reach_admits_name_match_edges_at_floor(tmp_path):
     conn = sqlite3.connect(str(db))
     conn.executescript(_SCHEMA)
     conn.executemany(
-        "INSERT INTO nodes (id,label,name,file_path,is_test,language) "
-        "VALUES (?,?,?,?,0,'python')",
+        "INSERT INTO nodes (id,label,name,file_path,is_test,language) VALUES (?,?,?,?,0,'python')",
         [(1, "Function", "a", "a.py"), (2, "Function", "b", "b.py")],
     )
     conn.execute(
@@ -426,8 +461,7 @@ def test_anchor_proximity_admits_name_match_edges_at_floor(tmp_path):
     conn = sqlite3.connect(str(db))
     conn.executescript(_SCHEMA)
     conn.executemany(
-        "INSERT INTO nodes (id,label,name,file_path,is_test,language) "
-        "VALUES (?,?,?,?,0,'python')",
+        "INSERT INTO nodes (id,label,name,file_path,is_test,language) VALUES (?,?,?,?,0,'python')",
         [(1, "Function", "a", "a.py"), (2, "Function", "b", "b.py")],
     )
     conn.execute(
@@ -446,13 +480,15 @@ def test_anchor_proximity_admits_name_match_edges_at_floor(tmp_path):
 # Bug 6 — dense-dispersion gate measures discrimination, not coverage
 # ===========================================================================
 
+
 def test_dispersion_gate_does_not_fire_on_few_but_confident_dense():
     """A dense signal that covers FEW files but discriminates SHARPLY among
     them (high max, clear spread over the covered set) is NOT flat — the gate
     must measure dispersion over the NONZERO sem values, not the zero-padded
     full candidate vector."""
     from groundtruth.pretask.v7_4_brief import (
-        DEFAULT_WEIGHTS, _apply_dense_dispersion_gate,
+        DEFAULT_WEIGHTS,
+        _apply_dense_dispersion_gate,
     )
 
     files = [f"f{i}.py" for i in range(20)]
@@ -469,7 +505,8 @@ def test_dispersion_gate_still_fires_on_truly_flat_covered_set():
     """No over-correction: when the COVERED set is itself flat (all-equal among
     the few covered files), the gate still fires."""
     from groundtruth.pretask.v7_4_brief import (
-        DEFAULT_WEIGHTS, _apply_dense_dispersion_gate,
+        DEFAULT_WEIGHTS,
+        _apply_dense_dispersion_gate,
     )
 
     files = [f"f{i}.py" for i in range(20)]
@@ -482,13 +519,19 @@ def test_dispersion_gate_still_fires_on_truly_flat_covered_set():
 # Bug 7 — issue query tokenizes at a larger window than symbol passages
 # ===========================================================================
 
+
 def test_issue_query_window_larger_than_passage_window():
     """The issue QUERY must tokenize at a window strictly larger than the
     ~128-token per-symbol passage window, so the file/symbol hints in the issue
     tail are not discarded."""
     from groundtruth.memory.enrich.embed import (
-        EmbeddingModel, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DIM,
-        E5_MODEL, E5_DIM, _query_token_window, _passage_token_window,
+        EmbeddingModel,
+        DEFAULT_EMBED_MODEL,
+        DEFAULT_EMBED_DIM,
+        E5_MODEL,
+        E5_DIM,
+        _query_token_window,
+        _passage_token_window,
     )
 
     gte = EmbeddingModel(DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DIM)
@@ -496,7 +539,7 @@ def test_issue_query_window_larger_than_passage_window():
     assert _passage_token_window(gte) <= 128
     assert _query_token_window(gte) > _passage_token_window(gte)
     assert _query_token_window(gte) >= 1024  # gte supports 8192
-    assert _query_token_window(e5) >= 512    # e5 supports 512
+    assert _query_token_window(e5) >= 512  # e5 supports 512
 
 
 def test_long_issue_query_tail_survives_tokenization():
@@ -506,7 +549,9 @@ def test_long_issue_query_tail_survives_tokenization():
     Uses a deterministic fake session that records the input length so the test
     runs without a baked ONNX model."""
     from groundtruth.memory.enrich.embed import (
-        EmbeddingModel, DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DIM,
+        EmbeddingModel,
+        DEFAULT_EMBED_MODEL,
+        DEFAULT_EMBED_DIM,
     )
 
     m = EmbeddingModel(DEFAULT_EMBED_MODEL, DEFAULT_EMBED_DIM)
@@ -527,6 +572,7 @@ def test_long_issue_query_tail_survives_tokenization():
                 def __init__(self, n):
                     self.ids = list(range(n))
                     self.attention_mask = [1] * n
+
             out = []
             for t in texts:
                 n = min(len(t.split()), getattr(self, "max_length", 128))
@@ -538,8 +584,10 @@ def test_long_issue_query_tail_survives_tokenization():
         def get_inputs(self):
             class I:
                 name = "input_ids"
+
             class J:
                 name = "attention_mask"
+
             return [I(), J()]
 
         def run(self, _o, feed):
@@ -562,6 +610,7 @@ def test_long_issue_query_tail_survives_tokenization():
 # Bug 8 — explicit is_query threaded; query/passage role folded into the cache key
 # ===========================================================================
 
+
 def test_passage_hash_distinguishes_query_from_passage_role():
     """The SAME text embedded as a QUERY vs a PASSAGE must hash to DIFFERENT
     cache keys, so a query-prefixed vector can never poison a passage entry."""
@@ -578,7 +627,9 @@ def test_embed_threads_is_query_explicitly_not_by_length():
     must use the PASSAGE prefix — role comes from the explicit flag, never from
     len(texts)==1."""
     from groundtruth.memory.enrich.embed import (
-        EmbeddingModel, E5_MODEL, E5_DIM,
+        EmbeddingModel,
+        E5_MODEL,
+        E5_DIM,
     )
 
     m = EmbeddingModel(E5_MODEL, E5_DIM)
@@ -602,6 +653,7 @@ def test_embed_threads_is_query_explicitly_not_by_length():
 # Bug 10 — EmbeddingModel.dim re-derived from the ONNX output width after load
 # ===========================================================================
 
+
 def test_dim_corrected_from_onnx_output_width(monkeypatch):
     """If the declared dim disagrees with the ONNX output width, the model
     corrects self.dim from the graph after load (the metadata must not lie to
@@ -619,8 +671,10 @@ def test_dim_corrected_from_onnx_output_width(monkeypatch):
         def get_inputs(self):
             class I:
                 name = "input_ids"
+
             class J:
                 name = "attention_mask"
+
             return [I(), J()]
 
         def get_outputs(self):
@@ -633,9 +687,7 @@ def test_dim_corrected_from_onnx_output_width(monkeypatch):
 
     import onnxruntime as _ort  # noqa: F401  (import guard parity)
 
-    monkeypatch.setattr(
-        "onnxruntime.InferenceSession", lambda *a, **k: _Sess(), raising=False
-    )
+    monkeypatch.setattr("onnxruntime.InferenceSession", lambda *a, **k: _Sess(), raising=False)
 
     # Point the tokenizer/onnx resolution at a temp dir with stub files so
     # _ensure_loaded reaches the session build (we stub the heavy bits).
@@ -650,6 +702,7 @@ def test_dim_corrected_from_onnx_output_width(monkeypatch):
             class E:
                 ids = [1, 2, 3]
                 attention_mask = [1, 1, 1]
+
             return [E() for _ in texts]
 
     monkeypatch.setattr("tokenizers.Tokenizer.from_file", lambda *a, **k: _Tok(), raising=False)

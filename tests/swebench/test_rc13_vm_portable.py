@@ -19,12 +19,11 @@ Covers:
 
 These tests run without spending money — every codepath is local.
 """
+
 from __future__ import annotations
 
 import importlib.util
-import os
 import stat
-import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -102,7 +101,8 @@ def _make_fake_venv_python(tmp_path: Path, version_string: str) -> Path:
     venv_bin = tmp_path / "fake_venv" / "bin"
     venv_bin.mkdir(parents=True)
     py = venv_bin / "python"
-    py.write_text(textwrap.dedent(f"""\
+    py.write_text(
+        textwrap.dedent(f"""\
         #!/usr/bin/env python3
         import sys
         joined = " ".join(sys.argv)
@@ -110,13 +110,13 @@ def _make_fake_venv_python(tmp_path: Path, version_string: str) -> Path:
             print({version_string!r})
         else:
             sys.exit(0)
-    """))
+    """)
+    )
     py.chmod(py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
     return py
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="fake-shebang venv only works on Unix")
+@pytest.mark.skipif(sys.platform == "win32", reason="fake-shebang venv only works on Unix")
 def test_assert_sweagent_version_matches(runner_mod, tmp_path):
     fake = _make_fake_venv_python(tmp_path, "1.1.0")
     ok, detail = runner_mod._assert_sweagent_version(str(fake), expected="1.1.0")
@@ -124,8 +124,7 @@ def test_assert_sweagent_version_matches(runner_mod, tmp_path):
     assert "sweagent_version:1.1.0" in detail
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="fake-shebang venv only works on Unix")
+@pytest.mark.skipif(sys.platform == "win32", reason="fake-shebang venv only works on Unix")
 def test_assert_sweagent_version_mismatch_fails(runner_mod, tmp_path):
     fake = _make_fake_venv_python(tmp_path, "9.9.9")
     ok, detail = runner_mod._assert_sweagent_version(str(fake), expected="1.1.0")
@@ -148,14 +147,16 @@ def test_assert_sweagent_version_missing_venv_softpasses(runner_mod, tmp_path):
 
 def test_assert_no_duplicate_submit_canonical_track4_passes(runner_mod, tmp_path):
     cfg = tmp_path / "ok.yaml"
-    cfg.write_text(textwrap.dedent("""\
+    cfg.write_text(
+        textwrap.dedent("""\
         agent:
           tools:
             bundles:
               - path: tools/registry
               - path: tools/edit_anthropic
               - path: /home/ubuntu/Groundtruth/tools/sweagent/gt_pre_finish_gate
-    """))
+    """)
+    )
     ok, detail = runner_mod._assert_no_duplicate_submit(cfg)
     assert ok is True
     assert "submit_override_safe" in detail
@@ -163,14 +164,16 @@ def test_assert_no_duplicate_submit_canonical_track4_passes(runner_mod, tmp_path
 
 def test_assert_no_duplicate_submit_rejects_review_on_submit_m(runner_mod, tmp_path):
     cfg = tmp_path / "bad.yaml"
-    cfg.write_text(textwrap.dedent("""\
+    cfg.write_text(
+        textwrap.dedent("""\
         agent:
           tools:
             bundles:
               - path: tools/registry
               - path: tools/review_on_submit_m
               - path: /home/ubuntu/Groundtruth/tools/sweagent/gt_pre_finish_gate
-    """))
+    """)
+    )
     ok, detail = runner_mod._assert_no_duplicate_submit(cfg)
     assert ok is False
     assert "duplicate_submit_declaration" in detail
@@ -185,8 +188,7 @@ def test_assert_no_duplicate_submit_missing_config_softpasses(runner_mod, tmp_pa
 # ---- _probe_binary_loadable -----------------------------------------------
 
 
-@pytest.mark.skipif(sys.platform != "linux",
-                    reason="ldd probe only runs on Linux")
+@pytest.mark.skipif(sys.platform != "linux", reason="ldd probe only runs on Linux")
 def test_probe_binary_loadable_on_self_python(state_mod):
     # /usr/bin/python3 is dynamically linked but its deps must resolve on
     # the host running these tests. Use it as a positive control.
@@ -276,9 +278,7 @@ def test_gt_hook_py_finds_bundle_relative(state_mod, monkeypatch, tmp_path):
 # ---- _fire_gt_index_file emits structured loader-incompat record ----------
 
 
-def test_fire_gt_index_file_returns_loader_incompat_on_probe_fail(
-    state_mod, monkeypatch, tmp_path
-):
+def test_fire_gt_index_file_returns_loader_incompat_on_probe_fail(state_mod, monkeypatch, tmp_path):
     """RC-13: when the binary fails the ldd probe, _fire_gt_index_file must
     return a structured record with `binary_loader_incompatible` rather
     than crashing or silently bumping the L6 counter on a no-op."""

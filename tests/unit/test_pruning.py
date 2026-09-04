@@ -95,10 +95,10 @@ class TestPruneFindings:
 
     def test_combined_filters(self) -> None:
         findings = [
-            _make(confidence=0.9, novelty=True, line=1),   # keep
-            _make(confidence=0.5, novelty=True, line=2),   # drop (below floor)
+            _make(confidence=0.9, novelty=True, line=1),  # keep
+            _make(confidence=0.5, novelty=True, line=2),  # drop (below floor)
             _make(confidence=0.9, novelty=False, line=3),  # drop (not novel)
-            _make(confidence=0.8, novelty=True, line=4),   # keep
+            _make(confidence=0.8, novelty=True, line=4),  # keep
         ]
         result = prune_findings(findings)
         assert len(result) == 2

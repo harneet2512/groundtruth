@@ -12,9 +12,9 @@ gt_interactions_*.jsonl. The end-to-end agent-visibility step is verified
 on Linux when the wrapper appends router evidence text to obs.content
 inside the live-mode bypass in ``process_event`` (post_view, post_edit).
 """
+
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import sys
@@ -35,7 +35,6 @@ def _load_wrapper_helpers():
     available on Windows. We extract the helper functions by source slicing.
     """
     src = (_REPO_ROOT / "scripts" / "swebench" / "oh_gt_full_wrapper.py").read_text()
-    import re
     # Slice from `# FINAL_ARCH_V2 GT_ROUTER_V2` block start to the
     # `_strip_scaffold_files` function (exclusive).
     start = src.index("# FINAL_ARCH_V2 GT_ROUTER_V2 path")
@@ -46,9 +45,12 @@ def _load_wrapper_helpers():
     # Strip _emit_structured_event call (uses telemetry writer which needs
     # full wrapper context). We monkey-patch it.
     ns = {
-        "os": os, "sys": sys, "json": json,
+        "os": os,
+        "sys": sys,
+        "json": json,
         "time": __import__("time"),
-        "Any": object, "Path": Path,
+        "Any": object,
+        "Path": Path,
     }
     # The helpers use `_metrics_path` which is at module top — define a
     # local equivalent for the test harness.
@@ -83,8 +85,10 @@ def wrapper(tmp_path, monkeypatch):
 def _make_config(task_id: str, db_path: str = "") -> SimpleNamespace:
     """Minimal config object compatible with the wrapper helpers under test."""
     from groundtruth.state.agent_state import AgentState
-    state = AgentState.load_or_create(task_id=task_id, max_iterations=100,
-                                       repo_root="/workspace/" + task_id)
+
+    state = AgentState.load_or_create(
+        task_id=task_id, max_iterations=100, repo_root="/workspace/" + task_id
+    )
     cfg = SimpleNamespace(
         _agent_state=state,
         _router_v2=None,
@@ -129,10 +133,12 @@ class TestRouterV2Telemetry:
         # the wrapper's _metrics_path inside the namespace.
         ns = wrapper
         recorded_files: list[Path] = []
+
         def _path(config, name):
             p = tmp_path / f"gt_{name}_{config._meta_instance_id}.jsonl"
             recorded_files.append(p)
             return str(p)
+
         ns["_metrics_path"] = _path
 
         cfg = _make_config("test-disk")
@@ -155,7 +161,11 @@ class TestRouterV2Telemetry:
         line = interactions_file.read_text().splitlines()[0]
         rec = json.loads(line)
         assert rec["layer"] == "L3_router_v2"
-        assert rec.get("emit") is True or rec.get("suppression_reason") in ("no_graph_db", "no_evidence", None)
+        assert rec.get("emit") is True or rec.get("suppression_reason") in (
+            "no_graph_db",
+            "no_evidence",
+            None,
+        )
         assert rec["path"] == "/workspace/test-disk/src/foo.py"
 
         # Structured event also recorded.
@@ -171,8 +181,10 @@ class TestRouterV2Telemetry:
 
     def test_on_edit_persists_and_increments(self, wrapper, tmp_path, monkeypatch):
         ns = wrapper
+
         def _path(config, name):
             return str(tmp_path / f"gt_{name}_{config._meta_instance_id}.jsonl")
+
         ns["_metrics_path"] = _path
 
         cfg = _make_config("test-edit")

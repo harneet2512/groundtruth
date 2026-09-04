@@ -1,4 +1,5 @@
 """Tiny widget toolkit. Provides primitive elements used by layout."""
+
 from __future__ import annotations
 
 

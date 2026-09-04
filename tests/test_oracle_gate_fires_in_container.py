@@ -38,6 +38,7 @@ RED  (pre-fix): TypeError from the no-arg stub -> 0 v2 records  -> both asserts 
 GREEN (post-fix): stub ctor accepts kwargs + the producer is individually guarded
       -> the gate runs -> >= 1 v2 record.
 """
+
 from __future__ import annotations
 
 import json
@@ -50,8 +51,9 @@ ROOT = Path(__file__).resolve().parents[1]
 GMP = ROOT / "artifact_deepswe" / "gt_mini_patch.py"
 
 
-def _run_driver(body: str, env_events_name: str = "events.jsonl", *, tmp: Path,
-                step_limit: str = "100") -> subprocess.CompletedProcess:
+def _run_driver(
+    body: str, env_events_name: str = "events.jsonl", *, tmp: Path, step_limit: str = "100"
+) -> subprocess.CompletedProcess:
     """Load gt_mini_patch.py in a clean subprocess with the runtime modules
     POISONED (forces ``_RUNTIME_AVAILABLE`` False -> the stub is the live class —
     the in-container shape) and the oracle route armed, then run ``body``.
@@ -95,8 +97,9 @@ def _run_driver(body: str, env_events_name: str = "events.jsonl", *, tmp: Path,
         assert m._RUNTIME_AVAILABLE is False, "expected runtime stub fallback"
     """)
     script = header + "\n" + textwrap.dedent(body)
-    return subprocess.run([sys.executable, "-c", script], capture_output=True,
-                          text=True, cwd=str(ROOT))
+    return subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, cwd=str(ROOT)
+    )
 
 
 def test_stub_horizon_thresholds_constructs_with_six_kwargs():
@@ -120,10 +123,12 @@ def test_stub_horizon_thresholds_constructs_with_six_kwargs():
         print("UNIT_CTOR_OK")
     """)
     import tempfile
+
     with tempfile.TemporaryDirectory() as d:
         r = _run_driver(body, tmp=Path(d))
     assert "UNIT_CTOR_OK" in r.stdout, (
-        f"stub ctor / producer raised\nstdout={r.stdout!r}\nstderr={r.stderr!r}")
+        f"stub ctor / producer raised\nstdout={r.stdout!r}\nstderr={r.stderr!r}"
+    )
 
 
 def test_oracle_gate_writes_v2_telemetry_in_container():
@@ -139,6 +144,7 @@ def test_oracle_gate_writes_v2_telemetry_in_container():
     and the winning candidate writes the v2 record.
     """
     import tempfile
+
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         body = textwrap.dedent("""
@@ -162,7 +168,8 @@ def test_oracle_gate_writes_v2_telemetry_in_container():
         """)
         r = _run_driver(body, tmp=tmp)
         assert "DRIVE_OK" in r.stdout, (
-            f"drive did not complete\nstdout={r.stdout!r}\nstderr={r.stderr!r}")
+            f"drive did not complete\nstdout={r.stdout!r}\nstderr={r.stderr!r}"
+        )
 
         events = tmp / "events.jsonl"
         v2 = []
@@ -180,4 +187,5 @@ def test_oracle_gate_writes_v2_telemetry_in_container():
             "(reproduces the artifact: TypeError from the no-arg "
             "_ProductHorizonThresholds stub killed _augment_output before the gate).\n"
             f"events_file_exists={events.exists()} v2_count={len(v2)}\n"
-            f"stdout={r.stdout!r}\nstderr={r.stderr!r}")
+            f"stdout={r.stdout!r}\nstderr={r.stderr!r}"
+        )

@@ -39,9 +39,7 @@ def test_ppr_filters_low_confidence_edges(tiny_graph_db: str) -> None:
     format_value (id=5) with the noisy edge filtered should yield NO
     flow into _fd's file.
     """
-    res = personalized_pagerank(
-        tiny_graph_db, seed_nodes={5}, min_confidence=0.5
-    )
+    res = personalized_pagerank(tiny_graph_db, seed_nodes={5}, min_confidence=0.5)
     # Either node 5 holds all the mass (seed restart), or it has no
     # outgoing edges that survived the filter — both are correct.
     file_scores = aggregate_scores_by_file(res.node_scores, tiny_graph_db)

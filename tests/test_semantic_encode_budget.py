@@ -64,8 +64,7 @@ class CountingEmbedder:
         rng = np.random.default_rng(abs(hash(text)) % (2**31))
         return _unit(rng.standard_normal(_DIM)).astype(np.float32)
 
-    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False,
-               batch_size=128):
+    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False, batch_size=128):
         texts = list(texts)
         self.encode_calls += 1
         self.texts_encoded += len(texts)
@@ -168,9 +167,10 @@ def _make_witnessed_graph(path: str, n_files: int, syms_per_file: int) -> None:
 # 1. HARD ENCODE BUDGET on _semantic_score_by_file (RED pre-fix: encoded all 9000)
 # ---------------------------------------------------------------------------
 
+
 def test_encode_budget_bounds_encodes_and_logs(tmp_path, monkeypatch, capsys):
     _clear_caches()
-    n_files, spf = 300, 30                      # 9000 unique passages
+    n_files, spf = 300, 30  # 9000 unique passages
     db = str(tmp_path / "graph.db")
     files = _make_flat_graph(db, n_files, spf)
 
@@ -212,10 +212,11 @@ def test_encode_budget_bounds_encodes_and_logs(tmp_path, monkeypatch, capsys):
 # 2. CONTENT-ADDRESSED CACHE dedup (RED pre-fix: second call re-encoded all 50)
 # ---------------------------------------------------------------------------
 
+
 def test_passage_cache_dedups_repeat_scoring(tmp_path, monkeypatch):
     _clear_caches()
     db = str(tmp_path / "graph.db")
-    files = _make_flat_graph(db, 10, 5)         # 50 unique passages
+    files = _make_flat_graph(db, 10, 5)  # 50 unique passages
     monkeypatch.setenv("GT_SEM_PASSAGE_BUDGET", "4096")
     monkeypatch.delenv("GT_PROOF_MODE", raising=False)
 
@@ -248,9 +249,7 @@ def test_cross_half_cache_reuse_anchor_select_primes_localizer(tmp_path, monkeyp
 
     m1 = CountingEmbedder()
     # Half 1 (run_v74 path) embeds every indexed file's passages.
-    anchor_select.semantic_top_k(
-        "fix the widget bug", str(tmp_path), db, m1, score_all=True
-    )
+    anchor_select.semantic_top_k("fix the widget bug", str(tmp_path), db, m1, score_all=True)
     assert m1.texts_encoded >= 50  # primed the shared store
 
     m2 = CountingEmbedder()
@@ -279,9 +278,10 @@ def test_shared_cache_is_one_object_and_bounded():
 #    (RED pre-fix: passed ALL witnessed files, encoded every passage)
 # ---------------------------------------------------------------------------
 
+
 def test_localize_semantic_pool_caps_callsite_and_encodes(tmp_path, monkeypatch):
     _clear_caches()
-    n_files, spf = 250, 20                      # 250 witnessed files, 5001 passages
+    n_files, spf = 250, 20  # 250 witnessed files, 5001 passages
     db = str(tmp_path / "graph.db")
     _make_witnessed_graph(db, n_files, spf)
 
@@ -310,7 +310,7 @@ def test_localize_semantic_pool_caps_callsite_and_encodes(tmp_path, monkeypatch)
     )
     wall = time.monotonic() - t0
 
-    pool_cap = gl._sem_pool_files(8)            # default max(6*8, 48) = 48
+    pool_cap = gl._sem_pool_files(8)  # default max(6*8, 48) = 48
     # The semantic half saw the POOL, not the full pre-truncation candidate set.
     # OLD behavior: all 251 witnessed files -> RED.
     assert seen.get("n_files", 0) > 0, "semantic ranker never ran"
@@ -376,6 +376,7 @@ def test_final_window_is_subset_of_semantic_pool(tmp_path, monkeypatch):
 #    encoded under a tight budget (RED pre-fix: budget skipped by raw DB-row order)
 # ---------------------------------------------------------------------------
 
+
 def _make_tail_relevant_graph(path: str, n_filler: int, syms_per_file: int) -> str:
     """A flat graph where every file is irrelevant filler EXCEPT one issue-relevant
     file inserted LAST (so it sits in the DB-row tail of SELECT DISTINCT file_path).
@@ -411,7 +412,7 @@ def test_anchor_budget_prioritizes_issue_relevant_tail_file(tmp_path, monkeypatc
     relevant file was skipped -> its symbols never encoded -> zero matrix -> score
     absent from semantic_top_k. GREEN: priority order encodes it within budget."""
     _clear_caches()
-    n_filler, spf = 80, 10                       # 800 filler passages
+    n_filler, spf = 80, 10  # 800 filler passages
     db = str(tmp_path / "graph.db")
     relevant = _make_tail_relevant_graph(db, n_filler, spf)
 
@@ -423,9 +424,7 @@ def test_anchor_budget_prioritizes_issue_relevant_tail_file(tmp_path, monkeypatc
     model = CountingEmbedder()
     issue = "frobnicate widget crashes when the config is reloaded"
 
-    file_paths, file_matrix = anchor_select._get_file_embeddings(
-        db, str(tmp_path), model, issue
-    )
+    file_paths, file_matrix = anchor_select._get_file_embeddings(db, str(tmp_path), model, issue)
     rel_key = relevant.replace("\\", "/").lstrip("./").lstrip("/")
 
     # PRIMARY (deterministic, embedder-cosine-independent): the issue-relevant tail
@@ -442,10 +441,9 @@ def test_anchor_budget_prioritizes_issue_relevant_tail_file(tmp_path, monkeypatc
     # matrix), proving the budget actually bound — the win is PRIORITY, not an
     # over-large budget that encoded everything.
     starved = [
-        fp for fp in file_paths
-        if fp != rel_key and (
-            file_matrix.get(fp) is None or file_matrix[fp].shape[0] == 0
-        )
+        fp
+        for fp in file_paths
+        if fp != rel_key and (file_matrix.get(fp) is None or file_matrix[fp].shape[0] == 0)
     ]
     assert starved, (
         "no file was starved by the budget — it did not bind, so the priority "

@@ -7,6 +7,7 @@ post-merge schema and a numeric fallback otherwise. The in-container query
 string interpolates this clause for both the symbol-ranking COUNT and the
 caller subquery.
 """
+
 import os
 import sqlite3
 import tempfile
@@ -68,8 +69,8 @@ def test_l4a_filter_clause_valid_sql():
         conn.commit()
         rows = conn.execute(f"SELECT id FROM edges e WHERE e.type='CALLS' AND {clause}").fetchall()
         ids = {r[0] for r in rows}
-        assert 1 in ids       # verified same_file admitted
-        assert 2 not in ids   # SUPPRESSED name_match excluded
+        assert 1 in ids  # verified same_file admitted
+        assert 2 not in ids  # SUPPRESSED name_match excluded
         conn.close()
     finally:
         os.unlink(path)

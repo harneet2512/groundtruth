@@ -8,6 +8,7 @@ agent-visible output. Intended visible markers ([GT_AUTO], [SIGNATURE],
 the agent sees "[GT_AUTO] Key symbols in file.py:". It is NOT a hidden
 prefix despite the [GT_...] naming pattern.
 """
+
 from __future__ import annotations
 
 import os
@@ -17,17 +18,35 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"
 
 
 HIDDEN_PREFIXES = (
-    "[GT_META]", "[GT_STATUS]", "[GT_CONFIG]", "[GT_TRACE]",
-    "[GT_DELIVERY]", "[GT_COST]", "[GT_PAYLOAD]", "[GT_LLM_CONFIG]",
+    "[GT_META]",
+    "[GT_STATUS]",
+    "[GT_CONFIG]",
+    "[GT_TRACE]",
+    "[GT_DELIVERY]",
+    "[GT_COST]",
+    "[GT_PAYLOAD]",
+    "[GT_LLM_CONFIG]",
     "[GT_SUMMARY]",
 )
 
 VISIBLE_MARKERS = (
-    "[GT_AUTO]", "[SIGNATURE]", "[BEHAVIORAL CONTRACT]",
-    "[TEST]", "[COMPLETENESS]", "[PATTERN]", "[PEER]",
-    "[SIMILAR]", "[OVERRIDE]", "[MISMATCH]", "[REVIEW]",
-    "[GT KEY CONTRACTS]", "[CATCHES]", "[RAISES]",
-    "PRESERVE:", "Called by:", "Calls into:",
+    "[GT_AUTO]",
+    "[SIGNATURE]",
+    "[BEHAVIORAL CONTRACT]",
+    "[TEST]",
+    "[COMPLETENESS]",
+    "[PATTERN]",
+    "[PEER]",
+    "[SIMILAR]",
+    "[OVERRIDE]",
+    "[MISMATCH]",
+    "[REVIEW]",
+    "[GT KEY CONTRACTS]",
+    "[CATCHES]",
+    "[RAISES]",
+    "PRESERVE:",
+    "Called by:",
+    "Calls into:",
 )
 
 
@@ -65,7 +84,11 @@ class TestProductionHiddenPrefixes:
         try:
             # Import the actual constant
             wrapper_path = os.path.join(
-                os.path.dirname(__file__), "..", "..", "scripts", "swebench",
+                os.path.dirname(__file__),
+                "..",
+                "..",
+                "scripts",
+                "swebench",
                 "oh_gt_full_wrapper.py",
             )
             if not os.path.isfile(wrapper_path):

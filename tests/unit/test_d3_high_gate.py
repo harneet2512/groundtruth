@@ -12,29 +12,41 @@ BRIEFING.md §5 brief numbers come from measure_brief.py on generate_v1r_brief w
 semantic ON; the sh-744 HIGH->MEDIUM downgrade is confirmed on the real run before the
 full benchmark).
 """
+
 from groundtruth.pretask.v1r_brief import _high_func_support
 from groundtruth.pretask.graph_localizer import Witness
 
 
 def _w(anchor, direction, src, dst, edge_type="CALLS"):
     return Witness(
-        file_path="sh.py", anchor=anchor, edge_type=edge_type, direction=direction,
-        verified=True, confidence=1.0, hop=1, src_symbol=src, dst_symbol=dst,
+        file_path="sh.py",
+        anchor=anchor,
+        edge_type=edge_type,
+        direction=direction,
+        verified=True,
+        confidence=1.0,
+        hop=1,
+        src_symbol=src,
+        dst_symbol=dst,
     )
 
 
 def test_lone_edge_anchor_is_weak_downgrades():
     # sh-744 shape: HIGH named `stdout`, supported by exactly one "wait calls stdout" edge.
-    witnesses = [_w("stdout", "calls_anchor", "wait", "stdout"),
-                 _w("wait", "calls_anchor", "__await__", "wait")]
+    witnesses = [
+        _w("stdout", "calls_anchor", "wait", "stdout"),
+        _w("wait", "calls_anchor", "__await__", "wait"),
+    ]
     assert _high_func_support(witnesses, "stdout") == 1
     assert _high_func_support(witnesses, "stdout") < 2  # -> HIGH downgrades to MEDIUM
 
 
 def test_multi_edge_convergence_keeps_high():
-    witnesses = [_w("foo", "calls_anchor", "bar", "foo"),
-                 _w("foo", "called_by_anchor", "foo", "baz"),
-                 _w("other", "calls_anchor", "x", "other")]
+    witnesses = [
+        _w("foo", "calls_anchor", "bar", "foo"),
+        _w("foo", "called_by_anchor", "foo", "baz"),
+        _w("other", "calls_anchor", "x", "other"),
+    ]
     assert _high_func_support(witnesses, "foo") == 2  # -> HIGH stays
 
 

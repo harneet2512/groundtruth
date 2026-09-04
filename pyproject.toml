@@ -44,6 +44,7 @@ dev = [
     "ruff>=0.4.0,<1",
     "coverage>=7.0.0,<8",
     "pathspec>=0.12.0,<1",
+    "pyyaml>=6.0.0,<7",
 ]
 benchmark = [
     "openai>=1.0.0,<2",

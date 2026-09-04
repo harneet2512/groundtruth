@@ -3,6 +3,7 @@
 Uses unittest-style assertions because gt_hook's TestAssertionMiner only
 recognises ``self.assertX`` calls, not bare ``assert`` statements.
 """
+
 from __future__ import annotations
 
 import unittest

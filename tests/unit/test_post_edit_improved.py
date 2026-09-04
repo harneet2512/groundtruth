@@ -3,11 +3,11 @@
 Tests the generate_improved_evidence function which produces priority-ordered
 code evidence from graph.db: callers -> siblings -> signature -> tests.
 """
+
 from __future__ import annotations
 
 import os
 import sqlite3
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -156,8 +156,7 @@ def repo_root(tmp_path: Path) -> str:
 class TestGetCallersFromGraph:
     def test_returns_cross_file_callers(self, graph_db: str, repo_root: str) -> None:
         callers = _get_callers_from_graph(
-            graph_db, "src/auth.py", "validate_token", repo_root,
-            seen_files=[], limit=5
+            graph_db, "src/auth.py", "validate_token", repo_root, seen_files=[], limit=5
         )
         # Should get 2 cross-file callers (routes.py and middleware.py)
         # Same-file caller (refresh_token in auth.py) excluded by query
@@ -169,8 +168,7 @@ class TestGetCallersFromGraph:
 
     def test_reads_actual_code_line(self, graph_db: str, repo_root: str) -> None:
         callers = _get_callers_from_graph(
-            graph_db, "src/auth.py", "validate_token", repo_root,
-            seen_files=[], limit=5
+            graph_db, "src/auth.py", "validate_token", repo_root, seen_files=[], limit=5
         )
         routes_caller = next(c for c in callers if c["file"] == "src/api/routes.py")
         assert "validate_token" in routes_caller["code"]
@@ -179,8 +177,12 @@ class TestGetCallersFromGraph:
     def test_marks_unseen_files(self, graph_db: str, repo_root: str) -> None:
         # Mark routes.py as already seen
         callers = _get_callers_from_graph(
-            graph_db, "src/auth.py", "validate_token", repo_root,
-            seen_files=["src/api/routes.py"], limit=5
+            graph_db,
+            "src/auth.py",
+            "validate_token",
+            repo_root,
+            seen_files=["src/api/routes.py"],
+            limit=5,
         )
         routes_caller = next(c for c in callers if c["file"] == "src/api/routes.py")
         mw_caller = next(c for c in callers if c["file"] == "src/middleware.py")
@@ -189,8 +191,7 @@ class TestGetCallersFromGraph:
 
     def test_filters_low_confidence(self, graph_db: str, repo_root: str) -> None:
         callers = _get_callers_from_graph(
-            graph_db, "src/auth.py", "validate_token", repo_root,
-            seen_files=[], limit=10
+            graph_db, "src/auth.py", "validate_token", repo_root, seen_files=[], limit=10
         )
         # utils.py has confidence 0.2 -- must not appear
         files = {c["file"] for c in callers}
@@ -211,24 +212,18 @@ class TestGetSignatureFromGraph:
 
 class TestGetSiblingsFromGraph:
     def test_returns_siblings(self, graph_db: str, repo_root: str) -> None:
-        siblings = _get_siblings_from_graph(
-            graph_db, "src/auth.py", "validate_token", repo_root
-        )
+        siblings = _get_siblings_from_graph(graph_db, "src/auth.py", "validate_token", repo_root)
         names = {s["name"] for s in siblings}
         # refresh_token and validate_session are siblings (same file, top-level)
         assert "refresh_token" in names or "validate_session" in names
 
     def test_reads_snippet(self, graph_db: str, repo_root: str) -> None:
-        siblings = _get_siblings_from_graph(
-            graph_db, "src/auth.py", "validate_token", repo_root
-        )
+        siblings = _get_siblings_from_graph(graph_db, "src/auth.py", "validate_token", repo_root)
         # validate_session at line 50 has body with isinstance check at line 51
         session_sib = next((s for s in siblings if s["name"] == "validate_session"), None)
         if session_sib:
             # snippet comes from lines 51+ (body after def line)
             assert "isinstance" in session_sib["snippet"] or session_sib["snippet"] != ""
-
-
 
 
 class TestGenerateImprovedEvidence:
@@ -264,7 +259,11 @@ class TestGenerateImprovedEvidence:
         # Must contain the actual code line, not just metadata
         assert "validate_token" in output
         # The code line from routes.py:47
-        assert "request.headers" in output or "validate_token(tok)" in output or "validate_token" in output
+        assert (
+            "request.headers" in output
+            or "validate_token(tok)" in output
+            or "validate_token" in output
+        )
 
     def test_contains_signature_or_contract(self, graph_db: str, repo_root: str) -> None:
         output = generate_improved_evidence(
@@ -273,10 +272,20 @@ class TestGenerateImprovedEvidence:
             db_path=graph_db,
             repo_root=repo_root,
         )
-        assert any(m in output for m in (
-            "SIGNATURE:", "def ", "PRESERVE:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-            "BEHAVIORAL CONTRACT:", "[TEST]",
-        ))
+        assert any(
+            m in output
+            for m in (
+                "SIGNATURE:",
+                "def ",
+                "PRESERVE:",
+                "MUTATES:",
+                "RETURNS:",
+                "RAISES:",
+                "PARAMS:",
+                "BEHAVIORAL CONTRACT:",
+                "[TEST]",
+            )
+        )
 
     def test_contains_actionable_evidence(self, graph_db: str, repo_root: str) -> None:
         output = generate_improved_evidence(
@@ -285,12 +294,25 @@ class TestGenerateImprovedEvidence:
             db_path=graph_db,
             repo_root=repo_root,
         )
-        assert any(m in output for m in (
-            "MUST PRESERVE", "PRESERVE:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-            "[SIGNATURE]", "def ", "[TEST]",
-            "[BEHAVIORAL CONTRACT]", "WARNING:", "SIBLING:",
-            "[CONTRACT]", "[CONTRACT ~]",
-        ))
+        assert any(
+            m in output
+            for m in (
+                "MUST PRESERVE",
+                "PRESERVE:",
+                "MUTATES:",
+                "RETURNS:",
+                "RAISES:",
+                "PARAMS:",
+                "[SIGNATURE]",
+                "def ",
+                "[TEST]",
+                "[BEHAVIORAL CONTRACT]",
+                "WARNING:",
+                "SIBLING:",
+                "[CONTRACT]",
+                "[CONTRACT ~]",
+            )
+        )
 
     def test_respects_token_cap(self, graph_db: str, repo_root: str) -> None:
         output = generate_improved_evidence(
@@ -342,7 +364,9 @@ class TestGenerateImprovedEvidence:
         # Negative control: no fabricated callers/contract for a function not in graph
         assert "PRESERVE:" not in output and "[CONTRACT]" not in output
 
-    def test_unbriefed_file_gets_minimal(self, graph_db: str, repo_root: str, tmp_path: Path) -> None:
+    def test_unbriefed_file_gets_minimal(
+        self, graph_db: str, repo_root: str, tmp_path: Path
+    ) -> None:
         # Write brief candidates that do NOT include auth.py
         candidates_path = str(tmp_path / "candidates.txt")
         with open(candidates_path, "w") as f:
@@ -350,6 +374,7 @@ class TestGenerateImprovedEvidence:
 
         # Patch the constant for this test
         import groundtruth.hooks.post_edit as pe
+
         orig = pe._BRIEF_CANDIDATES_PATH
         pe._BRIEF_CANDIDATES_PATH = candidates_path
         try:
@@ -362,11 +387,24 @@ class TestGenerateImprovedEvidence:
             # Unbriefed but has a graph connection -- becomes neighbor
             # or if no connection found, gets minimal with SIGNATURE
             if output:
-                assert any(m in output for m in (
-                    "[SIGNATURE]", "def ", "PRESERVE:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-                    "[BEHAVIORAL CONTRACT]", "[TEST]", "WARNING:", "SIBLING:",
-                    "[CONTRACT]", "[CONTRACT ~]",
-                ))
+                assert any(
+                    m in output
+                    for m in (
+                        "[SIGNATURE]",
+                        "def ",
+                        "PRESERVE:",
+                        "MUTATES:",
+                        "RETURNS:",
+                        "RAISES:",
+                        "PARAMS:",
+                        "[BEHAVIORAL CONTRACT]",
+                        "[TEST]",
+                        "WARNING:",
+                        "SIBLING:",
+                        "[CONTRACT]",
+                        "[CONTRACT ~]",
+                    )
+                )
         finally:
             pe._BRIEF_CANDIDATES_PATH = orig
 
@@ -551,7 +589,9 @@ class TestB1SiblingSuppressionInOutput:
             db_path=db_path,
             repo_root=str(repo),
         )
-        assert "[PATTERN]" in output, f"Pattern must fire when sibling shares state. Got: {output!r}"
+        assert "[PATTERN]" in output, (
+            f"Pattern must fire when sibling shares state. Got: {output!r}"
+        )
         assert "remove_item" in output
 
     def test_callers_still_emitted(self, graph_db: str, repo_root: str) -> None:
@@ -561,8 +601,9 @@ class TestB1SiblingSuppressionInOutput:
             db_path=graph_db,
             repo_root=repo_root,
         )
-        assert "routes.py" in output or "middleware.py" in output, \
+        assert "routes.py" in output or "middleware.py" in output, (
             "Caller evidence must still be emitted after B1 silence"
+        )
 
 
 @pytest.fixture
@@ -605,9 +646,7 @@ def short_body_db(tmp_path: Path) -> tuple[str, str]:
     lines.append("    os.remove(path)")
     lines.append("    shutil.rmtree(os.path.dirname(path))")
     lines.append("    print('done')")
-    Path(os.path.join(root, "src", "utils.py")).write_text(
-        "\n".join(lines), encoding="utf-8"
-    )
+    Path(os.path.join(root, "src", "utils.py")).write_text("\n".join(lines), encoding="utf-8")
     return db_path, root
 
 
@@ -646,8 +685,9 @@ class TestNoHiddenMetadataInOutput:
             db_path=graph_db,
             repo_root=repo_root,
         )
-        assert "[GT_STATUS]" not in output, \
+        assert "[GT_STATUS]" not in output, (
             "Hidden [GT_STATUS] must not appear in agent-visible evidence"
+        )
 
     def test_no_gt_config_in_output(self, graph_db: str, repo_root: str) -> None:
         output = generate_improved_evidence(
@@ -656,8 +696,9 @@ class TestNoHiddenMetadataInOutput:
             db_path=graph_db,
             repo_root=repo_root,
         )
-        assert "[GT_CONFIG]" not in output, \
+        assert "[GT_CONFIG]" not in output, (
             "Hidden [GT_CONFIG] must not appear in agent-visible evidence"
+        )
 
     def test_no_gt_meta_in_output(self, graph_db: str, repo_root: str) -> None:
         output = generate_improved_evidence(
@@ -666,8 +707,9 @@ class TestNoHiddenMetadataInOutput:
             db_path=graph_db,
             repo_root=repo_root,
         )
-        assert "[GT_META]" not in output, \
+        assert "[GT_META]" not in output, (
             "Hidden [GT_META] must not appear in agent-visible evidence"
+        )
 
     def test_allowed_markers_still_present(self, graph_db: str, repo_root: str) -> None:
         output = generate_improved_evidence(
@@ -677,13 +719,25 @@ class TestNoHiddenMetadataInOutput:
             repo_root=repo_root,
         )
         if output:
-            has_allowed = any(m in output for m in (
-                "[CONTRACT]", "[CONTRACT ~]",
-                "def ", "PRESERVE:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-                "[SIGNATURE]", "[BEHAVIORAL CONTRACT]", "[TEST]",
-            ))
-            assert has_allowed, \
+            has_allowed = any(
+                m in output
+                for m in (
+                    "[CONTRACT]",
+                    "[CONTRACT ~]",
+                    "def ",
+                    "PRESERVE:",
+                    "MUTATES:",
+                    "RETURNS:",
+                    "RAISES:",
+                    "PARAMS:",
+                    "[SIGNATURE]",
+                    "[BEHAVIORAL CONTRACT]",
+                    "[TEST]",
+                )
+            )
+            assert has_allowed, (
                 "Allowed evidence markers should still be present after metadata stripping"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1116,9 +1170,7 @@ def process_items(self, items: list) -> list:
     return results
 """
         # Write with padding to match start_line=1
-        Path(os.path.join(root, "src", "processor.py")).write_text(
-            func_body, encoding="utf-8"
-        )
+        Path(os.path.join(root, "src", "processor.py")).write_text(func_body, encoding="utf-8")
         return db_path, root
 
     def test_contract_includes_mutations(self, mutation_db: tuple[str, str]) -> None:
@@ -1171,5 +1223,6 @@ def process_items(self, items: list) -> list:
             repo_root=repo_root,
         )
         # B2 fallback emits body lines directly (no header)
-        assert "os.remove" in output, \
+        assert "os.remove" in output, (
             "B2 fallback for short void functions must still emit body content"
+        )

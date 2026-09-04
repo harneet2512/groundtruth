@@ -216,9 +216,7 @@ class ImportGraph:
             ).fetchone()
             build_ts = build_row[0] if build_row is not None else None
             if isinstance(build_ts, str) and self._looks_like_iso_utc(build_ts):
-                freshest_row = conn.execute(
-                    "SELECT MAX(indexed_at) FROM file_hashes"
-                ).fetchone()
+                freshest_row = conn.execute("SELECT MAX(indexed_at) FROM file_hashes").fetchone()
                 freshest = freshest_row[0] if freshest_row is not None else None
                 if isinstance(freshest, str) and freshest > build_ts:
                     return False
@@ -236,13 +234,7 @@ class ImportGraph:
         timestamp signal when this holds, to avoid false stale verdicts."""
         v = value.strip()
         # YYYY-MM-DDT... — the indexer writes time.RFC3339 UTC.
-        return (
-            len(v) >= 10
-            and v[:4].isdigit()
-            and v[4] == "-"
-            and v[7] == "-"
-            and "T" in v
-        )
+        return len(v) >= 10 and v[:4].isdigit() and v[4] == "-" and v[7] == "-" and "T" in v
 
     def _closure_sources_for_symbol(self, symbol_id: int) -> set[int] | None:
         """Node IDs that transitively reach ``symbol_id`` via the closure table.
@@ -311,10 +303,7 @@ class ImportGraph:
             closure_files.update(f for f in file_map.values() if f)
 
         if closure_used:
-            refs = [
-                Reference(file_path=fp, line=None, context="")
-                for fp in sorted(closure_files)
-            ]
+            refs = [Reference(file_path=fp, line=None, context="") for fp in sorted(closure_files)]
             return Ok(refs)
 
         # --- Live BFS fallback (pre-C7 graph.db) ---

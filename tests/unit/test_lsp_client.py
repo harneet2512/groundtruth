@@ -404,10 +404,7 @@ class TestLSPClientStderrSurfacing:
         import sys
 
         script = (
-            "import sys\n"
-            "for i in range(200):\n"
-            "    sys.stderr.write(f'line-{i}\\n')\n"
-            "sys.exit(3)\n"
+            "import sys\nfor i in range(200):\n    sys.stderr.write(f'line-{i}\\n')\nsys.exit(3)\n"
         )
         client = LSPClient(
             server_command=[sys.executable, "-c", script],
@@ -610,7 +607,9 @@ class TestProbeReadyReadinessVsLiveness:
             # Answer every probe id with an error until the probe gives up.
             for rid in range(1, 12):
                 await asyncio.sleep(0.02)
-                mock_stdout.feed_data(make_lsp_message(make_jsonrpc_error(rid, -32601, "not ready")))
+                mock_stdout.feed_data(
+                    make_lsp_message(make_jsonrpc_error(rid, -32601, "not ready"))
+                )
 
         asyncio.create_task(feed_errors())
         alive = await client.probe_ready(timeout=0.5, interval=0.1)

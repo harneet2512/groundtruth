@@ -34,6 +34,7 @@ GREEN (this test):
   - no anchor available -> kept (True, no over-suppression)
   - empty cached evidence -> never emit (False)
 """
+
 from __future__ import annotations
 
 import sys
@@ -49,8 +50,10 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts" / "swebench"))
 sys.modules.setdefault(
     "litellm",
     SimpleNamespace(
-        model_cost={}, success_callback=[],
-        completion=lambda *a, **k: None, acompletion=None,
+        model_cost={},
+        success_callback=[],
+        completion=lambda *a, **k: None,
+        acompletion=None,
         completion_cost=lambda *a, **k: 0.0,
     ),
 )
@@ -135,8 +138,7 @@ class TestRecallShouldEmit:
     def test_anchor_present_but_no_overlap_suppressed(self):
         """An anchor exists and the cached text shares none of it -> drop."""
         assert (
-            ohgt._recall_should_emit("totally unrelated banner text", {"set_fields"}, None)
-            is False
+            ohgt._recall_should_emit("totally unrelated banner text", {"set_fields"}, None) is False
         )
 
 

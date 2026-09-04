@@ -44,7 +44,11 @@ def _make_event(*, error_class: str | None = None) -> KernelEvent:
             provenance={
                 "graph_db_sha": "abc",
                 "plan_path": "/tmp/p.json",
-                "confidence_components": {"localization": 0.7, "drift": 0.0, "graph_validation": 1.0},
+                "confidence_components": {
+                    "localization": 0.7,
+                    "drift": 0.0,
+                    "graph_validation": 1.0,
+                },
                 "error_class": error_class,
             },
         ),

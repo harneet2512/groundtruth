@@ -1,11 +1,11 @@
 """P0-04/P0-05 — dep_store_manifest fail-closed validation."""
+
 from __future__ import annotations
 
 import json
 import os
 import tempfile
 
-import pytest
 
 from scripts.swebench.dep_store_manifest import (
     build_manifest,
@@ -76,7 +76,10 @@ def test_go_manifest_keeps_declared_gomodcache_when_copy_is_missing():
             rustup_source="",
         )
         assert validate_manifest(manifest) == []
-        assert manifest["stores"]["gomodcache"]["declared_in_task_image"] == "/workspace/.cache/go/pkg/mod"
+        assert (
+            manifest["stores"]["gomodcache"]["declared_in_task_image"]
+            == "/workspace/.cache/go/pkg/mod"
+        )
 
 
 def test_rust_fail_closed_missing_rustup():
@@ -126,10 +129,13 @@ def test_rust_passes_with_rust_src_for_active_toolchain():
         cargo = os.path.join(td, "cargo")
         _touch_tree(cargo, ["registry/index/foo"])
         rustup = os.path.join(td, "rustup")
-        _touch_tree(rustup, [
-            "toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc",
-            "toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/lib.rs",
-        ])
+        _touch_tree(
+            rustup,
+            [
+                "toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc",
+                "toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/lib.rs",
+            ],
+        )
         manifest = build_manifest(
             language="rust",
             gomodcache_host=os.path.join(td, "gomodcache"),
@@ -142,7 +148,9 @@ def test_rust_passes_with_rust_src_for_active_toolchain():
             rust_toolchain="stable-x86_64-unknown-linux-gnu",
         )
         assert validate_manifest(manifest) == []
-        assert manifest["stores"]["rust_src"]["active_toolchain"] == "stable-x86_64-unknown-linux-gnu"
+        assert (
+            manifest["stores"]["rust_src"]["active_toolchain"] == "stable-x86_64-unknown-linux-gnu"
+        )
         assert manifest["stores"]["rust_src"]["source_in_task_image"].endswith(
             "/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library"
         )

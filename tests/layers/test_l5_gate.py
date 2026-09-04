@@ -11,6 +11,7 @@ Anti-benchmaxxing: the synthetic repo uses a generic ``pkg.util.parse_url``
 function and three generic call sites — no SWE-bench-Live / Live-Lite /
 benchmark-specific names anywhere.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -19,7 +20,6 @@ import json
 import os
 import sqlite3
 import subprocess
-import sys
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from typing import Iterator
@@ -29,7 +29,11 @@ import pytest
 # ── Locate and import the gate module under test ─────────────────────────────
 GATE_PATH = (
     Path(__file__).resolve().parents[2]
-    / "tools" / "sweagent" / "gt_pre_finish_gate" / "lib" / "gt_pre_finish_gate.py"
+    / "tools"
+    / "sweagent"
+    / "gt_pre_finish_gate"
+    / "lib"
+    / "gt_pre_finish_gate.py"
 )
 
 
@@ -47,21 +51,24 @@ GATE = _load_gate_module()
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def _run_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", *args], cwd=str(repo), check=True,
-        capture_output=True, text=True,
+        ["git", *args],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 
 def _init_repo(repo: Path) -> None:
     """Create a tracked baseline:
 
-      pkg/__init__.py
-      pkg/util.py            (def parse_url(s):)
-      callers/a.py           (uses parse_url)
-      callers/b.py           (uses parse_url)
-      callers/c.py           (uses parse_url)
-      tests/test_util.py     (a placeholder real test)
-      README.md
+    pkg/__init__.py
+    pkg/util.py            (def parse_url(s):)
+    callers/a.py           (uses parse_url)
+    callers/b.py           (uses parse_url)
+    callers/c.py           (uses parse_url)
+    tests/test_util.py     (a placeholder real test)
+    README.md
     """
     repo.mkdir(parents=True, exist_ok=True)
     _run_git(repo, "init", "-q")
@@ -72,26 +79,17 @@ def _init_repo(repo: Path) -> None:
 
     (repo / "pkg").mkdir()
     (repo / "pkg" / "__init__.py").write_text("")
-    (repo / "pkg" / "util.py").write_text(
-        "def parse_url(s):\n"
-        "    return s.strip()\n"
-    )
+    (repo / "pkg" / "util.py").write_text("def parse_url(s):\n    return s.strip()\n")
 
     (repo / "callers").mkdir()
     (repo / "callers" / "a.py").write_text(
-        "from pkg.util import parse_url\n"
-        "def a():\n"
-        "    return parse_url('a')\n"
+        "from pkg.util import parse_url\ndef a():\n    return parse_url('a')\n"
     )
     (repo / "callers" / "b.py").write_text(
-        "from pkg.util import parse_url\n"
-        "def b():\n"
-        "    return parse_url('b')\n"
+        "from pkg.util import parse_url\ndef b():\n    return parse_url('b')\n"
     )
     (repo / "callers" / "c.py").write_text(
-        "from pkg.util import parse_url\n"
-        "def c():\n"
-        "    return parse_url('c')\n"
+        "from pkg.util import parse_url\ndef c():\n    return parse_url('c')\n"
     )
 
     (repo / "tests").mkdir()
@@ -159,8 +157,7 @@ def _build_graph_db(db_path: Path) -> None:
 
     def add_node(label, name, file_path, qualified=None):
         cur = conn.execute(
-            "INSERT INTO nodes(label,name,qualified_name,file_path,language) "
-            "VALUES (?,?,?,?,?)",
+            "INSERT INTO nodes(label,name,qualified_name,file_path,language) VALUES (?,?,?,?,?)",
             (label, name, qualified or name, file_path, "python"),
         )
         return cur.lastrowid
@@ -173,8 +170,7 @@ def _build_graph_db(db_path: Path) -> None:
     add_node("Module", "util", "pkg/util.py", "pkg.util")
     add_node("Module", "a", "callers/a.py", "callers.a")
 
-    for src, src_file in ((a_id, "callers/a.py"), (b_id, "callers/b.py"),
-                          (c_id, "callers/c.py")):
+    for src, src_file in ((a_id, "callers/a.py"), (b_id, "callers/b.py"), (c_id, "callers/c.py")):
         conn.execute(
             "INSERT INTO edges(source_id,target_id,type,source_line,source_file,"
             "resolution_method,confidence) VALUES (?,?,?,?,?,?,?)",
@@ -188,8 +184,9 @@ def _build_graph_db(db_path: Path) -> None:
 @contextmanager
 def _gate_env(repo: Path, log_dir: Path, db_path: Path | None) -> Iterator[None]:
     """Set env vars expected by the gate; restore on exit."""
-    saved = {k: os.environ.get(k) for k in
-             ("GT_GATE_CWD", "GT_INSTANCE_LOG_DIR", "GT_GRAPH_DB", "ROOT")}
+    saved = {
+        k: os.environ.get(k) for k in ("GT_GATE_CWD", "GT_INSTANCE_LOG_DIR", "GT_GRAPH_DB", "ROOT")
+    }
     os.environ["GT_GATE_CWD"] = str(repo)
     os.environ["GT_INSTANCE_LOG_DIR"] = str(log_dir)
     if db_path is not None:
@@ -244,9 +241,7 @@ def test_hallucinated_import_positive(repo_fixture):
     # imported NAME 'foo' has no node → flagged.
     target = repo / "pkg" / "util.py"
     target.write_text(
-        "from pkg.does_not_exist import foo\n"
-        "def parse_url(s):\n"
-        "    return s.strip()\n"
+        "from pkg.does_not_exist import foo\ndef parse_url(s):\n    return s.strip()\n"
     )
     with _gate_env(repo, log_dir, db):
         rc, _ = _invoke_gate()
@@ -263,9 +258,7 @@ def test_hallucinated_import_negative(repo_fixture):
     # Stdlib import — top component 'os' does NOT match any path in graph.db.
     target = repo / "pkg" / "util.py"
     target.write_text(
-        "from os import path\n"
-        "def parse_url(s):\n"
-        "    return path.normpath(s.strip())\n"
+        "from os import path\ndef parse_url(s):\n    return path.normpath(s.strip())\n"
     )
     with _gate_env(repo, log_dir, db):
         _invoke_gate()
@@ -282,8 +275,7 @@ def test_caller_blind_edit_positive(repo_fixture):
     repo, log_dir, db = repo_fixture
     # Modify parse_url body, no test file edited.
     (repo / "pkg" / "util.py").write_text(
-        "def parse_url(s):\n"
-        "    return s.strip().lower()\n"  # body changed
+        "def parse_url(s):\n    return s.strip().lower()\n"  # body changed
     )
     with _gate_env(repo, log_dir, db):
         _invoke_gate()
@@ -297,10 +289,7 @@ def test_caller_blind_edit_positive(repo_fixture):
 
 def test_caller_blind_edit_negative(repo_fixture):
     repo, log_dir, db = repo_fixture
-    (repo / "pkg" / "util.py").write_text(
-        "def parse_url(s):\n"
-        "    return s.strip().lower()\n"
-    )
+    (repo / "pkg" / "util.py").write_text("def parse_url(s):\n    return s.strip().lower()\n")
     # Also touch the test file → caller-blind is satisfied.
     (repo / "tests" / "test_util.py").write_text(
         "from pkg.util import parse_url\n"
@@ -322,8 +311,7 @@ def test_contract_break_positive(repo_fixture):
     repo, log_dir, db = repo_fixture
     # Add a parameter — signature change.
     (repo / "pkg" / "util.py").write_text(
-        "def parse_url(s, validate=True):\n"
-        "    return s.strip()\n"
+        "def parse_url(s, validate=True):\n    return s.strip()\n"
     )
     # Edit the test too so caller-blind doesn't piggyback (we're isolating
     # the contract-break check).
@@ -343,11 +331,7 @@ def test_contract_break_positive(repo_fixture):
 def test_contract_break_negative(repo_fixture):
     repo, log_dir, db = repo_fixture
     # Body change only, signature unchanged.
-    (repo / "pkg" / "util.py").write_text(
-        "def parse_url(s):\n"
-        "    s = s.strip()\n"
-        "    return s\n"
-    )
+    (repo / "pkg" / "util.py").write_text("def parse_url(s):\n    s = s.strip()\n    return s\n")
     # Touch tests so caller-blind doesn't fire either.
     (repo / "tests" / "test_util.py").write_text(
         "from pkg.util import parse_url\n"
@@ -398,9 +382,7 @@ def test_scratch_file_nested_excluded(repo_fixture):
     repo, log_dir, db = repo_fixture
     # tests/ is nested, and the basename matches the prefix pattern, but the
     # path contains '/', so the gate excludes it.
-    (repo / "tests" / "test_real.py").write_text(
-        "def test_real():\n    assert True\n"
-    )
+    (repo / "tests" / "test_real.py").write_text("def test_real():\n    assert True\n")
     with _gate_env(repo, log_dir, db):
         _invoke_gate()
     verdict = _read_verdict(log_dir)
@@ -427,20 +409,15 @@ def test_soft_escape_after_3(repo_fixture):
     repo, log_dir, db = repo_fixture
     # Force a flaggable diff (signature change).
     (repo / "pkg" / "util.py").write_text(
-        "def parse_url(s, validate=True):\n"
-        "    return s.strip()\n"
+        "def parse_url(s, validate=True):\n    return s.strip()\n"
     )
     # Pre-seed 3 prior blocks so this is the 4th attempt.
-    (log_dir / "gt_finish_attempts.json").write_text(
-        json.dumps({"blocks": 3, "ts": 0.0})
-    )
+    (log_dir / "gt_finish_attempts.json").write_text(json.dumps({"blocks": 3, "ts": 0.0}))
     with _gate_env(repo, log_dir, db):
         rc, stdout = _invoke_gate()
     assert rc == 0
     verdict = _read_verdict(log_dir)
-    assert verdict["result"] == "warn_soft_escape", (
-        f"4th attempt should soft-escape; got {verdict}"
-    )
+    assert verdict["result"] == "warn_soft_escape", f"4th attempt should soft-escape; got {verdict}"
     assert verdict["soft_escape"] is True
     assert verdict["submit_blocked"] is False
     # Submission markers must appear on the success path.
@@ -458,9 +435,7 @@ def test_strip_scratch_on_soft_escape(repo_fixture):
     staged_before = _run_git(repo, "diff", "--cached", "--name-only").stdout.split()
     assert "reproduce_issue.py" in staged_before
     # Pre-seed 3 prior blocks → next call is the 4th.
-    (log_dir / "gt_finish_attempts.json").write_text(
-        json.dumps({"blocks": 3, "ts": 0.0})
-    )
+    (log_dir / "gt_finish_attempts.json").write_text(json.dumps({"blocks": 3, "ts": 0.0}))
     with _gate_env(repo, log_dir, db):
         rc, stdout = _invoke_gate()
     assert rc == 0
@@ -472,9 +447,7 @@ def test_strip_scratch_on_soft_escape(repo_fixture):
     )
     # Index no longer contains the scratch (git rm --cached worked).
     ls_files = _run_git(repo, "ls-files", "--", "reproduce_issue.py").stdout.strip()
-    assert ls_files == "", (
-        f"Scratch should be unstaged; ls-files={ls_files!r}"
-    )
+    assert ls_files == "", f"Scratch should be unstaged; ls-files={ls_files!r}"
     # On-disk file remains.
     assert scratch.exists(), "git rm --cached must not delete on-disk file"
     # Emitted patch (between submission markers) must NOT contain the scratch.
@@ -508,9 +481,7 @@ def test_no_graph_db_pass(repo_fixture):
     repo, log_dir, _db = repo_fixture
     # Make sure SOMETHING is in the diff so the early "no edited files" branch
     # doesn't short-circuit before the graph-db check.
-    (repo / "pkg" / "util.py").write_text(
-        "def parse_url(s):\n    return s.strip()  # comment\n"
-    )
+    (repo / "pkg" / "util.py").write_text("def parse_url(s):\n    return s.strip()  # comment\n")
     with _gate_env(repo, log_dir, db_path=None):
         rc, stdout = _invoke_gate()
     assert rc == 0
@@ -595,7 +566,9 @@ def test_rc09_changed_symbols_for_lang_python_one_function():
 
 
 def test_rc09_emit_submission_aborts_on_corrupted_test_patch(
-    repo_fixture, monkeypatch, capsys,
+    repo_fixture,
+    monkeypatch,
+    capsys,
 ):
     """RC-09: when ``/root/test.patch`` exists but reverse-apply fails,
     ``emit_submission`` must abort with a clear stderr message rather than

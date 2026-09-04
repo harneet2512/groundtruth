@@ -100,9 +100,7 @@ def find_obligations(
                 # Empty set = GT couldn't identify edited function. Suppress class-wide noise.
                 continue
             candidate_methods = {
-                name: attrs
-                for name, attrs in methods.items()
-                if name in edited_functions
+                name: attrs for name, attrs in methods.items() if name in edited_functions
             }
         else:
             candidate_methods = methods

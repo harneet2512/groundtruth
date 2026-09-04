@@ -43,6 +43,7 @@ fixed at the DELIVERY surface in gt_mini_patch.py (never the rank/anchor/fusion 
 
 All deterministic: sqlite fixtures, no network, no task IDs, no gold labels.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -87,8 +88,9 @@ def patch_mod(monkeypatch):
 # ---------------------------------------------------------------------------
 # graph.db fixture builder (Go-indexer output schema, language column included)
 # ---------------------------------------------------------------------------
-def _create_graph_db(db_path: Path, nodes: list[dict], edges: list[tuple],
-                     with_language: bool = True) -> None:
+def _create_graph_db(
+    db_path: Path, nodes: list[dict], edges: list[tuple], with_language: bool = True
+) -> None:
     conn = sqlite3.connect(str(db_path))
     lang_col = "language TEXT NOT NULL DEFAULT 'python'," if with_language else ""
     conn.execute(
@@ -121,19 +123,34 @@ def _create_graph_db(db_path: Path, nodes: list[dict], edges: list[tuple],
             conn.execute(
                 "INSERT INTO nodes (label, name, file_path, signature, start_line, "
                 "end_line, is_test, language) VALUES (?,?,?,?,?,?,?,?)",
-                (n["label"], n["name"], n["file_path"], n.get("signature", ""),
-                 n.get("start_line", 1), n.get("end_line", 1), int(n.get("is_test", 0)),
-                 n.get("language", "python")),
+                (
+                    n["label"],
+                    n["name"],
+                    n["file_path"],
+                    n.get("signature", ""),
+                    n.get("start_line", 1),
+                    n.get("end_line", 1),
+                    int(n.get("is_test", 0)),
+                    n.get("language", "python"),
+                ),
             )
         else:
             conn.execute(
                 "INSERT INTO nodes (label, name, file_path, signature, start_line, "
                 "end_line, is_test) VALUES (?,?,?,?,?,?,?)",
-                (n["label"], n["name"], n["file_path"], n.get("signature", ""),
-                 n.get("start_line", 1), n.get("end_line", 1), int(n.get("is_test", 0))),
+                (
+                    n["label"],
+                    n["name"],
+                    n["file_path"],
+                    n.get("signature", ""),
+                    n.get("start_line", 1),
+                    n.get("end_line", 1),
+                    int(n.get("is_test", 0)),
+                ),
             )
-        key_to_id[n.get("key", n["name"])] = conn.execute(
-            "SELECT last_insert_rowid()").fetchone()[0]
+        key_to_id[n.get("key", n["name"])] = conn.execute("SELECT last_insert_rowid()").fetchone()[
+            0
+        ]
     for src, tgt, etype, line, method, conf in edges:
         conn.execute(
             "INSERT INTO edges (source_id, target_id, type, source_line, "
@@ -156,16 +173,16 @@ _JS_LIB = "lib/helper.js"
 @pytest.fixture
 def crosslang_repo(tmp_path: Path):
     """The boa [57] pollution shape, generalized:
-      - source.rs: Rust method `execute` + fn `load_module`.
-      - caller.rs: Rust fn `run_loop` calls execute (impl_method, det) — a TRUE
-        same-language fact that must SURVIVE (snippet mentions `execute`).
-      - deltablue.js (NOT under any vendor dir): javascript fn `chainTest` with a
-        deterministic-STAMPED (impl_method 0.6) CALLS edge to the Rust `execute`
-        — the cross-language pollution that must be suppressed.
-      - fmt.js: javascript callee of the Rust `load_module` (det stamp) — must
-        never render as a [CALLEE] contract.
-      - util.ts / helper.js: a js-family caller of a ts-family target — SAME
-        family, must survive.
+    - source.rs: Rust method `execute` + fn `load_module`.
+    - caller.rs: Rust fn `run_loop` calls execute (impl_method, det) — a TRUE
+      same-language fact that must SURVIVE (snippet mentions `execute`).
+    - deltablue.js (NOT under any vendor dir): javascript fn `chainTest` with a
+      deterministic-STAMPED (impl_method 0.6) CALLS edge to the Rust `execute`
+      — the cross-language pollution that must be suppressed.
+    - fmt.js: javascript callee of the Rust `load_module` (det stamp) — must
+      never render as a [CALLEE] contract.
+    - util.ts / helper.js: a js-family caller of a ts-family target — SAME
+      family, must survive.
     """
     db = tmp_path / "graph.db"
     repo = tmp_path / "src"
@@ -184,66 +201,110 @@ def crosslang_repo(tmp_path: Path):
         encoding="utf-8",
     )
     (repo / _RS_CALLER).write_text(
-        "pub fn run_loop(ctx: &mut Context) {\n"
-        "    let m = module();\n"
-        "    m.execute(ctx);\n"
-        "}\n",
+        "pub fn run_loop(ctx: &mut Context) {\n    let m = module();\n    m.execute(ctx);\n}\n",
         encoding="utf-8",
     )
     (repo / _RS_PARSER).write_text(
-        "// parser\n"
-        "pub fn parse_module(src: &str) {\n"
-        "}\n",
+        "// parser\npub fn parse_module(src: &str) {\n}\n",
         encoding="utf-8",
     )
     (repo / _JS_BENCH).write_text(
-        "function chainTest(n) {\n"
-        "    plan.execute();\n"
-        "}\n",
+        "function chainTest(n) {\n    plan.execute();\n}\n",
         encoding="utf-8",
     )
     (repo / _JS_TOOL).write_text(
-        "function format_output(p) {\n"
-        "    return p;\n"
-        "}\n",
+        "function format_output(p) {\n    return p;\n}\n",
         encoding="utf-8",
     )
     (repo / _TS_LIB).write_text(
-        "export function startServer(port: number) {\n"
-        "}\n",
+        "export function startServer(port: number) {\n}\n",
         encoding="utf-8",
     )
     (repo / _JS_LIB).write_text(
-        "function boot() {\n"
-        "    startServer(80);\n"
-        "}\n",
+        "function boot() {\n    startServer(80);\n}\n",
         encoding="utf-8",
     )
     nodes = [
-        {"label": "Method", "name": "execute", "key": "execute",
-         "file_path": _RS_SOURCE, "signature": "pub fn execute(&self, ctx: &mut Context)",
-         "start_line": 2, "end_line": 4, "language": "rust"},
-        {"label": "Function", "name": "load_module", "key": "load_module",
-         "file_path": _RS_SOURCE, "signature": "pub fn load_module(path: &str)",
-         "start_line": 6, "end_line": 9, "language": "rust"},
-        {"label": "Function", "name": "run_loop", "key": "run_loop",
-         "file_path": _RS_CALLER, "signature": "pub fn run_loop(ctx: &mut Context)",
-         "start_line": 1, "end_line": 4, "language": "rust"},
-        {"label": "Function", "name": "parse_module", "key": "parse_module",
-         "file_path": _RS_PARSER, "signature": "pub fn parse_module(src: &str)",
-         "start_line": 2, "end_line": 3, "language": "rust"},
-        {"label": "Function", "name": "chainTest", "key": "chainTest",
-         "file_path": _JS_BENCH, "signature": "function chainTest(n)",
-         "start_line": 1, "end_line": 3, "language": "javascript"},
-        {"label": "Function", "name": "format_output", "key": "format_output",
-         "file_path": _JS_TOOL, "signature": "function format_output(p)",
-         "start_line": 1, "end_line": 3, "language": "javascript"},
-        {"label": "Function", "name": "startServer", "key": "startServer",
-         "file_path": _TS_LIB, "signature": "export function startServer(port: number)",
-         "start_line": 1, "end_line": 2, "language": "typescript"},
-        {"label": "Function", "name": "boot", "key": "boot",
-         "file_path": _JS_LIB, "signature": "function boot()",
-         "start_line": 1, "end_line": 3, "language": "javascript"},
+        {
+            "label": "Method",
+            "name": "execute",
+            "key": "execute",
+            "file_path": _RS_SOURCE,
+            "signature": "pub fn execute(&self, ctx: &mut Context)",
+            "start_line": 2,
+            "end_line": 4,
+            "language": "rust",
+        },
+        {
+            "label": "Function",
+            "name": "load_module",
+            "key": "load_module",
+            "file_path": _RS_SOURCE,
+            "signature": "pub fn load_module(path: &str)",
+            "start_line": 6,
+            "end_line": 9,
+            "language": "rust",
+        },
+        {
+            "label": "Function",
+            "name": "run_loop",
+            "key": "run_loop",
+            "file_path": _RS_CALLER,
+            "signature": "pub fn run_loop(ctx: &mut Context)",
+            "start_line": 1,
+            "end_line": 4,
+            "language": "rust",
+        },
+        {
+            "label": "Function",
+            "name": "parse_module",
+            "key": "parse_module",
+            "file_path": _RS_PARSER,
+            "signature": "pub fn parse_module(src: &str)",
+            "start_line": 2,
+            "end_line": 3,
+            "language": "rust",
+        },
+        {
+            "label": "Function",
+            "name": "chainTest",
+            "key": "chainTest",
+            "file_path": _JS_BENCH,
+            "signature": "function chainTest(n)",
+            "start_line": 1,
+            "end_line": 3,
+            "language": "javascript",
+        },
+        {
+            "label": "Function",
+            "name": "format_output",
+            "key": "format_output",
+            "file_path": _JS_TOOL,
+            "signature": "function format_output(p)",
+            "start_line": 1,
+            "end_line": 3,
+            "language": "javascript",
+        },
+        {
+            "label": "Function",
+            "name": "startServer",
+            "key": "startServer",
+            "file_path": _TS_LIB,
+            "signature": "export function startServer(port: number)",
+            "start_line": 1,
+            "end_line": 2,
+            "language": "typescript",
+        },
+        {
+            "label": "Function",
+            "name": "boot",
+            "key": "boot",
+            "file_path": _JS_LIB,
+            "signature": "function boot()",
+            "start_line": 1,
+            "end_line": 3,
+            "language": "javascript",
+        },
     ]
     edges = [
         # TRUE same-language fact (must survive): caller.rs run_loop -> execute
@@ -297,26 +358,26 @@ def test_cross_language_caller_never_a_witness(crosslang_repo, patch_mod):
     repo, db = crosslang_repo
     con = sqlite3.connect(str(db))
     try:
-        wits = patch_mod._resolved_witnesses_for_file(
-            con, _RS_SOURCE, str(repo), max_each=4)
+        wits = patch_mod._resolved_witnesses_for_file(con, _RS_SOURCE, str(repo), max_each=4)
     finally:
         con.close()
     rendered = " ".join(f"{w['file_path']} {w['symbol']} {w['target']}" for w in wits)
     assert "deltablue" not in rendered, f"cross-language caller leaked: {rendered}"
     assert "fmt.js" not in rendered, f"cross-language callee leaked: {rendered}"
     # TRUE same-language facts survive
-    assert any(w["direction"] == "caller" and w["file_path"] == _RS_CALLER
-               for w in wits), f"true rust caller over-suppressed: {wits}"
-    assert any(w["direction"] == "callee" and w["file_path"] == _RS_PARSER
-               for w in wits), f"true rust callee over-suppressed: {wits}"
+    assert any(w["direction"] == "caller" and w["file_path"] == _RS_CALLER for w in wits), (
+        f"true rust caller over-suppressed: {wits}"
+    )
+    assert any(w["direction"] == "callee" and w["file_path"] == _RS_PARSER for w in wits), (
+        f"true rust callee over-suppressed: {wits}"
+    )
 
 
 def test_cross_language_caller_never_a_caller_fact(crosslang_repo, patch_mod):
     repo, db = crosslang_repo
     con = sqlite3.connect(str(db))
     try:
-        line = patch_mod._caller_contract_for_file(
-            con, _RS_SOURCE, str(repo), ["execute"])
+        line = patch_mod._caller_contract_for_file(con, _RS_SOURCE, str(repo), ["execute"])
     finally:
         con.close()
     assert "deltablue" not in line, f"cross-language caller fact leaked: {line}"
@@ -339,16 +400,15 @@ def test_same_family_js_ts_witness_survives(crosslang_repo, patch_mod):
     repo, db = crosslang_repo
     con = sqlite3.connect(str(db))
     try:
-        wits = patch_mod._resolved_witnesses_for_file(
-            con, _TS_LIB, str(repo), max_each=4)
+        wits = patch_mod._resolved_witnesses_for_file(con, _TS_LIB, str(repo), max_each=4)
     finally:
         con.close()
     assert any(w["file_path"] == _JS_LIB for w in wits), (
-        f"same-family js->ts caller wrongly suppressed: {wits}")
+        f"same-family js->ts caller wrongly suppressed: {wits}"
+    )
 
 
-def test_contract_caller_count_excludes_cross_language(crosslang_repo, patch_mod,
-                                                       monkeypatch):
+def test_contract_caller_count_excludes_cross_language(crosslang_repo, patch_mod, monkeypatch):
     repo, db = crosslang_repo
     monkeypatch.setenv("GT_GRAPH_DB", str(db))
     block = patch_mod._graph_contract_block(_RS_SOURCE)
@@ -365,23 +425,35 @@ def test_legacy_schema_without_language_is_permissive(tmp_path, patch_mod):
     (repo / "pkg" / "a.py").write_text("def callee():\n    pass\n", encoding="utf-8")
     (repo / "pkg" / "b.py").write_text("def caller():\n    callee()\n", encoding="utf-8")
     nodes = [
-        {"label": "Function", "name": "callee", "key": "callee",
-         "file_path": "pkg/a.py", "signature": "def callee()", "start_line": 1,
-         "end_line": 2},
-        {"label": "Function", "name": "caller", "key": "caller",
-         "file_path": "pkg/b.py", "signature": "def caller()", "start_line": 1,
-         "end_line": 2},
+        {
+            "label": "Function",
+            "name": "callee",
+            "key": "callee",
+            "file_path": "pkg/a.py",
+            "signature": "def callee()",
+            "start_line": 1,
+            "end_line": 2,
+        },
+        {
+            "label": "Function",
+            "name": "caller",
+            "key": "caller",
+            "file_path": "pkg/b.py",
+            "signature": "def caller()",
+            "start_line": 1,
+            "end_line": 2,
+        },
     ]
     edges = [("caller", "callee", "CALLS", 2, "import", 1.0)]
     _create_graph_db(db, nodes, edges, with_language=False)
     con = sqlite3.connect(str(db))
     try:
-        wits = patch_mod._resolved_witnesses_for_file(con, "pkg/a.py", str(repo),
-                                                      max_each=4)
+        wits = patch_mod._resolved_witnesses_for_file(con, "pkg/a.py", str(repo), max_each=4)
     finally:
         con.close()
     assert any(w["file_path"] == "pkg/b.py" for w in wits), (
-        f"legacy schema wrongly suppressed: {wits}")
+        f"legacy schema wrongly suppressed: {wits}"
+    )
 
 
 # ===========================================================================
@@ -408,40 +480,61 @@ def stale_repo(tmp_path: Path):
         encoding="utf-8",
     )
     (repo / "cache.rs").write_text(
-        "pub fn update_cache() {\n"
-        "}\n"
-        "// trailing\n",
+        "pub fn update_cache() {\n}\n// trailing\n",
         encoding="utf-8",
     )
     (repo / "parser.rs").write_text(
-        "// parser\n"
-        "pub fn parse_module(src: &str) {\n"
-        "}\n",
+        "// parser\npub fn parse_module(src: &str) {\n}\n",
         encoding="utf-8",
     )
     (repo / "main.rs").write_text(
-        "pub fn load_module(path: &str) {\n"
-        "    root_shape();\n"
-        "    parse_module(path);\n"
-        "}\n",
+        "pub fn load_module(path: &str) {\n    root_shape();\n    parse_module(path);\n}\n",
         encoding="utf-8",
     )
     nodes = [
-        {"label": "Function", "name": "load_module", "key": "load_module",
-         "file_path": "main.rs", "signature": "pub fn load_module(path: &str)",
-         "start_line": 1, "end_line": 4, "language": "rust"},
+        {
+            "label": "Function",
+            "name": "load_module",
+            "key": "load_module",
+            "file_path": "main.rs",
+            "signature": "pub fn load_module(path: &str)",
+            "start_line": 1,
+            "end_line": 4,
+            "language": "rust",
+        },
         # STALE: graph thinks root_shape is defined at ctx/mod.rs:2 (live: doc comment)
-        {"label": "Function", "name": "root_shape", "key": "root_shape",
-         "file_path": "ctx/mod.rs", "signature": "pub fn root_shape()",
-         "start_line": 2, "end_line": 2, "language": "rust"},
+        {
+            "label": "Function",
+            "name": "root_shape",
+            "key": "root_shape",
+            "file_path": "ctx/mod.rs",
+            "signature": "pub fn root_shape()",
+            "start_line": 2,
+            "end_line": 2,
+            "language": "rust",
+        },
         # STALE caller: graph thinks update_cache's call site is cache.rs:2 (live: `}`)
-        {"label": "Function", "name": "update_cache", "key": "update_cache",
-         "file_path": "cache.rs", "signature": "pub fn update_cache()",
-         "start_line": 1, "end_line": 2, "language": "rust"},
+        {
+            "label": "Function",
+            "name": "update_cache",
+            "key": "update_cache",
+            "file_path": "cache.rs",
+            "signature": "pub fn update_cache()",
+            "start_line": 1,
+            "end_line": 2,
+            "language": "rust",
+        },
         # FRESH callee
-        {"label": "Function", "name": "parse_module", "key": "parse_module",
-         "file_path": "parser.rs", "signature": "pub fn parse_module(src: &str)",
-         "start_line": 2, "end_line": 3, "language": "rust"},
+        {
+            "label": "Function",
+            "name": "parse_module",
+            "key": "parse_module",
+            "file_path": "parser.rs",
+            "signature": "pub fn parse_module(src: &str)",
+            "start_line": 2,
+            "end_line": 3,
+            "language": "rust",
+        },
     ]
     edges = [
         # callee witness: load_module -> root_shape (def line stale)
@@ -459,8 +552,7 @@ def test_snippet_attestation_helper(patch_mod):
     att = patch_mod._snippet_attests
     assert att("plan.execute();", "execute")
     assert att("pub fn parse_module(src: &str) {", "parse_module")
-    assert not att("/// Returns an error if the handle is already cancelled.",
-                   "root_shape")
+    assert not att("/// Returns an error if the handle is already cancelled.", "root_shape")
     assert not att("}", "enter_realm")
     # empty snippet (file unreadable) is NOT drift evidence
     assert att("", "anything")
@@ -471,42 +563,36 @@ def test_stale_callee_witness_suppressed(stale_repo, patch_mod):
     repo, db = stale_repo
     con = sqlite3.connect(str(db))
     try:
-        wits = patch_mod._resolved_witnesses_for_file(con, "main.rs", str(repo),
-                                                      max_each=4)
+        wits = patch_mod._resolved_witnesses_for_file(con, "main.rs", str(repo), max_each=4)
     finally:
         con.close()
     stale = [w for w in wits if w["symbol"] == "root_shape"]
-    assert not stale, (
-        f"stale callee witness rendered (quotes a drifted doc-comment line): {stale}")
+    assert not stale, f"stale callee witness rendered (quotes a drifted doc-comment line): {stale}"
     # the FRESH callee witness survives
     assert any(w["symbol"] == "parse_module" for w in wits), (
-        f"fresh callee witness over-suppressed: {wits}")
+        f"fresh callee witness over-suppressed: {wits}"
+    )
 
 
 def test_stale_caller_witness_suppressed(stale_repo, patch_mod):
     repo, db = stale_repo
     con = sqlite3.connect(str(db))
     try:
-        wits = patch_mod._resolved_witnesses_for_file(con, "main.rs", str(repo),
-                                                      max_each=4)
+        wits = patch_mod._resolved_witnesses_for_file(con, "main.rs", str(repo), max_each=4)
     finally:
         con.close()
-    stale = [w for w in wits if w["direction"] == "caller"
-             and w["file_path"] == "cache.rs"]
-    assert not stale, (
-        f"stale caller witness rendered (call-site line is a bare brace): {stale}")
+    stale = [w for w in wits if w["direction"] == "caller" and w["file_path"] == "cache.rs"]
+    assert not stale, f"stale caller witness rendered (call-site line is a bare brace): {stale}"
 
 
 def test_stale_caller_fact_suppressed_in_caller_contract(stale_repo, patch_mod):
     repo, db = stale_repo
     con = sqlite3.connect(str(db))
     try:
-        line = patch_mod._caller_contract_for_file(
-            con, "main.rs", str(repo), ["load_module"])
+        line = patch_mod._caller_contract_for_file(con, "main.rs", str(repo), ["load_module"])
     finally:
         con.close()
-    assert "update_cache()" not in line, (
-        f"drifted call-site line rendered as a caller FACT: {line}")
+    assert "update_cache()" not in line, f"drifted call-site line rendered as a caller FACT: {line}"
 
 
 # ===========================================================================
@@ -528,12 +614,15 @@ _NPM_PASS = "  16725 passing (40s)\n"
 def test_no_test_evidence_fires_after_two_blind_test_runs(patch_mod):
     patch_mod._source_edit_count = 1
     out1 = patch_mod._l5_no_test_evidence_nudge(
-        "timeout 60 cargo test --lib 2>&1 | tail -20", _CARGO_BLIND)
+        "timeout 60 cargo test --lib 2>&1 | tail -20", _CARGO_BLIND
+    )
     assert out1 == ""  # first blind run: not yet a pattern
     out2 = patch_mod._l5_no_test_evidence_nudge(
-        "timeout 120 cargo test evaluation 2>&1 | tail -30", _CARGO_BLIND)
+        "timeout 120 cargo test evaluation 2>&1 | tail -30", _CARGO_BLIND
+    )
     assert 'reason="no_test_evidence"' in out2, (
-        "two blind test runs after a source edit must fire the governor")
+        "two blind test runs after a source edit must fire the governor"
+    )
 
 
 def test_no_test_evidence_fires_once(patch_mod):
@@ -555,8 +644,7 @@ def test_no_test_evidence_silent_when_pass_seen(patch_mod):
 
 def test_no_test_evidence_silent_when_fail_seen(patch_mod):
     patch_mod._source_edit_count = 1
-    assert patch_mod._l5_no_test_evidence_nudge("go test -run TestRequire ./...",
-                                                _GO_FAIL) == ""
+    assert patch_mod._l5_no_test_evidence_nudge("go test -run TestRequire ./...", _GO_FAIL) == ""
     for _ in range(4):
         out = patch_mod._l5_no_test_evidence_nudge("cargo test", _CARGO_BLIND)
     assert out == "", "a real FAIL is test evidence -> blind-run pattern is moot"

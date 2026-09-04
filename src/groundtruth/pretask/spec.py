@@ -19,15 +19,14 @@ The extractor is deterministic and language-agnostic: it keys on requirement
 GRAMMAR (modals, quoted spans, fenced code, numbered steps), which is invariant
 across English issue bodies for any repo/language.
 """
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
 
 # ----------------------------------------------------------------- regex set
-_IDENT_RE = re.compile(
-    r"\b([A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]+)*)\b"
-)
+_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]+)*)\b")
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 _FENCE_RE = re.compile(r"```[\w-]*\n(.*?)```", re.S)
 # Double-quoted or single-quoted short literals the reporter calls out verbatim.
@@ -50,16 +49,39 @@ _BEHAVIOR_VERB_RE = re.compile(
 )
 # API-shape qualifiers in a parenthesized fragment attached to a symbol:
 #   capture_snapshot (async, optional name, returns ID)
-_API_QUALIFIER_RE = re.compile(
-    r"([A-Za-z_][A-Za-z0-9_]*)\s*\(([^()\n]{0,120})\)"
-)
+_API_QUALIFIER_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(([^()\n]{0,120})\)")
 # Qualifier keywords WORTH keeping (the requirement words anchors.py drops):
 _QUALIFIER_KEYWORDS = (
-    "async", "await", "sync", "synchronous", "asynchronous", "optional",
-    "required", "nullable", "immutable", "mutable", "readonly", "read-only",
-    "deprecated", "lazy", "eager", "abstract", "static", "const", "final",
-    "thread-safe", "idempotent", "recursive", "ordered", "sorted", "unique",
-    "returns", "raises", "throws", "default", "defaults",
+    "async",
+    "await",
+    "sync",
+    "synchronous",
+    "asynchronous",
+    "optional",
+    "required",
+    "nullable",
+    "immutable",
+    "mutable",
+    "readonly",
+    "read-only",
+    "deprecated",
+    "lazy",
+    "eager",
+    "abstract",
+    "static",
+    "const",
+    "final",
+    "thread-safe",
+    "idempotent",
+    "recursive",
+    "ordered",
+    "sorted",
+    "unique",
+    "returns",
+    "raises",
+    "throws",
+    "default",
+    "defaults",
 )
 # Expected-vs-actual / repro markers.
 _EXPECTED_RE = re.compile(
@@ -90,6 +112,7 @@ class Obligation:
                      being wrong about the surface (§5.2 SAFE set): e.g.
                      {"async"} or {"impl Trait for Type"}.  Empty = not checkable.
     """
+
     verbatim_text: str
     kind: str
     symbols: frozenset[str] = frozenset()
@@ -100,6 +123,7 @@ class Obligation:
 @dataclass
 class IssueSpec:
     """The decomposed issue: an ordered list of obligations + their union views."""
+
     obligations: list[Obligation] = field(default_factory=list)
     # union convenience views (telemetry / oracle relevance keys)
     all_symbols: set[str] = field(default_factory=set)
@@ -215,8 +239,7 @@ def extract_spec(issue_text: str, max_obligations: int = 40) -> IssueSpec:
             elif any(c.isupper() for c in s[1:]):
                 kept_syms.add(s)  # internal capital — CamelCase / acronym
             elif s[:1].isupper() and any(
-                m.start() > 0
-                for m in re.finditer(rf"\b{re.escape(s)}\b", lead)
+                m.start() > 0 for m in re.finditer(rf"\b{re.escape(s)}\b", lead)
             ):
                 kept_syms.add(s)  # capitalized, seen mid-fragment
         kws = _qualifier_keywords(v)

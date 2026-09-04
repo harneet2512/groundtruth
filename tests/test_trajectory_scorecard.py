@@ -1,8 +1,8 @@
 """P7 — trajectory scorecard on paired TaskMetrics."""
+
 from __future__ import annotations
 
 import importlib.util
-import math
 import sys
 from pathlib import Path
 

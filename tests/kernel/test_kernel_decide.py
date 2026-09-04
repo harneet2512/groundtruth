@@ -35,7 +35,9 @@ from groundtruth.control.types import (
 # Phase 1 implementation landed -- tests are now expected-pass.
 
 
-def _make_run_state(*, confidence: float, focus: str, model_hint: str | None = "claude-sonnet-4.5") -> RunState:
+def _make_run_state(
+    *, confidence: float, focus: str, model_hint: str | None = "claude-sonnet-4.5"
+) -> RunState:
     focus_path = Path(focus)
     return RunState(
         task_id="t",
@@ -50,7 +52,9 @@ def _make_run_state(*, confidence: float, focus: str, model_hint: str | None = "
             plan_path=None,
         ),
         edit_history=[],
-        capabilities=Capabilities(block=True, visible=True, audit=True, mid_task_pull=True, replan_inject=True),
+        capabilities=Capabilities(
+            block=True, visible=True, audit=True, mid_task_pull=True, replan_inject=True
+        ),
         model_hint=model_hint,
     )
 
@@ -74,7 +78,11 @@ def test_first_edit_root_scaffold_blocks(fixture_loader):
     decision = kernel.decide_pre_tool(call, rs)
     assert decision.action == DecisionAction(expected["expected_return"]["action"])
     assert decision.rule_id == expected["expected_return"]["rule_id"]
-    assert expected["expected_return"]["min_confidence"] <= decision.confidence <= expected["expected_return"]["max_confidence"]
+    assert (
+        expected["expected_return"]["min_confidence"]
+        <= decision.confidence
+        <= expected["expected_return"]["max_confidence"]
+    )
 
 
 # Layer 1: Happy path -- confidence-gated upgrade to block.
@@ -147,7 +155,9 @@ def test_unicode_paths_handled_cleanly():
 # Mutation pin: any branch that prefers localization over drift unconditionally.
 def test_conflicting_high_localization_high_drift_does_not_allow():
     rs = _make_run_state(confidence=0.85, focus="src/a.py")
-    rs = rs.model_copy(update={"warning_history": ["first_edit_missed_focus", "first_edit_missed_focus"]})
+    rs = rs.model_copy(
+        update={"warning_history": ["first_edit_missed_focus", "first_edit_missed_focus"]}
+    )
     decision = kernel.decide_pre_tool(_edit_call("src/elsewhere.py"), rs)
     assert decision.action != DecisionAction.ALLOW
 

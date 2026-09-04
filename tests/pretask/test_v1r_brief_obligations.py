@@ -90,9 +90,7 @@ def test_obligations_render_is_after_contract_before_scope() -> None:
     s_pos = out.find("Scope chain")
     assert o_pos != -1, f"block absent: {out!r}"
     if s_pos != -1:  # scope chain rendered → obligations must precede it
-        assert o_pos < s_pos, (
-            f"obligation block rendered AFTER the scope chain: {out!r}"
-        )
+        assert o_pos < s_pos, f"obligation block rendered AFTER the scope chain: {out!r}"
 
 
 def test_obligations_render_bites_mutation() -> None:
@@ -101,12 +99,14 @@ def test_obligations_render_bites_mutation() -> None:
     focus that shares no token render NOTHING. (If the helper ignored the gate
     and always rendered, the second call would be non-empty → RED.)"""
     files_hit = [
-        FileEntry(path="src/parser.rs", score=0.9,
-                  functions=["parse_node"], function_names=["parse_node"])
+        FileEntry(
+            path="src/parser.rs", score=0.9, functions=["parse_node"], function_names=["parse_node"]
+        )
     ]
     files_miss = [
-        FileEntry(path="src/logger.rs", score=0.9,
-                  functions=["write_line"], function_names=["write_line"])
+        FileEntry(
+            path="src/logger.rs", score=0.9, functions=["write_line"], function_names=["write_line"]
+        )
     ]
     hit = _render_obligations_block(_PEST_ISSUE, files_hit, _cap)
     miss = _render_obligations_block(_PEST_ISSUE, files_miss, _cap)
@@ -119,6 +119,7 @@ def test_obligations_render_bites_mutation() -> None:
 
 # --- LEAKAGE: grader-coupled obligations are dropped fail-closed --------------
 
+
 def test_leakage_test_name_obligation_dropped() -> None:
     """An obligation that names a pytest test (``test_*``) is NEVER rendered —
     GT must surface zero test references (gt_trial §6 leakage rule)."""
@@ -127,8 +128,9 @@ def test_leakage_test_name_obligation_dropped() -> None:
         "The fix must make test_parse_node_coalesces pass.\n"
     )
     files = [
-        FileEntry(path="src/parser.rs", score=0.9,
-                  functions=["parse_node"], function_names=["parse_node"])
+        FileEntry(
+            path="src/parser.rs", score=0.9, functions=["parse_node"], function_names=["parse_node"]
+        )
     ]
     out = render_brief(files, issue_text=issue)
     # the clean behavioral obligation still renders …
@@ -146,16 +148,16 @@ def test_leakage_fail_to_pass_obligation_dropped() -> None:
         "parse_node should satisfy the FAIL_TO_PASS contract for the suite.\n"
     )
     files = [
-        FileEntry(path="src/parser.rs", score=0.9,
-                  functions=["parse_node"], function_names=["parse_node"])
+        FileEntry(
+            path="src/parser.rs", score=0.9, functions=["parse_node"], function_names=["parse_node"]
+        )
     ]
     out = render_brief(files, issue_text=issue)
-    assert "FAIL_TO_PASS" not in out, (
-        f"a FAIL_TO_PASS marker leaked into the brief: {out!r}"
-    )
+    assert "FAIL_TO_PASS" not in out, f"a FAIL_TO_PASS marker leaked into the brief: {out!r}"
 
 
 # --- NO-OVERLAP: stay quiet when nothing anchors to the focus -----------------
+
 
 def test_no_overlap_obligations_quiet() -> None:
     """Obligations that share no token with the rendered focus function → the
@@ -166,8 +168,9 @@ def test_no_overlap_obligations_quiet() -> None:
     )
     # focus function shares NO token with validate_schema / SchemaError
     files = [
-        FileEntry(path="src/render.rs", score=0.9,
-                  functions=["draw_pixel"], function_names=["draw_pixel"])
+        FileEntry(
+            path="src/render.rs", score=0.9, functions=["draw_pixel"], function_names=["draw_pixel"]
+        )
     ]
     out = render_brief(files, issue_text=issue)
     assert "<gt-obligations>" not in out, (
@@ -185,8 +188,9 @@ def test_no_focus_functions_quiet() -> None:
 def test_empty_issue_quiet() -> None:
     """No issue text → no obligations → quiet (degrades cleanly)."""
     files = [
-        FileEntry(path="src/parser.rs", score=0.9,
-                  functions=["parse_node"], function_names=["parse_node"])
+        FileEntry(
+            path="src/parser.rs", score=0.9, functions=["parse_node"], function_names=["parse_node"]
+        )
     ]
     assert _render_obligations_block("", files, _cap) == []
 
@@ -219,9 +223,12 @@ def test_obligations_render_on_anchor_symbol_not_in_focus() -> None:
     files = [
         # focus functions deliberately exclude any token in the obligation —
         # exactly the live pest case (focus = optimize/new, subject = range).
-        FileEntry(path="meta/src/optimizer/mod.rs", score=0.9,
-                  functions=["optimize", "new"],
-                  function_names=["optimize", "new"])
+        FileEntry(
+            path="meta/src/optimizer/mod.rs",
+            score=0.9,
+            functions=["optimize", "new"],
+            function_names=["optimize", "new"],
+        )
     ]
     out = _render_obligations_block(
         _FEATURE_ADD_ISSUE, files, _cap, anchor_symbols={"range", "CharClass"}
@@ -238,9 +245,12 @@ def test_anchor_symbol_param_bites_mutation() -> None:
     it. Reverting the fix (focus-only gate) makes this RED — proving the param,
     not some incidental focus-token overlap, is what surfaces the obligation."""
     files = [
-        FileEntry(path="meta/src/optimizer/mod.rs", score=0.9,
-                  functions=["optimize", "new"],
-                  function_names=["optimize", "new"])
+        FileEntry(
+            path="meta/src/optimizer/mod.rs",
+            score=0.9,
+            functions=["optimize", "new"],
+            function_names=["optimize", "new"],
+        )
     ]
     with_anchor = _render_obligations_block(
         _FEATURE_ADD_ISSUE, files, _cap, anchor_symbols={"range", "CharClass"}
@@ -262,16 +272,15 @@ def test_anchor_symbol_gate_still_correct_or_quiet() -> None:
         "It should always raise a SchemaError when the version is missing.\n"
     )
     files = [
-        FileEntry(path="src/render.rs", score=0.9,
-                  functions=["draw_pixel"], function_names=["draw_pixel"])
+        FileEntry(
+            path="src/render.rs", score=0.9, functions=["draw_pixel"], function_names=["draw_pixel"]
+        )
     ]
     # anchor symbols about a DIFFERENT subsystem — no overlap with the obligation.
     out = _render_obligations_block(
         issue, files, _cap, anchor_symbols={"draw_pixel", "framebuffer"}
     )
-    assert out == [], (
-        f"unrelated obligation laundered through anchor_symbols: {out!r}"
-    )
+    assert out == [], f"unrelated obligation laundered through anchor_symbols: {out!r}"
 
 
 def test_render_brief_threads_anchor_symbols() -> None:
@@ -279,9 +288,12 @@ def test_render_brief_threads_anchor_symbols() -> None:
     so an issue-subject obligation reaches the brief end-to-end (the live wiring
     gap — anchors were computed but never reached the gate)."""
     files = [
-        FileEntry(path="meta/src/optimizer/mod.rs", score=0.9,
-                  functions=["optimize", "new"],
-                  function_names=["optimize", "new"])
+        FileEntry(
+            path="meta/src/optimizer/mod.rs",
+            score=0.9,
+            functions=["optimize", "new"],
+            function_names=["optimize", "new"],
+        )
     ]
     out_with = render_brief(
         files, issue_text=_FEATURE_ADD_ISSUE, anchor_symbols={"range", "CharClass"}

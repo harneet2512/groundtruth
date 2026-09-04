@@ -278,9 +278,18 @@ def test_medium_scope_distinct_files_gates_name_match(tmp_path: Path) -> None:
            CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,
               target_id INTEGER, type TEXT, resolution_method TEXT, confidence REAL);"""
     )
-    conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (1,'Function','target_fn','pkg/target.py')")
-    for nid, f in [(2, "pkg/factA.py"), (3, "pkg/factB.py"), (4, "pkg/guessA.py"), (5, "pkg/guessB.py")]:
-        conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (?,'Function','c',?)", (nid, f))
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path) VALUES (1,'Function','target_fn','pkg/target.py')"
+    )
+    for nid, f in [
+        (2, "pkg/factA.py"),
+        (3, "pkg/factB.py"),
+        (4, "pkg/guessA.py"),
+        (5, "pkg/guessB.py"),
+    ]:
+        conn.execute(
+            "INSERT INTO nodes (id,label,name,file_path) VALUES (?,'Function','c',?)", (nid, f)
+        )
     conn.executemany(
         "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence) "
         "VALUES (?,1,'CALLS',?,?)",
@@ -614,9 +623,7 @@ def sparse_graph_db(tmp_path: Path) -> str:
 
 @patch("groundtruth.pretask.v1r_brief.run_v74")
 @patch("groundtruth.pretask.v1r_brief._top_functions", return_value=[])
-def test_sparse_graph_no_suppression(
-    _mock_funcs, mock_v74, sparse_graph_db: str
-) -> None:
+def test_sparse_graph_no_suppression(_mock_funcs, mock_v74, sparse_graph_db: str) -> None:
     """On sparse graphs, modulus gate must NOT suppress the brief."""
     mock_v74.return_value = MagicMock(
         ranked_full=[
@@ -696,29 +703,52 @@ from groundtruth.pretask.graph_localizer import (  # noqa: E402
 )
 
 
-def _cand(file_path: str, *, score: float, verified: bool = False,
-          anchor: str = "anchor_fn", dst: str = "callee_fn") -> Candidate:
+def _cand(
+    file_path: str,
+    *,
+    score: float,
+    verified: bool = False,
+    anchor: str = "anchor_fn",
+    dst: str = "callee_fn",
+) -> Candidate:
     """A localizer Candidate carrying one issue-anchored witness (verified or not)."""
     w = Witness(
-        file_path=file_path, anchor=anchor, edge_type="CALLS",
-        direction="calls_anchor", verified=verified, confidence=1.0 if verified else 0.5,
-        hop=1, src_symbol="src_fn", dst_symbol=dst,
+        file_path=file_path,
+        anchor=anchor,
+        edge_type="CALLS",
+        direction="calls_anchor",
+        verified=verified,
+        confidence=1.0 if verified else 0.5,
+        hop=1,
+        src_symbol="src_fn",
+        dst_symbol=dst,
     )
     return Candidate(
-        file_path=file_path, score=score, witnesses=[w],
-        lex_hits=1, degree=1, confidence=(1.0 if verified else 0.5),
+        file_path=file_path,
+        score=score,
+        witnesses=[w],
+        lex_hits=1,
+        degree=1,
+        confidence=(1.0 if verified else 0.5),
     )
 
 
-def _loc_result(cands: list[Candidate], *, anchors: list[str], agree: dict[str, int]) -> LocalizerResult:
+def _loc_result(
+    cands: list[Candidate], *, anchors: list[str], agree: dict[str, int]
+) -> LocalizerResult:
     return LocalizerResult(
-        candidates=cands, anchor_symbols=anchors, confidence=cands[0].confidence if cands else 0.0,
-        confident=True, gate_reason="test", agreement_by_file=agree,
+        candidates=cands,
+        anchor_symbols=anchors,
+        confidence=cands[0].confidence if cands else 0.0,
+        confident=True,
+        gate_reason="test",
+        agreement_by_file=agree,
     )
 
 
 # ---- L1 CROSS-WIRE: _localization_header now returns (header, primary) and the
 #      primary is the file the header NAMES as #1 (single source of truth). ------
+
 
 def test_localization_header_returns_tuple_empty_when_no_loc():
     """No candidates -> ('', '') — nothing to align to (correct-or-quiet)."""
@@ -744,7 +774,8 @@ def test_localization_header_primary_is_named_first_file(tmp_path: Path):
               target_id INTEGER, type TEXT, source_line INTEGER,
               resolution_method TEXT, confidence REAL DEFAULT 0.5);"""
     )
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     cands = [_cand("src/gold.py", score=0.9), _cand("src/other.py", score=0.5)]
     # >=1 ranker agrees on gold -> MEDIUM flat list naming gold #1.
     loc = _loc_result(cands, anchors=["anchor_fn"], agree={_gl_normalize("src/gold.py"): 1})
@@ -772,7 +803,7 @@ def test_l1_alignment_moves_loc_primary_to_entries_front():
         FileEntry(path="src/gold.py", score=0.50),
     ]
     _loc_primary = "src/gold.py"
-    _loc_header = "<gt-localization confidence=\"medium\">\n  1. src/gold.py\n</gt-localization>"
+    _loc_header = '<gt-localization confidence="medium">\n  1. src/gold.py\n</gt-localization>'
 
     # The exact alignment the consumer runs (generate_v1r_brief, pre-L1-SCOPE).
     if _loc_header and _loc_primary and entries:
@@ -783,7 +814,7 @@ def test_l1_alignment_moves_loc_primary_to_entries_front():
                     entries.insert(0, entries.pop(_i))
                 break
 
-    assert entries[0].path == "src/gold.py"          # == _loc.candidates[0] (Pipe A)
+    assert entries[0].path == "src/gold.py"  # == _loc.candidates[0] (Pipe A)
     # the other entries keep their relative order behind the pinned primary
     assert [e.path for e in entries] == ["src/gold.py", "src/hub.py", "src/other.py"]
 
@@ -803,7 +834,8 @@ def test_localization_tier_medium_when_agreed_candidate_below_top(tmp_path: Path
               target_id INTEGER, type TEXT, source_line INTEGER,
               resolution_method TEXT, confidence REAL DEFAULT 0.5);"""
     )
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     # cands[0] = lexical-only #1 (0 agreement); cands[1] = multi-ranker-agreed #2.
     # Each carries ONE issue anchor so the HIGH path (needs >=2 distinct anchors)
     # does NOT fire — isolating the MEDIUM-vs-LOW tier decision.
@@ -835,7 +867,8 @@ def test_localization_tier_low_when_no_shown_candidate_agrees(tmp_path: Path):
               target_id INTEGER, type TEXT, source_line INTEGER,
               resolution_method TEXT, confidence REAL DEFAULT 0.5);"""
     )
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     cands = [
         _cand("a/one.py", score=0.9, anchor="a1"),
         _cand("b/two.py", score=0.5, anchor="a2"),
@@ -860,11 +893,20 @@ def _semleaf_db(tmp_path: Path) -> str:
               resolution_method TEXT, confidence REAL DEFAULT 0.5);
            CREATE VIRTUAL TABLE nodes_fts USING fts5(name, qualified_name, signature, content='');"""
     )
-    conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (1,'Function','parse_header','f.py')")
-    conn.execute("INSERT INTO nodes (id,label,name,file_path) VALUES (2,'Function','unrelated','f.py')")
-    conn.execute("INSERT INTO nodes_fts (rowid,name,qualified_name,signature) VALUES (1,'parse_header','','')")
-    conn.execute("INSERT INTO nodes_fts (rowid,name,qualified_name,signature) VALUES (2,'unrelated','','')")
-    conn.commit(); conn.close()
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path) VALUES (1,'Function','parse_header','f.py')"
+    )
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path) VALUES (2,'Function','unrelated','f.py')"
+    )
+    conn.execute(
+        "INSERT INTO nodes_fts (rowid,name,qualified_name,signature) VALUES (1,'parse_header','','')"
+    )
+    conn.execute(
+        "INSERT INTO nodes_fts (rowid,name,qualified_name,signature) VALUES (2,'unrelated','','')"
+    )
+    conn.commit()
+    conn.close()
     return db
 
 
@@ -878,8 +920,12 @@ def test_semantic_leaf_names_lexical_only_match_is_quiet(tmp_path: Path):
 
     db = _semleaf_db(tmp_path)
     loc = LocalizerResult(
-        candidates=[], anchor_symbols=[], confidence=0.0, confident=True,
-        gate_reason="t", symbol_semrank_by_file={},  # NO semantic signal
+        candidates=[],
+        anchor_symbols=[],
+        confidence=0.0,
+        confident=True,
+        gate_reason="t",
+        symbol_semrank_by_file={},  # NO semantic signal
     )
     # 'parse' matches parse_header lexically and nothing else corroborates it.
     assert _semantic_leaf_names(loc, db, "f.py", "fix the parse bug") == [], (
@@ -896,7 +942,10 @@ def test_semantic_leaf_names_cross_signal_is_named(tmp_path: Path):
 
     db = _semleaf_db(tmp_path)
     loc = LocalizerResult(
-        candidates=[], anchor_symbols=[], confidence=0.0, confident=True,
+        candidates=[],
+        anchor_symbols=[],
+        confidence=0.0,
+        confident=True,
         gate_reason="t",
         symbol_semrank_by_file={"f.py": [("parse_header", 0.9), ("unrelated", 0.1)]},
     )
@@ -912,7 +961,10 @@ def test_semantic_leaf_names_top_semantic_alone_is_named(tmp_path: Path):
 
     db = _semleaf_db(tmp_path)
     loc = LocalizerResult(
-        candidates=[], anchor_symbols=[], confidence=0.0, confident=True,
+        candidates=[],
+        anchor_symbols=[],
+        confidence=0.0,
+        confident=True,
         gate_reason="t",
         symbol_semrank_by_file={"f.py": [("parse_header", 0.9)]},
     )
@@ -923,6 +975,7 @@ def test_semantic_leaf_names_top_semantic_alone_is_named(tmp_path: Path):
 
 # ---- #37: _entry_confidence_tier path_match — generic 4-char stems must NOT
 #      promote to [WARNING]; specific compound/long stems still do. -------------
+
 
 def test_entry_tier_generic_stem_not_promoted():
     """A generic file stem ('core'/'base'/'data') substring-present in the issue
@@ -939,7 +992,7 @@ def test_entry_tier_specific_stem_still_promoted():
     """A SPECIFIC stem (len>=5 OR contains '_') that appears as a whole word in the
     issue still earns [WARNING] — the real localization signal is preserved
     (leafonly-plugin / import_files style)."""
-    e1 = FileEntry(path="src/leafonly.py", score=0.1)   # len 8 -> specific
+    e1 = FileEntry(path="src/leafonly.py", score=0.1)  # len 8 -> specific
     assert _entry_confidence_tier(e1, "the leafonly plugin drops postings") == "[WARNING]"
     e2 = FileEntry(path="src/import_files.py", score=0.1)  # contains '_'
     assert _entry_confidence_tier(e2, "import_files mis-orders the tasks") == "[WARNING]"
@@ -954,6 +1007,7 @@ def test_entry_tier_specific_stem_substring_only_not_promoted():
 
 # ---- #60: _top_function_names — SQL and Python use ONE filtered term set; the
 #      SQL front-sort is honored, no contradictory Python re-partition. ----------
+
 
 def _funcname_db(tmp_path: Path) -> str:
     db = str(tmp_path / "fn.db")
@@ -972,8 +1026,12 @@ def _funcname_db(tmp_path: Path) -> str:
     # unfiltered Python re-partition would vault it to [0], while the fix does not.
     conn.executemany(
         "INSERT INTO nodes (id,label,name,file_path,is_test) VALUES (?,?,?,'src/m.py',0)",
-        [(1, "Function", "set_fields"), (2, "Function", "hub"),
-         (3, "Function", "helper"), (4, "Function", "fi")],
+        [
+            (1, "Function", "set_fields"),
+            (2, "Function", "hub"),
+            (3, "Function", "helper"),
+            (4, "Function", "fi"),
+        ],
     )
     # hub has 3 incoming edges (high ref_count); set_fields/fi have 0.
     conn.executemany(
@@ -981,7 +1039,8 @@ def _funcname_db(tmp_path: Path) -> str:
         "VALUES (?,2,'CALLS','import',1.0)",
         [(1,), (3,), (4,)],
     )
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     return db
 
 
@@ -1013,6 +1072,7 @@ def test_top_function_names_short_term_filtered_consistently(tmp_path: Path):
 # ---- #36: callee witness `code` snippet must describe the callee DEFINITION
 #      (file_path:line it travels with), not the call-site line in another file. --
 
+
 def test_callee_witness_code_matches_definition_line(tmp_path: Path):
     """The callee record's `code` must be the snippet at (callee_file, def_line) —
     NOT the call-site line in the candidate file. RED before #36: code was
@@ -1022,13 +1082,9 @@ def test_callee_witness_code_matches_definition_line(tmp_path: Path):
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     # candidate file: the call site is on line 2.
-    (repo / "src" / "caller.py").write_text(
-        "def use():\n    return helper(1)\n", encoding="utf-8"
-    )
+    (repo / "src" / "caller.py").write_text("def use():\n    return helper(1)\n", encoding="utf-8")
     # callee file: helper is DEFINED on line 1.
-    (repo / "src" / "lib.py").write_text(
-        "def helper(x):\n    return x + 1\n", encoding="utf-8"
-    )
+    (repo / "src" / "lib.py").write_text("def helper(x):\n    return x + 1\n", encoding="utf-8")
     db = str(tmp_path / "g.db")
     conn = sqlite3.connect(db)
     conn.executescript(
@@ -1042,15 +1098,15 @@ def test_callee_witness_code_matches_definition_line(tmp_path: Path):
     )
     conn.executemany(
         "INSERT INTO nodes (id,label,name,file_path,start_line,is_test) VALUES (?,?,?,?,?,0)",
-        [(1, "Function", "use", "src/caller.py", 1),
-         (2, "Function", "helper", "src/lib.py", 1)],
+        [(1, "Function", "use", "src/caller.py", 1), (2, "Function", "helper", "src/lib.py", 1)],
     )
     # use (src/caller.py) CALLS helper (src/lib.py) at call-site line 2 (deterministic).
     conn.execute(
         "INSERT INTO edges (source_id,target_id,type,source_line,resolution_method,confidence) "
         "VALUES (1,2,'CALLS',2,'import',1.0)"
     )
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
     wits = _resolved_witnesses_for_file(db, "src/caller.py", str(repo), max_each=2)
     callees = [w for w in wits if w["direction"] == "callee"]
@@ -1084,8 +1140,11 @@ def test_d2_sanitize_strips_inline_docstring_prose_general():
     Field(description=) / Javadoc / Rust doc-comment captured verbatim) collapses to
     the typed shape, capped at _MAX_RENDERED_SIG — while a short normal signature
     (any language) passes through BYTE-IDENTICAL."""
-    fastapi = ('def jsonable_encoder( obj: Annotated[ Any, Doc("""'
-               + "x" * 800 + '""") ] = None, exclude: int = 0)')
+    fastapi = (
+        'def jsonable_encoder( obj: Annotated[ Any, Doc("""'
+        + "x" * 800
+        + '""") ] = None, exclude: int = 0)'
+    )
     out = _sanitize_signature(fastapi)
     assert '"""' not in out and "Doc(...)" in out
     assert len(out) <= _MAX_RENDERED_SIG
@@ -1121,9 +1180,11 @@ def test_d2_top_functions_line_has_no_docstring_wall():
     fe = FileEntry(
         path="fastapi/encoders.py",
         score=1.0,
-        functions=[_sanitize_signature(
-            'def jsonable_encoder(obj: Annotated[Any, Doc("""' + "p" * 900 + '""")])'
-        )],
+        functions=[
+            _sanitize_signature(
+                'def jsonable_encoder(obj: Annotated[Any, Doc("""' + "p" * 900 + '""")])'
+            )
+        ],
     )
     brief = render_brief([fe], issue_text="fix jsonable_encoder serialization")
     fl = [ln for ln in brief.split("\n") if ln.startswith("1. ")]
@@ -1189,7 +1250,8 @@ def test_d1_d3_budget_enforced_and_graph_map_leads(tmp_path):
         "INSERT INTO edges (source_id,target_id,type,source_line,resolution_method,confidence) "
         "VALUES (2,1,'CALLS',1,'import',1.0)"
     )
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
     res = _gen_brief("fix the handle function serialization bug", str(repo), db, max_files=5)
     bt = res.brief_text

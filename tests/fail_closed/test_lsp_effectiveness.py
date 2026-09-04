@@ -24,6 +24,7 @@ Two structural bugs made the LSP residual pass unable to flip GATE 1's pred_B
 RED before the fix (functions absent / first definition not retried), GREEN after.
 No benchmark shapes: synthetic graphs + a generic fake stdio LSP server.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -51,8 +52,9 @@ from groundtruth.utils.result import Err, Ok  # noqa: E402
 # ───────────────────────── (a) dynamic --max-edges ──────────────────────────
 
 
-def _mk_graph(tmp_path, *, name_match=0, qualified_unresolved=0, det=0,
-              det_method="import", imports_noise=0):
+def _mk_graph(
+    tmp_path, *, name_match=0, qualified_unresolved=0, det=0, det_method="import", imports_noise=0
+):
     """Synthetic graph.db with exactly the edge populations GATE 1 counts."""
     db = str(tmp_path / "graph.db")
     conn = sqlite3.connect(db)
@@ -136,7 +138,7 @@ def test_max_edges_unreadable_graph_fails_safe_to_floor(tmp_path):
 # textDocument/definition requests (the tsserver "project still loading"
 # fast-fail shape), then returns a real Location. Generic — no benchmark or
 # language shapes.
-_FAKE_LSP_SERVER = r'''
+_FAKE_LSP_SERVER = r"""
 import json
 import sys
 
@@ -192,7 +194,7 @@ while True:
         send({"jsonrpc": "2.0", "id": mid, "result": {"capabilities": {}}})
     else:
         send({"jsonrpc": "2.0", "id": mid, "result": None})
-'''
+"""
 
 
 @pytest.fixture
@@ -307,15 +309,20 @@ async def test_resolve_edges_runs_barrier_and_verifies_edge(
     conn.close()
 
     cfg = LSPServerConfig(command=[sys.executable, fake_server_script, "2", lib_uri])
-    monkeypatch.setattr(
-        "groundtruth.lsp.config.get_server_config", lambda ext: Ok(cfg)
-    )
+    monkeypatch.setattr("groundtruth.lsp.config.get_server_config", lambda ext: Ok(cfg))
 
     edge = {
-        "id": 1, "source_id": 1, "target_id": 42, "resolution_method": "name_match",
-        "confidence": 0.2, "source_file": "src/main.ts", "source_line": 1,
-        "caller_name": "main", "language": "typescript",
-        "target_name": "helper", "target_file": "lib.ts",
+        "id": 1,
+        "source_id": 1,
+        "target_id": 42,
+        "resolution_method": "name_match",
+        "confidence": 0.2,
+        "source_file": "src/main.ts",
+        "source_line": 1,
+        "caller_name": "main",
+        "language": "typescript",
+        "target_name": "helper",
+        "target_file": "lib.ts",
     }
     stats = await resolve._resolve_edges(db, str(root), [edge], "typescript")
 

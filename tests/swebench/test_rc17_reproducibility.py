@@ -10,10 +10,10 @@ Covers the helper-level contracts shipped in:
 
 Each test asserts a single behavioral invariant from F_reproducibility.md.
 """
+
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -26,6 +26,7 @@ if str(SCRIPTS) not in sys.path:
 
 
 # ---- F-002: image_name_resolver --------------------------------------------
+
 
 def test_resolver_refuses_latest_in_image_name():
     from image_name_resolver import resolve_image_name
@@ -82,6 +83,7 @@ def test_apply_digest_overrides_passthrough_on_miss():
 
 # ---- F-005: env allow-list -------------------------------------------------
 
+
 def test_build_subprocess_env_drops_non_allowlisted():
     from swe_agent_smoke_runner import _build_subprocess_env
 
@@ -117,6 +119,7 @@ def test_persist_run_env_writes_sorted_json(tmp_path):
 
 
 # ---- F-009: verify_report dedup -------------------------------------------
+
 
 def test_verify_report_section_run_id_extraction():
     sys.path.insert(0, str(SCRIPTS))

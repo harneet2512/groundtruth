@@ -4,6 +4,7 @@ Tests use in-memory SQLite + a tiny temp repo (files on disk) so we can
 exercise semantic scoring, graph reach, anchor proximity, and hub penalty
 without a real gt-index run.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -65,13 +66,69 @@ def tiny_db_v74(tmp_path: Path) -> str:
     """)
     nodes = [
         # id, label, name, qual, file, start, end, sig, ret, exp, test, lang, parent
-        (1, "Function", "parse_expr",  None, "src/parser.py", 10, 30, None, None, 1, 0, "python", None),
-        (2, "Function", "parse_stmt",  None, "src/parser.py", 35, 55, None, None, 1, 0, "python", None),
-        (3, "Class",    "Token",       None, "src/tokens.py", 1,  20, None, None, 1, 0, "python", None),
-        (4, "Function", "tokenize",    None, "src/tokens.py", 22, 40, None, None, 1, 0, "python", None),
-        (5, "Class",    "Node",        None, "src/ast.py",    1,  15, None, None, 1, 0, "python", None),
-        (6, "Class",    "ASTBuilder",  None, "src/ast.py",    20, 80, None, None, 1, 0, "python", None),
-        (7, "Function", "test_parse",  None, "tests/test_p.py", 1, 20, None, None, 0, 1, "python", None),
+        (
+            1,
+            "Function",
+            "parse_expr",
+            None,
+            "src/parser.py",
+            10,
+            30,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            2,
+            "Function",
+            "parse_stmt",
+            None,
+            "src/parser.py",
+            35,
+            55,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (3, "Class", "Token", None, "src/tokens.py", 1, 20, None, None, 1, 0, "python", None),
+        (
+            4,
+            "Function",
+            "tokenize",
+            None,
+            "src/tokens.py",
+            22,
+            40,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (5, "Class", "Node", None, "src/ast.py", 1, 15, None, None, 1, 0, "python", None),
+        (6, "Class", "ASTBuilder", None, "src/ast.py", 20, 80, None, None, 1, 0, "python", None),
+        (
+            7,
+            "Function",
+            "test_parse",
+            None,
+            "tests/test_p.py",
+            1,
+            20,
+            None,
+            None,
+            0,
+            1,
+            "python",
+            None,
+        ),
     ]
     conn.executemany(
         "INSERT INTO nodes (id, label, name, qualified_name, file_path, "
@@ -81,10 +138,10 @@ def tiny_db_v74(tmp_path: Path) -> str:
     )
     edges = [
         # src_id, tgt_id, type, src_line, src_file, method, confidence
-        (1, 4, "CALLS", 15, "src/parser.py", "import",     1.0),   # parse_expr -> tokenize
-        (1, 3, "CALLS", 20, "src/parser.py", "name_match", 0.9),   # parse_expr -> Token
-        (6, 1, "CALLS", 25, "src/ast.py",    "import",     1.0),   # ASTBuilder -> parse_expr
-        (6, 5, "CALLS", 30, "src/ast.py",    "same_file",  1.0),   # ASTBuilder -> Node
+        (1, 4, "CALLS", 15, "src/parser.py", "import", 1.0),  # parse_expr -> tokenize
+        (1, 3, "CALLS", 20, "src/parser.py", "name_match", 0.9),  # parse_expr -> Token
+        (6, 1, "CALLS", 25, "src/ast.py", "import", 1.0),  # ASTBuilder -> parse_expr
+        (6, 5, "CALLS", 30, "src/ast.py", "same_file", 1.0),  # ASTBuilder -> Node
     ]
     conn.executemany(
         "INSERT INTO edges (source_id, target_id, type, source_line, source_file, "
@@ -103,7 +160,8 @@ def tiny_repo(tmp_path: Path) -> str:
     src.mkdir()
     (tmp_path / "tests").mkdir()
 
-    (src / "parser.py").write_text(textwrap.dedent("""
+    (src / "parser.py").write_text(
+        textwrap.dedent("""
         # Parser module: parse_expr parses tokens into AST expressions
         def parse_expr(tokens):
             t = tokenize(tokens)
@@ -111,8 +169,10 @@ def tiny_repo(tmp_path: Path) -> str:
 
         def parse_stmt(tokens):
             return parse_expr(tokens)
-    """))
-    (src / "tokens.py").write_text(textwrap.dedent("""
+    """)
+    )
+    (src / "tokens.py").write_text(
+        textwrap.dedent("""
         # Token class and tokenizer
         class Token:
             def __init__(self, val):
@@ -120,8 +180,10 @@ def tiny_repo(tmp_path: Path) -> str:
 
         def tokenize(text):
             return text.split()
-    """))
-    (src / "ast.py").write_text(textwrap.dedent("""
+    """)
+    )
+    (src / "ast.py").write_text(
+        textwrap.dedent("""
         # AST node and builder
         class Node:
             pass
@@ -130,7 +192,8 @@ def tiny_repo(tmp_path: Path) -> str:
             def build(self, src):
                 expr = parse_expr(src)
                 return Node()
-    """))
+    """)
+    )
     (tmp_path / "tests" / "test_p.py").write_text("def test_parse(): pass\n")
     return str(tmp_path)
 
@@ -140,21 +203,25 @@ def tiny_repo(tmp_path: Path) -> str:
 
 def test_normalize_identifier_snake():
     from groundtruth.pretask.anchor_select import _normalize_identifier
+
     assert _normalize_identifier("parse_expr") == ["parse", "expr"]
 
 
 def test_normalize_identifier_camel():
     from groundtruth.pretask.anchor_select import _normalize_identifier
+
     assert _normalize_identifier("ASTBuilder") == ["ast", "builder"]
 
 
 def test_normalize_identifier_kebab():
     from groundtruth.pretask.anchor_select import _normalize_identifier
+
     assert _normalize_identifier("my-token-type") == ["token", "type"]  # "my" < 3 chars dropped
 
 
 def test_normalize_identifier_short_parts_filtered():
     from groundtruth.pretask.anchor_select import _normalize_identifier
+
     parts = _normalize_identifier("is_ok")
     # "ok" has 2 chars and is filtered (< 3)
     assert "ok" not in parts
@@ -162,6 +229,7 @@ def test_normalize_identifier_short_parts_filtered():
 
 def test_symbol_anchor_containment(tiny_db_v74: str):
     from groundtruth.pretask.anchor_select import _symbol_anchors
+
     # Issue mentions "parse_expr" → parts = ["parse", "expr"]
     issue = "The parse_expr function crashes with empty input"
     result = _symbol_anchors(issue, tiny_db_v74, k_anchor=10)
@@ -170,6 +238,7 @@ def test_symbol_anchor_containment(tiny_db_v74: str):
 
 def test_symbol_anchor_non_match(tiny_db_v74: str):
     from groundtruth.pretask.anchor_select import _symbol_anchors
+
     issue = "completely unrelated issue about memory leaks xyz"
     result = _symbol_anchors(issue, tiny_db_v74, k_anchor=5)
     # No symbols in the graph match the word parts here
@@ -178,6 +247,7 @@ def test_symbol_anchor_non_match(tiny_db_v74: str):
 
 def test_symbol_anchor_k_cap(tiny_db_v74: str):
     from groundtruth.pretask.anchor_select import _symbol_anchors
+
     # Issue with many matches; k_anchor=1 should limit to 1 file
     issue = "parse_expr parse_stmt Token tokenize Node ASTBuilder crash"
     result = _symbol_anchors(issue, tiny_db_v74, k_anchor=1)
@@ -189,6 +259,7 @@ def test_symbol_anchor_k_cap(tiny_db_v74: str):
 
 def test_reach_direct_neighbor(tiny_db_v74: str):
     from groundtruth.pretask.graph_reach import compute_reach
+
     # Anchor = src/ast.py (contains ASTBuilder which calls parse_expr in parser.py)
     reach = compute_reach(["src/ast.py"], tiny_db_v74, max_depth=1)
     # src/parser.py should be reachable at depth 1 (ASTBuilder -> parse_expr)
@@ -198,6 +269,7 @@ def test_reach_direct_neighbor(tiny_db_v74: str):
 
 def test_reach_multi_hop(tiny_db_v74: str):
     from groundtruth.pretask.graph_reach import compute_reach
+
     # Anchor = src/ast.py; depth=2 should reach src/tokens.py via:
     # ast.py -> parser.py -> tokens.py
     reach = compute_reach(["src/ast.py"], tiny_db_v74, max_depth=2)
@@ -206,7 +278,8 @@ def test_reach_multi_hop(tiny_db_v74: str):
 
 
 def test_reach_depth_decay(tiny_db_v74: str):
-    from groundtruth.pretask.graph_reach import compute_reach, EDGE_TYPE_WEIGHT
+    from groundtruth.pretask.graph_reach import compute_reach
+
     # Depth decay property: a single-path score at depth d is ≤ single-path at d-1.
     # Compute from src/parser.py as anchor (1 outgoing edge to tokens.py via tokenize).
     reach = compute_reach(["src/parser.py"], tiny_db_v74, max_depth=2)
@@ -221,6 +294,7 @@ def test_reach_depth_decay(tiny_db_v74: str):
 
 def test_reach_excludes_tests(tiny_db_v74: str):
     from groundtruth.pretask.graph_reach import compute_reach
+
     # tests/test_p.py has no outgoing edges and is not reachable from src/
     reach = compute_reach(["src/ast.py"], tiny_db_v74, max_depth=3)
     assert "tests/test_p.py" not in reach
@@ -228,6 +302,7 @@ def test_reach_excludes_tests(tiny_db_v74: str):
 
 def test_reach_empty_anchors(tiny_db_v74: str):
     from groundtruth.pretask.graph_reach import compute_reach
+
     reach = compute_reach([], tiny_db_v74, max_depth=3)
     assert reach == {}
 
@@ -237,6 +312,7 @@ def test_reach_empty_anchors(tiny_db_v74: str):
 
 def test_hub_penalty_range(tiny_db_v74: str):
     from groundtruth.pretask.hub_penalty import compute_hub_penalties, W_HUB_MAX
+
     penalties = compute_hub_penalties(tiny_db_v74)
     # All penalties must be in [0, 1)
     for fp, pen in penalties.items():
@@ -246,7 +322,8 @@ def test_hub_penalty_range(tiny_db_v74: str):
 
 
 def test_hub_penalty_high_fanout(tiny_db_v74: str):
-    from groundtruth.pretask.hub_penalty import compute_hub_penalties, HUB_SCALE
+    from groundtruth.pretask.hub_penalty import compute_hub_penalties
+
     penalties = compute_hub_penalties(tiny_db_v74)
     # src/parser.py is target of 1 edge (ASTBuilder -> parse_expr)
     # src/tokens.py is target of 2 edges (parse_expr -> tokenize/Token)
@@ -262,6 +339,7 @@ def test_hub_penalty_high_fanout(tiny_db_v74: str):
 
 def test_anchor_proximity_self(tiny_db_v74: str):
     from groundtruth.pretask.anchor_proximity import compute_anchor_proximity
+
     prox = compute_anchor_proximity(["src/parser.py"], tiny_db_v74)
     # The anchor itself gets prox from 1 anchor → min(1.0, 1/3.0)
     assert "src/parser.py" in prox
@@ -270,6 +348,7 @@ def test_anchor_proximity_self(tiny_db_v74: str):
 
 def test_anchor_proximity_convergence(tiny_db_v74: str):
     from groundtruth.pretask.anchor_proximity import compute_anchor_proximity
+
     # If both src/ast.py and src/parser.py are anchors, their 1-hop neighbor
     # src/tokens.py gets prox from 2 distinct anchors → min(1.0, 2/3.0)
     prox = compute_anchor_proximity(["src/ast.py", "src/parser.py"], tiny_db_v74)
@@ -279,10 +358,10 @@ def test_anchor_proximity_convergence(tiny_db_v74: str):
 
 def test_anchor_proximity_cap(tiny_db_v74: str):
     from groundtruth.pretask.anchor_proximity import compute_anchor_proximity
+
     # 4+ anchors: cap at 1.0
     prox = compute_anchor_proximity(
-        ["src/ast.py", "src/parser.py", "src/tokens.py", "tests/test_p.py"],
-        tiny_db_v74
+        ["src/ast.py", "src/parser.py", "src/tokens.py", "tests/test_p.py"], tiny_db_v74
     )
     for fp, score in prox.items():
         assert 0.0 <= score <= 1.0, f"{fp}: {score}"
@@ -293,6 +372,7 @@ def test_anchor_proximity_cap(tiny_db_v74: str):
 
 def test_ablation_A_no_graph_terms():
     from groundtruth.pretask.v7_4_brief import _ablation_weights, DEFAULT_WEIGHTS
+
     w = _ablation_weights("A", dict(DEFAULT_WEIGHTS))
     assert w["W_REACH"] == 0.0
     assert w["W_PROX"] == 0.0
@@ -303,6 +383,7 @@ def test_ablation_A_no_graph_terms():
 
 def test_ablation_B0_no_sem():
     from groundtruth.pretask.v7_4_brief import _ablation_weights, DEFAULT_WEIGHTS
+
     w = _ablation_weights("B0", dict(DEFAULT_WEIGHTS))
     assert w["W_SEM"] == 0.0
     assert w["W_HUB"] == 0.0
@@ -311,6 +392,7 @@ def test_ablation_B0_no_sem():
 
 def test_ablation_C_no_commit():
     from groundtruth.pretask.v7_4_brief import _ablation_weights, DEFAULT_WEIGHTS
+
     w = _ablation_weights("C", dict(DEFAULT_WEIGHTS))
     assert w["W_COMMIT"] == 0.0
     assert w["W_SEM"] > 0.0
@@ -320,10 +402,17 @@ def test_ablation_C_no_commit():
 def test_hub_penalty_weight_cap():
     from groundtruth.pretask.v7_4_brief import _total_score
     from groundtruth.pretask.hub_penalty import W_HUB_MAX
+
     # Even with W_HUB > W_HUB_MAX, total_score caps it
     comps = {"sem": 0.5, "reach": 0.4, "anchor_prox": 0.1, "hub_pen": 0.8, "commit": 0.0}
     weights_over = {"W_SEM": 0.5, "W_REACH": 0.4, "W_PROX": 0.1, "W_HUB": 0.5, "W_COMMIT": 0.0}
-    weights_capped = {"W_SEM": 0.5, "W_REACH": 0.4, "W_PROX": 0.1, "W_HUB": W_HUB_MAX, "W_COMMIT": 0.0}
+    weights_capped = {
+        "W_SEM": 0.5,
+        "W_REACH": 0.4,
+        "W_PROX": 0.1,
+        "W_HUB": W_HUB_MAX,
+        "W_COMMIT": 0.0,
+    }
     s_over = _total_score(comps, weights_over)
     s_capped = _total_score(comps, weights_capped)
     # The cap enforces W_HUB ≤ W_HUB_MAX regardless of what's passed
@@ -333,6 +422,7 @@ def test_hub_penalty_weight_cap():
 def test_focus_set_hard_cap(tiny_db_v74: str, tiny_repo: str):
     """Focus set must never exceed DEFAULT_FOCUS_SIZE."""
     from groundtruth.pretask.v7_4_brief import run_v74, DEFAULT_FOCUS_SIZE
+
     # Mock model that returns random normalized embeddings (no sentence-transformer needed)
     class FakeModel:
         def encode(self, texts, **kw):
@@ -357,6 +447,7 @@ def test_focus_set_hard_cap(tiny_db_v74: str, tiny_repo: str):
 def test_entered_via_graph_rescue(tiny_db_v74: str, tiny_repo: str):
     """Files admitted only via graph expansion get entered_via='graph_rescue'."""
     from groundtruth.pretask.v7_4_brief import run_v74
+
     # Use variant B1 to isolate graph rescue behavior
     result = run_v74(
         issue_text="ASTBuilder failed to handle nested nodes",
@@ -390,6 +481,7 @@ def _clear_embed_cache():
     this test's FakeModel vectors (the pre-existing combined-order flake on
     test_item46, 2026-06-10)."""
     from groundtruth.pretask import anchor_select as _as
+
     _as._EMBED_CACHE.clear()
     try:
         _as._SYMVEC_CACHE.clear()
@@ -461,9 +553,7 @@ def test_item46_sem_fallback_never_uses_bounded_seed_map(
     assert all(v == 0.0 for v in result.sem_components_full)
 
 
-def test_item21_bm25_called_exactly_once(
-    tiny_db_v74: str, tiny_repo: str, monkeypatch
-):
+def test_item21_bm25_called_exactly_once(tiny_db_v74: str, tiny_repo: str, monkeypatch):
     """item #21: lexical_file_search must run ONCE per run_v74 (ablation C), reused
     for both candidate seeding and `lex` component scoring.
 
@@ -495,9 +585,7 @@ def test_item21_bm25_called_exactly_once(
     )
 
 
-def test_item19_path_component_max_normalized_to_one(
-    tiny_db_v74: str, tiny_repo: str
-):
+def test_item19_path_component_max_normalized_to_one(tiny_db_v74: str, tiny_repo: str):
     """item #19: the `path` component map must be max-normalized to [0,1] like
     lex/reach, so its top value is 1.0 even when no file is an EXACT basename match
     (raw construction tops out at 0.7 for a substring match).
@@ -541,7 +629,8 @@ def _rrf_run_tokens_score(monkeypatch, tiny_db_v74, tiny_repo, hub_pen_for_token
 
     monkeypatch.setenv("GT_RRF_FUSION", "full")
     monkeypatch.setattr(
-        _b, "compute_hub_penalties",
+        _b,
+        "compute_hub_penalties",
         lambda *_a, **_k: {"src/tokens.py": hub_pen_for_tokens},
     )
     result = _b.run_v74(
@@ -556,9 +645,7 @@ def _rrf_run_tokens_score(monkeypatch, tiny_db_v74, tiny_repo, hub_pen_for_token
     return by_path["src/tokens.py"]
 
 
-def test_item20_rrf_mode_applies_hub_demotion(
-    tiny_db_v74: str, tiny_repo: str, monkeypatch
-):
+def test_item20_rrf_mode_applies_hub_demotion(tiny_db_v74: str, tiny_repo: str, monkeypatch):
     """item #20: in RRF fusion mode the hub defense must still apply — a file with a
     positive hub_pen has its fused score multiplicatively demoted by
     max(0, 1 - w_hub*hub_pen). Two runs that differ ONLY in tokens.py's hub_pen:
@@ -589,5 +676,5 @@ def test_item20_rrf_mode_applies_hub_demotion(
     )
     assert heavy["score"] == pytest.approx(base["score"] * expected_ratio, rel=1e-4), (
         f"hub demotion factor wrong: heavy={heavy['score']} base={base['score']} "
-        f"ratio={heavy['score']/base['score']} expected={expected_ratio}"
+        f"ratio={heavy['score'] / base['score']} expected={expected_ratio}"
     )

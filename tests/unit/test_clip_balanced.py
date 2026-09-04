@@ -13,6 +13,7 @@ ending on a dangling binary operator (``... (documents and not``).
 or "" when no non-trivial well-formed prefix exists. The test's balance oracle
 is INDEPENDENT of the implementation so it validates real output, not itself.
 """
+
 from __future__ import annotations
 
 import re
@@ -21,7 +22,9 @@ from groundtruth.runtime.sanitizer import clip_balanced, is_well_formed_clause
 
 # The two real malformed values that reached the agent (canary 26657916167 / 26651360055).
 _REAL_CONSEQUENCE = 'raise TypeError("DocumentSplitter expects a List of Documents as input.")'
-_REAL_COND = "not isinstance(documents, list) or (documents and not isinstance(documents[0], Document))"
+_REAL_COND = (
+    "not isinstance(documents, list) or (documents and not isinstance(documents[0], Document))"
+)
 _REAL_STORED = "raise: " + _REAL_COND + " -> " + _REAL_CONSEQUENCE
 
 
@@ -59,20 +62,26 @@ def _balanced(s: str) -> bool:
 
 # ---- negative control: prove the test detects the actual bug class ----
 
+
 def test_negative_control_blind_cut_is_malformed():
     """The OLD blind byte-slice produces an UNBALANCED value. If this ever
     passes the oracle, the oracle is too weak and the green test below is
     meaningless."""
     blind_consequence = _REAL_CONSEQUENCE[:60]
     assert blind_consequence == 'raise TypeError("DocumentSplitter expects a List of Document'
-    assert not _balanced(blind_consequence), "blind [:60] must be detected as unbalanced (open quote+paren)"
+    assert not _balanced(blind_consequence), (
+        "blind [:60] must be detected as unbalanced (open quote+paren)"
+    )
 
     blind_cond = (_REAL_COND)[:53]  # lands at '(documents and not'
     assert blind_cond.endswith("and not") or blind_cond.endswith("and no")
-    assert not _balanced(blind_cond), "blind cut of the cond must be unbalanced (open paren / trailing op)"
+    assert not _balanced(blind_cond), (
+        "blind cut of the cond must be unbalanced (open paren / trailing op)"
+    )
 
 
 # ---- green: clip_balanced repairs already-malformed stored values ----
+
 
 def test_repairs_open_string_literal():
     """An already-truncated open-quote value (from an old indexer build) is

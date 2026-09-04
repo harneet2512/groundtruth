@@ -8,6 +8,7 @@ classification (is_test / fixture dirs), never gold labels, and advises fixing t
 Asserts: fires on test/fixture edits, stays QUIET on pure source edits (correct-or-quiet),
 catches the two real gaming paths, and dedups (advise, not spam).
 """
+
 import os
 
 from groundtruth.hooks.post_edit import _test_edit_advisory
@@ -61,5 +62,5 @@ def test_mixed_source_and_test_names_the_test():
 
 def test_dedup_fires_once_per_file():
     _clean()
-    assert _test_edit_advisory(["tests/test_x.py"]) != ""   # first: fires
-    assert _test_edit_advisory(["tests/test_x.py"]) == ""   # second: deduped (no spam)
+    assert _test_edit_advisory(["tests/test_x.py"]) != ""  # first: fires
+    assert _test_edit_advisory(["tests/test_x.py"]) == ""  # second: deduped (no spam)

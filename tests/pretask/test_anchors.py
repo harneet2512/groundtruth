@@ -64,24 +64,19 @@ def test_anchors_normalize_github_blob_url() -> None:
     repo-agnostic, no task-specific keys.
     """
     cases = {
-        "https://github.com/arviz-devs/arviz/blob/main/arviz/plots/hdiplot.py":
-            "arviz/plots/hdiplot.py",
-        "//github.com/arviz-devs/arviz/blob/abc123def456/arviz/plots/hdiplot.py":
-            "arviz/plots/hdiplot.py",
-        "http://github.com/o/r/blob/v1.2.3/pkg/sub/file.go":
-            "pkg/sub/file.go",
-        "https://github.com/o/r/blob/main/a/b.py#L42":
-            "a/b.py",
-        "https://gitlab.com/group/proj/-/blob/master/src/app/main.rs":
-            "src/app/main.rs",
-        "https://bitbucket.org/team/repo/src/main/lib/util.ts":
-            "lib/util.ts",
-        "https://raw.githubusercontent.com/o/r/main/x/y/z.js":
-            "x/y/z.js",
+        "https://github.com/arviz-devs/arviz/blob/main/arviz/plots/hdiplot.py": "arviz/plots/hdiplot.py",
+        "//github.com/arviz-devs/arviz/blob/abc123def456/arviz/plots/hdiplot.py": "arviz/plots/hdiplot.py",
+        "http://github.com/o/r/blob/v1.2.3/pkg/sub/file.go": "pkg/sub/file.go",
+        "https://github.com/o/r/blob/main/a/b.py#L42": "a/b.py",
+        "https://gitlab.com/group/proj/-/blob/master/src/app/main.rs": "src/app/main.rs",
+        "https://bitbucket.org/team/repo/src/main/lib/util.ts": "lib/util.ts",
+        "https://raw.githubusercontent.com/o/r/main/x/y/z.js": "x/y/z.js",
     }
     for url, expected in cases.items():
         out = extract_issue_anchors(url, graph_db_path=None)
-        assert expected in out.paths, f"{url!r} did not normalize to {expected!r}; got {out.paths!r}"
+        assert expected in out.paths, (
+            f"{url!r} did not normalize to {expected!r}; got {out.paths!r}"
+        )
         # The raw host-prefixed string must NOT survive as a path.
         assert not any(p.startswith("//") or "github.com" in p for p in out.paths), (
             f"raw URL leaked into paths for {url!r}: {out.paths!r}"

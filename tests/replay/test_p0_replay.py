@@ -11,7 +11,6 @@ import json
 import os
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -21,6 +20,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 
 # ---- Replay 1: sh-744 behavioral contract full chain ----
+
 
 class TestReplay1ShContract:
     """Prove behavioral contract survives generation + wrapper formatting."""
@@ -44,7 +44,9 @@ class TestReplay1ShContract:
             db_path=self.GRAPH_DB,
             repo_root="",
         )
-        assert output == "", f"G7 silence gate should produce empty for isolated function, got: {output[:200]}"
+        assert output == "", (
+            f"G7 silence gate should produce empty for isolated function, got: {output[:200]}"
+        )
 
     def test_wrapper_formatting_preserves_evidence(self, graph_available):
         """P0-2 replay: wrapper formatting does NOT truncate to 3 lines."""
@@ -62,7 +64,8 @@ class TestReplay1ShContract:
         # Simulate the EXACT wrapper formatting path (P0-2 fix applied)
         hook_output = output
         directive_lines = [
-            ln.strip() for ln in hook_output.splitlines()
+            ln.strip()
+            for ln in hook_output.splitlines()
             if ln.strip()
             and not ln.strip().startswith("[GT_STATUS]")
             and not ln.strip().startswith("__")
@@ -81,17 +84,20 @@ class TestReplay1ShContract:
         assert len(surviving_lines) >= 1, "Zero lines survived formatting"
 
         # Print for proof ledger
-        print(f"\n=== REPLAY 1 PROOF ===")
-        print(f"Function: beancount/plugins/leafonly.py::leafonly")
+        print("\n=== REPLAY 1 PROOF ===")
+        print("Function: beancount/plugins/leafonly.py::leafonly")
         print(f"Graph: {self.GRAPH_DB}")
         print(f"Raw output length: {len(output)}")
         print(f"Formatted length: {len(evidence_text)}")
         print(f"Surviving lines: {len(surviving_lines)}")
-        print(f"Evidence markers present: {[m for m in ('GUARD:', 'MUTATES:', 'RETURNS:', 'RAISES:', 'def ', '[CONTRACT]', '[CONTRACT ~]', '[SIGNATURE]', '[BEHAVIORAL CONTRACT]', '[TEST]', '[PATTERN]') if m in evidence_text]}")
+        print(
+            f"Evidence markers present: {[m for m in ('GUARD:', 'MUTATES:', 'RETURNS:', 'RAISES:', 'def ', '[CONTRACT]', '[CONTRACT ~]', '[SIGNATURE]', '[BEHAVIORAL CONTRACT]', '[TEST]', '[PATTERN]') if m in evidence_text]}"
+        )
         print(f"First 500 chars:\n{evidence_text[:500]}")
 
 
 # ---- Replay 2: Multi-file path mismatch ----
+
 
 class TestReplay2PathMismatch:
     """Prove LIKE suffix match works on real multi-file graph.db."""
@@ -112,7 +118,7 @@ class TestReplay2PathMismatch:
         for (p,) in paths:
             assert not p.startswith("/testbed"), f"Graph stores absolute path: {p}"
             assert not p.startswith("/workspace"), f"Graph stores workspace path: {p}"
-        print(f"\n=== REPLAY 2 PROOF (path format) ===")
+        print("\n=== REPLAY 2 PROOF (path format) ===")
         print(f"Sample paths: {[p[0] for p in paths[:5]]}")
 
     def test_old_exact_query_misses_with_prefix(self, graph_available):
@@ -146,7 +152,7 @@ class TestReplay2PathMismatch:
         for start, end, gpath in candidates:
             gparts = gpath.replace("\\", "/").split("/")
             if len(gparts) <= len(runtime_parts):
-                if runtime_parts[-len(gparts):] == gparts:
+                if runtime_parts[-len(gparts) :] == gparts:
                     if len(gparts) > best_len:
                         best_len = len(gparts)
                         best_match = (start, end)
@@ -155,7 +161,7 @@ class TestReplay2PathMismatch:
             f"NEW suffix resolver should match. func={func_name}, "
             f"runtime={prefixed_path}, graph={graph_path}, candidates={len(candidates)}"
         )
-        print(f"\n=== REPLAY 2 PROOF (path mismatch) ===")
+        print("\n=== REPLAY 2 PROOF (path mismatch) ===")
         print(f"Function: {func_name}")
         print(f"Graph path: {graph_path}")
         print(f"Prefixed path: {prefixed_path}")
@@ -165,6 +171,7 @@ class TestReplay2PathMismatch:
 
 
 # ---- Replay 3: Sparse/zero-edge file ----
+
 
 class TestReplay3SparseFile:
     """Prove improved L3 fires on zero-edge files."""
@@ -194,7 +201,7 @@ class TestReplay3SparseFile:
         if not zero_edge_nodes:
             pytest.skip("No zero-edge function nodes found in frozen graph")
 
-        print(f"\n=== REPLAY 3 PROOF (zero-edge nodes found) ===")
+        print("\n=== REPLAY 3 PROOF (zero-edge nodes found) ===")
         for name, path, start, end in zero_edge_nodes:
             print(f"  {path}::{name} (lines {start}-{end})")
 
@@ -226,7 +233,7 @@ class TestReplay3SparseFile:
         )
         # With P0-3 fix, this should NOT be empty (local evidence should fire)
         # But it MAY be empty if the function body is not readable from repo_root=""
-        print(f"\n=== REPLAY 3 PROOF ===")
+        print("\n=== REPLAY 3 PROOF ===")
         print(f"Function: {file_path}::{func_name}")
         print(f"Output length: {len(output)}")
         print(f"Output: {output[:300]}")
@@ -235,6 +242,7 @@ class TestReplay3SparseFile:
 
 
 # ---- Replay 4: Patch integrity pipeline ----
+
 
 class TestReplay4PatchIntegrity:
     """Prove patch hash logging works in real-ish submission pipeline."""
@@ -252,10 +260,15 @@ class TestReplay4PatchIntegrity:
         )
         # Write output.jsonl
         output_path = tmp_path / "output.jsonl"
-        output_path.write_text(json.dumps({
-            "instance_id": "test__test-1",
-            "test_result": {"git_patch": patch},
-        }) + "\n")
+        output_path.write_text(
+            json.dumps(
+                {
+                    "instance_id": "test__test-1",
+                    "test_result": {"git_patch": patch},
+                }
+            )
+            + "\n"
+        )
 
         # Hash at output.jsonl stage — must match what convert_to_submission does
         # convert_to_submission.py strips the patch before hashing (line 44: patch.strip())
@@ -268,6 +281,7 @@ class TestReplay4PatchIntegrity:
 
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "swebench"))
         from convert_to_submission import convert
+
         convert(str(output_path), str(pred_dir))
 
         # Read predictions.jsonl
@@ -282,7 +296,7 @@ class TestReplay4PatchIntegrity:
         assert hash_at_output == hash_at_pred, (
             f"Patch hash mismatch: output={hash_at_output}, pred={hash_at_pred}"
         )
-        print(f"\n=== REPLAY 4 PROOF (clean patch) ===")
+        print("\n=== REPLAY 4 PROOF (clean patch) ===")
         print(f"Hash at output.jsonl: {hash_at_output}")
         print(f"Hash at predictions.jsonl: {hash_at_pred}")
         print(f"Match: {hash_at_output == hash_at_pred}")
@@ -298,16 +312,22 @@ class TestReplay4PatchIntegrity:
             "+    return 42"  # No trailing newline — truncated
         )
         output_path = tmp_path / "output.jsonl"
-        output_path.write_text(json.dumps({
-            "instance_id": "test__test-trunc",
-            "test_result": {"git_patch": patch},
-        }) + "\n")
+        output_path.write_text(
+            json.dumps(
+                {
+                    "instance_id": "test__test-trunc",
+                    "test_result": {"git_patch": patch},
+                }
+            )
+            + "\n"
+        )
 
         pred_dir = tmp_path / "preds"
         pred_dir.mkdir()
 
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "swebench"))
         from convert_to_submission import convert
+
         convert(str(output_path), str(pred_dir))
 
         captured = capsys.readouterr()
@@ -315,6 +335,6 @@ class TestReplay4PatchIntegrity:
             f"Truncated patch not detected. Output:\n{captured.out}"
         )
         assert "WARNING" in captured.out, "No WARNING for truncated patch"
-        print(f"\n=== REPLAY 4 PROOF (truncated patch) ===")
+        print("\n=== REPLAY 4 PROOF (truncated patch) ===")
         print(f"Malformed detected: {'malformed=True' in captured.out}")
         print(f"Warning emitted: {'WARNING' in captured.out}")

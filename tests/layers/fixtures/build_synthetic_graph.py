@@ -70,36 +70,63 @@ CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
 # (label, name, qualified_name, file_path, start_line, end_line, language)
 NODES: list[tuple[str, str, str, str, int, int, str]] = [
     # repo_python — server.py
-    ("Function", "handle_request", "src.server.handle_request",
-     "src/server.py", 8, 18, "python"),
-    ("Function", "serve_forever", "src.server.serve_forever",
-     "src/server.py", 21, 23, "python"),
-    ("Function", "_main", "src.server._main",
-     "src/server.py", 26, 30, "python"),
+    ("Function", "handle_request", "src.server.handle_request", "src/server.py", 8, 18, "python"),
+    ("Function", "serve_forever", "src.server.serve_forever", "src/server.py", 21, 23, "python"),
+    ("Function", "_main", "src.server._main", "src/server.py", 26, 30, "python"),
     # repo_python — url_utils.py
-    ("Function", "parse_url", "src.url_utils.parse_url",
-     "src/url_utils.py", 11, 25, "python"),
-    ("Function", "normalize_url", "src.url_utils.normalize_url",
-     "src/url_utils.py", 28, 33, "python"),
-    ("Function", "is_https", "src.url_utils.is_https",
-     "src/url_utils.py", 36, 39, "python"),
+    ("Function", "parse_url", "src.url_utils.parse_url", "src/url_utils.py", 11, 25, "python"),
+    (
+        "Function",
+        "normalize_url",
+        "src.url_utils.normalize_url",
+        "src/url_utils.py",
+        28,
+        33,
+        "python",
+    ),
+    ("Function", "is_https", "src.url_utils.is_https", "src/url_utils.py", 36, 39, "python"),
     # repo_python — validators.py
-    ("Function", "validate_request_url", "src.validators.validate_request_url",
-     "src/validators.py", 10, 15, "python"),
-    ("Function", "validate_callback", "src.validators.validate_callback",
-     "src/validators.py", 18, 21, "python"),
+    (
+        "Function",
+        "validate_request_url",
+        "src.validators.validate_request_url",
+        "src/validators.py",
+        10,
+        15,
+        "python",
+    ),
+    (
+        "Function",
+        "validate_callback",
+        "src.validators.validate_callback",
+        "src/validators.py",
+        18,
+        21,
+        "python",
+    ),
     # repo_go — parser.go
-    ("Function", "ParseURL", "pkg.parser.ParseURL",
-     "pkg/parser.go", 12, 24, "go"),
-    ("Function", "Normalize", "pkg.parser.Normalize",
-     "pkg/parser.go", 27, 33, "go"),
-    ("Function", "IsHTTPS", "pkg.parser.IsHTTPS",
-     "pkg/parser.go", 36, 41, "go"),
+    ("Function", "ParseURL", "pkg.parser.ParseURL", "pkg/parser.go", 12, 24, "go"),
+    ("Function", "Normalize", "pkg.parser.Normalize", "pkg/parser.go", 27, 33, "go"),
+    ("Function", "IsHTTPS", "pkg.parser.IsHTTPS", "pkg/parser.go", 36, 41, "go"),
     # repo_rust — normalize.rs
-    ("Function", "normalize", "crates.util.normalize.normalize",
-     "crates/util/src/normalize.rs", 4, 12, "rust"),
-    ("Function", "to_https", "crates.util.normalize.to_https",
-     "crates/util/src/normalize.rs", 15, 21, "rust"),
+    (
+        "Function",
+        "normalize",
+        "crates.util.normalize.normalize",
+        "crates/util/src/normalize.rs",
+        4,
+        12,
+        "rust",
+    ),
+    (
+        "Function",
+        "to_https",
+        "crates.util.normalize.to_https",
+        "crates/util/src/normalize.rs",
+        15,
+        21,
+        "rust",
+    ),
 ]
 
 
@@ -110,57 +137,115 @@ def _id(name: str, file_path: str, ids: dict[tuple[str, str], int]) -> int:
 # (source_name/file, target_name/file, type, line, resolution_method, confidence)
 EDGES: list[tuple[tuple[str, str], tuple[str, str], str, int, str, float]] = [
     # high-confidence: server.handle_request -> url_utils.parse_url (import)
-    (("handle_request", "src/server.py"),
-     ("parse_url", "src/url_utils.py"),
-     "CALLS", 10, "import", 1.0),
+    (
+        ("handle_request", "src/server.py"),
+        ("parse_url", "src/url_utils.py"),
+        "CALLS",
+        10,
+        "import",
+        1.0,
+    ),
     # high-confidence: server.handle_request -> url_utils.normalize_url (import)
-    (("handle_request", "src/server.py"),
-     ("normalize_url", "src/url_utils.py"),
-     "CALLS", 11, "import", 1.0),
+    (
+        ("handle_request", "src/server.py"),
+        ("normalize_url", "src/url_utils.py"),
+        "CALLS",
+        11,
+        "import",
+        1.0,
+    ),
     # high-confidence: server.handle_request -> validators.validate_request_url (import)
-    (("handle_request", "src/server.py"),
-     ("validate_request_url", "src/validators.py"),
-     "CALLS", 12, "import", 1.0),
+    (
+        ("handle_request", "src/server.py"),
+        ("validate_request_url", "src/validators.py"),
+        "CALLS",
+        12,
+        "import",
+        1.0,
+    ),
     # high-confidence: validators.validate_request_url -> url_utils.parse_url (import)
-    (("validate_request_url", "src/validators.py"),
-     ("parse_url", "src/url_utils.py"),
-     "CALLS", 12, "import", 1.0),
+    (
+        ("validate_request_url", "src/validators.py"),
+        ("parse_url", "src/url_utils.py"),
+        "CALLS",
+        12,
+        "import",
+        1.0,
+    ),
     # high-confidence: validators.validate_request_url -> url_utils.is_https (import)
-    (("validate_request_url", "src/validators.py"),
-     ("is_https", "src/url_utils.py"),
-     "CALLS", 13, "import", 1.0),
+    (
+        ("validate_request_url", "src/validators.py"),
+        ("is_https", "src/url_utils.py"),
+        "CALLS",
+        13,
+        "import",
+        1.0,
+    ),
     # high-confidence: validators.validate_callback -> url_utils.parse_url (import)
-    (("validate_callback", "src/validators.py"),
-     ("parse_url", "src/url_utils.py"),
-     "CALLS", 20, "import", 1.0),
+    (
+        ("validate_callback", "src/validators.py"),
+        ("parse_url", "src/url_utils.py"),
+        "CALLS",
+        20,
+        "import",
+        1.0,
+    ),
     # same-file: url_utils.normalize_url -> url_utils.parse_url
-    (("normalize_url", "src/url_utils.py"),
-     ("parse_url", "src/url_utils.py"),
-     "CALLS", 30, "same_file", 1.0),
+    (
+        ("normalize_url", "src/url_utils.py"),
+        ("parse_url", "src/url_utils.py"),
+        "CALLS",
+        30,
+        "same_file",
+        1.0,
+    ),
     # same-file: url_utils.is_https -> url_utils.parse_url
-    (("is_https", "src/url_utils.py"),
-     ("parse_url", "src/url_utils.py"),
-     "CALLS", 38, "same_file", 1.0),
+    (
+        ("is_https", "src/url_utils.py"),
+        ("parse_url", "src/url_utils.py"),
+        "CALLS",
+        38,
+        "same_file",
+        1.0,
+    ),
     # name_match (ambiguous, low confidence): pkg.parser.ParseURL -> parse_url (cross-language collision)
-    (("ParseURL", "pkg/parser.go"),
-     ("parse_url", "src/url_utils.py"),
-     "CALLS", 13, "name_match", 0.4),
+    (
+        ("ParseURL", "pkg/parser.go"),
+        ("parse_url", "src/url_utils.py"),
+        "CALLS",
+        13,
+        "name_match",
+        0.4,
+    ),
     # name_match (single candidate, higher conf): pkg.parser.Normalize -> normalize
-    (("Normalize", "pkg/parser.go"),
-     ("normalize", "crates/util/src/normalize.rs"),
-     "CALLS", 28, "name_match", 0.9),
+    (
+        ("Normalize", "pkg/parser.go"),
+        ("normalize", "crates/util/src/normalize.rs"),
+        "CALLS",
+        28,
+        "name_match",
+        0.9,
+    ),
     # same-file Go: ParseURL -> Normalize
-    (("ParseURL", "pkg/parser.go"),
-     ("Normalize", "pkg/parser.go"),
-     "CALLS", 14, "same_file", 1.0),
+    (("ParseURL", "pkg/parser.go"), ("Normalize", "pkg/parser.go"), "CALLS", 14, "same_file", 1.0),
     # same-file Rust: to_https -> normalize
-    (("to_https", "crates/util/src/normalize.rs"),
-     ("normalize", "crates/util/src/normalize.rs"),
-     "CALLS", 16, "same_file", 1.0),
+    (
+        ("to_https", "crates/util/src/normalize.rs"),
+        ("normalize", "crates/util/src/normalize.rs"),
+        "CALLS",
+        16,
+        "same_file",
+        1.0,
+    ),
     # name_match low conf: serve_forever -> ParseURL
-    (("serve_forever", "src/server.py"),
-     ("ParseURL", "pkg/parser.go"),
-     "CALLS", 22, "name_match", 0.4),
+    (
+        ("serve_forever", "src/server.py"),
+        ("ParseURL", "pkg/parser.go"),
+        "CALLS",
+        22,
+        "name_match",
+        0.4,
+    ),
 ]
 
 
@@ -180,8 +265,7 @@ def build(db_path: Path = DB_PATH) -> Path:
                 "(label, name, qualified_name, file_path, start_line, end_line, "
                 "signature, return_type, is_exported, is_test, language, parent_id) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (label, name, qname, fp, sl, el,
-                 f"{name}(...)", None, 1, 0, lang, None),
+                (label, name, qname, fp, sl, el, f"{name}(...)", None, 1, 0, lang, None),
             )
             ids[(name, fp)] = cur.lastrowid
 

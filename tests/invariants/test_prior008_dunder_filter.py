@@ -2,13 +2,12 @@
 
 Tests the production code path: post_edit.py _get_siblings_from_graph().
 """
+
 from __future__ import annotations
 
 import os
 import sqlite3
 import tempfile
-
-import pytest
 
 
 def create_graph_with_dunder_siblings(db_path: str, repo_root: str) -> None:
@@ -93,7 +92,10 @@ class TestDunderFilterInProduction:
             create_graph_with_dunder_siblings(db_path, tmpdir)
 
             siblings = _get_siblings_from_graph(
-                db_path, "beets/importer.py", "set_fields", tmpdir,
+                db_path,
+                "beets/importer.py",
+                "set_fields",
+                tmpdir,
             )
 
             names = [s["name"] for s in siblings]
@@ -112,10 +114,11 @@ class TestDunderFilterInProduction:
             create_graph_with_dunder_siblings(db_path, tmpdir)
 
             siblings = _get_siblings_from_graph(
-                db_path, "beets/importer.py", "set_fields", tmpdir,
+                db_path,
+                "beets/importer.py",
+                "set_fields",
+                tmpdir,
             )
 
             names = [s["name"] for s in siblings]
-            assert "reload" in names, (
-                f"Valid sibling 'reload' must be preserved. Got: {names}"
-            )
+            assert "reload" in names, f"Valid sibling 'reload' must be preserved. Got: {names}"

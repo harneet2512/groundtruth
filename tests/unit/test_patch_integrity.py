@@ -7,7 +7,6 @@ from __future__ import annotations
 
 
 class TestPatchIntegrity:
-
     def test_clean_patch_not_malformed(self):
         """A proper patch ending with newline is not malformed."""
         patch = (
@@ -48,6 +47,7 @@ class TestPatchIntegrity:
     def test_hash_consistency(self):
         """SHA256 hash of the same patch is consistent."""
         import hashlib
+
         patch = "diff --git a/foo.py b/foo.py\n+line\n"
         h1 = hashlib.sha256(patch.encode("utf-8")).hexdigest()[:16]
         h2 = hashlib.sha256(patch.encode("utf-8")).hexdigest()[:16]
@@ -56,6 +56,7 @@ class TestPatchIntegrity:
     def test_hash_changes_on_truncation(self):
         """Hash differs between full and truncated patch."""
         import hashlib
+
         full = "diff --git a/foo.py b/foo.py\n+line\n"
         truncated = "diff --git a/foo.py b/foo.py\n+lin"
         h_full = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]

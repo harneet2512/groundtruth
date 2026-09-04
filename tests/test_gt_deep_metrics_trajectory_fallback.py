@@ -32,7 +32,7 @@ def test_deepswe_trajectory_gt_observations_backfill_token_accounting(tmp_path):
         "<gt-task-brief>\nfiles: src/a.py\n</gt-task-brief>\n"
         "<gt-graph-map>\nsource graph\n</gt-graph-map>\n"
         "<gt-evidence>\ncontract evidence\n</gt-evidence>\n"
-        "<gt-nudge reason=\"test_evidence_gap\">verify this edit</gt-nudge>\n"
+        '<gt-nudge reason="test_evidence_gap">verify this edit</gt-nudge>\n'
     )
     trajectory = {
         "info": {
@@ -60,10 +60,7 @@ def test_deepswe_trajectory_gt_observations_backfill_token_accounting(tmp_path):
     assert deep["efficiency"]["gt_injected_tokens_source"] == "trajectory_proxy"
     assert deep["layers_active"]
     assert deep["per_layer"]
-    assert all(
-        layer.get("source") == "trajectory_proxy"
-        for layer in deep["per_layer"].values()
-    )
+    assert all(layer.get("source") == "trajectory_proxy" for layer in deep["per_layer"].values())
 
 
 def test_embedder_certificate_overrides_local_probe_unavailability(tmp_path):
@@ -81,9 +78,7 @@ def test_embedder_certificate_overrides_local_probe_unavailability(tmp_path):
         "upstream_semantic_nonzero_count": 5,
         "effective_w_sem": 0.2,
     }
-    (artifacts / "embedder_certificate.json").write_text(
-        json.dumps(cert), encoding="utf-8"
-    )
+    (artifacts / "embedder_certificate.json").write_text(json.dumps(cert), encoding="utf-8")
 
     deep = mod.build(task, str(tmp_path))
 

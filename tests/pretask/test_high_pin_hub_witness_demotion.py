@@ -18,6 +18,7 @@ arXiv:2505.06914 — plausible-but-wrong context is the maximally harmful class)
 Red->green: hub-anchored pin (func with 25 callers) -> MEDIUM, not HIGH;
 non-hub pin with identical witness shape -> HIGH preserved (no over-kill).
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -31,9 +32,15 @@ _PIN_FILE = "evaluator/functions.go"
 
 def _w(anchor: str, dst: str, conf: float = 1.0) -> Witness:
     return Witness(
-        file_path=_PIN_FILE, anchor=anchor, edge_type="CALLS",
-        direction="calls_anchor", verified=True, confidence=conf,
-        hop=1, src_symbol=anchor, dst_symbol=dst,
+        file_path=_PIN_FILE,
+        anchor=anchor,
+        edge_type="CALLS",
+        direction="calls_anchor",
+        verified=True,
+        confidence=conf,
+        hop=1,
+        src_symbol=anchor,
+        dst_symbol=dst,
     )
 
 
@@ -42,22 +49,32 @@ def _loc(func: str) -> LocalizerResult:
     >=2 distinct issue anchors, >=2 distinct witnesses converging on ``func``
     (max-strength), agreement >= 2."""
     witnesses = [
-        _w(func, "Eval", 1.0),       # support 1 for func (max strength)
-        _w(func, "Parse", 1.0),      # support 2 for func (distinct tuple)
+        _w(func, "Eval", 1.0),  # support 1 for func (max strength)
+        _w(func, "Parse", 1.0),  # support 2 for func (distinct tuple)
         _w("Evaluator", "Run", 0.8),  # 2nd distinct issue anchor (weaker)
     ]
     cand = Candidate(
-        file_path=_PIN_FILE, score=0.9, witnesses=witnesses,
-        lex_hits=2, degree=1, confidence=1.0,
+        file_path=_PIN_FILE,
+        score=0.9,
+        witnesses=witnesses,
+        lex_hits=2,
+        degree=1,
+        confidence=1.0,
     )
     other = Candidate(
-        file_path="evaluator/lexer.go", score=0.4, witnesses=[],
-        lex_hits=1, degree=1, confidence=0.2,
+        file_path="evaluator/lexer.go",
+        score=0.4,
+        witnesses=[],
+        lex_hits=1,
+        degree=1,
+        confidence=0.2,
     )
     return LocalizerResult(
         candidates=[cand, other],
         anchor_symbols=[func, "Evaluator"],
-        confidence=1.0, confident=True, gate_reason="test",
+        confidence=1.0,
+        confident=True,
+        gate_reason="test",
         agreement_by_file={_gl_normalize(_PIN_FILE): 3},
     )
 
@@ -83,14 +100,16 @@ def _build_graph(db_path: Path, pinned_func: str, pinned_fanin: int) -> str:
 
     def node(name: str, fp: str) -> int:
         cur = conn.execute(
-            "INSERT INTO nodes (label, name, file_path) VALUES ('Function',?,?)",
-            (name, fp))
+            "INSERT INTO nodes (label, name, file_path) VALUES ('Function',?,?)", (name, fp)
+        )
         return cur.lastrowid
 
     def call(src: int, tgt: int) -> None:
         conn.execute(
             "INSERT INTO edges (source_id, target_id, type, resolution_method) "
-            "VALUES (?,?, 'CALLS', 'import')", (src, tgt))
+            "VALUES (?,?, 'CALLS', 'import')",
+            (src, tgt),
+        )
 
     pin = node(pinned_func, _PIN_FILE)
     for i in range(pinned_fanin):
@@ -113,7 +132,8 @@ def test_hub_witness_only_pin_demotes_to_medium(tmp_path: Path):
     db = _build_graph(tmp_path / "g.db", "New", 25)
     header, primary = _localization_header(_loc("New"), db, "fix New evaluation")
     assert 'confidence="high"' not in header, (
-        "single-hub-witness HIGH pin survived (inverted confidence):\n" + header)
+        "single-hub-witness HIGH pin survived (inverted confidence):\n" + header
+    )
     # not silenced — demoted: the candidate list still shows the file.
     assert _PIN_FILE in header, "demotion must keep the candidate visible:\n" + header
     assert primary == _PIN_FILE
@@ -123,10 +143,8 @@ def test_non_hub_pin_keeps_high(tmp_path: Path):
     """Identical witness shape on a NON-hub func (fan-in 3) -> HIGH preserved
     (no over-suppression of legitimate convergence)."""
     db = _build_graph(tmp_path / "g.db", "ParseStep", 3)
-    header, primary = _localization_header(
-        _loc("ParseStep"), db, "fix ParseStep evaluation")
-    assert 'confidence="high"' in header, (
-        "legitimate HIGH over-suppressed:\n" + header)
+    header, primary = _localization_header(_loc("ParseStep"), db, "fix ParseStep evaluation")
+    assert 'confidence="high"' in header, "legitimate HIGH over-suppressed:\n" + header
     assert f"Edit target: {_PIN_FILE} :: ParseStep" in header
     assert primary == _PIN_FILE
 
@@ -135,5 +153,6 @@ def test_unreadable_graph_stays_permissive(tmp_path: Path):
     """No graph.db -> the symbol-hub gate cannot judge -> prior behavior
     (HIGH renders; the gate's own failure is never a demotion fact)."""
     header, _ = _localization_header(
-        _loc("New"), str(tmp_path / "missing.db"), "fix New evaluation")
+        _loc("New"), str(tmp_path / "missing.db"), "fix New evaluation"
+    )
     assert 'confidence="high"' in header

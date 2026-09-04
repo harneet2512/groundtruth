@@ -16,6 +16,7 @@ These tests pin BOTH directions of the internal-target check:
 plus a MUTATION CHECK that removing the builtin guard turns the builtin case wrongly FAIL (the test
 bites), and a CLI smoke that the prior `depth_present` KeyError in the verdict line no longer aborts.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -99,8 +100,18 @@ def test_builtin_set_mirrors_resolver_promote_list(audit):
     canonical RAISES builtins (and the brief's named receivers) are present."""
     for name in ("Error", "TypeError", "Exception", "RuntimeError", "ValueError"):
         assert name in audit._BUILTIN_EXCEPTIONS, name
-    for recv in ("Object", "Map", "Set", "Array", "String", "string", "list", "dict",
-                 "panic", "unwrap"):
+    for recv in (
+        "Object",
+        "Map",
+        "Set",
+        "Array",
+        "String",
+        "string",
+        "list",
+        "dict",
+        "panic",
+        "unwrap",
+    ):
         assert recv in audit._BUILTIN_RECEIVERS, recv
 
 
@@ -125,7 +136,9 @@ def test_mutation_removing_builtin_guard_makes_builtin_case_fail(audit, tmp_path
     # the guard is the thing keeping the false-FAIL closed. Restored automatically by monkeypatch.
     monkeypatch.setattr(audit, "_is_builtin_target", lambda tok: False)
     rep_broken = audit.audit_depth(db)
-    assert rep_broken["fired"] is False, "removing the builtin guard must reintroduce the false-FAIL"
+    assert rep_broken["fired"] is False, (
+        "removing the builtin guard must reintroduce the false-FAIL"
+    )
     assert rep_broken["per_class"]["RAISES"]["status"] == "PROMOTE-GAP"
 
 

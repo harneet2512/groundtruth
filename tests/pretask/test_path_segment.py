@@ -1,4 +1,5 @@
 """Unit tests for v2.2 path-segment BM25 scoring."""
+
 from __future__ import annotations
 
 from groundtruth.pretask.path_segment import (

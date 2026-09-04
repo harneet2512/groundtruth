@@ -31,6 +31,7 @@ subcommand itself dispatches to a regex indexer for non-Python repos via
 guarantee correctness on Go/Rust, so we make that limitation explicit in
 ``test_analyze_does_not_assume_only_python`` rather than masking it.
 """
+
 from __future__ import annotations
 
 import os
@@ -126,27 +127,42 @@ def hook_env(tmp_path: Path) -> dict[str, str]:
     return env
 
 
-def _run_analyze(workspace: Path, env: dict[str, str], filepath: str,
-                 *, quiet: bool = False) -> subprocess.CompletedProcess[str]:
+def _run_analyze(
+    workspace: Path, env: dict[str, str], filepath: str, *, quiet: bool = False
+) -> subprocess.CompletedProcess[str]:
     cmd = [sys.executable, str(GT_HOOK), "analyze", filepath, "--root", str(workspace)]
     if quiet:
         cmd.append("--quiet")
     return subprocess.run(
-        cmd, env=env, capture_output=True, text=True, timeout=60,
+        cmd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
         encoding="utf-8",
     )
 
 
-def _run_verify(workspace: Path, env: dict[str, str], db_path: str,
-                *, quiet: bool = False) -> subprocess.CompletedProcess[str]:
+def _run_verify(
+    workspace: Path, env: dict[str, str], db_path: str, *, quiet: bool = False
+) -> subprocess.CompletedProcess[str]:
     cmd = [
-        sys.executable, str(GT_HOOK), "verify",
-        "--root", str(workspace), "--db", db_path,
+        sys.executable,
+        str(GT_HOOK),
+        "verify",
+        "--root",
+        str(workspace),
+        "--db",
+        db_path,
     ]
     if quiet:
         cmd.append("--quiet")
     return subprocess.run(
-        cmd, env=env, capture_output=True, text=True, timeout=60,
+        cmd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
         encoding="utf-8",
     )
 
@@ -205,8 +221,7 @@ def test_scratch_file(workspace: Path, hook_env: dict[str, str]) -> None:
     assert "no symbols found" in result_loud.stderr
 
 
-def test_missing_graph_db(workspace: Path, hook_env: dict[str, str],
-                          tmp_path: Path) -> None:
+def test_missing_graph_db(workspace: Path, hook_env: dict[str, str], tmp_path: Path) -> None:
     """Pointing ``--db`` at a nonexistent file must not crash.
 
     NOTE: ``--db`` only exists on the ``verify`` subcommand. ``analyze``
@@ -277,8 +292,7 @@ def test_family_detection_canonical(workspace: Path, hook_env: dict[str, str]) -
     # enough to produce far more. Lock in a tighter floor so a
     # regression that silently drops one family is caught.
     assert len(seen) >= 6, (
-        f"too few families fired: saw={sorted(seen)} "
-        f"expected ≥6 of {CANONICAL_FAMILY_TOKENS}"
+        f"too few families fired: saw={sorted(seen)} expected ≥6 of {CANONICAL_FAMILY_TOKENS}"
     )
     # Spot-check the non-CONNECTED-CODE families, which are the ones most
     # likely to silently regress (they require test mining + sibling search).
@@ -305,8 +319,7 @@ def test_synthetic_graph_db_is_multi_language(synthetic_graph_db: Path) -> None:
     try:
         langs = {row[0] for row in conn.execute("SELECT DISTINCT language FROM nodes")}
         files = {row[0] for row in conn.execute("SELECT DISTINCT file_path FROM nodes")}
-        confs = sorted({round(row[0], 2)
-                        for row in conn.execute("SELECT confidence FROM edges")})
+        confs = sorted({round(row[0], 2) for row in conn.execute("SELECT confidence FROM edges")})
     finally:
         conn.close()
     assert {"python", "go", "rust"}.issubset(langs), f"languages: {langs}"
@@ -323,9 +336,7 @@ def test_synthetic_graph_db_is_multi_language(synthetic_graph_db: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_unicode_arrows_survive_windows_cp1252_simulation(
-    workspace: Path, tmp_path: Path
-) -> None:
+def test_unicode_arrows_survive_windows_cp1252_simulation(workspace: Path, tmp_path: Path) -> None:
     """Bug fix #1: ``gt_hook analyze`` on Windows cp1252 console used to
     silently exit with empty stdout because ``print('→')`` raised
     UnicodeEncodeError, the ``if __name__ == '__main__'`` guard caught
@@ -351,11 +362,18 @@ def test_unicode_arrows_survive_windows_cp1252_simulation(
     env.pop("GT_INSTANCE_ID", None)
 
     cmd = [
-        sys.executable, str(GT_HOOK), "analyze", "url_utils.py",
-        "--root", str(workspace),
+        sys.executable,
+        str(GT_HOOK),
+        "analyze",
+        "url_utils.py",
+        "--root",
+        str(workspace),
     ]
     result = subprocess.run(
-        cmd, env=env, capture_output=True, timeout=60,
+        cmd,
+        env=env,
+        capture_output=True,
+        timeout=60,
     )
     # Decode stdout permissively so the test itself does not blow up
     # on whatever bytes the hook emits.
@@ -388,8 +406,7 @@ def test_pytest_bare_assert_surfaces_in_tests_family(
     repo = tmp_path / "pytest_repo"
     repo.mkdir()
     (repo / "url_utils.py").write_text(
-        "def parse_url(s):\n"
-        "    return s.lower()\n",
+        "def parse_url(s):\n    return s.lower()\n",
         encoding="utf-8",
     )
     tests_dir = repo / "tests"
@@ -430,11 +447,9 @@ def test_pytest_bare_assert_surfaces_in_tests_family(
     # The bare ``assert ... == ...`` must classify as assertEqual; the
     # ``assert isinstance(...)`` must classify as assertIsInstance. At
     # least one must reach the rendered output.
-    assert (
-        "assertEqual" in out
-        or "assertIsInstance" in out
-        or "assertTrue" in out
-    ), f"no bare-assert classification rendered: {out!r}"
+    assert "assertEqual" in out or "assertIsInstance" in out or "assertTrue" in out, (
+        f"no bare-assert classification rendered: {out!r}"
+    )
 
 
 def test_obligations_section_not_truncated_when_under_cap(
@@ -509,8 +524,7 @@ def test_obligations_section_not_truncated_when_under_cap(
     # CODE is dense — this is the regression. Pre-fix, the embedded
     # OBLIGATIONS block was silently dropped by the [:20] cap.
     assert "--- OBLIGATIONS ---" in out, (
-        f"OBLIGATIONS section missing — likely truncated by [:20] cap. "
-        f"Output:\n{out}"
+        f"OBLIGATIONS section missing — likely truncated by [:20] cap. Output:\n{out}"
     )
     # At least one obligation line must follow the marker. CALLERS or
     # TEST is the most reliable signal given the fixture (5 callers + 1
@@ -575,11 +589,21 @@ def test_analyze_with_db_reads_graph_db(
     env.pop("GT_INSTANCE_ID", None)
 
     cmd = [
-        sys.executable, str(GT_HOOK), "analyze", "src/url_utils.py",
-        "--root", str(repo), "--db", str(synthetic_graph_db),
+        sys.executable,
+        str(GT_HOOK),
+        "analyze",
+        "src/url_utils.py",
+        "--root",
+        str(repo),
+        "--db",
+        str(synthetic_graph_db),
     ]
     result = subprocess.run(
-        cmd, env=env, capture_output=True, text=True, timeout=30,
+        cmd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
         encoding="utf-8",
     )
     assert result.returncode == 0, result.stderr
@@ -590,14 +614,11 @@ def test_analyze_with_db_reads_graph_db(
     assert out.lstrip().startswith("<gt-evidence>"), (
         f"brief is not wrapped in <gt-evidence>; got: {out!r}"
     )
-    assert "[VERIFIED] TARGET: parse_url" in out, (
-        f"missing TARGET line; brief was:\n{out}"
-    )
+    assert "[VERIFIED] TARGET: parse_url" in out, f"missing TARGET line; brief was:\n{out}"
     # Count [CALLER] lines — must equal the 3 admissible cross-file edges.
     caller_lines = [ln for ln in out.splitlines() if ln.startswith("[CALLER]")]
     assert len(caller_lines) == 3, (
-        f"expected 3 [CALLER] lines from synthetic graph.db, got "
-        f"{len(caller_lines)}; brief:\n{out}"
+        f"expected 3 [CALLER] lines from synthetic graph.db, got {len(caller_lines)}; brief:\n{out}"
     )
     # Anti-fallback assertion — legacy AST banner must NOT appear.
     assert "=== GT CODEBASE INTELLIGENCE ===" not in out, (
@@ -606,7 +627,9 @@ def test_analyze_with_db_reads_graph_db(
 
 
 def test_analyze_with_missing_db_falls_back_to_ast(
-    workspace: Path, hook_env: dict[str, str], tmp_path: Path,
+    workspace: Path,
+    hook_env: dict[str, str],
+    tmp_path: Path,
 ) -> None:
     """RC-05 back-compat: a missing ``--db`` file must NOT crash. The hook
     falls back to its legacy AST index path so the L3 brief never goes
@@ -615,11 +638,21 @@ def test_analyze_with_missing_db_falls_back_to_ast(
     bogus = tmp_path / "no-such-graph.db"
     assert not bogus.exists()
     cmd = [
-        sys.executable, str(GT_HOOK), "analyze", "url_utils.py",
-        "--root", str(workspace), "--db", str(bogus),
+        sys.executable,
+        str(GT_HOOK),
+        "analyze",
+        "url_utils.py",
+        "--root",
+        str(workspace),
+        "--db",
+        str(bogus),
     ]
     result = subprocess.run(
-        cmd, env=hook_env, capture_output=True, text=True, timeout=60,
+        cmd,
+        env=hook_env,
+        capture_output=True,
+        text=True,
+        timeout=60,
         encoding="utf-8",
     )
     assert result.returncode == 0, result.stderr
@@ -629,8 +662,7 @@ def test_analyze_with_missing_db_falls_back_to_ast(
     )
 
 
-def test_analyze_does_not_assume_only_python(workspace: Path,
-                                              hook_env: dict[str, str]) -> None:
+def test_analyze_does_not_assume_only_python(workspace: Path, hook_env: dict[str, str]) -> None:
     """The analyze command's regex indexer is reachable for non-Python repos.
 
     We don't assert behavior parity with Python — that's L1's job. We only

@@ -1,4 +1,5 @@
 """Input validators that build on URL parsing."""
+
 from __future__ import annotations
 
 from .url_utils import parse_url, is_https

@@ -1,6 +1,7 @@
 """Render-level tests for the verification-horizon emission: the structural risk_note
 is appended, and the benchmark-shaped 'submit/submission' wording is gone (legitimacy
 fix — a product agent finalizes/commits, it does not 'submit a patch')."""
+
 from __future__ import annotations
 
 from groundtruth.runtime.verification_horizon import render_verify_emission
@@ -8,7 +9,11 @@ from groundtruth.runtime.verification_horizon import render_verify_emission
 
 def test_risk_note_is_appended_to_the_body():
     out = render_verify_emission(
-        "advisory", 5, 100, {"pkg/a.py"}, None,
+        "advisory",
+        5,
+        100,
+        {"pkg/a.py"},
+        None,
         risk_note="set_fields (7 verified caller(s) in the graph) — no test has exercised it",
     )
     assert "Highest-impact unverified change: set_fields (7 verified caller(s)" in out

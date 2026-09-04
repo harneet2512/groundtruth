@@ -12,7 +12,7 @@ Edge cases tested:
 """
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 # ── P14 Implementation (from BUILD_RESEARCH_P6_P14.md spec, Approach A) ──
@@ -51,6 +51,7 @@ SERDE_PAIRS: list[tuple[str, str]] = [
 @dataclass
 class FunctionNode:
     """Simplified representation of a function node from graph.db."""
+
     id: int
     name: str
     file_path: str
@@ -61,6 +62,7 @@ class FunctionNode:
 @dataclass
 class SerializationPair:
     """A detected pair of serialization/deserialization functions."""
+
     serializer: FunctionNode
     deserializer: FunctionNode
     pattern: tuple[str, str]
@@ -69,6 +71,7 @@ class SerializationPair:
 @dataclass
 class UnpairedFunction:
     """A function matching one side of a serde pattern but missing its counterpart."""
+
     function: FunctionNode
     missing_counterpart: str
     pattern: tuple[str, str]
@@ -105,23 +108,29 @@ def detect_serialization_pairs(
             has_deser = deser_name in scope_funcs
 
             if has_ser and has_deser:
-                pairs.append(SerializationPair(
-                    serializer=scope_funcs[ser_name],
-                    deserializer=scope_funcs[deser_name],
-                    pattern=pattern,
-                ))
+                pairs.append(
+                    SerializationPair(
+                        serializer=scope_funcs[ser_name],
+                        deserializer=scope_funcs[deser_name],
+                        pattern=pattern,
+                    )
+                )
             elif has_ser and not has_deser:
-                unpaired.append(UnpairedFunction(
-                    function=scope_funcs[ser_name],
-                    missing_counterpart=deser_name,
-                    pattern=pattern,
-                ))
+                unpaired.append(
+                    UnpairedFunction(
+                        function=scope_funcs[ser_name],
+                        missing_counterpart=deser_name,
+                        pattern=pattern,
+                    )
+                )
             elif has_deser and not has_ser:
-                unpaired.append(UnpairedFunction(
-                    function=scope_funcs[deser_name],
-                    missing_counterpart=ser_name,
-                    pattern=pattern,
-                ))
+                unpaired.append(
+                    UnpairedFunction(
+                        function=scope_funcs[deser_name],
+                        missing_counterpart=ser_name,
+                        pattern=pattern,
+                    )
+                )
 
     return pairs, unpaired
 
@@ -134,7 +143,9 @@ def test_dump_without_load_no_pair():
     should NOT create a pair. It should appear as UnpairedFunction instead."""
     functions = [
         FunctionNode(id=1, name="dump", file_path="serializer.py", parent_id=0, start_line=10),
-        FunctionNode(id=2, name="format_output", file_path="serializer.py", parent_id=0, start_line=20),
+        FunctionNode(
+            id=2, name="format_output", file_path="serializer.py", parent_id=0, start_line=20
+        ),
     ]
 
     pairs, unpaired = detect_serialization_pairs(functions)
@@ -146,7 +157,9 @@ def test_dump_without_load_no_pair():
     )
 
     # 'dump' should appear in unpaired list
-    dump_unpaired = [u for u in unpaired if u.function.name == "dump" and u.missing_counterpart == "load"]
+    dump_unpaired = [
+        u for u in unpaired if u.function.name == "dump" and u.missing_counterpart == "load"
+    ]
     assert len(dump_unpaired) >= 1, (
         f"Expected 'dump' to appear in unpaired (missing 'load'), got unpaired: "
         f"{[(u.function.name, u.missing_counterpart) for u in unpaired]}"
@@ -175,9 +188,7 @@ def test_dump_with_load_creates_pair():
     # recorded as missing.
     save_unpaired = [u for u in unpaired if u.missing_counterpart == "save"]
     # This is expected -- "load" exists but "save" doesn't
-    assert len(save_unpaired) >= 1, (
-        "Expected 'load' to create unpaired entry for missing 'save'"
-    )
+    assert len(save_unpaired) >= 1, "Expected 'load' to create unpaired entry for missing 'save'"
 
     print("  PASS: test_dump_with_load_creates_pair")
 
@@ -188,18 +199,19 @@ def test_to_json_cross_file_no_pair():
     NOT create a pair."""
     functions = [
         FunctionNode(id=1, name="to_json", file_path="models/user.py", parent_id=10, start_line=15),
-        FunctionNode(id=2, name="from_json", file_path="models/order.py", parent_id=20, start_line=25),
+        FunctionNode(
+            id=2, name="from_json", file_path="models/order.py", parent_id=20, start_line=25
+        ),
         # Same class in user.py: this SHOULD pair
-        FunctionNode(id=3, name="from_json", file_path="models/user.py", parent_id=10, start_line=30),
+        FunctionNode(
+            id=3, name="from_json", file_path="models/user.py", parent_id=10, start_line=30
+        ),
     ]
 
     pairs, unpaired = detect_serialization_pairs(functions)
 
     # Only the user.py pair (same file + same parent_id=10) should match
-    valid_pairs = [
-        p for p in pairs
-        if p.pattern == ("to_json", "from_json")
-    ]
+    valid_pairs = [p for p in pairs if p.pattern == ("to_json", "from_json")]
     assert len(valid_pairs) == 1, (
         f"Expected exactly 1 to_json/from_json pair (same scope), got {len(valid_pairs)}"
     )
@@ -209,7 +221,8 @@ def test_to_json_cross_file_no_pair():
 
     # order.py's from_json should be unpaired (no to_json in same scope)
     order_unpaired = [
-        u for u in unpaired
+        u
+        for u in unpaired
         if u.function.file_path == "models/order.py"
         and u.function.name == "from_json"
         and u.missing_counterpart == "to_json"
@@ -243,8 +256,7 @@ def test_case_sensitive_no_pair():
 
     # "to_json" should be in unpaired, missing "from_json"
     to_json_unpaired = [
-        u for u in unpaired
-        if u.function.name == "to_json" and u.missing_counterpart == "from_json"
+        u for u in unpaired if u.function.name == "to_json" and u.missing_counterpart == "from_json"
     ]
     assert len(to_json_unpaired) == 1, (
         f"Expected 'to_json' unpaired (missing 'from_json'), got: "
@@ -261,9 +273,7 @@ def test_case_sensitive_no_pair():
 
     # TO_JSON should NOT be in results as a matched function since it doesn't
     # match any pattern exactly
-    to_json_upper_in_results = [
-        u for u in unpaired if u.function.name == "TO_JSON"
-    ]
+    to_json_upper_in_results = [u for u in unpaired if u.function.name == "TO_JSON"]
     assert len(to_json_upper_in_results) == 0, (
         f"'TO_JSON' should not match any serde pattern (case-sensitive). Got: "
         f"{[(u.function.name, u.missing_counterpart) for u in to_json_upper_in_results]}"
@@ -299,9 +309,7 @@ def test_same_class_creates_pair():
     pairs, unpaired = detect_serialization_pairs(functions)
 
     ser_deser_pairs = [p for p in pairs if p.pattern == ("serialize", "deserialize")]
-    assert len(ser_deser_pairs) == 1, (
-        f"Expected 1 pair (same class), got {len(ser_deser_pairs)}"
-    )
+    assert len(ser_deser_pairs) == 1, f"Expected 1 pair (same class), got {len(ser_deser_pairs)}"
 
     print("  PASS: test_same_class_creates_pair")
 
@@ -321,7 +329,9 @@ def test_go_naming_conventions():
     marshal_pairs = [p for p in pairs if p.pattern == ("MarshalJSON", "UnmarshalJSON")]
 
     assert len(tojson_pairs) == 1, f"Expected ToJSON/FromJSON pair, got {len(tojson_pairs)}"
-    assert len(marshal_pairs) == 1, f"Expected MarshalJSON/UnmarshalJSON pair, got {len(marshal_pairs)}"
+    assert len(marshal_pairs) == 1, (
+        f"Expected MarshalJSON/UnmarshalJSON pair, got {len(marshal_pairs)}"
+    )
 
     print("  PASS: test_go_naming_conventions")
 

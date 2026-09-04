@@ -12,13 +12,17 @@ from pathlib import Path
 from typing import Any
 
 
-def build_project_memory(repo_root: str, *, log_dir: str | None = None, task_id: str = "unknown") -> dict[str, Any]:
+def build_project_memory(
+    repo_root: str, *, log_dir: str | None = None, task_id: str = "unknown"
+) -> dict[str, Any]:
     root = Path(repo_root)
     memory = {
         "repo": _repo_identity(root),
         "package_manager": _package_manager(root),
         "test_layout": _test_layout(root),
-        "changelog_convention": _first_existing(root, ["CHANGELOG.md", "CHANGES.rst", "docs/changelog.rst"]),
+        "changelog_convention": _first_existing(
+            root, ["CHANGELOG.md", "CHANGES.rst", "docs/changelog.rst"]
+        ),
         "generated_vendor_patterns": _generated_vendor_patterns(root),
         "common_side_file_rules": _side_file_rules(root),
         "slow_flaky_test_commands": [],

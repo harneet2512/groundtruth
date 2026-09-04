@@ -32,33 +32,112 @@ def _build_store() -> tuple[SymbolStore, str]:
     now = int(time.time())
 
     symbols = [
-        ("get_user_by_id", "function", "src/users/queries.py", 9, 14, True,
-         "(user_id: int) -> User", "user_id: int", "User"),
-        ("create_user", "function", "src/users/queries.py", 17, 25, True,
-         "(data: CreateUserInput) -> User", "data: CreateUserInput", "User"),
-        ("update_user", "function", "src/users/queries.py", 28, 50, True,
-         "(user_id: int, data: UpdateUserInput) -> User", "user_id: int, data: UpdateUserInput", "User"),
-        ("delete_user", "function", "src/users/queries.py", 53, 56, True,
-         "(user_id: int) -> None", "user_id: int", "None"),
-        ("login", "function", "src/auth/login.py", 21, 37, True,
-         "(email: str, password: str) -> LoginResult", "email: str, password: str", "LoginResult"),
-        ("hash_password", "function", "src/utils/crypto.py", 1, 10, True,
-         "(password: str) -> tuple[str, bytes]", "password: str", "tuple[str, bytes]"),
-        ("validate_email", "function", "src/utils/validation.py", 1, 10, True,
-         "(email: str) -> str", "email: str", "str"),
-        ("sign_token", "function", "src/auth/jwt.py", 1, 10, True,
-         "(payload: dict) -> str", "payload: dict", "str"),
-        ("test_login_success", "function", "tests/test_auth.py", 5, 15, False,
-         "()", None, None),
+        (
+            "get_user_by_id",
+            "function",
+            "src/users/queries.py",
+            9,
+            14,
+            True,
+            "(user_id: int) -> User",
+            "user_id: int",
+            "User",
+        ),
+        (
+            "create_user",
+            "function",
+            "src/users/queries.py",
+            17,
+            25,
+            True,
+            "(data: CreateUserInput) -> User",
+            "data: CreateUserInput",
+            "User",
+        ),
+        (
+            "update_user",
+            "function",
+            "src/users/queries.py",
+            28,
+            50,
+            True,
+            "(user_id: int, data: UpdateUserInput) -> User",
+            "user_id: int, data: UpdateUserInput",
+            "User",
+        ),
+        (
+            "delete_user",
+            "function",
+            "src/users/queries.py",
+            53,
+            56,
+            True,
+            "(user_id: int) -> None",
+            "user_id: int",
+            "None",
+        ),
+        (
+            "login",
+            "function",
+            "src/auth/login.py",
+            21,
+            37,
+            True,
+            "(email: str, password: str) -> LoginResult",
+            "email: str, password: str",
+            "LoginResult",
+        ),
+        (
+            "hash_password",
+            "function",
+            "src/utils/crypto.py",
+            1,
+            10,
+            True,
+            "(password: str) -> tuple[str, bytes]",
+            "password: str",
+            "tuple[str, bytes]",
+        ),
+        (
+            "validate_email",
+            "function",
+            "src/utils/validation.py",
+            1,
+            10,
+            True,
+            "(email: str) -> str",
+            "email: str",
+            "str",
+        ),
+        (
+            "sign_token",
+            "function",
+            "src/auth/jwt.py",
+            1,
+            10,
+            True,
+            "(payload: dict) -> str",
+            "payload: dict",
+            "str",
+        ),
+        ("test_login_success", "function", "tests/test_auth.py", 5, 15, False, "()", None, None),
     ]
 
     sym_ids: dict[str, int] = {}
     for name, kind, fp, sl, el, exp, sig, params, ret in symbols:
         r = store.insert_symbol(
-            name=name, kind=kind, language="python", file_path=fp,
-            line_number=sl, end_line=el, is_exported=exp,
-            signature=sig, params=params, return_type=ret,
-            documentation=None, last_indexed_at=now,
+            name=name,
+            kind=kind,
+            language="python",
+            file_path=fp,
+            line_number=sl,
+            end_line=el,
+            is_exported=exp,
+            signature=sig,
+            params=params,
+            return_type=ret,
+            documentation=None,
+            last_indexed_at=now,
         )
         if isinstance(r, Ok):
             sym_ids[name] = r.value
@@ -220,8 +299,11 @@ async def test_task_map_finding_fields(env):
     )
     for f in result["findings"]:
         assert f["kind"] in (
-            "file_relevance", "import_path", "caller_expectation",
-            "test_assertion", "caller_contract",
+            "file_relevance",
+            "import_path",
+            "caller_expectation",
+            "test_assertion",
+            "caller_contract",
         ), f"unexpected kind: {f['kind']}"
         assert 0.0 <= f["confidence"] <= 1.0
         assert f["location"]["file"]
@@ -275,5 +357,6 @@ def test_gt_intel_findings_json_flag():
     assert "--surface" in source
     assert "compute_findings_json" in source
     assert "format_findings_text" in source
-    assert "enhanced_briefing" in source and "findings_json" in source, \
+    assert "enhanced_briefing" in source and "findings_json" in source, (
         "enhanced-briefing must have findings-json branch"
+    )

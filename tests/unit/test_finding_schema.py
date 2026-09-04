@@ -122,15 +122,11 @@ class TestToTextLine:
         assert self._make(0.69).to_text_line().startswith("[INFO]")
 
     def test_fix_required_action(self) -> None:
-        line = self._make(
-            0.9, agent_action=AgentAction.FIX_REQUIRED
-        ).to_text_line()
+        line = self._make(0.9, agent_action=AgentAction.FIX_REQUIRED).to_text_line()
         assert "FIX REQUIRED" in line
 
     def test_no_line_number(self) -> None:
-        f = self._make(
-            0.9, location=Location(file="src/model.py")
-        )
+        f = self._make(0.9, location=Location(file="src/model.py"))
         line = f.to_text_line()
         assert "@ src/model.py " in line
         assert ":None" not in line

@@ -1,4 +1,5 @@
 """Tests for scripts.eval_lite.gold_extractor."""
+
 from __future__ import annotations
 
 import sqlite3

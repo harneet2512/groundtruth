@@ -16,9 +16,9 @@ implementation) and asserts:
   (green) the path-scoped lookup returns the importer.py symbol's callers and NEVER zero.py;
           and returns SILENCE (empty) when the grepped file has no such symbol.
 """
+
 from __future__ import annotations
 
-import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -30,8 +30,10 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts" / "swebench"))
 sys.modules.setdefault(
     "litellm",
     SimpleNamespace(
-        model_cost={}, success_callback=[],
-        completion=lambda *a, **k: None, acompletion=None,
+        model_cost={},
+        success_callback=[],
+        completion=lambda *a, **k: None,
+        acompletion=None,
         completion_cost=lambda *a, **k: 0.0,
     ),
 )
@@ -64,18 +66,71 @@ def _build_homonym_db(path: str) -> None:
     # 2: SingletonImportTask.set_fields in importer.py (same-file twin)
     # 3: zero.py set_fields(self, item, tags)  (UNRELATED homonym, wrong arity)
     nodes = [
-        ("Method", "set_fields", "beets/importer.py", 600,
-         "set_fields(self, key, string: str)", "import"),  # id 1
-        ("Method", "set_fields", "beets/importer.py", 980,
-         "set_fields(self, key, string: str)", "import"),  # id 2
-        ("Method", "set_fields", "beetsplug/zero.py", 120,
-         "set_fields(self, item, tags)", "import"),         # id 3
+        (
+            "Method",
+            "set_fields",
+            "beets/importer.py",
+            600,
+            "set_fields(self, key, string: str)",
+            "import",
+        ),  # id 1
+        (
+            "Method",
+            "set_fields",
+            "beets/importer.py",
+            980,
+            "set_fields(self, key, string: str)",
+            "import",
+        ),  # id 2
+        (
+            "Method",
+            "set_fields",
+            "beetsplug/zero.py",
+            120,
+            "set_fields(self, item, tags)",
+            "import",
+        ),  # id 3
         # callers
-        ("Function", "_apply_choice", "beets/importer.py", 700, "", "import"),     # id 4 (same-file caller)
-        ("Function", "run_import", "beets/ui/commands.py", 300, "", "import"),      # id 5 (cross-file caller of importer set_fields)
-        ("Function", "_set_fields", "beetsplug/zero.py", 60, "", "import"),         # id 6 (caller of zero homonym)
-        ("Function", "apply_zero", "beetsplug/zero.py", 200, "", "import"),         # id 7 (caller of zero homonym)
-        ("Function", "zero_main", "beetsplug/zero.py", 230, "", "import"),          # id 8 (caller of zero homonym)
+        (
+            "Function",
+            "_apply_choice",
+            "beets/importer.py",
+            700,
+            "",
+            "import",
+        ),  # id 4 (same-file caller)
+        (
+            "Function",
+            "run_import",
+            "beets/ui/commands.py",
+            300,
+            "",
+            "import",
+        ),  # id 5 (cross-file caller of importer set_fields)
+        (
+            "Function",
+            "_set_fields",
+            "beetsplug/zero.py",
+            60,
+            "",
+            "import",
+        ),  # id 6 (caller of zero homonym)
+        (
+            "Function",
+            "apply_zero",
+            "beetsplug/zero.py",
+            200,
+            "",
+            "import",
+        ),  # id 7 (caller of zero homonym)
+        (
+            "Function",
+            "zero_main",
+            "beetsplug/zero.py",
+            230,
+            "",
+            "import",
+        ),  # id 8 (caller of zero homonym)
     ]
     for label, name, fp, line, sig, _rm in nodes:
         conn.execute(
@@ -135,8 +190,14 @@ def test_grep_file_scope_extracted_from_command():
     assert hasattr(ohgt, "_extract_grep_file_scope"), (
         "fix must add _extract_grep_file_scope to recover the grepped file path"
     )
-    assert ohgt._extract_grep_file_scope("grep -rn set_fields beets/importer.py") == "beets/importer.py"
-    assert ohgt._extract_grep_file_scope("rg set_fields src/beets/importer.py") == "src/beets/importer.py"
+    assert (
+        ohgt._extract_grep_file_scope("grep -rn set_fields beets/importer.py")
+        == "beets/importer.py"
+    )
+    assert (
+        ohgt._extract_grep_file_scope("rg set_fields src/beets/importer.py")
+        == "src/beets/importer.py"
+    )
     # A bare repo-wide grep (no file arg) -> no scope.
     assert ohgt._extract_grep_file_scope("grep -rn set_fields") in (None, "")
 
@@ -149,7 +210,11 @@ def test_scoped_lookup_returns_importer_never_zero(tmp_path):
         "fix must add _grep_intercept_callers(db, symbol, file_scope, ...) path-scoped helper"
     )
     callers = ohgt._grep_intercept_callers(
-        db, "set_fields", file_scope="beets/importer.py", limit=5, min_conf=0.6,
+        db,
+        "set_fields",
+        file_scope="beets/importer.py",
+        limit=5,
+        min_conf=0.6,
     )
     files = {c[0] for c in callers}
     # The importer.py symbol's cross-file caller must appear.
@@ -163,7 +228,11 @@ def test_scoped_lookup_silent_when_symbol_absent_in_grepped_file(tmp_path):
     db = str(tmp_path / "graph.db")
     _build_homonym_db(db)
     callers = ohgt._grep_intercept_callers(
-        db, "set_fields", file_scope="beets/library.py", limit=5, min_conf=0.6,
+        db,
+        "set_fields",
+        file_scope="beets/library.py",
+        limit=5,
+        min_conf=0.6,
     )
     assert callers == [], (
         "symbol not defined in grepped file must yield silence, never the zero.py homonym"

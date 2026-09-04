@@ -1,17 +1,18 @@
 """Tests for gt_check_claims.py — the claim proof checker."""
+
 from __future__ import annotations
 
 import os
 import sys
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 from gt_check_claims import check_claims
 
 
-def make_claim(claim_id: str, layer: str, doc_status: str = "WORKING",
-               proof_type: str = "none") -> dict:
+def make_claim(
+    claim_id: str, layer: str, doc_status: str = "WORKING", proof_type: str = "none"
+) -> dict:
     return {
         "claim_id": claim_id,
         "layer": layer,
@@ -129,8 +130,10 @@ class TestSkippedClaims:
         # BROKEN without matching DISABLED/OPEN_BUG falls through to unsupported or skipped
         # depending on layer. The key assertion: it's not silently passed.
         total_processed = (
-            len(result["verified"]) + len(result["unsupported"])
-            + len(result["contradicted"]) + len(result["skipped"])
+            len(result["verified"])
+            + len(result["unsupported"])
+            + len(result["contradicted"])
+            + len(result["skipped"])
         )
         assert total_processed == 1
 

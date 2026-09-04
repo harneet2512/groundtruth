@@ -28,7 +28,6 @@ import os
 import re
 import shutil
 import sqlite3
-import sys
 import time
 from pathlib import Path
 
@@ -110,21 +109,105 @@ def build_python_graph(db_path: Path) -> str:
     conn = _new_graph_db(db_path)
     nodes = [
         # url_utils.py — central, incoming from server, validators
-        (1,  "Function", "parse_url",            None, "url_utils.py",  10, 30, None, None, 1, 0, "python", None),
-        (2,  "Function", "normalize_url",        None, "url_utils.py",  35, 45, None, None, 1, 0, "python", None),
-        (3,  "Function", "is_https",             None, "url_utils.py",  50, 55, None, None, 1, 0, "python", None),
+        (
+            1,
+            "Function",
+            "parse_url",
+            None,
+            "url_utils.py",
+            10,
+            30,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            2,
+            "Function",
+            "normalize_url",
+            None,
+            "url_utils.py",
+            35,
+            45,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (3, "Function", "is_https", None, "url_utils.py", 50, 55, None, None, 1, 0, "python", None),
         # validators.py
-        (4,  "Function", "validate_request_url", None, "validators.py", 10, 20, None, None, 1, 0, "python", None),
-        (5,  "Function", "validate_callback",    None, "validators.py", 25, 35, None, None, 1, 0, "python", None),
+        (
+            4,
+            "Function",
+            "validate_request_url",
+            None,
+            "validators.py",
+            10,
+            20,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            5,
+            "Function",
+            "validate_callback",
+            None,
+            "validators.py",
+            25,
+            35,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
         # server.py
-        (6,  "Function", "handle_request",       None, "server.py",     10, 25, None, None, 1, 0, "python", None),
-        (7,  "Function", "serve_forever",        None, "server.py",     30, 35, None, None, 1, 0, "python", None),
+        (
+            6,
+            "Function",
+            "handle_request",
+            None,
+            "server.py",
+            10,
+            25,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            7,
+            "Function",
+            "serve_forever",
+            None,
+            "server.py",
+            30,
+            35,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
         # cache.py — ZERO incoming-from-other-top-hits (doc/utility only)
-        (8,  "Class",    "TTLCache",             None, "cache.py",      10, 50, None, None, 1, 0, "python", None),
-        (9,  "Method",   "set",                  None, "cache.py",      18, 22, None, None, 0, 0, "python", 8),
-        (10, "Method",   "get",                  None, "cache.py",      24, 30, None, None, 0, 0, "python", 8),
+        (8, "Class", "TTLCache", None, "cache.py", 10, 50, None, None, 1, 0, "python", None),
+        (9, "Method", "set", None, "cache.py", 18, 22, None, None, 0, 0, "python", 8),
+        (10, "Method", "get", None, "cache.py", 24, 30, None, None, 0, 0, "python", 8),
         # logger.py
-        (11, "Function", "log_event",            None, "logger.py",     8,  12, None, None, 1, 0, "python", None),
+        (11, "Function", "log_event", None, "logger.py", 8, 12, None, None, 1, 0, "python", None),
     ]
     _insert_nodes(conn, nodes)
     edges = [
@@ -153,26 +236,82 @@ def build_go_graph(db_path: Path) -> str:
     conn = _new_graph_db(db_path)
     nodes = [
         # url_parser.go — incoming from http_handler
-        (1, "Function", "ParseRequestURL", None, "url_parser.go", 15, 35, None, None, 1, 0, "go", None),
-        (2, "Function", "NormalizeHost",   None, "url_parser.go", 40, 45, None, None, 1, 0, "go", None),
-        (3, "Class",    "ParsedRequest",   None, "url_parser.go", 8,  12, None, None, 1, 0, "go", None),
+        (
+            1,
+            "Function",
+            "ParseRequestURL",
+            None,
+            "url_parser.go",
+            15,
+            35,
+            None,
+            None,
+            1,
+            0,
+            "go",
+            None,
+        ),
+        (
+            2,
+            "Function",
+            "NormalizeHost",
+            None,
+            "url_parser.go",
+            40,
+            45,
+            None,
+            None,
+            1,
+            0,
+            "go",
+            None,
+        ),
+        (3, "Class", "ParsedRequest", None, "url_parser.go", 8, 12, None, None, 1, 0, "go", None),
         # http_handler.go
-        (4, "Function", "httpHandler",     None, "http_handler.go", 10, 25, None, None, 0, 0, "go", None),
-        (5, "Function", "RegisterRoutes",  None, "http_handler.go", 30, 33, None, None, 1, 0, "go", None),
+        (
+            4,
+            "Function",
+            "httpHandler",
+            None,
+            "http_handler.go",
+            10,
+            25,
+            None,
+            None,
+            0,
+            0,
+            "go",
+            None,
+        ),
+        (
+            5,
+            "Function",
+            "RegisterRoutes",
+            None,
+            "http_handler.go",
+            30,
+            33,
+            None,
+            None,
+            1,
+            0,
+            "go",
+            None,
+        ),
         # config.go — separate
-        (6, "Function", "LoadConfig",      None, "config.go", 12, 20, None, None, 1, 0, "go", None),
-        (7, "Function", "envOr",           None, "config.go", 30, 36, None, None, 0, 0, "go", None),
+        (6, "Function", "LoadConfig", None, "config.go", 12, 20, None, None, 1, 0, "go", None),
+        (7, "Function", "envOr", None, "config.go", 30, 36, None, None, 0, 0, "go", None),
         # logger.go
-        (8, "Class",    "Logger",          None, "logger.go", 10, 14, None, None, 1, 0, "go", None),
-        (9, "Method",   "Log",             None, "logger.go", 22, 35, None, None, 1, 0, "go", 8),
+        (8, "Class", "Logger", None, "logger.go", 10, 14, None, None, 1, 0, "go", None),
+        (9, "Method", "Log", None, "logger.go", 22, 35, None, None, 1, 0, "go", 8),
         # main.go
-        (10, "Function", "RunServer",      None, "main.go", 6, 14, None, None, 1, 0, "go", None),
+        (10, "Function", "RunServer", None, "main.go", 6, 14, None, None, 1, 0, "go", None),
     ]
     _insert_nodes(conn, nodes)
     edges = [
-        (4, 1, 14, "http_handler.go", 0.9),   # httpHandler -> ParseRequestURL
-        (5, 4, 31, "http_handler.go", 0.9),   # RegisterRoutes -> httpHandler
-        (10, 6, 7, "main.go", 0.9),           # RunServer -> LoadConfig
+        (4, 1, 14, "http_handler.go", 0.9),  # httpHandler -> ParseRequestURL
+        (5, 4, 31, "http_handler.go", 0.9),  # RegisterRoutes -> httpHandler
+        (10, 6, 7, "main.go", 0.9),  # RunServer -> LoadConfig
     ]
     _insert_edges(conn, edges)
     conn.commit()
@@ -183,19 +322,75 @@ def build_go_graph(db_path: Path) -> str:
 def build_js_graph(db_path: Path) -> str:
     conn = _new_graph_db(db_path)
     nodes = [
-        (1, "Function", "parseJSON",      None, "json_parser.js", 6,  16, None, None, 1, 0, "javascript", None),
-        (2, "Function", "stringifyJSON",  None, "json_parser.js", 22, 28, None, None, 1, 0, "javascript", None),
-        (3, "Function", "fetchAndDecode", None, "api_client.js",  4,  10, None, None, 1, 0, "javascript", None),
-        (4, "Function", "postJson",       None, "api_client.js",  12, 22, None, None, 1, 0, "javascript", None),
-        (5, "Class",    "Store",          None, "store.js",       3,  25, None, None, 1, 0, "javascript", None),
-        (6, "Function", "bootstrap",      None, "index.js",       4,  10, None, None, 1, 0, "javascript", None),
+        (
+            1,
+            "Function",
+            "parseJSON",
+            None,
+            "json_parser.js",
+            6,
+            16,
+            None,
+            None,
+            1,
+            0,
+            "javascript",
+            None,
+        ),
+        (
+            2,
+            "Function",
+            "stringifyJSON",
+            None,
+            "json_parser.js",
+            22,
+            28,
+            None,
+            None,
+            1,
+            0,
+            "javascript",
+            None,
+        ),
+        (
+            3,
+            "Function",
+            "fetchAndDecode",
+            None,
+            "api_client.js",
+            4,
+            10,
+            None,
+            None,
+            1,
+            0,
+            "javascript",
+            None,
+        ),
+        (
+            4,
+            "Function",
+            "postJson",
+            None,
+            "api_client.js",
+            12,
+            22,
+            None,
+            None,
+            1,
+            0,
+            "javascript",
+            None,
+        ),
+        (5, "Class", "Store", None, "store.js", 3, 25, None, None, 1, 0, "javascript", None),
+        (6, "Function", "bootstrap", None, "index.js", 4, 10, None, None, 1, 0, "javascript", None),
     ]
     _insert_nodes(conn, nodes)
     edges = [
-        (3, 1, 8, "api_client.js", 0.9),    # fetchAndDecode -> parseJSON
-        (4, 1, 20, "api_client.js", 0.9),   # postJson -> parseJSON
-        (6, 3, 7, "index.js", 0.9),         # bootstrap -> fetchAndDecode
-        (6, 5, 5, "index.js", 0.9),         # bootstrap -> Store
+        (3, 1, 8, "api_client.js", 0.9),  # fetchAndDecode -> parseJSON
+        (4, 1, 20, "api_client.js", 0.9),  # postJson -> parseJSON
+        (6, 3, 7, "index.js", 0.9),  # bootstrap -> fetchAndDecode
+        (6, 5, 5, "index.js", 0.9),  # bootstrap -> Store
     ]
     _insert_edges(conn, edges)
     conn.commit()
@@ -206,21 +401,21 @@ def build_js_graph(db_path: Path) -> str:
 def build_rust_graph(db_path: Path) -> str:
     conn = _new_graph_db(db_path)
     nodes = [
-        (1, "Function", "parse_url",   None, "url.rs",     12, 30, None, None, 1, 0, "rust", None),
-        (2, "Function", "is_https",    None, "url.rs",     35, 38, None, None, 1, 0, "rust", None),
-        (3, "Class",    "ParsedUrl",   None, "url.rs",     5,  9,  None, None, 1, 0, "rust", None),
-        (4, "Function", "handle",      None, "handler.rs", 10, 22, None, None, 1, 0, "rust", None),
-        (5, "Function", "format_ok",   None, "handler.rs", 24, 27, None, None, 0, 0, "rust", None),
-        (6, "Function", "load_config", None, "config.rs",  10, 16, None, None, 1, 0, "rust", None),
-        (7, "Class",    "Logger",      None, "logger.rs",  6,  9,  None, None, 1, 0, "rust", None),
-        (8, "Function", "run",         None, "main.rs",    10, 16, None, None, 1, 0, "rust", None),
+        (1, "Function", "parse_url", None, "url.rs", 12, 30, None, None, 1, 0, "rust", None),
+        (2, "Function", "is_https", None, "url.rs", 35, 38, None, None, 1, 0, "rust", None),
+        (3, "Class", "ParsedUrl", None, "url.rs", 5, 9, None, None, 1, 0, "rust", None),
+        (4, "Function", "handle", None, "handler.rs", 10, 22, None, None, 1, 0, "rust", None),
+        (5, "Function", "format_ok", None, "handler.rs", 24, 27, None, None, 0, 0, "rust", None),
+        (6, "Function", "load_config", None, "config.rs", 10, 16, None, None, 1, 0, "rust", None),
+        (7, "Class", "Logger", None, "logger.rs", 6, 9, None, None, 1, 0, "rust", None),
+        (8, "Function", "run", None, "main.rs", 10, 16, None, None, 1, 0, "rust", None),
     ]
     _insert_nodes(conn, nodes)
     edges = [
         (4, 1, 11, "handler.rs", 0.9),  # handle -> parse_url
         (4, 2, 14, "handler.rs", 0.9),  # handle -> is_https
         (4, 5, 18, "handler.rs", 0.9),  # handle -> format_ok
-        (8, 6, 12, "main.rs", 0.9),     # run -> load_config
+        (8, 6, 12, "main.rs", 0.9),  # run -> load_config
     ]
     _insert_edges(conn, edges)
     conn.commit()
@@ -231,6 +426,7 @@ def build_rust_graph(db_path: Path) -> str:
 # ---------------------------------------------------------------------------
 # Helpers — clone the read-only fixture into a per-test workdir
 # ---------------------------------------------------------------------------
+
 
 def _clone_fixture(src: Path, dst: Path) -> Path:
     """Copy the fixture tree into a writable scratch directory.
@@ -262,6 +458,7 @@ def _purge_cache_for(repo_path: str) -> None:
 # 1. BM25 basic ranking — Python repo
 # ---------------------------------------------------------------------------
 
+
 def test_bm25_basic_ranking(tmp_path: Path) -> None:
     repo = _clone_fixture(FIXTURES_ROOT / "repo_python", tmp_path / "repo")
     graph = build_python_graph(tmp_path / "graph.db")
@@ -288,6 +485,7 @@ def test_bm25_basic_ranking(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 2. Structural rerank promotes high-incoming-edge file
 # ---------------------------------------------------------------------------
+
 
 def test_structural_rerank_promotes(tmp_path: Path) -> None:
     """The structural rerank is a +30% multiplier (R2L midpoint). It cannot
@@ -334,9 +532,7 @@ def test_structural_rerank_promotes(tmp_path: Path) -> None:
 
     # 'callers from elsewhere' must report a positive count for url_utils.py
     # under the full graph.
-    url_line = next(
-        ln for ln in brief_full.splitlines() if "url_utils.py" in ln
-    )
+    url_line = next(ln for ln in brief_full.splitlines() if "url_utils.py" in ln)
     m = re.search(r"(\d+) callers from elsewhere", url_line)
     assert m and int(m.group(1)) >= 5, (
         f"expected >=5 incoming callers for url_utils.py, got: {url_line}"
@@ -358,6 +554,7 @@ def test_structural_rerank_promotes(tmp_path: Path) -> None:
 # 3. Empty-result branch
 # ---------------------------------------------------------------------------
 
+
 def test_empty_result_branch(tmp_path: Path) -> None:
     repo = _clone_fixture(FIXTURES_ROOT / "repo_python", tmp_path / "repo")
     graph = build_python_graph(tmp_path / "graph.db")
@@ -375,6 +572,7 @@ def test_empty_result_branch(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 4. Extension whitelist
 # ---------------------------------------------------------------------------
+
 
 def test_extension_filter(tmp_path: Path) -> None:
     """The whitelist already includes .py/.js/.go/.rs/.css/.html/.md.
@@ -400,8 +598,13 @@ def test_extension_filter(tmp_path: Path) -> None:
     _purge_cache_for(str(repo))
 
     # Query for the included tokens; they should appear in the brief.
-    for tok in ("uniquehtmltoken", "uniquemdtoken", "uniquejstoken",
-                "uniquegotoken", "uniquerstoken"):
+    for tok in (
+        "uniquehtmltoken",
+        "uniquemdtoken",
+        "uniquejstoken",
+        "uniquegotoken",
+        "uniquerstoken",
+    ):
         _purge_cache_for(str(repo))  # fresh index per query
         brief = generate_fts5_orientation_brief(tok, str(repo), no_graph)
         assert _EMPTY_BRIEF not in brief, (
@@ -421,17 +624,14 @@ def test_extension_filter(tmp_path: Path) -> None:
 # 5. Skip dirs
 # ---------------------------------------------------------------------------
 
+
 def test_skip_dirs(tmp_path: Path) -> None:
     repo = _clone_fixture(FIXTURES_ROOT / "repo_python", tmp_path / "repo")
 
     (repo / "node_modules").mkdir()
-    (repo / "node_modules" / "foo.js").write_text(
-        "// nodemoduletoken should never be indexed\n"
-    )
+    (repo / "node_modules" / "foo.js").write_text("// nodemoduletoken should never be indexed\n")
     (repo / "__pycache__").mkdir()
-    (repo / "__pycache__" / "bar.pyc").write_bytes(
-        b"pycachetoken should never appear"
-    )
+    (repo / "__pycache__" / "bar.pyc").write_bytes(b"pycachetoken should never appear")
     # Also drop a normal .py file in pycache to test dir-pruning, not just ext.
     (repo / "__pycache__" / "shadow.py").write_text(
         "# pycachepytoken — under skipped dir, must be pruned\n"
@@ -453,6 +653,7 @@ def test_skip_dirs(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 6. Size cap
 # ---------------------------------------------------------------------------
+
 
 def test_size_cap(tmp_path: Path) -> None:
     """Files >1 MB must be skipped."""
@@ -480,9 +681,7 @@ def test_size_cap(tmp_path: Path) -> None:
     assert "huge.py" not in brief_big, f"size cap not enforced: {brief_big}"
 
     _purge_cache_for(str(repo))
-    brief_small = generate_fts5_orientation_brief(
-        "uniquesmallfiletoken", str(repo), no_graph
-    )
+    brief_small = generate_fts5_orientation_brief("uniquesmallfiletoken", str(repo), no_graph)
     assert "tiny.py" in brief_small, brief_small
 
 
@@ -490,14 +689,14 @@ def test_size_cap(tmp_path: Path) -> None:
 # 7. Cross-language correctness
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "lang_dir, builder, query, expected_file",
     [
-        ("repo_go",   build_go_graph,   "httpHandler request validation", "http_handler.go"),
-        ("repo_rust", build_rust_graph, "parse_url scheme validation",    "url.rs"),
-        ("repo_js",   build_js_graph,   "parseJSON decode response body", "json_parser.js"),
-        ("repo_python", build_python_graph,
-            "parse_url scheme validation",                                "url_utils.py"),
+        ("repo_go", build_go_graph, "httpHandler request validation", "http_handler.go"),
+        ("repo_rust", build_rust_graph, "parse_url scheme validation", "url.rs"),
+        ("repo_js", build_js_graph, "parseJSON decode response body", "json_parser.js"),
+        ("repo_python", build_python_graph, "parse_url scheme validation", "url_utils.py"),
     ],
 )
 def test_cross_lang(
@@ -522,6 +721,7 @@ def test_cross_lang(
 # 8. Cache reuse
 # ---------------------------------------------------------------------------
 
+
 def test_cache_reuse(tmp_path: Path) -> None:
     """Second call with the same repo_path must hit the prebuilt /tmp cache.
 
@@ -537,21 +737,15 @@ def test_cache_reuse(tmp_path: Path) -> None:
     assert not os.path.exists(cache_path), "stale cache leaked from earlier test"
 
     t0 = time.perf_counter()
-    brief1 = generate_fts5_orientation_brief(
-        "parse url validation", str(repo), graph
-    )
+    brief1 = generate_fts5_orientation_brief("parse url validation", str(repo), graph)
     t1 = time.perf_counter()
-    assert os.path.exists(cache_path), (
-        f"cache db not written at {cache_path} after first call"
-    )
+    assert os.path.exists(cache_path), f"cache db not written at {cache_path} after first call"
     first_mtime = os.path.getmtime(cache_path)
     first_size = os.path.getsize(cache_path)
 
     # Sleep is OK here — the perf comparison is informational; correctness
     # rests on the mtime check below.
-    brief2 = generate_fts5_orientation_brief(
-        "parse url validation", str(repo), graph
-    )
+    brief2 = generate_fts5_orientation_brief("parse url validation", str(repo), graph)
     t2 = time.perf_counter()
 
     assert brief2 == brief1, "deterministic input produced different briefs"
@@ -583,12 +777,16 @@ def test_cache_reuse(tmp_path: Path) -> None:
 # 9. Anti-benchmaxxing audit
 # ---------------------------------------------------------------------------
 
+
 def test_anti_benchmaxxing_no_python_only_assumptions() -> None:
     """The L2 source must not hardwire Python-only assumptions outside its
     extension whitelist (which deliberately includes many languages)."""
     src_path = (
         Path(__file__).resolve().parents[2]
-        / "src" / "groundtruth" / "pretask" / "sqlite3_fts_fallback.py"
+        / "src"
+        / "groundtruth"
+        / "pretask"
+        / "sqlite3_fts_fallback.py"
     )
     src = src_path.read_text(encoding="utf-8")
 
@@ -612,9 +810,7 @@ def test_anti_benchmaxxing_no_python_only_assumptions() -> None:
 
     for pat, desc in forbidden_patterns:
         m = re.search(pat, body)
-        assert not m, (
-            f"anti-benchmaxxing audit failed: {desc}: matched {m.group(0)!r}"
-        )
+        assert not m, f"anti-benchmaxxing audit failed: {desc}: matched {m.group(0)!r}"
 
     # Also: the rerank coefficient must remain the documented 0.3 R2L
     # midpoint. Tightening / loosening this on Live-Lite tasks would be

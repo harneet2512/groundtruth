@@ -4,8 +4,8 @@ L5B-INV-1: Max 2 L5b firings per task.
 L5B-INV-2: L5b only suggests files in brief_candidates.
 L5B-INV-3: Same file never suggested twice by L5b.
 """
+
 import types
-import pytest
 
 
 def _make_config(brief_candidates=None, max_iter=100):
@@ -29,14 +29,16 @@ def _make_config(brief_candidates=None, max_iter=100):
 
 def _add_pending(config, file_path, action_type="READ_CALLER_CONTRACT"):
     """Add a pending next_action that has been checked 2 times (about to expire)."""
-    config._pending_next_actions.append({
-        "event_id": "evt_test",
-        "next_action_type": action_type,
-        "next_action_file": file_path,
-        "iter_emitted": config.action_count - 5,
-        "checked_count": 2,
-        "followed": False,
-    })
+    config._pending_next_actions.append(
+        {
+            "event_id": "evt_test",
+            "next_action_type": action_type,
+            "next_action_file": file_path,
+            "iter_emitted": config.action_count - 5,
+            "checked_count": 2,
+            "followed": False,
+        }
+    )
 
 
 def _simulate_l5b_check(config, obs="some observation text"):

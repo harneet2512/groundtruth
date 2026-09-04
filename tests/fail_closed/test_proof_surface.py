@@ -8,6 +8,7 @@ TWO-SIDED contract:
 The "would have passed silently before" is exactly the bug; the proof-mode raise is
 the fix. Outside proof mode every guard must be inert so dev/CI is unchanged.
 """
+
 from __future__ import annotations
 
 import os
@@ -48,8 +49,17 @@ def graph_db(tmp_path):
     )
     conn.executemany(
         "INSERT INTO nodes(id, name, qualified_name, signature, file_path, is_test) VALUES(?,?,?,?,?,?)",
-        [(1, "set_fields", "ImportTask.set_fields", "def set_fields(self)", "beets/importer.py", 0),
-         (2, "write", "Library.write", "def write(self)", "beets/library.py", 0)],
+        [
+            (
+                1,
+                "set_fields",
+                "ImportTask.set_fields",
+                "def set_fields(self)",
+                "beets/importer.py",
+                0,
+            ),
+            (2, "write", "Library.write", "def write(self)", "beets/library.py", 0),
+        ],
     )
     try:
         conn.execute(_FTS_DDL)
@@ -69,7 +79,9 @@ def graph_db_no_fts(tmp_path):
     """A graph.db WITHOUT nodes_fts (Go indexer compiled without -tags sqlite_fts5)."""
     db = str(tmp_path / "nofts.db")
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, file_path TEXT, is_test INTEGER)")
+    conn.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, file_path TEXT, is_test INTEGER)"
+    )
     conn.execute("INSERT INTO nodes VALUES (1, 'x', 'a.py', 0)")
     conn.commit()
     conn.close()
@@ -120,6 +132,7 @@ def test_noncanonical_host_alias_allowed_outside_proof(monkeypatch):
 
 def test_context_from_env_rejects_noncanonical_host_alias_in_proof(monkeypatch):
     from groundtruth.runtime.context import GTRuntimeContext
+
     monkeypatch.setenv("GT_PROOF_MODE", "1")
     monkeypatch.setenv("GT_HOST_GRAPH", "/host/typo.db")
     with pytest.raises(GTProofModeError):
@@ -128,6 +141,7 @@ def test_context_from_env_rejects_noncanonical_host_alias_in_proof(monkeypatch):
 
 def test_context_from_env_uses_host_alias_outside_proof(monkeypatch):
     from groundtruth.runtime.context import GTRuntimeContext
+
     monkeypatch.setenv("GT_HOST_GRAPH_DB", "/host/graph.db")
     ctx = GTRuntimeContext.from_env()
     assert ctx.graph_db == "/host/graph.db"  # fallback still works for dev
@@ -234,13 +248,16 @@ def test_semantic_noop_zero_candidates(monkeypatch):
     assert proof.assert_semantic_consumed(0.0, [], 0) is True
 
 
-@pytest.mark.parametrize("ablation,rrf,wsem", [
-    ("A", "", 0.15),       # no-sem ablation
-    ("B0", "", 0.15),
-    ("C", "det", 0.15),    # RRF drops sem
-    ("C", "nosem", 0.15),
-    ("C", "", 0.0),        # W_SEM zeroed
-])
+@pytest.mark.parametrize(
+    "ablation,rrf,wsem",
+    [
+        ("A", "", 0.15),  # no-sem ablation
+        ("B0", "", 0.15),
+        ("C", "det", 0.15),  # RRF drops sem
+        ("C", "nosem", 0.15),
+        ("C", "", 0.0),  # W_SEM zeroed
+    ],
+)
 def test_forbid_no_sem_config_raises_in_proof(monkeypatch, ablation, rrf, wsem):
     monkeypatch.setenv("GT_PROOF_MODE", "1")
     monkeypatch.setenv("GT_REQUIRE_EMBEDDER", "1")

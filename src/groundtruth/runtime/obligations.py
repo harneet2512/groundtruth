@@ -1,4 +1,5 @@
 """Product-owned issue obligation lifecycle."""
+
 from __future__ import annotations
 
 import hashlib
@@ -35,8 +36,12 @@ class ObligationRecord:
 
 
 def _is_compound_symbol(part: str) -> bool:
-    return ("_" in part or "." in part or any(c.isdigit() for c in part)
-            or (len(part) > 1 and any(c.isupper() for c in part[1:])))
+    return (
+        "_" in part
+        or "." in part
+        or any(c.isdigit() for c in part)
+        or (len(part) > 1 and any(c.isupper() for c in part[1:]))
+    )
 
 
 def obligation_tested(view, tested_tokens: set[str]) -> bool:
@@ -139,10 +144,14 @@ class ObligationTracker:
         return transitions
 
     def mark_satisfied(self, obligation_id: int, evidence: str, turn: int) -> bool:
-        return self._set_explicit(obligation_id, ObligationLifecycle.SATISFIED.value, evidence, turn)
+        return self._set_explicit(
+            obligation_id, ObligationLifecycle.SATISFIED.value, evidence, turn
+        )
 
     def mark_contradicted(self, obligation_id: int, evidence: str, turn: int) -> bool:
-        return self._set_explicit(obligation_id, ObligationLifecycle.CONTRADICTED.value, evidence, turn)
+        return self._set_explicit(
+            obligation_id, ObligationLifecycle.CONTRADICTED.value, evidence, turn
+        )
 
     def _set_explicit(self, obligation_id: int, status: str, evidence: str, turn: int) -> bool:
         for ob in self.obligations:
@@ -167,7 +176,10 @@ class ObligationTracker:
             touched, conf = overlap(v, edited)
             if ob.status == ObligationLifecycle.CONTRADICTED.value:
                 status = OBL_EDITED_UNTESTED if touched else OBL_UNADDRESSED
-            elif ob.status in (ObligationLifecycle.TESTED.value, ObligationLifecycle.SATISFIED.value) or obligation_tested(v, tested):
+            elif ob.status in (
+                ObligationLifecycle.TESTED.value,
+                ObligationLifecycle.SATISFIED.value,
+            ) or obligation_tested(v, tested):
                 status = OBL_TESTED
             elif ob.status == ObligationLifecycle.EDITED.value or touched:
                 status = OBL_EDITED_UNTESTED
@@ -178,15 +190,18 @@ class ObligationTracker:
 
     def unmet(self) -> list[ObligationRecord]:
         return [
-            o for o in self.obligations
-            if o.status not in (ObligationLifecycle.TESTED.value, ObligationLifecycle.SATISFIED.value)
+            o
+            for o in self.obligations
+            if o.status
+            not in (ObligationLifecycle.TESTED.value, ObligationLifecycle.SATISFIED.value)
         ]
 
     def coverage_ratio(self) -> float:
         if not self.obligations:
             return 1.0
         done = sum(
-            1 for o in self.obligations
+            1
+            for o in self.obligations
             if o.status in (ObligationLifecycle.TESTED.value, ObligationLifecycle.SATISFIED.value)
         )
         return done / len(self.obligations)
@@ -219,7 +234,7 @@ def render_obligation_status_block(statuses, covering=None, max_listed: int | No
     for v, status, _touched, _conf in listed:
         quote = v.verbatim if len(v.verbatim) <= 160 else v.verbatim[:157] + "..."
         mark = "[edited, untested]" if status == OBL_EDITED_UNTESTED else "[not addressed]"
-        line = f"{mark} \"{quote}\""
+        line = f'{mark} "{quote}"'
         if (covering or {}).get(v.idx) and status == OBL_EDITED_UNTESTED:
             line += (
                 "\n    targeted verification: graph-linked covering test "
@@ -233,6 +248,6 @@ def render_obligation_status_block(statuses, covering=None, max_listed: int | No
     lines.append(
         "Run targeted verification for each untested requirement before "
         "concluding it is met; an unverified submission cannot be fixed after "
-        "submit.")
+        "submit."
+    )
     return f'\n<gt-nudge reason="test_evidence_gap" h="{h}">\n' + "\n".join(lines) + "\n</gt-nudge>"
-

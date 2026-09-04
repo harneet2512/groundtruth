@@ -4,6 +4,7 @@ generate_v1r_brief must return a byte-identical brief whether GT_AUDIT_DIR is se
 or unset — the audit block only writes side files, it never touches the brief.
 RED if the snapshot block ever mutated a returned value; GREEN by construction.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -42,30 +43,47 @@ def _build_db(tmp_path: Path) -> tuple[str, str]:
     (repo / "pkg").mkdir(parents=True, exist_ok=True)
     (repo / "pkg" / "config.py").write_text(
         "def parse_config(path):\n    return load_config(path)\n\n"
-        "def load_config(path):\n    return {}\n", encoding="utf-8")
+        "def load_config(path):\n    return {}\n",
+        encoding="utf-8",
+    )
     (repo / "pkg" / "app.py").write_text(
         "from pkg.config import parse_config\n\ndef main():\n    return parse_config('c')\n",
-        encoding="utf-8")
+        encoding="utf-8",
+    )
     db = str(tmp_path / "graph.db")
     con = sqlite3.connect(db)
     con.executescript(_SCHEMA)
     con.executemany(
         "INSERT INTO nodes (id,label,name,file_path,start_line,end_line,language) VALUES (?,?,?,?,?,?,'python')",
-        [(1, "Function", "parse_config", "pkg/config.py", 1, 2),
-         (2, "Function", "load_config", "pkg/config.py", 4, 5),
-         (3, "Function", "main", "pkg/app.py", 3, 4)])
+        [
+            (1, "Function", "parse_config", "pkg/config.py", 1, 2),
+            (2, "Function", "load_config", "pkg/config.py", 4, 5),
+            (3, "Function", "main", "pkg/app.py", 3, 4),
+        ],
+    )
     con.executemany(
         "INSERT INTO edges (source_id,target_id,type,source_line,source_file,resolution_method,confidence,trust_tier) "
         "VALUES (?,?,'CALLS',?,?,?,?,?)",
-        [(3, 1, 4, "pkg/app.py", "import", 1.0, "CERTIFIED"),
-         (1, 2, 2, "pkg/config.py", "same_file", 1.0, "CERTIFIED")])
-    con.execute("INSERT INTO properties (node_id,kind,value) VALUES (1,'data_flow','path -> load_config(path)')")
-    con.executemany("INSERT INTO project_meta VALUES (?,?)",
-                    [("schema_version", "v15.2-trust-tier"), ("git_commit", "deadbeef")])
-    con.executemany("INSERT INTO nodes_fts (name,qualified_name,signature,file_path) VALUES (?,?,?,?)",
-                    [("parse_config", "pkg.config.parse_config", "", "pkg/config.py"),
-                     ("load_config", "pkg.config.load_config", "", "pkg/config.py"),
-                     ("main", "pkg.app.main", "", "pkg/app.py")])
+        [
+            (3, 1, 4, "pkg/app.py", "import", 1.0, "CERTIFIED"),
+            (1, 2, 2, "pkg/config.py", "same_file", 1.0, "CERTIFIED"),
+        ],
+    )
+    con.execute(
+        "INSERT INTO properties (node_id,kind,value) VALUES (1,'data_flow','path -> load_config(path)')"
+    )
+    con.executemany(
+        "INSERT INTO project_meta VALUES (?,?)",
+        [("schema_version", "v15.2-trust-tier"), ("git_commit", "deadbeef")],
+    )
+    con.executemany(
+        "INSERT INTO nodes_fts (name,qualified_name,signature,file_path) VALUES (?,?,?,?)",
+        [
+            ("parse_config", "pkg.config.parse_config", "", "pkg/config.py"),
+            ("load_config", "pkg.config.load_config", "", "pkg/config.py"),
+            ("main", "pkg.app.main", "", "pkg/app.py"),
+        ],
+    )
     con.commit()
     con.close()
     return db, str(repo)
@@ -105,4 +123,5 @@ def test_audit_snapshot_byte_identical(tmp_path: Path, monkeypatch) -> None:
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(pytest.main([__file__, "-q"]))

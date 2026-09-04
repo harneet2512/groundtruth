@@ -29,6 +29,7 @@ Fix-to-language gap map (GAP_ANALYSIS.md, G6 cell):
 All fixtures are synthetic and deterministic.  No task IDs, no gold labels,
 no benchmark names, no network.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -108,15 +109,19 @@ def _create_graph_db(db_path: Path, nodes: list[dict], edges: list[tuple]) -> No
             "INSERT INTO nodes (label, name, file_path, signature, start_line, "
             "end_line, is_test, language) VALUES (?,?,?,?,?,?,?,?)",
             (
-                n["label"], n["name"], n["file_path"],
-                n.get("signature", ""), n.get("start_line", 1),
-                n.get("end_line", 2), int(n.get("is_test", 0)),
+                n["label"],
+                n["name"],
+                n["file_path"],
+                n.get("signature", ""),
+                n.get("start_line", 1),
+                n.get("end_line", 2),
+                int(n.get("is_test", 0)),
                 n.get("language", "python"),
             ),
         )
-        key_to_id[n.get("key", n["name"])] = (
-            conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        )
+        key_to_id[n.get("key", n["name"])] = conn.execute("SELECT last_insert_rowid()").fetchone()[
+            0
+        ]
     for src, tgt, etype, line, method, conf in edges:
         conn.execute(
             "INSERT INTO edges (source_id, target_id, type, source_line, "
@@ -130,6 +135,7 @@ def _create_graph_db(db_path: Path, nodes: list[dict], edges: list[tuple]) -> No
 # ===========================================================================
 # FIX 1 — cross-language fact filter: go + python fixtures
 # ===========================================================================
+
 
 class TestFix1CrossLanguageGoAndPython:
     """GAP: js↔rust + js/ts-family were covered; go/python had no fixture."""
@@ -180,20 +186,31 @@ class TestFix1CrossLanguageGoAndPython:
         (tmp_path / _GO_SRC).write_text(
             "package pkg\nfunc ServeHTTP() {\n    Route()\n}\n", encoding="utf-8"
         )
-        (tmp_path / _PY_CALLER).write_text(
-            "def build():\n    Route()\n", encoding="utf-8"
-        )
-        (tmp_path / _GO_CALLEE).write_text(
-            "package pkg\nfunc Route() {}\n", encoding="utf-8"
-        )
+        (tmp_path / _PY_CALLER).write_text("def build():\n    Route()\n", encoding="utf-8")
+        (tmp_path / _GO_CALLEE).write_text("package pkg\nfunc Route() {}\n", encoding="utf-8")
         db = tmp_path / "graph.db"
         nodes = [
-            {"label": "Function", "name": "ServeHTTP", "key": "ServeHTTP",
-             "file_path": _GO_SRC, "language": "go"},
-            {"label": "Function", "name": "build", "key": "build",
-             "file_path": _PY_CALLER, "language": "python"},
-            {"label": "Function", "name": "Route", "key": "Route",
-             "file_path": _GO_CALLEE, "language": "go"},
+            {
+                "label": "Function",
+                "name": "ServeHTTP",
+                "key": "ServeHTTP",
+                "file_path": _GO_SRC,
+                "language": "go",
+            },
+            {
+                "label": "Function",
+                "name": "build",
+                "key": "build",
+                "file_path": _PY_CALLER,
+                "language": "python",
+            },
+            {
+                "label": "Function",
+                "name": "Route",
+                "key": "Route",
+                "file_path": _GO_CALLEE,
+                "language": "go",
+            },
         ]
         edges = [
             # TRUE go→go edge (must survive)
@@ -214,17 +231,13 @@ class TestFix1CrossLanguageGoAndPython:
         finally:
             con.close()
         py_callers = [w for w in wits if "setup.py" in w.get("file_path", "")]
-        assert not py_callers, (
-            f"py→go cross-language caller leaked into witnesses: {py_callers}"
-        )
+        assert not py_callers, f"py→go cross-language caller leaked into witnesses: {py_callers}"
         # TRUE go→go caller survives
         assert any("server.go" in w.get("file_path", "") for w in wits), (
             f"true go→go caller was over-suppressed: {wits}"
         )
 
-    def test_go_caller_of_py_callee_never_a_callee_contract(
-        self, tmp_path, patch_mod
-    ):
+    def test_go_caller_of_py_callee_never_a_callee_contract(self, tmp_path, patch_mod):
         """A go function 'calling' a python function must never appear as a callee."""
         _GO_F = "cmd/main.go"
         _PY_F = "helper.py"
@@ -235,10 +248,20 @@ class TestFix1CrossLanguageGoAndPython:
         (tmp_path / _PY_F).write_text("def helper():\n    pass\n", encoding="utf-8")
         db = tmp_path / "graph.db"
         nodes = [
-            {"label": "Function", "name": "run", "key": "run",
-             "file_path": _GO_F, "language": "go"},
-            {"label": "Function", "name": "helper", "key": "helper",
-             "file_path": _PY_F, "language": "python"},
+            {
+                "label": "Function",
+                "name": "run",
+                "key": "run",
+                "file_path": _GO_F,
+                "language": "go",
+            },
+            {
+                "label": "Function",
+                "name": "helper",
+                "key": "helper",
+                "file_path": _PY_F,
+                "language": "python",
+            },
         ]
         edges = [
             # IMPOSSIBLE go→py edge (must be suppressed when helper is the focus file)
@@ -251,14 +274,13 @@ class TestFix1CrossLanguageGoAndPython:
         finally:
             con.close()
         joined = " ".join(out)
-        assert "run" not in joined, (
-            f"go→py cross-language callee contract leaked: {joined}"
-        )
+        assert "run" not in joined, f"go→py cross-language callee contract leaked: {joined}"
 
 
 # ===========================================================================
 # FIX 2 — greenfield anchors + grep-spine: python + js fixtures
 # ===========================================================================
+
 
 class TestFix2GreenfieldPythonAndJS:
     """GAP: go/rust/ts fixtures existed; python + js had no fixture."""
@@ -324,19 +346,16 @@ class TestFix2GreenfieldPythonAndJS:
         defining file.  The test uses a python file that has a registered graph
         node (a function that wraps the greenfield literal) — consistent with
         the real ABS shape where `evaluator/builtins.go` has `registerBuiltins`."""
-        from groundtruth.pretask.graph_localizer import _grep_to_seeds, localize
+        from groundtruth.pretask.graph_localizer import localize
 
         # defining file: has a graph node AND contains the greenfield literal
         (tmp_path / "cache").mkdir()
         (tmp_path / "cache" / "registry.py").write_text(
-            "def _init_cache():\n"
-            '    HANDLERS["register_cache"] = _register_impl\n',
+            'def _init_cache():\n    HANDLERS["register_cache"] = _register_impl\n',
             encoding="utf-8",
         )
         # resolved file: existing graph node for a resolved anchor
-        (tmp_path / "config.py").write_text(
-            "def setup_env():\n    pass\n", encoding="utf-8"
-        )
+        (tmp_path / "config.py").write_text("def setup_env():\n    pass\n", encoding="utf-8")
         # decoy: only prose, no greenfield token
         (tmp_path / "utils.py").write_text(
             "# configuration initialization registration\ndef utility():\n    pass\n",
@@ -405,8 +424,7 @@ class TestFix2GreenfieldPythonAndJS:
             "function renderView() {}\n", encoding="utf-8"
         )
         (tmp_path / "src" / "setup.js").write_text(
-            "// registration configuration environment initialization\n"
-            "function setup() {}\n",
+            "// registration configuration environment initialization\nfunction setup() {}\n",
             encoding="utf-8",
         )
         db = tmp_path / "graph.db"
@@ -459,28 +477,32 @@ class TestFix2GreenfieldPythonAndJS:
 # FIX 3 — snippet attestation: cross-language sanity (go/py/ts/rust)
 # ===========================================================================
 
+
 class TestFix3SnippetAttestationCrossLanguage:
     """GAP: attestation is language-neutral (pure `symbol in code`) but had only
     a rust-shaped fixture.  Quick sanity across go/py/ts/rust confirms no
     language-specific edge in the helper."""
 
-    @pytest.mark.parametrize("snippet,symbol,expected", [
-        # go
-        ("func ServeHTTP(w http.ResponseWriter, r *http.Request) {", "ServeHTTP", True),
-        ("// Initialize the server", "ServeHTTP", False),
-        # python
-        ("def process_request(self, req: Request) -> Response:", "process_request", True),
-        ("# TODO: implement this", "process_request", False),
-        # typescript
-        ("export function flushAll(): void {", "flushAll", True),
-        ("const x = registry.get(key);", "flushAll", False),
-        # rust
-        ("pub fn execute(&self, ctx: &mut Context) -> JsResult<()> {", "execute", True),
-        ("/// Returns an error if the handle is already cancelled.", "root_shape", False),
-        # empty / missing  -> True (not drift evidence)
-        ("", "anything", True),
-        ("some code", "", True),
-    ])
+    @pytest.mark.parametrize(
+        "snippet,symbol,expected",
+        [
+            # go
+            ("func ServeHTTP(w http.ResponseWriter, r *http.Request) {", "ServeHTTP", True),
+            ("// Initialize the server", "ServeHTTP", False),
+            # python
+            ("def process_request(self, req: Request) -> Response:", "process_request", True),
+            ("# TODO: implement this", "process_request", False),
+            # typescript
+            ("export function flushAll(): void {", "flushAll", True),
+            ("const x = registry.get(key);", "flushAll", False),
+            # rust
+            ("pub fn execute(&self, ctx: &mut Context) -> JsResult<()> {", "execute", True),
+            ("/// Returns an error if the handle is already cancelled.", "root_shape", False),
+            # empty / missing  -> True (not drift evidence)
+            ("", "anything", True),
+            ("some code", "", True),
+        ],
+    )
     def test_snippet_attests_language_agnostic(
         self, patch_mod, snippet: str, symbol: str, expected: bool
     ):
@@ -497,26 +519,22 @@ class TestFix3SnippetAttestationCrossLanguage:
 # Each block proves: fire on blind, silent on pass, silent on fail, silent on env error.
 
 _PYTEST_BLIND = (
-    "collected 5 items\n"
-    "tests/test_auth.py ."
-    "  # only first test ran; the rest were not collected\n"
+    "collected 5 items\ntests/test_auth.py .  # only first test ran; the rest were not collected\n"
 )
 _PYTEST_PASS = "5 passed in 1.22s\n"
 _PYTEST_FAIL = "FAILED tests/test_auth.py::test_login - AssertionError\n1 failed in 0.55s\n"
 _PYTEST_ENV = "ModuleNotFoundError: No module named 'requests'\n"
 
 _GO_BLIND = (
-    "?   \tgithub.com/org/pkg/internal [no test files]\n"
-    "ok  \tgithub.com/org/pkg/cmd\t (cached)\n"
+    "?   \tgithub.com/org/pkg/internal [no test files]\nok  \tgithub.com/org/pkg/cmd\t (cached)\n"
 )
 _GO_PASS = "ok  \tgithub.com/org/pkg/server\t0.044s\n"
-_GO_FAIL = "--- FAIL: TestParseConfig (0.01s)\n\tfailed assertion\nFAIL\ngithub.com/org/pkg/server\n"
-_GO_ENV = "cannot find package \"github.com/missing/dep\" in any of:\n"
-
-_CARGO_BLIND = (
-    "   Compiling myapp v0.1.0 (/app)\n"
-    "    Checking myapp-macros v0.1.0 (/app/macros)\n"
+_GO_FAIL = (
+    "--- FAIL: TestParseConfig (0.01s)\n\tfailed assertion\nFAIL\ngithub.com/org/pkg/server\n"
 )
+_GO_ENV = 'cannot find package "github.com/missing/dep" in any of:\n'
+
+_CARGO_BLIND = "   Compiling myapp v0.1.0 (/app)\n    Checking myapp-macros v0.1.0 (/app/macros)\n"
 _CARGO_PASS = "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
 _CARGO_FAIL = "test result: FAILED. 1 passed; 2 failed; 0 ignored\n"
 _CARGO_ENV = "error[E0432]: unresolved import `crate::missing`\nerror: could not compile `myapp`\n"
@@ -528,8 +546,7 @@ _JEST_BLIND = (
 )
 # For jest blind: jest ran but produced no test count (e.g. worker crash)
 _JEST_REAL_BLIND = (
-    "jest: Worker process exited unexpectedly before any tests ran\n"
-    "Jest exited with exit code 1\n"
+    "jest: Worker process exited unexpectedly before any tests ran\nJest exited with exit code 1\n"
 )
 _JEST_PASS = "  10 passing (3s)\n"
 _JEST_FAIL = "  2 failing\n  1) MyService connect should return 200\n"
@@ -550,9 +567,7 @@ class TestFix4NoTestEvidencePerRunner:
         out1 = patch_mod._l5_no_test_evidence_nudge("pytest tests/", _PYTEST_BLIND)
         assert out1 == ""
         out2 = patch_mod._l5_no_test_evidence_nudge("pytest tests/", _PYTEST_BLIND)
-        assert 'reason="no_test_evidence"' in out2, (
-            "pytest blind run ×2 must fire no_test_evidence"
-        )
+        assert 'reason="no_test_evidence"' in out2, "pytest blind run ×2 must fire no_test_evidence"
 
     def test_pytest_pass_silences_governor(self, patch_mod):
         patch_mod._source_edit_count = 1
@@ -605,13 +620,9 @@ class TestFix4NoTestEvidencePerRunner:
 
     def test_go_test_blind_fires_after_two_runs(self, patch_mod):
         patch_mod._source_edit_count = 1
-        out1 = patch_mod._l5_no_test_evidence_nudge(
-            "go test ./...", _GO_BLIND
-        )
+        out1 = patch_mod._l5_no_test_evidence_nudge("go test ./...", _GO_BLIND)
         assert out1 == ""
-        out2 = patch_mod._l5_no_test_evidence_nudge(
-            "go test ./...", _GO_BLIND
-        )
+        out2 = patch_mod._l5_no_test_evidence_nudge("go test ./...", _GO_BLIND)
         assert 'reason="no_test_evidence"' in out2, (
             "go test blind run ×2 must fire no_test_evidence"
         )
@@ -677,12 +688,8 @@ class TestFix4NoTestEvidencePerRunner:
         """jest run where workers crashed with no test count -> blind."""
         patch_mod._source_edit_count = 1
         patch_mod._l5_no_test_evidence_nudge("jest --testPathPattern=src", _JEST_REAL_BLIND)
-        out2 = patch_mod._l5_no_test_evidence_nudge(
-            "jest --testPathPattern=src", _JEST_REAL_BLIND
-        )
-        assert 'reason="no_test_evidence"' in out2, (
-            "jest blind run ×2 must fire no_test_evidence"
-        )
+        out2 = patch_mod._l5_no_test_evidence_nudge("jest --testPathPattern=src", _JEST_REAL_BLIND)
+        assert 'reason="no_test_evidence"' in out2, "jest blind run ×2 must fire no_test_evidence"
 
     def test_jest_passing_count_silences(self, patch_mod):
         """'N passing' is a test-pass marker."""
@@ -745,6 +752,7 @@ class TestFix4NoTestEvidencePerRunner:
 # FIX 5 — instance_id resolver: python-slug + SWE-bench __ verbatim
 # ===========================================================================
 
+
 class TestFix5InstanceIdPythonSlugs:
     """GAP: fix tested on the 4 real non-python PATH A tasks + synthetic SWE-bench
     ids; a python-slug (typical SWE-bench-Live beets/django/astropy shape) with an
@@ -790,9 +798,7 @@ class TestFix5InstanceIdPythonSlugs:
 
     def test_python_slug_trial_dir_last_resort(self, do):
         """trial dir 'jobs/2026-06-10/beets-5495__AbC123' -> 'beets-5495'."""
-        got = do.extract_instance_id(
-            {}, {}, trial_dir="jobs/2026-06-10/beets-5495__AbC123"
-        )
+        got = do.extract_instance_id({}, {}, trial_dir="jobs/2026-06-10/beets-5495__AbC123")
         assert got == "beets-5495", f"trial-dir python slug mangled: {got!r}"
 
     def test_no_double_underscore_split_when_explicit(self, do):

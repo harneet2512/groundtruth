@@ -6,6 +6,7 @@ independently-defined frozensets. A cross-module import is avoided (both ship
 in-container stdlib-only), so this test is the single enforcement that a one-sided edit
 cannot land silently — drift would drop different stdlib-shadow edges on the same repo.
 """
+
 from __future__ import annotations
 
 from groundtruth.pretask.curation_map import _STDLIB_MODULES

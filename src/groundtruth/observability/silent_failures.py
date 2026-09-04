@@ -16,6 +16,7 @@ counter: the file is the source of truth across subprocesses (gt-index Go
 binary, gt_edit state command bash, hook subprocesses), which is why the
 contract is **append-one-JSON-line-per-failure**.
 """
+
 from __future__ import annotations
 
 import json
@@ -30,15 +31,18 @@ _ENV = "GT_SILENT_FAILURES_FILE"
 _logger = logging.getLogger("groundtruth.silent_failures")
 
 
-def record(site: str, exc: BaseException | None = None,
-           extra: dict[str, Any] | None = None, debug: bool = False) -> None:
+def record(
+    site: str,
+    exc: BaseException | None = None,
+    extra: dict[str, Any] | None = None,
+    debug: bool = False,
+) -> None:
     """Count + log a silent failure. ``site`` is a short stable id like
     ``"v22_brief.rank_files"``. Never raises."""
     level = logging.DEBUG if debug else logging.WARNING
     try:
         if exc is not None:
-            _logger.log(level, "silent_failure site=%s exc=%s",
-                        site, exc, exc_info=exc)
+            _logger.log(level, "silent_failure site=%s exc=%s", site, exc, exc_info=exc)
         else:
             _logger.log(level, "silent_failure site=%s", site)
     except Exception:  # pragma: no cover — logger itself broken
@@ -60,8 +64,7 @@ def record(site: str, exc: BaseException | None = None,
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, default=str) + "\n")
     except Exception as inner:  # pragma: no cover
-        print(f"[silent_failures] could not append to {path}: {inner}",
-              file=sys.stderr)
+        print(f"[silent_failures] could not append to {path}: {inner}", file=sys.stderr)
 
 
 def count_from_file(path: str) -> tuple[int, int]:

@@ -26,6 +26,7 @@ toolkit (``widgets.py``, ``layout.py``, ``store.py``, ``events.py``,
 benchmark-specific module names. Cross-file calls are wired solely to
 exercise incoming-edge snapshot/restore in the indexer.
 """
+
 from __future__ import annotations
 
 import json
@@ -33,9 +34,7 @@ import os
 import platform
 import shutil
 import sqlite3
-import statistics
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -86,9 +85,7 @@ def _find_local_binary() -> Path | None:
 # gcloud-authenticated access to the gt-t0 VM.
 _REMOTE_HOST = os.environ.get("GT_INDEX_REMOTE_HOST", "gt-t0")
 _REMOTE_ZONE = os.environ.get("GT_INDEX_REMOTE_ZONE", "us-central1-a")
-_REMOTE_BIN = os.environ.get(
-    "GT_INDEX_REMOTE_BIN", "/home/ubuntu/Groundtruth/gt-index/gt-index"
-)
+_REMOTE_BIN = os.environ.get("GT_INDEX_REMOTE_BIN", "/home/ubuntu/Groundtruth/gt-index/gt-index")
 
 
 def _gcloud_exe() -> str | None:
@@ -159,9 +156,7 @@ class GtIndexRunner:
         shutil.copytree(_FIXTURE_SRC, self.local_repo)
         self._remote_workdir: str | None = None
         if _USE_REMOTE:
-            self._remote_workdir = (
-                f"/tmp/gt_l6_test_{os.getpid()}_{int(time.time()*1000)}"
-            )
+            self._remote_workdir = f"/tmp/gt_l6_test_{os.getpid()}_{int(time.time() * 1000)}"
             self._remote_setup()
 
     # — Remote helpers ——————————————————————————————————————————————————————
@@ -210,10 +205,7 @@ class GtIndexRunner:
                 _REMOTE_HOST,
                 f"--zone={_REMOTE_ZONE}",
                 "--command",
-                (
-                    f"cd {self._remote_workdir}/repo && "
-                    f"tar -xf {self._remote_workdir}/repo.tar"
-                ),
+                (f"cd {self._remote_workdir}/repo && tar -xf {self._remote_workdir}/repo.tar"),
             ],
             check=True,
             capture_output=True,
@@ -260,7 +252,7 @@ class GtIndexRunner:
         # and prior leftover ``graph.db`` is held by AV / cached handle).
         # Caller (open_db) sees the pulled file via ``self.local_db``.
         self._pull_counter = getattr(self, "_pull_counter", 0) + 1
-        unique = self.tmp_path / f"_pulled_{self._pull_counter}_{int(time.time()*1000)}.db"
+        unique = self.tmp_path / f"_pulled_{self._pull_counter}_{int(time.time() * 1000)}.db"
         unique.parent.mkdir(parents=True, exist_ok=True)
         # Use forward-slash path: gcloud.cmd → pscp.exe occasionally rejects
         # backslash drive-letter paths with "Cannot create file" depending
@@ -290,7 +282,9 @@ class GtIndexRunner:
         self.local_db = unique
 
     # — Public API ————————————————————————————————————————————————————————
-    def run(self, *args: str, expect_zero: bool = True, timeout: int = 120) -> subprocess.CompletedProcess:
+    def run(
+        self, *args: str, expect_zero: bool = True, timeout: int = 120
+    ) -> subprocess.CompletedProcess:
         """Invoke gt-index. Returns CompletedProcess with stdout/stderr."""
         if _USE_REMOTE:
             quoted = " ".join(_shquote(a) for a in args)
@@ -319,13 +313,23 @@ class GtIndexRunner:
 
     def run_incremental(self, rel: str) -> dict:
         proc = self.run(
-            "-root", "repo", "-file", rel, "-output", "graph.db",
+            "-root",
+            "repo",
+            "-file",
+            rel,
+            "-output",
+            "graph.db",
         )
         return _last_json_line(proc.stdout)
 
     def run_incremental_raw(self, rel: str) -> subprocess.CompletedProcess:
         return self.run(
-            "-root", "repo", "-file", rel, "-output", "graph.db",
+            "-root",
+            "repo",
+            "-file",
+            rel,
+            "-output",
+            "graph.db",
             expect_zero=False,
         )
 
@@ -453,10 +457,7 @@ def test_real_reparse(built_runner: GtIndexRunner):
 
     def add_helper(text: str) -> str:
         # Append a brand-new function. Adds one node and (potentially) edges.
-        return text + (
-            "\n\ndef extra_helper(x):\n"
-            "    return make_button(str(x))\n"
-        )
+        return text + ("\n\ndef extra_helper(x):\n    return make_button(str(x))\n")
 
     built_runner.modify_file("widgets.py", add_helper)
     out = built_runner.run_incremental("widgets.py")
@@ -498,9 +499,7 @@ def test_incoming_edges_restored(built_runner: GtIndexRunner):
     # All defs preserved → ResolveIncomingEdgesTx must restore everything.
     def minimal_edit(text: str) -> str:
         marker = '    return {"kind": "button", "label": label}'
-        replacement = (
-            "    # minimal-edit marker for L6 reindex test\n" + marker
-        )
+        replacement = "    # minimal-edit marker for L6 reindex test\n" + marker
         assert marker in text, "fixture drift: widgets.py make_button body changed"
         return text.replace(marker, replacement, 1)
 
@@ -527,9 +526,7 @@ def test_incoming_edges_partially_unresolved(built_runner: GtIndexRunner):
     # Rename make_default_store → make_seeded_store. Callers still reference
     # the old name → those incoming edges become unresolvable.
     def rename_def(text: str) -> str:
-        return text.replace(
-            "def make_default_store()", "def make_seeded_store()", 1
-        )
+        return text.replace("def make_default_store()", "def make_seeded_store()", 1)
 
     built_runner.modify_file("store.py", rename_def)
     out = built_runner.run_incremental("store.py")
@@ -557,9 +554,7 @@ def test_p95_under_500ms(built_runner: GtIndexRunner):
     for i, rel in enumerate(files):
         # Force a real reparse each time — append a unique benign comment
         # so the SHA-256 short-circuit doesn't kick in.
-        built_runner.modify_file(
-            rel, lambda t, n=i: t + f"\n# l6-p95-mark-{n}\n"
-        )
+        built_runner.modify_file(rel, lambda t, n=i: t + f"\n# l6-p95-mark-{n}\n")
         out = built_runner.run_incremental(rel)
         assert out["short_circuited"] is False, out
         durations.append(int(out["duration_ms"]))
@@ -580,8 +575,10 @@ def test_no_root_flag(runner: GtIndexRunner):
     # Deliberately omit -root. Use a -output path that does NOT exist at
     # the (default ".") cwd of the runner, so step 1 fires.
     proc = runner.run(
-        "-file", "widgets.py",
-        "-output", "missing_graph.db",
+        "-file",
+        "widgets.py",
+        "-output",
+        "missing_graph.db",
         expect_zero=False,
     )
     assert proc.returncode != 0, proc.stdout + proc.stderr

@@ -6,6 +6,7 @@ Verifies that the module satisfies all three mandatory properties:
 - Hybrid: 5 distinct signals composited
 - Confidence-gated: explicit [VERIFIED]/[WARNING]/[INFO] tiering + honest note
 """
+
 from groundtruth.orientation.composite import (
     composite_score,
     signal_decomposition_tiers,
@@ -23,6 +24,7 @@ from groundtruth.orientation.composite import (
 # ---------------------------------------------------------------------------
 # Individual signal tests
 # ---------------------------------------------------------------------------
+
 
 def test_direct_match_positive():
     assert _direct_name_match("parse_query", "fix the parse_query bug") == 1.0
@@ -95,6 +97,7 @@ def test_property_match_short_kw_ignored():
 # ---------------------------------------------------------------------------
 # Composite score (Hybrid property)
 # ---------------------------------------------------------------------------
+
 
 def test_composite_is_hybrid():
     """Composite uses 5 signals, not 1."""
@@ -193,14 +196,22 @@ def test_composite_class_no_direct_not_demoted():
 
 def test_negative_caller_count_clamped():
     s_neg, _ = composite_score(
-        name="foo", label="Function", file_path="bar.py",
-        caller_count=-5, properties=None,
-        issue_text="", issue_kws=set(),
+        name="foo",
+        label="Function",
+        file_path="bar.py",
+        caller_count=-5,
+        properties=None,
+        issue_text="",
+        issue_kws=set(),
     )
     s_zero, _ = composite_score(
-        name="foo", label="Function", file_path="bar.py",
-        caller_count=0, properties=None,
-        issue_text="", issue_kws=set(),
+        name="foo",
+        label="Function",
+        file_path="bar.py",
+        caller_count=0,
+        properties=None,
+        issue_text="",
+        issue_kws=set(),
     )
     assert s_neg == s_zero
 
@@ -208,14 +219,22 @@ def test_negative_caller_count_clamped():
 def test_class_label_generalized_across_languages():
     for cls_label in ("Trait", "Enum", "Type", "Protocol", "Module", "Mixin"):
         s_fn, _ = composite_score(
-            name="QueryParser", label="Function", file_path="src/p.py",
-            caller_count=1, properties=None,
-            issue_text="QueryParser bug", issue_kws={"queryparser"},
+            name="QueryParser",
+            label="Function",
+            file_path="src/p.py",
+            caller_count=1,
+            properties=None,
+            issue_text="QueryParser bug",
+            issue_kws={"queryparser"},
         )
         s_cls, _ = composite_score(
-            name="QueryParser", label=cls_label, file_path="src/p.py",
-            caller_count=1, properties=None,
-            issue_text="QueryParser bug", issue_kws={"queryparser"},
+            name="QueryParser",
+            label=cls_label,
+            file_path="src/p.py",
+            caller_count=1,
+            properties=None,
+            issue_text="QueryParser bug",
+            issue_kws={"queryparser"},
         )
         assert s_cls < s_fn, f"label={cls_label} did not demote"
 
@@ -223,6 +242,7 @@ def test_class_label_generalized_across_languages():
 # ---------------------------------------------------------------------------
 # Signal-decomposition tiering (Option B — Cursor-style categorical)
 # ---------------------------------------------------------------------------
+
 
 def test_tier_verified_on_direct_match():
     """direct == 1.0 -> [VERIFIED] regardless of other signals."""
@@ -304,6 +324,7 @@ def test_backward_compat_dynamic_tiers_with_floats_returns_info():
 # Confidence-gated rendering
 # ---------------------------------------------------------------------------
 
+
 def test_render_verified_becomes_issue_references():
     candidates = [
         {"func": "parse_query", "file": "src/api.py", "callers": 2},
@@ -357,6 +378,7 @@ def test_render_empty_inputs_returns_fallback():
 # End-to-end
 # ---------------------------------------------------------------------------
 
+
 def test_e2e_strong_match_lands_in_issue_references():
     """End-to-end with composite score → signal decomposition → render."""
     candidates_raw = [
@@ -382,14 +404,16 @@ def test_e2e_strong_match_lands_in_issue_references():
     candidates = []
     for c in candidates_raw:
         _, sig = composite_score(
-            name=c["name"], label=c["label"], file_path=c["file_path"],
-            caller_count=c["caller_count"], properties=c["properties"],
-            issue_text=issue, issue_kws=kws,
+            name=c["name"],
+            label=c["label"],
+            file_path=c["file_path"],
+            caller_count=c["caller_count"],
+            properties=c["properties"],
+            issue_text=issue,
+            issue_kws=kws,
         )
         signals_list.append(sig)
-        candidates.append({
-            "func": c["name"], "file": c["file_path"], "callers": c["caller_count"]
-        })
+        candidates.append({"func": c["name"], "file": c["file_path"], "callers": c["caller_count"]})
 
     tiers = signal_decomposition_tiers(signals_list)
     lines, counts = render_orientation(candidates, tiers)

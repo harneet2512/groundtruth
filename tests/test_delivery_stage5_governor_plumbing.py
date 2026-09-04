@@ -22,6 +22,7 @@
     reads must be forwarded explicitly (the P0 that mislabeled the first-3
     run: GT_SELF_VERIFY_ATTEMPTS was set on the host and never forwarded).
 """
+
 from __future__ import annotations
 
 import glob
@@ -82,14 +83,18 @@ def _reset_failure_state(gmp, monkeypatch):
     monkeypatch.setattr(gmp, "_source_edit_count", 1, raising=False)
 
 
-_GREEN_CARGO = ("running 106 tests\n"
-                "test result: ok. 106 passed; 0 failed; 0 ignored; 0 measured; "
-                "0 filtered out; finished in 1.44s\n")
-_REAL_FAIL = ("--- FAIL: TestEnv (0.00s)\n--- FAIL: TestCommand (0.08s)\nFAIL\n")
-_PATCH_NOISE = ("Checking patch src/walk.rs...\n"
-                "error: patch failed: src/walk.rs:24\n"
-                "Hunk #2 FAILED at 120.\n"
-                "1 out of 3 hunks FAILED\n")
+_GREEN_CARGO = (
+    "running 106 tests\n"
+    "test result: ok. 106 passed; 0 failed; 0 ignored; 0 measured; "
+    "0 filtered out; finished in 1.44s\n"
+)
+_REAL_FAIL = "--- FAIL: TestEnv (0.00s)\n--- FAIL: TestCommand (0.08s)\nFAIL\n"
+_PATCH_NOISE = (
+    "Checking patch src/walk.rs...\n"
+    "error: patch failed: src/walk.rs:24\n"
+    "Hunk #2 FAILED at 120.\n"
+    "1 out of 3 hunks FAILED\n"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -113,16 +118,25 @@ class TestZeroCountClosure:
         """A green `0 failed` line must not flip _last_test_outcome_failed
         (the false-pivot channel)."""
         for name, val in [
-            ("_GT_BASELINE", False), ("_ORACLE_ROUTE", True),
-            ("_marker_sent", True), ("_action_count", 0),
+            ("_GT_BASELINE", False),
+            ("_ORACLE_ROUTE", True),
+            ("_marker_sent", True),
+            ("_action_count", 0),
             ("_last_test_outcome_failed", False),
-            ("_oracle_edited_rels", set()), ("_oracle_nonedit_streak", 0),
-            ("_oracle_edited_tokens", set()), ("_oracle_tested_tokens", set()),
-            ("_oracle_edited_tokens_by_file", {}), ("_edit_churn", {}),
-            ("_traj_state_keys", []), ("_traj_loop_sigs", []),
-            ("_lr_history", []), ("_nsr_history", []),
-            ("_oracle_focus_cache", None), ("_oracle_delivered_hashes", set()),
-            ("_cycle_edit_start", None), ("_test_cycle_spans", []),
+            ("_oracle_edited_rels", set()),
+            ("_oracle_nonedit_streak", 0),
+            ("_oracle_edited_tokens", set()),
+            ("_oracle_tested_tokens", set()),
+            ("_oracle_edited_tokens_by_file", {}),
+            ("_edit_churn", {}),
+            ("_traj_state_keys", []),
+            ("_traj_loop_sigs", []),
+            ("_lr_history", []),
+            ("_nsr_history", []),
+            ("_oracle_focus_cache", None),
+            ("_oracle_delivered_hashes", set()),
+            ("_cycle_edit_start", None),
+            ("_test_cycle_spans", []),
         ]:
             monkeypatch.setattr(gmp, name, val, raising=False)
         out = {"output": _GREEN_CARGO, "returncode": 0}
@@ -139,8 +153,7 @@ class TestPatchNoiseClosure:
 
     def test_mixed_output_keeps_only_real_failures(self, gmp):
         fl = gmp._failure_lines(_PATCH_NOISE + _REAL_FAIL)
-        assert fl and all("Hunk" not in ln and "patch failed" not in ln
-                          for ln in fl)
+        assert fl and all("Hunk" not in ln and "patch failed" not in ln for ln in fl)
 
 
 # ---------------------------------------------------------------------------
@@ -166,9 +179,12 @@ class TestBaselineClosure:
         # one post-edit observation (count 1 — no fire yet)
         assert gmp._l5_failure_nudge("go test ./evaluator/...", _REAL_FAIL) == ""
         # the agent disproves it in a single-turn stash window
-        assert gmp._l5_failure_nudge(
-            "git stash && go test ./evaluator/... ; git stash pop",
-            _REAL_FAIL) == ""
+        assert (
+            gmp._l5_failure_nudge(
+                "git stash && go test ./evaluator/... ; git stash pop", _REAL_FAIL
+            )
+            == ""
+        )
         # recurrence after the disproof: shielded forever
         for _ in range(3):
             out = gmp._l5_failure_nudge("go test ./evaluator/...", _REAL_FAIL)
@@ -178,11 +194,13 @@ class TestBaselineClosure:
         """The TRUE-positive path is preserved: a NEW failure appearing only
         after edits, recurring, still fires."""
         _reset_failure_state(gmp, monkeypatch)
-        out1 = gmp._l5_failure_nudge("pytest tests/ -q",
-                                     "FAILED tests/t.py::test_new - AssertionError\n1 failed\n")
+        out1 = gmp._l5_failure_nudge(
+            "pytest tests/ -q", "FAILED tests/t.py::test_new - AssertionError\n1 failed\n"
+        )
         assert out1 == ""
-        out2 = gmp._l5_failure_nudge("pytest tests/ -q",
-                                     "FAILED tests/t.py::test_new - AssertionError\n1 failed\n")
+        out2 = gmp._l5_failure_nudge(
+            "pytest tests/ -q", "FAILED tests/t.py::test_new - AssertionError\n1 failed\n"
+        )
         assert 'reason="failure_persisted"' in out2
 
 
@@ -191,21 +209,33 @@ class TestBaselineClosure:
 # under parity_mode=True (the frozen Stage-2 contract).
 # ---------------------------------------------------------------------------
 def _fp_traj(task_prefix: str) -> str | None:
-    hits = sorted(glob.glob(str(
-        _FP_CORPUS / f"{task_prefix}*" / "jobs" / "*" / "*" / "agent"
-        / "mini-swe-agent.trajectory.json")))
+    hits = sorted(
+        glob.glob(
+            str(
+                _FP_CORPUS
+                / f"{task_prefix}*"
+                / "jobs"
+                / "*"
+                / "*"
+                / "agent"
+                / "mini-swe-agent.trajectory.json"
+            )
+        )
+    )
     return hits[0] if hits else None
 
 
 class TestReplayTwin:
-    @pytest.mark.parametrize("task,fp_suppressed", [
-        ("fd-deterministic", True),       # green-run zero-count FP
-        ("abs-module", True),             # stash-disproof baseline FP
-        ("abs-stepped", False),           # fires 1 turn BEFORE the disproof —
-                                          # unknowable at fire time (honest residual)
-    ])
-    def test_corrected_mode_kills_proven_fps(self, sense_mod, oracle_mod,
-                                             task, fp_suppressed):
+    @pytest.mark.parametrize(
+        "task,fp_suppressed",
+        [
+            ("fd-deterministic", True),  # green-run zero-count FP
+            ("abs-module", True),  # stash-disproof baseline FP
+            ("abs-stepped", False),  # fires 1 turn BEFORE the disproof —
+            # unknowable at fire time (honest residual)
+        ],
+    )
+    def test_corrected_mode_kills_proven_fps(self, sense_mod, oracle_mod, task, fp_suppressed):
         tj = _fp_traj(task)
         if tj is None:
             pytest.skip("FP corpus not present")
@@ -215,12 +245,12 @@ class TestReplayTwin:
         assert "failure_persisted" in parity  # the historical (FP) behavior
         if fp_suppressed:
             assert "failure_persisted" not in corrected, (
-                f"{task}: the proven FP must be suppressed in corrected mode")
+                f"{task}: the proven FP must be suppressed in corrected mode"
+            )
         # corrected mode NEVER adds new fires (suppress-only):
         assert corrected <= parity
 
-    def test_boa_true_positive_preserved_in_corrected_mode(self, sense_mod,
-                                                           oracle_mod):
+    def test_boa_true_positive_preserved_in_corrected_mode(self, sense_mod, oracle_mod):
         tj = _fp_traj("boa-")
         if tj is None:
             pytest.skip("FP corpus not present")
@@ -235,20 +265,35 @@ class TestReplayTwin:
 class TestHeredocEdits:
     def _reset(self, gmp, monkeypatch):
         for name, val in [
-            ("_GT_BASELINE", False), ("_ORACLE_ROUTE", True),
-            ("_marker_sent", True), ("_action_count", 0),
-            ("_source_edit_count", 0), ("_oracle_edited_rels", set()),
-            ("_oracle_nonedit_streak", 0), ("_oracle_edited_tokens", set()),
-            ("_oracle_edited_tokens_by_file", {}), ("_edit_churn", {}),
-            ("_contract_seen", set()), ("_seen", set()),
-            ("_cochange_fired", False), ("_oracle_focus_cache", None),
-            ("_oracle_delivered_hashes", set()), ("_traj_state_keys", []),
-            ("_traj_loop_sigs", []), ("_lr_history", []), ("_nsr_history", []),
-            ("_cycle_edit_start", None), ("_last_test_outcome_failed", False),
-            ("_cmd_history", []), ("_l5_fired", False),
-            ("_l5_failure_fired", False), ("_l5_notest_fired", False),
-            ("_test_fail_history", []), ("_blind_test_runs", 0),
-            ("_test_evidence_seen", False), ("_consensus_fired", False),
+            ("_GT_BASELINE", False),
+            ("_ORACLE_ROUTE", True),
+            ("_marker_sent", True),
+            ("_action_count", 0),
+            ("_source_edit_count", 0),
+            ("_oracle_edited_rels", set()),
+            ("_oracle_nonedit_streak", 0),
+            ("_oracle_edited_tokens", set()),
+            ("_oracle_edited_tokens_by_file", {}),
+            ("_edit_churn", {}),
+            ("_contract_seen", set()),
+            ("_seen", set()),
+            ("_cochange_fired", False),
+            ("_oracle_focus_cache", None),
+            ("_oracle_delivered_hashes", set()),
+            ("_traj_state_keys", []),
+            ("_traj_loop_sigs", []),
+            ("_lr_history", []),
+            ("_nsr_history", []),
+            ("_cycle_edit_start", None),
+            ("_last_test_outcome_failed", False),
+            ("_cmd_history", []),
+            ("_l5_fired", False),
+            ("_l5_failure_fired", False),
+            ("_l5_notest_fired", False),
+            ("_test_fail_history", []),
+            ("_blind_test_runs", 0),
+            ("_test_evidence_seen", False),
+            ("_consensus_fired", False),
             ("_consensus_scope", set()),
         ]:
             monkeypatch.setattr(gmp, name, val, raising=False)
@@ -257,8 +302,12 @@ class TestHeredocEdits:
         self._reset(gmp, monkeypatch)
         monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
         out = {"output": "", "returncode": 0}
-        gmp._augment_output({"command":
-            "cat > lib/lexer/Lexer.js << 'EOF'\nclass Lexer { expandShorthand() {} }\nEOF"}, out)
+        gmp._augment_output(
+            {
+                "command": "cat > lib/lexer/Lexer.js << 'EOF'\nclass Lexer { expandShorthand() {} }\nEOF"
+            },
+            out,
+        )
         assert gmp._source_edit_count == 1
         assert "lib/lexer/Lexer.js" in gmp._oracle_edited_rels
 
@@ -268,9 +317,13 @@ class TestHeredocEdits:
         self._reset(gmp, monkeypatch)
         monkeypatch.setenv("GT_ORACLE_EVENTS", str(tmp_path / "ev.jsonl"))
         out = {"output": "", "returncode": 0}
-        gmp._augment_output({"command":
-            "python3 << 'EOF'\nsrc = open('lib/lexer/Lexer.js').read()\n"
-            "open('lib/lexer/Lexer.js', 'w').write(src.replace('a', 'b'))\nEOF"}, out)
+        gmp._augment_output(
+            {
+                "command": "python3 << 'EOF'\nsrc = open('lib/lexer/Lexer.js').read()\n"
+                "open('lib/lexer/Lexer.js', 'w').write(src.replace('a', 'b'))\nEOF"
+            },
+            out,
+        )
         assert gmp._source_edit_count == 1
         assert "lib/lexer/Lexer.js" in gmp._oracle_edited_rels
 
@@ -280,17 +333,27 @@ class TestHeredocEdits:
 # ---------------------------------------------------------------------------
 _REQUIRED_AE_KEYS = [
     # substrate consume (pre-existing)
-    "GT_HOST_GRAPH_DB", "GT_CERT_DIR", "GT_HOST_SRC_ROOT",
-    "GT_PORTABLE_SUBSTRATE", "GT_FORBID_PREBUILT_GRAPH", "GT_PROOF_MODE",
-    "GT_CONTAINERIZED", "GT_RUNTIME_STRATEGY",
+    "GT_HOST_GRAPH_DB",
+    "GT_CERT_DIR",
+    "GT_HOST_SRC_ROOT",
+    "GT_PORTABLE_SUBSTRATE",
+    "GT_FORBID_PREBUILT_GRAPH",
+    "GT_PROOF_MODE",
+    "GT_CONTAINERIZED",
+    "GT_RUNTIME_STRATEGY",
     # verification horizon (pre-existing)
-    "GT_STEP_LIMIT", "GT_VERIFICATION_CYCLE_COST",
+    "GT_STEP_LIMIT",
+    "GT_VERIFICATION_CYCLE_COST",
     # Stage-5 closures: the audit's named P0 (set on host, never forwarded)
     "GT_SELF_VERIFY_ATTEMPTS",
     # oracle kill switch + Stage-4 escalation calibration channel
     "GT_ORACLE_ROUTE",
-    "GT_ESC_ADV_TCOV", "GT_ESC_ADV_B", "GT_ESC_URG_TCOV", "GT_ESC_URG_B",
-    "GT_ESC_GATE_TCOV", "GT_ESC_GATE_KV",
+    "GT_ESC_ADV_TCOV",
+    "GT_ESC_ADV_B",
+    "GT_ESC_URG_TCOV",
+    "GT_ESC_URG_B",
+    "GT_ESC_GATE_TCOV",
+    "GT_ESC_GATE_KV",
     # FIX 3 (2026-06-11): oracle suppression-telemetry harvest path (writable
     # /gt_out mount) — without it the 8-dp decision record dies in-container.
     "GT_ORACLE_EVENTS",
@@ -299,8 +362,7 @@ _REQUIRED_AE_KEYS = [
 
 def test_workflow_forwards_every_gt_env_via_ae():
     text = _WF_PATH.read_text(encoding="utf-8")
-    missing = [k for k in _REQUIRED_AE_KEYS
-               if not re.search(rf"--ae {re.escape(k)}=", text)]
+    missing = [k for k in _REQUIRED_AE_KEYS if not re.search(rf"--ae {re.escape(k)}=", text)]
     assert not missing, (
         "GT env vars set on the host but NOT forwarded into the task "
         f"container via --ae (the Stage-C-killing P0 class): {missing}"

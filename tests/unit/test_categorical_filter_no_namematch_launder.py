@@ -5,6 +5,7 @@ Found by the per-layer LIPI (wx2eywcer): the docstring claimed a 'name_match cc<
 admit (the old os.walk -> account.walk launder) that the SQL correctly does NOT
 implement. This test fails if a future 'make code match docstring' edit re-introduces it.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -28,9 +29,9 @@ def _admits(tmp_path, method, tier, cc=1, conf=0.95) -> bool:
     )
     conn.commit()
     clause = _categorical_edge_filter_clause()
-    n = conn.execute(
-        f"SELECT COUNT(*) FROM edges e WHERE e.type='CALLS' AND {clause}"
-    ).fetchone()[0]
+    n = conn.execute(f"SELECT COUNT(*) FROM edges e WHERE e.type='CALLS' AND {clause}").fetchone()[
+        0
+    ]
     conn.close()
     return n > 0
 

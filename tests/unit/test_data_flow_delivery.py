@@ -6,6 +6,7 @@ SELECTs kind='data_flow', the value validator gates it, and _fmt_one renders a
 ``flows:`` line the agent sees. In-memory sqlite — no temp file, so no Windows
 graph.db file-lock teardown flake.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -69,8 +70,6 @@ def test_read_props_drops_arrowless_data_flow() -> None:
     # End-to-end gate: an arrowless data_flow row is filtered by the value validator
     # in _read_props (not just the standalone validator).
     conn = _mem_db()
-    conn.execute(
-        "INSERT INTO properties VALUES (?,?,?,?,?)", (1, "data_flow", "count", 10, 0.8)
-    )
+    conn.execute("INSERT INTO properties VALUES (?,?,?,?,?)", (1, "data_flow", "count", 10, 0.8))
     props = _read_props(conn, [1])
     assert "data_flow" not in props

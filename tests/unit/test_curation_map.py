@@ -7,6 +7,7 @@ Proves the mechanism, not just that code runs:
 - the agreement-guard: a name_match edge is NEVER a fact;
 - honest abstention: no confident connection -> empty render / any_signal False.
 """
+
 import os
 import sqlite3
 import tempfile
@@ -155,9 +156,9 @@ def test_overload_same_neighbor_keeps_fact_not_name_match():
         "type TEXT, source_line INT, source_file TEXT, resolution_method TEXT, confidence REAL)"
     )
     nodes = [
-        (1, "foo", "src/app.py", "Function", 0),      # overload A
+        (1, "foo", "src/app.py", "Function", 0),  # overload A
         (3, "validate", "src/app.py", "Function", 0),  # shared neighbor
-        (5, "foo", "src/app.py", "Function", 0),      # overload B (same name+file)
+        (5, "foo", "src/app.py", "Function", 0),  # overload B (same name+file)
     ]
     conn.executemany("INSERT INTO nodes VALUES (?,?,?,?,?)", nodes)
     # name_match edge inserted FIRST so it precedes the fact row in natural order.
@@ -227,8 +228,12 @@ def test_db_without_confidence_columns_suppresses_nonfacts_keeps_facts():
         "type TEXT, source_line INT, source_file TEXT, resolution_method TEXT)"
     )
     conn.execute("INSERT INTO nodes VALUES (1,'foo','src/app.py','Function',0)")
-    conn.execute("INSERT INTO nodes VALUES (2,'dispatch','src/router.py','Function',0)")  # name_match caller
-    conn.execute("INSERT INTO nodes VALUES (3,'validate','src/app.py','Function',0)")     # same_file callee (fact)
+    conn.execute(
+        "INSERT INTO nodes VALUES (2,'dispatch','src/router.py','Function',0)"
+    )  # name_match caller
+    conn.execute(
+        "INSERT INTO nodes VALUES (3,'validate','src/app.py','Function',0)"
+    )  # same_file callee (fact)
     conn.execute(
         "INSERT INTO edges (id, source_id, target_id, type, resolution_method) "
         "VALUES (1,2,1,'CALLS','name_match')"
@@ -249,8 +254,8 @@ def test_db_without_confidence_columns_suppresses_nonfacts_keeps_facts():
         assert fm.callees[0].is_fact is True
         rendered = cm.render_map(maps)
         assert "validate (src/app.py)" in rendered
-        assert "(unverified)" not in rendered          # nothing rendered unverified
-        assert "dispatch" not in rendered              # name_match caller suppressed
+        assert "(unverified)" not in rendered  # nothing rendered unverified
+        assert "dispatch" not in rendered  # name_match caller suppressed
     finally:
         os.unlink(path)
 
@@ -263,8 +268,12 @@ def test_db_no_method_no_conf_columns_fully_suppressed():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, file_path TEXT, label TEXT)")
-    conn.execute("CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INT, target_id INT, type TEXT)")
+    conn.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, file_path TEXT, label TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INT, target_id INT, type TEXT)"
+    )
     conn.execute("INSERT INTO nodes VALUES (1,'foo','src/app.py','Function')")
     conn.execute("INSERT INTO nodes VALUES (2,'dispatch','src/router.py','Function')")
     conn.execute("INSERT INTO edges (id, source_id, target_id, type) VALUES (1,2,1,'CALLS')")
@@ -303,6 +312,7 @@ def _make_db_full(path: str) -> sqlite3.Connection:
 
 
 # --- item #16: _node_ids normalizes path identically to the witness twin ----
+
 
 def test_item16_node_ids_normalizes_path_separator_and_dot_prefix():
     """#16: a focus path in repo-relative `beets/importer.py` must still match a
@@ -346,22 +356,26 @@ def test_item16_normalize_file_path_matches_witness_twin():
 
 # --- item #35: _neighbors applies the stdlib-shadow guard (shared helper) ----
 
+
 def test_item35_stdlib_shadow_dropped_when_repo_root_given():
     """#35: a DETERMINISTIC-tagged edge that is really `os.walk(` name-matched to a
     same-named PROJECT symbol must be DROPPED in <gt-graph-map> (parity with the
     witness twin's guard). Pre-fix _neighbors had no shadow guard -> rendered bare
     as a fact. Verified by giving repo_root so the call site can be read."""
     import tempfile as _tf
+
     repo = _tf.mkdtemp()
     # Caller file whose call site is `result = os.walk(top)` — a stdlib attr call.
     caller_rel = "acct/usage.py"
     os.makedirs(os.path.join(repo, "acct"), exist_ok=True)
     with open(os.path.join(repo, caller_rel), "w", encoding="utf-8") as fh:
-        fh.write(textwrap.dedent("""\
+        fh.write(
+            textwrap.dedent("""\
             def consume(top):
                 result = os.walk(top)
                 return result
-        """))
+        """)
+        )
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     conn = _make_db_full(path)
@@ -393,6 +407,7 @@ def test_item35_real_deterministic_caller_survives_guard():
     """#35 negative control: a genuine cross-file caller (NOT a stdlib attr call)
     must STILL be shown when repo_root is given — the guard is surgical, not a nuke."""
     import tempfile as _tf
+
     repo = _tf.mkdtemp()
     os.makedirs(os.path.join(repo, "pkg"), exist_ok=True)
     with open(os.path.join(repo, "pkg/router.py"), "w", encoding="utf-8") as fh:
@@ -416,6 +431,7 @@ def test_item35_real_deterministic_caller_survives_guard():
 
 
 # --- item #14: verified_caller_count is an UNCAPPED count -------------------
+
 
 def test_item14_verified_caller_count_not_truncated_by_display_cap():
     """#14: a function with more verified callers than the legacy max_neighbors=5
@@ -455,6 +471,7 @@ def test_item14_contract_map_delegates_to_uncapped_count():
     """#14: contract_map._verified_caller_count now delegates to the uncapped
     primitive, so the drift block's "N verified callers" is no longer truncated."""
     from groundtruth.pretask import contract_map as ctm
+
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     conn = _make_db_full(path)
@@ -478,6 +495,7 @@ def test_item14_contract_map_delegates_to_uncapped_count():
 
 
 # --- item #15: 2-hop rescue gated on FACT count, not total visible ----------
+
 
 def test_item15_rescue_fires_when_zero_facts_despite_namematch_noise():
     """#15: a focus with 0 FACT 1-hop edges must trigger the verified 2-hop rescue
@@ -544,8 +562,9 @@ def test_item15_dynamic_neighbors_sparseness_uses_fact_count(monkeypatch):
 
     def fake_second_hop(conn, seed_ids, **kw):
         rescued["fired"] = True
-        return [cm.Edge(name="deep", file="z.py", confidence=1.0,
-                        resolution_method="import", hops=2)]
+        return [
+            cm.Edge(name="deep", file="z.py", confidence=1.0, resolution_method="import", hops=2)
+        ]
 
     monkeypatch.setattr(cm, "_neighbors", fake_neighbors)
     monkeypatch.setattr(cm, "_apply_dynamic_budget", fake_budget)
@@ -563,8 +582,14 @@ def test_item15_dynamic_neighbors_sparseness_uses_fact_count(monkeypatch):
             return _Cur()
 
     out = cm._dynamic_neighbors(
-        _Conn(), [1], direction="callees", has_conf=True, has_method=True,
-        fact_ceiling=8, unverified_k=3, second_hop=True,
+        _Conn(),
+        [1],
+        direction="callees",
+        has_conf=True,
+        has_method=True,
+        fact_ceiling=8,
+        unverified_k=3,
+        second_hop=True,
     )
     # FACT count is 1 (== threshold, not >), so the rescue MUST fire and add `deep`.
     assert rescued["fired"] is True  # pre-fix: predicate len(edges)=3>1 -> never fired
@@ -572,6 +597,7 @@ def test_item15_dynamic_neighbors_sparseness_uses_fact_count(monkeypatch):
 
 
 # --- item #59: true COUNT for budget; rescue over-fetch past exclude --------
+
 
 def test_item59_budget_uses_true_fact_count_on_a_big_hub():
     """#59: on a hub with more verified neighbors than the over-fetch window, the
@@ -615,10 +641,11 @@ def test_item59_budget_uses_true_fact_count_on_a_big_hub():
 def test_item59_apply_dynamic_budget_true_count_zeros_guess_budget():
     """#59 (unit): with a TRUE fact count exceeding unverified_k, the guess budget
     is zero even if the windowed `edges` under-counts facts (the mega-hub case)."""
-    facts = [cm.Edge(name=f"f{i}", file="a.py", confidence=1.0,
-                     resolution_method="import") for i in range(2)]
-    guesses = [cm.Edge(name="g1", file="b.py", confidence=0.6,
-                       resolution_method="name_match")]
+    facts = [
+        cm.Edge(name=f"f{i}", file="a.py", confidence=1.0, resolution_method="import")
+        for i in range(2)
+    ]
+    guesses = [cm.Edge(name="g1", file="b.py", confidence=0.6, resolution_method="name_match")]
     # Windowed edges show only 2 facts, but the TRUE count is 10 -> guesses dropped.
     out = cm._apply_dynamic_budget(
         facts + guesses, fact_ceiling=8, unverified_k=3, true_fact_count=10
@@ -641,8 +668,10 @@ def test_item59_second_hop_overfetch_survives_heavy_exclude():
     conn = _make_db_full(path)
     conn.execute("INSERT INTO nodes VALUES (1,'foo','pkg/a.py','Function',0)")
     conn.execute("INSERT INTO nodes VALUES (2,'seed','pkg/b.py','Function',0)")
-    conn.execute("INSERT INTO edges (id,source_id,target_id,type,source_line,source_file,"
-                 "resolution_method,confidence) VALUES (1,1,2,'CALLS',1,NULL,'same_file',1.0)")
+    conn.execute(
+        "INSERT INTO edges (id,source_id,target_id,type,source_line,source_file,"
+        "resolution_method,confidence) VALUES (1,1,2,'CALLS',1,NULL,'same_file',1.0)"
+    )
     eid = 2
     # 20 sibs (> limit*4=12) named 'sib00'.. so they sort before 'zzz_deepnew'.
     n_sibs = 20
@@ -653,13 +682,19 @@ def test_item59_second_hop_overfetch_survives_heavy_exclude():
         sfile = f"pkg/s{i:02d}.py"
         sib_keys.append((sname, sfile))
         conn.execute("INSERT INTO nodes VALUES (?,?,?,?,0)", (sid, sname, sfile, "Function"))
-        conn.execute("INSERT INTO edges (id,source_id,target_id,type,source_line,source_file,"
-                     "resolution_method,confidence) VALUES (?,2,?,'CALLS',1,NULL,'import',1.0)",
-                     (eid, sid)); eid += 1
+        conn.execute(
+            "INSERT INTO edges (id,source_id,target_id,type,source_line,source_file,"
+            "resolution_method,confidence) VALUES (?,2,?,'CALLS',1,NULL,'import',1.0)",
+            (eid, sid),
+        )
+        eid += 1
     # genuinely-new 2-hop target, named to sort LAST (z...), reachable only from seed
     conn.execute("INSERT INTO nodes VALUES (99,'zzz_deepnew','pkg/z.py','Function',0)")
-    conn.execute("INSERT INTO edges (id,source_id,target_id,type,source_line,source_file,"
-                 "resolution_method,confidence) VALUES (?,2,99,'CALLS',1,NULL,'import',1.0)", (eid,))
+    conn.execute(
+        "INSERT INTO edges (id,source_id,target_id,type,source_line,source_file,"
+        "resolution_method,confidence) VALUES (?,2,99,'CALLS',1,NULL,'import',1.0)",
+        (eid,),
+    )
     conn.commit()
     conn.close()
     try:
@@ -669,8 +704,13 @@ def test_item59_second_hop_overfetch_survives_heavy_exclude():
         exclude = set(sib_keys)  # all 20 sibs already shown at hop1 -> excluded
         exclude.add(("foo", "pkg/a.py"))
         hop2 = cm._second_hop_facts(
-            c, seed_ids, direction="callees", has_conf=has_conf,
-            has_method=has_method, exclude=exclude, limit=3,
+            c,
+            seed_ids,
+            direction="callees",
+            has_conf=has_conf,
+            has_method=has_method,
+            exclude=exclude,
+            limit=3,
         )
         c.close()
         names = {e.name for e in hop2}

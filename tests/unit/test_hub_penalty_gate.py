@@ -10,6 +10,7 @@ Product requirement (DOC_OF_HONOR Layer 0.5 — graph-theory degree normalizatio
 a hub and a non-hub with IDENTICAL evidence must NOT tie; the hub ranks lower. And
 a non-hub (hub_pen==0) must be a strict no-op (the no-regression property).
 """
+
 from groundtruth.pretask.v7_4_brief import (
     DEFAULT_WEIGHTS,
     _ablation_weights,
@@ -21,8 +22,14 @@ W = _ablation_weights("C", dict(DEFAULT_WEIGHTS))
 
 def _comp(hub_pen: float, lex: float = 0.9, path: float = 0.9) -> dict:
     return {
-        "sem": 0.0, "lex": lex, "path": path, "reach": 0.0,
-        "anchor_prox": 0.0, "commit": 0.0, "hub_pen": hub_pen, "frame": 0.0,
+        "sem": 0.0,
+        "lex": lex,
+        "path": path,
+        "reach": 0.0,
+        "anchor_prox": 0.0,
+        "commit": 0.0,
+        "hub_pen": hub_pen,
+        "frame": 0.0,
     }
 
 
@@ -62,7 +69,7 @@ def test_high_evidence_hub_not_overpenalized():
 def test_hub_wins_when_evidence_gap_exceeds_penalty():
     """The GUARANTEED invariant (max penalty = w_hub*hub_pen <= w_hub): a hub
     whose raw evidence beats a rival by MORE than w_hub still wins. gap 0.285 > 0.10."""
-    hub = _total_score(_comp(hub_pen=1.0, lex=0.9, path=0.9), W)   # evid 0.855 - 0.10 = 0.755
+    hub = _total_score(_comp(hub_pen=1.0, lex=0.9, path=0.9), W)  # evid 0.855 - 0.10 = 0.755
     rival = _total_score(_comp(hub_pen=0.0, lex=0.6, path=0.6), W)  # evid 0.57
     assert hub > rival
 
@@ -73,6 +80,8 @@ def test_close_contest_hub_loses_BY_DESIGN():
     code comment: 'a tie-breaker that flips close hub-vs-specific contests'). This
     is the regime test_high_evidence_hub_not_overpenalized never exercised — it
     documents the real flip so the no-regression claim isn't over-read."""
-    hub = _total_score(_comp(hub_pen=0.9, lex=0.9, path=0.9), W)      # evid 0.855 - 0.09 = 0.765
-    specific = _total_score(_comp(hub_pen=0.0, lex=0.84, path=0.84), W)  # evid 0.798 (gap 0.057 < 0.09)
+    hub = _total_score(_comp(hub_pen=0.9, lex=0.9, path=0.9), W)  # evid 0.855 - 0.09 = 0.765
+    specific = _total_score(
+        _comp(hub_pen=0.0, lex=0.84, path=0.84), W
+    )  # evid 0.798 (gap 0.057 < 0.09)
     assert specific > hub, "close contest: the specific non-hub wins (by design)"

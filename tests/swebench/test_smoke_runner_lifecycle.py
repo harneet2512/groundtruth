@@ -43,9 +43,7 @@ def smoke_runner():
         stub.resolve_image_name = lambda *a, **kw: ""  # type: ignore[attr-defined]
         sys.modules["image_name_resolver"] = stub
 
-    spec = importlib.util.spec_from_file_location(
-        "smoke_runner_under_test", RUNNER_PATH
-    )
+    spec = importlib.util.spec_from_file_location("smoke_runner_under_test", RUNNER_PATH)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules["smoke_runner_under_test"] = mod
@@ -61,65 +59,50 @@ class TestComputeHardCapSeconds:
         """5 tasks / 4 workers: longest chain is 2 (one worker gets 2),
         so cap = 1800 * 1.25 * 2 = 4500. Old integer-floor gave 2250.
         """
-        result = smoke_runner._compute_hard_cap_seconds(
-            cap_seconds=1800, task_count=5, workers=4
-        )
-        assert result == 4500, (
-            f"expected 4500 (math.ceil(5/4)=2), got {result}"
-        )
+        result = smoke_runner._compute_hard_cap_seconds(cap_seconds=1800, task_count=5, workers=4)
+        assert result == 4500, f"expected 4500 (math.ceil(5/4)=2), got {result}"
 
     def test_saturated_30_4_chain_is_8(self, smoke_runner):
         """30 tasks / 4 workers: math.ceil(30/4) = 8."""
-        result = smoke_runner._compute_hard_cap_seconds(
-            cap_seconds=1800, task_count=30, workers=4
-        )
+        result = smoke_runner._compute_hard_cap_seconds(cap_seconds=1800, task_count=30, workers=4)
         assert result == int(1800 * 1.25 * 8) == 18000
 
     def test_exactly_divisible_keeps_existing_behavior(self, smoke_runner):
         """4 tasks / 4 workers: math.ceil(4/4) = 1. Same as old code."""
-        result = smoke_runner._compute_hard_cap_seconds(
-            cap_seconds=1800, task_count=4, workers=4
-        )
+        result = smoke_runner._compute_hard_cap_seconds(cap_seconds=1800, task_count=4, workers=4)
         assert result == 2250
 
     def test_single_task_chain_is_1(self, smoke_runner):
-        result = smoke_runner._compute_hard_cap_seconds(
-            cap_seconds=1800, task_count=1, workers=4
-        )
+        result = smoke_runner._compute_hard_cap_seconds(cap_seconds=1800, task_count=1, workers=4)
         assert result == 2250
 
     def test_more_workers_than_tasks_chain_floor_is_1(self, smoke_runner):
         """3 tasks / 4 workers — chain is 1 (math.ceil(3/4)=1)."""
-        result = smoke_runner._compute_hard_cap_seconds(
-            cap_seconds=1800, task_count=3, workers=4
-        )
+        result = smoke_runner._compute_hard_cap_seconds(cap_seconds=1800, task_count=3, workers=4)
         assert result == 2250
 
     def test_zero_workers_treated_as_one(self, smoke_runner):
         """Defensive: workers=0 must not divide-by-zero; falls back to 1."""
-        result = smoke_runner._compute_hard_cap_seconds(
-            cap_seconds=1800, task_count=5, workers=0
-        )
+        result = smoke_runner._compute_hard_cap_seconds(cap_seconds=1800, task_count=5, workers=0)
         # safe_workers=max(1,0)=1, ceil(5/1)=5, 1800*1.25*5 = 11250
         assert result == 11250
 
     def test_zero_cap_returns_none(self, smoke_runner):
-        assert smoke_runner._compute_hard_cap_seconds(
-            cap_seconds=0, task_count=5, workers=4
-        ) is None
+        assert (
+            smoke_runner._compute_hard_cap_seconds(cap_seconds=0, task_count=5, workers=4) is None
+        )
 
     def test_none_cap_returns_none(self, smoke_runner):
-        assert smoke_runner._compute_hard_cap_seconds(
-            cap_seconds=None, task_count=5, workers=4
-        ) is None
+        assert (
+            smoke_runner._compute_hard_cap_seconds(cap_seconds=None, task_count=5, workers=4)
+            is None
+        )
 
     def test_zero_tasks_does_not_crash(self, smoke_runner):
         """Edge case: empty task list. Should still return a finite cap
         because main() validates task_count > 0 upstream and we want
         defensive behavior here."""
-        result = smoke_runner._compute_hard_cap_seconds(
-            cap_seconds=1800, task_count=0, workers=4
-        )
+        result = smoke_runner._compute_hard_cap_seconds(cap_seconds=1800, task_count=0, workers=4)
         # safe_count=max(1,0)=1, ceil(1/4)=1, 1800*1.25*1=2250
         assert result == 2250
 
@@ -191,9 +174,7 @@ class TestSignalForwarder:
             time.sleep(0.1)
             assert state["fired"] is True, "handler did not fire"
             assert state["signum"] == signal.SIGTERM
-            assert proc.terminate_called == 1, (
-                f"expected 1 terminate, got {proc.terminate_called}"
-            )
+            assert proc.terminate_called == 1, f"expected 1 terminate, got {proc.terminate_called}"
 
             # Second SIGTERM should NOT re-fire (single-fire policy
             # documented in addendum ADD-RC-14-2).
@@ -262,9 +243,7 @@ class _SlowDeathProc:
 
 
 class TestWaitLoopTeardown:
-    def test_wait_loop_post_sigterm_timeout_is_60s_not_30s(
-        self, smoke_runner, monkeypatch
-    ):
+    def test_wait_loop_post_sigterm_timeout_is_60s_not_30s(self, smoke_runner, monkeypatch):
         """The post-SIGTERM wait must be 60s. We monkeypatch proc.wait to
         record the timeout it was called with."""
         proc = _SlowDeathProc()
@@ -289,10 +268,6 @@ class TestWaitLoopTeardown:
 
         # First wait call (post-SIGTERM) must use timeout=60.
         assert recorded, "wait was never called"
-        assert recorded[0] == 60, (
-            f"post-SIGTERM wait must be 60s (RC-14 fix), got {recorded[0]}"
-        )
+        assert recorded[0] == 60, f"post-SIGTERM wait must be 60s (RC-14 fix), got {recorded[0]}"
         # And after timeout, kill must have been called.
-        assert proc._killed is True, (
-            "wait_loop must escalate to kill() after SIGTERM timeout"
-        )
+        assert proc._killed is True, "wait_loop must escalate to kill() after SIGTERM timeout"

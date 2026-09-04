@@ -28,6 +28,7 @@ Properties (CLAUDE.md pillars):
     has VERIFIED dependents. A name_match (guessed) caller is NEVER blast radius.
   - LLM-free, deterministic, $0.
 """
+
 from __future__ import annotations
 
 import os
@@ -46,8 +47,15 @@ try:  # pragma: no cover - import shape varies by harness
 except Exception:  # pragma: no cover
     _DETERMINISTIC_METHODS = frozenset(
         {
-            "same_file", "import", "import_type", "type_flow", "verified_unique",
-            "inherited", "return_type", "lsp", "lsp_verified",
+            "same_file",
+            "import",
+            "import_type",
+            "type_flow",
+            "verified_unique",
+            "inherited",
+            "return_type",
+            "lsp",
+            "lsp_verified",
         }
     )
 
@@ -74,14 +82,14 @@ _REF_CACHE: dict = {}
 @dataclass(frozen=True)
 class SymbolRisk:
     name: str
-    dependents: int   # DISTINCT verified incoming-dependency edges (the blast radius)
-    risk: float       # 0..1, saturating, relative to the repo fan-in reference
+    dependents: int  # DISTINCT verified incoming-dependency edges (the blast radius)
+    risk: float  # 0..1, saturating, relative to the repo fan-in reference
 
 
 @dataclass(frozen=True)
 class EditRisk:
-    score: float          # 0..1 — the MAX symbol risk (the riskiest edited symbol)
-    reasons: tuple        # tuple[SymbolRisk, ...] high -> low
+    score: float  # 0..1 — the MAX symbol risk (the riskiest edited symbol)
+    reasons: tuple  # tuple[SymbolRisk, ...] high -> low
     reference_fanin: float  # the repo fan-in reference used (telemetry)
 
     def is_quiet(self) -> bool:
@@ -104,7 +112,7 @@ def _normalize_path(f) -> str:
     s = str(f).strip().replace("\\", "/")
     for pre in ("a/", "b/", "./"):
         if s.startswith(pre):
-            s = s[len(pre):]
+            s = s[len(pre) :]
     return s.lstrip("/")
 
 
@@ -114,7 +122,7 @@ def _normalize_edited_files(edited_files) -> list[str]:
     a file it edited — a same-named symbol defined in an UN-edited file (e.g. a callee
     hub like ``List.push``) is not the agent's change and must not be flagged."""
     out: list[str] = []
-    for f in (edited_files or []):
+    for f in edited_files or []:
         s = _normalize_path(f)
         if s:
             out.append(s)
@@ -132,7 +140,7 @@ def _normalize_edited_ranges(edited_ranges) -> dict[str, list[tuple[int, int]]]:
         if not key:
             continue
         clean: list[tuple[int, int]] = []
-        for r in (ranges or []):
+        for r in ranges or []:
             try:
                 a, b = int(r[0]), int(r[1])
             except (TypeError, ValueError, IndexError):
@@ -200,8 +208,15 @@ def _repo_fanin_reference(conn, conf_clause: str, method_clause: str, conf_param
 
 
 def _ranged_dependents(
-    conn, nm, types_in, conf_clause, method_clause, file_clause,
-    conf_params, file_params, ranges_by_file,
+    conn,
+    nm,
+    types_in,
+    conf_clause,
+    method_clause,
+    file_clause,
+    conf_params,
+    file_params,
+    ranges_by_file,
 ) -> int:
     """Distinct verified incoming-dependency sources of the nodes named ``nm`` whose
     DEFINITION line is inside an edited hunk (R3). Two passes: (1) the candidate target
@@ -218,8 +233,7 @@ def _ranged_dependents(
     except sqlite3.Error:
         return 0
     target_ids = [
-        int(r[0]) for r in cand
-        if r and _line_in_edited_ranges(r[1], r[2], ranges_by_file)
+        int(r[0]) for r in cand if r and _line_in_edited_ranges(r[1], r[2], ranges_by_file)
     ]
     if not target_ids:
         return 0
@@ -334,8 +348,15 @@ def structural_edit_risk(
         for nm in names:
             if enforce_ranges:
                 dependents = _ranged_dependents(
-                    conn, nm, types_in, conf_clause, method_clause, file_clause,
-                    conf_params, file_params, ranges_by_file,
+                    conn,
+                    nm,
+                    types_in,
+                    conf_clause,
+                    method_clause,
+                    file_clause,
+                    conf_params,
+                    file_params,
+                    ranges_by_file,
                 )
             else:
                 try:

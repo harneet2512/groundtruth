@@ -16,11 +16,11 @@ Both halves of the gate live in ``groundtruth.config.evidence_markers`` (the
 leaf config module) so every emitter (the wrapper's [RECALL] path and
 ``format_contract``'s [FORMAT] path) can reuse them without importing hooks.
 """
+
 from __future__ import annotations
 
 import sqlite3
 
-import pytest
 
 from groundtruth.config.evidence_markers import (
     identifier_tokens,
@@ -60,9 +60,7 @@ class TestPassesRelevanceGate:
         )
 
     def test_overlap_with_issue_terms_passes(self):
-        assert passes_relevance_gate(
-            "progress_write dump", {"progress", "write"}, set()
-        )
+        assert passes_relevance_gate("progress_write dump", {"progress", "write"}, set())
 
     def test_no_overlap_drops(self):
         # The literal-fixture-key noise: "path"/"SKIP_SLOW_TESTS" vs an
@@ -94,15 +92,11 @@ def _build_db(tmp_path, *, caller_keys: list[str]) -> tuple[str, str]:
     repo = tmp_path / "repo"
     repo.mkdir()
     # edited function lives here
-    (repo / "target.py").write_text(
-        "def normalize_tz(dt):\n    return dt\n", encoding="utf-8"
-    )
+    (repo / "target.py").write_text("def normalize_tz(dt):\n    return dt\n", encoding="utf-8")
     # caller subscripts the return value with the noise keys
     subs = "".join(f'    _ = result["{k}"]\n' for k in caller_keys)
     (repo / "caller.py").write_text(
-        "from target import normalize_tz\n"
-        "def use():\n"
-        "    result = normalize_tz(0)\n" + subs,
+        "from target import normalize_tz\ndef use():\n    result = normalize_tz(0)\n" + subs,
         encoding="utf-8",
     )
 
@@ -150,7 +144,10 @@ class TestFormatRelevanceGate:
         not render as [FORMAT] evidence."""
         db_path, repo = _build_db(tmp_path, caller_keys=["path", "SKIP_SLOW_TESTS"])
         out = mine_return_shape(
-            db_path, "target.py", "normalize_tz", repo,
+            db_path,
+            "target.py",
+            "normalize_tz",
+            repo,
             issue_terms={"timezone", "offset"},
         )
         joined = "\n".join(out)
@@ -162,7 +159,10 @@ class TestFormatRelevanceGate:
         """Positive control: a key overlapping the edited fn's tokens survives."""
         db_path, repo = _build_db(tmp_path, caller_keys=["normalize", "other"])
         out = mine_return_shape(
-            db_path, "target.py", "normalize_tz", repo,
+            db_path,
+            "target.py",
+            "normalize_tz",
+            repo,
             issue_terms=set(),
         )
         joined = "\n".join(out)
@@ -173,7 +173,10 @@ class TestFormatRelevanceGate:
         """Positive control: overlap via issue terms (not fn tokens) survives."""
         db_path, repo = _build_db(tmp_path, caller_keys=["offset", "junk"])
         out = mine_return_shape(
-            db_path, "target.py", "normalize_tz", repo,
+            db_path,
+            "target.py",
+            "normalize_tz",
+            repo,
             issue_terms={"offset"},
         )
         joined = "\n".join(out)

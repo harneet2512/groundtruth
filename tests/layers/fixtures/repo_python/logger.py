@@ -1,4 +1,5 @@
 """Structured logger wrapper for the example app."""
+
 from __future__ import annotations
 
 import json

@@ -5,9 +5,24 @@ import pytest
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption("--trajectory-dir", action="store", default=None, help="Root directory containing per-task trajectory artifacts")
-    parser.addoption("--graph-dir", action="store", default=None, help="Optional graph/index root for L1/L6 checks")
-    parser.addoption("--baselines-file", action="store", default="tests/behavioral/baselines.json", help="Behavioral baseline JSON")
+    parser.addoption(
+        "--trajectory-dir",
+        action="store",
+        default=None,
+        help="Root directory containing per-task trajectory artifacts",
+    )
+    parser.addoption(
+        "--graph-dir",
+        action="store",
+        default=None,
+        help="Optional graph/index root for L1/L6 checks",
+    )
+    parser.addoption(
+        "--baselines-file",
+        action="store",
+        default="tests/behavioral/baselines.json",
+        help="Behavioral baseline JSON",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:

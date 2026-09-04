@@ -5,11 +5,10 @@ Research:
 - CodePlan FSE 2024: change-may-impact via CalledBy edges
 - Codebase-Memory 2026: 10x fewer tokens with structured rendering
 """
-import sqlite3
-import pytest
-from pathlib import Path
 
-from groundtruth.graph.ego import ego_graph, change_impact, EgoGraph
+import sqlite3
+
+from groundtruth.graph.ego import ego_graph, change_impact
 
 
 def _create_test_db(tmp_path):

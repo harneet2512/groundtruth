@@ -4,6 +4,7 @@ Verifies that ALL markers produced by post_edit.py are recognized by the
 has_evidence check. This prevents the silent-drop bug where valid evidence
 (BEHAVIORAL CONTRACT, TEST EXPECTS) was produced but not delivered.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -17,22 +18,51 @@ from groundtruth.hooks.post_edit import generate_improved_evidence
 
 EVIDENCE_MARKERS = (
     # Primary markers (old format)
-    "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]",
-    "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
-    "[BEHAVIORAL CONTRACT]", "[TEST]",
-    "[GT_VERIFY]", "[GT L3:",
+    "[CONTRACT]",
+    "[CONTRACT ~]",
+    "[SIGNATURE]",
+    "[PATTERN]",
+    "[PEER]",
+    "[TWINS]",
+    "[PROPAGATE]",
+    "[CO-CHANGE]",
+    "[SCOPE]",
+    "[BEHAVIORAL CONTRACT]",
+    "[TEST]",
+    "[GT_VERIFY]",
+    "[GT L3:",
     # Property kind prefixes (GUARD: renamed to PRESERVE: in post_edit.py:212)
-    "PRESERVE:", "MUTATES:", "RAISES:", "PARAMS:",
-    "FIELD:", "READS:", "[SECURITY]", "[SERDE]",
-    "[CATCHES]", "[BOUNDARY]", "[CONCURRENCY]",
-    "[CONFIG]", "[ORDER]", "[RESOURCE]", "[TWIN]",
+    "PRESERVE:",
+    "MUTATES:",
+    "RAISES:",
+    "PARAMS:",
+    "FIELD:",
+    "READS:",
+    "[SECURITY]",
+    "[SERDE]",
+    "[CATCHES]",
+    "[BOUNDARY]",
+    "[CONCURRENCY]",
+    "[CONFIG]",
+    "[ORDER]",
+    "[RESOURCE]",
+    "[TWIN]",
     # G7 always-fire honest isolation note (post_edit.py:229)
     "[INFO]",
     # Legacy markers (backward compat)
-    "SIGNATURE:", "CALLERS:", "SIBLING:", "TWINS:",
-    "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
-    "BEHAVIORAL CONTRACT:", "TEST EXPECTS:", "TEST:",
-    "WARNING:", "TOP CALLER:", "MUST PRESERVE:",
+    "SIGNATURE:",
+    "CALLERS:",
+    "SIBLING:",
+    "TWINS:",
+    "PROPAGATE:",
+    "CO-CHANGE:",
+    "SCOPE:",
+    "BEHAVIORAL CONTRACT:",
+    "TEST EXPECTS:",
+    "TEST:",
+    "WARNING:",
+    "TOP CALLER:",
+    "MUST PRESERVE:",
     "Run: pytest",
 )
 
@@ -101,7 +131,8 @@ def rich_graph_db(tmp_path: Path) -> tuple[str, str]:
     conn.commit()
     conn.close()
 
-    (tmp_path / "repo" / "src" / "colors.py").write_text(textwrap.dedent("""\
+    (tmp_path / "repo" / "src" / "colors.py").write_text(
+        textwrap.dedent("""\
         def colorize(text, color):
             if os.environ.get('FORCE_COLOR'):
                 return True
@@ -114,15 +145,18 @@ def rich_graph_db(tmp_path: Path) -> tuple[str, str]:
             except ImportError:
                 return text
             return colorama.init() + text
-    """))
+    """)
+    )
 
-    (tmp_path / "repo" / "src" / "render.py").write_text(textwrap.dedent("""\
+    (tmp_path / "repo" / "src" / "render.py").write_text(
+        textwrap.dedent("""\
         from src.colors import colorize
 
         def render(msg):
             result = colorize(msg, 'red')
             print(result)
-    """))
+    """)
+    )
 
     return db_path, repo_root
 
@@ -170,9 +204,7 @@ class TestEvidenceGateRecognition:
             db_path=db_path,
             repo_root=repo_root,
         )
-        assert _has_evidence(output), (
-            f"Caller evidence should trigger the gate. Got: {output!r}"
-        )
+        assert _has_evidence(output), f"Caller evidence should trigger the gate. Got: {output!r}"
 
     def test_empty_function_no_false_positive(self, rich_graph_db):
         """A function not in the graph now gets the G7 always-fire isolation note."""

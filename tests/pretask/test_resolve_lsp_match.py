@@ -16,6 +16,7 @@ dispatch-table invariant. Each test is red on the pre-squash code and green afte
         LSP_SERVERS keys, so the precision pass never silently no-ops on a language
         it claimed to handle.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -56,12 +57,12 @@ def _make_db(path: str) -> None:
         "VALUES (?,?,?,?,?,?,0)",
         [
             (1, "Function", "caller", "app.py", 30, 40),
-            (2, "Function", "helper", "app.py", 10, 20),   # real in-repo callee
+            (2, "Function", "helper", "app.py", 10, 20),  # real in-repo callee
             (3, "Function", "renamed", "app.py", 50, 60),  # the CORRECTED target (#29)
             # a node in app.py with NO end_line, spanning the call site only if the
             # NULL-end_line branch fires (used to prove the window still matches it).
             (4, "Function", "nullspan", "app.py", 70, None),
-            (9, "Function", "thing", "other.py", 5, 8),    # makes other.py "indexed"
+            (9, "Function", "thing", "other.py", 5, 8),  # makes other.py "indexed"
         ],
     )
     conn.execute(
@@ -100,14 +101,20 @@ def _edge_exists(conn) -> bool:
 
 # ─────────────────────────────── item #29 ───────────────────────────────
 
+
 def test_verify_when_lsp_confirms_current_target(db):
     """LSP definition lands inside helper (id 2) at line 15 — the edge's current
     target. Window match → verified (resolution_method 'lsp'), edge kept."""
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
-        conn, edge=_edge(conn), target_rel="app.py", target_line=15,
-        target_name="helper", stats=stats, has_trust_tier=False,
+        conn,
+        edge=_edge(conn),
+        target_rel="app.py",
+        target_line=15,
+        target_name="helper",
+        stats=stats,
+        has_trust_tier=False,
     )
     conn.commit()
     assert out == "verified"
@@ -125,8 +132,13 @@ def test_corrected_target_with_different_name_is_repointed_not_deleted(db):
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
-        conn, edge=_edge(conn), target_rel="app.py", target_line=55,
-        target_name="helper", stats=stats, has_trust_tier=False,
+        conn,
+        edge=_edge(conn),
+        target_rel="app.py",
+        target_line=55,
+        target_name="helper",
+        stats=stats,
+        has_trust_tier=False,
     )
     conn.commit()
     assert out == "corrected", "LSP-corrected (renamed) edge must re-point, not delete"
@@ -144,13 +156,19 @@ def test_name_is_only_a_tiebreaker_inside_window(db):
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
-        conn, edge=_edge(conn), target_rel="app.py", target_line=15,
-        target_name="helper", stats=stats, has_trust_tier=False,
+        conn,
+        edge=_edge(conn),
+        target_rel="app.py",
+        target_line=15,
+        target_name="helper",
+        stats=stats,
+        has_trust_tier=False,
     )
     assert out == "verified"
 
 
 # ─────────────────────────────── item #28 ───────────────────────────────
+
 
 def test_external_definition_never_deletes(db):
     """item #28 RED→GREEN: the LSP resolves the call to an EXTERNAL file (relpath
@@ -160,8 +178,13 @@ def test_external_definition_never_deletes(db):
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
-        conn, edge=_edge(conn), target_rel="../../usr/lib/python3.11/posixpath.py",
-        target_line=120, target_name="join", stats=stats, has_trust_tier=False,
+        conn,
+        edge=_edge(conn),
+        target_rel="../../usr/lib/python3.11/posixpath.py",
+        target_line=120,
+        target_name="join",
+        stats=stats,
+        has_trust_tier=False,
     )
     conn.commit()
     assert out == "skipped"
@@ -175,8 +198,13 @@ def test_absolute_path_target_never_deletes(db):
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
-        conn, edge=_edge(conn), target_rel="C:/Python311/Lib/json/__init__.py",
-        target_line=5, target_name="loads", stats=stats, has_trust_tier=False,
+        conn,
+        edge=_edge(conn),
+        target_rel="C:/Python311/Lib/json/__init__.py",
+        target_line=5,
+        target_name="loads",
+        stats=stats,
+        has_trust_tier=False,
     )
     conn.commit()
     assert out == "skipped"
@@ -191,8 +219,13 @@ def test_not_indexed_file_window_miss_never_deletes(db):
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
-        conn, edge=_edge(conn), target_rel="vendored.py", target_line=99,
-        target_name="helper", stats=stats, has_trust_tier=False,
+        conn,
+        edge=_edge(conn),
+        target_rel="vendored.py",
+        target_line=99,
+        target_name="helper",
+        stats=stats,
+        has_trust_tier=False,
     )
     conn.commit()
     assert out == "skipped"
@@ -207,8 +240,13 @@ def test_indexed_file_no_node_match_is_genuine_fp_delete(db):
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
-        conn, edge=_edge(conn), target_rel="other.py", target_line=999,
-        target_name="ghost", stats=stats, has_trust_tier=False,
+        conn,
+        edge=_edge(conn),
+        target_rel="other.py",
+        target_line=999,
+        target_name="ghost",
+        stats=stats,
+        has_trust_tier=False,
     )
     conn.commit()
     assert out == "deleted"
@@ -223,8 +261,13 @@ def test_null_end_line_node_still_matches_in_window(db):
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
-        conn, edge=_edge(conn), target_rel="app.py", target_line=70,
-        target_name="nullspan", stats=stats, has_trust_tier=False,
+        conn,
+        edge=_edge(conn),
+        target_rel="app.py",
+        target_line=70,
+        target_name="nullspan",
+        stats=stats,
+        has_trust_tier=False,
     )
     conn.commit()
     assert out == "corrected"
@@ -233,6 +276,7 @@ def test_null_end_line_node_still_matches_in_window(db):
 
 
 # ─────────────────────────────── item #30 ───────────────────────────────
+
 
 def test_dispatch_tables_subset_of_servable_extensions():
     """item #30: every extension _LANG_TO_EXT points at must be a key config.LSP_SERVERS
@@ -264,8 +308,15 @@ def test_known_servers_keys_match_lang_to_ext_keys():
 def test_real_languages_still_dispatch_correctly():
     """The supported languages must still resolve name→ext (regression guard)."""
     for name, ext in [
-        ("python", ".py"), ("py", ".py"), ("typescript", ".ts"), ("ts", ".ts"),
-        ("go", ".go"), ("rust", ".rs"), ("rs", ".rs"), ("java", ".java"),
-        ("typescriptreact", ".tsx"), ("javascript", ".js"),
+        ("python", ".py"),
+        ("py", ".py"),
+        ("typescript", ".ts"),
+        ("ts", ".ts"),
+        ("go", ".go"),
+        ("rust", ".rs"),
+        ("rs", ".rs"),
+        ("java", ".java"),
+        ("typescriptreact", ".tsx"),
+        ("javascript", ".js"),
     ]:
         assert _LANG_TO_EXT.get(name) == ext

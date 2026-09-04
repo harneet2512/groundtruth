@@ -10,10 +10,9 @@ import json
 import os
 import sys
 
-from groundtruth.trajectory.state import L5TrajectoryState, IterationBand
+from groundtruth.trajectory.state import L5TrajectoryState
 from groundtruth.trajectory.governor import L5Governor
-from groundtruth.trajectory import hooks
-from groundtruth.trajectory.event_classifier import classify_file_kind, classify_check_kind
+from groundtruth.trajectory.event_classifier import classify_file_kind
 
 
 def replay_trajectory(trajectory_path: str) -> dict:
@@ -37,11 +36,13 @@ def replay_trajectory(trajectory_path: str) -> dict:
         action = entry.get("action", "")
         args = entry.get("args", {})
         if action in ("run", "read", "write", "edit", "finish"):
-            actions.append({
-                "action": action,
-                "path": args.get("path", ""),
-                "command": args.get("command", ""),
-            })
+            actions.append(
+                {
+                    "action": action,
+                    "path": args.get("path", ""),
+                    "command": args.get("command", ""),
+                }
+            )
 
     fires = {}
     all_events = []
@@ -54,20 +55,32 @@ def replay_trajectory(trajectory_path: str) -> dict:
         file_kind = classify_file_kind(path) if path else "UNKNOWN_FILE"
 
         cls_name = {
-            "edit": "FileEditAction", "write": "FileWriteAction",
-            "run": "CmdRunAction", "read": "FileReadAction", "finish": "AgentFinishAction",
+            "edit": "FileEditAction",
+            "write": "FileWriteAction",
+            "run": "CmdRunAction",
+            "read": "FileReadAction",
+            "finish": "AgentFinishAction",
         }.get(act["action"], "Unknown")
 
-        _cls = type(cls_name, (), {
-            "command": command, "path": path, "content": command,
-        })
+        _cls = type(
+            cls_name,
+            (),
+            {
+                "command": command,
+                "path": path,
+                "content": command,
+            },
+        )
         fa = _cls()
 
         _obs_cls = type("Observation", (), {"content": "", "stdout": ""})
         obs_mock = _obs_cls()
 
         decision = gov.goku_check(
-            fa, obs_mock, i, 100,
+            fa,
+            obs_mock,
+            i,
+            100,
             file_path=path or None,
             diff_size=None,
         )
@@ -89,14 +102,18 @@ def replay_trajectory(trajectory_path: str) -> dict:
             hook = decision.hook_name
             fires[hook] = fires.get(hook, 0) + 1
             status = "SUPPRESSED" if decision.suppressed else "EMITTED"
-            print(f"  [{status}] iter={i} hook={hook} reason={decision.suppression_reason or decision.trigger_reason}")
+            print(
+                f"  [{status}] iter={i} hook={hook} reason={decision.suppression_reason or decision.trigger_reason}"
+            )
 
     return {
         "instance_id": instance_id,
         "total_actions": len(actions),
         "fires": fires,
         "total_fires": sum(fires.values()),
-        "total_emitted": sum(1 for e in all_events if e["goku_fired"] and not e.get("goku_suppressed")),
+        "total_emitted": sum(
+            1 for e in all_events if e["goku_fired"] and not e.get("goku_suppressed")
+        ),
         "total_suppressed": sum(1 for e in all_events if e.get("goku_suppressed")),
         "state": {
             "edited_source_files": gov.state.edited_source_files,
@@ -119,6 +136,8 @@ if __name__ == "__main__":
     print()
     print(f"Instance: {result['instance_id']}")
     print(f"Actions: {result['total_actions']}")
-    print(f"Goku fires: {result['total_fires']} (emitted={result['total_emitted']}, suppressed={result['total_suppressed']})")
+    print(
+        f"Goku fires: {result['total_fires']} (emitted={result['total_emitted']}, suppressed={result['total_suppressed']})"
+    )
     print(f"Fires by hook: {json.dumps(result['fires'], indent=2)}")
     print(f"State: {json.dumps(result['state'], indent=2)}")

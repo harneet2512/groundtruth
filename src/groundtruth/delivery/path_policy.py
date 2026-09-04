@@ -1,22 +1,46 @@
 """Centralized delivery path policy — vendored/generated/minified exclusions."""
+
 from __future__ import annotations
 
 import os
 
 _VENDOR_DIR_MARKERS: tuple[str, ...] = (
-    "/extern/", "/externals/", "/vendor/", "/vendored/", "/third_party/",
-    "/thirdparty/", "/node_modules/", "/bower_components/", "/dist/",
-    "/_generated/", "/generated/", "/site-packages/",
-    "/static/", "/assets/",
+    "/extern/",
+    "/externals/",
+    "/vendor/",
+    "/vendored/",
+    "/third_party/",
+    "/thirdparty/",
+    "/node_modules/",
+    "/bower_components/",
+    "/dist/",
+    "/_generated/",
+    "/generated/",
+    "/site-packages/",
+    "/static/",
+    "/assets/",
 )
 _MINIFIED_SUFFIXES: tuple[str, ...] = (".min.js", ".min.css", ".min.mjs", ".min.map")
 _GENERATED_FILE_MARKERS: tuple[str, ...] = (
-    "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
-    ".generated.", "/generated/", "_generated.go", ".g.dart", ".freezed.dart",
+    "zz_generated",
+    ".pb.go",
+    ".pb.gw.go",
+    "_pb2.py",
+    "_pb2_grpc.py",
+    ".generated.",
+    "/generated/",
+    "_generated.go",
+    ".g.dart",
+    ".freezed.dart",
 )
 # post_view legacy segment patterns (subset; path_policy is superset)
 _VENDOR_SEGMENT_PATTERNS: tuple[str, ...] = (
-    "static/", "vendor/", "node_modules/", "dist/", ".min.", "assets/",
+    "static/",
+    "vendor/",
+    "node_modules/",
+    "dist/",
+    ".min.",
+    "assets/",
 )
 
 
@@ -53,8 +77,14 @@ def is_vendored_path(fp: str) -> bool:
 # file IN it is codegen. These suffix markers are: protobuf (.pb.go/_pb2.py/...),
 # kubernetes deepcopy (zz_generated), dart codegen (.g.dart/.freezed.dart).
 _GENERATED_RANK_DEMOTE_SUFFIXES: tuple[str, ...] = (
-    "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
-    "_generated.go", ".g.dart", ".freezed.dart",
+    "zz_generated",
+    ".pb.go",
+    ".pb.gw.go",
+    "_pb2.py",
+    "_pb2_grpc.py",
+    "_generated.go",
+    ".g.dart",
+    ".freezed.dart",
 )
 
 
@@ -79,19 +109,56 @@ def is_generated(fp: str) -> bool:
 # `contest/`/`latest/` are NOT test dirs (the load-bearing invariant the parity
 # test pins). gt_mini_patch imports this with a local fallback (in-container the
 # groundtruth import may fail — same pattern as the fact set).
-_TEST_DIR_SEGMENTS: frozenset[str] = frozenset({
-    "test", "tests", "__tests__", "__test__", "spec", "specs", "e2e", "testing",
-})
-_DEMO_NONSOURCE_DIR_SEGMENTS: frozenset[str] = frozenset({
-    "examples", "example", "demo", "demos", "sample", "samples", "fixtures",
-    "fixture", "docs", "doc", "docs_src", "doc_src", "documentation",
-    "tutorial", "tutorials", "benchmark", "benchmarks", "benches", "bench", "vendor",
-    "node_modules", "dist", "build",
-    # fuzz / property-based / mutation test dirs (mirrors walker.go nonSourceDirSegments —
-    # DUPLICATION TRAP: keep these two sets in sync; the wasmi leak was fuzz/ missing here)
-    "fuzz", "fuzzing", "fuzz_targets", "corpus", "testcases",
-    "conformance", "compat", "integration_tests", "e2e_tests",
-})
+_TEST_DIR_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "test",
+        "tests",
+        "__tests__",
+        "__test__",
+        "spec",
+        "specs",
+        "e2e",
+        "testing",
+    }
+)
+_DEMO_NONSOURCE_DIR_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "examples",
+        "example",
+        "demo",
+        "demos",
+        "sample",
+        "samples",
+        "fixtures",
+        "fixture",
+        "docs",
+        "doc",
+        "docs_src",
+        "doc_src",
+        "documentation",
+        "tutorial",
+        "tutorials",
+        "benchmark",
+        "benchmarks",
+        "benches",
+        "bench",
+        "vendor",
+        "node_modules",
+        "dist",
+        "build",
+        # fuzz / property-based / mutation test dirs (mirrors walker.go nonSourceDirSegments —
+        # DUPLICATION TRAP: keep these two sets in sync; the wasmi leak was fuzz/ missing here)
+        "fuzz",
+        "fuzzing",
+        "fuzz_targets",
+        "corpus",
+        "testcases",
+        "conformance",
+        "compat",
+        "integration_tests",
+        "e2e_tests",
+    }
+)
 
 
 def _path_segments(path: str) -> tuple[list[str], str]:
@@ -111,9 +178,7 @@ def is_test_path(path: str) -> bool:
         return False
     if any(s in _TEST_DIR_SEGMENTS for s in segs[:-1]):
         return True
-    return (
-        bn.startswith("test_") or "_test." in bn or ".test." in bn or ".spec." in bn
-    )
+    return bn.startswith("test_") or "_test." in bn or ".test." in bn or ".spec." in bn
 
 
 def is_test_or_demo(path: str) -> bool:
@@ -150,6 +215,7 @@ def test_tooling_roots(graph_db: str) -> frozenset[str]:
     must be tests; ``require``→``assert`` (both non-test, same vendored tree) does NOT
     disqualify the ``internal/testify`` root because that importer is INSIDE it."""
     import sqlite3
+
     pairs: list[tuple[str, str]] = []
     try:
         conn = sqlite3.connect(graph_db)
@@ -193,8 +259,7 @@ def test_tooling_roots(graph_db: str) -> frozenset[str]:
             if d in roots:
                 continue
             if imps and all(
-                is_test_path(i) or any(i == r or i.startswith(r + "/") for r in roots)
-                for i in imps
+                is_test_path(i) or any(i == r or i.startswith(r + "/") for r in roots) for i in imps
             ):
                 roots.add(d)
                 changed = True

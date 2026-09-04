@@ -22,9 +22,7 @@ import pytest
 # Load the module by path (it lives under scripts/verify, not an importable pkg).
 # --------------------------------------------------------------------------- #
 
-_MODULE_PATH = (
-    Path(__file__).resolve().parents[2] / "scripts" / "verify" / "legitimacy.py"
-)
+_MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "verify" / "legitimacy.py"
 _spec = importlib.util.spec_from_file_location("gt_legitimacy", _MODULE_PATH)
 assert _spec is not None and _spec.loader is not None
 legitimacy = importlib.util.module_from_spec(_spec)
@@ -53,15 +51,11 @@ def test_stale_graph_db_flagged(tmp_path, forbid_prebuilt):
     stale = job_start - 3600.0  # one hour before the job started
     _plant(tmp_path / "work" / "graph.db", "x", stale)
 
-    found = legitimacy.scan_prebuilt_artifacts(
-        "owner__repo-123", str(tmp_path / "work"), job_start
-    )
+    found = legitimacy.scan_prebuilt_artifacts("owner__repo-123", str(tmp_path / "work"), job_start)
     assert any("prebuilt graph.db older than job start" in m for m in found)
 
     with pytest.raises(RuntimeError, match="illegitimate_prebuilt_artifact_detected"):
-        legitimacy.assert_legitimate(
-            "owner__repo-123", str(tmp_path / "work"), job_start
-        )
+        legitimacy.assert_legitimate("owner__repo-123", str(tmp_path / "work"), job_start)
 
 
 def test_stale_brief_and_localization_flagged(tmp_path, forbid_prebuilt):
@@ -70,9 +64,7 @@ def test_stale_brief_and_localization_flagged(tmp_path, forbid_prebuilt):
     _plant(tmp_path / "gt_brief.json", "{}", stale)
     _plant(tmp_path / "gt_localization.json", "{}", stale)
 
-    found = legitimacy.scan_prebuilt_artifacts(
-        "owner__repo-123", str(tmp_path), job_start
-    )
+    found = legitimacy.scan_prebuilt_artifacts("owner__repo-123", str(tmp_path), job_start)
     assert any("gt_brief.json" in m for m in found)
     assert any("gt_localization.json" in m for m in found)
 
@@ -95,9 +87,7 @@ def test_fresh_graph_db_not_flagged(tmp_path, forbid_prebuilt):
     fresh = time.time()  # graph created now, AFTER job start
     _plant(tmp_path / "graph.db", "x", fresh)
 
-    found = legitimacy.scan_prebuilt_artifacts(
-        "owner__repo-123", str(tmp_path), job_start
-    )
+    found = legitimacy.scan_prebuilt_artifacts("owner__repo-123", str(tmp_path), job_start)
     assert found == []
     # Must not raise.
     legitimacy.assert_legitimate("owner__repo-123", str(tmp_path), job_start)
@@ -108,9 +98,7 @@ def test_flag_ignored_when_env_not_set(tmp_path, monkeypatch):
     job_start = time.time()
     _plant(tmp_path / "graph.db", "x", job_start - 3600.0)
     # scan still finds it, but assert is a no-op without the env flag.
-    found = legitimacy.scan_prebuilt_artifacts(
-        "owner__repo-123", str(tmp_path), job_start
-    )
+    found = legitimacy.scan_prebuilt_artifacts("owner__repo-123", str(tmp_path), job_start)
     assert found  # detection works
     legitimacy.assert_legitimate("owner__repo-123", str(tmp_path), job_start)  # no raise
 

@@ -1,4 +1,5 @@
 """URL parsing and validation utilities."""
+
 from __future__ import annotations
 
 import re

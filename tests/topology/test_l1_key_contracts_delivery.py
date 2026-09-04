@@ -8,6 +8,7 @@ Evidence from fresh canary run 26532251352:
 - beets: contracts=0 (Pipeline() has no qualifying properties)
 - loguru: contracts=0 (info() has no qualifying properties)
 """
+
 from __future__ import annotations
 
 import os
@@ -147,8 +148,9 @@ def simulate_l1_key_contracts_query(db_path: str, file_path: str) -> list[str]:
     return contract_lines
 
 
-def simulate_l1_extra_with_marker(contract_lines: list[str], plan_lines: list[str],
-                                   edit_target: bool) -> str:
+def simulate_l1_extra_with_marker(
+    contract_lines: list[str], plan_lines: list[str], edit_target: bool
+) -> str:
     """Simulate the _l1_extra construction WITH the [GT KEY CONTRACTS] marker fix."""
     l1_extra = ""
     if edit_target:
@@ -176,7 +178,9 @@ class TestKeyContractsMarkerPresent:
             assert len(contract_lines) > 0, "Expected non-empty contract_lines from properties"
 
             l1_extra = simulate_l1_extra_with_marker(
-                contract_lines, ["  Key function: check() in balance.py"], edit_target=True,
+                contract_lines,
+                ["  Key function: check() in balance.py"],
+                edit_target=True,
             )
             assert "[GT KEY CONTRACTS]" in l1_extra, (
                 f"BUG-002: [GT KEY CONTRACTS] marker missing despite non-empty contracts. "
@@ -193,7 +197,8 @@ class TestKeyContractsMarkerPresent:
             assert len(contract_lines) == 0, "Expected empty contract_lines"
 
             l1_extra = simulate_l1_extra_with_marker(
-                contract_lines, ["  beets/util/pipeline.py: key functions = run_parallel"],
+                contract_lines,
+                ["  beets/util/pipeline.py: key functions = run_parallel"],
                 edit_target=False,
             )
             assert "[GT KEY CONTRACTS]" not in l1_extra, (
@@ -242,15 +247,29 @@ class TestFreshArtifactEvidence:
     """Check fresh run logs to verify contracts count."""
 
     BEANCOUNT_LOG = os.path.join(
-        os.path.dirname(__file__), "..", "..", "runs", "fresh_canary",
-        "canary-v2_live-beancount__beancount-931", "gt_debug", "full_run.log",
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "runs",
+        "fresh_canary",
+        "canary-v2_live-beancount__beancount-931",
+        "gt_debug",
+        "full_run.log",
     )
 
     @pytest.mark.skipif(
-        not os.path.isfile(os.path.join(
-            os.path.dirname(__file__), "..", "..", "runs", "fresh_canary",
-            "canary-v2_live-beancount__beancount-931", "gt_debug", "full_run.log",
-        )),
+        not os.path.isfile(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                "..",
+                "runs",
+                "fresh_canary",
+                "canary-v2_live-beancount__beancount-931",
+                "gt_debug",
+                "full_run.log",
+            )
+        ),
         reason="Beancount fresh artifact not available",
     )
     def test_beancount_has_nonzero_contracts(self):
@@ -260,10 +279,8 @@ class TestFreshArtifactEvidence:
                 if "l1_enhanced" in line and "contracts=" in line:
                     # Extract contracts count
                     idx = line.index("contracts=")
-                    count_str = line[idx + 10:].strip().split()[0].split(",")[0]
+                    count_str = line[idx + 10 :].strip().split()[0].split(",")[0]
                     count = int(count_str)
-                    assert count > 0, (
-                        f"Beancount must have contracts>0. Got: {line.strip()}"
-                    )
+                    assert count > 0, f"Beancount must have contracts>0. Got: {line.strip()}"
                     return
         pytest.fail("No l1_enhanced log line found in beancount full_run.log")

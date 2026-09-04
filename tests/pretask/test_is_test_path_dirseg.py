@@ -3,6 +3,7 @@ just the basename. The csstree witness (2026-06-15) leaked `test/lexer.js` into 
 brief's "Also changes:" cochange line because the old `"/test/" in p` substring required
 a LEADING slash and a relative top-level `test/lexer.js` (basename `lexer.js`, no test
 marker) slipped through. These paths are swap-invariant: never surfaced to the agent."""
+
 from groundtruth.pretask.v1r_brief import _is_test_path
 
 

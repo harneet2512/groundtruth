@@ -13,6 +13,7 @@ These tests catch the bug class that produced "raw_len=243" and
 
 The bundle itself is the in-repo build: scripts/swebench/gt_pretask_brief_v1r.py
 """
+
 from __future__ import annotations
 
 import os
@@ -48,6 +49,7 @@ def _gt_index_binary() -> Path | None:
 def _has_sentence_transformers() -> bool:
     try:
         import importlib.util
+
         return importlib.util.find_spec("sentence_transformers") is not None
     except Exception:
         return False
@@ -72,23 +74,30 @@ def test_v1r_bundle_empty_db_returns_zero(tmp_path):
 
     proc = subprocess.run(
         [
-            sys.executable, str(BUNDLE),
-            "--db", str(tmp_path / "does-not-exist.db"),
-            "--root", str(FIXTURE_REPO),
-            "--issue-text-file", str(issue_file),
-            "--telemetry-out", str(telemetry),
-            "--max-files", "5",
-            "--max-funcs-per-file", "3",
-            "--task-id", "smoke-test",
+            sys.executable,
+            str(BUNDLE),
+            "--db",
+            str(tmp_path / "does-not-exist.db"),
+            "--root",
+            str(FIXTURE_REPO),
+            "--issue-text-file",
+            str(issue_file),
+            "--telemetry-out",
+            str(telemetry),
+            "--max-files",
+            "5",
+            "--max-funcs-per-file",
+            "3",
+            "--task-id",
+            "smoke-test",
         ],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
-    assert proc.returncode == 0, (
-        f"bundle exit {proc.returncode}; stderr=\n{proc.stderr}"
-    )
+    assert proc.returncode == 0, f"bundle exit {proc.returncode}; stderr=\n{proc.stderr}"
     assert proc.stdout == "", (
-        f"expected empty stdout for missing db, got {len(proc.stdout)} chars: "
-        f"{proc.stdout[:200]!r}"
+        f"expected empty stdout for missing db, got {len(proc.stdout)} chars: {proc.stdout[:200]!r}"
     )
 
 
@@ -99,14 +108,22 @@ def test_v1r_bundle_accepts_unknown_args(tmp_path):
 
     proc = subprocess.run(
         [
-            sys.executable, str(BUNDLE),
-            "--db", str(tmp_path / "missing.db"),
-            "--root", str(FIXTURE_REPO),
-            "--issue-text-file", str(issue_file),
-            "--task-id", "smoke",
-            "--some-future-flag", "xyz",
+            sys.executable,
+            str(BUNDLE),
+            "--db",
+            str(tmp_path / "missing.db"),
+            "--root",
+            str(FIXTURE_REPO),
+            "--issue-text-file",
+            str(issue_file),
+            "--task-id",
+            "smoke",
+            "--some-future-flag",
+            "xyz",
         ],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert proc.returncode == 0, (
         f"bundle should accept unknown args via parse_known_args; "
@@ -134,7 +151,9 @@ def test_v1r_bundle_non_empty_brief_on_fixture(tmp_path):
     db_path = tmp_path / "graph.db"
     proc = subprocess.run(
         [str(binary), "-root", str(FIXTURE_REPO), "-output", str(db_path)],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     assert proc.returncode == 0, f"gt-index failed: {proc.stderr}"
     assert db_path.is_file() and db_path.stat().st_size > 1024
@@ -150,16 +169,26 @@ def test_v1r_bundle_non_empty_brief_on_fixture(tmp_path):
 
     proc = subprocess.run(
         [
-            sys.executable, str(BUNDLE),
-            "--db", str(db_path),
-            "--root", str(FIXTURE_REPO),
-            "--issue-text-file", str(issue_file),
-            "--telemetry-out", str(telemetry),
-            "--max-files", "5",
-            "--max-funcs-per-file", "3",
-            "--task-id", "fixture-test",
+            sys.executable,
+            str(BUNDLE),
+            "--db",
+            str(db_path),
+            "--root",
+            str(FIXTURE_REPO),
+            "--issue-text-file",
+            str(issue_file),
+            "--telemetry-out",
+            str(telemetry),
+            "--max-files",
+            "5",
+            "--max-funcs-per-file",
+            "3",
+            "--task-id",
+            "fixture-test",
         ],
-        capture_output=True, text=True, timeout=180,
+        capture_output=True,
+        text=True,
+        timeout=180,
     )
     assert proc.returncode == 0, f"bundle failed: stderr={proc.stderr}"
 
@@ -169,8 +198,6 @@ def test_v1r_bundle_non_empty_brief_on_fixture(tmp_path):
             "bundle produced empty output on fixture — fixture too small to "
             "trigger v7.4 retrieval. Test passes structural launch."
         )
-    assert out.startswith("<gt-task-brief>"), (
-        f"brief missing opening tag, got: {out[:200]!r}"
-    )
+    assert out.startswith("<gt-task-brief>"), f"brief missing opening tag, got: {out[:200]!r}"
     assert "</gt-task-brief>" in out
     assert "1." in out, "expected numbered entry '1.' in brief"

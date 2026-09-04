@@ -2,12 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
-from unittest.mock import MagicMock
-
-import pytest
 
 from groundtruth.trajectory.state import (
     L5TrajectoryState,
@@ -29,12 +23,10 @@ from groundtruth.trajectory.parsers import (
     GenericTracebackParser,
     TscParser,
     MypyParser,
-    parse_failures,
 )
 from groundtruth.trajectory.hooks import (
     hook_no_durable_source_progress,
     hook_premature_commitment,
-    hook_patch_hypothesis,
     hook_hypothesis_falsified,
     hook_same_failure_persisted,
     hook_unsafe_finish,

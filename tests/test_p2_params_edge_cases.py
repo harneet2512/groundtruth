@@ -90,9 +90,7 @@ def _merge_go_params(raw_params: list[str]) -> list[str]:
     return merged
 
 
-def _parse_signature_params(
-    signature: str, language: str
-) -> list[dict] | None:
+def _parse_signature_params(signature: str, language: str) -> list[dict] | None:
     """Parse function signature into structured params per the P2 spec."""
     if not signature:
         return None
@@ -181,6 +179,7 @@ def _parse_signature_params(
 
 # ── Tests ────────────────────────────────────────────────────────────────
 
+
 def test_zero_params():
     """Edge case 1: Function with 0 parameters should emit nothing."""
     sig = "def empty()"
@@ -208,13 +207,11 @@ def test_fifteen_params_capped_at_ten():
     result = _parse_signature_params(sig, "python")
 
     assert result is not None, "Expected non-None for 15-param function"
-    assert len(result) == MAX_PARAMS, (
-        f"Expected {MAX_PARAMS} params after cap, got {len(result)}"
-    )
+    assert len(result) == MAX_PARAMS, f"Expected {MAX_PARAMS} params after cap, got {len(result)}"
     # Verify first 10 are present, last 5 are dropped
     for i in range(10):
-        assert result[i]["name"] == f"p{i+1}", (
-            f"Param {i} should be p{i+1}, got {result[i]['name']}"
+        assert result[i]["name"] == f"p{i + 1}", (
+            f"Param {i} should be p{i + 1}, got {result[i]['name']}"
         )
     print("  PASS: test_fifteen_params_capped_at_ten")
 
@@ -251,9 +248,13 @@ def test_go_style_params():
     assert result is not None, "Expected non-None for Go params"
     assert len(result) == 2, f"Expected 2 params, got {len(result)}"
     assert result[0]["name"] == "x", f"First param name should be 'x', got '{result[0]['name']}'"
-    assert result[0]["type"] == "int", f"First param type should be 'int', got '{result[0]['type']}'"
+    assert result[0]["type"] == "int", (
+        f"First param type should be 'int', got '{result[0]['type']}'"
+    )
     assert result[1]["name"] == "y", f"Second param name should be 'y', got '{result[1]['name']}'"
-    assert result[1]["type"] == "string", f"Second param type should be 'string', got '{result[1]['type']}'"
+    assert result[1]["type"] == "string", (
+        f"Second param type should be 'string', got '{result[1]['type']}'"
+    )
     # Go params have no defaults -- all required
     assert result[0]["required"] is True
     assert result[1]["required"] is True

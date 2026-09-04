@@ -87,17 +87,17 @@ twin_is_test_or_demo = _load_twin_predicate()
 # or "latest" dir must never be filtered as a test dir.
 _CASES = [
     # path                          should_be   brief_drifts
-    ("test/lexer.js",               True,       False),  # top-level test dir (csstree)
-    ("__tests__/awilix.test.ts",    True,       False),  # JS test dir + .test. marker
+    ("test/lexer.js", True, False),  # top-level test dir (csstree)
+    ("__tests__/awilix.test.ts", True, False),  # JS test dir + .test. marker
     # de-dup'd 2026-06-15: brief now delegates to path_policy.is_test_or_demo, so these
     # DEMO-dir rows are CAUGHT (was the fastapi docs_src candidate leak). drift -> False.
-    ("docs_src/tutorial001.py",     True,       False),  # DEMO dir -> brief now catches
-    ("examples/demo.js",            True,       False),  # DEMO dir -> brief now catches
-    ("lib/utils/List.js",           False,      False),  # real source -> kept
-    ("src/container.ts",            False,      False),  # real source -> kept
-    ("src/test_helpers/x.go",       False,      False),  # 'test_helpers' is NOT a test dir seg
-    ("contest/a.py",                False,      False),  # substring 'test' != test dir seg
-    ("latest/b.py",                 False,      False),  # substring 'test' != test dir seg
+    ("docs_src/tutorial001.py", True, False),  # DEMO dir -> brief now catches
+    ("examples/demo.js", True, False),  # DEMO dir -> brief now catches
+    ("lib/utils/List.js", False, False),  # real source -> kept
+    ("src/container.ts", False, False),  # real source -> kept
+    ("src/test_helpers/x.go", False, False),  # 'test_helpers' is NOT a test dir seg
+    ("contest/a.py", False, False),  # substring 'test' != test dir seg
+    ("latest/b.py", False, False),  # substring 'test' != test dir seg
 ]
 
 

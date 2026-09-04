@@ -17,9 +17,9 @@ canonical schema from CLAUDE.md (nodes + edges with confidence + resolution_meth
 No Live-Lite-specific data, no real repo, no LLM, no network — the suite is
 repo-agnostic and language-agnostic by construction.
 """
+
 from __future__ import annotations
 
-import importlib
 import sqlite3
 import sys
 from pathlib import Path
@@ -46,6 +46,7 @@ import gt_track4_pre_run  # type: ignore[import-not-found]  # noqa: E402
 # ---------------------------------------------------------------------------
 # Synthetic 5-file graph.db fixture
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def synthetic_graph_db(tmp_path: Path) -> str:
@@ -104,15 +105,141 @@ def synthetic_graph_db(tmp_path: Path) -> str:
     )
     nodes = [
         # id, label,   name,             qualified_name,            file,                start,end, sig,                          ret,    exp,test,lang,    parent
-        (1, "Function", "parse_url",      "urls.parse_url",          "src/urls.py",       10, 30,  "def parse_url(s)",            "str",   1, 0, "python", None),
-        (2, "Function", "normalize_host", "urls.normalize_host",     "src/urls.py",       40, 60,  "def normalize_host(h)",       "str",   1, 0, "python", None),
-        (3, "Function", "validate_input", "utils.validate_input",    "src/utils.py",       5, 20,  "def validate_input(x)",       "bool",  1, 0, "python", None),
-        (4, "Function", "format_value",   "utils.format_value",      "src/utils.py",      30, 50,  "def format_value(x)",         "str",   1, 0, "python", None),
-        (5, "Class",    "Network",        "net.Network",             "src/net.py",         1, 100, None,                          None,    1, 0, "python", None),
-        (6, "Method",   "add",            "net.Network.add",         "src/net.py",        50, 70,  "def add(self, host)",         "None",  1, 0, "python", 5),
-        (7, "Function", "render",         "render.render",           "src/render.py",      1, 30,  "def render(t)",               "str",   1, 0, "python", None),
-        (8, "Function", "build_page",     "render.build_page",       "src/render.py",     35, 70,  "def build_page(items)",       "str",   1, 0, "python", None),
-        (9, "Function", "test_parse_url", "tests.test_parse_url",    "tests/test_urls.py", 1, 15,  None,                          None,    0, 1, "python", None),
+        (
+            1,
+            "Function",
+            "parse_url",
+            "urls.parse_url",
+            "src/urls.py",
+            10,
+            30,
+            "def parse_url(s)",
+            "str",
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            2,
+            "Function",
+            "normalize_host",
+            "urls.normalize_host",
+            "src/urls.py",
+            40,
+            60,
+            "def normalize_host(h)",
+            "str",
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            3,
+            "Function",
+            "validate_input",
+            "utils.validate_input",
+            "src/utils.py",
+            5,
+            20,
+            "def validate_input(x)",
+            "bool",
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            4,
+            "Function",
+            "format_value",
+            "utils.format_value",
+            "src/utils.py",
+            30,
+            50,
+            "def format_value(x)",
+            "str",
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            5,
+            "Class",
+            "Network",
+            "net.Network",
+            "src/net.py",
+            1,
+            100,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            6,
+            "Method",
+            "add",
+            "net.Network.add",
+            "src/net.py",
+            50,
+            70,
+            "def add(self, host)",
+            "None",
+            1,
+            0,
+            "python",
+            5,
+        ),
+        (
+            7,
+            "Function",
+            "render",
+            "render.render",
+            "src/render.py",
+            1,
+            30,
+            "def render(t)",
+            "str",
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            8,
+            "Function",
+            "build_page",
+            "render.build_page",
+            "src/render.py",
+            35,
+            70,
+            "def build_page(items)",
+            "str",
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            9,
+            "Function",
+            "test_parse_url",
+            "tests.test_parse_url",
+            "tests/test_urls.py",
+            1,
+            15,
+            None,
+            None,
+            0,
+            1,
+            "python",
+            None,
+        ),
     ]
     conn.executemany(
         "INSERT INTO nodes (id, label, name, qualified_name, file_path, "
@@ -122,14 +249,14 @@ def synthetic_graph_db(tmp_path: Path) -> str:
     )
     # (source_id, target_id, source_line, source_file, resolution_method, confidence)
     edges = [
-        (7, 1, 12, "src/render.py",       "import",     1.00),  # render -> parse_url
-        (7, 3, 14, "src/render.py",       "import",     1.00),  # render -> validate_input
-        (6, 1, 55, "src/net.py",          "import",     0.90),  # Network.add -> parse_url
-        (6, 2, 60, "src/net.py",          "import",     1.00),  # Network.add -> normalize_host
-        (9, 1,  5, "tests/test_urls.py",  "import",     0.95),  # test_parse_url -> parse_url
-        (8, 7, 40, "src/render.py",       "same_file",  1.00),  # build_page -> render
+        (7, 1, 12, "src/render.py", "import", 1.00),  # render -> parse_url
+        (7, 3, 14, "src/render.py", "import", 1.00),  # render -> validate_input
+        (6, 1, 55, "src/net.py", "import", 0.90),  # Network.add -> parse_url
+        (6, 2, 60, "src/net.py", "import", 1.00),  # Network.add -> normalize_host
+        (9, 1, 5, "tests/test_urls.py", "import", 0.95),  # test_parse_url -> parse_url
+        (8, 7, 40, "src/render.py", "same_file", 1.00),  # build_page -> render
         # Poison pill: BELOW MIN_CONFIDENCE — must be filtered in caller/test queries.
-        (4, 3, 35, "src/utils.py",        "name_match", 0.20),  # format_value -> validate_input
+        (4, 3, 35, "src/utils.py", "name_match", 0.20),  # format_value -> validate_input
     ]
     conn.executemany(
         "INSERT INTO edges (source_id, target_id, type, source_line, "
@@ -146,21 +273,16 @@ def synthetic_graph_db(tmp_path: Path) -> str:
 # extract_identifiers_from_issue
 # ---------------------------------------------------------------------------
 
+
 class TestExtractIdentifiers:
     def test_extract_zero_ids(self) -> None:
         """Pure prose with no code-shaped tokens -> 0 identifiers."""
-        ids = gt_intel.extract_identifiers_from_issue(
-            "the layout breaks on small screens"
-        )
-        assert ids == [], (
-            f"expected zero IDs from pure prose, got {ids!r}"
-        )
+        ids = gt_intel.extract_identifiers_from_issue("the layout breaks on small screens")
+        assert ids == [], f"expected zero IDs from pure prose, got {ids!r}"
 
     def test_extract_one_id(self) -> None:
         """A single snake_case identifier in plain text -> >=1 ID containing it."""
-        ids = gt_intel.extract_identifiers_from_issue(
-            "Bug in set_snapshots when called twice."
-        )
+        ids = gt_intel.extract_identifiers_from_issue("Bug in set_snapshots when called twice.")
         assert len(ids) >= 1, f"expected >=1 ID, got {ids!r}"
         assert "set_snapshots" in ids, f"missing set_snapshots in {ids!r}"
 
@@ -184,21 +306,19 @@ class TestExtractIdentifiers:
           - Case is preserved (CamelCase stays CamelCase).
         """
         ids = gt_intel.extract_identifiers_from_issue(
-            "Go HandleRequest panics; Rust mod::parse_url returns Err; "
-            "Python do_thing raises."
+            "Go HandleRequest panics; Rust mod::parse_url returns Err; Python do_thing raises."
         )
         assert "HandleRequest" in ids, f"Go CamelCase missing in {ids!r}"
         assert "parse_url" in ids, f"Rust snake_case tail missing in {ids!r}"
         assert "do_thing" in ids, f"Python snake_case missing in {ids!r}"
         # Case preservation:
-        assert "handlerequest" not in ids, (
-            f"case was lowered for Go ident in {ids!r}"
-        )
+        assert "handlerequest" not in ids, f"case was lowered for Go ident in {ids!r}"
 
 
 # ---------------------------------------------------------------------------
 # generate_enhanced_briefing  (against the synthetic graph.db)
 # ---------------------------------------------------------------------------
+
 
 class TestEnhancedBriefing:
     def test_brief_structure(self, synthetic_graph_db: str) -> None:
@@ -217,21 +337,20 @@ class TestEnhancedBriefing:
         conn = sqlite3.connect(synthetic_graph_db)
         try:
             out = gt_intel.generate_enhanced_briefing(
-                conn, str(_REPO_ROOT), ids, max_lines=8,
+                conn,
+                str(_REPO_ROOT),
+                ids,
+                max_lines=8,
             )
         finally:
             conn.close()
 
         assert out, "brief was empty"
-        assert "<gt-evidence>" in out, (
-            f"missing <gt-evidence> wrapper in:\n{out}"
-        )
+        assert "<gt-evidence>" in out, f"missing <gt-evidence> wrapper in:\n{out}"
         labels = list(gt_intel.TAXONOMY_LABELS.values())
         present = [lbl for lbl in labels if lbl in out]
         assert present, (
-            f"no TAXONOMY_LABELS tag found.\n"
-            f"expected one of {labels}\n"
-            f"got brief:\n{out}"
+            f"no TAXONOMY_LABELS tag found.\nexpected one of {labels}\ngot brief:\n{out}"
         )
 
     def test_brief_zero_id_falls_back_to_orientation(self, synthetic_graph_db: str) -> None:
@@ -248,15 +367,16 @@ class TestEnhancedBriefing:
         conn = sqlite3.connect(synthetic_graph_db)
         try:
             out = gt_intel.generate_enhanced_briefing(
-                conn, str(_REPO_ROOT), [], max_lines=8,
+                conn,
+                str(_REPO_ROOT),
+                [],
+                max_lines=8,
             )
         finally:
             conn.close()
 
         assert "<gt-evidence>" in out, f"missing wrapper:\n{out}"
-        labels_present = [
-            lbl for lbl in gt_intel.TAXONOMY_LABELS.values() if lbl in out
-        ]
+        labels_present = [lbl for lbl in gt_intel.TAXONOMY_LABELS.values() if lbl in out]
         assert not labels_present, (
             f"zero-ID brief should not contain per-task family labels, found: "
             f"{labels_present}\nbrief:\n{out}"
@@ -275,6 +395,7 @@ class TestEnhancedBriefing:
 # ---------------------------------------------------------------------------
 # MIN_CONFIDENCE filtering
 # ---------------------------------------------------------------------------
+
 
 class TestConfidenceFilter:
     def test_min_confidence_constant(self) -> None:
@@ -303,14 +424,14 @@ class TestConfidenceFilter:
         # NOTE: get_callers also filters on source_file != target_file, so
         # this is a belt-and-suspenders check on the confidence gate.
         assert "format_value" not in caller_names, (
-            f"low-confidence (0.20) edge leaked past MIN_CONFIDENCE filter: "
-            f"{caller_names!r}"
+            f"low-confidence (0.20) edge leaked past MIN_CONFIDENCE filter: {caller_names!r}"
         )
 
 
 # ---------------------------------------------------------------------------
 # compute_brief routing (L1 -> L2)
 # ---------------------------------------------------------------------------
+
 
 class TestComputeBriefRouting:
     """Verify which layer fires given an issue's identifier extraction outcome.
@@ -337,11 +458,13 @@ class TestComputeBriefRouting:
             return "<gt-task-brief>\nL2 STUB\n</gt-task-brief>"
 
         monkeypatch.setattr(
-            gt_track4_pre_run, "_import_gt_intel",
+            gt_track4_pre_run,
+            "_import_gt_intel",
             lambda: (fake_extract, fake_briefing),
         )
         monkeypatch.setattr(
-            gt_track4_pre_run, "_import_l2_fallback",
+            gt_track4_pre_run,
+            "_import_l2_fallback",
             lambda: fake_l2,
         )
 
@@ -353,9 +476,7 @@ class TestComputeBriefRouting:
             graph_db_path=str(tmp_path / "missing.db"),
         )
 
-        assert l1_call_count["n"] == 0, (
-            "L1 briefing was invoked despite zero IDs"
-        )
+        assert l1_call_count["n"] == 0, "L1 briefing was invoked despite zero IDs"
         assert l2_call_count["n"] == 1, (
             f"L2 fallback should fire exactly once, got {l2_call_count['n']}"
         )
@@ -364,7 +485,10 @@ class TestComputeBriefRouting:
         assert "L2 STUB" in brief, f"brief missing L2 content: {brief!r}"
 
     def test_nonzero_id_with_l1_hit_skips_l2(
-        self, monkeypatch, synthetic_graph_db: str, tmp_path: Path,
+        self,
+        monkeypatch,
+        synthetic_graph_db: str,
+        tmp_path: Path,
     ) -> None:
         """Non-empty IDs + L1 produces output -> L2 is a no-op."""
         l1_call_count = {"n": 0}
@@ -383,11 +507,13 @@ class TestComputeBriefRouting:
             return "<gt-task-brief>\nshould-not-fire\n</gt-task-brief>"
 
         monkeypatch.setattr(
-            gt_track4_pre_run, "_import_gt_intel",
+            gt_track4_pre_run,
+            "_import_gt_intel",
             lambda: (fake_extract, fake_briefing),
         )
         monkeypatch.setattr(
-            gt_track4_pre_run, "_import_l2_fallback",
+            gt_track4_pre_run,
+            "_import_l2_fallback",
             lambda: fake_l2,
         )
 
@@ -401,8 +527,7 @@ class TestComputeBriefRouting:
             f"L1 must fire exactly once when ids present, got {l1_call_count['n']}"
         )
         assert l2_call_count["n"] == 0, (
-            f"L2 must NOT fire when L1 already produced output, "
-            f"got {l2_call_count['n']}"
+            f"L2 must NOT fire when L1 already produced output, got {l2_call_count['n']}"
         )
         assert l1_status == "fired", f"l1_status={l1_status!r}"
         assert l2_status == "noop", f"l2_status={l2_status!r}"

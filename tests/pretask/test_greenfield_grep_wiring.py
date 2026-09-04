@@ -19,6 +19,7 @@ so prose length can never crowd them out.
 Synthetic fixtures, three languages (go / rust / ts). No task IDs, no gold
 labels, no benchmark names, no network.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -117,8 +118,7 @@ def go_fixture(tmp_path: Path) -> tuple[str, str]:
         lang="go",
         defining_rel="evaluator/builtins.go",
         defining_src=(
-            'package evaluator\n\nfunc registerBuiltins() {\n'
-            '\tbuiltins["require"] = requireFn\n}\n'
+            'package evaluator\n\nfunc registerBuiltins() {\n\tbuiltins["require"] = requireFn\n}\n'
         ),
         defining_node="registerBuiltins",
         resolved_rel="repl/repl.go",
@@ -142,14 +142,23 @@ def test_priority_token_survives_length_crowding(go_fixture) -> None:
     priority token it goes first and the file seeds."""
     repo, db = go_fixture
     long_words = {
-        "deterministic", "discoverable", "registration", "configuration",
-        "environment", "initialization", "documentation", "compatibility",
-        "consistently", "infrastructure",
+        "deterministic",
+        "discoverable",
+        "registration",
+        "configuration",
+        "environment",
+        "initialization",
+        "documentation",
+        "compatibility",
+        "consistently",
+        "infrastructure",
     }
     conn = sqlite3.connect(db)
     try:
         seeds = _grep_to_seeds(
-            long_words | {"require"}, repo, conn,
+            long_words | {"require"},
+            repo,
+            conn,
             priority_tokens={"require"},
         )
     finally:
@@ -165,9 +174,16 @@ def test_no_priority_tokens_is_a_noop(go_fixture) -> None:
     pre-fix red, and that the fix changes NOTHING for bug-fix issues)."""
     repo, db = go_fixture
     long_words = {
-        "deterministic", "discoverable", "registration", "configuration",
-        "environment", "initialization", "documentation", "compatibility",
-        "consistently", "infrastructure",
+        "deterministic",
+        "discoverable",
+        "registration",
+        "configuration",
+        "environment",
+        "initialization",
+        "documentation",
+        "compatibility",
+        "consistently",
+        "infrastructure",
     }
     conn = sqlite3.connect(db)
     try:
@@ -218,8 +234,7 @@ def test_rust_colon_pair_tail_reaches_candidates(tmp_path: Path) -> None:
         resolved_node="evaluate_script",
         decoy_rel="core/src/prep.rs",
         decoy_src=(
-            "// registration configuration environment initialization\n"
-            "pub fn prep_engine() {}\n"
+            "// registration configuration environment initialization\npub fn prep_engine() {}\n"
         ),
         decoy_node="prep_engine",
     )
@@ -291,9 +306,7 @@ class _FlatEmbedModel:
         return v
 
 
-def test_generate_v1r_brief_renders_greenfield_defining_file(
-    go_fixture, monkeypatch
-) -> None:
+def test_generate_v1r_brief_renders_greenfield_defining_file(go_fixture, monkeypatch) -> None:
     """The defining file must survive through render: candidates -> .files."""
     from groundtruth.pretask import anchor_select as _as
     from groundtruth.pretask import v1r_brief as _v1r
@@ -309,12 +322,13 @@ def test_generate_v1r_brief_renders_greenfield_defining_file(
 
     repo, db = go_fixture
     result = _v1r.generate_v1r_brief(
-        _GO_ISSUE, repo, db, bug_id="unit-greenfield", repo="unit",
+        _GO_ISSUE,
+        repo,
+        db,
+        bug_id="unit-greenfield",
+        repo="unit",
     )
-    norm = [
-        str(getattr(f, "path", f)).replace("\\", "/").lstrip("./")
-        for f in result.files
-    ]
+    norm = [str(getattr(f, "path", f)).replace("\\", "/").lstrip("./") for f in result.files]
     assert any(f.endswith("evaluator/builtins.go") for f in norm), (
         f"greenfield defining file absent from the rendered brief: {norm}"
     )

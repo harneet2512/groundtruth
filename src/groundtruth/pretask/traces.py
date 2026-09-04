@@ -47,9 +47,7 @@ _REGISTRY: tuple[tuple[str, re.Pattern[str], tuple[int, int, int]], ...] = (
     # JavaScript / TypeScript V8 format: ``at fn (path:line:col)``
     (
         "javascript",
-        re.compile(
-            r"at\s+([A-Za-z_$][A-Za-z0-9_$.<>]*)\s+\(([^()\s]+):(\d+):\d+\)"
-        ),
+        re.compile(r"at\s+([A-Za-z_$][A-Za-z0-9_$.<>]*)\s+\(([^()\s]+):(\d+):\d+\)"),
         (2, 3, 1),
     ),
     # Java: ``at pkg.Class.method(File.java:line)``
@@ -73,9 +71,7 @@ _REGISTRY: tuple[tuple[str, re.Pattern[str], tuple[int, int, int]], ...] = (
     # C / C++ gdb: ``#N 0xADDR in func at path:line``
     (
         "c",
-        re.compile(
-            r"#\d+\s+0x[0-9a-fA-F]+\s+in\s+([A-Za-z_][A-Za-z0-9_]*)\s+at\s+([^\s:]+):(\d+)"
-        ),
+        re.compile(r"#\d+\s+0x[0-9a-fA-F]+\s+in\s+([A-Za-z_][A-Za-z0-9_]*)\s+at\s+([^\s:]+):(\d+)"),
         (2, 3, 1),
     ),
 )
@@ -190,7 +186,7 @@ def parse_stack_traces(
         for marker in ("site-packages/", "dist-packages/"):
             idx = norm.find(marker)
             if idx >= 0:
-                f = norm[idx + len(marker):]
+                f = norm[idx + len(marker) :]
                 break
         normalized.append(StackFrame(file=f, line=fr.line, func=fr.func, lang=fr.lang))
     in_repo = [fr for fr in normalized if _is_in_repo(fr.file, repo_root)]

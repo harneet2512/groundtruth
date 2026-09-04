@@ -7,10 +7,8 @@ with unverified patch, and governor integration.
 
 from __future__ import annotations
 
-import os
 from unittest.mock import MagicMock
 
-import pytest
 
 from groundtruth.trajectory.classifier import (
     VerificationTarget,
@@ -28,36 +26,38 @@ from groundtruth.trajectory.state import L5TrajectoryState
 
 
 class TestClassifyVerificationTargeting:
-
     def test_broad_pytest_bare(self):
-        assert classify_verification_targeting(
-            "pytest", ["src/auth.py"]
-        ) == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        assert (
+            classify_verification_targeting("pytest", ["src/auth.py"])
+            == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        )
 
     def test_broad_pytest_tests_dir(self):
-        assert classify_verification_targeting(
-            "pytest tests/", ["src/auth.py"]
-        ) == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        assert (
+            classify_verification_targeting("pytest tests/", ["src/auth.py"])
+            == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        )
 
     def test_broad_npm_test(self):
-        assert classify_verification_targeting(
-            "npm test", ["src/index.ts"]
-        ) == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        assert (
+            classify_verification_targeting("npm test", ["src/index.ts"])
+            == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        )
 
     def test_broad_go_test_all(self):
-        assert classify_verification_targeting(
-            "go test ./...", ["pkg/server.go"]
-        ) == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        assert (
+            classify_verification_targeting("go test ./...", ["pkg/server.go"])
+            == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        )
 
     def test_broad_cargo_test(self):
-        assert classify_verification_targeting(
-            "cargo test", ["src/lib.rs"]
-        ) == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        assert (
+            classify_verification_targeting("cargo test", ["src/lib.rs"])
+            == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        )
 
     def test_targeted_to_edited_file(self):
-        result = classify_verification_targeting(
-            "pytest tests/test_auth.py", ["src/auth.py"]
-        )
+        result = classify_verification_targeting("pytest tests/test_auth.py", ["src/auth.py"])
         assert result == VerificationTarget.TARGETED_TO_EDITED_FILE
 
     def test_targeted_to_edited_file_with_cd_prefix(self):
@@ -67,9 +67,7 @@ class TestClassifyVerificationTargeting:
         assert result == VerificationTarget.TARGETED_TO_EDITED_FILE
 
     def test_targeted_to_edited_symbol_k_flag(self):
-        result = classify_verification_targeting(
-            "pytest -k auth", ["src/auth.py"]
-        )
+        result = classify_verification_targeting("pytest -k auth", ["src/auth.py"])
         assert result == VerificationTarget.TARGETED_TO_EDITED_SYMBOL
 
     def test_targeted_to_related_test(self):
@@ -81,15 +79,11 @@ class TestClassifyVerificationTargeting:
         assert result == VerificationTarget.TARGETED_TO_RELATED_TEST
 
     def test_irrelevant_specific_test(self):
-        result = classify_verification_targeting(
-            "pytest tests/test_unrelated.py", ["src/auth.py"]
-        )
+        result = classify_verification_targeting("pytest tests/test_unrelated.py", ["src/auth.py"])
         assert result == VerificationTarget.IRRELEVANT_VERIFICATION
 
     def test_unknown_non_verification(self):
-        result = classify_verification_targeting(
-            "ls -la", ["src/auth.py"]
-        )
+        result = classify_verification_targeting("ls -la", ["src/auth.py"])
         assert result == VerificationTarget.UNKNOWN
 
     def test_is_targeted_true_for_targeted(self):
@@ -103,14 +97,16 @@ class TestClassifyVerificationTargeting:
         assert not VerificationTarget.UNKNOWN.is_targeted()
 
     def test_broad_python_m_pytest(self):
-        assert classify_verification_targeting(
-            "python -m pytest", ["src/auth.py"]
-        ) == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        assert (
+            classify_verification_targeting("python -m pytest", ["src/auth.py"])
+            == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        )
 
     def test_broad_tox(self):
-        assert classify_verification_targeting(
-            "tox", ["src/auth.py"]
-        ) == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        assert (
+            classify_verification_targeting("tox", ["src/auth.py"])
+            == VerificationTarget.BROAD_PROJECT_VERIFICATION
+        )
 
     def test_targeted_module_in_command(self):
         result = classify_verification_targeting(
@@ -125,7 +121,6 @@ class TestClassifyVerificationTargeting:
 
 
 class TestHasUnverifiedPatch:
-
     def test_edit_then_broad_pass(self):
         state = L5TrajectoryState(instance_id="test")
         state.record_source_edit("src/auth.py")
@@ -167,14 +162,15 @@ class TestHasUnverifiedPatch:
         state.current_iter = 10
         state.record_verification(True, target_level="broad_project_verification")
         assert len(state.verification_targeting_history) == 1
-        assert state.verification_targeting_history[0]["target_level"] == "broad_project_verification"
+        assert (
+            state.verification_targeting_history[0]["target_level"] == "broad_project_verification"
+        )
 
 
 # ── hook_unverified_patch ─────────────────────────────────────────────
 
 
 class TestHookUnverifiedPatch:
-
     def test_fires_when_unverified(self):
         state = L5TrajectoryState(instance_id="test")
         state.record_source_edit("src/auth.py")
@@ -221,9 +217,7 @@ class TestHookUnverifiedPatch:
         state = L5TrajectoryState(instance_id="test")
         state.record_source_edit("src/auth.py")
         state.record_verification(True, target_level="broad_project_verification")
-        msg = hook_unverified_patch(
-            state, test_file_suggestions=["tests/test_auth.py"]
-        )
+        msg = hook_unverified_patch(state, test_file_suggestions=["tests/test_auth.py"])
         assert msg is not None
         assert "tests/test_auth.py" in msg
 
@@ -241,7 +235,6 @@ class TestHookUnverifiedPatch:
 
 
 class TestUnsafeFinishCatchesUnverified:
-
     def test_fires_on_unverified_patch_at_finish(self):
         state = L5TrajectoryState(instance_id="test")
         state.record_source_edit("src/auth.py")
@@ -267,13 +260,12 @@ class TestUnsafeFinishCatchesUnverified:
 
     def test_fires_on_unresolved_failure(self):
         from groundtruth.trajectory.state import FailureSnapshot
+
         state = L5TrajectoryState(instance_id="test")
         state.current_iter = 10
         state.record_source_edit("src/auth.py")
         state.current_iter = 11
-        snapshot = FailureSnapshot(
-            failing_unit="test_auth", assertion_or_error="assert failed"
-        )
+        snapshot = FailureSnapshot(failing_unit="test_auth", assertion_or_error="assert failed")
         snapshot.compute_hash()
         state.record_verification(False, snapshot)
         msg = hook_unsafe_finish(state)
@@ -322,19 +314,22 @@ def _make_finish() -> MagicMock:
 
 
 class TestGovernorUnverifiedPatch:
-
     def test_edit_then_broad_pass_fires(self, monkeypatch):
         monkeypatch.setenv("GT_REBUILD_L5", "1")
         gov = L5Governor(instance_id="test-unverified", max_iter=100)
 
         gov.after_interaction(
-            _make_edit("src/auth.py"), _make_obs("ok"),
-            action_count=10, max_iter=100,
+            _make_edit("src/auth.py"),
+            _make_obs("ok"),
+            action_count=10,
+            max_iter=100,
         )
 
         result = gov.after_interaction(
-            _make_cmd("pytest tests/"), _make_obs("5 passed\nexit code: 0\n"),
-            action_count=11, max_iter=100,
+            _make_cmd("pytest tests/"),
+            _make_obs("5 passed\nexit code: 0\n"),
+            action_count=11,
+            max_iter=100,
         )
         assert result.fired
         assert result.message and "Unverified Patch" in result.message
@@ -344,13 +339,17 @@ class TestGovernorUnverifiedPatch:
         gov = L5Governor(instance_id="test-targeted-ok", max_iter=100)
 
         gov.after_interaction(
-            _make_edit("src/auth.py"), _make_obs("ok"),
-            action_count=10, max_iter=100,
+            _make_edit("src/auth.py"),
+            _make_obs("ok"),
+            action_count=10,
+            max_iter=100,
         )
 
         result = gov.after_interaction(
-            _make_cmd("pytest tests/test_auth.py"), _make_obs("1 passed\nexit code: 0\n"),
-            action_count=11, max_iter=100,
+            _make_cmd("pytest tests/test_auth.py"),
+            _make_obs("1 passed\nexit code: 0\n"),
+            action_count=11,
+            max_iter=100,
         )
         assert not result.fired
 
@@ -359,13 +358,17 @@ class TestGovernorUnverifiedPatch:
         gov = L5Governor(instance_id="test-flag-off", max_iter=100)
 
         gov.after_interaction(
-            _make_edit("src/auth.py"), _make_obs("ok"),
-            action_count=10, max_iter=100,
+            _make_edit("src/auth.py"),
+            _make_obs("ok"),
+            action_count=10,
+            max_iter=100,
         )
 
         result = gov.after_interaction(
-            _make_cmd("pytest tests/"), _make_obs("5 passed\nexit code: 0\n"),
-            action_count=11, max_iter=100,
+            _make_cmd("pytest tests/"),
+            _make_obs("5 passed\nexit code: 0\n"),
+            action_count=11,
+            max_iter=100,
         )
         assert not result.fired
 
@@ -374,17 +377,23 @@ class TestGovernorUnverifiedPatch:
         gov = L5Governor(instance_id="test-finish-unverified", max_iter=100)
 
         gov.after_interaction(
-            _make_edit("src/auth.py"), _make_obs("ok"),
-            action_count=10, max_iter=100,
+            _make_edit("src/auth.py"),
+            _make_obs("ok"),
+            action_count=10,
+            max_iter=100,
         )
         gov.after_interaction(
-            _make_cmd("pytest tests/"), _make_obs("5 passed\nexit code: 0\n"),
-            action_count=11, max_iter=100,
+            _make_cmd("pytest tests/"),
+            _make_obs("5 passed\nexit code: 0\n"),
+            action_count=11,
+            max_iter=100,
         )
 
         result = gov.after_interaction(
-            _make_finish(), _make_obs(""),
-            action_count=12, max_iter=100,
+            _make_finish(),
+            _make_obs(""),
+            action_count=12,
+            max_iter=100,
         )
         assert result.fired
         assert result.message and "Unsafe Finish" in result.message
@@ -394,17 +403,17 @@ class TestGovernorUnverifiedPatch:
         gov = L5Governor(instance_id="test-hyp-still", max_iter=100)
 
         gov.after_interaction(
-            _make_edit("src/auth.py"), _make_obs("ok"),
-            action_count=10, max_iter=100,
+            _make_edit("src/auth.py"),
+            _make_obs("ok"),
+            action_count=10,
+            max_iter=100,
         )
 
         result = gov.after_interaction(
             _make_cmd("pytest tests/test_auth.py -x"),
-            _make_obs(
-                "FAILED tests/test_auth.py::test_login - AssertionError\n"
-                "exit code: 1\n"
-            ),
-            action_count=11, max_iter=100,
+            _make_obs("FAILED tests/test_auth.py::test_login - AssertionError\nexit code: 1\n"),
+            action_count=11,
+            max_iter=100,
         )
         assert result.fired
         assert result.message and "Hypothesis Falsified" in result.message

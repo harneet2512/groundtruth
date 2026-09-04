@@ -25,6 +25,7 @@ THE INVARIANT under test (the catalog's required regression):
 These are deterministic UNIT tests over an in-memory graph.db — no benchmark,
 no agent, no task run.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -45,11 +46,11 @@ from groundtruth.pretask.graph_localizer import _PROMOTED_EDGE_TYPES
 
 # file_path per node id (anchor = a.py)
 _NODES = {
-    1: "a.py",   # anchor (source)
-    2: "b.py",   # structural neighbor via CALLS
-    3: "c.py",   # structural neighbor via IMPORTS
-    4: "d.py",   # reachable ONLY via a depth edge (must stay invisible)
-    5: "e.py",   # 2-hop structural neighbor from b.py
+    1: "a.py",  # anchor (source)
+    2: "b.py",  # structural neighbor via CALLS
+    3: "c.py",  # structural neighbor via IMPORTS
+    4: "d.py",  # reachable ONLY via a depth edge (must stay invisible)
+    5: "e.py",  # 2-hop structural neighbor from b.py
 }
 
 # (source_id, target_id, type, resolution_method, confidence)
@@ -123,9 +124,8 @@ _ANCHORS = ["a.py"]
 # G01 + the catalog invariant: WITH-depth ≡ WITHOUT-depth (byte-identical).
 # ---------------------------------------------------------------------------
 
-def test_reach_scores_byte_identical_with_and_without_depth(
-    graph_with_depth, graph_without_depth
-):
+
+def test_reach_scores_byte_identical_with_and_without_depth(graph_with_depth, graph_without_depth):
     """reach_score must be byte-identical whether or not promoted depth exists."""
     with_d = compute_reach(_ANCHORS, graph_with_depth, max_depth=3)
     no_d = compute_reach(_ANCHORS, graph_without_depth, max_depth=3)
@@ -143,16 +143,11 @@ def test_reach_scores_byte_identical_with_and_without_depth(
         assert with_d[fp].entered_via_graph == no_d[fp].entered_via_graph
 
 
-def test_graph_expand_byte_identical_with_and_without_depth(
-    graph_with_depth, graph_without_depth
-):
+def test_graph_expand_byte_identical_with_and_without_depth(graph_with_depth, graph_without_depth):
     """The graph_expand candidate set must be byte-identical with/without depth."""
     with_d = graph_expand_candidates(_ANCHORS, graph_with_depth, max_depth=3)
     no_d = graph_expand_candidates(_ANCHORS, graph_without_depth, max_depth=3)
-    assert with_d == no_d, (
-        f"depth edges leaked into graph_expand candidates: "
-        f"extra={with_d - no_d}"
-    )
+    assert with_d == no_d, f"depth edges leaked into graph_expand candidates: extra={with_d - no_d}"
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +155,7 @@ def test_graph_expand_byte_identical_with_and_without_depth(
 # never appear in reach/expand. This is the navigable-hop leak the invariant
 # pins shut as future RANK consumers evolve.
 # ---------------------------------------------------------------------------
+
 
 def test_depth_only_target_never_enters_reach(graph_with_depth):
     reach = compute_reach(_ANCHORS, graph_with_depth, max_depth=3)
@@ -179,6 +175,7 @@ def test_depth_only_target_never_enters_expand(graph_with_depth):
 # G16 (explicit per-type exclusion) + G18 (SSOT): every blacklisted type AND
 # the promote_% provenance are individually excluded from the reach adjacency.
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("depth_type", _PROMOTED_EDGE_TYPES)
 def test_each_promoted_type_excluded_from_reach(tmp_path, depth_type):

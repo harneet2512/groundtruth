@@ -6,6 +6,7 @@ the brief's ranker/sibling/contract. This pins every label filter in v1r_brief.p
 definition set ('Function','Method','Class','ImplBlock'). It BITES: with the old
 ('Function','Method') filter the Class/ImplBlock rows are dropped and these assertions fail.
 """
+
 from __future__ import annotations
 
 import re
@@ -30,10 +31,10 @@ def _make_db(path: str) -> None:
         "INSERT INTO nodes (id,label,name,file_path,start_line,end_line,is_test,language) "
         "VALUES (?,?,?,?,?,?,0,?)",
         [
-            (1, "Class", "Foo", "b.go", 2, 4, "go"),        # go struct (type def) edit target
+            (1, "Class", "Foo", "b.go", 2, 4, "go"),  # go struct (type def) edit target
             (2, "Method", "M", "b.go", 3, 3, "go"),
             (3, "Function", "baz", "b.go", 6, 7, "go"),
-            (4, "Class", "Bar", "e.rs", 1, 3, "rust"),      # rust struct
+            (4, "Class", "Bar", "e.rs", 1, 3, "rust"),  # rust struct
             (5, "ImplBlock", "Bar", "e.rs", 4, 6, "rust"),  # rust impl block
         ],
     )
@@ -62,4 +63,6 @@ def test_no_bare_function_method_filter_remains():
     Any new bare ('Function','Method') filter re-introduces the Python-only blindness."""
     src = Path(__file__).resolve().parents[2] / "src" / "groundtruth" / "pretask" / "v1r_brief.py"
     bare = re.findall(r"label IN \('Function',\s*'Method'\)", src.read_text(encoding="utf-8"))
-    assert not bare, f"{len(bare)} bare Function/Method-only label filter(s) remain (drop type-def edits)"
+    assert not bare, (
+        f"{len(bare)} bare Function/Method-only label filter(s) remain (drop type-def edits)"
+    )

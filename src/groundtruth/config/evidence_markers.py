@@ -6,28 +6,52 @@ No inline marker tuples in the wrapper — import from here.
 
 # L3b markers: post-view navigation + structural signals
 L3B_MARKERS: tuple[str, ...] = (
-    "Called by:", "Calls into:", "Imported by:",
-    "[GT] ", "<gt-context", "<gt-scope",
-    "[CONTRACT]", "[CONTRACT ~]", "[PEER]", "[PATTERN]",
-    "[SIGNATURE]", "[TEST]", "[GT_VERIFY",
-    "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
-    "[BEHAVIORAL CONTRACT]", "[RECALL]",
-    "[GT_AUTO]", "[MISMATCH]", "[FORMAT]", "[GT_CONTRACT",
+    "Called by:",
+    "Calls into:",
+    "Imported by:",
+    "[GT] ",
+    "<gt-context",
+    "<gt-scope",
+    "[CONTRACT]",
+    "[CONTRACT ~]",
+    "[PEER]",
+    "[PATTERN]",
+    "[SIGNATURE]",
+    "[TEST]",
+    "[GT_VERIFY",
+    "[PROPAGATE]",
+    "[CO-CHANGE]",
+    "[SCOPE]",
+    "[BEHAVIORAL CONTRACT]",
+    "[RECALL]",
+    "[GT_AUTO]",
+    "[MISMATCH]",
+    "[FORMAT]",
+    "[GT_CONTRACT",
 )
 
 # L3 markers: post-edit evidence (superset of L3b + legacy compat)
 L3_MARKERS: tuple[str, ...] = (
     *L3B_MARKERS,
-    "<gt-post-edit", "<gt-edit-target", "<gt-orientation",
-    "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]",
-    "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
-    "[GT L3:", "[TWINS]",
+    "<gt-post-edit",
+    "<gt-edit-target",
+    "<gt-orientation",
+    "[GT_CHANGE]",
+    "[GT_CONTRACT]",
+    "[GT_PATTERN]",
+    "[GT_STRUCTURAL]",
+    "[GT_SEMANTIC]",
+    "[GT_COUPLING]",
+    "[GT L3:",
+    "[TWINS]",
     # Semantic check markers (prepended by wrapper from groundtruth.hooks.semantic_check)
-    "GUARD_ADDED:", "GUARD_REMOVED:",
+    "GUARD_ADDED:",
+    "GUARD_REMOVED:",
     # Obligation check markers (from groundtruth.hooks.obligation_check)
     "[COMPLETENESS]",
     # Exception path markers (from L4b-1 in post_view.py)
-    "[CATCHES]", "[RAISES]",
+    "[CATCHES]",
+    "[RAISES]",
     # Behavioral-contract return-shape marker (post_edit.py return_shape branch)
     "[RETURNS]",
     # Override chain markers (P15)
@@ -35,8 +59,14 @@ L3_MARKERS: tuple[str, ...] = (
     # Similar function markers (P4)
     "[SIMILAR]",
     # Legacy markers (backward compat with older post_edit.py)
-    "SIGNATURE:", "SIBLING:", "CALLERS:", "WARNING:",
-    "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
+    "SIGNATURE:",
+    "SIBLING:",
+    "CALLERS:",
+    "WARNING:",
+    "TOP CALLER:",
+    "MUST PRESERVE:",
+    "TEST EXPECTS:",
+    "TEST:",
 )
 
 # Rescue markers: minimal — rescue payload always starts with [GT]
@@ -119,9 +149,7 @@ def passes_relevance_gate(
     text = (candidate_text or "").lower()
     if not text:
         return False
-    anchor = {t for t in (issue_terms or set()) if t} | {
-        t for t in (fn_tokens or set()) if t
-    }
+    anchor = {t for t in (issue_terms or set()) if t} | {t for t in (fn_tokens or set()) if t}
     if not anchor:
         # No relevance anchor available — stay silent rather than guess.
         return False

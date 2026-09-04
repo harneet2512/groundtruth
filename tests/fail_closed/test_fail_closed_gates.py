@@ -62,9 +62,7 @@ def pp():
 @pytest.fixture(scope="module")
 def gdm():
     """The gt_deep_metrics module."""
-    return _load_module_by_path(
-        "gt_deep_metrics_under_test", "scripts/swebench/gt_deep_metrics.py"
-    )
+    return _load_module_by_path("gt_deep_metrics_under_test", "scripts/swebench/gt_deep_metrics.py")
 
 
 # --------------------------------------------------------------------------- #
@@ -137,9 +135,7 @@ def _base_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
-    conn.execute(
-        "INSERT INTO project_meta(key, value) VALUES ('schema_version', '15')"
-    )
+    conn.execute("INSERT INTO project_meta(key, value) VALUES ('schema_version', '15')")
 
 
 def _add_node(
@@ -345,7 +341,8 @@ def test_lsp_installed_zero_enrichment_fails_or_reason(pp, clean_env, tmp_path, 
     import shutil as _shutil
 
     monkeypatch.setattr(
-        _shutil, "which",
+        _shutil,
+        "which",
         lambda exe: "/usr/bin/gopls" if exe == "gopls" else None,
     )
     ok_a, detail_a = pp.check_lsp_edges(db_a)
@@ -419,9 +416,9 @@ def test_l3_metadata_only_is_degraded(clean_env):
     from groundtruth.hooks import post_edit
 
     metadata_only_blocks = [
-        "[BEHAVIORAL CONTRACT]",          # bare header, no payload -> metadata
-        "body_len=80",                    # placeholder stub -> metadata
-        "[GT L3: set_fields]",            # header-only marker -> metadata
+        "[BEHAVIORAL CONTRACT]",  # bare header, no payload -> metadata
+        "body_len=80",  # placeholder stub -> metadata
+        "[GT L3: set_fields]",  # header-only marker -> metadata
     ]
     real, meta = post_edit._l3_account_evidence(metadata_only_blocks)
     assert real == 0, f"metadata-only blocks must have real=0, got {real}"
@@ -576,7 +573,9 @@ def test_preflight_failure_not_counted_as_no_patch(gdm, clean_env):
     orig = gdm._safe_read_text
     gdm._safe_read_text = lambda path, *a, **k: preflight_log  # type: ignore[assignment]
     try:
-        verdict = gdm.classify_outcome("repo__task-1", "/tmp/full_run.log", traj, {}, "swe-live-openhands")
+        verdict = gdm.classify_outcome(
+            "repo__task-1", "/tmp/full_run.log", traj, {}, "swe-live-openhands"
+        )
     finally:
         gdm._safe_read_text = orig  # type: ignore[assignment]
 
@@ -593,7 +592,9 @@ def test_preflight_failure_not_counted_as_no_patch(gdm, clean_env):
     )
     gdm._safe_read_text = lambda path, *a, **k: dataset_log  # type: ignore[assignment]
     try:
-        verdict2 = gdm.classify_outcome("repo__task-2", "/tmp/full_run.log", traj, {}, "swe-live-openhands")
+        verdict2 = gdm.classify_outcome(
+            "repo__task-2", "/tmp/full_run.log", traj, {}, "swe-live-openhands"
+        )
     finally:
         gdm._safe_read_text = orig  # type: ignore[assignment]
 

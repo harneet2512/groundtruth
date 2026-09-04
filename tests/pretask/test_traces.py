@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import os
 
 from groundtruth.pretask.traces import parse_stack_traces
 
 
-PYTHON_TRACE = '''Traceback (most recent call last):
+PYTHON_TRACE = """Traceback (most recent call last):
   File "patroni/postmaster.py", line 89, in start
     self.watchdog.activate()
   File "patroni/watchdog.py", line 142, in activate
     self._fd.write(b"\\x56")
 OSError: [Errno 9] Bad file descriptor
-'''
+"""
 
 
 def test_traces_python(tmp_path) -> None:
@@ -32,11 +31,11 @@ def test_traces_python(tmp_path) -> None:
 def test_traces_in_repo_filter(tmp_path) -> None:
     """Frames pointing at site-packages / stdlib are dropped."""
     text = (
-        'Traceback (most recent call last):\n'
+        "Traceback (most recent call last):\n"
         '  File "/usr/lib/python3.11/threading.py", line 980, in run\n'
-        '    self._target(*self._args, **self._kwargs)\n'
+        "    self._target(*self._args, **self._kwargs)\n"
         '  File "myrepo/handlers.py", line 12, in handler\n'
-        '    raise ValueError\n'
+        "    raise ValueError\n"
     )
     frames = parse_stack_traces(text, str(tmp_path))
     files = [fr.file for fr in frames]
@@ -67,9 +66,7 @@ def test_traces_javascript_order_and_vendor_filter(tmp_path) -> None:
         "    at lodashMap (node_modules/lodash/map.js:10:1)\n"
     )
     frames = parse_stack_traces(text, str(tmp_path))
-    assert [(fr.file, fr.func) for fr in frames] == [
-        ("src/App.tsx", "handleClick")
-    ]
+    assert [(fr.file, fr.func) for fr in frames] == [("src/App.tsx", "handleClick")]
 
 
 def test_traces_no_frames(tmp_path) -> None:

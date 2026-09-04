@@ -184,18 +184,18 @@ def test_flag_set_valid_uploads_and_skips_build(tmp_path, monkeypatch):
     ohgt.install_graph_and_hook(runtime, config)
 
     # The promoted db was copied toward the config.graph_db directory.
-    assert any(
-        host == str(promoted) for host, _dir in runtime.copied
-    ), f"promoted db not copied: {runtime.copied}"
+    assert any(host == str(promoted) for host, _dir in runtime.copied), (
+        f"promoted db not copied: {runtime.copied}"
+    )
     # The full in-container build command MUST NOT have run.
     assert not any(
         "/tmp/gt-index-linux -root='/workspace' -output='/tmp/gt_index.db' 2>&1" in c
         for c in runtime.actions
     ), "in-container build ran despite a valid prebuilt db"
     # The uploaded file is renamed/placed at the EXACT config.graph_db path.
-    assert any(
-        c.startswith("mv -f ") and "/tmp/gt_index.db" in c for c in runtime.actions
-    ), "uploaded db was not moved to the exact config.graph_db path"
+    assert any(c.startswith("mv -f ") and "/tmp/gt_index.db" in c for c in runtime.actions), (
+        "uploaded db was not moved to the exact config.graph_db path"
+    )
     # Prebuilt mode is armed for the L6 re-promotion.
     assert config._gt_prebuilt_active is True
 
@@ -249,9 +249,7 @@ def test_repromote_noop_when_not_prebuilt():
     runtime = _BaseRuntime()
     config = ohgt.GTRuntimeConfig()
     assert config._gt_prebuilt_active is False
-    status = ohgt._repromote_after_reindex(
-        runtime, config, runtime.run_action, "src/app.py"
-    )
+    status = ohgt._repromote_after_reindex(runtime, config, runtime.run_action, "src/app.py")
     assert status == "skip:not_prebuilt"
     # No re-promotion command was emitted.
     assert not any("groundtruth.resolve" in c for c in runtime.actions)
@@ -262,9 +260,7 @@ def test_repromote_fires_when_prebuilt_and_lsp_present():
     config = ohgt.GTRuntimeConfig()
     config._gt_prebuilt_active = True
 
-    status = ohgt._repromote_after_reindex(
-        runtime, config, runtime.run_action, "src/app.py"
-    )
+    status = ohgt._repromote_after_reindex(runtime, config, runtime.run_action, "src/app.py")
     assert status == "ok:repromoted(python)"
     # The scoped LSP re-promotion command was issued for python.
     assert any(
@@ -272,9 +268,7 @@ def test_repromote_fires_when_prebuilt_and_lsp_present():
         for c in runtime.actions
     ), "scoped re-promotion command not emitted"
     # It targets the EXACT config.graph_db path the in-container hooks read.
-    assert any(
-        "groundtruth.resolve" in c and "/tmp/gt_index.db" in c for c in runtime.actions
-    )
+    assert any("groundtruth.resolve" in c and "/tmp/gt_index.db" in c for c in runtime.actions)
 
 
 def test_repromote_quiet_when_lsp_absent():
@@ -284,9 +278,7 @@ def test_repromote_quiet_when_lsp_absent():
     config = ohgt.GTRuntimeConfig()
     config._gt_prebuilt_active = True
 
-    status = ohgt._repromote_after_reindex(
-        runtime, config, runtime.run_action, "src/app.py"
-    )
+    status = ohgt._repromote_after_reindex(runtime, config, runtime.run_action, "src/app.py")
     assert status.startswith("skip:lsp_absent")
     assert not any("groundtruth.resolve" in c for c in runtime.actions)
 
@@ -296,9 +288,7 @@ def test_repromote_skips_unsupported_language():
     config = ohgt.GTRuntimeConfig()
     config._gt_prebuilt_active = True
 
-    status = ohgt._repromote_after_reindex(
-        runtime, config, runtime.run_action, "config.toml"
-    )
+    status = ohgt._repromote_after_reindex(runtime, config, runtime.run_action, "config.toml")
     assert status.startswith("skip:lang_unsupported")
     assert not any("groundtruth.resolve" in c for c in runtime.actions)
 

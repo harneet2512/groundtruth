@@ -27,6 +27,7 @@ ONE-FORMULA RULE — the sensor BINDS the implementations from gt_mini_patch
 RED before Stage 1: DerivedState has none of these fields and the module
 exports none of these functions (AttributeError).
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -93,8 +94,7 @@ def test_sensor_binds_live_formulas(sense_mod, patch_mod):
 # ---------------------------------------------------------------------------
 class TestLoopRatio:
     def test_distinct_actions_zero(self, sense_mod):
-        turns = [_turn(sense_mod, i, f"cat file_{i}.py", f"content {i}")
-                 for i in range(20)]
+        turns = [_turn(sense_mod, i, f"cat file_{i}.py", f"content {i}") for i in range(20)]
         st = sense_mod.sense(turns)
         assert st.loop_ratio == 0.0
 
@@ -108,9 +108,14 @@ class TestLoopRatio:
             for j in range(5):
                 turns.append(_turn(sense_mod, idx, f"ls dir_{block}_{j}", f"out {block}{j}"))
                 idx += 1
-            turns.append(_turn(
-                sense_mod, idx, "./target/debug/fd --sort name",
-                "file7.txt\nfile007.txt\nSAME WRONG ORDER"))
+            turns.append(
+                _turn(
+                    sense_mod,
+                    idx,
+                    "./target/debug/fd --sort name",
+                    "file7.txt\nfile007.txt\nSAME WRONG ORDER",
+                )
+            )
             idx += 1
         st = sense_mod.sense(turns)
         # 5 identical signatures over 30 actions -> 5/30
@@ -119,8 +124,7 @@ class TestLoopRatio:
     def test_same_command_new_output_is_iteration_not_loop(self, sense_mod):
         """The 2026-06-10 '13453 false fire' discipline: same command with a
         DIFFERENT observation each run is progress, never a loop."""
-        turns = [_turn(sense_mod, i, "pytest -x", f"collected {i} items")
-                 for i in range(10)]
+        turns = [_turn(sense_mod, i, "pytest -x", f"collected {i} items") for i in range(10)]
         st = sense_mod.sense(turns)
         assert st.loop_ratio == 0.0
 
@@ -188,7 +192,8 @@ class TestCoverageRatios:
 
     def test_edit_coverage_fraction(self, sense_mod):
         r = sense_mod.edit_coverage_ratio(
-            {"capture_snapshot", "max_snapshots"}, {"capture_snapshot", "noise"})
+            {"capture_snapshot", "max_snapshots"}, {"capture_snapshot", "noise"}
+        )
         assert r == 0.5
 
     def test_test_coverage_nothing_edited_dormant(self, sense_mod):
@@ -210,9 +215,10 @@ class TestCoverageRatios:
         assert sense_mod.test_coverage_ratio(by_file, {"return", "self"}) == 0.0
 
     def test_symbol_tested_compound_containment(self, sense_mod):
-        assert sense_mod.symbol_tested(
-            "capture_snapshot", {"test_capture_snapshot"}) is True
-        assert sense_mod.symbol_tested("walk", {"test_walk_dirs"}) is False  # plain word: exact only
+        assert sense_mod.symbol_tested("capture_snapshot", {"test_capture_snapshot"}) is True
+        assert (
+            sense_mod.symbol_tested("walk", {"test_walk_dirs"}) is False
+        )  # plain word: exact only
         assert sense_mod.symbol_tested("walk", {"walk"}) is True
 
 

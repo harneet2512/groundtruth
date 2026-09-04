@@ -18,13 +18,13 @@ Tests by fix letter (BUG_GRAPH §Fix sketch):
 
 These tests exercise the REAL code paths. No real SWE-agent batches.
 """
+
 from __future__ import annotations
 
 import importlib.util
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -78,22 +78,17 @@ def counts_mod():
 
 # ---- (c) L4 sums query+search+navigate ------------------------------------
 
+
 def test_l4_counts_sum_query_search_navigate(counts_mod, tmp_path: Path) -> None:
     td = tmp_path / "task_x"
     td.mkdir()
-    (td / "gt_query_calls.jsonl").write_text(
-        '{"symbol":"a"}\n{"symbol":"b"}\n', encoding="utf-8"
-    )
+    (td / "gt_query_calls.jsonl").write_text('{"symbol":"a"}\n{"symbol":"b"}\n', encoding="utf-8")
     (td / "gt_search_calls.jsonl").write_text(
         '{"q":"foo"}\n{"q":"bar"}\n{"q":"baz"}\n', encoding="utf-8"
     )
-    (td / "gt_navigate_calls.jsonl").write_text(
-        '{"to":"x"}\n', encoding="utf-8"
-    )
+    (td / "gt_navigate_calls.jsonl").write_text('{"to":"x"}\n', encoding="utf-8")
     (td / "gt_validate_calls.jsonl").write_text("", encoding="utf-8")
-    (td / "gt_reindex.jsonl").write_text(
-        '{"path":"a.py"}\n{"path":"b.py"}\n', encoding="utf-8"
-    )
+    (td / "gt_reindex.jsonl").write_text('{"path":"a.py"}\n{"path":"b.py"}\n', encoding="utf-8")
     counts = counts_mod.count_layer_calls(td)
     assert counts["gt_query"] == 2
     assert counts["gt_search"] == 3
@@ -126,6 +121,7 @@ def test_smoke_runner_l4_uses_shared_helper(smoke_mod, tmp_path: Path) -> None:
 
 # ---- (d) all 6 stub JSONLs pre-created -------------------------------------
 
+
 def test_init_host_artifact_stubs_creates_all_six(tmp_path: Path) -> None:
     """RC-10 (D-005): all 6 expected JSONL files must be pre-created."""
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "swebench"))
@@ -134,13 +130,16 @@ def test_init_host_artifact_stubs_creates_all_six(tmp_path: Path) -> None:
         del sys.modules["gt_track4_pre_run"]
     # Stub sweagent + swerex (same approach as test_pullback_hook.py).
     import types
+
     if "sweagent.run.hooks.abstract" not in sys.modules:
         sw = types.ModuleType("sweagent")
         sw_run = types.ModuleType("sweagent.run")
         sw_hooks = types.ModuleType("sweagent.run.hooks")
         sw_abs = types.ModuleType("sweagent.run.hooks.abstract")
+
         class RunHook:  # noqa: D401
             pass
+
         sw_abs.RunHook = RunHook
         sys.modules["sweagent"] = sw
         sys.modules["sweagent.run"] = sw_run
@@ -150,15 +149,18 @@ def test_init_host_artifact_stubs_creates_all_six(tmp_path: Path) -> None:
         sx = types.ModuleType("swerex")
         sx_r = types.ModuleType("swerex.runtime")
         sx_a = types.ModuleType("swerex.runtime.abstract")
+
         class UploadRequest:
             def __init__(self, source_path=None, target_path=None):
                 self.source_path = source_path
                 self.target_path = target_path
+
         sx_a.UploadRequest = UploadRequest
         sys.modules["swerex"] = sx
         sys.modules["swerex.runtime"] = sx_r
         sys.modules["swerex.runtime.abstract"] = sx_a
     import gt_track4_pre_run as hm
+
     log_dir = tmp_path / "logs" / "task_y"
     hm._init_host_artifact_stubs(log_dir)
     for name in (
@@ -174,6 +176,7 @@ def test_init_host_artifact_stubs_creates_all_six(tmp_path: Path) -> None:
 
 # ---- (e) canonical helper FAIL-LOUD on disagreement -----------------------
 
+
 def test_disagreement_check_returns_none_on_agreement(counts_mod) -> None:
     assert counts_mod.disagreement_check(5, 5) is None
 
@@ -186,10 +189,18 @@ def test_disagreement_check_returns_reason_on_divergence(counts_mod) -> None:
 
 # ---- (f) Optional sentinels render unknown ---------------------------------
 
+
 def test_format_layer_line_renders_unknown_for_missing_elapsed_cost(smoke_mod) -> None:
     snap = smoke_mod.LayerSnapshot(
-        L1="fired", L2="noop", L3=2, L4=1, L5="pass", L6=1,
-        elapsed_s=None, resolved=None, cost_usd=None,
+        L1="fired",
+        L2="noop",
+        L3=2,
+        L4=1,
+        L5="pass",
+        L6=1,
+        elapsed_s=None,
+        resolved=None,
+        cost_usd=None,
     )
     line = smoke_mod.format_layer_line("repo__pkg-1", snap)
     assert "elapsed_s=unknown" in line
@@ -199,8 +210,15 @@ def test_format_layer_line_renders_unknown_for_missing_elapsed_cost(smoke_mod) -
 
 def test_format_layer_line_real_values_render_numeric(smoke_mod) -> None:
     snap = smoke_mod.LayerSnapshot(
-        L1="fired", L2="noop", L3=2, L4=1, L5="pass", L6=1,
-        elapsed_s=42.5, resolved=True, cost_usd=0.123456,
+        L1="fired",
+        L2="noop",
+        L3=2,
+        L4=1,
+        L5="pass",
+        L6=1,
+        elapsed_s=42.5,
+        resolved=True,
+        cost_usd=0.123456,
     )
     line = smoke_mod.format_layer_line("t-1", snap)
     assert "elapsed_s=42.50" in line
@@ -210,14 +228,14 @@ def test_format_layer_line_real_values_render_numeric(smoke_mod) -> None:
 
 # ---- (g) failsafe lines flagged synthesized=true --------------------------
 
+
 def test_failsafe_line_marks_synthesized(smoke_mod, tmp_path: Path) -> None:
     """RC-10 (D-009): failsafe path emits synthesized=true."""
     out = tmp_path / "run"
     out.mkdir()
     # No per-task dir exists, so collect_layer_snapshot returns empty snapshot.
     global_log = out / "_global_gt_layers.log"
-    smoke_mod._emit_for_completed_task(out, "missing_task", global_log,
-                                       synthesized=True)
+    smoke_mod._emit_for_completed_task(out, "missing_task", global_log, synthesized=True)
     line = global_log.read_text(encoding="utf-8")
     assert "synthesized=true" in line, (
         "failsafe path must mark synthesized=true so the verifier can "
@@ -227,23 +245,27 @@ def test_failsafe_line_marks_synthesized(smoke_mod, tmp_path: Path) -> None:
 
 # ---- (h) L5 verdict mapping covers all 13 values --------------------------
 
-@pytest.mark.parametrize("verdict,expected_class", [
-    ("pass", "pass"),
-    ("force", "pass"),
-    ("approved", "pass"),
-    ("warn_soft_escape", "warn"),
-    ("blocked", "fail"),
-    ("autosubmit", "infra_failure"),
-    ("pull_failed", "infra_failure"),
-    ("no_close_wrap", "infra_failure"),
-    ("no_graph_db", "infra_failure"),
-    ("malformed", "infra_failure"),
-    ("blocked_no_progress", "infra_failure"),
-    ("unresolved", "infra_failure"),
-    ("absent", "infra_failure"),
-    ("db_open_error", "infra_failure"),
-    ("db_open_error: sqlite3.OperationalError", "infra_failure"),
-])
+
+@pytest.mark.parametrize(
+    "verdict,expected_class",
+    [
+        ("pass", "pass"),
+        ("force", "pass"),
+        ("approved", "pass"),
+        ("warn_soft_escape", "warn"),
+        ("blocked", "fail"),
+        ("autosubmit", "infra_failure"),
+        ("pull_failed", "infra_failure"),
+        ("no_close_wrap", "infra_failure"),
+        ("no_graph_db", "infra_failure"),
+        ("malformed", "infra_failure"),
+        ("blocked_no_progress", "infra_failure"),
+        ("unresolved", "infra_failure"),
+        ("absent", "infra_failure"),
+        ("db_open_error", "infra_failure"),
+        ("db_open_error: sqlite3.OperationalError", "infra_failure"),
+    ],
+)
 def test_l5_classify_covers_all_thirteen(smoke_mod, verdict, expected_class) -> None:
     """RC-10 (D-011): all 13 emitted verdicts have a mapping; none collapses
     silently to not_evaluated."""
@@ -264,15 +286,23 @@ def test_read_l5_db_open_error_renders_infra_failure(smoke_mod, tmp_path: Path) 
     snap = smoke_mod.LayerSnapshot()
     smoke_mod._read_l5(td, snap)
     assert snap.L5 == "infra_failure"
-    assert snap.L5 != "not_evaluated", (
-        "infra failure must NOT collapse to not_evaluated"
-    )
+    assert snap.L5 != "not_evaluated", "infra failure must NOT collapse to not_evaluated"
 
 
 # ---- (i) --per-task-all-layers per-task AND -------------------------------
 
-def _write_task(out: Path, tid: str, *, L1: str, L3: int, L4: int,
-                L5_gate: str, L6: int, brief_marker: str = "<gt-task-brief>") -> None:
+
+def _write_task(
+    out: Path,
+    tid: str,
+    *,
+    L1: str,
+    L3: int,
+    L4: int,
+    L5_gate: str,
+    L6: int,
+    brief_marker: str = "<gt-task-brief>",
+) -> None:
     td = out / tid
     td.mkdir(parents=True)
     if L1 != "empty":
@@ -282,18 +312,14 @@ def _write_task(out: Path, tid: str, *, L1: str, L3: int, L4: int,
     for i in range(L3):
         (ev / f"edit_{i:03d}.json").write_text("{}")
     if L4:
-        (td / "gt_query_calls.jsonl").write_text(
-            "\n".join('{"x":1}' for _ in range(L4)) + "\n"
-        )
+        (td / "gt_query_calls.jsonl").write_text("\n".join('{"x":1}' for _ in range(L4)) + "\n")
     else:
         (td / "gt_query_calls.jsonl").write_text("")
     (td / "gt_search_calls.jsonl").write_text("")
     (td / "gt_navigate_calls.jsonl").write_text("")
     (td / "gt_validate_calls.jsonl").write_text("")
     if L6:
-        (td / "gt_reindex.jsonl").write_text(
-            "\n".join('{"x":1}' for _ in range(L6)) + "\n"
-        )
+        (td / "gt_reindex.jsonl").write_text("\n".join('{"x":1}' for _ in range(L6)) + "\n")
     else:
         (td / "gt_reindex.jsonl").write_text("")
     (td / "gt_pre_finish_gate.json").write_text(json.dumps({"result": L5_gate}))
@@ -305,8 +331,10 @@ def test_per_task_all_layers_fails_when_one_task_has_dead_l4(smoke_mod, tmp_path
     _write_task(out, "task_a", L1="fired", L3=2, L4=1, L5_gate="pass", L6=1)
     _write_task(out, "task_b", L1="fired", L3=2, L4=0, L5_gate="pass", L6=1)
     ok, reasons = smoke_mod._evaluate_layer_invocation(
-        out, ["task_a", "task_b"],
-        per_task_all_layers=True, per_task_min_pct=100.0,
+        out,
+        ["task_a", "task_b"],
+        per_task_all_layers=True,
+        per_task_min_pct=100.0,
     )
     assert ok is False
     assert any("per_task_all_layers" in r for r in reasons), reasons
@@ -318,29 +346,36 @@ def test_per_task_all_layers_passes_when_every_task_full(smoke_mod, tmp_path: Pa
     _write_task(out, "task_a", L1="fired", L3=2, L4=1, L5_gate="pass", L6=1)
     _write_task(out, "task_b", L1="fired", L3=1, L4=2, L5_gate="warn_soft_escape", L6=1)
     ok, _reasons = smoke_mod._evaluate_layer_invocation(
-        out, ["task_a", "task_b"],
-        per_task_all_layers=True, per_task_min_pct=100.0,
+        out,
+        ["task_a", "task_b"],
+        per_task_all_layers=True,
+        per_task_min_pct=100.0,
     )
     assert ok is True
 
 
 # ---- (a) verify_report wires layer gates ----------------------------------
 
+
 def test_verify_report_layer_gate_fails_when_log_empty(report_mod, tmp_path: Path) -> None:
     """A run dir with only the rate artifacts but NO gt_layers.log gives
     layer_gates present=False — backwards compat for archived runs."""
     rd = tmp_path / "run"
     rd.mkdir()
-    (rd / "gt_arm_summary.json").write_text(json.dumps({
-        "arm": "gt-nolsp",
-        "task_count": 1,
-        "ack_armed_total": 1,
-        "steer_delivered_total": 1,
-        "ack_engagement_total": 1,
-        "material_edit_total": 1,
-        "must_ok_rate": 1.0,
-        "has_patch_rate": 1.0,
-    }))
+    (rd / "gt_arm_summary.json").write_text(
+        json.dumps(
+            {
+                "arm": "gt-nolsp",
+                "task_count": 1,
+                "ack_armed_total": 1,
+                "steer_delivered_total": 1,
+                "ack_engagement_total": 1,
+                "material_edit_total": 1,
+                "must_ok_rate": 1.0,
+                "has_patch_rate": 1.0,
+            }
+        )
+    )
     (rd / "gt_report.csv").write_text(
         "run_id,arm,instance_id,cycle,material_edit_count,ack_armed_count,steer_delivered_count,ack_engagement_count\n"
         "r,gt-nolsp,task-1,1,1,1,1,1\n"
@@ -355,16 +390,20 @@ def test_verify_report_layer_gate_passes_with_global_log(report_mod, tmp_path: P
     """Synthesizing a healthy _global_gt_layers.log adds 4 PASS gate rows."""
     rd = tmp_path / "run"
     rd.mkdir()
-    (rd / "gt_arm_summary.json").write_text(json.dumps({
-        "arm": "gt-nolsp",
-        "task_count": 1,
-        "ack_armed_total": 1,
-        "steer_delivered_total": 1,
-        "ack_engagement_total": 1,
-        "material_edit_total": 1,
-        "must_ok_rate": 1.0,
-        "has_patch_rate": 1.0,
-    }))
+    (rd / "gt_arm_summary.json").write_text(
+        json.dumps(
+            {
+                "arm": "gt-nolsp",
+                "task_count": 1,
+                "ack_armed_total": 1,
+                "steer_delivered_total": 1,
+                "ack_engagement_total": 1,
+                "material_edit_total": 1,
+                "must_ok_rate": 1.0,
+                "has_patch_rate": 1.0,
+            }
+        )
+    )
     (rd / "gt_report.csv").write_text(
         "run_id,arm,instance_id,cycle,material_edit_count,ack_armed_count,steer_delivered_count,ack_engagement_count\n"
         "r,gt-nolsp,task-1,1,1,1,1,1\n"
@@ -392,12 +431,20 @@ def test_verify_report_layer_gate_fails_on_dead_l4(report_mod, tmp_path: Path) -
     """layers_all_six_fire is FALSE when L4=0 across all healthy tasks."""
     rd = tmp_path / "run"
     rd.mkdir()
-    (rd / "gt_arm_summary.json").write_text(json.dumps({
-        "arm": "gt-nolsp", "task_count": 1,
-        "ack_armed_total": 1, "steer_delivered_total": 1,
-        "ack_engagement_total": 1, "material_edit_total": 1,
-        "must_ok_rate": 1.0, "has_patch_rate": 1.0,
-    }))
+    (rd / "gt_arm_summary.json").write_text(
+        json.dumps(
+            {
+                "arm": "gt-nolsp",
+                "task_count": 1,
+                "ack_armed_total": 1,
+                "steer_delivered_total": 1,
+                "ack_engagement_total": 1,
+                "material_edit_total": 1,
+                "must_ok_rate": 1.0,
+                "has_patch_rate": 1.0,
+            }
+        )
+    )
     (rd / "gt_report.csv").write_text(
         "run_id,arm,instance_id,cycle,material_edit_count,ack_armed_count,steer_delivered_count,ack_engagement_count\n"
         "r,gt-nolsp,task-1,1,1,1,1,1\n"
@@ -408,12 +455,9 @@ def test_verify_report_layer_gate_fails_on_dead_l4(report_mod, tmp_path: Path) -
     )
     (rd / "_global_gt_layers.log").write_text(line)
     result = report_mod.compute(rd)
-    six_gate = next(g for g in result["gates"]
-                    if g["characteristic"] == "layers_all_six_fire")
+    six_gate = next(g for g in result["gates"] if g["characteristic"] == "layers_all_six_fire")
     assert six_gate["pass"] is False
-    assert result["verdict"] == "FAIL", (
-        "verify_report verdict must FAIL when layer-fire gate fails"
-    )
+    assert result["verdict"] == "FAIL", "verify_report verdict must FAIL when layer-fire gate fails"
 
 
 def test_verify_report_synthesized_lines_excluded_from_six_layer_check(
@@ -424,12 +468,20 @@ def test_verify_report_synthesized_lines_excluded_from_six_layer_check(
     must FAIL the layers_all_six_fire gate."""
     rd = tmp_path / "run"
     rd.mkdir()
-    (rd / "gt_arm_summary.json").write_text(json.dumps({
-        "arm": "gt-nolsp", "task_count": 2,
-        "ack_armed_total": 0, "steer_delivered_total": 0,
-        "ack_engagement_total": 0, "material_edit_total": 0,
-        "must_ok_rate": 0.0, "has_patch_rate": 0.0,
-    }))
+    (rd / "gt_arm_summary.json").write_text(
+        json.dumps(
+            {
+                "arm": "gt-nolsp",
+                "task_count": 2,
+                "ack_armed_total": 0,
+                "steer_delivered_total": 0,
+                "ack_engagement_total": 0,
+                "material_edit_total": 0,
+                "must_ok_rate": 0.0,
+                "has_patch_rate": 0.0,
+            }
+        )
+    )
     (rd / "gt_report.csv").write_text(
         "run_id,arm,instance_id,cycle,material_edit_count,ack_armed_count,steer_delivered_count,ack_engagement_count\n"
         "r,gt-nolsp,task-1,1,0,0,0,0\n"
@@ -445,8 +497,7 @@ def test_verify_report_synthesized_lines_excluded_from_six_layer_check(
     )
     (rd / "_global_gt_layers.log").write_text(healthy_zero + synth_bogus)
     result = report_mod.compute(rd)
-    six_gate = next(g for g in result["gates"]
-                    if g["characteristic"] == "layers_all_six_fire")
+    six_gate = next(g for g in result["gates"] if g["characteristic"] == "layers_all_six_fire")
     # Healthy subset = the all-zero line; synth excluded → no L4 fired.
     assert six_gate["pass"] is False, (
         "synthesized lines must not count toward layer-fire — pre-fix "
@@ -456,15 +507,24 @@ def test_verify_report_synthesized_lines_excluded_from_six_layer_check(
 
 # ---- (j) partial_pull surfaces in verify_report ---------------------------
 
+
 def test_verify_report_surfaces_partial_pull_count(report_mod, tmp_path: Path) -> None:
     rd = tmp_path / "run"
     rd.mkdir()
-    (rd / "gt_arm_summary.json").write_text(json.dumps({
-        "arm": "gt-nolsp", "task_count": 1,
-        "ack_armed_total": 1, "steer_delivered_total": 1,
-        "ack_engagement_total": 1, "material_edit_total": 1,
-        "must_ok_rate": 1.0, "has_patch_rate": 1.0,
-    }))
+    (rd / "gt_arm_summary.json").write_text(
+        json.dumps(
+            {
+                "arm": "gt-nolsp",
+                "task_count": 1,
+                "ack_armed_total": 1,
+                "steer_delivered_total": 1,
+                "ack_engagement_total": 1,
+                "material_edit_total": 1,
+                "must_ok_rate": 1.0,
+                "has_patch_rate": 1.0,
+            }
+        )
+    )
     (rd / "gt_report.csv").write_text(
         "run_id,arm,instance_id,cycle,material_edit_count,ack_armed_count,steer_delivered_count,ack_engagement_count\n"
         "r,gt-nolsp,task-1,1,1,1,1,1\n"
@@ -479,6 +539,7 @@ def test_verify_report_surfaces_partial_pull_count(report_mod, tmp_path: Path) -
 
 
 # ---- gt_layers_verifier regex accepts unknown -----------------------------
+
 
 def test_verifier_regex_accepts_unknown_elapsed_and_cost(verifier_mod, tmp_path: Path) -> None:
     log = tmp_path / "g.log"

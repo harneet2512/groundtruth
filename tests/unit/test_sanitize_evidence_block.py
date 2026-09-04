@@ -12,6 +12,7 @@ SEMANTIC validators + a boundary block sanitizer. Oracles here are INDEPENDENT o
 implementation so they validate real output, not themselves. Language-agnostic by design
 (GT is multi-language) — no Python `ast`.
 """
+
 from __future__ import annotations
 
 import re
@@ -29,19 +30,25 @@ from groundtruth.runtime.sanitizer import (  # noqa: F401 — import IS the firs
 # ---- the 4 REAL bad fixtures (VRA) ----
 BEETS_NONSENSE_CONTRACT = "   Contract: raises raise,exc_info[1].with_traceback"
 HAYSTACK_EMPTY_FIELD = "[GT KEY CONTRACTS]\n  Preserve: guard_clause: "
-HAYSTACK_GLUE_GT = "1. document_splitter.py run() -> docs[0].content == \"This is a text wit"
+HAYSTACK_GLUE_GT = '1. document_splitter.py run() -> docs[0].content == "This is a text wit'
 HAYSTACK_GLUE_FILE = "# SPDX-FileCopyrightText: 2022-present deepset GmbH"
 BEETS_CATCHE_GT = '[RAISES] WHEN not items: raise ValueError("need at least one item") | [CATCHES] except Exception'
-BEETS_FILE_BANNER = "Here's the result of running `cat -n` on /workspace/beetbox__beets-5495/beets/importer.py"
+BEETS_FILE_BANNER = (
+    "Here's the result of running `cat -n` on /workspace/beetbox__beets-5495/beets/importer.py"
+)
 
 # ---- valid evidence that MUST survive unchanged (negative controls, VRA) ----
-BEANCOUNT_VALID_CONTRACT = "1. beancount/plugins/leafonly.py\n   Contract: returns value|entries, errors"
+BEANCOUNT_VALID_CONTRACT = (
+    "1. beancount/plugins/leafonly.py\n   Contract: returns value|entries, errors"
+)
 HAYSTACK_VALID_CONTRACT = (
     "   Contract: raises TypeError,ValueError | preserve raise: not isinstance(documents, list) "
     "or (documents and not isinstance(documents[0], Document)) -> raise TypeError | "
-    "returns collection|{\"documents\": split_docs}"
+    'returns collection|{"documents": split_docs}'
 )
-BEETS_VALID_PRESERVE = "  Preserve: exception_handler: except UnreadableFileError as exc -> re-raises"
+BEETS_VALID_PRESERVE = (
+    "  Preserve: exception_handler: except UnreadableFileError as exc -> re-raises"
+)
 
 
 # ===== independent oracles =====
@@ -52,37 +59,48 @@ def _has_glue_junction(s: str) -> bool:
 
 def _has_truncated_marker(s: str) -> bool:
     """True if a `[MARKER` opener appears with no closing `]` before line end / non-marker char."""
-    return bool(re.search(r"\[[A-Z][A-Z _]{2,}(?:\n|$|[^A-Z\]_ ])", s)) and not re.search(r"\[CATCHES\]", s)
+    return bool(re.search(r"\[[A-Z][A-Z _]{2,}(?:\n|$|[^A-Z\]_ ])", s)) and not re.search(
+        r"\[CATCHES\]", s
+    )
 
 
 def _balanced(s: str) -> bool:
     in_str, esc, depth = "", False, 0
     for ch in s:
         if esc:
-            esc = False; continue
-        if in_str:
-            if ch == "\\": esc = True
-            elif ch == in_str: in_str = ""
+            esc = False
             continue
-        if ch in "\"'": in_str = ch
-        elif ch in "([{": depth += 1
+        if in_str:
+            if ch == "\\":
+                esc = True
+            elif ch == in_str:
+                in_str = ""
+            continue
+        if ch in "\"'":
+            in_str = ch
+        elif ch in "([{":
+            depth += 1
         elif ch in ")]}":
             depth -= 1
-            if depth < 0: return False
+            if depth < 0:
+                return False
     return not in_str and depth == 0
 
 
 # ===== negative controls: prove the test detects the bug class =====
 def test_negative_control_old_raw_slice_glues():
     """The OLD `text[:600]` + raw concat fuses GT onto the file with no newline."""
-    glued = (HAYSTACK_GLUE_GT)[:len(HAYSTACK_GLUE_GT)] + HAYSTACK_GLUE_FILE  # raw concat
+    glued = (HAYSTACK_GLUE_GT)[: len(HAYSTACK_GLUE_GT)] + HAYSTACK_GLUE_FILE  # raw concat
     assert _has_glue_junction(glued), "fixture must reproduce the glue the new code must prevent"
 
 
 def test_negative_control_structural_gate_passes_nonsense():
     """clip_balanced/is_well_formed_clause (structural) WOULD pass the nonsense — that's why we need semantic."""
     from groundtruth.runtime.sanitizer import is_well_formed_clause
-    assert is_well_formed_clause("raise,exc_info[1].with_traceback"), "structural gate is blind here (by design)"
+
+    assert is_well_formed_clause("raise,exc_info[1].with_traceback"), (
+        "structural gate is blind here (by design)"
+    )
 
 
 # ===== B3: exception spec validator =====
@@ -103,31 +121,55 @@ def test_bare_raises_returns_suppressed():
     assert "returns value|entries" in out and "raises" not in out
 
 
-@pytest.mark.parametrize("good", ["TypeError", "TypeError,ValueError", "ReadError,WriteError",
-                                  "ConanException", "conan.errors.ConanException"])
+@pytest.mark.parametrize(
+    "good",
+    [
+        "TypeError",
+        "TypeError,ValueError",
+        "ReadError,WriteError",
+        "ConanException",
+        "conan.errors.ConanException",
+    ],
+)
 def test_exception_spec_accepts_valid(good):
     assert valid_exception_spec(good)
 
 
-@pytest.mark.parametrize("bad", [
-    "", "  ", "raise", "return None", "e.args[0]", "Foo(", "exc_info[1].with_traceback",
-    "TypeError,", ",ValueError", "raise ValueError", "throw Err", "1Error",
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "  ",
+        "raise",
+        "return None",
+        "e.args[0]",
+        "Foo(",
+        "exc_info[1].with_traceback",
+        "TypeError,",
+        ",ValueError",
+        "raise ValueError",
+        "throw Err",
+        "1Error",
+    ],
+)
 def test_exception_spec_rejects_generalized_adversarial(bad):
     assert not valid_exception_spec(bad)
 
 
 # ===== B3b: guard clause validator =====
 def test_guard_rejects_empty():
-    assert not valid_guard_clause("")        # haystack VRA
+    assert not valid_guard_clause("")  # haystack VRA
     assert not valid_guard_clause("   ")
 
 
-@pytest.mark.parametrize("good", [
-    "not isinstance(documents, list)",
-    "documents and not isinstance(documents[0], Document)",
-    "not conanfile.package_folder",
-])
+@pytest.mark.parametrize(
+    "good",
+    [
+        "not isinstance(documents, list)",
+        "documents and not isinstance(documents[0], Document)",
+        "not conanfile.package_folder",
+    ],
+)
 def test_guard_accepts_valid(good):
     assert valid_guard_clause(good)
 
@@ -138,8 +180,9 @@ def test_guard_rejects_generalized_adversarial(bad):
 
 
 # ===== return shape validator =====
-@pytest.mark.parametrize("good", ["value|entries, errors", 'collection|{"documents": split_docs}',
-                                  "Optional[User]"])
+@pytest.mark.parametrize(
+    "good", ["value|entries, errors", 'collection|{"documents": split_docs}', "Optional[User]"]
+)
 def test_return_accepts_valid(good):
     assert valid_return_shape(good)
 
@@ -151,7 +194,9 @@ def test_return_rejects_invalid(bad):
 
 # ===== B3 at the brief boundary: suppress the nonsense Contract line =====
 def test_brief_suppresses_nonsense_contract_line():
-    out = sanitize_evidence_block("<gt-task-brief>\n" + BEETS_NONSENSE_CONTRACT + "\n</gt-task-brief>")
+    out = sanitize_evidence_block(
+        "<gt-task-brief>\n" + BEETS_NONSENSE_CONTRACT + "\n</gt-task-brief>"
+    )
     assert "raise,exc_info" not in out, "nonsense raises segment must be suppressed"
     assert "<gt-task-brief>" in out and "</gt-task-brief>" in out, "structure preserved"
 
@@ -160,7 +205,9 @@ def test_brief_suppresses_nonsense_contract_line():
 def test_brief_suppresses_empty_guard_field():
     out = sanitize_evidence_block(HAYSTACK_EMPTY_FIELD)
     assert "guard_clause:" not in out, "empty guard_clause field must be suppressed"
-    assert "[GT KEY CONTRACTS]" not in out, "orphaned header (no valid Preserve left) must be dropped"
+    assert "[GT KEY CONTRACTS]" not in out, (
+        "orphaned header (no valid Preserve left) must be dropped"
+    )
 
 
 # ===== negative controls: valid contracts UNCHANGED =====
@@ -192,11 +239,20 @@ def test_join_without_glue_idempotent_when_boundary_present():
     assert join_without_glue("a", "\nb") == "a\nb"
 
 
-@pytest.mark.parametrize("gt,filec", [
-    # the REAL haystack markerless glues, confirmed from raw output.jsonl bytes:
-    ('[TEST] DocumentSplitter(split_length=250, split_ove', "Here's the result of running `cat -n`"),
-    ('[TEST] assert docs[0].content == "This is a text wit', "# SPDX-FileCopyrightText: 2022-present"),
-])
+@pytest.mark.parametrize(
+    "gt,filec",
+    [
+        # the REAL haystack markerless glues, confirmed from raw output.jsonl bytes:
+        (
+            "[TEST] DocumentSplitter(split_length=250, split_ove",
+            "Here's the result of running `cat -n`",
+        ),
+        (
+            '[TEST] assert docs[0].content == "This is a text wit',
+            "# SPDX-FileCopyrightText: 2022-present",
+        ),
+    ],
+)
 def test_markerless_glue_prevented_at_boundary(gt, filec):
     """Markerless glue (`split_oveHere's`, `text wit# SPDX`) is the MAJORITY of
     real B1 glue and has no general semantic signature — it is PREVENTED at the

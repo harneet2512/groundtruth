@@ -4,6 +4,7 @@ This is the architecture contract for when GT may speak. Adapter surfaces can
 convert their local events into these enums, but should not reimplement the
 allowlist in workflow or harness-specific code.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -51,73 +52,95 @@ class PayloadKind(Enum):
 
 
 PHASE_POLICY: dict[Phase, frozenset[str]] = {
-    Phase.ORIENT: frozenset({
-        PayloadKind.BRIEF.value,
-        PayloadKind.ORIENTATION.value,
-    }),
-    Phase.VIEW: frozenset({
-        PayloadKind.LOCAL_EVIDENCE.value,
-        # A degenerate loop is "stuck" regardless of phase — the agent can spin
-        # on the same query/binary during exploration (fd stale-binary: same
-        # command + identical output, no edits). The loop detector must fire in
-        # VIEW, not only VERIFY (it was silent ~75 steps on the fd shape).
-        PayloadKind.LOOP_NUDGE.value,
-    }),
-    Phase.EDIT: frozenset({
-        PayloadKind.LOCAL_EVIDENCE.value,
-        PayloadKind.CONTRACT.value,
-        PayloadKind.COCHANGE.value,
-        PayloadKind.OBLIGATION_STATUS.value,
-        PayloadKind.COHERENCE_RISK.value,
-        PayloadKind.LOOP_NUDGE.value,
-    }),
-    Phase.VERIFY: frozenset({
-        PayloadKind.OBLIGATION_STATUS.value,
-        PayloadKind.STUCK_NUDGE.value,
-        PayloadKind.FAILURE_NUDGE.value,
-        PayloadKind.NO_TEST_NUDGE.value,
-        PayloadKind.LOOP_NUDGE.value,
-        PayloadKind.VERIFY_ADVISORY.value,
-        PayloadKind.VERIFY_URGENT.value,
-        PayloadKind.VERIFY_PIVOT.value,
-    }),
-    Phase.SUBMIT: frozenset({
-        PayloadKind.OBLIGATION_STATUS.value,
-        PayloadKind.VERIFY_GATE.value,
-    }),
+    Phase.ORIENT: frozenset(
+        {
+            PayloadKind.BRIEF.value,
+            PayloadKind.ORIENTATION.value,
+        }
+    ),
+    Phase.VIEW: frozenset(
+        {
+            PayloadKind.LOCAL_EVIDENCE.value,
+            # A degenerate loop is "stuck" regardless of phase — the agent can spin
+            # on the same query/binary during exploration (fd stale-binary: same
+            # command + identical output, no edits). The loop detector must fire in
+            # VIEW, not only VERIFY (it was silent ~75 steps on the fd shape).
+            PayloadKind.LOOP_NUDGE.value,
+        }
+    ),
+    Phase.EDIT: frozenset(
+        {
+            PayloadKind.LOCAL_EVIDENCE.value,
+            PayloadKind.CONTRACT.value,
+            PayloadKind.COCHANGE.value,
+            PayloadKind.OBLIGATION_STATUS.value,
+            PayloadKind.COHERENCE_RISK.value,
+            PayloadKind.LOOP_NUDGE.value,
+        }
+    ),
+    Phase.VERIFY: frozenset(
+        {
+            PayloadKind.OBLIGATION_STATUS.value,
+            PayloadKind.STUCK_NUDGE.value,
+            PayloadKind.FAILURE_NUDGE.value,
+            PayloadKind.NO_TEST_NUDGE.value,
+            PayloadKind.LOOP_NUDGE.value,
+            PayloadKind.VERIFY_ADVISORY.value,
+            PayloadKind.VERIFY_URGENT.value,
+            PayloadKind.VERIFY_PIVOT.value,
+        }
+    ),
+    Phase.SUBMIT: frozenset(
+        {
+            PayloadKind.OBLIGATION_STATUS.value,
+            PayloadKind.VERIFY_GATE.value,
+        }
+    ),
 }
 
 
 EVENT_BOUND_PAYLOADS: dict[Event, frozenset[str]] = {
-    Event.TASK_START: frozenset({
-        PayloadKind.BRIEF.value,
-        PayloadKind.ORIENTATION.value,
-    }),
-    Event.POST_VIEW: frozenset({
-        PayloadKind.LOCAL_EVIDENCE.value,
-    }),
-    Event.POST_EDIT: frozenset({
-        PayloadKind.LOCAL_EVIDENCE.value,
-        PayloadKind.CONTRACT.value,
-        PayloadKind.COCHANGE.value,
-        PayloadKind.COHERENCE_RISK.value,
-    }),
-    Event.TEST_RESULT: frozenset({
-        PayloadKind.FAILURE_NUDGE.value,
-        PayloadKind.NO_TEST_NUDGE.value,
-        PayloadKind.VERIFY_PIVOT.value,
-    }),
-    Event.REVIEW_TRANSITION: frozenset({
-        PayloadKind.SCOPE_COMPLETENESS.value,
-        PayloadKind.OBLIGATION_STATUS.value,
-        PayloadKind.VERIFY_ADVISORY.value,
-        PayloadKind.VERIFY_URGENT.value,
-        PayloadKind.VERIFY_GATE.value,
-    }),
-    Event.PRE_SUBMIT: frozenset({
-        PayloadKind.OBLIGATION_STATUS.value,
-        PayloadKind.VERIFY_GATE.value,
-    }),
+    Event.TASK_START: frozenset(
+        {
+            PayloadKind.BRIEF.value,
+            PayloadKind.ORIENTATION.value,
+        }
+    ),
+    Event.POST_VIEW: frozenset(
+        {
+            PayloadKind.LOCAL_EVIDENCE.value,
+        }
+    ),
+    Event.POST_EDIT: frozenset(
+        {
+            PayloadKind.LOCAL_EVIDENCE.value,
+            PayloadKind.CONTRACT.value,
+            PayloadKind.COCHANGE.value,
+            PayloadKind.COHERENCE_RISK.value,
+        }
+    ),
+    Event.TEST_RESULT: frozenset(
+        {
+            PayloadKind.FAILURE_NUDGE.value,
+            PayloadKind.NO_TEST_NUDGE.value,
+            PayloadKind.VERIFY_PIVOT.value,
+        }
+    ),
+    Event.REVIEW_TRANSITION: frozenset(
+        {
+            PayloadKind.SCOPE_COMPLETENESS.value,
+            PayloadKind.OBLIGATION_STATUS.value,
+            PayloadKind.VERIFY_ADVISORY.value,
+            PayloadKind.VERIFY_URGENT.value,
+            PayloadKind.VERIFY_GATE.value,
+        }
+    ),
+    Event.PRE_SUBMIT: frozenset(
+        {
+            PayloadKind.OBLIGATION_STATUS.value,
+            PayloadKind.VERIFY_GATE.value,
+        }
+    ),
 }
 
 

@@ -11,6 +11,7 @@ These lock the held-out invariants:
 They use SYNTHETIC fixtures (no benchmark coupling) plus, when present, the real
 fastapi-implicit-head-options task as a held-out integration check.
 """
+
 from __future__ import annotations
 
 import os
@@ -152,9 +153,7 @@ def test_fair_probe_when_behavior_only(tmp_path):
 
 def test_token_boundary_no_false_substring(tmp_path):
     """`get` must NOT count as naming `get_stats` (bounded-token match)."""
-    patch = (
-        "diff --git a/x.py b/x.py\n+++ b/x.py\n+def get_stats():\n    pass\n"
-    )
+    patch = "diff --git a/x.py b/x.py\n+++ b/x.py\n+def get_stats():\n    pass\n"
     instr = "The endpoint should get the data and return it."  # 'get' but not 'get_stats'
     td = _make_task(tmp_path, instruction=instr, patch=patch, language="python")
     rec = F.score_task(td)

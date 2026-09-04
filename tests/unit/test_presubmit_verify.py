@@ -9,6 +9,7 @@ table is OFF-LIMITS). These tests lock that legitimacy + the once-only latch.
 (Updated: the SUT was redesigned from listing tests -> surfacing contracts; the old tests
 asserted the removed leak and used an `assertions`-table fixture the SUT no longer reads.)
 """
+
 import os
 import sqlite3
 import sys
@@ -61,9 +62,9 @@ def _make_config(db, edited, last_edit_action, action_count):
 
 def _assert_no_test_leak(content: str):
     low = content.lower()
-    assert "pytest" not in low, content        # no test command
-    assert "::test_" not in content, content    # no test-node path
-    assert "test_foo" not in content, content   # no test name
+    assert "pytest" not in low, content  # no test command
+    assert "::test_" not in content, content  # no test-node path
+    assert "test_foo" not in content, content  # no test name
 
 
 def test_fires_at_review_transition_with_contract():
@@ -74,8 +75,8 @@ def test_fires_at_review_transition_with_contract():
         content = getattr(obs, "content", "")
         assert cfg._presubmit_fired is True
         assert "[GT_VERIFY]" in content
-        assert "return_shape" in content        # the behavioral CONTRACT is surfaced
-        _assert_no_test_leak(content)            # but NEVER a test name/command
+        assert "return_shape" in content  # the behavioral CONTRACT is surfaced
+        _assert_no_test_leak(content)  # but NEVER a test name/command
     finally:
         os.unlink(db)
 
@@ -86,9 +87,9 @@ def test_generic_reminder_when_no_contract():
         cfg = _make_config(db, {"src/app.py"}, last_edit_action=5, action_count=9)
         obs = w._maybe_fire_presubmit_verify(cfg, _Obs(), None)
         content = getattr(obs, "content", "")
-        assert cfg._presubmit_fired is True       # fires at the transition (won't retry)
+        assert cfg._presubmit_fired is True  # fires at the transition (won't retry)
         assert "[GT_VERIFY]" in content
-        _assert_no_test_leak(content)             # generic reminder, no test leak
+        _assert_no_test_leak(content)  # generic reminder, no test leak
     finally:
         os.unlink(db)
 
@@ -96,7 +97,9 @@ def test_generic_reminder_when_no_contract():
 def test_does_not_fire_before_review_transition():
     db = _make_db()
     try:
-        cfg = _make_config(db, {"src/app.py"}, last_edit_action=5, action_count=6)  # only 1 since edit
+        cfg = _make_config(
+            db, {"src/app.py"}, last_edit_action=5, action_count=6
+        )  # only 1 since edit
         obs = w._maybe_fire_presubmit_verify(cfg, _Obs(), None)
         assert cfg._presubmit_fired is False
         assert "[GT_VERIFY]" not in getattr(obs, "content", "")
@@ -136,6 +139,6 @@ def test_no_test_name_or_pytest_leaked():
         low = content.lower()
         assert "incomplete" not in low
         assert "should edit" not in low
-        _assert_no_test_leak(content)             # legitimacy: test-blind
+        _assert_no_test_leak(content)  # legitimacy: test-blind
     finally:
         os.unlink(db)

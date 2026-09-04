@@ -34,6 +34,7 @@ LEG 1: all fixes are structural (latch lifecycle, ratio denominator, English
 requirement grammar) — no task IDs, repos, or gold.  LEG 2: defers + delivers
 the completeness/evidence classes the gate was silently destroying.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -118,20 +119,16 @@ def test_outranked_cochange_rearms_and_delivers_later(patch_mod, monkeypatch, tm
     re-arm path (a real Lane B competition) is still covered by
     test_outranked_l5_failure_nudge_rearms below."""
     _reset_oracle_state(patch_mod, monkeypatch, tmp_path)
-    monkeypatch.setattr(patch_mod, "_oracle_focus_cache",
-                        {"capture_snapshot", "snapshots"}, raising=False)
-    monkeypatch.setattr(patch_mod, "_classify",
-                        lambda c: ("post_edit", "pkg/m.py"), raising=False)
-    monkeypatch.setattr(patch_mod, "_to_repo_rel",
-                        lambda f, r: "pkg/m.py", raising=False)
-    monkeypatch.setattr(patch_mod, "_invalidate_on_edit",
-                        lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(
+        patch_mod, "_oracle_focus_cache", {"capture_snapshot", "snapshots"}, raising=False
+    )
+    monkeypatch.setattr(patch_mod, "_classify", lambda c: ("post_edit", "pkg/m.py"), raising=False)
+    monkeypatch.setattr(patch_mod, "_to_repo_rel", lambda f, r: "pkg/m.py", raising=False)
+    monkeypatch.setattr(patch_mod, "_invalidate_on_edit", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(patch_mod, "_evidence", lambda c: "", raising=False)
 
-    contract = ('<gt-contract file="m.py">\n[SIGNATURE] def capture_snapshot()'
-                "\n</gt-contract>")
-    cochange = ('<gt-cochange file="m.py">\npkg/snapshots.py changes with this '
-                "file\n</gt-cochange>")
+    contract = '<gt-contract file="m.py">\n[SIGNATURE] def capture_snapshot()\n</gt-contract>'
+    cochange = '<gt-cochange file="m.py">\npkg/snapshots.py changes with this file\n</gt-cochange>'
 
     def fake_contract(rel):
         # mimic the real producer's production-time latch
@@ -146,10 +143,8 @@ def test_outranked_cochange_rearms_and_delivers_later(patch_mod, monkeypatch, tm
         patch_mod._cochange_fired = True
         return cochange
 
-    monkeypatch.setattr(patch_mod, "_graph_contract_block", fake_contract,
-                        raising=False)
-    monkeypatch.setattr(patch_mod, "_cochange_block", fake_cochange,
-                        raising=False)
+    monkeypatch.setattr(patch_mod, "_graph_contract_block", fake_contract, raising=False)
+    monkeypatch.setattr(patch_mod, "_cochange_block", fake_cochange, raising=False)
 
     # LANE-SPLIT 2026-06-13: contract AND cochange are now BOTH Lane A (the
     # always-on data plane).  They no longer COMPETE in the oracle gate — the
@@ -182,20 +177,17 @@ def test_outranked_l5_failure_nudge_rearms(patch_mod, monkeypatch, tmp_path):
     """A sev-tie loser (l5.failure vs consensus.scope at the review turn) must
     not permanently lose its fire-once class."""
     _reset_oracle_state(patch_mod, monkeypatch, tmp_path)
-    monkeypatch.setattr(patch_mod, "_oracle_focus_cache", {"anything"},
-                        raising=False)
-    monkeypatch.setattr(patch_mod, "_classify", lambda c: (None, None),
-                        raising=False)
+    monkeypatch.setattr(patch_mod, "_oracle_focus_cache", {"anything"}, raising=False)
+    monkeypatch.setattr(patch_mod, "_classify", lambda c: (None, None), raising=False)
     monkeypatch.setattr(patch_mod, "_evidence", lambda c: "", raising=False)
     monkeypatch.setattr(patch_mod, "_l5_nudge", lambda c, o="", **k: "", raising=False)
-    monkeypatch.setattr(patch_mod, "_l5_no_test_evidence_nudge",
-                        lambda c, o: "", raising=False)
-    scope_block = ('\n<gt-scope reason="completeness">\nanything pkg/b.py — in '
-                   "GT scope, not yet edited\n</gt-scope>")
-    monkeypatch.setattr(patch_mod, "_scope_completeness_block",
-                        lambda: scope_block, raising=False)
-    monkeypatch.setattr(patch_mod, "_oracle_edited_rels", {"pkg/a.py"},
-                        raising=False)
+    monkeypatch.setattr(patch_mod, "_l5_no_test_evidence_nudge", lambda c, o: "", raising=False)
+    scope_block = (
+        '\n<gt-scope reason="completeness">\nanything pkg/b.py — in '
+        "GT scope, not yet edited\n</gt-scope>"
+    )
+    monkeypatch.setattr(patch_mod, "_scope_completeness_block", lambda: scope_block, raising=False)
+    monkeypatch.setattr(patch_mod, "_oracle_edited_rels", {"pkg/a.py"}, raising=False)
     monkeypatch.setattr(patch_mod, "_oracle_nonedit_streak", 2, raising=False)
 
     nudge = '\n<gt-nudge reason="failure_persisted">\nGT: anything persisted\n</gt-nudge>'
@@ -207,8 +199,7 @@ def test_outranked_l5_failure_nudge_rearms(patch_mod, monkeypatch, tmp_path):
         return nudge
 
     monkeypatch.setattr(patch_mod, "_l5_failure_fired", False, raising=False)
-    monkeypatch.setattr(patch_mod, "_l5_failure_nudge", fake_failure,
-                        raising=False)
+    monkeypatch.setattr(patch_mod, "_l5_failure_nudge", fake_failure, raising=False)
 
     # review-transition turn: scope (sev 2) and failure nudge (sev 2) co-fire;
     # whichever loses must re-arm its latch.
@@ -229,25 +220,19 @@ def test_outranked_l5_failure_nudge_rearms(patch_mod, monkeypatch, tmp_path):
 # Defect 2 — an EMPTY scope-completeness block must not consume the
 # review-transition latch.
 # ---------------------------------------------------------------------------
-def test_empty_scope_block_does_not_consume_review_latch(patch_mod, monkeypatch,
-                                                         tmp_path):
+def test_empty_scope_block_does_not_consume_review_latch(patch_mod, monkeypatch, tmp_path):
     _reset_oracle_state(patch_mod, monkeypatch, tmp_path)
     monkeypatch.setattr(patch_mod, "_oracle_focus_cache", set(), raising=False)
-    monkeypatch.setattr(patch_mod, "_classify", lambda c: (None, None),
-                        raising=False)
+    monkeypatch.setattr(patch_mod, "_classify", lambda c: (None, None), raising=False)
     monkeypatch.setattr(patch_mod, "_evidence", lambda c: "", raising=False)
     monkeypatch.setattr(patch_mod, "_l5_nudge", lambda c, o="", **k: "", raising=False)
-    monkeypatch.setattr(patch_mod, "_l5_failure_nudge", lambda c, o: "",
-                        raising=False)
-    monkeypatch.setattr(patch_mod, "_l5_no_test_evidence_nudge",
-                        lambda c, o: "", raising=False)
+    monkeypatch.setattr(patch_mod, "_l5_failure_nudge", lambda c, o: "", raising=False)
+    monkeypatch.setattr(patch_mod, "_l5_no_test_evidence_nudge", lambda c, o: "", raising=False)
     # review transition reached, but the completeness check has nothing to say
     # (nothing edited in scope -> "").
-    monkeypatch.setattr(patch_mod, "_oracle_edited_rels", {"pkg/other.py"},
-                        raising=False)
+    monkeypatch.setattr(patch_mod, "_oracle_edited_rels", {"pkg/other.py"}, raising=False)
     monkeypatch.setattr(patch_mod, "_oracle_nonedit_streak", 3, raising=False)
-    monkeypatch.setattr(patch_mod, "_consensus_scope", {"pkg/a.py"},
-                        raising=False)
+    monkeypatch.setattr(patch_mod, "_consensus_scope", {"pkg/a.py"}, raising=False)
     out = {"output": "x"}
     patch_mod._augment_output({"command": "ls"}, out)
     assert patch_mod._oracle_review_fired is False, (
@@ -263,7 +248,7 @@ def test_empty_scope_block_does_not_consume_review_latch(patch_mod, monkeypatch,
 def test_streaming_failure_confidence_matches_pure(sense_mod, oracle_mod):
     turns = [
         _turn(sense_mod, "sed -i 's/a/b/' pkg/m.py", ""),
-        _turn(sense_mod, "pytest -x", ""),                      # killed: empty obs
+        _turn(sense_mod, "pytest -x", ""),  # killed: empty obs
         _turn(sense_mod, "pytest -x", "FAILED test_x.py::t"),
         _turn(sense_mod, "pytest -x", "FAILED test_x.py::t"),
     ]
@@ -293,8 +278,8 @@ def test_spec_sentence_initial_english_caps_not_symbols():
         "get_user must return Optional[User]."
     )
     assert "capture_snapshot" in spec.all_symbols
-    assert "KeyError" in spec.all_symbols          # CamelCase-internal kept
-    assert "Optional" in spec.all_symbols          # mid-fragment capital kept
+    assert "KeyError" in spec.all_symbols  # CamelCase-internal kept
+    assert "Optional" in spec.all_symbols  # mid-fragment capital kept
     for noise in ("The", "When"):
         assert noise not in spec.all_symbols, (
             f"fragment-initial English word {noise!r} admitted as an obligation "
@@ -323,10 +308,12 @@ def test_callee_sig_args_preserves_nonpython_bounds():
     sys.path.insert(0, str(_ROOT / "src"))
     from groundtruth.pretask.contract_map import _callee_sig_args
 
-    rust = ("fn from_copy_closure_with_captures<F, T>(closure: F, captures: T) "
-            "-> NativeFunction where F: Fn(&JsValue, &[JsValue], &mut T, "
-            "&mut Context) -> JsResult<JsValue> + Copy + 'static, "
-            "T: Trace + 'static")
+    rust = (
+        "fn from_copy_closure_with_captures<F, T>(closure: F, captures: T) "
+        "-> NativeFunction where F: Fn(&JsValue, &[JsValue], &mut T, "
+        "&mut Context) -> JsResult<JsValue> + Copy + 'static, "
+        "T: Trace + 'static"
+    )
     out = _callee_sig_args(rust, "from_copy_closure_with_captures")
     assert "T: Trace + 'static" in out, (
         "the boa [86] killing fact was re-stripped by the brief renderer — "
@@ -348,8 +335,7 @@ def test_oracle_import_fails_loud_without_sensor(tmp_path):
     # no gt_oracle_sense.py sibling, and no cached module instance:
     for key in ("gt_oracle_sense_oracle", "gt_mini_patch_oracle"):
         sys.modules.pop(key, None)
-    spec = importlib.util.spec_from_file_location("gt_oracle_iso",
-                                                  iso / "gt_oracle.py")
+    spec = importlib.util.spec_from_file_location("gt_oracle_iso", iso / "gt_oracle.py")
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
     sys.modules["gt_oracle_iso"] = mod  # dataclass annotation resolution needs it

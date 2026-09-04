@@ -17,6 +17,7 @@ These fixtures are built from the OBSERVED beets failure topology (a function
 whose body re-raises a captured exc_info tuple with .with_traceback), NOT from
 reading the implementation.
 """
+
 from __future__ import annotations
 
 import sqlite3

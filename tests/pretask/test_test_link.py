@@ -1,4 +1,5 @@
 """Tests for v2.2 test_link module."""
+
 from __future__ import annotations
 
 from groundtruth.pretask.test_link import (
@@ -69,9 +70,7 @@ def test_score_substring_match() -> None:
 
 def test_score_substring_match_relative() -> None:
     q = QueryObject(function_hints=["test_helpers"])
-    scores = score_test_to_source(
-        ["src/helpers.py", "src/auth_helpers.py"], q
-    )
+    scores = score_test_to_source(["src/helpers.py", "src/auth_helpers.py"], q)
     # exact wins (1.0), substring (0.7) normalized to 0.7
     assert scores["src/helpers.py"] == 1.0
     assert scores["src/auth_helpers.py"] < 1.0
@@ -80,9 +79,7 @@ def test_score_substring_match_relative() -> None:
 
 def test_score_segment_match() -> None:
     q = QueryObject(function_hints=["test_login"])
-    scores = score_test_to_source(
-        ["src/auth/login_handler.py", "src/other/foo.py"], q
-    )
+    scores = score_test_to_source(["src/auth/login_handler.py", "src/other/foo.py"], q)
     assert "src/auth/login_handler.py" in scores
     assert scores["src/auth/login_handler.py"] > 0.0
 
@@ -95,24 +92,18 @@ def test_score_no_test_names_returns_empty() -> None:
 
 def test_score_normalized_to_max_1() -> None:
     q = QueryObject(function_hints=["test_auth"])
-    scores = score_test_to_source(
-        ["src/auth.py", "src/auth_handlers.py", "src/users.py"], q
-    )
+    scores = score_test_to_source(["src/auth.py", "src/auth_handlers.py", "src/users.py"], q)
     assert any(v == 1.0 for v in scores.values())
 
 
 def test_score_handles_camelcase_tests() -> None:
     q = QueryObject(function_hints=["testRidgeClassifier"])
-    scores = score_test_to_source(
-        ["sklearn/linear_model/ridge.py", "sklearn/svm/base.py"], q
-    )
+    scores = score_test_to_source(["sklearn/linear_model/ridge.py", "sklearn/svm/base.py"], q)
     assert "sklearn/linear_model/ridge.py" in scores
     assert scores["sklearn/linear_model/ridge.py"] > 0.0
 
 
 def test_all_test_files_returns_empty() -> None:
     q = QueryObject(function_hints=["test_auth"])
-    scores = score_test_to_source(
-        ["tests/test_auth.py", "tests/test_users.py"], q
-    )
+    scores = score_test_to_source(["tests/test_auth.py", "tests/test_users.py"], q)
     assert scores == {}

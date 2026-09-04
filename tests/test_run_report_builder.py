@@ -7,6 +7,7 @@ Covers (per docs/RESEARCH_ARTIFACT_SPEC_20260610.md):
   - no fabrication: a field deleted from input never appears as a number in output
   - n<5 cells report counts, not rates
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -24,11 +25,17 @@ sys.modules["build_run_report"] = brr
 _spec.loader.exec_module(brr)
 
 EXPECTED_FILES = [
-    "experiment_card.json", "tasks_normalized.json",
-    "layer_effectiveness.md", "layer_effectiveness.csv",
-    "failure_taxonomy.md", "failure_taxonomy.csv",
-    "token_economics.md", "language_depth.md",
-    "behavioral_deltas.md", "integrity_chain.md", "TECH_REPORT_DRAFT.md",
+    "experiment_card.json",
+    "tasks_normalized.json",
+    "layer_effectiveness.md",
+    "layer_effectiveness.csv",
+    "failure_taxonomy.md",
+    "failure_taxonomy.csv",
+    "token_economics.md",
+    "language_depth.md",
+    "behavioral_deltas.md",
+    "integrity_chain.md",
+    "TECH_REPORT_DRAFT.md",
 ]
 
 TASK_A = "acme__widgets-101"
@@ -49,45 +56,86 @@ def make_gha_run(root: Path, *, with_cost: bool = True, with_scorecard: bool = T
         "outcome": "unresolved_with_patch",
         "resolved": None,
         "has_patch": True,
-        "graph_nodes": 100.0, "graph_edges": 250.0,
-        "verified_edge_count": 200.0, "verified_edge_ratio": 0.8,
+        "graph_nodes": 100.0,
+        "graph_edges": 250.0,
+        "verified_edge_count": 200.0,
+        "verified_edge_ratio": 0.8,
         "fts5_row_count": 100.0,
-        "lsp_server_name": "pyright", "lsp_enriched_edge_count": 40.0,
-        "embedder_vector_dim": 384.0, "embedder_nonzero": True, "semantic_enabled": True,
+        "lsp_server_name": "pyright",
+        "lsp_enriched_edge_count": 40.0,
+        "embedder_vector_dim": 384.0,
+        "embedder_nonzero": True,
+        "semantic_enabled": True,
         "gt_injected_tokens_total": 1300.0,
         "per_layer": {
-            "L1": {"eligible": 1.0, "emitted": 1.0, "suppressed": 0.0,
-                   "rendered_tokens_total": 500.0, "utilization_score": 0.75},
+            "L1": {
+                "eligible": 1.0,
+                "emitted": 1.0,
+                "suppressed": 0.0,
+                "rendered_tokens_total": 500.0,
+                "utilization_score": 0.75,
+            },
         },
         "agent": {"action_count": 52.0, "first_edit_action": 32.0},
         "efficiency": {},
     }
     if with_cost:
         dm["efficiency"] = {
-            "llm_calls": 49.0, "llm_tokens_in": 1000.0, "llm_tokens_out": 100.0,
-            "llm_tokens_cached": 0.0, "llm_cache_hit_tokens": 0.0,
-            "llm_cache_miss_tokens": 0.0, "llm_cost_usd": 0.1673,
+            "llm_calls": 49.0,
+            "llm_tokens_in": 1000.0,
+            "llm_tokens_out": 100.0,
+            "llm_tokens_cached": 0.0,
+            "llm_cache_hit_tokens": 0.0,
+            "llm_cache_miss_tokens": 0.0,
+            "llm_cost_usd": 0.1673,
             "gt_injection_overhead_pct": 0.11,
         }
     (dbg / f"gt_deep_metrics_{TASK_A}.json").write_text(json.dumps(dm), encoding="utf-8")
     events = [
-        {"layer": "L1", "eligible": True, "emitted": True, "suppressed": False,
-         "iter": 0, "max_iter": 100, "rendered_text": "<gt-localization>candidates</gt-localization>"},
-        {"layer": "L4", "eligible": True, "emitted": False, "suppressed": True,
-         "iter": 0, "max_iter": 100, "suppression_reason": "no_prefetch_results"},
+        {
+            "layer": "L1",
+            "eligible": True,
+            "emitted": True,
+            "suppressed": False,
+            "iter": 0,
+            "max_iter": 100,
+            "rendered_text": "<gt-localization>candidates</gt-localization>",
+        },
+        {
+            "layer": "L4",
+            "eligible": True,
+            "emitted": False,
+            "suppressed": True,
+            "iter": 0,
+            "max_iter": 100,
+            "suppression_reason": "no_prefetch_results",
+        },
     ]
     (dbg / f"gt_layer_events_{TASK_A}.jsonl").write_text(
-        "\n".join(json.dumps(e) for e in events), encoding="utf-8")
+        "\n".join(json.dumps(e) for e in events), encoding="utf-8"
+    )
     (run / "output.jsonl").write_text('{"id": 1, "action": "read"}\n', encoding="utf-8")
-    (run / "eval_result.json").write_text(json.dumps({
-        "resolved_ids": [], "unresolved_ids": [TASK_A]}), encoding="utf-8")
+    (run / "eval_result.json").write_text(
+        json.dumps({"resolved_ids": [], "unresolved_ids": [TASK_A]}), encoding="utf-8"
+    )
     if with_scorecard:
-        (run / "scorecard.json").write_text(json.dumps({
-            "task": TASK_A, "run_id": "999",
-            "tier1_outcome": {"resolved": 0},
-            "tier2_causality": {"delivered": 1, "correct": 0, "consumed": 0, "gt_caused": 0},
-            "tier6_legitimacy": {"no_gold_labels": True},
-        }), encoding="utf-8")
+        (run / "scorecard.json").write_text(
+            json.dumps(
+                {
+                    "task": TASK_A,
+                    "run_id": "999",
+                    "tier1_outcome": {"resolved": 0},
+                    "tier2_causality": {
+                        "delivered": 1,
+                        "correct": 0,
+                        "consumed": 0,
+                        "gt_caused": 0,
+                    },
+                    "tier6_legitimacy": {"no_gold_labels": True},
+                }
+            ),
+            encoding="utf-8",
+        )
     return run
 
 
@@ -96,40 +144,81 @@ def make_vm_run(root: Path) -> Path:
     tdir = run / TASK_B
     gt = tdir / "gt"
     gt.mkdir(parents=True)
-    (tdir / "row.json").write_text(json.dumps({
-        "instance_id": TASK_B, "language": "go", "image": "img:tag",
-        "model": "vertex_ai/some-model", "pier_config": "cfg.yaml",
-        "failure_class": "", "pier_rc": 0, "proof_reused": False,
-        "outcome_class": "RESOLVED", "in_resolved_denominator": True,
-        "reward": 1, "n_agent_steps": 17, "exit_status": "submitted",
-        "gt_prebuilt_active": True, "hook_hash_match": True,
-        "timings_s": {"task_pull": 30, "proof": 120, "agent": 600, "substrate_pull": 10},
-        "task_repo_commit": "deadbeef00", "deepswe_bench_sha": "bench123",
-        "gt_git_commit": "abc123def456", "substrate_digest": "ghcr.io/x@sha256:fff",
-        "run_id": "vm_sweep_1", "ts_utc": "2026-06-10T00:00:00Z",
-    }), encoding="utf-8")
+    (tdir / "row.json").write_text(
+        json.dumps(
+            {
+                "instance_id": TASK_B,
+                "language": "go",
+                "image": "img:tag",
+                "model": "vertex_ai/some-model",
+                "pier_config": "cfg.yaml",
+                "failure_class": "",
+                "pier_rc": 0,
+                "proof_reused": False,
+                "outcome_class": "RESOLVED",
+                "in_resolved_denominator": True,
+                "reward": 1,
+                "n_agent_steps": 17,
+                "exit_status": "submitted",
+                "gt_prebuilt_active": True,
+                "hook_hash_match": True,
+                "timings_s": {"task_pull": 30, "proof": 120, "agent": 600, "substrate_pull": 10},
+                "task_repo_commit": "deadbeef00",
+                "deepswe_bench_sha": "bench123",
+                "gt_git_commit": "abc123def456",
+                "substrate_digest": "ghcr.io/x@sha256:fff",
+                "run_id": "vm_sweep_1",
+                "ts_utc": "2026-06-10T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
     (gt / "graph.db").write_bytes(b"FAKE GRAPH DB BYTES")
-    (gt / "graph_certificate.json").write_text(json.dumps({
-        "nodes_count": 89, "edges_count": 95, "calls_count": 89, "det_pct": 100.0,
-        "deterministic_count": 89, "name_match_count": 0, "fts5_row_count": 89,
-        "fts5_match_probe_ok": True, "assertions_count": 68,
-        "resolution_method_dist": {"import": 52, "same_file": 35, "verified_unique": 2},
-        "schema_version": "v15.2-trust-tier",
-    }), encoding="utf-8")
-    (gt / "lsp_certificate.json").write_text(json.dumps({
-        "resolved": 0, "residual": 0, "lsp_no_op_valid": True,
-        "lsp_no_op_reason": "residual=0 (no in-scope name_match demand)",
-    }), encoding="utf-8")
-    (gt / "run_manifest.json").write_text(json.dumps({
-        "graph_hash": "ghash111"}), encoding="utf-8")
+    (gt / "graph_certificate.json").write_text(
+        json.dumps(
+            {
+                "nodes_count": 89,
+                "edges_count": 95,
+                "calls_count": 89,
+                "det_pct": 100.0,
+                "deterministic_count": 89,
+                "name_match_count": 0,
+                "fts5_row_count": 89,
+                "fts5_match_probe_ok": True,
+                "assertions_count": 68,
+                "resolution_method_dist": {"import": 52, "same_file": 35, "verified_unique": 2},
+                "schema_version": "v15.2-trust-tier",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (gt / "lsp_certificate.json").write_text(
+        json.dumps(
+            {
+                "resolved": 0,
+                "residual": 0,
+                "lsp_no_op_valid": True,
+                "lsp_no_op_reason": "residual=0 (no in-scope name_match demand)",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (gt / "run_manifest.json").write_text(json.dumps({"graph_hash": "ghash111"}), encoding="utf-8")
     trial = tdir / "pier" / "jobs" / "2026-06-10__00-00-00" / "trial__abc"
     (trial / "agent").mkdir(parents=True)
     (trial / "verifier").mkdir()
     (trial / "artifacts").mkdir()
-    (trial / "result.json").write_text(json.dumps({
-        "task_name": f"datacurve/{TASK_B}", "trial_name": "trial__abc",
-        "task_checksum": "chk", "config": {"agent": {"model_name": "vertex_ai/some-model"}},
-    }), encoding="utf-8")
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": f"datacurve/{TASK_B}",
+                "trial_name": "trial__abc",
+                "task_checksum": "chk",
+                "config": {"agent": {"model_name": "vertex_ai/some-model"}},
+            }
+        ),
+        encoding="utf-8",
+    )
     (trial / "agent" / "mini-swe-agent.txt").write_text("step 1\nstep 2\n", encoding="utf-8")
     (trial / "verifier" / "reward.txt").write_text("1", encoding="utf-8")
     (trial / "artifacts" / "model.patch").write_text("diff --git a b\n", encoding="utf-8")
@@ -142,10 +231,17 @@ def make_pier_run(root: Path) -> Path:
     (trial / "agent").mkdir(parents=True)
     (trial / "verifier").mkdir()
     (trial / "artifacts").mkdir()
-    (trial / "result.json").write_text(json.dumps({
-        "task_name": "datacurve/pier-task-1", "trial_name": "task__xyz",
-        "task_checksum": "c1", "config": {"agent": {"model_name": "deepseek/deepseek-v4-flash"}},
-    }), encoding="utf-8")
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "datacurve/pier-task-1",
+                "trial_name": "task__xyz",
+                "task_checksum": "c1",
+                "config": {"agent": {"model_name": "deepseek/deepseek-v4-flash"}},
+            }
+        ),
+        encoding="utf-8",
+    )
     (trial / "agent" / "mini-swe-agent.txt").write_text("trajectory line\n", encoding="utf-8")
     (trial / "verifier" / "reward.txt").write_text("0", encoding="utf-8")
     (trial / "artifacts" / "model.patch").write_text("", encoding="utf-8")  # empty == no patch
@@ -254,8 +350,13 @@ def test_no_fabricated_numbers_for_deleted_fields(tmp_path):
     out = run_analyzer(run)
     tasks = json.loads((out / "tasks_normalized.json").read_text(encoding="utf-8"))
     t = tasks[0]
-    for field in ("n_agent_steps", "first_edit_action", "gt_injected_tokens",
-                  "llm_cost_usd", "edit_to_gold_action"):
+    for field in (
+        "n_agent_steps",
+        "first_edit_action",
+        "gt_injected_tokens",
+        "llm_cost_usd",
+        "edit_to_gold_action",
+    ):
         assert t[field] is None, f"{field} fabricated: {t[field]}"
     behav = (out / "behavioral_deltas.md").read_text(encoding="utf-8")
     assert "NOT COLLECTED" in behav
@@ -272,8 +373,7 @@ def test_small_n_reports_counts_not_rates(tmp_path):
     run = make_gha_run(tmp_path)
     out = run_analyzer(run)
     eff = (out / "layer_effectiveness.md").read_text(encoding="utf-8")
-    l1_row = next(line for line in eff.splitlines()
-                  if line.startswith("| L1 |"))
+    l1_row = next(line for line in eff.splitlines() if line.startswith("| L1 |"))
     assert "1/1" in l1_row
     assert "(" not in l1_row.split("|")[9]  # delivered_tasks cell: no rate in parens
     tax = (out / "failure_taxonomy.md").read_text(encoding="utf-8")

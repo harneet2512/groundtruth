@@ -17,6 +17,7 @@ Each test exercises real code paths against artifacts the relevant code
 path would produce on disk. None of these can be made to pass by editing
 the test alone.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -25,8 +26,6 @@ import json
 import os
 import sqlite3
 import sys
-import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -54,9 +53,7 @@ def gt_edit_state():
     )
 
 
-def test_resolve_graph_db_no_build_does_not_invoke_gt_index(
-    gt_edit_state, tmp_path, monkeypatch
-):
+def test_resolve_graph_db_no_build_does_not_invoke_gt_index(gt_edit_state, tmp_path, monkeypatch):
     """RC-15(a): the resolver MUST NOT call subprocess.run / gt-index.
 
     The legacy ``_ensure_graph_db_built`` path blocked the agent for up to
@@ -76,14 +73,10 @@ def test_resolve_graph_db_no_build_does_not_invoke_gt_index(
     assert called == [], "resolver invoked subprocess.run — sync build leaked"
 
 
-def test_resolve_graph_db_no_build_returns_existing_path(
-    gt_edit_state, tmp_path, monkeypatch
-):
+def test_resolve_graph_db_no_build_returns_existing_path(gt_edit_state, tmp_path, monkeypatch):
     db = tmp_path / "graph.db"
     db.write_bytes(b"sqlite-stub")
-    monkeypatch.setattr(
-        os.path, "isfile", lambda p: p == "/tmp/graph.db" or p == str(db)
-    )
+    monkeypatch.setattr(os.path, "isfile", lambda p: p == "/tmp/graph.db" or p == str(db))
     # Force the resolver to look at our tmp file by patching the candidate
     # tuple via a small wrapper. Easiest: monkeypatch isfile to claim
     # /tmp/graph.db exists and check the return.
@@ -149,11 +142,13 @@ def test_evidence_brief_cap_overridable(gt_edit_state, tmp_path, monkeypatch):
     long_brief = "\n".join(f"line {i}" for i in range(35))
 
     monkeypatch.setattr(
-        gt_edit_state, "_fire_gt_index_file",
+        gt_edit_state,
+        "_fire_gt_index_file",
         lambda *a, **k: {"file": a[1], "wall_ms": 1},
     )
     monkeypatch.setattr(
-        gt_edit_state, "_fire_gt_hook",
+        gt_edit_state,
+        "_fire_gt_hook",
         lambda *a, **k: {"file": a[1], "brief": long_brief},
     )
     monkeypatch.setenv("GT_STATE_PATH", str(tmp_path / "state.json"))
@@ -185,6 +180,7 @@ def gt_track4():
 
 def test_run_async_safely_no_loop_path(gt_track4):
     """asyncio.run path returns the coroutine result."""
+
     async def coro():
         return 42
 
@@ -195,6 +191,7 @@ def test_run_async_safely_no_loop_path(gt_track4):
 def test_run_async_safely_handles_running_loop(gt_track4):
     """When asyncio.run raises RuntimeError("running event loop"), the
     helper falls back to a worker-thread loop and still completes."""
+
     async def coro():
         await asyncio.sleep(0)
         return "from_inner"
@@ -236,7 +233,10 @@ def test_read_file_with_retry_three_attempts_then_fails(gt_track4):
     gt_track4.time.sleep = lambda s: sleeps.append(s)
     try:
         content, err = gt_track4._read_file_with_retry(
-            FakeEnv(), "/x/y", attempts=3, backoff_s=1.0,
+            FakeEnv(),
+            "/x/y",
+            attempts=3,
+            backoff_s=1.0,
         )
     finally:
         gt_track4.time.sleep = real_sleep
@@ -281,7 +281,9 @@ def test_read_file_with_retry_short_circuits_file_not_found(gt_track4):
             raise FileNotFoundError(path)
 
     content, err = gt_track4._read_file_with_retry(
-        FakeEnv(), "/x/y", attempts=3,
+        FakeEnv(),
+        "/x/y",
+        attempts=3,
     )
     assert content is None
     assert err == "file_not_found"
@@ -322,13 +324,15 @@ def test_compute_kernel_gates_streams_jsonl(verify_report, tmp_path, monkeypatch
 
     telemetry = run_dir / "gt_runtime_telemetry.jsonl"
     telemetry.write_text(
-        json.dumps({"block": "gt_pull", "gt_pull": {"kind": "search"}}) + "\n"
+        json.dumps({"block": "gt_pull", "gt_pull": {"kind": "search"}})
+        + "\n"
         + json.dumps(
             {
                 "block": "gt_pull",
                 "gt_pull": {"kind": "search", "error_class": "timeout"},
             }
-        ) + "\n"
+        )
+        + "\n"
     )
 
     # Trip wire: any read_text() against gt_output.jsonl or telemetry file
@@ -341,8 +345,7 @@ def test_compute_kernel_gates_streams_jsonl(verify_report, tmp_path, monkeypatch
         if s.endswith("gt_output.jsonl") or s.endswith("gt_runtime_telemetry.jsonl"):
             tripwire.append(s)
             raise AssertionError(
-                f"verify_report read_text fallback path used for {s} — "
-                "streaming regression"
+                f"verify_report read_text fallback path used for {s} — streaming regression"
             )
         return real_read_text(self, *args, **kwargs)
 

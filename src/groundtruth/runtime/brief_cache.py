@@ -16,6 +16,7 @@ FAIL-SAFE: any cache miss / read error / write error falls back to generating
 (``generated=True``) — it degrades to the prior double-generation, it NEVER breaks
 the proof or blocks ``brief.txt``. So this is a pure optimization with a safety net.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -26,8 +27,11 @@ from typing import Any, Optional
 BRIEF_CACHE_BASENAME = "brief_result.json"
 BRIEF_RESULT_SCHEMA = "gt.brief_result.v1"
 _METRIC_FIELDS = (
-    "effective_w_sem", "semantic_signal_count",
-    "rendered_candidate_count", "k_sem_top", "sem_components",
+    "effective_w_sem",
+    "semantic_signal_count",
+    "rendered_candidate_count",
+    "k_sem_top",
+    "sem_components",
 )
 
 
@@ -52,7 +56,11 @@ def _extract_metrics(obj: Any) -> dict:
     for k in _METRIC_FIELDS:
         v = _get(k)
         # sem_components may be a non-JSON-able object; keep only JSON-safe scalars/lists.
-        if k == "sem_components" and v is not None and not isinstance(v, (list, dict, int, float, str, bool)):
+        if (
+            k == "sem_components"
+            and v is not None
+            and not isinstance(v, (list, dict, int, float, str, bool))
+        ):
             try:
                 v = list(v)
             except TypeError:
@@ -98,8 +106,9 @@ def load_cached_brief(out_dir: str, expect_identity: Optional[str] = None) -> Op
     return None
 
 
-def persist_brief(out_dir: str, brief_text: str, result_obj: Any = None,
-                  identity: str = "") -> dict:
+def persist_brief(
+    out_dir: str, brief_text: str, result_obj: Any = None, identity: str = ""
+) -> dict:
     """Best-effort persist of the brief text + sha + request identity + metrics for
     cross-process reuse. Returns the dict regardless of whether the write succeeded."""
     text = (brief_text or "").strip()
@@ -118,8 +127,9 @@ def persist_brief(out_dir: str, brief_text: str, result_obj: Any = None,
     return d
 
 
-def get_or_generate(out_dir: str, issue_text: str, work: str, graph: str,
-                    generator: Any = None) -> dict:
+def get_or_generate(
+    out_dir: str, issue_text: str, work: str, graph: str, generator: Any = None
+) -> dict:
     """Single-generation entry point. Returns
     ``{schema, brief_text, brief_sha256, metrics, generated: bool}``.
 

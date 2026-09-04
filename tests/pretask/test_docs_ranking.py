@@ -1,4 +1,5 @@
 """Tests for docs/source file ranking adjustment (Phase 2.2)."""
+
 from __future__ import annotations
 
 from groundtruth.pretask.v7_4_brief import _is_docs_file, _is_source_dir

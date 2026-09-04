@@ -122,7 +122,7 @@ def test_trace_probe_is_fallback_only_and_uses_strong_trace_text() -> None:
         _rec("src/b.py", 0.09),
         _rec("src/c.py", 0.08),
     ]
-    trace = "FAILED loading config tests/fixtures/case.json\nFile \"src/failure.py\", line 12"
+    trace = 'FAILED loading config tests/fixtures/case.json\nFile "src/failure.py", line 12'
 
     result = govern(gt, [], early_trace_text=trace, preferred_max=3, hard_ceiling=5)
 

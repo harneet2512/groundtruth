@@ -1,5 +1,4 @@
 """Tests for cross-file scope in L1 brief."""
-from dataclasses import dataclass, field
 
 from groundtruth.pretask.v1r_brief import render_brief, FileEntry
 
@@ -78,10 +77,12 @@ class TestScopeInBrief:
         """Scope and directive can coexist when top entry is [VERIFIED]."""
         # Per Cursor-style philosophy, directive only fires on [VERIFIED] top
         # entry. Add a function-name contract so it qualifies.
-        entries = [_make_entry(
-            "src/app.py",
-            contract="run() in src/main.py:10 `app.run()`",
-        )]
+        entries = [
+            _make_entry(
+                "src/app.py",
+                contract="run() in src/main.py:10 `app.run()`",
+            )
+        ]
         scores = [0.9, 0.3]  # big gap → high confidence directive
         result = render_brief(
             entries,

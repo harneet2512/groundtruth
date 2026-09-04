@@ -36,13 +36,13 @@ VERDICTS at authoring (HEAD = gt-trial b3398595), verified by reading the code:
          floor the review names lives in the file-disjoint hub_penalty/graph_reach/
          anchor_proximity modules — out of this cluster's scope. Documented seam.
 """
+
 from __future__ import annotations
 
 import sqlite3
 
 from groundtruth.pretask.graph_localizer import (
     Candidate,
-    Witness,
     _final_relevance_key,
     _is_generated,
     _normalize,
@@ -109,11 +109,9 @@ def _make_dotslash_gold_db(tmp_path):
         "is_test,language) VALUES (?,?,?,?,?,?,?,0,'python')",
         [
             # gold: defined at the './'-prefixed dotfile-dir spelling
-            (1, "Method", "apply_hook", "./.ci/runner.py", 10, 40,
-             "def apply_hook(self, cfg):"),
+            (1, "Method", "apply_hook", "./.ci/runner.py", 10, 40, "def apply_hook(self, cfg):"),
             # a caller in a plain dir that CALLS apply_hook (verified) — extends BFS
-            (2, "Function", "drive", "pipeline/drive.py", 1, 8,
-             "def drive():"),
+            (2, "Function", "drive", "pipeline/drive.py", 1, 8, "def drive():"),
         ],
     )
     conn.execute(
@@ -163,11 +161,19 @@ def test_final_relevance_key_puts_path_string_last() -> None:
     # 'zzz.py' has STRONGER relevance (higher confidence, earlier subject) than the
     # alphabetically-FIRST 'aaa.py'. The relevance key must rank zzz.py first.
     strong = Candidate(
-        file_path="zzz.py", score=0.5, witnesses=[], lex_hits=3, degree=0,
+        file_path="zzz.py",
+        score=0.5,
+        witnesses=[],
+        lex_hits=3,
+        degree=0,
         confidence=0.9,
     )
     weak = Candidate(
-        file_path="aaa.py", score=0.5, witnesses=[], lex_hits=1, degree=0,
+        file_path="aaa.py",
+        score=0.5,
+        witnesses=[],
+        lex_hits=1,
+        degree=0,
         confidence=0.4,
     )
     subject_pos = {"zzz.py": 2, "aaa.py": 50}
@@ -178,10 +184,8 @@ def test_final_relevance_key_puts_path_string_last() -> None:
     )
     # and the path string is genuinely last: two candidates equal on all relevance
     # signals fall back to path order (insertion-stable, deterministic).
-    a = Candidate(file_path="a.py", score=0.5, witnesses=[], lex_hits=2, degree=0,
-                  confidence=0.7)
-    b = Candidate(file_path="b.py", score=0.5, witnesses=[], lex_hits=2, degree=0,
-                  confidence=0.7)
+    a = Candidate(file_path="a.py", score=0.5, witnesses=[], lex_hits=2, degree=0, confidence=0.7)
+    b = Candidate(file_path="b.py", score=0.5, witnesses=[], lex_hits=2, degree=0, confidence=0.7)
     sp = {"a.py": 5, "b.py": 5}
     tied = sorted([b, a], key=lambda c: _final_relevance_key(c, sp))
     assert [c.file_path for c in tied] == ["a.py", "b.py"]
@@ -199,8 +203,7 @@ def _final_sort_key(c: Candidate, subject_pos: "dict[str, int]") -> tuple:
     rrf_tied = 0.0  # all candidates share the same fusion mass in this regime
     grep_floor = 0  # no grep recall -> floor is a no-op (every file at 0)
     depth_authority = 0
-    return (grep_floor, depth_authority, -rrf_tied,
-            *_final_relevance_key(c, subject_pos))
+    return (grep_floor, depth_authority, -rrf_tied, *_final_relevance_key(c, subject_pos))
 
 
 def test_final_sort_rrf_tie_resolved_by_subject_not_alpha() -> None:
@@ -218,12 +221,20 @@ def test_final_sort_rrf_tie_resolved_by_subject_not_alpha() -> None:
     # discriminator left is subject position: 'zeta/widget.py' defines the broken,
     # first-named function (subject_pos 0); 'alpha/cache.py' is its callee (pos 30).
     subject = Candidate(
-        file_path="zeta/widget.py", score=0.50, witnesses=[], lex_hits=2,
-        degree=0, confidence=0.5,
+        file_path="zeta/widget.py",
+        score=0.50,
+        witnesses=[],
+        lex_hits=2,
+        degree=0,
+        confidence=0.5,
     )
     callee = Candidate(
-        file_path="alpha/cache.py", score=0.50, witnesses=[], lex_hits=2,
-        degree=0, confidence=0.5,
+        file_path="alpha/cache.py",
+        score=0.50,
+        witnesses=[],
+        lex_hits=2,
+        degree=0,
+        confidence=0.5,
     )
     subject_pos = {"zeta/widget.py": 0, "alpha/cache.py": 30}
     ordered = sorted([callee, subject], key=lambda c: _final_sort_key(c, subject_pos))

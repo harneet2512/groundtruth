@@ -1,7 +1,6 @@
 """BUG-C4 + Patch 2: post_view.py correctness tests."""
-import os
+
 import sqlite3
-import tempfile
 
 
 def test_graph_navigation_error_goes_to_stderr(capsys, tmp_path):

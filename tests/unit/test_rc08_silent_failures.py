@@ -4,10 +4,10 @@ These tests cover the new ``groundtruth.observability.silent_failures``
 helper plus the ``verify_report._load`` contract change (file missing vs
 file present-but-corrupt) and the new silent_failures gate.
 """
+
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -50,8 +50,7 @@ def test_silent_failures_count_separates_corrupt_lines(tmp_path):
     sf = tmp_path / "silent_failures.jsonl"
     sf.write_text(
         json.dumps({"site": "ok", "ts": 1.0}) + "\n"
-        "{not valid json\n"
-        + json.dumps({"site": "ok2", "ts": 2.0}) + "\n"
+        "{not valid json\n" + json.dumps({"site": "ok2", "ts": 2.0}) + "\n"
     )
     records, bad = count_from_file(str(sf))
     assert records == 2
@@ -67,13 +66,16 @@ def test_silent_failures_no_env_is_logger_only(tmp_path, monkeypatch):
 
 def test_silent_failures_count_missing_file_returns_zero():
     from groundtruth.observability.silent_failures import count_from_file
+
     assert count_from_file("/no/such/path") == (0, 0)
 
 
 # --- verify_report._load contract --------------------------------------------
 
+
 def _import_verify_report():
     import importlib
+
     sys.path.insert(0, str(_REPO / "scripts" / "swebench"))
     return importlib.import_module("verify_report")
 
@@ -151,13 +153,24 @@ def test_verify_report_load_jsonl_unicode_decode_error_returns_empty(tmp_path, m
 
 # --- RC-08: compute()/_cmd_append corrupt-summary contract -------------------
 
+
 def _write_min_summary(d: Path):
-    (d / "gt_arm_summary.json").write_text(json.dumps({
-        "arm": "test", "task_count": 1, "ack_armed_total": 1,
-        "steer_delivered_total": 1, "ack_engagement_total": 1,
-        "material_edit_total": 1, "delivery_rate": 1.0, "engagement_rate": 1.0,
-        "must_ok_rate": 1.0, "has_patch_rate": 1.0,
-    }))
+    (d / "gt_arm_summary.json").write_text(
+        json.dumps(
+            {
+                "arm": "test",
+                "task_count": 1,
+                "ack_armed_total": 1,
+                "steer_delivered_total": 1,
+                "ack_engagement_total": 1,
+                "material_edit_total": 1,
+                "delivery_rate": 1.0,
+                "engagement_rate": 1.0,
+                "must_ok_rate": 1.0,
+                "has_patch_rate": 1.0,
+            }
+        )
+    )
 
 
 def test_compute_clears_parse_failures_per_call(tmp_path):
@@ -193,8 +206,7 @@ def test_cmd_append_corrupt_json_exits_clean_not_crash(tmp_path, capsys):
     vr = _import_verify_report()
     (tmp_path / "gt_arm_summary.json").write_text("{not valid json")
 
-    args = type("Args", (), {"run_dir": str(tmp_path), "doc": None,
-                             "no_append": True})()
+    args = type("Args", (), {"run_dir": str(tmp_path), "doc": None, "no_append": True})()
     rc = vr._cmd_append(args)
     assert rc == 2
     err = capsys.readouterr().err
@@ -208,8 +220,7 @@ def test_cmd_append_corrupt_classification_exits_clean(tmp_path, capsys):
     _write_min_summary(tmp_path)
     (tmp_path / "run_classification.json").write_text("{broken")
 
-    args = type("Args", (), {"run_dir": str(tmp_path), "doc": None,
-                             "no_append": True})()
+    args = type("Args", (), {"run_dir": str(tmp_path), "doc": None, "no_append": True})()
     rc = vr._cmd_append(args)
     assert rc == 2
     assert "present-but-corrupt" in capsys.readouterr().err
@@ -217,7 +228,10 @@ def test_cmd_append_corrupt_classification_exits_clean(tmp_path, capsys):
 
 # --- v22_brief silent-failure wiring -----------------------------------------
 
-@pytest.mark.skip(reason="DEAD SURFACE retired — v22_brief guarded fail-closed (zero live importer); see test_dead_surface_guards.py")
+
+@pytest.mark.skip(
+    reason="DEAD SURFACE retired — v22_brief guarded fail-closed (zero live importer); see test_dead_surface_guards.py"
+)
 def test_v22_brief_records_rank_files_failure(tmp_path, monkeypatch):
     """rank_files raises → record() is called via the new wrapper, NOT pass."""
     sf = tmp_path / "sf.jsonl"
@@ -232,12 +246,11 @@ def test_v22_brief_records_rank_files_failure(tmp_path, monkeypatch):
 
     fake_rank.rank_files = _bad_rank_files  # type: ignore[attr-defined]
     fake_rank.rank_functions = lambda *a, **kw: []  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules,
-                        "groundtruth.pretask.query_preprocessor", fake_pre)
-    monkeypatch.setitem(sys.modules,
-                        "groundtruth.pretask.v2_ranker", fake_rank)
+    monkeypatch.setitem(sys.modules, "groundtruth.pretask.query_preprocessor", fake_pre)
+    monkeypatch.setitem(sys.modules, "groundtruth.pretask.v2_ranker", fake_rank)
 
     from groundtruth.pretask import v22_brief
+
     # generate_brief returns "" if graph_db_path doesn't exist, so create it.
     (tmp_path / "g.db").write_text("")
     out = v22_brief.generate_brief(
@@ -246,7 +259,7 @@ def test_v22_brief_records_rank_files_failure(tmp_path, monkeypatch):
         graph_db_path=str(tmp_path / "g.db"),
     )
     assert out == ""  # ranked_files empty → empty brief, BUT the failure
-                       # must have been recorded.
+    # must have been recorded.
     assert sf.is_file(), "rank_files exception must be recorded"
     rec = [json.loads(ln) for ln in sf.read_text().splitlines() if ln.strip()]
     assert any("v22_brief.rank_files" == r["site"] for r in rec)

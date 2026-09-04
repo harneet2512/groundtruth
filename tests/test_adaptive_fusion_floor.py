@@ -22,6 +22,7 @@ All inputs are synthetic and generalized — no benchmark task IDs, gold files, 
 repo-specific shapes. The classifier signals (rule-code regex, backtick code
 symbols, graph-resolved paths, prose function-word ratio) are language-agnostic.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -261,7 +262,9 @@ def test_mixed_is_byte_identical_to_base_with_no_other_signal():
     w = _adapt_weights_for_issue(
         {}, {}, dict(DEFAULT_WEIGHTS), issue_text="broken", issue_anchors=IssueAnchors()
     )
-    assert w == base, f"mixed must equal base; diff={ {k: (base.get(k), w.get(k)) for k in set(base)|set(w) if base.get(k) != w.get(k)} }"
+    assert w == base, (
+        f"mixed must equal base; diff={ {k: (base.get(k), w.get(k)) for k in set(base) | set(w) if base.get(k) != w.get(k)} }"
+    )
 
 
 def test_base_w_sem_is_dense_led():
@@ -312,8 +315,11 @@ def test_dim1_direct_assignment_preserved_off_identifier_heavy():
     """No-regression: off identifier_heavy (mixed), Dim-1's documented direct
     assignment stands byte-identical (frames demote lexical to let frame lead)."""
     w = _adapt_weights_for_issue(
-        {"src/mod.py": 1.0}, {}, dict(DEFAULT_WEIGHTS),
-        issue_text="broken", issue_anchors=IssueAnchors(),
+        {"src/mod.py": 1.0},
+        {},
+        dict(DEFAULT_WEIGHTS),
+        issue_text="broken",
+        issue_anchors=IssueAnchors(),
     )
     assert w["W_LEX"] == pytest.approx(0.30)
     assert w["W_PATH"] == pytest.approx(0.25)
@@ -356,7 +362,9 @@ def test_dim3_counts_type_flow_as_deterministic(graph_db_typeflow: str):
     boosted to 0.12. (impl_method/unique_method were removed from the set 2026-06-15 as
     receiver-unproven; type_flow/inherited/return_type remain the proven method rungs.)"""
     w = _adapt_weights_for_issue(
-        {}, {}, dict(DEFAULT_WEIGHTS),
+        {},
+        {},
+        dict(DEFAULT_WEIGHTS),
         graph_db=graph_db_typeflow,
         issue_anchors=IssueAnchors(),
         issue_text="broken",
@@ -373,10 +381,21 @@ def _minimal_v74_result():
     from groundtruth.pretask.v7_4_brief import V74BriefResult
 
     return V74BriefResult(
-        bug_id="t", repo="r", hyperparameters={}, anchors=[], anchor_trust=[],
-        candidate_set_size=0, ranked_top10_focus=[], ranked_full=[], focus_set=[],
-        focus_set_size=0, gold_files=[], gold_in_focus=False,
-        first_gold_rank_focus=None, first_gold_rank_full=None, ablation_variant="C",
+        bug_id="t",
+        repo="r",
+        hyperparameters={},
+        anchors=[],
+        anchor_trust=[],
+        candidate_set_size=0,
+        ranked_top10_focus=[],
+        ranked_full=[],
+        focus_set=[],
+        focus_set_size=0,
+        gold_files=[],
+        gold_in_focus=False,
+        first_gold_rank_focus=None,
+        first_gold_rank_full=None,
+        ablation_variant="C",
     )
 
 
@@ -420,7 +439,8 @@ def test_forbid_no_sem_config_judges_post_adaptation_w_sem(
 
     seen: dict = {}
     monkeypatch.setattr(
-        proof, "forbid_no_sem_config",
+        proof,
+        "forbid_no_sem_config",
         lambda abl, rrf, w_sem: seen.setdefault("w_sem", float(w_sem)),
     )
 
@@ -430,18 +450,29 @@ def test_forbid_no_sem_config_judges_post_adaptation_w_sem(
 
         def encode(self, texts, **kw):
             import numpy as _np
+
             return _np.zeros((len(list(texts)), 384), dtype=_np.float32)
 
     monkeypatch.setattr(b, "_get_model", lambda: _ZeroEnc())
     monkeypatch.setattr(b, "_SEMANTIC_AVAILABLE", True)
     from groundtruth.pretask import anchor_select as _as
+
     _as._EMBED_CACHE.clear()
     _as._SYMVEC_CACHE.clear()
 
     b.run_v74(
-        "some issue", str(tmp_path), graph_db,
-        weights={"W_SEM": 0.0, "W_LEX": 0.70, "W_REACH": 0.0, "W_PROX": 0.0,
-                 "W_HUB": 0.0, "W_COMMIT": 0.0, "W_PATH": 0.45},
+        "some issue",
+        str(tmp_path),
+        graph_db,
+        weights={
+            "W_SEM": 0.0,
+            "W_LEX": 0.70,
+            "W_REACH": 0.0,
+            "W_PROX": 0.0,
+            "W_HUB": 0.0,
+            "W_COMMIT": 0.0,
+            "W_PATH": 0.45,
+        },
     )
     assert "w_sem" in seen, "forbid_no_sem_config was not called"
     assert seen["w_sem"] >= _w_sem_floor() > 0.0, (

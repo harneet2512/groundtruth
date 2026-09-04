@@ -7,6 +7,7 @@ the baked /opt/gt/src, so a divergence = a stale substrate. Locks:
   2. assert_commit_parity: record-only by default; fail-closed under GT_REQUIRE_COMMIT_PARITY=1.
   3. run_manifest carries substrate_build_commit + commit_parity + brief_sha256 + gt_git_commit.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -17,7 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_gp(modname: str = "gp_dtest"):
-    spec = importlib.util.spec_from_file_location(modname, ROOT / "scripts" / "swebench" / "gt_run_proof.py")
+    spec = importlib.util.spec_from_file_location(
+        modname, ROOT / "scripts" / "swebench" / "gt_run_proof.py"
+    )
     assert spec and spec.loader
     m = importlib.util.module_from_spec(spec)
     sys.modules[modname] = m
@@ -65,7 +68,7 @@ def test_gate_off_is_record_only(monkeypatch):
     _clear(monkeypatch)
     monkeypatch.setenv("GT_SUBSTRATE_BUILD_COMMIT", "abc123")
     monkeypatch.setenv("GT_GIT_COMMIT", "def456")  # mismatch
-    ok, detail = gp.assert_commit_parity()         # flag unset
+    ok, detail = gp.assert_commit_parity()  # flag unset
     assert ok is True and "record-only" in detail
 
 
@@ -97,9 +100,15 @@ def test_manifest_carries_provenance(monkeypatch, tmp_path):
     # write a brief.txt so brief_sha256 is recorded (not null)
     (tmp_path / "brief.txt").write_text("hello brief", encoding="utf-8")
     man = gp.build_run_manifest(
-        graph_db=str(tmp_path / "nope.db"), out_dir=str(tmp_path), languages=["python"],
-        lsp_scope_files=0, lsp_max_edges="0", lsp_ready_budgets={}, gate_rc=0,
-        artifacts_present={}, source_root=str(tmp_path),
+        graph_db=str(tmp_path / "nope.db"),
+        out_dir=str(tmp_path),
+        languages=["python"],
+        lsp_scope_files=0,
+        lsp_max_edges="0",
+        lsp_ready_budgets={},
+        gate_rc=0,
+        artifacts_present={},
+        source_root=str(tmp_path),
     )
     assert man["schema"] == "gt.run_manifest.v2"
     assert man["substrate_build_commit"] == "buildsha"

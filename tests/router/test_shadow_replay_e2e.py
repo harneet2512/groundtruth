@@ -39,18 +39,29 @@ def fixture_replay(tmp_path_factory: pytest.TempPathFactory) -> dict:
     fixture_dir = out_dir / "fixture"
     _run(
         "scripts/build_replay_fixture.py",
-        "--out", str(fixture_dir),
-        "--workspace", "/workspace/fixture",
+        "--out",
+        str(fixture_dir),
+        "--workspace",
+        "/workspace/fixture",
     )
     report_path = out_dir / "replay.json"
     _run(
         "scripts/shadow_replay.py",
         "--outputs",
-        str(fixture_dir / "results" / "SWE-bench-Live__SWE-bench-Live-lite" / "CodeActAgent"
-            / "deepseek-v4-flash_maxiter_100" / "output.jsonl"),
-        "--graph-map", str(fixture_dir / "graph_map.json"),
-        "--repo-root", "/workspace/fixture",
-        "--report", str(report_path),
+        str(
+            fixture_dir
+            / "results"
+            / "SWE-bench-Live__SWE-bench-Live-lite"
+            / "CodeActAgent"
+            / "deepseek-v4-flash_maxiter_100"
+            / "output.jsonl"
+        ),
+        "--graph-map",
+        str(fixture_dir / "graph_map.json"),
+        "--repo-root",
+        "/workspace/fixture",
+        "--report",
+        str(report_path),
     )
     return json.loads(report_path.read_text(encoding="utf-8"))
 
@@ -74,8 +85,7 @@ class TestGraphBackedReplay:
         """Distinct router branches must fire (not all NO_EVIDENCE)."""
         dist = fixture_replay["suppression_distribution"]
         real_branches = {
-            k for k, v in dist.items()
-            if v > 0 and k not in ("no_graph_db", "not_applicable")
+            k for k, v in dist.items() if v > 0 and k not in ("no_graph_db", "not_applicable")
         }
         # We expect at least 3 distinct branches (no_evidence is allowed too).
         assert len(real_branches) >= 2, dist
@@ -102,7 +112,9 @@ class TestParseReplayMetrics:
         assert rm.old_vs_new_distribution == fixture_replay["old_vs_new_distribution"]
 
     def test_files_viewed_before_gold_is_distinct_count(
-        self, fixture_replay: dict, tmp_path: Path,
+        self,
+        fixture_replay: dict,
+        tmp_path: Path,
     ) -> None:
         """Repaired metric: count of distinct files, not action index."""
         path = tmp_path / "report.json"

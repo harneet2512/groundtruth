@@ -7,6 +7,7 @@ Two fixes verified:
    production latch so a fresh contract can compete (the content-hash dedup
    still suppresses an identical block).
 """
+
 from __future__ import annotations
 
 import importlib
@@ -14,7 +15,6 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -69,11 +69,11 @@ class TestDistributionFloor:
         gmp._oracle_edited_rels.clear()
 
         # High confidence: 4/5 focus tokens matched
-        block_high = '<gt-contract>alpha beta gamma delta high</gt-contract>'
+        block_high = "<gt-contract>alpha beta gamma delta high</gt-contract>"
         # Medium confidence: 3/5 focus tokens matched
-        block_med = '<gt-evidence>alpha beta gamma medium</gt-evidence>'
+        block_med = "<gt-evidence>alpha beta gamma medium</gt-evidence>"
         # Low confidence: 1/5 focus tokens matched (only "alpha")
-        block_low = '<gt-scope>alpha low</gt-scope>'
+        block_low = "<gt-scope>alpha low</gt-scope>"
 
         cands = [
             (3, "l3.contract", block_high, False),
@@ -90,6 +90,7 @@ class TestDistributionFloor:
     def test_floor_parity_with_oracle_module(self, gmp):
         """The floor computation matches gt_oracle.distribution_floor exactly."""
         import statistics
+
         confs = [0.8, 0.6, 0.1]
         med = statistics.median(confs)
         mad = statistics.median(abs(v - med) for v in confs)
@@ -138,7 +139,7 @@ class TestRearmOnChange:
         gmp._oracle_focus_cache = {"test_func", "module"}
         gmp._oracle_edited_rels.clear()
 
-        block = '<gt-contract>test_func module contract</gt-contract>'
+        block = "<gt-contract>test_func module contract</gt-contract>"
         cands = [(3, "l3.contract", block, True)]
         # First delivery
         result1 = gmp._oracle_gate_blocks(cands)

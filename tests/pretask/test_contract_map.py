@@ -7,6 +7,7 @@ asserts:
   - a name_match callee is NEVER shown (correct-or-quiet, no laundering);
   - render abstains (empty string) when there is no signal.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -57,11 +58,11 @@ def _make_db(path: str) -> None:
     conn.executemany(
         "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence) VALUES (?,?,?,?,?)",
         [
-            (1, 2, "CALLS", "import", 1.0),       # verified -> _check shown
+            (1, 2, "CALLS", "import", 1.0),  # verified -> _check shown
             # conf 0.9 is ABOVE _NAME_MATCH_FLOOR so it clears _neighbors' visibility
             # filter — suppression must therefore come from the deterministic-method
             # gate (name_match not in _DETERMINISTIC_METHODS), genuinely exercising it.
-            (1, 3, "CALLS", "name_match", 0.9),   # name_match -> walk suppressed by the gate
+            (1, 3, "CALLS", "name_match", 0.9),  # name_match -> walk suppressed by the gate
         ],
     )
     conn.executemany(
@@ -169,7 +170,15 @@ def _make_overload_db(path: str) -> None:
         [
             (1, "Method", "run", "svc.py", 200, "def run(self):", ""),
             (4, "Method", "handle", "h.py", 10, "def handle(self, a: int) -> None:", "None"),
-            (5, "Method", "handle", "h.py", 90, "def handle(self, a: str, b: dict) -> bool:", "bool"),
+            (
+                5,
+                "Method",
+                "handle",
+                "h.py",
+                90,
+                "def handle(self, a: str, b: dict) -> bool:",
+                "bool",
+            ),
         ],
     )
     # The VERIFIED edge resolves run -> handle(id 5), the higher-line overload.

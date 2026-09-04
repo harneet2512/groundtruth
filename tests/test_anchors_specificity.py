@@ -10,6 +10,7 @@ Red-before-green discriminators on a synthetic graph:
   * ``compute_delta_table`` — distinctive, survives both (control).
   * ``the`` — pure English, never a graph node, dropped both (control).
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -33,12 +34,15 @@ def _mk_graph(path, defs, edges):
     for i, (name, label, fpath) in enumerate(defs, 1):
         conn.execute(
             "INSERT INTO nodes(id,label,name,file_path,is_test,language)"
-            " VALUES(?,?,?,?,0,'python')", (i, label, name, fpath))
+            " VALUES(?,?,?,?,0,'python')",
+            (i, label, name, fpath),
+        )
         ids.setdefault(name, i)
     for src, dst in edges:
         conn.execute(
-            "INSERT INTO edges(source_id,target_id,type,confidence)"
-            " VALUES(?,?, 'CALLS', 1.0)", (ids.get(src, 0), ids.get(dst, 0)))
+            "INSERT INTO edges(source_id,target_id,type,confidence) VALUES(?,?, 'CALLS', 1.0)",
+            (ids.get(src, 0), ids.get(dst, 0)),
+        )
     conn.commit()
     conn.close()
 
@@ -53,14 +57,14 @@ def _build_repo(tmp_path):
     homonym_string = [("String", "Class", f"pkg{i}/types.py") for i in range(8)]  # homonym
     distinctive = [
         ("compute_delta_table", "Function", "delta.py"),
-        ("run", "Function", "cmd.py"),            # distinctive, uniquely defined
+        ("run", "Function", "cmd.py"),  # distinctive, uniquely defined
     ]
     defs = callers + helpers + homonym_string + distinctive
     edges = []
-    for i in range(1, 23):                         # helper_i called by i distinct callers
+    for i in range(1, 23):  # helper_i called by i distinct callers
         for j in range(i):
             edges.append((f"caller_fn_{j}", f"helper_{i}"))
-    edges += [("compute_delta_table", "run")]       # run: distinctive, uniquely defined
+    edges += [("compute_delta_table", "run")]  # run: distinctive, uniquely defined
     db = str(tmp_path / "graph.db")
     _mk_graph(db, defs, edges)
     return db
@@ -97,15 +101,21 @@ def test_no_graph_keeps_nl_filtered_set(tmp_path):
 
 
 if __name__ == "__main__":
-    import tempfile, pathlib, traceback
+    import tempfile
+    import pathlib
+    import traceback
+
     tests = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_")]
     p = f = 0
     for name, fn in tests:
         try:
             with tempfile.TemporaryDirectory() as d:
                 fn(pathlib.Path(d))
-            print(f"PASS {name}"); p += 1
+            print(f"PASS {name}")
+            p += 1
         except Exception:
-            print(f"FAIL {name}"); traceback.print_exc(); f += 1
+            print(f"FAIL {name}")
+            traceback.print_exc()
+            f += 1
     print(f"\n{p} passed, {f} failed")
     raise SystemExit(1 if f else 0)

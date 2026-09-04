@@ -1,5 +1,5 @@
 """Tests for shared evidence marker contract."""
-import pytest
+
 from groundtruth.config.evidence_markers import (
     L3B_MARKERS,
     L3_MARKERS,
@@ -23,7 +23,7 @@ class TestHasGtEvidence:
         assert has_gt_evidence("[PEER] tracer.py::trace() (your earlier edit):\ndef trace(", "l3b")
 
     def test_l3b_pattern(self):
-        assert has_gt_evidence("[PATTERN] sibling set_tag() does:\n\"\"\"", "l3b")
+        assert has_gt_evidence('[PATTERN] sibling set_tag() does:\n"""', "l3b")
 
     def test_l3b_signature(self):
         assert has_gt_evidence("[SIGNATURE] def trace() -> Iterator[Span]", "l3b")
@@ -50,7 +50,9 @@ class TestHasGtEvidence:
         assert has_gt_evidence("[RECALL] from earlier: Called by: test.py:42", "l3b")
 
     def test_l3b_called_by(self):
-        assert has_gt_evidence("Called by: installer.py:205 `install_graph = InstallGraph(graph)`", "l3b")
+        assert has_gt_evidence(
+            "Called by: installer.py:205 `install_graph = InstallGraph(graph)`", "l3b"
+        )
 
     def test_l3b_calls_into(self):
         assert has_gt_evidence("Calls into: graph.py::analyze_binaries", "l3b")

@@ -4,11 +4,14 @@ A residual==0 pass must be impossible without a warmed language server. These te
 `foundational_gates._classify_lsp` (and `gate_lsp`) with synthetic certificates covering the
 required verdict matrix. No SWE-bench tasks, no gold, no per-repo logic — pure verdict logic.
 """
+
 import importlib.util
 import json
 import os
 
-_FG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "metrics", "foundational_gates.py")
+_FG_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "scripts", "metrics", "foundational_gates.py"
+)
 _spec = importlib.util.spec_from_file_location("foundational_gates_t", _FG_PATH)
 fg = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(fg)
@@ -64,19 +67,31 @@ def _base_cert(**kw):
 
 # ── the required verdict matrix ──────────────────────────────────────────────
 
+
 def test_residual_zero_never_launched_fails():
     # FIX-A: a hard NO_WARM fail is reserved for a server that NEVER LAUNCHED
     # (binary missing / un-spawnable = a real substrate defect). server_launched=False.
-    cert = _base_cert(lsp_warm=False, warm_probe_ok=False, probe_latency_ms=0.0,
-                      server_launched=False,
-                      residual=0, demand_edges=0, attempted_edges=0)
+    cert = _base_cert(
+        lsp_warm=False,
+        warm_probe_ok=False,
+        probe_latency_ms=0.0,
+        server_launched=False,
+        residual=0,
+        demand_edges=0,
+        attempted_edges=0,
+    )
     v, ok = fg._classify_lsp(cert)
     assert v == "LSP_FAIL_NO_WARM" and not ok
 
 
 def test_residual_zero_warm_noop_valid_passes():
-    cert = _base_cert(residual=0, demand_edges=0, attempted_edges=0,
-                      no_op_valid=True, no_op_reason="zero in-scope name_match method-call edges")
+    cert = _base_cert(
+        residual=0,
+        demand_edges=0,
+        attempted_edges=0,
+        no_op_valid=True,
+        no_op_reason="zero in-scope name_match method-call edges",
+    )
     v, ok = fg._classify_lsp(cert)
     assert v == "LSP_NO_OP_VALID_WITH_WARM_SERVER" and ok
 
@@ -89,9 +104,15 @@ def test_demand_present_no_attempts_warm_warns():
 
 def test_demand_present_never_launched_fails():
     # FIX-A: demand present, server NEVER LAUNCHED → hard NO_WARM fail (real defect).
-    cert = _base_cert(demand_edges=5, residual=5, attempted_edges=0,
-                      server_launched=False,
-                      lsp_warm=False, warm_probe_ok=False, probe_latency_ms=0.0)
+    cert = _base_cert(
+        demand_edges=5,
+        residual=5,
+        attempted_edges=0,
+        server_launched=False,
+        lsp_warm=False,
+        warm_probe_ok=False,
+        probe_latency_ms=0.0,
+    )
     v, ok = fg._classify_lsp(cert)
     # Never-launched → fails at the warm check, never reaches the attempted check
     assert v == "LSP_FAIL_NO_WARM" and not ok
@@ -102,9 +123,15 @@ def test_demand_present_launched_not_warm_warns():
     # gopls still indexing) → WARN, not fail. The tree-sitter graph + contract/sibling/
     # cochange (deliver-always items 1/2/4) still reach the agent; the LSP residual is a
     # known dep-env/timing limitation on a live server, not a substrate defect.
-    cert = _base_cert(demand_edges=5, residual=5, attempted_edges=0,
-                      server_launched=True,
-                      lsp_warm=False, warm_probe_ok=False, probe_latency_ms=0.0)
+    cert = _base_cert(
+        demand_edges=5,
+        residual=5,
+        attempted_edges=0,
+        server_launched=True,
+        lsp_warm=False,
+        warm_probe_ok=False,
+        probe_latency_ms=0.0,
+    )
     v, ok = fg._classify_lsp(cert)
     assert v == "LSP_WARN_NOT_READY" and ok
 
@@ -125,15 +152,22 @@ def test_server_command_exists_probe_not_run_warns():
     # FIX-A: binary launched but workspace/symbol probe never returned (latency 0) is a
     # WARN, not a fail — a live server still warming/indexing. Never-launched is the only
     # hard NO_WARM fail (see test_*_never_launched_fails).
-    cert = _base_cert(server_launched=True, lsp_warm=False, warm_probe_ok=False, probe_latency_ms=0.0)
+    cert = _base_cert(
+        server_launched=True, lsp_warm=False, warm_probe_ok=False, probe_latency_ms=0.0
+    )
     v, ok = fg._classify_lsp(cert)
     assert v == "LSP_WARN_NOT_READY" and ok
 
 
 def test_non_python_python_only_lsp_unsupported_explicit():
-    cert = _base_cert(language="go", server_launched=False, lsp_warm=False,
-                      warm_probe_ok=False, probe_latency_ms=0.0,
-                      unsupported_reason="no LSP server installed for language 'go'")
+    cert = _base_cert(
+        language="go",
+        server_launched=False,
+        lsp_warm=False,
+        warm_probe_ok=False,
+        probe_latency_ms=0.0,
+        unsupported_reason="no LSP server installed for language 'go'",
+    )
     v, ok = fg._classify_lsp(cert)
     assert v == "LSP_UNSUPPORTED_EXPLICIT" and ok
 
@@ -232,16 +266,29 @@ def test_deleted_edges_count_as_effective_lsp_work():
 
 # ── gate_lsp end-to-end (cert path + line fallback) ──────────────────────────
 
+
 def test_gate_lsp_reads_cert_arg():
     assert fg.gate_lsp("", cert=_base_cert()) is True
     # FIX-A: a never-launched server (server_launched=False) is the hard fail.
-    assert fg.gate_lsp("", cert=_base_cert(server_launched=False, lsp_warm=False,
-                                           warm_probe_ok=False,
-                                           probe_latency_ms=0.0)) is False
+    assert (
+        fg.gate_lsp(
+            "",
+            cert=_base_cert(
+                server_launched=False, lsp_warm=False, warm_probe_ok=False, probe_latency_ms=0.0
+            ),
+        )
+        is False
+    )
     # A launched-but-not-warm server is a WARN → gate PASSES (deliver-always).
-    assert fg.gate_lsp("", cert=_base_cert(server_launched=True, lsp_warm=False,
-                                           warm_probe_ok=False,
-                                           probe_latency_ms=0.0)) is True
+    assert (
+        fg.gate_lsp(
+            "",
+            cert=_base_cert(
+                server_launched=True, lsp_warm=False, warm_probe_ok=False, probe_latency_ms=0.0
+            ),
+        )
+        is True
+    )
 
 
 def test_gate_lsp_missing_cert_and_no_line_fails(tmp_path, monkeypatch):
@@ -269,9 +316,13 @@ def test_gate_lsp_warm_line_without_verdict_fails(tmp_path, monkeypatch):
     monkeypatch.delenv("GT_PROOF_MODE", raising=False)
     monkeypatch.delenv("GT_REQUIRE_LSP", raising=False)
     monkeypatch.setenv("GT_LSP_CERT", str(tmp_path / "nope.json"))
-    assert fg.gate_lsp("LSP_METRICS resolved=3 residual=5 scoped_source_files=3 lsp_warm=1") is False
+    assert (
+        fg.gate_lsp("LSP_METRICS resolved=3 residual=5 scoped_source_files=3 lsp_warm=1") is False
+    )
     # residual==0 warm line with no verdict is ALSO no longer a vacuous NO_OP pass.
-    assert fg.gate_lsp("LSP_METRICS resolved=0 residual=0 scoped_source_files=3 lsp_warm=1") is False
+    assert (
+        fg.gate_lsp("LSP_METRICS resolved=0 residual=0 scoped_source_files=3 lsp_warm=1") is False
+    )
 
 
 def test_gate_lsp_no_cert_under_proof_mode_fails(tmp_path, monkeypatch):
@@ -294,6 +345,7 @@ def test_gate_lsp_no_cert_under_proof_mode_fails(tmp_path, monkeypatch):
 # false-RED a run where an INDEPENDENT runtime witness (the LSP-stamped edges PERSISTED
 # in the final graph.db the agent navigates) proves real conversion. Reconcile to PASS
 # iff the witness shows conversion; fail-closed when NEITHER cert NOR witness shows it.
+
 
 def test_gate_lsp_no_cert_no_witness_fails_closed(tmp_path, monkeypatch):
     # No cert, no conversion line, witness explicitly zero -> NEITHER source shows
@@ -343,7 +395,12 @@ def test_gate_lsp_loads_cert_from_file(tmp_path, monkeypatch):
     monkeypatch.setenv("GT_LSP_CERT", str(p))
     assert fg.gate_lsp("") is True
     # FIX-A: a never-launched cert on disk must fail (server_launched=False).
-    p.write_text(json.dumps(_base_cert(server_launched=False, lsp_warm=False,
-                                       warm_probe_ok=False, probe_latency_ms=0.0)),
-                 encoding="utf-8")
+    p.write_text(
+        json.dumps(
+            _base_cert(
+                server_launched=False, lsp_warm=False, warm_probe_ok=False, probe_latency_ms=0.0
+            )
+        ),
+        encoding="utf-8",
+    )
     assert fg.gate_lsp("") is False

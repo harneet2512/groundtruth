@@ -1,4 +1,5 @@
 """P6 / CP012 option 2 — verifier failure classification + gate note."""
+
 from __future__ import annotations
 
 import importlib.util

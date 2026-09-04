@@ -8,12 +8,12 @@ generate_improved_evidence(), and asserts on the content of the returned string.
 Run:
     pytest tests/behavioral/test_evidence_behavioral.py -v
 """
+
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -100,9 +100,11 @@ def _write_issue_terms(terms: list[str]) -> None:
         f.write("\n".join(terms))
 
 
-def _write_issue_anchors(symbols: list[str] | None = None,
-                          paths: list[str] | None = None,
-                          test_names: list[str] | None = None) -> None:
+def _write_issue_anchors(
+    symbols: list[str] | None = None,
+    paths: list[str] | None = None,
+    test_names: list[str] | None = None,
+) -> None:
     data = {
         "symbols": symbols or [],
         "paths": paths or [],
@@ -277,67 +279,361 @@ def _build_graph_db(db_path: str) -> None:  # noqa: C901 (complex but intentiona
     nodes = [
         # --- src/auth.py ---
         # AuthService class
-        (1, "Class", "AuthService", "auth.AuthService", "src/auth.py",
-         4, 36, None, None, 1, 0, "python", None),
+        (
+            1,
+            "Class",
+            "AuthService",
+            "auth.AuthService",
+            "src/auth.py",
+            4,
+            36,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
         # AuthService.__init__
-        (2, "Method", "__init__", "auth.AuthService.__init__", "src/auth.py",
-         5, 7, "def __init__(self, db)", None, 0, 0, "python", 1),
+        (
+            2,
+            "Method",
+            "__init__",
+            "auth.AuthService.__init__",
+            "src/auth.py",
+            5,
+            7,
+            "def __init__(self, db)",
+            None,
+            0,
+            0,
+            "python",
+            1,
+        ),
         # AuthService.validate_token
-        (3, "Method", "validate_token", "auth.AuthService.validate_token", "src/auth.py",
-         9, 22, "def validate_token(self, token: str) -> bool", "bool", 1, 0, "python", 1),
+        (
+            3,
+            "Method",
+            "validate_token",
+            "auth.AuthService.validate_token",
+            "src/auth.py",
+            9,
+            22,
+            "def validate_token(self, token: str) -> bool",
+            "bool",
+            1,
+            0,
+            "python",
+            1,
+        ),
         # AuthService.refresh_token
-        (4, "Method", "refresh_token", "auth.AuthService.refresh_token", "src/auth.py",
-         24, 30, "def refresh_token(self, old_token: str) -> str", "str", 1, 0, "python", 1),
+        (
+            4,
+            "Method",
+            "refresh_token",
+            "auth.AuthService.refresh_token",
+            "src/auth.py",
+            24,
+            30,
+            "def refresh_token(self, old_token: str) -> str",
+            "str",
+            1,
+            0,
+            "python",
+            1,
+        ),
         # AuthService.revoke_token
-        (5, "Method", "revoke_token", "auth.AuthService.revoke_token", "src/auth.py",
-         32, 34, "def revoke_token(self, token: str) -> None", "None", 1, 0, "python", 1),
-
+        (
+            5,
+            "Method",
+            "revoke_token",
+            "auth.AuthService.revoke_token",
+            "src/auth.py",
+            32,
+            34,
+            "def revoke_token(self, token: str) -> None",
+            "None",
+            1,
+            0,
+            "python",
+            1,
+        ),
         # --- src/api/routes.py ---
-        (6, "Function", "handle_request", "routes.handle_request", "src/api/routes.py",
-         4, 10, "def handle_request(request, auth_service: AuthService) -> Response", "Response", 1, 0, "python", None),
-        (7, "Function", "handle_refresh", "routes.handle_refresh", "src/api/routes.py",
-         12, 16, "def handle_refresh(request, auth_service: AuthService) -> Response", "Response", 1, 0, "python", None),
-
+        (
+            6,
+            "Function",
+            "handle_request",
+            "routes.handle_request",
+            "src/api/routes.py",
+            4,
+            10,
+            "def handle_request(request, auth_service: AuthService) -> Response",
+            "Response",
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            7,
+            "Function",
+            "handle_refresh",
+            "routes.handle_refresh",
+            "src/api/routes.py",
+            12,
+            16,
+            "def handle_refresh(request, auth_service: AuthService) -> Response",
+            "Response",
+            1,
+            0,
+            "python",
+            None,
+        ),
         # --- src/models.py ---
-        (8, "Class", "User", "models.User", "src/models.py",
-         5, 11, None, None, 1, 0, "python", None),
-        (9, "Method", "to_dict", "models.User.to_dict", "src/models.py",
-         10, 11, "def to_dict(self) -> dict", "dict", 1, 0, "python", 8),
-        (10, "Class", "Session", "models.Session", "src/models.py",
-         13, 15, None, None, 1, 0, "python", None),
-        (11, "Class", "Response", "models.Response", "src/models.py",
-         17, 21, None, None, 1, 0, "python", None),
-        (12, "Method", "__init__", "models.Response.__init__", "src/models.py",
-         18, 20, "def __init__(self, status: int, body)", None, 0, 0, "python", 11),
-
+        (
+            8,
+            "Class",
+            "User",
+            "models.User",
+            "src/models.py",
+            5,
+            11,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            9,
+            "Method",
+            "to_dict",
+            "models.User.to_dict",
+            "src/models.py",
+            10,
+            11,
+            "def to_dict(self) -> dict",
+            "dict",
+            1,
+            0,
+            "python",
+            8,
+        ),
+        (
+            10,
+            "Class",
+            "Session",
+            "models.Session",
+            "src/models.py",
+            13,
+            15,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            11,
+            "Class",
+            "Response",
+            "models.Response",
+            "src/models.py",
+            17,
+            21,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            12,
+            "Method",
+            "__init__",
+            "models.Response.__init__",
+            "src/models.py",
+            18,
+            20,
+            "def __init__(self, status: int, body)",
+            None,
+            0,
+            0,
+            "python",
+            11,
+        ),
         # --- src/utils.py ---
         # SAME NAME as AuthService.validate_token -- tests disambiguation
-        (13, "Function", "validate_token", "utils.validate_token", "src/utils.py",
-         5, 10, "def validate_token(token_string: str) -> bool", "bool", 1, 0, "python", None),
-        (14, "Function", "sanitize_input", "utils.sanitize_input", "src/utils.py",
-         12, 13, "def sanitize_input(raw: str) -> str", "str", 1, 0, "python", None),
-
+        (
+            13,
+            "Function",
+            "validate_token",
+            "utils.validate_token",
+            "src/utils.py",
+            5,
+            10,
+            "def validate_token(token_string: str) -> bool",
+            "bool",
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            14,
+            "Function",
+            "sanitize_input",
+            "utils.sanitize_input",
+            "src/utils.py",
+            12,
+            13,
+            "def sanitize_input(raw: str) -> str",
+            "str",
+            1,
+            0,
+            "python",
+            None,
+        ),
         # --- tests/test_auth.py ---
-        (15, "Class", "TestAuthService", "test_auth.TestAuthService", "tests/test_auth.py",
-         4, 25, None, None, 0, 1, "python", None),
-        (16, "Method", "test_validate_token_success", "test_auth.TestAuthService.test_validate_token_success",
-         "tests/test_auth.py", 5, 7, "def test_validate_token_success(self, mock_db)", None, 0, 1, "python", 15),
-        (17, "Method", "test_validate_token_empty", "test_auth.TestAuthService.test_validate_token_empty",
-         "tests/test_auth.py", 9, 11, "def test_validate_token_empty(self, mock_db)", None, 0, 1, "python", 15),
-        (18, "Method", "test_validate_token_short", "test_auth.TestAuthService.test_validate_token_short",
-         "tests/test_auth.py", 13, 16, "def test_validate_token_short(self, mock_db)", None, 0, 1, "python", 15),
-        (19, "Method", "test_validate_token_locked_user", "test_auth.TestAuthService.test_validate_token_locked_user",
-         "tests/test_auth.py", 18, 20, "def test_validate_token_locked_user(self, mock_db_locked)", None, 0, 1, "python", 15),
-        (20, "Method", "test_refresh_token", "test_auth.TestAuthService.test_refresh_token",
-         "tests/test_auth.py", 22, 25, "def test_refresh_token(self, mock_db)", None, 0, 1, "python", 15),
-
+        (
+            15,
+            "Class",
+            "TestAuthService",
+            "test_auth.TestAuthService",
+            "tests/test_auth.py",
+            4,
+            25,
+            None,
+            None,
+            0,
+            1,
+            "python",
+            None,
+        ),
+        (
+            16,
+            "Method",
+            "test_validate_token_success",
+            "test_auth.TestAuthService.test_validate_token_success",
+            "tests/test_auth.py",
+            5,
+            7,
+            "def test_validate_token_success(self, mock_db)",
+            None,
+            0,
+            1,
+            "python",
+            15,
+        ),
+        (
+            17,
+            "Method",
+            "test_validate_token_empty",
+            "test_auth.TestAuthService.test_validate_token_empty",
+            "tests/test_auth.py",
+            9,
+            11,
+            "def test_validate_token_empty(self, mock_db)",
+            None,
+            0,
+            1,
+            "python",
+            15,
+        ),
+        (
+            18,
+            "Method",
+            "test_validate_token_short",
+            "test_auth.TestAuthService.test_validate_token_short",
+            "tests/test_auth.py",
+            13,
+            16,
+            "def test_validate_token_short(self, mock_db)",
+            None,
+            0,
+            1,
+            "python",
+            15,
+        ),
+        (
+            19,
+            "Method",
+            "test_validate_token_locked_user",
+            "test_auth.TestAuthService.test_validate_token_locked_user",
+            "tests/test_auth.py",
+            18,
+            20,
+            "def test_validate_token_locked_user(self, mock_db_locked)",
+            None,
+            0,
+            1,
+            "python",
+            15,
+        ),
+        (
+            20,
+            "Method",
+            "test_refresh_token",
+            "test_auth.TestAuthService.test_refresh_token",
+            "tests/test_auth.py",
+            22,
+            25,
+            "def test_refresh_token(self, mock_db)",
+            None,
+            0,
+            1,
+            "python",
+            15,
+        ),
         # Extra nodes for density
-        (21, "Function", "log_access", "auth.log_access", "src/auth.py",
-         37, 39, "def log_access(token: str, reason: str) -> None", "None", 0, 0, "python", None),
-        (22, "Function", "check_rate_limit", "routes.check_rate_limit", "src/api/routes.py",
-         18, 22, "def check_rate_limit(ip: str) -> bool", "bool", 0, 0, "python", None),
-        (23, "Function", "hash_token", "utils.hash_token", "src/utils.py",
-         15, 17, "def hash_token(token: str) -> str", "str", 0, 0, "python", None),
+        (
+            21,
+            "Function",
+            "log_access",
+            "auth.log_access",
+            "src/auth.py",
+            37,
+            39,
+            "def log_access(token: str, reason: str) -> None",
+            "None",
+            0,
+            0,
+            "python",
+            None,
+        ),
+        (
+            22,
+            "Function",
+            "check_rate_limit",
+            "routes.check_rate_limit",
+            "src/api/routes.py",
+            18,
+            22,
+            "def check_rate_limit(ip: str) -> bool",
+            "bool",
+            0,
+            0,
+            "python",
+            None,
+        ),
+        (
+            23,
+            "Function",
+            "hash_token",
+            "utils.hash_token",
+            "src/utils.py",
+            15,
+            17,
+            "def hash_token(token: str) -> str",
+            "str",
+            0,
+            0,
+            "python",
+            None,
+        ),
     ]
 
     conn.executemany(
@@ -434,6 +730,7 @@ def _build_graph_db(db_path: str) -> None:  # noqa: C901 (complex but intentiona
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def synthetic_env(tmp_path: Path):
     """Build a complete synthetic environment: repo files + graph.db + cleanup."""
@@ -460,6 +757,7 @@ def synthetic_env(tmp_path: Path):
 # Tests
 # ---------------------------------------------------------------------------
 
+
 class TestUShaped:
     """U-shaped attention ordering (Lost in the Middle, NeurIPS 2024).
 
@@ -481,12 +779,8 @@ class TestUShaped:
         bc_pos = output.find("[BEHAVIORAL CONTRACT]")
 
         # Both should exist for validate_token (it has signature + properties)
-        assert sig_pos != -1, (
-            f"[SIGNATURE] not found in output. Full output:\n{output}"
-        )
-        assert bc_pos != -1, (
-            f"[BEHAVIORAL CONTRACT] not found in output. Full output:\n{output}"
-        )
+        assert sig_pos != -1, f"[SIGNATURE] not found in output. Full output:\n{output}"
+        assert bc_pos != -1, f"[BEHAVIORAL CONTRACT] not found in output. Full output:\n{output}"
         assert sig_pos < bc_pos, (
             f"[SIGNATURE] (pos={sig_pos}) should appear BEFORE "
             f"[BEHAVIORAL CONTRACT] (pos={bc_pos}). Full output:\n{output}"
@@ -515,15 +809,13 @@ class TestUShaped:
             # ordered correctly by checking the U-shaped code path exists.
             # This is acceptable -- the budget-cap is working as designed.
             pytest.skip(
-                "UNVERIFIED: [TEST] not present in output (budget exhausted). "
-                f"Output:\n{output}"
+                f"UNVERIFIED: [TEST] not present in output (budget exhausted). Output:\n{output}"
             )
 
         if bc_pos == -1:
             # No behavioral contract -- skip this ordering check
             pytest.skip(
-                "UNVERIFIED: [BEHAVIORAL CONTRACT] not present in output. "
-                f"Output:\n{output}"
+                f"UNVERIFIED: [BEHAVIORAL CONTRACT] not present in output. Output:\n{output}"
             )
 
         assert test_pos > bc_pos, (
@@ -561,8 +853,7 @@ class TestUShaped:
                     f"first [BEHAVIORAL CONTRACT] at line {min(bc_lines)}"
                 )
             pytest.skip(
-                "UNVERIFIED: [TEST] not present in output (budget exhausted). "
-                f"Output:\n{output}"
+                f"UNVERIFIED: [TEST] not present in output (budget exhausted). Output:\n{output}"
             )
 
         if bc_lines:
@@ -663,8 +954,7 @@ class TestSameNameDisambiguation:
         )
         # Should contain the utils signature
         assert "token_string" in output, (
-            f"Expected utils.py's validate_token signature (token_string param). "
-            f"Output:\n{output}"
+            f"Expected utils.py's validate_token signature (token_string param). Output:\n{output}"
         )
 
 
@@ -691,7 +981,8 @@ class TestAssertionKeywordRanking:
         # guard in post_edit). Issue-keyword relevance surfaces via behavioral
         # contract / caller contract lines instead.
         ranked_lines = [
-            line.strip() for line in output.split("\n")
+            line.strip()
+            for line in output.split("\n")
             if line.strip().startswith(("[BEHAVIORAL CONTRACT]", "[CONTRACT]"))
         ]
 
@@ -747,16 +1038,14 @@ def handle_request(request, auth_service: AuthService) -> Response:
         if "validate_token" in output and "routes.py" in output:
             # Find the caller line referencing routes.py
             caller_lines = [
-                l for l in output.split("\n")
-                if "routes.py" in l and "validate_token" in l
+                l for l in output.split("\n") if "routes.py" in l and "validate_token" in l
             ]
             for cl in caller_lines:
                 # Should NOT be truncated at 90 chars
                 if "strict_mode" in cl:
                     # If the long line made it through, it was not truncated at 90
                     assert "strict_mode" in cl, (
-                        f"Long caller line was truncated before 'strict_mode'. "
-                        f"Line: {cl}"
+                        f"Long caller line was truncated before 'strict_mode'. Line: {cl}"
                     )
 
 
@@ -826,8 +1115,7 @@ class TestEvidenceStructure:
         has_validate = "validate_token" in output
         has_revoke = "revoke_token" in output or "delete_token" in output or "pop(" in output
         assert has_validate or has_revoke, (
-            f"Expected evidence for at least one of validate_token/revoke_token. "
-            f"Output:\n{output}"
+            f"Expected evidence for at least one of validate_token/revoke_token. Output:\n{output}"
         )
 
 
@@ -869,8 +1157,7 @@ class TestG7SilenceGate:
         # sanitize_input has a typed signature (-> str) so G7 should keep [SIGNATURE]
         if output:
             assert "[SIGNATURE]" in output, (
-                f"G7 gate should preserve [SIGNATURE] for typed function. "
-                f"Output:\n{output}"
+                f"G7 gate should preserve [SIGNATURE] for typed function. Output:\n{output}"
             )
 
 
@@ -889,6 +1176,5 @@ class TestEdgeConfidenceFiltering:
         # Should be filtered (conf < 0.6)
         if output:
             assert "hash_token" not in output, (
-                f"hash_token (conf=0.4) should be filtered from caller evidence. "
-                f"Output:\n{output}"
+                f"hash_token (conf=0.4) should be filtered from caller evidence. Output:\n{output}"
             )

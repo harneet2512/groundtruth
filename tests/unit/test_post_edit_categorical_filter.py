@@ -9,11 +9,11 @@ Verifies:
 - Strong resolution methods (same_file, import, verified_unique, type_flow,
   import_type, lsp_verified) admit edges regardless of confidence number.
 """
+
 import os
 import sqlite3
 import tempfile
 
-import pytest
 
 from groundtruth.hooks.post_edit import (
     _categorical_edge_filter_clause,
@@ -29,6 +29,7 @@ from groundtruth.hooks.post_edit import (
 # ---------------------------------------------------------------------------
 # G7 isolation gate (Contract pillar always-fire)
 # ---------------------------------------------------------------------------
+
 
 def test_g7_drops_caller_derived_markers():
     """Caller-derived markers dropped when function is isolated."""
@@ -233,9 +234,7 @@ def test_categorical_clause_runs_in_sqlite():
         )
         conn.commit()
         clause = _categorical_edge_filter_clause()
-        rows = conn.execute(
-            f"SELECT id FROM edges e WHERE {clause}"
-        ).fetchall()
+        rows = conn.execute(f"SELECT id FROM edges e WHERE {clause}").fetchall()
         ids = {r[0] for r in rows}
         assert 1 in ids  # CERTIFIED + same_file admitted
         assert 2 not in ids  # SUPPRESSED excluded
@@ -275,9 +274,7 @@ def test_filter_admits_verified_unique_high_confidence():
         )
         conn.commit()
         clause = _categorical_edge_filter_clause()
-        rows = conn.execute(
-            f"SELECT id FROM edges e WHERE {clause}"
-        ).fetchall()
+        rows = conn.execute(f"SELECT id FROM edges e WHERE {clause}").fetchall()
         assert len(rows) == 1
         conn.close()
     finally:
@@ -302,9 +299,7 @@ def test_filter_rejects_unique_name_match():
         )
         conn.commit()
         clause = _categorical_edge_filter_clause()
-        rows = conn.execute(
-            f"SELECT id FROM edges e WHERE {clause}"
-        ).fetchall()
+        rows = conn.execute(f"SELECT id FROM edges e WHERE {clause}").fetchall()
         ids = {r[0] for r in rows}
         assert 1 not in ids
         assert 2 not in ids

@@ -10,8 +10,8 @@ Research backing:
 - OCD/SWEzze 2026: only 8.4% of segments needed for resolution
 - Lost in the Middle NeurIPS 2024: repeated injections push useful evidence into dead zone
 """
+
 import types
-import pytest
 
 
 def _make_config():
@@ -92,7 +92,7 @@ class TestReindexReset:
         _simulate_l3b_gate(config, "c.py")
         _simulate_reindex_reset(config, edited_file="b.py")
         assert _simulate_l3b_gate(config, "a.py") is False  # NOT reset
-        assert _simulate_l3b_gate(config, "b.py") is True   # reset (edited)
+        assert _simulate_l3b_gate(config, "b.py") is True  # reset (edited)
         assert _simulate_l3b_gate(config, "c.py") is False  # NOT reset
 
     def test_reindex_does_not_clear_hash_dedup(self):
@@ -116,4 +116,6 @@ class TestReindexReset:
         assert _simulate_l3b_gate(config, "src/auth.py") is False
         _simulate_reindex_reset(config, edited_file="src/auth.py")  # agent edited, L6 reindex fired
         assert _simulate_l3b_gate(config, "src/auth.py") is True
-        assert _simulate_l3b_gate(config, "src/auth.py") is False  # blocked again until next reindex
+        assert (
+            _simulate_l3b_gate(config, "src/auth.py") is False
+        )  # blocked again until next reindex

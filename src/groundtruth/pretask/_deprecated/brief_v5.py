@@ -160,8 +160,7 @@ def _build_provenance(
             try:
                 placeholders = ",".join("?" for _ in anchors.symbols)
                 cursor = conn.execute(
-                    f"SELECT DISTINCT file_path, name FROM nodes "
-                    f"WHERE name IN ({placeholders})",
+                    f"SELECT DISTINCT file_path, name FROM nodes WHERE name IN ({placeholders})",
                     tuple(anchors.symbols),
                 )
                 for fpath, name in cursor.fetchall():
@@ -178,9 +177,7 @@ def _build_provenance(
         for fpath in file_scores:
             fp_norm = fpath.replace("\\", "/")
             if fp_norm.endswith(f_norm) or f_norm.endswith(fp_norm):
-                provenance[fpath].append(
-                    ("stack-trace-frame", f"line {fr.line}")
-                )
+                provenance[fpath].append(("stack-trace-frame", f"line {fr.line}"))
                 break
 
     # Tag 3: graph-neighbor — applied to files that earned NO stronger tag.
@@ -213,13 +210,8 @@ def _build_provenance(
                     if not fpath:
                         continue
                     fp_norm = fpath.replace("\\", "/").lower()
-                    if (
-                        ("test" in fp_norm or fp_norm.endswith("_test.go"))
-                        and fpath in file_scores
-                    ):
-                        provenance[fpath].append(
-                            ("test-of-affected-class", "")
-                        )
+                    if ("test" in fp_norm or fp_norm.endswith("_test.go")) and fpath in file_scores:
+                        provenance[fpath].append(("test-of-affected-class", ""))
             except sqlite3.Error:
                 pass
             finally:
@@ -228,9 +220,7 @@ def _build_provenance(
     # Tag 5: recent-edit — only if file has no other tag yet.
     for fpath, weight in recency_map.items():
         if fpath in file_scores and not provenance[fpath]:
-            provenance[fpath].append(
-                ("recent-edit", f"weight {weight:.2f}")
-            )
+            provenance[fpath].append(("recent-edit", f"weight {weight:.2f}"))
 
     return dict(provenance)
 
@@ -358,8 +348,7 @@ def generate_brief(
         "wall_ms": m2_ms,
         "raw_frames_found": raw_frames_count_box["n"],
         "in_repo_frames": [
-            {"file": fr.file, "line": fr.line, "func": fr.func, "lang": fr.lang}
-            for fr in frames
+            {"file": fr.file, "line": fr.line, "func": fr.func, "lang": fr.lang} for fr in frames
         ],
         "deepest_frame": (
             {
@@ -389,9 +378,7 @@ def generate_brief(
         file_scores = {}
     m3_ms = int((time.perf_counter() - t0) * 1000)
 
-    top_10 = sorted(
-        file_scores.items(), key=lambda kv: kv[1][0], reverse=True
-    )[:10]
+    top_10 = sorted(file_scores.items(), key=lambda kv: kv[1][0], reverse=True)[:10]
     record.module_3_ppr = {
         "wall_ms": m3_ms,
         "seed_node_count": len(seed_ids),
@@ -416,9 +403,7 @@ def generate_brief(
         if weight > 0.0:
             multiplier = 1.0 + min(weight, 1.0) * (RECENCY_BOOST_MAX - 1.0)
             new_score = score * multiplier
-            boosts_applied.append(
-                {"file": fpath, "boost": round(multiplier, 3)}
-            )
+            boosts_applied.append({"file": fpath, "boost": round(multiplier, 3)})
         else:
             new_score = score
         boosted_scores[fpath] = (new_score, n_nodes)
@@ -432,9 +417,7 @@ def generate_brief(
 
     # ------------- Module 6: deterministic hybrid fusion -------------
     t0 = time.perf_counter()
-    lexical_hits = lexical_file_search(
-        issue_text or "", repo_root, graph_db, anchors, max_files=30
-    )
+    lexical_hits = lexical_file_search(issue_text or "", repo_root, graph_db, anchors, max_files=30)
     memory_hits, memory_stats = repository_memory_search(
         issue_text or "", repo_root, anchors, max_files=30
     )
@@ -448,9 +431,7 @@ def generate_brief(
     fused = reciprocal_rank_fusion(signal_lists, max_files=max(50, max_files))
     m6_ms = int((time.perf_counter() - t0) * 1000)
 
-    fused_scores: dict[str, tuple[float, int]] = {
-        hit.file: (hit.score, 1) for hit in fused
-    }
+    fused_scores: dict[str, tuple[float, int]] = {hit.file: (hit.score, 1) for hit in fused}
     if not fused_scores:
         fused_scores = dict(boosted_scores)
 
@@ -467,10 +448,7 @@ def generate_brief(
                 "file": hit.file,
                 "score": round(hit.score, 6),
                 "confidence": hit.confidence,
-                "signals": [
-                    {"type": name, "detail": detail}
-                    for name, detail in hit.signals
-                ],
+                "signals": [{"type": name, "detail": detail} for name, detail in hit.signals],
             }
             for hit in fused[:20]
         ],
@@ -479,9 +457,7 @@ def generate_brief(
 
     # ------------- Module 5: render -------------
     t0 = time.perf_counter()
-    provenance = _build_provenance(
-        fused_scores, anchors, frames, recency_map, graph_db
-    )
+    provenance = _build_provenance(fused_scores, anchors, frames, recency_map, graph_db)
     for hit in fused:
         tags = provenance.setdefault(hit.file, [])
         tags.append(("confidence", hit.confidence))
@@ -529,9 +505,7 @@ def generate_brief(
                 )
             )
 
-    rendered = render_brief(
-        candidates, anchors=anchors, frames=frames, max_files=max_files
-    )
+    rendered = render_brief(candidates, anchors=anchors, frames=frames, max_files=max_files)
     m5_ms = int((time.perf_counter() - t0) * 1000)
 
     in_brief = candidates[:max_files] if candidates else []

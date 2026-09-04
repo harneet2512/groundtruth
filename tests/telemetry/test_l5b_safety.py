@@ -1,11 +1,11 @@
 """Tests for L5b safety checker."""
+
 from __future__ import annotations
 
 from groundtruth.trajectory.hooks import L5bSafetyChecker
 
 
 class TestL5bSafetyChecker:
-
     def test_restart_language_detected(self):
         for phrase in L5bSafetyChecker.RESTART_PHRASES:
             text = f"You should {phrase} the implementation"

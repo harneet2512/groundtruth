@@ -35,6 +35,7 @@ artifacts (NOT the regex gap the trajectory audit hypothesized — every
 
 Pure sqlite fixtures; no task IDs, no gold labels, no network.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -103,13 +104,11 @@ def go_graph(tmp_path: Path) -> str:
 # GAP 1 — `Type::method` qualified pairs
 # ===========================================================================
 def test_colon_qualified_pair_confirmed_against_graph(rust_graph):
-    issue = (
-        "Add cancellation support to `Script::evaluate` so long-running "
-        "scripts can be stopped."
-    )
+    issue = "Add cancellation support to `Script::evaluate` so long-running scripts can be stopped."
     anchors = extract_issue_anchors(issue, rust_graph)
     assert "Script.evaluate" in anchors.symbols, (
-        f"::-qualified pair not confirmed: {sorted(anchors.symbols)}")
+        f"::-qualified pair not confirmed: {sorted(anchors.symbols)}"
+    )
 
 
 def test_colon_qualified_pair_unconfirmed_stays_out(rust_graph):
@@ -143,11 +142,10 @@ def test_greenfield_code_tokens_survive_as_unresolved_tier(go_graph):
     anchors = extract_issue_anchors(_GO_ISSUE, go_graph)
     # the feature-to-be-built symbols + env var are reporter-marked code with
     # 0 graph nodes -> they land in the unresolved tier, not in symbols
-    for tok in ("require", "ABS_MODULE_PATH", "require_cache_info",
-                "reset_require_cache"):
+    for tok in ("require", "ABS_MODULE_PATH", "require_cache_info", "reset_require_cache"):
         assert tok in anchors.unresolved_code_symbols, (
-            f"greenfield anchor {tok!r} lost: "
-            f"{sorted(anchors.unresolved_code_symbols)}")
+            f"greenfield anchor {tok!r} lost: {sorted(anchors.unresolved_code_symbols)}"
+        )
         assert tok not in anchors.symbols  # never minted as a graph symbol
 
 
@@ -169,9 +167,12 @@ def test_prose_only_words_never_enter_unresolved_tier(go_graph):
     """Words that were never backtick/fence-marked are NOT code provenance."""
     anchors = extract_issue_anchors(
         "The loader should normalize and deduplicate equivalent directories "
-        "while preserving order.", go_graph)
+        "while preserving order.",
+        go_graph,
+    )
     assert not anchors.unresolved_code_symbols, (
-        f"prose leaked into the code tier: {sorted(anchors.unresolved_code_symbols)}")
+        f"prose leaked into the code tier: {sorted(anchors.unresolved_code_symbols)}"
+    )
 
 
 def test_no_db_path_keeps_unresolved_tier_empty():

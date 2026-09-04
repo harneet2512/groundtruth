@@ -12,7 +12,6 @@ import pytest
 from groundtruth.index.graph import ImportGraph
 from groundtruth.index.store import SymbolStore
 from groundtruth.schema.novelty import NoveltyFilter
-from groundtruth.utils.result import Ok
 
 
 @pytest.fixture()

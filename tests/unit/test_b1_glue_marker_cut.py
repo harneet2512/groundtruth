@@ -17,6 +17,7 @@ This test exercises the wrapper's own truncation helper directly (no OH harness)
   (green) the safe-boundary truncation never emits a partial marker, the omission
           note sits on its own line, and append never fuses onto the prior obs.
 """
+
 from __future__ import annotations
 
 import sys
@@ -29,8 +30,10 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts" / "swebench"))
 sys.modules.setdefault(
     "litellm",
     SimpleNamespace(
-        model_cost={}, success_callback=[],
-        completion=lambda *a, **k: None, acompletion=None,
+        model_cost={},
+        success_callback=[],
+        completion=lambda *a, **k: None,
+        acompletion=None,
         completion_cost=lambda *a, **k: 0.0,
     ),
 )
@@ -79,8 +82,8 @@ def test_safe_truncation_never_leaves_partial_marker():
         idx = out.find("[CATCHE", idx)
         if idx == -1:
             break
-        assert out[idx:idx + len("[CATCHES]")] == "[CATCHES]", (
-            f"partial marker leaked at {idx}: {out[idx:idx + 12]!r}"
+        assert out[idx : idx + len("[CATCHES]")] == "[CATCHES]", (
+            f"partial marker leaked at {idx}: {out[idx : idx + 12]!r}"
         )
         idx += 1
 

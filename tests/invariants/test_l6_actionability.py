@@ -5,13 +5,12 @@ Content appended after state=FINISHED is a dead write.
 
 Violation = F2 in failure taxonomy.
 """
+
 from __future__ import annotations
 
 import os
 import sqlite3
 import tempfile
-
-import pytest
 
 
 def create_graph_with_callers(db_path: str) -> None:
@@ -68,8 +67,9 @@ def create_graph_with_callers(db_path: str) -> None:
     conn.close()
 
 
-def simulate_l6_review(db_path: str, edited_files: list[str],
-                        is_finish_handler: bool = False) -> dict:
+def simulate_l6_review(
+    db_path: str, edited_files: list[str], is_finish_handler: bool = False
+) -> dict:
     """Simulate L6 review and return delivery status.
 
     Returns dict with:
@@ -145,7 +145,8 @@ class TestL6ActionabilityInvariant:
             create_graph_with_callers(db_path)
 
             result = simulate_l6_review(
-                db_path, ["beancount/ops/balance.py"],
+                db_path,
+                ["beancount/ops/balance.py"],
                 is_finish_handler=False,
             )
             assert result["delivery_status"] == "DELIVERED_VISIBLE"
@@ -159,7 +160,8 @@ class TestL6ActionabilityInvariant:
             create_graph_with_callers(db_path)
 
             result = simulate_l6_review(
-                db_path, ["beancount/ops/balance.py"],
+                db_path,
+                ["beancount/ops/balance.py"],
                 is_finish_handler=True,
             )
             assert result["delivery_status"] == "DEAD_WRITE", (
@@ -173,7 +175,8 @@ class TestL6ActionabilityInvariant:
             create_graph_with_callers(db_path)
 
             result = simulate_l6_review(
-                db_path, ["beancount/ops/balance.py"],
+                db_path,
+                ["beancount/ops/balance.py"],
                 is_finish_handler=False,
             )
             assert result["has_test_suggestions"], (
@@ -189,8 +192,11 @@ class TestL6ActionabilityInvariant:
             create_graph_with_callers(db_path)
 
             result = simulate_l6_review(
-                db_path, ["nonexistent/file.py"],
+                db_path,
+                ["nonexistent/file.py"],
                 is_finish_handler=False,
             )
             assert result["content"] == ""
-            assert result["delivery_status"] == "DELIVERED_VISIBLE"  # status is about timing, not content
+            assert (
+                result["delivery_status"] == "DELIVERED_VISIBLE"
+            )  # status is about timing, not content

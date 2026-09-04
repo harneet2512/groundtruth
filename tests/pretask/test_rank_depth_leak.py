@@ -7,6 +7,7 @@ hub p80 once the promote pass landed. Fixed by adding type='CALLS'. These tests 
 graph where a function is reached ONLY by promoted edges and assert it does not outrank
 a CALLS-reached function.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -29,19 +30,52 @@ def _graph(tmp_path):
         "confidence REAL, metadata TEXT)"
     )
     nodes = [
-        (1, "Function", "funcCALLS", "", "a.py", 1, 5, "def funcCALLS():", None, 0, 0, "python", None),
-        (2, "Function", "funcPROMOTED", "", "a.py", 6, 10, "def funcPROMOTED():", None, 0, 0, "python", None),
+        (
+            1,
+            "Function",
+            "funcCALLS",
+            "",
+            "a.py",
+            1,
+            5,
+            "def funcCALLS():",
+            None,
+            0,
+            0,
+            "python",
+            None,
+        ),
+        (
+            2,
+            "Function",
+            "funcPROMOTED",
+            "",
+            "a.py",
+            6,
+            10,
+            "def funcPROMOTED():",
+            None,
+            0,
+            0,
+            "python",
+            None,
+        ),
     ]
-    for i in range(3, 6):   # 3 CALLS-callers -> funcCALLS
-        nodes.append((i, "Function", f"c{i}", "", "b.py", 1, 2, f"def c{i}():", None, 0, 0, "python", None))
+    for i in range(3, 6):  # 3 CALLS-callers -> funcCALLS
+        nodes.append(
+            (i, "Function", f"c{i}", "", "b.py", 1, 2, f"def c{i}():", None, 0, 0, "python", None)
+        )
     for i in range(6, 16):  # 10 PRECEDES-sources -> funcPROMOTED
-        nodes.append((i, "Function", f"p{i}", "", "b.py", 1, 2, f"def p{i}():", None, 0, 0, "python", None))
+        nodes.append(
+            (i, "Function", f"p{i}", "", "b.py", 1, 2, f"def p{i}():", None, 0, 0, "python", None)
+        )
     conn.executemany("INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", nodes)
     edges = [(i, 1, "CALLS", "import", 1.0) for i in range(3, 6)]
     edges += [(i, 2, "PRECEDES", "promote_precedes", 0.5) for i in range(6, 16)]
     conn.executemany(
         "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence) "
-        "VALUES (?,?,?,?,?)", edges,
+        "VALUES (?,?,?,?,?)",
+        edges,
     )
     conn.commit()
     conn.close()

@@ -76,7 +76,10 @@ class TestFullTrajectorySimulation:
         edit_action = _make_edit_action("src/auth.py")
         edit_obs = _make_obs("File edited successfully")
         result = gov.after_interaction(
-            edit_action, edit_obs, action_count=10, max_iter=100,
+            edit_action,
+            edit_obs,
+            action_count=10,
+            max_iter=100,
         )
         assert "src/auth.py" in gov.state.edited_source_files
 
@@ -95,7 +98,10 @@ class TestFullTrajectorySimulation:
             "exit code: 1\n"
         )
         result = gov.after_interaction(
-            test_action, test_obs, action_count=11, max_iter=100,
+            test_action,
+            test_obs,
+            action_count=11,
+            max_iter=100,
         )
 
         assert result.fired, "L5 should fire Hypothesis Falsified"
@@ -113,7 +119,10 @@ class TestFullTrajectorySimulation:
         test_action = _make_cmd_action("pytest tests/test_auth.py")
         test_obs = _make_obs("1 passed\nexit code: 0\n")
         result = gov.after_interaction(
-            test_action, test_obs, action_count=11, max_iter=100,
+            test_action,
+            test_obs,
+            action_count=11,
+            max_iter=100,
         )
         assert not result.fired
 
@@ -128,26 +137,34 @@ class TestFullTrajectorySimulation:
 
         # Edit
         gov.after_interaction(
-            _make_edit_action("src/auth.py"), _make_obs("ok"),
-            action_count=10, max_iter=100,
+            _make_edit_action("src/auth.py"),
+            _make_obs("ok"),
+            action_count=10,
+            max_iter=100,
         )
 
         # First failure
         gov.after_interaction(
-            _make_cmd_action("pytest tests/"), _make_obs(fail_output),
-            action_count=11, max_iter=100,
+            _make_cmd_action("pytest tests/"),
+            _make_obs(fail_output),
+            action_count=11,
+            max_iter=100,
         )
 
         # Edit again
         gov.after_interaction(
-            _make_edit_action("src/auth.py"), _make_obs("ok"),
-            action_count=12, max_iter=100,
+            _make_edit_action("src/auth.py"),
+            _make_obs("ok"),
+            action_count=12,
+            max_iter=100,
         )
 
         # Same failure again
         result = gov.after_interaction(
-            _make_cmd_action("pytest tests/"), _make_obs(fail_output),
-            action_count=13, max_iter=100,
+            _make_cmd_action("pytest tests/"),
+            _make_obs(fail_output),
+            action_count=13,
+            max_iter=100,
         )
         assert result.fired
         assert result.message and "Same Failure Persisted" in result.message
@@ -157,22 +174,26 @@ class TestFullTrajectorySimulation:
 
         # Edit
         gov.after_interaction(
-            _make_edit_action("src/auth.py"), _make_obs("ok"),
-            action_count=10, max_iter=100,
+            _make_edit_action("src/auth.py"),
+            _make_obs("ok"),
+            action_count=10,
+            max_iter=100,
         )
 
         # Test fails
         gov.after_interaction(
-            _make_cmd_action("pytest tests/"), _make_obs(
-                "FAILED tests/test_auth.py::test_login\nexit code: 1\n"
-            ),
-            action_count=11, max_iter=100,
+            _make_cmd_action("pytest tests/"),
+            _make_obs("FAILED tests/test_auth.py::test_login\nexit code: 1\n"),
+            action_count=11,
+            max_iter=100,
         )
 
         # Agent tries to finish
         result = gov.after_interaction(
-            _make_finish_action(), _make_obs(""),
-            action_count=12, max_iter=100,
+            _make_finish_action(),
+            _make_obs(""),
+            action_count=12,
+            max_iter=100,
         )
         assert result.fired
         assert result.message and "Unsafe Finish" in result.message
@@ -182,17 +203,18 @@ class TestFullTrajectorySimulation:
 
         # Edit at iter 70
         gov.after_interaction(
-            _make_edit_action("src/auth.py"), _make_obs("ok"),
-            action_count=70, max_iter=100,
+            _make_edit_action("src/auth.py"),
+            _make_obs("ok"),
+            action_count=70,
+            max_iter=100,
         )
 
         # Test fails at iter 71
         result = gov.after_interaction(
-            _make_cmd_action("pytest tests/"), _make_obs(
-                "FAILED tests/test_auth.py::test_login - AssertionError\n"
-                "exit code: 1\n"
-            ),
-            action_count=71, max_iter=100,
+            _make_cmd_action("pytest tests/"),
+            _make_obs("FAILED tests/test_auth.py::test_login - AssertionError\nexit code: 1\n"),
+            action_count=71,
+            max_iter=100,
         )
         assert result.fired
         assert result.message and "current hypothesis is unconfirmed" in result.message.lower()
@@ -202,16 +224,19 @@ class TestFullTrajectorySimulation:
         gov = L5Governor(instance_id="test-env", max_iter=100)
 
         gov.after_interaction(
-            _make_edit_action("src/auth.py"), _make_obs("ok"),
-            action_count=10, max_iter=100,
+            _make_edit_action("src/auth.py"),
+            _make_obs("ok"),
+            action_count=10,
+            max_iter=100,
         )
 
         result = gov.after_interaction(
-            _make_cmd_action("pytest tests/"), _make_obs(
-                "ModuleNotFoundError: No module named 'foo'. pip install foo\n"
-                "exit code: 1\n"
+            _make_cmd_action("pytest tests/"),
+            _make_obs(
+                "ModuleNotFoundError: No module named 'foo'. pip install foo\nexit code: 1\n"
             ),
-            action_count=11, max_iter=100,
+            action_count=11,
+            max_iter=100,
         )
         assert not result.fired, "Env failures should be suppressed"
 
@@ -219,8 +244,10 @@ class TestFullTrajectorySimulation:
         gov = L5Governor(instance_id="test-scaffold", max_iter=100)
 
         result = gov.after_interaction(
-            _make_edit_action("reproduce_issue.py"), _make_obs("ok"),
-            action_count=5, max_iter=100,
+            _make_edit_action("reproduce_issue.py"),
+            _make_obs("ok"),
+            action_count=5,
+            max_iter=100,
         )
         assert result.fired
         assert result.message and "No Durable Source Progress" in result.message
@@ -229,23 +256,27 @@ class TestFullTrajectorySimulation:
         gov = L5Governor(instance_id="test-reset", max_iter=100)
 
         gov.after_interaction(
-            _make_edit_action("src/auth.py"), _make_obs("ok"),
-            action_count=50, max_iter=100,
+            _make_edit_action("src/auth.py"),
+            _make_obs("ok"),
+            action_count=50,
+            max_iter=100,
         )
 
         # Simulate reset: iter goes backwards
         gov.after_interaction(
-            _make_edit_action("src/auth.py"), _make_obs("ok"),
-            action_count=10, max_iter=100,
+            _make_edit_action("src/auth.py"),
+            _make_obs("ok"),
+            action_count=10,
+            max_iter=100,
         )
         assert gov.state._injection_disabled
 
         # Should not fire anything after reset
         result = gov.after_interaction(
-            _make_cmd_action("pytest tests/"), _make_obs(
-                "FAILED tests/test_auth.py::test_login\nexit code: 1\n"
-            ),
-            action_count=11, max_iter=100,
+            _make_cmd_action("pytest tests/"),
+            _make_obs("FAILED tests/test_auth.py::test_login\nexit code: 1\n"),
+            action_count=11,
+            max_iter=100,
         )
         assert not result.fired
 
@@ -295,8 +326,10 @@ class TestTTDFrozenArtifact:
         # Replay: agent edits source at iter 22 (real iter from trajectory)
         edit_action = _make_edit_action(_FROZEN_CFNLINT_3862_EDIT_PATH)
         gov.after_interaction(
-            edit_action, _make_obs("File edited"),
-            action_count=22, max_iter=100,
+            edit_action,
+            _make_obs("File edited"),
+            action_count=22,
+            max_iter=100,
         )
         assert _FROZEN_CFNLINT_3862_EDIT_PATH in gov.state.edited_source_files
         assert gov.state.has_source_edit_before_last_failure
@@ -307,14 +340,19 @@ class TestTTDFrozenArtifact:
             "python -m pytest test/unit/module/config/ -v"
         )
         result = gov.after_interaction(
-            test_action, _make_obs(_FROZEN_CFNLINT_3862_FAIL),
-            action_count=35, max_iter=100,
+            test_action,
+            _make_obs(_FROZEN_CFNLINT_3862_FAIL),
+            action_count=35,
+            max_iter=100,
         )
 
         assert result.fired, "Hypothesis Falsified must fire on real frozen failure"
         assert result.message and "Hypothesis Falsified" in result.message
         assert result.message and "runner.py" in result.message
-        assert result.message and ("test_config_expand_paths_nomatch" in result.message or "config" in result.message.lower())
+        assert result.message and (
+            "test_config_expand_paths_nomatch" in result.message
+            or "config" in result.message.lower()
+        )
 
     def test_frozen_cfnlint3862_parser_extracts_assertion(self):
         """The pytest parser must extract the real assertion from frozen output."""
@@ -333,14 +371,17 @@ class TestTTDFrozenArtifact:
         gov = L5Governor(instance_id="cfn-lint-3862-late-ttd", max_iter=100)
 
         gov.after_interaction(
-            _make_edit_action(_FROZEN_CFNLINT_3862_EDIT_PATH), _make_obs("ok"),
-            action_count=70, max_iter=100,
+            _make_edit_action(_FROZEN_CFNLINT_3862_EDIT_PATH),
+            _make_obs("ok"),
+            action_count=70,
+            max_iter=100,
         )
 
         result = gov.after_interaction(
             _make_cmd_action("python -m pytest test/unit/module/config/ -v"),
             _make_obs(_FROZEN_CFNLINT_3862_FAIL),
-            action_count=75, max_iter=100,
+            action_count=75,
+            max_iter=100,
         )
 
         assert result.fired
@@ -353,13 +394,16 @@ class TestTTDFrozenArtifact:
         gov = L5Governor(instance_id="cfn-lint-3862-state-ttd", max_iter=100)
 
         gov.after_interaction(
-            _make_edit_action(_FROZEN_CFNLINT_3862_EDIT_PATH), _make_obs("ok"),
-            action_count=22, max_iter=100,
+            _make_edit_action(_FROZEN_CFNLINT_3862_EDIT_PATH),
+            _make_obs("ok"),
+            action_count=22,
+            max_iter=100,
         )
         gov.after_interaction(
             _make_cmd_action("python -m pytest test/unit/module/config/ -v"),
             _make_obs(_FROZEN_CFNLINT_3862_FAIL),
-            action_count=35, max_iter=100,
+            action_count=35,
+            max_iter=100,
         )
 
         assert gov.state.verification_commands_run == 1

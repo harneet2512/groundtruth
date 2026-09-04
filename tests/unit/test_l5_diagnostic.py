@@ -9,10 +9,10 @@ These tests lock the diagnostic-only contract:
 - L5 scaffold advisory states the verifiable fact, NO file list, NO directive
 - L5b reminder states the unexamined-signal observation, NO "Next action:"
 """
+
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "swebench"))
 import oh_gt_full_wrapper as w  # noqa: E402

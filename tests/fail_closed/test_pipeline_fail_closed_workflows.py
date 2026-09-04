@@ -19,6 +19,7 @@ Covers the 4-reviewer LIPI audit fixes that live in WORKFLOW YAML (not importabl
 
 No task IDs, no gold, no benchmark logic — pure pipeline contracts, identical for every task.
 """
+
 import os
 import subprocess
 import sys
@@ -50,6 +51,7 @@ def _step(doc, job, name_prefix):
 
 # ── workflows must stay YAML-parseable ────────────────────────────────────────
 
+
 def test_workflows_parse_as_yaml():
     for p in (WF_DEEPSWE, WF_30, WF_300, WF_LANG_SMOKE):
         doc = _load(p)
@@ -58,13 +60,14 @@ def test_workflows_parse_as_yaml():
 
 # ── P0.1-a: issue extraction — functional, from the REAL workflow heredoc ────
 
+
 def _extract_issue_heredoc():
     """Pull the python heredoc body out of the substrate-proof step's run block."""
     step = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")
     lines = step["run"].splitlines()
     start = next(i for i, ln in enumerate(lines) if "<< 'PYEOF'" in ln)
     body = []
-    for ln in lines[start + 1:]:
+    for ln in lines[start + 1 :]:
         if ln.strip() == "PYEOF":
             break
         body.append(ln)
@@ -77,16 +80,22 @@ def _run_issue_extraction(tmp_path, task_dir):
     script.write_text(_extract_issue_heredoc(), encoding="utf-8")
     out_file = tmp_path / "issue.txt"
     env = dict(os.environ, GT_ISSUE_OUT=str(out_file))
-    r = subprocess.run([sys.executable, str(script), str(task_dir)],
-                       env=env, capture_output=True, text=True, timeout=60)
+    r = subprocess.run(
+        [sys.executable, str(script), str(task_dir)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     return r, out_file
 
 
 def test_issue_extraction_reads_instruction_md(tmp_path):
     task = tmp_path / "task_a"
     task.mkdir()
-    (task / "instruction.md").write_text("Fix the frobnicator overflow in core/x.py\n",
-                                         encoding="utf-8")
+    (task / "instruction.md").write_text(
+        "Fix the frobnicator overflow in core/x.py\n", encoding="utf-8"
+    )
     (task / "task.toml").write_text('[metadata]\nlanguage = "python"\n', encoding="utf-8")
     r, out_file = _run_issue_extraction(tmp_path, task)
     assert r.returncode == 0, f"stderr={r.stderr!r}"
@@ -97,8 +106,7 @@ def test_issue_extraction_reads_instruction_md(tmp_path):
 def test_issue_extraction_falls_back_to_task_toml(tmp_path):
     task = tmp_path / "task_b"
     task.mkdir()
-    (task / "task.toml").write_text('[task]\nprompt = "Do the thing properly"\n',
-                                    encoding="utf-8")
+    (task / "task.toml").write_text('[task]\nprompt = "Do the thing properly"\n', encoding="utf-8")
     r, out_file = _run_issue_extraction(tmp_path, task)
     assert r.returncode == 0, f"stderr={r.stderr!r}"
     assert out_file.read_text(encoding="utf-8") == "Do the thing properly"
@@ -131,10 +139,11 @@ def test_issue_extraction_whitespace_instruction_fails_closed(tmp_path):
 def test_issue_extraction_old_swallow_removed():
     run = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")["run"]
     assert "|| : > /tmp/issue.txt" not in run  # the silent empty-issue swallow is gone
-    assert "GT_ISSUE_MISSING" in run            # the fail-closed marker is emitted
+    assert "GT_ISSUE_MISSING" in run  # the fail-closed marker is emitted
 
 
 # ── P0.1-b: pipefail + PIPESTATUS + adapter-error surfacing on pier run ──────
+
 
 def test_pier_run_has_pipefail_and_pipestatus():
     run = _step(_load(WF_DEEPSWE), "trial", "Run GT trial")["run"]
@@ -145,11 +154,12 @@ def test_pier_run_has_pipefail_and_pipestatus():
 
 def test_pier_run_surfaces_swallowed_adapter_error():
     run = _step(_load(WF_DEEPSWE), "trial", "Run GT trial")["run"]
-    assert "DeepSweAdapterError" in run        # greps pier's jobs/exception_message
-    assert "DEEPSWE_ADAPTER_FAIL" in run       # fails with the classified GT marker
+    assert "DeepSweAdapterError" in run  # greps pier's jobs/exception_message
+    assert "DEEPSWE_ADAPTER_FAIL" in run  # fails with the classified GT marker
 
 
 # ── P0.1-c: brief.txt is artifact #8 in the workflow check ───────────────────
+
 
 def test_workflow_artifact_check_includes_brief():
     run = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")["run"]
@@ -160,15 +170,17 @@ def test_workflow_artifact_check_includes_brief():
 
 # ── P0.1-d: summarize parses the steps VALUE, not token presence ─────────────
 
+
 def test_summarize_parses_steps_value_not_presence():
     run = _step(_load(WF_DEEPSWE), "summarize", "Aggregate DeepSWE benchmark results")["run"]
-    assert "AGENT_RAN_STEPS=[0-9]+" in run     # numeric VALUE parse
-    assert '-gt 0' in run                       # requires steps > 0
+    assert "AGENT_RAN_STEPS=[0-9]+" in run  # numeric VALUE parse
+    assert "-gt 0" in run  # requires steps > 0
     assert 'grep -rqsE "AGENT_RAN_STEPS|n_agent_steps"' not in run  # presence check gone
-    assert "launch-fail" in run                 # 0/absent surfaces as launch-fail
+    assert "launch-fail" in run  # 0/absent surfaces as launch-fail
 
 
 # ── P0.2: OH-surface embedder pin (e5) — substrate stays gte ─────────────────
+
 
 def test_oh_30task_pins_e5():
     env = _load(WF_30).get("env") or {}
@@ -199,7 +211,7 @@ def test_substrate_paths_stay_gte():
             if i == -1:
                 break
             # the docker-run arg block immediately preceding the entrypoint
-            block = t[max(0, i - 1500):i]
+            block = t[max(0, i - 1500) : i]
             assert "GT_EMBED_MODEL_NAME" not in block, f"substrate run pinned to e5 in {wf}"
             i += 1
     # deepswe_full (the DeepSWE surface) must not define the OH pin at all.
@@ -208,6 +220,7 @@ def test_substrate_paths_stay_gte():
 
 
 # ── P1-f: proof container strict by default (deliver-always = explicit opt-in) ─
+
 
 def test_deepswe_proof_gates_strict_by_default():
     doc = _load(WF_DEEPSWE)

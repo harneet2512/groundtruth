@@ -1,4 +1,5 @@
 """Tests for scripts/swebench/artifact_resolver.py."""
+
 from __future__ import annotations
 
 import importlib.util

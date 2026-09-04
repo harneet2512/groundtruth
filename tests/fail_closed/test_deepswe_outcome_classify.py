@@ -7,6 +7,7 @@ resolved-rate denominator, and that the paired-delta scaffold is structure-only 
 fabricated baseline). No SWE-bench tasks, no gold, no per-task IDs, no per-repo logic —
 the classifier is generalized rules over signals, identical for all 113 tasks.
 """
+
 import importlib.util
 import os
 
@@ -20,12 +21,17 @@ _spec.loader.exec_module(do)
 
 # ── classify_outcome: one synthetic record per class ────────────────────────
 
+
 def test_classify_infra_substrate_pull_fail():
     # §E infra marker present in the trial log -> INFRA, regardless of any later signal.
     rec = {
         "infra_markers": ["GT_SUBSTRATE_PULL_FAIL"],
-        "adapter_fail": False, "gt_prebuilt_active": True, "hook_hash_match": True,
-        "cert_fail": False, "reward": 1.0, "n_agent_steps": 12,
+        "adapter_fail": False,
+        "gt_prebuilt_active": True,
+        "hook_hash_match": True,
+        "cert_fail": False,
+        "reward": 1.0,
+        "n_agent_steps": 12,
     }
     assert do.classify_outcome(rec) == "INFRA"
 
@@ -38,22 +44,29 @@ def test_classify_infra_eval_no_report():
 
 def test_classify_infra_enospc_subtype():
     rec = {
-        "infra_markers": [], "infra_subtype": "INFRA_ENOSPC",
-        "reward": 0.0, "n_agent_steps": 5,
+        "infra_markers": [],
+        "infra_subtype": "INFRA_ENOSPC",
+        "reward": 0.0,
+        "n_agent_steps": 5,
     }
     assert do.classify_outcome(rec) == "INFRA"
 
 
 def test_classify_infra_trajectory_fallback_subtype():
     rec = {
-        "infra_markers": [], "infra_subtype": "INFRA_TRAJECTORY_FALLBACK",
-        "reward": 0.0, "n_agent_steps": 5,
+        "infra_markers": [],
+        "infra_subtype": "INFRA_TRAJECTORY_FALLBACK",
+        "reward": 0.0,
+        "n_agent_steps": 5,
     }
     assert do.classify_outcome(rec) == "INFRA"
 
 
 def test_detect_infra_enospc_from_log():
-    assert do.detect_infra_subtype("/nonexistent", "OSError: no space left on device") == "INFRA_ENOSPC"
+    assert (
+        do.detect_infra_subtype("/nonexistent", "OSError: no space left on device")
+        == "INFRA_ENOSPC"
+    )
 
 
 def test_classify_infra_every_marker():
@@ -66,8 +79,13 @@ def test_classify_infra_every_marker():
 def test_classify_gt_adapter_fail():
     # DEEPSWE_ADAPTER_FAIL -> GT (adapter could not wire/consume the substrate).
     rec = {
-        "infra_markers": [], "adapter_fail": True, "gt_prebuilt_active": None,
-        "hook_hash_match": None, "cert_fail": False, "reward": 0.0, "n_agent_steps": 0,
+        "infra_markers": [],
+        "adapter_fail": True,
+        "gt_prebuilt_active": None,
+        "hook_hash_match": None,
+        "cert_fail": False,
+        "reward": 0.0,
+        "n_agent_steps": 0,
     }
     assert do.classify_outcome(rec) == "GT"
 
@@ -75,8 +93,13 @@ def test_classify_gt_adapter_fail():
 def test_classify_gt_prebuilt_inactive():
     # gt_prebuilt_active=false -> GT (substrate graph was not consumed).
     rec = {
-        "infra_markers": [], "adapter_fail": False, "gt_prebuilt_active": False,
-        "hook_hash_match": None, "cert_fail": False, "reward": 0.0, "n_agent_steps": 8,
+        "infra_markers": [],
+        "adapter_fail": False,
+        "gt_prebuilt_active": False,
+        "hook_hash_match": None,
+        "cert_fail": False,
+        "reward": 0.0,
+        "n_agent_steps": 8,
     }
     assert do.classify_outcome(rec) == "GT"
 
@@ -84,8 +107,13 @@ def test_classify_gt_prebuilt_inactive():
 def test_classify_gt_hash_mismatch():
     # hook_graph_hash != post-LSP hash -> GT (consumed graph diverges from substrate).
     rec = {
-        "infra_markers": [], "adapter_fail": False, "gt_prebuilt_active": True,
-        "hook_hash_match": False, "cert_fail": False, "reward": 0.0, "n_agent_steps": 8,
+        "infra_markers": [],
+        "adapter_fail": False,
+        "gt_prebuilt_active": True,
+        "hook_hash_match": False,
+        "cert_fail": False,
+        "reward": 0.0,
+        "n_agent_steps": 8,
     }
     assert do.classify_outcome(rec) == "GT"
 
@@ -93,8 +121,13 @@ def test_classify_gt_hash_mismatch():
 def test_classify_gt_cert_fail():
     # Any embedder/LSP/graph cert FAIL -> GT (unsound substrate delivered).
     rec = {
-        "infra_markers": [], "adapter_fail": False, "gt_prebuilt_active": True,
-        "hook_hash_match": True, "cert_fail": True, "reward": 0.0, "n_agent_steps": 8,
+        "infra_markers": [],
+        "adapter_fail": False,
+        "gt_prebuilt_active": True,
+        "hook_hash_match": True,
+        "cert_fail": True,
+        "reward": 0.0,
+        "n_agent_steps": 8,
     }
     assert do.classify_outcome(rec) == "GT"
 
@@ -102,8 +135,13 @@ def test_classify_gt_cert_fail():
 def test_classify_resolved():
     # reward 1.0 with sound GT context -> RESOLVED.
     rec = {
-        "infra_markers": [], "adapter_fail": False, "gt_prebuilt_active": True,
-        "hook_hash_match": True, "cert_fail": False, "reward": 1.0, "n_agent_steps": 14,
+        "infra_markers": [],
+        "adapter_fail": False,
+        "gt_prebuilt_active": True,
+        "hook_hash_match": True,
+        "cert_fail": False,
+        "reward": 1.0,
+        "n_agent_steps": 14,
     }
     assert do.classify_outcome(rec) == "RESOLVED"
 
@@ -111,8 +149,13 @@ def test_classify_resolved():
 def test_classify_agent():
     # Sound GT context (prebuilt active, valid certs, hash match), agent ran, reward 0 -> AGENT.
     rec = {
-        "infra_markers": [], "adapter_fail": False, "gt_prebuilt_active": True,
-        "hook_hash_match": True, "cert_fail": False, "reward": 0.0, "n_agent_steps": 20,
+        "infra_markers": [],
+        "adapter_fail": False,
+        "gt_prebuilt_active": True,
+        "hook_hash_match": True,
+        "cert_fail": False,
+        "reward": 0.0,
+        "n_agent_steps": 20,
     }
     assert do.classify_outcome(rec) == "AGENT"
 
@@ -125,13 +168,19 @@ def test_classify_unknown_no_signal():
 
 # ── P1-h: missing witness on a ran-but-unresolved task classifies GT ─────────
 
+
 def test_classify_gt_missing_witness_ran_unresolved():
     # Agent RAN (steps>0), did NOT resolve (reward<1), and the consumption witness is
     # MISSING (gt_prebuilt_active unknown): witness-absent = unproven consumption =
     # GT's problem — class GT, IN the resolved denominator (never UNKNOWN-excluded).
     rec = {
-        "infra_markers": [], "adapter_fail": False, "gt_prebuilt_active": None,
-        "hook_hash_match": None, "cert_fail": False, "reward": 0.0, "n_agent_steps": 17,
+        "infra_markers": [],
+        "adapter_fail": False,
+        "gt_prebuilt_active": None,
+        "hook_hash_match": None,
+        "cert_fail": False,
+        "reward": 0.0,
+        "n_agent_steps": 17,
     }
     assert do.classify_outcome(rec) == "GT"
     assert do.is_in_resolved_denominator("GT") is True
@@ -140,8 +189,12 @@ def test_classify_gt_missing_witness_ran_unresolved():
 def test_classify_missing_witness_resolved_stays_resolved():
     # reward 1.0 wins before the witness-absent rule (precedence 3 > 3b).
     rec = {
-        "infra_markers": [], "adapter_fail": False, "gt_prebuilt_active": None,
-        "cert_fail": False, "reward": 1.0, "n_agent_steps": 9,
+        "infra_markers": [],
+        "adapter_fail": False,
+        "gt_prebuilt_active": None,
+        "cert_fail": False,
+        "reward": 1.0,
+        "n_agent_steps": 9,
     }
     assert do.classify_outcome(rec) == "RESOLVED"
 
@@ -153,6 +206,7 @@ def test_classify_missing_witness_no_reward_stays_unknown():
 
 
 # ── P1-h: infra-marker token collision (line-anchored matching) ──────────────
+
 
 def test_find_infra_markers_line_anchored():
     # The workflow's own fail-closed echo (marker starts the line) -> detected.
@@ -173,11 +227,17 @@ def test_find_infra_markers_embedded_token_not_matched():
 def test_adapter_fail_line_with_embedded_infra_token_classifies_gt():
     # The collision case: the ONLY 'GT_ARTIFACT_MISSING' occurrence lives INSIDE a
     # DEEPSWE_ADAPTER_FAIL message. INFRA must NOT eat the adapter-consume failure.
-    log = ("[GT_META] graph_witness ... | error=DEEPSWE_ADAPTER_FAIL: "
-           "GT_ARTIFACT_MISSING brief.txt not consumed\n")
+    log = (
+        "[GT_META] graph_witness ... | error=DEEPSWE_ADAPTER_FAIL: "
+        "GT_ARTIFACT_MISSING brief.txt not consumed\n"
+    )
     rec = do.build_signal_record(
-        instance_id="repo__e-5", reward=0.0, n_agent_steps=11, exit_status="Submitted",
-        trial_log=log, cert_dir=None,
+        instance_id="repo__e-5",
+        reward=0.0,
+        n_agent_steps=11,
+        exit_status="Submitted",
+        trial_log=log,
+        cert_dir=None,
     )
     assert rec["infra_markers"] == []
     assert rec["adapter_fail"] is True
@@ -188,8 +248,12 @@ def test_line_anchored_infra_marker_still_classifies_infra():
     # A genuine workflow fail-closed line still wins as INFRA (precedence 1).
     log = "GT_SUBSTRATE_PULL_FAIL: docker pull of the pinned substrate failed\n"
     rec = do.build_signal_record(
-        instance_id="repo__f-6", reward=0.0, n_agent_steps=0, exit_status=None,
-        trial_log=log, cert_dir=None,
+        instance_id="repo__f-6",
+        reward=0.0,
+        n_agent_steps=0,
+        exit_status=None,
+        trial_log=log,
+        cert_dir=None,
     )
     assert rec["infra_markers"] == ["GT_SUBSTRATE_PULL_FAIL"]
     assert rec["failure_class"] == "INFRA"
@@ -201,8 +265,12 @@ def test_issue_missing_marker_is_infra():
     assert "GT_ISSUE_MISSING" in do.INFRA_LOG_MARKERS
     log = "GT_ISSUE_MISSING: no issue text for this task — refusing to run the substrate\n"
     rec = do.build_signal_record(
-        instance_id="repo__g-7", reward=None, n_agent_steps=None, exit_status=None,
-        trial_log=log, cert_dir=None,
+        instance_id="repo__g-7",
+        reward=None,
+        n_agent_steps=None,
+        exit_status=None,
+        trial_log=log,
+        cert_dir=None,
     )
     assert rec["failure_class"] == "INFRA"
     assert rec["in_resolved_denominator"] is False
@@ -213,13 +281,18 @@ def test_precedence_infra_beats_gt_beats_outcome():
     infra_over_gt = {"infra_markers": ["GT_RUN_PROOF_FAIL"], "adapter_fail": True, "reward": 1.0}
     assert do.classify_outcome(infra_over_gt) == "INFRA"
     gt_over_resolved = {
-        "infra_markers": [], "adapter_fail": False, "gt_prebuilt_active": False,
-        "cert_fail": False, "reward": 1.0, "n_agent_steps": 9,
+        "infra_markers": [],
+        "adapter_fail": False,
+        "gt_prebuilt_active": False,
+        "cert_fail": False,
+        "reward": 1.0,
+        "n_agent_steps": 9,
     }
     assert do.classify_outcome(gt_over_resolved) == "GT"
 
 
 # ── resolved-rate denominator: INFRA excluded ───────────────────────────────
+
 
 def test_infra_excluded_from_denominator():
     assert do.is_in_resolved_denominator("INFRA") is False
@@ -257,8 +330,14 @@ def test_tally_resolved_rate_does_not_count_infra_as_failure():
 
 # ── paired-delta scaffolding: structure only, no fabricated baseline ─────────
 
+
 def test_paired_delta_no_baseline_is_none():
-    gt_on = {"instance_id": "repo__x-1", "failure_class": "AGENT", "reward": 0.0, "n_agent_steps": 20}
+    gt_on = {
+        "instance_id": "repo__x-1",
+        "failure_class": "AGENT",
+        "reward": 0.0,
+        "n_agent_steps": 20,
+    }
     p = do.build_paired_delta(gt_on, baseline=None)
     assert p["instance_id"] == "repo__x-1"
     assert p["baseline_present"] is False
@@ -268,8 +347,18 @@ def test_paired_delta_no_baseline_is_none():
 
 
 def test_paired_delta_with_baseline_computes_8dp_delta():
-    gt_on = {"instance_id": "repo__x-1", "failure_class": "RESOLVED", "reward": 1.0, "n_agent_steps": 12}
-    baseline = {"instance_id": "repo__x-1", "failure_class": "AGENT", "reward": 0.0, "n_agent_steps": 18}
+    gt_on = {
+        "instance_id": "repo__x-1",
+        "failure_class": "RESOLVED",
+        "reward": 1.0,
+        "n_agent_steps": 12,
+    }
+    baseline = {
+        "instance_id": "repo__x-1",
+        "failure_class": "AGENT",
+        "reward": 0.0,
+        "n_agent_steps": 18,
+    }
     p = do.build_paired_delta(gt_on, baseline=baseline)
     assert p["baseline_present"] is True
     assert p["key_mismatch"] is False
@@ -286,6 +375,7 @@ def test_paired_delta_flags_key_mismatch():
 
 # ── end-to-end: build_signal_record parses log + certs, then classifies ──────
 
+
 def test_build_signal_record_gt_from_meta_witness(tmp_path):
     # A trial log whose [GT_META] witness reports prebuilt_active=false -> GT.
     log = (
@@ -294,8 +384,12 @@ def test_build_signal_record_gt_from_meta_witness(tmp_path):
         "gt_prebuilt_active=false; note=no_host_resolved_graph\n"
     )
     rec = do.build_signal_record(
-        instance_id="repo__a-1", reward=0.0, n_agent_steps=5, exit_status="Submitted",
-        trial_log=log, cert_dir=None,
+        instance_id="repo__a-1",
+        reward=0.0,
+        n_agent_steps=5,
+        exit_status="Submitted",
+        trial_log=log,
+        cert_dir=None,
     )
     assert rec["gt_prebuilt_active"] is False
     assert rec["failure_class"] == "GT"
@@ -307,16 +401,25 @@ def test_build_signal_record_agent_with_passing_certs(tmp_path):
     cert_dir = tmp_path / "gt"
     cert_dir.mkdir()
     (cert_dir / "graph_certificate.json").write_text(
-        '{"verdict": "GRAPH_VALID", "pass": true}', encoding="utf-8")
+        '{"verdict": "GRAPH_VALID", "pass": true}', encoding="utf-8"
+    )
     (cert_dir / "lsp_certificate.json").write_text(
-        '{"verdict": "LSP_ACTIVE_VALID", "pass": true}', encoding="utf-8")
+        '{"verdict": "LSP_ACTIVE_VALID", "pass": true}', encoding="utf-8"
+    )
     (cert_dir / "embedder_certificate.json").write_text(
-        '{"verdict": "EMBEDDER_USAGE_VALID", "pass": true}', encoding="utf-8")
-    log = ("[GT_META] graph_witness ... | gt_prebuilt_active=true; "
-           "hook_graph_hash_matches_post_lsp=True; substrate_digest=sha256:deadbeef\n")
+        '{"verdict": "EMBEDDER_USAGE_VALID", "pass": true}', encoding="utf-8"
+    )
+    log = (
+        "[GT_META] graph_witness ... | gt_prebuilt_active=true; "
+        "hook_graph_hash_matches_post_lsp=True; substrate_digest=sha256:deadbeef\n"
+    )
     rec = do.build_signal_record(
-        instance_id="repo__b-2", reward=0.0, n_agent_steps=20, exit_status="Submitted",
-        trial_log=log, cert_dir=str(cert_dir),
+        instance_id="repo__b-2",
+        reward=0.0,
+        n_agent_steps=20,
+        exit_status="Submitted",
+        trial_log=log,
+        cert_dir=str(cert_dir),
     )
     assert rec["gt_prebuilt_active"] is True
     assert rec["hook_hash_match"] is True
@@ -329,12 +432,16 @@ def test_build_signal_record_gt_from_failing_cert(tmp_path):
     cert_dir = tmp_path / "gt"
     cert_dir.mkdir()
     (cert_dir / "embedder_certificate.json").write_text(
-        '{"verdict": "EMBEDDER_FAIL_ZERO_MODEL", "pass": false}', encoding="utf-8")
-    log = ("[GT_META] ... | gt_prebuilt_active=true; "
-           "hook_graph_hash_matches_post_lsp=True\n")
+        '{"verdict": "EMBEDDER_FAIL_ZERO_MODEL", "pass": false}', encoding="utf-8"
+    )
+    log = "[GT_META] ... | gt_prebuilt_active=true; hook_graph_hash_matches_post_lsp=True\n"
     rec = do.build_signal_record(
-        instance_id="repo__c-3", reward=0.0, n_agent_steps=20, exit_status="Submitted",
-        trial_log=log, cert_dir=str(cert_dir),
+        instance_id="repo__c-3",
+        reward=0.0,
+        n_agent_steps=20,
+        exit_status="Submitted",
+        trial_log=log,
+        cert_dir=str(cert_dir),
     )
     assert rec["cert_fail"] is True
     assert rec["failure_class"] == "GT"
@@ -345,12 +452,16 @@ def test_build_signal_record_resolved(tmp_path):
     cert_dir = tmp_path / "gt"
     cert_dir.mkdir()
     (cert_dir / "graph_certificate.json").write_text(
-        '{"verdict": "GRAPH_VALID", "pass": true}', encoding="utf-8")
-    log = ("[GT_META] ... | gt_prebuilt_active=true; "
-           "hook_graph_hash_matches_post_lsp=True\n")
+        '{"verdict": "GRAPH_VALID", "pass": true}', encoding="utf-8"
+    )
+    log = "[GT_META] ... | gt_prebuilt_active=true; hook_graph_hash_matches_post_lsp=True\n"
     rec = do.build_signal_record(
-        instance_id="repo__d-4", reward=1.0, n_agent_steps=14, exit_status="Submitted",
-        trial_log=log, cert_dir=str(cert_dir),
+        instance_id="repo__d-4",
+        reward=1.0,
+        n_agent_steps=14,
+        exit_status="Submitted",
+        trial_log=log,
+        cert_dir=str(cert_dir),
     )
     assert rec["failure_class"] == "RESOLVED"
     assert rec["in_resolved_denominator"] is True

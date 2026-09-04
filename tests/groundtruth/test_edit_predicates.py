@@ -7,7 +7,6 @@ SWE-agent / OH imports.
 
 from __future__ import annotations
 
-import pytest
 
 from groundtruth.edit_predicates import (
     extract_edited_path,
@@ -18,6 +17,7 @@ from groundtruth.edit_predicates import (
 # ---------------------------------------------------------------------------
 # True cases — should fire L3+L6
 # ---------------------------------------------------------------------------
+
 
 def test_str_replace_editor_str_replace_python_file_is_edit() -> None:
     """SWE-agent canonical: str_replace_editor with command=str_replace on .py."""
@@ -75,9 +75,7 @@ def test_bash_append_redirect_go_file_is_edit() -> None:
 
 def test_bash_embedded_str_replace_editor_invocation() -> None:
     """Bash command containing `str_replace_editor str_replace path` — OH legacy."""
-    args = {
-        "command": "str_replace_editor str_replace /workspace/foo.py --old_str a --new_str b"
-    }
+    args = {"command": "str_replace_editor str_replace /workspace/foo.py --old_str a --new_str b"}
     assert is_source_edit("bash", args) is True
     assert extract_edited_path("bash", args) == "/workspace/foo.py"
 
@@ -85,6 +83,7 @@ def test_bash_embedded_str_replace_editor_invocation() -> None:
 # ---------------------------------------------------------------------------
 # False cases — should NOT fire L3+L6
 # ---------------------------------------------------------------------------
+
 
 def test_str_replace_editor_view_python_file_is_not_edit() -> None:
     """View is read-only."""
@@ -181,6 +180,7 @@ def test_bash_python_command_no_redirect_is_not_edit() -> None:
 # ---------------------------------------------------------------------------
 # Path-extraction edge cases
 # ---------------------------------------------------------------------------
+
 
 def test_extract_edited_path_uses_file_path_alias() -> None:
     """OH legacy used `file_path`; should still resolve."""

@@ -21,6 +21,7 @@ from groundtruth.providers.evidence_providers import (
     sibling_twin_provider,
     structural_twin_in_function_provider,
 )
+
 # Imported under an alias because pytest would collect ``test_provider``
 # (a public helper) as a test function otherwise.
 from groundtruth.providers.evidence_providers import test_provider as assertion_provider
@@ -48,22 +49,17 @@ def _build_repo(tmp_path: Path) -> tuple[Path, str]:
     )
     foo_py = repo / "users" / "foo.py"
     foo_py.write_text(
-        "from core.target import target\n"
-        "def caller_one():\n"
-        "    return target(1, 2)\n",
+        "from core.target import target\ndef caller_one():\n    return target(1, 2)\n",
         encoding="utf-8",
     )
     bar_py = repo / "users" / "bar.py"
     bar_py.write_text(
-        "from core.target import target\n"
-        "def caller_two():\n"
-        "    return target(3, 4)\n",
+        "from core.target import target\ndef caller_two():\n    return target(3, 4)\n",
         encoding="utf-8",
     )
     sibling_py = repo / "core" / "sibling.py"
     sibling_py.write_text(
-        "def sibling_func(x):\n"
-        "    return x + 1\n",
+        "def sibling_func(x):\n    return x + 1\n",
         encoding="utf-8",
     )
 
@@ -105,14 +101,85 @@ def _build_repo(tmp_path: Path) -> tuple[Path, str]:
         """
     )
     nodes = [
-        (1, "Function", "target", "core.target", "core/target.py", 1, 6, "def target(a, b)", "int", 1, 0, "python", 0),
-        (2, "Function", "caller_one", "users.foo", "users/foo.py", 2, 3, "def caller_one()", None, 1, 0, "python", 0),
-        (3, "Function", "caller_two", "users.bar", "users/bar.py", 2, 3, "def caller_two()", None, 1, 0, "python", 0),
-        (4, "Function", "sibling_func", "core.sibling", "core/sibling.py", 1, 2, "def sibling_func(x)", "int", 1, 0, "python", 0),
-        (5, "Function", "test_target", "tests.test_core", "tests/test_core.py", 1, 4, "def test_target()", None, 0, 1, "python", 0),
+        (
+            1,
+            "Function",
+            "target",
+            "core.target",
+            "core/target.py",
+            1,
+            6,
+            "def target(a, b)",
+            "int",
+            1,
+            0,
+            "python",
+            0,
+        ),
+        (
+            2,
+            "Function",
+            "caller_one",
+            "users.foo",
+            "users/foo.py",
+            2,
+            3,
+            "def caller_one()",
+            None,
+            1,
+            0,
+            "python",
+            0,
+        ),
+        (
+            3,
+            "Function",
+            "caller_two",
+            "users.bar",
+            "users/bar.py",
+            2,
+            3,
+            "def caller_two()",
+            None,
+            1,
+            0,
+            "python",
+            0,
+        ),
+        (
+            4,
+            "Function",
+            "sibling_func",
+            "core.sibling",
+            "core/sibling.py",
+            1,
+            2,
+            "def sibling_func(x)",
+            "int",
+            1,
+            0,
+            "python",
+            0,
+        ),
+        (
+            5,
+            "Function",
+            "test_target",
+            "tests.test_core",
+            "tests/test_core.py",
+            1,
+            4,
+            "def test_target()",
+            None,
+            0,
+            1,
+            "python",
+            0,
+        ),
     ]
     con.executemany(
-        "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", nodes,
+        "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        nodes,
     )
     edges = [
         # source_id, target_id, type, source_line, confidence
@@ -149,7 +216,11 @@ class TestCallerCodeProvider:
     def test_seen_marks_caller_seen(self, tmp_path: Path) -> None:
         repo, db = _build_repo(tmp_path)
         rows = caller_code_provider(
-            db, "core/target.py", "target", str(repo), seen_files=["users/foo.py"],
+            db,
+            "core/target.py",
+            "target",
+            str(repo),
+            seen_files=["users/foo.py"],
         )
         seen_map = {r.file: r.unseen for r in rows}
         assert seen_map["users/foo.py"] is False
@@ -203,7 +274,9 @@ class TestStructuralTwinInFunction:
     def test_finds_twin_block(self, tmp_path: Path) -> None:
         repo, _ = _build_repo(tmp_path)
         groups = structural_twin_in_function_provider(
-            str(repo / "core" / "target.py"), func_start=1, func_end=6,
+            str(repo / "core" / "target.py"),
+            func_start=1,
+            func_end=6,
         )
         # Two lines share the ``return a + b`` template inside the function.
         assert any(len(g.entries) >= 2 for g in groups)

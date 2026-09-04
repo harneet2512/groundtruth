@@ -7,6 +7,7 @@ brief) MUST be wired before any agent work. ``_assert_substrate_handoff``:
   * passes when the full handoff is present;
   * is a no-op outside proof mode (legacy dev/CI may host-build).
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -19,8 +20,12 @@ ROOT = Path(__file__).resolve().parents[1]
 GA = ROOT / "artifact_deepswe" / "gt_agent.py"
 
 _HANDOFF_KEYS = (
-    "GT_PROOF_MODE", "GT_PORTABLE_SUBSTRATE", "GT_HOST_GRAPH_DB",
-    "GT_CERT_DIR", "GT_BASELINE", "GT_FORBID_PREBUILT_GRAPH",
+    "GT_PROOF_MODE",
+    "GT_PORTABLE_SUBSTRATE",
+    "GT_HOST_GRAPH_DB",
+    "GT_CERT_DIR",
+    "GT_BASELINE",
+    "GT_FORBID_PREBUILT_GRAPH",
 )
 
 

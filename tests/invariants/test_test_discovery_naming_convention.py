@@ -7,7 +7,7 @@ Research:
 - TCTracer ICSE 2020: naming convention signal (test_foo → foo, weight 2.0)
 - RepoGraph ICLR 2025: test functions discoverable via is_test flag
 """
-import os
+
 import sqlite3
 import pytest
 
@@ -47,12 +47,14 @@ def _create_test_graph(db_path, source_files, test_files):
     for name, fpath in source_files:
         conn.execute(
             "INSERT INTO nodes (label, name, file_path, is_exported, is_test) "
-            "VALUES ('Function', ?, ?, 1, 0)", (name, fpath)
+            "VALUES ('Function', ?, ?, 1, 0)",
+            (name, fpath),
         )
     for name, fpath in test_files:
         conn.execute(
             "INSERT INTO nodes (label, name, file_path, is_exported, is_test) "
-            "VALUES ('Function', ?, ?, 0, 1)", (name, fpath)
+            "VALUES ('Function', ?, ?, 0, 1)",
+            (name, fpath),
         )
     conn.commit()
     conn.close()
@@ -117,9 +119,7 @@ def no_match_graph(tmp_path):
     )
     test_dir = tmp_path / "tests"
     test_dir.mkdir(parents=True)
-    (test_dir / "test_integration.py").write_text(
-        "def test_integration():\n    assert True\n"
-    )
+    (test_dir / "test_integration.py").write_text("def test_integration():\n    assert True\n")
     return db, str(tmp_path)
 
 
@@ -128,6 +128,7 @@ class TestNamingConventionDiscovery:
 
     def test_flexget_test_qbittorrent_found(self, flexget_graph):
         from groundtruth.hooks.post_edit import _discover_test_files_by_convention
+
         db, repo = flexget_graph
         files = _discover_test_files_by_convention(
             str(db), "flexget/plugins/clients/qbittorrent.py", repo
@@ -137,24 +138,23 @@ class TestNamingConventionDiscovery:
     def test_pypsa_test_statistics_not_found_by_stem(self, pypsa_graph):
         """expressions.py → test_expressions.py (doesn't exist), NOT test_statistics.py."""
         from groundtruth.hooks.post_edit import _discover_test_files_by_convention
+
         db, repo = pypsa_graph
-        files = _discover_test_files_by_convention(
-            str(db), "pypsa/statistics/expressions.py", repo
-        )
+        files = _discover_test_files_by_convention(str(db), "pypsa/statistics/expressions.py", repo)
         # test_statistics doesn't match test_expressions pattern
         assert not any("test_statistics" in f for f in files)
 
     def test_no_match_returns_empty(self, no_match_graph):
         from groundtruth.hooks.post_edit import _discover_test_files_by_convention
+
         db, repo = no_match_graph
-        files = _discover_test_files_by_convention(
-            str(db), "src/core/auth.py", repo
-        )
+        files = _discover_test_files_by_convention(str(db), "src/core/auth.py", repo)
         # test_integration doesn't match test_auth
         assert not any("test_integration" in f for f in files)
 
     def test_exact_stem_match(self, flexget_graph):
         from groundtruth.hooks.post_edit import _discover_test_files_by_convention
+
         db, repo = flexget_graph
         files = _discover_test_files_by_convention(
             str(db), "flexget/plugins/clients/qbittorrent.py", repo
@@ -168,10 +168,10 @@ class TestFileGrepFallbackWithConvention:
 
     def test_flexget_finds_assertions_without_edges(self, flexget_graph):
         from groundtruth.hooks.post_edit import _get_test_assertions_from_file
+
         db, repo = flexget_graph
         assertions = _get_test_assertions_from_file(
-            str(db), "flexget/plugins/clients/qbittorrent.py",
-            "ratio_limit", repo
+            str(db), "flexget/plugins/clients/qbittorrent.py", "ratio_limit", repo
         )
         assert len(assertions) >= 1
         assert any("ratio_limit" in a for a in assertions)

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 
 class TestEvidenceFormatting:
-
     def _simulate_non_live_formatting(self, hook_output: str) -> str:
         """Simulate the non-live L3 evidence formatting path.
 
@@ -17,7 +16,8 @@ class TestEvidenceFormatting:
         After P0-2 fix: "\n".join(directive_lines)[:2000]
         """
         directive_lines = [
-            ln.strip() for ln in hook_output.splitlines()
+            ln.strip()
+            for ln in hook_output.splitlines()
             if ln.strip()
             and not ln.strip().startswith("[GT_STATUS]")
             and not ln.strip().startswith("__")
@@ -107,7 +107,8 @@ class TestEvidenceFormatting:
             "[GT_STATUS] success\n"
         )
         directive_lines = [
-            ln.strip() for ln in hook_output.splitlines()
+            ln.strip()
+            for ln in hook_output.splitlines()
             if ln.strip()
             and not ln.strip().startswith("[GT_STATUS]")
             and not ln.strip().startswith("__")

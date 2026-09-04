@@ -18,6 +18,7 @@ Builds a synthetic graph.db matching the real schema (nodes/edges) and asserts:
 Red-before-green: with name_match admitted into the fact set (the pre-fix behavior),
 the L1 assertion (no name_match callee) and the L2 caller assertion both fail.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -61,8 +62,19 @@ CREATE TABLE edges (
 
 def _node(nid, name, fpath, sline=10, qname=None, sig="", is_test=0, label="Function"):
     return (
-        nid, label, name, qname or name, fpath, sline, sline + 5, sig, "",
-        0, is_test, "python", 0,
+        nid,
+        label,
+        name,
+        qname or name,
+        fpath,
+        sline,
+        sline + 5,
+        sig,
+        "",
+        0,
+        is_test,
+        "python",
+        0,
     )
 
 
@@ -95,6 +107,7 @@ def _conn(rows_nodes, rows_edges):
 
 # ── L1: IMPORT family / get_callees ─────────────────────────────────────────
 
+
 def test_l1_get_callees_excludes_name_match_keeps_deterministic():
     """get_callees: target -> det callee (import) kept; target -> name_match callee dropped.
 
@@ -103,12 +116,12 @@ def test_l1_get_callees_excludes_name_match_keeps_deterministic():
     """
     nodes = [
         _node(1, "validate", "app.py", sig="def validate(data):"),
-        _node(2, "_check", "util.py", sig="def _check(x):"),   # deterministic callee
-        _node(3, "walk", "core.py", sig="def walk(root):"),    # name_match callee (drop)
+        _node(2, "_check", "util.py", sig="def _check(x):"),  # deterministic callee
+        _node(3, "walk", "core.py", sig="def walk(root):"),  # name_match callee (drop)
     ]
     edges = [
-        (1, 2, "CALLS", 11, "app.py", "import", 1.0, None),        # det -> kept
-        (1, 3, "CALLS", 12, "app.py", "name_match", 0.9, None),    # guess -> dropped
+        (1, 2, "CALLS", 11, "app.py", "import", 1.0, None),  # det -> kept
+        (1, 3, "CALLS", 12, "app.py", "name_match", 0.9, None),  # guess -> dropped
     ]
     conn = _conn(nodes, edges)
 
@@ -159,6 +172,7 @@ def test_l1_import_family_threads_resolution_method_and_suppresses_name_match():
 
 
 # ── L2: directive briefing (generate_pretask_briefing) ──────────────────────
+
 
 def test_l2_top_caller_suppresses_name_match_phantom():
     """A name_match-only incoming caller is a phantom (same-name guess) and must NOT be

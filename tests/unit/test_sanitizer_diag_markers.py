@@ -1,6 +1,7 @@
 """C6B: [GT_RANK_DIAG] / [GT_BRIEF_DIAG] must be in the SINGLE central
 _HIDDEN_PREFIXES so no agent-facing path can re-leak them. Previously they were
 stripped only by a local filter in the wrapper brief path."""
+
 from __future__ import annotations
 
 from groundtruth.runtime.sanitizer import has_leak, is_hidden_line, sanitize

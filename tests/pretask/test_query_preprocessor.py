@@ -1,4 +1,5 @@
 """Tests for Track A preprocessor."""
+
 from __future__ import annotations
 
 from groundtruth.pretask.query_preprocessor import preprocess
@@ -51,9 +52,7 @@ def test_fenced_code_block() -> None:
 def test_title_extraction() -> None:
     text = "Bug in HelperFunction\n\nWhen calling foo it breaks."
     q = preprocess(text)
-    title_entries = [
-        t for t in q.high_signal_tokens if t.source == "title"
-    ]
+    title_entries = [t for t in q.high_signal_tokens if t.source == "title"]
     tokens = {t.token: t.weight for t in title_entries}
     assert "HelperFunction" in tokens
     assert tokens["HelperFunction"] == 1.5
@@ -70,10 +69,7 @@ def test_camel_case_error_class() -> None:
 def test_snake_case_in_prose() -> None:
     text = "Please set the cache_dir to None when running."
     q = preprocess(text)
-    snake = {
-        (t.token, t.source) for t in q.high_signal_tokens
-        if t.source == "snake_case"
-    }
+    snake = {(t.token, t.source) for t in q.high_signal_tokens if t.source == "snake_case"}
     assert ("cache_dir", "snake_case") in snake
 
 
@@ -105,11 +101,7 @@ def test_real_swebench_issue_spotcheck() -> None:
 
 
 def test_token_dedup_keeps_max_weight() -> None:
-    text = (
-        'File "x.py", line 1, in handler\n'
-        "  do()\n"
-        "Also `handler` is buggy."
-    )
+    text = 'File "x.py", line 1, in handler\n  do()\nAlso `handler` is buggy.'
     q = preprocess(text)
     handler_entries = [t for t in q.high_signal_tokens if t.token == "handler"]
     sources = {t.source for t in handler_entries}
@@ -126,12 +118,7 @@ def test_raw_text_preserved() -> None:
 
 
 def test_lists_are_deduplicated() -> None:
-    text = (
-        'File "src/a.py", line 1, in foo\n'
-        '  call()\n'
-        'File "src/a.py", line 5, in foo\n'
-        '  call2()\n'
-    )
+    text = 'File "src/a.py", line 1, in foo\n  call()\nFile "src/a.py", line 5, in foo\n  call2()\n'
     q = preprocess(text)
     assert q.file_hints.count("src/a.py") == 1
     assert q.function_hints.count("foo") == 1

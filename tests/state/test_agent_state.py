@@ -25,7 +25,6 @@ from groundtruth.state.agent_state import (
     IterationBand,
     PendingSuggestion,
     SuggestionStatus,
-    _agent_state_path,
     canonical_repo_path,
 )
 
@@ -263,7 +262,9 @@ def _redirect_state_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
 
 class TestPersistence:
     def test_save_then_load_round_trips(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _redirect_state_dir(monkeypatch, tmp_path)
         s = AgentState.create(task_id="round-trip", max_iterations=100, repo_root="/testbed")
@@ -288,7 +289,9 @@ class TestPersistence:
         assert loaded.pending_suggestions[0].next_action_file == "caller.py"
 
     def test_two_tasks_use_separate_state_files(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _redirect_state_dir(monkeypatch, tmp_path)
         # Re-import through the module so the monkey-patched helper is used.
@@ -322,7 +325,9 @@ class TestPersistence:
         assert reloaded_b.visited_files_set() == {"b.py"}
 
     def test_load_with_unknown_task_returns_fresh(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _redirect_state_dir(monkeypatch, tmp_path)
         s = AgentState.load_or_create(task_id="never-saved", repo_root="/testbed")
@@ -419,9 +424,12 @@ class TestBackwardsCompatibility:
         s.update_iter(80, 100)
         assert s.band == LegacyIterationBand.LATE_REPAIR
 
-    def test_view_mirrors_to_tmp_when_requested(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_view_mirrors_to_tmp_when_requested(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """When ``sync_legacy_file=True`` (default) the tmp mirror is rewritten."""
         import groundtruth.state.agent_state as mod
+
         tmp_viewed = tmp_path / "gt_viewed.txt"
         monkeypatch.setattr(mod, "LEGACY_VIEWED_PATH", str(tmp_viewed))
 
@@ -448,8 +456,12 @@ class TestPendingSuggestionHelpers:
         d = sug.to_legacy_dict()
         # Matches what the wrapper's _pending_next_actions list expects.
         assert set(d) >= {
-            "event_id", "next_action_type", "next_action_file",
-            "iter_emitted", "checked_count", "followed",
+            "event_id",
+            "next_action_type",
+            "next_action_file",
+            "iter_emitted",
+            "checked_count",
+            "followed",
         }
         assert d["followed"] is False
         sug.status = SuggestionStatus.FOLLOWED_EXACT

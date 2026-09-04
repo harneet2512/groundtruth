@@ -35,6 +35,7 @@ from groundtruth.pretask.contract_map import (
     contract_line,
     edit_target_callee_contracts,
 )
+
 # Symbol-anchored multi-hop graph-witness localizer (the L1 core). This is the
 # deterministic graph TRAVERSAL that the old lexical-only candidate path lacked:
 # it anchors on issue SYMBOLS, walks graph.db CALLS/IMPORTS from those nodes, and
@@ -74,6 +75,7 @@ def _clip_body_line(line: str, limit: int = _MAX_BODY_LINE_CHARS) -> str:
     if len(line) <= limit:
         return line
     return line[: limit - 1].rstrip() + "…"
+
 
 _schema_cache: dict[str, bool] = {}
 
@@ -281,20 +283,22 @@ class V1RBriefResult:
     # semantic + FTS5) and not a degraded lexical-only / hollow run. A candidate
     # counts toward a signal iff that signal contributed a NONZERO score to it.
     # Defaults keep every existing caller byte-compatible. (instr 2026-06-04)
-    graph_edge_count: int = 0        # candidates backed by >=1 real graph edge
-    semantic_signal_count: int = 0   # candidates with a nonzero semantic/ONNX score
-    structural_signal_count: int = 0 # candidates with a nonzero structural/graph-reach score
-    fts5_signal_count: int = 0       # candidates scored by / entering via FTS5/BM25 (lexical)
-    confidence_tier: str = "low"     # HIGH/MEDIUM/LOW from _localization_header
+    graph_edge_count: int = 0  # candidates backed by >=1 real graph edge
+    semantic_signal_count: int = 0  # candidates with a nonzero semantic/ONNX score
+    structural_signal_count: int = 0  # candidates with a nonzero structural/graph-reach score
+    fts5_signal_count: int = 0  # candidates scored by / entering via FTS5/BM25 (lexical)
+    confidence_tier: str = "low"  # HIGH/MEDIUM/LOW from _localization_header
     # --- Embedder-CONSUMPTION metrics (instr 2026-06-07, FIELD-NAME CONTRACT) ---
     # Let a fail-closed precheck distinguish "embedder PRESENT" from "embedder
     # CONSUMED": a present-but-unconsumed embedder has effective_w_sem > 0 yet
     # semantic_signal_count == 0 / all-zero sem_components. Measured over the
     # RENDERED candidates (.files), so it reflects exactly what the agent saw.
-    effective_w_sem: float = 0.0          # W_SEM actually applied after all zeroing branches (from run_v74)
-    rendered_candidate_count: int = 0     # number of rendered/delivered candidates (== len(files))
-    k_sem_top: int = 0                    # the relative sem-component cap actually used (from run_v74)
-    sem_components: list[float] = field(default_factory=list)  # components['sem'] over rendered candidates
+    effective_w_sem: float = 0.0  # W_SEM actually applied after all zeroing branches (from run_v74)
+    rendered_candidate_count: int = 0  # number of rendered/delivered candidates (== len(files))
+    k_sem_top: int = 0  # the relative sem-component cap actually used (from run_v74)
+    sem_components: list[float] = field(
+        default_factory=list
+    )  # components['sem'] over rendered candidates
 
 
 def _provenance_order_clause(
@@ -935,15 +939,17 @@ def _resolved_witnesses_for_file(
             code = _code_at(caller_file, line)
             if _is_stdlib_shadow(code, target_name or ""):
                 continue  # false caller: stdlib attr call name-matched to project symbol
-            out.append({
-                "relation": "CALLS",
-                "direction": "caller",
-                "file_path": caller_file,
-                "line": int(line) if line else 0,
-                "symbol": caller_name or "",
-                "target": target_name or "",
-                "code": code,
-            })
+            out.append(
+                {
+                    "relation": "CALLS",
+                    "direction": "caller",
+                    "file_path": caller_file,
+                    "line": int(line) if line else 0,
+                    "symbol": caller_name or "",
+                    "target": target_name or "",
+                    "code": code,
+                }
+            )
             if sum(1 for w in out if w["direction"] == "caller") >= max_each:
                 break
 
@@ -970,7 +976,15 @@ def _resolved_witnesses_for_file(
                 callee_sql.format(file_predicate="nsrc.file_path LIKE ?"),
                 ("%/" + _norm_fp, max_each * 4),
             ).fetchall()
-        for callee_file, source_line, callee_name, src_name, def_line, _slang, _tlang in callee_rows:
+        for (
+            callee_file,
+            source_line,
+            callee_name,
+            src_name,
+            def_line,
+            _slang,
+            _tlang,
+        ) in callee_rows:
             # `source_line` is the CALL SITE in THIS candidate file — use it ONLY for the
             # stdlib-shadow check on the call (`os.walk(` must be read at the call site).
             # The RENDERED location is the callee's DEFINITION line in callee_file
@@ -999,15 +1013,17 @@ def _resolved_witnesses_for_file(
             _call_code = _code_at(file_path, source_line)
             if _is_stdlib_shadow(_call_code, callee_name or ""):
                 continue
-            out.append({
-                "relation": "CALLS",
-                "direction": "callee",
-                "file_path": callee_file,
-                "line": int(def_line) if def_line else 0,
-                "symbol": callee_name or "",
-                "target": src_name or "",
-                "code": _code_at(callee_file, def_line) if def_line else "",
-            })
+            out.append(
+                {
+                    "relation": "CALLS",
+                    "direction": "callee",
+                    "file_path": callee_file,
+                    "line": int(def_line) if def_line else 0,
+                    "symbol": callee_name or "",
+                    "target": src_name or "",
+                    "code": _code_at(callee_file, def_line) if def_line else "",
+                }
+            )
             if sum(1 for w in out if w["direction"] == "callee") >= max_each:
                 break
         return out
@@ -1217,7 +1233,8 @@ def _co_change_from_table(graph_db: str, file_path: str, limit: int = 3) -> list
         # below the limit (the B6 lesson). This is the cochange path-emitter the
         # Class-A generalization missed.
         return [
-            r[0] for r in rows
+            r[0]
+            for r in rows
             if r[0] and not _is_test_or_demo(r[0]) and not _is_vendored_path(r[0])
         ][:limit]
     except sqlite3.Error:
@@ -1324,9 +1341,11 @@ def _l1_signal_counts(
             fts5 += 1
 
         _reach = float(comps.get("reach", 0.0) or 0.0)
-        _witnessed = bool(getattr(entry, "witness", "")) or getattr(
-            entry, "localizer_confidence", 0.0
-        ) > 0.0 or float(comps.get("witness", 0.0) or 0.0) > 0.0
+        _witnessed = (
+            bool(getattr(entry, "witness", ""))
+            or getattr(entry, "localizer_confidence", 0.0) > 0.0
+            or float(comps.get("witness", 0.0) or 0.0) > 0.0
+        )
         if _reach > 0.0 or _witnessed:
             struct += 1
 
@@ -1546,10 +1565,7 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
         # names), language-invariant (filename specificity, not Python-specific).
         _stem = os.path.splitext(os.path.basename(entry.path or ""))[0].lower()
         _stem_specific = len(_stem) >= 5 or "_" in _stem
-        path_match = (
-            _stem_specific
-            and bool(_re.search(rf"\b{_re.escape(_stem)}\b", _it))
-        )
+        path_match = _stem_specific and bool(_re.search(rf"\b{_re.escape(_stem)}\b", _it))
 
     # A verified GRAPH-TRAVERSAL witness (graph_localizer): the file is connected
     # to an issue-anchored symbol by a DETERMINISTIC CALLS/IMPORTS edge. This is
@@ -1750,10 +1766,10 @@ def _obligation_is_leaky(verbatim: str, symbols, gold_path_tokens: set[str]) -> 
     rendered gold-file path component. These are grader-coupled surfaces — GT must
     surface ZERO test references so its output is identical if the grader swaps.
     """
-    low = (verbatim or "")
+    low = verbatim or ""
     if _F2P_TOKEN_RE.search(low) or _OBLIG_TEST_NAME_RE.search(low):
         return True
-    for s in (symbols or set()):
+    for s in symbols or set():
         sl = str(s)
         if _OBLIG_TEST_NAME_RE.search(sl) or _F2P_TOKEN_RE.search(sl):
             return True
@@ -1792,6 +1808,7 @@ def _render_obligations_block(
             identifier_tokens as _id_tokens,
             passes_relevance_gate as _rel_gate,
         )
+
         spec = _extract_spec(issue_text)
     except Exception:
         return []
@@ -1812,9 +1829,8 @@ def _render_obligations_block(
     for f in files:
         # bare names (function_names) are the focus anchor; `functions` holds
         # signatures ("def foo(...)") whose tokens we also harvest as a fallback.
-        for fn in (
-            list(getattr(f, "function_names", []) or [])
-            + list(getattr(f, "functions", []) or [])
+        for fn in list(getattr(f, "function_names", []) or []) + list(
+            getattr(f, "functions", []) or []
         ):
             fn_tokens |= _id_tokens(fn)
         # gold-path tokens for the leakage guard — a rendered candidate's path
@@ -1829,7 +1845,7 @@ def _render_obligations_block(
     # obligation relevance anchor is consistent, not a new heuristic. They are NOT
     # added to gold_path_tokens, so the leakage guard is unaffected (an anchor
     # symbol that coincides with a gold-path segment is still caught there).
-    for s in (anchor_symbols or set()):
+    for s in anchor_symbols or set():
         fn_tokens |= _id_tokens(str(s))
     if not fn_tokens:
         return []  # no anchor to gate against — stay quiet
@@ -1884,6 +1900,7 @@ def render_brief(
 ) -> str:
     if not files:
         return "<gt-task-brief>\n</gt-task-brief>"
+
     # D1: per-body-line char cap. The budget-enforcement loop in
     # generate_v1r_brief tightens this (not the file LIST) when the brief is over
     # the token rail — trimming DETAIL, never which files the agent is told to
@@ -2008,9 +2025,16 @@ def render_brief(
     # the agent already has, curated into a concise spec).
     if issue_text:
         import re as _re_eb
+
         _eb_patterns = [
-            _re_eb.compile(r"(?:^|\n)#{1,3}\s*Expected\s*(?:Behavior|Output|Result)s?\s*\n(.*?)(?=\n#{1,3}\s|\Z)", _re_eb.DOTALL | _re_eb.IGNORECASE),
-            _re_eb.compile(r"(?:^|\n)\*\*Expected\s*(?:behavior|output|result)s?\*\*[:\s]*(.*?)(?=\n\*\*|\n#{1,3}|\Z)", _re_eb.DOTALL | _re_eb.IGNORECASE),
+            _re_eb.compile(
+                r"(?:^|\n)#{1,3}\s*Expected\s*(?:Behavior|Output|Result)s?\s*\n(.*?)(?=\n#{1,3}\s|\Z)",
+                _re_eb.DOTALL | _re_eb.IGNORECASE,
+            ),
+            _re_eb.compile(
+                r"(?:^|\n)\*\*Expected\s*(?:behavior|output|result)s?\*\*[:\s]*(.*?)(?=\n\*\*|\n#{1,3}|\Z)",
+                _re_eb.DOTALL | _re_eb.IGNORECASE,
+            ),
         ]
         for _pat in _eb_patterns:
             _eb_match = _pat.search(issue_text)
@@ -2043,13 +2067,14 @@ def render_brief(
     if False and graph_db and files:
         try:
             import sqlite3 as _asq
+
             _aconn = _asq.connect(graph_db)
             _all_spec_lines: list[str] = []
             _total_verify_budget = 5  # total assertion lines across all files
             for _verify_file in files:
                 if len(_all_spec_lines) >= _total_verify_budget:
                     break
-                _vf_path = _verify_file.path if hasattr(_verify_file, 'path') else str(_verify_file)
+                _vf_path = _verify_file.path if hasattr(_verify_file, "path") else str(_verify_file)
                 _vf_base = os.path.basename(_vf_path)
                 _per_file_limit = max(2, _total_verify_budget - len(_all_spec_lines))
                 # Two queries: first try linked assertions (target_node_id > 0),
@@ -2084,7 +2109,7 @@ def render_brief(
                         # Collapse whitespace so multi-line assertions render on one line
                         _expr_clean = " ".join((expr or "").split())[:80].strip()
                         if _expr_clean:
-                            _tname_short = (tname or "?")
+                            _tname_short = tname or "?"
                             _line = f"  {_tname_short}: {_expr_clean}"
                             if expected and expected.strip():
                                 _line += f" == {expected.strip()[:50]}"
@@ -2135,9 +2160,7 @@ def render_brief(
         _deliverable_scope = [
             f
             for f in scope_files
-            if not _is_vendored_path(f)
-            and not _is_test_path(f)
-            and not _is_test_or_demo(f)
+            if not _is_vendored_path(f) and not _is_test_path(f) and not _is_test_or_demo(f)
         ]
         scope_names = [os.path.basename(f) for f in _deliverable_scope[:3]]
         if scope_names and scope_confidence == "high":
@@ -2163,18 +2186,16 @@ def render_brief(
             _chain_src = [
                 f
                 for f in chain_files
-                if not _is_test_path(f)
-                and not _is_vendored_path(f)
-                and not _is_test_or_demo(f)
+                if not _is_test_path(f) and not _is_vendored_path(f) and not _is_test_or_demo(f)
             ]
             if len(_chain_src) >= 2 and chain_conf >= 0.5:
                 chain_basenames = [os.path.basename(f) for f in _chain_src]
                 # D1: cap the basename chain (many "→"-joined files run long). The
                 # leading "\n" is preserved so the blank-line separator survives.
                 lines.append(
-                    "\n" + _cap(
-                        "Scope chain (graph-connected, check ALL): "
-                        f"{' → '.join(chain_basenames)}"
+                    "\n"
+                    + _cap(
+                        f"Scope chain (graph-connected, check ALL): {' → '.join(chain_basenames)}"
                     )
                 )
                 if chain_desc:
@@ -2463,17 +2484,19 @@ def _high_func_support(witnesses, func: str) -> int:
     identity so two views of one edge don't double-count. Pure; no graph read.
     """
     fl = (func or "").lower()
-    return len({
-        (
-            getattr(w, "direction", ""),
-            getattr(w, "src_symbol", ""),
-            getattr(w, "dst_symbol", ""),
-            getattr(w, "edge_type", ""),
-        )
-        for w in (witnesses or [])
-        if (getattr(w, "anchor", "") or "").lower() == fl
-        and getattr(w, "direction", "") != "defines_anchor"
-    })
+    return len(
+        {
+            (
+                getattr(w, "direction", ""),
+                getattr(w, "src_symbol", ""),
+                getattr(w, "dst_symbol", ""),
+                getattr(w, "edge_type", ""),
+            )
+            for w in (witnesses or [])
+            if (getattr(w, "anchor", "") or "").lower() == fl
+            and getattr(w, "direction", "") != "defines_anchor"
+        }
+    )
 
 
 def _resolved_witness_tail(graph_db: str, file_path: str) -> str:
@@ -2534,7 +2557,8 @@ def _fts5_symbol_rank(graph_db: str, file_path: str, terms: set[str]) -> list[st
         conn = sqlite3.connect(graph_db)
         try:
             tables = {
-                r[0] for r in conn.execute(
+                r[0]
+                for r in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
@@ -2633,7 +2657,7 @@ def _semantic_leaf_names(
             return True  # >=2 agreeing signals
         if in_sem and sem_rank[nm] == 0:
             return True  # graded-relevance top match may stand alone
-        return False     # lexical-only (or non-top sem-only) -> correct-or-quiet
+        return False  # lexical-only (or non-top sem-only) -> correct-or-quiet
 
     qualified = [nm for nm in names if _qualifies(nm)]
     if not qualified:
@@ -2673,13 +2697,15 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     def _issue_edges(c):
         # verified, non-DEFINES (structural edge) witnesses descended from an issue anchor
         return [
-            w for w in c.witnesses
+            w
+            for w in c.witnesses
             if getattr(w, "verified", False)
             and getattr(w, "direction", "") != "defines_anchor"
             and (getattr(w, "anchor", "") or "").lower() in anchors
         ]
 
     import statistics as _st
+
     top = cands[0]
     top_edges = _issue_edges(top)
     struct_cands = [c for c in cands if _issue_edges(c)]
@@ -2728,8 +2754,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # ad-hoc list. Correct-or-quiet: keep the original set if the filter would empty
     # it (a vendored-only candidate set still gets a region-level option list).
     _kept = [
-        c for c in cands
-        if not _is_test_or_demo(c.file_path) and not _is_vendored_path(c.file_path)
+        c for c in cands if not _is_test_or_demo(c.file_path) and not _is_vendored_path(c.file_path)
     ]
     if _kept:
         cands = _kept
@@ -2789,7 +2814,8 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # them) WITHOUT losing real help: observed good outcomes came from the MEDIUM path,
     # not HIGH. Shared localizer -> fixes both the OH and DeepSWE pipelines at the source.
     _high_elig = [
-        c for c in cands
+        c
+        for c in cands
         if _issue_edges(c)
         and int(_agree_map.get(_gl_normalize(c.file_path), 0)) >= 2
         and _distinct_issue_anchors(c) >= 2
@@ -2815,11 +2841,9 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         # a confident-wrong steer is the single worst failure mode). Unreadable
         # graph -> (inf, ->0) -> permissive (prior behavior).
         _sym_hub_thr, _fanin_of = _symbol_fanin_fn(graph_db)
-        if (_high_func_support(tgt.witnesses, func) >= 2
-                and _fanin_of(func) <= _sym_hub_thr):
+        if _high_func_support(tgt.witnesses, func) >= 2 and _fanin_of(func) <= _sym_hub_thr:
             line_txt, line_no = _edit_target_guard(graph_db, tgt.file_path, func)
-            out = ['<gt-localization confidence="high">',
-                   f"Edit target: {tgt.file_path} :: {func}"]
+            out = ['<gt-localization confidence="high">', f"Edit target: {tgt.file_path} :: {func}"]
             if line_txt:
                 loc_s = f"  [L{line_no}]" if line_no else ""
                 out.append(f"  guard/return to update: {line_txt}{loc_s}")
@@ -2861,8 +2885,10 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     region = _common_region([c.file_path for c in shown])
     region_informative = region.count("/") >= 1  # >=2 path components
     if _low_tier and region_informative and len({os.path.dirname(c.file_path) for c in shown}) > 1:
-        out = ['<gt-localization confidence="low">',
-               f"Region: {region}/ — candidate edit targets (reason over these, confirm with grep):"]
+        out = [
+            '<gt-localization confidence="low">',
+            f"Region: {region}/ — candidate edit targets (reason over these, confirm with grep):",
+        ]
         for i, c in enumerate(shown, 1):
             out.append(f"  {i}. {c.file_path}")
             _wt = _resolved_witness_tail(graph_db, c.file_path)
@@ -2877,8 +2903,10 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # 0 signals agree -> "low" (this is the LOW rendering when the region above was
     # uninformative). Keeps the tier == "X signals agree" contract end-to-end. ----
     _tier_label = "low" if _low_tier else "medium"
-    out = [f'<gt-localization confidence="{_tier_label}">',
-           "Candidate edit targets (reason over these):"]
+    out = [
+        f'<gt-localization confidence="{_tier_label}">',
+        "Candidate edit targets (reason over these):",
+    ]
     for i, c in enumerate(shown, 1):
         fs = _defines_funcs(c)
         # R1 leaf-naming bridge: defines_anchor named NOTHING (behavior-described
@@ -2908,12 +2936,44 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
 # _NL_FUNCTION_WORDS English-function-word filter — a LANGUAGE invariant, NOT a per-task blocklist;
 # no domain words). loguru-1297: 'print' (a builtin with a caller edge) corroborated _error_interceptor
 # and flanked the gold — this drops it at the source so only specific names seed.
-_GENERIC_CODE_NAMES: frozenset[str] = frozenset({
-    "print", "format", "sorted", "range", "input", "repr", "round", "bytes", "bytearray",
-    "frozenset", "isinstance", "hasattr", "getattr", "setattr", "delattr", "super", "object",
-    "property", "staticmethod", "classmethod", "append", "extend", "insert", "remove",
-    "items", "keys", "values", "update", "split", "strip", "join", "replace", "encode", "decode",
-})
+_GENERIC_CODE_NAMES: frozenset[str] = frozenset(
+    {
+        "print",
+        "format",
+        "sorted",
+        "range",
+        "input",
+        "repr",
+        "round",
+        "bytes",
+        "bytearray",
+        "frozenset",
+        "isinstance",
+        "hasattr",
+        "getattr",
+        "setattr",
+        "delattr",
+        "super",
+        "object",
+        "property",
+        "staticmethod",
+        "classmethod",
+        "append",
+        "extend",
+        "insert",
+        "remove",
+        "items",
+        "keys",
+        "values",
+        "update",
+        "split",
+        "strip",
+        "join",
+        "replace",
+        "encode",
+        "decode",
+    }
+)
 
 
 def _exact_issue_named_files(
@@ -2948,6 +3008,7 @@ def _exact_issue_named_files(
     """
     import re as _re
     import sqlite3 as _sq
+
     toks = set(_re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text or ""))
     toks |= {t.lower() for t in toks}
     out: dict[str, list[str]] = {}
@@ -2971,16 +3032,16 @@ def _exact_issue_named_files(
         ):
             if not name or not fp:
                 continue
-            if name.startswith("__") and name.endswith("__"):   # dunders are never anchors
+            if name.startswith("__") and name.endswith("__"):  # dunders are never anchors
                 continue
-            if name.lower() in _GENERIC_CODE_NAMES:             # language builtins are never anchors
+            if name.lower() in _GENERIC_CODE_NAMES:  # language builtins are never anchors
                 continue
             if len(name) < 5 and "_" not in name and name not in _prov:
                 continue  # short generic names: only reporter-confirmed provenance admits them
             if name in toks or name.lower() in toks:
                 _name_files.setdefault(name, set()).add(fp)
         for name, files in _name_files.items():
-            if len(files) > _MAX_FILES_PER_NAME:                # generic name -> not a specific anchor
+            if len(files) > _MAX_FILES_PER_NAME:  # generic name -> not a specific anchor
                 continue
             for fp in files:
                 out.setdefault(fp, [])
@@ -3148,6 +3209,7 @@ def generate_v1r_brief(
     if graph_db:
         try:
             from groundtruth.pretask.anchors import extract_issue_anchors as _eia_h
+
             _anchors_obj = _eia_h(issue_text, graph_db)
         except Exception:
             _anchors_obj = None
@@ -3159,8 +3221,14 @@ def generate_v1r_brief(
     # caller, was ranked below lexical stats.py and dropped from the top-5.)
     _issue_named = _exact_issue_named_files(issue_text, graph_db, issue_anchors=_anchors_obj)
     if _issue_named:
+
         def _rf(r):
-            return (r.get("path") or r.get("file") or r.get("file_path") or "").replace("\\", "/").lstrip("/")
+            return (
+                (r.get("path") or r.get("file") or r.get("file_path") or "")
+                .replace("\\", "/")
+                .lstrip("/")
+            )
+
         _named = {f.replace("\\", "/").lstrip("/"): fns for f, fns in _issue_named.items()}
         _have = {_rf(r) for r in top_records}
         _by_path = {_rf(r): r for r in v74.ranked_full}
@@ -3169,14 +3237,18 @@ def generate_v1r_brief(
         for fp in sorted(_named):
             if fp in _have:
                 continue
-            if fp in _by_path:                       # retrieved-but-cut -> pull to front
+            if fp in _by_path:  # retrieved-but-cut -> pull to front
                 _promote.append(_by_path[fp])
-            else:                                    # recall miss -> synthesize a top record
-                _promote.append({
-                    "path": fp, "score": _top_score + 0.01,
-                    "functions": _named[fp][:3], "witnesses": [],
-                    "_exact_issue_named": True,
-                })
+            else:  # recall miss -> synthesize a top record
+                _promote.append(
+                    {
+                        "path": fp,
+                        "score": _top_score + 0.01,
+                        "functions": _named[fp][:3],
+                        "witnesses": [],
+                        "_exact_issue_named": True,
+                    }
+                )
         if _promote:
             top_records = _promote[:3] + top_records
 
@@ -3284,8 +3356,10 @@ def generate_v1r_brief(
             # cycler/validate_marker). This runs in-container AFTER the wrapper's
             # upload, so its write is authoritative for every downstream consumer.
             import json as _json_anch
+
             if _anchors_obj is None:  # hoisted single-source extraction (2026-06-10)
                 from groundtruth.pretask.anchors import extract_issue_anchors as _eia
+
                 _anchors_obj = _eia(issue_text, graph_db)
             # Oracle Stage 1: the issue-as-SPEC obligations + unresolved_code_symbols
             # (F2) ride the SAME already-shipped artifact. The spec extractor is a
@@ -3294,26 +3368,32 @@ def generate_v1r_brief(
             # no graph dependency, correct-or-quiet (empty list on empty issue).
             try:
                 from groundtruth.pretask.spec import extract_spec as _extract_spec
+
                 _spec = _extract_spec(issue_text)
                 _obligations = _spec.to_serializable()
             except Exception:
                 _obligations = []
             try:
                 with open("/tmp/gt_issue_anchors.json", "w", encoding="utf-8") as _af:
-                    _json_anch.dump({
-                        "symbols": sorted(_anchors_obj.symbols),
-                        "paths": sorted(_anchors_obj.paths),
-                        "test_names": sorted(_anchors_obj.test_names),
-                        "title_symbols": sorted(getattr(_anchors_obj, "title_symbols", set())),
-                        "code_symbols": sorted(getattr(_anchors_obj, "code_symbols", set())),
-                        "unresolved_code_symbols": sorted(
-                            getattr(_anchors_obj, "unresolved_code_symbols", set())),
-                        "obligations": _obligations,
-                    }, _af)
+                    _json_anch.dump(
+                        {
+                            "symbols": sorted(_anchors_obj.symbols),
+                            "paths": sorted(_anchors_obj.paths),
+                            "test_names": sorted(_anchors_obj.test_names),
+                            "title_symbols": sorted(getattr(_anchors_obj, "title_symbols", set())),
+                            "code_symbols": sorted(getattr(_anchors_obj, "code_symbols", set())),
+                            "unresolved_code_symbols": sorted(
+                                getattr(_anchors_obj, "unresolved_code_symbols", set())
+                            ),
+                            "obligations": _obligations,
+                        },
+                        _af,
+                    )
             except OSError:
                 pass  # non-container / read-only /tmp (e.g. unit tests) — no consumer
-            _loc = localize(issue_text, graph_db, top_k=8, issue_anchors=_anchors_obj,
-                           repo_root=repo_root)
+            _loc = localize(
+                issue_text, graph_db, top_k=8, issue_anchors=_anchors_obj, repo_root=repo_root
+            )
         except Exception:
             _loc = None
     if _loc and _loc.candidates:
@@ -3345,12 +3425,11 @@ def generate_v1r_brief(
         # lexical hard-negatives, then keep the original lexical order after them.
         # Only verified witnesses jump the queue (correct-or-quiet); name_match
         # witnesses are added but not promoted ahead of lexical winners.
-        _verified_promoted = [
-            p for p in _promoted if _witness_verified_by_file.get(p["path"])
-        ]
+        _verified_promoted = [p for p in _promoted if _witness_verified_by_file.get(p["path"])]
         _unverified_promoted = [
             p for p in _promoted if not _witness_verified_by_file.get(p["path"])
         ]
+
         # Also reorder EXISTING records: a lexical record that the localizer
         # verified-witnessed should sort ahead of a witness-less one.
         def _is_verified_witnessed(rec: dict) -> bool:
@@ -3360,9 +3439,7 @@ def generate_v1r_brief(
                 return True
             p = str(rec.get("path", ""))
             pn = p.replace("\\", "/").lstrip("./").lstrip("/")
-            return bool(
-                _witness_verified_by_file.get(p) or _witness_verified_by_file.get(pn)
-            )
+            return bool(_witness_verified_by_file.get(p) or _witness_verified_by_file.get(pn))
 
         _existing_verified = [r for r in top_records if _is_verified_witnessed(r)]
         _existing_rest = [r for r in top_records if not _is_verified_witnessed(r)]
@@ -3381,9 +3458,7 @@ def generate_v1r_brief(
                 r = _loc_rank_by_file.get(pn)
             return r if r is not None else 10**6
 
-        _all_verified = sorted(
-            _verified_promoted + _existing_verified, key=_loc_rank
-        )
+        _all_verified = sorted(_verified_promoted + _existing_verified, key=_loc_rank)
         top_records = _all_verified + _existing_rest + _unverified_promoted
 
         # GUARANTEE: every verified-witnessed localizer candidate appears in
@@ -3392,7 +3467,7 @@ def generate_v1r_brief(
         # file. GT curates the graph map; the agent navigates.
         # If a verified candidate is in the localizer but ranked below
         # MAX_FILES in top_records, inject it into the top set.
-        _rendered_paths = {str(r.get("path", "")) for r in top_records[:max(max_files, 5)]}
+        _rendered_paths = {str(r.get("path", "")) for r in top_records[: max(max_files, 5)]}
         _rendered_norm = {p.replace("\\", "/").lstrip("./").lstrip("/") for p in _rendered_paths}
         for _ci, cand in enumerate(_loc.candidates[:6]):
             if not cand.has_verified_witness:
@@ -3426,7 +3501,8 @@ def generate_v1r_brief(
             float(r.get("components", {}).get("sem", 0.0) or 0.0) > 0.0 for r in _rendered_now
         ):
             _sem_pool = [
-                r for r in v74.ranked_full
+                r
+                for r in v74.ranked_full
                 if str(r.get("path", "")) not in {str(x.get("path", "")) for x in top_records}
                 and float(r.get("components", {}).get("sem", 0.0) or 0.0) > 0.0
             ]
@@ -3622,10 +3698,11 @@ def generate_v1r_brief(
             def _verified_key(rec: dict) -> int:
                 p = str(rec.get("path", ""))
                 pn = p.replace("\\", "/").lstrip("./").lstrip("/")
-                return 0 if (
-                    _witness_verified_by_file.get(p)
-                    or _witness_verified_by_file.get(pn)
-                ) else 1
+                return (
+                    0
+                    if (_witness_verified_by_file.get(p) or _witness_verified_by_file.get(pn))
+                    else 1
+                )
 
             # Among verified-witnessed files, the LOCALIZER's rank is authoritative
             # and MUST dominate keyword count — otherwise a hub (plugins.py) with
@@ -3673,8 +3750,10 @@ def generate_v1r_brief(
     # SWERank ICLR 2025 (verified witness hard-negative), §4 (content + gate, not reach).
     _ein = _exact_issue_named_files(issue_text, graph_db, issue_anchors=_anchors_obj)
     if _ein:
+
         def _rfp(r):
             return (r.get("path") or r.get("file") or "").replace("\\", "/").lstrip("/")
+
         _ein_n = {f.replace("\\", "/").lstrip("/"): fns for f, fns in _ein.items()}
         _bp = {_rfp(r): r for r in v74.ranked_full}
         # Native retrieval rank by normalized path (0 = retrieval's #1). Used to detect
@@ -3698,18 +3777,23 @@ def generate_v1r_brief(
                 return True
             return False
 
-        _front: list[dict] = []   # corroborated -> keep front-promotion
-        _back: list[dict] = []    # coincidence -> append below native top, capped
+        _front: list[dict] = []  # corroborated -> keep front-promotion
+        _back: list[dict] = []  # coincidence -> append below native top, capped
         for _fp in _ein_n:
             if _fp in _in_top:
                 continue
-            _r = _bp.get(_fp) or {"path": _fp, "score": _topsc + 0.01,
-                                  "functions": _ein_n[_fp][:3], "witnesses": [], "_exact_issue_named": True}
+            _r = _bp.get(_fp) or {
+                "path": _fp,
+                "score": _topsc + 0.01,
+                "functions": _ein_n[_fp][:3],
+                "witnesses": [],
+                "_exact_issue_named": True,
+            }
             if _is_corroborated(_fp, _ein_n[_fp]):
                 _front.append(_r)
             else:
                 _back.append(_r)
-        _front.sort(key=lambda r: -float(r.get("score", 0.0)))   # highest-scored issue-named first
+        _front.sort(key=lambda r: -float(r.get("score", 0.0)))  # highest-scored issue-named first
         _back.sort(key=lambda r: -float(r.get("score", 0.0)))
         # Front-promote ONLY corroborated injections. Coincidence injections go AFTER the native
         # top candidates (preserve the gold's slot), capped to 2 so they don't flood the brief.
@@ -3718,12 +3802,14 @@ def generate_v1r_brief(
             top_records = _front + top_records + _back[:_MAX_COINCIDENCE_INJ]
         else:
             top_records = _front + top_records
-        _seen = set(); _dedup = []
+        _seen = set()
+        _dedup = []
         for _r in top_records:
             _k = _rfp(_r)
             if _k in _seen:
                 continue
-            _seen.add(_k); _dedup.append(_r)
+            _seen.add(_k)
+            _dedup.append(_r)
         top_records = _dedup
     # VENDORED / DEMO demote (root cause C, 2026-06-17) — FAIL-CLOSED chokepoint.
     # The upstream candidate filter drops test/demo paths, but the LATER injection
@@ -3738,7 +3824,8 @@ def generate_v1r_brief(
     # keep the pre-filter records (never collapse to a blank brief), mirroring the
     # upstream candidate-filter fallback.
     _kept = [
-        r for r in top_records
+        r
+        for r in top_records
         if not _is_test_or_demo(r.get("path", "") or "")
         and not _is_vendored_path(r.get("path", "") or "")
     ]
@@ -3755,7 +3842,9 @@ def generate_v1r_brief(
             repo_root,
             _words,
         )
-        func_names = _top_function_names(graph_db, path, issue_terms=_words, code_symbols=_code_syms)
+        func_names = _top_function_names(
+            graph_db, path, issue_terms=_words, code_symbols=_code_syms
+        )
         contract = _caller_contract_for_file(graph_db, path, repo_root, func_names)
         contract_props = contract_line(graph_db, path, func_names)
         siblings = _sibling_context(graph_db, path, func_names)
@@ -3773,17 +3862,14 @@ def generate_v1r_brief(
         # carry either depending on which stage admitted the candidate.
         _pn = path.replace("\\", "/").lstrip("./").lstrip("/")
         _wit = _witness_by_file.get(path) or _witness_by_file.get(_pn) or ""
-        _wit_ver = bool(
-            _witness_verified_by_file.get(path) or _witness_verified_by_file.get(_pn)
-        )
+        _wit_ver = bool(_witness_verified_by_file.get(path) or _witness_verified_by_file.get(_pn))
         _wit_conf = _loc_conf_by_file.get(path) or _loc_conf_by_file.get(_pn) or 0.0
         # v74 anchor proximity for this candidate (edge-independent issue-subject
         # signal) — carried onto the FileEntry so _entry_confidence_tier can keep an
         # anchor-matched file out of the [INFO] drop (BUG-3). Records are dicts with a
         # `components` sub-dict; fall back to a flat key, then 0.0.
         _aprox = float(
-            (rec.get("components") or {}).get("anchor_prox", rec.get("anchor_prox", 0.0))
-            or 0.0
+            (rec.get("components") or {}).get("anchor_prox", rec.get("anchor_prox", 0.0)) or 0.0
         )
         entries.append(
             FileEntry(
@@ -3833,13 +3919,19 @@ def generate_v1r_brief(
     # issue) vs a tier/plumbing bug. stderr → captured to gt_brief_stderr.log.
     try:
         import sys as _sys
-        _ap_cov = sum(1 for e in entries if getattr(e, "anchor_prox", 0.0) >= _ANCHOR_PROX_WARN_FLOOR)
+
+        _ap_cov = sum(
+            1 for e in entries if getattr(e, "anchor_prox", 0.0) >= _ANCHOR_PROX_WARN_FLOOR
+        )
         _ap_dump = ", ".join(
-            f"{os.path.basename(e.path)}:ap={getattr(e,'anchor_prox',0.0):.3f}:tier={_entry_confidence_tier(e, issue_text)}"
+            f"{os.path.basename(e.path)}:ap={getattr(e, 'anchor_prox', 0.0):.3f}:tier={_entry_confidence_tier(e, issue_text)}"
             for e in entries[:8]
         )
-        print(f"[GT_META] BUG3_ANCHOR_PROX entries={len(entries)} ap_ge_floor={_ap_cov} | {_ap_dump}",
-              file=_sys.stderr, flush=True)
+        print(
+            f"[GT_META] BUG3_ANCHOR_PROX entries={len(entries)} ap_ge_floor={_ap_cov} | {_ap_dump}",
+            file=_sys.stderr,
+            flush=True,
+        )
     except Exception:
         pass
 
@@ -3854,12 +3946,14 @@ def generate_v1r_brief(
     # content, so no BRIEFING measurement obligation.
     try:
         import sys as _sys_nc
+
         _nc = int(getattr(_loc, "n_components", 0) or 0)
         _nc_chains = len(getattr(_loc, "scope_chains", None) or [])
         print(
             f"[GT_META] SCOPE_COMPONENTS n_components={_nc:.8f} "
             f"rendered_chains={_nc_chains:.8f} fragmented={1.0 if _nc > 1 else 0.0:.8f}",
-            file=_sys_nc.stderr, flush=True,
+            file=_sys_nc.stderr,
+            flush=True,
         )
     except Exception:
         pass
@@ -4065,17 +4159,30 @@ def generate_v1r_brief(
     _aligned_records = [_rec_by_path.get(e.path, {}) for e in _delivered]
     if os.environ.get("GT_DEBUG_L1") == "1":
         import sys as _sys_dbg
-        _comp = [(str(_r.get("path", ""))[-44:], {k: round(float(v), 3) for k, v in (_r.get("components") or {}).items()})
-                 for _r in top_records[:5]]
-        _join = [(getattr(e, "path", "")[-44:], "MATCH" if getattr(e, "path", "") in _rec_by_path else "MISS")
-                 for e in _delivered[:8]]
+
+        _comp = [
+            (
+                str(_r.get("path", ""))[-44:],
+                {k: round(float(v), 3) for k, v in (_r.get("components") or {}).items()},
+            )
+            for _r in top_records[:5]
+        ]
+        _join = [
+            (
+                getattr(e, "path", "")[-44:],
+                "MATCH" if getattr(e, "path", "") in _rec_by_path else "MISS",
+            )
+            for e in _delivered[:8]
+        ]
         print(f"[GT_DEBUG_L1] ranked_full_components={_comp}", file=_sys_dbg.stderr, flush=True)
         print(f"[GT_DEBUG_L1] delivered_vs_record_join={_join}", file=_sys_dbg.stderr, flush=True)
-        print(f"[GT_DEBUG_L1] n_top_records={len(top_records)} n_delivered={len(_delivered)} embedder={os.environ.get('GT_FORCE_ONNX_EMBEDDER','?')}", file=_sys_dbg.stderr, flush=True)
-    try:
-        _ge, _sem_c, _struct_c, _fts5_c = _l1_signal_counts(
-            graph_db, _delivered, _aligned_records
+        print(
+            f"[GT_DEBUG_L1] n_top_records={len(top_records)} n_delivered={len(_delivered)} embedder={os.environ.get('GT_FORCE_ONNX_EMBEDDER', '?')}",
+            file=_sys_dbg.stderr,
+            flush=True,
         )
+    try:
+        _ge, _sem_c, _struct_c, _fts5_c = _l1_signal_counts(graph_db, _delivered, _aligned_records)
     except Exception:
         _ge = _sem_c = _struct_c = _fts5_c = 0
     _conf_tier = _tier_from_loc_header(_loc_header)
@@ -4116,31 +4223,44 @@ def generate_v1r_brief(
             for _i, _e in enumerate(_delivered):
                 _np = _norm_p(getattr(_e, "path", ""))
                 _live_sem = float(_sem_components[_i]) if _i < len(_sem_components) else 0.0
-                _cons_sem = float((_norm_rec.get(_np, {}).get("components", {}) or {}).get("sem", 0.0) or 0.0)
+                _cons_sem = float(
+                    (_norm_rec.get(_np, {}).get("components", {}) or {}).get("sem", 0.0) or 0.0
+                )
                 _routes = list(getattr(_e, "routes", []) or [])
                 _ev = getattr(_e, "entered_via", "") or ""
                 if _ev and _ev not in _routes:
                     _routes.append(_ev)
-                _rendered_snap.append({
-                    "candidate_id": f"{_np}:{getattr(_e, 'start_line', 0) or 0}:"
-                                    f"{getattr(_e, 'symbol', '') or os.path.basename(_np)}",
-                    "path": getattr(_e, "path", ""),
-                    "live_join": "MATCH" if getattr(_e, "path", "") in _rec_by_path else "MISS",
-                    "live_sem": _live_sem,
-                    "consistent_sem": _cons_sem,
-                    "routes": _routes,
-                })
-            _sem_snap = [{
-                "candidate_id": f"{_norm_p(_r.get('path', ''))}:0:"
-                                f"{os.path.basename(_norm_p(_r.get('path', '')))}",
-                "path": _r.get("path", ""),
-                "sem": float((_r.get("components", {}) or {}).get("sem", 0.0) or 0.0),
-                "components": _r.get("components", {}),
-            } for _r in top_records]
+                _rendered_snap.append(
+                    {
+                        "candidate_id": f"{_np}:{getattr(_e, 'start_line', 0) or 0}:"
+                        f"{getattr(_e, 'symbol', '') or os.path.basename(_np)}",
+                        "path": getattr(_e, "path", ""),
+                        "live_join": "MATCH" if getattr(_e, "path", "") in _rec_by_path else "MISS",
+                        "live_sem": _live_sem,
+                        "consistent_sem": _cons_sem,
+                        "routes": _routes,
+                    }
+                )
+            _sem_snap = [
+                {
+                    "candidate_id": f"{_norm_p(_r.get('path', ''))}:0:"
+                    f"{os.path.basename(_norm_p(_r.get('path', '')))}",
+                    "path": _r.get("path", ""),
+                    "sem": float((_r.get("components", {}) or {}).get("sem", 0.0) or 0.0),
+                    "components": _r.get("components", {}),
+                }
+                for _r in top_records
+            ]
             os.makedirs(_audit_dir, exist_ok=True)
-            with open(os.path.join(_audit_dir, "10_candidates_rendered.json"), "w", encoding="utf-8") as _f:
+            with open(
+                os.path.join(_audit_dir, "10_candidates_rendered.json"), "w", encoding="utf-8"
+            ) as _f:
                 _json_a.dump(_rendered_snap, _f, indent=2, default=str)
-            with open(os.path.join(_audit_dir, "08_candidates_semantic_scored.json"), "w", encoding="utf-8") as _f:
+            with open(
+                os.path.join(_audit_dir, "08_candidates_semantic_scored.json"),
+                "w",
+                encoding="utf-8",
+            ) as _f:
                 _json_a.dump(_sem_snap, _f, indent=2, default=str)
         except Exception:
             pass  # audit snapshot must never affect the brief
@@ -4175,9 +4295,7 @@ def generate_v1r_brief(
                 # candidate (importer.py) now reports its real structural
                 # confidence instead of the lexical 0.0.
                 _conf = (
-                    entry.localizer_confidence
-                    if entry.localizer_confidence > 0
-                    else entry.score
+                    entry.localizer_confidence if entry.localizer_confidence > 0 else entry.score
                 )
                 _reason = (
                     f"graph_witness={entry.witness}"
@@ -4216,45 +4334,47 @@ def generate_v1r_brief(
                 except Exception:
                     _wits = []
                 for _w in _wits:
-                    l1_items.append({
-                        "kind": "l1_graph_edge",
-                        "file_path": entry.path,            # the CANDIDATE this edge confirms
-                        "source": "CALLS",
-                        "direction": _w.get("direction"),   # caller | callee
-                        "symbol": _w.get("symbol", ""),
-                        "edge_file": _w.get("file_path", ""),
-                        "line": _w.get("line", 0),
-                        "confidence": 1.0,                  # deterministic edge = fact
-                        "reason": "resolved CALLS edge (deterministic provenance)",
-                    })
+                    l1_items.append(
+                        {
+                            "kind": "l1_graph_edge",
+                            "file_path": entry.path,  # the CANDIDATE this edge confirms
+                            "source": "CALLS",
+                            "direction": _w.get("direction"),  # caller | callee
+                            "symbol": _w.get("symbol", ""),
+                            "edge_file": _w.get("file_path", ""),
+                            "line": _w.get("line", 0),
+                            "confidence": 1.0,  # deterministic edge = fact
+                            "reason": "resolved CALLS edge (deterministic provenance)",
+                        }
+                    )
                 # The PRIMARY confirming witness for this candidate is its first
                 # resolved CALLER (a caller proves the candidate's symbol is a real,
                 # used target — the strongest confirmation). Emit ONE per task: the
                 # first candidate that carries a resolved caller.
                 if not _primary_emitted:
-                    _caller = next(
-                        (w for w in _wits if w.get("direction") == "caller"), None
-                    )
+                    _caller = next((w for w in _wits if w.get("direction") == "caller"), None)
                     if _caller is not None:
-                        l1_items.append({
-                            "kind": "l1_confirming_edge",
-                            "file_path": entry.path,
-                            "symbol": _caller.get("symbol", ""),
-                            "source": "CALLS",
-                            "edge_file": _caller.get("file_path", ""),
-                            "line": _caller.get("line", 0),
-                            "confidence": 1.0,
-                            "reason": "resolved cross-file caller (deterministic)",
-                        })
+                        l1_items.append(
+                            {
+                                "kind": "l1_confirming_edge",
+                                "file_path": entry.path,
+                                "symbol": _caller.get("symbol", ""),
+                                "source": "CALLS",
+                                "edge_file": _caller.get("file_path", ""),
+                                "line": _caller.get("line", 0),
+                                "confidence": 1.0,
+                                "reason": "resolved cross-file caller (deterministic)",
+                            }
+                        )
                         _primary_emitted = True
 
             _call_edge_count = sum(
-                1 for it in l1_items
+                1
+                for it in l1_items
                 if it.get("kind") == "l1_graph_edge" and it.get("source") == "CALLS"
             )
             _confirming = next(
-                (it.get("file_path") for it in l1_items
-                 if it.get("kind") == "l1_confirming_edge"),
+                (it.get("file_path") for it in l1_items if it.get("kind") == "l1_confirming_edge"),
                 None,
             )
             structured = {

@@ -1,4 +1,5 @@
 """Tiny in-memory cache used by the server."""
+
 from __future__ import annotations
 
 import time

@@ -19,6 +19,7 @@ assert the sensor recovers EVERY genuine source write (heredoc / `cat >` /
 `sed -i` / `python -c open(...,'w')` / `writeFileSync`) the corpus contains, plus
 the template-write residual the live counter misses.
 """
+
 from __future__ import annotations
 
 import glob
@@ -58,6 +59,7 @@ def patch_mod():
     # the module captures the flag at import); restored so this suite never
     # poisons later suites' env (pre-existing suite-order pollution).
     import os
+
     prev = os.environ.get("GT_BASELINE")
     os.environ["GT_BASELINE"] = "1"
     try:
@@ -83,7 +85,7 @@ def _raw_commands(messages: list[dict]) -> list[str]:
     for x in messages:
         if x.get("role") != "assistant":
             continue
-        for tc in (x.get("tool_calls") or []):
+        for tc in x.get("tool_calls") or []:
             try:
                 out.append(json.loads(tc["function"]["arguments"]).get("command", ""))
             except Exception:  # noqa: BLE001
@@ -95,8 +97,25 @@ def _raw_commands(messages: list[dict]) -> list[str]:
 # the recall assertion is not circular: it finds every command that writes a
 # *source* file by any shape, then we require the sensor to have sensed each.
 _SRC_EXT = (
-    ".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".rs", ".java", ".rb",
-    ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".php", ".kt", ".scala", ".swift",
+    ".py",
+    ".go",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".rs",
+    ".java",
+    ".rb",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".php",
+    ".kt",
+    ".scala",
+    ".swift",
 )
 
 
@@ -114,8 +133,7 @@ def _independent_source_writes(cmd: str) -> set[str]:
         redirect_targets.add(mm.group(1).strip("\"'`()"))
     # a scratch redirect target (e.g. /tmp/...) means the heredoc body is a
     # program, not a direct edit — don't peek inside it for source writes.
-    scratch_redirect = any(t.startswith("/tmp/") or t.startswith("/dev/")
-                           for t in redirect_targets)
+    scratch_redirect = any(t.startswith("/tmp/") or t.startswith("/dev/") for t in redirect_targets)
     for t in redirect_targets:
         if t.endswith(_SRC_EXT):
             writes.add(t)
@@ -195,7 +213,9 @@ def test_heredoc_and_python_c_edits_sensed(sense_mod):
         ("node -e \"require('fs').writeFileSync('s/app.js','x')\"", "s/app.js"),
     ]
     for cmd, expect in cases:
-        turn = sense_mod.Turn(index=0, command=cmd, raw_obs="<returncode>0</returncode>", full_obs="")
+        turn = sense_mod.Turn(
+            index=0, command=cmd, raw_obs="<returncode>0</returncode>", full_obs=""
+        )
         st = sense_mod.sense([turn])
         assert expect in st.edited_source_files, f"{cmd!r} -> {st.edited_source_files}"
         assert st.source_edit_count == 1
@@ -220,7 +240,9 @@ def test_test_evidence_and_blind_runs(sense_mod):
     """A real runner with a pass/fail result latches test_evidence_seen; a real
     runner with no result and no env/compile error counts as a blind run."""
     turns = [
-        sense_mod.Turn(0, "cargo test", "<output>\n    Blocking waiting for file lock\n</output>", ""),
+        sense_mod.Turn(
+            0, "cargo test", "<output>\n    Blocking waiting for file lock\n</output>", ""
+        ),
         sense_mod.Turn(1, "cargo test", "<output>\nBuilding...\n</output>", ""),
     ]
     st = sense_mod.sense(turns)
@@ -241,7 +263,9 @@ def test_boa_blind_runs_recovered_from_real_trajectory(sense_mod):
     statelessly-recomputed condition the governor reads — not a whole-trajectory
     claim (evidence does appear by the end, which is exactly why the governor must
     fire at the decision point, before it)."""
-    tj = glob.glob(str(_CORPUS / "boa-*" / "jobs" / "*" / "*" / "agent" / "mini-swe-agent.trajectory.json"))[0]
+    tj = glob.glob(
+        str(_CORPUS / "boa-*" / "jobs" / "*" / "*" / "agent" / "mini-swe-agent.trajectory.json")
+    )[0]
     turns = sense_mod.load_trajectory(tj)
     fire_state = None
     for k in range(len(turns)):
@@ -315,9 +339,11 @@ def test_phase_progression(sense_mod):
     """Phase advances ORIENT -> IMPLEMENT (no benchmark/task logic, pure shape)."""
     orient = sense_mod.sense([sense_mod.Turn(0, "ls", "<output>files</output>", "")])
     assert orient.phase == "ORIENT"
-    impl = sense_mod.sense([
-        sense_mod.Turn(0, "ls", "<output>files</output>", ""),
-        sense_mod.Turn(1, "sed -i '1a x' src/a.py", "<output></output>", ""),
-    ])
+    impl = sense_mod.sense(
+        [
+            sense_mod.Turn(0, "ls", "<output>files</output>", ""),
+            sense_mod.Turn(1, "sed -i '1a x' src/a.py", "<output></output>", ""),
+        ]
+    )
     assert impl.phase in ("IMPLEMENT", "VERIFY", "REVIEW")
     assert impl.source_edit_count == 1

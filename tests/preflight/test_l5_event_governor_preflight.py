@@ -6,14 +6,11 @@ No benchmark runs. No external repos required.
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 
 import pytest
 
 from groundtruth.trajectory.state import L5TrajectoryState, IterationBand
-from groundtruth.trajectory.governor import L5Governor, L5Decision
+from groundtruth.trajectory.governor import L5Governor
 from groundtruth.trajectory import hooks
 from groundtruth.trajectory.event_classifier import (
     classify_file_kind,
@@ -58,6 +55,7 @@ class _FakeAction:
     def __class__(self):
         class _Fake:
             __name__ = self._cls_name
+
         return _Fake()
 
 
@@ -68,6 +66,7 @@ class _FakeObs:
 
 
 # --- CASE 3: L3 next_action ignored -> L5 STRUCTURAL_WITNESS_IGNORED ---
+
 
 class TestCase3StructuralWitnessIgnored:
     def test_fires_after_3_unrelated_actions(self, state: L5TrajectoryState) -> None:
@@ -80,7 +79,8 @@ class TestCase3StructuralWitnessIgnored:
         assert not state.structural_witness_followed
 
         msg = hooks.hook_structural_witness_ignored(
-            state, witness_file="src/callers.py",
+            state,
+            witness_file="src/callers.py",
         )
         assert msg is not None
         # Diagnostic form (SWE-PRM NeurIPS 2025): no prescriptive directive.
@@ -108,6 +108,7 @@ class TestCase3StructuralWitnessIgnored:
 
 # --- CASE 4: Weak verification after edit ---
 
+
 class TestCase4WeakVerificationAfterEdit:
     def test_fires_on_broad_only(self, state: L5TrajectoryState) -> None:
         state.record_source_edit("src/auth.py")
@@ -131,6 +132,7 @@ class TestCase4WeakVerificationAfterEdit:
 
 
 # --- CASE 5: Finish with unverified edit ---
+
 
 class TestCase5FinishWithoutStructuralWitness:
     def test_fires_on_finish_no_witness(self, state: L5TrajectoryState) -> None:
@@ -163,6 +165,7 @@ class TestCase5FinishWithoutStructuralWitness:
 
 # --- CASE 6: Patch collapsed ---
 
+
 class TestCase6PatchCollapsed:
     def test_fires_on_diff_collapse(self, state: L5TrajectoryState) -> None:
         state.record_diff_snapshot(150)
@@ -185,6 +188,7 @@ class TestCase6PatchCollapsed:
 
 
 # --- CASE 7: No durable progress ---
+
 
 class TestCase7NoDurableProgress:
     def test_fires_in_late_band(self, state: L5TrajectoryState) -> None:
@@ -210,6 +214,7 @@ class TestCase7NoDurableProgress:
 
 # --- CASE 9: Strong verification ---
 
+
 class TestCase9StrongVerification:
     def test_targeted_pass_clears_unverified(self, state: L5TrajectoryState) -> None:
         state.current_iter = 5
@@ -226,10 +231,12 @@ class TestCase9StrongVerification:
 
 # --- CASE 10: Step 75 no restart ---
 
+
 class TestCase10NoRestart:
     def test_safety_checker_blocks_restart(self) -> None:
         is_safe, reason = hooks.L5bSafetyChecker.validate(
-            "Start over from scratch and explore the codebase", 0.75,
+            "Start over from scratch and explore the codebase",
+            0.75,
         )
         assert not is_safe
         assert reason is not None
@@ -237,13 +244,15 @@ class TestCase10NoRestart:
 
     def test_safety_checker_allows_do_not_restart(self) -> None:
         is_safe, _ = hooks.L5bSafetyChecker.validate(
-            "Do not restart. Focus on the current edit.", 0.75,
+            "Do not restart. Focus on the current edit.",
+            0.75,
         )
         assert is_safe
 
     def test_safety_checker_blocks_late_exploration(self) -> None:
         is_safe, reason = hooks.L5bSafetyChecker.validate(
-            "Explore the codebase to find more clues.", 0.75,
+            "Explore the codebase to find more clues.",
+            0.75,
         )
         assert not is_safe
         assert reason is not None
@@ -259,11 +268,13 @@ class TestCase10NoRestart:
 
 # --- CASE 11: Low-confidence drift suppressed ---
 
+
 class TestCase11LowConfidenceSuppressed:
     def test_goku_suppresses_medium_in_early_band(self, governor: L5Governor) -> None:
         governor.state.band = IterationBand.EARLY_EXPLORATION
         decision = governor._try_goku_emit(
-            "WEAK_VERIFICATION_AFTER_EDIT", "MEDIUM",
+            "WEAK_VERIFICATION_AFTER_EDIT",
+            "MEDIUM",
             "[GT L5] Test message",
             trigger_reason="test",
         )
@@ -274,7 +285,8 @@ class TestCase11LowConfidenceSuppressed:
     def test_goku_suppresses_low_always(self, governor: L5Governor) -> None:
         governor.state.band = IterationBand.FINALIZATION
         decision = governor._try_goku_emit(
-            "STALE_CONTEXT_PATH", "LOW",
+            "STALE_CONTEXT_PATH",
+            "LOW",
             "[GT L5] Test message",
             trigger_reason="test",
         )
@@ -284,6 +296,7 @@ class TestCase11LowConfidenceSuppressed:
 
 
 # --- Debounce + max emissions ---
+
 
 class TestDebounceAndCap:
     def test_debounce_blocks_same_type_within_3_iters(self, state: L5TrajectoryState) -> None:
@@ -315,6 +328,7 @@ class TestDebounceAndCap:
 
 
 # --- Event classifier ---
+
 
 class TestEventClassifier:
     def test_file_kind_source(self) -> None:
@@ -373,11 +387,15 @@ class TestEventClassifier:
         assert classify_verification_strength("BROAD_CHECK") == "WEAK"
 
     def test_verification_strength_with_witness(self) -> None:
-        assert classify_verification_strength("BROAD_CHECK", structural_witness_followed=True) == "STRONG"
+        assert (
+            classify_verification_strength("BROAD_CHECK", structural_witness_followed=True)
+            == "STRONG"
+        )
 
     def test_no_framework_names_in_event_types(self) -> None:
         """L5 event types must never contain framework-specific names."""
         from groundtruth.telemetry.constants import VALID_L5_EVENT_TYPES
+
         forbidden = {"pytest", "jest", "cargo", "go_test", "npm_test", "rspec", "tox"}
         for et in VALID_L5_EVENT_TYPES:
             for fw in forbidden:

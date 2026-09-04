@@ -6,14 +6,13 @@ non-Python files, and feature flag OFF behavior.
 
 from __future__ import annotations
 
-import os
 import sqlite3
-import tempfile
 
 import pytest
 
 
 # -- Helpers --
+
 
 def _create_graph_db(path: str) -> sqlite3.Connection:
     """Create an in-memory-style graph.db at the given path with the Go indexer schema."""
@@ -98,6 +97,7 @@ class TestExtractErrorSurface:
 
     def test_extract_raise_valueerror(self) -> None:
         from groundtruth.evidence.error_chain import extract_error_surface
+
         results = extract_error_surface(FUNC_RAISES_VALUE_ERROR)
         raises = [r for r in results if r["kind"] == "raise"]
         assert len(raises) == 1
@@ -105,6 +105,7 @@ class TestExtractErrorSurface:
 
     def test_extract_raise_typeerror(self) -> None:
         from groundtruth.evidence.error_chain import extract_error_surface
+
         results = extract_error_surface(FUNC_RAISES_TYPE_ERROR)
         raises = [r for r in results if r["kind"] == "raise"]
         assert len(raises) == 1
@@ -112,6 +113,7 @@ class TestExtractErrorSurface:
 
     def test_extract_except_valueerror(self) -> None:
         from groundtruth.evidence.error_chain import extract_error_surface
+
         results = extract_error_surface(FUNC_CATCHES_VALUE_ERROR)
         catches = [r for r in results if r["kind"] == "catch"]
         assert len(catches) == 1
@@ -119,6 +121,7 @@ class TestExtractErrorSurface:
 
     def test_extract_except_broad(self) -> None:
         from groundtruth.evidence.error_chain import extract_error_surface
+
         results = extract_error_surface(FUNC_CATCHES_BROADLY)
         catches = [r for r in results if r["kind"] == "catch"]
         assert len(catches) == 1
@@ -126,6 +129,7 @@ class TestExtractErrorSurface:
 
     def test_extract_no_errors(self) -> None:
         from groundtruth.evidence.error_chain import extract_error_surface
+
         results = extract_error_surface(FUNC_NO_ERRORS)
         assert results == []
 
@@ -140,6 +144,7 @@ def complex_func(x):
         raise RuntimeError("wrapped")
 """
         from groundtruth.evidence.error_chain import extract_error_surface
+
         results = extract_error_surface(source)
         raises = [r for r in results if r["kind"] == "raise"]
         catches = [r for r in results if r["kind"] == "catch"]
@@ -183,8 +188,7 @@ class TestTraceErrorChain:
 
         # process CALLS validate_input
         conn.execute(
-            "INSERT INTO edges (source_id, target_id, type, source_file) "
-            "VALUES (2, 1, 'CALLS', ?)",
+            "INSERT INTO edges (source_id, target_id, type, source_file) VALUES (2, 1, 'CALLS', ?)",
             (str(process_py),),
         )
         conn.commit()
@@ -194,6 +198,7 @@ class TestTraceErrorChain:
 
     def test_chain_raise_to_catch(self, db_setup) -> None:
         from groundtruth.evidence.error_chain import trace_error_chain
+
         db_path, validate_py, process_py = db_setup
 
         chains = trace_error_chain(db_path, validate_py, "validate_input")
@@ -202,6 +207,7 @@ class TestTraceErrorChain:
 
     def test_chain_empty_for_no_errors(self, db_setup) -> None:
         from groundtruth.evidence.error_chain import trace_error_chain
+
         db_path, _, process_py = db_setup
 
         # process itself doesn't raise, so forward chain should be about its callees
@@ -212,6 +218,7 @@ class TestTraceErrorChain:
 
     def test_chain_nonexistent_function(self, db_setup) -> None:
         from groundtruth.evidence.error_chain import trace_error_chain
+
         db_path, validate_py, _ = db_setup
 
         chains = trace_error_chain(db_path, validate_py, "nonexistent_func")
@@ -219,6 +226,7 @@ class TestTraceErrorChain:
 
     def test_non_python_returns_empty(self, db_setup) -> None:
         from groundtruth.evidence.error_chain import trace_error_chain
+
         db_path, _, _ = db_setup
 
         chains = trace_error_chain(db_path, "main.go", "main")
@@ -231,12 +239,14 @@ class TestErrorChainFeatureFlag:
     def test_extract_disabled_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GT_ERROR_CHAIN_ENABLED", "0")
         from groundtruth.evidence.error_chain import extract_error_surface
+
         result = extract_error_surface(FUNC_RAISES_VALUE_ERROR)
         assert result == []
 
     def test_trace_disabled_returns_empty(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         monkeypatch.setenv("GT_ERROR_CHAIN_ENABLED", "0")
         from groundtruth.evidence.error_chain import trace_error_chain
+
         db_path = str(tmp_path / "graph.db")
         _create_graph_db(db_path).close()
         result = trace_error_chain(db_path, "test.py", "func")
@@ -245,5 +255,6 @@ class TestErrorChainFeatureFlag:
     def test_default_is_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("GT_ERROR_CHAIN_ENABLED", raising=False)
         from groundtruth.evidence.error_chain import extract_error_surface
+
         result = extract_error_surface(FUNC_RAISES_VALUE_ERROR)
         assert result == []

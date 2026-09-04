@@ -21,6 +21,7 @@ The balance ORACLE below is INDEPENDENT of the implementation (it reasons about
 quotes/brackets/trailing-operator only), so it validates the real rendered
 output, not the implementation under test.
 """
+
 from __future__ import annotations
 
 import os
@@ -29,8 +30,6 @@ import sqlite3
 import tempfile
 
 import pytest
-
-from groundtruth.runtime.sanitizer import is_well_formed_clause
 
 
 # ---------------------------------------------------------------------------
@@ -285,17 +284,14 @@ def test_behavioral_contract_property_values_balanced(kind, value):
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         repo, db = _build_repo_and_db(tmp, prop_kind=kind, prop_value=value)
-        out = generate_improved_evidence(
-            "pkg/mod.py", ["target"], db, repo, mode="post_edit"
-        )
+        out = generate_improved_evidence("pkg/mod.py", ["target"], db, repo, mode="post_edit")
         # Every CONTRACT detail line that carries the property value must be
         # balanced. The XML wrapper (<gt-evidence ...>) and pure tag lines
         # (``[BEHAVIORAL CONTRACT]``) are structural, not source-text values, so
         # they are skipped — we assert balance on the indented detail lines that
         # carry the stored property value.
         detail_lines = [
-            ln for ln in out.splitlines()
-            if ln.startswith("  ") and ln.strip() and "<" not in ln
+            ln for ln in out.splitlines() if ln.startswith("  ") and ln.strip() and "<" not in ln
         ]
         # Defect must be observable: the property value reached a detail line.
         assert detail_lines, f"[{kind}] no contract detail rendered:\n{out}"
@@ -309,8 +305,7 @@ def test_behavioral_contract_property_values_balanced(kind, value):
                     val = val.split(sep, 1)[1]
                     break
             assert _balanced(val), (
-                f"[{kind}] rendered contract value not balanced: {stripped!r}\n"
-                f"full output:\n{out}"
+                f"[{kind}] rendered contract value not balanced: {stripped!r}\nfull output:\n{out}"
             )
 
 
@@ -319,15 +314,9 @@ def test_behavioral_contract_property_value_negative_control():
     from groundtruth.hooks.post_edit import generate_improved_evidence
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        repo, db = _build_repo_and_db(
-            tmp, prop_kind="guard_clause", prop_value="value is None"
-        )
-        out = generate_improved_evidence(
-            "pkg/mod.py", ["target"], db, repo, mode="post_edit"
-        )
-        assert "value is None" in out, (
-            f"balanced guard_clause value was altered:\n{out}"
-        )
+        repo, db = _build_repo_and_db(tmp, prop_kind="guard_clause", prop_value="value is None")
+        out = generate_improved_evidence("pkg/mod.py", ["target"], db, repo, mode="post_edit")
+        assert "value is None" in out, f"balanced guard_clause value was altered:\n{out}"
 
 
 # ---------------------------------------------------------------------------
@@ -374,8 +363,14 @@ def _ego_db_with_viewed_callers(tmp: str, viewed: str) -> str:
 
 
 class _FakeEgoNode:
-    def __init__(self, name: str, file_path: str, start_line: int = 10,
-                 node_id: int = 1, is_test: bool = False):
+    def __init__(
+        self,
+        name: str,
+        file_path: str,
+        start_line: int = 10,
+        node_id: int = 1,
+        is_test: bool = False,
+    ):
         self.id = node_id
         self.name = name
         self.file_path = file_path
@@ -408,6 +403,7 @@ class _FakeEgo:
 
     def render(self, max_tokens: int = 200) -> str:
         import os as _os
+
         return (
             f"set_fields() in {_os.path.basename(self.center.file_path)}:"
             f"{self.center.start_line}\n  run_command() commands.py:1"
@@ -427,14 +423,13 @@ def test_c2_homonym_ego_block_stays_silent(monkeypatch):
         monkeypatch.setattr(post_view, "_load_issue_terms", lambda *a, **k: {"set_fields"})
         # Homonym: center lands in beetsplug/zero.py, NOT the viewed file.
         monkeypatch.setattr(
-            ego_mod, "ego_graph",
+            ego_mod,
+            "ego_graph",
             lambda *a, **k: _FakeEgo("beetsplug/zero.py"),
         )
         out, _ = post_view.graph_navigation(viewed, db, iteration_ratio=0.0)
         joined = "\n".join(out)
-        assert "zero.py" not in joined, (
-            f"homonym file leaked into viewed-file evidence:\n{joined}"
-        )
+        assert "zero.py" not in joined, f"homonym file leaked into viewed-file evidence:\n{joined}"
 
 
 def test_c2_negative_control_same_file_ego_renders(monkeypatch):
@@ -450,7 +445,8 @@ def test_c2_negative_control_same_file_ego_renders(monkeypatch):
         monkeypatch.setattr(post_view, "_load_issue_terms", lambda *a, **k: {"set_fields"})
         # Center is the viewed file itself -> guard must NOT suppress.
         monkeypatch.setattr(
-            ego_mod, "ego_graph",
+            ego_mod,
+            "ego_graph",
             lambda *a, **k: _FakeEgo(viewed),
         )
         out, _ = post_view.graph_navigation(viewed, db, iteration_ratio=0.0)

@@ -7,9 +7,9 @@ empty-guard and the ev47 duplicate-line defects, and assert the rendered
 This is NOT a helper unit test — it proves the fix is WIRED into the emission
 path the agent observes, per the "verify from agent observation" rule.
 """
+
 from __future__ import annotations
 
-import os
 import sqlite3
 
 import pytest
@@ -17,7 +17,7 @@ import pytest
 from groundtruth.hooks.post_edit import generate_improved_evidence
 
 
-_SRC = '''\
+_SRC = """\
 class Lib:
     def transaction(self, key, value):
         if not key:
@@ -25,7 +25,7 @@ class Lib:
         with self.lock:
             self._store[key] = value
         return value
-'''
+"""
 
 
 def _make_repo_and_db(tmp_path, props: list[tuple[str, str, int]]):
@@ -78,10 +78,13 @@ def test_e2e_empty_guard_not_rendered(tmp_path, monkeypatch):
     is the only contract prop the [BEHAVIORAL CONTRACT] header must not ship with
     an empty body."""
     monkeypatch.setenv("GT_REBUILD_L3", "1")
-    repo, db = _make_repo_and_db(tmp_path, [
-        ("guard_clause", "   ", 3),           # blank guard -> must be dropped
-        ("guard_clause", "not key", 3),       # real guard -> kept
-    ])
+    repo, db = _make_repo_and_db(
+        tmp_path,
+        [
+            ("guard_clause", "   ", 3),  # blank guard -> must be dropped
+            ("guard_clause", "not key", 3),  # real guard -> kept
+        ],
+    )
     out = generate_improved_evidence("lib/store.py", ["transaction"], db, repo)
     # No empty PRESERVE line reaches the agent.
     assert "PRESERVE: \n" not in out and not out.rstrip().endswith("PRESERVE:")
@@ -93,12 +96,15 @@ def test_e2e_empty_guard_not_rendered(tmp_path, monkeypatch):
 def test_e2e_duplicate_resource_deduped(tmp_path, monkeypatch):
     """C1d: duplicate resource/guard property rows must render at most once."""
     monkeypatch.setenv("GT_REBUILD_L3", "1")
-    repo, db = _make_repo_and_db(tmp_path, [
-        ("resource_pattern", "context_manager: self.lock", 5),
-        ("resource_pattern", "context_manager: self.lock", 5),  # dup
-        ("guard_clause", "not key", 3),
-        ("guard_clause", "not key", 3),                          # dup
-    ])
+    repo, db = _make_repo_and_db(
+        tmp_path,
+        [
+            ("resource_pattern", "context_manager: self.lock", 5),
+            ("resource_pattern", "context_manager: self.lock", 5),  # dup
+            ("guard_clause", "not key", 3),
+            ("guard_clause", "not key", 3),  # dup
+        ],
+    )
     out = generate_improved_evidence("lib/store.py", ["transaction"], db, repo)
     assert out.count("context_manager: self.lock") <= 1, (
         f"duplicate [RESOURCE] line shipped to agent:\n{out}"
@@ -110,11 +116,14 @@ def test_e2e_duplicate_param_in_params_line_deduped(tmp_path, monkeypatch):
     """C1d: a duplicated param row must not repeat inside the PARAMS line (the
     verified ``PARAMS: lib [required] [required]`` ev47 defect)."""
     monkeypatch.setenv("GT_REBUILD_L3", "1")
-    repo, db = _make_repo_and_db(tmp_path, [
-        ("param", "key", 2),
-        ("param", "value", 2),
-        ("param", "value", 2),   # dup param row
-    ])
+    repo, db = _make_repo_and_db(
+        tmp_path,
+        [
+            ("param", "key", 2),
+            ("param", "value", 2),
+            ("param", "value", 2),  # dup param row
+        ],
+    )
     out = generate_improved_evidence("lib/store.py", ["transaction"], db, repo)
     for line in out.splitlines():
         if line.strip().startswith("PARAMS:"):
@@ -125,10 +134,13 @@ def test_e2e_guards_precede_resources(tmp_path, monkeypatch):
     """C1d ordering: the guard (high-value) must appear before the resource
     (low-value) in the rendered block, so a downstream cap keeps the guard."""
     monkeypatch.setenv("GT_REBUILD_L3", "1")
-    repo, db = _make_repo_and_db(tmp_path, [
-        ("resource_pattern", "context_manager: self.lock", 5),
-        ("guard_clause", "not key", 3),
-    ])
+    repo, db = _make_repo_and_db(
+        tmp_path,
+        [
+            ("resource_pattern", "context_manager: self.lock", 5),
+            ("guard_clause", "not key", 3),
+        ],
+    )
     out = generate_improved_evidence("lib/store.py", ["transaction"], db, repo)
     if "PRESERVE: not key" in out and "context_manager: self.lock" in out:
         assert out.index("PRESERVE: not key") < out.index("context_manager: self.lock"), (

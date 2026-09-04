@@ -1,4 +1,5 @@
 """HTTP server entry point. Wires url parsing into the request handler."""
+
 from __future__ import annotations
 
 from .url_utils import parse_url, normalize_url

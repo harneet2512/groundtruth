@@ -5,6 +5,7 @@ L1-INV-1: If issue text names a function in graph.db, that function's file
 L1-INV-2: Edit target must prefer issue-relevant functions over high-caller hubs.
 L1-INV-3: If no issue-relevant function exists, emit orientation, not edit target.
 """
+
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from conftest_l1 import (  # noqa: E402
 # Fixtures — synthetic graph.dbs modeling real failure cases
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def pypsa_graph(tmp_path):
     """pypsa-1172: expanded_capacity in expressions.py, Network in networks.py."""
@@ -30,11 +32,43 @@ def pypsa_graph(tmp_path):
         # High-degree hub (97 callers simulated with 5 for speed)
         ("Network", "Class", "pypsa/networks.py", "class Network:", 1, 500, True),
         ("add", "Method", "pypsa/networks.py", "def add(self, ...)", 50, 200, True),
-        ("set_snapshots", "Method", "pypsa/networks.py", "def set_snapshots(self, ...)", 100, 150, True),
+        (
+            "set_snapshots",
+            "Method",
+            "pypsa/networks.py",
+            "def set_snapshots(self, ...)",
+            100,
+            150,
+            True,
+        ),
         # Actual target — low degree
-        ("expanded_capacity", "Function", "pypsa/statistics/expressions.py", "def expanded_capacity(n, comps=None)", 10, 40, True),
-        ("optimal_capacity", "Function", "pypsa/statistics/expressions.py", "def optimal_capacity(n, comps=None)", 42, 70, True),
-        ("installed_capacity", "Function", "pypsa/statistics/expressions.py", "def installed_capacity(n, comps=None)", 75, 100, True),
+        (
+            "expanded_capacity",
+            "Function",
+            "pypsa/statistics/expressions.py",
+            "def expanded_capacity(n, comps=None)",
+            10,
+            40,
+            True,
+        ),
+        (
+            "optimal_capacity",
+            "Function",
+            "pypsa/statistics/expressions.py",
+            "def optimal_capacity(n, comps=None)",
+            42,
+            70,
+            True,
+        ),
+        (
+            "installed_capacity",
+            "Function",
+            "pypsa/statistics/expressions.py",
+            "def installed_capacity(n, comps=None)",
+            75,
+            100,
+            True,
+        ),
         # Callers for Network to make it high-degree
         ("test_a", "Function", "test/test_components.py", "def test_a()", 1, 10, False),
         ("test_b", "Function", "test/test_bugs.py", "def test_b()", 1, 10, False),
@@ -65,9 +99,33 @@ def flexget_graph(tmp_path):
     nodes = [
         ("Session", "Class", "flexget/utils/requests.py", "class Session:", 1, 300, True),
         ("get", "Method", "flexget/utils/requests.py", "def get(self, url)", 50, 80, True),
-        ("add_entries", "Method", "flexget/plugins/clients/qbittorrent.py", "def add_entries(self, task, config)", 200, 300, True),
-        ("connect", "Method", "flexget/plugins/clients/qbittorrent.py", "def connect(self, config)", 100, 150, True),
-        ("check_api_version", "Method", "flexget/plugins/clients/qbittorrent.py", "def check_api_version(self)", 150, 180, True),
+        (
+            "add_entries",
+            "Method",
+            "flexget/plugins/clients/qbittorrent.py",
+            "def add_entries(self, task, config)",
+            200,
+            300,
+            True,
+        ),
+        (
+            "connect",
+            "Method",
+            "flexget/plugins/clients/qbittorrent.py",
+            "def connect(self, config)",
+            100,
+            150,
+            True,
+        ),
+        (
+            "check_api_version",
+            "Method",
+            "flexget/plugins/clients/qbittorrent.py",
+            "def check_api_version(self)",
+            150,
+            180,
+            True,
+        ),
         # Many callers for Session
         ("caller1", "Function", "flexget/task.py", "def caller1()", 1, 10, True),
         ("caller2", "Function", "flexget/api.py", "def caller2()", 1, 10, True),
@@ -118,6 +176,7 @@ def hub_vs_match_graph(tmp_path):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestIssueSymbolFileExtraction:
     """L1-INV-1: Issue-named symbols → their files must be in search space."""
@@ -189,7 +248,9 @@ class TestClassVsFunctionScoring:
         best = candidates[0]
         # expanded_capacity is a Function, Network is a Class
         # Function with direct mention should beat Class with direct mention
-        assert best["func"] == "expanded_capacity", f"Expected expanded_capacity, got {best['func']} (score={best['score']})"
+        assert best["func"] == "expanded_capacity", (
+            f"Expected expanded_capacity, got {best['func']} (score={best['score']})"
+        )
 
 
 class TestExactNameInIssue:

@@ -1,4 +1,5 @@
 """P0-11 — phase_policy module is the canonical allowlist contract."""
+
 from __future__ import annotations
 
 import importlib.util

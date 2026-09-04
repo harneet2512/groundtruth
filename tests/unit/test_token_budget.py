@@ -14,7 +14,9 @@ class TestEnforceBudget:
     def test_over_budget_truncates(self) -> None:
         lines = ['<gt-evidence surface="test">']
         for i in range(50):
-            lines.append(f"[VERIFIED] finding {i} with some padding text to fill tokens @ file.py:{i}")
+            lines.append(
+                f"[VERIFIED] finding {i} with some padding text to fill tokens @ file.py:{i}"
+            )
         lines.append("</gt-evidence>")
         text = "\n".join(lines)
         assert len(text) // 4 > 400

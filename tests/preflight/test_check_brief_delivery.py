@@ -9,6 +9,7 @@ New opt-in gates covered here:
   - --require-layer-markers : L3/L3b/L6 markers asserted in observation content,
     only when their trigger (edit / edit->review) is present.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -43,7 +44,9 @@ _VALID = (
 )
 _EMPTY_MAP = _VALID.replace("app/core.py :: run\n  calls: helper (app/util.py)\n", "")
 _DOUBLE_WRAP = "<gt-task-brief>\n" + _VALID  # nested: two open tags
-_LEAK = _VALID.replace("</gt-task-brief>", "</gt-task-brief>\n[GT_RANK_DIAG] #1 score=0.7 app/core.py")
+_LEAK = _VALID.replace(
+    "</gt-task-brief>", "</gt-task-brief>\n[GT_RANK_DIAG] #1 score=0.7 app/core.py"
+)
 
 
 def test_valid_passes(tmp_path):
@@ -77,9 +80,11 @@ def test_diagnostic_leak_fails(tmp_path):
 def test_hidden_observation_leak_fails_runtime_gate(tmp_path):
     records = [
         _brief_rec(),
-        {"history": [
-            {"observation": "run", "content": "[GT_META] internal boot\nagent-visible text"},
-        ]},
+        {
+            "history": [
+                {"observation": "run", "content": "[GT_META] internal boot\nagent-visible text"},
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_runtime_delivery=True)
     assert r["passed"] is False
@@ -87,15 +92,19 @@ def test_hidden_observation_leak_fails_runtime_gate(tmp_path):
 
 
 def test_duplicate_l3_delivery_fails_runtime_gate(tmp_path):
-    block = '<gt-evidence trigger="post_edit:app/core.py">\n[CALLER] helper calls run\n</gt-evidence>'
+    block = (
+        '<gt-evidence trigger="post_edit:app/core.py">\n[CALLER] helper calls run\n</gt-evidence>'
+    )
     records = [
         _brief_rec(),
-        {"history": [
-            {"action": "edit", "args": {"path": "app/core.py"}},
-            {"observation": "edit", "content": block},
-            {"observation": "edit", "content": block},
-            {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "app/core.py"}},
+                {"observation": "edit", "content": block},
+                {"observation": "edit", "content": block},
+                {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_runtime_delivery=True)
     assert r["passed"] is False
@@ -210,6 +219,7 @@ def test_brief_diag_leak_fails(tmp_path):
 # --require-layer-markers : L3 / L3b / L6 in observation content, trigger-gated
 # ---------------------------------------------------------------------------
 
+
 def _brief_rec() -> dict:
     return {"instruction": _VALID}
 
@@ -218,13 +228,24 @@ def test_layer_markers_present_pass(tmp_path):
     """Edit happened AND edit->review transition exists; all markers present -> PASS."""
     records = [
         _brief_rec(),
-        {"history": [
-            {"action": "edit", "args": {"path": "app/core.py"}},
-            {"observation": "run", "content": "<gt-evidence>\n[CALLER] helper calls run\n</gt-evidence>"},
-            {"observation": "run", "content": "[CONTRACT] run(self) -> value | raises ValueError"},
-            {"action": "finish", "args": {}},
-            {"observation": "run", "content": "[GT_VERIFY] Tests covering app/core.py: test_run"},
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "app/core.py"}},
+                {
+                    "observation": "run",
+                    "content": "<gt-evidence>\n[CALLER] helper calls run\n</gt-evidence>",
+                },
+                {
+                    "observation": "run",
+                    "content": "[CONTRACT] run(self) -> value | raises ValueError",
+                },
+                {"action": "finish", "args": {}},
+                {
+                    "observation": "run",
+                    "content": "[GT_VERIFY] Tests covering app/core.py: test_run",
+                },
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_layer_markers=True)
     assert r["passed"] is True, r["reasons"]
@@ -241,12 +262,16 @@ def test_layer_markers_l3_attributed_tag_registers(tmp_path):
     bare-only check false-negatived a run where L3 actually reached the agent."""
     records = [
         _brief_rec(),
-        {"history": [
-            {"action": "edit", "args": {"path": "app/core.py"}},
-            {"observation": "edit",
-             "content": '<gt-evidence trigger="post_edit:app/core.py">\n  PRESERVE: raise ValueError\n</gt-evidence>'},
-            {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "app/core.py"}},
+                {
+                    "observation": "edit",
+                    "content": '<gt-evidence trigger="post_edit:app/core.py">\n  PRESERVE: raise ValueError\n</gt-evidence>',
+                },
+                {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_layer_markers=True)
     assert r["l3_evidence_seen"] is True, "attributed <gt-evidence trigger=...> must register as L3"
@@ -257,12 +282,16 @@ def test_layer_markers_l3_router_postedit_form_registers(tmp_path):
     at all). That form must also register as L3 reaching the agent."""
     records = [
         _brief_rec(),
-        {"history": [
-            {"action": "edit", "args": {"path": "app/core.py"}},
-            {"observation": "edit",
-             "content": "[GT] Post-edit: core.py\n[RECALL] from earlier: [CONTRACT] def run( -> value\n[RAISES] WHEN x: raise ValueError"},
-            {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "app/core.py"}},
+                {
+                    "observation": "edit",
+                    "content": "[GT] Post-edit: core.py\n[RECALL] from earlier: [CONTRACT] def run( -> value\n[RAISES] WHEN x: raise ValueError",
+                },
+                {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_layer_markers=True)
     assert r["l3_evidence_seen"] is True, "router_v2 '[GT] Post-edit:' form must register as L3"
@@ -272,10 +301,12 @@ def test_layer_markers_missing_l3_fails(tmp_path):
     """Edit happened (trigger present) but L3 <gt-evidence> absent -> FAIL."""
     records = [
         _brief_rec(),
-        {"history": [
-            {"action": "edit", "args": {"path": "app/core.py"}},
-            {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "app/core.py"}},
+                {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_layer_markers=True)
     assert r["passed"] is False
@@ -289,10 +320,12 @@ def test_layer_markers_no_edit_no_failure(tmp_path):
     A layer with NO trigger is NOT a failure."""
     records = [
         _brief_rec(),
-        {"history": [
-            {"action": "read", "args": {"path": "app/core.py"}},
-            {"observation": "read", "content": "file contents, no GT markers"},
-        ]},
+        {
+            "history": [
+                {"action": "read", "args": {"path": "app/core.py"}},
+                {"observation": "read", "content": "file contents, no GT markers"},
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_layer_markers=True)
     assert r["passed"] is True, r["reasons"]
@@ -304,11 +337,13 @@ def test_layer_markers_l6_only_required_on_edit_review_transition(tmp_path):
     """Edit happened, L3/L3b present, but NO review transition -> L6 not required -> PASS."""
     records = [
         _brief_rec(),
-        {"history": [
-            {"action": "edit", "args": {"path": "app/core.py"}},
-            {"observation": "run", "content": "<gt-evidence>\n[CALLER] x\n</gt-evidence>"},
-            {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "app/core.py"}},
+                {"observation": "run", "content": "<gt-evidence>\n[CALLER] x\n</gt-evidence>"},
+                {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_layer_markers=True)
     assert r["passed"] is True, r["reasons"]
@@ -320,13 +355,15 @@ def test_layer_markers_l6_missing_on_transition_fails(tmp_path):
     """Edit->review transition present but L6 [GT_VERIFY] Tests covering absent -> FAIL."""
     records = [
         _brief_rec(),
-        {"history": [
-            {"action": "edit", "args": {"path": "app/core.py"}},
-            {"observation": "run", "content": "<gt-evidence>\n[CALLER] x\n</gt-evidence>"},
-            {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
-            {"action": "finish", "args": {}},
-            {"observation": "run", "content": "submitted, no verify marker"},
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "app/core.py"}},
+                {"observation": "run", "content": "<gt-evidence>\n[CALLER] x\n</gt-evidence>"},
+                {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
+                {"action": "finish", "args": {}},
+                {"observation": "run", "content": "submitted, no verify marker"},
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_layer_markers=True)
     assert r["passed"] is False
@@ -341,11 +378,17 @@ def test_layer_markers_ignores_telemetry_and_instruction(tmp_path):
     records = [
         # brief instruction itself contains <gt-evidence>/[CONTRACT] — must be ignored
         {"instruction": _VALID + "\n<gt-evidence>x</gt-evidence>\n[CONTRACT] noise"},
-        {"history": [
-            {"action": "edit", "args": {"path": "app/core.py"}},
-            # telemetry field, NOT observation content
-            {"gt_layer_event": "<gt-evidence>telemetry</gt-evidence>", "observation": "run", "content": "plain output"},
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "app/core.py"}},
+                # telemetry field, NOT observation content
+                {
+                    "gt_layer_event": "<gt-evidence>telemetry</gt-evidence>",
+                    "observation": "run",
+                    "content": "plain output",
+                },
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_layer_markers=True)
     assert r["passed"] is False
@@ -370,7 +413,7 @@ _OBS_MALFORMED_SEMWARN = {
     "content": (
         '<gt-evidence trigger="post_edit:haystack/document_splitter.py">\n'
         '  SEMANTIC WARNING: New guard: raise TypeError("DocumentSplitter expects a List of Document\n'
-        '</gt-evidence>'
+        "</gt-evidence>"
     ),
 }
 # A post-edit OBSERVATION whose [RAISES] guard ends on a dangling boolean op.
@@ -384,9 +427,9 @@ _OBS_BALANCED = {
     "content": (
         '<gt-evidence trigger="post_edit:haystack/document_splitter.py">\n'
         '  SEMANTIC WARNING: New guard: raise TypeError("DocumentSplitter expects a List of Document.")\n'
-        '  [RAISES] WHEN (documents and not isinstance(documents, list)): raise TypeError\n'
-        '  PRESERVE: return [chunk for chunk in chunks if chunk]\n'
-        '</gt-evidence>'
+        "  [RAISES] WHEN (documents and not isinstance(documents, list)): raise TypeError\n"
+        "  PRESERVE: return [chunk for chunk in chunks if chunk]\n"
+        "</gt-evidence>"
     ),
 }
 
@@ -395,14 +438,14 @@ def test_observation_malformed_semwarn_fails_require_balanced(tmp_path):
     """A truncated SEMANTIC WARNING guard in OBSERVATION content FAILS the gate."""
     records = [
         {"instruction": _VALID},
-        {"history": [
-            {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
-            _OBS_MALFORMED_SEMWARN,
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
+                _OBS_MALFORMED_SEMWARN,
+            ]
+        },
     ]
-    r = cbd.check_brief_delivery(
-        _write_records(tmp_path, records), require_balanced_contracts=True
-    )
+    r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_balanced_contracts=True)
     assert r["passed"] is False, r["reasons"]
     assert r["malformed_observation_guards"], r
     assert r["malformed_contract_found"] is True
@@ -413,14 +456,14 @@ def test_observation_malformed_raises_fails_require_balanced(tmp_path):
     """A [RAISES] guard ending on a dangling operator in OBSERVATION FAILS."""
     records = [
         {"instruction": _VALID},
-        {"history": [
-            {"action": "edit", "args": {"path": "mod.py"}},
-            _OBS_MALFORMED_RAISES,
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "mod.py"}},
+                _OBS_MALFORMED_RAISES,
+            ]
+        },
     ]
-    r = cbd.check_brief_delivery(
-        _write_records(tmp_path, records), require_balanced_contracts=True
-    )
+    r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_balanced_contracts=True)
     assert r["passed"] is False, r["reasons"]
     assert r["malformed_observation_guards"], r
 
@@ -430,10 +473,12 @@ def test_observation_balanced_passes_require_balanced(tmp_path):
     OBSERVATION content pass through unchanged — no over-suppression."""
     records = [
         {"instruction": _VALID},
-        {"history": [
-            {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
-            _OBS_BALANCED,
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
+                _OBS_BALANCED,
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(
         _write_records(tmp_path, records),
@@ -450,10 +495,12 @@ def test_observation_malformed_computed_but_not_gated_without_flag(tmp_path):
     but does NOT fail when the opt-in flag is off — existing callers unaffected."""
     records = [
         {"instruction": _VALID},
-        {"history": [
-            {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
-            _OBS_MALFORMED_SEMWARN,
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
+                _OBS_MALFORMED_SEMWARN,
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records))
     assert r["malformed_observation_guards"], r
@@ -468,12 +515,17 @@ def test_observation_guard_scan_ignores_telemetry_and_instruction(tmp_path):
         # looks at Contract:/Preserve: lines, so this must NOT register as either
         # an instruction guard or an observation guard.
         {"instruction": _VALID + '\nSEMANTIC WARNING: raise TypeError("oops'},
-        {"history": [
-            {"action": "edit", "args": {"path": "app/core.py"}},
-            # telemetry field carrying a malformed guard — must be ignored
-            {"gt_layer_event": '[RAISES] WHEN (a and not', "observation": "run",
-             "content": "plain output, no guard markers"},
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "app/core.py"}},
+                # telemetry field carrying a malformed guard — must be ignored
+                {
+                    "gt_layer_event": "[RAISES] WHEN (a and not",
+                    "observation": "run",
+                    "content": "plain output, no guard markers",
+                },
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_balanced_contracts=True)
     assert r["malformed_observation_guards"] == [], r
@@ -485,10 +537,12 @@ def test_observation_balanced_with_instruction_malformed_still_fails(tmp_path):
     when all observation guards are balanced."""
     records = [
         {"instruction": _MALFORMED_CONTRACT},
-        {"history": [
-            {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
-            _OBS_BALANCED,
-        ]},
+        {
+            "history": [
+                {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
+                _OBS_BALANCED,
+            ]
+        },
     ]
     r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_balanced_contracts=True)
     assert r["passed"] is False, r["reasons"]

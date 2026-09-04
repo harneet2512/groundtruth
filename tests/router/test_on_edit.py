@@ -14,14 +14,11 @@ def _build_db(tmp_path: Path) -> tuple[Path, str]:
     (repo / "core").mkdir(parents=True)
     (repo / "users").mkdir(parents=True)
     (repo / "core" / "target.py").write_text(
-        "def target(a, b):\n"
-        "    return a + b\n",
+        "def target(a, b):\n    return a + b\n",
         encoding="utf-8",
     )
     (repo / "users" / "foo.py").write_text(
-        "from core.target import target\n"
-        "def caller():\n"
-        "    return target(1, 2)\n",
+        "from core.target import target\ndef caller():\n    return target(1, 2)\n",
         encoding="utf-8",
     )
     (repo / "isolated.py").write_text(
@@ -51,12 +48,41 @@ def _build_db(tmp_path: Path) -> tuple[Path, str]:
         """
     )
     nodes = [
-        (1, "Function", "target", "", "core/target.py", 1, 2, "def target(a, b)", "int", 1, 0, "python", 0),
-        (2, "Function", "caller", "", "users/foo.py", 2, 3, "def caller()", None, 1, 0, "python", 0),
+        (
+            1,
+            "Function",
+            "target",
+            "",
+            "core/target.py",
+            1,
+            2,
+            "def target(a, b)",
+            "int",
+            1,
+            0,
+            "python",
+            0,
+        ),
+        (
+            2,
+            "Function",
+            "caller",
+            "",
+            "users/foo.py",
+            2,
+            3,
+            "def caller()",
+            None,
+            1,
+            0,
+            "python",
+            0,
+        ),
         (3, "Function", "lonely", "", "isolated.py", 1, 2, "def lonely()", None, 1, 0, "python", 0),
     ]
     con.executemany(
-        "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", nodes,
+        "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        nodes,
     )
     # caller -> target with line number 3
     con.execute(

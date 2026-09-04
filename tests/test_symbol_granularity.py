@@ -35,6 +35,7 @@ from groundtruth.memory.enrich.embed import (
 # Pure-helper unit tests (no model, no graph)
 # ---------------------------------------------------------------------------
 
+
 def test_symbol_passage_blank_is_quiet():
     # correct-or-quiet: a fully blank symbol is never embedded.
     assert symbol_passage("", "", "") == ""
@@ -99,14 +100,15 @@ def test_passage_hash_is_content_addressed():
     h2 = passage_hash("foo (x)", "intfloat/e5-small-v2", 384, "sym2-fn")
     h3 = passage_hash("foo (y)", "intfloat/e5-small-v2", 384, "sym2-fn")
     h4 = passage_hash("foo (x)", "intfloat/e5-small-v2", 384, "sym1")
-    assert h1 == h2          # deterministic on identical content
-    assert h1 != h3          # different passage -> different key
-    assert h1 != h4          # version bump invalidates
+    assert h1 == h2  # deterministic on identical content
+    assert h1 != h3  # different passage -> different key
+    assert h1 != h4  # version bump invalidates
 
 
 # ---------------------------------------------------------------------------
 # THE PROOF (synthetic, deterministic): MAX separates gold from sibling; mean does not.
 # ---------------------------------------------------------------------------
+
 
 def _unit(v: np.ndarray) -> np.ndarray:
     return v / np.linalg.norm(v)
@@ -141,7 +143,7 @@ def _build_synthetic_files(seed: int = 1234):
     sibling_generics = generic_pool(60)
 
     gold_matrix = np.vstack([gold_symbol[None, :], gold_generics])  # (60, dim)
-    sibling_matrix = sibling_generics                                # (60, dim)
+    sibling_matrix = sibling_generics  # (60, dim)
 
     gold_cosines = (gold_matrix @ q).tolist()
     sibling_cosines = (sibling_matrix @ q).tolist()
@@ -331,9 +333,7 @@ def test_zero_cosine_files_never_become_semantic_seeds(tmp_path):
     seeds = anchor_select.semantic_top_k(
         "fix the request handler crash", str(tmp_path), db, _ZeroEmbedder()
     )
-    assert seeds == {}, (
-        f"zero-cosine files admitted as semantic seeds: {list(seeds.items())[:3]}"
-    )
+    assert seeds == {}, f"zero-cosine files admitted as semantic seeds: {list(seeds.items())[:3]}"
 
 
 if __name__ == "__main__":

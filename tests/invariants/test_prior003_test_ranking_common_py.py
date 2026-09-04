@@ -6,15 +6,16 @@ with helper file deprioritization.
 Research: R4 TCTracer (ICSE 2020) — naming convention signal gives
 direct test files higher traceability score than helper utilities.
 """
+
 from __future__ import annotations
 
 import os
 import sqlite3
 import tempfile
 
-import pytest
 
 import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 
@@ -108,12 +109,10 @@ class TestHelperDeprioritization:
             # First result must NOT be from _common.py or conftest.py
             first_file = results[0].get("file_path", "")
             assert "_common.py" not in first_file, (
-                f"PRIOR-003: _common.py must not be first result. "
-                f"Got: {first_file}"
+                f"PRIOR-003: _common.py must not be first result. Got: {first_file}"
             )
             assert "conftest.py" not in first_file, (
-                f"PRIOR-003: conftest.py must not be first result. "
-                f"Got: {first_file}"
+                f"PRIOR-003: conftest.py must not be first result. Got: {first_file}"
             )
 
     def test_direct_test_has_higher_rank(self):

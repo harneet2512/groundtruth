@@ -14,6 +14,7 @@ invokes) against a synthetic cfg and asserts the produced yaml has the
 load-bearing env variable set. It cannot be made to pass by changing the
 test — if the driver stops writing GT_LSP_ENABLED, this test fails.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -42,10 +43,15 @@ def _invoke_patcher(tmp_path: Path, arm: str) -> dict:
     src.write_text(_minimal_cfg())
     subprocess.run(
         [
-            sys.executable, str(PATCH_SCRIPT),
-            str(src), str(dst),
-            arm, "run-test", "iid-test",
-            str(tmp_path / "telem"), str(tmp_path / "bundle"),
+            sys.executable,
+            str(PATCH_SCRIPT),
+            str(src),
+            str(dst),
+            arm,
+            "run-test",
+            "iid-test",
+            str(tmp_path / "telem"),
+            str(tmp_path / "bundle"),
         ],
         check=True,
     )
@@ -76,20 +82,27 @@ class TestDriverPropagatesLspEnv:
         Uses identical telem/bundle/run args for both invocations so the only
         difference is the arm string.
         """
+
         def run(arm, out_name):
             src = tmp_path / f"{out_name}_in.yaml"
             dst = tmp_path / f"{out_name}_out.yaml"
             src.write_text(_minimal_cfg())
             subprocess.run(
                 [
-                    sys.executable, str(PATCH_SCRIPT),
-                    str(src), str(dst),
-                    arm, "run-shared", "iid-shared",
-                    str(tmp_path / "telem-shared"), str(tmp_path / "bundle-shared"),
+                    sys.executable,
+                    str(PATCH_SCRIPT),
+                    str(src),
+                    str(dst),
+                    arm,
+                    "run-shared",
+                    "iid-shared",
+                    str(tmp_path / "telem-shared"),
+                    str(tmp_path / "bundle-shared"),
                 ],
                 check=True,
             )
             return yaml.safe_load(dst.read_text())
+
         lsp = run("gt-lsp-hybrid", "lsp")
         nolsp = run("gt-nolsp", "nolsp")
         lsp_env = lsp["agent"]["tools"]["env_variables"]
@@ -106,16 +119,22 @@ class TestDriverPropagatesLspEnv:
         dst = tmp_path / "out.yaml"
         src.write_text(_minimal_cfg())
         subprocess.run(
-            [sys.executable, str(PATCH_SCRIPT), str(src), str(dst),
-             "gt-nolsp", "r", "i", str(tmp_path / "t"), str(bundle)],
+            [
+                sys.executable,
+                str(PATCH_SCRIPT),
+                str(src),
+                str(dst),
+                "gt-nolsp",
+                "r",
+                "i",
+                str(tmp_path / "t"),
+                str(bundle),
+            ],
             check=True,
         )
         cfg = yaml.safe_load(dst.read_text())
         paths = [b["path"] for b in cfg["agent"]["tools"]["bundles"]]
         assert str(bundle) in paths, (
-            f"groundtruth bundle path must be swapped to the per-task bundle. "
-            f"Paths: {paths!r}"
+            f"groundtruth bundle path must be swapped to the per-task bundle. Paths: {paths!r}"
         )
-        assert "tools/registry" in paths, (
-            "other bundles must be preserved unchanged"
-        )
+        assert "tools/registry" in paths, "other bundles must be preserved unchanged"

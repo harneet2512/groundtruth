@@ -13,6 +13,7 @@ regression cannot return:
      proof/benchmark mode, the hook ABORTS rather than silently delivering
      facts through a stale inline copy. Off proof mode it degrades (logged).
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -36,13 +37,18 @@ def _load_gmp(modname: str = "gt_mini_patch_b1"):
 
 def test_single_source_same_object_identity():
     from groundtruth.delivery.name_policy import (
-        is_builtin_shadow_name, is_stdlib_shadow,
+        is_builtin_shadow_name,
+        is_stdlib_shadow,
     )
     from groundtruth.delivery.path_policy import (
-        is_vendored_path, is_minified_file, is_delivery_excluded,
+        is_vendored_path,
+        is_minified_file,
+        is_delivery_excluded,
     )
     from groundtruth.pretask.curation_map import (
-        DETERMINISTIC_RESOLUTION_METHODS, _is_cross_language_pair, _nodes_have_language,
+        DETERMINISTIC_RESOLUTION_METHODS,
+        _is_cross_language_pair,
+        _nodes_have_language,
     )
     import groundtruth.pretask.v1r_brief as v1r
 
@@ -68,15 +74,38 @@ def test_single_source_same_object_identity():
 def test_decision_parity_battery():
     from groundtruth.delivery.name_policy import is_builtin_shadow_name, is_stdlib_shadow
     from groundtruth.delivery.path_policy import is_vendored_path
+
     gmp = _load_gmp()
 
-    names = ["isinstance", "join", "get", "__init__", "__await__",
-             "MyClass", "process_data", "walk", "x", ""]
-    paths = ["astropy/extern/jquery.min.js", "src/foo/bar.py", "vendor/lib.go",
-             "node_modules/x.js", "pkg/zz_generated.deepcopy.go",
-             "core/engine/src/module/source.rs", "a/b/normal.ts", "static/app.js"]
-    codes = [("os.walk(root)", "walk"), ("self.walk(x)", "walk"),
-             ("json.loads(s)", "loads"), ("x.foo()", "foo"), ("", "y")]
+    names = [
+        "isinstance",
+        "join",
+        "get",
+        "__init__",
+        "__await__",
+        "MyClass",
+        "process_data",
+        "walk",
+        "x",
+        "",
+    ]
+    paths = [
+        "astropy/extern/jquery.min.js",
+        "src/foo/bar.py",
+        "vendor/lib.go",
+        "node_modules/x.js",
+        "pkg/zz_generated.deepcopy.go",
+        "core/engine/src/module/source.rs",
+        "a/b/normal.ts",
+        "static/app.js",
+    ]
+    codes = [
+        ("os.walk(root)", "walk"),
+        ("self.walk(x)", "walk"),
+        ("json.loads(s)", "loads"),
+        ("x.foo()", "foo"),
+        ("", "y"),
+    ]
 
     for n in names:
         assert is_builtin_shadow_name(n) == gmp._is_builtin_shadow_name(n), n
@@ -111,8 +140,9 @@ def test_proof_mode_import_failure_degrades_gracefully():
         assert m._is_cross_language_pair("python", "rust") is True
         print("GRACEFUL_FUNCTIONAL_OK")
     """)
-    r = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                       text=True, cwd=str(ROOT))
+    r = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, cwd=str(ROOT)
+    )
     assert "GRACEFUL_FUNCTIONAL_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
 
 
@@ -130,6 +160,7 @@ def test_non_proof_import_failure_degrades_not_aborts():
         assert m._DELIVERY_POLICY_AVAILABLE is False
         print("DEGRADED_OK")
     """)
-    r = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                       text=True, cwd=str(ROOT))
+    r = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, cwd=str(ROOT)
+    )
     assert "DEGRADED_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"

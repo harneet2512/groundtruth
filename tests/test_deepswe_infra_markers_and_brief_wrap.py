@@ -23,6 +23,7 @@
 All deterministic: workflow-text + classifier behavior + pure assembly helper.
 No network, no Go toolchain, no task IDs.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -112,8 +113,7 @@ def test_fix2_every_infra_marker_echo_site_tees_to_trial_log(outcome_mod):
     before the agent step creates the log."""
     wf_lines = _FULL_WF.read_text(encoding="utf-8").splitlines()
     for marker in outcome_mod.INFRA_LOG_MARKERS:
-        sites = [(i, ln) for i, ln in enumerate(wf_lines, 1)
-                 if f'echo "{marker}' in ln]
+        sites = [(i, ln) for i, ln in enumerate(wf_lines, 1) if f'echo "{marker}' in ln]
         assert sites, (
             f"deepswe_full.yml has NO echo site for canonical marker {marker!r} "
             f"(INFRA_LOG_MARKERS expects the workflow to emit this exact token)"
@@ -156,12 +156,15 @@ def test_fix2_workflow_echoed_strings_classify_infra(outcome_mod):
         for text in emitted:
             log = f"earlier unrelated output\n{text}\n"
             assert marker in outcome_mod.find_infra_markers(log), (
-                f"classifier missed the workflow's own emission for {marker!r}: "
-                f"{text!r}"
+                f"classifier missed the workflow's own emission for {marker!r}: {text!r}"
             )
             rec = outcome_mod.build_signal_record(
-                instance_id="task-x", reward=None, n_agent_steps=None,
-                exit_status=None, trial_log=log, cert_dir=None,
+                instance_id="task-x",
+                reward=None,
+                n_agent_steps=None,
+                exit_status=None,
+                trial_log=log,
+                cert_dir=None,
             )
             assert rec["failure_class"] == "INFRA", (
                 f"emitted marker line did not classify INFRA (got "
@@ -173,8 +176,12 @@ def test_fix2_marker_absent_from_log_stays_unknown(outcome_mod):
     """Negative control (the pre-fix symptom): a substrate failure whose marker
     never reached trial_output.log classifies UNKNOWN — the bug G1 closes."""
     rec = outcome_mod.build_signal_record(
-        instance_id="task-x", reward=None, n_agent_steps=None,
-        exit_status=None, trial_log="", cert_dir=None,
+        instance_id="task-x",
+        reward=None,
+        n_agent_steps=None,
+        exit_status=None,
+        trial_log="",
+        cert_dir=None,
     )
     assert rec["failure_class"] == "UNKNOWN"
 
@@ -229,9 +236,10 @@ def test_fix3_run_routes_through_prepend_brief(agent_mod):
     """Integration avenue: GTMiniSweAgent.run must assemble via _prepend_brief —
     no residual inline wrap that could reintroduce the double tag."""
     import inspect
+
     src = inspect.getsource(agent_mod.GTMiniSweAgent.run)
     assert "_prepend_brief" in src, "run() no longer routes through _prepend_brief"
-    assert '<gt-task-brief>\\n{brief}' not in src, (
+    assert "<gt-task-brief>\\n{brief}" not in src, (
         "run() still carries the unconditional inline wrap"
     )
 
@@ -248,9 +256,7 @@ def test_fix3_run_routes_through_prepend_brief(agent_mod):
 # capped + classified (rc 137 -> GT_PROOF_OOM). F4 restores symmetry: a
 # compose-spec mem_limit/memswap_limit (honored WITHOUT --compatibility) + the
 # rc=137 -> GT_AGENT_OOM classification at the pier-run step.
-_PIER_DIR = (
-    _ROOT / "deepswe-pier" / "src" / "pier" / "environments" / "docker"
-)
+_PIER_DIR = _ROOT / "deepswe-pier" / "src" / "pier" / "environments" / "docker"
 _COMPOSE_BASE = _PIER_DIR / "docker-compose-base.yaml"
 
 
@@ -302,10 +308,7 @@ def test_f4_pier_run_step_classifies_agent_oom(outcome_mod):
         "still falls into the generic PIER_RUN_FAIL bucket, unclassified"
     )
     # ...and emits the canonical GT_AGENT_OOM marker, tee'd into the trial log.
-    sites = [
-        ln for ln in wf.splitlines()
-        if 'echo "GT_AGENT_OOM' in ln
-    ]
+    sites = [ln for ln in wf.splitlines() if 'echo "GT_AGENT_OOM' in ln]
     assert sites, "pier-run step never echoes the GT_AGENT_OOM marker"
     for ln in sites:
         assert "tee -a trial_output.log" in ln, (
@@ -327,8 +330,12 @@ def test_f4_agent_oom_marker_classifies_infra(outcome_mod):
     )
     assert "GT_AGENT_OOM" in outcome_mod.find_infra_markers(log)
     rec = outcome_mod.build_signal_record(
-        instance_id="task-x", reward=None, n_agent_steps=None,
-        exit_status=None, trial_log=log, cert_dir=None,
+        instance_id="task-x",
+        reward=None,
+        n_agent_steps=None,
+        exit_status=None,
+        trial_log=log,
+        cert_dir=None,
     )
     assert rec["failure_class"] == "INFRA", (
         f"agent-container OOM did not classify INFRA (got {rec['failure_class']!r})"

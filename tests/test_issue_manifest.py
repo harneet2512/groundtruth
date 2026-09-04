@@ -1,4 +1,5 @@
 """Tests for scripts/swebench/issue_manifest.py."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -8,9 +9,7 @@ import tempfile
 
 
 def _load():
-    path = os.path.join(
-        os.path.dirname(__file__), "..", "scripts", "swebench", "issue_manifest.py"
-    )
+    path = os.path.join(os.path.dirname(__file__), "..", "scripts", "swebench", "issue_manifest.py")
     spec = importlib.util.spec_from_file_location("issue_manifest_test", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

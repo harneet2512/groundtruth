@@ -34,6 +34,7 @@ Research basis:
 
 LLM-free, $0, pure SQL over a read-only graph.db.
 """
+
 from __future__ import annotations
 
 import os
@@ -194,17 +195,44 @@ _DEPTH_REL_MAX_PER_KIND = 4
 # column -> consumers probe with ``_nodes_have_language`` and stay permissive).
 # ---------------------------------------------------------------------------
 _LANG_FAMILIES: dict[str, str] = {
-    "javascript": "jslike", "typescript": "jslike", "jsx": "jslike",
-    "tsx": "jslike", "vue": "jslike", "svelte": "jslike",
-    "java": "jvm", "kotlin": "jvm", "scala": "jvm", "groovy": "jvm",
-    "c": "cfamily", "cpp": "cfamily", "c++": "cfamily", "objc": "cfamily",
-    "objcpp": "cfamily", "objective-c": "cfamily", "swift": "cfamily",
-    "python": "python", "go": "go", "rust": "rust", "ruby": "ruby",
-    "php": "php", "csharp": "csharp", "c#": "csharp", "lua": "lua",
-    "elixir": "elixir", "erlang": "erlang", "haskell": "haskell",
-    "dart": "dart", "r": "r", "julia": "julia", "perl": "perl",
-    "bash": "shell", "shell": "shell", "sh": "shell", "zig": "zig",
-    "ocaml": "ocaml", "clojure": "jvm",
+    "javascript": "jslike",
+    "typescript": "jslike",
+    "jsx": "jslike",
+    "tsx": "jslike",
+    "vue": "jslike",
+    "svelte": "jslike",
+    "java": "jvm",
+    "kotlin": "jvm",
+    "scala": "jvm",
+    "groovy": "jvm",
+    "c": "cfamily",
+    "cpp": "cfamily",
+    "c++": "cfamily",
+    "objc": "cfamily",
+    "objcpp": "cfamily",
+    "objective-c": "cfamily",
+    "swift": "cfamily",
+    "python": "python",
+    "go": "go",
+    "rust": "rust",
+    "ruby": "ruby",
+    "php": "php",
+    "csharp": "csharp",
+    "c#": "csharp",
+    "lua": "lua",
+    "elixir": "elixir",
+    "erlang": "erlang",
+    "haskell": "haskell",
+    "dart": "dart",
+    "r": "r",
+    "julia": "julia",
+    "perl": "perl",
+    "bash": "shell",
+    "shell": "shell",
+    "sh": "shell",
+    "zig": "zig",
+    "ocaml": "ocaml",
+    "clojure": "jvm",
 }
 
 
@@ -232,6 +260,7 @@ def _nodes_have_language(conn: sqlite3.Connection) -> bool:
     except sqlite3.Error:
         return False
     return "language" in cols
+
 
 # 1-hop neighbor cap per direction. RepoGraph: tight 1-hop beats wide dumps.
 # Kept as the legacy flat cap so _neighbors() and explicit max_neighbors callers
@@ -287,10 +316,34 @@ def normalize_file_path(file_path: str) -> str:
 # is enforced by tests/test_stdlib_modules_single_source so drift cannot land silently.
 _STDLIB_MODULES: frozenset[str] = frozenset(
     {
-        "os", "sys", "re", "io", "json", "math", "time", "copy", "glob", "uuid",
-        "shutil", "random", "typing", "logging", "pathlib", "datetime", "string",
-        "decimal", "inspect", "warnings", "argparse", "textwrap", "itertools",
-        "functools", "operator", "collections", "subprocess", "contextlib",
+        "os",
+        "sys",
+        "re",
+        "io",
+        "json",
+        "math",
+        "time",
+        "copy",
+        "glob",
+        "uuid",
+        "shutil",
+        "random",
+        "typing",
+        "logging",
+        "pathlib",
+        "datetime",
+        "string",
+        "decimal",
+        "inspect",
+        "warnings",
+        "argparse",
+        "textwrap",
+        "itertools",
+        "functools",
+        "operator",
+        "collections",
+        "subprocess",
+        "contextlib",
     }
 )
 
@@ -464,9 +517,7 @@ def _read_code_line(repo_root: str, rel_file: str, line: int) -> str:
     if not repo_root or not rel_file or not line or line <= 0:
         return ""
     try:
-        with open(
-            os.path.join(repo_root, rel_file), encoding="utf-8", errors="ignore"
-        ) as fh:
+        with open(os.path.join(repo_root, rel_file), encoding="utf-8", errors="ignore") as fh:
             lines = fh.readlines()
         if 0 < line <= len(lines):
             return lines[line - 1].strip()
@@ -542,7 +593,9 @@ def _neighbors(
     # names that are not real defs) and _fmt_edge rendered them indistinguishably from facts. Gate
     # only when the method column exists; without it the conf=0.0 sentinel already suppresses them.
     if has_method:
-        _det_in = ",".join("'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS))
+        _det_in = ",".join(
+            "'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS)
+        )
         sql += f" AND LOWER(TRIM(e.resolution_method)) IN ({_det_in})"
     try:
         rows = conn.execute(sql, node_ids).fetchall()
@@ -643,9 +696,7 @@ def _verified_neighbor_count(
         match_col, join_col = "e.target_id", "e.source_id"
     else:
         match_col, join_col = "e.source_id", "e.target_id"
-    _det_in = ",".join(
-        "'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS)
-    )
+    _det_in = ",".join("'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS))
     sql = (
         f"SELECT COUNT(DISTINCT n.name || '\\x00' || n.file_path) "
         f"FROM edges e JOIN nodes n ON {join_col} = n.id "
@@ -806,10 +857,7 @@ def _apply_dynamic_budget(
     # facts at the ceiling would re-open the guess budget on a fact-rich hub).
     # Prefer the uncapped COUNT when given (closes the >over-fetch-window hub gap).
     windowed_fact_count = sum(1 for e in edges if e.is_fact)
-    raw_fact_count = (
-        true_fact_count if true_fact_count is not None
-        else windowed_fact_count
-    )
+    raw_fact_count = true_fact_count if true_fact_count is not None else windowed_fact_count
     # Defensive: the true count can only be >= what we see in the window; never
     # let a bad/smaller override re-open the guess budget.
     raw_fact_count = max(raw_fact_count, windowed_fact_count)
@@ -926,7 +974,9 @@ def _dynamic_neighbors(
         conn, node_ids, direction=direction, has_method=has_method
     )
     edges = _apply_dynamic_budget(
-        raw, fact_ceiling=fact_ceiling, unverified_k=unverified_k,
+        raw,
+        fact_ceiling=fact_ceiling,
+        unverified_k=unverified_k,
         true_fact_count=true_facts,
     )
 
@@ -953,9 +1003,7 @@ def _dynamic_neighbors(
     # surface the focus itself as a (2-hop) neighbor.
     for fid in node_ids:
         try:
-            row = conn.execute(
-                "SELECT name, file_path FROM nodes WHERE id = ?", (fid,)
-            ).fetchone()
+            row = conn.execute("SELECT name, file_path FROM nodes WHERE id = ?", (fid,)).fetchone()
         except sqlite3.Error:
             row = None
         if row and row[0]:
@@ -1023,36 +1071,52 @@ def build_function_map(
             ids = _node_ids(conn, fpath, fname)
             if dynamic:
                 callers = _dynamic_neighbors(
-                    conn, ids, direction="callers", has_conf=has_conf,
-                    has_method=has_method, fact_ceiling=fact_ceiling,
-                    unverified_k=unverified_k, second_hop=second_hop,
+                    conn,
+                    ids,
+                    direction="callers",
+                    has_conf=has_conf,
+                    has_method=has_method,
+                    fact_ceiling=fact_ceiling,
+                    unverified_k=unverified_k,
+                    second_hop=second_hop,
                     repo_root=repo_root,
                 )
                 callees = _dynamic_neighbors(
-                    conn, ids, direction="callees", has_conf=has_conf,
-                    has_method=has_method, fact_ceiling=fact_ceiling,
-                    unverified_k=unverified_k, second_hop=second_hop,
+                    conn,
+                    ids,
+                    direction="callees",
+                    has_conf=has_conf,
+                    has_method=has_method,
+                    fact_ceiling=fact_ceiling,
+                    unverified_k=unverified_k,
+                    second_hop=second_hop,
                     repo_root=repo_root,
                 )
             else:
                 # Legacy flat-cap path — unchanged v1.0 behavior.
                 callers = _neighbors(
-                    conn, ids, direction="callers", has_conf=has_conf,
-                    has_method=has_method, max_neighbors=max_neighbors,
+                    conn,
+                    ids,
+                    direction="callers",
+                    has_conf=has_conf,
+                    has_method=has_method,
+                    max_neighbors=max_neighbors,
                     repo_root=repo_root,
                 )
                 callees = _neighbors(
-                    conn, ids, direction="callees", has_conf=has_conf,
-                    has_method=has_method, max_neighbors=max_neighbors,
+                    conn,
+                    ids,
+                    direction="callees",
+                    has_conf=has_conf,
+                    has_method=has_method,
+                    max_neighbors=max_neighbors,
                     repo_root=repo_root,
                 )
             # DEPTH (gt_new §6 trickle-down): the focus function's promoted
             # READS/WRITES/DATA_FLOW relationships — SCOPE/COMPLETENESS only,
             # never rank (this query is keyed off the focus ids; its output goes
             # only into the <gt-graph-map> render). [] on a no-promote graph.
-            depth_rels = _focus_depth_rels(
-                conn, ids, has_conf=has_conf, has_method=has_method
-            )
+            depth_rels = _focus_depth_rels(conn, ids, has_conf=has_conf, has_method=has_method)
             out.append(
                 FunctionMap(
                     file=fpath,
@@ -1092,9 +1156,7 @@ def verified_caller_count(graph_db_path: str, file_path: str, name: str) -> int:
         ids = _node_ids(conn, file_path, name)
         if not ids:
             return 0
-        return _verified_neighbor_count(
-            conn, ids, direction="callers", has_method=has_method
-        )
+        return _verified_neighbor_count(conn, ids, direction="callers", has_method=has_method)
     finally:
         conn.close()
 

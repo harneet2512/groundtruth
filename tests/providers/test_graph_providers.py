@@ -19,7 +19,6 @@ import pytest
 from groundtruth.providers.graph_providers import (
     CalleeEdge,
     CallerEdge,
-    FunctionInfo,
     ImporterEdge,
     callee_provider,
     caller_provider,
@@ -71,15 +70,100 @@ def _make_db(tmp_path: Path) -> str:
     # nodes
     rows = [
         # id, label, name, q, file_path, start, end, sig, ret, exp, test, lang, parent
-        (1, "Function", "target", "core.target", "core/target.py", 10, 30, "def target(a, b)", "int", 1, 0, "python", 0),
-        (2, "Function", "caller_one", "users.foo", "users/foo.py", 5, 20, "def caller_one()", None, 1, 0, "python", 0),
-        (3, "Function", "caller_two", "users.bar", "users/bar.py", 5, 20, "def caller_two()", None, 1, 0, "python", 0),
-        (4, "Function", "caller_three", "shared.utils", "shared/utils.py", 1, 10, "def caller_three()", None, 1, 0, "python", 0),
-        (5, "Function", "callee_low", "core.helper", "core/helper.py", 1, 10, "def callee_low()", None, 1, 0, "python", 0),
-        (6, "Function", "test_target", "tests.test_core", "tests/test_core.py", 1, 8, "def test_target()", None, 0, 1, "python", 0),
+        (
+            1,
+            "Function",
+            "target",
+            "core.target",
+            "core/target.py",
+            10,
+            30,
+            "def target(a, b)",
+            "int",
+            1,
+            0,
+            "python",
+            0,
+        ),
+        (
+            2,
+            "Function",
+            "caller_one",
+            "users.foo",
+            "users/foo.py",
+            5,
+            20,
+            "def caller_one()",
+            None,
+            1,
+            0,
+            "python",
+            0,
+        ),
+        (
+            3,
+            "Function",
+            "caller_two",
+            "users.bar",
+            "users/bar.py",
+            5,
+            20,
+            "def caller_two()",
+            None,
+            1,
+            0,
+            "python",
+            0,
+        ),
+        (
+            4,
+            "Function",
+            "caller_three",
+            "shared.utils",
+            "shared/utils.py",
+            1,
+            10,
+            "def caller_three()",
+            None,
+            1,
+            0,
+            "python",
+            0,
+        ),
+        (
+            5,
+            "Function",
+            "callee_low",
+            "core.helper",
+            "core/helper.py",
+            1,
+            10,
+            "def callee_low()",
+            None,
+            1,
+            0,
+            "python",
+            0,
+        ),
+        (
+            6,
+            "Function",
+            "test_target",
+            "tests.test_core",
+            "tests/test_core.py",
+            1,
+            8,
+            "def test_target()",
+            None,
+            0,
+            1,
+            "python",
+            0,
+        ),
     ]
     con.executemany(
-        "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows,
+        "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
     )
     # edges: callers/callees/importers
     edges = [
@@ -201,7 +285,9 @@ class TestIssueRelevanceScorer:
 
     def test_partial_overlap(self) -> None:
         # 2/3 terms present
-        assert issue_relevance_scorer("alpha gamma", {"alpha", "beta", "gamma"}) == pytest.approx(2 / 3)
+        assert issue_relevance_scorer("alpha gamma", {"alpha", "beta", "gamma"}) == pytest.approx(
+            2 / 3
+        )
 
     def test_case_insensitive(self) -> None:
         assert issue_relevance_scorer("ALPHA Beta", {"alpha", "beta"}) == 1.0

@@ -5,6 +5,7 @@ text, AGENT-OBSERVATION rule), utilization scores the agent's post-drift reactio
 agent action/edit stats match the compute_run_metrics schema, and flip/regression are
 computed vs the frozen baseline.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -28,15 +29,26 @@ def _history_reacted():
     return [
         {"action": "read", "args": {"path": "lib.py"}},
         {"action": "edit", "args": {"path": "lib.py", "str_replace": "..."}},
-        {"observation": "run", "content": _DRIFT},          # agent sees drift
-        {"action": "message", "content": "I should restore the KeyError in get_user"},  # engaged (symbol)
-        {"action": "edit", "args": {"path": "lib.py", "str_replace": "fix"}},  # reacted (edit after)
+        {"observation": "run", "content": _DRIFT},  # agent sees drift
+        {
+            "action": "message",
+            "content": "I should restore the KeyError in get_user",
+        },  # engaged (symbol)
+        {
+            "action": "edit",
+            "args": {"path": "lib.py", "str_replace": "fix"},
+        },  # reacted (edit after)
     ]
 
 
 def test_drift_emitted_and_full_utilization():
-    rec = dm.compute_drift_metrics(_history_reacted(), resolved="RESOLVED", patch="diff --git",
-                                   task="beets-1", baseline_ids={"other-task"})
+    rec = dm.compute_drift_metrics(
+        _history_reacted(),
+        resolved="RESOLVED",
+        patch="diff --git",
+        task="beets-1",
+        baseline_ids={"other-task"},
+    )
     assert rec["drift"]["emitted"] == 1
     assert rec["drift"]["raw_blocks"] and "dropped raise: KeyError" in rec["drift"]["raw_blocks"][0]
     assert "get_user" in rec["drift"]["named_symbols"]
@@ -71,7 +83,8 @@ def test_no_drift_quiet():
 
 def test_regression_flag_vs_baseline():
     hist = [{"action": "edit", "args": {"path": "lib.py"}}]
-    rec = dm.compute_drift_metrics(hist, resolved="NO", patch="", task="was-passing",
-                                   baseline_ids={"was-passing"})
+    rec = dm.compute_drift_metrics(
+        hist, resolved="NO", patch="", task="was-passing", baseline_ids={"was-passing"}
+    )
     assert rec["outcome"]["regression"] is True
     assert rec["outcome"]["flip"] is False

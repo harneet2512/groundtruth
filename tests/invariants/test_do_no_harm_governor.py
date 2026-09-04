@@ -1,8 +1,8 @@
 """Do-no-harm governor tests — correct silence and suppression decisions."""
+
 from __future__ import annotations
 
 from groundtruth.safety.governor import (
-    DeliveryDecision,
     DELIVERED_VISIBLE,
     SUPPRESSED_NO_EDITED_FUNCTION,
     SUPPRESSED_NOISE_RISK,

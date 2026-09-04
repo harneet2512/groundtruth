@@ -103,8 +103,7 @@ def _make_graph_db(path: str, *, with_closure: bool) -> None:
             """
         )
         conn.executemany(
-            "INSERT INTO closure (source_id, target_id, depth, min_confidence) "
-            "VALUES (?,?,?,?)",
+            "INSERT INTO closure (source_id, target_id, depth, min_confidence) VALUES (?,?,?,?)",
             [
                 (2, 1, 1, 1.0),  # b transitively reaches target (1 hop)
                 (3, 2, 1, 1.0),  # a transitively reaches b (1 hop)

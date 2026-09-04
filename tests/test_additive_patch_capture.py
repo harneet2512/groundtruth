@@ -10,6 +10,7 @@ solved it (the superjson-error-stack-serialization ledger). Fixed in 225edaae wi
 This is a staleness guard, not the proof (the proof is the live run). It fails closed if the
 mechanism regresses.
 """
+
 from pathlib import Path
 
 _PIER_CFG = (

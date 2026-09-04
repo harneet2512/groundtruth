@@ -102,9 +102,7 @@ def _make_template(line: str) -> str:
     return t
 
 
-def _read_source_line(
-    full_path: str, line_no: int, extra_lines: int = 0, end_line: int = 0
-) -> str:
+def _read_source_line(full_path: str, line_no: int, extra_lines: int = 0, end_line: int = 0) -> str:
     """Read a source line + optional context lines after it (post_edit logic)."""
     try:
         lines_to_read: list[str] = []
@@ -284,9 +282,7 @@ def caller_code_provider(
     return results
 
 
-def contract_provider(
-    db_path: str, file_path: str, function_name: str
-) -> Contract | None:
+def contract_provider(db_path: str, file_path: str, function_name: str) -> Contract | None:
     """Signature + return type for ``function_name`` (post_edit parity)."""
     if not os.path.exists(db_path):
         return None
@@ -370,9 +366,7 @@ def sibling_twin_provider(
     return results
 
 
-def test_provider(
-    db_path: str, file_path: str, function_name: str
-) -> list[TestAssertion]:
+def test_provider(db_path: str, file_path: str, function_name: str) -> list[TestAssertion]:
     """Test assertions targeting ``function_name`` (requires ``assertions`` table)."""
     if not os.path.exists(db_path):
         return []
@@ -382,9 +376,7 @@ def test_provider(
         conn.row_factory = sqlite3.Row
         tables = {
             r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         if "assertions" not in tables:
             conn.close()

@@ -31,6 +31,7 @@ LEG 1: the trigger is a token-set predicate over trajectory + issue text — no
 task IDs, no gold, no repo shapes.  LEG 2: this re-positions the issue's own
 requirement at the agent's decision point (the un-misdirectable class).
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -87,10 +88,15 @@ _OBL_ASYNC = {
 
 def _write_anchors(tmp_path: Path, obligations: list[dict]) -> str:
     p = tmp_path / "gt_issue_anchors.json"
-    p.write_text(json.dumps({
-        "symbols": ["capture_snapshot"],
-        "obligations": obligations,
-    }), encoding="utf-8")
+    p.write_text(
+        json.dumps(
+            {
+                "symbols": ["capture_snapshot"],
+                "obligations": obligations,
+            }
+        ),
+        encoding="utf-8",
+    )
     return str(p)
 
 
@@ -156,15 +162,14 @@ def test_live_obligation_fires_at_review_transition(patch_mod, tmp_path, monkeyp
         outputs.append(_drive(patch_mod, c))
     joined = "\n".join(outputs)
     assert 'reason="test_evidence_gap"' in joined, (
-        "the live path must fire the obligation nudge at the review "
-        f"transition — got:\n{joined}"
+        f"the live path must fire the obligation nudge at the review transition — got:\n{joined}"
     )
     # the payload quotes the issue requirement VERBATIM and names the symbol.
     assert "capture_snapshot" in joined
     assert "The capture_snapshot method should be async." in joined
     # fired exactly at the transition turn (the 3rd non-edit), not earlier.
-    assert 'test_evidence_gap' not in outputs[0]
-    assert 'test_evidence_gap' not in outputs[1]
+    assert "test_evidence_gap" not in outputs[0]
+    assert "test_evidence_gap" not in outputs[1]
     # latch consumed: the class is spent for this task.
     assert patch_mod._oracle_obligation_fired is True
 
@@ -198,11 +203,13 @@ def test_live_obligation_tested_stays_quiet(patch_mod, tmp_path, monkeypatch):
 
     outputs = [_drive(patch_mod, _EDIT_CMD)]
     # a real test run whose OBSERVED output names the symbol's test: evidence.
-    outputs.append(_drive(
-        patch_mod,
-        "python -m pytest tests/test_snapshots.py -q",
-        "tests/test_snapshots.py::test_capture_snapshot PASSED\n1 passed in 0.2s",
-    ))
+    outputs.append(
+        _drive(
+            patch_mod,
+            "python -m pytest tests/test_snapshots.py -q",
+            "tests/test_snapshots.py::test_capture_snapshot PASSED\n1 passed in 0.2s",
+        )
+    )
     for c in _NONEDIT_CMDS:
         outputs.append(_drive(patch_mod, c))
     joined = "\n".join(outputs)
@@ -273,6 +280,7 @@ def test_anchors_path_resolution(patch_mod, tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 def _boa_trajectory() -> str | None:
     import glob
+
     hits = sorted(glob.glob(str(_CORPUS / _BOA_GLOB)))
     return hits[0] if hits else None
 
@@ -307,7 +315,7 @@ def test_corpus_boa_live_obligation_fire(patch_mod, sense_mod, tmp_path, monkeyp
     hashes: list[str] = []
     for t in turns:
         out_text = _drive(patch_mod, t.command, t.raw_obs)
-        appended = out_text[len(t.raw_obs):] if out_text.startswith(t.raw_obs) else out_text
+        appended = out_text[len(t.raw_obs) :] if out_text.startswith(t.raw_obs) else out_text
         n = appended.count('reason="test_evidence_gap"')
         fires += n
         if n:

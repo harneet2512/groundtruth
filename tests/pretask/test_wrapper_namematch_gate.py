@@ -19,6 +19,7 @@ tests build the real graph.db schema (nodes/edges) in memory and assert that:
 RED-before-GREEN is demonstrated inline by also evaluating the OLD clause/string
 and asserting it WOULD have laundered the phantom.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -59,10 +60,10 @@ from groundtruth.pretask.curation_map import (  # noqa: E402
 
 def _make_db(path: str) -> None:
     """Build the real graph.db edge/node schema with:
-      target node 1 'process' in target.py,
-      caller 2 'driver'  in driver.py  via import   (DETERMINISTIC FACT),
-      caller 3 'phantom' in other.py   via name_match conf 0.9 (PHANTOM:
-        above the OLD 0.5 floor, so only the categorical gate excludes it).
+    target node 1 'process' in target.py,
+    caller 2 'driver'  in driver.py  via import   (DETERMINISTIC FACT),
+    caller 3 'phantom' in other.py   via name_match conf 0.9 (PHANTOM:
+      above the OLD 0.5 floor, so only the categorical gate excludes it).
     """
     conn = sqlite3.connect(path)
     conn.executescript(
@@ -121,8 +122,8 @@ def test_l5_scope_callers_deterministic_gate_excludes_name_match(tmp_path):
         "WHERE nt.file_path LIKE ? ESCAPE '\\' AND nsrc.file_path NOT LIKE ? ESCAPE '\\' "
         "AND {clause} LIMIT 5"
     )
-    new_clause = _edge_filter_for_db(db, alias="e")        # NEW: shared categorical gate
-    old_clause = "COALESCE(e.confidence, 0.5) >= 0.5"      # OLD: laundering floor
+    new_clause = _edge_filter_for_db(db, alias="e")  # NEW: shared categorical gate
+    old_clause = "COALESCE(e.confidence, 0.5) >= 0.5"  # OLD: laundering floor
 
     conn = sqlite3.connect(db)
     like = "%target.py"
@@ -194,6 +195,7 @@ class _StubObs:
 
 class _StubConfig:
     """Minimal stand-in for GTRuntimeConfig: no host db -> container fallback path."""
+
     _host_graph_db = ""
     workspace_root = ""  # empty root -> _path_relative_to_workspace is a no-op
 

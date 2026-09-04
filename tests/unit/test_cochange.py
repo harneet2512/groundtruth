@@ -1,7 +1,7 @@
 """Tests for co-change completeness post-edit."""
+
 import os
 import subprocess
-import tempfile
 
 import pytest
 
@@ -41,7 +41,9 @@ class TestCoChangeReminder:
         repo = tmp_path / "repo"
         repo.mkdir()
         subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"], cwd=repo, capture_output=True
+        )
         subprocess.run(["git", "config", "user.name", "test"], cwd=repo, capture_output=True)
 
         a = repo / "a.py"
@@ -57,7 +59,7 @@ class TestCoChangeReminder:
 
         # Add c.py in only 1 commit (weak co-change)
         c.write_text("def baz(): pass\n")
-        a.write_text(f"# version final\ndef foo(): pass\n")
+        a.write_text("# version final\ndef foo(): pass\n")
         subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
         subprocess.run(["git", "commit", "-m", "add c"], cwd=repo, capture_output=True)
 

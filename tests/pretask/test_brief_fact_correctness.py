@@ -11,6 +11,7 @@ read the wrong column / skipped the symmetric filter:
      names that are not real defs) identically to facts. It must be FACTS-ONLY, matching the
      witness path's resolution_method ∈ DETERMINISTIC gate.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -104,14 +105,14 @@ def test_graph_map_called_by_is_facts_only(tmp_path):
         [
             (1, "Function", "bake", "sh.py", 1365),
             (2, "Function", "resolve_command", "sh.py", 624),  # real deterministic caller
-            (3, "Function", "phantom", "sh.py", 50),           # name_match phantom caller
+            (3, "Function", "phantom", "sh.py", 50),  # name_match phantom caller
         ],
     )
     conn.executemany(
         "INSERT INTO edges (source_id,target_id,type,source_line,resolution_method,confidence) "
         "VALUES (?,?,?,?,?,?)",
         [
-            (2, 1, "CALLS", 630, "import", 1.0),     # resolve_command -> bake (FACT)
+            (2, 1, "CALLS", 630, "import", 1.0),  # resolve_command -> bake (FACT)
             (3, 1, "CALLS", 55, "name_match", 0.9),  # phantom -> bake (name GUESS, above floor)
         ],
     )
@@ -120,7 +121,9 @@ def test_graph_map_called_by_is_facts_only(tmp_path):
 
     out = render_map(build_function_map(db, [("sh.py", "bake")]))
     assert "resolve_command" in out, f"real deterministic caller must show; got:\n{out}"
-    assert "phantom" not in out, f"name_match phantom caller must NOT show (facts-only); got:\n{out}"
+    assert "phantom" not in out, (
+        f"name_match phantom caller must NOT show (facts-only); got:\n{out}"
+    )
 
 
 def test_fmt_edge_marks_non_fact_unverified_and_leaves_fact_bare():
@@ -141,10 +144,10 @@ def test_fmt_edge_marks_non_fact_unverified_and_leaves_fact_bare():
         "a non-fact edge must render (unverified), not indistinguishably from a fact"
     )
     # A 2-hop edge is verified-only (always a fact) -> (2-hop), no (unverified).
-    hop2 = Edge(
-        name="deep", file="x.py", confidence=1.0, resolution_method="type_flow", hops=2
+    hop2 = Edge(name="deep", file="x.py", confidence=1.0, resolution_method="type_flow", hops=2)
+    assert _fmt_edge(hop2) == "deep (x.py) (2-hop)", (
+        "a verified 2-hop fact: (2-hop), no (unverified)"
     )
-    assert _fmt_edge(hop2) == "deep (x.py) (2-hop)", "a verified 2-hop fact: (2-hop), no (unverified)"
 
 
 def test_legacy_db_without_resolution_method_marks_edges_unverified(tmp_path):
@@ -214,7 +217,7 @@ def test_edit_target_guard_binds_to_candidate_file_not_same_named_collision(tmp_
         "INSERT INTO nodes (id,label,name,file_path,start_line,is_test) VALUES (?,?,?,?,?,0)",
         [
             (1, "Function", "connect", "b/db.py", 200),  # same-named def in a DIFFERENT file
-            (2, "Function", "connect", "a/db.py", 10),   # the candidate file's def
+            (2, "Function", "connect", "a/db.py", 10),  # the candidate file's def
         ],
     )
     conn.executemany(
@@ -400,7 +403,7 @@ def test_edge_conf_clause_gates_name_match_when_no_confidence_column(tmp_path):
     conn.executemany(
         "INSERT INTO edges (source_id,target_id,type,resolution_method) VALUES (?,?,?,?)",
         [
-            (1, 2, "CALLS", "import"),      # FACT
+            (1, 2, "CALLS", "import"),  # FACT
             (1, 3, "CALLS", "name_match"),  # name GUESS — must be gated out
         ],
     )

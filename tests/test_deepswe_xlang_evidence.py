@@ -34,6 +34,7 @@ GREEN: the NEW path (graph.db pillars) -> non-empty contract/caller body on the
 
 All deterministic: a graph.db fixture built directly with sqlite3 (no Go toolchain).
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -88,9 +89,16 @@ def _create_graph_db(db_path: Path, nodes: list[dict], edges: list[tuple]) -> No
         conn.execute(
             "INSERT INTO nodes (label, name, file_path, signature, start_line, end_line, "
             "is_test, language) VALUES (?,?,?,?,?,?,?,?)",
-            (n["label"], n["name"], n["file_path"], n.get("signature", ""),
-             n.get("start_line", 1), n.get("end_line", 1), int(n.get("is_test", 0)),
-             n.get("language", "go")),
+            (
+                n["label"],
+                n["name"],
+                n["file_path"],
+                n.get("signature", ""),
+                n.get("start_line", 1),
+                n.get("end_line", 1),
+                int(n.get("is_test", 0)),
+                n.get("language", "go"),
+            ),
         )
         name_to_id[n["name"]] = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for src, tgt, etype, source_line, method, conf in edges:
@@ -121,10 +129,7 @@ def go_repo(tmp_path: Path):
         encoding="utf-8",
     )
     auth.write_text(
-        "package pkg\n\n"
-        "func Verify(token string) error {\n"
-        "    return nil\n"
-        "}\n",
+        "package pkg\n\nfunc Verify(token string) error {\n    return nil\n}\n",
         encoding="utf-8",
     )
     store.write_text(
@@ -136,15 +141,39 @@ def go_repo(tmp_path: Path):
     )
     db = tmp_path / "graph.db"
     nodes = [
-        {"label": "Function", "name": "Handle", "file_path": "pkg/handler.go",
-         "signature": "func Handle(req *Request) error", "start_line": 3, "end_line": 5},
-        {"label": "Function", "name": "Verify", "file_path": "pkg/auth.go",
-         "signature": "func Verify(token string) error", "start_line": 3, "end_line": 5},
-        {"label": "Function", "name": "Save", "file_path": "pkg/store.go",
-         "signature": "func Save(req *Request) error", "start_line": 3, "end_line": 5},
+        {
+            "label": "Function",
+            "name": "Handle",
+            "file_path": "pkg/handler.go",
+            "signature": "func Handle(req *Request) error",
+            "start_line": 3,
+            "end_line": 5,
+        },
+        {
+            "label": "Function",
+            "name": "Verify",
+            "file_path": "pkg/auth.go",
+            "signature": "func Verify(token string) error",
+            "start_line": 3,
+            "end_line": 5,
+        },
+        {
+            "label": "Function",
+            "name": "Save",
+            "file_path": "pkg/store.go",
+            "signature": "func Save(req *Request) error",
+            "start_line": 3,
+            "end_line": 5,
+        },
         # A same-named project function colliding with stdlib-ish guess (name_match).
-        {"label": "Function", "name": "Sibling", "file_path": "pkg/handler.go",
-         "signature": "func Sibling() {}", "start_line": 7, "end_line": 8},
+        {
+            "label": "Function",
+            "name": "Sibling",
+            "file_path": "pkg/handler.go",
+            "signature": "func Sibling() {}",
+            "start_line": 7,
+            "end_line": 8,
+        },
     ]
     edges = [
         # Handle (handler.go) CALLS Verify (auth.go) — DETERMINISTIC (import).
@@ -166,8 +195,7 @@ def py_repo(tmp_path: Path):
     users = root / "app" / "users.py"
     svc = root / "app" / "svc.py"
     users.write_text(
-        "def get_user(uid):\n"
-        "    return load(uid)\n",
+        "def get_user(uid):\n    return load(uid)\n",
         encoding="utf-8",
     )
     svc.write_text(
@@ -178,10 +206,24 @@ def py_repo(tmp_path: Path):
     )
     db = tmp_path / "pygraph.db"
     nodes = [
-        {"label": "Function", "name": "get_user", "file_path": "app/users.py",
-         "signature": "def get_user(uid)", "start_line": 1, "end_line": 2, "language": "python"},
-        {"label": "Function", "name": "handler", "file_path": "app/svc.py",
-         "signature": "def handler(uid)", "start_line": 3, "end_line": 4, "language": "python"},
+        {
+            "label": "Function",
+            "name": "get_user",
+            "file_path": "app/users.py",
+            "signature": "def get_user(uid)",
+            "start_line": 1,
+            "end_line": 2,
+            "language": "python",
+        },
+        {
+            "label": "Function",
+            "name": "handler",
+            "file_path": "app/svc.py",
+            "signature": "def handler(uid)",
+            "start_line": 3,
+            "end_line": 4,
+            "language": "python",
+        },
     ]
     edges = [
         ("handler", "get_user", "CALLS", 4, "import", 1.0),
@@ -192,12 +234,17 @@ def py_repo(tmp_path: Path):
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     env = dict(os.environ)
-    env.update({
-        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
-    })
-    return subprocess.run(["git", *args], cwd=str(root), capture_output=True,
-                          text=True, env=env, timeout=30)
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        }
+    )
+    return subprocess.run(
+        ["git", *args], cwd=str(root), capture_output=True, text=True, env=env, timeout=30
+    )
 
 
 def _run_old_verify(root: Path) -> str:
@@ -205,9 +252,18 @@ def _run_old_verify(root: Path) -> str:
     if not _GT_HOOK.is_file():
         pytest.skip("gt_hook.py not present")
     r = subprocess.run(
-        [sys.executable, "-S", str(_GT_HOOK), "verify", f"--root={root}", "--quiet",
-         "--max-items=3"],
-        capture_output=True, text=True, timeout=60,
+        [
+            sys.executable,
+            "-S",
+            str(_GT_HOOK),
+            "verify",
+            f"--root={root}",
+            "--quiet",
+            "--max-items=3",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     return (r.stdout or "").strip()
 
@@ -224,9 +280,12 @@ def test_old_gt_hook_verify_empty_on_go_diff(go_repo):
         _git(root, "add", "-A")
         _git(root, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
     # Make a real Go edit -> an unstaged .go diff.
-    handler.write_text(handler.read_text(encoding="utf-8").replace(
-        "return Verify(req.Token)", "return Verify(req.Token) // edited"),
-        encoding="utf-8")
+    handler.write_text(
+        handler.read_text(encoding="utf-8").replace(
+            "return Verify(req.Token)", "return Verify(req.Token) // edited"
+        ),
+        encoding="utf-8",
+    )
     diff = _git(root, "diff", "--name-only").stdout
     assert "handler.go" in diff, f"fixture sanity: expected a Go diff, got: {diff!r}"
     out = _run_old_verify(root)
@@ -294,8 +353,9 @@ def test_name_match_not_laundered_as_fact(go_repo, monkeypatch):
     # The verified caller Handle is a fact.
     assert "Handle" in body or "handler.go" in body, f"verified caller missing; got:\n{body}"
     # The name_match caller Sibling must not be laundered into a [WITNESS]/[CALLERS] FACT line.
-    fact_lines = [ln for ln in body.splitlines()
-                  if ln.startswith("[WITNESS]") or ln.startswith("[CALLERS]")]
+    fact_lines = [
+        ln for ln in body.splitlines() if ln.startswith("[WITNESS]") or ln.startswith("[CALLERS]")
+    ]
     assert not any("Sibling" in ln for ln in fact_lines), (
         f"name_match caller 'Sibling' was laundered as a fact:\n{body}"
     )

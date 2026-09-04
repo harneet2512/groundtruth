@@ -13,11 +13,8 @@ Uses a real git repo with real diffs, not mocks.
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
 import subprocess
-import tempfile
 import time
 
 import pytest
@@ -61,9 +58,7 @@ def git_repo(tmp_path):
     )
     (repo / "tests" / "__init__.py").parent.mkdir(exist_ok=True)
     (repo / "tests" / "test_model.py").write_text(
-        "def test_get_user():\n"
-        "    user = get_user(1)\n"
-        "    assert isinstance(user, dict)\n"
+        "def test_get_user():\n    user = get_user(1)\n    assert isinstance(user, dict)\n"
     )
 
     # Init git repo
@@ -71,9 +66,15 @@ def git_repo(tmp_path):
     subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "init"],
-        cwd=str(repo), capture_output=True,
-        env={**os.environ, "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "t@t",
-             "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "t@t"},
+        cwd=str(repo),
+        capture_output=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "test",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "test",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
     )
 
     # Build SymbolStore
@@ -88,10 +89,18 @@ def git_repo(tmp_path):
         ("test_get_user", "tests/test_model.py", 1, 3, "()", None),
     ]:
         r = store.insert_symbol(
-            name=name, kind="function", language="python", file_path=fp,
-            line_number=line, end_line=end, is_exported=True,
-            signature=sig, params=None, return_type=ret,
-            documentation=None, last_indexed_at=now,
+            name=name,
+            kind="function",
+            language="python",
+            file_path=fp,
+            line_number=line,
+            end_line=end,
+            is_exported=True,
+            signature=sig,
+            params=None,
+            return_type=ret,
+            documentation=None,
+            last_indexed_at=now,
         )
         if isinstance(r, Ok):
             ids[name] = r.value
@@ -108,14 +117,22 @@ def git_repo(tmp_path):
 
 def _git_diff(repo: str) -> str:
     r = subprocess.run(
-        ["git", "diff"], cwd=repo, capture_output=True, text=True, timeout=5,
+        ["git", "diff"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     return r.stdout
 
 
 def _git_diff_files(repo: str) -> list[str]:
     r = subprocess.run(
-        ["git", "diff", "--name-only"], cwd=repo, capture_output=True, text=True, timeout=5,
+        ["git", "diff", "--name-only"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     return [l.strip() for l in r.stdout.strip().split("\n") if l.strip()]
 
@@ -406,13 +423,17 @@ class TestReplay5ACK:
         nf.filter([f])
 
         # Agent ACKs and runs git diff again
-        r2 = nf.filter([Finding(
-            kind=FindingKind.GUARD_REMOVED,
-            severity=Severity.WARNING,
-            confidence=0.8,
-            location=Location(file="src/model.py", line=2, symbol="get_user"),
-            message="guard removed",
-        )])
+        r2 = nf.filter(
+            [
+                Finding(
+                    kind=FindingKind.GUARD_REMOVED,
+                    severity=Severity.WARNING,
+                    confidence=0.8,
+                    location=Location(file="src/model.py", line=2, symbol="get_user"),
+                    message="guard removed",
+                )
+            ]
+        )
         pruned = prune_findings(r2)
         assert len(pruned) == 0, "no respam after ACK"
 
@@ -425,6 +446,7 @@ class TestHarnessIntegration:
 
     def test_is_git_review_command(self):
         from benchmarks.swebench.run_mini_gt_hooked import _is_git_review_command
+
         assert _is_git_review_command("git diff")
         assert _is_git_review_command("git diff --stat")
         assert _is_git_review_command("git status")
@@ -435,6 +457,7 @@ class TestHarnessIntegration:
 
     def test_is_submit_command(self):
         from benchmarks.swebench.run_mini_gt_hooked import _is_submit_command
+
         assert _is_submit_command("submit")
         assert _is_submit_command("Submit")
         assert _is_submit_command("exit")
@@ -444,6 +467,7 @@ class TestHarnessIntegration:
 
     def test_novelty_fingerprint(self):
         from benchmarks.swebench.run_mini_gt_hooked import _novelty_fingerprint
+
         f = {"kind": "guard_removed", "location": {"file": "x.py", "line": 2, "symbol": "foo"}}
         fp = _novelty_fingerprint(f)
         assert "guard_removed" in fp
@@ -453,6 +477,7 @@ class TestHarnessIntegration:
 
     def test_filter_novel_findings(self):
         from benchmarks.swebench.run_mini_gt_hooked import _filter_novel_findings, _novelty_seen
+
         cid = "__test_container__"
         _novelty_seen.pop(cid, None)  # clean state
 
@@ -467,8 +492,14 @@ class TestHarnessIntegration:
         assert len(novel2) == 0, "second call: all suppressed"
 
         findings3 = [
-            {"kind": "guard_removed", "location": {"file": "x.py", "line": 2, "symbol": "f"}},  # dup
-            {"kind": "return_shape_changed", "location": {"file": "x.py", "line": 1, "symbol": "f"}},  # new
+            {
+                "kind": "guard_removed",
+                "location": {"file": "x.py", "line": 2, "symbol": "f"},
+            },  # dup
+            {
+                "kind": "return_shape_changed",
+                "location": {"file": "x.py", "line": 1, "symbol": "f"},
+            },  # new
         ]
         novel3 = _filter_novel_findings(cid, findings3)
         assert len(novel3) == 1, "third call: only new finding"

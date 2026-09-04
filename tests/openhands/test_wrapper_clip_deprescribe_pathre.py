@@ -25,9 +25,9 @@ PathRE -- ``_FILE_PATH_RE`` used a greedy ``\\S+`` that swallowed a leading
 All fixes are structural properties of code/repos in general -- no hardcoded
 names, paths, repo IDs, or benchmark shape.
 """
+
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -53,6 +53,7 @@ except Exception:  # retired OH glue may not import; module is skipped regardles
 # --------------------------------------------------------------------------
 # C1 -- SEMANTIC WARNING guard text must be balanced (correct-or-quiet)
 # --------------------------------------------------------------------------
+
 
 def test_c1_guard_text_is_balanced_after_clip():
     """A truncated guard slice (as produced by a byte-budget cut upstream)
@@ -151,6 +152,7 @@ def test_c6a_gate_block_preserved():
 # PathRE -- a path token cannot start with / contain grouping punctuation
 # --------------------------------------------------------------------------
 
+
 def test_pathre_does_not_capture_leading_paren_from_snippet():
     """A caller-code snippet like 'x = (foo/bar.py, baz)' must NOT yield a
     '(foo/bar.py' candidate."""
@@ -174,9 +176,7 @@ def test_pathre_negative_control_normal_path_unchanged():
     assert ohgt._extract_candidate_files("src/_private.py") == ["src/_private.py"]
     assert ohgt._extract_candidate_files("a-b.py") == ["a-b.py"]
     # Mid-sentence path (as it appears in a real brief line).
-    assert ohgt._extract_candidate_files("TARGET src/service.py here") == [
-        "src/service.py"
-    ]
+    assert ohgt._extract_candidate_files("TARGET src/service.py here") == ["src/service.py"]
 
 
 def test_pathre_brief_candidates_never_contain_punct_prefixed_paths():

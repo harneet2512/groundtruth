@@ -8,10 +8,10 @@ OLD real GT run that lacks the new markers.
 
 These tests are deterministic and never call an LLM.
 """
+
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -141,8 +141,9 @@ class TestRealGT:
 # ===========================================================================
 # Synthetic fixture builders
 # ===========================================================================
-def _write_instance(path: Path, history: list[dict], *, git_patch: str = "",
-                    instance_id: str = "synthetic__demo-1") -> str:
+def _write_instance(
+    path: Path, history: list[dict], *, git_patch: str = "", instance_id: str = "synthetic__demo-1"
+) -> str:
     inst = {
         "instance_id": instance_id,
         "instruction": "fix the bug",
@@ -157,17 +158,21 @@ def _write_instance(path: Path, history: list[dict], *, git_patch: str = "",
     return str(path)
 
 
-def _obs(content: str, *, observation: str = "run", source: str = "agent",
-         eid: int = 0) -> dict:
+def _obs(content: str, *, observation: str = "run", source: str = "agent", eid: int = 0) -> dict:
     return {
-        "id": eid, "timestamp": "t", "source": source,
-        "message": "tool result", "observation": observation,
-        "content": content, "extras": {},
+        "id": eid,
+        "timestamp": "t",
+        "source": source,
+        "message": "tool result",
+        "observation": observation,
+        "content": content,
+        "extras": {},
     }
 
 
-def _action(action: str, *, path: str = "", command: str = "", eid: int = 0,
-            new_str: str = "") -> dict:
+def _action(
+    action: str, *, path: str = "", command: str = "", eid: int = 0, new_str: str = ""
+) -> dict:
     args = {}
     if path:
         args["path"] = path
@@ -176,8 +181,12 @@ def _action(action: str, *, path: str = "", command: str = "", eid: int = 0,
     if new_str:
         args["new_str"] = new_str
     return {
-        "id": eid, "timestamp": "t", "source": "agent",
-        "message": "act", "action": action, "args": args,
+        "id": eid,
+        "timestamp": "t",
+        "source": "agent",
+        "message": "act",
+        "action": action,
+        "args": args,
     }
 
 
@@ -191,13 +200,17 @@ class TestSyntheticNewMarkers:
             "  set_fields -> calls set_parse(self, key, string: str)"
             "  [beets/dbcore/db.py:722]\n"
             "[TWIN] set_fields() also defined at importer.py:1071\n"
-            'Calls into: set_parse(self, key, string: str) (beets/dbcore/db.py)\n'
+            "Calls into: set_parse(self, key, string: str) (beets/dbcore/db.py)\n"
             "[GT_VERIFY] Run: pytest test/test_importer.py\n"
         )
         history = [
-            {"id": 1, "source": "user", "action": "message",
-             "message": "<gt-task-brief>\n1. beets/dbcore/db.py (def set_parse)\n"
-                        "EDIT-TARGET CONTRACTS\n  set_fields -> calls set_parse"},
+            {
+                "id": 1,
+                "source": "user",
+                "action": "message",
+                "message": "<gt-task-brief>\n1. beets/dbcore/db.py (def set_parse)\n"
+                "EDIT-TARGET CONTRACTS\n  set_fields -> calls set_parse",
+            },
             _action("read", path="/ws/beets/dbcore/db.py", eid=2),
             _obs(new_marker_blob, observation="read", eid=3),
             _action("run", command="pytest test/test_importer.py", eid=4),
@@ -245,10 +258,7 @@ class TestSyntheticNewMarkers:
         assert g["empty_contract_count"] == 0
 
     def test_curation_leak_detected(self, tmp_path: Path):
-        leak_blob = (
-            "normal output\n"
-            "[GT_CURATION] internal ranking debug that should be on stderr\n"
-        )
+        leak_blob = "normal output\n[GT_CURATION] internal ranking debug that should be on stderr\n"
         history = [_obs(leak_blob, observation="run", eid=1)]
         out = tmp_path / "synthetic_leak.jsonl"
         _write_instance(out, history)
@@ -261,13 +271,13 @@ class TestSyntheticNewMarkers:
         # SAME symbol defined in a DIFFERENT file (zero.py::set_fields) -> a true
         # homonym. The "defined at" prose form must also count.
         history = [
-            _action("run",
-                    command='grep -n "set_fields" /ws/beets/importer.py', eid=1),
+            _action("run", command='grep -n "set_fields" /ws/beets/importer.py', eid=1),
             _obs(
                 "match line in importer.py\n"
                 "[GT] Called by: set_fields defined at beets/zero.py:10\n"
                 "[SIGNATURE] beets/zero.py::set_fields(self, lib)\n",
-                observation="run", eid=2,
+                observation="run",
+                eid=2,
             ),
         ]
         out = tmp_path / "synthetic_grep.jsonl"
@@ -288,14 +298,14 @@ class TestSyntheticNewMarkers:
         # CALLER's name, NOT the grepped symbol -> NOT a homonym. homonym_count
         # must be 0 (correct-or-quiet) while cross_file_ref_count stays > 0.
         history = [
-            _action("run",
-                    command='grep -n "set_fields" /ws/beets/importer.py', eid=1),
+            _action("run", command='grep -n "set_fields" /ws/beets/importer.py', eid=1),
             _obs(
                 "    def set_fields(self, lib):\n"
                 "[GT] Called by: test/test_importer.py (33x), "
                 "beetsplug/convert.py::encode (2x), "
                 "beets/ui/commands.py::func (3x)\n",
-                observation="run", eid=2,
+                observation="run",
+                eid=2,
             ),
         ]
         out = tmp_path / "synthetic_grep_callers.jsonl"
@@ -304,8 +314,8 @@ class TestSyntheticNewMarkers:
         m = compute_run_metrics(str(out), ["beets/importer.py"])
         gi = m["per_layer"]["grep_intercept"]
         assert gi["delivered"] is True
-        assert gi["homonym_count"] == 0          # no true homonym
-        assert gi["cross_file_ref_count"] >= 1   # legitimate cross-file callers
+        assert gi["homonym_count"] == 0  # no true homonym
+        assert gi["cross_file_ref_count"] >= 1  # legitimate cross-file callers
 
 
 # ===========================================================================
@@ -349,8 +359,12 @@ class TestReachGoldMatching:
 class TestTwoSidedView:
     def test_two_sided_keys_and_placement(self, tmp_path: Path):
         history = [
-            {"id": 1, "source": "user", "action": "message",
-             "message": "<gt-task-brief>\n1. beets/importer.py (def set_fields)"},
+            {
+                "id": 1,
+                "source": "user",
+                "action": "message",
+                "message": "<gt-task-brief>\n1. beets/importer.py (def set_fields)",
+            },
             _action("run", command="grep -n set_fields beets/importer.py", eid=2),
             _obs("def set_fields(self, lib):", observation="run", eid=3),
             _action("edit", path="/ws/beets/importer.py", eid=4),
@@ -370,21 +384,24 @@ class TestTwoSidedView:
         assert "action_count" in ts["agent_side"]
 
         # back-compat: all flat keys still present (added view, not restructure).
-        for k in ("localization", "navigation", "outcome", "regression_guards",
-                  "per_layer"):
+        for k in ("localization", "navigation", "outcome", "regression_guards", "per_layer"):
             assert k in m
 
         # two_sided_view is pure over the metrics dict (deterministic).
         again = two_sided_view(m)
         assert again["gt_side"]["hit_at_1"] == ts["gt_side"]["hit_at_1"]
-        assert again["agent_side"]["reach_to_gold_action"] == \
-            ts["agent_side"]["reach_to_gold_action"]
+        assert (
+            again["agent_side"]["reach_to_gold_action"] == ts["agent_side"]["reach_to_gold_action"]
+        )
 
     def test_two_sided_per_layer_split(self, tmp_path: Path):
         history = [
             _action("run", command="grep -n set_fields beets/importer.py", eid=1),
-            _obs("[GT] Called by: test/test_importer.py (3x)\n"
-                 "    def set_fields(self, lib):", observation="run", eid=2),
+            _obs(
+                "[GT] Called by: test/test_importer.py (3x)\n    def set_fields(self, lib):",
+                observation="run",
+                eid=2,
+            ),
         ]
         out = _write_instance(tmp_path / "ts2.jsonl", history)
         m = compute_run_metrics(out, ["beets/importer.py"])
@@ -404,8 +421,12 @@ class TestTwoSidedView:
 class TestPairedDeltas:
     def test_numeric_deltas(self, tmp_path: Path):
         gt_hist = [
-            {"id": 1, "source": "user", "action": "message",
-             "message": "<gt-task-brief>\n1. a.py (def f)"},
+            {
+                "id": 1,
+                "source": "user",
+                "action": "message",
+                "message": "<gt-task-brief>\n1. a.py (def f)",
+            },
             _action("edit", path="/ws/a.py", eid=2),
             _obs("ok", observation="edit", eid=3),
         ]
@@ -444,8 +465,7 @@ class TestPairedDeltas:
 # ===========================================================================
 class TestEmit:
     def test_emit_writes_json(self, tmp_path: Path):
-        history = [_action("read", path="/ws/a.py", eid=1),
-                   _obs("ok", observation="read", eid=2)]
+        history = [_action("read", path="/ws/a.py", eid=1), _obs("ok", observation="read", eid=2)]
         out = _write_instance(tmp_path / "in.jsonl", history)
         dest = tmp_path / "run_metrics.json"
         result = emit_run_metrics(out, ["a.py"], str(dest))

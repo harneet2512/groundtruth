@@ -11,6 +11,7 @@ THE INVARIANT: compute_anchor_proximity returns BYTE-IDENTICAL scores with vs wi
 promoted READS/WRITES/RAISES/CO_SERIALIZES/DATA_FLOW edges layered on. Promoted depth is
 proximity-invisible (hence rank-invisible). Deterministic unit test — no agent/task run.
 """
+
 from __future__ import annotations
 
 import sqlite3

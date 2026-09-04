@@ -1,4 +1,5 @@
 """Workspace metadata readiness belongs to the substrate runtime, not workflow heuristics."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -35,7 +36,9 @@ def test_go_workspace_metadata_probe_success(monkeypatch, tmp_path):
 
 def test_go_workspace_metadata_probe_failure(monkeypatch, tmp_path):
     def _run(cmd, cwd=None, env=None, capture_output=None, text=None, timeout=None):
-        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no required module provides package")
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="no required module provides package"
+        )
 
     monkeypatch.setattr(_MOD.subprocess, "run", _run)
     result = _MOD.probe_workspace_metadata("go", str(tmp_path), os.environ.copy())

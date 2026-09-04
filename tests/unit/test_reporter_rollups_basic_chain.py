@@ -15,6 +15,7 @@ pre-synthesized rows would still pass — the real bug lives in the
 events → row → summary pipeline. So this test starts from raw telemetry
 events and walks the whole reporter.
 """
+
 from __future__ import annotations
 
 import json
@@ -22,40 +23,62 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORTER = REPO_ROOT / "benchmarks" / "swebench" / "vm_bundle" / "gt_canary_report.py"
 FINALIZATION = REPO_ROOT / "scripts" / "swebench" / "gt_finalization.py"
 
 
-def _make_task(outdir: Path, instance_id: str, events: list[dict], arm: str, identity_ok: bool = True) -> Path:
+def _make_task(
+    outdir: Path, instance_id: str, events: list[dict], arm: str, identity_ok: bool = True
+) -> Path:
     task = outdir / instance_id
     task.mkdir(parents=True, exist_ok=True)
     with (task / "gt_hook_telemetry.jsonl").open("w", encoding="utf-8") as f:
         for ev in events:
             f.write(json.dumps(ev) + "\n")
-    (task / "gt_per_task_summary.json").write_text(json.dumps({
-        "run_id": "r", "arm": arm, "instance_id": instance_id,
-        "identity_ok": identity_ok, "cycle": 10, "within_call_budget": True,
-    }))
+    (task / "gt_per_task_summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "r",
+                "arm": arm,
+                "instance_id": instance_id,
+                "identity_ok": identity_ok,
+                "cycle": 10,
+                "within_call_budget": True,
+            }
+        )
+    )
     # gt_budget.state.json is a MUST-gate requirement — reporter marks
     # budget_state_missing otherwise. Minimal stub satisfies the gate.
-    (task / "gt_budget.state.json").write_text(json.dumps({
-        "scope": f"r__{instance_id}__{arm}",
-        "orient": {"count": 1, "limit": 1, "exhausted": False},
-        "lookup": {"count": 0, "limit": 2, "exhausted": False},
-        "impact": {"count": 0, "limit": 2, "exhausted": False},
-        "check": {"count": 0, "limit": 3, "exhausted": False},
-        "initialized": True,
-    }))
+    (task / "gt_budget.state.json").write_text(
+        json.dumps(
+            {
+                "scope": f"r__{instance_id}__{arm}",
+                "orient": {"count": 1, "limit": 1, "exhausted": False},
+                "lookup": {"count": 0, "limit": 2, "exhausted": False},
+                "impact": {"count": 0, "limit": 2, "exhausted": False},
+                "check": {"count": 0, "limit": 3, "exhausted": False},
+                "initialized": True,
+            }
+        )
+    )
     return task
 
 
 def _run_reporter(outdir: Path, arm: str) -> dict:
-    cmd = [sys.executable, str(REPORTER),
-           "--outdir", str(outdir), "--arm", arm, "--run-id", "r",
-           "--max-steps", "150"]
+    cmd = [
+        sys.executable,
+        str(REPORTER),
+        "--outdir",
+        str(outdir),
+        "--arm",
+        arm,
+        "--run-id",
+        "r",
+        "--max-steps",
+        "150",
+    ]
     if arm == "gt-lsp-hybrid":
         cmd.append("--hybrid")
     subprocess.run(cmd, check=False, capture_output=True)
@@ -115,6 +138,7 @@ class TestReporterToFinalizationGate:
     def _run_gate(self, outdir: Path) -> dict:
         """Load gt_finalization at runtime and compute readiness."""
         import importlib.util
+
         spec = importlib.util.spec_from_file_location("gt_finalization", FINALIZATION)
         mod = importlib.util.module_from_spec(spec)
         # Register in sys.modules so @dataclass resolves cls.__module__

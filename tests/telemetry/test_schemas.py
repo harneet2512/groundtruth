@@ -1,10 +1,15 @@
 """Tests for telemetry schema validation."""
+
 from __future__ import annotations
 
 import pytest
 from groundtruth.telemetry.schemas import (
-    GTLayerEvent, GTAgentReactionEvent, GTBeliefEvent,
-    EvidenceItem, EvidenceKind, get_iteration_band,
+    GTLayerEvent,
+    GTAgentReactionEvent,
+    GTBeliefEvent,
+    EvidenceItem,
+    EvidenceKind,
+    get_iteration_band,
 )
 
 
@@ -61,26 +66,47 @@ class TestEvidenceKind:
 
 class TestGTLayerEvent:
     def test_required_fields(self):
-        event = GTLayerEvent(layer="L3", event_type="evidence", eligible=True, emitted=True, suppressed=False)
+        event = GTLayerEvent(
+            layer="L3", event_type="evidence", eligible=True, emitted=True, suppressed=False
+        )
         assert event.schema_version == "1.0.0"
         assert len(event.event_id) == 16
         assert event.timestamp_ms > 0
 
     def test_invalid_layer_raises(self):
         with pytest.raises(ValueError, match="Invalid layer"):
-            GTLayerEvent(layer="INVALID", event_type="x", eligible=True, emitted=True, suppressed=False)
+            GTLayerEvent(
+                layer="INVALID", event_type="x", eligible=True, emitted=True, suppressed=False
+            )
 
     def test_auto_iteration_band(self):
-        event = GTLayerEvent(layer="L3", event_type="x", eligible=True, emitted=True, suppressed=False, iter=70, max_iter=100)
+        event = GTLayerEvent(
+            layer="L3",
+            event_type="x",
+            eligible=True,
+            emitted=True,
+            suppressed=False,
+            iter=70,
+            max_iter=100,
+        )
         assert event.iteration_band == "late_60_85"
 
     def test_auto_rendered_chars(self):
-        event = GTLayerEvent(layer="L1", event_type="x", eligible=True, emitted=True, suppressed=False, rendered_text="hello world")
+        event = GTLayerEvent(
+            layer="L1",
+            event_type="x",
+            eligible=True,
+            emitted=True,
+            suppressed=False,
+            rendered_text="hello world",
+        )
         assert event.rendered_chars == 11
         assert event.rendered_tokens_estimate == 2
 
     def test_to_dict_includes_required(self):
-        event = GTLayerEvent(layer="L5", event_type="detection", eligible=True, emitted=True, suppressed=False)
+        event = GTLayerEvent(
+            layer="L5", event_type="detection", eligible=True, emitted=True, suppressed=False
+        )
         d = event.to_dict()
         assert "schema_version" in d
         assert "event_id" in d
@@ -89,7 +115,9 @@ class TestGTLayerEvent:
 
 class TestGTAgentReactionEvent:
     def test_valid_follow_type(self):
-        event = GTAgentReactionEvent(gt_event_id="abc", gt_layer="L3", gt_iter=5, follow_type="FOLLOWED_EXACT")
+        event = GTAgentReactionEvent(
+            gt_event_id="abc", gt_layer="L3", gt_iter=5, follow_type="FOLLOWED_EXACT"
+        )
         assert event.schema_version == "1.0.0"
 
     def test_invalid_follow_type_raises(self):
@@ -99,7 +127,9 @@ class TestGTAgentReactionEvent:
 
 class TestGTBeliefEvent:
     def test_valid_status(self):
-        event = GTBeliefEvent(file_path="src/foo.py", new_status="candidate", reason="L1 hit", source_event_id="abc")
+        event = GTBeliefEvent(
+            file_path="src/foo.py", new_status="candidate", reason="L1 hit", source_event_id="abc"
+        )
         assert event.schema_version == "1.0.0"
 
     def test_invalid_status_raises(self):

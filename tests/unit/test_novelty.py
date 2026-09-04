@@ -11,7 +11,9 @@ from groundtruth.schema.finding import (
 from groundtruth.schema.novelty import NoveltyFilter
 
 
-def _make(kind: FindingKind = FindingKind.GUARD_REMOVED, file: str = "x.py", line: int = 1) -> Finding:
+def _make(
+    kind: FindingKind = FindingKind.GUARD_REMOVED, file: str = "x.py", line: int = 1
+) -> Finding:
     return Finding(
         kind=kind,
         severity=Severity.WARNING,
@@ -59,7 +61,7 @@ class TestNoveltyFilter:
         second = [_make(line=1), _make(line=3)]
         results = nf.filter(second)
         assert results[0].novelty is False  # line=1 already shown
-        assert results[1].novelty is True   # line=3 is new
+        assert results[1].novelty is True  # line=3 is new
 
     def test_reset_clears_history(self) -> None:
         nf = NoveltyFilter()

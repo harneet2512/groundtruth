@@ -15,6 +15,7 @@ no gold, no per-repo logic):
       silent e5 substitution. With the flag OFF, the e5 fallback is preserved (graceful).
       gt_run_proof._baked_embedder_problems must require the CONFIGURED model baked (no "OR e5").
 """
+
 import importlib.util
 import os
 import sqlite3
@@ -44,8 +45,10 @@ _grp_spec.loader.exec_module(grp)
 # DEFECT #1 — LSP: known-language-missing-server vs genuinely-unknown language
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_known_lsp_languages_are_recognized():
     from groundtruth import resolve
+
     # Every language config.LSP_SERVERS can serve is KNOWN (name, short ext, dotted ext).
     for lang in ("python", "go", "rust", "typescript", "javascript", "java"):
         assert resolve._is_known_lsp_language(lang), lang
@@ -57,6 +60,7 @@ def test_known_lsp_languages_are_recognized():
 
 def test_unknown_languages_are_not_known():
     from groundtruth import resolve
+
     # No LSP_SERVERS entry exists for these -> genuinely unsupported (legitimate no-op).
     for lang in ("ruby", "c", "cpp", "php", "haskell", "cobol", ""):
         assert not resolve._is_known_lsp_language(lang), lang
@@ -65,13 +69,19 @@ def test_unknown_languages_are_not_known():
 def test_classify_lsp_install_missing_fails_closed():
     """(b) KNOWN language, binary missing -> verdict_hint=LSP_INSTALL_MISSING must FAIL."""
     cert = {
-        "schema": "gt.lsp_certificate.v1", "language": "go",
-        "server_command": "gopls", "server_launched": False, "warm_probe_ok": False,
-        "lsp_warm": False, "probe_latency_ms": 0.0,
+        "schema": "gt.lsp_certificate.v1",
+        "language": "go",
+        "server_command": "gopls",
+        "server_launched": False,
+        "warm_probe_ok": False,
+        "lsp_warm": False,
+        "probe_latency_ms": 0.0,
         "unsupported_reason": "",  # NOT a genuine no-server case
         "install_missing_reason": "LSP server for known language 'go' (command 'gopls') is not on PATH",
         "verdict_hint": "LSP_INSTALL_MISSING",
-        "residual": 0, "demand_edges": 0, "attempted_edges": 0,
+        "residual": 0,
+        "demand_edges": 0,
+        "attempted_edges": 0,
     }
     v, ok = fg._classify_lsp(cert)
     assert v == "LSP_INSTALL_MISSING" and not ok
@@ -80,10 +90,17 @@ def test_classify_lsp_install_missing_fails_closed():
 def test_classify_lsp_install_missing_not_masked_by_empty_unsupported():
     """Even if only verdict_hint is set (install_missing_reason blank), it must still FAIL."""
     cert = {
-        "language": "rust", "server_launched": False, "lsp_warm": False,
-        "warm_probe_ok": False, "probe_latency_ms": 0.0, "unsupported_reason": "",
-        "install_missing_reason": "", "verdict_hint": "LSP_INSTALL_MISSING",
-        "residual": 0, "demand_edges": 0, "attempted_edges": 0,
+        "language": "rust",
+        "server_launched": False,
+        "lsp_warm": False,
+        "warm_probe_ok": False,
+        "probe_latency_ms": 0.0,
+        "unsupported_reason": "",
+        "install_missing_reason": "",
+        "verdict_hint": "LSP_INSTALL_MISSING",
+        "residual": 0,
+        "demand_edges": 0,
+        "attempted_edges": 0,
     }
     v, ok = fg._classify_lsp(cert)
     assert v == "LSP_INSTALL_MISSING" and not ok
@@ -92,11 +109,17 @@ def test_classify_lsp_install_missing_not_masked_by_empty_unsupported():
 def test_classify_lsp_genuinely_unsupported_still_passes():
     """(a) genuinely-unknown language (unsupported_reason set, no install_missing) -> PASS no-op."""
     cert = {
-        "language": "ruby", "server_launched": False, "lsp_warm": False,
-        "warm_probe_ok": False, "probe_latency_ms": 0.0,
+        "language": "ruby",
+        "server_launched": False,
+        "lsp_warm": False,
+        "warm_probe_ok": False,
+        "probe_latency_ms": 0.0,
         "unsupported_reason": "no LSP server configured for language 'ruby'",
-        "install_missing_reason": "", "verdict_hint": "LSP_UNSUPPORTED_EXPLICIT",
-        "residual": 0, "demand_edges": 0, "attempted_edges": 0,
+        "install_missing_reason": "",
+        "verdict_hint": "LSP_UNSUPPORTED_EXPLICIT",
+        "residual": 0,
+        "demand_edges": 0,
+        "attempted_edges": 0,
     }
     v, ok = fg._classify_lsp(cert)
     assert v == "LSP_UNSUPPORTED_EXPLICIT" and ok
@@ -105,12 +128,16 @@ def test_classify_lsp_genuinely_unsupported_still_passes():
 def _tiny_graph_db(path: str) -> None:
     """Minimal graph.db with the columns resolve_main reads (edges + nodes + confidence)."""
     conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT, "
-                 "file_path TEXT, start_line INTEGER, end_line INTEGER, signature TEXT, "
-                 "return_type TEXT, language TEXT)")
-    conn.execute("CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, "
-                 "type TEXT, source_line INTEGER, source_file TEXT, resolution_method TEXT, "
-                 "confidence REAL)")
+    conn.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT, "
+        "file_path TEXT, start_line INTEGER, end_line INTEGER, signature TEXT, "
+        "return_type TEXT, language TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, "
+        "type TEXT, source_line INTEGER, source_file TEXT, resolution_method TEXT, "
+        "confidence REAL)"
+    )
     conn.commit()
     conn.close()
 
@@ -126,13 +153,25 @@ def _run_resolve(tmp_path, lang, env_extra):
     env["GT_LSP_CERT"] = str(tmp_path / "lsp_certificate.json")
     env.pop("GT_PROOF_MODE", None)  # stamp_meta must not hard-fail in proof mode here
     env.update(env_extra)
-    cmd = [sys.executable, "-m", "groundtruth.resolve", "--db", db, "--root", str(tmp_path),
-           "--resolve", "--lang", lang]
+    cmd = [
+        sys.executable,
+        "-m",
+        "groundtruth.resolve",
+        "--db",
+        db,
+        "--root",
+        str(tmp_path),
+        "--resolve",
+        "--lang",
+        lang,
+    ]
     return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120)
 
 
-@pytest.mark.skipif(__import__("shutil").which("gopls") is not None,
-                    reason="gopls IS installed; the install-missing path cannot be exercised here")
+@pytest.mark.skipif(
+    __import__("shutil").which("gopls") is not None,
+    reason="gopls IS installed; the install-missing path cannot be exercised here",
+)
 def test_known_language_missing_server_fails_closed_under_require_lsp(tmp_path):
     """(a) KNOWN language (go) with gopls absent + GT_REQUIRE_LSP=1 -> NONZERO exit (fail-closed)."""
     r = _run_resolve(tmp_path, "go", {"GT_REQUIRE_LSP": "1"})
@@ -141,8 +180,10 @@ def test_known_language_missing_server_fails_closed_under_require_lsp(tmp_path):
     assert "verdict=LSP_INSTALL_MISSING" in r.stdout
 
 
-@pytest.mark.skipif(__import__("shutil").which("gopls") is not None,
-                    reason="gopls IS installed; the install-missing path cannot be exercised here")
+@pytest.mark.skipif(
+    __import__("shutil").which("gopls") is not None,
+    reason="gopls IS installed; the install-missing path cannot be exercised here",
+)
 def test_known_language_missing_server_no_require_lsp_does_not_hard_fail(tmp_path):
     """(d) Same known-language-missing-server but WITHOUT GT_REQUIRE_LSP -> exit 0 (graceful),
     still surfaces the LSP_INSTALL_MISSING verdict (never silently green as 'unsupported')."""
@@ -170,20 +211,37 @@ def test_genuinely_unknown_language_no_ops_exit_0(tmp_path):
 # still ships the tree-sitter graph + contract/sibling/cochange (items 1/2/4).
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 async def _fake_resolve_edges_never_launched(db_path, root, edges, language):
     """A server that NEVER LAUNCHED (binary un-spawnable) — the hard FAIL_NO_WARM shape."""
-    return {"verified": 0, "corrected": 0, "deleted": 0, "failed": len(edges), "skipped": 0,
-            "server_launched": False, "warm_probe_ok": False,
-            "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
-            "failure_detail": "launch: server binary did not start"}
+    return {
+        "verified": 0,
+        "corrected": 0,
+        "deleted": 0,
+        "failed": len(edges),
+        "skipped": 0,
+        "server_launched": False,
+        "warm_probe_ok": False,
+        "probe_method": "workspace/symbol",
+        "probe_latency_ms": 0.0,
+        "failure_detail": "launch: server binary did not start",
+    }
 
 
 async def _fake_resolve_edges_no_warm(db_path, root, edges, language):
     """A server that LAUNCHED but never answered the warm probe (FIX-A: the WARN shape)."""
-    return {"verified": 0, "corrected": 0, "deleted": 0, "failed": len(edges), "skipped": 0,
-            "server_launched": True, "warm_probe_ok": False,
-            "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
-            "failure_detail": "warm_probe: server initialized but never answered workspace/symbol"}
+    return {
+        "verified": 0,
+        "corrected": 0,
+        "deleted": 0,
+        "failed": len(edges),
+        "skipped": 0,
+        "server_launched": True,
+        "warm_probe_ok": False,
+        "probe_method": "workspace/symbol",
+        "probe_latency_ms": 0.0,
+        "failure_detail": "warm_probe: server initialized but never answered workspace/symbol",
+    }
 
 
 def _run_resolve_main_inprocess(tmp_path, monkeypatch, *, require_lsp: bool, resolver=None):
@@ -205,9 +263,11 @@ def _run_resolve_main_inprocess(tmp_path, monkeypatch, *, require_lsp: bool, res
         monkeypatch.delenv("GT_REQUIRE_LSP", raising=False)
     monkeypatch.setattr(resolve, "_detect_servers", lambda: {"python": True})
     monkeypatch.setattr(resolve, "_resolve_edges", resolver or _fake_resolve_edges_never_launched)
-    monkeypatch.setattr(sys, "argv",
-                        ["resolve", "--db", db, "--root", str(tmp_path),
-                         "--resolve", "--lang", "python"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["resolve", "--db", db, "--root", str(tmp_path), "--resolve", "--lang", "python"],
+    )
     rc = None
     try:
         resolve.resolve_main()
@@ -224,10 +284,10 @@ def test_fail_no_warm_exits_nonzero_under_require_lsp(tmp_path, monkeypatch, cap
     rc, cert = _run_resolve_main_inprocess(tmp_path, monkeypatch, require_lsp=True)
     out = capsys.readouterr()
     assert rc == 2, f"expected exit 2; got {rc!r}; out={out.out!r} err={out.err!r}"
-    assert "verdict=LSP_FAIL_NO_WARM" in out.out          # the contract line is still emitted
-    assert "LSP_LIVENESS_FAIL" in out.err                  # the fail-closed reason is named
+    assert "verdict=LSP_FAIL_NO_WARM" in out.out  # the contract line is still emitted
+    assert "LSP_LIVENESS_FAIL" in out.err  # the fail-closed reason is named
     assert cert is not None and cert["verdict_hint"] == "LSP_FAIL_NO_WARM"
-    assert cert["schema"] == "gt.lsp_certificate.v2"       # P1-g schema bump
+    assert cert["schema"] == "gt.lsp_certificate.v2"  # P1-g schema bump
     assert "install_missing_reason" in cert and "verdict_hint" in cert  # v2 fields present
 
 
@@ -246,20 +306,22 @@ def test_launched_not_warm_warns_under_require_lsp(tmp_path, monkeypatch, capsys
     exit nonzero. It is a WARN (live transport, dep-env/timing limit) — the run proceeds and
     deliver-always ships the tree-sitter graph. This is the path that lets Go/Rust (cold
     rust-analyzer / gopls indexing) reach the agent instead of dying at the LSP gate."""
-    rc, cert = _run_resolve_main_inprocess(tmp_path, monkeypatch, require_lsp=True,
-                                           resolver=_fake_resolve_edges_no_warm)
+    rc, cert = _run_resolve_main_inprocess(
+        tmp_path, monkeypatch, require_lsp=True, resolver=_fake_resolve_edges_no_warm
+    )
     out = capsys.readouterr()
     assert rc is None, f"expected no SystemExit (WARN, not fail); got {rc!r} err={out.err!r}"
     assert "verdict=LSP_WARN_NOT_READY" in out.out
-    assert "LSP_LIVENESS_FAIL" not in out.err           # WARN is not a fail-closed trip
+    assert "LSP_LIVENESS_FAIL" not in out.err  # WARN is not a fail-closed trip
     assert cert is not None and cert["verdict_hint"] == "LSP_WARN_NOT_READY"
 
 
 def test_launched_not_warm_warns_without_require_lsp(tmp_path, monkeypatch, capsys):
     """FIX-A: off the flag, a launched-but-not-warm server also completes (exit 0) with the
     WARN verdict surfaced (never silently green, never a hard fail)."""
-    rc, cert = _run_resolve_main_inprocess(tmp_path, monkeypatch, require_lsp=False,
-                                           resolver=_fake_resolve_edges_no_warm)
+    rc, cert = _run_resolve_main_inprocess(
+        tmp_path, monkeypatch, require_lsp=False, resolver=_fake_resolve_edges_no_warm
+    )
     out = capsys.readouterr()
     assert rc is None, f"expected no SystemExit; got {rc!r} err={out.err!r}"
     assert "verdict=LSP_WARN_NOT_READY" in out.out
@@ -270,8 +332,10 @@ def test_launched_not_warm_warns_without_require_lsp(tmp_path, monkeypatch, caps
 # DEFECT #2 — embedder: no silent e5 substitution under GT_REQUIRE_EMBEDDER
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class _FakeLoadable:
     """A minimal embed.EmbeddingModel stand-in whose _ensure_loaded() succeeds."""
+
     def __init__(self, dim=384):
         self.dim = dim
 
@@ -302,6 +366,7 @@ def _patch_gte_fails_e5_loads(monkeypatch, embed_mod):
 
 def _reset_v74_cache():
     from groundtruth.pretask import v7_4_brief as v74
+
     v74._CACHED_MODEL = None
     v74._SEMANTIC_AVAILABLE = None
     return v74
@@ -309,6 +374,7 @@ def _reset_v74_cache():
 
 def _reset_localizer_cache():
     from groundtruth.pretask import graph_localizer as gl
+
     gl._EMBEDDER = None
     gl._EMBEDDER_TRIED = False
     return gl
@@ -317,6 +383,7 @@ def _reset_localizer_cache():
 def test_v74_get_model_raises_under_require_no_e5_substitution(monkeypatch):
     """(c) gte-absent + GT_REQUIRE_EMBEDDER=1 -> _get_model RAISES (no silent e5)."""
     from groundtruth.memory.enrich import embed as real_embed
+
     v74 = _reset_v74_cache()
     _patch_gte_fails_e5_loads(monkeypatch, real_embed)
     monkeypatch.setenv("GT_REQUIRE_EMBEDDER", "1")
@@ -331,6 +398,7 @@ def test_v74_get_model_raises_under_require_no_e5_substitution(monkeypatch):
 def test_localizer_get_embedder_raises_under_require_no_e5_substitution(monkeypatch):
     """(c) gte-absent + GT_REQUIRE_EMBEDDER=1 -> _get_embedder RAISES (no silent e5)."""
     from groundtruth.memory.enrich import embed as real_embed
+
     gl = _reset_localizer_cache()
     _patch_gte_fails_e5_loads(monkeypatch, real_embed)
     monkeypatch.setenv("GT_REQUIRE_EMBEDDER", "1")
@@ -344,6 +412,7 @@ def test_localizer_get_embedder_raises_under_require_no_e5_substitution(monkeypa
 def test_v74_get_model_uses_e5_fallback_when_flag_off(monkeypatch):
     """(d) gte-absent + GT_REQUIRE_EMBEDDER UNSET -> graceful e5 fallback (NOT raised)."""
     from groundtruth.memory.enrich import embed as real_embed
+
     v74 = _reset_v74_cache()
     _patch_gte_fails_e5_loads(monkeypatch, real_embed)
     monkeypatch.delenv("GT_REQUIRE_EMBEDDER", raising=False)
@@ -358,6 +427,7 @@ def test_v74_get_model_uses_e5_fallback_when_flag_off(monkeypatch):
 def test_localizer_get_embedder_uses_e5_fallback_when_flag_off(monkeypatch):
     """(d) gte-absent + GT_REQUIRE_EMBEDDER UNSET -> graceful e5 fallback (NOT None, NOT raised)."""
     from groundtruth.memory.enrich import embed as real_embed
+
     gl = _reset_localizer_cache()
     _patch_gte_fails_e5_loads(monkeypatch, real_embed)
     monkeypatch.delenv("GT_REQUIRE_EMBEDDER", raising=False)
@@ -368,6 +438,7 @@ def test_localizer_get_embedder_uses_e5_fallback_when_flag_off(monkeypatch):
 
 
 # ── gt_run_proof._baked_embedder_problems: configured-only (no "OR e5") ───────
+
 
 def test_baked_embedder_requires_configured_model_not_e5(monkeypatch, tmp_path):
     """Only e5 baked (configured gte ABSENT) -> validate must report 'not baked' (no e5 escape)."""
@@ -387,6 +458,7 @@ def test_baked_embedder_accepts_configured_model(monkeypatch, tmp_path):
     # Derive the configured dirname the same way the function does.
     sys.path.insert(0, SRC)
     from groundtruth.memory.enrich.embed import _default_embed_model
+
     configured = _default_embed_model().split("/")[-1]
     (root / configured).mkdir(parents=True)
     (root / configured / "model.onnx").write_bytes(b"\x00")
@@ -399,6 +471,7 @@ def test_baked_embedder_accepts_int8_variant(monkeypatch, tmp_path):
     root = tmp_path / "models"
     sys.path.insert(0, SRC)
     from groundtruth.memory.enrich.embed import _default_embed_model
+
     configured = _default_embed_model().split("/")[-1]
     (root / configured).mkdir(parents=True)
     (root / configured / "model_int8.onnx").write_bytes(b"\x00")  # no model.onnx, only int8

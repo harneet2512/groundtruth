@@ -1,4 +1,4 @@
-﻿"""Unit tests for the v1.0.5 apparatus modules.
+"""Unit tests for the v1.0.5 apparatus modules.
 
 Covers:
   - groundtruth.mcp.composite              â€” budget counter + format helpers
@@ -8,11 +8,10 @@ Covers:
 
 Tests do NOT depend on a real graph.db, OH SDK, or VM. They're hermetic.
 """
+
 from __future__ import annotations
 
 import json
-import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -85,14 +84,17 @@ def test_composite_unknown_endpoint_passes_through(isolated_counter):
     assert allowed is True
     assert msg == ""
 
+
 # ---------------------------------------------------------------------------
 # retired v22_brief.py
 # ---------------------------------------------------------------------------
+
 
 def test_v22_old_import_name_is_removed():
     import importlib.util
 
     assert importlib.util.find_spec("groundtruth.pretask.v22_brief") is None
+
 
 # ---------------------------------------------------------------------------
 # v105_telemetry.py

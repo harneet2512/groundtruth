@@ -1,4 +1,5 @@
 """Application state store with simple put/get."""
+
 from __future__ import annotations
 
 

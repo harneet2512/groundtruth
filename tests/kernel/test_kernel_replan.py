@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from groundtruth.control import kernel
 from groundtruth.control.types import (
@@ -46,7 +45,9 @@ def _rs(focus: list[str], cluster: list[str]) -> RunState:
             plan_path=None,
         ),
         edit_history=[],
-        capabilities=Capabilities(block=True, visible=True, audit=True, mid_task_pull=True, replan_inject=True),
+        capabilities=Capabilities(
+            block=True, visible=True, audit=True, mid_task_pull=True, replan_inject=True
+        ),
     )
 
 
@@ -75,7 +76,9 @@ def test_no_triggers_stays_course():
 def test_no_focus_after_three_recomputes():
     rs = _rs(["src/a.py"], ["src/a.py"])
     triggers = ReplanTriggers(
-        drift=DriftSignals(edits_outside_cluster_count=3, repeated_warnings=["no_focus_file_after_three_edits"]),
+        drift=DriftSignals(
+            edits_outside_cluster_count=3, repeated_warnings=["no_focus_file_after_three_edits"]
+        ),
     )
     plan = kernel.replan(triggers, rs)
     assert plan.stage == ReplanStage.RECOMPUTE
@@ -107,7 +110,9 @@ def test_triggers_with_no_candidates_does_not_crash():
         plan={"agent_focus_files": [], "cluster_files": []},
         brief_result=None,
         edit_history=[],
-        capabilities=Capabilities(block=True, visible=True, audit=True, mid_task_pull=True, replan_inject=True),
+        capabilities=Capabilities(
+            block=True, visible=True, audit=True, mid_task_pull=True, replan_inject=True
+        ),
     )
     triggers = ReplanTriggers(drift=DriftSignals(first_edit_misses_focus=True))
     plan = kernel.replan(triggers, rs)

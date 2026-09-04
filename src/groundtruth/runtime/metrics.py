@@ -3,6 +3,7 @@
 Collects per-layer and aggregate metrics during a task run.
 Used by both OH adapter and MCP product face.
 """
+
 from __future__ import annotations
 
 import json
@@ -14,6 +15,7 @@ from typing import Any
 @dataclass
 class RuntimeMetrics:
     """Accumulates metrics during a single task run."""
+
     task_id: str = ""
     start_ms: int = field(default_factory=lambda: int(time.time() * 1000))
 

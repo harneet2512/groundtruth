@@ -5,17 +5,18 @@ UNLESS explicitly suppressed with reason.
 
 Violation = G1 in failure taxonomy.
 """
+
 from __future__ import annotations
 
 import json
 import os
-import tempfile
 
 import pytest
 
 
-def make_event(layer: str, event_type: str, emitted: bool,
-               suppressed: bool = False, reason: str = "") -> dict:
+def make_event(
+    layer: str, event_type: str, emitted: bool, suppressed: bool = False, reason: str = ""
+) -> dict:
     return {
         "layer": layer,
         "event_type": event_type,
@@ -40,9 +41,13 @@ class TestDeliveryTruthInvariant:
 
     def test_emitted_false_suppressed_is_honest(self):
         """Dead writes must be marked emitted=False with reason."""
-        event = make_event("L5", "multi_file_scope_warning",
-                           emitted=False, suppressed=True,
-                           reason="finish_handler_dead_write")
+        event = make_event(
+            "L5",
+            "multi_file_scope_warning",
+            emitted=False,
+            suppressed=True,
+            reason="finish_handler_dead_write",
+        )
         assert event["emitted"] is False
         assert event["suppressed"] is True
         assert event["suppression_reason"] == "finish_handler_dead_write"
@@ -50,8 +55,12 @@ class TestDeliveryTruthInvariant:
     def test_synthetic_fixture_enforces_truth(self):
         """Post-fix fixture must have emitted=False for finish handler events."""
         fixture_path = os.path.join(
-            os.path.dirname(__file__), "..", "topology", "fixtures",
-            "post_fix_finish_events", "gt_layer_events_synthetic.jsonl",
+            os.path.dirname(__file__),
+            "..",
+            "topology",
+            "fixtures",
+            "post_fix_finish_events",
+            "gt_layer_events_synthetic.jsonl",
         )
         if not os.path.isfile(fixture_path):
             pytest.skip("Post-fix fixture not available")
@@ -73,8 +82,12 @@ class TestDeliveryTruthInvariant:
     def test_non_finish_events_remain_emitted_true(self):
         """Normal layer events should have emitted=True."""
         fixture_path = os.path.join(
-            os.path.dirname(__file__), "..", "topology", "fixtures",
-            "post_fix_finish_events", "gt_layer_events_synthetic.jsonl",
+            os.path.dirname(__file__),
+            "..",
+            "topology",
+            "fixtures",
+            "post_fix_finish_events",
+            "gt_layer_events_synthetic.jsonl",
         )
         if not os.path.isfile(fixture_path):
             pytest.skip("Post-fix fixture not available")

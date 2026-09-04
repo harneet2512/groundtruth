@@ -9,16 +9,17 @@ Tests cover:
 2. governor.py _check_multi_file_scope() — scope warnings must exclude vendor JS
 3. Legitimate Python callers must NOT be filtered
 """
+
 from __future__ import annotations
 
 import os
 import sqlite3
 import tempfile
 
-import pytest
 
 # Import production code
 import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 
@@ -124,13 +125,14 @@ class TestPostViewExcludesVendorJS:
             create_graph_with_vendor_callers(db_path)
 
             lines, count = graph_navigation(
-                "beets/importer.py", db_path, limit=5,
+                "beets/importer.py",
+                db_path,
+                limit=5,
             )
             output = "\n".join(lines)
 
             assert "jquery" not in output.lower(), (
-                f"PRIOR-005: jquery.js must not appear in caller evidence. "
-                f"Got:\n{output}"
+                f"PRIOR-005: jquery.js must not appear in caller evidence. Got:\n{output}"
             )
             assert "lodash" not in output.lower(), (
                 f"node_modules vendor JS must not appear. Got:\n{output}"
@@ -144,13 +146,13 @@ class TestPostViewExcludesVendorJS:
             create_graph_with_vendor_callers(db_path)
 
             lines, count = graph_navigation(
-                "beets/importer.py", db_path, limit=5,
+                "beets/importer.py",
+                db_path,
+                limit=5,
             )
             output = "\n".join(lines)
 
-            assert "bench.py" in output, (
-                f"Legitimate Python caller must appear. Got:\n{output}"
-            )
+            assert "bench.py" in output, f"Legitimate Python caller must appear. Got:\n{output}"
 
 
 class TestGovernorExcludesVendorJS:
@@ -172,8 +174,7 @@ class TestGovernorExcludesVendorJS:
                 result = gov._check_multi_file_scope()
 
                 assert "jquery" not in result.lower(), (
-                    f"PRIOR-005: jquery.js must not appear in scope warnings. "
-                    f"Got:\n{result}"
+                    f"PRIOR-005: jquery.js must not appear in scope warnings. Got:\n{result}"
                 )
                 assert "lodash" not in result.lower(), (
                     f"node_modules vendor JS must not appear. Got:\n{result}"

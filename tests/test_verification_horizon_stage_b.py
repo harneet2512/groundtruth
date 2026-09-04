@@ -8,13 +8,13 @@ Verifies:
    actionable upgrade from "run a test" to "run test_X in tests/test_Y.py").
 4. Correct-or-quiet: no graph / no test / no FACT edge -> stays generic.
 """
+
 from __future__ import annotations
 
 import importlib.util
 import os
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest

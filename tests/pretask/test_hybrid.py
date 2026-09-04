@@ -15,9 +15,7 @@ from groundtruth.pretask.hybrid import (
 )
 
 
-def test_hybrid_lexical_search_uses_repo_files(
-    tiny_graph_db: str, tmp_path: Path
-) -> None:
+def test_hybrid_lexical_search_uses_repo_files(tiny_graph_db: str, tmp_path: Path) -> None:
     """Lexical retrieval ranks indexed source files by issue term overlap."""
     repo = tmp_path / "repo"
     (repo / "patroni").mkdir(parents=True)
@@ -57,9 +55,7 @@ def test_repository_memory_search_uses_commit_messages(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
-    )
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
     (repo / "auth.py").write_text("def refresh_token():\n    pass\n", encoding="utf-8")
     subprocess.run(["git", "add", "auth.py"], cwd=repo, check=True)
@@ -70,9 +66,7 @@ def test_repository_memory_search_uses_commit_messages(tmp_path: Path) -> None:
     )
 
     anchors = extract_issue_anchors("refresh token expiry broken", None)
-    hits, stats = repository_memory_search(
-        "refresh token expiry broken", str(repo), anchors
-    )
+    hits, stats = repository_memory_search("refresh token expiry broken", str(repo), anchors)
     assert stats["commits_examined"] >= 1
     assert stats["matching_commits"] >= 1
     assert hits[0].file == "auth.py"

@@ -20,6 +20,7 @@ Items under test (FIX-NOW table, this file's per-file section):
         (a keyword-only marker `*,` is NOT varargs and must not kill the arity
         contract).
 """
+
 from __future__ import annotations
 
 import os
@@ -61,7 +62,9 @@ class TestItem13Varargs:
         """
         new_sig = "def f(self, a, *, b, c):"  # 4 required params (excl self): a,b,c... wait
         # Params excl self: a, b, c -> arity 3, 0 defaults -> min_required 3.
-        callers = [{"file": "caller.py", "line": "10", "code": "f(x)", "resolution_method": "import"}]
+        callers = [
+            {"file": "caller.py", "line": "10", "code": "f(x)", "resolution_method": "import"}
+        ]
         warn = pe._check_arity_mismatch(new_sig, "f", callers, edited_files=[])
         assert warn, "arity contract must fire for a keyword-only signature (not suppressed)"
         assert "f()" in warn
@@ -97,10 +100,10 @@ class TestItem10HierarchyGate:
         conn.executemany(
             "INSERT INTO edges VALUES (?,?,?,?,?,?,?,?)",
             [
-                (1, 10, 20, "EXTENDS", "inheritance", 1.0, "CERTIFIED", 1),   # verified -> admit
+                (1, 10, 20, "EXTENDS", "inheritance", 1.0, "CERTIFIED", 1),  # verified -> admit
                 (2, 11, 20, "IMPLEMENTS", "implements", 1.0, "CERTIFIED", 1),  # verified -> admit
-                (3, 12, 20, "EXTENDS", "name_match", 0.9, "CANDIDATE", 3),     # guess  -> suppress
-                (4, 13, 20, "EXTENDS", "inheritance", 1.0, "SUPPRESSED", 1),   # tier   -> exclude
+                (3, 12, 20, "EXTENDS", "name_match", 0.9, "CANDIDATE", 3),  # guess  -> suppress
+                (4, 13, 20, "EXTENDS", "inheritance", 1.0, "SUPPRESSED", 1),  # tier   -> exclude
             ],
         )
         conn.commit()
@@ -120,9 +123,7 @@ class TestItem10HierarchyGate:
         p = str(tmp_path / "graph.db")
         _hier_db(p, with_categorical=True)
         conn = sqlite3.connect(p)
-        conn.execute(
-            "INSERT INTO edges VALUES (1,10,20,'EXTENDS','name_match',0.95,'CERTIFIED',1)"
-        )
+        conn.execute("INSERT INTO edges VALUES (1,10,20,'EXTENDS','name_match',0.95,'CERTIFIED',1)")
         conn.commit()
         clause = pe._hierarchy_edge_filter_clause()
         rows = conn.execute(f"SELECT id FROM edges e WHERE {clause}").fetchall()
@@ -178,9 +179,31 @@ def _peer_graph(path: str, *, parent_edge_method: str) -> None:
             (11, "Class", "Derived", "pkg/derived.py", 1, 50, "", 1, "python", None),
             (12, "Class", "Other", "pkg/other.py", 1, 50, "", 1, "python", None),
             # the edited method on Derived
-            (1, "Method", "handle", "pkg/derived.py", 10, 20, "def handle(self, x):", 1, "python", 11),
+            (
+                1,
+                "Method",
+                "handle",
+                "pkg/derived.py",
+                10,
+                20,
+                "def handle(self, x):",
+                1,
+                "python",
+                11,
+            ),
             # the peer on Other (what [PEER] should surface)
-            (2, "Method", "handle", "pkg/other.py", 10, 20, "def handle(self, x):", 1, "python", 12),
+            (
+                2,
+                "Method",
+                "handle",
+                "pkg/other.py",
+                10,
+                20,
+                "def handle(self, x):",
+                1,
+                "python",
+                12,
+            ),
         ],
     )
     # Derived EXTENDS Base, Other EXTENDS Base — provenance varied by arg.
@@ -262,8 +285,18 @@ def _collision_graph(path: str) -> None:
             (1, "Class", "process", "app/worker.py", 1, 100, "", 1, "python", None),
             # The REAL edited method `process` in app/worker.py (the node the
             # caller/signature blocks resolve to).
-            (2, "Method", "process", "app/worker.py", 40, 60,
-             "def process(self, item):", 1, "python", None),
+            (
+                2,
+                "Method",
+                "process",
+                "app/worker.py",
+                40,
+                60,
+                "def process(self, item):",
+                1,
+                "python",
+                None,
+            ),
         ],
     )
     # Contract properties live ONLY on the Method node (id=2). If the resolver
@@ -320,9 +353,7 @@ class TestItem11ContractResolver:
         assert "[SIGNATURE]" in out, f"signature missing:\n{out}"
         # The guard from the Method node's properties must reach the agent —
         # proof the contract resolved to the method, not the colliding Class.
-        assert "not item" in out, (
-            f"behavioral contract did not resolve to the method node:\n{out}"
-        )
+        assert "not item" in out, f"behavioral contract did not resolve to the method node:\n{out}"
 
 
 # ===========================================================================
@@ -367,8 +398,17 @@ def _callee_graph(path: str, *, run_file: str, add_ambiguous_basename: bool) -> 
         "INSERT INTO edges (id,source_id,target_id,type,resolution_method,confidence,trust_tier,candidate_count) "
         "VALUES (?,?,?,?,?,?,?,?)",
         [
-            (100, 1, 2, "CALLS", "import", 1.0, "CERTIFIED", 1),     # cross-file callee
-            (101, 1, 3, "CALLS", "same_file", 1.0, "CERTIFIED", 1),  # SAME-file callee (must be excluded)
+            (100, 1, 2, "CALLS", "import", 1.0, "CERTIFIED", 1),  # cross-file callee
+            (
+                101,
+                1,
+                3,
+                "CALLS",
+                "same_file",
+                1.0,
+                "CERTIFIED",
+                1,
+            ),  # SAME-file callee (must be excluded)
         ],
     )
     conn.commit()

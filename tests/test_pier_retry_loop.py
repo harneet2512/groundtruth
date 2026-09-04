@@ -31,6 +31,7 @@ collapses the gain); Self-Debug (ICLR 2024); ORACLE-SWE (reproduction-test =
 largest single signal).  gt_gt §15.6: the verification loop is the lever
 context-only delivery cannot buy.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -57,8 +58,9 @@ class FakeEnv:
         self.exec_calls: list[str] = []
         self._verifier_results = list(verifier_results)
 
-    async def exec(self, command: str, cwd=None, env=None, timeout_sec=None,
-                   user=None) -> ExecResult:
+    async def exec(
+        self, command: str, cwd=None, env=None, timeout_sec=None, user=None
+    ) -> ExecResult:
         self.exec_calls.append(command)
         if "mini-swe-agent.trajectory" in command:  # attempt archival
             return ExecResult(stdout="", stderr="", return_code=0)
@@ -67,17 +69,25 @@ class FakeEnv:
         return ExecResult(stdout="", stderr="", return_code=0)
 
     def verifier_execs(self) -> list[str]:
-        return [c for c in self.exec_calls
-                if "mini-swe-agent.trajectory" not in c]
+        return [c for c in self.exec_calls if "mini-swe-agent.trajectory" not in c]
 
 
 @pytest.fixture()
 def agent(tmp_path, monkeypatch):
     # clean arm/proof env so run() takes the plain non-proof path.
-    for var in ("GT_PROOF_MODE", "GT_PORTABLE_SUBSTRATE", "GT_HOST_GRAPH_DB",
-                "GT_CERT_DIR", "GT_BASELINE", "GT_RETRY_ON_VERIFIER_FAIL",
-                "GT_RETRY_TEST_CMD", "GT_RETRY_TEST_TIMEOUT_SEC",
-                "GT_GRAPH_DB", "GT_REPO_ROOT", "GT_HOST_SRC_ROOT"):
+    for var in (
+        "GT_PROOF_MODE",
+        "GT_PORTABLE_SUBSTRATE",
+        "GT_HOST_GRAPH_DB",
+        "GT_CERT_DIR",
+        "GT_BASELINE",
+        "GT_RETRY_ON_VERIFIER_FAIL",
+        "GT_RETRY_TEST_CMD",
+        "GT_RETRY_TEST_TIMEOUT_SEC",
+        "GT_GRAPH_DB",
+        "GT_REPO_ROOT",
+        "GT_HOST_SRC_ROOT",
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(gt_agent, "_GT_BASELINE", False, raising=False)
     return GTMiniSweAgent(logs_dir=tmp_path)
@@ -212,8 +222,7 @@ def test_autodetect_command_dispatches_languages(monkeypatch):
     pytest) rooted at the GT-detected repo root — no per-task logic."""
     monkeypatch.delenv("GT_RETRY_TEST_CMD", raising=False)
     cmd, display = gt_agent._retry_test_command()
-    for marker in ("go test ./...", "cargo test", "npm test", "pytest",
-                   "gt_root.txt"):
+    for marker in ("go test ./...", "cargo test", "npm test", "pytest", "gt_root.txt"):
         assert marker in cmd
     assert "auto-detected" in display
 

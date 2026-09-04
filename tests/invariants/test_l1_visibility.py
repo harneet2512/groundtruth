@@ -6,14 +6,13 @@ All candidates must be scored before selection (no first-match-wins).
 
 Violation = D5 in failure taxonomy.
 """
+
 from __future__ import annotations
 
 import os
 import re
 import sqlite3
 import tempfile
-
-import pytest
 
 
 def create_beets_like_graph(db_path: str) -> None:
@@ -47,10 +46,10 @@ def create_beets_like_graph(db_path: str) -> None:
     for i in range(10):
         conn.execute(
             f"INSERT INTO nodes (id, label, name, file_path, start_line, is_exported, is_test, language) VALUES "
-            f"({100+i}, 'Function', 'caller_{i}', 'other/file{i}.py', {i*10}, 1, 0, 'python')"
+            f"({100 + i}, 'Function', 'caller_{i}', 'other/file{i}.py', {i * 10}, 1, 0, 'python')"
         )
         conn.execute(
-            f"INSERT INTO edges (source_id, target_id, type, confidence) VALUES ({100+i}, 1, 'CALLS', 1.0)"
+            f"INSERT INTO edges (source_id, target_id, type, confidence) VALUES ({100 + i}, 1, 'CALLS', 1.0)"
         )
 
     # set_fields method — LOW caller count (2 callers) but NAMED IN ISSUE
@@ -78,8 +77,9 @@ def create_beets_like_graph(db_path: str) -> None:
     conn.close()
 
 
-def simulate_edit_target_selection(db_path: str, issue_text: str,
-                                    brief_files: list[str]) -> dict | None:
+def simulate_edit_target_selection(
+    db_path: str, issue_text: str, brief_files: list[str]
+) -> dict | None:
     """Simulate edit target selection logic.
 
     Returns the selected edit target dict, or None if no target found.
@@ -89,17 +89,56 @@ def simulate_edit_target_selection(db_path: str, issue_text: str,
     conn.row_factory = sqlite3.Row
 
     _COMMON_FN_PARTS = {
-        "get", "set", "add", "remove", "update", "create",
-        "delete", "find", "make", "check", "is", "has",
-        "do", "run", "to", "from", "on", "in", "of", "by",
+        "get",
+        "set",
+        "add",
+        "remove",
+        "update",
+        "create",
+        "delete",
+        "find",
+        "make",
+        "check",
+        "is",
+        "has",
+        "do",
+        "run",
+        "to",
+        "from",
+        "on",
+        "in",
+        "of",
+        "by",
     }
 
     issue_kws = {
-        w.lower() for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text)
-        if len(w) > 3 and w.lower() not in {
-            "that", "this", "with", "from", "have", "been", "when", "then",
-            "should", "would", "could", "file", "line", "code", "test",
-            "error", "issue", "none", "true", "false", "self", "class",
+        w.lower()
+        for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text)
+        if len(w) > 3
+        and w.lower()
+        not in {
+            "that",
+            "this",
+            "with",
+            "from",
+            "have",
+            "been",
+            "when",
+            "then",
+            "should",
+            "would",
+            "could",
+            "file",
+            "line",
+            "code",
+            "test",
+            "error",
+            "issue",
+            "none",
+            "true",
+            "false",
+            "self",
+            "class",
         }
     }
 
@@ -132,16 +171,18 @@ def simulate_edit_target_selection(db_path: str, issue_text: str,
             score += kw_overlap * 10
             score += min(caller_count, 5)  # callers as tie-breaker only (capped)
 
-            all_candidates.append({
-                "file": bf,
-                "func": kf["name"],
-                "sig": kf["signature"] or "",
-                "line": kf["start_line"] or 0,
-                "callers": caller_count,
-                "score": score,
-                "direct": direct,
-                "kw_overlap": kw_overlap,
-            })
+            all_candidates.append(
+                {
+                    "file": bf,
+                    "func": kf["name"],
+                    "sig": kf["signature"] or "",
+                    "line": kf["start_line"] or 0,
+                    "callers": caller_count,
+                    "score": score,
+                    "direct": direct,
+                    "kw_overlap": kw_overlap,
+                }
+            )
 
     conn.close()
 
@@ -162,9 +203,12 @@ class TestEditTargetExplicitMentionBeatsCallers:
             db_path = os.path.join(tmpdir, "graph.db")
             create_beets_like_graph(db_path)
 
-            issue_text = "The set_fields method in importer.py does not properly handle unicode field values"
+            issue_text = (
+                "The set_fields method in importer.py does not properly handle unicode field values"
+            )
             result = simulate_edit_target_selection(
-                db_path, issue_text,
+                db_path,
+                issue_text,
                 ["beets/util/pipeline.py", "beets/importer.py"],
             )
 
@@ -183,7 +227,8 @@ class TestEditTargetExplicitMentionBeatsCallers:
             # Issue does NOT mention set_fields or Pipeline by name
             issue_text = "Unicode handling is broken in the import pipeline for field values"
             result = simulate_edit_target_selection(
-                db_path, issue_text,
+                db_path,
+                issue_text,
                 ["beets/util/pipeline.py", "beets/importer.py"],
             )
 
@@ -200,7 +245,8 @@ class TestEditTargetExplicitMentionBeatsCallers:
 
             issue_text = "Fix set_fields to handle encoding"
             result = simulate_edit_target_selection(
-                db_path, issue_text,
+                db_path,
+                issue_text,
                 # Pipeline file listed FIRST — must not win by position
                 ["beets/util/pipeline.py", "beets/importer.py"],
             )

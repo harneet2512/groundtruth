@@ -59,11 +59,67 @@ def tiny_graph_db(tmp_path: Path) -> str:
     )
     rows = [
         # id, label, name, qual, file, start, end, sig, ret, exp, test, lang, parent
-        (1, "Class",    "SafeWatchdog",        None, "patroni/watchdog.py",      10, 80,  None, None, 1, 0, "python", None),
-        (2, "Method",   "_fd",                 None, "patroni/watchdog.py",      30, 45,  None, None, 0, 0, "python", 1),
-        (3, "Class",    "Postmaster",          None, "patroni/postmaster.py",    5,  120, None, None, 1, 0, "python", None),
-        (4, "Function", "test_watchdog_fires", None, "tests/test_watchdog.py",   1,  20,  None, None, 0, 1, "python", None),
-        (5, "Function", "format_value",        None, "patroni/utils.py",         1,  10,  None, None, 1, 0, "python", None),
+        (
+            1,
+            "Class",
+            "SafeWatchdog",
+            None,
+            "patroni/watchdog.py",
+            10,
+            80,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (2, "Method", "_fd", None, "patroni/watchdog.py", 30, 45, None, None, 0, 0, "python", 1),
+        (
+            3,
+            "Class",
+            "Postmaster",
+            None,
+            "patroni/postmaster.py",
+            5,
+            120,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
+        (
+            4,
+            "Function",
+            "test_watchdog_fires",
+            None,
+            "tests/test_watchdog.py",
+            1,
+            20,
+            None,
+            None,
+            0,
+            1,
+            "python",
+            None,
+        ),
+        (
+            5,
+            "Function",
+            "format_value",
+            None,
+            "patroni/utils.py",
+            1,
+            10,
+            None,
+            None,
+            1,
+            0,
+            "python",
+            None,
+        ),
     ]
     conn.executemany(
         "INSERT INTO nodes (id, label, name, qualified_name, file_path, "
@@ -75,10 +131,10 @@ def tiny_graph_db(tmp_path: Path) -> str:
     # Edges with confidence:
     edges = [
         # src -> dst, conf
-        (3, 1, 100, "patroni/postmaster.py", 0.9),    # Postmaster -> SafeWatchdog
-        (4, 1, 5,   "tests/test_watchdog.py", 0.9),   # test_* -> SafeWatchdog
-        (1, 2, 35,  "patroni/watchdog.py", 1.0),      # SafeWatchdog -> _fd
-        (5, 2, 5,   "patroni/utils.py", 0.2),         # noisy edge, must be filtered
+        (3, 1, 100, "patroni/postmaster.py", 0.9),  # Postmaster -> SafeWatchdog
+        (4, 1, 5, "tests/test_watchdog.py", 0.9),  # test_* -> SafeWatchdog
+        (1, 2, 35, "patroni/watchdog.py", 1.0),  # SafeWatchdog -> _fd
+        (5, 2, 5, "patroni/utils.py", 0.2),  # noisy edge, must be filtered
     ]
     conn.executemany(
         "INSERT INTO edges (source_id, target_id, type, source_line, "

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
@@ -34,14 +33,10 @@ def test_recency_zero_for_unseen(tmp_path: Path) -> None:
         cwd=tmp_path,
         check=True,
     )
-    subprocess.run(
-        ["git", "config", "user.name", "test"], cwd=tmp_path, check=True
-    )
+    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
     (tmp_path / "a.py").write_text("x = 1\n")
     subprocess.run(["git", "add", "a.py"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "commit", "-q", "-m", "first"], cwd=tmp_path, check=True
-    )
+    subprocess.run(["git", "commit", "-q", "-m", "first"], cwd=tmp_path, check=True)
 
     weights, total = recent_commit_weight(str(tmp_path), days=30)
     # a.py should be present, b.py absent.

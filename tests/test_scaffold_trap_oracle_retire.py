@@ -12,6 +12,7 @@ both arms unchanged (backward compat — byte-parity with pre-oracle behavior).
 Red->green: on the oracle route, 26 actions with zero source edits must NOT
 produce a scaffold_trap nudge; on the legacy route the same drive still does.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -19,7 +20,6 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _PATCH_PATH = _ROOT / "artifact_deepswe" / "gt_mini_patch.py"
@@ -57,7 +57,7 @@ def _drive_nonedit_actions(mod, n: int) -> list[str]:
     for i in range(n):
         out = {"output": f"listing {i}"}
         mod._augment_output({"command": f"ls -la dir_{i}"}, out)
-        appended.append(out["output"][len(f"listing {i}"):])
+        appended.append(out["output"][len(f"listing {i}") :])
     return appended
 
 
@@ -73,7 +73,8 @@ def test_oracle_route_scaffold_trap_does_not_fire(tmp_path):
     assert mod._action_count >= 25
     assert mod._source_edit_count == 0
     assert "scaffold_trap" not in joined, (
-        "scaffold_trap fired on the oracle route (retired arm): " + joined[-400:])
+        "scaffold_trap fired on the oracle route (retired arm): " + joined[-400:]
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -18,14 +18,15 @@ P0 spec:
   - Cap at 5 per function
   - Skip nested function definitions
 """
+
 import dataclasses
-import re
 from typing import Optional
 
 
 # ============================================================================
 # Simulated data structures (mirrors Go PropertyRef)
 # ============================================================================
+
 
 @dataclasses.dataclass
 class PropertyRef:
@@ -40,11 +41,12 @@ class PropertyRef:
 # P6: Guard Consequence Extraction (simulating Go logic)
 # ============================================================================
 
+
 def extract_guard_from_stmt(
     stmt_type: str,
     stmt_text: str,
     condition_text: Optional[str],  # from tree-sitter ChildByFieldName("condition")
-    body_text: Optional[str],       # from tree-sitter ChildByFieldName("body"/"consequence")
+    body_text: Optional[str],  # from tree-sitter ChildByFieldName("body"/"consequence")
     line: int,
     node_idx: int = 0,
 ) -> Optional[PropertyRef]:
@@ -133,12 +135,14 @@ def extract_guard_from_stmt(
 # P0: Conditional Return Extraction (simulating Go logic)
 # ============================================================================
 
+
 @dataclasses.dataclass
 class IfStmtInfo:
     """Simulates what tree-sitter gives for an if_statement node."""
-    stmt_type: str              # "if_statement", "if_expression", "function_definition", etc.
+
+    stmt_type: str  # "if_statement", "if_expression", "function_definition", etc.
     condition_text: Optional[str]  # from ChildByFieldName("condition")
-    body_children: list         # list of child IfStmtInfo or ReturnInfo in the consequence
+    body_children: list  # list of child IfStmtInfo or ReturnInfo in the consequence
     line: int
     is_nested_func: bool = False  # for skipping nested function defs
 
@@ -146,6 +150,7 @@ class IfStmtInfo:
 @dataclasses.dataclass
 class ReturnInfo:
     """Simulates a return_statement node."""
+
     return_text: str  # the expression after "return", empty if bare return
 
 
@@ -191,13 +196,15 @@ def extract_conditional_returns(
                 ret_text = ret_text[:40]
 
             value = f"if {cond_text}: return {ret_text}"
-            results.append(PropertyRef(
-                node_idx=node_idx,
-                kind="conditional_return",
-                value=value,
-                line=child.line,
-                confidence=0.9,
-            ))
+            results.append(
+                PropertyRef(
+                    node_idx=node_idx,
+                    kind="conditional_return",
+                    value=value,
+                    line=child.line,
+                    confidence=0.9,
+                )
+            )
 
     return results
 
@@ -223,6 +230,7 @@ def _find_first_return_recursive(children: list) -> Optional[str]:
 # EDGE CASE TESTS
 # ============================================================================
 
+
 class TestResults:
     def __init__(self):
         self.passed = 0
@@ -240,13 +248,13 @@ class TestResults:
 
     def summary(self):
         total = self.passed + self.failed
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print(f"RESULTS: {self.passed}/{total} passed, {self.failed} failed")
         if self.failures:
             print("\nFAILURES:")
             for name, detail in self.failures:
                 print(f"  - {name}: {detail}")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         return self.failed == 0
 
 
@@ -309,13 +317,13 @@ def test_edge_cases():
     t.check(
         "Multi-line consequence is truncated",
         result is not None,
-        f"Expected a guard, got None",
+        "Expected a guard, got None",
     )
     if result:
         # The consequence part after " -> " should be <= 60 chars
         arrow_idx = result.value.find(" -> ")
         if arrow_idx >= 0:
-            consequence_in_value = result.value[arrow_idx + 4:]
+            consequence_in_value = result.value[arrow_idx + 4 :]
             t.check(
                 f"Consequence <= 60 chars (got {len(consequence_in_value)})",
                 len(consequence_in_value) <= 60,
@@ -403,12 +411,14 @@ def test_edge_cases():
     print("\n--- Edge Case 5: Cap at 5 conditional returns ---")
     many_ifs = []
     for i in range(10):
-        many_ifs.append(IfStmtInfo(
-            stmt_type="if_statement",
-            condition_text=f"x == {i}",
-            body_children=[ReturnInfo(return_text=str(i))],
-            line=i + 1,
-        ))
+        many_ifs.append(
+            IfStmtInfo(
+                stmt_type="if_statement",
+                condition_text=f"x == {i}",
+                body_children=[ReturnInfo(return_text=str(i))],
+                line=i + 1,
+            )
+        )
     results = extract_conditional_returns(many_ifs)
     t.check(
         "10 conditional returns -> capped at 5",
@@ -529,7 +539,7 @@ def test_edge_cases():
     t.check(
         "Go panic: detected as guard",
         result is not None,
-        f"Expected guard, got None",
+        "Expected guard, got None",
     )
     if result:
         t.check(
@@ -543,7 +553,7 @@ def test_edge_cases():
             f"Value: {result.value}",
         )
         t.check(
-            "Go panic: consequence includes panic(\"fatal\")",
+            'Go panic: consequence includes panic("fatal")',
             'panic("fatal")' in result.value,
             f"Value: {result.value}",
         )
@@ -564,7 +574,7 @@ def test_edge_cases():
     t.check(
         "Rust early return: detected as guard",
         result is not None,
-        f"Expected guard, got None",
+        "Expected guard, got None",
     )
     if result:
         # "Err(" matches keyword check, but "return" is checked first in priority
@@ -651,10 +661,18 @@ def test_edge_cases():
     # Return value 41 chars -> truncated to 40
     ret_41 = "b" * 41
 
-    if_80 = IfStmtInfo(stmt_type="if_statement", condition_text=cond_80,
-                        body_children=[ReturnInfo(return_text=ret_40)], line=1)
-    if_81 = IfStmtInfo(stmt_type="if_statement", condition_text=cond_81,
-                        body_children=[ReturnInfo(return_text=ret_41)], line=2)
+    if_80 = IfStmtInfo(
+        stmt_type="if_statement",
+        condition_text=cond_80,
+        body_children=[ReturnInfo(return_text=ret_40)],
+        line=1,
+    )
+    if_81 = IfStmtInfo(
+        stmt_type="if_statement",
+        condition_text=cond_81,
+        body_children=[ReturnInfo(return_text=ret_41)],
+        line=2,
+    )
 
     results = extract_conditional_returns([if_80, if_81])
     t.check(
@@ -722,7 +740,7 @@ def test_edge_cases():
     )
     if result:
         print(f"    NOTE: This is a known false positive. Value: '{result.value}'")
-        print(f"    The Go code uses strings.Contains which doesn't distinguish string literals.")
+        print("    The Go code uses strings.Contains which doesn't distinguish string literals.")
 
     # ========================================================================
     # Summary
@@ -735,6 +753,7 @@ def test_edge_cases():
 # children, not arbitrary depth for the IF (the return can be nested, but the
 # IF must be at the top level of the function body).
 # ============================================================================
+
 
 def test_only_top_level_ifs():
     """The if_statement must be a direct child of the function body."""

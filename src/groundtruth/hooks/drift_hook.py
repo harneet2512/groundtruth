@@ -11,6 +11,7 @@ Zero test contact: callers are is_test=0 by call-graph construction and the
 assertions table is never read; test/fixture files are skipped entirely. No
 execution, deterministic, LLM-free, $0.
 """
+
 from __future__ import annotations
 
 import os
@@ -28,14 +29,34 @@ _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.M)
 
 # Source extensions GT reasons about; drift on anything else is meaningless.
 _SOURCE_EXTS = (
-    ".py", ".go", ".js", ".jsx", ".ts", ".tsx", ".rs", ".java",
-    ".c", ".cc", ".cpp", ".h", ".hpp", ".rb", ".php",
+    ".py",
+    ".go",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".rs",
+    ".java",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".rb",
+    ".php",
 )
 # Path fragments marking a test/fixture file — drift stays OUT of these (zero
 # test contact; the agent should be fixing source, not tests).
 _TEST_MARKERS = (
-    "test_", "_test.", "/tests/", "/test/", "/__tests__/", "conftest.py",
-    "/fixtures/", "/testdata/", "spec.",
+    "test_",
+    "_test.",
+    "/tests/",
+    "/test/",
+    "/__tests__/",
+    "conftest.py",
+    "/fixtures/",
+    "/testdata/",
+    "spec.",
 )
 
 
@@ -74,7 +95,7 @@ def _to_rel(root: str, path: str) -> str:
     p = (path or "").replace("\\", "/")
     r = (root or "").replace("\\", "/").rstrip("/")
     if r and p.startswith(r + "/"):
-        p = p[len(r) + 1:]
+        p = p[len(r) + 1 :]
     return p.lstrip("/")
 
 
@@ -105,7 +126,11 @@ def _changed_ranges(root: str, rel: str) -> list[tuple[int, int]]:
     try:
         out = subprocess.run(
             ["git", "-C", root, "diff", "-U0", "--", rel],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
         )
     except (subprocess.SubprocessError, OSError):
         return []
@@ -166,7 +191,9 @@ def drift_for_file(root: str, working_db: str, original_db: str, rel: str) -> st
     # Restrict to edited functions (post-edit graph line spans align with the
     # new-side diff ranges). Fall back to the whole file only when git gives us
     # no ranges (no diff info) — the common path always has ranges.
-    funcs = _edited_funcs(working_db, rel, ranges) if ranges else _func_names_in_file(original_db, rel)
+    funcs = (
+        _edited_funcs(working_db, rel, ranges) if ranges else _func_names_in_file(original_db, rel)
+    )
     if not funcs:
         return ""
     pre = snapshot_contract(original_db, rel, funcs)

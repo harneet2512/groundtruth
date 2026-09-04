@@ -52,7 +52,11 @@ def find_brief_text(task_dir: Path, traj_obj: dict[str, Any]) -> str:
 def count_gt_query_calls(task_dir: Path, traj_obj: dict[str, Any]) -> int:
     sidecar = task_dir / "gt_query_calls.jsonl"
     if sidecar.exists():
-        return sum(1 for ln in sidecar.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip())
+        return sum(
+            1
+            for ln in sidecar.read_text(encoding="utf-8", errors="replace").splitlines()
+            if ln.strip()
+        )
     c = 0
     for s in steps(traj_obj):
         tool = str(s.get("tool", ""))

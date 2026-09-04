@@ -31,7 +31,9 @@ from groundtruth.control.types import (
 
 class _FullCapAdapter(Adapter):
     name = "full"
-    capabilities = Capabilities(block=True, visible=True, audit=True, mid_task_pull=True, replan_inject=True)
+    capabilities = Capabilities(
+        block=True, visible=True, audit=True, mid_task_pull=True, replan_inject=True
+    )
 
     def render_brief(self, brief: BriefResult) -> ScaffoldArtifact:
         return ScaffoldArtifact(kind="message", payload={"text": brief.brief_text})
@@ -59,12 +61,16 @@ class _FullCapAdapter(Adapter):
 
 class _NoBlockAdapter(_FullCapAdapter):
     name = "no_block"
-    capabilities = Capabilities(block=False, visible=True, audit=True, mid_task_pull=False, replan_inject=False)
+    capabilities = Capabilities(
+        block=False, visible=True, audit=True, mid_task_pull=False, replan_inject=False
+    )
 
 
 class _NoAuditAdapter(_FullCapAdapter):
     name = "no_audit"
-    capabilities = Capabilities(block=True, visible=True, audit=False, mid_task_pull=True, replan_inject=True)
+    capabilities = Capabilities(
+        block=True, visible=True, audit=False, mid_task_pull=True, replan_inject=True
+    )
 
 
 class _MissingCapsAdapter(Adapter):
@@ -181,9 +187,7 @@ def test_b2_adapter_only_reads_allowed_decision_fields() -> None:
     proxy = _AccessTracker(decision, accessed)
     adapter.apply_decision(proxy)  # type: ignore[arg-type]
     forbidden_touched = accessed & _DECISION_FORBIDDEN
-    assert not forbidden_touched, (
-        f"adapter accessed forbidden Decision fields: {forbidden_touched}"
-    )
+    assert not forbidden_touched, f"adapter accessed forbidden Decision fields: {forbidden_touched}"
     assert accessed.issubset(_DECISION_ALLOWED | {"action"}), (
         f"adapter read undocumented Decision fields: {accessed - _DECISION_ALLOWED}"
     )

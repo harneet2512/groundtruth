@@ -4,9 +4,9 @@ Tests both the standalone module (groundtruth.hooks.semantic_check) and the
 _regex_extract_guards function from evidence/change.py that the behavioral
 contract uses.
 """
+
 from __future__ import annotations
 
-import pytest
 
 from groundtruth.hooks.semantic_check import (
     extract_guards,
@@ -19,6 +19,7 @@ from groundtruth.evidence.change import _regex_extract_guards
 # ────────────────────────────────────────────────────
 # extract_guards (semantic_check module)
 # ────────────────────────────────────────────────────
+
 
 class TestExtractGuards:
     def test_basic_guard_with_return(self):
@@ -65,6 +66,7 @@ class TestExtractGuards:
 # extract_return_paths (semantic_check module)
 # ────────────────────────────────────────────────────
 
+
 class TestExtractReturnPaths:
     def test_basic_returns(self):
         code = "def f(x):\n    if x:\n        return True\n    return False"
@@ -91,6 +93,7 @@ class TestExtractReturnPaths:
 # run_check (semantic_check module — full pipeline)
 # ────────────────────────────────────────────────────
 
+
 class TestRunCheck:
     def test_returns_empty_for_missing_file(self, tmp_path):
         result = run_check("nonexistent.py", str(tmp_path))
@@ -106,23 +109,24 @@ class TestRunCheck:
     def test_detects_added_guard(self, tmp_path):
         """Simulates a git repo where old content has no guard but new does."""
         import subprocess
+
         f = tmp_path / "test.py"
         f.write_text("def foo(x):\n    return x + 1\n")
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
         subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "init"],
-            cwd=tmp_path, capture_output=True,
-            env={**__import__("os").environ, "GIT_AUTHOR_NAME": "test",
-                 "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "test",
-                 "GIT_COMMITTER_EMAIL": "t@t"},
+            cwd=tmp_path,
+            capture_output=True,
+            env={
+                **__import__("os").environ,
+                "GIT_AUTHOR_NAME": "test",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "test",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            },
         )
-        f.write_text(
-            "def foo(x):\n"
-            "    if x is None:\n"
-            "        return None\n"
-            "    return x + 1\n"
-        )
+        f.write_text("def foo(x):\n    if x is None:\n        return None\n    return x + 1\n")
         result = run_check("test.py", str(tmp_path))
         guard_added = [r for r in result if r.startswith("GUARD_ADDED:")]
         assert len(guard_added) >= 1
@@ -132,6 +136,7 @@ class TestRunCheck:
 # ────────────────────────────────────────────────────
 # _regex_extract_guards (evidence/change.py — behavioral contract)
 # ────────────────────────────────────────────────────
+
 
 class TestRegexExtractGuards:
     def test_loguru_colorize_pattern(self):

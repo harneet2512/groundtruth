@@ -22,7 +22,7 @@ class TestHasLeak:
 
     def test_clean_evidence_has_no_leak(self) -> None:
         evidence = (
-            "<gt-evidence trigger=\"post_edit:src/foo.py\">\n"
+            '<gt-evidence trigger="post_edit:src/foo.py">\n'
             "[CONTRACT] 3 callers depend on get_user()\n"
             "  api/views.py:42 `user = get_user(request.user_id)`\n"
             "[SIGNATURE] def get_user(user_id: int) -> Optional[User]\n"
@@ -126,8 +126,7 @@ class TestAllHiddenPrefixesCovered:
     def test_all_prefixes_present(self) -> None:
         actual = set(_HIDDEN_PREFIXES)
         assert actual == self.EXPECTED_PREFIXES, (
-            f"Missing: {self.EXPECTED_PREFIXES - actual}, "
-            f"Extra: {actual - self.EXPECTED_PREFIXES}"
+            f"Missing: {self.EXPECTED_PREFIXES - actual}, Extra: {actual - self.EXPECTED_PREFIXES}"
         )
 
     def test_has_leak_catches_all(self) -> None:
@@ -171,6 +170,7 @@ class TestMCPToolRegistration:
     def test_create_server_is_callable(self) -> None:
         """Verify create_server function exists and is callable."""
         from groundtruth.mcp.server import create_server
+
         assert callable(create_server)
 
     def test_tool_handlers_importable(self) -> None:
@@ -193,6 +193,7 @@ class TestMCPToolRegistration:
             handle_unused_packages,
             handle_validate,
         )
+
         handlers = [
             handle_brief,
             handle_checkpoint,

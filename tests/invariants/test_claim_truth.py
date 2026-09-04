@@ -5,38 +5,47 @@ Claims with only code_audit proof are UNVERIFIED.
 
 Ports logic from tests/topology/test_claim_checker.py for invariant suite.
 """
+
 from __future__ import annotations
 
 import os
 import sys
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 from gt_check_claims import check_claims
 
 
-def make_claim(claim_id: str, layer: str, doc_status: str = "WORKING",
-               proof_type: str = "none") -> dict:
+def make_claim(
+    claim_id: str, layer: str, doc_status: str = "WORKING", proof_type: str = "none"
+) -> dict:
     return {
-        "claim_id": claim_id, "layer": layer,
+        "claim_id": claim_id,
+        "layer": layer,
         "description": f"Test claim {claim_id}",
-        "expected_trigger": "test", "expected_evidence": "test",
-        "proof_type": proof_type, "test_path": None,
-        "current_status": "UNVERIFIED", "doc_status": doc_status,
+        "expected_trigger": "test",
+        "expected_evidence": "test",
+        "proof_type": proof_type,
+        "test_path": None,
+        "current_status": "UNVERIFIED",
+        "doc_status": doc_status,
     }
 
 
 def make_autopsy(layer_key: str, visible: bool) -> dict:
     return {
         "task_id": "test_task",
-        "layers": {layer_key: {
-            "expected": "yes", "generated": visible,
-            "visible_in_output": visible,
-            "status": "DELIVERED" if visible else "NOT_FIRED",
-            "failure_class": "", "markers_found": ["m"] if visible else [],
-            "events_from_log": 1 if visible else 0,
-        }},
+        "layers": {
+            layer_key: {
+                "expected": "yes",
+                "generated": visible,
+                "visible_in_output": visible,
+                "status": "DELIVERED" if visible else "NOT_FIRED",
+                "failure_class": "",
+                "markers_found": ["m"] if visible else [],
+                "events_from_log": 1 if visible else 0,
+            }
+        },
     }
 
 

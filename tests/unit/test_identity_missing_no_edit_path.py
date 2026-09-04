@@ -18,11 +18,11 @@ C. must_ok_rate reaches the 0.90 floor after the fix.
 After the fix, remaining run_invalid comes only from real agent budget
 violations (gt_check called 9 times vs limit 3) — not plumbing.
 """
+
 from __future__ import annotations
 
 import csv
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -61,8 +61,9 @@ def test_archive_shows_identity_missing_on_no_edit_tasks(arm: str) -> None:
 # Helper: build a synthetic run dir from the archived CSV, optionally
 # injecting gt_per_task_summary.json into specified task dirs.
 # ──────────────────────────────────────────────────────────────────────────
-def _build_simulated_run(archive_arm_dir: Path, out_dir: Path, arm: str,
-                         inject_summaries_for: list[str] | None = None) -> Path:
+def _build_simulated_run(
+    archive_arm_dir: Path, out_dir: Path, arm: str, inject_summaries_for: list[str] | None = None
+) -> Path:
     """Copy archive essentials + create per-task dirs with minimal telemetry.
 
     For tasks listed in inject_summaries_for, write gt_per_task_summary.json
@@ -83,7 +84,9 @@ def _build_simulated_run(archive_arm_dir: Path, out_dir: Path, arm: str,
         # Minimal telemetry so reporter can count events
         events = [
             {"event": "checkpoint_startup"},
-            {"event": "material_edit"} if int(row.get("material_edit_count", 0) or 0) > 0 else {"event": "cycle", "status": "no_edit"},
+            {"event": "material_edit"}
+            if int(row.get("material_edit_count", 0) or 0) > 0
+            else {"event": "cycle", "status": "no_edit"},
         ]
         # Add enough events so reporter computes correct row values
         for _ in range(int(row.get("ack_armed_count", 0) or 0)):
@@ -98,35 +101,63 @@ def _build_simulated_run(archive_arm_dir: Path, out_dir: Path, arm: str,
                 f.write(json.dumps(ev) + "\n")
 
         # Budget state stub
-        (task_dir / "gt_budget.state.json").write_text(json.dumps({
-            "scope": f"r__{iid}__{arm}",
-            "orient": {"count": int(row.get("gt_orient_count", 0) or 0), "limit": 1, "exhausted": False},
-            "lookup": {"count": int(row.get("gt_lookup_count", 0) or 0), "limit": 2, "exhausted": False},
-            "impact": {"count": int(row.get("gt_impact_count", 0) or 0), "limit": 2, "exhausted": False},
-            "check": {"count": int(row.get("gt_check_count", 0) or 0), "limit": 3, "exhausted": False},
-            "initialized": True,
-        }))
+        (task_dir / "gt_budget.state.json").write_text(
+            json.dumps(
+                {
+                    "scope": f"r__{iid}__{arm}",
+                    "orient": {
+                        "count": int(row.get("gt_orient_count", 0) or 0),
+                        "limit": 1,
+                        "exhausted": False,
+                    },
+                    "lookup": {
+                        "count": int(row.get("gt_lookup_count", 0) or 0),
+                        "limit": 2,
+                        "exhausted": False,
+                    },
+                    "impact": {
+                        "count": int(row.get("gt_impact_count", 0) or 0),
+                        "limit": 2,
+                        "exhausted": False,
+                    },
+                    "check": {
+                        "count": int(row.get("gt_check_count", 0) or 0),
+                        "limit": 3,
+                        "exhausted": False,
+                    },
+                    "initialized": True,
+                }
+            )
+        )
 
         # Per-task summary: inject only for specified tasks (simulating the fix)
         if inject_summaries_for is not None and iid in inject_summaries_for:
-            (task_dir / "gt_per_task_summary.json").write_text(json.dumps({
-                "run_id": row.get("run_id", "r"),
-                "arm": arm,
-                "instance_id": iid,
-                "identity_ok": True,
-                "cycle": int(row.get("cycle", 10) or 10),
-                "within_call_budget": True,
-            }))
+            (task_dir / "gt_per_task_summary.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": row.get("run_id", "r"),
+                        "arm": arm,
+                        "instance_id": iid,
+                        "identity_ok": True,
+                        "cycle": int(row.get("cycle", 10) or 10),
+                        "within_call_budget": True,
+                    }
+                )
+            )
         elif inject_summaries_for is None:
             # inject_summaries_for=None means "inject ALL" (post-fix simulation)
-            (task_dir / "gt_per_task_summary.json").write_text(json.dumps({
-                "run_id": row.get("run_id", "r"),
-                "arm": arm,
-                "instance_id": iid,
-                "identity_ok": True,
-                "cycle": int(row.get("cycle", 10) or 10),
-                "within_call_budget": True,
-            }))
+            (task_dir / "gt_per_task_summary.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": row.get("run_id", "r"),
+                        "arm": arm,
+                        "instance_id": iid,
+                        "identity_ok": True,
+                        "cycle": int(row.get("cycle", 10) or 10),
+                        "within_call_budget": True,
+                    }
+                )
+            )
 
     return out_dir
 
@@ -134,9 +165,18 @@ def _build_simulated_run(archive_arm_dir: Path, out_dir: Path, arm: str,
 def _run_reporter_and_verify(run_dir: Path, arm: str) -> dict:
     """Run gt_canary_report then verify_report.compute on the result."""
     hybrid = "--hybrid" if arm == "gt-lsp-hybrid" else ""
-    cmd = [sys.executable, str(REPORTER),
-           "--outdir", str(run_dir), "--arm", arm, "--run-id", "sim",
-           "--max-steps", "150"]
+    cmd = [
+        sys.executable,
+        str(REPORTER),
+        "--outdir",
+        str(run_dir),
+        "--arm",
+        arm,
+        "--run-id",
+        "sim",
+        "--max-steps",
+        "150",
+    ]
     if hybrid:
         cmd.append(hybrid)
     subprocess.run(cmd, check=False, capture_output=True)
@@ -146,10 +186,13 @@ def _run_reporter_and_verify(run_dir: Path, arm: str) -> dict:
 # ──────────────────────────────────────────────────────────────────────────
 # Test B — injecting summaries clears identity_missing
 # ──────────────────────────────────────────────────────────────────────────
-@pytest.mark.parametrize("arm,arm_label", [
-    ("nolsp", "gt-nolsp"),
-    ("lsp", "gt-lsp-hybrid"),
-])
+@pytest.mark.parametrize(
+    "arm,arm_label",
+    [
+        ("nolsp", "gt-nolsp"),
+        ("lsp", "gt-lsp-hybrid"),
+    ],
+)
 def test_injecting_summaries_clears_identity_missing(
     arm: str, arm_label: str, tmp_path: Path
 ) -> None:
@@ -157,8 +200,7 @@ def test_injecting_summaries_clears_identity_missing(
     gt_per_task_summary.json (inject_summaries_for=None means inject ALL).
     Re-run reporter + verify_report → identity_missing must be 0."""
     run_dir = tmp_path / arm
-    _build_simulated_run(ARCHIVE / arm, run_dir, arm_label,
-                         inject_summaries_for=None)
+    _build_simulated_run(ARCHIVE / arm, run_dir, arm_label, inject_summaries_for=None)
     metrics = _run_reporter_and_verify(run_dir, arm_label)
     assert metrics["raw"]["identity_missing_total"] == 0, (
         f"{arm}: with summaries injected into all task dirs, "
@@ -169,18 +211,20 @@ def test_injecting_summaries_clears_identity_missing(
 # ──────────────────────────────────────────────────────────────────────────
 # Test C — must_ok_rate reaches 0.90 after the fix
 # ──────────────────────────────────────────────────────────────────────────
-@pytest.mark.parametrize("arm,arm_label", [
-    ("nolsp", "gt-nolsp"),
-    ("lsp", "gt-lsp-hybrid"),
-])
+@pytest.mark.parametrize(
+    "arm,arm_label",
+    [
+        ("nolsp", "gt-nolsp"),
+        ("lsp", "gt-lsp-hybrid"),
+    ],
+)
 def test_must_ok_rate_reaches_threshold_after_identity_fix(
     arm: str, arm_label: str, tmp_path: Path
 ) -> None:
     """With identity_missing closed, remaining run_invalid comes from real
     budget violations only. must_ok_rate should reach the 0.90 floor."""
     run_dir = tmp_path / arm
-    _build_simulated_run(ARCHIVE / arm, run_dir, arm_label,
-                         inject_summaries_for=None)
+    _build_simulated_run(ARCHIVE / arm, run_dir, arm_label, inject_summaries_for=None)
     metrics = _run_reporter_and_verify(run_dir, arm_label)
     mr = metrics["raw"]["must_ok_rate"]
     assert mr >= 0.90, (

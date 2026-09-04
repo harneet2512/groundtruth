@@ -6,6 +6,7 @@ structure: the host/image split is killed — LSP + foundational gates run via `
 with the 8 proof flags, substrate is forbidden under proof, and the certificates upload. No
 SWE-bench tasks, no gold, no per-repo logic.
 """
+
 import importlib.util
 import os
 import sys
@@ -24,8 +25,10 @@ def _wf_text():
 
 # ── (1) runtime boundary assertion ───────────────────────────────────────────
 
+
 def test_boundary_inert_outside_proof(monkeypatch):
     from groundtruth.runtime.context import assert_container_boundary
+
     monkeypatch.delenv("GT_PROOF_MODE", raising=False)
     assert_container_boundary("x")  # no raise
 
@@ -33,6 +36,7 @@ def test_boundary_inert_outside_proof(monkeypatch):
 def test_boundary_raises_on_host_in_proof(monkeypatch):
     from groundtruth.runtime.context import assert_container_boundary
     from groundtruth.runtime.proof import GTProofModeError
+
     monkeypatch.setenv("GT_PROOF_MODE", "1")
     monkeypatch.delenv("GT_CONTAINERIZED", raising=False)
     with pytest.raises(GTProofModeError) as e:
@@ -44,6 +48,7 @@ def test_boundary_raises_with_flag_but_host_cgroup(monkeypatch):
     # GT_CONTAINERIZED set but cgroup/.dockerenv say host (the test runner) -> still fail.
     from groundtruth.runtime.context import assert_container_boundary
     from groundtruth.runtime.proof import GTProofModeError
+
     monkeypatch.setenv("GT_PROOF_MODE", "1")
     monkeypatch.setenv("GT_CONTAINERIZED", "1")
     with pytest.raises(GTProofModeError):
@@ -63,15 +68,17 @@ def test_foundational_gates_main_fails_on_host_in_proof(monkeypatch):
 
 # ── (2) workflow structure: host/image split killed ──────────────────────────
 
+
 def test_workflow_yaml_parses():
     import yaml
+
     with open(_WF, encoding="utf-8") as f:
         yaml.safe_load(f)
 
 
 def test_lsp_runs_in_container_not_host():
     t = _wf_text()
-    assert "groundtruth.resolve --db /tmp/graph.db --root \"$ROOT\"" in t
+    assert 'groundtruth.resolve --db /tmp/graph.db --root "$ROOT"' in t
     # the old host LSP invocation must be gone
     assert "python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src" not in t
 
@@ -84,9 +91,16 @@ def test_gates_run_in_container_not_host():
 
 def test_all_proof_flags_on_in_container_execs():
     t = _wf_text()
-    for flag in ("GT_PROOF_MODE=1", "GT_CONTAINERIZED=1", "GT_REQUIRE_FTS5=1",
-                 "GT_REQUIRE_EMBEDDER=1", "GT_FORCE_ONNX_EMBEDDER=1", "GT_REQUIRE_LSP=1",
-                 "GT_REQUIRE_FULL_STACK=1", "GT_FORBID_PREBUILT_GRAPH=1"):
+    for flag in (
+        "GT_PROOF_MODE=1",
+        "GT_CONTAINERIZED=1",
+        "GT_REQUIRE_FTS5=1",
+        "GT_REQUIRE_EMBEDDER=1",
+        "GT_FORCE_ONNX_EMBEDDER=1",
+        "GT_REQUIRE_LSP=1",
+        "GT_REQUIRE_FULL_STACK=1",
+        "GT_FORBID_PREBUILT_GRAPH=1",
+    ):
         assert flag in t, f"missing in-container exec flag: {flag}"
 
 
@@ -99,15 +113,23 @@ def test_legacy_divergent_substrate_forbidden():
 
 def test_classify_runtime_strategy():
     from groundtruth.runtime.context import classify_runtime_strategy
-    assert classify_runtime_strategy(gate_module="foundational_gates.py", in_container=False, proof=True) == ("HOST_GT_EXEC_FORBIDDEN", False)
-    assert classify_runtime_strategy(gate_module="gt-substrate-run.sh", in_container=True, proof=True) == ("LEGACY_DIVERGENT_SUBSTRATE_FORBIDDEN", False)
-    assert classify_runtime_strategy(gate_module="foundational_gates.py", in_container=True, proof=True) == ("UNIFIED_GT_SUBSTRATE_OK", True)
+
+    assert classify_runtime_strategy(
+        gate_module="foundational_gates.py", in_container=False, proof=True
+    ) == ("HOST_GT_EXEC_FORBIDDEN", False)
+    assert classify_runtime_strategy(
+        gate_module="gt-substrate-run.sh", in_container=True, proof=True
+    ) == ("LEGACY_DIVERGENT_SUBSTRATE_FORBIDDEN", False)
+    assert classify_runtime_strategy(
+        gate_module="foundational_gates.py", in_container=True, proof=True
+    ) == ("UNIFIED_GT_SUBSTRATE_OK", True)
 
 
 def test_run_v74_forbids_host_in_proof(monkeypatch):
     # Stage 4.1: the host-primary brief proof leak is closed — run_v74 on the host in proof fails.
     from groundtruth.pretask.v7_4_brief import run_v74
     from groundtruth.runtime.proof import GTProofModeError
+
     monkeypatch.setenv("GT_PROOF_MODE", "1")
     monkeypatch.delenv("GT_CONTAINERIZED", raising=False)
     with pytest.raises(GTProofModeError) as e:
@@ -119,6 +141,7 @@ def test_run_v74_guard_inert_outside_proof(monkeypatch):
     monkeypatch.delenv("GT_PROOF_MODE", raising=False)
     from groundtruth.pretask.v7_4_brief import run_v74
     from groundtruth.runtime.proof import GTProofModeError
+
     try:
         run_v74("x", "/tmp/repo", "/tmp/does_not_exist.db")
     except GTProofModeError:
@@ -145,4 +168,4 @@ def test_gtsrc_kept_alive_and_provisioned():
     # pinned gt-run-proof substrate is the primary path.
     t = _wf_text()
     assert "gtsrc provisioned" in t
-    assert "docker cp \"${{ github.workspace }}/src/groundtruth\" gtsrc:/opt/gt/groundtruth" in t
+    assert 'docker cp "${{ github.workspace }}/src/groundtruth" gtsrc:/opt/gt/groundtruth' in t

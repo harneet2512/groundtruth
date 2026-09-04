@@ -33,6 +33,7 @@ diverged from canon. These tests pin the restored parity:
 
 All deterministic: sqlite fixtures, no Go toolchain, no network, no task IDs.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -80,9 +81,14 @@ def patch_mod(monkeypatch):
 # ---------------------------------------------------------------------------
 # graph.db fixture builder (Go-indexer output schema)
 # ---------------------------------------------------------------------------
-def _create_graph_db(db_path: Path, nodes: list[dict], edges: list[tuple],
-                     *, with_method_cols: bool = True,
-                     cochanges: list[tuple] | None = None) -> None:
+def _create_graph_db(
+    db_path: Path,
+    nodes: list[dict],
+    edges: list[tuple],
+    *,
+    with_method_cols: bool = True,
+    cochanges: list[tuple] | None = None,
+) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         """
@@ -121,18 +127,23 @@ def _create_graph_db(db_path: Path, nodes: list[dict], edges: list[tuple],
         "node_id INTEGER, kind TEXT, value TEXT, line INTEGER)"
     )
     if cochanges is not None:
-        conn.execute(
-            "CREATE TABLE cochanges (file_a TEXT, file_b TEXT, count INTEGER)"
-        )
+        conn.execute("CREATE TABLE cochanges (file_a TEXT, file_b TEXT, count INTEGER)")
         conn.executemany("INSERT INTO cochanges VALUES (?,?,?)", cochanges)
     key_to_id: dict[str, int] = {}
     for n in nodes:
         conn.execute(
             "INSERT INTO nodes (label, name, file_path, signature, start_line, end_line, "
             "is_test, language) VALUES (?,?,?,?,?,?,?,?)",
-            (n["label"], n["name"], n["file_path"], n.get("signature", ""),
-             n.get("start_line", 1), n.get("end_line", 1), int(n.get("is_test", 0)),
-             n.get("language", "python")),
+            (
+                n["label"],
+                n["name"],
+                n["file_path"],
+                n.get("signature", ""),
+                n.get("start_line", 1),
+                n.get("end_line", 1),
+                int(n.get("is_test", 0)),
+                n.get("language", "python"),
+            ),
         )
         key = n.get("key", n["name"])
         key_to_id[key] = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -147,8 +158,7 @@ def _create_graph_db(db_path: Path, nodes: list[dict], edges: list[tuple],
         else:
             src, tgt, etype, line = e[:4]
             conn.execute(
-                "INSERT INTO edges (source_id, target_id, type, source_line) "
-                "VALUES (?,?,?,?)",
+                "INSERT INTO edges (source_id, target_id, type, source_line) VALUES (?,?,?,?)",
                 (key_to_id[src], key_to_id[tgt], etype, line),
             )
     conn.commit()
@@ -167,18 +177,35 @@ def two_init_repo(tmp_path: Path):
     Nothing from pkg_b may ever be attributed to pkg_a."""
     db = tmp_path / "graph.db"
     nodes = [
-        {"label": "Function", "name": "alpha_func", "file_path": "pkg_a/__init__.py",
-         "signature": "def alpha_func(x)", "start_line": 1, "end_line": 3},
-        {"label": "Function", "name": "beta_func", "file_path": "pkg_b/__init__.py",
-         "signature": "def beta_func(y)", "start_line": 1, "end_line": 3},
-        {"label": "Function", "name": "run", "file_path": "main.py",
-         "signature": "def run()", "start_line": 1, "end_line": 5},
+        {
+            "label": "Function",
+            "name": "alpha_func",
+            "file_path": "pkg_a/__init__.py",
+            "signature": "def alpha_func(x)",
+            "start_line": 1,
+            "end_line": 3,
+        },
+        {
+            "label": "Function",
+            "name": "beta_func",
+            "file_path": "pkg_b/__init__.py",
+            "signature": "def beta_func(y)",
+            "start_line": 1,
+            "end_line": 3,
+        },
+        {
+            "label": "Function",
+            "name": "run",
+            "file_path": "main.py",
+            "signature": "def run()",
+            "start_line": 1,
+            "end_line": 5,
+        },
     ]
     edges = [
         ("run", "beta_func", "CALLS", 3, "import", 1.0),
     ]
-    _create_graph_db(db, nodes, edges,
-                     cochanges=[("pkg_b/__init__.py", "main.py", 5)])
+    _create_graph_db(db, nodes, edges, cochanges=[("pkg_b/__init__.py", "main.py", 5)])
     return tmp_path, db
 
 
@@ -265,15 +292,21 @@ def test_bug1_cochange_block_no_cross_attribution(two_init_repo, patch_mod, monk
 @pytest.fixture
 def caller_count_repo(tmp_path: Path):
     """lib/util.py::helper with 4 incoming CALLS edges:
-       - app/a.py::use_a    import / 1.0 / is_test=0  -> COUNTS
-       - app/b.py::use_b    name_match / 0.9          -> excluded (not deterministic)
-       - tests/t.py::test_h import / 1.0 / is_test=1  -> excluded (test caller)
-       - app/c.py::use_c    import / 0.4              -> excluded (confidence < 0.7)
+    - app/a.py::use_a    import / 1.0 / is_test=0  -> COUNTS
+    - app/b.py::use_b    name_match / 0.9          -> excluded (not deterministic)
+    - tests/t.py::test_h import / 1.0 / is_test=1  -> excluded (test caller)
+    - app/c.py::use_c    import / 0.4              -> excluded (confidence < 0.7)
     """
     db = tmp_path / "graph.db"
     nodes = [
-        {"label": "Function", "name": "helper", "file_path": "lib/util.py",
-         "signature": "def helper(v)", "start_line": 1, "end_line": 4},
+        {
+            "label": "Function",
+            "name": "helper",
+            "file_path": "lib/util.py",
+            "signature": "def helper(v)",
+            "start_line": 1,
+            "end_line": 4,
+        },
         {"label": "Function", "name": "use_a", "file_path": "app/a.py"},
         {"label": "Function", "name": "use_b", "file_path": "app/b.py"},
         {"label": "Function", "name": "test_h", "file_path": "tests/t.py", "is_test": 1},
@@ -290,7 +323,8 @@ def caller_count_repo(tmp_path: Path):
 
 
 def test_bug2_caller_count_excludes_name_match_test_and_lowconf(
-        caller_count_repo, patch_mod, monkeypatch):
+    caller_count_repo, patch_mod, monkeypatch
+):
     _tmp, db = caller_count_repo
     monkeypatch.setenv("GT_GRAPH_DB", str(db))
     block = patch_mod._graph_contract_block("lib/util.py")
@@ -305,8 +339,12 @@ def test_bug2_caller_count_abstains_on_legacy_schema(tmp_path, patch_mod, monkey
     all (no number rather than a fake one). The signature itself still renders."""
     db = tmp_path / "legacy.db"
     nodes = [
-        {"label": "Function", "name": "helper", "file_path": "lib/util.py",
-         "signature": "def helper(v)"},
+        {
+            "label": "Function",
+            "name": "helper",
+            "file_path": "lib/util.py",
+            "signature": "def helper(v)",
+        },
         {"label": "Function", "name": "use_a", "file_path": "app/a.py"},
     ]
     edges = [("use_a", "helper", "CALLS", 2)]
@@ -325,10 +363,18 @@ def test_bug2_caller_count_abstains_on_legacy_schema(tmp_path, patch_mod, monkey
 def test_bug3_callee_contracts_abstain_on_legacy_schema(tmp_path, patch_mod):
     db = tmp_path / "legacy.db"
     nodes = [
-        {"label": "Function", "name": "caller_fn", "file_path": "lib/a.py",
-         "signature": "def caller_fn()"},
-        {"label": "Function", "name": "callee_fn", "file_path": "lib/b.py",
-         "signature": "def callee_fn(z)"},
+        {
+            "label": "Function",
+            "name": "caller_fn",
+            "file_path": "lib/a.py",
+            "signature": "def caller_fn()",
+        },
+        {
+            "label": "Function",
+            "name": "callee_fn",
+            "file_path": "lib/b.py",
+            "signature": "def callee_fn(z)",
+        },
     ]
     edges = [("caller_fn", "callee_fn", "CALLS", 2)]
     _create_graph_db(db, nodes, edges, with_method_cols=False)
@@ -347,10 +393,18 @@ def test_bug3_callee_contracts_still_fire_on_deterministic_edge(tmp_path, patch_
     """No over-suppression: a real deterministic callee still renders."""
     db = tmp_path / "graph.db"
     nodes = [
-        {"label": "Function", "name": "caller_fn", "file_path": "lib/a.py",
-         "signature": "def caller_fn()"},
-        {"label": "Function", "name": "callee_fn", "file_path": "lib/b.py",
-         "signature": "def callee_fn(z)"},
+        {
+            "label": "Function",
+            "name": "caller_fn",
+            "file_path": "lib/a.py",
+            "signature": "def caller_fn()",
+        },
+        {
+            "label": "Function",
+            "name": "callee_fn",
+            "file_path": "lib/b.py",
+            "signature": "def callee_fn(z)",
+        },
     ]
     edges = [("caller_fn", "callee_fn", "CALLS", 2, "import", 1.0)]
     _create_graph_db(db, nodes, edges)
@@ -375,8 +429,12 @@ def test_bug4_sanitize_signature_strips_hover_markdown(patch_mod):
 def test_bug4_contract_block_signature_sanitized(tmp_path, patch_mod, monkeypatch):
     db = tmp_path / "graph.db"
     nodes = [
-        {"label": "Method", "name": "wait", "file_path": "lib/w.py",
-         "signature": "```python\n(method) def wait(self, timeout: float) -> None\n```"},
+        {
+            "label": "Method",
+            "name": "wait",
+            "file_path": "lib/w.py",
+            "signature": "```python\n(method) def wait(self, timeout: float) -> None\n```",
+        },
     ]
     _create_graph_db(db, nodes, [])
     monkeypatch.setenv("GT_GRAPH_DB", str(db))
@@ -390,10 +448,18 @@ def test_bug4_contract_block_signature_sanitized(tmp_path, patch_mod, monkeypatc
 def test_bug4_callee_contract_signature_sanitized(tmp_path, patch_mod):
     db = tmp_path / "graph.db"
     nodes = [
-        {"label": "Function", "name": "caller_fn", "file_path": "lib/a.py",
-         "signature": "def caller_fn()"},
-        {"label": "Function", "name": "callee_fn", "file_path": "lib/b.py",
-         "signature": "```python\n(function) def callee_fn(z: int) -> str\n```"},
+        {
+            "label": "Function",
+            "name": "caller_fn",
+            "file_path": "lib/a.py",
+            "signature": "def caller_fn()",
+        },
+        {
+            "label": "Function",
+            "name": "callee_fn",
+            "file_path": "lib/b.py",
+            "signature": "```python\n(function) def callee_fn(z: int) -> str\n```",
+        },
     ]
     edges = [("caller_fn", "callee_fn", "CALLS", 2, "import", 1.0)]
     _create_graph_db(db, nodes, edges)
@@ -414,17 +480,25 @@ def test_bug4_property_values_clipped_balanced(tmp_path, patch_mod, monkeypatch)
     repaired by the balanced clip, never rendered raw."""
     db = tmp_path / "graph.db"
     nodes = [
-        {"label": "Function", "name": "top_fn", "file_path": "lib/p.py",
-         "signature": "def top_fn(x)", "key": "top_fn"},
+        {
+            "label": "Function",
+            "name": "top_fn",
+            "file_path": "lib/p.py",
+            "signature": "def top_fn(x)",
+            "key": "top_fn",
+        },
     ]
     _create_graph_db(db, nodes, [])
     node_id = _create_graph_db.last_ids["top_fn"]  # type: ignore[attr-defined]
     conn = sqlite3.connect(str(db))
-    conn.execute("INSERT INTO properties (node_id, kind, value, line) VALUES (?,?,?,?)",
-                 (node_id, "guard_clause", "x > 0 and", 2))
-    conn.execute("INSERT INTO properties (node_id, kind, value, line) VALUES (?,?,?,?)",
-                 (node_id, "exception_flow",
-                  'raise TypeError("unterminated literal', 3))
+    conn.execute(
+        "INSERT INTO properties (node_id, kind, value, line) VALUES (?,?,?,?)",
+        (node_id, "guard_clause", "x > 0 and", 2),
+    )
+    conn.execute(
+        "INSERT INTO properties (node_id, kind, value, line) VALUES (?,?,?,?)",
+        (node_id, "exception_flow", 'raise TypeError("unterminated literal', 3),
+    )
     conn.commit()
     conn.close()
     monkeypatch.setenv("GT_GRAPH_DB", str(db))
@@ -440,8 +514,9 @@ def test_bug4_property_values_clipped_balanced(tmp_path, patch_mod, monkeypatch)
 # ===========================================================================
 def test_bug5_connect_ro_works_on_readonly_file(tmp_path, patch_mod):
     db = tmp_path / "graph.db"
-    _create_graph_db(db, [{"label": "Function", "name": "f", "file_path": "a.py",
-                           "signature": "def f()"}], [])
+    _create_graph_db(
+        db, [{"label": "Function", "name": "f", "file_path": "a.py", "signature": "def f()"}], []
+    )
     os.chmod(db, stat.S_IREAD)  # read-only file
     try:
         con = patch_mod._connect_ro(str(db))
@@ -458,8 +533,9 @@ def test_bug5_connect_ro_works_on_readonly_file(tmp_path, patch_mod):
 def test_bug5_connect_ro_immutable_in_substrate_mode(tmp_path, patch_mod, monkeypatch):
     """On the truly-ro substrate mount the open uses immutable=1 (no WAL/locking)."""
     db = tmp_path / "graph.db"
-    _create_graph_db(db, [{"label": "Function", "name": "f", "file_path": "a.py",
-                           "signature": "def f()"}], [])
+    _create_graph_db(
+        db, [{"label": "Function", "name": "f", "file_path": "a.py", "signature": "def f()"}], []
+    )
     monkeypatch.setenv("GT_PORTABLE_SUBSTRATE", "1")
     con = patch_mod._connect_ro(str(db))
     assert con is not None
@@ -482,7 +558,9 @@ def test_bug5_probe_prints_classified_line_once(tmp_path, patch_mod, capsys):
     # second use: quiet (correct-or-quiet, no per-turn spam)
     assert patch_mod._connect_ro(str(bad)) is None
     captured2 = capsys.readouterr()
-    assert "GRAPH_UNREADABLE_IN_CONTAINER" not in captured2.out + captured2.err, "BUG5: probe line spammed"
+    assert "GRAPH_UNREADABLE_IN_CONTAINER" not in captured2.out + captured2.err, (
+        "BUG5: probe line spammed"
+    )
 
 
 def test_bug5_all_pillars_route_through_connect_ro(two_init_repo, patch_mod, monkeypatch):
@@ -492,8 +570,9 @@ def test_bug5_all_pillars_route_through_connect_ro(two_init_repo, patch_mod, mon
     monkeypatch.setattr(patch_mod, "_connect_ro", lambda _db: None)
     assert patch_mod._evidence_body("post_view", "pkg_a/__init__.py", str(_tmp)) == ""
     assert patch_mod._query_scope("pkg_a/__init__.py") == []
-    assert patch_mod._consensus_block("pkg_b/__init__.py", str(_tmp)) == "" or \
-        "graph-connected" not in patch_mod._consensus_block("pkg_b/__init__.py", str(_tmp))
+    assert patch_mod._consensus_block(
+        "pkg_b/__init__.py", str(_tmp)
+    ) == "" or "graph-connected" not in patch_mod._consensus_block("pkg_b/__init__.py", str(_tmp))
     assert patch_mod._graph_contract_block("pkg_b/__init__.py") == ""
     assert patch_mod._cochange_block("pkg_b/__init__.py") == ""
 
@@ -501,8 +580,9 @@ def test_bug5_all_pillars_route_through_connect_ro(two_init_repo, patch_mod, mon
 # ===========================================================================
 # BUG #6 — GT_BASELINE strict "1" parse (gt_agent + gt_mini_patch in lockstep)
 # ===========================================================================
-@pytest.mark.parametrize("value,expected", [("1", True), ("0", False),
-                                            ("false", False), ("true", False)])
+@pytest.mark.parametrize(
+    "value,expected", [("1", True), ("0", False), ("false", False), ("true", False)]
+)
 def test_bug6_gt_baseline_strict_parse(monkeypatch, value, expected):
     monkeypatch.setenv("GT_BASELINE", value)
     agent = _load(_AGENT_PATH, "gt_agent_dsf")
@@ -568,25 +648,31 @@ def _make_edge_graph(db_path: Path) -> None:
         "target_id INT, type TEXT, source_line INT, source_file TEXT, "
         "resolution_method TEXT, confidence REAL, metadata TEXT)"
     )
-    conn.execute("INSERT INTO nodes (label,name,file_path,language) "
-                 "VALUES ('Function','A','a.py','python')")
-    conn.execute("INSERT INTO nodes (label,name,file_path,language) "
-                 "VALUES ('Function','B','b.py','python')")
-    conn.execute("INSERT INTO edges (source_id,target_id,type,source_line,"
-                 "resolution_method,confidence) VALUES (1,2,'CALLS',4,'import',1.0)")
+    conn.execute(
+        "INSERT INTO nodes (label,name,file_path,language) VALUES ('Function','A','a.py','python')"
+    )
+    conn.execute(
+        "INSERT INTO nodes (label,name,file_path,language) VALUES ('Function','B','b.py','python')"
+    )
+    conn.execute(
+        "INSERT INTO edges (source_id,target_id,type,source_line,"
+        "resolution_method,confidence) VALUES (1,2,'CALLS',4,'import',1.0)"
+    )
     conn.commit()
     conn.close()
 
 
 def test_bug7_witness_raises_on_mismatch_substrate_without_proof(
-        agent_mod, monkeypatch, tmp_path, capsys):
+    agent_mod, monkeypatch, tmp_path, capsys
+):
     """Consistent raise scope: substrate active (GT_HOST_GRAPH_DB set) but NO
     GT_PROOF_MODE — a hash mismatch must STILL raise (DeepSweAdapterError
     docstring: 'under proof/substrate mode'), after printing the classified line."""
     db = tmp_path / "graph.db"
     _make_edge_graph(db)
     (tmp_path / "lsp_certificate.json").write_text(
-        '{"graph_hash_after_lsp": "deadbeef_wrong"}', encoding="utf-8")
+        '{"graph_hash_after_lsp": "deadbeef_wrong"}', encoding="utf-8"
+    )
     monkeypatch.setenv("GT_HOST_GRAPH_DB", str(db))
     monkeypatch.setenv("GT_CERT_DIR", str(tmp_path))
     monkeypatch.setenv("GT_LSP_CERT", str(tmp_path / "lsp_certificate.json"))
@@ -603,6 +689,7 @@ def test_bug7_witness_warns_outside_proof_and_substrate(agent_mod, monkeypatch, 
     monkeypatch.setattr(agent_mod, "_substrate_active", lambda: False)
     # Force the import-failed branch deterministically.
     import builtins
+
     real_import = builtins.__import__
 
     def _block(name, *a, **k):
@@ -621,6 +708,7 @@ def test_bug7_witness_warns_outside_proof_and_substrate(agent_mod, monkeypatch, 
 # ===========================================================================
 def test_bug8_yaml_honest_and_explains_all_tags():
     import yaml
+
     text = _PIER_CFG.read_text(encoding="utf-8")
     doc = yaml.safe_load(text)  # still valid yaml
     template = doc["agent"]["instance_template"]
@@ -644,8 +732,12 @@ def test_bug9_unverified_tag_on_name_match_caller_hint(tmp_path, patch_mod):
     root = tmp_path / "repo"
     root.mkdir()
     nodes = [
-        {"label": "Function", "name": "target_fn", "file_path": "lib/t.py",
-         "signature": "def target_fn()"},
+        {
+            "label": "Function",
+            "name": "target_fn",
+            "file_path": "lib/t.py",
+            "signature": "def target_fn()",
+        },
         {"label": "Function", "name": "guess_fn", "file_path": "app/x.py"},
     ]
     edges = [("guess_fn", "target_fn", "CALLS", 12, "name_match", 0.9)]

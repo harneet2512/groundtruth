@@ -4,6 +4,7 @@ Drives graph_certificate.classify_graph (synthetic certs) + the real-DB FTS5 MAT
 the cross-module hash canonicality (the edge fingerprint that pins build->LSP->gates->hooks to
 ONE graph). No SWE-bench tasks, no gold, no per-repo logic.
 """
+
 import importlib.util
 import os
 import sqlite3
@@ -11,7 +12,9 @@ import sys
 
 import pytest
 
-_GC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "metrics", "graph_certificate.py")
+_GC_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "scripts", "metrics", "graph_certificate.py"
+)
 _spec = importlib.util.spec_from_file_location("graph_certificate_t", _GC_PATH)
 gc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gc)
@@ -23,12 +26,18 @@ from groundtruth.runtime import proof as _proof  # noqa: E402
 def _base_graph_cert(**kw):
     """A valid, in-container, consistent-hash certificate; override per test."""
     c = {
-        "edges_count": 100, "calls_edges_count": 80,
-        "fts5_exists": True, "fts5_row_count": 50, "fts5_match_probe_ok": True,
+        "edges_count": 100,
+        "calls_edges_count": 80,
+        "fts5_exists": True,
+        "fts5_row_count": 50,
+        "fts5_match_probe_ok": True,
         "built_inside_container": True,
-        "host_resolved_graph_db": "/tmp/gt/graph.db", "prebuilt_active": True,
+        "host_resolved_graph_db": "/tmp/gt/graph.db",
+        "prebuilt_active": True,
         "closure_rebuilt_after_lsp": True,
-        "graph_hash": "abc", "graph_hash_after_lsp": "abc", "hook_graph_hash": "abc",
+        "graph_hash": "abc",
+        "graph_hash_after_lsp": "abc",
+        "hook_graph_hash": "abc",
         "graph_bases": {
             "label": "[graph bases]",
             "base_evaluable_pct": 100.0,
@@ -44,22 +53,36 @@ def _base_graph_cert(**kw):
 
 def _make_edges_db(path, with_fts5=False, fts5_regular=False):
     c = sqlite3.connect(path)
-    c.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, qualified_name TEXT, "
-              "signature TEXT, file_path TEXT, language TEXT)")
-    c.execute("CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, "
-              "type TEXT, resolution_method TEXT, confidence REAL, trust_tier TEXT, metadata TEXT)")
-    c.execute("CREATE TABLE properties (id INTEGER PRIMARY KEY, node_id INTEGER, kind TEXT, "
-              "value TEXT, line INTEGER, confidence REAL)")
-    c.execute("CREATE TABLE assertions (id INTEGER PRIMARY KEY, test_node_id INTEGER, "
-              "target_node_id INTEGER, kind TEXT, expression TEXT, expected TEXT, line INTEGER)")
+    c.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, qualified_name TEXT, "
+        "signature TEXT, file_path TEXT, language TEXT)"
+    )
+    c.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, "
+        "type TEXT, resolution_method TEXT, confidence REAL, trust_tier TEXT, metadata TEXT)"
+    )
+    c.execute(
+        "CREATE TABLE properties (id INTEGER PRIMARY KEY, node_id INTEGER, kind TEXT, "
+        "value TEXT, line INTEGER, confidence REAL)"
+    )
+    c.execute(
+        "CREATE TABLE assertions (id INTEGER PRIMARY KEY, test_node_id INTEGER, "
+        "target_node_id INTEGER, kind TEXT, expression TEXT, expected TEXT, line INTEGER)"
+    )
     c.execute("CREATE TABLE cochanges (file_a TEXT, file_b TEXT, count INTEGER)")
     c.execute("CREATE TABLE closure (source_id INTEGER, target_id INTEGER, depth INTEGER)")
-    c.executemany("INSERT INTO nodes (id,name,qualified_name,signature,file_path,language) VALUES (?,?,?,?,?,?)",
-                  [(1, "a", "a", "()", "f.py", "Python"), (2, "b", "b", "()", "f.py", "Python")])
-    c.executemany("INSERT INTO edges (source_id,target_id,type,resolution_method,confidence,trust_tier) "
-                  "VALUES (?,?,?,?,?,?)",
-                  [(1, 2, "CALLS", "same_file", 1.0, "CERTIFIED"),
-                   (2, 1, "CALLS", "name_match", 0.4, "SPECULATIVE")])
+    c.executemany(
+        "INSERT INTO nodes (id,name,qualified_name,signature,file_path,language) VALUES (?,?,?,?,?,?)",
+        [(1, "a", "a", "()", "f.py", "Python"), (2, "b", "b", "()", "f.py", "Python")],
+    )
+    c.executemany(
+        "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence,trust_tier) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            (1, 2, "CALLS", "same_file", 1.0, "CERTIFIED"),
+            (2, 1, "CALLS", "name_match", 0.4, "SPECULATIVE"),
+        ],
+    )
     if with_fts5:
         try:
             c.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, qualified_name)")
@@ -75,27 +98,43 @@ def _make_edges_db(path, with_fts5=False, fts5_regular=False):
 
 def _make_graph_bases_db(path):
     c = sqlite3.connect(path)
-    c.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT, "
-              "qualified_name TEXT, file_path TEXT, language TEXT)")
-    c.execute("CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, "
-              "type TEXT, source_line INTEGER, source_file TEXT, resolution_method TEXT, "
-              "confidence REAL, metadata TEXT, trust_tier TEXT)")
-    c.execute("CREATE TABLE properties (id INTEGER PRIMARY KEY, node_id INTEGER, kind TEXT, "
-              "value TEXT, line INTEGER, confidence REAL)")
-    c.execute("CREATE TABLE assertions (id INTEGER PRIMARY KEY, test_node_id INTEGER, "
-              "target_node_id INTEGER, kind TEXT, expression TEXT, expected TEXT, line INTEGER)")
+    c.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT, "
+        "qualified_name TEXT, file_path TEXT, language TEXT)"
+    )
+    c.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, "
+        "type TEXT, source_line INTEGER, source_file TEXT, resolution_method TEXT, "
+        "confidence REAL, metadata TEXT, trust_tier TEXT)"
+    )
+    c.execute(
+        "CREATE TABLE properties (id INTEGER PRIMARY KEY, node_id INTEGER, kind TEXT, "
+        "value TEXT, line INTEGER, confidence REAL)"
+    )
+    c.execute(
+        "CREATE TABLE assertions (id INTEGER PRIMARY KEY, test_node_id INTEGER, "
+        "target_node_id INTEGER, kind TEXT, expression TEXT, expected TEXT, line INTEGER)"
+    )
     c.execute("CREATE TABLE cochanges (file_a TEXT, file_b TEXT, count INTEGER)")
     c.execute("CREATE TABLE closure (source_id INTEGER, target_id INTEGER, depth INTEGER)")
     c.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, qualified_name)")
-    c.executemany("INSERT INTO nodes VALUES (?,?,?,?,?,?)", [
-        (1, "Class", "Base", "pkg.Base", "base.py", "Python"),
-        (2, "Class", "Child", "pkg.Child", "child.py", "Python"),
-        (3, "Function", "run", "pkg.run", "run.py", "Python"),
-        (4, "Function", "test_run", "pkg.test_run", "test_run.py", "Python"),
-    ])
-    c.executemany("INSERT INTO nodes_fts (name, qualified_name) VALUES (?,?)", [
-        ("Base", "pkg.Base"), ("Child", "pkg.Child"), ("run", "pkg.run"),
-    ])
+    c.executemany(
+        "INSERT INTO nodes VALUES (?,?,?,?,?,?)",
+        [
+            (1, "Class", "Base", "pkg.Base", "base.py", "Python"),
+            (2, "Class", "Child", "pkg.Child", "child.py", "Python"),
+            (3, "Function", "run", "pkg.run", "run.py", "Python"),
+            (4, "Function", "test_run", "pkg.test_run", "test_run.py", "Python"),
+        ],
+    )
+    c.executemany(
+        "INSERT INTO nodes_fts (name, qualified_name) VALUES (?,?)",
+        [
+            ("Base", "pkg.Base"),
+            ("Child", "pkg.Child"),
+            ("run", "pkg.run"),
+        ],
+    )
     c.executemany(
         "INSERT INTO edges (source_id,target_id,type,source_line,source_file,"
         "resolution_method,confidence,metadata,trust_tier) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -109,16 +148,19 @@ def _make_graph_bases_db(path):
             (3, 2, "PRECEDES", 15, "run.py", "promote_precedes", 1.0, "", "CERTIFIED"),
         ],
     )
-    c.executemany("INSERT INTO properties (node_id,kind,value,line,confidence) VALUES (?,?,?,?,?)", [
-        (3, "param", "x:int [required]", 1, 1.0),
-        (3, "return_shape", "int", 2, 1.0),
-        (2, "class_field", "value:int", 3, 1.0),
-        (3, "field_read", "value", 11, 1.0),
-        (3, "side_effect", "value", 12, 1.0),
-        (3, "exception_flow", "ValueError", 13, 1.0),
-        (3, "data_flow", "x -> value", 14, 1.0),
-        (3, "call_order", "load before save", 15, 1.0),
-    ])
+    c.executemany(
+        "INSERT INTO properties (node_id,kind,value,line,confidence) VALUES (?,?,?,?,?)",
+        [
+            (3, "param", "x:int [required]", 1, 1.0),
+            (3, "return_shape", "int", 2, 1.0),
+            (2, "class_field", "value:int", 3, 1.0),
+            (3, "field_read", "value", 11, 1.0),
+            (3, "side_effect", "value", 12, 1.0),
+            (3, "exception_flow", "ValueError", 13, 1.0),
+            (3, "data_flow", "x -> value", 14, 1.0),
+            (3, "call_order", "load before save", 15, 1.0),
+        ],
+    )
     c.execute("INSERT INTO assertions VALUES (1,4,3,'raises','run(None)','ValueError',5)")
     c.execute("INSERT INTO cochanges VALUES ('run.py','child.py',3)")
     c.execute("INSERT INTO closure VALUES (3,1,2)")
@@ -128,78 +170,115 @@ def _make_graph_bases_db(path):
 
 # ── classifier matrix (the required hard gates) ──────────────────────────────
 
+
 def test_graph_valid():
     assert gc.classify_graph(_base_graph_cert(), proof_mode=True) == ("GRAPH_VALID", True)
 
 
 def test_fts5_missing_fails():
-    assert gc.classify_graph(_base_graph_cert(fts5_exists=False), proof_mode=True) == ("GRAPH_FAIL_FTS5", False)
+    assert gc.classify_graph(_base_graph_cert(fts5_exists=False), proof_mode=True) == (
+        "GRAPH_FAIL_FTS5",
+        False,
+    )
 
 
 def test_fts5_empty_fails():
-    assert gc.classify_graph(_base_graph_cert(fts5_row_count=0), proof_mode=True) == ("GRAPH_FAIL_FTS5", False)
+    assert gc.classify_graph(_base_graph_cert(fts5_row_count=0), proof_mode=True) == (
+        "GRAPH_FAIL_FTS5",
+        False,
+    )
 
 
 def test_fts5_match_unqueryable_fails():
-    assert gc.classify_graph(_base_graph_cert(fts5_match_probe_ok=False), proof_mode=True) == ("GRAPH_FAIL_FTS5", False)
+    assert gc.classify_graph(_base_graph_cert(fts5_match_probe_ok=False), proof_mode=True) == (
+        "GRAPH_FAIL_FTS5",
+        False,
+    )
 
 
 def test_missing_handoff_in_proof_fails():
-    assert gc.classify_graph(_base_graph_cert(host_resolved_graph_db=""), proof_mode=True) == ("GRAPH_FAIL_MISSING_HANDOFF", False)
+    assert gc.classify_graph(_base_graph_cert(host_resolved_graph_db=""), proof_mode=True) == (
+        "GRAPH_FAIL_MISSING_HANDOFF",
+        False,
+    )
 
 
 def test_missing_handoff_outside_proof_ok():
     # handoff is only mandatory under proof mode
-    assert gc.classify_graph(_base_graph_cert(host_resolved_graph_db=""), proof_mode=False) == ("GRAPH_VALID", True)
+    assert gc.classify_graph(_base_graph_cert(host_resolved_graph_db=""), proof_mode=False) == (
+        "GRAPH_VALID",
+        True,
+    )
 
 
 def test_handoff_inactive_in_proof_fails():
-    assert gc.classify_graph(_base_graph_cert(prebuilt_active=False), proof_mode=True) == ("GRAPH_FAIL_HANDOFF_INACTIVE", False)
+    assert gc.classify_graph(_base_graph_cert(prebuilt_active=False), proof_mode=True) == (
+        "GRAPH_FAIL_HANDOFF_INACTIVE",
+        False,
+    )
 
 
 def test_stale_closure_fails():
-    assert gc.classify_graph(_base_graph_cert(closure_rebuilt_after_lsp=False), proof_mode=True) == ("GRAPH_FAIL_STALE_CLOSURE", False)
+    assert gc.classify_graph(
+        _base_graph_cert(closure_rebuilt_after_lsp=False), proof_mode=True
+    ) == ("GRAPH_FAIL_STALE_CLOSURE", False)
 
 
 def test_hash_mismatch_vs_lsp_fails():
-    assert gc.classify_graph(_base_graph_cert(graph_hash_after_lsp="DEF"), proof_mode=True) == ("GRAPH_FAIL_HASH_MISMATCH", False)
+    assert gc.classify_graph(_base_graph_cert(graph_hash_after_lsp="DEF"), proof_mode=True) == (
+        "GRAPH_FAIL_HASH_MISMATCH",
+        False,
+    )
 
 
 def test_hook_hash_mismatch_fails():
-    assert gc.classify_graph(_base_graph_cert(hook_graph_hash="DEF"), proof_mode=True) == ("GRAPH_FAIL_HOOK_MISMATCH", False)
+    assert gc.classify_graph(_base_graph_cert(hook_graph_hash="DEF"), proof_mode=True) == (
+        "GRAPH_FAIL_HOOK_MISMATCH",
+        False,
+    )
 
 
 def test_built_on_host_in_proof_fails():
-    assert gc.classify_graph(_base_graph_cert(built_inside_container=False), proof_mode=True) == ("GRAPH_FAIL_BUILT_ON_HOST", False)
+    assert gc.classify_graph(_base_graph_cert(built_inside_container=False), proof_mode=True) == (
+        "GRAPH_FAIL_BUILT_ON_HOST",
+        False,
+    )
 
 
 def test_empty_graph_fails():
-    assert gc.classify_graph(_base_graph_cert(calls_edges_count=0), proof_mode=True) == ("GRAPH_FAIL_EMPTY", False)
+    assert gc.classify_graph(_base_graph_cert(calls_edges_count=0), proof_mode=True) == (
+        "GRAPH_FAIL_EMPTY",
+        False,
+    )
 
 
 def test_incomplete_graph_bases_fail():
     assert gc.classify_graph(
-        _base_graph_cert(graph_bases={
-            "label": "[graph bases]",
-            "base_evaluable_pct": 92.0,
-            "duplicate_names": [],
-            "evaluable_missing": ["assertions", "closure"],
-            "required_missing": [],
-        }),
+        _base_graph_cert(
+            graph_bases={
+                "label": "[graph bases]",
+                "base_evaluable_pct": 92.0,
+                "duplicate_names": [],
+                "evaluable_missing": ["assertions", "closure"],
+                "required_missing": [],
+            }
+        ),
         proof_mode=True,
     ) == ("GRAPH_FAIL_BASES_INCOMPLETE", False)
 
 
 def test_graph_base_foreign_key_violations_fail():
     assert gc.classify_graph(
-        _base_graph_cert(graph_bases={
-            "label": "[graph bases]",
-            "base_evaluable_pct": 100.0,
-            "duplicate_names": [],
-            "evaluable_missing": [],
-            "required_missing": [],
-            "foreign_key_violations": 1,
-        }),
+        _base_graph_cert(
+            graph_bases={
+                "label": "[graph bases]",
+                "base_evaluable_pct": 100.0,
+                "duplicate_names": [],
+                "evaluable_missing": [],
+                "required_missing": [],
+                "foreign_key_violations": 1,
+            }
+        ),
         proof_mode=True,
     ) == ("GRAPH_FAIL_BASES_INCOMPLETE", False)
 
@@ -210,6 +289,7 @@ def test_empty_cert_fails():
 
 # ── real-DB: FTS5 MATCH proof + hash canonicality ────────────────────────────
 
+
 def test_hash_canonical_across_modules(tmp_path):
     db = str(tmp_path / "g.db")
     _make_edges_db(db)
@@ -219,6 +299,7 @@ def test_hash_canonical_across_modules(tmp_path):
     # resolve._graph_edges_hash too (if resolve imports in this env)
     try:
         from groundtruth.resolve import _graph_edges_hash as _rh
+
         assert _rh(db) == h_gc, "resolve hash must match the canonical hash"
     except Exception:
         pass
@@ -250,8 +331,13 @@ def test_build_certificate_real_db(tmp_path):
     assert cert["graph_hash"]
     # a real DB built here is consistent with the LSP cert when hashes are wired equal
     cert2 = gc.build_graph_certificate(
-        db, lsp_cert={"graph_db": db, "graph_hash_after_lsp": cert["graph_hash"],
-                      "closure_rebuilt_after_lsp": True})
+        db,
+        lsp_cert={
+            "graph_db": db,
+            "graph_hash_after_lsp": cert["graph_hash"],
+            "closure_rebuilt_after_lsp": True,
+        },
+    )
     assert cert2["lsp_warm_from_same_graph"] is True
     assert gc.classify_graph(cert2, proof_mode=False)[0] == "GRAPH_VALID"
 

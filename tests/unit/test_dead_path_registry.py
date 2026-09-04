@@ -93,11 +93,15 @@ def test_guard_passes_on_clean_live_chain_under_proof_mode():
     for m in LIVE_CHAIN_MODULES:
         importlib.import_module(m)
     dead_after = {d for d in DEAD_PATHS if d in sys.modules}
-    assert dead_after - dead_before == set(), f"live chain newly imported dead: {dead_after - dead_before}"
+    assert dead_after - dead_before == set(), (
+        f"live chain newly imported dead: {dead_after - dead_before}"
+    )
 
     live_only = {m: sys.modules[m] for m in LIVE_CHAIN_MODULES if m in sys.modules}
     assert assert_no_dead_surface_loaded(env={"GT_PROOF_MODE": "1"}, modules=live_only) is None
-    assert assert_no_dead_surface_loaded(env={"GT_REQUIRE_FULL_STACK": "1"}, modules=live_only) is None
+    assert (
+        assert_no_dead_surface_loaded(env={"GT_REQUIRE_FULL_STACK": "1"}, modules=live_only) is None
+    )
 
 
 @pytest.mark.parametrize("flag", ["GT_PROOF_MODE", "GT_REQUIRE_FULL_STACK"])

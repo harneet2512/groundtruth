@@ -21,12 +21,12 @@ no gold).  LEG 2: parity with the live governor is PRESERVED (zero behavior
 drift on the frozen corpus) while the spec->oracle plumbing that Stage 3's
 flip-lever candidates require becomes real.
 """
+
 from __future__ import annotations
 
 import importlib.util
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -121,6 +121,7 @@ def test_scaffold_confidence_is_nonedit_fraction(sense_mod, oracle_mod):
 # ---------------------------------------------------------------------------
 def test_distribution_floor_is_median_plus_mad(oracle_mod):
     import statistics
+
     pool = [0.9, 0.9, 0.5]
     med = statistics.median(pool)
     mad = statistics.median(abs(x - med) for x in pool)
@@ -135,10 +136,24 @@ def test_gate_pool_suppresses_low_tail_below_floor(oracle_mod):
     """In a multi-candidate pool the low-tail candidate is suppressed with
     reason below_floor; the winner is emitted; telemetry covers BOTH."""
     mk = oracle_mod.Candidate
-    strong = mk(id="a", layer="L5", kind="x", content="A", confidence=0.9,
-                severity="verification_gap", trigger="t")
-    weak = mk(id="b", layer="L5", kind="y", content="B", confidence=0.2,
-              severity="verification_gap", trigger="t")
+    strong = mk(
+        id="a",
+        layer="L5",
+        kind="x",
+        content="A",
+        confidence=0.9,
+        severity="verification_gap",
+        trigger="t",
+    )
+    weak = mk(
+        id="b",
+        layer="L5",
+        kind="y",
+        content="B",
+        confidence=0.2,
+        severity="verification_gap",
+        trigger="t",
+    )
     winner, telemetry = oracle_mod.gate_pool([strong, weak])
     assert winner is not None and winner.id == "a"
     by_id = {t.candidate_id: t for t in telemetry}
@@ -147,18 +162,33 @@ def test_gate_pool_suppresses_low_tail_below_floor(oracle_mod):
 
 
 def test_gate_pool_singleton_passes(oracle_mod):
-    c = oracle_mod.Candidate(id="solo", layer="L5", kind="x", content="A",
-                             confidence=0.33333333, severity="stuck", trigger="t")
+    c = oracle_mod.Candidate(
+        id="solo",
+        layer="L5",
+        kind="x",
+        content="A",
+        confidence=0.33333333,
+        severity="stuck",
+        trigger="t",
+    )
     winner, telemetry = oracle_mod.gate_pool([c])
     assert winner is not None and winner.id == "solo"
 
 
 def test_gate_pool_ranks_by_severity_then_confidence(oracle_mod):
     mk = oracle_mod.Candidate
-    obligation = mk(id="o", layer="spec", kind="obligation", content="O",
-                    confidence=0.8, severity="obligation", trigger="t")
-    nudge = mk(id="n", layer="L5", kind="x", content="N",
-               confidence=0.8, severity="stuck", trigger="t")
+    obligation = mk(
+        id="o",
+        layer="spec",
+        kind="obligation",
+        content="O",
+        confidence=0.8,
+        severity="obligation",
+        trigger="t",
+    )
+    nudge = mk(
+        id="n", layer="L5", kind="x", content="N", confidence=0.8, severity="stuck", trigger="t"
+    )
     winner, telemetry = oracle_mod.gate_pool([nudge, obligation])
     assert winner is not None and winner.id == "o"
     by_id = {t.candidate_id: t for t in telemetry}
@@ -190,8 +220,7 @@ def test_load_obligations_reads_anchors_artifact(oracle_mod, tmp_path):
     """The oracle reads obligations from the SAME gt_issue_anchors.json channel
     v1r_brief.py writes (F1 plumbing, now with a reader)."""
     p = tmp_path / "gt_issue_anchors.json"
-    p.write_text(json.dumps({"symbols": [], "obligations": _OBLIGATIONS}),
-                 encoding="utf-8")
+    p.write_text(json.dumps({"symbols": [], "obligations": _OBLIGATIONS}), encoding="utf-8")
     obls = oracle_mod.load_obligations(str(p))
     assert len(obls) == 2
     assert obls[0]["symbols"] == ["capture_snapshot"]
@@ -219,11 +248,12 @@ def test_obligations_do_not_change_parity_emissions(sense_mod, oracle_mod):
     """Wiring the pool must NOT change Stage-2 parity: the emitted nudges are
     identical with and without obligations supplied."""
     turns = [_turn(sense_mod, f"cat f{i}.txt", "x") for i in range(25)]
-    without = [d.emission.reason_string for d in oracle_mod.replay(turns)
-               if d.emission]
-    withobl = [d.emission.reason_string
-               for d in oracle_mod.replay(turns, obligations=_OBLIGATIONS)
-               if d.emission]
+    without = [d.emission.reason_string for d in oracle_mod.replay(turns) if d.emission]
+    withobl = [
+        d.emission.reason_string
+        for d in oracle_mod.replay(turns, obligations=_OBLIGATIONS)
+        if d.emission
+    ]
     assert without == withobl == ["scaffold_trap"]
 
 

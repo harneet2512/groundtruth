@@ -38,10 +38,7 @@ class Candidate:
     is_test: bool = False
 
 
-_HEADER_SUCCESS = (
-    "<gt-task-brief>\n"
-    "GT pre-task localization (deterministic, multi-signal).\n"
-)
+_HEADER_SUCCESS = "<gt-task-brief>\nGT pre-task localization (deterministic, multi-signal).\n"
 _FOOTER_SUCCESS = (
     "\n"
     "Editing files outside this list is not blocked, but should be justified.\n"

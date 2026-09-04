@@ -181,9 +181,7 @@ def run_index(root: str, output: str, timeout: int = 600) -> bool:
         return False
 
 
-def run_incremental_index(
-    root: str, relpath: str, output: str, timeout: int = 120
-) -> bool:
+def run_incremental_index(root: str, relpath: str, output: str, timeout: int = 120) -> bool:
     """Re-index a SINGLE file into an existing graph.db via `gt-index -file`.
 
     The Go binary already supports a file-keyed delete-and-replace reindex
@@ -210,15 +208,11 @@ def run_incremental_index(
             timeout=timeout,
         )
         if result.returncode != 0:
-            sys.stderr.write(
-                f"GroundTruth: gt-index -file failed: {result.stderr[:500]}\n"
-            )
+            sys.stderr.write(f"GroundTruth: gt-index -file failed: {result.stderr[:500]}\n")
             return False
         return True
     except subprocess.TimeoutExpired:
-        sys.stderr.write(
-            f"GroundTruth: gt-index -file timed out after {timeout}s\n"
-        )
+        sys.stderr.write(f"GroundTruth: gt-index -file timed out after {timeout}s\n")
         return False
     except FileNotFoundError:
         sys.stderr.write(f"GroundTruth: gt-index binary not found at {binary}\n")

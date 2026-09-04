@@ -29,6 +29,7 @@ RED before Stage 2: gt_oracle has no obligation_statuses/render_obligation_
 status_block; the live producer fired once per task with a single-symbol
 nudge and went silent for the rest of the run.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -73,15 +74,27 @@ def patch_mod():
 
 
 _OBLS = [
-    {"verbatim_text": "Multi-key conflicts raise ExtraFieldsLoadError.",
-     "kind": "behavior", "symbols": ["ExtraFieldsLoadError"],
-     "keywords": ["raise"], "checkable_forms": []},
-    {"verbatim_text": "The capture_snapshot method should be async.",
-     "kind": "behavior", "symbols": ["capture_snapshot"],
-     "keywords": ["async"], "checkable_forms": ["async"]},
-    {"verbatim_text": "Eviction preserves named snapshots via max_snapshots.",
-     "kind": "behavior", "symbols": ["max_snapshots"],
-     "keywords": ["preserve"], "checkable_forms": []},
+    {
+        "verbatim_text": "Multi-key conflicts raise ExtraFieldsLoadError.",
+        "kind": "behavior",
+        "symbols": ["ExtraFieldsLoadError"],
+        "keywords": ["raise"],
+        "checkable_forms": [],
+    },
+    {
+        "verbatim_text": "The capture_snapshot method should be async.",
+        "kind": "behavior",
+        "symbols": ["capture_snapshot"],
+        "keywords": ["async"],
+        "checkable_forms": ["async"],
+    },
+    {
+        "verbatim_text": "Eviction preserves named snapshots via max_snapshots.",
+        "kind": "behavior",
+        "symbols": ["max_snapshots"],
+        "keywords": ["preserve"],
+        "checkable_forms": [],
+    },
 ]
 
 
@@ -104,10 +117,8 @@ class TestStatusMachinery:
     def test_status_vector_hash_changes_with_status(self, oracle_mod):
         views = oracle_mod._obligation_views(_OBLS)
         a = oracle_mod.obligation_statuses(views, {"capture_snapshot"}, set())
-        b = oracle_mod.obligation_statuses(
-            views, {"capture_snapshot"}, {"test_capture_snapshot"})
-        assert (oracle_mod.status_vector_hash(a)
-                != oracle_mod.status_vector_hash(b))
+        b = oracle_mod.obligation_statuses(views, {"capture_snapshot"}, {"test_capture_snapshot"})
+        assert oracle_mod.status_vector_hash(a) != oracle_mod.status_vector_hash(b)
 
     def test_composite_severity_monotonic(self, oracle_mod):
         s_early = oracle_mod.composite_severity(5, 0.1, 0.3)
@@ -120,10 +131,14 @@ class TestStatusMachinery:
 
     def test_renderer_lists_statuses_and_covering_test(self, oracle_mod):
         views = oracle_mod._obligation_views(_OBLS)
-        sts = oracle_mod.obligation_statuses(
-            views, {"capture_snapshot"}, {"test_max_snapshots"})
-        covering = {1: {"name": "test_capture", "file": "tests/test_m.py",
-                        "run_cmd": "pytest tests/test_m.py::test_capture"}}
+        sts = oracle_mod.obligation_statuses(views, {"capture_snapshot"}, {"test_max_snapshots"})
+        covering = {
+            1: {
+                "name": "test_capture",
+                "file": "tests/test_m.py",
+                "run_cmd": "pytest tests/test_m.py::test_capture",
+            }
+        }
         block = oracle_mod.render_obligation_status_block(sts, covering)
         assert 'reason="test_evidence_gap"' in block
         assert "[edited, untested]" in block
@@ -136,23 +151,28 @@ class TestStatusMachinery:
         # the tested obligation is summarized, never re-listed as unmet
         assert "1 requirement(s) already show test evidence." in block
         # edited-untested rows sort BEFORE unaddressed rows
-        assert (block.index("[edited, untested]")
-                < block.index("[not addressed]"))
+        assert block.index("[edited, untested]") < block.index("[not addressed]")
 
     def test_renderer_quiet_when_all_tested(self, oracle_mod):
         views = oracle_mod._obligation_views(_OBLS)
         sts = oracle_mod.obligation_statuses(
             views,
             {"capture_snapshot"},
-            {"ExtraFieldsLoadError", "test_capture_snapshot",
-             "test_max_snapshots"},
+            {"ExtraFieldsLoadError", "test_capture_snapshot", "test_max_snapshots"},
         )
         assert oracle_mod.render_obligation_status_block(sts) == ""
 
     def test_renderer_lists_all_unmet_rows(self, oracle_mod):
-        obls = [{"verbatim_text": f"Requirement number {i} must hold for api_{i}.",
-                 "kind": "behavior", "symbols": [f"api_sym_{i}"],
-                 "keywords": [], "checkable_forms": []} for i in range(9)]
+        obls = [
+            {
+                "verbatim_text": f"Requirement number {i} must hold for api_{i}.",
+                "kind": "behavior",
+                "symbols": [f"api_sym_{i}"],
+                "keywords": [],
+                "checkable_forms": [],
+            }
+            for i in range(9)
+        ]
         views = oracle_mod._obligation_views(obls)
         sts = oracle_mod.obligation_statuses(views, {"api_sym_0"}, set())
         block = oracle_mod.render_obligation_status_block(sts)
@@ -172,24 +192,44 @@ def _write_anchors(tmp_path: Path, obligations: list[dict]) -> str:
 
 def _reset(patch_mod, monkeypatch):
     for name, val in [
-        ("_GT_BASELINE", False), ("_ORACLE_ROUTE", True), ("_marker_sent", True),
-        ("_action_count", 0), ("_source_edit_count", 0), ("_cmd_history", []),
-        ("_l5_fired", False), ("_l5_failure_fired", False),
-        ("_l5_notest_fired", False), ("_test_fail_history", []),
-        ("_blind_test_runs", 0), ("_test_evidence_seen", False),
-        ("_seen", set()), ("_contract_seen", set()),
-        ("_consensus_fired", False), ("_consensus_scope", set()),
-        ("_offscope_views", 0), ("_cochange_fired", False),
-        ("_oracle_focus_cache", None), ("_oracle_delivered_hashes", set()),
-        ("_oracle_edited_rels", set()), ("_oracle_nonedit_streak", 0),
-        ("_oracle_review_fired", False), ("_oracle_last_losers", set()),
-        ("_oracle_obligation_fired", False), ("_oblig_status_emitted", set()),
-        ("_oblig_status_last_hash", None), ("_oracle_edited_tokens", set()),
-        ("_oracle_tested_tokens", set()), ("_oracle_edited_tokens_by_file", {}),
-        ("_edit_churn", {}), ("_gt_oracle_tried", False), ("_gt_oracle_mod", None),
-        ("_horizon_advisory_fired", False), ("_horizon_gate_fire_count", 0),
+        ("_GT_BASELINE", False),
+        ("_ORACLE_ROUTE", True),
+        ("_marker_sent", True),
+        ("_action_count", 0),
+        ("_source_edit_count", 0),
+        ("_cmd_history", []),
+        ("_l5_fired", False),
+        ("_l5_failure_fired", False),
+        ("_l5_notest_fired", False),
+        ("_test_fail_history", []),
+        ("_blind_test_runs", 0),
+        ("_test_evidence_seen", False),
+        ("_seen", set()),
+        ("_contract_seen", set()),
+        ("_consensus_fired", False),
+        ("_consensus_scope", set()),
+        ("_offscope_views", 0),
+        ("_cochange_fired", False),
+        ("_oracle_focus_cache", None),
+        ("_oracle_delivered_hashes", set()),
+        ("_oracle_edited_rels", set()),
+        ("_oracle_nonedit_streak", 0),
+        ("_oracle_review_fired", False),
+        ("_oracle_last_losers", set()),
+        ("_oracle_obligation_fired", False),
+        ("_oblig_status_emitted", set()),
+        ("_oblig_status_last_hash", None),
+        ("_oracle_edited_tokens", set()),
+        ("_oracle_tested_tokens", set()),
+        ("_oracle_edited_tokens_by_file", {}),
+        ("_edit_churn", {}),
+        ("_gt_oracle_tried", False),
+        ("_gt_oracle_mod", None),
+        ("_horizon_advisory_fired", False),
+        ("_horizon_gate_fire_count", 0),
         ("_DELIVERED_FACTS", set()),
-        ("_ledger_consumed_kinds", set()), ("_ledger_ignore_counts", {}),
+        ("_ledger_consumed_kinds", set()),
+        ("_ledger_ignore_counts", {}),
     ]:
         monkeypatch.setattr(patch_mod, name, val, raising=False)
 
@@ -294,7 +334,9 @@ def test_pre_submit_severity_boost_at_90pct_budget(patch_mod, tmp_path, monkeypa
     sev, _payload = got
     # D3 fix: composite severity with base _SEV_GATE+1 so obligation beats horizon.
     # At 281/300 budget (0.937), unmet_ratio=1.0: composite(7, 0.937, 1.0) ≈ 9.87
-    assert sev > float(patch_mod._SEV_GATE), f"boost {sev} must beat flat gate {patch_mod._SEV_GATE}"
+    assert sev > float(patch_mod._SEV_GATE), (
+        f"boost {sev} must beat flat gate {patch_mod._SEV_GATE}"
+    )
 
 
 def test_pre_submit_no_boost_early_budget(patch_mod, tmp_path, monkeypatch):
@@ -309,13 +351,19 @@ def test_pre_submit_no_boost_early_budget(patch_mod, tmp_path, monkeypatch):
     assert got is not None
     sev, _payload = got
     budget_b = 100 / 300
-    unmet_ratio = len(patch_mod._load_gt_oracle().order_unmet(
-        patch_mod._get_obligation_tracker(patch_mod._load_gt_oracle()).statuses_tuple(
-            patch_mod._oracle_edited_tokens, patch_mod._oracle_tested_tokens
+    unmet_ratio = (
+        len(
+            patch_mod._load_gt_oracle().order_unmet(
+                patch_mod._get_obligation_tracker(patch_mod._load_gt_oracle()).statuses_tuple(
+                    patch_mod._oracle_edited_tokens, patch_mod._oracle_tested_tokens
+                )
+            )
         )
-    )) / 3
+        / 3
+    )
     expected = patch_mod._load_gt_oracle().composite_severity(
-        patch_mod._SEV_OBLIGATION, budget_b, unmet_ratio)
+        patch_mod._SEV_OBLIGATION, budget_b, unmet_ratio
+    )
     assert abs(sev - expected) < 1e-9
     assert sev != float(patch_mod._SEV_GATE)
 

@@ -6,6 +6,7 @@ never as a hard veto.
 
 W_HUB is capped at 0.10 to ensure the penalty never dominates.
 """
+
 from __future__ import annotations
 
 import math

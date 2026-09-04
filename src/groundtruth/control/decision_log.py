@@ -53,6 +53,7 @@ def append_decision(event: KernelEvent, *, log_dir: str | None = None) -> str | 
         "action_selected": payload["action_selected"],
         "authority_exercised": payload["authority_exercised"],
     }
+
     def _do_append() -> str | None:
         try:
             return append_block(

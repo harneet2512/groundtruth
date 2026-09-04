@@ -46,6 +46,7 @@ fixed at the DELIVERY/fact-filter surface (never the rank/anchor/fusion paths):
 
 All deterministic: sqlite fixtures, no network, no task IDs, no gold labels.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -90,8 +91,9 @@ def patch_mod(monkeypatch):
 # ---------------------------------------------------------------------------
 # graph.db fixture builder (Go-indexer output schema)
 # ---------------------------------------------------------------------------
-def _create_graph_db(db_path: Path, nodes: list[dict], edges: list[tuple],
-                     cochanges: list[tuple] | None = None) -> None:
+def _create_graph_db(
+    db_path: Path, nodes: list[dict], edges: list[tuple], cochanges: list[tuple] | None = None
+) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         """
@@ -125,12 +127,20 @@ def _create_graph_db(db_path: Path, nodes: list[dict], edges: list[tuple],
         conn.execute(
             "INSERT INTO nodes (label, name, file_path, signature, start_line, end_line, "
             "is_test, language) VALUES (?,?,?,?,?,?,?,?)",
-            (n["label"], n["name"], n["file_path"], n.get("signature", ""),
-             n.get("start_line", 1), n.get("end_line", 1), int(n.get("is_test", 0)),
-             n.get("language", "python")),
+            (
+                n["label"],
+                n["name"],
+                n["file_path"],
+                n.get("signature", ""),
+                n.get("start_line", 1),
+                n.get("end_line", 1),
+                int(n.get("is_test", 0)),
+                n.get("language", "python"),
+            ),
         )
-        key_to_id[n.get("key", n["name"])] = conn.execute(
-            "SELECT last_insert_rowid()").fetchone()[0]
+        key_to_id[n.get("key", n["name"])] = conn.execute("SELECT last_insert_rowid()").fetchone()[
+            0
+        ]
     for src, tgt, etype, line, method, conf in edges:
         conn.execute(
             "INSERT INTO edges (source_id, target_id, type, source_line, "
@@ -147,12 +157,12 @@ _VENDORED_JS = "astropy/extern/jquery/data/js/jquery.dataTables.min.js"
 @pytest.fixture
 def pollution_repo(tmp_path: Path):
     """The astropy-13236 pollution shape, generalized:
-      - table.py: real funcs `validate_rows` (1 clean deterministic caller from
-        core.py — a TRUE fact that must SURVIVE) + builtin-shadow methods
-        `isinstance` and `__init__` with deterministic callers (the launder).
-      - a vendored minified JS file with a deterministic edge INTO table.py
-        (the jquery [WITNESS]/caller pollution) and one FROM table.py.
-      - a node_modules neighbor + a vendored co-change partner.
+    - table.py: real funcs `validate_rows` (1 clean deterministic caller from
+      core.py — a TRUE fact that must SURVIVE) + builtin-shadow methods
+      `isinstance` and `__init__` with deterministic callers (the launder).
+    - a vendored minified JS file with a deterministic edge INTO table.py
+      (the jquery [WITNESS]/caller pollution) and one FROM table.py.
+    - a node_modules neighbor + a vendored co-change partner.
     """
     db = tmp_path / "graph.db"
     repo = tmp_path / "src"
@@ -180,35 +190,84 @@ def pollution_repo(tmp_path: Path):
     )
     # minified vendored file: one very long line
     (repo / _VENDORED_JS).write_text(
-        "var gb=function(a){return a};" * 200 + "\n", encoding="utf-8",
+        "var gb=function(a){return a};" * 200 + "\n",
+        encoding="utf-8",
     )
     nodes = [
-        {"label": "Method", "name": "isinstance", "key": "iso",
-         "file_path": "astropy/table/table.py",
-         "signature": "def isinstance(self, cls)", "start_line": 2, "end_line": 3},
-        {"label": "Method", "name": "__init__", "key": "init",
-         "file_path": "astropy/table/table.py",
-         "signature": "def __init__(self)", "start_line": 4, "end_line": 5},
-        {"label": "Method", "name": "validate_rows", "key": "validate_rows",
-         "file_path": "astropy/table/table.py",
-         "signature": "def validate_rows(self, data)", "start_line": 6, "end_line": 7},
-        {"label": "Function", "name": "run_pipeline", "key": "run_pipeline",
-         "file_path": "astropy/core/core.py",
-         "signature": "def run_pipeline(t)", "start_line": 1, "end_line": 2},
-        {"label": "Function", "name": "use_iso", "key": "use_iso",
-         "file_path": "astropy/core/core.py",
-         "signature": "def use_iso(t)", "start_line": 3, "end_line": 4},
-        {"label": "Function", "name": "make_one", "key": "make_one",
-         "file_path": "astropy/core/core.py",
-         "signature": "def make_one()", "start_line": 5, "end_line": 6},
-        {"label": "Function", "name": "gb", "key": "gb",
-         "file_path": _VENDORED_JS,
-         "signature": "function gb(a)", "start_line": 1, "end_line": 1,
-         "language": "javascript"},
-        {"label": "Function", "name": "helper_check", "key": "helper_check",
-         "file_path": "node_modules/checker/index.js",
-         "signature": "function helper_check(d)", "start_line": 1, "end_line": 1,
-         "language": "javascript"},
+        {
+            "label": "Method",
+            "name": "isinstance",
+            "key": "iso",
+            "file_path": "astropy/table/table.py",
+            "signature": "def isinstance(self, cls)",
+            "start_line": 2,
+            "end_line": 3,
+        },
+        {
+            "label": "Method",
+            "name": "__init__",
+            "key": "init",
+            "file_path": "astropy/table/table.py",
+            "signature": "def __init__(self)",
+            "start_line": 4,
+            "end_line": 5,
+        },
+        {
+            "label": "Method",
+            "name": "validate_rows",
+            "key": "validate_rows",
+            "file_path": "astropy/table/table.py",
+            "signature": "def validate_rows(self, data)",
+            "start_line": 6,
+            "end_line": 7,
+        },
+        {
+            "label": "Function",
+            "name": "run_pipeline",
+            "key": "run_pipeline",
+            "file_path": "astropy/core/core.py",
+            "signature": "def run_pipeline(t)",
+            "start_line": 1,
+            "end_line": 2,
+        },
+        {
+            "label": "Function",
+            "name": "use_iso",
+            "key": "use_iso",
+            "file_path": "astropy/core/core.py",
+            "signature": "def use_iso(t)",
+            "start_line": 3,
+            "end_line": 4,
+        },
+        {
+            "label": "Function",
+            "name": "make_one",
+            "key": "make_one",
+            "file_path": "astropy/core/core.py",
+            "signature": "def make_one()",
+            "start_line": 5,
+            "end_line": 6,
+        },
+        {
+            "label": "Function",
+            "name": "gb",
+            "key": "gb",
+            "file_path": _VENDORED_JS,
+            "signature": "function gb(a)",
+            "start_line": 1,
+            "end_line": 1,
+            "language": "javascript",
+        },
+        {
+            "label": "Function",
+            "name": "helper_check",
+            "key": "helper_check",
+            "file_path": "node_modules/checker/index.js",
+            "signature": "function helper_check(d)",
+            "start_line": 1,
+            "end_line": 1,
+            "language": "javascript",
+        },
     ]
     edges = [
         # TRUE fact: core.py calls validate_rows (deterministic, must survive)
@@ -223,9 +282,13 @@ def pollution_repo(tmp_path: Path):
         ("validate_rows", "helper_check", "CALLS", 7, "import", 1.0),
     ]
     _create_graph_db(
-        db, nodes, edges,
-        cochanges=[("astropy/table/table.py", _VENDORED_JS, 9),
-                   ("astropy/table/table.py", "astropy/core/core.py", 4)],
+        db,
+        nodes,
+        edges,
+        cochanges=[
+            ("astropy/table/table.py", _VENDORED_JS, 9),
+            ("astropy/table/table.py", "astropy/core/core.py", 4),
+        ],
     )
     return repo, db
 
@@ -254,15 +317,17 @@ def test_vendored_caller_never_a_witness(pollution_repo, patch_mod):
     con = sqlite3.connect(str(db))
     try:
         wits = patch_mod._resolved_witnesses_for_file(
-            con, "astropy/table/table.py", str(repo), max_each=4)
+            con, "astropy/table/table.py", str(repo), max_each=4
+        )
     finally:
         con.close()
     rendered = " ".join(f"{w['file_path']} {w['symbol']} {w['target']}" for w in wits)
     assert "extern" not in rendered, f"vendored witness leaked: {rendered}"
     assert "node_modules" not in rendered, f"node_modules witness leaked: {rendered}"
     # the TRUE deterministic caller fact survives
-    assert any(w["file_path"] == "astropy/core/core.py" and w["target"] == "validate_rows"
-               for w in wits), f"true caller fact was over-suppressed: {wits}"
+    assert any(
+        w["file_path"] == "astropy/core/core.py" and w["target"] == "validate_rows" for w in wits
+    ), f"true caller fact was over-suppressed: {wits}"
 
 
 def test_vendored_file_view_emits_no_evidence(pollution_repo, patch_mod, monkeypatch):
@@ -308,8 +373,20 @@ def test_cochange_excludes_vendored_partner(pollution_repo, patch_mod, monkeypat
 # ===========================================================================
 def test_builtin_shadow_name_classifier(patch_mod):
     is_b = patch_mod._is_builtin_shadow_name
-    for n in ("isinstance", "len", "get", "join", "items", "split", "loads",
-              "append", "exists", "__init__", "__call__", "Isinstance"):
+    for n in (
+        "isinstance",
+        "len",
+        "get",
+        "join",
+        "items",
+        "split",
+        "loads",
+        "append",
+        "exists",
+        "__init__",
+        "__call__",
+        "Isinstance",
+    ):
         assert is_b(n), n
     for n in ("validate_rows", "set_fields", "URLValidator", "get_order_by", ""):
         assert not is_b(n), n
@@ -342,7 +419,8 @@ def test_builtin_shadow_never_a_witness(pollution_repo, patch_mod):
     con = sqlite3.connect(str(db))
     try:
         wits = patch_mod._resolved_witnesses_for_file(
-            con, "astropy/table/table.py", str(repo), max_each=4)
+            con, "astropy/table/table.py", str(repo), max_each=4
+        )
     finally:
         con.close()
     targets = {w["target"] for w in wits} | {w["symbol"] for w in wits}
@@ -435,7 +513,8 @@ def test_gt_patch_banner_on_stderr_not_agent_output(patch_mod, capsys):
     out = {"output": "file contents", "returncode": 0}
     patch_mod._augment_output({"command": "cat README.md"}, out)
     assert "[gt-patch:loaded]" not in out["output"], (
-        "loader banner leaked into agent-visible output")
+        "loader banner leaked into agent-visible output"
+    )
     assert "[gt-patch:loaded]" in capsys.readouterr().err
 
 
@@ -446,26 +525,29 @@ def test_gt_patch_banner_on_stderr_not_agent_output(patch_mod, capsys):
 def v1r_mod():
     sys.path.insert(0, str(_ROOT / "src"))
     import groundtruth.pretask.v1r_brief as vb
+
     return vb
 
 
 def test_v1r_witnesses_exclude_vendored_and_builtin(pollution_repo, v1r_mod):
     repo, db = pollution_repo
     wits = v1r_mod._resolved_witnesses_for_file(
-        str(db), "astropy/table/table.py", str(repo), max_each=4)
+        str(db), "astropy/table/table.py", str(repo), max_each=4
+    )
     rendered = " ".join(f"{w['file_path']} {w['symbol']} {w['target']}" for w in wits)
     assert "extern" not in rendered and "node_modules" not in rendered, rendered
     targets = {w["target"] for w in wits} | {w["symbol"] for w in wits}
     assert "isinstance" not in targets and "__init__" not in targets, wits
-    assert any(w["target"] == "validate_rows" and w["file_path"] == "astropy/core/core.py"
-               for w in wits), f"true fact over-suppressed: {wits}"
+    assert any(
+        w["target"] == "validate_rows" and w["file_path"] == "astropy/core/core.py" for w in wits
+    ), f"true fact over-suppressed: {wits}"
 
 
 def test_v1r_caller_contract_excludes_vendored_and_builtin(pollution_repo, v1r_mod):
     repo, db = pollution_repo
     line = v1r_mod._caller_contract_for_file(
-        str(db), "astropy/table/table.py", str(repo),
-        ["isinstance", "validate_rows"])
+        str(db), "astropy/table/table.py", str(repo), ["isinstance", "validate_rows"]
+    )
     assert "isinstance" not in line.replace("use_iso", ""), line
     assert "extern" not in line and "node_modules" not in line, line
     assert "run_pipeline() in astropy/core/core.py" in line  # true fact survives

@@ -8,6 +8,7 @@ LOADS it instead of regenerating. Locks:
   3. end-to-end: gate persist -> emit_brief reuse (generator NOT called twice),
      brief.txt == the gate's brief, gate sha == delivered sha.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -38,6 +39,7 @@ class _FakeResult:
 
 def test_brief_cache_single_generation_and_stable_sha():
     from groundtruth.runtime import brief_cache as bc
+
     calls = {"n": 0}
 
     def gen(issue_text, repo_root, graph_db, bug_id):
@@ -45,12 +47,13 @@ def test_brief_cache_single_generation_and_stable_sha():
         return _FakeResult(f"BRIEF::{issue_text}::call{calls['n']}")
 
     import tempfile
+
     with tempfile.TemporaryDirectory() as out:
         r1 = bc.get_or_generate(out, "fix bug", "/work", "g.db", generator=gen)
         assert r1["generated"] is True
         r2 = bc.get_or_generate(out, "fix bug", "/work", "g.db", generator=gen)
-        assert r2["generated"] is False                     # reused — no 2nd generation
-        assert calls["n"] == 1                              # exactly one generation
+        assert r2["generated"] is False  # reused — no 2nd generation
+        assert calls["n"] == 1  # exactly one generation
         assert r1["brief_text"] == r2["brief_text"]
         assert r1["brief_sha256"] == r2["brief_sha256"]
         assert bc.brief_sha256(r2["brief_text"]) == r1["brief_sha256"]
@@ -58,6 +61,7 @@ def test_brief_cache_single_generation_and_stable_sha():
 
 def test_brief_cache_failsafe_regenerates_on_miss():
     from groundtruth.runtime import brief_cache as bc
+
     calls = {"n": 0}
 
     def gen(issue_text, repo_root, graph_db, bug_id):
@@ -65,6 +69,7 @@ def test_brief_cache_failsafe_regenerates_on_miss():
         return _FakeResult("X")
 
     import tempfile
+
     with tempfile.TemporaryDirectory() as out:
         r = bc.get_or_generate(out, "x", "/w", "g", generator=gen)
         assert r["generated"] is True and calls["n"] == 1

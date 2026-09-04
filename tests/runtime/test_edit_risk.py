@@ -7,6 +7,7 @@ counted as blast radius; risk is RELATIVE to the repo's own fan-in distribution
 
 Pure sqlite. No AI, no task symbols, no per-case tuning.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -14,8 +15,16 @@ import sqlite3
 from groundtruth.runtime.edit_risk import structural_edit_risk, reset_reference_cache
 
 
-def _build(tmp_path, spec, *, with_confidence=True, method="import", conf=1.0,
-           name="graph.db", etype="CALLS"):
+def _build(
+    tmp_path,
+    spec,
+    *,
+    with_confidence=True,
+    method="import",
+    conf=1.0,
+    name="graph.db",
+    etype="CALLS",
+):
     """spec = list of (target_name, n_distinct_callers). Builds nodes + ``etype`` edges
     where each named target receives ``n_distinct_callers`` distinct source nodes."""
     db = str(tmp_path / name)
@@ -79,7 +88,9 @@ def test_isolated_leaf_is_quiet(tmp_path):
     # 'leaf' has zero incoming CALLS (it only calls 'x').
     db = str(tmp_path / "g.db")
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT, file_path TEXT)")
+    conn.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT, file_path TEXT)"
+    )
     conn.execute(
         "CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, "
         "type TEXT, resolution_method TEXT, confidence REAL)"
@@ -123,8 +134,7 @@ def test_risk_is_relative_to_repo_distribution(tmp_path):
 
 
 def test_old_schema_without_confidence_degrades(tmp_path):
-    db = _build(tmp_path, [("hub", 6)] + [(f"t{i}", 1) for i in range(6)],
-                with_confidence=False)
+    db = _build(tmp_path, [("hub", 6)] + [(f"t{i}", 1) for i in range(6)], with_confidence=False)
     r = structural_edit_risk(db, {"hub"})
     assert not r.is_quiet()
     assert r.top_reason().dependents == 6
@@ -230,16 +240,16 @@ def test_hub_referenced_not_defined_in_edited_range_is_quiet(tmp_path):
     # 40-60 of a.py — where it merely CALLS hub. Def-line 5 is outside 40-60, so hub
     # is a reference, not the agent's change -> it must NOT be named (R3 fix).
     db = _build_with_lines(tmp_path, [("hub", 5, 10)] + [(f"t{i}", 100 + i, 1) for i in range(10)])
-    r = structural_edit_risk(
-        db, {"hub"}, edited_files={"a.py"}, edited_ranges={"a.py": [(40, 60)]}
-    )
+    r = structural_edit_risk(db, {"hub"}, edited_files={"a.py"}, edited_ranges={"a.py": [(40, 60)]})
     assert r.is_quiet(), r  # hub's definition is outside the edited hunk
 
 
 def test_symbol_defined_in_edited_range_still_fires(tmp_path):
     # Control: 'victim' is DEFINED at line 50 (inside the edited 40-60 hunk) with high
     # fan-in. The agent edited its DEFINITION -> the range filter must NOT over-suppress.
-    db = _build_with_lines(tmp_path, [("victim", 50, 10)] + [(f"t{i}", 100 + i, 1) for i in range(10)])
+    db = _build_with_lines(
+        tmp_path, [("victim", 50, 10)] + [(f"t{i}", 100 + i, 1) for i in range(10)]
+    )
     r = structural_edit_risk(
         db, {"victim"}, edited_files={"a.py"}, edited_ranges={"a.py": [(40, 60)]}
     )
@@ -259,8 +269,8 @@ def test_line_ranges_separate_the_hub_from_the_real_edit(tmp_path):
         db, {"hub", "construct"}, edited_files={"a.py"}, edited_ranges={"a.py": [(40, 60)]}
     )
     names = [sr.name for sr in r.reasons]
-    assert "hub" not in names, names      # referenced, not defined in the hunk
-    assert "construct" in names, names    # the agent's actual edit
+    assert "hub" not in names, names  # referenced, not defined in the hunk
+    assert "construct" in names, names  # the agent's actual edit
 
 
 def test_no_ranges_is_unchanged_back_compat(tmp_path):

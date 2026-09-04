@@ -18,9 +18,9 @@ implementation) and drives the gate helpers directly:
   (red)   helpers absent / advisory fires unconditionally and vaguely
   (green) suppressed when not stuck; fires naming the symbol when stuck + symbol present
 """
+
 from __future__ import annotations
 
-import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -32,8 +32,10 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts" / "swebench"))
 sys.modules.setdefault(
     "litellm",
     SimpleNamespace(
-        model_cost={}, success_callback=[],
-        completion=lambda *a, **k: None, acompletion=None,
+        model_cost={},
+        success_callback=[],
+        completion=lambda *a, **k: None,
+        acompletion=None,
         completion_cost=lambda *a, **k: 0.0,
     ),
 )
@@ -62,8 +64,13 @@ def _build_relation_db(path: str) -> None:
         """
     )
     nodes = [
-        ("Method", "set_fields", "beets/importer.py", 600),   # id 1 (edited symbol)
-        ("Function", "run_import", "beets/ui/commands.py", 300),  # id 2 (caller, the unexamined relation)
+        ("Method", "set_fields", "beets/importer.py", 600),  # id 1 (edited symbol)
+        (
+            "Function",
+            "run_import",
+            "beets/ui/commands.py",
+            300,
+        ),  # id 2 (caller, the unexamined relation)
     ]
     for label, name, fp, line in nodes:
         conn.execute(

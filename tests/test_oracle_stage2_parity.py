@@ -22,6 +22,7 @@ LEG 2: the metric moved is replay red->green vs the ledger ground truth at zero
 drift — the prerequisite for routing real correctness content through one gate
 without harming the model (the Core Product Contract's correct-or-quiet).
 """
+
 from __future__ import annotations
 
 import glob
@@ -135,9 +136,7 @@ def test_named_parity_assertions(sense_mod, oracle_mod):
     csstree carries NO harmful nudge (only the benign scaffold_trap)."""
     by_task = {}
     for tj in _trajs():
-        by_task[_task(tj)] = set(
-            oracle_mod.replay_nudge_reasons(sense_mod.load_trajectory(tj))
-        )
+        by_task[_task(tj)] = set(oracle_mod.replay_nudge_reasons(sense_mod.load_trajectory(tj)))
     assert "no_test_evidence" in by_task["boa-hierarchical-evaluation-cancellation"]
     assert by_task["csstree-shorthand-expansion-compression"] == {"scaffold_trap"}
     # csstree must NOT carry any non-scaffold (harmful) nudge.
@@ -193,8 +192,9 @@ def test_pure_path_matches_streaming(sense_mod, oracle_mod):
         if not any(t in tj.replace("\\", "/") for t in targets):
             continue
         turns = sense_mod.load_trajectory(tj)[:60]  # bounded for the O(n^3) path
-        streamed = [d.emission.reason_string if d.emission else None
-                    for d in oracle_mod.replay(turns)]
+        streamed = [
+            d.emission.reason_string if d.emission else None for d in oracle_mod.replay(turns)
+        ]
         pure = []
         for k in range(len(turns)):
             d = oracle_mod.oracle_decide(turns, k)

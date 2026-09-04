@@ -30,6 +30,7 @@ go RED. With the fix live (filter present) they are GREEN.
 
 All deterministic: sqlite fixtures, no network, no task IDs, no gold labels.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -45,13 +46,13 @@ from groundtruth.pretask.v1r_brief import (
 
 # Edit target lives in real source. The richlog shape: a widget defined in src/,
 # called by a tutorial `compose()` in docs/examples/ AND by a real src/ caller.
-_SRC_TARGET = "src/textual/widgets/_rich_log.py"   # defines `write`
-_SRC_CALLER = "src/textual/widget.py"              # real src caller (must survive)
+_SRC_TARGET = "src/textual/widgets/_rich_log.py"  # defines `write`
+_SRC_CALLER = "src/textual/widget.py"  # real src caller (must survive)
 _DEMO_CALLER = "docs/examples/guide/input/key01.py"  # tutorial caller (must drop)
-_EXAMPLES_CALLER = "examples/dictionary.py"          # top-level examples/ (must drop)
+_EXAMPLES_CALLER = "examples/dictionary.py"  # top-level examples/ (must drop)
 # callee side
-_SRC_CALLEE = "src/textual/geometry.py"            # real src callee (must survive)
-_DEMO_CALLEE = "docs/examples/widgets/log.py"      # demo callee (must drop)
+_SRC_CALLEE = "src/textual/geometry.py"  # real src callee (must survive)
+_DEMO_CALLEE = "docs/examples/widgets/log.py"  # demo callee (must drop)
 
 
 def _create_graph_db(db_path: Path, nodes, edges) -> None:
@@ -82,12 +83,20 @@ def _create_graph_db(db_path: Path, nodes, edges) -> None:
         conn.execute(
             "INSERT INTO nodes (label, name, file_path, signature, start_line, "
             "end_line, is_test, language) VALUES (?,?,?,?,?,?,?,?)",
-            (n["label"], n["name"], n["file_path"], n.get("signature", ""),
-             n.get("start_line", 1), n.get("end_line", 1), int(n.get("is_test", 0)),
-             n.get("language", "python")),
+            (
+                n["label"],
+                n["name"],
+                n["file_path"],
+                n.get("signature", ""),
+                n.get("start_line", 1),
+                n.get("end_line", 1),
+                int(n.get("is_test", 0)),
+                n.get("language", "python"),
+            ),
         )
-        key_to_id[n.get("key", n["name"])] = conn.execute(
-            "SELECT last_insert_rowid()").fetchone()[0]
+        key_to_id[n.get("key", n["name"])] = conn.execute("SELECT last_insert_rowid()").fetchone()[
+            0
+        ]
     for src, tgt, etype, line, method, conf in edges:
         conn.execute(
             "INSERT INTO edges (source_id, target_id, type, source_line, "
@@ -99,58 +108,87 @@ def _create_graph_db(db_path: Path, nodes, edges) -> None:
 
 
 def _write_repo_files(repo: Path) -> None:
-    for rel in (_SRC_TARGET, _SRC_CALLER, _DEMO_CALLER, _EXAMPLES_CALLER,
-                _SRC_CALLEE, _DEMO_CALLEE):
+    for rel in (
+        _SRC_TARGET,
+        _SRC_CALLER,
+        _DEMO_CALLER,
+        _EXAMPLES_CALLER,
+        _SRC_CALLEE,
+        _DEMO_CALLEE,
+    ):
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
     (repo / _SRC_TARGET).write_text(
-        "class RichLog:\n"
-        "    def follow_end(self, animate=False):\n"
-        "        return self._snap()\n",
-        encoding="utf-8")
+        "class RichLog:\n    def follow_end(self, animate=False):\n        return self._snap()\n",
+        encoding="utf-8",
+    )
     (repo / _SRC_CALLER).write_text(
-        "def mount_log(self):\n"
-        "    log = RichLog()\n"
-        "    log.follow_end()\n",
-        encoding="utf-8")
+        "def mount_log(self):\n    log = RichLog()\n    log.follow_end()\n", encoding="utf-8"
+    )
     (repo / _DEMO_CALLER).write_text(
-        "def compose(self):\n"
-        "    rl = RichLog()\n"
-        "    rl.follow_end()\n",
-        encoding="utf-8")
+        "def compose(self):\n    rl = RichLog()\n    rl.follow_end()\n", encoding="utf-8"
+    )
     (repo / _EXAMPLES_CALLER).write_text(
-        "def compose(self):\n"
-        "    rl = RichLog()\n"
-        "    rl.follow_end()\n",
-        encoding="utf-8")
-    (repo / _SRC_CALLEE).write_text(
-        "def Size(w, h):\n"
-        "    return (w, h)\n",
-        encoding="utf-8")
-    (repo / _DEMO_CALLEE).write_text(
-        "def demo_helper():\n"
-        "    return 1\n",
-        encoding="utf-8")
+        "def compose(self):\n    rl = RichLog()\n    rl.follow_end()\n", encoding="utf-8"
+    )
+    (repo / _SRC_CALLEE).write_text("def Size(w, h):\n    return (w, h)\n", encoding="utf-8")
+    (repo / _DEMO_CALLEE).write_text("def demo_helper():\n    return 1\n", encoding="utf-8")
 
 
 _NODES = [
-    {"label": "Method", "name": "follow_end", "key": "follow_end",
-     "file_path": _SRC_TARGET, "signature": "def follow_end(self, animate=False)",
-     "start_line": 2, "end_line": 3},
-    {"label": "Function", "name": "mount_log", "key": "mount_log",
-     "file_path": _SRC_CALLER, "signature": "def mount_log(self)",
-     "start_line": 1, "end_line": 3},
-    {"label": "Function", "name": "compose", "key": "compose_demo",
-     "file_path": _DEMO_CALLER, "signature": "def compose(self)",
-     "start_line": 1, "end_line": 2},
-    {"label": "Function", "name": "compose", "key": "compose_examples",
-     "file_path": _EXAMPLES_CALLER, "signature": "def compose(self)",
-     "start_line": 1, "end_line": 3},
-    {"label": "Function", "name": "Size", "key": "Size",
-     "file_path": _SRC_CALLEE, "signature": "def Size(w, h)",
-     "start_line": 1, "end_line": 2},
-    {"label": "Function", "name": "demo_helper", "key": "demo_helper",
-     "file_path": _DEMO_CALLEE, "signature": "def demo_helper()",
-     "start_line": 1, "end_line": 2},
+    {
+        "label": "Method",
+        "name": "follow_end",
+        "key": "follow_end",
+        "file_path": _SRC_TARGET,
+        "signature": "def follow_end(self, animate=False)",
+        "start_line": 2,
+        "end_line": 3,
+    },
+    {
+        "label": "Function",
+        "name": "mount_log",
+        "key": "mount_log",
+        "file_path": _SRC_CALLER,
+        "signature": "def mount_log(self)",
+        "start_line": 1,
+        "end_line": 3,
+    },
+    {
+        "label": "Function",
+        "name": "compose",
+        "key": "compose_demo",
+        "file_path": _DEMO_CALLER,
+        "signature": "def compose(self)",
+        "start_line": 1,
+        "end_line": 2,
+    },
+    {
+        "label": "Function",
+        "name": "compose",
+        "key": "compose_examples",
+        "file_path": _EXAMPLES_CALLER,
+        "signature": "def compose(self)",
+        "start_line": 1,
+        "end_line": 3,
+    },
+    {
+        "label": "Function",
+        "name": "Size",
+        "key": "Size",
+        "file_path": _SRC_CALLEE,
+        "signature": "def Size(w, h)",
+        "start_line": 1,
+        "end_line": 2,
+    },
+    {
+        "label": "Function",
+        "name": "demo_helper",
+        "key": "demo_helper",
+        "file_path": _DEMO_CALLEE,
+        "signature": "def demo_helper()",
+        "start_line": 1,
+        "end_line": 2,
+    },
 ]
 
 _EDGES = [
@@ -204,7 +242,8 @@ def test_demo_caller_leaks_when_filter_disabled(richlog_repo, disable_demo_filte
     repo, db = richlog_repo
     line = _caller_contract_for_file(str(db), _SRC_TARGET, str(repo), ["follow_end"])
     assert "docs/examples" in line, (
-        f"mutation did not restore the leak — test does not bite: {line}")
+        f"mutation did not restore the leak — test does not bite: {line}"
+    )
 
 
 def test_all_demo_callers_yield_empty_callers_line(tmp_path):
@@ -232,10 +271,12 @@ def test_demo_caller_never_a_resolved_witness(richlog_repo):
     assert "docs/examples" not in rendered, f"demo caller/callee witness leaked: {rendered}"
     assert "examples/dictionary.py" not in rendered, f"examples/ witness leaked: {rendered}"
     # true src caller AND callee survive
-    assert any(w["direction"] == "caller" and w["file_path"] == _SRC_CALLER
-               for w in wits), f"true src caller witness over-suppressed: {wits}"
-    assert any(w["direction"] == "callee" and w["file_path"] == _SRC_CALLEE
-               for w in wits), f"true src callee witness over-suppressed: {wits}"
+    assert any(w["direction"] == "caller" and w["file_path"] == _SRC_CALLER for w in wits), (
+        f"true src caller witness over-suppressed: {wits}"
+    )
+    assert any(w["direction"] == "callee" and w["file_path"] == _SRC_CALLEE for w in wits), (
+        f"true src callee witness over-suppressed: {wits}"
+    )
 
 
 def test_demo_witness_leaks_when_filter_disabled(richlog_repo, disable_demo_filter):
@@ -244,4 +285,5 @@ def test_demo_witness_leaks_when_filter_disabled(richlog_repo, disable_demo_filt
     wits = _resolved_witnesses_for_file(str(db), _SRC_TARGET, str(repo), max_each=4)
     rendered = " ".join(w["file_path"] for w in wits)
     assert "docs/examples" in rendered, (
-        f"mutation did not restore the witness leak — does not bite: {rendered}")
+        f"mutation did not restore the witness leak — does not bite: {rendered}"
+    )

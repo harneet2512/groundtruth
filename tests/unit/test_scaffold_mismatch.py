@@ -12,6 +12,7 @@ Expected from EXPECTED_BEHAVIOR_SCAFFOLD.md:
 These tests call classify_scaffold_compatibility() which does NOT exist yet.
 They MUST fail (skip) before implementation.
 """
+
 from __future__ import annotations
 
 import json
@@ -29,7 +30,7 @@ except ImportError:
 
 requires_classifier = pytest.mark.skipif(
     classify_scaffold_compatibility is None,
-    reason="classify_scaffold_compatibility not implemented yet — RED"
+    reason="classify_scaffold_compatibility not implemented yet — RED",
 )
 
 
@@ -52,8 +53,7 @@ def test_nogt_12907_classified_as_scaffold_mismatch():
     traj = _load_trajectory("nogt_12907.traj")
     result = classify_scaffold_compatibility(traj)
     assert result["classification"] == "model_scaffold_mismatch", (
-        f"43 blocks in first response, 4 steps → must be mismatch. "
-        f"Got {result['classification']}"
+        f"43 blocks in first response, 4 steps → must be mismatch. Got {result['classification']}"
     )
     assert result["first_response_code_blocks"] > 5
     assert result["total_steps"] <= 6
@@ -111,6 +111,4 @@ def test_frozen_nogt_12907_has_expected_shape():
     blocks = _count_code_blocks(first)
     assert blocks > 30, f"Expected > 30 code blocks, got {blocks}"
 
-    assert "submit" in first[-200:].lower(), (
-        "First response must end with a submit action"
-    )
+    assert "submit" in first[-200:].lower(), "First response must end with a submit action"

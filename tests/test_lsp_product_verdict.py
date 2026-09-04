@@ -1,4 +1,5 @@
 """P1-06 — product verdict must not collapse to a single lsp_warm boolean."""
+
 from __future__ import annotations
 
 import json

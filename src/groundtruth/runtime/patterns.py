@@ -12,6 +12,7 @@ Nothing was removed in the consolidation; only unified.
 Research basis for the governor that consumes these: TIDE (arXiv 2602.02196),
 TRAJEVAL (arXiv 2603.24631), "Beyond Resolution Rates" (arXiv 2604.02547).
 """
+
 from __future__ import annotations
 
 import re
@@ -34,7 +35,9 @@ TEST_RUNNER_RE = re.compile(
     r"|npm\s+(?:run\s+)?test\b|yarn\s+(?:run\s+)?test\b|pnpm\s+(?:run\s+)?test\b"
     r"|jest\b|mocha\b|vitest\b|rspec\b|rake\s+test\b|phpunit\b|ctest\b"
     r"|mvn\s+\S*\s*test\b|gradlew?\s+\S*\s*test\b|make\s+(?:check|test)\b"
-    r")", re.I)
+    r")",
+    re.I,
+)
 
 # ---------------------------------------------------------------------------
 # TEST PASS / FAIL markers — an observed RESULT either way latches
@@ -44,12 +47,14 @@ TEST_PASS_RE = re.compile(
     r"(test result: ok\b|\b\d+ passed\b|\b\d+ passing\b"
     r"|^OK\b|^ok\s+\S+\s+[\d.]+s|^PASS$|^PASS\b|BUILD SUCCESS"
     r"|OK \(\d+ tests?\)|Tests:\s+\d+ passed|\bpassed\b.*\b0 failed\b)",
-    re.M)
+    re.M,
+)
 
 TEST_FAIL_RE = re.compile(
     r"(\bFAILED\b|\bAssertionError\b|\b\d+ failed\b|\bFAIL: "
     r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
-    r"|\b\d+ failing\b|Tests:\s+\d+ failed)")
+    r"|\b\d+ failing\b|Tests:\s+\d+ failed)"
+)
 
 # ---------------------------------------------------------------------------
 # ENV FAILURE — environment/tooling failure (NOT a test failure). Used to
@@ -68,7 +73,9 @@ ENV_FAIL_RE = re.compile(
     r"|error while loading shared libraries|cannot open shared object"
     r"|ImproperlyConfigured"
     r"|AttributeError: module '[\w.]+' has no attribute"  # py-version shims
-    r"|errors? during collection|ERROR collecting|Interrupted: \d+ error)", re.I)
+    r"|errors? during collection|ERROR collecting|Interrupted: \d+ error)",
+    re.I,
+)
 
 # ---------------------------------------------------------------------------
 # COMPILE FAILURE — a build/compile error (actionable feedback, not blindness).
@@ -76,7 +83,8 @@ ENV_FAIL_RE = re.compile(
 COMPILE_FAIL_RE = re.compile(
     r"(error\[E\d+\]|error: could not compile|\bSyntaxError\b"
     r"|cannot find (?:value|function|type|module|symbol)"
-    r"|undefined:\s|\bTS\d{4,}:|compilation error)")
+    r"|undefined:\s|\bTS\d{4,}:|compilation error)"
+)
 
 
 __all__ = [

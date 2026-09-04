@@ -1,11 +1,10 @@
 """Tests for Phase 5: evidence_precision, evidence_recall, agent_uptake."""
+
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
-import pytest
 
 from groundtruth.metrics.evidence_scorer import (
     EvidenceScore,
@@ -54,13 +53,23 @@ class TestParseInjections:
     def test_parses_jsonl(self, tmp_path: Path):
         log = tmp_path / "gt_log.jsonl"
         log.write_text(
-            json.dumps({"layer": "L3", "file_path": "src/auth.py",
-                        "symbol": "validate_token",
-                        "rendered_text": "[SIGNATURE] def validate_token(token: str) -> bool"})
+            json.dumps(
+                {
+                    "layer": "L3",
+                    "file_path": "src/auth.py",
+                    "symbol": "validate_token",
+                    "rendered_text": "[SIGNATURE] def validate_token(token: str) -> bool",
+                }
+            )
             + "\n"
-            + json.dumps({"layer": "L3b", "file_path": "src/models.py",
-                          "symbol": "User",
-                          "rendered_text": "Callers: routes.py (3x)"})
+            + json.dumps(
+                {
+                    "layer": "L3b",
+                    "file_path": "src/models.py",
+                    "symbol": "User",
+                    "rendered_text": "Callers: routes.py (3x)",
+                }
+            )
             + "\n",
             encoding="utf-8",
         )
@@ -83,9 +92,14 @@ class TestParseInjections:
 class TestComputePrecision:
     def test_correct_injection(self):
         injections = [
-            InjectionRecord(layer="L3", file_path="src/auth.py",
-                            content="[SIGNATURE] validate_token", markers=["[SIGNATURE]"],
-                            char_count=30, target_function="validate_token"),
+            InjectionRecord(
+                layer="L3",
+                file_path="src/auth.py",
+                content="[SIGNATURE] validate_token",
+                markers=["[SIGNATURE]"],
+                char_count=30,
+                target_function="validate_token",
+            ),
         ]
         gold = [{"file": "src/auth.py", "functions": ["validate_token"]}]
         correct, total, _ = compute_precision(injections, gold)
@@ -94,9 +108,14 @@ class TestComputePrecision:
 
     def test_wrong_file_injection(self):
         injections = [
-            InjectionRecord(layer="L3", file_path="src/utils.py",
-                            content="[SIGNATURE] helper", markers=["[SIGNATURE]"],
-                            char_count=20, target_function="helper"),
+            InjectionRecord(
+                layer="L3",
+                file_path="src/utils.py",
+                content="[SIGNATURE] helper",
+                markers=["[SIGNATURE]"],
+                char_count=20,
+                target_function="helper",
+            ),
         ]
         gold = [{"file": "src/auth.py", "functions": ["validate_token"]}]
         correct, total, _ = compute_precision(injections, gold)
@@ -105,8 +124,9 @@ class TestComputePrecision:
 
     def test_empty_content_skipped(self):
         injections = [
-            InjectionRecord(layer="L3", file_path="src/auth.py",
-                            content="", markers=[], char_count=0),
+            InjectionRecord(
+                layer="L3", file_path="src/auth.py", content="", markers=[], char_count=0
+            ),
         ]
         gold = [{"file": "src/auth.py", "functions": []}]
         correct, total, _ = compute_precision(injections, gold)
@@ -114,12 +134,22 @@ class TestComputePrecision:
 
     def test_mixed_precision(self):
         injections = [
-            InjectionRecord(layer="L3", file_path="src/auth.py",
-                            content="sig", markers=[], char_count=3,
-                            target_function="validate_token"),
-            InjectionRecord(layer="L3", file_path="src/noise.py",
-                            content="noise", markers=[], char_count=5,
-                            target_function="unrelated"),
+            InjectionRecord(
+                layer="L3",
+                file_path="src/auth.py",
+                content="sig",
+                markers=[],
+                char_count=3,
+                target_function="validate_token",
+            ),
+            InjectionRecord(
+                layer="L3",
+                file_path="src/noise.py",
+                content="noise",
+                markers=[],
+                char_count=5,
+                target_function="unrelated",
+            ),
         ]
         gold = [{"file": "src/auth.py", "functions": ["validate_token"]}]
         correct, total, _ = compute_precision(injections, gold)
@@ -130,9 +160,14 @@ class TestComputePrecision:
 class TestComputeRecall:
     def test_full_recall(self):
         injections = [
-            InjectionRecord(layer="L3", file_path="src/auth.py",
-                            content="evidence", markers=[], char_count=8,
-                            target_function="validate_token"),
+            InjectionRecord(
+                layer="L3",
+                file_path="src/auth.py",
+                content="evidence",
+                markers=[],
+                char_count=8,
+                target_function="validate_token",
+            ),
         ]
         gold = [{"file": "src/auth.py", "functions": ["validate_token"]}]
         delivered, needed = compute_recall(injections, gold)
@@ -141,9 +176,14 @@ class TestComputeRecall:
 
     def test_partial_recall(self):
         injections = [
-            InjectionRecord(layer="L3", file_path="src/auth.py",
-                            content="evidence", markers=[], char_count=8,
-                            target_function="validate_token"),
+            InjectionRecord(
+                layer="L3",
+                file_path="src/auth.py",
+                content="evidence",
+                markers=[],
+                char_count=8,
+                target_function="validate_token",
+            ),
         ]
         gold = [
             {"file": "src/auth.py", "functions": ["validate_token"]},
@@ -164,9 +204,14 @@ class TestComputeRecall:
 class TestComputeUptake:
     def test_agent_uses_evidence(self):
         injections = [
-            InjectionRecord(layer="L3", file_path="src/auth.py",
-                            content="validate_token sig", markers=[], char_count=20,
-                            target_function="validate_token"),
+            InjectionRecord(
+                layer="L3",
+                file_path="src/auth.py",
+                content="validate_token sig",
+                markers=[],
+                char_count=20,
+                target_function="validate_token",
+            ),
         ]
         actions = [
             {"action_type": "observe", "text": ""},
@@ -178,9 +223,14 @@ class TestComputeUptake:
 
     def test_agent_ignores_evidence(self):
         injections = [
-            InjectionRecord(layer="L3", file_path="src/auth.py",
-                            content="validate_token sig", markers=[], char_count=20,
-                            target_function="validate_token"),
+            InjectionRecord(
+                layer="L3",
+                file_path="src/auth.py",
+                content="validate_token sig",
+                markers=[],
+                char_count=20,
+                target_function="validate_token",
+            ),
         ]
         actions = [
             {"action_type": "observe", "text": ""},
@@ -192,8 +242,9 @@ class TestComputeUptake:
 
     def test_no_edit_actions(self):
         injections = [
-            InjectionRecord(layer="L3", file_path="src/auth.py",
-                            content="sig", markers=[], char_count=3),
+            InjectionRecord(
+                layer="L3", file_path="src/auth.py", content="sig", markers=[], char_count=3
+            ),
         ]
         actions = [{"action_type": "observe", "text": ""}]
         hits, opps = compute_uptake(injections, actions)
@@ -208,9 +259,14 @@ class TestScoreRun:
 
         gt_log = tmp_path / "gt_log.jsonl"
         gt_log.write_text(
-            json.dumps({"layer": "L3", "file_path": "src/auth.py",
-                        "symbol": "validate_token",
-                        "rendered_text": "[SIGNATURE] def validate_token(token: str) -> bool"})
+            json.dumps(
+                {
+                    "layer": "L3",
+                    "file_path": "src/auth.py",
+                    "symbol": "validate_token",
+                    "rendered_text": "[SIGNATURE] def validate_token(token: str) -> bool",
+                }
+            )
             + "\n",
             encoding="utf-8",
         )
@@ -222,10 +278,17 @@ class TestScoreRun:
         assert score.correct_injections == 1
 
     def test_summary_format(self):
-        s = EvidenceScore(precision=0.75, recall=0.5, uptake=0.33,
-                          total_injections=4, correct_injections=3,
-                          gold_contexts_needed=6, gold_contexts_delivered=3,
-                          uptake_opportunities=3, uptake_hits=1)
+        s = EvidenceScore(
+            precision=0.75,
+            recall=0.5,
+            uptake=0.33,
+            total_injections=4,
+            correct_injections=3,
+            gold_contexts_needed=6,
+            gold_contexts_delivered=3,
+            uptake_opportunities=3,
+            uptake_hits=1,
+        )
         text = s.summary()
         assert "precision=0.75" in text
         assert "recall=0.50" in text

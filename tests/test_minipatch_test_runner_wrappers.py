@@ -22,6 +22,7 @@ Two bounded wrapper-recognition gaps in artifact_deepswe/gt_mini_patch.py:
 All deterministic: pure regex + module-level governor state, no network,
 no task IDs, no gold labels.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -68,20 +69,18 @@ _BLIND = "Creating test database for alias 'default'...\nKilled\n"
 # ===========================================================================
 def test_python_manage_test_is_recognized(patch_mod):
     assert patch_mod._TEST_RUNNER_RE.search("python manage.py test myapp") is not None, (
-        "Django's prefixed form `python manage.py test` must be a recognized "
-        "test-runner invocation")
+        "Django's prefixed form `python manage.py test` must be a recognized test-runner invocation"
+    )
 
 
 def test_python3_runtests_is_recognized(patch_mod):
     assert patch_mod._TEST_RUNNER_RE.search("python3 runtests.py") is not None
-    assert patch_mod._TEST_RUNNER_RE.search(
-        "python3.11 ./manage.py test app.tests") is not None
+    assert patch_mod._TEST_RUNNER_RE.search("python3.11 ./manage.py test app.tests") is not None
 
 
 def test_wrapped_python_manage_test_is_recognized(patch_mod):
     """Wrappers compose: `timeout N python manage.py test`."""
-    assert patch_mod._TEST_RUNNER_RE.search(
-        "timeout 120 python manage.py test myapp") is not None
+    assert patch_mod._TEST_RUNNER_RE.search("timeout 120 python manage.py test myapp") is not None
 
 
 def test_plain_python_script_is_NOT_recognized(patch_mod):
@@ -100,7 +99,8 @@ def test_python_manage_blind_runs_fire_governor(patch_mod):
     assert out1 == ""
     out2 = patch_mod._l5_no_test_evidence_nudge("python manage.py test myapp", _BLIND)
     assert 'reason="no_test_evidence"' in out2, (
-        "python-wrapped manage.py test blind x2 must fire no_test_evidence")
+        "python-wrapped manage.py test blind x2 must fire no_test_evidence"
+    )
 
 
 def test_plain_python_script_blind_runs_never_fire_governor(patch_mod):
@@ -115,9 +115,9 @@ def test_plain_python_script_blind_runs_never_fire_governor(patch_mod):
 # ===========================================================================
 def test_timeout_kill_after_cargo_test_is_recognized(patch_mod):
     assert patch_mod._TEST_RUNNER_RE.search("timeout -k 5 60 cargo test") is not None, (
-        "the kill-after form `timeout -k 5 60 cargo test` must not escape the wrapper")
-    assert patch_mod._TEST_RUNNER_RE.search(
-        "timeout --kill-after=5s 1m go test ./...") is not None
+        "the kill-after form `timeout -k 5 60 cargo test` must not escape the wrapper"
+    )
+    assert patch_mod._TEST_RUNNER_RE.search("timeout --kill-after=5s 1m go test ./...") is not None
 
 
 def test_existing_wrapper_forms_still_recognized(patch_mod):

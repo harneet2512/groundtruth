@@ -15,6 +15,7 @@ This asserts the load-bearing contract:
 
 Pure sqlite. No AI, no task symbols, no per-case weight tuning.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -76,7 +77,9 @@ def _chain_desc(tmp_path, *, etype: str, method: str, conf: float) -> str:
     conn = _one_edge_db(tmp_path, etype=etype, method=method, conf=conf)
     try:
         chains = _build_scope_chains(
-            [_Cand(_FILE_A), _Cand(_FILE_B)], conn, True,  # type: ignore[arg-type]
+            [_Cand(_FILE_A), _Cand(_FILE_B)],
+            conn,
+            True,  # type: ignore[arg-type]
         )
     finally:
         conn.close()
@@ -87,18 +90,14 @@ def _chain_desc(tmp_path, *, etype: str, method: str, conf: float) -> str:
 def test_speculative_name_match_edge_renders_unverified(tmp_path):
     # name_match at/above the floor is admitted (byte-identical reach) but is a NAME
     # GUESS -> it MUST carry '(unverified)', never bare (the laundering this closes).
-    desc = _chain_desc(
-        tmp_path, etype="CALLS", method="name_match", conf=_NAME_MATCH_FLOOR + 0.1
-    )
+    desc = _chain_desc(tmp_path, etype="CALLS", method="name_match", conf=_NAME_MATCH_FLOOR + 0.1)
     assert "(unverified)" in desc, desc
     assert "(CANDIDATE)" not in desc, desc
 
 
 def test_candidate_promote_edge_renders_candidate(tmp_path):
     # a promote_% edge is derived-from-facts but NOT verified -> explicit (CANDIDATE).
-    desc = _chain_desc(
-        tmp_path, etype="READS", method="promote_reads", conf=0.9
-    )
+    desc = _chain_desc(tmp_path, etype="READS", method="promote_reads", conf=0.9)
     assert "(CANDIDATE)" in desc, desc
     assert "(unverified)" not in desc, desc
 
@@ -113,14 +112,23 @@ def test_certified_deterministic_edge_renders_bare(tmp_path):
 def _trust_tier_db(tmp_path, tier, name="tt.db"):
     db = str(tmp_path / name)
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT, file_path TEXT)")
-    conn.execute("CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, "
-                 "target_id INTEGER, type TEXT, resolution_method TEXT, confidence REAL, "
-                 "trust_tier TEXT)")
-    conn.executemany("INSERT INTO nodes (id,label,name,file_path) VALUES (?,?,?,?)",
-                     [(1, "Function", "alpha", _FILE_A), (2, "Function", "beta", _FILE_B)])
-    conn.execute("INSERT INTO edges (source_id,target_id,type,resolution_method,confidence,"
-                 "trust_tier) VALUES (1,2,'CALLS','import',0.95,?)", (tier,))
+    conn.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT, file_path TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, "
+        "target_id INTEGER, type TEXT, resolution_method TEXT, confidence REAL, "
+        "trust_tier TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO nodes (id,label,name,file_path) VALUES (?,?,?,?)",
+        [(1, "Function", "alpha", _FILE_A), (2, "Function", "beta", _FILE_B)],
+    )
+    conn.execute(
+        "INSERT INTO edges (source_id,target_id,type,resolution_method,confidence,"
+        "trust_tier) VALUES (1,2,'CALLS','import',0.95,?)",
+        (tier,),
+    )
     conn.commit()
     return conn
 

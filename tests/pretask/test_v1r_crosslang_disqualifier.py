@@ -26,6 +26,7 @@ fixes.py::crosslang_repo) against the HOST functions:
 
 All deterministic: sqlite fixtures, no network, no task IDs, no gold labels.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -81,19 +82,34 @@ def _create_graph_db(db_path: Path, nodes, edges, *, with_language: bool = True)
             conn.execute(
                 "INSERT INTO nodes (label, name, file_path, signature, start_line, "
                 "end_line, is_test, language) VALUES (?,?,?,?,?,?,?,?)",
-                (n["label"], n["name"], n["file_path"], n.get("signature", ""),
-                 n.get("start_line", 1), n.get("end_line", 1), int(n.get("is_test", 0)),
-                 n.get("language", "python")),
+                (
+                    n["label"],
+                    n["name"],
+                    n["file_path"],
+                    n.get("signature", ""),
+                    n.get("start_line", 1),
+                    n.get("end_line", 1),
+                    int(n.get("is_test", 0)),
+                    n.get("language", "python"),
+                ),
             )
         else:
             conn.execute(
                 "INSERT INTO nodes (label, name, file_path, signature, start_line, "
                 "end_line, is_test) VALUES (?,?,?,?,?,?,?)",
-                (n["label"], n["name"], n["file_path"], n.get("signature", ""),
-                 n.get("start_line", 1), n.get("end_line", 1), int(n.get("is_test", 0))),
+                (
+                    n["label"],
+                    n["name"],
+                    n["file_path"],
+                    n.get("signature", ""),
+                    n.get("start_line", 1),
+                    n.get("end_line", 1),
+                    int(n.get("is_test", 0)),
+                ),
             )
-        key_to_id[n.get("key", n["name"])] = conn.execute(
-            "SELECT last_insert_rowid()").fetchone()[0]
+        key_to_id[n.get("key", n["name"])] = conn.execute("SELECT last_insert_rowid()").fetchone()[
+            0
+        ]
     for src, tgt, etype, line, method, conf in edges:
         conn.execute(
             "INSERT INTO edges (source_id, target_id, type, source_line, "
@@ -120,10 +136,7 @@ def _write_repo_files(repo: Path) -> None:
         encoding="utf-8",
     )
     (repo / _RS_CALLER).write_text(
-        "pub fn run_loop(ctx: &mut Context) {\n"
-        "    let m = module();\n"
-        "    m.execute(ctx);\n"
-        "}\n",
+        "pub fn run_loop(ctx: &mut Context) {\n    let m = module();\n    m.execute(ctx);\n}\n",
         encoding="utf-8",
     )
     (repo / _RS_PARSER).write_text(
@@ -138,36 +151,90 @@ def _write_repo_files(repo: Path) -> None:
     (repo / _TS_LIB).write_text(
         "export function startServer(port: number) {\n}\n", encoding="utf-8"
     )
-    (repo / _JS_LIB).write_text(
-        "function boot() {\n    startServer(80);\n}\n", encoding="utf-8"
-    )
+    (repo / _JS_LIB).write_text("function boot() {\n    startServer(80);\n}\n", encoding="utf-8")
 
 
 _NODES = [
-    {"label": "Method", "name": "execute", "key": "execute",
-     "file_path": _RS_SOURCE, "signature": "pub fn execute(&self, ctx: &mut Context)",
-     "start_line": 2, "end_line": 4, "language": "rust"},
-    {"label": "Function", "name": "load_module", "key": "load_module",
-     "file_path": _RS_SOURCE, "signature": "pub fn load_module(path: &str)",
-     "start_line": 6, "end_line": 9, "language": "rust"},
-    {"label": "Function", "name": "run_loop", "key": "run_loop",
-     "file_path": _RS_CALLER, "signature": "pub fn run_loop(ctx: &mut Context)",
-     "start_line": 1, "end_line": 4, "language": "rust"},
-    {"label": "Function", "name": "parse_module", "key": "parse_module",
-     "file_path": _RS_PARSER, "signature": "pub fn parse_module(src: &str)",
-     "start_line": 2, "end_line": 3, "language": "rust"},
-    {"label": "Function", "name": "chainTest", "key": "chainTest",
-     "file_path": _JS_BENCH, "signature": "function chainTest(n)",
-     "start_line": 1, "end_line": 3, "language": "javascript"},
-    {"label": "Function", "name": "format_output", "key": "format_output",
-     "file_path": _JS_TOOL, "signature": "function format_output(p)",
-     "start_line": 1, "end_line": 3, "language": "javascript"},
-    {"label": "Function", "name": "startServer", "key": "startServer",
-     "file_path": _TS_LIB, "signature": "export function startServer(port: number)",
-     "start_line": 1, "end_line": 2, "language": "typescript"},
-    {"label": "Function", "name": "boot", "key": "boot",
-     "file_path": _JS_LIB, "signature": "function boot()",
-     "start_line": 1, "end_line": 3, "language": "javascript"},
+    {
+        "label": "Method",
+        "name": "execute",
+        "key": "execute",
+        "file_path": _RS_SOURCE,
+        "signature": "pub fn execute(&self, ctx: &mut Context)",
+        "start_line": 2,
+        "end_line": 4,
+        "language": "rust",
+    },
+    {
+        "label": "Function",
+        "name": "load_module",
+        "key": "load_module",
+        "file_path": _RS_SOURCE,
+        "signature": "pub fn load_module(path: &str)",
+        "start_line": 6,
+        "end_line": 9,
+        "language": "rust",
+    },
+    {
+        "label": "Function",
+        "name": "run_loop",
+        "key": "run_loop",
+        "file_path": _RS_CALLER,
+        "signature": "pub fn run_loop(ctx: &mut Context)",
+        "start_line": 1,
+        "end_line": 4,
+        "language": "rust",
+    },
+    {
+        "label": "Function",
+        "name": "parse_module",
+        "key": "parse_module",
+        "file_path": _RS_PARSER,
+        "signature": "pub fn parse_module(src: &str)",
+        "start_line": 2,
+        "end_line": 3,
+        "language": "rust",
+    },
+    {
+        "label": "Function",
+        "name": "chainTest",
+        "key": "chainTest",
+        "file_path": _JS_BENCH,
+        "signature": "function chainTest(n)",
+        "start_line": 1,
+        "end_line": 3,
+        "language": "javascript",
+    },
+    {
+        "label": "Function",
+        "name": "format_output",
+        "key": "format_output",
+        "file_path": _JS_TOOL,
+        "signature": "function format_output(p)",
+        "start_line": 1,
+        "end_line": 3,
+        "language": "javascript",
+    },
+    {
+        "label": "Function",
+        "name": "startServer",
+        "key": "startServer",
+        "file_path": _TS_LIB,
+        "signature": "export function startServer(port: number)",
+        "start_line": 1,
+        "end_line": 2,
+        "language": "typescript",
+    },
+    {
+        "label": "Function",
+        "name": "boot",
+        "key": "boot",
+        "file_path": _JS_LIB,
+        "signature": "function boot()",
+        "start_line": 1,
+        "end_line": 3,
+        "language": "javascript",
+    },
 ]
 
 _EDGES = [
@@ -229,17 +296,20 @@ def test_host_cross_language_caller_never_a_witness(crosslang_repo):
     assert "deltablue" not in rendered, f"cross-language caller witness leaked: {rendered}"
     assert "fmt.js" not in rendered, f"cross-language callee witness leaked: {rendered}"
     # TRUE same-language facts survive
-    assert any(w["direction"] == "caller" and w["file_path"] == _RS_CALLER
-               for w in wits), f"true rust caller over-suppressed: {wits}"
-    assert any(w["direction"] == "callee" and w["file_path"] == _RS_PARSER
-               for w in wits), f"true rust callee over-suppressed: {wits}"
+    assert any(w["direction"] == "caller" and w["file_path"] == _RS_CALLER for w in wits), (
+        f"true rust caller over-suppressed: {wits}"
+    )
+    assert any(w["direction"] == "callee" and w["file_path"] == _RS_PARSER for w in wits), (
+        f"true rust callee over-suppressed: {wits}"
+    )
 
 
 def test_host_same_family_js_ts_witness_survives(crosslang_repo):
     repo, db = crosslang_repo
     wits = _resolved_witnesses_for_file(str(db), _TS_LIB, str(repo), max_each=4)
     assert any(w["file_path"] == _JS_LIB for w in wits), (
-        f"same-family js->ts caller wrongly suppressed: {wits}")
+        f"same-family js->ts caller wrongly suppressed: {wits}"
+    )
 
 
 # ===========================================================================
@@ -267,15 +337,36 @@ _PY_UTIL = "app/util.py"
 _JS_TAILWIND = "assets/tailwind.js"
 
 _PY_NODES = [
-    {"label": "Function", "name": "format_running", "key": "format_running",
-     "file_path": _PY_MAIN, "signature": "def format_running(tasks)",
-     "start_line": 1, "end_line": 4, "language": "python"},
-    {"label": "Function", "name": "snapshot_helper", "key": "snapshot_helper",
-     "file_path": _PY_UTIL, "signature": "def snapshot_helper(x)",
-     "start_line": 1, "end_line": 2, "language": "python"},
-    {"label": "Function", "name": "twind", "key": "twind",
-     "file_path": _JS_TAILWIND, "signature": "function twind()",
-     "start_line": 1, "end_line": 2, "language": "javascript"},
+    {
+        "label": "Function",
+        "name": "format_running",
+        "key": "format_running",
+        "file_path": _PY_MAIN,
+        "signature": "def format_running(tasks)",
+        "start_line": 1,
+        "end_line": 4,
+        "language": "python",
+    },
+    {
+        "label": "Function",
+        "name": "snapshot_helper",
+        "key": "snapshot_helper",
+        "file_path": _PY_UTIL,
+        "signature": "def snapshot_helper(x)",
+        "start_line": 1,
+        "end_line": 2,
+        "language": "python",
+    },
+    {
+        "label": "Function",
+        "name": "twind",
+        "key": "twind",
+        "file_path": _JS_TAILWIND,
+        "signature": "function twind()",
+        "start_line": 1,
+        "end_line": 2,
+        "language": "javascript",
+    },
 ]
 
 _PY_EDGES = [
@@ -292,13 +383,14 @@ def _write_py_repo(repo: Path) -> None:
     for rel in (_PY_MAIN, _PY_UTIL, _JS_TAILWIND):
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
     (repo / _PY_MAIN).write_text(
-        "def format_running(tasks):\n    return snapshot_helper(tasks)\n",
-        encoding="utf-8")
+        "def format_running(tasks):\n    return snapshot_helper(tasks)\n", encoding="utf-8"
+    )
     (repo / _PY_UTIL).write_text(
-        "def snapshot_helper(x):\n    # snapshot helper\n    return x\n",
-        encoding="utf-8")
+        "def snapshot_helper(x):\n    # snapshot helper\n    return x\n", encoding="utf-8"
+    )
     (repo / _JS_TAILWIND).write_text(
-        "function twind() { /* snapshot styles */ }\n", encoding="utf-8")
+        "function twind() { /* snapshot styles */ }\n", encoding="utf-8"
+    )
 
 
 @pytest.fixture
@@ -325,10 +417,10 @@ def test_static_callees_same_family_survives(crosslang_repo):
 
 def test_issue_relevant_neighbors_drop_cross_language(py_xlang_repo):
     repo, db = py_xlang_repo
-    out = _issue_relevant_neighbors(
-        str(db), _PY_MAIN, str(repo), {"snapshot"}, limit=3)
+    out = _issue_relevant_neighbors(str(db), _PY_MAIN, str(repo), {"snapshot"}, limit=3)
     assert _JS_TAILWIND not in out, (
-        f"cross-language neighbor (the tailwind.js launder) leaked: {out}")
+        f"cross-language neighbor (the tailwind.js launder) leaked: {out}"
+    )
     assert _PY_UTIL in out, f"true same-language neighbor lost: {out}"
 
 
@@ -336,8 +428,9 @@ def test_static_callees_legacy_schema_permissive(tmp_path):
     db = tmp_path / "graph.db"
     _create_graph_db(db, _PY_NODES, _PY_EDGES, with_language=False)
     out = _static_callees(str(db), _PY_MAIN, limit=3)
-    assert _JS_TAILWIND in out, (
-        "legacy schema (no nodes.language) must stay permissive: " + repr(out))
+    assert _JS_TAILWIND in out, "legacy schema (no nodes.language) must stay permissive: " + repr(
+        out
+    )
 
 
 def test_curation_map_neighbors_drop_cross_language(py_xlang_repo):
@@ -347,19 +440,33 @@ def test_curation_map_neighbors_drop_cross_language(py_xlang_repo):
         ids = curation_map._node_ids(conn, _PY_MAIN, "format_running")
         assert ids, "fixture focus node missing"
         callers = curation_map._neighbors(
-            conn, ids, direction="callers", has_conf=True, has_method=True,
-            max_neighbors=5, repo_root=str(repo))
+            conn,
+            ids,
+            direction="callers",
+            has_conf=True,
+            has_method=True,
+            max_neighbors=5,
+            repo_root=str(repo),
+        )
         callees = curation_map._neighbors(
-            conn, ids, direction="callees", has_conf=True, has_method=True,
-            max_neighbors=5, repo_root=str(repo))
+            conn,
+            ids,
+            direction="callees",
+            has_conf=True,
+            has_method=True,
+            max_neighbors=5,
+            repo_root=str(repo),
+        )
     finally:
         conn.close()
     caller_files = [e.file for e in callers]
     callee_files = [e.file for e in callees]
     assert _JS_TAILWIND not in caller_files, (
-        f"cross-language caller leaked into <gt-graph-map>: {caller_files}")
+        f"cross-language caller leaked into <gt-graph-map>: {caller_files}"
+    )
     assert _JS_TAILWIND not in callee_files, (
-        f"cross-language callee leaked into <gt-graph-map>: {callee_files}")
+        f"cross-language callee leaked into <gt-graph-map>: {callee_files}"
+    )
     assert _PY_UTIL in callee_files, f"true callee lost: {callee_files}"
 
 
@@ -369,12 +476,19 @@ def test_curation_map_neighbors_same_family_survives(crosslang_repo):
     try:
         ids = curation_map._node_ids(conn, _TS_LIB, "startServer")
         callers = curation_map._neighbors(
-            conn, ids, direction="callers", has_conf=True, has_method=True,
-            max_neighbors=5, repo_root=str(repo))
+            conn,
+            ids,
+            direction="callers",
+            has_conf=True,
+            has_method=True,
+            max_neighbors=5,
+            repo_root=str(repo),
+        )
     finally:
         conn.close()
     assert any(e.file == _JS_LIB for e in callers), (
-        f"same-family js->ts caller wrongly suppressed: {callers}")
+        f"same-family js->ts caller wrongly suppressed: {callers}"
+    )
 
 
 # A NON-vendored cross-language (JS) neighbour, so the legacy-permissive LANGUAGE
@@ -387,9 +501,16 @@ _JS_WIDGET = "web/widget.js"
 
 def test_curation_map_neighbors_legacy_schema_permissive(tmp_path):
     nodes = _PY_NODES + [
-        {"label": "Function", "name": "widget_render", "key": "widget_render",
-         "file_path": _JS_WIDGET, "signature": "function widget_render()",
-         "start_line": 1, "end_line": 2, "language": "javascript"},
+        {
+            "label": "Function",
+            "name": "widget_render",
+            "key": "widget_render",
+            "file_path": _JS_WIDGET,
+            "signature": "function widget_render()",
+            "start_line": 1,
+            "end_line": 2,
+            "language": "javascript",
+        },
     ]
     edges = _PY_EDGES + [
         ("format_running", "widget_render", "CALLS", 4, "verified_unique", 0.95),
@@ -400,19 +521,19 @@ def test_curation_map_neighbors_legacy_schema_permissive(tmp_path):
     try:
         ids = curation_map._node_ids(conn, _PY_MAIN, "format_running")
         callees = curation_map._neighbors(
-            conn, ids, direction="callees", has_conf=True, has_method=True,
-            max_neighbors=5)
+            conn, ids, direction="callees", has_conf=True, has_method=True, max_neighbors=5
+        )
     finally:
         conn.close()
     callee_files = [e.file for e in callees]
     # LANGUAGE permissiveness on legacy schema: the cross-language disqualifier
     # cannot judge (no language column) -> the clean JS neighbour survives.
-    assert _JS_WIDGET in callee_files, (
-        "legacy schema must stay permissive (cannot judge language)")
+    assert _JS_WIDGET in callee_files, "legacy schema must stay permissive (cannot judge language)"
     # PATH filter (parity with the per-turn twin): a vendored neighbour is dropped
     # from delivered scope regardless of language/legacy schema.
     assert _JS_TAILWIND not in callee_files, (
-        "vendored neighbour must be dropped by the file-level path filter")
+        "vendored neighbour must be dropped by the file-level path filter"
+    )
 
 
 # ===========================================================================
@@ -427,7 +548,8 @@ def test_host_legacy_schema_without_language_is_permissive(tmp_path):
     line = _caller_contract_for_file(str(db), _RS_SOURCE, str(repo), ["execute"])
     assert "run_loop() in " + _RS_CALLER in line, f"legacy fact lost: {line}"
     assert "deltablue" in line, (
-        "legacy schema must stay permissive (cannot judge language): " + line)
+        "legacy schema must stay permissive (cannot judge language): " + line
+    )
     wits = _resolved_witnesses_for_file(str(db), _RS_SOURCE, str(repo), max_each=4)
     assert any(w["file_path"] == _RS_CALLER for w in wits), f"legacy witness lost: {wits}"
     out = edit_target_callee_contracts(str(db), _RS_SOURCE, ["load_module"])

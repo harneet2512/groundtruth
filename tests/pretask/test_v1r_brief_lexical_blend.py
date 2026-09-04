@@ -86,6 +86,7 @@ def _build(
 
 # --- ROOT CAUSE A: NL-word coincidence must NOT beat structural degree --------
 
+
 def test_nl_word_does_not_beat_degree(tmp_path: Path) -> None:
     """``start`` (ref=1, matches the NL word "start" in the issue) must NOT lead
     over ``new`` (ref=3, structurally central). The issue contains NO backticked
@@ -97,7 +98,7 @@ def test_nl_word_does_not_beat_degree(tmp_path: Path) -> None:
     F = "span.rs"
     nodes = [
         (1, "Function", "start", F),  # the word-coincidence, ref=1
-        (2, "Function", "new", F),    # the central function, ref=3
+        (2, "Function", "new", F),  # the central function, ref=3
         (10, "Function", "caller_a", "a.rs"),
         (11, "Function", "caller_b", "b.rs"),
         (12, "Function", "caller_c", "c.rs"),
@@ -131,8 +132,8 @@ def test_code_symbol_anchor_still_surfaces_low_ref(tmp_path: Path) -> None:
     """
     F = "importer.py"
     nodes = [
-        (1, "Function", "set_fields", F),   # the edit target, ref=0
-        (2, "Function", "run", F),          # the hub, ref=5
+        (1, "Function", "set_fields", F),  # the edit target, ref=0
+        (2, "Function", "run", F),  # the hub, ref=5
         (20, "Function", "h1", "h1.py"),
         (21, "Function", "h2", "h2.py"),
         (22, "Function", "h3", "h3.py"),
@@ -173,6 +174,7 @@ def test_no_anchors_falls_back_to_degree(tmp_path: Path) -> None:
 
 # --- ROOT CAUSE C: vendored / demo paths are demoted from candidates ----------
 
+
 def test_vendored_and_demo_paths_are_demotable() -> None:
     """The exact noise paths from the live runs must be caught by the SAME
     predicates the brief uses to drop candidates — no new ad-hoc list."""
@@ -190,6 +192,7 @@ def test_vendored_and_demo_paths_are_demotable() -> None:
 
 
 # --- ROOT CAUSE B: the #1 file keeps the graph-map lead via a fallback focus ---
+
 
 def _map_schema_db(tmp_path: Path) -> str:
     db = str(tmp_path / "mapb.db")
@@ -271,16 +274,15 @@ def test_good_case_top_file_first_function_still_leads(tmp_path: Path) -> None:
         FileEntry(path="b.py", score=0.80, function_names=["g"]),
     ]
     out = render_brief(files, graph_db=db)
-    block = out[out.find("<gt-graph-map>"):out.find("</gt-graph-map>")]
+    block = out[out.find("<gt-graph-map>") : out.find("</gt-graph-map>")]
     assert "a.py :: central" in block, f"good case broke: {block!r}"
 
 
 # --- ROOT CAUSE C (E2E): a vendored candidate never reaches the brief entries --
 
+
 @patch("groundtruth.pretask.v1r_brief.run_v74")
-def test_vendored_candidate_dropped_from_brief_entries(
-    mock_v74: MagicMock, tmp_path: Path
-) -> None:
+def test_vendored_candidate_dropped_from_brief_entries(mock_v74: MagicMock, tmp_path: Path) -> None:
     """A vendored candidate that the UPSTREAM demo-segment filter does NOT catch
     (``third_party/`` is a vendor-dir marker, not a demo segment) must still be
     dropped by the fail-closed chokepoint before the brief's entries are built, so
@@ -314,8 +316,7 @@ def test_vendored_candidate_dropped_from_brief_entries(
     # leak shape — a vendored dup out-ranking the real file).
     mock_v74.return_value = MagicMock(
         ranked_full=[
-            {"path": "third_party/dacite/common.py", "score": 0.95,
-             "components": {"path": 0.9}},
+            {"path": "third_party/dacite/common.py", "score": 0.95, "components": {"path": 0.9}},
             {"path": "src/common.py", "score": 0.80, "components": {"path": 0.0}},
         ]
     )
@@ -329,6 +330,7 @@ def test_vendored_candidate_dropped_from_brief_entries(
 
 
 # --- ROOT CAUSE C (scope chain): vendored/demo files never enter "check ALL" ----
+
 
 def test_vendored_file_dropped_from_scope_chain(tmp_path: Path) -> None:
     """A pure-vendored-dir file (``third_party/``) connected into a scope chain must

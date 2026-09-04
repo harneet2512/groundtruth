@@ -2,6 +2,7 @@
 awilix↔geo cross-task contamination, 2026-06-15). A reused out_dir (a codespace
 running several tasks through one /tmp/gt) must regenerate per (issue, graph),
 not return a prior task's cached brief."""
+
 import tempfile
 
 from groundtruth.runtime import brief_cache as bc

@@ -9,6 +9,7 @@ noise (same file, agent already editing, no new evidence).
 
 Steers to DIFFERENT files must NOT be suppressed.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,8 +25,7 @@ except ImportError:
     should_suppress_steer = None
 
 requires_dedup = pytest.mark.skipif(
-    should_suppress_steer is None,
-    reason="steer_dedup not implemented yet — test is RED"
+    should_suppress_steer is None, reason="steer_dedup not implemented yet — test is RED"
 )
 
 
@@ -47,13 +47,15 @@ def _extract_steers_and_edits(events: list[dict]):
                 edited_files.add(f)
         elif e == "steer_delivered":
             sf = ev.get("file", "")
-            steers.append({
-                "file": sf,
-                "cycle": ev.get("cycle", 0),
-                "channel": ev.get("channel", ""),
-                "edited_files_at_time": set(edited_files),
-                "prior_steers": list(steer_history),
-            })
+            steers.append(
+                {
+                    "file": sf,
+                    "cycle": ev.get("cycle", 0),
+                    "channel": ev.get("channel", ""),
+                    "edited_files_at_time": set(edited_files),
+                    "prior_steers": list(steer_history),
+                }
+            )
             steer_history.append(sf)
 
     return steers
@@ -82,7 +84,7 @@ def test_lsp_13453_steers_3_to_5_are_suppressible():
     # Steers 3-5: suppressed (repeated > 2, agent already editing)
     for i in [2, 3, 4]:
         assert should_suppress_steer(steers[i]) is True, (
-            f"Steer {i+1} to same file after agent already editing it "
+            f"Steer {i + 1} to same file after agent already editing it "
             f"and repeated count > 2 must be suppressed. "
             f"file={steers[i]['file']}, prior_steers={steers[i]['prior_steers']}"
         )
@@ -93,17 +95,31 @@ def test_steers_to_different_files_not_suppressed():
     """Negative control: steers to different files must NOT be suppressed,
     even if the count is high."""
     steers = [
-        {"file": "file_A.py", "cycle": 5, "channel": "micro",
-         "edited_files_at_time": set(), "prior_steers": []},
-        {"file": "file_B.py", "cycle": 10, "channel": "micro",
-         "edited_files_at_time": {"file_A.py"}, "prior_steers": ["file_A.py"]},
-        {"file": "file_C.py", "cycle": 15, "channel": "micro",
-         "edited_files_at_time": {"file_A.py", "file_B.py"},
-         "prior_steers": ["file_A.py", "file_B.py"]},
+        {
+            "file": "file_A.py",
+            "cycle": 5,
+            "channel": "micro",
+            "edited_files_at_time": set(),
+            "prior_steers": [],
+        },
+        {
+            "file": "file_B.py",
+            "cycle": 10,
+            "channel": "micro",
+            "edited_files_at_time": {"file_A.py"},
+            "prior_steers": ["file_A.py"],
+        },
+        {
+            "file": "file_C.py",
+            "cycle": 15,
+            "channel": "micro",
+            "edited_files_at_time": {"file_A.py", "file_B.py"},
+            "prior_steers": ["file_A.py", "file_B.py"],
+        },
     ]
     for i, s in enumerate(steers):
         assert should_suppress_steer(s) is False, (
-            f"Steer {i+1} to a NEW file ({s['file']}) must not be suppressed"
+            f"Steer {i + 1} to a NEW file ({s['file']}) must not be suppressed"
         )
 
 
@@ -112,17 +128,31 @@ def test_repeated_steer_without_agent_editing_not_suppressed():
     """If the agent has NOT edited the steered file yet, repeating the
     steer is potentially useful (agent may not have seen it). Do not suppress."""
     steers = [
-        {"file": "target.py", "cycle": 5, "channel": "micro",
-         "edited_files_at_time": set(), "prior_steers": []},
-        {"file": "target.py", "cycle": 10, "channel": "material_edit",
-         "edited_files_at_time": set(), "prior_steers": ["target.py"]},
-        {"file": "target.py", "cycle": 15, "channel": "material_edit",
-         "edited_files_at_time": set(),
-         "prior_steers": ["target.py", "target.py"]},
+        {
+            "file": "target.py",
+            "cycle": 5,
+            "channel": "micro",
+            "edited_files_at_time": set(),
+            "prior_steers": [],
+        },
+        {
+            "file": "target.py",
+            "cycle": 10,
+            "channel": "material_edit",
+            "edited_files_at_time": set(),
+            "prior_steers": ["target.py"],
+        },
+        {
+            "file": "target.py",
+            "cycle": 15,
+            "channel": "material_edit",
+            "edited_files_at_time": set(),
+            "prior_steers": ["target.py", "target.py"],
+        },
     ]
     # Agent never edited target.py → repeats may be needed
     for i, s in enumerate(steers):
         assert should_suppress_steer(s) is False, (
-            f"Steer {i+1} to target.py but agent hasn't edited it yet. "
+            f"Steer {i + 1} to target.py but agent hasn't edited it yet. "
             f"Do not suppress — agent may need the reminder."
         )

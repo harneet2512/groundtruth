@@ -1,4 +1,5 @@
 """Tests for diff-aware signature arity mismatch detection."""
+
 from groundtruth.hooks.post_edit import (
     _signature_param_count,
     _signature_has_varargs,
@@ -87,7 +88,9 @@ class TestExtractCallArity:
 
 class TestCheckArityMismatch:
     def test_no_mismatch(self):
-        callers = [{"file": "a.py", "line": "10", "code": "foo(1, 2)", "resolution_method": "import"}]
+        callers = [
+            {"file": "a.py", "line": "10", "code": "foo(1, 2)", "resolution_method": "import"}
+        ]
         result = _check_arity_mismatch("def foo(a, b):", "foo", callers, [])
         assert result == ""
 
@@ -98,7 +101,9 @@ class TestCheckArityMismatch:
         assert "a.py:10" in result
 
     def test_mismatch_medium_confidence(self):
-        callers = [{"file": "a.py", "line": "10", "code": "foo(1)", "resolution_method": "name_match"}]
+        callers = [
+            {"file": "a.py", "line": "10", "code": "foo(1)", "resolution_method": "name_match"}
+        ]
         result = _check_arity_mismatch("def foo(a, b, c):", "foo", callers, [])
         assert "[GT_CONTRACT medium]" in result
 
@@ -125,7 +130,9 @@ class TestCheckArityMismatch:
 
     def test_self_excluded(self):
         # Method: def foo(self, a, b) — 2 real params. Caller passes 2 → no mismatch.
-        callers = [{"file": "a.py", "line": "10", "code": "obj.foo(1, 2)", "resolution_method": "import"}]
+        callers = [
+            {"file": "a.py", "line": "10", "code": "obj.foo(1, 2)", "resolution_method": "import"}
+        ]
         # _extract_call_arity for "obj.foo(1, 2)" with func_name="foo" → finds "foo(1, 2)" → 2
         result = _check_arity_mismatch("def foo(self, a, b):", "foo", callers, [])
         assert result == ""

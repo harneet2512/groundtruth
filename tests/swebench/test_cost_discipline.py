@@ -10,6 +10,7 @@ Covers:
 
 These tests run without spending money — every codepath is local.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -54,6 +55,7 @@ def classifier_mod():
 
 # ---- G-002: expected-cost surface -----------------------------------------
 
+
 def test_compute_expected_cost_basic(runner_mod):
     expected, line = runner_mod._compute_expected_cost(
         task_count=30,
@@ -83,6 +85,7 @@ def test_compute_expected_cost_rejects_negative(runner_mod):
 
 
 # ---- G-001/G-009: --total-cost-limit -> argv ------------------------------
+
 
 def test_total_cost_limit_emits_agent_flag(runner_mod):
     cmd = runner_mod.build_sweagent_cmd(
@@ -118,18 +121,15 @@ def test_total_cost_limit_omitted_by_default(runner_mod):
 
 # ---- E-001 / RC-02 (e): Vertex 403 body classifier -------------------------
 
+
 def test_classify_403_throttle(classifier_mod):
-    body = json.dumps(
-        {"error": {"status": "RESOURCE_EXHAUSTED", "message": "Quota exceeded"}}
-    )
+    body = json.dumps({"error": {"status": "RESOURCE_EXHAUSTED", "message": "Quota exceeded"}})
     assert classifier_mod.classify_403(body) == "throttle"
     assert classifier_mod.is_retryable(body) is True
 
 
 def test_classify_403_iam(classifier_mod):
-    body = json.dumps(
-        {"error": {"status": "PERMISSION_DENIED", "reason": "IAM_PERMISSION_DENIED"}}
-    )
+    body = json.dumps({"error": {"status": "PERMISSION_DENIED", "reason": "IAM_PERMISSION_DENIED"}})
     assert classifier_mod.classify_403(body) == "iam"
     assert classifier_mod.is_retryable(body) is False
 
@@ -155,6 +155,7 @@ def test_classify_403_throttle_wins_when_both_present(classifier_mod):
 
 # ---- G-007/G-008: env scrubbing -------------------------------------------
 
+
 def test_preflight_unsets_paid_call_keys(runner_mod, tmp_path, monkeypatch):
     monkeypatch.setenv("GT_LLM_API_KEY", "sk-real-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-real")
@@ -170,6 +171,7 @@ def test_preflight_unsets_paid_call_keys(runner_mod, tmp_path, monkeypatch):
 
 
 # ---- G-007: mcp/server.py invariant ---------------------------------------
+
 
 def test_mcp_server_passes_api_key_none():
     """Static-source assertion that the three AI components are constructed
@@ -188,13 +190,12 @@ def test_mcp_server_passes_api_key_none():
         # the 1-2-line invocations in server.py).
         end = src.find(")", idx)
         assert end != -1
-        snippet = src[idx:end + 1]
-        assert "api_key=None" in snippet, (
-            f"{ctor} no longer passes api_key=None: {snippet!r}"
-        )
+        snippet = src[idx : end + 1]
+        assert "api_key=None" in snippet, f"{ctor} no longer passes api_key=None: {snippet!r}"
 
 
 # ---- G-005: reconciliation helper -----------------------------------------
+
 
 def test_reconcile_within_tolerance(runner_mod, tmp_path):
     log = tmp_path / "litellm_calls.jsonl"
@@ -213,9 +214,7 @@ def test_reconcile_within_tolerance(runner_mod, tmp_path):
 
 def test_reconcile_outside_tolerance(runner_mod, tmp_path):
     log = tmp_path / "litellm_calls.jsonl"
-    log.write_text(
-        json.dumps({"response_cost": 0.50}) + "\n", encoding="utf-8"
-    )
+    log.write_text(json.dumps({"response_cost": 0.50}) + "\n", encoding="utf-8")
     within, line = runner_mod._reconcile_litellm_calls(tmp_path, 0.20)
     assert within is False
     assert "delta=" in line
@@ -228,6 +227,7 @@ def test_reconcile_missing_log(runner_mod, tmp_path):
 
 
 # ---- G-005: proxy YAML has cost callback config ---------------------------
+
 
 def test_litellm_proxy_yaml_has_cost_callback():
     """The proxy YAML must declare success_callback so per-call
