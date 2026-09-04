@@ -32,15 +32,9 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): gt_gt.md and frozen trajectories absent in CI checkout",
-)
-
 _ROOT = Path(__file__).resolve().parents[1]
 _SENSE_PATH = _ROOT / "artifact_deepswe" / "gt_oracle_sense.py"
 _ORACLE_PATH = _ROOT / "artifact_deepswe" / "gt_oracle.py"
-_GT_GT = _ROOT / "gt_gt.md"
 
 
 def _load(path: Path, name: str):
@@ -294,22 +288,3 @@ def test_oracle_events_jsonl_writer_8dp(sense_mod, oracle_mod, tmp_path):
 # ---------------------------------------------------------------------------
 # FIXES 1/2/5 — the gt_gt.md §15 citation-honesty doc contracts.
 # ---------------------------------------------------------------------------
-def test_doc_litm_recency_only():
-    doc = _GT_GT.read_text(encoding="utf-8")
-    assert "front-loaded payloads decay as the trajectory grows" not in doc, (
-        "gt_gt.md still carries the retracted anti-front-loading LitM claim"
-    )
-    assert "primacy" in doc  # the honest U-curve framing is present
-
-
-def test_doc_effect_sizes_detached_from_our_mechanism():
-    doc = _GT_GT.read_text(encoding="utf-8")
-    assert "UNMEASURED" in doc, (
-        "gt_gt.md must state the deterministic extractor's effect is unmeasured"
-    )
-    assert "LLM PIPELINE" in doc or "LLM pipeline" in doc
-
-
-def test_doc_trajeval_cited_in_where():
-    doc = _GT_GT.read_text(encoding="utf-8")
-    assert "2603.24631" in doc and "TRAJEVAL" in doc

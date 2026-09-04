@@ -26,13 +26,6 @@ import sys
 
 import yaml
 
-import pytest
-
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): workflow pin tests check inline run field but logic moved to substrate_proof.sh",
-)
-
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 WF_DEEPSWE = os.path.join(ROOT, ".github", "workflows", "deepswe_full.yml")
 WF_30 = os.path.join(ROOT, ".github", "workflows", "swebench_30task.yml")
@@ -52,6 +45,9 @@ def _load(p):
 def _step(doc, job, name_prefix):
     for s in doc["jobs"][job]["steps"]:
         if str(s.get("name", "")).startswith(name_prefix):
+            if s.get("run") == "bash scripts/ci/substrate_proof.sh":
+                s = dict(s)
+                s["run"] = _read(os.path.join(ROOT, "scripts", "ci", "substrate_proof.sh"))
             return s
     raise AssertionError(f"step {name_prefix!r} not found in job {job!r}")
 
@@ -72,7 +68,7 @@ def _extract_issue_heredoc():
     """Pull the python heredoc body out of the substrate-proof step's run block."""
     step = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")
     lines = step["run"].splitlines()
-    start = next(i for i, ln in enumerate(lines) if "<< 'PYEOF'" in ln)
+    start = next(i for i, ln in enumerate(lines) if "PYEOF" in ln and "<<" in ln)
     body = []
     for ln in lines[start + 1 :]:
         if ln.strip() == "PYEOF":
@@ -242,16 +238,16 @@ def test_deepswe_proof_path_exposes_complete_substrate_closure():
     # baked language-tool directories even though the pinned substrate contained them.
     run = _step(_load(WF_DEEPSWE), "trial", "GT substrate proof")["run"]
     path_lines = [ln for ln in run.splitlines() if '-e PATH="' in ln]
-    assert len(path_lines) == 1
-    path_line = path_lines[0]
-    for required in (
-        "/opt/gt/bin",
-        "/opt/gt/node/bin",
-        "/opt/gt/python/bin",
-        "/opt/gt/jre/bin",
-        "/opt/gt/go/bin",
-    ):
-        assert required in path_line
+    assert len(path_lines) == 2
+    for path_line in path_lines:
+        for required in (
+            "/opt/gt/bin",
+            "/opt/gt/node/bin",
+            "/opt/gt/python/bin",
+            "/opt/gt/jre/bin",
+            "/opt/gt/go/bin",
+        ):
+            assert required in path_line
 
 
 def test_language_smoke_fails_on_nonzero_proof_exit():

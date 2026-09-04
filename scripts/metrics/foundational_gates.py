@@ -839,7 +839,7 @@ def gate_embedder_consumption(db: str, repo: str, issue_text: str) -> bool:
     return ok
 
 
-def _persist_brief_for_emit(result_obj) -> None:
+def _persist_brief_for_emit(result_obj, issue_text: str, graph: str) -> None:
     """A1: persist the gate's generated V1RBriefResult to GT_BRIEF_CACHE_DIR (the proof
     out dir) so emit_brief in gt_run_proof REUSES it instead of regenerating — one brief
     per proof, gate-certified == delivered. Best-effort; never raises (a failure here
@@ -848,10 +848,15 @@ def _persist_brief_for_emit(result_obj) -> None:
     if not cache_dir:
         return
     try:
-        from groundtruth.runtime.brief_cache import persist_brief
+        from groundtruth.runtime.brief_cache import persist_brief, request_identity
         bt = (getattr(result_obj, "brief_text", "") or "").strip()
         if bt:
-            persist_brief(cache_dir, bt, result_obj)
+            persist_brief(
+                cache_dir,
+                bt,
+                result_obj,
+                identity=request_identity(issue_text, graph),
+            )
     except Exception:  # noqa: BLE001 -- best-effort optimization, never fatal
         pass
 
@@ -917,7 +922,7 @@ def _load_brief_metrics(db: str, repo: str, issue_text: str):
             if ex is not None:
                 # A1 (2026-06-13): persist THIS generated brief so emit_brief reuses it
                 # (single generation per proof — gate-certified == delivered by sha).
-                _persist_brief_for_emit(r)
+                _persist_brief_for_emit(r, issue_text, db)
                 return ex
             print("  [contract] generate_v1r_brief result lacks the contract attributes "
                   "(effective_w_sem/semantic_signal_count/sem_components) -> T1 contract not shipped",

@@ -3617,8 +3617,8 @@ func BuildNameIndex(db *store.DB, nodes []store.Node, nodeDBIDs []int64) (map[st
 	fileIndex := make(map[string]map[string][]int64)
 
 	for i, n := range nodes {
-		if n.Label == "File" {
-			continue // File anchors are never call targets (#B3)
+		if !IsCallTargetLabel(n.Label) {
+			continue
 		}
 		dbID := nodeDBIDs[i]
 		nameIndex[n.Name] = append(nameIndex[n.Name], dbID)
@@ -3630,6 +3630,35 @@ func BuildNameIndex(db *store.DB, nodes []store.Node, nodeDBIDs []int64) (map[st
 	}
 
 	return nameIndex, fileIndex
+}
+
+// IsCallTargetLabel is deliberately closed over the labels that participated
+// in call resolution before declaration-taxonomy nodes were added.  Taxonomy
+// declarations remain queryable and importable code symbols, but a Namespace,
+// TypeAlias, or evidence node can never displace an established callable.
+func IsCallTargetLabel(label string) bool {
+	switch label {
+	case "Function", "Method", "Class", "Interface":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsCodeSymbolLabel excludes graph evidence/analysis nodes from symbol import
+// targeting while retaining both legacy and additive declaration taxonomy.
+func IsCodeSymbolLabel(label string) bool {
+	if IsCallTargetLabel(label) {
+		return true
+	}
+	switch label {
+	case "Struct", "Enum", "EnumMember", "Trait", "Impl", "TypeAlias",
+		"Namespace", "Module", "Union", "Macro", "Constant", "Record",
+		"Annotation", "Constructor", "Accessor", "Protocol":
+		return true
+	default:
+		return false
+	}
 }
 
 // BuildFileMap creates a mapping from various module path representations to file paths.

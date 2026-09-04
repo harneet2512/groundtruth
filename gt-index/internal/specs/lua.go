@@ -10,7 +10,7 @@ func init() {
 		Extensions: []string{".lua"},
 		Language:   lua.GetLanguage(),
 
-		FunctionNodes: []string{"function_declaration", "function_definition_statement"},
+		FunctionNodes: []string{"function_statement", "function"},
 		ClassNodes:    []string{},
 		CallNodes:     []string{"function_call"},
 		ImportNodes:   []string{"function_call"},

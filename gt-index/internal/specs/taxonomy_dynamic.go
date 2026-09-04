@@ -100,8 +100,7 @@ func init() {
 	RegisterTaxonomy(&Taxonomy{
 		Lang: "lua",
 		ByNodeType: map[string]string{
-			// The grammar's real names. GT's lua spec looks for other names and
-			// therefore emits nothing; see the file comment.
+			// The grammar's real names, shared with the corrected Lua parser spec.
 			"function_statement": KindFunction,
 			"function":           KindFunction,
 		},

@@ -1379,6 +1379,28 @@ func runIncremental(root, relpath, dbPath string) error {
 	if pr == nil {
 		pr = &parser.ParseResult{}
 	}
+	repositoryRevision := repoCommit(root)
+	if repositoryRevision == "" {
+		repositoryRevision = "unversioned"
+	}
+	producerIdentity, err := currentBuildIdentity()
+	if err != nil {
+		return fmt.Errorf("compute producer identity for incremental receipt: %w", err)
+	}
+	const incrementalAnalysisReason = "incremental_reindex_requires_full_analysis"
+	analysisPayload, analysisSHA, err := store.AnalysisPhaseReceipt{
+		Schema:             store.AnalysisPhaseReceiptSchema,
+		State:              store.AnalysisStateNotRun,
+		RepositoryRevision: repositoryRevision,
+		BuildID:            producerIdentity.BuildID,
+		FailureReason:      incrementalAnalysisReason,
+		RolledBack: []string{
+			"resolution", "closure", "cochange", "community", "process",
+		},
+	}.Seal()
+	if err != nil {
+		return fmt.Errorf("seal incremental analysis receipt: %w", err)
+	}
 
 	// Pre-fetch resolver inputs from the existing DB BEFORE the delete (so the
 	// just-deleted file's old nodes don't pollute the resolver's name/file
@@ -1410,10 +1432,10 @@ func runIncremental(root, relpath, dbPath string) error {
 	// identities and call candidates, so retain no old complete sidecar beside
 	// the new graph. Full indexing will repopulate it; until then consumers must
 	// fail closed on the explicit incomplete marker.
-	for _, table := range []string{"resolution_candidates", "resolution_callsites", "resolution_symbols"} {
-		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
-			return fmt.Errorf("invalidate %s: %w", table, err)
-		}
+	if err := store.InvalidateAnalysisForIncrementalTx(
+		tx, analysisPayload, analysisSHA, incrementalAnalysisReason,
+	); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`); err != nil {
 		return fmt.Errorf("invalidate resolution metadata: %w", err)
@@ -1654,7 +1676,7 @@ func runIncremental(root, relpath, dbPath string) error {
 	// (filteredNodes already contains all DB nodes minus stale file + fresh nodes)
 	incrNameToIDs := make(map[string][]int64)
 	for i, n := range filteredNodes {
-		if n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
+		if resolver.IsCallTargetLabel(n.Label) && n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
 			incrNameToIDs[n.Name] = append(incrNameToIDs[n.Name], filteredIDs[i])
 		}
 	}
@@ -1686,7 +1708,7 @@ func runIncremental(root, relpath, dbPath string) error {
 	// File-scoped node IDs for import-guided resolution
 	incrFileNodeIDs := make(map[string]map[string][]int64)
 	for i, n := range filteredNodes {
-		if n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
+		if resolver.IsCallTargetLabel(n.Label) && n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
 			byName, ok := incrFileNodeIDs[n.FilePath]
 			if !ok {
 				byName = make(map[string][]int64)

@@ -10,7 +10,7 @@ func init() {
 		Extensions: []string{".svelte"},
 		Language:   svelte.GetLanguage(),
 
-		FunctionNodes: []string{"function_declaration"},
+		FunctionNodes: []string{},
 		ClassNodes:    []string{},
 		CallNodes:     []string{"call_expression"},
 		ImportNodes:   []string{"import_statement"},

@@ -7,8 +7,6 @@ the agent's trajectory, not mock data.
 
 from __future__ import annotations
 
-import glob
-import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,13 +15,16 @@ from groundtruth.trajectory.governor import L5Governor
 
 
 @pytest.fixture(autouse=True)
-def _clean_state_files() -> None:
-    """Remove stale L5 state files from /tmp before each test."""
-    for f in glob.glob("/tmp/gt_l5_state_test-*.json"):
-        try:
-            os.remove(f)
-        except OSError:
-            pass
+def _isolated_state_files(monkeypatch, tmp_path) -> None:
+    """Keep every replay's persisted state isolated across runs and workers."""
+    import groundtruth.state.agent_state as agent_state
+
+    def state_path(task_id: str = "") -> str:
+        safe = task_id.replace("/", "_").replace("\\", "_")
+        filename = f"gt_l5_state_{safe}.json" if task_id else "gt_l5_state.json"
+        return str(tmp_path / filename)
+
+    monkeypatch.setattr(agent_state, "_l5_state_path", state_path)
 
 
 def _make_cmd_action(command: str) -> MagicMock:

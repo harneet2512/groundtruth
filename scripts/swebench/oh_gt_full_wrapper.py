@@ -1230,14 +1230,19 @@ def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_act
         seen: set[str] = set()
         for _ef in list(config._presubmit_edited_files)[:10]:
             _norm = _ef.replace("\\", "/").lstrip("/")
-            rows = _ps_conn.execute(
-                "SELECT DISTINCT p.kind, p.value FROM properties p "
-                "JOIN nodes n ON p.node_id = n.id "
-                "WHERE n.file_path LIKE ? ESCAPE '\\' AND n.is_test = 0 "
-                "AND p.kind IN ('return_shape', 'exception_type', 'guard_clause') "
-                "LIMIT 4",
-                (f"%{_escape_like(_norm)}",),
-            ).fetchall()
+            try:
+                rows = _ps_conn.execute(
+                    "SELECT DISTINCT p.kind, p.value FROM properties p "
+                    "JOIN nodes n ON p.node_id = n.id "
+                    "WHERE n.file_path LIKE ? ESCAPE '\\' AND n.is_test = 0 "
+                    "AND p.kind IN ('return_shape', 'exception_type', 'guard_clause') "
+                    "LIMIT 4",
+                    (f"%{_escape_like(_norm)}",),
+                ).fetchall()
+            except sqlite3.OperationalError as exc:
+                if "no such table: properties" not in str(exc):
+                    raise
+                rows = []
             for _k, _v in rows:
                 line = f"  {os.path.basename(_norm)}: {_k} = {str(_v)[:80]}"
                 if line not in seen:

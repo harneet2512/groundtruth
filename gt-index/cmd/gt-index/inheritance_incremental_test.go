@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,6 +123,7 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 		t.Fatalf("after -file reindex self.save() demoted to name_match (inheritanceMap was nil on the incremental path — the G09 regression)")
 	}
 	assertGraphResolutionIncomplete(t, dbPath)
+	assertIncrementalAnalysisInvalidated(t, dbPath)
 
 	// The incremental transaction must not leave old sidecar authority beside the
 	// changed graph. The legacy CALLS edge above remains available, while the new
@@ -166,6 +170,70 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 	for _, edge := range visible {
 		if edge.Type == "HAS_CALLSITE" || edge.Type == "CANDIDATE" {
 			t.Fatalf("generic graph query exposed incomplete attached edge: %+v", edge)
+		}
+	}
+}
+
+func assertIncrementalAnalysisInvalidated(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	meta := map[string]string{}
+	for _, key := range []string{
+		store.AnalysisStateKey,
+		store.AnalysisFailureReasonKey,
+		store.AnalysisPhaseReceiptKey,
+		store.AnalysisPhaseReceiptSHA256Key,
+		"derived_layers_state",
+		"derived_community_cohesion",
+		"derived_community_certified_call_rows",
+		"derived_process_assertions_scanned",
+		"derived_process_truncated",
+	} {
+		var value string
+		if err := db.QueryRow(`SELECT value FROM project_meta WHERE key=?`, key).Scan(&value); err != nil {
+			t.Fatalf("read %s: %v", key, err)
+		}
+		meta[key] = value
+	}
+	if meta[store.AnalysisStateKey] != store.AnalysisStateNotRun ||
+		meta[store.AnalysisFailureReasonKey] != "incremental_reindex_requires_full_analysis" ||
+		meta["derived_layers_state"] != store.AnalysisStateNotRun ||
+		meta["derived_community_cohesion"] != "absent:not_run" ||
+		meta["derived_community_certified_call_rows"] != "0" ||
+		meta["derived_process_assertions_scanned"] != "0" ||
+		meta["derived_process_truncated"] != "false" {
+		t.Fatalf("incremental analysis state was not invalidated: %#v", meta)
+	}
+	sum := sha256.Sum256([]byte(meta[store.AnalysisPhaseReceiptKey]))
+	if got := hex.EncodeToString(sum[:]); got != meta[store.AnalysisPhaseReceiptSHA256Key] {
+		t.Fatalf("incremental analysis receipt seal mismatch: got %s want %s", got, meta[store.AnalysisPhaseReceiptSHA256Key])
+	}
+	var receipt store.AnalysisPhaseReceipt
+	if err := json.Unmarshal([]byte(meta[store.AnalysisPhaseReceiptKey]), &receipt); err != nil {
+		t.Fatalf("decode incremental analysis receipt: %v", err)
+	}
+	if receipt.State != store.AnalysisStateNotRun ||
+		receipt.FailureReason != "incremental_reindex_requires_full_analysis" {
+		t.Fatalf("incremental analysis receipt retained stale authority: %#v", receipt)
+	}
+	for _, table := range []string{"cochanges", "communities", "community_members", "processes", "process_steps"} {
+		var exists int
+		if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists == 0 {
+			continue
+		}
+		var count int
+		if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("stale derived table %s retained %d rows", table, count)
 		}
 	}
 }

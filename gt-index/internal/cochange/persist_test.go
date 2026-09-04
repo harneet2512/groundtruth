@@ -16,6 +16,10 @@ const schemaCochanges = `
 		file_a TEXT NOT NULL,
 		file_b TEXT NOT NULL,
 		count INTEGER NOT NULL DEFAULT 1,
+		commits_a INTEGER NOT NULL DEFAULT 0,
+		commits_b INTEGER NOT NULL DEFAULT 0,
+		confidence_a_to_b REAL NOT NULL DEFAULT 0.0,
+		confidence_b_to_a REAL NOT NULL DEFAULT 0.0,
 		PRIMARY KEY(file_a, file_b)
 	);
 	CREATE INDEX IF NOT EXISTS idx_cochanges_a ON cochanges(file_a);
@@ -36,13 +40,14 @@ func openCochangeDB(t *testing.T) *sql.DB {
 }
 
 type row struct {
-	a, b  string
-	count int
+	a, b                           string
+	count, commitsA, commitsB      int
+	confidenceAToB, confidenceBToA float64
 }
 
 func readCochanges(t *testing.T, db *sql.DB) []row {
 	t.Helper()
-	rs, err := db.Query("SELECT file_a, file_b, count FROM cochanges ORDER BY file_a, file_b")
+	rs, err := db.Query("SELECT file_a, file_b, count, commits_a, commits_b, confidence_a_to_b, confidence_b_to_a FROM cochanges ORDER BY file_a, file_b")
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -50,7 +55,7 @@ func readCochanges(t *testing.T, db *sql.DB) []row {
 	var out []row
 	for rs.Next() {
 		var r row
-		if err := rs.Scan(&r.a, &r.b, &r.count); err != nil {
+		if err := rs.Scan(&r.a, &r.b, &r.count, &r.commitsA, &r.commitsB, &r.confidenceAToB, &r.confidenceBToA); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
 		out = append(out, r)
@@ -87,7 +92,10 @@ func TestPersistWritesSupportIntoTheExistingColumns(t *testing.T) {
 	}
 
 	got := readCochanges(t, db)
-	want := []row{{"a.go", "b.go", 4}, {"a.go", "c.go", 1}}
+	want := []row{
+		{"a.go", "b.go", 4, 5, 4, 0.8, 1.0},
+		{"a.go", "c.go", 1, 5, 1, 0.2, 1.0},
+	}
 	if len(got) != len(want) {
 		t.Fatalf("rows = %+v, want %+v", got, want)
 	}
@@ -176,7 +184,7 @@ func TestExtractThenPersistRoundTrip(t *testing.T) {
 	}
 
 	got := readCochanges(t, db)
-	if len(got) != 1 || got[0] != (row{"a.go", "b.go", 4}) {
-		t.Fatalf("rows = %+v, want [{a.go b.go 4}]", got)
+	if len(got) != 1 || got[0] != (row{"a.go", "b.go", 4, 5, 4, 0.8, 1.0}) {
+		t.Fatalf("rows = %+v, want persisted support, denominators, and confidence", got)
 	}
 }

@@ -10,9 +10,9 @@ package specs
 // `implements_clause` from `extends`, so it is one of the few languages where
 // IMPLEMENTS is a syntactic fact rather than a guess about a base-class name.
 //
-// `abstract_class_declaration` is deliberately NOT mapped: it is a class, and
-// emitting it would move the pre-existing `Class` label total, which this item
-// is required not to do. It is recorded as a gap in REPORT.md instead.
+// `abstract_class_declaration` remains absent because the current parser does
+// not emit it as a class declaration; the taxonomy never invents an unreachable
+// declaration.
 
 func init() {
 	RegisterTaxonomy(&Taxonomy{
@@ -111,16 +111,14 @@ func init() {
 		),
 	})
 
-	// Svelte. MEASURED (2026-09-03, tree-sitter symbol table of the pinned
-	// grammar): the Svelte grammar has no `function_declaration` node type,
-	// which is the only name GT's svelte spec looks for, so GT emits no Svelte
-	// symbol at all — a .svelte file contributes only the synthetic File
-	// anchor. The grammar describes the component's TEMPLATE (element,
-	// script_element, style_element); the script body is `raw_text` it does not
-	// parse. Nothing is claimed here that GT cannot produce.
+	// Svelte's pinned grammar exposes template elements, while script and style
+	// bodies are opaque raw_text. Emit the reachable template declaration and do
+	// not claim JavaScript or CSS symbols that this grammar cannot parse.
 	RegisterTaxonomy(&Taxonomy{
-		Lang:       "svelte",
-		ByNodeType: nil,
+		Lang: "svelte",
+		Decls: map[string]Decl{
+			"element": {Kind: KindElement, Label: "Element", NameField: ""},
+		},
 		Absent: mergeReasons(
 			absent(ReasonNoSynthTest, KindTest),
 			noCodeKinds(),
@@ -128,7 +126,6 @@ func init() {
 			map[string]string{
 				KindRule:    "style_element holds CSS as raw_text; this grammar does not parse it",
 				KindSection: ReasonMarkupOnly,
-				KindElement: "the grammar produces `element`, but GT's svelte spec declares no class node types, so no element node is ever emitted",
 			},
 		),
 	})

@@ -457,7 +457,8 @@ unbounded blocking call — the Bash/PS tool returns output only on command comp
 
 ## What NOT to Build
 
-- No vector embeddings (FTS5 + graph queries are sufficient)
+- No remote or generative embedding service; semantic retrieval uses only the
+  pinned local contract-embedding model.
 - No VS Code extension (MCP is universal)
 - No web dashboard
 - No daemon process (MCP stdio)

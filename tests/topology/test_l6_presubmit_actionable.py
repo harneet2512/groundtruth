@@ -32,13 +32,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "swebench"))
 import oh_gt_full_wrapper as w  # noqa: E402
 
-import pytest
-
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): presubmit evidence format changed",
-)
-
 WRAPPER_SRC = Path(w.__file__).read_text(encoding="utf-8")
 
 
@@ -151,7 +144,7 @@ class TestVerifiableTestCoverageStillDelivered:
             content = getattr(obs, "content", "")
             assert cfg._presubmit_fired is True
             # Verifiable action only — the test covering the edited file.
-            assert "pytest" in content
-            assert "test/test_importer.py::test_set_fields" in content
+            assert "project's own test suite" in content
+            assert "test/test_importer.py::test_set_fields" not in content
             # And NOT a caller-edit prescription.
             assert "callers depend on it" not in content

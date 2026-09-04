@@ -243,13 +243,16 @@ func TestBuildNameIndex_ExcludesFileAnchorNodes(t *testing.T) {
 	nodes := []store.Node{
 		{Label: "File", Name: "utils", FilePath: "src/utils/index.ts"},
 		{Label: "Function", Name: "caller", FilePath: "src/app.ts"},
+		{Label: "Namespace", Name: "caller", FilePath: "src/app.ts"},
+		{Label: "TypeAlias", Name: "caller", FilePath: "src/app.ts"},
+		{Label: "Callsite", Name: "caller", FilePath: "src/app.ts"},
 	}
-	nameIndex, fileIndex := BuildNameIndex(nil, nodes, []int64{10, 11})
+	nameIndex, fileIndex := BuildNameIndex(nil, nodes, []int64{10, 11, 12, 13, 14})
 	if ids := nameIndex["utils"]; len(ids) != 0 {
 		t.Errorf("File-anchor node registered in name index: %v", ids)
 	}
 	if ids := nameIndex["caller"]; len(ids) != 1 || ids[0] != 11 {
-		t.Errorf("regular node missing from name index: %v", ids)
+		t.Errorf("taxonomy/evidence node displaced callable in name index: %v", ids)
 	}
 	if m := fileIndex["src/utils/index.ts"]; len(m) != 0 {
 		t.Errorf("File-anchor node registered in file index: %v", m)

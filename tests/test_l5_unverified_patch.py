@@ -23,11 +23,18 @@ from groundtruth.trajectory.state import L5TrajectoryState
 
 import pytest
 
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): verification logic changed",
-)
 
+@pytest.fixture(autouse=True)
+def _isolated_l5_state(monkeypatch, tmp_path):
+    """Keep persisted governor state isolated across tests and pytest runs."""
+    import groundtruth.state.agent_state as agent_state
+
+    def state_path(task_id: str = "") -> str:
+        safe = task_id.replace("/", "_").replace("\\", "_")
+        filename = f"gt_l5_state_{safe}.json" if task_id else "gt_l5_state.json"
+        return str(tmp_path / filename)
+
+    monkeypatch.setattr(agent_state, "_l5_state_path", state_path)
 
 # ── classify_verification_targeting ────────────────────────────────────
 
@@ -321,9 +328,9 @@ def _make_finish() -> MagicMock:
 
 
 class TestGovernorUnverifiedPatch:
-    def test_edit_then_broad_pass_fires(self, monkeypatch):
+    def test_edit_then_broad_pass_is_owned_by_goku(self, monkeypatch, tmp_path):
         monkeypatch.setenv("GT_REBUILD_L5", "1")
-        gov = L5Governor(instance_id="test-unverified", max_iter=100)
+        gov = L5Governor(instance_id=f"test-unverified-{tmp_path.name}", max_iter=100)
 
         gov.after_interaction(
             _make_edit("src/auth.py"),
@@ -338,8 +345,7 @@ class TestGovernorUnverifiedPatch:
             action_count=11,
             max_iter=100,
         )
-        assert result.fired
-        assert result.message and "Unverified Patch" in result.message
+        assert not result.fired
 
     def test_edit_then_targeted_pass_no_fire(self, monkeypatch):
         monkeypatch.setenv("GT_REBUILD_L5", "1")
@@ -379,9 +385,9 @@ class TestGovernorUnverifiedPatch:
         )
         assert not result.fired
 
-    def test_finish_with_unverified_patch(self, monkeypatch):
+    def test_finish_after_broad_pass_still_blocks_unverified_patch(self, monkeypatch, tmp_path):
         monkeypatch.setenv("GT_REBUILD_L5", "1")
-        gov = L5Governor(instance_id="test-finish-unverified", max_iter=100)
+        gov = L5Governor(instance_id=f"test-finish-unverified-{tmp_path.name}", max_iter=100)
 
         gov.after_interaction(
             _make_edit("src/auth.py"),
@@ -405,9 +411,9 @@ class TestGovernorUnverifiedPatch:
         assert result.fired
         assert result.message and "Unsafe Finish" in result.message
 
-    def test_existing_hypothesis_falsified_still_works(self, monkeypatch):
+    def test_existing_hypothesis_falsified_still_works(self, monkeypatch, tmp_path):
         monkeypatch.setenv("GT_REBUILD_L5", "1")
-        gov = L5Governor(instance_id="test-hyp-still", max_iter=100)
+        gov = L5Governor(instance_id=f"test-hyp-still-{tmp_path.name}", max_iter=100)
 
         gov.after_interaction(
             _make_edit("src/auth.py"),

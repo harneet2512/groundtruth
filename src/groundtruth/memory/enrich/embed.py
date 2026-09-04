@@ -481,7 +481,11 @@ def _passage_cache_max() -> int:
     return 100_000
 
 
-_PASSAGE_VEC_CACHE = _PassageVecCache(_passage_cache_max())
+# Preserve the process-wide cache when this module is reloaded to change model
+# configuration.  Other semantic modules intentionally share this singleton by
+# reference; replacing it during reload silently splits the two cache halves.
+if "_PASSAGE_VEC_CACHE" not in globals():
+    _PASSAGE_VEC_CACHE = _PassageVecCache(_passage_cache_max())
 
 
 def model_identity(model: object) -> tuple[str, int]:

@@ -886,6 +886,10 @@ func createSchema(db *sql.DB) error {
 		file_a TEXT NOT NULL,
 		file_b TEXT NOT NULL,
 		count INTEGER NOT NULL DEFAULT 1,
+		commits_a INTEGER NOT NULL DEFAULT 0,
+		commits_b INTEGER NOT NULL DEFAULT 0,
+		confidence_a_to_b REAL NOT NULL DEFAULT 0.0,
+		confidence_b_to_a REAL NOT NULL DEFAULT 0.0,
 		PRIMARY KEY(file_a, file_b)
 	);
 	CREATE INDEX IF NOT EXISTS idx_cochanges_a ON cochanges(file_a);
@@ -941,6 +945,23 @@ func createSchema(db *sql.DB) error {
 		if count == 0 {
 			if _, err := db.Exec(`ALTER TABLE edges ADD COLUMN ` + column.name + ` ` + column.definition); err != nil {
 				return fmt.Errorf("add edges.%s: %w", column.name, err)
+			}
+		}
+	}
+	cochangeColumns := []struct{ name, definition string }{
+		{"commits_a", "INTEGER NOT NULL DEFAULT 0"},
+		{"commits_b", "INTEGER NOT NULL DEFAULT 0"},
+		{"confidence_a_to_b", "REAL NOT NULL DEFAULT 0.0"},
+		{"confidence_b_to_a", "REAL NOT NULL DEFAULT 0.0"},
+	}
+	for _, column := range cochangeColumns {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('cochanges') WHERE name=?`, column.name).Scan(&count); err != nil {
+			return fmt.Errorf("inspect cochanges.%s: %w", column.name, err)
+		}
+		if count == 0 {
+			if _, err := db.Exec(`ALTER TABLE cochanges ADD COLUMN ` + column.name + ` ` + column.definition); err != nil {
+				return fmt.Errorf("add cochanges.%s: %w", column.name, err)
 			}
 		}
 	}

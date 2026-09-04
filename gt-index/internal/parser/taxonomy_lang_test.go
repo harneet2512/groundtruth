@@ -97,18 +97,18 @@ export class Circle implements Shape {
 export function build(): Circle { return new Circle(1) }
 `)
 	// Enum, EnumMember, TypeAlias and Namespace are mapped and emitted by
-	// emitTaxonomyDeclaration, which EmitTaxonomyDeclarations gates off; the
-	// gated emitter is exercised directly in TestGatedDeclarationEmitterWorks.
+	// emitTaxonomyDeclaration.
 	assertKinds(t, result,
 		specs.KindInterface, specs.KindClass,
 		specs.KindConstructor, specs.KindAccessor, specs.KindMethod,
-		specs.KindFunction,
+		specs.KindFunction, specs.KindEnum, specs.KindEnumMember,
+		specs.KindTypeAlias, specs.KindNamespace,
 	)
 
 	labels := labelCounts(result)
 	for _, label := range []string{"Enum", "EnumMember", "TypeAlias", "Namespace"} {
-		if labels[label] != 0 {
-			t.Errorf("%s node emitted while EmitTaxonomyDeclarations is off; labels=%v", label, labels)
+		if labels[label] == 0 {
+			t.Errorf("%s declaration node was not emitted; labels=%v", label, labels)
 		}
 	}
 
@@ -155,12 +155,13 @@ impl Handle for Router { fn go(&self) {} }
 pub union Raw { a: u32, b: f32 }
 macro_rules! shout { () => {} }
 `)
-	// Module, TypeAlias, Constant, Union and Macro come from the gated
+	// Module, TypeAlias, Constant, Union and Macro come from the additive
 	// declaration emitter; struct, enum, trait and impl are separated from the
 	// single Class label they all shared, which needs no new node.
 	assertKinds(t, result,
 		specs.KindStruct, specs.KindEnum, specs.KindTrait, specs.KindImpl,
-		specs.KindFunction,
+		specs.KindFunction, specs.KindModule, specs.KindTypeAlias,
+		specs.KindConstant, specs.KindUnion, specs.KindMacro,
 	)
 	// `impl Handle for Router` states conformance in a named field.
 	if got := propValues(result, PropImplementsType); len(got) != 1 ||
@@ -182,7 +183,8 @@ class Circle implements Shape {
 `)
 	assertKinds(t, result,
 		specs.KindInterface, specs.KindEnum, specs.KindClass,
-		specs.KindConstructor, specs.KindMethod,
+		specs.KindConstructor, specs.KindMethod, specs.KindEnumMember,
+		specs.KindRecord, specs.KindAnnotation,
 	)
 	if got := propValues(result, PropImplementsType); len(got) != 1 ||
 		got[0] != "Shape|"+specs.MechImplementsClause {
@@ -234,6 +236,8 @@ double area() { return 1.0; }
 `)
 	assertKinds(t, result,
 		specs.KindStruct, specs.KindClass, specs.KindFunction,
+		specs.KindNamespace, specs.KindEnum, specs.KindEnumMember,
+		specs.KindUnion, specs.KindTypeAlias,
 	)
 }
 
@@ -254,6 +258,8 @@ namespace Geo {
 	assertKinds(t, result,
 		specs.KindInterface, specs.KindStruct,
 		specs.KindClass, specs.KindConstructor, specs.KindMethod,
+		specs.KindNamespace, specs.KindEnum, specs.KindEnumMember,
+		specs.KindRecord,
 	)
 	// base_list does not say which entry is an interface, so C# claims none.
 	if got := propValues(result, PropImplementsType); len(got) != 0 {
@@ -279,6 +285,8 @@ function build() { return new Circle(); }
 	assertKinds(t, result,
 		specs.KindInterface, specs.KindClass,
 		specs.KindConstructor, specs.KindMethod, specs.KindFunction,
+		specs.KindNamespace, specs.KindTrait, specs.KindEnum,
+		specs.KindEnumMember,
 	)
 	if got := propValues(result, PropImplementsType); len(got) != 1 ||
 		got[0] != "Shape|"+specs.MechImplementsClause {
@@ -393,42 +401,40 @@ export function build(): Circle { return new Circle() }
 	if labels["Function"] != 1 {
 		t.Errorf("Function = %d, want 1; labels=%v", labels["Function"], labels)
 	}
-	// With EmitTaxonomyDeclarations off there is no new label at all: the only
-	// labels in the graph are the ones the parser produced before item 11.
-	for label := range labels {
-		switch label {
-		case "Class", "Method", "Function", "File":
-		default:
-			t.Errorf("unexpected label %q while EmitTaxonomyDeclarations is off; labels=%v", label, labels)
+	for _, label := range []string{"Enum", "EnumMember", "TypeAlias"} {
+		if labels[label] == 0 {
+			t.Errorf("missing additive taxonomy label %q; labels=%v", label, labels)
 		}
 	}
 }
 
-// TestLanguagesWithNoReachableDeclarationsStayEmpty pins the four pre-existing
-// spec/grammar mismatches this item MEASURED but deliberately does not fix,
-// so a later correction is a visible change to a test rather than a silent
-// shift in graph size.
-func TestLanguagesWithNoReachableDeclarationsStayEmpty(t *testing.T) {
-	cases := []struct{ name, src string }{
-		{"a.lua", "function greet(n)\n  return n\nend\n"},
-		{"a.sql", "CREATE TABLE t (id int);\n"},
+func TestPreviouslyUnreachableLanguageDeclarationsAreEmitted(t *testing.T) {
+	cases := []struct {
+		name, src, label, symbol string
+	}{
+		{"a.lua", "function greet(n)\n  return n\nend\n", "Function", "greet"},
+		{"a.sql", "CREATE TABLE users (id int);\nCREATE FUNCTION lookup(x int) RETURNS int AS 'x' LANGUAGE SQL;\n", "Table", "users"},
+		{"a.svelte", "<main><h1>Hello</h1></main>\n", "Element", "main"},
 	}
 	for _, c := range cases {
 		result := parseTaxonomyFixture(t, c.name, c.src)
-		if len(result.Nodes) != 0 {
-			t.Errorf("%s: expected 0 symbol nodes (the spec's node types are absent from the grammar), got %d",
-				c.name, len(result.Nodes))
+		found := false
+		for _, node := range result.Nodes {
+			if node.Label == c.label && node.Name == c.symbol && node.ByteEnd > node.ByteStart {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: missing %s %q with content address; nodes=%+v", c.name, c.label, c.symbol, result.Nodes)
 		}
 	}
 }
 
-// TestGatedDeclarationEmitterStillWorks exercises the emission path that
-// EmitTaxonomyDeclarations turns off, so the mappings that drive it are not
-// untested data. Turning the gate on is one line plus the resolver isolation
-// described on EmitTaxonomyDeclarations; this test says what happens then.
-func TestGatedDeclarationEmitterStillWorks(t *testing.T) {
+// TestDeclarationEmitterWorks exercises the additive declaration path directly.
+func TestDeclarationEmitterWorks(t *testing.T) {
+	original := EmitTaxonomyDeclarations
 	EmitTaxonomyDeclarations = true
-	defer func() { EmitTaxonomyDeclarations = false }()
+	defer func() { EmitTaxonomyDeclarations = original }()
 
 	result := parseTaxonomyFixture(t, "a.ts", `
 export enum Color { Red = "red", Green = "green" }
@@ -463,11 +469,9 @@ macro_rules! shout { () => {} }
 	}
 }
 
-// TestDeclarationEmissionIsOffByDefault states the shipped default in one
-// place, so flipping it is a visible change to a test rather than a silent
-// change in graph size and call resolution.
-func TestDeclarationEmissionIsOffByDefault(t *testing.T) {
-	if EmitTaxonomyDeclarations {
-		t.Error("EmitTaxonomyDeclarations is on; see its doc comment for the measured reason it is off")
+// TestDeclarationEmissionIsOnByDefault states the shipped default explicitly.
+func TestDeclarationEmissionIsOnByDefault(t *testing.T) {
+	if !EmitTaxonomyDeclarations {
+		t.Error("EmitTaxonomyDeclarations is off; final-hardening taxonomy is incomplete")
 	}
 }

@@ -20,12 +20,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): miniswe metrics source expectations stale",
-)
-
-
 ROOT = Path(__file__).resolve().parents[2]
 METRICS_PATH = ROOT / "scripts" / "swebench" / "gt_deep_metrics.py"
 

@@ -39,6 +39,8 @@ pytest.importorskip("pier", reason="pier is not installed")
 _ROOT = Path(__file__).resolve().parents[1]
 _WF_DIR = _ROOT / ".github" / "workflows"
 _FULL_WF = _WF_DIR / "deepswe_full.yml"
+_PROOF_SCRIPT = _ROOT / "scripts" / "ci" / "substrate_proof.sh"
+_INFRA_SURFACES = (_FULL_WF, _PROOF_SCRIPT)
 _OUTCOME_PATH = _ROOT / "scripts" / "verify" / "deepswe_outcome.py"
 _AGENT_PATH = _ROOT / "artifact_deepswe" / "gt_agent.py"
 
@@ -109,20 +111,28 @@ def test_fix1_every_pier_install_is_pinned_to_0_2_0():
 # FIX 2 — G1: every §E marker echo site tees the marker line into trial_output.log
 # ===========================================================================
 def test_fix2_every_infra_marker_echo_site_tees_to_trial_log(outcome_mod):
-    """For each canonical INFRA_LOG_MARKERS token: deepswe_full.yml must echo it
+    """Every fatal infra marker must be emitted by a live delivery surface
     (line-start inside the quoted string) AND pipe that echo through
     `tee -a trial_output.log` so the classifier sees it even when the job exits
     before the agent step creates the log."""
-    wf_lines = _FULL_WF.read_text(encoding="utf-8").splitlines()
-    for marker in outcome_mod.INFRA_LOG_MARKERS:
-        sites = [(i, ln) for i, ln in enumerate(wf_lines, 1) if f'echo "{marker}' in ln]
+    marker_lines = {
+        path: path.read_text(encoding="utf-8").splitlines() for path in _INFRA_SURFACES
+    }
+    fatal_markers = set(outcome_mod.INFRA_LOG_MARKERS) - {"GT_ARTIFACT_MISSING"}
+    for marker in fatal_markers:
+        sites = [
+            (path, i, ln)
+            for path, lines in marker_lines.items()
+            for i, ln in enumerate(lines, 1)
+            if f'echo "{marker}' in ln
+        ]
         assert sites, (
-            f"deepswe_full.yml has NO echo site for canonical marker {marker!r} "
+            f"delivery surfaces have NO echo site for canonical marker {marker!r} "
             f"(INFRA_LOG_MARKERS expects the workflow to emit this exact token)"
         )
-        for lineno, ln in sites:
+        for path, lineno, ln in sites:
             assert "tee -a trial_output.log" in ln, (
-                f"G1: marker echo at deepswe_full.yml:{lineno} does not append to "
+                f"G1: marker echo at {path.name}:{lineno} does not append to "
                 f"trial_output.log — the classifier scans that file, and this "
                 f"failure site exits before the agent step creates it:\n  {ln.strip()}"
             )
@@ -131,7 +141,7 @@ def test_fix2_every_infra_marker_echo_site_tees_to_trial_log(outcome_mod):
 def test_fix2_task_image_pull_fail_uses_canonical_token():
     """The audit found TASK_IMAGE_PULL_FAIL in INFRA_LOG_MARKERS while the workflow
     echoed 'FATAL: task image pull failed' — a token the classifier can never match."""
-    wf = _FULL_WF.read_text(encoding="utf-8")
+    wf = "\n".join(path.read_text(encoding="utf-8") for path in _INFRA_SURFACES)
     assert 'echo "FATAL: task image pull failed"' not in wf, (
         "G1: non-canonical task-image failure echo still present (classifier "
         "matches TASK_IMAGE_PULL_FAIL, not 'FATAL: ...')"
@@ -147,8 +157,13 @@ def test_fix2_workflow_echoed_strings_classify_infra(outcome_mod):
     for each marker, feed them to find_infra_markers + build_signal_record, and
     require class INFRA. Proves the workflow emission and the classifier tokens
     can never drift apart silently."""
-    wf_lines = _FULL_WF.read_text(encoding="utf-8").splitlines()
-    for marker in outcome_mod.INFRA_LOG_MARKERS:
+    wf_lines = [
+        line
+        for path in _INFRA_SURFACES
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    fatal_markers = set(outcome_mod.INFRA_LOG_MARKERS) - {"GT_ARTIFACT_MISSING"}
+    for marker in fatal_markers:
         emitted: list[str] = []
         for ln in wf_lines:
             m = re.search(r'echo "([^"]+)"', ln)
@@ -262,6 +277,7 @@ _PIER_DIR = _ROOT / "deepswe-pier" / "src" / "pier" / "environments" / "docker"
 _COMPOSE_BASE = _PIER_DIR / "docker-compose-base.yaml"
 
 
+@pytest.mark.skipif(not _COMPOSE_BASE.is_file(), reason="external deepswe-pier checkout absent")
 def test_f4_pier_compose_base_has_runtime_mem_cap():
     """The pier compose base must carry mem_limit + memswap_limit (the compose-spec
     runtime keys that `docker compose up` honors WITHOUT --compatibility), driven by

@@ -5,41 +5,28 @@ import (
 	"fmt"
 )
 
-// CochangesColumns names the columns Persist writes, in the order the schema
-// declares them (internal/store/sqlite.go, `CREATE TABLE cochanges`):
+// CochangesColumns names the columns Persist writes, in schema order:
 //
 //	file_a TEXT NOT NULL
 //	file_b TEXT NOT NULL
-//	count  INTEGER NOT NULL DEFAULT 1
+//	count INTEGER NOT NULL DEFAULT 1
+//	commits_a INTEGER NOT NULL DEFAULT 0
+//	commits_b INTEGER NOT NULL DEFAULT 0
+//	confidence_a_to_b REAL NOT NULL DEFAULT 0.0
+//	confidence_b_to_a REAL NOT NULL DEFAULT 0.0
 //	PRIMARY KEY(file_a, file_b)
 //
-// It is a named constant so a schema drift shows up as a compile-adjacent
-// review diff rather than as a runtime "no such column" during publication.
-const CochangesColumns = "file_a, file_b, count"
+// Naming this list makes schema drift visible beside the persistence code.
+const CochangesColumns = "file_a, file_b, count, commits_a, commits_b, confidence_a_to_b, confidence_b_to_a"
 
-// insertCochangeSQL is idempotent under the (file_a, file_b) primary key, so
-// re-publishing a graph replaces a pair's count instead of failing on it.
-const insertCochangeSQL = "INSERT OR REPLACE INTO cochanges (" + CochangesColumns + ") VALUES (?, ?, ?)"
+// insertCochangeSQL is idempotent under the (file_a, file_b) primary key.
+const insertCochangeSQL = "INSERT OR REPLACE INTO cochanges (" + CochangesColumns + ") VALUES (?, ?, ?, ?, ?, ?, ?)"
 
-// Persist writes result.Pairs into the existing `cochanges` table inside the
-// caller's transaction, and returns the number of rows written.
-//
-// It takes the transaction rather than opening one so co-change lands in the
-// same atomic publication as the rest of the graph: a graph that commits must
-// not be able to commit without the coupling rows it reported.
-//
-// KNOWN LOSS, stated rather than hidden: `cochanges` has three columns and no
-// place for a confidence, a window boundary or a reason. Persist therefore
-// stores Support as `count` and DROPS ConfidenceAToB, ConfidenceBToA,
-// CommitsA and CommitsB. Confidence is recoverable at query time only if the
-// per-file commit counts are recorded elsewhere — today they are not. Carrying
-// them requires additive columns in sqlite.go, which is outside this package's
-// remit; the extractor computes them so that change is a schema edit and not a
-// re-derivation.
-//
-// A Result with zero pairs writes nothing and returns 0 without error: an
-// abstention (Reason shallow_clone, no_history, not_a_repository) must leave
-// the table empty, and the Reason belongs in the receipt, not in a data row.
+// Persist writes result.Pairs into the existing cochanges table inside the
+// caller's transaction and returns the number of rows written. Both directional
+// denominators and confidences are retained. Window boundaries and abstention
+// reasons stay in phase-level receipt metadata because they describe the run,
+// not an individual pair.
 func Persist(tx *sql.Tx, result Result) (int, error) {
 	if tx == nil {
 		return 0, fmt.Errorf("cochange: persist: nil transaction")
@@ -54,11 +41,12 @@ func Persist(tx *sql.Tx, result Result) (int, error) {
 	defer stmt.Close()
 
 	written := 0
-	// result.Pairs is already sorted by (FileA, FileB), so the write order is
-	// deterministic and two publications of the same history produce the same
-	// page layout.
+	// Result.Pairs is sorted by (FileA, FileB), keeping writes deterministic.
 	for _, p := range result.Pairs {
-		if _, err := stmt.Exec(p.FileA, p.FileB, p.Support); err != nil {
+		if _, err := stmt.Exec(
+			p.FileA, p.FileB, p.Support, p.CommitsA, p.CommitsB,
+			p.ConfidenceAToB, p.ConfidenceBToA,
+		); err != nil {
 			return written, fmt.Errorf("cochange: insert pair (%s, %s): %w", p.FileA, p.FileB, err)
 		}
 		written++

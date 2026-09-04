@@ -7,19 +7,11 @@ import os
 import tempfile
 
 
-import pytest
-
 from scripts.swebench.dep_store_manifest import (
     build_manifest,
     validate_manifest,
     write_manifest,
 )
-
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift: dep store manifest format changed",
-)
-
 
 def _touch_tree(root: str, rel_paths: list[str]) -> None:
     for rel in rel_paths:

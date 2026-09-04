@@ -12,20 +12,20 @@ import os
 import sqlite3
 import tempfile
 
-
 import pytest
 
+import groundtruth.hooks.post_view as post_view
 from groundtruth.hooks.post_view import (
     _contract_pillar,
     _edge_filter,
     graph_navigation,
 )
 
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift: contract pillar rendering changed",
-)
 
+@pytest.fixture(autouse=True)
+def _no_process_global_issue_anchors(monkeypatch):
+    """Unit fixtures must not consume another test's /tmp issue sidecar."""
+    monkeypatch.setattr(post_view, "_load_issue_anchors", lambda: {})
 
 def _make_db(*, with_callers: bool = False, categorical: bool = True) -> str:
     fd, path = tempfile.mkstemp(suffix=".db")

@@ -34,11 +34,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): GT_ORACLE_ROUTE not forwarded to container",
-)
-
 _ROOT = Path(__file__).resolve().parents[1]
 _PATCH_PATH = _ROOT / "artifact_deepswe" / "gt_mini_patch.py"
 _SENSE_PATH = _ROOT / "artifact_deepswe" / "gt_oracle_sense.py"
@@ -366,8 +361,11 @@ _REQUIRED_AE_KEYS = [
 
 
 def test_workflow_forwards_every_gt_env_via_ae():
-    text = _WF_PATH.read_text(encoding="utf-8")
-    missing = [k for k in _REQUIRED_AE_KEYS if not re.search(rf"--ae {re.escape(k)}=", text)]
+    text = _WF_PATH.read_text(encoding="utf-8") + (_ROOT / "artifact_deepswe" / "gt_integration" / "gt_ae_block.sh").read_text(encoding="utf-8")
+    missing = [
+        k for k in _REQUIRED_AE_KEYS
+        if not re.search(rf"--ae [\"']?{re.escape(k)}=", text)
+    ]
     assert not missing, (
         "GT env vars set on the host but NOT forwarded into the task "
         f"container via --ae (the Stage-C-killing P0 class): {missing}"

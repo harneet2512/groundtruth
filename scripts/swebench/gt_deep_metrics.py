@@ -422,7 +422,7 @@ def _is_mutating_editor_command(tool_or_action: str, args_or_text) -> bool:
             return False
         if cmd in _EDIT_VERBS and path:
             return True
-        if tool in {"edit", "write", "create"} and path:
+        if tool in {"edit", "write", "create"} and (path or cmd):
             return True
         return False
     text = str(args_or_text or "").lower()
@@ -430,7 +430,9 @@ def _is_mutating_editor_command(tool_or_action: str, args_or_text) -> bool:
         m = re.search(r"(?:str_replace_editor|file_editor)\s+([a-z_]+)", text)
         if m:
             return m.group(1) in _EDIT_VERBS
-    return any(tok in text for tok in ("sed -i", "apply_patch", "tee ", "cat >"))
+    return "str_replace " in text or any(
+        tok in text for tok in ("sed -i", "apply_patch", "tee ", "cat >")
+    )
 
 
 def _deepseek_price_for(model: str) -> dict:

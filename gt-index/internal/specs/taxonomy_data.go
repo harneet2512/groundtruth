@@ -3,17 +3,9 @@ package specs
 // Data, schema and markup grammars: Protocol Buffers, SQL, CSS, HTML,
 // Markdown, TOML, YAML, HCL, CUE.
 //
-// These grammars declare things, but not the things a code taxonomy is made
-// of. Rather than leave nine of the thirty languages blank — which would read
-// as "not looked at" — each states which of the code kinds it lacks and why,
-// and claims only the data kinds it actually has.
-//
-// MEASURED (2026-09-03, tree-sitter symbol table of the pinned grammar): the
-// SQL grammar has no `create_table_statement` or `create_function_statement`
-// node type, which are the two names GT's sql spec looks for, so GT emits no
-// SQL symbol at all. The mapping names the grammar's real node types; the
-// parser will not reach them until the sql spec is corrected, which is out of
-// this item's scope. See REPORT.md.
+// These grammars include data, schema, and markup declarations as well as code
+// declarations. Each mapping accounts for the full closed vocabulary and only
+// claims constructs the pinned grammar and parser can emit.
 
 func init() {
 	RegisterTaxonomy(&Taxonomy{
@@ -41,7 +33,7 @@ func init() {
 			),
 			map[string]string{
 				KindModule:   "a .proto file is the compilation unit; `package` declares no named symbol node",
-				KindField:    "message fields are `field` nodes; GT records no class_field property for protobuf (see REPORT.md gaps)",
+				KindField:    "message fields are `field` nodes; GT records no class_field property for protobuf",
 				KindTable:    ReasonNotCode,
 				KindResource: ReasonNotCode,
 			},
@@ -51,8 +43,10 @@ func init() {
 	RegisterTaxonomy(&Taxonomy{
 		Lang: "sql",
 		ByNodeType: map[string]string{
-			"create_table":    KindTable,
 			"create_function": KindFunction,
+		},
+		Decls: map[string]Decl{
+			"create_table": {Kind: KindTable, Label: "Table", NameField: ""},
 		},
 		Absent: mergeReasons(
 			absent(ReasonNoSynthTest, KindTest),
@@ -64,8 +58,8 @@ func init() {
 				KindAnnotation, KindDecorator, KindConstant,
 			),
 			map[string]string{
-				KindEnum:       "create_type with an enum_elements list is an enum, but GT's sql spec reaches no SQL declaration at all (see REPORT.md)",
-				KindEnumMember: "no enum declaration is reached, so no member declaration",
+				KindEnum:       "create_type with an enum_elements list is not indexed by the current SQL spec",
+				KindEnumMember: "no indexed enum declaration exists, so no member declaration is emitted",
 				KindTypeAlias:  "create_type declares a new type rather than aliasing one",
 				KindField:      "a column_definition is a field, but GT records no class_field property for SQL",
 				KindMessage:    ReasonNotCode,

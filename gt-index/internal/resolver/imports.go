@@ -226,7 +226,7 @@ func ResolveImportsTx(tx *sql.Tx, imports []parser.ImportRef, fileMap map[string
 			fileNodeMap[n.FilePath] = id
 		}
 		// FILE->SYMBOL: exclude File-label anchors from name targeting.
-		if n.Label != "File" && n.Name != "" {
+		if IsCodeSymbolLabel(n.Label) && n.Name != "" {
 			byName, ok := fileSymbolIndex[n.FilePath]
 			if !ok {
 				byName = make(map[string]int64)
@@ -306,7 +306,7 @@ func buildImportSymbolIndex(db *store.DB) (map[string]map[string]int64, error) {
 	}
 	defer tx.Rollback()
 
-	rows, err := tx.Query(`SELECT id, name, file_path FROM nodes WHERE label != 'File'`)
+	rows, err := tx.Query(`SELECT id, label, name, file_path FROM nodes`)
 	if err != nil {
 		return nil, err
 	}
@@ -315,11 +315,11 @@ func buildImportSymbolIndex(db *store.DB) (map[string]map[string]int64, error) {
 	out := make(map[string]map[string]int64)
 	for rows.Next() {
 		var id int64
-		var name, file string
-		if err := rows.Scan(&id, &name, &file); err != nil {
+		var label, name, file string
+		if err := rows.Scan(&id, &label, &name, &file); err != nil {
 			continue
 		}
-		if name == "" || file == "" {
+		if !IsCodeSymbolLabel(label) || name == "" || file == "" {
 			continue
 		}
 		byName, ok := out[file]

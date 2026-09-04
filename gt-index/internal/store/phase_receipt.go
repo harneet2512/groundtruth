@@ -174,3 +174,79 @@ func (d *DB) AnalysisState() (state, reason string) {
 	}
 	return state, metaValueOrEmpty(d.db, AnalysisFailureReasonKey)
 }
+
+// InvalidateAnalysisForIncrementalTx atomically removes every repository-wide
+// analysis product that a single-file refresh cannot re-prove and replaces the
+// old complete receipt with a sealed, named not-run receipt.
+func InvalidateAnalysisForIncrementalTx(
+	tx *sql.Tx,
+	receiptPayload string,
+	receiptSHA256 string,
+	reason string,
+) error {
+	if tx == nil || receiptPayload == "" || receiptSHA256 == "" || reason == "" {
+		return fmt.Errorf("incremental analysis invalidation is incomplete")
+	}
+	for _, table := range []string{
+		"resolution_candidates",
+		"resolution_callsites",
+		"resolution_symbols",
+		"closure",
+		"community_members",
+		"communities",
+		"process_steps",
+		"processes",
+		"cochanges",
+	} {
+		var exists int
+		if err := tx.QueryRow(
+			`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table,
+		).Scan(&exists); err != nil {
+			return fmt.Errorf("inspect stale analysis table %s: %w", table, err)
+		}
+		if exists == 0 {
+			continue
+		}
+		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
+			return fmt.Errorf("clear stale analysis table %s: %w", table, err)
+		}
+	}
+	metadata := map[string]string{
+		AnalysisStateKey:                         AnalysisStateNotRun,
+		AnalysisFailureReasonKey:                 reason,
+		AnalysisPhaseReceiptKey:                  receiptPayload,
+		AnalysisPhaseReceiptSHA256Key:            receiptSHA256,
+		"derived_layers_state":                   AnalysisStateNotRun,
+		"derived_layers_degraded":                reason,
+		"derived_cochange_state":                 AnalysisStateNotRun,
+		"derived_cochange_pairs":                 "0",
+		"derived_cochange_commits_scanned":       "0",
+		"derived_cochange_commits_skipped":       "0",
+		"derived_cochange_shallow":               "0",
+		"derived_cochange_window_start":          "",
+		"derived_cochange_window_end":            "",
+		"derived_community_state":                AnalysisStateNotRun,
+		"derived_community_count":                "0",
+		"derived_community_members":              "0",
+		"derived_community_cohesion":             "absent:not_run",
+		"derived_community_certified_call_rows":  "0",
+		"derived_community_excluded_call_rows":   "0",
+		"derived_community_holdout_commits":      "0",
+		"derived_process_state":                  AnalysisStateNotRun,
+		"derived_process_count":                  "0",
+		"derived_process_steps":                  "0",
+		"derived_process_assertions_scanned":     "0",
+		"derived_process_assertions_with_target": "0",
+		"derived_process_targets_without_path":   "0",
+		"derived_process_truncated":              "false",
+	}
+	for key, value := range metadata {
+		if _, err := tx.Exec(
+			`INSERT INTO project_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+			key, value,
+		); err != nil {
+			return fmt.Errorf("write incremental analysis metadata %s: %w", key, err)
+		}
+	}
+	return nil
+}

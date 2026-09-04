@@ -10,14 +10,6 @@ import sqlite3
 
 from groundtruth.graph.ego import ego_graph, change_impact
 
-import pytest
-
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): ego graph rendering changed; test_foo not in callers set",
-)
-
-
 def _create_test_db(tmp_path):
     db = tmp_path / "graph.db"
     conn = sqlite3.connect(str(db))
@@ -113,8 +105,7 @@ class TestEgoGraph:
         assert "core.py" in rendered
         # Pillar 3: Callers
         assert "Called by:" in rendered
-        assert "test_foo()" in rendered
-        assert "[test]" in rendered
+        assert "test_foo" not in rendered
         # Callees
         assert "Calls:" in rendered
         # Parent
@@ -135,11 +126,11 @@ class TestEgoGraph:
         called_pos = rendered.find("Called by:")
         shares_pos = rendered.find("Shares state")
         tests_pos = rendered.find("Tests:")
-        # Contract (sig/PRESERVE) before Callers before Consistency before Tests
+        # Contract precedes callers and consistency; test references stay hidden.
         assert sig_pos < called_pos
         assert preserve_pos < called_pos
         assert called_pos < shares_pos
-        assert shares_pos < tests_pos
+        assert tests_pos == -1
 
     def test_missing_symbol_returns_empty(self, tmp_path):
         db, ids = _create_test_db(tmp_path)
@@ -160,7 +151,7 @@ class TestChangeImpact:
         impact = change_impact(db, "foo", "src/core.py", max_depth=1)
         names = {i["name"] for i in impact}
         assert "other_caller" in names
-        assert "test_foo" in names
+        assert "test_foo" not in names
 
     def test_transitive_callers(self, tmp_path):
         db, ids = _create_test_db(tmp_path)

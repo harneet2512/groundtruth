@@ -335,7 +335,7 @@ if [ "$HARNESS" = "deepswe" ]; then
   # chain). Read instruction.md first, task.toml fields as fallback, and FAIL-CLOSED
   # (GT_ISSUE_MISSING, classified INFRA) if the issue text ends up empty — never run
   # the substrate with an empty issue.
-  python3 - "$TASK_DIR" <<'PYEOF' || { echo "::warning::GT_ISSUE_MISSING: no issue text — proceeding with empty issue (agent has its own instruction)" | tee -a trial_output.log; }
+  python3 - "$TASK_DIR" <<'PYEOF' || { echo "::error::GT_ISSUE_MISSING: no issue text" | tee -a trial_output.log; exit 1; }
 import os, sys
 try:
     import tomllib
@@ -360,10 +360,9 @@ if not issue:
     except Exception:
         issue = ""
 if not issue:
-    issue = "Fix the issue described in the repository."
-    source = "synthesized_fallback"
     print("GT_ISSUE_MISSING: no instruction.md and no task.toml issue/prompt/instruction "
-          "— using synthesized fallback (agent has its own instruction)", file=sys.stderr)
+          "— refusing to run without the task instruction", file=sys.stderr)
+    raise SystemExit(2)
 with open(out_path, "w", encoding="utf-8") as f:
     f.write(issue)
 print(f"issue text: {len(issue)} chars from {source} -> {out_path}")

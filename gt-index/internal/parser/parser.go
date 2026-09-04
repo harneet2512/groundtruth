@@ -1642,10 +1642,16 @@ func extractFieldText(node *sitter.Node, fieldName string, src []byte) string {
 }
 
 func extractFirstIdentifier(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "identifier" || child.Type() == "type_identifier" {
+		if child.Type() == "identifier" || child.Type() == "type_identifier" || child.Type() == "tag_name" {
 			return child.Content(src)
+		}
+		if name := extractFirstIdentifier(child, src); name != "" {
+			return name
 		}
 	}
 	return ""

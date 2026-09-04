@@ -7,14 +7,6 @@ import os
 import sys
 import tempfile
 
-import pytest
-
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): TrialArtifacts.__init__ signature changed - missing runtime_ledger",
-)
-
-
 def _load():
     path = os.path.join(
         os.path.dirname(__file__), "..", "scripts", "swebench", "artifact_resolver.py"
@@ -42,6 +34,7 @@ def test_brief_provenance_match():
             task_truth=None,
             outcome_json=None,
             oracle_events=None,
+            runtime_ledger=None,
             delivered_instruction=delivered,
             brief_txt=brief,
         )
@@ -70,6 +63,7 @@ def test_brief_provenance_matches_wrapped_instruction():
             task_truth=None,
             outcome_json=None,
             oracle_events=None,
+            runtime_ledger=None,
             delivered_instruction=delivered,
             brief_txt=brief,
         )

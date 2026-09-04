@@ -15,12 +15,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): emit_brief regenerated instead of reusing gate brief",
-)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -89,7 +83,7 @@ def test_gate_persist_then_emit_reuses(tmp_path, monkeypatch):
 
     monkeypatch.setenv("GT_BRIEF_CACHE_DIR", str(tmp_path))
     # gate3b generated this brief and persists it.
-    fg._persist_brief_for_emit(_FakeResult("THE GATE BRIEF"))
+    fg._persist_brief_for_emit(_FakeResult("THE GATE BRIEF"), "issue text", "g.db")
     assert (tmp_path / "brief_result.json").is_file()
 
     calls = {"n": 0}

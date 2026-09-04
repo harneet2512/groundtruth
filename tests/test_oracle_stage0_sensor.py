@@ -31,17 +31,16 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): frozen trajectory corpus absent in CI checkout",
-)
-
 _ROOT = Path(__file__).resolve().parents[1]
 _SENSE_PATH = _ROOT / "artifact_deepswe" / "gt_oracle_sense.py"
 _PATCH_PATH = _ROOT / "artifact_deepswe" / "gt_mini_patch.py"
 _CORPUS = _ROOT / ".claude" / "reports" / "runs" / "tenpack_27307362054"
 
 _TRAJ_GLOB = str(_CORPUS / "*" / "jobs" / "*" / "*" / "agent" / "mini-swe-agent.trajectory.json")
+
+pytestmark = pytest.mark.skipif(
+    not _CORPUS.is_dir(), reason="external frozen trajectory corpus is not installed"
+)
 
 
 def _load(path: Path, name: str):

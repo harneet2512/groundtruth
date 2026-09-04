@@ -11,12 +11,6 @@ from groundtruth.runtime.obligations import ObligationTracker
 from groundtruth.runtime.trajectory_state import Turn, derive_phase, derive_state
 from groundtruth.runtime.verification_horizon import render_verify_emission
 
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): five-language fixture expectations vs current runtime",
-)
-
-
 class _ObligationView:
     idx = 1
     verbatim = "changed behavior must be covered by targeted verification"
@@ -105,16 +99,17 @@ def test_runtime_state_policy_and_verification_are_language_agnostic(language, t
     assert "relevant repo test target" in rendered
 
     budget = ContextBudgeter()
-    first = budget.trim("[WITNESS] targetedBehavior call by -> src/App:10\nInspect src/App", 30)
-    second = budget.trim("[WITNESS] targetedBehavior call by -> src/App:10\nInspect src/App", 30)
+    first = budget.trim("[WITNESS] targetedBehavior called by -> src/App:10\nInspect src/App", 30)
+    budget.commit_delivered(first.pending_lines)
+    second = budget.trim("[WITNESS] targetedBehavior called by -> src/App:10\nInspect src/App", 30)
     assert first.text
     assert second.text == ""
 
     action = translate_to_action(
-        "[WITNESS] targetedBehavior call by -> src/App:10",
+        "[WITNESS] targetedBehavior called by -> src/App:10",
         Phase.EDIT,
     )
-    assert "Inspect targetedBehavior at src/App:10" in action
+    assert "Changing targetedBehavior risks breaking the caller at src/App:10" in action
 
     tracker = ObligationTracker([_ObligationView()])
     tracker.update({"targetedBehavior"}, set(), 2)

@@ -32,11 +32,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): escalation threshold assertion changed",
-)
-
 _ROOT = Path(__file__).resolve().parents[1]
 _PATCH_PATH = _ROOT / "artifact_deepswe" / "gt_mini_patch.py"
 
@@ -307,5 +302,6 @@ class TestLiveEscalation:
         assert got is not None
         sev, kind, _b, _e = got
         assert kind == "verify.horizon.urgent"
-        # base 5 + 2*(220/300) + 1*(1 - 0.5 edit_coverage) = 5 + 1.4666... + 0.5
-        assert abs(sev - (5 + 2 * (220 / 300) + 0.5)) < 1e-9
+        # Neither obligation has structurally witnessed edit credit here, so
+        # unmet mass is 1.0.
+        assert abs(sev - (5 + 2 * (220 / 300) + 1.0)) < 1e-9

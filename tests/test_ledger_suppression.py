@@ -10,11 +10,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.xfail(
-    strict=False,
-    reason="Pre-existing test drift (not a final_hardening regression): too many values to unpack - ledger format changed",
-)
-
 _ROOT = Path(__file__).resolve().parents[1]
 _PATCH_PATH = _ROOT / "artifact_deepswe" / "gt_mini_patch.py"
 
@@ -72,7 +67,7 @@ def test_delivery_defers_judgment_to_next_turn(pm):
 def test_consumed_judgment_decays_ignore_count(pm):
     """D7: consumed judgment decays ignore count by 1."""
     pm._ledger_ignore_counts["l5.stuck"] = 2
-    pm._pending_delivery = ("l5.stuck", 5)
+    pm._pending_delivery = [("l5.stuck", 5)]
     pm._ledger_judge_pending("sed -i 's/old/new/' file.py")  # edit = consumed
     assert pm._ledger_ignore_counts["l5.stuck"] == 1
 
@@ -80,7 +75,7 @@ def test_consumed_judgment_decays_ignore_count(pm):
 def test_ignore_count_reaches_skip_threshold(pm):
     """D7: 3 consecutive ignored judgments → skip fires."""
     for i in range(3):
-        pm._pending_delivery = ("l5.stuck", i)
+        pm._pending_delivery = [("l5.stuck", i)]
         pm._ledger_judge_pending("git log")  # not an edit/test = ignored
     assert pm._ledger_should_skip_kind("l5.stuck")
 

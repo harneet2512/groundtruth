@@ -10,8 +10,8 @@ func init() {
 		Extensions: []string{".sql"},
 		Language:   sql.GetLanguage(),
 
-		FunctionNodes: []string{"create_function_statement"},
-		ClassNodes:    []string{"create_table_statement"},
+		FunctionNodes: []string{"create_function"},
+		ClassNodes:    []string{},
 		CallNodes:     []string{},
 		ImportNodes:   []string{},
 
