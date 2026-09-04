@@ -10,6 +10,7 @@ import sqlite3
 
 from groundtruth.graph.ego import ego_graph, change_impact
 
+
 def _create_test_db(tmp_path):
     db = tmp_path / "graph.db"
     conn = sqlite3.connect(str(db))

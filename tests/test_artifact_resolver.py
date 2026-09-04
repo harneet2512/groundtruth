@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 
+
 def _load():
     path = os.path.join(
         os.path.dirname(__file__), "..", "scripts", "swebench", "artifact_resolver.py"

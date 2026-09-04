@@ -13,6 +13,7 @@ from scripts.swebench.dep_store_manifest import (
     write_manifest,
 )
 
+
 def _touch_tree(root: str, rel_paths: list[str]) -> None:
     for rel in rel_paths:
         path = os.path.join(root, rel)

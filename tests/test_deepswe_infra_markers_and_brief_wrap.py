@@ -115,9 +115,7 @@ def test_fix2_every_infra_marker_echo_site_tees_to_trial_log(outcome_mod):
     (line-start inside the quoted string) AND pipe that echo through
     `tee -a trial_output.log` so the classifier sees it even when the job exits
     before the agent step creates the log."""
-    marker_lines = {
-        path: path.read_text(encoding="utf-8").splitlines() for path in _INFRA_SURFACES
-    }
+    marker_lines = {path: path.read_text(encoding="utf-8").splitlines() for path in _INFRA_SURFACES}
     fatal_markers = set(outcome_mod.INFRA_LOG_MARKERS) - {"GT_ARTIFACT_MISSING"}
     for marker in fatal_markers:
         sites = [
@@ -158,9 +156,7 @@ def test_fix2_workflow_echoed_strings_classify_infra(outcome_mod):
     require class INFRA. Proves the workflow emission and the classifier tokens
     can never drift apart silently."""
     wf_lines = [
-        line
-        for path in _INFRA_SURFACES
-        for line in path.read_text(encoding="utf-8").splitlines()
+        line for path in _INFRA_SURFACES for line in path.read_text(encoding="utf-8").splitlines()
     ]
     fatal_markers = set(outcome_mod.INFRA_LOG_MARKERS) - {"GT_ARTIFACT_MISSING"}
     for marker in fatal_markers:

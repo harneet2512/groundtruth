@@ -361,11 +361,10 @@ _REQUIRED_AE_KEYS = [
 
 
 def test_workflow_forwards_every_gt_env_via_ae():
-    text = _WF_PATH.read_text(encoding="utf-8") + (_ROOT / "artifact_deepswe" / "gt_integration" / "gt_ae_block.sh").read_text(encoding="utf-8")
-    missing = [
-        k for k in _REQUIRED_AE_KEYS
-        if not re.search(rf"--ae [\"']?{re.escape(k)}=", text)
-    ]
+    text = _WF_PATH.read_text(encoding="utf-8") + (
+        _ROOT / "artifact_deepswe" / "gt_integration" / "gt_ae_block.sh"
+    ).read_text(encoding="utf-8")
+    missing = [k for k in _REQUIRED_AE_KEYS if not re.search(rf"--ae [\"']?{re.escape(k)}=", text)]
     assert not missing, (
         "GT env vars set on the host but NOT forwarded into the task "
         f"container via --ae (the Stage-C-killing P0 class): {missing}"

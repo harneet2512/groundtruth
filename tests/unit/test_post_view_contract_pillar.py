@@ -27,6 +27,7 @@ def _no_process_global_issue_anchors(monkeypatch):
     """Unit fixtures must not consume another test's /tmp issue sidecar."""
     monkeypatch.setattr(post_view, "_load_issue_anchors", lambda: {})
 
+
 def _make_db(*, with_callers: bool = False, categorical: bool = True) -> str:
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)

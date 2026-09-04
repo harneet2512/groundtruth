@@ -36,6 +36,7 @@ def _isolated_l5_state(monkeypatch, tmp_path):
 
     monkeypatch.setattr(agent_state, "_l5_state_path", state_path)
 
+
 # ── classify_verification_targeting ────────────────────────────────────
 
 

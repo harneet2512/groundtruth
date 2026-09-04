@@ -11,6 +11,7 @@ from groundtruth.runtime.obligations import ObligationTracker
 from groundtruth.runtime.trajectory_state import Turn, derive_phase, derive_state
 from groundtruth.runtime.verification_horizon import render_verify_emission
 
+
 class _ObligationView:
     idx = 1
     verbatim = "changed behavior must be covered by targeted verification"
