@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master, "release/**"]
+    branches: [main, master, "release/**", "final_hardening/**"]
   pull_request:
     branches: [main, master]
   workflow_dispatch:  # manual: validate C7 Go build + closure preflight on any branch before a paid canary
@@ -44,6 +44,12 @@ jobs:
       - name: Build gt-index
         working-directory: gt-index
         run: CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index ./cmd/gt-index/
+      - name: Full Go test suite
+        # Every package, every test — the canonical gate for the producer.
+        # The selective tests below are kept for their provenance comments;
+        # this step is what actually gates a merge.
+        working-directory: gt-index
+        run: CGO_ENABLED=1 go test -tags sqlite_fts5 -timeout 600s ./...
       - name: Go resolver unit tests
         # Provenance probe (TestResolve_QualifiedStdlibCall_NotDeterministic): a
         # stdlib qualified call (os.walk) must never be tagged with a deterministic
