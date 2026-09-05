@@ -986,16 +986,32 @@ func resolveInterfaceOrClassNode(name, currentFile string, interfaceIndex, class
 
 // resolveClassOrFuncNode tries class index first, then function.
 func resolveClassOrFuncNode(name, currentFile string, classIndex map[string][]classNodeEntry, funcFileIndex map[string]map[string]int64) int64 {
-	if id := resolveClassNode(name, currentFile, classIndex); id != 0 {
+	if id := resolveClassNodeSameFileOrUnique(name, currentFile, classIndex); id != 0 {
 		return id
 	}
-	// Search all files for a function with this name
-	for _, funcs := range funcFileIndex {
+	if funcs := funcFileIndex[currentFile]; funcs != nil {
 		if id, ok := funcs[name]; ok {
 			return id
 		}
 	}
-	return 0
+	// A map walk must never choose the relationship target. Retain a unique
+	// cross-file declaration; if a second declaration carries the same bare
+	// name, abstain because syntax alone cannot establish which one JSX binds.
+	var match int64
+	for file, funcs := range funcFileIndex {
+		if file == currentFile {
+			continue
+		}
+		id, ok := funcs[name]
+		if !ok {
+			continue
+		}
+		if match != 0 && match != id {
+			return 0
+		}
+		match = id
+	}
+	return match
 }
 
 // findEnclosingFunc returns the function node whose [Start,End] line range ENCLOSES
