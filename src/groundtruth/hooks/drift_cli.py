@@ -11,7 +11,6 @@ Usage:
   python3 -m groundtruth.hooks.drift_cli --root <repo> --db <graph.db> --file <rel> [--file <rel> ...]
   python3 -m groundtruth.hooks.drift_cli --root <repo> --db <graph.db> --all-modified
 """
-
 from __future__ import annotations
 
 import argparse
@@ -26,11 +25,7 @@ def _git_modified(root: str) -> list[str]:
     try:
         out = subprocess.run(
             ["git", "-C", root, "diff", "--name-only", "HEAD"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
         return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
     except (subprocess.SubprocessError, OSError):

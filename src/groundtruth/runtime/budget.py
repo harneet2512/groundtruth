@@ -3,7 +3,6 @@
 Budgets prevent flooding. Each layer/tool has a maximum number of
 fires per task. Over-budget attempts are suppressed with reason.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -25,7 +24,6 @@ DEFAULT_BUDGETS: dict[str, int] = {
 @dataclass
 class BudgetTracker:
     """Per-task budget enforcement."""
-
     limits: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_BUDGETS))
     counts: dict[str, int] = field(default_factory=dict)
 

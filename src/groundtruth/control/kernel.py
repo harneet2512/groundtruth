@@ -57,7 +57,9 @@ def brief(task: TaskInput) -> BriefResult:
         task_id=task.task_id,
     )
     if not isinstance(raw, V1RBriefResult):
-        raise RuntimeError("generate_v1r_brief returned unexpected value; internal contract drift")
+        raise RuntimeError(
+            "generate_v1r_brief returned unexpected value; internal contract drift"
+        )
 
     files = list(raw.files or [])
     focus_raw = [f.path for f in files[:3] if getattr(f, "path", "")]
@@ -146,8 +148,12 @@ def observe_edit(edit: EditEvent, run_state: RunState) -> EditObservation:
     """
     from groundtruth.runtime.patch_auditor import audit_patch
 
-    name_status: list[tuple[str, str]] = [("M", str(p)) for p in edit.files_changed]
-    plan = run_state.plan or (run_state.brief_result.plan if run_state.brief_result else {})
+    name_status: list[tuple[str, str]] = [
+        ("M", str(p)) for p in edit.files_changed
+    ]
+    plan = run_state.plan or (
+        run_state.brief_result.plan if run_state.brief_result else {}
+    )
 
     repo_root = "."
     if run_state.brief_result and run_state.brief_result.plan_path:
@@ -231,7 +237,9 @@ def decide_pre_tool(tool_call: ToolCall, run_state: RunState) -> Decision:
     is_first_edit = len(run_state.edit_history) == 0
     brief = run_state.brief_result
     confidence = brief.confidence if brief else 0.0
-    focus_set = {_norm_path(str(p)) for p in brief.focus_files} if brief else set()
+    focus_set = (
+        {_norm_path(str(p)) for p in brief.focus_files} if brief else set()
+    )
 
     # Rule 1: root-scaffold at first edit -> block
     if is_first_edit and _is_root_scaffold(norm_path):
@@ -344,7 +352,9 @@ def pull(query: PullQuery, run_state: RunState) -> PullResult:
 
     handler_payload = _invoke_mcp_handler(query, run_state, asyncio.run)
     error_value = handler_payload.get("error") if isinstance(handler_payload, dict) else None
-    kind_str = query.kind.value if isinstance(query.kind, PullKind) else str(query.kind)
+    kind_str = (
+        query.kind.value if isinstance(query.kind, PullKind) else str(query.kind)
+    )
 
     whitelist = _PULL_WHITELIST.get(kind_str, set())
     if isinstance(handler_payload, dict):
@@ -482,6 +492,13 @@ def validate_against_graph(diff: Diff, graph: GraphHandle) -> ValidationResult:
 
     No test execution. Per ADR 0002 (locked decision 3, SWE-Bench Pro
     spec/interface augmentation evidence).
+
+    DEPRECATED (E capability, 2026-07-09): this regex-only (``_DEF_LINE_RE``)
+    validator has no live callers. The at-edit SYNTAX check moved to the real
+    parse-based ENGINE ``groundtruth.runtime.edit_check`` — ``check_edit_syntax``
+    (repo-toolchain parse via the frozen executor contract, positive-evidence /
+    correct-or-quiet) and the ``caller_diff_advisory`` FACT-tier caller half.
+    Kept here until the seam migration lands; do not extend this function.
     """
     from groundtruth.control.types import Evidence
 
@@ -504,10 +521,7 @@ def validate_against_graph(diff: Diff, graph: GraphHandle) -> ValidationResult:
             continue
         sign, name, args = m.group(1), m.group(2), m.group(3).strip()
         if sign == "-":
-            removed[name] = (
-                args,
-                current_file or (str(diff.files_changed[0]) if diff.files_changed else ""),
-            )
+            removed[name] = (args, current_file or (str(diff.files_changed[0]) if diff.files_changed else ""))
         else:
             added[name] = args
 
@@ -530,9 +544,7 @@ def validate_against_graph(diff: Diff, graph: GraphHandle) -> ValidationResult:
         # Prefer matching node by file_path + name suffix.
         for node in nodes:
             qn = str(node.get("qualified_name") or "")
-            if qn.endswith(f".{name}") and _norm_path(
-                str(node.get("file_path") or "")
-            ) == _norm_path(file_path):
+            if qn.endswith(f".{name}") and _norm_path(str(node.get("file_path") or "")) == _norm_path(file_path):
                 chosen_key = qn
                 nid = node.get("id")
                 if isinstance(nid, int):

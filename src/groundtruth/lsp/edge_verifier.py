@@ -26,13 +26,78 @@ import asyncio
 import os
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from groundtruth.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# --- GT_REQUIRE_LSP warm-gate failure taxonomy (C3) ---------------------------
+# The host wrapper warms a HOST-readable copy of the base-commit source (the
+# "Point A" export), NOT the in-container /workspace/<task> (which the host
+# process cannot read). Three distinct ways the gate can fail — kept separate so
+# the operator is sent to the RIGHT fix instead of "install pyright" for all.
+LSP_FAIL_NO_HOST_SRC = "LSP_FAIL_NO_HOST_SRC"  # GT_HOST_SRC_ROOT missing/empty — Point-A plumbing miss
+LSP_FAIL_NO_SOURCE = "LSP_FAIL_NO_SOURCE"      # root exists but holds no LSP-supported source file
+LSP_FAIL_NO_WARM = "LSP_FAIL_NO_WARM"          # server launched path but did not handshake
+
+
+def resolve_warm_source_root(
+    host_src: str | None, container_root: str | None, require_lsp: bool
+) -> tuple[str | None, str | None]:
+    """Pick the path the HOST warm gate walks, and classify the failure (C2+C3).
+
+    The host wrapper process cannot read the in-container workspace, so under a
+    paid ``GT_REQUIRE_LSP`` run the warm MUST run against the host-readable
+    base-commit source (``GT_HOST_SRC_ROOT``). The previous code fell back to
+    ``container_root`` when that was absent — a DEAD control on the host: the
+    walk always finds nothing -> NO_SOURCE_EXT -> fail-closed, mislabeled
+    "image-pull/network". This refuses that fallback and names the real miss.
+
+    Returns ``(root_or_None, failure_class_or_None)``:
+      - host source present        -> (host_src, None)
+      - absent AND require_lsp      -> (None, LSP_FAIL_NO_HOST_SRC)   # C2: no dead fallback
+      - absent AND not require_lsp  -> (container_root, None)         # legacy / non-GHA only
+    """
+    host_src = (host_src or "").strip()
+    if host_src and os.path.isdir(host_src):
+        return (host_src, None)
+    if require_lsp:
+        return (None, LSP_FAIL_NO_HOST_SRC)
+    return (container_root, None)
+
+
+def host_src_has_lsp_source(root: str | None, max_files: int = 4000) -> bool:
+    """True iff ``root`` is a host dir holding >=1 LSP-supported source file (C1).
+
+    Mirrors ``LazyEdgeVerifier._dominant_ext`` so the preflight check and the warm
+    gate agree on "is there source to warm against". A scaffold-only export
+    (``.openhands/TASKS.md`` + ``README.md``) returns False — the exact shape that
+    fail-closed 8 tasks in run 300_e51cc3f0."""
+    if not root or not os.path.isdir(root):
+        return False
+    from groundtruth.lsp.config import LSP_SERVERS
+
+    seen = 0
+    try:
+        for _root, dirs, files in os.walk(root):
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith(".")
+                and d not in ("node_modules", "vendor", "venv", "__pycache__", "target", "dist", "build")
+            ]
+            for fn in files:
+                if os.path.splitext(fn)[1].lower() in LSP_SERVERS:
+                    return True
+            seen += len(files)
+            if seen >= max_files:
+                break
+    except OSError:
+        return False
+    return False
 
 
 @dataclass
@@ -70,16 +135,11 @@ class EdgeVerificationCache:
         else:
             self._stats["rejected"] += 1
 
-    def put_fallback(
-        self, source_file: str, target_symbol: str, original_confidence: float
-    ) -> None:
+    def put_fallback(self, source_file: str, target_symbol: str, original_confidence: float) -> None:
         key = (source_file, target_symbol)
         self._cache[key] = VerifiedEdge(
-            source_file=source_file,
-            target_file="",
-            target_symbol=target_symbol,
-            verified=original_confidence >= 0.9,
-            confidence=original_confidence,
+            source_file=source_file, target_file="", target_symbol=target_symbol,
+            verified=original_confidence >= 0.9, confidence=original_confidence,
             method="fallback_no_lsp",
         )
         self._stats["fallback"] += 1
@@ -116,26 +176,12 @@ class LazyEdgeVerifier:
         """Most common LSP-supported source extension in the workspace (bounded walk).
         Used to warm the RIGHT language server at init."""
         from groundtruth.lsp.config import LSP_SERVERS
-
         counts: dict[str, int] = {}
         seen = 0
         try:
             for _root, dirs, files in os.walk(self._workspace):
-                dirs[:] = [
-                    d
-                    for d in dirs
-                    if not d.startswith(".")
-                    and d
-                    not in (
-                        "node_modules",
-                        "vendor",
-                        "venv",
-                        "__pycache__",
-                        "target",
-                        "dist",
-                        "build",
-                    )
-                ]
+                dirs[:] = [d for d in dirs if not d.startswith(".")
+                           and d not in ("node_modules", "vendor", "venv", "__pycache__", "target", "dist", "build")]
                 for fn in files:
                     ext = os.path.splitext(fn)[1].lower()
                     if ext in LSP_SERVERS:
@@ -162,7 +208,6 @@ class LazyEdgeVerifier:
         Used by the wrapper init gate (GT_REQUIRE_LSP) and the preflight probe."""
         try:
             from groundtruth.lsp.manager import LSPManager
-
             self._lsp_manager = LSPManager(self._workspace)
             self._start_time_ms = int(time.time() * 1000)
             if not warm:
@@ -171,7 +216,6 @@ class LazyEdgeVerifier:
                 return True
             # REAL warm: launch + handshake the dominant language server.
             from groundtruth.utils.result import Err
-
             ext = self._dominant_ext()
             if not ext:
                 self._available = False
@@ -179,13 +223,8 @@ class LazyEdgeVerifier:
                 return False
             res = await asyncio.wait_for(self._lsp_manager.ensure_server(ext), timeout=90.0)
             self._available = not isinstance(res, Err)
-            logger.info(
-                "edge_verifier_started",
-                workspace=self._workspace,
-                warm=True,
-                ext=ext,
-                available=self._available,
-            )
+            logger.info("edge_verifier_started", workspace=self._workspace, warm=True,
+                        ext=ext, available=self._available)
             return self._available
         except Exception as e:
             logger.warning("edge_verifier_start_failed", error=str(e))
@@ -204,7 +243,6 @@ class LazyEdgeVerifier:
         if not self._graph_db or not os.path.exists(self._graph_db):
             return None
         from groundtruth.lsp.config import LSP_SERVERS
-
         try:
             c = sqlite3.connect(self._graph_db)
             rows = c.execute(
@@ -224,12 +262,8 @@ class LazyEdgeVerifier:
         for tfile, tsym, tline, cfile in rows:
             if os.path.splitext(tfile)[1].lower() in LSP_SERVERS:
                 return await self.verify_caller(
-                    tfile,
-                    tsym,
-                    int(tline),
-                    cfile,
-                    original_confidence=1.0,
-                    timeout=timeout,
+                    tfile, tsym, int(tline), cfile,
+                    original_confidence=1.0, timeout=timeout,
                 )
         return None
 
@@ -262,7 +296,6 @@ class LazyEdgeVerifier:
         # Determine file extension for LSP server selection
         ext = os.path.splitext(target_file)[1].lower()
         from groundtruth.lsp.config import LSP_SERVERS
-
         if ext not in LSP_SERVERS:
             self._cache.put_fallback(caller_file, target_symbol, original_confidence)
             return self._cache.get(caller_file, target_symbol)  # type: ignore
@@ -272,7 +305,6 @@ class LazyEdgeVerifier:
         try:
             client_result = await self._lsp_manager.ensure_server(ext)
             from groundtruth.utils.result import Err
-
             if isinstance(client_result, Err):
                 self._cache.put_fallback(caller_file, target_symbol, original_confidence)
                 return self._cache.get(caller_file, target_symbol)  # type: ignore
@@ -285,16 +317,13 @@ class LazyEdgeVerifier:
             if os.path.exists(target_full):
                 text = open(target_full, encoding="utf-8", errors="replace").read()
                 from groundtruth.lsp.config import get_language_id
-
                 lang_result = get_language_id(ext)
                 lang_id = lang_result.value if not isinstance(lang_result, Err) else "python"
                 await client.did_open(target_uri, lang_id, 1, text)
 
             # Query references for the target symbol at its definition line
             refs_result = await client.references(
-                target_uri,
-                target_line - 1,
-                0,  # LSP is 0-indexed
+                target_uri, target_line - 1, 0,  # LSP is 0-indexed
                 include_declaration=False,
                 timeout=timeout,
             )
@@ -309,7 +338,10 @@ class LazyEdgeVerifier:
 
             # Check if caller_file appears in references
             caller_norm = caller_file.replace("\\", "/")
-            verified = any(caller_norm in (ref.uri or "").replace("\\", "/") for ref in refs)
+            verified = any(
+                caller_norm in (ref.uri or "").replace("\\", "/")
+                for ref in refs
+            )
 
             edge = VerifiedEdge(
                 source_file=caller_file,
@@ -361,59 +393,31 @@ def verify_edge_sync(
         loop = asyncio.get_event_loop()
         if loop.is_running():
             import concurrent.futures
-
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(
                     asyncio.run,
-                    _verify_one(
-                        verifier,
-                        target_file,
-                        target_symbol,
-                        target_line,
-                        caller_file,
-                        original_confidence,
-                        timeout,
-                    ),
+                    _verify_one(verifier, target_file, target_symbol, target_line, caller_file, original_confidence, timeout),
                 )
                 return future.result(timeout=timeout + 2)
         else:
             return loop.run_until_complete(
-                _verify_one(
-                    verifier,
-                    target_file,
-                    target_symbol,
-                    target_line,
-                    caller_file,
-                    original_confidence,
-                    timeout,
-                ),
+                _verify_one(verifier, target_file, target_symbol, target_line, caller_file, original_confidence, timeout),
             )
     except Exception:
         return VerifiedEdge(
-            source_file=caller_file,
-            target_file=target_file,
-            target_symbol=target_symbol,
-            verified=original_confidence >= 0.9,
-            confidence=original_confidence,
+            source_file=caller_file, target_file=target_file, target_symbol=target_symbol,
+            verified=original_confidence >= 0.9, confidence=original_confidence,
             method="sync_fallback",
         )
 
 
 async def _verify_one(
     verifier: LazyEdgeVerifier,
-    target_file: str,
-    target_symbol: str,
-    target_line: int,
-    caller_file: str,
-    original_confidence: float,
-    timeout: float,
+    target_file: str, target_symbol: str, target_line: int,
+    caller_file: str, original_confidence: float, timeout: float,
 ) -> VerifiedEdge:
     await verifier.start()
     return await verifier.verify_caller(
-        target_file,
-        target_symbol,
-        target_line,
-        caller_file,
-        original_confidence=original_confidence,
-        timeout=timeout,
+        target_file, target_symbol, target_line, caller_file,
+        original_confidence=original_confidence, timeout=timeout,
     )

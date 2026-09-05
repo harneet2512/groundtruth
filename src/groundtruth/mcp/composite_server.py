@@ -14,7 +14,6 @@ just the FastMCP transport wrapper. ``GT_INSTANCE_ID`` env (set by the OH
 wrapper before launching this server) is consumed by the budget counter
 and pre-submit gate logging path.
 """
-
 from __future__ import annotations
 
 import argparse

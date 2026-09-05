@@ -23,7 +23,9 @@ _DUNDER_PATTERN = re.compile(r"^__\w+__$")
 _SYMBOL_REF_PATTERN = re.compile(r"\b(?:self\.)?(\w{3,})\b")
 
 # Trivial body indicators: single return/pass/raise statements
-_TRIVIAL_BODY_PATTERN = re.compile(r"^\s*(?:pass|return\s+\S+|return|raise\s+\w+)\s*$")
+_TRIVIAL_BODY_PATTERN = re.compile(
+    r"^\s*(?:pass|return\s+\S+|return|raise\s+\w+)\s*$"
+)
 
 
 def _is_enabled() -> bool:
@@ -42,9 +44,7 @@ def _is_property_getter(signature: str | None, body: str) -> bool:
         parts = [p.strip() for p in signature.split(",") if p.strip()]
         non_self = [p for p in parts if "self" not in p]
         if len(non_self) == 0:
-            lines = [
-                l.strip() for l in body.splitlines() if l.strip() and not l.strip().startswith("#")
-            ]
+            lines = [l.strip() for l in body.splitlines() if l.strip() and not l.strip().startswith("#")]
             if len(lines) <= 2 and any(l.startswith("return self.") for l in lines):
                 return True
     return False
@@ -65,37 +65,14 @@ def _is_trivial(body: str) -> bool:
 def _extract_referenced_symbols(body: str) -> set[str]:
     """Extract referenced names from a function body for similarity comparison."""
     # Remove string literals to avoid false matches
-    cleaned = re.sub(r'["\'].*?["\']', "", body)
+    cleaned = re.sub(r'["\'].*?["\']', '', body)
     symbols = set(_SYMBOL_REF_PATTERN.findall(cleaned))
     # Remove Python keywords and very common names
     _noise = {
-        "self",
-        "None",
-        "True",
-        "False",
-        "return",
-        "raise",
-        "pass",
-        "break",
-        "continue",
-        "for",
-        "while",
-        "def",
-        "class",
-        "import",
-        "from",
-        "try",
-        "except",
-        "finally",
-        "with",
-        "yield",
-        "async",
-        "await",
-        "not",
-        "and",
-        "elif",
-        "else",
-        "lambda",
+        "self", "None", "True", "False", "return", "raise", "pass", "break",
+        "continue", "for", "while", "def", "class", "import", "from", "try",
+        "except", "finally", "with", "yield", "async", "await", "not", "and",
+        "elif", "else", "lambda",
     }
     return symbols - _noise
 
@@ -289,26 +266,16 @@ def _select_siblings_impl(
         sib_return_type = sib["return_type"]
 
         score = _similarity_score(
-            target_symbols,
-            target_param_count,
-            target_return_type,
-            sib_symbols,
-            sib_param_count,
-            sib_return_type,
+            target_symbols, target_param_count, target_return_type,
+            sib_symbols, sib_param_count, sib_return_type,
         )
 
         shared = target_symbols & sib_symbols
-        scored.append(
-            (
-                score,
-                {
-                    "name": sib_name,
-                    "shared_symbols": sorted(shared),
-                    "return_type": sib_return_type or "",
-                },
-                shared,
-            )
-        )
+        scored.append((score, {
+            "name": sib_name,
+            "shared_symbols": sorted(shared),
+            "return_type": sib_return_type or "",
+        }, shared))
 
     # Sort by score descending, take top 2
     scored.sort(key=lambda x: x[0], reverse=True)

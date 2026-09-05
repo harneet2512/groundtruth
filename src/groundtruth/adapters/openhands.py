@@ -72,7 +72,6 @@ class OpenHandsClient(Protocol):
 @dataclass
 class _Result:
     """Normalised OH SDK return shape used for B1 byte-count checks."""
-
     ok: bool
     body_bytes: int
     detail: dict[str, Any]
@@ -88,9 +87,7 @@ def _check_byte_count(name: str, raw: Any) -> _Result:
     if exit_code != 0:
         return _Result(ok=False, body_bytes=body_bytes, detail=dict(raw))
     if body_bytes == 0 and not raw.get("ok", False):
-        return _Result(
-            ok=False, body_bytes=0, detail={"reason": f"{name}_zero_byte_success", **raw}
-        )
+        return _Result(ok=False, body_bytes=0, detail={"reason": f"{name}_zero_byte_success", **raw})
     return _Result(ok=True, body_bytes=body_bytes, detail=dict(raw))
 
 
@@ -105,7 +102,9 @@ def _check_version() -> str:
         if tuple(int(x) for x in v.split(".")[:3] if x.isdigit()) < tuple(
             int(x) for x in MIN_OH_SDK_VERSION.split(".")
         ):
-            raise AdapterIncompatibleError(f"OH SDK {v} < required {MIN_OH_SDK_VERSION}")
+            raise AdapterIncompatibleError(
+                f"OH SDK {v} < required {MIN_OH_SDK_VERSION}"
+            )
         return v
     raise AdapterIncompatibleError("OH SDK not installed (openhands-sdk or openhands)")
 

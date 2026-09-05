@@ -1,10 +1,10 @@
 """Module 1 — Issue-text anchor extraction.
 
 Extracts symbol names, file paths, and test names from an issue body using
-deterministic regex patterns. Symbols are then cross-checked against
-``nodes.name`` in graph.db so that natural-language false positives
-(e.g. ``broken``, ``implementation``) are dropped before they leak into the
-PPR seed set.
+deterministic regex patterns. Symbol identity is cross-checked against
+``nodes.name`` in graph.db, while issue provenance independently decides
+whether the match is trusted for graph seeding. A unique graph name does not
+turn ordinary issue prose into a code reference.
 
 Pure regex + sqlite. No LLM, no tree-sitter dependency at runtime — fenced
 code blocks are scanned with the same identifier regex as prose, which is
@@ -23,7 +23,9 @@ from groundtruth.confidence import is_seed_pollutant
 # Identifier surface forms we care about: CamelCase, snake_case, dotted (a.b.c).
 # Min length 3 to drop "is", "to", etc. Keeps leading underscore for dunder
 # attrs (``_fd``, ``__init__``).
-_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]+)*)\b")
+_IDENT_RE = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]+)*)\b"
+)
 
 # Backtick-wrapped paths OR bare paths with known source extensions.
 _PATH_EXTS = (
@@ -50,17 +52,17 @@ _PATH_RE = re.compile(
 # URLs — a repo-relative path never starts with ``//host/`` — so legitimate
 # paths that merely contain a ``src/`` segment are untouched.
 _FORGE_BLOB_URL_RE = re.compile(
-    r"^(?:https?:)?//[^/]+/"  # optional scheme + // + host
-    r".+?/"  # <owner>/<repo> (+ group nesting)
-    r"(?:-/)?(?:blob|raw|blame|tree|src|HEAD)/"  # vcs view segment (GitLab ``-/``)
-    r"[^/]+/"  # <ref> (branch / tag / sha)
-    r"(.+)$"  # repo-relative tail (captured)
+    r"^(?:https?:)?//[^/]+/"                       # optional scheme + // + host
+    r".+?/"                                         # <owner>/<repo> (+ group nesting)
+    r"(?:-/)?(?:blob|raw|blame|tree|src|HEAD)/"     # vcs view segment (GitLab ``-/``)
+    r"[^/]+/"                                        # <ref> (branch / tag / sha)
+    r"(.+)$"                                         # repo-relative tail (captured)
 )
 # ``raw.githubusercontent.com`` has no view segment: ``/<owner>/<repo>/<ref>/<path>``.
 _RAW_GHUC_URL_RE = re.compile(
     r"^(?:https?:)?//raw\.githubusercontent\.com/"
-    r"[^/]+/[^/]+/[^/]+/"  # <owner>/<repo>/<ref>
-    r"(.+)$"  # repo-relative tail (captured)
+    r"[^/]+/[^/]+/[^/]+/"                            # <owner>/<repo>/<ref>
+    r"(.+)$"                                         # repo-relative tail (captured)
 )
 
 
@@ -79,7 +81,6 @@ def _normalize_forge_url(path: str) -> str:
             return tail or path
     return path
 
-
 # Pytest-style test names (test_*, *_test).
 _TEST_NAME_RE = re.compile(r"\b(test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
 
@@ -91,92 +92,19 @@ _TEST_NAME_RE = re.compile(r"\b(test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
 # NOT here: whether they are anchors is decided by the graph cross-check + per-repo
 # symbol_specificity (see _drop_generic_hubs), not by a static blocklist. The old
 # 190-word _STOPWORDS dropped real short/domain symbols — the false-negative poison.
-_NL_FUNCTION_WORDS: frozenset[str] = frozenset(
-    {
-        "the",
-        "and",
-        "for",
-        "nor",
-        "but",
-        "yet",
-        "this",
-        "that",
-        "these",
-        "those",
-        "there",
-        "here",
-        "with",
-        "without",
-        "within",
-        "from",
-        "into",
-        "onto",
-        "over",
-        "under",
-        "about",
-        "after",
-        "before",
-        "between",
-        "through",
-        "during",
-        "against",
-        "are",
-        "was",
-        "were",
-        "been",
-        "being",
-        "has",
-        "have",
-        "had",
-        "will",
-        "would",
-        "shall",
-        "should",
-        "can",
-        "could",
-        "may",
-        "might",
-        "must",
-        "does",
-        "did",
-        "not",
-        "yes",
-        "then",
-        "than",
-        "when",
-        "where",
-        "why",
-        "how",
-        "which",
-        "what",
-        "who",
-        "whom",
-        "whose",
-        "they",
-        "them",
-        "their",
-        "its",
-        "our",
-        "your",
-        "very",
-        "just",
-        "only",
-        "also",
-        "too",
-        "more",
-        "most",
-        "less",
-        "some",
-        "any",
-        "all",
-        "each",
-        "both",
-        "few",
-        "many",
-        "such",
-        "same",
-    }
-)
+_NL_FUNCTION_WORDS: frozenset[str] = frozenset({
+    "the", "and", "for", "nor", "but", "yet",
+    "this", "that", "these", "those", "there", "here",
+    "with", "without", "within", "from", "into", "onto", "over", "under",
+    "about", "after", "before", "between", "through", "during", "against",
+    "are", "was", "were", "been", "being", "has", "have", "had",
+    "will", "would", "shall", "should", "can", "could", "may", "might", "must",
+    "does", "did", "not", "yes",
+    "then", "than", "when", "where", "why", "how", "which", "what",
+    "who", "whom", "whose", "they", "them", "their", "its", "our", "your",
+    "very", "just", "only", "also", "too", "more", "most", "less",
+    "some", "any", "all", "each", "both", "few", "many", "such", "same",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -190,222 +118,41 @@ _NL_FUNCTION_WORDS: frozenset[str] = frozenset(
 _STOPWORDS: frozenset[str] = frozenset(
     {
         # English filler
-        "the",
-        "and",
-        "for",
-        "this",
-        "that",
-        "with",
-        "from",
-        "into",
-        "have",
-        "has",
-        "had",
-        "was",
-        "were",
-        "will",
-        "would",
-        "should",
-        "could",
-        "does",
-        "did",
-        "are",
-        "but",
-        "not",
-        "can",
-        "may",
-        "might",
-        "must",
-        "use",
-        "used",
-        "uses",
-        "using",
-        "see",
-        "any",
-        "all",
-        "some",
-        "one",
-        "two",
-        "three",
-        "four",
-        "five",
-        "ten",
-        "now",
-        "new",
-        "old",
-        "yes",
-        "off",
-        "out",
-        "via",
-        "per",
-        "non",
-        "yet",
-        "say",
-        "set",
-        "get",
-        "put",
-        "let",
-        "got",
-        "make",
-        "made",
-        "want",
-        "need",
-        "give",
-        "find",
-        "back",
-        "down",
-        "over",
-        "such",
-        "then",
-        "than",
-        "very",
-        "much",
-        "more",
-        "less",
-        "well",
-        "long",
-        "high",
-        "low",
-        "left",
-        "right",
-        "same",
-        "different",
-        "still",
-        "even",
-        "thus",
-        "also",
-        "again",
+        "the", "and", "for", "this", "that", "with", "from", "into", "have",
+        "has", "had", "was", "were", "will", "would", "should", "could",
+        "does", "did", "are", "but", "not", "can", "may", "might", "must",
+        "use", "used", "uses", "using", "see", "any", "all", "some", "one",
+        "two", "three", "four", "five", "ten", "now", "new", "old", "yes",
+        "off", "out", "via", "per", "non", "yet", "say", "set", "get",
+        "put", "let", "got", "make", "made", "want", "need", "give", "find",
+        "back", "down", "over", "such", "then", "than", "very", "much",
+        "more", "less", "well", "long", "high", "low", "left", "right",
+        "same", "different", "still", "even", "thus", "also", "again",
         # issue/bug filler
-        "fix",
-        "fixed",
-        "fixing",
-        "bug",
-        "bugs",
-        "issue",
-        "issues",
-        "error",
-        "errors",
-        "fail",
-        "fails",
-        "failed",
-        "failure",
-        "failures",
-        "broken",
-        "break",
-        "breaks",
-        "expected",
-        "actual",
-        "result",
-        "results",
-        "value",
-        "values",
-        "implementation",
-        "behavior",
-        "behaviour",
-        "problem",
-        "problems",
-        "regression",
-        "regressions",
-        "crash",
-        "crashes",
-        "wrong",
-        "incorrect",
-        "correct",
-        "correctly",
-        "since",
-        "before",
-        "after",
-        "while",
-        "when",
-        "where",
-        "why",
-        "how",
-        "what",
-        "which",
-        "whose",
-        "whom",
+        "fix", "fixed", "fixing", "bug", "bugs", "issue", "issues",
+        "error", "errors", "fail", "fails", "failed", "failure", "failures",
+        "broken", "break", "breaks", "expected", "actual", "result",
+        "results", "value", "values", "implementation", "behavior",
+        "behaviour", "problem", "problems", "regression", "regressions",
+        "crash", "crashes", "wrong", "incorrect", "correct", "correctly",
+        "since", "before", "after", "while", "when", "where", "why", "how",
+        "what", "which", "whose", "whom",
         # generic noun-ish
-        "test",
-        "tests",
-        "testing",
-        "code",
-        "codes",
-        "file",
-        "files",
-        "function",
-        "functions",
-        "class",
-        "classes",
-        "method",
-        "methods",
-        "type",
-        "types",
-        "object",
-        "objects",
-        "exception",
-        "exceptions",
-        "raise",
-        "raises",
-        "raised",
-        "return",
-        "returns",
-        "returned",
-        "import",
-        "imports",
-        "imported",
-        "module",
-        "modules",
-        "package",
-        "packages",
-        "library",
-        "libraries",
-        "version",
-        "versions",
+        "test", "tests", "testing", "code", "codes", "file", "files",
+        "function", "functions", "class", "classes", "method", "methods",
+        "type", "types", "object", "objects", "exception", "exceptions",
+        "raise", "raises", "raised", "return", "returns", "returned",
+        "import", "imports", "imported", "module", "modules", "package",
+        "packages", "library", "libraries", "version", "versions",
         # python keywords / builtins seen in prose
-        "true",
-        "false",
-        "none",
-        "null",
-        "self",
-        "cls",
-        "args",
-        "kwargs",
-        "python",
-        "java",
-        "javascript",
-        "typescript",
-        "rust",
-        "golang",
+        "true", "false", "none", "null", "self", "cls", "args", "kwargs",
+        "python", "java", "javascript", "typescript", "rust", "golang",
         # boilerplate verbs
-        "called",
-        "called",
-        "calling",
-        "called",
-        "ran",
-        "run",
-        "running",
-        "found",
-        "see",
-        "look",
-        "looking",
-        "looked",
-        "show",
-        "shows",
-        "showed",
-        "follow",
-        "follows",
-        "followed",
-        "throw",
-        "throws",
-        "thrown",
-        "catch",
-        "caught",
-        "log",
-        "logs",
-        "logged",
-        "print",
-        "prints",
-        "printed",
+        "called", "called", "calling", "called", "ran", "run", "running",
+        "found", "see", "look", "looking", "looked", "show", "shows",
+        "showed", "follow", "follows", "followed", "throw", "throws",
+        "thrown", "catch", "caught", "log", "logs", "logged", "print",
+        "prints", "printed",
     }
 )
 
@@ -487,6 +234,10 @@ class IssueAnchors:
     # self-localize. Empty when no graph is provided (without a graph we
     # cannot KNOW a token is unresolved — abstain).
     unresolved_code_symbols: set[str] = field(default_factory=set)
+    # Per-anchor provenance is the relevance authority. Graph uniqueness proves
+    # identity only; it never upgrades prose into a trusted issue anchor.
+    symbol_provenance: dict[str, str] = field(default_factory=dict)
+    path_provenance: dict[str, str] = field(default_factory=dict)
 
 
 # Backtick-wrapped inline code: `symbol` or `module.symbol`
@@ -498,91 +249,26 @@ _BACKTICK_CODE_RE = re.compile(r"`([^`\n]+)`")
 # never reached _resolve_qualified_dotted; `Context` died as a homonym). The
 # pair is harvested here and confirmed through the SAME graph probes as dotted
 # pairs — correct-or-quiet, never minted from string shape alone.
-_QUALIFIED_COLON_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,})::([A-Za-z_][A-Za-z0-9_]{2,})\b")
+_QUALIFIED_COLON_RE = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_]{2,})::([A-Za-z_][A-Za-z0-9_]{2,})\b"
+)
 
 # Cross-language type/keyword tokens that are never localization anchors even
 # with explicit code provenance (they appear inside backticked SIGNATURES —
 # `BeginRepl(args []string, version string)` — as parameter/type syntax, not
 # as symbols). Static by design: language syntax invariants, not domain words.
-_LANG_KEYWORD_TOKENS: frozenset[str] = frozenset(
-    {
-        "string",
-        "str",
-        "int",
-        "int8",
-        "int16",
-        "int32",
-        "int64",
-        "uint",
-        "float",
-        "float32",
-        "float64",
-        "double",
-        "bool",
-        "boolean",
-        "void",
-        "char",
-        "byte",
-        "rune",
-        "number",
-        "object",
-        "array",
-        "vec",
-        "map",
-        "list",
-        "dict",
-        "tuple",
-        "option",
-        "result",
-        "nil",
-        "null",
-        "none",
-        "true",
-        "false",
-        "self",
-        "cls",
-        "this",
-        "args",
-        "kwargs",
-        "argv",
-        "func",
-        "function",
-        "def",
-        "let",
-        "mut",
-        "pub",
-        "const",
-        "var",
-        "class",
-        "struct",
-        "enum",
-        "impl",
-        "trait",
-        "interface",
-        "type",
-        "import",
-        "from",
-        "use",
-        "mod",
-        "package",
-        "return",
-        "yield",
-        "async",
-        "await",
-        "static",
-        "public",
-        "private",
-        "protected",
-        "new",
-        "make",
-        "err",
-        "error",
-        "ctx",
-        "context",
-        "val",
-        "key",
-    }
-)
+_LANG_KEYWORD_TOKENS: frozenset[str] = frozenset({
+    "string", "str", "int", "int8", "int16", "int32", "int64", "uint",
+    "float", "float32", "float64", "double", "bool", "boolean", "void",
+    "char", "byte", "rune", "number", "object", "array", "vec", "map",
+    "list", "dict", "tuple", "option", "result", "nil", "null", "none",
+    "true", "false", "self", "cls", "this", "args", "kwargs", "argv",
+    "func", "function", "def", "let", "mut", "pub", "const", "var",
+    "class", "struct", "enum", "impl", "trait", "interface", "type",
+    "import", "from", "use", "mod", "package", "return", "yield",
+    "async", "await", "static", "public", "private", "protected",
+    "new", "make", "err", "error", "ctx", "context", "val", "key",
+})
 
 
 def _extract_code_region_identifiers(text: str) -> set[str]:
@@ -636,6 +322,45 @@ def _is_prose_only_common_word(sym: str, code_idents: set[str]) -> bool:
     return True
 
 
+def _is_identifier_shaped_unresolved(tok: str, issue_text: str) -> bool:
+    """True iff an unresolved code-fence token is IDENTIFIER-shaped (G5), not a
+    prose / error-output / shell-transcript noun that merely sat inside a fenced
+    block. Admit a token only when it carries an explicit CODE affordance:
+
+      * snake_case / SCREAMING_SNAKE / dunder  (contains ``_``)
+      * camelCase / PascalCase                 (an internal case transition)
+      * a CALL form ``tok(`` in the issue text  (``require()``)
+      * a ``::`` qualification (``Type::tok`` / ``tok::method``) — the greenfield
+        method tail of a Rust/C++ path is a bare lowercase name whose only signal
+        is the ``::`` the reporter wrote (``Context::reanchor``).
+
+    Plus length >= 4 and NOT a closed-class / issue-filler word. A bare lowercase
+    English word with none of these affordances (``cannot``, ``mismatch``,
+    ``character`` in error prose) is rejected — that is the over-admission the
+    stratum-D classifier keyed on. Provenance (attached to code punctuation), not a
+    dictionary, is the discriminator, so it generalises across repos/languages.
+    """
+    if len(tok) < 4:
+        return False
+    low = tok.lower()
+    if low in _NL_FUNCTION_WORDS or low in _STOPWORDS:
+        return False
+    if "_" in tok:
+        return True
+    if tok != tok.lower() and tok != tok.upper():  # internal case (camel/Pascal)
+        return True
+    esc = re.escape(tok)
+    text = issue_text or ""
+    # CALL form: token attached directly to '(' (no space -> excludes prose
+    # parentheticals like "the widget (deprecated)").
+    if re.search(esc + r"\(", text):
+        return True
+    # '::' qualification on either side (Rust/C++ path syntax; never in prose).
+    if re.search(r"::\s*" + esc + r"\b", text) or re.search(r"\b" + esc + r"\s*::", text):
+        return True
+    return False
+
+
 def _extract_raw_identifiers(text: str) -> set[str]:
     """Pull every identifier-shaped token from the issue body.
 
@@ -680,11 +405,35 @@ def _extract_title_region(text: str) -> str:
         if ln.strip():
             region.append(ln.strip().lstrip("#").strip())  # title = first non-empty line
             break
-    for ln in lines:  # markdown ATX headings anywhere are section titles
-        s = ln.strip()
-        if s.startswith("#"):
-            region.append(s.lstrip("#").strip())
     return "\n".join(region)
+
+
+_TRACEBACK_LINE_RE = re.compile(
+    r"(?im)^\s*(?:traceback\b|file\s+['\"]|at\s+[A-Za-z_$]|\w[^\n]*:\d+(?::\d+)?)"
+)
+
+
+def _extract_traceback_identifiers(text: str) -> set[str]:
+    """Identifiers on explicit stack/trace location lines (weak provenance)."""
+    out: set[str] = set()
+    for line in (text or "").splitlines():
+        if _TRACEBACK_LINE_RE.search(line):
+            out.update(_extract_raw_identifiers(line))
+    return out
+
+
+def _title_code_identifiers(title: str) -> set[str]:
+    """Graph-confirmable code-shaped identifiers on the actual summary line."""
+    out: set[str] = set()
+    for token in _extract_raw_identifiers(title):
+        if (
+            "." in token
+            or "_" in token
+            or (token != token.lower() and token != token.upper())
+            or re.search(rf"\b{re.escape(token)}\s*(?:\(|::)", title)
+        ):
+            out.add(token)
+    return out
 
 
 def _extract_paths(text: str) -> set[str]:
@@ -697,6 +446,29 @@ def _extract_paths(text: str) -> set[str]:
             # path anchor matches a graph ``file_path`` (which is repo-relative).
             out.add(_normalize_forge_url(path.strip()))
     return out
+
+
+def _extract_path_provenance(text: str) -> dict[str, str]:
+    """Classify source paths as explicit issue references or traceback-only.
+
+    A path mentioned anywhere outside a structured traceback line is explicit;
+    otherwise it remains weak traceback context. This is occurrence-based, so a
+    reporter who repeats a stack path in their own diagnosis upgrades it honestly.
+    """
+    traceback_paths: set[str] = set()
+    explicit_paths: set[str] = set()
+    for line in (text or "").splitlines():
+        line_paths = _extract_paths(line)
+        if not line_paths:
+            continue
+        if _TRACEBACK_LINE_RE.search(line):
+            traceback_paths.update(line_paths)
+        else:
+            explicit_paths.update(line_paths)
+    return {
+        path: ("EXPLICIT_PATH" if path in explicit_paths else "TRACEBACK_PATH")
+        for path in sorted(traceback_paths | explicit_paths)
+    }
 
 
 def _extract_test_names(text: str) -> set[str]:
@@ -868,8 +640,8 @@ def extract_issue_anchors(
             continue
         after_filter.add(tok)
 
-    resolved = _cross_check_against_graph(after_filter, graph_db_path)
-    resolved = _drop_generic_hubs(resolved, graph_db_path)
+    resolved_graph = _cross_check_against_graph(after_filter, graph_db_path)
+    resolved_graph = _drop_generic_hubs(resolved_graph, graph_db_path)
 
     # QUALIFIED dotted anchors (fix 2026-06-10 — §4 anchor-extraction defect):
     # a dotted token (``Class.method`` / ``module.func``) can never survive the
@@ -881,10 +653,10 @@ def extract_issue_anchors(
     # generic-hub gate — qualification structurally disambiguates (it is the
     # opposite of a homonym). Correct-or-quiet: unconfirmed dotted tokens stay out.
     _qualified_dotted = _resolve_qualified_dotted(
-        {t for t in after_filter if "." in t and t not in resolved},
+        {t for t in after_filter if "." in t and t not in resolved_graph},
         graph_db_path,
     )
-    resolved |= _qualified_dotted
+    resolved_graph |= _qualified_dotted
 
     # `Type::method` qualified pairs (2026-06-10, DeepSWE non-Python audit):
     # Rust/C++ path syntax decomposes under _IDENT_RE into two bare tokens that
@@ -893,21 +665,20 @@ def extract_issue_anchors(
     # dotted form, and confirm through the SAME graph probes — a confirmed pair
     # is exempt from the generic-hub/prose gates exactly like a confirmed
     # dotted pair (qualification disambiguates). Unconfirmed pairs stay out.
-    _colon_pairs = {f"{m.group(1)}.{m.group(2)}" for m in _QUALIFIED_COLON_RE.finditer(issue_text)}
+    _colon_pairs = {
+        f"{m.group(1)}.{m.group(2)}"
+        for m in _QUALIFIED_COLON_RE.finditer(issue_text)
+    }
     _colon_confirmed = _resolve_qualified_dotted(
-        {t for t in _colon_pairs if t not in resolved},
-        graph_db_path,
+        {t for t in _colon_pairs if t not in resolved_graph}, graph_db_path,
     )
     _qualified_dotted |= _colon_confirmed
-    resolved |= _colon_confirmed
+    resolved_graph |= _colon_confirmed
 
-    # PROVENANCE tier (BugLocator ICSE 2012; Schröter MSR 2010): the resolved
-    # symbols that also occur in the TITLE / heading region are the high-signal
-    # localization anchors; everything else (body + pasted traceback) is the
-    # weak tier. Consumers rank title_symbols first so stack-frame pollution
-    # (main/import_asis/apply_choice…) no longer ties with the titled target.
-    _title_idents = _extract_raw_identifiers(_extract_title_region(issue_text))
-    title_symbols = {s for s in resolved if s in _title_idents}
+    # Summary provenance: only code-shaped identifiers on the actual first
+    # non-empty issue line qualify. Markdown body headings remain prose queries;
+    # traceback identifiers are recorded separately as weak provenance.
+    _title_idents = _title_code_identifiers(_extract_title_region(issue_text))
 
     # CODE provenance (Reformulate, Retrieve, Localize arXiv:2512.07022, 2025;
     # Query Reduction for Bug Localization Mejia-Bernal et al. JSS 2025):
@@ -917,7 +688,12 @@ def extract_issue_anchors(
     # "check" in "configure and check trusted_hosts" doesn't seed a false graph
     # witness to json/tag.py::check() (the flask-5637 mislocalization).
     _code_idents = _extract_code_region_identifiers(issue_text)
-    code_symbols = {s for s in resolved if s in _code_idents}
+    code_symbols = {s for s in resolved_graph if s in _code_idents}
+    title_symbols = {s for s in resolved_graph if s in _title_idents}
+    # Graph membership proves identity, not issue relevance. Only explicit code
+    # provenance or a code-shaped identifier on the actual summary line seeds
+    # traversal. Body prose/headings/tracebacks remain lexical query material.
+    resolved = set(_qualified_dotted) | code_symbols | title_symbols
     # Remove prose-only common words from the main anchor set. They stay in
     # symbols_raw for telemetry but don't seed the graph localizer. This is
     # STRONGER than downweighting — a false seed produces a false witness that
@@ -938,7 +714,8 @@ def extract_issue_anchors(
             _gc_conn = sqlite3.connect(graph_db_path)
             try:
                 _graph_confirmed_unique = {
-                    s for s in resolved if not is_seed_pollutant(s, _gc_conn)
+                    s for s in resolved
+                    if not is_seed_pollutant(s, _gc_conn)
                 }
             finally:
                 _gc_conn.close()
@@ -954,6 +731,21 @@ def extract_issue_anchors(
             _prose_demoted.add(s)
             resolved.discard(s)
 
+    _traceback_idents = _extract_traceback_identifiers(issue_text)
+    symbol_provenance: dict[str, str] = {}
+    for symbol in sorted(resolved_graph):
+        if symbol in _qualified_dotted:
+            provenance = "QUALIFIED_CODE"
+        elif symbol in code_symbols:
+            provenance = "CODE_SYMBOL"
+        elif symbol in title_symbols:
+            provenance = "TITLE_SYMBOL"
+        elif symbol in _traceback_idents:
+            provenance = "TRACEBACK"
+        else:
+            provenance = "PROSE_QUERY"
+        symbol_provenance[symbol] = provenance
+
     # GREENFIELD tier (2026-06-10): reporter-marked code tokens that resolved
     # to NOTHING in the graph. Only meaningful WITH a graph (without one we
     # cannot know a token is unresolved — abstain, keep empty). Language
@@ -968,6 +760,12 @@ def extract_issue_anchors(
             low = tok.lower()
             if low in _NL_FUNCTION_WORDS or low in _LANG_KEYWORD_TOKENS:
                 continue
+            # G5: admit only IDENTIFIER-shaped tokens. A fenced block often holds
+            # error text / shell transcripts / fixture prose whose bare nouns
+            # ("cannot", "mismatch", "character") are NOT the API-to-be-built and
+            # were wrongly routing existing-file issues into stratum D.
+            if not _is_identifier_shaped_unresolved(tok, issue_text):
+                continue
             unresolved_code_symbols.add(tok)
 
     return IssueAnchors(
@@ -979,4 +777,6 @@ def extract_issue_anchors(
         title_symbols=title_symbols,
         code_symbols=code_symbols,
         unresolved_code_symbols=unresolved_code_symbols,
+        symbol_provenance=symbol_provenance,
+        path_provenance=_extract_path_provenance(issue_text),
     )

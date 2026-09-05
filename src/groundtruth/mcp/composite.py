@@ -19,7 +19,6 @@ Confidence tiers in rendered output:
   [WARNING]  — score == 1
   [INFO]     — score == 0 or unknown
 """
-
 from __future__ import annotations
 
 import json
@@ -92,7 +91,8 @@ def check_and_increment(instance_id: str, endpoint: str) -> tuple[bool, str]:
         redirect = _REDIRECTS.get(endpoint, "")
         return (
             False,
-            f"BUDGET_EXHAUSTED: {endpoint} has reached its per-task cap of {cap}. Try {redirect}.",
+            f"BUDGET_EXHAUSTED: {endpoint} has reached its per-task cap of {cap}. "
+            f"Try {redirect}.",
         )
     counts[endpoint] = used + 1
     _save_counter(instance_id, counts)
@@ -124,7 +124,6 @@ def _import_gt_intel():
     """
     try:
         from benchmarks.swebench import gt_intel  # type: ignore[import-not-found]
-
         return gt_intel
     except ImportError:
         return None
@@ -167,7 +166,9 @@ def _format_evidence_lines(
     return out
 
 
-def _open_target(db_path: str, file_path: str, function_name: str = "") -> tuple[Any, Any] | None:
+def _open_target(
+    db_path: str, file_path: str, function_name: str = ""
+) -> tuple[Any, Any] | None:
     """Open graph.db and resolve a target node. Returns (conn, node) or None."""
     if not os.path.exists(db_path):
         return None
@@ -194,7 +195,7 @@ def _format_block(title: str, lines: list[str]) -> str:
         body = "(no admissible evidence — below confidence floor or no graph neighbours)"
     else:
         body = "\n".join(lines)
-    return f'<gt-evidence tool="{title}">\n{body}\n</gt-evidence>'
+    return f"<gt-evidence tool=\"{title}\">\n{body}\n</gt-evidence>"
 
 
 # ---------------------------------------------------------------------------
@@ -216,14 +217,13 @@ def gt_lookup_impl(
 ) -> str:
     """Composite endpoint: callers + callees + tests + precedent + type."""
     import time as _time
-
     _t0 = _time.monotonic()
     iid = _resolve_instance_id(instance_id)
     allowed, msg = check_and_increment(iid, "gt_lookup")
     if not allowed:
-        _emit_endpoint_telemetry(
-            iid, "gt_lookup", {"symbol": symbol, "file_path": file_path}, msg, _t0
-        )
+        _emit_endpoint_telemetry(iid, "gt_lookup",
+                                 {"symbol": symbol, "file_path": file_path},
+                                 msg, _t0)
         return msg
     if not symbol or not symbol.strip():
         return _format_block("gt_lookup", ["[INFO] empty symbol — pass a function or class name"])
@@ -250,9 +250,9 @@ def gt_lookup_impl(
 
     lines = _format_evidence_lines(evidence_nodes, families_keep=_LOOKUP_FAMILIES)
     out = _format_block("gt_lookup", lines)
-    _emit_endpoint_telemetry(
-        iid, "gt_lookup", {"symbol": symbol, "file_path": file_path}, out, _t0, lines=lines
-    )
+    _emit_endpoint_telemetry(iid, "gt_lookup",
+                             {"symbol": symbol, "file_path": file_path},
+                             out, _t0, lines=lines)
     return out
 
 
@@ -266,14 +266,13 @@ def gt_impact_impl(
 ) -> str:
     """Composite endpoint: blast radius (caller count + critical path) + sibling norms."""
     import time as _time
-
     _t0 = _time.monotonic()
     iid = _resolve_instance_id(instance_id)
     allowed, msg = check_and_increment(iid, "gt_impact")
     if not allowed:
-        _emit_endpoint_telemetry(
-            iid, "gt_impact", {"target": target, "file_path": file_path}, msg, _t0
-        )
+        _emit_endpoint_telemetry(iid, "gt_impact",
+                                 {"target": target, "file_path": file_path},
+                                 msg, _t0)
         return msg
     if not target or not target.strip():
         return _format_block("gt_impact", ["[INFO] empty target — pass a symbol or file"])
@@ -315,9 +314,9 @@ def gt_impact_impl(
     )
     lines.extend(_format_evidence_lines(evidence_nodes, families_keep=_IMPACT_FAMILIES))
     out = _format_block("gt_impact", lines)
-    _emit_endpoint_telemetry(
-        iid, "gt_impact", {"target": target, "file_path": file_path}, out, _t0, lines=lines
-    )
+    _emit_endpoint_telemetry(iid, "gt_impact",
+                             {"target": target, "file_path": file_path},
+                             out, _t0, lines=lines)
     return out
 
 
@@ -330,12 +329,12 @@ def gt_check_impl(
 ) -> str:
     """File-level pre-submit check: validators + TEST coverage + import shape."""
     import time as _time
-
     _t0 = _time.monotonic()
     iid = _resolve_instance_id(instance_id)
     allowed, msg = check_and_increment(iid, "gt_check")
     if not allowed:
-        _emit_endpoint_telemetry(iid, "gt_check", {"file_path": file_path}, msg, _t0)
+        _emit_endpoint_telemetry(iid, "gt_check",
+                                 {"file_path": file_path}, msg, _t0)
         return msg
     if not file_path or not file_path.strip():
         return _format_block("gt_check", ["[INFO] empty path — pass a source file"])
@@ -357,7 +356,6 @@ def gt_check_impl(
     # the v1.0.5 per-task budget. Keep this surface deterministic + cheap.
     try:
         import groundtruth.validators.orchestrator  # noqa: F401
-
         lines.append(
             f"{_TIER_INFO} VALIDATORS graph-based (LSP path skipped by design — "
             "see compute_evidence IMPORT/TEST output below)"
@@ -382,9 +380,7 @@ def gt_check_impl(
                 ).fetchall()
                 for name, start_line in rows:
                     try:
-                        target = (
-                            gt_intel.get_target_node(conn, file_path, name) if gt_intel else None
-                        )
+                        target = gt_intel.get_target_node(conn, file_path, name) if gt_intel else None
                     except Exception:
                         target = None
                     if target is None:
@@ -408,7 +404,8 @@ def gt_check_impl(
         lines.append(f"{_TIER_INFO} graph.db missing at {db_path}")
 
     out = _format_block("gt_check", lines)
-    _emit_endpoint_telemetry(iid, "gt_check", {"file_path": file_path}, out, _t0, lines=lines)
+    _emit_endpoint_telemetry(iid, "gt_check",
+                             {"file_path": file_path}, out, _t0, lines=lines)
     return out
 
 
@@ -427,7 +424,7 @@ def _emit_endpoint_telemetry(
 
         latency_ms = (_time.monotonic() - t0_monotonic) * 1000.0
         tiers = {"verified": 0, "warning": 0, "info": 0}
-        for ln in lines or []:
+        for ln in (lines or []):
             if "[VERIFIED]" in ln:
                 tiers["verified"] += 1
             elif "[WARNING]" in ln:

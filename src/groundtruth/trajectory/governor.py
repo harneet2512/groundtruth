@@ -25,12 +25,13 @@ def _is_vendor_path(fp: str) -> bool:
         elif f"/{p}" in norm or norm.startswith(p):
             return True
     return False
-
-
 from .classifier import (
     classify_observation,
+    classify_command,
     classify_verification_targeting,
     is_verification_command,
+    CommandKind,
+    VerificationTarget,
 )
 from .parsers import parse_failures, FailureRecord
 from . import hooks
@@ -62,29 +63,9 @@ def _is_source_edit(path: str) -> bool:
         return False
     ext = os.path.splitext(path)[1].lower()
     source_exts = {
-        ".py",
-        ".js",
-        ".ts",
-        ".jsx",
-        ".tsx",
-        ".go",
-        ".rs",
-        ".java",
-        ".c",
-        ".cpp",
-        ".h",
-        ".hpp",
-        ".rb",
-        ".php",
-        ".swift",
-        ".kt",
-        ".scala",
-        ".cs",
-        ".yml",
-        ".yaml",
-        ".toml",
-        ".json",
-        ".cfg",
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java",
+        ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".swift", ".kt",
+        ".scala", ".cs", ".yml", ".yaml", ".toml", ".json", ".cfg",
     }
     if ext not in source_exts:
         return False
@@ -117,9 +98,7 @@ def _get_edited_path_from_action(action: Any) -> str:
     m = re.search(r"str_replace_editor.*?path=\"([^\"]+)\"", text)
     if m:
         return m.group(1)
-    m = re.search(
-        r"(?:create|str_replace|insert|write)\s+(\S+\.(?:py|js|ts|go|rs|java|rb|c|cpp|h))", text
-    )
+    m = re.search(r"(?:create|str_replace|insert|write)\s+(\S+\.(?:py|js|ts|go|rs|java|rb|c|cpp|h))", text)
     if m:
         return m.group(1)
     return ""
@@ -172,7 +151,6 @@ class L5Governor:
             _scaffold_threshold = 20  # default for small repos
             try:
                 import sqlite3 as _sq_l5
-
                 _gdb = os.environ.get("GT_GRAPH_DB", "/tmp/gt_index.db")
                 if os.path.exists(_gdb):
                     _nc = _sq_l5.connect(_gdb).execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
@@ -181,17 +159,9 @@ class L5Governor:
                     elif _nc > 1000:
                         _scaffold_threshold = 25
             except Exception as _sq_exc:
-                print(
-                    f"[GT_TRACE] mech=adaptive_L5 layer=L5 action=suppress reason=NO_GRAPH_DB error={_sq_exc}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                print(f"[GT_TRACE] mech=adaptive_L5 layer=L5 action=suppress reason=NO_GRAPH_DB error={_sq_exc}", file=sys.stderr, flush=True)
             self._cached_scaffold_threshold = _scaffold_threshold
-            print(
-                f"[GT_TRACE] mech=adaptive_L5 layer=L5 threshold={_scaffold_threshold} graph_db={os.environ.get('GT_GRAPH_DB', 'unset')}",
-                file=sys.stderr,
-                flush=True,
-            )
+            print(f"[GT_TRACE] mech=adaptive_L5 layer=L5 threshold={_scaffold_threshold} graph_db={os.environ.get('GT_GRAPH_DB', 'unset')}", file=sys.stderr, flush=True)
         # Don't fire the "no source edits" trap on the very turn the agent makes
         # its first source edit — the edit must be RECORDED (below) first, or a
         # later test failure can never find has_source_edit_before_last_failure
@@ -219,8 +189,7 @@ class L5Governor:
                     f"[GT_TRACE] mech=adaptive_L5 layer=L5 action=suppress "
                     f"reason=productive_exploration ratio={_exploration_ratio:.2f} "
                     f"unique_views={_unique_views} ac={action_count}",
-                    file=sys.stderr,
-                    flush=True,
+                    file=sys.stderr, flush=True,
                 )
                 self.state.save()
                 return _NO_DECISION
@@ -270,10 +239,7 @@ class L5Governor:
         return _NO_DECISION
 
     def _build_decision(
-        self,
-        hook_name: str,
-        msg: str | None,
-        *,
+        self, hook_name: str, msg: str | None, *,
         trigger_reason: str = "",
         verification_kind: str | None = None,
         edited_file: str | None = None,
@@ -285,7 +251,6 @@ class L5Governor:
             return _NO_DECISION
 
         from .hooks import L5bSafetyChecker
-
         ratio = self.state.current_iter / max(self.state.max_iter, 1)
         is_safe, reason = L5bSafetyChecker.validate(msg, ratio)
 
@@ -311,33 +276,22 @@ class L5Governor:
 
         if is_safe:
             return L5Decision(
-                hook_name=hook_name,
-                fired=True,
-                suppressed=False,
+                hook_name=hook_name, fired=True, suppressed=False,
                 message=msg,
-                next_action_type=next_action_type,
-                next_action_text=next_action_text,
-                next_action_file=next_action_file,
-                next_action_test=next_action_test,
-                trigger_reason=trigger_reason,
-                verification_kind=verification_kind,
-                edited_file=edited_file,
-                command=command,
+                next_action_type=next_action_type, next_action_text=next_action_text,
+                next_action_file=next_action_file, next_action_test=next_action_test,
+                trigger_reason=trigger_reason, verification_kind=verification_kind,
+                edited_file=edited_file, command=command,
             )
         else:
             self._log("l5b_safety_blocked", "", suppressed=reason or "safety_check_failed")
             return L5Decision(
-                hook_name=hook_name,
-                fired=True,
-                suppressed=True,
+                hook_name=hook_name, fired=True, suppressed=True,
                 suppression_reason=f"l5b_safety_check:{reason}",
                 message=None,
-                next_action_type=next_action_type,
-                next_action_text=next_action_text,
-                trigger_reason=trigger_reason,
-                verification_kind=verification_kind,
-                edited_file=edited_file,
-                command=command,
+                next_action_type=next_action_type, next_action_text=next_action_text,
+                trigger_reason=trigger_reason, verification_kind=verification_kind,
+                edited_file=edited_file, command=command,
             )
 
     def _handle_command(
@@ -365,8 +319,7 @@ class L5Governor:
         failure_record: FailureRecord | None = None
 
         targeting = classify_verification_targeting(
-            command,
-            list(self.state.edited_source_files),
+            command, list(self.state.edited_source_files),
         )
         target_level = targeting.value
 
@@ -414,10 +367,8 @@ class L5Governor:
         msg = hooks.hook_same_failure_persisted(self.state, failure_record)
         if msg:
             return self._build_decision(
-                "same_failure_persisted",
-                msg,
-                trigger_reason="repeated_failure",
-                command=command,
+                "same_failure_persisted", msg,
+                trigger_reason="repeated_failure", command=command,
             )
 
         if self.state.has_source_edit_before_last_failure and failure_record:
@@ -425,10 +376,8 @@ class L5Governor:
             if msg:
                 self.state.has_source_edit_before_last_failure = False
                 return self._build_decision(
-                    "hypothesis_falsified",
-                    msg,
-                    trigger_reason="test_failure_after_edit",
-                    command=command,
+                    "hypothesis_falsified", msg,
+                    trigger_reason="test_failure_after_edit", command=command,
                 )
 
         self.state.save()
@@ -452,10 +401,8 @@ class L5Governor:
         msg = hooks.hook_premature_commitment(self.state, path, confirming)
         if msg:
             return self._build_decision(
-                "premature_commitment",
-                msg,
-                trigger_reason="source_edit_before_confirming",
-                edited_file=path,
+                "premature_commitment", msg,
+                trigger_reason="source_edit_before_confirming", edited_file=path,
             )
 
         self.state.save()
@@ -465,10 +412,8 @@ class L5Governor:
         msg = hooks.hook_no_durable_source_progress(self.state, path)
         if msg:
             return self._build_decision(
-                "no_durable_source_progress",
-                msg,
-                trigger_reason="non_source_edit",
-                edited_file=path,
+                "no_durable_source_progress", msg,
+                trigger_reason="non_source_edit", edited_file=path,
             )
         self.state.save()
         return _NO_DECISION
@@ -477,8 +422,7 @@ class L5Governor:
         msg = hooks.hook_unsafe_finish(self.state)
         if msg:
             return self._build_decision(
-                "unsafe_finish",
-                msg,
+                "unsafe_finish", msg,
                 trigger_reason="finish_with_unresolved_or_unverified",
             )
         # Mechanism #4: Multi-file edit warning
@@ -504,7 +448,6 @@ class L5Governor:
             return ""
         try:
             import sqlite3
-
             conn = sqlite3.connect(graph_db)
             warnings = []
             for ef in list(edited)[:3]:
@@ -523,9 +466,7 @@ class L5Governor:
                 ).fetchall()
                 for caller_file, cnt in rows:
                     if caller_file not in edited and not _is_vendor_path(caller_file):
-                        warnings.append(
-                            f"  {caller_file} ({cnt} calls into {os.path.basename(ef)})"
-                        )
+                        warnings.append(f"  {caller_file} ({cnt} calls into {os.path.basename(ef)})")
             conn.close()
             if warnings:
                 # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025,
@@ -552,7 +493,6 @@ class L5Governor:
             return result
         try:
             import sqlite3
-
             conn = sqlite3.connect(graph_db)
             for edited in self.state.edited_source_files[-2:]:
                 norm = edited.replace("\\", "/")
@@ -649,17 +589,14 @@ class L5Governor:
         # Record verification commands
         if cls_name == "CmdRunAction":
             from .classifier import is_verification_command, classify_verification_targeting
-
             command = _extract_command(action)
             if is_verification_command(command):
                 obs_text = _extract_observation_text(obs)
                 from .classifier import classify_observation
-
                 classification = classify_observation(command, obs_text)
                 passed = not classification.is_failure
                 targeting = classify_verification_targeting(
-                    command,
-                    list(self.state.edited_source_files),
+                    command, list(self.state.edited_source_files),
                 )
                 self.state.record_verification(passed, target_level=targeting.value)
 
@@ -680,8 +617,7 @@ class L5Governor:
         # 1. Patch collapsed
         if self.state.patch_collapsed and not self.state.durable_edit_lost:
             decision = self._try_goku_emit(
-                "PATCH_COLLAPSED_OR_LOST",
-                "HIGH",
+                "PATCH_COLLAPSED_OR_LOST", "HIGH",
                 hooks.hook_patch_collapsed_or_lost(self.state),
                 trigger_reason="diff_nonzero_to_zero",
             )
@@ -693,8 +629,7 @@ class L5Governor:
         # 2. Finish without structural witness
         if _is_finish_action(action):
             decision = self._try_goku_emit(
-                "FINISH_WITH_UNVERIFIED_EDIT",
-                "HIGH",
+                "FINISH_WITH_UNVERIFIED_EDIT", "HIGH",
                 hooks.hook_finish_without_structural_witness(self.state),
                 trigger_reason="finish_no_witness",
             )
@@ -709,8 +644,7 @@ class L5Governor:
             and not self.state.structural_witness_followed
         ):
             decision = self._try_goku_emit(
-                "STRUCTURAL_WITNESS_IGNORED",
-                "HIGH",
+                "STRUCTURAL_WITNESS_IGNORED", "HIGH",
                 hooks.hook_structural_witness_ignored(
                     self.state,
                     witness_file=self.state.latest_gt_next_action_file,
@@ -723,18 +657,11 @@ class L5Governor:
 
         # 4. Weak verification after edit
         if self.state.has_unverified_patch():
-            confidence = (
-                "HIGH"
-                if self.state.band
-                in (
-                    IterationBand.LATE_REPAIR,
-                    IterationBand.FINALIZATION,
-                )
-                else "MEDIUM"
-            )
+            confidence = "HIGH" if self.state.band in (
+                IterationBand.LATE_REPAIR, IterationBand.FINALIZATION,
+            ) else "MEDIUM"
             decision = self._try_goku_emit(
-                "WEAK_VERIFICATION_AFTER_EDIT",
-                confidence,
+                "WEAK_VERIFICATION_AFTER_EDIT", confidence,
                 hooks.hook_weak_verification_after_edit(self.state),
                 trigger_reason="broad_pass_no_targeted",
             )
@@ -744,12 +671,10 @@ class L5Governor:
 
         # 5. No durable progress (late/final only)
         if not self.state.edited_source_files and self.state.band in (
-            IterationBand.LATE_REPAIR,
-            IterationBand.FINALIZATION,
+            IterationBand.LATE_REPAIR, IterationBand.FINALIZATION,
         ):
             decision = self._try_goku_emit(
-                "NO_DURABLE_PROGRESS",
-                "HIGH",
+                "NO_DURABLE_PROGRESS", "HIGH",
                 hooks.hook_no_durable_progress_goku(self.state),
                 trigger_reason="no_source_edit_late_band",
             )
@@ -785,30 +710,20 @@ class L5Governor:
 
         # Gate 1: confidence — only HIGH can ever inject
         if confidence_level != "HIGH":
-            self._log(
-                f"goku_{event_type}",
-                "",
-                suppressed=f"structured_only:confidence={confidence_level}",
-            )
+            self._log(f"goku_{event_type}", "", suppressed=f"structured_only:confidence={confidence_level}")
             self.state.record_l5_goku_emission(event_type)
             return L5Decision(
-                hook_name=f"goku_{event_type}",
-                fired=True,
-                suppressed=True,
+                hook_name=f"goku_{event_type}", fired=True, suppressed=True,
                 suppression_reason=f"structured_only:confidence={confidence_level}",
                 trigger_reason=trigger_reason,
             )
 
         # Gate 2: band — only LATE_REPAIR or FINALIZATION can inject
         if self.state.band not in (IterationBand.LATE_REPAIR, IterationBand.FINALIZATION):
-            self._log(
-                f"goku_{event_type}", "", suppressed=f"structured_only:band={self.state.band.value}"
-            )
+            self._log(f"goku_{event_type}", "", suppressed=f"structured_only:band={self.state.band.value}")
             self.state.record_l5_goku_emission(event_type)
             return L5Decision(
-                hook_name=f"goku_{event_type}",
-                fired=True,
-                suppressed=True,
+                hook_name=f"goku_{event_type}", fired=True, suppressed=True,
                 suppression_reason=f"structured_only:band={self.state.band.value}",
                 trigger_reason=trigger_reason,
             )
@@ -821,16 +736,10 @@ class L5Governor:
         # emissions counted toward the cap, making it fire too early.
         injection_count = self.state.l5_messages_emitted
         if injection_count >= L5_MAX_INJECTIONS_PER_TASK:
-            self._log(
-                f"goku_{event_type}",
-                "",
-                suppressed=f"max_injections:{injection_count}>={L5_MAX_INJECTIONS_PER_TASK}",
-            )
+            self._log(f"goku_{event_type}", "", suppressed=f"max_injections:{injection_count}>={L5_MAX_INJECTIONS_PER_TASK}")
             self.state.record_l5_goku_emission(event_type)
             return L5Decision(
-                hook_name=f"goku_{event_type}",
-                fired=True,
-                suppressed=True,
+                hook_name=f"goku_{event_type}", fired=True, suppressed=True,
                 suppression_reason=f"max_injections:{injection_count}>={L5_MAX_INJECTIONS_PER_TASK}",
                 trigger_reason=trigger_reason,
             )
@@ -841,16 +750,13 @@ class L5Governor:
             self._log(f"goku_{event_type}", "", suppressed=reason)
             self.state.record_l5_goku_emission(event_type)
             return L5Decision(
-                hook_name=f"goku_{event_type}",
-                fired=True,
-                suppressed=True,
+                hook_name=f"goku_{event_type}", fired=True, suppressed=True,
                 suppression_reason=reason,
                 trigger_reason=trigger_reason,
             )
 
         # Gate 5: safety checker
         from .hooks import L5bSafetyChecker
-
         ratio = self.state.current_iter / max(self.state.max_iter, 1)
         is_safe, safety_reason = L5bSafetyChecker.validate(message, ratio)
 
@@ -858,9 +764,7 @@ class L5Governor:
             self._log(f"goku_{event_type}", "", suppressed=f"l5b_safety:{safety_reason}")
             self.state.record_l5_goku_emission(event_type)
             return L5Decision(
-                hook_name=f"goku_{event_type}",
-                fired=True,
-                suppressed=True,
+                hook_name=f"goku_{event_type}", fired=True, suppressed=True,
                 suppression_reason=f"l5b_safety:{safety_reason}",
                 trigger_reason=trigger_reason,
             )
@@ -888,7 +792,7 @@ class L5Governor:
         for line in message.splitlines():
             stripped = line.strip()
             if stripped.startswith("Next action:"):
-                return stripped[len("Next action:") :].strip()
+                return stripped[len("Next action:"):].strip()
         return ""
 
     def _log(self, hook_name: str, message: str, suppressed: str = "") -> dict:
@@ -909,11 +813,7 @@ class L5Governor:
         }
         self._log_entries.append(entry)
         if message and not suppressed:
-            print(
-                f"[GT_META] L5 {hook_name} fired at iter {self.state.current_iter}/{self.state.max_iter} band={self.state.band.value}",
-                file=sys.stderr,
-                flush=True,
-            )
+            print(f"[GT_META] L5 {hook_name} fired at iter {self.state.current_iter}/{self.state.max_iter} band={self.state.band.value}", file=sys.stderr, flush=True)
         try:
             with open("/tmp/gt_l5_telemetry.jsonl", "a") as f:
                 f.write(json.dumps(entry) + "\n")

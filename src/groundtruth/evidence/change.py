@@ -235,53 +235,15 @@ def _regex_extract_mutations(func_body: str) -> list[tuple[str, str]]:
     mutations: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     # Common module names whose methods are not data mutations
-    _module_names = frozenset(
-        {
-            "os",
-            "sys",
-            "re",
-            "io",
-            "json",
-            "math",
-            "time",
-            "datetime",
-            "logging",
-            "shutil",
-            "subprocess",
-            "pathlib",
-            "collections",
-            "itertools",
-            "functools",
-            "typing",
-            "copy",
-            "hashlib",
-            "hmac",
-            "base64",
-            "urllib",
-            "http",
-            "socket",
-            "threading",
-            "asyncio",
-            "pytest",
-            "unittest",
-            "tempfile",
-            "glob",
-            "fnmatch",
-            "stat",
-            "signal",
-            "struct",
-            "csv",
-            "xml",
-            "html",
-            "email",
-            "string",
-            "pickle",
-            "sqlite3",
-            "importlib",
-            "inspect",
-            "textwrap",
-        }
-    )
+    _module_names = frozenset({
+        "os", "sys", "re", "io", "json", "math", "time", "datetime",
+        "logging", "shutil", "subprocess", "pathlib", "collections",
+        "itertools", "functools", "typing", "copy", "hashlib", "hmac",
+        "base64", "urllib", "http", "socket", "threading", "asyncio",
+        "pytest", "unittest", "tempfile", "glob", "fnmatch", "stat",
+        "signal", "struct", "csv", "xml", "html", "email", "string",
+        "pickle", "sqlite3", "importlib", "inspect", "textwrap",
+    })
 
     for line in func_body.splitlines():
         stripped = line.strip()
@@ -402,9 +364,7 @@ def _regex_extract_accumulations(func_body: str) -> list[tuple[str, str]]:
     return accums
 
 
-def _classify_return_statements(
-    func_body: str, func_start_line: int = 1
-) -> list[tuple[int, str, str]]:
+def _classify_return_statements(func_body: str, func_start_line: int = 1) -> list[tuple[int, str, str]]:
     """Classify return statements in a function body.
 
     Returns list of (line_number, return_type, text[:60]) where return_type is:
@@ -1019,9 +979,7 @@ class CoChangeCache:
     repeated git log parsing during a single agent session.
     """
 
-    def __init__(
-        self, repo_root: str, cache_path: str = "/tmp/gt_cochange.json", graph_db_path: str = ""
-    ):
+    def __init__(self, repo_root: str, cache_path: str = "/tmp/gt_cochange.json", graph_db_path: str = ""):
         self.repo_root = repo_root
         self.cache_path = cache_path
         self._graph_db_path = graph_db_path
@@ -1036,17 +994,16 @@ class CoChangeCache:
         filtered to peers with at least min_count co-occurrences.
         """
         # Try graph.db first (pre-computed at index time, works in containers)
-        if hasattr(self, "_graph_db_path") and self._graph_db_path:
+        if hasattr(self, '_graph_db_path') and self._graph_db_path:
             try:
                 import sqlite3
-
                 conn = sqlite3.connect(self._graph_db_path)
                 cursor = conn.execute(
                     "SELECT file_b, count FROM cochanges WHERE file_a = ? AND count >= ? "
                     "UNION "
                     "SELECT file_a, count FROM cochanges WHERE file_b = ? AND count >= ? "
                     "ORDER BY count DESC LIMIT 10",
-                    (file_path, min_count, file_path, min_count),
+                    (file_path, min_count, file_path, min_count)
                 )
                 results = [(row[0], row[1]) for row in cursor.fetchall()]
                 conn.close()
@@ -1073,7 +1030,10 @@ class CoChangeCache:
                     with open(self.cache_path, encoding="utf-8") as f:
                         raw = json.load(f)
                     # JSON deserializes lists of lists; convert back to list of tuples
-                    self._cache = {k: [(entry[0], entry[1]) for entry in v] for k, v in raw.items()}
+                    self._cache = {
+                        k: [(entry[0], entry[1]) for entry in v]
+                        for k, v in raw.items()
+                    }
                     self._cache_mtime = mtime
                     return
                 except (json.JSONDecodeError, OSError, KeyError, IndexError):
@@ -1111,7 +1071,8 @@ class CoChangeCache:
             return
 
         self._cache = {
-            f: sorted(peers.items(), key=lambda x: -x[1]) for f, peers in cooccurrence.items()
+            f: sorted(peers.items(), key=lambda x: -x[1])
+            for f, peers in cooccurrence.items()
         }
         self._cache_mtime = _time.time()
         try:

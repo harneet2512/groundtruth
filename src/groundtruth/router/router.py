@@ -66,7 +66,6 @@ class CollaborationRouter:
         delegate_evidence: bool = False,
     ) -> None:
         import os as _os
-
         self.state = state
         self.db_path = db_path
         self.repo_root = repo_root
@@ -134,27 +133,21 @@ class CollaborationRouter:
         callers = caller_provider(self.db_path, canon, limit=5)
         callees = callee_provider(self.db_path, canon, limit=5)
         importers = importer_provider(self.db_path, canon, limit=3)
-        self.provider_request_log.append(
-            {
-                "kind": "on_view",
-                "file": canon,
-                "callers": len(callers),
-                "callees": len(callees),
-                "importers": len(importers),
-            }
-        )
+        self.provider_request_log.append({
+            "kind": "on_view",
+            "file": canon,
+            "callers": len(callers),
+            "callees": len(callees),
+            "importers": len(importers),
+        })
         if not (callers or callees or importers):
             self.provider_empty_count += 1
             return self._suppress(em, SuppressionReason.NO_EVIDENCE, "graph_empty_for_file")
 
         # Drop edges that point at already-visited files (stale neighbors).
         visited = self.state.visited_files_set()
-        unseen_callers = [
-            c for c in callers if canonical_repo_path(c.file_path, self.repo_root) not in visited
-        ]
-        unseen_callees = [
-            c for c in callees if canonical_repo_path(c.file_path, self.repo_root) not in visited
-        ]
+        unseen_callers = [c for c in callers if canonical_repo_path(c.file_path, self.repo_root) not in visited]
+        unseen_callees = [c for c in callees if canonical_repo_path(c.file_path, self.repo_root) not in visited]
         unseen_importers = [
             i for i in importers if canonical_repo_path(i.file_path, self.repo_root) not in visited
         ]
@@ -194,20 +187,17 @@ class CollaborationRouter:
             return self._suppress(em, SuppressionReason.DUPLICATE, "same_view_and_primary")
 
         # Build a compact evidence string.
-        em.evidence_text = self._format_view_evidence(
-            canon, unseen_callers, unseen_callees, unseen_importers
-        )
-        em.evidence_items = (
-            [
-                {"kind": "caller_edge", "file_path": c.file_path, "count": c.count}
-                for c in unseen_callers[:3]
-            ]
-            + [
-                {"kind": "callee_edge", "file_path": c.file_path, "count": c.count}
-                for c in unseen_callees[:3]
-            ]
-            + [{"kind": "importer_edge", "file_path": i.file_path} for i in unseen_importers[:3]]
-        )
+        em.evidence_text = self._format_view_evidence(canon, unseen_callers, unseen_callees, unseen_importers)
+        em.evidence_items = [
+            {"kind": "caller_edge", "file_path": c.file_path, "count": c.count}
+            for c in unseen_callers[:3]
+        ] + [
+            {"kind": "callee_edge", "file_path": c.file_path, "count": c.count}
+            for c in unseen_callees[:3]
+        ] + [
+            {"kind": "importer_edge", "file_path": i.file_path}
+            for i in unseen_importers[:3]
+        ]
         em.confidence = 1.0 if unseen_callers or unseen_callees else 0.6
 
         return self._accept(em, dedup_key)
@@ -256,18 +246,12 @@ class CollaborationRouter:
         issue_terms = self.state.issue_terms
         for fn in function_names[:3]:
             callers = caller_code_provider(
-                self.db_path,
-                canon,
-                fn,
-                self.repo_root,
-                seen_files=seen_files,
-                limit=3,
+                self.db_path, canon, fn, self.repo_root,
+                seen_files=seen_files, limit=3,
             )
             if callers and issue_terms and len(callers) > 1:
                 callers.sort(
-                    key=lambda c: sum(
-                        1 for t in issue_terms if t in (c.file + " " + (c.code or "")).lower()
-                    ),
+                    key=lambda c: sum(1 for t in issue_terms if t in (c.file + " " + (c.code or "")).lower()),
                     reverse=True,
                 )
             if callers:
@@ -284,7 +268,8 @@ class CollaborationRouter:
                     for c in callers
                 )
                 ev_text_lines.append(
-                    f"CALLERS of {fn}: " + ", ".join(f"{c.file}:{c.line}" for c in callers[:3])
+                    f"CALLERS of {fn}: "
+                    + ", ".join(f"{c.file}:{c.line}" for c in callers[:3])
                 )
             contract = contract_provider(self.db_path, canon, fn)
             if contract:
@@ -328,26 +313,20 @@ class CollaborationRouter:
                 )
                 ev_text_lines.append(
                     f"TESTS for {fn}: "
-                    + ", ".join(
-                        f"{t.test_name} expects {(t.expected or '')[:30]}" for t in tests[:2]
-                    )
+                    + ", ".join(f"{t.test_name} expects {(t.expected or '')[:30]}" for t in tests[:2])
                 )
 
-        self.provider_request_log.append(
-            {
-                "kind": "on_edit",
-                "file": canon,
-                "functions": list(function_names[:3]),
-                "items": len(items),
-                "any_caller": any_caller,
-            }
-        )
+        self.provider_request_log.append({
+            "kind": "on_edit",
+            "file": canon,
+            "functions": list(function_names[:3]),
+            "items": len(items),
+            "any_caller": any_caller,
+        })
         if not items:
             self.provider_empty_count += 1
             return self._suppress(em, SuppressionReason.NO_EVIDENCE, "all_providers_empty")
-        if not any(
-            it["kind"] in ("caller_code", "contract", "sibling", "test_assertion") for it in items
-        ):
+        if not any(it["kind"] in ("caller_code", "contract", "sibling", "test_assertion") for it in items):
             return self._suppress(em, SuppressionReason.LOW_CONFIDENCE, "no_actionable_evidence")
 
         # Edit propagation hint (optional, low-noise).
@@ -355,12 +334,7 @@ class CollaborationRouter:
             propagation = edit_propagation_provider(self.db_path, canon, fn, limit=3)
             if propagation:
                 items.extend(
-                    {
-                        "kind": "propagation",
-                        "function": fn,
-                        "caller_file": p.caller_file,
-                        "line": p.line,
-                    }
+                    {"kind": "propagation", "function": fn, "caller_file": p.caller_file, "line": p.line}
                     for p in propagation
                 )
 
@@ -393,9 +367,7 @@ class CollaborationRouter:
             target_file=target_file,
             target_functions=list(target_functions or []),
             iteration=self.state.iteration,
-            band=self.state.band.value
-            if isinstance(self.state.band, IterationBand)
-            else str(self.state.band),
+            band=self.state.band.value if isinstance(self.state.band, IterationBand) else str(self.state.band),
         )
 
     def _suppress(
@@ -458,13 +430,9 @@ class CollaborationRouter:
     ) -> str:
         parts: list[str] = []
         if callers:
-            parts.append(
-                "Called by: " + ", ".join(f"{c.file_path} ({c.count}x)" for c in callers[:3])
-            )  # type: ignore[attr-defined]
+            parts.append("Called by: " + ", ".join(f"{c.file_path} ({c.count}x)" for c in callers[:3]))  # type: ignore[attr-defined]
         if callees:
-            parts.append(
-                "Calls into: " + ", ".join(f"{c.file_path} ({c.count}x)" for c in callees[:3])
-            )  # type: ignore[attr-defined]
+            parts.append("Calls into: " + ", ".join(f"{c.file_path} ({c.count}x)" for c in callees[:3]))  # type: ignore[attr-defined]
         if importers:
             parts.append("Imported by: " + ", ".join(i.file_path for i in importers[:3]))  # type: ignore[attr-defined]
         return "\n".join(parts)

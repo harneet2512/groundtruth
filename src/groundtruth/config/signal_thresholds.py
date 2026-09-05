@@ -6,7 +6,6 @@ the calling code logs which threshold was applied via _log_threshold_use().
 Justification source: 30-task edge confidence distribution across 13 repos
 (run 26082940766, 2026-05-19). p50=0.5, p75=0.7, p90=0.9.
 """
-
 from __future__ import annotations
 
 import sys
@@ -83,7 +82,9 @@ candidate pool's own confidence scores. This is a robust-statistics contract,
 not an absolute confidence cutoff; k=1.0 is the documented C1 floor."""
 
 
-def log_threshold_use(threshold_name: str, value: object, context: str = "") -> None:
+def log_threshold_use(
+    threshold_name: str, value: object, context: str = ""
+) -> None:
     """Log which threshold was applied. Goes to stderr (not agent-visible)."""
     msg = f"[GT_CONFIG] {threshold_name}={value}"
     if context:

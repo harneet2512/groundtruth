@@ -15,132 +15,50 @@ Research basis:
 
 Weights are explicit and traceable to research above.
 """
-
 from __future__ import annotations
 
 import math
 import re
+import statistics
 from typing import Iterable
 
 # Weights sum to 1.15 (5 signals, all additive). The "property" weight is
 # additive (not a separate bonus accumulator). A perfect-signal candidate
 # scores at most 1.15.
-_W_DIRECT_MATCH = 0.40  # LocAgent ACL 2025: direct name match dominates
-_W_PART_OVERLAP = 0.25  # SweRank ICLR 2025: subword overlap
-_W_PATH_OVERLAP = 0.15  # LocAgent: file path heuristic
-_W_INVERSE_HUB = 0.20  # CodePlan FSE 2024 / TF-IDF
-_W_PROP_MATCH = 0.15  # PyCG-style structural evidence
+_W_DIRECT_MATCH = 0.40   # LocAgent ACL 2025: direct name match dominates
+_W_PART_OVERLAP = 0.25   # SweRank ICLR 2025: subword overlap
+_W_PATH_OVERLAP = 0.15   # LocAgent: file path heuristic
+_W_INVERSE_HUB = 0.20    # CodePlan FSE 2024 / TF-IDF
+_W_PROP_MATCH = 0.15     # PyCG-style structural evidence
 
-_CLASS_CONTEXT_DEMOTE = 0.4  # Classes named in issue text usually context, not target
+_CLASS_CONTEXT_DEMOTE = 0.4   # Classes named in issue text usually context, not target
 
 _PART_SPLIT_RE = re.compile(r"[_]|(?<=[a-z])(?=[A-Z])")
 _PATH_SPLIT_RE = re.compile(r"[_/\.\-]")
 
-_COMMON_PARTS = frozenset(
-    {
-        "get",
-        "set",
-        "is",
-        "has",
-        "to",
-        "from",
-        "of",
-        "in",
-        "on",
-        "at",
-        "by",
-        "with",
-        "for",
-        "and",
-        "or",
-        "not",
-        "the",
-        "a",
-        "an",
-        "self",
-        "cls",
-        "obj",
-        "args",
-        "kwargs",
-        "data",
-        "value",
-        "item",
-    }
-)
+_COMMON_PARTS = frozenset({
+    "get", "set", "is", "has", "to", "from", "of", "in", "on", "at",
+    "by", "with", "for", "and", "or", "not", "the", "a", "an",
+    "self", "cls", "obj", "args", "kwargs", "data", "value", "item",
+})
 
-_COMMON_PATH = frozenset(
-    {
-        # extension-/scaffold-like tokens; generalized across languages
-        "src",
-        "lib",
-        "test",
-        "tests",
-        "spec",
-        "specs",
-        "py",
-        "js",
-        "ts",
-        "tsx",
-        "jsx",
-        "go",
-        "rs",
-        "rb",
-        "java",
-        "kt",
-        "c",
-        "h",
-        "cpp",
-        "hpp",
-        "cc",
-        "cxx",
-        "m",
-        "mm",
-        "php",
-        "swift",
-        "scala",
-        "clj",
-        "ex",
-        "exs",
-        "erl",
-        "core",
-        "utils",
-        "util",
-        "helpers",
-        "common",
-        "internal",
-        "pkg",
-        "main",
-        "app",
-        "config",
-        "include",
-        "vendor",
-        "public",
-        "private",
-        "module",
-        "modules",
-        "package",
-        "packages",
-        "components",
-        "",
-        "groundtruth",
-    }
-)
+_COMMON_PATH = frozenset({
+    # extension-/scaffold-like tokens; generalized across languages
+    "src", "lib", "test", "tests", "spec", "specs",
+    "py", "js", "ts", "tsx", "jsx", "go", "rs", "rb", "java", "kt",
+    "c", "h", "cpp", "hpp", "cc", "cxx", "m", "mm",
+    "php", "swift", "scala", "clj", "ex", "exs", "erl",
+    "core", "utils", "util", "helpers", "common", "internal", "pkg",
+    "main", "app", "config", "include", "vendor", "public", "private",
+    "module", "modules", "package", "packages", "components",
+    "", "groundtruth",
+})
 
 # Class-like declaration labels across languages emitted by gt-index.
-_CLASS_LABELS = frozenset(
-    {
-        "Class",
-        "Interface",
-        "Struct",
-        "Trait",
-        "Enum",
-        "Type",
-        "Module",
-        "Object",
-        "Protocol",
-        "Mixin",
-    }
-)
+_CLASS_LABELS = frozenset({
+    "Class", "Interface", "Struct",
+    "Trait", "Enum", "Type", "Module", "Object", "Protocol", "Mixin",
+})
 
 
 def _direct_name_match(name: str, issue_text: str) -> float:
@@ -265,11 +183,7 @@ def composite_score(
     if function_sloc >= 0 and function_fan_out >= 0:
         if function_sloc <= 4 and function_fan_out == 0:
             score *= 0.2
-        elif (
-            function_sloc <= 10
-            and caller_count > 0
-            and (caller_count / max(function_fan_out, 1)) > 3
-        ):
+        elif function_sloc <= 10 and caller_count > 0 and (caller_count / max(function_fan_out, 1)) > 3:
             score *= 0.5
 
     return score, {
@@ -416,7 +330,6 @@ def render_orientation(
 def _format_candidate_line(c: dict) -> str:
     """Format a single candidate line for orientation output."""
     import os
-
     name = c.get("func", "?")
     file_path = c.get("file", "")
     is_class = c.get("label") in _CLASS_LABELS or c.get("is_class")

@@ -31,7 +31,6 @@ Why this is honest, not lying:
   telemetry makes the staleness visible so a reviewer can spot when
   hook output reflects pre-edit state vs current state.
 """
-
 from __future__ import annotations
 
 import hashlib

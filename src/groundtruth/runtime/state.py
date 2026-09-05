@@ -2,7 +2,6 @@
 
 Pure observer. No agent-visible output. Feeds metrics to router decisions.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,7 +10,6 @@ from dataclasses import dataclass, field
 @dataclass
 class AgentTrajectoryState:
     """Tracks what the agent has done so far in this task."""
-
     action_count: int = 0
     max_iter: int = 100
 

@@ -128,6 +128,55 @@ def _compute_lsp_warm(server_launched: bool, warm_probe_ok: bool) -> bool:
     return bool(server_launched and warm_probe_ok)
 
 
+# ── SS-4 (2026-07-13) — HONEST js/ts secondary-leg classification (GT_SS_ELIGIBILITY) ──
+# MEASURED from run 29236533134 proof logs: python-babel__babel-1179's js leg fails
+# ``initialize`` with -32603 "Could not find a valid TypeScript installation …" because
+# a Python repo with 1 stray JS file has no workspace ``typescript`` dep. Today that
+# lands as a generic warm-probe failure. This classifier lets the resolve pass label the
+# ALREADY-OBSERVED failure honestly (an install/substrate gap, with a specific reason in
+# the cert) so a language-partial cert is EXPLICIT. It is SAFE — it only relabels a leg
+# that already failed to init; it NEVER pre-skips a leg a bundled TypeScript could serve.
+# The jupyter-ai "No Project" errors are a DIFFERENT signature (workspace/symbol on a
+# WORKING leg, LSP_ACTIVE_VALID) and are deliberately NOT matched here.
+_NO_TS_INSTALL_RE = re.compile(
+    r"(?:could not find a valid typescript|valid typescript installation|"
+    r"typescript.{0,40}dependency is installed in the workspace|tsserver\.path)",
+    re.IGNORECASE,
+)
+
+
+def _ss_eligibility_on_resolve() -> bool:
+    """SS-4 flag (GT_SS_ELIGIBILITY) as read by the resolve pass. Default-OFF
+    byte-identical: when off, an init failure keeps today's generic ``initialize:
+    <msg>`` failure_detail and no install_missing_reason is synthesized."""
+    return os.environ.get("GT_SS_ELIGIBILITY", "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _is_no_typescript_install_error(message: str) -> bool:
+    """True iff an LSP ``initialize`` error is the typescript-language-server
+    'no workspace TypeScript dependency' failure (-32603). The "No Project"
+    workspace/symbol error (a WORKING leg) is deliberately NOT matched."""
+    return bool(_NO_TS_INSTALL_RE.search(message or ""))
+
+
+def _classify_ts_install_failure(stats: dict, message: str, language: str) -> None:
+    """When GT_SS_ELIGIBILITY is on AND ``message`` is the no-workspace-TypeScript
+    ``initialize`` failure, relabel the js/ts leg HONESTLY as an install/substrate gap:
+    record a specific ``install_missing_reason`` and mark ``failure_detail`` as a skip.
+    Byte-identical no-op when the flag is off or the error is any other init failure
+    (the leg's resolution outcome is UNCHANGED — this only enriches the cert's WHY)."""
+    if not _ss_eligibility_on_resolve() or not _is_no_typescript_install_error(message):
+        return
+    reason = (
+        f"js/ts LSP leg for '{language}': no workspace TypeScript install "
+        "(node_modules/typescript) and no tsserver.path — the language server cannot "
+        "initialize; the canonical cert falls back to the dominant language"
+    )
+    stats["install_missing_reason"] = reason
+    stats["failure_detail"] = "skip: " + reason
+
+
 def _compute_degraded(lsp_warm: bool, residual: int, effective_work: int) -> bool:
     """A DEGRADED pass: a warm server left REAL residual work UNCONVERTED.
 
@@ -238,6 +287,62 @@ def _is_known_lsp_language(lang: str) -> bool:
     return (key in _LANG_TO_EXT) or (key.lstrip(".") in _LANG_TO_EXT) or (key in _KNOWN_SERVERS)
 
 
+def _strip_rel_prefix(p: str) -> str:
+    """C8 (Fable 2026-07-05): normalize a scope path by stripping the './' relative-marker
+    PREFIX only. `.lstrip("./")` stripped the char-SET {'.','/'} → `.github/x.js` became
+    `github/x.js` and never matched edges.source_file, silently dropping every
+    dot-directory file from scope + residual. Prefix-only strip preserves dot-dirs."""
+    p = p.replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
+def _effective_work(stats: dict) -> int:
+    """C1 (Fable 2026-07-05): the count of edges the LSP pass actually ADJUDICATED —
+    verified + corrected + deleted (window-miss tombstones) + skipped_external. An external
+    resolution is real work (the LSP PROVED a name_match internal edge false and removed it
+    from the residual); excluding it made an all-external warm pass read 0 → a false
+    `degraded` → exit 2 under GT_REQUIRE_LSP=1 (fail-closed for being correct)."""
+    return (
+        int(stats.get("verified", 0))
+        + int(stats.get("corrected", 0))
+        + int(stats.get("deleted", 0))
+        + int(stats.get("skipped_external", 0))
+    )
+
+
+def _canonical_db_language(conn: sqlite3.Connection, lang: str | None) -> str | None:
+    """C2 (Fable 2026-07-05): map a user --lang spelling ('py', 'python', 'js', ...) to the
+    value actually stored in ``nodes.language`` so the residual/scope/edge filters match.
+
+    The residual + ambiguous-edge queries filter ``src.language = ?`` and the edge list
+    filters ``e["language"] == lang``; both compare against the STORED language name
+    ('python', 'javascript', ...). A short alias ('py') matched ZERO rows → a false
+    ``LSP_NO_OP_VALID`` (residual read 0 on a graph full of unresolved python edges).
+    Resolve the alias to whatever the graph stores by ext-equivalence via ``_LANG_TO_EXT``
+    — no assumption about the canonical spelling. Returns the input unchanged when the
+    graph has no ext-equivalent language (correct-or-quiet: never invent a match). The
+    server-lookup path keeps the raw spelling (it already accepts aliases)."""
+    if not lang:
+        return lang
+    want_ext = _LANG_TO_EXT.get(lang) or _LANG_TO_EXT.get(lang.lstrip("."))
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT language FROM nodes WHERE language IS NOT NULL"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return lang
+    stored_names = [r[0] for r in rows if r and r[0]]
+    if lang in stored_names:  # already the stored spelling
+        return lang
+    if want_ext:
+        for name in stored_names:
+            if _LANG_TO_EXT.get(name) == want_ext:
+                return name
+    return lang
+
+
 def _count_residual_method_edges(
     conn: sqlite3.Connection,
     language: str | None = None,
@@ -288,7 +393,11 @@ def _count_residual_method_edges(
         "SELECT COUNT(*) FROM edges e "
         "JOIN nodes src ON e.source_id = src.id "
         "JOIN nodes tgt ON e.target_id = tgt.id "
-        "WHERE e.type = 'CALLS' AND e.resolution_method = 'name_match'"
+        # P3-11 fix (Fable 2026-07-02): count the whole name_match FAMILY, not just the exact
+        # literal — the P0 demote path stamps `name_match_qualified_unresolved` into
+        # resolution_method, so an exact match undercounts the residual and can declare a false
+        # no_op_valid ("LSP had nothing to do") on a graph that still has unresolved method edges.
+        "WHERE e.type = 'CALLS' AND e.resolution_method LIKE 'name_match%'"
     )
     params: list = []
     if language:
@@ -357,7 +466,11 @@ def _get_ambiguous_edges(
         query += f" AND e.source_file IN ({placeholders})"
         params.extend(source_files)
 
-    query += " ORDER BY e.confidence ASC LIMIT ?"
+    # DETERMINISM (Fable LSP7): a bare `confidence ASC` leaves the attempted subset under a
+    # binding cap following rowid order, which varies across parallel index builds — so two
+    # runs of the same substrate CERTIFY a different edge set. Stable, rebuild-invariant
+    # tiebreak on (source_file, source_line, id).
+    query += " ORDER BY e.confidence ASC, e.source_file, e.source_line, e.id LIMIT ?"
     params.append(int(limit))
 
     return [dict(row) for row in conn.execute(query, params).fetchall()]
@@ -499,8 +612,24 @@ def _apply_lsp_resolution(
         stats["corrected"] += 1
         return "corrected"
 
-    _is_external = not target_rel or target_rel.startswith("..") or os.path.isabs(target_rel)
+    _is_external = (
+        not target_rel
+        or target_rel.startswith("..")
+        or os.path.isabs(target_rel)
+    )
     if _is_external:
+        # LSP5 (Fable): the LSP resolved this call to an EXTERNAL/stdlib symbol OUTSIDE the repo
+        # (the common join/get/append/loads case). The pre-resolution name_match had wired it to
+        # an ARBITRARY internal same-named node — a PROVEN-FALSE internal edge. Stamp it
+        # `lsp_external` @ conf 0.0: KEPT for audit but below the 0.5 fact floor, so it is excluded
+        # from traversal AND from the name_match% residual (previously it stayed a 0.5-0.6
+        # name_match and inflated the residual → a false `degraded` verdict).
+        _ext_clause = ", trust_tier = 'SPECULATIVE'" if has_trust_tier else ""
+        conn.execute(
+            f"UPDATE edges SET confidence = 0.0, resolution_method = 'lsp_external'{_ext_clause} WHERE id = ?",
+            (edge["id"],),
+        )
+        stats["skipped_external"] = stats.get("skipped_external", 0) + 1
         stats["skipped"] += 1
         return "skipped"
 
@@ -509,13 +638,44 @@ def _apply_lsp_resolution(
         (target_rel,),
     ).fetchone()
     if _file_indexed:
-        # Indexed file, no node spans the call site → genuine FP.
-        conn.execute("DELETE FROM edges WHERE id = ?", (edge["id"],))
+        # LSP6 (Fable): the file HAS nodes but none spans the call site. This is NOT proof of a
+        # false positive — the indexer has PARTIAL node coverage (an arrow-const `const f = () =>`,
+        # a TS type alias, an interface member emits no spanning node), and tree-sitter↔LSP line
+        # drift on decorators/comments also misses the window. A hard DELETE here destroyed up to
+        # 62% of a real graph's edges. Demote to a conf-0.0 TOMBSTONE (`lsp_window_miss`): kept +
+        # auditable, excluded from traversal and the name_match% residual, but never destroyed —
+        # correct-or-quiet, because a window miss under partial coverage is not proof of an FP.
+        _miss_clause = ", trust_tier = 'SPECULATIVE'" if has_trust_tier else ""
+        conn.execute(
+            f"UPDATE edges SET confidence = 0.0, resolution_method = 'lsp_window_miss'{_miss_clause} WHERE id = ?",
+            (edge["id"],),
+        )
+        # C-Finding5 (Fable LIPI): a window-miss is a non-destructive TOMBSTONE (edge KEPT at
+        # conf=0.0), NOT a real deletion. `stats["deleted"]` continues to drive the liveness /
+        # effective_work / verdict_hint chain UNCHANGED (this tombstone IS work the LSP did), but we
+        # ALSO count it under the honestly-named `window_miss` so the cert can disclose that the
+        # "deleted_edges" are tombstones, not destroyed edges. Since a window-miss is the ONLY thing
+        # that reaches this branch, window_miss_edges == deleted_edges — which makes the tombstone
+        # nature self-evident to any reader, without redefining the liveness metric.
         stats["deleted"] += 1
+        stats["window_miss"] = stats.get("window_miss", 0) + 1
         return "deleted"
     # File not in the graph → no ground truth → never delete.
     stats["skipped"] += 1
     return "skipped"
+
+
+def _group_edges_by_callsite(edges: list[dict]) -> dict:
+    """LSP1 (demand-driven — Heintze & Tardieu, PLDI 2001): group ambiguous edges by their
+    CALL-SITE (source_file, source_line, target_name) — the demand unit for ONE LSP definition
+    query. name_match wires N same-named candidate edges for one call; this collapses them to one
+    query. Order-preserving (dict insertion order) so the pass stays deterministic; the FIRST edge
+    of each group is the representative whose LSP answer all siblings share."""
+    groups: dict[tuple, list[dict]] = {}
+    for e in edges:
+        key = (e.get("source_file", ""), e.get("source_line", 0) or 0, e.get("target_name", ""))
+        groups.setdefault(key, []).append(e)
+    return groups
 
 
 def _graph_edges_hash(db_path: str) -> str:
@@ -523,7 +683,6 @@ def _graph_edges_hash(db_path: str) -> str:
     content fingerprint proving the SAME graph flows build -> LSP -> gates -> hooks (Stage 1/2)."""
     import hashlib
     import sqlite3 as _sql
-
     h = hashlib.sha256()
     try:
         c = _sql.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -545,7 +704,6 @@ def _write_lsp_certificate(cert: dict) -> str:
     /tmp/gt/lsp_certificate.json). The foundational LSP gate reads this to classify the
     verdict; a residual==0 pass is INVALID without lsp_warm=true here."""
     import json as _json
-
     path = os.environ.get("GT_LSP_CERT", "/tmp/gt/lsp_certificate.json")
     try:
         _d = os.path.dirname(path)
@@ -656,8 +814,7 @@ async def _await_project_ready(
         else:
             # per-server default (rust-analyzer gets a longer indexing budget); else 20s.
             budget_s = _READY_BUDGET_S_BY_SERVER.get(
-                os.path.basename(server_cmd or ""), _READY_BUDGET_S_DEFAULT
-            )
+                os.path.basename(server_cmd or ""), _READY_BUDGET_S_DEFAULT)
     t0 = time.time()
     deadline = t0 + max(0.0, float(budget_s))
 
@@ -691,13 +848,68 @@ async def _await_project_ready(
         backoff = min(backoff * 2.0, 4.0)
 
 
+def _write_pyright_shim_config(abs_root: str, config):
+    """LSP8 (Fable): write a minimal pyrightconfig.json ONLY when the server is pyright and the
+    repo has none, so pyright evaluates modern `str | None` union syntax for go-to-definition.
+
+    Returns a CLEANUP CALLABLE that removes exactly the file GT created; the caller registers it
+    (atexit) so the shim NEVER persists in the agent's working repo. Returns None when nothing was
+    written (not pyright / a config already exists / [tool.pyright] in pyproject / write failed) —
+    in which case there is nothing to clean up. Correct-or-quiet: never raises.
+    """
+    if not (config and "pyright" in (getattr(config, "command", [""])[0] or "").lower()):
+        return None
+    pyright_cfg = os.path.join(abs_root, "pyrightconfig.json")
+    if os.path.exists(pyright_cfg):
+        return None  # the repo owns its config — never touch it
+    pyproject_toml = os.path.join(abs_root, "pyproject.toml")
+    try:
+        if os.path.exists(pyproject_toml):
+            with open(pyproject_toml, encoding="utf-8", errors="replace") as _pf:
+                if "[tool.pyright]" in _pf.read():
+                    return None  # config lives in pyproject — don't shadow it
+    except Exception:
+        pass
+    try:
+        import json as _json
+        with open(pyright_cfg, "w", encoding="utf-8") as _wf:
+            _wf.write(_json.dumps({
+                "pythonVersion": "3.11",
+                "typeCheckingMode": "off",
+                "reportMissingImports": "none",
+            }))
+    except Exception as _e:
+        print(f"  pyrightconfig.json write failed: {_e}", file=sys.stderr)
+        return None
+
+    def _cleanup(_p: str = pyright_cfg) -> None:
+        try:
+            if os.path.exists(_p):
+                os.remove(_p)
+        except OSError:
+            pass
+
+    return _cleanup
+
+
 async def _resolve_edges(
     db_path: str,
     root: str,
     edges: list[dict],
     language: str,
+    source_files: list[str] | None = None,
 ) -> dict:
     """Resolve ambiguous edges using LSP textDocument/definition.
+
+    ``source_files`` is the demand-driven issue scope (the same set passed to
+    ``_get_ambiguous_edges``). When present it bounds the type-ENRICHMENT phase to
+    the issue subgraph + its 1-hop callers/callees — the ONLY functions whose
+    contracts the brief can deliver — instead of hovering every function in the
+    repo (the whole-workspace ``didOpen`` that loaded the entire monorepo into the
+    LSP server's RSS and OOM-killed large-repo proofs). Correct-or-quiet: every
+    delivered callee/caller contract is in the 1-hop subgraph, so nothing the brief
+    renders loses its enrichment; only never-delivered repo-wide functions are
+    skipped. Absent/empty scope ⇒ whole-repo enrichment (legacy behavior preserved).
 
     For each ambiguous edge:
     1. Open the source file in the LSP server
@@ -718,50 +930,38 @@ async def _resolve_edges(
         )
         return {"error": 1}
 
-    stats: dict = {
-        "verified": 0,
-        "corrected": 0,
-        "deleted": 0,
-        "failed": 0,
-        "skipped": 0,
-        "server_launched": False,
-        "warm_probe_ok": False,
-        "probe_method": "workspace/symbol",
-        "probe_latency_ms": 0.0,
-        # How many real LSP requests the warm probe issued (client request-id
-        # delta). >0 is the fake-fallback guard for lsp_warm: a no-op that never
-        # queried the server cannot certify as warm, regardless of wall-clock.
-        "probe_requests_issued": 0,
-        # Readiness: a NON-error answer to the warm probe arrived (vs an
-        # lsp_error, which is transport-liveness only — alive but not ready).
-        "probe_answered_ok": False,
-        # WHY the launch/handshake/probe failed (server exit code + first
-        # stderr lines from the client) — lands in the LSP certificate so
-        # an LSP_FAIL_NO_WARM verdict is never blind again.
-        "failure_detail": "",
-        # Project-readiness barrier (run once, on the FIRST definition):
-        # None == never exercised (zero in-scope edges). Lands in the cert
-        # as project_ready / project_ready_wait_ms / project_ready_attempts.
-        "project_ready": None,
-        "project_ready_wait_ms": 0.0,
-        "project_ready_attempts": 0,
-        # Definition-stage failure classification (subset of "failed"):
-        # lsp_error = the server ANSWERED with an error (the gopls offline
-        # `no package metadata` class, the tsserver lazy-load fast-fail);
-        # empty = answered with no location; exception = client-side raise.
-        "failed_lsp_error": 0,
-        "failed_empty": 0,
-        "failed_exception": 0,
-        # Distinct visibility buckets (NOT silent col-0 / silent drops):
-        #   failed_didopen     = textDocument/didOpen returned Err -> the
-        #     document never loaded, so a later "resolved nothing" is a
-        #     load failure, not the LSP failing to find a definition.
-        #   skipped_no_call_site = the target_name has no call-shaped
-        #     (\bname\s*\() occurrence on the source line, so querying any
-        #     column would aim at an unrelated token. Skipped, not col-0.
-        "failed_didopen": 0,
-        "skipped_no_call_site": 0,
-    }
+    stats: dict = {"verified": 0, "corrected": 0, "deleted": 0, "window_miss": 0, "failed": 0, "skipped": 0,
+                   "server_launched": False, "warm_probe_ok": False,
+                   "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
+                   # How many real LSP requests the warm probe issued (client request-id
+                   # delta). >0 is the fake-fallback guard for lsp_warm: a no-op that never
+                   # queried the server cannot certify as warm, regardless of wall-clock.
+                   "probe_requests_issued": 0,
+                   # Readiness: a NON-error answer to the warm probe arrived (vs an
+                   # lsp_error, which is transport-liveness only — alive but not ready).
+                   "probe_answered_ok": False,
+                   # WHY the launch/handshake/probe failed (server exit code + first
+                   # stderr lines from the client) — lands in the LSP certificate so
+                   # an LSP_FAIL_NO_WARM verdict is never blind again.
+                   "failure_detail": "",
+                   # Project-readiness barrier (run once, on the FIRST definition):
+                   # None == never exercised (zero in-scope edges). Lands in the cert
+                   # as project_ready / project_ready_wait_ms / project_ready_attempts.
+                   "project_ready": None, "project_ready_wait_ms": 0.0,
+                   "project_ready_attempts": 0,
+                   # Definition-stage failure classification (subset of "failed"):
+                   # lsp_error = the server ANSWERED with an error (the gopls offline
+                   # `no package metadata` class, the tsserver lazy-load fast-fail);
+                   # empty = answered with no location; exception = client-side raise.
+                   "failed_lsp_error": 0, "failed_empty": 0, "failed_exception": 0,
+                   # Distinct visibility buckets (NOT silent col-0 / silent drops):
+                   #   failed_didopen     = textDocument/didOpen returned Err -> the
+                   #     document never loaded, so a later "resolved nothing" is a
+                   #     load failure, not the LSP failing to find a definition.
+                   #   skipped_no_call_site = the target_name has no call-shaped
+                   #     (\bname\s*\() occurrence on the source line, so querying any
+                   #     column would aim at an unrelated token. Skipped, not col-0.
+                   "failed_didopen": 0, "skipped_no_call_site": 0}
 
     # Map the language NAME to its real file extension (LSP_SERVERS is keyed by
     # extension, e.g. ".py", not ".python"). This is the fix for the universal LSP
@@ -780,37 +980,17 @@ async def _resolve_edges(
     abs_root = os.path.abspath(root)
     root_uri = _path_to_uri(abs_root)
 
-    # δ: when the server is pyright and the project has no pyrightconfig,
-    # drop a minimal one so pyright doesn't assume python<3.10 and refuse
-    # to evaluate `str | None` union annotations. typeCheckingMode=off
-    # because textDocument/definition doesn't need full type checking.
-    if language == "python" and "pyright" in (config.command[0] or "").lower():
-        _pyright_cfg = os.path.join(abs_root, "pyrightconfig.json")
-        _pyproject_toml = os.path.join(abs_root, "pyproject.toml")
-        if not os.path.exists(_pyright_cfg):
-            _has_pyright_in_pyproject = False
-            try:
-                if os.path.exists(_pyproject_toml):
-                    with open(_pyproject_toml, encoding="utf-8", errors="replace") as _pf:
-                        _has_pyright_in_pyproject = "[tool.pyright]" in _pf.read()
-            except Exception:
-                pass
-            if not _has_pyright_in_pyproject:
-                try:
-                    import json as _json
-
-                    with open(_pyright_cfg, "w", encoding="utf-8") as _wf:
-                        _wf.write(
-                            _json.dumps(
-                                {
-                                    "pythonVersion": "3.11",
-                                    "typeCheckingMode": "off",
-                                    "reportMissingImports": "none",
-                                }
-                            )
-                        )
-                except Exception as _e:
-                    print(f"  pyrightconfig.json write failed: {_e}", file=sys.stderr)
+    # δ: when the server is pyright and the project has no pyrightconfig, drop a minimal one so
+    # pyright doesn't assume python<3.10 and refuse to evaluate `str | None` union annotations.
+    # LSP8 (Fable): this shim is GT's, NOT part of the task — register its removal at process exit
+    # so it never persists in the agent's working repo (was: written and never cleaned →
+    # agent-visible + could leak into a `git add -A` patch). resolve.py is a short-lived CLI, so
+    # atexit fires after the whole LSP pass completes, before the agent touches the repo.
+    if language == "python":
+        _pyright_cleanup = _write_pyright_shim_config(abs_root, config)
+        if _pyright_cleanup is not None:
+            import atexit
+            atexit.register(_pyright_cleanup)
 
     print(f"  Starting {config.command[0]} for {language}...")
     client = LSPClient(config.command, root_uri)
@@ -866,6 +1046,10 @@ async def _resolve_edges(
             # (LSPClient._collect_failure_detail) — e.g. gopls's own die-reason.
             print(f"  LSP initialize failed: {init_result.error.message}", file=sys.stderr)
             stats["failure_detail"] = f"initialize: {init_result.error.message}"
+            # SS-4 (GT_SS_ELIGIBILITY): if this is the js/ts 'no workspace TypeScript'
+            # init failure (babel-1179 class), relabel it HONESTLY as an install gap so
+            # the cert says WHY. Byte-identical no-op when off / any other init error.
+            _classify_ts_install_failure(stats, init_result.error.message, language)
             stats["failed"] = len(edges)
             try:
                 await client.shutdown()
@@ -905,10 +1089,8 @@ async def _resolve_edges(
                 "warm_probe: server initialized but never answered workspace/symbol"
                 + (f"; server stderr: {_stderr}" if _stderr else "")
             )
-        print(
-            f"  LSP initialized (warm_probe_ok={_warm_ok}, "
-            f"{stats['probe_latency_ms']:.1f}ms), resolving {len(edges)} edges..."
-        )
+        print(f"  LSP initialized (warm_probe_ok={_warm_ok}, "
+              f"{stats['probe_latency_ms']:.1f}ms), resolving {len(edges)} edges...")
     except Exception as e:
         print(f"  LSP initialize failed: {e}", file=sys.stderr)
         stats["failure_detail"] = f"initialize: {e}"
@@ -947,10 +1129,18 @@ async def _resolve_edges(
     # first didOpen — the moment a lazily-loading server starts its project load).
     _barrier_pending = True
 
-    for i, edge in enumerate(edges):
-        source_file = edge.get("source_file", "")
-        source_line = edge.get("source_line", 0) or 0
-        target_name = edge.get("target_name", "")
+    # LSP1 (demand-driven — Heintze & Tardieu, PLDI 2001: "just enough computation per query").
+    # The DEMAND UNIT is the CALL-SITE (source_file, source_line, target_name), NOT the edge.
+    # name_match wires N same-named candidate edges for ONE call; the pre-fix loop queried the LSP
+    # once PER EDGE (77-82% redundant round-trips on real repos) and then CORRECTED all N to the
+    # same definition → up to ~20 IDENTICAL certified edges per line (inflating corrected /
+    # det-dominance). Resolve ONCE per call-site, apply to the representative, and DELETE the N-1
+    # redundant siblings. Deterministic: dict preserves edge insertion order (edges are pre-sorted).
+    _callsite_groups = _group_edges_by_callsite(edges)
+
+    for i, (_cs_key, _group_edges) in enumerate(_callsite_groups.items()):
+        edge = _group_edges[0]  # representative — all siblings share this call-site's LSP answer
+        source_file, source_line, target_name = _cs_key
 
         if not source_file or not target_name:
             stats["skipped"] += 1
@@ -997,6 +1187,15 @@ async def _resolve_edges(
                 continue
             line_text = lines[source_line - 1]  # 1-indexed
             col, _found_call = _find_call_column(line_text, target_name)
+            # C-Finding2 (Fable LIPI): count the call-shaped occurrences of target_name on this
+            # line. The call-site group key is (source_file, source_line, target_name) — but an edge
+            # carries NO column, so when a single line has TWO distinct same-named calls with
+            # different receivers (`a.foo() or b.foo()`), name_match wires candidates for BOTH into
+            # the SAME group. The LSP resolves only the FIRST occurrence (col); if we then delete all
+            # siblings we destroy the second call's true edge too. So the sibling-collapse below is
+            # gated on _n_callsites == 1 (unambiguous single call). ≥2 → resolve the representative
+            # but keep siblings (correct-or-quiet: we did not prove the other call's candidates false).
+            _n_callsites = len(re.findall(r"\b" + re.escape(target_name) + r"\s*\(", line_text))
             if not _found_call:
                 stats["skipped"] += 1
                 stats["skipped_no_call_site"] += 1
@@ -1013,13 +1212,8 @@ async def _resolve_edges(
                 # reused as THIS edge's answer (no double query).
                 _barrier_pending = False
                 def_result, _ready_ms, _ready_ok, _ready_attempts = await _await_project_ready(
-                    client,
-                    uri,
-                    source_line - 1,
-                    col,
-                    server_cmd=(
-                        config.command[0] if config and getattr(config, "command", None) else ""
-                    ),
+                    client, uri, source_line - 1, col,
+                    server_cmd=(config.command[0] if config and getattr(config, "command", None) else ""),
                 )
                 stats["project_ready"] = bool(_ready_ok)
                 stats["project_ready_wait_ms"] = float(_ready_ms)
@@ -1039,7 +1233,8 @@ async def _resolve_edges(
                 # undiagnosable — likely a gopls workspace-load failure, but
                 # the artifact carried no proof).
                 try:
-                    _note_failure_detail(stats, f"definition: {def_result.error.message}")
+                    _note_failure_detail(
+                        stats, f"definition: {def_result.error.message}")
                 except Exception:  # noqa: BLE001
                     pass
                 continue
@@ -1066,7 +1261,7 @@ async def _resolve_edges(
             # The match + destructive-delete guard live in _apply_lsp_resolution so
             # the production path and the unit test exercise the SAME logic (items
             # #28 destructive-delete guard, #29 location-primary match).
-            _apply_lsp_resolution(
+            _outcome = _apply_lsp_resolution(
                 conn,
                 edge=edge,
                 target_rel=target_rel,
@@ -1075,15 +1270,40 @@ async def _resolve_edges(
                 stats=stats,
                 has_trust_tier=_has_trust_tier,
             )
+            # LSP1 sibling collapse: when the call-site resolved to a KNOWN true target
+            # (verify/correct), the OTHER name_match candidates for the SAME call are false
+            # duplicates → DELETE them so the call-site keeps ONE authoritative edge (kills the
+            # ~20-identical-certified-edges-per-line inflation). Only on a positive resolution —
+            # external / window-miss / failed leave siblings intact (correct-or-quiet: we did not
+            # prove those candidates false). C-Finding2: also require _n_callsites == 1 — with ≥2
+            # same-named calls on the line the group conflates distinct receivers, so a delete would
+            # nuke the other call's true edge (the LSP only resolved this occurrence's column).
+            if _outcome in ("verified", "corrected") and len(_group_edges) > 1:
+                # C9 (Fable 2026-07-05): collapse siblings only when the resolution is
+                # UNAMBIGUOUS — a single call-site (_n_callsites==1) AND a single definition
+                # location. When the LSP returns MULTIPLE locations (TS declaration-merging,
+                # @overload, TYPE_CHECKING guards, Rust #[cfg] twins) a sibling may legitimately
+                # point to one of the OTHER locations, so a blanket delete of _group_edges[1:]
+                # would destroy a true edge. Keep siblings; record the skip (correct-or-quiet).
+                if _n_callsites == 1 and len(locations) == 1:
+                    for _sib in _group_edges[1:]:
+                        conn.execute("DELETE FROM edges WHERE id = ?", (_sib["id"],))
+                        stats["deduped_siblings"] = stats.get("deduped_siblings", 0) + 1
+                else:
+                    # Ambiguous (multi-call line OR multi-definition symbol) — keep siblings,
+                    # record the skip for visibility.
+                    stats["sibling_delete_skipped_multicall"] = (
+                        stats.get("sibling_delete_skipped_multicall", 0) + len(_group_edges) - 1
+                    )
 
         except Exception:
             stats["failed"] += 1
             stats["failed_exception"] += 1
             continue
 
-        # Progress every 100 edges
+        # Progress every 100 call-sites (LSP1: the loop now iterates call-sites, not edges)
         if (i + 1) % 100 == 0:
-            print(f"  ... {i + 1}/{len(edges)} edges processed", file=sys.stderr)
+            print(f"  ... {i + 1}/{len(_callsite_groups)} call-sites processed", file=sys.stderr)
 
     conn.commit()
 
@@ -1091,19 +1311,17 @@ async def _resolve_edges(
     # readiness barrier is the rust-analyzer-still-indexing shape (rust cert:
     # project_ready=false after 20s, 6620/6620 definition queries empty, 0
     # edges changed). Stamp WHY into the cert so the artifact is diagnosable.
-    if (
-        stats.get("project_ready") is False
-        and stats.get("failed_empty", 0) > 0
-        and (stats.get("verified", 0) + stats.get("corrected", 0) + stats.get("deleted", 0)) == 0
-    ):
+    if (stats.get("project_ready") is False
+            and stats.get("failed_empty", 0) > 0
+            and (stats.get("verified", 0) + stats.get("corrected", 0)
+                 + stats.get("deleted", 0)) == 0):
         _note_failure_detail(
             stats,
             f"project_ready=false after "
             f"{float(stats.get('project_ready_wait_ms', 0.0)):.0f}ms; "
             f"{int(stats.get('failed_empty', 0))} definition queries returned "
             "empty — server likely still indexing the workspace "
-            "(readiness budget too short for this project size)",
-        )
+            "(readiness budget too short for this project size)")
 
     # ---- LSP TYPE ENRICHMENT (same session, server already warm) ----
     # Query textDocument/hover on the top-N most-referenced nodes to extract
@@ -1135,8 +1353,30 @@ async def _resolve_edges(
         _enrich_conn.row_factory = sqlite3.Row
         _enrich_conn.execute("PRAGMA journal_mode=WAL")
         _enrich_conn.execute("PRAGMA busy_timeout=5000")
-        _top_nodes = _enrich_conn.execute(
-            f"""
+        # Demand-scope the enrichment to the issue subgraph + 1-hop callers/callees.
+        # Whole-repo hover (no scope) didOpen'd every file into the LSP server -> the
+        # entire monorepo loaded into the (uncapped) server RSS -> OOM on large repos.
+        # The brief only delivers contracts for the issue files + their direct
+        # callers/callees, so this subgraph is the exact set that can be rendered;
+        # nodes with no call relationship to the issue are never delivered (correct-or-
+        # quiet preserved). Empty scope -> whole-repo (legacy behavior unchanged).
+        _scope_clause = ""
+        _scope_params: list = [language]
+        if source_files:
+            _ph = ",".join("?" for _ in source_files)
+            _scope_clause = (
+                f"\n              AND (\n"
+                f"                n.file_path IN ({_ph})\n"
+                f"                OR n.id IN (SELECT e2.target_id FROM edges e2 "
+                f"JOIN nodes ns ON e2.source_id = ns.id WHERE ns.file_path IN ({_ph}))\n"
+                f"                OR n.id IN (SELECT e2.source_id FROM edges e2 "
+                f"JOIN nodes nt ON e2.target_id = nt.id WHERE nt.file_path IN ({_ph}))\n"
+                f"              )"
+            )
+            _scope_params.extend(source_files)  # n.file_path IN (issue files)
+            _scope_params.extend(source_files)  # callees of issue files (1-hop out)
+            _scope_params.extend(source_files)  # callers of issue files (1-hop in)
+        _top_nodes = _enrich_conn.execute(f"""
             SELECT n.id, n.name, n.file_path, n.start_line, n.signature, n.return_type,
                    COUNT(e.id) as ref_count
             FROM nodes n
@@ -1144,7 +1384,7 @@ async def _resolve_edges(
             WHERE n.is_test = 0
               AND n.label IN ('Function', 'Method', 'Class')
               AND n.start_line IS NOT NULL
-              AND n.language = ?
+              AND n.language = ?{_scope_clause}
               -- only hover the RESIDUAL the parser couldn't statically fill: a node that
               -- already has a return_type (go/rust declare ~72% in-source) does NOT need an
               -- LSP round-trip. This shrinks the hover set to the inference funcs, so typed
@@ -1153,9 +1393,7 @@ async def _resolve_edges(
             GROUP BY n.id
             ORDER BY ref_count DESC
             LIMIT {_enrich_limit}
-        """,
-            (language,),
-        ).fetchall()
+        """, tuple(_scope_params)).fetchall()
 
         _enriched = 0
         for node in _top_nodes:
@@ -1248,7 +1486,7 @@ async def _resolve_edges(
                     continue
 
                 # Extract hover text
-                if hasattr(hover.contents, "value"):
+                if hasattr(hover.contents, 'value'):
                     hover_text = hover.contents.value
                 elif isinstance(hover.contents, str):
                     hover_text = hover.contents
@@ -1260,7 +1498,6 @@ async def _resolve_edges(
                 # Parse return type from hover text (language-agnostic patterns)
                 _ret_type = ""
                 import re as _re_hover
-
                 # Strip markdown fences if present (gopls wraps in ```go ... ```)
                 _hover_clean = hover_text
                 if "```" in _hover_clean:
@@ -1284,7 +1521,7 @@ async def _resolve_edges(
                             if _paren_depth == 0:
                                 _param_end = _ci  # keep updating — last one wins
                     if _param_end > 0 and _param_end < len(_hover_clean) - 1:
-                        _after = _hover_clean[_param_end + 1 :].strip()
+                        _after = _hover_clean[_param_end + 1:].strip()
                         if _after and not _after.startswith("{"):
                             _ret_type = _after.split("\n")[0].strip()
                 # TypeScript/JS: "function name(...): ReturnType"
@@ -1304,14 +1541,11 @@ async def _resolve_edges(
                     # ```code``` block (the signature; Pyright keeps the docstring OUTSIDE
                     # it), drop the leading (method)/(function) hover-kind marker, and
                     # collapse the multi-line signature to one line. Language-agnostic.
-                    _m = _re_hover.search(
-                        r"```[a-zA-Z]*\s*\n?(.*?)```", hover_text, _re_hover.DOTALL
-                    )
+                    _m = _re_hover.search(r"```[a-zA-Z]*\s*\n?(.*?)```", hover_text, _re_hover.DOTALL)
                     _sig_clean = (_m.group(1) if _m else _hover_clean).strip()
                     _sig_clean = _re_hover.sub(
                         r"^\((?:method|function|property|variable|class|parameter|field|constant|module|overload)\)\s*",
-                        "",
-                        _sig_clean,
+                        "", _sig_clean,
                     ).strip()
                     _sig_clean = " ".join(_sig_clean.split())
                     if _sig_clean:
@@ -1357,8 +1591,12 @@ async def _resolve_edges(
     return stats
 
 
-def _rebuild_closure(db_path: str) -> None:
+def _rebuild_closure(db_path: str) -> bool:
     """Recompute the transitive-closure sidecar after the LSP pass mutated edges.
+
+    Returns True iff the closure was ACTUALLY rebuilt (binary present, rc==0) — so the
+    caller stamps ``closure_rebuilt_after_lsp`` honestly (C3, Fable 2026-07-05) instead
+    of unconditionally True on a warn-and-continue no-op.
 
     gt-index owns closure writes (the Go builder applies the RF-4 verified-only
     rules), so we invoke its authoritative ``-rebuild-closure`` mode rather than
@@ -1377,13 +1615,10 @@ def _rebuild_closure(db_path: str) -> None:
         # PROOF MODE (Stage 2): a stale closure is a partial-operation signal — the
         # closure must rebuild over the LSP-corrected edges or the run fails closed.
         # Outside proof mode: warn + continue (no regression vs prior behaviour).
-        _proof.require(
-            False,
-            "closure_binary_present",
-            "gt-index binary not found (set GT_INDEX_BIN) — closure NOT rebuilt; "
-            "it remains pre-LSP stale",
-        )
-        return
+        _proof.require(False, "closure_binary_present",
+                       "gt-index binary not found (set GT_INDEX_BIN) — closure NOT rebuilt; "
+                       "it remains pre-LSP stale")
+        return False
     try:
         r = subprocess.run(
             [bin_path, "-rebuild-closure", "-output", db_path],
@@ -1403,12 +1638,32 @@ def _rebuild_closure(db_path: str) -> None:
             # proof (impact/trace), NOT a brief ranking signal (BRIEFING §4).
             _proof.stamp_closure(db_path)
             print(f"[closure] {line.strip() or 'rebuilt over LSP-corrected edges'}")
-        else:
-            _proof.require(
-                False, "closure_rebuild_ok", f"rc={r.returncode}: {(r.stderr or '')[:200]}"
-            )
+            return True
+        _proof.require(False, "closure_rebuild_ok",
+                       f"rc={r.returncode}: {(r.stderr or '')[:200]}")
+        return False
     except Exception as exc:  # non-fatal outside proof; fail-closed inside
         _proof.require(False, "closure_rebuild_ok", f"{type(exc).__name__}: {exc}")
+        return False
+
+
+def _closure_action(defer: bool, changed: int) -> str:
+    """Decide what a single LSP pass does with the transitive-closure sidecar (pure + testable).
+
+    Returns one of:
+      - ``"defer"``   — the multi-language orchestrator owns ONE post-loop rebuild over the FINAL
+                        edge set (this pass skips its rebuild). Set via ``GT_DEFER_CLOSURE_REBUILD``.
+                        The closure sidecar is a whole-graph property; rebuilding it once per language
+                        is wasted work (only the last survives) and it is NOT part of the edges hash.
+      - ``"rebuild"`` — this pass mutated edges (``changed > 0``) → recompute the closure over them.
+      - ``"stamp"``   — no edges changed → the closure already reflects the edges; just refresh the
+                        freshness timestamp so ``assert_closure_after_lsp`` (clo_ts >= lsp_ts) holds.
+
+    ``defer=False`` reproduces the historical per-pass behaviour EXACTLY (rebuild iff changed, else
+    stamp) — so every single-language / standalone caller is byte-identical."""
+    if defer:
+        return "defer"
+    return "rebuild" if changed > 0 else "stamp"
 
 
 def resolve_main() -> None:
@@ -1431,11 +1686,18 @@ def resolve_main() -> None:
         action="store_true",
         help="Actually resolve edges via LSP (not just diagnose)",
     )
+    # Honor the same GT_LSP_MAX_EDGES operator override the runtime residual pass uses
+    # (gt_run_proof.compute_lsp_max_edges): a positive int wins, else the historical 500
+    # floor. (The full dynamic gap-based budget lives in the baked runtime helper — lifting
+    # it into a shared importable module changes a baked file, so it is deferred to Phase B;
+    # this only keeps the diagnostic CLI from silently capping below an explicit budget.)
+    _override = str(os.environ.get("GT_LSP_MAX_EDGES", "")).strip()
+    _default_max_edges = int(_override) if _override.isdigit() and int(_override) > 0 else 500
     parser.add_argument(
         "--max-edges",
         type=int,
-        default=500,
-        help="Maximum edges to resolve (default: 500)",
+        default=_default_max_edges,
+        help="Maximum edges to resolve (default: 500, or a positive GT_LSP_MAX_EDGES)",
     )
     # Demand-driven scoping (Heintze & Tardieu, "Demand-Driven Pointer Analysis,"
     # PLDI 2001): resolve only the issue-relevant subgraph, not the whole repo.
@@ -1450,7 +1712,7 @@ def resolve_main() -> None:
     )
     # Support both `groundtruth resolve --db ...` and `python -m groundtruth.resolve --db ...`
     if "resolve" in sys.argv:
-        _args_list = sys.argv[sys.argv.index("resolve") + 1 :]
+        _args_list = sys.argv[sys.argv.index("resolve") + 1:]
     else:
         _args_list = sys.argv[1:]
     args = parser.parse_args(_args_list)
@@ -1491,16 +1753,21 @@ def resolve_main() -> None:
                         p = os.path.relpath(p, _root)
                     except ValueError:
                         pass
-                return p.replace("\\", "/").lstrip("./")
+                return _strip_rel_prefix(p)  # C8: prefix-only strip, preserves dot-dirs
 
             source_files = [_rel_to_root(p) for p in source_files]
 
     conn = sqlite3.connect(args.db)
+    # C2 (Fable 2026-07-05): resolve the --lang alias ('py') to the stored nodes.language
+    # ('python') so the language-filtered queries below don't match ZERO rows and stamp a
+    # false LSP_NO_OP_VALID. Used only for the STORED-name comparisons; args.lang keeps the
+    # raw spelling for the server lookup + stamps.
+    _db_lang = _canonical_db_language(conn, args.lang)
     # Pass --max-edges as the query limit (was hardcoded LIMIT 500). A full resolve
     # now reaches ALL ambiguous edges, so the graph can be fully LSP-cleaned instead
     # of staying name_match-dominated. source_files scopes to the issue subgraph.
     edges = _get_ambiguous_edges(
-        conn, args.min_confidence, args.lang, source_files=source_files, limit=args.max_edges
+        conn, args.min_confidence, _db_lang, source_files=source_files, limit=args.max_edges
     )
     # Residual = the resolution-fraction DENOMINATOR: count of name_match method-call
     # edges in scope (issue subgraph if --source-files, else whole graph), captured
@@ -1513,7 +1780,7 @@ def resolve_main() -> None:
     # coin-flip against the cap. When demand-scope shrinks residual below the cap, this
     # is a no-op and the fraction is the true in-scope resolution rate.
     residual_method_edges = _count_residual_method_edges(
-        conn, args.lang, source_files=source_files, cap=args.max_edges
+        conn, _db_lang, source_files=source_files, cap=args.max_edges
     )
     conn.close()
 
@@ -1524,7 +1791,6 @@ def resolve_main() -> None:
             sys.exit(1)
 
         from groundtruth.runtime import proof as _proof
-
         _scoped_n = len(source_files) if source_files else 0
         try:
             _ctx_id = _proof.context_id()
@@ -1548,41 +1814,28 @@ def resolve_main() -> None:
             "demand_edges": int(residual_method_edges),
             "residual": int(residual_method_edges),
             "attempted_edges": 0,
-            "verified_edges": 0,
-            "corrected_edges": 0,
-            "deleted_edges": 0,
-            "failed_edges": 0,
-            "skipped_edges": 0,
-            "server_launched": False,
-            "warm_probe_ok": False,
-            "lsp_warm": False,
+            "verified_edges": 0, "corrected_edges": 0, "deleted_edges": 0,
+            "failed_edges": 0, "skipped_edges": 0,
+            "server_launched": False, "warm_probe_ok": False, "lsp_warm": False,
             # degraded == warm transport but real residual left unconverted (effective_work==0
             # while residual>0). Distinguishes an incomplete-env zero-conversion run from a real
             # conversion; fail-closed under GT_REQUIRE_LSP=1, deliver-always otherwise.
             "degraded": False,
-            "probe_method": "workspace/symbol",
-            "probe_latency_ms": 0.0,
-            "probe_requests_issued": 0,
-            "probe_answered_ok": False,
+            "probe_method": "workspace/symbol", "probe_latency_ms": 0.0,
+            "probe_requests_issued": 0, "probe_answered_ok": False,
             # Project-readiness barrier (lazily-loading servers, fix 27249519544-b):
             # null == barrier never exercised (no in-scope edges / pass never ran).
-            "project_ready": None,
-            "project_ready_wait_ms": 0.0,
+            "project_ready": None, "project_ready_wait_ms": 0.0,
             "project_ready_attempts": 0,
             # Definition-stage failure classification (subset of failed_edges):
             # {"lsp_error": N, "empty": N, "exception": N} — e.g. gopls offline
             # `no package metadata` per-edge fast-fails land under lsp_error.
             "failed_breakdown": {},
-            "no_op_valid": False,
-            "no_op_reason": "",
-            "unsupported_reason": "",
+            "no_op_valid": False, "no_op_reason": "", "unsupported_reason": "",
             "install_missing_reason": "",
-            "lsp_started_at": None,
-            "lsp_finished_at": None,
-            "graph_hash_before_lsp": _hash_before,
-            "graph_hash_after_lsp": _hash_before,
-            "closure_rebuilt_after_lsp": False,
-            "closure_rebuilt_at": None,
+            "lsp_started_at": None, "lsp_finished_at": None,
+            "graph_hash_before_lsp": _hash_before, "graph_hash_after_lsp": _hash_before,
+            "closure_rebuilt_after_lsp": False, "closure_rebuilt_at": None,
             "closure_hash_after_rebuild": "",
             "verdict_hint": "",
             # WHY a failing verdict failed: server exit code + first stderr lines
@@ -1607,6 +1860,11 @@ def resolve_main() -> None:
             _require_lsp = os.environ.get("GT_REQUIRE_LSP") == "1"
             _proof.stamp_meta(args.db, "lsp_warm", "0")
             _proof.stamp_meta(args.db, "lsp_language", args.lang)
+            # P1-6 fix (Fable 2026-07-02): no LSP ran on these no-server paths, so there is NO
+            # stale closure to rebuild. Leaving closure_rebuilt_after_lsp=False makes the graph cert
+            # hard-fail GRAPH_FAIL_STALE_CLOSURE the day GT_REQUIRE_GRAPH_VALID is armed and this
+            # (INSTALL_MISSING / UNSUPPORTED_EXPLICIT) cert is the dominant-language canonical. None = n/a.
+            cert["closure_rebuilt_after_lsp"] = None
             if _known:
                 # (b) baked-server language, binary missing -> install gap.
                 _cmd = _KNOWN_SERVERS.get(args.lang, "") or ""
@@ -1641,10 +1899,8 @@ def resolve_main() -> None:
             # (a) genuinely-unsupported language: no server exists to install -> honest no-op.
             cert["unsupported_reason"] = f"no LSP server configured for language '{args.lang}'"
             cert["verdict_hint"] = "LSP_UNSUPPORTED_EXPLICIT"
-            print(
-                f"WARN: No LSP server configured for {args.lang} — emitting unsupported certificate",
-                file=sys.stderr,
-            )
+            print(f"WARN: No LSP server configured for {args.lang} — emitting unsupported certificate",
+                  file=sys.stderr)
             _write_lsp_certificate(cert)
             print(
                 f"LSP_METRICS resolved=0 residual={residual_method_edges} "
@@ -1653,16 +1909,15 @@ def resolve_main() -> None:
             )
             return
 
-        lang_edges = [e for e in edges if e.get("language") == args.lang][: args.max_edges]
+        lang_edges = [e for e in edges if e.get("language") == _db_lang][: args.max_edges]
 
         # ALWAYS launch + warm-probe the server (EVEN with zero demand edges) so a
         # residual==0 no-op is PROVABLE — a no-op pass is only valid with a warmed server.
-        print(
-            f"\nResolving {len(lang_edges)} {args.lang} edges via LSP "
-            f"(launch + warm-probe even on no-op)..."
-        )
+        print(f"\nResolving {len(lang_edges)} {args.lang} edges via LSP "
+              f"(launch + warm-probe even on no-op)...")
         _t0 = time.time()
-        stats = asyncio.run(_resolve_edges(args.db, args.root, lang_edges, args.lang))
+        stats = asyncio.run(_resolve_edges(args.db, args.root, lang_edges, args.lang,
+                                           source_files=source_files))
         _elapsed = time.time() - _t0
         cert["lsp_started_at"] = _t0
         cert["lsp_finished_at"] = _t0 + _elapsed
@@ -1676,12 +1931,31 @@ def resolve_main() -> None:
         # probe_latency_ms > 0.0 (see _compute_lsp_warm — instant warm server rounds to 0.0ms).
         cert["lsp_warm"] = _compute_lsp_warm(cert["server_launched"], cert["warm_probe_ok"])
         cert["failure_detail"] = str(stats.get("failure_detail", "") or "")
+        # SS-4: surface the honest js/ts install-gap reason in the cert (only when the
+        # resolve pass synthesized one — byte-identical when absent).
+        if stats.get("install_missing_reason"):
+            cert["install_missing_reason"] = str(stats["install_missing_reason"])
         cert["attempted_edges"] = len(lang_edges)
         cert["verified_edges"] = int(stats.get("verified", 0))
         cert["corrected_edges"] = int(stats.get("corrected", 0))
         cert["deleted_edges"] = int(stats.get("deleted", 0))
+        # C-Finding5: honest disclosure — the "deleted" edges are non-destructive window-miss
+        # tombstones (conf=0.0, kept + auditable), not destroyed edges. window_miss_edges ==
+        # deleted_edges here because a window-miss is their only source.
+        cert["window_miss_edges"] = int(stats.get("window_miss", 0))
         cert["failed_edges"] = int(stats.get("failed", 0))
         cert["skipped_edges"] = int(stats.get("skipped", 0))
+        # C4 (Fable 2026-07-05): disclose the real work the pass did that was previously
+        # invisible in the cert — the true sibling DELETEs (deduped_siblings), the external
+        # adjudications (skipped_external, now counted in effective_work per C1), and the
+        # honest skip reasons — so an auditor can see what the pass adjudicated.
+        cert["deduped_sibling_edges"] = int(stats.get("deduped_siblings", 0))
+        cert["skipped_external_edges"] = int(stats.get("skipped_external", 0))
+        cert["skipped_no_call_site_edges"] = int(stats.get("skipped_no_call_site", 0))
+        cert["failed_didopen_edges"] = int(stats.get("failed_didopen", 0))
+        cert["sibling_delete_skipped_multicall_edges"] = int(
+            stats.get("sibling_delete_skipped_multicall", 0)
+        )
         cert["project_ready"] = stats.get("project_ready", None)
         cert["project_ready_wait_ms"] = float(stats.get("project_ready_wait_ms", 0.0) or 0.0)
         cert["project_ready_attempts"] = int(stats.get("project_ready_attempts", 0) or 0)
@@ -1691,45 +1965,56 @@ def resolve_main() -> None:
             "exception": int(stats.get("failed_exception", 0)),
         }
 
-        print(
-            f"\nResults ({_elapsed:.1f}s): server_launched={cert['server_launched']} "
-            f"warm_probe_ok={cert['warm_probe_ok']} probe_latency_ms={cert['probe_latency_ms']:.1f}"
-        )
+        print(f"\nResults ({_elapsed:.1f}s): server_launched={cert['server_launched']} "
+              f"warm_probe_ok={cert['warm_probe_ok']} probe_latency_ms={cert['probe_latency_ms']:.1f}")
         if cert["failure_detail"]:
             print(f"  failure_detail: {cert['failure_detail']}", file=sys.stderr)
-        print(
-            f"  Verified: {stats.get('verified', 0)}  Corrected: {stats.get('corrected', 0)}  "
-            f"Deleted: {stats.get('deleted', 0)}  Failed: {stats.get('failed', 0)}  "
-            f"Skipped: {stats.get('skipped', 0)}"
-        )
+        # C-Finding5: label the count honestly — these are non-destructive window-miss TOMBSTONES
+        # (conf=0.0, kept), not destroyed edges. (No log-scraper parses this token; the cert carries
+        # both deleted_edges and window_miss_edges for machines.)
+        print(f"  Verified: {stats.get('verified',0)}  Corrected: {stats.get('corrected',0)}  "
+              f"Tombstoned(window-miss): {stats.get('deleted',0)}  Failed: {stats.get('failed',0)}  "
+              f"Skipped: {stats.get('skipped',0)}")
         if stats.get("project_ready") is not None:
-            print(
-                f"  project_ready={stats['project_ready']} "
-                f"project_ready_wait_ms={float(stats.get('project_ready_wait_ms', 0.0)):.1f} "
-                f"project_ready_attempts={int(stats.get('project_ready_attempts', 0))} "
-                f"failed_breakdown(lsp_error={stats.get('failed_lsp_error', 0)} "
-                f"empty={stats.get('failed_empty', 0)} "
-                f"exception={stats.get('failed_exception', 0)})"
-            )
+            print(f"  project_ready={stats['project_ready']} "
+                  f"project_ready_wait_ms={float(stats.get('project_ready_wait_ms', 0.0)):.1f} "
+                  f"project_ready_attempts={int(stats.get('project_ready_attempts', 0))} "
+                  f"failed_breakdown(lsp_error={stats.get('failed_lsp_error',0)} "
+                  f"empty={stats.get('failed_empty',0)} "
+                  f"exception={stats.get('failed_exception',0)})")
 
         # Stamp LSP-enrichment completion + warm flag (one-pipeline order: index -> LSP ->
         # closure). generate_v1r_brief asserts the lsp stamp in proof mode.
         _proof.stamp_lsp(
             args.db,
-            metrics=f"verified={stats.get('verified', 0)} corrected={stats.get('corrected', 0)} "
-            f"deleted={stats.get('deleted', 0)} failed={stats.get('failed', 0)}",
+            metrics=f"verified={stats.get('verified',0)} corrected={stats.get('corrected',0)} "
+                    f"deleted={stats.get('deleted',0)} failed={stats.get('failed',0)}",
         )
         _proof.stamp_meta(args.db, "lsp_warm", "1" if cert["lsp_warm"] else "0")
         _proof.stamp_meta(args.db, "lsp_language", args.lang)
 
         # Closure rebuild AFTER LSP (stale otherwise). Fatal in proof mode if it fails/stale.
-        _changed = stats.get("corrected", 0) + stats.get("deleted", 0) + stats.get("verified", 0)
-        if _changed:
-            _rebuild_closure(args.db)
-        else:
+        # TIER-2 (multi-language build perf): when the multi-language orchestrator drives this pass
+        # (GT_DEFER_CLOSURE_REBUILD=1) the whole-graph closure rebuild is DEFERRED to ONE post-loop
+        # rebuild the orchestrator owns — rebuilding the sidecar once per language is wasted work
+        # (only the last survives; the closure table is NOT part of graph_edges_hash). The EDGES are
+        # still mutated + snapshotted below. Default-off → single-language / standalone callers are
+        # byte-identical (rebuild inline + assert here, exactly as before). See _closure_action.
+        _changed = (stats.get("corrected", 0) + stats.get("deleted", 0) + stats.get("verified", 0))
+        _clo_action = _closure_action(
+            os.environ.get("GT_DEFER_CLOSURE_REBUILD") == "1", _changed)
+        if _clo_action == "rebuild":
+            _closure_ok = _rebuild_closure(args.db)
+        elif _clo_action == "stamp":
             _proof.stamp_closure(args.db)
-        _proof.assert_closure_after_lsp(args.db)
-        cert["closure_rebuilt_after_lsp"] = True
+            _closure_ok = True  # no edges changed → closure already reflects post-LSP state
+        else:  # "defer" → the orchestrator rebuilds the whole-graph closure once, after all langs
+            _closure_ok = False
+        if _clo_action != "defer":
+            _proof.assert_closure_after_lsp(args.db)
+        # C3 (Fable 2026-07-05): stamp from the ACTUAL rebuild outcome, not unconditionally
+        # True — a warn-and-continue no-op (binary absent, non-proof) leaves the closure stale.
+        cert["closure_rebuilt_after_lsp"] = bool(_closure_ok)
         try:
             cert["closure_rebuilt_at"] = _proof.read_ts(args.db, _proof.K_CLOSURE_TS)
         except Exception:
@@ -1742,20 +2027,17 @@ def resolve_main() -> None:
         # fail-closed zero-conversion run, not an active LSP success.
         if cert["residual"] == 0:
             cert["no_op_valid"] = bool(cert["lsp_warm"])
-            cert["no_op_reason"] = (
-                "zero in-scope name_match method-call edges to resolve" if cert["lsp_warm"] else ""
-            )
+            cert["no_op_reason"] = ("zero in-scope name_match method-call edges to resolve"
+                                    if cert["lsp_warm"] else "")
 
-        effective_work = (
-            int(stats.get("verified", 0))
-            + int(stats.get("corrected", 0))
-            + int(stats.get("deleted", 0))
-        )
+        effective_work = _effective_work(stats)  # C1: +skipped_external (external IS adjudication)
         cert["effective_work"] = int(effective_work)
         # DEGRADED: a warm server that left REAL residual work UNCONVERTED (see
         # _compute_degraded). Distinguishes an incomplete-env zero-conversion from a real
         # conversion; WARN (deliver-always) when LSP unrequired, fail-closed under GT_REQUIRE_LSP=1.
-        cert["degraded"] = _compute_degraded(cert["lsp_warm"], cert["residual"], effective_work)
+        cert["degraded"] = _compute_degraded(
+            cert["lsp_warm"], cert["residual"], effective_work
+        )
         if not cert["lsp_warm"]:
             # FIX-A: distinguish a server that LAUNCHED but didn't warm in budget
             # (rust-analyzer still indexing, gopls workspace not loadable offline)
@@ -1819,6 +2101,14 @@ def resolve_main() -> None:
         # Deliver-always doctrine is preserved for the NON-required path: with GT_REQUIRE_LSP
         # unset this stays a WARN that passes, so the tree-sitter graph + brief still ship.
         if cert.get("degraded") and os.environ.get("GT_REQUIRE_LSP") == "1":
+            # C5 (Fable 2026-07-05): make the on-disk cert AGREE with exit 2. The cert was
+            # written above with a WARN-class verdict_hint; on this fail-closed path re-stamp
+            # it LSP_DEGRADED_FAIL and re-write, so a downstream reader of the cert never sees
+            # a PASS-class verdict on a run that exited non-zero. (Only the GT_REQUIRE_LSP=1
+            # path exits — the deliver-always WARN path keeps its WARN verdict, so FIX-A's
+            # warm-WARN=LIVE aggregation is unchanged.)
+            cert["verdict_hint"] = "LSP_DEGRADED_FAIL"
+            _write_lsp_certificate(cert)
             print(
                 "LSP_DEGRADED_FAIL: GT_REQUIRE_LSP=1 but the warm LSP server for language "
                 f"'{args.lang}' converted ZERO of {residual_method_edges} residual edges "
@@ -1828,7 +2118,8 @@ def resolve_main() -> None:
                 file=sys.stderr,
             )
             sys.exit(2)
-        if cert["verdict_hint"] == "LSP_FAIL_NO_WARM" and os.environ.get("GT_REQUIRE_LSP") == "1":
+        if (cert["verdict_hint"] == "LSP_FAIL_NO_WARM"
+                and os.environ.get("GT_REQUIRE_LSP") == "1"):
             # P1-e fail-closed: after FIX-A, LSP_FAIL_NO_WARM means the server NEVER
             # LAUNCHED (a genuine substrate break — bad binary / crash on start), NOT
             # merely "didn't warm in budget" (that is now LSP_WARN_NOT_READY, a PASS,

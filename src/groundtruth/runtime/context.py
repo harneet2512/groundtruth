@@ -11,7 +11,6 @@ discovering host paths and can never silently fall back in proof mode. It:
 
 It does NOT change ranking/scoring/brief logic. It only enforces the runtime contract.
 """
-
 from __future__ import annotations
 
 import math
@@ -27,13 +26,8 @@ from groundtruth.runtime.proof import GTProofModeError
 
 # The proof-mode flag set. Present-and-"1" is asserted in proof mode.
 REQUIRED_FLAGS = (
-    "GT_PROOF_MODE",
-    "GT_CONTAINERIZED",
-    "GT_REQUIRE_FTS5",
-    "GT_REQUIRE_EMBEDDER",
-    "GT_FORCE_ONNX_EMBEDDER",
-    "GT_REQUIRE_LSP",
-    "GT_REQUIRE_FULL_STACK",
+    "GT_PROOF_MODE", "GT_CONTAINERIZED", "GT_REQUIRE_FTS5", "GT_REQUIRE_EMBEDDER",
+    "GT_FORCE_ONNX_EMBEDDER", "GT_REQUIRE_LSP", "GT_REQUIRE_FULL_STACK",
     "GT_FORBID_PREBUILT_GRAPH",
 )
 _DEFAULT_RUNTIME_ROOT = "/opt/gt"
@@ -65,8 +59,7 @@ def assert_container_boundary(where: str = "gt") -> None:
             f"FINAL_PIPELINE_HOST_SPLIT_FAIL: {where} ran on the HOST in proof mode "
             f"(GT_CONTAINERIZED={os.environ.get('GT_CONTAINERIZED')!r}, inside_container={in_ctr}). "
             "In proof/final mode GT must execute inside the eval container (docker exec), never "
-            "the host runner."
-        )
+            "the host runner.")
 
 
 def classify_runtime_strategy(*, gate_module: str, in_container: bool, proof: bool):
@@ -104,12 +97,8 @@ class GTRuntimeContext:
 
     # ---- construction ----
     @classmethod
-    def from_env(
-        cls,
-        source_root: str | None = None,
-        graph_db: str | None = None,
-        audit_dir: str | None = None,
-    ) -> "GTRuntimeContext":
+    def from_env(cls, source_root: str | None = None, graph_db: str | None = None,
+                 audit_dir: str | None = None) -> "GTRuntimeContext":
         runtime_root = os.environ.get("GT_HOME") or _DEFAULT_RUNTIME_ROOT
         # In proof mode the canonical in-container paths are mandatory — the
         # GT_HOST_* aliases (a split host/container root) are rejected, never used
@@ -119,18 +108,8 @@ class GTRuntimeContext:
             src = source_root or os.environ.get("GT_SOURCE_ROOT") or ""
             gdb = graph_db or os.environ.get("GT_GRAPH_DB") or ""
         else:
-            src = (
-                source_root
-                or os.environ.get("GT_SOURCE_ROOT")
-                or os.environ.get("GT_HOST_SRC_ROOT")
-                or ""
-            )
-            gdb = (
-                graph_db
-                or os.environ.get("GT_GRAPH_DB")
-                or os.environ.get("GT_HOST_GRAPH_DB")
-                or ""
-            )
+            src = source_root or os.environ.get("GT_SOURCE_ROOT") or os.environ.get("GT_HOST_SRC_ROOT") or ""
+            gdb = graph_db or os.environ.get("GT_GRAPH_DB") or os.environ.get("GT_HOST_GRAPH_DB") or ""
         models = os.environ.get("GT_MODELS_ROOT") or os.path.join(runtime_root, "models")
         return cls(
             runtime_root=runtime_root,
@@ -172,27 +151,15 @@ class GTRuntimeContext:
 
         # proof flags present
         missing = [f for f in REQUIRED_FLAGS if os.environ.get(f) != "1"]
-        r.append(
-            (
-                "proof_flags_all_set",
-                not missing,
-                f"missing/not-1: {missing}" if missing else "all 8 = 1",
-            )
-        )
+        r.append(("proof_flags_all_set", not missing, f"missing/not-1: {missing}" if missing else "all 8 = 1"))
 
         # inside the eval container
-        r.append(
-            (
-                "inside_container",
-                self.inside_container,
-                "/.dockerenv + cgroup say host" if not self.inside_container else "container",
-            )
-        )
+        r.append(("inside_container", self.inside_container,
+                  "/.dockerenv + cgroup say host" if not self.inside_container else "container"))
 
         # groundtruth imported from under runtime_root (not a checkout/host path)
         try:
             import groundtruth as _g
-
             gf = getattr(_g, "__file__", "") or ""
             ok = self.runtime_root.rstrip("/") + "/" in gf or gf.startswith(self.runtime_root)
             r.append(("import_under_runtime_root", ok, gf))
@@ -200,18 +167,12 @@ class GTRuntimeContext:
             r.append(("import_under_runtime_root", False, f"import error: {e}"))
 
         # source root present (in container)
-        r.append(
-            (
-                "source_root_exists",
-                bool(self.source_root and os.path.isdir(self.source_root)),
-                self.source_root or "(unset)",
-            )
-        )
+        r.append(("source_root_exists", bool(self.source_root and os.path.isdir(self.source_root)),
+                  self.source_root or "(unset)"))
 
         # baked model files present -> no runtime download. Dirname derived from the
         # CONFIGURED localization model name (CHANGE 2: gte-modernbert-base by default).
         from groundtruth.memory.enrich.embed import _default_embed_model
-
         _model_dirname = _default_embed_model().split("/")[-1]
         onnx = os.path.join(self.models_root, _model_dirname, "model.onnx")
         tok = os.path.join(self.models_root, _model_dirname, "tokenizer.json")
@@ -220,19 +181,13 @@ class GTRuntimeContext:
         # onnxruntime importable
         try:
             import onnxruntime  # noqa: F401
-
             r.append(("onnxruntime_importable", True, getattr(onnxruntime, "__version__", "?")))
         except Exception as e:
             r.append(("onnxruntime_importable", False, str(e)))
 
         # ONNX forced (guarantees no sentence-transformers in either half)
-        r.append(
-            (
-                "force_onnx_set",
-                os.environ.get("GT_FORCE_ONNX_EMBEDDER") == "1",
-                os.environ.get("GT_FORCE_ONNX_EMBEDDER", ""),
-            )
-        )
+        r.append(("force_onnx_set", os.environ.get("GT_FORCE_ONNX_EMBEDDER") == "1",
+                  os.environ.get("GT_FORCE_ONNX_EMBEDDER", "")))
 
         # embedder is real (not Zero) and discriminates related>unrelated
         r.append(self._embedder_check())
@@ -242,13 +197,8 @@ class GTRuntimeContext:
         # presence-check on the wrong binary would mask a langserver that can't start. npm
         # ships both, so accept either, but require node.
         _ls = shutil.which("pyright-langserver") or shutil.which("pyright")
-        r.append(
-            (
-                "lsp_server_available",
-                bool(_ls and shutil.which("node")),
-                f"langserver={_ls} node={shutil.which('node')}",
-            )
-        )
+        r.append(("lsp_server_available", bool(_ls and shutil.which("node")),
+                  f"langserver={_ls} node={shutil.which('node')}"))
 
         if require_graph:
             present = bool(self.graph_db and os.path.exists(self.graph_db))
@@ -256,13 +206,8 @@ class GTRuntimeContext:
             # built in container == not a prebuilt host path injected
             prebuilt = os.environ.get("GT_PREBUILT_GRAPH_DB", "")
             forbid = os.environ.get("GT_FORBID_PREBUILT_GRAPH") == "1"
-            r.append(
-                (
-                    "not_prebuilt_when_forbidden",
-                    not (forbid and prebuilt),
-                    f"forbid={forbid} prebuilt={prebuilt or 'none'}",
-                )
-            )
+            r.append(("not_prebuilt_when_forbidden", not (forbid and prebuilt),
+                      f"forbid={forbid} prebuilt={prebuilt or 'none'}"))
         return r
 
     def _embedder_check(self) -> tuple[str, bool, str]:
@@ -279,28 +224,18 @@ class GTRuntimeContext:
 
             def cos(x, y):
                 d = sum(i * j for i, j in zip(x, y))
-                nx = math.sqrt(sum(i * i for i in x))
-                ny = math.sqrt(sum(i * i for i in y))
+                nx = math.sqrt(sum(i * i for i in x)); ny = math.sqrt(sum(i * i for i in y))
                 return d / (nx * ny) if nx and ny else 0.0
 
             a = emb("read configuration from a file", True)
-            rel, unrel = (
-                emb("parse config settings from disk", False),
-                emb("determinant of a matrix", False),
-            )
+            rel, unrel = emb("parse config settings from disk", False), emb("determinant of a matrix", False)
             sim, dis = cos(a, rel), cos(a, unrel)
             ok = bool(a) and all(math.isfinite(v) for v in a) and sim > dis and sim > 0.0
-            return (
-                "embedder_real_not_zero",
-                ok,
-                f"class={cls} cos_rel={sim:.4f} cos_unrel={dis:.4f}",
-            )
+            return ("embedder_real_not_zero", ok, f"class={cls} cos_rel={sim:.4f} cos_unrel={dis:.4f}")
         except Exception as e:
             return ("embedder_real_not_zero", False, f"load error: {e}")
 
-    def validate(
-        self, require_graph: bool = False, raise_on_fail: bool | None = None
-    ) -> list[tuple[str, bool, str]]:
+    def validate(self, require_graph: bool = False, raise_on_fail: bool | None = None) -> list[tuple[str, bool, str]]:
         results = self.checks(require_graph)
         do_raise = self.proof_mode if raise_on_fail is None else raise_on_fail
         if do_raise and any(not ok for _, ok, _ in results):
@@ -309,16 +244,11 @@ class GTRuntimeContext:
 
     def as_dict(self) -> dict:
         return {
-            "runtime_root": self.runtime_root,
-            "source_root": self.source_root,
-            "graph_db": self.graph_db,
-            "models_root": self.models_root,
-            "lsp_root": self.lsp_root,
-            "audit_dir": self.audit_dir,
-            "inside_container": self.inside_container,
-            "proof_mode": self.proof_mode,
-            "containerized": self.containerized,
-            "context_id": _proof.context_id(),
+            "runtime_root": self.runtime_root, "source_root": self.source_root,
+            "graph_db": self.graph_db, "models_root": self.models_root,
+            "lsp_root": self.lsp_root, "audit_dir": self.audit_dir,
+            "inside_container": self.inside_container, "proof_mode": self.proof_mode,
+            "containerized": self.containerized, "context_id": _proof.context_id(),
         }
 
 
@@ -358,9 +288,8 @@ def _main(argv: list[str]) -> int:
         return 0
     if validate:
         try:
-            results = ctx.validate(
-                require_graph=require_graph, raise_on_fail=(strict or ctx.proof_mode)
-            )
+            results = ctx.validate(require_graph=require_graph,
+                                   raise_on_fail=(strict or ctx.proof_mode))
         except GTProofModeError as e:
             for n, ok, d in e.failures:
                 print(f"  {'ok  ' if ok else 'FAIL'} {n}: {d}")

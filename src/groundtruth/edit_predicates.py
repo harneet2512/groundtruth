@@ -34,7 +34,9 @@ from typing import Any, Mapping
 # verbs in the CmdRunAction path. Keep the OH set authoritative; treat the
 # bash patterns separately below.
 # ---------------------------------------------------------------------------
-_MUTATING_EDITOR_CMDS: frozenset[str] = frozenset({"create", "str_replace", "insert"})
+_MUTATING_EDITOR_CMDS: frozenset[str] = frozenset(
+    {"create", "str_replace", "insert"}
+)
 
 # Tool names that the editor may surface as. SWE-agent canonical:
 # `str_replace_editor` (see /home/ubuntu/SWE-agent/tools/edit_anthropic/
@@ -61,10 +63,14 @@ _EDITOR_TOOL_NAMES: frozenset[str] = frozenset(
 # Bash-style tool names. When tool_name matches one of these, args["command"]
 # is parsed for either an embedded `str_replace_editor`/`file_editor`
 # invocation OR for shell redirection patterns that mutate a source file.
-_BASH_TOOL_NAMES: frozenset[str] = frozenset({"bash", "execute_bash", "CmdRunAction", "shell"})
+_BASH_TOOL_NAMES: frozenset[str] = frozenset(
+    {"bash", "execute_bash", "CmdRunAction", "shell"}
+)
 
 # Source-file extensions (verbatim from oh_gt_live_lite_v2_wrapper.py:484).
-_SOURCE_EXTS: tuple[str, ...] = (".py", ".js", ".ts", ".go", ".java", ".rs", ".rb", ".php")
+_SOURCE_EXTS: tuple[str, ...] = (
+    ".py", ".js", ".ts", ".go", ".java", ".rs", ".rb", ".php"
+)
 
 # Test-path regex (verbatim from oh_gt_live_lite_v2_wrapper.py:435).
 _TEST_PATH_RE: re.Pattern[str] = re.compile(
@@ -85,11 +91,11 @@ _EMBEDDED_EDITOR_RE: re.Pattern[str] = re.compile(
 # Keep this restrictive: must be a single-token redirect target with a
 # source extension, not a heredoc / process-substitution sink.
 _BASH_REDIRECT_RE: re.Pattern[str] = re.compile(
-    r"(?:^|\s|;|&&|\|\|)"  # statement boundary
-    r">>?\s*"  # > or >>
-    r"([^\s|;&<>()]+\."  # path with extension (one path token)
+    r"(?:^|\s|;|&&|\|\|)"          # statement boundary
+    r">>?\s*"                       # > or >>
+    r"([^\s|;&<>()]+\."             # path with extension (one path token)
     r"(?:py|js|ts|go|java|rs|rb|php))"
-    r"(?=\s|$|;|&|\|)"  # statement terminator
+    r"(?=\s|$|;|&|\|)"              # statement terminator
 )
 _BASH_TEE_RE: re.Pattern[str] = re.compile(
     r"\btee\s+(?:-a\s+)?([^\s|;&<>()]+\."

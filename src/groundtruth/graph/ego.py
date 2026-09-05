@@ -18,7 +18,6 @@ Research:
 
 Our edge: 100% deterministic. No embeddings, no LLM. Same graph.db = same output.
 """
-
 from __future__ import annotations
 
 import os
@@ -65,22 +64,16 @@ class EgoGraph:
     def callers(self) -> list[EgoNode]:
         if not self.center:
             return []
-        caller_ids = {
-            e.source_id
-            for e in self.edges
-            if e.target_id == self.center.id and e.edge_type == "CALLS"
-        }
+        caller_ids = {e.source_id for e in self.edges
+                      if e.target_id == self.center.id and e.edge_type == "CALLS"}
         return [self.nodes[i] for i in caller_ids if i in self.nodes]
 
     @property
     def callees(self) -> list[EgoNode]:
         if not self.center:
             return []
-        callee_ids = {
-            e.target_id
-            for e in self.edges
-            if e.source_id == self.center.id and e.edge_type == "CALLS"
-        }
+        callee_ids = {e.target_id for e in self.edges
+                      if e.source_id == self.center.id and e.edge_type == "CALLS"}
         return [self.nodes[i] for i in callee_ids if i in self.nodes]
 
     @property
@@ -101,9 +94,7 @@ class EgoGraph:
         """
         if not self.center:
             return ""
-        parts = [
-            f"{self.center.name}() in {_basename(self.center.file_path)}:{self.center.start_line}"
-        ]
+        parts = [f"{self.center.name}() in {_basename(self.center.file_path)}:{self.center.start_line}"]
 
         # Pillar 1: Contract (ALWAYS needed, ALWAYS available)
         if self.signature:
@@ -122,19 +113,13 @@ class EgoGraph:
             for c in sorted(callers, key=lambda x: x.file_path)[:5]:
                 parts.append(f"  {c.name}() {_basename(c.file_path)}:{c.start_line}")
                 if self.k >= 2:
-                    c_callers = [
-                        e
-                        for e in self.edges
-                        if e.target_id == c.id
-                        and e.edge_type == "CALLS"
-                        and e.source_id != self.center.id
-                    ]
+                    c_callers = [e for e in self.edges
+                                 if e.target_id == c.id and e.edge_type == "CALLS"
+                                 and e.source_id != self.center.id]
                     for cc_edge in c_callers[:2]:
                         cc = self.nodes.get(cc_edge.source_id)
                         if cc and not cc.is_test:
-                            parts.append(
-                                f"    {cc.name}() {_basename(cc.file_path)}:{cc.start_line}"
-                            )
+                            parts.append(f"    {cc.name}() {_basename(cc.file_path)}:{cc.start_line}")
 
         # Pillar 2: Consistency (shared state = change-may-impact)
         if self.obligations:
@@ -163,7 +148,7 @@ class EgoGraph:
         rendered = "\n".join(parts)
         if len(rendered) > max_tokens * 4:
             last_nl = rendered.rfind("\n", 0, max_tokens * 4)
-            rendered = rendered[:last_nl] if last_nl > 0 else rendered[: max_tokens * 4]
+            rendered = rendered[:last_nl] if last_nl > 0 else rendered[:max_tokens * 4]
         return rendered
 
     def render_impact(self, changed_function: str = "") -> str:
@@ -178,13 +163,12 @@ class EgoGraph:
         callers_by_hop: dict[int, list[EgoNode]] = {}
         for node in self.nodes.values():
             if node.id != self.center.id and node.hop > 0:
-                is_caller = any(
-                    e.target_id == self.center.id and e.source_id == node.id for e in self.edges
-                )
-                is_transitive = (
-                    any(e.source_id == node.id and e.edge_type == "CALLS" for e in self.edges)
-                    and not is_caller
-                )
+                is_caller = any(e.target_id == self.center.id and e.source_id == node.id
+                                for e in self.edges)
+                is_transitive = any(
+                    e.source_id == node.id and e.edge_type == "CALLS"
+                    for e in self.edges
+                ) and not is_caller
                 if is_caller or is_transitive:
                     callers_by_hop.setdefault(node.hop, []).append(node)
         for hop in sorted(callers_by_hop):
@@ -276,24 +260,17 @@ def ego_graph(
                     tid = row["target_id"]
                     if tid not in result.nodes:
                         result.nodes[tid] = EgoNode(
-                            id=tid,
-                            name=row["name"],
-                            label=row["label"],
+                            id=tid, name=row["name"], label=row["label"],
                             file_path=row["file_path"],
                             start_line=row["start_line"] or 0,
-                            is_test=bool(row["is_test"]),
-                            hop=hop,
+                            is_test=bool(row["is_test"]), hop=hop,
                         )
                         next_frontier.add(tid)
-                    result.edges.append(
-                        EgoEdge(
-                            source_id=node_id,
-                            target_id=tid,
-                            edge_type=row["type"],
-                            confidence=row["confidence"] or 0.0,
-                            source_line=row["source_line"] or 0,
-                        )
-                    )
+                    result.edges.append(EgoEdge(
+                        source_id=node_id, target_id=tid,
+                        edge_type=row["type"], confidence=row["confidence"] or 0.0,
+                        source_line=row["source_line"] or 0,
+                    ))
 
                 # Incoming edges (callers)
                 in_edges = conn.execute(
@@ -308,24 +285,17 @@ def ego_graph(
                     sid = row["source_id"]
                     if sid not in result.nodes:
                         result.nodes[sid] = EgoNode(
-                            id=sid,
-                            name=row["name"],
-                            label=row["label"],
+                            id=sid, name=row["name"], label=row["label"],
                             file_path=row["file_path"],
                             start_line=row["start_line"] or 0,
-                            is_test=bool(row["is_test"]),
-                            hop=hop,
+                            is_test=bool(row["is_test"]), hop=hop,
                         )
                         next_frontier.add(sid)
-                    result.edges.append(
-                        EgoEdge(
-                            source_id=sid,
-                            target_id=node_id,
-                            edge_type=row["type"],
-                            confidence=row["confidence"] or 0.0,
-                            source_line=row["source_line"] or 0,
-                        )
-                    )
+                    result.edges.append(EgoEdge(
+                        source_id=sid, target_id=node_id,
+                        edge_type=row["type"], confidence=row["confidence"] or 0.0,
+                        source_line=row["source_line"] or 0,
+                    ))
 
             frontier = next_frontier
 
@@ -373,11 +343,9 @@ def ego_graph(
                         if result.center.file_path.endswith(".py"):
                             try:
                                 from groundtruth.hooks.obligation_check import find_obligations
-
                                 repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
                                 obs = find_obligations(
-                                    result.center.file_path,
-                                    repo_root,
+                                    result.center.file_path, repo_root,
                                     {result.center.name},
                                 )
                                 result.obligations = obs[:3]
@@ -427,7 +395,8 @@ def change_impact(
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id, name, file_path FROM nodes WHERE name = ? AND is_test = 0 LIMIT 1",
+            "SELECT id, name, file_path FROM nodes "
+            "WHERE name = ? AND is_test = 0 LIMIT 1",
             (changed_function,),
         ).fetchall()
 
@@ -461,16 +430,14 @@ def change_impact(
                 if c["id"] not in visited:
                     visited.add(c["id"])
                     next_frontier.add(c["id"])
-                    impacted.append(
-                        {
-                            "name": c["name"],
-                            "file": c["file_path"],
-                            "line": c["start_line"] or 0,
-                            "is_test": bool(c["is_test"]),
-                            "hop": depth,
-                            "confidence": c["confidence"] or 0.0,
-                        }
-                    )
+                    impacted.append({
+                        "name": c["name"],
+                        "file": c["file_path"],
+                        "line": c["start_line"] or 0,
+                        "is_test": bool(c["is_test"]),
+                        "hop": depth,
+                        "confidence": c["confidence"] or 0.0,
+                    })
         frontier = next_frontier
 
     conn.close()

@@ -63,15 +63,16 @@ Returns a ``<gt-task-brief>`` string. Two output shapes:
 
 Never raises. On any internal failure the empty-result string is returned.
 """
-
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import logging
 import os
 import re
 import sqlite3
 import time
+from pathlib import Path
 
 logger = logging.getLogger("groundtruth.pretask.sqlite3_fts_fallback")
 
@@ -80,55 +81,20 @@ logger = logging.getLogger("groundtruth.pretask.sqlite3_fts_fallback")
 # ---------------------------------------------------------------------------
 
 _TEXT_EXTENSIONS = {
-    ".py",
-    ".js",
-    ".ts",
-    ".tsx",
-    ".jsx",
-    ".go",
-    ".rs",
-    ".java",
-    ".c",
-    ".cc",
-    ".cpp",
-    ".cxx",
-    ".h",
-    ".hpp",
-    ".hxx",
-    ".css",
-    ".scss",
-    ".less",
-    ".html",
-    ".htm",
-    ".md",
-    ".rst",
-    ".txt",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".json",
-    ".ini",
-    ".cfg",
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java",
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx",
+    ".css", ".scss", ".less",
+    ".html", ".htm",
+    ".md", ".rst", ".txt",
+    ".yaml", ".yml", ".toml", ".json", ".ini", ".cfg",
 }
 
 _SKIP_DIR_NAMES = {
-    "node_modules",
-    ".git",
-    "__pycache__",
-    "dist",
-    "build",
-    ".venv",
-    "venv",
-    ".tox",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    "site-packages",
-    ".eggs",
-    "egg-info",
+    "node_modules", ".git", "__pycache__", "dist", "build",
+    ".venv", "venv", ".tox", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache", "site-packages", ".eggs", "egg-info",
     "target",  # rust
-    ".idea",
-    ".vscode",
+    ".idea", ".vscode",
 }
 
 _MAX_FILE_SIZE = 1_000_000  # 1 MB cap per file
@@ -147,138 +113,27 @@ _MAX_QUERY_TOKENS = 30
 # Generic English + programming stopwords (NLTK English subset + common code
 # keywords). Deliberately broad; the goal is to drop tokens that BM25 would
 # otherwise weight near-zero anyway.
-_STOPWORDS = frozenset(
-    {
-        # English
-        "the",
-        "and",
-        "for",
-        "with",
-        "this",
-        "that",
-        "from",
-        "have",
-        "has",
-        "had",
-        "are",
-        "was",
-        "were",
-        "been",
-        "being",
-        "but",
-        "not",
-        "you",
-        "your",
-        "yours",
-        "they",
-        "them",
-        "their",
-        "there",
-        "here",
-        "what",
-        "when",
-        "where",
-        "which",
-        "who",
-        "whom",
-        "whose",
-        "why",
-        "how",
-        "all",
-        "any",
-        "both",
-        "each",
-        "few",
-        "more",
-        "most",
-        "other",
-        "some",
-        "such",
-        "than",
-        "too",
-        "very",
-        "can",
-        "will",
-        "just",
-        "should",
-        "would",
-        "could",
-        "may",
-        "might",
-        "must",
-        "shall",
-        "into",
-        "onto",
-        "upon",
-        "about",
-        "above",
-        "below",
-        "after",
-        "before",
-        "during",
-        "out",
-        "off",
-        "over",
-        "under",
-        "again",
-        "further",
-        "then",
-        "once",
-        "also",
-        "only",
-        "same",
-        "between",
-        "within",
-        "without",
-        "through",
-        "because",
-        "while",
-        "until",
-        "since",
-        "though",
-        "although",
-        # Programming
-        "def",
-        "class",
-        "return",
-        "import",
-        "from",
-        "self",
-        "this",
-        "true",
-        "false",
-        "none",
-        "null",
-        "undefined",
-        "function",
-        "var",
-        "let",
-        "const",
-        "public",
-        "private",
-        "protected",
-        "static",
-        "final",
-        "if",
-        "else",
-        "elif",
-        "for",
-        "while",
-        "do",
-        "switch",
-        "case",
-        "break",
-        "continue",
-        "try",
-        "except",
-        "catch",
-        "finally",
-        "raise",
-        "throw",
-        "new",
-        "delete",
-    }
-)
+_STOPWORDS = frozenset({
+    # English
+    "the", "and", "for", "with", "this", "that", "from", "have", "has", "had",
+    "are", "was", "were", "been", "being", "but", "not", "you", "your", "yours",
+    "they", "them", "their", "there", "here", "what", "when", "where", "which",
+    "who", "whom", "whose", "why", "how", "all", "any", "both", "each", "few",
+    "more", "most", "other", "some", "such", "than", "too", "very", "can",
+    "will", "just", "should", "would", "could", "may", "might", "must", "shall",
+    "into", "onto", "upon", "about", "above", "below", "after", "before",
+    "during", "out", "off", "over", "under", "again", "further", "then", "once",
+    "also", "only", "same", "between", "within", "without", "through",
+    "because", "while", "until", "since", "though", "although",
+    # Programming
+    "def", "class", "return", "import", "from", "self", "this",
+    "true", "false", "none", "null", "undefined",
+    "function", "var", "let", "const",
+    "public", "private", "protected", "static", "final",
+    "if", "else", "elif", "for", "while", "do", "switch", "case", "break",
+    "continue", "try", "except", "catch", "finally", "raise", "throw",
+    "new", "delete",
+})
 
 # FTS5 reserved characters / special syntax — strip aggressively from queries.
 _FTS5_QUERY_SAFE = re.compile(r"[^A-Za-z0-9_\s]")
@@ -287,7 +142,6 @@ _FTS5_QUERY_SAFE = re.compile(r"[^A-Za-z0-9_\s]")
 # ---------------------------------------------------------------------------
 # Cache key & path
 # ---------------------------------------------------------------------------
-
 
 def _cache_key(repo_path: str) -> str:
     """SHA1 of repo_path + dir mtime, truncated to 12 hex. Stable across runs
@@ -312,7 +166,6 @@ def _cache_db_path(repo_path: str) -> str:
 # ---------------------------------------------------------------------------
 # File walk
 # ---------------------------------------------------------------------------
-
 
 def _iter_repo_files(repo_path: str):
     """Yield absolute paths of text-source files under repo_path, skipping
@@ -346,7 +199,6 @@ def _read_text(path: str) -> str:
 # ---------------------------------------------------------------------------
 # graph.db lookup helpers
 # ---------------------------------------------------------------------------
-
 
 def _connect_graph(graph_db_path: str) -> sqlite3.Connection | None:
     if not graph_db_path or not os.path.exists(graph_db_path):
@@ -463,7 +315,6 @@ def _incoming_edge_count_among(
 # FTS5 cache build
 # ---------------------------------------------------------------------------
 
-
 def _cache_is_fresh(cache_path: str) -> bool:
     if not os.path.exists(cache_path):
         return False
@@ -555,7 +406,6 @@ def _build_fts_cache(
 # Query tokenization
 # ---------------------------------------------------------------------------
 
-
 def _tokenize_issue(issue_text: str) -> str:
     """Build an FTS5 MATCH query string from issue_text.
 
@@ -606,7 +456,9 @@ def _format_brief(
 ) -> str:
     """ranked: list of (file_path, promoted_score, incoming_edge_count, [symbols])."""
     lines = ["<gt-task-brief>"]
-    lines.append("[STRUCTURAL RETRIEVAL] No specific code identifiers extracted from issue text.")
+    lines.append(
+        "[STRUCTURAL RETRIEVAL] No specific code identifiers extracted from issue text."
+    )
     lines.append(
         "Surfacing files most relevant to issue description via BM25 + structural reranking:"
     )
@@ -656,7 +508,9 @@ def _generate_inner(
 ) -> str:
     # 0. Sanity: if no repo on disk, we can't build an index.
     if not repo_path or not os.path.isdir(repo_path):
-        logger.info("FTS5 fallback: repo_path %r missing — empty brief", repo_path)
+        logger.info(
+            "FTS5 fallback: repo_path %r missing — empty brief", repo_path
+        )
         return _EMPTY_BRIEF
 
     # 1. Cache resolution
@@ -699,7 +553,11 @@ def _generate_inner(
 
     # bm25() returns lower-is-better; flip sign so positive scores are good
     # and rerank promotion (multiplicative) makes intuitive sense.
-    candidates = [(r["file_path"], -float(r["score"])) for r in rows if r["file_path"]]
+    candidates = [
+        (r["file_path"], -float(r["score"]))
+        for r in rows
+        if r["file_path"]
+    ]
     if not candidates:
         return _EMPTY_BRIEF
 
@@ -709,7 +567,9 @@ def _generate_inner(
     incoming_counts: dict[str, int] = {}
     if graph_conn is not None:
         for fp, _ in candidates:
-            incoming_counts[fp] = _incoming_edge_count_among(graph_conn, fp, candidate_files)
+            incoming_counts[fp] = _incoming_edge_count_among(
+                graph_conn, fp, candidate_files
+            )
     else:
         for fp, _ in candidates:
             incoming_counts[fp] = 0
@@ -792,5 +652,7 @@ if __name__ == "__main__":
     p.add_argument("--graph-db", required=True)
     args = p.parse_args()
 
-    out = generate_fts5_orientation_brief(args.issue_text, args.repo_path, args.graph_db)
+    out = generate_fts5_orientation_brief(
+        args.issue_text, args.repo_path, args.graph_db
+    )
     print(out)

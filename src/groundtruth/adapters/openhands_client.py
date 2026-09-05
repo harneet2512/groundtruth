@@ -22,7 +22,6 @@ B1 contract: every method returns ``{"exit_code": int, "body": str, "ok":
 bool}`` so ``OpenHandsAdapter._check_byte_count`` works unchanged. Failures
 are caught and surfaced as ``exit_code != 0``, never silent.
 """
-
 from __future__ import annotations
 
 from typing import Any, Protocol
@@ -45,10 +44,11 @@ class RealOpenHandsClient:
         self._conv = conversation
         # Imported lazily so module import doesn't require OH installed.
         from openhands.sdk.security.confirmation_policy import AlwaysConfirm
-
         self._AlwaysConfirm = AlwaysConfirm
 
-    def register_confirmation_policy(self, message: str, tool_filter: str) -> dict[str, Any]:
+    def register_confirmation_policy(
+        self, message: str, tool_filter: str
+    ) -> dict[str, Any]:
         try:
             self._conv.send_message(message)
             self._conv.set_confirmation_policy(self._AlwaysConfirm())

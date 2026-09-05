@@ -30,7 +30,6 @@ output.jsonl schema (verified against real beets artifacts):
 
 This module only reads; it writes ``run_metrics.json`` on request.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -40,6 +39,7 @@ from typing import Any, Iterable, Optional
 
 # Reuse — do NOT duplicate — the gold-patch parser and injection parser.
 from groundtruth.metrics.evidence_scorer import (
+    InjectionRecord,
     parse_gold_patch,
     parse_injections,
 )
@@ -51,12 +51,10 @@ from groundtruth.metrics.evidence_scorer import (
 LAYER_MARKERS: dict[str, list[str]] = {
     "L1_brief": ["<gt-task-brief>"],
     "L3_postedit": [
-        'trigger="post_edit',
-        "[GT] Post-edit:",
+        'trigger="post_edit', "[GT] Post-edit:",
         # post-edit content markers (per task marker map): a post-edit block
         # carries these even when the wrapper omits the explicit trigger tag.
-        "[BEHAVIORAL CONTRACT]",
-        "Calls into:",
+        "[BEHAVIORAL CONTRACT]", "Calls into:",
     ],
     "postview": ['trigger="post_view'],
     "L3b_similar": ["[SIMILAR]", "[PEER]", "[TWIN]"],
@@ -78,34 +76,15 @@ _SIMILAR_MARKERS = ("[SIMILAR]", "[PEER]", "[TWIN]")
 # Regression-guard marker openers (a truncated opener glued onto a word with no
 # closing ']' is corruption).
 _MARKER_OPENERS = (
-    "[SIGNATURE",
-    "[BEHAVIORAL CONTRACT",
-    "[CONTRACT",
-    "[CATCHES",
-    "[CATCHE",
-    "[SIMILAR",
-    "[PEER",
-    "[TWIN",
-    "[VERIFIED",
-    "[WARNING",
-    "[INFO",
-    "[TEST",
-    "[MISMATCH",
-    "[GT_VERIFY",
-    "[GT L5",
-    "[OVERRIDE",
-    "[PATTERN",
-    "[COMPLETENESS",
+    "[SIGNATURE", "[BEHAVIORAL CONTRACT", "[CONTRACT", "[CATCHES", "[CATCHE",
+    "[SIMILAR", "[PEER", "[TWIN", "[VERIFIED", "[WARNING", "[INFO", "[TEST",
+    "[MISMATCH", "[GT_VERIFY", "[GT L5", "[OVERRIDE", "[PATTERN", "[COMPLETENESS",
 )
 
 # Empty-contract sentinel labels: a line "<label>:" whose value is blank.
 _CONTRACT_LABELS = (
-    "PRESERVE:",
-    "guard_clause:",
-    "[BEHAVIORAL CONTRACT]",
-    "MUTATES:",
-    "RETURNS:",
-    "RAISES:",
+    "PRESERVE:", "guard_clause:", "[BEHAVIORAL CONTRACT]", "MUTATES:",
+    "RETURNS:", "RAISES:",
 )
 
 
@@ -148,7 +127,7 @@ def _path_suffix_match(a: str, b: str) -> bool:
     pa, pb = a.split("/"), b.split("/")
     shorter = pa if len(pa) <= len(pb) else pb
     longer = pb if len(pa) <= len(pb) else pa
-    return longer[-len(shorter) :] == shorter if shorter else False
+    return longer[-len(shorter):] == shorter if shorter else False
 
 
 def _gold_basenames(gold_files: Iterable[str]) -> set[str]:
@@ -173,20 +152,8 @@ def _action_target_text(ev: dict) -> str:
 
 # Source-file extensions used to recognize a file token inside a command line.
 _SOURCE_EXTS = (
-    ".py",
-    ".rst",
-    ".md",
-    ".txt",
-    ".go",
-    ".js",
-    ".ts",
-    ".java",
-    ".rs",
-    ".c",
-    ".h",
-    ".cpp",
-    ".hpp",
-    ".cc",
+    ".py", ".rst", ".md", ".txt", ".go", ".js", ".ts", ".java", ".rs",
+    ".c", ".h", ".cpp", ".hpp", ".cc",
 )
 
 
@@ -202,7 +169,9 @@ def _file_tokens(text: str) -> set[str]:
     norm = _norm_path(text)
     # Split on whitespace and common shell separators so pipes/redirects don't
     # glue a file onto the next token (e.g. "...importer.py|head").
-    for raw in norm.replace("|", " ").replace(";", " ").replace("(", " ").replace(")", " ").split():
+    for raw in norm.replace("|", " ").replace(";", " ").replace("(", " ").replace(
+        ")", " "
+    ).split():
         t = raw.strip().strip('"').strip("'").strip("`")
         # Strip a trailing ":NNN" line-number suffix ("beets/db.py:722").
         if ":" in t:
@@ -310,26 +279,9 @@ def _extract_brief_ranked_files(instance: dict) -> list[str]:
             continue
         # Stop the path at the first space or '(' — the rest is signature info.
         path = token.split(" ")[0].split("(")[0].strip().rstrip(":")
-        if (
-            path
-            and "/" in path
-            or path.endswith(
-                (
-                    ".py",
-                    ".rst",
-                    ".md",
-                    ".txt",
-                    ".go",
-                    ".js",
-                    ".ts",
-                    ".java",
-                    ".rs",
-                    ".c",
-                    ".h",
-                    ".cpp",
-                )
-            )
-        ):
+        if path and "/" in path or path.endswith((".py", ".rst", ".md", ".txt",
+                                                   ".go", ".js", ".ts", ".java",
+                                                   ".rs", ".c", ".h", ".cpp")):
             ranked.append(_norm_path(path))
     return ranked
 
@@ -352,9 +304,13 @@ def compute_localization(instance: dict, gold_files: list[str]) -> dict[str, Any
 
     top3 = ranked[:3]
     if top3:
-        n_gold_in_top3 = sum(1 for rf in top3 if any(_path_suffix_match(rf, g) for g in gold))
+        n_gold_in_top3 = sum(
+            1 for rf in top3 if any(_path_suffix_match(rf, g) for g in gold)
+        )
         focus_precision = n_gold_in_top3 / len(top3)
-        focus_coverage = n_gold_in_top3 / len(gold) if gold else None
+        focus_coverage = (
+            n_gold_in_top3 / len(gold) if gold else None
+        )
     else:
         focus_precision = None
         focus_coverage = None
@@ -403,7 +359,9 @@ def compute_navigation(instance: dict, gold_files: list[str]) -> dict[str, Any]:
             if first_edit_action is None:
                 first_edit_action = counted
                 first_edit_file = path or None
-            if edit_to_gold_action is None and any(_path_suffix_match(path, g) for g in gold):
+            if edit_to_gold_action is None and any(
+                _path_suffix_match(path, g) for g in gold
+            ):
                 edit_to_gold_action = counted
 
     return {
@@ -438,7 +396,9 @@ def compute_outcome(instance: dict, gold_files: list[str]) -> dict[str, Any]:
     gold = [_norm_path(g) for g in gold_files]
 
     files = sorted(set(_patch_files(patch)))
-    touches_gold = any(any(_path_suffix_match(pf, g) for g in gold) for pf in files)
+    touches_gold = any(
+        any(_path_suffix_match(pf, g) for g in gold) for pf in files
+    )
     return {
         "has_patch": bool(patch.strip()),
         "patch_files": files,
@@ -472,7 +432,7 @@ def _count_boundary_corruption(text: str) -> int:
             if idx < 0:
                 break
             start = idx + 1
-            after = text[idx + len(opener) :]
+            after = text[idx + len(opener):]
             # Look at the run up to the next whitespace.
             j = 0
             while j < len(after) and not after[j].isspace():
@@ -505,7 +465,7 @@ def _count_empty_contracts(text: str) -> int:
         for label in _CONTRACT_LABELS:
             if not line.startswith(label):
                 continue
-            value = line[len(label) :].strip()
+            value = line[len(label):].strip()
             # '[BEHAVIORAL CONTRACT]' has no colon — empty when nothing follows.
             if label.endswith("]"):
                 if not value:
@@ -571,7 +531,9 @@ def _layer_uptake(
     module's reference logic implicitly (basename/function substring match
     over the action target text).
     """
-    action_text = " ".join(_action_target_text(a).lower() for a in later_actions)
+    action_text = " ".join(
+        _action_target_text(a).lower() for a in later_actions
+    )
     # also include thoughts/new_str of edits so a function written into code counts
     for a in later_actions:
         args = a.get("args") or {}
@@ -596,16 +558,14 @@ def _extract_paths(text: str) -> set[str]:
     for token in text.replace("(", " ").replace(")", " ").replace(",", " ").split():
         t = token.strip().strip('"').strip("'").rstrip(":>").lstrip("<")
         t = t.replace("\\", "/")
-        if "/" in t and t.endswith(
-            (".py", ".rst", ".md", ".go", ".js", ".ts", ".java", ".rs", ".c", ".h", ".cpp", ".txt")
-        ):
+        if "/" in t and t.endswith((".py", ".rst", ".md", ".go", ".js", ".ts",
+                                    ".java", ".rs", ".c", ".h", ".cpp", ".txt")):
             paths.add(t)
         elif ":" in t:
             # "beets/dbcore/db.py:722" form
             head = t.split(":")[0]
-            if "/" in head and head.endswith(
-                (".py", ".rst", ".md", ".go", ".js", ".ts", ".java", ".rs")
-            ):
+            if "/" in head and head.endswith((".py", ".rst", ".md", ".go",
+                                              ".js", ".ts", ".java", ".rs")):
                 paths.add(head)
     return paths
 
@@ -648,23 +608,26 @@ def _grep_symbol_and_file(cmd: str) -> tuple[Optional[str], Optional[str]]:
         base = tok.rsplit("/", 1)[-1]
         if base in _GREP_LIKE:
             # Walk forward to the first non-flag token = the pattern.
-            for nxt in toks[i + 1 :]:
+            for nxt in toks[i + 1:]:
                 if nxt.startswith(_GREP_FLAG_PREFIX):
                     continue
                 pat = nxt.strip().strip('"').strip("'").strip("`")
                 # Drop a leading "def " that may be glued inside quotes.
                 if pat.startswith("def "):
-                    pat = pat[len("def ") :].strip()
+                    pat = pat[len("def "):].strip()
                 # Accept ONLY a clean identifier (no regex metachars / alts).
                 ident = pat.replace("def ", "").strip()
-                if ident and all(c.isalnum() or c == "_" for c in ident) and not ident.isdigit():
+                if ident and all(c.isalnum() or c == "_" for c in ident) \
+                        and not ident.isdigit():
                     symbol = ident
                 break
             break
     return (symbol, grepped_file)
 
 
-def _block_names_symbol_defined_elsewhere(blob: str, symbol: str, grepped_file: str) -> bool:
+def _block_names_symbol_defined_elsewhere(
+    blob: str, symbol: str, grepped_file: str
+) -> bool:
     """True iff the GT block asserts SYMBOL is DEFINED in a file != grepped_file.
 
     This is the #44 homonym defect: the agent greps a symbol in one file and GT
@@ -694,7 +657,7 @@ def _block_names_symbol_defined_elsewhere(blob: str, symbol: str, grepped_file: 
             break
         start = idx + len(needle)
         # The char after the symbol must be a non-identifier (word boundary).
-        after = norm[idx + len(needle) : idx + len(needle) + 1]
+        after = norm[idx + len(needle): idx + len(needle) + 1]
         if after and (after.isalnum() or after == "_"):
             continue  # "::set_fields_extra" — different symbol
         # Walk left from '::' to capture the file path token.
@@ -703,11 +666,9 @@ def _block_names_symbol_defined_elsewhere(blob: str, symbol: str, grepped_file: 
         while j > 0 and (left[j - 1].isalnum() or left[j - 1] in "._/-"):
             j -= 1
         ref_path = left[j:]
-        if (
-            ref_path.endswith(_SOURCE_EXTS)
-            and not _path_suffix_match(ref_path, grepped_file)
-            and not _path_suffix_match(grepped_file, ref_path)
-        ):
+        if ref_path.endswith(_SOURCE_EXTS) and not _path_suffix_match(
+            ref_path, grepped_file
+        ) and not _path_suffix_match(grepped_file, ref_path):
             return True
 
     # Form 1: "<symbol> defined at|in <path>".
@@ -715,18 +676,16 @@ def _block_names_symbol_defined_elsewhere(blob: str, symbol: str, grepped_file: 
         idx = norm.find(marker)
         if idx < 0:
             continue
-        tail = norm[idx + len(marker) :]
+        tail = norm[idx + len(marker):]
         ref = tail.split()[0] if tail.split() else ""
         ref = ref.strip().strip('"').strip("'").rstrip(":,.")
         if ":" in ref:
             head, _, num = ref.rpartition(":")
             if head and num.isdigit():
                 ref = head
-        if (
-            ref.endswith(_SOURCE_EXTS)
-            and not _path_suffix_match(ref, grepped_file)
-            and not _path_suffix_match(grepped_file, ref)
-        ):
+        if ref.endswith(_SOURCE_EXTS) and not _path_suffix_match(
+            ref, grepped_file
+        ) and not _path_suffix_match(grepped_file, ref):
             return True
 
     return False
@@ -744,19 +703,12 @@ def _layer_fired_counts(gt_log: Optional[str]) -> dict[str, int]:
         return counts
     records = parse_injections(gt_log)
     alias = {
-        "l1": "L1_brief",
-        "brief": "L1_brief",
-        "l3b": "L3b_similar",
-        "similar": "L3b_similar",
-        "l3": "L3_postedit",
-        "post_edit": "L3_postedit",
-        "postedit": "L3_postedit",
-        "post_view": "postview",
-        "postview": "postview",
-        "l5": "L5_advisory",
-        "advisory": "L5_advisory",
-        "l6": "L6_verify",
-        "verify": "L6_verify",
+        "l1": "L1_brief", "brief": "L1_brief",
+        "l3b": "L3b_similar", "similar": "L3b_similar",
+        "l3": "L3_postedit", "post_edit": "L3_postedit", "postedit": "L3_postedit",
+        "post_view": "postview", "postview": "postview",
+        "l5": "L5_advisory", "advisory": "L5_advisory",
+        "l6": "L6_verify", "verify": "L6_verify",
         "grep": "grep_intercept",
         "curation": "curation",
     }
@@ -825,7 +777,10 @@ def compute_per_layer(
         delivered_chars = sum(len(t) for _, t in delivered_events)
         all_text = "\n".join(t for _, t in delivered_events)
 
-        on_gold = _content_on_gold(all_text, gold_files, gold_funcs) if delivered else False
+        on_gold = (
+            _content_on_gold(all_text, gold_files, gold_funcs)
+            if delivered else False
+        )
 
         # uptake: later counted action references a layer file/function.
         layer_files = set()
@@ -857,26 +812,29 @@ def compute_per_layer(
                 _EDIT_TARGET_CONTRACTS in t for _, t in delivered_events
             ) or any(
                 _EDIT_TARGET_CONTRACTS in blob
-                for ev in history
-                if _is_agent_visible(ev)
+                for ev in history if _is_agent_visible(ev)
                 for blob in _visible_texts(ev)
             )
         elif layer == "L3_postedit":
             entry["contract_delivered"] = any(
-                ("[BEHAVIORAL CONTRACT]" in t) or ("[CONTRACT]" in t) for _, t in delivered_events
+                ("[BEHAVIORAL CONTRACT]" in t) or ("[CONTRACT]" in t)
+                for _, t in delivered_events
             )
             entry["callee_sig_delivered"] = any(
-                ("[SIGNATURE]" in t) or ("Calls into:" in t) for _, t in delivered_events
+                ("[SIGNATURE]" in t) or ("Calls into:" in t)
+                for _, t in delivered_events
             )
             entry["callers_delivered"] = any(
-                ("Called by:" in t) or ("Calls into:" in t) for _, t in delivered_events
+                ("Called by:" in t) or ("Calls into:" in t)
+                for _, t in delivered_events
             )
         elif layer == "L3b_similar":
             entry["twin_delivered"] = any(
                 any(tm in t for tm in _TWIN_MARKERS) for _, t in delivered_events
             )
             entry["similar_count"] = sum(
-                1 for _, t in delivered_events if any(sm in t for sm in _SIMILAR_MARKERS)
+                1 for _, t in delivered_events
+                if any(sm in t for sm in _SIMILAR_MARKERS)
             )
         elif layer == "L5_advisory":
             entry["fired_count"] = delivered_count
@@ -900,25 +858,19 @@ def compute_per_layer(
                 grepped_cmd = ""
                 for ap, aev in reversed(counted_actions):
                     if ap <= hpos:
-                        grepped_cmd = (aev.get("args") or {}).get("command") or _action_target_text(
-                            aev
-                        )
+                        grepped_cmd = ((aev.get("args") or {}).get("command")
+                                       or _action_target_text(aev))
                         break
                 grepped_norm = _norm_path(grepped_cmd)
                 for dp in delivered_paths:
-                    if (
-                        grepped_norm
-                        and not _path_suffix_match(dp, grepped_norm)
-                        and not _path_suffix_match(grepped_norm, dp)
-                    ):
+                    if grepped_norm and not _path_suffix_match(dp, grepped_norm) \
+                            and not _path_suffix_match(grepped_norm, dp):
                         cross_file_refs += 1
                 # true homonym: same symbol, different DEFINING file.
                 symbol, grepped_file = _grep_symbol_and_file(grepped_cmd)
-                if (
-                    symbol
-                    and grepped_file
-                    and _block_names_symbol_defined_elsewhere(t, symbol, grepped_file)
-                ):
+                if symbol and grepped_file and \
+                        _block_names_symbol_defined_elsewhere(
+                            t, symbol, grepped_file):
                     homonyms += 1
             entry["cross_file_ref_count"] = cross_file_refs
             entry["homonym_count"] = homonyms
@@ -961,7 +913,9 @@ def compute_run_metrics(
     navigation = compute_navigation(instance, gold_files)
     outcome = compute_outcome(instance, gold_files)
     guards = compute_regression_guards(visible_blobs)
-    per_layer = compute_per_layer(instance, gold_files, gt_log=gt_log, gold_patch=gp_text)
+    per_layer = compute_per_layer(
+        instance, gold_files, gt_log=gt_log, gold_patch=gp_text
+    )
 
     metrics = {
         "instance_id": instance.get("instance_id"),
@@ -982,20 +936,10 @@ def compute_run_metrics(
 
 # Per-layer delivery-flag fields that belong to the GT (production) side.
 _GT_SIDE_LAYER_FIELDS = (
-    "delivered",
-    "delivered_count",
-    "delivered_chars",
-    "on_gold",
-    "edit_target_contracts_delivered",
-    "twin_delivered",
-    "callee_sig_delivered",
-    "contract_delivered",
-    "callers_delivered",
-    "test_targets_delivered",
-    "similar_count",
-    "first_gold_rank",
-    "fired",
-    "fired_count",
+    "delivered", "delivered_count", "delivered_chars", "on_gold",
+    "edit_target_contracts_delivered", "twin_delivered", "callee_sig_delivered",
+    "contract_delivered", "callers_delivered", "test_targets_delivered",
+    "similar_count", "first_gold_rank", "fired", "fired_count",
 )
 # Per-layer fields that belong to the agent (reception/behavior) side.
 _AGENT_SIDE_LAYER_FIELDS = ("uptake",)
@@ -1031,8 +975,12 @@ def two_sided_view(metrics: dict[str, Any]) -> dict[str, Any]:
     gt_layers: dict[str, dict[str, Any]] = {}
     agent_layers: dict[str, dict[str, Any]] = {}
     for layer, entry in per_layer.items():
-        gt_layers[layer] = {k: entry[k] for k in _GT_SIDE_LAYER_FIELDS if k in entry}
-        agent_layers[layer] = {k: entry[k] for k in _AGENT_SIDE_LAYER_FIELDS if k in entry}
+        gt_layers[layer] = {
+            k: entry[k] for k in _GT_SIDE_LAYER_FIELDS if k in entry
+        }
+        agent_layers[layer] = {
+            k: entry[k] for k in _AGENT_SIDE_LAYER_FIELDS if k in entry
+        }
 
     gt_side: dict[str, Any] = {
         # localization (was GT produce the right ranking)
@@ -1095,7 +1043,9 @@ def _num(v: Any) -> Optional[float]:
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
-def paired_deltas(metrics_gt: dict[str, Any], metrics_baseline: dict[str, Any]) -> dict[str, Any]:
+def paired_deltas(
+    metrics_gt: dict[str, Any], metrics_baseline: dict[str, Any]
+) -> dict[str, Any]:
     """Numeric deltas (gt - baseline) for shared, numeric metrics.
 
     Deterministic: keys are sorted; only metrics numeric in BOTH runs produce a
@@ -1167,10 +1117,9 @@ def _print_per_layer(per_layer: dict[str, dict[str, Any]]) -> None:
         )
         print(f"  {layer:14s} {common}")
         extras = {
-            k: v
-            for k, v in entry.items()
-            if k
-            not in ("delivered", "delivered_count", "delivered_chars", "on_gold", "uptake", "fired")
+            k: v for k, v in entry.items()
+            if k not in ("delivered", "delivered_count", "delivered_chars",
+                         "on_gold", "uptake", "fired")
         }
         if extras:
             extra_str = "  ".join(f"{k}={_fmt(v)}" for k, v in sorted(extras.items()))
@@ -1190,7 +1139,9 @@ def _print_side(title: str, side: dict[str, Any]) -> None:
             entry = per_layer.get(layer)
             if not entry:
                 continue
-            fields = "  ".join(f"{k}={_fmt(v)}" for k, v in sorted(entry.items()))
+            fields = "  ".join(
+                f"{k}={_fmt(v)}" for k, v in sorted(entry.items())
+            )
             if fields:
                 print(f"    {layer:14s} {fields}")
 
@@ -1222,8 +1173,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument("--output", required=True, help="path to output.jsonl")
     parser.add_argument(
-        "--gold-files",
-        required=True,
+        "--gold-files", required=True,
         help="comma-separated gold file paths (e.g. a.py,b.py)",
     )
     parser.add_argument("--gold-patch", default=None, help="path to gold patch .diff")
@@ -1235,21 +1185,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     gold_files = [g.strip() for g in args.gold_files.split(",") if g.strip()]
 
     metrics = emit_run_metrics(
-        args.output,
-        gold_files,
-        args.out,
-        gt_log=args.gt_log,
-        gold_patch=args.gold_patch,
+        args.output, gold_files, args.out,
+        gt_log=args.gt_log, gold_patch=args.gold_patch,
     )
     _print_table(metrics)
     print(f"\nwrote {args.out}")
 
     if args.baseline:
         baseline = compute_run_metrics(
-            args.baseline,
-            gold_files,
-            gt_log=args.gt_log,
-            gold_patch=args.gold_patch,
+            args.baseline, gold_files,
+            gt_log=args.gt_log, gold_patch=args.gold_patch,
         )
         deltas = paired_deltas(metrics, baseline)
         print("\n== paired deltas (gt - baseline) ==")

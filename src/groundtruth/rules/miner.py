@@ -6,7 +6,6 @@ test style, public API conventions, sibling-file patterns.
 Deterministic. No LLM. Uses graph.db + source reading.
 Shared between OH adapter and MCP product face.
 """
-
 from __future__ import annotations
 
 import os
@@ -14,6 +13,7 @@ import re
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -47,48 +47,40 @@ def mine_naming_conventions(
 
     rules: list[MinedRule] = []
 
-    snake = [n for n in names if re.match(r"^[a-z][a-z0-9_]*$", n)]
-    camel = [
-        n for n in names if re.match(r"^[a-z][a-zA-Z0-9]*$", n) and any(c.isupper() for c in n)
-    ]
+    snake = [n for n in names if re.match(r'^[a-z][a-z0-9_]*$', n)]
+    camel = [n for n in names if re.match(r'^[a-z][a-zA-Z0-9]*$', n) and any(c.isupper() for c in n)]
     prefix_counts: Counter[str] = Counter()
     for n in names:
-        parts = n.split("_")
+        parts = n.split('_')
         if len(parts) >= 2:
             prefix_counts[parts[0]] += 1
 
     if len(snake) > len(camel) and len(snake) >= 2:
-        rules.append(
-            MinedRule(
-                category="naming",
-                pattern="snake_case",
-                frequency=len(snake),
-                examples=snake[:3],
-                file_paths=[file_path],
-            )
-        )
+        rules.append(MinedRule(
+            category="naming",
+            pattern="snake_case",
+            frequency=len(snake),
+            examples=snake[:3],
+            file_paths=[file_path],
+        ))
     elif len(camel) > len(snake) and len(camel) >= 2:
-        rules.append(
-            MinedRule(
-                category="naming",
-                pattern="camelCase",
-                frequency=len(camel),
-                examples=camel[:3],
-                file_paths=[file_path],
-            )
-        )
+        rules.append(MinedRule(
+            category="naming",
+            pattern="camelCase",
+            frequency=len(camel),
+            examples=camel[:3],
+            file_paths=[file_path],
+        ))
 
     for prefix, count in prefix_counts.most_common(2):
-        if count >= 3 and prefix not in ("_", "__"):
-            rules.append(
-                MinedRule(
-                    category="naming",
-                    pattern=f"prefix_{prefix}_",
-                    frequency=count,
-                    examples=[n for n in names if n.startswith(prefix + "_")][:3],
-                    file_paths=[file_path],
-                )
-            )
+        if count >= 3 and prefix not in ('_', '__'):
+            rules.append(MinedRule(
+                category="naming",
+                pattern=f"prefix_{prefix}_",
+                frequency=count,
+                examples=[n for n in names if n.startswith(prefix + '_')][:3],
+                file_paths=[file_path],
+            ))
 
     return rules
 
@@ -106,17 +98,17 @@ def mine_import_style(
     if not os.path.isdir(dir_path):
         return []
 
-    py_files = [f for f in os.listdir(dir_path) if f.endswith(".py") and not f.startswith("_")][:10]
+    py_files = [f for f in os.listdir(dir_path) if f.endswith('.py') and not f.startswith('_')][:10]
 
     from_imports = 0
     direct_imports = 0
     for pf in py_files:
         try:
-            with open(os.path.join(dir_path, pf), "r", errors="replace") as fh:
+            with open(os.path.join(dir_path, pf), 'r', errors='replace') as fh:
                 for line in fh:
-                    if line.strip().startswith("from "):
+                    if line.strip().startswith('from '):
                         from_imports += 1
-                    elif line.strip().startswith("import "):
+                    elif line.strip().startswith('import '):
                         direct_imports += 1
                     if from_imports + direct_imports > 50:
                         break
@@ -127,23 +119,19 @@ def mine_import_style(
     total = from_imports + direct_imports
     if total >= 5:
         if from_imports > direct_imports * 2:
-            rules.append(
-                MinedRule(
-                    category="import",
-                    pattern="from_import_preferred",
-                    frequency=from_imports,
-                    file_paths=[file_path],
-                )
-            )
+            rules.append(MinedRule(
+                category="import",
+                pattern="from_import_preferred",
+                frequency=from_imports,
+                file_paths=[file_path],
+            ))
         elif direct_imports > from_imports * 2:
-            rules.append(
-                MinedRule(
-                    category="import",
-                    pattern="direct_import_preferred",
-                    frequency=direct_imports,
-                    file_paths=[file_path],
-                )
-            )
+            rules.append(MinedRule(
+                category="import",
+                pattern="direct_import_preferred",
+                frequency=direct_imports,
+                file_paths=[file_path],
+            ))
     return rules
 
 
@@ -172,5 +160,5 @@ def render_rules(rules: list[MinedRule], max_chars: int = 500) -> str:
         parts.append(line)
     rendered = "\n".join(parts)
     if len(rendered) > max_chars:
-        rendered = rendered[: max_chars - 3] + "..."
+        rendered = rendered[:max_chars - 3] + "..."
     return rendered

@@ -31,34 +31,10 @@ log = get_logger("endpoints.review_patch")
 
 _SUPPORTED_EXTENSIONS = frozenset(
     {
-        ".py",
-        ".go",
-        ".js",
-        ".jsx",
-        ".ts",
-        ".tsx",
-        ".rs",
-        ".java",
-        ".kt",
-        ".kts",
-        ".scala",
-        ".cs",
-        ".php",
-        ".swift",
-        ".c",
-        ".h",
-        ".cpp",
-        ".cc",
-        ".cxx",
-        ".hpp",
-        ".rb",
-        ".ex",
-        ".exs",
-        ".lua",
-        ".ml",
-        ".groovy",
-        ".mjs",
-        ".cjs",
+        ".py", ".go", ".js", ".jsx", ".ts", ".tsx", ".rs", ".java",
+        ".kt", ".kts", ".scala", ".cs", ".php", ".swift", ".c", ".h",
+        ".cpp", ".cc", ".cxx", ".hpp", ".rb", ".ex", ".exs", ".lua",
+        ".ml", ".groovy", ".mjs", ".cjs",
     }
 )
 

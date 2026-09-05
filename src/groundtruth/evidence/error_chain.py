@@ -209,11 +209,7 @@ def _build_chains(
         callee_source = _get_source_for_file(conn, callee["file_path"])
         if not callee_source:
             continue
-        callee_errors = (
-            extract_error_surface.__wrapped__(callee_source)
-            if hasattr(extract_error_surface, "__wrapped__")
-            else _extract_error_surface_raw(callee_source)
-        )
+        callee_errors = extract_error_surface.__wrapped__(callee_source) if hasattr(extract_error_surface, '__wrapped__') else _extract_error_surface_raw(callee_source)
         for err in callee_errors:
             if err["kind"] == "raise":
                 chains.append(
@@ -255,7 +251,8 @@ def _build_chains(
         for raised in own_raises:
             if raised in caller_catches:
                 chains.append(
-                    f"{func_name}() RAISES {raised} -> {caller['name']}() CATCHES {raised}"
+                    f"{func_name}() RAISES {raised} -> "
+                    f"{caller['name']}() CATCHES {raised}"
                 )
             elif "Exception" in caller_catches or "bare_except" in caller_catches:
                 chains.append(

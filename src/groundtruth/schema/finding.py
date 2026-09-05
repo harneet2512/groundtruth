@@ -120,7 +120,11 @@ def format_findings(
     for f in findings:
         lines.append(f.to_text_line())
     if include_binding:
-        binding_count = sum(1 for f in findings if f.agent_action == AgentAction.FIX_REQUIRED)
+        binding_count = sum(
+            1
+            for f in findings
+            if f.agent_action == AgentAction.FIX_REQUIRED
+        )
         if binding_count > 0:
             lines.append("---")
             lines.append(

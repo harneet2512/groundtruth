@@ -28,15 +28,9 @@ def build_benchmark_report(run_dir: str) -> dict[str, Any]:
     warning_count = sum(row["warning_count"] for row in rows)
     runtime_warning_count = sum(row["runtime_warning_count"] for row in rows)
     replan_count = sum(row["replan_count"] for row in rows)
-    cluster_rates = [
-        row["cluster_touch_rate"] for row in rows if row["cluster_touch_rate"] is not None
-    ]
-    focus_overlap_rates = [
-        row["brief_edit_overlap"] for row in rows if row["brief_edit_overlap"] is not None
-    ]
-    focus_precision_rates = [
-        row["focus_edit_precision"] for row in rows if row["focus_edit_precision"] is not None
-    ]
+    cluster_rates = [row["cluster_touch_rate"] for row in rows if row["cluster_touch_rate"] is not None]
+    focus_overlap_rates = [row["brief_edit_overlap"] for row in rows if row["brief_edit_overlap"] is not None]
+    focus_precision_rates = [row["focus_edit_precision"] for row in rows if row["focus_edit_precision"] is not None]
     focus_hit_at_1 = sum(1 for row in rows if row["focus_hit_at_1"])
     focus_hit_at_3 = sum(1 for row in rows if row["focus_hit_at_3"])
     usable_delivery = sum(1 for row in rows if row["usable_delivery_ok"])
@@ -60,17 +54,11 @@ def build_benchmark_report(run_dir: str) -> dict[str, Any]:
         "empty_patch_rate": _rate(empty_patch, total),
         "root_scaffold_rate": _rate(root_scaffold, total),
         "source_touch_rate": _rate(source_touch, total),
-        "brief_edit_overlap": round(sum(focus_overlap_rates) / len(focus_overlap_rates), 4)
-        if focus_overlap_rates
-        else 0.0,
+        "brief_edit_overlap": round(sum(focus_overlap_rates) / len(focus_overlap_rates), 4) if focus_overlap_rates else 0.0,
         "focus_hit_at_1_rate": _rate(focus_hit_at_1, total),
         "focus_hit_at_3_rate": _rate(focus_hit_at_3, total),
-        "focus_edit_precision": round(sum(focus_precision_rates) / len(focus_precision_rates), 4)
-        if focus_precision_rates
-        else 0.0,
-        "cluster_touch_rate": round(sum(cluster_rates) / len(cluster_rates), 4)
-        if cluster_rates
-        else 0.0,
+        "focus_edit_precision": round(sum(focus_precision_rates) / len(focus_precision_rates), 4) if focus_precision_rates else 0.0,
+        "cluster_touch_rate": round(sum(cluster_rates) / len(cluster_rates), 4) if cluster_rates else 0.0,
         "contract_extraction_rate": _rate(contract, total),
         "cochange_cluster_rate": _rate(cochange, total),
         "warning_count": warning_count,
@@ -81,9 +69,7 @@ def build_benchmark_report(run_dir: str) -> dict[str, Any]:
     }
 
 
-def write_benchmark_report(
-    run_dir: str, *, output_json: str | None = None, output_md: str | None = None
-) -> dict[str, Any]:
+def write_benchmark_report(run_dir: str, *, output_json: str | None = None, output_md: str | None = None) -> dict[str, Any]:
     report = build_benchmark_report(run_dir)
     root = Path(run_dir)
     json_path = Path(output_json) if output_json else root / "gt_full_form_report.json"

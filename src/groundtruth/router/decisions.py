@@ -20,19 +20,17 @@ class EmissionKind(str, enum.Enum):
 class SuppressionReason(str, enum.Enum):
     """Why the router did NOT emit. Mirrors FINAL_ARCH_V2 §3 Layer 3 list."""
 
-    DUPLICATE = "duplicate"  # evidence already shown for this target
-    STALE = "stale"  # would point at an already-viewed file
-    TOO_LATE = "too_late"  # LATE/FINAL band + non-finalization signal
-    NO_NEW_EDGE = "no_new_edge"  # provider returned only already-known edges
-    BUDGET = "budget"  # per-task injection cap reached
-    LOW_CONFIDENCE = "low_confidence"  # provider's best evidence below threshold
-    NO_EVIDENCE = (
-        "no_evidence"  # provider returned nothing (graph present, but empty for this target)
-    )
-    NO_GRAPH_DB = "no_graph_db"  # graph.db missing for this task; provider not consulted
-    DEBOUNCE = "debounce"  # same-kind emission within debounce window
-    NOT_APPLICABLE = "not_applicable"  # router rule did not trigger
-    DISABLED = "disabled"  # injection disabled (legacy state reset)
+    DUPLICATE = "duplicate"           # evidence already shown for this target
+    STALE = "stale"                   # would point at an already-viewed file
+    TOO_LATE = "too_late"             # LATE/FINAL band + non-finalization signal
+    NO_NEW_EDGE = "no_new_edge"       # provider returned only already-known edges
+    BUDGET = "budget"                 # per-task injection cap reached
+    LOW_CONFIDENCE = "low_confidence" # provider's best evidence below threshold
+    NO_EVIDENCE = "no_evidence"       # provider returned nothing (graph present, but empty for this target)
+    NO_GRAPH_DB = "no_graph_db"       # graph.db missing for this task; provider not consulted
+    DEBOUNCE = "debounce"             # same-kind emission within debounce window
+    NOT_APPLICABLE = "not_applicable" # router rule did not trigger
+    DISABLED = "disabled"             # injection disabled (legacy state reset)
 
 
 @dataclass
@@ -63,9 +61,7 @@ class RouterEmission:
         return {
             "kind": self.kind.value,
             "emit": self.emit,
-            "suppression_reason": self.suppression_reason.value
-            if self.suppression_reason
-            else None,
+            "suppression_reason": self.suppression_reason.value if self.suppression_reason else None,
             "suppression_detail": self.suppression_detail,
             "evidence_text_len": len(self.evidence_text),
             "primary_edge_file": self.primary_edge_file,

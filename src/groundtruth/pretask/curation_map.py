@@ -34,9 +34,9 @@ Research basis:
 
 LLM-free, $0, pure SQL over a read-only graph.db.
 """
-
 from __future__ import annotations
 
+import json
 import os
 import re as _re
 import sqlite3
@@ -133,6 +133,14 @@ _DETERMINISTIC_METHODS: frozenset[str] = DETERMINISTIC_RESOLUTION_METHODS
 # MIN_CONFIDENCE.
 _NAME_MATCH_FLOOR = 0.5
 
+# B-3: a deterministic-method edge is a FACT only at/above this confidence — matches the Go
+# closure's admission floor (closure.MinEdgeConfidence = 0.7, RF-4/#B7) so the Python consumer
+# FACT set agrees edge-for-edge with the transitive closure. Ambiguity-demoted deterministic
+# picks (import/same_file @0.6/CANDIDATE) fall BELOW it and are NOT facts (they stay visible as
+# unverified leads). conf <= 0.0 is the no-confidence sentinel (pre-v14 / no-conf-column graph,
+# curation_map:587 conf_f=0.0) → trust the method (back-compat, never a regression).
+_FACT_CONFIDENCE_FLOOR = 0.7
+
 # ---------------------------------------------------------------------------
 # DEPTH RELATIONSHIPS on the SCOPE/MAP surface (gt_new.md §6 + Appendix H
 # "trickle-down" — the OWED wiring). The Go promote pass (Pass 4f, promote.go)
@@ -195,44 +203,17 @@ _DEPTH_REL_MAX_PER_KIND = 4
 # column -> consumers probe with ``_nodes_have_language`` and stay permissive).
 # ---------------------------------------------------------------------------
 _LANG_FAMILIES: dict[str, str] = {
-    "javascript": "jslike",
-    "typescript": "jslike",
-    "jsx": "jslike",
-    "tsx": "jslike",
-    "vue": "jslike",
-    "svelte": "jslike",
-    "java": "jvm",
-    "kotlin": "jvm",
-    "scala": "jvm",
-    "groovy": "jvm",
-    "c": "cfamily",
-    "cpp": "cfamily",
-    "c++": "cfamily",
-    "objc": "cfamily",
-    "objcpp": "cfamily",
-    "objective-c": "cfamily",
-    "swift": "cfamily",
-    "python": "python",
-    "go": "go",
-    "rust": "rust",
-    "ruby": "ruby",
-    "php": "php",
-    "csharp": "csharp",
-    "c#": "csharp",
-    "lua": "lua",
-    "elixir": "elixir",
-    "erlang": "erlang",
-    "haskell": "haskell",
-    "dart": "dart",
-    "r": "r",
-    "julia": "julia",
-    "perl": "perl",
-    "bash": "shell",
-    "shell": "shell",
-    "sh": "shell",
-    "zig": "zig",
-    "ocaml": "ocaml",
-    "clojure": "jvm",
+    "javascript": "jslike", "typescript": "jslike", "jsx": "jslike",
+    "tsx": "jslike", "vue": "jslike", "svelte": "jslike",
+    "java": "jvm", "kotlin": "jvm", "scala": "jvm", "groovy": "jvm",
+    "c": "cfamily", "cpp": "cfamily", "c++": "cfamily", "objc": "cfamily",
+    "objcpp": "cfamily", "objective-c": "cfamily", "swift": "cfamily",
+    "python": "python", "go": "go", "rust": "rust", "ruby": "ruby",
+    "php": "php", "csharp": "csharp", "c#": "csharp", "lua": "lua",
+    "elixir": "elixir", "erlang": "erlang", "haskell": "haskell",
+    "dart": "dart", "r": "r", "julia": "julia", "perl": "perl",
+    "bash": "shell", "shell": "shell", "sh": "shell", "zig": "zig",
+    "ocaml": "ocaml", "clojure": "jvm",
 }
 
 
@@ -261,6 +242,85 @@ def _nodes_have_language(conn: sqlite3.Connection) -> bool:
         return False
     return "language" in cols
 
+
+# ---------------------------------------------------------------------------
+# B-24: edges.metadata is POLYMORPHIC — a JSON object on API_CALL edges
+# (``{"route":"/x","method":"GET"}``) OR a ``;``-separated ``key=value`` string on
+# promoted CALLS (``receiver_type=UserRepo;dataflow=fetch;usage=return``). The Go
+# indexer normalizes both into the derived ``edge_metadata(edge_id,key,value,
+# schema_version)`` sub-table via ONE canonical parser (gt-index/internal/store/
+# edge_metadata.go::ParseEdgeMetadata). Consumers query that table instead of
+# regex/``LIKE`` on the raw string; on an OLD graph.db (table absent/empty) they fall
+# back to :func:`parse_edge_metadata` — the byte-faithful Python twin of the Go parser.
+# ---------------------------------------------------------------------------
+def _json_scalar_str(v: object) -> str:
+    """Render a decoded JSON scalar as a stable string (twin of Go jsonScalarString).
+    ``bool`` BEFORE ``int`` (``isinstance(True, int)`` is True in Python); an integer
+    float renders without a trailing ``.0``; non-scalars are re-marshalled, never dropped."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else repr(v)
+    if v is None:
+        return ""
+    try:
+        return json.dumps(v)
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def parse_edge_metadata(raw: str) -> dict[str, str]:
+    """Parse a raw ``edges.metadata`` value into a normalized ``key -> value`` map.
+
+    The Python twin of the Go ``ParseEdgeMetadata`` (B-24): total + deterministic — an
+    empty / malformed input yields ``{}`` (correct-or-quiet), NEVER raises. A leading
+    ``{`` selects JSON-object parsing (scalar values stringified); otherwise the value is
+    split on ``;`` into ``key=value`` segments (an empty key or a segment with no ``=`` is
+    skipped, never fabricated). Used as the fallback when the derived ``edge_metadata``
+    table is absent/empty on an old graph.db."""
+    out: dict[str, str] = {}
+    s = (raw or "").strip()
+    if not s:
+        return out
+    if s.startswith("{"):
+        try:
+            obj = json.loads(s)
+        except (ValueError, TypeError):
+            obj = None
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = str(k).strip()
+                if not key:
+                    continue
+                out[key] = _json_scalar_str(v)
+            return out
+        # Malformed JSON -> fall through to key=value parsing (parity with Go).
+    for seg in s.split(";"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        eq = seg.find("=")
+        if eq <= 0:
+            continue  # no key, or empty key — skip, never fabricate a field
+        key = seg[:eq].strip()
+        if not key:
+            continue
+        out[key] = seg[eq + 1:]
+    return out
+
+
+def _edge_metadata_ready(conn: sqlite3.Connection) -> bool:
+    """True iff the normalized ``edge_metadata`` sub-table exists AND is populated (B-24).
+    Absent OR empty (old graph.db, or a db indexed before the sub-table was populated) ->
+    consumers fall back to parsing the raw ``edges.metadata`` string (correct-or-quiet)."""
+    try:
+        return conn.execute("SELECT 1 FROM edge_metadata LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
 
 # 1-hop neighbor cap per direction. RepoGraph: tight 1-hop beats wide dumps.
 # Kept as the legacy flat cap so _neighbors() and explicit max_neighbors callers
@@ -316,34 +376,10 @@ def normalize_file_path(file_path: str) -> str:
 # is enforced by tests/test_stdlib_modules_single_source so drift cannot land silently.
 _STDLIB_MODULES: frozenset[str] = frozenset(
     {
-        "os",
-        "sys",
-        "re",
-        "io",
-        "json",
-        "math",
-        "time",
-        "copy",
-        "glob",
-        "uuid",
-        "shutil",
-        "random",
-        "typing",
-        "logging",
-        "pathlib",
-        "datetime",
-        "string",
-        "decimal",
-        "inspect",
-        "warnings",
-        "argparse",
-        "textwrap",
-        "itertools",
-        "functools",
-        "operator",
-        "collections",
-        "subprocess",
-        "contextlib",
+        "os", "sys", "re", "io", "json", "math", "time", "copy", "glob", "uuid",
+        "shutil", "random", "typing", "logging", "pathlib", "datetime", "string",
+        "decimal", "inspect", "warnings", "argparse", "textwrap", "itertools",
+        "functools", "operator", "collections", "subprocess", "contextlib",
     }
 )
 
@@ -392,7 +428,13 @@ class Edge:
         callee gate, which normalizes the same way; the deterministic methods are
         already lowercase, so normalization only widens, never narrows, the set.
         """
-        return (self.resolution_method or "").strip().lower() in _DETERMINISTIC_METHODS
+        if (self.resolution_method or "").strip().lower() not in _DETERMINISTIC_METHODS:
+            return False
+        # B-3: agree with the closure's AND-rule (method ∈ set AND conf >= 0.7). A real
+        # ambiguity-demoted deterministic pick (import/same_file @0.6/CANDIDATE) is NOT a
+        # fact — it stays visible as an unverified lead (Edge.visible clears the 0.5 floor).
+        # conf <= 0.0 is the no-confidence sentinel (no-conf-column graph) → trust the method.
+        return self.confidence >= _FACT_CONFIDENCE_FLOOR or self.confidence <= 0.0
 
     @property
     def visible(self) -> bool:
@@ -496,11 +538,18 @@ def _node_ids(conn: sqlite3.Connection, file_path: str, name: str) -> list[int]:
     if not norm_fp:
         return []
     try:
+        # Graph-F7 (2026-07-10): the bare ``LIKE '%'||norm_fp`` had no path boundary, so
+        # focus ``app/db.py`` also unioned ``webapp/db.py`` (a foreign file whose name
+        # merely ENDS with the focus key), blending another file's nodes into the map.
+        # Keep the witness-twin suffix tolerance (a genuine nested ``src/app/db.py`` is a
+        # real path-boundary suffix and must still match) but require the boundary: an
+        # EXACT match OR a ``/``-delimited suffix. Structural; no task/file-specific logic.
         rows = conn.execute(
             "SELECT id FROM nodes "
-            "WHERE REPLACE(file_path, '\\', '/') LIKE ? AND name = ? "
+            "WHERE (REPLACE(file_path, '\\', '/') = ? "
+            "       OR REPLACE(file_path, '\\', '/') LIKE ?) AND name = ? "
             "AND label IN ('Function','Method')",
-            (f"%{norm_fp}", name),
+            (norm_fp, f"%/{norm_fp}", name),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -517,7 +566,9 @@ def _read_code_line(repo_root: str, rel_file: str, line: int) -> str:
     if not repo_root or not rel_file or not line or line <= 0:
         return ""
     try:
-        with open(os.path.join(repo_root, rel_file), encoding="utf-8", errors="ignore") as fh:
+        with open(
+            os.path.join(repo_root, rel_file), encoding="utf-8", errors="ignore"
+        ) as fh:
             lines = fh.readlines()
         if 0 < line <= len(lines):
             return lines[line - 1].strip()
@@ -593,9 +644,7 @@ def _neighbors(
     # names that are not real defs) and _fmt_edge rendered them indistinguishably from facts. Gate
     # only when the method column exists; without it the conf=0.0 sentinel already suppresses them.
     if has_method:
-        _det_in = ",".join(
-            "'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS)
-        )
+        _det_in = ",".join("'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS))
         sql += f" AND LOWER(TRIM(e.resolution_method)) IN ({_det_in})"
     try:
         rows = conn.execute(sql, node_ids).fetchall()
@@ -696,7 +745,9 @@ def _verified_neighbor_count(
         match_col, join_col = "e.target_id", "e.source_id"
     else:
         match_col, join_col = "e.source_id", "e.target_id"
-    _det_in = ",".join("'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS))
+    _det_in = ",".join(
+        "'" + str(m).lower() + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS)
+    )
     sql = (
         f"SELECT COUNT(DISTINCT n.name || '\\x00' || n.file_path) "
         f"FROM edges e JOIN nodes n ON {join_col} = n.id "
@@ -772,16 +823,32 @@ def _focus_depth_rels(
     # residual. The CALLS edge is itself a FACT (it has the dataflow tag only
     # because the promote pass resolved both endpoints), so it joins the
     # DATA_FLOW kind. Metadata-annotation read; no rank effect.
-    try:
-        ann_rows = conn.execute(
+    #
+    # B-24: detect the dataflow annotation via the normalized ``edge_metadata`` sub-table
+    # (``em.key = 'dataflow'``) instead of a raw ``metadata LIKE '%dataflow=%'`` — the
+    # LIKE also matched a stray ``…dataflow=`` substring inside another key's value and
+    # could not tell ``dataflow=x`` from ``no_dataflow=x``. Fall back to the raw-string
+    # LIKE when the table is absent/empty (old graph.db) — byte-identical to before.
+    if _edge_metadata_ready(conn):
+        ann_sql = (
+            f"SELECT 'DATA_FLOW', nt.name, nt.file_path, {conf_sel} "
+            f"FROM edges e JOIN nodes nt ON e.target_id = nt.id "
+            f"JOIN edge_metadata em ON em.edge_id = e.id AND em.key = 'dataflow' "
+            f"WHERE e.source_id IN ({placeholders}) AND e.type = 'CALLS' "
+            f"AND LOWER(TRIM(e.resolution_method)) IN ({_det_in}) "
+            f"AND nt.is_test = 0 AND nt.name IS NOT NULL"
+        )
+    else:
+        ann_sql = (
             f"SELECT 'DATA_FLOW', nt.name, nt.file_path, {conf_sel} "
             f"FROM edges e JOIN nodes nt ON e.target_id = nt.id "
             f"WHERE e.source_id IN ({placeholders}) AND e.type = 'CALLS' "
             f"AND e.metadata LIKE '%dataflow=%' "
             f"AND LOWER(TRIM(e.resolution_method)) IN ({_det_in}) "
-            f"AND nt.is_test = 0 AND nt.name IS NOT NULL",
-            node_ids,
-        ).fetchall()
+            f"AND nt.is_test = 0 AND nt.name IS NOT NULL"
+        )
+    try:
+        ann_rows = conn.execute(ann_sql, node_ids).fetchall()
         rows.extend(ann_rows)
     except sqlite3.Error:
         pass
@@ -789,6 +856,14 @@ def _focus_depth_rels(
     cands: list[DepthRel] = []
     for kind, tgt_name, tgt_file, conf in rows:
         if not tgt_name:
+            continue
+        # Graph-F4 (LEAK FAMILY, 2026-07-10): the SQL gate is only ``nt.is_test = 0``,
+        # but a TEST/DEMO file (``tests/helper.py``) or a VENDORED file
+        # (``node_modules/…``) can carry is_test=0 (a stale/frozen graph, or a helper
+        # module the indexer never flagged). The sibling ``_neighbors`` already drops
+        # those file-classes before render; do the SAME here so a depth-rel never
+        # steers the agent to edit a test/vendored file. Parity with curation_map:665.
+        if _is_test_or_demo(tgt_file or "") or _is_vendored_path(tgt_file or ""):
             continue
         try:
             conf_f = float(conf) if conf is not None else 0.0
@@ -857,7 +932,10 @@ def _apply_dynamic_budget(
     # facts at the ceiling would re-open the guess budget on a fact-rich hub).
     # Prefer the uncapped COUNT when given (closes the >over-fetch-window hub gap).
     windowed_fact_count = sum(1 for e in edges if e.is_fact)
-    raw_fact_count = true_fact_count if true_fact_count is not None else windowed_fact_count
+    raw_fact_count = (
+        true_fact_count if true_fact_count is not None
+        else windowed_fact_count
+    )
     # Defensive: the true count can only be >= what we see in the window; never
     # let a bad/smaller override re-open the guess budget.
     raw_fact_count = max(raw_fact_count, windowed_fact_count)
@@ -974,9 +1052,7 @@ def _dynamic_neighbors(
         conn, node_ids, direction=direction, has_method=has_method
     )
     edges = _apply_dynamic_budget(
-        raw,
-        fact_ceiling=fact_ceiling,
-        unverified_k=unverified_k,
+        raw, fact_ceiling=fact_ceiling, unverified_k=unverified_k,
         true_fact_count=true_facts,
     )
 
@@ -1003,7 +1079,9 @@ def _dynamic_neighbors(
     # surface the focus itself as a (2-hop) neighbor.
     for fid in node_ids:
         try:
-            row = conn.execute("SELECT name, file_path FROM nodes WHERE id = ?", (fid,)).fetchone()
+            row = conn.execute(
+                "SELECT name, file_path FROM nodes WHERE id = ?", (fid,)
+            ).fetchone()
         except sqlite3.Error:
             row = None
         if row and row[0]:
@@ -1071,52 +1149,36 @@ def build_function_map(
             ids = _node_ids(conn, fpath, fname)
             if dynamic:
                 callers = _dynamic_neighbors(
-                    conn,
-                    ids,
-                    direction="callers",
-                    has_conf=has_conf,
-                    has_method=has_method,
-                    fact_ceiling=fact_ceiling,
-                    unverified_k=unverified_k,
-                    second_hop=second_hop,
+                    conn, ids, direction="callers", has_conf=has_conf,
+                    has_method=has_method, fact_ceiling=fact_ceiling,
+                    unverified_k=unverified_k, second_hop=second_hop,
                     repo_root=repo_root,
                 )
                 callees = _dynamic_neighbors(
-                    conn,
-                    ids,
-                    direction="callees",
-                    has_conf=has_conf,
-                    has_method=has_method,
-                    fact_ceiling=fact_ceiling,
-                    unverified_k=unverified_k,
-                    second_hop=second_hop,
+                    conn, ids, direction="callees", has_conf=has_conf,
+                    has_method=has_method, fact_ceiling=fact_ceiling,
+                    unverified_k=unverified_k, second_hop=second_hop,
                     repo_root=repo_root,
                 )
             else:
                 # Legacy flat-cap path — unchanged v1.0 behavior.
                 callers = _neighbors(
-                    conn,
-                    ids,
-                    direction="callers",
-                    has_conf=has_conf,
-                    has_method=has_method,
-                    max_neighbors=max_neighbors,
+                    conn, ids, direction="callers", has_conf=has_conf,
+                    has_method=has_method, max_neighbors=max_neighbors,
                     repo_root=repo_root,
                 )
                 callees = _neighbors(
-                    conn,
-                    ids,
-                    direction="callees",
-                    has_conf=has_conf,
-                    has_method=has_method,
-                    max_neighbors=max_neighbors,
+                    conn, ids, direction="callees", has_conf=has_conf,
+                    has_method=has_method, max_neighbors=max_neighbors,
                     repo_root=repo_root,
                 )
             # DEPTH (gt_new §6 trickle-down): the focus function's promoted
             # READS/WRITES/DATA_FLOW relationships — SCOPE/COMPLETENESS only,
             # never rank (this query is keyed off the focus ids; its output goes
             # only into the <gt-graph-map> render). [] on a no-promote graph.
-            depth_rels = _focus_depth_rels(conn, ids, has_conf=has_conf, has_method=has_method)
+            depth_rels = _focus_depth_rels(
+                conn, ids, has_conf=has_conf, has_method=has_method
+            )
             out.append(
                 FunctionMap(
                     file=fpath,
@@ -1156,7 +1218,9 @@ def verified_caller_count(graph_db_path: str, file_path: str, name: str) -> int:
         ids = _node_ids(conn, file_path, name)
         if not ids:
             return 0
-        return _verified_neighbor_count(conn, ids, direction="callers", has_method=has_method)
+        return _verified_neighbor_count(
+            conn, ids, direction="callers", has_method=has_method
+        )
     finally:
         conn.close()
 

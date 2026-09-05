@@ -9,7 +9,6 @@ Usage (inside the container):
 Budget: gt_lookup=2/task, gt_impact=2/task, gt_check=3/task.
 When budget is exhausted, returns BUDGET_EXHAUSTED with redirect suggestion.
 """
-
 import argparse
 import os
 import sys
@@ -41,13 +40,9 @@ def main():
     from groundtruth.mcp.composite import gt_lookup_impl, gt_impact_impl, gt_check_impl
 
     if args.command == "lookup":
-        print(
-            gt_lookup_impl(args.symbol, db_path=db_path, root_path=root_path, file_path=args.file)
-        )
+        print(gt_lookup_impl(args.symbol, db_path=db_path, root_path=root_path, file_path=args.file))
     elif args.command == "impact":
-        print(
-            gt_impact_impl(args.symbol, db_path=db_path, root_path=root_path, file_path=args.file)
-        )
+        print(gt_impact_impl(args.symbol, db_path=db_path, root_path=root_path, file_path=args.file))
     elif args.command == "check":
         print(gt_check_impl(args.file_path, db_path=db_path, root_path=root_path))
 

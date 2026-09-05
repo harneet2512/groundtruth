@@ -65,30 +65,26 @@ async def handle_check(
 
             caller_files = {r.referenced_in_file for r in callers if r.referenced_in_file}
             if len(callers) >= 3:
-                findings.append(
-                    Finding(
-                        kind=FindingKind.CALLER_CONTRACT,
-                        severity=Severity.WARNING,
-                        confidence=0.80,
-                        location=Location(file=matched, line=sym.line_number, symbol=sym.name),
-                        message=f"{sym.name}() has {len(callers)} callers in {len(caller_files)} files — verify signature compatibility",
-                        agent_action=AgentAction.VERIFY,
-                        why_now=WhyNow.FILE_CHANGED,
-                    )
-                )
+                findings.append(Finding(
+                    kind=FindingKind.CALLER_CONTRACT,
+                    severity=Severity.WARNING,
+                    confidence=0.80,
+                    location=Location(file=matched, line=sym.line_number, symbol=sym.name),
+                    message=f"{sym.name}() has {len(callers)} callers in {len(caller_files)} files — verify signature compatibility",
+                    agent_action=AgentAction.VERIFY,
+                    why_now=WhyNow.FILE_CHANGED,
+                ))
 
             if sym.return_type:
-                findings.append(
-                    Finding(
-                        kind=FindingKind.CALLER_EXPECTATION,
-                        severity=Severity.WARNING,
-                        confidence=0.75,
-                        location=Location(file=matched, line=sym.line_number, symbol=sym.name),
-                        message=f"callers expect return type: {sym.return_type}",
-                        agent_action=AgentAction.VERIFY,
-                        why_now=WhyNow.FILE_CHANGED,
-                    )
-                )
+                findings.append(Finding(
+                    kind=FindingKind.CALLER_EXPECTATION,
+                    severity=Severity.WARNING,
+                    confidence=0.75,
+                    location=Location(file=matched, line=sym.line_number, symbol=sym.name),
+                    message=f"callers expect return type: {sym.return_type}",
+                    agent_action=AgentAction.VERIFY,
+                    why_now=WhyNow.FILE_CHANGED,
+                ))
 
     pruned = prune_findings(novelty.filter(findings), confidence_floor=MIN_CONFIDENCE)
     if not pruned:

@@ -3,7 +3,6 @@
 Pure regex extraction. No LLM, no embeddings, no graph DB lookup. Track B
 consumes the QueryObject and performs the cross-check against graph.db.
 """
-
 from __future__ import annotations
 
 import os

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -115,10 +117,8 @@ def _is_source_file(path: str) -> bool:
 
 def _is_root_scaffold(status: str, path: str) -> bool:
     norm = _norm(path)
-    return (
-        status.startswith("A")
-        and "/" not in norm
-        and any(fnmatch.fnmatch(norm, pattern) for pattern in ROOT_SCAFFOLD_PATTERNS)
+    return status.startswith("A") and "/" not in norm and any(
+        fnmatch.fnmatch(norm, pattern) for pattern in ROOT_SCAFFOLD_PATTERNS
     )
 
 
@@ -150,6 +150,119 @@ def _focus_file(item: Any) -> str:
     return _norm(str(item))
 
 
+# ---------------------------------------------------------------------------
+# G1 — diff hygiene (the submit gate's hygiene arm). Categorical BLOCK on a
+# binary blob in the diff (a compiled artifact is never a source fix — this is
+# the class that poisoned the net-negative run: an 11.5 MB `abs` binary staged
+# into the patch). Oversize/lockfile are ADVISORY only (correct-or-quiet:
+# a false block is worse than no gate — plan §6 invariant ②).
+# ---------------------------------------------------------------------------
+_LOCKFILE_NAMES: frozenset[str] = frozenset({
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock",
+    "go.sum", "poetry.lock", "gemfile.lock", "composer.lock",
+})
+_BINARY_DIFFER = re.compile(r"^Binary files a/(.+?) and b/(.+?) differ", re.MULTILINE)
+
+
+def _oversize_added_lines() -> int:
+    """Advisory oversize threshold (env-tunable; never gates a BLOCK, only a warning)."""
+    try:
+        return max(1, int(os.environ.get("GT_HYGIENE_MAX_ADDED_LINES", "10000")))
+    except ValueError:
+        return 10000
+
+
+def diff_hygiene(numstat: str = "", patch: str = "") -> dict[str, Any]:
+    """Pure hygiene verdict from ``git diff --numstat`` output (+ optional raw patch).
+
+    ``git diff --numstat`` prints ``<added>\\t<deleted>\\t<path>`` per file, and a
+    BINARY file as ``-\\t-\\t<path>`` — the reliable, extension-independent binary
+    signal that ``patch_hygiene.classify_file`` (name-only) structurally cannot see.
+
+    Returns a dict consumed by ``submit_gate.gate_verdict`` as ``hygiene``:
+    ``blocking`` True only for a binary blob; oversize/lockfile ride along as
+    advisory context, never a block.
+    """
+    binary_files: list[str] = []
+    oversize_files: list[dict[str, Any]] = []
+    lockfiles: list[str] = []
+    cap = _oversize_added_lines()
+
+    for line in (numstat or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        added, deleted, path = parts[0].strip(), parts[1].strip(), _norm(parts[-1].strip())
+        if not path:
+            continue
+        base = path.rsplit("/", 1)[-1].lower()
+        if base in _LOCKFILE_NAMES or base.endswith(".lock"):
+            lockfiles.append(path)
+        if added == "-" and deleted == "-":
+            binary_files.append(path)
+            continue
+        try:
+            n_added = int(added)
+        except ValueError:
+            n_added = 0
+        if n_added > cap:
+            oversize_files.append({"path": path, "added_lines": n_added})
+
+    # Raw-patch fallback: some pipelines only carry the applied patch text.
+    if patch:
+        for m in _BINARY_DIFFER.finditer(patch):
+            p = _norm(m.group(2))
+            if p not in binary_files:
+                binary_files.append(p)
+        if "GIT binary patch" in patch and not binary_files:
+            binary_files.append("(git binary patch present)")
+
+    blocking = bool(binary_files)
+    if blocking:
+        reason = "binary_file_in_diff"
+        detail = "refusing to commit binary artifact(s): " + ", ".join(binary_files[:3])
+    elif oversize_files:
+        reason = "oversize_addition"
+        detail = "large added file(s): " + ", ".join(
+            f"{f['path']} (+{f['added_lines']})" for f in oversize_files[:3]
+        )
+    elif lockfiles:
+        reason = "lockfile_touched"
+        detail = "lockfile(s) in diff: " + ", ".join(lockfiles[:3])
+    else:
+        reason = ""
+        detail = ""
+
+    return {
+        "blocking": blocking,
+        "reason": reason,
+        "detail": detail,
+        "binary_files": binary_files,
+        "oversize_files": oversize_files,
+        "lockfiles": lockfiles,
+    }
+
+
+def _git_numstat(repo_root: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo_root, "diff", "--numstat", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def git_diff_hygiene(repo_root: str) -> dict[str, Any]:
+    """Live wrapper: compute ``diff_hygiene`` from the repo's current diff.
+
+    Correct-or-quiet: a git failure yields empty numstat -> non-blocking verdict.
+    """
+    return diff_hygiene(numstat=_git_numstat(repo_root))
+
+
 def audit_patch(
     repo_root: str,
     *,
@@ -179,12 +292,8 @@ def audit_patch(
 
     root_scaffolds = sorted(path for status, path in rows if _is_root_scaffold(status, path))
     root_scaffold_set = set(root_scaffolds)
-    source_files = sorted(
-        path for path in changed if path not in root_scaffold_set and _is_source_file(path)
-    )
-    test_files = sorted(
-        path for path in changed if path not in root_scaffold_set and _is_test_file(path)
-    )
+    source_files = sorted(path for path in changed if path not in root_scaffold_set and _is_source_file(path))
+    test_files = sorted(path for path in changed if path not in root_scaffold_set and _is_test_file(path))
     cluster_touched = sorted(path for path in changed if path in cluster)
     focus_touched_set = {path for path in changed if path in focus}
     focus_touched = [path for path in focus_ranked if path in focus_touched_set]

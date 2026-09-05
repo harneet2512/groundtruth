@@ -23,6 +23,7 @@ import re
 import sqlite3
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from groundtruth.hooks.logger import log_hook
@@ -42,7 +43,9 @@ from groundtruth.delivery.path_policy import is_vendored_path as _path_policy_ve
 # evidence (contract pillar, ego-graph, test assertions). Token estimate = chars//4.
 
 _L3B_MAX_TOKENS = 600  # total L3b render budget (==MAX_BRIEF_TOKENS prepend rail)
-_GT_LAYER_EVENTS_PV = os.environ.get("GT_LAYER_EVENTS_PATH", "/tmp/gt_layer_events.jsonl")
+_GT_LAYER_EVENTS_PV = os.environ.get(
+    "GT_LAYER_EVENTS_PATH", "/tmp/gt_layer_events.jsonl"
+)
 
 # Item #31: real first-line shape of the RepoGraph ego block (ego.py render():
 # `<name>() in <basename>:<line>`). The trimmer keys priority off line prefixes;
@@ -114,7 +117,9 @@ def _enforce_l3b_cap(
     indexed = list(enumerate(lines))
     # Drop order: highest priority-number first; ties broken by LATER position
     # (tail of a band trimmed before its head).
-    drop_order = sorted(indexed, key=lambda it: (_l3b_line_priority(it[1]), it[0]), reverse=True)
+    drop_order = sorted(
+        indexed, key=lambda it: (_l3b_line_priority(it[1]), it[0]), reverse=True
+    )
     dropped: set[int] = set()
     for idx, _ln in drop_order:
         kept = [l for i, l in indexed if i not in dropped]
@@ -138,7 +143,6 @@ def _emit_l3b_cap_event(
     metrics reader sees the FINAL token count + cap_enforced flag. Best-effort."""
     try:
         import json as _json
-
         rec = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "layer": "L3b",
@@ -166,15 +170,12 @@ def _edge_filter(db_path: str, *, alias: str = "e") -> str:
     """
     try:
         from groundtruth.hooks.post_edit import _edge_filter_for_db
-
         return _edge_filter_for_db(db_path, alias=alias)
     except Exception:
         return f"COALESCE({alias}.confidence, 0.5) >= 0.7"
 
 
-def _contract_pillar(
-    conn: sqlite3.Connection, needle: str, issue_terms: set[str] | None = None
-) -> list[str]:
+def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str] | None = None) -> list[str]:
     """Contract pillar (CLAUDE.md:80-86) — signature + return type per function.
 
     ALWAYS-FIRE: this evidence comes from the `nodes` table (signature,
@@ -189,7 +190,6 @@ def _contract_pillar(
     Returns a list of "[CONTRACT] name(sig) -> ret" lines (verbatim, no
     confidence labels — the data is structurally certain from the parser).
     """
-
     # Issue ANCHORS (the symbols the issue NAMES) are the decisive signal for which
     # function in this file the agent cares about — SWERank ICLR 2025: issue-named
     # entities localize the edit target. Computed BEFORE the fetch (was after) so an
@@ -204,9 +204,11 @@ def _contract_pillar(
     def _generic_anchor(_n: str) -> bool:
         _s = (_n or "").strip()
         return _s.startswith("__") and _s.endswith("__")
-
     _anch_data = _load_issue_anchors()
-    _anchor_syms = {s.lower() for s in _anch_data.get("symbols", []) if not _generic_anchor(s)}
+    _anchor_syms = {
+        s.lower() for s in _anch_data.get("symbols", [])
+        if not _generic_anchor(s)
+    }
     # PROVENANCE tiers (research-backed, 3-tier):
     #   300 = code_symbols (backtick-wrapped — reporter explicitly marked as code)
     #         Reformulate, Retrieve, Localize arXiv:2512.07022 2025
@@ -214,8 +216,14 @@ def _contract_pillar(
     #   100 = body anchors (everywhere else — weakest tier)
     # Prose-only common words (check/set/get/run) already REMOVED from symbols
     # by extract_issue_anchors, so they never seed the graph localizer.
-    _code_syms = {s.lower() for s in _anch_data.get("code_symbols", []) if not _generic_anchor(s)}
-    _title_syms = {s.lower() for s in _anch_data.get("title_symbols", []) if not _generic_anchor(s)}
+    _code_syms = {
+        s.lower() for s in _anch_data.get("code_symbols", [])
+        if not _generic_anchor(s)
+    }
+    _title_syms = {
+        s.lower() for s in _anch_data.get("title_symbols", [])
+        if not _generic_anchor(s)
+    }
 
     # Anchor-matched functions sort to the FRONT of the fetch (CASE ... THEN 0) so
     # they ALWAYS survive the LIMIT regardless of definition position; the rest fill
@@ -365,7 +373,6 @@ def _is_deliverable_path(fp: str) -> bool:
     """Return True iff a path can be shown to the agent as source evidence."""
     return _path_policy_is_deliverable(fp)
 
-
 # Layer 2 (Agent-State Tracker) — FINAL_ARCH_V2 §3. Imported lazily inside
 # functions where the in-process AgentState is passed; otherwise the loaders
 # below fall back to the legacy /tmp files (subprocess compatibility).
@@ -466,11 +473,16 @@ def _read_file(root: str, relpath: str) -> str:
 
 
 def _is_test_file(filepath: str) -> bool:
-    fp = "/" + filepath.lower().replace("\\", "/")
-    base = os.path.basename(fp)
-    if base.startswith("test_"):
-        return True
-    return any(p in fp for p in ["/tests/", "/test/", "/testing/", "/fixtures/"])
+    """Delegate to the SINGLE canonical test predicate (``path_policy.is_test_path`` —
+    the de-dup seam all consumers delegate to). Full ``walker.IsTestFile`` parity across
+    languages: Go ``*_test.go``, JVM ``FooTest.java``, Ruby ``*_spec.rb``, C#/PHP/Swift,
+    ``conftest.py``/``tests.py``, and every test dir segment — while keeping
+    ``latest.py``/``attestation.py`` clean. A thinner local copy leaked a test PATH into
+    the ``<gt-context>`` "Imported by:" render (run 28772993900: test_language_extensions.py,
+    xarray/tests/test_coordinate_transform.py) and missed non-Python test conventions."""
+    from groundtruth.delivery.path_policy import is_test_path
+
+    return is_test_path(filepath)
 
 
 def _classify_role(method_name: str, method_node: ast.FunctionDef) -> str:
@@ -540,7 +552,6 @@ def _load_issue_anchors() -> dict:
     """Load issue anchors (symbols, paths, test_names) written by wrapper."""
     try:
         import json as _json
-
         raw = open("/tmp/gt_issue_anchors.json", encoding="utf-8").read().strip()
         if not raw:
             return {"symbols": [], "paths": [], "test_names": []}
@@ -550,9 +561,7 @@ def _load_issue_anchors() -> dict:
 
 
 def _score_by_issue_relevance(
-    files: list[tuple[str, int]],
-    root: str,
-    issue_terms: set[str],
+    files: list[tuple[str, int]], root: str, issue_terms: set[str],
 ) -> list[tuple[str, int, int]]:
     """Re-rank neighbor files by issue terms + anchor symbol/path matches."""
     _anchors = _load_issue_anchors()
@@ -571,11 +580,7 @@ def _score_by_issue_relevance(
         term_hits = 0
         if issue_terms:
             try:
-                text = (
-                    open(os.path.join(root, fp), encoding="utf-8", errors="ignore")
-                    .read(200_000)
-                    .lower()
-                )
+                text = open(os.path.join(root, fp), encoding="utf-8", errors="ignore").read(200_000).lower()
                 term_hits = sum(1 for t in issue_terms if t in text)
             except OSError:
                 pass
@@ -644,8 +649,7 @@ def _classify_layer_inline(file_path: str) -> str:
 
 
 def _in_degree_for_file(
-    cur: "sqlite3.Cursor",
-    file_path: str,
+    cur: "sqlite3.Cursor", file_path: str,
     edge_filter: str = "COALESCE(e.confidence, 0.5) >= 0.7",
 ) -> int:
     """Get total incoming edge count for a file (used for hub penalty).
@@ -674,9 +678,7 @@ def _in_degree_for_file(
 
 
 def _top_functions_for_file(
-    cur: "sqlite3.Cursor",
-    file_path: str,
-    limit: int = 2,
+    cur: "sqlite3.Cursor", file_path: str, limit: int = 2,
     edge_filter: str = "COALESCE(e.confidence, 0.5) >= 0.7",
 ) -> list[tuple[str, int]]:
     """Get top functions in a file by reference count, boosted by anchor match.
@@ -704,12 +706,10 @@ def _top_functions_for_file(
         _anchors = _load_issue_anchors()
         _syms = set(s.lower() for s in _anchors.get("symbols", []))
         if _syms:
-
             def _boost(item: tuple) -> tuple:
                 name, cnt = item
                 boost = 1000 if name.lower() in _syms else 0
                 return (boost + cnt, name)
-
             funcs.sort(key=_boost, reverse=True)
         return funcs[:limit]
     except Exception:
@@ -717,11 +717,7 @@ def _top_functions_for_file(
 
 
 def graph_navigation(
-    relpath: str,
-    db_path: str,
-    *,
-    limit: int = 5,
-    iteration_ratio: float = 0.0,
+    relpath: str, db_path: str, *, limit: int = 5, iteration_ratio: float = 0.0,
     _evidence_accumulator: list[dict] | None = None,
     state: object | None = None,
 ) -> tuple[list[str], int]:
@@ -779,15 +775,8 @@ def graph_navigation(
     _iteration_band = "early_0_25"
     if rebuild_l3b:
         try:
-            from groundtruth.telemetry.constants import (  # noqa: F401
-                L3B_EDGE_LIMITS,
-                BAND_EARLY,
-                BAND_MID,
-                BAND_LATE,
-                BAND_FINAL,
-            )
+            from groundtruth.telemetry.constants import L3B_EDGE_LIMITS, BAND_EARLY, BAND_MID, BAND_LATE, BAND_FINAL
             from groundtruth.telemetry.schemas import get_iteration_band
-
             _iteration_band = get_iteration_band(int(iteration_ratio * 100), 100)
             _configured_limit = L3B_EDGE_LIMITS.get(_iteration_band, limit)
             if _configured_limit < limit:
@@ -852,11 +841,7 @@ def graph_navigation(
                 ORDER BY cnt DESC
                 LIMIT ?
                 """,
-                (
-                    needle,
-                    needle,
-                    limit * 4,
-                ),  # fetch more for filtering; SWAP-INVARIANT: no test callers
+                (needle, needle, limit * 4),  # fetch more for filtering; SWAP-INVARIANT: no test callers
             )
             callers = [(row[0], row[1]) for row in cur.fetchall()]
             # Get one representative source_line + TARGET symbol per caller file. The
@@ -967,11 +952,11 @@ def graph_navigation(
             if issue_terms:
                 ranked_callers = _score_by_issue_relevance(callers, root, issue_terms)
                 ranked_callees = _score_by_issue_relevance(callees, root, issue_terms)
-                top_callers = [(f, cnt) for f, cnt, _ in ranked_callers[: limit * 2]]
-                top_callees = [(f, cnt) for f, cnt, _ in ranked_callees[: limit * 2]]
+                top_callers = [(f, cnt) for f, cnt, _ in ranked_callers[:limit * 2]]
+                top_callees = [(f, cnt) for f, cnt, _ in ranked_callees[:limit * 2]]
             else:
-                top_callers = callers[: limit * 2]
-                top_callees = callees[: limit * 2]
+                top_callers = callers[:limit * 2]
+                top_callees = callees[:limit * 2]
 
             # Improvement 4: Hub-penalized ranking (repo-relative hub scale)
             # Compute p90 in-degree once for this graph instead of hardcoded 50
@@ -981,41 +966,31 @@ def graph_navigation(
             # not a hardcoded `confidence >= 0.7` literal. Three different edge sets feeding
             # one ranking formula (numerator `_ef`, in_deg unfiltered, scale conf>=0.7)
             # miscalibrated the penalty; thread `_ef` through all three.
-            all_degrees = [
-                r[0]
-                for r in cur.execute(
-                    f"SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id "
-                    f"AND e.type = 'CALLS' AND {_ef} GROUP BY n.file_path ORDER BY 1"
-                ).fetchall()
-            ]
+            all_degrees = [r[0] for r in cur.execute(
+                f"SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id "
+                f"AND e.type = 'CALLS' AND {_ef} GROUP BY n.file_path ORDER BY 1"
+            ).fetchall()]
             hub_scale = all_degrees[int(len(all_degrees) * 0.9)] if all_degrees else 50
 
             def _hub_penalized_score(fp: str, cnt: int) -> float:
                 in_deg = _in_degree_for_file(cur, fp, edge_filter=_ef)
                 return cnt * (1.0 - min(1.0, in_deg / float(hub_scale)))
 
-            top_callers = sorted(
-                top_callers, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True
-            )[:limit]
-            top_callees = sorted(
-                top_callees, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True
-            )[:limit]
+            top_callers = sorted(top_callers, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
+            top_callees = sorted(top_callees, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
 
             # Structured capture: decay metadata + edges
             _primary_edge_file: str | None = None
             _primary_edge_kind: str | None = None
             if _evidence_accumulator is not None:
-                _evidence_accumulator.append(
-                    {
-                        "kind": "l3b_decay_metadata",
-                        "decay_applied": _decay_applied,
-                        "edge_limit_before": _edge_limit_before,
-                        "edge_limit_after": limit,
-                        "iteration_band": _iteration_band,
-                        "broad_navigation_after_60pct": iteration_ratio >= 0.60
-                        and not _decay_applied,
-                    }
-                )
+                _evidence_accumulator.append({
+                    "kind": "l3b_decay_metadata",
+                    "decay_applied": _decay_applied,
+                    "edge_limit_before": _edge_limit_before,
+                    "edge_limit_after": limit,
+                    "iteration_band": _iteration_band,
+                    "broad_navigation_after_60pct": iteration_ratio >= 0.60 and not _decay_applied,
+                })
             # Mark primary edge (top caller, or top callee if no caller)
             if top_callers:
                 _primary_edge_file = top_callers[0][0]
@@ -1026,36 +1001,24 @@ def graph_navigation(
 
             if _evidence_accumulator is not None:
                 for i, (fp, cnt) in enumerate(top_callers):
-                    _evidence_accumulator.append(
-                        {
-                            "kind": "l3b_caller_edge",
-                            "file_path": fp,
-                            "text": f"{cnt} calls",
-                            "source": "graph_db",
-                            "reason": f"calls symbol in {needle}",
-                            "primary_edge": i == 0,
-                        }
-                    )
+                    _evidence_accumulator.append({
+                        "kind": "l3b_caller_edge", "file_path": fp,
+                        "text": f"{cnt} calls", "source": "graph_db",
+                        "reason": f"calls symbol in {needle}",
+                        "primary_edge": i == 0,
+                    })
                 for i, (fp, cnt) in enumerate(top_callees):
-                    _evidence_accumulator.append(
-                        {
-                            "kind": "l3b_callee_edge",
-                            "file_path": fp,
-                            "text": f"{cnt} calls",
-                            "source": "graph_db",
-                            "reason": f"called by symbol in {needle}",
-                            "primary_edge": i == 0 and not top_callers,
-                        }
-                    )
+                    _evidence_accumulator.append({
+                        "kind": "l3b_callee_edge", "file_path": fp,
+                        "text": f"{cnt} calls", "source": "graph_db",
+                        "reason": f"called by symbol in {needle}",
+                        "primary_edge": i == 0 and not top_callers,
+                    })
         except Exception as _sb1_exc:
             # Caller/callee/hub-rank compute failed — degrade ONLY this block.
             # top_callers/top_callees stay [] so rendering renders nothing here;
             # importers + exception-flow + contract/ego (other blocks) still fire.
-            print(
-                f"[GT_META] graph_nav_callers_error: {type(_sb1_exc).__name__}: {_sb1_exc}",
-                file=sys.stderr,
-                flush=True,
-            )
+            print(f"[GT_META] graph_nav_callers_error: {type(_sb1_exc).__name__}: {_sb1_exc}", file=sys.stderr, flush=True)
 
         # --- Sub-block 2: caller/callee rendering ---
         try:
@@ -1067,10 +1030,7 @@ def graph_navigation(
                 funcs = _top_functions_for_file(cur, fp, limit=2, edge_filter=_ef)
                 func_names = ",".join(name for name, _ in funcs) if funcs else ""
                 suffix = ""
-                if any(
-                    fp == c or fp.endswith("/" + c) or c.endswith("/" + fp)
-                    for c in brief_candidates
-                ):
+                if any(fp == c or fp.endswith("/" + c) or c.endswith("/" + fp) for c in brief_candidates):
                     suffix = " [CANDIDATE]"
                 # L3b+ Enhancement: layer classification tag
                 _layer_tag = _classify_layer_inline(fp)
@@ -1094,20 +1054,12 @@ def graph_navigation(
                 return f"{fp} ({cnt}x){suffix}"
 
             # Token caps per band (approx chars = tokens * 4)
-            _char_caps = {
-                "early_0_25": 1000,
-                "mid_25_60": 640,
-                "late_60_85": 320,
-                "final_85_100": 0,
-            }
+            _char_caps = {"early_0_25": 1000, "mid_25_60": 640, "late_60_85": 320, "final_85_100": 0}
             _char_cap = _char_caps.get(_iteration_band, 1000) if _l3b_primary else 99999
 
             if _l3b_primary and iteration_ratio >= 0.25 and _primary_edge_file:
                 # After early band: render ONLY primary edge
-                primary_formatted = _format_neighbor(
-                    _primary_edge_file,
-                    top_callers[0][1] if top_callers else (top_callees[0][1] if top_callees else 0),
-                )
+                primary_formatted = _format_neighbor(_primary_edge_file, top_callers[0][1] if top_callers else (top_callees[0][1] if top_callees else 0))
                 label = "Called by" if top_callers else "Calls into"
                 line = f"{label}: {primary_formatted}"
                 if len(line) <= _char_cap:
@@ -1117,21 +1069,14 @@ def graph_navigation(
             else:
                 # Early band or flag off: render all (original behavior)
                 if top_callers:
-                    caller_files = [
-                        _format_neighbor(fp, cnt, _caller_source_lines.get(fp, 0))
-                        for fp, cnt in top_callers
-                    ]
+                    caller_files = [_format_neighbor(fp, cnt, _caller_source_lines.get(fp, 0)) for fp, cnt in top_callers]
                     out.append(f"Called by: {', '.join(caller_files)}")
                 # Rule 3 (R2/R5): Suppress callees during read-only exploration.
                 # Callee info is useful for edit propagation (post_edit.py handles
                 # that). During exploration, callees add noise the agent doesn't
                 # follow. Research: Agentless phase separation, SE-agent lifecycle.
         except Exception as _sb2_exc:
-            print(
-                f"[GT_META] graph_nav_render_error: {type(_sb2_exc).__name__}: {_sb2_exc}",
-                file=sys.stderr,
-                flush=True,
-            )
+            print(f"[GT_META] graph_nav_render_error: {type(_sb2_exc).__name__}: {_sb2_exc}", file=sys.stderr, flush=True)
 
         # --- Sub-block 3: importers ---
         # Importers: skip after 60% iteration (Change 4)
@@ -1140,10 +1085,9 @@ def graph_navigation(
         # anyway). Presence-probe: some indexes materialize 0 IMPORTS edges; an empty
         # "Imported by:" on such a graph FALSELY implies the file is un-imported.
         try:
-            if (
-                not (rebuild_l3b and iteration_ratio >= 0.60)
-                and cur.execute("SELECT 1 FROM edges WHERE type = 'IMPORTS' LIMIT 1").fetchone()
-            ):
+            if not (rebuild_l3b and iteration_ratio >= 0.60) and cur.execute(
+                "SELECT 1 FROM edges WHERE type = 'IMPORTS' LIMIT 1"
+            ).fetchone():
                 _resolved_imp = _resolve_file_path(conn, needle)
                 _ef_imp = _edge_filter(db_path)
                 cur.execute(
@@ -1158,56 +1102,42 @@ def graph_navigation(
                     JOIN nodes nsrc ON e.source_id = nsrc.id
                     WHERE nt.file_path = ?
                       AND nsrc.file_path != ?
+                      AND nsrc.is_test = 0
                     LIMIT ?
                     """,
                     (_resolved_imp, _resolved_imp, limit),
                 )
-                importers = [fp for (fp,) in cur.fetchall() if fp not in visited_files]
+                # LEAK GUARD: never surface a test file in "Imported by:" — a test
+                # path is a test artifact (the strict zero-leak bar). The column
+                # filter above is defense-in-depth; the path guard is primary
+                # because a test file's module-level import edge is not is_test-flagged.
+                importers = [
+                    fp
+                    for (fp,) in cur.fetchall()
+                    if fp not in visited_files and not _is_test_file(fp)
+                ]
                 if importers:
                     out.append(f"Imported by: {', '.join(importers)}")
                     # Structured capture: importers
                     if _evidence_accumulator is not None:
                         for fp in importers:
-                            _evidence_accumulator.append(
-                                {
-                                    "kind": "l3b_importer_edge",
-                                    "file_path": fp,
-                                    "source": "graph_db",
-                                    "reason": f"imports from {needle}",
-                                }
-                            )
+                            _evidence_accumulator.append({
+                                "kind": "l3b_importer_edge", "file_path": fp,
+                                "source": "graph_db", "reason": f"imports from {needle}",
+                            })
         except Exception as _sb3_exc:
-            print(
-                f"[GT_META] graph_nav_importers_error: {type(_sb3_exc).__name__}: {_sb3_exc}",
-                file=sys.stderr,
-                flush=True,
-            )
+            print(f"[GT_META] graph_nav_importers_error: {type(_sb3_exc).__name__}: {_sb3_exc}", file=sys.stderr, flush=True)
 
         # --- Sub-block 4: exception-flow ---
         # L4b-1: Exception path evidence (Calcagno et al. NFM 2015)
         # Rule 5 (R4): Only emit RAISES/CATCHES when issue keywords match
         # error-handling terms. OpenAI: "relevant context, not all context."
         try:
-            _ERROR_KEYWORDS = frozenset(
-                {
-                    "error",
-                    "exception",
-                    "raise",
-                    "raises",
-                    "catch",
-                    "catches",
-                    "handle",
-                    "handler",
-                    "traceback",
-                    "crash",
-                    "fail",
-                    "failure",
-                    "throw",
-                    "thrown",
-                    "except",
-                    "unexpected",
-                }
-            )
+            _ERROR_KEYWORDS = frozenset({
+                "error", "exception", "raise", "raises", "catch", "catches",
+                "handle", "handler", "traceback", "crash", "fail", "failure",
+                "throw", "thrown", "except", "unexpected",
+            })
             _issue_terms_exc = set()
             try:
                 _it_path = "/tmp/gt_issue_terms.txt"
@@ -1243,17 +1173,11 @@ def graph_navigation(
                         _exc_parts.append(f"[{tag}] {val}")
                     out.append(" | ".join(_exc_parts))
         except Exception as _sb4_exc:
-            print(
-                f"[GT_META] graph_nav_exception_flow_error: {type(_sb4_exc).__name__}: {_sb4_exc}",
-                file=sys.stderr,
-                flush=True,
-            )
+            print(f"[GT_META] graph_nav_exception_flow_error: {type(_sb4_exc).__name__}: {_sb4_exc}", file=sys.stderr, flush=True)
 
         # Progress tracking (Change 4)
         if rebuild_l3b and total_candidates > 0 and visited_files:
-            out.insert(
-                0, f"[Progress: visited {len(visited_files)}/{total_candidates} connected files]"
-            )
+            out.insert(0, f"[Progress: visited {len(visited_files)}/{total_candidates} connected files]")
 
         # Late-phase focus tag (Change 4)
         if rebuild_l3b and iteration_ratio >= 0.85 and out:
@@ -1265,11 +1189,7 @@ def graph_navigation(
         # errors above, so reaching here means a structural failure — but we
         # STILL return the evidence already accumulated in `out` rather than
         # nuking it to []. Degrade locally, never zero the agent's context.
-        print(
-            f"[GT_META] graph_navigation_error: {type(exc).__name__}: {exc}",
-            file=sys.stderr,
-            flush=True,
-        )
+        print(f"[GT_META] graph_navigation_error: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return out, total_callers
     finally:
         conn.close()
@@ -1282,7 +1202,6 @@ def graph_navigation(
     #   3. Must have callers passing the gate (otherwise silence)
     try:
         from groundtruth.graph.ego import ego_graph as _ego
-
         _issue_terms = _load_issue_terms(state)  # Fix D: pass state so terms load
         _ego_conn = sqlite3.connect(db_path)
         try:
@@ -1313,8 +1232,9 @@ def graph_navigation(
             # name resolves to a file other than the viewed file, stay silent
             # rather than show a wrong-file homonym. Generalized: pure path
             # identity, no hardcoded names.
-            _center_ok = _eg.center is not None and _same_stored_file(
-                getattr(_eg.center, "file_path", ""), needle
+            _center_ok = (
+                _eg.center is not None
+                and _same_stored_file(getattr(_eg.center, "file_path", ""), needle)
             )
             if _center_ok and len(_eg.callers) > 0:
                 # DISABLED (swap-invariant — run15 leak): strip ALL test-derived
@@ -1329,14 +1249,12 @@ def graph_navigation(
                 # consistency / callees pillars are unaffected.
                 _eg.test_assertions = []
                 _eg.nodes = {
-                    _nid: _n
-                    for _nid, _n in _eg.nodes.items()
+                    _nid: _n for _nid, _n in _eg.nodes.items()
                     if not getattr(_n, "is_test", False)
                     or (_eg.center is not None and _nid == _eg.center.id)
                 }
                 _eg.edges = [
-                    _e
-                    for _e in _eg.edges
+                    _e for _e in _eg.edges
                     if _e.source_id in _eg.nodes and _e.target_id in _eg.nodes
                 ]
                 _ego_text = _eg.render(max_tokens=150)
@@ -1361,25 +1279,14 @@ def graph_navigation(
                     _ego_text = "\n".join(_ego_lines).strip()
                 if _ego_text:
                     out.insert(0, _ego_text)
-                    print(
-                        f"[GT_META] ego_graph_view: func={_best_func} callers={len(_eg.callers)} "
-                        f"guards={len(_eg.guards)} tests={len(_eg.test_assertions)}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                    print(f"[GT_META] ego_graph_view: func={_best_func} callers={len(_eg.callers)} "
+                          f"guards={len(_eg.guards)} tests={len(_eg.test_assertions)}", file=sys.stderr, flush=True)
             elif _eg.center is not None and not _center_ok:
-                print(
-                    f"[GT_META] ego_graph_homonym_suppressed: func={_best_func} "
-                    f"center_file={getattr(_eg.center, 'file_path', '')} viewed={needle}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                print(f"[GT_META] ego_graph_homonym_suppressed: func={_best_func} "
+                      f"center_file={getattr(_eg.center, 'file_path', '')} viewed={needle}",
+                      file=sys.stderr, flush=True)
     except Exception as _ego_exc:
-        print(
-            f"[GT_META] ego_graph_view_error: {type(_ego_exc).__name__}: {_ego_exc}",
-            file=sys.stderr,
-            flush=True,
-        )
+        print(f"[GT_META] ego_graph_view_error: {type(_ego_exc).__name__}: {_ego_exc}", file=sys.stderr, flush=True)
 
     # Fix B (CLAUDE.md:86): Contract pillar ALWAYS fires on the main path.
     # signature/return come from the `nodes` table — no graph edges needed.
@@ -1387,9 +1294,7 @@ def graph_navigation(
     # high-confidence callers is exactly where the agent is most blind.
     # Prepend so the agent sees the contract before caller/callee navigation.
     try:
-        _cp_conn = sqlite3.connect(
-            "file:" + os.path.abspath(db_path).replace("\\", "/") + "?mode=ro", uri=True
-        )
+        _cp_conn = sqlite3.connect("file:" + os.path.abspath(db_path).replace("\\", "/") + "?mode=ro", uri=True)
         try:
             _contract_lines = _contract_pillar(_cp_conn, needle, _load_issue_terms(state))
         finally:
@@ -1400,15 +1305,10 @@ def graph_navigation(
                 out.insert(0, _cl)
             print(
                 f"[GT_META] contract_pillar: file={needle} lines={len(_contract_lines)}",
-                file=sys.stderr,
-                flush=True,
+                file=sys.stderr, flush=True,
             )
     except Exception as _cp_exc:
-        print(
-            f"[GT_META] contract_pillar_error: {type(_cp_exc).__name__}: {_cp_exc}",
-            file=sys.stderr,
-            flush=True,
-        )
+        print(f"[GT_META] contract_pillar_error: {type(_cp_exc).__name__}: {_cp_exc}", file=sys.stderr, flush=True)
 
     # DISABLED (swap-invariant — run15 leak): test-assertion surfacing for the
     # VIEWED file. This block queried the `assertions` table (test-derived) and
@@ -1436,8 +1336,7 @@ def graph_navigation(
         print(
             f"[GT_META] l3b_cap_enforced: file={needle} pre_tokens={_pre_tokens} "
             f"final_tokens={_final_tokens} dropped={_dropped} cap={_L3B_MAX_TOKENS}",
-            file=sys.stderr,
-            flush=True,
+            file=sys.stderr, flush=True,
         )
 
     return out, total_callers
@@ -1460,7 +1359,6 @@ def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
     matches none of it, stay silent rather than emit position-ranked noise. A truly
     blind task (no anchors, no terms) keeps the always-fire definition-order spec.
     """
-
     # Issue ANCHORS (the symbols the issue NAMES) — same hygiene as _contract_pillar:
     # drop generic dunders so they don't match a file's generic methods.
     def _generic_anchor(_n: str) -> bool:
@@ -1468,7 +1366,9 @@ def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
         return _s.startswith("__") and _s.endswith("__")
 
     _anch_data = _load_issue_anchors()
-    _anchor_syms = {s.lower() for s in _anch_data.get("symbols", []) if not _generic_anchor(s)}
+    _anchor_syms = {
+        s.lower() for s in _anch_data.get("symbols", []) if not _generic_anchor(s)
+    }
     _issue_terms = _load_issue_terms()
 
     try:
@@ -1529,7 +1429,7 @@ def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
     for name, start, end in ranked:
         if not start or not end:
             continue
-        func_lines = all_lines[max(0, start - 1) : min(len(all_lines), end)]
+        func_lines = all_lines[max(0, start - 1):min(len(all_lines), end)]
         templates: dict[str, list[str]] = {}
         for line in func_lines:
             stripped = line.strip()
@@ -1543,9 +1443,7 @@ def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
         groups = [(t, lns) for t, lns in templates.items() if 2 <= len(lns) <= 8]
         if groups:
             groups.sort(key=lambda x: -len(x[1]))
-            cases = [
-                ln if len(ln) <= 45 else clip_balanced(ln, 42) + "..." for ln in groups[0][1][:4]
-            ]
+            cases = [ln if len(ln) <= 45 else clip_balanced(ln, 42) + "..." for ln in groups[0][1][:4]]
             specs.append(f"{name} handles: {' | '.join(cases)}")
 
     if not specs:
@@ -1662,9 +1560,7 @@ def main() -> None:
     # connects so agent + GT collaborate on localization
     _accum = [] if args.structured_output else None
     nav_lines, total_callers = graph_navigation(
-        filepath,
-        args.db,
-        iteration_ratio=args.iteration_ratio,
+        filepath, args.db, iteration_ratio=args.iteration_ratio,
         _evidence_accumulator=_accum,
     )
 
@@ -1677,7 +1573,6 @@ def main() -> None:
         print("\n".join(nav_lines))
         if args.structured_output and _accum:
             import json as _json
-
             print("__GT_STRUCTURED__")
             print(_json.dumps(_accum))
         status = _status_line("success", f"{len(nav_lines)}_items")

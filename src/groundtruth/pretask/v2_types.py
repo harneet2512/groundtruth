@@ -3,7 +3,6 @@
 Both modules import from this single source so neither can drift the contract.
 Track D (eval harness) consumes the same types via Track B's return value.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field

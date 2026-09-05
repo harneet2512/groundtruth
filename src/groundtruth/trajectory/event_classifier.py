@@ -9,83 +9,29 @@ import os
 import re
 
 _SCAFFOLD_PREFIXES = (
-    "reproduce",
-    "repro_",
-    "debug_",
-    "tmp_",
-    "test_fix",
-    "scratch_",
-    "temp_",
-    "throwaway_",
-    "local_",
-    "hack_",
+    "reproduce", "repro_", "debug_", "tmp_", "test_fix", "scratch_",
+    "temp_", "throwaway_", "local_", "hack_",
 )
 
 _SCAFFOLD_DIRS = {
-    "reproduce",
-    "debug",
-    "scratch",
-    "tmp",
-    "temp",
-    "throwaway",
+    "reproduce", "debug", "scratch", "tmp", "temp", "throwaway",
 }
 
 _GENERATED_DIRS = {
-    "gen",
-    "generated",
-    "__generated__",
-    "_generated",
-    "vendor",
-    "node_modules",
-    "dist",
-    "build",
+    "gen", "generated", "__generated__", "_generated",
+    "vendor", "node_modules", "dist", "build",
 }
 
 _CONFIG_EXTS = {
-    ".yml",
-    ".yaml",
-    ".toml",
-    ".json",
-    ".cfg",
-    ".ini",
-    ".env",
-    ".conf",
-    ".config",
-    ".properties",
-    ".xml",
+    ".yml", ".yaml", ".toml", ".json", ".cfg", ".ini", ".env",
+    ".conf", ".config", ".properties", ".xml",
 }
 
 _SOURCE_EXTS = {
-    ".py",
-    ".js",
-    ".ts",
-    ".jsx",
-    ".tsx",
-    ".go",
-    ".rs",
-    ".java",
-    ".c",
-    ".cpp",
-    ".h",
-    ".hpp",
-    ".rb",
-    ".php",
-    ".swift",
-    ".kt",
-    ".scala",
-    ".cs",
-    ".lua",
-    ".zig",
-    ".ex",
-    ".exs",
-    ".clj",
-    ".ml",
-    ".hs",
-    ".erl",
-    ".dart",
-    ".r",
-    ".jl",
-    ".pl",
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java",
+    ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".swift", ".kt",
+    ".scala", ".cs", ".lua", ".zig", ".ex", ".exs", ".clj",
+    ".ml", ".hs", ".erl", ".dart", ".r", ".jl", ".pl",
 }
 
 _TEST_PATTERNS = [
@@ -152,10 +98,8 @@ def classify_check_kind(
     then maps to generalized check kinds.
     """
     from .classifier import (
-        classify_command,
-        classify_verification_targeting,
-        is_verification_command,
-        CommandKind,
+        classify_command, classify_verification_targeting,
+        is_verification_command, CommandKind,
     )
 
     if not command:
@@ -227,7 +171,6 @@ def classify_event_bucket(
                 return "SEARCH"
 
         from .classifier import is_verification_command, classify_command, CommandKind
-
         if is_verification_command(command):
             return "VERIFICATION_CHECK"
 

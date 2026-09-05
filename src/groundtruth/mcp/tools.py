@@ -426,7 +426,10 @@ async def handle_validate(
                 error_lines.append(f"- {msg} → {fix}")
             else:
                 error_lines.append(f"- {msg}")
-        guidance = f"Found {len(vr.errors)} error(s):\n" + "\n".join(error_lines)
+        guidance = (
+            f"Found {len(vr.errors)} error(s):\n"
+            + "\n".join(error_lines)
+        )
     else:
         guidance = "No structural errors found."
 
@@ -954,9 +957,7 @@ async def handle_checkpoint(
 
     has_briefings = summary.tools_called.get("groundtruth_orient_v2", 0) > 0
     if not has_briefings and summary.total_calls > 0:
-        recommendations.append(
-            "Use groundtruth_orient_v2 for proactive context before code changes."
-        )
+        recommendations.append("Use groundtruth_orient_v2 for proactive context before code changes.")
 
     elapsed_ms = max(1, (time.monotonic_ns() - start) // 1_000_000)
     tracker.record(
@@ -1551,7 +1552,10 @@ async def handle_patterns(
             f"{i + 1}. {p['pattern_name']} ({p['frequency']})"
             for i, p in enumerate(patterns_detected)
         ]
-        guidance = "Detected conventions in this directory:\n" + "\n".join(conventions)
+        guidance = (
+            "Detected conventions in this directory:\n"
+            + "\n".join(conventions)
+        )
     else:
         guidance = f"No strong conventions detected among {total_siblings} sibling file(s)."
 

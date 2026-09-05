@@ -44,10 +44,28 @@ _REGISTRY: tuple[tuple[str, re.Pattern[str], tuple[int, int, int]], ...] = (
         re.compile(r'File "([^"]+)", line (\d+), in ([A-Za-z_][A-Za-z0-9_]*)'),
         (1, 2, 3),
     ),
+    # L-2 (2026-07-10) — Python SyntaxError / compile-error frame: ``File "path",
+    # line N`` with NO ``, in func`` clause (a parse failure has no call frame /
+    # function name; the traceback shows the source line + a ``^`` caret instead).
+    # The negative lookahead ``(?!, in )`` prevents this from also matching a normal
+    # ``…, in func`` frame (that one is captured above with its func name), so the
+    # dedup never sees a func / no-func twin of the same frame. func_group=0 (absent).
+    # Without this the gateway trace_frame producer was MUTE exactly when the suite
+    # died of a syntax break — the one time the offending line is unambiguous.
+    (
+        "python",
+        # (?!\d) forces the FULL line number (no backtracking to a shorter prefix that
+        # would sneak past the (?!, in ) guard — e.g. "line 142, in activate" must not
+        # match as line=14); (?!, in ) then excludes any normal call frame.
+        re.compile(r'File "([^"]+)", line (\d+)(?!\d)(?!, in )'),
+        (1, 2, 0),
+    ),
     # JavaScript / TypeScript V8 format: ``at fn (path:line:col)``
     (
         "javascript",
-        re.compile(r"at\s+([A-Za-z_$][A-Za-z0-9_$.<>]*)\s+\(([^()\s]+):(\d+):\d+\)"),
+        re.compile(
+            r"at\s+([A-Za-z_$][A-Za-z0-9_$.<>]*)\s+\(([^()\s]+):(\d+):\d+\)"
+        ),
         (2, 3, 1),
     ),
     # Java: ``at pkg.Class.method(File.java:line)``
@@ -71,7 +89,9 @@ _REGISTRY: tuple[tuple[str, re.Pattern[str], tuple[int, int, int]], ...] = (
     # C / C++ gdb: ``#N 0xADDR in func at path:line``
     (
         "c",
-        re.compile(r"#\d+\s+0x[0-9a-fA-F]+\s+in\s+([A-Za-z_][A-Za-z0-9_]*)\s+at\s+([^\s:]+):(\d+)"),
+        re.compile(
+            r"#\d+\s+0x[0-9a-fA-F]+\s+in\s+([A-Za-z_][A-Za-z0-9_]*)\s+at\s+([^\s:]+):(\d+)"
+        ),
         (2, 3, 1),
     ),
 )
@@ -127,22 +147,41 @@ def _is_in_repo(path: str, repo_root: str) -> bool:
         return False
     if any(m in raw_norm for m in bad_markers):
         return False
-    try:
-        rp = os.path.realpath(path)
-        rr = os.path.realpath(repo_root)
-    except (OSError, ValueError):
-        rp, rr = path, repo_root
+    # ABSOLUTE PATHS ONLY.  ``realpath`` resolves a RELATIVE path against the
+    # current working directory, so running from inside the checkout -- which is
+    # what the container does, the agent's CWD is the testbed -- made every
+    # relative frame satisfy the containment test below and short-circuit past
+    # the existence check that follows.  Same input, opposite verdict, decided by
+    # where the process happened to be launched.  That bypassed the D-2 guard
+    # documented under this block precisely in the environment it was written for
+    # (measured 2026-07-28; ``tests/pretask/test_trace_cwd_laundering_20260728.py``).
+    #
+    # A relative path carries no host location of its own, so the only honest
+    # question to ask about it is the one below: does it name a real file under
+    # the root.
+    if os.path.isabs(path):
+        try:
+            rp = os.path.realpath(path)
+            rr = os.path.realpath(repo_root)
+        except (OSError, ValueError):
+            rp, rr = path, repo_root
 
-    rp_norm = rp.replace("\\", "/")
-    rr_norm = rr.replace("\\", "/").rstrip("/")
-    if rp_norm.startswith(rr_norm + "/") or rp_norm == rr_norm:
-        return True
+        rp_norm = rp.replace("\\", "/")
+        rr_norm = rr.replace("\\", "/").rstrip("/")
+        if rp_norm.startswith(rr_norm + "/") or rp_norm == rr_norm:
+            return True
 
-    # Fallback for relative paths that came in as ``patroni/watchdog.py``:
-    # treat them as in-repo if they don't reference a vendored / system
-    # path (common stdlib + per-language third-party markers).
+    # Fallback for relative paths that came in as ``patroni/watchdog.py`` or a
+    # site-packages-stripped ``loguru/_datetime.py``. D-2 (run6 audit, hydra): a
+    # relative shape ALONE is insufficient — a THIRD-PARTY dep frame stripped of its
+    # install prefix (``omegaconf/base.py`` while fixing hydra) is also relative and
+    # bad-marker-free, and was wrongly delivered as "deepest in-repo frame" (0 rows
+    # in graph.db). The true discriminator is EXISTENCE under repo_root: the package
+    # being fixed IS the repo (``loguru/_datetime.py`` exists under a loguru testbed),
+    # a third-party dep is NOT vendored (``omegaconf/`` absent under a hydra testbed).
+    # Fail-closed (correct-or-quiet): drop when it does not resolve to a real repo file.
     if not os.path.isabs(path):
-        return True
+        return os.path.isfile(os.path.join(repo_root, raw_norm))
 
     return False
 
@@ -186,7 +225,7 @@ def parse_stack_traces(
         for marker in ("site-packages/", "dist-packages/"):
             idx = norm.find(marker)
             if idx >= 0:
-                f = norm[idx + len(marker) :]
+                f = norm[idx + len(marker):]
                 break
         normalized.append(StackFrame(file=f, line=fr.line, func=fr.func, lang=fr.lang))
     in_repo = [fr for fr in normalized if _is_in_repo(fr.file, repo_root)]

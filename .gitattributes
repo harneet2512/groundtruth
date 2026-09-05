@@ -2,3 +2,8 @@ models/**/*.onnx filter=lfs diff=lfs merge=lfs -text
 models/**/*.json -text
 models/**/tokenizer.json -text
 benchmarks/data/*.jsonl filter=lfs diff=lfs merge=lfs -text
+# The recovered shipping package has mixed line endings. Preserve its exact
+# bytes across checkout/build until an explicitly reviewed normalization.
+src/groundtruth/** -text
+LICENSE text eol=lf
+gt-index/internal/grammars/** text eol=lf

@@ -22,7 +22,6 @@ agent-loop run proves it converges in practice.
 
 All deterministic, no LLM, no embeddings.
 """
-
 from __future__ import annotations
 
 import os
@@ -119,9 +118,7 @@ class CurationTracker:
         band = band_for(action_count)
         dropped = self.initial_size - self.last_size
         if not reason:
-            reason = {"early": "early_full", "mid": "mid_drop_visited", "late": "late_edit_focus"}[
-                band
-            ]
+            reason = {"early": "early_full", "mid": "mid_drop_visited", "late": "late_edit_focus"}[band]
         return (
             f"[GT_CURATION] action={action_count} band={band} "
             f"size={self.last_size} initial={self.initial_size} "

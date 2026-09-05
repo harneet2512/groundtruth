@@ -4,7 +4,6 @@ This module is intentionally separate from the frozen static v8 governor.  It
 consumes frozen v7.5 ranked records plus parsed early trace events and returns a
 bounded active working set.
 """
-
 from __future__ import annotations
 
 import re
@@ -258,9 +257,7 @@ def parse_trace_artifact(root: Path, bug_id: str) -> TraceParseResult:
                 else _paths_for_signal(text, "material_edit")
             )
             if edit_paths:
-                signal_paths.append(
-                    ("first_edit" if not saw_first_edit else "material_edit", edit_paths)
-                )
+                signal_paths.append(("first_edit" if not saw_first_edit else "material_edit", edit_paths))
                 saw_first_edit = True
         if DIFF_RE.search(text):
             signal_paths.append(("diff_header", _paths_for_signal(text, "diff_header")))
@@ -337,9 +334,7 @@ def summarize_trace_events(events: Iterable[TraceEvent]) -> dict[str, AgentFileE
     return out
 
 
-def trace_events_to_agent_candidates(
-    agent_files: dict[str, AgentFileEvidence],
-) -> list[AgentCandidate]:
+def trace_events_to_agent_candidates(agent_files: dict[str, AgentFileEvidence]) -> list[AgentCandidate]:
     evidence_by_tier = {
         4: "material_edit",
         3: "tool_trace",
@@ -424,13 +419,7 @@ def schedule_v82(
     structural_added: list[str] = []
     provisional: list[str] = []
 
-    def admit(
-        path: str,
-        reason: str,
-        ev: AgentFileEvidence | None = None,
-        edge_conf: float = 0.0,
-        anchor: str | None = None,
-    ) -> None:
+    def admit(path: str, reason: str, ev: AgentFileEvidence | None = None, edge_conf: float = 0.0, anchor: str | None = None) -> None:
         rec = gt_by_path.get(path)
         tier = ev.tier if ev else 0
         event_count = ev.event_count if ev else 0
@@ -479,9 +468,7 @@ def schedule_v82(
             if dst in active or dst not in structural_eligible:
                 continue
             rec = gt_by_path.get(dst)
-            structural_candidates.append(
-                (anchor_ev.tier, _gt_score(rec), conf, dst, anchor_ev.path, anchor_ev)
-            )
+            structural_candidates.append((anchor_ev.tier, _gt_score(rec), conf, dst, anchor_ev.path, anchor_ev))
     structural_candidates.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
     for _anchor_tier, _score, conf, dst, anchor, anchor_ev in structural_candidates[:2]:
         admit(dst, "trace_gated_structural", None, conf, anchor)
@@ -497,16 +484,10 @@ def schedule_v82(
         candidates = list(active.values())
         choice: ScheduledFile | None = None
         for predicate, key in (
-            (
-                lambda c: c.tier == 1 and c.path not in gt_top10,
-                lambda c: (c.gt_score, c.event_count, c.path),
-            ),
+            (lambda c: c.tier == 1 and c.path not in gt_top10, lambda c: (c.gt_score, c.event_count, c.path)),
             (lambda c: c.reason == "provisional_gt_anchor", lambda c: (c.gt_score, c.path)),
             (lambda c: c.tier == 2, lambda c: (c.gt_score, c.event_count, c.path)),
-            (
-                lambda c: c.reason == "trace_gated_structural",
-                lambda c: (c.gt_score, c.edge_confidence, c.path),
-            ),
+            (lambda c: c.reason == "trace_gated_structural", lambda c: (c.gt_score, c.edge_confidence, c.path)),
         ):
             pool = [c for c in candidates if predicate(c)]
             if pool:
@@ -539,14 +520,7 @@ def schedule_v82(
 
     final = sorted(
         active.values(),
-        key=lambda c: (
-            -c.tier,
-            -int(c.has_gt_support),
-            -c.event_count,
-            -c.gt_score,
-            c.first_step,
-            c.path,
-        ),
+        key=lambda c: (-c.tier, -int(c.has_gt_support), -c.event_count, -c.gt_score, c.first_step, c.path),
     )
     return ScheduleResult(
         active_files=[c.path for c in final],

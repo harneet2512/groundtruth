@@ -20,7 +20,6 @@ proof mode) or warns (outside).
 
 Proof mode = ``GT_PROOF_MODE=1``.
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -50,7 +49,8 @@ _DEFAULT_RUNTIME_ROOT = "/opt/gt"
 # tables (nodes/edges/properties/assertions) so stamping never collides with the
 # indexer's writes. resolve.py is already a legitimate graph.db writer.
 _META_DDL = (
-    "CREATE TABLE IF NOT EXISTS gt_runtime_meta (key TEXT PRIMARY KEY, value TEXT, updated_ts REAL)"
+    "CREATE TABLE IF NOT EXISTS gt_runtime_meta "
+    "(key TEXT PRIMARY KEY, value TEXT, updated_ts REAL)"
 )
 
 # Timing keys (one pipeline order: index -> LSP enrich -> closure rebuild).
@@ -115,12 +115,9 @@ def reject_host_aliases() -> None:
     if not is_proof_mode():
         return
     present = [k for k in HOST_ALIASES if os.environ.get(k)]
-    require(
-        not present,
-        "no_noncanonical_host_aliases",
-        f"non-canonical host aliases set in proof mode: {present} — use the canonical "
-        f"handoff GT_HOST_SRC_ROOT/GT_HOST_GRAPH_DB, or in-container GT_SOURCE_ROOT/GT_GRAPH_DB",
-    )
+    require(not present, "no_noncanonical_host_aliases",
+            f"non-canonical host aliases set in proof mode: {present} — use the canonical "
+            f"handoff GT_HOST_SRC_ROOT/GT_HOST_GRAPH_DB, or in-container GT_SOURCE_ROOT/GT_GRAPH_DB")
 
 
 def runtime_root() -> str:
@@ -135,17 +132,13 @@ def require_import_under_runtime_root() -> None:
     root = runtime_root().rstrip("/")
     try:
         import groundtruth as _g
-
         gf = (getattr(_g, "__file__", "") or "").replace("\\", "/")
     except Exception as e:  # pragma: no cover - import always succeeds here
         require(False, "import_under_runtime_root", f"import error: {e}")
         return
     ok = gf.startswith(root + "/") or gf.startswith(root)
-    require(
-        ok,
-        "import_under_runtime_root",
-        f"groundtruth imported from {gf!r}, expected under {root!r}",
-    )
+    require(ok, "import_under_runtime_root",
+            f"groundtruth imported from {gf!r}, expected under {root!r}")
 
 
 def forbid_prebuilt_graph() -> None:
@@ -154,22 +147,30 @@ def forbid_prebuilt_graph() -> None:
     if not is_proof_mode():
         return
     prebuilt = os.environ.get("GT_PREBUILT_GRAPH_DB", "")
-    require(
-        not prebuilt, "no_prebuilt_graph", f"GT_PREBUILT_GRAPH_DB set in proof mode: {prebuilt!r}"
-    )
+    require(not prebuilt, "no_prebuilt_graph",
+            f"GT_PREBUILT_GRAPH_DB set in proof mode: {prebuilt!r}")
+
+
+def context_id_from(rroot: str, source_root: str, graph_db: str, models_root: str) -> str:
+    """Pure context-id over the 4 runtime-defining paths. Shared by context_id() (env-driven)
+    and any caller that holds the paths directly (e.g. the runtime_context.json writer, which
+    runs in a process whose os.environ does NOT carry GT_SOURCE_ROOT/GT_GRAPH_DB — those are
+    injected only into the cert SUBPROCESS's env). Using this helper with the same paths the cert
+    subprocess received guarantees a byte-identical id instead of a silently-diverging one."""
+    parts = [rroot, source_root or "", graph_db or "", models_root or os.path.join(rroot, "models")]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 def context_id() -> str:
     """Stable id for the runtime that produced an artifact — sha256[:16] of the
     paths that DEFINE the runtime. Stamped into graph meta, brief result, gate
     result and the run contract so gates-only and live can be proven identical."""
-    parts = [
+    return context_id_from(
         runtime_root(),
         os.environ.get("GT_SOURCE_ROOT", ""),
         os.environ.get("GT_GRAPH_DB", ""),
-        os.environ.get("GT_MODELS_ROOT", "") or os.path.join(runtime_root(), "models"),
-    ]
-    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+        os.environ.get("GT_MODELS_ROOT", ""),
+    )
 
 
 # ───────────────────────────── graph.db meta stamp/read ───────────────────────
@@ -201,7 +202,9 @@ def read_meta(db, key: str) -> str | None:
     conn, owned = _connect(db)
     try:
         try:
-            row = conn.execute("SELECT value FROM gt_runtime_meta WHERE key=?", (key,)).fetchone()
+            row = conn.execute(
+                "SELECT value FROM gt_runtime_meta WHERE key=?", (key,)
+            ).fetchone()
         except sqlite3.OperationalError:
             return None  # meta table absent
         return row[0] if row else None
@@ -235,7 +238,6 @@ def graph_edges_hash(db) -> str:
     compare; a drift test guards that. Returns '' if the db is unreadable."""
     import hashlib
     import sqlite3 as _sql
-
     h = hashlib.sha256()
     try:
         c = _sql.connect(f"file:{db}?mode=ro", uri=True)
@@ -263,18 +265,16 @@ def assert_fts5_native(conn: sqlite3.Connection, *, where: str = "retrieval") ->
     """
     try:
         tables = {
-            r[0]
-            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
         }
     except sqlite3.Error as e:
         return require(False, "fts5_table_check", f"{where}: {e}")
     if "nodes_fts" not in tables:
-        return require(
-            False,
-            "fts5_native_present",
-            f"{where}: nodes_fts missing — Go indexer lacked "
-            f"-tags sqlite_fts5; python-side creation is forbidden in proof mode",
-        )
+        return require(False, "fts5_native_present",
+                       f"{where}: nodes_fts missing — Go indexer lacked "
+                       f"-tags sqlite_fts5; python-side creation is forbidden in proof mode")
     try:
         n = conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
     except sqlite3.Error as e:
@@ -282,9 +282,7 @@ def assert_fts5_native(conn: sqlite3.Connection, *, where: str = "retrieval") ->
     if not require(n > 0, "fts5_populated", f"{where}: nodes_fts has 0 rows"):
         return False
     try:
-        conn.execute(
-            "SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ? LIMIT 1", ("a*",)
-        ).fetchall()
+        conn.execute("SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ? LIMIT 1", ("a*",)).fetchall()
     except sqlite3.Error as e:
         return require(False, "fts5_match_works", f"{where}: MATCH raised: {e}")
     return True
@@ -310,11 +308,8 @@ def assert_lsp_before_scoring(db) -> bool:
     graph — else the brief ranks over a name_match-garbage map."""
     if not is_proof_mode():
         return True
-    return require(
-        read_ts(db, K_LSP_TS) is not None,
-        "lsp_before_scoring",
-        "no lsp_enrichment_ts stamp on graph — LSP did not run before scoring",
-    )
+    return require(read_ts(db, K_LSP_TS) is not None, "lsp_before_scoring",
+                   "no lsp_enrichment_ts stamp on graph — LSP did not run before scoring")
 
 
 def assert_closure_after_lsp(db) -> bool:
@@ -324,25 +319,16 @@ def assert_closure_after_lsp(db) -> bool:
         return True
     lsp = read_ts(db, K_LSP_TS)
     clo = read_ts(db, K_CLOSURE_TS)
-    if not require(
-        lsp is not None,
-        "closure_lsp_stamp_present",
-        "no lsp_enrichment_ts — cannot prove closure freshness",
-    ):
+    if not require(lsp is not None, "closure_lsp_stamp_present",
+                   "no lsp_enrichment_ts — cannot prove closure freshness"):
         return False
-    if not require(
-        clo is not None,
-        "closure_rebuilt",
-        "no closure_rebuild_ts stamp — closure not rebuilt after LSP",
-    ):
+    if not require(clo is not None, "closure_rebuilt",
+                   "no closure_rebuild_ts stamp — closure not rebuilt after LSP"):
         return False
     if lsp is None or clo is None:  # narrowing (require warned, not raised, outside proof)
         return False
-    return require(
-        clo >= lsp,
-        "closure_newer_than_lsp",
-        f"closure_rebuild_ts={clo!r} older than lsp_enrichment_ts={lsp!r} (stale closure)",
-    )
+    return require(clo >= lsp, "closure_newer_than_lsp",
+                   f"closure_rebuild_ts={clo!r} older than lsp_enrichment_ts={lsp!r} (stale closure)")
 
 
 # ───────────────────────────── embedder usage (Stage 3) ───────────────────────
@@ -355,21 +341,12 @@ def forbid_no_sem_config(ablation: str, rrf_mode: str, effective_w_sem: float) -
     if not (is_proof_mode() and require_embedder()):
         return
     rrf = (rrf_mode or "").strip().lower()
-    require(
-        ablation not in ("A", "B0", "B1"),
-        "no_sem_ablation_in_proof",
-        f"ablation={ablation!r} zeroes the semantic signal; forbidden in proof mode",
-    )
-    require(
-        rrf not in ("det", "deterministic", "nosem"),
-        "no_sem_rrf_in_proof",
-        f"GT_RRF_FUSION={rrf!r} drops the embedding signal; forbidden in proof mode",
-    )
-    require(
-        effective_w_sem > 0.0,
-        "sem_weight_nonzero",
-        f"effective W_SEM={effective_w_sem} — semantic weight zeroed in proof mode",
-    )
+    require(ablation not in ("A", "B0", "B1"), "no_sem_ablation_in_proof",
+            f"ablation={ablation!r} zeroes the semantic signal; forbidden in proof mode")
+    require(rrf not in ("det", "deterministic", "nosem"), "no_sem_rrf_in_proof",
+            f"GT_RRF_FUSION={rrf!r} drops the embedding signal; forbidden in proof mode")
+    require(effective_w_sem > 0.0, "sem_weight_nonzero",
+            f"effective W_SEM={effective_w_sem} — semantic weight zeroed in proof mode")
 
 
 def assert_semantic_consumed(effective_w_sem: float, sem_components, n_candidates: int) -> bool:
@@ -383,35 +360,27 @@ def assert_semantic_consumed(effective_w_sem: float, sem_components, n_candidate
         return True
     if n_candidates <= 0:
         return True
-    if not require(
-        effective_w_sem > 0.0,
-        "sem_weight_nonzero",
-        f"effective_w_sem={effective_w_sem} with {n_candidates} candidates",
-    ):
+    if not require(effective_w_sem > 0.0, "sem_weight_nonzero",
+                   f"effective_w_sem={effective_w_sem} with {n_candidates} candidates"):
         return False
     comps = list(sem_components or [])
     nonzero = sum(1 for s in comps if isinstance(s, (int, float)) and s and s > 0.0)
-    return require(
-        nonzero > 0,
-        "semantic_components_consumed",
-        f"effective_w_sem={effective_w_sem} but ALL {len(comps)} sem components "
-        f"zero/flat over {n_candidates} candidates — embedder present but unconsumed",
-    )
+    return require(nonzero > 0, "semantic_components_consumed",
+                   f"effective_w_sem={effective_w_sem} but ALL {len(comps)} sem components "
+                   f"zero/flat over {n_candidates} candidates — embedder present but unconsumed")
 
 
 def embedder_identity() -> dict:
     """The semantic surface identity (models root / class / dim / force-onnx) so
     run_v74 and localize can be proven to use the SAME embedder, not two."""
     ident = {
-        "models_root": os.environ.get("GT_MODELS_ROOT", "")
-        or os.path.join(runtime_root(), "models"),
+        "models_root": os.environ.get("GT_MODELS_ROOT", "") or os.path.join(runtime_root(), "models"),
         "force_onnx": os.environ.get("GT_FORCE_ONNX_EMBEDDER", ""),
         "class": "",
         "dim": "",
     }
     try:
         from groundtruth.memory.enrich.embed import get_embedding_model
-
         m = get_embedding_model()
         ident["class"] = type(m).__name__
         ident["dim"] = str(getattr(m, "dim", ""))
@@ -426,20 +395,14 @@ def assert_same_embedder_identity(db, who: str) -> bool:
     if not is_proof_mode():
         return True
     ident = embedder_identity()
-    key = (
-        ident.get("models_root", ""),
-        ident.get("class", ""),
-        ident.get("dim", ""),
-        ident.get("force_onnx", ""),
-    )
+    key = (ident.get("models_root", ""), ident.get("class", ""), ident.get("dim", ""), ident.get("force_onnx", ""))
     sig = "|".join(key)
     prior = read_meta(db, K_EMBEDDER_ID)
     if prior is None:
         stamp_meta(db, K_EMBEDDER_ID, sig)
         return True
-    return require(
-        prior == sig, "same_embedder_identity", f"{who} embedder {sig!r} != prior {prior!r}"
-    )
+    return require(prior == sig, "same_embedder_identity",
+                   f"{who} embedder {sig!r} != prior {prior!r}")
 
 
 def embedder_model_path() -> str:
@@ -509,7 +472,6 @@ def write_embedder_certificate(cert: dict) -> str:
     """Write the embedder certificate to $GT_EMBEDDER_CERT (default
     /tmp/gt/embedder_certificate.json). Best-effort; never raises."""
     import json as _json
-
     path = os.environ.get("GT_EMBEDDER_CERT", "/tmp/gt/embedder_certificate.json")
     try:
         d = os.path.dirname(path)

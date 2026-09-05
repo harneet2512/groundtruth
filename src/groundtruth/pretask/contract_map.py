@@ -23,7 +23,6 @@ Research: The Distracting Effect (arXiv:2505.06914, 2025) — plausible-but-wron
 context drops accuracy 6-11pp, so never render an unverified callee edge as a fact.
 Lost in the Middle (NeurIPS 2024) — signature first (primacy). LLM-free, $0, pure SQL.
 """
-
 from __future__ import annotations
 
 import re
@@ -38,6 +37,7 @@ from groundtruth.pretask.curation_map import (
     _node_ids,
     _nodes_have_language,
     _open_ro,
+    build_function_map,
     verified_caller_count,
 )
 from groundtruth.runtime.sanitizer import (
@@ -46,7 +46,6 @@ from groundtruth.runtime.sanitizer import (
     valid_guard_clause,
     valid_return_shape,
 )
-
 
 # Per-kind SEMANTIC validators (C1b — B3 semantic-nonsense contract). clip_balanced
 # is STRUCTURAL only: it passes ``raise,exc_info[1].with_traceback`` (brackets
@@ -242,54 +241,128 @@ def _node_meta(conn: sqlite3.Connection, node_ids: list[int]) -> tuple[str, str]
     return (_sanitize_signature(row[0] or ""), row[1] or "")
 
 
-def _read_props(conn: sqlite3.Connection, node_ids: list[int]) -> dict[str, list[str]]:
-    """Return {kind: [value, ...]} for contract kinds, deduped, capped per kind.
+# B-22: the FACT trust tiers a property may carry (mirrors the edge tiers). A property
+# whose (non-empty) trust_tier is outside this set — SPECULATIVE — is not a contract
+# FACT (correct-or-quiet). An EMPTY tier is legacy (the column absent, or a row a current
+# binary left unstamped) and is gated on confidence alone, never dropped for the tier.
+_FACT_TRUST_TIERS: frozenset[str] = frozenset({"CERTIFIED", "CANDIDATE"})
 
-    Order within a kind preserved by line (the source order the agent will see).
+
+def _property_columns(conn: sqlite3.Connection) -> set[str]:
+    """The column names of the ``properties`` table (empty set on any error)."""
+    try:
+        return {r[1] for r in conn.execute("PRAGMA table_info(properties)").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def _gated_prop_rows(
+    conn: sqlite3.Connection, node_ids: list[int]
+) -> list[tuple[str, str, int, float, int, int, str, str, str, str, str, str]]:
+    """The confidence+trust_tier-gated, value-validated CONTRACT property rows.
+
+    Returns ``[(kind, value, line, confidence, start_line, end_line, trust_tier,
+    extractor, evidence_method, verification_status, property_id, source_revision), ...]``
+    in source (line) order — the ONE gated read shared by :func:`_read_props` (values
+    only) and :func:`read_property_facts` (provenance-carrying).
+
+    B-22 provenance + back-compat: the read PROBES the ``properties`` columns and SELECTs
+    the per-fact provenance (``property_id``/span/tier/extractor/…) only when present, so
+    a legacy properties table (``node_id,kind,value,line,confidence``) reads WITHOUT error
+    (absent columns default: span -> ``line``; the rest -> ``''``). The ``confidence``
+    column is REQUIRED (B-25): a schema lacking it cannot verify mining confidence, so the
+    read returns ``[]`` (correct-or-quiet) rather than laundering unconfidence-able values.
+
+    GATES (both correct-or-quiet): (1) ``confidence >= 0.5`` (the fact floor, in SQL);
+    (2) a NON-EMPTY ``trust_tier`` must be a FACT tier (:data:`_FACT_TRUST_TIERS`) — an
+    empty tier (legacy) is gated on confidence alone. Then ``clip_balanced`` repairs a
+    blind-byte-capped value and the per-kind semantic validator drops a parsed-statement
+    fragment laundering as a contract fact.
     """
     if not node_ids:
-        return {}
+        return []
+    cols = _property_columns(conn)
+    # B-25: cannot verify mining confidence without the column -> correct-or-quiet.
+    if "confidence" not in cols:
+        return []
     placeholders = ",".join("?" for _ in node_ids)
     kind_ph = ",".join("?" for _ in _CONTRACT_KINDS)
-    # I1/I3 confidence gate: a property mined BELOW the fact floor (0.5) is not a
-    # contract FACT and must not be delivered (correct-or-quiet). properties.confidence
-    # carries the mining confidence (e.g. data_flow 0.8). A legacy schema WITHOUT the
-    # column falls back to ungated/permissive so gt_gt behavior is preserved (I5).
-    _base = (
-        f"SELECT kind, value FROM properties "
-        f"WHERE node_id IN ({placeholders}) AND kind IN ({kind_ph}) "
+
+    def _col_or(name: str, default_expr: str) -> str:
+        """The column ``name`` when the properties table has it, else ``default_expr``
+        (a literal SQL expression) — so an old db without the B-22 provenance columns
+        reads with a sensible default instead of ``no such column`` (COALESCE for legacy)."""
+        return name if name in cols else default_expr
+
+    e_line = "COALESCE(line,0)"
+    # Graph-F5 (B-25 fail-CLOSED): a NULL confidence is UNCONFIDENCE-ABLE, not maximal.
+    # COALESCE(...,0.0) fails it below the 0.5 gate (parity with the gateway's
+    # _fact_callers); the prior ...,1.0 floated a NULL to max authority (fail-OPEN).
+    e_conf = "COALESCE(confidence,0.0)"
+    e_start = "COALESCE(" + _col_or("start_line", "line") + ", line, 0)"
+    e_end = "COALESCE(" + _col_or("end_line", "line") + ", line, 0)"
+    e_tier = "COALESCE(" + _col_or("trust_tier", "''") + ", '')"
+    e_extr = "COALESCE(" + _col_or("extractor", "''") + ", '')"
+    e_evm = "COALESCE(" + _col_or("evidence_method", "''") + ", '')"
+    e_vst = "COALESCE(" + _col_or("verification_status", "''") + ", '')"
+    e_pid = "COALESCE(" + _col_or("property_id", "''") + ", '')"
+    e_srev = "COALESCE(" + _col_or("source_revision", "''") + ", '')"
+    sql = (
+        "SELECT kind, value, " + e_line + ", " + e_conf + ", "
+        + e_start + ", " + e_end + ", " + e_tier + ", "
+        + e_extr + ", " + e_evm + ", " + e_vst + ", " + e_pid + ", " + e_srev + " "
+        "FROM properties "
+        "WHERE node_id IN (" + placeholders + ") AND kind IN (" + kind_ph + ") "
+        "AND " + e_conf + " >= 0.5 ORDER BY line"
     )
-    _params = (*node_ids, *_CONTRACT_KINDS)
     try:
-        rows = conn.execute(
-            _base + "AND COALESCE(confidence, 1.0) >= 0.5 ORDER BY line", _params
-        ).fetchall()
-    except sqlite3.OperationalError:
-        try:
-            rows = conn.execute(_base + "ORDER BY line", _params).fetchall()
-        except sqlite3.Error:
-            return {}
+        rows = conn.execute(sql, (*node_ids, *_CONTRACT_KINDS)).fetchall()
     except sqlite3.Error:
-        return {}
-    out: dict[str, list[str]] = {}
-    seen: dict[str, set[str]] = {}
-    for kind, value in rows:
+        return []
+    out: list[tuple[str, str, int, float, int, int, str, str, str, str, str, str]] = []
+    for (kind, value, line, conf, start_line, end_line, tier, extractor,
+         ev_method, vstatus, prop_id, src_rev) in rows:
         if not value:
             continue
-        # Repair any value the indexer stored mid-expression (blind byte cap on
-        # an older binary build) so the brief never emits an unterminated literal
-        # or a dangling operator. No-op on already-balanced short values
-        # (e.g. "TypeError"); drops the value entirely if unrepairable.
+        # B-22 trust_tier gate (correct-or-quiet): a non-empty tier outside the FACT
+        # tiers (SPECULATIVE) is not a contract fact; an empty tier gates on confidence.
+        t = (str(tier) if tier is not None else "").strip().upper()
+        if t and t not in _FACT_TRUST_TIERS:
+            continue
+        # Repair a value the indexer stored mid-expression (blind byte cap on an older
+        # build) so the brief never emits an unterminated literal / dangling operator.
         v = clip_balanced(str(value).strip())
         if not v:
             continue
-        # SEMANTIC gate (C1b): a mined value must be a well-formed instance of its
-        # kind, else it is a parsed statement fragment laundering as a contract
-        # fact (the ``raises raise,exc_info[1].with_traceback`` beets garbage).
-        # Drop it (correct-or-quiet). No-op for kinds without a validator.
+        # SEMANTIC gate (C1b): a mined value must be a well-formed instance of its kind,
+        # else it is a parsed statement fragment laundering as a contract fact. Drop it.
         _validate = _CONTRACT_VALUE_VALIDATORS.get(kind)
         if _validate is not None and not _validate(v):
             continue
+        out.append((
+            str(kind), v, int(line or 0), float(conf or 0.0),
+            int(start_line or 0), int(end_line or 0), t,
+            str(extractor or ""), str(ev_method or ""), str(vstatus or ""),
+            str(prop_id or ""), str(src_rev or ""),
+        ))
+    return out
+
+
+def _read_props(conn: sqlite3.Connection, node_ids: list[int]) -> dict[str, list[str]]:
+    """Return {kind: [value, ...]} for contract kinds, deduped, capped per kind.
+
+    Order within a kind preserved by line (the source order the agent will see). The
+    gated read (confidence + trust_tier, back-compat column-probe) is shared with
+    :func:`read_property_facts` via :func:`_gated_prop_rows`; this returns the value-only
+    projection the existing consumers expect (shape unchanged — the property_id + span
+    provenance rides the :func:`read_property_facts` surface).
+    """
+    if not node_ids:
+        return {}
+    out: dict[str, list[str]] = {}
+    seen: dict[str, set[str]] = {}
+    for row in _gated_prop_rows(conn, node_ids):
+        kind, v = row[0], row[1]
         bucket = out.setdefault(kind, [])
         seenset = seen.setdefault(kind, set())
         if v in seenset or len(bucket) >= _MAX_PER_KIND:
@@ -299,10 +372,85 @@ def _read_props(conn: sqlite3.Connection, node_ids: list[int]) -> dict[str, list
     return out
 
 
+@dataclass(frozen=True)
+class PropertyFact:
+    """One provenance-carrying contract property (B-22) — the fact value plus the
+    per-fact identity + span + tier the receipt / dedup layer keys on.
+
+    ``property_id`` is the stable content id (the dedup/receipt key; a 64-hex id on a
+    current db, ``''`` on a legacy one); ``(start_line, end_line)`` is the fact's span.
+    This is the surface the ``{kind: [values]}`` shape of :func:`_read_props` cannot
+    carry — a distinct, back-compat return shape that DOES allow the provenance.
+    """
+
+    file: str
+    function: str
+    kind: str
+    value: str
+    line: int
+    start_line: int
+    end_line: int
+    confidence: float
+    trust_tier: str
+    extractor: str
+    evidence_method: str
+    verification_status: str
+    property_id: str
+    source_revision: str
+
+
+def read_property_facts(
+    graph_db_path: str, file_path: str, func_names: list[str]
+) -> list[PropertyFact]:
+    """Provenance-carrying contract properties for ``(file_path, func_names)`` — the B-22
+    receipt surface. SAME gate as :func:`_read_props` (confidence + trust_tier, back-compat
+    column-probe), but each row CARRIES ``property_id`` (the dedup/receipt key), the
+    ``(start_line, end_line)`` span, the trust tier, and the extractor/evidence/
+    verification provenance — which the ``{kind: [values]}`` shape cannot.
+
+    Deduped by ``property_id`` (or ``(kind, value)`` on a legacy db that has no
+    property_id). Pure read; never raises; returns ``[]`` on a bad/missing db or a legacy
+    schema without a ``confidence`` column. Generalized — any file/language indexed by
+    gt-index.
+    """
+    if not func_names:
+        return []
+    conn = _open_ro(graph_db_path)
+    if conn is None:
+        return []
+    try:
+        facts: list[PropertyFact] = []
+        seen: set[str] = set()
+        for fname in func_names:
+            if not fname:
+                continue
+            ids = _node_ids(conn, file_path, fname)
+            if not ids:
+                continue
+            for (kind, value, line, conf, start_line, end_line, tier, extractor,
+                 ev_method, vstatus, prop_id, src_rev) in _gated_prop_rows(conn, ids):
+                key = prop_id or (kind + "\x00" + value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                facts.append(PropertyFact(
+                    file=file_path, function=fname, kind=kind, value=value,
+                    line=line, start_line=start_line, end_line=end_line,
+                    confidence=conf, trust_tier=tier, extractor=extractor,
+                    evidence_method=ev_method, verification_status=vstatus,
+                    property_id=prop_id, source_revision=src_rev,
+                ))
+        return facts
+    finally:
+        conn.close()
+
+
 # G17 cap — keep the blast-fact note compact (one line of SCOPE context, not a dump).
 _MAX_BLAST_FIELDS = 3
-# Fact floor (I1/I3) — a promoted edge below 0.5 is not a fact; gate READS/WRITES on it.
-_BLAST_CONF_FLOOR = 0.5
+# Fact floor (I1/I3, B-26) — a promoted edge below 0.7 is not a FACT (the producer emits
+# undeclared-field READS/WRITES at 0.6). Gate READS/WRITES on 0.7 so only verified edges
+# render as "verified readers", never a 0.6 structural guess.
+_BLAST_CONF_FLOOR = 0.7
 
 
 def _blast_facts(
@@ -324,16 +472,23 @@ def _blast_facts(
     DISPLAY-ONLY, node-local-or-quiet (I2): this consumes promoted depth edges but
     NEVER feeds any rank / reach / degree / score term — the contract pillar has no
     score path (the RRF / total-score ranking surfaces live in other modules).
-    Confidence-gated >= 0.5 on a current binary; a legacy schema with no ``confidence`` column stays
-    permissive (gt_gt I5). Correct-or-quiet: ``()`` when no WRITES is promoted.
+    Confidence-gated >= 0.7 (B-26) on a current binary; a legacy schema with no ``confidence``
+    column is QUIET, not permissive (correct-or-quiet). ``()`` when no WRITES is promoted.
     Pure read; never raises. Generalized — any language the promote pass emits
     READS/WRITES for (Python/Go/JS/TS), no benchmark- or task-specific logic.
     """
     if not node_ids:
         return ()
+    # B-26: without a `confidence` column we cannot apply the fact floor, so an
+    # unconfidence-able edge would render as a "verified reader" (false authority).
+    # Correct-or-quiet: emit nothing on a legacy schema rather than unverified facts.
+    if not has_conf:
+        return ()
     placeholders = ",".join("?" for _ in node_ids)
     # WRITES the edit-target performs: target_id = owning Class, metadata = field.
-    w_conf = "AND COALESCE(e.confidence, 1.0) >= ?" if has_conf else ""
+    # Graph-F6 (B-26 fail-CLOSED): COALESCE(...,0.0) so a NULL-confidence edge fails the
+    # 0.7 fact floor instead of floating to 1.0 and rendering as a "verified" writer.
+    w_conf = "AND COALESCE(e.confidence, 0.0) >= ?" if has_conf else ""
     w_params: list[object] = list(node_ids)
     if has_conf:
         w_params.append(_BLAST_CONF_FLOOR)
@@ -363,7 +518,9 @@ def _blast_facts(
         # the query counted readers of ANY field of the owning class, over-attributing
         # class-wide readers to this one field when the render says "writes to <field>;
         # N verified readers" (a multi-field class would overstate field-level precision).
-        r_conf = "AND COALESCE(e.confidence, 1.0) >= ?" if has_conf else ""
+        # Graph-F6 (B-26 fail-CLOSED): a NULL-confidence READS must not inflate the
+        # verified-reader count — COALESCE(...,0.0) fails it below the 0.7 fact floor.
+        r_conf = "AND COALESCE(e.confidence, 0.0) >= ?" if has_conf else ""
         r_params: list[object] = [owner_class_id, field]
         if has_conf:
             r_params.append(_BLAST_CONF_FLOOR)
@@ -499,7 +656,9 @@ def build_contract(
                 )
                 if callee_id is None:
                     continue
-                cev = _evidence_for(conn, edge.file, edge.name, is_callee=True, ids=[callee_id])
+                cev = _evidence_for(
+                    conn, edge.file, edge.name, is_callee=True, ids=[callee_id]
+                )
                 # Worth showing a callee if it raises/guards OR exposes a
                 # signature — the signature is the deciding "call it correctly"
                 # interface fact the agent otherwise greps for (Task #48).
@@ -636,7 +795,9 @@ def _node_language(conn: sqlite3.Connection, node_id: int | None) -> str:
     if node_id is None:
         return ""
     try:
-        row = conn.execute("SELECT language FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        row = conn.execute(
+            "SELECT language FROM nodes WHERE id = ?", (node_id,)
+        ).fetchone()
     except sqlite3.Error:
         return ""
     return str(row[0]) if row and row[0] else ""
@@ -764,7 +925,9 @@ def edit_target_callee_contracts(
                 # families cannot be a real source-level call — never a
                 # callee CONTRACT fact, whatever its deterministic stamp.
                 # Permissive when either language is unknown/legacy.
-                if has_lang and _is_cross_language_pair(src_lang, _node_language(conn, callee_id)):
+                if has_lang and _is_cross_language_pair(
+                    src_lang, _node_language(conn, callee_id)
+                ):
                     continue
                 sig, line = _node_sig_line_by_id(conn, callee_id)
                 if not sig:
@@ -788,8 +951,12 @@ def edit_target_callee_contracts(
         conn.close()
 
 
-def _callee_sig_args(signature: str, callee: str) -> str:
+def _callee_sig_args(signature: str, _callee: str) -> str:
     """Render a callee signature compactly as ``name(args)``.
+
+    (``_callee`` is retained — positionally — for the call-site contract in
+    ``v1r_brief._callee_sig_args(cc.signature, cc.callee)``; it is intentionally unused
+    in the body, hence the leading underscore.)
 
     Strips a leading ``def `` / ``async def `` and any ``-> ReturnType`` tail and a
     trailing colon so the brief shows ``set_parse(self, key, string: str)`` rather
@@ -801,7 +968,7 @@ def _callee_sig_args(signature: str, callee: str) -> str:
     for prefix in ("async def ", "def "):
         if sig.startswith(prefix):
             is_pydef = True
-            sig = sig[len(prefix) :].strip()
+            sig = sig[len(prefix):].strip()
             break
     if not is_pydef:
         # Stage 5 / LIPI 2026-06-10: a non-Python declaration header carries
@@ -859,7 +1026,9 @@ class ContractDrift:
     removed: bool = False  # node gone after reindex (renamed/removed)
 
 
-def snapshot_contract(graph_db_path: str, file_path: str, func_names: list[str]) -> dict[str, dict]:
+def snapshot_contract(
+    graph_db_path: str, file_path: str, func_names: list[str]
+) -> dict[str, dict]:
     """Capture the edit-target's OWN contract before an edit, JSON-serializable,
     keyed by function name.
 
@@ -898,7 +1067,7 @@ def _norm_shape(shape: str) -> str:
     cat, expr = shape.split("|", 1)
 
     def _repl(m: "re.Match[str]") -> str:
-        rest = expr[m.end() :].lstrip()
+        rest = expr[m.end():].lstrip()
         return m.group(0) if rest.startswith("(") else "_"  # keep call/constructor/method heads
 
     return cat + "|" + re.sub(r"[A-Za-z_]\w*", _repl, expr)
@@ -998,7 +1167,9 @@ def build_drift(
             continue  # no baseline for this name -> nothing to diff
         cur = post.get(name)
         if cur is None:
-            drifts.append(ContractDrift(file_path, name, ("function removed or renamed",), 0, True))
+            drifts.append(
+                ContractDrift(file_path, name, ("function removed or renamed",), 0, True)
+            )
             continue
         changes = _diff_contract(pre, cur)
         if not changes:

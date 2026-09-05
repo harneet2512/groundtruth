@@ -42,21 +42,13 @@ _TEST_MARKERS = frozenset(
 
 
 def _is_test_file(path: str) -> bool:
-    """Heuristic: is this a test file?"""
-    p = path.lower().replace("\\", "/")
-    if any(m in p for m in _TEST_MARKERS):
-        return True
-    base = os.path.basename(p)
-    stem = os.path.splitext(base)[0]
-    return (
-        base.startswith("test_")
-        or stem.endswith("_test")
-        or ".test." in base
-        or ".spec." in base
-        or stem.endswith("Test")
-        or stem.endswith("Tests")
-        or stem.endswith("_spec")
-    )
+    """Delegate to the SINGLE canonical test predicate (``path_policy.is_test_path`` —
+    full ``walker.IsTestFile`` parity). The prior local copy lowercased the path first,
+    so its case-sensitive JVM branch (``stem.endswith("Test")``) was DEAD — ``FooTest.java``
+    was never detected and could surface through the references endpoint (leak)."""
+    from groundtruth.delivery.path_policy import is_test_path
+
+    return is_test_path(path)
 
 
 def _read_line(root_path: str, file_path: str, line: int) -> str:

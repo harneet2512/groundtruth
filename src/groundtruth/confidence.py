@@ -64,7 +64,6 @@ Only DEFENSIBLE hardcodes kept: the dunder shape (__x__ — a language invariant
 every class defines __init__), the MAD consistency constant 1.4826, and the
 modified-z outlier constant 3.5 (both are mathematical, distribution-derived).
 """
-
 from __future__ import annotations
 
 import math
@@ -73,10 +72,10 @@ import sqlite3
 from dataclasses import dataclass
 
 # --- mathematical constants (NOT tunable knobs) ------------------------------
-_MAD_SIGMA = 1.4826  # 1/Phi^-1(3/4): MAD -> normal-sigma consistency (Leys 2013)
-_Z_OUTLIER = 3.5  # modified-z significant-outlier label (Iglewicz-Hoaglin 1993)
-_MIN_PCTL_SAMPLES = 20  # = ceil(1/(1-0.95)): below this a 95th percentile == the max
-_HOMONYM_FLOOR = 5  # Aider repomap.py production floor: `len(defines[ident]) > 5`
+_MAD_SIGMA = 1.4826        # 1/Phi^-1(3/4): MAD -> normal-sigma consistency (Leys 2013)
+_Z_OUTLIER = 3.5           # modified-z significant-outlier label (Iglewicz-Hoaglin 1993)
+_MIN_PCTL_SAMPLES = 20     # = ceil(1/(1-0.95)): below this a 95th percentile == the max
+_HOMONYM_FLOOR = 5         # Aider repomap.py production floor: `len(defines[ident]) > 5`
 _EPS = 1e-9
 
 
@@ -104,7 +103,6 @@ def _db_key(conn: sqlite3.Connection) -> str:
     different repo). A rebuilt graph.db (new mtime/size) re-computes automatically.
     """
     import os
-
     try:
         for _seq, name, fpath in conn.execute("PRAGMA database_list").fetchall():
             if name == "main" and fpath:
@@ -141,48 +139,39 @@ def _repo_stats(conn: sqlite3.Connection) -> _RepoStats:
     token_df: dict[str, int] = {}
     try:
         n_files = conn.execute("SELECT COUNT(DISTINCT file_path) FROM nodes").fetchone()[0] or 1
-        names = [
-            r[0]
-            for r in conn.execute(
-                "SELECT name FROM nodes WHERE label IN "
-                "('Function','Method','Class','Interface') AND name IS NOT NULL"
-            ).fetchall()
-        ]
+        names = [r[0] for r in conn.execute(
+            "SELECT name FROM nodes WHERE label IN "
+            "('Function','Method','Class','Interface') AND name IS NOT NULL"
+        ).fetchall()]
         vocab = max(len(names), 1)
-        for nm in names:  # token document-frequency map (BLUiR)
+        for nm in names:                       # token document-frequency map (BLUiR)
             for t in set(_split_identifier(nm)):
                 token_df[t] = token_df.get(t, 0) + 1
         # In-degree distribution — MUST use the same confidence filter as the
         # per-symbol in-degree (S2 / is_seed_pollutant), else the P95 reference and
         # the measurement count different edge sets and the hub test is meaningless.
-        degs = [
-            r[0]
-            for r in conn.execute(
-                "SELECT COUNT(e.id) c FROM nodes n JOIN edges e ON e.target_id = n.id "
-                "WHERE e.type='CALLS' AND COALESCE(e.confidence,0.5) >= 0.5 "
-                "GROUP BY n.name ORDER BY c"
-            ).fetchall()
-            if r and r[0] is not None
-        ]
+        degs = [r[0] for r in conn.execute(
+            "SELECT COUNT(e.id) c FROM nodes n JOIN edges e ON e.target_id = n.id "
+            "WHERE e.type='CALLS' AND COALESCE(e.confidence,0.5) >= 0.5 "
+            "GROUP BY n.name ORDER BY c"
+        ).fetchall() if r and r[0] is not None]
         n_deg = len(degs)
         if degs:
             d95 = float(degs[int(len(degs) * 0.95)]) or 50.0
         # P95 of per-name definition-site counts — the repo's OWN homonymy ceiling.
-        defcounts = [
-            r[0]
-            for r in conn.execute(
-                "SELECT COUNT(DISTINCT file_path) c FROM nodes WHERE label IN "
-                "('Function','Method','Class','Interface') AND name IS NOT NULL "
-                "GROUP BY LOWER(name) ORDER BY c"
-            ).fetchall()
-            if r and r[0] is not None
-        ]
+        defcounts = [r[0] for r in conn.execute(
+            "SELECT COUNT(DISTINCT file_path) c FROM nodes WHERE label IN "
+            "('Function','Method','Class','Interface') AND name IS NOT NULL "
+            "GROUP BY LOWER(name) ORDER BY c"
+        ).fetchall() if r and r[0] is not None]
         n_def = len(defcounts)
         if defcounts:
             d95_def = float(defcounts[int(len(defcounts) * 0.95)]) or 1.0
     except sqlite3.Error:
         pass
-    stats = _RepoStats(n_files, vocab, max(d95, 1.0), max(d95_def, 1.0), n_deg, n_def, token_df)
+    stats = _RepoStats(
+        n_files, vocab, max(d95, 1.0), max(d95_def, 1.0), n_deg, n_def, token_df
+    )
     _REPO_CACHE[key] = stats
     return stats
 
@@ -223,22 +212,15 @@ def _specificity_components(
     st = _repo_stats(conn)
     sl = s.lower()
     try:
-        df_def = (
-            conn.execute(
-                "SELECT COUNT(DISTINCT file_path) FROM nodes WHERE LOWER(name)=? "
-                "AND label IN ('Function','Method','Class','Interface')",
-                (sl,),
-            ).fetchone()[0]
-            or 0
-        )
-        indeg = (
-            conn.execute(
-                "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id=n.id "
-                "WHERE LOWER(n.name)=? AND e.type='CALLS' AND COALESCE(e.confidence,0.5) >= 0.5",
-                (sl,),
-            ).fetchone()[0]
-            or 0
-        )
+        df_def = conn.execute(
+            "SELECT COUNT(DISTINCT file_path) FROM nodes WHERE LOWER(name)=? "
+            "AND label IN ('Function','Method','Class','Interface')", (sl,)
+        ).fetchone()[0] or 0
+        indeg = conn.execute(
+            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id=n.id "
+            "WHERE LOWER(n.name)=? AND e.type='CALLS' AND COALESCE(e.confidence,0.5) >= 0.5",
+            (sl,),
+        ).fetchone()[0] or 0
     except sqlite3.Error:
         return None
     if df_def <= 0:
@@ -300,14 +282,10 @@ def is_seed_pollutant(name: str, conn: sqlite3.Connection) -> bool:
         return True
     sl = s.lower()
     try:
-        df_def = (
-            conn.execute(
-                "SELECT COUNT(DISTINCT file_path) FROM nodes WHERE LOWER(name)=? "
-                "AND label IN ('Function','Method','Class','Interface')",
-                (sl,),
-            ).fetchone()[0]
-            or 0
-        )
+        df_def = conn.execute(
+            "SELECT COUNT(DISTINCT file_path) FROM nodes WHERE LOWER(name)=? "
+            "AND label IN ('Function','Method','Class','Interface')", (sl,)
+        ).fetchone()[0] or 0
     except sqlite3.Error:
         return False
     if df_def <= 0:
@@ -333,8 +311,8 @@ def is_seed_pollutant(name: str, conn: sqlite3.Connection) -> bool:
 # =========================================================================
 @dataclass
 class DynTier:
-    kept: list[int]  # indices (into the input order) above the dynamic cutoff
-    tiers: list[str]  # per-item tier: "high" | "mid" | "low"
+    kept: list[int]              # indices (into the input order) above the dynamic cutoff
+    tiers: list[str]             # per-item tier: "high" | "mid" | "low"
     median: float
     sigma: float
 
@@ -370,11 +348,9 @@ def dynamic_cutoff(scores: list[float]) -> DynTier:
     for i in range(n):
         z = 0.6745 * (scores[i] - med) / mad if mad > _EPS else 0.0
         if z >= _Z_OUTLIER:
-            tiers[i] = "high"
-            kept.append(i)
+            tiers[i] = "high"; kept.append(i)
         elif scores[i] > med:
-            tiers[i] = "mid"
-            kept.append(i)
+            tiers[i] = "mid"; kept.append(i)
         else:
             tiers[i] = "low"
     kept.sort(key=lambda i: -scores[i])
@@ -435,7 +411,7 @@ def claim_confidence(score: float, pool: list[float]) -> tuple[float, bool]:
     if not pool:
         return (0.5, True)
     m = len(pool)
-    conf = sum(1 for p in pool if p <= score) / m  # ECDF percentile rank
+    conf = sum(1 for p in pool if p <= score) / m          # ECDF percentile rank
     abstain = dynamic_cutoff(list(pool) + [score]).tiers[-1] == "low"
     return (round(conf, 4), abstain)
 
@@ -445,10 +421,10 @@ def claim_confidence(score: float, pool: list[float]) -> tuple[float, bool]:
 # =========================================================================
 @dataclass
 class Phase:
-    phase: str  # "early" | "mid" | "late"  (= orient / work / land)
-    progress: float  # i / max_iter in [0,1];  -1.0 = unknown horizon
-    near_budget: bool  # within the force-submit window
-    char_budget: int  # evidence budget for this turn (scales with remaining)
+    phase: str          # "early" | "mid" | "late"  (= orient / work / land)
+    progress: float     # i / max_iter in [0,1];  -1.0 = unknown horizon
+    near_budget: bool   # within the force-submit window
+    char_budget: int    # evidence budget for this turn (scales with remaining)
 
 
 def phase_and_budget(

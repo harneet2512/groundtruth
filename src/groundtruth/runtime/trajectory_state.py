@@ -1,5 +1,4 @@
 """Product-owned mini-swe trajectory state controller."""
-
 from __future__ import annotations
 
 import re
@@ -9,23 +8,8 @@ from .context_policy import Event, Phase
 
 
 SOURCE_EXTS = {
-    ".py",
-    ".go",
-    ".rs",
-    ".js",
-    ".ts",
-    ".tsx",
-    ".jsx",
-    ".java",
-    ".rb",
-    ".c",
-    ".cpp",
-    ".h",
-    ".hpp",
-    ".php",
-    ".kt",
-    ".scala",
-    ".cs",
+    ".py", ".go", ".rs", ".js", ".ts", ".tsx", ".jsx", ".java", ".rb",
+    ".c", ".cpp", ".h", ".hpp", ".php", ".kt", ".scala", ".cs",
 }
 
 
@@ -86,11 +70,7 @@ def command_event(command: str, observation: str = "") -> Event | None:
     if files:
         if re.search(r"\b(apply_patch|python[\d.]*\s+-c|writeFile|open\()", command or "", re.I):
             return Event.POST_EDIT
-        if re.search(
-            r"(?:^|[;&|]\s*)(cat|sed|grep|rg|less|head|tail|Get-Content|Select-String)\b",
-            command or "",
-            re.I,
-        ):
+        if re.search(r"(?:^|[;&|]\s*)(cat|sed|grep|rg|less|head|tail|Get-Content|Select-String)\b", command or "", re.I):
             return Event.POST_VIEW
         if re.search(r"(?:^|[;&|]\s*)(?:cat\b.*>|.*>>)", command or "", re.I):
             return Event.POST_EDIT
@@ -169,8 +149,7 @@ def derive_phase(state: TrajectoryState) -> Phase:
     # fall back to the minimum (never invent a default budget).
     orient_limit = (
         max(_ORIENT_MIN_ACTIONS, int(state.step_limit * ORIENT_ACTION_FRACTION))
-        if state.step_limit
-        else _ORIENT_MIN_ACTIONS
+        if state.step_limit else _ORIENT_MIN_ACTIONS
     )
     if state.action_count <= orient_limit and not state.edited_files:
         return Phase.ORIENT

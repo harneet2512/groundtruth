@@ -27,6 +27,7 @@ from groundtruth.index.store import (
     SymbolRecord,
     SymbolStore,
 )
+from groundtruth.index.repo_scope import NOOP_SCOPE, RepoScope, for_read
 from groundtruth.utils.result import Err, GroundTruthError, Ok, Result
 
 
@@ -146,9 +147,14 @@ class GraphStore(SymbolStore):
     Write methods (insert_symbol, etc.) are no-ops since the Go indexer owns writes.
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, *, active_repo_root: str | None = None) -> None:
         super().__init__(db_path=db_path)
         self._usage_cache: dict[int, int] | None = None
+        # SM-9a multi-repo consumer: the on-disk root of the repo whose reads should
+        # be scoped when this graph.db indexes >1 repository. None (the default, and
+        # every existing caller) OR a single-repo db -> NOOP_SCOPE, byte-identical.
+        self._active_repo_root = active_repo_root
+        self._repo_scope: RepoScope = NOOP_SCOPE
 
     def initialize(self) -> Result[None, GroundTruthError]:
         """Open connection to the Go indexer DB."""
@@ -167,6 +173,9 @@ class GraphStore(SymbolStore):
             self._conn.execute("PRAGMA temp_store=MEMORY")
             # Pre-compute usage counts (incoming edge count per node)
             self._build_usage_cache()
+            # SM-9a: resolve the active-repo read scope ONCE. On a single-repo / legacy
+            # db this is NOOP_SCOPE (one O(1) probe, no behavioral change).
+            self._repo_scope = for_read(self._conn, self._active_repo_root)
             return Ok(None)
         except sqlite3.Error as exc:
             return Err(
@@ -180,9 +189,7 @@ class GraphStore(SymbolStore):
         """Check if edges table has a confidence column (v14+ schema)."""
         if not hasattr(self, "_confidence_col_exists"):
             try:
-                cols = {
-                    r[1] for r in self.connection.execute("PRAGMA table_info(edges)").fetchall()
-                }
+                cols = {r[1] for r in self.connection.execute("PRAGMA table_info(edges)").fetchall()}
                 self._confidence_col_exists = "confidence" in cols
             except sqlite3.Error:
                 self._confidence_col_exists = False
@@ -224,7 +231,12 @@ class GraphStore(SymbolStore):
 
     def find_symbol_by_name(self, name: str) -> Result[list[SymbolRecord], GroundTruthError]:
         try:
-            cursor = self.connection.execute("SELECT * FROM nodes WHERE name = ?", (name,))
+            # SM-9a: scope the name-match to the active repo on a multi-repo db so a
+            # same-named symbol from another repository is not returned as fact.
+            _frag, _rp = self._repo_scope.node_filter()
+            cursor = self.connection.execute(
+                "SELECT * FROM nodes WHERE name = ?" + _frag, (name, *_rp)
+            )
             return Ok(
                 [_node_row_to_symbol(row, self._usage_for(row["id"])) for row in cursor.fetchall()]
             )
@@ -241,7 +253,10 @@ class GraphStore(SymbolStore):
             matched = self._match_file_path(file_path)
             if matched is None:
                 return Ok([])
-            cursor = self.connection.execute("SELECT * FROM nodes WHERE file_path = ?", (matched,))
+            _frag, _rp = self._repo_scope.node_filter()
+            cursor = self.connection.execute(
+                "SELECT * FROM nodes WHERE file_path = ?" + _frag, (matched, *_rp)
+            )
             return Ok(
                 [_node_row_to_symbol(row, self._usage_for(row["id"])) for row in cursor.fetchall()]
             )
@@ -296,7 +311,9 @@ class GraphStore(SymbolStore):
 
     def get_all_symbol_names(self) -> Result[list[str], GroundTruthError]:
         try:
-            cursor = self.connection.execute("SELECT DISTINCT name FROM nodes")
+            _frag, _rp = self._repo_scope.node_filter()
+            _sql = "SELECT DISTINCT name FROM nodes" + (" WHERE 1=1" + _frag if _frag else "")
+            cursor = self.connection.execute(_sql, _rp)
             return Ok([row["name"] for row in cursor.fetchall()])
         except sqlite3.Error as exc:
             return Err(
@@ -307,7 +324,9 @@ class GraphStore(SymbolStore):
 
     def get_all_files(self) -> Result[list[str], GroundTruthError]:
         try:
-            cursor = self.connection.execute("SELECT DISTINCT file_path FROM nodes")
+            _frag, _rp = self._repo_scope.node_filter()
+            _sql = "SELECT DISTINCT file_path FROM nodes" + (" WHERE 1=1" + _frag if _frag else "")
+            cursor = self.connection.execute(_sql, _rp)
             return Ok([row["file_path"] for row in cursor.fetchall()])
         except sqlite3.Error as exc:
             return Err(
@@ -418,11 +437,16 @@ class GraphStore(SymbolStore):
         normalized = self._normalize_path(file_path)
         if not normalized:
             return None
+        # SM-9a: scope both the exact and the basename-fallback resolution to the
+        # active repo on a multi-repo db, so a path is never resolved to a
+        # same-named file that lives in another repository. Empty frag on
+        # single-repo -> the SQL below is byte-identical (no extra clause/parens).
+        _frag, _rp = self._repo_scope.node_filter()
         try:
             # 1) Exact match first.
             row = self.connection.execute(
-                "SELECT file_path FROM nodes WHERE file_path = ? LIMIT 1",
-                (normalized,),
+                "SELECT file_path FROM nodes WHERE file_path = ?" + _frag + " LIMIT 1",
+                (normalized, *_rp),
             ).fetchone()
             if row:
                 return row["file_path"]
@@ -432,10 +456,16 @@ class GraphStore(SymbolStore):
             if not basename:
                 return None
             esc = basename.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            # Parenthesize the OR only when a repo filter is appended (AND binds
+            # tighter than OR): keep the LIKE/= disjunction grouped before the
+            # repo_id AND. Without a filter the string is left untouched.
+            if _frag:
+                _where = "(file_path LIKE ? ESCAPE '\\' OR file_path = ?)" + _frag
+            else:
+                _where = "file_path LIKE ? ESCAPE '\\' OR file_path = ?"
             rows = self.connection.execute(
-                "SELECT DISTINCT file_path FROM nodes "
-                "WHERE file_path LIKE ? ESCAPE '\\' OR file_path = ? LIMIT 2",
-                (f"%/{esc}", basename),
+                "SELECT DISTINCT file_path FROM nodes WHERE " + _where + " LIMIT 2",
+                (f"%/{esc}", basename, *_rp),
             ).fetchall()
             if len(rows) == 1:
                 return rows[0]["file_path"]
@@ -691,21 +721,13 @@ class GraphStore(SymbolStore):
                 (test_node_id,),
             )
             return [
-                {
-                    "kind": row[0],
-                    "expression": row[1],
-                    "expected": row[2],
-                    "line": row[3],
-                    "target_node_id": row[4],
-                }
+                {"kind": row[0], "expression": row[1], "expected": row[2], "line": row[3], "target_node_id": row[4]}
                 for row in cursor.fetchall()
             ]
         except sqlite3.OperationalError:
             return []
 
-    def get_assertions_for_target(
-        self, target_name: str, target_node_id: int | None = None
-    ) -> list[dict[str, Any]]:
+    def get_assertions_for_target(self, target_name: str, target_node_id: int | None = None) -> list[dict[str, Any]]:
         """Get assertions that test a specific function.
 
         When target_node_id is provided, queries by the resolved foreign key for
@@ -1045,7 +1067,9 @@ class GraphStore(SymbolStore):
             args.append("".join(current).strip())
         return [a for a in args if a]
 
-    def map_args_to_params(self, caller_code: str, callee_id: int) -> list[dict[str, Any]] | None:
+    def map_args_to_params(
+        self, caller_code: str, callee_id: int
+    ) -> list[dict[str, Any]] | None:
         """Map positional arguments in caller code to callee parameters.
 
         Prefers structured params from the properties table (P2) when available,
@@ -1076,15 +1100,13 @@ class GraphStore(SymbolStore):
         if params:
             mapping: list[dict[str, Any]] = []
             for i, (arg, param) in enumerate(zip(args, params)):
-                mapping.append(
-                    {
-                        "position": i,
-                        "arg": arg,
-                        "param_name": param["name"],
-                        "param_type": param.get("type"),
-                        "required": param.get("required", True),
-                    }
-                )
+                mapping.append({
+                    "position": i,
+                    "arg": arg,
+                    "param_name": param["name"],
+                    "param_type": param.get("type"),
+                    "required": param.get("required", True),
+                })
             return mapping if mapping else None
 
         # Fallback: parse callee signature string
@@ -1140,15 +1162,13 @@ class GraphStore(SymbolStore):
 
         mapping: list[dict[str, Any]] = []
         for i, (arg, param) in enumerate(zip(args, params)):
-            mapping.append(
-                {
-                    "position": i,
-                    "arg": arg,
-                    "param_name": param,
-                    "param_type": None,
-                    "required": True,
-                }
-            )
+            mapping.append({
+                "position": i,
+                "arg": arg,
+                "param_name": param,
+                "param_type": None,
+                "required": True,
+            })
         return mapping if mapping else None
 
     # --- Write operations are no-ops for the bridge ---
@@ -1188,10 +1208,8 @@ class GraphStore(SymbolStore):
             funcs = self.connection.execute(
                 "SELECT name FROM nodes WHERE label IN ('Function','Method') AND is_test = 0 LIMIT 500"
             ).fetchall()
-            snake = sum(1 for f in funcs if "_" in f["name"] and f["name"].islower())
-            camel = sum(
-                1 for f in funcs if "_" not in f["name"] and any(c.isupper() for c in f["name"][1:])
-            )
+            snake = sum(1 for f in funcs if '_' in f["name"] and f["name"].islower())
+            camel = sum(1 for f in funcs if not '_' in f["name"] and any(c.isupper() for c in f["name"][1:]))
             total = len(funcs)
             if total > 0:
                 result["naming"] = "snake_case" if snake > camel else "camelCase"
@@ -1224,7 +1242,7 @@ class GraphStore(SymbolStore):
                 "UNION "
                 "SELECT file_a, count FROM cochanges WHERE file_b = ? AND count >= ? "
                 "ORDER BY count DESC LIMIT 10",
-                (file_path, min_count, file_path, min_count),
+                (file_path, min_count, file_path, min_count)
             )
             return [(row[0], row[1]) for row in cursor.fetchall()]
         except Exception:

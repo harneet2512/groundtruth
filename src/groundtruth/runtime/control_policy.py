@@ -43,9 +43,7 @@ def decide_control_action(
         "hook_blocked": should_block,
         "final_audit_only": bool(final_audit_only),
         "should_replan": bool(replan_decision.get("should_replan", False)),
-        "validation_failed": bool(
-            test_result.get("executed") and not test_result.get("all_passed")
-        ),
+        "validation_failed": bool(test_result.get("executed") and not test_result.get("all_passed")),
     }
 
 

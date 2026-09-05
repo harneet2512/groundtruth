@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from groundtruth.runtime.sanitizer import clip_balanced
@@ -170,14 +170,9 @@ class GenericTracebackParser:
         )
 
         frames = list(self._TB_RE.finditer(output[-3000:]))
-        project_frames = [
-            f
-            for f in frames
-            if not any(
-                skip in f.group(1)
-                for skip in ("/site-packages/", "/lib/python", "/_pytest/", "/unittest/")
-            )
-        ]
+        project_frames = [f for f in frames if not any(
+            skip in f.group(1) for skip in ("/site-packages/", "/lib/python", "/_pytest/", "/unittest/")
+        )]
         if project_frames:
             last = project_frames[-1]
             rec.file = last.group(1)
@@ -292,11 +287,7 @@ def parse_failures(command: str, output: str) -> list[FailureRecord]:
     cmd_kind = classify_command(command)
 
     if cmd_kind == CommandKind.TEST:
-        preferred = [
-            PytestParser.name,
-            GenericTracebackParser.name,
-            GenericExpectedActualParser.name,
-        ]
+        preferred = [PytestParser.name, GenericTracebackParser.name, GenericExpectedActualParser.name]
     elif cmd_kind == CommandKind.TYPECHECK:
         preferred = [TscParser.name, MypyParser.name, GenericTracebackParser.name]
     else:

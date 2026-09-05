@@ -13,7 +13,9 @@ import os
 import re as _re
 import sqlite3
 import subprocess
-from dataclasses import dataclass, field
+import hashlib
+import json
+from dataclasses import dataclass, field, replace
 
 # Single source of truth for the categorical correct-or-quiet rule lives in
 # curation_map: an edge is a caller FACT only when its resolution_method is
@@ -35,7 +37,6 @@ from groundtruth.pretask.contract_map import (
     contract_line,
     edit_target_callee_contracts,
 )
-
 # Symbol-anchored multi-hop graph-witness localizer (the L1 core). This is the
 # deterministic graph TRAVERSAL that the old lexical-only candidate path lacked:
 # it anchors on issue SYMBOLS, walks graph.db CALLS/IMPORTS from those nodes, and
@@ -75,7 +76,6 @@ def _clip_body_line(line: str, limit: int = _MAX_BODY_LINE_CHARS) -> str:
     if len(line) <= limit:
         return line
     return line[: limit - 1].rstrip() + "…"
-
 
 _schema_cache: dict[str, bool] = {}
 
@@ -155,12 +155,18 @@ def _edge_conf_clause(graph_db: str, alias: str = "e") -> str:
         # the categorical FACT cannot be asserted, so consumers must treat the
         # joined rows as unverified (correct-or-quiet at the render layer).
         return ""
-    try:
-        from groundtruth.hooks.post_edit import _edge_filter_for_db
-
-        return "AND " + _edge_filter_for_db(graph_db, alias=alias, min_conf=EDGE_CONFIDENCE_FLOOR)
-    except Exception:
-        return f"AND {alias}.confidence >= {EDGE_CONFIDENCE_FLOOR}"
+    if _has_resolution_method(graph_db):
+        # B-3: agree edge-for-edge with the Go closure's admission rule
+        # (closure.isVerifiedEdge: method ∈ set AND confidence >= MinEdgeConfidence=0.7).
+        # Method-only admitted ambiguity-demoted deterministic edges (import/same_file/lsp
+        # @0.6/CANDIDATE) as bare FACTS — the wrong-file "Calls:" lead — diverging from the
+        # closure. The AND conjunct keeps genuine facts (conf 1.0/0.9) and drops the 0.6
+        # ambiguous picks to the (unverified) render path. EDGE_CONFIDENCE_FLOOR == 0.7.
+        return (
+            f"AND LOWER(TRIM({alias}.resolution_method)) IN ({_DET_METHOD_INLIST}) "
+            f"AND {alias}.confidence >= {EDGE_CONFIDENCE_FLOOR}"
+        )
+    return f"AND {alias}.confidence >= {EDGE_CONFIDENCE_FLOOR}"
 
 
 def _file_is_namematch_only(graph_db: str, file_path: str) -> bool:
@@ -269,6 +275,119 @@ class FileEntry:
     # function_names) out of the [INFO] drop. Without this the one signal that
     # correctly identified gold died at the FileEntry boundary (BUG-3).
     anchor_prox: float = 0.0
+    # Candidate-local issue relevance from graph_localizer. This is distinct
+    # from witness_verified/edge truth and is the authority for confidence tags.
+    relevance_grade: str = ""
+
+
+def _candidate_acquisition_sources(
+    graph_db: str,
+    repo_root: str,
+    file_path: str,
+    resolution_methods: set[str] | frozenset[str],
+) -> dict[str, dict[str, object]]:
+    """Return candidate-local acquisition lineage without changing delivery.
+
+    Only positive, independently checkable source contributions are emitted.
+    Missing legacy columns, an unreadable checkout, or an unresolved partition
+    all abstain. A single-repo no-op is emitted only when the indexed candidate
+    bytes equal the active checkout bytes. Repeatability is intentionally not
+    synthesized here: a single generation cannot prove ``determinism``.
+    """
+    methods = {
+        str(method).strip().lower() for method in resolution_methods
+        if isinstance(method, str) and str(method).strip()
+    }
+    deterministic = {str(m).strip().lower() for m in DETERMINISTIC_RESOLUTION_METHODS}
+    verified = methods & deterministic
+    sources: dict[str, dict[str, object]] = {}
+    if verified:
+        sources["resolution_honesty"] = {
+            "kind": "resolution_methods",
+            "methods": sorted(verified),
+            "all_verified": methods <= deterministic,
+        }
+        type_methods = verified & {"type_flow", "import_type"}
+        if type_methods:
+            sources["type_intelligence"] = {
+                "kind": "type_resolution",
+                "methods": sorted(type_methods),
+            }
+        lsp_methods = verified & {"lsp", "lsp_verified"}
+        if lsp_methods:
+            sources["LSP"] = {
+                "kind": "lsp_resolution",
+                "methods": sorted(lsp_methods),
+            }
+
+    if not graph_db or not file_path:
+        return sources
+    normalized_path = file_path.replace("\\", "/").lstrip("./").lstrip("/")
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            hash_cols = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(file_hashes)").fetchall()
+            }
+            hash_col = "content_hash" if "content_hash" in hash_cols else (
+                "hash" if "hash" in hash_cols else ""
+            )
+            candidate_revision_current = False
+            if hash_col:
+                row = conn.execute(
+                    f"SELECT {hash_col} FROM file_hashes WHERE file_path = ? LIMIT 1",
+                    (normalized_path,),
+                ).fetchone()
+                indexed = str(row[0]).strip().lower() if row and row[0] else ""
+                try:
+                    with open(os.path.join(repo_root, normalized_path), "rb") as source_file:
+                        observed = hashlib.sha256(source_file.read()).hexdigest()
+                except OSError:
+                    observed = ""
+                if _re.fullmatch(r"[0-9a-f]{64}", indexed) and indexed == observed:
+                    candidate_revision_current = True
+                    sources["freshness_basis"] = {
+                        "kind": "content_revision",
+                        "indexed_sha256": indexed,
+                        "observed_sha256": observed,
+                    }
+
+            from groundtruth.index.repo_scope import for_read
+
+            scope = for_read(conn, repo_root)
+            if not scope.is_multi_repo and scope.resolved and candidate_revision_current:
+                sources["repo_scope"] = {
+                    "kind": "repo_partition",
+                    "is_multi_repo": False,
+                    "resolved": True,
+                    "scope_mode": "single_repo_noop",
+                    "active_repo_id": None,
+                    "candidate_repo_id": None,
+                    "candidate_path": normalized_path,
+                }
+            elif scope.is_multi_repo and scope.resolved and scope.active_repo_id is not None:
+                node_cols = {
+                    str(row[1]) for row in conn.execute("PRAGMA table_info(nodes)").fetchall()
+                }
+                if "repo_id" in node_cols:
+                    repo_rows = conn.execute(
+                        "SELECT DISTINCT repo_id FROM nodes WHERE file_path = ? AND repo_id IS NOT NULL",
+                        (normalized_path,),
+                    ).fetchall()
+                    repo_ids = {int(row[0]) for row in repo_rows if row and row[0] is not None}
+                    if repo_ids == {scope.active_repo_id}:
+                        sources["repo_scope"] = {
+                            "kind": "repo_partition",
+                            "is_multi_repo": True,
+                            "resolved": True,
+                            "active_repo_id": scope.active_repo_id,
+                            "candidate_repo_id": scope.active_repo_id,
+                        }
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+    return sources
 
 
 @dataclass(frozen=True)
@@ -283,22 +402,93 @@ class V1RBriefResult:
     # semantic + FTS5) and not a degraded lexical-only / hollow run. A candidate
     # counts toward a signal iff that signal contributed a NONZERO score to it.
     # Defaults keep every existing caller byte-compatible. (instr 2026-06-04)
-    graph_edge_count: int = 0  # candidates backed by >=1 real graph edge
-    semantic_signal_count: int = 0  # candidates with a nonzero semantic/ONNX score
-    structural_signal_count: int = 0  # candidates with a nonzero structural/graph-reach score
-    fts5_signal_count: int = 0  # candidates scored by / entering via FTS5/BM25 (lexical)
-    confidence_tier: str = "low"  # HIGH/MEDIUM/LOW from _localization_header
+    # SCOPE (C15, 2026-07-27 — read this before citing any of the four): these four are
+    # DELIVERY claims. They count over the RENDERED candidate set (``.files``), joined to
+    # the final bytes, and they pair with ``rendered_candidate_count`` /``sem_components``
+    # as the numerator/denominator/distribution triple that gate 3b and the absorption
+    # contract read. Their unqualified names invite the ACQUISITION reading; for that
+    # question read ``acquired_*`` below, NEVER these.
+    graph_edge_count: int = 0        # DELIVERED candidates backed by >=1 real graph edge
+    semantic_signal_count: int = 0   # DELIVERED candidates with a nonzero semantic/ONNX score
+    structural_signal_count: int = 0 # DELIVERED candidates with a nonzero structural/graph-reach score
+    fts5_signal_count: int = 0       # DELIVERED candidates scored by / entering via FTS5/BM25
+    confidence_tier: str = "low"     # HIGH/MEDIUM/LOW from _localization_header
+    # --- ACQUISITION counts (C15) — what the LEGS FOUND, independent of delivery ---
+    # Counted over the RANKED set (``top_records``), so the brief reduction cannot zero
+    # them. WHY THIS FAMILY EXISTS: under GT_BRIEF_MINIMAL + GT_LOC_RESLOT the reducer
+    # deletes every localization block, so the DELIVERED set is empty BY CONSTRUCTION and
+    # the four fields above all read 0. On run 30297116212 that zero was read as "the
+    # acquisition subsystem is dark" and written into the architecture state-of-record —
+    # while the SAME run's embedder certificate reported 112 semantic candidates and the
+    # production localizer, driven against that run's own graph, produced 50. It was a
+    # broken gauge, not a broken subsystem. Both facts are wanted; they must not share a
+    # name. These answer "what did the legs find"; the four above answer "what reached
+    # the model".
+    acquired_graph_edge_count: int = 0
+    acquired_semantic_signal_count: int = 0
+    acquired_structural_signal_count: int = 0
+    acquired_fts5_signal_count: int = 0
+    # Per-ranked-candidate acquisition witnesses, populated before any delivery
+    # reduction. This is deliberately narrower than ``localization_proof``: it
+    # carries only the four acquisition-leg witnesses and makes no rendered-block,
+    # contribution-attestation, or receipt claim.
+    acquisition_proof: list[dict[str, object]] = field(default_factory=list)
+    # --- DELIVERY counts, explicitly named. ``None`` == NOT_EVALUABLE ---
+    # Same values as the four legacy fields above, under names that cannot be misread.
+    # NOT_EVALUABLE (None) — never 0 — when the minimal/re-slot reduction is what emptied
+    # the delivered set: "0 reached the model via the step-0 brief" is then a statement
+    # about the re-slot, not about delivery quality, and a 0 there is the same lie under a
+    # better name. A genuine 0 (candidates delivered, none carrying the signal) stays 0.
+    delivered_graph_edge_count: int | None = None
+    delivered_semantic_signal_count: int | None = None
+    delivered_structural_signal_count: int | None = None
+    delivered_fts5_signal_count: int | None = None
+    delivered_candidate_count: int | None = None
     # --- Embedder-CONSUMPTION metrics (instr 2026-06-07, FIELD-NAME CONTRACT) ---
     # Let a fail-closed precheck distinguish "embedder PRESENT" from "embedder
     # CONSUMED": a present-but-unconsumed embedder has effective_w_sem > 0 yet
     # semantic_signal_count == 0 / all-zero sem_components. Measured over the
     # RENDERED candidates (.files), so it reflects exactly what the agent saw.
-    effective_w_sem: float = 0.0  # W_SEM actually applied after all zeroing branches (from run_v74)
-    rendered_candidate_count: int = 0  # number of rendered/delivered candidates (== len(files))
-    k_sem_top: int = 0  # the relative sem-component cap actually used (from run_v74)
-    sem_components: list[float] = field(
-        default_factory=list
-    )  # components['sem'] over rendered candidates
+    effective_w_sem: float = 0.0          # W_SEM actually applied after all zeroing branches (from run_v74)
+    rendered_candidate_count: int = 0     # number of rendered/delivered candidates (== len(files))
+    k_sem_top: int = 0                    # the relative sem-component cap actually used (from run_v74)
+    sem_components: list[float] = field(default_factory=list)  # components['sem'] over rendered candidates
+    # Per-rendered-candidate proof payload persisted to substrate ``brief_result.json``.
+    # Observability only: lets Stage-1 audits explain why each delivered file ranked
+    # where it did without changing the brief text or ranking behavior.
+    localization_proof: list[dict[str, object]] = field(default_factory=list)
+    # B-30: labels of the brief blocks the DOSE-rail enforcer suppressed to keep the
+    # brief within ``max_brief_tokens`` (e.g. "graph-map", "scope-chain", "truncated").
+    # Empty on the common under-budget path; observability only, no ranking effect.
+    budget_suppressed: list[str] = field(default_factory=list)
+    # B-6: per-brief-block delivery receipts — a sidecar map giving each fact-bearing
+    # block (localization / obligations / contract / scope / companion) a STABLE,
+    # DISTINCT identity so the consumption grader can attribute which BLOCK the agent
+    # consumed. Each entry: ``{block_id, fact_class, label, char_span:[start,end],
+    # content_hash}``. HOST-SIDE METADATA — NEVER rendered into ``brief_text`` (the
+    # brief bytes are byte-identical whether this is populated or not). Empty unless
+    # ``GT_BLOCK_RECEIPTS`` explicitly enables them, or ``GT_INSEAM_METRICS``
+    # enables them when the dedicated flag is absent. No ranking effect.
+    block_receipts: list[dict] = field(default_factory=list)
+    # Typed CAP terminal decisions generated while assembling this exact brief.
+    # Sidecar only; never rendered into brief_text.
+    control_participation: list[dict] = field(default_factory=list)
+    # Cluster-2b: the producer's build-time obligations record — the EXACT issue source
+    # identity (issue_sha256 + revision) the task-start obligations block was extracted
+    # from, plus the extracted obligations digest + count, bound to the delivered
+    # obligations block's candidate_id + seal. HOST-SIDE METADATA — never rendered into
+    # brief_text (byte-identical whether populated or not). Empty when there is no
+    # delivered obligations block or no persisted extraction record (fail-closed: the
+    # obligations attestation then stays honestly UNMEASURED). Consumed by the
+    # canonical task-start evidence adapter.
+    obligations_record: dict = field(default_factory=dict)
+    # B-31 (Brief-F9): which token counter produced ``token_estimate`` /governed the
+    # DOSE rail — ``"gte-modernbert-bpe"`` (the baked HF BPE vocabulary) or
+    # ``"char4-estimate"`` (the char/4 fallback when no tokenizer.json is configured).
+    # Observability only (no ranking / brief-byte effect). NOTE: even the "real"
+    # counter is gte-modernbert's BPE — a PROXY for the sampled model's tokenizer, not
+    # the model's own; treat the count as consistent-and-honest, not exact-per-model.
+    tokenizer_used: str = ""
 
 
 def _provenance_order_clause(
@@ -579,6 +769,12 @@ def _issue_relevant_neighbors(
     for neighbor, src_lang, tgt_lang in rows:
         if _is_cross_language_pair(src_lang, tgt_lang):
             continue
+        # E1 (Fable 2026-07-05): route the Calls: neighbor through the Class-A path chokepoint.
+        # is_test=0 (SQL) alone can leak a vendored/demo path (same-language) or a frozen-graph
+        # test node whose is_test flag was never set. is_deliverable = the ONE predicate every
+        # other delivery surface uses (no surface re-implements "is this non-source").
+        if not _is_deliverable(neighbor):
+            continue
         if neighbor in seen_neighbors:
             continue
         seen_neighbors.add(neighbor)
@@ -624,6 +820,10 @@ def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
         for fpath, src_lang, tgt_lang in rows:
             if _is_cross_language_pair(src_lang, tgt_lang):
                 continue
+            # E1 (Fable 2026-07-05): Class-A path chokepoint — is_test=0 (SQL) misses a
+            # same-language vendored/demo path or a frozen-graph test node.
+            if not _is_deliverable(fpath):
+                continue
             if fpath not in out:
                 out.append(fpath)
         return out[:limit]
@@ -655,8 +855,10 @@ MAX_CALLERS_PER_FUNC = 2
 # ---------------------------------------------------------------------------
 from groundtruth.delivery.path_policy import (  # noqa: E402
     is_vendored_path as _is_vendored_path,
+    is_minified_file as _is_minified_file,
     is_test_or_demo as _is_test_or_demo,
     is_test_tooling as _is_test_tooling,
+    is_deliverable as _is_deliverable,
     test_tooling_roots as _test_tooling_roots,
 )
 from groundtruth.delivery.name_policy import (  # noqa: E402
@@ -790,7 +992,18 @@ def _caller_contract_for_file(
 
                 # Normalize provenance (strip/lower) so 'Import' / 'import ' from
                 # an inconsistent indexer still classify as the canonical method.
-                is_fact = (method or "").strip().lower() in _DETERMINISTIC_METHODS
+                # A whitelisted METHOD is necessary but NOT sufficient: a tier whose
+                # premise was not re-proven is capped to conf 0.6 (the -file/L6 restore
+                # demote in incremental.go) but KEEPS its method as provenance, and a
+                # genuinely-uncertain whitelisted edge (e.g. among-files import pick) is
+                # also minted at 0.6. Neither is a FACT — EDGE_CONFIDENCE_FLOOR (0.7)
+                # "keeps genuine facts (1.0/0.9) and drops the 0.6" (the SAME conjunct the
+                # caller-query helper applies). Gate on it here too, else a method-only
+                # is_fact launders the capped restore back to CERTIFIED. Old schema (no
+                # confidence column) stays permissive — there is no conf to judge.
+                is_fact = (method or "").strip().lower() in _DETERMINISTIC_METHODS and (
+                    not has_conf or conf_f >= EDGE_CONFIDENCE_FLOOR
+                )
                 if is_fact:
                     snippet = code if len(code) <= 80 else code[:77] + "..."
                     rendered = (
@@ -865,10 +1078,18 @@ def _resolved_witnesses_for_file(
     conn = None
     try:
         conn = sqlite3.connect(graph_db)
-        _, has_method = _has_columns(conn)
+        has_conf, has_method = _has_columns(conn)
         if not has_method:
             return []  # cannot judge provenance -> emit nothing (never launder)
         _det_sql = "','".join(sorted(DETERMINISTIC_RESOLUTION_METHODS))
+        # E3 (2026-07-05): a whitelisted METHOD is necessary but NOT sufficient — the
+        # -file/L6 restore demote (incremental.go) caps an unre-proven deterministic edge
+        # to conf 0.6 while KEEPING its method as provenance, and an among-files import
+        # pick is minted at 0.6. Neither is a FACT. Gate on EDGE_CONFIDENCE_FLOOR (0.7),
+        # the SAME conjunct is_fact()/_resolution_fact_clause apply, so a demoted edge
+        # cannot launder back into a [WITNESS]. Old schema (no confidence col) stays
+        # permissive — there is no conf to judge.
+        _conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if has_conf else ""
         _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
         # Cross-language disqualifier (mini-delivery port): endpoint languages,
         # permissive on legacy graphs without nodes.language ('' -> no judgement).
@@ -905,6 +1126,7 @@ def _resolved_witnesses_for_file(
               AND nsrc.is_test = 0
               AND e.source_line > 0
               AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
+              {_conf_clause}
             ORDER BY e.source_line
             LIMIT ?
             """
@@ -939,17 +1161,15 @@ def _resolved_witnesses_for_file(
             code = _code_at(caller_file, line)
             if _is_stdlib_shadow(code, target_name or ""):
                 continue  # false caller: stdlib attr call name-matched to project symbol
-            out.append(
-                {
-                    "relation": "CALLS",
-                    "direction": "caller",
-                    "file_path": caller_file,
-                    "line": int(line) if line else 0,
-                    "symbol": caller_name or "",
-                    "target": target_name or "",
-                    "code": code,
-                }
-            )
+            out.append({
+                "relation": "CALLS",
+                "direction": "caller",
+                "file_path": caller_file,
+                "line": int(line) if line else 0,
+                "symbol": caller_name or "",
+                "target": target_name or "",
+                "code": code,
+            })
             if sum(1 for w in out if w["direction"] == "caller") >= max_each:
                 break
 
@@ -964,6 +1184,7 @@ def _resolved_witnesses_for_file(
               AND nt.file_path != nsrc.file_path
               AND nt.is_test = 0
               AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
+              {_conf_clause}
             ORDER BY e.source_line
             LIMIT ?
             """
@@ -976,15 +1197,7 @@ def _resolved_witnesses_for_file(
                 callee_sql.format(file_predicate="nsrc.file_path LIKE ?"),
                 ("%/" + _norm_fp, max_each * 4),
             ).fetchall()
-        for (
-            callee_file,
-            source_line,
-            callee_name,
-            src_name,
-            def_line,
-            _slang,
-            _tlang,
-        ) in callee_rows:
+        for callee_file, source_line, callee_name, src_name, def_line, _slang, _tlang in callee_rows:
             # `source_line` is the CALL SITE in THIS candidate file — use it ONLY for the
             # stdlib-shadow check on the call (`os.walk(` must be read at the call site).
             # The RENDERED location is the callee's DEFINITION line in callee_file
@@ -1013,17 +1226,15 @@ def _resolved_witnesses_for_file(
             _call_code = _code_at(file_path, source_line)
             if _is_stdlib_shadow(_call_code, callee_name or ""):
                 continue
-            out.append(
-                {
-                    "relation": "CALLS",
-                    "direction": "callee",
-                    "file_path": callee_file,
-                    "line": int(def_line) if def_line else 0,
-                    "symbol": callee_name or "",
-                    "target": src_name or "",
-                    "code": _code_at(callee_file, def_line) if def_line else "",
-                }
-            )
+            out.append({
+                "relation": "CALLS",
+                "direction": "callee",
+                "file_path": callee_file,
+                "line": int(def_line) if def_line else 0,
+                "symbol": callee_name or "",
+                "target": src_name or "",
+                "code": _code_at(callee_file, def_line) if def_line else "",
+            })
             if sum(1 for w in out if w["direction"] == "callee") >= max_each:
                 break
         return out
@@ -1037,32 +1248,71 @@ def _resolved_witnesses_for_file(
                 pass
 
 
-def _sibling_context(graph_db: str, file_path: str, func_names: list[str]) -> str:
-    """Find sibling functions in the same class/module — parallel implementations.
+def _norm_fp(file_path: str) -> str:
+    """Normalize a path to the form gt-index stores in nodes.file_path:
+    repo-relative, forward slashes, no leading ``./`` or ``/``. Kept byte-parity
+    with the mini port (gt_mini_patch._norm_fp).
 
-    General mechanism: if the candidate has function X, show what OTHER functions
-    exist at the same scope level. These are the patterns to follow.
+    NB: strip the ``./`` PREFIX, not a char-SET (Fable finding 2). ``str.lstrip("./")``
+    removes any leading run of {'.','/'} → ``.github/x`` becomes ``github/x`` and the
+    sibling query's ``file_path = ?`` matches nothing for every dot-directory file."""
+    p = (file_path or "").replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p.lstrip("/")
+
+
+def _compact_sig(sig: str) -> str:
+    """Compact a stored signature to the pattern shape for the sibling line:
+    sanitize LSP markdown, strip a leading Python ``def``/``async def`` (other
+    languages keep their native ``func``/``fn``/method head), bound the length so
+    several siblings fit one line. Correct-or-quiet: empty in -> empty out. Kept
+    byte-parity with the mini port (gt_mini_patch._compact_sig)."""
+    s = _sanitize_signature((sig or "").strip())
+    if not s:
+        return ""
+    s = _re.sub(r"^\s*(async\s+)?def\s+", "", s).rstrip(":").strip()
+    return (s[:88] + "...") if len(s) > 88 else s
+
+
+def _sibling_context(graph_db: str, file_path: str, func_names: list[str]) -> str:
+    """Sibling functions at the same scope — parallel patterns to follow.
+
+    Each sibling carries its compact SIGNATURE (receiver/params/return) — the
+    pattern a new or edited member must MATCH — not just the bare name, so the
+    agent writes a member consistent with its siblings. Builtin/dunder-shadow
+    names are filtered (a shadowed name is not a sibling pattern). ``Function``/
+    ``Method`` ONLY — a class/impl-block is not a parallel-function pattern.
+    Correct-or-quiet: a sibling with no clean signature falls back to its bare
+    name; empty in / no siblings / error -> empty out. Pure SQL over
+    ``nodes.signature``. Kept BYTE-PARITY with the mini port
+    (``gt_mini_patch._sibling_context``); the deep-parity harness guards drift.
     """
     if not func_names:
         return ""
     try:
         conn = sqlite3.connect(graph_db)
         rows = conn.execute(
-            """
-            SELECT DISTINCT n.name
-            FROM nodes n
-            WHERE n.file_path = ?
-              AND n.label IN ('Function', 'Method', 'Class', 'ImplBlock')
-              AND n.is_test = 0
-              AND n.name NOT IN ({})
-            ORDER BY n.start_line
-            LIMIT 8
-            """.format(",".join("?" * len(func_names))),
-            (file_path, *func_names),
+            "SELECT DISTINCT n.name, n.signature FROM nodes n "
+            "WHERE n.file_path = ? "
+            "AND n.label IN ('Function','Method','Class','ImplBlock') AND n.is_test = 0 "
+            "AND n.name NOT IN ({}) ORDER BY n.start_line LIMIT 8".format(
+                ",".join("?" * len(func_names))),
+            (_norm_fp(file_path), *func_names),
         ).fetchall()
         conn.close()
-        names = [r[0] for r in rows if len(r[0]) > 2 and not r[0].startswith("_")]
-        return ", ".join(names[:5]) if names else ""
+        out: list[str] = []
+        seen: set[str] = set()
+        for name, sig in rows:
+            if (not name or len(name) <= 2 or name.startswith("_")
+                    or _is_builtin_shadow_name(name) or name in seen):
+                continue
+            seen.add(name)
+            csig = _compact_sig(sig)
+            out.append(csig if csig else name)
+            if len(out) >= 4:
+                break
+        return ", ".join(out) if out else ""
     except Exception:
         return ""
 
@@ -1233,8 +1483,7 @@ def _co_change_from_table(graph_db: str, file_path: str, limit: int = 3) -> list
         # below the limit (the B6 lesson). This is the cochange path-emitter the
         # Class-A generalization missed.
         return [
-            r[0]
-            for r in rows
+            r[0] for r in rows
             if r[0] and not _is_test_or_demo(r[0]) and not _is_vendored_path(r[0])
         ][:limit]
     except sqlite3.Error:
@@ -1248,7 +1497,1233 @@ def _co_change_from_table(graph_db: str, file_path: str, limit: int = 3) -> list
 
 
 def _estimate_tokens(text: str) -> int:
+    """Char/4 token ESTIMATE (B-31 fallback). This is an APPROXIMATION, not a
+    real token count — used only when the baked BPE tokenizer is unavailable.
+    Prefer ``_count_tokens`` (which uses the real tokenizer when present)."""
     return len(text) // 4 + 1
+
+
+# B-31: real BPE token count via the baked HF ``tokenizers`` vocabulary. The DOSE
+# rail and the reported token count must reflect the MODEL's tokens, not a
+# char/4 heuristic (which under/over-counts materially on code, punctuation, and
+# Unicode). Deterministic + offline: the tokenizer.json is loaded ONCE from disk
+# (no network, no download). Falls back to the char/4 ESTIMATE only when the lib
+# or the baked file is unavailable — and that path is honestly an estimate.
+_TOKENIZER_CACHE: dict[str, object] = {}
+
+
+def _resolve_tokenizer_path() -> str:
+    """Baked gte tokenizer.json path, or "" when none is configured. Consults ONLY
+    explicit env config (``GT_TOKENIZER_JSON`` override, then
+    ``GT_MODELS_ROOT/gte-modernbert-base/tokenizer.json``) so behavior is
+    deterministic and never depends on an ambient install."""
+    p = os.environ.get("GT_TOKENIZER_JSON")
+    if p:
+        return p
+    mr = os.environ.get("GT_MODELS_ROOT")
+    if mr:
+        return os.path.join(mr, "gte-modernbert-base", "tokenizer.json")
+    return ""
+
+
+def _get_tokenizer():
+    """Load (and path-cache) the baked ``tokenizers.Tokenizer``, or None. Keyed by
+    the RESOLVED path so a test/process that changes the env is never served a
+    stale tokenizer from a different path (hermetic across env changes)."""
+    path = _resolve_tokenizer_path()
+    if not path or not os.path.isfile(path):
+        return None
+    if path in _TOKENIZER_CACHE:
+        return _TOKENIZER_CACHE[path]
+    tok = None
+    try:
+        from tokenizers import Tokenizer  # baked HF lib
+        tok = Tokenizer.from_file(path)
+    except Exception:
+        tok = None
+    _TOKENIZER_CACHE[path] = tok
+    return tok
+
+
+def _count_tokens(text: str) -> int:
+    """Real BPE token count when the baked tokenizer is available; otherwise the
+    char/4 ESTIMATE. Deterministic + LLM-free + offline.
+
+    B-31/Brief-F9 caveat: the "real" tokenizer is gte-modernbert's BPE — a PROXY for
+    the sampled model's own tokenizer, not the model's exact vocabulary. Use
+    :func:`_tokenizer_kind` to record which counter actually ran (``tokenizer_used``
+    on the result); the char/4 fallback is honest but coarser."""
+    tok = _get_tokenizer()
+    if tok is not None:
+        try:
+            return len(tok.encode(text).ids)
+        except Exception:
+            pass
+    return _estimate_tokens(text)
+
+
+def _tokenizer_kind() -> str:
+    """Marker for WHICH token counter :func:`_count_tokens` uses right now, so a
+    caller (and the deep-metrics audit) can tell the real-BPE path from the silent
+    char/4 fallback. ``"gte-modernbert-bpe"`` when the baked HF tokenizer.json is
+    configured + loadable (a PROXY for the sampled model's tokenizer), else
+    ``"char4-estimate"``. Pure + deterministic; mirrors _count_tokens's own branch."""
+    return "gte-modernbert-bpe" if _get_tokenizer() is not None else "char4-estimate"
+
+
+# ITEM-5 (2026-07-13): the plain-checklist header the GT_BRIEF_NATIVE obligations FORM arm emits
+# in place of the <gt-obligations> tag. SINGLE source so _is_brief_boundary / _segment_brief_blocks
+# / brief_minimal_certificate recognize the native block (keep it obligations-priority + minimal-safe).
+_OBLIGATION_NATIVE_HEADER = "Requirements to satisfy (from the issue):"
+
+
+def _brief_native_on() -> bool:
+    """GT_BRIEF_NATIVE — the obligations-section FORM arm. Default OFF -> byte-identical (the
+    ``<gt-obligations>`` tag block). When ON the SAME obligation rows render as a plain requirements
+    checklist (``- [ ] <obligation>`` under a one-line plain header, NO ``<gt-*>`` tag). REBAKE-
+    RELEVANT: read at brief-GENERATION, dormant + byte-identical on a pre-baked / off run. Retires
+    ONLY the obligations FRAME; GT_BRIEF_MINIMAL retires graph/contract narration and
+    retains calibrated MEDIUM/LOW localization contention when singularizing it would
+    overstate confidence."""
+    import os as _os
+    return (_os.environ.get("GT_BRIEF_NATIVE") or "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+def _ss_ack_form_on() -> bool:
+    """GT_SS_ACK_FORM — the SS-5 acknowledgment-FORM arm. Default OFF -> byte-identical. When ON
+    (AND ``_brief_native_on()``), the plain checklist additionally applies the requirement-extractor
+    discipline: only IMPERATIVE requirement items survive (repro fragments / pleas are dropped) and
+    the ``[kind]`` classifier prefix is stripped, so the step-0 obligations read as a native
+    requirements checklist. Layering it ON TOP of GT_BRIEF_NATIVE keeps GT_BRIEF_NATIVE-alone
+    byte-identical to today's plain-checklist arm. Strict ``== "1"``-family parse."""
+    import os as _os
+    return (_os.environ.get("GT_SS_ACK_FORM") or "").strip().lower() not in (
+        "", "0", "false", "no", "off")
+
+
+# The ONLY path-bearing orientation note: the matched top-1 candidate line built in the
+# confident-line emitter ("Highest-confidence candidate (graph + issue signals): <path>").
+# It NAMES A FILE, so under GT_LOC_RESLOT it is a task_start which-file steer and is retired
+# from the minimal brief; the fileless steers below name no path and are the legitimate
+# minimal orientation. ONE source for this prefix, reused as the first element below.
+_PATH_BEARING_ORIENTATION_PREFIX = "Highest-confidence candidate"
+
+# The stable line-prefixes of a step-0 orientation NOTE — the path-bearing matched candidate
+# line plus the two FILELESS honest steers ("Note: GT could not anchor …" for a matched brief
+# with no verified edge, "Note: GT found no indexed file …" for the no-match/new-file brief).
+# ONE source of truth so the THREE consumers stay in lock-step: _is_brief_boundary (scan-stop),
+# _segment_brief_blocks (the ``orientation-note`` label), and the token-rail orientation-note
+# drop pass. A new steer prefix added here is recognized by ALL THREE at once — never added in
+# one site but silently missed at the others (the exact split that let the no-match steer fall
+# to ``misc`` → non-substantive → dropped by the minimal reducer).
+_ORIENTATION_NOTE_PREFIXES: tuple[str, ...] = (
+    _PATH_BEARING_ORIENTATION_PREFIX,
+    "Note: GT could not anchor",
+    "Note: GT found no indexed file",
+)
+
+
+def _is_brief_boundary(line: str) -> bool:
+    """True if ``line`` starts a structural brief block or a scaffold tag. A scan
+    that consumes a 'section until the next blank line' must STOP here so it never
+    swallows the following block or the ``</gt-task-brief>`` close tag — blocks are
+    not always blank-separated (a trailing steer note abuts the close tag)."""
+    s = line.strip()
+    if s in ("<gt-task-brief>", "</gt-task-brief>", "<gt-obligations>",
+             "</gt-obligations>", "<gt-graph-map>", "</gt-graph-map>"):
+        return True
+    if s == _OBLIGATION_NATIVE_HEADER:  # ITEM-5: the GT_BRIEF_NATIVE obligations header is a boundary
+        return True
+    if s.startswith("<gt-localization") or s.startswith("</gt-localization"):
+        return True
+    if _re.match(r"^\d+\.\s", line):
+        return True
+    return any(line.startswith(p) for p in (
+        "Expected behavior:", "EDIT-TARGET CONTRACTS", "Other candidates",
+        "Related files to inspect", "Likely multi-file scope", "Scope chain",
+        *_ORIENTATION_NOTE_PREFIXES,
+    ))
+
+
+def _segment_brief_blocks(text: str) -> list[dict]:
+    """Segment a rendered brief into priority-tagged blocks for the B-30 rail's
+    priority-ordered rebuild. Each block is ``{priority, label, text, order}``;
+    ``priority < 0`` is protected scaffold (always kept). Lower priority number =
+    higher value = kept first. Deterministic; pure text segmentation."""
+    lines = text.split("\n")
+    n = len(lines)
+    blocks: list[dict] = []
+
+    def _add(pri: int, label: str, seg: list[str]) -> None:
+        blocks.append({"priority": pri, "label": label, "text": "\n".join(seg), "order": len(blocks)})
+
+    def _until_close(start: int, close_tag: str) -> int:
+        j = start + 1
+        while j < n and lines[j].strip() != close_tag:
+            j += 1
+        return min(j, n - 1)
+
+    def _until_unindented(start: int) -> int:
+        j = start + 1
+        while j < n and (lines[j].startswith(" ") or lines[j].startswith("\t")):
+            j += 1
+        return j
+
+    def _until_blank(start: int) -> int:
+        j = start + 1
+        while j < n and lines[j].strip() != "" and not _is_brief_boundary(lines[j]):
+            j += 1
+        return j
+
+    _file_seen = 0
+    i = 0
+    while i < n:
+        ln = lines[i]
+        s = ln.strip()
+        if s.startswith("<gt-localization"):
+            # the localization steer is a first-class structural fact (which file to
+            # edit) — kept high (contract tier), but BELOW the active obligation so a
+            # tight budget preserves the behavioral spec over the confidence header.
+            e = _until_close(i, "</gt-localization>")
+            _add(2, "localization-header", lines[i : e + 1]); i = e + 1; continue
+        if s in ("<gt-task-brief>", "</gt-task-brief>"):
+            _add(-1, "scaffold", [ln]); i += 1; continue
+        if s == "<gt-graph-map>":
+            e = _until_close(i, "</gt-graph-map>")
+            _add(6, "graph-map", lines[i : e + 1]); i = e + 1; continue
+        if s == "<gt-obligations>":
+            e = _until_close(i, "</gt-obligations>")
+            _add(1, "obligations", lines[i : e + 1]); i = e + 1; continue
+        if s == _OBLIGATION_NATIVE_HEADER:
+            # ITEM-5: the GT_BRIEF_NATIVE obligations block (plain header + `- [ ] …` rows, no tag).
+            # Label it ``obligations`` (priority 1) so the token rail protects it EXACTLY like the
+            # tagged block and the minimal reducer keeps it — the header + its checklist rows run to
+            # the next blank / boundary.
+            e = _until_blank(i)
+            _add(1, "obligations", lines[i:e]); i = e; continue
+        if ln.startswith("Expected behavior:"):
+            # softer issue-spec echo — kept in the contract/spec tier, strictly
+            # BELOW the parsed <gt-obligations> block (the active obligation).
+            _add(2, "expected-behavior", [ln]); i += 1; continue
+        if ln.startswith("EDIT-TARGET CONTRACTS"):
+            e = _until_unindented(i)
+            _add(2, "edit-target-contracts", lines[i:e]); i = e; continue
+        if _re.match(r"^\d+\.\s", ln):
+            # All file entries share one priority band and are kept as a RANK-ORDERED
+            # PREFIX by the enforcer (never file #2 without file #1) — document order
+            # == localizer rank, so processing by order preserves the ranking.
+            e = _until_unindented(i)
+            _file_seen += 1
+            _add(3, f"file-entry-{_file_seen}", lines[i:e]); i = e; continue
+        if (ln.startswith("Other candidates") or ln.startswith("Related files")
+                or ln.startswith("Likely multi-file") or ln.startswith("Scope chain")):
+            e = _until_blank(i)
+            _add(5, "companion", lines[i:e]); i = e; continue
+        if any(ln.startswith(p) for p in _ORIENTATION_NOTE_PREFIXES):
+            _add(6, "orientation-note", [ln]); i += 1; continue
+        # blank / unknown line — cheap filler kept with its neighbors.
+        _add(5, "misc", [ln]); i += 1; continue
+    return blocks
+
+
+# B-6: fact-class of each segmented block label. A block whose label is absent here
+# (``scaffold`` = the <gt-task-brief> tags; ``misc`` = blank/unknown filler) is NOT a
+# fact-bearing block and gets no receipt (correct-or-quiet: a receipt is a claim a
+# FACT was delivered, never a claim about structural scaffold). File entries carry
+# the per-file localization evidence (contract/callers/context, incl. any "Also
+# changes:" cochange line), so they map to ``localization``.
+_BLOCK_FACT_CLASS: dict[str, str] = {
+    "localization-header": "localization",
+    "obligations": "obligations",
+    "expected-behavior": "obligations",
+    "edit-target-contracts": "contract",
+    "companion": "scope",
+    "graph-map": "graph-map",
+    "orientation-note": "orientation",
+    # "file-entry-<N>" is matched by prefix below (each N is a distinct label).
+}
+
+
+def _block_receipts_on() -> bool:
+    """Whether host-side brief block receipts are enabled.
+
+    ``GT_BLOCK_RECEIPTS`` remains the explicit override. When absent, the
+    already-profiled ``GT_INSEAM_METRICS`` capability enables receipts. With
+    neither present the metadata stays off. Brief bytes never depend on this.
+    """
+    import os as _os
+    _flag = (
+        _os.environ.get("GT_BLOCK_RECEIPTS")
+        if "GT_BLOCK_RECEIPTS" in _os.environ
+        else _os.environ.get("GT_INSEAM_METRICS")
+    )
+    return (_flag or "").strip().lower() not in (
+        "", "0", "false", "no",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# SM-6 (B, 2026-07-11): the step-0 baked brief reduction — GT_BRIEF_MINIMAL.
+#
+# DEFAULT-OFF, byte-identical when off, and BAKED (the brief is generated at substrate-
+# build time and consumed read-only in-container — gt_agent._substrate_brief), so this
+# reduction has ZERO effect on any run until the flag is set at the SM-8 REBAKE.
+# Graph-map and contract narration are retired. HIGH reduces to one orientation
+# header; MEDIUM/LOW retain compact confidence, contention, and the grep hedge so
+# uncertainty cannot become a singular assertion. Reactive def_partition/post_search
+# remains the follow-up localization channel after the agent's own search.
+# --------------------------------------------------------------------------- #
+def _loc_reslot_on() -> bool:
+    """GT_LOC_RESLOT — the T0->T2 localization re-slot (registry:
+    ``localization.deliver_by=search_result``). When ON, step-0 ships NO localization
+    narration at any confidence tier (the calibrated contention rides the reactive
+    ranked-localization delivery at the registered search boundary instead). Default
+    OFF -> the MEDIUM/LOW retention branch below is byte-identical legacy behavior."""
+    import os as _os
+    return (_os.environ.get("GT_LOC_RESLOT") or "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    )
+
+
+def _brief_minimal_on() -> bool:
+    """GT_BRIEF_MINIMAL master switch — default OFF, byte-identical. When OFF the brief is
+    generated exactly as before (the reducer is never invoked). When ON (set only at the
+    SM-8 substrate rebake) the step-0 brief is reduced to obligations + minimal
+    orientation; graph-map and contract narration are retired, while MEDIUM/LOW
+    localization contention is retained as an indivisible calibrated fact."""
+    import os as _os
+    return (_os.environ.get("GT_BRIEF_MINIMAL") or "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    )
+
+
+# The segmented-block labels the minimal reduction normally DROPS whole. A MEDIUM/LOW
+# ``localization-header`` is conditionally retained; HIGH drops it and keeps one file header.
+# ``graph-map`` (<gt-graph-map>) is always dropped;
+# ``edit-target-contracts`` + ``companion`` (Other candidates cross-file facts / Related
+# files / Scope chain) are the contract/scope NARRATION; ``expected-behavior`` is the
+# issue-spec echo. A ``file-entry`` block is REDUCED to its header line (the minimal
+# 'which file' orientation), never dropped — handled specially in the reducer. The
+# scaffold (<gt-task-brief> tags), ``obligations``, and ``orientation-note`` are KEPT.
+_BRIEF_MINIMAL_DROP_LABELS: frozenset = frozenset(
+    {"localization-header", "graph-map", "edit-target-contracts",
+     "companion", "expected-behavior"}
+)
+
+
+def _reduce_brief_to_minimal(text: str) -> str:
+    """Reduce an assembled brief to obligations + minimal orientation ONLY (SM-6 B).
+
+    Reuses the B-30 rail's :func:`_segment_brief_blocks` — the ONE tested brief taxonomy —
+    so the reduction tracks the exact block boundaries the token enforcer already trusts.
+    KEEPS: the ``<gt-task-brief>`` scaffold, the ``<gt-obligations>`` block, the
+    orientation-note, plus either a HIGH file-entry header or the MEDIUM/LOW compact
+    localization contention block. DROPS whole: ``<gt-graph-map>``, HIGH
+    ``<gt-localization>``, ``EDIT-TARGET CONTRACTS``, the
+    per-file contract/caller/call evidence bodies, the cross-file 'Other candidates'/scope
+    hints, and the 'Expected behavior' echo. PURE + deterministic; NEVER called when
+    GT_BRIEF_MINIMAL is off (byte-identical). Idempotent: re-reducing a minimal brief
+    returns it unchanged (its blocks are already only kept labels + header-only entries)."""
+    blocks = _segment_brief_blocks(text)
+    # MEDIUM/LOW is not a singular localization assertion: its confidence label,
+    # contention set, and grep-confirmation hedge are one indivisible fact.  The
+    # old reducer dropped that block but retained a file-entry header, converting
+    # uncertainty into a naked top-1 steer.  Keep the already-compact contention
+    # block and suppress duplicate file-entry headers.  HIGH remains on the prior
+    # minimal path (one orientation header, no localization narration).
+    #
+    # R4 (run-#3 pilot, 2026-07-18): the MEDIUM/LOW retention is RETIRED under the
+    # localization RE-SLOT. Three authorities collided and this branch was the odd one
+    # out: the registry declares localization ``deliver_by=search_result`` (T0->T2
+    # re-slot, user-ratified), the run workflow sets GT_BRIEF_MINIMAL with the stated
+    # intent "retires the step-0 localization narration", yet this branch still shipped
+    # a task_start localization header -- which the J3 timing kernel therefore graded
+    # WRONG_EVENT on 21/21 live tasks (delivery-grain receipt: actual_event=task_start,
+    # decision_open_index=null). Under GT_LOC_RESLOT the calibrated-contention VALUE
+    # moves to the reactive ranked-localization delivery at the registered search
+    # boundary; step-0 keeps obligations + orientation only. With the re-slot off, the
+    # MEDIUM/LOW retention stands unchanged (byte-identical legacy path).
+    _loc_tier = _localization_confidence_tier(text)
+    _keep_contention = _loc_tier in {"medium", "low"} and not _loc_reslot_on()
+    kept: list[str] = []
+    # CORRECT-OR-QUIET (2026-07-20, run6 audit D-3): the scaffold (<gt-task-brief>
+    # tags) and blank ``misc`` filler carry no model-facing fact. When every
+    # SUBSTANTIVE block (obligations / orientation-note / localization / file-entry)
+    # is dropped or was never assembled, the reduction previously kept the bare
+    # scaffold and shipped a 33-char hollow ``<gt-task-brief>\n\n</gt-task-brief>``
+    # that got SEALED + counted as a delivery (smolagents/babel/privacyidea/mpl-29721,
+    # block_lineage:[]). Track whether any substantive block survives; if none, return
+    # "" so gt_agent._prepend_brief (`if not brief: return instruction`) ships nothing.
+    _kept_substantive = False
+    for b in blocks:
+        label = b["label"]
+        if label == "localization-header" and _keep_contention:
+            kept.append(b["text"])
+            _kept_substantive = True
+            continue
+        if label in _BRIEF_MINIMAL_DROP_LABELS:
+            continue
+        if label.startswith("file-entry"):
+            # Ultracode review (2026-07-18): under the RE-SLOT, dropping the calibrated
+            # contention while keeping these ranked "N. path" header lines would ship a
+            # NAKED uncalibrated top-N steer at task_start — worse than both prior forms
+            # and still an unregistered step-0 localization. Under GT_LOC_RESLOT step-0
+            # keeps obligations + orientation-note ONLY; ranked localization arrives at
+            # the registered search boundary. Legacy paths byte-identical.
+            if _loc_reslot_on():
+                continue
+            if _keep_contention:
+                continue
+            head = b["text"].split("\n", 1)[0]
+            if head.strip():
+                kept.append(head)  # minimal orientation: the header, not the contract body
+                _kept_substantive = True
+            continue
+        if (label == "orientation-note" and _loc_reslot_on()
+                and b["text"].startswith(_PATH_BEARING_ORIENTATION_PREFIX)):
+            # DELTA 3 (run-#3 pilot, 2026-07-20): under the localization RE-SLOT the minimal
+            # brief ships NO localization narration. The path-bearing matched note
+            # ("Highest-confidence candidate (…): <path>") NAMES a top-1 file, so leaving it
+            # here shipped a task_start which-file steer that defeats the re-slot contract and
+            # silently passed J3 as "orientation". Retire it exactly like the localization-
+            # header and file-entry ranks. The FILELESS orientation notes ("Note: GT found no
+            # indexed file …", "Note: GT could not anchor …") name no path and remain the
+            # legitimate minimal orientation — they fall through to the keep below. Content
+            # discriminator (names-a-path vs fileless), never task/repo-keyed. Legacy path
+            # (re-slot off) is byte-identical: the note is kept as before.
+            continue
+        kept.append(b["text"])
+        if label not in ("scaffold", "misc"):
+            _kept_substantive = True
+    # Collapse the blank-line runs the dropped blocks leave behind (the ``misc`` filler that
+    # abutted a retired block) to at most one, and strip leading/trailing blanks — a clean
+    # minimal brief, never a hollow one. Cosmetic only: no kept fact is touched.
+    out_lines: list[str] = []
+    for ln in "\n".join(kept).split("\n"):
+        if ln.strip() == "" and (not out_lines or out_lines[-1].strip() == ""):
+            continue
+        out_lines.append(ln)
+    while out_lines and out_lines[-1].strip() == "":
+        out_lines.pop()
+    # Correct-or-quiet: a scaffold-only reduction ships nothing, never a hollow tag.
+    if not _kept_substantive:
+        return ""
+    return "\n".join(out_lines)
+
+
+def _localization_confidence_tier(text: str) -> str:
+    """Return the rendered localization tier, or ``""`` when absent/unknown."""
+    match = _re.search(
+        r'<gt-localization\b[^>]*\bconfidence=["\'](high|medium|low)["\']',
+        text or "",
+        _re.IGNORECASE,
+    )
+    return match.group(1).lower() if match else ""
+
+
+def _model_visible_localization_entries(
+    brief_text: str,
+    candidates: list[FileEntry],
+) -> list[FileEntry]:
+    """Return candidates whose paths occur in a model-visible candidate block.
+
+    ``.files`` and ``rendered_candidate_count`` are delivery claims.  They must be
+    joined to the final bytes, not to the wider internal ranking list.  Restrict
+    matching to localization headers and file-entry blocks so a path mentioned only
+    as a caller/neighbor is not promoted to a delivered edit candidate.
+    """
+    candidate_lines: list[str] = []
+    for block in _segment_brief_blocks(brief_text or ""):
+        if (
+            block["label"] != "localization-header"
+            and not block["label"].startswith("file-entry")
+        ):
+            continue
+        candidate_lines.extend(
+            line.replace("\\", "/")
+            for line in block["text"].splitlines()
+            if _re.match(r"^\s*\d+\.\s+", line)
+        )
+    if not candidate_lines:
+        return []
+    out: list[FileEntry] = []
+    for entry in candidates:
+        raw_path = str(entry.path or "").replace("\\", "/")
+        normalized_path = _gl_normalize(raw_path)
+        variants = [path for path in dict.fromkeys((raw_path, normalized_path)) if path]
+        if not variants:
+            continue
+        if any(
+            _re.match(
+                rf"^\s*\d+\.\s+{_re.escape(path)}(?![A-Za-z0-9_./-])",
+                line,
+            )
+            for path in variants
+            for line in candidate_lines
+        ):
+            out.append(entry)
+    return out
+
+
+def _brief_minimal_participation(before: str, after: str) -> list[dict]:
+    """Typed sidecar for the terminal minimal-brief reduction decision."""
+    if not _block_receipts_on():
+        return []
+    try:
+        from groundtruth.runtime.control_participation import (
+            build_control_participation,
+            participation_to_dict,
+        )
+        record = build_control_participation(
+            feature_id="GT_BRIEF_MINIMAL",
+            decision_site="pretask.v1r_brief.minimal_reduction",
+            decision="APPLIED" if after != before else "NO_EFFECT",
+            iteration=0,
+            candidate_bytes=before,
+            reason="brief_reduced" if after != before else "already_minimal",
+        )
+        return [participation_to_dict(record)]
+    except Exception as exc:  # sidecar failure never changes brief bytes
+        import hashlib as _hashlib
+        return [{
+            "schema": "gt.control_participation.v1",
+            "control_ref": {
+                "category": "CAP", "feature_id": "GT_BRIEF_MINIMAL",
+                "role": "eligibility",
+            },
+            "decision_site": "pretask.v1r_brief.minimal_reduction",
+            "decision": "ERROR",
+            "iteration": 0,
+            "candidate_chars": len(before),
+            "candidate_sha256_16": (
+                _hashlib.sha256(before.encode("utf-8", "surrogatepass"))
+                .hexdigest()[:16] if before else ""
+            ),
+            "reason": f"control_record_error:{type(exc).__name__}",
+        }]
+
+
+# The retired step-0 narration markers a minimal (SM-6 B) brief MUST NOT contain, and the
+# obligation marker it MUST retain. Kept in lockstep with :data:`_BRIEF_MINIMAL_DROP_LABELS`
+# + :func:`_reduce_brief_to_minimal` (the SM-7 gate reddens on a drift). These are the
+# byte-level shadows of always-dropped BLOCK labels. HIGH localization is checked
+# conditionally by :func:`brief_minimal_certificate`; MEDIUM/LOW is minimal-safe.
+# ``graph-map`` -> ``<gt-graph-map>``, ``edit-target-contracts``/``companion`` -> the contract/
+# caller/scope narration lines, ``expected-behavior`` -> the issue-spec echo.
+_BRIEF_MINIMAL_RETIRED_MARKERS: tuple[str, ...] = (
+    "<gt-graph-map>",
+    "EDIT-TARGET CONTRACTS",
+    "Callers:",
+    "Calls:",
+    "Context:",
+    "Other candidates",
+    "Related files",
+    "Scope chain",
+    "Expected behavior",
+)
+
+
+def brief_minimal_certificate(brief_text: str) -> dict:
+    """Certify that a generated brief was ACTUALLY minimalized (SM-6 B / SM-8 arm-integrity).
+
+    ``GT_BRIEF_MINIMAL`` is an UNMAPPED Profile-2 member (no importable backing module), so
+    the ``rl_profile`` preflight passes WITHOUT proving the baked brief was minimalized — at
+    the SM-8 rebake the GT-on arm could ship the FULL step-0 brief while claiming minimal,
+    which silently invalidates the paired GT-on vs GT-off comparison. This function is that
+    missing certificate: SM-8 generates the baked brief with ``GT_BRIEF_MINIMAL=1`` and calls
+    ``brief_minimal_certificate(brief.brief_text)`` to REFUSE shipping an arm whose brief still
+    carries a retired step-0 narration surface.
+
+    PURE read of ``brief_text`` — no I/O, no env, no mutation. NOTHING in the live brief
+    pipeline calls it (:func:`generate_v1r_brief` never references it), so adding it is
+    byte-identical to the running product — it is an SM-8 rebake / SM-7 gate check only.
+
+    Returns ``{minimal, retired_present, obligations_present, orientation_present}``:
+      * ``retired_present`` — the retired markers still present (MUST be empty for minimal);
+      * ``obligations_present`` — the ``<gt-obligations>`` behavioral contract is retained;
+      * ``orientation_present`` — a 'which file' orientation survives (a numbered file-entry
+        header OR the no-match ``Localize with grep`` note);
+      * ``minimal`` — True iff NO retired marker is present (the necessary certificate; a full
+        arm-integrity pass additionally asserts ``obligations_present``).
+    """
+    text = brief_text or ""
+    retired = [m for m in _BRIEF_MINIMAL_RETIRED_MARKERS if m in text]
+    # A compact MEDIUM/LOW contention block is now part of minimal orientation:
+    # removing it changes calibrated uncertainty into a singular assertion.  HIGH
+    # localization narration remains retired because its one file-entry header is
+    # sufficient orientation.
+    if "<gt-localization" in text and _localization_confidence_tier(text) not in {
+        "medium", "low",
+    }:
+        retired.append("<gt-localization")
+    # ITEM-5: the obligations contract is retained under EITHER frame — the ``<gt-obligations>`` tag
+    # (default) OR the GT_BRIEF_NATIVE plain checklist header — so a combined MINIMAL+NATIVE rebake
+    # still certifies obligations_present (the native form has no tag to match).
+    obligations_present = "<gt-obligations>" in text or _OBLIGATION_NATIVE_HEADER in text
+    orientation_present = bool(
+        _re.search(r"(?m)^\s*\d+\.\s+\S", text)
+    ) or "Localize with grep" in text
+    return {
+        "minimal": not retired,
+        "retired_present": retired,
+        "obligations_present": obligations_present,
+        "orientation_present": orientation_present,
+    }
+
+
+def _fact_class_for_label(label: str) -> str | None:
+    """The fact-class of a segmented block label, or ``None`` for non-fact scaffold/
+    filler. File entries (``file-entry-1``, ``file-entry-2``, …) map to localization."""
+    if label.startswith("file-entry"):
+        return "localization"
+    return _BLOCK_FACT_CLASS.get(label)
+
+
+def _localization_candidate_id(file_path: str) -> str:
+    """Stable identity shared by a ranked file and its rendered file-entry block."""
+    normalized = _gl_normalize(str(file_path or ""))
+    return f"localization:{normalized}" if normalized else "localization:none"
+
+
+def _brief_block_receipts(
+    brief_text: str,
+    *,
+    localization_candidate_ids: list[str] | None = None,
+) -> list[dict]:
+    """B-6: assign each fact-bearing brief block a STABLE, DISTINCT delivery receipt.
+
+    Reuses the deterministic :func:`_segment_brief_blocks` segmentation (the SAME
+    block boundaries the B-30 dose-rail rebuilds by) and, for each fact-bearing
+    block, emits ``{block_id, fact_class, label, char_span:[start,end],
+    content_hash}``:
+
+      * ``block_id`` — a stable, DISTINCT handle: the bare label when it occurs once
+        in this brief, else ``"<label>#<k>"`` (k = 0-based occurrence). File entries
+        are already distinct (``file-entry-1``, ``file-entry-2``, …).
+      * ``char_span`` — ``[start, end)`` byte offsets into ``brief_text`` such that
+        ``brief_text[start:end] == block_text`` exactly (the segmentation partitions
+        the lines contiguously; blocks rejoin with the newline separator).
+      * ``content_hash`` — ``sha256`` hex of the block's UTF-8 bytes.
+
+    METADATA ONLY — this is a PURE READ of ``brief_text``; it NEVER mutates it, so a
+    caller populating ``block_receipts`` leaves the delivered brief byte-identical.
+    Deterministic, LLM-free, no I/O. Scaffold (the <gt-task-brief> tags) and blank/
+    unknown filler are not fact-bearing and get no receipt."""
+    import hashlib as _hashlib
+    if not brief_text:
+        return []
+    blocks = _segment_brief_blocks(brief_text)
+    # Two-pass distinctness: count fact-bearing labels so a label seen once keeps its
+    # bare name and a repeated label (e.g. two "companion" blocks) is disambiguated.
+    fact_labels = [
+        b["label"] for b in blocks if _fact_class_for_label(b["label"]) is not None
+    ]
+    _label_total: dict[str, int] = {}
+    for _lab in fact_labels:
+        _label_total[_lab] = _label_total.get(_lab, 0) + 1
+    _has_file_entries = any(
+        block["label"].startswith("file-entry") for block in blocks
+    )
+
+    receipts: list[dict] = []
+    offset = 0
+    _seen: dict[str, int] = {}
+    _file_entry_index = 0
+    for b in blocks:
+        seg = b["text"]
+        start = offset
+        end = offset + len(seg)
+        offset = end + 1  # the "\n" that _segment_brief_blocks joins blocks on
+        fact_class = _fact_class_for_label(b["label"])
+        if fact_class is None:
+            continue  # scaffold / filler — not a fact
+        label = b["label"]
+        k = _seen.get(label, 0)
+        _seen[label] = k + 1
+        block_id = label if _label_total.get(label, 0) <= 1 else f"{label}#{k}"
+        if (
+            label == "localization-header"
+            and not _has_file_entries
+            and localization_candidate_ids
+        ):
+            # Minimal MEDIUM/LOW renders the whole contention set in this one
+            # physical block and intentionally drops duplicate file-entry blocks.
+            # Emit one logical candidate join per visible candidate, sealed to
+            # that candidate's exact header line.  These subspans are metadata
+            # inside one physical delivery, not multiple doses.
+            for candidate_index, candidate_id in enumerate(
+                localization_candidate_ids, start=1,
+            ):
+                prefix = "localization:"
+                candidate_path = (
+                    candidate_id[len(prefix):]
+                    if candidate_id.startswith(prefix) else ""
+                )
+                matches = list(_re.finditer(
+                    rf"(?m)^[ \t]*\d+\.[ \t]+(?:\./)*/?"
+                    rf"{_re.escape(candidate_path)}"
+                    rf"(?![A-Za-z0-9_./-])",
+                    seg.replace("\\", "/"),
+                )) if candidate_path else []
+                line_spans = {
+                    (
+                        seg.rfind("\n", 0, match.start()) + 1,
+                        (
+                            len(seg)
+                            if seg.find("\n", match.end()) < 0
+                            else seg.find("\n", match.end())
+                        ),
+                    )
+                    for match in matches
+                }
+                if len(line_spans) != 1:
+                    continue
+                line_start, line_end = next(iter(line_spans))
+                candidate_bytes = seg[line_start:line_end]
+                receipts.append({
+                    "block_id": f"{block_id}:candidate-{candidate_index}",
+                    "fact_class": fact_class,
+                    "label": label,
+                    "candidate_id": candidate_id,
+                    "char_span": [start + line_start, start + line_end],
+                    "content_hash": _hashlib.sha256(
+                        candidate_bytes.encode("utf-8")
+                    ).hexdigest(),
+                })
+            continue
+        if label.startswith("file-entry"):
+            candidate_id = (
+                localization_candidate_ids[_file_entry_index]
+                if localization_candidate_ids is not None
+                and _file_entry_index < len(localization_candidate_ids)
+                else f"brief:block:{block_id}"
+            )
+            _file_entry_index += 1
+        else:
+            candidate_id = f"brief:block:{block_id}"
+        receipts.append({
+            "block_id": block_id,
+            "fact_class": fact_class,
+            "label": label,
+            "candidate_id": candidate_id,
+            "char_span": [start, end],
+            "content_hash": _hashlib.sha256(seg.encode("utf-8")).hexdigest(),
+        })
+    return receipts
+
+
+def _candidate_local_contribution_sources(proof: dict) -> list[str]:
+    """Deterministically NAME the ACQ sources with a candidate-local witness in one
+    rendered candidate proof.
+
+    NAME-ONLY producer authority: this asserts which sources the producer used to
+    rank/render THIS candidate, from the producer's own generation data (the graph
+    witness, the v7.4 component values, the typed acquisition_sources it emitted).
+    The downstream collector RE-VALIDATES each named source's typed witness before it
+    may promote a row, so a name here is a producer assertion, not the whole proof.
+    ``cochange_history`` keeps its own self-sealed ``cochange_evidence`` path and is
+    intentionally excluded here (single authority per source)."""
+    found: list[str] = []
+    components = proof.get("components")
+    components = components if isinstance(components, dict) else {}
+
+    def _pos(value: object) -> bool:
+        try:
+            return float(value or 0.0) > 0.0
+        except (TypeError, ValueError):
+            return False
+
+    witness = proof.get("witness")
+    if (
+        proof.get("witness_verified") is True
+        and isinstance(witness, str)
+        and witness.strip()
+    ):
+        found.append("graph_validity")
+    if _pos(components.get("reach")):
+        found.append("structural_depth")
+    if _pos(components.get("lex")):
+        found.append("lexical_FTS5")
+    if _pos(components.get("sem")):
+        found.append("semantic_embedder")
+    if _pos(components.get("body")) or _pos(components.get("content")):
+        found.append("body_retrieval")
+    sources = proof.get("acquisition_sources")
+    if isinstance(sources, dict):
+        for name in (
+            "resolution_honesty", "type_intelligence", "LSP",
+            "freshness_basis", "repo_scope", "determinism",
+        ):
+            if isinstance(sources.get(name), dict):
+                found.append(name)
+    return sorted(set(found))
+
+
+def _attest_source_contributions(
+    localization_proof: list[dict],
+    block_receipts: list[dict],
+) -> None:
+    """Emit a producer-owned, self-sealed source-contribution attestation onto each
+    rendered candidate proof that maps 1:1 to a sealed localization block.
+
+    The attestation binds the candidate to the EXACT delivered block bytes
+    (``block_content_sha256`` == the block receipt's content hash) and names the ACQ
+    sources the producer used to render that candidate. It is self-sealed
+    (``attestation_sha256`` over the canonical attestation minus that field, the same
+    scheme as ``_cochange_evidence``'s ``source_identity_sha256``), so any downstream
+    tamper of the candidate binding, the block seal, or the source list is detectable.
+
+    HOST-SIDE METADATA — never rendered into ``brief_text``; a PURE derivation of the
+    already-computed proof + receipt data, so the delivered brief is byte-identical
+    whether or not attestations are populated. A candidate that does not map to exactly
+    one sealed localization block gets NO attestation (fail-closed -> the collector
+    keeps ``source_contribution_correct`` at ``None``)."""
+    seal_by_candidate: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for receipt in block_receipts:
+        if not isinstance(receipt, dict) or receipt.get("fact_class") != "localization":
+            continue
+        candidate_id = receipt.get("candidate_id")
+        digest = receipt.get("content_hash")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            continue
+        if not isinstance(digest, str) or _re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            continue
+        if candidate_id in seal_by_candidate and seal_by_candidate[candidate_id] != digest:
+            # More than one distinct localization block claims this candidate; the
+            # producer cannot attest a single delivered binding -> stay silent.
+            ambiguous.add(candidate_id)
+            continue
+        seal_by_candidate[candidate_id] = digest
+    for proof in localization_proof:
+        if not isinstance(proof, dict):
+            continue
+        candidate_id = proof.get("candidate_id")
+        if not isinstance(candidate_id, str) or candidate_id in ambiguous:
+            continue
+        digest = seal_by_candidate.get(candidate_id)
+        if digest is None:
+            continue  # candidate never rendered into a sealed localization block
+        attestation: dict[str, object] = {
+            "kind": "source_contribution",
+            "candidate_id": candidate_id,
+            "block_content_sha256": digest,
+            "sources": _candidate_local_contribution_sources(proof),
+        }
+        canonical = json.dumps(
+            attestation, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        )
+        attestation["attestation_sha256"] = hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest()
+        proof["contribution_attestation"] = attestation
+
+
+def _build_obligations_record(
+    brief_text: str,
+    block_receipts: list[dict],
+    issue_text: str,
+) -> dict:
+    """Bind the delivered obligations block to its build-time extraction record.
+
+    Returns a canonical ``gt.obligations_record.v1`` sidecar (candidate_id + block seal +
+    the EXACT issue source identity + the extracted obligations digest/count) or ``{}``.
+
+    Fail-closed and PURE: it reads only the already-persisted V2 obligations artifact
+    (``gt_obligations_v2.json`` — written by ``_write_obligations_v2_artifact`` earlier in
+    this same brief generation), never re-extracts, and never touches ``brief_text``. Any
+    miss (no delivered obligations block, absent/mismatched artifact, span/hash mismatch)
+    returns ``{}`` so the obligations attestation stays honestly UNMEASURED rather than
+    binding a fabricated record."""
+    if not isinstance(block_receipts, list) or not (issue_text or "").strip():
+        return {}
+    # Only the canonical obligations block is an extraction product.  The
+    # ``expected-behavior`` issue echo deliberately shares the coarse
+    # obligations fact class for ranking, but it is not clause extraction and
+    # must never mint an obligations record or attestation.
+    receipt = next(
+        (r for r in block_receipts
+         if isinstance(r, dict)
+         and r.get("fact_class") == "obligations"
+         and r.get("label") == "obligations"),
+        None,
+    )
+    if receipt is None:
+        return {}
+    candidate_id = receipt.get("candidate_id")
+    content_hash = receipt.get("content_hash")
+    span = receipt.get("char_span")
+    if (
+        not isinstance(candidate_id, str) or not candidate_id
+        or not isinstance(content_hash, str)
+        or _re.fullmatch(r"[0-9a-f]{64}", content_hash) is None
+        or not isinstance(span, list) or len(span) != 2
+        or not all(isinstance(n, int) and not isinstance(n, bool) for n in span)
+        or span[0] < 0 or span[0] >= span[1] or span[1] > len(brief_text)
+    ):
+        return {}
+    block = brief_text[span[0]:span[1]]
+    if ("<gt-obligations>" not in block
+            and _OBLIGATION_NATIVE_HEADER not in block):
+        return {}
+    digest = hashlib.sha256(block.encode("utf-8", "surrogatepass")).hexdigest()
+    if digest != content_hash:
+        return {}
+    issue_sha = hashlib.sha256(issue_text.encode("utf-8")).hexdigest()
+    # Read the authoritative extracted obligations (V2 artifact) written this generation.
+    try:
+        artifact_path = os.path.join(
+            os.path.dirname(_anchors_path()) or "/tmp", "gt_obligations_v2.json"
+        )
+        with open(artifact_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("issue_sha256") != issue_sha:
+        return {}  # stale/cross-task artifact — never launder another issue's obligations
+    clauses = data.get("clauses")
+    if not isinstance(clauses, list) or not clauses:
+        return {}
+    verbatims = [
+        " ".join((c.get("verbatim_text") or "").split())
+        for c in clauses
+        if isinstance(c, dict) and (c.get("verbatim_text") or "").strip()
+    ]
+    if not verbatims:
+        return {}
+    obligations_digest = hashlib.sha256(
+        json.dumps(verbatims, sort_keys=False, separators=(",", ":"),
+                   ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema": "gt.obligations_record.v1",
+        "candidate_id": candidate_id,
+        "block_content_sha256": content_hash,
+        "issue_sha256": issue_sha,
+        "issue_revision": f"issue:{issue_sha}",
+        "obligation_count": len(verbatims),
+        "obligations_digest": obligations_digest,
+    }
+
+
+def _terminal_pretask_mediator_participation(
+    brief_text: str,
+    block_receipts: list[dict],
+    *,
+    budget_suppressed: list[str] | None = None,
+    content_paths: set[str] | frozenset[str] | None = None,
+    content_decision: str = "NO_EFFECT",
+    content_reason: str = "no_content_candidate",
+    semantic_anchor_paths: set[str] | frozenset[str] | None = None,
+    semantic_localizer_paths: set[str] | frozenset[str] | None = None,
+) -> list[dict]:
+    """Build terminal mediator rows from the final, model-visible brief only.
+
+    Ranking/rendering may execute repeatedly while the token rail tightens.  This
+    function runs after that loop and joins controls only to blocks that survived
+    into ``brief_text``.  It is a pure sidecar builder and never changes the brief.
+    """
+    if not _block_receipts_on():
+        return []
+    import hashlib as _hashlib
+    import os as _os
+
+    suppressed = set(budget_suppressed or ())
+    content_ids = {_localization_candidate_id(p) for p in (content_paths or ())}
+    anchor_ids = {_localization_candidate_id(p) for p in (semantic_anchor_paths or ())}
+    localizer_ids = {
+        _localization_candidate_id(p) for p in (semantic_localizer_paths or ())
+    }
+    receipts_by_id = {
+        str(r.get("candidate_id", "")): r
+        for r in block_receipts
+        if isinstance(r, dict) and r.get("candidate_id")
+    }
+
+    def _exact_bytes(receipt: dict | None) -> str:
+        if not receipt:
+            return ""
+        span = receipt.get("char_span")
+        if (
+            not isinstance(span, list) or len(span) != 2
+            or type(span[0]) is not int or type(span[1]) is not int
+            or span[0] < 0 or span[1] < span[0] or span[1] > len(brief_text)
+        ):
+            return ""
+        return brief_text[span[0]:span[1]]
+
+    rows: list[dict] = []
+
+    def _append(
+        feature_id: str,
+        decision_site: str,
+        decision: str,
+        fact_class: str,
+        candidate_id: str,
+        candidate_bytes: str,
+        reason: str,
+    ) -> None:
+        try:
+            from groundtruth.runtime.control_participation import (
+                build_control_participation,
+                participation_to_dict,
+            )
+            rows.append(participation_to_dict(build_control_participation(
+                feature_id=feature_id,
+                decision_site=decision_site,
+                decision=decision,
+                iteration=0,
+                candidate_bytes=candidate_bytes,
+                fact_class=fact_class,
+                candidate_id=candidate_id,
+                reason=reason,
+            )))
+        except Exception as exc:  # sidecar failure never changes delivered bytes
+            seal = (
+                _hashlib.sha256(candidate_bytes.encode("utf-8", "surrogatepass"))
+                .hexdigest()[:16] if candidate_bytes else ""
+            )
+            rows.append({
+                "schema": "gt.control_participation.v1",
+                "control_ref": {
+                    "category": "CAP", "feature_id": feature_id, "role": "mediator",
+                },
+                "decision_site": decision_site,
+                "decision": "ERROR",
+                "iteration": 0,
+                "candidate_chars": len(candidate_bytes),
+                "candidate_sha256_16": seal,
+                "fact_class": fact_class,
+                "candidate_id": candidate_id,
+                "reason": f"control_record_error:{type(exc).__name__}",
+            })
+
+    obligation = next(
+        (r for r in block_receipts
+         if isinstance(r, dict)
+         and r.get("fact_class") == "obligations"
+         and r.get("label") == "obligations"), None)
+    obligation_bytes = _exact_bytes(obligation)
+    obligation_id = (
+        str(obligation.get("candidate_id")) if obligation
+        else "brief:block:obligations:none"
+    )
+    native_on = _brief_native_on()
+    native_terminal = bool(
+        obligation_bytes and _OBLIGATION_NATIVE_HEADER in obligation_bytes)
+    if native_on:
+        native_decision = "APPLIED" if native_terminal else (
+            "SUPPRESSED" if "obligations" in suppressed else "NO_EFFECT")
+        _append(
+            "GT_BRIEF_NATIVE", "pretask.v1r_brief.native_render",
+            native_decision, "obligations", obligation_id, obligation_bytes,
+            "native_obligations_terminal" if native_terminal else (
+                "token_rail" if native_decision == "SUPPRESSED"
+                else "no_terminal_obligations_block"),
+        )
+
+    ack_on = _ss_ack_form_on()
+    if ack_on:
+        if not native_on:
+            ack_decision, ack_reason = "NO_EFFECT", "requires_brief_native"
+        elif native_terminal:
+            ack_decision, ack_reason = "APPLIED", "imperative_native_checklist_terminal"
+        elif "obligations" in suppressed:
+            ack_decision, ack_reason = "SUPPRESSED", "token_rail"
+        else:
+            ack_decision, ack_reason = "NO_EFFECT", "no_imperative_obligation"
+        _append(
+            "GT_SS_ACK_FORM", "pretask.v1r_brief.ack_requirement_filter",
+            ack_decision, "obligations", obligation_id, obligation_bytes, ack_reason,
+        )
+
+    if (_os.environ.get("GT_CONTENT_LEG") or "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    ):
+        surviving = sorted(content_ids & set(receipts_by_id))
+        for candidate_id in surviving:
+            _append(
+                "GT_CONTENT_LEG", "pretask.v1r_brief.content_bm25_rank",
+                "APPLIED", "localization", candidate_id,
+                _exact_bytes(receipts_by_id[candidate_id]), content_reason,
+            )
+        if not surviving:
+            terminal_decision = (
+                content_decision if content_decision in {"ERROR", "SUPPRESSED"}
+                else "NO_EFFECT"
+            )
+            _append(
+                "GT_CONTENT_LEG", "pretask.v1r_brief.content_bm25_rank",
+                terminal_decision, "localization", "localization:content:none", "",
+                content_reason if terminal_decision in {"ERROR", "SUPPRESSED"}
+                else "no_final_content_candidate",
+            )
+
+    if (_os.environ.get("GT_SEM_BODY") or "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    ):
+        semantic_ids = anchor_ids | localizer_ids
+        surviving = sorted(semantic_ids & set(receipts_by_id))
+        for candidate_id in surviving:
+            in_anchor = candidate_id in anchor_ids
+            in_localizer = candidate_id in localizer_ids
+            reason = (
+                "anchor_and_localizer" if in_anchor and in_localizer
+                else "anchor_only" if in_anchor else "localizer_only"
+            )
+            _append(
+                "GT_SEM_BODY", "pretask.v1r_brief.semantic_body_rank",
+                "APPLIED", "localization", candidate_id,
+                _exact_bytes(receipts_by_id[candidate_id]), reason,
+            )
+        if not surviving:
+            _append(
+                "GT_SEM_BODY", "pretask.v1r_brief.semantic_body_rank",
+                "NO_EFFECT", "localization", "localization:semantic-body:none", "",
+                "no_final_semantic_body_candidate",
+            )
+    return rows
+
+
+# B-30: HARD dose-rail enforcement. The budget loops in ``generate_v1r_brief``
+# trim breadth (candidate entries) then detail (per-body-line cap) but can bottom
+# out — a single entry + the body cap at its floor + fixed header/block overhead —
+# STILL over budget (measured: caps 100/20/1 produced 244/242/242 tokens; the rail
+# was never enforced). This enforcer guarantees ``_count_tokens(result) <= budget``
+# by dropping whole rendered brief blocks LOWEST-priority first (recording each
+# suppression), then — only if the protected core still exceeds the cap —
+# truncating the residue. The localizer / ``.files`` are untouched: this trims the
+# rendered DOSE, never which files the agent is told to consider (BRIEFING.md §3).
+#
+# Keep-priority (highest survives): active obligation > violated contract >
+# causal edge (Witness/Callers) > repo law (Context/Spec) > companion surface
+# (co-change/Calls/scope/related) > orientation (graph-map, steer notes). The
+# <gt-localization> header, the <gt-task-brief> tags, the <gt-obligations> block,
+# "Expected behavior", "EDIT-TARGET CONTRACTS", the file-list headers, and each
+# file's Witness/Contract are PROTECTED by the passes; only the final hard
+# truncate can trim them, and only when even that core exceeds the cap.
+def _enforce_token_rail(text: str, budget: int) -> tuple[str, list[str]]:
+    """Trim ``text`` to at most ``budget`` tokens, returning ``(text, suppressed)``.
+
+    Brief-F8 contract: ``budget <= 0`` means the rail is DISABLED — the text is
+    returned UNCHANGED with an empty ``suppressed`` list (there is no positive
+    ceiling to enforce, and clamping to a hard-truncate would gut the brief to
+    ~empty, which no caller wants). Every real caller passes a positive
+    ``max_brief_tokens`` (default ``MAX_BRIEF_TOKENS``); a non-positive budget is the
+    documented "no ceiling" escape hatch, not a request to erase the brief."""
+    suppressed: list[str] = []
+    if budget <= 0 or _count_tokens(text) <= budget:
+        return text, suppressed
+    lines = text.split("\n")
+
+    def _tok() -> int:
+        return _count_tokens("\n".join(lines))
+
+    def _drop_tagged(open_tag: str, close_tag: str) -> bool:
+        s = next((i for i, ln in enumerate(lines) if ln.strip() == open_tag), None)
+        if s is None:
+            return False
+        e = next((j for j in range(s, len(lines)) if lines[j].strip() == close_tag), None)
+        if e is None:
+            return False
+        del lines[s : e + 1]
+        return True
+
+    def _drop_until_blank(pred) -> bool:
+        s = next((i for i, ln in enumerate(lines) if pred(ln)), None)
+        if s is None:
+            return False
+        e = s + 1
+        while e < len(lines) and lines[e].strip() != "" and not _is_brief_boundary(lines[e]):
+            e += 1
+        del lines[s:e]
+        return True
+
+    def _drop_lines(pred) -> bool:
+        keep = [ln for ln in lines if not pred(ln)]
+        if len(keep) == len(lines):
+            return False
+        lines[:] = keep
+        return True
+
+    # Lowest priority FIRST. Each op removes ONE unit; loop while still over.
+    _passes = [
+        ("graph-map", lambda: _drop_tagged("<gt-graph-map>", "</gt-graph-map>")),
+        ("orientation-note", lambda: _drop_until_blank(
+            lambda ln: any(ln.startswith(p) for p in _ORIENTATION_NOTE_PREFIXES))),
+        ("scope-chain", lambda: _drop_until_blank(
+            lambda ln: ln.startswith("Scope chain"))),
+        ("related-files", lambda: _drop_until_blank(
+            lambda ln: ln.startswith("Related files to inspect")
+            or ln.startswith("Likely multi-file scope"))),
+        ("companion-candidates", lambda: _drop_until_blank(
+            lambda ln: ln.startswith("Other candidates"))),
+        ("calls", lambda: _drop_lines(
+            lambda ln: ln.lstrip().startswith("Calls:")
+            or ln.lstrip().startswith("Also changes:"))),
+        ("context", lambda: _drop_lines(
+            lambda ln: ln.lstrip().startswith("Context:")
+            or ln.lstrip().startswith("Spec:"))),
+        ("callers", lambda: _drop_lines(
+            lambda ln: ln.lstrip().startswith("Callers:"))),
+    ]
+    for label, op in _passes:
+        while _tok() > budget and op():
+            if label not in suppressed:
+                suppressed.append(label)
+        if _tok() <= budget:
+            break
+
+    text2 = "\n".join(lines)
+    if _count_tokens(text2) <= budget:
+        return text2, suppressed
+
+    # Phase 2: the passes were insufficient (a single entry's protected core still
+    # exceeds the cap). Rebuild keeping HIGHEST-priority blocks first, then re-emit
+    # them in original order. This is what lets the top-priority active OBLIGATION
+    # survive even though it renders near the END of the brief — a naive prefix
+    # truncation would keep the file list and cut the obligation, inverting the
+    # doctrine's fact order. Scaffold (localization header + <gt-task-brief> tags)
+    # is always kept; blocks that don't fit are recorded as suppressed.
+    blocks = _segment_brief_blocks(text2)
+    kept = [b for b in blocks if b["priority"] < 0]  # scaffold, always
+    _dropped_file = False
+    for b in sorted(blocks, key=lambda b: (b["priority"], b["order"])):
+        if b["priority"] < 0:
+            continue
+        _is_file = b["label"].startswith("file-entry")
+        # File entries are a rank-ordered prefix: once a higher-ranked entry is
+        # dropped, never keep a lower-ranked one (no localization rank inversion).
+        if _is_file and _dropped_file:
+            if b["label"] not in suppressed:
+                suppressed.append(b["label"])
+            continue
+        trial = sorted(kept + [b], key=lambda x: x["order"])
+        if _count_tokens("\n".join(x["text"] for x in trial)) <= budget:
+            kept.append(b)
+        else:
+            if _is_file:
+                _dropped_file = True
+            if b["label"] not in suppressed:
+                suppressed.append(b["label"])
+    result = "\n".join(x["text"] for x in sorted(kept, key=lambda x: x["order"]))
+    if _count_tokens(result) <= budget:
+        return result, suppressed
+
+    # HARD last resort: even the scaffold exceeds the cap (pathologically tiny
+    # budget). Char-length binary search (fewer chars => fewer-or-equal tokens for
+    # these tokenizers) so the returned text NEVER exceeds the cap.
+    if "truncated" not in suppressed:
+        suppressed.append("truncated")
+    lo, hi = 0, len(result)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _count_tokens(result[:mid]) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    return result[:lo].rstrip(), suppressed
 
 
 def _file_has_graph_edge(graph_db: str, file_path: str) -> bool:
@@ -1300,6 +2775,134 @@ def _tier_from_loc_header(loc_header: str) -> str:
     return m.group(1).upper() if m else "low"
 
 
+class _RankedEntry:
+    """A path-only stand-in so acquisition counting needs no DELIVERED entry.
+
+    `_l1_signal_counts` reads only `.path`, `.witness` and `.localizer_confidence` off an entry;
+    a ranked record carries its witness inside `components`, which the counter already handles.
+    """
+
+    __slots__ = ("path", "witness", "localizer_confidence")
+
+    def __init__(
+        self,
+        path: str,
+        *,
+        witness: str = "",
+        localizer_confidence: float = 0.0,
+    ) -> None:
+        self.path = path
+        self.witness = witness
+        self.localizer_confidence = localizer_confidence
+
+
+# C15 — the wire form of "this question has no answer on this run", for JSON readers that
+# cannot carry ``None``. A reader must never see 0 where the honest answer is "the re-slot
+# removed the population this counter is defined over".
+_NOT_EVALUABLE = "NOT_EVALUABLE"
+
+
+def _l1_acquisition_counts(
+    graph_db: str,
+    records: list[dict],
+    *,
+    witness_by_file: dict[str, str] | None = None,
+    localizer_confidence_by_file: dict[str, float] | None = None,
+) -> tuple[int, int, int, int]:
+    """The same four signal counts, over what was ACQUIRED — independent of delivery.
+
+    WHY THIS EXISTS. `_l1_signal_counts` counts over the DELIVERED candidate set, which is
+    correct for a delivery claim but is stored in fields named `fts5_signal_count`,
+    `semantic_signal_count`, `structural_signal_count`, `graph_edge_count`. Those names mean
+    ACQUISITION. Under `GT_BRIEF_MINIMAL` + `GT_LOC_RESLOT` the brief reduction deletes every
+    localization block, so the delivered set is empty BY CONSTRUCTION and all four read 0.
+
+    Measured cost of that conflation (run 30297116212): the counters read 0 while the SAME run's
+    `embedder_certificate.json` reported `semantic_candidate_count: 112` and driving the
+    production localizer against that run's own graph produced 50 candidates. The zero was read
+    as "the acquisition subsystem is dark", written into the architecture state-of-record, and
+    used to redirect a day of work. It was a broken gauge, not a broken subsystem.
+
+    Both facts are wanted. They must not share a name: this answers "what did the legs find",
+    `_l1_signal_counts` answers "what reached the model".
+    """
+    witness_by_file = witness_by_file or {}
+    localizer_confidence_by_file = localizer_confidence_by_file or {}
+    entries = []
+    for record in records:
+        if not isinstance(record, dict) or not record.get("path"):
+            continue
+        path = str(record.get("path", ""))
+        normalized = path.replace("\\", "/").lstrip("./").lstrip("/")
+        entries.append(
+            _RankedEntry(
+                path,
+                witness=(
+                    witness_by_file.get(path)
+                    or witness_by_file.get(normalized)
+                    or ""
+                ),
+                localizer_confidence=float(
+                    localizer_confidence_by_file.get(path)
+                    or localizer_confidence_by_file.get(normalized)
+                    or 0.0
+                ),
+            )
+        )
+    aligned = [r for r in records if isinstance(r, dict) and r.get("path")]
+    return _l1_signal_counts(graph_db, entries, aligned)  # type: ignore[arg-type]
+
+
+def _acquisition_proof_rows(
+    records: list[dict],
+    *,
+    witness_by_file: dict[str, str],
+    witness_verified_by_file: dict[str, bool],
+) -> list[dict[str, object]]:
+    """Project ranked candidates into acquisition-only proof rows.
+
+    The population is ``records`` (the terminal ranked set), never the rendered
+    candidate set. Only the four C16 acquisition-leg inputs are admitted. In
+    particular this array cannot carry block seals, contribution attestations,
+    co-change evidence, or the extended sources whose proof contract requires a
+    delivered localization candidate.
+    """
+    proof: list[dict[str, object]] = []
+    for rank, record in enumerate(records, start=1):
+        if not isinstance(record, dict):
+            continue
+        path = str(record.get("path", "") or "")
+        if not path:
+            continue
+        normalized = path.replace("\\", "/").lstrip("./").lstrip("/")
+        raw_components = record.get("components")
+        raw_components = raw_components if isinstance(raw_components, dict) else {}
+        components: dict[str, float] = {}
+        for name in ("reach", "lex", "sem"):
+            try:
+                components[name] = float(raw_components.get(name, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                components[name] = 0.0
+        witness = (
+            witness_by_file.get(path)
+            or witness_by_file.get(normalized)
+            or ""
+        )
+        witness_verified = bool(
+            witness_verified_by_file.get(path)
+            or witness_verified_by_file.get(normalized)
+        )
+        proof.append({
+            "candidate_id": _localization_candidate_id(path),
+            "rank": rank,
+            "path": path,
+            "witness": witness,
+            "witness_verified": witness_verified,
+            "components": components,
+        })
+    return proof
+
+
 def _l1_signal_counts(
     graph_db: str,
     entries: list[FileEntry],
@@ -1341,11 +2944,9 @@ def _l1_signal_counts(
             fts5 += 1
 
         _reach = float(comps.get("reach", 0.0) or 0.0)
-        _witnessed = (
-            bool(getattr(entry, "witness", ""))
-            or getattr(entry, "localizer_confidence", 0.0) > 0.0
-            or float(comps.get("witness", 0.0) or 0.0) > 0.0
-        )
+        _witnessed = bool(getattr(entry, "witness", "")) or getattr(
+            entry, "localizer_confidence", 0.0
+        ) > 0.0 or float(comps.get("witness", 0.0) or 0.0) > 0.0
         if _reach > 0.0 or _witnessed:
             struct += 1
 
@@ -1355,6 +2956,22 @@ def _l1_signal_counts(
         if _edge_cache[path]:
             graph_edges += 1
     return graph_edges, sem, struct, fts5
+
+
+def _terminal_acquisition_components(
+    components: dict[str, float],
+    candidate_path: str,
+    *,
+    body_paths: set[str] | frozenset[str],
+) -> dict[str, float]:
+    """Attach only terminal, candidate-local acquisition participation facts."""
+    out = dict(components)
+    normalized_body = {_gl_normalize(path) for path in body_paths}
+    if _gl_normalize(candidate_path) in normalized_body:
+        # Boolean participation, not a fabricated similarity magnitude: this
+        # candidate survived after a real content-FTS or body-embedding leg.
+        out["body"] = 1.0
+    return out
 
 
 # --- Decision 26: Cross-Domain Bridging via Co-Change + Test Co-Import ---
@@ -1387,11 +3004,14 @@ def _expand_via_cochange(
     """Find files in other modules that co-changed with symptom files in git history."""
     symptom_dirs = {os.path.dirname(f) for f in symptom_files}
     cochange_counts: dict[str, int] = {}
+    cochange_rows: dict[str, list[dict[str, object]]] = {}
+    source_revision = ""
+    current_commit = ""
 
     # Get last 100 commits
     try:
         result = subprocess.run(
-            ["git", "log", "--oneline", "--name-only", "-100"],
+            ["git", "log", "--format=%H", "--name-only", "-100"],
             cwd=repo_root,
             capture_output=True,
             text=True,
@@ -1404,48 +3024,164 @@ def _expand_via_cochange(
     except Exception:
         return []
 
-    # Parse commits — each commit block starts with a hash line, followed by file paths
+    # Parse commits through one flush path so blank separators are not required.
     current_files: list[str] = []
+
+    def _flush_commit() -> None:
+        if not current_commit or not current_files:
+            return
+        symptom_paths = sorted({f for f in current_files if f in symptom_files})
+        if not symptom_paths:
+            return
+        for candidate in dict.fromkeys(current_files):
+            if (
+                candidate in symptom_files
+                or os.path.dirname(candidate) in symptom_dirs
+            ):
+                continue
+            cochange_counts[candidate] = cochange_counts.get(candidate, 0) + 1
+            cochange_rows.setdefault(candidate, []).append({
+                "commit": current_commit,
+                "symptom_paths": symptom_paths,
+            })
+
     for line in result.stdout.splitlines():
         line = line.strip()
         if not line:
-            # End of commit block — check for co-changes
-            if current_files:
-                symptom_in_commit = any(f in current_files for f in symptom_files)
-                if symptom_in_commit:
-                    for f in current_files:
-                        if os.path.dirname(f) not in symptom_dirs and f not in symptom_files:
-                            cochange_counts[f] = cochange_counts.get(f, 0) + 1
+            _flush_commit()
+            current_commit = ""
             current_files = []
-        elif _re.match(r"^[0-9a-f]{7,12}\s", line):
-            # This is a commit hash line (e.g., "abc1234 Fix bug")
-            # Process previous block
-            if current_files:
-                symptom_in_commit = any(f in current_files for f in symptom_files)
-                if symptom_in_commit:
-                    for f in current_files:
-                        if os.path.dirname(f) not in symptom_dirs and f not in symptom_files:
-                            cochange_counts[f] = cochange_counts.get(f, 0) + 1
+        elif _re.fullmatch(r"[0-9a-f]{40}", line):
+            _flush_commit()
+            current_commit = line
+            if not source_revision:
+                source_revision = line
             current_files = []
         else:
-            # This is a file path
             current_files.append(line)
 
-    # Process final block
-    if current_files:
-        symptom_in_commit = any(f in current_files for f in symptom_files)
-        if symptom_in_commit:
-            for f in current_files:
-                if os.path.dirname(f) not in symptom_dirs and f not in symptom_files:
-                    cochange_counts[f] = cochange_counts.get(f, 0) + 1
+    _flush_commit()
 
     # Rank by co-change frequency, require >= 2
     ranked = sorted(cochange_counts.items(), key=lambda x: (-x[1], x[0]))
     return [
-        {"path": f, "score": 0.0, "components": {"cochange": count}, "entered_via": "cochange"}
+        {
+            "path": f,
+            "score": 0.0,
+            "components": {"cochange": count},
+            "entered_via": "cochange",
+            "cochange_evidence": _cochange_evidence(
+                candidate_path=f,
+                source_revision=source_revision,
+                source_rows=cochange_rows.get(f, []),
+                history_limit=100,
+            ),
+        }
         for f, count in ranked[:max_expansion]
         if count >= 2
     ]
+
+
+def _cochange_evidence(
+    *,
+    candidate_path: str,
+    source_revision: str,
+    source_rows: list[dict[str, object]],
+    history_limit: int,
+) -> dict[str, object]:
+    """Build a stable producer-owned truth/freshness witness for one bridge."""
+    evidence: dict[str, object] = {
+        "kind": "cochange_history",
+        "source": "git_log",
+        "source_revision": source_revision,
+        "history_limit": history_limit,
+        "candidate_path": candidate_path,
+        "count": len(source_rows),
+        "source_rows": source_rows,
+    }
+    canonical = json.dumps(
+        evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    evidence["source_identity_sha256"] = hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    return evidence
+
+
+def _primary_cochange_evidence(
+    *,
+    candidate_path: str,
+    co_change_paths: list[str],
+) -> dict[str, object]:
+    """Self-sealed co-change witness for a PRIMARY localization candidate.
+
+    Distinct from the cross-domain bridge witness (``_cochange_evidence``): the
+    bridge proves a candidate co-changed with the SYMPTOM files across dated
+    commits, whereas this proves the delivered localization candidate carries its
+    own mined co-change neighbourhood — the files rendered on its
+    ``Also changes: …`` line. That neighbourhood comes from the indexer's
+    ``cochanges`` table (or the git-log miner) as a ranked file list with no
+    per-commit rows, so the witness names the neighbours directly and self-seals
+    them with the SAME sha256-over-canonical-JSON scheme the bridge uses. The
+    neighbour list is sorted, de-duplicated and never includes the candidate
+    itself, so a downstream reader can prove the rows were not mutated.
+    """
+    kept = sorted({
+        c for c in co_change_paths
+        if isinstance(c, str) and c and c != candidate_path
+    })
+    evidence: dict[str, object] = {
+        "kind": "cochange_history",
+        "source": "primary_path",
+        "candidate_path": candidate_path,
+        "count": len(kept),
+        "co_change_paths": kept,
+    }
+    canonical = json.dumps(
+        evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    evidence["source_identity_sha256"] = hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    return evidence
+
+
+def _primary_cochange_support(
+    *,
+    candidate_path: str,
+    entry_co_changes: list[str] | None,
+    components: dict[str, float],
+    bridge_evidence: object,
+) -> tuple[object, list[str] | None]:
+    """Stamp co-change SUPPORT onto a delivered localization candidate's proof.
+
+    Returns ``(cochange_evidence, proof_co_changes)``. Keyed only on the general
+    condition — *this delivered candidate carries a real (non-test) co-change
+    neighbour list* — never on a task/repo/candidate id. A cross-domain bridge
+    candidate already owns its self-sealed ``cochange_evidence`` and
+    ``components["cochange"]`` (entered via ``cochange``); it is returned
+    untouched so its proof stays byte-identical. Otherwise, when the neighbour
+    list is non-empty and no cochange component is present yet, mint the
+    primary-path witness and stamp ``components["cochange"]`` in place so the
+    ACQ SOURCE-5 join stops being blind to it. When neither applies, the input
+    evidence (``None`` for an ordinary candidate) is returned unchanged.
+    """
+    if isinstance(bridge_evidence, dict):
+        return bridge_evidence, None
+    # Mirror the rendered "Also changes: …" filter exactly: drop test/demo paths
+    # and the candidate itself, then de-duplicate. Only a NON-EMPTY real
+    # neighbourhood mints a witness (never a hollow count-0 support row).
+    kept = sorted({
+        c for c in (entry_co_changes or [])
+        if isinstance(c, str) and c and c != candidate_path and not _is_test_path(c)
+    })
+    if not kept or float(components.get("cochange", 0.0) or 0.0) > 0.0:
+        return bridge_evidence, None
+    evidence = _primary_cochange_evidence(
+        candidate_path=candidate_path, co_change_paths=kept,
+    )
+    components["cochange"] = float(evidence["count"])
+    return evidence, list(evidence["co_change_paths"])  # type: ignore[arg-type]
 
 
 def _expand_via_test_coimport(
@@ -1519,6 +3255,24 @@ def _expand_via_test_coimport(
 # anchors_within_1_hop / 3), so >= 0.33 means >= 1 issue-anchor is a direct
 # call-graph neighbour — a real structural subject match, not float noise. Keeps
 # anchor-matched but witness-less gold out of the [INFO] drop (BUG-3).
+def _anchors_path(*, for_write: bool = False) -> str:
+    """Per-task gt_issue_anchors.json path (B10). Mirrors gt_mini_patch._anchors_path so
+    the brief's WRITE lands where the in-container consumers READ. Priority:
+    GT_ANCHORS_PATH -> $GT_CERT_DIR/gt_issue_anchors.json -> /tmp fallback. GT_CERT_DIR is
+    the per-task substrate mount, so keying on it stops two tasks on one host from sharing
+    a single mutable /tmp file (determinism / cross-task isolation). for_write=True skips
+    the isfile check (the file does not exist yet at write time)."""
+    p = os.environ.get("GT_ANCHORS_PATH")
+    if p:
+        return p
+    cert = os.environ.get("GT_CERT_DIR", "")
+    if cert:
+        cand = os.path.join(cert, "gt_issue_anchors.json")
+        if for_write or os.path.isfile(cand):
+            return cand
+    return "/tmp/gt_issue_anchors.json"
+
+
 _ANCHOR_PROX_WARN_FLOOR = 0.33
 
 
@@ -1535,7 +3289,16 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     Cursor-style honesty per .claude/CLAUDE.md: never present low-confidence
     guesses as confident ranked facts.
     """
-    # HI-tier rendering format from _caller_contract_for_file is
+    relevance_grade = str(getattr(entry, "relevance_grade", "") or "").upper()
+    if relevance_grade:
+        if relevance_grade == "VERIFIED":
+            return "[VERIFIED]"
+        if relevance_grade == "WARNING":
+            return "[WARNING]"
+        return "[INFO]"
+
+    # Legacy/non-localizer fallback. HI-tier rendering format from
+    # _caller_contract_for_file is
     # "func_name() in file.py:line `code`". Anchor on "() in " to avoid
     # false positives from paths containing the substring " in ".
     contract_has_func_names = "() in " in (entry.contract or "")
@@ -1565,7 +3328,10 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
         # names), language-invariant (filename specificity, not Python-specific).
         _stem = os.path.splitext(os.path.basename(entry.path or ""))[0].lower()
         _stem_specific = len(_stem) >= 5 or "_" in _stem
-        path_match = _stem_specific and bool(_re.search(rf"\b{_re.escape(_stem)}\b", _it))
+        path_match = (
+            _stem_specific
+            and bool(_re.search(rf"\b{_re.escape(_stem)}\b", _it))
+        )
 
     # A verified GRAPH-TRAVERSAL witness (graph_localizer): the file is connected
     # to an issue-anchored symbol by a DETERMINISTIC CALLS/IMPORTS edge. This is
@@ -1608,6 +3374,22 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     return "[INFO]"
 
 
+def _graph_map_demand_on() -> bool:
+    """B-27: the ``<gt-graph-map>`` is DEMAND-PAGED, not a step-0 narration dose.
+
+    Default OFF — a step-0 brief carries NO graph-map (anti-narration doctrine:
+    an unmeasured who-calls-whom dose the agent did not ask for is narration, not
+    a decision-point fact). The map is emitted ONLY when an explicit demand signal
+    (this flag / a future demand hook) requests it; when ON, the emitted block is
+    byte-identical to the historical step-0 emission. Byte-identical when off
+    (``_with_graph_map`` returns the brief unchanged). Robust truthy parse, parity
+    with ``_obligations_v2_on``."""
+    import os as _os
+    return (_os.environ.get("GT_GRAPH_MAP_DEMAND") or "").strip().lower() not in (
+        "", "0", "false", "no",
+    )
+
+
 def _with_graph_map(
     brief: str,
     files: list[FileEntry],
@@ -1617,20 +3399,33 @@ def _with_graph_map(
     """Surface the deterministic 1-hop curation map as a LEADING <gt-graph-map>
     block — callers/callees of the top shown files' focus functions.
 
-    Returns ``brief`` unchanged when graph_db is unset, when no shown file has a
-    focus function, or when no connection clears the correct-or-quiet bar
+    B-27 (demand-gate): DISABLED at step-0 by default. Returns ``brief`` unchanged
+    unless ``_graph_map_demand_on()`` (an explicit demand signal) requests the map.
+    A step-0 brief is by definition not demand-triggered, so the default path emits
+    no graph-map — reconciling gt_layers.md §2.3 (retired at step-0) with the code.
+
+    Also returns ``brief`` unchanged when graph_db is unset, when no shown file has
+    a focus function, or when no connection clears the correct-or-quiet bar
     (render_map returns '' — honest abstention, never a guess). The map obeys the
     SAME categorical rule as the caller gate: a deterministic edge renders as a
     fact; a name_match edge renders only ever as ``(unverified)``.
 
     D3 (CLAUDE.md "the brief's value is the graph map, not the file ranking";
     Lost-in-the-Middle TACL 2024 — primacy beats burial): this who-calls-whom map
-    is the UNIQUE value the agent's own grep loop cannot cheaply rebuild, so it is
-    placed FIRST (immediately after the <gt-task-brief> open tag), not appended at
-    ~96% position behind the evidence wall. The map's own body lines are capped the
-    same way the evidence bodies are (the "called by:" fan-in line can run long).
-    Falls back to a trailing append only when the open tag is absent.
+    is the UNIQUE value the agent's own grep loop cannot cheaply rebuild, so — WHEN
+    demand-paged — it is placed FIRST (immediately after the <gt-task-brief> open
+    tag), not appended at ~96% position behind the evidence wall. The map's own
+    body lines are capped the same way the evidence bodies are (the "called by:"
+    fan-in line can run long). Falls back to a trailing append only when the open
+    tag is absent.
     """
+    import os as _os
+
+    gateway_on = (_os.environ.get("GT_GATEWAY") or "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    )
+    if gateway_on or not _graph_map_demand_on():
+        return brief
     if not graph_db or not files:
         return brief
     try:
@@ -1754,28 +3549,295 @@ def _edit_target_contracts_block(graph_db: str, top: FileEntry) -> list[str]:
 # the grader's test names — gt_trial §6 leakage rule).
 _OBLIGATION_BUDGET = 4  # at most N obligation lines (compact, high-precision)
 _OBLIGATION_LINE_CHARS = 200  # per-obligation verbatim cap
+
+
+def _obligations_v2_on() -> bool:
+    """Resolve structured obligations for the production Profile-2 path.
+
+    ``GT_OBLIGATIONS_V2`` remains an explicit diagnostic override/kill switch.
+    When it is absent, the live workflow's explicit Profile-2 activation owns
+    this behavior through the existing obligation capability; no extra CAP row
+    or unreceipted feature flag is introduced.
+    """
+    import os as _os
+    _raw = _os.environ.get("GT_OBLIGATIONS_V2")
+    if _raw is not None and _raw.strip():
+        return _raw.strip().lower() not in ("0", "false", "no", "off")
+    return (_os.environ.get("GT_RL_PROFILE") or "").strip() == "2"
+
+
+def _dynamic_obligation_budget(n_clauses: int) -> int:
+    """T1 budget scaling with spec density: K = clamp(ceil(n/3), 4, 10).
+    n<=12 keeps today's dose (4); a 25-clause spec renders 9; ceiling 10 bounds
+    the block at <=10x200 chars inside the existing brief token rail."""
+    import math as _math
+    return max(_OBLIGATION_BUDGET, min(10, _math.ceil(max(0, n_clauses) / 3)))
+
+
+_V2_KIND_PRIORITY = {"error": 0, "signature": 1, "behavior": 2, "compat": 3, "repro": 4}
+
+
+def _v2_order_key(row: dict) -> tuple:
+    """Deterministic total order: modality strength desc, symbol specificity
+    desc (compound-symbol count, then max symbol length), kind priority,
+    document order asc."""
+    subj = row.get("subject_symbols") or []
+    compound = sum(1 for s in subj if ("_" in s or "." in s or any(c.isupper() for c in s[1:])))
+    maxlen = max((len(s) for s in subj), default=0)
+    return (
+        -int(row.get("modality_strength") or 0),
+        -compound,
+        -maxlen,
+        _V2_KIND_PRIORITY.get(row.get("kind") or "", 9),
+        int(row.get("_doc_index") or 0),
+    )
+
+
+def _write_obligations_v2_artifact(
+    rows: list[dict], gold_path_tokens: set[str], issue_text: str
+) -> None:
+    """T2: persist the FULL leak-screened clause list next to the anchors file —
+    gt_obligations_v2.json (machine, incl. render_path_tokens so the in-container
+    T3 screen applies the IDENTICAL leak rule) + gt_obligations.md (the agent's
+    checklist; issue-verbatim rows only — adds structure, zero new information).
+    Fail-open: the artifact must never break the brief."""
+    try:
+        import hashlib as _hashlib_v2
+        import json as _j
+        import os as _os
+        target_dir = _os.path.dirname(_anchors_path(for_write=True)) or "/tmp"
+        clean = [{k: v for k, v in o.items() if not k.startswith("_")} for o in rows]
+        md = ["# GT obligations checklist — every requirement extracted from the issue",
+              "# Verify each before submitting; tick what you have EXERCISED with a test.",
+              ""]
+        for o in clean:
+            verb = " ".join((o.get("verbatim_text") or "").split())
+            md.append(
+                f"- [ ] ({o.get('clause_id','')}, {o.get('kind','')}, "
+                f"{o.get('modality','')}) \"{verb}\""
+            )
+        md_text = "\n".join(md) + "\n"
+        payload = {
+            "obligations_version": 2,
+            "issue_sha256": _hashlib_v2.sha256(issue_text.encode("utf-8")).hexdigest(),
+            "checklist_sha256": _hashlib_v2.sha256(md_text.encode("utf-8")).hexdigest(),
+            "render_path_tokens": sorted(gold_path_tokens),
+            "clauses": clean,
+        }
+        # Dual-write target_dir AND /tmp — mirrors the gt_issue_anchors.json persist
+        # resilience (this fn's sibling). The proof harness (gt_run_proof.emit_brief)
+        # mirrors /tmp/gt_obligations_v2.json -> out_dir into the cert-dir handoff, so
+        # writing /tmp is what lets these files reach the AGENT (T2 checklist + T3
+        # activation). Without it they die in the brief-gen subprocess's cwd — the
+        # 2026-07-08 witness gap (run 28975223607: T1 shipped, T2/T3 never activated).
+        _dirs = [target_dir]
+        if "/tmp" not in _dirs:
+            _dirs.append("/tmp")
+        for _d in _dirs:
+            try:
+                import tempfile as _tempfile_v2
+
+                def _atomic_text(_path: str, _text: str) -> None:
+                    _fd, _tmp = _tempfile_v2.mkstemp(
+                        prefix=f".{_os.path.basename(_path)}.", dir=_d
+                    )
+                    try:
+                        with _os.fdopen(_fd, "w", encoding="utf-8", newline="") as _f:
+                            _f.write(_text)
+                            _f.flush()
+                            _os.fsync(_f.fileno())
+                        # mkstemp is 0600; container-root writer vs non-root host reader
+                        # (W1a-PERM class, sweep A2 latent) — publish world-readable so a
+                        # future harvest of these artifacts can never silently EACCES.
+                        _os.chmod(_tmp, 0o644)
+                        _os.replace(_tmp, _path)
+                    except BaseException:
+                        try:
+                            _os.unlink(_tmp)
+                        except OSError:
+                            pass
+                        raise
+
+                # JSON is the bundle commit marker: publish checklist bytes first,
+                # then atomically replace their identity/digest-bearing manifest.
+                _atomic_text(_os.path.join(_d, "gt_obligations.md"), md_text)
+                _atomic_text(
+                    _os.path.join(_d, "gt_obligations_v2.json"),
+                    _j.dumps(payload),
+                )
+            except OSError:
+                continue
+    except Exception:
+        pass
 _F2P_TOKEN_RE = _re.compile(r"\b(?:FAIL_TO_PASS|PASS_TO_PASS|fail_to_pass|pass_to_pass)\b")
-_OBLIG_TEST_NAME_RE = _re.compile(r"\b(?:test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
+# LEAK LAW — the test-identifier + assertion + test-path screens are SINGLE-SOURCED with the seam
+# (Fable-LIPI round-2, 2026-07-11). Round-1 tuned the brief's screen and the seam's prose screen
+# (`gt_mini_patch._prose_leaks_test_identity`) SEPARATELY, and each missed a different half (the
+# brief missed `assert_eq!` / `.test.ts` / `crate::tests::`; the seam missed the assertion keyword
+# entirely; BOTH missed `Test_`/`TEST_` case+underscore variants; AND the brief regex dir leg was
+# only `tests?/`, leaking `spec/`/`__tests__/`/`e2e/` file paths — seam round-2 Finding-1). To make
+# the invariant STRUCTURAL rather than disciplinary, the brief now screens with the ONE canonical
+# PREDICATE `native_render.prose_leaks_test_identity` (name + assertion + the path_policy dir belt),
+# the same function the seam calls — they cannot drift. See that module for the language coverage +
+# the production near-miss guards (`contest_handler`/`latest_value`/`std::collections`/`Testing*`).
+from groundtruth.runtime.native_render import (  # noqa: E402
+    prose_leaks_test_identity as _prose_leaks_test_identity,
+)
 
 
 def _obligation_is_leaky(verbatim: str, symbols, gold_path_tokens: set[str]) -> bool:
     """Fail-closed: True if the obligation must NOT be rendered.
 
     Drops the obligation WHOLE if its verbatim text (or any named symbol) carries a
-    pytest test name, a FAIL_TO_PASS / PASS_TO_PASS marker, or a token that equals a
-    rendered gold-file path component. These are grader-coupled surfaces — GT must
-    surface ZERO test references so its output is identical if the grader swaps.
+    test name (ANY language convention — pytest ``test_*``/``*_test``, Go
+    ``TestX``, camelCase ``testX``, a ``path.ext::node`` nodeid, or a ``tests/``
+    path segment), a pytest ASSERTION keyword, or a FAIL_TO_PASS / PASS_TO_PASS
+    marker — or a token equal to a rendered gold-file path component. These are
+    grader-coupled surfaces — GT must surface ZERO test references so its output is
+    identical if the grader swaps. ONE canonical screen: the assertion + test-name
+    legs run HERE so every caller (the ``<gt-obligations>`` block AND the B-1
+    Expected-Behavior spec) obeys the SAME leak law (Brief-F2 asymmetry closed).
     """
-    low = verbatim or ""
-    if _F2P_TOKEN_RE.search(low) or _OBLIG_TEST_NAME_RE.search(low):
+    low = (verbatim or "")
+    if _F2P_TOKEN_RE.search(low) or _prose_leaks_test_identity(low):
         return True
-    for s in symbols or set():
+    for s in (symbols or set()):
         sl = str(s)
-        if _OBLIG_TEST_NAME_RE.search(sl) or _F2P_TOKEN_RE.search(sl):
+        if _prose_leaks_test_identity(sl) or _F2P_TOKEN_RE.search(sl):
             return True
         if sl.lower() in gold_path_tokens:
             return True
     return False
+
+
+_EB_PATTERNS = (
+    _re.compile(
+        r"(?:^|\n)#{1,3}\s*Expected\s*(?:Behavior|Output|Result)s?\s*\n(.*?)(?=\n#{1,3}\s|\Z)",
+        _re.DOTALL | _re.IGNORECASE,
+    ),
+    _re.compile(
+        r"(?:^|\n)\*\*Expected\s*(?:behavior|output|result)s?\*\*[:\s]*(.*?)(?=\n\*\*|\n#{1,3}|\Z)",
+        _re.DOTALL | _re.IGNORECASE,
+    ),
+)
+
+
+def _expected_behavior_spec(issue_text: str):
+    """The issue's Expected-Behavior spec line, leak-screened (B-1).
+
+    Returns the one-line spec (<=200 chars), or None (correct-or-quiet) when absent
+    or carrying a test name / FAIL_TO_PASS marker / assertion. Routes through the
+    canonical `_obligation_is_leaky` screen so this surface obeys the SAME leak law
+    as the obligations block."""
+    if not issue_text:
+        return None
+    for _pat in _EB_PATTERNS:
+        _m = _pat.search(issue_text)
+        if _m:
+            _txt = (_m.group(1) or "").strip()
+            if _txt and len(_txt) > 10:
+                _short = _txt[:200].strip()
+                # ONE canonical screen: _obligation_is_leaky now covers the assertion
+                # keyword AND every test-name convention (Brief-F1/F2), so this surface
+                # obeys the IDENTICAL leak law as the <gt-obligations> block.
+                if _short and not _obligation_is_leaky(_short, set(), set()):
+                    return _short
+            return None
+    return None
+
+
+# SS-5 (2026-07-13): the requirement-extractor discipline for the GT_SS_ACK_FORM checklist.
+# A rendered obligation row is ``  - [<kind>] <verbatim>`` (kind tag) or ``  - <verbatim>``. The
+# ``[<kind>]`` classifier is one of the extractor's fixed grammar classes (error/signature/behavior/
+# compat/repro); ``repro`` is a REPRODUCTION FRAGMENT ("when I run X I get Y"), not an imperative
+# requirement, so it is dropped. A direct conversational ask or a trailing ``?`` marks a
+# non-requirement sentence (a request/question) — also dropped. First-person product proposals
+# remain requirements: politeness/epistemic hedging does not erase requested behavior. Everything else is a requirement/
+# directive the extractor already validated as requirement grammar, and is KEPT.
+_OBLIGATION_ROW_KIND_RE = _re.compile(r"^\[(?P<kind>[a-z][a-z_]*)\]\s+(?P<text>.*)$")
+_REPRO_KINDS = frozenset({"repro"})
+_OBLIGATION_PLEA_RE = _re.compile(
+    r"^(?:please\b|could\s+you\b|can\s+(?:you|we|someone|somebody)\b"
+    r"|would\s+you\b|any\s+chance\b|is\s+there\s+(?:a|any|some)\b"
+    r"|thank(?:s|\s+you)\b)",
+    _re.IGNORECASE,
+)
+
+
+def _parse_obligation_row(row: str) -> tuple[str, str]:
+    """Split a rendered obligation row into ``(kind, text)``. ``kind`` is ``""`` when the row
+    carries no ``[<kind>]`` classifier prefix. Pure; the inverse of the ``  - {tag}{compact}``
+    render at the two build loops."""
+    s = row.lstrip()
+    if s.startswith("- "):
+        s = s[2:]
+    m = _OBLIGATION_ROW_KIND_RE.match(s)
+    if m:
+        return m.group("kind"), (m.group("text") or "").strip()
+    return "", s.strip()
+
+
+def _obligation_is_imperative(kind: str, text: str) -> bool:
+    """SS-5 requirement-extractor discipline: True iff the obligation row is an IMPERATIVE
+    requirement item (keep), False for a repro fragment or direct ask/question (drop). Pure +
+    deterministic — SELECTS requirement sentences, never paraphrases (LLM-free; a rewrite could
+    change meaning). Contract mirrors what an SS-2 runtime extractor would expose, so a future
+    shared helper can substitute without changing callers."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if (kind or "").strip().lower() in _REPRO_KINDS:
+        return False
+    if t.rstrip().endswith("?"):
+        return False
+    if _OBLIGATION_PLEA_RE.match(t):
+        return False
+    return True
+
+
+def _obligation_checklist_row(row: str, strip_kind: bool = False) -> str:
+    """ITEM-5: transform a rendered ``  - {tag}{compact}`` obligation row into a plain checklist
+    item ``- [ ] {tag}{compact}``. Only the bullet changes; the obligation CONTENT (kind tag +
+    verbatim text) is preserved verbatim.
+
+    SS-5 ``strip_kind`` (GT_SS_ACK_FORM): drop the leading ``[<kind>]`` classifier so the item is a
+    plain requirement line ``- [ ] <verbatim>`` (a native requirements checklist, no GT-metadata
+    tag). Default ``strip_kind=False`` is byte-identical to the ITEM-5 GT_BRIEF_NATIVE arm."""
+    s = row.lstrip()
+    if s.startswith("- "):
+        s = s[2:]
+    if strip_kind:
+        m = _OBLIGATION_ROW_KIND_RE.match(s)
+        if m:
+            s = m.group("text")
+    return "- [ ] " + s
+
+
+def _obligations_section(rendered: list[str]) -> list[str]:
+    """Wrap the rendered obligation rows in the delivered FRAME.
+
+    Default (tag) arm: the ``<gt-obligations>`` block — byte-identical. GT_BRIEF_NATIVE arm: a plain
+    requirements checklist (``- [ ] <obligation>``) under a one-line plain header, NO ``<gt-*>`` tag,
+    so the obligations ride the model's native requirements-list channel in-distribution. Leak-safe:
+    every row already passed ``_obligation_is_leaky`` upstream; the native form only swaps the frame
+    + bullet (no test identity can enter here).
+
+    SS-5 GT_SS_ACK_FORM (layered ON TOP of GT_BRIEF_NATIVE): additionally apply the requirement-
+    extractor discipline — keep only IMPERATIVE requirement items (drop repro fragments / pleas via
+    ``_obligation_is_imperative``) and strip the ``[<kind>]`` classifier. GT_BRIEF_NATIVE-alone (ACK
+    OFF) is byte-identical to today's plain-checklist arm. Correct-or-quiet: when no imperative
+    requirement survives, the block is dropped entirely (``[]``) rather than shipping an empty
+    header."""
+    if _brief_native_on():
+        if _ss_ack_form_on():
+            kept = [r for r in rendered
+                    if _obligation_is_imperative(*_parse_obligation_row(r))]
+            if not kept:
+                return []
+            return ["", _OBLIGATION_NATIVE_HEADER] + [
+                _obligation_checklist_row(r, strip_kind=True) for r in kept]
+        return ["", _OBLIGATION_NATIVE_HEADER] + [_obligation_checklist_row(r) for r in rendered]
+    return ["", "<gt-obligations>"] + rendered + ["</gt-obligations>"]
 
 
 def _render_obligations_block(
@@ -1783,11 +3845,20 @@ def _render_obligations_block(
     files: list[FileEntry],
     cap,
     anchor_symbols: set[str] | None = None,
+    require_anchor: bool = True,
 ) -> list[str]:
     """Render the ``<gt-obligations>`` behavioral-spec block, or ``[]`` when quiet.
 
     ``cap`` is the body-line clip closure from ``render_brief``. Returns a list of
     rendered lines (block tags included) or an empty list (correct-or-quiet).
+
+    ``require_anchor`` (default True — byte-identical for every existing caller)
+    gates the block on FOCUS/anchor overlap so the spec is never coupled to a
+    WRONG located file. On the B-2 no-match path (``generate_v1r_brief`` has NO
+    ranked existing file) there IS no located file to be wrong about, so the
+    caller passes ``require_anchor=False``: the leak screen (``_obligation_is_leaky``)
+    still runs, but the relevance gate is bypassed so the issue's own behavioral
+    obligations still reach the agent at step 0.
 
     ``anchor_symbols`` are the issue's own curated code identifiers
     (``IssueAnchors.symbols`` ∪ ``code_symbols`` ∪ ``unresolved_code_symbols`` —
@@ -1808,8 +3879,65 @@ def _render_obligations_block(
             identifier_tokens as _id_tokens,
             passes_relevance_gate as _rel_gate,
         )
-
-        spec = _extract_spec(issue_text)
+        # Row-11 fix (gt_math_oh 2026-06-25): read the ALREADY-PERSISTED structured
+        # obligations from /tmp/gt_issue_anchors.json (written by generate_v1r_brief
+        # at :3342 via spec.to_serializable()). The DeepSWE path reads these via
+        # load_obligations; the OH path re-extracted thin — producing weaker output.
+        # Bridge: try the persisted file first; fall back to live extraction.
+        spec = None
+        try:
+            import json as _obl_json
+            with open(_anchors_path(), encoding="utf-8") as _obl_f:
+                _obl_data = _obl_json.load(_obl_f)
+            _persisted = _obl_data.get("obligations") or []
+            if _obligations_v2_on():
+                # V2 artifacts are task-bound.  A shared /tmp fallback can
+                # outlive its producer; version alone cannot prevent a valid
+                # artifact from another issue being laundered into this brief.
+                import hashlib as _obl_hashlib
+                _issue_sha = _obl_hashlib.sha256(
+                    issue_text.encode("utf-8")
+                ).hexdigest()
+                if (
+                    _obl_data.get("obligations_version") != 2
+                    or _obl_data.get("issue_sha256") != _issue_sha
+                ):
+                    _persisted = []
+            if _persisted:
+                from groundtruth.pretask.spec import Obligation, IssueSpec
+                if _obligations_v2_on():
+                    # v2 bridge: carry ALL fields (the v1 two-field reconstruction
+                    # silently dropped symbols/keywords — weakening the symbol leg
+                    # of the leak check). Flag-gated so flag-off bytes are stable.
+                    _obls = [Obligation(
+                        verbatim_text=o.get("verbatim_text", ""),
+                        kind=o.get("kind", "behavior"),
+                        symbols=frozenset(o.get("symbols") or ()),
+                        keywords=frozenset(o.get("keywords") or ()),
+                        checkable_forms=frozenset(o.get("checkable_forms") or ()),
+                        clause_id=o.get("clause_id", ""),
+                        modality=o.get("modality", ""),
+                        modality_strength=int(o.get("modality_strength") or 0),
+                        subject_symbols=frozenset(o.get("subject_symbols") or ()),
+                        parent_id=o.get("parent_id", ""),
+                        part_index=int(o.get("part_index") or 0),
+                        region=o.get("region", "normative"),
+                    ) for o in _persisted if isinstance(o, dict) and o.get("verbatim_text")]
+                else:
+                    _obls = [Obligation(
+                        verbatim_text=o.get("verbatim_text", ""),
+                        kind=o.get("kind", "behavior"),
+                    ) for o in _persisted if isinstance(o, dict) and o.get("verbatim_text")]
+                if _obls:
+                    spec = IssueSpec(obligations=_obls)
+        except Exception:
+            pass
+        if spec is None:
+            if _obligations_v2_on():
+                from groundtruth.pretask.spec import extract_spec_v2 as _extract_spec_v2
+                spec = _extract_spec_v2(issue_text)
+            else:
+                spec = _extract_spec(issue_text)
     except Exception:
         return []
     if not spec.obligations:
@@ -1829,8 +3957,9 @@ def _render_obligations_block(
     for f in files:
         # bare names (function_names) are the focus anchor; `functions` holds
         # signatures ("def foo(...)") whose tokens we also harvest as a fallback.
-        for fn in list(getattr(f, "function_names", []) or []) + list(
-            getattr(f, "functions", []) or []
+        for fn in (
+            list(getattr(f, "function_names", []) or [])
+            + list(getattr(f, "functions", []) or [])
         ):
             fn_tokens |= _id_tokens(fn)
         # gold-path tokens for the leakage guard — a rendered candidate's path
@@ -1845,10 +3974,59 @@ def _render_obligations_block(
     # obligation relevance anchor is consistent, not a new heuristic. They are NOT
     # added to gold_path_tokens, so the leakage guard is unaffected (an anchor
     # symbol that coincides with a gold-path segment is still caught there).
-    for s in anchor_symbols or set():
+    for s in (anchor_symbols or set()):
         fn_tokens |= _id_tokens(str(s))
-    if not fn_tokens:
+    if not fn_tokens and require_anchor:
         return []  # no anchor to gate against — stay quiet
+
+    if _obligations_v2_on():
+        # ── GT_OBLIGATIONS_V2 T1 render ──────────────────────────────────────
+        # leak screen FIRST (drop whole), then T2 artifact (FULL clean list —
+        # relevance gate deliberately NOT applied to the artifact: every row is
+        # issue-verbatim text the agent already possesses; the anti-launder rule
+        # protects the brief's DOSE, not secrecy), then gate + order + dynamic K.
+        rows: list[dict] = []
+        for _di, o in enumerate(spec.to_serializable(version=2)):
+            _verb = (o.get("verbatim_text") or "").strip() if isinstance(o, dict) else ""
+            if not _verb:
+                continue
+            if _obligation_is_leaky(_verb, o.get("symbols", []), gold_path_tokens):
+                continue
+            o["_doc_index"] = _di
+            rows.append(o)
+        _write_obligations_v2_artifact(rows, gold_path_tokens, issue_text)
+        # The internal artifact retains every structurally classified row for
+        # audit/provenance. Only normative rows are requirements that may enter
+        # the model observation; process/evidence rows are never completion
+        # obligations, even when their text overlaps the localized symbols.
+        deliverable = [
+            o for o in rows if o.get("region", "normative") == "normative"
+        ]
+        gated = deliverable if not require_anchor else [
+            o for o in deliverable
+            if _rel_gate((o.get("verbatim_text") or ""), None, fn_tokens)
+        ]
+        gated.sort(key=_v2_order_key)
+        k = _dynamic_obligation_budget(len(deliverable))
+        rendered_v2: list[str] = []
+        seen_v2: set[str] = set()
+        for o in gated:
+            if len(rendered_v2) >= k:
+                break
+            full = " ".join((o.get("verbatim_text") or "").split())
+            compact = full[:_OBLIGATION_LINE_CHARS].strip()
+            if len(full) > _OBLIGATION_LINE_CHARS:
+                compact += "…"
+            key = compact.lower()
+            if not compact or key in seen_v2:
+                continue
+            seen_v2.add(key)
+            kind = o.get("kind", "")
+            tag = f"[{kind}] " if kind else ""
+            rendered_v2.append(cap(f"  - {tag}{compact}"))
+        if not rendered_v2:
+            return []
+        return _obligations_section(rendered_v2)
 
     rendered: list[str] = []
     seen: set[str] = set()
@@ -1869,7 +4047,9 @@ def _render_obligations_block(
         # Relevance gate: render only when the obligation overlaps the FOCUS anchor
         # (the rendered edit-target functions). No focus overlap → drop this
         # obligation. (issue_terms intentionally empty — focus is the discriminator.)
-        if not _rel_gate(verbatim, None, fn_tokens):
+        # Bypassed on the B-2 no-match path (require_anchor=False): with no located
+        # file, there is no wrong file to couple to — the leak screen above still runs.
+        if require_anchor and not _rel_gate(verbatim, None, fn_tokens):
             continue
         # Collapse whitespace + cap so a long requirement sentence stays one line.
         compact = " ".join(verbatim.split())[:_OBLIGATION_LINE_CHARS].strip()
@@ -1882,7 +4062,7 @@ def _render_obligations_block(
 
     if not rendered:
         return []
-    return ["", "<gt-obligations>"] + rendered + ["</gt-obligations>"]
+    return _obligations_section(rendered)
 
 
 def render_brief(
@@ -1900,7 +4080,6 @@ def render_brief(
 ) -> str:
     if not files:
         return "<gt-task-brief>\n</gt-task-brief>"
-
     # D1: per-body-line char cap. The budget-enforcement loop in
     # generate_v1r_brief tightens this (not the file LIST) when the brief is over
     # the token rail — trimming DETAIL, never which files the agent is told to
@@ -1940,8 +4119,12 @@ def render_brief(
         # starting point. No tier prefix.
         files = files[:1]
         tiers = tiers[:1]
+        info_dropped: list[FileEntry] = []  # nothing anchored -> do not front-load weak facts
     else:
-        # Filter out [INFO] entries — research says filter hard upstream.
+        # Filter out [INFO] entries — research says filter hard upstream. Capture the
+        # dropped [INFO] candidates FIRST (rank order preserved) so the proactive
+        # top-N block below can front-load their deterministic cross-file facts.
+        info_dropped = [f for f, t in zip(files, tiers) if t == "[INFO]"]
         files_filtered = [f for f, t in zip(files, tiers) if t != "[INFO]"]
         tiers_filtered = [t for t in tiers if t != "[INFO]"]
         files = files_filtered
@@ -1968,6 +4151,12 @@ def render_brief(
         # interface facts the agent must preserve — raises / guards / return shape.
         if f.contract_props:
             lines.append(_cap(f"   Contract: {f.contract_props}"))
+        # Row-9 fix (gt_math_oh 2026-06-25): siblings/Context rendered LAST
+        # (after Callers/Calls/Spec) and was budget-cut every time (600 tokens).
+        # Move it up — consistency (sibling functions in the same class/module)
+        # is the same importance tier as contract (what to preserve).
+        if f.pattern:
+            lines.append(_cap(f"   Context: {f.pattern}"))
         if f.spec and issue_text:
             # Relevance gate: spec must overlap with issue terms to avoid red herrings
             _spec_lower = f.spec.lower()
@@ -2009,8 +4198,6 @@ def render_brief(
             lines.append(_cap(f"   Spec: {f.spec}"))
         if f.contract:
             lines.append(_cap(f"   Callers: {f.contract}"))
-        if f.pattern:
-            lines.append(_cap(f"   Context: {f.pattern}"))
         if f.co_changes:
             # SWAP-INVARIANT (run16 leak): drop test files from the co-change list — "Also changes:
             # …/test_plots_matplotlib.py" surfaces a test reference. Non-test co-changes are kept.
@@ -2019,33 +4206,48 @@ def render_brief(
                 lines.append(_cap(f"   Also changes: {', '.join(_cc)}"))
         if f.callees:
             lines.append(_cap(f"   Calls: {', '.join(f.callees)}"))
+    # PROACTIVE top-N (GT_PROACTIVE_TOPN, default 1 = OFF). The rich render above
+    # covers only the non-[INFO] candidates (usually #1); lower-ranked candidates are
+    # [INFO]-dropped as weakly issue-relevant (anti-flood, 1937-1958). But their
+    # CONTRACT + verified CALLERS are DETERMINISTIC graph facts, and the agent
+    # re-derives them by OPENING those files (measured re-search, 91% of tasks). When
+    # enabled, front-load a COMPACT contract/callers block for the next-ranked [INFO]
+    # candidates up to the cap — the cross-file facts, without the round-trip.
+    # Leakage-safe (no test names — contract/callers only). Bounded per AGENTS.md
+    # 2602.11988 (a broad early dump hurts strong agents). Env-gated so the A/B
+    # toggles it on ONE baked image; default 1 leaves every existing brief byte-identical.
+    try:
+        _proactive_topn = int(os.environ.get("GT_PROACTIVE_TOPN", "1") or "1")
+    except ValueError:
+        _proactive_topn = 1
+    if _proactive_topn > 1 and info_dropped:
+        _need = _proactive_topn - len(files)  # files == rendered non-[INFO] count here
+        if _need > 0:
+            _pro_lines: list[str] = []
+            for f in info_dropped[:_need]:
+                _facts = []
+                if f.contract_props:
+                    _facts.append(_cap(f"   Contract: {f.contract_props}"))
+                if f.contract:
+                    _facts.append(_cap(f"   Callers: {f.contract}"))
+                if not _facts:
+                    continue  # correct-or-quiet: no facts -> no line
+                _hdr = f.path + (f" ({', '.join(f.functions)})" if f.functions else "")
+                _pro_lines.append(_cap(_hdr))
+                _pro_lines.extend(_facts)
+            if _pro_lines:
+                lines.append(
+                    "Other candidates — cross-file facts (so you need not open each first):"
+                )
+                lines.extend(_pro_lines)
     # EXPECTED BEHAVIOR from issue text — the reporter's own spec for what the code
     # SHOULD do. Extracted from markdown sections like "### Expected Behavior",
     # "Expected:", "Should:", "The fix should". Leakage-safe (it's the issue text
     # the agent already has, curated into a concise spec).
-    if issue_text:
-        import re as _re_eb
-
-        _eb_patterns = [
-            _re_eb.compile(
-                r"(?:^|\n)#{1,3}\s*Expected\s*(?:Behavior|Output|Result)s?\s*\n(.*?)(?=\n#{1,3}\s|\Z)",
-                _re_eb.DOTALL | _re_eb.IGNORECASE,
-            ),
-            _re_eb.compile(
-                r"(?:^|\n)\*\*Expected\s*(?:behavior|output|result)s?\*\*[:\s]*(.*?)(?=\n\*\*|\n#{1,3}|\Z)",
-                _re_eb.DOTALL | _re_eb.IGNORECASE,
-            ),
-        ]
-        for _pat in _eb_patterns:
-            _eb_match = _pat.search(issue_text)
-            if _eb_match:
-                _eb_text = _eb_match.group(1).strip()
-                if _eb_text and len(_eb_text) > 10:
-                    _eb_short = _eb_text[:200].strip()
-                    if _eb_short:
-                        lines.append("")
-                        lines.append(f"Expected behavior: {_eb_short}")
-                break
+    _eb_spec = _expected_behavior_spec(issue_text)
+    if _eb_spec:
+        lines.append("")
+        lines.append(f"Expected behavior: {_eb_spec}")
 
     # INTENDED-BEHAVIOR SPEC (research-backed lever): surface the ASSERTION BODIES
     # from tests that target ALL rendered files' functions. The assertion tells
@@ -2067,14 +4269,13 @@ def render_brief(
     if False and graph_db and files:
         try:
             import sqlite3 as _asq
-
             _aconn = _asq.connect(graph_db)
             _all_spec_lines: list[str] = []
             _total_verify_budget = 5  # total assertion lines across all files
             for _verify_file in files:
                 if len(_all_spec_lines) >= _total_verify_budget:
                     break
-                _vf_path = _verify_file.path if hasattr(_verify_file, "path") else str(_verify_file)
+                _vf_path = _verify_file.path if hasattr(_verify_file, 'path') else str(_verify_file)
                 _vf_base = os.path.basename(_vf_path)
                 _per_file_limit = max(2, _total_verify_budget - len(_all_spec_lines))
                 # Two queries: first try linked assertions (target_node_id > 0),
@@ -2109,7 +4310,7 @@ def render_brief(
                         # Collapse whitespace so multi-line assertions render on one line
                         _expr_clean = " ".join((expr or "").split())[:80].strip()
                         if _expr_clean:
-                            _tname_short = tname or "?"
+                            _tname_short = (tname or "?")
                             _line = f"  {_tname_short}: {_expr_clean}"
                             if expected and expected.strip():
                                 _line += f" == {expected.strip()[:50]}"
@@ -2160,7 +4361,9 @@ def render_brief(
         _deliverable_scope = [
             f
             for f in scope_files
-            if not _is_vendored_path(f) and not _is_test_path(f) and not _is_test_or_demo(f)
+            if not _is_vendored_path(f)
+            and not _is_test_path(f)
+            and not _is_test_or_demo(f)
         ]
         scope_names = [os.path.basename(f) for f in _deliverable_scope[:3]]
         if scope_names and scope_confidence == "high":
@@ -2186,16 +4389,18 @@ def render_brief(
             _chain_src = [
                 f
                 for f in chain_files
-                if not _is_test_path(f) and not _is_vendored_path(f) and not _is_test_or_demo(f)
+                if not _is_test_path(f)
+                and not _is_vendored_path(f)
+                and not _is_test_or_demo(f)
             ]
             if len(_chain_src) >= 2 and chain_conf >= 0.5:
                 chain_basenames = [os.path.basename(f) for f in _chain_src]
                 # D1: cap the basename chain (many "→"-joined files run long). The
                 # leading "\n" is preserved so the blank-line separator survives.
                 lines.append(
-                    "\n"
-                    + _cap(
-                        f"Scope chain (graph-connected, check ALL): {' → '.join(chain_basenames)}"
+                    "\n" + _cap(
+                        "Scope chain (graph-connected, check ALL): "
+                        f"{' → '.join(chain_basenames)}"
                     )
                 )
                 if chain_desc:
@@ -2302,6 +4507,43 @@ def _common_region(paths: list[str]) -> str:
         else:
             break
     return "/".join(common)
+
+
+def _defines_func_in_file(graph_db: str, file_path: str, func: str) -> bool:
+    """True iff ``func`` is DEFINED (Function/Method/Class/ImplBlock) in ``file_path`` —
+    the SAME exact-then-suffix node query ``_edit_target_guard`` uses.
+
+    B2 (2026-07-05): the HIGH ``Edit target: <file> :: <func>`` head asserts ``func`` is
+    the EDITABLE target IN that file, but ``func = w.anchor`` can be a CALLER symbol only
+    REFERENCED there while defined elsewhere (the sh-744 caller-file/callee-symbol
+    conflation) — a confident-WRONG steer, the single worst failure mode. Gate the HIGH
+    head on a real def-site; a miss falls through to the MEDIUM candidate list (byte-
+    identical to the weak-anchor downgrade). Unreadable graph -> True (permissive: never
+    suppress HIGH on an I/O error — prior behavior)."""
+    if not graph_db or not func or not file_path:
+        return True
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            rel = _gl_normalize(file_path)
+            row = conn.execute(
+                "SELECT 1 FROM nodes WHERE (file_path = ? OR file_path = ?) "
+                "AND name = ? AND is_test = 0 "
+                "AND label IN ('Function','Method','Class','ImplBlock') LIMIT 1",
+                (file_path, rel, func),
+            ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT 1 FROM nodes WHERE file_path LIKE ? "
+                    "AND name = ? AND is_test = 0 "
+                    "AND label IN ('Function','Method','Class','ImplBlock') LIMIT 1",
+                    ("%/" + rel, func),
+                ).fetchone()
+            return bool(row)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return True  # never suppress HIGH on a read failure (prior behavior)
 
 
 def _edit_target_guard(graph_db: str, file_path: str, func: str) -> tuple[str, int | None]:
@@ -2484,19 +4726,17 @@ def _high_func_support(witnesses, func: str) -> int:
     identity so two views of one edge don't double-count. Pure; no graph read.
     """
     fl = (func or "").lower()
-    return len(
-        {
-            (
-                getattr(w, "direction", ""),
-                getattr(w, "src_symbol", ""),
-                getattr(w, "dst_symbol", ""),
-                getattr(w, "edge_type", ""),
-            )
-            for w in (witnesses or [])
-            if (getattr(w, "anchor", "") or "").lower() == fl
-            and getattr(w, "direction", "") != "defines_anchor"
-        }
-    )
+    return len({
+        (
+            getattr(w, "direction", ""),
+            getattr(w, "src_symbol", ""),
+            getattr(w, "dst_symbol", ""),
+            getattr(w, "edge_type", ""),
+        )
+        for w in (witnesses or [])
+        if (getattr(w, "anchor", "") or "").lower() == fl
+        and getattr(w, "direction", "") != "defines_anchor"
+    })
 
 
 def _resolved_witness_tail(graph_db: str, file_path: str) -> str:
@@ -2557,8 +4797,7 @@ def _fts5_symbol_rank(graph_db: str, file_path: str, terms: set[str]) -> list[st
         conn = sqlite3.connect(graph_db)
         try:
             tables = {
-                r[0]
-                for r in conn.execute(
+                r[0] for r in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
@@ -2657,7 +4896,7 @@ def _semantic_leaf_names(
             return True  # >=2 agreeing signals
         if in_sem and sem_rank[nm] == 0:
             return True  # graded-relevance top match may stand alone
-        return False  # lexical-only (or non-top sem-only) -> correct-or-quiet
+        return False     # lexical-only (or non-top sem-only) -> correct-or-quiet
 
     qualified = [nm for nm in names if _qualifies(nm)]
     if not qualified:
@@ -2694,18 +4933,50 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     anchors = {(a or "").lower() for a in (getattr(loc, "anchor_symbols", None) or [])}
     cands = loc.candidates
 
+    # ---- CONSENSUS FACT-LEDGER FORM (GT_CONSENSUS_LEDGER, default off) ----
+    # A FORM-only re-grammar of this header — invariant-3 safe: SAME gates, SAME
+    # candidate set, SAME order, SAME returned `primary_path`; only the presentation
+    # STRING changes. When the flag is set the consensus renders as a VERIFIABLE FACT
+    # LEDGER — "N/3 signals agree (grep, structural, semantic)" plus the per-leg
+    # receipts from `loc.signals_by_file` — and DROPS the imperative "Edit target:"
+    # verdict phrasing, so the model REASONS over cross-ranker agreement (Cormack RRF
+    # SIGIR 2009: concord across independent rankers is the trustworthy signal) rather
+    # than being handed an override the RL policy discounts. Default OFF => every branch
+    # below falls through to the EXACT prior strings (byte-identical, proven by test).
+    _ledger = os.environ.get("GT_CONSENSUS_LEDGER", "") == "1"
+    _signals_map = getattr(loc, "signals_by_file", None) or {}
+
+    def _sig_receipt(fp: str) -> str:
+        # Which of the 3 independent rankers voted this file into its own top-3 —
+        # the RECEIPTS behind the agreement COUNT. Leg names only ({grep,structural,
+        # semantic}), never a test name / path / assertion, so this adds ZERO leak
+        # surface. Empty legs => the honest "0/3" (correct-or-quiet: no consensus).
+        # Whitelist the leg names at the render boundary (Fable C2): the count is
+        # len(legs), but only the known literals may ever be emitted — so a future
+        # producer change to signals_by_file cannot leak an arbitrary token into the
+        # agent-visible bytes. Makes "ZERO leak surface" structural, not assumed.
+        # "content" is the lexical leg's label when the grep leg is absent (repo-less/
+        # MCP path, GT_CONTENT_LEG) — mutually exclusive with "grep", so a file never
+        # carries both and the denominator stays 3 ({grep|content}, structural, semantic).
+        # It MUST be whitelisted (Fable #6): else the receipt drops it while the HIGH-
+        # eligibility gate counts the unfiltered leg, so the header would claim an
+        # agreement the receipt denies. Rendered from the SAME filtered basis the gate uses.
+        legs = [l for l in _signals_map.get(_gl_normalize(fp), [])
+                if l in ("grep", "content", "structural", "semantic")]
+        if legs:
+            return f"{len(legs)}/3 signals agree ({', '.join(legs)})"
+        return "0/3 signals agree"
+
     def _issue_edges(c):
         # verified, non-DEFINES (structural edge) witnesses descended from an issue anchor
         return [
-            w
-            for w in c.witnesses
+            w for w in c.witnesses
             if getattr(w, "verified", False)
             and getattr(w, "direction", "") != "defines_anchor"
             and (getattr(w, "anchor", "") or "").lower() in anchors
         ]
 
     import statistics as _st
-
     top = cands[0]
     top_edges = _issue_edges(top)
     struct_cands = [c for c in cands if _issue_edges(c)]
@@ -2754,11 +5025,14 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # ad-hoc list. Correct-or-quiet: keep the original set if the filter would empty
     # it (a vendored-only candidate set still gets a region-level option list).
     _kept = [
-        c for c in cands if not _is_test_or_demo(c.file_path) and not _is_vendored_path(c.file_path)
+        c for c in cands
+        if not _is_test_or_demo(c.file_path) and not _is_vendored_path(c.file_path)
     ]
     if _kept:
         cands = _kept
-    _evidenced = sum(1 for c in cands if c.has_verified_witness) or 3
+    _evidenced = sum(
+        1 for c in cands if getattr(c, "relevance_grade", "") == "VERIFIED"
+    ) or 3
     K = min(max(3, _evidenced), 6, len(cands))
     shown = cands[:K]
 
@@ -2814,8 +5088,7 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # them) WITHOUT losing real help: observed good outcomes came from the MEDIUM path,
     # not HIGH. Shared localizer -> fixes both the OH and DeepSWE pipelines at the source.
     _high_elig = [
-        c
-        for c in cands
+        c for c in cands
         if _issue_edges(c)
         and int(_agree_map.get(_gl_normalize(c.file_path), 0)) >= 2
         and _distinct_issue_anchors(c) >= 2
@@ -2841,12 +5114,24 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         # a confident-wrong steer is the single worst failure mode). Unreadable
         # graph -> (inf, ->0) -> permissive (prior behavior).
         _sym_hub_thr, _fanin_of = _symbol_fanin_fn(graph_db)
-        if _high_func_support(tgt.witnesses, func) >= 2 and _fanin_of(func) <= _sym_hub_thr:
+        if (_defines_func_in_file(graph_db, tgt.file_path, func)
+                and _high_func_support(tgt.witnesses, func) >= 2
+                and _fanin_of(func) <= _sym_hub_thr):
             line_txt, line_no = _edit_target_guard(graph_db, tgt.file_path, func)
-            out = ['<gt-localization confidence="high">', f"Edit target: {tgt.file_path} :: {func}"]
+            # FORM-only (GT_CONSENSUS_LEDGER): the imperative "Edit target:" verdict
+            # becomes a fact-ledger head ("file :: func — N/3 signals agree (...)") and
+            # the guard line reads as a receipt, not a directive. Flag off => the EXACT
+            # prior two strings (byte-identical). SAME target, SAME `primary_path`.
+            if _ledger:
+                _high_head = f"{tgt.file_path} :: {func} — {_sig_receipt(tgt.file_path)}"
+                _guard_label = "guard/return"
+            else:
+                _high_head = f"Edit target: {tgt.file_path} :: {func}"
+                _guard_label = "guard/return to update"
+            out = ['<gt-localization confidence="high">', _high_head]
             if line_txt:
                 loc_s = f"  [L{line_no}]" if line_no else ""
-                out.append(f"  guard/return to update: {line_txt}{loc_s}")
+                out.append(f"  {_guard_label}: {line_txt}{loc_s}")
             # reason MUST justify THIS edit target — render the witness that CHOSE
             # `func` (the max-strength issue edge), not an arbitrary other witness on
             # the file. (Avenue-2 fix: top.render_witness() previously picked an
@@ -2885,15 +5170,13 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     region = _common_region([c.file_path for c in shown])
     region_informative = region.count("/") >= 1  # >=2 path components
     if _low_tier and region_informative and len({os.path.dirname(c.file_path) for c in shown}) > 1:
-        out = [
-            '<gt-localization confidence="low">',
-            f"Region: {region}/ — candidate edit targets (reason over these, confirm with grep):",
-        ]
+        out = ['<gt-localization confidence="low">',
+               f"Region: {region}/ — candidate edit targets (reason over these, confirm with grep):"]
         for i, c in enumerate(shown, 1):
-            out.append(f"  {i}. {c.file_path}")
-            _wt = _resolved_witness_tail(graph_db, c.file_path)
-            if _wt:
-                out.append(f"     {_wt}")
+            # FORM-only (GT_CONSENSUS_LEDGER): append the per-file N/3 receipt. Flag
+            # off => "" => byte-identical to today. SAME lines, SAME order.
+            _rc = f"  — {_sig_receipt(c.file_path)}" if _ledger else ""
+            out.append(f"  {i}. {c.file_path}{_rc}")
         out.append("</gt-localization>")
         return "\n".join(out), shown[0].file_path
 
@@ -2903,10 +5186,12 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # 0 signals agree -> "low" (this is the LOW rendering when the region above was
     # uninformative). Keeps the tier == "X signals agree" contract end-to-end. ----
     _tier_label = "low" if _low_tier else "medium"
-    out = [
-        f'<gt-localization confidence="{_tier_label}">',
-        "Candidate edit targets (reason over these):",
-    ]
+    # B-9: the grep-confirmation hedge is MANDATORY on this header — it is the branch
+    # nearly every real issue hits (all 4 measured live shapes render MEDIUM here), and
+    # at 0.67 top-1 precision the agent must re-confirm the target, not treat it as fact
+    # (ALREADY_BUILT.md; the LOW-region branch above already carries the same hedge).
+    out = [f'<gt-localization confidence="{_tier_label}">',
+           "Candidate edit targets (reason over these — confirm the edit target with grep):"]
     for i, c in enumerate(shown, 1):
         fs = _defines_funcs(c)
         # R1 leaf-naming bridge: defines_anchor named NOTHING (behavior-described
@@ -2918,17 +5203,58 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         if not fs:
             fs = _semantic_leaf_names(loc, graph_db, c.file_path, issue_text)
         tail = f" — {', '.join(fs[:3])}" if fs else ""
-        out.append(f"  {i}. {c.file_path}{tail}")
+        # FORM-only (GT_CONSENSUS_LEDGER): lead the line with the per-file N/3 receipt,
+        # then the candidate funcs. Flag off => "" => byte-identical to today.
+        _rc = f" — {_sig_receipt(c.file_path)}" if _ledger else ""
+        out.append(f"  {i}. {c.file_path}{_rc}{tail}")
         # Surface the RESOLVED call-edge fact (already on disk) next to the
         # candidate so a confirming edge reaches the iter-0 header — the audited
         # gap where the header's candidates carried no call-edge witness and the
         # resolution only reached the agent reactively (post_view, iters 8/10/49).
         # Deterministic + stdlib-shadow-guarded; correct-or-quiet (no fact -> no line).
-        _wt = _resolved_witness_tail(graph_db, c.file_path)
-        if _wt:
-            out.append(f"     {_wt}")
     out.append("</gt-localization>")
     return "\n".join(out), shown[0].file_path
+
+
+def _localization_header_for_entries(
+    loc: LocalizerResult | None,
+    graph_db: str,
+    issue_text: str,
+    entries: list[FileEntry],
+) -> tuple[str, str, str]:
+    """Render one localization order without letting a weak pipe override another.
+
+    HIGH is a singular, structurally gated target and retains the historical
+    localizer-primary contract.  MEDIUM/LOW are contention sets: order their shared
+    candidates by the terminal evidence order already represented by ``entries``.
+    The input objects are never mutated.
+    """
+    if loc is None or not loc.candidates or not entries:
+        return "", "", ""
+    terminal_rank = {_gl_normalize(entry.path): index for index, entry in enumerate(entries)}
+    original_rank = {id(candidate): index for index, candidate in enumerate(loc.candidates)}
+    shared = [
+        candidate for candidate in loc.candidates
+        if _gl_normalize(candidate.file_path) in terminal_rank
+    ]
+    if not shared:
+        # No candidate has terminal evidence.  Under minimal mode the normal
+        # file-entry renderer remains the honest orientation; do not retain an
+        # unjoinable localizer-only contention block.
+        return "", "", ""
+    initial_header, _initial_primary = _localization_header(loc, graph_db, issue_text)
+    initial_tier = _localization_confidence_tier(initial_header)
+    ordered = list(shared)
+    if initial_tier in {"medium", "low"}:
+        ordered.sort(
+            key=lambda candidate: (
+                terminal_rank.get(_gl_normalize(candidate.file_path), 10**6),
+                original_rank[id(candidate)],
+            )
+        )
+    ordered_loc = replace(loc, candidates=ordered)
+    header, primary = _localization_header(ordered_loc, graph_db, issue_text)
+    return header, primary, _localization_confidence_tier(header)
 
 
 # Language-invariant generic identifiers — code builtins + ubiquitous collection methods that are
@@ -2936,44 +5262,12 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
 # _NL_FUNCTION_WORDS English-function-word filter — a LANGUAGE invariant, NOT a per-task blocklist;
 # no domain words). loguru-1297: 'print' (a builtin with a caller edge) corroborated _error_interceptor
 # and flanked the gold — this drops it at the source so only specific names seed.
-_GENERIC_CODE_NAMES: frozenset[str] = frozenset(
-    {
-        "print",
-        "format",
-        "sorted",
-        "range",
-        "input",
-        "repr",
-        "round",
-        "bytes",
-        "bytearray",
-        "frozenset",
-        "isinstance",
-        "hasattr",
-        "getattr",
-        "setattr",
-        "delattr",
-        "super",
-        "object",
-        "property",
-        "staticmethod",
-        "classmethod",
-        "append",
-        "extend",
-        "insert",
-        "remove",
-        "items",
-        "keys",
-        "values",
-        "update",
-        "split",
-        "strip",
-        "join",
-        "replace",
-        "encode",
-        "decode",
-    }
-)
+_GENERIC_CODE_NAMES: frozenset[str] = frozenset({
+    "print", "format", "sorted", "range", "input", "repr", "round", "bytes", "bytearray",
+    "frozenset", "isinstance", "hasattr", "getattr", "setattr", "delattr", "super", "object",
+    "property", "staticmethod", "classmethod", "append", "extend", "insert", "remove",
+    "items", "keys", "values", "update", "split", "strip", "join", "replace", "encode", "decode",
+})
 
 
 def _exact_issue_named_files(
@@ -3008,11 +5302,29 @@ def _exact_issue_named_files(
     """
     import re as _re
     import sqlite3 as _sq
-
-    toks = set(_re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text or ""))
+    if issue_anchors is None:
+        try:
+            from groundtruth.pretask.anchors import extract_issue_anchors
+            issue_anchors = extract_issue_anchors(issue_text, graph_db)
+        except Exception:
+            issue_anchors = None
+    trusted_symbols = (
+        set(getattr(issue_anchors, "symbols", None) or set())
+        | set(getattr(issue_anchors, "title_symbols", None) or set())
+        | set(getattr(issue_anchors, "code_symbols", None) or set())
+    )
+    toks = set(trusted_symbols)
+    for token in tuple(trusted_symbols):
+        toks.update(part for part in token.replace("::", ".").split(".") if part)
     toks |= {t.lower() for t in toks}
+    path_provenance = getattr(issue_anchors, "path_provenance", None) or {}
+    explicit_paths = {
+        _gl_normalize(path)
+        for path in (getattr(issue_anchors, "paths", None) or set())
+        if path and path_provenance.get(path, "EXPLICIT_PATH") == "EXPLICIT_PATH"
+    }
     out: dict[str, list[str]] = {}
-    if not toks:
+    if not toks and not explicit_paths:
         return out
     # Reporter-confirmed provenance (title / backtick code) — exempts ONLY the
     # short-name shape skip below, never the dunder/generic/ambiguity gates.
@@ -3024,6 +5336,19 @@ def _exact_issue_named_files(
     _MAX_FILES_PER_NAME = 3  # a name spread across >3 files is generic, not a specific anchor
     try:
         c = _sq.connect(graph_db)
+        # An exact reporter-supplied path is already candidate-local provenance.
+        # It does not need a long or distinctive basename: those heuristics only
+        # protect prose-derived stems.  Confirm membership against the graph so a
+        # nonexistent/scratch path is still correct-or-quiet.
+        for (fp,) in c.execute(
+            "SELECT DISTINCT file_path FROM nodes "
+            "WHERE is_test=0 AND file_path IS NOT NULL"
+        ):
+            if fp and _gl_normalize(str(fp)) in explicit_paths:
+                stem = os.path.splitext(os.path.basename(str(fp).replace("\\", "/")))[0]
+                out.setdefault(str(fp), [])
+                if stem and stem not in out[str(fp)]:
+                    out[str(fp)].append(stem)
         _name_files: dict[str, set[str]] = {}
         for name, fp in c.execute(
             "SELECT DISTINCT name, file_path FROM nodes "
@@ -3032,21 +5357,54 @@ def _exact_issue_named_files(
         ):
             if not name or not fp:
                 continue
-            if name.startswith("__") and name.endswith("__"):  # dunders are never anchors
+            if name.startswith("__") and name.endswith("__"):   # dunders are never anchors
                 continue
-            if name.lower() in _GENERIC_CODE_NAMES:  # language builtins are never anchors
+            if name.lower() in _GENERIC_CODE_NAMES:             # language builtins are never anchors
                 continue
             if len(name) < 5 and "_" not in name and name not in _prov:
                 continue  # short generic names: only reporter-confirmed provenance admits them
             if name in toks or name.lower() in toks:
                 _name_files.setdefault(name, set()).add(fp)
         for name, files in _name_files.items():
-            if len(files) > _MAX_FILES_PER_NAME:  # generic name -> not a specific anchor
+            if len(files) > _MAX_FILES_PER_NAME:                # generic name -> not a specific anchor
                 continue
-            for fp in files:
+            for fp in sorted(files):                            # DETERMINISM (B5-4): `files` is a set
                 out.setdefault(fp, [])
                 if name not in out[fp]:
                     out[fp].append(name)
+        # CAUSE B (gt_math_oh diag, 2026-06-24): the issue often names the gold
+        # MODULE (file basename) not its defining SYMBOL — "leafonly plugin",
+        # "plugins.chzzk" name leafonly.py / chzzk.py, but the symbol is
+        # validate_leaf_only / class Chzzk, so the symbol loop above misses the
+        # file. Guarantee a file whose BASENAME STEM the issue names verbatim,
+        # under the SAME gates (generic/len/ambiguity) so it cannot flood. This
+        # is the GUARANTEE surface (force-promote-past-cut), distinct from the
+        # path-rescue recall in v7_4_brief.py:1322 which only seeds candidate_set.
+        _stem_files: dict[str, set[str]] = {}
+        for (fp,) in c.execute(
+            "SELECT DISTINCT file_path FROM nodes WHERE is_test=0 AND file_path IS NOT NULL"
+        ):
+            if not fp:
+                continue
+            stem = os.path.splitext(os.path.basename(str(fp).replace("\\", "/")))[0].lower()
+            if len(stem) < 5:                                   # short stems collide with prose
+                continue
+            if stem in _GENERIC_CODE_NAMES:                     # generic module names are never anchors
+                continue
+            # SELECTIVE: fire ONLY when the issue references the stem AS A MODULE/FILE
+            # (dotted path "plugins.chzzk", "<stem>.py", or "<stem> plugin/module"), NOT
+            # merely the bare word in prose. A bare-word match floods the guarantee on a
+            # long issue (8 files here) and the downstream _promote[:3] cap then drops the
+            # real gold. Module-reference is the specific "the issue names this file" signal.
+            if _gl_normalize(str(fp)) in explicit_paths:
+                _stem_files.setdefault(stem, set()).add(fp)
+        for stem, files in _stem_files.items():
+            if len(files) > _MAX_FILES_PER_NAME:                # ambiguous stem -> not a specific anchor
+                continue
+            for fp in files:
+                out.setdefault(fp, [])
+                if stem not in out[fp]:
+                    out[fp].append(stem)
         c.close()
     except Exception:
         pass
@@ -3105,6 +5463,182 @@ def _exact_name_has_verified_caller(graph_db: str, file_path: str, func_names: l
                 pass
 
 
+def _apply_evidence_rrf(
+    records: list[dict],
+    *,
+    witness_verified_by_file: dict[str, bool] | None = None,
+    loc_rank_by_file: dict[str, int] | None = None,
+) -> list[dict]:
+    """Final evidence-class RRF reorder of the candidate records.
+
+    Fuses per-class (lexical/semantic/structural/path/historical) reciprocal-rank
+    scores so a file backed by MANY independent evidence classes ranks above a
+    single-signal file, tie-broken by class count, raw strength, then the
+    localizer's own rank and canonical path (incoming order only breaks duplicate-
+    path ties).
+
+    P0 #2 fix (2026-07-01) — two defects in the pre-extraction inline version:
+      (1) The ``strength > 0`` filter SILENTLY DROPPED records whose evidence
+          lives outside the 8-key strength sum — synthesized exact-issue-named
+          recall-miss gold (no ``components``), graph-neighbor (``{"path":0.0}``),
+          and cochange/test_coimport bridges — undoing the recall/neighborhood
+          machinery upstream. They are now KEPT (``_keep_recall_or_bridge``); with
+          strength 0 they RRF-sort to the BOTTOM, so recall is preserved without
+          ever floating them above real-evidence gold.
+      (2) The verified-witness flag lived ONLY in the side-dict
+          ``witness_verified_by_file`` and was never written onto the record, so
+          ``_issue_evidence_strength`` / ``_positive_evidence_classes`` scored
+          verified gold as un-witnessed and multi-signal HUBS out-sorted it. The
+          flag (and the localizer rank) are now STAMPED onto each record first.
+
+    Correct-or-quiet: a genuinely hollow set (no real evidence AND no
+    recall/neighbor/bridge anchor) still returns ``[]`` so the empty-proof gate
+    can halt instead of delivering noise.
+    """
+    wv = witness_verified_by_file or {}
+    lr = loc_rank_by_file or {}
+
+    # (2) Stamp the localizer's side-dict verification ONTO each record so the
+    # strength/RRF stage below actually SEES it.
+    for _rec in records:
+        if not isinstance(_rec, dict):
+            continue
+        _p = str(_rec.get("path", ""))
+        _pn = _p.replace("\\", "/").lstrip("./").lstrip("/")
+        if not _rec.get("witness_verified", False) and (wv.get(_p) or wv.get(_pn)):
+            _rec["witness_verified"] = True
+        if "_loc_rank" not in _rec:
+            _r = lr.get(_p)
+            if _r is None:
+                _r = lr.get(_pn)
+            if _r is not None:
+                _rec["_loc_rank"] = _r
+
+    def _issue_evidence_strength(rec: dict) -> float:
+        comps = rec.get("components", {}) if isinstance(rec, dict) else {}
+        if not isinstance(comps, dict):
+            return 0.0
+        total = 0.0
+        for key in ("lex", "sem", "path", "reach", "anchor_prox", "witness", "code_def", "frame"):
+            try:
+                total += max(0.0, float(comps.get(key, 0.0) or 0.0))
+            except Exception:
+                continue
+        if rec.get("witness_verified", False):
+            total += 1.0
+        return total
+
+    def _positive_evidence_classes(rec: dict) -> dict[str, float]:
+        comps = rec.get("components", {}) if isinstance(rec, dict) else {}
+        if not isinstance(comps, dict):
+            comps = {}
+
+        def _pos(key: str) -> float:
+            try:
+                return max(0.0, float(comps.get(key, 0.0) or 0.0))
+            except Exception:
+                return 0.0
+
+        structural = _pos("reach") + _pos("anchor_prox") + _pos("witness")
+        if rec.get("witness_verified", False):
+            structural += 1.0
+        return {
+            "lexical": _pos("lex") + _pos("code_def"),
+            "semantic": _pos("sem"),
+            "structural": structural,
+            "path": _pos("path"),
+            "historical": _pos("frame"),
+        }
+
+    def _class_count(rec: dict) -> int:
+        return sum(1 for v in _positive_evidence_classes(rec).values() if v > 0.0)
+
+    def _ensure_entered_via(rec: dict) -> dict:
+        if str(rec.get("entered_via", "") or "").strip():
+            return rec
+        classes = [k for k, v in _positive_evidence_classes(rec).items() if v > 0.0]
+        if not classes:
+            return rec
+        out = dict(rec)
+        out["entered_via"] = "evidence:" + "+".join(classes)
+        return out
+
+    def _rrf_evidence_scores(recs: list[dict]) -> dict[int, float]:
+        scores = {id(rec): 0.0 for rec in recs}
+
+        def _path(rec: dict) -> str:
+            return _gl_normalize(str(rec.get("path", "") or ""))
+
+        def _loc_rank(rec: dict) -> int:
+            try:
+                return int(rec.get("_loc_rank", 10 ** 6))
+            except (TypeError, ValueError):
+                return 10 ** 6
+
+        for cls in ("lexical", "semantic", "structural", "path", "historical"):
+            ranked = []
+            for idx, rec in enumerate(recs):
+                val = _positive_evidence_classes(rec).get(cls, 0.0)
+                if val > 0.0:
+                    ranked.append((idx, rec, val))
+            ranked.sort(
+                key=lambda item: (
+                    -item[2], _loc_rank(item[1]), _path(item[1]), item[0]
+                )
+            )
+            for rank, (_idx, rec, _val) in enumerate(ranked, start=1):
+                scores[id(rec)] += 1.0 / float(60 + rank)
+        return scores
+
+    def _keep_recall_or_bridge(rec: dict) -> bool:
+        # Recall/neighborhood/bridge records carry a real localization purpose but
+        # no summable evidence component (exact-issue-named recall-miss gold has no
+        # `components`; graph-neighbor is {"path":0.0}; cochange/test_coimport
+        # bridges use keys outside the strength sum). Keep them so the strength
+        # filter can't SILENTLY DROP them; strength-0 records RRF-sort to the
+        # bottom, so recall is preserved without floating them above gold.
+        if not isinstance(rec, dict):
+            return False
+        if rec.get("_exact_issue_named"):
+            return True
+        if str(rec.get("entered_via", "") or "") in (
+            "cochange",
+            "test_coimport",
+            "graph_neighbor",
+        ):
+            return True
+        comps = rec.get("components", {})
+        return isinstance(comps, dict) and ("cochange" in comps or "test_coimport" in comps)
+
+    _with_order = list(enumerate(records))
+    _evidence_records = [
+        (idx, _ensure_entered_via(rec), _issue_evidence_strength(rec))
+        for idx, rec in _with_order
+    ]
+    _supported = [
+        (idx, rec, strength)
+        for idx, rec, strength in _evidence_records
+        if strength > 0.0 or _keep_recall_or_bridge(rec)
+    ]
+    if _supported:
+        _rrf = _rrf_evidence_scores([rec for _, rec, _ in _supported])
+        _supported.sort(
+            key=lambda item: (
+                -_rrf.get(id(item[1]), 0.0),
+                -_class_count(item[1]),
+                -item[2],
+                int(item[1].get("_loc_rank", 10 ** 6)),
+                _gl_normalize(str(item[1].get("path", "") or "")),
+                item[0],
+            )
+        )
+        return [rec for _, rec, _ in _supported]
+    # Product invariant: no blind delivery. An all-hollow candidate set is a
+    # localization failure, not an edit-target list. The live diagnostic gate
+    # records/halts this as empty proof instead of silently delivering noise.
+    return []
+
+
 def generate_v1r_brief(
     issue_text: str,
     repo_root: str,
@@ -3149,6 +5683,7 @@ def generate_v1r_brief(
         except Exception:
             pass
 
+    _semantic_anchor_paths: set[str] = set()
     v74 = run_v74(
         issue_text,
         repo_root,
@@ -3158,26 +5693,103 @@ def generate_v1r_brief(
         gold_files=gold_files,
         ablation="C",
         k_anchor=3,
-        k_sem_top=10,
+        # Dense seed depth. Env-tunable (default 10 = unchanged): a code-trained embedder
+        # ranks the behavior-gold higher, but a top-10 seed cut can still drop it on large
+        # repos — deepening the SEED (not just re-ranking) lets the better embedder's recall
+        # land (recall agent ab384a9ad8cf05d1a). Pairs with the jina-code A/B.
+        k_sem_top=int(os.environ.get("GT_SEM_TOP_K", "10")),
         tau_anchor=0.20,
         max_depth=3,
         min_confidence=EDGE_CONFIDENCE_FLOOR,
         weights=weights,
         focus_size=max_files,
+        semantic_body_paths_out=_semantic_anchor_paths,
     )
 
     if not v74.ranked_full:
-        # No candidates ranked — but the embedder WEIGHT is still known. Surface it
-        # so the precheck can tell "embedder on, no candidates" from "embedder off".
+        # No candidates ranked (new-file / behavioral no-match). B-2: the OLD path
+        # returned an EMPTY <gt-task-brief> — the issue's parsed behavioral spec was
+        # LOST at step 0, exactly when a no-match/new-file task most needs it. Render
+        # the issue's OWN obligations (leak-screened) plus an honest-uncertainty note
+        # so the agent still gets its behavioral contract + a truthful "localize with
+        # grep" steer. No located file exists, so the focus-anchor relevance gate is
+        # bypassed (require_anchor=False); the leak screen (_obligation_is_leaky) still
+        # runs, so zero test-name / FAIL_TO_PASS / gold-path tokens can leak. The
+        # embedder WEIGHT is still surfaced (unchanged) so the precheck can tell
+        # "embedder on, no candidates" from "embedder off".
+        def _nomatch_cap(_l: str) -> str:
+            return _clip_body_line(_l, _MAX_BODY_LINE_CHARS)
+
+        _nm_oblig = _render_obligations_block(
+            issue_text, [], _nomatch_cap, anchor_symbols=None, require_anchor=False
+        )
+        _nm_lines = [
+            "<gt-task-brief>",
+            "Note: GT found no indexed file ranked for this issue (new-file or "
+            "behavioral change). Localize with grep/code-search on the issue's terms.",
+        ]
+        _nm_lines.extend(_nm_oblig)
+        _nm_lines.append("</gt-task-brief>")
+        _nm_brief = "\n".join(_nm_lines)
+        # Brief-F3: the no-match brief must obey the SAME hard token rail (B-30) as the
+        # matched path — the early return previously bypassed _enforce_token_rail, so a
+        # small max_brief_tokens (or GT_OBLIGATIONS_V2 dynamic-K growth) shipped an
+        # over-cap brief. Idempotent: a brief already within budget is byte-identical
+        # and _nm_suppressed stays empty.
+        _nm_suppressed: list[str] = []
+        _nm_control_participation: list[dict] = []
+        if _count_tokens(_nm_brief) > max_brief_tokens:
+            _nm_brief, _nm_suppressed = _enforce_token_rail(_nm_brief, max_brief_tokens)
+        # SM-6 (B): apply the SAME minimal reduction so GT_BRIEF_MINIMAL yields a minimal
+        # brief on EVERY path. The no-match brief is already scaffold + grep-orientation
+        # note + obligations, so the reducer is a no-op here (nothing to drop); applied for
+        # uniformity. DEFAULT-OFF -> byte-identical.
+        if _brief_minimal_on():
+            _nm_before_minimal = _nm_brief
+            _nm_brief = _reduce_brief_to_minimal(_nm_brief)
+            _nm_control_participation = _brief_minimal_participation(
+                _nm_before_minimal, _nm_brief)
+        # Brief-F7: B-6 per-block receipts also cover the fact-bearing no-match brief
+        # (its <gt-obligations> block). Same PURE read as the matched path; brief bytes
+        # unchanged. Empty unless receipt/in-seam instrumentation is enabled.
+        _nm_receipts = _brief_block_receipts(_nm_brief) if _block_receipts_on() else []
+        _nm_control_participation.extend(
+            _terminal_pretask_mediator_participation(
+                _nm_brief,
+                _nm_receipts,
+                budget_suppressed=_nm_suppressed,
+                semantic_anchor_paths=_semantic_anchor_paths,
+            )
+        )
         return V1RBriefResult(
             files=[],
-            brief_text="<gt-task-brief>\n</gt-task-brief>",
-            token_estimate=4,
+            brief_text=_nm_brief,
+            token_estimate=_count_tokens(_nm_brief),
             v74_result=v74,
             effective_w_sem=float(getattr(v74, "effective_w_sem", 0.0) or 0.0),
             rendered_candidate_count=0,
+            # C15 — these zeros are HONEST on this path and are set EXPLICITLY so that is
+            # auditable rather than inherited from a default. This branch is reached only
+            # when ``v74.ranked_full`` is empty: the legs ran and ranked nothing, so
+            # acquisition is genuinely 0, and nothing was withheld by the reduction, so
+            # delivery is genuinely 0 rather than NOT_EVALUABLE. ``delivered_*`` must be
+            # stated here because its default is None (NOT_EVALUABLE), which would be the
+            # wrong answer on this path.
+            acquired_graph_edge_count=0,
+            acquired_semantic_signal_count=0,
+            acquired_structural_signal_count=0,
+            acquired_fts5_signal_count=0,
+            delivered_graph_edge_count=0,
+            delivered_semantic_signal_count=0,
+            delivered_structural_signal_count=0,
+            delivered_fts5_signal_count=0,
+            delivered_candidate_count=0,
             k_sem_top=int(getattr(v74, "k_sem_top_effective", 0) or 0),
             sem_components=[],
+            budget_suppressed=_nm_suppressed,
+            block_receipts=_nm_receipts,
+            control_participation=_nm_control_participation,
+            tokenizer_used=_tokenizer_kind(),
         )
 
     # Adaptive K: include candidates while score gap is small.
@@ -3209,7 +5821,6 @@ def generate_v1r_brief(
     if graph_db:
         try:
             from groundtruth.pretask.anchors import extract_issue_anchors as _eia_h
-
             _anchors_obj = _eia_h(issue_text, graph_db)
         except Exception:
             _anchors_obj = None
@@ -3221,14 +5832,8 @@ def generate_v1r_brief(
     # caller, was ranked below lexical stats.py and dropped from the top-5.)
     _issue_named = _exact_issue_named_files(issue_text, graph_db, issue_anchors=_anchors_obj)
     if _issue_named:
-
         def _rf(r):
-            return (
-                (r.get("path") or r.get("file") or r.get("file_path") or "")
-                .replace("\\", "/")
-                .lstrip("/")
-            )
-
+            return (r.get("path") or r.get("file") or r.get("file_path") or "").replace("\\", "/").lstrip("/")
         _named = {f.replace("\\", "/").lstrip("/"): fns for f, fns in _issue_named.items()}
         _have = {_rf(r) for r in top_records}
         _by_path = {_rf(r): r for r in v74.ranked_full}
@@ -3237,18 +5842,16 @@ def generate_v1r_brief(
         for fp in sorted(_named):
             if fp in _have:
                 continue
-            if fp in _by_path:  # retrieved-but-cut -> pull to front
-                _promote.append(_by_path[fp])
-            else:  # recall miss -> synthesize a top record
-                _promote.append(
-                    {
-                        "path": fp,
-                        "score": _top_score + 0.01,
-                        "functions": _named[fp][:3],
-                        "witnesses": [],
-                        "_exact_issue_named": True,
-                    }
-                )
+            if fp in _by_path:                       # retrieved-but-cut -> pull to front
+                _rec = dict(_by_path[fp])
+                _rec["_exact_issue_named"] = True    # survive the localize re-rank at :3397
+                _promote.append(_rec)
+            else:                                    # recall miss -> synthesize a top record
+                _promote.append({
+                    "path": fp, "score": _top_score + 0.01,
+                    "functions": _named[fp][:3], "witnesses": [],
+                    "_exact_issue_named": True,
+                })
         if _promote:
             top_records = _promote[:3] + top_records
 
@@ -3274,7 +5877,39 @@ def generate_v1r_brief(
         ".rst",
         ".md",
         ".txt",
+        ".yml",
+        ".yaml",
+        ".toml",
+        ".lock",
     }
+    _NON_SOURCE_NAMES = {name.lower() for name in _NON_SOURCE}
+
+    def _is_non_source_candidate_path(path: str) -> bool:
+        _path = str(path or "")
+        _basename = os.path.basename(_path).lower()
+        _ext = os.path.splitext(_path)[1].lower()
+        if _basename.endswith((".test-d.ts", ".test-d.tsx", ".spec-d.ts", ".spec-d.tsx")):
+            return True
+        _parts = [p for p in _path.replace("\\", "/").lower().split("/") if p]
+        if "dts-test" in _parts:
+            return True
+        if _basename in _NON_SOURCE_NAMES or _ext in _NON_SOURCE_EXTS:
+            return True
+        # R1 (env-gated): vendored / minified-bundle guard at the DELIVERED seam.
+        # A concatenated bundle (e.g. libs/s.js) matches NO path pattern but wins BM25
+        # on raw term frequency, evicting the gold from the shallow recall slots and
+        # ranking #1 (tutanota). is_vendored_path is path-only; is_minified_file is
+        # content-based (mean line length > threshold), so it catches the bundle no
+        # path rule sees. This predicate is reused across all candidate seams, so the
+        # filter applies coherently everywhere (recall agent ab384a9ad8cf05d1a). Reads
+        # the file from repo_root (in closure scope); OSError -> False (safe degrade).
+        if os.environ.get("GT_RECALL_PATHCLASS_FILTER", "") == "1":
+            try:
+                if _is_vendored_path(_path) or _is_minified_file(repo_root, _path):
+                    return True
+            except Exception:
+                pass
+        return False
 
     # De-dup'd (2026-06-15): the nested test-only _is_test_file MISSED demo dirs, so a
     # docs_src/ tutorial .py (no test basename, .py not in _NON_SOURCE_EXTS) survived the
@@ -3284,8 +5919,7 @@ def generate_v1r_brief(
     top_records = [
         r
         for r in top_records
-        if os.path.basename(r.get("path", "")) not in _NON_SOURCE
-        and os.path.splitext(r.get("path", ""))[1].lower() not in _NON_SOURCE_EXTS
+        if not _is_non_source_candidate_path(r.get("path", ""))
         and not _is_test_or_demo(r.get("path", ""))
     ]
     if not top_records:
@@ -3302,9 +5936,7 @@ def generate_v1r_brief(
             continue
         comps = r.get("components", {})
         if comps.get("path", 0.0) >= 0.5:
-            bn = os.path.basename(r.get("path", ""))
-            ext = os.path.splitext(bn)[1].lower()
-            if bn not in _NON_SOURCE and ext not in _NON_SOURCE_EXTS:
+            if not _is_non_source_candidate_path(r.get("path", "")):
                 _path_rescued.append(r)
         if len(_path_rescued) >= 2:
             break
@@ -3333,6 +5965,8 @@ def generate_v1r_brief(
     _loc: LocalizerResult | None = None
     _witness_by_file: dict[str, str] = {}
     _witness_verified_by_file: dict[str, bool] = {}
+    _relevance_by_file: dict[str, str] = {}
+    _resolution_methods_by_file: dict[str, frozenset[str]] = {}
     _loc_conf_by_file: dict[str, float] = {}
     # The localizer's OWN rank per file (0 = its #1). This is the authoritative
     # structural localization order; the brief MUST honor it for witnessed files
@@ -3356,10 +5990,8 @@ def generate_v1r_brief(
             # cycler/validate_marker). This runs in-container AFTER the wrapper's
             # upload, so its write is authoritative for every downstream consumer.
             import json as _json_anch
-
             if _anchors_obj is None:  # hoisted single-source extraction (2026-06-10)
                 from groundtruth.pretask.anchors import extract_issue_anchors as _eia
-
                 _anchors_obj = _eia(issue_text, graph_db)
             # Oracle Stage 1: the issue-as-SPEC obligations + unresolved_code_symbols
             # (F2) ride the SAME already-shipped artifact. The spec extractor is a
@@ -3367,33 +5999,80 @@ def generate_v1r_brief(
             # KEEPS async/await/returns the anchor extractor drops). Deterministic,
             # no graph dependency, correct-or-quiet (empty list on empty issue).
             try:
-                from groundtruth.pretask.spec import extract_spec as _extract_spec
-
-                _spec = _extract_spec(issue_text)
-                _obligations = _spec.to_serializable()
+                if _obligations_v2_on():
+                    from groundtruth.pretask.spec import extract_spec_v2 as _extract_spec
+                    _spec = _extract_spec(issue_text)
+                    _obligations = _spec.to_serializable(version=2)
+                else:
+                    from groundtruth.pretask.spec import extract_spec as _extract_spec
+                    _spec = _extract_spec(issue_text)
+                    _obligations = _spec.to_serializable()
             except Exception:
                 _obligations = []
-            try:
-                with open("/tmp/gt_issue_anchors.json", "w", encoding="utf-8") as _af:
-                    _json_anch.dump(
-                        {
-                            "symbols": sorted(_anchors_obj.symbols),
-                            "paths": sorted(_anchors_obj.paths),
-                            "test_names": sorted(_anchors_obj.test_names),
-                            "title_symbols": sorted(getattr(_anchors_obj, "title_symbols", set())),
-                            "code_symbols": sorted(getattr(_anchors_obj, "code_symbols", set())),
-                            "unresolved_code_symbols": sorted(
-                                getattr(_anchors_obj, "unresolved_code_symbols", set())
-                            ),
-                            "obligations": _obligations,
-                        },
-                        _af,
+            _anch_payload = {
+                "symbols": sorted(_anchors_obj.symbols),
+                "paths": sorted(_anchors_obj.paths),
+                "test_names": sorted(_anchors_obj.test_names),
+                "title_symbols": sorted(getattr(_anchors_obj, "title_symbols", set())),
+                "code_symbols": sorted(getattr(_anchors_obj, "code_symbols", set())),
+                "unresolved_code_symbols": sorted(
+                    getattr(_anchors_obj, "unresolved_code_symbols", set())),
+                "symbol_provenance": dict(sorted(
+                    (getattr(_anchors_obj, "symbol_provenance", {}) or {}).items()
+                )),
+                "path_provenance": dict(sorted(
+                    (getattr(_anchors_obj, "path_provenance", {}) or {}).items()
+                )),
+                "obligations": _obligations,
+            }
+            # Every anchors artifact is task-bound, regardless of whether the
+            # optional v2 obligations renderer is active. Proof admission uses
+            # this identity to reject a stale canonical filename from another
+            # issue; obligations_version remains the conditional schema marker.
+            import hashlib as _hashlib_anch
+            _anch_payload["issue_sha256"] = _hashlib_anch.sha256(
+                issue_text.encode("utf-8")
+            ).hexdigest()
+            if _obligations_v2_on():
+                # artifact-wins split-brain rule: consumers trust THIS stamp over
+                # their own env, so host and container can never disagree.
+                _anch_payload["obligations_version"] = 2
+            # B10 hardening: write to the per-task path, but if that fails (e.g. a
+            # misconfigured/absent $GT_CERT_DIR pointing at a nonexistent dir) fall back to
+            # the always-writable /tmp so the anchors artifact is never SILENTLY lost.
+            # correct-or-quiet only when BOTH targets are unwritable (unit tests / RO fs).
+            _anch_targets = [_anchors_path(for_write=True)]
+            if "/tmp/gt_issue_anchors.json" not in _anch_targets:
+                _anch_targets.append("/tmp/gt_issue_anchors.json")
+            for _ap in _anch_targets:
+                try:
+                    import tempfile as _tempfile_anch
+                    _ad = os.path.dirname(_ap) or "."
+                    _afd, _atmp = _tempfile_anch.mkstemp(
+                        prefix=f".{os.path.basename(_ap)}.", dir=_ad
                     )
-            except OSError:
-                pass  # non-container / read-only /tmp (e.g. unit tests) — no consumer
-            _loc = localize(
-                issue_text, graph_db, top_k=8, issue_anchors=_anchors_obj, repo_root=repo_root
-            )
+                    try:
+                        with os.fdopen(_afd, "w", encoding="utf-8", newline="") as _af:
+                            _json_anch.dump(_anch_payload, _af)
+                            _af.flush()
+                            os.fsync(_af.fileno())
+                        # mkstemp is 0600 by contract; this artifact is harvested by a
+                        # NON-ROOT host cp while the container writes as root (W1a-PERM
+                        # class, sweep A1) — publish world-readable or the copy silently
+                        # EACCESes and the anchors artifact vanishes from the upload.
+                        os.chmod(_atmp, 0o644)
+                        os.replace(_atmp, _ap)
+                    except BaseException:
+                        try:
+                            os.unlink(_atmp)
+                        except OSError:
+                            pass
+                        raise
+                    break
+                except OSError:
+                    continue
+            _loc = localize(issue_text, graph_db, top_k=8, issue_anchors=_anchors_obj,
+                           repo_root=repo_root)
         except Exception:
             _loc = None
     if _loc and _loc.candidates:
@@ -3402,13 +6081,21 @@ def generate_v1r_brief(
         _promoted: list[dict] = []
         for _ci, cand in enumerate(_loc.candidates):
             cf = cand.file_path
-            _witness_by_file[cf] = cand.render_witness()
-            _witness_verified_by_file[cf] = cand.has_verified_witness
+            _relevance = str(getattr(cand, "relevance_grade", "INFO") or "INFO")
+            _relevance_by_file[cf] = _relevance
+            _witness_by_file[cf] = (
+                cand.render_witness() if _relevance == "VERIFIED" else ""
+            )
+            _witness_verified_by_file[cf] = _relevance == "VERIFIED"
+            _resolution_methods_by_file[cf] = frozenset(
+                str(getattr(witness, "resolution_method", "") or "").strip().lower()
+                for witness in cand.witnesses
+                if getattr(witness, "verified", False)
+                and str(getattr(witness, "resolution_method", "") or "").strip()
+            )
             _loc_conf_by_file[cf] = cand.confidence
             _loc_rank_by_file[cf] = _ci
-            bn = os.path.basename(cf)
-            ext = os.path.splitext(bn)[1].lower()
-            if bn in _NON_SOURCE or ext in _NON_SOURCE_EXTS:
+            if _is_non_source_candidate_path(cf):
                 continue
             # A witnessed file the lexical path missed is ADDED — this is exactly
             # the beets-5495 case (importer.py absent from lexical candidates).
@@ -3425,11 +6112,12 @@ def generate_v1r_brief(
         # lexical hard-negatives, then keep the original lexical order after them.
         # Only verified witnesses jump the queue (correct-or-quiet); name_match
         # witnesses are added but not promoted ahead of lexical winners.
-        _verified_promoted = [p for p in _promoted if _witness_verified_by_file.get(p["path"])]
+        _verified_promoted = [
+            p for p in _promoted if _witness_verified_by_file.get(p["path"])
+        ]
         _unverified_promoted = [
             p for p in _promoted if not _witness_verified_by_file.get(p["path"])
         ]
-
         # Also reorder EXISTING records: a lexical record that the localizer
         # verified-witnessed should sort ahead of a witness-less one.
         def _is_verified_witnessed(rec: dict) -> bool:
@@ -3439,7 +6127,9 @@ def generate_v1r_brief(
                 return True
             p = str(rec.get("path", ""))
             pn = p.replace("\\", "/").lstrip("./").lstrip("/")
-            return bool(_witness_verified_by_file.get(p) or _witness_verified_by_file.get(pn))
+            return bool(
+                _witness_verified_by_file.get(p) or _witness_verified_by_file.get(pn)
+            )
 
         _existing_verified = [r for r in top_records if _is_verified_witnessed(r)]
         _existing_rest = [r for r in top_records if not _is_verified_witnessed(r)]
@@ -3458,7 +6148,9 @@ def generate_v1r_brief(
                 r = _loc_rank_by_file.get(pn)
             return r if r is not None else 10**6
 
-        _all_verified = sorted(_verified_promoted + _existing_verified, key=_loc_rank)
+        _all_verified = sorted(
+            _verified_promoted + _existing_verified, key=_loc_rank
+        )
         top_records = _all_verified + _existing_rest + _unverified_promoted
 
         # GUARANTEE: every verified-witnessed localizer candidate appears in
@@ -3467,7 +6159,7 @@ def generate_v1r_brief(
         # file. GT curates the graph map; the agent navigates.
         # If a verified candidate is in the localizer but ranked below
         # MAX_FILES in top_records, inject it into the top set.
-        _rendered_paths = {str(r.get("path", "")) for r in top_records[: max(max_files, 5)]}
+        _rendered_paths = {str(r.get("path", "")) for r in top_records[:max(max_files, 5)]}
         _rendered_norm = {p.replace("\\", "/").lstrip("./").lstrip("/") for p in _rendered_paths}
         for _ci, cand in enumerate(_loc.candidates[:6]):
             if not cand.has_verified_witness:
@@ -3501,8 +6193,7 @@ def generate_v1r_brief(
             float(r.get("components", {}).get("sem", 0.0) or 0.0) > 0.0 for r in _rendered_now
         ):
             _sem_pool = [
-                r
-                for r in v74.ranked_full
+                r for r in v74.ranked_full
                 if str(r.get("path", "")) not in {str(x.get("path", "")) for x in top_records}
                 and float(r.get("components", {}).get("sem", 0.0) or 0.0) > 0.0
             ]
@@ -3510,9 +6201,7 @@ def generate_v1r_brief(
                 _best_sem = max(
                     _sem_pool, key=lambda r: float(r.get("components", {}).get("sem", 0.0) or 0.0)
                 )
-                _bn = os.path.basename(str(_best_sem.get("path", "")))
-                _ext = os.path.splitext(_bn)[1].lower()
-                if _bn not in _NON_SOURCE and _ext not in _NON_SOURCE_EXTS:
+                if not _is_non_source_candidate_path(str(_best_sem.get("path", ""))):
                     top_records.insert(min(len(_all_verified) + 1, len(top_records)), _best_sem)
 
     # Graph neighbor expansion: callers/callees of top-ranked files become
@@ -3547,15 +6236,14 @@ def generate_v1r_brief(
                 for (neighbor,) in rows:
                     if neighbor in _existing_paths:
                         continue
-                    bn = os.path.basename(neighbor)
-                    ext = os.path.splitext(bn)[1].lower()
-                    if bn in _NON_SOURCE or ext in _NON_SOURCE_EXTS:
+                    if _is_non_source_candidate_path(neighbor):
                         continue
                     _neighbor_candidates.append(
                         {
                             "path": neighbor,
                             "score": rec.get("score", 0) * 0.8,
                             "components": {"path": 0.0},
+                            "entered_via": "graph_neighbor",
                         }
                     )
                     _existing_paths.add(neighbor)
@@ -3628,6 +6316,45 @@ def generate_v1r_brief(
             if conn is not None:
                 conn.close()
 
+    # EXACT-PATH COVERAGE FLOOR (2026-06-28). The LAST word on delivered membership,
+    # after every reshuffle above (exact-named, path-rescue, witness-promote, sem-
+    # inject, neighbor-extend, hub-demote). A file whose path component is an EXACT
+    # match (==1.0 — the issue token IS the file stem) is a near-certain localization
+    # fact; the magnitude-free RRF fusion flattens it to one-rank-among-N and the
+    # downstream reorders can then push it below the delivered cut. Confirmed: bytes
+    # `hex.rs` path=1.000 dropped rank-3 (linear) -> not-delivered (rrf). This floor
+    # guarantees an EXACT path-match file sits inside the delivered window. It is
+    # NOT a threshold (1.0 is categorical exact-match, like an exact issue-named
+    # symbol) and NOT signal-magnitude tuning, so a weak path argmax (e.g. 0.3 in a
+    # pure-behavior task) is never injected -> no harm to the working regimes. The
+    # displaced boundary record stays in top_records (shifts out of the top max_files,
+    # not dropped). Membership only; ordering of the rest is untouched.
+    if top_records and v74 and getattr(v74, "ranked_full", None):
+        _exact = [
+            r for r in v74.ranked_full
+            if float((r.get("components") or {}).get("path", 0.0) or 0.0) >= 0.999
+            and str(r.get("path", "")) and not _is_non_source_candidate_path(str(r.get("path", "")))
+        ]
+        if _exact:
+            _win = {str(r.get("path", "")) for r in top_records[:max_files]}
+            for _el in _exact:
+                _ep = str(_el.get("path", ""))
+                if _ep in _win:
+                    continue
+                top_records = [r for r in top_records if str(r.get("path", "")) != _ep]
+                top_records.insert(min(max_files - 1, len(top_records)), _el)
+                _win = {str(r.get("path", "")) for r in top_records[:max_files]}
+
+    # NOTE (2026-06-28): an EXACT-NAME coverage floor was tried here and REVERTED —
+    # it was a net regression (60-case proof 53->52). When an issue names several
+    # symbols (e.g. express "Router, request, response"), the floor force-injected the
+    # sibling files (router.js/request.js/response.js) and DISPLACED the actual gold
+    # (express.js) out of the delivered window. Unlike exact-PATH (path==1.0 requires
+    # df==1, a UNIQUE file), exact-NAME has no uniqueness guard, so it over-injects.
+    # The 3 residual in-set-buried cases (serde/bat/fzf) are a RANKING problem (gold
+    # has decent sem/lex but reach=0, out-ranked at 7-9), not a membership gap — not
+    # fixable by a coverage floor without this over-injection harm. Left documented.
+
     _words = set(w.lower() for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) > 3)
     # CODE-SYMBOL provenance (backtick/fence-marked, IssueAnchors.code_symbols +
     # unresolved_code_symbols). The per-file function rankers (_top_functions /
@@ -3698,11 +6425,10 @@ def generate_v1r_brief(
             def _verified_key(rec: dict) -> int:
                 p = str(rec.get("path", ""))
                 pn = p.replace("\\", "/").lstrip("./").lstrip("/")
-                return (
-                    0
-                    if (_witness_verified_by_file.get(p) or _witness_verified_by_file.get(pn))
-                    else 1
-                )
+                return 0 if (
+                    _witness_verified_by_file.get(p)
+                    or _witness_verified_by_file.get(pn)
+                ) else 1
 
             # Among verified-witnessed files, the LOCALIZER's rank is authoritative
             # and MUST dominate keyword count — otherwise a hub (plugins.py) with
@@ -3750,10 +6476,8 @@ def generate_v1r_brief(
     # SWERank ICLR 2025 (verified witness hard-negative), §4 (content + gate, not reach).
     _ein = _exact_issue_named_files(issue_text, graph_db, issue_anchors=_anchors_obj)
     if _ein:
-
         def _rfp(r):
             return (r.get("path") or r.get("file") or "").replace("\\", "/").lstrip("/")
-
         _ein_n = {f.replace("\\", "/").lstrip("/"): fns for f, fns in _ein.items()}
         _bp = {_rfp(r): r for r in v74.ranked_full}
         # Native retrieval rank by normalized path (0 = retrieval's #1). Used to detect
@@ -3777,24 +6501,28 @@ def generate_v1r_brief(
                 return True
             return False
 
-        _front: list[dict] = []  # corroborated -> keep front-promotion
-        _back: list[dict] = []  # coincidence -> append below native top, capped
-        for _fp in _ein_n:
+        _front: list[dict] = []   # corroborated -> keep front-promotion
+        _back: list[dict] = []    # coincidence -> append below native top, capped
+        for _fp in sorted(_ein_n):                               # DETERMINISM (B5-4): dict-from-set order
             if _fp in _in_top:
+                # Preserve the trusted exact-name provenance on an already-present
+                # record. Later vendor filtering can remove its stronger sibling;
+                # without this stamp the surviving source record becomes hollow and
+                # the terminal RRF incorrectly drops it.
+                for _existing_record in top_records:
+                    if _rfp(_existing_record) == _fp:
+                        _existing_record["_exact_issue_named"] = True
                 continue
-            _r = _bp.get(_fp) or {
-                "path": _fp,
-                "score": _topsc + 0.01,
-                "functions": _ein_n[_fp][:3],
-                "witnesses": [],
-                "_exact_issue_named": True,
-            }
+            _r = _bp.get(_fp) or {"path": _fp, "score": _topsc + 0.01,
+                                  "functions": _ein_n[_fp][:3], "witnesses": [], "_exact_issue_named": True}
             if _is_corroborated(_fp, _ein_n[_fp]):
                 _front.append(_r)
             else:
                 _back.append(_r)
-        _front.sort(key=lambda r: -float(r.get("score", 0.0)))  # highest-scored issue-named first
-        _back.sort(key=lambda r: -float(r.get("score", 0.0)))
+        # DETERMINISM (B5-4): break score ties by path so the _back[:2] cap picks the same
+        # two files run-to-run (stable sort otherwise preserves hashseed-dependent order).
+        _front.sort(key=lambda r: (-float(r.get("score", 0.0)), r.get("path", "")))
+        _back.sort(key=lambda r: (-float(r.get("score", 0.0)), r.get("path", "")))
         # Front-promote ONLY corroborated injections. Coincidence injections go AFTER the native
         # top candidates (preserve the gold's slot), capped to 2 so they don't flood the brief.
         _MAX_COINCIDENCE_INJ = 2
@@ -3802,14 +6530,12 @@ def generate_v1r_brief(
             top_records = _front + top_records + _back[:_MAX_COINCIDENCE_INJ]
         else:
             top_records = _front + top_records
-        _seen = set()
-        _dedup = []
+        _seen = set(); _dedup = []
         for _r in top_records:
             _k = _rfp(_r)
             if _k in _seen:
                 continue
-            _seen.add(_k)
-            _dedup.append(_r)
+            _seen.add(_k); _dedup.append(_r)
         top_records = _dedup
     # VENDORED / DEMO demote (root cause C, 2026-06-17) — FAIL-CLOSED chokepoint.
     # The upstream candidate filter drops test/demo paths, but the LATER injection
@@ -3824,13 +6550,24 @@ def generate_v1r_brief(
     # keep the pre-filter records (never collapse to a blank brief), mirroring the
     # upstream candidate-filter fallback.
     _kept = [
-        r
-        for r in top_records
-        if not _is_test_or_demo(r.get("path", "") or "")
+        r for r in top_records
+        if not _is_non_source_candidate_path(r.get("path", "") or "")
+        and not _is_test_or_demo(r.get("path", "") or "")
         and not _is_vendored_path(r.get("path", "") or "")
     ]
-    if _kept:
-        top_records = _kept
+    top_records = _kept
+
+    # Final evidence-class RRF reorder. Extracted to module scope (_apply_evidence_rrf)
+    # so the terminal ranking stage is unit-testable in isolation, and so the two P0 #2
+    # fixes live in one place: (1) recall/neighbor/bridge records are not silently
+    # dropped by the strength filter; (2) the localizer's side-dict verification is
+    # stamped onto each record so verified gold is not out-sorted by multi-signal hubs.
+    top_records = _apply_evidence_rrf(
+        top_records,
+        witness_verified_by_file=_witness_verified_by_file,
+        loc_rank_by_file=_loc_rank_by_file,
+    )
+
     entries: list[FileEntry] = []
     for rec in top_records:
         path = str(rec.get("path", ""))
@@ -3842,9 +6579,7 @@ def generate_v1r_brief(
             repo_root,
             _words,
         )
-        func_names = _top_function_names(
-            graph_db, path, issue_terms=_words, code_symbols=_code_syms
-        )
+        func_names = _top_function_names(graph_db, path, issue_terms=_words, code_symbols=_code_syms)
         contract = _caller_contract_for_file(graph_db, path, repo_root, func_names)
         contract_props = contract_line(graph_db, path, func_names)
         siblings = _sibling_context(graph_db, path, func_names)
@@ -3862,14 +6597,43 @@ def generate_v1r_brief(
         # carry either depending on which stage admitted the candidate.
         _pn = path.replace("\\", "/").lstrip("./").lstrip("/")
         _wit = _witness_by_file.get(path) or _witness_by_file.get(_pn) or ""
-        _wit_ver = bool(_witness_verified_by_file.get(path) or _witness_verified_by_file.get(_pn))
+        _wit_ver = bool(
+            _witness_verified_by_file.get(path) or _witness_verified_by_file.get(_pn)
+        )
         _wit_conf = _loc_conf_by_file.get(path) or _loc_conf_by_file.get(_pn) or 0.0
+        _relevance = _relevance_by_file.get(path) or _relevance_by_file.get(_pn) or ""
+        if not _relevance:
+            _path_provenance = getattr(_anchors_obj, "path_provenance", None) or {}
+            _explicit_paths = {
+                _gl_normalize(p)
+                for p in (getattr(_anchors_obj, "paths", None) or set())
+                if p and _path_provenance.get(p, "EXPLICIT_PATH") == "EXPLICIT_PATH"
+            }
+            if _pn in _explicit_paths or rec.get("_exact_issue_named"):
+                _relevance = "VERIFIED"
+            else:
+                _comps = rec.get("components") or {}
+                _classes = {
+                    "lexical": float(_comps.get("lex", 0.0) or 0.0)
+                    + float(_comps.get("code_def", 0.0) or 0.0),
+                    "semantic": float(_comps.get("sem", 0.0) or 0.0),
+                    "structural": float(_comps.get("reach", 0.0) or 0.0)
+                    + float(_comps.get("anchor_prox", 0.0) or 0.0)
+                    + float(_comps.get("witness", 0.0) or 0.0),
+                    "path": float(_comps.get("path", 0.0) or 0.0),
+                    "historical": float(_comps.get("frame", 0.0) or 0.0),
+                }
+                _relevance = (
+                    "WARNING" if sum(value > 0 for value in _classes.values()) >= 2
+                    else "INFO"
+                )
         # v74 anchor proximity for this candidate (edge-independent issue-subject
         # signal) — carried onto the FileEntry so _entry_confidence_tier can keep an
         # anchor-matched file out of the [INFO] drop (BUG-3). Records are dicts with a
         # `components` sub-dict; fall back to a flat key, then 0.0.
         _aprox = float(
-            (rec.get("components") or {}).get("anchor_prox", rec.get("anchor_prox", 0.0)) or 0.0
+            (rec.get("components") or {}).get("anchor_prox", rec.get("anchor_prox", 0.0))
+            or 0.0
         )
         entries.append(
             FileEntry(
@@ -3887,23 +6651,33 @@ def generate_v1r_brief(
                 witness_verified=_wit_ver,
                 localizer_confidence=_wit_conf,
                 anchor_prox=_aprox,
+                relevance_grade=_relevance,
             )
         )
 
-    # ---- L1 CROSS-WIRE FIX (single ordering source) ----
-    # Build the localization header HERE, BEFORE the L1-SCOPE block reads
-    # `entries[0]`, and make the file `<gt-localization>` names #1 the SAME
-    # `entries[0]` that L1-SCOPE, `render_brief`'s file list, the graph-map, and the
-    # EDIT-TARGET CONTRACTS block all key off. Previously the header was built far
-    # below (after L1-SCOPE/render) on `_loc.candidates`, while `entries` carried a
-    # SEPARATELY-ordered list — so `<gt-localization>` and the `files[0]`-keyed
-    # sub-blocks could name DIFFERENT #1 files (the confirmed cfn-lint-3749 self-
-    # contradiction). Reordering `entries` so its head equals the header's primary
-    # makes every brief sub-block consume one ordering verbatim. Pure reorder (no
-    # entry added/dropped); correct-or-quiet (no header / no match -> entries
-    # untouched); generalized (path-normalized match, no per-repo logic).
-    _loc_header, _loc_primary = _localization_header(_loc, graph_db, issue_text)
-    if _loc_header and _loc_primary and entries:
+    # ---- L1 CROSS-WIRE FIX (confidence-aware single ordering source) ----
+    # HIGH is a singular structural target, so its localizer primary aligns every
+    # file-keyed block. MEDIUM/LOW are contention sets: their header follows the
+    # already-terminal evidence order and MUST NOT reorder `entries`. This prevents
+    # a weak localizer #1 from overriding stronger fused evidence while keeping the
+    # brief internally consistent. Pure reorder of a frozen localizer view; no
+    # candidate is added/dropped and the inputs are not mutated.
+    if _brief_minimal_on():
+        # Minimal bytes and their telemetry share one bounded population. Apply
+        # max_files before either renderer so no visible header candidate can sit
+        # outside `.files`/localization_proof.
+        entries = entries[:max_files]
+        _loc_header, _loc_primary, _loc_tier = _localization_header_for_entries(
+            _loc, graph_db, issue_text, entries,
+        )
+    else:
+        # Preserve the historical full renderer exactly when the kill-switch is
+        # off. Candidate-population alignment is a Profile-2/minimal behavior.
+        _loc_header, _loc_primary = _localization_header(
+            _loc, graph_db, issue_text,
+        )
+        _loc_tier = _localization_confidence_tier(_loc_header)
+    if _loc_tier == "high" and _loc_header and _loc_primary and entries:
         _lp_norm = _gl_normalize(_loc_primary)
         _pi = next(
             (i for i, e in enumerate(entries) if _gl_normalize(e.path) == _lp_norm),
@@ -3911,7 +6685,6 @@ def generate_v1r_brief(
         )
         if _pi not in (None, 0):
             entries.insert(0, entries.pop(_pi))
-
     # BUG-3 instrumentation: prove whether anchor_prox actually reaches the FileEntry on
     # the LIVE brief path (the l1_ranking_diagnosis showed 1.0, but the rendered brief
     # dropped those files — telemetry-vs-delivery gap). Logs the per-entry tier + anchor_prox
@@ -3919,19 +6692,13 @@ def generate_v1r_brief(
     # issue) vs a tier/plumbing bug. stderr → captured to gt_brief_stderr.log.
     try:
         import sys as _sys
-
-        _ap_cov = sum(
-            1 for e in entries if getattr(e, "anchor_prox", 0.0) >= _ANCHOR_PROX_WARN_FLOOR
-        )
+        _ap_cov = sum(1 for e in entries if getattr(e, "anchor_prox", 0.0) >= _ANCHOR_PROX_WARN_FLOOR)
         _ap_dump = ", ".join(
-            f"{os.path.basename(e.path)}:ap={getattr(e, 'anchor_prox', 0.0):.3f}:tier={_entry_confidence_tier(e, issue_text)}"
+            f"{os.path.basename(e.path)}:ap={getattr(e,'anchor_prox',0.0):.3f}:tier={_entry_confidence_tier(e, issue_text)}"
             for e in entries[:8]
         )
-        print(
-            f"[GT_META] BUG3_ANCHOR_PROX entries={len(entries)} ap_ge_floor={_ap_cov} | {_ap_dump}",
-            file=_sys.stderr,
-            flush=True,
-        )
+        print(f"[GT_META] BUG3_ANCHOR_PROX entries={len(entries)} ap_ge_floor={_ap_cov} | {_ap_dump}",
+              file=_sys.stderr, flush=True)
     except Exception:
         pass
 
@@ -3946,14 +6713,12 @@ def generate_v1r_brief(
     # content, so no BRIEFING measurement obligation.
     try:
         import sys as _sys_nc
-
         _nc = int(getattr(_loc, "n_components", 0) or 0)
         _nc_chains = len(getattr(_loc, "scope_chains", None) or [])
         print(
             f"[GT_META] SCOPE_COMPONENTS n_components={_nc:.8f} "
             f"rendered_chains={_nc_chains:.8f} fragmented={1.0 if _nc > 1 else 0.0:.8f}",
-            file=_sys_nc.stderr,
-            flush=True,
+            file=_sys_nc.stderr, flush=True,
         )
     except Exception:
         pass
@@ -4106,23 +6871,31 @@ def generate_v1r_brief(
 
     _body_cap = _MAX_BODY_LINE_CHARS
     brief_text = _render(_body_cap)
-    tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
+    tok = _count_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
 
-    # Decouple localization BREADTH from the evidence token budget. The delivered
-    # candidate list (.files) keeps the full rank-ordered localization set; only the
-    # rendered EVIDENCE bodies in brief_text are trimmed to the token rail. Before
-    # this, the trim popped entries -> .files, gutting localization to 1-2 files and
+    # Decouple localization BREADTH from the evidence token budget while rendering.
+    # `_loc_files` keeps the full rank-ordered set through detail trimming; after the
+    # final bytes are assembled, `.files` is joined back to paths actually visible in
+    # candidate blocks. Before the decoupling, trimming prematurely gutted localization
+    # to 1-2 files and
     # dropping golds the localizer ranked #0-#5 (proven on the held-out sweep:
     # geopandas-3226 gold @rank0 and sqllineage-557 @rank5 vanished from .files even
     # though the ranker placed them at/near the top; delivered Recall@5 fell to 0.40
     # vs the bare localizer's 0.60 = grep parity). The token budget governs how much
     # per-file evidence the agent reads, NOT which files it is told to consider.
     _loc_files = list(entries)
+    # C16: acquisition evidence is projected from the terminal ranked population
+    # before token/minimal/re-slot delivery reduction can remove candidates.
+    _acquisition_proof = _acquisition_proof_rows(
+        top_records,
+        witness_by_file=_witness_by_file,
+        witness_verified_by_file=_witness_verified_by_file,
+    )
     while tok > max_brief_tokens and len(entries) > 1:
         entries = entries[:-1]
         _scores = _scores[: len(entries)]
         brief_text = _render(_body_cap)
-        tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
+        tok = _count_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
 
     # D1 — ENFORCE the budget by trimming DETAIL, not the file LIST. The loop above
     # can bottom out at len(entries)==1 while still over budget when a single
@@ -4134,23 +6907,55 @@ def generate_v1r_brief(
     # rendered entries until under budget. This counts the FULL brief_text — which
     # already includes the (now-leading) <gt-graph-map> via _with_graph_map — so the
     # graph-map's bytes are inside the rail too. Floored at a readable minimum;
-    # rank-neutral (.files / candidate order untouched). Idempotent: a brief already
+    # rank-neutral (candidate order untouched). Idempotent: a brief already
     # under budget never enters this loop and is byte-identical to before.
     _BODY_CAP_FLOOR = 80
     while tok > max_brief_tokens and _body_cap > _BODY_CAP_FLOOR:
         _body_cap = max(_BODY_CAP_FLOOR, _body_cap - 60)
         brief_text = _render(_body_cap)
-        tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
+        tok = _count_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
 
     if _loc_header:
         brief_text = _loc_header + "\n" + brief_text
 
+    # B-30: HARD rail. The two loops above trim breadth (entries) then detail
+    # (body cap) but can bottom out — one entry + body cap at floor + fixed
+    # header/block overhead — STILL over budget (measured: caps 100/20/1 ->
+    # 244/242/242 tokens; the declared cap was never enforced). Enforce it as an
+    # inviolable ceiling: drop whole rendered brief blocks lowest-priority first,
+    # record what was suppressed, and truncate the residue only as a last resort.
+    # Rank/localizer untouched (`_loc_files` was captured before the loops);
+    # this trims DOSE, never which files the agent is told to consider. Idempotent:
+    # a brief already within budget is unchanged (byte-identical) and _budget_suppressed
+    # stays empty.
+    _budget_suppressed: list[str] = []
+    if _count_tokens(brief_text) > max_brief_tokens:
+        brief_text, _budget_suppressed = _enforce_token_rail(brief_text, max_brief_tokens)
+
+    # SM-6 (B): step-0 brief reduction — GT_BRIEF_MINIMAL (DEFAULT-OFF, byte-identical).
+    # Applied AFTER the token rail so the reduced text drives token_estimate + block
+    # receipts below. Retires <gt-graph-map>/<gt-localization>/contract narration, keeps
+    # obligations + minimal 'which file' orientation (localization rides reactive
+    # def_partition). BAKED: dormant until the SM-8 rebake sets the flag at generation.
+    _control_participation: list[dict] = []
+    # C15 — how many candidates were model-visible BEFORE the reduction ran. Used below to
+    # PROVE (not assume from a flag) that the reduction is what emptied the delivered set,
+    # which is the difference between NOT_EVALUABLE and an honest 0.
+    _delivered_pre_reduction = 0
+    if _brief_minimal_on():
+        _before_minimal = brief_text
+        _delivered_pre_reduction = len(
+            _model_visible_localization_entries(_before_minimal, _loc_files))
+        brief_text = _reduce_brief_to_minimal(brief_text)
+        _control_participation = _brief_minimal_participation(
+            _before_minimal, brief_text)
+
     # --- L1 signal-provenance counts (observability; no ranking effect) ---
-    # Count over the DELIVERED candidate set (.files == _loc_files[:max_files]).
+    # Count over the DELIVERED candidate set (final-byte joined; identical to `.files`).
     # Align each delivered entry to its top_records dict (carrying run_v74
     # `components`) by path so semantic/structural/fts5 contributions are read
     # from the ACTUAL signals computed during localization, not re-derived.
-    _delivered = _loc_files[:max_files]
+    _delivered = _model_visible_localization_entries(brief_text, _loc_files)
     _rec_by_path: dict[str, dict] = {}
     for _r in top_records:
         _rp = str(_r.get("path", ""))
@@ -4159,32 +6964,44 @@ def generate_v1r_brief(
     _aligned_records = [_rec_by_path.get(e.path, {}) for e in _delivered]
     if os.environ.get("GT_DEBUG_L1") == "1":
         import sys as _sys_dbg
-
-        _comp = [
-            (
-                str(_r.get("path", ""))[-44:],
-                {k: round(float(v), 3) for k, v in (_r.get("components") or {}).items()},
-            )
-            for _r in top_records[:5]
-        ]
-        _join = [
-            (
-                getattr(e, "path", "")[-44:],
-                "MATCH" if getattr(e, "path", "") in _rec_by_path else "MISS",
-            )
-            for e in _delivered[:8]
-        ]
+        _comp = [(str(_r.get("path", ""))[-44:], {k: round(float(v), 3) for k, v in (_r.get("components") or {}).items()})
+                 for _r in top_records[:5]]
+        _join = [(getattr(e, "path", "")[-44:], "MATCH" if getattr(e, "path", "") in _rec_by_path else "MISS")
+                 for e in _delivered[:8]]
         print(f"[GT_DEBUG_L1] ranked_full_components={_comp}", file=_sys_dbg.stderr, flush=True)
         print(f"[GT_DEBUG_L1] delivered_vs_record_join={_join}", file=_sys_dbg.stderr, flush=True)
-        print(
-            f"[GT_DEBUG_L1] n_top_records={len(top_records)} n_delivered={len(_delivered)} embedder={os.environ.get('GT_FORCE_ONNX_EMBEDDER', '?')}",
-            file=_sys_dbg.stderr,
-            flush=True,
-        )
+        print(f"[GT_DEBUG_L1] n_top_records={len(top_records)} n_delivered={len(_delivered)} embedder={os.environ.get('GT_FORCE_ONNX_EMBEDDER','?')}", file=_sys_dbg.stderr, flush=True)
     try:
-        _ge, _sem_c, _struct_c, _fts5_c = _l1_signal_counts(graph_db, _delivered, _aligned_records)
+        _ge, _sem_c, _struct_c, _fts5_c = _l1_signal_counts(
+            graph_db, _delivered, _aligned_records
+        )
     except Exception:
         _ge = _sem_c = _struct_c = _fts5_c = 0
+
+    # C15 — the ACQUISITION fact, over the RANKED set, delivery-independent. This is the
+    # number that answers "did the legs find anything"; the four above answer "what reached
+    # the model". They are computed from the same signals and differ ONLY in population, so
+    # acquired >= delivered always holds and the pair is itself the re-slot's delivery gap.
+    try:
+        _acq_ge, _acq_sem, _acq_struct, _acq_fts5 = _l1_acquisition_counts(
+            graph_db,
+            top_records,
+            witness_by_file=_witness_by_file,
+            localizer_confidence_by_file=_loc_conf_by_file,
+        )
+    except Exception:
+        _acq_ge = _acq_sem = _acq_struct = _acq_fts5 = 0
+
+    # NOT_EVALUABLE iff the reduction is what emptied delivery — candidates WERE visible
+    # before it ran and none are now. Anything else (a genuine empty ranking, or delivered
+    # candidates that simply carry no signal) reports an honest integer.
+    _reduction_emptied_delivery = (not _delivered) and _delivered_pre_reduction > 0
+    if _reduction_emptied_delivery:
+        _d_ge = _d_sem = _d_struct = _d_fts5 = _d_count = None
+    else:
+        _d_ge, _d_sem, _d_struct, _d_fts5 = _ge, _sem_c, _struct_c, _fts5_c
+        _d_count = len(_delivered)
+
     _conf_tier = _tier_from_loc_header(_loc_header)
 
     # --- Embedder-CONSUMPTION metrics over the RENDERED candidates ---
@@ -4199,6 +7016,81 @@ def generate_v1r_brief(
     ]
     _eff_w_sem = float(getattr(v74, "effective_w_sem", 0.0) or 0.0)
     _k_sem_top = int(getattr(v74, "k_sem_top_effective", 0) or 0)
+    _terminal_body_paths = {
+        _gl_normalize(str(_p))
+        for _p in (
+            set(_semantic_anchor_paths)
+            | set(getattr(_loc, "content_leg_paths", frozenset()) or ())
+            | set(getattr(_loc, "semantic_body_paths", frozenset()) or ())
+        )
+    }
+    _localization_proof: list[dict[str, object]] = []
+    for _i, (_e, _r) in enumerate(zip(_delivered, _aligned_records), start=1):
+        _comps_raw = (_r.get("components", {}) if isinstance(_r, dict) else {}) or {}
+        _components: dict[str, float] = {}
+        for _ck, _cv in _comps_raw.items():
+            try:
+                _components[str(_ck)] = float(_cv or 0.0)
+            except Exception:
+                continue
+        _proof_path = str(getattr(_e, "path", "") or "")
+        _components = _terminal_acquisition_components(
+            _components, _proof_path, body_paths=_terminal_body_paths,
+        )
+        # ACQ SOURCE-5 (cochange_history) + INFLUENCE-5 (cochange_prior): the
+        # candidate's mined co-change neighbours (its "Also changes: …" line) are
+        # a first-class SUPPORT signal, but were never stamped onto the emitted
+        # proof — so both features sat dark on every ordinary localization
+        # candidate. Stamp components["cochange"] and a self-sealed primary-path
+        # witness here (bridge candidates keep their own sealed witness untouched).
+        _bridge_cochange_ev = (
+            _r.get("cochange_evidence") if isinstance(_r, dict) else None
+        )
+        _cochange_ev, _cc_for_proof = _primary_cochange_support(
+            candidate_path=_proof_path,
+            entry_co_changes=getattr(_e, "co_changes", None),
+            components=_components,
+            bridge_evidence=_bridge_cochange_ev,
+        )
+        _localization_proof.append({
+            "candidate_id": _localization_candidate_id(
+                _proof_path),
+            "rank": _i,
+            "path": _proof_path,
+            "score": float(getattr(_e, "score", 0.0) or 0.0),
+            "function_names": list(getattr(_e, "function_names", []) or [])[:8],
+            "witness": getattr(_e, "witness", "") or "",
+            "witness_verified": bool(getattr(_e, "witness_verified", False)),
+            "relevance_grade": str(getattr(_e, "relevance_grade", "INFO") or "INFO"),
+            "localizer_confidence": float(getattr(_e, "localizer_confidence", 0.0) or 0.0),
+            "anchor_prox": float(getattr(_e, "anchor_prox", 0.0) or 0.0),
+            "components": _components,
+            "semantic_component": float(_components.get("sem", 0.0) or 0.0),
+            "lex_component": float(_components.get("lex", 0.0) or 0.0),
+            "reach_component": float(_components.get("reach", 0.0) or 0.0),
+            "path_component": float(_components.get("path", 0.0) or 0.0),
+            "witness_component": float(_components.get("witness", 0.0) or 0.0),
+            "entered_via": str(_r.get("entered_via", "") if isinstance(_r, dict) else ""),
+            "cochange_evidence": (
+                _cochange_ev if _components.get("cochange", 0.0) > 0.0 else None
+            ),
+            "acquisition_sources": _candidate_acquisition_sources(
+                graph_db,
+                repo_root,
+                str(getattr(_e, "path", "") or ""),
+                _resolution_methods_by_file.get(
+                    str(getattr(_e, "path", "") or ""),
+                    _resolution_methods_by_file.get(
+                        str(getattr(_e, "path", "") or "").replace("\\", "/").lstrip("./").lstrip("/"),
+                        frozenset(),
+                    ),
+                ),
+            ),
+        })
+        # Data-lineage pointer for the primary-path co-change witness only. Bridge
+        # candidates (``_cc_for_proof is None``) keep their exact prior proof shape.
+        if _cc_for_proof is not None:
+            _localization_proof[-1]["co_changes"] = _cc_for_proof
 
     # --- AUDIT snapshots (READ-ONLY; gated by GT_AUDIT_DIR; no ranking effect) ---
     # Persists the absorption lineage: for each rendered entry, the LIVE (exact-path)
@@ -4223,62 +7115,109 @@ def generate_v1r_brief(
             for _i, _e in enumerate(_delivered):
                 _np = _norm_p(getattr(_e, "path", ""))
                 _live_sem = float(_sem_components[_i]) if _i < len(_sem_components) else 0.0
-                _cons_sem = float(
-                    (_norm_rec.get(_np, {}).get("components", {}) or {}).get("sem", 0.0) or 0.0
-                )
+                _cons_sem = float((_norm_rec.get(_np, {}).get("components", {}) or {}).get("sem", 0.0) or 0.0)
                 _routes = list(getattr(_e, "routes", []) or [])
                 _ev = getattr(_e, "entered_via", "") or ""
                 if _ev and _ev not in _routes:
                     _routes.append(_ev)
-                _rendered_snap.append(
-                    {
-                        "candidate_id": f"{_np}:{getattr(_e, 'start_line', 0) or 0}:"
-                        f"{getattr(_e, 'symbol', '') or os.path.basename(_np)}",
-                        "path": getattr(_e, "path", ""),
-                        "live_join": "MATCH" if getattr(_e, "path", "") in _rec_by_path else "MISS",
-                        "live_sem": _live_sem,
-                        "consistent_sem": _cons_sem,
-                        "routes": _routes,
-                    }
-                )
-            _sem_snap = [
-                {
-                    "candidate_id": f"{_norm_p(_r.get('path', ''))}:0:"
-                    f"{os.path.basename(_norm_p(_r.get('path', '')))}",
-                    "path": _r.get("path", ""),
-                    "sem": float((_r.get("components", {}) or {}).get("sem", 0.0) or 0.0),
-                    "components": _r.get("components", {}),
-                }
-                for _r in top_records
-            ]
+                _rendered_snap.append({
+                    "candidate_id": f"{_np}:{getattr(_e, 'start_line', 0) or 0}:"
+                                    f"{getattr(_e, 'symbol', '') or os.path.basename(_np)}",
+                    "path": getattr(_e, "path", ""),
+                    "live_join": "MATCH" if getattr(_e, "path", "") in _rec_by_path else "MISS",
+                    "live_sem": _live_sem,
+                    "consistent_sem": _cons_sem,
+                    "routes": _routes,
+                })
+            _sem_snap = [{
+                "candidate_id": f"{_norm_p(_r.get('path', ''))}:0:"
+                                f"{os.path.basename(_norm_p(_r.get('path', '')))}",
+                "path": _r.get("path", ""),
+                "sem": float((_r.get("components", {}) or {}).get("sem", 0.0) or 0.0),
+                "components": _r.get("components", {}),
+            } for _r in top_records]
             os.makedirs(_audit_dir, exist_ok=True)
-            with open(
-                os.path.join(_audit_dir, "10_candidates_rendered.json"), "w", encoding="utf-8"
-            ) as _f:
+            with open(os.path.join(_audit_dir, "10_candidates_rendered.json"), "w", encoding="utf-8") as _f:
                 _json_a.dump(_rendered_snap, _f, indent=2, default=str)
-            with open(
-                os.path.join(_audit_dir, "08_candidates_semantic_scored.json"),
-                "w",
-                encoding="utf-8",
-            ) as _f:
+            with open(os.path.join(_audit_dir, "08_candidates_semantic_scored.json"), "w", encoding="utf-8") as _f:
                 _json_a.dump(_sem_snap, _f, indent=2, default=str)
         except Exception:
             pass  # audit snapshot must never affect the brief
 
+    # B-6: per-block delivery receipts (sidecar metadata; default OFF, additive).
+    # Computed from the FINAL brief_text so spans/hashes match exactly what the agent
+    # sees. A PURE READ — brief_text is NOT modified, so the delivered brief bytes are
+    # byte-identical whether or not receipts are populated.
+    _rendered_candidate_ids = [
+        _localization_candidate_id(str(getattr(_e, "path", "") or ""))
+        for _e in _delivered
+    ]
+    _block_receipts = (
+        _brief_block_receipts(
+            brief_text,
+            localization_candidate_ids=_rendered_candidate_ids,
+        )
+        if _block_receipts_on() else []
+    )
+    # B-ACQ: seal each rendered candidate's ACQ source contribution to its exact
+    # delivered block bytes. PURE metadata mutation on _localization_proof (already a
+    # sidecar); brief_text is untouched, so the delivered brief stays byte-identical.
+    if _block_receipts:
+        _attest_source_contributions(_localization_proof, _block_receipts)
+    # Cluster-2b: bind the delivered obligations block to its build-time extraction record
+    # (sidecar; brief_text untouched, byte-identical). Empty when there is no obligations
+    # block or no persisted extraction (fail-closed -> obligations attestation UNMEASURED).
+    _obligations_record = (
+        _build_obligations_record(brief_text, _block_receipts, issue_text)
+        if _block_receipts else {}
+    )
+    _control_participation.extend(
+        _terminal_pretask_mediator_participation(
+            brief_text,
+            _block_receipts,
+            budget_suppressed=_budget_suppressed,
+            content_paths=set(getattr(_loc, "content_leg_paths", frozenset()) or ()),
+            content_decision=str(
+                getattr(_loc, "content_leg_decision", "NO_EFFECT") or "NO_EFFECT"),
+            content_reason=str(
+                getattr(_loc, "content_leg_reason", "no_content_candidate")
+                or "no_content_candidate"),
+            semantic_anchor_paths=_semantic_anchor_paths,
+            semantic_localizer_paths=set(
+                getattr(_loc, "semantic_body_paths", frozenset()) or ()),
+        )
+    )
+
     result = V1RBriefResult(
         files=_delivered,
         brief_text=brief_text,
-        token_estimate=_estimate_tokens(brief_text),
+        token_estimate=_count_tokens(brief_text),
         v74_result=v74,
         graph_edge_count=_ge,
         semantic_signal_count=_sem_c,
         structural_signal_count=_struct_c,
         fts5_signal_count=_fts5_c,
         confidence_tier=_conf_tier,
+        acquired_graph_edge_count=_acq_ge,
+        acquired_semantic_signal_count=_acq_sem,
+        acquired_structural_signal_count=_acq_struct,
+        acquired_fts5_signal_count=_acq_fts5,
+        acquisition_proof=_acquisition_proof,
+        delivered_graph_edge_count=_d_ge,
+        delivered_semantic_signal_count=_d_sem,
+        delivered_structural_signal_count=_d_struct,
+        delivered_fts5_signal_count=_d_fts5,
+        delivered_candidate_count=_d_count,
         effective_w_sem=_eff_w_sem,
         rendered_candidate_count=len(_delivered),
         k_sem_top=_k_sem_top,
         sem_components=_sem_components,
+        localization_proof=_localization_proof,
+        budget_suppressed=_budget_suppressed,
+        block_receipts=_block_receipts,
+        control_participation=_control_participation,
+        obligations_record=_obligations_record,
+        tokenizer_used=_tokenizer_kind(),  # Brief-F9: which token counter ran
     )
 
     # Structured telemetry: emit L1 candidates as JSON for wrapper to parse
@@ -4287,7 +7226,7 @@ def generate_v1r_brief(
             import json as _json
 
             l1_items = []
-            for entry in entries:
+            for entry in _delivered:
                 # confidence_score now reflects the GRAPH-TRAVERSAL witness
                 # strength (graph_localizer) when this file was witnessed, falling
                 # back to the v74 lexical score otherwise. This is the fix for the
@@ -4295,7 +7234,9 @@ def generate_v1r_brief(
                 # candidate (importer.py) now reports its real structural
                 # confidence instead of the lexical 0.0.
                 _conf = (
-                    entry.localizer_confidence if entry.localizer_confidence > 0 else entry.score
+                    entry.localizer_confidence
+                    if entry.localizer_confidence > 0
+                    else entry.score
                 )
                 _reason = (
                     f"graph_witness={entry.witness}"
@@ -4310,6 +7251,7 @@ def generate_v1r_brief(
                         "confidence_score": _conf,
                         "witnessed": bool(entry.witness),
                         "witness_verified": entry.witness_verified,
+                        "relevance_grade": entry.relevance_grade,
                         "witness": entry.witness,
                         "source": "graph_traversal" if entry.witness else "graph_db",
                         "reason": _reason,
@@ -4328,58 +7270,56 @@ def generate_v1r_brief(
             # close that gap. Deterministic-provenance + stdlib-shadow-guarded
             # (_resolved_witnesses_for_file); a name_match is NEVER emitted here.
             _primary_emitted = False
-            for entry in entries:
+            for entry in _delivered:
                 try:
                     _wits = _resolved_witnesses_for_file(graph_db, entry.path, repo_root)
                 except Exception:
                     _wits = []
                 for _w in _wits:
-                    l1_items.append(
-                        {
-                            "kind": "l1_graph_edge",
-                            "file_path": entry.path,  # the CANDIDATE this edge confirms
-                            "source": "CALLS",
-                            "direction": _w.get("direction"),  # caller | callee
-                            "symbol": _w.get("symbol", ""),
-                            "edge_file": _w.get("file_path", ""),
-                            "line": _w.get("line", 0),
-                            "confidence": 1.0,  # deterministic edge = fact
-                            "reason": "resolved CALLS edge (deterministic provenance)",
-                        }
-                    )
+                    l1_items.append({
+                        "kind": "l1_graph_edge",
+                        "file_path": entry.path,            # the CANDIDATE this edge confirms
+                        "source": "CALLS",
+                        "direction": _w.get("direction"),   # caller | callee
+                        "symbol": _w.get("symbol", ""),
+                        "edge_file": _w.get("file_path", ""),
+                        "line": _w.get("line", 0),
+                        "confidence": 1.0,                  # deterministic edge = fact
+                        "reason": "resolved CALLS edge (deterministic provenance)",
+                    })
                 # The PRIMARY confirming witness for this candidate is its first
                 # resolved CALLER (a caller proves the candidate's symbol is a real,
                 # used target — the strongest confirmation). Emit ONE per task: the
                 # first candidate that carries a resolved caller.
                 if not _primary_emitted:
-                    _caller = next((w for w in _wits if w.get("direction") == "caller"), None)
+                    _caller = next(
+                        (w for w in _wits if w.get("direction") == "caller"), None
+                    )
                     if _caller is not None:
-                        l1_items.append(
-                            {
-                                "kind": "l1_confirming_edge",
-                                "file_path": entry.path,
-                                "symbol": _caller.get("symbol", ""),
-                                "source": "CALLS",
-                                "edge_file": _caller.get("file_path", ""),
-                                "line": _caller.get("line", 0),
-                                "confidence": 1.0,
-                                "reason": "resolved cross-file caller (deterministic)",
-                            }
-                        )
+                        l1_items.append({
+                            "kind": "l1_confirming_edge",
+                            "file_path": entry.path,
+                            "symbol": _caller.get("symbol", ""),
+                            "source": "CALLS",
+                            "edge_file": _caller.get("file_path", ""),
+                            "line": _caller.get("line", 0),
+                            "confidence": 1.0,
+                            "reason": "resolved cross-file caller (deterministic)",
+                        })
                         _primary_emitted = True
 
             _call_edge_count = sum(
-                1
-                for it in l1_items
+                1 for it in l1_items
                 if it.get("kind") == "l1_graph_edge" and it.get("source") == "CALLS"
             )
             _confirming = next(
-                (it.get("file_path") for it in l1_items if it.get("kind") == "l1_confirming_edge"),
+                (it.get("file_path") for it in l1_items
+                 if it.get("kind") == "l1_confirming_edge"),
                 None,
             )
             structured = {
                 "candidates": l1_items,
-                "candidate_count": len(entries),
+                "candidate_count": len(_delivered),
                 # Provenance counts (same definitions as the V1RBriefResult fields):
                 # a candidate counts toward a signal iff that signal contributed a
                 # nonzero score / a real graph edge exists. These let a fail-closed
@@ -4389,6 +7329,20 @@ def generate_v1r_brief(
                 "structural_signal_count": _struct_c,
                 "fts5_signal_count": _fts5_c,
                 "confidence_tier": _conf_tier,
+                # C15: the ACQUISITION fact under a name that cannot be misread as
+                # delivery, plus delivery under a name that cannot be misread as
+                # acquisition. "NOT_EVALUABLE" (never 0) when the re-slot reduction is
+                # what emptied the delivered set.
+                "acquired_graph_edge_count": _acq_ge,
+                "acquired_semantic_signal_count": _acq_sem,
+                "acquired_structural_signal_count": _acq_struct,
+                "acquired_fts5_signal_count": _acq_fts5,
+                "acquisition_proof": _acquisition_proof,
+                "delivered_graph_edge_count": _NOT_EVALUABLE if _d_ge is None else _d_ge,
+                "delivered_semantic_signal_count": _NOT_EVALUABLE if _d_sem is None else _d_sem,
+                "delivered_structural_signal_count": _NOT_EVALUABLE if _d_struct is None else _d_struct,
+                "delivered_fts5_signal_count": _NOT_EVALUABLE if _d_fts5 is None else _d_fts5,
+                "delivered_candidate_count": _NOT_EVALUABLE if _d_count is None else _d_count,
                 # Embedder-CONSUMPTION metrics (same definitions as the
                 # V1RBriefResult fields): effective_w_sem>0 with
                 # semantic_signal_count==0 / all-zero sem_components ==
@@ -4398,10 +7352,10 @@ def generate_v1r_brief(
                 "k_sem_top": _k_sem_top,
                 "sem_components": _sem_components,
                 # legacy proxy (callees present) kept for back-compat readers
-                "neighbor_present_count": sum(1 for e in entries if e.callees),
-                "signature_count": sum(1 for e in entries if e.functions),
-                "witnessed_count": sum(1 for e in entries if e.witness),
-                "verified_witness_count": sum(1 for e in entries if e.witness_verified),
+                "neighbor_present_count": sum(1 for e in _delivered if e.callees),
+                "signature_count": sum(1 for e in _delivered if e.functions),
+                "witnessed_count": sum(1 for e in _delivered if e.witness),
+                "verified_witness_count": sum(1 for e in _delivered if e.witness_verified),
                 # Resolved deterministic call-edge witnesses surfaced at iter-0 — the
                 # signal the audited run reported as 0 / 'N/A'.
                 "l1_candidates_with_call_edge_count": _call_edge_count,
@@ -4409,7 +7363,7 @@ def generate_v1r_brief(
                 "warnings": [],
                 "abstain_reason": None,
             }
-            if not entries:
+            if not _delivered:
                 structured["abstain_reason"] = "no_candidates"
             with open("/tmp/gt_l1_structured.json", "w") as _f:
                 _json.dump(structured, _f)

@@ -40,7 +40,9 @@ def _extract_identifiers(issue_text: str) -> list[str]:
     tokens: list[str] = []
     for match in re.finditer(r"`([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)`", issue_text):
         tokens.append(match.group(1))
-    for match in re.finditer(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\b", issue_text):
+    for match in re.finditer(
+        r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\b", issue_text
+    ):
         candidate = match.group(1)
         if candidate not in tokens:
             tokens.append(candidate)
@@ -118,9 +120,10 @@ def _build_findings(
         callers_result = graph.find_callers(target["name"])
         if not isinstance(callers_result, Ok):
             continue
-        cross_file = [c for c in callers_result.value if c.file_path != target["file"]][
-            :_MAX_CALLERS_PER_TARGET
-        ]
+        cross_file = [
+            c for c in callers_result.value
+            if c.file_path != target["file"]
+        ][:_MAX_CALLERS_PER_TARGET]
         for caller in cross_file:
             usage_hint = ""
             if caller.file_path and caller.line:
@@ -143,7 +146,9 @@ def _build_findings(
                         line=target["line"],
                         symbol=target["name"],
                     ),
-                    evidence_locations=[Location(file=caller.file_path, line=caller.line)],
+                    evidence_locations=[
+                        Location(file=caller.file_path, line=caller.line)
+                    ],
                     message=f"caller at {caller.file_path}:{caller.line}"
                     + (f" — {usage_hint}" if usage_hint else ""),
                     why_now=WhyNow.FILE_OPENED,
@@ -172,13 +177,7 @@ async def handle_task_map(
         for ef in entry_files:
             if not any(t["file"] == ef for t in targets):
                 targets.append(
-                    {
-                        "name": os.path.basename(ef),
-                        "file": ef,
-                        "line": None,
-                        "kind": "file",
-                        "signature": None,
-                    }
+                    {"name": os.path.basename(ef), "file": ef, "line": None, "kind": "file", "signature": None}
                 )
 
     findings = _build_findings(targets, graph, root_path)

@@ -3,7 +3,6 @@
 Every GT mechanism emission or suppression should include these fields in its
 [GT_META] log line. This enables systematic diagnosis across runs.
 """
-
 from __future__ import annotations
 
 import enum
@@ -72,14 +71,12 @@ class TraceEvent:
         ]
         if self.emit_or_suppress == "suppress":
             parts.append(f"reason={self.suppression_reason.value}")
-        parts.extend(
-            [
-                f"visible={self.agent_visible}",
-                f"surface={self.delivery_surface}",
-                f"tokens={self.payload_tokens}",
-                f"turns_left={self.remaining_turns}",
-            ]
-        )
+        parts.extend([
+            f"visible={self.agent_visible}",
+            f"surface={self.delivery_surface}",
+            f"tokens={self.payload_tokens}",
+            f"turns_left={self.remaining_turns}",
+        ])
         if self.task_id:
             parts.insert(0, f"task={self.task_id}")
         return "[GT_TRACE] " + " ".join(parts)

@@ -3,14 +3,55 @@
 Every GT signal must end in exactly one terminal state.
 No silent drops — if a signal is not delivered, there must be a logged reason.
 """
-
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+# Canonical durable-sink defaults (W1a): the mini seam's _ledger_line_direct used
+# GT_RUNTIME_LEDGER / /tmp/gt_runtime_ledger.jsonl; this module is now the canonical
+# home of that semantics and the mini adopts append_ledger_line in W2.
+DEFAULT_SINK_ENV = "GT_RUNTIME_LEDGER"
+DEFAULT_SINK_PATH = "/tmp/gt_runtime_ledger.jsonl"
+
+
+def resolve_sink_path(explicit: str | None = None) -> str:
+    """The durable-ledger file path: an explicit argument wins, else the
+    ``GT_RUNTIME_LEDGER`` env var, else :data:`DEFAULT_SINK_PATH`."""
+    if explicit:
+        return explicit
+    return os.environ.get(DEFAULT_SINK_ENV, DEFAULT_SINK_PATH)
+
+
+def append_ledger_line(entry: dict[str, Any], path: str) -> None:
+    """SIGKILL-safe append of ONE JSON line to the durable ledger FILE.
+
+    Durability by construction: the record is APPENDED (never a truncate-then-rewrite,
+    which has a window where a mid-write SIGKILL blanks the whole file) and the write
+    completes before the ``with`` block closes the handle, so the bytes reach the OS
+    the instant the record is made and survive process death. A ``timestamp_ms`` is
+    injected when absent (schema parity with :meth:`LedgerEntry.to_dict`). Best-effort:
+    telemetry must NEVER break the agent loop, so every I/O error is swallowed.
+
+    This is the canonical, standalone home of the semantics
+    ``gt_mini_patch._ledger_line_direct`` provides; the mini seam adopts THIS in W2."""
+    try:
+        if "timestamp_ms" not in entry:
+            try:
+                entry = {**entry, "timestamp_ms": int(time.time() * 1000)}
+            except Exception:  # noqa: BLE001
+                entry = {**entry, "timestamp_ms": 0}
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception:  # noqa: BLE001 — telemetry must never break the agent loop
+        pass
 
 
 class SignalOutcome(str, Enum):
@@ -53,47 +94,37 @@ class LedgerEntry:
 
 
 class Ledger:
-    """Append-only log of every GT signal decision."""
+    """Append-only log of every GT signal decision.
 
-    def __init__(self) -> None:
+    An optional durable file sink (``sink_path``) makes each recorded entry survive a
+    mid-run SIGKILL: on :meth:`record` the entry is ALSO appended as one JSON line to
+    the sink via :func:`append_ledger_line`. When ``sink_path`` is ``None`` (the
+    default) the Ledger is exactly its prior in-memory-only self — byte-identical."""
+
+    def __init__(self, sink_path: str | None = None) -> None:
         self._entries: list[LedgerEntry] = []
+        self._sink_path = sink_path
 
     def record(self, entry: LedgerEntry) -> None:
         self._entries.append(entry)
+        if self._sink_path:
+            append_ledger_line(entry.to_dict(), self._sink_path)
 
-    def delivered(
-        self, layer: str, event_type: str, file_path: str, chars: int, iteration: int = 0
-    ) -> None:
-        self.record(
-            LedgerEntry(
-                layer=layer,
-                event_type=event_type,
-                file_path=file_path,
-                outcome=SignalOutcome.DELIVERED,
-                chars_delivered=chars,
-                iteration=iteration,
-            )
-        )
+    def delivered(self, layer: str, event_type: str, file_path: str,
+                  chars: int, iteration: int = 0) -> None:
+        self.record(LedgerEntry(
+            layer=layer, event_type=event_type, file_path=file_path,
+            outcome=SignalOutcome.DELIVERED, chars_delivered=chars,
+            iteration=iteration,
+        ))
 
-    def suppressed(
-        self,
-        layer: str,
-        event_type: str,
-        file_path: str,
-        outcome: SignalOutcome,
-        reason: str = "",
-        iteration: int = 0,
-    ) -> None:
-        self.record(
-            LedgerEntry(
-                layer=layer,
-                event_type=event_type,
-                file_path=file_path,
-                outcome=outcome,
-                reason=reason,
-                iteration=iteration,
-            )
-        )
+    def suppressed(self, layer: str, event_type: str, file_path: str,
+                   outcome: SignalOutcome, reason: str = "",
+                   iteration: int = 0) -> None:
+        self.record(LedgerEntry(
+            layer=layer, event_type=event_type, file_path=file_path,
+            outcome=outcome, reason=reason, iteration=iteration,
+        ))
 
     @property
     def entries(self) -> list[LedgerEntry]:

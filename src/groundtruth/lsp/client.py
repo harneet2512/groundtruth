@@ -55,7 +55,6 @@ def _ensure_rust_toolchain_on_path(server_command: list[str] | str) -> None:
             logger.info("rust toolchain located off-PATH; prepended %s for rust-analyzer", d)
             return
 
-
 _TRACE_TRUNCATE_BYTES = 10 * 1024  # 10KB
 _TRACE_MAX_FILES = 3
 
@@ -97,6 +96,15 @@ class LSPClient:
         # answer to a known query arrives (readiness), independent of the bool return
         # (which reports transport-liveness — the process replied at all).
         self.probe_answered_ok = False
+        # Workspace readiness: the language server finished loading the workspace so
+        # definition queries can actually resolve (distinct from transport-liveness).
+        # None = not yet observed; set by the readiness barrier that drives resolution.
+        self.project_ready: bool | None = None
+        # B3-#7 (LSP warm-gate honesty): count of definition lookups that ANSWERED but
+        # returned EMPTY (no location). This is the "~44% of definition lookups return
+        # empty" signal made measurable at the dispatch layer — independent of
+        # transport-liveness — so a transport-alive-but-unproductive server is visible.
+        self.empty_definition_lookups = 0
 
     @property
     def is_running(self) -> bool:
@@ -114,17 +122,45 @@ class LSPClient:
             # never reaches project_ready -> 0 conversions. Robustly locate an off-PATH toolchain.
             _ensure_rust_toolchain_on_path(self._server_command)
             resolved_cmd = resolve_command(self._server_command)
+            # Cap the LANGUAGE SERVER's heap. A huge monorepo (drizzle-orm/effect: tsserver
+            # loads the WHOLE project per tsconfig at `initialize`, 10-15GB) with no cap
+            # exhausts the runner's RAM+swap and the HOST OOM-killer SIGTERMs the job (exit
+            # 143, nothing uploads — the 6 TS/Go failures on run 27855582405). Scoping our
+            # QUERIES doesn't help: the server auto-loads the workspace from its project
+            # config, not from which files we open. NODE_OPTIONS caps the V8 heap for
+            # pyright/tsserver (inherited by the tsserver child that typescript-language-
+            # server spawns); GOMEMLIMIT makes gopls' GC aggressive at the ceiling. A server
+            # that hits the cap GCs harder / degrades / exits cleanly -> the proof falls back
+            # to the tree-sitter graph + brief (correct-or-quiet), instead of OOM-killing the
+            # whole run. rust-analyzer has no such knob (and Rust repos warmed fine), so it is
+            # left uncapped. Tunable via GT_LSP_SERVER_MAX_MB (default 8192).
+            _srv_env = dict(os.environ)
+            _cmd0 = os.path.basename(str(resolved_cmd[0])) if resolved_cmd else ""
+            try:
+                _cap_mb = int(os.environ.get("GT_LSP_SERVER_MAX_MB", "8192") or "8192")
+            except ValueError:
+                _cap_mb = 8192
+            if _cap_mb > 0:
+                if any(n in _cmd0 for n in ("typescript-language-server", "pyright", "node")):
+                    _node_opts = _srv_env.get("NODE_OPTIONS", "")
+                    if "max-old-space-size" not in _node_opts:
+                        _srv_env["NODE_OPTIONS"] = f"{_node_opts} --max-old-space-size={_cap_mb}".strip()
+                elif "gopls" in _cmd0:
+                    _srv_env.setdefault("GOMEMLIMIT", f"{_cap_mb}MiB")
             self._process = await asyncio.create_subprocess_exec(
                 *resolved_cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_srv_env,
             )
             # Drain stderr from the start: stderr=PIPE that nobody reads both hides
             # the server's die-reason AND can deadlock a chatty server once the OS
             # pipe buffer fills. See _drain_stderr.
             if self._process.stderr is not None:
-                self._stderr_task = asyncio.create_task(self._drain_stderr(self._process.stderr))
+                self._stderr_task = asyncio.create_task(
+                    self._drain_stderr(self._process.stderr)
+                )
             self._started = True
             return Ok(None)
         except (OSError, FileNotFoundError) as exc:
@@ -322,8 +358,41 @@ class LSPClient:
                 break
             await asyncio.sleep(min(interval, remaining))
         # Deadline reached with no Ok. Report transport-liveness if the process ever
-        # replied (alive but not ready); False if it never responded at all.
+        # replied (alive but not ready); False if it never responded at all. This is the
+        # raw TRANSPORT-level signal and MUST stay transport-only — the honest higher-level
+        # active/valid verdict is warm_verdict() below, layered on top of this.
         return transport_alive
+
+    def warm_verdict(self) -> str:
+        """Honest higher-level warm verdict (B3-#7 LSP warm-gate honesty).
+
+        Transport-liveness — the process REPLIED (``probe_ready`` returning True) — is NOT
+        readiness. A server can be transport-alive yet answer no definition/readiness probe
+        (the witnessed "~44% of definition lookups return empty" case) and must NOT
+        self-certify as active/valid from transport alone. ``LSP_ACTIVE_VALID`` requires
+        BOTH readiness signals proven: the readiness probe ANSWERED (``probe_answered_ok``)
+        AND the workspace LOADED (``project_ready``). Otherwise the honest verdict is
+        ``LSP_DEGRADED`` — never a fake ACTIVE_VALID. ``probe_ready`` keeps returning raw
+        transport-liveness (unchanged); this verdict sits above it.
+
+        MUTATION-CHECK: reverting this to ``return "LSP_ACTIVE_VALID"`` (transport-only)
+        makes the warm-gate test fail — a transport-alive-but-not-ready stub would then
+        certify ACTIVE_VALID.
+        """
+        if self.probe_answered_ok is True and self.project_ready is True:
+            return "LSP_ACTIVE_VALID"
+        return "LSP_DEGRADED"
+
+    def readiness_fields(self) -> dict[str, Any]:
+        """Readiness snapshot for the LSP certificate / foundational gate: the two honest
+        readiness signals plus the empty-definition-lookup counter, so the "~44% empty"
+        rate is measurable downstream instead of being hidden behind transport-liveness."""
+        return {
+            "probe_answered_ok": bool(self.probe_answered_ok),
+            "project_ready": self.project_ready,
+            "empty_definition_lookups": int(self.empty_definition_lookups),
+            "warm_verdict": self.warm_verdict(),
+        }
 
     async def _send_response(self, msg_id: int | str, result: object = None) -> None:
         """Send a response to a server-initiated request."""
@@ -678,13 +747,21 @@ class LSPClient:
         }
         result = await self.send_request("textDocument/definition", params)
         if isinstance(result, Err):
+            # A transport/LSP error is NOT an empty answer (it never resolved); the
+            # empty-lookup counter tracks ANSWERED-but-empty, matching resolve.py's
+            # failed_empty. Errors are counted elsewhere (failed_lsp_error).
             return result
         raw = result.value
         if raw is None:
+            # B3-#7: server answered with no definition — the "~44% empty" signal.
+            self.empty_definition_lookups += 1
             return Ok([])
         if isinstance(raw, dict):
             return Ok([Location.model_validate(raw)])
         locations = [Location.model_validate(loc) for loc in raw]
+        if not locations:
+            # B3-#7: answered with an empty location list — also an empty lookup.
+            self.empty_definition_lookups += 1
         return Ok(locations)
 
     async def did_open(

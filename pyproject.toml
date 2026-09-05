@@ -17,7 +17,11 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
-    "mcp>=1.0.0,<3.0",
+    # mcp 2.0.0 REMOVED `mcp.server.fastmcp`, which src/groundtruth/mcp/server.py
+    # and composite_server.py import at module scope. Every mcp API this repo
+    # touches is 1.x-only (mcp.server.fastmcp.FastMCP, mcp.server.Server,
+    # mcp.types, mcp.ClientSession, mcp.client.stdio) — nothing needs 2.x.
+    "mcp>=1.0.0,<2.0",
     "pydantic>=2.0.0,<3.0",
     "structlog>=24.0.0,<26.0",
 ]
@@ -36,6 +40,24 @@ Issues = "https://github.com/harneet2512/groundtruth/issues"
 ai = ["anthropic>=0.30.0,<1"]
 gitignore = ["pathspec>=0.12.0,<1"]
 dev = [
+    # Imported directly by the fail-closed determinism/identity test corpus.
+    # CI installs only this extra, so omitting numpy breaks collection before
+    # any GroundTruth test executes.
+    "numpy>=1.26.0,<3",
+    # Paired-metric tests import scipy.stats during collection.
+    "scipy>=1.11.0,<2",
+    # Workflow contract tests parse YAML directly rather than through a core
+    # dependency, so keep the test dependency explicit.
+    "PyYAML>=6.0.0,<7",
+    "tree-sitter-language-pack>=1.13.0,<2",
+    # Contract tests import the benchmark harness; pin the same Mini-SWE
+    # version used by the Phase II integration rather than relying on a
+    # workstation-global installation.
+    "mini-swe-agent==2.3.0",
+    # Embedder contract tests patch these runtimes but still import their real
+    # public APIs as a guard against integration drift.
+    "onnxruntime>=1.18.0,<2",
+    "tokenizers>=0.19.0,<1",
     "pytest>=8.0.0,<9",
     "pytest-asyncio>=0.23.0,<1",
     "pytest-timeout>=2.3.0,<3",
@@ -44,17 +66,14 @@ dev = [
     "ruff>=0.4.0,<1",
     "coverage>=7.0.0,<8",
     "pathspec>=0.12.0,<1",
-    "pyyaml>=6.0.0,<7",
-    "mcp>=1.0.0,<2",
-    "filelock>=3.0.0,<4",
-    "numpy>=1.24.0,<3",
-    "pydantic>=2.0.0,<3",
-    "structlog>=23.0.0,<26",
-    "anthropic>=0.30.0,<1",
-    "onnxruntime>=1.16.0,<2",
-    "colorama>=0.4.0,<1",
-    "tree-sitter-language-pack>=0.6.0,<1",
-    "gitpython>=3.1.0,<4",
+    # NOT a core dependency, deliberately: the capsule budgeter degrades to the
+    # char/4 estimate without it and now SAYS SO (UncalibratedCapsuleBudgetWarning
+    # + capsule_token_estimator_kind() == "char4_estimate"). It is here so CI --
+    # which installs `.[dev]` -- enforces the budget with REAL cl100k counts
+    # instead of an estimate. Until 2026-07-29 tiktoken reached this repo only
+    # transitively through the `benchmark` extra (openai/litellm), so any
+    # interpreter holding just the declared deps silently ran uncalibrated.
+    "tiktoken>=0.7.0,<1",
 ]
 benchmark = [
     "openai>=1.0.0,<2",
@@ -74,7 +93,7 @@ benchmark = [
 groundtruth = "groundtruth.main:cli"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -83,26 +102,6 @@ packages = ["src/groundtruth"]
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-
-[tool.ruff.lint]
-# Explicit rule set — CI and local must agree. Without this, ruff's default
-# rule set varies by version, and the CI runner (ruff 0.4–0.x) enables
-# different rules than a local 0.15+. The three families below are what the
-# mechanical pass at 327f70235 cleaned, and what the repo can pass today.
-select = ["E", "F", "W"]
-# Judgment-call classes deferred to a reviewed pass (REV-280).
-# Mechanical classes (F401, F541, E401, E713) were fixed at 327f70235.
-# These remain and are tracked — do NOT add blanket ignores beyond this list.
-ignore = [
-    "E501",  # line-too-long (395 instances; ruff format handles line length)
-    "E402",  # module-import-not-at-top-of-file (14 instances, deliberate conditional imports)
-    "E701",  # multiple-statements-on-one-line-colon (9, one-liner branches)
-    "E702",  # multiple-statements-on-one-line-semicolon (27, compact test assertions)
-    "E731",  # lambda-assignment (3, callbacks)
-    "E741",  # ambiguous-variable-name (35, single-letter math/loop vars)
-    "E742",  # ambiguous-class-name (2)
-    "F841",  # unused-variable (18, assigned-for-side-effect or debugging)
-]
 
 [tool.mypy]
 strict = true

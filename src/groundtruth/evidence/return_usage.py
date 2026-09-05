@@ -158,7 +158,9 @@ def classify_return_usage(caller_line: str, func_name: str) -> ReturnUsageLabel:
     return "UNKNOWN"
 
 
-def annotate_caller_lines(caller_lines: list[str], func_name: str) -> list[dict[str, str]]:
+def annotate_caller_lines(
+    caller_lines: list[str], func_name: str
+) -> list[dict[str, str]]:
     """Annotate multiple caller lines with return usage labels.
 
     Returns empty list when feature is disabled.

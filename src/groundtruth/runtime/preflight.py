@@ -12,7 +12,6 @@ Writes runtime_preflight.json (the context + the check results + the verdict) to
 --out, and exits non-zero (fail-closed) when GT_PROOF_MODE=1 and any check fails.
 Changes no GT product logic.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -29,9 +28,7 @@ def _run_census(runtime_root: str, graph_db: str, source_root: str) -> tuple[boo
     (passed, tail-of-output). Tries the in-container path first, then a checkout."""
     candidates = [
         os.path.join(runtime_root, "scripts", "verify", "preflight_pipeline.py"),
-        os.path.join(
-            os.environ.get("GITHUB_WORKSPACE", ""), "scripts", "verify", "preflight_pipeline.py"
-        ),
+        os.path.join(os.environ.get("GITHUB_WORKSPACE", ""), "scripts", "verify", "preflight_pipeline.py"),
         "scripts/verify/preflight_pipeline.py",
     ]
     script = next((p for p in candidates if p and os.path.exists(p)), "")
@@ -40,21 +37,15 @@ def _run_census(runtime_root: str, graph_db: str, source_root: str) -> tuple[boo
     try:
         cp = subprocess.run(
             [sys.executable, script, "--db", graph_db, "--root", source_root, "--census"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=600,
-        )
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
         tail = "\n".join((cp.stdout + cp.stderr).strip().splitlines()[-12:])
         return (cp.returncode == 0, tail)
     except Exception as e:
         return (False, f"census error: {e}")
 
 
-def run_preflight(
-    mode: str, source_root: str, graph_db: str, audit_dir: str, out: str, census: bool
-) -> int:
+def run_preflight(mode: str, source_root: str, graph_db: str, audit_dir: str,
+                  out: str, census: bool) -> int:
     ctx = GTRuntimeContext.from_env(source_root=source_root, graph_db=graph_db, audit_dir=audit_dir)
     require_graph = mode == "graph"
     results = ctx.checks(require_graph=require_graph)
@@ -63,9 +54,7 @@ def run_preflight(
     census_tail = ""
     if require_graph and census and ctx.graph_db:
         census_pass, census_tail = _run_census(ctx.runtime_root, ctx.graph_db, ctx.source_root)
-        results.append(
-            ("graph_dimension_census", bool(census_pass), census_tail.replace("\n", " | ")[:300])
-        )
+        results.append(("graph_dimension_census", bool(census_pass), census_tail.replace("\n", " | ")[:300]))
 
     failures = [(n, ok, d) for n, ok, d in results if not ok]
     verdict = {
@@ -91,10 +80,8 @@ def run_preflight(
         print(f"GT_PROOF_MODE=1 PREFLIGHT FAILED ({mode}): " + ", ".join(n for n, _, _ in failures))
         return 1
     if failures:
-        print(
-            f"PREFLIGHT WARNINGS ({mode}; not proof mode, not fatal): "
-            + ", ".join(n for n, _, _ in failures)
-        )
+        print(f"PREFLIGHT WARNINGS ({mode}; not proof mode, not fatal): "
+              + ", ".join(n for n, _, _ in failures))
     else:
         print(f"PREFLIGHT OK ({mode})")
     return 0

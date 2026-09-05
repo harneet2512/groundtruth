@@ -1,46 +1,22 @@
 """Centralized delivery path policy — vendored/generated/minified exclusions."""
-
 from __future__ import annotations
 
 import os
 
 _VENDOR_DIR_MARKERS: tuple[str, ...] = (
-    "/extern/",
-    "/externals/",
-    "/vendor/",
-    "/vendored/",
-    "/third_party/",
-    "/thirdparty/",
-    "/node_modules/",
-    "/bower_components/",
-    "/dist/",
-    "/_generated/",
-    "/generated/",
-    "/site-packages/",
-    "/static/",
-    "/assets/",
+    "/extern/", "/externals/", "/vendor/", "/vendored/", "/third_party/",
+    "/thirdparty/", "/node_modules/", "/bower_components/", "/dist/",
+    "/_generated/", "/generated/", "/site-packages/",
+    "/static/", "/assets/",
 )
 _MINIFIED_SUFFIXES: tuple[str, ...] = (".min.js", ".min.css", ".min.mjs", ".min.map")
 _GENERATED_FILE_MARKERS: tuple[str, ...] = (
-    "zz_generated",
-    ".pb.go",
-    ".pb.gw.go",
-    "_pb2.py",
-    "_pb2_grpc.py",
-    ".generated.",
-    "/generated/",
-    "_generated.go",
-    ".g.dart",
-    ".freezed.dart",
+    "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
+    ".generated.", "/generated/", "_generated.go", ".g.dart", ".freezed.dart",
 )
 # post_view legacy segment patterns (subset; path_policy is superset)
 _VENDOR_SEGMENT_PATTERNS: tuple[str, ...] = (
-    "static/",
-    "vendor/",
-    "node_modules/",
-    "dist/",
-    ".min.",
-    "assets/",
+    "static/", "vendor/", "node_modules/", "dist/", ".min.", "assets/",
 )
 
 
@@ -77,14 +53,8 @@ def is_vendored_path(fp: str) -> bool:
 # file IN it is codegen. These suffix markers are: protobuf (.pb.go/_pb2.py/...),
 # kubernetes deepcopy (zz_generated), dart codegen (.g.dart/.freezed.dart).
 _GENERATED_RANK_DEMOTE_SUFFIXES: tuple[str, ...] = (
-    "zz_generated",
-    ".pb.go",
-    ".pb.gw.go",
-    "_pb2.py",
-    "_pb2_grpc.py",
-    "_generated.go",
-    ".g.dart",
-    ".freezed.dart",
+    "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
+    "_generated.go", ".g.dart", ".freezed.dart",
 )
 
 
@@ -109,54 +79,43 @@ def is_generated(fp: str) -> bool:
 # `contest/`/`latest/` are NOT test dirs (the load-bearing invariant the parity
 # test pins). gt_mini_patch imports this with a local fallback (in-container the
 # groundtruth import may fail — same pattern as the fact set).
-_TEST_DIR_SEGMENTS: frozenset[str] = frozenset(
-    {
-        "test",
-        "tests",
-        "__tests__",
-        "__test__",
-        "spec",
-        "specs",
-        "e2e",
-        "testing",
-    }
-)
-_DEMO_NONSOURCE_DIR_SEGMENTS: frozenset[str] = frozenset(
-    {
-        "examples",
-        "example",
-        "demo",
-        "demos",
-        "sample",
-        "samples",
-        "fixtures",
-        "fixture",
-        "docs",
-        "doc",
-        "docs_src",
-        "doc_src",
-        "documentation",
-        "tutorial",
-        "tutorials",
-        "benchmark",
-        "benchmarks",
-        "benches",
-        "bench",
-        "vendor",
-        "node_modules",
-        "dist",
-        "build",
-        # fuzz / property-based / mutation test dirs (mirrors walker.go nonSourceDirSegments —
-        # DUPLICATION TRAP: keep these two sets in sync; the wasmi leak was fuzz/ missing here)
-        "fuzz",
-        "fuzzing",
-        "fuzz_targets",
-        "corpus",
-        "testcases",
-        "conformance",
-        "compat",
-        "integration_tests",
-        "e2e_tests",
+_TEST_DIR_SEGMENTS: frozenset[str] = frozenset({
+    # Fable LSP11: `__tests` (no trailing __) is csstree's real layout `lib/__tests/`;
+    # a segment-exact entry, so it never false-positives on `contest`/`latest`.
+    # Fable P11: `testing` REMOVED — it is production-ambiguous (Django `django/test`-style
+    # shipped test UTILITIES, Go `testing` helpers) and wrongly demoted/excluded real source.
+    # Mirrors walker.go nonSourceDirSegments (kept in sync).
+    "test", "tests", "__tests__", "__test__", "__tests", "spec", "specs", "e2e",
+})
+_DEMO_NONSOURCE_DIR_SEGMENTS: frozenset[str] = frozenset({
+    "examples", "example", "demo", "demos", "sample", "samples", "fixtures",
+    "fixture", "docs", "doc", "docs_src", "doc_src", "documentation",
+    "tutorial", "tutorials", "benchmark", "benchmarks", "benches", "bench", "vendor",
+    "node_modules", "dist", "build",
+    # fuzz / property-based / mutation test dirs (mirrors walker.go nonSourceDirSegments —
+    # DUPLICATION TRAP: keep these two sets in sync; the wasmi leak was fuzz/ missing here)
+    "fuzz", "fuzzing", "fuzz_targets", "corpus", "testcases",
+    # Fable P11: `conformance` + `compat` REMOVED — production-ambiguous (pandas/numpy
+    # `compat` shims, protobuf `conformance` are real source). Mirrors walker.go.
+    "integration_tests", "e2e_tests",
+})
+_TEST_TOOLING_ROOT_SEGMENTS: frozenset[str] = frozenset(
+    set(_TEST_DIR_SEGMENTS)
+    | set(_DEMO_NONSOURCE_DIR_SEGMENTS)
+    | {
+        "support",
+        "supports",
+        "helper",
+        "helpers",
+        "mock",
+        "mocks",
+        "stub",
+        "stubs",
+        "fake",
+        "fakes",
+        "testdata",
+        "testutils",
+        "testutil",
     }
 )
 
@@ -169,16 +128,66 @@ def _path_segments(path: str) -> tuple[list[str], str]:
     return segs, (segs[-1] if segs else "")
 
 
+# Exact test-module basenames the pattern markers below MISS: pytest ``conftest.py``
+# (fixtures that call product symbols — near-universal in Python repos) and the
+# Django/convention ``tests.py`` / ``test.py`` test modules. RATIONALE (corrected
+# 2026-07-05, Fable spec-review reconciliation): walker.go DOES now flag these at index
+# time (``walker.go:218`` sets is_test=1 on conftest.py/tests.py/test.py/*_tests.py,
+# Fable 2026-07-03), so a FRESHLY-BUILT graph is already correct. This Python guard is
+# defense-in-depth for FROZEN / pre-existing graphs indexed by an OLDER binary that
+# predates that rule (is_test=0 on their nodes) — without it a delivered CALLER line
+# could surface a graded-test function NAME + location (proven leak). Exact match (never
+# substring), so ``latest.py`` / ``mytest.py`` / ``attestation.py`` stay clean.
+_TEST_FILE_BASENAMES = frozenset({"conftest.py", "tests.py", "test.py"})
+
+
 def is_test_path(path: str) -> bool:
     """True iff a TEST file — by DIRECTORY SEGMENT (a relative top-level ``test/x.js``
     is caught; ``contest/``/``latest/`` are NOT — substring is never enough) OR a
-    basename marker (``test_*`` / ``*_test.*`` / ``*.test.*`` / ``*.spec.*``)."""
+    basename marker. FULL PARITY with the Go indexer's ``walker.IsTestFile``
+    (``gt-index/internal/walker/walker.go:210-271``) so this defense-in-depth guard
+    for FROZEN / stale-``is_test`` graphs catches EVERY test convention the walker
+    flags at index time — not just the Python/JS subset (Fable E2: the under-covering
+    set leaked ``*_tests.py`` / ``*.tests.ts`` / ``*_spec.rb`` / ``tests.rs`` /
+    ``FooTest.java`` bodies through witness/caller renders). Stem+ext rules are
+    EXT-GATED and CASE-SENSITIVE for the CamelCase forms, so ``latest.py`` /
+    ``attestation.py`` / ``mytest.py`` stay clean."""
     segs, bn = _path_segments(path)
     if not segs:
         return False
     if any(s in _TEST_DIR_SEGMENTS for s in segs[:-1]):
         return True
-    return bn.startswith("test_") or "_test." in bn or ".test." in bn or ".spec." in bn
+    if bn in _TEST_FILE_BASENAMES:
+        return True
+    # boundary-delimited basename markers (incl. the JS/TS plural .tests./.specs.)
+    if (bn.startswith("test_") or "_test." in bn or ".test." in bn or ".spec." in bn
+            or ".tests." in bn or ".specs." in bn):
+        return True
+    # walker.IsTestFile stem/ext parity (defense-in-depth on stale-is_test graphs).
+    # Use the ORIGINAL-CASE basename: bn is lowercased by _path_segments, which would
+    # break the CASE-sensitive CamelCase forms (FooTest.java) AND make lowercase
+    # "latest"/"attestation" ambiguous with a "test" suffix. ext is matched lowercased.
+    _ob = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    dot = _ob.rfind(".")
+    ext = (_ob[dot:] if dot > 0 else "").lower()
+    stem = _ob[:dot] if dot > 0 else _ob
+    if ext == ".py" and stem.endswith("_tests"):                    # pytest plural module
+        return True
+    if ext in (".java", ".kt", ".kts", ".scala", ".groovy") and (  # JVM (CASE-sensitive)
+            stem.endswith("Test") or stem.endswith("Tests") or stem.endswith("Spec")):
+        return True
+    if ext == ".cs" and (stem.endswith("Test") or stem.endswith("Tests")):  # C#
+        return True
+    if ext == ".php" and stem.endswith("Test"):                    # PHPUnit
+        return True
+    if ext == ".swift" and (stem.endswith("Tests") or stem.endswith("Test")):
+        return True
+    if ext == ".rb" and stem.endswith("_spec"):                    # RSpec
+        return True
+    if ext == ".rs" and (                                          # Rust module test files
+            bn in ("tests.rs", "test.rs") or stem.endswith("_tests")):
+        return True
+    return False
 
 
 def is_test_or_demo(path: str) -> bool:
@@ -190,6 +199,18 @@ def is_test_or_demo(path: str) -> bool:
     if any(s in _DEMO_NONSOURCE_DIR_SEGMENTS for s in segs[:-1]):
         return True
     return is_test_path(path)
+
+
+def _has_test_tooling_root_marker(path: str) -> bool:
+    """True when a candidate root's own path indicates test/support/tooling.
+
+    Import topology alone is not a source-role proof: normal production roots can
+    be imported mostly or only by tests in sparse graphs. Hard test-tooling
+    exclusion therefore needs an independent path-role marker before the graph
+    import fixpoint may classify the root.
+    """
+    segs, _ = _path_segments(path)
+    return any(s in _TEST_TOOLING_ROOT_SEGMENTS for s in segs)
 
 
 def is_deliverable(path: str) -> bool:
@@ -215,7 +236,6 @@ def test_tooling_roots(graph_db: str) -> frozenset[str]:
     must be tests; ``require``→``assert`` (both non-test, same vendored tree) does NOT
     disqualify the ``internal/testify`` root because that importer is INSIDE it."""
     import sqlite3
-
     pairs: list[tuple[str, str]] = []
     try:
         conn = sqlite3.connect(graph_db)
@@ -258,8 +278,11 @@ def test_tooling_roots(graph_db: str) -> frozenset[str]:
         for d, imps in ext_importers.items():
             if d in roots:
                 continue
+            if not _has_test_tooling_root_marker(d):
+                continue
             if imps and all(
-                is_test_path(i) or any(i == r or i.startswith(r + "/") for r in roots) for i in imps
+                is_test_path(i) or any(i == r or i.startswith(r + "/") for r in roots)
+                for i in imps
             ):
                 roots.add(d)
                 changed = True

@@ -13,12 +13,12 @@ Edge type weights (language-agnostic, stored graph edges only):
   COMPOSES   = 0.4
   RE_EXPORTS = 0.5
 """
-
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import defaultdict
+from typing import Optional
 
 # I2 (depth↔rank isolation): the reach BFS feeds the localizer RANK (W_REACH in
 # _total_score) AND the graph_expand candidate set. Per invariant I2 ("depth never
@@ -82,7 +82,7 @@ def _build_file_graph(
           AND n2.file_path IS NOT NULL
           AND n1.file_path != n2.file_path
           AND COALESCE(e.confidence, 0.5) >= ?
-          AND {_degree_edge_filter("e")}
+          AND {_degree_edge_filter('e')}
         """,
         (min_confidence,),
     )
@@ -136,7 +136,6 @@ def compute_reach(
 
     # BFS queue: (current_file, depth, path_edge_product)
     from collections import deque
-
     queue: deque[tuple[str, int, float]] = deque()
 
     for anchor in trusted_anchors:

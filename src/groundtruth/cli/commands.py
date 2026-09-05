@@ -534,7 +534,9 @@ def gt_run_tests_cmd(
     plan = _load_plan_json(plan_path)
     patch = audit_patch(root, plan=plan)
     changed = (
-        patch["source_files_touched"] + patch["test_files_touched"] + patch["outside_cluster_files"]
+        patch["source_files_touched"]
+        + patch["test_files_touched"]
+        + patch["outside_cluster_files"]
     )
     selection = select_test_command(
         root,

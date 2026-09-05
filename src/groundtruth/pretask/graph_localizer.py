@@ -36,7 +36,6 @@ violate GroundTruth's LLM-free, deterministic-only core contract.
 
 Everything here is pure sqlite + regex over graph.db. No model, no network.
 """
-
 from __future__ import annotations
 
 import os
@@ -44,7 +43,7 @@ import re as _re
 import sqlite3
 import statistics
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from groundtruth.pretask.anchors import IssueAnchors, extract_issue_anchors
 from groundtruth.pretask.curation_map import (
@@ -53,7 +52,15 @@ from groundtruth.pretask.curation_map import (
     _has_columns,
     _open_ro,
 )
+from groundtruth.index.repo_scope import RepoScope, for_read
 from groundtruth.confidence import dynamic_cutoff, is_seed_pollutant
+
+
+def _repo_frag(scope: "RepoScope | None", alias: str = "") -> tuple[str, tuple]:
+    """SM-9a: (SQL fragment, params) scoping a ``nodes`` read to the active repo, or
+    ("", ()) when there is no scope (single-repo / legacy / no scope passed). Central
+    so every seed producer scopes identically and single-repo stays byte-identical."""
+    return scope.node_filter(alias) if scope is not None else ("", ())
 
 # _STDLIB_HEADS deleted (Step 2): it was DEAD — the code's own comment noted the
 # `nbr_name in _STDLIB_HEADS` guard never fired (the shadow token is the attribute,
@@ -77,16 +84,8 @@ from groundtruth.confidence import dynamic_cutoff, is_seed_pollutant
 # quiet (it only SUPPRESSES a known-spurious unverified edge), not poison.
 _STDLIB_ATTRS: frozenset[str] = frozenset(
     {
-        "walk",
-        "loads",
-        "dumps",
-        "utcnow",
-        "getlogger",
-        "basicconfig",
-        "deepcopy",
-        "namedtuple",
-        "defaultdict",
-        "fromtimestamp",
+        "walk", "loads", "dumps", "utcnow", "getlogger", "basicconfig",
+        "deepcopy", "namedtuple", "defaultdict", "fromtimestamp",
     }
 )
 
@@ -140,11 +139,13 @@ W_SUBJECT = 0.15
 # grep finds files with keywords, the graph finds files at the CENTER of
 # the keyword-relevant code cluster. Weight above W_DEGREE (it's a stronger
 # structural signal) but below W_WITNESS (direct edge > neighborhood count).
-# PPR: Personalized PageRank structural signal. The graph's depth advantage
-# over grep — PPR propagates mass through the call graph from seed nodes,
-# capturing multi-hop structural proximity. Weight above W_DEGREE (it's a
-# richer structural signal from the full graph) but below W_WITNESS (a
-# direct verified edge is stronger than diffused PPR mass).
+# NOTE (doc correction): Personalized PageRank is NOT implemented — there is no
+# W_PPR constant and no PPR computation in this module. Multi-hop structural
+# proximity is captured instead by the path-decay reach signal (`_path_decay_scores`,
+# Dijkstra over verified edges) fused via RRF (GT_LOC_FUSION_V2). This paragraph is
+# retained only to record that PPR was considered and deliberately NOT built (reach
+# already over-promotes hubs; the architecture subordinates structural reach on
+# purpose — adding diffused PPR mass would worsen the hub-bias, not help).
 
 # Witness strength by edge provenance (correct-or-quiet).
 # EDGE witnesses (CALLS/IMPORTS): structural evidence — the file is connected
@@ -154,9 +155,9 @@ W_SUBJECT = 0.15
 # carries no structural depth. Must score BELOW edge witnesses so the graph
 # actually adds ranking value over grep (LIPI diagnosis: when both scored 1.0,
 # the localizer degenerated to expensive BM25 — 23% hit@1).
-_WITNESS_VERIFIED = 1.0  # verified EDGE witness (CALLS/IMPORTS)
-_WITNESS_DEFINES = 0.55  # DEFINES witness — above name_match but below edges
-_WITNESS_NAMEMATCH = 0.45  # unverified name_match edge
+_WITNESS_VERIFIED = 1.0     # verified EDGE witness (CALLS/IMPORTS)
+_WITNESS_DEFINES = 0.55     # DEFINES witness — above name_match but below edges
+_WITNESS_NAMEMATCH = 0.45   # unverified name_match edge
 # Hop decay is applied inline in Witness.strength() as 1/(1+hop).
 #
 # DEFINES vs verified-EDGE strength inversion guard (#57). A DEFINES witness is
@@ -205,15 +206,8 @@ _MIN_ANCHOR_LEN = 3
 # counts to the unfiltered query. It becomes load-bearing only once promoted edges
 # exist.
 _PROMOTED_EDGE_TYPES: tuple[str, ...] = (
-    "DATA_FLOW",
-    "READS",
-    "WRITES",
-    "RAISES",
-    "CO_SERIALIZES",
-    "PRECEDES",
+    "DATA_FLOW", "READS", "WRITES", "RAISES", "CO_SERIALIZES", "PRECEDES",
 )
-
-
 # SQL predicate (alias-parameterized) that EXCLUDES promoted relationship edges and
 # any promoted-provenance edge from a degree count. `{a}` is the edge-table alias.
 def _degree_edge_filter(a: str) -> str:
@@ -227,15 +221,20 @@ def _degree_edge_filter(a: str) -> str:
 
 # Shared FTS5 DDL — single source of truth so schema changes don't diverge
 # across the Go indexer, Python fallback, and preflight script.
+# STANDALONE FTS5 (NOT content='nodes' external-content): the query-path fallback
+# builds nodes_fts in a PRIVATE in-memory db with graph.db ATTACHed read-only, so the
+# read-only query path NEVER writes graph.db (was: CREATE/INSERT INTO the source db ->
+# mutated a read-only artifact + changed its sha256 + could race a concurrent reader).
+# An external-content table binds to a `nodes` table in its OWN db; here `nodes` lives in
+# the attached `src`, so we store the column VALUES to keep the index self-contained.
 _FTS5_CREATE = """
-CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-    name, qualified_name, signature, file_path,
-    content='nodes', content_rowid='id'
+CREATE VIRTUAL TABLE nodes_fts USING fts5(
+    name, qualified_name, signature, file_path
 )"""
 _FTS5_POPULATE = """
 INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
 SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
-FROM nodes WHERE is_test = 0
+FROM src.nodes WHERE is_test = 0
 """
 
 # Composite rerank weights (Phase 1: FTS5 + path decay added).
@@ -247,7 +246,12 @@ FROM nodes WHERE is_test = 0
 # BM25 and PathDecay are NEW signals that ADD to the existing witness/lex/degree
 # scoring. They do not replace any existing signal — backward compatible.
 W_BM25 = 0.35
-W_PATH_DECAY = 0.30
+# W_PATH_DECAY = path-decay reach in localize()'s composite (feeds entries[0], the
+# agent's #1). BRIEFING §3 lever #2: 0.30→0.15 "cut reach-family dominance" (BLUiR
+# ASE 2013). This is the @1 lever (the run_v74 RRF reach-drop only moves the candidate
+# window, not the headline — integration audit a728d099c70ce7213). Env-tunable so the
+# OSS-60 falsifier can A/B it one variable at a time; default 0.30 = unchanged.
+W_PATH_DECAY = float(os.environ.get("GT_LOC_W_PATH_DECAY", "0.30"))
 
 # GREP-FLOOR (Phase 4) — placement of depth-injected (grep-MISSED) candidates
 # relative to the grep-recalled floor. The human's call; default conservative.
@@ -257,6 +261,78 @@ W_PATH_DECAY = 0.30
 #                                    interleave into the floor (recall-leaning; tune
 #                                    on the 5-lang set AFTER the human sees numbers).
 INJECTION_PLACEMENT = os.environ.get("GT_INJECTION_PLACEMENT", "strictly_below_floor")
+
+# ── LOCALIZER FUSION V2 (Reciprocal-Rank-Fusion re-architecture) ──────────────
+# Default OFF. When OFF, NONE of the V2 code paths are entered and the emitted
+# ranking is byte-identical to the magnitude composite (the mandatory diff gate).
+#
+# Rationale (Cormack et al., SIGIR 2009; k=60): the magnitude composite at the
+# score body AVERAGES zero-valued companion terms for file classes that
+# structurally can't score on an axis (config files, binary entrypoints,
+# proc-macro crates), drowning a surface that already maxes at gold (path=1.0 or
+# lex=1.0). RRF is rank-based and dilution-immune: a list that ranks gold #1
+# contributes 1/(k+1) regardless of the other lists' scores. It also needs no
+# score normalization and is robust when any one list is weak.
+#
+# Two genuinely independent surfaces are added (the only ones not keyed on
+# nodes.name, per CLAUDE.md Lim#6): L5 file-CONTENT IDF-coverage (on-disk body
+# tokens) and L6 path-IDF coverage (file_path tokens). On behavior-described
+# issues (`nl_gap`, via the already-shipped _classify_issue_lexicality) the name
+# lists L1/L2/L4 are demoted by widening their RRF-k (~10x smaller contribution)
+# so the independents LEAD. SPLADE/dense are explicitly OUT of scope (add a model;
+# overfit risk). The Go-indexer body-FTS (true BM25F) is Phase 2 (needs REBUILD).
+GT_LOC_FUSION_V2 = os.environ.get("GT_LOC_FUSION_V2", "1") != "0"          # BAKED default ON — independent-surface RRF fusion. Proven generalizing 2026-06-29: OSS-60 +2 @1/+2 in8 AND held-out +1, 0 per-lang regression (vs every prior approach that overfit). Revert: GT_LOC_FUSION_V2=0.
+GT_LOC_BEHAVIOR_LEAD = os.environ.get("GT_LOC_BEHAVIOR_LEAD", "0") != "0"  # BAKED default OFF — the behavior-gate SUPPRESSED the held-out lift (fuse_full held-out +0 vs fuse_nolead +1); plain RRF+independents generalizes better.
+GT_LOC_RRF_K = int(os.environ.get("GT_LOC_RRF_K", "60"))                    # Cormack default
+GT_LOC_RRF_K_DEMOTE = int(os.environ.get("GT_LOC_RRF_K_DEMOTE", "600"))     # name-list k on nl_gap
+GT_LOC_CONTENT_MAXFILES = int(os.environ.get("GT_LOC_CONTENT_MAXFILES", "200"))  # bound on-disk reads
+GT_LOC_PRF = os.environ.get("GT_LOC_PRF", "0") != "0"                       # optional RM3, default OFF
+# Ablation control (Arm 3): RRF re-fusion of the EXISTING name-keyed surfaces
+# only — excludes the two new independent lists L5/L6. Default OFF (no effect
+# unless fusion on). Separates the magnitude-dilution win from the independent-
+# surface win in the A/B (see arm definitions).
+GT_LOC_FUSION_EXCLUDE_INDEP = os.environ.get("GT_LOC_FUSION_EXCLUDE_INDEP", "0") != "0"
+
+# Reach edge-type scope — trickle-down of the indexer depth fix (RE_EXPORTS/COMPOSES,
+# 2026-06-29). The path-decay reach (the @1 ranking lever, W_PATH_DECAY) traverses
+# CALLS/IMPORTS by default, mirroring the CALLS-pure transitive closure. With
+# GT_LOC_REACH_DEPTH=1 it ALSO follows the structural depth edges (RE_EXPORTS
+# barrel->source, COMPOSES class->field-type, EXTENDS/IMPLEMENTS) so the newly-emitted
+# depth edges feed @1.
+# DEFAULT OFF — KEEP OFF (measured harmful, 2026-06-29). A/B on the depth-fixed digest:
+# OSS-60 @1 flat (+0) / in8 -1 (rust regressed). Root cause (rnd_rust_regex_1308 miss_diag):
+# depth edges give non-gold files nonzero reach (regex has ~137 IMPLEMENTS + many COMPOSES =
+# hubs), and a lexically-perfect gold with reach=0.0 gets outranked by depth-reach-boosted
+# hubs -> falls out of delivered top-8. This is BRIEFING #3 (reach over-promotes hubs;
+# Rust worst-hit, traits implemented by many structs). The depth edges trickle-down via the
+# MAP + degree + brief (where they belong), NOT the @1 reach. Do NOT enable without a
+# hub-gated redesign that proves a held-out lift with 0 per-lang regression.
+GT_LOC_REACH_DEPTH = os.environ.get("GT_LOC_REACH_DEPTH", "0") != "0"
+_REACH_EDGE_TYPES = ("CALLS", "IMPORTS")
+if GT_LOC_REACH_DEPTH:
+    _REACH_EDGE_TYPES = ("CALLS", "IMPORTS", "RE_EXPORTS", "COMPOSES", "EXTENDS", "IMPLEMENTS")
+_REACH_EDGE_TYPES_SQL = ", ".join("'" + _t + "'" for _t in _REACH_EDGE_TYPES)
+
+
+def _is_test_block_name(sym: str) -> bool:
+    """Test-framework block names that carry test DESCRIPTIONS, not code symbols.
+    Mocha `it('should remove...')`, Jest `test('...')`, describe blocks.
+    The indexer stores these as node names; rendering them as witnesses leaks
+    test descriptions into the brief (LEAKAGE). Defense-in-depth: the BFS
+    already filters is_test=0 on neighbors, but this catches any that slip
+    through (e.g. from seed-minting or cross-hop provenance)."""
+    s = (sym or "").strip()
+    if (s.startswith("it:") or s.startswith("it ") or
+            s.startswith("describe:") or s.startswith("describe ") or
+            s.startswith("test(") or s.startswith("test ") or
+            " should " in s):
+        return True
+    # E2 (Fable 2026-07-05): also catch pytest/unittest test SYMBOL names — test_foo (^test_),
+    # foo_test (_test$), TestClass (^Test[A-Z]) — that a stale graph (is_test flag unset) can
+    # slip into a witness field. Correct-or-quiet: suppressing a witness never invents one.
+    if s.startswith("test_") or s.endswith("_test"):
+        return True
+    return s.startswith("Test") and len(s) > 4 and s[4].isupper()
 
 
 def _is_generic_symbol(sym: str) -> bool:
@@ -274,41 +350,22 @@ def _is_generic_symbol(sym: str) -> bool:
 
 
 from groundtruth.delivery.path_policy import is_generated as _is_generated
+from groundtruth.delivery.path_policy import is_test_path as _is_test_path_pp
+from groundtruth.delivery.path_policy import is_vendored_path as _is_vendored_path_pp
 
 
-# Test file detection — language-agnostic patterns covering all 5+ Tier-1
-# languages. Test files are observation/verification artifacts, never the edit
-# target for a bug fix. They often DEFINE issue-named symbols (test functions
-# for the broken feature) so they score high on DEFINES witnesses, but they
-# are structurally wrong targets — applying the same heavy demote as generated
-# files (score -= penalty, not hard drop) keeps them in the candidate list for
-# reference while preventing them from ranking #1.
-_TEST_PATTERNS: tuple[str, ...] = (
-    "test_",
-    "_test.",
-    ".test.",
-    ".spec.",
-    "_spec.",
-    "/tests/",
-    "/test/",
-    "/__tests__/",
-    "testing/",
-    "testutil",
-    "test_helper",
-)
-
-
-def _is_test_file(fp: str) -> bool:
-    """True for test/spec files across all supported languages."""
-    f = os.path.basename((fp or "").lower())
-    p = (fp or "").replace("\\", "/").lower()
-    return any(m in f or m in p for m in _TEST_PATTERNS)
+# Test-file detection is delegated to the CANONICAL segment-based predicate
+# (delivery.path_policy.is_test_path, imported above as _is_test_path_pp) so the localizer's
+# non-source demote and the brief-render test filter agree. A local substring predicate lived here
+# and drifted from path_policy (it matched "testing/" as a substring, which P11 removed as
+# production-ambiguous) — B-Finding2 (Fable LIPI) removed it to end the re-divergence.
 
 
 def _fts5_candidates(
     conn: sqlite3.Connection,
     issue_tokens: set[str],
     limit: int = 50,
+    scope: "RepoScope | None" = None,
 ) -> list[tuple[int, str, str, float]]:
     """BM25 retrieval over function names/signatures/paths via FTS5.
 
@@ -334,7 +391,6 @@ def _fts5_candidates(
     # rebuild the plan forbids. Raises in proof mode; no-op (returns) otherwise so
     # the dev/CI fallback below is byte-identical.
     from groundtruth.runtime import proof as _proof
-
     if _proof.is_proof_mode():
         _proof.assert_fts5_native(conn, where="L1 retrieval")
 
@@ -346,7 +402,9 @@ def _fts5_candidates(
     try:
         tables = {
             r[0]
-            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
         }
         if "nodes_fts" not in tables:
             _db_path = conn.execute("PRAGMA database_list").fetchone()[2]
@@ -354,24 +412,30 @@ def _fts5_candidates(
                 print("[GT L1] FTS5: no database path available, skipping", file=sys.stderr)
                 return []
             try:
-                print(
-                    "[GT L1] FTS5: nodes_fts missing, attempting Python-side creation",
-                    file=sys.stderr,
-                )
-                # Intentional WRITE to graph.db: create FTS5 virtual table as a
-                # Python-side fallback when nodes_fts doesn't exist. This mutates
-                # the DB during what is otherwise a read-only query path. The
-                # sqlite3.Error catch below handles read-only filesystems gracefully
-                # (returns [] without crashing).
-                _fts_conn = sqlite3.connect(_db_path)
+                print("[GT L1] FTS5: nodes_fts missing, building read-only in-memory index", file=sys.stderr)
+                # READ-ONLY fallback: build the FTS index in a PRIVATE in-memory db with
+                # graph.db ATTACHed read-only (mode=ro), so this query path NEVER writes
+                # graph.db (was: sqlite3.connect(_db_path) + CREATE/INSERT INTO the source
+                # -> mutated a read-only artifact, changed its sha256, could race a reader).
+                # uri=True enables SQLITE_OPEN_URI so the ATTACH honors the mode=ro filename;
+                # resolve() guarantees the absolute path as_uri() requires.
+                import pathlib
+                _src_uri = pathlib.Path(_db_path).resolve().as_uri() + "?mode=ro"
+                _fts_conn = sqlite3.connect(":memory:", uri=True)
                 _fts_conn_owned = True
+                _fts_conn.execute("ATTACH DATABASE ? AS src", (_src_uri,))
                 _fts_conn.execute(_FTS5_CREATE)
-                _fts_conn.execute(_FTS5_POPULATE)
+                # SM-9a: scope the in-memory index population to the active repo so the
+                # rebuilt nodes_fts never carries another repo's symbols. src.nodes has
+                # repo_id; _FTS5_POPULATE ends with `WHERE is_test = 0`. No-op single-repo.
+                _src_frag, _src_params = _repo_frag(scope)
+                _fts_conn.execute(_FTS5_POPULATE + _src_frag, _src_params)
                 _fts_conn.commit()
                 _n_rows = _fts_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
-                print(f"[GT L1] FTS5: Python-side creation OK ({_n_rows} rows)", file=sys.stderr)
-            except sqlite3.Error as _fts_err:
-                print(f"[GT L1] FTS5: Python-side creation FAILED: {_fts_err}", file=sys.stderr)
+                print(f"[GT L1] FTS5: in-memory creation OK ({_n_rows} rows, graph.db untouched)",
+                      file=sys.stderr)
+            except (sqlite3.Error, ValueError, OSError) as _fts_err:
+                print(f"[GT L1] FTS5: in-memory creation FAILED: {_fts_err}", file=sys.stderr)
                 if _fts_conn_owned:
                     try:
                         _fts_conn.close()
@@ -390,8 +454,8 @@ def _fts5_candidates(
     for t in sorted(issue_tokens, key=lambda x: (-len(x), x)):
         # FTS5 special chars: *, ^, ", (, ), :, +, -, NOT, AND, OR, NEAR
         # Wrap each token in double quotes to treat as literal phrase.
-        cleaned = t.replace('"', "")
-        if len(cleaned) >= 3 and all(c.isalnum() or c == "_" for c in cleaned):
+        cleaned = t.replace('"', '')
+        if len(cleaned) >= 3 and all(c.isalnum() or c == '_' for c in cleaned):
             safe_tokens.append(f'"{cleaned}"')
         if len(safe_tokens) >= 20:
             break
@@ -406,16 +470,35 @@ def _fts5_candidates(
 
     match_expr = " OR ".join(safe_tokens)
 
-    try:
-        rows = _fts_conn.execute(
-            """SELECT rowid, name, file_path,
+    # LEAK INVARIANT (Fable S1/L2, reproduced live): the Go-built external-content nodes_fts
+    # is now is_test-filtered at INSERT (store/sqlite.go), but a STALE or externally-built
+    # graph.db could still carry test rows — and a test symbol seeded here becomes an
+    # FTS5_SEED/BFS root that renders as `fts5 match: …`, leaking the FAIL_TO_PASS surface.
+    # Defense-in-depth: on the direct-graph.db path (not owned) JOIN nodes and exclude
+    # is_test. The in-memory fallback (owned) is already population-filtered (_FTS5_POPULATE
+    # WHERE is_test = 0) and has no local `nodes` to join — so keep its plain query.
+    if _fts_conn_owned:
+        _fts_query = """SELECT rowid, name, file_path,
                       bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
                FROM nodes_fts
                WHERE nodes_fts MATCH ?
-               ORDER BY score
-               LIMIT ?""",
-            (match_expr, limit),
-        ).fetchall()
+               ORDER BY score, file_path, name, rowid
+               LIMIT ?"""
+        _fts_params: tuple = (match_expr, limit)
+    else:
+        # SM-9a: the direct path JOINs the real nodes (which carry repo_id) -> scope
+        # the MATCH to the active repo. Frag param sits between MATCH and LIMIT.
+        _f_n, _p_n = _repo_frag(scope, "n")
+        _fts_query = """SELECT nodes_fts.rowid, nodes_fts.name, nodes_fts.file_path,
+                      bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
+               FROM nodes_fts
+               JOIN nodes n ON n.id = nodes_fts.rowid
+               WHERE nodes_fts MATCH ? AND COALESCE(n.is_test, 0) = 0""" + _f_n + """
+               ORDER BY score, nodes_fts.file_path, nodes_fts.name, nodes_fts.rowid
+               LIMIT ?"""
+        _fts_params = (match_expr, *_p_n, limit)
+    try:
+        rows = _fts_conn.execute(_fts_query, _fts_params).fetchall()
     except sqlite3.Error as _q_err:
         print(f"[GT L1] FTS5: query failed: {_q_err}", file=sys.stderr)
         return []
@@ -436,6 +519,196 @@ def _fts5_candidates(
     else:
         print("[GT L1] FTS5: no candidates found", file=sys.stderr)
     return results
+
+
+def _split_camel_subtokens(s: str) -> list[str]:
+    """Split a PascalCase/camelCase run into word parts (parity with the Go indexer's
+    splitCamel in content_fts.go): boundary at a lower->Upper transition and at an
+    acronym-run->Upper+lower transition ("HTTPServer" -> HTTP, Server)."""
+    if not s:
+        return []
+    out: list[str] = []
+    start = 0
+    # ASCII range tests (NOT str.islower/isupper) to mirror Go splitCamel EXACTLY: the Go
+    # indexer uses 'a'<=c<='z' / 'A'<=c<='Z', so a Unicode-aware Python predicate would
+    # split non-ASCII identifiers at boundaries the stored content never split → query/
+    # index parity break on those idents. Empty nxt ("") fails 'a'<=""<="z" → no false split.
+    for i in range(1, len(s)):
+        prev, cur = s[i - 1], s[i]
+        nxt = s[i + 1] if i + 1 < len(s) else ""
+        lower_to_upper = ("a" <= prev <= "z") and ("A" <= cur <= "Z")
+        acronym_end = ("A" <= cur <= "Z") and ("a" <= nxt <= "z") and ("A" <= prev <= "Z")
+        if lower_to_upper or acronym_end:
+            out.append(s[start:i])
+            start = i
+    out.append(s[start:])
+    return out
+
+
+# Common English/boilerplate words skipped by BOTH L1 lexical legs (grep + content-BM25)
+# so an over-common token never dominates the OR-query and dilutes BM25 (Fable #10).
+_L1_STOPWORDS = frozenset({
+    "that", "this", "with", "from", "have", "been", "will",
+    "when", "what", "which", "were", "they", "their", "does",
+    "should", "would", "could", "about", "some", "other",
+    "into", "more", "than", "each", "also", "after", "before",
+})
+
+# Max query terms fed to the content-BM25 MATCH (kept the rarest = most discriminative,
+# per DF ordering below). Module-level so tests can shrink it to exercise the ordering.
+_CONTENT_FTS_TERM_CAP = 30
+
+
+def _content_fts_candidates(
+    conn: sqlite3.Connection,
+    issue_tokens: set[str],
+    limit: int = 50,
+    issue_text: str = "",
+    scope: "RepoScope | None" = None,
+) -> list[tuple[int, str, str, float]]:
+    """BM25 retrieval over per-symbol BODY content (symbol_content_fts, the Go B1 index).
+
+    The content leg's retriever. Matches issue terms — AND their camelCase/snake_case
+    SUB-TOKENS, so a camelCase issue symbol matches the stored sub-tokens the Go indexer
+    split — against function BODY vocabulary (identifiers, string literals, comments) that
+    no name-only surface indexes. Returns (node_id, name, file_path, bm25_score) with test
+    symbols excluded (they are also excluded at index time — belt and suspenders against a
+    body-text leak). Graceful []: symbol_content_fts is absent on a graph.db built before
+    B1 or without FTS5, so an empty return simply leaves the lexical slot vacant.
+
+    Research: BLUiR (ASE 2013) structured lexical anchoring + sub-token splitting; the
+    body-content surface is the stratum-B (behavior-described) complement to nodes_fts.
+    """
+    import sys
+
+    if not issue_tokens:
+        return []
+    try:
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    except sqlite3.Error:
+        return []
+    if "symbol_content_fts" not in tables:
+        return []
+
+    # Expand each issue token with its camelCase/snake_case sub-tokens (the query MUST
+    # be split the same way the stored content was, or a camelCase symbol never matches).
+    _expanded: set[str] = set()
+    for t in issue_tokens:
+        _expanded.add(t)
+        for part in str(t).split("_"):
+            for sub in _split_camel_subtokens(part):
+                if len(sub) >= 2:
+                    _expanded.add(sub)
+
+    # Case-aware expansion from the RAW issue text: _issue_terms lowercases every token
+    # BEFORE it reaches here (getUserById -> getuserbyid), erasing the camelCase boundary so
+    # the loop above finds nothing — partial-match then works only for snake_case langs
+    # (Python/Rust) and is DEAD for camelCase (JS/TS/Go/Java, 4 of 6 Tier-1). Splitting the
+    # ORIGINAL-case issue words restores it (sub-tokens lowercased to match the case-folded
+    # unicode61 FTS content). issue_text="" => byte-identical to the pre-fix behaviour.
+    if issue_text:
+        for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text):
+            for part in w.split("_"):
+                for sub in _split_camel_subtokens(part):
+                    if len(sub) >= 2:
+                        _expanded.add(sub.lower())
+
+    # Well-formed, non-stopword candidates (len>=3, alnum/_).
+    _cands: list[str] = []
+    for t in _expanded:
+        cleaned = t.replace('"', "")
+        if (len(cleaned) >= 3 and cleaned.lower() not in _L1_STOPWORDS
+                and all(c.isalnum() or c == "_" for c in cleaned)):
+            _cands.append(cleaned)
+    # SOTA term selection (Fable #4): order by ASCENDING document frequency in
+    # symbol_content_fts — rarest = most discriminative (IDF-like) — instead of longest-first,
+    # which anti-selects short distinctive domain tokens (tls/acl/ssl) under a common word cap.
+    # Data-driven + repo-local + deterministic (tie-break -len, token). df==0 tokens retrieve
+    # nothing, so they sort LAST (harmless, but never displace a df>=1 term). To bound the FTS
+    # COUNT probes on a huge issue, only the 120 longest candidates are scored (the rest are
+    # the least likely to be distinctive multi-word compounds anyway).
+    _probe = sorted(set(_cands), key=lambda x: (-len(x), x))[:120]
+
+    def _df(tok: str) -> int:
+        try:
+            return conn.execute(
+                "SELECT count(*) FROM symbol_content_fts WHERE symbol_content_fts MATCH ?",
+                (f'"{tok}"',),
+            ).fetchone()[0]
+        except sqlite3.Error:
+            return 1 << 30
+    _dfmap = {t: _df(t) for t in _probe}
+    _ranked = sorted(_probe, key=lambda x: (_dfmap[x] == 0, _dfmap[x], -len(x), x))
+    safe_tokens = [f'"{t}"' for t in _ranked[:_CONTENT_FTS_TERM_CAP]]
+    if not safe_tokens:
+        return []
+    match_expr = " OR ".join(safe_tokens)
+
+    _f_n, _p_n = _repo_frag(scope, "n")  # SM-9a: scope the body-content JOIN to active repo
+    try:
+        rows = conn.execute(
+            """SELECT c.rowid, n.name, n.file_path, bm25(symbol_content_fts) AS score
+                 FROM symbol_content_fts c JOIN nodes n ON n.id = c.rowid
+                WHERE symbol_content_fts MATCH ? AND COALESCE(n.is_test, 0) = 0""" + _f_n + """
+                ORDER BY score, n.file_path, c.rowid
+                LIMIT ?""",
+            (match_expr, *_p_n, limit),
+        ).fetchall()
+    except sqlite3.Error as _q_err:
+        print(f"[GT L1] content-fts: query failed: {_q_err}", file=sys.stderr)
+        return []
+
+    out: list[tuple[int, str, str, float]] = []
+    for row in rows:
+        if row and row[0] is not None:
+            score = -float(row[3]) if row[3] is not None else 0.0
+            out.append((int(row[0]), str(row[1]), _normalize(str(row[2])), score))
+    return out
+
+
+def _content_margin_threshold() -> "float | None":
+    """The measurement-derived RELATIVE margin the content-BM25 FUSION leg must clear to
+    contribute to the composite (``GT_CONTENT_MARGIN``, a fraction in [0, 1)). Returns
+    ``None`` — the UNCALIBRATED / correct-or-quiet state — when the env is unset, empty,
+    unparseable, or out of range. When ``None`` the fusion leg ABSTAINS entirely (it never
+    adds an RRF term), so the pipeline is byte-identical to the leg-off path. The VALUE is
+    NOT hardcoded here (house rule: no arbitrary thresholds): it comes from the measured
+    top-hit-margin distribution via ``scripts/measure_brief.py`` — OWED until that measures
+    it, and until then the leg is deliberately silent on the grep-non-empty (fusion) path."""
+    raw = os.getenv("GT_CONTENT_MARGIN")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        v = float(raw.strip())
+    except ValueError:
+        return None
+    return v if 0.0 <= v < 1.0 else None
+
+
+def _content_leg_margin_ok(cfts: "list[tuple[int, str, str, float]]", threshold: float) -> bool:
+    """The MARGIN-GATE: does the content-BM25 leg have a CLEARLY-SEPARATED top hit?
+
+    ``cfts`` rows carry ``-bm25`` (higher = better). The gate passes iff the relative
+    separation of the best hit over the runner-up, ``(top1 - top2) / top1``, is at least
+    ``threshold`` — i.e. the leg found ONE body that dominates, not a flat field of weak
+    near-ties. A single hit is maximally separated (passes); an empty/degenerate field or a
+    non-positive top score fails. Deterministic (BM25 is deterministic), pure, comparative
+    (relative, not an absolute score cutoff), so it generalizes across repos/score scales.
+
+    This is the correct-or-quiet core: a WEAK margin -> the leg contributes ≈0 (abstains),
+    so it never converts a confident lexical/structural localization into body-BM25-first
+    noise; only a confident content hit shifts the composite rank."""
+    scores = sorted((float(c[3]) for c in cfts), reverse=True)
+    if not scores or scores[0] <= 0.0:
+        return False
+    if len(scores) == 1:
+        return True
+    top1, top2 = scores[0], scores[1]
+    return ((top1 - top2) / top1) >= float(threshold)
 
 
 def _path_decay_scores(
@@ -487,7 +760,7 @@ def _path_decay_scores(
 
     # Pre-fetch seed file paths.
     for i in range(0, len(seed_node_ids), 400):
-        chunk = seed_node_ids[i : i + 400]
+        chunk = seed_node_ids[i:i + 400]
         ph = ",".join("?" for _ in chunk)
         try:
             rows = conn.execute(
@@ -508,7 +781,7 @@ def _path_decay_scores(
         cost, nid, hops = heapq.heappop(pq)
 
         # Skip if we already found a cheaper path to this node.
-        if cost > best_cost.get(nid, float("inf")):
+        if cost > best_cost.get(nid, float('inf')):
             continue
 
         if hops >= max_hop:
@@ -518,7 +791,8 @@ def _path_decay_scores(
         # same provenance columns the witness BFS reads (name / method / tier) so
         # the shared _edge_admitted predicate (#54) sees identical inputs — no
         # SQL-level conf_where; admission happens once, in Python, for both walks.
-        for match_col, join_col in [("e.source_id", "e.target_id"), ("e.target_id", "e.source_id")]:
+        for match_col, join_col in [("e.source_id", "e.target_id"),
+                                     ("e.target_id", "e.source_id")]:
             try:
                 rows = conn.execute(
                     f"""SELECT {join_col} AS nbr_id, n.file_path, {conf_sel},
@@ -526,8 +800,9 @@ def _path_decay_scores(
                         FROM edges e
                         JOIN nodes n ON {join_col} = n.id
                         WHERE {match_col} = ?
-                          AND e.type IN ('CALLS', 'IMPORTS')
+                          AND e.type IN ({_REACH_EDGE_TYPES_SQL})
                           AND n.is_test = 0
+                        ORDER BY n.file_path, {join_col}
                         LIMIT 100""",
                     (nid,),
                 ).fetchall()
@@ -561,7 +836,7 @@ def _path_decay_scores(
                 edge_cost = 1.0 / conf_f
                 new_cost = cost + edge_cost
 
-                if new_cost < best_cost.get(nbr_id, float("inf")):
+                if new_cost < best_cost.get(nbr_id, float('inf')):
                     best_cost[nbr_id] = new_cost
                     node_file[nbr_id] = nbr_file
                     heapq.heappush(pq, (new_cost, nbr_id, hops + 1))
@@ -575,7 +850,7 @@ def _path_decay_scores(
                 file_cost[fp] = cost
 
     # Convert cost to decay score: S(f) = beta^cost.
-    return {fp: beta**cost for fp, cost in file_cost.items()}
+    return {fp: beta ** cost for fp, cost in file_cost.items()}
 
 
 @dataclass(frozen=True)
@@ -603,6 +878,10 @@ class Witness:
     hop: int
     src_symbol: str
     dst_symbol: str
+    # Exact resolver provenance for edge witnesses. Empty for lexical DEFINES /
+    # grep/path seeds and legacy synthetic witnesses. This is audit-only source
+    # lineage; it does not affect strength, ordering, or rendered bytes.
+    resolution_method: str = ""
 
     def strength(self) -> float:
         conf = self.confidence if self.confidence > 0 else (1.0 if self.verified else 0.5)
@@ -630,6 +909,17 @@ class Candidate:
     lex_hits: int  # # of issue terms intersecting this file's symbol/path identifiers
     degree: int
     confidence: float  # best-witness strength, 0..1 (drives the render gate)
+    # Issue relevance is deliberately separate from structural edge validity.
+    # One deterministic edge proves that edge; it does not prove this file is an
+    # edit target for the current issue.
+    relevance_grade: str = "INFO"
+
+    @property
+    def edge_verified(self) -> bool:
+        return any(
+            w.verified and w.direction != "defines_anchor"
+            for w in self.witnesses
+        )
 
     @property
     def has_verified_witness(self) -> bool:
@@ -648,10 +938,28 @@ class Candidate:
         """
         if not self.witnesses:
             return ""
+        # LEAK GUARD (Fable L8, defense-in-depth): EVERY render branch below prints
+        # w.anchor / w.src_symbol / w.dst_symbol verbatim (hop-2 "{anchor} -> ... -> {far}",
+        # "defines {anchor}", "{seed}: {src or anchor}"). The nodes_fts is_test fix keeps
+        # test nodes out of the BFS, but a test NAME could still reach a witness field via a
+        # stale index or cross-hop provenance — and the old filter guarded only the
+        # edge-witness src/dst, NEVER the anchor. Drop any witness whose anchor OR either
+        # endpoint is a test-block name up front, so all three branches inherit the guard.
+        _safe = [
+            w for w in self.witnesses
+            # E2 (Fable 2026-07-05): admission defense — drop a witness whose FILE is a test
+            # path (mirrors §19.1 caller-line closure). The name guards below miss a real code
+            # symbol that merely LIVES in tests/ on a stale graph (is_test flag unset).
+            if not _is_test_path_pp(w.file_path)
+            and not _is_test_block_name(w.anchor)
+            and not _is_test_block_name(w.src_symbol)
+            and not _is_test_block_name(w.dst_symbol)
+        ]
+        if not _safe:
+            return ""
         edge_wits = [
-            w
-            for w in self.witnesses
-            if w.direction != "defines_anchor" and w.src_symbol != w.dst_symbol
+            w for w in _safe if w.direction != "defines_anchor"
+            and w.src_symbol != w.dst_symbol
         ]
         if edge_wits:
             # Prefer a MEANINGFUL edge (neither endpoint a generic constructor/
@@ -680,14 +988,16 @@ class Candidate:
             tag = "" if w.verified else " (unverified)"
             if w.hop >= 2:
                 far = w.src_symbol if w.direction == "calls_anchor" else w.dst_symbol
-                return f"{w.anchor} -> ... -> {far} [{w.edge_type}, {w.hop}-hop]{tag}"
+                return (
+                    f"{w.anchor} -> ... -> {far} "
+                    f"[{w.edge_type}, {w.hop}-hop]{tag}"
+                )
             body = (
-                f"{w.src_symbol} calls {w.dst_symbol}"
-                if _calls_anchor
+                f"{w.src_symbol} calls {w.dst_symbol}" if _calls_anchor
                 else f"{w.dst_symbol} called by {w.src_symbol}"
             )
             return f"{body} [{w.edge_type}]{tag}"
-        w = max(self.witnesses, key=lambda x: x.strength())
+        w = max(_safe, key=lambda x: x.strength())
         # SEED-TYPED witnesses (fix 2026-06-09): only the exact-name seeder mints
         # the "defines {name} (issue symbol)" DEFINES fact. A grep/path/FTS5 seed
         # is a retrieval ENTRY POINT — render it as what it is, never as a
@@ -698,6 +1008,7 @@ class Candidate:
             "GREP_SEED": "grep match",
             "PATH_SEED": "path match",
             "FTS5_SEED": "fts5 match",
+            "CONTENT_SEED": "content match",
         }.get(w.edge_type, "seed match")
         return f"{_seed_label}: {w.src_symbol or w.anchor}"
 
@@ -706,9 +1017,9 @@ class Candidate:
 class LocalizerResult:
     candidates: list[Candidate]
     anchor_symbols: list[str]
-    confidence: float  # best candidate confidence (0 when no anchor hit)
-    confident: bool  # passes the per-task data-derived gate
-    gate_reason: str  # why confident / not (telemetry)
+    confidence: float            # best candidate confidence (0 when no anchor hit)
+    confident: bool              # passes the per-task data-derived gate
+    gate_reason: str             # why confident / not (telemetry)
     scope_chains: list[ScopeChain] = field(default_factory=list)
     graph_stats: dict = field(default_factory=dict)
     # WIDE-scope edit-set telemetry (Task-2 slice 1, additive). n_components = the
@@ -726,6 +1037,16 @@ class LocalizerResult:
     # CombMIN Fox & Shaw TREC-2 1994) — agreement across independent rankers is a
     # stronger relevance signal than any single ranker.
     agreement_by_file: dict[str, int] = field(default_factory=dict)
+    # LEG ATTRIBUTION (additive, default {}): per-file list of WHICH independent
+    # rankers placed the file in their own top-3 — a subset of
+    # ["grep","structural","semantic"], stable order. `agreement_by_file` is the
+    # COUNT; this is the NAMED legs behind it. The consensus-form header renders
+    # "3/3 (grep, structural, semantic)" from this so the model sees leg
+    # attribution (the grep vote pre-registers what its own grep will return),
+    # not just a bare number. Empty {} when no candidates ranked (byte-identical
+    # to today until consumed). Kept in lockstep with agreement_by_file:
+    # len(signals_by_file[f]) == agreement_by_file[f] for every f.
+    signals_by_file: dict[str, list[str]] = field(default_factory=dict)
     # R1 leaf-naming bridge (additive, default {}): per-file ranked per-SYMBOL semantic
     # scores — {file_norm: [(symbol_name, cosine), ...]} high→low — captured from the
     # SAME per-symbol MaxSim cosines that produce the file's semantic score (previously
@@ -735,6 +1056,12 @@ class LocalizerResult:
     # embedder is off / no candidate scored — degrades the symbol-naming stage to its
     # prior in-degree behavior byte-identically (correct-or-quiet).
     symbol_semrank_by_file: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
+    # Render-neutral mediator evidence.  Paths are normalized and restricted to
+    # candidates that survive this localizer's final top-k.
+    content_leg_paths: frozenset[str] = frozenset()
+    content_leg_decision: str = "NO_EFFECT"
+    content_leg_reason: str = "feature_not_reached"
+    semantic_body_paths: frozenset[str] = frozenset()
 
 
 def _normalize(fp: str) -> str:
@@ -761,6 +1088,38 @@ def _normalize(fp: str) -> str:
     return text
 
 
+def _candidate_relevance_grade(
+    file_path: str,
+    witnesses: list[Witness],
+    *,
+    trusted_anchors: set[str],
+    explicit_paths: set[str],
+    independent_signals: list[str] | tuple[str, ...] = (),
+) -> str:
+    """Grade candidate-local issue relevance without laundering edge truth.
+
+    VERIFIED requires an explicit issue path, an exact trusted definition, or a
+    deterministic candidate-local relation descended from a trusted anchor.
+    Multiple independent retrieval legs earn WARNING; a single retrieval/edge
+    signal is INFO; no support is ABSTAIN.
+    """
+    normalized = _normalize(file_path)
+    normalized_paths = {_normalize(path) for path in explicit_paths if path}
+    if normalized and normalized in normalized_paths:
+        return "VERIFIED"
+    trusted = {(anchor or "").lower() for anchor in trusted_anchors if anchor}
+    for witness in witnesses:
+        if not witness.verified or (witness.anchor or "").lower() not in trusted:
+            continue
+        if witness.direction == "defines_anchor" or witness.edge_type in {"CALLS", "IMPORTS"}:
+            return "VERIFIED"
+    if len(set(independent_signals)) >= 2:
+        return "WARNING"
+    if witnesses or independent_signals:
+        return "INFO"
+    return "ABSTAIN"
+
+
 def _struct_witness_tier(c: "Candidate") -> int:
     """SWERank hard-negative tier for the structural ranker (BUG-4). Lower = better:
         0  verified CLOSE structural witness  (CALLS/IMPORTS, hop <= 1)
@@ -773,12 +1132,14 @@ def _struct_witness_tier(c: "Candidate") -> int:
     if not c.has_verified_witness:
         return 3 if c.witnesses else 4
     has_close = any(
-        w.verified and w.direction != "defines_anchor" and w.hop <= 1 for w in c.witnesses
+        w.verified and w.direction != "defines_anchor" and w.hop <= 1
+        for w in c.witnesses
     )
     if has_close:
         return 0
     has_distant_structural = any(
-        w.verified and w.direction != "defines_anchor" and w.hop >= 2 for w in c.witnesses
+        w.verified and w.direction != "defines_anchor" and w.hop >= 2
+        for w in c.witnesses
     )
     return 1 if has_distant_structural else 2
 
@@ -849,13 +1210,23 @@ def _lex_hit(term: str, symset: set[str]) -> bool:
     return False
 
 
-def _seed_node_rows(conn: sqlite3.Connection, anchors: set[str]) -> list[tuple[int, str, str]]:
+def _seed_node_rows(
+    conn: sqlite3.Connection, anchors: set[str], scope: "RepoScope | None" = None
+) -> list[tuple[int, str, str]]:
     """(node_id, name, file_path) for every Function/Method/Class node whose name
-    is an issue anchor. These are the BFS seeds (KGCompass entity seeding)."""
+    is an issue anchor. These are the BFS seeds (KGCompass entity seeding).
+
+    ``scope`` (SM-9a): when the graph indexes >1 repository, scope the name-match to
+    the active repo so a same-named symbol from another repo is not seeded. None /
+    single-repo -> byte-identical."""
     if not anchors:
         return []
+    _f_bare, _p_bare = _repo_frag(scope)
+    _f_c, _p_c = _repo_frag(scope, "c")
     out: list[tuple[int, str, str]] = []
-    anchors_l = list(anchors)
+    # A set's iteration order varies with PYTHONHASHSEED. The 400-item chunk
+    # boundary is observable, so establish one canonical anchor order first.
+    anchors_l = sorted(anchors)
     # Chunk to stay under SQLite's variable limit on huge anchor sets.
     for i in range(0, len(anchors_l), 400):
         chunk = anchors_l[i : i + 400]
@@ -864,8 +1235,8 @@ def _seed_node_rows(conn: sqlite3.Connection, anchors: set[str]) -> list[tuple[i
             rows = conn.execute(
                 f"SELECT id, name, file_path FROM nodes "
                 f"WHERE name IN ({ph}) AND is_test = 0 "
-                f"AND label IN ('Function','Method','Class','Interface')",
-                tuple(chunk),
+                f"AND label IN ('Function','Method','Class','Interface')" + _f_bare,
+                tuple(chunk) + _p_bare,
             ).fetchall()
         except sqlite3.Error:
             continue
@@ -881,7 +1252,7 @@ def _seed_node_rows(conn: sqlite3.Connection, anchors: set[str]) -> list[tuple[i
     # recall addition — a dotted anchor that resolves seeds its REAL definition
     # node; unresolvable dotted anchors stay non-seeding (correct-or-quiet).
     _seen_ids = {nid for nid, _, _ in out}
-    for anc in anchors:
+    for anc in sorted(anchors):
         if "." not in anc:
             continue
         parts = [p for p in anc.split(".") if p]
@@ -892,15 +1263,15 @@ def _seed_node_rows(conn: sqlite3.Connection, anchors: set[str]) -> list[tuple[i
             qrows = conn.execute(
                 "SELECT c.id, c.name, c.file_path FROM nodes c "
                 "JOIN nodes p ON c.parent_id = p.id "
-                "WHERE c.name = ? AND p.name = ? AND c.is_test = 0",
-                (tail, qualifier),
+                "WHERE c.name = ? AND p.name = ? AND c.is_test = 0" + _f_c,
+                (tail, qualifier) + _p_c,
             ).fetchall()
             if not qrows:
                 qrows = conn.execute(
                     "SELECT id, name, file_path FROM nodes "
                     "WHERE (qualified_name = ? OR qualified_name LIKE ?) "
-                    "AND is_test = 0",
-                    (anc, f"%.{qualifier}.{tail}"),
+                    "AND is_test = 0" + _f_bare,
+                    (anc, f"%.{qualifier}.{tail}") + _p_bare,
                 ).fetchall()
         except sqlite3.Error:
             continue
@@ -908,6 +1279,9 @@ def _seed_node_rows(conn: sqlite3.Connection, anchors: set[str]) -> list[tuple[i
             if r and r[0] is not None and r[2] and int(r[0]) not in _seen_ids:
                 _seen_ids.add(int(r[0]))
                 out.append((int(r[0]), str(r[1]), _normalize(str(r[2]))))
+    # SQLite row order is physical state, not relevance. Traversal is capped
+    # downstream, so use a semantic total order before returning the seeds.
+    out.sort(key=lambda row: (row[2], row[1], row[0]))
     return out
 
 
@@ -916,6 +1290,7 @@ def _path_to_seeds(
     issue_tokens: set[str],
     existing_seed_files: set[str],
     limit: int = 10,
+    scope: "RepoScope | None" = None,
 ) -> list[tuple[int, str, str]]:
     """Seed from files whose PATH contains an issue token.
 
@@ -956,6 +1331,7 @@ def _path_to_seeds(
     if not path_tokens:
         return []
 
+    _f_bare, _p_bare = _repo_frag(scope)  # SM-9a active-repo scope (no-op single-repo)
     out: list[tuple[int, str, str]] = []
     seen_ids: set[int] = set()
     seen_files: set[str] = set(existing_seed_files)  # dedup by file, not just node ID
@@ -975,11 +1351,19 @@ def _path_to_seeds(
                 break
             try:
                 rows = conn.execute(
-                    "SELECT id, name, file_path FROM nodes "
+                    "SELECT id, name, file_path FROM ("
+                    "SELECT id, name, file_path, "
+                    "ROW_NUMBER() OVER ("
+                    "PARTITION BY file_path ORDER BY name, "
+                    "CASE WHEN start_line IS NULL THEN 1 ELSE 0 END, start_line, "
+                    "CASE WHEN end_line IS NULL THEN 1 ELSE 0 END, end_line, "
+                    "COALESCE(signature,''), id"
+                    ") AS file_rank FROM nodes "
                     "WHERE file_path LIKE ? AND is_test = 0 "
-                    "AND label IN ('Function','Method','Class') "
-                    "LIMIT 5",
-                    (pat,),
+                    "AND label IN ('Function','Method','Class')" + _f_bare + ") "
+                    "WHERE file_rank = 1 "
+                    "ORDER BY file_path, name, id LIMIT 5",
+                    (pat,) + _p_bare,
                 ).fetchall()
                 if rows:
                     _found_any = True
@@ -987,22 +1371,68 @@ def _path_to_seeds(
                 continue
             for r in rows:
                 fp = _normalize(str(r[2])) if r and r[2] else ""
-                if (
-                    r
-                    and r[0] is not None
-                    and fp
-                    and int(r[0]) not in seen_ids
-                    and fp not in seen_files
-                ):
+                if r and r[0] is not None and fp and int(r[0]) not in seen_ids and fp not in seen_files:
                     seen_ids.add(int(r[0]))
                     seen_files.add(fp)
                     out.append((int(r[0]), str(r[1]), fp))
                     if len(out) >= limit:
                         break
 
+    # COMPOUND path-token recall (2026-06-27): when the issue contains
+    # multiple tokens and a file path contains TWO OR MORE of them, that
+    # file is more specific than one matching a single token. Promotes
+    # child implementations over parent modules: issue "HOTP token" →
+    # tokens/hotptoken.py (both "hotp" and "token" in path) outranks
+    # token.py (only "token"). Runs AFTER single-token pass so compound
+    # matches get PRIORITY (prepended, not appended). Generalized: any
+    # repo structure where child files combine qualifier + stem in their
+    # path (the standard naming convention across all languages).
+    if len(path_tokens) >= 2:
+        try:
+            all_files = [
+                r[0] for r in conn.execute(
+                    "SELECT DISTINCT file_path FROM nodes WHERE is_test = 0" + _f_bare
+                    + " ORDER BY file_path",
+                    _p_bare,
+                ).fetchall() if r[0]
+            ]
+            compound_hits: list[tuple[str, int]] = []
+            for fp in all_files:
+                fp_lower = fp.lower()
+                hit_count = sum(1 for t in path_tokens if t in fp_lower)
+                if hit_count >= 2:
+                    compound_hits.append((fp, hit_count))
+            compound_hits.sort(key=lambda item: (-item[1], _normalize(item[0])))
+            compound_new: list[tuple[int, str, str]] = []
+            for fp, _hc in compound_hits[:limit]:
+                nfp = _normalize(fp)
+                if nfp in seen_files:
+                    continue
+                rows = conn.execute(
+                    "SELECT id, name FROM nodes WHERE file_path = ? "
+                    "AND is_test = 0 AND label IN ('Function','Method','Class')" + _f_bare + " "
+                    "ORDER BY name, id LIMIT 1", (fp,) + _p_bare
+                ).fetchall()
+                if rows and rows[0][0] is not None:
+                    nid = int(rows[0][0])
+                    if nid not in seen_ids:
+                        seen_ids.add(nid)
+                        seen_files.add(nfp)
+                        compound_new.append((nid, str(rows[0][1]), nfp))
+            if compound_new:
+                out = compound_new + out
+                print(
+                    f"[GT L1] path-to-seed: {len(compound_new)} COMPOUND nodes "
+                    f"(2+ tokens in path) prepended",
+                    file=sys.stderr,
+                )
+        except (sqlite3.Error, Exception):
+            pass
+
     if out:
         print(
-            f"[GT L1] path-to-seed: {len(out)} nodes seeded from {len(path_tokens)} path tokens",
+            f"[GT L1] path-to-seed: {len(out)} total nodes seeded from "
+            f"{len(path_tokens)} path tokens",
             file=sys.stderr,
         )
 
@@ -1015,7 +1445,10 @@ def _path_match_token(fp: str, issue_tokens: set[str]) -> str:
     leading ``{token}.``). Longest hit wins; ``""`` when nothing re-derives.
     Display-only (the seed-typed witness line); never affects ranking."""
     fpl = "/" + (fp or "").lower()
-    hits = [t for t in issue_tokens if len(t) >= 4 and (f"/{t}." in fpl or f"/{t}/" in fpl)]
+    hits = [
+        t for t in issue_tokens
+        if len(t) >= 4 and (f"/{t}." in fpl or f"/{t}/" in fpl)
+    ]
     return max(hits, key=len) if hits else ""
 
 
@@ -1028,9 +1461,12 @@ def _grep_to_seeds(
 ) -> list[tuple[int, str, str]]:
     """Grep-recall seeding: subsume grep so GT can never have worse recall.
 
-    Runs ripgrep (or fallback grep) over the repo for issue tokens, maps hit
-    file:line pairs to the enclosing graph node (the function/method/class
-    containing that line), and returns those nodes as additional BFS seeds.
+    Runs ripgrep (`rg -l`, files-with-matches) — or a Python-walk fallback — over the
+    repo for issue tokens, and for each HIT FILE returns its first few non-test graph
+    nodes as additional BFS seeds. NOTE: this is FILE-granularity, not line-granularity —
+    `-l` yields no line numbers, so the seeds are the file's leading nodes, NOT the node
+    enclosing the matched line. File-level recall is the guarantee; ranking is left to the
+    downstream legs (grep_score_by_file, structural, semantic).
 
     This is mechanism B from the recall analysis: use grep for recall, graph
     for rank. GT seeds only on name-matched Function/Method/Class/Interface
@@ -1062,48 +1498,10 @@ def _grep_to_seeds(
     _prio_low = {t.lower() for t in _prio}
 
     # Pick distinctive tokens (skip very short or very common words)
-    tokens = _prio + [
-        t
-        for t in sorted(
-            (
-                t
-                for t in issue_tokens
-                if len(t) >= 4
-                and t
-                not in {
-                    "that",
-                    "this",
-                    "with",
-                    "from",
-                    "have",
-                    "been",
-                    "will",
-                    "when",
-                    "what",
-                    "which",
-                    "were",
-                    "they",
-                    "their",
-                    "does",
-                    "should",
-                    "would",
-                    "could",
-                    "about",
-                    "some",
-                    "other",
-                    "into",
-                    "more",
-                    "than",
-                    "each",
-                    "also",
-                    "after",
-                    "before",
-                }
-            ),
-            key=lambda t: (-len(t), t),
-        )[:10]
-        if t.lower() not in _prio_low
-    ]
+    tokens = _prio + [t for t in sorted(
+        (t for t in issue_tokens if len(t) >= 4 and t not in _L1_STOPWORDS),
+        key=lambda t: (-len(t), t),
+    )[:10] if t.lower() not in _prio_low]
 
     if not tokens:
         return []
@@ -1116,7 +1514,25 @@ def _grep_to_seeds(
     # Check rg availability ONCE before the loop. If rg is in PATH, use
     # it for ALL tokens. If not, use Python walk for ALL. Don't switch
     # mid-loop (Bug 4: inconsistent coverage from partial rg failures).
-    _rg_available = shutil.which("rg") is not None
+    #
+    # PINNABLE BACKEND (2026-07-28). `shutil.which("rg")` reads the ambient PATH, so the SAME
+    # commit seeds differently on a host with ripgrep than on one without -- the two backends
+    # do not return identical file sets. That made every before/after comparison through
+    # `ss_gate` un-citable across machines: the gate strips the whole GT_* namespace but has no
+    # control over PATH, so it believed it was hermetic and was not. Same defect class as the
+    # ambient `gt-index` binary, which that harness already closes by pinning `GT_INDEX_BIN` to
+    # a guaranteed-absent path.
+    #
+    # `auto` (the default, and the value when the var is unset) is byte-identical to the
+    # previous behaviour, so production is untouched; a harness that needs reproducibility pins
+    # `python` (or `rg`) explicitly and gets the same seeding on every host.
+    _backend = (os.environ.get("GT_L1_GREP_BACKEND") or "auto").strip().lower()
+    if _backend == "python":
+        _rg_available = False
+    elif _backend == "rg":
+        _rg_available = True
+    else:
+        _rg_available = shutil.which("rg") is not None
     if not _rg_available:
         print(
             "[GT L1] grep-to-seed: rg not in PATH, using Python walk",
@@ -1129,12 +1545,16 @@ def _grep_to_seeds(
         for token in tokens:
             try:
                 result = subprocess.run(
-                    ["rg", "-n", "--no-heading", "-l", "-i", token, repo_root],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=5,
+                    # -F (fixed-strings): the token is a LITERAL, not a regex. Without it a
+                    # priority anchor with an UNBALANCED metachar (foo(, a::b[) is a regex
+                    # PARSE ERROR → rg exits non-zero → that token silently contributes ZERO
+                    # recall on exactly the most specific anchors; and a BALANCED one (x.y)
+                    # was a valid regex whose `.` matched any char, so `x_y` matched by
+                    # accident — -F kills that false positive too (precision, not just recall).
+                    # -F also matches the Python-walk fallback's literal `in` semantics
+                    # (coverage parity). `--` guards a token beginning with `-`.
+                    ["rg", "-n", "--no-heading", "-l", "-i", "-F", "--", token, repo_root],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
                 )
                 if result.returncode == 0:
                     for line in result.stdout.strip().splitlines():
@@ -1158,21 +1578,14 @@ def _grep_to_seeds(
     else:
         # Python fallback: walk once, check all tokens per file
         _source_exts = (
-            ".py",
-            ".go",
-            ".rs",
-            ".ts",
-            ".js",
-            ".java",
-            ".rb",
-            ".c",
-            ".cpp",
-            ".h",
-            ".cs",
-        )
+            ".py", ".go", ".rs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+            ".java", ".kt", ".scala", ".rb", ".php", ".swift",
+            ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".cs",
+        )  # Fable #9: match the rg leg's coverage on rg-less hosts (was missing tsx/jsx/kt/…)
         try:
-            for dirpath, _, filenames in os.walk(repo_root):
-                for fname in filenames:
+            for dirpath, dirnames, filenames in os.walk(repo_root):
+                dirnames.sort()
+                for fname in sorted(filenames):
                     if not any(fname.endswith(ext) for ext in _source_exts):
                         continue
                     fpath = os.path.join(dirpath, fname)
@@ -1209,7 +1622,7 @@ def _grep_to_seeds(
         except OSError:
             file_scores.append((fp, 1))
 
-    file_scores.sort(key=lambda x: -x[1])
+    file_scores.sort(key=lambda x: (-x[1], _normalize(x[0])))
     top_files = [fp for fp, _ in file_scores[:max_seeds]]
 
     # Map hit files to enclosing graph nodes
@@ -1222,7 +1635,7 @@ def _grep_to_seeds(
                 "SELECT id, name, file_path FROM nodes "
                 "WHERE file_path = ? AND is_test = 0 "
                 "AND label IN ('Function','Method','Class','Interface') "
-                "LIMIT 5",
+                "ORDER BY name, id LIMIT 5",
                 (norm,),
             ).fetchall()
         except sqlite3.Error:
@@ -1239,9 +1652,7 @@ def _grep_to_seeds(
 
 
 def _role_discount_for_function(
-    conn: sqlite3.Connection,
-    file_path: str,
-    func_name: str,
+    conn: sqlite3.Connection, file_path: str, func_name: str,
 ) -> float:
     """Research-backed role discount for a SPECIFIC function (not file-level).
 
@@ -1312,6 +1723,8 @@ def _file_degrees(conn: sqlite3.Connection, files: set[str]) -> dict[str, int]:
     return deg
 
 
+
+
 def _is_verified(method: str) -> bool:
     return (method or "").strip().lower() in _DETERMINISTIC_METHODS
 
@@ -1348,30 +1761,20 @@ def _graph_stats(conn: sqlite3.Connection, has_conf: bool) -> dict:
     heavy queries, then adds the confidence percentiles that _repo_stats
     doesn't compute. One source of truth for "is this graph dense/sparse."
     """
-    stats: dict = {
-        "node_count": 0,
-        "edge_count": 0,
-        "avg_degree": 0.0,
-        "conf_p50": 1.0,
-        "conf_p90": 1.0,
-        "high_conf_frac": 1.0,
-    }
+    stats: dict = {"node_count": 0, "edge_count": 0, "avg_degree": 0.0,
+                   "conf_p50": 1.0, "conf_p90": 1.0, "high_conf_frac": 1.0}
     try:
         # Reuse the cached _repo_stats for node/edge/degree data
         from groundtruth.confidence import _repo_stats
-
         rs = _repo_stats(conn)
         stats["node_count"] = rs.n_files * 5  # approximate: ~5 functions/file
         # Get actual counts only if _repo_stats didn't cover them
-        stats["node_count"] = (
-            conn.execute("SELECT COUNT(*) FROM nodes WHERE is_test = 0").fetchone()[0] or 0
-        )
-        stats["edge_count"] = (
-            conn.execute("SELECT COUNT(*) FROM edges WHERE type IN ('CALLS','IMPORTS')").fetchone()[
-                0
-            ]
-            or 0
-        )
+        stats["node_count"] = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE is_test = 0"
+        ).fetchone()[0] or 0
+        stats["edge_count"] = conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE type IN ('CALLS','IMPORTS')"
+        ).fetchone()[0] or 0
         if stats["node_count"] > 0:
             stats["avg_degree"] = stats["edge_count"] / stats["node_count"]
         if has_conf and stats["edge_count"] > 0:
@@ -1470,7 +1873,6 @@ class ScopeChain:
     Addresses the 32% INCOMPLETE_SCOPE failures: agent finds 1 file but the fix
     needs 2-8 connected files.
     """
-
     files: list[str]
     edges: list[tuple[str, str, str, str]]
     confidence: float
@@ -1496,18 +1898,12 @@ class ScopeChain:
 # (measured: 0 across scanned graphs), so widening the SELECT adds zero rows and the
 # union-find over CALLS/IMPORTS reproduces today's connected components.
 _SCOPE_EDGE_TYPES: tuple[str, ...] = (
-    (
-        "CALLS",
-        "IMPORTS",
-    )
-    + _PROMOTED_EDGE_TYPES
-    + ("USES",)
-)
+    "CALLS", "IMPORTS",
+) + _PROMOTED_EDGE_TYPES + ("USES",)
 
 
-def _scope_edge_trust(
-    verified: bool, method: str | None, conf_f: float, trust_tier: str | None = None
-) -> str | None:
+def _scope_edge_trust(verified: bool, method: str | None, conf_f: float,
+                      trust_tier: str | None = None) -> str | None:
     """Trust tier of a candidate scope edge, or None to DROP it.
 
     CERTIFIED   — deterministic resolution_method (a fact: import/same_file/type_flow/
@@ -1597,7 +1993,6 @@ def _build_scope_chains(
             """,
             _params,
         ).fetchall()
-
     try:
         rows = _scope_rows("COALESCE(e.trust_tier, 'SPECULATIVE')")
     except sqlite3.OperationalError:
@@ -1682,27 +2077,27 @@ def _build_scope_chains(
             # that no edge_tiers consumer was closing; NOT byte-identical to the prior
             # builder ON PURPOSE — the prior bare render WAS the laundering.)
             _tag = (
-                " (CANDIDATE)"
-                if tier == "CANDIDATE"
-                else " (unverified)"
-                if tier == "SPECULATIVE"
+                " (CANDIDATE)" if tier == "CANDIDATE"
+                else " (unverified)" if tier == "SPECULATIVE"
                 else ""
             )
-            desc_parts.append(f"{os.path.basename(src)} → {os.path.basename(dst)} ({sym}){_tag}")
+            desc_parts.append(
+                f"{os.path.basename(src)} → {os.path.basename(dst)} ({sym}){_tag}"
+            )
         # Preserve seed-first ordering: keep top_files order within the component.
         ordered = [f for f in top_files if _find(f) == root]
-        chains.append(
-            ScopeChain(
-                files=ordered,
-                edges=chain_edges,
-                confidence=chain_conf,
-                description="; ".join(desc_parts),
-                edge_tiers=tuple(edge_tiers),
-            )
-        )
+        chains.append(ScopeChain(
+            files=ordered,
+            edges=chain_edges,
+            confidence=chain_conf,
+            description="; ".join(desc_parts),
+            edge_tiers=tuple(edge_tiers),
+        ))
 
     chains.sort(key=lambda c: (-len(c.files), -c.confidence, c.files[0] if c.files else ""))
     return chains[:max_chains]
+
+
 
 
 _EMBEDDER = None
@@ -1719,7 +2114,6 @@ class _OnnxEmbedderAdapter:
 
     def __init__(self, model):
         from groundtruth.memory.enrich.embed import DEFAULT_EMBED_DIM
-
         self._m = model
         # Width of the zero-fallback vectors when encode() is called with no texts.
         # Read the model's true dim (CHANGE 2: 768 for gte-modernbert, 384 for e5).
@@ -1727,7 +2121,6 @@ class _OnnxEmbedderAdapter:
 
     def encode(self, texts, normalize_embeddings=True, show_progress_bar=False):
         import numpy as np
-
         texts = list(texts)
         if not texts:
             return np.zeros((0, self.dim), dtype=np.float32)
@@ -1771,14 +2164,10 @@ def _get_embedder():
     if not _force_onnx and not _require_embedder:
         try:
             from sentence_transformers import SentenceTransformer
-
             # CODE-AWARE embedder (CodeSearchNet query->code; LIPI on sqllineage-557:
             # a general sentence model ranks generic files above the specific code gold).
             _EMBEDDER = SentenceTransformer(
-                os.environ.get(
-                    "GT_EMBED_MODEL", "flax-sentence-embeddings/st-codesearch-distilroberta-base"
-                )
-            )
+                os.environ.get("GT_EMBED_MODEL", "flax-sentence-embeddings/st-codesearch-distilroberta-base"))
             return _EMBEDDER
         except Exception as e:
             _st_err = e
@@ -1792,10 +2181,9 @@ def _get_embedder():
         _default_embed_model,
         get_embedding_model,
     )
-
     try:
         _m = get_embedding_model()  # code-tuned default (GT_EMBED_MODEL_NAME/DIM)
-        _m._ensure_loaded()  # raises if onnxruntime / model files absent
+        _m._ensure_loaded()         # raises if onnxruntime / model files absent
         _EMBEDDER = _OnnxEmbedderAdapter(_m)
         return _EMBEDDER
     except Exception as e:
@@ -1866,12 +2254,225 @@ def _sem_pool_files(top_k: int) -> int:
     return default
 
 
+# B2 (stratum-B vocab): default-OFF body enrichment, GT_SEM_BODY-gated. The passage
+# form is name+signature+behavioral-props (docstring/call_order/guards) — it lacks the
+# DOMAIN VOCABULARY ("Redis", "TLS", "handshake") that lives in the body's
+# identifiers/strings/comments, so behavior-described issues (stratum B) score 0. The
+# vocabulary is now mined INTO graph.db at INDEX time (parser.go extractBodyChannels)
+# as the string_literals/body_terms/calls property kinds; the query-time file reader
+# (_body_terms) is retired. Both semantic halves read those channels through the ONE
+# shared _symbol_body_map assembler below so a symbol's passage text/hash is identical
+# in both halves under the flag. OFF -> name+sig+props passage, BYTE-IDENTICAL to today.
+
+
+def _boilerplate_stoplist(node_terms: "dict[int, str]") -> "set[str]":
+    """Boilerplate stoplist derived from the repo's OWN document-frequency distribution.
+
+    C2b — parameter-free: a token is boilerplate iff its document frequency (# symbols
+    whose body_terms contain it) exceeds ``mean + 1*std`` of the DF distribution (a
+    z-score > 1). The coefficient is exactly 1 (an allowed constant); the reference
+    ``mean``/``std`` come from THIS repo's own symbols — never a hardcoded tuned number,
+    never a fixed "top X%" cut. Needs >= 2 distinct tokens to have a distribution; below
+    that, no stoplisting (correct-or-quiet). DF distributions of code identifiers are
+    heavy right-tailed (most tokens appear once), so mean+std sits well above the mass of
+    rare domain tokens and catches only the genuinely ubiquitous boilerplate."""
+    if not node_terms:
+        return set()
+    from collections import Counter
+    df: "Counter[str]" = Counter()
+    for tv in node_terms.values():
+        for t in set(tv.split()):
+            df[t] += 1
+    if len(df) < 2:
+        return set()
+    import math
+    vals = list(df.values())
+    mean = sum(vals) / len(vals)
+    std = math.sqrt(sum((v - mean) ** 2 for v in vals) / len(vals))
+    cut = mean + std  # z > 1: distribution-derived, coefficient == 1 (allowed)
+    return {t for t, c in df.items() if c > cut}
+
+
+_sem_body_noop_warned = False  # C1: one-shot latch for the body-less-graph warning
+
+
+def _symbol_body_map(
+    conn: "sqlite3.Connection",
+    body_on: bool,
+    enriched_node_ids_out: "set[int] | None" = None,
+) -> "dict[int, str]":
+    """node_id -> the ``body_snippet`` passed to ``symbol_passage`` — the SINGLE source
+    of per-symbol passage BODY, shared by BOTH semantic halves
+    (``graph_localizer._assemble_symbol_passages`` and
+    ``anchor_select._get_file_embeddings``). Routing both halves through this map is
+    what makes a given symbol produce IDENTICAL passage text — and therefore an
+    identical ``passage_hash`` -> exactly ONE shared-cache encode — under GT_SEM_BODY.
+
+    OFF (``body_on=False``): ``" ".join`` of up to 4 behavioral props
+    (docstring/call_order/guard_clause/conditional_return). This is BYTE-IDENTICAL to
+    the value both halves already produced OFF (each did its own
+    ``" ".join(node_body[nid])`` over the same query), so OFF stays byte-identical.
+
+    ON: the fixed-salience template ``string_literals -> body_terms(stoplisted) ->
+    docstring -> calls -> non-docstring props``. The domain-vocabulary channels
+    (string_literals/body_terms) LEAD so a verbose docstring/calls list can never push
+    the stratum-B signal past ``symbol_passage``'s char cap. A node with no channel
+    content degrades to its OFF props. Query errors (older graph / absent table) are
+    swallowed -> ON degrades to today's props (correct-or-quiet); the caller-facing
+    ``nodes`` read stays outside this helper so its ``sqlite3.Error`` still fail-closes."""
+    # OFF props — the byte-identical source for BOTH modes (ON uses it as the degrade
+    # fallback). A missing `properties` table degrades to name+sig-only passages.
+    node_body: dict[int, list[str]] = {}
+    try:
+        for nid, val in conn.execute(
+            "SELECT p.node_id, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
+            "WHERE n.is_test=0 AND p.kind IN "
+            "('docstring','call_order','guard_clause','conditional_return')"):
+            if nid is None:
+                continue
+            lst = node_body.setdefault(int(nid), [])
+            if len(lst) < 4:
+                lst.append(str(val))
+    except sqlite3.Error:
+        pass  # properties table absent -> name+signature passages only
+    if not body_on:
+        return {nid: " ".join(v) for nid, v in node_body.items()}
+
+    # ON: the body-channel vocabulary + template parts, all FROM graph.db (a SEPARATE
+    # query so the OFF path above is untouched).
+    node_strings: dict[int, str] = {}
+    node_calls_v: dict[int, str] = {}
+    node_terms: dict[int, str] = {}
+    node_docstring: dict[int, str] = {}
+    node_props2: dict[int, list[str]] = {}  # non-docstring behavioral props (trailing)
+    try:
+        for nid, kind, val in conn.execute(
+            "SELECT p.node_id, p.kind, p.value FROM properties p JOIN nodes n "
+            "ON n.id=p.node_id WHERE n.is_test=0 AND p.kind IN "
+            "('string_literals','body_terms','calls','docstring',"
+            "'call_order','guard_clause','conditional_return')"):
+            if nid is None:
+                continue
+            nid = int(nid)
+            v = str(val)
+            if kind == "string_literals":
+                node_strings[nid] = v
+            elif kind == "calls":
+                node_calls_v[nid] = v
+            elif kind == "body_terms":
+                node_terms[nid] = v
+            elif kind == "docstring":
+                node_docstring.setdefault(nid, v)
+            else:  # call_order / guard_clause / conditional_return
+                lst = node_props2.setdefault(nid, [])
+                if len(lst) < 4:
+                    lst.append(v)
+    except sqlite3.Error:
+        pass  # new kinds absent (older graph) -> ON degrades to today's props
+
+    # C1 (Fable 2026-07-05): GT_SEM_BODY is ON but the graph carries ZERO body-channel
+    # rows (body_terms + string_literals absent) — the substrate was NOT baked with the
+    # index-time body channels, so ON silently degrades to the OFF props and the flag is a
+    # NO-OP that still attests "body enrichment". Warn LOUDLY (once, stderr = harness log);
+    # under proof mode fail-CLOSED so a paid GT_SEM_BODY run cannot grade a body-less graph
+    # as body-enriched. (Non-proof: warn + degrade, correct-or-quiet.)
+    if not node_terms and not node_strings:
+        global _sem_body_noop_warned
+        import os as _os, sys as _sys
+        if not _sem_body_noop_warned:
+            _sem_body_noop_warned = True
+            _sys.stderr.write(
+                "[GT_WARN] GT_SEM_BODY=1 but graph has 0 body-channel rows "
+                "(body_terms/string_literals absent) — semantic body enrichment is a "
+                "NO-OP; rebuild the substrate with the body channels.\n")
+            _sys.stderr.flush()
+        if _os.environ.get("GT_PROOF_MODE") == "1" and _os.environ.get("GT_BASELINE") != "1":
+            raise RuntimeError(
+                "GT_SEM_BODY=1 under proof mode but graph has 0 body-channel rows "
+                "(substrate not baked with body channels) — refusing to grade a body-less "
+                "graph as body-enriched.")
+
+    stop = _boilerplate_stoplist(node_terms)
+    ids = (set(node_body) | set(node_strings) | set(node_calls_v)
+           | set(node_terms) | set(node_docstring) | set(node_props2))
+    out: dict[int, str] = {}
+    for nid in ids:
+        off_body = " ".join(node_body.get(nid, []))
+        _terms = " ".join(t for t in node_terms.get(nid, "").split() if t not in stop)
+        # G5 fixed-salience template: the domain-vocabulary channels LEAD so a verbose
+        # docstring or calls list cannot truncate them out of symbol_passage's char cap.
+        body = " ".join(x for x in (
+            node_strings.get(nid, ""),
+            _terms,
+            node_docstring.get(nid, ""),
+            node_calls_v.get(nid, ""),
+            " ".join(node_props2.get(nid, [])),
+        ) if x).strip()
+        if not body:
+            body = off_body  # degrade -> today's OFF props
+        out[nid] = body
+        if enriched_node_ids_out is not None and body and body != off_body:
+            enriched_node_ids_out.add(nid)
+    return out
+
+
+def _assemble_symbol_passages(
+    graph_db: str, want: "set[str]", body_on: bool, want_sym: bool = False,
+    enriched_files_out: "set[str] | None" = None,
+) -> "tuple[dict[str, list[str]], dict[str, list[str]]]":
+    """Build per-file ordered per-symbol passages from graph.db (NO file I/O).
+
+    Per-symbol passage BODY comes from the shared ``_symbol_body_map`` (the SAME source
+    ``anchor_select._get_file_embeddings`` reads), so a given symbol's passage text/hash
+    is identical in both halves. OFF (``body_on=False``): each passage is
+    ``symbol_passage(name, sig, PROPS)`` (docstring/call_order/guard/conditional_return
+    join) — BYTE-IDENTICAL to the pre-C2b code. ON: the fixed-salience body-channel
+    template (see ``_symbol_body_map``). ``is_test`` symbols are excluded at source
+    (leak=0). ``sqlite3.Error`` on the ``nodes`` read propagates (proof-mode fail-close)."""
+    from groundtruth.memory.enrich.embed import symbol_passage
+
+    file_passages: dict[str, list[str]] = {}
+    file_symnames: dict[str, list[str]] = {}
+    conn = sqlite3.connect(graph_db)
+    try:
+        enriched_node_ids: set[int] = set()
+        body_map = _symbol_body_map(
+            conn, body_on,
+            enriched_node_ids if enriched_files_out is not None else None,
+        )
+        # The cap uses stable source identity, not graph insertion id. Relevance-first
+        # selection within the cap is a separate measured concern.
+        _symbol_rows = conn.execute(
+            "SELECT id, file_path, name, COALESCE(signature,''), "
+            "start_line, end_line FROM nodes WHERE is_test=0"
+        ).fetchall()
+        _symbol_rows.sort(key=lambda row: (
+            _normalize(str(row[1] or "")),
+            row[4] is None, int(row[4] or 0),
+            row[5] is None, int(row[5] or 0),
+            str(row[2] or ""), str(row[3] or ""), int(row[0] or 0),
+        ))
+        for nid, fp, nm, sig, _sl, _el in _symbol_rows:
+            k = _normalize(fp)
+            if k not in want or len(file_passages.get(k, [])) >= 80:
+                continue
+            body = body_map.get(int(nid), "") if nid is not None else ""
+            passage = symbol_passage(nm or "", sig or "", body)
+            if passage:  # correct-or-quiet: never embed a blank symbol
+                file_passages.setdefault(k, []).append(passage)
+                if enriched_files_out is not None and int(nid) in enriched_node_ids:
+                    enriched_files_out.add(k)
+                if want_sym:
+                    file_symnames.setdefault(k, []).append(str(nm or ""))
+    finally:
+        conn.close()
+    return file_passages, file_symnames
+
+
 def _semantic_score_by_file(
-    issue_text: str,
-    graph_db: str,
-    files: "Iterable[str]",
-    *,
-    symbol_scores_out: "dict[str, list[tuple[str, float]]] | None" = None,
+    issue_text: str, graph_db: str, files: "Iterable[str]",
+    *, symbol_scores_out: "dict[str, list[tuple[str, float]]] | None" = None,
+    body_enriched_files_out: "set[str] | None" = None,
 ) -> dict[str, float]:
     """Semantic similarity between the issue and each candidate file's CODE CONTENT.
 
@@ -1918,56 +2519,35 @@ def _semantic_score_by_file(
         read_agg_params,
         symbol_passage,
     )
-
     # Stage 3: prove localize uses the SAME embedder identity as run_v74/v1r (model-root
     # divergence -> raise in proof mode). Wires the never-called assert_same_embedder_identity.
     _proof.assert_same_embedder_identity(graph_db, "localize")
     _proof_on = _proof.is_proof_mode() and _proof.require_embedder() and bool(files)
-    if model is None or not files:
+    if model is None:
+        # FAIL-CLOSED by construction (not by relying on _get_embedder's raise winning
+        # the race): under GT_REQUIRE_EMBEDDER a None localize embedder is a silent-OFF
+        # semantic pipeline — refuse it. Outside proof/require it degrades quietly.
+        _proof.require(
+            not (_proof.is_proof_mode() and _proof.require_embedder()),
+            "semantic_embedder_present",
+            "GT_REQUIRE_EMBEDDER=1 but the localize embedder is None — semantic OFF",
+        )
+        return {}
+    if not files:
         return {}
     want = {_normalize(f) for f in files}
-    # Per-node behavioral body snippet (docstring/call_order/guards/conditional_return)
-    # so each symbol carries ITS OWN body, not the whole file's. Same source as before,
-    # regrouped per-symbol.
-    node_body: dict[int, list[str]] = {}
-    # Per-file ordered list of symbol passages (carry the existing 80/symbol cap).
-    file_passages: dict[str, list[str]] = {}
-    # R1 leaf-naming bridge: the symbol NAME parallel to each passage (same index),
-    # so the per-symbol cosine computed below can be attributed back to a name for
-    # symbol-stage ranking. Only assembled when symbol_scores_out is requested.
-    file_symnames: dict[str, list[str]] = {}
     _want_sym = symbol_scores_out is not None
+    # C2b: assemble per-symbol passages from graph.db. Read the flag at CALL time (Fable
+    # #10) so a test/harness toggling GT_SEM_BODY is honoured. OFF -> name+signature+PROPS
+    # passages, BYTE-IDENTICAL to the pre-C2b code; ON -> the graph.db body-channel template
+    # (no file I/O — the query-time disk read is retired, so repo_root is no longer needed).
+    _body_on = os.environ.get("GT_SEM_BODY", "") not in ("", "0", "false", "no")
+    _enriched_files: set[str] = set()
     try:
-        conn = sqlite3.connect(graph_db)
-        try:
-            # Properties are ADDITIVE — isolate so a missing `properties` table (older
-            # graphs) degrades to name+signature passages, NOT a proof-mode fail-close.
-            try:
-                for nid, val in conn.execute(
-                    "SELECT p.node_id, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
-                    "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"
-                ):
-                    if nid is None:
-                        continue
-                    lst = node_body.setdefault(int(nid), [])
-                    if len(lst) < 4:
-                        lst.append(str(val))
-            except sqlite3.Error:
-                pass  # properties table absent -> name+signature passages only
-            for nid, fp, nm, sig in conn.execute(
-                "SELECT id, file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test=0"
-            ):
-                k = _normalize(fp)
-                if k not in want or len(file_passages.get(k, [])) >= 80:
-                    continue
-                body = " ".join(node_body.get(int(nid), [])) if nid is not None else ""
-                passage = symbol_passage(nm or "", sig or "", body)
-                if passage:  # correct-or-quiet: never embed a blank symbol
-                    file_passages.setdefault(k, []).append(passage)
-                    if _want_sym:
-                        file_symnames.setdefault(k, []).append(str(nm or ""))
-        finally:
-            conn.close()
+        file_passages, file_symnames = _assemble_symbol_passages(
+            graph_db, want, _body_on, _want_sym,
+            _enriched_files if body_enriched_files_out is not None else None,
+        )
     except sqlite3.Error as _e:
         if _proof_on:
             _proof.require(False, "semantic_db_read", str(_e))
@@ -1976,14 +2556,10 @@ def _semantic_score_by_file(
     file_passages = {k: v for k, v in file_passages.items() if v}
     if not file_passages:
         if _proof_on:
-            _proof.require(
-                False,
-                "semantic_docs_present",
-                f"{len(want)} candidates but 0 symbol passages assembled from graph.db",
-            )
+            _proof.require(False, "semantic_docs_present",
+                           f"{len(want)} candidates but 0 symbol passages assembled from graph.db")
         return {}
     import numpy as np
-
     # PRIORITY ORDER = the caller's iteration order (the call site passes the
     # pre-semantic candidate ranking). The encode budget truncates from the BACK,
     # so the lowest-priority candidates lose their semantic scores first.
@@ -2043,7 +2619,6 @@ def _semantic_score_by_file(
     if n_skipped > 0:
         # Correct-or-quiet: ONE line, stderr only (never agent-visible stdout).
         import sys as _sys
-
         print(
             f"[GT_SEM] passage budget hit ({len(to_encode)}/{len(seen_hashes)} encoded; "
             f"{n_hits} cached; {n_skipped} unique passages skipped)",
@@ -2079,19 +2654,18 @@ def _semantic_score_by_file(
                 if _c > _best.get(_nm, -1.0):
                     _best[_nm] = _c
             symbol_scores_out[f] = sorted(  # type: ignore[index]
-                _best.items(), key=lambda kv: -kv[1]
+                _best.items(), key=lambda kv: (-kv[1], kv[0])
             )
     if _proof_on and _res:
         _nz = sum(1 for v in _res.values() if v and v > 0)
-        _proof.require(
-            _nz > 0,
-            "semantic_ranks_nonzero",
-            f"all {len(_res)} semantic ranks zero/flat for {len(want)} candidates",
-        )
+        _proof.require(_nz > 0, "semantic_ranks_nonzero",
+                       f"all {len(_res)} semantic ranks zero/flat for {len(want)} candidates")
+    if body_enriched_files_out is not None:
+        body_enriched_files_out.update(_enriched_files & set(_res))
     return _res
 
 
-def localize(
+def _localize_legacy(
     issue_text: str,
     graph_db: str,
     *,
@@ -2113,6 +2687,10 @@ def localize(
     import math
     import sys
 
+    _content_candidate_paths: set[str] = set()
+    _content_decision = "NO_EFFECT"
+    _content_reason = "feature_not_reached"
+
     if not graph_db or not os.path.exists(graph_db):
         return LocalizerResult([], [], 0.0, False, "no_graph_db")
 
@@ -2123,12 +2701,23 @@ def localize(
             issue_anchors = IssueAnchors()
 
     anchors = {a for a in issue_anchors.symbols if len(a) >= _MIN_ANCHOR_LEN}
+    anchor_list = sorted(anchors)
     # Phase 1 (grep-floor): issue-token-node-name anchors are a TIE-BREAK HINT, not
     # the seed. Do NOT early-return when no issue token equals a node name — grep
     # recall (string match over file CONTENT, incl. data-access sites like
     # box.style['overflow']) is the seed/floor and runs below. Only bail when there
-    # is neither a symbol anchor NOR a repo to grep.
-    if not anchors and not repo_root:
+    # is neither a symbol anchor NOR a repo to grep NOR the content-BM25 leg NOR any issue
+    # text for the FTS5 leg. B1's symbol_content_fts lives INSIDE graph.db, so it seeds the
+    # repo-less path with no anchor (the exact stratum-B case it exists for).
+    # L5 (Fable): the FTS5 leg (_fts5_candidates below) ALSO lives inside graph.db and builds
+    # an in-memory index when the persisted nodes_fts is absent — so it can seed the repo-less /
+    # no-anchor path with ZERO external deps. Coupling this bail to `not repo_root` alone made
+    # FTS5 DEAD on that path (the carve-out named only the content leg). If the graph has nodes
+    # and the issue has tokens, let FTS5 try; the `if not seeds` net below still returns
+    # no_anchor_hit when it and every other leg come up empty, so nothing is over-claimed. The
+    # measured/paid path (repo_root present) never hit this bail → byte-identical there.
+    _fts_seedable = bool(issue_text and issue_text.strip())
+    if not anchors and not repo_root and os.getenv("GT_CONTENT_LEG") != "1" and not _fts_seedable:
         return LocalizerResult([], [], 0.0, False, "no_anchor_hit")
 
     # Phase 1/2: the set of files GREP recalled (string match over content). This is
@@ -2138,7 +2727,7 @@ def localize(
     # Per-file grep STRENGTH (distinct issue-token coverage). Drives the within-floor
     # rank fusion so a lexically-strong gold (grep #1) is not buried by structural
     # reranking — the go-cli regression. Empty when no repo_root.
-    grep_score_by_file: dict[str, int] = {}
+    grep_score_by_file: dict[str, float] = {}
 
     conn = _open_ro(graph_db)
     if conn is None:
@@ -2148,6 +2737,19 @@ def localize(
             return LocalizerResult([], [], 0.0, False, "graph_open_failed")
 
     try:
+        # SM-9a MULTI-REPO consumer: resolve the active-repo read scope ONCE. On a
+        # single-repo / legacy graph this is a no-op (byte-identical). On a multi-repo
+        # graph where repo_root cannot be resolved to a stored repo, FAIL CLOSED —
+        # return empty (correct-or-quiet) rather than seeding/ranking candidates from
+        # the WRONG repository. When resolved, the seed producers below are scoped to
+        # the active repo's partition.
+        _repo_scope = for_read(conn, repo_root)
+        if _repo_scope.is_multi_repo and not _repo_scope.resolved:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            return LocalizerResult([], anchor_list, 0.0, False, "multi_repo_unresolved")
         has_conf, has_method = _has_columns(conn)
         # trust_tier column (schema v15.2+): when present, a SUPPRESSED edge is
         # HARD-EXCLUDED at admission per the categorical filter (CLAUDE.md edge
@@ -2165,7 +2767,7 @@ def localize(
         _dyn_hop = min(max_hop, _dynamic_max_hop(_stats))
         _dyn_conf = _dynamic_conf_floor(_stats)
 
-        seeds = _seed_node_rows(conn, anchors)
+        seeds = _seed_node_rows(conn, anchors, scope=_repo_scope)
 
         # SEED PROVENANCE (fix 2026-06-09): ONLY these exact-name seeds — the
         # issue literally names a symbol defined in the file — may mint the
@@ -2187,14 +2789,16 @@ def localize(
         terms = _issue_terms(issue_text)
         _existing_seed_files = {s[2] for s in seeds}  # normalized file paths already seeded
         try:
-            _path_seeds = _path_to_seeds(conn, terms, _existing_seed_files, limit=10)
+            _path_seeds = _path_to_seeds(conn, terms, _existing_seed_files, limit=10, scope=_repo_scope)
             if _path_seeds:
                 existing_ids = {s[0] for s in seeds}
                 for ps in _path_seeds:
                     if ps[0] not in existing_ids:
                         seeds.append(ps)
                         existing_ids.add(ps[0])
-                        _seed_provenance[ps[0]] = ("PATH_SEED", _path_match_token(ps[2], terms))
+                        _seed_provenance[ps[0]] = (
+                            "PATH_SEED", _path_match_token(ps[2], terms)
+                        )
         except Exception as _path_err:
             print(
                 f"[GT L1] path-to-seed: FAILED: {_path_err}",
@@ -2220,7 +2824,6 @@ def localize(
         _anchor_coverage = len(_covered_terms) / _n_terms
         # Diversity score: tanh normalizes so 5+ files → ~1.0, 1 file → ~0.2
         import math
-
         _diversity_score = math.tanh(_seed_diversity / 3.0)
         # Confidence score: fraction of seeds with a verified edge backing
         _verified_seed_files = set()
@@ -2263,6 +2866,15 @@ def localize(
         # not a fixed cap; the rails (15..60) are an operational token budget only.
         _base_limit = max(15, min(60, int(_stats.get("node_count", 0) / 60)))
         _grep_limit = _base_limit if _seed_quality >= 0.5 else int(_base_limit * 1.6)
+        # B1: tracks whether the CONTENT-BM25 fallback (below) filled the lexical slot,
+        # so the agreement vote names the leg honestly ("content" vs "grep").
+        _content_leg_used = False
+        # SM-10 FUSION (redirect 2026-07-12): the content-BM25 leg as an ALWAYS-CONSIDERED,
+        # provenance-SEPARATED, MARGIN-GATED fusion leg on the grep-NON-empty path (distinct
+        # from the grep-empty fallback above, so it can never double-count the grep signal).
+        # Empty unless GT_CONTENT_LEG is on AND a measured GT_CONTENT_MARGIN clears the gate ->
+        # byte-identical off / uncalibrated. Its per-file score seeds a distinct RRF leg below.
+        _content_fusion_score: dict[str, float] = {}
         if repo_root:
             try:
                 # GREENFIELD wiring (gt_gt §4, 2026-06-10): unresolved code
@@ -2270,13 +2882,9 @@ def localize(
                 # name-match/FTS5 node to seed; the literal-token grep over
                 # source is their ONLY entry into the candidate set.
                 grep_seeds = _grep_to_seeds(
-                    terms,
-                    repo_root,
-                    conn,
-                    max_seeds=_grep_limit,
-                    priority_tokens=set(
-                        getattr(issue_anchors, "unresolved_code_symbols", None) or set()
-                    ),
+                    terms, repo_root, conn, max_seeds=_grep_limit,
+                    priority_tokens=set(getattr(
+                        issue_anchors, "unresolved_code_symbols", None) or set()),
                 )
                 if grep_seeds:
                     existing_ids = {s[0] for s in seeds}
@@ -2293,11 +2901,8 @@ def localize(
                 _gtoks = [t.lower() for t in terms if len(t) >= 4]
                 for _fp in grep_recalled:
                     try:
-                        _txt = (
-                            open(os.path.join(repo_root, _fp), encoding="utf-8", errors="ignore")
-                            .read(500_000)
-                            .lower()
-                        )
+                        _txt = open(os.path.join(repo_root, _fp), encoding="utf-8",
+                                    errors="ignore").read(500_000).lower()
                         _hit_toks = [t for t in _gtoks if t in _txt]
                         grep_score_by_file[_fp] = len(_hit_toks)
                         if _hit_toks:
@@ -2312,6 +2917,84 @@ def localize(
                     file=sys.stderr,
                 )
 
+        # B1 CONTENT-BM25 FALLBACK LEG (Fable hybrid verdict; GT_CONTENT_LEG, default-off).
+        # When the live-grep leg recalled NOTHING — repo_root absent (the graph.db-only /
+        # MCP path), rg failed/timed out, or genuinely zero hits — the lexical slot is
+        # VACANT and a behavior-described (stratum-B) task loses its content signal and can
+        # bail with no floor. symbol_content_fts is a persistent BM25 index over per-symbol
+        # BODY vocabulary (Go-built, test symbols excluded at source) that lives INSIDE
+        # graph.db, so it serves content ranking with NO live checkout. It fires ONLY when
+        # grep_recalled is empty -> MUTUALLY EXCLUSIVE with the grep leg -> it can NEVER
+        # double-count the lexical signal in RRF / the agreement vote. It fills the SAME
+        # slot (grep_recalled + grep_score_by_file) under a DISTINCT leg label ("content")
+        # so the consensus stays honest. Default-off: the measured paid path (repo present
+        # -> grep succeeds) is byte-identical; this only lights the grep-dead lane.
+        if os.getenv("GT_CONTENT_LEG") == "1":
+            try:
+                _cfts = _content_fts_candidates(conn, terms, limit=_grep_limit, issue_text=issue_text, scope=_repo_scope)
+            except Exception as _cfts_err:
+                print(f"[GT L1] content-fts leg: FAILED: {_cfts_err}", file=sys.stderr)
+                _cfts = []
+                _content_decision = "ERROR"
+                _content_reason = "content_fts_query_failed"
+            if _cfts and not grep_recalled:
+                # GREP-EMPTY FALLBACK (UNCHANGED): the lexical slot is VACANT, so a lossy top-K
+                # BM25 hit beats no floor at all — fill the grep slot exactly as before. The
+                # margin-gate does NOT apply here (there is no grep signal to protect against).
+                _existing_ids_c = {s[0] for s in seeds}
+                for _nid, _cname, _cfp, _cscore in _cfts:
+                    grep_recalled.add(_cfp)
+                    if _cscore > grep_score_by_file.get(_cfp, float("-inf")):
+                        grep_score_by_file[_cfp] = _cscore
+                    if _nid not in _existing_ids_c:
+                        seeds.append((_nid, _cname, _cfp))
+                        _existing_ids_c.add(_nid)
+                        _seed_provenance[_nid] = ("CONTENT_SEED", "")
+                _content_leg_used = True
+                _content_candidate_paths.update(_normalize(row[2]) for row in _cfts)
+                _content_decision = "APPLIED"
+                _content_reason = "vacant_lexical_slot"
+                print(
+                    f"[GT L1] content-fts leg: filled vacant lexical slot with "
+                    f"{len(_cfts)} BM25 body-content candidates",
+                    file=sys.stderr,
+                )
+            elif _cfts:
+                # GREP-NON-EMPTY FUSION (SM-10 redirect 2026-07-12): the content-BM25 leg is
+                # ALWAYS considered — a DISTINCT, provenance-separated fusion leg alongside the
+                # live grep leg (double-count is prevented by the separate "content" leg, NOT by
+                # a grep-empty exclusion). MARGIN-GATED: it contributes a distinct RRF leg ONLY
+                # when a MEASURED GT_CONTENT_MARGIN clears (a clearly-separated top body hit);
+                # a weak margin OR an uncalibrated (unset) threshold -> ABSTAIN -> byte-identical
+                # to the grep-only pipeline (correct-or-quiet — never body-BM25-first noise).
+                _mthr = _content_margin_threshold()
+                if _mthr is not None and _content_leg_margin_ok(_cfts, _mthr):
+                    _existing_ids_c = {s[0] for s in seeds}
+                    for _nid, _cname, _cfp, _cscore in _cfts:
+                        if _cscore > _content_fusion_score.get(_cfp, float("-inf")):
+                            _content_fusion_score[_cfp] = _cscore
+                        if _nid not in _existing_ids_c:
+                            seeds.append((_nid, _cname, _cfp))
+                            _existing_ids_c.add(_nid)
+                            _seed_provenance[_nid] = ("CONTENT_SEED", "")
+                    _content_candidate_paths.update(_content_fusion_score)
+                    _content_decision = "APPLIED"
+                    _content_reason = "margin_cleared"
+                    print(
+                        f"[GT L1] content-fts FUSION leg: margin>={_mthr:.4f} cleared, "
+                        f"{len(_content_fusion_score)} distinct body-content files fused",
+                        file=sys.stderr,
+                    )
+                else:
+                    _content_decision = "SUPPRESSED"
+                    _content_reason = (
+                        "margin_uncalibrated" if _mthr is None
+                        else "margin_not_cleared"
+                    )
+            elif not _cfts and _content_decision != "ERROR":
+                _content_decision = "NO_EFFECT"
+                _content_reason = "no_content_fts_candidates"
+
         # FTS5-TO-SEED (mechanism C): BM25 retrieval over the nodes_fts
         # virtual table. Matches grep's recall by searching function names,
         # signatures, qualified names, and file paths — but ranks by
@@ -2323,7 +3006,7 @@ def localize(
         _fts5_score_by_file: dict[str, float] = {}
         _fts5_seed_used = False
         try:
-            fts5_hits = _fts5_candidates(conn, terms, limit=50)
+            fts5_hits = _fts5_candidates(conn, terms, limit=50, scope=_repo_scope)
             if fts5_hits:
                 existing_ids = {s[0] for s in seeds}
                 for nid, name, fp, bm25_score in fts5_hits:
@@ -2347,7 +3030,7 @@ def localize(
                 conn.close()
             except sqlite3.Error:
                 pass
-            return LocalizerResult([], list(anchors), 0.0, False, "no_anchor_hit")
+            return LocalizerResult([], anchor_list, 0.0, False, "no_anchor_hit")
 
         # Seed files themselves are hop-0 candidates: the issue named a symbol that
         # lives there. Witness = self-anchor (the named symbol is defined here).
@@ -2370,32 +3053,97 @@ def localize(
         seed_ids = [s[0] for s in seeds]
         seed_name_by_id = {s[0]: s[1] for s in seeds}
 
+        # ALL-POLLUTANT detection: are ALL exact-name seeds generic homonyms?
+        # When yes, name-match seeds are all noise — demote them below
+        # grep/path so content-match leads. Data-driven via is_seed_pollutant.
+        _exact_names = [s[1] for s in seeds if s[0] in _exact_seed_ids]
+        _all_seeds_pollutant = bool(_exact_names) and all(
+            is_seed_pollutant(n, conn) for n in _exact_names
+        )
+
+        # IDF-scaled seed confidence (2026-06-26, BLUiR ASE 2013).
+        # Non-exact seeds (path, grep, fts5) carry domain-match signal whose
+        # value is inversely proportional to how many files the matched token
+        # covers (IDF). A token matching 1 file is highly discriminating; a
+        # token matching 500 files is noise. Continuous — no hardcoded tier
+        # boundaries. Adapts to every codebase via the graph's own file count.
+        #
+        # confidence = FLOOR + (CEILING - FLOOR) * idf_ratio
+        # idf_ratio  = log2(N / df) / log2(N)   ∈ [0, 1]
+        #
+        # FLOOR (0.35) = existing non-exact seed grade (grep/fts5 baseline).
+        # CEILING (0.60) = between demoted-DEFINES (0.45) and verified (1.0) —
+        # a maximally specific non-exact seed outranks any homonym but not a
+        # unique verified name. Both are architectural constants from the
+        # existing witness hierarchy, not arbitrary picks.
+        _SEED_CONF_FLOOR = 0.35
+        _SEED_CONF_CEILING = 0.60
+        try:
+            _total_graph_files = conn.execute(
+                "SELECT COUNT(DISTINCT file_path) FROM nodes"
+            ).fetchone()[0] or 1
+        except sqlite3.Error:
+            _total_graph_files = 1
+
+        def _idf_seed_confidence(df: int) -> float:
+            if _total_graph_files <= 1 or df <= 0:
+                return _SEED_CONF_FLOOR
+            _idf = math.log2(_total_graph_files / max(1, df)) / math.log2(
+                max(2, _total_graph_files)
+            )
+            return _SEED_CONF_FLOOR + (_SEED_CONF_CEILING - _SEED_CONF_FLOOR) * min(
+                1.0, _idf
+            )
+
+        # Precompute per-token document frequency for path seeds.
+        _path_token_df: dict[str, int] = {}
+        for sid, name, fp in seeds:
+            _kind, _tok = _seed_provenance.get(sid, ("SEED", ""))
+            if _kind == "PATH_SEED" and _tok and _tok not in _path_token_df:
+                try:
+                    _pats = [f"%/{_tok}.%", f"%/{_tok}/%", f"{_tok}.%"]
+                    _df = 0
+                    for _pp in _pats:
+                        _c = conn.execute(
+                            "SELECT COUNT(DISTINCT file_path) FROM nodes "
+                            "WHERE file_path LIKE ?", (_pp,)
+                        ).fetchone()
+                        _df += (_c[0] if _c else 0)
+                    _path_token_df[_tok] = max(1, _df)
+                except sqlite3.Error:
+                    _path_token_df[_tok] = 1
+
+        # Precompute per-token document frequency for grep seeds.
+        _grep_token_df: dict[str, int] = {}
+        for sid, name, fp in seeds:
+            _kind, _tok = _seed_provenance.get(sid, ("SEED", ""))
+            if _kind == "GREP_SEED":
+                _gt = _tok or _grep_token_by_file.get(fp, "")
+                if _gt and _gt not in _grep_token_df:
+                    _grep_token_df[_gt] = sum(
+                        1 for _gf in grep_recalled
+                        if _gt.lower() in _gf.lower()
+                    ) or 1
+
         for sid, name, fp in seeds:
             if sid not in _exact_seed_ids:
-                # Fix 2026-06-09 (witness provenance): a grep/path/FTS5 seed is a
-                # retrieval ENTRY POINT — the issue did NOT name this symbol.
-                # Minting "defines {name} (issue symbol)" for it fabricated a
-                # verified-grade DEFINES fact (conf 1.0) out of a string/path/BM25
-                # match, which the [VERIFIED] gate, verified-first sort and HIGH
-                # header then consumed as structural truth. These seeds now carry
-                # a seed-typed, UNVERIFIED witness (rendered "grep match: …" /
-                # "path match: …" / "fts5 match: …") at confidence 0.35 — below
-                # the demoted-DEFINES grade (0.45) so an exact-name DEFINES always
-                # outranks them. BFS traversal from these seeds is unchanged.
                 _kind, _tok = _seed_provenance.get(sid, ("SEED", ""))
                 if _kind == "GREP_SEED" and not _tok:
                     _tok = _grep_token_by_file.get(fp, "")
+                if _kind == "PATH_SEED" and _tok:
+                    _seed_conf = _idf_seed_confidence(_path_token_df.get(_tok, 1))
+                elif _kind == "GREP_SEED" and _tok:
+                    _seed_conf = _idf_seed_confidence(
+                        _grep_token_df.get(_tok, len(grep_recalled) or 1)
+                    )
+                else:
+                    _seed_conf = _SEED_CONF_FLOOR
                 witnesses_by_file.setdefault(fp, []).append(
                     Witness(
-                        file_path=fp,
-                        anchor=name,
-                        edge_type=_kind,
-                        direction="defines_anchor",
-                        verified=False,
-                        confidence=0.35,
-                        hop=0,
-                        src_symbol=_tok or name,
-                        dst_symbol=name,
+                        file_path=fp, anchor=name, edge_type=_kind,
+                        direction="defines_anchor", verified=False,
+                        confidence=_seed_conf, hop=0,
+                        src_symbol=_tok or name, dst_symbol=name,
                     )
                 )
                 continue
@@ -2418,17 +3166,23 @@ def localize(
             # signal here; Step-2 finding #1). Aider `len(defines[ident])>5: mul*=0.1`
             # generalized to per-repo P95; never PROMOTE on uniqueness.
             _def_verified = not is_seed_pollutant(name, conn)
+            # ALL-POLLUTANT demotion (2026-06-26): when EVERY exact-name seed
+            # is a pollutant (zero unique definitions — all anchors are generic
+            # verbs like create/display/login), name-match seeds are ALL noise.
+            # Demote them to 0.30 (below the grep/path IDF floor 0.35) so
+            # file-content overlap and path-domain signals LEAD the ranking
+            # instead of being buried under generic homonym seeds. Data-driven:
+            # _all_seeds_pollutant is computed once from is_seed_pollutant over
+            # the exact-seed set (not hardcoded per anchor). When at least ONE
+            # seed is unique, pollutants stay at 0.45 (existing behavior —
+            # the unique seed anchors the ranking, pollutants are tiebreakers).
+            _poll_conf = 0.30 if _all_seeds_pollutant else 0.45
             witnesses_by_file.setdefault(fp, []).append(
                 Witness(
-                    file_path=fp,
-                    anchor=name,
-                    edge_type="DEFINES",
-                    direction="defines_anchor",
-                    verified=_def_verified,
-                    confidence=1.0 if _def_verified else 0.45,
-                    hop=0,
-                    src_symbol=name,
-                    dst_symbol=name,
+                    file_path=fp, anchor=name, edge_type="DEFINES",
+                    direction="defines_anchor", verified=_def_verified,
+                    confidence=1.0 if _def_verified else _poll_conf,
+                    hop=0, src_symbol=name, dst_symbol=name,
                 )
             )
 
@@ -2467,7 +3221,12 @@ def localize(
                         f"n.name, n.file_path, e.type, {conf_sel}, {method_sel}, {tier_sel} "
                         f"FROM edges e JOIN nodes n ON {join_col} = n.id "
                         f"WHERE {match_col} IN ({ph}) "
-                        f"AND e.type IN ('CALLS','IMPORTS') AND n.is_test = 0"
+                        f"AND e.type IN ('CALLS','IMPORTS') AND n.is_test = 0 "
+                        # DETERMINISM (Fable L9): the sibling decay walk has an ORDER BY;
+                        # this BFS did not, so anchor_of_id (first-row-wins for a neighbor
+                        # reachable from >1 frontier node) and render_witness's tie order
+                        # were query-plan-dependent. Fix insertion order deterministically.
+                        f"ORDER BY n.file_path, {join_col}, {match_col}, e.type"
                     )
                     try:
                         rows = conn.execute(sql, chunk).fetchall()
@@ -2516,6 +3275,7 @@ def localize(
                                 hop=hop,
                                 src_symbol=src_sym,
                                 dst_symbol=dst_sym,
+                                resolution_method=str(method or "").strip().lower(),
                             )
                         )
                         if nbr_id not in visited_ids:
@@ -2530,7 +3290,8 @@ def localize(
                 conn.close()
             except sqlite3.Error:
                 pass
-            return LocalizerResult([], list(anchors), 0.0, False, "no_witness", graph_stats=_stats)
+            return LocalizerResult([], anchor_list, 0.0, False, "no_witness",
+                                   graph_stats=_stats)
 
         # ---- PATH DECAY SCORING (KGCompass-style) ----
         # Dijkstra-style BFS from ALL seed nodes. Edge weight = 1/confidence,
@@ -2540,14 +3301,9 @@ def localize(
         _path_decay_by_file: dict[str, float] = {}
         try:
             _path_decay_by_file = _path_decay_scores(
-                conn,
-                seed_ids,
-                has_conf,
-                max_hop=_dyn_hop,
-                beta=0.85,
-                min_edge_conf=_dyn_conf,
-                has_method=has_method,
-                has_trust_tier=has_trust_tier,
+                conn, seed_ids, has_conf,
+                max_hop=_dyn_hop, beta=0.85, min_edge_conf=_dyn_conf,
+                has_method=has_method, has_trust_tier=has_trust_tier,
             )
         except Exception:
             pass
@@ -2564,7 +3320,9 @@ def localize(
             if defines_wits:
                 # Use the strongest DEFINES witness's anchor (the function name)
                 best_def = max(defines_wits, key=lambda w: w.strength())
-                _role_discounts[fp] = _role_discount_for_function(conn, fp, best_def.anchor)
+                _role_discounts[fp] = _role_discount_for_function(
+                    conn, fp, best_def.anchor
+                )
         # Downgrade DEFINES witnesses for Herbold-trivial functions
         # (SLOC<=4, fan_out=0). A trivial function matching an issue keyword
         # by name is NOT a verified structural fact — it's a lexical coincidence.
@@ -2576,19 +3334,14 @@ def localize(
                 new_wits = []
                 for w in witnesses_by_file.get(fp, []):
                     if w.direction == "defines_anchor" and w.verified:
-                        new_wits.append(
-                            Witness(
-                                file_path=w.file_path,
-                                anchor=w.anchor,
-                                edge_type=w.edge_type,
-                                direction=w.direction,
-                                verified=False,
-                                confidence=0.45,
-                                hop=w.hop,
-                                src_symbol=w.src_symbol,
-                                dst_symbol=w.dst_symbol,
-                            )
-                        )
+                        new_wits.append(Witness(
+                            file_path=w.file_path, anchor=w.anchor,
+                            edge_type=w.edge_type, direction=w.direction,
+                            verified=False, confidence=0.45,
+                            hop=w.hop, src_symbol=w.src_symbol,
+                            dst_symbol=w.dst_symbol,
+                            resolution_method=w.resolution_method,
+                        ))
                     else:
                         new_wits.append(w)
                 witnesses_by_file[fp] = new_wits
@@ -2630,6 +3383,7 @@ def localize(
     _decay_vals = [v for v in _path_decay_by_file.values() if v > 0]
     _decay_max = max(_decay_vals) if _decay_vals else 1.0
 
+
     # TEST-TOOLING demote (vendored assertion/debug libs imported only by tests, e.g.
     # internal/testify, internal/spew — escape the vendor/ markers, lexically match an
     # issue's error/panic vocabulary, and out-rank the real gold; NEVER a feature edit
@@ -2637,16 +3391,156 @@ def localize(
     # test-file demote magnitude (no new weight/threshold). Computed ONCE.
     try:
         from groundtruth.delivery.path_policy import (
-            test_tooling_roots as _tt_roots_fn,
-            is_test_tooling as _is_tt,
+            test_tooling_roots as _tt_roots_fn, is_test_tooling as _is_tt,
         )
-
         _tt_roots = _tt_roots_fn(graph_db) if graph_db else frozenset()
     except Exception:
         _tt_roots = frozenset()
 
         def _is_tt(fp: str, roots: frozenset) -> bool:
             return False
+
+    # ── LOCALIZER FUSION V2 (RRF over per-surface rank lists) ─────────────────
+    # Computed ONCE, before the per-candidate scoring loop, only when the master
+    # flag is set. Produces _rrf_score_by_file[fp]; the scoring loop swaps the
+    # magnitude composite for this rank-fused score. When the flag is OFF this
+    # block is skipped entirely and `score` is byte-identical to the prior path.
+    _rrf_score_by_file: dict[str, float] = {}
+    if GT_LOC_FUSION_V2:
+        # Lazy imports (only on the gated path; avoids any import-cycle on the
+        # default path and keeps OFF byte-identical).
+        from groundtruth.pretask.hybrid import (
+            SignalHit as _SignalHit,
+            reciprocal_rank_fusion as _rrf,
+        )
+        from groundtruth.pretask.v7_4_brief import (
+            _classify_issue_lexicality as _classify_lex,
+        )
+
+        _issue_toks = sorted({t.lower() for t in terms if len(t) >= 4})
+
+        # L1 witness/structural + L4 lex — per-file, same computation the scoring
+        # loop uses (kept in lockstep so the lists reflect the real surfaces).
+        _l1_witness: dict[str, float] = {}
+        _l4_lex: dict[str, float] = {}
+        for _fp, _wits in witnesses_by_file.items():
+            _l1_witness[_fp] = max((w.strength() for w in _wits), default=0.0)
+            _ss = {os.path.splitext(os.path.basename(_fp))[0].lower()}
+            for _w in _wits:
+                _ss.add(_w.src_symbol.lower())
+                _ss.add(_w.dst_symbol.lower())
+            _lh = sum(1 for t in terms if _lex_hit(t, _ss))
+            _l4_lex[_fp] = min(1.0, _lh / 5.0)
+
+        # L5 file-CONTENT IDF-coverage (INDEPENDENT of nodes.name — reads bodies).
+        # Bounded to GT_LOC_CONTENT_MAXFILES candidate files. Each token weighted
+        # by its IDF over the READ set (NOT raw count — the Lim#6 "calendar in 34
+        # files" guard). Bodies cached for optional PRF (RM3) below.
+        _l5_content: dict[str, float] = {}
+        _bodies: dict[str, str] = {}
+        if not GT_LOC_FUSION_EXCLUDE_INDEP and repo_root and _issue_toks:
+            _cand_files = sorted(witnesses_by_file.keys())[:GT_LOC_CONTENT_MAXFILES]
+            _tok_present: dict[str, list[str]] = {}  # fp -> tokens present
+            _tok_df: dict[str, int] = {}             # token -> distinct files in read set
+            for _fp in _cand_files:
+                try:
+                    _txt = open(
+                        os.path.join(repo_root, _fp), encoding="utf-8",
+                        errors="ignore",
+                    ).read(500_000).lower()
+                except OSError:
+                    continue
+                _bodies[_fp] = _txt
+                _present = [t for t in _issue_toks if t in _txt]
+                if _present:
+                    _tok_present[_fp] = _present
+                    for t in _present:
+                        _tok_df[t] = _tok_df.get(t, 0) + 1
+            _nread = max(1, len(_bodies))
+            for _fp, _present in _tok_present.items():
+                _l5_content[_fp] = sum(
+                    math.log((_nread + 1.0) / _tok_df[t]) for t in _present
+                )
+
+            # Optional RM3/PRF (Phase 1.5, gated): expand the content query once
+            # from the top content files' bodies, then recompute L5. Amplifies an
+            # existing content foothold; no-op when no file matched. Reuses the
+            # cached bodies (no extra disk).
+            if GT_LOC_PRF and _l5_content:
+                from collections import Counter as _Counter
+                _top = sorted(_l5_content, key=lambda f: -_l5_content[f])[:3]
+                _ctr: _Counter = _Counter()
+                for _fp in _top:
+                    for _bt in _re.findall(r"[a-z_]\w{3,}", _bodies.get(_fp, "")):
+                        _ctr[_bt] += 1
+                _expand = [
+                    t for t, _ in _ctr.most_common(40)
+                    if t not in _issue_toks
+                ][:10]
+                if _expand:
+                    _edf = {
+                        t: max(1, sum(1 for b in _bodies.values() if t in b))
+                        for t in _expand
+                    }
+                    for _fp, _txt in _bodies.items():
+                        _extra = sum(
+                            math.log((_nread + 1.0) / _edf[t])
+                            for t in _expand if t in _txt
+                        )
+                        if _extra:
+                            _l5_content[_fp] = _l5_content.get(_fp, 0.0) + _extra
+
+        # L6 path-IDF coverage (INDEPENDENT of nodes.name — file_path tokens).
+        # df computed over the candidate path set; weight via the existing
+        # _idf_seed_confidence. Pure string, no disk.
+        _l6_path_idf: dict[str, float] = {}
+        if not GT_LOC_FUSION_EXCLUDE_INDEP and _issue_toks:
+            _cand_paths = list(witnesses_by_file.keys())
+            _path_df: dict[str, int] = {}
+            for t in _issue_toks:
+                _path_df[t] = sum(1 for p in _cand_paths if t in p.lower())
+            for _fp in _cand_paths:
+                _pl = _fp.lower()
+                _hit = [t for t in _issue_toks if t in _pl]
+                if _hit:
+                    _l6_path_idf[_fp] = sum(
+                        _idf_seed_confidence(_path_df[t]) for t in _hit
+                    )
+
+        # Behavior-lead gate: on nl_gap, widen the name lists' RRF-k (~10x smaller
+        # contribution) so the independent + reach lists LEAD. identifier_heavy /
+        # mixed keep all lists at k=60 (regression-safe).
+        _lexclass = _classify_lex(issue_text, issue_anchors, graph_db=graph_db)
+        _demote = GT_LOC_BEHAVIOR_LEAD and _lexclass == "nl_gap"
+        _k_name = GT_LOC_RRF_K_DEMOTE if _demote else GT_LOC_RRF_K
+
+        def _mklist(_d: dict[str, float]) -> list:
+            _items = [(f, s) for f, s in _d.items() if s > 0]
+            _items.sort(key=lambda kv: (-kv[1], kv[0]))  # deterministic ties
+            return [_SignalHit(file=f, score=s) for f, s in _items]
+
+        # Name-keyed lists (k_name) and independent/reach lists (k_base). RRF is
+        # additive across lists, so fusing the two groups separately and summing
+        # the per-file scores == one fused pass with per-list k. (The shipped
+        # reciprocal_rank_fusion takes a single k; this is how we get per-list k.)
+        _name_lists = {
+            "witness": _mklist(_l1_witness),         # L1
+            "fts5": _mklist(_fts5_score_by_file),    # L2
+            "lex": _mklist(_l4_lex),                 # L4
+        }
+        _indep_lists = {"path_decay": _mklist(_path_decay_by_file)}  # L3 (reach)
+        if not GT_LOC_FUSION_EXCLUDE_INDEP:
+            _indep_lists["content"] = _mklist(_l5_content)    # L5
+            _indep_lists["path_idf"] = _mklist(_l6_path_idf)  # L6
+        _maxf = max(50, len(witnesses_by_file) + 1)
+        for _fh in _rrf(_name_lists, k=_k_name, max_files=_maxf):
+            _rrf_score_by_file[_fh.file] = (
+                _rrf_score_by_file.get(_fh.file, 0.0) + _fh.score
+            )
+        for _fh in _rrf(_indep_lists, k=GT_LOC_RRF_K, max_files=_maxf):
+            _rrf_score_by_file[_fh.file] = (
+                _rrf_score_by_file.get(_fh.file, 0.0) + _fh.score
+            )
 
     candidates: list[Candidate] = []
     _cand_subject_pos: dict[str, int] = {}
@@ -2681,14 +3575,20 @@ def localize(
             + W_DEGREE * deg_norm
         )
         _weight_sum = W_BM25 + W_PATH_DECAY + W_WITNESS + W_LEX + W_SUBJECT + W_DEGREE
-        score = _raw_score / _weight_sum if _weight_sum > 0 else _raw_score
-        if _is_generated(fp):
-            score -= 0.5
-        _tt_on = (
-            os.environ.get("GT_TEST_TOOLING_DEMOTE", "1") != "0"
-        )  # default ON; "0"=A/B baseline
-        if _is_test_file(fp) or (_tt_on and _is_tt(fp, _tt_roots)):
-            score -= 0.4
+        if GT_LOC_FUSION_V2:
+            # RRF re-fusion (rank-based, dilution-immune). Files absent from every
+            # list score 0.0 here — they still sit inside the downstream grep
+            # floor / tier ordering, which RRF only reorders within/above.
+            score = _rrf_score_by_file.get(fp, 0.0)
+        else:
+            score = _raw_score / _weight_sum if _weight_sum > 0 else _raw_score
+        # L3/L7 (Fable): the test/generated/tooling demote is applied as an ORDERING stratum
+        # in the FINAL SORT (see _nonsource_stratum below), NOT as a score subtraction. Under
+        # V2 fusion the sort keys on rank fusion — never c.score — so a `score -= 0.4/0.5` was
+        # DEAD (a .pb.go / vendored testify re-entered top-k) AND it polluted the confidence
+        # gate's flatness MAD with negative demote outliers (L7). Keeping c.score clean fixes
+        # both; GT_TEST_TOOLING_DEMOTE still gates the tooling stratum.
+        _tt_on = os.environ.get("GT_TEST_TOOLING_DEMOTE", "1") != "0"  # default ON; "0"=A/B baseline
         candidates.append(
             Candidate(
                 file_path=fp,
@@ -2728,14 +3628,30 @@ def localize(
     # strictly below the floor (default) or, under interleave_short_deterministic,
     # joins the floor iff it has a <=1-hop deterministic-edge witness.
     _have_floor = bool(grep_recalled)
+    # When the floor is sourced from the CONTENT leg (Fable #5), it is a LOSSY top-K
+    # BM25 retrieval, NOT recall-grade string-match-over-the-repo like grep. Grep earns
+    # absolute floor authority (near-exhaustive); content-BM25 does not. So in content-
+    # mode a structural hop-0 witness that missed the BM25 top-K must still JOIN the
+    # floor (compete on the composite rank) rather than sink below every content hit —
+    # else the flag would convert precise structural localization into body-BM25-first
+    # ranking. Only affects the GT_CONTENT_LEG/repo-less path; byte-identical otherwise.
+    _floor_is_content = _content_leg_used
 
     def _grep_floor(c: Candidate) -> int:
         if not _have_floor:
             return 0
         if _normalize(c.file_path) in grep_recalled:
             return 0
-        if INJECTION_PLACEMENT == "interleave_short_deterministic" and any(
-            w.verified and w.direction != "defines_anchor" and w.hop <= 1 for w in c.witnesses
+        # SM-10 FUSION (redirect 2026-07-12): a MARGIN-CLEARED content-BM25 hit earns FLOOR
+        # authority alongside grep, so a confident behaviour-described (stratum-B) body match
+        # can COMPETE on the composite rank instead of sinking below every grep file. Gated by
+        # the margin (only a clearly-separated top hit enters `_content_fusion_score`), so a
+        # weak match never displaces grep — and empty on the off/uncalibrated path (no-op).
+        if _content_fusion_score and _normalize(c.file_path) in _content_fusion_score:
+            return 0
+        if (INJECTION_PLACEMENT == "interleave_short_deterministic" or _floor_is_content) and any(
+            w.verified and w.direction != "defines_anchor" and w.hop <= 1
+            for w in c.witnesses
         ):
             return 0
         return 1
@@ -2750,7 +3666,14 @@ def localize(
     def _depth_authority(c: Candidate) -> int:
         if not _have_floor or _normalize(c.file_path) in grep_recalled:
             return 0
-        has_edge_reach = any(w.verified and w.direction != "defines_anchor" for w in c.witnesses)
+        # SM-10 FUSION: a margin-cleared content hit is a real body match (not a string-world
+        # coincidence), so it carries authority like an edge-reached file — else it would be
+        # authority-demoted below the floor it just earned. Margin-gated + empty off (no-op).
+        if _content_fusion_score and _normalize(c.file_path) in _content_fusion_score:
+            return 0
+        has_edge_reach = any(
+            w.verified and w.direction != "defines_anchor" for w in c.witnesses
+        )
         return 0 if has_edge_reach else 1
 
     # ---- WITHIN-FLOOR RANK FUSION (fixes the go-cli regression) ----
@@ -2776,14 +3699,9 @@ def localize(
     # `-score` ordering, so this is a strict refinement of the prior key.
     _struct_order = sorted(
         candidates,
-        key=lambda c: (
-            _witness_tier(c),
-            _cand_subject_pos.get(c.file_path, 10**9),
-            -c.score,
-            -c.confidence,
-            -c.lex_hits,
-            c.file_path,
-        ),
+        key=lambda c: (_witness_tier(c),
+                       _cand_subject_pos.get(c.file_path, 10**9),
+                       -c.score, -c.confidence, -c.lex_hits, c.file_path),
     )
     _struct_rank = {id(c): i for i, c in enumerate(_struct_order)}
     _grecalled = sorted(
@@ -2792,7 +3710,6 @@ def localize(
     )
     _grep_rank = {id(c): i for i, c in enumerate(_grecalled)}
     _BIG = 10**6
-
     # WITHIN-FLOOR ORDER = GREP SPINE + SPECIFIC-EVIDENCE PROMOTION.
     # Held-out lesson (flow-traced on sqllineage/privacyidea): structural reranking by
     # witness VOLUME is net-harmful vs grep — hub files with 100s of generic witnesses
@@ -2828,34 +3745,47 @@ def localize(
     # given up: a candidate BELOW the pool cutoff can no longer be promoted into
     # the window by semantic rank alone (bounded beats killed).
     def _rrf2(c: Candidate) -> float:
-        return 1.0 / (60 + _grep_rank.get(id(c), _BIG)) + 1.0 / (60 + _struct_rank.get(id(c), _BIG))
+        return (1.0 / (60 + _grep_rank.get(id(c), _BIG))
+                + 1.0 / (60 + _struct_rank.get(id(c), _BIG)))
 
     _sem_pool = sorted(
         candidates,
         key=lambda c: (_grep_floor(c), _depth_authority(c), -_rrf2(c), c.file_path),
-    )[: _sem_pool_files(top_k)]
+    )[:_sem_pool_files(top_k)]
     # R1: capture the per-symbol semantic scores (previously discarded) so the
     # symbol-naming stage can rank within-file leaves by the same signal. The float
     # return is unchanged; _symbol_semrank stays {} when the embedder is off.
     _symbol_semrank: dict[str, list[tuple[str, float]]] = {}
+    _semantic_body_scored_files: set[str] = set()
     _sem = _semantic_score_by_file(
-        issue_text,
-        graph_db,
-        [c.file_path for c in _sem_pool],
+        issue_text, graph_db, [c.file_path for c in _sem_pool],
         symbol_scores_out=_symbol_semrank,
+        body_enriched_files_out=_semantic_body_scored_files,
     )
     # Rank ONLY scored candidates: a file with no semantic score (outside the pool,
     # over the encode budget, or no embeddable symbols) must fall to rank _BIG
     # (≈0 RRF mass) — never inherit a small list-position rank from a 0.0 default.
-    _sem_order = (
-        sorted(
-            (c for c in candidates if _normalize(c.file_path) in _sem),
-            key=lambda c: -_sem.get(_normalize(c.file_path), 0.0),
-        )
-        if _sem
-        else []
-    )
+    _sem_order = sorted(
+        (c for c in candidates if _normalize(c.file_path) in _sem),
+        key=lambda c: (-_sem.get(_normalize(c.file_path), 0.0), c.file_path),
+    ) if _sem else []
     _sem_rank = {id(c): i for i, c in enumerate(_sem_order)}
+
+    # ---- CONTENT-BM25 FUSION LEG (SM-10 redirect, margin-gated) ----
+    # A DISTINCT, provenance-separated ranker over the body-BM25 score (grep-non-empty path).
+    # Populated ONLY when GT_CONTENT_LEG is on AND the measured GT_CONTENT_MARGIN gate cleared
+    # (see the content-leg block above), so `_content_fusion_score` is empty — and this rank
+    # dict is empty — on every off / uncalibrated / weak-margin path => `_rrf3` and the
+    # agreement vote below are byte-identical. It never fills the grep slot, so it can never
+    # double-count the lexical signal; it is its OWN leg in the fusion + agreement vote.
+    _content_order = sorted(
+        (c for c in candidates if _normalize(c.file_path) in _content_fusion_score),
+        key=lambda c: (
+            -_content_fusion_score.get(_normalize(c.file_path), 0.0),
+            c.file_path,
+        ),
+    ) if _content_fusion_score else []
+    _content_rank = {id(c): i for i, c in enumerate(_content_order)}
 
     # ---- MULTI-SIGNAL AGREEMENT COUNT (the grep-floor build) ----
     # For each candidate, count how many of the THREE independent rankers
@@ -2872,23 +3802,39 @@ def localize(
     # signal than any single ranker's score.
     _TOP_N_AGREE = 3
     _agreement_by_file: dict[str, int] = {}
+    _signals_by_file: dict[str, list[str]] = {}
     for c in candidates:
-        _agree = 0
+        _legs: list[str] = []
         if _grep_rank.get(id(c), _BIG) < _TOP_N_AGREE:
-            _agree += 1
+            # The lexical slot is the grep leg, OR (when grep recalled nothing) the B1
+            # content-BM25 fallback that filled it — name it honestly so the consensus
+            # ledger never claims "grep" agreed when no grep ran.
+            _legs.append("content" if _content_leg_used else "grep")
         if _struct_rank.get(id(c), _BIG) < _TOP_N_AGREE:
-            _agree += 1
+            _legs.append("structural")
         if _sem_rank and _sem_rank.get(id(c), _BIG) < _TOP_N_AGREE:
-            _agree += 1
+            _legs.append("semantic")
+        # SM-10: the margin-gated body-content leg is a DISTINCT agreement signal (a file the
+        # grep, structural AND content legs all surface is stronger still). Empty rank dict on
+        # the off/uncalibrated/weak-margin path => this never adds a leg (byte-identical).
+        if _content_rank and _content_rank.get(id(c), _BIG) < _TOP_N_AGREE:
+            _legs.append("content")
+        _agree = len(_legs)
         _fnorm = _normalize(c.file_path)
-        # A file may have multiple candidate rows; keep the MAX agreement seen.
+        # A file may have multiple candidate rows; keep the MAX agreement seen, and
+        # the NAMED legs from that same max row so signals stay in lockstep with count.
         if _agree > _agreement_by_file.get(_fnorm, -1):
             _agreement_by_file[_fnorm] = _agree
+            _signals_by_file[_fnorm] = _legs
 
     def _rrf3(c: Candidate) -> float:
         s = 1.0 / (60 + _grep_rank.get(id(c), _BIG)) + 1.0 / (60 + _struct_rank.get(id(c), _BIG))
         if _sem_rank:
             s += 1.0 / (60 + _sem_rank.get(id(c), _BIG))
+        # SM-10: the margin-gated content leg adds a DISTINCT RRF term (only when it cleared
+        # the gate -> _content_rank non-empty; otherwise a no-op, so byte-identical off).
+        if _content_rank:
+            s += 1.0 / (60 + _content_rank.get(id(c), _BIG))
         return s
 
     # BUG-2 (2026-06-15): the final sort tie-broke `-_rrf3` ties on `c.file_path` ASC
@@ -2898,11 +3844,77 @@ def localize(
     # keys BEFORE the path: best-witness strength, then lex_hits, then subject position.
     # The path string is the LAST resort. No-op when `_rrf3` already separates (the
     # common case); load-bearing only on exact ties (grep-floor-only / no-embedder).
+    # GT_LOC_SEM_LED — "give semantic more power" (the embedder understands code+meaning;
+    # grep/struct/bm25/path-decay/degree are lexical+graph matchers that go BLIND on a
+    # behavior-described issue with no shared tokens, yet they currently decide entries[0]).
+    # When the flag is set AND the embedder produced per-file scores, lead the final order
+    # with the semantic MAGNITUDE (the cosine itself — NOT its RRF rank, because RRF discards
+    # the very margin that is the signal); grep-floor/depth/rrf become tiebreaks. Default off
+    # => _sem_led_key returns 0.0 for every candidate => the sort is byte-identical. Pairs with
+    # the LINEAR (magnitude) run_v74 fusion + a code embedder; measured on OSS-60 + held-out.
+    _sem_led = bool(_sem) and os.environ.get("GT_LOC_SEM_LED", "") == "1"
+    # CONFIDENCE GATE (generalization fix). FORCED semantic-lead overfits: it helped the tuned
+    # OSS-60 but REGRESSED unseen held-out repos (TS recall 4/5->1/3), because on cases where the
+    # embedder is wrong it OVERRIDES the correct lexical/structural pick. Fix: lead with semantic
+    # ONLY when the embedder DISCRIMINATES for this issue — the top per-file score clearly above
+    # the field (dispersion = (top-median)/top >= threshold). On a FLAT distribution the embedder
+    # "doesn't know", so fall back to grep/struct. NQC score-dispersion (Shtok et al. TOIS 2012).
+    # GT_SEM_LED_MIN_DISP default 0.15; GT_SEM_LED_GATE=0 disables the gate (= old forced lead).
+    if _sem_led and os.environ.get("GT_SEM_LED_GATE", "1") != "0":
+        _svals = sorted((v for v in _sem.values() if v > 0), reverse=True)
+        if len(_svals) >= 3:
+            _stop, _smed = _svals[0], _svals[len(_svals) // 2]
+            _sdisp = (_stop - _smed) / _stop if _stop > 0 else 0.0
+            if _sdisp < float(os.environ.get("GT_SEM_LED_MIN_DISP", "0.15")):
+                _sem_led = False  # flat -> embedder uncertain -> don't override lex/struct
+        else:
+            _sem_led = False  # too few scored files to judge confidence
+
+    def _sem_led_key(c: "Candidate") -> float:
+        if not _sem_led:
+            return 0.0
+        return -round(_sem.get(_normalize(c.file_path), 0.0), 4)
+
+    def _nonsource_stratum(c: "Candidate") -> int:
+        # L3 (Fable): test / generated / vendored-tooling files sink BELOW real source in the
+        # final order — restoring the demote that the dead `score -= 0.4/0.5` no longer
+        # delivered under V2 fusion. Placed AFTER the grep-recall floor + depth authority (a
+        # grep-recalled file is NEVER pushed below a non-recalled one — the Phase-2 invariant)
+        # but ABOVE rank fusion, so a high-RRF .pb.go / vendored testify cannot outrank real
+        # source. 2 = generated (the old strongest -0.5), 1 = test/tooling (-0.4), 0 = source.
+        # Same toggle: GT_TEST_TOOLING_DEMOTE=0 keeps the tooling stratum off (A/B baseline).
+        fp = c.file_path
+        if _is_generated(fp):
+            return 2
+        # W3 FIX 3 (name-index false-positive / vendored-asset demote): a VENDORED web asset
+        # (static/, vendor/, contrib assets, minified .min.js/.css — path_policy.is_vendored_path)
+        # can name-match ONE issue token inside a huge minified library and, on its hub in-degree,
+        # out-rank real source (measured: privacyidea static/contrib/js/jquery.js — deg=736 hub,
+        # lex=1 — ranked #1 while the gold eventhandler stayed at ~19). This is exactly the
+        # "hub demotion" lever BRIEFING §3/§4 names as CORRECT (NOT graph-reach). The existing
+        # strata only caught generated-suffix + test dirs, leaving vendored assets un-sunk.
+        # Harm-reduction / correct-or-quiet: no real-source gold is ever under a vendored path,
+        # so this can only remove noise. Uses the EXISTING policy predicate (no new heuristic).
+        # Call-time flag (default OFF → byte-identical; kill-switch = keep OFF; ship = "1").
+        if os.environ.get("GT_LOC_VENDOR_DEMOTE", "0") == "1" and _is_vendored_path_pp(fp):
+            return 1
+        # B-Finding2 (Fable LIPI): use the CANONICAL segment-based test predicate
+        # (path_policy.is_test_path) — the same one the brief-render filter uses — NOT a local
+        # substring predicate. The old local `_is_test_file` still matched "testing/" as a
+        # SUBSTRING, which P11 deliberately removed from path_policy as production-ambiguous
+        # (Django `django/test`, Go `testing` helpers), so the demote sank real source that the
+        # render kept. Routing through is_test_path makes the demote and the render agree.
+        if _is_test_path_pp(fp) or (_tt_on and _is_tt(fp, _tt_roots)):
+            return 1
+        return 0
+
     candidates.sort(
         key=lambda c: (
-            _grep_floor(c),  # Phase 2: grep recall floor (PRIMARY)
-            _depth_authority(c),  # Phase 3: string-world non-recalled sinks
-            -_rrf3(c),  # lexical + structural + SEMANTIC rank fusion
+            _sem_led_key(c),         # GT_LOC_SEM_LED: semantic magnitude LEADS (else 0.0 no-op)
+            _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY when sem not led)
+            _depth_authority(c),     # Phase 3: string-world non-recalled sinks
+            _nonsource_stratum(c),   # L3: non-source (test/generated/tooling) sinks below source
+            -_rrf3(c),               # lexical + structural + SEMANTIC rank fusion
             *_final_relevance_key(c, _cand_subject_pos),  # relevance before the path string
         )
     )
@@ -2911,7 +3923,6 @@ def localize(
     # buries a known-gold candidate. Off unless GT_LOCALIZE_DEBUG is set.
     if os.environ.get("GT_LOCALIZE_DEBUG"):
         import sys as _sys
-
         for _i, _c in enumerate(candidates[:25], start=1):
             _sys.stderr.write(
                 f"[L1DBG] #{_i:2} {os.path.basename(_c.file_path):28} "
@@ -2920,6 +3931,31 @@ def localize(
                 f"depth={_depth_authority(_c)} score={_c.score}\n"
             )
     candidates = candidates[:top_k]
+    _path_provenance = getattr(issue_anchors, "path_provenance", None) or {}
+    _explicit_issue_paths = {
+        path for path in (getattr(issue_anchors, "paths", None) or set())
+        if _path_provenance.get(path, "EXPLICIT_PATH") == "EXPLICIT_PATH"
+    }
+    candidates = [
+        replace(
+            candidate,
+            relevance_grade=_candidate_relevance_grade(
+                candidate.file_path,
+                candidate.witnesses,
+                trusted_anchors=anchors,
+                explicit_paths=_explicit_issue_paths,
+                independent_signals=_signals_by_file.get(
+                    _normalize(candidate.file_path), []
+                ),
+            ),
+        )
+        for candidate in candidates
+    ]
+    _final_candidate_paths = {_normalize(c.file_path) for c in candidates}
+    _content_terminal_paths = frozenset(
+        _content_candidate_paths & _final_candidate_paths)
+    _semantic_body_terminal_paths = frozenset(
+        _semantic_body_scored_files & _final_candidate_paths)
 
     # ---- SCOPE CHAINS (structural edit-scope from graph edges) ----
     # Opens its own connection — the BFS conn is already closed above.
@@ -2941,7 +3977,9 @@ def localize(
     _n_components = 0
     if candidates:
         _chained_files = {_normalize(f) for ch in _chains for f in ch.files}
-        _singletons = sum(1 for c in candidates if _normalize(c.file_path) not in _chained_files)
+        _singletons = sum(
+            1 for c in candidates if _normalize(c.file_path) not in _chained_files
+        )
         _n_components = len(_chains) + _singletons
 
     # ---- CONFIDENCE GATE (data-derived, per-task) ----
@@ -2962,21 +4000,20 @@ def localize(
     #   - TOIS 2025 caveat: QPP thresholds don't transfer across collections,
     #     so all checks use per-task distribution metrics (MAD, CV), not absolutes.
     best = candidates[0]
-    if not best.has_verified_witness:
+    if best.relevance_grade != "VERIFIED":
         return LocalizerResult(
-            candidates,
-            list(anchors),
-            best.confidence,
-            False,
-            "top_unverified",
-            scope_chains=_chains,
-            graph_stats=_stats,
-            agreement_by_file=_agreement_by_file,
-            n_components=_n_components,
-            symbol_semrank_by_file=_symbol_semrank,
+            candidates, anchor_list, best.confidence, False,
+            f"top_relevance_{best.relevance_grade.lower()}",
+            scope_chains=_chains, graph_stats=_stats,
+            agreement_by_file=_agreement_by_file, signals_by_file=_signals_by_file,
+            n_components=_n_components, symbol_semrank_by_file=_symbol_semrank,
+            content_leg_paths=_content_terminal_paths,
+            content_leg_decision=_content_decision,
+            content_leg_reason=_content_reason,
+            semantic_body_paths=_semantic_body_terminal_paths,
         )
 
-    verified = [c for c in candidates if c.has_verified_witness]
+    verified = [c for c in candidates if c.relevance_grade == "VERIFIED"]
     scores = sorted((c.score for c in candidates), reverse=True)
 
     if len(candidates) == 1:
@@ -3021,7 +4058,10 @@ def localize(
         # High ratio = the localizer found names, not call/import edges.
         _top5 = candidates[:5]
         _total_wit = sum(len(c.witnesses) for c in _top5)
-        _defines_wit = sum(1 for c in _top5 for w in c.witnesses if w.direction == "defines_anchor")
+        _defines_wit = sum(
+            1 for c in _top5 for w in c.witnesses
+            if w.direction == "defines_anchor"
+        )
         _def_ratio = _defines_wit / _total_wit if _total_wit > 0 else 0.0
         if _def_ratio > 0.5:
             _sep_flags += 1
@@ -3041,21 +4081,55 @@ def localize(
             confident = False
             gate_reason = f"score_separation_fail({'+'.join(_sep_parts)})"
             import sys
-
             print(
                 f"[GT L1] score-separation downgrade: {gate_reason}",
                 file=sys.stderr,
             )
 
     return LocalizerResult(
-        candidates,
-        list(anchors),
-        best.confidence,
-        confident,
-        gate_reason,
-        scope_chains=_chains,
-        graph_stats=_stats,
-        agreement_by_file=_agreement_by_file,
-        n_components=_n_components,
-        symbol_semrank_by_file=_symbol_semrank,
+        candidates, anchor_list, best.confidence, confident, gate_reason,
+        scope_chains=_chains, graph_stats=_stats,
+        agreement_by_file=_agreement_by_file, signals_by_file=_signals_by_file,
+        n_components=_n_components, symbol_semrank_by_file=_symbol_semrank,
+        content_leg_paths=_content_terminal_paths,
+        content_leg_decision=_content_decision,
+        content_leg_reason=_content_reason,
+        semantic_body_paths=_semantic_body_terminal_paths,
     )
+
+
+def localize(
+    issue_text: str,
+    graph_db: str,
+    *,
+    issue_anchors: IssueAnchors | None = None,
+    max_hop: int = 3,
+    top_k: int = 8,
+    repo_root: str = "",
+) -> LocalizerResult:
+    """Compatibility projection with an isolated, fail-open vNext shadow.
+
+    The legacy implementation owns the returned object.  Shadow computation
+    receives that object only after it is complete and cannot mutate it.
+    """
+    result = _localize_legacy(
+        issue_text,
+        graph_db,
+        issue_anchors=issue_anchors,
+        max_hop=max_hop,
+        top_k=top_k,
+        repo_root=repo_root,
+    )
+    if os.getenv("GT_LOC_VNEXT_SHADOW", "0") == "1":
+        from groundtruth.pretask.localization_vnext.shadow import (
+            record_shadow_projection,
+        )
+
+        record_shadow_projection(
+            issue_text=issue_text,
+            repository_root=repo_root,
+            graph_db=graph_db,
+            legacy_result=result,
+            source_projection="localize",
+        )
+    return result
