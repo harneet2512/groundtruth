@@ -3,6 +3,7 @@ set -eu
 
 if [ ! -f gt-index/cmd/gt-index/inspection.go ]; then
   echo "RED: deterministic inspection transport is absent"
+  echo "RED: compact candidate facts are not yet coupled to inspection"
   exit 1
 fi
 if ! grep -Fq '"inspect-jsonl"' gt-index/cmd/gt-index/main.go; then
