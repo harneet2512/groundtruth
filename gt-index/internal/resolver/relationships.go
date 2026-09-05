@@ -984,34 +984,43 @@ func resolveInterfaceOrClassNode(name, currentFile string, interfaceIndex, class
 	return resolveClassNode(name, currentFile, classIndex)
 }
 
-// resolveClassOrFuncNode tries class index first, then function.
+// resolveClassOrFuncNode resolves a JSX component name across the union of
+// class and function declarations. A same-file declaration wins only when it
+// is the sole same-file target across both declaration kinds. Otherwise a
+// cross-file target must be globally unique across both kinds. Syntax alone
+// cannot justify preferring a class over a function (or vice versa), so every
+// mixed-kind ambiguity fails closed.
 func resolveClassOrFuncNode(name, currentFile string, classIndex map[string][]classNodeEntry, funcFileIndex map[string]map[string]int64) int64 {
-	if id := resolveClassNodeSameFileOrUnique(name, currentFile, classIndex); id != 0 {
-		return id
-	}
-	if funcs := funcFileIndex[currentFile]; funcs != nil {
-		if id, ok := funcs[name]; ok {
-			return id
+	sameFile := make(map[int64]struct{})
+	all := make(map[int64]struct{})
+	for _, entry := range classIndex[name] {
+		all[entry.ID] = struct{}{}
+		if entry.FilePath == currentFile {
+			sameFile[entry.ID] = struct{}{}
 		}
 	}
-	// A map walk must never choose the relationship target. Retain a unique
-	// cross-file declaration; if a second declaration carries the same bare
-	// name, abstain because syntax alone cannot establish which one JSX binds.
-	var match int64
 	for file, funcs := range funcFileIndex {
-		if file == currentFile {
-			continue
-		}
 		id, ok := funcs[name]
 		if !ok {
 			continue
 		}
-		if match != 0 && match != id {
-			return 0
+		all[id] = struct{}{}
+		if file == currentFile {
+			sameFile[id] = struct{}{}
 		}
-		match = id
 	}
-	return match
+	if len(sameFile) == 1 {
+		for id := range sameFile {
+			return id
+		}
+	}
+	if len(sameFile) > 1 || len(all) != 1 {
+		return 0
+	}
+	for id := range all {
+		return id
+	}
+	return 0
 }
 
 // findEnclosingFunc returns the function node whose [Start,End] line range ENCLOSES
