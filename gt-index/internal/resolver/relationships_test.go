@@ -445,3 +445,30 @@ func TestResolveClassOrFuncNodeAbstainsOnAmbiguousCrossFileFunction(t *testing.T
 		t.Fatalf("unique cross-file function resolved to %d, want 33", got)
 	}
 }
+
+func TestResolveClassOrFuncNodeAbstainsAcrossDeclarationKinds(t *testing.T) {
+	classes := map[string][]classNodeEntry{
+		"Error": {{ID: 11, FilePath: "a.ts"}, {ID: 22, FilePath: "b.ts"}},
+		"Only":  {{ID: 44, FilePath: "a.ts"}},
+		"Local": {{ID: 77, FilePath: "use.ts"}},
+		"Both":  {{ID: 88, FilePath: "use.ts"}},
+	}
+	functions := map[string]map[string]int64{
+		"c.ts":   {"Error": 33, "Only": 55, "Local": 66},
+		"d.ts":   {"Only": 99},
+		"use.ts": {"Both": 111},
+	}
+
+	if got := resolveClassOrFuncNode("Error", "use.ts", classes, functions); got != 0 {
+		t.Fatalf("mixed ambiguous cross-file declarations resolved to %d", got)
+	}
+	if got := resolveClassOrFuncNode("Only", "use.ts", classes, functions); got != 0 {
+		t.Fatalf("one class plus multiple functions resolved to %d", got)
+	}
+	if got := resolveClassOrFuncNode("Local", "use.ts", classes, functions); got != 77 {
+		t.Fatalf("sole same-file declaration resolved to %d, want 77", got)
+	}
+	if got := resolveClassOrFuncNode("Both", "use.ts", classes, functions); got != 0 {
+		t.Fatalf("mixed same-file declarations resolved to %d", got)
+	}
+}
