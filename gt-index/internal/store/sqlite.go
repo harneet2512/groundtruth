@@ -194,6 +194,14 @@ type AttachedCandidate struct {
 }
 
 const GraphCompletionSchema = "gt-index.graph-completion.v1"
+
+// GraphSkippedCandidatesKey is the project_meta receipt key holding how many
+// resolution candidates were dropped as derivation abstentions by the build
+// that produced the current graph. It is written next to the graph completion
+// receipt on every attach, including when nothing was skipped, so that "0" and
+// "not recorded" stay distinguishable to consumers.
+const GraphSkippedCandidatesKey = "graph_resolution_skipped_candidates"
+
 const ResolutionDerivationContract = "gt-index.call-resolution.derivation.v2"
 const CallResolutionSchemaVersion = 2
 
@@ -446,6 +454,25 @@ func (g GraphCompletionIdentity) receipt() (string, string, error) {
 	}
 	sum := sha256.Sum256(payload)
 	return string(payload), hex.EncodeToString(sum[:]), nil
+}
+
+// GraphSkippedCandidates reports how many resolution candidates the producing
+// build dropped as derivation abstentions. It returns false when the graph was
+// written by a producer that did not record the counter.
+func (d *DB) GraphSkippedCandidates() (int, bool, error) {
+	var value string
+	err := d.db.QueryRow(`SELECT value FROM project_meta WHERE key=?`, GraphSkippedCandidatesKey).Scan(&value)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("read %s: %w", GraphSkippedCandidatesKey, err)
+	}
+	skipped, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false, fmt.Errorf("malformed %s %q: %w", GraphSkippedCandidatesKey, value, err)
+	}
+	return skipped, true, nil
 }
 
 func BindGraphCompletionTx(tx *sql.Tx, identity GraphCompletionIdentity) error {
@@ -1218,6 +1245,11 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 		return fmt.Errorf("insert inspection query policy: %w", err)
 	}
 	revision := identity.RepositoryRevision
+	// A candidate that fails derivation validation is an abstention, not a
+	// corrupt graph: the producer has no publishable facts for it. Skip it,
+	// keep the candidates that do carry complete provenance, and record the
+	// count in the graph receipt so consumers can audit what was dropped.
+	skippedCandidates := 0
 	for _, row := range rows {
 		if row.Callsite == nil || row.Source == nil {
 			return fmt.Errorf("graph resolution row missing callsite or source")
@@ -1299,7 +1331,16 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 		}
 		coverageJSON, _ := json.Marshal(coverage)
 		stepsJSON, _ := json.Marshal(steps)
-		v2, err := prepareResolutionV2(identity, c, row.Candidates)
+		derivable := make([]*ResolutionCandidate, 0, len(row.Candidates))
+		for _, candidate := range row.Candidates {
+			if err := validateCandidateDerivation(derivationKind, candidate); err != nil {
+				log.Printf("[WARN] callsite %s candidate %d skipped as abstention: %v", c.CallsiteID, candidate.Ordinal, err)
+				skippedCandidates++
+				continue
+			}
+			derivable = append(derivable, candidate)
+		}
+		v2, err := prepareResolutionV2(identity, c, derivable)
 		if err != nil {
 			return fmt.Errorf("prepare callsite %s v2: %w", c.CallsiteID, err)
 		}
@@ -1353,10 +1394,7 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 			identity.BuildID, identity.SourceFingerprint, string(coverageJSON), string(stepsJSON)); err != nil {
 			return fmt.Errorf("link callsite %s: %w", c.CallsiteID, err)
 		}
-		for _, candidate := range row.Candidates {
-			if err := validateCandidateDerivation(derivationKind, candidate); err != nil {
-				return fmt.Errorf("callsite %s candidate %d: %w", c.CallsiteID, candidate.Ordinal, err)
-			}
+		for _, candidate := range derivable {
 			candidateStepsJSON, _ := json.Marshal(candidateProvenance(steps, candidate))
 			candidateMeta, _ := json.Marshal(map[string]any{
 				"callsite_id": c.CallsiteID, "candidate_ordinal": candidate.Ordinal,
@@ -1395,6 +1433,13 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 				return fmt.Errorf("insert candidate edge %s/%d: %w", c.CallsiteID, candidate.Ordinal, err)
 			}
 		}
+	}
+	if skippedCandidates > 0 {
+		log.Printf("[WARN] %d resolution candidates skipped as abstentions", skippedCandidates)
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		GraphSkippedCandidatesKey, strconv.Itoa(skippedCandidates)); err != nil {
+		return fmt.Errorf("record skipped candidate abstentions: %w", err)
 	}
 	return nil
 }
