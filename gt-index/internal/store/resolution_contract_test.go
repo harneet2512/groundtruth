@@ -321,7 +321,7 @@ func TestQueryPolicyChangesSelectionWithoutMutatingGraphFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	var before string
-	if err := db.db.QueryRow(`SELECT quote(confidence)||'|'||derivation_kind||'|'||evidence_set||'|'||metadata FROM edges WHERE type='CANDIDATE'`).Scan(&before); err != nil {
+	if err := db.db.QueryRow(`SELECT quote(confidence)||'|'||derivation_kind||'|'||evidence_set||'|'||COALESCE(metadata,'') FROM edges WHERE type='CANDIDATE_TARGET'`).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
 	conservative, err := db.QueryAttachedCandidatesWithPolicy("target", ConservativeCandidatePolicy)
@@ -336,7 +336,7 @@ func TestQueryPolicyChangesSelectionWithoutMutatingGraphFacts(t *testing.T) {
 		t.Fatalf("query policies did not own selection: conservative=%+v inspection=%+v", conservative, inspection)
 	}
 	var after string
-	if err := db.db.QueryRow(`SELECT quote(confidence)||'|'||derivation_kind||'|'||evidence_set||'|'||metadata FROM edges WHERE type='CANDIDATE'`).Scan(&after); err != nil {
+	if err := db.db.QueryRow(`SELECT quote(confidence)||'|'||derivation_kind||'|'||evidence_set||'|'||COALESCE(metadata,'') FROM edges WHERE type='CANDIDATE_TARGET'`).Scan(&after); err != nil {
 		t.Fatal(err)
 	}
 	if before != after {
@@ -361,7 +361,7 @@ func TestCandidatePolicyFilterUsesTypedFactIndex(t *testing.T) {
 	}
 	defer db.Close()
 	rows, err := db.db.Query(`EXPLAIN QUERY PLAN SELECT target_id FROM edges INDEXED BY idx_edges_candidate_policy
-		WHERE type='CANDIDATE' AND derivation_kind=? AND evidence_set=? AND candidate_count=? ORDER BY target_id`, "declared_type", "closed", 1)
+		WHERE type='CANDIDATE_TARGET' AND derivation_kind=? AND evidence_set=? AND candidate_count=? ORDER BY target_id`, "declared_type", "closed", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,6 +550,24 @@ func TestAttachResolutionGraphRejectsUnknownReceiverOrigin(t *testing.T) {
 	row := AttachedResolution{Source: &Node{ID: sourceID, Label: "Function", Name: "caller", FilePath: "main.py", Language: "python"}, Callsite: &ResolutionCallsite{CallsiteID: "bad-origin", SourceID: sourceID, SourceFile: "main.py", Callee: "run", DispatchState: "candidate_only", CandidateCount: 1}, Candidates: []*ResolutionCandidate{{TargetID: targetID, TargetStableID: "t", TargetNativeID: "t", Ordinal: 0, ReceiverOrigin: "invented"}}}
 	if err := db.AttachResolutionGraph(testGraphIdentity("rev"), []AttachedResolution{row}); err == nil {
 		t.Fatal("unknown receiver origin accepted")
+	}
+}
+
+func TestLegacyResolutionCandidateWriterCannotReintroduceDuplication(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.BatchInsertResolutionCandidates([]*ResolutionCandidate{{CallsiteID: "c", TargetID: 1}}); err == nil {
+		t.Fatal("legacy resolution candidate writer accepted a row")
+	}
+	var count int
+	if err := db.db.QueryRow(`SELECT count(*) FROM resolution_candidates`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("legacy candidate rows = %d, want 0", count)
 	}
 }
 

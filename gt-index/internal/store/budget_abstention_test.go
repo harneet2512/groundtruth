@@ -166,7 +166,7 @@ func TestCandidateEdgesDoNotDuplicateCallsiteCoverage(t *testing.T) {
 	if err := json.Unmarshal([]byte(callsiteCoverage), &coverage); err != nil || len(coverage) == 0 {
 		t.Fatalf("HAS_CALLSITE lost the authoritative pass coverage: %q (%v)", callsiteCoverage, err)
 	}
-	rows, err := db.db.Query(`SELECT COALESCE(pass_coverage,'') FROM edges WHERE type='CANDIDATE'`)
+	rows, err := db.db.Query(`SELECT COALESCE(pass_coverage,'') FROM edges WHERE type='CANDIDATE_TARGET'`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestCandidateEdgesDoNotDuplicateCallsiteCoverage(t *testing.T) {
 			t.Fatal(err)
 		}
 		seen++
-		if candidateCoverage != "[]" {
+		if candidateCoverage != "" {
 			t.Fatalf("candidate edge duplicated %d bytes of callsite coverage: %q", len(candidateCoverage), candidateCoverage)
 		}
 	}

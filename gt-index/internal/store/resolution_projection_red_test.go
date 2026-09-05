@@ -109,7 +109,7 @@ func TestProjectionRendersReasonAndStepOntoPublishedResolutionEdges(t *testing.T
 	// Before the projection runs, every resolution edge has a NULL reason: an
 	// unprojected graph must not read as a graph with empty justifications.
 	var unprojected int
-	if err := db.db.QueryRow(`SELECT count(*) FROM edges WHERE type IN ('HAS_CALLSITE','CANDIDATE') AND resolution_reason IS NOT NULL`).Scan(&unprojected); err != nil {
+	if err := db.db.QueryRow(`SELECT count(*) FROM edges WHERE type IN ('HAS_CALLSITE','CANDIDATE_TARGET') AND resolution_reason IS NOT NULL`).Scan(&unprojected); err != nil {
 		t.Fatal(err)
 	}
 	if unprojected != 0 {
@@ -152,7 +152,7 @@ func TestProjectionRendersReasonAndStepOntoPublishedResolutionEdges(t *testing.T
 
 	// It touches only resolution edges. Everything else keeps a NULL reason.
 	var others int
-	if err := db.db.QueryRow(`SELECT count(*) FROM edges WHERE type NOT IN ('HAS_CALLSITE','CANDIDATE') AND resolution_reason IS NOT NULL`).Scan(&others); err != nil {
+	if err := db.db.QueryRow(`SELECT count(*) FROM edges WHERE type NOT IN ('HAS_CALLSITE','CANDIDATE_TARGET') AND resolution_reason IS NOT NULL`).Scan(&others); err != nil {
 		t.Fatal(err)
 	}
 	if others != 0 {

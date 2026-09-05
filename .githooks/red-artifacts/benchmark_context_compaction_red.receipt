@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=08fe997d0d5e1ef4bf00e5d990dd4907eebf8adf
+fixture_path=.githooks/tests/benchmark_context_compaction_red.sh
+fixture_sha256=a4f7231f62134aa8b89be71911fbdfb3ccc4e26e11450687434a15d773a8d0e4
+command=.githooks/tests/benchmark_context_compaction_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/benchmark_context_compaction_red.out
+output_sha256=0cd0d4e4d4f4082a746c63380617b2476fc284ba6bdf1fe694bd09beceaeb787

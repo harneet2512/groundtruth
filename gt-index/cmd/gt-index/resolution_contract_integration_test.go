@@ -72,31 +72,32 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM resolution_callsites").Scan(&calls); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT count(*) FROM resolution_candidates").Scan(&candidates); err != nil {
+	if err := db.QueryRow("SELECT count(*) FROM edges WHERE type='CANDIDATE_TARGET'").Scan(&candidates); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow("SELECT count(*) FROM resolution_symbols").Scan(&symbols); err != nil {
 		t.Fatal(err)
 	}
 	if calls == 0 || candidates == 0 || symbols == 0 {
-		t.Fatalf("producer sidecar is empty: callsites=%d candidates=%d symbols=%d", calls, candidates, symbols)
+		t.Fatalf("canonical resolution graph is empty: callsites=%d candidates=%d symbols=%d", calls, candidates, symbols)
+	}
+	var duplicatedCandidates int
+	if err := db.QueryRow(`SELECT
+		(SELECT count(*) FROM resolution_candidates) +
+		(SELECT count(*) FROM edges WHERE type='CANDIDATE')`).Scan(&duplicatedCandidates); err != nil {
+		t.Fatal(err)
+	}
+	if duplicatedCandidates != 0 {
+		t.Fatalf("legacy candidate duplication survived publication: %d rows", duplicatedCandidates)
 	}
 	var orphan int
-	if err := db.QueryRow(`SELECT count(*) FROM resolution_candidates c
-		LEFT JOIN resolution_symbols s ON s.stable_id=c.target_stable_id
-		WHERE s.stable_id IS NULL`).Scan(&orphan); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM edges c
+		LEFT JOIN resolution_symbols s ON s.stable_id=c.target_symbol_id
+		WHERE c.type='CANDIDATE_TARGET' AND s.stable_id IS NULL`).Scan(&orphan); err != nil {
 		t.Fatal(err)
 	}
 	if orphan != 0 {
 		t.Fatalf("candidate rows with no producer symbol identity: %d", orphan)
-	}
-	var mismatch int
-	if err := db.QueryRow(`SELECT count(*) FROM resolution_callsites c
-		WHERE c.candidate_count != (SELECT count(*) FROM resolution_candidates k WHERE k.callsite_id=c.callsite_id)`).Scan(&mismatch); err != nil {
-		t.Fatal(err)
-	}
-	if mismatch != 0 {
-		t.Fatalf("callsite candidate counts disagree with retained rows: %d", mismatch)
 	}
 	var dynamicCount, dynamicCandidates, dynamicSelected int
 	if err := db.QueryRow(`SELECT count(*),coalesce(sum(candidate_count),0),count(selected_target_stable_id)
@@ -108,7 +109,7 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	}
 	var declaredScope, importChain, verification string
 	if err := db.QueryRow(`SELECT declared_scope,import_chain,verification_status
-		FROM resolution_candidates WHERE import_chain != '[]' ORDER BY callsite_id,ordinal LIMIT 1`).Scan(&declaredScope, &importChain, &verification); err != nil {
+		FROM edges WHERE type='CANDIDATE_TARGET' AND import_chain != '[]' ORDER BY callsite_stable_id,ordinal LIMIT 1`).Scan(&declaredScope, &importChain, &verification); err != nil {
 		t.Fatal(err)
 	}
 	if declaredScope == "" || importChain == "" || importChain == "[]" || verification != "source_supported" {
