@@ -213,6 +213,7 @@ type AttachedCandidate struct {
 	PolicyReason        string
 	MatchedRuleIDs      []string
 	FactIDsRead         []string
+	DerivationFactIDs   []string
 	CompletenessStates  map[string]string
 	DerivedScore        *string
 	PolicyHash          string
@@ -1640,7 +1641,7 @@ func (d *DB) queryAttachedCandidates(callee, callsiteID string, policy Candidate
 		COALESCE(ce.evidence_set,hc.evidence_set,''),
 		COALESCE(ce.sibling_count,hc.sibling_count,0),
 		COALESCE((SELECT u.reason_code FROM nodes u WHERE u.node_type='unresolved_fact' AND u.callsite_id=c.stable_id LIMIT 1),''),
-		'[]', '[]',
+		'[]', '[]', COALESCE(ce.derivation_fact_ids,'[]'),
 		COALESCE(ce.declared_scope,''), COALESCE(ce.receiver_type,''), COALESCE(ce.receiver_origin,''),
 		COALESCE(ce.receiver_shape,''), COALESCE(ce.receiver_chain,'[]'), COALESCE(ce.import_chain,'[]'),
 		COALESCE(ce.export_status,''), ce.parser_complete
@@ -1659,14 +1660,14 @@ func (d *DB) queryAttachedCandidates(callee, callsiteID string, policy Candidate
 	var out []AttachedCandidate
 	for rows.Next() {
 		var c AttachedCandidate
-		var coverageJSON, stepsJSON string
+		var coverageJSON, stepsJSON, derivationFactIDsJSON string
 		var parserComplete sql.NullBool
 		if err := rows.Scan(&c.SourceID, &c.CallsiteNodeID, &c.TargetID, &c.TargetStableID, &c.CallsiteID,
 			&c.SourceFile, &c.SourceLine, &c.Callee, &c.DispatchState,
 			&c.CandidateOrdinal, &c.Mechanism, &c.Revision,
 			&c.CandidateCount, &c.HasCandidate, &c.StructuralAuthority, &c.TargetAuthority,
 			&c.DerivationKind, &c.EvidenceSet, &c.SiblingCount, &c.AbstentionReason,
-			&coverageJSON, &stepsJSON, &c.DeclaredScope, &c.ReceiverType, &c.ReceiverOrigin,
+			&coverageJSON, &stepsJSON, &derivationFactIDsJSON, &c.DeclaredScope, &c.ReceiverType, &c.ReceiverOrigin,
 			&c.ReceiverShape, &c.ReceiverChain, &c.ImportChain, &c.ExportStatus, &parserComplete); err != nil {
 			return nil, err
 		}
@@ -1679,6 +1680,9 @@ func (d *DB) queryAttachedCandidates(callee, callsiteID string, policy Candidate
 		}
 		if err := json.Unmarshal([]byte(stepsJSON), &c.ProvenanceSteps); err != nil {
 			return nil, fmt.Errorf("decode provenance for %s: %w", c.CallsiteID, err)
+		}
+		if err := json.Unmarshal([]byte(derivationFactIDsJSON), &c.DerivationFactIDs); err != nil {
+			return nil, fmt.Errorf("decode derivation fact IDs for %s: %w", c.CallsiteID, err)
 		}
 		c.PolicyID, c.PolicyVersion, c.PolicyVersionID = policy.ID, policy.Version, policy.VersionID()
 		c.PolicyHash = c.PolicyVersionID

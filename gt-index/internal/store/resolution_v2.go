@@ -402,31 +402,27 @@ func insertResolutionV2FactsTx(stmts *resolutionStmts, identity GraphCompletionI
 		if err := persistVTAFlowFactsTx(stmts, identity, c, fact); err != nil {
 			return fmt.Errorf("persist VTA flow facts for %s/%d: %w", c.CallsiteID, fact.Ordinal, err)
 		}
-		declaredTypeID := ""
-		if fact.ReceiverType != "" {
-			declaredTypeID = canonicalResolutionID("type", fact.ReceiverType)
-		}
-		scopeID := ""
-		if fact.DeclaredScope != "" {
-			scopeID = canonicalResolutionID("scope", fact.DeclaredScope)
-		}
-		importID := ""
-		if fact.ImportChain != "" && fact.ImportChain != "[]" {
-			importID = canonicalResolutionID("import", fact.ImportChain)
-		}
-		result, err := stmts.derivationFact.Exec(
-			candidate.PassKind, candidate.FactID, c.SourceFile, "resolution", candidate.FactID,
-			identity.RepositoryRevision, identity.BuildID, v2.CallsiteID, fact.TargetStableID, candidate.PassKind,
-			mustJSON(append(append([]string{}, fact.FlowSourceStableIDs...), fact.FlowEdgeStableIDs...)), declaredTypeID, scopeID, importID, identity.RepositoryRevision)
-		if err != nil {
-			return fmt.Errorf("insert derivation fact: %w", err)
-		}
-		factNodeID, err := result.LastInsertId()
-		if err != nil {
-			return err
-		}
-		if err := insertResolutionFactLinkTx(stmts, callsiteNodeID, factNodeID, "HAS_DERIVATION_FACT", v2.CallsiteID, candidate.FactID); err != nil {
-			return err
+		// An ordinary derivation is a deterministic projection of its candidate
+		// edge, callsite and target. Materializing a node and link for every weak
+		// name-match candidate made those redundant rows dominate large graphs.
+		// VTA derivations remain materialized because they own input-fact links;
+		// the normal reader lazily reconstructs all other provenance exactly.
+		if len(fact.FlowSourceStableIDs) > 0 || len(fact.FlowEdgeStableIDs) > 0 {
+			declaredTypeID, scopeID, importID := candidateDerivationReferenceIDs(fact)
+			result, err := stmts.derivationFact.Exec(
+				candidate.PassKind, candidate.FactID, c.SourceFile, "resolution", candidate.FactID,
+				identity.RepositoryRevision, identity.BuildID, v2.CallsiteID, fact.TargetStableID, candidate.PassKind,
+				mustJSON(append(append([]string{}, fact.FlowSourceStableIDs...), fact.FlowEdgeStableIDs...)), declaredTypeID, scopeID, importID, identity.RepositoryRevision)
+			if err != nil {
+				return fmt.Errorf("insert derivation fact: %w", err)
+			}
+			factNodeID, err := result.LastInsertId()
+			if err != nil {
+				return err
+			}
+			if err := insertResolutionFactLinkTx(stmts, callsiteNodeID, factNodeID, "HAS_DERIVATION_FACT", v2.CallsiteID, candidate.FactID); err != nil {
+				return err
+			}
 		}
 		if _, err := stmts.candidateTargetEdge.Exec(
 			callsiteNodeID, fact.TargetID, c.SourceFile, fact.Mechanism, len(v2.Candidates), fact.VerificationStatus,
@@ -491,6 +487,19 @@ func insertResolutionV2FactsTx(stmts *resolutionStmts, identity GraphCompletionI
 		}
 	}
 	return nil
+}
+
+func candidateDerivationReferenceIDs(candidate *ResolutionCandidate) (declaredTypeID, scopeID, importID string) {
+	if candidate.ReceiverType != "" {
+		declaredTypeID = canonicalResolutionID("type", candidate.ReceiverType)
+	}
+	if candidate.DeclaredScope != "" {
+		scopeID = canonicalResolutionID("scope", candidate.DeclaredScope)
+	}
+	if candidate.ImportChain != "" && candidate.ImportChain != "[]" {
+		importID = canonicalResolutionID("import", candidate.ImportChain)
+	}
+	return declaredTypeID, scopeID, importID
 }
 
 func insertResolutionFactLinkTx(stmts *resolutionStmts, callsiteNodeID, factNodeID int64, edgeType, callsiteID, factID string) error {
@@ -575,7 +584,9 @@ func (d *DB) loadResolutionV2Evidence(candidates []AttachedCandidate) error {
 		if err != nil {
 			return fmt.Errorf("load derivation facts: %w", err)
 		}
+		materializedDerivations := 0
 		for rows.Next() {
+			materializedDerivations++
 			var id, passKind, passVersion, operation, inputFactIDsJSON, declaredTypeID, receiverValueID, scopeID, importID, boundaryID string
 			var ordinal int
 			if err := rows.Scan(&id, &passKind, &passVersion, &ordinal, &operation, &inputFactIDsJSON, &declaredTypeID, &receiverValueID, &scopeID, &importID, &boundaryID); err != nil {
@@ -621,6 +632,26 @@ func (d *DB) loadResolutionV2Evidence(candidates []AttachedCandidate) error {
 		}
 		if err := rows.Close(); err != nil {
 			return err
+		}
+		if materializedDerivations == 0 && candidates[i].HasCandidate {
+			if len(candidates[i].DerivationFactIDs) != 1 {
+				return fmt.Errorf("candidate %s has %d lazy derivation identities, want 1", candidates[i].TargetStableID, len(candidates[i].DerivationFactIDs))
+			}
+			candidate := ResolutionCandidate{
+				DeclaredScope: candidates[i].DeclaredScope,
+				ReceiverType:  candidates[i].ReceiverType,
+				ImportChain:   candidates[i].ImportChain,
+			}
+			declaredTypeID, scopeID, importID := candidateDerivationReferenceIDs(&candidate)
+			payload := mustJSON(map[string]any{
+				"boundary_id": candidates[i].Revision, "declared_type_id": declaredTypeID,
+				"import_id": importID, "input_fact_ids": []string{}, "operation": "include",
+				"pass_kind": candidates[i].DerivationKind, "pass_version": "1",
+				"receiver_value_id": "", "scope_id": scopeID,
+			})
+			factID := candidates[i].DerivationFactIDs[0]
+			candidates[i].ProvenanceSteps = append(candidates[i].ProvenanceSteps, ResolutionDerivationStep{StepID: factID, Kind: candidates[i].DerivationKind, Value: payload})
+			candidates[i].FactIDsRead = append(candidates[i].FactIDsRead, factID)
 		}
 	}
 	return nil
