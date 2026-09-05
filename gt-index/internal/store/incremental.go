@@ -585,19 +585,7 @@ func BatchInsertResolutionCandidatesTx(tx *sql.Tx, candidates []*ResolutionCandi
 	if len(candidates) == 0 {
 		return nil
 	}
-	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO resolution_candidates
-		(callsite_id,target_id,target_stable_id,target_native_id,ordinal,mechanism,declared_scope,receiver_type,receiver_origin,receiver_shape,receiver_chain,import_chain,dynamic_dispatch,export_status,parser_complete,verification_status,selected)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-	if err != nil {
-		return fmt.Errorf("prepare resolution candidates: %w", err)
-	}
-	defer stmt.Close()
-	for _, c := range candidates {
-		if _, err := stmt.Exec(c.CallsiteID, c.TargetID, c.TargetStableID, c.TargetNativeID, c.Ordinal, c.Mechanism, c.DeclaredScope, c.ReceiverType, c.ReceiverOrigin, c.ReceiverShape, c.ReceiverChain, c.ImportChain, c.DynamicDispatch, c.ExportStatus, c.ParserComplete, c.VerificationStatus, c.Selected); err != nil {
-			return fmt.Errorf("insert resolution candidate: %w", err)
-		}
-	}
-	return nil
+	return fmt.Errorf("legacy resolution_candidates publication disabled; use canonical CANDIDATE_TARGET edges")
 }
 
 // BatchInsertPropertiesTx inserts properties inside the given tx.

@@ -20,7 +20,6 @@ import (
 type resolutionStmts struct {
 	callsiteNode        *sql.Stmt
 	hasCallsiteEdge     *sql.Stmt
-	candidateEdge       *sql.Stmt
 	derivationFact      *sql.Stmt
 	candidateTargetEdge *sql.Stmt
 	selectedTargetEdge  *sql.Stmt
@@ -62,13 +61,6 @@ const (
 			 derivation_contract,derivation_kind,evidence_set,analysis_boundary,pass_kind,pass_version,pass_status,abstention_reason,sibling_count,
 			 producer_build_id,producer_source_fingerprint,pass_coverage,provenance_steps)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-
-	candidateEdgeSQL = `INSERT INTO edges
-				(source_id,target_id,type,source_line,source_file,resolution_method,confidence,metadata,trust_tier,candidate_count,evidence_type,verification_status,
-				 derivation_contract,derivation_kind,evidence_set,analysis_boundary,pass_kind,pass_version,pass_status,abstention_reason,sibling_count,
-				 producer_build_id,producer_source_fingerprint,pass_coverage,provenance_steps,
-				 declared_scope,receiver_type,receiver_origin,receiver_shape,receiver_chain,import_chain,export_status,parser_complete)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 	derivationFactSQL = `INSERT INTO nodes
 			(label,name,qualified_name,file_path,language,stable_id,node_type,schema_version,source_revision,producer_build_id,
@@ -118,7 +110,6 @@ func prepareResolutionStmts(tx *sql.Tx) (*resolutionStmts, error) {
 	}{
 		{"callsite node", callsiteNodeSQL, &stmts.callsiteNode},
 		{"has-callsite edge", hasCallsiteEdgeSQL, &stmts.hasCallsiteEdge},
-		{"candidate edge", candidateEdgeSQL, &stmts.candidateEdge},
 		{"derivation fact", derivationFactSQL, &stmts.derivationFact},
 		{"candidate target edge", candidateTargetEdgeSQL, &stmts.candidateTargetEdge},
 		{"selected target edge", selectedTargetEdgeSQL, &stmts.selectedTargetEdge},
@@ -145,7 +136,7 @@ func (s *resolutionStmts) Close() {
 		return
 	}
 	for _, stmt := range []*sql.Stmt{
-		s.callsiteNode, s.hasCallsiteEdge, s.candidateEdge, s.derivationFact,
+		s.callsiteNode, s.hasCallsiteEdge, s.derivationFact,
 		s.candidateTargetEdge, s.selectedTargetEdge, s.completenessFact,
 		s.unresolvedFact, s.factLink, s.vtaFactLookup, s.vtaFactInsert,
 	} {

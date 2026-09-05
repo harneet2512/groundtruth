@@ -242,7 +242,14 @@ func main() {
 	rebuildClosure := flag.Bool("rebuild-closure", false, "Recompute the closure sidecar on an existing -output graph.db over its CURRENT edges. Run AFTER the LSP resolve pass so the closure reflects LSP-promoted/re-pointed/deleted edges (it is built once at index time and goes stale otherwise). Clears the old closure first.")
 	buildInfo := flag.Bool("build-info", false, "Print the gt-index.build.v1 binary identity JSON and exit")
 	frameworkValidation := flag.Bool("framework-validation", false, "Print the HAR-70 framework overlay validation report and exit")
+	inspectJSONL := flag.Bool("inspect-jsonl", false, "Parse caller-supplied source bytes as pure JSONL without graph mutation")
 	flag.Parse()
+	if *inspectJSONL {
+		if err := runInspectionJSONL(os.Stdin, os.Stdout); err != nil {
+			log.Fatalf("inspect-jsonl: %v", err)
+		}
+		return
+	}
 	if *frameworkValidation {
 		payload := struct {
 			Schema string                            `json:"schema"`

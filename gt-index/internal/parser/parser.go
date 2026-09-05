@@ -138,7 +138,12 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseBytes(sf, isTest, src)
+}
 
+// ParseBytes parses exactly the caller-supplied bytes. It performs no source
+// filesystem read and is the authority used by the JSONL inspection boundary.
+func ParseBytes(sf walker.SourceFile, isTest bool, src []byte) (*ParseResult, error) {
 	parser := sitter.NewParser()
 	parser.SetLanguage(sf.Spec.Language)
 

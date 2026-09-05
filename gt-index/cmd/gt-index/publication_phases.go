@@ -99,7 +99,7 @@ func analysisPhaseSkipReason(coreElapsed time.Duration) (string, error) {
 // It is what a failed receipt reports as discarded, and it is the checklist for
 // "rolled back as a unit": nothing in this list may survive a phase-2 failure.
 var analysisRollbackScope = []string{
-	"resolution_symbols", "resolution_callsites", "resolution_candidates",
+	"resolution_symbols", "resolution_callsites",
 	"Callsite nodes", "HAS_CALLSITE edges", "CANDIDATE_TARGET edges",
 	"DerivationFact nodes", "CompletenessFact nodes", "flow fact nodes",
 	"graph_completion_receipt", "resolution_complete",
@@ -187,7 +187,7 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 		abortStagedBuild(db, stagedOutput, "insert resolution symbols: %v", err)
 	}
 	callsiteRows := make([]*store.ResolutionCallsite, 0, len(callsites))
-	candidateRows := make([]*store.ResolutionCandidate, 0)
+	candidateRowCount := 0
 	graphRows := make([]store.AttachedResolution, 0, len(callsites))
 	nodeByID := make(map[int64]*store.Node, len(allNodes))
 	fileNodeIDByPath := make(map[string]int64)
@@ -400,7 +400,7 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 				}
 			}
 			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: publishedMechanism, DeclaredScope: target.QualifiedName, ReceiverType: receiverType, ReceiverOrigin: receiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), FlowSourceStableIDs: flowSourceStableIDs, FlowEdgeStableIDs: flowEdgeStableIDs, FlowSourceFacts: flowSourceFacts, FlowEdgeFacts: flowEdgeFacts, DynamicDispatch: publishedDispatchState == string(resolver.DispatchDynamic), ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: selectedNodeID != nil && *selectedNodeID == targetID}
-			candidateRows = append(candidateRows, candidate)
+			candidateRowCount++
 			graphCandidates = append(graphCandidates, candidate)
 		}
 		if len(graphCandidates) != len(candidateNodeIDs) {
@@ -430,10 +430,6 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 	if err := store.BatchInsertResolutionCallsitesTx(publishTx, callsiteRows); err != nil {
 		_ = publishTx.Rollback()
 		abortStagedBuild(db, stagedOutput, "insert resolution callsites: %v", err)
-	}
-	if err := store.BatchInsertResolutionCandidatesTx(publishTx, candidateRows); err != nil {
-		_ = publishTx.Rollback()
-		abortStagedBuild(db, stagedOutput, "insert resolution candidates: %v", err)
 	}
 	graphIdentity := store.GraphCompletionIdentity{
 		Schema: store.GraphCompletionSchema, RepositoryRevision: repositoryRevision,
@@ -494,7 +490,7 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 	return analysisPhaseResult{
 		State:          store.AnalysisStateComplete,
 		CallsiteCount:  len(callsiteRows),
-		CandidateCount: len(candidateRows),
+		CandidateCount: candidateRowCount,
 	}
 }
 

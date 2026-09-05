@@ -1335,8 +1335,8 @@ func (d *DB) BatchInsertResolutionCandidates(candidates []*ResolutionCandidate) 
 
 // AttachResolutionGraphTx publishes resolver evidence as first-class graph
 // objects. Each callsite is a Callsite node linked from its source symbol by a
-// HAS_CALLSITE edge; each viable target is linked from that node by a CANDIDATE
-// edge. The complete set is written in the caller's transaction so a graph
+// HAS_CALLSITE edge; each viable target is linked from that node by the
+// canonical CANDIDATE_TARGET edge. The complete set is written in the caller's transaction so a graph
 // reader observes either all attached evidence or none of it.
 // attachProgressInterval is how often the publication reports progress. Small
 // enough to catch a stall inside a long repository, large enough that an
@@ -1473,6 +1473,11 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 		if err != nil {
 			return fmt.Errorf("prepare callsite %s v2: %w", c.CallsiteID, err)
 		}
+		for _, candidate := range row.Candidates {
+			if err := validateCandidateDerivation(derivationKind, candidate); err != nil {
+				return fmt.Errorf("callsite %s candidate %d: %w", c.CallsiteID, candidate.Ordinal, err)
+			}
+		}
 		callsiteMeta, _ := json.Marshal(map[string]any{
 			"callsite_id": c.CallsiteID, "dispatch_state": c.DispatchState,
 			"mechanism": c.Mechanism, "repository_revision": revision,
@@ -1513,53 +1518,6 @@ func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows 
 			revision, passKind, "1", passStatus, abstentionReason, c.CandidateCount,
 			identity.BuildID, identity.SourceFingerprint, string(coverageJSON), string(stepsJSON)); err != nil {
 			return fmt.Errorf("link callsite %s: %w", c.CallsiteID, err)
-		}
-		for _, candidate := range row.Candidates {
-			if err := validateCandidateDerivation(derivationKind, candidate); err != nil {
-				return fmt.Errorf("callsite %s candidate %d: %w", c.CallsiteID, candidate.Ordinal, err)
-			}
-			candidateStepsJSON, _ := json.Marshal(candidateProvenance(steps, candidate))
-			candidateMeta, _ := json.Marshal(map[string]any{
-				"callsite_id": c.CallsiteID, "candidate_ordinal": candidate.Ordinal,
-				"target_stable_id": candidate.TargetStableID, "target_native_id": candidate.TargetNativeID,
-				"mechanism":      candidate.Mechanism,
-				"declared_scope": candidate.DeclaredScope, "receiver_type": candidate.ReceiverType,
-				"receiver_origin": candidate.ReceiverOrigin, "receiver_shape": candidate.ReceiverShape,
-				"receiver_chain": candidate.ReceiverChain, "import_chain": candidate.ImportChain,
-				"flow_source_stable_ids": candidate.FlowSourceStableIDs, "flow_edge_stable_ids": candidate.FlowEdgeStableIDs,
-				"flow_source_facts": candidate.FlowSourceFacts, "flow_edge_facts": candidate.FlowEdgeFacts,
-				"dynamic_dispatch": candidate.DynamicDispatch, "export_status": candidate.ExportStatus,
-				"parser_complete": candidate.ParserComplete, "repository_revision": revision,
-				"verification_status": candidate.VerificationStatus,
-				"candidate_count":     c.CandidateCount, "sibling_count": c.CandidateCount,
-				"derivation_kind": derivationKind, "evidence_set": evidenceSet,
-				"derivation_contract":         ResolutionDerivationContract,
-				"producer_build_id":           identity.BuildID,
-				"producer_source_fingerprint": identity.SourceFingerprint,
-			})
-			// Candidate viability is a typed, set-valued derivation fact. NULL is
-			// deliberate: zero would still persist an uncalibrated probability-like
-			// scalar and invite generic confidence consumers to interpret policy as truth.
-			//
-			// pass_coverage is a CALLSITE fact, not a candidate fact. It used to be
-			// copied verbatim onto every candidate edge, so a callsite with 106
-			// candidates stored the same blob 106 times. On a 250-file boa sample
-			// that is 713 MB of the publication's 845 MB of candidate-edge JSON --
-			// the reason an atomic publication of the whole repository never
-			// terminated. Nothing reads it here: queryAttachedCandidates selects the
-			// literal '[]' for this column and loadResolutionV2Evidence rebuilds
-			// coverage from the CompletenessFact nodes. The authoritative copy stays
-			// on the HAS_CALLSITE edge above, one row per callsite.
-			if _, err := stmts.candidateEdge.Exec(
-				callsiteNodeID, candidate.TargetID, "CANDIDATE", c.SourceLine, c.SourceFile,
-				candidate.Mechanism, nil, string(candidateMeta),
-				"CANDIDATE", c.CandidateCount, "resolver_candidate", candidate.VerificationStatus,
-				ResolutionDerivationContract, derivationKind, evidenceSet, revision, passKind, "1", passStatus, "", c.CandidateCount,
-				identity.BuildID, identity.SourceFingerprint, emptyCoverageProjection, string(candidateStepsJSON),
-				candidate.DeclaredScope, candidate.ReceiverType, candidate.ReceiverOrigin, candidate.ReceiverShape,
-				candidate.ReceiverChain, candidate.ImportChain, candidate.ExportStatus, candidate.ParserComplete); err != nil {
-				return fmt.Errorf("insert candidate edge %s/%d: %w", c.CallsiteID, candidate.Ordinal, err)
-			}
 		}
 	}
 	return nil
@@ -1776,9 +1734,9 @@ func (d *DB) GetAllEdges(minConf float64) ([]*Edge, error) {
 		        COALESCE(resolution_method, ''), COALESCE(confidence, 0.0)
 		   FROM edges
 		  WHERE COALESCE(confidence, 0.0) >= ?
-		    AND type <> 'CANDIDATE'
+		    AND type NOT IN ('CANDIDATE','CANDIDATE_TARGET')
 		    AND NOT (
-				 type IN ('HAS_CALLSITE', 'CANDIDATE')
+				 type IN ('HAS_CALLSITE', 'CANDIDATE_TARGET')
 				 AND COALESCE((SELECT value FROM project_meta WHERE key='graph_resolution_complete'), '0') <> '1'
 			)`,
 		minConf,

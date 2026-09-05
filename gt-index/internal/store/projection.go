@@ -102,7 +102,7 @@ type ResolutionProjectionReport struct {
 // projectionEdgeTypes are the resolution edges that carry a derivation and
 // therefore a reason. Every other edge type keeps a NULL reason, which reads as
 // "this edge is not a resolution decision" rather than as a missing value.
-var projectionEdgeTypes = []string{"HAS_CALLSITE", "CANDIDATE"}
+var projectionEdgeTypes = []string{"HAS_CALLSITE", "CANDIDATE_TARGET"}
 
 // ProjectResolutionEdgeReasonsTx renders `reason` and `step` onto every
 // resolution edge from the derivation facts already stored on it.
